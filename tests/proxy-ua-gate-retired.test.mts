@@ -31,7 +31,7 @@ const rel = (p: string) => p.slice(SRC.length + 1);
 // re-sign that carries it forward. Anything else touching it is a reader.
 const ALLOWED = new Set([
   "lib/session-jwt.ts",
-  "lib/auth.ts",
+  "lib/auth-session-mint.ts",
   "app/api/auth/machine-session/route.ts",
   "lib/session-refresh.ts",
 ]);

@@ -69,22 +69,22 @@ function satisfiedFor(
 // `inPlex`/`inJellyfin` are COLLAPSED booleans — the instance that proved
 // presence is not carried here — and that stays sound under multi-server
 // per-user visibility grants for one structural reason: every caller of this
-// function probes the DEFAULT ("") server only. pollAndNotifyAvailable's
-// checkPlex/checkJellyfin closures are built in the Radarr/Sonarr webhook
-// handlers from getPlexConfig()/getJellyfinConfig() with no slug argument, which
-// resolve DEFAULT_MEDIA_INSTANCE; the default instance is visible to every user
-// by construction (defaultInstanceConfig hard-codes restricted:false and
-// canViewMediaInstance short-circuits true on slug ""). So `true` here already
-// means "present on a server this requester can see", for every requester.
+// function probes only servers EVERY user can see. pollAndNotifyAvailable's
+// checkPlex/checkJellyfin closures are built by visibleAvailabilityChecks
+// (arr-webhook-events.ts) over the configured servers whose registry entry is
+// not restricted — the default ("") is never restricted (defaultInstanceConfig
+// hard-codes restricted:false), and canViewMediaInstance answers true for any
+// unrestricted instance. So `true` here already means "present on a server this
+// requester can see", for every requester.
 //
 // A restricted named instance can only enter the picture through the sync
 // orchestrator, which does carry per-instance presence and applies the
 // per-requester gate itself (presentForRequester in /api/sync/route.ts).
 //
-// If a caller ever probes a NAMED instance, this contract breaks and the two
-// booleans must become per-instance (an optional slug-set parameter, so the two
-// webhook call sites keep compiling) plus the same pre-CAS grants filter the
-// orchestrator applies. Do not widen the probe without doing that.
+// If a caller ever probes a RESTRICTED instance, this contract breaks and the
+// two booleans must become per-instance (an optional slug-set parameter) plus
+// the same pre-CAS grants filter the orchestrator applies. Do not widen the
+// probe without doing that.
 export async function notifyAvailablePerServer(
   pending: PendingAvailableRequest[],
   inPlex: boolean,
@@ -127,8 +127,8 @@ export interface AvailableWinner {
 
 // THE "now available" fan-out, for every path that has already won the
 // once-only claim (claimAvailableNotificationWinners / claimAvailableNotifications
-// — guardrail 14): the webhook poll above, all six sync-orchestrator /
-// per-source marking passes, AND the manual admin "mark available"
+// — guardrail 14): the webhook poll above, every library/arr marking pass
+// (src/lib/available-marking.ts, used by the orchestrator and both Resyncs), AND the manual admin "mark available"
 // (notifyRequestStatusChange below, after its own CAS + disabled-account
 // gate). Callers pass only the claimed, DELIVERABLE rows (disabled requesters
 // already dropped — guardrail 33), so every channel here fires exactly once
@@ -301,6 +301,14 @@ export async function pollAndNotifyAvailable(
   const running = inFlightPolls.get(key);
   if (running) return running;
 
+  // A probe that throws costs its attempt, never the poll: a rejection here
+  // would end the loop before the notify and nobody would be told.
+  const probe = (check: () => Promise<boolean>, server: string) =>
+    check().catch((err: unknown) => {
+      console.warn(`[${logScope}] ${server} availability probe failed:`, err instanceof Error ? err.message : err);
+      return false;
+    });
+
   const poll = (async () => {
     let inPlex = false;
     let inJellyfin = false;
@@ -309,8 +317,8 @@ export async function pollAndNotifyAvailable(
       await new Promise((r) => setTimeout(r, ITEM_POLL_INTERVAL_MS));
 
       [inPlex, inJellyfin] = await Promise.all([
-        checkPlex && !inPlex ? checkPlex() : Promise.resolve(inPlex),
-        checkJellyfin && !inJellyfin ? checkJellyfin() : Promise.resolve(inJellyfin),
+        checkPlex && !inPlex ? probe(checkPlex, "Plex") : Promise.resolve(inPlex),
+        checkJellyfin && !inJellyfin ? probe(checkJellyfin, "Jellyfin") : Promise.resolve(inJellyfin),
       ]);
 
       // At least one server is configured here (the early return above), so the

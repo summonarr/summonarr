@@ -11,6 +11,8 @@
   "requests.status.declined": "已拒绝",
   "requests.sort.newest": "最新",
   "requests.sort.oldest": "最早",
+  "requests.filter.statusLabel": "按状态筛选",
+  "requests.filter.sortLabel": "请求排序",
   "requests.searchPlaceholder": "搜索标题…",
   "requests.mediaType.movie": "电影",
   "requests.mediaType.tv": "剧集",

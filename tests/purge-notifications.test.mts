@@ -32,7 +32,14 @@ const pgProto = Client.prototype as unknown as {
   query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[] }>;
   end: () => Promise<void>;
 };
-pgProto.connect = async () => {};
+// The lock's own client, so a test can drop its connection mid-run (pg's
+// connection-level 'error' channel), which aborts the run's signal.
+let lockClient: { emit(event: string, ...args: unknown[]): boolean } | null = null;
+function captureLockClient(client: { emit(event: string, ...args: unknown[]): boolean }): void {
+  lockClient = client;
+}
+(pgProto as unknown as { connect: (this: { emit(event: string, ...args: unknown[]): boolean }) => Promise<void> }).connect =
+  async function () { captureLockClient(this); };
 pgProto.query = async (text, values) => {
   if (text.includes("pg_try_advisory_lock")) {
     lockCalls.push({ op: "try", lockId: Number((values ?? [])[0]) });
@@ -65,9 +72,12 @@ function matches(r: Row, c: Clause): boolean {
   if (c.readAt && r.readAt === null) return false;
   return true;
 }
+// When set, the first notification read drops the lock's connection.
+let dropLockOnFirstRead = false;
 shadowPrismaModel(prisma, "notification", {
   findMany: async (args: { where: { OR: Clause[] }; take: number }) => {
     findManyCalls++;
+    if (dropLockOnFirstRead && findManyCalls === 1) lockClient?.emit("error", new Error("Connection terminated unexpectedly"));
     return rows.filter((r) => args.where.OR.some((c) => matches(r, c))).slice(0, args.take).map((r) => ({ id: r.id }));
   },
   deleteMany: async (args: { where: { id: { in: string[] } } }) => {
@@ -102,6 +112,7 @@ function authed(secret = CRON_SECRET) {
 
 beforeEach(() => {
   rows = []; findManyCalls = 0; deleteWheres = []; lockCalls = []; lockFree = true; errors.length = 0; audits.length = 0;
+  dropLockOnFirstRead = false; lockClient = null;
   delete process.env.NOTIFICATION_READ_RETENTION_DAYS;
   delete process.env.NOTIFICATION_RETENTION_DAYS;
 });
@@ -210,6 +221,21 @@ test("route: authorized run purges, takes and releases its lock, audits", async 
     { op: "unlock", lockId: AL.PURGE_NOTIFICATIONS_LOCK_ID },
   ]);
   assert.equal(audits.length, 1);
+});
+
+test("route: a run stopped by its lock signal answers ok:false with X-Cron-Degraded, not a clean run", async () => {
+  // A stopped purge leaves retention behind; recorded as a success, the run
+  // ledger could not show the job falling behind.
+  rows = Array.from({ length: lib.NOTIFICATION_DELETE_BATCH + 5 }, (_, i) => ({ id: `n${i}`, createdAt: ago(500), readAt: null }));
+  dropLockOnFirstRead = true;
+  const res = await POST(authed());
+  assert.equal(res.status, 200, "still 200: the entrypoint fast-retries any non-2xx");
+  const body = await res.json() as { ok: boolean; aborted: boolean; deleted: number; error?: string };
+  assert.equal(body.aborted, true);
+  assert.equal(body.deleted, lib.NOTIFICATION_DELETE_BATCH, "the batch in flight finished; the rest waits for the next run");
+  assert.equal(body.ok, false);
+  assert.match(body.error ?? "", /stopped before it finished/);
+  assert.equal(res.headers.get("x-cron-degraded"), "1");
 });
 
 test("route: a busy lock skips without touching the table", async () => {

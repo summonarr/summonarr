@@ -1,6 +1,6 @@
 // Tests for the TVDB cross-reference fallback in Sonarr series resolution
-// (src/lib/arr.ts: resolveTmdbToTvdb, pickSeriesByTvdbCrossRef, and its use in
-// addSeriesToSonarr + the read paths).
+// (src/lib/arr-id-map.ts, re-exported by arr.ts: resolveTmdbToTvdb,
+// pickSeriesByTvdbCrossRef, and its use in addSeriesToSonarr + the read paths).
 //
 // The incident: approving TMDB 304842 ("The Drop: A Snowfall Saga", premiered
 // eight days earlier) failed with "Sonarr: no series found for tmdbId 304842".
@@ -118,6 +118,9 @@ const {
   resolveTmdbToTvdb,
   resolveTvdbIdFromTmdbId,
 } = await import("../src/lib/arr.ts");
+// The read paths reuse a verified lookup for a while (arr-id-map.ts); every case
+// here scripts its own lookup answers, so none may be served a previous case's.
+const { _resetSeriesLookupCacheForTests } = await import("../src/lib/arr-id-map.ts");
 
 const DAY = 24 * 60 * 60;
 const TMDB = 304842;
@@ -159,6 +162,7 @@ beforeEach(() => {
   seriesLibrary = () => [];
   seriesStatus = 200;
   sonarrQueue = { records: [], totalRecords: 0 };
+  _resetSeriesLookupCacheForTests();
 });
 
 // ═══ pickSeriesByTvdbCrossRef ═══════════════════════════════════════════════
@@ -355,6 +359,7 @@ test("issue tvdbId: a library row naming ANOTHER title, or none (Sonarr v3), nev
   seedCrossRef(TMDB, TVDB);
   for (const rowTmdbId of [71694, undefined, 0]) {
     calls.length = 0;
+    _resetSeriesLookupCacheForTests();
     seriesLibrary = (tvdbId) => (tvdbId === String(TVDB) ? [{ id: 9, tvdbId: TVDB, ...(rowTmdbId === undefined ? {} : { tmdbId: rowTmdbId }) }] : []);
     // Sonarr's tmdb lookup names this title at another TVDB id: only it may decide.
     tmdbLookup = [dropRow({ tvdbId: 1234 })];
@@ -370,6 +375,7 @@ test("issue tvdbId: no cross-reference goes straight to the lookup; an unverifie
   assert.equal(calls.filter((c) => c.url.pathname === "/api/v3/series").length, 0, "no library read without a candidate");
 
   calls.length = 0;
+  _resetSeriesLookupCacheForTests();
   tmdbLookup = [dropRow({ tvdbId: 1, tmdbId: 9 }), dropRow({ tvdbId: 2, tmdbId: 8 })];
   assert.equal(await resolveTvdbIdFromTmdbId(TMDB), null);
   assert.equal(unfilteredLibraryReads().length, 0);
@@ -402,14 +408,21 @@ test("downloading: an UNRESOLVABLE series is unknown (null), never a confident '
 // ═══ structure ══════════════════════════════════════════════════════════════
 
 test("structure: one tvdb lookup URL, used by the add path; the webhook verify is the lone opt-out", () => {
-  const source = readFileSync(new URL("../src/lib/arr.ts", import.meta.url), "utf8");
+  // arr.ts re-exports flat siblings; the rule holds across all of them.
+  const read = (file: string) => readFileSync(new URL(`../src/lib/${file}`, import.meta.url), "utf8");
+  const body = (source: string, signature: string) => {
+    const fn = source.slice(source.indexOf(signature));
+    return fn.slice(0, fn.indexOf("\n}\n"));
+  };
+  const source = ["arr.ts", "arr-client.ts", "arr-config.ts", "arr-id-map.ts", "arr-lookup.ts", "arr-add.ts", "arr-releases.ts", "arr-queue-cache.ts"].map(read).join("\n");
   assert.equal((source.match(/series\/lookup\?term=tvdb:\$\{/g) ?? []).length, 1, "exactly one tvdb lookup URL (the shared helper)");
 
-  const add = source.slice(source.indexOf("export async function addSeriesToSonarr"));
-  assert.match(add.slice(0, add.indexOf("\n}\n")), /lookupSeriesByTvdbCrossRef</, "the add path uses the shared fallback");
+  // The add path resolves through the same function as the read paths, and that
+  // function falls back to the cross-reference.
+  assert.match(body(read("arr-add.ts"), "async function lookupSeriesForAdd("), /resolveSonarrSeries\(/, "the add path uses the shared resolution");
+  assert.match(body(read("arr-id-map.ts"), "export async function resolveSonarrSeries("), /lookupSeriesByTvdbCrossRef\(/, "…which falls back to the cross-reference");
 
   // The call-site object form only — the helper's doc comment names the flag too.
   assert.equal((source.match(/\{ tvdbCrossRef: false \}/g) ?? []).length, 1, "one opt-out only");
-  const verify = source.slice(source.indexOf("export async function isSeriesDownloadedInSonarr"));
-  assert.match(verify.slice(0, verify.indexOf("\n}\n")), /\{ tvdbCrossRef: false \}/, "…and it is the webhook's download verify");
+  assert.match(body(read("arr.ts"), "export async function isSeriesDownloadedInSonarr"), /\{ tvdbCrossRef: false \}/, "…and it is the webhook's download verify");
 });

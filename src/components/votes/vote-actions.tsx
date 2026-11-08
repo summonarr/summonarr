@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ThumbsUp, Trash2, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
@@ -37,23 +37,48 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
   const voted = override ?? userVoted;
   const [dismissed, setDismissed] = useState(false);
   const [confirmingDismiss, setConfirmingDismiss] = useState(false);
+  // Set when the confirm step closes by a user action (Cancel, Escape): the
+  // Dismiss button it gave way to takes focus back (autoFocus acts on mount).
+  const [refocusDismiss, setRefocusDismiss] = useState(false);
+  // A non-admin's row loses its only control the moment an unvote starts;
+  // focus moves to a hidden status note in its place instead of to <body>,
+  // and back to the Voted button if the unvote fails.
+  const [removedHere, setRemovedHere] = useState(false);
+  const [refocusVoted, setRefocusVoted] = useState(false);
+  const removedNoteRef = useRef<HTMLSpanElement>(null);
+  const showRemovedNote = !voted && !isAdmin && (pending === "unvote" || removedHere);
+  useEffect(() => {
+    if (showRemovedNote) removedNoteRef.current?.focus();
+  }, [showRemovedNote]);
+
+  function cancelDismiss() {
+    setConfirmingDismiss(false);
+    setRefocusDismiss(true);
+  }
 
   async function handleUnvote() {
     if (loading) return;
     setPending("unvote");
     setOverride(false);
+    setRefocusVoted(false);
     try {
       const res = await fetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "DELETE" });
-      if (res.ok) {
+      // 404: the vote is already gone (another tab, or an admin dismissed it),
+      // which is what was asked. Rolling back to "Voted" left a control whose
+      // every retry 404'd again.
+      if (res.ok || res.status === 404) {
+        setRemovedHere(true);
         toast({ title: t("personal.votes.removed"), variant: "success" });
         router.refresh();
       } else {
         // Back to the PRE-CLICK state (voted), never the possibly stale prop.
         setOverride(true);
+        setRefocusVoted(true);
         toast({ title: rateLimitMessage(res, t) ?? t("personal.votes.removeFailed"), variant: "error" });
       }
     } catch {
       setOverride(true);
+      setRefocusVoted(true);
       toast({ title: t("personal.votes.removeFailed"), variant: "error" });
     } finally {
       setPending(null);
@@ -84,7 +109,14 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
   if (dismissed) return null;
   // Nothing to render: an empty basis-full wrapper would still claim its own
   // flex-wrap line (plus the row gap) under every non-admin, unvoted row.
-  if (!voted && !isAdmin) return null;
+  if (!voted && !isAdmin) {
+    // sr-only is absolutely positioned, so the note claims no flex line.
+    return showRemovedNote ? (
+      <span ref={removedNoteRef} tabIndex={-1} className="sr-only">
+        {removedHere ? t("personal.votes.removed") : t("request.vote.updating")}
+      </span>
+    ) : null;
+  }
 
   // Below `sm` the actions take a full row under the text column (the row is
   // flex-wrap) — at 375px the confirm state (~180px) otherwise crushed the title.
@@ -94,6 +126,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
         <button
           onClick={handleUnvote}
           disabled={loading}
+          autoFocus={refocusVoted}
           // Clicking removes the vote with no confirm, so say so (same hint as the
           // detail page's VoteDeleteButton). min-h matches the FilterPills' 32px
           // target in the same row; text-xs + py-1.5 alone was 28px.
@@ -107,8 +140,12 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
       )}
       {isAdmin && !confirmingDismiss && (
         <button
-          onClick={() => setConfirmingDismiss(true)}
+          onClick={() => {
+            setConfirmingDismiss(true);
+            setRefocusDismiss(false);
+          }}
           disabled={loading}
+          autoFocus={refocusDismiss}
           className="flex items-center gap-1.5 min-h-[32px] text-xs px-3 py-1.5 rounded-lg border border-red-500/50 bg-red-600/10 text-red-400 hover:bg-red-600/20 transition-colors disabled:opacity-50"
         >
           <Trash2 className="w-3 h-3" />
@@ -116,7 +153,15 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
         </button>
       )}
       {isAdmin && confirmingDismiss && (
-        <div className="flex items-center gap-1.5">
+        <div
+          className="flex items-center gap-1.5"
+          onKeyDown={(e) => {
+            if (e.key === "Escape" && !loading) {
+              e.stopPropagation();
+              cancelDismiss();
+            }
+          }}
+        >
           <button
             onClick={handleDismiss}
             disabled={loading}
@@ -127,7 +172,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
             {t("personal.votes.confirmDismiss")}
           </button>
           <button
-            onClick={() => setConfirmingDismiss(false)}
+            onClick={cancelDismiss}
             disabled={loading}
             className="min-h-[32px] text-xs px-2 py-1.5 text-zinc-400 hover:text-zinc-100 transition-colors"
           >

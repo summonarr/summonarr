@@ -21,12 +21,12 @@ export const dynamic = "force-dynamic";
 // param exists, so nothing here can widen the scope to another user.
 export default async function MyStatsPage() {
   const session = await requireAppSession();
-  const t = await getTranslator();
+  const [t, trackingOn] = await Promise.all([getTranslator(), isPlayHistoryEnabled()]);
 
   // Tracking off ⇒ nothing is recorded, so the "your stats will appear here"
   // copy below would be false. Say so (the /popular gate) and skip the
   // aggregate read entirely.
-  if (!(await isPlayHistoryEnabled())) {
+  if (!trackingOn) {
     return (
       <div className="ds-page-enter">
         <PageHeader title={t("personal.stats.title")} subtitle={t("personal.stats.subtitle")} />

@@ -49,11 +49,14 @@ export function processTimeZone(): string {
 // THE rule: the stored setting when it names a valid zone, else the process
 // zone, else UTC. A bad stored value (written by hand, or a zone a later Intl
 // no longer knows) falls back instead of failing every statistics query.
+// The fallback is only worked out when the stored value is unusable, so the
+// common case (a valid stored zone, or the cached read) builds one Intl
+// formatter, not three.
 export function resolveStatsTimeZone(
   stored: string | null | undefined,
-  fallback: string = processTimeZone(),
+  fallback?: string,
 ): string {
-  return normalizeTimeZone(stored) ?? normalizeTimeZone(fallback) ?? UTC_ZONE;
+  return normalizeTimeZone(stored) ?? normalizeTimeZone(fallback ?? processTimeZone()) ?? UTC_ZONE;
 }
 
 // "UTC", or the zone's last segment with spaces ("America/New_York" →
@@ -99,15 +102,26 @@ export function zonedTodayIso(now: Date, zone: string): string {
   return `${zonedDayKey(now, zone)}T00:00:00.000Z`;
 }
 
+// The zone is always BOUND (guardrail 19g): `zoneRef` must be a placeholder,
+// "$n" or "?", never a zone name or any other SQL. A caller that passes one is
+// a bug, refused here before it can reach $queryRawUnsafe.
+const PLACEHOLDER = /^(?:\$[1-9][0-9]*|\?)$/;
+
+function assertPlaceholder(zoneRef: string): void {
+  if (!PLACEHOLDER.test(zoneRef)) throw new TypeError("stats time zone SQL: the zone must be a bind placeholder");
+}
+
 // SQL: the stored UTC timestamp `column` as wall-clock time in the zone bound
-// at `zoneRef` (a placeholder such as "$3").
+// at `zoneRef` (a placeholder such as "$3"). `column` is code, never input.
 export function zonedTimestampSql(column: string, zoneRef: string): string {
+  assertPlaceholder(zoneRef);
   return `((${column} AT TIME ZONE 'UTC') AT TIME ZONE ${zoneRef}::text)`;
 }
 
 // SQL: midnight of the date `dateExpr` in the zone, as a stored-UTC timestamp.
 // Compare the BARE column with it so the startedAt indexes still serve the
-// range (a wrapped column can't use them).
+// range (a wrapped column can't use them). `dateExpr` is code, never input.
 export function zonedMidnightSql(dateExpr: string, zoneRef: string): string {
+  assertPlaceholder(zoneRef);
   return `((((${dateExpr})::timestamp) AT TIME ZONE ${zoneRef}::text) AT TIME ZONE 'UTC')`;
 }

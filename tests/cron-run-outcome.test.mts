@@ -65,3 +65,13 @@ test("every Run button carries the job's name as its accessible name", () => {
   // The job name is the row header, so each cell is announced with it.
   assert.match(TABLE, /<th scope="row"[^>]*>\s*<div[^>]*>\{job\.name\}<\/div>/);
 });
+
+// A long job showed a later "last run" than the server recorded (its start).
+test("a manual run's row shows when it was sent, through the one row update", () => {
+  const trigger = TABLE.slice(TABLE.indexOf("async function handleTriggerJob("));
+  const started = trigger.indexOf("const startedAt = new Date().toISOString();");
+  assert.ok(started > 0 && started < trigger.indexOf("await fetch("), "captured before the request");
+  assert.equal((TABLE.match(/lastRun: startedAt/g) ?? []).length, 1, "one row update for success, failure and network error");
+  assert.equal((trigger.match(/markRun\(name, /g) ?? []).length, 2);
+  assert.doesNotMatch(TABLE, /lastRun: new Date\(\)/);
+});

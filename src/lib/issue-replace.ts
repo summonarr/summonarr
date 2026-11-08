@@ -246,27 +246,40 @@ export function importForFile(
   const ambiguousMovie = service === "radarr" && titleFiles.length > 1;
   const found: ArrHistoryEvent[] = [];
   for (const unit of units) {
-    if (unit === undefined) return null;
-    const byPath = file.path !== null ? (unit.newestImportByPath.get(file.path) ?? null) : null;
-    if (ambiguousMovie && byPath === null) return null;
-    const newest = byPath ?? unit.newestImport;
-    if (newest === null) return null;
-    if (byPath === null && newest.importedPath !== null && file.path !== null && newest.importedPath !== file.path) {
-      // The same file whose title folder moved since (a series/movie path change, or the title
-      // manager's root-folder move): the arrs record no history for a move, so the import still
-      // names the old folder — but the same relative path inside it.
-      const folderMoved = sameRelativeFile(newest.importedPath, file.relativePath);
-      // The rename's `path` is the file's relative path (an older arr sends the full one).
-      const renamedTo = Math.max(unit.renamedTo.get(file.relativePath) ?? -Infinity, unit.renamedTo.get(file.path) ?? -Infinity) > newest.id;
-      if (!folderMoved && !renamedTo) return null;
-    }
-    // Replaced since: a deletion after the import, other than an upgrade's.
-    if (unit.lastDeletion > newest.id) return null;
-    found.push(newest);
+    const imported = unit === undefined ? null : importForUnit(unit, file, ambiguousMovie);
+    if (imported === null) return null;
+    found.push(imported);
   }
   const downloads = new Set(found.map((e) => e.downloadId));
   if (downloads.size !== 1 || found[0].downloadId === null) return null;
   return found.reduce((a, b) => (b.id > a.id ? b : a));
+}
+
+/** The import that put `file` on disk for ONE unit it holds (importForFile's rules), or null. */
+function importForUnit(unit: UnitHistory, file: TitleFile, ambiguousMovie: boolean): ArrHistoryEvent | null {
+  const byPath = file.path !== null ? (unit.newestImportByPath.get(file.path) ?? null) : null;
+  if (ambiguousMovie && byPath === null) return null;
+  const newest = byPath ?? unit.newestImport;
+  if (newest === null) return null;
+  if (byPath === null && newest.importedPath !== null && file.path !== null && newest.importedPath !== file.path
+    && !folderMovedOrRenamed(unit, { path: file.path, relativePath: file.relativePath }, { id: newest.id, importedPath: newest.importedPath })) return null;
+  // Replaced since: a deletion after the import, other than an upgrade's.
+  if (unit.lastDeletion > newest.id) return null;
+  return newest;
+}
+
+/** An import naming another path still stands for the file when its folder moved or a later rename names it. */
+function folderMovedOrRenamed(
+  unit: UnitHistory,
+  file: { path: string; relativePath: string },
+  imported: { id: number; importedPath: string },
+): boolean {
+  // The same file whose title folder moved since (a series/movie path change, or the title
+  // manager's root-folder move): the arrs record no history for a move, so the import still
+  // names the old folder — but the same relative path inside it.
+  if (sameRelativeFile(imported.importedPath, file.relativePath)) return true;
+  // The rename's `path` is the file's relative path (an older arr sends the full one).
+  return Math.max(unit.renamedTo.get(file.relativePath) ?? -Infinity, unit.renamedTo.get(file.path) ?? -Infinity) > imported.id;
 }
 
 /**
@@ -495,20 +508,19 @@ export function episodesOf(files: readonly TitleFile[]): EpisodeRef[] {
 export function followUpSearch(
   scope: ReplaceScope,
   uncovered: readonly TitleFile[],
-  anyCovered: boolean,
   remaining: readonly TitleFile[],
-  unmonitored = false,
+  opts: { anyCovered: boolean; unmonitored?: boolean },
 ): ReplaceSearch | null {
   if (uncovered.length === 0) return null;
-  if (scope.kind === "movie") return anyCovered ? null : { kind: "movie" };
+  if (scope.kind === "movie") return opts.anyCovered ? null : { kind: "movie" };
   const episodes = episodesOf(uncovered);
   if (scope.kind === "episode") {
     return { kind: "episodes", episodes: episodes.length > 0 ? episodes : [{ seasonNumber: scope.seasonNumber, episodeNumber: scope.episodeNumber }] };
   }
-  if ((anyCovered || unmonitored) && episodes.length > 0) return { kind: "episodes", episodes };
+  if ((opts.anyCovered || opts.unmonitored === true) && episodes.length > 0) return { kind: "episodes", episodes };
   if (scope.kind === "season") {
     const seasonLeft = remaining.some((f) => fileInScope(f, scope));
-    return episodes.length === 0 || (!seasonLeft && episodes.length >= 2)
+    return episodes.length === 0 || seasonPackFits(episodes.length, seasonLeft)
       ? { kind: "season", seasonNumber: scope.seasonNumber }
       : { kind: "episodes", episodes };
   }
@@ -518,11 +530,21 @@ export function followUpSearch(
   for (const seasonNumber of [...new Set(episodes.map((e) => e.seasonNumber))]) {
     const inSeason = episodes.filter((e) => e.seasonNumber === seasonNumber);
     const seasonLeft = remaining.some((f) => fileInScope(f, { kind: "season", seasonNumber }));
-    if (seasonNumber > 0 && inSeason.length >= 2 && !seasonLeft) seasons.push(seasonNumber);
+    // Specials are never a season pack.
+    if (seasonNumber > 0 && seasonPackFits(inSeason.length, seasonLeft)) seasons.push(seasonNumber);
     // One by one, never a spread push (guardrail 5i).
     else for (const e of inSeason) rest.push(e);
   }
   return { kind: "plan", seasons, episodes: rest };
+}
+
+/**
+ * The season-pack rule: a SeasonSearch only when no file of the season is left
+ * on disk and two or more of its episodes went — beside files still there, a
+ * SeasonSearch hunts upgrades for every one of them.
+ */
+function seasonPackFits(episodesGone: number, seasonFilesLeft: boolean): boolean {
+  return !seasonFilesLeft && episodesGone >= 2;
 }
 
 /**

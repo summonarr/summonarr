@@ -8,7 +8,7 @@ import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getArrInstances } from "@/lib/arr-instance-registry";
 import { isFeatureEnabled } from "@/lib/features";
-import { SyncButton } from "@/components/admin/request-actions";
+import { SyncButton } from "@/components/admin/request-sync-buttons";
 import { AdminRequestList, type GroupedRequestRow, type Requester, type MediaRatings } from "@/components/admin/admin-request-list";
 import { AdminFilterBar } from "@/components/admin/admin-filter-bar";
 import { EmptyState, PageHeader, StatCard } from "@/components/ui/design";
@@ -45,6 +45,191 @@ const STATUS_RANK: Record<string, number> = {
   AVAILABLE: 3,
 };
 
+// The group page's order for a sort. The group key is the tiebreaker: year and
+// title sorts tie constantly, and Postgres orders tied rows differently for
+// different LIMIT/OFFSET bounds, so without a total order a title could repeat
+// across pages or never appear.
+function groupOrderFor(sort: QueueSort): Prisma.MediaRequestOrderByWithAggregationInput[] {
+  const primary: Prisma.MediaRequestOrderByWithAggregationInput =
+    sort === "oldest" ? { _min: { createdAt: "asc" } }
+    : sort === "title" ? { _min: { title: "asc" } }
+    : sort === "year-desc" ? { _max: { releaseYear: "desc" } }
+    : sort === "year-asc" ? { _min: { releaseYear: "asc" } }
+    : { _max: { createdAt: "desc" } };
+  return [primary, { tmdbId: "asc" }, { mediaType: "asc" }];
+}
+
+// The ratings strip's fields of a cached or live TMDB details payload.
+function toRatings(m: TmdbMedia): MediaRatings {
+  return {
+    certification: m.certification ?? null,
+    imdbId: m.imdbId ?? null,
+    imdbRating: m.imdbRating ?? null,
+    imdbVotes: m.imdbVotes ?? null,
+    rottenTomatoes: m.rottenTomatoes ?? null,
+    rtAudienceScore: m.rtAudienceScore ?? null,
+    metacritic: m.metacritic ?? null,
+    traktRating: m.traktRating ?? null,
+    letterboxdRating: m.letterboxdRating ?? null,
+    mdblistScore: m.mdblistScore ?? null,
+    malRating: m.malRating ?? null,
+    rogerEbertRating: m.rogerEbertRating ?? null,
+    voteAverage: m.voteAverage || null,
+  };
+}
+
+// Missing from the cache AND the request is pending → fetch it live from TMDB.
+// getMovieDetails/getTVDetails save the response to the cache, so the next page
+// load is served from the database. The render waits at most
+// LIVE_DETAILS_WAIT_MS: a title not back by then renders without ratings, and
+// its fetch finishes (and caches) in the background. Without the bound a
+// failing title — never cached — held every render for the fetch's timeout.
+async function addLiveRatings(
+  staleP: readonly { tmdbId: number; mediaType: MediaType }[],
+  ratingsMap: Map<string, MediaRatings>,
+): Promise<void> {
+  if (staleP.length) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), LIVE_DETAILS_WAIT_MS);
+    });
+    const detailResults = await Promise.all(
+      staleP.map((p) =>
+        Promise.race([
+          (p.mediaType === "MOVIE" ? getMovieDetails(p.tmdbId) : getTVDetails(p.tmdbId)).catch(() => null),
+          deadline,
+        ]),
+      ),
+    );
+    clearTimeout(timer);
+    staleP.forEach((p, i) => {
+      const details = detailResults[i];
+      if (details) ratingsMap.set(`${p.tmdbId}:${p.mediaType}`, toRatings(details));
+    });
+  }
+}
+
+// Slug → display name for the instance badges + approve picker labels. Union of
+// both services' registries; a slug defined on both keeps the Radarr name
+// (sonarr is applied first, radarr second, so radarr overwrites).
+function instanceNamesFor(...registries: readonly (readonly { slug: string; name: string }[])[]): Record<string, string> {
+  const names: Record<string, string> = {};
+  for (const instances of registries) {
+    for (const inst of instances) {
+      if (inst.slug !== "") names[inst.slug] = inst.name;
+    }
+  }
+  return names;
+}
+
+// The highest-priority status in a title's bucket (pending first).
+function aggregateStatusOf(bucket: readonly { status: string }[]): string {
+  return bucket
+    .map((r) => r.status)
+    .sort((a, b) => (STATUS_RANK[a] ?? 99) - (STATUS_RANK[b] ?? 99))[0];
+}
+
+const cacheKey = (p: { tmdbId: number; mediaType: "MOVIE" | "TV" }) => tmdbDetailsKey(p.mediaType, p.tmdbId);
+
+// Ratings for the page's titles: the cached TMDB details first (stale rows
+// count), then a bounded live fetch for PENDING titles the cache lacks.
+async function queueRatings(
+  pairs: readonly { tmdbId: number; mediaType: "MOVIE" | "TV" }[],
+  cached: ReadonlyMap<string, { value: TmdbMedia; isStale: boolean }>,
+  requests: readonly { tmdbId: number; mediaType: string; status: string }[],
+): Promise<Map<string, MediaRatings>> {
+  const ratingsMap = new Map<string, MediaRatings>();
+  const inDb = new Set<string>();
+  pairs.forEach((p) => {
+    const v = cached.get(cacheKey(p))?.value;
+    if (!v) return;
+    const key = `${p.tmdbId}:${p.mediaType}`;
+    inDb.add(key);
+    ratingsMap.set(key, toRatings(v));
+  });
+
+  // Pending titles missing from the cache, fetched live (bounded wait).
+  const pendingKeys = new Set(
+    requests.filter((r) => r.status === "PENDING").map((r) => `${r.tmdbId}:${r.mediaType}`),
+  );
+  await addLiveRatings(
+    pairs.filter((p) => {
+      const key = `${p.tmdbId}:${p.mediaType}`;
+      return pendingKeys.has(key) && !inDb.has(key);
+    }),
+    ratingsMap,
+  );
+  return ratingsMap;
+}
+
+const QUEUE_REQUEST_INCLUDE = {
+  user: { select: { name: true, email: true, discordId: true } },
+  _count: { select: { comments: true } },
+} as const satisfies Prisma.MediaRequestInclude;
+
+type RequestWithUser = Prisma.MediaRequestGetPayload<{ include: typeof QUEUE_REQUEST_INCLUDE }>;
+
+// One row per title on this page, in the page query's group order; each of the
+// title's requests becomes one requester.
+function buildQueueRows(
+  requests: readonly RequestWithUser[],
+  groupOrder: readonly string[],
+  ctx: {
+    ratingsMap: ReadonlyMap<string, MediaRatings>;
+    plexSet: ReadonlySet<string>;
+    jellyfinSet: ReadonlySet<string>;
+    userCountMap: ReadonlyMap<string, number>;
+    watchGrades: Awaited<ReturnType<typeof getWatchGradeSummaries>>;
+  },
+): GroupedRequestRow[] {
+  const { ratingsMap, plexSet, jellyfinSet, userCountMap, watchGrades } = ctx;
+  const grouped = new Map<string, RequestWithUser[]>();
+  for (const r of requests) {
+    const key = `${r.tmdbId}:${r.mediaType}`;
+    const bucket = grouped.get(key);
+    if (bucket) bucket.push(r);
+    else grouped.set(key, [r]);
+  }
+
+  return groupOrder
+    .map((key) => grouped.get(key))
+    .filter((bucket): bucket is RequestWithUser[] => Array.isArray(bucket) && bucket.length > 0)
+    .map((bucket) => {
+      const primary = bucket[0];
+      const requesters: Requester[] = bucket.map((r) => ({
+        requestId: r.id,
+        userId: r.requestedBy,
+        userWatchGrade: watchGrades?.get(r.requestedBy) ?? null,
+        status: r.status,
+        arrInstance: r.arrInstance,
+        note: r.note,
+        adminNote: r.adminNote,
+        commentCount: r._count.comments,
+        createdAt: r.createdAt.toISOString(),
+        userName: r.user.name,
+        userEmail: r.user.email,
+        userDiscordId: r.user.discordId,
+        userRequestCount: userCountMap.get(r.requestedBy) ?? 1,
+      }));
+
+      const aggregateStatus = aggregateStatusOf(bucket);
+
+      return {
+        groupKey: `${primary.tmdbId}:${primary.mediaType}`,
+        tmdbId: primary.tmdbId,
+        title: primary.title,
+        mediaType: primary.mediaType,
+        posterUrl: posterUrl(primary.posterPath, "w342"),
+        releaseYear: primary.releaseYear,
+        ratings: ratingsMap.get(`${primary.tmdbId}:${primary.mediaType}`) ?? null,
+        onPlex: plexSet.has(`${primary.tmdbId}:${primary.mediaType}`),
+        onJellyfin: jellyfinSet.has(`${primary.tmdbId}:${primary.mediaType}`),
+        aggregateStatus,
+        requesters,
+      };
+    });
+}
+
 export default async function AdminPage({
   searchParams,
 }: {
@@ -71,20 +256,7 @@ export default async function AdminPage({
     ...(typeFilter ? { mediaType: typeFilter } : {}),
   };
 
-  const primaryGroupOrder: Prisma.MediaRequestOrderByWithAggregationInput =
-    sort === "oldest" ? { _min: { createdAt: "asc" } }
-    : sort === "title" ? { _min: { title: "asc" } }
-    : sort === "year-desc" ? { _max: { releaseYear: "desc" } }
-    : sort === "year-asc" ? { _min: { releaseYear: "asc" } }
-    : { _max: { createdAt: "desc" } };
-  // The group key is the tiebreaker. Year and title sorts tie constantly, and
-  // Postgres orders tied rows differently for different LIMIT/OFFSET bounds, so
-  // without a total order a title could repeat across pages or never appear.
-  const groupOrderBy: Prisma.MediaRequestOrderByWithAggregationInput[] = [
-    primaryGroupOrder,
-    { tmdbId: "asc" },
-    { mediaType: "asc" },
-  ];
+  const groupOrderBy = groupOrderFor(sort);
 
   // A comment link names a request, not a page. On arrival from one (see
   // commentLinkToLocate), go to the page that holds its title under the current
@@ -146,7 +318,6 @@ export default async function AdminPage({
   const pagedGroups = page === requestedPage ? requestedGroups : await pageOfGroups(page);
 
   const pairs = pagedGroups.map((g) => ({ tmdbId: g.tmdbId, mediaType: g.mediaType }));
-  const cacheKey = (p: { tmdbId: number; mediaType: "MOVIE" | "TV" }) => tmdbDetailsKey(p.mediaType, p.tmdbId);
 
   // 1. Database first: read the cached TMDB details (which carry the ratings)
   //    from TmdbCache in one query for the whole page. No external calls, and
@@ -157,7 +328,7 @@ export default async function AdminPage({
     ? await Promise.all([
         prisma.mediaRequest.findMany({
           where: { OR: pairs, ...(statusFilter ? { status: statusFilter } : {}) },
-          include: { user: { select: { name: true, email: true, discordId: true } }, _count: { select: { comments: true } } },
+          include: QUEUE_REQUEST_INCLUDE,
           orderBy: { createdAt: "desc" },
         }),
         // Only the membership sets below read these rows.
@@ -170,63 +341,7 @@ export default async function AdminPage({
   const plexSet = new Set(plexItems.map((p) => `${p.tmdbId}:${p.mediaType}`));
   const jellyfinSet = new Set(jellyfinItems.map((p) => `${p.tmdbId}:${p.mediaType}`));
 
-  const ratingsMap = new Map<string, MediaRatings>();
-  const toRatings = (m: TmdbMedia): MediaRatings => ({
-    certification: m.certification ?? null,
-    imdbId: m.imdbId ?? null,
-    imdbRating: m.imdbRating ?? null,
-    imdbVotes: m.imdbVotes ?? null,
-    rottenTomatoes: m.rottenTomatoes ?? null,
-    rtAudienceScore: m.rtAudienceScore ?? null,
-    metacritic: m.metacritic ?? null,
-    traktRating: m.traktRating ?? null,
-    letterboxdRating: m.letterboxdRating ?? null,
-    mdblistScore: m.mdblistScore ?? null,
-    malRating: m.malRating ?? null,
-    rogerEbertRating: m.rogerEbertRating ?? null,
-    voteAverage: m.voteAverage || null,
-  });
-  const inDb = new Set<string>();
-  pairs.forEach((p) => {
-    const v = cached.get(cacheKey(p))?.value;
-    if (!v) return;
-    const key = `${p.tmdbId}:${p.mediaType}`;
-    inDb.add(key);
-    ratingsMap.set(key, toRatings(v));
-  });
-
-  // 2. Missing from the cache AND the request is pending → fetch it live from
-  //    TMDB. getMovieDetails/getTVDetails save the response to the cache, so the
-  //    next page load is served from the database. The render waits at most
-  //    LIVE_DETAILS_WAIT_MS: a title not back by then renders without ratings,
-  //    and its fetch finishes (and caches) in the background. Without the bound a
-  //    failing title — never cached — held every render for the fetch's timeout.
-  const pendingKeys = new Set(
-    requests.filter((r) => r.status === "PENDING").map((r) => `${r.tmdbId}:${r.mediaType}`),
-  );
-  const staleP = pairs.filter((p) => {
-    const key = `${p.tmdbId}:${p.mediaType}`;
-    return pendingKeys.has(key) && !inDb.has(key);
-  });
-  if (staleP.length) {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), LIVE_DETAILS_WAIT_MS);
-    });
-    const detailResults = await Promise.all(
-      staleP.map((p) =>
-        Promise.race([
-          (p.mediaType === "MOVIE" ? getMovieDetails(p.tmdbId) : getTVDetails(p.tmdbId)).catch(() => null),
-          deadline,
-        ]),
-      ),
-    );
-    clearTimeout(timer);
-    staleP.forEach((p, i) => {
-      const details = detailResults[i];
-      if (details) ratingsMap.set(`${p.tmdbId}:${p.mediaType}`, toRatings(details));
-    });
-  }
+  const ratingsMap = await queueRatings(pairs, cached, requests);
 
   const countFor = (status: string) =>
     statusCounts.find((s) => s.status === status)?._count.status ?? 0;
@@ -244,21 +359,8 @@ export default async function AdminPage({
   const statusCountsMap: Record<string, number> = {};
   for (const s of statusCounts) statusCountsMap[s.status] = s._count.status;
 
-  type RequestWithUser = (typeof requests)[number];
-  const grouped = new Map<string, RequestWithUser[]>();
-  for (const r of requests) {
-    const key = `${r.tmdbId}:${r.mediaType}`;
-    const bucket = grouped.get(key);
-    if (bucket) bucket.push(r);
-    else grouped.set(key, [r]);
-  }
-
   const groupOrder = pagedGroups.map((g) => `${g.tmdbId}:${g.mediaType}`);
 
-  // Slug → display name for the instance badges + approve picker labels. Union
-  // of both services' registries; a slug defined on both keeps the Radarr name
-  // (sonarr is applied first, radarr second, so radarr overwrites).
-  const instanceNames: Record<string, string> = {};
   // Requesters on THIS page: their request totals (every status, all time) are
   // all the badges need, not a count for every user.
   const pageRequesters = [...new Set(requests.map((r) => r.requestedBy))];
@@ -277,51 +379,11 @@ export default async function AdminPage({
     isFeatureEnabled("feature.integration.sonarr").catch(() => false),
   ]);
   const userCountMap = new Map(userRequestCounts.map((u) => [u.requestedBy, u._count.id]));
-  for (const instances of [sonarrInstances, radarrInstances]) {
-    for (const inst of instances) {
-      if (inst.slug !== "") instanceNames[inst.slug] = inst.name;
-    }
-  }
+  const instanceNames = instanceNamesFor(sonarrInstances, radarrInstances);
 
-  const rows: GroupedRequestRow[] = groupOrder
-    .map((key) => grouped.get(key))
-    .filter((bucket): bucket is RequestWithUser[] => Array.isArray(bucket) && bucket.length > 0)
-    .map((bucket) => {
-      const primary = bucket[0];
-      const requesters: Requester[] = bucket.map((r) => ({
-        requestId: r.id,
-        userId: r.requestedBy,
-        userWatchGrade: watchGrades?.get(r.requestedBy) ?? null,
-        status: r.status,
-        arrInstance: r.arrInstance,
-        note: r.note,
-        adminNote: r.adminNote,
-        commentCount: r._count.comments,
-        createdAt: r.createdAt.toISOString(),
-        userName: r.user.name,
-        userEmail: r.user.email,
-        userDiscordId: r.user.discordId,
-        userRequestCount: userCountMap.get(r.requestedBy) ?? 1,
-      }));
-
-      const aggregateStatus = bucket
-        .map((r) => r.status)
-        .sort((a, b) => (STATUS_RANK[a] ?? 99) - (STATUS_RANK[b] ?? 99))[0];
-
-      return {
-        groupKey: `${primary.tmdbId}:${primary.mediaType}`,
-        tmdbId: primary.tmdbId,
-        title: primary.title,
-        mediaType: primary.mediaType,
-        posterUrl: posterUrl(primary.posterPath, "w342"),
-        releaseYear: primary.releaseYear,
-        ratings: ratingsMap.get(`${primary.tmdbId}:${primary.mediaType}`) ?? null,
-        onPlex: plexSet.has(`${primary.tmdbId}:${primary.mediaType}`),
-        onJellyfin: jellyfinSet.has(`${primary.tmdbId}:${primary.mediaType}`),
-        aggregateStatus,
-        requesters,
-      };
-    });
+  const rows = buildQueueRows(requests, groupOrder, {
+    ratingsMap, plexSet, jellyfinSet, userCountMap, watchGrades,
+  });
 
   return (
     <div className="ds-page-enter">

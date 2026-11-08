@@ -61,6 +61,7 @@
   "shared.upload.chunkFailed": "第 {chunk}/{total} 部分上传失败（HTTP {status}）。",
   "shared.upload.nonJson": "服务器返回了意外的响应。请求可能被重定向了，例如重定向到登录页面。",
   "shared.upload.noCompletion": "上传已完成，但服务器始终未确认恢复。",
+  "shared.upload.empty": "备份文件为空。",
   "shared.upload.network": "上传失败。请检查网络连接后重试。",
   "shared.upload.cancelled": "上传已取消。"
 }

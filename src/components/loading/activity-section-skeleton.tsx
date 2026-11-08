@@ -9,7 +9,7 @@
 // 14px label line box, gap 6, the 22px value's 33px line box, gap 6 and the
 // 22px sparkline (~109px). The strip keeps `resp-kpi`, so it reflows to 3 and
 // then 2 columns at the same 1180 / 899 breakpoints as the real one.
-import { Bar, SKELETON_CARD } from "@/components/loading/poster-grid-skeleton";
+import { Bar, SKELETON_CARD, SKELETON_FILL } from "@/components/loading/skeleton-primitives";
 
 // Tab labels: Overview / History / Users / Stats / Recently Added at text-sm
 // with px-3.
@@ -84,14 +84,16 @@ export function KpiStripSkeleton({ count = 6 }: { count?: number }) {
   );
 }
 
-// ActivityCard stand-in (radius var(--ds-r-lg), hairline) with a SectionHeader line.
+// ActivityCard stand-in (radius var(--ds-r-lg), hairline) with a SectionHeader
+// line. The body bar takes whatever height the card leaves under the header
+// (flex-1), so a change to the padding or the header row can't unbalance it.
 export function ActivityCardSkeleton({ h }: { h: number }) {
   return (
-    <div style={{ ...SKELETON_CARD, borderRadius: "var(--ds-r-lg)", padding: 18, height: h }}>
+    <div className="flex flex-col" style={{ ...SKELETON_CARD, borderRadius: "var(--ds-r-lg)", padding: 18, height: h }}>
       <div className="flex items-center" style={{ height: 20, marginBottom: 12 }}>
         <Bar w={140} h={12} />
       </div>
-      <Bar w="100%" h={Math.max(0, h - 20 - 12 - 36 - 2)} r={6} />
+      <div className="flex-1 min-h-0" style={{ width: "100%", borderRadius: 6, background: SKELETON_FILL }} />
     </div>
   );
 }

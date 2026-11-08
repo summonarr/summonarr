@@ -113,6 +113,7 @@
   "trash.status.error": "error",
   "trash.status.applied": "applied",
   "trash.status.ready": "ready",
+  "trash.status.notConfigured": "not configured",
   "trash.spec.error.loadDetail": "Could not load detail ({status})",
   "trash.spec.error.network": "Network error — please try again",
   "trash.spec.error.apply": "Apply failed ({status})",

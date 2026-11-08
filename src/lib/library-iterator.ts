@@ -20,25 +20,19 @@ export async function* iterateLibrary(
 ): AsyncGenerator<LibraryItem> {
   let cursor: { tmdbId: number; serverInstance: string } | undefined;
   for (;;) {
+    // One query shape for both tables; only the model differs.
+    const args = {
+      where: { mediaType },
+      take: LIBRARY_PAGE_SIZE,
+      ...(cursor !== undefined
+        ? { skip: 1, cursor: { tmdbId_mediaType_serverInstance: { tmdbId: cursor.tmdbId, mediaType, serverInstance: cursor.serverInstance } } }
+        : {}),
+      orderBy: [{ tmdbId: "asc" as const }, { serverInstance: "asc" as const }],
+      select: { tmdbId: true, mediaType: true, serverInstance: true },
+    };
     const page = source === "plex"
-      ? await prisma.plexLibraryItem.findMany({
-          where: { mediaType },
-          take: LIBRARY_PAGE_SIZE,
-          ...(cursor !== undefined
-            ? { skip: 1, cursor: { tmdbId_mediaType_serverInstance: { tmdbId: cursor.tmdbId, mediaType, serverInstance: cursor.serverInstance } } }
-            : {}),
-          orderBy: [{ tmdbId: "asc" }, { serverInstance: "asc" }],
-          select: { tmdbId: true, mediaType: true, serverInstance: true },
-        })
-      : await prisma.jellyfinLibraryItem.findMany({
-          where: { mediaType },
-          take: LIBRARY_PAGE_SIZE,
-          ...(cursor !== undefined
-            ? { skip: 1, cursor: { tmdbId_mediaType_serverInstance: { tmdbId: cursor.tmdbId, mediaType, serverInstance: cursor.serverInstance } } }
-            : {}),
-          orderBy: [{ tmdbId: "asc" }, { serverInstance: "asc" }],
-          select: { tmdbId: true, mediaType: true, serverInstance: true },
-        });
+      ? await prisma.plexLibraryItem.findMany(args)
+      : await prisma.jellyfinLibraryItem.findMany(args);
     if (page.length === 0) break;
     for (const item of page) {
       yield { tmdbId: item.tmdbId, mediaType: item.mediaType as "MOVIE" | "TV" };

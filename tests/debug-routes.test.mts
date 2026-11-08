@@ -752,3 +752,16 @@ test("ratings-state HEADLINE: WITH &live=1 fetchUnifiedRatings runs — a `live`
   assert.ok(fetchCalls.length >= 1, "the live probe issued at least one provider request");
   assert.ok(fetchCalls.some((u) => u.hostname === "api.mdblist.com"), "MDBList (the primary source) was queried");
 });
+
+test("ratings-state: live probes spend provider quota, so past five a minute per admin they are 429 with Retry-After — the read-only dump never is", async () => {
+  // No provider key configured: each probe answers without leaving the process.
+  const token = await mintSession();
+  for (let i = 0; i < 5; i++) {
+    assert.equal((await ratingsStateGET(ratingsReq(token, "?tmdbId=603&type=movie&live=1"), undefined)).status, 200, `probe ${i + 1}`);
+  }
+  const over = await ratingsStateGET(ratingsReq(token, "?tmdbId=603&type=movie&live=1"), undefined);
+  assert.equal(over.status, 429);
+  assert.equal(over.headers.get("Retry-After"), "60");
+  assert.equal((await ratingsStateGET(ratingsReq(token, "?tmdbId=603&type=movie"), undefined)).status, 200, "the read-only dump is not limited");
+  assert.equal((await ratingsStateGET(ratingsReq(await mintSession(), "?tmdbId=603&type=movie&live=1"), undefined)).status, 200, "the budget is per admin");
+});

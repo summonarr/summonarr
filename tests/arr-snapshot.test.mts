@@ -18,6 +18,9 @@ import {
   snapshotKey,
   snapshotted,
 } from "../src/lib/arr-snapshot.ts";
+
+// A session the wrapped handlers may read (snapshotted requires SummonarrSession's shape).
+const ADMIN_SESSION = { user: { id: "admin-1", role: "ADMIN", permissions: BigInt(0) } };
 import { cachedUrl, readArrSnapshot, SNAPSHOT_HEADER as CLIENT_HEADER } from "../src/lib/client/arr-snapshot.ts";
 
 beforeEach(() => clearArrSnapshots());
@@ -92,7 +95,7 @@ test("wrapper: cached=1 answers 204 when nothing is kept, WITHOUT running the ha
     ran++;
     return Response.json({ rows: [1] });
   });
-  const res = await GET(req("http://x/api/admin/queue?cached=1"), {}, {});
+  const res = await GET(req("http://x/api/admin/queue?cached=1"), {}, ADMIN_SESSION);
   assert.equal(res.status, 204);
   assert.equal(ran, 0, "a snapshot read never reaches Radarr/Sonarr");
 });
@@ -100,9 +103,9 @@ test("wrapper: cached=1 answers 204 when nothing is kept, WITHOUT running the ha
 test("wrapper: a live 200 JSON is kept byte-for-byte and served with its read time; the live answer itself is untouched", async () => {
   const body = { rows: [{ id: 1, title: "Dune" }], errors: [] };
   const GET = snapshotted(async () => Response.json(body));
-  const live = await GET(req("http://x/api/admin/queue"), {}, {});
+  const live = await GET(req("http://x/api/admin/queue"), {}, ADMIN_SESSION);
   assert.deepEqual(await live.json(), body, "the live response is still readable after the copy");
-  const cached = await GET(req("http://x/api/admin/queue?cached=1"), {}, {});
+  const cached = await GET(req("http://x/api/admin/queue?cached=1"), {}, ADMIN_SESSION);
   assert.equal(cached.status, 200);
   assert.deepEqual(await cached.json(), body);
   const at = cached.headers.get(SNAPSHOT_HEADER);
@@ -113,25 +116,25 @@ test("wrapper: a live 200 JSON is kept byte-for-byte and served with its read ti
 test("wrapper: a failed read never replaces the last good answer (an arr that is down keeps it on screen)", async () => {
   let status = 200;
   const GET = snapshotted(async () => (status === 200 ? Response.json({ ok: 1 }) : Response.json({ error: "Sonarr didn't answer" }, { status })));
-  await GET(req("http://x/api/admin/missing?service=sonarr"), {}, {});
+  await GET(req("http://x/api/admin/missing?service=sonarr"), {}, ADMIN_SESSION);
   status = 502;
-  await GET(req("http://x/api/admin/missing?service=sonarr"), {}, {});
+  await GET(req("http://x/api/admin/missing?service=sonarr"), {}, ADMIN_SESSION);
   status = 504;
-  await GET(req("http://x/api/admin/missing?service=sonarr"), {}, {});
-  const cached = await GET(req("http://x/api/admin/missing?service=sonarr&cached=1"), {}, {});
+  await GET(req("http://x/api/admin/missing?service=sonarr"), {}, ADMIN_SESSION);
+  const cached = await GET(req("http://x/api/admin/missing?service=sonarr&cached=1"), {}, ADMIN_SESSION);
   assert.deepEqual(await cached.json(), { ok: 1 });
 });
 
 test("wrapper: languages don't cross, and a job poll is neither kept nor served", async () => {
   const GET = snapshotted(async (r: NextRequest) => Response.json({ lang: r.headers.get("accept-language") }));
-  await GET(req("http://x/api/admin/arr/tasks", { "accept-language": "fr" }), {}, {});
-  assert.equal((await GET(req("http://x/api/admin/arr/tasks?cached=1", { "accept-language": "en" }), {}, {})).status, 204);
-  assert.deepEqual(await (await GET(req("http://x/api/admin/arr/tasks?cached=1", { "accept-language": "fr" }), {}, {})).json(), { lang: "fr" });
+  await GET(req("http://x/api/admin/arr/tasks", { "accept-language": "fr" }), {}, ADMIN_SESSION);
+  assert.equal((await GET(req("http://x/api/admin/arr/tasks?cached=1", { "accept-language": "en" }), {}, ADMIN_SESSION)).status, 204);
+  assert.deepEqual(await (await GET(req("http://x/api/admin/arr/tasks?cached=1", { "accept-language": "fr" }), {}, ADMIN_SESSION)).json(), { lang: "fr" });
 
   const before = arrSnapshotStats().entries;
-  await GET(req("http://x/api/admin/arr/title/files?id=2&job=0123"), {}, {});
+  await GET(req("http://x/api/admin/arr/title/files?id=2&job=0123"), {}, ADMIN_SESSION);
   assert.equal(arrSnapshotStats().entries, before, "a job poll answers the job, not the page");
-  assert.equal((await GET(req("http://x/api/admin/arr/title/files?id=2&job=0123&cached=1"), {}, {})).status, 204);
+  assert.equal((await GET(req("http://x/api/admin/arr/title/files?id=2&job=0123&cached=1"), {}, ADMIN_SESSION)).status, 204);
 });
 
 // --- client half -----------------------------------------------------------
@@ -196,7 +199,8 @@ test("config writes drop every snapshot: a cached read never runs its route's ow
   assert.equal((settings.match(/clearArrSnapshots\(\)/g) ?? []).length, 1, "the write path only");
   assert.ok(settings.indexOf("clearArrSnapshots()") > settings.indexOf("await prisma.$transaction("), "after the commit");
   const instances = src("src/app/api/admin/arr-instances/route.ts");
-  assert.match(instances, /clearArrSnapshots\(\);\s*void logAudit\(/);
+  // Cleared before the audit write; the 4K visibility memo is dropped beside it.
+  assert.match(instances, /clearArrSnapshots\(\);(?:\s*\/\/[^\n]*)*\s*invalidateShow4kVisibilityCache\(\);\s*void logAudit\(/);
 });
 
 test("dropArrTitleSnapshots drops every title-manager view of that title on that instance, in every language — nothing else", () => {
@@ -240,7 +244,7 @@ test("a live read that was out across an invalidation keeps nothing — a clear,
   };
 
   // A config write's clear while the queue read is out.
-  const queue = GET(req("http://x/api/admin/queue"), {}, {});
+  const queue = GET(req("http://x/api/admin/queue"), {}, ADMIN_SESSION);
   await waitHeld(1);
   clearArrSnapshots();
   held[0]();
@@ -249,7 +253,7 @@ test("a live read that was out across an invalidation keeps nothing — a clear,
   assert.equal(readSnapshot(snapshotKey("http://x/api/admin/queue", "en")!), null, "but it is not kept");
 
   // The title manager's Remove while that title's read is out.
-  const title = GET(req("http://x/api/admin/arr/title?service=radarr&instance=&id=7"), {}, {});
+  const title = GET(req("http://x/api/admin/arr/title?service=radarr&instance=&id=7"), {}, ADMIN_SESSION);
   await waitHeld(2);
   rememberSnapshot(snapshotKey("http://x/api/admin/arr/title/files?service=radarr&instance=&id=7", "en")!, "{}");
   assert.equal(dropArrTitleSnapshots({ service: "radarr", instance: "", arrId: 7, tmdbId: null }), 1);
@@ -258,7 +262,7 @@ test("a live read that was out across an invalidation keeps nothing — a clear,
   assert.equal(readSnapshot(snapshotKey("http://x/api/admin/arr/title?service=radarr&instance=&id=7", "en")!), null, "the removed title's read is not put back");
 
   // A drop that dropped nothing invalidates nothing: a read out across it is kept.
-  const other = GET(req("http://x/api/admin/queue?page=2"), {}, {});
+  const other = GET(req("http://x/api/admin/queue?page=2"), {}, ADMIN_SESSION);
   await waitHeld(3);
   assert.equal(dropArrTitleSnapshots({ service: "sonarr", instance: "", arrId: 999, tmdbId: null }), 0);
   held[2]();
@@ -266,7 +270,7 @@ test("a live read that was out across an invalidation keeps nothing — a clear,
   assert.ok(readSnapshot(snapshotKey("http://x/api/admin/queue?page=2", "en")!));
 
   // And a read with no invalidation while it was out is kept as before.
-  const plain = GET(req("http://x/api/admin/queue?page=3"), {}, {});
+  const plain = GET(req("http://x/api/admin/queue?page=3"), {}, ADMIN_SESSION);
   await waitHeld(4);
   held[3]();
   await plain;
@@ -287,4 +291,19 @@ test("the hook shows the stale note only for a snapshot the page actually drew",
   assert.match(hook, /apply: \(data: T\) => boolean \| void/);
   assert.match(hook, /if \(applyRef\.current\(snap\.data\) === false\) return;\s*setShown\(\{ url, at: snap\.at \}\);/);
   assert.match(hook, /if \(!snap \|\| ctl\.signal\.aborted \|\| liveFor\.current === url\) return;/, "a live answer that beat the snapshot always wins");
+});
+
+test("client: a parse that refuses the body makes it 'no snapshot'; one that accepts it hands back its own value", async () => {
+  const { v, check } = await import("../src/lib/validate.ts");
+  const schema = v.object({ rows: v.array(v.unknown()) });
+  const parse = (data: unknown) => {
+    const r = check(schema, data);
+    return r.ok ? r.value : null;
+  };
+  let body: unknown = { rows: [1], extra: true };
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(body), { status: 200, headers: { [SNAPSHOT_HEADER]: "2026-10-13T10:00:00.000Z" } })) as typeof fetch;
+  assert.deepEqual(await readArrSnapshot("/api/admin/queue", { parse }), { data: { rows: [1] }, at: "2026-10-13T10:00:00.000Z" });
+  body = { rows: "nope" };
+  assert.equal(await readArrSnapshot("/api/admin/queue", { parse }), null);
 });

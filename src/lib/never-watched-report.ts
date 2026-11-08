@@ -20,7 +20,7 @@ import { cleanupKey, evaluateCleanupTitle, type CleanupExclusion, type CleanupMe
 import { currentActivityGeneration } from "./play-history";
 import { processSingleton } from "./process-singleton";
 import { coalesce } from "./concurrency";
-import { loadLibraryWatchFacts, NEVER_WATCHED_FEATURE_KEY, type LibraryWatchTitle, type SharedWatchFacts } from "./never-watched-data";
+import { loadLibraryWatchFacts, NEVER_WATCHED_FEATURE_KEY, type LibraryWatchTitle, type ServerCoverage, type SharedWatchFacts } from "./never-watched-data";
 import { hasPermission, Permission } from "./permissions";
 import { upstreamErrorCode, type UpstreamErrorCode } from "./upstream-watch";
 import {
@@ -215,72 +215,17 @@ export async function computeNeverWatchedReport(
       }
       continue;
     }
-    const verdict = evaluateCleanupTitle(t, settings, { now });
-    const copies = copiesOf(t);
-    const sizeOnDisk = copies.length === 0 ? null : copies.reduce((n, e) => n + e.sizeOnDisk, 0);
-    const eligible = cleanupEnabled && verdict.candidate && copies.length > 0 && arrServiceReadable(arr.errors, t.mediaType);
-    titleRows.push({
-      kind: "title",
-      tmdbId: t.tmdbId,
-      mediaType: t.mediaType,
-      title: t.title,
-      posterPath: t.posterPath,
-      year: t.year,
-      servers: t.servers,
-      addedAt: iso(t.addedAt),
-      shelfStart: iso(t.shelfStart),
-      state: t.watch.state,
-      reason: t.watch.reason,
-      reasonServers: t.watch.reasonServers,
-      windowStart: iso(t.watch.windowStart),
-      days: t.watch.days,
-      fullyObserved: t.watch.fullyObserved,
-      softPlays: t.evidence.softPlays,
-      softServers: t.evidence.softServers,
-      arr: copies.map((e) => ({ service: e.service, instance: e.instance, sizeOnDisk: e.sizeOnDisk })),
-      sizeOnDisk,
-      protected: t.protected,
-      cleanup: { matched: verdict.matched, excludedBy: verdict.excludedBy, candidate: verdict.candidate },
-      eligible,
-    });
-    if (isNeverWatchedState(t.watch.state)) {
-      totals.never.titles++;
-      if (sizeOnDisk === null) totals.never.unsized++;
-      else totals.never.bytes += sizeOnDisk;
-    } else if (t.watch.state === "possiblyWatched") totals.possible++;
-    else if (t.watch.state === "unobservable") totals.unknown++;
-    if (eligible) {
-      totals.eligible.titles++;
-      totals.eligible.bytes += sizeOnDisk ?? 0;
-    }
+    const canDelete = cleanupEnabled && arrServiceReadable(arr.errors, t.mediaType);
+    const row = titleRowFor(t, copiesOf(t), evaluateCleanupTitle(t, settings, { now }), canDelete);
+    titleRows.push(row);
+    countTitleRow(totals, row);
   }
 
   return {
     titles: titleRows,
     seasons: seasonRows,
     totals,
-    coverage: ctx.coverage.map((c) => {
-      const code = upstreamErrorCode(c.upstream?.error);
-      return {
-        server: c.server,
-        source: c.source,
-        tracked: c.tracked,
-        since: iso(c.since),
-        holds: c.holds,
-        upstream: {
-          health: c.upstreamHealth,
-          fetchedAt: c.upstream?.fetchedAt ?? null,
-          attemptedAt: c.upstream?.attemptedAt ?? null,
-          entries: c.upstream?.entries ?? 0,
-          matched: c.upstream?.matched ?? 0,
-          samples: c.upstream?.samples ?? 0,
-          agreed: c.upstream?.agreed ?? 0,
-          error: c.upstream?.error ?? null,
-          errorCode: code?.code ?? null,
-          httpStatus: code?.httpStatus ?? null,
-        },
-      };
-    }),
+    coverage: ctx.coverage.map(coverageRow),
     trackingOn: ctx.playHistoryTracked,
     historyStart: iso(ctx.historyStart),
     unplacedPlays: ctx.unplacedPlays,
@@ -291,6 +236,77 @@ export async function computeNeverWatchedReport(
     neverWatchedDays: settings.neverWatchedDays,
     requireUpstreamCheck: settings.requireUpstreamCheck,
     computedAt: now.toISOString(),
+  };
+}
+
+// An unwatched title's row. `canDelete`: cleanup is on and every instance of
+// the title's service could be listed (arrServiceReadable).
+function titleRowFor(
+  t: CleanupTitle,
+  copies: readonly ArrLibraryEntry[],
+  verdict: ReturnType<typeof evaluateCleanupTitle>,
+  canDelete: boolean,
+): NwTitleRow {
+  const sizeOnDisk = copies.length === 0 ? null : copies.reduce((n, e) => n + e.sizeOnDisk, 0);
+  return {
+    kind: "title",
+    tmdbId: t.tmdbId,
+    mediaType: t.mediaType,
+    title: t.title,
+    posterPath: t.posterPath,
+    year: t.year,
+    servers: t.servers,
+    addedAt: iso(t.addedAt),
+    shelfStart: iso(t.shelfStart),
+    state: t.watch.state,
+    reason: t.watch.reason,
+    reasonServers: t.watch.reasonServers,
+    windowStart: iso(t.watch.windowStart),
+    days: t.watch.days,
+    fullyObserved: t.watch.fullyObserved,
+    softPlays: t.evidence.softPlays,
+    softServers: t.evidence.softServers,
+    arr: copies.map((e) => ({ service: e.service, instance: e.instance, sizeOnDisk: e.sizeOnDisk })),
+    sizeOnDisk,
+    protected: t.protected,
+    cleanup: { matched: verdict.matched, excludedBy: verdict.excludedBy, candidate: verdict.candidate },
+    eligible: canDelete && verdict.candidate && copies.length > 0,
+  };
+}
+
+function countTitleRow(totals: NwTotals, row: NwTitleRow): void {
+  if (isNeverWatchedState(row.state)) {
+    totals.never.titles++;
+    if (row.sizeOnDisk === null) totals.never.unsized++;
+    else totals.never.bytes += row.sizeOnDisk;
+  } else if (row.state === "possiblyWatched") totals.possible++;
+  else if (row.state === "unobservable") totals.unknown++;
+  if (row.eligible) {
+    totals.eligible.titles++;
+    totals.eligible.bytes += row.sizeOnDisk ?? 0;
+  }
+}
+
+function coverageRow(c: ServerCoverage): NwCoverageRow {
+  const code = upstreamErrorCode(c.upstream?.error);
+  return {
+    server: c.server,
+    source: c.source,
+    tracked: c.tracked,
+    since: iso(c.since),
+    holds: c.holds,
+    upstream: {
+      health: c.upstreamHealth,
+      fetchedAt: c.upstream?.fetchedAt ?? null,
+      attemptedAt: c.upstream?.attemptedAt ?? null,
+      entries: c.upstream?.entries ?? 0,
+      matched: c.upstream?.matched ?? 0,
+      samples: c.upstream?.samples ?? 0,
+      agreed: c.upstream?.agreed ?? 0,
+      error: c.upstream?.error ?? null,
+      errorCode: code?.code ?? null,
+      httpStatus: code?.httpStatus ?? null,
+    },
   };
 }
 
@@ -369,6 +385,18 @@ function olderThanCached(value: NeverWatchedReport, c: { value: NeverWatchedRepo
   return listed < 0 || (listed === 0 && Date.parse(value.computedAt) < Date.parse(cached.computedAt));
 }
 
+// A stable id per shared facts object, for the coalesce key.
+const sharedFactsIds = new WeakMap<SharedWatchFacts, number>();
+let nextSharedFactsId = 0;
+function sharedFactsId(shared: SharedWatchFacts): number {
+  let id = sharedFactsIds.get(shared);
+  if (id === undefined) {
+    id = ++nextSharedFactsId;
+    sharedFactsIds.set(shared, id);
+  }
+  return id;
+}
+
 // `opts.shared` hands a miss the caller's shared facts load (SharedWatchFacts —
 // the /admin/stats storage section) instead of a load of its own; a hit never
 // touches it. The store check below sees only what changed AFTER this call read
@@ -387,7 +415,11 @@ export async function getNeverWatchedReport(opts: { fresh?: boolean; shared?: Sh
   if (!opts.fresh && c.value && c.generation === generation && Date.now() - c.at < ttl) return c.value;
   if (opts.shared && sharedPredates) return computeNeverWatchedReport({ shared: opts.shared });
   const version = c.version;
-  return coalesce(`never-watched:report:${generation}:${version}:${opts.fresh ? "fresh" : ""}`, async () => {
+  // A shared caller computes from ITS load (the next computation of the same
+  // caller reuses that load), so it never joins another caller's computation,
+  // nor they its.
+  const sharedTag = opts.shared ? `:shared:${sharedFactsId(opts.shared)}` : "";
+  return coalesce(`never-watched:report:${generation}:${version}:${opts.fresh ? "fresh" : ""}${sharedTag}`, async () => {
     const value = await computeNeverWatchedReport({ freshArr: opts.fresh, shared: opts.shared });
     // A report computed across an invalidation or a new play is already stale —
     // never store it over a newer state (the guardrail-19b shape). Nor over a
@@ -404,6 +436,19 @@ export async function getNeverWatchedReport(opts: { fresh?: boolean; shared?: Sh
 }
 
 // ── Paging ─────────────────────────────────────────────────────────────────
+
+const isoTime = (s: string | null) => (s ? Date.parse(s) : null);
+
+// A row's value for a numeric sort (null = unknown; "title" sorts by text).
+function numericSortKey(r: NwTitleRow | NwSeasonRow, sortBy: NwQuery["sortBy"]): number | null {
+  switch (sortBy) {
+    case "size": return r.sizeOnDisk;
+    case "days": return r.days;
+    case "since": return isoTime(r.windowStart);
+    case "added": return r.kind === "title" ? isoTime(r.shelfStart ?? r.addedAt) : isoTime(r.windowStart);
+    default: return null;
+  }
+}
 
 export function selectReportRows(
   report: NeverWatchedReport,
@@ -423,23 +468,18 @@ export function selectReportRows(
   // Unknowns (no size, no date) always sort last, whichever the direction.
   const num = (a: number | null, b: number | null) =>
     a === null && b === null ? 0 : a === null ? 1 : b === null ? -1 : (a - b) * dir;
-  const time = (s: string | null) => (s ? new Date(s).getTime() : null);
-  const added = (r: NwTitleRow | NwSeasonRow) => (r.kind === "title" ? time(r.shelfStart ?? r.addedAt) : time(r.windowStart));
-  filtered.sort((a, b) => {
-    let c = 0;
-    switch (q.sortBy) {
-      case "size": c = num(a.sizeOnDisk, b.sizeOnDisk); break;
-      case "days": c = num(a.days, b.days); break;
-      case "since": c = num(time(a.windowStart), time(b.windowStart)); break;
-      case "added": c = num(added(a), added(b)); break;
-      case "title": c = a.title.localeCompare(b.title) * dir; break;
-    }
+  // The numeric key is worked out once per row, not on every comparison.
+  const keyed = filtered.map((row) => ({ row, key: numericSortKey(row, q.sortBy) }));
+  keyed.sort((x, y) => {
+    const a = x.row;
+    const b = y.row;
+    const c = q.sortBy === "title" ? a.title.localeCompare(b.title) * dir : num(x.key, y.key);
     return c
       || a.tmdbId - b.tmdbId
       || (a.kind === "season" && b.kind === "season" ? a.seasonNumber - b.seasonNumber : 0);
   });
   const start = (q.page - 1) * q.limit;
-  return { rows: filtered.slice(start, start + q.limit), total: filtered.length };
+  return { rows: keyed.slice(start, start + q.limit).map((k) => k.row), total: keyed.length };
 }
 
 // ── One title (the detail-page chip) ───────────────────────────────────────
@@ -461,17 +501,41 @@ export interface TitleNeverWatched {
 // (peekCachedArrLibraryIndex): a page render never lists an arr. On a cold
 // cache the chip can count a delivery the report drops, so its "since" date can
 // be earlier than the report's until the index is warm again.
+//
+// Each admin view of a title used to re-run the whole narrowed read. The answer
+// is kept for the report's TTL under the same rules as the report: served only
+// for the activity generation, report version and Radarr/Sonarr index it was
+// judged under, and never stored when either moved during the read (19b).
+const TITLE_CHIP_MAX_ENTRIES = 500;
+const titleChipCache = processSingleton("never-watched:title-chip", () => ({
+  entries: new Map<string, { value: TitleNeverWatched | null; at: number; generation: number; version: number; arr: ArrLibraryIndex | null }>(),
+}));
+
 export async function getTitleNeverWatched(tmdbId: number, mediaType: CleanupMediaType): Promise<TitleNeverWatched | null> {
-  const facts = await loadLibraryWatchFacts(peekCachedArrLibraryIndex(), { only: [{ tmdbId, mediaType }], seasons: mediaType === "TV" });
+  const key = cleanupKey(tmdbId, mediaType);
+  const generation = currentActivityGeneration();
+  const version = reportCache.version;
+  const arr = peekCachedArrLibraryIndex();
+  const entries = titleChipCache.entries;
+  const hit = entries.get(key);
+  if (hit && hit.generation === generation && hit.version === version && hit.arr === arr && Date.now() - hit.at < REPORT_TTL_MS) return hit.value;
+
+  const facts = await loadLibraryWatchFacts(arr, { only: [{ tmdbId, mediaType }], seasons: mediaType === "TV" });
   const t = facts.titles[0];
-  if (!t) return null;
-  return {
-    state: t.verdict.state,
-    windowStart: iso(t.verdict.windowStart),
-    days: t.verdict.days,
-    fullyObserved: t.verdict.fullyObserved,
-    neverWatchedSeasons: (t.seasons ?? []).filter((s) => isNeverWatchedState(s.state)).map((s) => s.seasonNumber),
-  };
+  const value: TitleNeverWatched | null = t
+    ? {
+        state: t.verdict.state,
+        windowStart: iso(t.verdict.windowStart),
+        days: t.verdict.days,
+        fullyObserved: t.verdict.fullyObserved,
+        neverWatchedSeasons: (t.seasons ?? []).filter((s) => isNeverWatchedState(s.state)).map((s) => s.seasonNumber),
+      }
+    : null;
+  if (currentActivityGeneration() === generation && reportCache.version === version) {
+    if (entries.size >= TITLE_CHIP_MAX_ENTRIES && !entries.has(key)) entries.clear();
+    entries.set(key, { value, at: Date.now(), generation, version, arr });
+  }
+  return value;
 }
 
 // The detail-page chip's read: ADMIN only, the page switched on, and a failure

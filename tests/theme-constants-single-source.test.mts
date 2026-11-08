@@ -9,6 +9,7 @@ import {
   ACCENTS,
   ACCENT_STORAGE_KEY,
   THEME_STORAGE_KEY,
+  applyStoredTheme,
   isAccent,
   themeInitScript,
 } from "../src/lib/theme-constants.ts";
@@ -25,18 +26,41 @@ test("no hand-copied storage key or accent list outside the shared module", () =
   }
 });
 
-// Runs the generated script against a stub <html> + localStorage.
-function runScript(stored: Record<string, string>) {
+// Runs the generated script (or the in-page restore) against a stub <html> + localStorage.
+function stubs(stored: Record<string, string>) {
   const attrs: Record<string, string> = {};
   const classes = new Set<string>(["dark"]);
   const documentElement = {
-    setAttribute: (k: string, v: string) => (attrs[k] = v),
-    classList: { toggle: (c: string, on: boolean) => (on ? classes.add(c) : classes.delete(c)) },
+    setAttribute: (k: string, v: string) => { attrs[k] = v; },
+    classList: { toggle: (c: string, on?: boolean) => (on ? classes.add(c) : classes.delete(c)) },
   };
   const localStorage = { getItem: (k: string) => stored[k] ?? null };
-  new Function("document", "localStorage", themeInitScript())({ documentElement }, localStorage);
-  return { attrs, classes };
+  return { attrs, classes, doc: { documentElement }, localStorage };
 }
+function runScript(stored: Record<string, string>) {
+  const s = stubs(stored);
+  new Function("document", "localStorage", themeInitScript())(s.doc, s.localStorage);
+  return { attrs: s.attrs, classes: s.classes };
+}
+function runRestore(stored: Record<string, string>) {
+  const s = stubs(stored);
+  applyStoredTheme(s.doc, s.localStorage);
+  return { attrs: s.attrs, classes: s.classes };
+}
+
+test("the crash page's restore and the pre-paint script are one function and agree on every input", () => {
+  const cases: Array<Record<string, string>> = [
+    {}, { [THEME_STORAGE_KEY]: "light" }, { [THEME_STORAGE_KEY]: "dark" }, { [THEME_STORAGE_KEY]: "sepia" },
+    { [ACCENT_STORAGE_KEY]: "chartreuse" }, ...ACCENTS.map((a) => ({ [THEME_STORAGE_KEY]: "light", [ACCENT_STORAGE_KEY]: a })),
+  ];
+  for (const c of cases) {
+    const a = runScript(c);
+    const b = runRestore(c);
+    assert.deepEqual(b.attrs, a.attrs, JSON.stringify(c));
+    assert.deepEqual([...b.classes], [...a.classes], JSON.stringify(c));
+  }
+  assert.doesNotMatch(readFileSync("src/app/global-error.tsx", "utf8"), /localStorage\.getItem/, "the crash page reads storage only through applyStoredTheme");
+});
 
 test("the pre-paint script applies every accent and the stored theme", () => {
   for (const accent of ACCENTS) {

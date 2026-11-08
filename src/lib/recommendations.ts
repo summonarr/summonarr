@@ -2,19 +2,23 @@ import "server-only";
 import { prisma } from "@/lib/prisma";
 import type { MediaType, Prisma, RecommendationSeed } from "@/generated/prisma";
 import type { TmdbMedia } from "@/lib/tmdb-types";
-import { getTrending, getPopularMovies, getPopularTV } from "@/lib/tmdb";
 import { resolveLinkedMediaServerUserIds } from "@/lib/my-watch-history";
 import { settleLimit } from "@/lib/concurrency";
 import { getBlacklistSet } from "@/lib/blacklist";
-import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
+import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/batch-write";
 import { qualityMultiplier, withTmdbTerm } from "@/lib/recommendation-quality";
 import { isFeatureEnabled } from "@/lib/features";
 import {
+  emptyGraphResult,
+  fetchFallbackPool,
   FOR_YOU_COWATCH_FEATURE_KEY,
   readCoWatchSuggestions,
   readGraphSuggestions,
   readTitleQuality,
   refreshRecommendationGraph,
+  titleKey,
+  toDbMediaType,
+  toTmdbMediaType,
   type GraphRefreshResult,
 } from "@/lib/recommendation-graph";
 import { importServerWatchHistory, type ServerHistoryImportResult } from "@/lib/server-watch-history-data";
@@ -457,14 +461,21 @@ export function buildTasteSignals(
   return out;
 }
 
+// The half of the quit test that needs no episode count: few enough plays, and
+// settled long enough. Undated ⇒ can't show it is settled; leave it alone. The
+// seed selection asks the server for episode counts only for series that pass
+// this. Pure — see the QUIT_SHOW_* constants.
+export function couldBeQuitShow(plays: number, lastAt: Date | null, now: number): boolean {
+  return plays <= QUIT_SHOW_MAX_PLAYS && lastAt !== null && now - lastAt.getTime() >= QUIT_SHOW_SETTLE_MS;
+}
+
 // Whether a series seed reads as dropped. `episodesOnServer` is null when the
-// server holds none of it (never judged). Pure — see the QUIT_SHOW_* constants.
+// server holds none of it (never judged). Pure — the ONE home of the quit
+// thresholds (couldBeQuitShow plus the ratio against the server's episodes).
 export function isQuitShow(plays: number, episodesOnServer: number | null, lastAt: Date | null, now: number): boolean {
+  if (!couldBeQuitShow(plays, lastAt, now)) return false;
   if (episodesOnServer === null || episodesOnServer < QUIT_SHOW_MIN_EPISODES) return false;
-  if (plays > QUIT_SHOW_MAX_PLAYS || plays / episodesOnServer >= QUIT_SHOW_MAX_RATIO) return false;
-  // Undated ⇒ can't show it is settled; leave it alone.
-  if (!lastAt || now - lastAt.getTime() < QUIT_SHOW_SETTLE_MS) return false;
-  return true;
+  return plays / episodesOnServer < QUIT_SHOW_MAX_RATIO;
 }
 
 export interface RecommendationCandidate {
@@ -500,11 +511,15 @@ export interface RecommendationCandidate {
 
 // One title in a candidate's "because of" list. The four fields the reason*
 // columns carry for the strongest seed, for each of them.
+// The pools a seed can come from. TRENDING is the fallback rows' marker, never
+// a seed — typed out here so no seed-side code has to re-check it.
+export type SeedSource = Exclude<RecommendationSeed, "TRENDING">;
+
 export interface RecommendationReasonSeed {
   tmdbId: number;
   title: string;
   mediaType: MediaType;
-  source: RecommendationSeed;
+  source: SeedSource;
 }
 
 // How many seeds a row keeps in reasonSeeds. A popular title can be surfaced by
@@ -513,7 +528,7 @@ export interface RecommendationReasonSeed {
 // seedCount still reports the true total.
 export const MAX_REASON_SEEDS = 25;
 
-function reasonSeedOf(seed: { tmdbId: number; title: string; mediaType: MediaType; source: RecommendationSeed }): RecommendationReasonSeed {
+function reasonSeedOf(seed: { tmdbId: number; title: string; mediaType: MediaType; source: SeedSource }): RecommendationReasonSeed {
   return { tmdbId: seed.tmdbId, title: seed.title, mediaType: seed.mediaType, source: seed.source };
 }
 
@@ -575,20 +590,11 @@ export interface Seed {
   // off the seed row (PlayHistory.title / WatchlistItem.title) rather than looked
   // up later — a title watched years ago may have no TMDB cache row left.
   title: string;
-  source: RecommendationSeed;
+  source: SeedSource;
 }
 
-function candidateKey(tmdbId: number, mediaType: MediaType): string {
-  return `${tmdbId}:${mediaType}`;
-}
-
-function toDbMediaType(m: "movie" | "tv"): MediaType {
-  return m === "movie" ? "MOVIE" : "TV";
-}
-
-function toTmdbMediaType(m: MediaType): "movie" | "tv" {
-  return m === "MOVIE" ? "movie" : "tv";
-}
+// The graph's title key (recommendation-graph.ts): one shape for both halves.
+const candidateKey = titleKey;
 
 // How much a seed still counts, given when it was last watched (or added to the
 // watchlist). Bounded below by SEED_RECENCY_FLOOR so old-but-real taste keeps a
@@ -623,7 +629,7 @@ function positionFactor(index: number): number {
 function weightSeeds(
   rows: { tmdbId: number; mediaType: MediaType; title: string; lastAt?: Date | null; count?: number }[],
   typeWeight: number,
-  source: RecommendationSeed,
+  source: SeedSource,
   now: number,
 ): Seed[] {
   return rows.map((r) => ({
@@ -758,51 +764,41 @@ async function episodesOnServer(tmdbIds: number[]): Promise<Map<number, number>>
   return out;
 }
 
-async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promise<Seed[]> {
-  // History seeds track CURRENT taste. With the recency-first ordering above,
-  // the windowed query and the all-time top-up together yield exactly "the most
-  // recently played MAX_WATCH_HISTORY_SEEDS titles": the window returns the
-  // newest of them, and the top-up extends backwards past 180 days only when a
-  // quiet viewer has not filled the slots.
-  // The window just keeps the common query small.
-  //
-  // Windowed rows come FIRST, then any remaining slots are TOPPED UP from
-  // all-time history, so a user with only a few recent watches still gets a
-  // full pool. Older titles get lower recency weights, so they rarely outrank
-  // recent taste. A fully dormant household (zero windowed rows) seeds purely
-  // from all-time history. The exclusion set
-  // (buildExclusionSet) stays all-time on purpose: an old watch must still
-  // never come back as a "new" recommendation.
-  const groupHistory = (windowed: boolean, take: number) =>
-    prisma.playHistory.groupBy({
-      by: ["tmdbId", "mediaType"],
-      where: {
-        mediaServerUserId: { in: linkedServerUserIds },
-        watched: true,
-        tmdbId: { not: null },
-        mediaType: { not: null },
-        ...(windowed ? { startedAt: { gte: new Date(Date.now() - SEED_RECENCY_WINDOW_MS) } } : {}),
-      },
-      _count: { tmdbId: true },
-      // NOTE the orderBy below is RECENCY-first, not count-first. PlayHistory
-      // has one row per episode, so ordering by count would let long series
-      // crowd out every film. Play count still matters, but as a weight
-      // (countFactor) rather than as the selection key.
-      // title rides along in the aggregate so naming the seed ("Because you
-      // watched X") costs no second query. PlayHistory.title is the show/movie
-      // title — episodeTitle is a separate column — so it is already the right
-      // label for a TV seed. _max picks one arbitrary row's title within the
-      // group; every row in a (tmdbId, mediaType) group is the same title
-      // except for upstream renames, where the newest spelling is fine.
-      _max: { startedAt: true, title: true },
-      orderBy: [{ _max: { startedAt: "desc" } }, { _count: { tmdbId: "desc" } }],
-      take,
-    });
+// The user's watched titles from PlayHistory, recency-first.
+//
+// NOTE the orderBy is RECENCY-first, not count-first. PlayHistory has one row
+// per episode, so ordering by count would let long series crowd out every film.
+// Play count still matters, but as a weight (countFactor) rather than as the
+// selection key. title rides along in the aggregate so naming the seed
+// ("Because you watched X") costs no second query. PlayHistory.title is the
+// show/movie title — episodeTitle is a separate column — so it is already the
+// right label for a TV seed. _max picks one arbitrary row's title within the
+// group; every row in a (tmdbId, mediaType) group is the same title except for
+// upstream renames, where the newest spelling is fine.
+function groupWatchedHistory(linkedServerUserIds: string[], windowed: boolean, take: number) {
+  return prisma.playHistory.groupBy({
+    by: ["tmdbId", "mediaType"],
+    where: {
+      mediaServerUserId: { in: linkedServerUserIds },
+      watched: true,
+      tmdbId: { not: null },
+      mediaType: { not: null },
+      ...(windowed ? { startedAt: { gte: new Date(Date.now() - SEED_RECENCY_WINDOW_MS) } } : {}),
+    },
+    _count: { tmdbId: true },
+    _max: { startedAt: true, title: true },
+    orderBy: [{ _max: { startedAt: "desc" } }, { _count: { tmdbId: "desc" } }],
+    take,
+  });
+}
+type WatchedHistoryGroup = Awaited<ReturnType<typeof groupWatchedHistory>>[number];
 
+// Everything seed selection draws on, read together.
+async function readSeedInputs(userId: string, linkedServerUserIds: string[]) {
   const [windowedRows, watchlistRows, requestRows, traktRows, serverWatchedRows, favoriteRows, ratingRows] = await Promise.all([
     linkedServerUserIds.length === 0
       ? Promise.resolve([])
-      : groupHistory(true, MAX_WATCH_HISTORY_SEEDS),
+      : groupWatchedHistory(linkedServerUserIds, true, MAX_WATCH_HISTORY_SEEDS),
     prisma.watchlistItem.findMany({
       where: { userId },
       orderBy: { createdAt: "desc" },
@@ -819,49 +815,45 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
       take: MAX_REQUEST_SEEDS * REQUEST_SEED_OVERFETCH,
       select: { tmdbId: true, mediaType: true, title: true, createdAt: true },
     }),
-    // The newest MAX_WATCH_HISTORY_SEEDS are all the merge below can ever keep.
+    // The newest MAX_WATCH_HISTORY_SEEDS are all the merge can ever keep.
     readTraktHistory(userId, MAX_WATCH_HISTORY_SEEDS),
     readServerHistory(linkedServerUserIds),
     readServerFavorites(linkedServerUserIds),
     readTraktRatings(userId),
   ]);
+  return { windowedRows, watchlistRows, requestRows, traktRows, serverWatchedRows, favoriteRows, ratingRows };
+}
 
-  // What the viewer said about titles: ratings and favorites (see TASTE_*).
-  const taste = buildTasteSignals(ratingRows, favoriteRows);
-  const vetoed = (tmdbId: number, mediaType: MediaType) => taste.get(candidateKey(tmdbId, mediaType))?.factor === 0;
+// History seeds track CURRENT taste. The windowed query and the all-time top-up
+// together yield exactly "the most recently played MAX_WATCH_HISTORY_SEEDS
+// titles": the window returns the newest of them, and the top-up extends
+// backwards past 180 days only when a quiet viewer has not filled the slots.
+// The window just keeps the common query small. Older titles get lower recency
+// weights, so they rarely outrank recent taste; a fully dormant household (zero
+// windowed rows) seeds purely from all-time history. The exclusion set
+// (buildExclusionSet) stays all-time on purpose: an old watch must still never
+// come back as a "new" recommendation.
+async function topUpHistory(linkedServerUserIds: string[], windowedRows: WatchedHistoryGroup[]): Promise<WatchedHistoryGroup[]> {
+  if (linkedServerUserIds.length === 0 || windowedRows.length >= MAX_WATCH_HISTORY_SEEDS) return windowedRows;
+  // Overfetch by the windowed count: every windowed title also sits in the
+  // all-time grouping, so the worst case needs that many extras to still fill
+  // the remaining slots after dedup.
+  const seen = new Set(windowedRows.map((r) => `${r.tmdbId}:${r.mediaType}`));
+  const allTime = await groupWatchedHistory(linkedServerUserIds, false, MAX_WATCH_HISTORY_SEEDS + seen.size);
+  return [
+    ...windowedRows,
+    ...allTime.filter((r) => !seen.has(`${r.tmdbId}:${r.mediaType}`)),
+  ].slice(0, MAX_WATCH_HISTORY_SEEDS);
+}
 
-  // Collapse the per-arrInstance duplicates (one user may hold an HD and a 4K
-  // row for the same title): rows arrive newest-first, so first-wins is
-  // newest-wins.
-  const seenRequestKeys = new Set<string>();
-  const requestSeedRows: { tmdbId: number; mediaType: MediaType; title: string; createdAt: Date }[] = [];
-  for (const r of requestRows) {
-    const key = candidateKey(r.tmdbId, r.mediaType);
-    if (seenRequestKeys.has(key)) continue;
-    seenRequestKeys.add(key);
-    requestSeedRows.push(r);
-    if (requestSeedRows.length >= MAX_REQUEST_SEEDS) break;
-  }
-
-  let historyRows = windowedRows;
-  if (linkedServerUserIds.length > 0 && windowedRows.length < MAX_WATCH_HISTORY_SEEDS) {
-    // Overfetch by the windowed count: every windowed title also sits in the
-    // all-time grouping, so the worst case needs that many extras to still
-    // fill the remaining slots after dedup.
-    const seen = new Set(windowedRows.map((r) => `${r.tmdbId}:${r.mediaType}`));
-    const allTime = await groupHistory(false, MAX_WATCH_HISTORY_SEEDS + seen.size);
-    historyRows = [
-      ...windowedRows,
-      ...allTime.filter((r) => !seen.has(`${r.tmdbId}:${r.mediaType}`)),
-    ].slice(0, MAX_WATCH_HISTORY_SEEDS);
-  }
-
-  // groupBy's TS types keep tmdbId/mediaType nullable even though the where
-  // clause already excludes nulls, so they are narrowed here rather than cast.
-  const serverHistory: HistorySeedRow[] = [];
-  for (const r of historyRows) {
+// groupBy's TS types keep tmdbId/mediaType nullable even though the where
+// clause already excludes nulls, so they are narrowed here rather than cast.
+// Pure.
+function historySeedRowsOf(groups: WatchedHistoryGroup[]): HistorySeedRow[] {
+  const out: HistorySeedRow[] = [];
+  for (const r of groups) {
     if (r.tmdbId == null || r.mediaType == null) continue;
-    serverHistory.push({
+    out.push({
       tmdbId: r.tmdbId,
       mediaType: r.mediaType,
       // PlayHistory.title is NOT NULL, but _max over an empty group is typed
@@ -872,14 +864,71 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
       count: r._count.tmdbId,
     });
   }
+  return out;
+}
+
+// Collapse the per-arrInstance duplicates (one user may hold an HD and a 4K
+// row for the same title): rows arrive newest-first, so first-wins is
+// newest-wins. Pure.
+function newestRequestPerTitle<R extends { tmdbId: number; mediaType: MediaType }>(rows: readonly R[]): R[] {
+  const seen = new Set<string>();
+  const out: R[] = [];
+  for (const r of rows) {
+    const key = candidateKey(r.tmdbId, r.mediaType);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+    if (out.length >= MAX_REQUEST_SEEDS) break;
+  }
+  return out;
+}
+
+// Series the viewer dropped (see QUIT_SHOW_*), as candidateKeys. Only series
+// that could qualify on plays and age (couldBeQuitShow) are counted against the
+// server, which keeps the read small. A loved series is never "quit".
+async function detectQuitShows(historySeeds: HistorySeedRow[], taste: Map<string, TasteSignal>, now: number): Promise<Set<string>> {
+  const candidates = historySeeds.filter(
+    (r) =>
+      r.mediaType === "TV" &&
+      couldBeQuitShow(r.count, r.lastAt, now) &&
+      (taste.get(candidateKey(r.tmdbId, r.mediaType))?.factor ?? 1) <= 1,
+  );
+  const episodeCounts = await episodesOnServer(candidates.map((r) => r.tmdbId));
+  return new Set(
+    candidates
+      .filter((r) => isQuitShow(r.count, episodeCounts.get(r.tmdbId) ?? null, r.lastAt, now))
+      .map((r) => candidateKey(r.tmdbId, r.mediaType)),
+  );
+}
+
+// A LOVED title the recency-ordered pools did not reach (rated 9/10 years ago,
+// say) still seeds, from its own pool — newest evidence first, only titles the
+// viewer is known to have watched (the reason line says "Because you
+// watched…"). Pure.
+function lovedSeedRows(taste: Map<string, TasteSignal>, seededKeys: Set<string>) {
+  return [...taste.entries()]
+    .filter(([k, t]) => t.factor > 1 && t.watched && !seededKeys.has(k))
+    .sort(([, a], [, b]) => (b.at?.getTime() ?? -Infinity) - (a.at?.getTime() ?? -Infinity))
+    .slice(0, MAX_LOVED_SEEDS)
+    .map(([, t]) => ({ tmdbId: t.tmdbId, mediaType: t.mediaType, title: t.title, lastAt: t.at, count: Math.max(1, t.plays) }));
+}
+
+async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promise<Seed[]> {
+  const inputs = await readSeedInputs(userId, linkedServerUserIds);
+
+  // What the viewer said about titles: ratings and favorites (see TASTE_*).
+  const taste = buildTasteSignals(inputs.ratingRows, inputs.favoriteRows);
+  const vetoed = (tmdbId: number, mediaType: MediaType) => taste.get(candidateKey(tmdbId, mediaType))?.factor === 0;
+
   // A disliked title never seeds, and is dropped BEFORE the merge so the slot it
   // would have held goes to the next most recent watch.
+  const serverHistory = historySeedRowsOf(await topUpHistory(linkedServerUserIds, inputs.windowedRows));
   const historySeeds = mergeHistorySeedRows(
     serverHistory.filter((r) => !vetoed(r.tmdbId, r.mediaType)),
     [
-      ...traktRows.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title, lastAt: r.lastWatchedAt, count: r.plays })),
+      ...inputs.traktRows.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title, lastAt: r.lastWatchedAt, count: r.plays })),
       // The servers' own history (guardrail 40c) — reaches past the install.
-      ...serverWatchedRows.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title, lastAt: r.lastWatchedAt, count: r.plays })),
+      ...inputs.serverWatchedRows.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title, lastAt: r.lastWatchedAt, count: r.plays })),
     ].filter((r) => !vetoed(r.tmdbId, r.mediaType)),
     MAX_WATCH_HISTORY_SEEDS,
   );
@@ -887,24 +936,7 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
   // One `now` for the whole selection: reading the clock per seed would let a
   // slow query change the weights partway down the list.
   const now = Date.now();
-
-  // Series the viewer dropped (see QUIT_SHOW_*). Only series that could qualify
-  // on plays and age are counted against the server, which keeps the read small.
-  const quitCandidates = historySeeds.filter(
-    (r) =>
-      r.mediaType === "TV" &&
-      r.count <= QUIT_SHOW_MAX_PLAYS &&
-      r.lastAt !== null &&
-      now - r.lastAt.getTime() >= QUIT_SHOW_SETTLE_MS &&
-      // A loved series is never "quit".
-      (taste.get(candidateKey(r.tmdbId, r.mediaType))?.factor ?? 1) <= 1,
-  );
-  const episodeCounts = await episodesOnServer(quitCandidates.map((r) => r.tmdbId));
-  const quitKeys = new Set(
-    quitCandidates
-      .filter((r) => isQuitShow(r.count, episodeCounts.get(r.tmdbId) ?? null, r.lastAt, now))
-      .map((r) => candidateKey(r.tmdbId, r.mediaType)),
-  );
+  const quitKeys = await detectQuitShows(historySeeds, taste, now);
 
   // The app's core loop is watchlist -> request -> watch, so one title can sit
   // in all three pools at once — and it must seed exactly ONCE. Priority is
@@ -914,26 +946,15 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
   // identical (1.5), so which one keeps the slot changes nothing but the
   // reason wording, and watchlist keeps it as the earlier-established pool.
   const historyKeys = new Set(historySeeds.map((r) => candidateKey(r.tmdbId, r.mediaType)));
-  const unwatchedListRows = watchlistRows.filter(
+  const unwatchedListRows = inputs.watchlistRows.filter(
     (r) => !historyKeys.has(candidateKey(r.tmdbId, r.mediaType)) && !vetoed(r.tmdbId, r.mediaType),
   );
   const listKeys = new Set(unwatchedListRows.map((r) => candidateKey(r.tmdbId, r.mediaType)));
-  const novelRequestRows = requestSeedRows.filter((r) => {
+  const novelRequestRows = newestRequestPerTitle(inputs.requestRows).filter((r) => {
     const key = candidateKey(r.tmdbId, r.mediaType);
     return !historyKeys.has(key) && !listKeys.has(key) && !vetoed(r.tmdbId, r.mediaType);
   });
-
-  // A LOVED title the recency-ordered pools did not reach (rated 9/10 years
-  // ago, say) still seeds, from its own pool — newest evidence first, only
-  // titles the viewer is known to have watched (the reason line says "Because
-  // you watched…"). Its type weight already carries the loved factor, so the
-  // taste pass below must not apply it twice.
   const seededKeys = new Set([...historyKeys, ...listKeys, ...novelRequestRows.map((r) => candidateKey(r.tmdbId, r.mediaType))]);
-  const lovedRows = [...taste.entries()]
-    .filter(([k, t]) => t.factor > 1 && t.watched && !seededKeys.has(k))
-    .sort(([, a], [, b]) => (b.at?.getTime() ?? -Infinity) - (a.at?.getTime() ?? -Infinity))
-    .slice(0, MAX_LOVED_SEEDS)
-    .map(([, t]) => ({ tmdbId: t.tmdbId, mediaType: t.mediaType, title: t.title, lastAt: t.at, count: Math.max(1, t.plays) }));
 
   // Taste multiplies the seed it is about, and a dropped series is dampened.
   const adjust = (seeds: Seed[]): Seed[] => {
@@ -961,7 +982,9 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
       "REQUEST",
       now,
     )),
-    ...weightSeeds(lovedRows, WATCH_HISTORY_SEED_WEIGHT * TASTE_LOVED_FACTOR, "WATCH_HISTORY", now),
+    // A loved seed's type weight already carries the loved factor, so the taste
+    // pass must not apply it twice.
+    ...weightSeeds(lovedSeedRows(taste, seededKeys), WATCH_HISTORY_SEED_WEIGHT * TASTE_LOVED_FACTOR, "WATCH_HISTORY", now),
   ];
 }
 
@@ -1005,11 +1028,30 @@ const MAX_EXCLUSION_HIDDEN = 10_000;
 // title outside the list simply isn't asked about. The compute-time exclusion
 // passes nothing and reads everything. The blacklist is a cached global set and
 // is never narrowed.
+// The titles a user already knows, as candidateKeys: their own rows in a set
+// built per call, and the shared blacklist read in place. The blacklist is a
+// cached global set of every blacklisted title; copying it into a new set on
+// every shelf read cost more than the ≤300 lookups made against it. `add`
+// only ever touches the user's own set.
+export interface KnownTitles {
+  has(key: string): boolean;
+  add(key: string): void;
+}
+
+function knownTitles(own: Set<string>, shared: ReadonlySet<string>): KnownTitles {
+  return {
+    has: (key) => own.has(key) || shared.has(key),
+    add: (key) => {
+      own.add(key);
+    },
+  };
+}
+
 async function collectKnownTitleKeys(
   userId: string,
   linkedServerUserIds: string[],
   onlyTmdbIds?: number[],
-): Promise<Set<string>> {
+): Promise<KnownTitles> {
   const only = onlyTmdbIds ? { tmdbId: { in: onlyTmdbIds } } : {};
   const [watchlistRows, watchedRows, hiddenRows, requestRows, voteRows, blacklistSet, traktWatchedRows, serverWatchedRows, ratedRows] = await Promise.all([
     prisma.watchlistItem.findMany({ where: { userId, ...only }, select: { tmdbId: true, mediaType: true } }),
@@ -1061,20 +1103,15 @@ async function collectKnownTitleKeys(
     readTraktRatings(userId, onlyTmdbIds),
   ]);
 
-  // blacklistKey (blacklist.ts) emits the same "{tmdbId}:{MOVIE|TV}" shape as
-  // candidateKey, so the cached set can be adopted wholesale.
-  const known = new Set<string>(blacklistSet);
-  for (const r of watchlistRows) known.add(candidateKey(r.tmdbId, r.mediaType));
-  for (const r of watchedRows) {
-    if (r.tmdbId != null && r.mediaType != null) known.add(candidateKey(r.tmdbId, r.mediaType));
+  const own = new Set<string>();
+  for (const rows of [watchlistRows, watchedRows, hiddenRows, requestRows, voteRows, traktWatchedRows, serverWatchedRows, ratedRows]) {
+    for (const r of rows as readonly { tmdbId: number | null; mediaType: MediaType | null }[]) {
+      if (r.tmdbId != null && r.mediaType != null) own.add(candidateKey(r.tmdbId, r.mediaType));
+    }
   }
-  for (const r of hiddenRows) known.add(candidateKey(r.tmdbId, r.mediaType));
-  for (const r of requestRows) known.add(candidateKey(r.tmdbId, r.mediaType));
-  for (const r of voteRows) known.add(candidateKey(r.tmdbId, r.mediaType));
-  for (const r of traktWatchedRows) known.add(candidateKey(r.tmdbId, r.mediaType));
-  for (const r of serverWatchedRows) known.add(candidateKey(r.tmdbId, r.mediaType));
-  for (const r of ratedRows) known.add(candidateKey(r.tmdbId, r.mediaType));
-  return known;
+  // blacklistKey (blacklist.ts) emits the same "{tmdbId}:{MOVIE|TV}" shape as
+  // candidateKey, so the cached set is consulted as is.
+  return knownTitles(own, blacklistSet);
 }
 
 // Titles the user sampled and demonstrably bailed on — see the ABANDON_*
@@ -1112,7 +1149,7 @@ async function collectAbandonedTitleKeys(linkedServerUserIds: string[], now: num
   return out;
 }
 
-async function buildExclusionSet(userId: string, linkedServerUserIds: string[], seeds: Seed[]): Promise<Set<string>> {
+async function buildExclusionSet(userId: string, linkedServerUserIds: string[], seeds: Seed[]): Promise<KnownTitles> {
   const excluded = await collectKnownTitleKeys(userId, linkedServerUserIds);
   for (const s of seeds) {
     // REQUEST seeds do NOT fold themselves into the exclusion set. Request
@@ -1253,6 +1290,162 @@ export async function selectSeedPlan(userId: string): Promise<UserSeedPlan> {
   return { linkedServerUserIds, seeds: await selectSeeds(userId, linkedServerUserIds) };
 }
 
+// Every candidate the seeds' suggestions vote for, with the weighted language
+// tally the profile needs and the coverage `conclusive` is judged on.
+interface CandidateTally {
+  scored: Map<string, ScoredCandidate>;
+  languageWeight: Map<string, number>;
+  totalLanguageWeight: number;
+  // How many seeds the graph could answer for (see `conclusive`) — knowable
+  // only because coverage is a stored fact rather than the outcome of a fetch
+  // just attempted.
+  coveredSeeds: number;
+  // Suggestions counted BEFORE exclusion: a user who has already watched every
+  // suggestion is a conclusive empty (clear their stale rows), whereas zero
+  // items arriving at all is the outage case. Filtering first would collapse
+  // the two back together.
+  rawSuggestions: number;
+}
+
+// One suggestion's vote for one candidate. Mutates the tally; no I/O.
+function creditCandidate(tally: CandidateTally, excluded: KnownTitles, seed: Seed, item: TmdbMedia, contribution: number): void {
+  const mediaType = toDbMediaType(item.mediaType);
+  const key = candidateKey(item.id, mediaType);
+  if (excluded.has(key)) return;
+  const seedKey = candidateKey(seed.tmdbId, seed.mediaType);
+
+  // Tallied AFTER the exclusion check above, deliberately: excluded titles are
+  // ones the viewer has already watched or listed, so counting them would shape
+  // the profile around a back catalogue that can never appear in the output
+  // anyway. The profile describes the CANDIDATE pool.
+  if (item.originalLanguage) {
+    tally.languageWeight.set(item.originalLanguage, (tally.languageWeight.get(item.originalLanguage) ?? 0) + contribution);
+    tally.totalLanguageWeight += contribution;
+  }
+
+  const existing = tally.scored.get(key);
+  if (existing) {
+    existing.contributions.push(contribution);
+    existing.seedRefs.push({ seed: reasonSeedOf(seed), contribution });
+    if (!existing.seedKeys.has(seedKey)) {
+      existing.seedKeys.add(seedKey);
+      existing.seedCount++;
+    }
+    // Keep the STRONGEST contribution as the reason, not the first one
+    // encountered — seeds are not visited in weight order, so first-wins would
+    // name an essentially arbitrary title. Comparing CONTRIBUTION rather than
+    // raw seed weight is deliberate: a slightly weaker seed that ranks this
+    // title first is a better explanation than a strong seed that had it 40th.
+    // Ties keep the incumbent.
+    if (contribution > existing.reasonWeight) {
+      existing.reasonWeight = contribution;
+      existing.reasonTmdbId = seed.tmdbId;
+      existing.reasonTitle = seed.title;
+      existing.reasonMediaType = seed.mediaType;
+      existing.reasonSource = seed.source;
+    }
+    return;
+  }
+  tally.scored.set(key, {
+    tmdbId: item.id,
+    mediaType,
+    title: item.title,
+    overview: item.overview || null,
+    posterPath: item.posterPath,
+    backdropPath: item.backdropPath,
+    releaseDate: item.releaseDate,
+    voteAverage: item.voteAverage,
+    score: contribution,
+    rank: 0,
+    reasonTmdbId: seed.tmdbId,
+    reasonTitle: seed.title,
+    reasonMediaType: seed.mediaType,
+    reasonSource: seed.source,
+    reasonWeight: contribution,
+    seedCount: 1,
+    reasonSeeds: null,
+    language: item.originalLanguage ?? undefined,
+    voteCount: item.voteCount ?? 0,
+    contributions: [contribution],
+    seedRefs: [{ seed: reasonSeedOf(seed), contribution }],
+    seedKeys: new Set([seedKey]),
+  });
+}
+
+// Every seed's TMDB suggestions and co-watch edges, credited to their
+// candidates. No I/O.
+function tallyCandidates(
+  seeds: Seed[],
+  graphed: ReadonlyMap<string, TmdbMedia[]>,
+  coWatched: ReadonlyMap<string, TmdbMedia[]>,
+  excluded: KnownTitles,
+): CandidateTally {
+  const tally: CandidateTally = { scored: new Map(), languageWeight: new Map(), totalLanguageWeight: 0, coveredSeeds: 0, rawSuggestions: 0 };
+  for (const seed of seeds) {
+    const seedKey = candidateKey(seed.tmdbId, seed.mediaType);
+    const suggestions = graphed.get(seedKey);
+    // undefined, not empty: the graph has no answer for this seed. An empty list
+    // IS an answer ("TMDB knows of nothing similar") and counts as covered — the
+    // distinction is the node stamp, and collapsing the two would make a title
+    // with genuinely no suggestions look like an outage forever.
+    if (suggestions !== undefined) {
+      tally.coveredSeeds++;
+      // position is the index within THIS seed's suggestion list, so it has to
+      // be counted over the raw list — not over the survivors of the exclusion
+      // filter, which would silently promote every item sitting behind a title
+      // the user had already watched.
+      suggestions.forEach((item, position) => {
+        tally.rawSuggestions++;
+        creditCandidate(tally, excluded, seed, item, seed.weight * positionFactor(position));
+      });
+    }
+    // The server's own co-watching (COWATCH_WEIGHT). Deliberately OUTSIDE the
+    // coverage count and rawSuggestions: `conclusive` asks whether TMDB's half
+    // of the graph answered, and co-watch edges must never let a shelf built
+    // during a TMDB outage pass for a complete one.
+    coWatched.get(seedKey)?.forEach((item, position) => {
+      creditCandidate(tally, excluded, seed, item, seed.weight * COWATCH_WEIGHT * positionFactor(position));
+    });
+  }
+  return tally;
+}
+
+// Exact score ties are rare (a continuous product of factors), but when they
+// happen they break by community rating rather than by Map insertion order,
+// which is an artefact of seed iteration.
+function byScoreThenRating(a: { score: number; voteAverage: number }, b: { score: number; voteAverage: number }): number {
+  return b.score - a.score || b.voteAverage - a.voteAverage;
+}
+
+// The graph's two reads for a user's seeds. The graph is the ONLY source of
+// suggestions: one pair of indexed reads returns every edge out of every seed
+// this user holds, precomputed by refreshRecommendationGraph for the whole
+// instance.
+//
+// A read failure here is not recoverable by trying somewhere else — there is
+// nowhere else. It surfaces as zero coverage, which `conclusive` turns into
+// "keep yesterday's shelf".
+async function readSeedSuggestions(seeds: Seed[]): Promise<{ graphed: Map<string, TmdbMedia[]>; coWatched: Map<string, TmdbMedia[]> }> {
+  const seedTitles = seeds.map((s) => ({ tmdbId: s.tmdbId, mediaType: s.mediaType }));
+  const [graphed, coWatched] = await Promise.all([
+    readGraphSuggestions(seedTitles).catch((err) => {
+      console.error("[recommendations] graph read failed; this user keeps their existing shelf:", err);
+      return new Map<string, TmdbMedia[]>();
+    }),
+    // Supplementary, and OFF by default (FOR_YOU_COWATCH_FEATURE_KEY): with the
+    // switch off nothing about any other viewer is read and the shelf is the
+    // viewer's own. A failed read just means no co-watch votes this cycle; it
+    // never touches coverage, so it can never make a shelf look complete.
+    isFeatureEnabled(FOR_YOU_COWATCH_FEATURE_KEY)
+      .then((on) => (on ? readCoWatchSuggestions(seedTitles) : new Map<string, TmdbMedia[]>()))
+      .catch((err) => {
+        console.warn("[recommendations] co-watch read failed; ranking on TMDB suggestions alone:", err);
+        return new Map<string, TmdbMedia[]>();
+      }),
+  ]);
+  return { graphed, coWatched };
+}
+
 // Pure(ish) compute — no writes, and no upstream call of any kind. Returns no
 // candidates for a cold-start user (zero eligible seeds). Read `conclusive`
 // before acting on an empty `candidates`: the two empties mean different things.
@@ -1286,161 +1479,24 @@ export async function computeRecommendationsForUser(
     buildExclusionSet(userId, linkedServerUserIds, seeds),
     collectAbandonedTitleKeys(linkedServerUserIds, Date.now()),
   ]);
-
-  // The graph is the ONLY source of suggestions: one pair of indexed reads
-  // returns every edge out of every seed this user holds, precomputed by
-  // refreshRecommendationGraph for the whole instance.
-  //
-  // A read failure here is not recoverable by trying somewhere else — there is
-  // nowhere else. It surfaces as zero coverage, which `conclusive` below turns
-  // into "keep yesterday's shelf".
-  const seedTitles = seeds.map((s) => ({ tmdbId: s.tmdbId, mediaType: s.mediaType }));
-  const [graphed, coWatched] = await Promise.all([
-    readGraphSuggestions(seedTitles).catch((err) => {
-      console.error("[recommendations] graph read failed; this user keeps their existing shelf:", err);
-      return new Map<string, TmdbMedia[]>();
-    }),
-    // Supplementary, and OFF by default (FOR_YOU_COWATCH_FEATURE_KEY): with the
-    // switch off nothing about any other viewer is read and the shelf is the
-    // viewer's own. A failed read just means no co-watch votes this cycle; it
-    // never touches coverage, so it can never make a shelf look complete.
-    isFeatureEnabled(FOR_YOU_COWATCH_FEATURE_KEY)
-      .then((on) => (on ? readCoWatchSuggestions(seedTitles) : new Map<string, TmdbMedia[]>()))
-      .catch((err) => {
-        console.warn("[recommendations] co-watch read failed; ranking on TMDB suggestions alone:", err);
-        return new Map<string, TmdbMedia[]>();
-      }),
-  ]);
-
-  // How many of this user's seeds the graph could actually answer for. The whole
-  // trustworthiness of the result rests on this ratio (see `conclusive`), and it
-  // is only knowable because coverage is a stored fact rather than the outcome of
-  // a fetch we just attempted.
-  let coveredSeeds = 0;
-
-  // Counted BEFORE exclusion: a user who has already watched every suggestion is a
-  // conclusive empty (clear their stale rows), whereas zero items arriving at all is
-  // the outage case. Filtering first would collapse the two back together.
-  let rawSuggestions = 0;
-
-  const scored = new Map<string, ScoredCandidate>();
-  // Weighted language tally, accumulated in the same pass that scores.
-  const languageWeight = new Map<string, number>();
-  let totalLanguageWeight = 0;
-
-  // One suggestion's vote for one candidate.
-  const credit = (seed: Seed, item: TmdbMedia, contribution: number) => {
-    const mediaType = toDbMediaType(item.mediaType);
-    const key = candidateKey(item.id, mediaType);
-    if (excluded.has(key)) return;
-    const seedKey = candidateKey(seed.tmdbId, seed.mediaType);
-
-    // Tallied AFTER the exclusion check above, deliberately: excluded titles
-    // are ones the viewer has already watched or listed, so counting them
-    // would shape the profile around a back catalogue that can never appear
-    // in the output anyway. The profile describes the CANDIDATE pool.
-    if (item.originalLanguage) {
-      languageWeight.set(item.originalLanguage, (languageWeight.get(item.originalLanguage) ?? 0) + contribution);
-      totalLanguageWeight += contribution;
-    }
-
-    const existing = scored.get(key);
-    if (existing) {
-      existing.contributions.push(contribution);
-      existing.seedRefs.push({ seed: reasonSeedOf(seed), contribution });
-      if (!existing.seedKeys.has(seedKey)) {
-        existing.seedKeys.add(seedKey);
-        existing.seedCount++;
-      }
-      // Keep the STRONGEST contribution as the reason, not the first one
-      // encountered — seeds are not visited in weight order, so first-wins
-      // would name an essentially arbitrary title. Comparing
-      // CONTRIBUTION rather than raw seed weight is deliberate: a slightly
-      // weaker seed that ranks this title first is a better explanation than a
-      // strong seed that had it 40th. Ties keep the incumbent.
-      if (contribution > existing.reasonWeight) {
-        existing.reasonWeight = contribution;
-        existing.reasonTmdbId = seed.tmdbId;
-        existing.reasonTitle = seed.title;
-        existing.reasonMediaType = seed.mediaType;
-        existing.reasonSource = seed.source;
-      }
-      return;
-    }
-    scored.set(key, {
-      tmdbId: item.id,
-      mediaType,
-      title: item.title,
-      overview: item.overview || null,
-      posterPath: item.posterPath,
-      backdropPath: item.backdropPath,
-      releaseDate: item.releaseDate,
-      voteAverage: item.voteAverage,
-      score: contribution,
-      rank: 0,
-      reasonTmdbId: seed.tmdbId,
-      reasonTitle: seed.title,
-      reasonMediaType: seed.mediaType,
-      reasonSource: seed.source,
-      reasonWeight: contribution,
-      seedCount: 1,
-      reasonSeeds: null,
-      language: item.originalLanguage ?? undefined,
-      voteCount: item.voteCount ?? 0,
-      contributions: [contribution],
-      seedRefs: [{ seed: reasonSeedOf(seed), contribution }],
-      seedKeys: new Set([seedKey]),
-    });
-  };
-
-  seeds.forEach((seed) => {
-    const seedKey = candidateKey(seed.tmdbId, seed.mediaType);
-    const suggestions = graphed.get(seedKey);
-    // undefined, not empty: the graph has no answer for this seed. An empty list
-    // IS an answer ("TMDB knows of nothing similar") and counts as covered — the
-    // distinction is the node stamp, and collapsing the two would make a title
-    // with genuinely no suggestions look like an outage forever.
-    if (suggestions !== undefined) {
-      coveredSeeds++;
-      // position is the index within THIS seed's suggestion list, so it has to
-      // be counted over the raw list — not over the survivors of the exclusion
-      // filter, which would silently promote every item sitting behind a title
-      // the user had already watched.
-      suggestions.forEach((item, position) => {
-        rawSuggestions++;
-        credit(seed, item, seed.weight * positionFactor(position));
-      });
-    }
-    // The server's own co-watching (COWATCH_WEIGHT). Deliberately OUTSIDE the
-    // coverage count and rawSuggestions: `conclusive` asks whether TMDB's half
-    // of the graph answered, and co-watch edges must never let a shelf built
-    // during a TMDB outage pass for a complete one.
-    coWatched.get(seedKey)?.forEach((item, position) => {
-      credit(seed, item, seed.weight * COWATCH_WEIGHT * positionFactor(position));
-    });
-  });
+  const suggestions = await readSeedSuggestions(seeds);
+  const tally = tallyCandidates(seeds, suggestions.graphed, suggestions.coWatched, excluded);
 
   // The post-accumulation passes, in this order: the decay-sum sets each score,
   // and the two multipliers then scale the bounded score, not the raw sum.
-  applyCorroboration(scored.values());
-  applyLanguageProfile(scored.values(), languageWeight, totalLanguageWeight);
-  applyAbandonDamp(scored.values(), abandoned);
-
-  const byRelevance = [...scored.values()]
-    // Scores come from a continuous product of factors, so exact ties are rare
-    // — but when they happen, break by community rating rather than by Map
-    // insertion order, which is an artefact of seed iteration.
-    .sort((a, b) => b.score - a.score || b.voteAverage - a.voteAverage);
+  applyCorroboration(tally.scored.values());
+  applyLanguageProfile(tally.scored.values(), tally.languageWeight, tally.totalLanguageWeight);
+  applyAbandonDamp(tally.scored.values(), abandoned);
 
   // ── Quality prior ───────────────────────────────────────────────────────
   // Only the shortlist is rated: rating every candidate would mean thousands of
   // lookups per user, and anything below the shortlist was never going to be
   // stored anyway. Relevance gates, quality refines.
-  const shortlist = byRelevance.slice(0, RATING_SHORTLIST);
+  const shortlist = [...tally.scored.values()].sort(byScoreThenRating).slice(0, RATING_SHORTLIST);
   await applyQualityPrior(shortlist);
 
   const ranked = shortlist
-    .sort((a, b) => b.score - a.score || b.voteAverage - a.voteAverage)
+    .sort(byScoreThenRating)
     .slice(0, MAX_STORED_RECOMMENDATIONS_PER_USER)
     .map(
       ({ reasonWeight: _reasonWeight, language: _language, voteCount: _voteCount, contributions: _contributions, seedKeys: _seedKeys, seedRefs, ...c }, i): RecommendationCandidate => ({
@@ -1461,7 +1517,7 @@ export async function computeRecommendationsForUser(
     for (const c of fallback.candidates) ranked.push({ ...c, rank: ranked.length });
   }
 
-  return { candidates: ranked, conclusive: isConclusive(seeds.length, coveredSeeds, rawSuggestions) };
+  return { candidates: ranked, conclusive: isConclusive(seeds.length, tally.coveredSeeds, tally.rawSuggestions) };
 }
 
 interface FallbackPoolResult {
@@ -1478,18 +1534,17 @@ interface FallbackPoolResult {
 // has NO relevance opinion on them, and a zero score keeps that fact in the
 // data rather than inventing a comparable number.
 async function buildFallbackCandidates(
-  excludedKeys: Set<string>,
-  takenKeys: Set<string>,
+  excludedKeys: { has(key: string): boolean },
+  takenKeys: ReadonlySet<string>,
   slots: number,
 ): Promise<FallbackPoolResult> {
   if (slots <= 0) return { candidates: [], poolAvailable: true };
 
   let pool: TmdbMedia[];
   try {
-    const [trending, popMovies, popTV] = await Promise.all([getTrending(), getPopularMovies(), getPopularTV()]);
-    // Trending first: it is the freshest signal, and the dedupe below keeps the
-    // first copy, so a title on both lists reads as trending.
-    pool = [...trending, ...popMovies, ...popTV];
+    // Trending first (fetchFallbackPool): the dedupe below keeps the first copy,
+    // so a title on both lists reads as trending.
+    pool = await fetchFallbackPool();
   } catch (err) {
     console.warn("[recommendations] fallback pool unavailable; leaving the shelf as-is:", err);
     return { candidates: [], poolAvailable: false };
@@ -1594,9 +1649,32 @@ async function getActiveUserIds(): Promise<string[]> {
       purgedAt: null,
       authSessions: { some: { lastSeenAt: { gte: cutoff } } },
     },
+    // A stable cohort order, so every run walks the users the same way.
+    orderBy: { id: "asc" },
     select: { id: true },
   });
   return rows.map((r) => r.id);
+}
+
+// The union of every user's seeds — the graph's REQUIRED set (guardrail 40) —
+// ranked by the total weight the cohort puts on each title, heaviest first. The
+// graph cuts the set at MAX_REQUIRED_SOURCES in this order, so past that
+// ceiling it is the cohort's least-weighted titles that go uncovered, the same
+// ones every run, rather than whichever users the query happened to list last.
+// Ties by key, for a stable order. Pure.
+export function requiredSeedSources(plans: readonly { seeds: readonly Seed[] }[]): { tmdbId: number; mediaType: MediaType }[] {
+  const byKey = new Map<string, { tmdbId: number; mediaType: MediaType; weight: number }>();
+  for (const plan of plans) {
+    for (const seed of plan.seeds) {
+      const key = candidateKey(seed.tmdbId, seed.mediaType);
+      const prior = byKey.get(key);
+      if (prior) prior.weight += seed.weight;
+      else byKey.set(key, { tmdbId: seed.tmdbId, mediaType: seed.mediaType, weight: seed.weight });
+    }
+  }
+  return [...byKey.entries()]
+    .sort(([ka, a], [kb, b]) => b.weight - a.weight || (ka < kb ? -1 : ka > kb ? 1 : 0))
+    .map(([, { tmdbId, mediaType }]) => ({ tmdbId, mediaType }));
 }
 
 export interface WarmRecommendationsResult {
@@ -1613,22 +1691,43 @@ export interface WarmRecommendationsResult {
   // Best-effort — its failures are reported here and logged, but never fail the
   // run: seeds simply read what was stored before.
   serverHistory: ServerHistoryImportResult;
+  // The history import threw outright: serverHistory is then all zeros (nothing
+  // was counted), not an invented tally.
+  serverHistoryFailed?: true;
 }
 
-const NO_GRAPH: GraphRefreshResult = {
-  sources: 0,
-  requiredSources: 0,
-  requiredCovered: 0,
-  sourcesRefreshed: 0,
-  sourcesSkipped: 0,
-  sourcesFailed: 0,
-  edgesWritten: 0,
-  sourcesSwept: 0,
-  titlesRated: 0,
-  verdictsDeferred: 0,
-  ratingsFailed: 0,
-  coWatchEdges: 0,
-};
+// One user's shelf, recomputed from their plan and stored: the number of rows
+// written, or null when the answer was inconclusive and the stored shelf kept.
+//
+// NEVER let an inconclusive run replace good rows with nothing. The write is
+// delete-then-insert, so an empty `candidates` produced by an incomplete graph
+// would clear the user's shelf — and because the compute RESOLVES rather than
+// throws, it would be counted as a successful update. Keep the stale set and
+// recompute next cycle. One transaction PER USER, never one spanning all users.
+async function recomputeShelf(userId: string, plan: UserSeedPlan): Promise<number | null> {
+  const { candidates, conclusive } = await computeRecommendationsForUser(userId, plan);
+  if (!conclusive) return null;
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.userRecommendation.deleteMany({ where: { userId } });
+      if (candidates.length > 0) {
+        await batchCreateMany(
+          tx.userRecommendation,
+          // A Json? column takes undefined (omit) for "no value" — a bare null
+          // is refused by Prisma (it wants Prisma.DbNull).
+          candidates.map(({ reasonSeeds, ...c }) => ({
+            ...c,
+            userId,
+            // Wrapped in an object, never a bare array — see storedReasonSeeds.
+            ...(reasonSeeds && reasonSeeds.length > 0 ? { reasonSeeds: storedReasonSeeds(reasonSeeds) } : {}),
+          })),
+        );
+      }
+    },
+    { timeout: BATCH_TX_TIMEOUT },
+  );
+  return candidates.length;
+}
 
 export async function warmRecommendationsCache(opts: { signal?: AbortSignal } = {}): Promise<WarmRecommendationsResult> {
   // ── Phase 0: bring the servers' own watch records up to date ─────────────
@@ -1637,10 +1736,13 @@ export async function warmRecommendationsCache(opts: { signal?: AbortSignal } = 
   // request per Jellyfin user and one short Plex walk per server once the first
   // import is done), and never throws: an unreachable server leaves its stored
   // rows in place and the run carries on.
+  let serverHistoryFailed = false;
   const serverHistory = await importServerWatchHistory({ signal: opts.signal }).catch((err): ServerHistoryImportResult => {
     console.error("[recommendations] server history import failed; seeding from what is stored:", err);
-    return { servers: 0, identities: 0, failedServers: 1, failedIdentities: 0, unresolved: 0, aborted: false };
+    serverHistoryFailed = true;
+    return { servers: 0, identities: 0, failedServers: 0, failedIdentities: 0, unresolved: 0, aborted: false };
   });
+  const historyOutcome = { serverHistory, ...(serverHistoryFailed ? { serverHistoryFailed: true as const } : {}) };
 
   const userIds = await getActiveUserIds();
 
@@ -1663,12 +1765,7 @@ export async function warmRecommendationsCache(opts: { signal?: AbortSignal } = 
     }
   }
 
-  const required = new Map<string, { tmdbId: number; mediaType: MediaType }>();
-  for (const { plan } of plans) {
-    for (const seed of plan.seeds) {
-      required.set(candidateKey(seed.tmdbId, seed.mediaType), { tmdbId: seed.tmdbId, mediaType: seed.mediaType });
-    }
-  }
+  const required = requiredSeedSources(plans.map((p) => p.plan));
 
   // ── Phase 2: build ───────────────────────────────────────────────────────
   // A throw here ABORTS the run instead of computing anyway. Without a live
@@ -1678,7 +1775,7 @@ export async function warmRecommendationsCache(opts: { signal?: AbortSignal } = 
   // nothing. Every stored shelf survives untouched either way.
   let graph: GraphRefreshResult;
   try {
-    graph = await refreshRecommendationGraph({ required: [...required.values()], signal: opts.signal });
+    graph = await refreshRecommendationGraph({ required, signal: opts.signal });
   } catch (err) {
     console.error("[recommendations] graph refresh failed; no user was recomputed and every shelf was left as-is:", err);
     return {
@@ -1688,8 +1785,8 @@ export async function warmRecommendationsCache(opts: { signal?: AbortSignal } = 
       usersFailed,
       candidatesWritten: 0,
       graphFailed: true,
-      graph: { ...NO_GRAPH },
-      serverHistory,
+      graph: emptyGraphResult(),
+      ...historyOutcome,
     };
   }
 
@@ -1705,33 +1802,7 @@ export async function warmRecommendationsCache(opts: { signal?: AbortSignal } = 
   // as an inconclusive compute does.
   const results = await settleLimit(plans, USER_CONCURRENCY, async ({ userId, plan }) => {
     if (opts.signal?.aborted) return null;
-    const { candidates, conclusive } = await computeRecommendationsForUser(userId, plan);
-    // NEVER let an inconclusive run replace good rows with nothing. The write below
-    // is delete-then-insert, so an empty `candidates` produced by an incomplete
-    // graph would clear the user's shelf — and because the compute RESOLVES rather
-    // than throws, it would be counted as a successful update. Keep the stale set
-    // and recompute next cycle.
-    if (!conclusive) return null;
-    await prisma.$transaction(
-      async (tx) => {
-        await tx.userRecommendation.deleteMany({ where: { userId } });
-        if (candidates.length > 0) {
-          await batchCreateMany(
-            tx.userRecommendation,
-            // A Json? column takes undefined (omit) for "no value" — a bare null
-            // is refused by Prisma (it wants Prisma.DbNull).
-            candidates.map(({ reasonSeeds, ...c }) => ({
-              ...c,
-              userId,
-              // Wrapped in an object, never a bare array — see storedReasonSeeds.
-              ...(reasonSeeds && reasonSeeds.length > 0 ? { reasonSeeds: storedReasonSeeds(reasonSeeds) } : {}),
-            })),
-          );
-        }
-      },
-      { timeout: BATCH_TX_TIMEOUT },
-    );
-    return candidates.length;
+    return recomputeShelf(userId, plan);
   });
 
   let usersUpdated = 0;
@@ -1766,26 +1837,22 @@ export async function warmRecommendationsCache(opts: { signal?: AbortSignal } = 
     candidatesWritten,
     graphFailed: false,
     graph,
-    serverHistory,
+    ...historyOutcome,
   };
 }
 
 function seedsForWire(value: unknown): { seeds?: NonNullable<TmdbMedia["recommendedBecause"]>["seeds"] } {
   const seeds = parseReasonSeeds(value);
   if (seeds.length === 0) return {};
-  const out: NonNullable<NonNullable<TmdbMedia["recommendedBecause"]>["seeds"]> = [];
-  for (const seed of seeds) {
-    // parseReasonSeeds already drops TRENDING (a fallback marker, never a
-    // seed); this check is what tells the compiler so.
-    if (seed.source === "TRENDING") continue;
-    out.push({
+  // parseReasonSeeds keeps only seed pools (SeedSource), never TRENDING.
+  return {
+    seeds: seeds.map((seed) => ({
       tmdbId: seed.tmdbId,
       title: seed.title,
       mediaType: toTmdbMediaType(seed.mediaType),
       source: seed.source,
-    });
-  }
-  return { seeds: out };
+    })),
+  };
 }
 
 function rowToTmdbMedia(

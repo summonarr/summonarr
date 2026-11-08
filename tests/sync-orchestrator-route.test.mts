@@ -348,6 +348,10 @@ function stagedLibraryRows<T = Record<string, unknown>>(model: LibraryStagingMod
     .flatMap((l) => l.data.map(({ runId: _runId, ...row }) => row as T));
 }
 
+// A one-shot failure of the first setting.findMany whose keys it matches — a
+// transient DB error inside one phase while the rest of the run reads fine.
+let failSettingFindManyOnce: ((keys: string[]) => boolean) | null = null;
+
 const fakePrisma = {
   mediaRequest: {
     findMany: async (args: { where?: ReqWhere }) => {
@@ -417,6 +421,10 @@ const fakePrisma = {
     },
     findMany: async (args: { where: { key: { in: string[] } } }) => {
       const keys = args.where.key.in;
+      if (failSettingFindManyOnce?.(keys)) {
+        failSettingFindManyOnce = null;
+        throw new Error("setting read failed (unit test)");
+      }
       return keys.filter((k) => settings.has(k)).map((k) => ({ key: k, value: settings.get(k) as string }));
     },
     upsert: async (args: { where: { key: string }; create: { key: string; value: string } }) => {
@@ -807,6 +815,7 @@ beforeEach(() => {
   sessionRows.clear();
   settings.clear();
   failCreateManyOnModels.clear();
+  failSettingFindManyOnce = null;
   lockAcquire = (id) => id !== 2009; // 2009 busy ⇒ syncDownloadPolicies skipped
   respond = (url) => { throw new Error(`unexpected fetch ${url} — script a responder for this test`); };
   invalidateFeatureFlagCache(); // module-global 10s flag cache — reset between tests
@@ -1913,7 +1922,7 @@ test("an EMPTY Plex answer for an instance that holds stored rows is held back �
 
 // The Jellyfin twin of the Plex hold: Jellyfin answers 200 with no titles for a selected
 // library that was recreated under a new id, or while it is mid-scan.
-function jellyfinWithFolders(movieTmdbIds: number[], folders: Array<{ Id: string; Name: string; CollectionType: string }>): (url: URL) => Response {
+function jellyfinWithFolders(movieTmdbIds: number[], folders: Array<{ Id: string; Name: string; CollectionType?: string }>): (url: URL) => Response {
   const items = jellyfinResponder(movieTmdbIds);
   return (url) => (url.pathname === "/Library/MediaFolders" ? okJson({ Items: folders }) : items(url));
 }
@@ -1943,6 +1952,45 @@ test("an EMPTY Jellyfin answer for an instance that holds stored rows is held ba
   assert.ok(!settingUpserts.some((u) => u.key === "lastJellyfinSyncSucceededAt"), "no success stamp");
   assert.ok((b.failedSources as string[]).includes("jellyfin"), "the Jellyfin source is reported degraded");
   assert.ok(warns.some((w) => w.includes('Jellyfin instance "') && w.includes("keeping")), "the hold-back is warned");
+});
+
+test("Jellyfin: a type that comes back empty while a MIXED (untyped) library could hold it is held back — the guard sees every library, not the picker's list", async () => {
+  // No library selection, TV rows stored, the shows come back empty and the
+  // only libraries are a movie library and a mixed one. A mixed library holds
+  // either type, so the empty TV answer is not trusted. The picker's list
+  // (movies/tvshows only) hid the mixed library and the TV rows were wiped.
+  configureBothServers();
+  preservedRowSlugs.jellyfinLibraryItem.add("");
+  const plex = plexResponder([300]);
+  const jf = jellyfinWithFolders([550], [
+    { Id: "m1", Name: "Movies", CollectionType: "movies" },
+    { Id: "x1", Name: "Everything" },
+    { Id: "mu", Name: "Music", CollectionType: "music" },
+  ]);
+  respond = (url) => (url.origin === JF_BASE ? jf(url) : plex(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  const b = await bodyOf(res);
+  await settle();
+  assert.equal(txTouching("jellyfinLibraryItem").length, 0, "the TV rows are not replaced by an empty answer");
+  assert.ok((b.failedSources as string[]).includes("jellyfin"));
+});
+
+test("Jellyfin: a music library is not a place shows could be — an empty TV answer beside only movie and music libraries still syncs", async () => {
+  configureBothServers();
+  preservedRowSlugs.jellyfinLibraryItem.add("");
+  const plex = plexResponder([300]);
+  const jf = jellyfinWithFolders([550], [
+    { Id: "m1", Name: "Movies", CollectionType: "movies" },
+    { Id: "mu", Name: "Music", CollectionType: "music" },
+  ]);
+  respond = (url) => (url.origin === JF_BASE ? jf(url) : plex(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+  assert.equal(txTouching("jellyfinLibraryItem").length, 1, "no library could hold shows, so the replace runs");
 });
 
 test("an EMPTY Jellyfin answer for an instance with NO stored rows still proceeds", async () => {
@@ -2073,7 +2121,7 @@ test("multi-server PARTIAL failure still marks a request the HEALTHY instance ho
 
 // Plex: one movie section (empty) + one show section. The type=2 walk lists
 // the shows (with tmdb guids); the type=4 walk lists their episodes, each
-// carrying an on-disk file — the data the skipShowFilePaths patch runs on.
+// carrying an on-disk file — the data the show file-path patch runs on.
 function plexShowResponder(shows: Array<{ ratingKey: string; tmdbId: number; files: string[] }>): (url: URL) => Response {
   return (url) => {
     if (url.pathname === "/library/sections") {
@@ -2115,7 +2163,7 @@ test("show file-path patch: ONE VALUES-joined UPDATE per instance (never one upd
   assert.equal(res.status, 200);
   await settle();
 
-  // The library write landed first, with the show rows pathless (skipShowFilePaths).
+  // The library write landed first, with the show rows pathless (the TV walk reads no path).
   const plexTx = txTouching("plexLibraryItem");
   assert.equal(plexTx.length, 1);
   const tvRows = stagedLibraryRows<{ mediaType: string; plexRatingKey: string; filePath: string | null }>("plexLibraryItemStaging")
@@ -3391,4 +3439,188 @@ test("cleanup: the stamp is checked in the demote's CAS WHERE, so a stamp landin
   const demote = mediaRequestUpdateManyCalls.find((c) => c.data.status === "APPROVED");
   assert.ok(demote, "the demote ran");
   assert.equal(demote.where?.cleanedUpAt, null, "the demote's where must carry cleanedUpAt: null");
+});
+
+// ── the Sonarr hold when the Sonarr refresh THROWS ──────────────────────────
+// A refresh that throws before it learns the configured instances used to leave
+// an EMPTY set, which the completeness gate read as "no instance is the oracle":
+// every TV request then flipped off library presence alone — a show with one
+// downloaded episode announced as ready. The gate must read the registry itself
+// and hold on the cached wanted rows.
+
+test("guardrail 14a: a Sonarr refresh that THROWS still holds an incomplete series — the gate reads the registry itself", async () => {
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-1");
+  configureSonarr();
+  respond = plexShowResponder([{ ratingKey: "show-1399", tmdbId: 1399, files: ["/tv/got/s01e01.mkv"] }]);
+  // Last run's verdict: incomplete.
+  sonarrWantedRows.push({ tmdbId: 1399, arrInstance: "" });
+  // The refresh's configured-instance read fails once; every later read works.
+  failSettingFindManyOnce = (keys) => keys.includes("sonarrUrl");
+  seedUser("u1", {});
+  seedRequest({ id: "req-partial", tmdbId: 1399, mediaType: "TV", requestedBy: "u1", status: "APPROVED", lastArrPushAt: new Date() });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.ok(errors.some((e) => e.startsWith("[sync] Sonarr wanted sync failed:")), "precondition: the Sonarr refresh threw");
+  assert.ok((b.failedSources as string[]).includes("sonarr"), "and the run says so");
+  assert.equal(b.plexMarked, 0, "a series Sonarr last listed as wanted must stay held while its refresh is down");
+  assert.equal(requests.get("req-partial")?.status, "APPROVED");
+  assert.equal(casCalls.filter((c) => c.ids.includes("req-partial")).length, 0, "PRE-CAS: the claim is not burned");
+});
+
+// ── the SECOND ARR pass flips a reverted row too ────────────────────────────
+
+test("the SECOND ARR pass flips an APPROVED row whose claim is already burned (a reverted request) without re-notifying", async () => {
+  configureBothServers();
+  respond = bothServersRespond([], []); // libraries empty: the ARR caches are the only movers
+  // Imported since the run-start snapshot: only the second pass sees it.
+  arrAvailableRows.push({ model: "radarrAvailableItem", tmdbId: 779, arrInstance: "", fromCall: 2 });
+  // A revert moved it back to APPROVED earlier; the claim stays burned.
+  seedRequest({ id: "r-reverted", tmdbId: 779, mediaType: "MOVIE", requestedBy: "u-1", status: "APPROVED", notifiedAvailable: true });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(arrAvailableReadCounts.radarrAvailableItem, 2, "precondition: the second pass read the fresh cache");
+  assert.equal(requests.get("r-reverted")?.status, "AVAILABLE", "the fresh cache holds it, so it is available now — not next run");
+  assert.deepEqual(notifiedUserIds(), [], "its notification was already sent once");
+  assert.equal(b.marked, 1, "a row that actually moved is counted");
+});
+
+// ── the revert reads only what it can act on ────────────────────────────────
+
+test("the revert's arr presence read skips AVAILABLE rows whose instance this run did not refresh", async () => {
+  // No Radarr configured: no instance was refreshed, so the revert can demote
+  // nothing and must not read the caches for it (they grow with the whole
+  // request history).
+  configureBothServers();
+  respond = bothServersRespond([], []);
+  seedRequest({ id: "r-old", tmdbId: 880, mediaType: "MOVIE", requestedBy: "u-1", status: "AVAILABLE", notifiedAvailable: true });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  assert.equal(arrAvailableReadCounts.radarrAvailableItem, 0, "no cache read for a row the revert cannot act on");
+  assert.equal(requests.get("r-old")?.status, "AVAILABLE");
+});
+
+// ── guardrail 41 inside the Plex arm: the lock's signal reaches every walk ───
+// A dropped lock connection aborts the signal exactly as the 30-minute timeout
+// does. Every Plex walk takes it and REJECTS mid-listing (never a partial
+// library), so the arm takes its failed-fetch isolation: the stored rows stay,
+// and the run winds down at its next phase boundary instead of throwing.
+
+const plexFetchesAfter = (index: number) => fetchCalls.slice(index).filter((c) => c.url.origin === PLEX_ORIGIN);
+const plexWrites = () => ({
+  tx: txTouching("plexLibraryItem").length,
+  staged: stagedLibraryRows("plexLibraryItemStaging").length,
+  patches: rawStatements.filter((r) => r.sql.includes('UPDATE "PlexLibraryItem"')).length,
+});
+// episodeStagingLoads is not reset per test, so each test below clears it first.
+const episodeCacheWrites = () => ({ tx: txTouching("tVEpisodeCache").length, staged: episodeStagingLoads.length });
+
+// A movie section listed one item per page over two pages; `onPage` runs as
+// each page is served (the hook a test drops the lock from).
+function twoPageMovies(onPage: (start: number) => void): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname === "/library/sections") {
+      return okJson({ MediaContainer: { Directory: [{ key: "1", title: "Movies", type: "movie" }] } });
+    }
+    if (url.pathname === "/library/sections/1/all") {
+      const start = Number(url.searchParams.get("X-Plex-Container-Start"));
+      onPage(start);
+      return okJson({ MediaContainer: { totalSize: 2, Metadata: [{ ratingKey: `rk${800 + start}`, type: "movie", title: `M${start}`, Guid: [{ id: `tmdb://${800 + start}` }] }] } });
+    }
+    throw new Error(`unexpected Plex fetch ${url.pathname}`);
+  };
+}
+const dropLock = () => lockClients.get(2000)?.emit("end");
+
+test("GUARDRAIL 41: a lock lost MID Plex walk sends no further Plex request, writes nothing, and winds the run down", async () => {
+  episodeStagingLoads.length = 0;
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-1");
+  let dropAt = -1;
+  respond = twoPageMovies((start) => {
+    if (start !== 0) return;
+    dropAt = fetchCalls.length;
+    dropLock();
+  });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.ok(dropAt > 0, "precondition: the lock dropped while the first page was served");
+  assert.deepEqual(plexFetchesAfter(dropAt).map((c) => c.url.href), [], "the walk must not ask for another page once the lock is gone");
+  assert.deepEqual(plexWrites(), { tx: 0, staged: 0, patches: 0 }, "the server's stored rows stay — no partial replace");
+  assert.deepEqual(episodeCacheWrites(), { tx: 0, staged: 0 });
+  assert.equal(res.status, 200, "a wind-down returns, it never throws");
+  assert.equal((await bodyOf(res)).windDown, true);
+  assert.ok(res.headers.get("X-Cron-Degraded"), "a run that stopped early must not be recorded green");
+  assert.ok(!errors.some((e) => e.includes("Plex check failed")), `a lost lock is not a Plex failure: ${errors.join(" | ")}`);
+});
+
+test("GUARDRAIL 41: a lock lost after the Plex walk FINISHED but before its write writes nothing — the arm's fetch → write boundary", async () => {
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-1");
+  let dropped = false;
+  respond = twoPageMovies((start) => {
+    if (start !== 1) return; // the last page: the walk itself completes
+    dropped = true;
+    dropLock();
+  });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.ok(dropped, "precondition: the lock dropped while the last page was served");
+  assert.deepEqual(plexWrites(), { tx: 0, staged: 0, patches: 0 }, "a complete walk is still not written once the lock is gone");
+  assert.equal((await bodyOf(res)).windDown, true);
+});
+
+test("GUARDRAIL 41: a lock lost MID episode walk stops it, and neither the episode cache nor a show file path is written", async () => {
+  episodeStagingLoads.length = 0;
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-1");
+  const shows = [{ ratingKey: "show-a", tmdbId: 1399 }, { ratingKey: "show-b", tmdbId: 1400 }];
+  let dropAt = -1;
+  respond = (url) => {
+    const type = url.searchParams.get("type");
+    if (url.pathname === "/library/sections") {
+      return okJson({ MediaContainer: { Directory: [{ key: "2", title: "TV", type: "show" }] } });
+    }
+    if (url.pathname === "/library/sections/2/all" && type === "2") {
+      return okJson({ MediaContainer: {
+        totalSize: shows.length,
+        Metadata: shows.map((s) => ({ ratingKey: s.ratingKey, type: "show", title: `Show ${s.tmdbId}`, Guid: [{ id: `tmdb://${s.tmdbId}` }] })),
+      } });
+    }
+    if (url.pathname === "/library/sections/2/all" && type === "4") {
+      // One episode per page over two pages; the lock drops on the first.
+      const start = Number(url.searchParams.get("X-Plex-Container-Start"));
+      if (start === 0) {
+        dropAt = fetchCalls.length;
+        dropLock();
+      }
+      const s = shows[start];
+      return okJson({ MediaContainer: { totalSize: 2, Metadata: [{ grandparentRatingKey: s.ratingKey, parentIndex: 1, index: 1, Media: [{ Part: [{ file: `/tv/${s.ratingKey}.mkv` }] }] }] } });
+    }
+    throw new Error(`unexpected Plex fetch ${url.pathname}?${url.searchParams}`);
+  };
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.ok(dropAt > 0, "precondition: the lock dropped during the episode walk");
+  assert.equal(txTouching("plexLibraryItem").length, 1, "control: the library write ran before the lock was lost");
+  assert.deepEqual(plexFetchesAfter(dropAt).map((c) => c.url.href), [], "the episode walk must not ask for another page once the lock is gone");
+  assert.deepEqual(episodeCacheWrites(), { tx: 0, staged: 0 }, "a walk that lost its lock must not rewrite the episode cache");
+  assert.equal(rawStatements.filter((r) => r.sql.includes('UPDATE "PlexLibraryItem"')).length, 0, "nor patch file paths");
+  assert.equal((await bodyOf(res)).windDown, true);
+  assert.ok(!errors.some((e) => e.includes("Plex TV episode fetch failed")), `a lost lock is not a failed fetch: ${errors.join(" | ")}`);
 });

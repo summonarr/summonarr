@@ -7,14 +7,8 @@ import { getUserPlayStats } from "@/lib/play-history";
 import { zonedTodayIso } from "@/lib/stats-time-zone";
 import { resolvePosterMap, posterSrcFor } from "@/lib/poster-cache";
 import { getTranslator } from "@/lib/i18n/server";
-import {
-  addTitleResolutions,
-  collectUnmappedPairs,
-  resolveUnmappedEntry,
-  titleWhereDisjuncts,
-  unresolvedPairs,
-  type TitleResolveMap,
-} from "@/lib/activity-title-resolve";
+import { collectUnmappedPairs, resolveUnmappedEntry } from "@/lib/activity-title-resolve";
+import { resolveTitlesToTmdb } from "@/lib/activity-title-resolve-data";
 import {
   UserDetailView,
   type UserDetailData,
@@ -25,6 +19,27 @@ export const dynamic = "force-dynamic";
 // The known-IP table lists the most recently seen addresses only: a mobile
 // viewer can collect hundreds, and every one was sent to the client as a row.
 const KNOWN_IPS_SHOWN = 50;
+
+// Every address the viewer played from, newest sighting first.
+function knownIpRows(
+  groups: readonly { ipAddress: string | null; _count: { _all: number }; _max: { startedAt: Date | null } }[],
+): { ip: string; plays: number; lastSeenIso: string | null }[] {
+  return groups
+    .filter((g): g is typeof g & { ipAddress: string } => !!g.ipAddress)
+    .map((g) => ({ ip: g.ipAddress, plays: g._count._all, lastSeenIso: g._max.startedAt?.toISOString() ?? null }))
+    .sort(
+      (a, b) =>
+        (b.lastSeenIso ? Date.parse(b.lastSeenIso) : 0) -
+        (a.lastSeenIso ? Date.parse(a.lastSeenIso) : 0),
+    );
+}
+
+// The share of plays with a known method that played direct, or null with none.
+function directPlayPercent(ratio: readonly { method: string; count: number }[]): number | null {
+  const direct = ratio.find((r) => r.method === "DirectPlay")?.count ?? 0;
+  const total = ratio.reduce((n, r) => n + r.count, 0);
+  return total > 0 ? Math.round((direct / total) * 100) : null;
+}
 
 export default async function UserActivityPage({
   params,
@@ -54,18 +69,7 @@ export default async function UserActivityPage({
     }),
   ]);
   if (!msUser) notFound();
-  const allKnownIps = ipGroups
-    .filter((g): g is typeof g & { ipAddress: string } => !!g.ipAddress)
-    .map((g) => ({
-      ip: g.ipAddress,
-      plays: g._count._all,
-      lastSeenIso: g._max.startedAt?.toISOString() ?? null,
-    }))
-    .sort(
-      (a, b) =>
-        (b.lastSeenIso ? Date.parse(b.lastSeenIso) : 0) -
-        (a.lastSeenIso ? Date.parse(a.lastSeenIso) : 0),
-    );
+  const allKnownIps = knownIpRows(ipGroups);
   // The count stays exact (the group-by already has every address); only the
   // rows sent to the client are capped, newest first.
   const knownIps = allKnownIps.slice(0, KNOWN_IPS_SHOWN);
@@ -80,53 +84,20 @@ export default async function UserActivityPage({
   // play to the movie and produce `/media/<movieId>?type=TV`. The keying and
   // the `where` fragments both come from activity-title-resolve.ts so they
   // cannot drift apart; a play's own non-null mediaType is never overwritten.
+  // The overview's own reads (activity-title-resolve-data.ts): the newest
+  // resolved play per pair, then — a title may be in a library but never
+  // resolved on any play — the library tables, where a title held under two
+  // tmdbIds stays unlinked rather than guessed.
   const recentPlaysSlice = stats.recentPlays.slice(0, 12);
-  const unmappedPairs = collectUnmappedPairs([...stats.topMedia, ...recentPlaysSlice]);
-  const titleResolved: TitleResolveMap = {};
-  if (unmappedPairs.length > 0) {
-    const matches = await prisma.playHistory.findMany({
-      where: {
-        OR: titleWhereDisjuncts(unmappedPairs).map((d) => ({ ...d, tmdbId: { not: null } })),
-      },
-      distinct: ["title", "mediaType"],
-      orderBy: { startedAt: "desc" },
-      select: { title: true, tmdbId: true, mediaType: true },
-    });
-    addTitleResolutions(titleResolved, matches);
-
-    // A title may be in a library but never resolved on any *play* (so the
-    // PlayHistory match above misses it). The library tables are an
-    // authoritative title→tmdbId mapping — use them so the title still links.
-    const stillUnmapped = unresolvedPairs(titleResolved, unmappedPairs);
-    if (stillUnmapped.length > 0) {
-      const libraryWhere = { OR: titleWhereDisjuncts(stillUnmapped) };
-      const [plexLib, jellyfinLib] = await Promise.all([
-        prisma.plexLibraryItem.findMany({
-          where: libraryWhere,
-          select: { title: true, tmdbId: true, mediaType: true },
-        }),
-        prisma.jellyfinLibraryItem.findMany({
-          where: libraryWhere,
-          select: { title: true, tmdbId: true, mediaType: true },
-        }),
-      ]);
-      addTitleResolutions(titleResolved, [...plexLib, ...jellyfinLib]);
-    }
-  }
+  const titleResolved = await resolveTitlesToTmdb(
+    collectUnmappedPairs([...stats.topMedia, ...recentPlaysSlice]),
+    { libraryFallback: true },
+  );
   const resolvedTopMedia = stats.topMedia.map((m) => resolveUnmappedEntry(m, titleResolved));
 
   const topMediaPosters = await resolvePosterMap(resolvedTopMedia);
 
-  const directPlays =
-    stats.transcodeRatio.find((r) => r.method === "DirectPlay")?.count ?? 0;
-  const totalWithMethod = stats.transcodeRatio.reduce(
-    (s, r) => s + r.count,
-    0,
-  );
-  const directPct =
-    totalWithMethod > 0
-      ? Math.round((directPlays / totalWithMethod) * 100)
-      : null;
+  const directPct = directPlayPercent(stats.transcodeRatio);
 
   const data: UserDetailData = {
     userId: id,

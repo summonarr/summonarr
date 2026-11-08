@@ -1,9 +1,10 @@
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { escMd } from "@/lib/discord-notify";
-import { buildResultsPayload, editOriginal, savePending } from "../reply";
-import { attachAvailability, cachedSearchTmdb, discordVisibleInstances } from "../search";
-import type { CommandContext, CommandOption, PendingSearch, TmdbResult } from "../types";
+import { buildResultsPayload, editOriginal, mediaTypeOption, optionValue, savePending } from "../reply";
+import { maintenanceRefuses } from "../request-gates";
+import { searchForDiscord } from "../search";
+import type { CommandContext, PendingSearch, TmdbResult } from "../types";
 
 export async function handleRequestCommand(ctx: CommandContext): Promise<void> {
   const { t, appId, token, interactionId, discordUserId, discordUsername, data, requireLinked, isExemptByRole } = ctx;
@@ -15,13 +16,11 @@ export async function handleRequestCommand(ctx: CommandContext): Promise<void> {
     return;
   }
 
-  const maintRow = await prisma.setting.findUnique({ where: { key: "maintenanceEnabled" } });
-  if (maintRow?.value === "true") {
-    const discordAdmin = await prisma.user.findFirst({ where: { discordId: discordUserId, role: "ADMIN" }, select: { id: true } });
-    if (!discordAdmin) {
-      await editOriginal(appId, token, { content: t("notify.bot.maintenance") });
-      return;
-    }
+  // The one Discord maintenance rule (request-gates.ts), shared with the result
+  // pick: the ADMIN bit of an active linked account bypasses it.
+  if (await maintenanceRefuses(discordUserId)) {
+    await editOriginal(appId, token, { content: t("notify.bot.maintenance") });
+    return;
   }
 
   // A deactivated account is refused outright, as /recent does: its
@@ -40,16 +39,16 @@ export async function handleRequestCommand(ctx: CommandContext): Promise<void> {
     return;
   }
 
-  // `options` is always present on a real /request; a payload without it throws
-  // here (and is reported as an unexpected error), exactly as before.
-  const options = data.options as CommandOption[];
-  const type = options.find((o) => o.name === "type")?.value as "movie" | "tv";
-  const query = options.find((o) => o.name === "query")?.value as string;
+  const type = mediaTypeOption(optionValue(data.options, "type"));
+  const query = optionValue(data.options, "query");
+  if (!type || typeof query !== "string" || query.trim().length === 0) {
+    await editOriginal(appId, token, { content: t("notify.bot.searchFailed") });
+    return;
+  }
 
   let results: TmdbResult[];
   try {
-    const raw = await cachedSearchTmdb(query, type, discordUserId);
-    results = await attachAvailability(raw, await discordVisibleInstances(discordUserId));
+    results = await searchForDiscord(query, type, discordUserId);
   } catch (err) {
     console.error("[interactions] TMDB search error:", err);
     await editOriginal(appId, token, { content: t("notify.bot.searchFailed") });

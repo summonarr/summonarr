@@ -6,12 +6,13 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useState,
+  useSyncExternalStore,
 } from "react";
 import {
   ACCENT_STORAGE_KEY,
   THEME_STORAGE_KEY,
   isAccent,
+  isTheme,
   type Accent,
   type Theme,
 } from "@/lib/theme-constants";
@@ -65,29 +66,49 @@ function applyAccent(accent: Accent) {
   document.documentElement.setAttribute("data-accent", accent);
 }
 
-// State starts at the server-rendered defaults so the first client render
-// matches the server HTML (no hydration mismatch). The effect below then reads
-// the saved values that layout.tsx's inline script already put on <html>.
-export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setThemeState] = useState<Theme>(DEFAULT_THEME);
-  const [accent, setAccentState] = useState<Accent>(DEFAULT_ACCENT);
+// <html data-theme/data-accent> IS the store: layout.tsx's inline script
+// writes the saved values there before first paint, the setters below write it,
+// and another tab's change arrives as a "storage" event that is applied there.
+// The server snapshot is the defaults, so hydration matches the server HTML and
+// React re-renders with the real values right after (no mount effect needed).
+function readTheme(): Theme {
+  const t = document.documentElement.getAttribute("data-theme");
+  return isTheme(t) ? t : DEFAULT_THEME;
+}
 
-  // Runs once after mount to copy <html data-theme/data-accent> into state.
-  // After that this provider is the only writer, so nothing needs watching.
+function readAccent(): Accent {
+  const a = document.documentElement.getAttribute("data-accent");
+  return isAccent(a) ? a : DEFAULT_ACCENT;
+}
+
+function subscribeAppearance(onChange: () => void): () => void {
+  const observer = new MutationObserver(onChange);
+  observer.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["data-theme", "data-accent"],
+  });
+  const onStorage = (e: StorageEvent) => {
+    if (e.key === THEME_STORAGE_KEY && isTheme(e.newValue)) applyTheme(e.newValue);
+    else if (e.key === ACCENT_STORAGE_KEY && isAccent(e.newValue)) applyAccent(e.newValue);
+  };
+  window.addEventListener("storage", onStorage);
+  return () => {
+    observer.disconnect();
+    window.removeEventListener("storage", onStorage);
+  };
+}
+
+export function ThemeProvider({ children }: { children: React.ReactNode }) {
+  const theme = useSyncExternalStore(subscribeAppearance, readTheme, () => DEFAULT_THEME);
+  const accent = useSyncExternalStore(subscribeAppearance, readAccent, () => DEFAULT_ACCENT);
+
+  // The browser-chrome colour follows whatever theme is current, the one the
+  // pre-paint script applied included.
   useEffect(() => {
-    const t = document.documentElement.getAttribute("data-theme");
-    const a = document.documentElement.getAttribute("data-accent");
-    if (t === "light" || t === "dark") {
-      setThemeState(t);
-      applyChromeColor(t);
-    }
-    if (isAccent(a)) {
-      setAccentState(a);
-    }
-  }, []);
+    applyChromeColor(theme);
+  }, [theme]);
 
   const setTheme = useCallback((t: Theme) => {
-    setThemeState(t);
     applyTheme(t);
     try {
       localStorage.setItem(THEME_STORAGE_KEY, t);
@@ -97,7 +118,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const setAccent = useCallback((a: Accent) => {
-    setAccentState(a);
     applyAccent(a);
     try {
       localStorage.setItem(ACCENT_STORAGE_KEY, a);

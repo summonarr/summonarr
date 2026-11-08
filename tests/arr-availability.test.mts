@@ -71,11 +71,22 @@ shadowPrismaModel(prisma, "sonarrAvailableItem", sonarrAvail.stub);
 
 const ALL = [radarrWanted, sonarrWanted, radarrAvail, sonarrAvail];
 
+// The feature flags attachArrPending reads (features.ts). Empty ⇒ every
+// integration at its default (on).
+const flagRows = new Map<string, string>();
+shadowPrismaModel(prisma, "setting", {
+  findMany: async (args: { where: { key: { in: string[] } } }) =>
+    args.where.key.in.filter((k) => flagRows.has(k)).map((key) => ({ key, value: flagRows.get(key) as string })),
+});
+const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
+
 beforeEach(() => {
   for (const t of ALL) {
     t.state.rows = [];
     t.state.calls.length = 0;
   }
+  flagRows.clear();
+  invalidateFeatureFlagCache();
 });
 
 test("empty input returns the same array and touches none of the four tables", async () => {
@@ -218,4 +229,17 @@ test("input objects are not mutated and unrelated fields survive the copy", asyn
   assert.equal(items[0].arrPending, undefined); // original untouched
   assert.equal(out[0].title, "Fight Club");
   assert.equal(out[0].arrPending, true);
+});
+
+test("a switched-OFF integration answers as though it tracks nothing — its stale cache is never read", async () => {
+  // The cache of a disabled integration is never refreshed or cleared, so its
+  // last wanted rows would light "pending" badges forever.
+  radarrWanted.state.rows = [{ tmdbId: 603, arrInstance: "" }];
+  sonarrWanted.state.rows = [{ tmdbId: 1399, arrInstance: "" }];
+  flagRows.set("feature.integration.radarr", "false");
+  const out = await attachArrPending([media(603, "movie"), media(1399, "tv")]);
+  assert.deepEqual(out.map((i) => [i.id, i.arrPending]), [[603, false], [1399, true]]);
+  assert.equal("arrInstances" in out[0], false, "no instance tracks a title for a switched-off integration");
+  assert.equal(radarrWanted.state.calls.length + radarrAvail.state.calls.length, 0, "the disabled side's tables are not read");
+  assert.equal(sonarrWanted.state.calls.length, 1, "the enabled side still reads its cache");
 });

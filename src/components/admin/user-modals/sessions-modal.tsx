@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { isIndefiniteDeadline } from "@/lib/session-lifetime";
 import { localizeDeviceLabel } from "@/lib/ua-fingerprint";
@@ -17,21 +18,27 @@ import {
   Clock,
 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { v, type Infer } from "@/lib/validate";
 import { useModalA11y } from "@/hooks/use-modal-a11y";
 import type { User } from "./shared";
+import { requestFailureText } from "../request-failure-text";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
 
-interface AdminAuthSession {
-  id: string;
-  sessionId: string;
-  deviceType: string;
-  deviceLabel: string | null;
-  ipAddress: string | null;
-  createdAt: string;
-  lastSeenAt: string;
-  expiresAt: string;
-}
+// GET /api/admin/users/[id]/sessions: the account's devices, newest first.
+const AdminAuthSessionSchema = v.object({
+  id: v.string(),
+  sessionId: v.string(),
+  deviceType: v.string(),
+  deviceLabel: v.nullable(v.string()),
+  ipAddress: v.nullable(v.string()),
+  createdAt: v.string(),
+  lastSeenAt: v.string(),
+  expiresAt: v.string(),
+});
+const SessionList = v.array(AdminAuthSessionSchema);
+type AdminAuthSession = Infer<typeof AdminAuthSessionSchema>;
 
 function DeviceIcon({ deviceType }: { deviceType: string }) {
   if (deviceType === "mobile") return <Smartphone className="w-3.5 h-3.5 shrink-0 text-zinc-400" />;
@@ -55,14 +62,204 @@ function sessionLabel(s: AdminAuthSession, t: Translator): string {
   return s.ipAddress ? `${deviceName(s, t)} (${s.ipAddress})` : deviceName(s, t);
 }
 
-export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
+// The account's sessions: { sessions, loading, error } and a setter for the
+// list, loaded once per account. The translator rides a ref: the users page
+// hands the provider a new catalog (and so a new `t`) on every refresh, and as
+// an effect dependency that re-fetched the list under an open modal — a read
+// that began before a revoke could land after it and bring the row back.
+function useAccountSessions(userId: string) {
+  const t = useT();
+  const [sessions, setSessions] = useState<AdminAuthSession[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const tRef = useRef(t);
+  useEffect(() => {
+    tRef.current = t;
+  }, [t]);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    void fetchJson(withBasePath(`/api/admin/users/${userId}/sessions`), { schema: SessionList, signal: ctrl.signal }).then((res) => {
+      if (!res.ok && res.kind === "aborted") return;
+      setLoading(false);
+      if (res.ok) {
+        setSessions(res.data);
+        return;
+      }
+      // The route's own sentence when it has one: it admits MANAGE_USERS but
+      // refuses an ADMIN target to a caller without the ADMIN bit (403), and
+      // a generic "could not load" there read as a broken page rather than a
+      // rule. An empty list would read as "no sessions".
+      setSessions([]);
+      setError(res.kind === "http" && res.error ? res.error : tRef.current("adminManage.sessions.loadError"));
+    });
+    return () => ctrl.abort();
+  }, [userId]);
+
+  return { sessions, setSessions, loading, error, setError };
+}
+
+function SessionRow({
+  s,
+  confirming,
+  revoking,
+  locked,
+  mounted,
+  onAsk,
+  onCancel,
+  onRevoke,
+}: {
+  s: AdminAuthSession;
+  confirming: boolean;
+  // This row's revoke is in flight.
+  revoking: boolean;
+  // Its controls are off: this row's revoke, or revoke-all, is in flight.
+  locked: boolean;
+  mounted: boolean;
+  onAsk: () => void;
+  onCancel: () => void;
+  onRevoke: () => void;
+}) {
   const t = useT();
   const locale = useLocale();
-  const [sessions, setSessions]       = useState<AdminAuthSession[]>([]);
-  const [loading, setLoading]         = useState(true);
-  const [revoking, setRevoking]       = useState<string | null>(null);
-  const [revokingAll, setRevokingAll] = useState(false);
-  const [error, setError]             = useState<string | null>(null);
+  const label = sessionLabel(s, t);
+  return (
+    <div className="flex items-start justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-800/50 px-3 py-2.5">
+      <div className="flex items-start gap-2 min-w-0">
+        <DeviceIcon deviceType={s.deviceType} />
+        <div className="min-w-0 space-y-0.5">
+          <p className="text-xs text-zinc-200 truncate">
+            {deviceName(s, t)}
+          </p>
+          <div className="flex items-center gap-3 flex-wrap">
+            {s.ipAddress && (
+              <span className="flex items-center gap-1 text-[10px] text-zinc-500">
+                <MapPin className="w-2.5 h-2.5" />{s.ipAddress}
+              </span>
+            )}
+            <span className="flex items-center gap-1 text-[10px] text-zinc-500">
+              <Clock className="w-2.5 h-2.5" />{t("profile.sessions.active", { time: mounted ? formatRelativeTimeLocalized(s.lastSeenAt, locale) : "" })}
+            </span>
+          </div>
+          <p className="text-[10px] text-zinc-500">
+            {/* A native-app (iOS) session carries the never-reached sentinel
+                deadline (session-lifetime.ts) — it ends only when revoked. */}
+            {isIndefiniteDeadline(s.expiresAt)
+              ? t("profile.sessions.neverExpires")
+              : t("profile.sessions.expires", { date: mounted ? new Date(s.expiresAt).toLocaleDateString(locale) : "" })}
+          </p>
+        </div>
+      </div>
+
+      {confirming ? (
+        <div className="flex items-center gap-1.5 shrink-0 mt-0.5">
+          <button
+            type="button"
+            aria-label={t("adminManage.sessions.confirmRevokeAria", { name: label })}
+            disabled={locked}
+            onClick={onRevoke}
+            autoFocus
+            className="rounded-md px-2 py-1 text-[10px] font-medium bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-40"
+          >
+            {revoking
+              ? <Loader2 className="w-3 h-3 animate-spin" />
+              : t("profile.sessions.revokeButton")}
+          </button>
+          <button
+            type="button"
+            aria-label={t("adminManage.sessions.cancelRevokeAria", { name: label })}
+            disabled={locked}
+            onClick={onCancel}
+            className="rounded-md px-2 py-1 text-[10px] text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors disabled:opacity-40"
+          >
+            {t("adminManage.common.cancel")}
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          disabled={locked}
+          onClick={onAsk}
+          aria-label={t("adminManage.sessions.revokeAria", { name: label })}
+          className="shrink-0 -m-1.5 inline-flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-40"
+          title={t("adminManage.sessions.revokeAria", { name: label })}
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function RevokeAllBar({
+  accountName,
+  confirming,
+  revoking,
+  locked,
+  onAsk,
+  onCancel,
+  onRevoke,
+}: {
+  accountName: string;
+  confirming: boolean;
+  revoking: boolean;
+  // Off while any revoke is in flight: two DELETEs for one account never overlap.
+  locked: boolean;
+  onAsk: () => void;
+  onCancel: () => void;
+  onRevoke: () => void;
+}) {
+  const t = useT();
+  const label = revoking
+    ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />{t("adminManage.sessions.revoking")}</>
+    : null;
+  return (
+    <div className="mt-4 pt-3 border-t border-zinc-800">
+      {!confirming ? (
+        <button
+          type="button"
+          disabled={locked}
+          onClick={onAsk}
+          className="w-full flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40"
+        >
+          {label ?? <><Trash2  className="w-3.5 h-3.5" />{t("adminManage.sessions.revokeAll")}</>}
+        </button>
+      ) : (
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            aria-label={t("adminManage.sessions.confirmRevokeAllAria", { name: accountName })}
+            disabled={locked}
+            onClick={onRevoke}
+            autoFocus
+            className="flex-1 flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-40"
+          >
+            {label ?? <><Trash2  className="w-3.5 h-3.5" />{t("adminManage.sessions.revokeAllConfirm")}</>}
+          </button>
+          <button
+            type="button"
+            aria-label={t("adminManage.sessions.cancelRevokeAll")}
+            disabled={locked}
+            onClick={onCancel}
+            className="rounded-md px-3 py-2 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors disabled:opacity-40"
+          >
+            {t("adminManage.common.cancel")}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const REVOKE_ALL = "revoke-all";
+const revokeKey = (sessionId: string) => `revoke:${sessionId}`;
+
+export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
+  const t = useT();
+  const { sessions, setSessions, loading, error, setError } = useAccountSessions(u.id);
+  // Each revoke is busy under its own key, so two in flight never clear each
+  // other's spinner; revoke-all waits for every single one.
+  const action = useAsyncAction();
   const [confirmingRevoke, setConfirmingRevoke] = useState<string | null>(null);
   const [confirmingRevokeAll, setConfirmingRevokeAll] = useState(false);
   // Guardrail 16: formatRelativeTime reads Date.now() and toLocaleDateString
@@ -75,94 +272,43 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
   // Focus-in + Tab-trap + Escape + focus-restore for this hand-rolled overlay.
   useModalA11y(dialogRef, onClose, closeBtnRef);
 
-  // The translator through a ref: the users page router.refresh()es after every
-  // row action, which hands the provider a new catalog and so a new `t`. As an
-  // effect dependency that re-fetched the list under an open modal — and a
-  // read that began before a revoke could land after it and bring the row back.
-  const tRef = useRef(t);
-  useEffect(() => {
-    tRef.current = t;
-  }, [t]);
-
-  useEffect(() => {
-    let live = true;
-    (async () => {
-      try {
-        const r = await fetch(withBasePath(`/api/admin/users/${u.id}/sessions`));
-        if (!live) return;
-        if (!r.ok) {
-          // Show the route's own sentence when it has one. The route admits
-          // MANAGE_USERS but refuses an ADMIN target to a caller without the
-          // ADMIN bit (403) — a generic "could not load" there read as a broken
-          // page rather than a rule. An empty list would read as "no sessions".
-          const data = (await r.json().catch(() => null)) as { error?: string } | null;
-          if (!live) return;
-          setSessions([]);
-          setError(data?.error ?? tRef.current("adminManage.sessions.loadError"));
-          return;
-        }
-        const data = (await r.json()) as unknown;
-        if (!live) return;
-        setSessions(Array.isArray(data) ? (data as AdminAuthSession[]) : []);
-      } catch {
-        if (!live) return;
-        setSessions([]);
-        setError(tRef.current("adminManage.sessions.loadError"));
-      } finally {
-        if (live) setLoading(false);
-      }
-    })();
-    return () => {
-      live = false;
-    };
-  }, [u.id]);
+  const sessionsUrl = withBasePath(`/api/admin/users/${u.id}/sessions`);
+  const revokingAll = action.busy(REVOKE_ALL);
 
   async function revoke(sessionId: string) {
     setConfirmingRevoke(null);
-    setRevoking(sessionId);
     setError(null);
-    try {
-      const res = await fetch(withBasePath(`/api/admin/users/${u.id}/sessions`), {
-        method:  "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ sessionId }),
-      });
-      if (!res.ok) {
-        // Show why it failed, so the admin knows the device may still be
-        // signed in rather than guessing from a row that didn't disappear.
-        const data = (await res.json().catch(() => null)) as { error?: string } | null;
-        setError(data?.error ?? t("adminManage.sessions.revokeError", { status: res.status }));
-        return;
-      }
-      setSessions((s) => s.filter((r) => r.sessionId !== sessionId));
-    } catch {
-      setError(t("adminManage.sessions.revokeNetwork"));
-    } finally {
-      setRevoking(null);
+    const res = await action.run(
+      revokeKey(sessionId),
+      (signal) => fetchJson(sessionsUrl, { init: jsonInit("DELETE", { sessionId }), signal }),
+      { ifBusy: "skip" },
+    );
+    if (!res) return;
+    if (!res.ok) {
+      // Say why it failed, so the admin knows the device may still be signed
+      // in rather than guessing from a row that didn't disappear.
+      const text = requestFailureText(res, t, { status: "adminManage.sessions.revokeError", network: "adminManage.sessions.revokeNetwork" });
+      if (text !== null) setError(text);
+      return;
     }
+    setSessions((s) => s.filter((r) => r.sessionId !== sessionId));
   }
 
   async function revokeAll() {
     setConfirmingRevokeAll(false);
-    setRevokingAll(true);
     setError(null);
-    try {
-      const res = await fetch(withBasePath(`/api/admin/users/${u.id}/sessions`), {
-        method:  "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ all: true }),
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as { error?: string } | null;
-        setError(data?.error ?? t("adminManage.sessions.revokeAllError", { status: res.status }));
-        return;
-      }
-      setSessions([]);
-    } catch {
-      setError(t("adminManage.sessions.revokeAllNetwork"));
-    } finally {
-      setRevokingAll(false);
+    const res = await action.run(
+      REVOKE_ALL,
+      (signal) => fetchJson(sessionsUrl, { init: jsonInit("DELETE", { all: true }), signal }),
+      { ifBusy: "skip" },
+    );
+    if (!res) return;
+    if (!res.ok) {
+      const text = requestFailureText(res, t, { status: "adminManage.sessions.revokeAllError", network: "adminManage.sessions.revokeAllNetwork" });
+      if (text !== null) setError(text);
+      return;
     }
+    setSessions([]);
   }
 
   const displayName = u.name ?? u.email;
@@ -219,116 +365,34 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
             <p className="text-xs text-zinc-500 py-4 text-center">{t("profile.sessions.empty")}</p>
           )}
 
-          {!loading && sessions.map((s) => (
-            <div
-              key={s.id}
-              className="flex items-start justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-800/50 px-3 py-2.5"
-            >
-              <div className="flex items-start gap-2 min-w-0">
-                <DeviceIcon deviceType={s.deviceType} />
-                <div className="min-w-0 space-y-0.5">
-                  <p className="text-xs text-zinc-200 truncate">
-                    {deviceName(s, t)}
-                  </p>
-                  <div className="flex items-center gap-3 flex-wrap">
-                    {s.ipAddress && (
-                      <span className="flex items-center gap-1 text-[10px] text-zinc-500">
-                        <MapPin className="w-2.5 h-2.5" />{s.ipAddress}
-                      </span>
-                    )}
-                    <span className="flex items-center gap-1 text-[10px] text-zinc-500">
-                      <Clock className="w-2.5 h-2.5" />{t("profile.sessions.active", { time: mounted ? formatRelativeTimeLocalized(s.lastSeenAt, locale) : "" })}
-                    </span>
-                  </div>
-                  <p className="text-[10px] text-zinc-500">
-                    {/* A native-app (iOS) session carries the never-reached sentinel
-                        deadline (session-lifetime.ts) — it ends only when revoked. */}
-                    {isIndefiniteDeadline(s.expiresAt)
-                      ? t("profile.sessions.neverExpires")
-                      : t("profile.sessions.expires", { date: mounted ? new Date(s.expiresAt).toLocaleDateString(locale) : "" })}
-                  </p>
-                </div>
-              </div>
-
-              {confirmingRevoke === s.sessionId ? (
-                <div className="flex items-center gap-1.5 shrink-0 mt-0.5">
-                  <button
-                    type="button"
-                    aria-label={t("adminManage.sessions.confirmRevokeAria", { name: sessionLabel(s, t) })}
-                    disabled={revoking === s.sessionId || revokingAll}
-                    onClick={() => revoke(s.sessionId)}
-                    autoFocus
-                    className="rounded-md px-2 py-1 text-[10px] font-medium bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-40"
-                  >
-                    {revoking === s.sessionId
-                      ? <Loader2 className="w-3 h-3 animate-spin" />
-                      : t("profile.sessions.revokeButton")}
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={t("adminManage.sessions.cancelRevokeAria", { name: sessionLabel(s, t) })}
-                    disabled={revoking === s.sessionId || revokingAll}
-                    onClick={() => setConfirmingRevoke(null)}
-                    className="rounded-md px-2 py-1 text-[10px] text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors disabled:opacity-40"
-                  >
-                    {t("adminManage.common.cancel")}
-                  </button>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  disabled={revoking === s.sessionId || revokingAll}
-                  onClick={() => setConfirmingRevoke(s.sessionId)}
-                  aria-label={t("adminManage.sessions.revokeAria", { name: sessionLabel(s, t) })}
-                  className="shrink-0 -m-1.5 inline-flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-40"
-                  title={t("adminManage.sessions.revokeAria", { name: sessionLabel(s, t) })}
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-          ))}
+          {!loading && sessions.map((s) => {
+            const revoking = action.busy(revokeKey(s.sessionId));
+            return (
+              <SessionRow
+                key={s.id}
+                s={s}
+                confirming={confirmingRevoke === s.sessionId}
+                revoking={revoking}
+                locked={revoking || revokingAll}
+                mounted={mounted}
+                onAsk={() => setConfirmingRevoke(s.sessionId)}
+                onCancel={() => setConfirmingRevoke(null)}
+                onRevoke={() => void revoke(s.sessionId)}
+              />
+            );
+          })}
         </div>
 
         {!loading && sessions.length > 0 && (
-          <div className="mt-4 pt-3 border-t border-zinc-800">
-            {!confirmingRevokeAll ? (
-              <button
-                type="button"
-                disabled={revokingAll}
-                onClick={() => setConfirmingRevokeAll(true)}
-                className="w-full flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40"
-              >
-                {revokingAll
-                  ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />{t("adminManage.sessions.revoking")}</>
-                  : <><Trash2  className="w-3.5 h-3.5" />{t("adminManage.sessions.revokeAll")}</>}
-              </button>
-            ) : (
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  aria-label={t("adminManage.sessions.confirmRevokeAllAria", { name: u.name ?? u.email })}
-                  disabled={revokingAll}
-                  onClick={revokeAll}
-                  autoFocus
-                  className="flex-1 flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-40"
-                >
-                  {revokingAll
-                    ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />{t("adminManage.sessions.revoking")}</>
-                    : <><Trash2  className="w-3.5 h-3.5" />{t("adminManage.sessions.revokeAllConfirm")}</>}
-                </button>
-                <button
-                  type="button"
-                  aria-label={t("adminManage.sessions.cancelRevokeAll")}
-                  disabled={revokingAll}
-                  onClick={() => setConfirmingRevokeAll(false)}
-                  className="rounded-md px-3 py-2 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors disabled:opacity-40"
-                >
-                  {t("adminManage.common.cancel")}
-                </button>
-              </div>
-            )}
-          </div>
+          <RevokeAllBar
+            accountName={displayName}
+            confirming={confirmingRevokeAll}
+            revoking={revokingAll}
+            locked={action.anyBusy}
+            onAsk={() => setConfirmingRevokeAll(true)}
+            onCancel={() => setConfirmingRevokeAll(false)}
+            onRevoke={() => void revokeAll()}
+          />
         )}
       </div>
     </div>

@@ -4,7 +4,9 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson } from "@/lib/client/fetch-json";
 import { useT } from "@/components/i18n/i18n-provider";
+import { rebuildOutcome, type RebuildOutcome } from "./rebuild-recommendations-outcome";
 
 // Admin-only shortcut on /for-you to the same job the cron loop runs every
 // WARM_RECOMMENDATIONS_INTERVAL (12h). The shelf is PRECOMPUTED, so without
@@ -31,7 +33,7 @@ export function RebuildRecommendationsButton() {
   const router = useRouter();
   const t = useT();
   const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState<{ text: string; type: "success" | "warning" | "error" } | null>(null);
+  const [message, setMessage] = useState<Pick<RebuildOutcome, "text" | "type" | "detail"> | null>(null);
   const [cooldown, setCooldown] = useState(0);
 
   // The outcome is a one-off report, not state: clear it once it has been
@@ -53,84 +55,19 @@ export function RebuildRecommendationsButton() {
     if (loading || cooldown > 0) return;
     setLoading(true);
     setMessage(null);
-    try {
-      const res = await fetch(withBasePath("/api/cron/warm-recommendations"), { method: "POST" });
-      // A reverse proxy can answer a slow rebuild with an HTML 502/504 page, so
-      // a body that isn't JSON must not surface as a parser error.
-      const data = (await res.json().catch(() => ({}))) as {
-        error?: string;
-        skipped?: boolean;
-        reason?: string;
-        usersUpdated?: number;
-        usersEligible?: number;
-        usersFailed?: number;
-        graphFailed?: boolean;
-      };
-
-      // The advisory lock answers {skipped, reason} with a 200 and no `error`,
-      // so judging on res.ok alone would report a rebuild that never started as
-      // a success. Checked BEFORE the error branch because a skip is not a
-      // failure — the job is already running, which is what the operator wanted.
-      if (res.ok && data.skipped) {
-        setMessage({ text: data.reason ?? t("browse.forYou.rebuild.alreadyRunning"), type: "success" });
-        setCooldown(30);
-        return;
-      }
-      // Finished, but some users failed (200 + `error`): the rest of the shelves
-      // — usually the viewer's own — WERE rebuilt, so this is a warning and the
-      // grid refreshes. Only graphFailed means nothing changed at all.
-      if (res.ok && data.error && !data.graphFailed) {
-        setMessage({
-          text: t("browse.forYou.rebuild.partial", {
-            updated: data.usersUpdated ?? 0,
-            count: data.usersEligible ?? 0,
-            failed: data.usersFailed ?? 0,
-          }),
-          type: "warning",
-        });
-        setCooldown(60);
-        router.refresh();
-        return;
-      }
-      if (!res.ok || data.error) {
-        // A gateway timeout (502/504 from the proxy, not our JSON) says nothing
-        // about the job itself, which may still be running server-side.
-        const gatewayTimeout = !data.error && (res.status === 502 || res.status === 504);
-        setMessage({
-          text:
-            data.error ??
-            (gatewayTimeout
-              ? t("browse.forYou.rebuild.lostContact")
-              : t("browse.forYou.rebuild.failed", { status: res.status })),
-          type: "error",
-        });
-        setCooldown(30);
-        return;
-      }
-
-      const updated = data.usersUpdated ?? 0;
-      const eligible = data.usersEligible ?? 0;
-      setMessage({
-        text: t("browse.forYou.rebuild.done", { updated, count: eligible }),
-        type: "success",
-      });
-      setCooldown(60);
-      // The picks are read from UserRecommendation by a server component, so the
-      // grid only changes on a server re-render. Nothing else on the page would
-      // trigger one — LiveRefresh listens for request events, not this.
-      router.refresh();
-    } catch {
-      // A rebuild on a large library can outlive a reverse proxy's timeout
-      // (~60-100s) while still completing server-side, so a transport failure
-      // must not claim the job failed — say what is actually known.
-      setMessage({
-        text: t("browse.forYou.rebuild.lostContact"),
-        type: "error",
-      });
-      setCooldown(60);
-    } finally {
-      setLoading(false);
-    }
+    // A rebuild runs for as long as the build takes, so no client timeout:
+    // giving up early would read as a failure while the job finishes anyway.
+    const res = await fetchJson(withBasePath("/api/cron/warm-recommendations"), {
+      init: { method: "POST" },
+      timeoutMs: Infinity,
+    });
+    const outcome = rebuildOutcome(res, t);
+    setMessage({ text: outcome.text, type: outcome.type, detail: outcome.detail });
+    setCooldown(outcome.cooldown);
+    // Nothing else on the page would re-render the shelves — LiveRefresh
+    // listens for request events, not this.
+    if (outcome.refresh) router.refresh();
+    setLoading(false);
   }
 
   const busy = loading || cooldown > 0;
@@ -141,7 +78,9 @@ export function RebuildRecommendationsButton() {
         type="button"
         onClick={handleRebuild}
         disabled={busy}
-        aria-label={cooldown > 0 ? t("browse.forYou.rebuild.labelWait", { seconds: cooldown }) : t("browse.forYou.rebuild.label")}
+        // A fixed name: one that counted down every second was re-announced on
+        // each tick by some screen readers. The wait is in the title.
+        aria-label={t("browse.forYou.rebuild.label")}
         title={
           cooldown > 0
             ? t("browse.forYou.rebuild.wait", { seconds: cooldown })
@@ -174,6 +113,8 @@ export function RebuildRecommendationsButton() {
       <span role="status" className="ds-mono" style={{ fontSize: 11 }}>
         {message && (
           <span
+            // The server's own (English) words, when it sent any.
+            title={message.detail}
             style={{
               color:
                 message.type === "success" ? "var(--ds-success)"

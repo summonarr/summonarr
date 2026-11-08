@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Trash2, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson } from "@/lib/client/fetch-json";
 import { useT } from "@/components/i18n/i18n-provider";
 
 // Confirm-then-DELETE control for a single play-history record; on success
@@ -30,32 +31,34 @@ export function DeletePlayButton({ id }: { id: string }) {
     (confirming ? cancelRef : triggerRef).current?.focus();
   }, [confirming]);
 
+  // Each step starts clean: a failure belongs to the attempt that made it, so
+  // Cancel and a fresh confirm never show the previous one's message.
   function step(next: boolean) {
     stepped.current = true;
+    setError(null);
     setConfirming(next);
   }
 
-  // `deleting` is cleared on the failure paths only. After a success both
+  // `deleting` is cleared on the failure path only. After a success both
   // buttons stay disabled until the navigation lands: re-enabled, a second
   // click sent a DELETE for the row that was already gone and showed "failed".
   async function handleDelete() {
     setDeleting(true);
     setError(null);
-    try {
-      const res = await fetch(withBasePath(`/api/play-history/${id}`), { method: "DELETE" });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
-        setError(typeof body?.error === "string" ? body.error : t("adminActivity.deletePlay.failed"));
-        setDeleting(false);
-        return;
-      }
-      router.push("/admin/activity/history");
-      router.refresh();
-    } catch (err) {
-      console.error("[delete-play] delete failed:", err);
-      setError(t("adminActivity.deletePlay.failed"));
+    const res = await fetchJson(withBasePath(`/api/play-history/${encodeURIComponent(id)}`), {
+      init: { method: "DELETE" },
+      fallbackError: t("adminActivity.deletePlay.failed"),
+    });
+    if (!res.ok) {
+      // A route refusal already says why (its rate-limit text, say); anything
+      // else (no answer, a proxy page) is for the console.
+      if (res.kind !== "http") console.error("[delete-play] delete failed:", res.detail);
+      setError(res.error);
       setDeleting(false);
+      return;
     }
+    router.push("/admin/activity/history");
+    router.refresh();
   }
 
   if (!confirming) {
@@ -90,7 +93,7 @@ export function DeletePlayButton({ id }: { id: string }) {
         {deleting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
         {t("adminActivity.common.delete")}
       </button>
-      {error && <span className="text-xs text-red-400">{error}</span>}
+      {error && <span role="alert" className="text-xs text-red-400">{error}</span>}
     </div>
   );
 }

@@ -6,6 +6,7 @@ import { getTranslator } from "@/lib/i18n/server";
 import { PageHeader } from "@/components/ui/design";
 import { LibraryCleanup } from "@/components/admin/library-cleanup";
 import { parseCleanupView } from "@/lib/library-cleanup-view";
+import { searchParamGetter, type PageSearchParams } from "@/lib/search-params";
 
 export const dynamic = "force-dynamic";
 
@@ -16,7 +17,7 @@ export const dynamic = "force-dynamic";
 export default async function LibraryCleanupPage({
   searchParams,
 }: {
-  searchParams: Promise<Record<string, string | string[] | undefined>>;
+  searchParams: Promise<PageSearchParams>;
 }) {
   await requireFeature("feature.admin.cleanup");
   const session = await authActive();
@@ -24,7 +25,9 @@ export default async function LibraryCleanupPage({
   const t = await getTranslator();
   // Filters and sort live in the URL; every value is whitelisted on parse.
   const sp = await searchParams;
-  const initialView = parseCleanupView({ get: (name) => (typeof sp[name] === "string" ? (sp[name] as string) : null) });
+  // A repeated key reads its first value, as URLSearchParams.get() would.
+  const get = searchParamGetter(sp);
+  const initialView = parseCleanupView({ get: (name) => get(name) ?? null });
 
   return (
     <div className="ds-page-enter">

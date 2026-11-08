@@ -7,26 +7,7 @@ import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-in
 import { SafeFetchError, safeFetchAdminConfigured } from "@/lib/safe-fetch";
 import { jellyfinAdminHeaders } from "@/lib/jellyfin";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-
-// Raw Jellyfin user shape — every field optional so no user is dropped while parsing.
-interface RawJellyfinUser {
-  Id?: string | null;
-  Name?: string | null;
-  Email?: string | null;
-  HasPassword?: boolean;
-  Policy?: {
-    IsAdministrator?: boolean;
-    IsDisabled?: boolean;
-    IsHidden?: boolean;
-    EnableContentDownloading?: boolean;
-  } | null;
-}
-
-type SkipReason = "missing-id" | "empty-name" | "missing-name" | "no-policy";
-
-function maskEmail(email: string | null | undefined): string | null {
-  return email ? `${email.slice(0, 3)}…` : null;
-}
+import { diagnoseJellyfinUser, readUsersBody } from "@/lib/jellyfin-user-diagnosis";
 
 export const GET = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, _session) => {
   const t = translatorForRequest(req);
@@ -46,66 +27,11 @@ export const GET = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, _se
 
   const base = url.replace(/\/$/, "");
 
-  // Plain fetch with no query params, so nothing is filtered on the server side.
-  let httpStatus = 0;
-  let rawBody: unknown = null;
-  let fetchError: string | null = null;
-  try {
-    // Jellyfin's GET /Users needs admin ("elevated") rights. The real user
-    // sync's own headers (jellyfin.ts), so the diagnosis sees what it sees and
-    // can't drift from it when the client identity changes.
-    const res = await safeFetchAdminConfigured(`${base}/Users`, {
-      headers: jellyfinAdminHeaders(apiKey),
-      timeoutMs: 30_000,
-    });
-    httpStatus = res.status;
-    rawBody = await res.json();
-  } catch (err) {
-    // A coarse kind, never the message: a SafeFetchError's text names the
-    // admin-configured server's scheme, host and port (and on the SSRF-policy
-    // branches its resolved address), and this route admits a MANAGE_USERS
-    // delegate who is not shown the server address anywhere else.
-    fetchError = err instanceof SafeFetchError
-      ? `fetch:${err.reason}`
-      : err instanceof Error ? err.name : "error";
-  }
-
-  // Parse however the body comes back
-  let items: RawJellyfinUser[] = [];
-  let responseShape = "unknown";
-  if (Array.isArray(rawBody)) {
-    items = rawBody as RawJellyfinUser[];
-    responseShape = "array";
-  } else if (rawBody && typeof rawBody === "object" && "Items" in rawBody && Array.isArray((rawBody as { Items: unknown }).Items)) {
-    items = (rawBody as { Items: RawJellyfinUser[] }).Items;
-    responseShape = "QueryResult{Items}";
-  } else if (rawBody !== null) {
-    responseShape = `unexpected:${typeof rawBody}`;
-  }
+  const { httpStatus, rawBody, fetchError } = await fetchUsers(base, apiKey);
+  const { items, responseShape } = readUsersBody(rawBody);
 
   // Flag every user the sync would skip, and say why, so the admin can see it.
-  // Reasons are stable machine codes (not prose, not translated): this route is
-  // curl/OpenAPI-only and the codes are what a bug report gets grepped for.
-  const breakdown = items.map((u) => {
-    const issues: SkipReason[] = [];
-    if (!u.Id) issues.push("missing-id");
-    if (!u.Name) issues.push(u.Name === "" ? "empty-name" : "missing-name");
-    if (!u.Policy) issues.push("no-policy");
-    return {
-      id: u.Id ?? null,
-      name: u.Name ?? null,
-      // Masked for skipped AND processed rows alike — the skipped ones are
-      // exactly what gets pasted into a bug report.
-      email: maskEmail(u.Email),
-      isAdmin: u.Policy?.IsAdministrator ?? null,
-      isDisabled: u.Policy?.IsDisabled ?? null,
-      isHidden: u.Policy?.IsHidden ?? null,
-      downloadsEnabled: u.Policy?.EnableContentDownloading ?? null,
-      wouldBeSkipped: issues.length > 0,
-      skipReasons: issues,
-    };
-  });
-
+  const breakdown = items.map(diagnoseJellyfinUser);
   const skipped = breakdown.filter((u) => u.wouldBeSkipped);
   const processed = breakdown.filter((u) => !u.wouldBeSkipped);
 
@@ -135,3 +61,28 @@ export const GET = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, _se
     })),
   });
 });
+
+// The raw /Users answer, with no query params so nothing is filtered on the
+// server side. Jellyfin's GET /Users needs admin ("elevated") rights: the real
+// user sync's own headers (jellyfin.ts), so the diagnosis sees what it sees and
+// can't drift from it when the client identity changes.
+async function fetchUsers(base: string, apiKey: string): Promise<{ httpStatus: number; rawBody: unknown; fetchError: string | null }> {
+  let httpStatus = 0;
+  try {
+    const res = await safeFetchAdminConfigured(`${base}/Users`, {
+      headers: jellyfinAdminHeaders(apiKey),
+      timeoutMs: 30_000,
+    });
+    httpStatus = res.status;
+    return { httpStatus, rawBody: await res.json(), fetchError: null };
+  } catch (err) {
+    // A coarse kind, never the message: a SafeFetchError's text names the
+    // admin-configured server's scheme, host and port (and on the SSRF-policy
+    // branches its resolved address), and this route admits a MANAGE_USERS
+    // delegate who is not shown the server address anywhere else.
+    const fetchError = err instanceof SafeFetchError
+      ? `fetch:${err.reason}`
+      : err instanceof Error ? err.name : "error";
+    return { httpStatus, rawBody: null, fetchError };
+  }
+}

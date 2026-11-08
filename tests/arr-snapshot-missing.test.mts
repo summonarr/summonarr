@@ -24,7 +24,8 @@ import { readFileSync } from "node:fs";
 const read = (p: string) => readFileSync(new URL(`../src/components/admin/${p}`, import.meta.url), "utf8");
 const HOOK = read("use-missing-reports.ts");
 const BULK = read("use-bulk-search.ts");
-const PAGE = read("missing-report.tsx");
+// The view: missing-report.tsx and the pieces around its list.
+const PAGE = read("missing-report.tsx") + read("missing-report-parts.tsx");
 
 /** The source of `const load = useCallback(` … through its deps line. */
 function loadBody(): string {
@@ -62,15 +63,15 @@ test("one builder for a list's read: the live load and the snapshot read use it,
   );
   assert.doesNotMatch(PAGE + BULK, /missingListUrl|useArrSnapshot/, "the reads and the snapshot are the hook's alone");
   // Live.
-  assert.match(loadBody(), /const res = await fetch\(missingListUrl\(svc, m\)\);/);
-  assert.equal(count(HOOK, /\bfetch\(missingListUrl\(/g), 1);
+  assert.match(loadBody(), /const res = await fetchJson\(missingListUrl\(svc, m\), \{/);
+  assert.equal(count(HOOK, /\bfetchJson\(missingListUrl\(/g), 1);
   // The view's first load and its snapshot read name the same list.
   assert.match(HOOK, /if \(needsLoad\) void load\(service, mode\);/);
   assert.match(
     HOOK,
     /const snapshotUrl = configured\[service\] && !liveKeys\.has\(current\) \? missingListUrl\(service, mode\) : null;/,
   );
-  assert.match(HOOK, /const snap = useArrSnapshot<Reports\[ReportKey\]>\(snapshotUrl, \(data\) => \{/);
+  assert.match(HOOK, /const snap = useArrSnapshot<unknown>\(snapshotUrl, \(data\) => \{/);
   assert.equal(count(HOOK, /useArrSnapshot</g), 1);
   assert.match(HOOK, /const current: ReportKey = `\$\{service\}:\$\{mode\}`;/);
   // The page shows the view the hook reads: it hands in its own tab and mode
@@ -84,8 +85,9 @@ test("one builder for a list's read: the live load and the snapshot read use it,
 
 test("markLive runs for an accepted live answer of the view on screen, and the list is recorded live before its report is set", () => {
   const body = loadBody();
-  const accepted = body.indexOf("const data = await res.json();\n      if (superseded()) return;");
-  assert.ok(accepted >= 0, "the accepted branch follows the sequence check");
+  const accepted = body.indexOf("const data = asListReport(res.data);");
+  assert.ok(accepted >= 0 && body.indexOf("if (superseded()) return;") < accepted, "the accepted branch follows the sequence check");
+  assert.ok(body.indexOf("if (!res.ok) {") < accepted, "and the failure's return: only a checked report is accepted");
   const add = body.indexOf("liveRef.current.add(k);");
   const mark = body.indexOf("if (viewRef.current === k) markLiveRef.current();");
   const set = body.indexOf("setReports((r) => ({ ...r, [k]: data }));");
@@ -108,8 +110,8 @@ test("the first live answer keeps what was ticked or searched on the snapshot; o
   assert.match(body, /if \(replacesLive\) onLiveReplaced\(k\);/);
   assert.equal(count(code(HOOK), /onLiveReplaced\(/g), 1, "the hook calls onLiveReplaced only there");
   // The page's reset is its rows' (resetList) plus its expanded episode lists.
-  const rows = callbackBody(PAGE, "const resetRows = useCallback((k: ReportKey) => {", "[resetList]");
-  for (const r of ["resetList(k);", "setExpanded(", "setEpisodes("]) assert.ok(rows.includes(r), `${r} resets in resetRows`);
+  const rows = callbackBody(PAGE, "const resetRows = useCallback((k: ReportKey) => {", "[resetList, episodeLoads]");
+  for (const r of ["resetList(k);", "setExpanded(", "setEpisodes(", "episodeLoads.abort();"]) assert.ok(rows.includes(r), `${r} resets in resetRows`);
   assert.equal(count(code(PAGE), /\bresetRows\b/g), 2, "resetRows is defined and handed to the hook as onLiveReplaced — called nowhere else");
   assert.equal(count(code(PAGE), /\bresetList\(/g), 1, "resetList runs only inside resetRows");
   assert.equal(count(PAGE, /setExpanded\(\(prev\) => new Set\(\[\.\.\.prev\]\.filter/g), 1, "the expanded rows reset only there");
@@ -125,7 +127,7 @@ test("the reset load depends on is stable, so the view's first load runs once", 
   // load's identity feeds the needsLoad effect: a reset made anew each render
   // would re-run it on every render.
   assert.match(HOOK, /useEffect\(\(\) => \{\s*if \(needsLoad\) void load\(service, mode\);\s*\}, \[needsLoad, service, mode, load\]\);/);
-  callbackBody(PAGE, "const resetRows = useCallback(", "[resetList]");
+  callbackBody(PAGE, "const resetRows = useCallback(", "[resetList, episodeLoads]");
   callbackBody(BULK, "const resetList = useCallback(", "[updateSearches]");
   callbackBody(BULK, "const updateSearches = useCallback(", "[]");
 });
@@ -133,7 +135,8 @@ test("the reset load depends on is stable, so the view's first load runs once", 
 test("a snapshot sets the report alone, and never over a live answer or while the admin has something going on that list", () => {
   assert.match(
     HOOK,
-    /useArrSnapshot<Reports\[ReportKey\]>\(snapshotUrl, \(data\) => \{\s*if \(!snapshotMayPaint\(current\)\) return false;\s*setReports\(\(r\) => \(\{ \.\.\.r, \[current\]: data \}\)\);\s*\}\);/,
+    /useArrSnapshot<unknown>\(snapshotUrl, \(data\) => \{\s*if \(!snapshotMayPaint\(current\)\) return false;\s*(?:\/\/[^\n]*\n\s*)*const checked = check\(MISSING_REPORT, data\);\s*if \(!checked\.ok\) return false;\s*setReports\(\(r\) => \(\{ \.\.\.r, \[current\]: asListReport\(checked\.value\) \}\)\);\s*\}\);/,
+    "a kept answer is checked like a live one, and one the page can't read is not painted",
   );
   const start = HOOK.indexOf("const snapshotMayPaint = (k: ReportKey) =>");
   assert.ok(start >= 0);

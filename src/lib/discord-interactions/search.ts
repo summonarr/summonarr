@@ -3,6 +3,7 @@ import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { tmdbAuth } from "@/lib/tmdb-auth";
 import { effectivePermissions, parseMediaServerGrants } from "@/lib/permissions";
 import { getMediaInstanceAccessLists, visibleInstancesFor, type VisibleServerInstances } from "@/lib/media-visibility";
+import { check, v } from "@/lib/validate";
 import type { TmdbResult } from "./types";
 
 const TMDB_HOSTS = ["api.themoviedb.org"];
@@ -81,12 +82,64 @@ export async function attachAvailability(
   });
 }
 
+// One TMDB search hit, as much of it as this file reads. Every field but the id
+// is optional: TMDB omits or nulls them freely. A hit without an integer id is
+// dropped rather than persisted to a pending row it could never be filed from.
+const TmdbSearchItem = v.object({
+  id: v.int(),
+  title: v.optional(v.nullable(v.string())),
+  name: v.optional(v.nullable(v.string())),
+  release_date: v.optional(v.nullable(v.string())),
+  first_air_date: v.optional(v.nullable(v.string())),
+  poster_path: v.optional(v.nullable(v.string())),
+  overview: v.optional(v.nullable(v.string())),
+  vote_average: v.optional(v.nullable(v.number())),
+});
+const TmdbSearchPage = v.object({ results: v.array(v.unknown()) });
+
+// What a cached search row holds: the projected results, before availability.
+const CachedResults = v.array(v.object({
+  id: v.int(),
+  title: v.string(),
+  mediaType: v.literal("movie", "tv"),
+  releaseYear: v.string(),
+  posterPath: v.nullable(v.string()),
+  overview: v.string(),
+  voteAverage: v.number(),
+}));
+
+const SEARCH_RESULT_LIMIT = 5;
+
+/** The first five usable hits of a TMDB search page; anything malformed is skipped. */
+export function projectTmdbSearch(raw: unknown, type: "movie" | "tv"): TmdbResult[] | null {
+  const page = check(TmdbSearchPage, raw);
+  if (!page.ok) return null;
+  const out: TmdbResult[] = [];
+  for (const entry of page.value.results.slice(0, SEARCH_RESULT_LIMIT)) {
+    const item = check(TmdbSearchItem, entry);
+    if (!item.ok) continue;
+    const hit = item.value;
+    const title = (type === "movie" ? hit.title : hit.name) ?? "";
+    if (title.length === 0) continue;
+    const rawDate = type === "movie" ? hit.release_date : hit.first_air_date;
+    out.push({
+      id: hit.id,
+      title,
+      mediaType: type,
+      releaseYear: rawDate ? rawDate.substring(0, 4) : "Unknown",
+      posterPath: hit.poster_path ?? null,
+      overview: hit.overview ?? "",
+      voteAverage: hit.vote_average ?? 0,
+    });
+  }
+  return out;
+}
+
 async function searchTmdb(query: string, type: "movie" | "tv"): Promise<TmdbResult[]> {
   const auth = tmdbAuth();
   if (!auth) throw new Error("No TMDB credentials configured (set TMDB_READ_TOKEN)");
 
   const url = new URL(`https://api.themoviedb.org/3/search/${type}`);
-  for (const [k, v] of Object.entries(auth.query)) url.searchParams.set(k, v);
   url.searchParams.set("query", query);
   url.searchParams.set("page", "1");
   url.searchParams.set("include_adult", "false");
@@ -97,24 +150,19 @@ async function searchTmdb(query: string, type: "movie" | "tv"): Promise<TmdbResu
     timeoutMs: 15_000,
   });
   if (!res.ok) throw new Error(`TMDB search failed: ${res.status}`);
-  const data = (await res.json()) as { results: Record<string, unknown>[] };
+  const results = projectTmdbSearch(await res.json().catch(() => undefined), type);
+  // An unusable page is a failed search (the caller's "search failed" reply),
+  // never an empty one, and is never cached.
+  if (!results) throw new Error("TMDB search returned an unusable answer");
+  return results;
+}
 
-  return data.results
-    .slice(0, 5)
-    .map((item) => {
-      const rawDate = (type === "movie" ? item.release_date : item.first_air_date) as string | undefined;
-      const title = (type === "movie" ? item.title : item.name) as string | undefined;
-      return {
-        id: item.id as number,
-        title: title ?? "",
-        mediaType: type,
-        releaseYear: rawDate ? rawDate.substring(0, 4) : "Unknown",
-        posterPath: (item.poster_path as string | null) ?? null,
-        overview: (item.overview as string) ?? "",
-        voteAverage: (item.vote_average as number) ?? 0,
-      };
-    })
-    .filter((r) => r.title.length > 0);
+/** The parsed results of a cached search row, or null when the row is unusable. */
+export function parseCachedResults(data: string): TmdbResult[] | null {
+  let raw: unknown;
+  try { raw = JSON.parse(data); } catch { return null; }
+  const parsed = check(CachedResults, raw);
+  return parsed.ok ? parsed.value : null;
 }
 
 export async function cachedSearchTmdb(query: string, type: "movie" | "tv", discordUserId: string): Promise<TmdbResult[]> {
@@ -122,7 +170,8 @@ export async function cachedSearchTmdb(query: string, type: "movie" | "tv", disc
   const key = `q:${discordUserId}:${type}:${query.toLowerCase().trim()}`;
   const cached = await prisma.discordSearchCache.findUnique({ where: { queryKey: key } }).catch(() => null);
   if (cached && new Date() < cached.expiresAt) {
-    try { return JSON.parse(cached.data) as TmdbResult[]; } catch { }
+    const hit = parseCachedResults(cached.data);
+    if (hit) return hit;
   }
   const results = await searchTmdb(query, type);
   prisma.discordSearchCache.upsert({

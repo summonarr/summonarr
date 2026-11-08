@@ -223,7 +223,8 @@ shadowPrismaModel(prisma, "mediaRequest", {
 shadowPrismaModel(prisma, "watchlistItem", { groupBy: async () => [] });
 shadowPrismaModel(prisma, "activeSession", { findMany: async () => [] });
 shadowPrismaModel(prisma, "upstreamWatchEvidence", { findMany: async () => [] });
-let protections: Array<{ tmdbId: number; mediaType: string; title: string | null; reason: string | null; createdAt: Date }> = [];
+let protections: Array<{ tmdbId: number; mediaType: string; title: string | null; reason: string | null; addedBy?: string; createdAt: Date }> = [];
+const protectionUpserts: Array<{ create: Record<string, unknown>; update: Record<string, unknown> }> = [];
 // When set, a protection read answers with what it saw on arrival, but only
 // once the gate opens — a computation parked mid-flight.
 let protectionsGate: Promise<void> | null = null;
@@ -236,11 +237,13 @@ shadowPrismaModel(prisma, "cleanupProtection", {
     return seen;
   },
   count: async () => protections.length,
-  upsert: async (args: { where: { tmdbId_mediaType: { tmdbId: number; mediaType: string } }; create: { title: string | null; reason: string | null } }) => {
+  upsert: async (args: { where: { tmdbId_mediaType: { tmdbId: number; mediaType: string } }; create: { title: string | null; reason: string | null; addedBy?: string }; update: Record<string, unknown> }) => {
     seq.push("cleanupProtection.upsert");
+    protectionUpserts.push({ create: args.create, update: args.update });
     const { tmdbId, mediaType } = args.where.tmdbId_mediaType;
-    protections = protections.filter((p) => !(p.tmdbId === tmdbId && p.mediaType === mediaType));
-    const row = { tmdbId, mediaType, title: args.create.title, reason: args.create.reason, createdAt: new Date() };
+    const existing = protections.find((p) => p.tmdbId === tmdbId && p.mediaType === mediaType);
+    if (existing) return Object.assign(existing, args.update);
+    const row = { tmdbId, mediaType, title: args.create.title, reason: args.create.reason, addedBy: args.create.addedBy, createdAt: new Date() };
     protections.push(row);
     return row;
   },
@@ -289,6 +292,7 @@ const settingsRoute = await import("../src/app/api/admin/cleanup/settings/route.
 const protectRoute = await import("../src/app/api/admin/cleanup/protect/route.ts");
 const deleteRoute = await import("../src/app/api/admin/cleanup/delete/route.ts");
 const { CLEANUP_MAX_ITEMS } = await import("../src/lib/library-cleanup.ts");
+const { rememberSnapshot, resetArrSnapshotsForTests } = await import("../src/lib/arr-snapshot.ts");
 const neverWatchedRoute = await import("../src/app/api/admin/never-watched/route.ts");
 // The listing's 502/503/504 retry pauses 2 s in production; no test should wait.
 const { _setArrListingRetryDelayForTests, getCachedArrLibraryIndex, invalidateArrLibraryIndexCache } = await import("../src/lib/library-cleanup-arr.ts");
@@ -352,6 +356,7 @@ beforeEach(() => {
   listingHook = null;
   protectionsGate = null;
   protectionReads = 0;
+  protectionUpserts.length = 0;
   tmdbPlays = [];
   firstPlays = [];
   tmdbToTvdb = new Map();
@@ -526,9 +531,13 @@ test("a same-sized but different target set since the dry run fails the fingerpr
   radarrMovies[RADARR_4K] = [{ id: 26, tmdbId: 600, title: "Movie 600", sizeOnDisk: 6_000 }];
   const res = await execute(token, { items, confirmTargets: plan.targetCount, confirmFingerprint: plan.targetsFingerprint });
   assert.equal(res.status, 409);
-  const fresh = await res.json() as { targetCount: number; targetsFingerprint: string };
+  const fresh = await res.json() as { targetCount: number; targetsFingerprint: string; reclaimableBytes: number };
   assert.equal(fresh.targetCount, 3, "the count alone would have passed");
   assert.notEqual(fresh.targetsFingerprint, plan.targetsFingerprint);
+  // The fresh plan carries its size, exactly as a dry run of the same set answers it.
+  const again = await (await dryRun(token, { items })).json() as { reclaimableBytes: number; targetsFingerprint: string };
+  assert.equal(again.targetsFingerprint, fresh.targetsFingerprint);
+  assert.equal(fresh.reclaimableBytes, again.reclaimableBytes);
   assert.deepEqual(deletes(), [], "no DELETE for an entry the admin never saw");
   assert.deepEqual(requestWrites, []);
   // Confirming the fresh plan deletes exactly its targets.
@@ -939,6 +948,35 @@ test("protect then unprotect round-trips and is audited", async () => {
   assert.equal((await call(protectRoute.DELETE as never, token, "/protect?tmdbId=100&mediaType=MOVIE", "DELETE")).status, 200);
   assert.ok(!protections.some((p) => p.tmdbId === 100));
   assert.deepEqual(audits.map((a) => a.action), ["LIBRARY_CLEANUP_PROTECT", "LIBRARY_CLEANUP_PROTECT"]);
+});
+
+test("re-protecting a title keeps who protected it and the reason this call didn't send — still 201", async () => {
+  const first = await mintSession();
+  assert.equal((await call(protectRoute.POST as never, first, "/protect", "POST", { ...MOVIE_100, title: "Movie 100", reason: "keep forever" })).status, 201);
+  const firstBy = protections.find((p) => p.tmdbId === 100)?.addedBy;
+  assert.ok(firstBy);
+  // Another admin re-protects from the never-watched page, which sends the title alone.
+  const res = await call(protectRoute.POST as never, await mintSession(), "/protect", "POST", { ...MOVIE_100, title: "Movie 100 (2001)" });
+  assert.equal(res.status, 201);
+  const row = protections.find((p) => p.tmdbId === 100)!;
+  assert.equal(row.title, "Movie 100 (2001)");
+  assert.equal(row.reason, "keep forever", "a reason given earlier survives a call that sent none");
+  assert.equal(row.addedBy, firstBy, "the first admin still owns the protection");
+  assert.deepEqual(Object.keys(protectionUpserts.at(-1)!.update), ["title"], "the update writes only what was sent");
+});
+
+test("a snapshot drop that throws after a delete went through never turns that delete into a failure", async () => {
+  // A malformed kept key makes dropArrTitleSnapshots throw (new URL fails).
+  rememberSnapshot("en|http://[", "{}");
+  try {
+    const body = await (await execute(await mintSession(), { items: [MOVIE_100], confirmTargets: 2 })).json();
+    assert.equal(body.results[0].status, "deleted");
+    assert.deepEqual(body.results[0].failed, []);
+    assert.equal(body.results[0].uncertain, undefined);
+    assert.ok(requests.find((r) => r.id === "r100a")!.cleanedUpAt instanceof Date, "the stamps of a deleted title stay");
+  } finally {
+    resetArrSnapshotsForTests();
+  }
 });
 
 // ── never-watched report (guardrail 14d) ─────────────────────────────────────

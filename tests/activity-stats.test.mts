@@ -345,7 +345,10 @@ test("completion rate, buckets, and the hour/day-of-week margins are read from t
 });
 
 test("the per-day series and the totals come from one daily and one summary statement", async () => {
-  const today = new Date().toISOString().slice(0, 10);
+  // Days are bucketed in the statistics zone (the process zone here), so
+  // "today" is that zone's date, not the UTC one.
+  const { zonedDayKey, processTimeZone } = await import("../src/lib/stats-time-zone.ts");
+  const today = zonedDayKey(new Date(), processTimeZone());
   canned = [
     { marker: "AS viewers", rows: [{ day: today, plays: 0n, hours: 1.234, viewers: 0n, gb: 0 }] },
     {
@@ -421,10 +424,11 @@ test("concurrent cold transcode-offender loads share one computation, and a clea
 });
 
 test("concurrent cold /popular loads of one key share one window query; a load after a clear does not join it", async () => {
-  // Distinct page per case: popularCache keys on (mediaType, sort, page, limit).
+  // Distinct media type per case: the ranking cache keys on (mediaType, sort).
   const pair = await coldPair(() => getMostPopularOnServer({ mediaType: "MOVIE", page: 41 }), "completed_arcs");
   assert.equal(pair.count, 1, "both callers shared ONE full-history window query");
-  assert.equal(pair.a, pair.b);
+  // Each caller gets its own page object, sliced from the one shared ranking.
+  assert.deepEqual(pair.a, pair.b);
 
   captured = [];
   const release = holdStatements();
@@ -436,6 +440,37 @@ test("concurrent cold /popular loads of one key share one window query; a load a
   release();
   await Promise.all([before, after]);
   assert.equal(captured.filter((q) => q.sql.includes("completed_arcs")).length, 2, "the post-clear caller computed afresh");
+});
+
+test("/popular pages are slices of ONE cached ranking: one statement serves every page and page size, and a deep page keeps the real totals", async () => {
+  clearActivityCache();
+  // 95 ranked titles, in the order the statement returns them.
+  const rows = Array.from({ length: 95 }, (_, i) => ({
+    tmdbId: i + 1, mediaType: "MOVIE", title: `Title ${i + 1}`, year: null,
+    plays: BigInt(200 - i), allTimePlays: 1n, viewers: 1n, episodes: 0n, totalHours: 1, total_items: 95n,
+  }));
+  canned = [{ marker: "completed_arcs", rows }];
+  try {
+    const queries = await capture(async () => {
+      const first = await getMostPopularOnServer({ mediaType: "MOVIE", sort: "viewers" });
+      assert.deepEqual(first.items.map((x) => x.tmdbId), Array.from({ length: 40 }, (_, i) => i + 1));
+      assert.deepEqual([first.page, first.totalItems, first.totalPages], [1, 95, 3]);
+
+      const last = await getMostPopularOnServer({ mediaType: "MOVIE", sort: "viewers", page: 3 });
+      assert.deepEqual(last.items.map((x) => x.tmdbId), Array.from({ length: 15 }, (_, i) => i + 81));
+
+      const small = await getMostPopularOnServer({ mediaType: "MOVIE", sort: "viewers", page: 2, limit: 10 });
+      assert.deepEqual(small.items.map((x) => x.tmdbId), Array.from({ length: 10 }, (_, i) => i + 11));
+      assert.equal(small.totalPages, 10);
+
+      // Past the end: an empty page, but the ranking's totals — not "0 items".
+      const deep = await getMostPopularOnServer({ mediaType: "MOVIE", sort: "viewers", page: 10_000 });
+      assert.deepEqual([deep.items.length, deep.page, deep.totalItems, deep.totalPages], [0, 100, 95, 3]);
+    });
+    assert.equal(queries.filter((q) => q.sql.includes("completed_arcs")).length, 1, "every page came from one ranking statement");
+  } finally {
+    canned = [];
+  }
 });
 
 test("the all-users aggregate is computed once per key and recomputed after a clear", async () => {
@@ -574,8 +609,11 @@ test("reasonCalloutKind: Unknown (pre-capture rows), No reason reported (the ser
 
 test("the Statistics callout words its top reason through reasonCalloutKind, with its own 'unreported' sentence", () => {
   const src = readFileSync(new URL("../src/components/admin/activity-stats-redesign.tsx", import.meta.url), "utf8");
-  assert.match(src, /reasonCalloutKind\(topReason\.reason\) === "unknown"/);
-  assert.match(src, /reasonCalloutKind\(topReason\.reason\) === "unreported"/);
+  // One verdict per callout, read once and branched on.
+  assert.match(src, /\{topReason && <TopReasonCallout reason=\{topReason\.reason\} pct=\{topReasonPct\} \/>\}/);
+  assert.match(src, /const kind = reasonCalloutKind\(reason\);/);
+  assert.match(src, /kind === "unknown" \?/);
+  assert.match(src, /kind === "unreported" \?/);
   assert.match(src, /t\("adminActivity\.stats\.noReasonReportedTop"/);
   assert.doesNotMatch(src, /topReason\.reason === UNKNOWN_REASON/, "the UNKNOWN-only branch is gone");
   const en = JSON.parse(

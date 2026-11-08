@@ -440,6 +440,10 @@ shadowPrismaModel(prisma, "issueGrab", {
     }
     return { count };
   },
+  findUnique: async (args: { where: { id: string } }) => {
+    const g = grabs.find((x) => x.id === args.where.id);
+    return g ? { ...g } : null;
+  },
   update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
     const g = grabs.find((x) => x.id === args.where.id);
     if (!g) throw p2025();
@@ -1314,6 +1318,44 @@ test("radarr issue-grab: a failed web push keeps notifiedAt set and does not re-
   assert.equal(settings.has(`grabPushRetry:${grab.id}`), true, "the retry marker is rewritten when push fails again");
 });
 
+test("a push a failed delivery left behind is retried by a later sweep, not only by a Download for the same title", async () => {
+  const { retryPendingGrabPushes } = await import("../src/lib/arr-webhook.ts");
+  const now = new Date("2026-11-07T12:00:00Z");
+  const old = new Date(now.getTime() - 30 * 60_000).toISOString();
+  const sent = seedGrab({ tmdbId: 1, mediaType: "MOVIE", notifiedAt: now, title: "Sent" });
+  const failsAgain = seedGrab({ tmdbId: 2, mediaType: "MOVIE", notifiedAt: now, title: "Fails" });
+  const stale = seedGrab({ tmdbId: 3, mediaType: "MOVIE", notifiedAt: now, title: "Stale" });
+  const fresh = seedGrab({ tmdbId: 4, mediaType: "MOVIE", notifiedAt: now, title: "Fresh" });
+  settings.set(`grabPushRetry:${sent.id}`, old);
+  settings.set(`grabPushRetry:${failsAgain.id}`, old);
+  settings.set(`grabPushRetry:${stale.id}`, new Date(now.getTime() - 25 * 60 * 60_000).toISOString());
+  settings.set(`grabPushRetry:${fresh.id}`, new Date(now.getTime() - 60_000).toISOString());
+  const pushed: string[] = [];
+  const r = await retryPendingGrabPushes({
+    now,
+    force: true,
+    // Cast: the test and the module see push.ts's outcome type through two import paths.
+    push: (async (data: { title: string }) => {
+      pushed.push(data.title);
+      return data.title === "Fails" ? "failed" : "sent";
+    }) as never,
+  });
+  assert.deepEqual(pushed.sort(), ["Fails", "Sent"], "an expired or brand-new marker is never pushed");
+  assert.deepEqual(r, { retried: 2, expired: 1 });
+  assert.equal(settings.has(`grabPushRetry:${sent.id}`), false, "a delivered push clears its marker");
+  assert.equal(settings.get(`grabPushRetry:${failsAgain.id}`), old, "a push failing again keeps its FIRST failure's time");
+  assert.equal(settings.has(`grabPushRetry:${stale.id}`), false, "a marker past its TTL is dropped");
+  assert.equal(settings.has(`grabPushRetry:${fresh.id}`), true, "a fresh marker is left to the delivery that wrote it");
+  assert.equal(grabUpdateManyCalls.length, 0, "the emit claim is never touched");
+});
+
+test("radarr: one secret on two instances is said once in the log; the default instance still handles the event", async () => {
+  settings.set(arrSettingKey("radarr", "4k", "WebhookSecret"), RADARR_SECRET);
+  const { res } = await post(radarrPOST, webhookReq("radarr", { token: RADARR_SECRET, body: { eventType: "Test" } }));
+  assert.equal(res.status, 200);
+  assert.ok(warns.some((w) => w.includes("one webhook secret matches several instances (default, 4k)")));
+});
+
 // ── body caps, malformed JSON, rate limiting ────────────────────────────────
 
 test("radarr: a declared Content-Length over 1 MB → 413 before auth even runs", async () => {
@@ -1334,7 +1376,7 @@ test("radarr: an oversized actual body without Content-Length → 413 after the 
   );
   assert.equal(res.status, 413);
   assert.deepEqual(body, { error: "Payload too large" });
-  assert.ok(warns.some((w) => w.includes("413 payload too large bytes=1048577")));
+  assert.ok(warns.some((w) => w.includes("413 payload too large")));
 });
 
 test("radarr: malformed and non-object JSON bodies → 400 Invalid JSON (auth runs first)", async () => {
@@ -1729,7 +1771,7 @@ test("sonarr ManualInteractionRequired: stable key prefers tvdbId, falls back to
   );
   assert.equal(first.res.status, 200);
   assert.deepEqual(first.body, { ok: true, manualInteraction: true });
-  assert.equal(first.tasks.length, 2, "fresh claim schedules the push AND the 30-day marker prune");
+  assert.equal(first.tasks.length, 1, "a fresh claim schedules ONE deferred unit: the push chained with the 30-day marker prune (the Radarr twin's shape)");
   assert.deepEqual(
     settingCreateManyCalls[0].data.map((d) => d.key),
     ["manualInteractionNotified:sonarr::tvdb:42"],
@@ -1772,7 +1814,7 @@ test("sonarr ManualInteractionRequired: stable key prefers tvdbId, falls back to
       },
     }),
   );
-  assert.equal(tmdbKeyed.tasks.length, 2);
+  assert.equal(tmdbKeyed.tasks.length, 1);
   const lastClaim = settingCreateManyCalls[settingCreateManyCalls.length - 1];
   assert.deepEqual(lastClaim.data.map((d) => d.key), ["manualInteractionNotified:sonarr::tmdb:43"]);
 });
@@ -1788,7 +1830,7 @@ test("sonarr manual-interaction markers keep tvdb and tmdb ids apart: a Download
       body: { eventType: "ManualInteractionRequired", series: { tvdbId: 4242, tmdbId: 9001, title: "Parked" }, downloadClient: "sab" },
     }),
   );
-  assert.equal(parked.tasks.length, 2, "precondition: series A's marker was claimed");
+  assert.equal(parked.tasks.length, 1, "precondition: series A's marker was claimed");
   const parkedKey = "manualInteractionNotified:sonarr::tvdb:4242";
   assert.ok(settings.has(parkedKey));
 

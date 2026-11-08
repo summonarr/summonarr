@@ -48,7 +48,7 @@ export function weekdayCounts(playsByDow: readonly { dow: number; count: number 
   });
 }
 
-/** Plays per UTC hour 0..23; an hour the SQL didn't return reads 0. */
+/** Plays per hour 0..23 in the statistics time zone (guardrail 19g); an hour the SQL didn't return reads 0. */
 export function hourCounts(playsByHour: readonly { hour: number; count: number }[]): number[] {
   return Array.from({ length: 24 }, (_, h) => playsByHour.find((p) => p.hour === h)?.count ?? 0);
 }

@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { warnOnChange, forgetWarnOnChange } from "@/lib/log-dedup";
-import { BATCH_TX_TIMEOUT, batchCreateMany } from "@/lib/batch-write";
+import { BATCH_TX_TIMEOUT, batchCreateMany, type LibraryTxClient } from "@/lib/batch-write";
 
 /** One episode row as the sync arms build it — the source column is added here. */
 export interface EpisodeCacheRow {
@@ -147,6 +147,36 @@ async function episodeCacheUnchanged(source: "plex" | "jellyfin", rows: readonly
 }
 
 /**
+ * Advisory lock 2002,1 (plex) / 2002,2 (jellyfin): every write to one source's
+ * TVEpisodeCache rows serializes on it — the whole-namespace swap below, the
+ * Jellyfin Resync's recent-only scoped rewrite and fix-match. Named here so no
+ * writer re-types the pair. Literals: pg_advisory_xact_lock has no
+ * (int, bigint) overload, so a parameterised objId fails to resolve the
+ * function.
+ */
+export async function lockEpisodeCacheInTx(tx: Pick<LibraryTxClient, "$executeRaw">, source: "plex" | "jellyfin"): Promise<void> {
+  if (source === "plex") await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
+  else await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
+}
+
+// The visible swap: one short transaction under the source's lock, deleting the
+// source's rows and copying this run's staged rows in, both server-side.
+async function swapStagedEpisodes(source: "plex" | "jellyfin", runId: string): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await lockEpisodeCacheInTx(tx, source);
+    // Prisma, not raw SQL: the delete is server-side either way, and keeping it
+    // as a model call leaves the whole-namespace replace visible to the suites
+    // that pin "exactly one delete, scoped to this source".
+    await tx.tVEpisodeCache.deleteMany({ where: { source } });
+    await tx.$executeRaw`
+      INSERT INTO "TVEpisodeCache" ("source", "tmdbId", "seasonNumber", "episodeNumber", "episodeName", "airDate", "stillPath", "runtime", "overview", "addedAt")
+      SELECT "source", "tmdbId", "seasonNumber", "episodeNumber", "episodeName", "airDate", "stillPath", "runtime", "overview", "addedAt"
+      FROM "TVEpisodeCacheStaging" WHERE "runId" = ${runId}
+    `;
+  }, { timeout: BATCH_TX_TIMEOUT });
+}
+
+/**
  * Replace every TVEpisodeCache row for one source, atomically, WITHOUT holding a
  * transaction open for the data transfer.
  *
@@ -207,26 +237,45 @@ export async function replaceEpisodeCacheForSource(
       toWrite.map((r) => ({ ...r, runId, source })),
     );
 
-    await prisma.$transaction(async (tx) => {
-      // Same lock ids the per-source routes take (2002,1 plex / 2002,2 jellyfin),
-      // as literals: pg_advisory_xact_lock has no (int, bigint) overload, so a
-      // parameterised objId fails to resolve the function.
-      if (source === "plex") await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
-      else await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
-      // Prisma, not raw SQL: the delete is server-side either way, and keeping it
-      // as a model call leaves the whole-namespace replace visible to the suites
-      // that pin "exactly one delete, scoped to this source".
-      await tx.tVEpisodeCache.deleteMany({ where: { source } });
-      await tx.$executeRaw`
-        INSERT INTO "TVEpisodeCache" ("source", "tmdbId", "seasonNumber", "episodeNumber", "episodeName", "airDate", "stillPath", "runtime", "overview", "addedAt")
-        SELECT "source", "tmdbId", "seasonNumber", "episodeNumber", "episodeName", "airDate", "stillPath", "runtime", "overview", "addedAt"
-        FROM "TVEpisodeCacheStaging" WHERE "runId" = ${runId}
-      `;
-    }, { timeout: BATCH_TX_TIMEOUT });
+    await swapStagedEpisodes(source, runId);
   } finally {
     // Drop this run's staged rows even when the swap threw, so a failed rewrite
     // does not leave a full copy of the library sitting in staging until the sweep.
     await prisma.tVEpisodeCacheStaging.deleteMany({ where: { runId } }).catch(() => {});
   }
   return "replaced";
+}
+
+/**
+ * The recent-only episode write (guardrail 13): insert-only within the window,
+ * so an empty list writes nothing. Otherwise the delete is scoped to the exact
+ * (tmdbId, season, episode) tuples about to be re-inserted, NOT to the whole
+ * tmdbId: a recent window returns only the copies of a show added lately, so a
+ * copy in another library or section (guardrails 37 / 37c) contributes no
+ * episodes here, and a tmdbId-wide delete would wipe its seasons until the next
+ * full rebuild. Removed episodes are the full path's job. Bounded by the window,
+ * so it fits one transaction, under the source's episode-cache lock.
+ */
+export async function mergeRecentEpisodesForSource(
+  source: "plex" | "jellyfin",
+  episodes: readonly EpisodeCacheRow[],
+): Promise<void> {
+  if (episodes.length === 0) return;
+  const bySeason = new Map<string, { tmdbId: number; seasonNumber: number; episodeNumbers: number[] }>();
+  for (const e of episodes) {
+    const key = `${e.tmdbId}:${e.seasonNumber}`;
+    const group = bySeason.get(key);
+    if (group) group.episodeNumbers.push(e.episodeNumber);
+    else bySeason.set(key, { tmdbId: e.tmdbId, seasonNumber: e.seasonNumber, episodeNumbers: [e.episodeNumber] });
+  }
+  const seasonScopes = Array.from(bySeason.values()).map((g) => ({
+    tmdbId: g.tmdbId,
+    seasonNumber: g.seasonNumber,
+    episodeNumber: { in: g.episodeNumbers },
+  }));
+  await prisma.$transaction(async (tx) => {
+    await lockEpisodeCacheInTx(tx, source);
+    await tx.tVEpisodeCache.deleteMany({ where: { source, OR: seasonScopes } });
+    await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source, ...e })));
+  }, { timeout: BATCH_TX_TIMEOUT });
 }

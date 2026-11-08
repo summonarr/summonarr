@@ -5,8 +5,10 @@ import { hasPermission, Permission } from "@/lib/permissions";
 import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import type { ArrVariant } from "@/lib/arr";
 import type { TrashService } from "@/components/admin/trash-guides/types";
+import { first, type PageSearchParams } from "@/lib/search-params";
 
-export type TrashPageSearchParams = Promise<{ service?: string; variant?: string }>;
+// A repeated key arrives as an array at runtime; each is read by its first value.
+export type TrashPageSearchParams = Promise<PageSearchParams>;
 
 // A configured instance the trash pages can target (drives the nav toggle).
 export interface TrashInstanceOption {
@@ -49,7 +51,9 @@ export async function loadTrashPageContext(
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
-  const { service: rawService, variant: rawVariant } = await searchParams;
+  const sp = await searchParams;
+  const rawService = first(sp.service);
+  const rawVariant = first(sp.variant);
   const service: TrashService = rawService === "sonarr" ? "SONARR" : "RADARR";
 
   const [radarrInstances, sonarrInstances] = await loadTrashInstances();

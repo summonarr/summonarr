@@ -266,6 +266,8 @@
   "notify.bot.admin.approvedArrFailedTitle": "⚠️ Genehmigt (arr fehlgeschlagen) – {title}",
   "notify.bot.admin.approvedBy": "Genehmigt von **{admin}**",
   "notify.bot.admin.approvedByArrFailed": "Genehmigt von **{admin}**, konnte aber nicht zu arr hinzugefügt werden – bitte manuell hinzufügen.",
+  "notify.bot.admin.approveRolledBackTitle": "⚠️ Wieder ausstehend (arr fehlgeschlagen) – {title}",
+  "notify.bot.admin.approveRolledBackBy": "Genehmigt von **{admin}**, konnte aber nicht zu arr hinzugefügt werden und ist wieder ausstehend – erneut genehmigen, um es noch einmal zu versuchen, oder ablehnen.",
   "notify.bot.admin.declinedTitle": "❌ Abgelehnt – {title}",
   "notify.bot.admin.declinedBy": "Abgelehnt von **{admin}**",
   "notify.bot.inactiveButton": "Diese Schaltfläche ist nicht mehr aktiv.",

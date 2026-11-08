@@ -1479,3 +1479,63 @@ test("PATCH: a blank statsTimeZone clears it, and a save applies to the statisti
   assert.equal(upsertFor("statsTimeZone").at(-1)?.create.value, "", "blank is WRITTEN, not skipped");
   assert.equal(await getStatsTimeZone(), processTimeZone(), "and the statistics fall back to the process zone");
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// PATCH — play-history settings, probe diagnostics, the stored Discord ids
+// ════════════════════════════════════════════════════════════════════════════
+
+test("PATCH: a play-history setting save applies at once (no 15s stale settings memo)", async () => {
+  const { getWatchedThreshold, getArcGapDays, invalidatePlayHistorySettings } = await import("../src/lib/play-history.ts");
+  invalidatePlayHistorySettings();
+  const admin = await mintSession("ADMIN");
+  assert.equal(await getWatchedThreshold(), 80, "unset: the default, now memoized");
+
+  const res = await patchLater({ playHistoryWatchedThreshold: "55" }, admin.header);
+  assert.equal(res.status, 200);
+  assert.equal(await getWatchedThreshold(), 55, "the route drops play-history's settings memo on a change");
+
+  // A save that touches no playHistory* key leaves the memo alone.
+  assert.equal(await getArcGapDays(), 14);
+  settings.set("playHistoryArcGapDays", "30"); // written behind the memo's back
+  assert.equal((await patchLater({ siteTitle: "Elsewhere" }, admin.header)).status, 200);
+  assert.equal(await getArcGapDays(), 14, "an unrelated save keeps the memo");
+});
+
+test("PATCH: a failed connection test is logged with its cause; the answer keeps the fixed message", async () => {
+  const admin = await mintSession("ADMIN");
+  respond = () => new Response("nope", { status: 401 });
+  const res = await PATCH(
+    patchReq(JSON.stringify({ sonarr4kUrl: "http://10.0.0.6:8989", sonarr4kApiKey: "k6" }), admin.header),
+    undefined,
+  );
+  assert.equal(res.status, 422);
+  assert.equal(((await res.json()) as { sonarr4kError?: string }).sonarr4kError, "Sonarr 4K connection failed");
+  assert.ok(
+    warns.some((w) => w.startsWith("[settings] Sonarr 4K connection failed: ") && w.includes("401")),
+    `the server log names the cause: ${JSON.stringify(warns)}`,
+  );
+  assert.ok(!warns.some((w) => w.includes("k6")), "the API key never reaches the log");
+});
+
+test("PATCH: the Discord re-registration refuses a stored client id the PATCH itself would refuse", async () => {
+  // A row written some other way (an old release, a restore): five digits is a
+  // snowflake to no one. The task must stop before calling Discord.
+  const dns = (await import("node:dns/promises")).default as { lookup: unknown };
+  const realLookup = dns.lookup;
+  dns.lookup = async () => { throw new Error("no DNS in unit tests"); };
+  try {
+    settings.set("discordBotToken", "bot-token");
+    settings.set("discordClientId", "12345");
+    settings.set("discordGuildId", "666666666666666666");
+    const admin = await mintSession("ADMIN");
+    const res = await patchLater({ discordGuildId: "777777777777777777" }, admin.header);
+    assert.equal(res.status, 200);
+    for (let i = 0; i < 50 && !errors.some((e) => e.startsWith("[discord]")); i++) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    assert.deepEqual(errors.filter((e) => e.startsWith("[discord]")), ["[discord] Invalid discordClientId — must be a numeric snowflake"]);
+    assert.equal(fetchCalls.length, 0, "nothing was sent to Discord");
+  } finally {
+    dns.lookup = realLookup;
+  }
+});

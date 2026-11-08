@@ -124,7 +124,9 @@ export function badMatchSideKey(m: BadMatchKeys, side: "plex" | "jellyfin"): str
  * applies before it offers a Fix. Without the key fix-match can only answer
  * "re-sync first", so sending it is a predictable failure.
  */
-export function fixAllEligible(m: BadMatchKeys & { arrVerdict: "plex" | "jellyfin" | null; arrTmdbId: number | null }): boolean {
+export function fixAllEligible<M extends BadMatchKeys & { arrVerdict: "plex" | "jellyfin" | null; arrTmdbId: number | null }>(
+  m: M,
+): m is M & { arrVerdict: "plex" | "jellyfin"; arrTmdbId: number } {
   return m.arrVerdict !== null && m.arrTmdbId !== null && badMatchSideKey(m, m.arrVerdict) !== null;
 }
 
@@ -165,9 +167,10 @@ export function suggestWrongSide(
   const py = plexYear ? Number.parseInt(plexYear, 10) : NaN;
   const jy = jellyfinYear ? Number.parseInt(jellyfinYear, 10) : NaN;
   if (fy === null || Number.isNaN(py) || Number.isNaN(jy)) return null;
+  // parseInt yields integers, so "doesn't fit" is already two or more years off.
   const plexFits = Math.abs(py - fy) <= 1;
   const jellyfinFits = Math.abs(jy - fy) <= 1;
-  if (plexFits && !jellyfinFits && Math.abs(jy - fy) >= 2) return { wrong: "jellyfin", year: fy };
-  if (jellyfinFits && !plexFits && Math.abs(py - fy) >= 2) return { wrong: "plex", year: fy };
+  if (plexFits && !jellyfinFits) return { wrong: "jellyfin", year: fy };
+  if (jellyfinFits && !plexFits) return { wrong: "plex", year: fy };
   return null;
 }

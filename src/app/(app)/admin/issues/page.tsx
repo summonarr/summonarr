@@ -21,7 +21,9 @@ import { LocalDateText } from "@/components/local-date";
 import { ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL_KEY, ISSUE_TYPE_LABEL_KEY } from "@/lib/status-labels";
 import { getTranslator } from "@/lib/i18n/server";
 import type { Translator } from "@/lib/i18n/translate";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
+import { groupIssues } from "@/lib/issue-groups";
+import { nameOrEmail } from "@/lib/display-name";
 
 // The TV scope chip ("Season 2", "Episode S02E05"). Only called for a non-FULL
 // scope; the number tails are omitted when the column is null, as before.
@@ -59,39 +61,170 @@ const VALID_FILTERS = ["ALL", "OPEN", "IN_PROGRESS", "RESOLVED"] as const;
 const ISSUE_LIST_CAP = 500;
 type FilterValue = (typeof VALID_FILTERS)[number];
 
-// Collapses duplicate reports (same tmdbId+mediaType+type+scope+season+episode)
-// into one group, keeping the newest as representative; ordered by report count
-// desc. TMDB ids are namespaced per type, so mediaType must be part of the key —
-// a movie and a show can share one id.
-function groupIssues<T extends {
-  id: string;
-  tmdbId: number;
-  mediaType: string;
-  issueType: string;
-  scope: string;
-  seasonNumber: number | null;
-  episodeNumber: number | null;
-  createdAt: Date;
-  user: { name: string | null; email: string };
-  _count: { messages: number };
-}>(issues: T[], unknownName: string): { representative: T; count: number; reporterNames: string[] }[] {
-  const map = new Map<string, T[]>();
-  for (const issue of issues) {
-    const key = `${issue.tmdbId}::${issue.mediaType}::${issue.issueType}::${issue.scope}::${issue.seasonNumber ?? ""}::${issue.episodeNumber ?? ""}`;
-    const group = map.get(key) ?? [];
-    group.push(issue);
-    map.set(key, group);
+// The issue include every read on this page uses, so a deep-linked issue
+// fetched on its own has the same shape as the listed ones.
+const ISSUE_INCLUDE = {
+  user: { select: { name: true, email: true } },
+  claimedUser: { select: { name: true, email: true } },
+  _count: { select: { messages: true } },
+} as const;
+
+// Which of these titles are in the Plex / Jellyfin library, as `tmdbId:mediaType`
+// sets. Built for every media type (movies AND TV) — if a title is missing from
+// these sets, Fix Match wrongly tells the admin "This item is not in any synced
+// library".
+async function libraryPresence(pairs: readonly { tmdbId: number; mediaType: "MOVIE" | "TV" }[]) {
+  if (pairs.length === 0) return { plexSet: new Set<string>(), jellyfinSet: new Set<string>() };
+  const where = { OR: pairs.map(({ tmdbId, mediaType }) => ({ tmdbId, mediaType })) };
+  const select = { tmdbId: true, mediaType: true } as const;
+  const [plexItems, jellyfinItems] = await Promise.all([
+    prisma.plexLibraryItem.findMany({ where, select }),
+    prisma.jellyfinLibraryItem.findMany({ where, select }),
+  ]);
+  return {
+    plexSet: new Set(plexItems.map((i) => `${i.tmdbId}:${i.mediaType}`)),
+    jellyfinSet: new Set(jellyfinItems.map((i) => `${i.tmdbId}:${i.mediaType}`)),
+  };
+}
+
+// ── Shared pieces of the card, the mobile detail and the side panel ─────────
+
+function StatusChip({ t, status }: { t: Translator; status: string }) {
+  return <Chip tone={ISSUE_STATUS_TONE[status]}>{t(ISSUE_STATUS_LABEL_KEY[status] ?? status)}</Chip>;
+}
+
+// "Reported by <name> · <date>", the mobile detail's and the side panel's line.
+function ReportedByLine({ t, issue, style }: { t: Translator; issue: { user: { name: string | null; email: string }; createdAt: Date }; style: CSSProperties }) {
+  return (
+    <p className="ds-mono" style={style}>
+      {t("adminQueue.issues.reportedBy", { name: nameOrEmail(issue.user) })} ·{" "}
+      <LocalDateText iso={issue.createdAt.toISOString()} />
+    </p>
+  );
+}
+
+function ClaimedByLine({ t, claimedUser, style }: { t: Translator; claimedUser: { name: string | null; email: string } | null; style: CSSProperties }) {
+  return (
+    <p className="ds-mono" style={style}>
+      {t("adminQueue.issues.claimedBy", { name: claimedUser ? nameOrEmail(claimedUser) : t("adminQueue.issues.unknown") })}
+    </p>
+  );
+}
+
+function IssueResolution({ t, resolution, style }: { t: Translator; resolution: string; style: CSSProperties }) {
+  return (
+    <p className="italic" style={style}>
+      {t("adminQueue.issues.resolution", { resolution })}
+    </p>
+  );
+}
+
+// The older reports a card stands for, each linking to its own detail and
+// thread: the card's actions change the newest report only.
+function OtherReports({
+  t,
+  members,
+  hrefFor,
+}: {
+  t: Translator;
+  members: readonly { id: string; user: { name: string | null; email: string }; createdAt: Date }[];
+  hrefFor: (id: string) => string;
+}) {
+  return (
+    <nav aria-label={t("adminQueue.issues.otherReports")} className="ds-mono" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", margin: "4px 0 0 12px" }}>
+      {t("adminQueue.issues.otherReports")}:{" "}
+      {members.map((m, i) => (
+        <span key={m.id}>
+          {i > 0 && " · "}
+          <Link href={hrefFor(m.id)} scroll={false} className="hover:underline" style={{ color: "var(--ds-fg-muted)" }}>
+            {nameOrEmail(m.user)}
+          </Link>{" "}
+          <LocalDateText iso={m.createdAt.toISOString()} />
+        </span>
+      ))}
+    </nav>
+  );
+}
+
+// Everything the page reads: the tab's issues (capped), the per-status counts,
+// the selected issue (from the list, or read on its own for a deep link), the
+// library presence of every listed title, and, for an ADMIN, which Radarr/Sonarr
+// instances hold each one.
+async function loadIssuesPageData({ filter, selectedId, isAdmin }: {
+  filter: FilterValue;
+  selectedId: string | undefined;
+  isAdmin: boolean;
+}) {
+  const [issueRows, statusCounts, radarrInstances, sonarrInstances, radarrOn, sonarrOn] = await Promise.all([
+    // Filter by status in SQL, not in JS. If we fetched 500 rows of every
+    // status and filtered afterwards, a busy tab could show a count of "620"
+    // over a list missing its older issues. Filtering here spends the whole
+    // 500-row budget on the tab being viewed.
+    prisma.issue.findMany({
+      where: filter === "ALL" ? undefined : { status: filter },
+      include: ISSUE_INCLUDE,
+      orderBy: { createdAt: "desc" },
+      // One row past the cap, read only to tell "exactly the cap" from "more".
+      take: ISSUE_LIST_CAP + 1,
+    }),
+    prisma.issue.groupBy({ by: ["status"], _count: { status: true } }),
+    getSyncableArrInstances("radarr"),
+    getSyncableArrInstances("sonarr"),
+    // The Manage icon opens routes that answer 404 while the integration is
+    // switched off (arrGate), and the synced cache rows it reads outlive the
+    // switch-off — so the flag, not the cache, decides whether it shows.
+    isFeatureEnabled("feature.integration.radarr").catch(() => false),
+    isFeatureEnabled("feature.integration.sonarr").catch(() => false),
+  ]);
+
+  const capped = issueRows.length > ISSUE_LIST_CAP;
+  const allIssues = capped ? issueRows.slice(0, ISSUE_LIST_CAP) : issueRows;
+
+  // Configured-instance options for the Fix file window's instance picker.
+  const radarrOptions = radarrInstances.map((i) => ({ slug: i.slug, name: i.name }));
+  const sonarrOptions = sonarrInstances.map((i) => ({ slug: i.slug, name: i.name }));
+  const instancesFor = (mediaType: string) => (mediaType === "MOVIE" ? radarrOptions : sonarrOptions);
+
+  let selectedIssue = selectedId ? allIssues.find((i) => i.id === selectedId) ?? null : null;
+  if (selectedId && !selectedIssue) {
+    selectedIssue = await prisma.issue.findUnique({ where: { id: selectedId }, include: ISSUE_INCLUDE });
   }
-  return Array.from(map.values())
-    .map((group) => {
-      group.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-      const names = group.map((i) => i.user.name ?? i.user.email ?? unknownName);
-      return { representative: group[0], count: group.length, reporterNames: names };
-    })
-    .sort((a, b) => {
-      if (b.count !== a.count) return b.count - a.count;
-      return b.representative.createdAt.getTime() - a.representative.createdAt.getTime();
-    });
+
+  // Library presence for every listed title, and for selectedIssue too: a
+  // deep link (?selected=<id> from an issue-reply email or push) can point at
+  // an issue that is not in the current tab's list, and its side panel needs
+  // the same check.
+  const allLibraryPairs = [...new Map(
+    [...allIssues, ...(selectedIssue ? [selectedIssue] : [])]
+      .map((i) => [`${i.tmdbId}:${i.mediaType}`, { tmdbId: i.tmdbId, mediaType: i.mediaType }])
+  ).values()];
+  const { plexSet, jellyfinSet } = await libraryPresence(allLibraryPairs);
+
+  // ADMIN only: which configured Radarr/Sonarr instances hold each listed title,
+  // for the per-instance "Manage" icon — the synced wanted/available cache rows
+  // (arrInstancesForTitle's rule, one read per table for the whole list; no live
+  // call — the manager resolves the title live when it opens).
+  const movieIds = [...new Set(allLibraryPairs.filter((p) => p.mediaType === "MOVIE").map((p) => p.tmdbId))];
+  const tvIds = [...new Set(allLibraryPairs.filter((p) => p.mediaType === "TV").map((p) => p.tmdbId))];
+  const holderSelect = { tmdbId: true, arrInstance: true } as const;
+  const readRadarr = isAdmin && radarrOn && movieIds.length > 0;
+  const readSonarr = isAdmin && sonarrOn && tvIds.length > 0;
+  const [radarrWanted, radarrAvailable, sonarrWanted, sonarrAvailable] = await Promise.all([
+    readRadarr ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds } }, select: holderSelect }) : [],
+    readRadarr ? prisma.radarrAvailableItem.findMany({ where: { tmdbId: { in: movieIds } }, select: holderSelect }) : [],
+    readSonarr ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds } }, select: holderSelect }) : [],
+    readSonarr ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: tvIds } }, select: holderSelect }) : [],
+  ]);
+  // Holders only for a switched-on service: the cached rows of a switched-off
+  // one would draw a Manage icon whose every read 404s.
+  const radarrHolders = arrHoldersByTmdbId(radarrOn ? radarrOptions : [], [...radarrWanted, ...radarrAvailable]);
+  const sonarrHolders = arrHoldersByTmdbId(sonarrOn ? sonarrOptions : [], [...sonarrWanted, ...sonarrAvailable]);
+  const manageFor = (tmdbId: number, mediaType: string) => {
+    const holders = (mediaType === "MOVIE" ? radarrHolders : sonarrHolders).get(tmdbId);
+    return isAdmin && holders ? { tmdbId, holders } : undefined;
+  };
+
+  return { allIssues, capped, statusCounts, selectedIssue, plexSet, jellyfinSet, instancesFor, manageFor };
 }
 
 export default async function AdminIssuesPage({
@@ -117,107 +250,13 @@ export default async function AdminIssuesPage({
     ? (rawFilter as FilterValue)
     : "OPEN";
 
-  const [issueRows, statusCounts, radarrInstances, sonarrInstances, radarrOn, sonarrOn] = await Promise.all([
-    // Filter by status in SQL, not in JS. If we fetched 500 rows of every
-    // status and filtered afterwards, a busy tab could show a count of "620"
-    // over a list missing its older issues. Filtering here spends the whole
-    // 500-row budget on the tab being viewed.
-    prisma.issue.findMany({
-      where: filter === "ALL" ? undefined : { status: filter },
-      include: {
-        user: { select: { name: true, email: true } },
-        claimedUser: { select: { name: true, email: true } },
-        _count: { select: { messages: true } },
-      },
-      orderBy: { createdAt: "desc" },
-      // One row past the cap, read only to tell "exactly the cap" from "more".
-      take: ISSUE_LIST_CAP + 1,
-    }),
-    prisma.issue.groupBy({ by: ["status"], _count: { status: true } }),
-    getSyncableArrInstances("radarr"),
-    getSyncableArrInstances("sonarr"),
-    // The Manage icon opens routes that answer 404 while the integration is
-    // switched off (arrGate), and the synced cache rows it reads outlive the
-    // switch-off — so the flag, not the cache, decides whether it shows.
-    isFeatureEnabled("feature.integration.radarr").catch(() => false),
-    isFeatureEnabled("feature.integration.sonarr").catch(() => false),
-  ]);
-
-  const capped = issueRows.length > ISSUE_LIST_CAP;
-  const allIssues = capped ? issueRows.slice(0, ISSUE_LIST_CAP) : issueRows;
-
-  // Configured-instance options for the Fix file window's instance picker.
-  const radarrOptions = radarrInstances.map((i) => ({ slug: i.slug, name: i.name }));
-  const sonarrOptions = sonarrInstances.map((i) => ({ slug: i.slug, name: i.name }));
-  const instancesFor = (mediaType: string) => (mediaType === "MOVIE" ? radarrOptions : sonarrOptions);
+  const { allIssues, capped, statusCounts, selectedIssue, plexSet, jellyfinSet, instancesFor, manageFor } =
+    await loadIssuesPageData({ filter, selectedId, isAdmin });
 
   const countFor = (status: string) =>
     statusCounts.find((s) => s.status === status)?._count.status ?? 0;
 
-  const filtered = allIssues;
-  const groups = groupIssues(filtered, t("shared.thread.unknownAuthor"));
-
-  let selectedIssue = selectedId ? allIssues.find((i) => i.id === selectedId) ?? null : null;
-  if (selectedId && !selectedIssue) {
-    selectedIssue = await prisma.issue.findUnique({
-      where: { id: selectedId },
-      include: {
-        user: { select: { name: true, email: true } },
-        claimedUser: { select: { name: true, email: true } },
-        _count: { select: { messages: true } },
-      },
-    });
-  }
-
-  // Which listed titles are in the Plex / Jellyfin library. Built for every
-  // media type (movies AND TV) — if a title is missing from these sets, Fix
-  // Match wrongly tells the admin "This item is not in any synced library".
-  //
-  // selectedIssue is added too: a deep link (?selected=<id> from an issue-reply
-  // email or push) can point at an issue that is not in the current tab's list,
-  // and its side panel needs the same library check.
-  const allLibraryPairs = [...new Map(
-    [...allIssues, ...(selectedIssue ? [selectedIssue] : [])]
-      .map((i) => [`${i.tmdbId}:${i.mediaType}`, { tmdbId: i.tmdbId, mediaType: i.mediaType }])
-  ).values()];
-  const [plexItems, jellyfinItems] = allLibraryPairs.length > 0
-    ? await Promise.all([
-        prisma.plexLibraryItem.findMany({
-          where: { OR: allLibraryPairs.map(({ tmdbId, mediaType }) => ({ tmdbId, mediaType })) },
-          select: { tmdbId: true, mediaType: true },
-        }),
-        prisma.jellyfinLibraryItem.findMany({
-          where: { OR: allLibraryPairs.map(({ tmdbId, mediaType }) => ({ tmdbId, mediaType })) },
-          select: { tmdbId: true, mediaType: true },
-        }),
-      ])
-    : [[], []];
-  const plexSet     = new Set(plexItems.map((i)     => `${i.tmdbId}:${i.mediaType}`));
-  const jellyfinSet = new Set(jellyfinItems.map((i) => `${i.tmdbId}:${i.mediaType}`));
-
-  // ADMIN only: which configured Radarr/Sonarr instances hold each listed title,
-  // for the per-instance "Manage" icon — the synced wanted/available cache rows
-  // (arrInstancesHolding's rule, one read per table for the whole list; no live
-  // call — the manager resolves the title live when it opens).
-  const movieIds = [...new Set(allLibraryPairs.filter((p) => p.mediaType === "MOVIE").map((p) => p.tmdbId))];
-  const tvIds = [...new Set(allLibraryPairs.filter((p) => p.mediaType === "TV").map((p) => p.tmdbId))];
-  const holderSelect = { tmdbId: true, arrInstance: true } as const;
-  const readRadarr = isAdmin && radarrOn && movieIds.length > 0;
-  const readSonarr = isAdmin && sonarrOn && tvIds.length > 0;
-  const [radarrWanted, radarrAvailable, sonarrWanted, sonarrAvailable] = await Promise.all([
-    readRadarr ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds } }, select: holderSelect }) : [],
-    readRadarr ? prisma.radarrAvailableItem.findMany({ where: { tmdbId: { in: movieIds } }, select: holderSelect }) : [],
-    readSonarr ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds } }, select: holderSelect }) : [],
-    readSonarr ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: tvIds } }, select: holderSelect }) : [],
-  ]);
-  // Holders only for a switched-on service: the cached rows of a switched-off
-  // one would draw a Manage icon whose every read 404s.
-  const radarrHolders = arrHoldersByTmdbId(radarrOn ? radarrOptions : [], [...radarrWanted, ...radarrAvailable]);
-  const sonarrHolders = arrHoldersByTmdbId(sonarrOn ? sonarrOptions : [], [...sonarrWanted, ...sonarrAvailable]);
-  const manageFor = (tmdbId: number, mediaType: string) => {
-    const holders = (mediaType === "MOVIE" ? radarrHolders : sonarrHolders).get(tmdbId);
-    return isAdmin && holders ? { tmdbId, holders } : undefined;
-  };
+  const groups = groupIssues(allIssues);
 
   const tabs: { label: string; value: FilterValue; count: number }[] = [
     { label: t(ISSUE_STATUS_LABEL_KEY.OPEN), value: "OPEN", count: countFor("OPEN") },
@@ -241,7 +280,7 @@ export default async function AdminIssuesPage({
         key={`claim-${issue.id}`}
         issueId={issue.id}
         claimedBy={issue.claimedBy}
-        claimerName={issue.claimedUser?.name ?? issue.claimedUser?.email ?? null}
+        claimerName={issue.claimedUser ? nameOrEmail(issue.claimedUser) : null}
         currentUserId={currentUserId}
       />
     );
@@ -314,13 +353,10 @@ export default async function AdminIssuesPage({
               <p className="font-semibold" style={{ fontSize: 14, color: "var(--ds-fg)", margin: 0 }}>
                 {sel.title}
               </p>
-              <Chip tone={ISSUE_STATUS_TONE[sel.status]}>{t(ISSUE_STATUS_LABEL_KEY[sel.status] ?? sel.status)}</Chip>
+              <StatusChip t={t} status={sel.status} />
               <Chip>{issueTypeLabel(t, sel.issueType)}</Chip>
             </div>
-            <p className="ds-mono" style={{ marginTop: 4, fontSize: 10.5, color: "var(--ds-fg-subtle)" }}>
-              {t("adminQueue.issues.reportedBy", { name: sel.user.name ?? sel.user.email })} ·{" "}
-              <LocalDateText iso={sel.createdAt.toISOString()} />
-            </p>
+            <ReportedByLine t={t} issue={sel} style={{ marginTop: 4, fontSize: 10.5, color: "var(--ds-fg-subtle)" }} />
             {sel.note && (
               <p
                 className="whitespace-pre-wrap"
@@ -337,26 +373,20 @@ export default async function AdminIssuesPage({
               </p>
             )}
             {sel.resolution && (
-              <p
-                className="italic"
-                style={{
-                  marginTop: 6,
-                  fontSize: 12,
-                  color: "color-mix(in oklab, var(--ds-success) 85%, var(--ds-fg))",
-                }}
-              >
-                {t("adminQueue.issues.resolution", { resolution: sel.resolution })}
-              </p>
+              <IssueResolution
+                t={t}
+                resolution={sel.resolution}
+                style={{ marginTop: 6, fontSize: 12, color: "color-mix(in oklab, var(--ds-success) 85%, var(--ds-fg))" }}
+              />
             )}
           </>
         )}
         {sel.claimedBy && (
-          <p
-            className="ds-mono"
+          <ClaimedByLine
+            t={t}
+            claimedUser={sel.claimedUser}
             style={{ marginTop: standalone ? 4 : 0, marginBottom: 8, fontSize: 10.5, color: "var(--ds-accent-text)" }}
-          >
-            {t("adminQueue.issues.claimedBy", { name: sel.claimedUser?.name ?? sel.claimedUser?.email ?? t("adminQueue.issues.unknown") })}
-          </p>
+          />
         )}
         {standalone ? (
           <div style={{ marginTop: 10 }}>
@@ -457,7 +487,7 @@ export default async function AdminIssuesPage({
             {selectedIssue && !selectedInList && renderMobileDetail(true)}
             {groups.length === 0 && <EmptyIssues title={t("adminQueue.issues.empty")} />}
             <div className="flex flex-col gap-3">
-              {groups.map(({ representative: issue, count, reporterNames }) => {
+              {groups.map(({ representative: issue, members, count, reporterNames }) => {
                 const poster = posterUrl(issue.posterPath, "w342");
                 const isSelected = issue.id === selectedId;
                 return (
@@ -523,7 +553,7 @@ export default async function AdminIssuesPage({
                           <span style={{ color: "var(--ds-fg-muted)" }}>
                             {count > 1
                               ? `${reporterNames.slice(0, 2).join(", ")}${count > 2 ? t("adminQueue.issues.more", { count: count - 2 }) : ""}`
-                              : t("adminQueue.issues.by", { name: issue.user.name ?? issue.user.email })}
+                              : t("adminQueue.issues.by", { name: nameOrEmail(issue.user) })}
                           </span>
                           {" · "}
                           <LocalDateText iso={issue.createdAt.toISOString()} />
@@ -545,30 +575,23 @@ export default async function AdminIssuesPage({
                         )}
                         <IssuePlaybackContext value={issue.playbackContext} t={t} />
                         {issue.resolution && (
-                          <p
-                            className="italic"
-                            style={{
-                              marginTop: 4,
-                              fontSize: 11,
-                              color:
-                                "color-mix(in oklab, var(--ds-success) 80%, var(--ds-fg))",
-                            }}
-                          >
-                            {t("adminQueue.issues.resolution", { resolution: issue.resolution })}
-                          </p>
+                          <IssueResolution
+                            t={t}
+                            resolution={issue.resolution}
+                            style={{ marginTop: 4, fontSize: 11, color: "color-mix(in oklab, var(--ds-success) 80%, var(--ds-fg))" }}
+                          />
                         )}
                       </Link>
 
                       <div className="hidden sm:inline-flex shrink-0">
-                        <Chip tone={ISSUE_STATUS_TONE[issue.status]}>
-                          {t(ISSUE_STATUS_LABEL_KEY[issue.status] ?? issue.status)}
-                        </Chip>
+                        <StatusChip t={t} status={issue.status} />
                       </div>
 
                       <div className="contents xl:hidden">
                         {issueActionsFor(issue)}
                       </div>
                     </IssueCardShell>
+                    {count > 1 && <OtherReports t={t} members={members.slice(1)} hrefFor={issueHref} />}
                     {isSelected && renderMobileDetail(false)}
                   </div>
                 );
@@ -578,180 +601,184 @@ export default async function AdminIssuesPage({
 
           <aside className="hidden xl:block sticky top-6 h-[calc(100dvh-52px-3rem)]">
             {selectedIssue ? (
-              <div
-                className="h-full flex flex-col overflow-hidden"
-                style={{
-                  background: "var(--ds-bg-2)",
-                  border: "1px solid var(--ds-border)",
-                  borderRadius: 8,
-                }}
-              >
-                <div
-                  className="flex-shrink-0 overflow-y-auto"
-                  style={{
-                    padding: 18,
-                    borderBottom: "1px solid var(--ds-border)",
-                  }}
-                >
-                  <div className="flex items-start" style={{ gap: 14 }}>
-                    <div
-                      className="relative shrink-0 overflow-hidden"
-                      style={{
-                        width: 64,
-                        aspectRatio: "2 / 3",
-                        borderRadius: 4,
-                        background: "var(--ds-bg-3)",
-                      }}
-                    >
-                      {(() => {
-                        const poster = posterUrl(
-                          selectedIssue.posterPath,
-                          "w342",
-                        );
-                        return poster ? (
-                          <Image
-                            src={poster}
-                            alt={selectedIssue.title}
-                            fill
-                            className="object-cover"
-                            sizes="64px"
-                          />
-                        ) : (
-                          <div
-                            className="absolute inset-0 flex items-center justify-center"
-                            style={{ color: "var(--ds-fg-subtle)" }}
-                          >
-                            {selectedIssue.mediaType === "MOVIE" ? (
-                              <Film style={{ width: 20, height: 20 }} />
-                            ) : (
-                              <Tv2 style={{ width: 20, height: 20 }} />
-                            )}
-                          </div>
-                        );
-                      })()}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p
-                        className="font-semibold"
-                        style={{ fontSize: 14, color: "var(--ds-fg)", margin: 0 }}
-                      >
-                        {selectedIssue.title}
-                      </p>
-                      <div
-                        className="flex items-center flex-wrap"
-                        style={{ gap: 6, marginTop: 4 }}
-                      >
-                        <Chip tone={ISSUE_STATUS_TONE[selectedIssue.status]}>
-                          {t(ISSUE_STATUS_LABEL_KEY[selectedIssue.status] ?? selectedIssue.status)}
-                        </Chip>
-                        <Chip>
-                          {issueTypeLabel(t, selectedIssue.issueType)}
-                        </Chip>
-                        {selectedIssue.mediaType === "TV" &&
-                          selectedIssue.scope !== "FULL" && (
-                            <Chip>{scopeLabel(t, selectedIssue)}</Chip>
-                          )}
-                      </div>
-                      <p
-                        className="ds-mono"
-                        style={{
-                          marginTop: 4,
-                          fontSize: 10.5,
-                          color: "var(--ds-fg-subtle)",
-                        }}
-                      >
-                        {t("adminQueue.issues.reportedBy", { name: selectedIssue.user.name ?? selectedIssue.user.email })} ·{" "}
-                        <LocalDateText iso={selectedIssue.createdAt.toISOString()} />
-                      </p>
-                      {selectedIssue.claimedBy && (
-                        <p
-                          className="ds-mono"
-                          style={{
-                            marginTop: 2,
-                            fontSize: 10.5,
-                            color: "var(--ds-accent-text)",
-                          }}
-                        >
-                          {t("adminQueue.issues.claimedBy", {
-                            name:
-                              selectedIssue.claimedUser?.name ??
-                              selectedIssue.claimedUser?.email ??
-                              t("adminQueue.issues.unknown"),
-                          })}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                  {selectedIssue.note && (
-                    <p
-                      className="whitespace-pre-wrap"
-                      style={{
-                        marginTop: 12,
-                        padding: "8px 12px",
-                        borderRadius: 4,
-                        background: "var(--ds-bg-1)",
-                        borderLeft:
-                          "2px solid color-mix(in oklab, var(--ds-warning) 40%, transparent)",
-                        fontSize: 12,
-                        color: "var(--ds-fg-muted)",
-                      }}
-                    >
-                      {selectedIssue.note}
-                    </p>
-                  )}
-                  {selectedIssue.resolution && (
-                    <p
-                      className="italic"
-                      style={{
-                        marginTop: 8,
-                        fontSize: 12,
-                        color:
-                          "color-mix(in oklab, var(--ds-success) 85%, var(--ds-fg))",
-                      }}
-                    >
-                      {t("adminQueue.issues.resolution", { resolution: selectedIssue.resolution })}
-                    </p>
-                  )}
-
-                  <div style={{ marginTop: 16 }}>
-                    {issueActionsFor(selectedIssue, {
-                      key: `actions-${selectedIssue.id}`,
-                      align: "start",
-                      claim: claimFor(selectedIssue),
-                    })}
-                  </div>
-                </div>
-                <DesktopIssueThread key={selectedIssue.id} issueId={selectedIssue.id} />
-              </div>
+              <IssueSidePanel
+                t={t}
+                selectedIssue={selectedIssue}
+                actions={issueActionsFor(selectedIssue, {
+                  key: `actions-${selectedIssue.id}`,
+                  align: "start",
+                  claim: claimFor(selectedIssue),
+                })}
+              />
             ) : (
-              <div
-                className="h-full flex flex-col items-center justify-center text-center"
-                style={{
-                  padding: 32,
-                  background: "var(--ds-bg-1)",
-                  border: "1px dashed var(--ds-border)",
-                  borderRadius: 8,
-                }}
-              >
-                <MessageSquare
-                  style={{
-                    width: 28,
-                    height: 28,
-                    color: "var(--ds-fg-disabled)",
-                    marginBottom: 12,
-                  }}
-                />
-                <p
-                  className="ds-mono"
-                  style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
-                >
-                  {t("adminQueue.issues.selectPrompt")}
-                </p>
-              </div>
+              <SelectIssuePrompt t={t} />
             )}
           </aside>
         </div>
       )}
+    </div>
+  );
+}
+
+// The xl side panel for the selected issue: header, note, resolution, its
+// actions (built by the page, which owns them) and the thread.
+function IssueSidePanel({
+  t,
+  selectedIssue,
+  actions,
+}: {
+  t: Translator;
+  selectedIssue: {
+    id: string; title: string; posterPath: string | null; mediaType: string; status: string; issueType: string;
+    scope: string; seasonNumber: number | null; episodeNumber: number | null; note: string | null; resolution: string | null;
+    claimedBy: string | null; createdAt: Date;
+    user: { name: string | null; email: string }; claimedUser: { name: string | null; email: string } | null;
+  };
+  actions: ReactNode;
+}) {
+  return (
+    <div
+      className="h-full flex flex-col overflow-hidden"
+      style={{
+        background: "var(--ds-bg-2)",
+        border: "1px solid var(--ds-border)",
+        borderRadius: 8,
+      }}
+    >
+      <div
+        className="flex-shrink-0 overflow-y-auto"
+        style={{
+          padding: 18,
+          borderBottom: "1px solid var(--ds-border)",
+        }}
+      >
+        <div className="flex items-start" style={{ gap: 14 }}>
+          <div
+            className="relative shrink-0 overflow-hidden"
+            style={{
+              width: 64,
+              aspectRatio: "2 / 3",
+              borderRadius: 4,
+              background: "var(--ds-bg-3)",
+            }}
+          >
+            {(() => {
+              const poster = posterUrl(
+                selectedIssue.posterPath,
+                "w342",
+              );
+              return poster ? (
+                <Image
+                  src={poster}
+                  alt={selectedIssue.title}
+                  fill
+                  className="object-cover"
+                  sizes="64px"
+                />
+              ) : (
+                <div
+                  className="absolute inset-0 flex items-center justify-center"
+                  style={{ color: "var(--ds-fg-subtle)" }}
+                >
+                  {selectedIssue.mediaType === "MOVIE" ? (
+                    <Film style={{ width: 20, height: 20 }} />
+                  ) : (
+                    <Tv2 style={{ width: 20, height: 20 }} />
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+          <div className="flex-1 min-w-0">
+            <p
+              className="font-semibold"
+              style={{ fontSize: 14, color: "var(--ds-fg)", margin: 0 }}
+            >
+              {selectedIssue.title}
+            </p>
+            <div
+              className="flex items-center flex-wrap"
+              style={{ gap: 6, marginTop: 4 }}
+            >
+              <StatusChip t={t} status={selectedIssue.status} />
+              <Chip>
+                {issueTypeLabel(t, selectedIssue.issueType)}
+              </Chip>
+              {selectedIssue.mediaType === "TV" &&
+                selectedIssue.scope !== "FULL" && (
+                  <Chip>{scopeLabel(t, selectedIssue)}</Chip>
+                )}
+            </div>
+            <ReportedByLine t={t} issue={selectedIssue} style={{ marginTop: 4, fontSize: 10.5, color: "var(--ds-fg-subtle)" }} />
+            {selectedIssue.claimedBy && (
+              <ClaimedByLine
+                t={t}
+                claimedUser={selectedIssue.claimedUser}
+                style={{ marginTop: 2, fontSize: 10.5, color: "var(--ds-accent-text)" }}
+              />
+            )}
+          </div>
+        </div>
+        {selectedIssue.note && (
+          <p
+            className="whitespace-pre-wrap"
+            style={{
+              marginTop: 12,
+              padding: "8px 12px",
+              borderRadius: 4,
+              background: "var(--ds-bg-1)",
+              borderLeft:
+                "2px solid color-mix(in oklab, var(--ds-warning) 40%, transparent)",
+              fontSize: 12,
+              color: "var(--ds-fg-muted)",
+            }}
+          >
+            {selectedIssue.note}
+          </p>
+        )}
+        {selectedIssue.resolution && (
+          <IssueResolution
+            t={t}
+            resolution={selectedIssue.resolution}
+            style={{ marginTop: 8, fontSize: 12, color: "color-mix(in oklab, var(--ds-success) 85%, var(--ds-fg))" }}
+          />
+        )}
+
+        <div style={{ marginTop: 16 }}>
+          {actions}
+        </div>
+      </div>
+      <DesktopIssueThread key={selectedIssue.id} issueId={selectedIssue.id} />
+    </div>
+  );
+}
+
+// The side panel with nothing selected.
+function SelectIssuePrompt({ t }: { t: Translator }) {
+  return (
+    <div
+      className="h-full flex flex-col items-center justify-center text-center"
+      style={{
+        padding: 32,
+        background: "var(--ds-bg-1)",
+        border: "1px dashed var(--ds-border)",
+        borderRadius: 8,
+      }}
+    >
+      <MessageSquare
+        style={{
+          width: 28,
+          height: 28,
+          color: "var(--ds-fg-disabled)",
+          marginBottom: 12,
+        }}
+      />
+      <p
+        className="ds-mono"
+        style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
+      >
+        {t("adminQueue.issues.selectPrompt")}
+      </p>
     </div>
   );
 }

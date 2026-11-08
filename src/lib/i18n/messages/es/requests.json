@@ -11,6 +11,8 @@
   "requests.status.declined": "Rechazada",
   "requests.sort.newest": "Más recientes",
   "requests.sort.oldest": "Más antiguas",
+  "requests.filter.statusLabel": "Filtrar por estado",
+  "requests.filter.sortLabel": "Ordenar solicitudes",
   "requests.searchPlaceholder": "Buscar títulos…",
   "requests.mediaType.movie": "PELÍCULA",
   "requests.mediaType.tv": "SERIE",

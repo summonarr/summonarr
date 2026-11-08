@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cronSkippedResponse, isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
+import { isCronAuthorized } from "@/lib/cron-auth";
+import { CRON_DEGRADED_HEADER, cronSkippedResponse, withCronRunRecording } from "@/lib/cron-history";
 import { getTrending, getPopularMovies, getPopularTV, getTopRatedMovies, getTopRatedTV } from "@/lib/tmdb";
 import { fetchUnifiedRatings, hasAnyMdblistRating, type UnifiedRatingsResult } from "@/lib/omdb-availability";
 import { fetchMdblistBatch, isMdblistQuotaLocked, mdblistCacheKey, revalidateMdblistForTmdb, type MdblistRatings } from "@/lib/mdblist";
@@ -199,7 +200,7 @@ export async function POST(request: NextRequest) {
       }
       return NextResponse.json(
         { total: all.length, warmed, skipped, quotaExhausted, durationMs },
-        degraded !== null ? { headers: { "X-Cron-Degraded": degraded } } : undefined,
+        degraded !== null ? { headers: { [CRON_DEGRADED_HEADER]: degraded } } : undefined,
       );
     },
     // A busy lock is not a run: X-Cron-Skipped keeps it out of the ledger.

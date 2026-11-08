@@ -100,9 +100,11 @@ export const roleLabelKey: Record<User["role"], string> = {
 // <body>, and the modal's Tab trap (use-modal-a11y) then reads the next Tab as
 // "outside the container" and sends it back to Close — every toggle threw a
 // keyboard user to the top of the dialog. While a save is in flight the change
-// is ignored instead and aria-busy says so; the same decision QuotaRow
-// documents for its inputs.
-export function AdminToggleRow({ label, checked, onChange, busy }: { label: string; checked: boolean; onChange: () => void; busy: boolean }) {
+// is ignored instead: the switch stays focusable, but is dimmed and marked
+// aria-disabled, so the ignored click has a visible (and announced) reason —
+// the same decision QuotaRow documents for its inputs. A row whose changes
+// queue rather than being ignored (the permissions editor) passes no `busy`.
+export function AdminToggleRow({ label, checked, onChange, busy = false }: { label: string; checked: boolean; onChange: () => void; busy?: boolean }) {
   const switchId = useId();
   return (
     <label htmlFor={switchId} className="flex items-center justify-between py-2 border-b border-zinc-800 last:border-0">
@@ -112,6 +114,8 @@ export function AdminToggleRow({ label, checked, onChange, busy }: { label: stri
         size="sm"
         checked={checked}
         aria-busy={busy || undefined}
+        aria-disabled={busy || undefined}
+        className={busy ? "opacity-50" : undefined}
         onCheckedChange={() => { if (!busy) onChange(); }}
       />
     </label>

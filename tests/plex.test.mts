@@ -1,4 +1,5 @@
-// Unit tests for the Plex API client (src/lib/plex.ts) — the HTTP layer between
+// Unit tests for the Plex API client (src/lib/plex.ts and its plex-*.ts
+// siblings) — the HTTP layer between
 // Summonarr and both plex.tv (account surface, via safeFetchTrusted) and the
 // admin-configured Plex Media Server (library/session/terminate surface, via
 // safeFetchAdminConfigured). The contracts pinned here:
@@ -15,8 +16,8 @@
 //     legacy single-guid agents, multi-guid items sharing one entry, collection
 //     skip, totalSize paging, and the "no totalSize ⇒ page until an empty page"
 //     anti-truncation rule the inline comment declares load-bearing; show
-//     sections enrich filePath from one /allLeaves episode per show and degrade
-//     (filePath null) when the leaf fetch fails; multi-section combine is
+//     sections send no per-show request and leave filePath null (the sync reads
+//     show paths from the type=4 episode walk); multi-section combine is
 //     first-seen-wins and selectedKeys narrows the fan-out;
 //   - getPlexTVEpisodes/getPlexEpisodesForShow: season/episode mapping with the
 //     specials/zero/non-integer filters and per-key dedup; shows without a tmdb
@@ -44,7 +45,7 @@
 //     duplicated. refreshPlexSection is likewise skipped: library-scan.test.mts
 //     already pins it through its only caller.
 //
-// No DB (plex.ts's only import is safe-fetch — prisma never loads) and no
+// No DB (the plex-*.ts client loads no prisma module) and no
 // network/DNS: globalThis.fetch is scripted per URL and dns/promises.lookup is
 // stubbed to a PUBLIC address (plex.tv goes through safeFetchTrusted, which
 // rejects private answers; the admin-configured server host accepts public
@@ -408,7 +409,7 @@ test("recentOnly early stop: paging ends once an ENTIRE addedAt-desc page predat
   assert.deepEqual([...items.keys()].sort((a, b) => a - b), [1, 2, 3, 4]);
 });
 
-test("getPlexSectionTmdbIds show sections: recentlyAdded path, allLeaves filePath enrichment, and per-show leaf-failure degradation", async () => {
+test("getPlexSectionTmdbIds show sections: the recentlyAdded path, and no per-show request — a show's file path comes from the episode walk", async () => {
   const S = "http://plex-shows1.test:32400";
   respond = (url) => {
     if (url.pathname === "/library/sections/9/recentlyAdded") {
@@ -421,30 +422,17 @@ test("getPlexSectionTmdbIds show sections: recentlyAdded path, allLeaves filePat
         { totalSize: 3 },
       );
     }
-    if (url.pathname === "/library/metadata/201/allLeaves") {
-      return okJson({
-        MediaContainer: { Metadata: [{ Media: [{ Part: [{ file: "/tv/Show A/S01E01.mkv" }] }] }] },
-      });
-    }
-    if (url.pathname === "/library/metadata/202/allLeaves") return okJson({ error: "boom" }, 500);
-    if (url.pathname === "/library/metadata/203/allLeaves") throw new Error("socket hangup");
     throw new Error(`unexpected fetch ${url}`);
   };
 
   const items = await getPlexSectionTmdbIds(S, "t", "9", "show", { recentOnly: true });
   // recentOnly=true routes to /recentlyAdded; shows use type=2.
-  assert.equal(
-    fetchCalls[0].raw,
-    `${S}/library/sections/9/recentlyAdded?type=2&includeGuids=1&X-Plex-Container-Start=0&X-Plex-Container-Size=1000`,
+  assert.deepEqual(
+    fetchCalls.map((c) => c.raw),
+    [`${S}/library/sections/9/recentlyAdded?type=2&includeGuids=1&X-Plex-Container-Start=0&X-Plex-Container-Size=1000`],
+    "the listing is the only request: one allLeaves read per show used to follow it",
   );
-  // One single-episode leaf probe per show, capped to one item.
-  const leaf = fetchCalls.find((c) => c.url.pathname === "/library/metadata/201/allLeaves");
-  assert.ok(leaf);
-  assert.equal(leaf.raw, `${S}/library/metadata/201/allLeaves?X-Plex-Container-Start=0&X-Plex-Container-Size=1`);
-
-  assert.equal(items.get(100)?.filePath, "/tv/Show A/S01E01.mkv");
-  assert.equal(items.get(200)?.filePath, null, "a 500 leaf response leaves filePath null");
-  assert.equal(items.get(300)?.filePath, null, "a thrown leaf fetch is swallowed and leaves filePath null");
+  for (const id of [100, 200, 300]) assert.equal(items.get(id)?.filePath, null, `show ${id} carries no file of its own`);
 });
 
 test("getPlexSectionTmdbIds error shapes: a persistent 5xx and a missing MediaContainer throw with the page offset after retries exhaust", async (t: TestContext) => {
@@ -545,7 +533,7 @@ test("legacy-agent thetvdb://​/imdb:// items land in the legacy channel instea
 
 // ── getPlexTmdbIds ──────────────────────────────────────────────────────────
 
-test("getPlexTmdbIds lists sections, fans out over matching types only, and combines first-seen-wins", async () => {
+test("getPlexTmdbIds lists sections, fans out over matching types only, and keeps the first copy on an exact tie", async () => {
   const S = "http://plex-comb1.test:32400";
   const mv = (id: number, title: string) => ({ type: "movie", ratingKey: String(id), title, Guid: [{ id: `tmdb://${id}` }] });
   respond = (url) => {
@@ -569,7 +557,7 @@ test("getPlexTmdbIds lists sections, fans out over matching types only, and comb
 
   const combined = await getPlexTmdbIds(S, "t", "MOVIE");
   assert.deepEqual([...combined.keys()].sort((a, b) => a - b), [10, 20]);
-  assert.equal(combined.get(10)?.title, "From One", "a tmdbId in two sections keeps the first-seen entry");
+  assert.equal(combined.get(10)?.title, "From One", "copies alike in date and ratingKey: the first-seen entry stays");
   assert.ok(
     fetchCalls.every((c) => !c.url.pathname.startsWith("/library/sections/3/")),
     "show sections must not be fetched for a MOVIE sync",
@@ -582,8 +570,9 @@ test("getPlexTmdbIds lists sections, fans out over matching types only, and comb
 });
 
 // guardrail 37c: a title in two sections is two Plex items with two ratingKeys.
-// The merge keeps the first-seen entry but must keep the other copy's key
-// addressable, or every play/history entry filed under it resolves to nobody.
+// The merge keeps the preferred copy (newest addedAt) but must keep the other
+// copy's key addressable, or every play/history entry filed under it resolves
+// to nobody.
 test("getPlexTmdbIds records the losing section copy's ratingKey, without leaking it onto a conflated sibling", async () => {
   const S = "http://plex-comb3.test:32400";
   respond = (url) => {
@@ -596,12 +585,12 @@ test("getPlexTmdbIds records the losing section copy's ratingKey, without leakin
     if (url.pathname === "/library/sections/1/all") {
       return mediaContainer([
         // One conflated item claiming two tmdb ids — ONE entry object is shared by both.
-        { type: "movie", ratingKey: "100", title: "Merged", Guid: [{ id: "tmdb://10" }, { id: "tmdb://11" }] },
+        { type: "movie", ratingKey: "100", title: "Merged", addedAt: 1_700_000_100, Guid: [{ id: "tmdb://10" }, { id: "tmdb://11" }] },
       ], { totalSize: 1 });
     }
     if (url.pathname === "/library/sections/2/all") {
       return mediaContainer([
-        { type: "movie", ratingKey: "200", title: "4K copy", Guid: [{ id: "tmdb://10" }] },
+        { type: "movie", ratingKey: "200", title: "4K copy", addedAt: 1_700_000_000, Guid: [{ id: "tmdb://10" }] },
         // A split duplicate inside one section: both items stay addressable.
         { type: "movie", ratingKey: "300", title: "Dup A", Guid: [{ id: "tmdb://30" }] },
         { type: "movie", ratingKey: "301", title: "Dup B", Guid: [{ id: "tmdb://30" }] },
@@ -612,7 +601,7 @@ test("getPlexTmdbIds records the losing section copy's ratingKey, without leakin
 
   const { plexLibraryRatingKeys } = await import("../src/lib/plex.ts");
   const combined = await getPlexTmdbIds(S, "t", "MOVIE");
-  assert.equal(combined.get(10)?.ratingKey, "100", "the first-seen copy still owns the row");
+  assert.equal(combined.get(10)?.ratingKey, "100", "the newer copy owns the row");
   assert.deepEqual(plexLibraryRatingKeys(combined.get(10)!), ["100", "200"]);
   assert.deepEqual(
     plexLibraryRatingKeys(combined.get(11)!),
@@ -707,9 +696,6 @@ test("the type=2 walk accumulates ratingKey→tmdb ids, and a precomputed map sk
     if (url.pathname === "/library/sections/3/all") {
       return mediaContainer([{ type: "show", ratingKey: "70", title: "Severance", Guid: [{ id: "tmdb://95396" }] }], { totalSize: 1 });
     }
-    if (url.pathname === "/library/metadata/70/allLeaves") {
-      return mediaContainer([{ Media: [{ Part: [{ file: "/tv/severance/e1.mkv" }] }] }]);
-    }
     throw new Error(`unexpected fetch ${url}`);
   };
   const out = new Map<string, number[]>();
@@ -732,9 +718,9 @@ test("the type=2 walk accumulates ratingKey→tmdb ids, and a precomputed map sk
   );
 });
 
-test("skipShowFilePaths: the full show walk skips the per-show allLeaves probe; the type=4 walk captures the paths instead", async () => {
-  // The full sync used to fire ONE allLeaves request per show, every run, just
-  // to learn a file path the type=4 episode listing already carries.
+test("the show walk sends no per-show allLeaves probe; the type=4 walk captures the paths instead", async () => {
+  // The sync used to fire ONE allLeaves request per show, every run, just to
+  // learn a file path the type=4 episode listing already carries.
   const S = "http://plex-skip1.test:32400";
   respond = (url) => {
     if (url.pathname === "/library/sections/3/all" && url.searchParams.get("type") === "2") {
@@ -743,11 +729,11 @@ test("skipShowFilePaths: the full show walk skips the per-show allLeaves probe; 
     throw new Error(`unexpected fetch ${url}`);
   };
   const out = new Map<string, number[]>();
-  const items = await getPlexSectionTmdbIds(S, "t", "3", "show", { ratingKeyToTmdbOut: out, skipShowFilePaths: true });
+  const items = await getPlexSectionTmdbIds(S, "t", "3", "show", { ratingKeyToTmdbOut: out });
   assert.equal(items.get(95396)!.filePath, null, "no allLeaves probe ⇒ no path from the show walk");
   assert.ok(
     fetchCalls.every((c) => !c.url.pathname.includes("/allLeaves")),
-    "the per-show allLeaves fan-out must not fire when skipped",
+    "the per-show allLeaves fan-out must never fire",
   );
 
   fetchCalls.length = 0;
@@ -1690,4 +1676,161 @@ test("getPlexHomeUserToken: a 429 is an error (a rate limit says nothing about t
   await assert.rejects(() => getPlexHomeUserToken("admin", "888"), /rate-limited \(429\)/);
   respond = () => new Response("pin", { status: 403 });
   assert.equal(await getPlexHomeUserToken("admin", "888"), null);
+});
+
+// ── payload checks and the copy rule ─────────────────────────────────────────
+
+test("a duplicated title's stored copy does not depend on the order Plex lists its copies: newest addedAt, then the greater ratingKey", async () => {
+  const copies = [
+    { type: "movie", ratingKey: "300", title: "Older", addedAt: 1_700_000_000, Guid: [{ id: "tmdb://30" }] },
+    { type: "movie", ratingKey: "301", title: "Newer", addedAt: 1_700_000_500, Guid: [{ id: "tmdb://30" }] },
+    { type: "movie", ratingKey: "299", title: "Undated", Guid: [{ id: "tmdb://30" }] },
+  ];
+  const { plexLibraryRatingKeys } = await import("../src/lib/plex.ts");
+  for (const order of [copies, [...copies].reverse(), [copies[1], copies[2], copies[0]]]) {
+    respond = () => mediaContainer(order, { totalSize: order.length });
+    const items = await getPlexSectionTmdbIds("http://plex-copy-order.test:32400", "t", "1", "movie");
+    assert.equal(items.get(30)!.title, "Newer", "the newest copy wins inside a section, whatever the page order");
+    assert.deepEqual(plexLibraryRatingKeys(items.get(30)!), ["301", "299", "300"]);
+  }
+
+  // Across sections the same rule decides, whichever section is listed first.
+  const sectionsOf = (first: string) => [
+    { key: first, title: "A", type: "movie" as const },
+    { key: first === "1" ? "2" : "1", title: "B", type: "movie" as const },
+  ];
+  respond = (url) => url.pathname === "/library/sections/1/all"
+    ? mediaContainer([{ type: "movie", ratingKey: "10", title: "In one", addedAt: 1_700_000_000, Guid: [{ id: "tmdb://40" }] }], { totalSize: 1 })
+    : mediaContainer([{ type: "movie", ratingKey: "20", title: "In two", addedAt: 1_700_000_900, Guid: [{ id: "tmdb://40" }] }], { totalSize: 1 });
+  for (const first of ["1", "2"]) {
+    const combined = await getPlexTmdbIds("http://plex-copy-sections.test:32400", "t", "MOVIE", { sections: sectionsOf(first) });
+    assert.equal(combined.get(40)!.title, "In two");
+    assert.deepEqual(plexLibraryRatingKeys(combined.get(40)!), ["20", "10"]);
+  }
+});
+
+test("getPlexLibrarySections: a 2xx without a MediaContainer is a clear failure, not retried", async (t: TestContext) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  respond = () => okJson({ error: "not plex" });
+  const done = assert.rejects(getPlexLibrarySections("http://plex-sec-nocontainer.test:32400", "t"), /Plex sections: no MediaContainer/);
+  for (const ms of [2_000, 4_000, 6_000]) { await flush(); t.mock.timers.tick(ms); }
+  await done;
+  assert.equal(fetchCalls.length, 1);
+});
+
+test("tmdb ids outside INT4 range are no ids, on the modern Guid and the legacy guid string alike", async () => {
+  assert.equal(parseTmdbGuid("tmdb://2147483647"), 2147483647);
+  assert.equal(parseTmdbGuid("tmdb://2147483648"), null);
+  respond = () => mediaContainer([
+    { type: "movie", ratingKey: "1", guid: "com.plexapp.agents.themoviedb://0?lang=en" },
+    { type: "movie", ratingKey: "2", guid: "com.plexapp.agents.themoviedb://99999999999?lang=en" },
+    { type: "movie", ratingKey: "3", guid: "com.plexapp.agents.themoviedb://605?lang=en" },
+    { type: "movie", ratingKey: "4", Guid: [{ id: "tmdb://2147483648" }] },
+  ], { totalSize: 4 });
+  const items = await getPlexSectionTmdbIds("http://plex-int4.test:32400", "t", "1", "movie");
+  assert.deepEqual([...items.keys()], [605]);
+});
+
+test("getPlexWatchHistory: a malformed account id throws before any request — the filter is never dropped to read every account", async () => {
+  const S = "http://plex-hist-account.test:32400";
+  await assert.rejects(() => getPlexWatchHistory(S, "t", { accountId: "1 OR 2" }), /Invalid Plex account id/);
+  await assert.rejects(() => getPlexWatchHistory(S, "t", { accountId: "" }), /Invalid Plex account id/);
+  assert.equal(fetchCalls.length, 0);
+
+  respond = () => mediaContainer([], { totalSize: 0 });
+  await getPlexWatchHistory(S, "t", { accountId: "5" });
+  assert.equal(fetchCalls[0].url.searchParams.get("accountID"), "5");
+});
+
+test("getPlexWatchHistory: a record the previous page already returned (the list grew mid-walk) counts once", async () => {
+  const S = "http://plex-hist-dedupe.test:32400";
+  const mv = (id: number, extra: Record<string, unknown> = {}) => ({ type: "movie", ratingKey: String(id), viewedAt: 1_700_000_000 - id, accountID: 1, ...extra });
+  respond = (url) => {
+    const start = Number(url.searchParams.get("X-Plex-Container-Start"));
+    if (start === 0) return mediaContainer(Array.from({ length: 1000 }, (_, i) => mv(i + 1)), { totalSize: 2000 });
+    // Two views landed: this page repeats the previous page's last two records.
+    if (start === 1000) return mediaContainer(Array.from({ length: 1000 }, (_, i) => mv(i + 999)), { totalSize: 2002 });
+    if (start === 2000) return mediaContainer([mv(1999), mv(2000)], { totalSize: 2002 });
+    throw new Error(`unexpected page start=${start}`);
+  };
+  const h = await getPlexWatchHistory(S, "t");
+  assert.equal(h.entries.filter((e) => e.itemKey === "999").length, 1);
+  assert.equal(h.entries.filter((e) => e.itemKey === "1000").length, 1);
+  assert.equal(h.records, 2000, "every play once");
+
+  // Plex's own historyKey is the identity when present: the same item and
+  // second under two history keys are two plays.
+  fetchCalls.length = 0;
+  respond = (url) => Number(url.searchParams.get("X-Plex-Container-Start")) === 0
+    ? mediaContainer([mv(1, { historyKey: "/status/sessions/history/9" })], { totalSize: 2 })
+    : mediaContainer([mv(1, { historyKey: "/status/sessions/history/8" })], { totalSize: 2 });
+  const twice = await getPlexWatchHistory(S, "t");
+  assert.equal(twice.records, 2);
+});
+
+test("getPlexUserStates: a transient 5xx on one chunk is retried, so the states already read are kept; no MediaContainer is a failed read", async (t: TestContext) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { getPlexUserStates } = await import("../src/lib/plex.ts");
+  const S = "http://plex-states.test:32400";
+  const keys = Array.from({ length: 60 }, (_, i) => String(i + 1));
+  let failedOnce = false;
+  respond = (url) => {
+    const asked = url.pathname.replace("/library/metadata/", "").split(",");
+    if (asked.includes("51") && !failedOnce) {
+      failedOnce = true;
+      return okJson({ error: "busy" }, 503);
+    }
+    return mediaContainer(asked.map((k) => ({ ratingKey: k, viewCount: 1 })));
+  };
+  const p = getPlexUserStates(S, "t", keys);
+  for (let i = 0; i < 5; i++) { await flush(); t.mock.timers.tick(2_000); }
+  const states = await p;
+  assert.equal(states.size, 60, "the second chunk's retry answered; the first chunk's states survived");
+  assert.ok(warns.some((w) => w.includes("[plex] retry 1/3")));
+
+  respond = () => okJson({ error: "not plex" });
+  await assert.rejects(getPlexUserStates(S, "t", ["1"]), /no MediaContainer/);
+});
+
+test("getPlexHomeUserToken: a 401 is the ADMIN token refused — an error, never 'no token for this user'", async () => {
+  const { getPlexHomeUserToken } = await import("../src/lib/plex.ts");
+  respond = () => new Response("unauthorized", { status: 401 });
+  await assert.rejects(() => getPlexHomeUserToken("admin", "888"), /refused the server's admin token \(401\)/);
+});
+
+test("the library walk takes a signal: an abort between pages rejects (never a partial library) and sends no further page", async () => {
+  const S = "http://plex-walk-abort.test:32400";
+  const controller = new AbortController();
+  respond = () => {
+    controller.abort();
+    return mediaContainer(Array.from({ length: 1000 }, (_, i) => ({ type: "movie", ratingKey: String(i + 1), Guid: [{ id: `tmdb://${i + 1}` }] })), { totalSize: 3000 });
+  };
+  await assert.rejects(getPlexSectionTmdbIds(S, "t", "1", "movie", { signal: controller.signal }));
+  assert.equal(fetchCalls.length, 1);
+
+  fetchCalls.length = 0;
+  const episodes = new AbortController();
+  episodes.abort();
+  await assert.rejects(getPlexTVEpisodes(S, "t", undefined, undefined, undefined, undefined, { signal: episodes.signal }));
+  assert.equal(fetchCalls.length, 0, "an aborted episode walk lists no sections");
+});
+
+test("getPlexSessions: Metadata that is not a list is a failed read; an odd field degrades without hiding the session", async () => {
+  const S = "http://plex-sess-shape.test:32400";
+  respond = () => okJson({ MediaContainer: { Metadata: { sessionKey: "1" } } });
+  await assert.rejects(() => getPlexSessions(S, "t"), /no MediaContainer/);
+
+  respond = () => mediaContainer([
+    null,
+    { sessionKey: 12, User: { id: 42, title: 7 }, duration: "long", viewOffset: 1.5, Player: "Living Room", Media: "none", Guid: [null, { id: "tmdb://5" }] },
+  ]);
+  const sessions = await getPlexSessions(S, "t");
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].sessionKey, "12", "a numeric sessionKey reads as its string");
+  assert.equal(sessions[0].accountId, "42");
+  assert.equal(sessions[0].accountName, "");
+  assert.equal(sessions[0].duration, 0);
+  assert.equal(sessions[0].viewOffset, 1);
+  assert.equal(sessions[0].state, "playing");
+  assert.equal(extractTmdbIdFromGuids(sessions[0].Guid), 5);
 });

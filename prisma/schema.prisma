@@ -505,6 +505,8 @@ model MediaRequest {
   @@index([status, createdAt(sort: Desc)])
   @@index([tvdbId])
   @@index([status, availableAt])
+  // Kept although it is a boolean: false is the rare value, and the sync's
+  // notify fallback looks those rows up (status AVAILABLE AND NOT notified).
   @@index([notifiedAvailable])
 }
 
@@ -782,6 +784,10 @@ model TmdbCache {
   // Serves the admin settings-page provider counts (key startsWith "omdb:" →
   // LIKE 'omdb:%') — the default-collation PK btree can't serve a LIKE prefix
   // scan, so those counts full-scanned the largest cache table.
+  // Prisma can't read the ops class back, so `migrate diff` reports this index
+  // on every run: its name is in docker-entrypoint.sh's _PRISMA_DIFF_NOISE,
+  // which the pre-upgrade dump ignores (tests/entrypoint.test.mts checks every
+  // raw-ops index here is listed).
   @@index([key(ops: raw("text_pattern_ops"))])
 }
 
@@ -901,9 +907,15 @@ model Issue {
   messages IssueMessage[]
   grabs    IssueGrab[]
 
-  @@index([reportedBy])
+  // The user's issue list filters on reportedBy and orders by updatedAt DESC
+  // (app/(app)/issues/page.tsx); the prefix still serves reportedBy alone and
+  // the cascade from a deleted user.
+  @@index([reportedBy, updatedAt(sort: Desc)])
   @@index([claimedBy])
   @@index([status])
+  // GET /api/issues and the admin list page by (createdAt DESC, id DESC) with
+  // a (createdAt, id) cursor.
+  @@index([createdAt(sort: Desc), id])
 }
 
 model IssueMessage {
@@ -1023,7 +1035,8 @@ model AuditLog {
   sessionId String?     @db.VarChar(64)
 
   @@index([createdAt(sort: Desc)])
-  @@index([userName])
+  // No index on userName: the audit page's user filter is a case-insensitive
+  // substring match (ILIKE '%x%'), which a btree can't serve.
   @@index([target])
   @@index([userId, createdAt(sort: Desc)])
   @@index([action, createdAt(sort: Desc)])
@@ -1248,6 +1261,8 @@ enum AuditAction {
   ARR_TITLE_ADD
   // An admin removed a title from one Radarr/Sonarr instance (files optionally deleted).
   ARR_TITLE_DELETE
+  // An admin sent the fixed "update Summonarr" push to every iOS device.
+  PUSH_BROADCAST
 }
 
 // ─── Play History ────────────────────────────────────────────────────────────
@@ -1444,7 +1459,8 @@ model PlayHistory {
   @@index([tmdbId, mediaType])
   @@index([startedAt(sort: Desc)])
   @@index([source, sourceItemId, mediaServerUserId, startedAt])
-  @@index([watched])
+  // No index on `watched` alone: it is a near even split, and every query that
+  // filters on it also narrows by user, title or a startedAt range.
   @@index([referenceId])
   // Powers the arc-detection window functions in getMostPopularOnServer — partition key
   // (user, tmdbId, mediaType, season, episode) ordered by startedAt lets Postgres skip the sort.

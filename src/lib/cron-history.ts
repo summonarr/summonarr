@@ -2,7 +2,9 @@
 // route writes (withCronRunRecording), its readers for the System tab, and the
 // skipped answer that leaves it untouched (guardrail 7b).
 import { prisma } from "@/lib/prisma";
-import { CRON_SKIPPED_HEADER } from "@/lib/cron-run-outcome";
+import { CRON_DEGRADED_HEADER, CRON_SKIPPED_HEADER } from "@/lib/cron-run-outcome";
+import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
+import { processSingleton } from "@/lib/process-singleton";
 
 /**
  * How many recent runs the ledger keeps per target.
@@ -40,23 +42,40 @@ export interface CronRunEntry {
 // System`). `recent` is what makes a cadence anomaly legible without log
 // archaeology.
 //
-// Single writer per `target` in the normal case, so no locking is used here.
-// Two genuinely concurrent
-// recorders for one target could interleave the read and lose an entry from the
-// history; that is accepted — this row is observability, and the write below
-// still records the run that just finished either way.
-export async function recordCronRun(
+// The read-modify-write below is serialized per target in this process: a
+// manual "Run now" and a scheduled run finishing together would otherwise read
+// the same history and the later write would drop the earlier run. Summonarr
+// runs as one long-lived server (guardrail 17), so a process-wide queue
+// (processSingleton, guardrail 27a) covers every writer; no DB lock is needed
+// for an observability row.
+const ledgerQueue = processSingleton("cron-history:ledger-queue", () => new Map<string, Promise<void>>());
+
+export function recordCronRun(
   target: string,
   durationMs: number,
   ok: boolean = true,
 ): Promise<void> {
-  const key = `cron:lastRun:${target}`;
+  // Stamped now, not when the queued write runs.
   const entry: CronRunEntry = { at: new Date().toISOString(), durationMs, ok };
+  const write = () => writeCronRun(target, entry);
+  const next = (ledgerQueue.get(target) ?? Promise.resolve()).then(write, write);
+  ledgerQueue.set(target, next);
+  const settle = () => {
+    if (ledgerQueue.get(target) === next) ledgerQueue.delete(target);
+  };
+  void next.then(settle, settle);
+  return next;
+}
 
-  // Best-effort history read. Recording THIS run is the job's actual contract;
-  // its predecessors are a nicety. A read that throws — or a caller whose
-  // Prisma surface has no `setting.findUnique` at all — must therefore degrade
-  // to "no history yet" and still write, never propagate.
+// Never rejects: recording THIS run is the job's actual contract, and a failed
+// observability write must never fail the cron route that ran it (guardrail 7b).
+// Failures warn once per condition (warnOnChange), not once per run.
+async function writeCronRun(target: string, entry: CronRunEntry): Promise<void> {
+  const key = `cron:lastRun:${target}`;
+
+  // Best-effort history read: its predecessors are a nicety. A read that throws
+  // — or a caller whose Prisma surface has no `setting.findUnique` at all —
+  // degrades to "no history yet" and still writes, never propagates.
   let recent: CronRunEntry[] = [];
   try {
     const existing = await prisma.setting.findUnique({
@@ -64,17 +83,35 @@ export async function recordCronRun(
       select: { value: true },
     });
     recent = parseCronRunHistory(existing?.value);
-  } catch { /* history unavailable — record the run without it */ }
+    forgetWarnOnChange(`cron-history:read:${target}`);
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    warnOnChange(
+      `cron-history:read:${target}`,
+      why,
+      `[cron-history] could not read the ${target} run history; recording this run without it: ${why}`,
+    );
+  }
 
   const value = JSON.stringify({
     ...entry,
     recent: [entry, ...recent].slice(0, CRON_RUN_HISTORY_LIMIT),
   });
-  await prisma.setting.upsert({
-    where: { key },
-    create: { key, value },
-    update: { value },
-  }).catch(() => { /* observability write — never fail the caller */ });
+  try {
+    await prisma.setting.upsert({
+      where: { key },
+      create: { key, value },
+      update: { value },
+    });
+    forgetWarnOnChange(`cron-history:write:${target}`);
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    warnOnChange(
+      `cron-history:write:${target}`,
+      why,
+      `[cron-history] could not record the ${target} run: ${why}`,
+    );
+  }
 }
 
 // Wraps a cron/sync route body so a single recordCronRun call always fires on
@@ -97,8 +134,9 @@ export async function recordCronRun(
 // happened, so a ledger entry for it (ok, ~0 ms) would over-count runs/h on the
 // System tab — the one place guardrail 7b says a cadence anomaly is read. The
 // header lives in cron-run-outcome.ts, which the admin cron table shares to
-// show a manual skip as a skip.
-export { CRON_SKIPPED_HEADER };
+// show a manual skip as a skip; so does CRON_DEGRADED_HEADER, which every
+// producer names instead of spelling the header out.
+export { CRON_DEGRADED_HEADER, CRON_SKIPPED_HEADER };
 
 export async function withCronRunRecording<T extends Response>(
   target: string,
@@ -110,7 +148,7 @@ export async function withCronRunRecording<T extends Response>(
   try {
     const res = await fn();
     if (res.headers.get(CRON_SKIPPED_HEADER) !== null) skipped = true;
-    else if (res.status >= 400 || res.headers.get("x-cron-degraded") !== null) ok = false;
+    else if (res.status >= 400 || res.headers.get(CRON_DEGRADED_HEADER) !== null) ok = false;
     return res;
   } catch (err) {
     ok = false;

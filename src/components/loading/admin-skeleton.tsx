@@ -4,7 +4,7 @@
 // instead of blocking on the server render. Every admin page opens with the
 // shared PageHeader + subtitle, so the header is the kit's SkeletonHeader (33px
 // title line box, 18px subtitle line box, mb-5); the body is neutral 44px rows.
-import { Bar, SKELETON_CARD, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
+import { Bar, SKELETON_CARD, SkeletonHeader, SkeletonRoot } from "@/components/loading/skeleton-primitives";
 
 export function AdminSkeleton({ rows = 8 }: { rows?: number }) {
   return (

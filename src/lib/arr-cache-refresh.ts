@@ -5,17 +5,17 @@
 // One copy on purpose: the three copies this replaced had already drifted (only
 // the orchestrator reported a failed NAMED instance; guardrail 36).
 
-import { prisma } from "./prisma";
-import { getRadarrWantedTmdbIds, getSonarrWantedTmdbIds } from "./arr";
+import { prisma, type PrismaTxClient } from "./prisma";
+import { getRadarrWantedTmdbIds, getSonarrWantedTmdbIds, mergePartialWantedSets, type ArrWantedSets } from "./arr";
 import { getSyncableArrInstances } from "./arr-instance-registry";
 import { DEFAULT_ARR_INSTANCE, type ArrService } from "./arr-instances";
 import { settleLimit } from "./concurrency";
-import { BATCH_TX_TIMEOUT, batchCreateMany } from "./cron-auth";
+import { BATCH_TX_TIMEOUT, batchCreateMany } from "./batch-write";
 
 // The extended client's type (the encryption extension in ./prisma), not the
 // generated Prisma.TransactionClient, which the interactive-tx callback param
-// is not assignable to (see cron-auth.ts LibraryTxClient).
-type ArrCacheTxClient = Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
+// is not assignable to (see batch-write.ts LibraryTxClient).
+type ArrCacheTxClient = PrismaTxClient;
 
 const FETCH_CONCURRENCY = 5;
 
@@ -59,6 +59,10 @@ export type ArrCacheRefresh = {
  * - The default instance ("") is authoritative: if it failed, nothing is
  *   written, so a transient default outage can never mass-demote AVAILABLE
  *   requests off an emptied cache.
+ * - A PARTIAL result (Sonarr series TMDB couldn't map this run) still writes
+ *   what it knows, but keeps every cached row it doesn't mention
+ *   (mergePartialWantedSets), so a series that only failed to resolve is never
+ *   evicted.
  * - An enabled-but-unconfigured service writes nothing and still reports
  *   "written" with no synced slugs — callers key the revert/re-push gates on
  *   `syncedSlugs`, never on the outcome alone.
@@ -80,13 +84,20 @@ export async function refreshArrCache(service: ArrService): Promise<ArrCacheRefr
   }
 
   const writable = fetched.flatMap((f) => (f.result ? [{ slug: f.slug, result: f.result }] : []));
+  let wantedCount = 0;
+  let availableCount = 0;
   try {
     await prisma.$transaction(async (tx) => {
       await lockArrCacheInTx(tx, service);
+      wantedCount = 0;
+      availableCount = 0;
       // Sequential awaits only: one connection runs one query at a time (guardrail 23c).
       for (const { slug, result } of writable) {
-        const wantedRows    = Array.from(result.wanted).map((tmdbId) => ({ tmdbId, arrInstance: slug }));
-        const availableRows = Array.from(result.available).map((tmdbId) => ({ tmdbId, arrInstance: slug }));
+        const sets = result.partial ? mergePartialWantedSets(result, await cachedSetsInTx(tx, service, slug)) : result;
+        wantedCount += sets.wanted.size;
+        availableCount += sets.available.size;
+        const wantedRows    = Array.from(sets.wanted).map((tmdbId) => ({ tmdbId, arrInstance: slug }));
+        const availableRows = Array.from(sets.available).map((tmdbId) => ({ tmdbId, arrInstance: slug }));
         if (service === "radarr") {
           await tx.radarrWantedItem.deleteMany({ where: { arrInstance: slug } });
           if (wantedRows.length > 0) await batchCreateMany(tx.radarrWantedItem, wantedRows);
@@ -109,7 +120,16 @@ export async function refreshArrCache(service: ArrService): Promise<ArrCacheRefr
     failedSlugs,
     outcome: "written",
     syncedSlugs: writable.map((w) => w.slug),
-    wanted: writable.reduce((sum, { result }) => sum + result.wanted.size, 0),
-    available: writable.reduce((sum, { result }) => sum + result.available.size, 0),
+    wanted: wantedCount,
+    available: availableCount,
   };
+}
+
+// One instance's cached rows, read under the service's lock for a partial merge.
+async function cachedSetsInTx(tx: ArrCacheTxClient, service: ArrService, slug: string): Promise<Pick<ArrWantedSets, "wanted" | "available">> {
+  const where = { arrInstance: slug };
+  const select = { tmdbId: true } as const;
+  const wanted = service === "radarr" ? await tx.radarrWantedItem.findMany({ where, select }) : await tx.sonarrWantedItem.findMany({ where, select });
+  const available = service === "radarr" ? await tx.radarrAvailableItem.findMany({ where, select }) : await tx.sonarrAvailableItem.findMany({ where, select });
+  return { wanted: new Set(wanted.map((r) => r.tmdbId)), available: new Set(available.map((r) => r.tmdbId)) };
 }

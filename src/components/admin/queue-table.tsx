@@ -99,17 +99,27 @@ export function useHiddenColumns() {
   }, []);
   function saveHidden(next: ReadonlySet<ColumnId>) {
     setHidden(next);
-    try {
-      localStorage.setItem(HIDDEN_COLUMNS_KEY, JSON.stringify([...next]));
-    } catch {}
+    persistHidden(next);
   }
+  // From the latest set, never the one this render closed over: two toggles
+  // before a re-render both land.
   function toggleColumn(id: ColumnId, on: boolean) {
-    const next = new Set(hidden);
-    if (on) next.delete(id);
-    else next.add(id);
-    saveHidden(next);
+    setHidden((prev) => {
+      const next = new Set(prev);
+      if (on) next.delete(id);
+      else next.add(id);
+      persistHidden(next);
+      return next;
+    });
   }
   return { hidden, saveHidden, toggleColumn };
+}
+
+// Idempotent, so it is safe inside a state updater (which may run twice).
+function persistHidden(next: ReadonlySet<ColumnId>) {
+  try {
+    localStorage.setItem(HIDDEN_COLUMNS_KEY, JSON.stringify([...next]));
+  } catch {}
 }
 
 // Which rows' details are open, and the table frame's visible width. Called by
@@ -307,6 +317,187 @@ export interface QueueRowActions {
   onRemove: (row: QueueItem, action: QueueRemoveAction) => void;
 }
 
+// The line under a Sonarr row's title: the seasons of a season pack, else the
+// episodes, and how many episodes a multi-episode download holds.
+function EpisodeLine({ row: r }: { row: QueueItem }) {
+  const t = useT();
+  const seasons = seasonPackSeasons(r.title, r.episodes);
+  return (
+    <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-muted)" }}>
+      {seasons
+        ? `${seasons.map((n) => t("adminManage.queue.seasonNumber", { n })).join(", ")} · ${t("adminManage.queue.import.releaseTypes.seasonPack")}`
+        : episodeSummary(r.episodes)}
+      {r.episodes.length > 1 && <span> · {t("adminManage.queue.episodeCount", { count: r.episodes.length })}</span>}
+    </div>
+  );
+}
+
+// Chiplets stand in for every detail column the viewer has hidden, so the table stays narrow.
+function HiddenColumnChips({ row: r, hidden, multiInstance, arrLabel, fmt }: {
+  row: QueueItem;
+  hidden: ReadonlySet<ColumnId>;
+  multiInstance: boolean;
+  arrLabel: string;
+  fmt: QueueFormatters;
+}) {
+  const t = useT();
+  return (
+    <div className="flex flex-wrap items-center gap-1" style={{ marginTop: 3 }}>
+      {multiInstance && hidden.has("instance") && <Chip>{arrLabel}</Chip>}
+      {hidden.has("quality") && r.quality && <Chip>{r.quality}</Chip>}
+      {hidden.has("quality") && r.qualityTags.map((q) => <Chip key={q}>{t(QUALITY_TAG_LABEL[q])}</Chip>)}
+      {hidden.has("size") && r.size > 0 && <Chip>{fmt.size(r.size)}</Chip>}
+      {hidden.has("downloadClient") && r.downloadClient && (
+        <Chip><ProtocolIcon row={r} /> {r.downloadClient}</Chip>
+      )}
+      {hidden.has("indexer") && r.indexer && <Chip>{r.indexer}</Chip>}
+      {hidden.has("languages") && r.languages.length > 0 && <Chip>{r.languages.join(", ")}</Chip>}
+    </div>
+  );
+}
+
+// The always-shown first cell: the details toggle, the title and its links,
+// the episode line, the chiplets, and the release name when it differs.
+function QueueTitleCell({ row: r, arrLabel, hidden, multiInstance, fmt, open, onToggle }: {
+  row: QueueItem;
+  arrLabel: string;
+  hidden: ReadonlySet<ColumnId>;
+  multiInstance: boolean;
+  fmt: QueueFormatters;
+  open: boolean;
+  onToggle: (key: string) => void;
+}) {
+  const t = useT();
+  const detailHref = r.tmdbId !== null ? `/${r.service === "radarr" ? "movie" : "tv"}/${r.tmdbId}` : null;
+  const key = rowKey(r);
+  const title = r.mediaTitle || r.title;
+  return (
+    <td style={{ ...td, maxWidth: 380 }}>
+      <div className="flex items-start gap-1.5" style={{ minWidth: 220 }}>
+        <button
+          type="button"
+          onClick={() => onToggle(key)}
+          aria-expanded={open}
+          aria-controls={`queue-details-${key}`}
+          aria-label={t(open ? "adminManage.queue.details.hide" : "adminManage.queue.details.show", { title })}
+          className="ds-hover-tint inline-flex shrink-0 items-center justify-center rounded-md text-zinc-400 hover:text-zinc-100 outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
+          style={{ width: 22, height: 22, marginTop: -1 }}
+        >
+          {open ? <ChevronDown style={{ width: 14, height: 14 }} aria-hidden /> : <ChevronRight style={{ width: 14, height: 14 }} aria-hidden />}
+        </button>
+        <div className="min-w-0">
+          <div className="flex items-center gap-1" style={{ fontWeight: 500 }}>
+            <span className="min-w-0" style={{ overflowWrap: "anywhere" }}>
+              {detailHref ? <Link href={detailHref} className="hover:underline">{title}</Link> : title}
+              {r.year ? <span style={{ color: "var(--ds-fg-subtle)", fontWeight: 400 }}> ({r.year})</span> : null}
+            </span>
+            {r.arrMediaId !== null && (
+              <OpenInArrLink
+                service={r.service}
+                instance={r.instance}
+                target={{ arrId: r.arrMediaId }}
+                label={t("adminManage.openIn", { name: arrLabel })}
+                iconOnly
+              />
+            )}
+          </div>
+          {r.episodes.length > 0 && <EpisodeLine row={r} />}
+          <HiddenColumnChips row={r} hidden={hidden} multiInstance={multiInstance} arrLabel={arrLabel} fmt={fmt} />
+          {r.title !== title && (
+            <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", overflowWrap: "anywhere" }} title={r.title}>
+              {r.title}
+            </div>
+          )}
+        </div>
+      </div>
+    </td>
+  );
+}
+
+// The row's actions: manage, import, grab, and the three removals.
+function QueueRowButtons({ row: r, arrLabel, acting, actions }: {
+  row: QueueItem;
+  arrLabel: string;
+  acting: ReadonlySet<string>;
+  actions: QueueRowActions;
+}) {
+  const t = useT();
+  const key = rowKey(r);
+  const title = r.mediaTitle || r.title;
+  const arrId = r.arrMediaId;
+  return (
+    <td style={{ ...td, textAlign: "right" }}>
+      <div className="flex flex-wrap justify-end gap-1" style={{ maxWidth: 170, marginLeft: "auto" }}>
+        {/* Unknown/unmatched downloads name no title on the instance — nothing to manage. */}
+        {arrId !== null && (
+          <Button
+            size="icon-xs"
+            variant="ghost"
+            onClick={() => actions.onManage({ service: r.service, instance: r.instance, arrId, label: arrLabel })}
+            title={t("adminArr.manage.button", { name: arrLabel })}
+            aria-label={t("adminManage.queue.action.manageAria", { title, name: arrLabel })}
+          >
+            <Wrench />
+          </Button>
+        )}
+        {canImport(r) && (
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={() => actions.onImport(r)}
+            aria-label={t("adminManage.queue.action.importAria", { title })}
+          >
+            <FileCheck />
+            {t("adminManage.queue.action.import")}
+          </Button>
+        )}
+        {r.pending && (
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={() => actions.onGrab(r)}
+            disabled={acting.has(key)}
+            aria-label={t("adminManage.queue.action.grabAria", { title })}
+          >
+            {acting.has(key) ? <Loader2 className="animate-spin" /> : <Download />}
+            {t("adminManage.queue.action.grab")}
+          </Button>
+        )}
+        {/* A held release was never downloaded — there is nothing to search a replacement FOR yet. */}
+        {!r.pending && (
+          <Button
+            size="icon-xs"
+            variant="outline"
+            title={t("adminManage.queue.action.blocklistSearch")}
+            onClick={() => actions.onRemove(r, "blocklistSearch")}
+            aria-label={t("adminManage.queue.action.blocklistSearchAria", { title })}
+          >
+            <RotateCcw />
+          </Button>
+        )}
+        <Button
+          size="icon-xs"
+          variant="outline"
+          title={t("adminManage.queue.action.blocklist")}
+          onClick={() => actions.onRemove(r, "blocklist")}
+          aria-label={t("adminManage.queue.action.blocklistAria", { title })}
+        >
+          <Ban />
+        </Button>
+        <Button
+          size="icon-xs"
+          variant="ghost"
+          title={t("adminManage.queue.remove.button")}
+          onClick={() => actions.onRemove(r, "remove")}
+          aria-label={t("adminManage.queue.remove.aria", { title })}
+        >
+          <Trash2 />
+        </Button>
+      </div>
+    </td>
+  );
+}
+
 function QueueRow({
   row: r,
   arrLabel,
@@ -332,144 +523,13 @@ function QueueRow({
   frameWidth: number | null;
   actions: QueueRowActions;
 }) {
-  const t = useT();
-  const detailHref = r.tmdbId !== null ? `/${r.service === "radarr" ? "movie" : "tv"}/${r.tmdbId}` : null;
   const key = rowKey(r);
-  const title = r.mediaTitle || r.title;
-  const arrId = r.arrMediaId;
   return (
     <>
       <tr className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>
-        <td style={{ ...td, maxWidth: 380 }}>
-          <div className="flex items-start gap-1.5" style={{ minWidth: 220 }}>
-            <button
-              type="button"
-              onClick={() => onToggle(key)}
-              aria-expanded={open}
-              aria-controls={`queue-details-${key}`}
-              aria-label={t(open ? "adminManage.queue.details.hide" : "adminManage.queue.details.show", { title })}
-              className="ds-hover-tint inline-flex shrink-0 items-center justify-center rounded-md text-zinc-400 hover:text-zinc-100 outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
-              style={{ width: 22, height: 22, marginTop: -1 }}
-            >
-              {open ? <ChevronDown style={{ width: 14, height: 14 }} aria-hidden /> : <ChevronRight style={{ width: 14, height: 14 }} aria-hidden />}
-            </button>
-            <div className="min-w-0">
-              <div className="flex items-center gap-1" style={{ fontWeight: 500 }}>
-                <span className="min-w-0" style={{ overflowWrap: "anywhere" }}>
-                  {detailHref ? <Link href={detailHref} className="hover:underline">{title}</Link> : title}
-                  {r.year ? <span style={{ color: "var(--ds-fg-subtle)", fontWeight: 400 }}> ({r.year})</span> : null}
-                </span>
-                {r.arrMediaId !== null && (
-                  <OpenInArrLink
-                    service={r.service}
-                    instance={r.instance}
-                    target={{ arrId: r.arrMediaId }}
-                    label={t("adminManage.openIn", { name: arrLabel })}
-                    iconOnly
-                  />
-                )}
-              </div>
-              {r.episodes.length > 0 && (
-                <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-muted)" }}>
-                  {(() => {
-                    const seasons = seasonPackSeasons(r.title, r.episodes);
-                    return seasons
-                      ? `${seasons.map((n) => t("adminManage.queue.seasonNumber", { n })).join(", ")} · ${t("adminManage.queue.import.releaseTypes.seasonPack")}`
-                      : episodeSummary(r.episodes);
-                  })()}
-                  {r.episodes.length > 1 && <span> · {t("adminManage.queue.episodeCount", { count: r.episodes.length })}</span>}
-                </div>
-              )}
-              {/* Chiplets stand in for every detail column the viewer has hidden, so the table stays narrow. */}
-              <div className="flex flex-wrap items-center gap-1" style={{ marginTop: 3 }}>
-                {multiInstance && hidden.has("instance") && <Chip>{arrLabel}</Chip>}
-                {hidden.has("quality") && r.quality && <Chip>{r.quality}</Chip>}
-                {hidden.has("quality") && r.qualityTags.map((q) => <Chip key={q}>{t(QUALITY_TAG_LABEL[q])}</Chip>)}
-                {hidden.has("size") && r.size > 0 && <Chip>{fmt.size(r.size)}</Chip>}
-                {hidden.has("downloadClient") && r.downloadClient && (
-                  <Chip><ProtocolIcon row={r} /> {r.downloadClient}</Chip>
-                )}
-                {hidden.has("indexer") && r.indexer && <Chip>{r.indexer}</Chip>}
-                {hidden.has("languages") && r.languages.length > 0 && <Chip>{r.languages.join(", ")}</Chip>}
-              </div>
-              {r.title !== title && (
-                <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", overflowWrap: "anywhere" }} title={r.title}>
-                  {r.title}
-                </div>
-              )}
-            </div>
-          </div>
-        </td>
+        <QueueTitleCell row={r} arrLabel={arrLabel} hidden={hidden} multiInstance={multiInstance} fmt={fmt} open={open} onToggle={onToggle} />
         {columns.map((c) => <QueueCell key={c.id} column={c.id} row={r} arrLabel={arrLabel} fmt={fmt} />)}
-        <td style={{ ...td, textAlign: "right" }}>
-          <div className="flex flex-wrap justify-end gap-1" style={{ maxWidth: 170, marginLeft: "auto" }}>
-            {/* Unknown/unmatched downloads name no title on the instance — nothing to manage. */}
-            {arrId !== null && (
-              <Button
-                size="icon-xs"
-                variant="ghost"
-                onClick={() => actions.onManage({ service: r.service, instance: r.instance, arrId, label: arrLabel })}
-                title={t("adminArr.manage.button", { name: arrLabel })}
-                aria-label={t("adminManage.queue.action.manageAria", { title, name: arrLabel })}
-              >
-                <Wrench />
-              </Button>
-            )}
-            {canImport(r) && (
-              <Button
-                size="xs"
-                variant="outline"
-                onClick={() => actions.onImport(r)}
-                aria-label={t("adminManage.queue.action.importAria", { title: r.mediaTitle || r.title })}
-              >
-                <FileCheck />
-                {t("adminManage.queue.action.import")}
-              </Button>
-            )}
-            {r.pending && (
-              <Button
-                size="xs"
-                variant="outline"
-                onClick={() => actions.onGrab(r)}
-                disabled={acting.has(key)}
-                aria-label={t("adminManage.queue.action.grabAria", { title: r.mediaTitle || r.title })}
-              >
-                {acting.has(key) ? <Loader2 className="animate-spin" /> : <Download />}
-                {t("adminManage.queue.action.grab")}
-              </Button>
-            )}
-            {/* A held release was never downloaded — there is nothing to search a replacement FOR yet. */}
-            {!r.pending && (
-              <Button
-                size="icon-xs"
-                variant="outline"
-                title={t("adminManage.queue.action.blocklistSearch")}
-                onClick={() => actions.onRemove(r, "blocklistSearch")}
-                aria-label={t("adminManage.queue.action.blocklistSearchAria", { title: r.mediaTitle || r.title })}
-              >
-                <RotateCcw />
-              </Button>
-            )}
-            <Button
-              size="icon-xs"
-              variant="outline"
-              title={t("adminManage.queue.action.blocklist")}
-              onClick={() => actions.onRemove(r, "blocklist")}
-              aria-label={t("adminManage.queue.action.blocklistAria", { title: r.mediaTitle || r.title })}
-            >
-              <Ban />
-            </Button>
-            <Button
-              size="icon-xs"
-              variant="ghost"
-              title={t("adminManage.queue.remove.button")}
-              onClick={() => actions.onRemove(r, "remove")}
-              aria-label={t("adminManage.queue.remove.aria", { title: r.mediaTitle || r.title })}
-            >
-              <Trash2 />
-            </Button>
-          </div>
-        </td>
+        <QueueRowButtons row={r} arrLabel={arrLabel} acting={acting} actions={actions} />
       </tr>
       {open && (
         <tr id={`queue-details-${key}`} style={{ background: "var(--ds-bg-1)" }}>

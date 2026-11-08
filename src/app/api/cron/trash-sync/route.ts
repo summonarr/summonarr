@@ -1,72 +1,57 @@
-import { NextRequest, NextResponse } from "next/server";
-import { getCronActor, withCronRunRecording, cronSkippedResponse } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
-import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
+import { TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
+import { defineCronRoute } from "@/lib/cron-route";
 import { runTrashSync } from "@/lib/trash";
 import { isFeatureEnabled } from "@/lib/features";
+import { TRASH_DISABLED_SKIP_REASON } from "@/lib/trash-sync-text";
 
-export async function POST(request: NextRequest) {
-  const authCtx = await getCronActor(request);
-  if (!authCtx) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
+export const POST = defineCronRoute({
+  target: "trash-sync",
+  lockId: TRASH_SYNC_LOCK_ID,
   // TRaSH Guides is OFF by default. runTrashSync answers that with an
   // `errors: ["trashGuidesEnabled is off"]` result, which this route used to
   // turn into a 500 + an audit row: the entrypoint fast-retries any non-2xx
   // at CRON_RETRY_INTERVAL (300s), so a stock deployment ran the DAILY job
   // 288×/day, wrote 288 SETTINGS_CHANGE rows/day and kept the Run-now badge
   // red. A disabled feature is a skip (200, no audit), decided before the lock
-  // and the run ledger: no run happened, so no lock connection is opened and
-  // X-Cron-Skipped keeps it out of the run history (guardrail 7b).
-  if (!(await isFeatureEnabled("trashGuidesEnabled"))) {
-    return cronSkippedResponse("TRaSH Guides disabled");
-  }
+  // and the run ledger: no run happened (guardrail 7b).
+  // The admin card reads this reason back (trash-sync-text.ts) to tell "off"
+  // from "already running".
+  skipReason: async () => ((await isFeatureEnabled("trashGuidesEnabled")) ? null : TRASH_DISABLED_SKIP_REASON),
+  async run({ signal, actor, elapsedMs }) {
+    const result = await runTrashSync({ signal });
+    const durationMs = elapsedMs();
 
-  return withCronRunRecording("trash-sync", () => withAdvisoryLock(
-    TRASH_SYNC_LOCK_ID,
-    async (signal) => {
-      const startTime = Date.now();
-      const result = await runTrashSync({ signal });
-      const durationMs = Date.now() - startTime;
-
-      const recreated = result.applied.filter((r) => r.recreated).length;
-      const didWork = result.refreshed.length + result.applied.length > 0;
-      // Audit an admin-driven run always; a scheduled run only when it changed
-      // something — a cron tick that refreshed and applied nothing is not a
-      // settings change, and auditing it daily is noise in the admin's trail.
-      if (authCtx.trigger !== "cron" || didWork) await logAudit({
-        userId: authCtx.userId,
-        userName: authCtx.userName,
-        action: "SETTINGS_CHANGE",
-        target: "trash-sync",
-        details: {
-          refreshed: result.refreshed,
-          applied: {
-            count: result.applied.length,
-            failures: result.applied.filter((r) => !r.ok).length,
-            ...(recreated > 0 ? { recreated } : {}),
-          },
-          errors: result.errors,
-          durationMs,
-          trigger: authCtx.trigger,
+    const recreated = result.applied.filter((r) => r.recreated).length;
+    const didWork = result.refreshed.length + result.applied.length > 0;
+    // Audit an admin-driven run always; a scheduled run only when it changed
+    // something — a cron tick that refreshed and applied nothing is not a
+    // settings change, and auditing it daily is noise in the admin's trail.
+    if (actor.trigger !== "cron" || didWork) await logAudit({
+      userId: actor.userId,
+      userName: actor.userName,
+      action: "SETTINGS_CHANGE",
+      target: "trash-sync",
+      details: {
+        refreshed: result.refreshed,
+        applied: {
+          count: result.applied.length,
+          failures: result.applied.filter((r) => !r.ok).length,
+          ...(recreated > 0 ? { recreated } : {}),
         },
-      });
-
-      // Status stays 200 on a partial failure (the entrypoint fast-retries any
-      // non-2xx — a persistently failing spec would re-apply EVERY spec to every
-      // arr instance every 300s instead of once a day); X-Cron-Degraded is what
-      // marks the run failed in the ledger (withCronRunRecording).
-      const ok = result.errors.length === 0;
-      return NextResponse.json({
-        ok,
-        ...result,
-        // `error` (singular) is the field the admin Run-now badge surfaces.
-        ...(ok ? {} : { error: `${result.errors.length} TRaSH sync error(s)` }),
+        errors: result.errors,
         durationMs,
-        timestamp: new Date().toISOString(),
-      }, ok ? undefined : { headers: { "X-Cron-Degraded": String(result.errors.length) } });
-    },
-    () => cronSkippedResponse(),
-  ));
-}
+        trigger: actor.trigger,
+      },
+    });
+
+    // A partial failure stays 200 with X-Cron-Degraded: a non-2xx would make a
+    // persistently failing spec re-apply EVERY spec to every arr instance every
+    // 300s instead of once a day.
+    return {
+      body: { ...result, durationMs },
+      problems: result.errors.length,
+      error: `${result.errors.length} TRaSH sync error(s)`,
+    };
+  },
+});

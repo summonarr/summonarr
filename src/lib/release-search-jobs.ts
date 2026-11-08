@@ -38,7 +38,12 @@ export interface JobAnswer {
   body: unknown;
 }
 
+// What a job is: also its namespace, so a release search and another arr job
+// can never join each other even under the same key.
+type JobKind = "release-search" | "arr-job";
+
 type Job = {
+  kind: JobKind;
   owner: string;
   key: string;
   answer: JobAnswer | null;
@@ -60,17 +65,17 @@ function sweep(now: number): void {
   }
 }
 
-function startJob(scope: string, owner: string, key: string, run: () => Promise<JobAnswer>, now: number): { jobId: string; joined: boolean } {
-  const running = runningJob(owner, key);
+function startJob(kind: JobKind, owner: string, key: string, run: () => Promise<JobAnswer>, now: number): { jobId: string; joined: boolean } {
+  const running = runningJob(kind, owner, key);
   if (running) return { jobId: running, joined: true };
   sweepExpired(now);
   if (jobs.size >= MAX_JOBS) sweep(now);
   const jobId = randomBytes(16).toString("hex");
-  const job: Job = { owner, key, answer: null, finishedAt: null };
+  const job: Job = { kind, owner, key, answer: null, finishedAt: null };
   jobs.set(jobId, job);
   void run()
     .catch((err: unknown) => {
-      console.error(`[${scope}] background job failed:`, err);
+      console.error(`[${kind}] background job failed:`, err);
       return { status: 500, body: null } as JobAnswer;
     })
     .then((answer) => {
@@ -80,8 +85,8 @@ function startJob(scope: string, owner: string, key: string, run: () => Promise<
   return { jobId, joined: false };
 }
 
-function runningJob(owner: string, key: string): string | null {
-  for (const [id, j] of jobs) if (j.owner === owner && j.key === key && j.answer === null) return id;
+function runningJob(kind: JobKind, owner: string, key: string): string | null {
+  for (const [id, j] of jobs) if (j.kind === kind && j.owner === owner && j.key === key && j.answer === null) return id;
   return null;
 }
 
@@ -97,13 +102,14 @@ export function startReleaseSearchJob(owner: string, key: string, run: () => Pro
 
 /** The owner's job for `key` that is still running, if any — joining it costs no indexer hit. */
 export function runningReleaseSearchJob(owner: string, key: string): string | null {
-  return runningJob(owner, key);
+  return runningJob("release-search", owner, key);
 }
 
 /**
  * Any other long Radarr/Sonarr call as a job — startReleaseSearchJob's
- * contract, logged under its own scope. Keys share one map with the release
- * searches, so a caller prefixes its own (`provider-test\u0000…`).
+ * contract, logged under its own scope. Arr jobs are their own kind, so they
+ * never join a release search; among themselves a caller still prefixes its
+ * key (`provider-test\u0000…`).
  */
 export function startArrJob(owner: string, key: string, run: () => Promise<JobAnswer>, now: number = Date.now()): { jobId: string; joined: boolean } {
   return startJob("arr-job", owner, key, run, now);
@@ -111,7 +117,7 @@ export function startArrJob(owner: string, key: string, run: () => Promise<JobAn
 
 /** The owner's running job for `key`, if any — the same call again joins it. */
 export function runningArrJob(owner: string, key: string): string | null {
-  return runningJob(owner, key);
+  return runningJob("arr-job", owner, key);
 }
 
 export type JobPoll = { state: "unknown" } | { state: "running" } | { state: "done"; answer: JobAnswer };

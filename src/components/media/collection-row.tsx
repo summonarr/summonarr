@@ -12,7 +12,7 @@ interface CollectionRowProps {
   currentId: number;
   showPlex?: boolean;
   showJellyfin?: boolean;
-  canRequest?: boolean;
+  canRequest: boolean;
 }
 
 export function CollectionRow({

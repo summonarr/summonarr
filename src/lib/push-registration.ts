@@ -63,14 +63,17 @@ export async function tombstoneRemovedPushRowsInTx(
 ): Promise<void> {
   const web = rows.filter((r) => r.platform !== "ios");
   if (web.length === 0) return;
-  for (const row of web) {
-    const endpointHash = pushEndpointHash(row.endpoint);
-    await tx.pushSubscriptionRemoval.upsert({
-      where: { userId_endpointHash: { userId, endpointHash } },
-      create: { userId, endpointHash },
-      update: { removedAt: new Date() },
-    });
-  }
+  // Two statements for the whole batch, not one upsert per row: refresh the
+  // tombstones that already exist, then add the rest.
+  const endpointHashes = [...new Set(web.map((r) => pushEndpointHash(r.endpoint)))];
+  await tx.pushSubscriptionRemoval.updateMany({
+    where: { userId, endpointHash: { in: endpointHashes } },
+    data: { removedAt: new Date() },
+  });
+  await tx.pushSubscriptionRemoval.createMany({
+    data: endpointHashes.map((endpointHash) => ({ userId, endpointHash })),
+    skipDuplicates: true,
+  });
   const stale = await tx.pushSubscriptionRemoval.findMany({
     where: { userId },
     orderBy: { removedAt: "desc" },
@@ -88,19 +91,23 @@ export async function countUserPushRegistrationsInTx(tx: PushRegistrationClient,
 }
 
 // Makes room for one more registration under `cap` (0 or less = no cap) by
-// evicting the user's oldest row. An evicted web row is tombstoned so that
+// evicting the user's oldest rows: as many as it takes to leave cap - 1, so a
+// cap an admin lowered is enforced on the next registration instead of the
+// user staying over it for good. An evicted web row is tombstoned so that
 // browser's next page load can't bring it back and evict another device in turn.
 export async function evictOldestForCapInTx(tx: PushRegistrationClient, userId: string, cap: number): Promise<void> {
   if (cap <= 0) return;
-  if ((await countUserPushRegistrationsInTx(tx, userId)) < cap) return;
-  const oldest = await tx.pushSubscription.findFirst({
+  const count = await countUserPushRegistrationsInTx(tx, userId);
+  if (count < cap) return;
+  const oldest = await tx.pushSubscription.findMany({
     where: { userId },
     orderBy: { createdAt: "asc" },
+    take: count - cap + 1,
     select: { id: true, endpoint: true, platform: true },
   });
-  if (!oldest) return;
+  if (oldest.length === 0) return;
   // deleteMany (not delete): a missing row is count 0, not a P2025 that would
   // abort the transaction (guardrail 23).
-  await tx.pushSubscription.deleteMany({ where: { id: oldest.id } });
-  await tombstoneRemovedPushRowsInTx(tx, userId, [oldest]);
+  await tx.pushSubscription.deleteMany({ where: { id: { in: oldest.map((r) => r.id) } } });
+  await tombstoneRemovedPushRowsInTx(tx, userId, oldest);
 }

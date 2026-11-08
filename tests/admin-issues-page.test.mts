@@ -22,9 +22,14 @@ test("the cap notice shows only when rows past the cap exist", () => {
 });
 
 test("reporter names come from the typed user include", () => {
+  // The grouping lives in src/lib/issue-groups.ts (tests/issue-groups.test.mts).
+  const groups = readFileSync(new URL("../src/lib/issue-groups.ts", import.meta.url), "utf8");
   assert.doesNotMatch(page, /as unknown as/);
-  assert.match(page, /user: \{ name: string \| null; email: string \};/, "groupIssues' constraint names the include");
-  assert.match(page, /group\.map\(\(i\) => i\.user\.name \?\? i\.user\.email \?\? unknownName\)/);
+  assert.doesNotMatch(groups, /as unknown as/);
+  assert.match(page, /const groups = groupIssues\(allIssues\);/);
+  assert.match(groups, /user: \{ name: string \| null; email: string \};/, "groupIssues' constraint names the include");
+  // A blank display name falls back to the email (display-name.ts).
+  assert.match(groups, /reporterNames: group\.map\(\(i\) => nameOrEmail\(i\.user\)\)/);
 });
 
 test("IssueActions and its claim are built in one place each", () => {

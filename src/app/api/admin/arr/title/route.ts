@@ -5,10 +5,18 @@ import { arrFailure, arrGate, arrTitleGate, parseArrId, readWarnKey } from "@/li
 import { editedFields, parseTitleEdit } from "@/lib/arr-title";
 import { editTitle, findTitle, loadTitle } from "@/lib/arr-title-data";
 import { ARR_SERVICE_LABEL } from "@/lib/arr-admin";
-import { auditContext, logAudit } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
+import { tooManyRequests } from "@/lib/http";
 import { forgetWarnOnChange } from "@/lib/log-dedup";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { checkRateLimit } from "@/lib/rate-limit";
+
+// Edits per admin per minute. The Seasons tab sends one per season switch, so
+// an admin working down a long series sends many in a row (the episodes
+// route's budget): this bounds a runaway client — each edit reads the title
+// and the instance's choices, then writes it back.
+const EDIT_LIMIT_PER_MIN = 60;
 
 // Admin title manager (ADMIN) — one movie or series on one Radarr/Sonarr
 // instance, read and edited live.
@@ -27,7 +35,8 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 //       separate writes, and a half-applied edit could not be audited honestly).
 //       Every value must be one the instance offers (400 otherwise, nothing
 //       written). → { title } as the arr now has it. Audited ARR_TITLE_EDIT
-//       after the arr accepted it (guardrail 26).
+//       after the arr accepted it (guardrail 26). 429 past EDIT_LIMIT_PER_MIN
+//       per admin, checked after the body.
 // GET with `cached=1` → the last answer kept for this exact read, for display only
 // (src/lib/arr-snapshot.ts).
 export const GET = withAdmin(snapshotted(async (req) => {
@@ -62,6 +71,9 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   if (!edit) return NextResponse.json({ error: t("apiAdmin.arr.editInvalid") }, { status: 400 });
   const fields = editedFields(edit);
   if (fields.length === 0) return NextResponse.json({ error: t("apiAdmin.arr.editEmpty") }, { status: 400 });
+  if (!checkRateLimit(`arr-title-edit:${session.user.id}`, EDIT_LIMIT_PER_MIN, 60_000)) {
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
+  }
   let result;
   try {
     result = await editTitle(target.service, target.instance, target.arrId, edit);
@@ -72,8 +84,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   // Only what was written upstream is audited; an edit that changed nothing wrote nothing.
   if (applied.length === 0) return NextResponse.json({ title });
   void logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email ?? null,
+    ...auditActor(req, session),
     action: "ARR_TITLE_EDIT",
     target: `${target.service}:${target.instance}:${target.arrId}`,
     details: {
@@ -85,7 +96,6 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       ...(applied.includes("rootFolderPath") ? { rootFolderPath: edit.rootFolderPath, moveFiles: edit.moveFiles === true } : {}),
       ...(edit.seasons ? { seasons: edit.seasons } : {}),
     },
-    ...auditContext(req, session),
   });
   return NextResponse.json({ title });
 });

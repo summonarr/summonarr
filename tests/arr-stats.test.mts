@@ -299,3 +299,38 @@ test("an integration switched off is not called: its field is null and nothing o
   assert.deepEqual(result, { radarr: null, sonarr: entriesFor("tv"), extra: [], unreachable: [] });
   assert.deepEqual(fetchCalls.map((c) => new URL(c.url).origin), [new URL(SONARR_URL).origin], "no Radarr call at all");
 });
+
+test("a config read that throws for one instance lists it as unreachable — the other instances' disks still come back", async () => {
+  configureInstance("radarr", RADARR_URL, "rk", entriesFor("movies"));
+  settings.set("arrRadarrInstances", JSON.stringify([{ slug: "anime", name: "Anime" }]));
+  configureInstance("radarrAnime", RADARR_ANIME_URL, "rka", entriesFor("anime"));
+  configureInstance("sonarr", SONARR_URL, "sk", entriesFor("tv"));
+  // The anime instance's connection read fails (the database, or a value that
+  // no longer decrypts); the registry's configured-ness probe still answers.
+  shadowPrismaModel(prisma, "setting", {
+    findUnique: async (args: { where: { key: string } }) => {
+      const v = settings.get(args.where.key);
+      return v !== undefined ? { key: args.where.key, value: v } : null;
+    },
+    findMany: async (args: { where: { key: { in: string[] } } }) => {
+      if (args.where.key.in.includes("radarrAnimeRootFolder")) throw new Error("decrypt failed");
+      return args.where.key.in.filter((k) => settings.has(k)).map((k) => ({ key: k, value: settings.get(k) }));
+    },
+  });
+  try {
+    const result = await getArrDiskSpace();
+    assert.deepEqual(result.radarr, entriesFor("movies"));
+    assert.deepEqual(result.sonarr, entriesFor("tv"));
+    assert.deepEqual(result.extra, []);
+    assert.deepEqual(result.unreachable, [{ service: "radarr", slug: "anime", label: "Radarr (Anime)" }]);
+  } finally {
+    shadowPrismaModel(prisma, "setting", {
+      findUnique: async (args: { where: { key: string } }) => {
+        const v = settings.get(args.where.key);
+        return v !== undefined ? { key: args.where.key, value: v } : null;
+      },
+      findMany: async (args: { where: { key: { in: string[] } } }) =>
+        args.where.key.in.filter((k) => settings.has(k)).map((k) => ({ key: k, value: settings.get(k) })),
+    });
+  }
+});

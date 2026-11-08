@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { readJsonCapped } from "@/lib/body-size";
-import { logAudit, auditContext } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { invalidateBlacklistCache } from "@/lib/blacklist";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
@@ -65,12 +65,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   invalidateBlacklistCache();
   // Post-commit, non-transactional mutation ⇒ swallowing logAudit (guardrail 26).
   void logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email,
+    ...auditActor(req, session),
     action: "BLACKLIST_CHANGE",
     target: `blacklist:${mediaType}:${tmdbId}`,
     details: { op: "add", title: item.title, reason: item.reason },
-    ...auditContext(req, session),
   });
   // Additive: `created` is false when the title was already blocked.
   return NextResponse.json({ item, created: existing === null }, { status: 201 });
@@ -88,12 +86,10 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
   invalidateBlacklistCache();
   if (deleted.count > 0) {
     void logAudit({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email,
+      ...auditActor(req, session),
       action: "BLACKLIST_CHANGE",
       target: `blacklist:${mediaType}:${tmdbId}`,
       details: { op: "remove" },
-      ...auditContext(req, session),
     });
   }
   return NextResponse.json({ ok: true, removed: deleted.count });

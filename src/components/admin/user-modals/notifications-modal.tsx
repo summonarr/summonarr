@@ -12,6 +12,7 @@ import {
   AlertTriangle,
 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
 import { useModalA11y } from "@/hooks/use-modal-a11y";
 import { AdminToggleRow, type User } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
@@ -57,12 +58,19 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
   // so the page (every user, their counts, sessions and grades) is re-read ONCE
   // on close — for `u` to be fresh at the next open — not after every switch.
   const dirty = useRef(false);
+  // Saves still out. Closing mid-save used to skip the re-read (nothing had
+  // saved YET), so the next open showed the change reverted: the close now
+  // re-reads once they land.
+  const inFlight = useRef(new Set<Promise<unknown>>());
 
   const handleClose = useCallback(() => {
-    if (dirty.current) {
-      dirty.current = false;
+    const pending = [...inFlight.current];
+    if (pending.length > 0) {
+      void Promise.allSettled(pending).then(() => router.refresh());
+    } else if (dirty.current) {
       router.refresh();
     }
+    dirty.current = false;
     onClose();
   }, [onClose, router]);
 
@@ -75,26 +83,24 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
     setPrefs((p) => ({ ...p, [key]: newVal }));
     setSaving(true);
     setError(null);
+    const save = fetchJson(withBasePath(`/api/admin/users/${u.id}`), { init: jsonInit("PATCH", { [key]: newVal }) });
+    inFlight.current.add(save);
     try {
-      const res = await fetch(withBasePath(`/api/admin/users/${u.id}`), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [key]: newVal }),
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as { error?: string } | null;
-        setPrefs(prevPrefs);
-        setError(data?.error ?? t("adminManage.notif.failed", { status: res.status }));
+      const res = await save;
+      if (res.ok) {
+        dirty.current = true;
         return;
       }
-      dirty.current = true;
-    } catch {
-      // A network failure throws instead of returning a response, so the
-      // rollback above never runs. Undo the optimistic flip here too, or the
-      // switch would show a preference the server never stored.
+      // Refused, or no answer: undo the optimistic flip, or the switch would
+      // show a preference the server never stored.
       setPrefs(prevPrefs);
-      setError(t("adminManage.users.error.network"));
+      setError(
+        res.kind === "http" ? res.error || t("adminManage.notif.failed", { status: res.status })
+          : res.kind === "invalid" ? t("adminManage.notif.failed", { status: res.status })
+            : t("adminManage.users.error.network"),
+      );
     } finally {
+      inFlight.current.delete(save);
       setSaving(false);
     }
   }

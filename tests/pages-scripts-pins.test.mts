@@ -18,9 +18,20 @@ import { SETTINGS_SENSITIVE_KEYS } from "@/lib/settings-sensitive-keys.ts";
 
 const read = (rel: string) => readFileSync(new URL(`../${rel}`, import.meta.url), "utf8");
 
+// /requests and /issues read every key through the shared first() instead.
+for (const [file, keys] of [
+  ["src/app/(app)/requests/page.tsx", ["q", "status", "sort"]],
+  ["src/app/(app)/issues/page.tsx", ["q", "selected", "status", "type"]],
+] as const) {
+  test(`${file} reads its query through PageSearchParams and first()`, () => {
+    const src = read(file);
+    assert.match(src, /searchParams: Promise<PageSearchParams>/);
+    for (const key of keys) assert.match(src, new RegExp(`first\\(sp\\.${key}\\)`), `${key} must be reduced to its first value`);
+    assert.doesNotMatch(src, /\b(qParam|selectedId)\.trim\(\)/);
+  });
+}
+
 const PAGES: Array<{ file: string; raws: string[] }> = [
-  { file: "src/app/(app)/requests/page.tsx", raws: ["qRaw"] },
-  { file: "src/app/(app)/issues/page.tsx", raws: ["qRaw", "selectedRaw"] },
   { file: "src/app/(app)/admin/issues/page.tsx", raws: ["selectedRaw"] },
   { file: "src/app/(app)/admin/activity/users/page.tsx", raws: ["searchRaw"] },
 ];

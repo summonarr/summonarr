@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Trash2, Loader2, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
+import { readApiError } from "@/lib/client/api-error";
 import { DetailActionButton } from "@/components/media/detail-action-button";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
@@ -31,22 +32,14 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
   // input or button unmounts, so the root button that replaces it takes focus
   // (autoFocus acts on mount only) instead of focus falling to <body>.
   const [refocus, setRefocus] = useState(false);
-  // Client nav reuses this instance across titles. `alreadyVoted` is live so a
-  // refresh after voting (this button already router.refresh()es) matches.
-  const [seenTmdbId, setSeenTmdbId] = useState(tmdbId);
+  // A new title is a new instance (the action row keys this button by the
+  // title). Within one title `alreadyVoted` is live, so a refresh after voting
+  // (this button already router.refresh()es) or a change elsewhere matches.
   const [seenVoted, setSeenVoted] = useState(alreadyVoted);
-  const titleChanged = seenTmdbId !== tmdbId;
-  if (titleChanged) {
-    setSeenTmdbId(tmdbId);
-    setSeenVoted(alreadyVoted);
-    setState(alreadyVoted ? "voted" : "idle");
-    setReason("");
-    setRefocus(false);
-  } else if (alreadyVoted !== seenVoted && state !== "loading" && state !== "reason") {
+  if (alreadyVoted !== seenVoted && state !== "loading" && state !== "reason") {
     setSeenVoted(alreadyVoted);
     setState(alreadyVoted ? "voted" : "idle");
   }
-  const displayState = titleChanged ? (alreadyVoted ? "voted" : "idle") : state;
 
   function closeReason() {
     setState("idle");
@@ -69,7 +62,12 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
         router.refresh();
       } else {
         setState("idle");
-        toast({ title: rateLimitMessage(res, t) ?? t("request.vote.recordFailed"), variant: "error" });
+        // The route's own reason (your own request, not in the library, a
+        // stale page token…) says why a retry won't help; a 429 its wait.
+        toast({
+          title: rateLimitMessage(res, t) ?? (await readApiError(res, t("request.vote.recordFailed"))),
+          variant: "error",
+        });
       }
     } catch {
       setState("idle");
@@ -81,7 +79,10 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
     setState("loading");
     try {
       const res = await fetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "DELETE" });
-      if (res.ok) {
+      // 404: the vote is already gone (removed in another tab, or dismissed by
+      // an admin), which is what was asked for. Treating it as a failure kept
+      // the button on "Voted" and every retry 404'd again.
+      if (res.ok || res.status === 404) {
         setState("idle");
         toast({ title: t("request.vote.removed"), variant: "success" });
         router.refresh();
@@ -95,7 +96,7 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
     }
   }
 
-  if (displayState === "voted") {
+  if (state === "voted") {
     return (
       <DetailActionButton
         variant="danger-soft"
@@ -110,7 +111,7 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
     );
   }
 
-  if (displayState === "reason") {
+  if (state === "reason") {
     return (
       <div className="flex items-center gap-2 flex-wrap">
         <input
@@ -140,7 +141,7 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
     );
   }
 
-  if (displayState === "loading") {
+  if (state === "loading") {
     // aria-disabled, not disabled: the same <button> carries the idle, loading
     // and voted states, and disabling it would drop its focus to <body>. It has
     // no onClick, so a click while loading does nothing.

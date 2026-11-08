@@ -1,73 +1,45 @@
-import { NextRequest, NextResponse } from "next/server";
-import { cronSkippedResponse, isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
-import { prisma } from "@/lib/prisma";
-import { logAudit, getAuditPiiRetentionDays, REDACTED_USER_NAME } from "@/lib/audit";
-import { withAdvisoryLock, SCRUB_AUDIT_PII_LOCK_ID } from "@/lib/advisory-lock";
-import { scrubTargetPiiFromAudit } from "@/lib/audit-scrub";
+import { logAudit, getAuditPiiRetentionDays } from "@/lib/audit";
+import { SCRUB_AUDIT_PII_LOCK_ID } from "@/lib/advisory-lock";
+import { scrubAuditPii } from "@/lib/audit-pii-scrub";
+import { defineCronRoute } from "@/lib/cron-route";
 
-export async function POST(request: NextRequest) {
-  if (!(await isCronAuthorized(request))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+export const POST = defineCronRoute({
+  target: "audit-log:pii-scrub",
+  lockId: SCRUB_AUDIT_PII_LOCK_ID,
+  // Not signal-aware, and needn't be: every pass is idempotent and bounded by
+  // the cutoff, and a run past its lock timeout keeps the lock until it
+  // settles (withAdvisoryLock), so a second run never starts beside it.
+  async run() {
+    const retentionDays = await getAuditPiiRetentionDays();
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
 
-  return withCronRunRecording("audit-log:pii-scrub", () => withAdvisoryLock(
-    SCRUB_AUDIT_PII_LOCK_ID,
-    async () => {
-      const retentionDays = await getAuditPiiRetentionDays();
-      const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+    // The same scrub as the admin DELETE /api/admin/audit-log handler
+    // (audit-pii-scrub.ts): IP address, user agent and user name on every old
+    // row, the details of login/logout events, and the target-user names in
+    // admin-action details, once they pass the retention cutoff.
+    const { scrubbed, authDetailsCleared, adminDetailsScrubbed } = await scrubAuditPii(cutoff);
 
-      // Scrubs the same fields as the admin DELETE /api/admin/audit-log handler:
-      // IP address, user agent and user name on every old row, plus the details
-      // of login/logout events and the target-user names in admin-action
-      // details (below), once they pass the retention cutoff.
-      const piiResult = await prisma.auditLog.updateMany({
-        where: {
-          createdAt: { lt: cutoff },
-          OR: [
-            { ipAddress: { not: null } },
-            { userAgent: { not: null } },
-            { userName: { not: REDACTED_USER_NAME } },
-          ],
-        },
-        data: { ipAddress: null, userAgent: null, userName: REDACTED_USER_NAME },
-      });
-
-      const detailsResult = await prisma.auditLog.updateMany({
-        where: {
-          createdAt: { lt: cutoff },
-          action: { in: ["AUTH_LOGIN_FAILED", "AUTH_LOGIN", "AUTH_LOGOUT"] },
-          details: { not: null },
-        },
-        data: { details: null },
-      });
-
-      // Admin-action rows name their TARGET user in details (targetUser /
-      // legacy targetEmail) — audit-scrub.ts. Same cutoff, same promise.
-      const adminDetailsScrubbed = await scrubTargetPiiFromAudit(prisma, { createdAt: { lt: cutoff } });
-
-      await logAudit({
-        userId: "system",
-        userName: "cron",
-        action: "SETTINGS_CHANGE",
-        target: "audit-log:pii-scrub",
-        details: {
-          scrubbed: piiResult.count,
-          authDetailsCleared: detailsResult.count,
-          adminDetailsScrubbed,
-          cutoff: cutoff.toISOString(),
-          retentionDays,
-        },
-      });
-
-      return NextResponse.json({
-        ok: true,
-        scrubbed: piiResult.count,
-        authDetailsCleared: detailsResult.count,
+    await logAudit({
+      userId: "system",
+      userName: "cron",
+      action: "SETTINGS_CHANGE",
+      target: "audit-log:pii-scrub",
+      details: {
+        scrubbed,
+        authDetailsCleared,
         adminDetailsScrubbed,
         cutoff: cutoff.toISOString(),
-        timestamp: new Date().toISOString(),
-      });
-    },
-    () => cronSkippedResponse(),
-  ));
-}
+        retentionDays,
+      },
+    });
+
+    return {
+      body: {
+        scrubbed,
+        authDetailsCleared,
+        adminDetailsScrubbed,
+        cutoff: cutoff.toISOString(),
+      },
+    };
+  },
+});

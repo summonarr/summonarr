@@ -28,3 +28,20 @@ test("BASE_PATH is appended to a bare origin, once", () => {
   // No base path (or "/") adds nothing.
   assert.equal(siteBaseUrl("https://req.example.com", "", "/"), "https://req.example.com");
 });
+
+test("the localhost fallback is warned about once outside development, never when a URL is set", async () => {
+  const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
+  resetLogDedup();
+  const warns: string[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" ")); };
+  try {
+    siteBaseUrl("https://req.example.com", "", "");
+    assert.equal(warns.length, 0);
+    siteBaseUrl("", "", "");
+    siteBaseUrl(null, undefined, null);
+    assert.equal(warns.filter((w) => w.startsWith("[site-base-url]")).length, 1);
+  } finally {
+    console.warn = original;
+  }
+});

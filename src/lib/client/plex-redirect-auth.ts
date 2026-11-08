@@ -1,6 +1,7 @@
 // The Plex PIN redirect state, and the polling rules /auth/plex/done follows
 // once Plex sends the browser back. Pure, so the rules are unit-tested; the page
 // is a client component the test loader cannot import.
+import { retryAfterDeltaSeconds } from "./rate-limit";
 
 // Written to sessionStorage before the redirect: by the login form (flow
 // "login") and by the admin Plex connect form (flow "settings").
@@ -82,8 +83,8 @@ export function plexPinPollStep(status: number, retryAfter: string | null): PinP
   if (status >= 200 && status < 300) return { kind: "read" };
   if (status === 404 || status === 410) return { kind: "expired" };
   if (status === 429) {
-    const seconds = retryAfter === null ? NaN : Number(retryAfter);
-    const delayMs = Number.isFinite(seconds) && seconds > 0
+    const seconds = retryAfterDeltaSeconds(retryAfter);
+    const delayMs = seconds !== null && seconds > 0
       ? Math.min(seconds * 1000, RATE_LIMITED_MAX_MS)
       : RATE_LIMITED_DEFAULT_MS;
     return { kind: "wait", delayMs: Math.max(delayMs, PIN_POLL_INTERVAL_MS) };

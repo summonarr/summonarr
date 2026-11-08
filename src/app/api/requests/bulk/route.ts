@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { withPermission } from "@/lib/api-auth";
+import { withPermission, type SummonarrSession } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { maintenanceGuard } from "@/lib/maintenance";
@@ -10,6 +10,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { BULK_REQUEST_MAX_ITEMS } from "@/lib/request-limits";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 import { QuotaExceededError } from "@/lib/request-policy";
 import {
   BULK_TARGET_SELECT,
@@ -24,8 +25,10 @@ import {
   pushAutoApproved,
   routeItems,
   type BulkContext,
+  type BulkItem,
+  type CreateOutcome,
   type CreatedRows,
-  type MediaType,
+  type ItemResult,
 } from "@/lib/request-bulk";
 
 // Bulk request creation. Backs the collection "Request all" button and admin
@@ -75,13 +78,14 @@ export const POST = withPermission([
 
   // Honour the admin's "requests per minute" Setting like the single POST and
   // the votes route do; a lower configured cap must bound "Request all" too.
+  // (One primary-key read, the same every request limiter in the app pays.)
   const rlRow = await prisma.setting.findUnique({ where: { key: "rateLimitRequests" } });
   const bulkLimit = parseRateLimit(rlRow?.value, 10);
   if (!checkRateLimit(`bulk:${session.user.id}`, bulkLimit, 60_000)) {
     return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }
 
-  const rawBody = await readJsonCapped<{ items?: unknown; onBehalfOfUserId?: unknown }>(req, 1048576);
+  const rawBody = await readJsonCapped<Record<string, unknown>>(req, 1048576);
   if (rawBody instanceof NextResponse) return rawBody;
   const body = rawBody;
 
@@ -91,44 +95,123 @@ export const POST = withPermission([
   if (body.items.length > MAX_ITEMS) {
     return NextResponse.json({ error: t("apiUser.common.tooManyItems", { max: MAX_ITEMS }) }, { status: 400 });
   }
+  const items = parseItems(body.items, t);
+  if (items instanceof NextResponse) return items;
 
-  const parsed: { tmdbId: number; mediaType: MediaType }[] = [];
-  for (const raw of body.items) {
+  const resolved = await resolveBulkContext(session, body.onBehalfOfUserId, t);
+  if (resolved instanceof NextResponse) return resolved;
+  const ctx = resolved;
+  const { isOnBehalf, target, targetUserId } = ctx;
+
+  // discordRequireLinkedAccountSite only gates SELF requests — an admin acting on
+  // behalf is trusted and shouldn't be blocked by the target's link state.
+  if (!isOnBehalf) {
+    const reqLinked = await prisma.setting.findUnique({
+      where: { key: "discordRequireLinkedAccountSite" },
+    });
+    if (reqLinked?.value === "true" && !target.discordId) {
+      return NextResponse.json(
+        { error: t("apiUser.common.discordLinkRequired") },
+        { status: 403 },
+      );
+    }
+  }
+
+  const routing = await routeItems(ctx, items);
+  const visible = bulkVisibleServers(ctx, routing.mediaAccess);
+  const classified = await classifyItems(ctx, items, routing, visible);
+  const { skipped, staleDeclinedIdByKey } = classified;
+  const capped = await applyRatingCaps(ctx, classified.toCreate, routing, staleDeclinedIdByKey);
+  const { ratingBlocked } = capped;
+
+  if (capped.toCreate.length === 0) {
+    return NextResponse.json({ results: [...skipped, ...ratingBlocked], created: 0 }, { status: 200 });
+  }
+
+  const { prepared, metaFailed } = await prepareItems(ctx, capped.toCreate, routing, staleDeclinedIdByKey, capped.unverifiedKeys);
+
+  let created: CreatedRows = { createdRows: [], mirroredKeys: new Set() };
+  if (prepared.length > 0) {
+    try {
+      created = await createRowsTx(ctx, prepared, classified);
+    } catch (err) {
+      if (err instanceof QuotaExceededError) return quotaRefusal(err, t);
+      throw err;
+    }
+    clearRequestedDeletionVotes(ctx, prepared);
+  }
+
+  const outcomes = await pushAutoApproved(ctx, prepared, created);
+
+  const results = [...skipped, ...metaFailed, ...ratingBlocked, ...outcomes];
+  const createdCount = outcomes.filter((o) => o.result === "created" || o.result === "auto-approved").length;
+
+  if (isOnBehalf) {
+    // The account by id (+ display name), never the email — the convention for
+    // a row ABOUT a user (audit-scrub.ts). Counts per outcome and the titles it
+    // filed, not every per-item row: a 50-item batch kept a 50-row array in the
+    // audit table.
+    void logAudit({
+      userId: session.user.id,
+      userName: session.user.name ?? session.user.email,
+      action: "REQUEST_ON_BEHALF",
+      target: `user:${targetUserId}`,
+      details: { targetUserId, ...(target.name ? { targetUser: target.name } : {}), created: createdCount, resultCounts: countResults(results), filed: filedTitles(outcomes) },
+      ...auditContext(req, session),
+    });
+  }
+
+  // 201 only when something was created — a batch where every item fell to
+  // metaFailed / no row is the same zero-row outcome the all-skipped path
+  // answers 200 for.
+  return NextResponse.json({ results, created: createdCount }, { status: createdCount > 0 ? 201 : 200 });
+});
+
+// Every item checked and deduplicated on (tmdbId, mediaType), or the 400 for the
+// first malformed one.
+function parseItems(rawItems: unknown[], t: Translator): BulkItem[] | NextResponse {
+  const parsed: BulkItem[] = [];
+  const seen = new Set<string>();
+  for (const raw of rawItems) {
     // A null/primitive element is a malformed item, not a TypeError (500).
-    const it = (raw !== null && typeof raw === "object" ? raw : {}) as { tmdbId?: unknown; mediaType?: unknown };
-    if (!Number.isInteger(it.tmdbId) || (it.tmdbId as number) <= 0) {
+    const it: Record<string, unknown> = raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+    const tmdbId = it.tmdbId;
+    if (typeof tmdbId !== "number" || !Number.isInteger(tmdbId) || tmdbId <= 0) {
       return NextResponse.json({ error: t("apiUser.requests.bulk.itemTmdbId") }, { status: 400 });
     }
     // Bulk carries no per-item _token (the single POST's HMAC token is minted only
     // for an in-range id), so an INT4-overflowing id would reach the first keyed
     // mediaRequest read below and throw out of Prisma as a 500.
-    if (!isTmdbIdInRange(it.tmdbId as number)) {
+    if (!isTmdbIdInRange(tmdbId)) {
       return NextResponse.json({ error: t("apiUser.common.tmdbIdOutOfRange") }, { status: 400 });
     }
-    if (it.mediaType !== "MOVIE" && it.mediaType !== "TV") {
+    const mediaType = it.mediaType;
+    if (mediaType !== "MOVIE" && mediaType !== "TV") {
       return NextResponse.json({ error: t("apiUser.requests.bulk.itemMediaType") }, { status: 400 });
     }
-    parsed.push({ tmdbId: it.tmdbId as number, mediaType: it.mediaType });
-  }
-
-  // Dedup (tmdbId, mediaType).
-  const seen = new Set<string>();
-  const items = parsed.filter((i) => {
-    const k = keyOf(i.tmdbId, i.mediaType);
-    if (seen.has(k)) return false;
+    const k = keyOf(tmdbId, mediaType);
+    if (seen.has(k)) continue;
     seen.add(k);
-    return true;
-  });
+    parsed.push({ tmdbId, mediaType });
+  }
+  return parsed;
+}
 
-  // Resolve the target user. A PRESENT but non-string id is a client bug, not
-  // "no target": silently filing the rows under the caller re-targets requests
-  // to the wrong account with a 201, where every other malformed field is a 400.
-  if (body.onBehalfOfUserId !== undefined && body.onBehalfOfUserId !== null && typeof body.onBehalfOfUserId !== "string") {
+// Who the requests are for, and with whose rights every gate below runs.
+async function resolveBulkContext(
+  session: SummonarrSession,
+  onBehalfOfUserId: unknown,
+  t: Translator,
+): Promise<BulkContext | NextResponse> {
+  // A PRESENT but non-string id is a client bug, not "no target": silently filing
+  // the rows under the caller re-targets requests to the wrong account with a
+  // 201, where every other malformed field is a 400.
+  if (onBehalfOfUserId !== undefined && onBehalfOfUserId !== null && typeof onBehalfOfUserId !== "string") {
     return NextResponse.json({ error: t("apiUser.requests.bulk.onBehalfIdInvalid") }, { status: 400 });
   }
   const onBehalfId =
-    typeof body.onBehalfOfUserId === "string" && body.onBehalfOfUserId.length > 0
-      ? body.onBehalfOfUserId
+    typeof onBehalfOfUserId === "string" && onBehalfOfUserId.length > 0
+      ? onBehalfOfUserId
       : null;
   const isOnBehalf = onBehalfId !== null && onBehalfId !== session.user.id;
   if (isOnBehalf && !hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF)) {
@@ -180,7 +263,7 @@ export const POST = withPermission([
   // The on-behalf filer's own instance grants, server visibility, cap and quota
   // (request-bulk.ts loadFiler): grant only what you hold.
   const { filerChecked, filerRow, filerMay } = await loadFiler(session, isOnBehalf);
-  const ctx: BulkContext = {
+  return {
     session,
     isOnBehalf,
     target,
@@ -191,82 +274,29 @@ export const POST = withPermission([
     filerRow,
     filerMay,
   };
+}
 
-  // discordRequireLinkedAccountSite only gates SELF requests — an admin acting on
-  // behalf is trusted and shouldn't be blocked by the target's link state.
-  if (!isOnBehalf) {
-    const reqLinked = await prisma.setting.findUnique({
-      where: { key: "discordRequireLinkedAccountSite" },
-    });
-    if (reqLinked?.value === "true" && !target.discordId) {
-      return NextResponse.json(
-        { error: t("apiUser.common.discordLinkRequired") },
-        { status: 403 },
-      );
-    }
-  }
+// The in-transaction quota re-check found a window full — the target's, or on
+// behalf a non-ADMIN filer's own.
+function quotaRefusal(err: QuotaExceededError, t: Translator): NextResponse {
+  const remaining = Math.max(0, err.limit - err.used);
+  const key = err.whose === "filer"
+    ? err.mediaType === "MOVIE" ? "apiUser.requests.bulk.filerQuotaMovie" : "apiUser.requests.bulk.filerQuotaTv"
+    : err.mediaType === "MOVIE" ? "apiUser.requests.bulk.quotaMovie" : "apiUser.requests.bulk.quotaTv";
+  return NextResponse.json(
+    { error: t(key, { limit: err.limit, window: translateQuotaWindow(t, err.windowLabel), remaining }) },
+    { status: 429 },
+  );
+}
 
-  const routing = await routeItems(ctx, items);
-  const visible = bulkVisibleServers(ctx, routing.mediaAccess);
-  const classified = await classifyItems(ctx, items, routing, visible);
-  const { skipped, staleDeclinedIdByKey } = classified;
-  const capped = await applyRatingCaps(ctx, classified.toCreate, routing, staleDeclinedIdByKey);
-  const { ratingBlocked } = capped;
+// How many items ended in each result.
+function countResults(results: readonly CreateOutcome[]): Partial<Record<ItemResult, number>> {
+  const counts: Partial<Record<ItemResult, number>> = {};
+  for (const r of results) counts[r.result] = (counts[r.result] ?? 0) + 1;
+  return counts;
+}
 
-  if (capped.toCreate.length === 0) {
-    return NextResponse.json({ results: [...skipped, ...ratingBlocked], created: 0 }, { status: 200 });
-  }
-
-  const { prepared, metaFailed } = await prepareItems(ctx, capped.toCreate, routing, staleDeclinedIdByKey);
-
-  let created: CreatedRows = { createdRows: [], mirroredKeys: new Set() };
-  if (prepared.length > 0) {
-    try {
-      created = await createRowsTx(ctx, prepared, classified);
-    } catch (err) {
-      if (err instanceof QuotaExceededError) {
-        const remaining = Math.max(0, err.limit - err.used);
-        return NextResponse.json(
-          {
-            error: t(
-              err.whose === "filer"
-                ? err.mediaType === "MOVIE" ? "apiUser.requests.bulk.filerQuotaMovie" : "apiUser.requests.bulk.filerQuotaTv"
-                : err.mediaType === "MOVIE" ? "apiUser.requests.bulk.quotaMovie" : "apiUser.requests.bulk.quotaTv",
-              {
-                limit: err.limit,
-                window: translateQuotaWindow(t, err.windowLabel),
-                remaining,
-              },
-            ),
-          },
-          { status: 429 },
-        );
-      }
-      throw err;
-    }
-    clearRequestedDeletionVotes(ctx, prepared);
-  }
-
-  const outcomes = await pushAutoApproved(ctx, prepared, created);
-
-  const results = [...skipped, ...metaFailed, ...ratingBlocked, ...outcomes];
-  const createdCount = outcomes.filter((o) => o.result === "created" || o.result === "auto-approved").length;
-
-  if (isOnBehalf) {
-    // The account by id (+ display name), never the email — the convention for
-    // a row ABOUT a user (audit-scrub.ts).
-    void logAudit({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email,
-      action: "REQUEST_ON_BEHALF",
-      target: `user:${targetUserId}`,
-      details: { targetUserId, ...(target.name ? { targetUser: target.name } : {}), created: createdCount, results },
-      ...auditContext(req, session),
-    });
-  }
-
-  // 201 only when something was created — a batch where every item fell to
-  // metaFailed / no row is the same zero-row outcome the all-skipped path
-  // answers 200 for.
-  return NextResponse.json({ results, created: createdCount }, { status: createdCount > 0 ? 201 : 200 });
-});
+// The titles this call filed, as `MOVIE:603`.
+function filedTitles(outcomes: readonly CreateOutcome[]): string[] {
+  return outcomes.filter((o) => o.result === "created" || o.result === "auto-approved").map((o) => `${o.mediaType}:${o.tmdbId}`);
+}

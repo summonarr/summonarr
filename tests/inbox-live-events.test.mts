@@ -38,9 +38,14 @@ test("a frame about ANOTHER user (a manager's bypass delivers everyone's) does n
 });
 
 test("the events route marks exactly the inbox event types `own`, from the same list", () => {
+  // The frame is built by sseClientFrame (src/lib/sse-delivery.ts), which the
+  // route sends every delivered event through.
   const route = readFileSync(new URL("../src/app/api/events/route.ts", import.meta.url), "utf-8");
-  assert.match(route, /from "@\/lib\/inbox-live-event-types"/);
-  assert.match(route, /isInboxLiveEventType\(event\.type\) \? \{ \.\.\.clientEvent, own: evtUserId === userId \}/);
+  assert.match(route, /from "@\/lib\/sse-delivery"/);
+  assert.match(route, /const frame = sseClientFrame\(event as SSEEvent & \{ userId\?: string \}, userId\);/);
+  const delivery = readFileSync(new URL("../src/lib/sse-delivery.ts", import.meta.url), "utf-8");
+  assert.match(delivery, /from "\.\/inbox-live-event-types"/);
+  assert.match(delivery, /isInboxLiveEventType\(event\.type\) \? \{ \.\.\.clientEvent, own: evtUserId === viewerId \}/);
   const client = readFileSync(new URL("../src/components/notifications/inbox-live-events.ts", import.meta.url), "utf-8");
   assert.match(client, /from "@\/lib\/inbox-live-event-types"/, "the client list and the route's must be one list");
 });

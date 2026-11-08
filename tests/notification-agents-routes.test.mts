@@ -179,6 +179,31 @@ const fakePrisma = {
     },
   },
 };
+// The create route counts against the cap and inserts in one serializable
+// transaction. The fake hands the callback its own client, whose count records
+// that it ran in the transaction (the pool's count records false), and records
+// the options.
+const txOptions: unknown[] = [];
+const countsInTx: boolean[] = [];
+const baseCount = fakePrisma.notificationAgent.count;
+fakePrisma.notificationAgent.count = async () => {
+  countsInTx.push(false);
+  return baseCount();
+};
+const txClient = {
+  ...fakePrisma,
+  notificationAgent: {
+    ...fakePrisma.notificationAgent,
+    count: async () => {
+      countsInTx.push(true);
+      return baseCount();
+    },
+  },
+};
+(fakePrisma as Record<string, unknown>).$transaction = async (fn: (tx: unknown) => Promise<unknown>, opts?: unknown) => {
+  txOptions.push(opts);
+  return fn(txClient);
+};
 (globalThis as unknown as { prisma: unknown }).prisma = fakePrisma;
 
 // ── dynamic imports (env + globalThis stubs must precede the module graph) ───
@@ -447,6 +472,16 @@ test("POST: the channel cap → 400 naming the limit, nothing written", async ()
   assert.deepEqual(await res.json(), { error: `You can configure up to ${MAX_AGENTS} channels.` });
   assert.equal(agentsById.size, MAX_AGENTS);
   assert.equal(opIndex("notificationAgent.create"), -1);
+});
+
+test("POST: the cap is counted inside the serializable transaction that inserts", async () => {
+  const admin = await mintSession("ADMIN");
+  txOptions.length = 0;
+  countsInTx.length = 0;
+  const res = await createAgent(req(BASE, { method: "POST", headers: admin.header, body: WEBHOOK_BODY }), undefined);
+  assert.equal(res.status, 201);
+  assert.deepEqual(countsInTx, [true], "a count outside the transaction lets two creates both pass the cap");
+  assert.equal((txOptions[0] as { isolationLevel?: string } | undefined)?.isolationLevel, "Serializable");
 });
 
 // ════════════════════════════════════════════════════════════════════════════

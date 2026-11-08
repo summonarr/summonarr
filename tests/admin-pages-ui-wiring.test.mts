@@ -30,9 +30,12 @@ test("C001: the request list gates each row's Open in / Manage on that row's own
     src,
     /const showArrLinks =\s*canOpenArr && \(arrServices\?\.\[group\.mediaType === "MOVIE" \? "radarr" : "sonarr"\] \?\? true\);/,
   );
-  // One icon per instance the group's requests name (an HD and a 4K request are two), each still behind the row's service gate.
-  assert.match(src, /\{showArrLinks && groupArrInstances\.map\(\(slug\) => \(\s*<OpenInArrLink/);
-  assert.match(src, /\{showArrLinks && groupArrInstances\.map\(\(slug\) => \{/);
+  // One icon per instance the group's requests name (an HD and a 4K request are two), all behind the row's service gate.
+  assert.match(src, /\{showArrLinks && \(\s*<ArrTitleIcons\s+group=\{group\}\s+groupArrInstances=\{groupArrInstances\}/);
+  assert.equal(src.match(/<ArrTitleIcons\b/g)?.length, 1, "rendered only behind the gate");
+  const icons = src.slice(src.indexOf("function ArrTitleIcons("), src.indexOf("\n}\n", src.indexOf("function ArrTitleIcons(")));
+  assert.match(icons, /\{groupArrInstances\.map\(\(slug\) => \(\s*<OpenInArrLink/);
+  assert.match(icons, /\{groupArrInstances\.map\(\(slug\) => \{/);
   assert.match(src, /if \(!available && !onInstance\.some\(\(r\) => r\.status === "APPROVED"\)\) return null;\s*return \(\s*<ManageTitleButton/, "a Manage icon only for an instance the title was pushed to");
   assert.match(src, /initialTab=\{manageTabFor\(available \? "requestAvailable" : "requestApproved", arrService\)\}/, "the tab comes from manageTabFor, never hand-picked");
   assert.doesNotMatch(src, /\{canOpenArr && /, "no icon renders off the coarse gate alone");
@@ -61,26 +64,36 @@ test("C062: the never-watched selection cap IS the route's CLEANUP_MAX_ITEMS, an
 
 test("C015: a cleanup result with uncertain: true shows the neutral note; the type carries the flag", () => {
   const src = read("src/components/admin/cleanup-delete.tsx");
-  assert.match(src, /failed: Array<\{[^}]*\}>; uncertain\?: boolean \}>;/);
+  // The result type is the checked answer's (src/lib/cleanup-plan-answer.ts), which keeps the flag.
+  assert.match(read("src/lib/cleanup-plan-answer.ts"), /uncertain: v\.optional\(v\.boolean\(\)\),/);
   const panel = src.slice(src.indexOf("export function CleanupResultPanel"));
   assert.match(panel, /\{r\.uncertain === true && \(\s*<span style=\{\{ color: "var\(--ds-fg-muted\)" \}\}> \{t\("adminManage\.cleanup\.result\.uncertain"\)\}<\/span>/);
   assert.ok(en("adminManage")["adminManage.cleanup.result.uncertain"]);
 });
 
-test("C015: the route still puts `uncertain` on each result (the field the panel reads)", () => {
+test("C015: the execute step still puts `uncertain` on each result (the field the panel reads), and the route answers the results as they are", () => {
+  const exec = read("src/lib/library-cleanup-execute.ts");
+  assert.match(exec, /uncertain\?: true;/);
+  assert.match(exec, /\.\.\.\(uncertain \? \{ uncertain: true as const \} : \{\}\),/);
   const route = read("src/app/api/admin/cleanup/delete/route.ts");
-  assert.ok((route.match(/\.\.\.\(uncertain \? \{ uncertain: true \} : \{\}\),/g) ?? []).length >= 2);
+  assert.match(route, /const results = await mapLimit\(planned, TITLE_CONCURRENCY, \(p\) => executeCleanupTitle\(p, ctx\)\);/);
+  assert.match(route, /\s+results,\n/);
 });
 
 // ═══ C007 ════════════════════════════════════════════════════════════════════
 
 test("C007: Search missing refused part-way says only part of the search started — cleared by the next command", () => {
   const src = read("src/components/admin/arr-title/title-manager.tsx");
+  // Both ways a command goes out clear the line before sending: the Seasons tab's and the command bar's.
   const run = src.slice(src.indexOf("const runCommand = useCallback"), src.indexOf("async function topCommand"));
-  assert.match(run, /setPartialNote\(""\);[\s\S]*?await arrApi</, "cleared before the next command is sent");
-  assert.match(run, /partial\?: boolean/);
-  assert.match(run, /if \(res\.data\.partial === true\) setPartialNote\(t\("adminArr\.notice\.searchMissingPartial"\)\);/);
-  assert.match(src, /\{partialNote && !error && !loadError && \(\s*<p role="status" className="m-0 text-xs text-zinc-400">\{partialNote\}<\/p>/);
+  assert.match(run, /setPartialNote\(""\);[\s\S]*?await sendCommand\(/, "cleared before the next command is sent");
+  const top = src.slice(src.indexOf("async function topCommand"), src.indexOf("function pickRelease("));
+  assert.match(top, /clearLines\(\);[\s\S]*?sendCommand\(body, signal\)/);
+  assert.match(src, /const clearLines = \(\) => \{\s*setNotice\(""\);\s*setPartialNote\(""\);/);
+  assert.match(src, /if \(res\.data\.partial === true\) setPartialNote\(t\("adminArr\.notice\.searchMissingPartial"\)\);/);
+  assert.match(src, /<StatusLine error=\{error \|\| loadError\} [^>]*partialNote=\{partialNote\} \/>/);
+  const parts = read("src/components/admin/arr-title/manager-parts.tsx");
+  assert.match(parts, /\{partialNote && !error && \(\s*<p role="status" className="m-0 text-xs text-zinc-400">\{partialNote\}<\/p>/);
   assert.ok(en("adminArr")["adminArr.notice.searchMissingPartial"]);
 });
 
@@ -88,5 +101,7 @@ test("C007: the title command route answers a part-way Search missing with 202 a
   const data = read("src/lib/arr-missing-data.ts");
   assert.match(data, /return \{ commands: queued\.length, seasons, episodes, partial: true, commandIds: commandIdsOf\(queued\) \};/);
   const route = read("src/app/api/admin/arr/title/command/route.ts");
-  assert.match(route, /const result = await searchMissingTracked\("sonarr", instance, arrId, new Date\(\)\);\s*return NextResponse\.json\(result, \{ status: 202 \}\);/);
+  // The search's own answer, partial flag and all, is the 202's body.
+  assert.match(route, /case "searchMissing":[\s\S]*?return searchMissingTracked\("sonarr", instance, arrId, new Date\(\)\);/);
+  assert.match(route, /return NextResponse\.json\(await runCommand\(target, cmd\), \{ status: 202 \}\);/);
 });

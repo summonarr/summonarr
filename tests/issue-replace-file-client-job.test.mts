@@ -106,7 +106,9 @@ test("structural: every caller reads status 0 as 'may still be running' BEFORE i
     const call = src.indexOf("await runReplaceFileJob(");
     assert.ok(call > 0, `${file}: calls runReplaceFileJob`);
     const after = src.slice(call);
-    const zero = after.indexOf("answer.status === 0");
+    // `isNoAnswer(answer)` (library-sync.ts) is status 0 plus a proxy's own
+    // 502/503/504 that carries no error of ours — the wider no-answer rule.
+    const zero = after.search(/answer\.status === 0|isNoAnswer\(answer\)/);
     assert.ok(zero > 0, `${file}: handles status 0`);
     assert.ok(after.indexOf(stillRunning) > zero, `${file}: status 0 says it may still be running`);
     const failure = after.search(/answer\.status < 200 \|\| answer\.status >= 300|ok: answer\.status >= 200 && answer\.status < 300/);
@@ -146,4 +148,20 @@ test("structural: the Fix file window runs the delete through the job, and stops
   assert.match(replaceFn, /isAlive: \(\) => aliveRef\.current/);
   assert.doesNotMatch(replaceFn, /method: "POST"/, "no synchronous POST left in the dialog");
   assert.match(dialog, /return \(\) => \{ aliveRef\.current = false; \};/);
+});
+
+test("the poll URL keeps a query the start URL already had", async () => {
+  const { jobPollUrl } = await import("../src/lib/client/replace-file-job.ts");
+  assert.equal(jobPollUrl("/api/issues/1/files", "a b"), "/api/issues/1/files?job=a%20b");
+  assert.equal(jobPollUrl("/api/x?instance=uhd", "j1"), "/api/x?instance=uhd&job=j1");
+});
+
+test("onGiveUp passes through: an unreachable server and a job still running at the poll budget are told apart", async () => {
+  const reasons: string[] = [];
+  const onGiveUp = (r: string) => { reasons.push(r); };
+  const down = scripted([json({ job: JOB }, 202), ...Array.from({ length: 2 }, () => new TypeError("fetch failed"))]);
+  assert.deepEqual(await runReplaceFileJob(down.fetchFn, URL_, {}, { sleep: noSleep, failLimit: 2, onGiveUp }), { status: 0, data: null });
+  const slow = scripted([json({ job: JOB }, 202), ...Array.from({ length: 2 }, () => json({ job: JOB, running: true }, 202))]);
+  assert.deepEqual(await runReplaceFileJob(slow.fetchFn, URL_, {}, { sleep: noSleep, maxPolls: 2, onGiveUp }), { status: 0, data: null });
+  assert.deepEqual(reasons, ["unreachable", "outOfPolls"]);
 });

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { readJsonCapped } from "@/lib/body-size";
-import { logAudit, auditContext } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { validateCleanupSettingsPatch } from "@/lib/library-cleanup";
 import { loadCleanupSettings } from "@/lib/library-cleanup-data";
 import { cleanupDisabledResponse } from "@/lib/library-cleanup-gate";
@@ -37,12 +37,10 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   invalidateNeverWatchedReport();
   // Committed with no enclosing transaction left ⇒ the swallowing variant (guardrail 26).
   void logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email,
+    ...auditActor(req, session),
     action: "SETTINGS_CHANGE",
     target: "library-cleanup",
     details: { changed: Object.fromEntries(result.rows.map((r) => [r.key, r.value])) },
-    ...auditContext(req, session),
   });
   return NextResponse.json({ settings: await loadCleanupSettings() });
 });

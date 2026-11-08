@@ -46,6 +46,7 @@ let tagPost: "create" | "fail" | "fail-but-created" = "create";
 // Answers for POST /api/v3/movie|series, in order; then 201.
 let addAnswers: Response[] = [];
 let existingMovie: Record<string, unknown> | null = null;
+let movieLookup: unknown[] | null = null;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -68,6 +69,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return tagPost === "fail-but-created" ? json({ message: "conflict" }, 409) : json(created);
   }
   if (url.pathname === "/api/v3/movie/lookup") {
+    if (movieLookup) return json(movieLookup);
     return json([{ title: "The Matrix", tmdbId: 603, year: 1999, images: [], titleSlug: "the-matrix-603", status: "released" }]);
   }
   if (url.pathname === "/api/v3/series/lookup") {
@@ -117,6 +119,7 @@ beforeEach(() => {
   tagPost = "create";
   addAnswers = [];
   existingMovie = null;
+  movieLookup = null;
   settings.clear();
   // A fresh Radarr per test: the tag find-or-create is keyed by the instance URL.
   instance += 1;
@@ -170,6 +173,25 @@ test("tag: a refused POST with no tag on the re-read adds UNTAGGED — never a f
   const add = bodyOf(posts("/api/v3/movie")[0]);
   assert.equal("tags" in add, false, "no `tags` field when there is no tag");
   assert.ok(warns.some((w) => w.includes("requester-tag ensure failed")), warns.join(" | "));
+});
+
+// ═══ lookup match ════════════════════════════════════════════════════════════
+
+// Radarr's tmdb: lookup can degrade to a fuzzy title search. A single row that
+// names a DIFFERENT movie must never be added in place of the requested one.
+test("lookup: a lone row naming another tmdbId is refused and nothing is added", async () => {
+  movieLookup = [{ title: "The Matrix Reloaded", tmdbId: 604, year: 2003, images: [], titleSlug: "the-matrix-reloaded-604" }];
+  await assert.rejects(addMovieToRadarr(603), /returned no matching movie/);
+  assert.equal(posts("/api/v3/movie").length, 0, "nothing was POSTed");
+});
+
+test("lookup: the row with the requested tmdbId wins over unrelated rows", async () => {
+  movieLookup = [
+    { title: "The Matrix Reloaded", tmdbId: 604, year: 2003, images: [], titleSlug: "the-matrix-reloaded-604" },
+    { title: "The Matrix", tmdbId: 603, year: 1999, images: [], titleSlug: "the-matrix-603", status: "released" },
+  ];
+  await addMovieToRadarr(603);
+  assert.equal(bodyOf(posts("/api/v3/movie")[0]).tmdbId, 603);
 });
 
 // ═══ path collision / duplicate ══════════════════════════════════════════════

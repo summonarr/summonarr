@@ -18,7 +18,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
-import { readApiError } from "@/lib/client/api-error";
+import { fetchJson } from "@/lib/client/fetch-json";
+import { check } from "@/lib/validate";
+import { MISSING_REPORT, type CheckedMissingReport } from "@/components/admin/missing-report-shape";
 import type { CutoffMovie, CutoffSeries, MissingMovie, MissingSeries } from "@/lib/arr-missing";
 import type { ArrErrorKind } from "@/lib/arr-error-kind";
 
@@ -46,6 +48,11 @@ export type Reports = {
 // A list's live read. ONE builder for the live load and the snapshot read, so
 // the server keys the snapshot on exactly the read the live load makes.
 const missingListUrl = (svc: Service, m: Mode) => withBasePath(`/api/admin/missing?service=${svc}&mode=${m}`);
+
+// A checked report as the list it was read for. The check covers the envelope
+// and every row's identity (missing-report-shape.ts); the rest of each row is
+// the route's own projection for that (service, mode).
+const asListReport = (report: CheckedMissingReport) => report as Reports[ReportKey];
 
 export function useMissingReports({
   service,
@@ -90,42 +97,39 @@ export function useMissingReports({
     const superseded = () => loadSeq.current[k] !== seq;
     setLoadingKeys((prev) => new Set(prev).add(k));
     setErrors((e) => ({ ...e, [k]: "" }));
-    try {
-      const res = await fetch(missingListUrl(svc, m));
-      if (!res.ok) {
-        const message = await readApiError(res, t("adminManage.missing.error.load"));
-        if (superseded()) return;
-        setErrors((e) => ({ ...e, [k]: message }));
-        return;
-      }
-      const data = await res.json();
-      if (superseded()) return;
-      // This list now holds a live answer: no snapshot paints over it from here
-      // on (the ref is what a snapshot landing in the same tick reads), its
-      // snapshot read stops and the stale note goes.
-      const replacesLive = liveRef.current.has(k);
-      liveRef.current.add(k);
-      setLiveKeys(new Set(liveRef.current));
-      if (viewRef.current === k) markLiveRef.current();
-      setReports((r) => ({ ...r, [k]: data }));
-      // A fresh listing after an earlier LIVE one (Refresh) is a fresh start
-      // for the list's rows. The FIRST live answer replaces at most a
-      // snapshot, whose rows are the same rows (instance + id): what the admin
-      // ticked or searched on it stands — re-arming a row searched a moment
-      // ago would let it be searched twice.
-      if (replacesLive) onLiveReplaced(k);
-    } catch {
-      if (superseded()) return;
-      setErrors((e) => ({ ...e, [k]: t("adminManage.missing.error.loadNetwork") }));
-    } finally {
-      if (!superseded()) {
-        setLoadingKeys((prev) => {
-          const next = new Set(prev);
-          next.delete(k);
-          return next;
-        });
-      }
+    // A listing reads every instance live and pages through it: no client
+    // timeout. A 200 that isn't a report is the load's failure, never a list.
+    const res = await fetchJson(missingListUrl(svc, m), {
+      schema: MISSING_REPORT,
+      timeoutMs: Infinity,
+      fallbackError: t("adminManage.missing.error.load"),
+    });
+    if (superseded()) return;
+    setLoadingKeys((prev) => {
+      const next = new Set(prev);
+      next.delete(k);
+      return next;
+    });
+    if (!res.ok) {
+      const message = res.kind === "http" || res.kind === "invalid" ? res.error : t("adminManage.missing.error.loadNetwork");
+      setErrors((e) => ({ ...e, [k]: message }));
+      return;
     }
+    const data = asListReport(res.data);
+    // This list now holds a live answer: no snapshot paints over it from here
+    // on (the ref is what a snapshot landing in the same tick reads), its
+    // snapshot read stops and the stale note goes.
+    const replacesLive = liveRef.current.has(k);
+    liveRef.current.add(k);
+    setLiveKeys(new Set(liveRef.current));
+    if (viewRef.current === k) markLiveRef.current();
+    setReports((r) => ({ ...r, [k]: data }));
+    // A fresh listing after an earlier LIVE one (Refresh) is a fresh start
+    // for the list's rows. The FIRST live answer replaces at most a
+    // snapshot, whose rows are the same rows (instance + id): what the admin
+    // ticked or searched on it stands — re-arming a row searched a moment
+    // ago would let it be searched twice.
+    if (replacesLive) onLiveReplaced(k);
   }, [t, onLiveReplaced]);
 
   const loadingHere = loadingKeys.has(current);
@@ -146,9 +150,12 @@ export function useMissingReports({
   // on open and on each tab/mode switch. Null once a live answer landed (a
   // Refresh is live, never a snapshot) and while nothing is configured.
   const snapshotUrl = configured[service] && !liveKeys.has(current) ? missingListUrl(service, mode) : null;
-  const snap = useArrSnapshot<Reports[ReportKey]>(snapshotUrl, (data) => {
+  const snap = useArrSnapshot<unknown>(snapshotUrl, (data) => {
     if (!snapshotMayPaint(current)) return false;
-    setReports((r) => ({ ...r, [current]: data }));
+    // A kept answer is checked like a live one; one the page can't read is not painted.
+    const checked = check(MISSING_REPORT, data);
+    if (!checked.ok) return false;
+    setReports((r) => ({ ...r, [current]: asListReport(checked.value) }));
   });
   useEffect(() => {
     viewRef.current = current;

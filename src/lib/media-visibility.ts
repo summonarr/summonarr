@@ -153,6 +153,11 @@ export function titleKeysWhere(keys: MediaTitleKey[]): { OR: Array<{ mediaType: 
 // votes list, which otherwise names a restricted server's titles AND other
 // voters' reasons about them) subtract this before paging.
 //
+// "Not visible" is any serverInstance outside the viewer's visible list, not
+// only the registry's restricted slugs: rows tagged with a slug the registry no
+// longer lists (an entry dropped or unreadable) are hidden too, matching the
+// availability reads, which keep only `serverInstance IN visible`.
+//
 // `keys` may be a loader, called only when something IS hidden from this
 // viewer: an unrestricted deployment, an ADMIN, or a fully granted user pays
 // no read for it.
@@ -163,42 +168,53 @@ export async function titlesHiddenFromViewer(
   const lists = await getMediaInstanceAccessLists();
   if (!lists.anyRestricted) return [];
   const visible = await visibleForSession(session, lists);
-  const hiddenPlex = lists.plex.map((i) => i.slug).filter((s) => !visible.plex.includes(s));
-  const hiddenJellyfin = lists.jellyfin.map((i) => i.slug).filter((s) => !visible.jellyfin.includes(s));
-  if (hiddenPlex.length === 0 && hiddenJellyfin.length === 0) return [];
+  const allVisible =
+    lists.plex.every((i) => visible.plex.includes(i.slug)) &&
+    lists.jellyfin.every((i) => visible.jellyfin.includes(i.slug));
+  if (allVisible) return [];
 
   const list = typeof keys === "function" ? await keys() : keys;
-  if (list.length === 0) return [];
-  const keyWhere = titleKeysWhere(list);
-  const select = { tmdbId: true, mediaType: true } as const;
-  // A fixed four-way fan-out (guardrail 31), each bounded by `list`.
-  const [onHiddenPlex, onHiddenJellyfin, onVisiblePlex, onVisibleJellyfin] = await Promise.all([
-    hiddenPlex.length
-      ? prisma.plexLibraryItem.findMany({ where: { ...keyWhere, serverInstance: { in: hiddenPlex } }, select })
-      : Promise.resolve([]),
-    hiddenJellyfin.length
-      ? prisma.jellyfinLibraryItem.findMany({ where: { ...keyWhere, serverInstance: { in: hiddenJellyfin } }, select })
-      : Promise.resolve([]),
-    visible.plex.length
-      ? prisma.plexLibraryItem.findMany({ where: { ...keyWhere, serverInstance: { in: visible.plex } }, select })
-      : Promise.resolve([]),
-    visible.jellyfin.length
-      ? prisma.jellyfinLibraryItem.findMany({ where: { ...keyWhere, serverInstance: { in: visible.jellyfin } }, select })
-      : Promise.resolve([]),
-  ]);
-  const keyOf = (r: { tmdbId: number; mediaType: string }) => `${r.mediaType}:${r.tmdbId}`;
-  const seenOnVisible = new Set<string>();
-  for (const r of onVisiblePlex) seenOnVisible.add(keyOf(r));
-  for (const r of onVisibleJellyfin) seenOnVisible.add(keyOf(r));
   const out: MediaTitleKey[] = [];
-  const added = new Set<string>();
-  for (const r of [...onHiddenPlex, ...onHiddenJellyfin]) {
-    const k = keyOf(r);
-    if (seenOnVisible.has(k) || added.has(k)) continue;
-    added.add(k);
-    out.push({ tmdbId: r.tmdbId, mediaType: r.mediaType });
+  // Chunked so a whole library's worth of voted titles stays well under the
+  // bind-parameter limit (guardrail 23c); each chunk is two short reads.
+  for (let i = 0; i < list.length; i += HIDDEN_TITLE_KEY_CHUNK) {
+    for (const k of await hiddenAmong(list.slice(i, i + HIDDEN_TITLE_KEY_CHUNK), visible)) out.push(k);
   }
   return out;
+}
+
+const HIDDEN_TITLE_KEY_CHUNK = 5_000;
+const titleKeyOf = (r: { tmdbId: number; mediaType: string }) => `${r.mediaType}:${r.tmdbId}`;
+
+// One chunk: the keys some library holds outside the visible servers, then,
+// for those candidates only, which of them a visible server also holds.
+async function hiddenAmong(keys: MediaTitleKey[], visible: VisibleServerInstances): Promise<MediaTitleKey[]> {
+  if (keys.length === 0) return [];
+  const select = { tmdbId: true, mediaType: true } as const;
+  const distinct = ["tmdbId", "mediaType"] as ("tmdbId" | "mediaType")[];
+  const keyWhere = titleKeysWhere(keys);
+  const [offPlex, offJellyfin] = await Promise.all([
+    prisma.plexLibraryItem.findMany({ where: { ...keyWhere, serverInstance: { notIn: visible.plex } }, select, distinct }),
+    prisma.jellyfinLibraryItem.findMany({ where: { ...keyWhere, serverInstance: { notIn: visible.jellyfin } }, select, distinct }),
+  ]);
+  const candidates = new Map<string, MediaTitleKey>();
+  for (const r of [...offPlex, ...offJellyfin]) {
+    const k = titleKeyOf(r);
+    if (!candidates.has(k)) candidates.set(k, { tmdbId: r.tmdbId, mediaType: r.mediaType });
+  }
+  if (candidates.size === 0) return [];
+
+  const candidateWhere = titleKeysWhere([...candidates.values()]);
+  const [onPlex, onJellyfin] = await Promise.all([
+    visible.plex.length
+      ? prisma.plexLibraryItem.findMany({ where: { ...candidateWhere, serverInstance: { in: visible.plex } }, select, distinct })
+      : Promise.resolve([]),
+    visible.jellyfin.length
+      ? prisma.jellyfinLibraryItem.findMany({ where: { ...candidateWhere, serverInstance: { in: visible.jellyfin } }, select, distinct })
+      : Promise.resolve([]),
+  ]);
+  for (const r of [...onPlex, ...onJellyfin]) candidates.delete(titleKeyOf(r));
+  return [...candidates.values()];
 }
 
 // Same resolver for a caller holding a bare user id instead of a session — the

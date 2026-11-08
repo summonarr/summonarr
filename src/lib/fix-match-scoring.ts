@@ -56,8 +56,44 @@ export type TargetFacts = {
   runtime: number | null; genres: string[];
 };
 
+// Points for how close the release years are (20 / 10 / 5, else none).
+function yearPoints(candidateYear: number | null, targetYear: string): number {
+  const tYear = parseInt(targetYear, 10);
+  if (!candidateYear || !tYear) return 0;
+  const diff = Math.abs(candidateYear - tYear);
+  return diff === 0 ? 20 : diff === 1 ? 10 : diff === 2 ? 5 : 0;
+}
+
+// Points for how close the runtimes are, in minutes (15 down to 3, else none).
+function runtimePoints(candidateRuntime: number | null, targetRuntime: number | null): number {
+  if (!candidateRuntime || !targetRuntime) return 0;
+  const diff = Math.abs(candidateRuntime - targetRuntime);
+  if (diff <= 2) return 15;
+  if (diff <= 5) return 12;
+  if (diff <= 10) return 7;
+  if (diff <= 20) return 3;
+  return 0;
+}
+
+// Up to 15 points for genre overlap (Jaccard).
+function genrePoints(candidateGenres: readonly string[], targetGenres: readonly string[]): number {
+  if (!candidateGenres.length || !targetGenres.length) return 0;
+  const intersection = candidateGenres.filter((g) => targetGenres.includes(g)).length;
+  const union = new Set([...candidateGenres, ...targetGenres]).size;
+  return Math.round((intersection / union) * 15);
+}
+
+function levelForScore(score: number): CandidateMatch {
+  if (score >= 75) return "strong";
+  if (score >= 55) return "likely";
+  if (score >= 30) return "possible";
+  return "unknown";
+}
+
 // Classifies a Plex match candidate against the target (exact/strong/…/wrong)
 // from provider-id agreement plus a weighted title/year/runtime/genre score.
+// A provider id that names ANOTHER title (IMDb or TMDB) is "wrong" outright:
+// no fit score can outweigh the candidate saying what it is.
 export function assessCandidate(
   candidate: CandidateFacts,
   target: TargetFacts,
@@ -72,47 +108,18 @@ export function assessCandidate(
     return { matchLevel: "exact", confidence: 100, titleSimilarity: ts };
   }
 
-  if (candidate.imdbId && target.imdbId && candidate.imdbId !== target.imdbId) {
+  if (
+    (candidate.imdbId && target.imdbId && candidate.imdbId !== target.imdbId) ||
+    (candidate.tmdbId && candidate.tmdbId !== String(target.tmdbId))
+  ) {
     return { matchLevel: "wrong", confidence: 0, titleSimilarity: ts };
   }
 
-  let score = 0;
-
-  score += Math.round(ts * 0.4);
-
-  const cYear = candidate.year;
-  const tYear = parseInt(target.year, 10);
-  if (cYear && tYear) {
-    if (cYear === tYear) score += 20;
-    else if (Math.abs(cYear - tYear) === 1) score += 10;
-    else if (Math.abs(cYear - tYear) === 2) score += 5;
-  }
-
-  if (candidate.tmdbRuntime && target.runtime) {
-    const diff = Math.abs(candidate.tmdbRuntime - target.runtime);
-    if (diff <= 2) score += 15;
-    else if (diff <= 5) score += 12;
-    else if (diff <= 10) score += 7;
-    else if (diff <= 20) score += 3;
-  }
-
-  if (candidate.tmdbGenres.length && target.genres.length) {
-    const intersection = candidate.tmdbGenres.filter((g) => target.genres.includes(g)).length;
-    const union = new Set([...candidate.tmdbGenres, ...target.genres]).size;
-    score += Math.round((intersection / union) * 15);
-  }
-
-  if (candidate.tmdbId && candidate.tmdbId !== String(target.tmdbId)) {
-    score = Math.min(score, 40);
-  }
-
-  let matchLevel: CandidateMatch;
-  if (score >= 75)      matchLevel = "strong";
-  else if (score >= 55) matchLevel = "likely";
-  else if (score >= 30) matchLevel = "possible";
-  else                  matchLevel = "unknown";
-
-  return { matchLevel, confidence: score, titleSimilarity: ts };
+  const score = Math.round(ts * 0.4)
+    + yearPoints(candidate.year, target.year)
+    + runtimePoints(candidate.tmdbRuntime, target.runtime)
+    + genrePoints(candidate.tmdbGenres, target.genres);
+  return { matchLevel: levelForScore(score), confidence: score, titleSimilarity: ts };
 }
 
 /** Best level first, then highest confidence. */

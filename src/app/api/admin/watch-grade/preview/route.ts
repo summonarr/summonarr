@@ -20,8 +20,8 @@ export const dynamic = "force-dynamic";
 export const POST = withAdmin(async (req) => {
   const t = translatorForRequest(req);
   const parsed = await readJsonCapped<Record<string, unknown>>(req, 16_384);
+  // readJsonCapped already answers 400 for anything but a JSON object.
   if (parsed instanceof NextResponse) return parsed;
-  if (Array.isArray(parsed)) return NextResponse.json({ error: t("apiAdmin.common.invalidBody") }, { status: 400 });
 
   for (const key of Object.values(WATCH_GRADE_SETTING_KEYS)) {
     const value = parsed[key];

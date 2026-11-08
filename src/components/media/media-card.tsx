@@ -18,17 +18,18 @@ import { RatingsBar } from "@/components/media/ratings-bar";
 import { AvailabilityChips } from "@/components/media/availability-chips";
 import { mergeRatings } from "@/components/media/ratings-merge";
 import { cn } from "@/lib/utils";
-import { useState, useEffect, memo } from "react";
-import { requestRatings, type RatingsPayload } from "@/lib/client/ratings-batcher";
-import { postMediaRequest } from "@/lib/client/media-request";
+import { useState, useEffect, useRef, memo } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
-
-type LiveRatings = RatingsPayload;
+import type { Translator } from "@/lib/i18n/translate";
+import { useAsyncAction } from "@/hooks/use-async-action";
+import { useFocusReturn } from "@/hooks/use-focus-return";
+import { cardView, submitCardRequest, type CardRequestState, type CardView } from "./media-card-state";
+import { mediaDetailPath } from "./media-links";
+import { useLiveRatings } from "./use-live-ratings";
 
 interface MediaCardProps {
   media: TmdbMedia;
-  onClick?: (media: TmdbMedia) => void;
   className?: string;
   size?: "sm" | "md";
   showPlex?: boolean;
@@ -48,17 +49,62 @@ interface MediaCardProps {
       a node rather than a boolean flag so this component never learns about the
       hidden-items API. */
   overlayAction?: React.ReactNode;
-  /** When false, hide the HD Request overlay (the viewer cannot request this
-      media type on the default instance). View / Blocked still render — those
-      are not the request CTA. Same gate as the detail-page HD button. */
+  /** When true, show the HD Request overlay (the viewer can request this media
+      type on the default instance). View / Blocked render either way — those
+      are not the request CTA. Same gate as the detail-page HD button. Off
+      unless a caller says so: a forgotten prop must not offer a request the
+      server will refuse. */
   canRequest?: boolean;
 }
 
-type RequestState = "idle" | "confirm" | "loading" | "requested" | "available" | "error";
+// The viewer's request from this card: idle → confirm → loading → requested /
+// available, or back to idle / error with a toast. An answer that lands after
+// the card went away (another title, another page) is dropped with it.
+function useCardRequest(media: TmdbMedia, requestToken: string | undefined) {
+  const router = useRouter();
+  const { toast } = useToast();
+  const t = useT();
+  const action = useAsyncAction();
+  const [state, setState] = useState<CardRequestState>("idle");
+
+  async function submit() {
+    if (state !== "idle" && state !== "confirm") return;
+    setState("loading");
+    const outcome = await action.run("request", (signal) => submitCardRequest(media, requestToken, signal), { ifBusy: "skip" });
+    if (!outcome) return;
+    switch (outcome.kind) {
+      case "available":
+        // The item was already in a library — no request row was created.
+        // Reflect availability and let the server re-render the badges.
+        setState("available");
+        router.refresh();
+        return;
+      case "requested":
+        setState("requested");
+        return;
+      case "refused":
+        // Surface the server's reason (quota, permission, instance errors) —
+        // the bubble alone only ever said "Retry", and only on hover.
+        toast({ title: outcome.message ?? t("media.card.requestFailed", { title: media.title }), variant: "error" });
+        setState(outcome.transient ? "error" : "idle");
+        return;
+      case "no-answer":
+        toast({ title: t("media.networkError"), variant: "error" });
+        setState("error");
+        return;
+    }
+  }
+
+  return {
+    state,
+    ask: () => setState("confirm"),
+    cancel: () => setState("idle"),
+    submit,
+  };
+}
 
 function MediaCardImpl({
   media,
-  onClick,
   className,
   size = "sm",
   showPlex = true,
@@ -67,132 +113,24 @@ function MediaCardImpl({
   requestToken,
   caption,
   overlayAction,
-  canRequest = true,
+  canRequest = false,
 }: MediaCardProps) {
   const router = useRouter();
-  const { toast } = useToast();
   const t = useT();
   const poster = posterUrl(media.posterPath, "w342");
-  const [reqState, setReqState] = useState<RequestState>("idle");
-  const [liveRatings, setLiveRatings] = useState<LiveRatings | null>(null);
-  // Grids key cards by id, but a reused instance (person filmography filter,
-  // a parent that forgets the key) must not keep the previous title's request
-  // overlay. Ratings live-state is title-scoped too.
-  const [seenId, setSeenId] = useState(media.id);
-  const titleChanged = seenId !== media.id;
-  if (titleChanged) {
-    setSeenId(media.id);
-    setReqState("idle");
-    setLiveRatings(null);
-  }
+  const liveRatings = useLiveRatings(media);
+  const request = useCardRequest(media, requestToken);
+  const view = cardView(media, { showPlex, showJellyfin, canRequest, state: request.state });
+  const detailPath = mediaDetailPath(media);
 
-  useEffect(() => {
-    if (media.imdbRating !== undefined || media.rottenTomatoes !== undefined) return;
-    let cancelled = false;
-    requestRatings(media.id, media.mediaType, media.releaseDate ?? null).then((data) => {
-      if (!cancelled && data) setLiveRatings(data);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [media.id, media.mediaType, media.releaseDate, media.imdbRating, media.rottenTomatoes]);
-
-  const isAvailable = !!(
-    (showPlex && media.plexAvailable) ||
-    (showJellyfin && media.jellyfinAvailable)
-  ) || (!titleChanged && reqState === "available");
-  // Only the viewer's OWN request blocks re-requesting. A title queued by
-  // someone else (arrPending) stays requestable — the server mirrors the
-  // approved status so this user gets the "now available" notification.
-  const uiReqState = titleChanged ? "idle" : reqState;
-  const isRequested = !!media.requestedByMe || uiReqState === "requested";
-  const blacklisted = !!media.blacklisted;
-  // "Ghost" bubble: the title is already available, already requested by this
-  // viewer, or blocked — the bubble opens the detail page instead of requesting.
-  const ghost = isAvailable || isRequested || blacklisted;
-  // Hide the Request overlay when the viewer cannot request this type. Keep
-  // View / Blocked / in-flight confirm — "already requested" is not the CTA.
-  const showRequestOverlay =
-    canRequest ||
-    ghost ||
-    uiReqState === "confirm" ||
-    uiReqState === "loading" ||
-    uiReqState === "error";
-
-  const detailPath =
-    media.mediaType === "movie" ? `/movie/${media.id}` : `/tv/${media.id}`;
-
-  function handleCardClick() {
-    if (onClick) {
-      onClick(media);
-      return;
-    }
-    router.push(detailPath);
-  }
-
-  async function submitRequest(e: React.MouseEvent) {
-    e.stopPropagation();
-    if (reqState !== "idle" && reqState !== "confirm") return;
-    setReqState("loading");
-    try {
-      const mt = media.mediaType === "movie" ? "MOVIE" : "TV";
-      // Fetches a token when no prop carries one, and refreshes a prop token
-      // (person pages mint it at render) that expired while the tab sat open.
-      // A failed token fetch comes back as its own non-ok answer and lands in
-      // the error branch below without posting anything.
-      const res = await postMediaRequest({ tmdbId: media.id, mediaType: mt }, requestToken);
-      if (res.ok) {
-        const body = (await res.json().catch(() => null)) as { alreadyAvailable?: boolean } | null;
-        if (body?.alreadyAvailable) {
-          // The item was already in a library — no request row was created.
-          // Reflect availability and let the server re-render the badges.
-          setReqState("available");
-          router.refresh();
-        } else {
-          setReqState("requested");
-        }
-      } else if (res.status === 409) {
-        setReqState("requested");
-      } else {
-        // Surface the server's reason (quota, permission, instance errors) —
-        // the bubble alone only ever said "Retry", and only on hover. A 4xx is
-        // a decision, not a blip, so the card returns to idle instead of
-        // offering a retry that will fail the same way; only a 5xx/429 keeps
-        // the "Retry" state.
-        const data = (await res.json().catch(() => null)) as { error?: string } | null;
-        toast({
-          title: data?.error ?? t("media.card.requestFailed", { title: media.title }),
-          variant: "error",
-        });
-        const transient = res.status >= 500 || res.status === 429;
-        setReqState(transient ? "error" : "idle");
-      }
-    } catch {
-      toast({ title: t("media.networkError"), variant: "error" });
-      setReqState("error");
-    }
-  }
-
-  function handleBubbleClick(e: React.MouseEvent) {
-    e.stopPropagation();
-    if (onClick) {
-      onClick(media);
-      return;
-    }
-    if (ghost) {
+  function handleBubbleClick() {
+    if (view.ghost) {
       router.push(detailPath);
     } else if (!canRequest) {
       return;
-    } else if (reqState === "idle" || reqState === "error") {
-      setReqState("confirm");
-    } else if (reqState === "confirm") {
-      submitRequest(e);
+    } else if (request.state === "idle" || request.state === "error") {
+      request.ask();
     }
-  }
-
-  function cancelConfirm(e: React.MouseEvent) {
-    e.stopPropagation();
-    setReqState("idle");
   }
 
   // The card is a plain <div>, NOT a <button> and NOT role="button": it
@@ -206,7 +144,7 @@ function MediaCardImpl({
   // through the real link on the title below.
   return (
     <div
-      onClick={handleCardClick}
+      onClick={() => router.push(detailPath)}
       className={cn(
         "group relative flex flex-col w-full overflow-hidden text-left cursor-pointer",
         "ds-card-lift",
@@ -246,17 +184,15 @@ function MediaCardImpl({
         )}
 
         {/* Hover / confirm overlay */}
-        {showRequestOverlay && (
+        {view.showRequestOverlay && (
           <RequestOverlay
             title={media.title}
-            uiReqState={uiReqState}
-            isAvailable={isAvailable}
-            isRequested={isRequested}
-            blacklisted={blacklisted}
-            ghost={ghost}
+            state={request.state}
+            view={view}
             onPoster={!!poster}
             onBubble={handleBubbleClick}
-            onCancel={cancelConfirm}
+            onConfirm={() => void request.submit()}
+            onCancel={request.cancel}
           />
         )}
 
@@ -264,10 +200,8 @@ function MediaCardImpl({
           media={media}
           showPlex={showPlex}
           showJellyfin={showJellyfin}
-          isAvailable={isAvailable}
-          isRequested={isRequested}
-          blacklisted={blacklisted}
-          uiReqState={uiReqState}
+          view={view}
+          confirming={request.state === "confirm"}
           overlayAction={overlayAction}
         />
       </div>
@@ -292,28 +226,14 @@ function MediaCardImpl({
           {/* The card's keyboard / screen-reader entry point (see the root
               comment). stopPropagation: the root div's click handler would
               otherwise navigate a second time. */}
-          {onClick ? (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onClick(media);
-              }}
-              className="text-left rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
-              style={{ font: "inherit", color: "inherit", background: "none", border: 0, padding: 0 }}
-            >
-              {media.title}
-            </button>
-          ) : (
-            <Link
-              href={detailPath}
-              onClick={(e) => e.stopPropagation()}
-              className="rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
-              style={{ color: "inherit" }}
-            >
-              {media.title}
-            </Link>
-          )}
+          <Link
+            href={detailPath}
+            onClick={(e) => e.stopPropagation()}
+            className="rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
+            style={{ color: "inherit" }}
+          >
+            {media.title}
+          </Link>
         </p>
         <div
           className="ds-mono flex items-center gap-1.5 flex-wrap"
@@ -345,42 +265,35 @@ function MediaCardImpl({
   );
 }
 
+const POSTER_SCRIM = "linear-gradient(180deg, transparent 40%, rgba(0,0,0,0.72) 100%)";
+
+// Where keyboard focus goes back to when the confirm prompt closes.
+const BUBBLE = "bubble";
+
 // The poster's hover / confirm overlay: the request bubble, or the confirm
-// prompt once it was clicked. Only rendered while MediaCard's
+// prompt once it was clicked. Only rendered while the card's
 // showRequestOverlay holds.
 function RequestOverlay({
   title,
-  uiReqState,
-  isAvailable,
-  isRequested,
-  blacklisted,
-  ghost,
+  state,
+  view,
   onPoster,
   onBubble,
+  onConfirm,
   onCancel,
 }: {
   title: string;
-  uiReqState: RequestState;
-  isAvailable: boolean;
-  isRequested: boolean;
-  blacklisted: boolean;
-  ghost: boolean;
+  state: CardRequestState;
+  view: CardView;
   onPoster: boolean;
-  onBubble: (e: React.MouseEvent) => void;
-  onCancel: (e: React.MouseEvent) => void;
+  onBubble: () => void;
+  onConfirm: () => void;
+  onCancel: () => void;
 }) {
   const t = useT();
-
-  // Accessible names for the overlay controls: each card's buttons read as
-  // "Request <title>" rather than a page full of identical "Request"s.
-  const bubbleLabel = () => {
-    if (isAvailable || isRequested) return t("media.card.viewLabel", { title });
-    // The button navigates (router.push), so name the action, not a status.
-    if (blacklisted) return t("media.card.viewBlockedLabel", { title });
-    if (uiReqState === "loading") return t("media.card.requestingLabel", { title });
-    if (uiReqState === "error") return t("media.card.retryLabel", { title });
-    return t("media.card.requestLabel", { title });
-  };
+  const focus = useFocusReturn();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const confirming = state === "confirm";
 
   // Over a poster the scrim is black and the overlay text white — an image is
   // always dark-compatible. With no poster the placeholder is a flat surface
@@ -388,48 +301,67 @@ function RequestOverlay({
   // dropped and the translucent-white ghost button reads off the theme instead.
   const overlayFg = onPoster ? "#fff" : "var(--ds-fg)";
   const overlayGhostBg = onPoster ? "rgba(255,255,255,0.14)" : "var(--ds-bg-2)";
-  const overlayCancelBg = onPoster ? "rgba(255,255,255,0.12)" : "var(--ds-bg-2)";
   const overlayGhostBorder = onPoster
     ? "1px solid rgba(255,255,255,0.28)"
     : "1px solid var(--ds-border)";
 
-  const bubbleContent = () => {
-    if (isAvailable) return <span>{t("media.card.view")}</span>;
-    if (isRequested) return <span>{t("media.card.view")}</span>;
-    if (blacklisted)
-      return (
-        <span className="flex items-center gap-1">
-          <Ban className="w-3.5 h-3.5" />
-          {t("media.card.blocked")}
-        </span>
-      );
-    if (uiReqState === "loading") return <Loader2 className="w-3.5 h-3.5 animate-spin" />;
-    if (uiReqState === "error") return <span>{t("media.card.retry")}</span>;
-    return (
-      <span className="flex items-center gap-1">
-        <Plus className="w-3.5 h-3.5" />
-        {t("media.card.request")}
-      </span>
-    );
+  // Revealed on hover or when anything in the card has focus; always while
+  // the confirm prompt is up.
+  const reveal = confirming
+    ? "opacity-100"
+    : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100";
+  // A touch screen has no hover to reveal the bubble, so a REQUEST bubble
+  // (not a "View" one — a tap on the card already opens the title) stays
+  // visible and live there, as a compact "+" in the bottom-right corner, clear
+  // of the bottom-left status chips.
+  const touchCta = !view.ghost;
+
+  const cancel = () => {
+    focus.returnTo(BUBBLE);
+    onCancel();
   };
+
+  // The prompt is a step in one card: a click anywhere else (another card's
+  // bubble included) dismisses it, so only one card is ever asking.
+  const cancelRef = useRef(onCancel);
+  useEffect(() => {
+    cancelRef.current = onCancel;
+  });
+  useEffect(() => {
+    if (!confirming) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.target instanceof Node && rootRef.current?.contains(e.target)) return;
+      cancelRef.current();
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [confirming]);
 
   return (
     <div
+      ref={rootRef}
       className={cn(
-        "absolute inset-0 flex items-end justify-center pointer-events-none transition-opacity",
-        uiReqState === "confirm"
-          ? "opacity-100"
-          : "opacity-0 group-hover:opacity-100 focus-within:opacity-100",
+        "absolute inset-0 flex items-end justify-center pointer-events-none",
+        !confirming && touchCta && "[@media(hover:none)]:justify-end",
       )}
-      style={{
-        background: onPoster
-          ? "linear-gradient(180deg, transparent 40%, rgba(0,0,0,0.72) 100%)"
-          : "none",
-        padding: 10,
-      }}
+      style={{ padding: 10 }}
     >
-      {uiReqState === "confirm" ? (
-        <div className="pointer-events-auto flex flex-col items-center gap-2 px-3 pb-2">
+      {onPoster && (
+        <div
+          aria-hidden="true"
+          className={cn("absolute inset-0 transition-opacity", reveal)}
+          style={{ background: POSTER_SCRIM }}
+        />
+      )}
+      {confirming ? (
+        <div
+          className="pointer-events-auto relative flex flex-col items-center gap-2 px-3 pb-2"
+          onKeyDown={(e) => {
+            if (e.key !== "Escape") return;
+            e.stopPropagation();
+            cancel();
+          }}
+        >
           <span
             className="text-center leading-tight font-semibold"
             style={{ fontSize: 11, color: overlayFg }}
@@ -438,7 +370,14 @@ function RequestOverlay({
           </span>
           <div className="flex items-center gap-2">
             <button
-              onClick={onBubble}
+              // The bubble that opened the prompt is gone: focus moves here, so
+              // a keyboard user keeps their place.
+              autoFocus
+              onClick={(e) => {
+                e.stopPropagation();
+                focus.returnTo(BUBBLE);
+                onConfirm();
+              }}
               type="button"
               aria-label={t("media.card.confirmLabel", { title })}
               className="ds-tap inline-flex items-center gap-1 font-semibold transition-colors"
@@ -455,14 +394,17 @@ function RequestOverlay({
               {t("media.card.confirm")}
             </button>
             <button
-              onClick={onCancel}
+              onClick={(e) => {
+                e.stopPropagation();
+                cancel();
+              }}
               type="button"
               aria-label={t("media.card.cancelLabel", { title })}
               className="ds-tap inline-flex items-center gap-1 font-semibold transition-colors"
               style={{
                 padding: "4px 10px",
                 borderRadius: 999,
-                background: overlayCancelBg,
+                background: onPoster ? "rgba(255,255,255,0.12)" : "var(--ds-bg-2)",
                 color: overlayFg,
                 fontSize: 11,
                 border: overlayGhostBorder,
@@ -475,29 +417,70 @@ function RequestOverlay({
         </div>
       ) : (
         <button
-          onClick={onBubble}
+          ref={focus.refFor(BUBBLE)}
+          onClick={(e) => {
+            e.stopPropagation();
+            onBubble();
+          }}
           type="button"
-          aria-label={bubbleLabel()}
-          // Clickable only while the overlay is revealed. The overlay is
-          // opacity-0 until hover/focus, and a transparent-but-live button
-          // swallowed touch taps on the poster's bottom-centre (no hover
-          // on touch to reveal it first — Tailwind gates group-hover on
-          // `(hover: hover)`), opening a request prompt nobody saw.
-          // Keyboard focus is unaffected by pointer-events.
-          className="ds-tap pointer-events-none group-hover:pointer-events-auto group-focus-within:pointer-events-auto inline-flex items-center gap-1.5 font-semibold transition-colors"
+          aria-label={bubbleLabel(t, title, view, state)}
+          // Clickable only while revealed. A transparent-but-live button
+          // swallowed touch taps on the poster's bottom-centre (no hover on
+          // touch to reveal it first — Tailwind gates group-hover on
+          // `(hover: hover)`), opening a request prompt nobody saw; the touch
+          // CTA is visible whenever it is live. Keyboard focus is unaffected
+          // by pointer-events.
+          className={cn(
+            "ds-tap relative inline-flex items-center gap-1.5 font-semibold transition",
+            reveal,
+            "pointer-events-none group-hover:pointer-events-auto group-focus-within:pointer-events-auto",
+            touchCta && "[@media(hover:none)]:opacity-100 [@media(hover:none)]:pointer-events-auto",
+          )}
           style={{
             padding: "5px 12px",
             borderRadius: 999,
-            background: ghost ? overlayGhostBg : "var(--ds-accent)",
-            color: ghost ? overlayFg : "var(--ds-accent-fg)",
-            border: ghost ? overlayGhostBorder : "0",
+            background: view.ghost ? overlayGhostBg : "var(--ds-accent)",
+            color: view.ghost ? overlayFg : "var(--ds-accent-fg)",
+            border: view.ghost ? overlayGhostBorder : "0",
             fontSize: 12,
           }}
         >
-          {bubbleContent()}
+          <BubbleContent view={view} state={state} />
         </button>
       )}
     </div>
+  );
+}
+
+// Accessible names for the bubble: each card's reads as "Request <title>"
+// rather than a page full of identical "Request"s.
+function bubbleLabel(t: Translator, title: string, view: CardView, state: CardRequestState): string {
+  if (view.isAvailable || view.isRequested) return t("media.card.viewLabel", { title });
+  // The button navigates (router.push), so name the action, not a status.
+  if (view.blacklisted) return t("media.card.viewBlockedLabel", { title });
+  if (state === "loading") return t("media.card.requestingLabel", { title });
+  if (state === "error") return t("media.card.retryLabel", { title });
+  return t("media.card.requestLabel", { title });
+}
+
+function BubbleContent({ view, state }: { view: CardView; state: CardRequestState }) {
+  const t = useT();
+  if (view.isAvailable || view.isRequested) return <span>{t("media.card.view")}</span>;
+  if (view.blacklisted)
+    return (
+      <span className="flex items-center gap-1">
+        <Ban className="w-3.5 h-3.5" />
+        {t("media.card.blocked")}
+      </span>
+    );
+  if (state === "loading") return <Loader2 className="w-3.5 h-3.5 animate-spin" />;
+  if (state === "error") return <span>{t("media.card.retry")}</span>;
+  return (
+    <span className="flex items-center gap-1">
+      <Plus className="w-3.5 h-3.5" />
+      {/* Icon-only on a touch screen, where the CTA sits in the corner. */}
+      <span className="[@media(hover:none)]:hidden">{t("media.card.request")}</span>
+    </span>
   );
 }
 
@@ -507,19 +490,15 @@ function CardBadges({
   media,
   showPlex,
   showJellyfin,
-  isAvailable,
-  isRequested,
-  blacklisted,
-  uiReqState,
+  view,
+  confirming,
   overlayAction,
 }: {
   media: TmdbMedia;
   showPlex: boolean;
   showJellyfin: boolean;
-  isAvailable: boolean;
-  isRequested: boolean;
-  blacklisted: boolean;
-  uiReqState: RequestState;
+  view: CardView;
+  confirming: boolean;
   overlayAction?: React.ReactNode;
 }) {
   const t = useT();
@@ -541,7 +520,7 @@ function CardBadges({
           media={media}
           showPlex={showPlex}
           showJellyfin={showJellyfin}
-          isAvailable={isAvailable}
+          isAvailable={view.isAvailable}
         />
         {/* Caller-supplied action (e.g. /for-you's "not interested").
             Fades in with hover like the request overlay, but stays visible
@@ -559,25 +538,23 @@ function CardBadges({
       </div>
 
       {/* Bottom-left: request state — "Requested" (a pending request, anyone's)
-          and "Blocked" (admin blacklist, which never touches the request rows,
-          so both can hold at once). One stack like the top-left chips, so they
-          no longer paint on top of each other at the same corner.
+          and "Blocked" (admin blacklist). One stack like the top-left chips,
+          so they never paint on top of each other at the same corner.
           pointer-events-none: the chip sat over the revealed bubble's corner
           on ordinary card widths and a click there bubbled to the card (→ the
           detail page) instead of the bubble. It fades whenever the overlay is
           revealed for the same reason — the two share the poster's bottom
           edge — and stays hidden while the confirm prompt is up. */}
-      {!isAvailable &&
-        ((media.requested || uiReqState === "requested") || (!isRequested && blacklisted)) && (
+      {(view.requestedChip || view.blockedChip) && (
         <div
           className={cn(
             "absolute bottom-1.5 left-1.5 flex flex-col items-start gap-1 pointer-events-none transition-opacity",
-            uiReqState === "confirm"
+            confirming
               ? "opacity-0"
               : "group-hover:opacity-0 group-focus-within:opacity-0",
           )}
         >
-          {(media.requested || uiReqState === "requested") && (
+          {view.requestedChip && (
             <span
               className="ds-chip ds-chip-accent"
               style={{ paddingLeft: 5, paddingRight: 6 }}
@@ -586,7 +563,7 @@ function CardBadges({
               {t("media.badge.requested")}
             </span>
           )}
-          {!isRequested && blacklisted && (
+          {view.blockedChip && (
             <span
               className="ds-chip"
               style={{
@@ -640,4 +617,15 @@ function CardBadges({
   );
 }
 
-export const MediaCard = memo(MediaCardImpl);
+// Keyed on the title, so a reused instance (a parent that forgets the key, a
+// list that swaps titles in place) starts fresh: no request overlay, ratings
+// or answer in flight from the previous title carries across.
+function MediaCardForTitle(props: MediaCardProps) {
+  return <MediaCardImpl key={`${props.media.mediaType}:${props.media.id}`} {...props} />;
+}
+
+// memo pays off under a CLIENT parent: BrowseGrid re-renders every card on each
+// filter transition (isPending) with the same props. Cards a server component
+// renders (For You, the home rails) get new props only with a new RSC payload,
+// where every prop is new anyway.
+export const MediaCard = memo(MediaCardForTitle);

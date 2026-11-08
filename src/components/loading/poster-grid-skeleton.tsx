@@ -1,97 +1,17 @@
-// Shared skeleton kit. `PosterGridSkeleton` stands in for the MediaCard grids
-// (movies / tv / upcoming / popular / top / for-you); the smaller exports are
-// the pieces the other (app) loading.tsx files compose. Everything mirrors the
-// real page's footprint — PageHeader's box, the controls row every grid page
+// The poster layouts of the skeleton kit. `PosterGridSkeleton` stands in for
+// the MediaCard grids (movies / tv / upcoming / popular / top / for-you); the
+// detail-page hero and cast grid are here too. Everything mirrors the real
+// page's footprint — PageHeader's box, the controls row every grid page
 // renders above the grid, `.ds-media-grid` itself (fixed 2–6 columns, not an
 // auto-fill), and a MediaCard-shaped tile (2:3 poster + ~90px body, radius 8)
 // — so the streamed page lands on the same layout with no reflow.
-// Fills are --ds-bg-3 throughout: --ds-bg-2 is pure white in light mode and a
-// block filled with it is invisible on the --ds-bg page. Card containers use
-// --ds-bg-1 + a hairline for the same reason.
-import type { CSSProperties, ReactNode } from "react";
-import { SkeletonLoadingLabel } from "@/components/loading/skeleton-label";
+//
+// The primitives (SkeletonRoot, Bar, SkeletonHeader, ControlRow, the fill and
+// card surface) live in skeleton-primitives.tsx and are re-exported here for
+// the loading.tsx files that import them from this module.
+import { Bar, ControlRow, SKELETON_CARD, SKELETON_FILL, SkeletonHeader, SkeletonRoot } from "@/components/loading/skeleton-primitives";
 
-export const SKELETON_FILL = "var(--ds-bg-3)";
-export const SKELETON_CARD: CSSProperties = {
-  background: "var(--ds-bg-1)",
-  border: "1px solid var(--ds-border)",
-};
-
-// The root of every skeleton (loading.tsx boundaries and the kit's page-level
-// skeletons): the pulse plus what assistive tech needs — a status region that
-// is busy, named by a translated, visually hidden "Loading…". The bars are
-// empty boxes with nothing to read. The label is the FIRST child and sr-only
-// (absolutely positioned), so it takes no space and the no-reflow footprint
-// holds. Never nest one inside another: a skeleton has one status.
-export function SkeletonRoot({ className, children }: { className?: string; children: ReactNode }) {
-  return (
-    <div role="status" aria-busy="true" className={className ? `${className} animate-pulse` : "animate-pulse"}>
-      <SkeletonLoadingLabel />
-      {children}
-    </div>
-  );
-}
-
-// One text / control bar. `w` is a px number or any CSS width.
-export function Bar({
-  w,
-  h = 14,
-  r = 4,
-  style,
-}: {
-  w: number | string;
-  h?: number;
-  r?: number;
-  style?: CSSProperties;
-}) {
-  return (
-    <div
-      style={{ width: w, height: h, borderRadius: r, background: SKELETON_FILL, flexShrink: 0, ...style }}
-    />
-  );
-}
-
-// PageHeader stand-in: the 22px title's 33px line box, the optional 12px
-// subtitle (18px line box per line, mt-1), an optional right-aligned action,
-// mb-5. `subtitleLines` covers pages whose long subtitle wraps (issues, votes).
-// Booleans only — never literal text that could drift from the page.
-export function SkeletonHeader({
-  subtitle = false,
-  subtitleLines = 1,
-  right = false,
-}: {
-  subtitle?: boolean;
-  subtitleLines?: number;
-  right?: boolean;
-}) {
-  return (
-    <div className="ds-page-header mb-5">
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center" style={{ height: 33 }}>
-          <Bar w={200} h={24} />
-        </div>
-        {subtitle && (
-          <div className="mt-1">
-            {Array.from({ length: subtitleLines }).map((_, i) => (
-              <div key={i} className="flex items-center" style={{ height: 18 }}>
-                <Bar
-                  w={subtitleLines > 1 && i === subtitleLines - 1 ? 220 : 320}
-                  h={12}
-                  style={{ maxWidth: "100%" }}
-                />
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-      {right && (
-        <div className="ds-page-header-actions flex gap-1.5">
-          <Bar w={120} h={32} r={8} />
-        </div>
-      )}
-    </div>
-  );
-}
+export { Bar, ControlRow, SKELETON_CARD, SKELETON_FILL, SkeletonHeader, SkeletonRoot };
 
 // A MediaCard-shaped tile: 2:3 poster over a ~90px body (two title lines +
 // meta), radius 8 with the card's hairline.
@@ -106,12 +26,6 @@ export function MediaCardTile() {
       </div>
     </div>
   );
-}
-
-// A segmented-control / pill-group stand-in: the 32px bordered box the
-// design-system FilterBar and FilterPills render.
-export function ControlRow({ w = 280 }: { w?: number | string }) {
-  return <Bar w={w} h={32} r={8} style={{ ...SKELETON_CARD, maxWidth: "100%" }} />;
 }
 
 // Detail-page hero (movie + tv): the edge-to-edge backdrop (aspect-video,

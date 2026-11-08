@@ -361,6 +361,22 @@ test("an invalidation landing while the shared computation runs is never stored"
   assert.deepEqual(factLoads(), expectLoads(1), "nothing was stored");
 });
 
+test("a shared computation never joins a page's computation already in flight, so its own load is the one the next figure reuses", async () => {
+  const { index, at } = await getCachedArrLibraryIndex();
+  const shared = shareLibraryWatchFacts(index, at, { now: NOW, seasons: true });
+  let release!: () => void;
+  sessionsGate = new Promise<void>((r) => { release = r; });
+  const page = nwReport.getNeverWatchedReport();
+  for (let i = 0; i < 50 && count("activeSession.findMany") === 0; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(count("activeSession.findMany"), 1, "the page's computation is parked inside its load");
+  const fromShared = nwReport.getNeverWatchedReport({ shared });
+  for (let i = 0; i < 50 && count("activeSession.findMany") < 2; i++) await new Promise((r) => setImmediate(r));
+  sessionsGate = null;
+  release();
+  await Promise.all([page, fromShared]);
+  assert.equal(shared.started, true, "the shared computation ran its own load");
+});
+
 test("a shared load that FAILED is retried by the next computation, never replayed to it — and nothing is stored from it", async () => {
   sessionsFailOnce = true;
   const s = await stats.getStorageStats({ fresh: true });

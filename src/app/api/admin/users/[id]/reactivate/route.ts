@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission } from "@/lib/permissions";
-import { reactivateUser, isPurgedRow, assertTargetNotAdminInTx, TargetBecameAdminError } from "@/lib/account-lifecycle";
+import { reactivateUser, isAdminTarget, isPurgedRow, assertTargetNotAdminInTx, TargetBecameAdminError } from "@/lib/account-lifecycle";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // POST /api/admin/users/[id]/reactivate — re-enable a disabled account.
@@ -24,19 +25,20 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (
   const t = translatorForRequest(req);
   const { id } = await params;
   if (!checkRateLimit(`admin-user-reactivate:${session.user.id}`, 10, 60 * 1000)) {
-    return NextResponse.json({ error: t("apiAdmin.common.tooManyAttempts") }, { status: 429 });
+    return tooManyRequests(60, t("apiAdmin.common.tooManyAttempts"));
   }
 
   const target = await prisma.user.findUnique({
     where: { id },
-    select: { id: true, role: true, name: true, email: true, deactivatedAt: true, purgedAt: true },
+    select: { id: true, role: true, permissions: true, name: true, email: true, deactivatedAt: true, purgedAt: true },
   });
   if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
 
   // Same authority gate as the disable path: a non-admin MANAGE_USERS holder must
   // not be able to switch an admin account back on (restoring an admin is at
-  // least as privileged as disabling one).
-  if (target.role === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
+  // least as privileged as disabling one). By role or by the ADMIN bit — the
+  // rule the in-transaction re-check applies.
+  if (isAdminTarget(target) && !hasPermission(session.user.permissions, Permission.ADMIN)) {
     return NextResponse.json({ error: t("apiAdmin.users.onlyAdminReenable") }, { status: 403 });
   }
 

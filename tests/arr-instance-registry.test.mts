@@ -241,3 +241,47 @@ test("readArrInstanceRegistryForSave takes the service's save lock, THEN reads t
   assert.deepEqual(list.map((i) => i.slug), ["anime"], "the same normalizer as every other read");
   assert.equal(queries.length, 0, "nothing read through the top-level client");
 });
+
+test("a corrupt registry row warns ONCE per change, not on every read — and again once it parsed in between", async () => {
+  reset();
+  resetLogDedup();
+  const warns: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" ")); };
+  try {
+    registryValues.set("arrRadarrInstances", "{not json");
+    assert.deepEqual((await getArrInstances("radarr")).map((i) => i.slug), [""]);
+    await getArrInstances("radarr");
+    assert.equal(warns.length, 1, "an unchanged unparseable row warns once (guardrail 7b)");
+    assert.match(warns[0], /\[arr\] instance registry arrRadarrInstances is corrupted \(unparseable JSON\)/);
+
+    registryValues.set("arrRadarrInstances", JSON.stringify({ slug: "anime" }));
+    await getArrInstances("radarr");
+    await getArrInstances("radarr");
+    assert.equal(warns.length, 2, "a different corruption is a change");
+    assert.match(warns[1], /not a JSON array/);
+
+    registryValues.set("arrRadarrInstances", JSON.stringify([]));
+    await getArrInstances("radarr");
+    registryValues.set("arrRadarrInstances", JSON.stringify({ slug: "anime" }));
+    await getArrInstances("radarr");
+    assert.equal(warns.length, 3, "parsed in between, so the same corruption logs again");
+  } finally {
+    console.warn = realWarn;
+    resetLogDedup();
+  }
+});
+
+test("an auto-route rule keeps positive integer genre ids and short language codes, at most 50 of each", async () => {
+  reset();
+  const genreIds: unknown[] = [16, 16, -3, 2.5, "18", 0, ...Array.from({ length: 80 }, (_, i) => 100 + i)];
+  const originalLanguages: unknown[] = ["ja", "ja", "", 7, "x".repeat(36), ...Array.from({ length: 80 }, (_, i) => `l${i}`)];
+  registryValues.set("arrRadarrInstances", JSON.stringify([{ slug: "anime", name: "Anime", autoRoute: { genreIds, originalLanguages } }]));
+  const anime = (await getArrInstances("radarr")).find((i) => i.slug === "anime");
+  const rule = anime?.autoRoute;
+  assert.ok(rule?.genreIds && rule.originalLanguages);
+  assert.equal(rule.genreIds.length, 50);
+  assert.deepEqual(rule.genreIds.slice(0, 3), [16, 100, 101], "duplicates, non-positive, fractional and string ids dropped");
+  assert.equal(rule.originalLanguages.length, 50);
+  assert.deepEqual(rule.originalLanguages.slice(0, 2), ["ja", "l0"], "blank, non-string and over-long codes dropped");
+});

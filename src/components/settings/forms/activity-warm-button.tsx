@@ -1,40 +1,51 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { CheckCircle, Loader2, RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson } from "@/lib/client/fetch-json";
+import { v } from "@/lib/validate";
+import { useDelayed } from "@/hooks/use-delayed";
 import { useT } from "@/components/i18n/i18n-provider";
+
+// The warm's answer; a field of the wrong type fails the check rather than
+// reaching the translator.
+const WarmAnswer = v.object({ warmed: v.optional(v.number()) });
+
+// The warm runs the stats aggregates before it answers: a slow success is
+// still a success, not a timeout (guardrail 37a's failure mode).
+const WARM_TIMEOUT_MS = 10 * 60_000;
 
 export function ActivityWarmButton() {
   const t = useT();
   const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [result, setResult] = useState<string | null>(null);
-  // Timer that resets the button 10s after a run. Kept in a ref so a new run
-  // can cancel the previous one — otherwise an old timer could reset the
-  // button to "idle" (re-enabling it) while a newer run is still loading.
-  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
+  // Resets the button 10s after a run. A new run cancels the previous reset —
+  // otherwise an old timer could reset the button to "idle" (re-enabling it)
+  // while a newer run is still loading — and nothing fires after unmount.
+  const later = useDelayed();
 
   async function handleWarm() {
-    if (resetTimer.current) clearTimeout(resetTimer.current);
+    later.cancel();
     setStatus("loading");
     setResult(null);
-    try {
-      const res = await fetch(withBasePath("/api/admin/activity-warm"), { method: "POST" });
-      const data: { warmed?: number; error?: string } = await res.json();
-      if (!res.ok || data.error) {
-        setStatus("error");
-        setResult(data.error ?? t("settings.form.common.requestFailed"));
-      } else {
-        setStatus("done");
-        setResult(t("settings.form.activityWarm.result", { count: data.warmed ?? 0 }));
-      }
-    } catch {
+    const res = await fetchJson(withBasePath("/api/admin/activity-warm"), {
+      init: { method: "POST" },
+      schema: WarmAnswer,
+      timeoutMs: WARM_TIMEOUT_MS,
+    });
+    if (res.ok) {
+      setStatus("done");
+      setResult(t("settings.form.activityWarm.result", { count: res.data.warmed ?? 0 }));
+    } else {
       setStatus("error");
-      setResult(t("settings.form.common.requestFailed"));
+      // The route's own reason (a 429 names its wait), else the HTTP status.
+      setResult(res.error || (res.status > 0
+        ? t("settings.form.common.requestFailedHttp", { status: res.status })
+        : t("settings.form.common.requestFailed")));
     }
-    resetTimer.current = setTimeout(() => { setStatus("idle"); setResult(null); }, 10000);
+    later(() => { setStatus("idle"); setResult(null); }, 10000);
   }
 
   return (

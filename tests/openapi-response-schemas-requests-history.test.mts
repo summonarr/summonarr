@@ -6,6 +6,7 @@
 import {
   getSpec,
   handlerSource,
+  specOp,
   interfaceFields,
   jsonBodyKeys,
   keysOf,
@@ -19,6 +20,7 @@ import {
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import ts from "typescript";
+import { playHistorySource } from "./_play-history-source.mts";
 
 // ── local AST helpers ────────────────────────────────────────────────────────
 
@@ -90,6 +92,24 @@ function varObject(src: string, name: string): ts.ObjectLiteralExpression {
   return found;
 }
 
+/** The object literal a function declaration `<name>` returns (its first `return { … }`). */
+function returnedObject(src: string, name: string): ts.ObjectLiteralExpression {
+  let found: ts.ObjectLiteralExpression | null = null;
+  const visit = (n: ts.Node) => {
+    if (!found && ts.isFunctionDeclaration(n) && n.name?.text === name && n.body) {
+      const inBody = (m: ts.Node) => {
+        if (!found && ts.isReturnStatement(m) && m.expression) found = objectOf(m.expression);
+        if (!found && !ts.isFunctionLike(m)) ts.forEachChild(m, inBody);
+      };
+      ts.forEachChild(n.body, inBody);
+    }
+    if (!found) ts.forEachChild(n, visit);
+  };
+  visit(parse(src));
+  assert.ok(found, `function ${name} returning { … } not found`);
+  return found;
+}
+
 /** The object literals passed to `NextResponse.json(…)` in a source, in order. */
 function jsonObjects(src: string): ts.ObjectLiteralExpression[] {
   const out: ts.ObjectLiteralExpression[] = [];
@@ -131,6 +151,26 @@ const OK_TRUE = { type: "object", required: ["ok"], properties: { ok: { type: "b
 
 // ── requests and issues ─────────────────────────────────────────────────────
 
+test("GET /requests and GET /issues document each row's `user`: the name, and the email for a manager", async () => {
+  const page = await responseSchema("/requests", "get", "200");
+  const rows: Record<string, SchemaNode> = {
+    "/requests": prop(page.allOf?.find((part) => part.properties?.requests), "requests", "[]"),
+    "/issues": prop(await responseSchema("/issues", "get", "200"), "[]"),
+  };
+  for (const [path, bit] of [["/requests", "MANAGE_REQUESTS"], ["/issues", "MANAGE_ISSUES"]] as const) {
+    const row = rows[path];
+    const user = row.allOf?.[1]?.properties?.user;
+    assert.ok(user, `${path}: the row documents no user`);
+    assert.deepEqual(keysOf(user), ["email", "name"], path);
+    assert.deepEqual(user.required, ["name"], `${path}: email is a manager's only`);
+    assert.match(user.properties?.email?.description ?? "", new RegExp(bit));
+    // The handler includes exactly these: { name, email } for a manager, { name } otherwise.
+    const src = handlerSource(path, "get");
+    assert.match(src, /user: \{ select: \{ name: true, email: true \} \}/, path);
+    assert.match(src, /user: \{ select: \{ name: true \} \}/, path);
+  }
+});
+
 test("plain acknowledgements: a grabbed release and a filed report answer { ok: true }", async () => {
   for (const [path, method] of [["/requests/{id}/releases", "post"], ["/report", "post"]] as const) {
     assert.deepEqual(await responseSchema(path, method, "200"), OK_TRUE, path);
@@ -143,7 +183,7 @@ test("the request pickers document what their handlers answer: quality profiles,
   const qp = await responseSchema("/requests/quality-profiles", "get", "200");
   assert.deepEqual(keysOf(qp), jsonBodyKeys(handlerSource("/requests/quality-profiles", "get")).at(-1));
   // listQualityProfiles projects { id, name } and keeps at most MAX_QUALITY_PROFILES.
-  const arr = libSource("arr.ts");
+  const arr = libSource("arr-config.ts");
   assert.match(arr, /profiles\.push\(\{ id: p\.id, name: /);
   assert.deepEqual(keysOf(prop(qp, "qualityProfiles", "[]")), ["id", "name"]);
   assert.equal(prop(qp, "qualityProfiles").maxItems, Number(/export const MAX_QUALITY_PROFILES = (\d+);/.exec(arr)?.[1]));
@@ -155,8 +195,10 @@ test("the request pickers document what their handlers answer: quality profiles,
   const users = await responseSchema("/requests/users", "get", "200");
   const usersSrc = routeSource("/requests/users");
   assert.deepEqual(keysOf(users), jsonBodyKeys(usersSrc).at(-1));
-  const pushed = /users\.push\((\{[^)]*\})\)/.exec(usersSrc)?.[1] ?? "";
-  assert.deepEqual(keysOf(prop(users, "users", "[]")), sorted([...pushed.matchAll(/(\w+): u\./g)].map((m) => m[1])));
+  const pushed = /users\.push\((\{[^}]*\})\)/.exec(usersSrc)?.[1] ?? "";
+  // Every key of the pushed row (email is masked for a non-ADMIN caller, so it
+  // is not a bare u.<field> read).
+  assert.deepEqual(keysOf(prop(users, "users", "[]")), sorted([...pushed.matchAll(/(\w+):/g)].map((m) => m[1])));
   assert.equal(prop(users, "users").maxItems, Number(/const MAX_USERS = (\d+);/.exec(usersSrc)?.[1]));
 });
 
@@ -233,16 +275,17 @@ test("GET /issues/{id}/files documents the answer, the scope kinds, and each fil
 // ── votes ────────────────────────────────────────────────────────────────────
 
 test("GET /votes documents each item the handler builds, and POST the created DeletionVote row", async () => {
-  const src = handlerSource("/votes", "get");
+  // The handler answers loadVotesList's items (src/lib/votes-list-data.ts).
+  assert.match(handlerSource("/votes", "get"), /const \{ items, total \} = await loadVotesList\(/);
+  const lib = libSource("votes-list-data.ts");
   const page = await responseSchema("/votes", "get", "200");
   const items = page.allOf?.[1]?.properties?.items?.items;
   assert.ok(items);
-  const built = varObject(src, "items");
-  assert.deepEqual(keysOf(items), keysOfObject(built));
+  assert.deepEqual(keysOf(items), interfaceFields(lib, "VoteListItem"));
   // Other voters' reasons carry the vote id (for POST /report) and nothing that names the voter.
   assert.deepEqual(keysOf(prop(items, "reasonEntries", "[]")), ["id", "reason"]);
-  assert.match(src, /list\.push\(\{ id: r\.id, reason \}\)/);
-  assert.match(src, /if \(list\.length >= 3 \|\|/);
+  assert.match(lib, /out\.push\(\{ id: r\.id, reason \}\)/);
+  assert.match(lib, /const REASONS_PER_TITLE = 3;/);
   assert.equal(prop(items, "reasons").maxItems, 3);
   assert.equal(prop(items, "reasonEntries").maxItems, 3);
 
@@ -254,6 +297,22 @@ test("GET /votes documents each item the handler builds, and POST the created De
 // ── play history ─────────────────────────────────────────────────────────────
 
 const PLAY_HISTORY_COLUMNS = prismaModelFields("PlayHistory", ["mediaServerUser"]);
+
+test("GET /play-history and its export document one filter set: the parameters normalizePlayHistoryFilters reads", async () => {
+  const names = async (path: string) => ((await specOp(path, "get")).parameters ?? []).map((p) => p.name);
+  const read = sorted([...libSource("play-history-filters.ts").matchAll(/params\.get\("(\w+)"\)/g)].map((m) => m[1]));
+  const list = await names("/play-history");
+  const exported = await names("/play-history/export");
+  // The export takes the filters plus its format; the list adds paging, sort and its mode switches.
+  assert.deepEqual(sorted([...new Set(read)]), sorted(exported.filter((n) => n !== "format")));
+  for (const n of read) assert.ok(list.includes(n), `GET /play-history lacks ${n}`);
+  const spec = await getSpec();
+  const listParams = spec.paths["/play-history"].get.parameters ?? [];
+  for (const p of spec.paths["/play-history/export"].get.parameters ?? []) {
+    if (p.name !== "format") assert.deepEqual(p, listParams.find((q) => q.name === p.name), p.name);
+  }
+  assert.match(handlerSource("/play-history/export", "get"), /normalizePlayHistoryFilters\(params,/);
+});
 
 test("GET /play-history/{id} documents every PlayHistory column and the embedded media-server user", async () => {
   const schema = await responseSchema("/play-history/{id}", "get", "200");
@@ -267,14 +326,19 @@ test("GET /play-history documents the page, both row modes and the two distinct 
   const [page, platforms, users] = schema.anyOf ?? [];
   assert.ok(page && platforms && users, "three answers");
   const src = routeSource("/play-history");
+  // The grouped and the ungrouped answer share one page body (listResponse).
   const pages = jsonBodyKeys(src).filter((k) => k.includes("totalPages"));
-  assert.equal(pages.length, 2, "the grouped and the ungrouped answer");
+  assert.equal(pages.length, 1, "one page body for both modes");
   for (const body of pages) assert.deepEqual(keysOf(page), body);
+  assert.match(src, /return listResponse\(rows\.map\(\(row\) => shapeUngroupedRow\(row, livePaths\)\)/);
+  assert.match(src, /return listResponse\(rows\.map\(\(r\) => shapeGroupedRow\(r, livePaths\)\)/);
 
-  // Each row is the PlayHistory row plus what either path adds to it.
+  // Each row is the PlayHistory row plus what either mode's shaping adds to it
+  // (src/lib/play-history-list.ts).
+  const listLib = libSource("play-history-list.ts");
   const added = new Set<string>();
-  for (const v of ["itemsWithPosters", "items"]) {
-    for (const k of keysOfObject(varObject(src, v))) if (!k.startsWith("...")) added.add(k);
+  for (const fn of ["shapeUngroupedRow", "shapeGroupedRow"]) {
+    for (const k of keysOfObject(returnedObject(listLib, fn))) if (!k.startsWith("...")) added.add(k);
   }
   assert.deepEqual(keysOf(prop(page, "items", "[]")), sorted([...new Set([...PLAY_HISTORY_COLUMNS, ...added])]));
   assert.deepEqual(platforms.items?.type, "string");
@@ -317,7 +381,7 @@ test("the caller's own stats and Wrapped document the handlers' projections", as
     assert.deepEqual(keysOf(doc), keysOfObject(objectAt(wrappedBody, ["data", k])), k);
   }
   // The pass-through parts are WrappedBundle's own shapes.
-  const bundle = /export interface WrappedBundle \{([\s\S]*?)\n\}/.exec(libSource("play-history.ts"))?.[1] ?? "";
+  const bundle = /export interface WrappedBundle \{([\s\S]*?)\n\}/.exec(playHistorySource())?.[1] ?? "";
   for (const k of ["totals", "movies", "tv", "biggestDay", "busiestMonth", "completion"]) {
     const fields = new RegExp(`\\n  ${k}: \\{([^}]*)\\}`).exec(bundle)?.[1] ?? "";
     assert.deepEqual(keysOf(prop(data, k)), sorted([...fields.matchAll(/(\w+):/g)].map((m) => m[1])), k);
@@ -334,7 +398,7 @@ test("the admin play-history reads document their rows: active sessions, statist
   for (const k of bigints) assert.equal(prop(sessions, "[]", k).type, "integer", k);
   assert.match(routeSource("/play-history/sessions"), /NextResponse\.json\(sessions\.map\(withoutBigInts\)\)/);
 
-  const lib = libSource("play-history.ts");
+  const lib = playHistorySource();
   assert.deepEqual(
     keysOf(await responseSchema("/play-history/stats", "get", "200")),
     interfaceFields(lib, "PlayHistoryStatsResult"),
@@ -349,6 +413,7 @@ test("the admin play-history reads document their rows: active sessions, statist
   assert.ok(exportOp.content?.["text/csv"], "the CSV body");
   const rows = exportOp.content?.["application/json"]?.schema;
   const exportSrc = routeSource("/play-history/export");
-  assert.deepEqual(keysOf(rows?.items), keysOfObject(varObject(exportSrc, "data")));
+  assert.deepEqual(keysOf(rows?.items), keysOfObject(returnedObject(exportSrc, "exportJsonRow")));
+  assert.match(exportSrc, /JSON\.stringify\(rows\.map\(exportJsonRow\), null, 2\)/);
   assert.equal(rows?.maxItems, Number(/const MAX_EXPORT_ROWS = ([\d_]+);/.exec(exportSrc)?.[1].replace(/_/g, "")));
 });

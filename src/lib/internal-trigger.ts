@@ -69,6 +69,37 @@ function sinceLastTriggerSuffix(nowMs: number): string {
   return ` Previous trigger ${Math.round((nowMs - lastTriggerAt) / 1000)}s ago.`;
 }
 
+// The loopback URL of this process's own sync route. On a sub-path deployment
+// Next serves the route at `${BASE_PATH}/api/sync`; a bare `/api/sync` would
+// 404 and the SSE-driven full sync would never run. Assumes the single
+// long-lived process model (Docker container on PORT), so the loopback hits the
+// correct process; multi-instance affects only the local one.
+function loopbackSyncUrl(): string {
+  const port = process.env.PORT ?? "3000";
+  const basePath = process.env.BASE_PATH ?? "";
+  return `http://127.0.0.1:${port}${basePath}/api/sync`;
+}
+
+// What the sync route's answer means for the caller.
+async function triggerOutcome(res: Response): Promise<TriggerFullSyncResult> {
+  if (!res.ok) {
+    // Best-effort trigger: surface the HTTP error for operators but do not
+    // throw or block the timeline handler.
+    const body = await res.text().catch(() => '');
+    console.warn(
+      `[internal-trigger] full sync trigger got non-2xx ${res.status} from /api/sync: ${body.slice(0, 200)}`
+    );
+    return "failed";
+  }
+  // A 200 has two meanings: the orchestrator ran, or it returned
+  // { skipped: true } because another run holds the advisory lock. The
+  // caller needs the distinction — a dropped timeline trigger used to make
+  // a library change wait up to SYNC_INTERVAL. An unparseable success body
+  // reads as "ran" (never re-arm on ambiguity).
+  const body: unknown = await res.json().catch(() => null);
+  return body !== null && typeof body === "object" && (body as { skipped?: unknown }).skipped === true ? "skipped" : "ran";
+}
+
 export async function triggerFullSync(): Promise<TriggerFullSyncResult> {
   const secret = process.env.CRON_SECRET;
   // No CRON_SECRET means we cannot authenticate the loopback call. Skip without
@@ -83,14 +114,6 @@ export async function triggerFullSync(): Promise<TriggerFullSyncResult> {
   const triggeredAt = Date.now();
   const sinceLast = sinceLastTriggerSuffix(triggeredAt);
   lastTriggerAt = triggeredAt;
-
-  const port = process.env.PORT ?? "3000";
-  // On a sub-path deployment Next serves the route at `${BASE_PATH}/api/sync`;
-  // a bare `/api/sync` would 404 and the SSE-driven full sync would never run.
-  const basePath = process.env.BASE_PATH ?? "";
-  const url = `http://127.0.0.1:${port}${basePath}/api/sync`;
-  // Assumes the single long-lived process model (Docker container on PORT), so
-  // the loopback hits the correct process; multi-instance affects only the local one.
 
   // Cap the wait so a slow or stuck orchestrator run does not hold the
   // debounced Plex timeline handler indefinitely.
@@ -107,27 +130,12 @@ export async function triggerFullSync(): Promise<TriggerFullSyncResult> {
   );
 
   try {
-    const res = await fetch(url, {
+    const res = await fetch(loopbackSyncUrl(), {
       method: "POST",
       headers: { Authorization: `Bearer ${secret}` },
       signal: controller.signal,
     });
-    if (!res.ok) {
-      // Best-effort trigger: surface the HTTP error for operators but do not
-      // throw or block the timeline handler.
-      const body = await res.text().catch(() => '');
-      console.warn(
-        `[internal-trigger] full sync trigger got non-2xx ${res.status} from /api/sync: ${body.slice(0, 200)}`
-      );
-      return "failed";
-    }
-    // A 200 has two meanings: the orchestrator ran, or it returned
-    // { skipped: true } because another run holds the advisory lock. The
-    // caller needs the distinction — a dropped timeline trigger used to make
-    // a library change wait up to SYNC_INTERVAL. An unparseable success body
-    // reads as "ran" (never re-arm on ambiguity).
-    const body = (await res.json().catch(() => null)) as { skipped?: boolean } | null;
-    return body?.skipped === true ? "skipped" : "ran";
+    return await triggerOutcome(res);
   } catch (err) {
     // Do not throw — the caller (Plex timeline path) already treats this as
     // best-effort and only logs at warn level. Keep the same contract.

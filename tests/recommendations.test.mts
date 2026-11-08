@@ -110,12 +110,13 @@ if ((dns as { lookup: unknown }).lookup !== fakeLookup) {
 
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
-const { computeRecommendationsForUser, selectSeedPlan, warmRecommendationsCache, getUserRecommendations, getRecommendationsComputedAt, summarizeRecommendationSeeds, qualityScoreOf, orderReasonSeeds, parseReasonSeeds, storedReasonSeeds, MAX_REASON_SEEDS, SEED_RECENCY_HALF_LIFE_MS, SEED_RECENCY_FLOOR, SEED_COUNT_WEIGHT, MAX_WATCH_HISTORY_SEEDS, mergeHistorySeedRows, tasteFactor, isQuitShow, TASTE_MEH_FACTOR, TASTE_LOVED_FACTOR, QUIT_SHOW_SETTLE_MS, applyCorroboration, applyLanguageProfile, applyAbandonDamp } =
+const { computeRecommendationsForUser, selectSeedPlan, warmRecommendationsCache, getUserRecommendations, getRecommendationsComputedAt, summarizeRecommendationSeeds, qualityScoreOf, orderReasonSeeds, parseReasonSeeds, storedReasonSeeds, MAX_REASON_SEEDS, SEED_RECENCY_HALF_LIFE_MS, SEED_RECENCY_FLOOR, SEED_COUNT_WEIGHT, MAX_WATCH_HISTORY_SEEDS, mergeHistorySeedRows, tasteFactor, isQuitShow, TASTE_MEH_FACTOR, TASTE_LOVED_FACTOR, QUIT_SHOW_SETTLE_MS, applyCorroboration, applyLanguageProfile, applyAbandonDamp, requiredSeedSources } =
   await import("../src/lib/recommendations.ts");
 const { invalidateBlacklistCache } = await import("../src/lib/blacklist.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
-const { refreshRecommendationGraph, prewarmSuggestionEdges } = await import("../src/lib/recommendation-graph.ts");
+const { refreshRecommendationGraph, prewarmSuggestionEdges, judgeSourcePage } = await import("../src/lib/recommendation-graph.ts");
 const { getOmdbRatings, isOmdbQuotaLocked } = await import("../src/lib/omdb.ts");
+const { __resetTmdbBackoffsForTests } = await import("../src/lib/tmdb.ts");
 
 // ── in-memory tables ─────────────────────────────────────────────────────────
 type MT = "MOVIE" | "TV";
@@ -1008,19 +1009,20 @@ function tvItem(id: number): RawFixture {
 const listFixtures = new Map<string, RawFixture[]>();
 
 const fetchCalls: string[] = [];
-// Simulates TMDB being unreachable. A network failure rejects, which lands in the
-// Promise.allSettled INSIDE getMovieSuggestions/getTVSuggestions — those swallow it
-// and return [], which is exactly why an outage is indistinguishable from "no
-// suggestions" one layer up and why the conclusive flag has to exist.
+// Simulates TMDB being unreachable. A network failure rejects inside the
+// suggestions loader, which the graph reads as a FAILED source (never stamped);
+// the rails still get an empty list from getMovieSuggestions/getTVSuggestions.
 let tmdbOutage = false;
 // An outage that ends partway through a run: the next N suggestion requests
 // fail, then TMDB answers again.
 let tmdbSuggestionFailures = 0;
+// Sources ("movie:<id>") whose /similar and /recommendations always fail.
+const failingSuggestionSources = new Set<string>();
 let omdbTimesOut = false;
 // MDBList (only reachable once mdblistKeyConfigured is set): "timeout" throws
 // the shape safe-fetch turns into SafeFetchError("timeout"); "answer" replies
 // to a batch POST with a row per requested id that carries no ratings.
-let mdblistReply: "timeout" | "answer" = "answer";
+let mdblistReply: "timeout" | "answer" | "refused" = "answer";
 let mdblistCalls = 0;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
@@ -1038,6 +1040,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       err.name = "TimeoutError";
       throw err;
     }
+    if (mdblistReply === "refused") {
+      return new Response(JSON.stringify({ error: "Invalid API key!" }), { status: 403, headers: { "content-type": "application/json" } });
+    }
     const ids = init?.body ? (JSON.parse(String(init.body)) as { ids: number[] }).ids : [];
     return new Response(JSON.stringify(ids.map((id) => ({ tmdb_id: id, ratings: [] }))), {
       status: 200,
@@ -1049,6 +1054,8 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     tmdbSuggestionFailures--;
     throw new TypeError("fetch failed");
   }
+  const failing = url.pathname.match(/\/(movie|tv)\/(\d+)\/(similar|recommendations)$/);
+  if (failing && failingSuggestionSources.has(`${failing[1]}:${failing[2]}`)) throw new TypeError("fetch failed");
   // Not anchored to the start: TMDB's real paths carry a version prefix
   // (/3/movie/{id}/similar) — match the suffix shape regardless of it.
   const listed = [...listFixtures.entries()].find(([path]) => url.pathname.endsWith(path));
@@ -1178,10 +1185,14 @@ beforeEach(() => {
   invalidateBlacklistCache();
   suggestionsFor.clear();
   listFixtures.clear();
+  // A test that takes TMDB down leaves tmdb.ts's process-wide list backoff set
+  // (the frozen clock never lets it lapse); the next test starts clean.
+  __resetTmdbBackoffsForTests();
   ratingRows = [];
   fetchCalls.length = 0;
   tmdbOutage = false;
   tmdbSuggestionFailures = 0;
+  failingSuggestionSources.clear();
   transactionCalls = 0;
   userRecTransactionCalls = 0;
   userRecDeletes = 0;
@@ -3460,8 +3471,11 @@ test("a null verdict is NOT stamped while a provider is locked out — an outage
 
   // Trip the breaker first — this is the coupling: without omdb.ts counting
   // transport failures, a timeout storm never sets the flag this guard reads.
+  // A run must span time to trip it (one parallel burst is a blip), and each
+  // sequential timeout takes 10s in real life.
   for (let i = 0; i < 5; i++) {
     await getOmdbRatings(`tt900000${i}`).catch(() => {});
+    mock.timers.tick(10_000);
   }
   assert.equal(isOmdbQuotaLocked(), true, "precondition: the provider is known-unreachable");
 
@@ -3688,9 +3702,9 @@ test("a never-built block of sources TMDB has nothing for is stamped once a late
 });
 
 test("an outage that ends between pages stamps no false zero — the carried sources are asked again and get their real lists", async () => {
-  // Every suggestion request of the first page fails (getMovieSuggestions turns
-  // that into []), then TMDB answers. Judging those empties by the next page's
-  // answers WITHOUT asking again would stamp fifty wrong "nothing"s for a week.
+  // Every suggestion request of the first page fails, then TMDB answers. The
+  // failed sources are asked again with the next page; stamping them from the
+  // failure would write fifty wrong "nothing"s for a week.
   const first = Array.from({ length: 50 }, (_, i) => ({ tmdbId: 7200 + i, mediaType: "MOVIE" as MT }));
   for (const s of first) suggestionsFor.set(`movie:${s.tmdbId}`, [movieItem(s.tmdbId + 10_000)]);
   suggestionsFor.set("movie:7300", [movieItem(17_300)]);
@@ -3704,6 +3718,57 @@ test("an outage that ends between pages stamps no false zero — the carried sou
   }
   assert.equal(nodeRows.filter((n) => n.suggestionsRefreshedAt !== null && n.suggestionCount === 0).length, 0, "no zero was stamped");
   assert.equal(graph.requiredCovered, 51);
+});
+
+test("a source whose TMDB fetch FAILS keeps its old edges and its old stamp, even when a neighbour on the page answers", async () => {
+  // getMovieSuggestions used to turn a failed fetch into [], and a neighbour's
+  // answer made the page conclusive — so the failure was stamped as "TMDB has
+  // nothing similar", deleting the source's edges for a week.
+  const builtAt = new Date(T0 - 30 * DAY_MS);
+  seedGraph({ tmdbId: 10, mediaType: "MOVIE" }, [{ tmdbId: 500, mediaType: "MOVIE" }], builtAt);
+  suggestionsFor.set("movie:11", [movieItem(600)]);
+  failingSuggestionSources.add("movie:10");
+
+  const graph = await refreshRecommendationGraph({ required: [{ tmdbId: 10, mediaType: "MOVIE" }, { tmdbId: 11, mediaType: "MOVIE" }] });
+
+  const failed = nodeRows.find((n) => n.tmdbId === 10)!;
+  assert.equal(failed.suggestionsRefreshedAt?.getTime(), builtAt.getTime(), "the failed source is not stamped");
+  assert.equal(failed.suggestionCount, 1);
+  assert.deepEqual(edgeRows.filter((e) => e.sourceTmdbId === 10).map((e) => e.tmdbId), [500], "its old edges are kept");
+  assert.ok(edgeRows.some((e) => e.sourceTmdbId === 11 && e.tmdbId === 600), "the neighbour is written");
+  assert.equal(graph.sourcesFailed, 1);
+  assert.equal(graph.sourcesRefreshed, 1);
+  assert.equal(graph.sourcesRefreshed + graph.sourcesSkipped + graph.sourcesFailed, graph.sources, "every source is counted once");
+});
+
+test("judgeSourcePage: a failure or an inconclusive empty is carried ONCE, then counted; only answers on a conclusive page are written", () => {
+  const src = (id: number) => ({ tmdbId: id, mediaType: "MOVIE" as MT });
+  const ok = (ids: number[]) => ({ kind: "ok" as const, value: ids.map((id) => ({ id, mediaType: "movie" as const, title: "", overview: "", posterPath: null, backdropPath: null, releaseDate: null, releaseYear: null, voteAverage: 0 })) });
+  const failed = { kind: "failed" as const, error: new Error("down") };
+
+  const conclusive = judgeSourcePage([src(1), src(2), src(3)], [ok([9]), ok([]), failed], 0);
+  assert.deepEqual(conclusive.write.map((w) => [w.source.tmdbId, w.suggestions.length]), [[1, 1], [2, 0]], "a zero beside an answer is real");
+  assert.deepEqual(conclusive.carry, [{ source: src(3), failed: true }], "a failure is asked again with the next page");
+
+  const quiet = judgeSourcePage([src(3), src(4)], [failed, ok([])], 1);
+  assert.equal(quiet.write.length, 0, "an all-empty page writes nothing");
+  assert.equal(quiet.failed, 1, "a carried source that fails again is counted failed");
+  assert.deepEqual(quiet.carry, [{ source: src(4), failed: false }]);
+  assert.equal(quiet.skipped, 0);
+});
+
+test("a title first created as a SOURCE gets its release date once it shows up as a suggestion target", async () => {
+  // createMany skipDuplicates never touches an existing node, so a source node
+  // (created with no date) kept a null date for good — and the ratings pass
+  // sent the providers no date.
+  seedGraph({ tmdbId: 700, mediaType: "MOVIE" }, [], new Date(T0));
+  nodeRows.push({ tmdbId: 701, mediaType: "MOVIE", releaseDate: "1999-01-01", suggestionsRefreshedAt: null, suggestionCount: 0, quality: null, evidence: 0, qualityRatedAt: null });
+  suggestionsFor.set("movie:10", [movieItem(700), movieItem(701)]);
+
+  await refreshRecommendationGraph({ required: [{ tmdbId: 10, mediaType: "MOVIE" }] });
+
+  assert.equal(nodeRows.find((n) => n.tmdbId === 700)?.releaseDate, "2020-01-01", "the missing date is filled");
+  assert.equal(nodeRows.find((n) => n.tmdbId === 701)?.releaseDate, "1999-01-01", "an existing date is never overwritten");
 });
 
 test("the orphan sweep reads OLDEST stamps first — an orphan past the read cap is still reached", async () => {
@@ -3809,10 +3874,24 @@ shadowPrismaClientMethod(prisma, "$queryRaw", async (q: unknown) => {
 // as a single Prisma.sql value (guardrail 23a). Applied to nodeRows here, so the
 // verdict tests read real stamps; every other statement (the SET LOCAL
 // timeouts, set_config) is a no-op. verdictWrites records the rows per statement.
+// The node writer's release-date fill (… SET "releaseDate" … WHERE … IS NULL) is
+// applied too, to rows whose date is still null.
 let verdictWrites: number[] = [];
 shadowPrismaClientMethod(prisma, "$executeRaw", async (q: unknown) => {
   const query = q as { text?: unknown; values?: unknown[] };
   if (typeof query.text !== "string" || !query.text.includes('UPDATE "RecommendationTitle"')) return 0;
+  if (query.text.includes('SET "releaseDate"')) {
+    const values = query.values ?? [];
+    let filled = 0;
+    for (let i = 0; i < values.length; i += 3) {
+      const [tmdbId, mediaType, releaseDate] = values.slice(i, i + 3) as [number, MT, string];
+      const node = nodeRows.find((n) => n.tmdbId === tmdbId && n.mediaType === mediaType);
+      if (!node || node.releaseDate !== null) continue;
+      node.releaseDate = releaseDate;
+      filled++;
+    }
+    return filled;
+  }
   const [ratedAt, ...rest] = query.values ?? [];
   let updated = 0;
   verdictWrites.push(rest.length / 4);
@@ -4050,6 +4129,19 @@ test("scoring passes: the decay-sum is strongest-first and bounded; language and
   assert.equal(kept.score, 1, "keyed by title AND type");
 });
 
+test("requiredSeedSources: the cohort's union is ranked by total seed weight, so a cut at the ceiling drops the least-wanted titles, the same ones every run", () => {
+  const seed = (tmdbId: number, weight: number, mediaType: MT = "MOVIE") => ({ tmdbId, mediaType, weight, title: `T${tmdbId}`, source: "WATCH_HISTORY" as const });
+  const required = requiredSeedSources([
+    { seeds: [seed(5, 0.2), seed(2, 1.0), seed(1, 0.9)] },
+    { seeds: [seed(3, 0.5, "TV"), seed(1, 0.9), seed(3, 0.5)] },
+  ]);
+  assert.deepEqual(
+    required.map((r) => `${r.tmdbId}:${r.mediaType}`),
+    ["1:MOVIE", "2:MOVIE", "3:MOVIE", "3:TV", "5:MOVIE"],
+    "1 is wanted by two users (1.8 in all); the 0.5 tie breaks by key; the lightest comes last",
+  );
+});
+
 test("40c pure: tasteFactor tiers, and a rating outranks a favorite", () => {
   assert.equal(tasteFactor(3, false), 0);
   assert.equal(tasteFactor(4, true), 0, "a favorite cannot rescue a 4/10");
@@ -4073,7 +4165,7 @@ test("40c pure: tasteFactor tiers, and a rating outranks a favorite", () => {
 // tests leave MDBList's process-wide failure count where they put it.
 //
 // The MDBList breaker trips on the fifth failure in a row, and one verdict batch
-// sends about three requests (a movie POST, a TV POST, one probe GET). Without a
+// sends about two requests (a movie POST, a TV POST). Without a
 // per-batch failure signal the first batch of a storm read MDBList as answering
 // and stamped a week-long null verdict on every title it touched.
 
@@ -4092,7 +4184,7 @@ function unratedNode(tmdbId: number, mediaType: MT): NodeRow {
   };
 }
 
-function useMdblistOnly(reply: "timeout" | "answer"): void {
+function useMdblistOnly(reply: "timeout" | "answer" | "refused"): void {
   // Past the OMDb lockout (an hour) and every 30s memo, with OMDb off: an
   // MDBList-only instance, so a null verdict is MDBList's answer alone.
   mock.timers.tick(2 * 60 * 60 * 1000);
@@ -4129,13 +4221,52 @@ test("verdict pass: MDBList timing out in the FIRST batch of a storm, breaker no
   try {
     const result = await refreshRecommendationGraph();
     assert.deepEqual(verdictWrites, [], "a batch whose verdicts are all deferred writes nothing at all");
-    assert.equal(mdblistCalls, 3, "a movie POST, a TV POST and one probe — all timed out");
-    assert.equal(isMdblistQuotaLocked({ background: true }), false, "precondition: three failures do not trip the breaker");
+    assert.equal(mdblistCalls, 2, "a movie POST and a TV POST — both timed out (no single-title probe follows a batch)");
+    assert.equal(isMdblistQuotaLocked({ background: true }), false, "precondition: two failures do not trip the breaker");
     assert.equal(result.titlesRated, 0);
     assert.equal(result.verdictsDeferred, 2, "both titles are re-asked next run");
     for (const node of nodeRows) {
       assert.equal(node.qualityRatedAt, null, "no week-long verdict earned by a timeout");
     }
+  } finally {
+    mdblistKeyConfigured = false;
+    mdblistReply = "answer";
+  }
+});
+
+test("verdict pass: a REAL verdict earned while MDBList was not answering is written, but stamped to be re-derived within a day", async () => {
+  // Guardrail 40 writes a real verdict however the batch fared; but one built
+  // while a provider was down may rest on fewer sources than the title has, and
+  // used to be trusted for the whole week.
+  useMdblistOnly("timeout");
+  nodeRows.push(unratedNode(940, "MOVIE"), unratedNode(941, "MOVIE"));
+  // 940's ratings are already cached; 941 has none, and its MDBList batch times out.
+  seedRatings(940, "movie", {
+    imdbId: null, imdbRating: "8.0", imdbVotes: "100000", rottenTomatoes: "90%", rtAudienceScore: null, metacritic: null,
+    traktRating: null, letterboxdRating: null, mdblistScore: null, malRating: null, rogerEbertRating: null, releasedDigital: null, trailerUrl: null,
+  });
+  try {
+    const result = await refreshRecommendationGraph();
+    const rated = nodeRows.find((n) => n.tmdbId === 940)!;
+    assert.notEqual(rated.quality, null, "the real verdict is written");
+    assert.equal(Date.now() - rated.qualityRatedAt!.getTime(), 6 * DAY_MS, "stamped to fall stale after a day, not a week");
+    assert.equal(nodeRows.find((n) => n.tmdbId === 941)!.qualityRatedAt, null, "the null is deferred");
+    assert.equal(result.verdictsDeferred, 1);
+  } finally {
+    mdblistKeyConfigured = false;
+    mdblistReply = "answer";
+  }
+});
+
+// LAST: MDBList's refusal latches the harness's MDBList key for an hour.
+test("verdict pass: a REFUSED MDBList key is MDBList not answering — no null verdict is stamped", async () => {
+  useMdblistOnly("refused");
+  nodeRows.push(unratedNode(950, "MOVIE"));
+  try {
+    const result = await refreshRecommendationGraph();
+    assert.ok(mdblistCalls > 0, "precondition: MDBList was asked, and refused the key");
+    assert.equal(result.verdictsDeferred, 1);
+    assert.equal(nodeRows.find((n) => n.tmdbId === 950)!.qualityRatedAt, null, "an outage of configuration earns no 'nobody answered'");
   } finally {
     mdblistKeyConfigured = false;
     mdblistReply = "answer";

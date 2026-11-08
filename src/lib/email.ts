@@ -44,19 +44,6 @@ interface Recipient {
 // `enableUserEmails` is the "Send notification emails" master switch: while it is
 // off, getEmailConfig() returns null so EVERY notifier (user- and admin-facing
 // alike) is muted — only the explicit admin test email bypasses it.
-const EMAIL_KEYS = [
-  "emailBackend",
-  "smtpHost",
-  "smtpPort",
-  "smtpUser",
-  "smtpPassword",
-  "smtpFrom",
-  "resendApiKey",
-  "resendFrom",
-  "siteUrl",
-  "enableUserEmails",
-] as const;
-
 type EmailBackend = "smtp" | "resend";
 
 // The transport settings sendTestEmail may take in place of the stored rows:
@@ -72,6 +59,8 @@ export const EMAIL_TRANSPORT_KEYS = [
   "resendFrom",
 ] as const;
 export type EmailTransportOverrides = Partial<Record<(typeof EMAIL_TRANSPORT_KEYS)[number], string>>;
+
+const EMAIL_KEYS = [...EMAIL_TRANSPORT_KEYS, "siteUrl", "enableUserEmails"] as const;
 
 interface EmailConfig {
   backend: EmailBackend;
@@ -213,8 +202,9 @@ async function sendOne(cfg: EmailConfig, to: string, subject: string, html: stri
       body: JSON.stringify({ from, to: safeTo, subject: safeSubjectText, html }),
     });
     if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as { message?: string };
-      throw new Error(body.message ?? `Resend send failed (${res.status})`);
+      const body: unknown = await res.json().catch(() => null);
+      const message = body && typeof body === "object" ? (body as { message?: unknown }).message : undefined;
+      throw new Error(typeof message === "string" && message.length > 0 ? message : `Resend send failed (${res.status})`);
     }
     return;
   }
@@ -294,28 +284,40 @@ function safeHeader(str: string): string {
   return str.replace(/[\r\n]+/g, " ");
 }
 
-async function getAdminEmails(excludeUserId?: string, userWhere: { emailOnComment?: true } = {}): Promise<Recipient[]> {
-  // Bitmask authoritative: any holder of MANAGE_REQUESTS (or ADMIN superbit).
-  // Includes custom-granted users; falls back correctly for legacy rows.
+// The active accounts holding `permission`, narrowed by `where`, as one
+// recipient per address. Bitmask authoritative: a custom grant counts, clearing
+// the bit stops the mail, the ADMIN superbit always passes, and a legacy
+// unseeded row falls back to its role preset (effectivePermissions) — which is
+// why the permission is checked here and not in SQL.
+//
+// Disabled accounts keep their role, permissions and email (guardrail 33 —
+// deactivateUserInTx writes exactly two fields), so without the deactivatedAt
+// filter they'd keep receiving admin mail forever. A PURGED row is worse: its
+// tombstone address (deleted-<id>@deleted.invalid) hard-bounces on every send.
+// This is the admin-side chokepoint — the requester fan-out has its own two gates.
+async function recipientsWithPermission(
+  permission: bigint,
+  where: { emailOnComment?: true; notifyOnIssue?: true; id?: string | { not: string } },
+): Promise<Recipient[]> {
   const rows = await prisma.user.findMany({
-    // Disabled accounts keep their role, permissions and email (guardrail 33 —
-    // deactivateUserInTx writes exactly two fields), so without this they'd keep
-    // receiving admin mail forever. A PURGED row is worse: its tombstone address
-    // (deleted-<id>@deleted.invalid) hard-bounces on every send. This is the
-    // admin-side chokepoint — the requester fan-out has its own two gates.
-    where: { deactivatedAt: null, ...userWhere, ...(excludeUserId ? { id: { not: excludeUserId } } : {}) },
+    where: { deactivatedAt: null, ...where },
     select: { email: true, notificationEmail: true, role: true, permissions: true, locale: true },
   });
   return rows
-    .filter((u) => {
-      const perms = effectivePermissions(u.role, parsePermissions(String(u.permissions ?? 0)));
-      return hasPermission(perms, Permission.MANAGE_REQUESTS);
-    })
+    .filter((u) => hasPermission(effectivePermissions(u.role, parsePermissions(String(u.permissions ?? 0))), permission))
     .flatMap((a) => {
       const to = resolveUserNotificationEmail(a);
       return to ? [{ to, locale: a.locale ?? null }] : [];
     })
     .filter(firstPerAddress());
+}
+
+// Request admins: any holder of MANAGE_REQUESTS (or the ADMIN superbit).
+async function getAdminEmails(excludeUserId?: string, userWhere: { emailOnComment?: true } = {}): Promise<Recipient[]> {
+  return recipientsWithPermission(Permission.MANAGE_REQUESTS, {
+    ...userWhere,
+    ...(excludeUserId ? { id: { not: excludeUserId } } : {}),
+  });
 }
 
 // notificationEmail is not unique: two accounts (a local admin and the same
@@ -332,7 +334,6 @@ function firstPerAddress(): (r: Recipient) => boolean {
 }
 
 // For issue-related admin emails: holders of MANAGE_ISSUES + notifyOnIssue.
-// Bitmask authoritative so clearing the bit stops notifications; ADMIN always passes.
 async function getIssueAdminEmails(opts: { excludeUserId?: string; restrictToUserId?: string } = {}): Promise<Recipient[]> {
   if (opts.restrictToUserId && opts.restrictToUserId === opts.excludeUserId) return [];
   const idFilter = opts.restrictToUserId
@@ -340,24 +341,7 @@ async function getIssueAdminEmails(opts: { excludeUserId?: string; restrictToUse
     : opts.excludeUserId
       ? { id: { not: opts.excludeUserId } }
       : {};
-  const rows = await prisma.user.findMany({
-    where: {
-      notifyOnIssue: true,
-      deactivatedAt: null, // see getAdminEmails
-      ...idFilter,
-    },
-    select: { email: true, notificationEmail: true, role: true, permissions: true, locale: true },
-  });
-  return rows
-    .filter((u) => {
-      const perms = effectivePermissions(u.role, parsePermissions(String(u.permissions ?? 0)));
-      return hasPermission(perms, Permission.MANAGE_ISSUES);
-    })
-    .flatMap((a) => {
-      const to = resolveUserNotificationEmail(a);
-      return to ? [{ to, locale: a.locale ?? null }] : [];
-    })
-    .filter(firstPerAddress());
+  return recipientsWithPermission(Permission.MANAGE_ISSUES, { notifyOnIssue: true, ...idFilter });
 }
 
 // ─── Template ────────────────────────────────────────────────────────────────
@@ -441,24 +425,25 @@ function mediaAltText(t: Translator, mediaType?: string): string {
   return t("notify.email.posterAlt.other");
 }
 
-function richEmailHtml(opts: TemplateOpts): string {
-  const { t } = opts.lang;
-  const accent = ACCENTS[opts.accent];
-  const poster = posterUrl(opts.posterPath);
-
-  const detailRowsHtml = opts.details?.length
+function detailTableHtml(details: TemplateOpts["details"]): string {
+  return details?.length
     ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;width:100%">
-        ${opts.details.map(([l, v]) => detailRow(l, v)).join("")}
+        ${details.map(([l, v]) => detailRow(l, v)).join("")}
       </table>`
     : "";
+}
 
-  // Two-column poster layout collapses nicely in most clients; Outlook renders
-  // the poster as an inline image-left block, which is acceptable.
-  const contentBlock = poster
-    ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;width:100%">
+// The details and body, beside the poster when there is one. Two-column poster
+// layout collapses nicely in most clients; Outlook renders the poster as an
+// inline image-left block, which is acceptable.
+function contentBlockHtml(opts: TemplateOpts): string {
+  const detailRowsHtml = detailTableHtml(opts.details);
+  const poster = posterUrl(opts.posterPath);
+  if (!poster) return `${detailRowsHtml}${opts.bodyHtml?.html ?? ""}`;
+  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;width:100%">
         <tr>
           <td valign="top" width="130" style="padding:0 20px 0 0">
-            <img src="${esc(poster)}" width="120" alt="${esc(mediaAltText(t, opts.mediaType))}"
+            <img src="${esc(poster)}" width="120" alt="${esc(mediaAltText(opts.lang.t, opts.mediaType))}"
               style="display:block;width:120px;max-width:120px;height:auto;border-radius:8px;border:1px solid #3f3f46" />
           </td>
           <td valign="top" style="min-width:0">
@@ -466,29 +451,44 @@ function richEmailHtml(opts: TemplateOpts): string {
             ${opts.bodyHtml?.html ?? ""}
           </td>
         </tr>
-      </table>`
-    : `${detailRowsHtml}${opts.bodyHtml?.html ?? ""}`;
+      </table>`;
+}
 
-  const ctaHtml = opts.ctaLabel && opts.ctaHref
-    ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 4px">
+function ctaButtonHtml(opts: TemplateOpts): string {
+  if (!opts.ctaLabel || !opts.ctaHref) return "";
+  const accent = ACCENTS[opts.accent];
+  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 4px">
         <tr><td style="border-radius:8px;background:${accent.button}">
           <a href="${esc(opts.ctaHref)}"
             style="display:inline-block;padding:11px 22px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;background:${accent.button}">
             ${esc(opts.ctaLabel)}
           </a>
         </td></tr>
-      </table>`
-    : "";
+      </table>`;
+}
 
-  const subheadingHtml = opts.subheading
-    ? `<p style="margin:0 0 20px;font-size:14px;color:#a1a1aa;line-height:1.55">${opts.subheading.html}</p>`
+function subheadingHtml(subheading: SafeHtml | undefined): string {
+  return subheading
+    ? `<p style="margin:0 0 20px;font-size:14px;color:#a1a1aa;line-height:1.55">${subheading.html}</p>`
     : "";
+}
 
-  const footerHtml = opts.siteUrl
+function footerHtml(t: Translator, siteUrl: string | undefined): string {
+  return siteUrl
     ? `<p style="margin:0;font-size:11px;color:#52525b;line-height:1.5">
-        ${tHtml(t, "notify.email.footer", { brand: trustedHtml(`<a href="${esc(opts.siteUrl)}" style="color:#71717a;text-decoration:none">Summonarr</a>`) }).html}
+        ${tHtml(t, "notify.email.footer", { brand: trustedHtml(`<a href="${esc(siteUrl)}" style="color:#71717a;text-decoration:none">Summonarr</a>`) }).html}
       </p>`
     : `<p style="margin:0;font-size:11px;color:#52525b;line-height:1.5">${tHtml(t, "notify.email.footer", { brand: "Summonarr" }).html}</p>`;
+}
+
+// The page shell: wordmark bar, heading, content, CTA and footer. Every
+// fragment above is already escaped or SafeHtml.
+function richEmailHtml(opts: TemplateOpts): string {
+  const accent = ACCENTS[opts.accent];
+  const contentBlock = contentBlockHtml(opts);
+  const ctaHtml = ctaButtonHtml(opts);
+  const subheading = subheadingHtml(opts.subheading);
+  const footer = footerHtml(opts.lang.t, opts.siteUrl);
 
   return `<!DOCTYPE html>
 <html lang="${opts.lang.locale}">
@@ -526,7 +526,7 @@ function richEmailHtml(opts: TemplateOpts): string {
               <h1 style="margin:0 0 8px;font-size:20px;line-height:1.3;font-weight:700;color:#fafafa">
                 ${esc(opts.heading)}
               </h1>
-              ${subheadingHtml}
+              ${subheading}
             </td>
           </tr>
           <!-- Content -->
@@ -539,7 +539,7 @@ function richEmailHtml(opts: TemplateOpts): string {
           <!-- Footer -->
           <tr>
             <td style="padding:20px 28px 24px;border-top:1px solid #27272a">
-              ${footerHtml}
+              ${footer}
             </td>
           </tr>
         </table>

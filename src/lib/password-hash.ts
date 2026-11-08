@@ -101,6 +101,11 @@ export function hashSlotStats(): { active: number; queued: number } {
   return { active: gate.active, queued: gate.queue.length };
 }
 
+/** Test seam: whether a stored hash is one verifyPassword can check at all (format and bounded parameters). */
+export function isVerifiableHash(hash: string): boolean {
+  return parseHash(hash) !== null;
+}
+
 /** Test seam: total scrypt work (N·r·p summed) this process has done. */
 export function scryptWorkDone(): number {
   return gate.work;
@@ -208,11 +213,16 @@ function getDummyHash(): Promise<string> {
   return dummyHashPromise;
 }
 
-// Warm the dummy hash at module load so the FIRST failure-path call doesn't pay
-// an extra scrypt (getDummyHash + verify ≈ 2x) before the cache fills — that
-// one-time doubling is the only timing divergence between the real-verify and
-// dummy-verify paths. Errors are irrelevant here; the lazy path recomputes.
-void getDummyHash().catch(() => {});
+// Warm the dummy hash so the FIRST failure-path call doesn't pay an extra
+// scrypt (getDummyHash + verify ≈ 2x) before the cache fills — that one-time
+// doubling is the only timing divergence between the real-verify and
+// dummy-verify paths. Started by the first hash or verify of the process (and
+// callable at boot), never as an import side effect: importing this module
+// from a build worker, a script or a test would otherwise run a 128 MiB
+// derivation for nothing. Errors are irrelevant here; the lazy path recomputes.
+export function warmPasswordHashing(): void {
+  void getDummyHash().catch(() => {});
+}
 
 export class PasswordTooLongError extends Error {
   constructor() {
@@ -225,6 +235,7 @@ export async function hashPassword(password: string): Promise<string> {
   // A password that could never sign in (verifyPassword refuses it) must never
   // be stored either.
   if (password.length > MAX_PASSWORD_LENGTH) throw new PasswordTooLongError();
+  warmPasswordHashing();
   const salt = randomBytes(SCRYPT_SALT_BYTES);
   const key = await withHashSlot(() => derive(password, salt, SCRYPT_KEYLEN, SCRYPT_PARAMS));
   return encode(SCRYPT_PARAMS, salt, key);
@@ -237,8 +248,14 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
     await dummyVerify();
     return false;
   }
+  warmPasswordHashing();
   const parsed = parseHash(hash);
-  if (!parsed) return false;
+  // A malformed or foreign-format stored hash is refused after the same work as
+  // a real verify, so such an account can't be told apart by response time.
+  if (!parsed) {
+    await dummyVerify();
+    return false;
+  }
   return withHashSlot(async () => {
     const actual = await derive(password, parsed.salt, parsed.key.length, parsed.params);
     const ok = actual.length === parsed.key.length && timingSafeEqual(actual, parsed.key);

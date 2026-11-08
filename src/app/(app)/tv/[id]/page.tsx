@@ -1,15 +1,11 @@
 import type { Metadata } from "next";
 import { cache } from "react";
-import { getTVDetails, tmdbLanguageFor, getTVCredits, getTVSuggestions, getTVGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
-import Link from "next/link";
-import { RatingsBar } from "@/components/media/ratings-bar";
+import { getTVDetails, isTmdbNotFound, tmdbLanguageFor, getTVCredits, getTVSuggestions, getTVGenres } from "@/lib/tmdb";
 import { CastSection } from "@/components/media/cast-section";
 import { SimilarRow } from "@/components/media/similar-row";
 import { TVSeasons } from "@/components/media/tv-seasons";
-import Image from "next/image";
 import { notFound } from "next/navigation";
 import { parseManageLink } from "@/lib/arr-links-data";
-import { NeverWatchedChip } from "@/components/admin/never-watched-chip";
 import { prisma } from "@/lib/prisma";
 import { requireAppSession } from "@/lib/require-app-session";
 import { isTmdbIdInRange, parseTmdbIdParam } from "@/lib/tmdb-id";
@@ -17,12 +13,10 @@ import { attachAllAvailability } from "@/lib/attach-all";
 import { providerEpisodeSources, visibleEpisodeSourcesFrom } from "@/lib/media-visibility";
 import { allNamed, emptyOnFailure, loadDetailPageState } from "@/lib/detail-page-data";
 import { DetailActions } from "@/components/media/detail-actions";
-import { AvailabilityBadges } from "@/components/media/availability-badges";
+import { DetailHero } from "@/components/media/detail-hero";
 import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName, localizedProductionCountry } from "@/lib/tmdb-types";
-import { Chip } from "@/components/ui/design";
 import { canRequest } from "@/lib/permissions";
-import { DetailTitle } from "@/components/layout/detail-title";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
 import { localizeMedia } from "@/lib/tmdb-localize";
 import { translateTmdbStatus } from "@/components/media/detail-status";
@@ -51,8 +45,7 @@ const loadShow = cache(async (id: string) => {
   const tmdbId = parseTmdbIdParam(id);
   if (tmdbId === null || !isTmdbIdInRange(tmdbId)) notFound();
   const englishMedia = await getTVDetails(tmdbId).catch((err: unknown) => {
-    const message = err instanceof Error ? err.message : String(err);
-    if (/failed: 404\b/.test(message)) notFound();
+    if (isTmdbNotFound(err)) notFound();
     throw err;
   });
   // Title, overview, tagline and genres in the viewer's language (English is a
@@ -122,8 +115,9 @@ export default async function TVDetailPage({
   const episodeSources = visibleEpisodeSourcesFrom(state.plexAvailable, state.jellyfinAvailable, providerSources);
   const ownedBySeason: Record<number, number[]> = {};
   const seen = new Set<string>();
+  const visibleSources = new Set<string>(episodeSources);
   for (const row of ownedEpisodes) {
-    if (!episodeSources.includes(row.source as "plex" | "jellyfin")) continue;
+    if (!visibleSources.has(row.source)) continue;
     const key = `${row.seasonNumber}:${row.episodeNumber}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -136,189 +130,59 @@ export default async function TVDetailPage({
   const suggestions = await attachAllAvailability(rawSuggestions, session.user.id, { blockRatings: true, show4k });
   const manageLink = parseManageLink(sp.manage, sp.tab, "sonarr");
 
-  const backdrop = backdropUrl(media.backdropPath, "original");
-  const poster = posterUrl(media.posterPath, "w500");
-
   return (
     <div className="ds-page-enter ds-detail-bleed">
-      {/* Renders nothing — publishes the title so the header breadcrumb
-          reads "TV Shows › <title>" instead of "TV Shows › Detail". */}
-      <DetailTitle title={media.title} />
-      <div
-        className="relative w-full overflow-hidden aspect-video max-h-[500px] xl:max-h-[640px] 2xl:max-h-[760px]"
-        style={{ background: "var(--ds-bg-inset)" }}
-      >
-        {backdrop && (
-          <Image src={backdrop} alt="" fill className="object-cover object-top" sizes="100vw" priority />
-        )}
-        <div
-          className="absolute inset-0"
-          style={{
-            background:
-              "linear-gradient(to top, var(--ds-bg) 0%, color-mix(in oklab, var(--ds-bg) 55%, transparent) 55%, transparent 100%)",
-          }}
-        />
-      </div>
-
-      <div className="ds-detail-body">
-        <div className="ds-detail-hero">
-          {poster && (
-            <div
-              className="ds-detail-poster relative shrink-0 overflow-hidden hidden sm:block"
-              style={{
-                width: 160,
-                aspectRatio: "2 / 3",
-                borderRadius: 8,
-                boxShadow: "var(--ds-shadow-lg)",
-                border: "1px solid var(--ds-border)",
-                background: "var(--ds-bg-3)",
-              }}
-            >
-              {/* Decorative: the <h1> beside it carries the title, so a named
-                  poster read the title twice. Same rule as the backdrop. */}
-              <Image src={poster} alt="" fill className="object-cover" sizes="160px" />
+      <DetailHero
+        media={media}
+        state={state}
+        t={t}
+        locale={locale}
+        kindLabel={t("detail.kindTv")}
+        metaParts={[
+          media.releaseYear,
+          media.certification,
+          media.runtime ? t("detail.runtimePerEpisode", { minutes: media.runtime }) : null,
+          media.numberOfSeasons
+            ? t("detail.seasonCount", { count: media.numberOfSeasons })
+            : null,
+          // TMDB's English name unless Intl agrees on the country — never
+          // a bare code or ICU's successor-state alias (tmdb-types.ts).
+          localizedProductionCountry(media, locale),
+          // A code Intl has no name for renders as the code, as it always has.
+          languageName(media.originalLanguage, locale) ?? media.originalLanguage,
+          media.status ? translateTmdbStatus(media.status, t) : null,
+        ]}
+        genreNameToId={genreNameToId}
+        genreHref={(gid) => `/tv?genreId=${gid}`}
+        genreAriaLabel={(genre) => t("detail.browseGenreTv", { genre })}
+        extraLines={
+          media.nextEpisodeAirDate && (
+            <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
+              {t("detail.nextEpisode")}{" "}
+              {/* TMDB air dates are date-only ("YYYY-MM-DD"), which Date parses
+                  as UTC midnight — format in UTC too, or a server running west
+                  of UTC renders the day before (same fix as formatReleaseDate). */}
+              {new Date(media.nextEpisodeAirDate).toLocaleDateString(locale, {
+                month: "short",
+                day: "numeric",
+                year: "numeric",
+                timeZone: "UTC",
+              })}
             </div>
-          )}
-
-          <div className="flex flex-col justify-end" style={{ gap: 10 }}>
-            <div className="flex items-center flex-wrap" style={{ gap: 8 }}>
-              <Chip tone="accent">{t("detail.kindTv")}</Chip>
-              <AvailabilityBadges
-                plexAvailable={state.plexAvailable}
-                jellyfinAvailable={state.jellyfinAvailable}
-                arrPending={state.arrPending}
-                requested={state.requestedAny}
-                arr4kAvailable={state.arr4kAvailable}
-                arr4kPending={state.arr4kPending}
-                showPlex={showPlex}
-                showJellyfin={showJellyfin}
-                show4k={show4k}
-              />
-              <NeverWatchedChip info={state.neverWatched} t={t} locale={locale} />
-            </div>
-
-            <h1
-              className="font-semibold"
-              style={{
-                fontSize: 32,
-                letterSpacing: "-0.025em",
-                color: "var(--ds-fg)",
-                margin: 0,
-                lineHeight: 1.08,
-              }}
-            >
-              {media.title}
-            </h1>
-
-            <div
-              className="ds-mono flex items-center flex-wrap"
-              style={{ fontSize: 11.5, color: "var(--ds-fg-subtle)", gap: 8 }}
-            >
-              {[
-                media.releaseYear,
-                media.certification,
-                media.runtime ? t("detail.runtimePerEpisode", { minutes: media.runtime }) : null,
-                media.numberOfSeasons
-                  ? t("detail.seasonCount", { count: media.numberOfSeasons })
-                  : null,
-                // TMDB's English name unless Intl agrees on the country — never
-                // a bare code or ICU's successor-state alias (tmdb-types.ts).
-                localizedProductionCountry(media, locale),
-                // A code Intl has no name for renders as the code, as it always has.
-                languageName(media.originalLanguage, locale) ?? media.originalLanguage,
-                media.status ? translateTmdbStatus(media.status, t) : null,
-              ]
-                .filter(Boolean)
-                .map((part, i) => (
-                  <span key={i} className="flex items-center" style={{ gap: 8 }}>
-                    {i > 0 && <span style={{ opacity: 0.4 }}>·</span>}
-                    {part}
-                  </span>
-                ))}
-            </div>
-
-            {media.genres && media.genres.length > 0 && (
-              <div className="flex flex-wrap" style={{ gap: 6 }}>
-                {media.genres.slice(0, 5).map((g) => {
-                  const gid = genreNameToId.get(g);
-                  return gid !== undefined ? (
-                    <Link key={g} href={`/tv?genreId=${gid}`} aria-label={t("detail.browseGenreTv", { genre: g })}>
-                      <Chip className="ds-chip-link">{g}</Chip>
-                    </Link>
-                  ) : (
-                    <Chip key={g}>{g}</Chip>
-                  );
-                })}
-              </div>
-            )}
-
-            {media.originalTitle && (
-              <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
-                {t("detail.originalTitle", { title: media.originalTitle })}
-              </div>
-            )}
-
-            {media.nextEpisodeAirDate && (
-              <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
-                {t("detail.nextEpisode")}{" "}
-                {/* TMDB air dates are date-only ("YYYY-MM-DD"), which Date parses
-                    as UTC midnight — format in UTC too, or a server running west
-                    of UTC renders the day before (same fix as formatReleaseDate). */}
-                {new Date(media.nextEpisodeAirDate).toLocaleDateString(locale, {
-                  month: "short",
-                  day: "numeric",
-                  year: "numeric",
-                  timeZone: "UTC",
-                })}
-              </div>
-            )}
-
-            <RatingsBar
-              imdbRating={media.imdbRating}
-              imdbId={media.imdbId}
-              imdbVotes={media.imdbVotes}
-              rottenTomatoes={media.rottenTomatoes}
-              rtAudienceScore={media.rtAudienceScore}
-              metacritic={media.metacritic}
-              traktRating={media.traktRating}
-              letterboxdRating={media.letterboxdRating}
-              mdblistScore={media.mdblistScore}
-              malRating={media.malRating}
-              rogerEbertRating={media.rogerEbertRating}
-              jellyfinRating={
-                showJellyfin && state.jellyfinCommunityRating != null
-                  ? state.jellyfinCommunityRating.toFixed(1)
-                  : null
-              }
-              voteAverage={media.voteAverage}
-              size="md"
-            />
-
-            {media.overview && (
-              <p
-                className="max-w-2xl"
-                style={{
-                  fontSize: 14,
-                  color: "var(--ds-fg-muted)",
-                  lineHeight: 1.65,
-                }}
-              >
-                {media.overview}
-              </p>
-            )}
-
-            <DetailActions
-              media={media}
-              mediaType="TV"
-              state={state}
-              canRequest={canRequestTv}
-              tvdbId={tvdbId}
-              manageLink={manageLink}
-              t={t}
-            />
-          </div>
-        </div>
-      </div>
+          )
+        }
+        actions={
+          <DetailActions
+            media={media}
+            mediaType="TV"
+            state={state}
+            canRequest={canRequestTv}
+            tvdbId={tvdbId}
+            manageLink={manageLink}
+            t={t}
+          />
+        }
+      />
 
       <DetailExtras media={media} mediaType="tv" />
 

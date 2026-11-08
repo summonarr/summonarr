@@ -12,9 +12,15 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(fileURLToPath(import.meta.url), "../..");
 const src = (rel: string) => readFileSync(resolve(ROOT, rel), "utf8");
 
-test("RequestButton treats `requested` as live and resets when tmdbId changes", () => {
+// The action buttons start fresh on another title because the action row keys
+// each one by the title (pinned below, "movie and TV detail pages key action
+// buttons"), not through a render-time reset inside each button: that reset
+// never ran under the key, and every new piece of state had to be added to it.
+const NO_TITLE_RESET = /seenTmdbId|titleChanged/;
+
+test("RequestButton treats `requested` as live and relies on the caller's key across titles", () => {
   const body = src("src/components/media/request-button.tsx");
-  assert.match(body, /seenTmdbId !== tmdbId/);
+  assert.doesNotMatch(body, NO_TITLE_RESET);
   assert.match(body, /state === "requested" \|\| state === "duplicate" \|\| !!requested/);
   assert.match(body, /canRequest && \(/);
 });
@@ -23,11 +29,14 @@ test("Request4kButton and RequestInstanceButton share one request flow that trea
   // Both are thin wrappers over VariantRequestButton: only the POST extras and
   // the wording differ, so the flow (and its fixes) can't drift between them.
   const shared = src("src/components/media/variant-request-button.tsx");
-  assert.match(shared, /seenTmdbId !== tmdbId/);
+  assert.doesNotMatch(shared, NO_TITLE_RESET);
   assert.match(shared, /state === "requested" \|\| requested/);
-  // A 429 shows the Retry-After hint, as RequestButton's does.
-  assert.match(shared, /setMsg\(rateLimitMessage\(res, t\) \?\? data\.error \?\? t\("request\.somethingWrong"\)\)/);
-  assert.match(shared, /postMediaRequest\(\{ tmdbId, mediaType, \.\.\.extras \}, requestToken\)/);
+  // A 429 shows the Retry-After hint, as RequestButton's does; any other
+  // refusal shows the route's own reason, read as a string.
+  assert.match(shared, /setMsg\(rateLimitMessage\(res, t\) \?\? \(await readApiError\(res, t\("request\.somethingWrong"\)\)\)\)/);
+  // The title's own fields go last, so an extra can never replace them.
+  assert.match(shared, /postMediaRequest\(\{ \.\.\.extras, tmdbId, mediaType \}, requestToken\)/);
+  assert.match(shared, /export type VariantRequestExtras = \{ is4k: true \} \| \{ arrInstance: string \};/);
 
   const fourK = src("src/components/media/request-4k-button.tsx");
   assert.match(fourK, /<VariantRequestButton\b/);
@@ -41,9 +50,9 @@ test("Request4kButton and RequestInstanceButton share one request flow that trea
   }
 });
 
-test("WatchlistButton refreshes after a successful auto-request and resets on tmdbId", () => {
+test("WatchlistButton refreshes after a successful auto-request and relies on the caller's key across titles", () => {
   const body = src("src/components/media/watchlist-button.tsx");
-  assert.match(body, /seenTmdbId !== tmdbId/);
+  assert.doesNotMatch(body, NO_TITLE_RESET);
   assert.match(body, /override \?\? initialOnWatchlist/);
   assert.match(body, /ar\?\.requested/);
   assert.match(body, /router\.refresh\(\)/);
@@ -52,21 +61,29 @@ test("WatchlistButton refreshes after a successful auto-request and resets on tm
 test("HideButton and WatchlistButton roll a failed toggle back to the PRE-CLICK state, never the stale prop", () => {
   // After one successful toggle the prop still holds the page-load value, so
   // rolling back to it (setOverride(null)) showed the wrong state.
-  for (const file of ["src/components/media/hide-button.tsx", "src/components/media/watchlist-button.tsx"]) {
-    const body = src(file);
-    assert.doesNotMatch(body, /setOverride\(null\);?\s*\/\/ rollback/, file);
-    const rollbacks = body.match(/setOverride\(!next\)/g) ?? [];
-    assert.equal(rollbacks.length, 2, `${file}: both the HTTP-error and network-error paths roll back to !next`);
-  }
+  const watchlist = src("src/components/media/watchlist-button.tsx");
+  assert.doesNotMatch(watchlist, /setOverride\(null\);?\s*\/\/ rollback/);
+  assert.equal((watchlist.match(/setOverride\(!next\)/g) ?? []).length, 2, "both the HTTP-error and network-error paths roll back to !next");
+  // HideButton reads every failure (a refusal, a timeout, no answer) as one
+  // result (hidden-items.ts), so its single failure branch is the rollback.
+  const hide = src("src/components/media/hide-button.tsx");
+  assert.doesNotMatch(hide, /setOverride\(null\);?\s*\/\/ rollback/);
+  assert.match(hide, /if \(res\.ok\) \{[\s\S]*?return;\s*\}[\s\S]*?setOverride\(!next\);\s*setMsg\(hiddenFailureText\(res\.failure/);
 });
 
-test("HideButton and VoteDeleteButton reset when tmdbId changes", () => {
+test("HideButton and VoteDeleteButton start fresh on another title through a key", () => {
+  // HideButton is keyed on the title inside the component, so a new title is a
+  // new instance: no override, error or in-flight answer carries across.
   const hide = src("src/components/media/hide-button.tsx");
-  assert.match(hide, /seenTmdbId !== tmdbId/);
+  assert.match(hide, /return <HideButtonForTitle key=\{`\$\{props\.mediaType\}:\$\{props\.tmdbId\}`\} \{\.\.\.props\} \/>;/);
+  assert.doesNotMatch(hide, NO_TITLE_RESET);
   assert.match(hide, /override \?\? initialHidden/);
+  // VoteDeleteButton is keyed by the action row (pinned below); within one
+  // title it still follows the live `alreadyVoted`.
   const vote = src("src/components/votes/vote-delete-button.tsx");
-  assert.match(vote, /seenTmdbId !== tmdbId/);
-  assert.match(vote, /alreadyVoted \? "voted" : "idle"/);
+  assert.doesNotMatch(vote, NO_TITLE_RESET);
+  assert.doesNotMatch(vote, /displayState/);
+  assert.match(vote, /if \(alreadyVoted !== seenVoted && state !== "loading" && state !== "reason"\) \{\s*setSeenVoted\(alreadyVoted\);\s*setState\(alreadyVoted \? "voted" : "idle"\);/);
 });
 
 test("VoteActions resyncs `voted` from the live prop and rolls a failed unvote back to voted", () => {
@@ -78,16 +95,31 @@ test("VoteActions resyncs `voted` from the live prop and rolls a failed unvote b
   assert.doesNotMatch(body, /useState\(userVoted\);\s*const \[dismissed/, "voted must not be a one-time copy of the prop");
   const rollbacks = body.match(/setOverride\(true\)/g) ?? [];
   assert.equal(rollbacks.length, 2, "both the HTTP-error and network-error paths roll back to the pre-click state");
+  // A 404 means the vote is already gone: success, never a rollback to Voted.
+  assert.match(body, /if \(res\.ok \|\| res\.status === 404\) \{\s*setRemovedHere\(true\);/);
+});
+
+test("VoteActions keeps focus on the row: a status note after an unvote, Escape and Cancel back to Dismiss", () => {
+  const body = src("src/components/votes/vote-actions.tsx");
+  assert.match(body, /<span ref=\{removedNoteRef\} tabIndex=\{-1\} className="sr-only">/);
+  assert.match(body, /if \(showRemovedNote\) removedNoteRef\.current\?\.focus\(\);/);
+  assert.match(body, /if \(e\.key === "Escape" && !loading\) \{[\s\S]*?cancelDismiss\(\);/);
+  assert.match(body, /onClick=\{cancelDismiss\}/);
+  assert.match(body, /autoFocus=\{refocusDismiss\}/);
 });
 
 test("VoteDeleteButton: unvote shows the rate-limit hint, a vote clears its reason, and focus survives the state change", () => {
   const body = src("src/components/votes/vote-delete-button.tsx");
   assert.match(body, /rateLimitMessage\(res, t\) \?\? t\("request\.vote\.removeFailed"\)/);
+  // A refused vote shows the route's own reason (your own request, a stale
+  // page token…), and a 404 on unvote means the vote is already gone.
+  assert.match(body, /rateLimitMessage\(res, t\) \?\? \(await readApiError\(res, t\("request\.vote\.recordFailed"\)\)\)/);
+  assert.match(body, /if \(res\.ok \|\| res\.status === 404\) \{\s*setState\("idle"\);/);
   assert.match(body, /setState\("voted"\);\s*setReason\(""\);\s*router\.refresh\(\)/, "a recorded vote clears the reason");
   assert.match(body, /if \(e\.key === "Escape"\) closeReason\(\)/);
   // The loading button is the SAME <button> as idle/voted: `disabled` dropped
   // its focus to <body> on every vote and unvote.
-  const loading = body.slice(body.indexOf('displayState === "loading"'));
+  const loading = body.slice(body.indexOf('state === "loading"'));
   const button = loading.slice(loading.indexOf("<DetailActionButton"), loading.indexOf("</DetailActionButton>"));
   assert.doesNotMatch(button, /\sdisabled\b/);
   assert.match(button, /aria-disabled/);
@@ -120,8 +152,11 @@ test("movie and TV detail pages key action buttons and gate HD Request on canReq
 test("MediaCard hides the HD Request overlay when canRequest is false", () => {
   const body = src("src/components/media/media-card.tsx");
   assert.match(body, /canRequest\?: boolean/);
-  assert.match(body, /const showRequestOverlay =/);
-  assert.match(body, /showRequestOverlay &&/);
+  // Off unless the caller says so (fail closed for a forgotten prop).
+  assert.match(body, /canRequest = false,/);
+  // The overlay rule itself is media-card-state.ts (tests/media-card-state.test.mts).
+  assert.match(body, /const view = cardView\(media, \{ showPlex, showJellyfin, canRequest, state: request\.state \}\);/);
+  assert.match(body, /\{view\.showRequestOverlay && \(/);
   assert.match(body, /else if \(!canRequest\) \{\s*return;/);
 });
 
@@ -145,7 +180,7 @@ test("RequestButton drops a View-request state when `requested` goes true → fa
   // State was seeded from `requested` at mount only; a request declined or
   // deleted elsewhere kept "View request" until a remount.
   const body = src("src/components/media/request-button.tsx");
-  const block = /const \[prevRequested, setPrevRequested\] = useState\(!!requested\);\n\s*if \(!titleChanged && prevRequested !== !!requested\) \{([\s\S]*?)\n  \}/.exec(body);
+  const block = /const \[prevRequested, setPrevRequested\] = useState\(!!requested\);\n\s*if \(prevRequested !== !!requested\) \{([\s\S]*?)\n  \}/.exec(body);
   assert.ok(block, "the requested-prop reconcile block is missing");
   assert.match(block[1], /setPrevRequested\(!!requested\)/);
   assert.match(block[1], /if \(!requested && \(state === "duplicate" \|\| state === "requested"\)\) setState\("idle"\)/);
@@ -156,7 +191,8 @@ test("every client request POST goes through postMediaRequest (token fetch failu
   // used to post `_token: undefined` when the token fetch failed. Both are
   // handled once, in src/lib/client/media-request.ts (tests/media-request-client.test.mts).
   for (const file of [
-    "src/components/media/media-card.tsx",
+    // MediaCard's request (media-card.tsx calls submitCardRequest).
+    "src/components/media/media-card-state.ts",
     "src/components/media/request-button.tsx",
     // Request4kButton and RequestInstanceButton post through this one.
     "src/components/media/variant-request-button.tsx",

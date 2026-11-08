@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { escMd } from "@/lib/discord-notify";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { processSingleton } from "@/lib/process-singleton";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { isLocale, type Locale } from "@/lib/i18n/locales";
 import { instanceDefaultLocale, localeForUser, translatorFor } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
@@ -225,6 +226,20 @@ export function linkedAccountRefusal(t: Translator, linked: LinkedSiteAccount): 
   if (linked.kind === "none") return t("notify.bot.linkRequired");
   if (linked.kind === "deactivated") return t("notify.bot.pick.deactivated");
   return null;
+}
+
+export type LinkedUser = Extract<LinkedSiteAccount, { kind: "ok" }>["user"];
+
+/** The linked site account a personal-list command acts as, or the reply refusing it. */
+export async function requireLinkedSiteAccount(t: Translator, discordUserId: string): Promise<{ refusal: string } | { user: LinkedUser }> {
+  const linked = await linkedSiteAccount(discordUserId);
+  if (linked.kind === "ok") return { user: linked.user };
+  return { refusal: linkedAccountRefusal(t, linked) ?? t("notify.bot.linkRequired") };
+}
+
+// The read-command budget (/watchlist, /issue, /recent): one bucket per Discord user.
+export function withinDiscordReadBudget(discordUserId: string): boolean {
+  return checkRateLimit(`discord-read:${discordUserId}`, 20, 60_000);
 }
 
 // One option's value out of an interaction's (or a subcommand's) options.

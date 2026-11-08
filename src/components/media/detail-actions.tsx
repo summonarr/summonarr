@@ -59,47 +59,7 @@ export function DetailActions({
       className="flex items-end flex-wrap"
       style={{ gap: 10, marginTop: 6 }}
     >
-      <RequestButton
-        key={media.id}
-        tmdbId={media.id}
-        mediaType={mediaType}
-        title={media.title}
-        plexAvailable={state.plexAvailable}
-        jellyfinAvailable={state.jellyfinAvailable}
-        arrPending={state.arrPending}
-        requested={state.requested}
-        showPlex={state.showPlex}
-        showJellyfin={state.showJellyfin}
-        requestToken={state.requestToken}
-        canRequestOnBehalf={state.canOnBehalf}
-        canChooseProfile={state.canChooseProfile}
-        blacklisted={state.blacklisted}
-        canRequest={canRequest}
-      />
-      {state.show4k && (
-        <Request4kButton
-          key={`4k-${media.id}`}
-          tmdbId={media.id}
-          mediaType={mediaType}
-          requestToken={state.requestToken}
-          requested={state.requested4k}
-          available={state.arr4kAvailable}
-          blacklisted={state.blacklisted}
-        />
-      )}
-      {state.namedTargets.map((target) => (
-        <RequestInstanceButton
-          key={`${media.id}:${target.slug}`}
-          tmdbId={media.id}
-          mediaType={mediaType}
-          instance={target.slug}
-          instanceName={target.name}
-          requestToken={state.requestToken}
-          requested={target.requested}
-          available={target.available}
-          blacklisted={state.blacklisted}
-        />
-      ))}
+      <RequestActions media={media} mediaType={mediaType} state={state} canRequest={canRequest} />
       <WatchlistButton key={`watchlist-${media.id}`} tmdbId={media.id} mediaType={mediaType} initialOnWatchlist={state.onWatchlist} />
       <HideButton
         key={`hide-${media.id}`}
@@ -130,39 +90,120 @@ export function DetailActions({
       {(media.trailerKey || media.trailerUrl) && (
         <TrailerButton trailerKey={media.trailerKey} trailerUrl={media.trailerUrl} />
       )}
-      {state.arrLinks.map((inst) => {
-        const label = arrInstanceLabel(service, inst.name, inst.slug);
-        const deep = manageLink !== null && manageLink.instance === inst.slug;
-        // An instance holding the title: manage it there. Any other
-        // configured one: add it there, with the arr's own choices. A
-        // ?manage= deep link (an external/bookmarked URL — nothing in the
-        // app emits one) opens the manager even on a non-holder: `holds`
-        // is the synced cache, and the manager resolves the title live, so
-        // a title added since the last sync still opens; a true non-holder
-        // gets the dialog's own not-found state.
-        return inst.holds || deep ? (
-          <Fragment key={inst.slug || "default"}>
-            <ArrManageButton
+      <ArrInstanceActions mediaId={media.id} service={service} arrLinks={state.arrLinks} manageLink={manageLink} t={t} />
+    </div>
+  );
+}
+
+// Request on the default instance, on the 4K one when the viewer has it, and on
+// each named instance this title can go to.
+function RequestActions({
+  media,
+  mediaType,
+  state,
+  canRequest,
+}: {
+  media: { id: number; title: string };
+  mediaType: DetailMediaType;
+  state: DetailPageState;
+  canRequest: boolean;
+}) {
+  return (
+    <>
+    <RequestButton
+      key={media.id}
+      tmdbId={media.id}
+      mediaType={mediaType}
+      title={media.title}
+      plexAvailable={state.plexAvailable}
+      jellyfinAvailable={state.jellyfinAvailable}
+      arrPending={state.arrPending}
+      requested={state.requested}
+      showPlex={state.showPlex}
+      showJellyfin={state.showJellyfin}
+      requestToken={state.requestToken}
+      canRequestOnBehalf={state.canOnBehalf}
+      canChooseProfile={state.canChooseProfile}
+      blacklisted={state.blacklisted}
+      canRequest={canRequest}
+    />
+    {state.show4k && (
+      <Request4kButton
+        key={`4k-${media.id}`}
+        tmdbId={media.id}
+        mediaType={mediaType}
+        requestToken={state.requestToken}
+        requested={state.requested4k}
+        available={state.arr4kAvailable}
+        blacklisted={state.blacklisted}
+      />
+    )}
+    {state.namedTargets.map((target) => (
+      <RequestInstanceButton
+        key={`${media.id}:${target.slug}`}
+        tmdbId={media.id}
+        mediaType={mediaType}
+        instance={target.slug}
+        instanceName={target.name}
+        requestToken={state.requestToken}
+        requested={target.requested}
+        available={target.available}
+        blacklisted={state.blacklisted}
+      />
+    ))}
+    </>
+  );
+}
+
+// An admin's Radarr/Sonarr controls, one set per configured instance.
+function ArrInstanceActions({
+  mediaId,
+  service,
+  arrLinks,
+  manageLink,
+  t,
+}: {
+  mediaId: number;
+  service: "radarr" | "sonarr";
+  arrLinks: DetailPageState["arrLinks"];
+  manageLink: ReturnType<typeof parseManageLink>;
+  t: Translator;
+}) {
+  return (
+    <>
+    {arrLinks.map((inst) => {
+      const label = arrInstanceLabel(service, inst.name, inst.slug);
+      const deep = manageLink !== null && manageLink.instance === inst.slug;
+      // An instance holding the title: manage it there. Any other
+      // configured one: add it there, with the arr's own choices. A
+      // ?manage= deep link (an external/bookmarked URL — nothing in the
+      // app emits one) opens the manager even on a non-holder: `holds`
+      // is the synced cache, and the manager resolves the title live, so
+      // a title added since the last sync still opens; a true non-holder
+      // gets the dialog's own not-found state.
+      return inst.holds || deep ? (
+        <Fragment key={inst.slug || "default"}>
+          <ArrManageButton
+            service={service}
+            instance={inst.slug}
+            tmdbId={mediaId}
+            instanceLabel={label}
+            autoOpen={deep}
+            initialTab={deep ? manageLink.tab : undefined}
+          />
+          {inst.holds && (
+            <OpenInArrLink
               service={service}
               instance={inst.slug}
-              tmdbId={media.id}
-              instanceLabel={label}
-              autoOpen={deep}
-              initialTab={deep ? manageLink.tab : undefined}
+              target={{ tmdbId: mediaId }}
+              label={t("adminManage.openIn", { name: label })}
             />
-            {inst.holds && (
-              <OpenInArrLink
-                service={service}
-                instance={inst.slug}
-                target={{ tmdbId: media.id }}
-                label={t("adminManage.openIn", { name: label })}
-              />
-            )}
-          </Fragment>
-        ) : (
-          <ArrAddButton key={inst.slug || "default"} service={service} instance={inst.slug} tmdbId={media.id} instanceLabel={label} />
-        );
-      })}
-    </div>
+          )}
+        </Fragment>
+      ) : (
+        <ArrAddButton key={inst.slug || "default"} service={service} instance={inst.slug} tmdbId={mediaId} instanceLabel={label} />
+      );
+    })}
+    </>
   );
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo, type ReactNode } from "react";
+import { useState, useEffect, useRef, useMemo, useDeferredValue, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { StyledSelect } from "@/components/ui/styled-select";
@@ -13,16 +13,31 @@ import {
 import type { ArrRelease } from "@/lib/arr";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
-import { ageFormatter, sizeFormatter } from "./release-search-dialog";
+import type { Translator } from "@/lib/i18n/translate";
+import { ageFormatter, sizeFormatter } from "./queue-format";
 import { FixFileOptions, type FixFileAction } from "./issue-fix-options";
+import { releaseListOf } from "./issue-fix-answers";
 import { ManageTitleButton } from "@/components/admin/arr-title/title-manager";
 import { arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { manageTabFor } from "@/lib/arr-manage-links";
 import { holdLiveRefresh, requestPageRefresh } from "@/lib/client/refresh-hold";
-import { apiErrorText, readApiError } from "@/lib/client/api-error";
+import { apiErrorText } from "@/lib/client/api-error";
+import { fetchJson, jsonInit, type FetchJsonFailure } from "@/lib/client/fetch-json";
 import { runReleaseSearchJob } from "@/lib/client/release-search-job";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { seriesReleaseScopeSearchable } from "@/lib/release-scope";
 import { defaultRelease, rejectedOnlyForFileOnDisk } from "@/lib/issue-fix";
+import { arrServiceName } from "@/lib/arr-service-name";
+
+// A grab answers once the arr has fetched the .torrent/.nzb and handed it to
+// the download client — the server waits up to 120 s for that (arr-releases.ts).
+const GRAB_TIMEOUT_MS = 150_000;
+
+// A failed write's line: the route's own reason, or the network line when no
+// answer came at all.
+function writeErrorText(res: FetchJsonFailure, t: Translator): string {
+  return res.kind === "http" ? res.error : t("shared.thread.networkError");
+}
 
 interface IssueActionsProps {
   issueId: string;
@@ -66,6 +81,111 @@ function managerRefreshHolds(): (slug: string, open: boolean) => void {
   };
 }
 
+// "S01E02" for an episode, "Season 1" for a season, nothing for the rest.
+function scopeDetailOf(scope: string, seasonNumber: number | null, episodeNumber: number | null, t: Translator): string | null {
+  if (scope === "EPISODE" && seasonNumber != null && episodeNumber != null) {
+    return `S${String(seasonNumber).padStart(2, "0")}E${String(episodeNumber).padStart(2, "0")}`;
+  }
+  if (scope === "SEASON" && seasonNumber != null) return t("adminQueue.issues.scope.seasonN", { number: seasonNumber });
+  return null;
+}
+
+// The status row's buttons when no panel is open: In progress, Resolve (or
+// Reopen) and Delete.
+function StatusButtons({
+  isResolved,
+  isInProgress,
+  busy,
+  statusLoading,
+  onInProgress,
+  onResolve,
+  onReopen,
+  onDelete,
+}: {
+  isResolved: boolean;
+  isInProgress: boolean;
+  busy: boolean;
+  statusLoading: boolean;
+  onInProgress: () => void;
+  onResolve: () => void;
+  onReopen: () => void;
+  onDelete: () => void;
+}) {
+  const t = useT();
+  return (
+    <>
+      {!isResolved && !isInProgress && (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onInProgress}
+          disabled={busy}
+          className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-yellow-400 hover:border-yellow-500/50 gap-1"
+        >
+          {statusLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Clock className="w-3 h-3" />}
+          {t("personal.issues.status.inProgress")}
+        </Button>
+      )}
+
+      {!isResolved && (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onResolve}
+          disabled={busy}
+          className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-green-400 hover:border-green-500/50 gap-1"
+        >
+          <Check className="w-3 h-3" />
+          {t("adminQueue.issueActions.resolve")}
+        </Button>
+      )}
+
+      {isResolved && (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onReopen}
+          disabled={busy}
+          className="h-7 px-3 text-xs border-zinc-700 text-zinc-500 hover:text-zinc-100 gap-1"
+        >
+          {t("adminQueue.issueActions.reopen")}
+        </Button>
+      )}
+
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={onDelete}
+        disabled={busy}
+        aria-label={t("adminQueue.issueActions.deleteIssue")}
+        title={t("adminQueue.issueActions.deleteIssue")}
+        className="h-7 px-3 text-xs border-zinc-700 text-zinc-500 hover:text-red-400 hover:border-red-500/50"
+      >
+        <Trash2 className="w-3 h-3" />
+      </Button>
+    </>
+  );
+}
+
+function DeleteConfirm({ busy, deleting, onDelete, onCancel }: { busy: boolean; deleting: boolean; onDelete: () => void; onCancel: () => void }) {
+  const t = useT();
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-[11px] text-zinc-400">{t("adminQueue.issueActions.deleteConfirm")}</span>
+      <Button
+        size="sm"
+        onClick={onDelete}
+        disabled={busy}
+        className="h-6 px-2 text-xs bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] gap-1"
+      >
+        {deleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+        {t("adminQueue.actions.delete")}
+      </Button>
+      <button type="button" onClick={onCancel} className="rounded px-2 py-1 text-zinc-500 hover:text-zinc-400 text-xs">{t("shared.common.cancel")}</button>
+    </div>
+  );
+}
+
 // Two rows: fixing the file (Fix match, Fix file, Manage) and working the
 // issue (claim, In progress, Resolve/Reopen, Delete). Fix file is ONE window
 // in place of the old Refetch / Replace / Replace file buttons — see
@@ -99,6 +219,8 @@ export function IssueActions({
   // until a new `currentStatus` arrives (or the row goes) the buttons describe
   // the issue as it WAS: a second Delete 404'd, and a stale "In progress" after
   // a Resolve passed the server's check against the new status and reopened it.
+  // So the lock stays until the server says otherwise — and says so on the card
+  // (the "Updating…" line below) instead of leaving the buttons dead unexplained.
   const [actedFrom, setActedFrom] = useState<string | null>(null);
   if (actedFrom !== null && actedFrom !== currentStatus) setActedFrom(null);
   const busy = loading !== null || actedFrom !== null;
@@ -120,52 +242,45 @@ export function IssueActions({
     if (busy) return;
     setLoading("status");
     setError(null);
-    try {
-      const res = await fetch(withBasePath(`/api/issues/${issueId}`), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status, resolution: resolutionNote }),
-      });
-      if (!res.ok) {
-        // `message` first (readApiError) — a concurrent status change answers
-        // { error: "status-conflict", message: "<sentence>" }; the slug alone is noise.
-        setError(await readApiError(res, t("adminQueue.issueActions.statusFailed")));
-        return;
-      }
-      setActedFrom(currentStatus);
-      // Sent: a later Resolve (after a Reopen) starts from an empty note
-      // instead of re-sending, and re-announcing, this one.
-      setResolution("");
-      setPanel(null);
-      // The change is announced over SSE too; the page's one shared refresh
-      // (refresh-hold.ts) makes the two a single reload.
-      requestPageRefresh(() => router.refresh());
-    } catch {
-      setError(t("shared.thread.networkError"));
-    } finally {
-      // A failure keeps the resolve panel open beside the error, note and all.
-      setLoading(null);
+    const res = await fetchJson(withBasePath(`/api/issues/${issueId}`), {
+      init: jsonInit("PATCH", { status, resolution: resolutionNote }),
+      fallbackError: t("adminQueue.issueActions.statusFailed"),
+    });
+    // A failure keeps the resolve panel open beside the error, note and all.
+    setLoading(null);
+    // A 2xx whose body can't be read still changed the status.
+    if (!res.ok && res.kind !== "invalid") {
+      // The route's reason, `message` first — a concurrent status change answers
+      // { error: "status-conflict", message: "<sentence>" }; the slug alone is noise.
+      setError(writeErrorText(res, t));
+      return;
     }
+    setActedFrom(currentStatus);
+    // Sent: a later Resolve (after a Reopen) starts from an empty note
+    // instead of re-sending, and re-announcing, this one.
+    setResolution("");
+    setPanel(null);
+    // The change is announced over SSE too; the page's one shared refresh
+    // (refresh-hold.ts) makes the two a single reload.
+    requestPageRefresh(() => router.refresh());
   }
 
   async function deleteIssue() {
     if (busy) return;
     setLoading("delete");
     setError(null);
-    try {
-      const res = await fetch(withBasePath(`/api/issues/${issueId}`), { method: "DELETE" });
-      if (!res.ok) {
-        setError(await readApiError(res, t("adminQueue.actions.deleteFailed")));
-        return;
-      }
-      setActedFrom(currentStatus);
-      requestPageRefresh(() => router.refresh());
-    } catch {
-      setError(t("shared.thread.networkError"));
-    } finally {
-      setLoading(null);
-      setPanel(null);
+    const res = await fetchJson(withBasePath(`/api/issues/${issueId}`), {
+      init: { method: "DELETE" },
+      fallbackError: t("adminQueue.actions.deleteFailed"),
+    });
+    setLoading(null);
+    setPanel(null);
+    if (!res.ok && res.kind !== "invalid") {
+      setError(writeErrorText(res, t));
+      return;
     }
+    setActedFrom(currentStatus);
+    requestPageRefresh(() => router.refresh());
   }
 
   // A whole-series TV issue has no release list: Sonarr's series-only query is
@@ -176,13 +291,7 @@ export function IssueActions({
   const isResolved = currentStatus === "RESOLVED";
   const isInProgress = currentStatus === "IN_PROGRESS";
   const justify = align === "start" ? "justify-start" : "justify-end";
-
-  const scopeDetail =
-    scope === "EPISODE" && seasonNumber != null && episodeNumber != null
-      ? `S${String(seasonNumber).padStart(2, "0")}E${String(episodeNumber).padStart(2, "0")}`
-      : scope === "SEASON" && seasonNumber != null
-      ? t("adminQueue.issues.scope.seasonN", { number: seasonNumber })
-      : null;
+  const scopeDetail = scopeDetailOf(scope, seasonNumber, episodeNumber, t);
 
   const service = mediaType === "MOVIE" ? "radarr" : "sonarr";
   const manageIcons = isAdmin && manage
@@ -265,73 +374,28 @@ export function IssueActions({
             <button type="button" onClick={() => setPanel(null)} className="rounded px-2 py-1 text-zinc-500 hover:text-zinc-400 text-xs">{t("shared.common.cancel")}</button>
           </form>
         ) : panel === "delete" ? (
-          <div className="flex items-center gap-1.5">
-            <span className="text-[11px] text-zinc-400">{t("adminQueue.issueActions.deleteConfirm")}</span>
-            <Button
-              size="sm"
-              onClick={deleteIssue}
-              disabled={busy}
-              className="h-6 px-2 text-xs bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] gap-1"
-            >
-              {loading === "delete" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-              {t("adminQueue.actions.delete")}
-            </Button>
-            <button type="button" onClick={() => setPanel(null)} className="rounded px-2 py-1 text-zinc-500 hover:text-zinc-400 text-xs">{t("shared.common.cancel")}</button>
-          </div>
+          <DeleteConfirm busy={busy} deleting={loading === "delete"} onDelete={() => void deleteIssue()} onCancel={() => setPanel(null)} />
         ) : (
-          <>
-            {!isResolved && !isInProgress && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => updateStatus("IN_PROGRESS")}
-                disabled={busy}
-                className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-yellow-400 hover:border-yellow-500/50 gap-1"
-              >
-                {loading === "status" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Clock className="w-3 h-3" />}
-                {t("personal.issues.status.inProgress")}
-              </Button>
-            )}
-
-            {!isResolved && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => setPanel("resolve")}
-                disabled={busy}
-                className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-green-400 hover:border-green-500/50 gap-1"
-              >
-                <Check className="w-3 h-3" />
-                {t("adminQueue.issueActions.resolve")}
-              </Button>
-            )}
-
-            {isResolved && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => updateStatus("OPEN")}
-                disabled={busy}
-                className="h-7 px-3 text-xs border-zinc-700 text-zinc-500 hover:text-zinc-100 gap-1"
-              >
-                {t("adminQueue.issueActions.reopen")}
-              </Button>
-            )}
-
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setPanel("delete")}
-              disabled={busy}
-              aria-label={t("adminQueue.issueActions.deleteIssue")}
-              title={t("adminQueue.issueActions.deleteIssue")}
-              className="h-7 px-3 text-xs border-zinc-700 text-zinc-500 hover:text-red-400 hover:border-red-500/50"
-            >
-              <Trash2 className="w-3 h-3" />
-            </Button>
-          </>
+          <StatusButtons
+            isResolved={isResolved}
+            isInProgress={isInProgress}
+            busy={busy}
+            statusLoading={loading === "status"}
+            onInProgress={() => void updateStatus("IN_PROGRESS")}
+            onResolve={() => setPanel("resolve")}
+            onReopen={() => void updateStatus("OPEN")}
+            onDelete={() => setPanel("delete")}
+          />
         )}
       </div>
+
+      {actedFrom !== null && (
+        // Done on the server; the card follows once the page's refresh lands.
+        <span role="status" className="flex items-center gap-1 text-[11px] text-zinc-500">
+          <Loader2 className="w-3 h-3 animate-spin" aria-hidden />
+          {t("adminQueue.issueActions.updating")}
+        </span>
+      )}
 
       {panel === "fix" && (
         <FixFileDialog
@@ -398,7 +462,8 @@ function patchReleaseSearch(instance: string, patch: ReleaseSearchPatch) {
 //
 // This window keeps the header, the release search and the one write in
 // flight; the options view (FixFileOptions) owns what is on disk, the choices
-// and the delete, per instance; ReleasePicker owns one answer's list.
+// and the delete, per instance; ReleasesView shows the search, ReleasePicker
+// owns one answer's list.
 function FixFileDialog({
   issueId,
   mediaType,
@@ -424,12 +489,17 @@ function FixFileDialog({
 }) {
   const t = useT();
   const router = useRouter();
-  const serviceName = mediaType === "MOVIE" ? "Radarr" : "Sonarr";
+  const serviceName = arrServiceName(mediaType);
 
   const [view, setView] = useState<"options" | "releases">("options");
   // The one write running, if any: the delete, the search or the grab. While
-  // it runs the window can't be closed, switched or left.
+  // it runs the window can't be switched to another instance or left for the
+  // other view. It CAN be closed: the server finishes the write either way
+  // (a delete runs as a background job), and a replace's polls run for up to
+  // ten minutes — the admin was stuck behind the window all that time.
   const [action, setAction] = useState<FixFileAction | null>(null);
+  // The grab's request: aborted (its answer dropped) when the window closes.
+  const writes = useAsyncAction();
   // Ticked: the delete marks each file's release failed, so it is blocklisted
   // and not downloaded again. Unticked: the delete is followed by a search.
   // The window's choice, not one instance's: a switch leaves it as it was.
@@ -473,10 +543,15 @@ function FixFileDialog({
       );
       // A superseded search must not write back — neither its list nor its error.
       if (answer === null || reqId !== releaseReqRef.current) return;
-      if (answer.status < 200 || answer.status >= 300 || !Array.isArray(answer.data)) {
+      // Checked before the list renders: a payload of another shape is the
+      // search failing, never a crash inside the picker.
+      const list = answer.status >= 200 && answer.status < 300 ? releaseListOf(answer.data) : null;
+      if (list === null) {
+        // The route's own reason (the integration switched off, an instance
+        // that isn't a configured one), else "failed to fetch".
         patchSearch(targetInstance, { error: apiErrorText(answer.data, t("adminQueue.issueActions.releasesFailed")) });
       } else {
-        patchSearch(targetInstance, { releases: answer.data as ArrRelease[] });
+        patchSearch(targetInstance, { releases: list });
       }
     } catch {
       // Report the failure (only if this is still the latest search). Otherwise the
@@ -529,29 +604,31 @@ function FixFileDialog({
   // `rel` is the one the admin has selected AND can see (ReleasePicker); its
   // guid is the server-issued handle, sent back as it came (guardrail 5e).
   async function grabRelease(rel: ArrRelease) {
+    if (writes.busy("grab")) return;
     setAction("grab");
     patchSearch(instance, { error: null });
-    try {
-      const res = await fetch(withBasePath(`/api/issues/${issueId}/releases`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ guid: rel.guid, indexerId: rel.indexerId, instance }),
-      });
-      if (!res.ok) {
-        patchSearch(instance, { error: await readApiError(res, t("adminQueue.issueActions.grabFailed")) });
-      } else {
-        patchSearch(instance, { grabOk: true });
-        // Once the window closes — not under the "grab queued" it is showing.
-        requestPageRefresh(() => router.refresh());
-      }
-    } catch {
-      patchSearch(instance, { error: t("shared.thread.networkError") });
-    } finally {
-      setAction(null);
+    const res = await writes.run("grab", (signal) =>
+      fetchJson(withBasePath(`/api/issues/${issueId}/releases`), {
+        init: jsonInit("POST", { guid: rel.guid, indexerId: rel.indexerId, instance }),
+        signal,
+        timeoutMs: GRAB_TIMEOUT_MS,
+        fallbackError: t("adminQueue.issueActions.grabFailed"),
+      }), { ifBusy: "skip" });
+    setAction(null);
+    // The window closed meanwhile: nothing here to tell.
+    if (!res) return;
+    // A 2xx whose body can't be read was still a grab.
+    if (!res.ok && res.kind !== "invalid") {
+      patchSearch(instance, { error: writeErrorText(res, t) });
+    } else {
+      patchSearch(instance, { grabOk: true });
+      // Once the window closes — not under the "grab queued" it is showing.
+      requestPageRefresh(() => router.refresh());
     }
   }
 
   const working = action !== null;
+  const closeLabel = working ? t("adminQueue.issueActions.closeWhileWorking") : t("adminQueue.common.close");
 
   const instancePicker = instances.length > 1 && (
     <StyledSelect
@@ -569,7 +646,7 @@ function FixFileDialog({
   );
 
   return (
-    <Dialog open onOpenChange={(o) => { if (!o && !working) close(); }}>
+    <Dialog open onOpenChange={(o) => { if (!o) close(); }}>
       <DialogPortal>
         <DialogBackdrop />
         <DialogPopup className="max-w-3xl">
@@ -594,9 +671,8 @@ function FixFileDialog({
             <div className="flex items-center gap-3">
               {instancePicker}
               <DialogClose
-                disabled={working}
-                aria-label={t("adminQueue.common.close")}
-                title={t("adminQueue.common.close")}
+                aria-label={closeLabel}
+                title={closeLabel}
                 className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors"
               >
                 <X className="w-5 h-5" />
@@ -620,52 +696,109 @@ function FixFileDialog({
             onClose={close}
           />
 
-          {view === "releases" && (releasesLoading ? (
-            <div className="flex items-center justify-center gap-3 text-sm text-zinc-500 py-16">
-              <Loader2 className="w-5 h-5 animate-spin" />
-              {t("adminQueue.issueActions.searching")}
-            </div>
-          ) : grabOk ? (
-            <>
-              <div className="flex items-center justify-center gap-2 text-sm text-green-400 py-16">
-                <Check className="w-4 h-4" />
-                {t("adminQueue.issueActions.grabQueued")}
-              </div>
-              <div className="flex justify-end px-4 py-4 sm:px-6 border-t border-zinc-700 bg-zinc-900 flex-shrink-0">
-                <Button size="sm" onClick={close}>{t("adminQueue.common.close")}</Button>
-              </div>
-            </>
-          ) : releases === null || releases.length === 0 ? (
-            <div className="grid justify-items-center gap-3 px-6 py-16 text-center text-sm">
-              {releases === null ? (
-                <span role="alert" className="flex items-start gap-1.5 text-red-400">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                  {releaseError ?? t("adminQueue.issueActions.releasesFailed")}
-                </span>
-              ) : (
-                <span className="text-zinc-500">{t("adminQueue.issueActions.noReleases")}</span>
-              )}
-              <Button variant="ghost" size="sm" onClick={() => void loadReleases(instance)} disabled={working}>
-                <RefreshCw />
-                {t("adminQueue.issueActions.searchAgain")}
-              </Button>
-            </div>
-          ) : (
-            <ReleasePicker
+          {view === "releases" && (
+            <ReleasesView
+              loading={releasesLoading}
+              grabOk={grabOk}
               releases={releases}
+              releaseError={releaseError}
               serviceName={serviceName}
               matchBanner={libraryConfirmed && scope === "EPISODE"}
-              releaseError={releaseError}
               working={working}
               grabbing={action === "grab"}
               onSearchAgain={() => void loadReleases(instance)}
               onBack={backToOptions}
               onGrab={(rel) => void grabRelease(rel)}
+              onClose={close}
             />
-          ))}
+          )}
         </DialogPopup>
       </DialogPortal>
     </Dialog>
+  );
+}
+
+// The release list's view of one search: searching, the grab queued, nothing
+// (or the search failed), or the list itself — in that order.
+function ReleasesView({
+  loading,
+  grabOk,
+  releases,
+  releaseError,
+  serviceName,
+  matchBanner,
+  working,
+  grabbing,
+  onSearchAgain,
+  onBack,
+  onGrab,
+  onClose,
+}: {
+  loading: boolean;
+  grabOk: boolean;
+  releases: ArrRelease[] | null;
+  releaseError: string | null;
+  serviceName: string;
+  matchBanner: boolean;
+  working: boolean;
+  grabbing: boolean;
+  onSearchAgain: () => void;
+  onBack: () => void;
+  onGrab: (rel: ArrRelease) => void;
+  onClose: () => void;
+}) {
+  const t = useT();
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center gap-3 text-sm text-zinc-500 py-16">
+        <Loader2 className="w-5 h-5 animate-spin" />
+        {t("adminQueue.issueActions.searching")}
+      </div>
+    );
+  }
+  if (grabOk) {
+    return (
+      <>
+        <div className="flex items-center justify-center gap-2 text-sm text-green-400 py-16">
+          <Check className="w-4 h-4" />
+          {t("adminQueue.issueActions.grabQueued")}
+        </div>
+        <div className="flex justify-end px-4 py-4 sm:px-6 border-t border-zinc-700 bg-zinc-900 flex-shrink-0">
+          <Button size="sm" onClick={onClose}>{t("adminQueue.common.close")}</Button>
+        </div>
+      </>
+    );
+  }
+  if (releases === null || releases.length === 0) {
+    return (
+      <div className="grid justify-items-center gap-3 px-6 py-16 text-center text-sm">
+        {releases === null ? (
+          <span role="alert" className="flex items-start gap-1.5 text-red-400">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            {releaseError ?? t("adminQueue.issueActions.releasesFailed")}
+          </span>
+        ) : (
+          <span className="text-zinc-500">{t("adminQueue.issueActions.noReleases")}</span>
+        )}
+        <Button variant="ghost" size="sm" onClick={onSearchAgain} disabled={working}>
+          <RefreshCw />
+          {t("adminQueue.issueActions.searchAgain")}
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <ReleasePicker
+      releases={releases}
+      serviceName={serviceName}
+      matchBanner={matchBanner}
+      releaseError={releaseError}
+      working={working}
+      grabbing={grabbing}
+      onSearchAgain={onSearchAgain}
+      onBack={onBack}
+      onGrab={onGrab}
+    />
   );
 }
 
@@ -712,14 +845,28 @@ function ReleasePicker({
     return () => clearTimeout(timer);
   }, []);
 
-  const filterTerm = releaseFilter.toLowerCase();
-  const visibleReleases = releases.filter(
-    (r) => (showRejected || !r.rejected || rejectedOnlyForFileOnDisk(r))
-      && (filterTerm === "" || r.title.toLowerCase().includes(filterTerm)),
+  // A season pack's search answers hundreds of releases: the list follows a
+  // deferred copy of the filter (typing stays responsive), and each pass over
+  // the whole answer runs only when what it reads changed.
+  const filterTerm = useDeferredValue(releaseFilter).toLowerCase();
+  const visibleReleases = useMemo(
+    () => releases.filter(
+      (r) => (showRejected || !r.rejected || rejectedOnlyForFileOnDisk(r))
+        && (filterTerm === "" || r.title.toLowerCase().includes(filterTerm)),
+    ),
+    [releases, showRejected, filterTerm],
   );
   const selectedVisible = visibleReleases.find((r) => r.guid === selectedGuid) ?? null;
-  const rejectedCount = releases.filter((r) => r.rejected && !rejectedOnlyForFileOnDisk(r)).length;
-  const anyDiskOnly = releases.some(rejectedOnlyForFileOnDisk);
+  const { rejectedCount, anyDiskOnly } = useMemo(() => {
+    let rejected = 0;
+    let diskOnly = false;
+    for (const r of releases) {
+      const onlyDisk = rejectedOnlyForFileOnDisk(r);
+      if (r.rejected && !onlyDisk) rejected++;
+      if (onlyDisk) diskOnly = true;
+    }
+    return { rejectedCount: rejected, anyDiskOnly: diskOnly };
+  }, [releases]);
 
   return (
     <>

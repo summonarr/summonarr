@@ -27,7 +27,7 @@ import type { ArrService } from "./arr-instances";
 import type { ArrHistoryEvent } from "./arr-history";
 import type { QueueItem } from "./arr-queue";
 import type { NotifyEvent } from "./notify-events";
-import { diskFor, rootDisk, type ArrDisk, type ArrRootFolder } from "./arr-system";
+import { diskIn, indexDisks, rootDiskIn, type ArrDisk, type ArrRootFolder } from "./arr-system";
 import { safeMessage } from "./arr-parse";
 
 // ── settings ─────────────────────────────────────────────────────────────────
@@ -167,10 +167,12 @@ const MAX_DISKS = 200;
  */
 export function readDisks(roots: readonly ArrRootFolder[], disks: readonly ArrDisk[]): DiskReading[] {
   const byPath = new Map<string, DiskReading>();
+  // Each disk's path made comparable once for the whole list, not per root (5i).
+  const index = indexDisks(disks);
   for (const root of roots) {
     if (!root.accessible) continue;
-    const disk = rootDisk(root, disks);
-    const refused = disk === null ? diskFor(root.path, disks) : null;
+    const disk = rootDiskIn(root, index);
+    const refused = disk === null ? diskIn(root.path, index) : null;
     const free = root.freeSpace ?? disk?.freeSpace ?? null;
     if (free === null) continue;
     const path = disk?.path ?? root.path;
@@ -243,11 +245,15 @@ export function judgeDisks(
   const gone: Record<string, GoneDisk> = {};
   if (memory) {
     const at = new Date(memory.nowMs).toISOString();
+    // A running count: Object.keys per entry made the bound quadratic.
+    let kept = 0;
     for (const [path, state] of Object.entries(prev ?? {})) {
-      if (!(path in next) && Object.keys(gone).length < MAX_DISKS) gone[path] = { state, at };
+      if (kept >= MAX_DISKS) break;
+      if (!(path in next)) { gone[path] = { state, at }; kept++; }
     }
     for (const [path, g] of Object.entries(memory.gone ?? {})) {
-      if (!(path in next) && !(path in gone) && Date.parse(g.at) >= floor && Object.keys(gone).length < MAX_DISKS) gone[path] = g;
+      if (kept >= MAX_DISKS) break;
+      if (!(path in next) && !(path in gone) && Date.parse(g.at) >= floor) { gone[path] = g; kept++; }
     }
   }
   return { next, transitions, gone };
@@ -368,6 +374,39 @@ export const isManualMark = (r: ArrHistoryEvent): boolean => r.message?.trim().t
  * left for the next run once the cap was reached — a Sonarr pack counts once
  * per episode, so it is not a count of downloads.
  */
+// The episode a failed record is about, for counting a pack's distinct
+// episodes; null when the record names none.
+function failureEpisodeKey(r: ArrHistoryEvent): string | null {
+  if (r.episode) return `${r.episode.seasonNumber}:${r.episode.episodeNumber}`;
+  return r.episodeId !== null ? `id:${r.episodeId}` : null;
+}
+
+function startFailureGroup(r: ArrHistoryEvent, ms: number): { group: FailureGroup; episodes: Set<string> } {
+  const episodes = new Set<string>();
+  const ep = failureEpisodeKey(r);
+  if (ep !== null) episodes.add(ep);
+  const group: FailureGroup = {
+    downloadId: r.downloadId,
+    at: new Date(ms).toISOString(),
+    release: r.sourceTitle,
+    mediaTitle: r.mediaTitle,
+    tmdbId: r.tmdbId,
+    episodes: episodes.size,
+    message: scrubArrText(r.message),
+  };
+  return { group, episodes };
+}
+
+// The downloads a previous run announced, by downloadId → when.
+function rememberedFailures(recent: readonly RecentFailure[]): Map<string, number> {
+  const remembered = new Map<string, number>();
+  for (const f of recent) {
+    const ms = Date.parse(f.at);
+    if (Number.isFinite(ms)) remembered.set(f.downloadId, ms);
+  }
+  return remembered;
+}
+
 export function selectNewFailures(
   records: readonly ArrHistoryEvent[],
   cursor: HistoryCursor,
@@ -384,11 +423,7 @@ export function selectNewFailures(
 
   const groups: FailureGroup[] = [];
   const byDownload = new Map<string, { group: FailureGroup; episodes: Set<string>; ms: number }>();
-  const remembered = new Map<string, number>();
-  for (const f of recent) {
-    const ms = Date.parse(f.at);
-    if (Number.isFinite(ms)) remembered.set(f.downloadId, ms);
-  }
+  const remembered = rememberedFailures(recent);
   let last: { ms: number; id: number; at: string } | null = null;
   let consumed = 0;
   for (const { r, ms } of fresh) {
@@ -398,26 +433,14 @@ export function selectNewFailures(
     if (isManualMark(r)) {
       // An admin's mark, not a failure: passed, never announced (before the cap, so it can't use up the budget).
     } else if (open && ms - open.ms <= FAILURE_FOLD_WINDOW_MS) {
-      if (r.episode) open.episodes.add(`${r.episode.seasonNumber}:${r.episode.episodeNumber}`);
-      else if (r.episodeId !== null) open.episodes.add(`id:${r.episodeId}`);
+      const ep = failureEpisodeKey(r);
+      if (ep !== null) open.episodes.add(ep);
       open.group.episodes = open.episodes.size;
     } else if (announcedMs !== undefined && Math.abs(ms - announcedMs) <= FAILURE_FOLD_WINDOW_MS) {
       // Part of a download a previous run already announced.
     } else {
       if (groups.length >= cap) break;
-      const group: FailureGroup = {
-        downloadId: id,
-        at: new Date(ms).toISOString(),
-        release: r.sourceTitle,
-        mediaTitle: r.mediaTitle,
-        tmdbId: r.tmdbId,
-        episodes: 0,
-        message: scrubArrText(r.message),
-      };
-      const episodes = new Set<string>();
-      if (r.episode) episodes.add(`${r.episode.seasonNumber}:${r.episode.episodeNumber}`);
-      else if (r.episodeId !== null) episodes.add(`id:${r.episodeId}`);
-      group.episodes = episodes.size;
+      const { group, episodes } = startFailureGroup(r, ms);
       groups.push(group);
       if (id) {
         byDownload.set(id, { group, episodes, ms });
@@ -516,6 +539,36 @@ export function attentionReadGapMs(intervalSeconds: number): number {
  * counted, and a key kept through it is stored moved forward by that much, so
  * later runs don't count it either.
  */
+/**
+ * The time since the last successful read that was NOT observed: the part of
+ * the gap beyond `readGapMs`, or 0 with no (or an unreadable) last read.
+ */
+function unobservedMs(readAt: string | undefined, nowMs: number, readGapMs: number): number {
+  const lastRead = readAt ? Date.parse(readAt) : NaN;
+  return Number.isFinite(lastRead) ? Math.max(0, nowMs - lastRead - readGapMs) : 0;
+}
+
+/**
+ * The keys still remembered, each with its last-seen time: those seen within
+ * the grace of OBSERVED time, moved forward by the unobserved gap (never past
+ * now) so later runs don't count it either. A state stored before `seen`
+ * existed seeds the memory from its last set, as seen now.
+ */
+function recalledAttention(prev: AttentionMemory | null, nowMs: number, readGapMs: number): Map<string, string> {
+  const unobserved = unobservedMs(prev?.readAt, nowMs, readGapMs);
+  const floor = nowMs - WATCH_GRACE_MS - unobserved;
+  const known = new Map<string, string>();
+  for (const [key, at] of Object.entries(prev?.seen ?? {})) {
+    const ms = Date.parse(at);
+    if (ms >= floor) known.set(key, unobserved > 0 ? new Date(Math.min(nowMs, ms + unobserved)).toISOString() : at);
+  }
+  if (prev && !prev.seen) {
+    const nowIso = new Date(nowMs).toISOString();
+    for (const key of prev.keys ?? []) known.set(key, nowIso);
+  }
+  return known;
+}
+
 export function diffAttention(
   items: readonly QueueItem[],
   prev: AttentionMemory | null,
@@ -524,15 +577,7 @@ export function diffAttention(
   readGapMs = ATTENTION_READ_GAP_MS,
 ): { keys: string[]; newly: QueueItem[]; seen: Record<string, string>; deferred: number } {
   const nowIso = new Date(nowMs).toISOString();
-  const lastRead = prev?.readAt ? Date.parse(prev.readAt) : NaN;
-  const unobserved = Number.isFinite(lastRead) ? Math.max(0, nowMs - lastRead - readGapMs) : 0;
-  const floor = nowMs - WATCH_GRACE_MS - unobserved;
-  const known = new Map<string, string>();
-  for (const [key, at] of Object.entries(prev?.seen ?? {})) {
-    const ms = Date.parse(at);
-    if (ms >= floor) known.set(key, unobserved > 0 ? new Date(Math.min(nowMs, ms + unobserved)).toISOString() : at);
-  }
-  if (prev && !prev.seen) for (const key of prev.keys ?? []) known.set(key, nowIso);
+  const known = recalledAttention(prev, nowMs, readGapMs);
   const keys: string[] = [];
   const newly: QueueItem[] = [];
   let deferred = 0;
@@ -601,17 +646,45 @@ const isIso = (v: unknown): v is string => typeof v === "string" && v.length <= 
 const strings = (v: unknown, max: number): string[] =>
   Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.length <= 600).slice(0, max) : [];
 
+// Each map is bounded by a running count (never Object.keys per entry, which
+// made a 2,000-entry map quadratic) and stops reading once full.
+function parseDiskStates(disks: Raw): Record<string, DiskState> {
+  const out: Record<string, DiskState> = {};
+  let n = 0;
+  for (const [path, state] of Object.entries(disks)) {
+    if (n >= MAX_DISKS) break;
+    if (state === "low" || state === "ok") { out[path] = state; n++; }
+  }
+  return out;
+}
+
+function parseGoneDisks(gone: Raw): Record<string, GoneDisk> {
+  const out: Record<string, GoneDisk> = {};
+  let n = 0;
+  for (const [path, v] of Object.entries(gone)) {
+    if (n >= MAX_DISKS) break;
+    const g = obj(v);
+    if (g && (g.state === "low" || g.state === "ok") && isIso(g.at)) { out[path] = { state: g.state, at: g.at }; n++; }
+  }
+  return out;
+}
+
+function parseAttentionSeen(seen: Raw): Record<string, string> {
+  const out: Record<string, string> = {};
+  let n = 0;
+  for (const [key, at] of Object.entries(seen)) {
+    if (n >= MAX_ATTENTION_KEYS) break;
+    if (key.length <= 600 && isIso(at)) { out[key] = at; n++; }
+  }
+  return out;
+}
+
 function parseInstanceState(v: unknown): InstanceWatchState | null {
   const r = obj(v);
   if (!r) return null;
   const out: InstanceWatchState = {};
   const disks = obj(r.disks);
-  if (disks) {
-    out.disks = {};
-    for (const [path, state] of Object.entries(disks)) {
-      if ((state === "low" || state === "ok") && Object.keys(out.disks).length < MAX_DISKS) out.disks[path] = state;
-    }
-  }
+  if (disks) out.disks = parseDiskStates(disks);
   const history = obj(r.history);
   const cursor = obj(history?.cursor);
   if (history && cursor && isIso(cursor.at) && typeof cursor.lastId === "number" && Number.isSafeInteger(cursor.lastId) && cursor.lastId >= 0) {
@@ -624,23 +697,10 @@ function parseInstanceState(v: unknown): InstanceWatchState | null {
     out.history = { cursor: { at: cursor.at, lastId: cursor.lastId }, recent };
   }
   const gone = obj(r.goneDisks);
-  if (gone) {
-    out.goneDisks = {};
-    for (const [path, v] of Object.entries(gone)) {
-      const g = obj(v);
-      if (g && (g.state === "low" || g.state === "ok") && isIso(g.at) && Object.keys(out.goneDisks).length < MAX_DISKS) {
-        out.goneDisks[path] = { state: g.state, at: g.at };
-      }
-    }
-  }
+  if (gone) out.goneDisks = parseGoneDisks(gone);
   if (Array.isArray(r.attention)) out.attention = strings(r.attention, MAX_ATTENTION_KEYS);
   const seen = obj(r.attentionSeen);
-  if (seen) {
-    out.attentionSeen = {};
-    for (const [key, at] of Object.entries(seen)) {
-      if (key.length <= 600 && isIso(at) && Object.keys(out.attentionSeen).length < MAX_ATTENTION_KEYS) out.attentionSeen[key] = at;
-    }
-  }
+  if (seen) out.attentionSeen = parseAttentionSeen(seen);
   if (isIso(r.attentionReadAt)) out.attentionReadAt = r.attentionReadAt;
   if (Array.isArray(r.failures)) out.failures = strings(r.failures, MAX_FAILURE_TIMES).filter(isIso);
   return out;

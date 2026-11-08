@@ -211,8 +211,23 @@ test("scrubTargetPiiFromAudit pages on a strict id bound and keeps the caller's 
   const second = fakeDb(many);
   assert.equal(await scrubTargetPiiFromAudit(second.db, { target: "user:u1", AND: [{ details: { contains: '"keep":true' } }] }), 600);
   const page2 = second.calls.findManyWhere[1] as { AND: Where[] };
-  assert.deepEqual(page2.AND, [{ details: { contains: '"keep":true' } }, { id: { gt: "r00998" } }], "the caller's AND plus the id bound");
+  assert.deepEqual(page2.AND[0], { details: { contains: '"keep":true' } }, "the caller's AND");
+  assert.ok("OR" in page2.AND[1], "the PII-key OR as a term of its own");
+  assert.deepEqual(page2.AND[2], { id: { gt: "r00998" } }, "and the id bound");
+  assert.equal("OR" in page2, false, "nothing is laid over a caller's own OR");
   assert.ok(many.filter((_, i) => i % 2 === 1).every((r) => r.details!.includes('"targetUser"')));
+});
+
+test("scrubTargetPiiFromAudit keeps a caller's own OR — the scrub never widens past it", async () => {
+  const rows: Row[] = [
+    { id: "a", target: "user:u1", details: JSON.stringify({ targetUser: "Mine" }) },
+    { id: "b", target: "user:u2", details: JSON.stringify({ targetUser: "Theirs" }) },
+  ];
+  const { db, calls } = fakeDb(rows);
+  assert.equal(await scrubTargetPiiFromAudit(db, { OR: [{ target: "user:u1" }, { target: "user:nobody" }] }), 1);
+  assert.equal(rows[1].details, JSON.stringify({ targetUser: "Theirs" }), "a row outside the caller's OR is untouched");
+  const first = calls.findManyWhere[0] as { AND: Where[] };
+  assert.deepEqual(first.AND[0], { OR: [{ target: "user:u1" }, { target: "user:nobody" }] });
 });
 
 test("scrubTargetPiiFromAudit with a match predicate rewrites only the rows it accepts — and still terminates", async () => {

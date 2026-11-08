@@ -109,6 +109,32 @@ test("the SQL helpers bind the zone and compare the bare column", () => {
   assert.equal(zonedMidnightSql("$1::date", "$2"), `(((($1::date)::timestamp) AT TIME ZONE $2::text) AT TIME ZONE 'UTC')`);
 });
 
+test("the SQL helpers refuse a zone that is not a bind placeholder", () => {
+  assert.equal(zonedMidnightSql("CAST(? AS date)", "?"), `((((CAST(? AS date))::timestamp) AT TIME ZONE ?::text) AT TIME ZONE 'UTC')`);
+  for (const bad of ["'UTC'", "America/New_York", "$0", "$1; DROP TABLE x", "", "$1::text"]) {
+    assert.throws(() => zonedTimestampSql(`"startedAt"`, bad), TypeError, bad);
+    assert.throws(() => zonedMidnightSql("$1::date", bad), TypeError, bad);
+  }
+});
+
+test("resolveStatsTimeZone works out the fallback only when the stored zone is unusable", () => {
+  assert.equal(resolveStatsTimeZone("Europe/Paris"), "Europe/Paris");
+  assert.equal(resolveStatsTimeZone("nope", "Asia/Tokyo"), "Asia/Tokyo");
+  assert.equal(resolveStatsTimeZone(null, "nope"), "UTC");
+  const original = Intl.DateTimeFormat;
+  let built = 0;
+  (Intl as { DateTimeFormat: unknown }).DateTimeFormat = function (...args: ConstructorParameters<typeof Intl.DateTimeFormat>) {
+    built++;
+    return new original(...args);
+  };
+  try {
+    resolveStatsTimeZone("Europe/Paris");
+  } finally {
+    (Intl as { DateTimeFormat: unknown }).DateTimeFormat = original;
+  }
+  assert.equal(built, 1, "a valid stored zone builds one formatter");
+});
+
 // ── the setting reader ──────────────────────────────────────────────────────
 
 let stored: string | null = null;

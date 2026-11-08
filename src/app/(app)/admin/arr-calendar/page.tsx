@@ -7,11 +7,10 @@ import { parseCalendarView } from "@/lib/arr-calendar-days";
 import { getTranslator } from "@/lib/i18n/server";
 import { PageHeader } from "@/components/ui/design";
 import { ArrCalendar } from "@/components/admin/arr-calendar";
+import { first, type PageSearchParams } from "@/lib/search-params";
 
 export const dynamic = "force-dynamic";
 
-type Param = string | string[] | undefined;
-const one = (v: Param): string | undefined => (typeof v === "string" ? v : undefined);
 
 // ADMIN-only, re-decided here with the DB-checked authActive() (guardrail 29 —
 // the (app)/admin layout admits delegated managers too). The calendar loads
@@ -28,7 +27,8 @@ export async function generateMetadata(): Promise<Metadata> {
 export default async function ArrCalendarPage({
   searchParams,
 }: {
-  searchParams: Promise<{ week?: Param; filter?: Param; type?: Param; instance?: Param; unmonitored?: Param }>;
+  // A repeated key arrives as an array; each reads its first value (first()).
+  searchParams: Promise<PageSearchParams>;
 }) {
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
@@ -36,7 +36,7 @@ export default async function ArrCalendarPage({
   const instances = await enabledArrInstances();
   const sp = await searchParams;
   const initialView = parseCalendarView(
-    { week: one(sp.week), filter: one(sp.filter), type: one(sp.type), instance: one(sp.instance), unmonitored: one(sp.unmonitored) },
+    { week: first(sp.week), filter: first(sp.filter), type: first(sp.type), instance: first(sp.instance), unmonitored: first(sp.unmonitored) },
     instances.map((i) => `${i.service}:${i.slug}`),
   );
   // Next keeps a page's client state across a navigation that changes only the

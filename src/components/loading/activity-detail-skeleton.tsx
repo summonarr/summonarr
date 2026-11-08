@@ -16,7 +16,7 @@
 // Every row uses the page's own responsive classes (resp-grid-2/3 reflow at
 // 1180 / 899 / 639 in globals.css) so the streamed page lands on the same grid.
 import type { ReactNode } from "react";
-import { Bar, SKELETON_CARD, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
+import { Bar, SKELETON_CARD, SkeletonRoot } from "@/components/loading/skeleton-primitives";
 
 // ActivityCard stand-in: radius 10, the card hairline, a fixed height.
 function Card({ h }: { h: number }) {

@@ -89,7 +89,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel } = await import("./_helpers.mts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
-const { DOWNLOAD_CHECK_DELAY_MS, runDownloadCheck, scheduleDownloadCheck, scheduleDownloadChecks } =
+const { DOWNLOAD_CHECK_DELAY_MS, runDownloadCheck, scheduleDownloadCheck, scheduleDownloadChecks, movieReleaseStatus } =
   await import("../src/lib/download-check.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
@@ -462,6 +462,34 @@ test("movie with a past home-release date reads as released → 'Download Pendin
   assert.match(embed.title, /Download Pending/);
 });
 
+test("a movie in cinemas with NO home date anywhere is awaiting release, expected 90 days after its theatrical date", async () => {
+  // The theatrical date alone is not a home release: reading it as one told the
+  // requester "download pending" for a film still only in cinemas.
+  setSettings(DISCORD_CFG);
+  process.env.TMDB_READ_TOKEN = "unit-test-tmdb-token";
+  const day = 24 * 60 * 60 * 1000;
+  const theatrical = new Date(Date.now() - 10 * day).toISOString();
+  tmdbCacheRows.set("movie:603:release-info:v2", JSON.stringify({ digital: null, physical: null, primary: theatrical }));
+
+  await runDownloadCheck(target());
+
+  const embed = (discordPosts()[0].body?.embeds as Array<{ title: string; description: string }>)[0];
+  assert.match(embed.title, /Awaiting Release/);
+  const expected = new Date(Date.parse(theatrical) + 90 * day).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+  assert.match(embed.description, new RegExp(`Expected around \\*\\*${expected}\\*\\*`));
+});
+
+test("a dateless back-catalog movie (only an old theatrical date) still reads as released → 'Download Pending'", async () => {
+  setSettings(DISCORD_CFG);
+  process.env.TMDB_READ_TOKEN = "unit-test-tmdb-token";
+  tmdbCacheRows.set("movie:603:release-info:v2", JSON.stringify({ digital: null, physical: null, primary: "1999-03-31" }));
+
+  await runDownloadCheck(target());
+
+  const embed = (discordPosts()[0].body?.embeds as Array<{ title: string }>)[0];
+  assert.match(embed.title, /Download Pending/);
+});
+
 // ── the scheduling wrapper ──────────────────────────────────────────────────
 
 test("scheduleDownloadCheck queues at the 90s mark and reports acceptance", () => {
@@ -574,20 +602,24 @@ function walkSrc(dir = "src", out: string[] = []): string[] {
 }
 
 test("the Discord admin-approve button schedules the check, not just the pendingNotifyAt flag", () => {
-  // The admin_approve/decline handler lives in src/lib/discord-interactions/components/admin-decision.ts.
+  // The admin_approve/decline handler lives in src/lib/discord-interactions/components/admin-decision.ts;
+  // its claim and follow-up are request-transition.ts's, shared with the web PATCH.
   const text = src("src/lib/discord-interactions/components/admin-decision.ts");
-  const start = text.indexOf('if (action === "admin_approve")');
-  assert.ok(start > 0, "the admin_approve branch moved — update this pin");
-  // Bounded to the approve arm: the sibling decline arm starts at the `} else {`
-  // that closes it, and the /request auto-approve path is far earlier in the file.
-  const branch = text.slice(start, text.indexOf("\n  } else {", start));
-  assert.match(branch, /pendingNotifyAt: new Date\(Date\.now\(\) \+ DOWNLOAD_CHECK_DELAY_MS\)/);
+  const start = text.indexOf("async function approveFromDiscord(");
+  assert.ok(start > 0, "the approve path moved — update this pin");
+  const branch = text.slice(start, text.indexOf("\n}\n", start));
+  assert.match(branch, /claimApproval\(request\.id, "PENDING"\)/, "the approve claims through the shared claim, which arms the backstop");
   assert.match(
     branch,
-    /scheduleDownloadCheck\(/,
+    /followUpDecidedApprovals\(/,
     "admin_approve arms pendingNotifyAt but never scheduled the check — the requester's " +
     "'download pending' ping then waits for the next sync tick instead of ~90s",
   );
+  const transition = src("src/lib/request-transition.ts");
+  const claim = transition.slice(transition.indexOf("export async function claimApproval("));
+  assert.match(claim.slice(0, claim.indexOf("\n}\n")), /pendingNotifyAt: backstopDeadline\(\)/, "the shared claim arms the backstop");
+  const followUp = transition.slice(transition.indexOf("export function followUpDecidedApprovals("));
+  assert.match(followUp.slice(0, followUp.indexOf("\n}\n")), /scheduleDownloadChecks\(downloadChecksFor\(settled\)/, "the shared follow-up schedules it");
 });
 
 test("every route that ARMS pendingNotifyAt also SCHEDULES the check", () => {
@@ -598,9 +630,12 @@ test("every route that ARMS pendingNotifyAt also SCHEDULES the check", () => {
   // src/lib/request-create.ts is POST /api/requests' body, extracted so the
   // watchlist auto-request files through the same chokepoint — an approval path
   // like the routes, so it is scanned with them; src/lib/request-bulk.ts is the
-  // bulk route's item pipeline, likewise.
+  // bulk route's item pipeline, likewise, and src/lib/request-transition.ts is
+  // the decision state machine the web PATCH, the batch and the Discord buttons
+  // claim through.
+  const LIB_PATHS = new Set(["src/lib/request-create.ts", "src/lib/request-bulk.ts", "src/lib/request-transition.ts"]);
   const arming = walkSrc()
-    .filter((f) => f.startsWith("src/app/api/") || f.startsWith("src/lib/discord-interactions/") || f === "src/lib/request-create.ts" || f === "src/lib/request-bulk.ts")
+    .filter((f) => f.startsWith("src/app/api/") || f.startsWith("src/lib/discord-interactions/") || LIB_PATHS.has(f))
     .filter((f) => {
       const text = src(f);
       // The delay is the shared DOWNLOAD_CHECK_DELAY_MS; a bare literal still counts.
@@ -610,19 +645,23 @@ test("every route that ARMS pendingNotifyAt also SCHEDULES the check", () => {
   // Guards the pin itself: if the arming literal is ever reformatted, the regex
   // matches nothing and the assertion below passes vacuously.
   assert.deepEqual(arming.sort(), [
-    "src/app/api/requests/[id]/route.ts",
-    "src/app/api/requests/batch/route.ts",
-    "src/lib/discord-interactions/components/admin-decision.ts",
-    // The Discord /request pick arms nothing itself: it files through request-create.ts.
     // POST /api/requests/bulk arms through its item pipeline.
     "src/lib/request-bulk.ts",
+    // POST /api/requests (and the Discord /request pick, which files through it).
     "src/lib/request-create.ts",
+    // The web PATCH, the batch PATCH and the Discord admin buttons claim here.
+    "src/lib/request-transition.ts",
   ], "an approval path was added or removed — confirm it schedules, then update this roster");
 
   const armedButUnscheduled = arming.filter((f) => !/scheduleDownloadChecks?\(/.test(src(f)));
   assert.deepEqual(armedButUnscheduled, [],
     "these routes stamp pendingNotifyAt but never queue the job that consumes it, so the " +
     "requester's 'download pending' ping waits for the next sync tick instead of ~90s");
+
+  // The decision paths arm nothing of their own: they claim through the state machine.
+  for (const f of ["src/app/api/requests/[id]/route.ts", "src/app/api/requests/batch/route.ts", "src/lib/discord-interactions/components/admin-decision.ts"]) {
+    assert.doesNotMatch(src(f), /DOWNLOAD_CHECK_DELAY_MS|90_000/, `${f} arms the backstop itself`);
+  }
 });
 
 test("no third copy of the check body: only download-check.ts and the orchestrator backstop notify", () => {
@@ -646,3 +685,13 @@ function setSettings(map: Record<string, string>): void {
   settings.clear();
   for (const [k, v] of Object.entries(map)) settings.set(k, v);
 }
+
+test("a movie is unreleased only while EVERY known date is ahead, and the soonest is told by time, not text", () => {
+  const now = new Date("2026-05-01T00:00:00Z");
+  assert.deepEqual(movieReleaseStatus([null, undefined], now), { released: true });
+  assert.deepEqual(movieReleaseStatus(["2026-04-01T00:00:00Z", "2026-06-01T00:00:00Z"], now), { released: true });
+  assert.deepEqual(
+    movieReleaseStatus(["2026-06-10T00:00:00Z", "2026-06-10T01:00:00+02:00"], now),
+    { released: false, soonestReleaseDate: "2026-06-10T01:00:00+02:00" },
+  );
+});

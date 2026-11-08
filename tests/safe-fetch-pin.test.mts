@@ -104,20 +104,32 @@ test("REBIND: trusted mode pins too", async () => {
   assert.equal(hits.length, 0);
 });
 
-test("REBIND: an answer that flips to a private address after validation is refused (user)", async () => {
+test("REBIND: one lookup per request decides, and its answer is what is dialled (user)", async () => {
   const { port, hits } = await listen(ok);
-  stubDns((_h, n) => (n === 0 ? ["192.0.2.1"] : ["127.0.0.1"]));
+  // A resolver that would flip to loopback on a second question is never
+  // asked one: the request is refused or dialled on the first answer alone.
+  const dnsCalls = stubDns((_h, n) => (n === 0 ? ["127.0.0.1"] : ["192.0.2.1"]));
   const err = await rejection(safeFetch(`http://flip-user.test:${port}/`, { timeoutMs: 400 }));
   assert.equal(err.reason, "ssrf-blocked");
   assert.equal(hits.length, 0);
+  assert.deepEqual(dnsCalls.calls, ["flip-user.test"], "exactly one lookup");
 });
 
-test("REBIND: admin mode still blocks link-local after a flip to 169.254.169.254", async () => {
+test("REBIND: admin mode blocks link-local on its one lookup, and dials only what it validated", async () => {
   const { port, hits } = await listen(ok);
-  stubDns((_h, n) => (n === 0 ? ["127.0.0.1"] : ["169.254.169.254"]));
+  const dnsCalls = stubDns((_h, n) => (n === 0 ? ["169.254.169.254"] : ["127.0.0.1"]));
   const err = await rejection(safeFetchAdminConfigured(`http://flip-admin.test:${port}/`, { timeoutMs: 400 }));
   assert.equal(err.reason, "ssrf-blocked");
   assert.equal(hits.length, 0);
+  assert.deepEqual(dnsCalls.calls, ["flip-admin.test"]);
+
+  // The answer that passed is the one connected to, however the resolver
+  // answers afterwards.
+  const pinned = stubDns((_h, n) => (n === 0 ? ["127.0.0.1"] : ["169.254.169.254"]));
+  const res = await safeFetchAdminConfigured(`http://flip-admin-ok.test:${port}/`, { timeoutMs: 2000 });
+  assert.equal(await res.text(), "ok");
+  assert.equal(hits.length, 1);
+  assert.deepEqual(pinned.calls, ["flip-admin-ok.test"]);
 });
 
 test("PIN: admin mode dials the validated address for a name the OS cannot resolve; Host is the original name", async () => {
@@ -149,13 +161,14 @@ test("MULTI: one link-local record among private ones refuses the request (admin
   assert.equal(hits.length, 0);
 });
 
-test("MULTI: a single bad record appearing only in the FRESH answer refuses (trusted)", async () => {
+test("MULTI: a single bad record in the answer refuses (trusted)", async () => {
   const { port, hits } = await listen(ok);
-  stubDns((_h, n) => (n === 0 ? ["192.0.2.1"] : ["192.0.2.1", "10.0.0.5"]));
+  stubDns(() => ["192.0.2.1", "10.0.0.5"]);
   const err = await rejection(
     safeFetchTrusted(`http://multi-fresh.test:${port}/`, { allowedHosts: ["multi-fresh.test"], timeoutMs: 400 }),
   );
   assert.equal(err.reason, "ssrf-blocked");
+  assert.match(err.message, /trusted host resolves to unsafe address/);
   assert.equal(hits.length, 0);
 });
 

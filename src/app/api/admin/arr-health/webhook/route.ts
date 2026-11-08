@@ -9,7 +9,7 @@ import {
   WebhookSchemaError,
 } from "@/lib/arr-health-data";
 import { parseQueueService } from "@/lib/arr-queue-data";
-import { auditContext, logAudit } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { calendarSiteUrl } from "@/lib/calendar-feed";
 import { isFeatureEnabled } from "@/lib/features";
@@ -57,12 +57,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
   const audit = (details: Record<string, unknown>) =>
     void logAudit({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email ?? null,
+      ...auditActor(req, session),
       action: "SETTINGS_CHANGE",
       target: `arr-webhook:${service}:${instance}`,
       details: { service, instance, ...details },
-      ...auditContext(req, session),
     });
   let result;
   try {

@@ -13,7 +13,8 @@
 //         of a fresh edit skipped the question.
 //   F077  A write's answer (Settings save, season/episode flip) drops every
 //         read still in flight — it may predate the write — and reads again
-//         when one was, instead of letting the older read land over it.
+//         when one was, instead of letting the older read land over it
+//         (use-title-load.ts).
 //   F078  The request list holds its live refresh while a row's manager is
 //         open (a refresh can drop the row and the dialog with it), and runs
 //         it once the last one closes.
@@ -24,6 +25,7 @@ import { createRefreshGate } from "../src/lib/refresh-gate.ts";
 
 const read = (path: string) => readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
 const manager = () => read("components/admin/arr-title/title-manager.tsx");
+const titleLoad = () => read("components/admin/arr-title/use-title-load.ts");
 const list = () => read("components/admin/admin-request-list.tsx");
 
 /** The source of the ArrTitleManager component (before ManageTitleButton). */
@@ -84,7 +86,8 @@ test("F078: the request list refreshes only through the gate, and its rows' mana
   const timer = src.slice(src.indexOf("function scheduleRefresh() {"), src.indexOf("useLiveEvents("));
   assert.match(timer, /setTimeout\(\(\) => \{\s*refreshTimerRef\.current = null;\s*refreshList\(\);\s*\}, 500\);/, "the live refresh goes through the gate");
   const batch = src.slice(src.indexOf("async function batchAction"), src.indexOf("const totalPages"));
-  assert.match(batch, /refreshList\(\);/, "so does the batch action's own refresh");
+  assert.match(batch, /refreshNow\(\);/, "so does the batch action's own refresh");
+  assert.match(src, /function refreshNow\(\) \{[\s\S]*?refreshList\(\);\s*\}/, "which goes through the gate too");
   assert.match(
     src,
     /function onManagerActive\(open: boolean\) \{\s*if \(open\) return refreshGate\.opened\(\);\s*if \(refreshGate\.closed\(\) && !unmountedRef\.current\) scheduleRefresh\(\);\s*\}/,
@@ -116,13 +119,40 @@ test("F075: the open-time reset does not re-run on an initialTab change", () => 
   const start = body.indexOf("useEffect(() => {\n    if (!open) return;");
   assert.ok(start > 0, "the open-time effect");
   const effect = body.slice(start, body.indexOf("]);", start) + 3);
-  assert.match(effect, /\}, \[open, targetKey, load, stopWatches\]\);$/);
+  assert.match(effect, /\}, \[open, target, commands, stopWatches\]\);$/);
   assert.doesNotMatch(effect.slice(effect.lastIndexOf("}, [")), /firstTab/, "firstTab is not a dependency");
   assert.match(effect, /const openTab = firstTabRef\.current;/, "it reads the tab through the ref");
   assert.match(effect, /setTab\(openTab\);\s*setVisited\(new Set\(\["settings", openTab\]\)\);/);
   const refSync = body.indexOf("useEffect(() => {\n    firstTabRef.current = firstTab;\n  });");
   assert.ok(refSync > 0 && refSync < start, "the ref is synced by an effect declared BEFORE the open effect — current in the commit that opens");
   assert.match(body, /const firstTabRef = useRef\(firstTab\);/);
+  // The title's own open-time read and reset (use-title-load.ts) key on the same target, by value.
+  assert.match(titleLoad(), /\}, \[open, target, load, action\]\);/);
+  assert.match(body, /const target = useStableTarget\(targetProp\);/);
+});
+
+test("every open starts clean: no line, prompt, release picker or command of the title before", () => {
+  const body = managerBody();
+  const start = body.indexOf("useEffect(() => {\n    if (!open) return;");
+  const effect = body.slice(start, body.indexOf("]);", start) + 3);
+  for (const reset of ['setNotice("");', 'setPartialNote("");', 'setError("");', "setRelease(null);", "setConfirmDiscard(false);", "setRemoved(false);", "setWatchKey(null);"]) {
+    assert.ok(effect.includes(reset), reset);
+  }
+  // Closing (or a new target) drops the command bar's POSTs — no busy button or notice carries over.
+  assert.match(effect, /return \(\) => \{\s*commands\.abort\(\);\s*stopWatches\(\);\s*\};/);
+  assert.match(body, /const busy = commands\.busy\("search"\) \? "search" : commands\.busy\("refresh"\) \? "refresh" : null;/);
+});
+
+test("the discard banner takes focus on 'Keep editing', and gives it back where it was when it goes", () => {
+  const body = managerBody();
+  assert.match(
+    body,
+    /useEffect\(\(\) => \{\s*if \(confirmDiscard\) \{\s*keepEditingRef\.current\?\.focus\(\);\s*return;\s*\}\s*const back = discardReturn\.current;\s*discardReturn\.current = null;\s*if \(back\?\.isConnected\) back\.focus\(\);\s*\}, \[confirmDiscard\]\);/,
+  );
+  const leave = body.slice(body.indexOf("function leave(): boolean {"), body.indexOf("function requestClose("));
+  assert.match(leave, /if \(!confirmDiscard && document\.activeElement instanceof HTMLElement\) discardReturn\.current = document\.activeElement;\s*setConfirmDiscard\(true\);/, "where focus was, kept before the banner takes it");
+  assert.match(body, /keepRef=\{keepEditingRef\}/);
+  assert.match(read("components/admin/arr-title/manager-parts.tsx"), /<Button ref=\{keepRef\} variant="ghost" size="sm" onClick=\{onKeep\}>/);
 });
 
 // ── F076: the banner goes with the edits ───────────────────────────────────
@@ -140,22 +170,22 @@ test("F076: nothing left unsaved clears the discard banner", () => {
 
 // ── F077: a write's answer outranks a read still in flight ─────────────────
 
-test("F077: every read is counted while in flight; a write's answer drops it and reads again", () => {
+test("a write's answer drops every read still out — and reads again when one was", () => {
+  const load = titleLoad();
+  // Every read is the "load" action: busy while out, aborted (and dropped) by a newer one.
+  assert.match(load, /const res = await action\.run\("load", \(signal\) =>/);
+  const supersede = load.slice(load.indexOf("const supersedeReads = useCallback("));
+  assert.match(supersede, /^const supersedeReads = useCallback\(\(\): boolean => \{\s*const overlapped = action\.busy\("load"\);\s*action\.abort\("load"\);\s*return overlapped;\s*\}, \[action\]\);/);
+  const apply = load.slice(load.indexOf("const applyWrite = useCallback("), load.indexOf("}, [reload, supersedeReads]);"));
+  assert.match(
+    apply,
+    /if \(!next\) return reload\(\);\s*const reread = supersedeReads\(\);\s*setState\(\(s\) => \(s \? \{ \.\.\.s, title: mergeTitle\(s\.title, next\) \} : s\)\);\s*if \(reread\) reload\(\);/,
+    "drops older reads BEFORE its title goes in, then reads again if one was in flight",
+  );
+  // Both writes' answers come through it: a Settings save and a season/episode flip.
   const body = managerBody();
-  const load = body.slice(body.indexOf("const load = useCallback("), body.indexOf("}, [service, instance, tRef]);"));
-  assert.match(load, /loadsInFlight\.current\+\+;\s*const res = await arrApi<TitleState>\([^;]*\);\s*loadsInFlight\.current--;\s*if \(seq !== loadSeq\.current\) return;/, "counted down before the staleness check — a dropped read is no longer in flight");
-  const supersede = body.slice(body.indexOf("function supersedeReads(): boolean {"));
-  assert.match(supersede, /^function supersedeReads\(\): boolean \{\s*const overlapped = loadsInFlight\.current > 0;\s*loadSeq\.current\+\+;\s*return overlapped;\s*\}/);
-  for (const handler of ["onSaved={(next) => {", "onTitle={(next) => {"]) {
-    const i = body.indexOf(handler);
-    assert.ok(i > 0, handler);
-    const h = body.slice(i, body.indexOf("}}", i));
-    assert.match(
-      h,
-      /if \(!next\) return reload\(\);\s*const reread = supersedeReads\(\);\s*setState\(\(s\) => \(s \? \{ \.\.\.s, title: mergeTitle\(s\.title, next\) \} : s\)\);\s*if \(reread\) reload\(\);/,
-      `${handler} drops older reads BEFORE its title goes in, then reads again if one was in flight`,
-    );
-  }
+  assert.match(body, /onSaved=\{applyWrite\}/);
+  assert.match(body, /onTitle=\{applyWrite\}/);
 });
 
 // ── a failed open-time read can be retried ─────────────────────────────────
@@ -163,6 +193,7 @@ test("F077: every read is counted while in flight; a write's answer drops it and
 test("a failed open-time read offers Retry, which reads again as the open did", () => {
   const body = managerBody();
   const failed = body.slice(body.indexOf("loadError ? ("), body.indexOf(") : (", body.indexOf("loadError ? (")));
-  assert.match(failed, /onClick=\{\(\) => \{\s*setLoadError\(""\);\s*void load\(titleTargetOfKey\(targetKey\), true\);\s*\}\}/);
+  assert.match(failed, /onClick=\{retry\}/);
   assert.match(failed, /\{t\("adminArr\.common\.retry"\)\}/);
+  assert.match(titleLoad(), /retry: \(\) => \{\s*setLoadError\(""\);\s*void load\(target, true\);\s*\},/);
 });

@@ -274,44 +274,58 @@ function applyMask(g: Grid, mask: number): void {
   }
 }
 
+// N3's two 11-module finder-like patterns (1:1:3:1:1 with 4 light modules on
+// either side), dark = true.
+const FINDER_LEFT = [true, false, true, true, true, false, true, false, false, false, false] as const;
+const FINDER_RIGHT = [false, false, false, false, true, false, true, true, true, false, true] as const;
+
+function matchesAt(line: readonly boolean[], at: number, pattern: readonly boolean[]): boolean {
+  for (let k = 0; k < pattern.length; k++) if (line[at + k] !== pattern[k]) return false;
+  return true;
+}
+
+// N1 (runs of 5+ same-colour modules) and N3 (finder-like patterns) for one
+// row or column. Reads the line in place: no per-window allocation.
+function linePenalty(line: readonly boolean[]): number {
+  let s = 0;
+  let runColor = line[0];
+  let runLen = 1;
+  for (let i = 1; i < line.length; i++) {
+    if (line[i] === runColor) {
+      runLen++;
+    } else {
+      if (runLen >= 5) s += 3 + (runLen - 5);
+      runColor = line[i];
+      runLen = 1;
+    }
+  }
+  if (runLen >= 5) s += 3 + (runLen - 5);
+  for (let i = 0; i + 11 <= line.length; i++) {
+    if (matchesAt(line, i, FINDER_LEFT) || matchesAt(line, i, FINDER_RIGHT)) s += 40;
+  }
+  return s;
+}
+
 // ISO 18004 §7.8.3 penalty rules N1–N4. Any mask yields a VALID code; the score
 // only steers toward one that scans easily.
 function penaltyScore(g: Grid): number {
   const size = g.size;
   const m = g.modules;
   let score = 0;
-  const lineScore = (get: (i: number) => boolean) => {
-    let s = 0;
-    let runColor = get(0);
-    let runLen = 1;
-    for (let i = 1; i < size; i++) {
-      const c = get(i);
-      if (c === runColor) {
-        runLen++;
-      } else {
-        if (runLen >= 5) s += 3 + (runLen - 5);
-        runColor = c;
-        runLen = 1;
-      }
-    }
-    if (runLen >= 5) s += 3 + (runLen - 5);
-    // N3: 1:1:3:1:1 finder-like pattern with 4 light modules on either side.
-    for (let i = 0; i + 11 <= size; i++) {
-      const p = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((k) => get(i + k));
-      const a = p[0] && !p[1] && p[2] && p[3] && p[4] && !p[5] && p[6] && !p[7] && !p[8] && !p[9] && !p[10];
-      const b = !p[0] && !p[1] && !p[2] && !p[3] && p[4] && !p[5] && p[6] && p[7] && p[8] && !p[9] && p[10];
-      if (a || b) s += 40;
-    }
-    return s;
-  };
-  for (let y = 0; y < size; y++) score += lineScore((x) => m[y][x]);
-  for (let x = 0; x < size; x++) score += lineScore((y) => m[y][x]);
+  for (let y = 0; y < size; y++) score += linePenalty(m[y]);
+  const column: boolean[] = new Array(size);
+  for (let x = 0; x < size; x++) {
+    for (let y = 0; y < size; y++) column[y] = m[y][x];
+    score += linePenalty(column);
+  }
+  // N2: 2×2 blocks of one colour.
   for (let y = 0; y < size - 1; y++) {
     for (let x = 0; x < size - 1; x++) {
       const c = m[y][x];
       if (c === m[y][x + 1] && c === m[y + 1][x] && c === m[y + 1][x + 1]) score += 3;
     }
   }
+  // N4: dark/light balance.
   let dark = 0;
   for (const row of m) for (const c of row) if (c) dark++;
   const total = size * size;

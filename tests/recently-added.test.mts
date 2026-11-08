@@ -32,6 +32,7 @@ const {
   mergeRecentlyAdded,
   recentlyAddedSources,
   getRecentlyAddedForViewer,
+  getRecentlyAdded,
   clearRecentlyAddedCache,
   RECENTLY_ADDED_OVERFETCH,
 } = await import("../src/lib/recently-added.ts");
@@ -53,10 +54,11 @@ type LibArgs = {
 };
 
 function makeLibrary() {
-  const state = { rows: [] as LibRow[], args: [] as LibArgs[] };
+  const state = { rows: [] as LibRow[], args: [] as LibArgs[], gate: null as Promise<void> | null };
   const stub = {
     findMany: async (args: LibArgs) => {
       state.args.push(args);
+      if (state.gate) await state.gate;
       let rows = state.rows.filter((r) => r.addedAt != null && r.tmdbId > 0);
       // Honour the instance allowlist exactly as Postgres would. A query with
       // NO allowlist returns every server's rows — which is what an unscoped
@@ -120,6 +122,7 @@ const ALL_ON = { plex: true, jellyfin: true };
 beforeEach(() => {
   plexLib.state.rows = [];
   plexLib.state.args = [];
+  plexLib.state.gate = null;
   jellyfinLib.state.rows = [];
   jellyfinLib.state.args = [];
   core.rows = [];
@@ -286,4 +289,33 @@ test("the list is capped at the overfetch even when the library is large", async
   assert.equal(out.length, RECENTLY_ADDED_OVERFETCH);
   assert.equal(out[0].id, 100, "newest first");
   assert.ok((plexLib.state.args[0].take ?? Infinity) <= 100, "the library read is bounded by take");
+});
+
+test("a load still running when the cache is cleared (a backup restore) stores nothing, and later callers read afresh", async () => {
+  plexLib.state.rows = [lib(1, "MOVIE", day(1))];
+  let release!: () => void;
+  plexLib.state.gate = new Promise<void>((r) => { release = r; });
+  const pending = getRecentlyAdded({ plex: [""], jellyfin: [] });
+  for (let i = 0; i < 100 && plexLib.state.args.length === 0; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(plexLib.state.args.length, 1, "the pre-restore load is in flight");
+
+  clearRecentlyAddedCache();
+  plexLib.state.rows = [lib(2, "MOVIE", day(2))]; // the restored library
+  plexLib.state.gate = null;
+  release();
+  assert.ok(Array.isArray(await pending), "its own caller still gets an answer");
+
+  const after = await getRecentlyAdded({ plex: [""], jellyfin: [] });
+  assert.deepEqual(after.map((m) => m.id), [2], "the pre-restore list was not cached");
+  assert.equal(plexLib.state.args.length, 2);
+});
+
+test("a full cache evicts its oldest entry, not every entry", async () => {
+  for (let i = 0; i < 64; i++) await getRecentlyAdded({ plex: [`srv${i}`], jellyfin: [] });
+  assert.equal(plexLib.state.args.length, 64);
+  await getRecentlyAdded({ plex: ["srv64"], jellyfin: [] }); // the 65th signature
+  await getRecentlyAdded({ plex: ["srv1"], jellyfin: [] });
+  assert.equal(plexLib.state.args.length, 65, "a recent entry survived the eviction");
+  await getRecentlyAdded({ plex: ["srv0"], jellyfin: [] });
+  assert.equal(plexLib.state.args.length, 66, "the oldest entry was the one evicted");
 });

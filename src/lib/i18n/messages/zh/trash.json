@@ -113,6 +113,7 @@
   "trash.status.error": "错误",
   "trash.status.applied": "已应用",
   "trash.status.ready": "就绪",
+  "trash.status.notConfigured": "未配置",
   "trash.spec.error.loadDetail": "无法加载详情（{status}）",
   "trash.spec.error.network": "网络错误——请重试",
   "trash.spec.error.apply": "应用失败（{status}）",

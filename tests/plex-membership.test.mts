@@ -691,3 +691,59 @@ test("expirePlexMembershipCache: after an admin token change the next call keeps
   assert.ok(after?.emails.has("after-rotation@example.com"), "the refetched set is enforced on the next call");
   assert.ok(!after?.emails.has("newuser2@example.com"));
 });
+
+test("an expire while a refetch is in flight discards that refetch's answer (read with the old token) and refetches with the new token", async () => {
+  const { expirePlexMembershipCache } = await import("../src/lib/plex-membership.ts");
+  fakeNow += 1 * MIN;
+  const gate = deferred<Response>();
+  usersResponder = (call) => {
+    const token = call.headers.get("x-plex-token");
+    if (token === SWAP_B_TOKEN) return gate.promise;
+    if (token === "rotated-swap-token") return xmlResponse(usersXml([{ email: "fresh-token-user@example.com", machine: SWAP_B_MACHINE }]));
+    throw new Error(`unexpected plex.tv refetch for token ${token}`);
+  };
+  expirePlexMembershipCache("swap");
+  const usersBefore = usersCalls.length;
+  const during = await getCachedPlexAllowlist();
+  assert.ok(during?.emails.has("after-rotation@example.com"), "the last-known set is served while the refetch runs");
+  for (let i = 0; i < 100 && usersCalls.length === usersBefore; i++) await flushAsync(1);
+  assert.equal(usersCalls.length - usersBefore, 1, "the refetch with the old token is in flight");
+
+  // The admin connects a new token while that fetch is still running.
+  settings.plexSwapAdminToken = "rotated-swap-token";
+  expirePlexMembershipCache("swap");
+  gate.resolve(xmlResponse(usersXml([{ email: "old-token-user@example.com", machine: SWAP_B_MACHINE }])));
+  await flushAsync();
+
+  const next = await getCachedPlexAllowlist();
+  assert.ok(next && !next.emails.has("old-token-user@example.com"), "the old token's answer must not be cached");
+  await flushAsync();
+  assert.equal(usersCalls.length - usersBefore, 2, "a second refetch, with the new token, ran at once");
+  const after = await getCachedPlexAllowlist();
+  assert.ok(after?.emails.has("fresh-token-user@example.com"));
+  assert.ok(!after?.emails.has("old-token-user@example.com"));
+});
+
+test("removing the last friend: one confirmed-empty answer is served stale, a second in a row replaces the set", async () => {
+  fakeNow += 31 * MIN; // past the TTL of both instances
+  usersResponder = (call) => {
+    const token = call.headers.get("x-plex-token");
+    if (token === REMOTE_TOKEN) return xmlResponse(usersXml([{ email: "rfriend@example.com", machine: REMOTE_MACHINE }]));
+    // The swap server still identifies itself, but nobody is shared on it.
+    if (token === "rotated-swap-token") return xmlResponse(usersXml([]));
+    throw new Error(`unexpected plex.tv refetch for token ${token}`);
+  };
+  const first = await getCachedPlexAllowlist();
+  assert.ok(first?.emails.has("fresh-token-user@example.com"));
+  await flushAsync();
+  const afterOne = await getCachedPlexAllowlist();
+  assert.ok(afterOne?.emails.has("fresh-token-user@example.com"), "a single empty answer must not shrink the set");
+
+  fakeNow += 6 * MIN; // past the retry backoff
+  await getCachedPlexAllowlist();
+  await flushAsync();
+  const afterTwo = await getCachedPlexAllowlist();
+  assert.ok(afterTwo, "the call still enforces (never fails open here)");
+  assert.ok(!afterTwo.emails.has("fresh-token-user@example.com"), "the unshared friend is no longer a member");
+  assert.ok(afterTwo.emails.has("rfriend@example.com"), "the other server's members are untouched");
+});

@@ -8,6 +8,8 @@ import type { Locale } from "@/lib/i18n/locales";
 import { localizedTitleFor, titleResolver, type TitleRef } from "@/lib/tmdb-localize";
 import { discordIssueTypeLabelT, mediaLabelT } from "@/lib/notify-i18n";
 import { processSingleton } from "@/lib/process-singleton";
+import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
+import { isDiscordSnowflake } from "@/lib/discord-guild";
 import { deriveUserSource, JELLYFIN_SYNTHETIC_EMAIL_SUFFIX, type UserSourceInput } from "@/lib/user-source";
 
 // Language rule: a DM is written in the linked user's language (their stored
@@ -40,12 +42,18 @@ export function escMd(text: string): string {
   return text.replace(/([*_`~|\\>[\]()@#])/g, "\\$1");
 }
 
-function isValidSnowflake(id: string | null | undefined): id is string {
-  return typeof id === "string" && /^\d{17,20}$/.test(id);
+// User text as a Markdown blockquote: escaped, and EVERY line prefixed, so a
+// multi-line note or message stays inside the quote.
+export function quoteMd(text: string): string {
+  return `> ${escMd(text).replace(/\n/g, "\n> ")}`;
 }
+
+const isValidSnowflake = (id: string | null | undefined): id is string => isDiscordSnowflake(id);
 
 const COLORS = {
   approved:  0x5865F2,
+  // A thread message (issue reply, request comment) to its user: Discord blurple.
+  message:   0x5865F2,
   pending:   0xFEE75C,
   available: 0x57F287,
   declined:  0xED4245,
@@ -134,6 +142,23 @@ function noteRateLimit(key: string, res: Response): void {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+// Waits out this route's bucket hold, within what is left of the call's wait
+// budget; returns how long it waited. A hold longer than the budget is waited
+// only up to it — the call is then sent anyway, and its 429 handed back.
+async function awaitRateHold(key: string, budgetLeftMs: number): Promise<number> {
+  const holdUntil = rateHolds.get(key);
+  if (holdUntil === undefined) return 0;
+  const hold = holdUntil - Date.now();
+  if (hold <= 0) {
+    rateHolds.delete(key);
+    return 0;
+  }
+  const wait = Math.min(hold, budgetLeftMs);
+  if (wait <= 0) return 0;
+  await sleep(wait);
+  return wait;
+}
+
 async function discordRequest(
   url: string,
   init: { method: string; headers: Record<string, string>; body?: string },
@@ -141,18 +166,7 @@ async function discordRequest(
   const key = discordRouteKey(init.method, url);
   let waited = 0;
   for (let attempt = 0; ; attempt++) {
-    const holdUntil = rateHolds.get(key);
-    if (holdUntil !== undefined) {
-      const hold = holdUntil - Date.now();
-      if (hold <= 0) rateHolds.delete(key);
-      else {
-        const wait = Math.min(hold, DISCORD_MAX_WAIT_MS - waited);
-        if (wait > 0) {
-          await sleep(wait);
-          waited += wait;
-        }
-      }
-    }
+    waited += await awaitRateHold(key, DISCORD_MAX_WAIT_MS - waited);
     const res = await safeFetchTrusted(url, { ...init, allowedHosts: DISCORD_HOSTS, timeoutMs: DISCORD_FETCH_TIMEOUT_MS });
     noteRateLimit(key, res);
     if (res.status !== 429 || attempt >= DISCORD_MAX_429_RETRIES) return res;
@@ -164,17 +178,28 @@ async function discordRequest(
   }
 }
 
+// The Discord settings these senders read, by key; an absent row is undefined.
+async function loadDiscordSettings<K extends string>(keys: readonly K[]): Promise<Partial<Record<K, string>>> {
+  const rows = await prisma.setting.findMany({ where: { key: { in: [...keys] } } });
+  const out: Partial<Record<K, string>> = {};
+  for (const r of rows) out[r.key as K] = r.value;
+  return out;
+}
+
 async function getConfig(): Promise<{ botToken: string; channelId: string | null } | null> {
   if (!(await isFeatureEnabled("feature.integration.discord"))) return null;
-  const rows = await prisma.setting.findMany({
-    where: { key: { in: ["discordBotToken", "discordNotifyChannelId"] } },
-  });
-  const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-  if (!map.discordBotToken) return null;
-  return {
-    botToken: map.discordBotToken,
-    channelId: map.discordNotifyChannelId || null,
-  };
+  const cfg = await loadDiscordSettings(["discordBotToken", "discordNotifyChannelId"]);
+  if (!cfg.discordBotToken) return null;
+  const channel = cfg.discordNotifyChannelId || null;
+  // A channel id that is not a snowflake could never be posted to: every
+  // notification would throw and be lost. Treated as unset — DMs — and said
+  // once, so the admin can fix it.
+  if (channel !== null && !isValidSnowflake(channel)) {
+    warnOnChange("discord-notify:channel", channel, "[discord-notify] discordNotifyChannelId is not a Discord id; sending DMs instead");
+    return { botToken: cfg.discordBotToken, channelId: null };
+  }
+  forgetWarnOnChange("discord-notify:channel");
+  return { botToken: cfg.discordBotToken, channelId: channel };
 }
 
 // What the role sync needs to know about the linked account: its app role
@@ -218,11 +243,45 @@ export async function loadDiscordRoleAccount(userId: string): Promise<DiscordRol
   };
 }
 
-const ROLE_SETTING_KEYS = ["discordBotToken", "discordGuildId", "discordLinkedRoleId", "discordPlexRoleId", "discordJellyfinRoleId", "discordAdminRoleId", "discordIssueAdminRoleId"];
+const ROLE_SETTING_KEYS = ["discordBotToken", "discordGuildId", "discordLinkedRoleId", "discordPlexRoleId", "discordJellyfinRoleId", "discordAdminRoleId", "discordIssueAdminRoleId"] as const;
+type RoleConfig = Partial<Record<(typeof ROLE_SETTING_KEYS)[number], string>>;
+
+// The guild role config, when role sync can run for this member: the
+// integration is on, a bot token and a guild are set, and both ids are
+// snowflakes. Null means "skipped".
+async function loadRoleSyncConfig(discordUserId: string): Promise<(RoleConfig & { discordBotToken: string; discordGuildId: string }) | null> {
+  if (!(await isFeatureEnabled("feature.integration.discord"))) return null;
+  const cfg = await loadDiscordSettings(ROLE_SETTING_KEYS);
+  const { discordBotToken, discordGuildId } = cfg;
+  if (!discordBotToken || !discordGuildId) return null;
+  if (!isValidSnowflake(discordGuildId) || !isValidSnowflake(discordUserId)) return null;
+  return { ...cfg, discordBotToken, discordGuildId };
+}
+
+type MemberRoleTarget = { botToken: string; guildId: string; discordUserId: string };
+
+// PUT grants one role, DELETE revokes it. A 404 on DELETE is the common, benign
+// case: the member never had the role (or already left the guild). True on
+// success; a failure is logged (with `context` after the role id) and answered false.
+async function setMemberRole(target: MemberRoleTarget, roleId: string, method: "PUT" | "DELETE", context = ""): Promise<boolean> {
+  const res = await discordRequest(`${DISCORD_API}/guilds/${target.guildId}/members/${target.discordUserId}/roles/${roleId}`, {
+    method,
+    headers: { Authorization: `Bot ${target.botToken}`, "Content-Type": "application/json" },
+  });
+  if (res.ok || (method === "DELETE" && res.status === 404)) return true;
+  const text = await res.text();
+  console.error(`[discord-notify] Failed to ${method === "PUT" ? "assign" : "revoke"} role ${roleId}${context} (${res.status}): ${text}`);
+  return false;
+}
+
+async function allSucceeded(calls: Array<Promise<boolean>>): Promise<boolean> {
+  const results = await Promise.allSettled(calls);
+  return results.every((r) => r.status === "fulfilled" && r.value);
+}
 
 // The roles Summonarr itself manages (the five configured ids), deduped: the only
 // ones the sync ever revokes. A role an operator granted by hand is never in it.
-function managedRoleIds(cfg: Record<string, string | undefined>): string[] {
+function managedRoleIds(cfg: RoleConfig): string[] {
   return [...new Set([
     cfg.discordLinkedRoleId,
     cfg.discordPlexRoleId,
@@ -232,20 +291,20 @@ function managedRoleIds(cfg: Record<string, string | undefined>): string[] {
   ].filter((id): id is string => isValidSnowflake(id)))];
 }
 
+// The managed role ids an account should hold: the linked role, the server role
+// for how it signs in, and the admin/issue-admin role for its app role.
+function desiredRoleIds(cfg: RoleConfig, account: DiscordRoleAccount): string[] {
+  const source = discordServerRoleSource(account);
+  const serverRoleId = source === "jellyfin" ? cfg.discordJellyfinRoleId : source === "plex" ? cfg.discordPlexRoleId : undefined;
+  const adminRoleId = account.role === "ADMIN" ? cfg.discordAdminRoleId : account.role === "ISSUE_ADMIN" ? cfg.discordIssueAdminRoleId : undefined;
+  return [cfg.discordLinkedRoleId, serverRoleId, adminRoleId].filter((id): id is string => isValidSnowflake(id));
+}
+
 export async function assignDiscordRolesOnLink(discordUserId: string, account: DiscordRoleAccount): Promise<DiscordRoleSyncOutcome> {
   try {
-    if (!(await isFeatureEnabled("feature.integration.discord"))) return "skipped";
-    const rows = await prisma.setting.findMany({ where: { key: { in: ROLE_SETTING_KEYS } } });
-    const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-    if (!cfg.discordBotToken || !cfg.discordGuildId) return "skipped";
-    if (!isValidSnowflake(cfg.discordGuildId) || !isValidSnowflake(discordUserId)) return "skipped";
-
-    const source = discordServerRoleSource(account);
-    const serverRoleId = source === "jellyfin" ? cfg.discordJellyfinRoleId : source === "plex" ? cfg.discordPlexRoleId : undefined;
-    const userRole = account.role;
-    const adminRoleId = userRole === "ADMIN" ? cfg.discordAdminRoleId : userRole === "ISSUE_ADMIN" ? cfg.discordIssueAdminRoleId : undefined;
-
-    const roleIds = [cfg.discordLinkedRoleId, serverRoleId, adminRoleId].filter((id): id is string => isValidSnowflake(id));
+    const cfg = await loadRoleSyncConfig(discordUserId);
+    if (!cfg) return "skipped";
+    const roleIds = desiredRoleIds(cfg, account);
 
     // Sync is a DIFF, not an add-only pass. Without the removal half, a user
     // demoted from ADMIN to USER kept their Discord admin role forever — the
@@ -261,34 +320,12 @@ export async function assignDiscordRolesOnLink(discordUserId: string, account: D
 
     if (roleIds.length === 0 && stale.length === 0) return "skipped";
 
-    const memberRoleUrl = (roleId: string) =>
-      `${DISCORD_API}/guilds/${cfg.discordGuildId}/members/${discordUserId}/roles/${roleId}`;
-    const auth = { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" };
-
-    const results = await Promise.allSettled([
-      ...roleIds.map((roleId) =>
-        discordRequest(memberRoleUrl(roleId), { method: "PUT", headers: auth }).then(async (res) => {
-          if (!res.ok) {
-            const text = await res.text();
-            console.error(`[discord-notify] Failed to assign role ${roleId} (${res.status}): ${text}`);
-            return false;
-          }
-          return true;
-        })
-      ),
-      ...stale.map((roleId) =>
-        discordRequest(memberRoleUrl(roleId), { method: "DELETE", headers: auth }).then(async (res) => {
-          // 404 is the common, benign case: the member never had the role.
-          if (!res.ok && res.status !== 404) {
-            const text = await res.text();
-            console.error(`[discord-notify] Failed to revoke role ${roleId} (${res.status}): ${text}`);
-            return false;
-          }
-          return true;
-        })
-      ),
+    const target = { botToken: cfg.discordBotToken, guildId: cfg.discordGuildId, discordUserId };
+    const ok = await allSucceeded([
+      ...roleIds.map((roleId) => setMemberRole(target, roleId, "PUT")),
+      ...stale.map((roleId) => setMemberRole(target, roleId, "DELETE")),
     ]);
-    return results.every((r) => r.status === "fulfilled" && r.value) ? "ok" : "failed";
+    return ok ? "ok" : "failed";
   } catch (err) {
     console.error("[discord-notify] assignDiscordRolesOnLink failed:", err);
     return "failed";
@@ -322,36 +359,60 @@ export async function assignDiscordRolesForUser(discordUserId: string, userId: s
 // Discord side must never fail the unlink itself, which has already committed.
 export async function revokeDiscordRolesOnUnlink(discordUserId: string): Promise<DiscordRoleSyncOutcome> {
   try {
-    if (!(await isFeatureEnabled("feature.integration.discord"))) return "skipped";
-    const rows = await prisma.setting.findMany({ where: { key: { in: ROLE_SETTING_KEYS } } });
-    const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-    if (!cfg.discordBotToken || !cfg.discordGuildId) return "skipped";
-    if (!isValidSnowflake(cfg.discordGuildId) || !isValidSnowflake(discordUserId)) return "skipped";
-
+    const cfg = await loadRoleSyncConfig(discordUserId);
+    if (!cfg) return "skipped";
     const managed = managedRoleIds(cfg);
     if (managed.length === 0) return "skipped";
-
-    const results = await Promise.allSettled(
-      managed.map((roleId) =>
-        discordRequest(`${DISCORD_API}/guilds/${cfg.discordGuildId}/members/${discordUserId}/roles/${roleId}`, {
-          method: "DELETE",
-          headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
-        }).then(async (res) => {
-          // 404 = the member never had the role (or already left the guild).
-          if (!res.ok && res.status !== 404) {
-            const text = await res.text();
-            console.error(`[discord-notify] Failed to revoke role ${roleId} on unlink (${res.status}): ${text}`);
-            return false;
-          }
-          return true;
-        })
-      )
-    );
-    return results.every((r) => r.status === "fulfilled" && r.value) ? "ok" : "failed";
+    const target = { botToken: cfg.discordBotToken, guildId: cfg.discordGuildId, discordUserId };
+    const ok = await allSucceeded(managed.map((roleId) => setMemberRole(target, roleId, "DELETE", " on unlink")));
+    return ok ? "ok" : "failed";
   } catch (err) {
     console.error("[discord-notify] revokeDiscordRolesOnUnlink failed:", err);
     return "failed";
   }
+}
+
+// The admin request channel (new requests, new issues, requester comments):
+// the bot token and a snowflake channel id, or null when either is missing.
+async function loadAdminChannel(): Promise<{ botToken: string; channelId: string } | null> {
+  if (!(await isFeatureEnabled("feature.integration.discord"))) return null;
+  const cfg = await loadDiscordSettings(["discordBotToken", "discordAdminRequestChannelId"]);
+  const botToken = cfg.discordBotToken;
+  const channelId = cfg.discordAdminRequestChannelId;
+  if (!botToken || !channelId || !isValidSnowflake(channelId)) return null;
+  return { botToken, channelId };
+}
+
+// One mention-free post to the admin request channel; a refusal is logged.
+async function postAdminChannel(
+  admin: { botToken: string; channelId: string },
+  embed: Record<string, unknown>,
+  components: unknown[] | undefined,
+  what: string,
+): Promise<void> {
+  const res = await discordRequest(`${DISCORD_API}/channels/${admin.channelId}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bot ${admin.botToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ embeds: [clampEmbed(embed)], ...(components ? { components } : {}), allowed_mentions: { parse: [] } }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    console.error(`[discord-notify] Failed to post admin ${what} (${res.status}): ${text}`);
+  }
+}
+
+// A new request or issue card for the admin channel, written in the channel's
+// language: the heading, the description line and the reporter's note as a
+// quote, plus the poster.
+function adminCardEmbed(color: number, title: string, line: string, note: string | null, posterPath: string | null): Record<string, unknown> {
+  const embed: Record<string, unknown> = {
+    color,
+    title,
+    description: [line, note ? `\n${quoteMd(note)}` : ""].filter(Boolean).join(""),
+    timestamp: new Date().toISOString(),
+  };
+  if (posterPath) embed.thumbnail = { url: `${TMDB_POSTER_BASE}${posterPath}` };
+  return embed;
 }
 
 export async function notifyAdminsNewRequestDiscord(data: {
@@ -364,31 +425,17 @@ export async function notifyAdminsNewRequestDiscord(data: {
   posterPath: string | null;
 }): Promise<void> {
   try {
-    if (!(await isFeatureEnabled("feature.integration.discord"))) return;
-    const rows = await prisma.setting.findMany({
-      where: { key: { in: ["discordBotToken", "discordAdminRequestChannelId"] } },
-    });
-    const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-    if (!cfg.discordBotToken || !cfg.discordAdminRequestChannelId) return;
-    if (!isValidSnowflake(cfg.discordAdminRequestChannelId)) return;
-
+    const admin = await loadAdminChannel();
+    if (!admin) return;
     const t = channelTranslator();
-    const label = mediaLabelT(t, data.mediaType);
     const localTitle = await localizedTitleFor(data, null); // the channel's language
-    const embed: Record<string, unknown> = {
-      color: COLORS.pending,
-      title: t("notify.discord.newRequest.title", { title: escMd(localTitle) }),
-      description: [
-        t("notify.discord.newRequest.description", { media: label, user: escMd(data.requestedBy) }),
-        // Prefix every line so a multi-line note stays inside the blockquote.
-        data.note ? `\n> ${escMd(data.note).replace(/\n/g, "\n> ")}` : "",
-      ].filter(Boolean).join(""),
-      timestamp: new Date().toISOString(),
-    };
-    if (data.posterPath) {
-      embed.thumbnail = { url: `${TMDB_POSTER_BASE}${data.posterPath}` };
-    }
-
+    const embed = adminCardEmbed(
+      COLORS.pending,
+      t("notify.discord.newRequest.title", { title: escMd(localTitle) }),
+      t("notify.discord.newRequest.description", { media: mediaLabelT(t, data.mediaType), user: escMd(data.requestedBy) }),
+      data.note,
+      data.posterPath,
+    );
     const components = [{
       type: 1,
       components: [
@@ -396,16 +443,7 @@ export async function notifyAdminsNewRequestDiscord(data: {
         { type: 2, style: 4, label: t("notify.discord.newRequest.decline"), custom_id: `admin_decline:${data.requestId}`, emoji: { name: "❌" } },
       ],
     }];
-
-    const res = await discordRequest(`${DISCORD_API}/channels/${cfg.discordAdminRequestChannelId}/messages`, {
-      method: "POST",
-      headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ embeds: [clampEmbed(embed)], components, allowed_mentions: { parse: [] } }),
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      console.error(`[discord-notify] Failed to post admin request (${res.status}): ${text}`);
-    }
+    await postAdminChannel(admin, embed, components, "request");
   } catch (err) {
     console.error("[discord-notify] notifyAdminsNewRequestDiscord failed:", err);
   }
@@ -426,41 +464,19 @@ export async function notifyAdminsNewIssueDiscord(data: {
   posterPath: string | null;
 }): Promise<void> {
   try {
-    if (!(await isFeatureEnabled("feature.integration.discord"))) return;
-    const rows = await prisma.setting.findMany({
-      where: { key: { in: ["discordBotToken", "discordAdminRequestChannelId"] } },
-    });
-    const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-    if (!cfg.discordBotToken || !cfg.discordAdminRequestChannelId) return;
-    if (!isValidSnowflake(cfg.discordAdminRequestChannelId)) return;
-
+    const admin = await loadAdminChannel();
+    if (!admin) return;
     const t = channelTranslator();
-    const label = mediaLabelT(t, data.mediaType);
     const typeLabel = discordIssueTypeLabelT(t, data.issueType);
     const localTitle = await localizedTitleFor(data, null); // the channel's language
-    const embed: Record<string, unknown> = {
-      color: COLORS.issue,
-      title: t("notify.discord.newIssue.title", { title: escMd(localTitle) }),
-      description: [
-        t("notify.discord.newIssue.description", { media: label, issue: escMd(typeLabel), user: escMd(data.reportedBy) }),
-        // Prefix every line so a multi-line note stays inside the blockquote.
-        data.note ? `\n> ${escMd(data.note).replace(/\n/g, "\n> ")}` : "",
-      ].filter(Boolean).join(""),
-      timestamp: new Date().toISOString(),
-    };
-    if (data.posterPath) {
-      embed.thumbnail = { url: `${TMDB_POSTER_BASE}${data.posterPath}` };
-    }
-
-    const res = await discordRequest(`${DISCORD_API}/channels/${cfg.discordAdminRequestChannelId}/messages`, {
-      method: "POST",
-      headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ embeds: [clampEmbed(embed)], allowed_mentions: { parse: [] } }),
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      console.error(`[discord-notify] Failed to post admin issue (${res.status}): ${text}`);
-    }
+    const embed = adminCardEmbed(
+      COLORS.issue,
+      t("notify.discord.newIssue.title", { title: escMd(localTitle) }),
+      t("notify.discord.newIssue.description", { media: mediaLabelT(t, data.mediaType), issue: escMd(typeLabel), user: escMd(data.reportedBy) }),
+      data.note,
+      data.posterPath,
+    );
+    await postAdminChannel(admin, embed, undefined, "issue");
   } catch (err) {
     console.error("[discord-notify] notifyAdminsNewIssueDiscord failed:", err);
   }
@@ -486,6 +502,11 @@ async function postToChannel(botToken: string, channelId: string, discordId: str
   }
 }
 
+// A channel's post bucket allows about five messages per five seconds: posts to
+// one channel go out in chunks of this size, this far apart.
+const CHANNEL_CHUNK_SIZE = 5;
+const CHANNEL_CHUNK_DELAY_MS = 600;
+
 async function chunkSequential(
   tasks: Array<() => Promise<void>>,
   chunkSize: number,
@@ -501,32 +522,43 @@ async function chunkSequential(
 
 // Discord rate-limits opening DM channels, so DMs go out one at a time through
 // this queue (600 ms apart) to avoid 429 "too many requests" errors.
-const dmQueue: Array<() => Promise<void>> = [];
-let dmQueueRunning = false;
+// Process-wide (guardrail 27a): every chunk that sends a DM shares one queue,
+// so the 600 ms spacing holds across them.
+const dmQueue = processSingleton("discord-notify:dmQueue", () => ({ tasks: [] as Array<() => Promise<void>>, running: false }));
 
 function enqueueDm(fn: () => Promise<void>): Promise<void> {
   return new Promise((resolve, reject) => {
-    dmQueue.push(async () => {
+    dmQueue.tasks.push(async () => {
       try { await fn(); resolve(); } catch (err) { reject(err); }
     });
-    if (!dmQueueRunning) processDmQueue();
+    if (!dmQueue.running) void processDmQueue();
   });
 }
 
 async function processDmQueue(): Promise<void> {
-  dmQueueRunning = true;
-  while (dmQueue.length > 0) {
-    const next = dmQueue.shift()!;
+  dmQueue.running = true;
+  while (dmQueue.tasks.length > 0) {
+    const next = dmQueue.tasks.shift()!;
     await next();
-    if (dmQueue.length > 0) await new Promise((r) => setTimeout(r, 600));
+    if (dmQueue.tasks.length > 0) await new Promise((r) => setTimeout(r, 600));
   }
-  dmQueueRunning = false;
+  dmQueue.running = false;
 }
 
-async function sendDm(botToken: string, discordId: string, embed: Embed): Promise<void> {
-  if (!isValidSnowflake(discordId)) {
-    throw new Error(`Invalid Discord snowflake for DM: ${discordId}`);
-  }
+// discordId → its DM channel with the bot. Discord answers the same channel for
+// a user every time, so opening it once saves a call (and a rate-limit slot)
+// per DM. Bounded; the oldest entry goes first. Process-wide (guardrail 27a).
+const DM_CHANNEL_CACHE_MAX = 1_000;
+const dmChannels = processSingleton("discord-notify:dmChannels", () => new Map<string, string>());
+
+/** Test hook: forget every remembered DM channel. */
+export function forgetDiscordDmChannelsForTests(): void {
+  dmChannels.clear();
+}
+
+async function openDmChannel(botToken: string, discordId: string): Promise<string> {
+  const cached = dmChannels.get(discordId);
+  if (cached) return cached;
   const dmRes = await discordRequest(`${DISCORD_API}/users/@me/channels`, {
     method: "POST",
     headers: { Authorization: `Bot ${botToken}`, "Content-Type": "application/json" },
@@ -536,13 +568,32 @@ async function sendDm(botToken: string, discordId: string, embed: Embed): Promis
     const text = await dmRes.text();
     throw new Error(`Failed to open DM channel (${dmRes.status}): ${text}`);
   }
-  const { id: channelId } = await dmRes.json() as { id: string };
+  const body: unknown = await dmRes.json().catch(() => null);
+  const channelId = body && typeof body === "object" ? (body as { id?: unknown }).id : undefined;
+  if (typeof channelId !== "string" || !isValidSnowflake(channelId)) {
+    throw new Error("Failed to open DM channel: Discord answered no channel id");
+  }
+  if (dmChannels.size >= DM_CHANNEL_CACHE_MAX) {
+    const oldest = dmChannels.keys().next().value;
+    if (oldest !== undefined) dmChannels.delete(oldest);
+  }
+  dmChannels.set(discordId, channelId);
+  return channelId;
+}
+
+async function sendDm(botToken: string, discordId: string, embed: Embed): Promise<void> {
+  if (!isValidSnowflake(discordId)) {
+    throw new Error(`Invalid Discord snowflake for DM: ${discordId}`);
+  }
+  const channelId = await openDmChannel(botToken, discordId);
   const msgRes = await discordRequest(`${DISCORD_API}/channels/${channelId}/messages`, {
     method: "POST",
     headers: { Authorization: `Bot ${botToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({ embeds: [clampEmbed(embed)] }),
   });
   if (!msgRes.ok) {
+    // A remembered channel the post failed on is opened afresh next time.
+    dmChannels.delete(discordId);
     const text = await msgRes.text();
     throw new Error(`Failed to send DM (${msgRes.status}): ${text}`);
   }
@@ -669,13 +720,35 @@ export async function notifyUserIssueMessage(
   // An issue thread is private to the reporter and MANAGE_ISSUES holders: a DM
   // carries the message, a post in the shared channel only pings the reporter.
   await notifyUser(userId, (t, _locale, local, shared) => ({
-    color: 0x5865F2,
+    color: COLORS.message,
     title: t("notify.discord.userIssueMessage.title", { title: escMd(local) }),
     description: shared
       ? t("notify.discord.userIssueMessage.descriptionShared", { user: escMd(adminName) })
-      : `${t("notify.discord.userIssueMessage.description", { user: escMd(adminName) })}\n\n> ${escMd(body)}`,
+      : `${t("notify.discord.userIssueMessage.description", { user: escMd(adminName) })}\n\n${quoteMd(body)}`,
     timestamp: new Date().toISOString(),
   }), "notifyOnIssue", { title, ...media });
+}
+
+// The linked, active accounts holding `permission`, narrowed by `where` (a
+// preference flag, an id filter). A disabled account keeps its Discord link
+// (guardrail 33), so without the deactivatedAt filter it would keep getting
+// pinged. The permission is checked here, not in SQL: it is a bitmask that falls
+// back to the role preset (effectivePermissions).
+async function linkedPermissionHolders(
+  permission: bigint,
+  where: { notifyOnIssue?: true; notifyOnComment?: true; id?: string | { not: string } },
+): Promise<Array<{ discordId: string }>> {
+  const rows = await prisma.user.findMany({
+    where: { discordId: { not: null }, deactivatedAt: null, ...where },
+    select: { discordId: true, role: true, permissions: true },
+  });
+  const out: Array<{ discordId: string }> = [];
+  for (const u of rows) {
+    if (!u.discordId) continue;
+    const perms = effectivePermissions(u.role, parsePermissions(String(u.permissions ?? 0)));
+    if (hasPermission(perms, permission)) out.push({ discordId: u.discordId });
+  }
+  return out;
 }
 
 export async function notifyAdminsIssueMessage(
@@ -689,7 +762,6 @@ export async function notifyAdminsIssueMessage(
     const cfg = await getConfig();
     if (!cfg) return;
     if (!cfg.channelId) return;
-    if (!isValidSnowflake(cfg.channelId)) return;
 
     if (opts.restrictToUserId && opts.restrictToUserId === opts.excludeUserId) return;
 
@@ -699,21 +771,7 @@ export async function notifyAdminsIssueMessage(
         ? { id: { not: opts.excludeUserId } }
         : {};
 
-    const rows = await prisma.user.findMany({
-      where: {
-        discordId: { not: null },
-        notifyOnIssue: true,
-        // A disabled account keeps its Discord link (guardrail 33), so without
-        // this it would keep getting pinged about every issue message.
-        deactivatedAt: null,
-        ...idFilter,
-      },
-      select: { discordId: true, role: true, permissions: true },
-    });
-    const admins = rows.filter((u) => {
-      const perms = effectivePermissions(u.role, parsePermissions(String(u.permissions ?? 0)));
-      return hasPermission(perms, Permission.MANAGE_ISSUES);
-    });
+    const admins = await linkedPermissionHolders(Permission.MANAGE_ISSUES, { notifyOnIssue: true, ...idFilter });
     if (!admins.length) return;
 
     // Posted to the shared channel → the instance default language, title included.
@@ -723,7 +781,7 @@ export async function notifyAdminsIssueMessage(
     const t = channelTranslator();
     const localTitle = await localizedTitleFor({ title, tmdbId: opts.tmdbId, mediaType: opts.mediaType }, null);
     const embed: Embed = {
-      color: 0xFEE75C,
+      color: COLORS.pending,
       title: opts.fromAdmin
         ? t("notify.discord.adminIssueMessage.titleFromAdmin", { title: escMd(localTitle) })
         : t("notify.discord.adminIssueMessage.title", { title: escMd(localTitle) }),
@@ -733,13 +791,12 @@ export async function notifyAdminsIssueMessage(
       timestamp: new Date().toISOString(),
     };
 
-    await Promise.allSettled(
-      admins.map((a) =>
-        postToChannel(cfg.botToken, cfg.channelId!, a.discordId!, embed).catch((err) =>
-          console.error("[discord-notify] Failed to notify admin:", err)
-        )
+    const channelId = cfg.channelId;
+    await chunkSequential(admins.map((a) => () =>
+      postToChannel(cfg.botToken, channelId, a.discordId, embed).catch((err) =>
+        console.error("[discord-notify] Failed to notify admin:", err)
       )
-    );
+    ), CHANNEL_CHUNK_SIZE, CHANNEL_CHUNK_DELAY_MS);
   } catch (err) {
     console.error("[discord-notify] Failed to send admin issue message notification:", err);
   }
@@ -757,11 +814,11 @@ export async function notifyUserRequestComment(
   media?: { tmdbId?: number | null; mediaType?: string | null },
 ): Promise<void> {
   await notifyUser(userId, (t, _locale, local, shared) => ({
-    color: 0x5865F2,
+    color: COLORS.message,
     title: t("notify.discord.userRequestComment.title", { title: escMd(local) }),
     description: shared
       ? t("notify.discord.userRequestComment.descriptionShared", { user: escMd(authorName) })
-      : `${t("notify.discord.userRequestComment.description", { user: escMd(authorName) })}\n\n> ${escMd(body)}`,
+      : `${t("notify.discord.userRequestComment.description", { user: escMd(authorName) })}\n\n${quoteMd(body)}`,
     timestamp: new Date().toISOString(),
   }), "notifyOnComment", { title, ...media });
 }
@@ -778,47 +835,29 @@ export async function notifyAdminsRequestComment(
   opts: { excludeUserId?: string; tmdbId?: number | null; mediaType?: string | null } = {},
 ): Promise<void> {
   try {
-    if (!(await isFeatureEnabled("feature.integration.discord"))) return;
-    const cfgRows = await prisma.setting.findMany({
-      where: { key: { in: ["discordBotToken", "discordAdminRequestChannelId"] } },
-    });
-    const cfgMap = Object.fromEntries(cfgRows.map((r) => [r.key, r.value]));
-    const botToken = cfgMap.discordBotToken;
-    const channelId = cfgMap.discordAdminRequestChannelId;
-    if (!botToken || !channelId) return;
-    if (!isValidSnowflake(channelId)) return;
+    const admin = await loadAdminChannel();
+    if (!admin) return;
 
-    const rows = await prisma.user.findMany({
-      where: {
-        discordId: { not: null },
-        notifyOnComment: true,
-        deactivatedAt: null, // guardrail 33: a disabled account keeps its Discord link
-        ...(opts.excludeUserId ? { id: { not: opts.excludeUserId } } : {}),
-      },
-      select: { discordId: true, role: true, permissions: true },
-    });
-    const managers = rows.filter((u) => {
-      const perms = effectivePermissions(u.role, parsePermissions(String(u.permissions ?? 0)));
-      return hasPermission(perms, Permission.MANAGE_REQUESTS);
+    const managers = await linkedPermissionHolders(Permission.MANAGE_REQUESTS, {
+      notifyOnComment: true,
+      ...(opts.excludeUserId ? { id: { not: opts.excludeUserId } } : {}),
     });
     if (!managers.length) return;
 
     const t = channelTranslator();
     const localTitle = await localizedTitleFor({ title, tmdbId: opts.tmdbId, mediaType: opts.mediaType }, null);
     const embed: Embed = {
-      color: 0xFEE75C,
+      color: COLORS.pending,
       title: t("notify.discord.adminRequestComment.title", { title: escMd(localTitle) }),
-      description: `${t("notify.discord.adminRequestComment.description", { user: escMd(userName) })}\n\n> ${escMd(body)}`,
+      description: `${t("notify.discord.adminRequestComment.description", { user: escMd(userName) })}\n\n${quoteMd(body)}`,
       timestamp: new Date().toISOString(),
     };
 
-    await Promise.allSettled(
-      managers.map((a) =>
-        postToChannel(botToken, channelId, a.discordId!, embed).catch((err) =>
-          console.error("[discord-notify] Failed to notify manager:", err)
-        )
+    await chunkSequential(managers.map((a) => () =>
+      postToChannel(admin.botToken, admin.channelId, a.discordId, embed).catch((err) =>
+        console.error("[discord-notify] Failed to notify manager:", err)
       )
-    );
+    ), CHANNEL_CHUNK_SIZE, CHANNEL_CHUNK_DELAY_MS);
   } catch (err) {
     console.error("[discord-notify] Failed to send request comment notification:", err);
   }
@@ -887,7 +926,7 @@ async function notifyUsersBatch<R extends BatchRequest>(
       return send.catch((err) => console.error("[discord-notify] Failed to send notification:", err));
     });
     if (cfg.channelId) {
-      await chunkSequential(tasks, 5, 600);
+      await chunkSequential(tasks, CHANNEL_CHUNK_SIZE, CHANNEL_CHUNK_DELAY_MS);
     } else {
       await Promise.allSettled(tasks.map((t) => t()));
     }

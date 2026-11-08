@@ -2,6 +2,7 @@
 // no clock reads (guardrail 16): every date they show arrives as a fixed
 // string and is formatted in UTC, so the markup is the same wherever it renders.
 import Link from "next/link";
+import { monthColumns, monthValue, type MonthColumn, type MonthSeries } from "./month-columns";
 
 export const STATUS_COLOR = {
   PENDING: "var(--ds-warning)",
@@ -258,7 +259,8 @@ export function Meter({
 // Stacked monthly columns. `months` are "YYYY-MM" (UTC); labels come out in the
 // viewer's language. The current month is still filling up, so it is drawn
 // faded with a dashed outline and marked, instead of reading as a sudden drop. A hidden
-// table carries the same numbers for screen readers.
+// table carries the same numbers for screen readers. The geometry is
+// month-columns.ts.
 export function MonthChart({
   months,
   series,
@@ -271,7 +273,7 @@ export function MonthChart({
   height = 120,
 }: {
   months: string[];
-  series: Array<{ key: string; label: string; color: string; values: number[] }>;
+  series: MonthSeries[];
   locale: string;
   currentMonth: string;
   ariaLabel: string;
@@ -280,13 +282,10 @@ export function MonthChart({
   formatNumber: (n: number) => string;
   height?: number;
 }) {
-  const totals = months.map((_, i) => series.reduce((s, x) => s + (x.values[i] ?? 0), 0));
-  const max = Math.max(1, ...totals);
-  const monthFmt = new Intl.DateTimeFormat(locale, { month: "short", timeZone: "UTC" });
-  // Twelve columns on a phone leave ~25px each — "Sep" no longer fits.
-  const narrowFmt = new Intl.DateTimeFormat(locale, { month: "narrow", timeZone: "UTC" });
-  const longFmt = new Intl.DateTimeFormat(locale, { month: "long", year: "numeric", timeZone: "UTC" });
-  const date = (m: string) => new Date(`${m}-01T00:00:00Z`);
+  const columns = monthColumns(months, series, currentMonth);
+  const fmt = monthFormats(locale);
+  // "September 2026 (in progress)": the tooltip's and the table's row label.
+  const monthName = (c: MonthColumn) => `${fmt.long(c.month)}${c.partial ? ` (${partialLabel})` : ""}`;
 
   return (
     <figure style={{ margin: 0 }}>
@@ -294,62 +293,18 @@ export function MonthChart({
           (~14 + 14 + 11 px plus the gaps); less let the counts climb into the
           heading above the chart. */}
       <div aria-hidden className="flex items-end" style={{ gap: 6, height: height + 60 }}>
-        {months.map((m, i) => {
-          const partial = m === currentMonth;
-          const showYear = i === 0 || m.endsWith("-01");
-          const tip = `${longFmt.format(date(m))}${partial ? ` (${partialLabel})` : ""}: ${series
-            .map((s) => `${s.label} ${formatNumber(s.values[i] ?? 0)}`)
-            .join(", ")}`;
-          return (
-            <div key={m} className="flex-1 flex flex-col items-center min-w-0" style={{ gap: 3 }} title={tip}>
-              {/* Twelve ~20px columns on a phone can't hold a 4-digit count without
-                  smearing into the neighbours; below sm the title tooltip and the
-                  sr-only table below carry the numbers. */}
-              <span className="ds-mono hidden sm:inline" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", fontVariantNumeric: "tabular-nums" }}>
-                {formatNumber(totals[i])}
-              </span>
-              <div className="w-full flex items-end justify-center" style={{ height }}>
-                <div
-                  className="w-full flex flex-col-reverse overflow-hidden"
-                  style={{
-                    maxWidth: 32,
-                    height: `${Math.max((totals[i] / max) * 100, totals[i] > 0 ? 2 : 1)}%`,
-                    borderRadius: "3px 3px 0 0",
-                    opacity: partial ? 0.55 : 1,
-                    background: totals[i] > 0 ? undefined : "var(--ds-bg-3)",
-                    outline: partial ? "1px dashed var(--ds-border-strong)" : undefined,
-                  }}
-                >
-                  {series.map((s) =>
-                    (s.values[i] ?? 0) > 0 ? (
-                      <div key={s.key} style={{ height: `${((s.values[i] ?? 0) / Math.max(totals[i], 1)) * 100}%`, background: s.color }} />
-                    ) : null,
-                  )}
-                </div>
-              </div>
-              <span className="ds-mono truncate" style={{ fontSize: 10, color: "var(--ds-fg-muted)", maxWidth: "100%" }}>
-                <span className="sm:hidden">{narrowFmt.format(date(m))}</span>
-                <span className="hidden sm:inline">{monthFmt.format(date(m))}</span>
-              </span>
-              <span className="ds-mono" style={{ fontSize: 9, color: "var(--ds-fg-subtle)", minHeight: 11 }}>
-                {showYear ? m.slice(0, 4) : ""}
-              </span>
-            </div>
-          );
-        })}
+        {columns.map((c, i) => (
+          <MonthBar
+            key={c.month}
+            column={c}
+            height={height}
+            fmt={fmt}
+            formatNumber={formatNumber}
+            tip={`${monthName(c)}: ${series.map((s) => `${s.label} ${formatNumber(monthValue(s, i))}`).join(", ")}`}
+          />
+        ))}
       </div>
-      {series.length > 1 && (
-        <figcaption>
-          <ul className="flex flex-wrap" aria-hidden style={{ gap: "6px 16px", margin: "8px 0 0", padding: 0, listStyle: "none" }}>
-            {series.map((s) => (
-              <li key={s.key} className="flex items-center" style={{ gap: 6, fontSize: 12, color: "var(--ds-fg-muted)" }}>
-                <span style={{ width: 8, height: 8, borderRadius: 2, background: s.color }} />
-                {s.label}
-              </li>
-            ))}
-          </ul>
-        </figcaption>
-      )}
+      {series.length > 1 && <MonthLegend series={series} />}
       {/* The sr-only wrapper is a div, not the table: a table ignores the 1px
           width sr-only sets and lays out at its content width (~500px), and as
           an absolutely positioned box that widened the whole document, so
@@ -364,16 +319,94 @@ export function MonthChart({
           </tr>
         </thead>
         <tbody>
-          {months.map((m, i) => (
-            <tr key={m}>
-              <th scope="row">{longFmt.format(date(m))}{m === currentMonth ? ` (${partialLabel})` : ""}</th>
-              {series.map((s) => <td key={s.key}>{formatNumber(s.values[i] ?? 0)}</td>)}
+          {columns.map((c, i) => (
+            <tr key={c.month}>
+              <th scope="row">{monthName(c)}</th>
+              {series.map((s) => <td key={s.key}>{formatNumber(monthValue(s, i))}</td>)}
             </tr>
           ))}
         </tbody>
       </table>
       </div>
     </figure>
+  );
+}
+
+// The month labels, in the viewer's language and always UTC (the months are UTC).
+function monthFormats(locale: string) {
+  const short = new Intl.DateTimeFormat(locale, { month: "short", timeZone: "UTC" });
+  // Twelve columns on a phone leave ~25px each — "Sep" no longer fits.
+  const narrow = new Intl.DateTimeFormat(locale, { month: "narrow", timeZone: "UTC" });
+  const long = new Intl.DateTimeFormat(locale, { month: "long", year: "numeric", timeZone: "UTC" });
+  const date = (m: string) => new Date(`${m}-01T00:00:00Z`);
+  return {
+    short: (m: string) => short.format(date(m)),
+    narrow: (m: string) => narrow.format(date(m)),
+    long: (m: string) => long.format(date(m)),
+  };
+}
+
+function MonthBar({
+  column: c,
+  height,
+  fmt,
+  formatNumber,
+  tip,
+}: {
+  column: MonthColumn;
+  height: number;
+  fmt: ReturnType<typeof monthFormats>;
+  formatNumber: (n: number) => string;
+  tip: string;
+}) {
+  return (
+    <div className="flex-1 flex flex-col items-center min-w-0" style={{ gap: 3 }} title={tip}>
+      {/* Twelve ~20px columns on a phone can't hold a 4-digit count without
+          smearing into the neighbours; below sm the title tooltip and the
+          sr-only table below carry the numbers. */}
+      <span className="ds-mono hidden sm:inline" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", fontVariantNumeric: "tabular-nums" }}>
+        {formatNumber(c.total)}
+      </span>
+      <div className="w-full flex items-end justify-center" style={{ height }}>
+        <div
+          className="w-full flex flex-col-reverse overflow-hidden"
+          style={{
+            maxWidth: 32,
+            height: `${c.heightPct}%`,
+            borderRadius: "3px 3px 0 0",
+            opacity: c.partial ? 0.55 : 1,
+            background: c.total > 0 ? undefined : "var(--ds-bg-3)",
+            outline: c.partial ? "1px dashed var(--ds-border-strong)" : undefined,
+          }}
+        >
+          {c.segments.map((s) => (
+            <div key={s.key} style={{ height: `${s.pct}%`, background: s.color }} />
+          ))}
+        </div>
+      </div>
+      <span className="ds-mono truncate" style={{ fontSize: 10, color: "var(--ds-fg-muted)", maxWidth: "100%" }}>
+        <span className="sm:hidden">{fmt.narrow(c.month)}</span>
+        <span className="hidden sm:inline">{fmt.short(c.month)}</span>
+      </span>
+      <span className="ds-mono" style={{ fontSize: 9, color: "var(--ds-fg-subtle)", minHeight: 11 }}>
+        {c.showYear ? c.month.slice(0, 4) : ""}
+      </span>
+    </div>
+  );
+}
+
+function MonthLegend({ series }: { series: readonly MonthSeries[] }) {
+  return (
+    <figcaption>
+      <ul className="flex flex-wrap" aria-hidden style={{ gap: "6px 16px", margin: "8px 0 0", padding: 0, listStyle: "none" }}>
+        {series.map((s) => (
+          <li key={s.key} className="flex items-center" style={{ gap: 6, fontSize: 12, color: "var(--ds-fg-muted)" }}>
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: s.color }} />
+            {s.label}
+          </li>
+        ))}
+      </ul>
+    </figcaption>
   );
 }
 

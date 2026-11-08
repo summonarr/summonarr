@@ -26,85 +26,58 @@ import { LiveRefresh } from "@/components/live-refresh";
 import { PageHeader, EmptyState } from "@/components/ui/design";
 import { AlertTriangle } from "@/components/icons";
 import { getTranslator } from "@/lib/i18n/server";
+import type { Translator } from "@/lib/i18n/translate";
 import { canRequest } from "@/lib/permissions";
 import { settleSources } from "@/lib/settle-sources";
 import { first, type PageSearchParams } from "@/lib/search-params";
+import { dedupeUnion, emptiedByHideAvailable, mediaKey, projectRail, splitFeatured, type RailVisibility } from "@/lib/home-rails";
 
 const RAIL_SIZE = 14;
 const RAIL_OVERFETCH = 20;
 
-// Flattens multiple rails into one list, keeping first occurrence per media key.
-function dedupeUnion(lists: TmdbMedia[][]): TmdbMedia[] {
-  const seen = new Set<string>();
-  const out: TmdbMedia[] = [];
-  for (const list of lists) {
-    for (const m of list) {
-      const k = `${m.mediaType}-${m.id}`;
-      if (seen.has(k)) continue;
-      seen.add(k);
-      out.push(m);
-    }
-  }
-  return out;
-}
+type HomeRail = { title: string; subtitle: string; href?: string; raw: TmdbMedia[]; items: TmdbMedia[] };
 
-type ServerVisibility = { showPlex: boolean; showJellyfin: boolean };
-
-// The one "Hide Available drops this" rule, shared by project() and
-// emptiedByHideAvailable() so the rail and its empty-state message can't
-// disagree about which titles count as available.
-function availableToViewer(e: TmdbMedia, vis: ServerVisibility): boolean {
-  return (vis.showPlex && !!e.plexAvailable) || (vis.showJellyfin && !!e.jellyfinAvailable);
-}
-
-// Maps raw items to their enriched versions, dropping available titles when
-// hideAvailable is set, capped at limit.
-function project(
-  raw: TmdbMedia[],
-  enriched: Map<string, TmdbMedia>,
-  hideAvailable: boolean,
-  limit: number,
-  // The user's own server visibility. A Plex-pinned user must not have
-  // Jellyfin-only titles dropped from their rails — every paginated surface
-  // (/api/top-rated, /api/upcoming, browse-query) already gates this way, and
-  // the rails here linking to those pages showed a different set than the page
-  // they led to.
-  vis: ServerVisibility,
-): TmdbMedia[] {
-  const out: TmdbMedia[] = [];
-  for (const m of raw) {
-    const e = enriched.get(`${m.mediaType}-${m.id}`);
-    // A missing map entry means attachAllAvailability intentionally filtered the item
-    // (the user hid it). Drop it — do NOT fall back to the raw item, which would
-    // resurrect the hidden title onto the rail.
-    if (!e) continue;
-    if (hideAvailable && availableToViewer(e, vis)) continue;
-    out.push(e);
-    if (out.length >= limit) break;
-  }
-  return out;
-}
-
-// True when Hide Available is what emptied a rail: at least one of its titles
-// survived the hidden-title filter and every such title was dropped as
-// available. A rail that is empty for any OTHER reason — a failed TMDB call
-// (settleSources → []), a new user with no For You shelf, titles the user hid —
-// must not claim "everything here is already on your server".
-function emptiedByHideAvailable(
-  raw: TmdbMedia[],
-  enriched: Map<string, TmdbMedia>,
-  hideAvailable: boolean,
-  vis: ServerVisibility,
-): boolean {
-  if (!hideAvailable) return false;
-  let seen = false;
-  for (const m of raw) {
-    const e = enriched.get(`${m.mediaType}-${m.id}`);
-    if (!e) continue;
-    if (!availableToViewer(e, vis)) return false;
-    seen = true;
-  }
-  return seen;
+// The rails under the trending row, in display order, each gated on its page's
+// feature flag. `project` turns a raw list into its enriched, filtered rail.
+function homeRails({
+  t, recentEnabled, forYouEnabled, upcomingEnabled, topEnabled, lists, project,
+}: {
+  t: Translator;
+  recentEnabled: boolean;
+  forYouEnabled: boolean;
+  upcomingEnabled: boolean;
+  topEnabled: boolean;
+  lists: Record<"recent" | "forYou" | "popMovies" | "popTV" | "upMovies" | "upTV" | "topMovies" | "topTV", TmdbMedia[]>;
+  project: (raw: TmdbMedia[], limit: number) => TmdbMedia[];
+}): HomeRail[] {
+  const rail = (title: string, subtitle: string, raw: TmdbMedia[], href?: string, limit = RAIL_SIZE): HomeRail => ({
+    title,
+    subtitle,
+    ...(href ? { href } : {}),
+    raw,
+    items: project(raw, limit),
+  });
+  return [
+    // No "See all": the only full list (/admin/activity/recent) is admin-only.
+    ...(recentEnabled
+      ? [rail(t("home.rail.recent.title"), t("home.rail.recent.subtitle"), lists.recent, undefined, RECENTLY_ADDED_SIZE)]
+      : []),
+    ...(forYouEnabled ? [rail(t("home.rail.forYou.title"), t("home.rail.forYou.subtitle"), lists.forYou, "/for-you")] : []),
+    rail(t("home.rail.popularMovies.title"), t("home.rail.popularMovies.subtitle"), lists.popMovies, "/movies"),
+    rail(t("home.rail.popularTv.title"), t("home.rail.popularTv.subtitle"), lists.popTV, "/tv"),
+    ...(upcomingEnabled
+      ? [
+          rail(t("home.rail.upcomingMovies.title"), t("home.rail.upcomingMovies.subtitle"), lists.upMovies, "/upcoming"),
+          rail(t("home.rail.onTheAir.title"), t("home.rail.onTheAir.subtitle"), lists.upTV, "/upcoming"),
+        ]
+      : []),
+    ...(topEnabled
+      ? [
+          rail(t("home.rail.topMovies.title"), t("home.rail.topMovies.subtitle"), lists.topMovies, "/top"),
+          rail(t("home.rail.topTv.title"), t("home.rail.topTv.subtitle"), lists.topTV, "/top"),
+        ]
+      : []),
+  ];
 }
 
 // Tab / bookmark / history title — the page title, in the viewer's language.
@@ -127,7 +100,10 @@ export default async function DiscoverPage({
     plex: flags["feature.integration.plex"],
     jellyfin: flags["feature.integration.jellyfin"],
   });
-  const vis = { showPlex, showJellyfin };
+  // The viewer's own server visibility: a Plex-pinned viewer must not have
+  // Jellyfin-only titles dropped from their rails — every paginated surface
+  // (/api/top-rated, /api/upcoming, browse-query) gates the same way.
+  const vis: RailVisibility = { hideAvailable, showPlex, showJellyfin };
   const canRequestMovie = canRequest(session.user.permissions, "MOVIE", false);
   const canRequestTv = canRequest(session.user.permissions, "TV", false);
   const upcomingEnabled = flags["feature.page.upcoming"];
@@ -172,6 +148,11 @@ export default async function DiscoverPage({
       : Promise.resolve([] as TmdbMedia[]),
   });
 
+  // Enrich the full RAIL_OVERFETCH window (not just RAIL_SIZE): projectRail()
+  // drops available/hidden items then backfills toward RAIL_SIZE from the tail,
+  // so the tail must be in the enriched map too or rails under-fill when a
+  // filter is on. Trending and recently-added are kept whole (the latter is
+  // already capped at its own overfetch).
   const trending  = lists.trending;
   const popMovies = lists["popular-movies"].slice(0, RAIL_OVERFETCH);
   const popTV     = lists["popular-tv"].slice(0, RAIL_OVERFETCH);
@@ -182,64 +163,26 @@ export default async function DiscoverPage({
   const forYou    = lists["for-you"].slice(0, RAIL_OVERFETCH);
   const recent    = lists["recently-added"];
 
-  // Enrich the full RAIL_OVERFETCH window (not just RAIL_SIZE): project() drops
-  // available/hidden items then backfills toward RAIL_SIZE from the tail, so the
-  // tail must be in the enriched map too or rails under-fill when a filter is on.
-  const candidateLists = [
-    { raw: trending, limit: trending.length },
-    { raw: popMovies, limit: RAIL_OVERFETCH },
-    { raw: popTV, limit: RAIL_OVERFETCH },
-    { raw: upMovies, limit: RAIL_OVERFETCH },
-    { raw: upTV, limit: RAIL_OVERFETCH },
-    { raw: topMovies, limit: RAIL_OVERFETCH },
-    { raw: topTV, limit: RAIL_OVERFETCH },
-    { raw: forYou, limit: RAIL_OVERFETCH },
-    // Last, so a title also on a TMDB rail keeps that richer record (overview,
-    // backdrop) in the shared enriched map. Already capped at its overfetch.
-    { raw: recent, limit: recent.length },
-  ];
-  const displaySet = dedupeUnion(candidateLists.map((c) => c.raw.slice(0, c.limit)));
+  // Recently added last, so a title also on a TMDB rail keeps that richer
+  // record (overview, backdrop) in the shared enriched map.
+  const displaySet = dedupeUnion([trending, popMovies, popTV, upMovies, upTV, topMovies, topTV, forYou, recent]);
   const show4k = await show4kPromise;
-  const enriched = await attachAllAvailability(displaySet, session?.user.id, { show4k });
-  const emap = new Map(enriched.map((m) => [`${m.mediaType}-${m.id}`, m]));
+  const enriched = await attachAllAvailability(displaySet, session.user.id, { show4k });
+  const emap = new Map(enriched.map((m) => [mediaKey(m), m]));
+  const project = (raw: TmdbMedia[], limit: number) => projectRail(raw, emap, vis, limit);
 
-  const trendingItems = project(trending,  emap, hideAvailable, trending.length, vis);
-  const featuredMovie = trendingItems.find((m) => m.mediaType === "movie");
-  const featuredTV = trendingItems.find((m) => m.mediaType === "tv");
-  const featuredKeys = new Set(
-    [featuredMovie, featuredTV]
-      .filter((m): m is TmdbMedia => m != null)
-      .map((m) => `${m.mediaType}-${m.id}`),
-  );
-  const trendingRest = trendingItems.filter(
-    (m) => !featuredKeys.has(`${m.mediaType}-${m.id}`),
-  );
-  const railsBase: { title: string; subtitle: string; href?: string; raw: TmdbMedia[]; items: TmdbMedia[] }[] = [
-    // No "See all": the only full list (/admin/activity/recent) is admin-only.
-    ...(recentEnabled
-      ? [{ title: t("home.rail.recent.title"), subtitle: t("home.rail.recent.subtitle"), raw: recent, items: project(recent, emap, hideAvailable, RECENTLY_ADDED_SIZE, vis) }]
-      : []),
-    ...(forYouEnabled
-      ? [{ title: t("home.rail.forYou.title"), subtitle: t("home.rail.forYou.subtitle"), href: "/for-you", raw: forYou, items: project(forYou, emap, hideAvailable, RAIL_SIZE, vis) }]
-      : []),
-    { title: t("home.rail.popularMovies.title"), subtitle: t("home.rail.popularMovies.subtitle"), href: "/movies",   raw: popMovies, items: project(popMovies, emap, hideAvailable, RAIL_SIZE, vis) },
-    { title: t("home.rail.popularTv.title"), subtitle: t("home.rail.popularTv.subtitle"), href: "/tv",       raw: popTV, items: project(popTV,     emap, hideAvailable, RAIL_SIZE, vis) },
-    ...(upcomingEnabled
-      ? [
-          { title: t("home.rail.upcomingMovies.title"), subtitle: t("home.rail.upcomingMovies.subtitle"), href: "/upcoming", raw: upMovies, items: project(upMovies, emap, hideAvailable, RAIL_SIZE, vis) },
-          { title: t("home.rail.onTheAir.title"), subtitle: t("home.rail.onTheAir.subtitle"), href: "/upcoming", raw: upTV, items: project(upTV,     emap, hideAvailable, RAIL_SIZE, vis) },
-        ]
-      : []),
-    ...(topEnabled
-      ? [
-          { title: t("home.rail.topMovies.title"), subtitle: t("home.rail.topMovies.subtitle"), href: "/top", raw: topMovies, items: project(topMovies, emap, hideAvailable, RAIL_SIZE, vis) },
-          { title: t("home.rail.topTv.title"), subtitle: t("home.rail.topTv.subtitle"), href: "/top", raw: topTV, items: project(topTV,     emap, hideAvailable, RAIL_SIZE, vis) },
-        ]
-      : []),
-  ];
+  const { featured, rest: trendingRest } = splitFeatured(project(trending, trending.length));
+  const featuredMovie = featured.find((m) => m.mediaType === "movie");
+  const featuredTV = featured.find((m) => m.mediaType === "tv");
+  const featuredKeys = new Set(featured.map(mediaKey));
+  const railsBase = homeRails({
+    t, recentEnabled, forYouEnabled, upcomingEnabled, topEnabled,
+    lists: { recent, forYou, popMovies, popTV, upMovies, upTV, topMovies, topTV },
+    project,
+  });
   const rails = railsBase.map((r) => ({
     ...r,
-    allAvailable: r.items.length === 0 && emptiedByHideAvailable(r.raw, emap, hideAvailable, vis),
+    allAvailable: r.items.length === 0 && emptiedByHideAvailable(r.raw, emap, vis),
   }));
   // Judged over the titles the ROW could show: the two heroes take the only
   // unavailable titles in an otherwise all-available week, and counting them
@@ -247,9 +190,8 @@ export default async function DiscoverPage({
   const trendingAllAvailable =
     trendingRest.length === 0 &&
     emptiedByHideAvailable(
-      trending.filter((m) => !featuredKeys.has(`${m.mediaType}-${m.id}`)),
+      trending.filter((m) => !featuredKeys.has(mediaKey(m))),
       emap,
-      hideAvailable,
       vis,
     );
 

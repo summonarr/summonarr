@@ -10,14 +10,19 @@
 import { promises as fsp, createReadStream } from "node:fs";
 import path from "node:path";
 import { restoreScratchDir } from "@/lib/restore-scratch";
-import { prisma } from "@/lib/prisma";
+import { prisma, type PrismaTxClient } from "@/lib/prisma";
 import {
   hasEncryptedMagic,
   wrapDecryptStream,
   BackupCryptoError,
   ENCRYPTED_MAGIC,
 } from "@/lib/backup-crypto";
-import { BACKUP_TABLES, BACKUP_ENUMS, computeSchemaFingerprint } from "@/lib/backup-schema";
+import {
+  BACKUP_TABLES,
+  BACKUP_ENUMS,
+  computeNormalizedSchemaFingerprint,
+  computeSchemaFingerprint,
+} from "@/lib/backup-schema";
 import { tokenEncryptionKeyFingerprint } from "@/lib/token-crypto";
 import { invalidateCachedSessionChecks } from "@/lib/session-revocation";
 import { clearArrSnapshots } from "@/lib/arr-snapshot";
@@ -173,8 +178,6 @@ const ALLOWED_PATTERNS = [
 // lexer ends the column list on.
 const COLUMN_LIST_RE = /^"[A-Za-z0-9_]{1,63}"(?:, ?"[A-Za-z0-9_]{1,63}")*$/;
 
-const DANGEROUS_SQL_PATTERN = /\b(SELECT|UPDATE|DELETE|DROP|ALTER|EXECUTE|COPY|CREATE\s+FUNCTION|SET\s+SESSION|SET\s+ROLE|GRANT|REVOKE|TRUNCATE|pg_read_file|pg_write_file|lo_import|lo_export|pg_execute_server_program|dblink|LOAD|pg_lo_import|pg_lo_export|current_setting|set_config)\b/i;
-
 interface SplitterState {
   current: string;
   lineComment: string;
@@ -185,6 +188,34 @@ interface SplitterState {
   pendingDash: boolean;
 }
 
+function newSplitterState(): SplitterState {
+  return {
+    current: "",
+    lineComment: "",
+    inSingleQuote: false,
+    inDollarQuote: false,
+    inLineComment: false,
+    pendingDollar: false,
+    pendingDash: false,
+  };
+}
+
+// The characters that end a run of ordinary statement text outside any quote.
+const STATEMENT_SPECIAL_RE = /['$;-]/g;
+
+function nextStatementSpecial(chunk: string, from: number): number {
+  STATEMENT_SPECIAL_RE.lastIndex = from;
+  const m = STATEMENT_SPECIAL_RE.exec(chunk);
+  return m ? m.index : chunk.length;
+}
+
+function endLineComment(state: SplitterState, onComment: (comment: string) => void): void {
+  state.inLineComment = false;
+  const c = state.lineComment.trim();
+  if (c) onComment(c);
+  state.lineComment = "";
+}
+
 // SQL splitter that:
 //   • Splits statements on `;` (skipping `;` inside '...' or $$...$$).
 //   • Routes `-- ... \n` line comments to onComment instead of gluing them
@@ -192,110 +223,137 @@ interface SplitterState {
 //     `-- Table: ...` comment fail validation and be dropped).
 //   • A `$` or `-` at the very end of a chunk is held as "pending" until the
 //     next chunk shows whether it starts `$$` or `--`.
+// Text between the characters that matter is appended as one slice, never a
+// character at a time: a restore feeds gigabytes through here.
 function feedSqlChunk(
   state: SplitterState,
   chunk: string,
   onStatement: (stmt: string) => void,
   onComment: (comment: string) => void,
 ): void {
-  for (let i = 0; i < chunk.length; i++) {
-    const ch = chunk[i];
-
+  let i = 0;
+  while (i < chunk.length) {
     if (state.inLineComment) {
-      if (ch === "\n") {
-        state.inLineComment = false;
-        const c = state.lineComment.trim();
-        if (c) onComment(c);
-        state.lineComment = "";
-      } else {
-        state.lineComment += ch;
+      const nl = chunk.indexOf("\n", i);
+      if (nl === -1) {
+        state.lineComment += chunk.slice(i);
+        return;
       }
+      state.lineComment += chunk.slice(i, nl);
+      endLineComment(state, onComment);
+      i = nl + 1;
       continue;
     }
 
+    const ch = chunk[i];
+    // A pending `$`/`-` is only ever set by a chunk's last character, so it
+    // is resolved here by the first character of the next chunk.
     if (state.pendingDollar) {
       state.pendingDollar = false;
       if (ch === "$") {
         if (!state.inSingleQuote) state.inDollarQuote = !state.inDollarQuote;
         state.current += "$$";
+        i++;
         continue;
       }
       state.current += "$";
     }
-
     if (state.pendingDash) {
       state.pendingDash = false;
       if (ch === "-" && !state.inSingleQuote && !state.inDollarQuote) {
         state.inLineComment = true;
         state.lineComment = "";
+        i++;
         continue;
       }
       state.current += "-";
     }
 
     if (state.inSingleQuote) {
-      state.current += ch;
-      if (ch === "'" && chunk[i + 1] === "'") {
+      const q = chunk.indexOf("'", i);
+      if (q === -1) {
+        state.current += chunk.slice(i);
+        return;
+      }
+      state.current += chunk.slice(i, q + 1);
+      if (chunk[q + 1] === "'") {
         state.current += "'";
-        i++;
-      } else if (ch === "'") {
+        i = q + 2;
+      } else {
         state.inSingleQuote = false;
+        i = q + 1;
       }
       continue;
     }
+
     if (state.inDollarQuote) {
-      if (ch === "$") {
-        if (chunk[i + 1] === "$") {
-          state.current += "$$";
-          state.inDollarQuote = false;
-          i++;
-        } else if (i === chunk.length - 1) {
-          state.pendingDollar = true;
-        } else {
-          state.current += "$";
-        }
-      } else {
-        state.current += ch;
+      const d = chunk.indexOf("$", i);
+      if (d === -1) {
+        state.current += chunk.slice(i);
+        return;
       }
-      continue;
-    }
-    if (ch === "'") {
-      state.inSingleQuote = true;
-      state.current += ch;
-      continue;
-    }
-    if (ch === "$") {
-      if (chunk[i + 1] === "$") {
-        state.inDollarQuote = true;
+      state.current += chunk.slice(i, d);
+      if (chunk[d + 1] === "$") {
         state.current += "$$";
-        i++;
-      } else if (i === chunk.length - 1) {
-        state.pendingDollar = true;
+        state.inDollarQuote = false;
+        i = d + 2;
       } else {
-        state.current += "$";
+        if (d === chunk.length - 1) state.pendingDollar = true;
+        else state.current += "$";
+        i = d + 1;
       }
       continue;
     }
-    if (ch === "-") {
-      if (chunk[i + 1] === "-") {
-        state.inLineComment = true;
-        state.lineComment = "";
-        i++;
-      } else if (i === chunk.length - 1) {
-        state.pendingDash = true;
-      } else {
-        state.current += "-";
-      }
+
+    const s = nextStatementSpecial(chunk, i);
+    if (s > i) {
+      state.current += chunk.slice(i, s);
+      i = s;
       continue;
     }
-    if (ch === ";") {
-      const trimmed = state.current.trim();
-      if (trimmed) onStatement(trimmed);
-      state.current = "";
-      continue;
-    }
-    state.current += ch;
+    i = handleStatementSpecial(state, chunk, i, onStatement);
   }
+}
+
+// One of `'`, `$`, `-` or `;` outside any quote; returns the next index.
+function handleStatementSpecial(
+  state: SplitterState,
+  chunk: string,
+  i: number,
+  onStatement: (stmt: string) => void,
+): number {
+  const ch = chunk[i];
+  const last = i === chunk.length - 1;
+  if (ch === "'") {
+    state.inSingleQuote = true;
+    state.current += ch;
+    return i + 1;
+  }
+  if (ch === "$") {
+    if (chunk[i + 1] === "$") {
+      state.inDollarQuote = true;
+      state.current += "$$";
+      return i + 2;
+    }
+    if (last) state.pendingDollar = true;
+    else state.current += "$";
+    return i + 1;
+  }
+  if (ch === "-") {
+    if (chunk[i + 1] === "-") {
+      state.inLineComment = true;
+      state.lineComment = "";
+      return i + 2;
+    }
+    if (last) state.pendingDash = true;
+    else state.current += "-";
+    return i + 1;
+  }
+  // ";"
+  const trimmed = state.current.trim();
+  if (trimmed) onStatement(trimmed);
+  state.current = "";
+  return i + 1;
 }
 
 function flushSqlChunk(
@@ -311,12 +369,7 @@ function flushSqlChunk(
     state.current += "-";
     state.pendingDash = false;
   }
-  if (state.inLineComment) {
-    state.inLineComment = false;
-    const c = state.lineComment.trim();
-    if (c) onComment(c);
-    state.lineComment = "";
-  }
+  if (state.inLineComment) endLineComment(state, onComment);
   const trimmed = state.current.trim();
   if (trimmed) onStatement(trimmed);
   state.current = "";
@@ -338,7 +391,7 @@ const SAFE_LITERAL_RE = /^(NULL|TRUE|FALSE|-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9
 // smuggle `ON CONFLICT ("key") DO UPDATE SET "value" = (SELECT …)` past both the
 // allowlist regex and this check — arbitrary SQL expression execution (sub-SELECT
 // across any table, pg_read_file, …) as the app's DB role. The INSERT branch of
-// isStatementSafe returns before DANGEROUS_SQL_PATTERN, so this is the only gate.
+// isStatementSafe runs no keyword scan, so this is the only gate.
 // `DO UPDATE` is never emitted by the exporter (db-export appends DO NOTHING).
 const ON_CONFLICT_TAIL_RE = /^ON CONFLICT(?:\s*\([^()]*\))?\s+DO NOTHING$/i;
 
@@ -353,38 +406,47 @@ function remainderAfterTupleIsSafe(rest: string): boolean {
   return ON_CONFLICT_TAIL_RE.test(trimmed);
 }
 
+function isTupleSpace(ch: string | undefined): boolean {
+  return ch === " " || ch === "\t" || ch === "\n" || ch === "\r";
+}
+
+// One literal starting at `i`: a quoted string (with `''` escapes) runs to its
+// closing quote, anything else to the next `,`, whitespace or `)`.
+function readValueToken(clause: string, i: number): { token: string; next: number } {
+  if (clause[i] === "'") {
+    let j = i + 1;
+    while (j < clause.length) {
+      if (clause[j] === "'") {
+        if (clause[j + 1] === "'") j += 2;
+        else return { token: clause.slice(i, j + 1), next: j + 1 };
+      } else {
+        j++;
+      }
+    }
+    return { token: clause.slice(i), next: clause.length };
+  }
+  let j = i;
+  while (j < clause.length && !/[,\s)]/.test(clause[j])) j++;
+  return { token: clause.slice(i, j), next: j };
+}
+
+// Exactly one `( literal, literal, … )` tuple, then only an allowed tail.
 function validateValuesTokens(valuesClause: string): boolean {
   let i = 0;
-  while (i < valuesClause.length && valuesClause[i] === " ") i++;
+  while (valuesClause[i] === " ") i++;
   if (valuesClause[i] !== "(") return false;
   i++;
 
   while (i < valuesClause.length) {
-    while (i < valuesClause.length && /[ \t\n\r]/.test(valuesClause[i])) i++;
+    while (isTupleSpace(valuesClause[i])) i++;
     if (i >= valuesClause.length) return false;
     if (valuesClause[i] === ")") return remainderAfterTupleIsSafe(valuesClause.slice(i + 1));
 
-    let token = "";
-    if (valuesClause[i] === "'") {
-      token += "'";
-      i++;
-      while (i < valuesClause.length) {
-        const c = valuesClause[i++];
-        token += c;
-        if (c === "'") {
-          if (valuesClause[i] === "'") { token += "'"; i++; }
-          else break;
-        }
-      }
-    } else {
-      while (i < valuesClause.length && !/[,\s)]/.test(valuesClause[i])) {
-        token += valuesClause[i++];
-      }
-    }
-
+    const { token, next } = readValueToken(valuesClause, i);
     if (!SAFE_LITERAL_RE.test(token)) return false;
+    i = next;
 
-    while (i < valuesClause.length && /[ \t\n\r]/.test(valuesClause[i])) i++;
+    while (isTupleSpace(valuesClause[i])) i++;
     if (i >= valuesClause.length) return false;
     const sep = valuesClause[i];
     if (sep === ",") { i++; continue; }
@@ -423,19 +485,9 @@ function isStatementSafe(stmt: string): { ok: true } | { ok: false; reason: stri
     // `SELECT 1 FROM pg_type` inside the block.
     return { ok: true };
   }
-  // Anything matching neither allowlist pattern. The DANGEROUS_SQL_PATTERN
-  // check is defence-in-depth for any future allowlist entry; for the
-  // existing two it's redundant.
-  if (!ALLOWED_PATTERNS.some((p) => p.test(stmt))) {
-    return { ok: false, reason: `Blocked disallowed statement: ${stmt.slice(0, 80)}...` };
-  }
-  const decommented = stmt
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/\s+/g, " ");
-  if (DANGEROUS_SQL_PATTERN.test(decommented)) {
-    return { ok: false, reason: `Blocked statement with suspicious keyword: ${stmt.slice(0, 80)}...` };
-  }
-  return { ok: true };
+  // The allowlist is the whole policy: anything matching neither pattern is
+  // refused. A future pattern gets its own branch above with its own checks.
+  return { ok: false, reason: `Blocked disallowed statement: ${stmt.slice(0, 80)}...` };
 }
 
 export type BackupImportSummary = {
@@ -456,6 +508,8 @@ export type BackupImportResult =
   | { ok: false; status: number; error: string; errors?: string[]; summary?: BackupImportSummary };
 
 export type BackupImportMode = "setup" | "admin";
+
+type BackupFailure = Extract<BackupImportResult, { ok: false }>;
 
 // The pre-auth ("setup") restore runs before any admin account exists and
 // authenticates solely with BACKUP_DB_PASSWORD, so on an internet-facing
@@ -496,16 +550,27 @@ async function invalidateRestoredCaches(): Promise<void> {
 // Raised by the replay stream when the upload passes MAX_CIPHERTEXT_BYTES.
 class CiphertextOverflowError extends Error {}
 
-function ciphertextOverflow(): BackupImportResult {
+function ciphertextOverflow(): BackupFailure {
   return { ok: false, status: 413, error: `Encrypted body exceeds ${MAX_CIPHERTEXT_BYTES} bytes` };
 }
 
 // A failure while reading or decrypting the upload, as a client result.
-function readFailure(err: unknown, where: "drain" | "stream"): BackupImportResult {
+function readFailure(err: unknown, where: "drain" | "stream"): BackupFailure {
   if (err instanceof BackupCryptoError) return { ok: false, status: err.status, error: err.message };
   if (err instanceof CiphertextOverflowError) return ciphertextOverflow();
   console.error(`[backup] db-import ${where} error:`, err);
   return { ok: false, status: 400, error: READ_FAILED_MESSAGE };
+}
+
+// The first-run freshness test, read under advisory lock 43 (the caller takes
+// it first, lockSetupInTx). Shared by the setup routes' gate (backup-routes.ts)
+// and the restore transaction below, so the two can never disagree on "fresh".
+export async function setupClosedInTx(
+  tx: Pick<PrismaTxClient, "setting" | "user">,
+): Promise<boolean> {
+  const setupCompleted = await tx.setting.findUnique({ where: { key: "setup_completed_at" } });
+  const userCount = await tx.user.count();
+  return setupCompleted !== null || userCount > 0;
 }
 
 export async function processBackupImport(
@@ -521,40 +586,39 @@ export async function processBackupImport(
   }
 }
 
-async function runBackupImport(
-  body: ReadableStream<Uint8Array>,
-  password: string,
-  mode: BackupImportMode,
-  spool: StatementSpool,
-): Promise<BackupImportResult> {
-  // The authoritative check of the setup routes' internet-facing opt-in.
-  if (mode === "setup" && setupRestoreDisabled()) {
-    body.cancel().catch(() => {});
-    return { ok: false, status: 403, error: SETUP_RESTORE_DISABLED_MESSAGE };
-  }
-
-  const sourceReader = body.getReader();
+// Reads until the magic bytes are in hand (or the upload ends).
+async function readHead(
+  sourceReader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<{ head: Buffer } | BackupFailure> {
   let head = Buffer.alloc(0);
-  while (head.length < ENCRYPTED_MAGIC.length) {
-    const { value, done } = await sourceReader.read();
-    if (done) break;
-    if (value && value.byteLength > 0) {
-      head = Buffer.concat([head, Buffer.from(value)]);
+  try {
+    while (head.length < ENCRYPTED_MAGIC.length) {
+      const { value, done } = await sourceReader.read();
+      if (done) break;
+      if (value && value.byteLength > 0) head = Buffer.concat([head, Buffer.from(value)]);
     }
+  } catch (err) {
+    // A client that aborted the upload mid-header, for one.
+    sourceReader.cancel().catch(() => {});
+    return readFailure(err, "stream");
   }
   if (!hasEncryptedMagic(head)) {
     sourceReader.cancel().catch(() => {});
     return { ok: false, status: 400, error: "Backup file is not an encrypted Summonarr dump." };
   }
-
-  let totalCiphertextBytes = head.length;
-  if (totalCiphertextBytes > MAX_CIPHERTEXT_BYTES) {
+  if (head.length > MAX_CIPHERTEXT_BYTES) {
     sourceReader.cancel().catch(() => {});
     return ciphertextOverflow();
   }
+  return { head };
+}
 
+// The whole upload again (the bytes readHead took first), refused with
+// CiphertextOverflowError once it passes MAX_CIPHERTEXT_BYTES.
+function replayUpload(head: Buffer, sourceReader: ReadableStreamDefaultReader<Uint8Array>): ReadableStream<Uint8Array> {
   let firstEmitted = false;
-  const replay = new ReadableStream<Uint8Array>({
+  let totalCiphertextBytes = head.length;
+  return new ReadableStream<Uint8Array>({
     async pull(controller) {
       if (!firstEmitted) {
         firstEmitted = true;
@@ -580,6 +644,259 @@ async function runBackupImport(
       sourceReader.cancel(reason).catch(() => {});
     },
   });
+}
+
+const FINGERPRINT_RE = /^Schema-Fingerprint:\s*([0-9a-f]{8,64})$/i;
+const NORMALIZED_FINGERPRINT_RE = /^Schema-Fingerprint-Normalized:\s*([0-9a-f]{8,64})$/i;
+const TEK_FINGERPRINT_RE = /^Token-Encryption-Key-Fingerprint:\s*([0-9a-f]{8,64})$/i;
+const MAX_VALIDATION_ERRORS = 20;
+
+// What reading the whole plaintext produced: the validated statements are in
+// the spool, everything else is here.
+type ParsedDump = {
+  totalStatements: number;
+  totalPlaintextBytes: number;
+  errors: string[];
+  fingerprint: string | null;
+  normalizedFingerprint: string | null;
+  tekFingerprint: string | null;
+};
+
+// Decodes, splits and validates the plaintext into the spool. On an early stop
+// (validation errors hit the cap, the size cap fires, the text is not UTF-8)
+// the rest of the stream is still drained: wrapDecryptStream verifies the GCM
+// auth tag only when its source ends, and bailing out before then would leave
+// the tag unverified, a partial-tampering oracle. A tag failure outranks every
+// other verdict, because a tampered ciphertext must read as a crypto failure,
+// not a blocked statement.
+async function parseDump(
+  plaintextStream: ReadableStream<Uint8Array>,
+  spool: StatementSpool,
+): Promise<ParsedDump | BackupFailure> {
+  // Fatal: a backup is UTF-8 by construction, so an invalid byte is
+  // corruption, never text to restore as U+FFFD.
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const splitter = newSplitterState();
+  const parsed: ParsedDump = {
+    totalStatements: 0,
+    totalPlaintextBytes: 0,
+    errors: [],
+    fingerprint: null,
+    normalizedFingerprint: null,
+    tekFingerprint: null,
+  };
+  let abortReason: { error: string; status: number } | null = null;
+  const aborted = () => abortReason !== null || parsed.errors.length >= MAX_VALIDATION_ERRORS;
+
+  const onStatement = (stmt: string): void => {
+    if (aborted()) return;
+    parsed.totalStatements++;
+    const safe = isStatementSafe(stmt);
+    if (safe.ok) spool.add(stmt);
+    else parsed.errors.push(safe.reason);
+  };
+  const onComment = (comment: string): void => {
+    const m = FINGERPRINT_RE.exec(comment);
+    if (m) parsed.fingerprint = m[1].toLowerCase();
+    const nm = NORMALIZED_FINGERPRINT_RE.exec(comment);
+    if (nm) parsed.normalizedFingerprint = nm[1].toLowerCase();
+    const tm = TEK_FINGERPRINT_RE.exec(comment);
+    if (tm) parsed.tekFingerprint = tm[1].toLowerCase();
+  };
+  // Decoding errors are corruption: stop like any other early abort.
+  const feed = (decode: () => string): void => {
+    let text: string;
+    try {
+      text = decode();
+    } catch {
+      abortReason = { error: READ_FAILED_MESSAGE, status: 400 };
+      return;
+    }
+    feedSqlChunk(splitter, text, onStatement, onComment);
+  };
+
+  const ptReader = plaintextStream.getReader();
+  try {
+    while (!aborted()) {
+      const { value, done } = await ptReader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      parsed.totalPlaintextBytes += value.byteLength;
+      if (parsed.totalPlaintextBytes > MAX_PLAINTEXT_BYTES) {
+        abortReason = { error: `SQL body exceeds ${MAX_PLAINTEXT_BYTES / (1024 * 1024)}MB limit`, status: 413 };
+        break;
+      }
+      feed(() => decoder.decode(value, { stream: true }));
+      if (spool.needsFlush()) await spool.flush();
+    }
+    if (!aborted()) {
+      // Whatever the decoder still holds (a sequence cut at the end) must
+      // decode too; a dangling partial sequence is corruption.
+      feed(() => decoder.decode());
+    }
+    if (!aborted()) {
+      flushSqlChunk(splitter, onStatement, onComment);
+      await spool.flush();
+    } else {
+      try {
+        while (!(await ptReader.read()).done) {
+          // drained bytes are discarded
+        }
+      } catch (err) {
+        if (err instanceof BackupCryptoError) return { ok: false, status: err.status, error: err.message };
+        return readFailure(err, "drain");
+      }
+    }
+  } catch (err) {
+    return readFailure(err, "stream");
+  } finally {
+    ptReader.releaseLock();
+  }
+
+  if (abortReason) return { ok: false, status: abortReason.status, error: abortReason.error };
+  return parsed;
+}
+
+// The schema and key checks between a valid dump and the restore: a refusal,
+// or the warnings to carry into the answer.
+function fingerprintVerdict(parsed: ParsedDump): BackupFailure | { warnings: string[] } {
+  const warnings: string[] = [];
+  // The normalized fingerprint (newer exports) ignores comment and whitespace
+  // edits; an older export carries only the byte fingerprint.
+  const [received, expected] = parsed.normalizedFingerprint
+    ? [parsed.normalizedFingerprint, computeNormalizedSchemaFingerprint()]
+    : [parsed.fingerprint, parsed.fingerprint ? computeSchemaFingerprint() : null];
+  if (received && received !== expected) {
+    return {
+      ok: false,
+      status: 409,
+      error:
+        `Schema mismatch — restore refused. Backup fingerprint ${received} does not match this server's schema fingerprint ${expected}. The database has not been touched. Restore only into a server running the same schema version.`,
+    };
+  }
+  if (!received) {
+    warnings.push(
+      `This backup has no schema fingerprint (it was created by an older version). Proceeding, but if the schema has drifted the restore will roll back partway through.`,
+    );
+  }
+  // Encrypted secrets (API keys, OAuth tokens, SMTP password) are AES-encrypted with
+  // TOKEN_ENCRYPTION_KEY. Restoring onto a server with a DIFFERENT key leaves them as
+  // undecryptable ciphertext. Warn (don't refuse — the rest of the data restores fine
+  // and the operator can re-enter the secrets afterward).
+  const currentTekFingerprint = tokenEncryptionKeyFingerprint();
+  if (parsed.tekFingerprint && currentTekFingerprint && parsed.tekFingerprint !== currentTekFingerprint) {
+    warnings.push(
+      `This backup's encrypted secrets (API keys, tokens, SMTP password, two-factor authenticator secrets) were encrypted with a different TOKEN_ENCRYPTION_KEY than this server uses — they will restore but won't be decryptable. Re-enter them in Settings after the restore.`,
+    );
+  }
+  return { warnings };
+}
+
+const TRUNCATE_STMT = `TRUNCATE TABLE ${BACKUP_TABLES.map((t) => `"public"."${t}"`).join(", ")} RESTART IDENTITY`;
+
+// INSERT INTO "public"."<Table>" (...) ...  — capture the table name to attribute
+// conflict-skipped rows in the response summary. Statements are already validated
+// against the BACKUP_TABLES allowlist (ALLOWED_PATTERNS above), so a plain
+// capturing match suffices here. The group MUST be capturing: m[1] is the table name.
+const INSERT_TABLE_RE = /^INSERT INTO "public"\."([^"]+)"/i;
+
+// Older exports (pre-snapshot fix) could emit duplicate rows when a sync wrote
+// between paginated SELECTs. Force-append ON CONFLICT DO NOTHING so the restore
+// tolerates those dumps instead of aborting on the first collision. The
+// TRUNCATE guarantees the only duplicates possible are within the dump itself.
+// The "already has a conflict clause" test must be anchored at the end of the
+// statement: an unanchored /ON CONFLICT/i also matches that text inside row
+// data (an issue message quoting a Postgres error, a cached TMDB overview),
+// which silently skipped the append for exactly the rows it protects — the
+// duplicate then raised 23505 and rolled the whole restore back. Validation
+// already pins the tail to this shape.
+function withConflictTail(stmt: string): string {
+  return stmt.startsWith("INSERT") && !HAS_CONFLICT_TAIL_RE.test(stmt) ? `${stmt} ON CONFLICT DO NOTHING` : stmt;
+}
+
+type RestoreCounts = { executed: number; conflictSkippedByTable: Record<string, number>; conflictSkippedTotal: number };
+
+// TRUNCATE + replay + session wipe in ONE transaction: a refusal (setup mode
+// found the server no longer fresh) or a thrown statement leaves the database
+// as it was.
+async function restoreInTransaction(
+  spool: StatementSpool,
+  mode: BackupImportMode,
+  plaintextBytes: number,
+): Promise<{ rejected: { status: number; error: string } } | RestoreCounts> {
+  const counts: RestoreCounts = { executed: 0, conflictSkippedByTable: {}, conflictSkippedTotal: 0 };
+  const rejection = await prisma.$transaction(async (tx) => {
+    // Advisory lock 43 (setup-lock.ts) is shared with /api/auth/register and the setup
+    // gates. Holding it inside the TRUNCATE+INSERT transaction guarantees a racing register
+    // can't sneak a new user row between an outer freshness check and the truncate. In
+    // "setup" mode we also re-check the freshness invariant under the lock so an attacker
+    // can't pre-stage a chunked import and fire the final chunk after a legitimate admin
+    // completes setup.
+    await lockSetupInTx(tx);
+    if (mode === "setup" && (await setupClosedInTx(tx))) {
+      return { status: 409, error: SETUP_NOT_FRESH_MESSAGE };
+    }
+    await tx.$executeRawUnsafe(TRUNCATE_STMT);
+    for await (const stmt of spool.read()) {
+      const affected = await tx.$executeRawUnsafe(withConflictTail(stmt));
+      counts.executed++;
+      const m = INSERT_TABLE_RE.exec(stmt);
+      if (m && typeof affected === "number" && affected === 0) {
+        const table = m[1];
+        counts.conflictSkippedByTable[table] = (counts.conflictSkippedByTable[table] ?? 0) + 1;
+        counts.conflictSkippedTotal++;
+      }
+    }
+    // A restore must not bring back sessions (guardrail 6g). The dump carries
+    // the AuthSession rows AND each user's sessionsRevokedAt/passwordChangedAt
+    // as of when it was taken, so restoring an older backup resurrected every
+    // device the owner had signed out since — a stolen phone revoked last
+    // week, or every session a password change ended. Native tokens never
+    // expire (guardrail 6c), so that resurrection was permanent. Inside the
+    // same transaction, so a rolled-back restore leaves sessions untouched.
+    await tx.authSession.deleteMany({});
+    await tx.user.updateMany({ data: { sessionsRevokedAt: new Date() } });
+    return null;
+  }, { timeout: restoreTxTimeoutMs(plaintextBytes, spool.count), maxWait: 10_000 });
+  return rejection ? { rejected: rejection } : counts;
+}
+
+// The process memos a committed restore made stale. After the commit only
+// (guardrail 27).
+async function afterCommittedRestore(): Promise<void> {
+  // The transaction committed: sessions are gone and every cutoff is now.
+  // A cookie whose dbCheckedAt is still inside its window would otherwise
+  // skip that lookup for up to 60s and act with its pre-restore privileges.
+  invalidateCachedSessionChecks();
+  // The Setting table was replaced, Radarr/Sonarr instances included: a
+  // `cached=1` read skips its route's instance checks, so a kept answer could
+  // paint an instance the restored config no longer has (guardrail 5h).
+  clearArrSnapshots();
+  // Every other memo built from the replaced tables (feature flags, the
+  // Discord key, session lengths, agents, library and activity caches).
+  await invalidateRestoredCaches();
+}
+
+// The splitter only ever emits non-empty statements, so nothing is skipped;
+// the field stays in the summary (the routes, the UI and audit rows report it).
+const SKIPPED_STATEMENTS = 0;
+
+async function runBackupImport(
+  body: ReadableStream<Uint8Array>,
+  password: string,
+  mode: BackupImportMode,
+  spool: StatementSpool,
+): Promise<BackupImportResult> {
+  // The authoritative check of the setup routes' internet-facing opt-in.
+  if (mode === "setup" && setupRestoreDisabled()) {
+    body.cancel().catch(() => {});
+    return { ok: false, status: 403, error: SETUP_RESTORE_DISABLED_MESSAGE };
+  }
+
+  const sourceReader = body.getReader();
+  const headRead = await readHead(sourceReader);
+  if ("ok" in headRead) return headRead;
+  const replay = replayUpload(headRead.head, sourceReader);
 
   let plaintextStream: ReadableStream<Uint8Array>;
   try {
@@ -594,155 +911,36 @@ async function runBackupImport(
     throw err;
   }
 
-  const decoder = new TextDecoder("utf-8");
-  const splitter: SplitterState = {
-    current: "",
-    lineComment: "",
-    inSingleQuote: false,
-    inDollarQuote: false,
-    inLineComment: false,
-    pendingDollar: false,
-    pendingDash: false,
-  };
-  let totalStatements = 0;
-  // The splitter only ever emits non-empty statements, so nothing is skipped;
-  // the field stays in the summary (the routes and audit rows report it).
-  const skipped = 0;
-  const errors: string[] = [];
-  let totalPlaintextBytes = 0;
-  let aborted = false;
-  let abortReason: { error: string; status: number } | null = null;
-  let receivedFingerprint: string | null = null;
-  let receivedTekFingerprint: string | null = null;
+  const parsed = await parseDump(plaintextStream, spool);
+  if ("ok" in parsed) return parsed;
 
-  const FINGERPRINT_RE = /^Schema-Fingerprint:\s*([0-9a-f]{8,64})$/i;
-  const TEK_FINGERPRINT_RE = /^Token-Encryption-Key-Fingerprint:\s*([0-9a-f]{8,64})$/i;
-
-  function collectStatement(stmt: string): void {
-    if (aborted) return;
-    totalStatements++;
-    const safe = isStatementSafe(stmt);
-    if (!safe.ok) {
-      errors.push(safe.reason);
-      if (errors.length >= 20) aborted = true;
-      return;
-    }
-    spool.add(stmt);
-  }
-
-  // On early abort (validation errors hit the cap, or the size cap fires) we
-  // must still drain the plaintext stream to completion. wrapDecryptStream
-  // verifies the GCM auth tag inside its pull when the underlying reader
-  // signals done; bailing out before then leaves the tag unverified, which
-  // is a partial-tampering oracle. Drained bytes are discarded.
-  async function drainPlaintext(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
-    while (true) {
-      const { done: drainDone } = await reader.read();
-      if (drainDone) return;
-    }
-  }
-
-  function collectComment(comment: string): void {
-    const m = FINGERPRINT_RE.exec(comment);
-    if (m) receivedFingerprint = m[1].toLowerCase();
-    const tm = TEK_FINGERPRINT_RE.exec(comment);
-    if (tm) receivedTekFingerprint = tm[1].toLowerCase();
-  }
-
-  const ptReader = plaintextStream.getReader();
-  let cryptoVerifyError: BackupCryptoError | null = null;
-  try {
-    while (!aborted) {
-      const { value, done } = await ptReader.read();
-      if (done) break;
-      if (!value || value.byteLength === 0) continue;
-      totalPlaintextBytes += value.byteLength;
-      if (totalPlaintextBytes > MAX_PLAINTEXT_BYTES) {
-        abortReason = { error: `SQL body exceeds ${MAX_PLAINTEXT_BYTES / (1024 * 1024)}MB limit`, status: 413 };
-        aborted = true;
-        break;
-      }
-      const text = decoder.decode(value, { stream: true });
-      const pending: string[] = [];
-      feedSqlChunk(splitter, text, (s) => pending.push(s), collectComment);
-      for (const stmt of pending) {
-        collectStatement(stmt);
-        if (aborted) break;
-      }
-      if (spool.needsFlush()) await spool.flush();
-    }
-    if (!aborted) {
-      const pending: string[] = [];
-      flushSqlChunk(splitter, (s) => pending.push(s), collectComment);
-      for (const stmt of pending) collectStatement(stmt);
-      await spool.flush();
-    } else {
-      try {
-        await drainPlaintext(ptReader);
-      } catch (err) {
-        // A tag failure is held, not returned: it outranks the abort reason below.
-        if (err instanceof BackupCryptoError) cryptoVerifyError = err;
-        else return readFailure(err, "drain");
-      }
-    }
-  } catch (err) {
-    return readFailure(err, "stream");
-  } finally {
-    ptReader.releaseLock();
-  }
-
-  // Auth-tag mismatch on the abort drain takes precedence over validation/size errors.
-  // A tampered ciphertext must surface as a crypto failure, not as "blocked statement".
-  if (cryptoVerifyError) {
-    return { ok: false, status: cryptoVerifyError.status, error: cryptoVerifyError.message };
-  }
-
-  if (abortReason) {
-    return { ok: false, status: abortReason.status, error: abortReason.error };
-  }
-
-  if (errors.length > 0) {
+  if (parsed.errors.length > 0) {
     return {
       ok: false,
       status: 200,
       error: "Backup failed validation",
-      errors,
+      errors: parsed.errors,
       summary: {
-        total: totalStatements,
+        total: parsed.totalStatements,
         executed: 0,
-        skipped,
-        errors: errors.length,
+        skipped: SKIPPED_STATEMENTS,
+        errors: parsed.errors.length,
         conflictSkippedByTable: {},
         conflictSkippedTotal: 0,
       },
     };
   }
 
-  const expectedFingerprint = computeSchemaFingerprint();
-  const warnings: string[] = [];
-  if (receivedFingerprint && receivedFingerprint !== expectedFingerprint) {
-    return {
-      ok: false,
-      status: 409,
-      error:
-        `Schema mismatch — restore refused. Backup fingerprint ${receivedFingerprint} does not match this server's schema fingerprint ${expectedFingerprint}. The database has not been touched. Restore only into a server running the same schema version.`,
-    };
+  let verdict: ReturnType<typeof fingerprintVerdict>;
+  try {
+    verdict = fingerprintVerdict(parsed);
+  } catch (err) {
+    // The schema file could not be read: nothing has been touched.
+    console.error("[backup/import] schema fingerprint unavailable:", err);
+    return { ok: false, status: 500, error: RESTORE_ROLLED_BACK_MESSAGE };
   }
-  if (!receivedFingerprint) {
-    warnings.push(
-      `This backup has no schema fingerprint (it was created by an older version). Proceeding, but if the schema has drifted the restore will roll back partway through.`,
-    );
-  }
-  // Encrypted secrets (API keys, OAuth tokens, SMTP password) are AES-encrypted with
-  // TOKEN_ENCRYPTION_KEY. Restoring onto a server with a DIFFERENT key leaves them as
-  // undecryptable ciphertext. Warn (don't refuse — the rest of the data restores fine
-  // and the operator can re-enter the secrets afterward).
-  const currentTekFingerprint = tokenEncryptionKeyFingerprint();
-  if (receivedTekFingerprint && currentTekFingerprint && receivedTekFingerprint !== currentTekFingerprint) {
-    warnings.push(
-      `This backup's encrypted secrets (API keys, tokens, SMTP password, two-factor authenticator secrets) were encrypted with a different TOKEN_ENCRYPTION_KEY than this server uses — they will restore but won't be decryptable. Re-enter them in Settings after the restore.`,
-    );
-  }
+  if ("ok" in verdict) return verdict;
+  const { warnings } = verdict;
 
   // Defense-in-depth floor: a dump that decrypted cleanly (valid GCM tag) but
   // parsed to ZERO insertable statements would still TRUNCATE every table and
@@ -756,71 +954,9 @@ async function runBackupImport(
     };
   }
 
-  const truncateList = BACKUP_TABLES.map((t) => `"public"."${t}"`).join(", ");
-  const truncateStmt = `TRUNCATE TABLE ${truncateList} RESTART IDENTITY`;
-
-  // INSERT INTO "public"."<Table>" (...) ...  — capture the table name to attribute
-  // conflict-skipped rows in the response summary. Statements are already validated
-  // against the BACKUP_TABLES allowlist (ALLOWED_PATTERNS above), so a plain
-  // capturing match suffices here. The group MUST be capturing: m[1] is the table name.
-  const INSERT_TABLE_RE = /^INSERT INTO "public"\."([^"]+)"/i;
-
-  let executed = 0;
-  const conflictSkippedByTable: Record<string, number> = {};
-  let conflictSkippedTotal = 0;
-  let rejection: { status: number; error: string } | null;
+  let restored: Awaited<ReturnType<typeof restoreInTransaction>>;
   try {
-    rejection = await prisma.$transaction(async (tx) => {
-      // Advisory lock 43 (setup-lock.ts) is shared with /api/auth/register and the setup
-      // gates. Holding it inside the TRUNCATE+INSERT transaction guarantees a racing register
-      // can't sneak a new user row between an outer freshness check and the truncate. In
-      // "setup" mode we also re-check the freshness invariant under the lock so an attacker
-      // can't pre-stage a chunked import and fire the final chunk after a legitimate admin
-      // completes setup.
-      await lockSetupInTx(tx);
-      if (mode === "setup") {
-        const setupCompleted = await tx.setting.findUnique({ where: { key: "setup_completed_at" } });
-        const userCount = await tx.user.count();
-        if (setupCompleted !== null || userCount > 0) {
-          return { status: 409, error: SETUP_NOT_FRESH_MESSAGE };
-        }
-      }
-      await tx.$executeRawUnsafe(truncateStmt);
-      for await (const stmt of spool.read()) {
-        // Older exports (pre-snapshot fix) could emit duplicate rows when a
-        // sync wrote between paginated SELECTs. Force-append ON CONFLICT DO
-        // NOTHING so the restore tolerates those dumps instead of aborting
-        // on the first collision. The TRUNCATE above guarantees the only
-        // duplicates possible are within the dump itself.
-        // The "already has a conflict clause" test must be anchored at the end
-        // of the statement: an unanchored /ON CONFLICT/i also matches that text
-        // inside row data (an issue message quoting a Postgres error, a cached
-        // TMDB overview), which silently skipped the append for exactly the rows
-        // it protects — the duplicate then raised 23505 and rolled the whole
-        // restore back. Validation already pins the tail to this shape.
-        const safeStmt = stmt.startsWith("INSERT") && !HAS_CONFLICT_TAIL_RE.test(stmt)
-          ? `${stmt} ON CONFLICT DO NOTHING`
-          : stmt;
-        const affected = await tx.$executeRawUnsafe(safeStmt);
-        executed++;
-        const m = INSERT_TABLE_RE.exec(stmt);
-        if (m && typeof affected === "number" && affected === 0) {
-          const table = m[1];
-          conflictSkippedByTable[table] = (conflictSkippedByTable[table] ?? 0) + 1;
-          conflictSkippedTotal++;
-        }
-      }
-      // A restore must not bring back sessions (guardrail 6g). The dump carries
-      // the AuthSession rows AND each user's sessionsRevokedAt/passwordChangedAt
-      // as of when it was taken, so restoring an older backup resurrected every
-      // device the owner had signed out since — a stolen phone revoked last
-      // week, or every session a password change ended. Native tokens never
-      // expire (guardrail 6c), so that resurrection was permanent. Inside the
-      // same transaction, so a rolled-back restore leaves sessions untouched.
-      await tx.authSession.deleteMany({});
-      await tx.user.updateMany({ data: { sessionsRevokedAt: new Date() } });
-      return null;
-    }, { timeout: restoreTxTimeoutMs(totalPlaintextBytes, spool.count), maxWait: 10_000 });
+    restored = await restoreInTransaction(spool, mode, parsed.totalPlaintextBytes);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Log the underlying DB error server-side; do not echo it to the client.
@@ -828,30 +964,18 @@ async function runBackupImport(
     console.error("[backup/import] import failed:", msg);
     return { ok: false, status: 500, error: RESTORE_ROLLED_BACK_MESSAGE };
   }
-
-  if (rejection) {
-    return { ok: false, status: rejection.status, error: rejection.error };
+  if ("rejected" in restored) {
+    return { ok: false, status: restored.rejected.status, error: restored.rejected.error };
   }
 
-  // The transaction committed: sessions are gone and every cutoff is now.
-  // A cookie whose dbCheckedAt is still inside its window would otherwise
-  // skip that lookup for up to 60s and act with its pre-restore privileges.
-  invalidateCachedSessionChecks();
-  // The Setting table was replaced, Radarr/Sonarr instances included: a
-  // `cached=1` read skips its route's instance checks, so a kept answer could
-  // paint an instance the restored config no longer has (guardrail 5h).
-  clearArrSnapshots();
-  // Every other memo built from the replaced tables (feature flags, the
-  // Discord key, session lengths, agents, library and activity caches).
-  await invalidateRestoredCaches();
+  await afterCommittedRestore();
 
   warnings.push(
     "Every account was signed out by the restore (sessions in the backup are never brought back). Sign in again.",
   );
-
-  if (conflictSkippedTotal > 0) {
+  if (restored.conflictSkippedTotal > 0) {
     warnings.push(
-      `${conflictSkippedTotal} duplicate row(s) in the backup were skipped on restore (the dump contained internal duplicates, e.g. from an older export). The restore is otherwise complete.`,
+      `${restored.conflictSkippedTotal} duplicate row(s) in the backup were skipped on restore (the dump contained internal duplicates, e.g. from an older export). The restore is otherwise complete.`,
     );
   }
 
@@ -859,12 +983,12 @@ async function runBackupImport(
     ok: true,
     status: 200,
     summary: {
-      total: totalStatements,
-      executed,
-      skipped,
+      total: parsed.totalStatements,
+      executed: restored.executed,
+      skipped: SKIPPED_STATEMENTS,
       errors: 0,
-      conflictSkippedByTable,
-      conflictSkippedTotal,
+      conflictSkippedByTable: restored.conflictSkippedByTable,
+      conflictSkippedTotal: restored.conflictSkippedTotal,
     },
     warning: warnings.length ? warnings.join(" ") : null,
   };

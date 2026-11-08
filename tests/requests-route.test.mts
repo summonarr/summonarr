@@ -647,6 +647,18 @@ test("GET scopes a plain USER to their own requests (narrow select) while MANAGE
   assert.ok(allArgs.include, "the manager path includes the requesting user relation");
 });
 
+test("GET is rate-limited per user: the 61st list read in a minute is a 429 with Retry-After that reads nothing", async () => {
+  const { token } = await mintSession();
+  for (let i = 0; i < 60; i++) assert.equal((await list(token)).status, 200, `read ${i + 1}`);
+  ops.length = 0;
+  const limited = await list(token);
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get("retry-after"), "60");
+  assert.equal(opsOf("mediaRequest.findMany").length, 0);
+  // Another caller's budget is their own.
+  assert.equal((await list((await mintSession()).token)).status, 200);
+});
+
 // ── pre-body gates ──────────────────────────────────────────────────────────
 
 test("the site-wide Discord-link requirement blocks unlinked users with 403 and passes linked ones through", async () => {
@@ -1398,6 +1410,53 @@ test("auto-routing and the rating cap share ONE details read: the cap still refu
   assert.equal(createdData().arrInstance, "anime");
   assert.equal(detailsReads.filter((k) => k === "movie:603:details").length, 1);
   assert.equal(fetchCalls.length, 0);
+});
+
+// A capped requester's certification that can't be read (TMDB down, no cached
+// details) is not refused — an outage must not block every capped user — but
+// it is never auto-approved: an admin reviews it, so the outage can't slip a
+// title past the cap and straight into Radarr/Sonarr.
+test("the rating cap: an auto-approver whose certification can't be read is filed PENDING, never auto-approved", async () => {
+  fetchImpl = () => { throw new Error("TMDB unreachable"); };
+  const capped = await mintSession({ permissions: String(Permission.REQUEST | Permission.AUTO_APPROVE), maxContentRating: "PG-13" });
+  const res = await post(capped.token, requestBody(capped.userId));
+  assert.equal(res.status, 201);
+  assert.equal(createdData().status ?? "PENDING", "PENDING", "an unverified rating is reviewed, not auto-approved");
+  assert.equal("approvedAt" in createdData(), false);
+  assert.equal(((await res.json()) as Record<string, unknown>).status, "PENDING");
+
+  // An uncapped auto-approver is untouched by the outage: no cap, no lookup.
+  ops.length = 0;
+  const uncapped = await mintSession({ permissions: String(Permission.REQUEST | Permission.AUTO_APPROVE) });
+  await post(uncapped.token, requestBody(uncapped.userId));
+  assert.equal(createdData().status, "APPROVED");
+});
+
+// The Discord picker's auto-approve role is the global auto-approve bit and no
+// more: it never auto-approves onto a restricted (or 4K) instance the requester
+// may only REQUEST on — that takes the instance's own auto-approve grant.
+test("a Discord auto-approve role auto-approves on the default instance, never on a restricted one it holds no auto-approve grant for", async () => {
+  const { createMediaRequest } = await import("../src/lib/request-create.ts");
+  seedAnimeInstance();
+  const grants = { anime: { request: true } };
+  const { userId } = await mintSession({ instanceGrants: grants });
+  const session = { user: { id: userId, role: "USER", permissions: Permission.REQUEST, name: "Picker", email: "picker@example.com" } };
+  const ctx = {
+    settings: {},
+    userRecord: { discordId: null, movieQuotaLimit: null, movieQuotaDays: null, tvQuotaLimit: null, tvQuotaDays: null, maxContentRating: null, instanceGrants: grants },
+  };
+  const runNow = (task: () => Promise<void>) => { afterTasks.push(task); };
+  fetchImpl = () => { throw new Error("arr unreachable"); };
+
+  const restricted = await createMediaRequest(session as never, ctx, { tmdbId: 603, mediaType: "MOVIE", arrInstance: "anime" }, undefined, { autoApprove: true, afterResponse: runNow });
+  assert.equal(restricted.ok, true);
+  assert.equal(createdData().arrInstance, "anime");
+  assert.equal(createdData().status ?? "PENDING", "PENDING", "the role does not reach a restricted instance");
+
+  ops.length = 0;
+  await createMediaRequest(session as never, ctx, { tmdbId: 604, mediaType: "MOVIE" }, undefined, { autoApprove: true, afterResponse: runNow });
+  assert.equal(createdData().arrInstance, "");
+  assert.equal(createdData().status, "APPROVED", "on the default instance the role auto-approves");
 });
 
 // ── language of the refusal text (apiUser.* catalog) ────────────────────────

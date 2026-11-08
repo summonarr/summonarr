@@ -1068,7 +1068,7 @@ test("feature.integration.push=false short-circuits every notify helper: zero su
   await approvedPushFor({ userId: "u-x", title: "Dune", mediaType: "MOVIE" });
   await notifyUsersRequestsAvailablePush([{ requestedBy: "u-x", title: "Dune", mediaType: "MOVIE" }]);
   await notifyAdminsNewIssuePush({ title: "Dune", issueType: "VIDEO", reportedBy: "alice" });
-  assert.equal(await notifyAdminGrabCompletedPush({ userId: "u-x", title: "Dune", scope: "ALL", issueId: "i1" }), "skipped-no-keys");
+  assert.equal(await notifyAdminGrabCompletedPush({ userId: "u-x", title: "Dune", scope: "ALL", issueId: "i1" }), "skipped-disabled", "push switched off is its own outcome, not a key problem");
 
   assert.equal(subQueries.length, 0);
   assert.equal(userFindUniqueCalls.length, 0);
@@ -1461,4 +1461,30 @@ test("buildVapidContact passes a bare address through and falls back sensibly", 
   assert.equal(buildVapidContact(null, "user@host.tld"), "mailto:user@host.tld", "smtpUser is the second choice");
   assert.equal(buildVapidContact(null, null), "mailto:admin@localhost");
   assert.equal(buildVapidContact("", ""), "mailto:admin@localhost");
+});
+
+test("process-wide relay cache (guardrail 27a): an invalidation in one chunk's copy reaches the copy a sender reads", async () => {
+  subRows = [iosSub("u-chunk", "token-chunk")];
+  let relayReads = 0;
+  settingFindManyHook = async (keys) => {
+    if (keys.includes("apnsRelayUrl")) relayReads++;
+  };
+  const otherSpecifier = "../src/lib/push.ts?chunk=settings-route";
+  const other: typeof import("../src/lib/push.ts") = await import(otherSpecifier);
+  assert.notEqual(other.invalidateApnsRelayCache, invalidateApnsRelayCache, "a distinct module instance");
+  await sendApnsTestToUser("u-chunk"); // warms the cache
+  const warm = relayReads;
+  await sendApnsTestToUser("u-chunk");
+  assert.equal(relayReads, warm, "the cached config is reused");
+  other.invalidateApnsRelayCache(); // the settings route's copy
+  await sendApnsTestToUser("u-chunk");
+  assert.equal(relayReads, warm + 1, "the sender's copy re-read the config after the other copy invalidated it");
+});
+
+test("a relay error body with non-string fields is read as no detail, never printed as [object Object]", async () => {
+  subRows = [iosSub("u-odd", "token-odd")];
+  relayRespond = () => jsonResponse({ error: { nested: true }, reason: 42 }, 400);
+  await sendApnsTestToUser("u-odd");
+  assert.ok(errors.some((e) => e.includes("APNs relay rejected the payload (400: no error given)")), errors.join("\n"));
+  assert.ok(!errors.some((e) => e.includes("[object Object]")));
 });

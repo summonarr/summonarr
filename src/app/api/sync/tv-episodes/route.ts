@@ -1,13 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { plexSettingKey, jellyfinSettingKey } from "@/lib/media-instances";
-import { getMediaInstances } from "@/lib/media-instance-registry";
+import { getMediaInstances, type MediaInstanceConfig } from "@/lib/media-instance-registry";
 import { prisma } from "@/lib/prisma";
-import { getPlexTVEpisodes, getPlexLibrarySections, type PlexTVEpisodeData } from "@/lib/plex";
+import { getPlexTVEpisodes, getPlexLibrarySections } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
 import { buildPlexShowKeyMap } from "@/lib/plex-legacy-resolve";
-import { getJellyfinTVEpisodes, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
+import { getJellyfinTVEpisodes } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
-import { isCronAuthorized, replaceEpisodeCacheForSource, withCronRunRecording } from "@/lib/cron-auth";
+import { earliestAddedPerEpisode, replaceEpisodeCacheForSource, type EpisodeCacheRow } from "@/lib/episode-cache";
+import { parseLibrarySelection } from "@/lib/library-resync";
+import { isCronAuthorized } from "@/lib/cron-auth";
+import { CRON_DEGRADED_HEADER, withCronRunRecording } from "@/lib/cron-history";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Allow up to 5 minutes: fetching every episode of a large TV library is slow.
@@ -20,6 +23,8 @@ export async function POST(request: NextRequest) {
   }
   return withCronRunRecording("tv-episodes-sync", () => syncTvEpisodes());
 }
+
+type EpisodeSource = "plex" | "jellyfin";
 
 // Rebuilds the shared TVEpisodeCache from EVERY configured server of each type.
 //
@@ -47,83 +52,113 @@ async function syncTvEpisodes() {
     skipped: [] as string[],
   };
 
-  // ── Plex ──────────────────────────────────────────────────────────────────
-  {
-    const instances = await getMediaInstances("plex");
-    const episodes: Awaited<ReturnType<typeof getPlexTVEpisodes>> = [];
-    let configured = 0;
-    let complete = true;
+  // One source failing never stops the other.
+  const plex = await rebuildEpisodeSource("plex", plexInstanceEpisodes, results.errors);
+  if (plex === "skipped") results.skipped.push("plex");
+  else results.plex = plex;
+  const jellyfin = await rebuildEpisodeSource("jellyfin", jellyfinInstanceEpisodes, results.errors);
+  if (jellyfin === "skipped") results.skipped.push("jellyfin");
+  else results.jellyfin = jellyfin;
 
-    for (const inst of instances) {
-      const cfg = await getPlexConfig(inst.slug);
-      if (!cfg.url || !cfg.token) continue; // unconfigured contributes nothing and is not a failure
-      configured++;
-      const serverUrl = cfg.url.replace(/\/$/, "");
-      const token = cfg.token;
-      const selected = await readSelection(plexSettingKey(inst.slug, "Libraries"));
-      try {
-        const sections = await getPlexLibrarySections(serverUrl, token);
-        // Element-wise, never `push(...array)`: this accumulator unions every
-        // configured instance's episodes, so spreading it as call arguments hits
-        // V8's argument ceiling on a large library and the catch below downgrades
-        // that to `complete = false`, skipping the rewrite entirely.
-        // The map is built with legacy-agent shows resolved, as the orchestrator does —
-        // the internal fallback walk can't see them and this rewrite is whole-table.
-        const showKeys = await buildPlexShowKeyMap(serverUrl, token, selected, sections);
-        for (const e of await getPlexTVEpisodes(serverUrl, token, selected, sections, showKeys)) episodes.push(e);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[sync/tv-episodes] Plex episode sync failed for instance "${inst.slug}":`, msg);
-        results.errors.push(`${errorLabel("Plex", inst.slug, inst.name)}: ${msg}`);
-        complete = false;
-      }
-    }
+  // A source left untouched is a failed run for the cron history
+  // (withCronRunRecording reads X-Cron-Degraded), even though the answer stays
+  // 200 like the orchestrator's: the healthy source's rewrite still happened.
+  return NextResponse.json(
+    results,
+    results.skipped.length > 0 ? { headers: { [CRON_DEGRADED_HEADER]: results.skipped.join(",") } } : undefined,
+  );
+}
 
-    if (configured > 0 && complete) {
-      await rewrite("plex", episodes);
-      results.plex = episodes.length;
-    } else if (configured > 0) {
-      // Deliberately NOT a partial write — see the all-or-nothing note above.
-      results.skipped.push("plex");
-      console.warn("[sync/tv-episodes] Plex episode cache left untouched — at least one server failed, and a partial union would wipe it.");
-    }
+/**
+ * One source's whole-namespace rebuild: every registered server's episodes,
+ * then ONE replace. Returns the rows written (0 with nothing configured), or
+ * "skipped" when the cache was left untouched — a server failed (a partial
+ * union would wipe its rows), or the registry or the write itself failed.
+ * Failures are reported in `errors`, never thrown.
+ */
+async function rebuildEpisodeSource(
+  source: EpisodeSource,
+  instanceEpisodes: (inst: MediaInstanceConfig) => Promise<EpisodeCacheRow[] | null>,
+  errors: string[],
+): Promise<number | "skipped"> {
+  const service = source === "plex" ? "Plex" : "Jellyfin";
+  let instances: MediaInstanceConfig[];
+  try {
+    instances = await getMediaInstances(source);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[sync/tv-episodes] ${service} server list failed:`, msg);
+    errors.push(`${service}: ${msg}`);
+    return "skipped";
   }
 
-  // ── Jellyfin ──────────────────────────────────────────────────────────────
-  {
-    const instances = await getMediaInstances("jellyfin");
-    const episodes: Awaited<ReturnType<typeof getJellyfinTVEpisodes>> = [];
-    let configured = 0;
-    let complete = true;
-
-    for (const inst of instances) {
-      const cfg = await getJellyfinConfig(inst.slug);
-      if (!cfg.url || !cfg.apiKey) continue;
+  const episodes: EpisodeCacheRow[] = [];
+  let configured = 0;
+  let complete = true;
+  for (const inst of instances) {
+    try {
+      const fetched = await instanceEpisodes(inst);
+      if (fetched === null) continue; // unconfigured contributes nothing and is not a failure
       configured++;
-      const baseUrl = cfg.url.replace(/\/$/, "");
-      const apiKey = cfg.apiKey;
-      const selected = await readSelection(jellyfinSettingKey(inst.slug, "Libraries"));
-      try {
-        // Element-wise — see the Plex arm above.
-        for (const e of await getJellyfinTVEpisodes(baseUrl, apiKey, selected)) episodes.push(e);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[sync/tv-episodes] Jellyfin episode sync failed for instance "${inst.slug}":`, msg);
-        results.errors.push(`${errorLabel("Jellyfin", inst.slug, inst.name)}: ${msg}`);
-        complete = false;
-      }
-    }
-
-    if (configured > 0 && complete) {
-      await rewrite("jellyfin", episodes);
-      results.jellyfin = episodes.length;
-    } else if (configured > 0) {
-      results.skipped.push("jellyfin");
-      console.warn("[sync/tv-episodes] Jellyfin episode cache left untouched — at least one server failed, and a partial union would wipe it.");
+      // Element-wise, never `push(...array)`: this accumulator unions every
+      // configured instance's episodes, so spreading it as call arguments hits
+      // V8's argument ceiling on a large library and the catch below would
+      // downgrade that to an incomplete union, skipping the rewrite entirely.
+      for (const e of fetched) episodes.push(e);
+    } catch (err) {
+      // A config or selection read that failed is a server we could not read:
+      // counted as configured, so its rows are never wiped by a partial union.
+      configured++;
+      complete = false;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[sync/tv-episodes] ${service} episode sync failed for instance "${inst.slug}":`, msg);
+      errors.push(`${errorLabel(service, inst.slug, inst.name)}: ${msg}`);
     }
   }
+  if (configured === 0) return 0;
+  if (!complete) {
+    // Deliberately NOT a partial write — see the all-or-nothing note above.
+    console.warn(`[sync/tv-episodes] ${service} episode cache left untouched — at least one server failed, and a partial union would wipe it.`);
+    return "skipped";
+  }
 
-  return NextResponse.json(results);
+  // One row per (show, season, episode): two servers holding the same show
+  // count it once, as the cache stores it.
+  const rows = earliestAddedPerEpisode(episodes);
+  try {
+    // The staged load + one short swap under advisory lock 2002,1 (plex) /
+    // 2002,2 (jellyfin), shared with every other writer of the namespace, so
+    // two runs can't interleave their delete/insert phases.
+    await replaceEpisodeCacheForSource(source, rows);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[sync/tv-episodes] ${service} episode cache write failed:`, msg);
+    errors.push(`${service}: ${msg}`);
+    return "skipped";
+  }
+  return rows.length;
+}
+
+// One Plex server's episodes; null when it is not configured. The show map is
+// built with legacy-agent shows resolved, as the orchestrator does — the
+// internal fallback walk can't see them and this rewrite is whole-table.
+async function plexInstanceEpisodes(inst: MediaInstanceConfig): Promise<EpisodeCacheRow[] | null> {
+  const cfg = await getPlexConfig(inst.slug);
+  if (!cfg.url || !cfg.token) return null;
+  const serverUrl = cfg.url.replace(/\/$/, "");
+  const token = cfg.token;
+  const selected = await readSelection(plexSettingKey(inst.slug, "Libraries"));
+  const sections = await getPlexLibrarySections(serverUrl, token);
+  const showKeys = await buildPlexShowKeyMap(serverUrl, token, selected, sections);
+  return getPlexTVEpisodes(serverUrl, token, selected, sections, showKeys);
+}
+
+// One Jellyfin server's episodes; null when it is not configured.
+async function jellyfinInstanceEpisodes(inst: MediaInstanceConfig): Promise<EpisodeCacheRow[] | null> {
+  const cfg = await getJellyfinConfig(inst.slug);
+  if (!cfg.url || !cfg.apiKey) return null;
+  const selected = await readSelection(jellyfinSettingKey(inst.slug, "Libraries"));
+  return getJellyfinTVEpisodes(cfg.url.replace(/\/$/, ""), cfg.apiKey, selected);
 }
 
 // These strings are shown to the admin, not logged, so the DEFAULT server keeps
@@ -138,21 +173,5 @@ function errorLabel(service: "Plex" | "Jellyfin", slug: string, name: string): s
 // the server it came from). Unset ⇒ undefined ⇒ every library on that server.
 async function readSelection(key: string): Promise<Set<string> | undefined> {
   const row = await prisma.setting.findUnique({ where: { key } });
-  if (!row?.value) return undefined;
-  const parsed = new Set(row.value.split(",").map((k) => k.trim()).filter(Boolean));
-  return parsed.size ? parsed : undefined;
+  return parseLibrarySelection(row?.value);
 }
-
-// Whole-table replace for one source, inside the advisory lock that serializes
-// every wholesale rewrite of that namespace — the orchestrator, this route, and
-// the per-source resyncs all share it, so two runs can't interleave their
-// delete/insert phases and leave the cache empty or duplicated.
-async function rewrite(
-  source: "plex" | "jellyfin",
-  episodes: Array<PlexTVEpisodeData | JellyfinTVEpisodeData>,
-): Promise<void> {
-  // The helper loads the new rows first, then swaps them in with one short
-  // transaction under advisory lock 2002,1 (plex) / 2002,2 (jellyfin).
-  await replaceEpisodeCacheForSource(source, episodes);
-}
-

@@ -139,7 +139,9 @@ export function presetExceeds(role: string, callerPerms: bigint): boolean {
 }
 
 // Core check. The ADMIN superbit grants everything. mode "or" (default): any of
-// the required bits satisfies; "and": all required must be set.
+// the required bits satisfies; "and": all required must be set. An EMPTY list
+// grants nothing (fail closed): a requirement list that came out empty is a
+// caller bug, and reading it as "no requirement" would admit everyone.
 export function hasPermission(
   userPerms: bigint,
   required: PermissionValue | PermissionValue[],
@@ -147,7 +149,7 @@ export function hasPermission(
 ): boolean {
   if ((userPerms & Permission.ADMIN) !== 0n) return true;
   const reqs = Array.isArray(required) ? required : [required];
-  if (reqs.length === 0) return true;
+  if (reqs.length === 0) return false;
   return mode === "and"
     ? reqs.every((r) => (userPerms & r) !== 0n)
     : reqs.some((r) => (userPerms & r) !== 0n);
@@ -440,14 +442,12 @@ export function canViewMediaInstance(
   return grants[service]?.[instance.slug]?.view === true;
 }
 
-// JWT boundary — permissions ride the token as a decimal string.
+// JWT boundary — permissions ride the token as a decimal string. Decimal digits
+// only: BigInt also reads "-1" (every bit set, the ADMIN superbit included),
+// hex and binary. Bits outside the known space are dropped, never kept.
 export function parsePermissions(claim: string | undefined | null): bigint {
-  if (!claim) return 0n;
-  try {
-    return BigInt(claim);
-  } catch {
-    return 0n;
-  }
+  if (!claim || !/^\d+$/.test(claim)) return 0n;
+  return BigInt(claim) & KNOWN_MASK;
 }
 
 export function serializePermissions(perms: bigint): string {

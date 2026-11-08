@@ -157,3 +157,11 @@ test("getJellyfinConfig: two different instances never see each other's keys", a
   assert.deepEqual(await getJellyfinConfig(""), { url: "http://default.example.com", apiKey: "default-secret-key" });
   assert.deepEqual(await getJellyfinConfig("remote"), { url: "http://remote.example.com", apiKey: "remote-secret-key" });
 });
+
+test("getJellyfinConfig normalizes the URL as getConfiguredJellyfinUrl does: trimmed, and whitespace-only is unconfigured", async () => {
+  keyedRows.set("jellyfinUrl", { key: "jellyfinUrl", value: "  http://default.example.com:8096 \n" });
+  keyedRows.set("jellyfinApiKey", { key: "jellyfinApiKey", value: "k" });
+  assert.deepEqual(await getJellyfinConfig(), { url: "http://default.example.com:8096", apiKey: "k" });
+  keyedRows.set("jellyfinUrl", { key: "jellyfinUrl", value: " \t " });
+  assert.deepEqual(await getJellyfinConfig(), { url: null, apiKey: "k" });
+});

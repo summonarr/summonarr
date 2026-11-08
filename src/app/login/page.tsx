@@ -9,31 +9,30 @@ import { LoginForm } from "./login-form";
 import { getMaintenanceStatus } from "@/lib/maintenance";
 import { getTranslator } from "@/lib/i18n/server";
 import { isOidcConfigured } from "@/lib/oidc";
+import { first, type PageSearchParams } from "@/lib/search-params";
 
 export const dynamic = "force-dynamic";
 
-export default async function LoginPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
-}) {
+// The three plain settings the page reads, in one query.
+const LOGIN_SETTING_KEYS = ["siteTitle", "siteUrl", "disableLocalLogin"] as const;
 
-  const count = await prisma.user.count();
+export default async function LoginPage({ searchParams }: { searchParams: Promise<PageSearchParams> }) {
   // Fresh install: empty user table always lands on /setup. No exceptions for external providers —
   // the admin account is created locally first; Jellyfin/OIDC are wired up from Settings afterwards.
-  if (count === 0) redirect("/setup");
+  // An existence probe, not a count: this public page is hit on every visit.
+  const anyUser = await prisma.user.findFirst({ select: { id: true } });
+  if (!anyUser) redirect("/setup");
 
   // Independent reads, one round of them. getMaintenanceStatus keeps its own
   // fail-closed catch.
-  const [plexInstances, jellyfinInstances, siteTitleRow, siteUrlRow, disableLocalRow, maintenance, t] = await Promise.all([
+  const [plexInstances, jellyfinInstances, settingRows, maintenance, t] = await Promise.all([
     getSyncableMediaInstances("plex"),
     getSyncableMediaInstances("jellyfin"),
-    prisma.setting.findUnique({ where: { key: "siteTitle" } }),
-    prisma.setting.findUnique({ where: { key: "siteUrl" } }),
-    prisma.setting.findUnique({ where: { key: "disableLocalLogin" } }),
+    prisma.setting.findMany({ where: { key: { in: [...LOGIN_SETTING_KEYS] } }, select: { key: true, value: true } }),
     getMaintenanceStatus(),
     getTranslator(),
   ]);
+  const setting = (key: (typeof LOGIN_SETTING_KEYS)[number]) => settingRows.find((row) => row.key === key)?.value;
   // Fully DB-configured, like Jellyfin below: the Plex tab appears once at least
   // one instance has BOTH its ServerUrl and AdminToken stored. Deliberately
   // tighter than the old plexAdminToken-only check — a token-without-URL
@@ -51,9 +50,9 @@ export default async function LoginPage({
   // so the tab hides instead of failing on every click.
   const oidcEnabled = isOidcConfigured();
   const oidcName = process.env.OIDC_DISPLAY_NAME || "SSO";
-  const localLoginDisabled = disableLocalRow?.value === "true";
-  const siteTitle = siteTitleRow?.value || "Summonarr";
-  const siteUrl = siteUrlRow?.value || process.env.AUTH_URL || "";
+  const localLoginDisabled = setting("disableLocalLogin") === "true";
+  const siteTitle = setting("siteTitle") || "Summonarr";
+  const siteUrl = setting("siteUrl") || process.env.AUTH_URL || "";
   // The Playfair wordmark above the icon already says "Summonarr"; repeating it
   // as the h1 read as a stutter on every default install. When the title IS the
   // default, the wordmark becomes the page's h1 instead so the heading outline
@@ -62,7 +61,7 @@ export default async function LoginPage({
   const WordmarkTag = isDefaultTitle ? "h1" : "p";
   // /setup sends the new admin here when its automatic sign-in didn't go
   // through, so the account it just created doesn't look like a failure.
-  const accountCreated = (await searchParams).created === "1";
+  const accountCreated = first((await searchParams).created) === "1";
 
   return (
     <div

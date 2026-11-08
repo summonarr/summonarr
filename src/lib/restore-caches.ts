@@ -14,11 +14,12 @@ import { invalidateAgentCache } from "@/lib/notify-agents";
 import { invalidateApnsRelayCache } from "@/lib/push";
 import { invalidateMdblistPlanCache } from "@/lib/mdblist";
 import { invalidateArrLibraryIndexCache } from "@/lib/library-cleanup-arr";
-import { clearActivityCache } from "@/lib/play-history";
+import { clearActivityCache, invalidatePlayHistorySettings } from "@/lib/play-history";
 import { clearRecentlyAddedCache } from "@/lib/recently-added";
 import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
 import { clearCandidateCache } from "@/lib/fix-match-candidate-cache";
 import { invalidateStatsTimeZone } from "@/lib/stats-time-zone-data";
+import { invalidateWatchGradeSettings } from "@/lib/watch-grade-data";
 
 export function invalidateCachesAfterRestore(): void {
   invalidatePublicKeyCache();
@@ -30,7 +31,9 @@ export function invalidateCachesAfterRestore(): void {
   invalidateMdblistPlanCache();
   invalidateArrLibraryIndexCache();
   clearActivityCache();
+  invalidatePlayHistorySettings();
   invalidateStatsTimeZone();
+  invalidateWatchGradeSettings();
   clearRecentlyAddedCache();
   invalidateNeverWatchedReport();
   clearCandidateCache();

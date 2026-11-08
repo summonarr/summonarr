@@ -6,11 +6,12 @@
 // blindly (guardrail 5e). Every call goes through arrFetch (guardrail 5).
 // Nothing is cached, and nothing in Summonarr is written except the audit row
 // the route adds.
-import { ArrResponseError, arrErrorKind, arrErrorMessage, arrFetch, arrFetchNoContent, getArrCfg, type ArrCfg } from "./arr";
-import { ArrInstanceError, configuredArrCfg, enabledArrInstances } from "./arr-admin";
+import { ArrResponseError, arrErrorMessage, arrFetch, arrFetchNoContent, getArrCfg, type ArrCfg } from "./arr";
+import { ArrInstanceError, configuredArrCfg, enabledArrInstances, postArrCommand } from "./arr-admin";
+import { settleArrInstances } from "./arr-instance-fanout";
 import type { ArrErrorKind } from "./arr-error-kind";
 import { pagedReadEnded } from "./arr-parse";
-import { mapLimit, settleLimit } from "./concurrency";
+import { mapLimit } from "./concurrency";
 import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
 import { prisma } from "./prisma";
 import {
@@ -38,8 +39,6 @@ import {
   type QueueService,
 } from "./arr-queue";
 
-export const QUEUE_SERVICES: readonly QueueService[] = ["radarr", "sonarr"];
-
 export function parseQueueService(v: unknown): QueueService | null {
   return v === "radarr" || v === "sonarr" ? v : null;
 }
@@ -65,6 +64,11 @@ export interface QueueReport {
 export const PAGE_SIZE = 250;
 const QUEUE_READ_TIMEOUT_MS = 20_000;
 export const MAX_PAGES = 40;
+// The page's whole read of one instance: each page has its own 20 s, but a
+// slow instance on every one of 40 pages held the page (and its background
+// refresh) for many minutes. Past this it answers what it read, marked
+// incomplete — inside a reverse proxy's ~60 s.
+export const QUEUE_LISTING_BUDGET_MS = 45_000;
 const LISTING_CONCURRENCY = 4;
 const REQUESTER_CHUNK = 1_000;
 const MAX_REQUESTERS_PER_ROW = 5;
@@ -84,42 +88,27 @@ export interface QueueListing {
 
 /**
  * One instance's queue, page by page, on a connection the caller resolved.
- * `signal` (the arr monitor's — guardrail 41): once it aborts no further page
- * is read and the page in flight is cancelled; the walk RETURNS what it has,
- * marked `stopped`, and never throws for the abort.
+ * `signal` (the arr monitor's — guardrail 41 — or the page's read budget):
+ * once it aborts no further page is read and the page in flight is cancelled;
+ * the walk RETURNS what it has, marked `stopped`, and never throws for the abort.
+ *
+ * Offset paging over a queue that changes between pages can skip a record (one
+ * leaving an earlier page shifts the next page's first record back onto the
+ * page already read). The arr offers no cursor, so the listing accepts it: the
+ * page's next re-read shows the record, and a write re-reads before it calls a
+ * posted id gone (liveQueueRows).
  */
 export async function readQueueListing(cfg: ArrCfg, service: QueueService, signal?: AbortSignal): Promise<QueueListing> {
-  // Unknown items — downloads the arr can't match to a title — are included:
-  // they are the ones that never import on their own and need an admin.
-  const include = service === "radarr"
-    ? "includeMovie=true&includeUnknownMovieItems=true"
-    : "includeSeries=true&includeEpisode=true&includeUnknownSeriesItems=true";
   const records: unknown[] = [];
   let total: number | null = null;
   let ended = false;
   let stopped = false;
   let pages = 0;
   for (let page = 1; page <= MAX_PAGES; page++) {
-    if (signal?.aborted) {
+    const res = signal?.aborted ? STOPPED : await readQueuePage(cfg, service, page, signal);
+    if (res === STOPPED) {
       stopped = true;
       break;
-    }
-    // Quiet: loadDownloadQueue reports a failed instance once (warnOnChange).
-    // The page re-reads every 20 s: a dark instance answers "unreachable" well
-    // inside that instead of holding every poll for the 30 s default.
-    let res: { records?: unknown; totalRecords?: unknown };
-    try {
-      res = await arrFetch<{ records?: unknown; totalRecords?: unknown }>(
-        cfg, `/api/v3/queue?page=${page}&pageSize=${PAGE_SIZE}&sortKey=added&sortDirection=ascending&${include}`,
-        { quietErrors: true, timeoutMs: QUEUE_READ_TIMEOUT_MS, ...(signal ? { signal } : {}) },
-      );
-    } catch (err) {
-      // The page the abort cancelled: return, never throw, on an abort.
-      if (signal?.aborted) {
-        stopped = true;
-        break;
-      }
-      throw err;
     }
     pages = page;
     const batch = Array.isArray(res?.records) ? res.records : [];
@@ -142,14 +131,44 @@ export async function readQueueListing(cfg: ArrCfg, service: QueueService, signa
   };
 }
 
-// Exported for the arr monitor (arr-watch-data.ts), which judges the same
-// records through the same fold (foldQueueRecords) as this page, and for the
-// paged reader's pins. `signal` as readQueueListing: the walk returns what it
-// has, which the aborted run discards.
-export async function readQueuePages(service: QueueService, instance: string, signal?: AbortSignal): Promise<unknown[]> {
+// The walk was stopped by its signal (distinct from an empty answer, which ends it).
+const STOPPED = Symbol("queue-read-stopped");
+
+// One page of the walk, or STOPPED when `signal` cancelled it — the walk
+// returns, never throws, on an abort.
+async function readQueuePage(
+  cfg: ArrCfg,
+  service: QueueService,
+  page: number,
+  signal: AbortSignal | undefined,
+): Promise<{ records?: unknown; totalRecords?: unknown } | null | typeof STOPPED> {
+  // Unknown items — downloads the arr can't match to a title — are included:
+  // they are the ones that never import on their own and need an admin.
+  const include = service === "radarr"
+    ? "includeMovie=true&includeUnknownMovieItems=true"
+    : "includeSeries=true&includeEpisode=true&includeUnknownSeriesItems=true";
+  try {
+    // Quiet: loadDownloadQueue reports a failed instance once (warnOnChange).
+    // The page re-reads every 20 s: a dark instance answers "unreachable" well
+    // inside that instead of holding every poll for the 30 s default.
+    return await arrFetch<{ records?: unknown; totalRecords?: unknown }>(
+      cfg, `/api/v3/queue?page=${page}&pageSize=${PAGE_SIZE}&sortKey=added&sortDirection=ascending&${include}`,
+      { quietErrors: true, timeoutMs: QUEUE_READ_TIMEOUT_MS, ...(signal ? { signal } : {}) },
+    );
+  } catch (err) {
+    if (signal?.aborted) return STOPPED;
+    throw err;
+  }
+}
+
+// readQueueListing by instance slug — the seam the paged reader's pins
+// (bounds, abort) drive it through; production callers resolve their own
+// connection. The whole listing comes back, so a caller can't mistake a
+// stopped or truncated walk for the full queue.
+export async function readQueuePages(service: QueueService, instance: string, signal?: AbortSignal): Promise<QueueListing> {
   const cfg = await getArrCfg(service, instance);
   if (!cfg) throw new Error("not configured");
-  return (await readQueueListing(cfg, service, signal)).records;
+  return readQueueListing(cfg, service, signal);
 }
 
 // Who asked for each title: the requesters of a non-declined request (pending,
@@ -158,6 +177,11 @@ export async function readQueuePages(service: QueueService, instance: string, si
 // are indexed ONCE by (media type, instance, id) — a TV request found by both
 // its tmdb and its tvdb id lands in one name Set — so each item is two lookups,
 // never a scan of every request (guardrail 5i: linear over a 10k-record queue).
+// The index key of one title on one instance: written from the request rows,
+// read back per queue item — one format for both.
+const requesterKey = (mediaType: "MOVIE" | "TV", instance: string, id: { tmdb: number } | { tvdb: number }): string =>
+  `${mediaType}|${instance}|${"tmdb" in id ? `tmdb:${id.tmdb}` : `tvdb:${id.tvdb}`}`;
+
 async function attachRequesters(items: QueueItem[]): Promise<void> {
   const movieIds = [...new Set(items.filter((i) => i.service === "radarr" && i.tmdbId !== null).map((i) => i.tmdbId as number))];
   const tvTmdbIds = [...new Set(items.filter((i) => i.service === "sonarr" && i.tmdbId !== null).map((i) => i.tmdbId as number))];
@@ -177,8 +201,9 @@ async function attachRequesters(items: QueueItem[]): Promise<void> {
       });
       for (const r of rows) {
         const name = r.user.name?.trim() || r.user.email;
-        index(`${r.mediaType}|${r.arrInstance}|tmdb:${r.tmdbId}`, name);
-        if (r.tvdbId !== null) index(`${r.mediaType}|${r.arrInstance}|tvdb:${r.tvdbId}`, name);
+        const mediaType = r.mediaType === "MOVIE" ? "MOVIE" : "TV";
+        index(requesterKey(mediaType, r.arrInstance, { tmdb: r.tmdbId }), name);
+        if (r.tvdbId !== null) index(requesterKey(mediaType, r.arrInstance, { tvdb: r.tvdbId }), name);
       }
     }
   };
@@ -193,9 +218,13 @@ async function attachRequesters(items: QueueItem[]): Promise<void> {
   }
   forgetWarnOnChange("queue:requesters");
   for (const item of items) {
-    const prefix = `${item.service === "radarr" ? "MOVIE" : "TV"}|${item.instance}|`;
+    const mediaType = item.service === "radarr" ? "MOVIE" : "TV";
     const names = new Set<string>();
-    for (const key of [item.tmdbId !== null ? `${prefix}tmdb:${item.tmdbId}` : null, item.tvdbId !== null ? `${prefix}tvdb:${item.tvdbId}` : null]) {
+    const keys = [
+      item.tmdbId !== null ? requesterKey(mediaType, item.instance, { tmdb: item.tmdbId }) : null,
+      item.tvdbId !== null ? requesterKey(mediaType, item.instance, { tvdb: item.tvdbId }) : null,
+    ];
+    for (const key of keys) {
       for (const name of (key && byTitle.get(key)) || []) {
         if (names.size >= MAX_REQUESTERS_PER_ROW) break;
         names.add(name);
@@ -205,34 +234,44 @@ async function attachRequesters(items: QueueItem[]): Promise<void> {
   }
 }
 
+// One instance's listing for the page, within QUEUE_LISTING_BUDGET_MS. A budget
+// that ran out before ANY page answered is a timed-out instance; after some,
+// what was read is listed and marked incomplete.
+async function readQueueForPage(service: QueueService, instance: string): Promise<{ listing: QueueListing; rows: QueueItem[]; cut: boolean }> {
+  const cfg = await getArrCfg(service, instance);
+  if (!cfg) throw new Error("not configured");
+  const budget = AbortSignal.timeout(QUEUE_LISTING_BUDGET_MS);
+  const listing = await readQueueListing(cfg, service, budget);
+  if (listing.stopped && listing.pages === 0) {
+    const err = new Error(`queue read timed out after ${QUEUE_LISTING_BUDGET_MS / 1000}s`);
+    err.name = "TimeoutError";
+    throw err;
+  }
+  return { listing, rows: foldQueueRecords(service, instance, listing.records), cut: listing.truncated || listing.stopped };
+}
+
 /** Every configured instance's queue, one row per download, attention first. */
 export async function loadDownloadQueue(): Promise<QueueReport> {
   const instances: QueueReport["instances"] = await enabledArrInstances();
-  const settled = await settleLimit(instances, LISTING_CONCURRENCY, async (inst) => {
-    const cfg = await getArrCfg(inst.service, inst.slug);
-    if (!cfg) throw new Error("not configured");
-    const listing = await readQueueListing(cfg, inst.service);
-    return { listing, rows: foldQueueRecords(inst.service, inst.slug, listing.records) };
+  // The page re-reads every 20s while open: an instance that stays down is
+  // one unchanged condition, logged once until it changes (guardrail 7b).
+  const outcomes = await settleArrInstances(instances, LISTING_CONCURRENCY, (inst) => readQueueForPage(inst.service, inst.slug), {
+    key: (inst) => `queue:${inst.service}:${inst.slug}`,
+    message: (inst, error) => `[queue] ${inst.service} instance "${inst.slug}" queue read failed: ${error}`,
   });
   const report: QueueReport = { instances, errors: [], items: [] };
   const truncated: NonNullable<QueueReport["truncated"]> = [];
-  settled.forEach((s, i) => {
-    const inst = instances[i];
-    // The page re-reads every 20s while open: an instance that stays down is
-    // one unchanged condition, logged once until it changes (guardrail 7b).
-    const logKey = `queue:${inst.service}:${inst.slug}`;
-    if (s.status === "fulfilled") {
-      // One by one, never a spread push of an upstream-sized list (guardrail 5i).
-      for (const row of s.value.rows) report.items.push(row);
-      const { listing } = s.value;
-      if (listing.truncated) truncated.push({ service: inst.service, instance: inst.slug, read: listing.records.length, total: listing.total });
-      forgetWarnOnChange(logKey);
-      return;
+  for (const o of outcomes) {
+    const { service, slug } = o.inst;
+    if (!o.ok) {
+      report.errors.push({ service, instance: slug, error: o.error, kind: o.kind });
+      continue;
     }
-    const error = arrErrorMessage(s.reason);
-    report.errors.push({ service: inst.service, instance: inst.slug, error, kind: arrErrorKind(s.reason) });
-    warnOnChange(logKey, error, `[queue] ${inst.service} instance "${inst.slug}" queue read failed: ${error}`);
-  });
+    // One by one, never a spread push of an upstream-sized list (guardrail 5i).
+    for (const row of o.value.rows) report.items.push(row);
+    const { listing, cut } = o.value;
+    if (cut) truncated.push({ service, instance: slug, read: listing.records.length, total: Math.max(listing.total, listing.records.length) });
+  }
   if (truncated.length > 0) report.truncated = truncated;
   await attachRequesters(report.items);
   sortQueueItems(report.items);
@@ -273,7 +312,7 @@ async function liveQueueRows(cfg: ArrCfg, service: QueueService, instance: strin
 /**
  * Remove downloads from one instance's queue through Radarr/Sonarr's bulk
  * DELETE — ONE call. Posted ids are names for downloads the instance currently
- * reports: a fresh `readQueuePages` is folded and intersected first, then
+ * reports: a fresh read (liveQueueRows) is folded and intersected first, then
  * ONE record id per matched download is sent (`liveRemovalIds` / 5c). An API
  * caller that posts every episode id of a Sonarr pack still blocklists once.
  * Throws `QueueGoneError` when nothing posted is still in the queue, so the
@@ -299,7 +338,7 @@ export async function removeFromQueue(
 /**
  * Send releases Radarr/Sonarr are HOLDING (a delay profile, an unavailable
  * client, a fallback) to the download client now — the arr's own "Grab" on a
- * pending queue item. Posted ids are names: a fresh `readQueuePages` is folded
+ * pending queue item. Posted ids are names: a fresh read (liveQueueRows) is folded
  * and intersected first (`liveGrabIds` — only still-pending rows, ONE id per
  * download), then ONE bulk POST. Throws `QueueGoneError` when nothing posted is
  * still pending, so the route 409s without sending a grab.
@@ -320,15 +359,15 @@ export async function grabPending(service: QueueService, instance: string, ids: 
  */
 export async function recheckDownloads(): Promise<{ instances: number; errors: Array<{ service: QueueService; instance: string; error: string; kind: ArrErrorKind }> }> {
   const instances = await enabledArrInstances();
-  const settled = await settleLimit(instances, LISTING_CONCURRENCY, async (inst) => {
+  const outcomes = await settleArrInstances(instances, LISTING_CONCURRENCY, async (inst) => {
     const cfg = await getArrCfg(inst.service, inst.slug);
     if (!cfg) throw new Error("not configured");
-    await arrFetch<unknown>(cfg, "/api/v3/command", { method: "POST", body: JSON.stringify({ name: "RefreshMonitoredDownloads" }) });
+    await postArrCommand(cfg, { name: "RefreshMonitoredDownloads" });
   });
   const errors: Array<{ service: QueueService; instance: string; error: string; kind: ArrErrorKind }> = [];
-  settled.forEach((r, i) => {
-    if (r.status === "rejected") errors.push({ service: instances[i].service, instance: instances[i].slug, error: arrErrorMessage(r.reason), kind: arrErrorKind(r.reason) });
-  });
+  for (const o of outcomes) {
+    if (!o.ok) errors.push({ service: o.inst.service, instance: o.inst.slug, error: o.error, kind: o.kind });
+  }
   return { instances: instances.length, errors };
 }
 
@@ -372,6 +411,22 @@ export interface ImportListing {
   languages: ImportChoice[];
 }
 
+// A dropdown's choices, or none when the instance couldn't list them — the
+// dialog then offers no correction for that field. Logged once per unchanged
+// condition (guardrail 7b): the dialog re-reads on every open.
+async function choicesOrEmpty<K, V>(service: QueueService, instance: string, what: "qualities" | "languages", read: Promise<Map<K, V>>): Promise<Map<K, V>> {
+  const logKey = `queue:import-${what}:${service}:${instance}`;
+  try {
+    const out = await read;
+    forgetWarnOnChange(logKey);
+    return out;
+  } catch (err) {
+    const error = arrErrorMessage(err);
+    warnOnChange(logKey, error, `[queue] ${service} instance "${instance}" ${what} for the import editor could not be read: ${error}`);
+    return new Map<K, V>();
+  }
+}
+
 /**
  * The files Radarr/Sonarr found in one download, what each matched to and why
  * it was refused, plus the instance's qualities and languages for the editor.
@@ -382,8 +437,8 @@ export async function loadImportCandidates(service: QueueService, instance: stri
   const cfg = await configuredCfg(service, instance);
   const [raw, qualities, languages] = await Promise.all([
     arrFetch<unknown>(cfg, manualImportPath(downloadId)),
-    readQualities(cfg).catch(() => new Map<number, { name: string; quality: unknown }>()),
-    readLanguages(cfg).catch(() => new Map<number, { id: number; name: string }>()),
+    choicesOrEmpty(service, instance, "qualities", readQualities(cfg)),
+    choicesOrEmpty(service, instance, "languages", readLanguages(cfg)),
   ]);
   return {
     files: importCandidates(service, raw),
@@ -409,32 +464,50 @@ const CATALOG_CONCURRENCY = 4;
 async function loadCatalog(cfg: ArrCfg, rows: ReturnType<typeof selectedRawRows>): Promise<ImportCatalog> {
   const needs = overrideNeeds(rows);
   if (needs.movieIds.length + needs.seriesIds.length > MAX_CATALOG_TITLES) throw new ImportOverrideError("tooManyTitles");
-  const notFound = async <T>(p: Promise<T>): Promise<T | null> => {
-    try {
-      return await p;
-    } catch (err) {
-      if (err instanceof ArrResponseError && err.status === 404) return null;
-      throw err;
-    }
-  };
   const [qualities, languages] = await Promise.all([
     needs.qualities ? readQualities(cfg) : Promise.resolve(new Map<number, { name: string; quality: unknown }>()),
     needs.languages ? readLanguages(cfg) : Promise.resolve(new Map<number, { id: number; name: string }>()),
   ]);
   // A few titles at a time; the first non-404 failure fails the call (mapLimit
-  // stops claiming titles after it). A series' episodes are read only once the
-  // series itself answered.
+  // stops claiming titles after it).
+  const movies = await readCatalogMovies(cfg, needs.movieIds);
+  const series = await readCatalogSeries(cfg, needs.seriesIds);
+  return {
+    qualities: new Map([...qualities].map(([k, v]) => [k, v.quality])),
+    languages,
+    movies,
+    series,
+  };
+}
+
+// A title the instance doesn't have (404) is absent from the catalog — the
+// correction naming it is then refused — never a failed call.
+async function orNotFound<T>(p: Promise<T>): Promise<T | null> {
+  try {
+    return await p;
+  } catch (err) {
+    if (err instanceof ArrResponseError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+async function readCatalogMovies(cfg: ArrCfg, ids: readonly number[]): Promise<Map<number, { id: number; title: string; year: number | null }>> {
   const movies = new Map<number, { id: number; title: string; year: number | null }>();
-  const movieRows = await mapLimit(needs.movieIds, CATALOG_CONCURRENCY, (id) =>
-    notFound(arrFetch<{ id?: unknown; title?: unknown; year?: unknown }>(cfg, `/api/v3/movie/${id}`)),
+  const rows = await mapLimit(ids, CATALOG_CONCURRENCY, (id) =>
+    orNotFound(arrFetch<{ id?: unknown; title?: unknown; year?: unknown }>(cfg, `/api/v3/movie/${id}`)),
   );
-  needs.movieIds.forEach((id, i) => {
-    const m = movieRows[i];
+  ids.forEach((id, i) => {
+    const m = rows[i];
     if (m && m.id === id) movies.set(id, { id, title: typeof m.title === "string" ? m.title : String(id), year: typeof m.year === "number" && m.year > 0 ? m.year : null });
   });
+  return movies;
+}
+
+// A series' episodes are read only once the series itself answered.
+async function readCatalogSeries(cfg: ArrCfg, ids: readonly number[]): Promise<Map<number, { id: number; title: string; episodes: Map<number, QueueEpisode> }>> {
   const series = new Map<number, { id: number; title: string; episodes: Map<number, QueueEpisode> }>();
-  const seriesRows = await mapLimit(needs.seriesIds, CATALOG_CONCURRENCY, async (id) => {
-    const sr = await notFound(arrFetch<{ id?: unknown; title?: unknown }>(cfg, `/api/v3/series/${id}`));
+  const rows = await mapLimit(ids, CATALOG_CONCURRENCY, async (id) => {
+    const sr = await orNotFound(arrFetch<{ id?: unknown; title?: unknown }>(cfg, `/api/v3/series/${id}`));
     if (!sr || sr.id !== id) return null;
     const eps = await arrFetch<unknown>(cfg, `/api/v3/episode?seriesId=${id}`);
     const episodes = new Map<number, QueueEpisode>();
@@ -447,13 +520,8 @@ async function loadCatalog(cfg: ArrCfg, rows: ReturnType<typeof selectedRawRows>
     }
     return { id, title: typeof sr.title === "string" ? sr.title : String(id), episodes };
   });
-  for (const sr of seriesRows) if (sr) series.set(sr.id, sr);
-  return {
-    qualities: new Map([...qualities].map(([k, v]) => [k, v.quality])),
-    languages,
-    movies,
-    series,
-  };
+  for (const sr of rows) if (sr) series.set(sr.id, sr);
+  return series;
 }
 
 async function correctedRows(service: QueueService, cfg: ArrCfg, downloadId: string, selections: ReadonlyMap<string, ImportOverride>) {

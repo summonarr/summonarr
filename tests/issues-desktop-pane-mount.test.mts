@@ -59,9 +59,15 @@ test("desktop wrapper and mobile drawer gate on complementary media queries via 
     new URL("../src/components/issues/issue-detail-mobile-drawer.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(desktop, /useMediaQuery\("\(min-width: 1280px\)"\)/);
+  // The two queries are ONE pair of constants, beside the desktop wrapper.
+  const constant = (name: string) => new RegExp(`export const ${name} = "([^"]+)";`).exec(desktop)?.[1];
+  assert.equal(constant("ISSUE_DESKTOP_QUERY"), DESKTOP_QUERY);
+  assert.equal(constant("ISSUE_MOBILE_QUERY"), MOBILE_QUERY);
+  assert.match(desktop, /useMediaQuery\(ISSUE_DESKTOP_QUERY\)/);
   assert.match(desktop, /if \(isDesktop !== true\) return null;/);
-  assert.match(drawer, /useMediaQuery\("\(max-width: 1279\.98px\)"\) === true/);
+  assert.match(drawer, /import \{ ISSUE_MOBILE_QUERY \} from "@\/components\/issues\/desktop-issue-thread";/);
+  assert.match(drawer, /useMediaQuery\(ISSUE_MOBILE_QUERY\) === true/);
+  assert.doesNotMatch(drawer, /useMediaQuery\("/, "no second copy of the breakpoint");
   // The drawer no longer keeps its own matchMedia effect — one gate implementation.
   assert.doesNotMatch(drawer, /window\.matchMedia/);
   // Sanity on the pair: same breakpoint, exclusive ranges.
@@ -85,7 +91,7 @@ test("/admin/issues mounts each thread through a media-query wrapper, never Issu
 
   const wrappers = readFileSync(new URL("../src/components/issues/desktop-issue-thread.tsx", import.meta.url), "utf8");
   const mobile = wrappers.slice(wrappers.indexOf("export function MobileIssueThread("));
-  assert.match(mobile, /useMediaQuery\("\(max-width: 1279\.98px\)"\) === true/, "null (SSR/hydration) is 'not mounted'");
+  assert.match(mobile, /useMediaQuery\(ISSUE_MOBILE_QUERY\) === true/, "null (SSR/hydration) is 'not mounted'");
   assert.match(mobile, /if \(!isMobile\) return null;/);
 });
 
@@ -99,7 +105,8 @@ test("/issues keeps the desktop pane when the page's list is empty but an issue 
 
 test("/issues marks the selected row for assistive tech, not only with its border", () => {
   const page = readFileSync(new URL("../src/app/(app)/issues/page.tsx", import.meta.url), "utf8");
-  assert.match(page, /href=\{issueHref\(issue\.id\)\}\s*scroll=\{false\}\s*aria-current=\{isSelected \? "true" : undefined\}/);
+  assert.match(page, /href=\{issueHref\(issue\.id\)\}\s*isSelected=\{issue\.id === selectedId\}/);
+  assert.match(page, /href=\{href\}\s*scroll=\{false\}\s*aria-current=\{isSelected \? "true" : undefined\}/);
 });
 
 // A huge or repeated ?page= used to reach Prisma's skip unclamped (a number

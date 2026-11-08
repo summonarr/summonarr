@@ -56,7 +56,8 @@ test("the approval URL query-encodes every value, the PIN code included", () => 
 });
 
 test("the settings form builds its approval URL through the helpers, with the per-attempt client id", () => {
-  const connect = FORM.slice(FORM.indexOf("async function handleConnect"), FORM.indexOf("async function handleDisconnect"));
+  const connect = FORM.slice(FORM.indexOf("async function startPlexConnect"), FORM.indexOf("function PlexAccount("));
+  assert.ok(connect.length > 0, "the connect start was found");
   assert.match(connect, /plexForwardUrl\(plexReturnBase\(siteUrl, window\.location\.origin, BASE_PATH\), state\)/);
   assert.match(connect, /plexApprovalUrl\(\{\s*clientId: pinClientId,\s*code: pinCode,/);
   assert.doesNotMatch(connect, /PLEX_CLIENT_ID/, "guardrail 6f: never the shared client id");

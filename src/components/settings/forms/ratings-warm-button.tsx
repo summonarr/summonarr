@@ -4,12 +4,29 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { CheckCircle, Loader2, RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson, jsonInit, type FetchJsonResult } from "@/lib/client/fetch-json";
+import { v, type Infer } from "@/lib/validate";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { useT } from "@/components/i18n/i18n-provider";
+
+// One warm route's answer: its counts, or its own error.
+const WarmAnswer = v.object({
+  fetched: v.optional(v.number()),
+  skipped: v.optional(v.number()),
+  purged: v.optional(v.number()),
+  error: v.optional(v.nullable(v.string())),
+});
+
+// Both warms walk every cached title against an upstream API: no client
+// timeout of our own (a slow success must not read as a failure).
+const WARM_TIMEOUT_MS = Infinity;
 
 export function RatingsWarmButton() {
   const t = useT();
   const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [results, setResults] = useState<{ omdb?: string; mdblist?: string } | null>(null);
+  // Unmount aborts both requests; a second click while they run does nothing.
+  const action = useAsyncAction();
 
   // Clears a successful run's result 10s after it lands. An error stays put,
   // with its error styling, until the next run: resetting only the status left
@@ -18,18 +35,17 @@ export function RatingsWarmButton() {
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
 
-  type WarmData = { fetched?: number; skipped?: number; total?: number; failed?: number; purged?: number; error?: string };
-
-  // One source's line: its own error, or its counts. A rejected fetch (network
-  // failure) or a reply that isn't JSON (e.g. a reverse proxy's timeout page on
-  // a long warm) is an error for THAT source only — the other source's real
-  // outcome is still shown.
-  async function sourceLine(settled: PromiseSettledResult<Response>): Promise<{ text: string; ok: boolean }> {
-    if (settled.status === "rejected") return { text: t("settings.form.common.requestFailed"), ok: false };
-    const res = settled.value;
-    const data: WarmData = await res.json().catch(() => ({ error: t("settings.form.common.requestFailedHttp", { status: res.status }) }));
+  // One source's line: its own error, or its counts. A network failure, or a
+  // reply that isn't JSON (e.g. a reverse proxy's timeout page on a long warm),
+  // is an error for THAT source only — the other source's real outcome is
+  // still shown.
+  function sourceLine(res: FetchJsonResult<Infer<typeof WarmAnswer>>): { text: string; ok: boolean } {
+    if (!res.ok) {
+      if (res.kind === "http") return { text: res.error || t("settings.form.common.requestFailedHttp", { status: res.status }), ok: false };
+      return { text: t("settings.form.common.requestFailed"), ok: false };
+    }
+    const data = res.data;
     if (data.error) return { text: data.error, ok: false };
-    if (!res.ok) return { text: t("settings.form.common.requestFailedHttp", { status: res.status }), ok: false };
     return {
       text: (data.purged ?? 0) > 0
         ? t("settings.form.ratingsWarm.summaryPurged", { fetched: data.fetched ?? 0, skipped: data.skipped ?? 0, purged: data.purged ?? 0 })
@@ -42,17 +58,14 @@ export function RatingsWarmButton() {
     if (resetTimer.current) clearTimeout(resetTimer.current);
     setStatus("loading");
     setResults(null);
-    // allSettled, not all: one source's network failure must not blank the
-    // other source's result.
-    const [omdbSettled, mdblistSettled] = await Promise.allSettled([
-      fetch(withBasePath("/api/admin/omdb-warm"), { method: "POST" }),
-      fetch(withBasePath("/api/admin/mdblist-warm"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ force }),
-      }),
-    ]);
-    const [omdb, mdblist] = await Promise.all([sourceLine(omdbSettled), sourceLine(mdblistSettled)]);
+    // Both at once, each with its own outcome: one source's failure must not
+    // blank the other source's result (fetchJson never throws).
+    const answers = await action.run("warm", (signal) => Promise.all([
+      fetchJson(withBasePath("/api/admin/omdb-warm"), { init: { method: "POST" }, schema: WarmAnswer, signal, timeoutMs: WARM_TIMEOUT_MS }),
+      fetchJson(withBasePath("/api/admin/mdblist-warm"), { init: jsonInit("POST", { force }), schema: WarmAnswer, signal, timeoutMs: WARM_TIMEOUT_MS }),
+    ]), { ifBusy: "skip" });
+    if (!answers) return;
+    const [omdb, mdblist] = answers.map(sourceLine);
     const allOk = omdb.ok && mdblist.ok;
     setStatus(allOk ? "done" : "error");
     setResults({ omdb: omdb.text, mdblist: mdblist.text });

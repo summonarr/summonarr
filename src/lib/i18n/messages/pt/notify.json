@@ -266,6 +266,8 @@
   "notify.bot.admin.approvedArrFailedTitle": "⚠️ Aprovada (falha no arr) — {title}",
   "notify.bot.admin.approvedBy": "Aprovada por **{admin}**",
   "notify.bot.admin.approvedByArrFailed": "Aprovada por **{admin}**, mas não pôde ser adicionada ao arr — adicione manualmente.",
+  "notify.bot.admin.approveRolledBackTitle": "⚠️ De volta a pendente (falha no arr) — {title}",
+  "notify.bot.admin.approveRolledBackBy": "Aprovada por **{admin}**, mas não pôde ser adicionada ao arr, por isso voltou a pendente — aprove novamente para tentar de novo, ou recuse.",
   "notify.bot.admin.declinedTitle": "❌ Recusada — {title}",
   "notify.bot.admin.declinedBy": "Recusada por **{admin}**",
   "notify.bot.inactiveButton": "Este botão não está mais ativo.",

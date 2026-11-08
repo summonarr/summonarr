@@ -90,6 +90,7 @@ const {
   getWatchGradeAvailability,
   getWatchGradeSummaries,
   getUserWatchGradeDetail,
+  invalidateWatchGradeSettings,
   mergedWatchGradeSettings,
   previewWatchGradeSpread,
   MAX_VERDICT_ROWS,
@@ -1001,7 +1002,32 @@ test("computeWatchGrades grades with a settings override — window, cutoffs, re
     { graded: 4, score: 75, letter: "A", min: 4 },
   );
   assert.ok(!("OR" in (opsOf("mediaRequest.findMany")[0].args as { where: object }).where), "the override's window drives the request read");
-  assert.equal(opsOf("setting.findMany").length, 1, "availability still reads what is stored, once");
+  assert.equal(
+    opsOf("setting.findMany").filter((o) => JSON.stringify(o.args).includes("watchGradeBandA")).length,
+    0,
+    "availability reuses the stored settings it just read; the override never replaces them",
+  );
+});
+
+test("availability holds the stored grade settings briefly, and a save or restore's invalidation reads them again", async () => {
+  setSettings({ ...TRACKING_ON, watchGradeBandA: "90" });
+  ops = [];
+  const gradeReads = () => opsOf("setting.findMany").filter((o) =>
+    JSON.stringify(o.args).includes("watchGradeBandA")).length;
+  const first = await getWatchGradeAvailability();
+  const second = await getWatchGradeAvailability();
+  assert.ok(first.enabled && second.enabled);
+  assert.equal(first.settings.bandA, 90);
+  assert.equal(gradeReads(), 1, "the second read is served from the memo");
+
+  // A save changes the stored value; within the TTL only the invalidation surfaces it.
+  settings.set("watchGradeBandA", "85");
+  assert.equal(((await getWatchGradeAvailability()) as typeof first).settings.bandA, 90, "still the memo");
+  invalidateWatchGradeSettings();
+  const fresh = await getWatchGradeAvailability();
+  assert.ok(fresh.enabled);
+  assert.equal(fresh.settings.bandA, 85);
+  assert.equal(gradeReads(), 2);
 });
 
 test("mergedWatchGradeSettings: body keys win, a blank one means the default, a missing one keeps the stored value — unrepaired", async () => {

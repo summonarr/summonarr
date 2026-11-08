@@ -41,9 +41,11 @@ export function CastSection({ cast }: CastSectionProps) {
                 style={{ width: 56, height: 56, background: "var(--ds-bg-3)" }}
               >
                 {photo ? (
+                  // Decorative: the link's text already names the person, so
+                  // alt text would read the name twice.
                   <Image
                     src={photo}
-                    alt={member.name}
+                    alt=""
                     fill
                     sizes="56px"
                     className="object-cover"

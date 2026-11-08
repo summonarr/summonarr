@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
 
 const getServerSnapshot = () => null;
 
@@ -9,24 +9,21 @@ const getServerSnapshot = () => null;
 // render identical (CLAUDE.md guardrail 16 — a viewport-dependent boolean is as
 // nondeterministic across the two passes as a Date read), so callers must treat
 // null as "not yet known" rather than as false. After hydration the value
-// tracks the MediaQueryList's "change" event.
+// tracks the MediaQueryList's "change" event. One MediaQueryList per query
+// serves both the subscription and every snapshot read.
 export function useMediaQuery(query: string): boolean | null {
+  const mq = useMemo(
+    () => (typeof window === "undefined" || typeof window.matchMedia !== "function" ? null : window.matchMedia(query)),
+    [query],
+  );
   const subscribe = useCallback(
     (onChange: () => void) => {
-      if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
-        return () => {};
-      }
-      const mq = window.matchMedia(query);
+      if (!mq) return () => {};
       mq.addEventListener("change", onChange);
       return () => mq.removeEventListener("change", onChange);
     },
-    [query],
+    [mq],
   );
-  const getSnapshot = useCallback(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
-      return null;
-    }
-    return window.matchMedia(query).matches;
-  }, [query]);
+  const getSnapshot = useCallback(() => (mq ? mq.matches : null), [mq]);
   return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 }

@@ -14,6 +14,7 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { Poster } from "@/components/admin/activity-ui";
+import { RankedTitleRow } from "./ranked-title-row";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { formatDurationHM } from "@/lib/format-duration";
 import { mediaHref } from "@/lib/media-href";
@@ -117,13 +118,12 @@ function WrappedStat({ grad, kicker, value, sub }: { grad: string; kicker: strin
   );
 }
 
-export function WrappedView({ data: w }: { data: WrappedData }) {
-  const t = useT();
-  const locale = useLocale();
-  const top = w.topTitles[0];
-  const heroHref = top ? mediaHref(top.tmdbId, top.mediaType) : null;
-  const n = (v: number) => v.toLocaleString(locale);
+type WrappedCard = { kicker: string; value: ReactNode; sub?: ReactNode };
 
+/** The gradient stat cards, in order; a card whose data is missing is left
+ *  out rather than shown empty. */
+function wrappedCards(w: WrappedData, t: Translator, locale: string): WrappedCard[] {
+  const n = (v: number) => v.toLocaleString(locale);
   // The server buckets play starts in the statistics zone; the day and hour
   // cards name it, so an evening viewer elsewhere isn't left reading "2 AM".
   const zone = zoneShortLabel(w.timeZone);
@@ -139,7 +139,7 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
         ? capitalize(partOfDay(prime.hour, t))
         : "—";
 
-  const cards: { kicker: string; value: ReactNode; sub?: ReactNode }[] = [];
+  const cards: WrappedCard[] = [];
   cards.push({
     kicker: t("personal.wrapped.moviesVsTv"),
     value: `${w.movies.titles.toLocaleString(locale)} · ${w.tv.episodes.toLocaleString(locale)}`,
@@ -209,6 +209,18 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
     });
   }
 
+  return cards;
+}
+
+export function WrappedView({ data: w }: { data: WrappedData }) {
+  const t = useT();
+  const locale = useLocale();
+  const top = w.topTitles[0];
+  const heroHref = top ? mediaHref(top.tmdbId, top.mediaType) : null;
+  const n = (v: number) => v.toLocaleString(locale);
+
+  const cards = wrappedCards(w, t, locale);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       {/* Hero */}
@@ -277,25 +289,17 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
             {t("personal.wrapped.topList", { count: w.topTitles.length, year: w.year })}
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {w.topTitles.map((item, i) => {
-              const href = mediaHref(item.tmdbId, item.mediaType);
-              return (
-                <div key={`${item.title}-${i}`} style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <span className="ds-mono" style={{ width: 20, textAlign: "right", fontSize: 15, fontWeight: 700, color: "var(--ds-accent-text)" }}>{i + 1}</span>
-                  <Poster src={item.posterSrc} letter={(item.title[0] ?? "?").toUpperCase()} w={32} h={46} radius={4} />
-                  <div style={{ flex: 1, minWidth: 0, display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
-                    {href ? (
-                      <Link href={href} className="hover:underline" style={{ fontSize: 14, color: "var(--ds-fg)", textDecoration: "none", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</Link>
-                    ) : (
-                      <span style={{ fontSize: 14, color: "var(--ds-fg)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</span>
-                    )}
-                    <span className="ds-mono" style={{ fontSize: 12, color: "var(--ds-fg-subtle)", fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>
-                      {t("personal.wrapped.playsCount", { count: item.count })}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
+            {w.topTitles.map((item, i) => (
+              <RankedTitleRow
+                key={`${item.title}-${i}`}
+                size="large"
+                rank={i + 1}
+                title={item.title}
+                href={mediaHref(item.tmdbId, item.mediaType)}
+                posterSrc={item.posterSrc}
+                count={t("personal.wrapped.playsCount", { count: item.count })}
+              />
+            ))}
           </div>
         </div>
       )}

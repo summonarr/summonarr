@@ -19,17 +19,6 @@ export function titleReadPath(service: string, instance: string, by: TitleReadTa
   return `/api/admin/arr/title?${q.toString()}`;
 }
 
-/** A target as an effect key — a parent re-render hands a new object. */
-export function titleTargetKey(target: TitleReadTarget): string {
-  return "tmdbId" in target ? `tmdb:${target.tmdbId}` : `arr:${target.arrId}`;
-}
-
-/** The target an effect key names (the inverse of titleTargetKey). */
-export function titleTargetOfKey(key: string): TitleReadTarget {
-  const [kind, id] = key.split(":");
-  return kind === "tmdb" ? { tmdbId: Number(id) } : { arrId: Number(id) };
-}
-
 /**
  * How a LIVE title answer lands. The open-time read replaces the state and
  * remounts the Settings form — unless a snapshot was painted first: the admin

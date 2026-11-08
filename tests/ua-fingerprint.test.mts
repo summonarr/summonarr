@@ -43,6 +43,12 @@ const UA = {
     "Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   chromeIphone:
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/120.0.6099.119 Mobile/15E148 Safari/604.1",
+  firefoxIphone:
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/120.0 Mobile/15E148 Safari/605.1.15",
+  edgeIphone:
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 EdgiOS/120.0.2210.126 Mobile/15E148 Safari/605.1.15",
+  edgeAndroid:
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 EdgA/120.0.2210.115",
 };
 
 test("desktop browser/OS classification", () => {
@@ -113,16 +119,15 @@ test("Chrome OS (CrOS token) classifies as chromeos, not linux/unknown", () => {
   assert.equal(fingerprintToLabel(extractUaFingerprint(UA.chromeOs)), "Chrome on Chrome OS");
 });
 
-test("iOS Chrome (CriOS/) classifies as safari — pins CURRENT behavior", () => {
-  // Chrome on iOS sends CriOS/ instead of Chrome/, so it falls through to the
-  // Safari/ test. Pinned so the device label doesn't change under existing
-  // sessions; since guardrail 6h a reclassification would be cosmetic only.
-  assert.deepEqual(extractUaFingerprint(UA.chromeIphone), {
-    browser: "safari",
-    os: "ios",
-    device: "mobile",
-  });
-  assert.equal(fingerprintToLabel(extractUaFingerprint(UA.chromeIphone)), "Safari on iPhone");
+test("iOS Chrome, Firefox and Edge and Android Edge are named for their browser, not Safari/Chrome", () => {
+  // These UAs carry Safari/ (and Android Edge's Chrome/), so the generic tests
+  // used to label every one of them Safari or Chrome.
+  assert.deepEqual(extractUaFingerprint(UA.chromeIphone), { browser: "chrome", os: "ios", device: "mobile" });
+  assert.equal(fingerprintToLabel(extractUaFingerprint(UA.chromeIphone)), "Chrome on iPhone");
+  assert.equal(extractUaFingerprint(UA.firefoxIphone).browser, "firefox");
+  assert.equal(extractUaFingerprint(UA.edgeIphone).browser, "edge");
+  assert.deepEqual(extractUaFingerprint(UA.edgeAndroid), { browser: "edge", os: "android", device: "mobile" });
+  assert.equal(extractUaFingerprint(UA.safariIphone).browser, "safari");
 });
 
 test("fingerprintToLabel splits Android tablet vs phone", () => {

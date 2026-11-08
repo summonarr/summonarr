@@ -11,7 +11,9 @@ import { join } from "node:path";
 import {
   BACKUP_TABLES,
   BACKUP_ENUMS,
+  computeNormalizedSchemaFingerprint,
   computeSchemaFingerprint,
+  normalizeSchemaText,
 } from "../src/lib/backup-schema.ts";
 
 const schema = readFileSync(join(process.cwd(), "prisma", "schema.prisma"), "utf-8");
@@ -63,6 +65,24 @@ test("schema fingerprint: 16 hex chars, cached-stable, matches the file bytes", 
   // chars) rather than trusting the module to agree with itself. A silent
   // algorithm change would make every existing backup unrestorable.
   const expected = createHash("sha256").update(schema).digest("hex").slice(0, 16);
+  assert.equal(fp, expected);
+});
+
+test("normalized schema fingerprint ignores comments and whitespace, never string contents", () => {
+  const base = 'model A {\n  id String @id\n  url String @default("https://x.test/a")\n}\n';
+  const edited = '// header\nmodel A {   /// doc\n\n  id   String @id // inline\n  url String @default("https://x.test/a")\n}';
+  assert.equal(normalizeSchemaText(edited), normalizeSchemaText(base));
+  // A `//` inside a string literal is text: changing what follows it changes the schema.
+  assert.notEqual(
+    normalizeSchemaText('m { url String @default("https://x.test/a") }'),
+    normalizeSchemaText('m { url String @default("https://x.test/b") }'),
+  );
+  // A real change still changes it.
+  assert.notEqual(normalizeSchemaText("model A { id Int }"), normalizeSchemaText("model A { id String }"));
+
+  const fp = computeNormalizedSchemaFingerprint();
+  assert.match(fp, /^[0-9a-f]{16}$/);
+  const expected = createHash("sha256").update(normalizeSchemaText(schema)).digest("hex").slice(0, 16);
   assert.equal(fp, expected);
 });
 

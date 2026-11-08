@@ -120,7 +120,7 @@ test("structural: the window reads the files once per instance, ADMIN only, and 
   // loadReleases is called only from opening the list, an instance switch while
   // it is open, and Search again — never on mount.
   const calls = dialog.match(/loadReleases\(/g) ?? [];
-  assert.equal(calls.length, 5, "definition + open + instance switch + two Search again");
+  assert.equal(calls.length, 4, "definition + open + instance switch + Search again (one handler for both of its buttons)");
   assert.doesNotMatch(optionsSrc, /loadReleases|runReleaseSearchJob|\/releases/, "the options view never searches indexers");
 });
 
@@ -138,11 +138,16 @@ test("structural: the block box picks the delete's follow-up — blocklist the r
 
 test("structural: the search reports its own failures before claiming success", () => {
   const search = functionBody(options, "async function searchNow(");
-  assert.match(search, /body: JSON\.stringify\(\{ refetch: true, instance \}\)/, "the window's instance");
-  const okCheck = search.indexOf("if (!res.ok)");
+  assert.match(search, /init: jsonInit\("PATCH", \{ refetch: true, instance \}\)/, "the window's instance");
+  const okCheck = search.indexOf("if (!res.ok");
   const arrCheck = search.indexOf("if (data.arrError)");
   const sent = search.indexOf("setSearched(true)");
   assert.ok(okCheck > 0 && okCheck < arrCheck && arrCheck < sent, "res.ok, then arrError, then sent");
+  // A refusal shows the route's own reason (the integration switched off, an
+  // instance that isn't a configured one), never a bare "failed".
+  assert.match(search, /res\.kind === "http"\s*\? apiErrorText\(res\.body, t\("adminQueue\.issueActions\.searchFailed", \{ status: res\.status \}\)\)/);
+  // The request is bounded and dropped with the window.
+  assert.match(search, /signal,\s*timeoutMs: SEARCH_TIMEOUT_MS,/);
 });
 
 // ── structural: what belongs to one instance never reaches another ───────────

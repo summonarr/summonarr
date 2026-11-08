@@ -642,6 +642,19 @@ test("register: a racing registration's unique violation is read by its Prisma C
   assert.equal(users.length, 0);
 });
 
+test("register: a first attempt that fails does not turn away a registration already in flight beside it", async () => {
+  // The locked in-transaction check decides; nothing in-process may answer
+  // "closed" for an attempt that never committed.
+  userCreateThrows = new Error("transient insert failure (unit test)");
+  const outcomes = await Promise.allSettled([
+    registerPost(registerReq({ email: "first@example.com", password: STRONG_PASSWORD })),
+    registerPost(registerReq({ email: "second@example.com", password: STRONG_PASSWORD })),
+  ]);
+  const statuses = outcomes.map((o) => (o.status === "fulfilled" ? o.value.status : "rejected")).sort();
+  assert.deepEqual(statuses, [201, "rejected"]);
+  assert.equal(users.length, 1);
+});
+
 // ── POST /api/auth/sign-out ─────────────────────────────────────────────────
 
 test("sign-out (cookie): fully revokes the session server-side and clears both cookie variants", async () => {
@@ -650,7 +663,7 @@ test("sign-out (cookie): fully revokes the session server-side and clears both c
   seedUser({ id: "u-co", email: "co@example.com", name: "Cookie User", createdAt: created });
   const token = await mintToken({ id: "u-co", sessionId: "sess-co", name: "Cookie User" });
 
-  const res = await signOutPost(signOutReq({ cookie: `${COOKIE}=${token}` }));
+  const res = await signOutPost(signOutReq({ cookie: `${COOKIE}=${token}`, "user-agent": "unit-test-agent" }));
   assert.equal(res.status, 200);
   assert.deepEqual(await bodyOf(res), { ok: true });
 
@@ -673,6 +686,9 @@ test("sign-out (cookie): fully revokes the session server-side and clears both c
   const audit = auditRows.at(-1);
   assert.equal(audit?.action, "AUTH_LOGOUT");
   assert.equal(audit?.userId, "u-co");
+  // Where from, like every other auth event.
+  assert.equal(typeof audit?.ipAddress, "string");
+  assert.equal(audit?.userAgent, "unit-test-agent");
 });
 
 test("sign-out is bearer-first: a bearer sign-out revokes the bearer's session, not the cookie's", async () => {
@@ -807,6 +823,16 @@ test("machine-session requires the CRON_SECRET bearer (401) and refuses when the
   } finally {
     process.env.CRON_SECRET = CRON_SECRET;
   }
+});
+
+test("machine-session tells an unauthenticated caller nothing about whether the feature is on", async () => {
+  // Disabled (the default): a wrong or missing secret reads exactly like it
+  // does when the feature is enabled — only the secret's holder learns more.
+  const off = await machineSessionPost(machineReq({ bearer: "wrong-secret" }));
+  settings.set("enableMachineSession", "true");
+  const on = await machineSessionPost(machineReq({ bearer: "wrong-secret" }));
+  assert.equal(off.status, 401);
+  assert.deepEqual(await bodyOf(off), await bodyOf(on));
 });
 
 test("machine-session mint: a valid request mints an admin-provider JWT delivered only as an HttpOnly cookie, never in the body", async () => {

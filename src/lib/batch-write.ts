@@ -1,13 +1,11 @@
 // Batch writes for library-sized data (guardrails 4 and 23c): the transaction
 // budget, the Postgres-side limits a batch transaction can opt into, and the
 // chunked createMany every bulk insert goes through.
-import type { prisma } from "@/lib/prisma";
+import type { PrismaTxClient } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 
-// The encryption extension in ./prisma changes the client's type, so the
-// generated Prisma.TransactionClient is NOT assignable to the interactive-tx
-// callback param — derive it from the extended client (account-lifecycle.ts).
-export type LibraryTxClient = Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
+// The extended client's transaction client (see PrismaTxClient in ./prisma).
+export type LibraryTxClient = PrismaTxClient;
 
 // Always pass BATCH_TX_TIMEOUT to $transaction for library-sized writes to avoid Prisma's default 5s timeout
 export const BATCH_TX_TIMEOUT = 30_000;

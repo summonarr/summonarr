@@ -1,5 +1,5 @@
 import { IconBase } from "./icon-base";
-import type { IconProps } from "./index";
+import type { IconProps } from "./types";
 
 export function ChevronLeft(props: IconProps) {
   return (

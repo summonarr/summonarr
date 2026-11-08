@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { PLEX_CLIENT_ID } from "@/lib/plex";
+import { plexClientIdentity } from "@/lib/plex-client-headers";
 
 // The SERVER-TOKEN half of the Plex watchlist auto-request (guardrail 34b).
 //
@@ -68,9 +69,7 @@ function headers(token: string, json: boolean): Record<string, string> {
     Accept: "application/json",
     ...(json ? { "Content-Type": "application/json" } : {}),
     "X-Plex-Token": token,
-    "X-Plex-Client-Identifier": PLEX_CLIENT_ID,
-    "X-Plex-Product": "Summonarr",
-    "X-Plex-Version": "1.0",
+    ...plexClientIdentity(PLEX_CLIENT_ID),
   };
 }
 
@@ -298,6 +297,23 @@ export async function fetchFriendWatchlist(
 
 // ── friend → Summonarr user ─────────────────────────────────────────────────
 
+type PlexIdentityRow = { userId: string | null; manualUserLink: boolean };
+
+// The user one plex.tv account id resolves to, by the precedence below, or null
+// to skip it: a manual pin decides alone (a pin to nobody, or pins to two
+// accounts, skips); then the sign-in subject; then an unambiguous automatic
+// link. Pure.
+export function pickPlexAccountUser(rows: readonly PlexIdentityRow[], subjectUserId: string | undefined): string | null {
+  const pins = rows.filter((r) => r.manualUserLink);
+  if (pins.length > 0) {
+    const pinned = new Set(pins.map((r) => r.userId));
+    return pinned.size === 1 ? [...pinned][0] : null;
+  }
+  if (subjectUserId) return subjectUserId;
+  const linked = new Set(rows.map((r) => r.userId).filter((u): u is string => !!u));
+  return linked.size === 1 ? [...linked][0] : null;
+}
+
 // Numeric plex.tv account ids → Summonarr user id. Order, per id:
 //   1. an admin's MANUAL pin on a plex MediaServerUser row (manualUserLink) —
 //      a pin to nobody skips the friend; a pin never loses to automatic
@@ -338,23 +354,8 @@ export async function resolvePlexAccountUsers(accountIds: readonly string[]): Pr
 
   const candidate = new Map<string, string>();
   for (const id of ids) {
-    const rows = rowsById.get(id) ?? [];
-    const pins = rows.filter((r) => r.manualUserLink);
-    if (pins.length > 0) {
-      const pinned = new Set(pins.map((r) => r.userId));
-      // Pinned to nobody, or to different accounts on different instances ⇒ skip.
-      if (pinned.size !== 1) continue;
-      const only = [...pinned][0];
-      if (only) candidate.set(id, only);
-      continue;
-    }
-    const bySubject = userBySubject.get(id);
-    if (bySubject) {
-      candidate.set(id, bySubject);
-      continue;
-    }
-    const linked = new Set(rows.map((r) => r.userId).filter((u): u is string => !!u));
-    if (linked.size === 1) candidate.set(id, [...linked][0]);
+    const userId = pickPlexAccountUser(rowsById.get(id) ?? [], userBySubject.get(id));
+    if (userId) candidate.set(id, userId);
   }
   if (candidate.size === 0) return out;
 

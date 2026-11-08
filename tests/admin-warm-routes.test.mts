@@ -38,6 +38,7 @@
 // fake Next request scope, in-memory prisma stubs, and a patched `pg`
 // Client.prototype standing in for the Postgres advisory lock. No DB, no network.
 import { test, beforeEach } from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -155,7 +156,37 @@ shadowPrismaClientMethod(prisma, "$executeRawUnsafe", async (sql: string) => {
   // Whole statement, not a prefix — the pins below read the UPDATE's WHERE
   // clause and check for a DELETE anywhere in it.
   rec("$executeRawUnsafe", sql.replace(/\s+/g, " ").trim());
+  if (backfillUpdateThrows) throw backfillUpdateThrows;
   return backfillUpdatedRows;
+});
+
+// The backfill's execute path runs its count and UPDATE in one transaction.
+// The fake hands the callback its own tx client (recording which statements
+// ran on it, then delegating to the stubs above) and records the options; a
+// callback that throws is "rolled back" by recording no commit.
+let txStatements: string[] = [];
+let txOptions: unknown[] = [];
+let txCommits = 0;
+let backfillUpdateThrows: unknown = null;
+const rawClient = prisma as unknown as {
+  $queryRawUnsafe: (sql: string, ...values: unknown[]) => Promise<unknown>;
+  $executeRawUnsafe: (sql: string, ...values: unknown[]) => Promise<unknown>;
+};
+const txClient = {
+  $queryRawUnsafe: (sql: string, ...values: unknown[]) => {
+    if (sql.includes("total_rows")) txStatements.push("count");
+    return rawClient.$queryRawUnsafe(sql, ...values);
+  },
+  $executeRawUnsafe: (sql: string, ...values: unknown[]) => {
+    txStatements.push("update");
+    return rawClient.$executeRawUnsafe(sql, ...values);
+  },
+};
+shadowPrismaClientMethod(prisma, "$transaction", async (fn: (tx: unknown) => Promise<unknown>, opts?: unknown) => {
+  txOptions.push(opts);
+  const out = await fn(txClient);
+  txCommits++;
+  return out;
 });
 
 let backfillCounts = { total_rows: 0n, candidate_rows: 0n, watched_flips: 0n };
@@ -272,6 +303,10 @@ beforeEach(() => {
   lockAcquire = () => true;
   backfillCounts = { total_rows: 100n, candidate_rows: 7n, watched_flips: 2n };
   backfillUpdatedRows = 7;
+  backfillUpdateThrows = null;
+  txStatements = [];
+  txOptions = [];
+  txCommits = 0;
 });
 
 // ── matrix sanity ────────────────────────────────────────────────────────────
@@ -315,6 +350,21 @@ test("backfill: anonymous is 401, a plain USER is 403, and neither reads a row",
 });
 
 // ── 1: the cooldown CAS ──────────────────────────────────────────────────────
+
+test("activity-warm: a finished warm names the seconds until the next may start, so the button counts down the server's own cooldown", async () => {
+  const w = WARMS.find((x) => x.name === "activity-warm")!;
+  const t = await mintSession();
+  casClaims = 1;
+  const res = await callWarm(w, t);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { retryAfter?: unknown; lastWarmAt?: unknown };
+  assert.equal(typeof body.retryAfter, "number");
+  assert.ok((body.retryAfter as number) >= 1 && (body.retryAfter as number) <= 120, `retryAfter ${String(body.retryAfter)}`);
+  assert.equal(typeof body.lastWarmAt, "string", "the existing field stays");
+  const button = readFileSync(new URL("../src/components/admin/activity-warm-button.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(button, /setCooldown\(\d+\)/, "no copy of the cooldown in the client");
+  assert.match(button, /setCooldown\(cooldownSeconds\(res\.data\.retryAfter\)\)/);
+});
 
 for (const w of WARMS) {
   test(`${w.name}: a claimed CAS slot runs the warm`, async () => {
@@ -686,4 +736,38 @@ test("backfill never deletes PlayHistory rows — it clamps them", async () => {
   assert.equal(opsOf("playHistory.deleteMany").length, 0);
   const sql = opsOf("$executeRawUnsafe")[0].args as string;
   assert.ok(!/DELETE/i.test(sql), `the backfill statement must not delete: ${sql}`);
+});
+
+// ── backfill-playtime: the gate and the write are one snapshot ───────────────
+
+test("execute reads the confirmation count and runs the UPDATE inside ONE repeatable-read transaction", async () => {
+  const t = await mintSession();
+  const res = await callBackfill(t, "?execute=true", JSON.stringify({ confirmAffectedRows: 7 }));
+  assert.equal(res.status, 200);
+  assert.deepEqual(txStatements, ["count", "update"], "the gate's count and the write share the transaction");
+  assert.equal(txOptions.length, 1);
+  assert.equal((txOptions[0] as { isolationLevel?: string }).isolationLevel, "RepeatableRead");
+  assert.equal(txCommits, 1);
+});
+
+test("an UPDATE that writes a different number of rows than confirmed is rolled back and answered 409", async () => {
+  const t = await mintSession();
+  backfillUpdatedRows = 9; // the count said 7
+  const res = await callBackfill(t, "?execute=true", JSON.stringify({ confirmAffectedRows: 7 }));
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).affectedRows, 9);
+  assert.equal(txCommits, 0, "the mismatched write must not commit");
+  assert.equal(opsOf("auditLog.create").length, 0, "nothing applied, nothing audited");
+});
+
+test("a serialization failure on the UPDATE is a 409 carrying the live count, not a 500", async () => {
+  const t = await mintSession();
+  backfillUpdateThrows = Object.assign(new Error("could not serialize access due to concurrent update"), {
+    name: "PrismaClientKnownRequestError",
+    code: "P2034",
+  });
+  const res = await callBackfill(t, "?execute=true", JSON.stringify({ confirmAffectedRows: 7 }));
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).affectedRows, 7);
+  assert.equal(txCommits, 0);
 });

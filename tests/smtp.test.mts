@@ -883,3 +883,36 @@ test("write timeout: a peer that stops reading mid-DATA is torn down, not awaite
   assert.ok(r.writes.at(-1)?.startsWith("From: "), "the stalled payload was the last write");
   assert.equal(r.socketDestroys[0][0]?.message, "SMTP write timeout");
 });
+
+test("a long ASCII subject is folded at spaces into lines near 76 characters, and unfolds byte for byte", async () => {
+  const subject = "Now Available: " + Array.from({ length: 40 }, (_, i) => `Word${i}`).join(" ") + "  end";
+  const r = await runSendMail({ msg: { subject } });
+  assert.equal(r.error, undefined);
+  const { headers } = extractMessage(r.writes);
+  const start = headers.findIndex((h) => h.startsWith("Subject: "));
+  const physical = [headers[start]];
+  for (let i = start + 1; headers[i]?.startsWith(" "); i++) physical.push(headers[i]);
+  assert.ok(physical.length > 1, "expected the subject to fold");
+  for (const line of physical) assert.ok(line.length <= 76, `line too long: ${line.length}`);
+  // Unfolding (RFC 5322 §2.2.3) removes each CRLF and keeps the space after it.
+  assert.equal(physical.join("").slice("Subject: ".length), subject);
+});
+
+test("an ASCII subject with no space to fold at goes out as encoded-words instead of an over-long line", async () => {
+  const subject = "x".repeat(1200);
+  const r = await runSendMail({ msg: { subject } });
+  assert.equal(r.error, undefined);
+  const { headers } = extractMessage(r.writes);
+  for (const h of headers) assert.ok(h.length <= 998, `header line of ${h.length}`);
+  const start = headers.findIndex((h) => h.startsWith("Subject: "));
+  assert.match(headers[start], /^Subject: =\?UTF-8\?B\?/);
+});
+
+test("a non-ASCII address that can't be encoded is refused before anything is sent", async () => {
+  for (const to of ["usér@exämple.com", "Zoë <zoë@exämple.com>"]) {
+    const r = await runSendMail({ msg: { to } });
+    assert.ok(r.error instanceof SmtpError, to);
+    assert.match(String(r.error.message), /SMTPUTF8/);
+    assert.equal(r.writes.length, 0, "nothing written");
+  }
+});

@@ -41,10 +41,13 @@ import { instanceDefaultLocale } from "./i18n/server-locale";
 
 // v2: the payload gained `posterPath` (language-tagged posters).
 const KEY_VERSION = "v2";
-const translationsKey = (mediaType: string, id: number) => `${mediaType}:${id}:i18n:${KEY_VERSION}`;
 const personKey = (id: number) => `person:${id}:i18n:v1`;
 const collectionKey = (id: number) => `collection:${id}:i18n:v1`;
 const dbType = (mediaType: string) => (mediaType === "MOVIE" || mediaType === "movie" ? "movie" : "tv");
+// The ONE key for a title's translations, from either media type spelling
+// ("movie"/"MOVIE"): every read and write goes through it, so a caller holding
+// the other spelling can never miss a stored row.
+const titleKey = (mediaType: string, id: number) => `${dbType(mediaType)}:${id}:i18n:${KEY_VERSION}`;
 
 // Translations change rarely, and the library prewarm needs the headroom: at
 // MAX_PREWARM_PER_RUN a day, 30 days covers a library of well over 100k titles.
@@ -65,6 +68,15 @@ const MAX_MISSES_PER_CALL = 120;
 // Process-wide cap on concurrent translation fetches across every request and
 // the prewarm, so they can't burst past TMDB's rate budget (guardrail 31).
 export const MAX_IN_FLIGHT = 6;
+// Past this many fetches parked behind the limiter, a page's misses are not
+// queued at all (it reads the cache only): while TMDB is slow every view would
+// otherwise park up to MAX_MISSES_PER_CALL more closures behind it.
+export const MAX_QUEUED_MISSES = 240;
+// A transient failure (timeout, 5xx, 429) is remembered in this process for
+// this long, so the next views don't fetch the same title again while TMDB is
+// struggling. Never written to the cache: a failure is not an answer.
+export const RETRY_AFTER_FAILURE_MS = 10 * 60_000;
+const MAX_RETRY_ENTRIES = 10_000;
 
 /**
  * A bound on how many `fn`s run at once: the first `max` callers run, later
@@ -75,10 +87,15 @@ export const MAX_IN_FLIGHT = 6;
  * ran on top of it — one over the cap per woken waiter. mapLimit/settleLimit in
  * concurrency.ts bound ONE call's fan-out; this bounds every call in the process.
  */
-export function createInFlightLimiter(max: number): <T>(fn: () => Promise<T>) => Promise<T> {
+export type InFlightLimiter = (<T>(fn: () => Promise<T>) => Promise<T>) & {
+  /** How many callers are parked waiting for a slot. */
+  waiting(): number;
+};
+
+export function createInFlightLimiter(max: number): InFlightLimiter {
   let active = 0;
   const queue: (() => void)[] = [];
-  return async function limited<T>(fn: () => Promise<T>): Promise<T> {
+  const limited = async function limited<T>(fn: () => Promise<T>): Promise<T> {
     if (active >= max) {
       // Resumes already holding the slot the finishing task handed over.
       await new Promise<void>((resolve) => queue.push(resolve));
@@ -93,9 +110,37 @@ export function createInFlightLimiter(max: number): <T>(fn: () => Promise<T>) =>
       else active--;
     }
   };
+  return Object.assign(limited, { waiting: () => queue.length });
 }
 
-const limited = processSingleton("tmdb-localize:limiter", () => createInFlightLimiter(MAX_IN_FLIGHT));
+// A new key whenever the limiter's shape changes, so a hot reload never reads
+// an old one.
+const limited = processSingleton("tmdb-localize:limiter:v2", () => createInFlightLimiter(MAX_IN_FLIGHT));
+
+// cache key → when a fetch may be tried again after a transient failure.
+const retryAfter = processSingleton("tmdb-localize:retryAfter", () => new Map<string, number>());
+
+function inRetryBackoff(key: string, now: number = Date.now()): boolean {
+  const until = retryAfter.get(key);
+  if (until === undefined) return false;
+  if (until > now) return true;
+  retryAfter.delete(key);
+  return false;
+}
+
+function noteTransientFailure(key: string): void {
+  retryAfter.delete(key);
+  if (retryAfter.size >= MAX_RETRY_ENTRIES) {
+    const oldest = retryAfter.keys().next().value;
+    if (oldest !== undefined) retryAfter.delete(oldest);
+  }
+  retryAfter.set(key, Date.now() + RETRY_AFTER_FAILURE_MS);
+}
+
+/** Test seam. */
+export function _resetTranslationRetryForTests(): void {
+  retryAfter.clear();
+}
 
 // Fetch + store one translations payload: coalesced on the cache key (a
 // stampede of pages listing the same title shares one fetch) and run through
@@ -109,7 +154,10 @@ function fetchAndCache<T extends object>(key: string, fetcher: () => Promise<T>)
       try {
         value = await fetcher();
       } catch (err) {
-        if (!isTmdbNotFound(err)) throw err;
+        if (!isTmdbNotFound(err)) {
+          noteTransientFailure(key);
+          throw err;
+        }
         value = {} as T;
         ttl = NOT_FOUND_TTL;
       }
@@ -138,42 +186,42 @@ async function withinBudget<T, F>(work: Promise<T>, budgetMs: number, fallback: 
 }
 
 function loadTranslations(mediaType: string, id: number): Promise<TitleTranslations> {
-  return fetchAndCache(translationsKey(dbType(mediaType), id), () => fetchTitleTranslations(dbType(mediaType), id));
+  return fetchAndCache(titleKey(mediaType, id), () => fetchTitleTranslations(dbType(mediaType), id));
 }
 
 // Cached translations for `refs`, fetching up to MAX_MISSES_PER_CALL misses and
 // waiting for them at most `budgetMs` (fetchMisses false ⇒ cache reads only).
-// Keyed by `<movie|tv>:<id>`.
+// Keyed by titleKey. A miss is not fetched while its title is in a failure
+// backoff, nor while the limiter already has MAX_QUEUED_MISSES parked.
+//
+// The returned map is a SNAPSHOT taken at the deadline: fetches still running
+// finish in the background and fill the cache for the next call, but never
+// change what this caller holds (titleResolver keeps it in a closure, and the
+// same notification must not render differently depending on timing).
 async function translationsFor(
   refs: readonly { id: number; mediaType: string }[],
   opts: { fetchMisses: boolean; budgetMs?: number },
 ): Promise<Map<string, TitleTranslations>> {
-  const keyOf = (r: { id: number; mediaType: string }) => translationsKey(dbType(r.mediaType), r.id);
   const unique = new Map<string, { id: number; mediaType: string }>();
-  for (const r of refs) unique.set(keyOf(r), r);
+  for (const r of refs) unique.set(titleKey(r.mediaType, r.id), r);
   const cached = await getCacheMany<TitleTranslations>([...unique.keys()]);
-  if (!opts.fetchMisses) return cached;
+  if (!opts.fetchMisses || limited.waiting() >= MAX_QUEUED_MISSES) return cached;
 
-  const missing = [...unique].filter(([k]) => !cached.has(k)).slice(0, MAX_MISSES_PER_CALL);
+  const now = Date.now();
+  const missing = [...unique]
+    .filter(([k]) => !cached.has(k) && !inRetryBackoff(k, now))
+    .slice(0, MAX_MISSES_PER_CALL);
   if (missing.length === 0) return cached;
+  const arrived = new Map<string, TitleTranslations>();
   const all = Promise.allSettled(
     missing.map(([k, r]) =>
       loadTranslations(r.mediaType, r.id).then((value) => {
-        cached.set(k, value);
+        arrived.set(k, value);
       }),
     ),
   );
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  await Promise.race([
-    all,
-    new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, opts.budgetMs ?? MISS_BUDGET_MS);
-    }),
-  ]);
-  clearTimeout(timer);
-  // Fetches past the deadline finish in the background (each awaits its own
-  // cache write) and the result is read from the cache on the next call.
-  return cached;
+  await withinBudget(all, opts.budgetMs ?? MISS_BUDGET_MS, undefined);
+  return new Map([...cached, ...arrived]);
 }
 
 /**
@@ -259,7 +307,7 @@ export async function localizeMedia<T extends LocalizableMedia>(items: T[], loca
       translationsFor(items, { fetchMisses: true }),
       genreNamesFor(items, language),
     ]);
-    return items.map((i) => overlay(i, cached.get(translationsKey(i.mediaType, i.id)), locale, genreNames));
+    return items.map((i) => overlay(i, cached.get(titleKey(i.mediaType, i.id)), locale, genreNames));
   } catch (err) {
     console.warn("[tmdb-localize] overlay failed:", err instanceof Error ? err.message : err);
     return items;
@@ -281,7 +329,7 @@ export async function cachedLocalizedTitles(
   try {
     const cached = await translationsFor(refs.map((r) => ({ id: r.tmdbId, mediaType: r.mediaType })), { fetchMisses: false });
     for (const r of refs) {
-      const title = cached.get(translationsKey(dbType(r.mediaType), r.tmdbId))?.[locale]?.title;
+      const title = cached.get(titleKey(r.mediaType, r.tmdbId))?.[locale]?.title;
       if (title) out.set(`${dbType(r.mediaType)}:${r.tmdbId}`, title);
     }
   } catch (err) {
@@ -321,7 +369,7 @@ export async function titleResolver(refs: readonly TitleRef[], locales: Iterable
     );
     return (ref, locale) => {
       if (locale === "en" || typeof ref.tmdbId !== "number" || !ref.mediaType) return ref.title;
-      return cached.get(translationsKey(dbType(ref.mediaType), ref.tmdbId))?.[locale]?.title ?? ref.title;
+      return cached.get(titleKey(ref.mediaType, ref.tmdbId))?.[locale]?.title ?? ref.title;
     };
   } catch (err) {
     console.warn("[tmdb-localize] notification titles failed:", err instanceof Error ? err.message : err);
@@ -478,25 +526,18 @@ export async function prewarmTitleTranslations(
   if (!(await nonEnglishInUse())) return result;
   result.skipped = false;
   const max = opts.maxFetches ?? MAX_PREWARM_PER_RUN;
+  // Fetches this run may still make; a failure spends the budget too.
+  const budgetLeft = () => max - result.fetched - result.failed;
 
-  const [plex, jellyfin, requests, watchlist] = await Promise.all([
-    prisma.plexLibraryItem.findMany({ select: { tmdbId: true, mediaType: true }, distinct: ["tmdbId", "mediaType"] }),
-    prisma.jellyfinLibraryItem.findMany({ select: { tmdbId: true, mediaType: true }, distinct: ["tmdbId", "mediaType"] }),
-    prisma.mediaRequest.findMany({ select: { tmdbId: true, mediaType: true }, distinct: ["tmdbId", "mediaType"] }),
-    prisma.watchlistItem.findMany({ select: { tmdbId: true, mediaType: true }, distinct: ["tmdbId", "mediaType"] }),
-  ]);
-  const unique = new Map<string, { id: number; mediaType: string }>();
-  for (const r of [...requests, ...watchlist, ...plex, ...jellyfin]) {
-    unique.set(translationsKey(dbType(r.mediaType), r.tmdbId), { id: r.tmdbId, mediaType: r.mediaType });
-  }
-  const all = [...unique];
+  const all = await prewarmCandidates();
   result.candidates = all.length;
 
-  for (let i = 0; i < all.length && result.fetched + result.failed < max; i += PREWARM_CHUNK) {
+  for (let i = 0; i < all.length && budgetLeft() > 0; i += PREWARM_CHUNK) {
     if (opts.signal?.aborted) break;
     const chunk = all.slice(i, i + PREWARM_CHUNK);
     const cached = await getCacheMany<TitleTranslations>(chunk.map(([k]) => k));
-    const missing = chunk.filter(([k]) => !cached.has(k)).slice(0, max - result.fetched - result.failed);
+    const now = Date.now();
+    const missing = chunk.filter(([k]) => !cached.has(k) && !inRetryBackoff(k, now)).slice(0, budgetLeft());
     const settled = await settleLimit(missing, MAX_IN_FLIGHT, async ([, r]) => {
       if (opts.signal?.aborted) return false;
       await loadTranslations(r.mediaType, r.id);
@@ -508,4 +549,21 @@ export async function prewarmTitleTranslations(
     }
   }
   return result;
+}
+
+// Every distinct title worth translating, keyed by titleKey, requests and
+// watchlists first (the iCal feed's titles), then the library. Distinct per
+// table in the database, so each read returns one row per title.
+async function prewarmCandidates(): Promise<[string, { id: number; mediaType: string }][]> {
+  const [plex, jellyfin, requests, watchlist] = await Promise.all([
+    prisma.plexLibraryItem.findMany({ select: { tmdbId: true, mediaType: true }, distinct: ["tmdbId", "mediaType"] }),
+    prisma.jellyfinLibraryItem.findMany({ select: { tmdbId: true, mediaType: true }, distinct: ["tmdbId", "mediaType"] }),
+    prisma.mediaRequest.findMany({ select: { tmdbId: true, mediaType: true }, distinct: ["tmdbId", "mediaType"] }),
+    prisma.watchlistItem.findMany({ select: { tmdbId: true, mediaType: true }, distinct: ["tmdbId", "mediaType"] }),
+  ]);
+  const unique = new Map<string, { id: number; mediaType: string }>();
+  for (const r of [...requests, ...watchlist, ...plex, ...jellyfin]) {
+    unique.set(titleKey(r.mediaType, r.tmdbId), { id: r.tmdbId, mediaType: r.mediaType });
+  }
+  return [...unique];
 }

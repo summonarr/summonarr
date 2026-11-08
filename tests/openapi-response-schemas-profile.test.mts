@@ -7,6 +7,7 @@
 
 import {
   getSpec, responseSchema, keysOf, handlerSource, interfaceFields, libSource, jsonBodyKeys,
+  specOp, prismaOptionalFields, nullableKeys, routeSource,
   type SchemaNode,
 } from "./_openapi-spec.mts";
 import { test } from "node:test";
@@ -195,7 +196,7 @@ test("the WebAuthn challenge and registration options document exactly the keys 
 
 test("QuickConnect initiation documents the code and secret, and flowState only for a native caller", async () => {
   const schema = await responseSchema("/auth/jellyfin/quickconnect", "post", "200");
-  const result = interfaceFields(libSource("jellyfin.ts"), "JellyfinQuickConnectResult");
+  const result = interfaceFields(libSource("jellyfin-signin.ts"), "JellyfinQuickConnectResult");
   assert.deepEqual(result, ["code", "secret"]);
   assert.deepEqual(keysOf(schema), sorted([...result, "flowState"]));
   assert.deepEqual(sorted(schema.required ?? []), result);
@@ -231,4 +232,48 @@ test("every profile-group 2xx documents a JSON schema", async () => {
       }
     }
   }
+});
+
+/** The columns the handler's `authSession.findMany` selects, sorted. */
+function selectKeys(src: string): string[] {
+  const block = /authSession\.findMany\(\{[\s\S]*?select: \{([^}]*)\}/.exec(src)?.[1];
+  assert.ok(block, "no authSession.findMany select");
+  return sorted([...block.matchAll(/(\w+):\s*true/g)].map((m) => m[1]));
+}
+
+test("both session lists document one AuthSession row: the columns they select, nullable exactly where the model is", async () => {
+  const own = await responseSchema("/sessions", "get", "200");
+  const users = await responseSchema("/admin/users/{id}/sessions", "get", "200");
+  const optional = prismaOptionalFields("AuthSession");
+  for (const [where, row, extra, src] of [
+    ["GET /sessions", own.items, ["indefinite", "isCurrent"], handlerSource("/sessions", "get")],
+    ["GET /admin/users/{id}/sessions", users.items, ["indefinite"], handlerSource("/admin/users/{id}/sessions", "get")],
+  ] as const) {
+    assert.deepEqual(keysOf(row), sorted([...selectKeys(src), ...extra]), where);
+    assert.deepEqual(nullableKeys(row), optional.filter((f) => keysOf(row).includes(f)), `${where}: nullability`);
+  }
+  // The shared columns are one fragment, word for word.
+  for (const k of keysOf(users.items)) assert.deepEqual(own.items?.properties?.[k], users.items?.properties?.[k], k);
+});
+
+test("GET /notifications documents each item nullable exactly where the Notification model is", async () => {
+  const item = (await responseSchema("/notifications", "get", "200")).properties?.items?.items;
+  const optional = prismaOptionalFields("Notification").filter((f) => keysOf(item).includes(f));
+  assert.ok(optional.includes("mediaType"), "a notification about no title has no mediaType");
+  assert.deepEqual(nullableKeys(item), optional);
+});
+
+test("POST /profile/notification-email documents its answer, its step-up and its send limit", async () => {
+  const op = await specOp("/profile/notification-email", "post");
+  const ok = await responseSchema("/profile/notification-email", "post", "200");
+  assert.deepEqual(successAnswers("/profile/notification-email", "post"), [keysOf(ok)]);
+  const src = routeSource("/profile/notification-email");
+  assert.match(src, /requireStepUp\(/);
+  assert.ok(op.responses["401"], "the step-up's 401");
+  assert.match(src, /peekRateLimit\(sendKey, 3, 15 \* 60_000\)/);
+  assert.match(op.responses["429"].description, /3 verification emails in 15 minutes/);
+  assert.match(src, /status: 403/);
+  assert.match(src, /status: 502/);
+  for (const status of ["403", "502", "503"]) assert.ok(op.responses[status], status);
+  assert.equal(op.requestBody?.content["application/json"].schema.properties?.confirmPassword?.writeOnly, true);
 });

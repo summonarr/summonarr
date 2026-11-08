@@ -16,7 +16,7 @@ export const PATCH = withAdmin(async (
   const { id } = await params;
   const parsed = await readJsonCapped<Record<string, unknown>>(req, AGENT_BODY_CAP);
   if (parsed instanceof NextResponse) return parsed;
-  const existing = await prisma.notificationAgent.findUnique({ where: { id }, select: { kind: true, name: true, enabled: true, events: true, config: true } });
+  const existing = await prisma.notificationAgent.findUnique({ where: { id }, select: { kind: true, name: true, enabled: true, events: true, config: true, secret: true } });
   if (!existing) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
   const r = parseAgentInput(parsed && typeof parsed === "object" ? parsed : {}, existing);
   if (!r.ok) return NextResponse.json({ error: t(`apiAdmin.agents.error.${r.error}`) }, { status: 400 });

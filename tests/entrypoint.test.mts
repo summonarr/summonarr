@@ -130,7 +130,7 @@ test("boot waits (bounded) for Postgres before the first step that needs it, and
   assert.ok(wait < ENTRY.indexOf("Deduplicating PlayHistory"), "before the pre-push scripts");
   const loop = ENTRY.slice(wait, ENTRY.indexOf("\ndone\n", wait));
   assert.match(loop, /DBWAIT_EOF' && break/);
-  assert.match(loop, /did not answer within \$\{_db_wait\}s — continuing boot\."\n\s+break/, "a timeout continues boot");
+  assert.match(loop, /did not answer within \$\{_db_wait\}s — continuing boot\."\n\s+_db_unanswered=1\n\s+break/, "a timeout continues boot (and tells the dump not to probe)");
   assert.doesNotMatch(loop.replace(/process\.exit\(code\)/, ""), /\bexit\b/, "the wait never ends boot itself");
 });
 
@@ -239,6 +239,89 @@ test("the pre-upgrade dump clears a cut-off .partial before taking a new one", (
   assert.ok(clear < fn.indexOf("pg_dump -h postgres"), "before the new dump starts");
 });
 
+test("the pre-upgrade dump ignores exactly the raw-ops indexes Prisma re-reports, and lists every one of them", () => {
+  const noise = ENTRY.match(/^_PRISMA_DIFF_NOISE='([^']*)'$/m);
+  assert.ok(noise, "_PRISMA_DIFF_NOISE");
+  const listed = noise[1].split(/\s+/).filter(Boolean);
+  // Every raw-ops index in the schema (Prisma's default name: <Model>_<cols>_idx)
+  // must be listed, or each boot reads it as a pending change and dumps.
+  const schema = read("prisma/schema.prisma");
+  const rawOps: string[] = [];
+  for (const m of schema.matchAll(/^model (\w+) \{\n([\s\S]*?)\n\}/gm)) {
+    for (const ix of m[2].matchAll(/@@index\(\[([^\]]*raw\([^\]]*)\]\)/g)) {
+      const cols = ix[1].split(",").map((c) => c.trim().replace(/\(.*$/, ""));
+      rawOps.push(`${m[1]}_${cols.join("_")}_idx`);
+    }
+  }
+  assert.ok(rawOps.length > 0, "the TmdbCache text_pattern_ops index parsed");
+  for (const name of rawOps) assert.ok(listed.includes(name), `${name} is missing from _PRISMA_DIFF_NOISE`);
+
+  // Run the filter: the noise pair goes, a real change (even one naming a
+  // longer index that starts with the same text) stays.
+  const fn = shFunction("_pre_upgrade_dump");
+  const filter = fn.slice(fn.indexOf("  _pending=$("), fn.indexOf('  [ -z "$_pending" ] && return 0'));
+  const run = (diff: string) => spawnSync("sh", ["-c", `set -e\n${noise[0]}\n${filter}printf '%s' "$_pending"`], {
+    env: { NODE_ENV: "test", PATH: process.env.PATH ?? "", _diff: diff },
+    encoding: "utf8",
+  }).stdout;
+  const pair = '-- DropIndex\nDROP INDEX "TmdbCache_key_idx";\n\n-- CreateIndex\nCREATE INDEX "TmdbCache_key_idx" ON "TmdbCache"("key" text_pattern_ops);\n';
+  assert.equal(run(pair), "");
+  assert.equal(run(`${pair}CREATE INDEX "TmdbCache_key_idx2" ON "TmdbCache"("key");\n`), 'CREATE INDEX "TmdbCache_key_idx2" ON "TmdbCache"("key");');
+});
+
+test("the pre-upgrade dump never waits on an unanswered database", () => {
+  const fn = shFunction("_pre_upgrade_dump");
+  const skip = fn.indexOf('if [ -n "$_db_unanswered" ]; then');
+  assert.ok(skip >= 0 && skip < fn.indexOf("psql "), "a database the boot wait gave up on is skipped before any probe");
+  const wait = ENTRY.slice(ENTRY.indexOf("_db_unanswered=\"\""), ENTRY.indexOf("\n_pre_upgrade_dump() {"));
+  assert.match(wait, /continuing boot\."\n\s+_db_unanswered=1\n\s+break/, "the wait's timeout sets the flag");
+  assert.match(fn, /PGCONNECT_TIMEOUT=10 psql /, "the probe's connect is bounded");
+  assert.match(fn, /PGCONNECT_TIMEOUT=10 timeout "\$_tmo" pg_dump -h postgres/, "the dump's connect is bounded");
+  assert.match(fn, /_diff=\$\(timeout \d+ node node_modules\/prisma\/build\/index\.js migrate diff /, "the diff is bounded");
+});
+
+test("the PlayHistory dedup scans only while no unique index enforces the key", () => {
+  const body = heredocs().find((h) => h.tag === "DEDUP_EOF")?.body ?? "";
+  assert.match(body, /FROM pg_index i/);
+  assert.match(body, /i\.indisunique AND i\.indisvalid/);
+  assert.match(body, /i\.indpred IS NULL AND i\.indexprs IS NULL/, "a partial or expression index proves nothing");
+  assert.match(body, /const res = enforced \? \{ rowCount: 0 \} : await client\.query\(`\s*DELETE FROM "PlayHistory"/);
+});
+
+test("the playDuration clamp judges watched against the credits start, like the app's finalize", () => {
+  const body = heredocs().find((h) => h.tag === "BACKFILL_EOF")?.body ?? "";
+  assert.match(body, /column_name = 'creditsStartMs'/, "an older table without the column still runs");
+  assert.match(body, /WHEN "creditsStartMs" > 0 AND "creditsStartMs" <= duration::bigint \* 1000\s+THEN "creditsStartMs"::float \/ 1000 ELSE duration::float END/);
+  assert.match(body, /::float \/ \(\$\{effective\}\) \* 100\) >= \$1/);
+  const judge = read("src/lib/play-history-record.ts");
+  assert.match(judge, /session\.creditsStartMs != null && session\.creditsStartMs > 0 && session\.creditsStartMs <= totalDurationMs/, "the rule the SQL mirrors");
+});
+
+test("a cron URL override may be https: the call speaks TLS instead of refusing the scheme", async () => {
+  // A plain TCP listener that hangs up: an https client fails the handshake,
+  // an http-only client would refuse the URL before connecting.
+  const server = createNetServer((socket) => socket.destroy());
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const fn = shFunction("_cron_sync");
+    const body = heredocs().find((h) => h.tag === "JSEOF" && fn.includes(h.body));
+    assert.ok(body, "_cron_sync's heredoc");
+    const r = await runNode(body.body, {
+      cwd: REPO,
+      env: { SYNC_CALL_URL: `https://127.0.0.1:${port}/api/sync`, SYNC_CALL_LABEL: "sync", SYNC_CALL_TIMEOUT_MS: "5000", CRON_SECRET: "x" },
+    });
+    assert.equal(r.code, 1);
+    assert.match(r.stdout, /\[sync failed: /);
+    assert.doesNotMatch(r.stdout, /not supported/, r.stdout);
+    const poller = shFunction("_play_history_loop");
+    assert.match(poller, /import https from 'node:https';/);
+    assert.match(poller, /const client = URL\.canParse\(url\) && new URL\(url\)\.protocol === 'https:' \? https : http;/);
+  } finally {
+    server.close();
+  }
+});
+
 // ── the cron scheduler ───────────────────────────────────────────────────────
 
 const SHORT_CADENCE = ["watch-sync", "arr-watch", "arr-snapshots"];
@@ -263,7 +346,7 @@ test("the schedule table: one row per job, short-cadence jobs in their own loop,
   assert.deepEqual([...used].sort(), rows.map((j) => j.intervalVar).sort());
 
   const compose = read("docker-container/docker-compose.yml");
-  const settings = read("src/app/(app)/settings/page.tsx");
+  const settings = read("src/app/(app)/settings/_tabs/cron-jobs.ts");
   for (const j of rows) {
     assert.ok(compose.includes(`${j.intervalVar}: "\${${j.intervalVar}:-${j.def}}"`), `compose default for ${j.intervalVar}`);
     // The System tab's CRON_JOBS table lists every job, with its interval var and default.
@@ -500,6 +583,12 @@ test("the runner stage's app tree is root-owned; only /data and the Next cache a
   assert.ok(copies.every((c) => c.at < chownAt), "after the last COPY, so no copy resets them");
   assert.equal((runner.match(/chown/g) ?? []).length, 1, "no other ownership change in the runner");
   assert.ok(runner.indexOf("\nUSER nextjs\n") > chownAt);
+});
+
+test("the image healthcheck probes with busybox wget, not a node process per probe", () => {
+  const m = DOCKERFILE.match(/HEALTHCHECK [^\n]*\\\n\s+CMD ([^\n]*)\n/);
+  assert.ok(m, "Dockerfile HEALTHCHECK command");
+  assert.match(m[1], /^wget -q -Y off -T \d+ -O \/dev\/null "http:\/\/127\.0\.0\.1:\$\{PORT:-3000\}\$\{BASE_PATH\}\/api\/health" \|\| exit 1$/);
 });
 
 test("the healthcheck start period covers a slow boot, the same in the Dockerfile and both compose files", () => {

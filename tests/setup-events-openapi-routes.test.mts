@@ -24,8 +24,8 @@
 //      chunked variant consumes its limiter on chunk 0 only, for the same reason:
 //      a per-chunk limiter would 429 an honest multi-chunk restore partway.
 //
-// /api/events is DB-checked-auth (guardrail 29 reasoning: it is reachable on the
-// prefetch path proxy.ts skips, so a JWT-only check would honour a revoked or
+// /api/events is DB-checked-auth (guardrail 29 reasoning: the route must not
+// lean on the proxy alone, so a JWT-only check would honour a revoked or
 // demoted session until its natural expiry) and connection-capped. /api/openapi
 // is ADMIN-only and must not embed live secrets.
 //
@@ -386,6 +386,41 @@ test("a NON-ZERO chunk with no active session is 409, not a silent accept", asyn
   const res = await doChunk(chunkHeaders({ "x-chunk-index": "7" }));
   assert.equal(res.status, 409);
   assert.match((await res.json()).error, /start at chunk 0|no active upload/i);
+});
+
+test("import-chunk refuses a missing or malformed chunk header with its badHeaders 400 — never read as chunk 0, no rate token, no gate", async () => {
+  // Number("") is 0: a request with no X-Chunk-Index used to count as chunk 0,
+  // spend the attempt and open a session.
+  const ip = "203.0.113.211";
+  const cases: Array<Record<string, string | undefined>> = [
+    { "x-chunk-index": undefined },
+    { "x-chunk-index": "" },
+    { "x-chunk-index": "-1" },
+    { "x-chunk-index": "1.5" },
+    { "x-chunk-index": "0x10" },
+    { "x-chunk-total": undefined },
+    { "x-chunk-total": "0" },
+    { "x-file-size": "" },
+    { "x-file-size": "1e3" },
+    { "x-upload-id": "" },
+  ];
+  for (const over of cases) {
+    const headers: Record<string, string> = { ...chunkHeaders(), "x-forwarded-for": ip };
+    for (const [k, v] of Object.entries(over)) {
+      if (v === undefined) delete headers[k];
+      else headers[k] = v;
+    }
+    const res = await inScope(() => setupChunk.POST(chunkReq(headers)));
+    assert.equal(res.status, 400, JSON.stringify(over));
+    assert.deepEqual(await res.json(), { error: "Missing or invalid upload headers." }, JSON.stringify(over));
+  }
+  assert.deepEqual(advisoryLocks, [], "no request reached the setup gate");
+  const valid = chunkHeaders({ "x-forwarded-for": ip });
+  const ok = await doChunk(valid);
+  assert.equal(ok.status, 200, "the malformed requests spent none of the IP's chunk-0 budget");
+  await inScope(() => setupChunk.DELETE(new NextRequest("http://localhost:3000/api/setup/import-chunk", {
+    method: "DELETE", headers: { "x-upload-id": valid["x-upload-id"] },
+  })));
 });
 
 test("import-chunk consumes its rate limiter on CHUNK 0 only", async () => {

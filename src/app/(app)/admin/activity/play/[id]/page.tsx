@@ -18,9 +18,11 @@ import {
   Poster,
   SectionHeader,
   SourceTag,
-  fmtBitrate,
-  methodLabel,
 } from "@/components/admin/activity-ui";
+// Functions this server page CALLS come from the directive-free module: through
+// the "use client" activity-ui they would be client references, which throw
+// when called on the server.
+import { fmtBitrate, methodLabel } from "@/components/admin/activity-format";
 import { DeletePlayButton } from "@/components/admin/delete-play-button";
 import { IpInfo } from "@/components/admin/ip-info";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
@@ -40,12 +42,35 @@ function formatDuration(seconds: number | null): string {
   return `${s}s`;
 }
 
-function LabeledValue({ label, value, mono = false }: { label: string; value: React.ReactNode; mono?: boolean }) {
+// One labelled field of a detail card: the label, then whatever shows its
+// value. `gap` is the space under the label (the progress bar sits a step lower).
+function Field({ label, gap = "mb-0.5", children }: { label: string; gap?: "mb-0.5" | "mb-1"; children: React.ReactNode }) {
   return (
     <div>
-      <p className="text-xs text-zinc-500 uppercase tracking-wide mb-0.5">{label}</p>
-      <p className={`text-sm text-zinc-200 ${mono ? "tabular-nums font-mono" : ""}`}>{value}</p>
+      <p className={`text-xs text-zinc-500 uppercase tracking-wide ${gap}`}>{label}</p>
+      {children}
     </div>
+  );
+}
+
+// A field whose value is plain text.
+function LabeledValue({ label, value, mono = false }: { label: string; value: React.ReactNode; mono?: boolean }) {
+  return (
+    <Field label={label}>
+      <p className={`text-sm text-zinc-200 ${mono ? "tabular-nums font-mono" : ""}`}>{value}</p>
+    </Field>
+  );
+}
+
+// A codec with its transcode/direct pill beside it.
+function CodecValue({ label, codec, decision, t }: { label: string; codec: string | null; decision: string | null; t: Translator }) {
+  return (
+    <Field label={label}>
+      <span className="text-sm text-zinc-200">{codec?.toUpperCase() ?? "—"}</span>
+      {decision && (
+        <span className="ml-2"><DecisionBadge decision={decision} t={t} /></span>
+      )}
+    </Field>
   );
 }
 
@@ -195,8 +220,7 @@ export default async function PlayDetailPage({
               label={t("adminActivity.field.stopped")}
               value={<PlayTimestamp iso={play.stoppedAt?.toISOString() ?? null} />}
             />
-            <div>
-              <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1">{t("adminActivity.field.progress")}</p>
+            <Field label={t("adminActivity.field.progress")} gap="mb-1">
               <div className="flex items-center gap-2">
                 {/* Same fill rule as the history table's bar: success once the
                     play counts as watched, otherwise the accent (guardrail 42 —
@@ -215,7 +239,7 @@ export default async function PlayDetailPage({
                 </div>
                 <span className="text-xs text-zinc-400 tabular-nums w-8 text-right">{pct}%</span>
               </div>
-            </div>
+            </Field>
             <LabeledValue label={t("adminActivity.kpi.watchTime")} value={formatDuration(playDurationS)} />
             <LabeledValue label={t("adminActivity.field.totalDuration")} value={formatDuration(durationS)} />
             {play.pausedDuration > 0 && (
@@ -227,30 +251,17 @@ export default async function PlayDetailPage({
         <ActivityCard>
           <SectionHeader label={t("adminActivity.play.streamQuality")} />
           <div className="space-y-3">
-            <div>
-              <p className="text-xs text-zinc-500 uppercase tracking-wide mb-0.5">{t("adminActivity.play.playMethod")}</p>
+            <Field label={t("adminActivity.play.playMethod")}>
               <PlayMethodBadge
                 method={play.playMethod}
                 videoDecision={play.videoDecision}
                 audioDecision={play.audioDecision}
                 t={t}
               />
-            </div>
+            </Field>
             <LabeledValue label={t("adminActivity.popover.resolution")} value={play.resolution ?? "—"} />
-            <div>
-              <p className="text-xs text-zinc-500 uppercase tracking-wide mb-0.5">{t("adminActivity.field.videoCodec")}</p>
-              <span className="text-sm text-zinc-200">{play.videoCodec?.toUpperCase() ?? "—"}</span>
-              {play.videoDecision && (
-                <span className="ml-2"><DecisionBadge decision={play.videoDecision} t={t} /></span>
-              )}
-            </div>
-            <div>
-              <p className="text-xs text-zinc-500 uppercase tracking-wide mb-0.5">{t("adminActivity.field.audioCodec")}</p>
-              <span className="text-sm text-zinc-200">{play.audioCodec?.toUpperCase() ?? "—"}</span>
-              {play.audioDecision && (
-                <span className="ml-2"><DecisionBadge decision={play.audioDecision} t={t} /></span>
-              )}
-            </div>
+            <CodecValue label={t("adminActivity.field.videoCodec")} codec={play.videoCodec} decision={play.videoDecision} t={t} />
+            <CodecValue label={t("adminActivity.field.audioCodec")} codec={play.audioCodec} decision={play.audioDecision} t={t} />
             <LabeledValue label={t("adminActivity.field.container")} value={play.container?.toUpperCase() ?? "—"} />
             <LabeledValue label={t("adminActivity.field.bitrate")} value={fmtBitrate(play.bitrate, play.source)} />
           </div>
@@ -259,8 +270,7 @@ export default async function PlayDetailPage({
         <ActivityCard>
           <SectionHeader label={t("adminActivity.field.device")} />
           <div className="space-y-3">
-            <div>
-              <p className="text-xs text-zinc-500 uppercase tracking-wide mb-0.5">{t("adminActivity.field.user")}</p>
+            <Field label={t("adminActivity.field.user")}>
               <Link
                 href={`/admin/activity/user/${play.mediaServerUser.id}`}
                 className="flex items-center gap-2 text-sm text-indigo-400 hover:text-indigo-300 transition-colors"
@@ -279,16 +289,15 @@ export default async function PlayDetailPage({
                 <User className="w-3.5 h-3.5" />
                 {play.mediaServerUser.username}
               </Link>
-            </div>
+            </Field>
             <LabeledValue label={t("adminActivity.field.platform")} value={play.platform ?? "—"} />
             <LabeledValue label={t("adminActivity.field.player")} value={play.player ?? "—"} />
             <LabeledValue label={t("adminActivity.field.device")} value={play.device ?? "—"} />
-            <div>
-              <p className="text-xs text-zinc-500 uppercase tracking-wide mb-0.5">{t("adminActivity.field.ipAddress")}</p>
+            <Field label={t("adminActivity.field.ipAddress")}>
               {play.ipAddress
                 ? <IpInfo ip={play.ipAddress} size="sm" />
                 : <p className="text-sm text-zinc-200">—</p>}
-            </div>
+            </Field>
           </div>
         </ActivityCard>
       </div>

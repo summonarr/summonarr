@@ -640,3 +640,36 @@ test("offboarding: an earlier server's departure survives a run that throws read
   await flush();
   assert.equal(offboardAudits().length, 1);
 });
+
+test("an unchanged server user is not re-written; a changed one is", async () => {
+  settings.clear();
+  msuStore.clear();
+  settings.set("jellyfinUrl", DEFAULT_URL);
+  settings.set("jellyfinApiKey", "key-default");
+  seedMsu({ id: "row-same", source: "jellyfin", serverInstance: "", sourceUserId: "s1", username: "sam", email: null, isServerAdmin: false, downloadsEnabled: true, active: true, manualUserLink: false });
+  seedMsu({ id: "row-renamed", source: "jellyfin", serverInstance: "", sourceUserId: "s2", username: "old-name", email: null, isServerAdmin: false, downloadsEnabled: true, active: true, manualUserLink: false });
+  respond = (url) => {
+    if (url === `${DEFAULT_URL}/Users`) {
+      return okJson([
+        { Id: "s1", Name: "sam", Policy: { IsAdministrator: false, EnableContentDownloading: true } },
+        { Id: "s2", Name: "new-name", Policy: { IsAdministrator: false, EnableContentDownloading: true } },
+      ]);
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const delegate = (prisma as unknown as { mediaServerUser: { upsert: (args: { where: { source_serverInstance_sourceUserId: { sourceUserId: string } } }) => Promise<unknown> } }).mediaServerUser;
+  const original = delegate.upsert;
+  const written: string[] = [];
+  delegate.upsert = async (args) => {
+    written.push(args.where.source_serverInstance_sourceUserId.sourceUserId);
+    return original(args);
+  };
+  try {
+    const results = await syncDownloadPolicies();
+    assert.equal(results[0].upserted, 2, "both are still counted as synced");
+  } finally {
+    delegate.upsert = original;
+  }
+  assert.deepEqual(written, ["s2"]);
+  assert.equal(msuStore.get("row-renamed")!.username, "new-name");
+});

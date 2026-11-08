@@ -10,6 +10,7 @@ import {
   signQcFlowCookie,
 } from "@/lib/jellyfin-flow-state";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 import { isSecureCookieContext } from "@/lib/session-cookie";
 
 // `instance` travels as a query param on both the initiate (POST) and poll
@@ -152,120 +153,169 @@ export async function GET(req: NextRequest) {
   const wait = searchParams.get("wait") === "1";
 
   const countKey = secret.slice(0, 32);
-  const existingRaw = pollCounts.get(countKey);
   const now = Date.now();
-  // Treat an expired entry as absent so a fresh TTL window starts. Otherwise the
-  // new entry inherits the stale (already-past) expiresAt, the count resets to 1
-  // on every poll, and MAX_POLLS is never enforced after the first TTL expiry.
-  const existing = existingRaw && existingRaw.expiresAt >= now ? existingRaw : undefined;
-  if (existingRaw && !existing) pollCounts.delete(countKey);
-  const attempts = (existing ? existing.count : 0) + 1;
-  if (attempts > MAX_POLLS) {
-    // Keep the entry rather than dropping it: deleting the counter here would let
-    // the very next poll for the same secret start a fresh 60-attempt window.
-    // The 60s sweep above reclaims the key once its TTL passes.
-    pollCounts.set(countKey, { count: attempts, expiresAt: existing?.expiresAt ?? now + QC_TTL });
+  const budget = pollBudget(countKey, now);
+  if (budget.kind === "spent") {
     return NextResponse.json({ error: t("apiAuth.quickConnect.sessionExpired") }, { status: 410 });
   }
-  if (!existing && pollCounts.size >= MAX_POLL_KEYS) {
-    sweepExpiredPollCounts(now);
-    if (pollCounts.size >= MAX_POLL_KEYS) {
-      // Shed load rather than grow unbounded. 503 (not 410) so a legitimate client
-      // retries instead of treating its session as dead.
-      return NextResponse.json({ error: t("apiAuth.quickConnect.busy") }, { status: 503 });
-    }
+  if (budget.kind === "full") {
+    // Shed load rather than grow unbounded. 503 (not 410) so a legitimate client
+    // retries instead of treating its session as dead; `retry: true` (additive)
+    // tells it this 503 is temporary, unlike "not configured".
+    return NextResponse.json({ error: t("apiAuth.quickConnect.busy"), retry: true }, { status: 503 });
   }
   // Concurrent-long-poll cap (per-IP + global). Reject 503 if exceeded so the
   // client can fall back to short-polling instead of stalling. Checked BEFORE
   // the attempt is charged below: a 503 here means Jellyfin was never asked, and
   // charging a MAX_POLLS attempt anyway let a few tabs behind one NAT address
   // (per-IP cap 3) walk a legitimate secret to the 410 "session expired" state
-  // on retries. Nothing awaits between this check and the slot increment inside
-  // the try, so the check/increment pair stays race-free.
+  // on retries. Nothing awaits between this check and the slot taken in
+  // longPoll, so the check/take pair stays race-free.
   const ipKey = getClientIpKey(req.headers);
   if (wait) {
     if (globalInflight >= LONG_POLL_GLOBAL_CAP) {
-      return NextResponse.json({ error: t("apiAuth.quickConnect.serverBusy") }, { status: 503 });
+      return NextResponse.json({ error: t("apiAuth.quickConnect.serverBusy"), retry: true }, { status: 503 });
     }
     if ((inflightByIp.get(ipKey) ?? 0) >= LONG_POLL_PER_IP_CAP) {
-      return NextResponse.json({ error: t("apiAuth.quickConnect.tooManyPolls") }, { status: 503 });
+      return NextResponse.json({ error: t("apiAuth.quickConnect.tooManyPolls"), retry: true }, { status: 503 });
     }
   }
 
-  pollCounts.set(countKey, { count: attempts, expiresAt: existing?.expiresAt ?? now + QC_TTL });
+  pollCounts.set(countKey, { count: budget.attempts, expiresAt: budget.expiresAt });
 
   try {
     if (!wait) {
-      const authenticated = await pollJellyfinQuickConnect(jellyfinUrl, secret);
+      const authenticated = await pollJellyfinQuickConnect(jellyfinUrl, secret, { signal: req.signal });
       if (authenticated) pollCounts.delete(countKey);
       return NextResponse.json({ authenticated });
     }
-
-    inflightByIp.set(ipKey, (inflightByIp.get(ipKey) ?? 0) + 1);
-    globalInflight += 1;
-
-    try {
-      // Long-poll: keep hitting Jellyfin until authenticated, client disconnects, or budget elapses.
-      // One inbound long-poll counts as one attempt against MAX_POLLS regardless of internal ticks.
-      const deadline = Date.now() + LONG_POLL_MAX_MS;
-      // ONE abort listener for the whole long-poll, not one per tick. A
-      // per-tick listener stays attached when the timer (not the abort) wins,
-      // so a full poll would pile up ~13 listeners on the same signal and trip
-      // Node's max-listeners warning.
-      let abortWake: (() => void) | null = null;
-      const onAbort = () => abortWake?.();
-      req.signal.addEventListener("abort", onAbort, { once: true });
-      try {
-      while (Date.now() < deadline) {
-        if (req.signal.aborted) {
-          return NextResponse.json({ authenticated: false }, { status: 499 });
-        }
-        const authenticated = await pollJellyfinQuickConnect(jellyfinUrl, secret);
-        if (authenticated) {
-          pollCounts.delete(countKey);
-          return NextResponse.json({ authenticated: true });
-        }
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) break;
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, Math.min(LONG_POLL_TICK_MS, remaining));
-          // The shared listener wakes this tick early; the loop-top check then
-          // returns 499. Clearing abortWake after each tick keeps the closure
-          // from outliving the promise it belongs to.
-          abortWake = () => {
-            clearTimeout(timer);
-            resolve();
-          };
-        });
-        abortWake = null;
-      }
-      return NextResponse.json({ authenticated: false });
-      } finally {
-        req.signal.removeEventListener("abort", onAbort);
-      }
-    } finally {
-      globalInflight = Math.max(0, globalInflight - 1);
-      const remaining = (inflightByIp.get(ipKey) ?? 1) - 1;
-      if (remaining <= 0) inflightByIp.delete(ipKey);
-      else inflightByIp.set(ipKey, remaining);
-    }
+    return await longPoll(
+      req.signal,
+      ipKey,
+      () => pollJellyfinQuickConnect(jellyfinUrl, secret, { signal: req.signal }),
+      countKey,
+    );
   } catch (err) {
-    console.error("[jellyfin quickconnect] poll error:", err);
-    // Terminal upstream states, distinguished from transient failures so
-    // clients stop polling a dead secret: 404 = the secret expired server-side
-    // (same 410 semantics as the MAX_POLLS cap above), 401 = QuickConnect is
-    // disabled on the server.
-    const status = errorStatus(err);
-    if (status === 404) {
-      pollCounts.delete(countKey);
-      return NextResponse.json({ error: t("apiAuth.quickConnect.sessionExpired") }, { status: 410 });
-    }
-    if (status === 401) {
-      return NextResponse.json(
-        { error: t("apiAuth.quickConnect.disabled"), code: QUICKCONNECT_DISABLED_CODE },
-        { status: 502 },
-      );
-    }
-    return NextResponse.json({ error: t("apiAuth.quickConnect.pollFailed") }, { status: 502 });
+    // The client left while Jellyfin was being asked: the aborted request is
+    // not a Jellyfin failure, and nobody reads the answer.
+    if (req.signal.aborted) return NextResponse.json({ authenticated: false }, { status: 499 });
+    return pollFailure(err, countKey, t);
   }
+}
+
+type PollBudget =
+  | { kind: "ok"; attempts: number; expiresAt: number }
+  | { kind: "spent" }
+  | { kind: "full" };
+
+// This poll's charge against the secret's MAX_POLLS. Not recorded here: the
+// caller records it once the request is going to reach Jellyfin.
+function pollBudget(countKey: string, now: number): PollBudget {
+  const existingRaw = pollCounts.get(countKey);
+  // Treat an expired entry as absent so a fresh TTL window starts. Otherwise the
+  // new entry inherits the stale (already-past) expiresAt, the count resets to 1
+  // on every poll, and MAX_POLLS is never enforced after the first TTL expiry.
+  const existing = existingRaw && existingRaw.expiresAt >= now ? existingRaw : undefined;
+  if (existingRaw && !existing) pollCounts.delete(countKey);
+  const attempts = (existing ? existing.count : 0) + 1;
+  const expiresAt = existing?.expiresAt ?? now + QC_TTL;
+  if (attempts > MAX_POLLS) {
+    // Keep the entry rather than dropping it: deleting the counter here would let
+    // the very next poll for the same secret start a fresh 60-attempt window.
+    // The 60s sweep above reclaims the key once its TTL passes.
+    pollCounts.set(countKey, { count: attempts, expiresAt });
+    return { kind: "spent" };
+  }
+  if (!existing && pollCounts.size >= MAX_POLL_KEYS) {
+    sweepExpiredPollCounts(now);
+    if (pollCounts.size >= MAX_POLL_KEYS) return { kind: "full" };
+  }
+  return { kind: "ok", attempts, expiresAt };
+}
+
+// Keep asking Jellyfin until the user approves, the client disconnects, or the
+// budget elapses. One inbound long-poll counts as one attempt against
+// MAX_POLLS regardless of internal ticks. Holds one per-IP and one global slot
+// for its whole life.
+async function longPoll(
+  signal: AbortSignal,
+  ipKey: string,
+  poll: () => Promise<boolean>,
+  countKey: string,
+): Promise<NextResponse> {
+  inflightByIp.set(ipKey, (inflightByIp.get(ipKey) ?? 0) + 1);
+  globalInflight += 1;
+  const sleeper = abortableSleeper(signal);
+  try {
+    const deadline = Date.now() + LONG_POLL_MAX_MS;
+    while (Date.now() < deadline) {
+      if (signal.aborted) return NextResponse.json({ authenticated: false }, { status: 499 });
+      const authenticated = await poll();
+      if (authenticated) {
+        pollCounts.delete(countKey);
+        return NextResponse.json({ authenticated: true });
+      }
+      // A client that left while Jellyfin was being asked: release the slots
+      // now rather than after another tick.
+      if (signal.aborted) return NextResponse.json({ authenticated: false }, { status: 499 });
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await sleeper.sleep(Math.min(LONG_POLL_TICK_MS, remaining));
+    }
+    return NextResponse.json({ authenticated: false });
+  } finally {
+    sleeper.dispose();
+    globalInflight = Math.max(0, globalInflight - 1);
+    const remaining = (inflightByIp.get(ipKey) ?? 1) - 1;
+    if (remaining <= 0) inflightByIp.delete(ipKey);
+    else inflightByIp.set(ipKey, remaining);
+  }
+}
+
+// A sleep the request's abort cuts short. ONE abort listener for the whole
+// long-poll, not one per tick: a per-tick listener stays attached when the
+// timer (not the abort) wins, so a full poll would pile up ~13 listeners on the
+// same signal and trip Node's max-listeners warning.
+function abortableSleeper(signal: AbortSignal): { sleep(ms: number): Promise<void>; dispose(): void } {
+  let wake: (() => void) | null = null;
+  const onAbort = () => wake?.();
+  signal.addEventListener("abort", onAbort, { once: true });
+  return {
+    sleep(ms) {
+      return new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          wake = null;
+          resolve();
+        }, ms);
+        wake = () => {
+          clearTimeout(timer);
+          wake = null;
+          resolve();
+        };
+      });
+    },
+    dispose() {
+      signal.removeEventListener("abort", onAbort);
+    },
+  };
+}
+
+function pollFailure(err: unknown, countKey: string, t: Translator): NextResponse {
+  console.error("[jellyfin quickconnect] poll error:", err);
+  // Terminal upstream states, distinguished from transient failures so
+  // clients stop polling a dead secret: 404 = the secret expired server-side
+  // (same 410 semantics as the MAX_POLLS cap), 401 = QuickConnect is
+  // disabled on the server.
+  const status = errorStatus(err);
+  if (status === 404) {
+    pollCounts.delete(countKey);
+    return NextResponse.json({ error: t("apiAuth.quickConnect.sessionExpired") }, { status: 410 });
+  }
+  if (status === 401) {
+    return NextResponse.json(
+      { error: t("apiAuth.quickConnect.disabled"), code: QUICKCONNECT_DISABLED_CODE },
+      { status: 502 },
+    );
+  }
+  return NextResponse.json({ error: t("apiAuth.quickConnect.pollFailed") }, { status: 502 });
 }

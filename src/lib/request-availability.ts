@@ -17,6 +17,22 @@ export function buildMediaTypeWhere(items: TmdbMedia[]): Prisma.MediaRequestWher
   };
 }
 
+type DbMediaType = "MOVIE" | "TV";
+
+// The ONE key for a title in this module: TmdbMedia's own lowercase mediaType
+// and the id, `${mediaType}:${id}` — what permanentlyDeclinedKeys hands the
+// client, and what the requested sets below are keyed on.
+function titleKey(mediaType: TmdbMedia["mediaType"], id: number): string {
+  return `${mediaType}:${id}`;
+}
+
+function rowKey(row: { tmdbId: number; mediaType: DbMediaType }): string {
+  return titleKey(row.mediaType === "MOVIE" ? "movie" : "tv", row.tmdbId);
+}
+
+// Two queries, not one selecting requestedBy: the global one is DISTINCT per
+// title, so it stays bounded by the page's items however many users asked for
+// each, where a merged read would return one row per requester.
 export async function attachRequestedStatus(items: TmdbMedia[], userId?: string): Promise<TmdbMedia[]> {
   if (items.length === 0) return items;
   const baseWhere = buildMediaTypeWhere(items);
@@ -38,14 +54,14 @@ export async function attachRequestedStatus(items: TmdbMedia[], userId?: string)
           select: { tmdbId: true, mediaType: true },
           distinct: ["tmdbId", "mediaType"],
         })
-      : Promise.resolve([] as { tmdbId: number; mediaType: "MOVIE" | "TV" }[]),
+      : Promise.resolve([] as { tmdbId: number; mediaType: DbMediaType }[]),
   ]);
 
-  const globalSet = new Set(globalRows.map((r) => `${r.tmdbId}:${r.mediaType}`));
-  const mineSet   = new Set(mineRows.map((r)   => `${r.tmdbId}:${r.mediaType}`));
+  const globalSet = new Set(globalRows.map(rowKey));
+  const mineSet = new Set(mineRows.map(rowKey));
 
   return items.map((item) => {
-    const key = `${item.id}:${item.mediaType === "movie" ? "MOVIE" : "TV"}`;
+    const key = titleKey(item.mediaType, item.id);
     return {
       ...item,
       requested:     globalSet.has(key),
@@ -69,5 +85,5 @@ export async function permanentlyDeclinedKeys(items: TmdbMedia[], userId: string
     where: { requestedBy: userId, arrInstance: "", permanentlyDeclined: true, ...baseWhere },
     select: { tmdbId: true, mediaType: true },
   });
-  return rows.map((r) => `${r.mediaType === "MOVIE" ? "movie" : "tv"}:${r.tmdbId}`);
+  return rows.map(rowKey);
 }

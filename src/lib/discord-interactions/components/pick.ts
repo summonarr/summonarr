@@ -2,16 +2,18 @@ import { prisma } from "@/lib/prisma";
 import { defaultPermissionsForRole } from "@/lib/permissions";
 import { sessionForUser } from "@/lib/auto-request";
 import { createMediaRequest, loadRequestContext, type CreateMediaRequestResult } from "@/lib/request-create";
-import { TMDB_POSTER_BASE, editOriginal, quotaWindowLabel, releaseYearOf } from "../reply";
-import type { ComponentContext, PendingSearch } from "../types";
+import { TMDB_POSTER_BASE, editOriginal, loadPending, quotaWindowLabel, releaseYearOf } from "../reply";
+import { holdsAutoApproveRole, loadDiscordRequestSettings, maintenanceRefuses } from "../request-gates";
+import type { ComponentContext, PendingSearch, TmdbResult } from "../types";
 
 // The Discord /request picker files through the request chokepoint
 // (createMediaRequest) like the web route and the watchlist auto-request: the
 // instance routing and its grants, quota, blacklist, content rating, duplicate
 // and stale-decline handling, mirroring, auto-approve with its push and
 // rollback, and the admin alerts are ONE copy. Only the Discord parts live here:
-// the maintenance gate, the linked/shadow account, the deactivation gate, the
-// auto-approve role, and the reply.
+// the maintenance gate and the auto-approve role (request-gates.ts, shared with
+// the /request command), the linked/shadow account, the deactivation gate, and
+// the reply.
 
 // The admin alerts run once the response is sent; Discord was answered before
 // this handler started, so they run now.
@@ -21,18 +23,13 @@ function runNow(task: () => Promise<void>): void {
 
 // `pick:<interactionId>:<discordUserId>:<index>` — a /request result button.
 export async function handlePick(ctx: ComponentContext): Promise<void> {
-  const { interaction, t, appId, token, customId, discordUser, discordUserId } = ctx;
+  const { interaction, t, appId, token, customId, discordUserId } = ctx;
   const [, interactionId, userId, idxStr] = customId.split(":");
 
   if (discordUserId !== userId) return;
 
   const key = `p:${interactionId}:${discordUserId}`;
-  const cachedRow = await prisma.discordSearchCache.findUnique({ where: { queryKey: key } }).catch(() => null);
-  let pending: PendingSearch | null = null;
-  if (cachedRow && new Date() < cachedRow.expiresAt) {
-    try { pending = JSON.parse(cachedRow.data) as PendingSearch; } catch { }
-  }
-
+  const pending = await loadPending<PendingSearch>(key);
   if (!pending) {
     prisma.discordSearchCache.delete({ where: { queryKey: key } }).catch(() => {});
     await editOriginal(appId, token, {
@@ -43,8 +40,7 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
     return;
   }
 
-  const idx = parseInt(idxStr, 10);
-  const selected = pending.results[idx];
+  const selected = pickedResult(pending, idxStr);
   if (!selected) {
     await editOriginal(appId, token, { content: t("notify.bot.pick.invalid"), embeds: [], components: [] });
     return;
@@ -56,73 +52,25 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
   // next pick from the same results answer "search expired". It is deleted once
   // the chokepoint has filed the pick (or found the title already here).
 
-  // The Discord-side settings this click reads, in one query (the request's own
-  // are the chokepoint's, read by loadRequestContext).
-  const settingRows = await prisma.setting.findMany({
-    where: { key: { in: ["maintenanceEnabled", "discordRequireLinkedAccount", "discordAutoApproveRoles"] } },
-  });
-  const setting = new Map(settingRows.map((r) => [r.key, r.value]));
-
-  // Maintenance gate: a user who ran /request BEFORE maintenance was enabled could
-  // still click a result button afterward and create a request (incl. auto-approve
-  // → ARR push). Block unless the clicker is a linked Discord admin (admins bypass).
-  if (setting.get("maintenanceEnabled") === "true") {
-    const discordAdmin = await prisma.user.findFirst({ where: { discordId: discordUserId, role: "ADMIN" }, select: { id: true } });
-    if (!discordAdmin) {
-      await editOriginal(appId, token, { content: t("notify.bot.maintenance"), embeds: [], components: [] });
-      return;
-    }
+  // A user who ran /request BEFORE maintenance was enabled could still click a
+  // result afterwards and create a request (incl. auto-approve → ARR push).
+  if (await maintenanceRefuses(discordUserId)) {
+    await editOriginal(appId, token, { content: t("notify.bot.maintenance"), embeds: [], components: [] });
+    return;
   }
-
-  const mediaType = selected.mediaType === "movie" ? "MOVIE" : "TV";
 
   // A Discord auto-approve role both exempts the clicker from the linked-account
   // requirement and auto-approves the request (the chokepoint's `autoApprove`).
-  const memberRoles: string[] = interaction.member?.roles ?? [];
-  const requireLinkedComponent = setting.get("discordRequireLinkedAccount") === "true";
-  const autoApproveRoles = (setting.get("discordAutoApproveRoles") ?? "").split(",").map((r) => r.trim()).filter(Boolean);
-  const hasAutoApproveRole = autoApproveRoles.length > 0 && memberRoles.some((r) => autoApproveRoles.includes(r));
-
-  let dbUser;
-  if (requireLinkedComponent && !hasAutoApproveRole) {
-    const linked = await prisma.user.findFirst({
-      where: { discordId: discordUserId, NOT: { email: { endsWith: "@discord.local" } } },
+  const settings = await loadDiscordRequestSettings();
+  const hasAutoApproveRole = holdsAutoApproveRole(settings.autoApproveRoles, interaction.member?.roles ?? []);
+  const dbUser = await resolveRequester(ctx, pending, settings.requireLinked && !hasAutoApproveRole);
+  if (!dbUser) {
+    await editOriginal(appId, token, {
+      content: t("notify.bot.linkRequiredToRequest"),
+      embeds: [],
+      components: [],
     });
-    if (!linked) {
-      await editOriginal(appId, token, {
-        content: t("notify.bot.linkRequiredToRequest"),
-        embeds: [],
-        components: [],
-      });
-      return;
-    }
-    dbUser = linked;
-  } else {
-    // Create a shadow user with a synthetic email; they can merge into a real account via /link.
-    // Use the LIVE username from the component interaction rather than the cached
-    // `pending.discordUsername` (which was captured at /request time and may be stale).
-    const liveUsername = (discordUser.username as string | undefined) ?? pending.discordUsername;
-    dbUser = await prisma.user.upsert({
-      where: { discordId: discordUserId },
-      // `permissions` is seeded on create only — deliberately NOT re-set on update, so an
-      // admin's per-user permission edits aren't clobbered on every Discord interaction.
-      // Legacy rows with permissions=0 stay correct via the effectivePermissions(role, …)
-      // fallback in sessionForUser; don't "fix" this by adding permissions to `update`.
-      update: {},
-      create: {
-        discordId: discordUserId,
-        name: liveUsername,
-        email: `discord_${discordUserId}@discord.local`,
-        permissions: defaultPermissionsForRole("USER"),
-      },
-    });
-    // Refresh the display name for SHADOW rows only. `/link` puts the same discordId on
-    // the user's REAL row (mergeDiscordIntoWebAccount), so an unconditional
-    // `update: { name }` rewrote a provider-provisioned name (Plex/OIDC/registration)
-    // with the Discord handle on every result click — and nothing in the UI sets it back.
-    if (dbUser.email.endsWith("@discord.local") && dbUser.name !== liveUsername) {
-      dbUser = await prisma.user.update({ where: { id: dbUser.id }, data: { name: liveUsername } });
-    }
+    return;
   }
 
   const confirmEmbed: Record<string, unknown> = { title: selected.title };
@@ -149,7 +97,7 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
   const result = await createMediaRequest(
     sessionForUser(dbUser),
     await loadRequestContext(dbUser.id),
-    { tmdbId: selected.id, mediaType },
+    { tmdbId: selected.id, mediaType: selected.mediaType === "movie" ? "MOVIE" : "TV" },
     t,
     {
       afterResponse: runNow,
@@ -168,23 +116,70 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
   // also expires.
   prisma.discordSearchCache.delete({ where: { queryKey: key } }).catch(() => {});
 
-  let note: string;
-  if (result.kind === "already-available") {
-    // A library hit is NOT a request: no row, so it doesn't consume the quota.
-    note = t("notify.bot.pick.inLibrary");
-    confirmEmbed.color = 0x57f287;
-  } else if (result.branch === "auto-approve" && result.pushFailed) {
-    // The push failed and the request rolled back to PENDING — don't tell the
-    // user it's "being downloaded"; an admin will review it.
-    note = t("notify.bot.pick.arrFailed");
-    confirmEmbed.color = 0xfee75c;
-  } else {
-    note = t(result.branch === "auto-approve" ? "notify.bot.pick.autoApproved" : result.branch === "mirror-approved" ? "notify.bot.pick.mirrored" : "notify.bot.pick.pending");
-    confirmEmbed.color = 0x57f287;
-  }
-
+  const { note, color } = filedNote(result, t);
+  confirmEmbed.color = color;
   confirmEmbed.description = `(${selected.releaseYear}) — ${note}`;
   await editOriginal(appId, token, { content: t("notify.bot.pick.submitted"), embeds: [confirmEmbed], components: [] });
+}
+
+// The picked result, or null for an index or entry the stored search can't
+// answer. The row is this server's own write, read back from the database: a
+// result without a usable id, type and title must not be filed.
+function pickedResult(pending: PendingSearch, idxStr: string | undefined): TmdbResult | null {
+  const results: unknown[] = Array.isArray(pending.results) ? pending.results : [];
+  const r = results[parseInt(idxStr ?? "", 10)] as Partial<TmdbResult> | undefined;
+  if (!r || typeof r !== "object") return null;
+  if (!Number.isInteger(r.id) || (r.mediaType !== "movie" && r.mediaType !== "tv") || typeof r.title !== "string") return null;
+  return r as TmdbResult;
+}
+
+// The account the request is filed as: the clicker's linked site account, which
+// the linked-account requirement insists on; otherwise their own row, created as
+// a shadow account with a synthetic email if they have none (they can merge it
+// into a real account via /link). Null when a link is required and missing.
+async function resolveRequester(ctx: ComponentContext, pending: PendingSearch, mustBeLinked: boolean) {
+  const { discordUser, discordUserId } = ctx;
+  if (mustBeLinked) {
+    return prisma.user.findFirst({
+      where: { discordId: discordUserId, NOT: { email: { endsWith: "@discord.local" } } },
+    });
+  }
+  // The LIVE username from the component interaction rather than the cached
+  // `pending.discordUsername` (captured at /request time, possibly stale).
+  const liveUsername = (discordUser.username as string | undefined) ?? pending.discordUsername;
+  const dbUser = await prisma.user.upsert({
+    where: { discordId: discordUserId },
+    // `permissions` is seeded on create only — deliberately NOT re-set on update, so an
+    // admin's per-user permission edits aren't clobbered on every Discord interaction.
+    // Legacy rows with permissions=0 stay correct via the effectivePermissions(role, …)
+    // fallback in sessionForUser; don't "fix" this by adding permissions to `update`.
+    update: {},
+    create: {
+      discordId: discordUserId,
+      name: liveUsername,
+      email: `discord_${discordUserId}@discord.local`,
+      permissions: defaultPermissionsForRole("USER"),
+    },
+  });
+  // Refresh the display name for SHADOW rows only. `/link` puts the same discordId on
+  // the user's REAL row (mergeDiscordIntoWebAccount), so an unconditional
+  // `update: { name }` rewrote a provider-provisioned name (Plex/OIDC/registration)
+  // with the Discord handle on every result click — and nothing in the UI sets it back.
+  if (dbUser.email.endsWith("@discord.local") && dbUser.name !== liveUsername) {
+    return prisma.user.update({ where: { id: dbUser.id }, data: { name: liveUsername } });
+  }
+  return dbUser;
+}
+
+// What the requester is told about a filed pick.
+function filedNote(result: Extract<CreateMediaRequestResult, { ok: true }>, t: ComponentContext["t"]): { note: string; color: number } {
+  // A library hit is NOT a request: no row, so it doesn't consume the quota.
+  if (result.kind === "already-available") return { note: t("notify.bot.pick.inLibrary"), color: 0x57f287 };
+  // The push failed and the request rolled back to PENDING — don't tell the
+  // user it's "being downloaded"; an admin will review it.
+  if (result.branch === "auto-approve" && result.pushFailed) return { note: t("notify.bot.pick.arrFailed"), color: 0xfee75c };
+  const key = result.branch === "auto-approve" ? "notify.bot.pick.autoApproved" : result.branch === "mirror-approved" ? "notify.bot.pick.mirrored" : "notify.bot.pick.pending";
+  return { note: t(key), color: 0x57f287 };
 }
 
 // The reply for a refused pick. A refusal the picker can't produce (it sends no

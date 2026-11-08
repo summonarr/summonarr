@@ -67,6 +67,8 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 // ── scripted discord.com ─────────────────────────────────────────────────────
 const fetchCalls: Array<{ url: URL; method: string; body: string | null }> = [];
 let dmChannelOk = true;
+// What a successful DM-channel open answers: a real channel id is a snowflake.
+let dmChannelBody: unknown = { id: "445566778899001122" };
 let dmSendOk = true;
 let registerOk = true;
 let roleCallsOk = true;
@@ -77,7 +79,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   fetchCalls.push({ url, method: init?.method ?? "GET", body });
   const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { "content-type": "application/json" } });
   if (url.pathname.endsWith("/users/@me/channels")) {
-    return dmChannelOk ? json({ id: "dm-channel-1" }) : json({ message: "Cannot send messages to this user" }, 403);
+    return dmChannelOk ? json(dmChannelBody) : json({ message: "Cannot send messages to this user" }, 403);
   }
   if (/\/channels\/[^/]+\/messages$/.test(url.pathname)) {
     return dmSendOk ? json({ id: "msg-1" }) : json({ message: "DM CLOSED" }, 403);
@@ -178,7 +180,20 @@ shadowPrismaModel(prisma, "user", {
     if (u) Object.assign(u, args.data);
     return u ?? {};
   },
-  updateMany: async (args: unknown) => { rec("user.updateMany", args); return { count: 0 }; },
+  // Honours the id/discordId filter the unlink's compare-and-swap clears through.
+  updateMany: async (args: { where?: { id?: string; discordId?: string | null }; data?: Record<string, unknown> }) => {
+    rec("user.updateMany", args);
+    if (userUpdateThrows) throw new Error("simulated write failure");
+    const w = args.where ?? {};
+    let count = 0;
+    for (const u of appUsers) {
+      if (w.id !== undefined && u.id !== w.id) continue;
+      if (w.discordId !== undefined && u.discordId !== w.discordId) continue;
+      if (args.data) Object.assign(u, args.data);
+      count++;
+    }
+    return { count };
+  },
   create: async (args: unknown) => { rec("user.create", args); return { id: "new" }; },
   delete: async (args: unknown) => { rec("user.delete", args); return {}; },
   count: async () => appUsers.length,
@@ -411,7 +426,7 @@ beforeEach(async () => {
   mergeCodes = [];
   settings.clear();
   settings.set("discordBotToken", "a-bot-token");
-  settings.set("discordClientId", "999888777");
+  settings.set("discordClientId", "999888777666555444");
   // revokeDiscordRolesOnUnlink / assignDiscordRolesOnLink do nothing unless a
   // guild AND at least one managed role id are configured, and both must be REAL
   // snowflakes (17-20 digit Discord ids) because each is checked with
@@ -426,6 +441,7 @@ beforeEach(async () => {
   warns.length = 0;
   errors.length = 0;
   dmChannelOk = true;
+  dmChannelBody = { id: "445566778899001122" };
   dmSendOk = true;
   registerOk = true;
   roleCallsOk = true;
@@ -782,6 +798,20 @@ test("a failed DM-channel open is also a 502 with no stored code", async () => {
   assert.equal(mergeCodes.length, 0);
 });
 
+test("a DM-channel answer with no snowflake id sends nothing to /channels/…/messages and stores no code", async () => {
+  // The id goes straight into the next request's path: a missing or junk id
+  // used to post to /channels/undefined/messages.
+  for (const body of [{}, { id: 42 }, { id: "../../guilds/1" }, null]) {
+    dmChannelBody = body;
+    fetchCalls.length = 0;
+    const { token } = await mintSession();
+    const res = await doInitiate(token, { discordId: VALID_SNOWFLAKE });
+    assert.equal(res.status, 502, JSON.stringify(body));
+    assert.ok(!fetchCalls.some((c) => /\/channels\/[^/]+\/messages$/.test(c.url.pathname)), `no message post for ${JSON.stringify(body)}`);
+    assert.equal(mergeCodes.length, 0);
+  }
+});
+
 test("a DM failure never leaks the Discord response body", async () => {
   dmSendOk = false;
   const { token } = await mintSession();
@@ -912,12 +942,14 @@ test("a CORRECT code merges, consumes the code and reports the migration count",
   assert.equal(mergeCodes.length, 0, "the code is consumed on success");
 });
 
-test("a FAILED merge does NOT burn the code — the user must be able to retry", async () => {
+test("a FAILED merge does NOT burn the code — the user must be able to retry — and answers 500, not a 409 conflict", async () => {
   mergeThrows = true;
   const { token, userId } = await mintSession();
   seedCode(userId);
   const res = await doConfirm(token, { code: "ABCDEF123456" });
-  assert.equal(res.status, 409);
+  // A server failure (DB outage, tx timeout) is not a conflict the user can
+  // resolve: only DiscordAlreadyLinkedError answers 409.
+  assert.equal(res.status, 500);
   assert.equal((await res.json()).error, "Could not link accounts.");
   assert.equal(mergeCodes.length, 1, "a transient merge failure must leave the code redeemable");
   assert.ok(
@@ -1128,7 +1160,7 @@ test("unlink only ever touches the CALLER's row", async () => {
   const them = await mintSession({ discordId: "987654321098765432" });
   await doUnlink(me.token);
   assert.equal(appUsers.find((u) => u.id === them.userId)!.discordId, "987654321098765432");
-  const where = (opsOf("user.update")[0].args as { where: { id: string } }).where;
+  const where = (opsOf("user.updateMany")[0].args as { where: { id: string } }).where;
   assert.equal(where.id, me.userId);
 });
 
@@ -1137,6 +1169,42 @@ test("unlink is audited", async () => {
   await doUnlink(token);
   for (const t of afterTasks.splice(0)) await t();
   assert.equal(opsOf("auditLog.create").length, 1);
+});
+
+test("unlinking an account with NO link audits nothing — nothing was unlinked", async () => {
+  const { token } = await mintSession({ discordId: null });
+  assert.equal((await doUnlink(token)).status, 200);
+  for (const t of afterTasks.splice(0)) await t();
+  assert.equal(opsOf("auditLog.create").length, 0);
+  assert.equal(opsOf("user.updateMany").length, 0, "no write when there is no link to clear");
+});
+
+test("unlink clears the id it READ: a link that changed in between is cleared on the new id and only THAT id's roles are revoked", async () => {
+  const NEW_SNOWFLAKE = "987654321098765432";
+  const { token, userId } = await mintSession({ discordId: VALID_SNOWFLAKE });
+  // A confirm-merge links another Discord account right after the unlink's
+  // first read: the compare-and-swap on the old id must miss, never clear the
+  // new link while revoking the old id's roles.
+  let reads = 0;
+  const realFindUnique = (prisma as unknown as { user: { findUnique: (a: { where: { id?: string } }) => Promise<unknown> } }).user.findUnique;
+  (prisma as unknown as { user: { findUnique: unknown } }).user.findUnique = async (a: { where: { id?: string }; select?: { discordId?: boolean } }) => {
+    const row = await realFindUnique(a);
+    if (a.where.id === userId && a.select?.discordId && Object.keys(a.select).length === 1 && ++reads === 1) {
+      appUsers.find((u) => u.id === userId)!.discordId = NEW_SNOWFLAKE;
+    }
+    return row;
+  };
+  try {
+    assert.equal((await doUnlink(token)).status, 200);
+  } finally {
+    (prisma as unknown as { user: { findUnique: unknown } }).user.findUnique = realFindUnique;
+  }
+  assert.equal(appUsers.find((u) => u.id === userId)!.discordId, null, "the account ends up unlinked");
+  const cas = opsOf("user.updateMany").map((o) => (o.args as { where: { discordId: string } }).where.discordId);
+  assert.deepEqual(cas, [VALID_SNOWFLAKE, NEW_SNOWFLAKE], "the stale clear missed and the retry cleared the id it re-read");
+  await waitForDiscordCall();
+  const revoked = fetchCalls.filter((c) => c.url.hostname === "discord.com").map((c) => c.url.pathname);
+  assert.ok(revoked.length > 0 && revoked.every((p) => p.includes(NEW_SNOWFLAKE)), `only the unlinked id's roles are revoked: ${revoked.join(", ")}`);
 });
 
 // ── status ───────────────────────────────────────────────────────────────────
@@ -1300,7 +1368,7 @@ test("register-commands is 400 without a bot token or client id, and calls nothi
   const { token } = await mintSession({ role: "ADMIN", permissions: Permission.ADMIN });
   for (const missing of ["discordBotToken", "discordClientId"]) {
     settings.set("discordBotToken", "a-bot-token");
-    settings.set("discordClientId", "999888777");
+    settings.set("discordClientId", "999888777666555444");
     settings.delete(missing);
     fetchCalls.length = 0;
     const res = await doRegister(token);
@@ -1320,12 +1388,12 @@ test("register-commands registers GLOBALLY when no guild is set", async () => {
 });
 
 test("register-commands scopes to the GUILD when one is configured", async () => {
-  settings.set("discordGuildId", "555444333");
+  settings.set("discordGuildId", "555444333000111222");
   const { token } = await mintSession({ role: "ADMIN", permissions: Permission.ADMIN });
   const body = await (await doRegister(token)).json();
   const call = fetchCalls.find((c) => c.url.pathname.includes("/commands"))!;
-  assert.match(call.url.pathname, /\/guilds\/555444333\/commands$/);
-  assert.match(body.message, /guild 555444333/);
+  assert.match(call.url.pathname, /\/guilds\/555444333000111222\/commands$/);
+  assert.match(body.message, /guild 555444333000111222/);
 });
 
 test("register-commands maps an upstream failure to 502 without leaking the body", async () => {

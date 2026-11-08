@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { patchSettings } from "@/components/settings/forms/shared";
 import {
   type FeatureCategory,
   type FeatureDefinition,
@@ -66,13 +67,31 @@ function featureText(t: Translator, feature: FeatureDefinition): { label: string
   };
 }
 
+// Every shown switch's starting value: the stored flag, else the registry's
+// default — the value the switch renders, so a flip and a revert start from
+// what is on screen.
+function seedFlags(initialFlags: FeatureFlags, groups: FeaturesFormProps["groups"]): FeatureFlags {
+  const seeded: FeatureFlags = { ...initialFlags };
+  for (const group of groups) {
+    for (const feature of group.features) seeded[feature.key] ??= feature.defaultEnabled;
+  }
+  return seeded;
+}
+
+function bodyFor(batch: [string, boolean][]): Record<string, string> {
+  const body: Record<string, string> = {};
+  for (const [key, target] of batch) body[key] = target ? "true" : "false";
+  return body;
+}
+
 export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
   const t = useT();
-  const [flags, setFlags] = useState<FeatureFlags>(initialFlags);
+  const [seeded] = useState(() => seedFlags(initialFlags, groups));
+  const [flags, setFlags] = useState<FeatureFlags>(seeded);
   const [statusByKey, setStatusByKey] = useState<Record<string, SaveStatus>>({});
   const [errorByKey, setErrorByKey] = useState<Record<string, string>>({});
 
-  const savedState = useRef<FeatureFlags>({ ...initialFlags });
+  const savedState = useRef<FeatureFlags>({ ...seeded });
   const pendingTarget = useRef<Map<string, boolean>>(new Map());
   const inFlight = useRef(false);
   // Switches whose save request is on its way right now, and the value sent.
@@ -87,6 +106,9 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
   // it instead of firing straight into another 429.
   const retryDelay = useRef<number | null>(null);
   const backingOff = useRef(false);
+  // Set by the unmount cleanup, which sends what is pending itself: a flush
+  // still in flight then stops, and nothing is scheduled again.
+  const unmounted = useRef(false);
 
   function scheduleStatusClear(key: string) {
     const existing = statusTimers.current.get(key);
@@ -104,63 +126,78 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
     statusTimers.current.set(key, timer);
   }
 
-  function bodyFor(batch: [string, boolean][]): Record<string, string> {
-    const body: Record<string, string> = {};
-    for (const [key, target] of batch) body[key] = target ? "true" : "false";
-    return body;
+  // A key toggled back to the value the server already holds needs no
+  // request — settle it locally.
+  function settleUnchanged() {
+    for (const [key, target] of [...pendingTarget.current]) {
+      if (target === savedState.current[key]) {
+        pendingTarget.current.delete(key);
+        setStatusByKey((prev) => ({ ...prev, [key]: "ok" }));
+        scheduleStatusClear(key);
+      }
+    }
+  }
+
+  function markSaving(batch: [string, boolean][]) {
+    for (const [key] of batch) {
+      const existing = statusTimers.current.get(key);
+      if (existing) {
+        clearTimeout(existing);
+        statusTimers.current.delete(key);
+      }
+    }
+    setStatusByKey((prev) => {
+      const next = { ...prev };
+      for (const [key] of batch) next[key] = "saving";
+      return next;
+    });
+  }
+
+  // One PATCH for the batch: the reply flushOutcome reads (null when none
+  // came) and the text a failure shows.
+  async function sendBatch(batch: [string, boolean][]) {
+    for (const [key, target] of batch) inFlightKeys.current.set(key, target);
+    const result = await patchSettings(bodyFor(batch));
+    for (const [key] of batch) inFlightKeys.current.delete(key);
+    if (result.status === 0) return { reply: null, message: t("settings.common.networkError") };
+    return {
+      reply: { status: result.status, ok: result.data.ok === true ? true : undefined },
+      message: result.error || t("settings.common.saveFailedStatus", { status: result.status }),
+    };
+  }
+
+  function applySettled(settled: ReturnType<typeof settleBatch>, message: string) {
+    for (const { key, ok, revertTo } of settled) {
+      if (!ok) setFlags((prev) => ({ ...prev, [key]: revertTo ?? seeded[key] ?? false }));
+      setStatusByKey((prev) => ({ ...prev, [key]: ok ? "ok" : "error" }));
+      setErrorByKey((prev) => {
+        const next = { ...prev };
+        if (ok) delete next[key];
+        else next[key] = message;
+        return next;
+      });
+      // A failure stays on screen (icon + message) until the next toggle
+      // of this switch; only the success tick fades.
+      if (ok) scheduleStatusClear(key);
+    }
   }
 
   async function flush() {
     // Only one flush at a time. A flip made meanwhile waits in pendingTarget and
     // is picked up by the loop below, or by the reschedule in `finally`.
-    if (inFlight.current) return;
+    if (inFlight.current || unmounted.current) return;
     inFlight.current = true;
 
     try {
       while (true) {
-        // A key toggled back to the value the server already holds needs no
-        // request — settle it locally.
-        for (const [key, target] of [...pendingTarget.current]) {
-          if (target === savedState.current[key]) {
-            pendingTarget.current.delete(key);
-            setStatusByKey((prev) => ({ ...prev, [key]: "ok" }));
-            scheduleStatusClear(key);
-          }
-        }
-
+        settleUnchanged();
         const batch = [...pendingTarget.current];
         if (batch.length === 0) return;
+        markSaving(batch);
 
-        for (const [key] of batch) {
-          const existing = statusTimers.current.get(key);
-          if (existing) {
-            clearTimeout(existing);
-            statusTimers.current.delete(key);
-          }
-        }
-        setStatusByKey((prev) => {
-          const next = { ...prev };
-          for (const [key] of batch) next[key] = "saving";
-          return next;
-        });
-
-        let reply: { status: number; ok: boolean | undefined } | null = null;
-        let message = "";
-        for (const [key, target] of batch) inFlightKeys.current.set(key, target);
-        try {
-          const res = await fetch(withBasePath("/api/settings"), {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(bodyFor(batch)),
-          });
-          const data: { ok?: boolean; error?: string } = await res.json().catch(() => ({}));
-          reply = { status: res.status, ok: data.ok };
-          message = data.error ?? t("settings.common.saveFailedStatus", { status: res.status });
-        } catch {
-          message = t("settings.common.networkError");
-        } finally {
-          for (const [key] of batch) inFlightKeys.current.delete(key);
-        }
+        const { reply, message } = await sendBatch(batch);
+        // The unmount cleanup already sent what was left.
+        if (unmounted.current) return;
 
         const outcome = flushOutcome(reply);
         if (outcome === "rateLimited") {
@@ -175,20 +212,7 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
         // Only switches still set to what we just sent are finished; one the
         // user flipped again meanwhile goes out in the next loop round instead
         // of letting this older reply overwrite it.
-        const settled = settleBatch({ saved: savedState.current, pending: pendingTarget.current }, batch, outcome);
-        for (const { key, ok, revertTo } of settled) {
-          if (!ok) setFlags((prev) => ({ ...prev, [key]: revertTo ?? false }));
-          setStatusByKey((prev) => ({ ...prev, [key]: ok ? "ok" : "error" }));
-          setErrorByKey((prev) => {
-            const next = { ...prev };
-            if (ok) delete next[key];
-            else next[key] = message;
-            return next;
-          });
-          // A failure stays on screen (icon + message) until the next toggle
-          // of this switch; only the success tick fades.
-          if (ok) scheduleStatusClear(key);
-        }
+        applySettled(settleBatch({ saved: savedState.current, pending: pendingTarget.current }, batch, outcome), message);
       }
     } finally {
       inFlight.current = false;
@@ -201,6 +225,7 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
   function scheduleFlush() {
     // While backing off after a 429, the retry timer sends everything pending.
     if (backingOff.current) return;
+    if (unmounted.current) return;
     if (flushTimer.current) clearTimeout(flushTimer.current);
     flushTimer.current = setTimeout(() => {
       flushTimer.current = null;
@@ -226,12 +251,16 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
     const pendingRef = pendingTarget;
     const inFlightRef = inFlightKeys;
     return () => {
+      unmounted.current = true;
       if (flushTimer.current) clearTimeout(flushTimer.current);
       for (const timer of timers.current.values()) clearTimeout(timer);
       // Skip a switch whose same value is already being sent — that request
       // still reaches the server after unmount. A switch flipped again since
       // then is NOT skipped, or its newest value would be lost.
       const pending = [...pendingRef.current].filter(([key, target]) => inFlightRef.current.get(key) !== target);
+      // Handed to the request below (or to the one already in flight): a flush
+      // resuming after its await must not send them again.
+      pendingRef.current.clear();
       if (pending.length === 0) return;
       // Send flips still waiting on the delay, so leaving the page right after
       // a click doesn't lose them. `keepalive` lets the request finish after the
@@ -251,7 +280,7 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
     // which may not have caught up yet after several fast clicks.
     const current = pendingTarget.current.has(key)
       ? (pendingTarget.current.get(key) as boolean)
-      : (savedState.current[key] ?? false);
+      : (savedState.current[key] ?? seeded[key] ?? false);
     const next = !current;
 
     pendingTarget.current.set(key, next);

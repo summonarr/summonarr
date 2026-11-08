@@ -31,27 +31,48 @@ const between = (src: string, from: string, to: string) => {
 // ── batch selection ─────────────────────────────────────────────────────────
 
 test("a batch run only removes the ids it settled — a box ticked or unticked mid-run keeps the admin's choice", () => {
-  const batch = between(list(), "async function batchAction", "const totalPages");
+  const src = list();
+  const batch = between(src, "async function batchAction", "const totalPages");
   assert.doesNotMatch(batch, /setSelected\(new Set\(/, "no snapshot replaces the selection");
-  const drop = between(batch, "const dropSettled = () => {", "};\n");
-  assert.match(drop, /const done = answered\.filter\(\(id\) => !keep\.has\(id\)\);/);
+  const drop = between(src, "function dropSettled(done: readonly string[]) {", "\n  }\n");
   assert.match(drop, /setSelected\(\(prev\) => \{[\s\S]*?const next = new Set\(prev\);\s*for \(const id of done\) next\.delete\(id\);/, "a functional update over the CURRENT selection");
-  assert.match(batch, /for \(const id of chunk\) answered\.push\(id\);/, "only a chunk the route answered counts as settled");
-  // Every way out of the run settles through it.
-  assert.equal(batch.match(/dropSettled\(\);/g)?.length, 3, "refusal, network failure and success");
+  // One way out of the run: it settles exactly what the route answered (settledIds, tested in admin-request-batch).
+  assert.equal(batch.match(/dropSettled\(/g)?.length, 1, "one call");
+  assert.match(batch, /dropSettled\(settledIds\(progress\)\);/);
+  // Only a chunk the route answered is recorded; the first failure returns before it.
+  const send = between(src, "async function sendBatch(", "\n}\n");
+  assert.match(send, /if \(!res\.ok\) return \{ progress, stop: res \};\s*progress = recordChunk\(progress, chunk, res\.data\);/);
+  assert.match(send, /schema: BatchAnswer,/, "the 200 is read through its schema, not cast");
+  // A second click while a run is going starts nothing.
+  assert.match(batch, /\{ ifBusy: "skip" \}/);
 });
 
 test("a refusal or a network failure part-way keeps the earlier push-failure reason and refreshes the list", () => {
-  const batch = between(list(), "async function batchAction", "const totalPages");
-  assert.match(batch, /const withEarlier = \(message: string\) => \(arrError \? `\$\{arrError\}\\n\$\{message\}` : message\);/);
-  const refused = between(batch, "if (!res.ok) {", "return;\n");
-  assert.match(refused, /setBatchError\(withEarlier\(/);
-  assert.match(refused, /dropSettled\(\);\s*refreshList\(\);/);
-  const failed = between(batch, "} catch {", "} finally {");
-  assert.match(failed, /setBatchError\(withEarlier\(t\("shared\.thread\.networkError"\)\)\);/);
-  assert.match(failed, /dropSettled\(\);\s*refreshList\(\);/, "the chunks before the failure were applied: reconcile and refresh");
+  const src = list();
+  const batch = between(src, "async function batchAction", "const totalPages");
+  assert.match(batch, /setBatchError\(batchErrorText\(progress, stop \? batchStopText\(stop, t\) : null\)\);/);
+  assert.match(batch, /refreshNow\(\);\n  \}/, "every run ends in the refresh");
+  const stopText = between(src, "function batchStopText(", "\n}\n");
+  assert.match(stopText, /return t\("shared\.thread\.networkError"\);/, "no answer is the translated network line, never a raw message");
+  assert.match(stopText, /if \(res\.status === 429\) return t\("shared\.rateLimited\.generic"\);/);
   // The two reasons are one line each.
-  assert.match(list(), /className="w-full whitespace-pre-line"/);
+  assert.match(src, /className="w-full whitespace-pre-line"/);
+});
+
+test("adds that got no answer are named above the list, outside the bar their rows leave", () => {
+  const src = list();
+  const batch = between(src, "async function batchAction", "const totalPages");
+  assert.match(batch, /setBatchNotice\(outcomeUnknownNotice\(progress\.outcomeUnknown\)\);/);
+  assert.match(src, /\{batchNotice && \(\s*<div\s+role="status"/);
+  assert.match(src, /t\("adminQueue\.list\.outcomeUnknown", \{ count: ids\.length, titles: names\.join\(", "\) \}\)/);
+});
+
+test("a new status or type filter clears the selection; the bar names what is selected on other pages", () => {
+  const src = list();
+  assert.match(src, /useSelection\(requests, `\$\{statusFilter \?\? ""\}\|\$\{typeFilter \?\? ""\}`\)/);
+  assert.match(src, /if \(filterKey !== prevFilterKey\) \{\s*setPrevFilterKey\(filterKey\);\s*if \(selected\.size > 0\) setSelected\(new Set\(\)\);/);
+  assert.match(src, /offPage=\{offPageCount\(selected, requests\)\}/);
+  assert.match(src, /\{offPage > 0 && \(/);
 });
 
 // ── the batch decline input ─────────────────────────────────────────────────
@@ -59,7 +80,7 @@ test("a refusal or a network failure part-way keeps the earlier push-failure rea
 test("the batch decline reason has an accessible name and the routes' note cap", () => {
   const src = list();
   assert.match(src, /import \{ ADMIN_NOTE_MAX \} from "@\/lib\/request-limits";/);
-  const input = between(src, "<input\n            type=\"text\"\n            value={note}", "/>");
+  const input = between(src, "<input\n        type=\"text\"\n        value={note}", "/>");
   assert.match(input, /aria-label=\{t\("adminQueue\.actions\.declineReasonAria"\)\}/);
   assert.match(input, /maxLength=\{ADMIN_NOTE_MAX\}/);
 });
@@ -111,18 +132,23 @@ test("a group reply is saved request by request; what saved is shown, and a part
   assert.match(save, /if \(res\.status === 429\) break;/, "a rate-limit refusal stops the rest");
   assert.match(save, /if \(saved > 0\) router\.refresh\(\);/);
   assert.match(save, /t\("adminQueue\.actions\.saveReplyPartial", \{ saved, total: targetIds\.length \}\)/);
-  assert.match(save, /body: JSON\.stringify\(\{ adminNote: note \}\)/, "note-only: no status, so no same-status 422");
+  assert.match(save, /init: jsonInit\("PATCH", \{ adminNote: note \}\)/, "note-only: no status, so no same-status 422");
 });
 
 test("a quality-profile read for an instance the row has since left is dropped", () => {
   const src = actions();
-  const reset = between(src, "useEffect(() => {\n    profilesRequest.current++;", "}, [arrInstance, mediaType]);");
-  assert.match(reset, /setProfiles\(null\);/);
-  assert.match(reset, /setProfilesLoading\(false\);/);
+  // The list, the open picker and a read still out are keyed by the instance:
+  // a change of instance leaves them all behind, with no effect to reset them.
+  assert.match(src, /const profileKey = `\$\{mediaType\}:\$\{arrInstance\}`;/);
+  assert.match(src, /const profiles = profileState\?\.key === profileKey \? profileState : null;/);
+  assert.match(src, /pickerOpen: pickerFor === profileKey,/);
   const open = between(src, "async function openProfilePicker()", "async function decide(");
-  assert.match(open, /const token = \+\+profilesRequest\.current;\s*const current = \(\) => token === profilesRequest\.current;/);
-  assert.match(open, /if \(!current\(\)\) return;\s*setProfiles\(data\.qualityProfiles\);/);
+  assert.match(open, /const key = profileKey;\s*setProfileState\(\{ key, phase: "loading" \}\);/);
+  // The answer lands only over the read that started it.
+  assert.match(open, /setProfileState\(\(prev\) => \(prev\?\.key === key && prev\.phase === "loading" \? next : prev\)\);/);
   assert.match(open, /new URLSearchParams\(\{ mediaType, instance: arrInstance \}\)/);
+  assert.match(open, /schema: QualityProfilesAnswer,/, "the list is checked, not cast");
+  assert.doesNotMatch(src, /useEffect\(/, "no prop is copied into state through an effect");
 });
 
 test("the profile spinner is announced", () => {
@@ -136,7 +162,8 @@ test("Search and Re-push share one PATCH; an approve whose push got no answer ke
   const src = actions();
   assert.match(src, /const triggerSearch = \(\) => patchRequestAction\("SEARCH", \{ search: true \}\);/);
   assert.match(src, /const retryPush = \(\) => patchRequestAction\("RETRY", \{ retry: true \}\);/);
-  assert.match(src, /if \(data\.arrPushOutcomeUnknown !== true\) setOptimisticStatus\(null\);/);
+  assert.match(src, /decisionOutcome\(\{ arrError: res\.data\.arrError, pushOutcomeUnknown: res\.data\.arrPushOutcomeUnknown \}\)/);
+  assert.match(src, /if \(!outcome\.keepOptimistic\) setOptimisticStatus\(null\);/);
 });
 
 test("the new queue strings exist in every locale with their placeholders", () => {

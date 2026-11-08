@@ -266,6 +266,8 @@
   "notify.bot.admin.approvedArrFailedTitle": "⚠️ 已批准（arr 失败）——{title}",
   "notify.bot.admin.approvedBy": "由 **{admin}** 批准",
   "notify.bot.admin.approvedByArrFailed": "由 **{admin}** 批准，但无法添加到 arr——请手动添加。",
+  "notify.bot.admin.approveRolledBackTitle": "⚠️ 已退回待处理（arr 失败）——{title}",
+  "notify.bot.admin.approveRolledBackBy": "由 **{admin}** 批准，但无法添加到 arr，因此已退回待处理——再次批准以重试，或拒绝。",
   "notify.bot.admin.declinedTitle": "❌ 已拒绝——{title}",
   "notify.bot.admin.declinedBy": "由 **{admin}** 拒绝",
   "notify.bot.inactiveButton": "此按钮已失效。",

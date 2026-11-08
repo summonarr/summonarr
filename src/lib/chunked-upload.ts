@@ -5,6 +5,8 @@
 // while keeping the chunk count bounded for typical 100MB–500MB dumps.
 
 import type { Translator } from "./i18n/translate";
+import { randomUuid } from "./random-id";
+import { isGatewayStatus } from "./gateway-status";
 
 export const DEFAULT_CHUNK_SIZE = 16 * 1024 * 1024;
 
@@ -22,6 +24,7 @@ export type ChunkedUploadErrorCode =
   | "chunkFailed"
   | "nonJson"
   | "noCompletion"
+  | "empty"
   | "network"
   | "cancelled";
 
@@ -54,6 +57,8 @@ export function chunkedUploadErrorMessage(outcome: ChunkedUploadError, t: Transl
       return t("shared.upload.nonJson");
     case "noCompletion":
       return t("shared.upload.noCompletion");
+    case "empty":
+      return t("shared.upload.empty");
     case "cancelled":
       return t("shared.upload.cancelled");
     case "server":
@@ -62,29 +67,18 @@ export function chunkedUploadErrorMessage(outcome: ChunkedUploadError, t: Transl
   }
 }
 
-// crypto.randomUUID only exists in secure contexts, so a plain-HTTP LAN or
-// local-only deployment has none. getRandomValues is available everywhere;
-// build the same v4 shape the import-session UUID_RE accepts.
-function newUploadId(): string {
-  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
-  const b = crypto.getRandomValues(new Uint8Array(16));
-  b[6] = (b[6] & 0x0f) | 0x40;
-  b[8] = (b[8] & 0x3f) | 0x80;
-  const hex = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
 
 // Non-final chunks are retried after a transient failure — the network
 // dropped, the per-chunk timeout fired, or a proxy answered 502/503/504 with
 // no JSON — waiting these delays in turn. The FINAL chunk is never retried or
 // timed out: it runs the destructive TRUNCATE+INSERT on the server, which can
-// outlast any client timeout and must not run twice.
+// outlast any client timeout (a multi-GB restore takes over an hour) and must
+// not run twice. A client deadline there would report a failure for a restore
+// that then commits; Cancel is the way out.
 const RETRY_DELAYS_MS = [1_000, 3_000, 10_000];
 // Generous on purpose: a 16 MB chunk over a slow uplink takes minutes, and the
 // server's idle window between chunks is 10 minutes.
 const CHUNK_TIMEOUT_MS = 5 * 60 * 1000;
-
-const GATEWAY_STATUSES = new Set([502, 503, 504]);
 
 function isJson(res: Response): boolean {
   return !!res.headers.get("content-type")?.includes("application/json");
@@ -120,6 +114,108 @@ function wait(ms: number, signal: AbortSignal | undefined): Promise<void> {
   });
 }
 
+type ChunkRequest = {
+  endpoint: string;
+  uploadId: string;
+  index: number;
+  totalChunks: number;
+  fileSize: number;
+  body: Blob;
+};
+
+function sendChunk(req: ChunkRequest, signal: AbortSignal | undefined): Promise<Response> {
+  return fetch(req.endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "X-Upload-Id": req.uploadId,
+      "X-Chunk-Index": String(req.index),
+      "X-Chunk-Total": String(req.totalChunks),
+      "X-File-Size": String(req.fileSize),
+    },
+    body: req.body,
+    signal,
+  });
+}
+
+// How one chunk's sending ended: the server's answer (with its body, when the
+// landed check already read it), "landed" when a retried chunk turns out to
+// have arrived already, or "aborted" by the caller. Throws when the network
+// failed past the retries.
+type ChunkSendResult =
+  | { kind: "answer"; res: Response; parsed?: Record<string, unknown> }
+  | { kind: "landed" }
+  | { kind: "aborted" };
+
+async function sendChunkWithRetry(
+  req: ChunkRequest,
+  opts: { isLast: boolean; signal?: AbortSignal; retryDelaysMs: readonly number[]; chunkTimeoutMs: number },
+): Promise<ChunkSendResult> {
+  const { isLast, signal, retryDelaysMs, chunkTimeoutMs } = opts;
+  for (let attempt = 0; ; attempt++) {
+    if (signal?.aborted) return { kind: "aborted" };
+    const canRetry = !isLast && attempt < retryDelaysMs.length;
+    let res: Response;
+    try {
+      if (isLast) {
+        res = await sendChunk(req, signal);
+      } else {
+        const a = attemptSignal(signal, chunkTimeoutMs);
+        try {
+          res = await sendChunk(req, a.signal);
+        } finally {
+          a.done();
+        }
+      }
+    } catch (err) {
+      if (signal?.aborted) return { kind: "aborted" };
+      if (!canRetry) throw err;
+      await wait(retryDelaysMs[attempt], signal);
+      continue;
+    }
+    if (canRetry && isGatewayStatus(res.status) && !isJson(res)) {
+      await wait(retryDelaysMs[attempt], signal);
+      continue;
+    }
+    // A retried chunk the server already holds: the attempt that "failed"
+    // landed before its answer was lost, so the server now expects the next one.
+    if (attempt > 0 && res.status === 409 && !res.redirected && isJson(res)) {
+      const parsed = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (parsed.expected === req.index + 1) return { kind: "landed" };
+      return { kind: "answer", res, parsed };
+    }
+    return { kind: "answer", res };
+  }
+}
+
+// One chunk's answer: the upload's outcome when it ends here, null to go on.
+async function chunkAnswerOutcome(
+  res: Response,
+  parsed: Record<string, unknown> | undefined,
+  index: number,
+  totalChunks: number,
+): Promise<ChunkedUploadOutcome | null> {
+  // Still a gateway error after the retries (or on the final chunk, which
+  // is never retried): name it, rather than the redirect explanation below.
+  if (isGatewayStatus(res.status) && !isJson(res)) {
+    return { kind: "error", status: res.status, code: "chunkFailed", chunk: index + 1, total: totalChunks };
+  }
+  // A redirect (auth gate, etc.) returns 200 + HTML after fetch follows
+  // it; res.json() then silently falls back to {} and the loop would run
+  // to completion with no `complete` flag. Catch that explicitly.
+  if (res.redirected || !isJson(res)) {
+    return { kind: "error", status: res.status, code: "nonJson" };
+  }
+  const data = parsed ?? ((await res.json().catch(() => ({}))) as Record<string, unknown>);
+  if (!res.ok) {
+    return typeof data.error === "string" && data.error
+      ? { kind: "error", status: res.status, code: "server", error: data.error }
+      : { kind: "error", status: res.status, code: "chunkFailed", chunk: index + 1, total: totalChunks };
+  }
+  if (data.complete) return { kind: "complete", ok: data.ok === true, data };
+  return null;
+}
+
 export async function uploadInChunks(opts: {
   file: File;
   endpoint: string;
@@ -142,7 +238,10 @@ export async function uploadInChunks(opts: {
     retryDelaysMs = RETRY_DELAYS_MS,
     chunkTimeoutMs = CHUNK_TIMEOUT_MS,
   } = opts;
-  const uploadId = newUploadId();
+  // Nothing to send: no session is opened, so there is nothing to cancel.
+  if (file.size === 0) return { kind: "error", status: null, code: "empty" };
+
+  const uploadId = randomUuid();
   const totalChunks = Math.ceil(file.size / chunkSize);
   onProgress?.({ uploaded: 0, total: file.size, phase: "upload" });
 
@@ -158,97 +257,22 @@ export async function uploadInChunks(opts: {
     for (let index = 0; index < totalChunks; index++) {
       const start = index * chunkSize;
       const end = Math.min(start + chunkSize, file.size);
-      const chunk = file.slice(start, end);
       const isLast = index === totalChunks - 1;
+      // fetch reports no upload progress, and the final request is both the
+      // last bytes and the whole restore, so it reads as "restoring" from the
+      // moment it is sent.
+      if (isLast) onProgress?.({ uploaded: file.size, total: file.size, phase: "import" });
 
-      if (isLast) {
-        onProgress?.({ uploaded: file.size, total: file.size, phase: "import" });
-      }
-
-      const send = (sig: AbortSignal | undefined) =>
-        fetch(endpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/octet-stream",
-            "X-Upload-Id": uploadId,
-            "X-Chunk-Index": String(index),
-            "X-Chunk-Total": String(totalChunks),
-            "X-File-Size": String(file.size),
-          },
-          body: chunk,
-          signal: sig,
-        });
-
-      let res: Response | undefined;
-      // The body, when the retry check below already read it.
-      let parsed: Record<string, unknown> | undefined;
-      let landed = false;
-      for (let attempt = 0; ; attempt++) {
-        if (signal?.aborted) return aborted();
-        const canRetry = !isLast && attempt < retryDelaysMs.length;
-        try {
-          if (isLast) {
-            res = await send(signal);
-          } else {
-            const a = attemptSignal(signal, chunkTimeoutMs);
-            try {
-              res = await send(a.signal);
-            } finally {
-              a.done();
-            }
-          }
-        } catch (err) {
-          if (signal?.aborted) return aborted();
-          if (!canRetry) throw err;
-          await wait(retryDelaysMs[attempt], signal);
-          continue;
+      const req: ChunkRequest = { endpoint, uploadId, index, totalChunks, fileSize: file.size, body: file.slice(start, end) };
+      const sent = await sendChunkWithRetry(req, { isLast, signal, retryDelaysMs, chunkTimeoutMs });
+      if (sent.kind === "aborted") return aborted();
+      if (sent.kind === "answer") {
+        const outcome = await chunkAnswerOutcome(sent.res, sent.parsed, index, totalChunks);
+        if (outcome) {
+          if (outcome.kind === "error") cancel();
+          return outcome;
         }
-        if (canRetry && GATEWAY_STATUSES.has(res.status) && !isJson(res)) {
-          await wait(retryDelaysMs[attempt], signal);
-          continue;
-        }
-        // A retried chunk the server already holds: the attempt that "failed"
-        // landed before its answer was lost, so the server now expects the next one.
-        if (attempt > 0 && res.status === 409 && !res.redirected && isJson(res)) {
-          parsed = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-          landed = parsed.expected === index + 1;
-        }
-        break;
       }
-      if (landed) {
-        onProgress?.({ uploaded: end, total: file.size, phase: "upload" });
-        continue;
-      }
-      if (!res) throw new Error(`Chunk ${index + 1}/${totalChunks} failed`);
-
-      // Still a gateway error after the retries (or on the final chunk, which
-      // is never retried): name it, rather than the redirect explanation below.
-      if (GATEWAY_STATUSES.has(res.status) && !isJson(res)) {
-        cancel();
-        return { kind: "error", status: res.status, code: "chunkFailed", chunk: index + 1, total: totalChunks };
-      }
-
-      // A redirect (auth gate, etc.) returns 200 + HTML after fetch follows
-      // it; res.json() then silently falls back to {} and the loop would run
-      // to completion with no `complete` flag. Catch that explicitly.
-      if (res.redirected || !isJson(res)) {
-        cancel();
-        return { kind: "error", status: res.status, code: "nonJson" };
-      }
-
-      const data = parsed ?? ((await res.json().catch(() => ({}))) as Record<string, unknown>);
-
-      if (!res.ok) {
-        cancel();
-        return typeof data.error === "string" && data.error
-          ? { kind: "error", status: res.status, code: "server", error: data.error }
-          : { kind: "error", status: res.status, code: "chunkFailed", chunk: index + 1, total: totalChunks };
-      }
-
-      if (data.complete) {
-        return { kind: "complete", ok: data.ok === true, data };
-      }
-
       onProgress?.({ uploaded: end, total: file.size, phase: "upload" });
     }
     cancel();

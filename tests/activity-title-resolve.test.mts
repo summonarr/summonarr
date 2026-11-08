@@ -118,15 +118,21 @@ test("already-mapped entries pass through untouched and first writer wins per ke
 // PlayHistory with `distinct: ["title"]` and key the answer on `title:<title>`,
 // so a TV session "Fargo" picked up the MOVIE "Fargo"'s tmdbId AND type — and
 // the fire-and-forget backfill persisted both to ActiveSession (then PlayHistory
-// at finalize). Structural pin: the page must go through this module.
+// at finalize). Structural pin: the page's session lookup (activity-session-tmdb.ts)
+// and the shared title reads (activity-title-resolve-data.ts) go through this module.
 test("admin activity page's session title fallback is (title, mediaType)-scoped", async () => {
   const { readFileSync } = await import("node:fs");
-  const src = readFileSync(new URL("../src/app/(app)/admin/activity/page.tsx", import.meta.url), "utf8");
-  assert.match(src, /from "@\/lib\/activity-title-resolve"/);
-  assert.match(src, /titleWhereDisjuncts\(/);
+  const page = readFileSync(new URL("../src/app/(app)/admin/activity/page.tsx", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../src/lib/activity-session-tmdb.ts", import.meta.url), "utf8");
+  const data = readFileSync(new URL("../src/lib/activity-title-resolve-data.ts", import.meta.url), "utf8");
+  assert.match(page, /resolveActiveSessionTmdb\(activeSessions\)/);
+  assert.match(src, /from "\.\/activity-title-resolve"/);
+  assert.match(data, /titleWhereDisjuncts\(/);
   assert.match(src, /lookupTitleResolution\(titleResolved, s\.title, s\.mediaType\)/);
-  assert.doesNotMatch(src, /distinct:\s*\["title"\]/);
-  assert.doesNotMatch(src, /`title:\$\{/);
+  for (const s of [page, src, data]) {
+    assert.doesNotMatch(s, /distinct:\s*\["title"\]/);
+    assert.doesNotMatch(s, /`title:\$\{/);
+  }
   // The session's own known type wins over the title resolution's.
   assert.match(src, /toActivityMediaType\(s\.mediaType\) \?\? byTitle\?\.mediaType/);
 });
@@ -151,7 +157,9 @@ test("calendar 'View these plays' link carries watched=true and the page seeds i
   const page = readFileSync(new URL("../src/app/(app)/admin/activity/history/page.tsx", import.meta.url), "utf8");
   assert.match(page, /initialWatched=\{initialWatched\}/);
   const table = readFileSync(new URL("../src/components/admin/activity-history-table.tsx", import.meta.url), "utf8");
-  assert.match(table, /useState<"" \| "true" \| "false">\(initialWatched \?\? ""\)/);
+  assert.match(table, /watched: initialWatched,/);
+  const helpers = readFileSync(new URL("../src/components/admin/activity-history/helpers.ts", import.meta.url), "utf8");
+  assert.match(helpers, /watched: seed\.watched \?\? "",/);
 });
 
 // ── what the Activity overview may persist onto a live session ──────────────
@@ -188,8 +196,9 @@ test("sessionBackfill invents no media type and writes nothing when the types di
 
 test("the Activity overview backfills through sessionBackfill and no longer defaults a missing type to TV", () => {
   const src = readFileSync(new URL("../src/app/(app)/admin/activity/page.tsx", import.meta.url), "utf8");
-  assert.match(src, /sessionBackfill\(s\.mediaType, \{ \.\.\.byItem, via: "item" \}\)/);
-  assert.doesNotMatch(src, /mediaType: h\.mediaType \?\? "TV"/);
+  const lookup = readFileSync(new URL("../src/lib/activity-session-tmdb.ts", import.meta.url), "utf8");
+  assert.match(lookup, /sessionBackfill\(s\.mediaType, \{ \.\.\.byItem, via: "item" \}\)/);
+  assert.doesNotMatch(lookup, /mediaType: h\.mediaType \?\? "TV"/);
   const backfill = src.slice(src.indexOf("INTENTIONAL fire-and-forget"));
   assert.match(backfill, /void Promise\.all\(/, "still fire-and-forget (guardrail 17)");
   assert.match(backfill, /data: \{ tmdbId: s\.backfill\.tmdbId, mediaType: s\.backfill\.mediaType \}/);

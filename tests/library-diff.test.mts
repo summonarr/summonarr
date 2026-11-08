@@ -39,13 +39,21 @@ test("bad matches: fixable first, then by path", () => {
 // and stop when the page goes away.
 import { readFileSync } from "node:fs";
 test("bulk Fix all asks first, can be stopped, and stops on unmount", () => {
+  // The run is the shared one (fix-all-run.tsx, its loop in fix-all-sequence.ts),
+  // the same as the library match check's.
+  const run = readFileSync(new URL("../src/components/admin/fix-all-run.tsx", import.meta.url), "utf8");
+  const loop = readFileSync(new URL("../src/lib/client/fix-all-sequence.ts", import.meta.url), "utf8");
+  const control = run.slice(run.indexOf("export function FixAllControl("));
+  assert.match(control, /ref=\{triggerRef\}\s*type="button"\s*onClick=\{run\.askConfirm\}/, "the first click opens a confirm step");
+  assert.match(run, /askConfirm: \(\) => setState\("confirm"\),/);
+  assert.match(control, /onClick=\{\(\) => \{ refocus\.current = true; onConfirm\(\); \}\}/, "only the confirm's own button starts the run");
+  assert.equal(control.match(/onConfirm\(\)/g)?.length, 1);
+  assert.match(run, /stop: \(\) => \{ stopRef\.current = true; \},/);
+  assert.match(loop, /for \(const entry of entries\) \{\s*if \(deps\.stopped\(\)\) break;/, "the loop checks the stop flag between titles");
+  assert.match(run, /return \(\) => \{ alive\.current = false; stopRef\.current = true; abortRef\.current\?\.abort\(\); \};/, "unmount aborts the status poll");
   const src = readFileSync(new URL("../src/components/admin/library-diff-client.tsx", import.meta.url), "utf8");
-  const fixAll = src.slice(src.indexOf("function FixAllArrButton"), src.indexOf("function ArrFilterButton"));
-  assert.match(fixAll, /onClick=\{\(\) => setRunState\("confirm"\)\}/, "the first click opens a confirm step");
-  assert.doesNotMatch(fixAll, /onClick=\{handleFixAll\}[^>]*\n[^>]*disabled=\{state === "running"\}/, "the start button must not run the loop directly");
-  assert.match(fixAll, /stopRef\.current = true/);
-  assert.match(fixAll, /if \(stopRef\.current\) break;/, "the loop checks the stop flag between titles");
-  assert.match(fixAll, /abortRef\.current\?\.abort\(\)/, "unmount aborts the status poll");
+  assert.match(src, /const fixAll = useFixAllRun\(\);/);
+  assert.doesNotMatch(src, /function FixAllArrButton|runFixMatch\(/, "no private copy of the loop");
 });
 
 import { folderYear, suggestWrongSide } from "../src/lib/library-diff.ts";
@@ -84,14 +92,40 @@ test("Fix all sends only what the cards offer a Fix for: a verdict, the id, and 
 
 test("structural: Fix all filters with that rule, the cards use the same key rule, and the run outlives the list emptying", () => {
   const src = readFileSync(new URL("../src/components/admin/library-diff-client.tsx", import.meta.url), "utf8");
-  const fixAll = src.slice(src.indexOf("function FixAllArrButton"), src.indexOf("function ArrFilterButton"));
-  assert.match(fixAll, /const fixable = matches\.filter\(fixAllEligible\);/);
-  assert.match(src, /badMatchSideKey\(match, "plex"\) \? \(/);
-  assert.match(src, /badMatchSideKey\(match, "jellyfin"\) \? \(/);
+  const section = src.slice(src.indexOf("function BadMatchSection("), src.indexOf("export function LibraryDiffClient("));
+  assert.match(section, /const fixable = matches\.filter\(fixAllEligible\);/);
+  assert.match(section, /onConfirm=\{\(\) => void fixAll\.start\(fixable\.map\(badMatchFixEntry\)\)\}/);
+  // Both columns are one component, so the card's key rule is written once.
+  assert.match(src, /\} else if \(badMatchSideKey\(match, side\)\) \{/);
+  assert.match(src, /<BadMatchColumn match=\{match\} side="plex" /);
+  assert.match(src, /<BadMatchColumn match=\{match\} side="jellyfin" /);
   // Searching every match away, or a run that fixed them all, used to unmount
-  // the button — which stopped the run and discarded its results.
-  assert.match(fixAll, /stopRef\.current = false;\s*onStart\(\);/);
-  assert.match(src, /\{\(filteredBadMatches\.length > 0 \|\| fixAllStarted\) && \(\s*<section>/);
+  // the button — which stopped the run and discarded its results. The run now
+  // lives in the page, and the section stays once it started.
+  const run = readFileSync(new URL("../src/components/admin/fix-all-run.tsx", import.meta.url), "utf8");
+  assert.match(run, /stopRef\.current = false;\s*setStarted\(true\);/);
+  assert.match(src, /const fixAllStarted = fixAll\.started;/);
+  assert.match(src, /\{\(filteredBadMatches\.length > 0 \|\| fixAllStarted\) && \(\s*<BadMatchSection /);
   assert.doesNotMatch(src, /\{filteredBadMatches\.length > 0 && \(/);
-  assert.match(src, /<FixAllArrButton matches=\{filteredBadMatches\} onStart=\{onFixAllStart\} \/>/);
+});
+
+test("structural: while Fix all runs, a card offers no Fix for a side the run still has to do", () => {
+  const src = readFileSync(new URL("../src/components/admin/library-diff-client.tsx", import.meta.url), "utf8");
+  // The card checks the same key the run's entry carries.
+  assert.match(src, /key: badMatchFixKey\(match\.arrVerdict, wrongItem\),/);
+  assert.match(src, /locked=\{pending\.has\(badMatchFixKey\("plex", match\.plex\)\)\}/);
+  assert.match(src, /locked=\{pending\.has\(badMatchFixKey\("jellyfin", match\.jellyfin\)\)\}/);
+  const column = src.slice(src.indexOf("function BadMatchColumn("), src.indexOf("function BadMatchCard("));
+  const locked = column.indexOf("} else if (locked) {");
+  assert.ok(locked > 0 && locked < column.indexOf("<FixMatchButton"), "the lock is checked before the Fix is offered");
+  assert.match(src, /pending=\{fixAll\.pending\}/);
+});
+
+test("structural: the bad-match list is drawn under a cap, with the same notice as the columns", () => {
+  const src = readFileSync(new URL("../src/components/admin/library-diff-client.tsx", import.meta.url), "utf8");
+  const section = src.slice(src.indexOf("function BadMatchSection("), src.indexOf("export function LibraryDiffClient("));
+  assert.match(section, /\{matches\.slice\(0, BAD_MATCH_RENDER_CAP\)\.map\(\(match\) => \(/);
+  assert.doesNotMatch(section, /\{matches\.map\(/, "never every card");
+  assert.match(section, /\{matches\.length > BAD_MATCH_RENDER_CAP && \(/);
+  assert.match(section, /t\("adminManage\.library\.diff\.renderCap", \{ cap: BAD_MATCH_RENDER_CAP\.toLocaleString\(locale\)/);
 });

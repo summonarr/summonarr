@@ -6,7 +6,7 @@ import { processSingleton } from "@/lib/process-singleton";
 import { isFeatureEnabled } from "@/lib/features";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
-import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
+import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/batch-write";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
 import { canAutoRequest } from "@/lib/permissions";
 import {
@@ -180,10 +180,17 @@ async function traktGet(
     headers: traktHeaders(clientId, accessToken),
     timeoutMs: TRAKT_TIMEOUT_MS,
   });
+  if (!res.ok) discardBody(res);
   if (res.status === 401) return { unauthorized: true };
   if (res.status === 429) throw new TraktRateLimitedError();
   if (!res.ok) throw new Error(`Trakt ${path.split("?")[0]} answered ${res.status}`);
   return { unauthorized: false, body: await res.json(), headers: res.headers };
+}
+
+// A response whose body will not be read: cancelled, so it doesn't hold its
+// socket until GC.
+function discardBody(res: Response): void {
+  res.body?.cancel().catch(() => {});
 }
 
 // ── token bookkeeping ───────────────────────────────────────────────────────
@@ -246,7 +253,10 @@ async function refreshTraktToken(cfg: TraktOAuthConfig, account: TraktAccountRow
     redirect_uri: OOB_REDIRECT_URI,
     grant_type: "refresh_token",
   });
-  if (res.status === 429) throw new TraktRateLimitedError();
+  if (res.status === 429) {
+    discardBody(res);
+    throw new TraktRateLimitedError();
+  }
   if (!res.ok) {
     const failure = classifyTraktRefreshFailure(res.status, await res.json().catch(() => null));
     if (failure === "revoked") throw new TraktTokenRevokedError();
@@ -527,13 +537,14 @@ async function fetchRatings(client: TraktUserClient): Promise<TraktRatingRow[]> 
 // delete these rows. So the transaction LOCKS the connection row (FOR UPDATE:
 // the toggle's update and the disconnect's delete wait for it) and re-checks
 // that the history is still wanted and that the grant it was read with
-// (`accountId`) is still the user's before writing. Returns false (nothing
-// written) otherwise.
+// (`accountId`) is still the user's before writing — the rows, the ratings and
+// the import stamps together. Returns false (nothing written) otherwise.
 async function replaceTraktHistory(
   userId: string,
   accountId: string,
   rows: TraktWatchedRow[],
   ratings: TraktRatingRow[],
+  stamps: { activityAt: Date | null; importedAt: Date },
 ): Promise<boolean> {
   return prisma.$transaction(
     async (tx) => {
@@ -556,6 +567,14 @@ async function replaceTraktHistory(
         tx.traktRating,
         ratings.map((r) => ({ userId, tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title, rating: r.rating, ratedAt: r.ratedAt })),
       );
+      // The import's bookkeeping commits WITH the rows it describes, under the
+      // same lock. Written later from the run's snapshot, it overwrote a reset
+      // made meanwhile (a same-account reconnect, or the switch flipped off and
+      // on — both delete these rows), claiming an import that no longer exists.
+      await tx.traktConnection.update({
+        where: { userId },
+        data: { historyActivityAt: stamps.activityAt, historyImportedAt: stamps.importedAt },
+      });
       return true;
     },
     { timeout: BATCH_TX_TIMEOUT },
@@ -607,9 +626,12 @@ export function safeVerificationUrl(raw: unknown): string {
 
 export async function startTraktDeviceAuth(userId: string, cfg: TraktOAuthConfig): Promise<TraktDeviceStart> {
   const res = await traktPost("/oauth/device/code", cfg.clientId, { client_id: cfg.clientId });
+  if (!res.ok) discardBody(res);
   if (res.status === 429) throw new TraktRateLimitedError();
   if (!res.ok) throw new Error(`Trakt device code answered ${res.status}`);
-  const body = (await res.json()) as Record<string, unknown>;
+  const raw: unknown = await res.json();
+  // A JSON null, array or scalar is as unusable as a missing field.
+  const body: Record<string, unknown> = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   const deviceCode = typeof body.device_code === "string" ? body.device_code : "";
   const userCode = typeof body.user_code === "string" ? body.user_code : "";
   if (!deviceCode || !userCode || userCode.length > 32) throw new Error("Trakt device code response was unusable");
@@ -643,11 +665,31 @@ export type TraktPollResult =
   // That Trakt account is already connected to another Summonarr account.
   | { state: "conflict" };
 
+// What Trakt's device-token status means (RFC 8628, Trakt's codes). Pure.
+//   400: not yet authorized — keep polling at the interval;
+//   429: "slow down" — widen the interval for the rest of this grant;
+//   418: the user denied it;
+//   404 / 409 / 410: invalid, already used, or expired — start again;
+//   another non-2xx: transient — keep the grant, try again next interval.
+export function deviceTokenStatus(status: number): "issued" | "pending" | "slowDown" | "denied" | "expired" | "retry" {
+  if (status >= 200 && status < 300) return "issued";
+  if (status === 400) return "pending";
+  if (status === 429) return "slowDown";
+  if (status === 418) return "denied";
+  if (status === 404 || status === 409 || status === 410) return "expired";
+  return "retry";
+}
+
 export async function pollTraktDeviceAuth(userId: string, cfg: TraktOAuthConfig): Promise<TraktPollResult> {
   const pending = pendingDeviceAuth.get(userId);
   const now = Date.now();
+  // Ends THIS grant only: a restart of the flow while a poll was in flight put
+  // a new entry under the same user, and this poll's outcome is not about it.
+  const endGrant = () => {
+    if (pendingDeviceAuth.get(userId) === pending) pendingDeviceAuth.delete(userId);
+  };
   if (!pending || pending.expiresAt <= now) {
-    pendingDeviceAuth.delete(userId);
+    endGrant();
     return { state: "expired" };
   }
   // Pace Trakt ourselves: a client polling faster than Trakt's interval (or two
@@ -660,32 +702,25 @@ export async function pollTraktDeviceAuth(userId: string, cfg: TraktOAuthConfig)
       client_id: cfg.clientId,
       client_secret: cfg.clientSecret,
     });
-    if (res.status === 400) {
-      pending.nextPollAt = Date.now() + pending.intervalMs;
-      return { state: "pending" };
-    }
-    if (res.status === 429) {
-      // "Slow down": widen the interval for the rest of this grant.
-      pending.intervalMs += 5_000;
-      pending.nextPollAt = Date.now() + pending.intervalMs;
-      return { state: "pending" };
-    }
-    if (res.status === 418) {
-      pendingDeviceAuth.delete(userId);
-      return { state: "denied" };
-    }
-    if (res.status === 404 || res.status === 409 || res.status === 410) {
-      pendingDeviceAuth.delete(userId);
-      return { state: "expired" };
-    }
-    if (!res.ok) {
+    const status = deviceTokenStatus(res.status);
+    if (status !== "issued") {
+      discardBody(res);
+      if (status === "slowDown") pending.intervalMs += 5_000;
+      if (status === "pending" || status === "slowDown") {
+        pending.nextPollAt = Date.now() + pending.intervalMs;
+        return { state: "pending" };
+      }
+      if (status === "denied" || status === "expired") {
+        endGrant();
+        return { state: status };
+      }
       // Transient: keep the grant, try again on the next interval.
       pending.nextPollAt = Date.now() + pending.intervalMs;
       throw new Error(`Trakt device token answered ${res.status}`);
     }
     const tokens = parseTraktTokenResponse(await res.json());
     // The code is redeemed whatever happens next — it cannot be polled again.
-    pendingDeviceAuth.delete(userId);
+    endGrant();
     if (!tokens) throw new Error("Trakt device token response was unusable");
     let result: TraktPollResult;
     try {
@@ -806,6 +841,7 @@ export async function disconnectTrakt(userId: string): Promise<boolean> {
 function revokeTraktToken(cfg: TraktOAuthConfig, token: string, userId: string): void {
   void traktPost("/oauth/revoke", cfg.clientId, { token, client_id: cfg.clientId, client_secret: cfg.clientSecret })
     .then((res) => {
+      discardBody(res);
       if (!res.ok) console.warn(`[trakt] token revoke for user ${userId} answered ${res.status}`);
     })
     .catch((err: unknown) =>
@@ -836,6 +872,109 @@ export function traktRunProblems(result: TraktSyncResult): number {
   return result.errors + (result.rateLimited ? 1 : 0) + (result.clientRejected ? 1 : 0);
 }
 
+type TraktConnectionRow = {
+  userId: string;
+  watchlistAutoRequest: boolean;
+  historySeeds: boolean;
+  historyActivityAt: Date | null;
+  historyImportedAt: Date | null;
+  user: { id: string; role: string; permissions: bigint; name: string | null; email: string };
+};
+
+// One user's history import, when it is due and Trakt says it changed.
+// Unchanged since the last import ⇒ the (large) history read is skipped.
+async function importHistoryIfChanged(client: TraktUserClient, row: TraktConnectionRow, accountId: string, result: TraktSyncResult): Promise<void> {
+  const { body } = await client.get("/sync/last_activities");
+  const stamp = traktHistoryActivityStamp(body);
+  if (stamp !== null && row.historyActivityAt !== null && stamp.getTime() === row.historyActivityAt.getTime()) return;
+  const history = await fetchWatchedHistory(client);
+  const ratings = await fetchRatings(client);
+  // False: switched off or disconnected mid-read — nothing written, the stamps
+  // included.
+  if (await replaceTraktHistory(row.userId, accountId, history, ratings, { activityAt: stamp, importedAt: new Date() })) {
+    result.historyImported++;
+  }
+}
+
+// A revoked grant, with the account row it was read from.
+class TraktGrantRevoked extends Error {
+  accountId: string;
+  constructor(accountId: string) {
+    super("Trakt rejected the stored grant");
+    this.name = "TraktGrantRevoked";
+    this.accountId = accountId;
+  }
+}
+
+// One user's sync. Throws what the run's error handling sorts out.
+async function syncOneTraktUser(
+  cfg: TraktOAuthConfig,
+  row: TraktConnectionRow,
+  want: { watchlist: boolean; history: boolean },
+  result: TraktSyncResult,
+  signal?: AbortSignal,
+): Promise<{ accountId: string } | null> {
+  const account = await prisma.account.findFirst({
+    where: { userId: row.userId, provider: "trakt" },
+    select: { id: true, access_token: true, refresh_token: true, expires_at: true },
+  });
+  if (!account) return null;
+  const client = new TraktUserClient(cfg, account);
+  try {
+    if (want.watchlist) {
+      const watchlist = await fetchWatchlist(client, signal);
+      await fileAutoRequestTitles(row.user, watchlist, "trakt-watchlist", result, signal);
+    }
+    if (want.history && !signal?.aborted && traktHistoryImportDue(row.historyImportedAt)) {
+      await importHistoryIfChanged(client, row, account.id, result);
+    }
+  } catch (err) {
+    // Which grant failed travels with the error: a revocation ends only it.
+    if (err instanceof TraktTokenRevokedError) throw new TraktGrantRevoked(account.id);
+    throw err;
+  }
+  // updateMany: a user who disconnected mid-run has no row left, and that is
+  // not a run error. Only while the grant this run used is still theirs: a
+  // reconnect mid-run reset the bookkeeping for the new account. The history
+  // stamps are NOT written here (replaceTraktHistory commits them with the
+  // rows): this run's snapshot of them would overwrite a reset made meanwhile.
+  await prisma.traktConnection.updateMany({
+    where: { userId: row.userId, user: { accounts: { some: { id: account.id, provider: "trakt" } } } },
+    data: { syncedAt: new Date(), status: "ok" },
+  });
+  return { accountId: account.id };
+}
+
+// What one user's failure means for the run: "next" user, or "stop" (every
+// remaining user would fail the same way).
+async function handleUserSyncError(err: unknown, userId: string, result: TraktSyncResult): Promise<"next" | "stop"> {
+  if (err instanceof TraktGrantRevoked) {
+    result.tokensRevoked++;
+    console.warn(`[trakt] Trakt refused the stored grant for user ${userId} — removed; they must reconnect Trakt`);
+    await endRevokedConnection(userId, err.accountId);
+    return "next";
+  }
+  result.errors++;
+  await markConnection(userId, "error");
+  if (err instanceof TraktClientRejectedError) {
+    result.clientRejected = true;
+    // Restates an unchanged condition every run until fixed (guardrail 7b).
+    warnOnChange(
+      CLIENT_REJECTED_WARN_KEY,
+      "rejected",
+      "[trakt] Trakt rejected the app's client id/secret on a token refresh — no user grant was touched; fix the Trakt credentials in Settings → Integrations",
+    );
+    return "stop";
+  }
+  if (err instanceof TraktRateLimitedError) {
+    result.rateLimited = true;
+    console.warn("[trakt] Trakt rate limited the sync — the remaining users wait for the next run");
+    return "stop";
+  }
+  console.error(`[trakt] sync failed for user ${userId}: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
+  return "next";
+}
+
 export async function syncTraktUsers(opts: { signal?: AbortSignal } = {}): Promise<TraktSyncResult> {
   const result: TraktSyncResult = {
     users: 0, requested: 0, refused: 0, alreadyHandled: 0, historyImported: 0, tokensRevoked: 0, errors: 0, outcomes: {},
@@ -848,7 +987,7 @@ export async function syncTraktUsers(opts: { signal?: AbortSignal } = {}): Promi
   ]);
   if (!autoRequestOn && !forYouOn) return { ...result, skipped: "disabled" };
 
-  const rows = await prisma.traktConnection.findMany({
+  const rows: TraktConnectionRow[] = await prisma.traktConnection.findMany({
     where: {
       user: { deactivatedAt: null, purgedAt: null, accounts: { some: { provider: "trakt" } } },
     },
@@ -866,74 +1005,16 @@ export async function syncTraktUsers(opts: { signal?: AbortSignal } = {}): Promi
   // the Prisma pool is five connections), each isolated.
   for (const row of rows) {
     if (opts.signal?.aborted) break; // guardrail 41 — return, never throw
-    const wantWatchlist = autoRequestOn && row.watchlistAutoRequest && hasAutoRequestBit(row.user);
-    const wantHistory = forYouOn && row.historySeeds;
-    if (!wantWatchlist && !wantHistory) continue;
+    const want = {
+      watchlist: autoRequestOn && row.watchlistAutoRequest && hasAutoRequestBit(row.user),
+      history: forYouOn && row.historySeeds,
+    };
+    if (!want.watchlist && !want.history) continue;
     result.users++;
     try {
-      const account = await prisma.account.findFirst({
-        where: { userId: row.userId, provider: "trakt" },
-        select: { id: true, access_token: true, refresh_token: true, expires_at: true },
-      });
-      if (!account) continue;
-      const client = new TraktUserClient(cfg, account);
-      let historyActivityAt = row.historyActivityAt;
-      let historyImportedAt = row.historyImportedAt;
-
-      if (wantWatchlist) {
-        const watchlist = await fetchWatchlist(client, opts.signal);
-        await fileAutoRequestTitles(row.user, watchlist, "trakt-watchlist", result, opts.signal);
-      }
-      if (wantHistory && !opts.signal?.aborted && traktHistoryImportDue(historyImportedAt)) {
-        const { body } = await client.get("/sync/last_activities");
-        const stamp = traktHistoryActivityStamp(body);
-        // Unchanged since the last import ⇒ skip the (large) history read.
-        if (stamp === null || historyActivityAt === null || stamp.getTime() !== historyActivityAt.getTime()) {
-          const history = await fetchWatchedHistory(client);
-          const ratings = await fetchRatings(client);
-          // False: switched off or disconnected mid-read — nothing written, and
-          // the bookkeeping below must not claim an import either.
-          if (await replaceTraktHistory(row.userId, account.id, history, ratings)) {
-            historyActivityAt = stamp;
-            historyImportedAt = new Date();
-            result.historyImported++;
-          }
-        }
-      }
-      // updateMany: a user who disconnected mid-run has no row left, and that
-      // is not a run error. Only while the grant this run used is still theirs:
-      // a reconnect mid-run reset these stamps for the new account, and writing
-      // the old account's back would hold off its first import for hours.
-      await prisma.traktConnection.updateMany({
-        where: { userId: row.userId, user: { accounts: { some: { id: account.id, provider: "trakt" } } } },
-        data: { syncedAt: new Date(), status: "ok", historyActivityAt, historyImportedAt },
-      });
-      forgetWarnOnChange(CLIENT_REJECTED_WARN_KEY);
+      if (await syncOneTraktUser(cfg, row, want, result, opts.signal)) forgetWarnOnChange(CLIENT_REJECTED_WARN_KEY);
     } catch (err) {
-      if (err instanceof TraktTokenRevokedError) {
-        result.tokensRevoked++;
-        console.warn(`[trakt] Trakt refused the stored grant for user ${row.userId} — removed; they must reconnect Trakt`);
-        await endRevokedConnection(row.userId);
-        continue;
-      }
-      result.errors++;
-      await markConnection(row.userId, "error");
-      if (err instanceof TraktClientRejectedError) {
-        result.clientRejected = true;
-        // Restates an unchanged condition every run until fixed (guardrail 7b).
-        warnOnChange(
-          CLIENT_REJECTED_WARN_KEY,
-          "rejected",
-          "[trakt] Trakt rejected the app's client id/secret on a token refresh — no user grant was touched; fix the Trakt credentials in Settings → Integrations",
-        );
-        break;
-      }
-      if (err instanceof TraktRateLimitedError) {
-        result.rateLimited = true;
-        console.warn("[trakt] Trakt rate limited the sync — the remaining users wait for the next run");
-        break;
-      }
-      console.error(`[trakt] sync failed for user ${row.userId}: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
+      if ((await handleUserSyncError(err, row.userId, result)) === "stop") break;
     }
   }
   return result;
@@ -948,14 +1029,22 @@ async function markConnection(userId: string, status: "error" | "reauth"): Promi
 // The grant is gone: drop the credential and the history it imported (the user
 // may have revoked Summonarr on trakt.tv precisely to stop that), keep the
 // connection row as "reauth" so the profile can say what happened.
-async function endRevokedConnection(userId: string): Promise<void> {
+//
+// Only THE account whose grant was refused. A user who disconnected and
+// reconnected while the run held the old token pair (disconnect revokes it, so
+// the run's refresh is then refused) has a NEW account row by now; deleting
+// every trakt account ended the connection they had just made. With another
+// trakt account still theirs, the history and the status belong to it and are
+// left alone.
+async function endRevokedConnection(userId: string, accountId: string): Promise<void> {
   try {
-    await prisma.$transaction([
-      prisma.account.deleteMany({ where: { userId, provider: "trakt" } }),
-      prisma.traktWatchedItem.deleteMany({ where: { userId } }),
-      prisma.traktRating.deleteMany({ where: { userId } }),
-      prisma.traktConnection.updateMany({ where: { userId }, data: { status: "reauth", historyActivityAt: null, historyImportedAt: null } }),
-    ]);
+    await prisma.$transaction(async (tx) => {
+      await tx.account.deleteMany({ where: { id: accountId, userId, provider: "trakt" } });
+      if ((await tx.account.count({ where: { userId, provider: "trakt" } })) > 0) return;
+      await tx.traktWatchedItem.deleteMany({ where: { userId } });
+      await tx.traktRating.deleteMany({ where: { userId } });
+      await tx.traktConnection.updateMany({ where: { userId }, data: { status: "reauth", historyActivityAt: null, historyImportedAt: null } });
+    });
   } catch (e) {
     console.error(`[trakt] revoked-grant cleanup for user ${userId} failed: ${sanitizeForLog(e instanceof Error ? e.message : String(e))}`);
   }

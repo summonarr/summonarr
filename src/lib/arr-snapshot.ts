@@ -32,6 +32,7 @@ import { processSingleton } from "@/lib/process-singleton";
 import { SNAPSHOT_HEADER } from "@/lib/client/arr-snapshot";
 import { settleLimit } from "@/lib/concurrency";
 import { warnOnChange } from "@/lib/log-dedup";
+import type { SummonarrSession } from "@/lib/api-auth";
 
 export { SNAPSHOT_HEADER };
 
@@ -111,7 +112,10 @@ interface Entry {
   failedAt: number | null;
 }
 
-type AnyHandler = (req: NextRequest, ctx: unknown, session: unknown) => Response | Promise<Response>;
+// A stored route handler. The session is typed: the background refresh calls
+// it with SYSTEM_SESSION, which must satisfy what every wrapped handler may
+// read. Only `ctx` is erased — each route's own, handed back unchanged.
+type AnyHandler = (req: NextRequest, ctx: unknown, session: SummonarrSession) => Response | Promise<Response>;
 
 interface Store {
   entries: Map<string, Entry>;
@@ -127,6 +131,11 @@ interface Store {
 }
 
 const store = processSingleton<Store>("arr-snapshot:store", () => ({ entries: new Map(), bytes: 0, generation: 0, handlers: new Map() }));
+
+// Views a background re-read is out for, by key. A run that hit its time limit
+// stops waiting (its lock is released), but a re-read already started keeps
+// going: the next run skips that view instead of asking the arr again.
+const refreshing = processSingleton("arr-snapshot:refreshing", () => new Set<string>());
 
 /**
  * The snapshot key of a read, or null when the read is never snapshotted (a
@@ -260,6 +269,7 @@ export function dropArrTitleSnapshots(title: { service: string; instance: string
 export function resetArrSnapshotsForTests(): void {
   clearArrSnapshots();
   store.handlers.clear();
+  refreshing.clear();
 }
 
 /** A Setting key whose change makes every snapshot suspect (see clearArrSnapshots). */
@@ -278,7 +288,7 @@ export function arrSnapshotStats(): { entries: number; bytes: number } {
  * when there is none) without calling the handler; any other read runs the
  * handler and keeps its answer when it is a 200 JSON.
  */
-export function snapshotted<Ctx, S>(
+export function snapshotted<Ctx, S extends SummonarrSession>(
   handler: (req: NextRequest, ctx: Ctx, session: S) => Response | Promise<Response>,
 ): (req: NextRequest, ctx: Ctx, session: S) => Promise<Response> {
   return async (req, ctx, session) => {
@@ -330,8 +340,8 @@ async function keepIfJson(key: string, res: Response, meta: { url: string; local
 // kept), so a refresh runs the handler as the system. Never handed to anything
 // but these handlers.
 const SYSTEM_SESSION = {
-  user: { id: "system:arr-snapshot-refresh", role: "ADMIN", permissions: BigInt(0), name: "Summonarr" },
-};
+  user: { id: "system:arr-snapshot-refresh", role: "ADMIN", permissions: BigInt(0), name: "Summonarr", email: null },
+} satisfies SummonarrSession;
 
 export interface DueSnapshot {
   key: string;
@@ -401,40 +411,56 @@ export interface RefreshResult {
  */
 export async function refreshArrSnapshots(opts: { signal?: AbortSignal; now?: () => number; maxPerRun?: number } = {}): Promise<RefreshResult> {
   const now = opts.now ?? Date.now;
-  const due = dueSnapshots(now());
+  const due = dueSnapshots(now()).filter((d) => !refreshing.has(d.key));
   const batch = due.slice(0, opts.maxPerRun ?? SNAPSHOT_REFRESH_MAX_PER_RUN);
-  let refreshed = 0;
-  let failed = 0;
-  let started = 0;
+  const tally = { refreshed: 0, failed: 0, started: 0 };
   await settleLimit(batch, SNAPSHOT_REFRESH_CONCURRENCY, async (d) => {
-    if (opts.signal?.aborted) return;
+    if (opts.signal?.aborted || refreshing.has(d.key)) return;
     // Cleared or replaced since the list was made (a config write, an admin's own read): skip.
     const current = store.entries.get(d.key);
     if (!current || current.url !== d.url) return;
     const reg = store.handlers.get(routePathOf(new URL(d.url).pathname));
     if (!reg) return;
-    started++;
-    const generation = store.generation;
+    tally.started++;
+    refreshing.add(d.key);
     try {
-      const req = new NextRequest(d.url, { headers: { "accept-language": d.locale } });
-      const res = await reg.handler(req, reg.ctx, SYSTEM_SESSION);
-      // A config write that cleared the store while this read was out must win
-      // — also when an admin's own read has kept the view again since.
-      if (store.generation !== generation || !store.entries.has(d.key)) return;
-      if (await keepIfJson(d.key, res, { url: d.url, locale: d.locale, viewed: false }, now())) refreshed++;
-      else {
-        failed++;
-        noteFailedRefresh(current, now());
-      }
-    } catch (err) {
-      failed++;
-      noteFailedRefresh(current, now());
-      // A route that throws every pass is a condition, not an event (guardrail 7b).
-      const path = routePathOf(new URL(d.url).pathname);
-      const message = err instanceof Error ? err.message : String(err);
-      warnOnChange(`arr-snapshot:${path}`, message, `[arr-snapshot] background re-read of ${path} failed: ${message}`);
+      const outcome = await refreshOne(d, reg, current, now, opts.signal);
+      if (outcome === "refreshed") tally.refreshed++;
+      else if (outcome === "failed") tally.failed++;
+    } finally {
+      refreshing.delete(d.key);
     }
   });
   const aborted = opts.signal?.aborted === true;
-  return { due: due.length, refreshed, failed, deferred: due.length - started, aborted };
+  return { due: due.length, refreshed: tally.refreshed, failed: tally.failed, deferred: due.length - tally.started, aborted };
+}
+
+// One view re-read through its route's handler. "dropped": the store was
+// cleared (or the view removed) while it was out, so its answer is not kept.
+async function refreshOne(
+  d: DueSnapshot,
+  reg: { handler: AnyHandler; ctx: unknown },
+  current: Entry,
+  now: () => number,
+  signal: AbortSignal | undefined,
+): Promise<"refreshed" | "failed" | "dropped"> {
+  const generation = store.generation;
+  try {
+    // The run's signal rides on the request, for a handler that observes req.signal.
+    const req = new NextRequest(d.url, { headers: { "accept-language": d.locale }, ...(signal ? { signal } : {}) });
+    const res = await reg.handler(req, reg.ctx, SYSTEM_SESSION);
+    // A config write that cleared the store while this read was out must win
+    // — also when an admin's own read has kept the view again since.
+    if (store.generation !== generation || !store.entries.has(d.key)) return "dropped";
+    if (await keepIfJson(d.key, res, { url: d.url, locale: d.locale, viewed: false }, now())) return "refreshed";
+    noteFailedRefresh(current, now());
+    return "failed";
+  } catch (err) {
+    noteFailedRefresh(current, now());
+    // A route that throws every pass is a condition, not an event (guardrail 7b).
+    const path = routePathOf(new URL(d.url).pathname);
+    const message = err instanceof Error ? err.message : String(err);
+    warnOnChange(`arr-snapshot:${path}`, message, `[arr-snapshot] background re-read of ${path} failed: ${message}`);
+    return "failed";
+  }
 }

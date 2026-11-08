@@ -80,6 +80,10 @@ function AvatarImage({
     setStatus(img.naturalWidth > 0 ? "loaded" : "error")
   }, [setStatus])
 
+  // An image removed while "loaded" (the caller stops rendering it) would
+  // otherwise leave the fallback hidden with nothing over it.
+  React.useEffect(() => () => setStatus("idle"), [setStatus])
+
   if (status === "error") return null
   // `absolute inset-0` stacks the image OVER the fallback instead of beside it
   // in the root's flex row: while it loads ("idle") the initials show whole

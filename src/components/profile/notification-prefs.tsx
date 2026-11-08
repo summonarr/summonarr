@@ -6,7 +6,10 @@ import { Check, Loader2, MessageCircle, Mail, AlertTriangle, Bell, Smartphone } 
 import { IOS_APP_STORE_URL } from "@/lib/ios-app";
 import { withBasePath } from "@/lib/base-path";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
+import { readApiError } from "@/lib/client/api-error";
+import { jsonInit } from "@/lib/client/fetch-json";
 import { useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,6 +17,7 @@ import { Chip } from "@/components/ui/design";
 import { StepUpPasswordForm } from "@/components/profile/step-up-password-form";
 import { stepUpNeedOf, withStepUpPassword } from "@/lib/client/step-up";
 import { PLAUSIBLE_EMAIL_RE } from "@/lib/email-normalize";
+import { applyDelta, revertFailed, type PrefDelta } from "./notification-prefs-delta";
 
 // The stored on/off preference per channel × event (User columns, and the body
 // PATCH /api/profile/notifications takes).
@@ -83,43 +87,30 @@ function ToggleRow({
   );
 }
 
-// Notification on/off switches per channel (Discord, email, push). Each flip
-// shows immediately and is saved 400ms later (so quick flips are sent together),
-// and is undone if the save fails. Also holds the Jellyfin-only field for
-// setting a notification email address.
-export function NotificationPrefs({
-  emailEnabled,
-  discordLinked,
-  isAdminRole,
-  isJellyfin,
-  notificationEmail,
-  pendingEmail = null,
-  prefs: initialPrefs,
-}: NotificationPrefsProps) {
-  const t = useT();
-  const router = useRouter();
+// A string field of a parsed error body, if it is one.
+function textField(body: unknown, key: "message" | "error"): string | undefined {
+  if (!body || typeof body !== "object") return undefined;
+  const value = (body as Record<string, unknown>)[key];
+  return typeof value === "string" && value ? value : undefined;
+}
+
+// The switches' state and its autosave. Each flip shows immediately and is
+// saved 400ms later (so quick flips are sent together), and is undone if the
+// save fails. A save sends only the switches flipped since the last one
+// (notification-prefs-delta.ts): the route writes every boolean it receives,
+// so the whole set from this tab would undo a change made meanwhile in another
+// tab or the iOS app.
+function usePrefsAutosave(initialPrefs: NotificationPrefValues, t: Translator) {
   const [prefs, setPrefs] = useState<NotificationPrefValues>(initialPrefs);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  // Jellyfin-only local state for the self-service notification-email flow. The
-  // input holds a NEW address to verify; the current verified address is shown
-  // separately from the `notificationEmail` prop.
-  const [emailInput, setEmailInput] = useState("");
-  const [emailSavingState, setEmailSavingState] = useState<"idle" | "saving" | "sent" | "error">("idle");
-  const [emailError, setEmailError] = useState<string | null>(null);
-  // Sending a verification link needs a step-up (guardrail 6g): the server
-  // answers "password-required" and the password is asked for inline. Holds the
-  // address being verified while the prompt is open (the input, or the pending
-  // address on "Resend"), so the confirmed retry sends the same one.
-  const [stepUpAddress, setStepUpAddress] = useState<string | null>(null);
-  const [stepUpError, setStepUpError] = useState<string | null>(null);
-
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingPrefsRef = useRef<NotificationPrefValues | null>(null);
-  // Last state the server confirmed — the toggles revert here if a save fails.
-  const savedPrefsRef = useRef<NotificationPrefValues>(prefs);
+  // Flips not yet sent.
+  const pendingRef = useRef<PrefDelta<NotificationPrefValues> | null>(null);
+  // Last state the server confirmed — a failed save's switches revert here.
+  const savedPrefsRef = useRef<NotificationPrefValues>(initialPrefs);
   // One save at a time: a flip made while a save is in flight waits for it, so
   // an older answer can never land after a newer one and move savedPrefsRef back.
   const inFlightRef = useRef(false);
@@ -128,10 +119,10 @@ export function NotificationPrefs({
     // Copy the ref objects themselves (not their .current values) so the
     // cleanup reads whatever is pending at the moment the component unmounts.
     const timer = saveTimerRef;
-    const pendingRef = pendingPrefsRef;
+    const pendingDelta = pendingRef;
     return () => {
       if (timer.current) clearTimeout(timer.current);
-      const pending = pendingRef.current;
+      const pending = pendingDelta.current;
       if (!pending) return;
       // There is no Save button: flipping a switch IS the save, and the switch
       // has already moved on screen. A toggle made less than 400ms before
@@ -147,58 +138,50 @@ export function NotificationPrefs({
     };
   }, []);
 
-  // Put the toggles back to the last state the server confirmed, so the UI never
-  // shows a position the server rejected. Skipped while a newer toggle is still
-  // waiting to be saved: that save sends the full set of toggles (including this
-  // one), so it will retry this change — and rolling back here would make the
-  // switches disagree with what that save then stores.
-  function rollBack() {
-    if (pendingPrefsRef.current) return;
-    setPrefs(savedPrefsRef.current);
-  }
-
   async function flush() {
     // The save in flight sends this one when it settles (see finally).
     if (inFlightRef.current) return;
-    const updated = pendingPrefsRef.current;
-    if (!updated) return;
-    pendingPrefsRef.current = null;
+    const delta = pendingRef.current;
+    if (!delta) return;
+    pendingRef.current = null;
     inFlightRef.current = true;
     setSaving(true);
     setSaved(false);
     setSaveError(null);
+    // Put the failed switches back to the last state the server confirmed, so
+    // the UI never shows a position the server rejected.
+    const rollBack = () => setPrefs((cur) => revertFailed(cur, savedPrefsRef.current, delta, pendingRef.current));
     try {
-      const res = await fetch(withBasePath("/api/profile/notifications"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(updated),
-      });
+      const res = await fetch(withBasePath("/api/profile/notifications"), jsonInit("PATCH", delta));
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
         rollBack();
-        setSaveError(rateLimitMessage(res, t) ?? data?.error ?? t("profile.error.saveFailed"));
+        setSaveError(rateLimitMessage(res, t) ?? (await readApiError(res, t("profile.error.saveFailed"))));
         return;
       }
-      savedPrefsRef.current = updated;
+      savedPrefsRef.current = applyDelta(savedPrefsRef.current, delta);
+      // No page refresh: these switches are the only copy on the page, so
+      // re-rendering the whole profile server-side per flip bought nothing.
       setSaved(true);
-      router.refresh();
     } catch {
       rollBack();
       setSaveError(t("profile.error.network"));
     } finally {
       inFlightRef.current = false;
       setSaving(false);
-      // Flips made during this save whose debounce already ran: send them now
-      // (they carry the full set). One still debouncing flushes on its own.
-      if (pendingPrefsRef.current && !saveTimerRef.current) void flush();
+      // Flips made during this save whose debounce already ran: send them now.
+      // One still debouncing flushes on its own.
+      if (pendingRef.current && !saveTimerRef.current) void flush();
     }
   }
 
   function toggle(key: PrefKey) {
-    const updated = { ...(pendingPrefsRef.current ?? prefs), [key]: !(pendingPrefsRef.current ?? prefs)[key] };
-    setPrefs(updated);
+    // The value on screen: a flip still pending in this tick wins over the
+    // render's `prefs`, so two quick flips of one switch cancel out.
+    const shown = pendingRef.current && key in pendingRef.current ? pendingRef.current[key]! : prefs[key];
+    const next = !shown;
+    setPrefs((cur) => ({ ...cur, [key]: next }));
     setSaveError(null);
-    pendingPrefsRef.current = updated;
+    pendingRef.current = { ...pendingRef.current, [key]: next };
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
       saveTimerRef.current = null;
@@ -206,10 +189,38 @@ export function NotificationPrefs({
     }, 400);
   }
 
-  // Jellyfin: email a one-time verification link to the entered address. The
-  // server only saves the address once that link is clicked, so nobody can point
-  // notifications at an address they don't control.
-  // `address` is set by "Resend" for the pending address; otherwise the input.
+  return { prefs, toggle, saving, saved, saveError };
+}
+
+// Jellyfin only: the self-service notification address. A Jellyfin account has
+// no provider-verified email, so a new address is bound only through a
+// one-time verification link; the current verified one can be removed.
+function JellyfinEmailField({
+  notificationEmail,
+  pendingEmail,
+  t,
+}: {
+  notificationEmail: string | null;
+  pendingEmail: string | null;
+  t: Translator;
+}) {
+  const router = useRouter();
+  // The input holds a NEW address to verify; the current verified address is
+  // shown separately from the `notificationEmail` prop.
+  const [emailInput, setEmailInput] = useState("");
+  const [emailSavingState, setEmailSavingState] = useState<"idle" | "saving" | "sent" | "error">("idle");
+  const [emailError, setEmailError] = useState<string | null>(null);
+  // Sending a verification link needs a step-up (guardrail 6g): the server
+  // answers "password-required" and the password is asked for inline. Holds the
+  // address being verified while the prompt is open (the input, or the pending
+  // address on "Resend"), so the confirmed retry sends the same one.
+  const [stepUpAddress, setStepUpAddress] = useState<string | null>(null);
+  const [stepUpError, setStepUpError] = useState<string | null>(null);
+
+  // Email a one-time verification link to the entered address. The server only
+  // saves the address once that link is clicked, so nobody can point
+  // notifications at an address they don't control. `address` is set by
+  // "Resend" for the pending address; otherwise the input.
   async function sendVerification(address?: string, confirmPassword?: string) {
     const trimmed = (address ?? emailInput).trim();
     if (trimmed === "" || !PLAUSIBLE_EMAIL_RE.test(trimmed)) {
@@ -220,12 +231,11 @@ export function NotificationPrefs({
     setEmailError(null);
     setEmailSavingState("saving");
     try {
-      const res = await fetch(withBasePath("/api/profile/notification-email"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(withStepUpPassword({ email: trimmed }, confirmPassword)),
-      });
-      const data = await res.json().catch(() => ({}));
+      const res = await fetch(
+        withBasePath("/api/profile/notification-email"),
+        jsonInit("POST", withStepUpPassword({ email: trimmed }, confirmPassword)),
+      );
+      const data: unknown = await res.json().catch(() => null);
       const need = stepUpNeedOf(res.status, data);
       if (need) {
         setStepUpAddress(trimmed);
@@ -236,7 +246,12 @@ export function NotificationPrefs({
       if (!res.ok) {
         // `message` first: a step-up refusal ("session-too-old", "rate_limit")
         // carries its sentence there and a machine code in `error`.
-        setEmailError(data?.message ?? rateLimitMessage(res, t) ?? data?.error ?? t("profile.notifications.error.sendVerification"));
+        setEmailError(
+          textField(data, "message") ??
+            rateLimitMessage(res, t) ??
+            textField(data, "error") ??
+            t("profile.notifications.error.sendVerification"),
+        );
         setEmailSavingState("error");
         return;
       }
@@ -255,25 +270,121 @@ export function NotificationPrefs({
     setEmailError(null);
     setEmailSavingState("saving");
     try {
-      const res = await fetch(withBasePath("/api/profile/notifications"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ notificationEmail: null }),
-      });
+      const res = await fetch(withBasePath("/api/profile/notifications"), jsonInit("PATCH", { notificationEmail: null }));
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setEmailError(rateLimitMessage(res, t) ?? data?.error ?? t("profile.notifications.error.removeEmail"));
+        setEmailError(rateLimitMessage(res, t) ?? (await readApiError(res, t("profile.notifications.error.removeEmail"))));
         setEmailSavingState("error");
         return;
       }
       setEmailInput("");
       setEmailSavingState("idle");
+      // The verified address is a server-rendered prop.
       router.refresh();
     } catch {
       setEmailError(t("profile.notifications.error.network"));
       setEmailSavingState("error");
     }
   }
+
+  return (
+    <div className="py-3 border-b border-zinc-800">
+      <label htmlFor="notificationEmail" className="text-sm font-medium text-zinc-200 block">
+        {t("profile.notifications.emailAddress")}
+      </label>
+      <p className="text-xs text-zinc-500 mt-0.5 mb-2">
+        {t("profile.notifications.jellyfinEmailHint")}
+      </p>
+      {notificationEmail && (
+        <div className="flex flex-wrap items-center gap-2 mb-2">
+          <span className="ds-mono text-sm text-zinc-300 break-all">{notificationEmail}</span>
+          <Chip tone="approved">{t("profile.notifications.verified")}</Chip>
+          <Button
+            type="button"
+            variant="link"
+            size="xs"
+            onClick={clearNotificationEmail}
+            disabled={emailSavingState === "saving"}
+            className="px-0 text-zinc-500 hover:text-zinc-300"
+          >
+            {t("profile.common.remove")}
+          </Button>
+        </div>
+      )}
+      {pendingEmail && emailSavingState !== "sent" && (
+        <div className="flex flex-wrap items-center gap-2 mb-2">
+          <span className="text-xs text-zinc-400">
+            {t("profile.notifications.verificationPending", { email: pendingEmail })}
+          </span>
+          <Button
+            type="button"
+            variant="link"
+            size="xs"
+            onClick={() => sendVerification(pendingEmail)}
+            disabled={emailSavingState === "saving"}
+            className="px-0"
+          >
+            {emailSavingState === "saving" ? <Loader2 className="w-3 h-3 animate-spin" /> : t("profile.notifications.resendVerification")}
+          </Button>
+        </div>
+      )}
+      {stepUpAddress !== null ? (
+        <StepUpPasswordForm
+          busy={emailSavingState === "saving"}
+          error={stepUpError}
+          onSubmit={(password) => void sendVerification(stepUpAddress, password)}
+          onCancel={() => { setStepUpAddress(null); setStepUpError(null); }}
+        />
+      ) : (
+        <div className="flex gap-2">
+          <Input
+            id="notificationEmail"
+            type="email"
+            value={emailInput}
+            onChange={(e) => {
+              setEmailInput(e.target.value);
+              if (emailSavingState !== "idle") setEmailSavingState("idle");
+              if (emailError) setEmailError(null);
+            }}
+            placeholder={notificationEmail ? t("profile.notifications.changeAddress") : t("auth.field.emailPlaceholder")}
+            aria-invalid={emailError ? true : undefined}
+            className="flex-1"
+            autoComplete="email"
+            spellCheck={false}
+          />
+          <Button
+            type="button"
+            onClick={() => sendVerification()}
+            disabled={emailSavingState === "saving" || emailInput.trim() === ""}
+            className="shrink-0"
+          >
+            {emailSavingState === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("profile.notifications.sendVerification")}
+          </Button>
+        </div>
+      )}
+      {emailError && <p role="alert" className="text-xs text-red-400 mt-1.5">{emailError}</p>}
+      {emailSavingState === "sent" && !emailError && (
+        <p className="text-xs text-green-400 mt-1.5 flex items-center gap-1">
+          <Check className="w-3 h-3" /> {t("profile.notifications.verificationSent")}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// Notification on/off switches per channel (Discord, email, push), saved as
+// they flip (usePrefsAutosave). Also holds the Jellyfin-only field for setting
+// a notification email address.
+export function NotificationPrefs({
+  emailEnabled,
+  discordLinked,
+  isAdminRole,
+  isJellyfin,
+  notificationEmail,
+  pendingEmail = null,
+  prefs: initialPrefs,
+}: NotificationPrefsProps) {
+  const t = useT();
+  const { prefs, toggle, saving, saved, saveError } = usePrefsAutosave(initialPrefs, t);
 
   // Literal keys per row, so the i18n usage and dead-string checks see them.
   const discordRows: PrefRow[] = [
@@ -331,87 +442,7 @@ export function NotificationPrefs({
           </div>
 
           {isJellyfin ? (
-            <div className="py-3 border-b border-zinc-800">
-              <label htmlFor="notificationEmail" className="text-sm font-medium text-zinc-200 block">
-                {t("profile.notifications.emailAddress")}
-              </label>
-              <p className="text-xs text-zinc-500 mt-0.5 mb-2">
-                {t("profile.notifications.jellyfinEmailHint")}
-              </p>
-              {notificationEmail && (
-                <div className="flex flex-wrap items-center gap-2 mb-2">
-                  <span className="ds-mono text-sm text-zinc-300 break-all">{notificationEmail}</span>
-                  <Chip tone="approved">{t("profile.notifications.verified")}</Chip>
-                  <Button
-                    type="button"
-                    variant="link"
-                    size="xs"
-                    onClick={clearNotificationEmail}
-                    disabled={emailSavingState === "saving"}
-                    className="px-0 text-zinc-500 hover:text-zinc-300"
-                  >
-                    {t("profile.common.remove")}
-                  </Button>
-                </div>
-              )}
-              {pendingEmail && emailSavingState !== "sent" && (
-                <div className="flex flex-wrap items-center gap-2 mb-2">
-                  <span className="text-xs text-zinc-400">
-                    {t("profile.notifications.verificationPending", { email: pendingEmail })}
-                  </span>
-                  <Button
-                    type="button"
-                    variant="link"
-                    size="xs"
-                    onClick={() => sendVerification(pendingEmail)}
-                    disabled={emailSavingState === "saving"}
-                    className="px-0"
-                  >
-                    {emailSavingState === "saving" ? <Loader2 className="w-3 h-3 animate-spin" /> : t("profile.notifications.resendVerification")}
-                  </Button>
-                </div>
-              )}
-              {stepUpAddress !== null ? (
-                <StepUpPasswordForm
-                  busy={emailSavingState === "saving"}
-                  error={stepUpError}
-                  onSubmit={(password) => void sendVerification(stepUpAddress, password)}
-                  onCancel={() => { setStepUpAddress(null); setStepUpError(null); }}
-                />
-              ) : (
-                <div className="flex gap-2">
-                  <Input
-                    id="notificationEmail"
-                    type="email"
-                    value={emailInput}
-                    onChange={(e) => {
-                      setEmailInput(e.target.value);
-                      if (emailSavingState !== "idle") setEmailSavingState("idle");
-                      if (emailError) setEmailError(null);
-                    }}
-                    placeholder={notificationEmail ? t("profile.notifications.changeAddress") : t("auth.field.emailPlaceholder")}
-                    aria-invalid={emailError ? true : undefined}
-                    className="flex-1"
-                    autoComplete="email"
-                    spellCheck={false}
-                  />
-                  <Button
-                    type="button"
-                    onClick={() => sendVerification()}
-                    disabled={emailSavingState === "saving" || emailInput.trim() === ""}
-                    className="shrink-0"
-                  >
-                    {emailSavingState === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("profile.notifications.sendVerification")}
-                  </Button>
-                </div>
-              )}
-              {emailError && <p role="alert" className="text-xs text-red-400 mt-1.5">{emailError}</p>}
-              {emailSavingState === "sent" && !emailError && (
-                <p className="text-xs text-green-400 mt-1.5 flex items-center gap-1">
-                  <Check className="w-3 h-3" /> {t("profile.notifications.verificationSent")}
-                </p>
-              )}
-            </div>
+            <JellyfinEmailField notificationEmail={notificationEmail} pendingEmail={pendingEmail} t={t} />
           ) : (
             <div className="py-3 border-b border-zinc-800">
               <p className="text-sm font-medium text-zinc-200">{t("profile.notifications.emailAddress")}</p>

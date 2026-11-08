@@ -2,9 +2,28 @@
 
 // Pagination footer for the history table: rows-per-page select, result-range
 // label, and the page-number strip. The page and page-size state live in the
-// parent; this file only works out which numbers to show.
+// parent; which numbers to show is the shared pager window (pager-window.ts),
+// the same ±2 strip the browse pages draw.
 
+import type { ReactNode } from "react";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { pagerWindow } from "@/lib/pager-window";
+import { PAGE_SIZES } from "./types";
+
+function Ellipsis() {
+  return (
+    <span
+      className="ds-mono"
+      style={{
+        color: "var(--ds-fg-disabled)",
+        fontSize: 11,
+        padding: "0 4px",
+      }}
+    >
+      …
+    </span>
+  );
+}
 
 export function HistoryPagination({
   page,
@@ -25,12 +44,9 @@ export function HistoryPagination({
   const locale = useLocale();
   const startItem = total > 0 ? (page - 1) * limit + 1 : 0;
   const endItem = Math.min(page * limit, total);
-  const pageRange: number[] = [];
-  {
-    const s = Math.max(1, page - 2);
-    const e = Math.min(totalPages, page + 2);
-    for (let i = s; i <= e; i++) pageRange.push(i);
-  }
+  const { pages: pageRange } = pagerWindow(page, totalPages);
+  const atFirst = page === 1;
+  const atLast = page >= totalPages;
 
   return (
     <div
@@ -71,7 +87,7 @@ export function HistoryPagination({
             cursor: "pointer",
           }}
         >
-          {[10, 25, 50, 100, 150, 200].map((n) => (
+          {PAGE_SIZES.map((n) => (
             <option key={n} value={n}>
               {n}
             </option>
@@ -103,28 +119,13 @@ export function HistoryPagination({
           gap: 4,
         }}
       >
-        {(
-          [
-            ["«", t("adminActivity.pagination.first"), () => setPage(1), page === 1],
-            ["‹", t("adminActivity.pagination.previous"), () => setPage(page - 1), page === 1],
-          ] as const
-        ).map(([glyph, label, fn, disabled], idx) => (
-          <PageBtn key={idx} onClick={fn} disabled={disabled} ariaLabel={label}>
-            {glyph}
-          </PageBtn>
-        ))}
-        {pageRange[0] > 1 && (
-          <span
-            className="ds-mono"
-            style={{
-              color: "var(--ds-fg-disabled)",
-              fontSize: 11,
-              padding: "0 4px",
-            }}
-          >
-            …
-          </span>
-        )}
+        <PageBtn onClick={() => setPage(1)} disabled={atFirst} ariaLabel={t("adminActivity.pagination.first")}>
+          «
+        </PageBtn>
+        <PageBtn onClick={() => setPage(page - 1)} disabled={atFirst} ariaLabel={t("adminActivity.pagination.previous")}>
+          ‹
+        </PageBtn>
+        {pageRange[0] > 1 && <Ellipsis />}
         {pageRange.map((p) => (
           <PageBtn
             key={p}
@@ -134,28 +135,13 @@ export function HistoryPagination({
             {p}
           </PageBtn>
         ))}
-        {pageRange[pageRange.length - 1] < totalPages && (
-          <span
-            className="ds-mono"
-            style={{
-              color: "var(--ds-fg-disabled)",
-              fontSize: 11,
-              padding: "0 4px",
-            }}
-          >
-            …
-          </span>
-        )}
-        {(
-          [
-            ["›", t("adminActivity.pagination.next"), () => setPage(page + 1), page >= totalPages],
-            ["»", t("adminActivity.pagination.last"), () => setPage(totalPages), page >= totalPages],
-          ] as const
-        ).map(([glyph, label, fn, disabled], idx) => (
-          <PageBtn key={idx} onClick={fn} disabled={disabled} ariaLabel={label}>
-            {glyph}
-          </PageBtn>
-        ))}
+        {pageRange[pageRange.length - 1] < totalPages && <Ellipsis />}
+        <PageBtn onClick={() => setPage(page + 1)} disabled={atLast} ariaLabel={t("adminActivity.pagination.next")}>
+          ›
+        </PageBtn>
+        <PageBtn onClick={() => setPage(totalPages)} disabled={atLast} ariaLabel={t("adminActivity.pagination.last")}>
+          »
+        </PageBtn>
       </div>
     </div>
   );
@@ -170,7 +156,7 @@ function PageBtn({
   active,
   ariaLabel,
 }: {
-  children: React.ReactNode;
+  children: ReactNode;
   onClick: () => void;
   disabled?: boolean;
   active?: boolean;

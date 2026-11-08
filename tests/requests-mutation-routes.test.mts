@@ -1151,6 +1151,36 @@ test("approve with a LISTED qualityProfileId claims the row and forwards that id
   assert.equal((JSON.parse(adds[0].body!) as { qualityProfileId?: number }).qualityProfileId, 2);
 });
 
+// The admin's picker choice is stored on the row, so the profile the admin
+// picked is the one a later Re-push (and the sync's re-push) sends — it used to
+// be used once and dropped, and a retry after a failed approve fell back to the
+// requester's profile or the instance default.
+test("approve with a qualityProfileId STORES it: a Re-push after the approve sends the admin's choice", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, qualityProfileId: 1 })];
+  const res = await doPatch(token, "r1", { status: "APPROVED", qualityProfileId: 2, qualityProfileName: "Ultra-HD" });
+  assert.equal(res.status, 200);
+  assert.equal(reqRows[0].qualityProfileId, 2, "the override is the row's profile now");
+  assert.equal(((await res.json()) as { qualityProfileId: number }).qualityProfileId, 2);
+
+  fetchCalls.length = 0;
+  assert.equal((await doPatch(token, "r1", { retry: true })).status, 200);
+  const adds = fetchCalls.filter((c) => c.method === "POST" && c.url.pathname.includes("/api/v3/movie"));
+  assert.equal(adds.length, 1);
+  assert.equal((JSON.parse(adds[0].body!) as { qualityProfileId?: number }).qualityProfileId, 2, "the Re-push keeps the admin's choice");
+});
+
+test("approve WITHOUT a qualityProfileId leaves the requester's stored profile alone", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, qualityProfileId: 1 })];
+  await doPatch(token, "r1", { status: "APPROVED" });
+  assert.equal(reqRows[0].qualityProfileId, 1);
+  const claim = opsOf("mediaRequest.updateMany")[0].args as { data: Record<string, unknown> };
+  assert.equal("qualityProfileId" in claim.data, false);
+});
+
 // A TV request with no stored tvdbId has nothing to search: the route answers
 // with a TRANSLATED arrError instead of throwing an English Error into the
 // generic arr catch (which arrErrorMessage passes through verbatim).

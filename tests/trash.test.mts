@@ -55,7 +55,7 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 // Dynamic imports so the stubs above genuinely precede the module-graph load.
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
-const { BATCH_TX_TIMEOUT } = await import("../src/lib/cron-auth.ts");
+const { BATCH_TX_TIMEOUT } = await import("../src/lib/batch-write.ts");
 const {
   describeSchemaError,
   refreshCatalog,
@@ -71,6 +71,9 @@ const {
   getSpecDetail,
   __resetGithubTokenCacheForTests,
 } = await import("../src/lib/trash.ts");
+const { buildProfileItems } = await import("../src/lib/trash-profile-items.ts");
+const { upsertRemote } = await import("../src/lib/trash-apply-common.ts");
+const { resolveLanguage } = await import("../src/lib/trash-apply-profile.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
 
@@ -266,6 +269,9 @@ function prismaError(code: string, message: string): Error {
 // race: a "winner" row (errorCount 1) appears and the create throws P2002 —
 // recordApply's fallback must then re-update so the tally reflects BOTH attempts.
 let appCreateConflictOnce = false;
+// When set, trashApplication.upsert throws for this spec id (a DB blip while
+// recording one apply).
+let appUpsertThrowsFor: string | null = null;
 
 type AppWhereUnique = { trashSpecId_arrInstance: { trashSpecId: string; arrInstance: string } };
 shadowPrismaModel(prisma, "trashApplication", {
@@ -293,6 +299,7 @@ shadowPrismaModel(prisma, "trashApplication", {
   },
   upsert: async (args: { where: AppWhereUnique; update: Record<string, unknown>; create: Record<string, unknown> }) => {
     const k = args.where.trashSpecId_arrInstance;
+    if (appUpsertThrowsFor === k.trashSpecId) throw new Error("connection terminated unexpectedly (unit test)");
     const existing = appRows.find(
       (a) => a.trashSpecId === k.trashSpecId && a.arrInstance === k.arrInstance,
     );
@@ -375,8 +382,15 @@ shadowPrismaModel(prisma, "trashApplication", {
 // client and record the options so the BATCH_TX_TIMEOUT pin (guardrail 4) is
 // assertable.
 const txCalls: Array<{ timeout?: number } | undefined> = [];
+// When set, the next interactive transaction throws it instead of running.
+let txFailNext: Error | null = null;
 shadowPrismaClientMethod(prisma, "$transaction", (fnOrOps: unknown, opts?: { timeout?: number }) => {
   txCalls.push(opts);
+  if (txFailNext && typeof fnOrOps === "function") {
+    const err = txFailNext;
+    txFailNext = null;
+    return Promise.reject(err);
+  }
   if (typeof fnOrOps === "function") return (fnOrOps as (tx: unknown) => Promise<unknown>)(prisma);
   return Promise.all(fnOrOps as Promise<unknown>[]);
 });
@@ -521,6 +535,8 @@ beforeEach(() => {
   specSeq = 0;
   appSeq = 0;
   appCreateConflictOnce = false;
+  appUpsertThrowsFor = null;
+  txFailNext = null;
   respond = () => {
     throw new Error("unexpected fetch — script a responder for this test");
   };
@@ -776,6 +792,47 @@ test("a non-2xx tree response makes refreshCatalog throw with the status and bod
     () => refreshCatalog("RADARR"),
     /GitHub tree fetch failed for TRaSH-Guides\/Guides@master: 403 API rate limit exceeded/,
   );
+});
+
+test("a batch that fails to save is reported for its files and the refresh goes on; nothing of that kind is retired", async () => {
+  // Stored, and no longer listed: a complete custom-format pass would delete it.
+  seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-old", sha: "sha-old", path: "docs/json/radarr/cf/old.json" });
+  // The first transaction is the custom-format batch.
+  txFailNext = new Error("could not serialize access due to concurrent update (db.internal:5432)");
+  respond = router(ghRoutes(FULL_RADARR_TREE, FULL_RADARR_FILES));
+
+  const result = await refreshCatalog("RADARR");
+  assert.deepEqual(result.customFormats, { fetched: 1, updated: 0, unchanged: 0 });
+  // Every later kind still refreshed.
+  assert.deepEqual(result.customFormatGroups, { fetched: 1, updated: 1, unchanged: 0 });
+  assert.deepEqual(result.naming, { fetched: 1, updated: 1 });
+  assert.deepEqual(result.qualityProfiles, { fetched: 1, updated: 1 });
+  assert.deepEqual(result.qualitySizes, { fetched: 1, updated: 1 });
+  assert.deepEqual(result.errors, ["cf: could not save 1 spec(s) to the database (see the server log)"]);
+  // The DB's own text stays in the log.
+  assert.ok(errors.some((e) => e.startsWith("[trash] RADARR cf write failed") && e.includes("db.internal")));
+  assert.ok(specRows.some((r) => r.trashId === "cf-old"), "an incomplete pass retires nothing of its kind");
+  assert.equal(specRows.some((r) => r.trashId === "cf-x265"), false);
+  assert.deepEqual(specDeleteWheres, []);
+});
+
+test("a missing table or enum value during a batch write still fails the refresh, so the db-push hint reaches the admin", async () => {
+  txFailNext = new Error('invalid input value for enum "TrashSpecKind": "CUSTOM_FORMAT_GROUP"');
+  respond = router(ghRoutes(FULL_RADARR_TREE, FULL_RADARR_FILES));
+  await assert.rejects(() => refreshCatalog("RADARR"), /CUSTOM_FORMAT_GROUP/);
+});
+
+test("a tree listing with a malformed entry fails the refresh instead of retiring by a partial listing", async () => {
+  seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-x265", sha: "sha-cf1", path: "docs/json/radarr/cf/x265.json" });
+  respond = router({
+    [TREE_KEY]: () => json({ tree: [blob("docs/json/radarr/cf/x265.json", "sha-cf1"), { path: 5, sha: "s", type: "blob" }], truncated: false }),
+  });
+  await assert.rejects(
+    () => refreshCatalog("RADARR"),
+    /GitHub tree response for TRaSH-Guides\/Guides@master was malformed: tree\[1\]\.path: expected string, got number/,
+  );
+  assert.deepEqual(specDeleteWheres, []);
+  assert.equal(fetchCalls.filter((c) => c.url.hostname === "raw.githubusercontent.com").length, 0);
 });
 
 // ── refreshCatalog: specs removed upstream ──────────────────────────────────
@@ -1622,6 +1679,63 @@ test("a quality TRaSH lists on its own is allowed even where the schema nests it
   assert.equal(body.cutoff, 3);
 });
 
+test("a profile PUT targets the stored profile even when the arr's schema carries an id, and a POST sends none", async () => {
+  configureRadarr();
+  const known = seedSpec({
+    service: "RADARR", kind: "QUALITY_PROFILE", trashId: "qp-known", name: "Known",
+    payload: { trash_id: "qp-known", name: "Known", items: [], formatItems: {} },
+  });
+  seedApp(known.id, "", { remoteId: 12 });
+  const fresh = seedSpec({
+    service: "RADARR", kind: "QUALITY_PROFILE", trashId: "qp-new", name: "New",
+    payload: { trash_id: "qp-new", name: "New", items: [], formatItems: {} },
+  });
+  respond = router({
+    ...profileRoutes({ schemaItems: [] }),
+    [`GET ${RADARR}/api/v3/qualityprofile`]: () => json([{ id: 12, name: "Known" }]),
+    // The schema endpoint answers with a default id, as a resource does.
+    [`GET ${RADARR}/api/v3/qualityprofile/schema`]: () => json({ id: 0, items: [], formatItems: [] }),
+    [`PUT ${RADARR}/api/v3/qualityprofile/12`]: () => json({ id: 12 }),
+  });
+
+  const results = await applyQualityProfiles("RADARR", [known.id, fresh.id]);
+  assert.deepEqual(results.map((r) => [r.trashId, r.ok, r.remoteId]), [["qp-known", true, 12], ["qp-new", true, 70]]);
+  const put = fetchCalls.find((c) => callKey(c) === `PUT ${RADARR}/api/v3/qualityprofile/12`)!;
+  assert.equal((JSON.parse(put.body!) as { id: unknown }).id, 12);
+  assert.equal("id" in postedProfile(), false, "a new profile's POST carries no id");
+});
+
+test("a custom format the admin stopped managing is never pushed by a profile, though its live CF keeps its score", async () => {
+  configureRadarr();
+  const live = seedSpec({
+    service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-live", name: "Live",
+    payload: { trash_id: "cf-live", name: "Live", trash_scores: { default: 50 } },
+  });
+  seedApp(live.id, "", { enabled: false, remoteId: 21 });
+  // Disabled, and gone from the arr: a profile must not bring it back.
+  const gone = seedSpec({
+    service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-gone", name: "Gone",
+    payload: { trash_id: "cf-gone", name: "Gone", trash_scores: { default: 70 } },
+  });
+  seedApp(gone.id, "", { enabled: false, remoteId: 99 });
+  const qp = seedSpec({
+    service: "RADARR", kind: "QUALITY_PROFILE", trashId: "qp-1", name: "P",
+    payload: { trash_id: "qp-1", name: "P", items: [], formatItems: { Live: "cf-live", Gone: "cf-gone" } },
+  });
+  respond = router(profileRoutes({ schemaItems: [], cfs: [{ id: 21, name: "Live" }] }));
+
+  const results = await applyQualityProfiles("RADARR", [qp.id]);
+  assert.equal(results[0].ok, true);
+  assert.deepEqual(postedProfile().formatItems, [{ format: 21, name: "Live", score: 50 }]);
+  assert.equal(
+    fetchCalls.some((c) => c.url.pathname.startsWith("/api/v3/customformat") && c.method !== "GET"),
+    false,
+    "no custom format was written",
+  );
+  assert.equal(findApp(gone.id, "")!.appliedAt, null);
+  assert.equal(findApp(gone.id, "")!.errorCount, 0);
+});
+
 test("mapping remote CFs to scores is linear in what the arr sends (guardrail 5i)", async () => {
   configureRadarr();
   const qp = seedSpec({
@@ -1825,9 +1939,10 @@ test("applySpecs runs kinds in dependency order and dedups member CFs already ca
     .filter((c) => c.method === "POST")
     .map((c) => (JSON.parse(c.body!) as { name: string }).name);
   assert.deepEqual(postedNames, ["Member", "Solo"]);
+  // The member CF the group pushed is reported once, with its group.
   assert.deepEqual(
     results.map((r) => r.trashId),
-    ["grp-1", "cf-solo", "default", "qs-1"],
+    ["grp-1", "cf-member", "cf-solo", "default", "qs-1"],
   );
 });
 
@@ -1864,6 +1979,228 @@ test("applySpecs contains a service that isn't configured: its specs fail withou
   assert.ok(findApp(cf.id, "")!.appliedAt instanceof Date);
   assert.ok(findApp(naming.id, "")!.appliedAt instanceof Date, "naming, after the failing kind, still applied");
   assert.equal(findApp(sonarrQp.id, ""), undefined, "no TrashApplication row for an instance that doesn't exist");
+});
+
+test("applySpecs reports every member CF a group pushed: a failed optional member fails the apply though its group is ok", async () => {
+  configureRadarr();
+  seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-req", name: "Req", payload: { trash_id: "cf-req", name: "Req" } });
+  const opt = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-opt", name: "Opt", payload: { trash_id: "cf-opt", name: "Opt" } });
+  const group = seedSpec({
+    service: "RADARR", kind: "CUSTOM_FORMAT_GROUP", trashId: "grp-1", name: "G",
+    payload: {
+      trash_id: "grp-1", name: "G",
+      custom_formats: [
+        { name: "Req", trash_id: "cf-req", required: true },
+        { name: "Opt", trash_id: "cf-opt", required: false },
+      ],
+    },
+  });
+  respond = router({
+    [`GET ${RADARR}/api/v3/customformat`]: () => json([]),
+    [`POST ${RADARR}/api/v3/customformat`]: (c) =>
+      (JSON.parse(c.body!) as { name: string }).name === "Opt" ? json({ message: "boom" }, 500) : json({ id: 31 }),
+  });
+
+  // The member is requested too (the cron lists every enabled application): it is answered once.
+  const results = await applySpecs([group.id, opt.id]);
+  assert.deepEqual(
+    results.map((r) => [r.trashId, r.ok, r.error]),
+    [["grp-1", true, undefined], ["cf-req", true, undefined], ["cf-opt", false, "500 — boom"]],
+  );
+  assert.equal(fetchCalls.filter((c) => c.method === "POST").length, 2, "each member pushed once");
+
+  // The cron folds the member's failure into its errors.
+  seedApp(group.id, "");
+  settings.set("trashGuidesEnabled", "true");
+  settings.set("trashLastRefreshAt", new Date().toISOString());
+  const sync = await runTrashSync();
+  assert.ok(sync.errors.includes("apply cf-opt: 500 — boom"), JSON.stringify(sync.errors));
+});
+
+test("a group phase that throws answers for the member CFs it would have pushed", async () => {
+  // Sonarr is not configured, so the member apply under the group throws.
+  const member = seedSpec({ service: "SONARR", kind: "CUSTOM_FORMAT", trashId: "cf-m", name: "M", payload: { trash_id: "cf-m", name: "M" } });
+  const group = seedSpec({
+    service: "SONARR", kind: "CUSTOM_FORMAT_GROUP", trashId: "grp-s", name: "GS",
+    payload: { trash_id: "grp-s", name: "GS", custom_formats: [{ name: "M", trash_id: "cf-m", required: true }] },
+  });
+  const results = await applySpecs([group.id, member.id]);
+  assert.deepEqual(
+    results.map((r) => [r.trashId, r.ok, r.error]),
+    [["grp-s", false, "SONARR is not configured"], ["cf-m", false, "SONARR is not configured"]],
+  );
+  assert.equal(fetchCalls.length, 0);
+});
+
+test("the apply stops between specs when the lock's signal aborts, and returns what it applied", async () => {
+  configureRadarr();
+  const a = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-a", name: "A", payload: { trash_id: "cf-a", name: "A" } });
+  const b = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-b", name: "B", payload: { trash_id: "cf-b", name: "B" } });
+  const naming = seedSpec({
+    service: "RADARR", kind: "NAMING", trashId: "default", name: "TRaSH Standard Naming",
+    payload: { file: { standard: "X" } },
+  });
+  let controller = new AbortController();
+  let nextId = 40;
+  respond = router({
+    [`GET ${RADARR}/api/v3/customformat`]: () => json([]),
+    // The first write is where the lock's work timeout fires.
+    [`POST ${RADARR}/api/v3/customformat`]: () => {
+      controller.abort();
+      return json({ id: ++nextId });
+    },
+    [`PUT ${RADARR}/api/v3/customformat/41`]: () => {
+      controller.abort();
+      return json({ id: 41 });
+    },
+  });
+
+  const results = await applySpecs([a.id, b.id, naming.id], "", { signal: controller.signal });
+  assert.deepEqual(results.map((r) => [r.trashId, r.ok]), [["cf-a", true]]);
+  assert.equal(fetchCalls.filter((c) => c.method === "POST").length, 1);
+  assert.equal(fetchCalls.some((c) => c.url.pathname.includes("config/naming")), false);
+  assert.ok(findApp(a.id, "")!.appliedAt instanceof Date, "what was applied is still recorded");
+  assert.equal(findApp(b.id, ""), undefined);
+
+  // The cron hands its signal to the apply.
+  for (const id of [b.id, naming.id]) seedApp(id, "");
+  settings.set("trashGuidesEnabled", "true");
+  settings.set("trashLastRefreshAt", new Date().toISOString());
+  controller = new AbortController();
+  fetchCalls.length = 0;
+  const sync = await runTrashSync({ signal: controller.signal });
+  assert.deepEqual(sync.applied.map((r) => [r.trashId, r.ok]), [["cf-a", true]]);
+  assert.equal(fetchCalls.filter((c) => c.method !== "GET").length, 1);
+});
+
+test("a failed bookkeeping write still reports the arr write it followed, and its siblings are recorded", async () => {
+  configureRadarr();
+  const a = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-a", name: "A", payload: { trash_id: "cf-a", name: "A" } });
+  const b = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-b", name: "B", payload: { trash_id: "cf-b", name: "B" } });
+  let nextId = 50;
+  respond = router({
+    [`GET ${RADARR}/api/v3/customformat`]: () => json([]),
+    [`POST ${RADARR}/api/v3/customformat`]: () => json({ id: ++nextId }),
+  });
+  appUpsertThrowsFor = a.id;
+
+  const results = await applyCustomFormats("RADARR", [a.id, b.id]);
+  assert.deepEqual(results.map((r) => [r.trashId, r.ok, r.remoteId]), [["cf-a", true, 51], ["cf-b", true, 52]]);
+  assert.equal(findApp(a.id, ""), undefined);
+  assert.equal(findApp(b.id, "")!.remoteId, 52);
+  assert.ok(warns.some((w) => w.includes("[trash] could not record an apply")));
+});
+
+test("a stored payload that fails its validator is reported per spec and never sent", async () => {
+  configureRadarr();
+  const bad = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-bad", name: "Bad", payload: { name: "no trash_id" } });
+  const good = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-good", name: "Good", payload: { trash_id: "cf-good", name: "Good" } });
+  const badSize = seedSpec({
+    service: "RADARR", kind: "QUALITY_SIZE", trashId: "qs-bad",
+    payload: { trash_id: "qs-bad", qualities: [{ quality: "Bluray-1080p", min: "1", max: 2 }] },
+  });
+  const badProfile = seedSpec({
+    service: "RADARR", kind: "QUALITY_PROFILE", trashId: "qp-bad", name: "Bad P",
+    payload: { trash_id: "qp-bad", name: "Bad P", minFormatScore: "high" },
+  });
+  respond = router({
+    ...profileRoutes({ schemaItems: [] }),
+    [`GET ${RADARR}/api/v3/customformat`]: () => json([]),
+    [`POST ${RADARR}/api/v3/customformat`]: () => json({ id: 5 }),
+  });
+
+  const results = await applySpecs([bad.id, good.id, badSize.id, badProfile.id]);
+  const invalid = /^The stored TRaSH definition is malformed/;
+  assert.deepEqual(results.map((r) => [r.trashId, r.ok]), [["cf-bad", false], ["cf-good", true], ["qp-bad", false], ["qs-bad", false]]);
+  for (const r of results.filter((x) => !x.ok)) assert.match(r.error ?? "", invalid);
+  const posts = fetchCalls.filter((c) => c.method !== "GET");
+  assert.deepEqual(posts.map((c) => (JSON.parse(c.body!) as { name: string }).name), ["Good"]);
+  assert.equal(fetchCalls.some((c) => c.url.pathname.includes("qualitydefinition")), false, "nothing valid to size");
+  assert.match(findApp(bad.id, "")!.lastError ?? "", invalid);
+});
+
+test("a malformed arr answer fails the apply with what was wrong, and nothing is written back", async () => {
+  configureRadarr();
+  const cf = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-a", name: "A", payload: { trash_id: "cf-a", name: "A" } });
+  respond = router({ [`GET ${RADARR}/api/v3/customformat`]: () => json([{ id: "7", name: "A" }]) });
+  const cfResults = await applyCustomFormats("RADARR", [cf.id]);
+  assert.deepEqual(cfResults.map((r) => [r.ok, r.error]), [[false, "Could not read existing custom formats from the *arr instance"]]);
+  assert.ok(warns.some((w) => w.includes("[0].id: expected integer, got string")), JSON.stringify(warns));
+
+  const size = seedSpec({
+    service: "RADARR", kind: "QUALITY_SIZE", trashId: "qs-1",
+    payload: { trash_id: "qs-1", qualities: [{ quality: "Bluray-1080p", min: 5, max: 10 }] },
+  });
+  respond = router({ [`GET ${RADARR}/api/v3/qualitydefinition`]: () => json([{ id: 1, title: "Bluray-1080p" }]) });
+  const sizeResults = await applyQualitySizes("RADARR", [size.id]);
+  assert.deepEqual(
+    sizeResults.map((r) => [r.ok, r.error]),
+    [[false, "Unexpected response from /api/v3/qualitydefinition: [0].quality: expected object, got undefined"]],
+  );
+
+  const naming = seedSpec({ service: "RADARR", kind: "NAMING", trashId: "default", name: "N", payload: { file: { standard: "X" } } });
+  respond = router({ [`GET ${RADARR}/api/v3/config/naming`]: () => json([1, 2]) });
+  const namingResults = await applyNaming("RADARR", [naming.id]);
+  assert.equal(namingResults[0].ok, false);
+  assert.match(namingResults[0].error ?? "", /^Unexpected response from \/api\/v3\/config\/naming: expected object, got array/);
+
+  const qp = seedSpec({
+    service: "RADARR", kind: "QUALITY_PROFILE", trashId: "qp-1", name: "P",
+    payload: { trash_id: "qp-1", name: "P", items: [], formatItems: {} },
+  });
+  respond = router(profileRoutes({ schemaItems: [{ quality: { id: "3", name: "WEBDL-1080p" }, allowed: false }] }));
+  const profileResults = await applyQualityProfiles("RADARR", [qp.id]);
+  assert.deepEqual(
+    profileResults.map((r) => [r.ok, r.error]),
+    [[false, "Unexpected response from /api/v3/qualityprofile/schema items: [0].quality.id: expected integer, got string"]],
+  );
+  assert.equal(fetchCalls.some((c) => c.method === "PUT" || c.method === "POST"), false);
+});
+
+test("an arr error that quotes a credential is masked before it is stored or reported", async () => {
+  configureRadarr();
+  const cf = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-a", name: "A", payload: { trash_id: "cf-a", name: "A" } });
+  respond = router({
+    [`GET ${RADARR}/api/v3/customformat`]: () => json([]),
+    [`POST ${RADARR}/api/v3/customformat`]: () =>
+      json({ message: "Indexer failed: https://idx.example/api?t=search&apikey=SECRET1234567890" }, 400),
+  });
+  const [result] = await applyCustomFormats("RADARR", [cf.id]);
+  assert.equal(result.ok, false);
+  const error = result.error ?? "";
+  assert.ok(!error.includes("SECRET1234567890"), error);
+  assert.match(error, /^400 — Indexer failed: .*apikey=••••••••/);
+  assert.equal(findApp(cf.id, "")!.lastError, result.error);
+});
+
+test("upsertRemote PUTs to the resolved id even when the body carries an id of its own", async () => {
+  configureRadarr();
+  respond = router({ [`PUT ${RADARR}/api/v3/qualityprofile/7`]: () => json({ id: 7 }) });
+  const out = await upsertRemote({ url: RADARR, apiKey: "radarr-key" }, "/api/v3/qualityprofile", 7, { id: 0, name: "P" });
+  assert.deepEqual(out, { remoteId: 7, recreated: false });
+  const put = fetchCalls.find((c) => c.method === "PUT")!;
+  assert.deepEqual(JSON.parse(put.body!), { id: 7, name: "P" });
+});
+
+test("a profile's language falls back to Radarr's own pseudo-ids when the arr's list is unavailable", () => {
+  // Any = -1 and Original = -2 in Radarr's Language.cs; swapped, "Any" would turn the filter off.
+  assert.deepEqual(resolveLanguage("any", []), { id: -1, name: "Any" });
+  assert.deepEqual(resolveLanguage("Original", []), { id: -2, name: "Original" });
+  assert.deepEqual(resolveLanguage(undefined, []), { id: -2, name: "Original" });
+  assert.equal(resolveLanguage("French", []), undefined);
+  const list = [{ id: 0, name: "Unknown" }, { id: 2, name: "French" }, { id: -1, name: "Any" }];
+  assert.deepEqual(resolveLanguage("french", list), { id: 2, name: "French" });
+  assert.deepEqual(resolveLanguage("ANY", list), { id: -1, name: "Any" });
+});
+
+test("buildProfileItems sends a TRaSH group with one known quality as that quality, named for the cutoff both ways", () => {
+  const { items, idByName } = buildProfileItems(
+    [{ quality: { id: 3, name: "WEBDL-1080p" }, items: [] }],
+    [{ name: "WEB 1080p", allowed: true, items: ["WEBDL-1080p", "Not In The Schema"] }],
+  );
+  assert.deepEqual(items, [{ quality: { id: 3, name: "WEBDL-1080p" }, items: [], allowed: true }]);
+  assert.equal(idByName.get("WEB 1080p"), 3);
+  assert.equal(idByName.get("WEBDL-1080p"), 3);
 });
 
 // ── runTrashSync ────────────────────────────────────────────────────────────
@@ -1964,7 +2301,7 @@ test("runTrashSync fans out per service and per configured instance, honors kind
   assert.ok(findApp(rcf.id, "anime")!.appliedAt instanceof Date);
 });
 
-test("a per-service refresh throw is contained: the other service still refreshes and partial success stamps the gate", async () => {
+test("a per-service refresh throw is contained: the other service still refreshes, and the gate stays open so the failed one retries next run", async () => {
   // The tree fetch is shared now, so a per-service failure comes from the
   // service's own work after it — here the RADARR spec-store read throws.
   settings.set("trashGuidesEnabled", "true"); // no trashLastRefreshAt → refresh due
@@ -1980,7 +2317,13 @@ test("a per-service refresh throw is contained: the other service still refreshe
     result.errors.some((e) => /^RADARR refresh: trashSpec store exploded for RADARR/.test(e)),
     `expected a namespaced RADARR refresh error, got: ${JSON.stringify(result.errors)}`,
   );
-  // Partial success is deliberate: the gate records "we recently tried".
+  // Stamping here would hold the failed service off for the cadence window.
+  assert.equal(settings.has("trashLastRefreshAt"), false);
+
+  // The next run refreshes again, and once both services ran it stamps.
+  failSpecFindManyForService = null;
+  const retry = await runTrashSync();
+  assert.deepEqual(retry.refreshed.map((r) => r.service), ["RADARR", "SONARR"]);
   assert.ok(settings.has("trashLastRefreshAt"));
 });
 

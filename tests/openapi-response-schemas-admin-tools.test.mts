@@ -6,7 +6,7 @@
 
 import {
   getSpec, specOp, responseSchema, keysOf, handlerSource, routeSource, libSource,
-  interfaceFields, prismaModelFields, type SchemaNode,
+  interfaceFields, prismaModelFields, jsonBodyKeys, type SchemaNode,
 } from "./_openapi-spec.mts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -100,16 +100,28 @@ test("the audit-log export documents its CSV columns and its JSON rows, as the h
   const op = await specOp("/admin/audit-log/export", "get");
   const csv = op.responses["200"].content?.["text/csv"]?.schema;
   const documented = /`(id,[\w,]+)`/.exec(csv?.description ?? "")?.[1];
-  const written = /await write\("(id,[\w,]+)\\n"\)/.exec(handlerSource("/admin/audit-log/export", "get"))?.[1];
+  // The rows are written by the route's own pump (writeExport), outside the GET slice.
+  const written = /await write\("(id,[\w,]+)\\n"\)/.exec(routeSource("/admin/audit-log/export"))?.[1];
   assert.ok(documented && written);
   assert.equal(documented, written);
   const json = op.responses["200"].content?.["application/json"]?.schema;
   assert.equal(json?.type, "array");
   // Every row is the whole prisma row (JSON.stringify(log)), the same row the paged GET lists.
-  assert.match(handlerSource("/admin/audit-log/export", "get"), /JSON\.stringify\(log\)/);
+  assert.match(routeSource("/admin/audit-log/export"), /JSON\.stringify\(log\)/);
   assert.deepEqual(keysOf(json?.items), prismaModelFields("AuditLog", ["user"]));
   const paged = prop(await responseSchema("/admin/audit-log", "get", "200"), "logs", "[]");
   assert.deepEqual(json?.items, paged);
+});
+
+test("DELETE /admin/audit-log documents every count its handler answers, and shares the cron's descriptions", async () => {
+  const scrub = await responseSchema("/admin/audit-log", "delete", "200");
+  const answered = jsonBodyKeys(handlerSource("/admin/audit-log", "delete"));
+  assert.deepEqual(answered, [keysOf(scrub)]);
+  assert.deepEqual([...(scrub.required ?? [])].sort(), keysOf(scrub));
+  const cron = (await responseSchema("/cron/scrub-audit-pii", "post", "200")).oneOf?.[0];
+  assert.ok(cron, "the cron's run answer");
+  for (const k of ["scrubbed", "adminDetailsScrubbed", "cutoff"]) assert.deepEqual(scrub.properties?.[k], cron.properties?.[k], k);
+  assert.match((await specOp("/admin/audit-log", "delete")).description ?? "", /target user's name/);
 });
 
 test("the backup export is an octet-stream and the restore's two 200 bodies are importResultResponse's", async () => {
@@ -139,15 +151,18 @@ test("the arr-state dump documents every key it sends, its instance rows and the
   const top = bodyKeys(src).at(-1);
   assert.deepEqual(keysOf(schema), top);
   assert.deepEqual([...(schema.required ?? [])].sort(), top);
-  // The per-instance row the mapLimit callback returns.
-  assertSomeLiteral(src, keysOf(prop(schema, "instances", "[]")), "instances[]");
+  // The per-instance row (instanceState's InstanceState) and the tvdb section
+  // are built by the route's own helpers, outside the GET slice.
+  const route = routeSource("/admin/debug/arr-state");
+  assert.deepEqual(keysOf(prop(schema, "instances", "[]")), interfaceFields(route, "InstanceState"));
+  assert.match(src, /const instances = await mapLimit\(instanceConfigs, 4, \(inst\) => instanceState\(inst, type, tmdbId\)\);/);
   // The wanted-table row is the stored prisma row; both models share its columns.
   const wanted = keysOf(prop(schema, "cacheTable", "row"));
   assert.deepEqual(wanted, prismaModelFields("RadarrWantedItem"));
   assert.deepEqual(wanted, prismaModelFields("SonarrWantedItem"));
   const select = /mediaRequest\.findMany\(\{[\s\S]*?select: \{([^}]*)\}/.exec(src)?.[1] ?? "";
   assert.deepEqual(keysOf(prop(schema, "mediaRequests", "[]")), [...select.matchAll(/(\w+): true/g)].map((m) => m[1]).sort());
-  assertSomeLiteral(src, keysOf(prop(schema, "tvdbInfo", "cachedMappingRow")), "tvdbInfo.cachedMappingRow");
+  assertSomeLiteral(route, keysOf(prop(schema, "tvdbInfo", "cachedMappingRow")), "tvdbInfo.cachedMappingRow");
 });
 
 test("the ratings-state dump documents its keys, the MDBList budget and the cache rows — and only whether a key is set", async () => {
@@ -250,7 +265,9 @@ test("fix-match documents its synchronous answer, the 202, the job status and th
 });
 
 test("fix-match candidates and file-info document every field, and their paths as the caller's view (file name for a delegate)", async () => {
-  const candidatesSrc = routeSource("/admin/fix-match/candidates");
+  // The picker's types live with the code that builds them; the route re-exports them.
+  assert.match(routeSource("/admin/fix-match/candidates"), /export type \{ CandidateMatch, CandidatesResponse, PlexCandidate \} from "@\/lib\/fix-match-candidates";/);
+  const candidatesSrc = libSource("fix-match-candidates.ts");
   const candidates = await responseSchema("/admin/fix-match/candidates", "get", "200");
   assert.deepEqual(keysOf(candidates), interfaceFields(candidatesSrc, "CandidatesResponse"));
   const item = prop(candidates, "candidates", "[]");
@@ -280,10 +297,11 @@ test("fix-match candidates and file-info document every field, and their paths a
   }
   assert.equal(libraryPathFor(Permission.MANAGE_ISSUES, "/mnt/media/Movies/Dune (2021)/Dune.mkv"), "Dune.mkv");
   assert.equal(libraryPathFor(Permission.ADMIN, "/mnt/media/Movies/Dune (2021)/Dune.mkv"), "/mnt/media/Movies/Dune (2021)/Dune.mkv");
-  const candHandler = handlerSource("/admin/fix-match/candidates", "get");
-  assert.equal([...candHandler.matchAll(/(plex|jellyfin)FilePath: libraryPathFor\(/g)].length, 4, "the Jellyfin answer and viewOf both project the two paths");
-  assert.match(candHandler, /if \(cached\) return NextResponse\.json\(viewOf\(cached\)\);/);
-  assert.match(candHandler, /return NextResponse\.json\(viewOf\(responseBody\)\);/);
+  // The two modes are the route's own helpers (jellyfinConfirmation, plexCandidates).
+  const candRoute = routeSource("/admin/fix-match/candidates");
+  assert.equal([...candRoute.matchAll(/(plex|jellyfin)FilePath: libraryPathFor\((perms|q), /g)].length, 4, "the Jellyfin answer and viewOf both project the two paths");
+  assert.match(candRoute, /if \(cached\) return NextResponse\.json\(viewOf\(cached\)\);/);
+  assert.match(candRoute, /return NextResponse\.json\(viewOf\(responseBody\)\);/);
   const fileInfoHandler = handlerSource("/admin/fix-match/file-info", "get");
   assert.match(fileInfoHandler, /plexFilePath: +libraryPathFor\(perms, plexItem\?\.filePath\)/);
   assert.match(fileInfoHandler, /jellyfinFilePath: libraryPathFor\(perms, jellyfinItem\?\.filePath\)/);

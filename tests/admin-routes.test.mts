@@ -346,6 +346,21 @@ const fakePrisma = {
   trashApplication: {
     findUnique: async (args: { where: { id: string } }) => trashAppsById.get(args.where.id) ?? null,
     deleteMany: async (args: unknown) => { txOps.push({ op: "trashApplication.deleteMany", args }); return { count: trashDeleteCount }; },
+    // The routes write with update/delete + include and read P2025 as "gone";
+    // trashDeleteCount 0 stands for a row deleted concurrently.
+    delete: async (args: { where: { id: string } }) => {
+      txOps.push({ op: "trashApplication.delete", args });
+      const row = trashAppsById.get(args.where.id);
+      if (!row || trashDeleteCount === 0) throw Object.assign(new Error("Record to delete does not exist."), { name: "PrismaClientKnownRequestError", code: "P2025" });
+      trashAppsById.delete(args.where.id);
+      return row;
+    },
+    update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+      txOps.push({ op: "trashApplication.update", args });
+      const row = trashAppsById.get(args.where.id);
+      if (!row) throw Object.assign(new Error("Record to update not found."), { name: "PrismaClientKnownRequestError", code: "P2025" });
+      return { ...row, ...args.data };
+    },
   },
   auditLog: {
     create: async (args: { data: Record<string, unknown> }) => {
@@ -389,7 +404,7 @@ const { shouldForceDbCheck } = await import("../src/lib/session-revocation.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
 const { purgedEmailFor, USER_ROLE_LOCK_SQL } = await import("../src/lib/account-lifecycle.ts");
 
-const { BATCH_TX_TIMEOUT } = await import("../src/lib/cron-auth.ts");
+const { BATCH_TX_TIMEOUT } = await import("../src/lib/batch-write.ts");
 const { DELETE: clearCache } = await import("../src/app/api/admin/clear-cache/route.ts");
 const { DELETE: playHistoryDelete } = await import("../src/app/api/play-history/[id]/route.ts");
 const { PATCH: userPatch, DELETE: userDelete } = await import("../src/app/api/admin/users/[id]/route.ts");
@@ -398,7 +413,8 @@ const { POST: userReactivate } = await import("../src/app/api/admin/users/[id]/r
 const { POST: userPurge } = await import("../src/app/api/admin/users/[id]/purge/route.ts");
 const { DELETE: userMfaReset } = await import("../src/app/api/admin/users/[id]/mfa/route.ts");
 const { PATCH: serverUserPatch } = await import("../src/app/api/admin/server-users/[id]/route.ts");
-const { DELETE: trashDelete } = await import("../src/app/api/admin/trash-guides/applications/[id]/route.ts");
+const { DELETE: trashDelete, PATCH: trashPatch } = await import("../src/app/api/admin/trash-guides/applications/[id]/route.ts");
+const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 const { POST: plexTerminate } = await import("../src/app/api/admin/play-history/terminate-session/route.ts");
 const { POST: jellyfinTerminate } = await import("../src/app/api/admin/play-history/terminate-jellyfin-session/route.ts");
 const { POST: dbImport } = await import("../src/app/api/admin/backup/db-import/route.ts");
@@ -749,6 +765,57 @@ test("Jellyfin terminate: happy path → 200 and one JELLYFIN_SESSION_TERMINATE 
   assert.equal(auditRows.length, 1);
   assert.equal(auditRows[0].action, "JELLYFIN_SESSION_TERMINATE");
 });
+
+test("Plex terminate: an unreachable server answers 502 with the coarse kind only, and logs the full error", async () => {
+  const admin = await mintSession("ADMIN");
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-token-1");
+  respond = () => {
+    throw new Error("connect ECONNREFUSED 10.9.8.7:32400");
+  };
+  const res = await plexTerminate(req("http://localhost:3000/api/admin/play-history/terminate-session", { method: "POST", headers: { ...admin.header, "content-type": "application/json" }, body: JSON.stringify({ sessionKey: "77" }) }), undefined);
+  assert.equal(res.status, 502);
+  const { error } = await res.json();
+  assert.ok(!String(error).includes("10.9.8.7"), `the upstream address must not reach the client: ${error}`);
+  assert.ok(!String(error).includes("ECONNREFUSED"), `the raw error text must not reach the client: ${error}`);
+  assert.ok(errors.some((e) => e.includes("[terminate-session]")), "the full error is logged for the operator");
+  await flush();
+  assert.equal(auditAttempts.length, 0);
+});
+
+test("Jellyfin terminate: a failed Stop answers 502 with the coarse kind only, and logs the full error", async () => {
+  const admin = await mintSession("ADMIN");
+  settings.set("jellyfinUrl", JF_BASE);
+  settings.set("jellyfinApiKey", "jf-key-1");
+  respond = (url) => {
+    if (url.pathname === "/Sessions") return okJson([{ Id: "jf-uuid", PlaySessionId: "jf-play-key", NowPlayingItem: { Id: "i1", Name: "Arrival", Type: "Movie" }, PlayState: {}, UserName: "louise" }]);
+    throw new Error("socket hang up at 10.9.8.7:8096");
+  };
+  const res = await jellyfinTerminate(req("http://localhost:3000/api/admin/play-history/terminate-jellyfin-session", { method: "POST", headers: { ...admin.header, "content-type": "application/json" }, body: JSON.stringify({ sessionKey: "jf-play-key" }) }), undefined);
+  assert.equal(res.status, 502);
+  const { error } = await res.json();
+  assert.ok(!String(error).includes("10.9.8.7"), `the upstream address must not reach the client: ${error}`);
+  assert.ok(errors.some((e) => e.includes("[terminate-jellyfin-session]")), "the full error is logged for the operator");
+});
+
+for (const [label, handler, path] of [
+  ["Plex", () => plexTerminate, "terminate-session"],
+  ["Jellyfin", () => jellyfinTerminate, "terminate-jellyfin-session"],
+] as const) {
+  test(`${label} terminate: an over-long or control-character sessionKey is 400 before any fetch`, async () => {
+    const admin = await mintSession("ADMIN");
+    settings.set("plexServerUrl", PLEX_BASE);
+    settings.set("plexAdminToken", "plex-token-1");
+    settings.set("jellyfinUrl", JF_BASE);
+    settings.set("jellyfinApiKey", "jf-key-1");
+    for (const sessionKey of ["k".repeat(257), "77\n78"]) {
+      const res = await handler()(req(`http://localhost:3000/api/admin/play-history/${path}`, { method: "POST", headers: { ...admin.header, "content-type": "application/json" }, body: JSON.stringify({ sessionKey }) }), undefined);
+      assert.equal(res.status, 400, JSON.stringify(sessionKey));
+      assert.equal((await res.json()).error, "sessionKey is invalid");
+    }
+    assert.equal(fetchCalls.length, 0);
+  });
+}
 
 test("Jellyfin terminate: server not configured → 400 before any fetch or audit", async () => {
   const admin = await mintSession("ADMIN");
@@ -1198,6 +1265,22 @@ test("delegate policy: a MANAGE_USERS delegate still sets a member's Jellyfin do
   assert.equal((serverUsersById.get(msuId) as ServerUserRow & { downloadsEnabled?: boolean }).downloadsEnabled, false);
 });
 
+test("a single user's download-policy change is audited with its before and after", async () => {
+  const delegate = await mintSession("USER", Permission.MANAGE_USERS);
+  const msuId = seedServerUser({ source: "jellyfin" });
+  (serverUsersById.get(msuId) as ServerUserRow & { downloadsEnabled?: boolean }).downloadsEnabled = true;
+  const res = await serverUserPatch(linkReq(msuId, { downloadsEnabled: false }, delegate.header), ctxFor(msuId));
+  assert.equal(res.status, 200);
+  await flush();
+  const row = auditRows.find((r) => r.target === `mediaServerUser:${msuId}`);
+  assert.ok(row, "the policy change must leave an audit row");
+  assert.equal(row.action, "SERVER_USERS_BULK");
+  const details = JSON.parse(row.details as string) as Record<string, unknown>;
+  assert.equal(details.before, true);
+  assert.equal(details.downloadsEnabled, false);
+  assert.equal(details.targetCount, 1);
+});
+
 test("an ADMIN may still link anything, including to themselves and the server owner's identity", async () => {
   const admin = await mintSession("ADMIN");
   const owner = seedServerUser({ source: "plex", isServerAdmin: true });
@@ -1359,6 +1442,56 @@ test("field PATCH: each branch answers { id, <field> }, writes once, audits once
   }
 });
 
+test("field PATCH: a body naming two fields is refused whole — nothing written, nothing audited", async () => {
+  const admin = await mintSession("ADMIN", Permission.ADMIN);
+  const targetId = seedUser("USER");
+  txOps = [];
+  auditRows.length = 0;
+  for (const body of [{ mediaServer: "plex", role: "ADMIN" }, { movieQuotaLimit: 5, movieQuotaDays: 30 }, { notifyOnApproved: false, emailOnApproved: false }]) {
+    const res = await fieldPatch(admin.header, targetId, body);
+    assert.equal(res.status, 400, JSON.stringify(body));
+    assert.match((await res.json()).error, /one field per request/);
+  }
+  assert.equal(txOps.filter((o) => o.op === "user.update(top)").length, 0);
+  await flush();
+  assert.equal(auditRows.length, 0);
+});
+
+test("field PATCH: a quota window of 0 days is stored as no value — both mean the 7-day default", async () => {
+  const admin = await mintSession("ADMIN", Permission.ADMIN);
+  const targetId = seedUser("USER");
+  txOps = [];
+  const res = await fieldPatch(admin.header, targetId, { movieQuotaDays: 0 });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { id: targetId, movieQuotaDays: null });
+  const write = txOps.find((o) => o.op === "user.update(top)");
+  assert.deepEqual((write?.args as { data: unknown }).data, { movieQuotaDays: null });
+});
+
+test("field PATCH: the grant-map audits record what the map held BEFORE, so a removed grant is visible", async () => {
+  const admin = await mintSession("ADMIN", Permission.ADMIN);
+  const targetId = seedUser("USER");
+  usersById.get(targetId)!.instanceGrants = { anime: { request: true } };
+  usersById.get(targetId)!.mediaServerGrants = { plex: { remote: { view: true } } };
+  auditRows.length = 0;
+  assert.equal((await fieldPatch(admin.header, targetId, { instanceGrants: {} })).status, 200);
+  assert.equal((await fieldPatch(admin.header, targetId, { mediaServerGrants: {} })).status, 200);
+  await flush();
+  const [instance, media] = auditRows.map((r) => JSON.parse(r.details as string) as Record<string, unknown>);
+  assert.deepEqual(instance.before, { anime: { request: true } });
+  assert.deepEqual(media.before, { plex: { remote: { view: true } } });
+});
+
+test("field PATCH: a delegate may not edit a role-USER account that carries the ADMIN bit", async () => {
+  const delegate = await mintSession("USER", Permission.MANAGE_USERS);
+  const targetId = seedUser("USER");
+  usersById.get(targetId)!.permissions = Permission.ADMIN;
+  txOps = [];
+  const res = await fieldPatch(delegate.header, targetId, { notifyOnApproved: false });
+  assert.equal(res.status, 403);
+  assert.equal(txOps.filter((o) => o.op === "user.update(top)").length, 0);
+});
+
 test("field PATCH: a row deleted between a branch's read and its write is 404, never a P2025 500, and audits nothing", async () => {
   topUserUpdateError = Object.assign(new Error("Record to update not found."), { name: "PrismaClientKnownRequestError", code: "P2025" });
   for (const c of FIELD_BRANCHES) {
@@ -1376,10 +1509,40 @@ test("field PATCH: a row deleted between a branch's read and its write is 404, n
 // Concurrent-delete race → 404 not 500 (trash-application delete)
 // ════════════════════════════════════════════════════════════════════════════
 
-test("trash-application delete: a concurrent delete (deleteMany count 0) → 404, not a 500", async () => {
+function enableTrash(on: boolean): void {
+  if (on) settings.set("trashGuidesEnabled", "true");
+  else settings.delete("trashGuidesEnabled");
+  invalidateFeatureFlagCache();
+}
+
+test("trash-application: both verbs answer 403 while the TRaSH integration is off, and change nothing", async () => {
   const admin = await mintSession("ADMIN");
+  enableTrash(false);
+  trashAppsById.set("ta0", { id: "ta0", trashSpec: { trashId: "off", kind: "cf" } });
+  const del = await trashDelete(req("http://localhost:3000/api/admin/trash-guides/applications/ta0", { method: "DELETE", headers: admin.header }), ctxFor("ta0"));
+  const patch = await trashPatch(req("http://localhost:3000/api/admin/trash-guides/applications/ta0", { method: "PATCH", headers: { ...admin.header, "content-type": "application/json" }, body: JSON.stringify({ enabled: false }) }), ctxFor("ta0"));
+  assert.equal(del.status, 403);
+  assert.equal(patch.status, 403);
+  assert.ok(trashAppsById.has("ta0"));
+  assert.equal(txOps.filter((o) => o.op.startsWith("trashApplication.")).length, 0);
+});
+
+test("trash-application toggle: an unknown id is a 404 from the write itself, and a known one is audited", async () => {
+  const admin = await mintSession("ADMIN");
+  enableTrash(true);
+  const patch = (id: string) => trashPatch(req(`http://localhost:3000/api/admin/trash-guides/applications/${id}`, { method: "PATCH", headers: { ...admin.header, "content-type": "application/json" }, body: JSON.stringify({ enabled: false }) }), ctxFor(id));
+  assert.equal((await patch("nope")).status, 404);
+  trashAppsById.set("ta3", { id: "ta3", trashSpec: { trashId: "t3", kind: "cf" } });
+  assert.equal((await patch("ta3")).status, 200);
+  await flush();
+  assert.equal(auditRows.at(-1)?.target, "trash:application-toggle");
+});
+
+test("trash-application delete: a concurrent delete (P2025) → 404, not a 500", async () => {
+  const admin = await mintSession("ADMIN");
+  enableTrash(true);
   trashAppsById.set("ta1", { id: "ta1", trashSpec: { trashId: "abc", kind: "quality" } });
-  trashDeleteCount = 0; // the row vanished between findUnique and deleteMany
+  trashDeleteCount = 0; // the row vanished before the delete reached it
   const res = await trashDelete(req("http://localhost:3000/api/admin/trash-guides/applications/ta1", { method: "DELETE", headers: admin.header }), ctxFor("ta1"));
   assert.equal(res.status, 404, "a lost race must map to 404, never surface an unhandled P2025 as 500");
   await flush();
@@ -1388,6 +1551,7 @@ test("trash-application delete: a concurrent delete (deleteMany count 0) → 404
 
 test("trash-application delete: happy path → 200 and an audit row (this route awaits logAudit inside the request)", async () => {
   const admin = await mintSession("ADMIN");
+  enableTrash(true);
   trashAppsById.set("ta2", { id: "ta2", trashSpec: { trashId: "xyz", kind: "cf" } });
   trashDeleteCount = 1;
   const res = await trashDelete(req("http://localhost:3000/api/admin/trash-guides/applications/ta2", { method: "DELETE", headers: admin.header }), ctxFor("ta2"));
@@ -1615,6 +1779,24 @@ const patchGrants = (id: string, header: Record<string, string>, body: string) =
     }),
     ctxFor(id),
   );
+
+test("account actions judge an ADMIN target by role OR the ADMIN bit before any work, and answer a delegate's burst with Retry-After", async () => {
+  const delegate = await mintSession("USER", Permission.MANAGE_USERS);
+  const bitAdmin = seedUser("USER");
+  usersById.get(bitAdmin)!.permissions = Permission.ADMIN;
+  usersById.get(bitAdmin)!.deactivatedAt = new Date();
+  const post = (path: string) => req(`http://localhost:3000/api/admin/users/${bitAdmin}/${path}`, { method: "POST", headers: delegate.header });
+  assert.equal((await sessionsList(req(`http://localhost:3000/api/admin/users/${bitAdmin}/sessions`, { method: "GET", headers: delegate.header }), ctxFor(bitAdmin))).status, 403);
+  assert.equal((await userReactivate(post("reactivate"), ctxFor(bitAdmin))).status, 403);
+  assert.equal((await userPurge(post("purge"), ctxFor(bitAdmin))).status, 403);
+  assert.equal(txOps.length, 0, "refused before any transaction");
+
+  // The purge limiter is 5 a minute per caller; the sixth answers with Retry-After.
+  let limited: Response | undefined;
+  for (let i = 0; i < 6; i++) limited = await userPurge(post("purge"), ctxFor(bitAdmin));
+  assert.equal(limited!.status, 429);
+  assert.equal(limited!.headers.get("Retry-After"), "60");
+});
 
 test("mediaServerGrants: the map is normalized, written, echoed and audited — and a plex slug never leaks into the identically-named jellyfin one", async () => {
   const admin = await mintSession("ADMIN", 1n);

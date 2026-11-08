@@ -155,17 +155,32 @@ const AUTH_SCHEME = /\b([Bb]earer|Basic)\s+[A-Za-z0-9._~+/=-]+/g;
 const URL_USERINFO = /(\/\/)(?=[^/\s?#]*:)[^/\s?#]*@/g;
 const PATH_TOKEN = /([/.])[A-Za-z0-9_-]{32,}(?=[/?#\s"'<>.,;\])}]|$)/g;
 const TORRENTLEECH = /(torrentleech\.org\/(?:rss\/download\/\d+\/)?)(?!rss\b)[A-Za-z0-9]{10,}/gi;
+const maskPair = (_m: string, q: string, name: string, sep: string, vq: string) => `${q}${name}${q}${sep}${vq}••••••••${vq}`;
+
+// The passes, IN ORDER — each sees what the one before it wrote (a quoted pair
+// is masked before the unquoted rule could stop at its first space). Wider
+// than strictly needed on purpose: any `…key=` name, IPTorrents' bare `r=`/`tp=`
+// and every 32+ character path segment (an info hash too) are masked, because
+// a credential relayed is a leak (guardrail 5e) and a hash masked is not.
+// tests/arr-parse-mask.test.mts holds a case table per pass.
+type MaskPass = { name: string; pattern: RegExp; replace: string | ((substring: string, ...args: string[]) => string) };
+export const MASK_PASSES: readonly MaskPass[] = [
+  { name: "query parameter", pattern: SECRET_PARAM, replace: (_m, name, eq) => `${name}${eq}••••••••` },
+  { name: "quoted pair", pattern: QUOTED_PAIR, replace: maskPair },
+  { name: "unquoted pair", pattern: SECRET_PAIR, replace: maskPair },
+  { name: "Authorization header", pattern: AUTH_HEADER, replace: "$1••••••••" },
+  { name: "auth scheme", pattern: AUTH_SCHEME, replace: "$1 ••••••••" },
+  { name: "URL userinfo", pattern: URL_USERINFO, replace: "$1••••••••@" },
+  { name: "path token", pattern: PATH_TOKEN, replace: "$1••••••••" },
+  { name: "TorrentLeech key", pattern: TORRENTLEECH, replace: "$1••••••••" },
+];
+
 export function maskSecrets(s: string): string {
-  const pair = (_m: string, q: string, name: string, sep: string, vq: string) => `${q}${name}${q}${sep}${vq}••••••••${vq}`;
-  return s
-    .replace(SECRET_PARAM, (_m, name: string, eq: string) => `${name}${eq}••••••••`)
-    .replace(QUOTED_PAIR, pair)
-    .replace(SECRET_PAIR, pair)
-    .replace(AUTH_HEADER, "$1••••••••")
-    .replace(AUTH_SCHEME, "$1 ••••••••")
-    .replace(URL_USERINFO, "$1••••••••@")
-    .replace(PATH_TOKEN, "$1••••••••")
-    .replace(TORRENTLEECH, "$1••••••••");
+  let out = s;
+  for (const pass of MASK_PASSES) {
+    out = typeof pass.replace === "string" ? out.replace(pass.pattern, pass.replace) : out.replace(pass.pattern, pass.replace);
+  }
+  return out;
 }
 
 // safeMessage masks only a bounded prefix: its answer is cut to `max` anyway,

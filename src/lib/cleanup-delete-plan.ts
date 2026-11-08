@@ -136,13 +136,17 @@ export function applyLocalProtection<T extends { rows: ProtectRow[]; protected: 
     return { ...r, excludedBy, candidate: excludedBy.length === 0 };
   });
   const rest = report.protected.filter((p) => !same(p));
-  const entry = { tmdbId: title.tmdbId, mediaType: title.mediaType, title: title.title, reason: null, createdAt } as T["protected"][number];
   const listed = rest.length !== report.protected.length;
   const delta = on ? (listed ? 0 : 1) : listed ? -1 : 0;
+  // Protecting a title already listed keeps its entry as the server holds it
+  // (its reason and date); only a new one is made up here. The cast: the entry
+  // carries exactly ProtectEntry's fields, which is what the reports hold.
+  const added = () =>
+    [{ tmdbId: title.tmdbId, mediaType: title.mediaType, title: title.title, reason: null, createdAt } as T["protected"][number], ...rest];
   return {
     ...report,
     rows,
-    protected: on ? [entry, ...rest] : rest,
+    protected: on ? (listed ? report.protected : added()) : rest,
     ...(typeof report.protectedTotal === "number" ? { protectedTotal: Math.max(0, report.protectedTotal + delta) } : {}),
   };
 }

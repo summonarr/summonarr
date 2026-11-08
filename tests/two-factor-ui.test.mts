@@ -9,6 +9,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
+import {
+  readCreationOptions,
+  readRecoveryCodes,
+  readTotpSetup,
+  readTwoFactorState,
+} from "../src/components/profile/two-factor-data.ts";
+
 const src = readFileSync(new URL("../src/components/profile/two-factor.tsx", import.meta.url), "utf8");
 
 // Every `const name = (...) => run(…)` / `stepUpRun(…)` handler body.
@@ -36,10 +43,16 @@ test("every two-factor change goes through the one step-up prelude, which sends 
   const prelude = src.slice(start, src.indexOf("\n  });\n", start));
   const needPw = prelude.indexOf("if (needPassword()) return;");
   const factor = prelude.indexOf("await secondFactorBody()");
-  const clearCode = prelude.indexOf('setStepUpCode("")');
   const send = prelude.indexOf("await fn({ password, ...sf })");
-  assert.ok(needPw > 0 && factor > needPw && clearCode > factor && send > clearCode,
-    "password, then second factor, then the single-use code is cleared, then the request");
+  assert.ok(needPw > 0 && factor > needPw && send > factor,
+    "password, then second factor, then the request");
+  // The second factor comes from the shared hook, which clears the single-use
+  // code as it reads it, before any request is sent.
+  const body = src.slice(src.indexOf("async function secondFactorBody()"), src.indexOf("const stepUpCall = ("));
+  assert.match(body, /if \(!stepUpFactor\.needsSecondFactor\) return \{\};\s*const r = await stepUpFactor\.secondFactorProof\(\);/);
+  const hook = readFileSync(new URL("../src/components/profile/use-second-factor-step-up.ts", import.meta.url), "utf8");
+  assert.match(hook, /failedMessage: \(\) => failedMessage,\s*\}\);\s*setStepUpCode\(""\);\s*return r;/);
+  assert.doesNotMatch(src, /buildSecondFactor/, "no private copy of the step-up flow");
   // No handler re-implements the prelude.
   for (const [name, h] of all) {
     assert.ok(!h.body.includes("secondFactorBody()"), `${name} uses the shared prelude`);
@@ -63,26 +76,79 @@ test("every two-factor handler that sends the account password clears it once th
 });
 
 test("enrolled passkeys stay listed (rename/remove) when WebAuthn is unavailable; only the add row is gated", () => {
-  const section = src.slice(src.indexOf("{/* Passkeys */}"), src.indexOf("{state.enabled && (", src.indexOf("{/* Passkeys */}")));
+  const section = src.slice(src.indexOf("function PasskeySection("), src.indexOf("function PasskeyRow("));
   const list = section.indexOf("{state.passkeys.map((p) =>");
   const gate = section.indexOf("{state.webauthnAvailable ? (");
   assert.ok(list > 0 && gate > list, "the passkey list renders before, and outside, the WebAuthn conditional");
-  assert.ok(!section.slice(0, list).includes("webauthnAvailable"), "nothing gates the list on WebAuthn");
-  const addRow = section.indexOf("onClick={addPasskey}");
+  const jsx = section.slice(section.indexOf("return ("));
+  assert.ok(!jsx.slice(0, jsx.indexOf("{state.passkeys.map((p) =>")).includes("webauthnAvailable"), "nothing gates the list on WebAuthn");
+  const addRow = section.indexOf("onClick={onAdd}");
   assert.ok(addRow > gate, "adding a passkey stays behind the WebAuthn gate");
+  assert.match(src, /<PasskeySection[\s\S]*?onAdd=\{addPasskey\}/);
 });
 
 test("a regenerate answer without the new codes is reported, not rendered as an empty list", () => {
   const body = handlers().get("regenerateCodes")?.body ?? "";
-  const guard = body.indexOf("if (!Array.isArray(r.data.recoveryCodes))");
-  const show = body.indexOf("setCodes(r.data.recoveryCodes");
-  assert.ok(guard > 0 && show > guard);
+  const guard = body.indexOf("if (!issued) {");
+  const show = body.indexOf("setCodes(issued)");
+  assert.ok(body.indexOf("const issued = readRecoveryCodes(r.data);") > 0 && guard > 0 && show > guard);
+});
+
+test("an MFA answer is shape-checked before it renders or keys anything", () => {
+  const state = readTwoFactorState({
+    enabled: true,
+    totpEnabled: false,
+    passkeys: [
+      { id: "a", name: "Phone", createdAt: "2026-01-01T00:00:00Z", lastUsedAt: null, backedUp: true },
+      { id: "b", name: "Broken" },
+      "junk",
+    ],
+    recoveryCodesRemaining: "x",
+    webauthnAvailable: true,
+  });
+  assert.deepEqual(state.passkeys.map((p) => p.id), ["a"], "a row missing its fields is dropped");
+  assert.equal(state.recoveryCodesRemaining, 0);
+  assert.deepEqual(readRecoveryCodes({ recoveryCodes: ["a1", "b2"] }), ["a1", "b2"]);
+  assert.equal(readRecoveryCodes({ recoveryCodes: ["a1", 2] }), null, "a non-string code refuses the list");
+  assert.equal(readRecoveryCodes({}), null);
+  const publicKey = {
+    rp: { id: "x", name: "X" }, user: { id: "u", name: "n", displayName: "N" }, challenge: "c",
+    pubKeyCredParams: [{ type: "public-key", alg: -7 }], excludeCredentials: [{ id: "k", type: "public-key" }],
+  };
+  assert.equal(readCreationOptions({ publicKey }), publicKey, "a usable options object passes through whole");
+  assert.equal(readCreationOptions({ publicKey: { ...publicKey, challenge: 1 } }), null);
+  assert.equal(readCreationOptions({}), null);
+  assert.deepEqual(readTotpSetup({ secret: "S", otpauthUri: "otpauth://x" }), { secret: "S", otpauthUri: "otpauth://x" });
+  assert.equal(readTotpSetup({ secret: "S" }), null);
+});
+
+// Revoked in the same tick as click() on a detached anchor, the URL saved an
+// empty file (or nothing) in browsers that start the download afterwards.
+test("the recovery-code download attaches the anchor and revokes the URL later", () => {
+  const fn = src.slice(src.indexOf("function downloadText("), src.indexOf("function QrImage("));
+  assert.match(fn, /document\.body\.appendChild\(a\);\s*a\.click\(\);\s*a\.remove\(\);\s*setTimeout\(\(\) => URL\.revokeObjectURL\(url\), \d[\d_]*\);/);
+  assert.doesNotMatch(src, /navigator\.clipboard/, "copies go through useCopyFeedback");
 });
 
 // Closing the account kept its own copy of the code / passkey builder, which
-// drifted from the shared one. Every profile step-up now goes through it.
-test("Delete account builds its second factor with the shared buildSecondFactor", () => {
+// drifted from the shared one. Every profile step-up now goes through it, by
+// way of the one hook the password change and the account close share.
+test("Delete account and Change password build their second factor through one shared hook", () => {
+  const hook = readFileSync(new URL("../src/components/profile/use-second-factor-step-up.ts", import.meta.url), "utf8");
+  assert.match(hook, /const r = await buildSecondFactor\(\{\s*code: stepUpCode,\s*passkeyPossible,\s*t,\s*failedMessage: \(\) => failedMessage,/);
   const del = readFileSync(new URL("../src/components/profile/delete-account.tsx", import.meta.url), "utf8");
-  assert.match(del, /const r = await buildSecondFactor\(\{\s*code: stepUpCode,\s*passkeyPossible,\s*t,\s*failedMessage: \(\) => t\("profile\.close\.error\.failed"\),/);
-  assert.doesNotMatch(del, /\/api\/profile\/mfa\/challenge/, "no second copy of the challenge request");
+  const pw = readFileSync(new URL("../src/components/profile/change-password.tsx", import.meta.url), "utf8");
+  assert.match(del, /useSecondFactorStepUp\(\{[\s\S]*?failedMessage: t\("profile\.close\.error\.failed"\),/);
+  assert.match(pw, /useSecondFactorStepUp\(\{ known: secondFactor, failedMessage: t\("profile\.password\.error\.failed"\) \}\)/);
+  for (const [name, body] of [["delete-account", del], ["change-password", pw]] as const) {
+    assert.doesNotMatch(body, /\/api\/profile\/mfa\/challenge/, `${name}: no second copy of the challenge request`);
+    assert.doesNotMatch(body, /buildSecondFactor|data\.secondFactorRequired|serverMethods/, `${name}: no private copy of the step-up flow`);
+  }
+});
+
+test("a typed step-up code: six digits (spaces aside) is an authenticator code, anything else a recovery code", async () => {
+  const { codeProof } = await import("../src/lib/client/step-up.ts");
+  assert.deepEqual(codeProof("123 456"), { method: "totp", code: "123 456" });
+  assert.deepEqual(codeProof("abcd-efgh"), { method: "recovery", code: "abcd-efgh" });
+  assert.deepEqual(codeProof("1234567"), { method: "recovery", code: "1234567" });
 });

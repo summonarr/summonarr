@@ -1,5 +1,5 @@
 // What a non-OK answer to the Library cleanup EXECUTE says about what happened —
-// pure, zero imports, so the unit runner loads it (the hook that reads it,
+// pure (its one import is zero-import too), so the unit runner loads it (the hook that reads it,
 // src/components/admin/cleanup-delete.tsx, is .tsx and can't).
 //
 // The execute is one synchronous request: a fresh listing of every instance,
@@ -16,8 +16,10 @@
 // isn't the route's JSON (a proxy's HTML page, the framework's 500 page after a
 // throw mid-run) — is OUTCOME UNKNOWN: some titles may already be gone.
 
+import { GATEWAY_STATUSES } from "./gateway-status";
+
 // Statuses a proxy or gateway answers with, whatever the body says.
-export const CLEANUP_GATEWAY_STATUSES: ReadonlySet<number> = new Set([502, 503, 504]);
+export const CLEANUP_GATEWAY_STATUSES: ReadonlySet<number> = GATEWAY_STATUSES;
 
 export type CleanupExecuteFailure =
   | { kind: "refused"; error: string }

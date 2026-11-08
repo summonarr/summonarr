@@ -286,3 +286,13 @@ test("C026: a definite refusal (409) still hands the title manager's handle back
   assert.equal((await grab(token, handle)).status, 200);
   assert.equal(posts, 2);
 });
+
+test("a title manager handle is redeemable only by the admin it was issued to", async () => {
+  const owner = await mintSession();
+  const other = await mintSession();
+  const handle = await search(owner);
+  assert.equal((await grab(other, handle)).status, 410, "another admin's grab is refused like an unknown handle");
+  assert.equal(posts, 0, "nothing reached the arr");
+  assert.equal((await grab(owner, handle)).status, 200, "the refusal didn't spend it");
+  assert.equal(posts, 1);
+});

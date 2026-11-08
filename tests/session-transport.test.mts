@@ -192,13 +192,14 @@ test("isTransportAllowed: refuses the other transport and an unknown claim value
   assert.equal(isTransportAllowed({ ...base, expiresAt: (base.iat as number) + 3600 }, "bearer"), true);
 });
 
-test("the inference's 90-day ceiling IS the configurable-duration ceiling (settings route, form, getSessionDurations)", () => {
+test("the inference's 90-day ceiling IS the configurable-duration ceiling (settings registry, form, getSessionDurations)", () => {
   assert.equal(MAX_CONFIGURABLE_SESSION_SECONDS, 7_776_000);
-  const settingsRoute = readFileSync(new URL("../src/app/api/settings/route.ts", import.meta.url), "utf8");
-  assert.match(settingsRoute, /const MAX_SESSION_SECONDS = 7_776_000;/);
+  const settingsRegistry = readFileSync(new URL("../src/lib/settings-registry.ts", import.meta.url), "utf8");
+  assert.match(settingsRegistry, /const MAX_SESSION_SECONDS = 7_776_000;/);
   const form = readFileSync(new URL("../src/components/settings/forms/session-form.tsx", import.meta.url), "utf8");
-  assert.match(form, /const MAX_SESSION_SECONDS = 7_776_000;/);
-  const authSrc = readFileSync(new URL("../src/lib/auth.ts", import.meta.url), "utf8");
+  assert.match(form, /const MAX_SESSION_SECONDS = MAX_CONFIGURABLE_SESSION_SECONDS;/);
+  assert.match(form, /import \{ MAX_CONFIGURABLE_SESSION_SECONDS \} from "@\/lib\/session-lifetime";/);
+  const authSrc = readFileSync(new URL("../src/lib/auth-session-durations.ts", import.meta.url), "utf8");
   assert.match(authSrc, /const MAX_ALLOWED_SESSION_SECONDS = MAX_CONFIGURABLE_SESSION_SECONDS;/);
 });
 

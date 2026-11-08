@@ -1,10 +1,11 @@
-// What an admin's own "Add to Radarr/Sonarr" may ask for — pure, no imports
-// beyond types. Every value is checked against a fixed vocabulary here and
+// What an admin's own "Add to Radarr/Sonarr" may ask for — pure (its only
+// imports are the zero-I/O arr-parse and arr-title). Every value is checked against a fixed vocabulary here and
 // against the instance's own profiles, root folders and tags in the data layer
 // (guardrail 5e: a browser value only ever NAMES something the instance has).
 
 import type { ArrService } from "./arr-instances";
-import { MINIMUM_AVAILABILITIES, SERIES_TYPES, type MinimumAvailability, type SeriesType } from "./arr-title";
+import { posInt } from "./arr-parse";
+import { isOneOf, MINIMUM_AVAILABILITIES, parseTagIds, SERIES_TYPES, type MinimumAvailability, type SeriesType } from "./arr-title";
 
 /**
  * Sonarr's own add-time monitoring choices, the subset both v3 and v4 accept.
@@ -31,8 +32,6 @@ export interface TitleAdd {
 }
 
 const MAX_TAGS = 100;
-const posInt = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : null);
-const isOneOf = <T extends string>(list: readonly T[], v: unknown): v is T => typeof v === "string" && (list as readonly string[]).includes(v);
 
 /**
  * The add-time search can do nothing: Radarr's searches skip an unmonitored
@@ -57,9 +56,9 @@ export function parseTitleAdd(service: ArrService, body: Record<string, unknown>
   if (tmdbId === null || qualityProfileId === null) return null;
   if (typeof root !== "string" || root.trim() === "" || root.length > 1_000) return null;
   if (typeof body.search !== "boolean") return null;
-  const tags = body.tags === undefined ? [] : body.tags;
-  if (!Array.isArray(tags) || tags.length > MAX_TAGS || !tags.every((t) => posInt(t) !== null)) return null;
-  const add: TitleAdd = { tmdbId, qualityProfileId, rootFolderPath: root, tags: [...new Set(tags as number[])], search: body.search };
+  const tags = body.tags === undefined ? [] : parseTagIds(body.tags, MAX_TAGS);
+  if (tags === null) return null;
+  const add: TitleAdd = { tmdbId, qualityProfileId, rootFolderPath: root, tags, search: body.search };
   const has = (k: string) => body[k] !== undefined;
   if (service === "radarr") {
     if (["monitor", "seriesType", "seasonFolder"].some(has)) return null;

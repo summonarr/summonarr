@@ -1,89 +1,62 @@
 // Shared types for the admin history table (activity-history-table.tsx and
-// the extracted pieces under this directory).
+// the extracted pieces under this directory). The wire shapes derive from the
+// runtime schemas in ./schema, so a row is exactly what the table checked.
 
-export interface HistoryRow {
-  id: string;
-  source: string;
-  // Media-server instance slug (media-instances.ts). "" = the default/only
-  // server, which is also what every row written before multi-server support
-  // reads (`@default("")`), so the UI renders a badge for it only when
-  // non-empty. Already on the wire: the ungrouped API path `include`s the whole
-  // PlayHistory row and the grouped path selects `h.*`.
-  serverInstance: string;
-  title: string;
-  tmdbId: number | null;
-  mediaType: string | null;
-  startedAt: string;
-  stoppedAt: string | null;
-  duration: number;
-  playDuration: number;
-  pausedDuration: number | null;
-  watched: boolean;
-  platform: string | null;
-  player: string | null;
-  device: string | null;
-  ipAddress: string | null;
-  playMethod: string | null;
-  resolution: string | null;
-  videoCodec: string | null;
-  audioCodec: string | null;
-  bitrate: number | null;
-  container: string | null;
-  videoDecision: string | null;
-  audioDecision: string | null;
-  seasonNumber: number | null;
-  episodeNumber: number | null;
-  episodeTitle: string | null;
-  posterUrl: string | null;
-  // Network metadata (Plex-only — Jellyfin leaves these null).
-  location: string | null;
-  bandwidth: number | null;
-  secure: boolean | null;
-  relayed: boolean | null;
-  // Intro/credits markers (Plex-only). Offsets in milliseconds.
-  introStartMs: number | null;
-  introEndMs: number | null;
-  creditsStartMs: number | null;
-  creditsEndMs: number | null;
-  // Resume-grouping anchor (see prisma/schema.prisma PlayHistory.referenceId).
-  referenceId: string | null;
-  // Resume-grouping aggregates. Populated by the grouped API path (default);
-  // in ungrouped mode the API mirrors single-row defaults (segmentCount = 1,
-  // totalPlayDuration = playDuration, chainId = referenceId ?? id) so the
-  // UI can read these fields unconditionally.
-  segmentCount?: number;
-  chainId?: string;
-  totalPlayDuration?: number;
-  // Chain-wide counterparts of pausedDuration / startedAt / stoppedAt. The
-  // grouped path computes them over the whole chain (SUM / MIN / MAX window
-  // aggregates); ungrouped mirrors the row's own values, same as above. The
-  // representative row's own startedAt stays the table's Date column (it is
-  // the grouped sort key); the detail panel spans the chain with these.
-  totalPausedDuration?: number | null;
-  firstStartedAt?: string;
-  lastStoppedAt?: string | null;
-  mediaServerUserId: string;
-  mediaServerUser: {
-    username: string;
-    source: string;
-    thumbUrl: string | null;
-  };
-}
+import type { Infer } from "@/lib/validate";
+import type { historyRowSchema, userOptionsSchema } from "./schema";
 
-export interface MediaServerUserOption {
-  id: string;
-  username: string;
-  source: string;
-  // Media-server instance slug (guardrail 35). Additive on the wire
-  // (`distinct=users`); the filter bar reads it only to disambiguate a
-  // username that exists on two same-type servers.
-  serverInstance?: string;
-}
+export type HistoryRow = Infer<typeof historyRowSchema>;
 
-export type SortField =
-  | "startedAt"
-  | "title"
-  | "playDuration"
-  | "duration"
-  | "platform";
+export type HistoryMediaType = NonNullable<HistoryRow["mediaType"]>;
+
+export type MediaServerUserOption = Infer<typeof userOptionsSchema>[number];
+
+export const SORT_FIELDS = ["startedAt", "title", "playDuration", "duration", "platform"] as const;
+export type SortField = (typeof SORT_FIELDS)[number];
 export type SortDir = "asc" | "desc";
+
+export type WatchedFilter = "" | "true" | "false";
+
+// The stream methods the Stream filter offers (and the URL may carry).
+export const PLAY_METHODS = ["DirectPlay", "DirectStream", "Transcode"] as const;
+
+// The rows-per-page choices; the first page size a fresh table uses is
+// DEFAULT_PAGE_SIZE.
+export const PAGE_SIZES = [10, 25, 50, 100, 150, 200] as const;
+export const DEFAULT_PAGE_SIZE = 25;
+
+// The table's own filters ("" = no filter). `search` is the COMMITTED text:
+// the input box holds its own draft and commits it after the debounce, so a
+// keystroke never refetches or re-pages.
+export interface HistoryFilters {
+  search: string;
+  watched: WatchedFilter;
+  method: string;
+  platform: string;
+  userId: string;
+  // YYYY-MM-DD, whole days in the statistics zone (the API reads them there).
+  fromDate: string;
+  toDate: string;
+}
+
+// Everything that decides which rows the table asks for.
+export interface HistoryQuery {
+  filters: HistoryFilters;
+  // Resume-grouping, default on: one row per chain (latest segment + chain
+  // aggregates). The API param is the inverse (`?ungrouped=true`) because the
+  // server defaults to grouped.
+  grouped: boolean;
+  sortBy: SortField;
+  sortDir: SortDir;
+  limit: number;
+  page: number;
+}
+
+// Every change but a page change starts again from page 1 (historyQueryReducer).
+export type HistoryQueryAction =
+  | { type: "filter"; patch: Partial<HistoryFilters> }
+  | { type: "clearFilters" }
+  | { type: "grouped"; grouped: boolean }
+  | { type: "sort"; field: SortField }
+  | { type: "limit"; limit: number }
+  | { type: "page"; page: number };

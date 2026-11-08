@@ -52,17 +52,21 @@ const { shadowPrismaModel } = await import("./_helpers.mts");
 const {
   getTraktPopularMovies,
   getTraktPopularTV,
+  getTraktPopularWithStatus,
   testTraktConnection,
   clampTraktLockoutMs,
 } = await import("../src/lib/trakt.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
 let traktClientId: string | null = "test-trakt-client-id";
+let settingReads = 0;
 shadowPrismaModel(prisma, "setting", {
-  findUnique: async (args: { where: { key: string } }) =>
-    args.where.key === "traktClientId" && traktClientId !== null
+  findUnique: async (args: { where: { key: string } }) => {
+    settingReads++;
+    return args.where.key === "traktClientId" && traktClientId !== null
       ? { key: "traktClientId", value: traktClientId }
-      : null,
+      : null;
+  },
 });
 
 type CacheRow = { key: string; data: string; cachedAt: Date; expiresAt: Date };
@@ -105,6 +109,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 beforeEach(() => {
   traktClientId = "test-trakt-client-id";
+  settingReads = 0;
   cacheRows.clear();
   cacheUpserts.length = 0;
   fetchCalls.length = 0;
@@ -180,17 +185,20 @@ test("duplicate tmdb ids dedup first-wins", async () => {
   assert.deepEqual(result.map((m) => [m.id, m.title]), [[7, "First"], [8, "Other"]]);
 });
 
-test("PINS CURRENT BEHAVIOR: one entry without an `ids` object degrades the whole call to []", async () => {
-  // normalizeMovie reads m.ids.tmdb unguarded — a row with no ids throws
-  // inside the map, the function's catch eats it, and the caller gets [].
-  // Good rows on the SAME page are lost too. If drop-the-row semantics are
-  // ever wanted instead, this pin is the one to flip.
-  respond = () => jsonResponse([movieRow(603, "The Matrix", 1999), { title: "Broken", year: 2000 }]);
+test("a malformed entry (no `ids` object, a null, a string tmdb id) is dropped — the good rows on its page survive", async () => {
+  // Every row is read field by field: one bad entry used to throw inside the
+  // map, and the whole page's good rows were lost with it.
+  respond = () => jsonResponse([
+    movieRow(603, "The Matrix", 1999),
+    { title: "Broken", year: 2000 },
+    null,
+    { title: "String id", year: 2001, ids: { tmdb: "604" } },
+  ]);
   errors.length = 0;
   const result = await getTraktPopularMovies(1);
-  assert.deepEqual(result, []);
-  assert.ok(errors.some((e) => e.includes("[trakt]")), "the degrade must be logged with the [trakt] scope");
-  assert.equal(cacheUpserts.length, 0); // an empty result is never cached
+  assert.deepEqual(result.map((m) => m.id), [603]);
+  assert.deepEqual(errors, [], "nothing threw");
+  assert.equal(cacheUpserts.length, 1, "the complete list is cached as usual");
 });
 
 // ── paging, caching, key gating ─────────────────────────────────────────────
@@ -222,6 +230,7 @@ test("concurrent cold-cache callers share ONE page fan-out and one cache write (
   respond = () => jsonResponse([movieRow(550, "Fight Club", 1999)]);
   const [a, b] = await Promise.all([getTraktPopularMovies(2), getTraktPopularMovies(2)]);
   assert.equal(fetchCalls.length, 2, "one fan-out (2 pages), not two (4)");
+  assert.equal(settingReads, 1, "the client id is read once for the fan-out, not once per page");
   assert.equal(cacheUpserts.length, 1, "one cache write, not a duplicate upsert");
   assert.equal(a, b, "coalesced callers get the same array instance back");
 });
@@ -261,6 +270,26 @@ test("no configured client id ⇒ [] without touching the network", async () => 
   assert.equal(fetchCalls.length, 0);
 });
 
+test("the status variant tells an outage from an answer: a failed page is incomplete, no client id and a full answer are complete", async () => {
+  respond = (url) =>
+    url.searchParams.get("page") === "3"
+      ? jsonResponse({ error: "server exploded" }, 500)
+      : jsonResponse([movieRow(Number(url.searchParams.get("page")), "Row")]);
+  const partial = await getTraktPopularWithStatus("movie");
+  assert.equal(partial.complete, false, "a failed page leaves the list incomplete");
+  assert.equal(partial.items.length, 4, "the pages that answered are still served");
+
+  respond = () => jsonResponse([movieRow(550, "Fight Club", 1999)]);
+  const whole = await getTraktPopularWithStatus("movie");
+  assert.equal(whole.complete, true);
+  assert.equal((await getTraktPopularWithStatus("movie")).complete, true, "a cache hit is complete");
+
+  cacheRows.clear();
+  traktClientId = null;
+  const unconfigured = await getTraktPopularWithStatus("tv");
+  assert.deepEqual(unconfigured, { items: [], complete: true }, "nothing to fetch is not an outage");
+});
+
 test("testTraktConnection returns the first title and throws on an empty response", async () => {
   respond = () => jsonResponse([movieRow(157336, "Interstellar", 2014)]);
   assert.equal(await testTraktConnection(), "Interstellar");
@@ -293,10 +322,13 @@ test("HTTP 429 trips the in-process lockout: [] now, and the next call skips the
     "a present Retry-After must NOT fall back to the 1h ceiling",
   );
 
-  // Inside the honored window a call still short-circuits with zero egress.
+  // Inside the honored window a call still short-circuits with zero egress —
+  // and without even reading the client id.
   fetchCalls.length = 0;
-  assert.deepEqual(await getTraktPopularMovies(1), []); // lockout error → caught → []
+  settingReads = 0;
+  assert.deepEqual(await getTraktPopularMovies(1), []);
   assert.equal(fetchCalls.length, 0);
+  assert.equal(settingReads, 0);
 });
 
 test("HTTP 429 with NO Retry-After falls back to the 1h ceiling (pure-fn check, no shared lockout state)", () => {
@@ -328,4 +360,14 @@ test("guardrail 27a: the 429 lockout is process-wide — a second copy of trakt.
   fetchCalls.length = 0;
   assert.deepEqual(await other.getTraktPopularMovies(1), []);
   assert.equal(fetchCalls.length, 0, "the other copy saw the lockout");
+});
+
+test("a 429 answered to the admin's connection test trips the lockout too — the test shares the one request path", async () => {
+  respond = () =>
+    new Response(JSON.stringify({ error: "slow down" }), {
+      status: 429,
+      headers: { "content-type": "application/json", "retry-after": "120" },
+    });
+  await assert.rejects(() => testTraktConnection(), /rate limited/);
+  assert.ok(warns.some((w) => /\[trakt\] Quota lockout tripped .* suspending calls for 2\.0 min/.test(w)));
 });

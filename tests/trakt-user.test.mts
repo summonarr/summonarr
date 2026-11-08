@@ -135,15 +135,18 @@ const accountModel = {
     else accounts.push({ id: `acct-${accounts.length + 1}`, ...args.create });
     return {};
   },
-  deleteMany: async (args: { where: { userId: string; provider: string; NOT?: { providerAccountId: string } } }) => {
+  deleteMany: async (args: { where: { id?: string; userId: string; provider: string; NOT?: { providerAccountId: string } } }) => {
     rec("account.deleteMany", args.where);
     const before = accounts.length;
     accounts = accounts.filter((r) => !(
       r.userId === args.where.userId && r.provider === args.where.provider &&
+      (args.where.id === undefined || r.id === args.where.id) &&
       (!args.where.NOT || r.providerAccountId !== args.where.NOT.providerAccountId)
     ));
     return { count: before - accounts.length };
   },
+  count: async (args: { where: { userId: string; provider: string } }) =>
+    accounts.filter((r) => r.userId === args.where.userId && r.provider === args.where.provider).length,
 };
 const connModel = {
   findUnique: async (args: { where: { userId: string } }) => conns.find((c) => c.userId === args.where.userId) ?? null,
@@ -508,6 +511,40 @@ test("device flow: a refusal on trakt.tv (418) reads denied and ends the pending
   assert.deepEqual(await trakt.pollTraktDeviceAuth("u1", CFG), { state: "expired" });
 });
 
+test("device flow: a poll in flight when the flow is restarted ends only ITS grant — the new code keeps polling", async () => {
+  mock.timers.enable({ apis: ["Date"], now: new Date("2026-10-08T12:00:00Z") });
+  let codes = 0;
+  respond = async (c) => {
+    if (c.path === "/oauth/device/code") {
+      codes++;
+      return json({ device_code: `D${codes}`, user_code: `U${codes}`, expires_in: 600, interval: 1 });
+    }
+    if (c.path === "/oauth/device/token") {
+      if (c.body!.code === "D1") {
+        // The user restarts the flow while the first poll is still talking to Trakt.
+        await trakt.startTraktDeviceAuth("u1", CFG);
+        return new Response(null, { status: 410 });
+      }
+      return new Response(null, { status: 400 }); // D2: not yet authorized
+    }
+    throw new Error(`unexpected ${c.path}`);
+  };
+  await trakt.startTraktDeviceAuth("u1", CFG);
+  mock.timers.tick(1_000);
+  assert.deepEqual(await trakt.pollTraktDeviceAuth("u1", CFG), { state: "expired" }, "the first code is spent");
+  mock.timers.tick(1_000);
+  assert.deepEqual(await trakt.pollTraktDeviceAuth("u1", CFG), { state: "pending" }, "the restarted flow is still pending, not expired");
+  assert.equal(calls.filter((c) => c.path === "/oauth/device/token").at(-1)!.body!.code, "D2");
+});
+
+test("device flow: a device-code answer that is not an object is unusable, never a TypeError", async () => {
+  respond = (c) => {
+    if (c.path === "/oauth/device/code") return json(null);
+    throw new Error(`unexpected ${c.path}`);
+  };
+  await assert.rejects(() => trakt.startTraktDeviceAuth("u1", CFG), /response was unusable/);
+});
+
 test("disconnect deletes the grant, the connection and the imported history, then revokes at Trakt best-effort", async () => {
   configure();
   addUser("u1");
@@ -603,6 +640,56 @@ test("sync: a REFUSED refresh ends the connection (credential + history deleted,
   assert.equal(watched.some((w) => w.userId === "u2"), true);
   assert.equal(ratings.some((r) => r.userId === "u2"), true);
   assert.equal(conns.find((c) => c.userId === "u2")!.status, "error");
+});
+
+test("sync: a refused refresh of an OLD grant, after a reconnect mid-run, removes only that grant — the new connection and its data stay", async () => {
+  configure();
+  settings.set(FLAG_AUTO, "true");
+  settings.set(FLAG_FOR_YOU, "true");
+  addUser("u1");
+  connect("u1", { expires_at: 0, refresh_token: "refresh-old" });
+  watched.push({ userId: "u1", tmdbId: 1, mediaType: "MOVIE", title: "x", plays: 1, lastWatchedAt: new Date() });
+  respond = (c) => {
+    if (c.path === "/oauth/token") {
+      // The user disconnects (Trakt revokes the old pair) and reconnects another
+      // account while this run holds the old tokens.
+      accounts.push({
+        id: "acct-u1-new", userId: "u1", provider: "trakt", providerAccountId: "uuid-new",
+        access_token: "access-new", refresh_token: "refresh-new", expires_at: Math.floor(Date.now() / 1000) + 86_400,
+      });
+      conns[0].status = "ok";
+      return json({ error: "invalid_grant" }, 400);
+    }
+    throw new Error(`unexpected ${c.path}`);
+  };
+  const result = await trakt.syncTraktUsers();
+  assert.equal(result.tokensRevoked, 1);
+  assert.deepEqual(accounts.map((a) => a.id), ["acct-u1-new"], "only the refused grant's row is deleted");
+  assert.equal(watched.length, 1, "the history belongs to the connection that remains");
+  assert.notEqual(conns[0].status, "reauth");
+});
+
+test("sync: a reset of the history stamps made mid-run (a same-account reconnect) is not undone by the run's write-back", async () => {
+  configure();
+  settings.set(FLAG_AUTO, "true");
+  settings.set(FLAG_FOR_YOU, "true");
+  addUser("u1");
+  // Imported a minute ago: this run does not import, it only reads the watchlist.
+  connect("u1", {}, { historyActivityAt: new Date("2026-10-01T00:00:00Z"), historyImportedAt: new Date(Date.now() - 60_000) });
+  respond = (c) => {
+    if (c.path.startsWith("/sync/watchlist/movies")) {
+      // storeTraktConnection keeps the account row (same Trakt account) and
+      // resets the bookkeeping; the history rows are deleted.
+      Object.assign(conns[0], { historyActivityAt: null, historyImportedAt: null, syncedAt: null, status: null });
+      return json([], 200, { "x-pagination-page-count": "1" });
+    }
+    if (c.path.startsWith("/sync/watchlist/shows")) return json([], 200, { "x-pagination-page-count": "1" });
+    throw new Error(`unexpected ${c.path}`);
+  };
+  await trakt.syncTraktUsers();
+  assert.equal(conns[0].historyActivityAt, null, "the snapshot's stamp is not written back over the reset");
+  assert.equal(conns[0].historyImportedAt, null, "so the next run imports the history again");
+  assert.equal(conns[0].status, "ok");
 });
 
 test("sync: the watchlist is read newest-first per type and each title meets the ledger as trakt-watchlist", async () => {

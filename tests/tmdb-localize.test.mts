@@ -64,6 +64,7 @@ const {
   prewarmTitleTranslations,
   createInFlightLimiter,
   MAX_IN_FLIGHT,
+  _resetTranslationRetryForTests,
 } = await import("../src/lib/tmdb-localize.ts");
 const { getTVSeasonEpisodesLocalized, tmdbLanguageFor, getMovieGenres } = await import("../src/lib/tmdb.ts");
 
@@ -161,6 +162,7 @@ beforeEach(() => {
   gatedUpsertKey = null;
   upsertGate = null;
   upsertGateReached = false;
+  _resetTranslationRetryForTests();
 });
 
 type Media = Parameters<typeof localizeMedia>[0][number];
@@ -604,4 +606,48 @@ test("translation fetches never exceed MAX_IN_FLIGHT across concurrent callers, 
     assert.equal(cacheRows.has(`collection:${8000 + d}:i18n:v1`), true, `d=${d}: the parked read did run`);
     assert.equal(cacheRows.has(`person:${9000 + d}:i18n:v1`), true, `d=${d}: the newcomer did run`);
   }
+});
+
+test("a transient translation failure is not fetched again on the next views while its backoff runs", async () => {
+  respond = () => json({ status_message: "busy" }, 503);
+  await localizeMedia([movie(900)], "de");
+  const afterFirst = fetched.length;
+  assert.ok(afterFirst > 0);
+  await localizeMedia([movie(900)], "de");
+  await titleResolver([{ title: "Movie 900", tmdbId: 900, mediaType: "movie" }], ["de"]);
+  assert.equal(fetched.length, afterFirst, "no refetch inside the backoff");
+  assert.equal(cacheRows.has("movie:900:i18n:v2"), false, "a failure is never cached as an answer");
+  _resetTranslationRetryForTests();
+  respond = () => json({ title: "Film 900", overview: "", translations: { translations: [{ iso_639_1: "de", iso_3166_1: "DE", data: { title: "Film 900", overview: "" } }] }, images: { posters: [] } });
+  const out = await localizeMedia([movie(900)], "de");
+  assert.ok(fetched.length > afterFirst, "fetched again once the backoff is over");
+  assert.equal(out[0].title, "Film 900");
+});
+
+test("the translations a resolver holds are a snapshot: a fetch landing after the budget changes the cache, not the resolver", async () => {
+  const gate = deferred<void>();
+  respond = async () => {
+    await gate.promise;
+    return json({ title: "Late", overview: "", translations: { translations: [{ iso_639_1: "de", iso_3166_1: "DE", data: { title: "Spät", overview: "" } }] }, images: { posters: [] } });
+  };
+  const ref = { title: "Late", tmdbId: 901, mediaType: "movie" };
+  const resolve = await titleResolver([ref], ["de"]);
+  assert.equal(resolve(ref, "de"), "Late", "English inside the budget");
+  gate.resolve();
+  for (let i = 0; i < 50 && !cacheRows.has("movie:901:i18n:v2"); i++) await new Promise((r) => setImmediate(r));
+  assert.ok(cacheRows.has("movie:901:i18n:v2"), "the late answer filled the cache");
+  assert.equal(resolve(ref, "de"), "Late", "the resolver already handed out did not change");
+});
+
+test("createInFlightLimiter reports how many callers are parked", async () => {
+  const limiter = createInFlightLimiter(1);
+  const first = deferred<void>();
+  const a = limiter(() => first.promise);
+  const b = limiter(async () => undefined);
+  const c = limiter(async () => undefined);
+  await Promise.resolve();
+  assert.equal(limiter.waiting(), 2);
+  first.resolve();
+  await Promise.all([a, b, c]);
+  assert.equal(limiter.waiting(), 0);
 });

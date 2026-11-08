@@ -49,13 +49,13 @@ export function lockoutDurationMs(priorLockouts: number): number {
 }
 
 // The active lockout's end, or null when codes may be tried.
-export async function activeMfaLockout(userId: string, nowMs = Date.now()): Promise<Date | null> {
+async function activeMfaLockout(userId: string, nowMs = Date.now()): Promise<Date | null> {
   const row = await prisma.user.findUnique({ where: { id: userId }, select: { mfaLockedUntil: true } });
   const until = row?.mfaLockedUntil ?? null;
   return until && until.getTime() > nowMs ? until : null;
 }
 
-export interface FailureOutcome {
+interface FailureOutcome {
   // Set when THIS failure tripped a lockout.
   lockedUntil: Date | null;
   imposed: boolean;
@@ -64,7 +64,7 @@ export interface FailureOutcome {
 // Counts one failed code. The increment is atomic in SQL; the lockout
 // transition is a compare-and-swap on "still at or over the threshold", so two
 // concurrent failures can't both impose (or double-escalate) it.
-export async function recordMfaCodeFailure(userId: string, nowMs = Date.now()): Promise<FailureOutcome> {
+async function recordMfaCodeFailure(userId: string, nowMs = Date.now()): Promise<FailureOutcome> {
   const row = await prisma.user.update({
     where: { id: userId },
     data: { mfaFailedAttempts: { increment: 1 } },
@@ -81,7 +81,7 @@ export async function recordMfaCodeFailure(userId: string, nowMs = Date.now()): 
 
 // A code verified. Conditional writes, so the common case (nothing to reset)
 // costs no write at all.
-export async function recordMfaCodeSuccess(userId: string, nowMs = Date.now()): Promise<void> {
+async function recordMfaCodeSuccess(userId: string, nowMs = Date.now()): Promise<void> {
   await prisma.user.updateMany({
     where: { id: userId, mfaFailedAttempts: { gt: 0 } },
     data: { mfaFailedAttempts: 0 },
@@ -111,14 +111,56 @@ export interface GuardContext {
   userAgent?: string | null;
 }
 
+// The guessable methods. A passkey assertion is a signature over a fresh
+// challenge, so it is outside the lockout both ways (see the header).
+function isCodeMethod(input: SecondFactorInput): boolean {
+  return input.method === "totp" || input.method === "recovery";
+}
+
+// Audits and mails the lockout this request imposed. Detached and best-effort:
+// the lockout is already committed, so neither the name lookup for the audit
+// row nor the mail may fail (or slow) the request that tripped it. logAudit and
+// notifyMfaSecurityEvent swallow their own errors; the lookup is caught here.
+async function reportLockout(userId: string, ctx: GuardContext, lockedUntil: Date): Promise<void> {
+  let userName = "unknown";
+  try {
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { name: true, email: true } });
+    userName = user?.name ?? user?.email ?? userName;
+  } catch (err) {
+    console.warn("[mfa] lockout audit: user lookup failed:", err instanceof Error ? err.message : err);
+  }
+  await logAudit({
+    userId,
+    userName,
+    action: "AUTH_LOGIN_FAILED",
+    target: `user:${userId}`,
+    ipAddress: ctx.ipAddress ?? null,
+    userAgent: ctx.userAgent ?? null,
+    provider: "credentials",
+    details: {
+      reason: "mfa_lockout",
+      context: ctx.context,
+      lockedUntil: lockedUntil.toISOString(),
+      threshold: MFA_LOCKOUT_THRESHOLD,
+    },
+  });
+  await notifyMfaSecurityEvent(userId, "lockout");
+}
+
 // verifySecondFactor (the replay-safe CAS verifiers — not a fork of them) wrapped
 // in the persistent lockout. Every caller that checks a code goes through here.
+//
+// Concurrency: the lockout check, the verify and the count are separate DB
+// round trips, so parallel guesses could each pass the check before any is
+// counted. Every caller charges a per-account in-memory bucket synchronously
+// before it gets here (mfa-user: at sign-in; mfa-stepup:, profile-password: or
+// profile-delete: at a step-up — guardrail 6e), which bounds that overlap.
 export async function verifySecondFactorGuarded(
   userId: string,
   input: SecondFactorInput,
   ctx: GuardContext,
 ): Promise<GuardedVerdict> {
-  const isCode = input.method === "totp" || input.method === "recovery";
+  const isCode = isCodeMethod(input);
   if (isCode && (await activeMfaLockout(userId))) {
     return { ok: false, reason: "locked", locked: true };
   }
@@ -133,24 +175,6 @@ export async function verifySecondFactorGuarded(
   if (!isCode) return { ok: false, reason: verdict.reason, locked: false };
 
   const outcome = await recordMfaCodeFailure(userId);
-  if (outcome.imposed && outcome.lockedUntil) {
-    const user = await prisma.user.findUnique({ where: { id: userId }, select: { name: true, email: true } });
-    void logAudit({
-      userId,
-      userName: user?.name ?? user?.email ?? "unknown",
-      action: "AUTH_LOGIN_FAILED",
-      target: `user:${userId}`,
-      ipAddress: ctx.ipAddress ?? null,
-      userAgent: ctx.userAgent ?? null,
-      provider: "credentials",
-      details: {
-        reason: "mfa_lockout",
-        context: ctx.context,
-        lockedUntil: outcome.lockedUntil.toISOString(),
-        threshold: MFA_LOCKOUT_THRESHOLD,
-      },
-    });
-    void notifyMfaSecurityEvent(userId, "lockout");
-  }
+  if (outcome.imposed && outcome.lockedUntil) void reportLockout(userId, ctx, outcome.lockedUntil);
   return { ok: false, reason: verdict.reason, locked: outcome.lockedUntil !== null };
 }

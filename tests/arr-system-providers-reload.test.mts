@@ -8,17 +8,14 @@
 //   C046  An indexer use the fresh read says it can't do (supportsRss /
 //         supportsSearch false) is never switched ON — 400, nothing sent, not
 //         audited. Switching it OFF still saves. Projected from booleans only.
-//   C040  A `?job=` poll that failed on the way (the fetch threw, a 5xx with
-//         no JSON — the shared rule in lib/client/job-poll.ts) is retried,
-//         JOB_MAX_FAILED_POLLS in a row read as still running, and any real
-//         answer resets the count — callJob is lifted out of arr-system.tsx and
-//         run through the real pollJob against a scripted fetch.
+//   C040  A `?job=` poll that failed on the way is retried — now pinned with
+//         the job call itself in tests/arr-call.test.mts (arrCallJob).
 //   C088  A BACKGROUND Test All waits 270 s; a synchronous Test All and every
 //         single test keep 120 s.
 //   C089  A failure's `customState.isWarning` decides when `isWarning` is
 //         absent, over `severity`; an explicit `isWarning` still wins.
 //   C041/C043/C044/C045 + the Reload held-prompt rule: source pins over
-//         arr-system.tsx (a component — no render harness here).
+//         the arr-system-*.tsx tabs (components — no render harness here).
 //
 // Harness: the same as tests/arr-fix-system.test.mts (in-memory prisma,
 // scripted Radarr behind a fetch stub, a synthetic request scope).
@@ -26,7 +23,7 @@ import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import dns from "node:dns/promises";
 import { readFileSync } from "node:fs";
-import { createRequire, stripTypeScriptTypes } from "node:module";
+import { createRequire } from "node:module";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 (globalThis as { AsyncLocalStorage?: unknown }).AsyncLocalStorage = AsyncLocalStorage;
@@ -96,10 +93,7 @@ const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 const { _resetReleaseSearchJobsForTests } = await import("../src/lib/release-search-jobs.ts");
-const {
-  JOB_MAX_FAILED_POLLS, projectFailures, projectIndexers, unsupportedIndexerUse,
-} = await import("../src/lib/arr-system.ts");
-const { pollJob, jobIdOf } = await import("../src/lib/client/job-poll.ts");
+const { projectFailures, projectIndexers, unsupportedIndexerUse } = await import("../src/lib/arr-system.ts");
 
 // ── auth fixture ─────────────────────────────────────────────────────────────
 const usersById = new Map<string, Record<string, unknown>>();
@@ -382,151 +376,78 @@ test("a failure's customState.isWarning decides when isWarning is absent — ove
 });
 
 // ── C040: a poll that failed on the way is not the job's answer ──────────────
-
-const TSX = readFileSync(new URL("../src/components/admin/arr-system.tsx", import.meta.url), "utf8");
-
-/** The text of a top-level function in arr-system.tsx, through its closing brace. */
-function topLevelFn(opener: string): string {
-  const start = TSX.indexOf(opener);
-  assert.ok(start >= 0, `${opener} is in arr-system.tsx`);
-  return TSX.slice(start, TSX.indexOf("\n}\n", start) + 2);
-}
-
-/**
- * callJob (and the resultOf it maps an answer with), lifted out of
- * arr-system.tsx with its types stripped. The first request is a scripted
- * `call`; the `?job=` polls run through the REAL pollJob against a scripted
- * fetch, with its waits made immediate.
- */
-type Res = { data: unknown; status: number } | { error: string; status: number; body: Record<string, unknown> | null };
-type Step = Response | Error;
-function liftCallJob(first: Res, polls: Step[], opts: { maxPolls?: number; alive?: () => boolean } = {}) {
-  const src = stripTypeScriptTypes(`${topLevelFn("function resultOf<T>(")}\n${topLevelFn("async function callJob<T>(")}`);
-  const seen: string[] = [];
-  const pollOpts: Array<Record<string, unknown>> = [];
-  const scriptedCall = async () => first;
-  const scriptedFetch = async (input: RequestInfo | URL) => {
-    seen.push(String(input));
-    const step = polls.shift();
-    if (!step) throw new Error(`no scripted answer for ${String(input)}`);
-    if (step instanceof Error) throw step;
-    return step;
-  };
-  const immediatePollJob = (f: typeof fetch, url: string, o: Record<string, unknown>) => {
-    pollOpts.push(o);
-    return pollJob(f, url, { ...(o as unknown as Parameters<typeof pollJob>[2]), sleep: async () => {} });
-  };
-  const make = new Function(
-    "call", "pollJob", "jobIdOf", "withBasePath", "fetch", "JOB_POLL_MS", "JOB_MAX_POLLS",
-    `${src}\nreturn callJob;`,
-  ) as (...a: unknown[]) => (path: string, init: unknown, fallback: string, stillRunning: string, alive: () => boolean) => Promise<Res | null>;
-  const callJob = make(scriptedCall, immediatePollJob, jobIdOf, (p: string) => `/base${p}`, scriptedFetch, 2_000, opts.maxPolls ?? 150);
-  return {
-    run: () => callJob("/admin/arr/providers", { method: "PATCH", body: {} }, "failed", "still running", opts.alive ?? (() => true)),
-    seen,
-    pollOpts,
-  };
-}
-const page = (status: number) => new Response("<html>Bad Gateway</html>", { status, headers: { "content-type": "text/html" } });
-const started: Res = { data: { job: "j1" }, status: 202 };
-const running = () => json({ job: "j1", running: true }, 202);
-const blip = () => new Error("offline");
-const stillRunning: Res = { error: "still running", status: 0, body: { stillRunning: true } };
-
-test("callJob polls through the shared loop with its own interval and budget, at the base-pathed ?job= url", async () => {
-  assert.match(TSX, /const JOB_POLL_MS = 2_000;/);
-  assert.match(TSX, /const JOB_MAX_POLLS = 150;/);
-  const { run, seen, pollOpts } = liftCallJob(started, [running(), json({ provider: { id: 3 } })]);
-  assert.deepEqual(await run(), { data: { provider: { id: 3 } }, status: 200 });
-  assert.deepEqual(seen, ["/base/admin/arr/providers?job=j1", "/base/admin/arr/providers?job=j1"]);
-  assert.equal(pollOpts.length, 1);
-  assert.equal(pollOpts[0].intervalMs, 2_000);
-  assert.equal(pollOpts[0].maxPolls, 150);
-  assert.equal(pollOpts[0].failLimit, undefined, "the shared default, JOB_MAX_FAILED_POLLS");
-});
-
-test("callJob retries a poll that failed on the way, and a real answer after it is the job's answer", async () => {
-  const { run, seen } = liftCallJob(started, [blip(), page(502), page(520), running(), json({ provider: { id: 3 } })]);
-  assert.deepEqual(await run(), { data: { provider: { id: 3 } }, status: 200 });
-  assert.equal(seen.length, 5);
-});
-
-test("callJob: JOB_MAX_FAILED_POLLS failed polls in a row read as still running — never the change's failure", async () => {
-  const { run, seen } = liftCallJob(started, [blip(), blip(), page(502), blip(), page(524), running()]);
-  assert.deepEqual(await run(), stillRunning);
-  assert.equal(seen.length, JOB_MAX_FAILED_POLLS, "stopped at the fifth failure in a row");
-});
-
-test("callJob: out of polls reads as still running too", async () => {
-  const { run, seen } = liftCallJob(started, Array.from({ length: 10 }, running), { maxPolls: 3 });
-  assert.deepEqual(await run(), stillRunning);
-  assert.equal(seen.length, 3);
-});
-
-test("callJob: a real answer between failures resets the count; the job route's JSON answers are the job's own", async () => {
-  const done = json({ provider: { id: 3 } });
-  const { run } = liftCallJob(started, [blip(), blip(), blip(), blip(), running(), blip(), blip(), blip(), blip(), done]);
-  assert.deepEqual(await run(), { data: { provider: { id: 3 } }, status: 200 }, "4 + 4 failures with a 202 between never reach five in a row");
-
-  const own502 = liftCallJob(started, [json({ error: "Radarr is unreachable" }, 502), done]);
-  assert.deepEqual(await own502.run(), { error: "Radarr is unreachable", status: 502, body: { error: "Radarr is unreachable" } });
-  assert.equal(own502.seen.length, 1);
-
-  const held = liftCallJob(started, [json({ error: "warnings", warningsOnly: true, messages: ["slow"] }, 409)]);
-  assert.deepEqual(await held.run(), { error: "warnings", status: 409, body: { error: "warnings", warningsOnly: true, messages: ["slow"] } });
-
-  const thrown = liftCallJob(started, [json(null, 500)]);
-  assert.deepEqual(await thrown.run(), { error: "failed", status: 500, body: null }, "a thrown job's JSON-null 500 is its failure, with the fallback text");
-});
-
-test("callJob: a first answer that is not a 202 is returned as it came; a 202 with no job id is a failure; a gone tab drops the answer", async () => {
-  const refused: Res = { error: "bad", status: 400, body: { error: "bad" } };
-  let lifted = liftCallJob(refused, []);
-  assert.deepEqual(await lifted.run(), refused);
-  assert.equal(lifted.seen.length, 0);
-  const sync: Res = { data: { provider: { id: 3 } }, status: 200 };
-  lifted = liftCallJob(sync, []);
-  assert.deepEqual(await lifted.run(), sync);
-  lifted = liftCallJob({ data: {}, status: 202 }, []);
-  assert.deepEqual(await lifted.run(), { error: "failed", status: 0, body: null });
-  assert.equal(lifted.seen.length, 0);
-  lifted = liftCallJob(started, [running(), json({ provider: { id: 3 } })], { alive: () => false });
-  assert.equal(await lifted.run(), null);
-  assert.equal(lifted.seen.length, 0, "no poll once the tab is gone");
-});
+// The job call moved out of the component into src/lib/client/arr-call.ts
+// (arrCallJob); its pins — the shared loop, retried failures, still running,
+// the job's own JSON answers, a gone tab — are in tests/arr-call.test.mts.
 
 // ── C041 / C043 / C044 / C045 / Reload: source pins ──────────────────────────
 
-/** The body of `function <name>(` in the component file, to the next line holding only "  }". */
-function fnBody(name: string): string {
-  const start = TSX.indexOf(`function ${name}(`);
-  assert.ok(start >= 0, `${name} is in arr-system.tsx`);
-  return TSX.slice(start, TSX.indexOf("\n  }\n", start));
+const read = (f: string) => readFileSync(new URL(`../src/components/admin/${f}`, import.meta.url), "utf8");
+const PROVIDERS = read("arr-system-providers.tsx");
+const TASKS = read("arr-system-tasks.tsx");
+const STORAGE = read("arr-system-storage.tsx");
+const PARTS = read("arr-system-parts.tsx");
+const TABS = [PROVIDERS, TASKS, STORAGE].join("\n");
+
+/** The body of `function <name>(` in a component file, to the next line holding only "  }". */
+function fnBody(src: string, name: string): string {
+  const start = src.indexOf(`function ${name}(`);
+  assert.ok(start >= 0, `${name} is there`);
+  return src.slice(start, src.indexOf("\n  }\n", start));
 }
 
 test("Providers Reload keeps a held 'switch anyway' prompt and an override written while it was out; clears only what was there at the click", () => {
-  const reload = fnBody("reload");
-  assert.doesNotMatch(reload, /setHeld\(\{\}\)/, "a bare setHeld({}) wipes a prompt that arrived mid-reload");
-  assert.doesNotMatch(reload, /setOverrides\(\{\}\)/);
-  assert.match(reload, /const heldBefore = held;/);
-  assert.match(reload, /const before = overrides;/);
+  const reload = fnBody(PROVIDERS, "reload");
+  assert.doesNotMatch(reload, /setIndexers\(\{\}\)|setClients\(\{\}\)/, "a bare reset wipes a prompt that arrived mid-reload");
+  assert.match(reload, /const indexersBefore = indexers;/);
+  assert.match(reload, /const clientsBefore = clients;/);
   assert.match(reload, /if \(!ok\) return;/, "a failed reload keeps them all");
-  assert.match(reload, /setHeld\(\(m\) => without\(m, \(key\) => m\[key\] === heldBefore\[key\]\)\)/);
-  assert.match(reload, /setOverrides\(\(m\) => without\(m, \(key\) => m\[key\] === before\[key\]\)\)/);
-  assert.match(TSX, /<Toolbar loading=\{loading\} onReload=\{reload\}/, "the Providers toolbar reloads through it");
+  assert.match(reload, /setIndexers\(\(m\) => pruneAfterReload\(m, indexersBefore\)\);/);
+  assert.match(reload, /setClients\(\(m\) => pruneAfterReload\(m, clientsBefore\)\);/);
+  assert.match(PROVIDERS, /<Toolbar loading=\{loading\} onReload=\{reload\}/, "the Providers toolbar reloads through it");
   // useReport's load answers whether ITS report landed.
-  assert.match(TSX, /const load = useCallback\(async \(kind: LoadKind = "manual"\): Promise<boolean> =>/);
-  assert.match(TSX, /setReport\(res\.data\);\s*setError\(""\);\s*return true;/);
+  assert.match(PARTS, /const load = useCallback\(async \(kind: LoadKind = "manual"\): Promise<boolean> =>/);
+  assert.match(PARTS, /setReport\(res\.data\);\s*setError\(""\);\s*return true;/);
 });
 
-test("busy is per instance card — no page-wide busy; a failed first load offers Reload on every tab; bulk searches see the arr's running command", () => {
-  assert.doesNotMatch(TSX, /busy !== null/, "no control is disabled by another card's action");
-  assert.equal(TSX.match(/useState<Record<string, string>>\(\{\}\)/g)?.length, 2, "Tasks and Providers keep busy per card");
-  assert.equal(TSX.match(/if \(!report\) return <Loading error=\{error\} loading=\{loading\} onRetry=\{\(\) => void load\(\)\} \/>;/g)?.length, 3);
-  assert.match(TSX, /function Loading\(\{ error, loading, onRetry \}: \{ error: string; loading: boolean; onRetry: \(\) => void \}\)/);
-  assert.match(TSX, /disabled=\{loading\} onClick=\{onRetry\}/);
+test("busy is per instance card (Tasks) and per card and kind (Indexers & clients) — never page-wide; a failed first load offers Reload on every tab; bulk searches see the arr's running command", () => {
+  assert.doesNotMatch(TABS, /busy !== null/, "no control is disabled by another card's action");
+  assert.equal(TASKS.match(/useState<Record<string, string>>\(\{\}\)/g)?.length, 1, "Tasks keeps busy per card");
+  assert.equal(PROVIDERS.match(/useState<Record<string, string>>\(\{\}\)/g)?.length, 1, "Indexers & clients keeps busy per section");
+  assert.match(PROVIDERS, /const section = sectionKey\(cardKey\(service, instance\), kind\);\s*startBusy\(section, `test:\$\{id \?\? "all"\}`\);/, "a test locks its kind on its card");
+  assert.match(PROVIDERS, /const section = sectionKey\(card, kind\);\s*startBusy\(section, `toggle:\$\{provider\.id\}`\);/, "so does a save");
+  assert.equal(TABS.match(/if \(!report\) return <Loading error=\{error\} loading=\{loading\} onRetry=\{\(\) => void load\(\)\} \/>;/g)?.length, 3);
+  assert.match(PARTS, /export function Loading\(\{ error, loading, onRetry \}: \{ error: string; loading: boolean; onRetry: \(\) => void \}\)/);
+  assert.match(PARTS, /disabled=\{loading\} onClick=\{onRetry\}/);
   assert.match(
-    TSX,
-    /const commandName = bulkActionCommand\(r\.service, action\)\.name;\s*const active = isWatchActive\(watches\[key\]\) \|\| r\.commands\.some\(\(c\) => c\.commandName === commandName && \(c\.status === "started" \|\| c\.status === "queued"\)\);/,
+    TASKS,
+    /const commandName = String\(bulkActionCommand\(r\.service, action\)\.name\);\s*const active = isWatchActive\(watches\[key\]\) \|\| running\.has\(commandName\);/,
   );
+  assert.match(TASKS, /const running = useMemo\(\(\) => activeCommandNames\(r\.commands\), \[r\.commands\]\);/, "the card's running commands, read once");
+});
+
+test("a verdict shows only beside the provider the report still has as tested; a saved provider is read as the kind sent", () => {
+  // Rows and Test All lines are shown against the provider (or the list) as the report has it now.
+  assert.equal([...PROVIDERS.matchAll(/view=\{visibleVerdict\(row\?\.result, against\)\}/g)].length, 2, "indexer and client rows");
+  assert.equal([...PROVIDERS.matchAll(/const against = providerSignature\(orig\);/g)].length, 2, "indexers and clients");
+  assert.match(PROVIDERS, /summary=\{visibleSummary\(indexers\.summary, ixList\)\}/);
+  assert.match(PROVIDERS, /all=\{visibleVerdict\(clients\.all, dcList\)\}/);
+  // A refusal's provider is checked as THIS kind's before it is shown.
+  assert.match(PROVIDERS, /const now = check\(schema, res\.body\);/);
+  assert.match(PROVIDERS, /PROVIDER_SAVED\.indexer, setIndexers/);
+  assert.match(PROVIDERS, /PROVIDER_SAVED\.downloadClient, setClients/);
+  assert.doesNotMatch(PROVIDERS, /as ArrIndexer|as ArrDownloadClient/);
+});
+
+test("Tasks Reload clears each card's last line, but never one still following its command", () => {
+  const reload = fnBody(TASKS, "reload");
+  assert.match(reload, /setMessages\(\(m\) => Object\.fromEntries\(Object\.entries\(m\)\.filter\(\(\[, msg\]\) => msg\.watchKey !== undefined && isWatchActive\(watches\[msg\.watchKey\]\)\)\)\);/);
+  assert.match(reload, /void load\(\);/);
+  assert.match(TASKS, /<Toolbar loading=\{loading\} onReload=\{reload\}/);
+});
+
+test("switching tabs keeps the page's other params and its #fragment", () => {
+  const shell = read("arr-system.tsx");
+  assert.match(shell, /window\.history\.replaceState\(null, "", withQuery\(window\.location, \{ tab: next \}\)\);/);
+  assert.doesNotMatch(shell, /`\?tab=\$\{next\}`/);
 });

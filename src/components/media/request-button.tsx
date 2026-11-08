@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
@@ -19,6 +19,13 @@ import {
 import Link from "next/link";
 import { withBasePath } from "@/lib/base-path";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
+import { readApiError } from "@/lib/client/api-error";
+import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { useAsyncAction } from "@/hooks/use-async-action";
+import { v } from "@/lib/validate";
+import { REQUEST_NOTE_MAX } from "@/lib/request-limits";
+import { SLOT } from "@/lib/i18n/slot";
+import { SlotText } from "@/components/i18n/slot-text";
 import { postMediaRequest } from "@/lib/client/media-request";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { Textarea } from "@/components/ui/textarea";
@@ -112,8 +119,477 @@ export function onBehalfMessage(result: string | undefined, created: number | un
   return created ? ON_BEHALF_MESSAGES.created : "request.onBehalf.collapsed";
 }
 
+type Translate = ReturnType<typeof useT>;
+type MediaType = "MOVIE" | "TV";
+
+const ICON = { width: 14, height: 14 } as const;
+
+// GET /api/requests/quality-profiles.
+const ProfilesAnswer = v.object({
+  qualityProfiles: v.array(v.object({ id: v.int(), name: v.string() })),
+});
+type QualityProfile = { id: number; name: string };
+
+// GET /api/requests/users (another account's email arrives masked for a
+// non-admin; `truncated` is not read here).
+const UsersAnswer = v.object({
+  users: v.optional(v.array(v.object({ id: v.string(), name: v.nullable(v.string()), email: v.string() }))),
+});
+type OnBehalfUser = { id: string; name: string | null; email: string };
+
+// POST /api/requests/bulk.
+const BulkAnswer = v.object({
+  created: v.optional(v.number()),
+  results: v.optional(v.array(v.object({ result: v.optional(v.string()) }))),
+});
+
+type ProfilesState = "idle" | "loading" | "error";
+
+// Request-time quality profiles (REQUEST_ADVANCED). `profiles === null` ⇒ not
+// yet loaded. Each read is a live, rate-limited Radarr/Sonarr call: "loading"
+// stops Request → Cancel → Request from sending a second one, and "error"
+// tells the user why there is no picker (the next open retries).
+function useQualityProfiles(enabled: boolean, mediaType: MediaType) {
+  const action = useAsyncAction();
+  const [profiles, setProfiles] = useState<QualityProfile[] | null>(null);
+  const [profilesState, setProfilesState] = useState<ProfilesState>("idle");
+
+  async function loadProfiles() {
+    if (!enabled || profiles !== null || profilesState === "loading") return;
+    setProfilesState("loading");
+    const res = await action.run("profiles", (signal) =>
+      fetchJson(withBasePath(`/api/requests/quality-profiles?mediaType=${mediaType}`), { schema: ProfilesAnswer, signal }),
+    );
+    if (!res) return;
+    // A non-ok answer or one without a list is a failure, not an empty picker.
+    if (!res.ok) {
+      setProfilesState("error");
+      return;
+    }
+    setProfiles(res.data.qualityProfiles);
+    setProfilesState("idle");
+  }
+
+  return { profiles, profilesState, loadProfiles };
+}
+
+type UsersState = "idle" | "loading" | "loaded" | "error";
+
+// The on-behalf picker's user list: "loading" while the fetch is in flight,
+// "error" when it failed — an empty select alone read as "there are no users"
+// — and "loaded" once it answered, so an EMPTY list is kept rather than
+// refetched on every open. Lives above the panel so closing the panel keeps it.
+function useOnBehalfUsers() {
+  const action = useAsyncAction();
+  const [obUsers, setObUsers] = useState<OnBehalfUser[]>([]);
+  const [obUsersState, setObUsersState] = useState<UsersState>("idle");
+
+  // Fetched once: a loaded list (even an empty one) is kept; only a failed
+  // read is retried on the next open.
+  async function openOnBehalf() {
+    if (obUsersState === "idle" || obUsersState === "error") {
+      setObUsersState("loading");
+      const res = await action.run("users", (signal) =>
+        fetchJson(withBasePath("/api/requests/users"), { schema: UsersAnswer, signal }),
+      );
+      if (!res) return;
+      if (!res.ok) {
+        setObUsersState("error");
+        return;
+      }
+      setObUsers(res.data.users ?? []);
+      setObUsersState("loaded");
+    }
+  }
+
+  return { obUsers, obUsersState, openOnBehalf };
+}
+
+// Reused in the confirm and note panels: the picker when the user can choose a
+// profile, a disabled "loading" picker while the list is on its way (so Confirm
+// isn't clicked believing there is no choice), and a note that the server
+// default will be used when the load failed.
+function ProfileSelect({
+  canChooseProfile,
+  profiles,
+  profilesState,
+  profileId,
+  onChange,
+  t,
+}: {
+  canChooseProfile: boolean;
+  profiles: QualityProfile[] | null;
+  profilesState: ProfilesState;
+  profileId: number | "";
+  onChange: (id: number | "") => void;
+  t: Translate;
+}) {
+  if (!canChooseProfile) return null;
+  if (profilesState === "error") {
+    return (
+      <p className="ds-mono max-w-sm" role="status" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", margin: 0 }}>
+        {t("request.profilesLoadFailed")}
+      </p>
+    );
+  }
+  if (profilesState === "loading") {
+    return (
+      <StyledSelect compact value="" disabled aria-label={t("request.qualityProfile")} className="max-w-sm">
+        <option value="">{t("request.loadingProfiles")}</option>
+      </StyledSelect>
+    );
+  }
+  if (!profiles || profiles.length === 0) return null;
+  return (
+    <StyledSelect
+      compact
+      value={profileId}
+      onChange={(e) => onChange(e.target.value ? Number(e.target.value) : "")}
+      aria-label={t("request.qualityProfile")}
+      className="max-w-sm"
+    >
+      <option value="">{t("request.serverDefaultQuality")}</option>
+      {profiles.map((p) => (
+        <option key={p.id} value={p.id}>
+          {p.name}
+        </option>
+      ))}
+    </StyledSelect>
+  );
+}
+
+// The server-rendered availability and queue lines above the CTA.
+function AvailabilityLines({
+  plex,
+  jellyfin,
+  foundAvailable,
+  arrPending,
+  t,
+}: {
+  plex: boolean;
+  jellyfin: boolean;
+  foundAvailable: boolean;
+  arrPending: boolean;
+  t: Translate;
+}) {
+  return (
+    <>
+      {plex && (
+        <div
+          className="flex items-center font-medium"
+          style={{ gap: 6, fontSize: 13, color: "var(--ds-plex-text)" }}
+        >
+          <PlayCircle style={ICON} />
+          {t("request.availableOn", { server: "Plex" })}
+        </div>
+      )}
+      {jellyfin && (
+        <div
+          className="flex items-center font-medium"
+          style={{ gap: 6, fontSize: 13, color: "var(--ds-jellyfin-text)" }}
+        >
+          <Tv2 style={ICON} />
+          {t("request.availableOn", { server: "Jellyfin" })}
+        </div>
+      )}
+      {foundAvailable && (
+        <DetailActionStatus variant="accent-soft" style={{ width: "fit-content" }}>
+          <Check style={ICON} />
+          {t("request.alreadyAvailable")}
+        </DetailActionStatus>
+      )}
+      {arrPending && (
+        <div
+          className="flex items-center font-medium"
+          style={{ gap: 6, fontSize: 13, color: "var(--ds-warning)" }}
+        >
+          <Clock style={ICON} />
+          {t("request.queued")}
+        </div>
+      )}
+    </>
+  );
+}
+
+function ConfirmPanel({
+  title,
+  note,
+  profileSelect,
+  onConfirm,
+  onCancel,
+  t,
+}: {
+  title: string;
+  note: string;
+  profileSelect: ReactNode;
+  onConfirm: () => void;
+  onCancel: () => void;
+  t: Translate;
+}) {
+  return (
+    <div className="flex flex-col gap-2 w-full max-w-sm">
+      <div
+        className="flex items-center"
+        style={{
+          gap: 8,
+          padding: "10px 12px",
+          borderRadius: 8,
+          border: "1px solid var(--ds-border)",
+          background: "var(--ds-bg-2)",
+        }}
+      >
+        <AlertCircle
+          className="shrink-0"
+          style={{ width: 14, height: 14, color: "var(--ds-accent-text)" }}
+        />
+        <p style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0 }}>
+          {/* Split around the title so it keeps its emphasis in any word order. */}
+          <SlotText text={t("request.confirmPrompt", { title: SLOT })}>
+            <span className="font-semibold">{title}</span>
+          </SlotText>
+        </p>
+      </div>
+      {/* A note typed under "Add Note" survives a failed submit so the
+          user can retry without retyping it — and it rides THIS submit
+          too, so the confirm step has to show it. */}
+      {note.trim() && (
+        <p
+          className="flex items-start"
+          style={{ gap: 6, fontSize: 12, color: "var(--ds-fg-muted)", margin: "0 2px" }}
+        >
+          <MessageSquare className="shrink-0" style={{ width: 12, height: 12, marginTop: 2 }} />
+          <span className="sr-only">{t("request.noteLabel")}</span>
+          <span className="min-w-0 line-clamp-3 whitespace-pre-wrap break-words">{note.trim()}</span>
+        </p>
+      )}
+      {profileSelect}
+      <div className="flex items-center gap-2">
+        <DetailActionButton variant="primary" onClick={onConfirm}>
+          <Check style={ICON} />
+          {t("request.confirm")}
+        </DetailActionButton>
+        <DetailActionButton variant="ghost" onClick={onCancel}>
+          <X style={ICON} />
+          {t("request.cancel")}
+        </DetailActionButton>
+      </div>
+    </div>
+  );
+}
+
+function NotePanel({
+  note,
+  onNoteChange,
+  requestLabel,
+  profileSelect,
+  onSubmit,
+  onCancel,
+  t,
+}: {
+  note: string;
+  onNoteChange: (note: string) => void;
+  requestLabel: string;
+  profileSelect: ReactNode;
+  onSubmit: () => void;
+  onCancel: () => void;
+  t: Translate;
+}) {
+  return (
+    <div className="flex flex-col gap-2 w-full max-w-sm">
+      <Textarea
+        value={note}
+        onChange={(e) => onNoteChange(e.target.value.slice(0, REQUEST_NOTE_MAX))}
+        placeholder={t("request.notePlaceholder")}
+        aria-label={t("request.noteLabel")}
+        rows={3}
+        autoFocus
+        className="resize-none"
+      />
+      {/* Directly under the textarea it counts, right-aligned like a
+          form hint. It used to sit below the Request/Cancel row, where
+          it read as a stray label. */}
+      <p
+        className="ds-mono text-right"
+        style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", margin: "-4px 2px 0 0" }}
+      >
+        {note.length}/{REQUEST_NOTE_MAX}
+      </p>
+      {profileSelect}
+      <div className="flex items-center gap-2">
+        <DetailActionButton variant="primary" onClick={onSubmit}>
+          <Plus style={ICON} />
+          {requestLabel}
+        </DetailActionButton>
+        <DetailActionButton variant="ghost" onClick={onCancel}>
+          <X style={ICON} />
+          {t("request.cancel")}
+        </DetailActionButton>
+      </div>
+    </div>
+  );
+}
+
+// "Request for user…": the user picker and its submit. Mounted only while the
+// panel is open, so Cancel discards the pick and the status line with it; the
+// user list itself is the parent's (useOnBehalfUsers), fetched once.
+function OnBehalfPanel({
+  tmdbId,
+  mediaType,
+  obUsers,
+  obUsersState,
+  onClose,
+  t,
+}: {
+  tmdbId: number;
+  mediaType: MediaType;
+  obUsers: OnBehalfUser[];
+  obUsersState: UsersState;
+  onClose: () => void;
+  t: Translate;
+}) {
+  const router = useRouter();
+  const action = useAsyncAction();
+  const [obUserId, setObUserId] = useState("");
+  const [obMsg, setObMsg] = useState("");
+  const [obMsgError, setObMsgError] = useState(false);
+  const obSubmitting = action.busy("submit");
+
+  async function submitOnBehalf() {
+    if (!obUserId) return;
+    setObMsg("");
+    setObMsgError(false);
+    // Never twice: a second click while the first is in flight does nothing.
+    const res = await action.run(
+      "submit",
+      (signal) =>
+        fetchJson(withBasePath("/api/requests/bulk"), {
+          init: jsonInit("POST", { items: [{ tmdbId, mediaType }], onBehalfOfUserId: obUserId }),
+          schema: BulkAnswer,
+          signal,
+          fallbackError: t("request.somethingWrong"),
+        }),
+      { ifBusy: "skip" },
+    );
+    if (!res) return;
+    if (!res.ok) {
+      setObMsg(res.kind === "network" || res.kind === "timeout" ? t("request.networkError") : res.error);
+      setObMsgError(true);
+      return;
+    }
+    const data = res.data;
+    const result = data.results?.[0]?.result;
+    setObMsg(t(onBehalfMessage(data.results?.[0]?.result, data.created)));
+    const failed = result !== undefined && ON_BEHALF_FAILURES.has(result);
+    setObMsgError(failed);
+    if (!failed) {
+      // Done for that user: clear the pick so the same request isn't sent
+      // again, and re-read the page (its requested / queued state).
+      setObUserId("");
+      router.refresh();
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2 w-full max-w-sm">
+      {obUsersState === "error" ? (
+        <p className="ds-mono" role="alert" style={{ fontSize: 11, color: "var(--ds-danger)", margin: 0 }}>
+          {t("request.usersLoadFailed")}
+        </p>
+      ) : obUsersState === "loaded" && obUsers.length === 0 ? (
+        <p className="ds-mono" role="status" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", margin: 0 }}>
+          {t("request.noEligibleUsers")}
+        </p>
+      ) : (
+        <StyledSelect
+          compact
+          value={obUserId}
+          onChange={(e) => setObUserId(e.target.value)}
+          aria-label={t("request.selectUserLabel")}
+        >
+          <option value="">
+            {obUsersState === "loading" ? t("request.loadingUsers") : t("request.selectUser")}
+          </option>
+          {obUsers.map((u) => (
+            <option key={u.id} value={u.id}>
+              {u.name ?? u.email}
+            </option>
+          ))}
+        </StyledSelect>
+      )}
+      <div className="flex items-center gap-2">
+        <DetailActionButton
+          variant="primary"
+          onClick={submitOnBehalf}
+          disabled={!obUserId || obSubmitting}
+          busy={obSubmitting}
+        >
+          {obSubmitting ? (
+            <Loader2 className="animate-spin" style={ICON} />
+          ) : (
+            <Plus style={ICON} />
+          )}
+          {t("request.requestForUser")}
+        </DetailActionButton>
+        <DetailActionButton variant="ghost" onClick={onClose}>
+          <X style={ICON} />
+          {t("request.cancel")}
+        </DetailActionButton>
+      </div>
+      {obMsg && (
+        <p
+          className="ds-mono"
+          role={obMsgError ? "alert" : "status"}
+          style={{
+            fontSize: 11,
+            color: obMsgError ? "var(--ds-danger)" : "var(--ds-fg-subtle)",
+            margin: 0,
+          }}
+        >
+          {obMsg}
+        </p>
+      )}
+    </div>
+  );
+}
+
+type RequestFailure = { error: string };
+
+// POST /api/requests for the default instance. `duplicate` is the 409 (this
+// viewer already asked); `alreadyAvailable` is the route's 200 that creates
+// NOTHING because the title is already in a library this viewer can see.
+async function sendRequest(
+  payload: { tmdbId: number; mediaType: MediaType; note: string; profileId: number | "" },
+  requestToken: string | undefined,
+  t: Translate,
+): Promise<"duplicate" | "alreadyAvailable" | "created" | RequestFailure> {
+  try {
+    // The page-minted token is refreshed once if it expired while the tab
+    // sat open (postMediaRequest).
+    const res = await postMediaRequest(
+      {
+        tmdbId: payload.tmdbId,
+        mediaType: payload.mediaType,
+        ...(payload.note.trim() ? { note: payload.note.trim() } : {}),
+        ...(payload.profileId ? { qualityProfileId: payload.profileId } : {}),
+      },
+      requestToken,
+    );
+    if (res.status === 409) return "duplicate";
+    if (!res.ok) {
+      return { error: rateLimitMessage(res, t) ?? (await readApiError(res, t("request.somethingWrong"))) };
+    }
+    const body = (await res.json().catch(() => null)) as { alreadyAvailable?: unknown } | null;
+    return body?.alreadyAvailable === true ? "alreadyAvailable" : "created";
+  } catch {
+    return { error: t("request.networkError") };
+  }
+}
+
 // Primary HD request CTA on movie/TV detail + cards: handles the confirm/note/
 // on-behalf flows and reflects availability, pending, and already-requested states.
+//
+// Callers key it by title (detail-actions.tsx), so a client navigation to
+// another title mounts a fresh instance and no state carries across.
 export function RequestButton({
   tmdbId,
   mediaType,
@@ -136,250 +612,80 @@ export function RequestButton({
   const [state, setState] = useState<State>(requested ? "duplicate" : "idle");
   const [note, setNote] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
-  const [obUsers, setObUsers] = useState<{ id: string; name: string | null; email: string }[]>([]);
-  const [obUserId, setObUserId] = useState("");
-  const [obMsg, setObMsg] = useState("");
-  const [obMsgError, setObMsgError] = useState(false);
-  // The picker's user list: "loading" while the fetch is in flight, "error"
-  // when it failed — an empty select alone read as "there are no users" —
-  // and "loaded" once it answered, so an EMPTY list is kept rather than
-  // refetched on every open.
-  const [obUsersState, setObUsersState] = useState<"idle" | "loading" | "loaded" | "error">("idle");
-  const [obSubmitting, setObSubmitting] = useState(false);
-  // Request-time quality profile (REQUEST_ADVANCED). profiles===null ⇒ not yet
-  // loaded; profileId==="" ⇒ use the server default.
-  const [profiles, setProfiles] = useState<{ id: number; name: string }[] | null>(null);
+  // profileId === "" ⇒ use the server default.
   const [profileId, setProfileId] = useState<number | "">("");
-  // Each profile read is a live, rate-limited Radarr/Sonarr call: "loading"
-  // stops Request → Cancel → Request from sending a second one, and "error"
-  // tells the user why there is no picker (the next open retries).
-  const [profilesState, setProfilesState] = useState<"idle" | "loading" | "error">("idle");
+  const { profiles, profilesState, loadProfiles } = useQualityProfiles(canChooseProfile, mediaType);
+  const { obUsers, obUsersState, openOnBehalf } = useOnBehalfUsers();
   // The route answers 200 { alreadyAvailable: true } and creates NOTHING when
   // the title is already in a library this viewer can see (or, for
   // auto-approvers, already downloaded by Radarr/Sonarr). Same handling as
   // Request4kButton: show it as available, not as a request that doesn't exist.
   const [foundAvailable, setFoundAvailable] = useState(false);
-  // Client nav /movie/A → /movie/B reuses this instance. Reset local UI when
-  // the title changes; `requested` is also live (OR'd into isDone below) so a
-  // router.refresh after watchlist auto-request flips the CTA without a remount.
-  const [seenTmdbId, setSeenTmdbId] = useState(tmdbId);
-  const titleChanged = seenTmdbId !== tmdbId;
-  if (titleChanged) {
-    setSeenTmdbId(tmdbId);
-    setState(requested ? "duplicate" : "idle");
-    setNote("");
-    setErrorMsg("");
-    setObUsers([]);
-    setObUserId("");
-    setObMsg("");
-    setObMsgError(false);
-    setObUsersState("idle");
-    setObSubmitting(false);
-    setProfiles(null);
-    setProfileId("");
-    setProfilesState("idle");
-    setFoundAvailable(false);
-  }
   // `requested` going true → false (the request was declined or deleted, then
   // something on the page called router.refresh) must clear a "View request"
   // this button was showing — isDone below ORs the local state in.
   const [prevRequested, setPrevRequested] = useState(!!requested);
-  if (!titleChanged && prevRequested !== !!requested) {
+  if (prevRequested !== !!requested) {
     setPrevRequested(!!requested);
     if (!requested && (state === "duplicate" || state === "requested")) setState("idle");
-  }
-
-  function loadProfiles() {
-    if (!canChooseProfile || profiles !== null || profilesState === "loading") return;
-    setProfilesState("loading");
-    fetch(withBasePath(`/api/requests/quality-profiles?mediaType=${mediaType}`))
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((d: { qualityProfiles?: { id: number; name: string }[] } | null) => {
-        if (!Array.isArray(d?.qualityProfiles)) throw new Error("no qualityProfiles");
-        setProfiles(d.qualityProfiles);
-        setProfilesState("idle");
-      })
-      .catch(() => setProfilesState("error"));
   }
 
   async function submitRequest() {
     setState("loading");
     setErrorMsg("");
-    try {
-      // The page-minted token is refreshed once if it expired while the tab
-      // sat open (postMediaRequest).
-      const res = await postMediaRequest(
-        {
-          tmdbId,
-          mediaType,
-          ...(note.trim() ? { note: note.trim() } : {}),
-          ...(profileId ? { qualityProfileId: profileId } : {}),
-        },
-        requestToken,
-      );
-      if (res.status === 409) {
-        setState("duplicate");
-        return;
-      }
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setErrorMsg(rateLimitMessage(res, t) ?? data.error ?? t("request.somethingWrong"));
-        setState("error");
-        return;
-      }
-      const body = (await res.json().catch(() => null)) as { alreadyAvailable?: boolean } | null;
-      if (body?.alreadyAvailable) {
-        setFoundAvailable(true);
-        setState("idle");
-        router.refresh();
-        return;
-      }
+    const outcome = await sendRequest({ tmdbId, mediaType, note, profileId }, requestToken, t);
+    if (outcome === "duplicate") {
+      setState("duplicate");
+    } else if (outcome === "alreadyAvailable") {
+      setFoundAvailable(true);
+      setState("idle");
+      router.refresh();
+    } else if (outcome === "created") {
       setState("requested");
       toast({ title: t("request.requestedToast", { title }), variant: "success" });
       // Re-render the server-side hero (availability badges, Queued state).
       router.refresh();
-    } catch {
-      setErrorMsg(t("request.networkError"));
+    } else {
+      setErrorMsg(outcome.error);
       setState("error");
     }
   }
 
-  function openOnBehalf() {
-    setObMsg("");
-    setObMsgError(false);
+  function startOnBehalf() {
     setState("onbehalf");
-    // Fetched once: a loaded list (even an empty one) is kept; only a failed
-    // read is retried on the next open.
-    if (obUsersState === "idle" || obUsersState === "error") {
-      setObUsersState("loading");
-      fetch(withBasePath("/api/requests/users"))
-        .then((r) => {
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          return r.json();
-        })
-        .then((d: { users?: { id: string; name: string | null; email: string }[] }) => {
-          setObUsers(d.users ?? []);
-          setObUsersState("loaded");
-        })
-        .catch(() => setObUsersState("error"));
-    }
+    void openOnBehalf();
   }
 
-  async function submitOnBehalf() {
-    if (!obUserId) return;
-    setObSubmitting(true);
-    setObMsg("");
-    setObMsgError(false);
-    try {
-      const res = await fetch(withBasePath("/api/requests/bulk"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items: [{ tmdbId, mediaType }], onBehalfOfUserId: obUserId }),
-      });
-      const data: {
-        created?: number;
-        results?: { result?: string }[];
-        error?: string;
-      } = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setObMsg(data.error ?? t("request.somethingWrong"));
-        setObMsgError(true);
-        return;
-      }
-      const result = data.results?.[0]?.result;
-      setObMsg(t(onBehalfMessage(data.results?.[0]?.result, data.created)));
-      setObMsgError(result !== undefined && ON_BEHALF_FAILURES.has(result));
-    } catch {
-      setObMsg(t("request.networkError"));
-      setObMsgError(true);
-    } finally {
-      setObSubmitting(false);
-    }
-  }
-
-  const isAvailable =
-    (showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable) || (titleChanged ? false : foundAvailable);
-  // `requested` is live — MediaCard ORs media.requestedByMe every render. A
-  // mount-only useState left the next title (or a post-auto-request refresh)
-  // stuck on the previous title's "View Request" / idle CTA. On a title
-  // change this render still holds the previous `state`, so prefer the live
-  // prop until the reset lands.
-  const isDone = titleChanged
-    ? !!requested
-    : state === "requested" || state === "duplicate" || !!requested;
-  const uiState: State = titleChanged ? (requested ? "duplicate" : "idle") : state;
-  // Only the viewer's OWN request replaces the CTA. A title queued by someone
-  // else (arrPending) stays requestable: the server mirrors the approved status
-  // so this user is tracked for the "now available" notification. The queue
-  // state is still shown by the "Queued" indicator above.
-  const showViewRequest = isDone;
+  const isAvailable = (showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable) || foundAvailable;
+  // `requested` is live — MediaCard ORs media.requestedByMe every render, and
+  // a router.refresh after a watchlist auto-request flips the CTA without a
+  // remount. Only the viewer's OWN request replaces the CTA. A title queued by
+  // someone else (arrPending) stays requestable: the server mirrors the
+  // approved status so this user is tracked for the "now available"
+  // notification. The queue state is still shown by the "Queued" indicator.
+  const showViewRequest = state === "requested" || state === "duplicate" || !!requested;
   const requestLabel = mediaType === "MOVIE" ? t("request.requestMovie") : t("request.requestTv");
-  // Split around the title so it keeps its emphasis in any word order.
-  const confirmPrompt = t("request.confirmPrompt", { title: "\u0000" }).split("\u0000");
 
-  // Reused in the confirm and note panels. Same element in two spots is fine — it
-  // only renders when the user can choose a profile and options have loaded; a
-  // failed load says the server default will be used instead of vanishing.
-  const profileSelect =
-    canChooseProfile && profilesState === "error" ? (
-      <p className="ds-mono max-w-sm" role="status" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", margin: 0 }}>
-        {t("request.profilesLoadFailed")}
-      </p>
-    ) : canChooseProfile && profiles && profiles.length > 0 ? (
-      <StyledSelect
-        compact
-        value={profileId}
-        onChange={(e) => setProfileId(e.target.value ? Number(e.target.value) : "")}
-        aria-label={t("request.qualityProfile")}
-        className="max-w-sm"
-      >
-        <option value="">{t("request.serverDefaultQuality")}</option>
-        {profiles.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.name}
-          </option>
-        ))}
-      </StyledSelect>
-    ) : null;
+  const profileSelect = (
+    <ProfileSelect
+      canChooseProfile={canChooseProfile}
+      profiles={profiles}
+      profilesState={profilesState}
+      profileId={profileId}
+      onChange={setProfileId}
+      t={t}
+    />
+  );
 
   return (
     <div className="flex flex-col gap-2">
-      {showPlex && plexAvailable && (
-        <div
-          className="flex items-center font-medium"
-          style={{ gap: 6, fontSize: 13, color: "var(--ds-plex-text)" }}
-        >
-          <PlayCircle style={{ width: 14, height: 14 }} />
-          {t("request.availableOn", { server: "Plex" })}
-        </div>
-      )}
-      {showJellyfin && jellyfinAvailable && (
-        <div
-          className="flex items-center font-medium"
-          style={{ gap: 6, fontSize: 13, color: "var(--ds-jellyfin-text)" }}
-        >
-          <Tv2 style={{ width: 14, height: 14 }} />
-          {t("request.availableOn", { server: "Jellyfin" })}
-        </div>
-      )}
-      {foundAvailable && (
-        <DetailActionStatus variant="accent-soft" style={{ width: "fit-content" }}>
-          <Check style={{ width: 14, height: 14 }} />
-          {t("request.alreadyAvailable")}
-        </DetailActionStatus>
-      )}
-      {arrPending && (
-        <div
-          className="flex items-center font-medium"
-          style={{ gap: 6, fontSize: 13, color: "var(--ds-warning)" }}
-        >
-          <Clock style={{ width: 14, height: 14 }} />
-          {t("request.queued")}
-        </div>
-      )}
+      <AvailabilityLines
+        plex={!!(showPlex && plexAvailable)}
+        jellyfin={!!(showJellyfin && jellyfinAvailable)}
+        foundAvailable={foundAvailable}
+        arrPending={!!arrPending}
+        t={t}
+      />
 
       {showViewRequest && (
         <Link
@@ -387,215 +693,93 @@ export function RequestButton({
           className={DETAIL_ACTION_CLASS}
           style={{ ...detailActionStyle("accent-soft"), width: "fit-content" }}
         >
-          <Check style={{ width: 14, height: 14 }} />
+          <Check style={ICON} />
           {t("request.viewRequest")}
         </Link>
       )}
 
       {!isAvailable && !showViewRequest && blacklisted && (
         <DetailActionStatus variant="muted" style={{ width: "fit-content" }}>
-          <Ban style={{ width: 14, height: 14 }} />
+          <Ban style={ICON} />
           {t("request.notAvailableToRequest")}
         </DetailActionStatus>
       )}
 
       {!isAvailable && !showViewRequest && !blacklisted && canRequest && (
         <>
-          {uiState === "confirm" && (
-            <div className="flex flex-col gap-2 w-full max-w-sm">
-              <div
-                className="flex items-center"
-                style={{
-                  gap: 8,
-                  padding: "10px 12px",
-                  borderRadius: 8,
-                  border: "1px solid var(--ds-border)",
-                  background: "var(--ds-bg-2)",
-                }}
-              >
-                <AlertCircle
-                  className="shrink-0"
-                  style={{ width: 14, height: 14, color: "var(--ds-accent-text)" }}
-                />
-                <p style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0 }}>
-                  {confirmPrompt[0]}
-                  <span className="font-semibold">{title}</span>
-                  {confirmPrompt[1]}
-                </p>
-              </div>
-              {/* A note typed under "Add Note" survives a failed submit so the
-                  user can retry without retyping it — and it rides THIS submit
-                  too, so the confirm step has to show it. */}
-              {note.trim() && (
-                <p
-                  className="flex items-start"
-                  style={{ gap: 6, fontSize: 12, color: "var(--ds-fg-muted)", margin: "0 2px" }}
-                >
-                  <MessageSquare className="shrink-0" style={{ width: 12, height: 12, marginTop: 2 }} />
-                  <span className="sr-only">{t("request.noteLabel")}</span>
-                  <span className="min-w-0 line-clamp-3 whitespace-pre-wrap break-words">{note.trim()}</span>
-                </p>
-              )}
-              {profileSelect}
-              <div className="flex items-center gap-2">
-                <DetailActionButton variant="primary" onClick={submitRequest}>
-                  <Check style={{ width: 14, height: 14 }} />
-                  {t("request.confirm")}
-                </DetailActionButton>
-                <DetailActionButton variant="ghost" onClick={() => setState("idle")}>
-                  <X style={{ width: 14, height: 14 }} />
-                  {t("request.cancel")}
-                </DetailActionButton>
-              </div>
-            </div>
+          {state === "confirm" && (
+            <ConfirmPanel
+              title={title}
+              note={note}
+              profileSelect={profileSelect}
+              onConfirm={submitRequest}
+              onCancel={() => setState("idle")}
+              t={t}
+            />
           )}
 
-          {uiState === "note" && (
-            <div className="flex flex-col gap-2 w-full max-w-sm">
-              <Textarea
-                value={note}
-                onChange={(e) => setNote(e.target.value.slice(0, 500))}
-                placeholder={t("request.notePlaceholder")}
-                aria-label={t("request.noteLabel")}
-                rows={3}
-                autoFocus
-                className="resize-none"
-              />
-              {/* Directly under the textarea it counts, right-aligned like a
-                  form hint. It used to sit below the Request/Cancel row, where
-                  it read as a stray label. */}
-              <p
-                className="ds-mono text-right"
-                style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", margin: "-4px 2px 0 0" }}
-              >
-                {note.length}/500
-              </p>
-              {profileSelect}
-              <div className="flex items-center gap-2">
-                <DetailActionButton variant="primary" onClick={submitRequest}>
-                  <Plus style={{ width: 14, height: 14 }} />
-                  {requestLabel}
-                </DetailActionButton>
-                <DetailActionButton
-                  variant="ghost"
-                  onClick={() => {
-                    setState("idle");
-                    setNote("");
-                  }}
-                >
-                  <X style={{ width: 14, height: 14 }} />
-                  {t("request.cancel")}
-                </DetailActionButton>
-              </div>
-            </div>
+          {state === "note" && (
+            <NotePanel
+              note={note}
+              onNoteChange={setNote}
+              requestLabel={requestLabel}
+              profileSelect={profileSelect}
+              onSubmit={submitRequest}
+              onCancel={() => {
+                setState("idle");
+                setNote("");
+              }}
+              t={t}
+            />
           )}
 
-          {uiState === "onbehalf" && (
-            <div className="flex flex-col gap-2 w-full max-w-sm">
-              {obUsersState === "error" ? (
-                <p className="ds-mono" role="alert" style={{ fontSize: 11, color: "var(--ds-danger)", margin: 0 }}>
-                  {t("request.usersLoadFailed")}
-                </p>
-              ) : obUsersState === "loaded" && obUsers.length === 0 ? (
-                <p className="ds-mono" role="status" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", margin: 0 }}>
-                  {t("request.noEligibleUsers")}
-                </p>
-              ) : (
-              <StyledSelect
-                compact
-                value={obUserId}
-                onChange={(e) => setObUserId(e.target.value)}
-                aria-label={t("request.selectUserLabel")}
-              >
-                <option value="">
-                  {obUsersState === "loading" ? t("request.loadingUsers") : t("request.selectUser")}
-                </option>
-                {obUsers.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name ?? u.email}
-                  </option>
-                ))}
-              </StyledSelect>
-              )}
-              <div className="flex items-center gap-2">
-                <DetailActionButton
-                  variant="primary"
-                  onClick={submitOnBehalf}
-                  disabled={!obUserId || obSubmitting}
-                  busy={obSubmitting}
-                >
-                  {obSubmitting ? (
-                    <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
-                  ) : (
-                    <Plus style={{ width: 14, height: 14 }} />
-                  )}
-                  {t("request.requestForUser")}
-                </DetailActionButton>
-                <DetailActionButton
-                  variant="ghost"
-                  onClick={() => {
-                    setState("idle");
-                    setObUserId("");
-                    setObMsg("");
-                    setObMsgError(false);
-                  }}
-                >
-                  <X style={{ width: 14, height: 14 }} />
-                  {t("request.cancel")}
-                </DetailActionButton>
-              </div>
-              {obMsg && (
-                <p
-                  className="ds-mono"
-                  role={obMsgError ? "alert" : "status"}
-                  style={{
-                    fontSize: 11,
-                    color: obMsgError ? "var(--ds-danger)" : "var(--ds-fg-subtle)",
-                    margin: 0,
-                  }}
-                >
-                  {obMsg}
-                </p>
-              )}
-            </div>
+          {state === "onbehalf" && (
+            <OnBehalfPanel
+              tmdbId={tmdbId}
+              mediaType={mediaType}
+              obUsers={obUsers}
+              obUsersState={obUsersState}
+              onClose={() => setState("idle")}
+              t={t}
+            />
           )}
 
-          {uiState !== "note" && uiState !== "confirm" && uiState !== "onbehalf" && (
+          {state !== "note" && state !== "confirm" && state !== "onbehalf" && (
             <div className="flex items-center gap-2 flex-wrap">
               <DetailActionButton
                 variant="primary"
-                onClick={() => { loadProfiles(); setState("confirm"); }}
-                disabled={uiState === "loading"}
-                busy={uiState === "loading"}
+                onClick={() => { void loadProfiles(); setState("confirm"); }}
+                disabled={state === "loading"}
+                busy={state === "loading"}
               >
-                {uiState === "loading" ? (
+                {state === "loading" ? (
                   <Loader2
                     className="animate-spin"
-                    style={{ width: 14, height: 14 }}
+                    style={ICON}
                   />
                 ) : (
-                  <Plus style={{ width: 14, height: 14 }} />
+                  <Plus style={ICON} />
                 )}
-                {uiState === "loading" ? t("request.submitting") : requestLabel}
+                {state === "loading" ? t("request.submitting") : requestLabel}
               </DetailActionButton>
 
-              {(uiState === "idle" || uiState === "error") && (
+              {(state === "idle" || state === "error") && (
                 <>
                   <DetailActionButton
                     variant="secondary"
-                    onClick={() => { loadProfiles(); setState("note"); }}
+                    onClick={() => { void loadProfiles(); setState("note"); }}
                     title={t("request.addNoteTitle")}
                   >
-                    <MessageSquare style={{ width: 14, height: 14 }} />
+                    <MessageSquare style={ICON} />
                     {t("request.addNote")}
                   </DetailActionButton>
                   {canRequestOnBehalf && (
                     <DetailActionButton
                       variant="ghost"
-                      onClick={openOnBehalf}
+                      onClick={startOnBehalf}
                       title={t("request.requestForAnotherUser")}
                     >
-                      <Plus style={{ width: 14, height: 14 }} />
+                      <Plus style={ICON} />
                       {t("request.requestForUserEllipsis")}
                     </DetailActionButton>
                   )}
@@ -604,7 +788,7 @@ export function RequestButton({
             </div>
           )}
 
-          {uiState === "error" && (
+          {state === "error" && (
             <p
               className="ds-mono max-w-sm"
               role="alert"

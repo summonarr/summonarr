@@ -5,10 +5,9 @@ import { Loader2 } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { withBasePath } from "@/lib/base-path";
-import { rateLimitMessage } from "@/lib/client/rate-limit";
-import { buildSecondFactor, type SecondFactorProof } from "@/lib/client/step-up";
 import { useT } from "@/components/i18n/i18n-provider";
-import type { ChangePasswordSecondFactor } from "@/components/profile/change-password";
+import { useSecondFactorStepUp, type KnownSecondFactor } from "./use-second-factor-step-up";
+import { SecondFactorCodeField } from "./second-factor-code-field";
 
 // Self-service "close account" (required by App Store Guideline 5.1.1(v)).
 // It calls DELETE /api/profile, which DISABLES the account: every session is
@@ -26,36 +25,21 @@ export function DeleteAccount({
   secondFactor,
 }: {
   requiresPassword?: boolean;
-  secondFactor?: ChangePasswordSecondFactor;
+  secondFactor?: KnownSecondFactor;
 }) {
   const t = useT();
   const [confirming, setConfirming] = useState(false);
   const [confirmText, setConfirmText] = useState("");
   const [password, setPassword] = useState("");
-  const [stepUpCode, setStepUpCode] = useState("");
-  // The methods the server listed when it asked for a second factor.
-  const [serverMethods, setServerMethods] = useState<string[] | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // An account with no password (SSO) has nothing to confirm a factor against.
+  const stepUp = useSecondFactorStepUp({
+    known: secondFactor,
+    applies: requiresPassword,
+    failedMessage: t("profile.close.error.failed"),
+  });
 
-  const needsSecondFactor = requiresPassword && (!!secondFactor?.enabled || serverMethods !== null);
-  const passkeyPossible =
-    (!!secondFactor?.hasPasskeys && !!secondFactor.webauthnAvailable) || !!serverMethods?.includes("webauthn");
-
-  // The `secondFactor` body field, or null when the user must act first (an
-  // error is already shown).
-  async function secondFactorProof(): Promise<SecondFactorProof | null> {
-    // The one client second-factor builder every profile step-up uses.
-    const r = await buildSecondFactor({
-      code: stepUpCode,
-      passkeyPossible,
-      t,
-      failedMessage: () => t("profile.close.error.failed"),
-    });
-    if ("proof" in r) return r.proof;
-    if (r.error) setError(r.error);
-    return null;
-  }
   // The word the user types is translated (a French user is not asked to type
   // DELETE), and the compare ignores case and surrounding whitespace.
   const confirmWord = t("profile.close.confirmWord");
@@ -64,18 +48,18 @@ export function DeleteAccount({
   async function handleDelete() {
     setError(null);
     setDeleting(true);
+    // The success path leaves the page; every other exit re-enables the button.
+    let navigating = false;
     try {
       const body: Record<string, unknown> = { password };
-      if (needsSecondFactor) {
-        const proof = await secondFactorProof();
-        if (!proof) {
-          setDeleting(false);
+      if (stepUp.needsSecondFactor) {
+        const r = await stepUp.secondFactorProof();
+        if (!("proof" in r)) {
+          if (r.error) setError(r.error);
           return;
         }
-        body.secondFactor = proof;
+        body.secondFactor = r.proof;
       }
-      // A code is single-use (a recovery code is consumed), so never resend one.
-      setStepUpCode("");
       const res = await fetch(withBasePath("/api/profile"), {
         method: "DELETE",
         ...(requiresPassword
@@ -86,27 +70,18 @@ export function DeleteAccount({
           : {}),
       });
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        if (data.secondFactorRequired) {
-          if (Array.isArray(data.methods)) setServerMethods(data.methods as string[]);
-          else setServerMethods((m) => m ?? []);
-          // With no proof sent, ask for one here rather than show the generic text.
-          if (!body.secondFactor) {
-            setError(t("profile.mfa.stepUp.codeRequired"));
-            setDeleting(false);
-            return;
-          }
-        }
-        // A two-factor lockout is a 429 with its own explanation and no Retry-After.
-        const lockedOut = res.status === 429 && !!body.secondFactor && typeof data.error === "string";
-        setError(lockedOut ? data.error : rateLimitMessage(res, t) ?? data.error ?? t("profile.close.error.failed"));
-        setDeleting(false);
+        // A passwordless web session whose sign-in is too old answers 401
+        // { error: "session-too-old", message }: the sentence is what shows.
+        const data: unknown = await res.json().catch(() => null);
+        setError(stepUp.refusalMessage(res, data, !!body.secondFactor, t("profile.close.error.failed")));
         return;
       }
+      navigating = true;
       window.location.href = withBasePath("/login");
     } catch {
       setError(t("profile.close.error.retry"));
-      setDeleting(false);
+    } finally {
+      if (!navigating) setDeleting(false);
     }
   }
 
@@ -153,23 +128,13 @@ export function DeleteAccount({
           aria-label={t("profile.password.current")}
         />
       )}
-      {needsSecondFactor && (
-        <div>
-          <label className="block text-sm text-zinc-400 mb-1" htmlFor="delete-stepup-code">
-            {t("profile.mfa.stepUp.label")}{" "}
-            <span className="text-zinc-500">
-              {passkeyPossible ? t("profile.mfa.stepUp.hintWithPasskey") : t("profile.mfa.stepUp.hint")}
-            </span>
-          </label>
-          <Input
-            id="delete-stepup-code"
-            autoComplete="one-time-code"
-            maxLength={24}
-            value={stepUpCode}
-            onChange={(e) => setStepUpCode(e.target.value)}
-            className="w-56"
-          />
-        </div>
+      {stepUp.needsSecondFactor && (
+        <SecondFactorCodeField
+          id="delete-stepup-code"
+          value={stepUp.stepUpCode}
+          onChange={stepUp.setStepUpCode}
+          passkeyPossible={stepUp.passkeyPossible}
+        />
       )}
       {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
       <div className="flex flex-wrap gap-2">
@@ -191,7 +156,7 @@ export function DeleteAccount({
             setConfirming(false);
             setConfirmText("");
             setPassword("");
-            setStepUpCode("");
+            stepUp.setStepUpCode("");
             setError(null);
           }}
           className="w-full sm:w-auto"

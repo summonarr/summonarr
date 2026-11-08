@@ -31,10 +31,10 @@
 //      scrub-audit-pii issue deleteMany/updateMany against the live tables, so
 //      the tests pin that every delete carries a date predicate — an unbounded
 //      deleteMany here erases the whole audit log.
-//   5. purge-auth-sessions IS FAILURE-ISOLATED. Its ten deletes run under
-//      Promise.allSettled and it reports a NON-2xx when any leg fails, so
-//      withCronRunRecording marks the run failed while the body still carries
-//      the counts that did succeed.
+//   5. purge-auth-sessions IS FAILURE-ISOLATED. Its ten deletes run one at a
+//      time, a failing leg never stops the others, and a failure answers 200
+//      with X-Cron-Degraded, so withCronRunRecording marks the run failed while
+//      the body still carries the counts that did succeed.
 //
 // Harness: real handlers invoked with a NextRequest, over in-memory prisma stubs
 // and a monkey-patched `pg` Client.prototype (the tests/advisory-lock.test.mts /
@@ -256,7 +256,7 @@ const SNAP = await import("../src/lib/arr-snapshot.ts");
 async function plantDueArrView(): Promise<void> {
   SNAP.resetArrSnapshotsForTests();
   const url = "http://localhost:3000/api/admin/queue";
-  await SNAP.snapshotted(async () => Response.json({ items: [] }))(new NextRequest(url, { headers: { "accept-language": "en" } }), {}, {});
+  await SNAP.snapshotted(async () => Response.json({ items: [] }))(new NextRequest(url, { headers: { "accept-language": "en" } }), {}, { user: { id: "admin-1", role: "ADMIN", permissions: BigInt(0) } });
   SNAP.rememberSnapshot(SNAP.snapshotKey(url, "en")!, '{"items":[]}', Date.now() - 10 * 60_000, { url, locale: "en", viewed: true });
 }
 
@@ -646,13 +646,18 @@ test("scrub-audit-pii: the userName pass writes and skips on the viewer's REDACT
     shadowPrismaModel(prisma, "auditLog", counter("auditLog"));
   }
   // The values match today, so the run above can't tell the constant from a
-  // copy of it: both scrub paths must name the constant, never the literal.
+  // copy of it: the one scrub both paths run must name the constant, never the
+  // literal, and neither path may carry a scrub of its own.
   const { readFileSync } = await import("node:fs");
+  const read = (file: string) => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+  const scrubSrc = read("src/lib/audit-pii-scrub.ts");
+  assert.doesNotMatch(scrubSrc, /["'`]\[redacted\]["'`]/, "the scrub carries its own \"[redacted]\" literal");
+  assert.match(scrubSrc, /userName: \{ not: REDACTED_USER_NAME \}/, "the scrub must skip rows already redacted by the constant");
+  assert.match(scrubSrc, /userName: REDACTED_USER_NAME \}/, "the scrub must write the constant");
   for (const file of ["src/app/api/cron/scrub-audit-pii/route.ts", "src/app/api/admin/audit-log/route.ts"]) {
-    const src = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
-    assert.doesNotMatch(src, /["'`]\[redacted\]["'`]/, `${file} carries its own "[redacted]" literal`);
-    assert.match(src, /userName: \{ not: REDACTED_USER_NAME \}/, `${file} must skip rows already redacted by the constant`);
-    assert.match(src, /userName: REDACTED_USER_NAME \}/, `${file} must write the constant`);
+    const src = read(file);
+    assert.match(src, /await scrubAuditPii\(cutoff\)/, `${file} runs the shared scrub`);
+    assert.doesNotMatch(src, /auditLog\.updateMany|REDACTED_USER_NAME/, `${file} carries a scrub of its own`);
   }
 });
 
@@ -682,11 +687,13 @@ test("scrub-audit-pii: aged admin-action rows lose the TARGET user's name/email 
   const aged_ = (r: Row, w: { createdAt?: { lt?: Date } }) => !w.createdAt?.lt || r.createdAt < w.createdAt.lt;
   shadowPrismaModel(prisma, "auditLog", {
     ...counter("auditLog"),
-    findMany: async (args: { where: { createdAt?: { lt?: Date }; OR?: Array<{ details: { contains: string } }> }; cursor?: { id: string } }) => {
+    findMany: async (args: { where: { createdAt?: { lt?: Date }; AND?: Array<{ OR?: Array<{ details: { contains: string } }> }> }; cursor?: { id: string } }) => {
       rec("auditLog.findMany", args.where);
       if (args.cursor) return [];
+      // The PII-key OR is one of the where's AND terms (the caller's own OR is never overwritten).
+      const keyTerms = (args.where.AND ?? []).flatMap((t) => t.OR ?? []);
       return rows
-        .filter((r) => aged_(r, args.where) && (args.where.OR ?? []).some((o) => r.details?.includes(o.details.contains)))
+        .filter((r) => aged_(r, args.where) && keyTerms.some((o) => r.details?.includes(o.details.contains)))
         .map((r) => ({ id: r.id, details: r.details }));
     },
     updateMany: async (args: { where: { createdAt?: { lt?: Date }; id?: string; details?: string }; data: { details?: string | null } }) => {
@@ -726,14 +733,46 @@ test("purge-auth-sessions: one failing delete does NOT abort the other nine", as
   });
   const res = await purge.POST(authed(purge));
   const swept = ops.filter((o) => o.op.endsWith(".deleteMany")).length;
-  assert.ok(swept >= 9, `only ${swept} deletes were attempted — allSettled should run all of them`);
+  assert.equal(swept, 10, `only ${swept} deletes were attempted — a failing leg must not stop the rest`);
   const body = await res.json();
   assert.equal(body.errorCount, 1);
-  // Non-2xx so withCronRunRecording marks the run failed…
-  assert.equal(res.status, 500);
+  // 200 + X-Cron-Degraded, like every other cron, so withCronRunRecording
+  // marks the run failed without the entrypoint re-running a daily job every
+  // 300s (its fast retry on a non-2xx)…
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("x-cron-degraded"), "1");
+  assert.equal(body.ok, false);
+  assert.match(body.error, /1 table purge\(s\) failed/);
+  assert.equal(ledgerOk("auth-sessions:purge-expired"), false, "the ledger records the failed run");
   // …while the body still carries the counts that DID succeed.
   assert.equal(typeof body.deleted.authSessions, "number");
   shadowPrismaModel(prisma, "webhookReplay", counter("webhookReplay"));
+});
+
+test("purge-auth-sessions: the legs run one at a time, never all at once on the small Prisma pool", async () => {
+  let inFlight = 0;
+  let peak = 0;
+  const slow = (model: string) => ({
+    ...counter(model),
+    deleteMany: async (args: { where?: unknown } = {}) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setImmediate(r));
+      inFlight--;
+      rec(`${model}.deleteMany`, args.where);
+      return { count: 0 };
+    },
+  });
+  const models = ["authSession", "discordLinkToken", "discordMergeCode", "discordSearchCache", "webhookReplay", "plexTokenCache", "tmdbMediaCore", "ipLookupCache", "auditLog"];
+  for (const m of models) shadowPrismaModel(prisma, m, slow(m));
+  try {
+    const res = await purge.POST(authed(purge));
+    assert.equal(res.status, 200);
+    assert.equal(opsOf("auditLog.deleteMany").length, 1);
+    assert.equal(peak, 1, `${peak} purge deletes ran at once`);
+  } finally {
+    for (const m of models) shadowPrismaModel(prisma, m, counter(m));
+  }
 });
 
 test("purge-auth-sessions: an all-clean run is 200 with errorCount 0", async () => {
@@ -742,6 +781,8 @@ test("purge-auth-sessions: an all-clean run is 200 with errorCount 0", async () 
   const body = await res.json();
   assert.equal(body.ok, true);
   assert.equal(body.errorCount, 0);
+  assert.equal(body.aborted, false);
+  assert.equal(res.headers.get("x-cron-degraded"), null);
 });
 
 test("purge-auth-sessions: a failing leg reports 0 under ITS key and is logged by name; the other counts stand", async () => {
@@ -755,7 +796,8 @@ test("purge-auth-sessions: a failing leg reports 0 under ITS key and is logged b
   });
   try {
     const res = await purge.POST(authed(purge));
-    assert.equal(res.status, 500);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("x-cron-degraded"), "1");
     const body = await res.json() as { errorCount: number; deleted: Record<string, number> };
     assert.equal(body.errorCount, 1);
     assert.equal(body.deleted.ipLookupCache, 0);
@@ -1006,9 +1048,45 @@ test("every cron route resolves its actor through getCronActor — no second rea
   const { readFileSync } = await import("node:fs");
   for (const route of ROUTES) {
     const src = readFileSync(`src/app/api/cron/${route.name}/route.ts`, "utf-8");
-    const usesAuth = /getCronActor\(|isCronAuthorized\(/.test(src);
+    // defineCronRoute / withCronActor (src/lib/cron-route.ts) call getCronActor
+    // first; tests/cron-route.test.mts pins that.
+    const usesAuth = /getCronActor\(|isCronAuthorized\(|defineCronRoute\(|withCronActor\(/.test(src);
     assert.ok(usesAuth, `${route.name} has no cron gate`);
     assert.ok(!src.includes("readActiveSummonarrSessionFromRequest"), `${route.name} re-reads the session for attribution — use getCronActor`);
+  }
+});
+
+test("every locking cron route is built on defineCronRoute — one shape for auth, skip, ledger, lock and answer", async () => {
+  const { readFileSync } = await import("node:fs");
+  for (const route of LOCKING) {
+    const code = readFileSync(`src/app/api/cron/${route.name}/route.ts`, "utf-8")
+      .split("\n").map((l) => { const i = l.indexOf("//"); return i === -1 ? l : l.slice(0, i); }).join("\n");
+    assert.match(code, /export const POST = defineCronRoute\(/, `${route.name} hand-rolls its cron plumbing`);
+    for (const piece of ["withAdvisoryLock(", "withCronRunRecording(", "getCronActor(", "X-Cron-Degraded"]) {
+      assert.ok(!code.includes(piece), `${route.name} still spells out ${piece} itself`);
+    }
+  }
+});
+
+test("warm-recommendations: a failed graph refresh is degraded with a COUNT in X-Cron-Degraded and the reason in `error`", async () => {
+  // It used to send the word "graph", the one cron whose header was not a count.
+  const route = ROUTES.find((r) => r.name === "warm-recommendations")!;
+  // The graph's source walk reads the watchlist; failing it fails the refresh.
+  shadowPrismaModel(prisma, "watchlistItem", {
+    ...counter("watchlistItem"),
+    findMany: async () => { throw new Error("graph store unavailable (unit test)"); },
+  });
+  try {
+    const res = await route.POST(authed(route));
+    assert.equal(res.status, 200);
+    const body = await res.json() as { ok: boolean; graphFailed: boolean; error?: string };
+    assert.equal(body.graphFailed, true, "the harness must actually fail the graph refresh");
+    assert.equal(body.ok, false);
+    assert.match(body.error ?? "", /graph refresh failed/);
+    assert.equal(res.headers.get("x-cron-degraded"), "1");
+    assert.equal(ledgerOk("recommendations"), false);
+  } finally {
+    shadowPrismaModel(prisma, "watchlistItem", counter("watchlistItem"));
   }
 });
 

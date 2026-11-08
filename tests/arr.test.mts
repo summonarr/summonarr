@@ -19,6 +19,17 @@ import {
 } from "../src/lib/arr.ts";
 import { SafeFetchError } from "../src/lib/safe-fetch.ts";
 
+// arr.ts is the entry; the client lives in flat siblings it re-exports. Source
+// pins read the module that holds the code, or the whole family when the rule
+// is "nowhere in the client".
+const ARR_MODULES = ["arr.ts", "arr-client.ts", "arr-config.ts", "arr-id-map.ts", "arr-lookup.ts", "arr-add.ts", "arr-releases.ts", "arr-queue-cache.ts"];
+const arrSource = (file: string) => readFileSync(new URL(`../src/lib/${file}`, import.meta.url), "utf8");
+const arrFamilySource = () => ARR_MODULES.map(arrSource).join("\n");
+const bodyOf = (source: string, signature: string) => {
+  const fn = source.slice(source.indexOf(signature));
+  return fn.slice(0, fn.indexOf("\n}\n"));
+};
+
 // arr.ts imports @/lib/prisma (client constructed at load, connections/queries
 // are lazy) and @/lib/token-crypto (key read lazily). Set the env so an
 // incidental lazy read can never throw mid-test; no test below issues a query.
@@ -263,20 +274,39 @@ test("guardrail 5: the 50 MB cap and 30s default timeout are pinned and wired in
   // runtime assertion isn't possible here. Pin the source text instead: this
   // fails the suite if anyone lowers the cap (the old 10 MB cap silently
   // truncated >3k-movie libraries) or detaches it from the safe-fetch call.
-  const source = readFileSync(new URL("../src/lib/arr.ts", import.meta.url), "utf8");
+  const source = arrSource("arr-client.ts");
   assert.match(source, /const ARR_FETCH_MAX_BYTES = 50 \* 1024 \* 1024;/);
   assert.match(source, /const ARR_FETCH_TIMEOUT_MS = 30_000;/);
   assert.match(source, /maxResponseBytes: ARR_FETCH_MAX_BYTES/);
   // The 30s default stays wired; a caller may only pass its own (the
   // interactive release search, pinned at 120s below), never drop the timeout.
   assert.match(source, /timeoutMs: options\.timeoutMs \?\? ARR_FETCH_TIMEOUT_MS/);
-  assert.match(source, /export const RELEASE_SEARCH_TIMEOUT_MS = 120_000;/);
-  assert.match(source, /\/api\/v3\/release\?\$\{query\}`, \{ timeoutMs: RELEASE_SEARCH_TIMEOUT_MS \}/);
+  // One transport: no other module of the client builds its own request.
+  for (const file of ARR_MODULES.filter((f) => f !== "arr-client.ts")) {
+    assert.doesNotMatch(arrSource(file), /safeFetchAdminConfigured|ARR_FETCH_MAX_BYTES/, `${file} goes through arrFetch`);
+  }
+
   // EVERY interactive release read waits that long — the request "Pick release"
-  // and the issue Replace too (their background job was pointless at 30s).
-  const releaseReads = [...source.matchAll(/arrFetch<ArrRelease\[\]>\(([^)]*)\)/g)].map((m) => m[1]);
-  assert.ok(releaseReads.length >= 3, "the three /api/v3/release reads are found");
-  for (const call of releaseReads) assert.match(call, /timeoutMs: RELEASE_SEARCH_TIMEOUT_MS/, call);
+  // and the issue Replace too (their background job was pointless at 30s). They
+  // all go through readReleases, the one release GET.
+  const releases = arrSource("arr-releases.ts");
+  assert.match(releases, /export const RELEASE_SEARCH_TIMEOUT_MS = 120_000;/);
+  assert.match(bodyOf(releases, "async function readReleases("), /arrFetch<unknown>\(cfg, path, \{ timeoutMs: RELEASE_SEARCH_TIMEOUT_MS \}\)/);
+  const fetches = [...releases.matchAll(/arrFetch<[^>]*>\(([^)]*)\)/g)].map((m) => m[1]);
+  assert.deepEqual(
+    // The grab POST is postReleaseGrab's (tests/arr-release-grab.test.mts pins its timeout).
+    fetches.filter((call) => !/timeoutMs: RELEASE_SEARCH_TIMEOUT_MS/.test(call) && !/^cfg, "\/api\/v3\/release", \{ method: "POST"/.test(call)),
+    ['cfg, "/api/v3/qualityprofile"'],
+    "every release read in the release module carries the search timeout",
+  );
+  assert.match(bodyOf(releases, "async function titleReleases("), /readReleases\(/);
+  for (const fn of ["export async function getReleasesForMovie(", "export async function getReleasesForSeries("]) {
+    assert.match(bodyOf(releases, fn), /titleReleases\(/, fn);
+  }
+  assert.match(bodyOf(releases, "export async function searchReleasesByArrId("), /readReleases\(cfg, `\/api\/v3\/release\?\$\{query\}`/);
+  for (const file of ARR_MODULES.filter((f) => f !== "arr-releases.ts")) {
+    assert.doesNotMatch(arrSource(file), /\/api\/v3\/release/, `${file} never reads releases itself`);
+  }
 });
 
 test("getCfg normalizes an EMPTY rootFolder to undefined so the `??` fallback actually fires", () => {
@@ -292,20 +322,21 @@ test("getCfg normalizes an EMPTY rootFolder to undefined so the `??` fallback ac
   // instance bounced APPROVED→PENDING forever behind an opaque "Arr request
   // failed (400)". The sibling qualityProfileId already normalizes for exactly
   // this reason.
-  const source = readFileSync(new URL("../src/lib/arr.ts", import.meta.url), "utf8");
-  const fn = source.slice(source.indexOf("async function getCfg("));
-  const body = fn.slice(0, fn.indexOf("\n}\n"));
+  const body = bodyOf(arrSource("arr-config.ts"), "async function getCfg(");
   assert.match(
     body,
     /rootFolder:\s*map\[folderKey\]\s*\|\|\s*undefined/,
-    "rootFolder must be `|| undefined` — a bare `map[folderKey]` lets \"\" survive the `??` at both add sites",
+    "rootFolder must be `|| undefined` — a bare `map[folderKey]` lets \"\" survive the `??` in the add",
   );
 
-  // And both add sites must still rely on `??` (the guards above them assume it).
+  // And the add — ONE flow for both services — must still rely on `??` (the
+  // fetch guard above it assumes it).
+  const add = arrSource("arr-add.ts");
+  const flow = bodyOf(add, "async function addToArr<");
+  assert.match(flow, /cfg\.rootFolder \? Promise\.resolve\(null\) : firstRootFolderPath\(cfg\)/, "the fallback list is fetched only when no folder is configured");
+  assert.match(flow, /const rootFolderPath = cfg\.rootFolder \?\? fallbackRootFolder;/, "root-folder fallback");
   for (const site of ["addMovieToRadarr", "addSeriesToSonarr"]) {
-    const f = source.slice(source.indexOf(`export async function ${site}`));
-    const b = f.slice(0, f.indexOf("\n}\n"));
-    assert.match(b, /const rootFolderPath = cfg\.rootFolder \?\? rootFolders\[0\]\.path;/, `${site} root-folder fallback`);
+    assert.match(bodyOf(add, `export async function ${site}(`), /addToArr\(/, `${site} goes through the shared add flow`);
   }
 });
 
@@ -359,14 +390,12 @@ test("every Sonarr series/lookup caller routes through the shared picker", () =>
   // Source-text pin: these functions are DB/network-bound so they cannot be
   // invoked here, but a new call site that hand-rolls `results[0]` again would
   // silently reintroduce the wrong-series bug.
-  const source = readFileSync(new URL("../src/lib/arr.ts", import.meta.url), "utf8");
+  const source = arrFamilySource();
   // Interpolated form only — the helper's own doc comment mentions the path too.
   const lookupCalls = source.match(/series\/lookup\?term=tmdb:\$\{/g) ?? [];
-  assert.equal(
-    lookupCalls.length,
-    2,
-    "expected exactly two lookup URLs: the shared helper and addSeriesToSonarr's Promise.all fetch",
-  );
+  assert.equal(lookupCalls.length, 1, "expected exactly one lookup URL: resolveSonarrSeries, which the add path shares");
+  assert.match(bodyOf(arrSource("arr-id-map.ts"), "export async function resolveSonarrSeries("), /pickSeriesByTmdbId\(rows, tmdbId\)/);
+  assert.match(bodyOf(arrSource("arr-add.ts"), "async function lookupSeriesForAdd("), /resolveSonarrSeries\(cfg, tmdbId\)/);
   assert.doesNotMatch(source, /lookup\[0\]/, "no direct lookup[0] indexing may remain");
   assert.doesNotMatch(source, /results\[0\]\?\.(tvdbId|firstAired)/, "no direct results[0] field access may remain");
 });
@@ -421,7 +450,7 @@ test("retryTransientRead: an aborted caller stops the retries", async () => {
 });
 
 test("arrRequest retries only reads: writes bypass retryTransientRead", () => {
-  const source = readFileSync(new URL("../src/lib/arr.ts", import.meta.url), "utf8");
+  const source = arrSource("arr-client.ts");
   assert.match(source, /isRetryableRead\(options\) \? await retryTransientRead\(send, \{ signal \}\) : await send\(\)/);
   assert.match(source, /method === "GET" \|\| method === "HEAD"/);
 });

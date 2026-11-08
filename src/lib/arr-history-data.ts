@@ -48,11 +48,23 @@ const TITLE_TTL_MS = 10 * 60_000;
 const TITLE_RETRY_MS = 30_000;
 const MAX_TITLE_CACHE = 5_000;
 const titleCache = processSingleton("arr-blocklist-titles", () => new Map<string, { info: TitleInfo | null; expiresAt: number }>());
+// Lookups in flight, by the same key: two page loads at once (two tabs, the
+// page and its snapshot refresh) share one arr read per title instead of each
+// asking for every title on the page.
+const titleInFlight = processSingleton("arr-blocklist-titles:in-flight", () => new Map<string, Promise<TitleInfo | null>>());
 
-async function titleFor(cfg: ArrCfg, service: ArrService, arrId: number, now: number): Promise<TitleInfo | null> {
+function titleFor(cfg: ArrCfg, service: ArrService, arrId: number, now: number): Promise<TitleInfo | null> {
   const key = `${cfg.url}\u0000${service}\u0000${arrId}`;
   const hit = titleCache.get(key);
-  if (hit && hit.expiresAt > now) return hit.info;
+  if (hit && hit.expiresAt > now) return Promise.resolve(hit.info);
+  const pending = titleInFlight.get(key);
+  if (pending) return pending;
+  const lookup = fetchTitle(cfg, service, arrId, key, now).finally(() => titleInFlight.delete(key));
+  titleInFlight.set(key, lookup);
+  return lookup;
+}
+
+async function fetchTitle(cfg: ArrCfg, service: ArrService, arrId: number, key: string, now: number): Promise<TitleInfo | null> {
   let info: TitleInfo | null = null;
   let ttl = TITLE_TTL_MS;
   try {
@@ -152,44 +164,66 @@ export async function removeFromBlocklist(
   viewed: { page: number; pageSize: number } | null = null,
 ): Promise<RemovedBlocklistEntry[]> {
   const cfg = await configuredArrCfg(service, instance);
+  const search = blocklistSearch(cfg, service, ids);
+  if (viewed) await search.take(viewed.page, viewed.pageSize);
+  const scannedThrough = await scanBlocklist(search);
+  if (viewed && scannedThrough !== null) await rereadNeighbours(search, viewed, scannedThrough);
+  if (search.wanted.size > 0) throw new BlocklistGoneError();
+  await arrFetchNoContent(cfg, "/api/v3/blocklist/bulk", { method: "DELETE", body: JSON.stringify({ ids: [...ids] }) });
+  return ids.map((id) => search.found.get(id) as RemovedBlocklistEntry);
+}
+
+interface BlocklistSearch {
+  /** The ids not yet seen on a fresh read. */
+  wanted: Set<number>;
+  found: Map<number, RemovedBlocklistEntry>;
+  /** Read one page and claim the wanted ids it holds; how many records it held and the arr's total. */
+  take(page: number, pageSize: number): Promise<{ count: number; totalRecords: unknown }>;
+}
+
+function blocklistSearch(cfg: ArrCfg, service: ArrService, ids: readonly number[]): BlocklistSearch {
   const wanted = new Set(ids);
   const found = new Map<number, RemovedBlocklistEntry>();
-  const take = async (page: number, pageSize: number) => {
-    const raw = (await readBlocklist(cfg, page, pageSize)) as { records?: unknown; totalRecords?: unknown } | null;
-    const records: unknown[] = Array.isArray(raw?.records) ? raw.records : [];
-    for (const r of records) {
-      const entry = removedBlocklistEntry(service, r);
-      if (entry && wanted.delete(entry.id)) found.set(entry.id, entry);
-    }
-    return { count: records.length, totalRecords: raw?.totalRecords };
+  return {
+    wanted,
+    found,
+    async take(page, pageSize) {
+      const raw = (await readBlocklist(cfg, page, pageSize)) as { records?: unknown; totalRecords?: unknown } | null;
+      const records: unknown[] = Array.isArray(raw?.records) ? raw.records : [];
+      for (const r of records) {
+        const entry = removedBlocklistEntry(service, r);
+        if (entry && wanted.delete(entry.id)) found.set(entry.id, entry);
+      }
+      return { count: records.length, totalRecords: raw?.totalRecords };
+    },
   };
-  if (viewed) await take(viewed.page, viewed.pageSize);
-  // Records the scan read through; null once it reached the end of the list.
-  let scannedThrough: number | null = 0;
-  for (let page = 1; page <= BLOCKLIST_SCAN_PAGES && wanted.size > 0; page++) {
-    const { count, totalRecords } = await take(page, BLOCKLIST_SCAN_PAGE);
+}
+
+// The newest-first scan, only while ids are still wanted. Answers the records
+// it read through, or null once it reached the end of the list.
+async function scanBlocklist(search: BlocklistSearch): Promise<number | null> {
+  let scannedThrough = 0;
+  for (let page = 1; page <= BLOCKLIST_SCAN_PAGES && search.wanted.size > 0; page++) {
+    const { count, totalRecords } = await search.take(page, BLOCKLIST_SCAN_PAGE);
     // An arr that reported no total has reached the end only on a short page —
     // a missing total read as 0 called page 1 a complete scan.
-    if (pagedReadEnded(page, BLOCKLIST_SCAN_PAGE, count, totalRecords)) {
-      scannedThrough = null;
-      break;
-    }
+    if (pagedReadEnded(page, BLOCKLIST_SCAN_PAGE, count, totalRecords)) return null;
     scannedThrough = page * BLOCKLIST_SCAN_PAGE;
   }
-  // The scan stopped at its cap short of the list's end, and the viewed page
-  // lies past it: an entry picked there moves to the NEXT page when one is
-  // blocklisted meanwhile (newest first) and to the previous one when one is
-  // removed. Re-read those two pages — each still read fresh, never trusted
-  // from the browser — before calling it gone.
-  if (viewed && scannedThrough !== null) {
-    for (const page of [viewed.page + 1, viewed.page - 1]) {
-      if (wanted.size === 0) break;
-      if (page >= 1 && page * viewed.pageSize > scannedThrough) await take(page, viewed.pageSize);
-    }
+  return scannedThrough;
+}
+
+// The scan stopped at its cap short of the list's end, and the viewed page
+// lies past it: an entry picked there moves to the NEXT page when one is
+// blocklisted meanwhile (newest first) and to the previous one when one is
+// removed. Re-read those two pages — each still read fresh, never trusted
+// from the browser — before calling it gone. A neighbour inside the scanned
+// range was read by the scan already.
+async function rereadNeighbours(search: BlocklistSearch, viewed: { page: number; pageSize: number }, scannedThrough: number): Promise<void> {
+  for (const page of [viewed.page + 1, viewed.page - 1]) {
+    if (search.wanted.size === 0) return;
+    if (page >= 1 && page * viewed.pageSize > scannedThrough) await search.take(page, viewed.pageSize);
   }
-  if (wanted.size > 0) throw new BlocklistGoneError();
-  await arrFetchNoContent(cfg, "/api/v3/blocklist/bulk", { method: "DELETE", body: JSON.stringify({ ids: [...ids] }) });
-  return ids.map((id) => found.get(id) as RemovedBlocklistEntry);
 }
 
 /**

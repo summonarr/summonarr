@@ -114,13 +114,18 @@ const fakePrisma = {
 (globalThis as unknown as { prisma: unknown }).prisma = fakePrisma;
 
 const {
+  isCronAuthorized,
+  getCronActor,
+  CRON_SYSTEM_ACTOR,
+  parseTrustedOriginEntry,
+} = await import("../src/lib/cron-auth.ts");
+const {
   BATCH_TX_TIMEOUT,
   batchCreateMany,
   createManyBatchSize,
   POSTGRES_MAX_BIND_PARAMS,
-  isCronAuthorized,
-  getCronActor,
-  CRON_SYSTEM_ACTOR,
+} = await import("../src/lib/batch-write.ts");
+const {
   parseCronLastRun,
   parseCronRunHistory,
   countCronRunsSince,
@@ -129,9 +134,8 @@ const {
   withCronRunRecording,
   cronSkippedResponse,
   CRON_SKIPPED_HEADER,
-  parseTrustedOriginEntry,
-  earliestAddedPerEpisode,
-} = await import("../src/lib/cron-auth.ts");
+} = await import("../src/lib/cron-history.ts");
+const { earliestAddedPerEpisode } = await import("../src/lib/episode-cache.ts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { extractUaFingerprint, serializeFingerprint } = await import(
   "../src/lib/ua-fingerprint.ts"
@@ -982,6 +986,79 @@ test("recordCronRun: a Prisma surface with NO setting.findUnique still records t
   }
   assert.equal(lastLedgerWrite().parsed?.durationMs, 42);
   assert.deepEqual(lastLedgerHistory().map((e) => e.durationMs), [42]);
+});
+
+test("recordCronRun: two runs of one target finishing together BOTH land in the history", async () => {
+  // A manual "Run now" and a scheduled tick can finish at once. Each write is a
+  // read-modify-write of the same row, so unserialized the second read the
+  // pre-first history and its upsert dropped the first run.
+  resetLedger();
+  await recordCronRun("race", 1);
+  await Promise.all([recordCronRun("race", 2), recordCronRun("race", 3), recordCronRun("other", 9)]);
+  assert.deepEqual(
+    parseCronRunHistory(settingRows.get("cron:lastRun:race")).map((e) => e.durationMs),
+    [3, 2, 1],
+    "every concurrent run is kept, newest first",
+  );
+  assert.deepEqual(parseCronRunHistory(settingRows.get("cron:lastRun:other")).map((e) => e.durationMs), [9]);
+});
+
+test("recordCronRun: a failing ledger write is warned once per condition, scoped, and again after it recovers", async () => {
+  const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
+  resetLogDedup();
+  const seen: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => { seen.push(args.map(String).join(" ")); };
+  try {
+    resetLedger();
+    failUpserts = true;
+    await recordCronRun("warned", 1);
+    await recordCronRun("warned", 2);
+    assert.equal(seen.filter((w) => w.startsWith("[cron-history]") && w.includes("warned")).length, 1, "an unchanged failure is not re-logged per run (guardrail 7b)");
+    failUpserts = false;
+    await recordCronRun("warned", 3);
+    failUpserts = true;
+    await recordCronRun("warned", 4);
+    assert.equal(seen.filter((w) => w.includes("could not record the warned run")).length, 2, "a failure after a recovery is reported again");
+
+    failUpserts = false;
+    failFindUnique = true;
+    await recordCronRun("warned", 5);
+    assert.ok(seen.some((w) => w.startsWith("[cron-history]") && w.includes("could not read the warned run history")), "a lost history read is visible too");
+  } finally {
+    console.warn = realWarn;
+    resetLedger();
+  }
+});
+
+test("DB helpers are imported from their own modules, not through cron-auth — no new caller of the re-exports", async () => {
+  // cron-auth.ts no longer re-exports the batch-write, episode-cache,
+  // library-staging and run-history helpers. A new import of them through the
+  // auth module would couple a DB helper to the session graph.
+  const { readdirSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const AUTH_NAMES = new Set(["isCronAuthorized", "getCronActor", "CRON_SYSTEM_ACTOR", "CronActor", "parseTrustedOriginEntry"]);
+  // Empty: every caller now imports from the defining module.
+  const NOT_YET_MOVED = new Set<string>([]);
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) { if (e.name !== "generated") walk(p); }
+      else if (/\.tsx?$/.test(e.name)) files.push(p);
+    }
+  };
+  walk("src");
+  const offenders: string[] = [];
+  for (const file of files) {
+    if (NOT_YET_MOVED.has(file)) continue;
+    for (const m of readFileSync(file, "utf8").matchAll(/import\s*(?:type\s*)?\{([^}]*)\}\s*from\s*"@\/lib\/cron-auth"/g)) {
+      const names = m[1].split(",").map((n) => n.trim().replace(/^type\s+/, "").split(/\s+as\s+/)[0]).filter(Boolean);
+      const helpers = names.filter((n) => !AUTH_NAMES.has(n));
+      if (helpers.length > 0) offenders.push(`${file}: ${helpers.join(", ")}`);
+    }
+  }
+  assert.deepEqual(offenders, [], "import these from batch-write / episode-cache / library-staging / cron-history");
 });
 
 // Several servers of one source can hold the same episode; the staging insert

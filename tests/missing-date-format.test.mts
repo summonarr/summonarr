@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const { missingDateFormatters } = await import("../src/components/admin/missing-format.ts");
+const { missingDateFormatters, utcDayFormatter } = await import("../src/components/admin/missing-format.ts");
 
 test("an air time is the viewer's local day; a release date stays on its UTC day", () => {
   const ny = missingDateFormatters("en-US", "America/New_York");
@@ -22,6 +22,16 @@ test("an air time is the viewer's local day; a release date stays on its UTC day
 test("no date is a dash, in either form", () => {
   const f = missingDateFormatters("en-US", "UTC");
   assert.deepEqual([f.day(null), f.aired(null)], ["—", "—"]);
+});
+
+test("a date the arr sent that isn't one is a dash too, never a RangeError that takes the table down", () => {
+  const f = missingDateFormatters("en-US", "UTC");
+  for (const bad of ["garbage", "2024-13-45", "", "NaN"]) {
+    assert.equal(f.day(bad), "—", `day(${JSON.stringify(bad)})`);
+    assert.equal(f.aired(bad), "—", `aired(${JSON.stringify(bad)})`);
+  }
+  assert.equal(utcDayFormatter("en-US")("not a date"), "—");
+  assert.equal(utcDayFormatter("en-US")("2024-03-01T00:00:00.000Z"), "Mar 1, 2024", "the shared UTC day formatter");
 });
 
 test("the page formats air times with `aired` and release dates with `day`", async () => {

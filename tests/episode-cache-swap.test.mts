@@ -117,9 +117,8 @@ const {
   replaceEpisodeCacheForSource,
   episodeCacheDigest,
   earliestAddedPerEpisode,
-  BATCH_TX_TIMEOUT,
-  POSTGRES_MAX_BIND_PARAMS,
-} = await import("../src/lib/cron-auth.ts");
+} = await import("../src/lib/episode-cache.ts");
+const { BATCH_TX_TIMEOUT, POSTGRES_MAX_BIND_PARAMS } = await import("../src/lib/batch-write.ts");
 const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
 
 function reset() {

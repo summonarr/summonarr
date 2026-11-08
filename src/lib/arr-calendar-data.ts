@@ -36,13 +36,15 @@ const CONCURRENCY = 4;
 
 // The queue is read only to mark what is downloading, so it is bounded well
 // below the Download Queue page's 40 pages: past 1,000 records a title further
-// down simply keeps its own status.
+// down simply keeps its own status (logged once per instance while it lasts).
 export const QUEUE_PAGE_SIZE = 250;
 export const MAX_QUEUE_PAGES = 4;
 
-// Exported for its bounds pin (tests/arr-projection-bounds.test.mts).
-export async function readQueue(cfg: ArrCfg): Promise<unknown[]> {
+type QueueRead = { records: unknown[]; truncated: boolean; total: number | null };
+
+async function readQueueBounded(cfg: ArrCfg): Promise<QueueRead> {
   const records: unknown[] = [];
+  let total: number | null = null;
   for (let page = 1; page <= MAX_QUEUE_PAGES; page++) {
     // Unknown items (no title matched) are left out by default — nothing on a
     // calendar could be one.
@@ -50,14 +52,20 @@ export async function readQueue(cfg: ArrCfg): Promise<unknown[]> {
       cfg, `/api/v3/queue?page=${page}&pageSize=${QUEUE_PAGE_SIZE}`, { quietErrors: true },
     );
     const batch = Array.isArray(res?.records) ? res.records : [];
+    if (typeof res?.totalRecords === "number" && Number.isFinite(res.totalRecords)) total = res.totalRecords;
     // At most a page's worth per page (an honest arr never sends more), appended
     // one by one: a spread push of a hostile page past ~125k records throws
     // RangeError, and an uncapped page would let one answer outgrow the page cap.
     for (const r of batch.slice(0, QUEUE_PAGE_SIZE)) records.push(r);
     // No total from the arr: read on until a short page, never "0 = done".
-    if (pagedReadEnded(page, QUEUE_PAGE_SIZE, batch.length, res?.totalRecords)) break;
+    if (pagedReadEnded(page, QUEUE_PAGE_SIZE, batch.length, res?.totalRecords)) return { records, truncated: false, total };
   }
-  return records;
+  return { records, truncated: true, total };
+}
+
+// Exported for its bounds pin (tests/arr-projection-bounds.test.mts).
+export async function readQueue(cfg: ArrCfg): Promise<unknown[]> {
+  return (await readQueueBounded(cfg)).records;
 }
 
 async function readInstance(inst: ArrInstanceRef, start: Date, end: Date, unmonitored: boolean, nowMs: number): Promise<CalendarEntry[]> {
@@ -65,7 +73,7 @@ async function readInstance(inst: ArrInstanceRef, start: Date, end: Date, unmoni
   const { from, to } = calendarFetchWindow(inst.service, start, end);
   // Read in parallel and never rejecting: a queue that can't be read leaves
   // every status as the calendar has it.
-  const queued = readQueue(cfg).then((records) => ({ records }), (err: unknown) => ({ err }));
+  const queued = readQueueBounded(cfg).then((read) => ({ read }), (err: unknown) => ({ err }));
   const raw = await arrFetch<unknown>(cfg, calendarPath(inst.service, from, to, unmonitored), { quietErrors: true });
   const entries = inst.service === "radarr"
     ? radarrCalendarEntries(inst.slug, raw, from.getTime(), to.getTime(), nowMs)
@@ -75,9 +83,16 @@ async function readInstance(inst: ArrInstanceRef, start: Date, end: Date, unmoni
   // Logged only once the calendar itself was read — a down instance is
   // reported by loadCalendar, not twice.
   const logKey = `arr-calendar:queue:${inst.service}:${inst.slug}`;
-  if ("records" in queue) {
-    applyCalendarQueue(entries, calendarQueue(inst.service, queue.records));
+  if ("read" in queue) {
+    applyCalendarQueue(entries, calendarQueue(inst.service, queue.read.records));
     forgetWarnOnChange(logKey);
+    const capKey = `arr-calendar:queue-cap:${inst.service}:${inst.slug}`;
+    if (queue.read.truncated) {
+      const of = queue.read.total === null ? "more" : String(queue.read.total);
+      warnOnChange(capKey, of, `[arr-calendar] ${inst.service} instance "${inst.slug}" queue holds ${of} records; only the first ${queue.read.records.length} mark titles as downloading`);
+    } else {
+      forgetWarnOnChange(capKey);
+    }
   } else {
     const error = arrErrorMessage(queue.err);
     warnOnChange(logKey, error, `[arr-calendar] ${inst.service} instance "${inst.slug}" queue read failed, statuses shown without downloads: ${error}`);

@@ -52,9 +52,14 @@ export type DiscordInteraction =
   | ComponentInteraction
   | OtherInteraction;
 
-/** The invoking user: a guild member's nested user, else the DM user. */
-export function discordUserOf(interaction: CommandInteraction | ComponentInteraction): DiscordUser {
-  return (interaction.member?.user ?? interaction.user) as DiscordUser;
+/**
+ * The invoking user: a guild member's nested user, else the DM user. Null when
+ * the payload names neither with a string id — the handlers then answer with
+ * the generic error instead of keying pending rows on `undefined`.
+ */
+export function discordUserOf(interaction: CommandInteraction | ComponentInteraction): DiscordUser | null {
+  const user = interaction.member?.user ?? interaction.user;
+  return user && typeof user.id === "string" && user.id.length > 0 ? user : null;
 }
 
 // ── Shared shapes ───────────────────────────────────────────────────────────
@@ -76,7 +81,8 @@ export interface TmdbResult {
 export interface PendingSearch {
   results: TmdbResult[];
   discordUserId: string;
-  discordUsername: string;
+  /** Absent when Discord sent no username. */
+  discordUsername?: string;
 }
 
 export interface PendingWatchlistAdd {
@@ -99,7 +105,7 @@ export interface CommandContext {
   token: string;
   interactionId: string;
   discordUserId: string;
-  discordUsername: string;
+  discordUsername: string | undefined;
   data: CommandData;
   /** The `discordRequireLinkedAccount` setting. */
   requireLinked: boolean;

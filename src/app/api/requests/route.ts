@@ -16,8 +16,14 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 const PAGE_SIZE = 20;
 const VALID_STATUSES = ["PENDING", "APPROVED", "AVAILABLE", "DECLINED"] as const;
 const VALID_SORTS = ["newest", "oldest"] as const;
+const LIST_LIMIT_PER_MIN = 60;
 
 export const GET = withAuth(async (req, _ctx, session) => {
+  // Three queries a call (the page, its count, the per-status counts with a
+  // case-insensitive title match): bounded per user like the other list reads.
+  if (!checkRateLimit(`requests-list:${session.user.id}`, LIST_LIMIT_PER_MIN, 60_000)) {
+    return tooManyRequests(60, translatorForRequest(req)("apiUser.common.tooManyRequestsLater"));
+  }
   const sp = req.nextUrl.searchParams;
   const page = parsePageParam(sp);
   const skip = (page - 1) * PAGE_SIZE;
@@ -39,7 +45,6 @@ export const GET = withAuth(async (req, _ctx, session) => {
   // MANAGE_REQUESTS sees every request (admins included via the ADMIN superbit);
   // everyone else sees only their own.
   const canManage = hasPermission(session.user.permissions, Permission.MANAGE_REQUESTS);
-  const isAdmin = canManage;
 
   // `scope` is the base visibility (all vs own). The filter-chip counts ignore
   // the selected `status` but honor the search `q`, mirroring the web /requests page.
@@ -53,7 +58,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
   };
 
   const [requests, total, statusCountsRaw] = await Promise.all([
-    isAdmin
+    canManage
       ? prisma.mediaRequest.findMany({
           where,
           include: { user: { select: { name: true, email: true } } },

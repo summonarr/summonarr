@@ -8,13 +8,14 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "../..");
-const CODE = readFileSync(join(ROOT, "src/app/api/admin/cleanup/delete/route.ts"), "utf8")
+const CODE = readFileSync(join(ROOT, "src/lib/library-cleanup-execute.ts"), "utf8")
   .split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
 
 test("cleanup drops a deleted title's snapshot views on success AND on 'gone already' (404)", () => {
-  assert.match(CODE, /import \{ dropArrTitleSnapshots \} from "@\/lib\/arr-snapshot"/);
-  const drop = /dropArrTitleSnapshots\(\{ service: t\.service, instance: t\.instance, arrId: t\.arrId, tmdbId \}\)/g;
-  assert.equal(CODE.match(drop)?.length, 2, "both deleted.push sites drop the views");
-  assert.match(CODE, /await deleteArrEntry\(t\);\s*deleted\.push\(targetLabel\(t\)\);\s*dropArrTitleSnapshots/);
-  assert.match(CODE, /err\.status === 404\) \{\s*deleted\.push\(targetLabel\(t\)\);\s*dropArrTitleSnapshots/);
+  assert.match(CODE, /import \{ dropArrTitleSnapshots \} from "\.\/arr-snapshot"/);
+  assert.match(CODE, /dropArrTitleSnapshots\(\{ service: t\.service, instance: t\.instance, arrId: t\.arrId, tmdbId \}\)/);
+  // One site, after the delete's try: a success and a 404 both reach it, any
+  // other failure `continue`s before it — and a drop that throws can't be
+  // taken for a failed delete (tests/library-cleanup-routes.test.mts drives it).
+  assert.match(CODE, /await deleteArrEntry\(t\);\s*\} catch \(err\) \{\s*if \(!\(err instanceof ArrResponseError && err\.status === 404\)\) \{[\s\S]*?continue;\s*\}\s*\}\s*outcome\.deleted\.push\(targetLabel\(t\)\);\s*dropSnapshots\(t, row\.tmdbId\);/);
 });

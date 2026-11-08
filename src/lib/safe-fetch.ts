@@ -4,7 +4,7 @@ import zlib from "node:zlib";
 import { isIP } from "node:net";
 import { PassThrough, Readable, Transform } from "node:stream";
 
-import { resolveToSafeUrlWithAddrs, resolveSafeAddrsFresh, verifyResolvedHost } from "@/lib/ssrf";
+import { canonicalSafeUrl, resolveSafeAddrsFresh, verifyResolvedHost } from "@/lib/ssrf";
 
 
 export type SafeFetchErrorReason =
@@ -14,28 +14,55 @@ export type SafeFetchErrorReason =
   | "redirect"
   | "network";
 
-// Strip the query string and any embedded credentials from a URL before it can
-// reach a log line. Several upstreams carry secrets in the query string (Plex
-// `?X-Plex-Token=`, OMDb `?apikey=`, MDBList/ipinfo `?token=`), and SafeFetchError
-// is routinely logged — sometimes as the whole error object — so the raw URL must
-// never travel inside `.message` or `.url`.
+// Strip the query string, any embedded credentials, the fragment and path-borne
+// tokens from a URL before it can reach a log line. Several upstreams carry
+// secrets in the query string (Plex `?X-Plex-Token=`, OMDb `?apikey=`,
+// MDBList/ipinfo `?token=`), and SafeFetchError is routinely logged — sometimes
+// as the whole error object — so the raw URL must never travel inside
+// `.message` or `.url`.
 export function redactUrlForLog(raw: string): string {
   try {
     const u = new URL(raw);
     u.search = "";
     u.username = "";
     u.password = "";
+    // A fragment is never sent to the server, so it has no diagnostic value,
+    // and a URL pasted into a notification agent may carry a token there.
+    u.hash = "";
     // Discord carries its secret in the PATH, not the query: webhook URLs and
     // interaction follow-ups are both /webhooks/{id}/{token}[/...]. Without
     // this, a thrown SafeFetchError (timeout/network) from editOriginal or a
     // follow-up POST would embed the interaction token — a ~15-min bearer
     // credential for posting as the bot — in .message/.url, breaking the
     // "safe to log verbatim" contract below for path-borne secrets.
-    u.pathname = u.pathname.replace(/(\/webhooks\/\d+\/)[^/]+/, "$1<redacted>");
+    u.pathname = u.pathname
+      .replace(/(\/webhooks\/\d+\/)[^/]+/, "$1<redacted>")
+      .split("/")
+      .map((seg) => (isOpaqueToken(seg) ? "<redacted>" : seg))
+      .join("/");
     return u.toString();
   } catch {
     return "[unparseable-url]";
   }
+}
+
+// A path segment that looks like a credential rather than a name or an id: 20+
+// URL-safe characters that are random-looking — mixed case with digits, or
+// digits and letters alternating often (a Slack-style hook token, an
+// ntfy/Apprise key). A number, a slug ("the-matrix-1999") and a hex id
+// (Jellyfin's 32-hex item ids) stay, so a logged path still says what was
+// asked for.
+function isOpaqueToken(seg: string): boolean {
+  if (seg.length < 20 || !/^[A-Za-z0-9_-]+$/.test(seg)) return false;
+  if (/^[0-9a-f]+$/i.test(seg)) return false;
+  if (/[a-z]/.test(seg) && /[A-Z]/.test(seg) && /[0-9]/.test(seg)) return true;
+  let transitions = 0;
+  for (let i = 1; i < seg.length; i++) {
+    const a = /[0-9]/.test(seg[i - 1]) ? 1 : /[A-Za-z]/.test(seg[i - 1]) ? 2 : 0;
+    const b = /[0-9]/.test(seg[i]) ? 1 : /[A-Za-z]/.test(seg[i]) ? 2 : 0;
+    if (a && b && a !== b) transitions++;
+  }
+  return transitions >= 4;
 }
 
 export class SafeFetchError extends Error {
@@ -84,68 +111,138 @@ const USER_AGENT = "Summonarr/0.1";
 
 type FetchMode = "hardcoded" | "admin" | "user";
 
+// The DNS-rebind defence: the connection is PINNED to the validated addresses.
+//
+// fetch() hands the hostname to undici, which resolves it again at connect
+// time, so no amount of checking beforehand can bind the connect to what was
+// checked. (An undici Agent/dispatcher can't be used: undici is not a
+// dependency, and Node's bundled copy is not importable from userland — an
+// earlier attempt with the npm package broke on the Dispatcher handler shape.)
+// So every mode converges on: check the URL against the mode's policy, resolve
+// the host FRESH, require EVERY address to be safe under the mode's policy, and
+// send the request with node:http(s) whose `lookup` returns only those
+// addresses (see pinnedFetch). The TCP connect therefore goes to an address we
+// validated, while TLS SNI / certificate verification and the Host header keep
+// using the original hostname. Hardcoded mode resolves with allowPrivate=false:
+// a hostname like `api.themoviedb.org` is never legitimately backed by a
+// private IP.
+//
+// ONE lookup per request decides: the addresses checked are the addresses
+// dialled, so there is no window between a check and a connect to rebind in.
+// (An earlier shape validated a cached lookup and then pinned a second, fresh
+// one; the first only added latency.) CDN-fronted hosts (api.themoviedb.org,
+// *.push.apple.com, fcm.googleapis.com, …) return rotating answer sets, so no
+// answer is compared with an earlier one: per-address safety plus the pin is
+// what matters.
+//
+// Exception: with NODE_USE_ENV_PROXY and a proxy variable set, the PROXY
+// resolves and dials the target, so the connection cannot be pinned from here.
+// That path keeps a fresh resolve check, then fetch() by hostname — see
+// envProxyActive().
 async function doFetch(
   rawUrl: string,
   opts: SafeFetchOptions,
   mode: FetchMode,
   allowedHosts?: ReadonlySet<string>,
 ): Promise<Response> {
+  const parsedUrl = parseHttpUrl(rawUrl);
+  const target = resolveTargetForMode(parsedUrl, rawUrl, mode, allowedHosts);
+  const deadline = createDeadline(rawUrl, opts);
+  const allowPrivate = mode === "admin";
 
+  const viaProxy = envProxyActive() || transportIsFetchSeam();
+  // Behind a proxy (it dials the target) only the check is possible; otherwise
+  // the request below connects to exactly this list.
+  const pinnedAddrs = viaProxy
+    ? (await deadline.withDnsDeadline(verifyResolvedHost(parsedUrl.hostname, { allowPrivate }))) ? [] : null
+    : await deadline.withDnsDeadline(resolveSafeAddrsFresh(parsedUrl.hostname, { allowPrivate }));
+  if (!pinnedAddrs) throw new SafeFetchError("ssrf-blocked", rawUrl, target.blockedMessage);
+
+  const headers = new Headers(opts.headers);
+  if (!headers.has("user-agent")) headers.set("user-agent", USER_AGENT);
+  const { timeoutMs: _t, maxResponseBytes: _m, connectTimeoutMs, idleTimeoutMs, ...rest } = opts;
+  void _t; void _m;
+  const init: RequestInit = { ...rest, headers, redirect: "error", signal: deadline.signal };
+
+  let res: Response;
+  try {
+    res = viaProxy
+      ? await fetch(target.url, init)
+      : await pinnedFetch(target.url, init, pinnedAddrs, deadline.signal, {
+          connectTimeoutMs: connectTimeoutMs ?? PINNED_CONNECT_TIMEOUT_MS,
+          idleTimeoutMs: idleTimeoutMs ?? PINNED_IDLE_TIMEOUT_MS,
+        });
+  } catch (err) {
+    throw mapTransportError(err, target.url, deadline.timeoutMs);
+  }
+  return await wrapResponseBody(res, opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES, target.url);
+}
+
+function parseHttpUrl(rawUrl: string): URL {
   let parsedUrl: URL;
   try {
     parsedUrl = new URL(rawUrl);
-    const proto = parsedUrl.protocol;
-    if (proto !== "http:" && proto !== "https:") {
-      throw new SafeFetchError("ssrf-blocked", rawUrl, `Protocol not allowed: ${proto}`);
-    }
-  } catch (e) {
-    if (e instanceof SafeFetchError) throw e;
+  } catch {
     throw new SafeFetchError("ssrf-blocked", rawUrl, `Invalid URL: ${rawUrl}`);
   }
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+    throw new SafeFetchError("ssrf-blocked", rawUrl, `Protocol not allowed: ${parsedUrl.protocol}`);
+  }
+  return parsedUrl;
+}
 
-  // DNS-rebind defence: the connection is PINNED to the validated addresses.
-  //
-  // fetch() hands the hostname to undici, which resolves it again at connect
-  // time, so no amount of checking beforehand can bind the connect to what was
-  // checked. (An undici Agent/dispatcher can't be used: undici is not a
-  // dependency, and Node's bundled copy is not importable from userland — an
-  // earlier attempt with the npm package broke on the Dispatcher handler shape.)
-  // So every mode converges on: validate (cached resolve + policy check), then
-  // resolve FRESH, require EVERY address to be safe under the mode's policy, and
-  // send the request with node:http(s) whose `lookup` returns only those
-  // addresses (see pinnedFetch). The TCP connect therefore goes to an address we
-  // validated, while TLS SNI / certificate verification and the Host header keep
-  // using the original hostname. Hardcoded mode resolves with allowPrivate=false:
-  // a hostname like `api.themoviedb.org` is never legitimately backed by a
-  // private IP.
-  //
-  // We deliberately do NOT require the fresh address SET to equal the first
-  // lookup. CDN-fronted hosts (api.themoviedb.org, *.push.apple.com,
-  // fcm.googleapis.com, …) return rotating answer sets, so two lookups seconds
-  // apart routinely disagree on a healthy host. Per-address safety plus the pin
-  // is what matters.
-  //
-  // Exception: with NODE_USE_ENV_PROXY and a proxy variable set, the PROXY
-  // resolves and dials the target, so the connection cannot be pinned from here.
-  // That path keeps the previous behaviour (fresh re-resolve check, then
-  // fetch() by hostname) — see envProxyActive().
+/**
+ * The URL a mode sends and the message its address check refuses with. Throws
+ * for a trusted host that isn't on the allowlist; the address policy itself
+ * runs on the one lookup in doFetch.
+ */
+function resolveTargetForMode(
+  parsedUrl: URL,
+  rawUrl: string,
+  mode: FetchMode,
+  allowedHosts: ReadonlySet<string> | undefined,
+): { url: string; blockedMessage: string } {
+  if (mode === "hardcoded") {
+    if (!allowedHosts || allowedHosts.size === 0) {
+      throw new SafeFetchError("ssrf-blocked", rawUrl, "safeFetchTrusted requires a non-empty allowedHosts list");
+    }
+    const host = parsedUrl.hostname.toLowerCase();
+    if (!allowedHosts.has(host)) {
+      throw new SafeFetchError("ssrf-blocked", rawUrl, `URL blocked by trusted-host policy (host=${host}): ${rawUrl}`);
+    }
+    // The outbound request derives from `parsedUrl`, whose hostname was just
+    // checked against the required allowlist — not from the raw input — so
+    // there is no untrusted-host path from caller input to the network call.
+    // The hostname is kept (never the resolved IP): TLS SNI and
+    // virtual-hosted endpoints both need it.
+    return {
+      url: parsedUrl.toString(),
+      // Hardcoded hosts (TMDB, plex.tv, …) must resolve to public addresses.
+      blockedMessage: `URL blocked by SSRF policy (trusted host resolves to unsafe address): ${rawUrl}`,
+    };
+  }
+  // "user": a URL with no hostname allowlist — Web Push, whose subscription
+  // endpoints span an unbounded set of vendor push services — under the full
+  // policy. "admin": a URL from Settings, where LAN/loopback is allowed.
+  return { url: canonicalSafeUrl(parsedUrl), blockedMessage: `URL blocked by SSRF policy: ${rawUrl}` };
+}
 
-  // Created BEFORE any DNS work so resolution counts against the caller's
-  // declared budget. dns.lookup (getaddrinfo) itself accepts no timeout and
-  // cannot be cancelled — when the OS resolver is unreachable it blocks for the
-  // resolver deadline (~5s × attempts × nameservers, up to ~40s) — so the race
-  // below bounds the caller's WALL TIME to timeoutMs while the orphaned lookup
-  // drains in the threadpool. Without this, the 5s poller and SSE reconnect
-  // overran their per-tick budgets by an order of magnitude during DNS outages.
+// Created BEFORE any DNS work so resolution counts against the caller's
+// declared budget. dns.lookup (getaddrinfo) itself accepts no timeout and
+// cannot be cancelled — when the OS resolver is unreachable it blocks for the
+// resolver deadline (~5s × attempts × nameservers, up to ~40s) — so the race in
+// withDnsDeadline bounds the caller's WALL TIME to timeoutMs while the orphaned
+// lookup drains in the threadpool. Without this, the 5s poller and SSE
+// reconnect overran their per-tick budgets by an order of magnitude during DNS
+// outages.
+function createDeadline(rawUrl: string, opts: SafeFetchOptions) {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
-  const signal = opts.signal
-    ? AbortSignal.any([opts.signal, timeoutSignal])
-    : timeoutSignal;
+  const signal = opts.signal ? AbortSignal.any([opts.signal, timeoutSignal]) : timeoutSignal;
   // Only OUR budget is a timeout. The caller's own abort is classified the way
-  // the request phase classifies it (doFetch's catch below): its own
-  // TimeoutError is a timeout, anything else is "network" carrying the caller's
-  // reason — never "timed out" for a request the caller cancelled.
+  // the request phase classifies it (mapTransportError): its own TimeoutError
+  // is a timeout, anything else is "network" carrying the caller's reason —
+  // never "timed out" for a request the caller cancelled.
   const dnsAbortError = (timeoutMessage: string): SafeFetchError => {
     const reason: unknown = timeoutSignal.aborted ? undefined : opts.signal?.reason;
     if (reason === undefined || (reason instanceof Error && reason.name === "TimeoutError")) {
@@ -159,8 +256,7 @@ async function doFetch(
       throw dnsAbortError(`Request to ${rawUrl} timed out after ${timeoutMs}ms (before DNS resolution)`);
     }
     return await new Promise<T>((resolve, reject) => {
-      const onAbort = () =>
-        reject(dnsAbortError(`DNS resolution for ${rawUrl} exceeded the ${timeoutMs}ms budget`));
+      const onAbort = () => reject(dnsAbortError(`DNS resolution for ${rawUrl} exceeded the ${timeoutMs}ms budget`));
       signal.addEventListener("abort", onAbort, { once: true });
       work.then(
         (v) => { signal.removeEventListener("abort", onAbort); resolve(v); },
@@ -168,192 +264,66 @@ async function doFetch(
       );
     });
   };
+  return { timeoutMs, signal, withDnsDeadline };
+}
 
-  const allowPrivate = mode === "admin";
-  let targetUrl: string;
-
-  if (mode === "user") {
-    // User-supplied URL with no hostname allowlist — used by Web Push, whose
-    // subscription endpoints span an unbounded set of vendor push services
-    // (fcm.googleapis.com, *.push.apple.com, updates.push.services.mozilla.com,
-    // *.notify.windows.com, …). allowPrivate=false blocks RFC1918/loopback/
-    // link-local/CGNAT/multicast — push services must be public.
-    const safe = await withDnsDeadline(resolveToSafeUrlWithAddrs(rawUrl, { allowPrivate: false }));
-    if (!safe) {
-      throw new SafeFetchError(
-        "ssrf-blocked",
-        rawUrl,
-        `URL blocked by SSRF policy: ${rawUrl}`,
+// A transport failure as the SafeFetchError callers branch on. The transport's
+// own connect/idle timeouts are "network" on purpose, as they were under
+// fetch (see PINNED_CONNECT_TIMEOUT_MS); only the caller's budget is "timeout".
+function mapTransportError(err: unknown, targetUrl: string, timeoutMs: number): SafeFetchError {
+  if (err instanceof Error) {
+    const cause = (err as { cause?: { name?: string; message?: unknown } }).cause;
+    if (err.name === "TimeoutError" || cause?.name === "TimeoutError") {
+      return new SafeFetchError("timeout", targetUrl, `Request to ${targetUrl} timed out after ${timeoutMs}ms`);
+    }
+    // Both transports refuse a redirect as TypeError("fetch failed") whose
+    // CAUSE says why — pinnedFetch's refuse() and undici's redirect:"error"
+    // alike — so the message alone never matched and a deterministic 3xx
+    // surfaced as a retryable "network" failure.
+    if (err instanceof TypeError && (/redirect/i.test(err.message) || cause?.message === "unexpected redirect")) {
+      return new SafeFetchError(
+        "redirect",
+        targetUrl,
+        `Request to ${targetUrl} attempted to redirect (unexpected redirect, blocked by safeFetch)`,
       );
     }
-    targetUrl = safe.url;
-  } else if (mode === "hardcoded") {
-    if (!allowedHosts || allowedHosts.size === 0) {
-      throw new SafeFetchError(
-        "ssrf-blocked",
-        rawUrl,
-        "safeFetchTrusted requires a non-empty allowedHosts list",
-      );
-    }
-    const host = parsedUrl.hostname.toLowerCase();
-    if (!allowedHosts.has(host)) {
-      throw new SafeFetchError(
-        "ssrf-blocked",
-        rawUrl,
-        `URL blocked by trusted-host policy (host=${host}): ${rawUrl}`,
-      );
-    }
-    // Hardcoded hosts (TMDB, plex.tv, …) must resolve to public addresses.
-    // allowPrivate=false here blocks DNS-rebind to RFC1918/loopback.
-    const safe = await withDnsDeadline(resolveToSafeUrlWithAddrs(rawUrl, { allowPrivate: false }));
-    if (!safe) {
-      throw new SafeFetchError(
-        "ssrf-blocked",
-        rawUrl,
-        `URL blocked by SSRF policy (trusted host resolves to unsafe address): ${rawUrl}`,
-      );
-    }
-    // Rebuild targetUrl from the URL we just validated. We keep the same
-    // hostname as rawUrl (we deliberately don't switch to the resolved IP — TLS
-    // SNI and virtual-hosted endpoints both need the hostname), but the outbound
-    // request now derives from `parsedUrl`, whose hostname was checked against
-    // the required `allowedHosts` allowlist above. Routing the fetch through the
-    // already-validated value (rather than the raw, attacker-influenced input)
-    // is what makes this request-forgery-safe: there is no untrusted-host path
-    // from caller input to the network call.
-    targetUrl = parsedUrl.toString();
-  } else {
-    // mode === "admin"
-    const safe = await withDnsDeadline(resolveToSafeUrlWithAddrs(rawUrl, { allowPrivate: true }));
-    if (!safe) {
-      throw new SafeFetchError(
-        "ssrf-blocked",
-        rawUrl,
-        `URL blocked by SSRF policy: ${rawUrl}`,
-      );
-    }
-    targetUrl = safe.url;
   }
+  const e = err as Error & { cause?: { code?: string; message?: string } };
+  const causeMsg = e?.cause?.message ?? e?.cause?.code ?? "";
+  const message = e instanceof Error ? e.message : String(err);
+  const detail = causeMsg ? `${message} (${causeMsg})` : message;
+  return new SafeFetchError("network", targetUrl, `fetch failed for ${targetUrl}: ${detail}`);
+}
 
-  const maxResponseBytes = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
-
-  const headers = new Headers(opts.headers);
-  if (!headers.has("user-agent")) headers.set("user-agent", USER_AGENT);
-
-  const { timeoutMs: _t, maxResponseBytes: _m, connectTimeoutMs, idleTimeoutMs, ...rest } = opts;
-  void _t; void _m;
-
-  const init: RequestInit = {
-    ...rest,
-    headers,
-    redirect: "error",
-    signal,
-  };
-
-  const viaProxy = envProxyActive() || transportIsFetchSeam();
-  let pinnedAddrs: string[] | null = null;
-  if (viaProxy) {
-    // Cannot pin behind a proxy (it dials the target); keep the fresh check.
-    const verified = await withDnsDeadline(
-      verifyResolvedHost(parsedUrl.hostname, { allowPrivate }),
-    );
-    if (!verified) pinnedAddrs = null;
-    else pinnedAddrs = [];
-  } else {
-    // Resolve FRESH; every address must be safe under the policy. The request
-    // below connects to exactly this list.
-    pinnedAddrs = await withDnsDeadline(
-      resolveSafeAddrsFresh(parsedUrl.hostname, { allowPrivate }),
-    );
-  }
-  if (!pinnedAddrs) {
-    throw new SafeFetchError(
-      "ssrf-blocked",
-      targetUrl,
-      `Host ${parsedUrl.hostname} failed re-resolution check (DNS-rebind defence)`,
-    );
-  }
-
-  let res: Response;
-  try {
-    res = viaProxy
-      ? await fetch(targetUrl, init)
-      : await pinnedFetch(targetUrl, init, pinnedAddrs, signal, {
-          connectTimeoutMs: connectTimeoutMs ?? PINNED_CONNECT_TIMEOUT_MS,
-          idleTimeoutMs: idleTimeoutMs ?? PINNED_IDLE_TIMEOUT_MS,
-        });
-  } catch (err) {
-      if (err instanceof Error) {
-
-        const name = err.name;
-        const causeName = (err as { cause?: { name?: string } }).cause?.name;
-        if (name === "TimeoutError" || causeName === "TimeoutError") {
-          throw new SafeFetchError(
-            "timeout",
-            targetUrl,
-            `Request to ${targetUrl} timed out after ${timeoutMs}ms`,
-          );
-        }
-        // Both transports refuse a redirect as TypeError("fetch failed") whose
-        // CAUSE says why — pinnedFetch's refuse() and undici's redirect:"error"
-        // alike — so the message alone never matched and a deterministic 3xx
-        // surfaced as a retryable "network" failure.
-        const causeMessage = (err as { cause?: { message?: unknown } }).cause?.message;
-        if (err instanceof TypeError && (/redirect/i.test(err.message) || causeMessage === "unexpected redirect")) {
-          throw new SafeFetchError(
-            "redirect",
-            targetUrl,
-            `Request to ${targetUrl} attempted to redirect (unexpected redirect, blocked by safeFetch)`,
-          );
-        }
-      }
-      const e = err as Error & { cause?: { code?: string; message?: string; errno?: number } };
-      const causeMsg = e.cause?.message ?? e.cause?.code ?? "";
-      const detail = causeMsg ? `${e.message} (${causeMsg})` : e.message;
-    throw new SafeFetchError(
-      "network",
-      targetUrl,
-      `fetch failed for ${targetUrl}: ${detail}`,
-    );
-  }
-
+// The size cap, declared and streamed, and headers that describe the body the
+// caller actually reads.
+async function wrapResponseBody(res: Response, maxResponseBytes: number, targetUrl: string): Promise<Response> {
   const contentLength = res.headers.get("content-length");
-    if (contentLength) {
-      const size = parseInt(contentLength, 10);
-      if (!isNaN(size) && size > maxResponseBytes) {
-        try {
-          await res.body?.cancel();
-        } catch {
-
-        }
-        throw new SafeFetchError(
-          "size",
-          targetUrl,
-          `Response body declared ${size} bytes, exceeds cap ${maxResponseBytes}`,
-        );
+  if (contentLength) {
+    const size = parseInt(contentLength, 10);
+    if (!isNaN(size) && size > maxResponseBytes) {
+      try {
+        await res.body?.cancel();
+      } catch {
+        // The refusal below is the answer either way.
       }
+      throw new SafeFetchError("size", targetUrl, `Response body declared ${size} bytes, exceeds cap ${maxResponseBytes}`);
     }
-
-  if (res.body) {
-    const limited = limitResponseBody(res.body, maxResponseBytes, targetUrl);
-    // Node 22's fetch transparently decompresses gzip/deflate/br responses — `res.body` already
-    // emits the decompressed bytes. But `res.headers` still carries the upstream Content-Encoding
-    // and the original (compressed) Content-Length. If we copy those headers verbatim onto the
-    // re-wrapped Response, downstream consumers can be misled into decompressing already-
-    // decompressed bytes (Response.json() then JSON.parses the gzip magic header and throws
-    // "Unexpected token '...' is not valid JSON"). Strip both headers so the new Response's
-    // metadata accurately describes its own body.
-    const sanitizedHeaders = new Headers(res.headers);
-    sanitizedHeaders.delete("content-encoding");
-    sanitizedHeaders.delete("content-length");
-    return new Response(limited, {
-      status: res.status,
-      statusText: res.statusText,
-      headers: sanitizedHeaders,
-    });
   }
-
-  return res;
+  if (!res.body) return res;
+  // Both transports hand back DECODED bytes, but `res.headers` still carries
+  // the upstream Content-Encoding and the original (compressed)
+  // Content-Length. Copied verbatim onto the re-wrapped Response they could
+  // make a consumer decompress already-decompressed bytes (Response.json()
+  // then parses the gzip magic header and throws), so both are dropped.
+  const sanitizedHeaders = new Headers(res.headers);
+  sanitizedHeaders.delete("content-encoding");
+  sanitizedHeaders.delete("content-length");
+  return new Response(limitResponseBody(res.body, maxResponseBytes, targetUrl), {
+    status: res.status,
+    statusText: res.statusText,
+    headers: sanitizedHeaders,
+  });
 }
 
 // True when Node's env-proxy support is on AND a proxy variable is set: http(s)
@@ -530,14 +500,7 @@ async function pinnedFetch(
   const request = new Request(targetUrl, init);
   const body = request.body ? Buffer.from(await request.arrayBuffer()) : undefined;
   const url = new URL(request.url);
-
-  const headers: Record<string, string> = {};
-  request.headers.forEach((v, k) => { headers[k] = v; });
-  if (!("accept" in headers)) headers["accept"] = "*/*";
-  if (!("accept-encoding" in headers)) headers["accept-encoding"] = "gzip, deflate, br";
-  if (body && !("content-length" in headers)) headers["content-length"] = String(body.byteLength);
-
-  const opts = buildPinnedRequestOptions(url, addrs, { method: request.method, headers, signal });
+  const opts = buildPinnedRequestOptions(url, addrs, { method: request.method, headers: pinnedRequestHeaders(request, body), signal });
   const isHttps = url.protocol === "https:";
   const transport = isHttps ? https : http;
 
@@ -565,85 +528,9 @@ async function pinnedFetch(
     });
     const creq = transport.request(opts, (res) => {
       gotHeaders = true;
-      // Undoes whatever this handler has built so far if it throws.
-      let teardown = () => { res.destroy(); };
-      try {
-        const status = res.statusCode ?? 0;
-        if ([301, 302, 303, 307, 308].includes(status) && res.headers.location) {
-          res.destroy();
-          refuse(new Error("unexpected redirect"));
-          return;
-        }
-        const respHeaders = new Headers();
-        for (let i = 0; i + 1 < res.rawHeaders.length; i += 2) {
-          try { respHeaders.append(res.rawHeaders[i], res.rawHeaders[i + 1]); } catch { /* skip an unrepresentable header */ }
-        }
-        if (status < 200 || status > 599) {
-          res.destroy();
-          refuse(new Error(`unsupported status ${status}`));
-          return;
-        }
-        if (request.method === "HEAD" || status === 204 || status === 205 || status === 304) {
-          res.resume();
-          // Built BEFORE settle(): a throw inside it would mark the promise settled.
-          const empty = new Response(null, { status, statusText: res.statusMessage ?? "", headers: respHeaders });
-          settle(() => resolve(empty));
-          return;
-        }
-
-        // Codings are listed in the order they were applied, so undo them last to
-        // first. Like fetch: more than MAX_CONTENT_ENCODINGS is refused, and an
-        // unknown coding anywhere means none can be undone, so the body is passed
-        // through raw.
-        const encodings = (res.headers["content-encoding"] ?? "")
-          .split(",").map((s) => s.trim().toLowerCase()).filter((s) => s && s !== "identity").reverse();
-        if (encodings.length > MAX_CONTENT_ENCODINGS) {
-          res.destroy();
-          refuse(new Error(`too many content-encodings in response: ${encodings.length}, maximum allowed is ${MAX_CONTENT_ENCODINGS}`));
-          return;
-        }
-        const decoders: Transform[] = [];
-        for (const enc of encodings) {
-          const d = decoderFor(enc);
-          if (!d) {
-            for (const x of decoders) x.destroy();
-            decoders.length = 0;
-            break;
-          }
-          decoders.push(d);
-        }
-        const stages: NodeJS.ReadableStream[] = [res];
-        const out = new PassThrough();
-        const destroyAll = (err?: unknown) => {
-          const e = err === undefined ? undefined : (signal.aborted ? signal.reason : streamError(ownError ?? err));
-          out.destroy(e as Error | undefined);
-          for (const s of stages) (s as Readable).destroy();
-        };
-        teardown = () => destroyAll();
-        let last: NodeJS.ReadableStream = res;
-        for (const d of decoders) {
-          d.on("error", destroyAll);
-          last = last.pipe(d);
-          stages.push(d);
-        }
-        res.on("error", destroyAll);
-        res.on("close", () => { if (!res.complete) destroyAll(new Error("terminated")); });
-        last.pipe(out);
-        out.on("close", () => { for (const s of stages) (s as Readable).destroy(); });
-
-        const response = new Response(Readable.toWeb(out) as ReadableStream<Uint8Array>, {
-          status,
-          statusText: res.statusMessage ?? "",
-          headers: respHeaders,
-        });
-        settle(() => resolve(response));
-      } catch (err) {
-        // A throw here would escape as an uncaughtException and leave the
-        // promise pending. new Response() throws on a reason phrase holding a
-        // control character, which Node's HTTP parser accepts.
-        teardown();
-        refuse(err);
-      }
+      const answer = responseFromIncoming(res, request.method, signal, () => ownError);
+      if (answer.ok) settle(() => resolve(answer.response));
+      else refuse(answer.cause);
     });
     // A 101. Without this listener Node drops the socket and emits neither
     // 'response' nor 'error'. fetch refuses an upgrade too.
@@ -651,26 +538,9 @@ async function pinnedFetch(
       socket.destroy();
       refuse(new Error(`unexpected upgrade (status ${res.statusCode})`));
     });
-    const kill = (err: Error) => {
+    armTransportTimeouts(creq, limits, isHttps, () => gotHeaders, (err) => {
       ownError ??= err;
       creq.destroy(err);
-    };
-    // Connect timeout: TCP connect plus, for https, the TLS handshake. The socket
-    // is always fresh (agent:false), so it is still connecting when it arrives.
-    creq.once("socket", (socket) => {
-      const timer = setTimeout(() => {
-        kill(transportTimeout(`Connect Timeout Error (timeout: ${limits.connectTimeoutMs}ms)`, "UND_ERR_CONNECT_TIMEOUT"));
-      }, limits.connectTimeoutMs);
-      const clear = () => clearTimeout(timer);
-      socket.once(isHttps ? "secureConnect" : "connect", clear);
-      socket.once("close", clear);
-    });
-    // Idle timeout: socket inactivity, armed once connected — covers waiting for
-    // the headers and every gap between body chunks.
-    creq.setTimeout(limits.idleTimeoutMs, () => {
-      kill(gotHeaders
-        ? transportTimeout(`Body Timeout Error (no data for ${limits.idleTimeoutMs}ms)`, "UND_ERR_BODY_TIMEOUT")
-        : transportTimeout(`Headers Timeout Error (no response for ${limits.idleTimeoutMs}ms)`, "UND_ERR_HEADERS_TIMEOUT"));
     });
     creq.on("error", fail);
     // Backstop: a request that closes before anything settled it fails now
@@ -683,6 +553,148 @@ async function pinnedFetch(
     else signal.addEventListener("abort", onAbort, { once: true });
     creq.end(body);
   });
+}
+
+function pinnedRequestHeaders(request: Request, body: Buffer | undefined): Record<string, string> {
+  const headers: Record<string, string> = {};
+  request.headers.forEach((v, k) => { headers[k] = v; });
+  if (!("accept" in headers)) headers["accept"] = "*/*";
+  if (!("accept-encoding" in headers)) headers["accept-encoding"] = "gzip, deflate, br";
+  if (body && !("content-length" in headers)) headers["content-length"] = String(body.byteLength);
+  return headers;
+}
+
+// Connect timeout: TCP connect plus, for https, the TLS handshake. The socket
+// is always fresh (agent:false), so it is still connecting when it arrives.
+// Idle timeout: socket inactivity, armed once connected — covers waiting for
+// the headers and every gap between body chunks. Each ends the request through
+// `kill` with undici's error code, so the caller sees the timeout, not the
+// reset it causes.
+function armTransportTimeouts(
+  creq: http.ClientRequest,
+  limits: { connectTimeoutMs: number; idleTimeoutMs: number },
+  isHttps: boolean,
+  gotHeaders: () => boolean,
+  kill: (err: Error) => void,
+): void {
+  creq.once("socket", (socket) => {
+    const timer = setTimeout(() => {
+      kill(transportTimeout(`Connect Timeout Error (timeout: ${limits.connectTimeoutMs}ms)`, "UND_ERR_CONNECT_TIMEOUT"));
+    }, limits.connectTimeoutMs);
+    const clear = () => clearTimeout(timer);
+    socket.once(isHttps ? "secureConnect" : "connect", clear);
+    socket.once("close", clear);
+  });
+  creq.setTimeout(limits.idleTimeoutMs, () => {
+    kill(gotHeaders()
+      ? transportTimeout(`Body Timeout Error (no data for ${limits.idleTimeoutMs}ms)`, "UND_ERR_BODY_TIMEOUT")
+      : transportTimeout(`Headers Timeout Error (no response for ${limits.idleTimeoutMs}ms)`, "UND_ERR_HEADERS_TIMEOUT"));
+  });
+}
+
+type IncomingAnswer = { ok: true; response: Response } | { ok: false; cause: unknown };
+
+// The Response for an answer that arrived, or why it is refused. Never throws:
+// a throw in the 'response' handler would escape as an uncaughtException and
+// leave pinnedFetch's promise pending (new Response() throws on a reason phrase
+// holding a control character, which Node's HTTP parser accepts), so whatever
+// was built is torn down and the throw becomes a refusal.
+function responseFromIncoming(
+  res: http.IncomingMessage,
+  method: string,
+  signal: AbortSignal,
+  ownError: () => Error | null,
+): IncomingAnswer {
+  let teardown = () => { res.destroy(); };
+  try {
+    const status = res.statusCode ?? 0;
+    if ([301, 302, 303, 307, 308].includes(status) && res.headers.location) {
+      res.destroy();
+      return { ok: false, cause: new Error("unexpected redirect") };
+    }
+    const respHeaders = new Headers();
+    for (let i = 0; i + 1 < res.rawHeaders.length; i += 2) {
+      try { respHeaders.append(res.rawHeaders[i], res.rawHeaders[i + 1]); } catch { /* skip an unrepresentable header */ }
+    }
+    if (status < 200 || status > 599) {
+      res.destroy();
+      return { ok: false, cause: new Error(`unsupported status ${status}`) };
+    }
+    if (method === "HEAD" || status === 204 || status === 205 || status === 304) {
+      res.resume();
+      return { ok: true, response: new Response(null, { status, statusText: res.statusMessage ?? "", headers: respHeaders }) };
+    }
+    const decoders = decodersForContentEncoding(res.headers["content-encoding"]);
+    if (!Array.isArray(decoders)) {
+      res.destroy();
+      return { ok: false, cause: decoders.tooMany };
+    }
+    const piped = pipeDecoded(res, decoders, signal, ownError);
+    teardown = piped.destroyAll;
+    return {
+      ok: true,
+      response: new Response(Readable.toWeb(piped.out) as ReadableStream<Uint8Array>, {
+        status,
+        statusText: res.statusMessage ?? "",
+        headers: respHeaders,
+      }),
+    };
+  } catch (err) {
+    teardown();
+    return { ok: false, cause: err };
+  }
+}
+
+// Codings are listed in the order they were applied, so they are undone last to
+// first. Like fetch: more than MAX_CONTENT_ENCODINGS is refused, and an unknown
+// coding anywhere means none can be undone, so the body is passed through raw
+// (no decoders).
+function decodersForContentEncoding(header: string | undefined): Transform[] | { tooMany: Error } {
+  const encodings = (header ?? "")
+    .split(",").map((s) => s.trim().toLowerCase()).filter((s) => s && s !== "identity").reverse();
+  if (encodings.length > MAX_CONTENT_ENCODINGS) {
+    return { tooMany: new Error(`too many content-encodings in response: ${encodings.length}, maximum allowed is ${MAX_CONTENT_ENCODINGS}`) };
+  }
+  const decoders: Transform[] = [];
+  for (const enc of encodings) {
+    const d = decoderFor(enc);
+    if (!d) {
+      for (const x of decoders) x.destroy();
+      return [];
+    }
+    decoders.push(d);
+  }
+  return decoders;
+}
+
+// res → each decoder → out, with one teardown for every stage: an error
+// anywhere (or a connection that closes before the body completed) errors
+// `out` with the transport's own timeout if it caused it, else the caller's
+// abort reason, else the failure itself.
+function pipeDecoded(
+  res: http.IncomingMessage,
+  decoders: readonly Transform[],
+  signal: AbortSignal,
+  ownError: () => Error | null,
+): { out: PassThrough; destroyAll: (err?: unknown) => void } {
+  const stages: NodeJS.ReadableStream[] = [res];
+  const out = new PassThrough();
+  const destroyAll = (err?: unknown) => {
+    const e = err === undefined ? undefined : (signal.aborted ? signal.reason : streamError(ownError() ?? err));
+    out.destroy(e as Error | undefined);
+    for (const s of stages) (s as Readable).destroy();
+  };
+  let last: NodeJS.ReadableStream = res;
+  for (const d of decoders) {
+    d.on("error", destroyAll);
+    last = last.pipe(d);
+    stages.push(d);
+  }
+  res.on("error", destroyAll);
+  res.on("close", () => { if (!res.complete) destroyAll(new Error("terminated")); });
+  last.pipe(out);
+  out.on("close", () => { for (const s of stages) (s as Readable).destroy(); });
+  return { out, destroyAll };
 }
 
 function limitResponseBody(

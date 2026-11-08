@@ -17,10 +17,10 @@
 // A run that blows the budget aborts at once (the counter throws), so the
 // quadratic and cubic shapes fail in milliseconds instead of hanging the suite.
 //
-// And that the change kept every OUTPUT: which entry wins, the canonical key
-// first then the sorted duplicates, a conflated item's shared entry never
-// mutated — pinned on a small mixed fixture whose expected keys were worked out
-// by hand from the pre-fix fold.
+// And every OUTPUT: which entry wins (prefersPlexCopy — newest addedAt, then
+// the greater ratingKey), the canonical key first then the sorted duplicates,
+// a conflated item's shared entry never mutated — pinned on a small mixed
+// fixture whose expected keys were worked out by hand.
 //
 // No DB and no network: fetch is scripted per URL and dns.lookup is stubbed to
 // a public address (as in tests/plex.test.mts); plex-legacy-resolve's prisma
@@ -136,7 +136,7 @@ const sortedKeys = (keys: string[]) => [...keys].sort();
 
 // ── 1. section fold ─────────────────────────────────────────────────────────
 
-test("a section listing 20k copies of one tmdb id folds in linear work, last copy winning with every other key", async () => {
+test("a section listing 20k copies of one tmdb id folds in linear work, the greatest ratingKey winning with every other key", async () => {
   const N = 20_000;
   // The LAST copy is a conflated item that also claims tmdb 78, so the winner's
   // entry object is shared — the fold must copy it, never write into it.
@@ -148,7 +148,7 @@ test("a section listing 20k copies of one tmdb id folds in linear work, last cop
   );
 
   const winner = result.get(77)!;
-  assert.equal(winner.ratingKey, String(N), "last write still wins inside a section");
+  assert.equal(winner.ratingKey, String(N), "undated copies: the greatest ratingKey wins (prefersPlexCopy)");
   assert.deepEqual(plexLibraryRatingKeys(winner), [String(N), ...sortedKeys(keyRange(1, N - 1))]);
   assert.equal(result.get(78)!.ratingKey, String(N));
   assert.equal(result.get(78)!.duplicateRatingKeys, undefined, "the shared entry was mutated — 78 got 77's copies");
@@ -157,7 +157,7 @@ test("a section listing 20k copies of one tmdb id folds in linear work, last cop
 
 // ── 2. cross-section merge ──────────────────────────────────────────────────
 
-test("400 sections each holding 50 copies of one tmdb id merge in linear work, first section's winner keeping every key", async () => {
+test("400 sections each holding 50 copies of one tmdb id merge in linear work, the preferred copy keeping every key", async () => {
   const SECTIONS = 400;
   const PER = 50;
   const N = SECTIONS * PER;
@@ -173,8 +173,8 @@ test("400 sections each holding 50 copies of one tmdb id merge in linear work, f
   );
 
   const winner = result.get(77)!;
-  assert.equal(winner.ratingKey, String(PER), "the first section's own winner (its last copy) owns the row");
-  assert.deepEqual(plexLibraryRatingKeys(winner), [String(PER), ...sortedKeys(keyRange(1, N).filter((k) => k !== String(PER)))]);
+  assert.equal(winner.ratingKey, String(N), "the greatest ratingKey across every section owns the row");
+  assert.deepEqual(plexLibraryRatingKeys(winner), [String(N), ...sortedKeys(keyRange(1, N - 1))]);
   assert.ok(work <= N * WORK_PER_COPY, `work ${work}`);
 });
 
@@ -229,15 +229,17 @@ test("withDuplicateRatingKeys merges two 20k-key entries in linear work, without
 
 // ── output equivalence with the pre-fix fold ────────────────────────────────
 
-test("a small mixed fixture keeps exactly the winners and keys the pre-fix fold produced", async () => {
-  // Expected values worked out by hand from the pre-fix pairwise fold:
-  //   section 1, tmdb 1: 30 → 5 (dup 30) → 30 again (prev 5 ≠ 30, so dup 5)
+test("a small mixed fixture keeps exactly the winners and keys the copy rule gives", async () => {
+  // Expected values worked out by hand from prefersPlexCopy (all copies are
+  // undated, so the greater ratingKey wins and an exact tie keeps the first):
+  //   section 1, tmdb 1: 30, 5, 30 again → 30 (the first 30; dup 5)
   //   section 1, tmdb 2: the conflated item 5, nothing else
-  //   section 1, tmdb 3: 12 → 7 (dup 12)
-  //   section 1, tmdb 4: 9 → a copy with no ratingKey (dup 9)
-  //   section 2 copies: tmdb 1 → 100, tmdb 2 → 200, tmdb 3 → 12 then 8 (dup 12)
-  //   merge (first section wins): 1 gains 100, 2 gains 200, 3 gains only 8
-  //   (12 is already there), 4 is untouched; duplicates sorted as strings.
+  //   section 1, tmdb 3: 12, 7 → 12 (dup 7)
+  //   section 1, tmdb 4: 9, a copy with no ratingKey → 9 (no key to add)
+  //   section 2 copies: tmdb 1 → 100, tmdb 2 → 200, tmdb 3 → 12, 8 → 12 (dup 8)
+  //   merge: 1 → 100 (dups 30, 5), 2 → 200 (dup 5), 3 → section 1's 12 (an
+  //   exact tie with section 2's; dups 7 and 8), 4 untouched; duplicates
+  //   sorted as strings.
   respond = serveSections({
     "1": [
       movie("30", [1], "Thirty"),
@@ -265,11 +267,11 @@ test("a small mixed fixture keeps exactly the winners and keys the pre-fix fold 
     const d = combined.get(id)!;
     return { title: d.title, ratingKey: d.ratingKey, keys: plexLibraryRatingKeys(d) };
   };
-  assert.deepEqual(view(1), { title: "Thirty again", ratingKey: "30", keys: ["30", "100", "5"] });
-  assert.deepEqual(view(2), { title: "Conflated", ratingKey: "5", keys: ["5", "200"] });
-  assert.deepEqual(view(3), { title: "Seven", ratingKey: "7", keys: ["7", "12", "8"] });
-  assert.deepEqual(view(4), { title: "No key", ratingKey: null, keys: ["9"] });
-  assert.deepEqual(combined.get(4)!.duplicateRatingKeys, ["9"]);
+  assert.deepEqual(view(1), { title: "Hundred", ratingKey: "100", keys: ["100", "30", "5"] });
+  assert.deepEqual(view(2), { title: "Two hundred", ratingKey: "200", keys: ["200", "5"] });
+  assert.deepEqual(view(3), { title: "Twelve", ratingKey: "12", keys: ["12", "7", "8"] });
+  assert.deepEqual(view(4), { title: "Nine", ratingKey: "9", keys: ["9"] });
+  assert.equal(combined.get(4)!.duplicateRatingKeys, undefined);
 
   // A merge that adds nothing hands back the SAME object, and the pairwise
   // helper still never writes into either side.

@@ -5,7 +5,7 @@ import { ARR_SERVICE_LABEL } from "@/lib/arr-admin";
 import { arrFailure, arrGate, parseArrId } from "@/lib/arr-admin-http";
 import { parseTitleAdd } from "@/lib/arr-title-add";
 import { TitleExistsError, TitleLookupError, addTitle, loadAddChoices } from "@/lib/arr-title-lifecycle";
-import { auditContext, logAudit } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { invalidateArrLibraryIndexCache } from "@/lib/library-cleanup-arr";
@@ -70,8 +70,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // title manager's Remove drops it the same way.
   invalidateNeverWatchedReport();
   void logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email ?? null,
+    ...auditActor(req, session),
     action: "ARR_TITLE_ADD",
     // No arr id to name it by: the title's TMDB id does, never a made-up 0.
     target: `${target.service}:${target.instance}:${result.arrId ?? `tmdb:${add.tmdbId}`}`,
@@ -87,7 +86,6 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       search: add.search,
       ...(target.service === "radarr" ? { monitored: add.monitored } : { monitor: add.monitor }),
     },
-    ...auditContext(req, session),
   });
   return NextResponse.json(result, { status: 201 });
 });

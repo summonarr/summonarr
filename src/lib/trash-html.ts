@@ -15,8 +15,24 @@
 //   1. Strip remaining tags in a loop until the string is stable. A single
 //      pass of `/<[^>]+>/g` can leave reassembled markup in adversarial input
 //      like `<scr<script>ipt>` (CodeQL: incomplete multi-char sanitization).
-//   2. Decode `&amp;` LAST. Decoding it before `&lt;` would turn `&amp;lt;`
-//      into a literal `<` (CodeQL: double unescape).
+//   2. Decode every entity in ONE pass. Decoding them one after another, with
+//      `&amp;` anywhere but last, would turn `&amp;lt;` into a literal `<`
+//      (CodeQL: double unescape); a single pass never re-reads its output.
+//
+// The tag strip is deliberately lossy (prose like `a < b > c` goes with it) and
+// numeric entities stay literal — both pinned in tests/trash-html.test.mts.
+
+// The named entities TRaSH prose uses. Anything else stays as written.
+const ENTITIES: Record<string, string> = {
+  "&lt;": "<",
+  "&gt;": ">",
+  "&quot;": '"',
+  "&#39;": "'",
+  "&apos;": "'",
+  "&nbsp;": " ",
+  "&amp;": "&",
+};
+const ENTITY = /&(?:lt|gt|quot|#39|apos|nbsp|amp);/g;
 
 export function stripTrashHtml(html: string): string {
   let text = html
@@ -31,13 +47,8 @@ export function stripTrashHtml(html: string): string {
     text = text.replace(/<[^>]+>/g, "");
   } while (text !== prev);
 
-  // Decode entities. `&amp;` must run last to avoid double-unescaping.
   return text
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, "&")
+    .replace(ENTITY, (entity) => ENTITIES[entity] ?? entity)
     .replace(/[ \t]+/g, " ")
     .replace(/\n[ \t]+/g, "\n")
     .replace(/[ \t]+\n/g, "\n")

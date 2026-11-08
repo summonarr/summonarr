@@ -113,6 +113,7 @@
   "trash.status.error": "erreur",
   "trash.status.applied": "appliqué",
   "trash.status.ready": "prêt",
+  "trash.status.notConfigured": "non configuré",
   "trash.spec.error.loadDetail": "Impossible de charger le détail ({status})",
   "trash.spec.error.network": "Erreur réseau — veuillez réessayer",
   "trash.spec.error.apply": "Échec de l'application ({status})",

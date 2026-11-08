@@ -142,10 +142,19 @@ const txObj = {
       rec("tx.authSession.delete", args);
       return {};
     },
-    deleteMany: async (args: { where: { userId: string; NOT?: { sessionId: string } } }) => {
+    // revokeOtherUserSessionsInTx's shape: the rows' ids first, then the delete,
+    // both keyed { userId, sessionId?: { not: <kept> } }.
+    findMany: async (args: { where: { userId: string; sessionId?: { not: string } } }) => {
+      rec("tx.authSession.findMany", args);
+      const notSid = args.where.sessionId?.not;
+      return [...authSessionRows]
+        .filter(([sid, row]) => row.userId === args.where.userId && !(notSid && sid === notSid))
+        .map(([sessionId]) => ({ sessionId }));
+    },
+    deleteMany: async (args: { where: { userId: string; sessionId?: { not: string } } }) => {
       rec("tx.authSession.deleteMany", args);
       revokeAllLedgerAtDelete = shouldForceDbCheck(args.where.userId, "probe-session");
-      const notSid = args.where.NOT?.sessionId;
+      const notSid = args.where.sessionId?.not;
       let count = 0;
       for (const [sid, row] of [...authSessionRows]) {
         if (row.userId !== args.where.userId) continue;
@@ -383,7 +392,7 @@ test("DELETE non-self by a credential user requires the password: missing → 40
 
   const wrongPw = await del(caller.token, { sessionId: "sess-laptop", confirmPassword: "not-it" });
   assert.equal(wrongPw.status, 401);
-  assert.deepEqual(await wrongPw.json(), { error: "invalid-password" });
+  assert.deepEqual(await wrongPw.json(), { error: "invalid-password", message: "Invalid password" });
   assert.ok(authSessionRows.has("sess-laptop"));
 
   const ok = await del(caller.token, { sessionId: "sess-laptop", confirmPassword: CORRECT_PASSWORD });
@@ -446,7 +455,7 @@ test("revoke-all by a credential user demands the password: missing → 401, wro
 
   const wrongPw = await postRevokeAll(caller.token, { confirmPassword: "nope" });
   assert.equal(wrongPw.status, 401);
-  assert.deepEqual(await wrongPw.json(), { error: "invalid-password" });
+  assert.deepEqual(await wrongPw.json(), { error: "invalid-password", message: "Invalid password" });
   assert.equal(opsOf("tx.authSession.deleteMany").length, 0, "no deletion until step-up passes");
 });
 
@@ -465,8 +474,12 @@ test("revoke-all (includeCurrent=false) deletes every OTHER device, keeps the ca
   assert.equal(authSessionRows.has("sess-tv"), false);
   assert.ok(authSessionRows.has(caller.sessionId), "the caller stays signed in when includeCurrent=false");
   // The deleteMany excluded the caller's session id.
-  const dm = opsOf("tx.authSession.deleteMany")[0].args as { where: { userId: string; NOT?: { sessionId: string } } };
-  assert.equal(dm.where.NOT?.sessionId, caller.sessionId);
+  const dm = opsOf("tx.authSession.deleteMany")[0].args as { where: { userId: string; sessionId?: { not: string } } };
+  assert.equal(dm.where.sessionId?.not, caller.sessionId);
+  // Each revoked session is force-revoked by id too, so a cached check of it
+  // can't ride the fast path on this replica.
+  assert.equal(shouldForceDbCheck("someone-else", "sess-phone"), true, "a revoked session id is marked");
+  assert.equal(shouldForceDbCheck("someone-else", caller.sessionId), false, "the kept session is not");
   // Guardrail 27: user ledger mark comes after the delete.
   assert.equal(revokeAllLedgerAtDelete, false, "the user is NOT force-revalidated before the DB delete");
   assert.equal(shouldForceDbCheck(caller.userId, "anything"), true, "the user is force-revalidated after the delete");
@@ -539,4 +552,13 @@ test("revoke-all is per-user rate-limited (5/hour): the 6th attempt → 429", as
   const limited = await postRevokeAll(caller.token, {});
   assert.equal(limited.status, 429);
   assert.deepEqual(await limited.json(), { error: "rate_limit", message: "Too many revoke-all attempts. Try again later." });
+});
+
+test("sign out other devices never LOWERS the cutoff: it stamps one second before the caller's session, only when that is later than the stored one", async () => {
+  const { othersRevokedCutoff } = await import("../src/lib/sign-out-everywhere.ts");
+  const created = new Date("2026-11-01T10:00:00Z");
+  assert.deepEqual(othersRevokedCutoff(created, null), new Date("2026-11-01T09:59:59Z"));
+  assert.deepEqual(othersRevokedCutoff(created, new Date("2026-10-01T00:00:00Z")), new Date("2026-11-01T09:59:59Z"));
+  assert.equal(othersRevokedCutoff(created, new Date("2026-11-02T00:00:00Z")), null, "a later full-revoke cutoff stands");
+  assert.equal(othersRevokedCutoff(null, null), null, "no caller row ⇒ no stamp");
 });

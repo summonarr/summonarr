@@ -3,14 +3,15 @@
 import { useRouter } from "next/navigation";
 import { useT } from "@/components/i18n/i18n-provider";
 import { StyledSelect } from "@/components/ui/styled-select";
+import { REQUEST_STATUS_LABEL_KEY } from "@/lib/status-labels";
 
 // Labels are i18n keys, translated at render.
 const STATUS_TABS = [
-  { labelKey: "requests.filter.all",       value: "" },
-  { labelKey: "requests.status.pending",   value: "PENDING" },
-  { labelKey: "requests.status.approved",  value: "APPROVED" },
-  { labelKey: "requests.status.declined",  value: "DECLINED" },
-  { labelKey: "requests.status.available", value: "AVAILABLE" },
+  { labelKey: "requests.filter.all", value: "" },
+  ...(["PENDING", "APPROVED", "DECLINED", "AVAILABLE"] as const).map((value) => ({
+    labelKey: REQUEST_STATUS_LABEL_KEY[value],
+    value,
+  })),
 ];
 
 const TYPE_TABS = [
@@ -35,6 +36,78 @@ interface AdminFilterBarProps {
   currentSort: string;
 }
 
+// A segmented control: one pressed button per option, with an optional count.
+// Wraps onto a second row on a narrow screen (rather than scrolling, which
+// clipped "Available" off the right edge); user-list-filters.tsx does the
+// same. The pressed segment is the design FilterBar's: a bg-3 fill alone was
+// ~1.07:1 against the bg-1 track in light mode, so it also carries a
+// border-strong edge and a small shadow (guardrail 42).
+function Segmented<V extends string>({
+  options,
+  active,
+  onChange,
+  label,
+}: {
+  options: readonly { value: V; label: string; count?: number }[];
+  active: V;
+  onChange: (value: V) => void;
+  label: string;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label={label}
+      className="flex flex-wrap gap-1 max-w-full"
+      style={{
+        padding: 2,
+        background: "var(--ds-bg-1)",
+        border: "1px solid var(--ds-border)",
+        borderRadius: 8,
+      }}
+    >
+      {options.map((o) => {
+        const isActive = o.value === active;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            onClick={() => onChange(o.value)}
+            aria-pressed={isActive}
+            className="ds-hover-tint inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 font-medium transition-colors"
+            style={{
+              padding: "5px 12px",
+              borderRadius: 6,
+              border: 0,
+              fontSize: 12,
+              background: isActive ? "var(--ds-bg-2)" : "transparent",
+              // Inactive segments leave box-shadow unset so .ds-hover-tint's
+              // inset tint (a box-shadow) shows on hover.
+              boxShadow: isActive ? "var(--ds-shadow-sm), inset 0 0 0 1px var(--ds-border-strong)" : undefined,
+              color: isActive ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+            }}
+          >
+            {o.label}
+            {typeof o.count === "number" && (
+              <span
+                className="ds-mono"
+                style={{
+                  fontSize: 10,
+                  padding: "0 5px",
+                  borderRadius: 3,
+                  background: isActive ? "var(--ds-accent-soft)" : "var(--ds-bg-3)",
+                  color: isActive ? "var(--ds-accent-text)" : "var(--ds-fg-subtle)",
+                }}
+              >
+                {o.count}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentType, currentSort }: AdminFilterBarProps) {
   const router = useRouter();
   const t = useT();
@@ -50,90 +123,24 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentT
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-      {/* flex-wrap (not a horizontal scroll) lets the 5 status pills wrap to a
-          second row on narrow screens instead of clipping "Available" off the
-          right edge. user-list-filters.tsx does the same. */}
-      <div
-        className="flex flex-wrap gap-1 max-w-full"
-        style={{
-          padding: 2,
-          background: "var(--ds-bg-1)",
-          border: "1px solid var(--ds-border)",
-          borderRadius: 8,
-        }}
-      >
-        {STATUS_TABS.map((tab) => {
-          const count = tab.value ? (statusCounts[tab.value] ?? 0) : totalAll;
-          const active = currentStatus === tab.value;
-          return (
-            <button
-              key={tab.value}
-              type="button"
-              onClick={() => navigate(tab.value, currentSort, currentType)}
-              aria-pressed={active}
-              className="ds-hover-tint inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 font-medium transition-colors"
-              style={{
-                padding: "5px 12px",
-                borderRadius: 6,
-                border: 0,
-                fontSize: 12,
-                background: active ? "var(--ds-bg-3)" : "transparent",
-                color: active ? "var(--ds-fg)" : "var(--ds-fg-muted)",
-              }}
-            >
-              {t(tab.labelKey)}
-              <span
-                className="ds-mono"
-                style={{
-                  fontSize: 10,
-                  padding: "0 5px",
-                  borderRadius: 3,
-                  background: active
-                    ? "var(--ds-accent-soft)"
-                    : "var(--ds-bg-3)",
-                  color: active ? "var(--ds-accent-text)" : "var(--ds-fg-subtle)",
-                }}
-              >
-                {count}
-              </span>
-            </button>
-          );
-        })}
-      </div>
+      <Segmented
+        label={t("adminQueue.filter.statusLabel")}
+        options={STATUS_TABS.map((tab) => ({
+          value: tab.value,
+          label: t(tab.labelKey),
+          count: tab.value ? (statusCounts[tab.value] ?? 0) : totalAll,
+        }))}
+        active={currentStatus}
+        onChange={(status) => navigate(status, currentSort, currentType)}
+      />
 
       <div className="flex flex-wrap items-center gap-3">
-        <div
-          className="flex flex-wrap gap-1 max-w-full"
-          style={{
-            padding: 2,
-            background: "var(--ds-bg-1)",
-            border: "1px solid var(--ds-border)",
-            borderRadius: 8,
-          }}
-        >
-          {TYPE_TABS.map((tab) => {
-            const active = currentType === tab.value;
-            return (
-              <button
-                key={tab.value}
-                type="button"
-                onClick={() => navigate(currentStatus, currentSort, tab.value)}
-                aria-pressed={active}
-                className="ds-hover-tint inline-flex items-center whitespace-nowrap shrink-0 font-medium transition-colors"
-                style={{
-                  padding: "5px 12px",
-                  borderRadius: 6,
-                  border: 0,
-                  fontSize: 12,
-                  background: active ? "var(--ds-bg-3)" : "transparent",
-                  color: active ? "var(--ds-fg)" : "var(--ds-fg-muted)",
-                }}
-              >
-                {t(tab.labelKey)}
-              </button>
-            );
-          })}
-        </div>
+        <Segmented
+          label={t("adminQueue.filter.typeLabel")}
+          options={TYPE_TABS.map((tab) => ({ value: tab.value, label: t(tab.labelKey) }))}
+          active={currentType}
+          onChange={(type) => navigate(currentStatus, currentSort, type)}
+        />
 
         <StyledSelect
           compact

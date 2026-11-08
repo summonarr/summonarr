@@ -7,9 +7,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { arrTitleDiffers, cleanupExecuteBody, nextCleanupDraft } from "../src/lib/cleanup-delete-plan.ts";
+import { planFromAnswer } from "../src/lib/cleanup-plan-answer.ts";
 
 const deleteSrc = readFileSync(new URL("../src/components/admin/cleanup-delete.tsx", import.meta.url), "utf8");
 const pageSrc = readFileSync(new URL("../src/components/admin/library-cleanup.tsx", import.meta.url), "utf8");
+// The page's pieces (the rules form, the filter bar, the table, the protected list).
+const partsSrc = readFileSync(new URL("../src/components/admin/library-cleanup-parts.tsx", import.meta.url), "utf8");
 
 // The body of `const <name> = useCallback(async (…) => { … }, [deps]);`.
 function callbackBody(src: string, name: string): string {
@@ -42,21 +45,24 @@ test("the execute body is exactly the plan's titles and count — never a skippe
 
 test("the hook's execute sends the plan through cleanupExecuteBody and never re-reads the live selection", () => {
   const exec = callbackBody(deleteSrc, "execute");
-  assert.match(exec, /body: JSON\.stringify\(cleanupExecuteBody\(plan, blacklist\)\)/);
-  assert.doesNotMatch(exec, /items\(\)/, "execute must not read the selection");
+  assert.match(exec, /await sendExecute\(plan, blacklist\)/);
+  const send = deleteSrc.slice(deleteSrc.indexOf("async function sendExecute("), deleteSrc.indexOf("export function useCleanupDelete("));
+  assert.match(send, /body: JSON\.stringify\(cleanupExecuteBody\(plan, blacklist\)\)/);
+  assert.doesNotMatch(exec + send, /items\(\)/, "execute must not read the selection");
 });
 
 test("a dry-run answer is installed only while its generation is current, and every selection change bumps it", () => {
   const dry = callbackBody(deleteSrc, "dryRun");
   assert.match(dry, /const gen = \+\+planGen\.current;/);
-  assert.match(dry, /if \(gen === planGen\.current\) setPlan\(next\);/);
-  assert.doesNotMatch(dry, /setPlan\(\(await res\.json\(\)\)/, "the response is never installed unchecked");
+  assert.ok(dry.indexOf("if (gen !== planGen.current) return;") >= 0 && dry.indexOf("if (gen !== planGen.current) return;") < dry.indexOf("setPlan(next);"), "a superseded answer returns before anything is installed");
+  assert.match(dry, /const next = planFromAnswer\(res\.data\);/, "the response is never installed unchecked");
+  assert.doesNotMatch(dry, /setPlan\(\(await res\.json\(\)\)/);
   const clear = callbackBody(deleteSrc, "clearPlan");
   assert.match(clear, /planGen\.current\+\+;/);
   assert.match(deleteSrc, /return \{\n\s+plan,\n\s+clearPlan,/, "the returned clearPlan is the generation-bumping one");
   const exec = callbackBody(deleteSrc, "execute");
   assert.match(exec, /const gen = planGen\.current;/);
-  assert.match(exec, /if \(fresh\?\.items && gen === planGen\.current\)/, "a 409's fresh plan for a changed selection is dropped");
+  assert.match(exec, /if \(answer\.plan && gen === planGen\.current\) setPlan\(answer\.plan\);/, "a 409's fresh plan for a changed selection is dropped");
 });
 
 // ── C056: a target the instance holds under another title is named ──────────
@@ -90,11 +96,15 @@ test("nextCleanupDraft keeps unsaved edits across a reload, follows fresh settin
 test("the page's load drops a superseded answer and merges the draft instead of overwriting it", () => {
   const load = callbackBody(pageSrc, "load");
   assert.match(load, /const seq = \+\+loadSeq\.current;/);
+  // fetchJson reads (and shape-checks) the body before it resolves, so the
+  // sequence check that follows it covers the body read too.
   assert.match(
     load,
-    /const data = \(await res\.json\(\)\) as Report;\n\s+if \(seq !== loadSeq\.current\) return;\n\s+setReport\(data\);/,
+    /const res = await fetchJson\(withBasePath\("\/api\/admin\/cleanup"\), \{\s*schema: CleanupReportSchema,[\s\S]*?\}\);\n\s+if \(seq !== loadSeq\.current\) return;/,
     "the report is installed only after a sequence check that follows the body read",
   );
+  assert.match(load, /const data = res\.data;\n\s+setReport\(data\);/, "the checked body, never an unchecked cast");
+  assert.doesNotMatch(load, /as Report/);
   assert.match(load, /setDraft\(\(d\) => nextCleanupDraft\(d, base, data\.settings, reset\)\);/);
   assert.doesNotMatch(load, /setDraft\(data\.settings\)/, "an unconditional draft reset discards unsaved edits");
   assert.match(pageSrc, /del\.clearPlan\(\);\n\s+await load\(\{ resetDraft: true \}\);/, "a rules save resets the draft on its reload");
@@ -115,8 +125,11 @@ test("the execute body echoes the dry run's target-set fingerprint, and the hook
     confirmFingerprint: "f".repeat(64),
   });
   assert.equal("confirmFingerprint" in cleanupExecuteBody({ targetCount: 1, items: plan.items }, true), false, "an older server's plan sends only the count");
+  // A 409's fresh plan is confirmed against ITS set: the fingerprint it carries is kept.
+  const fresh = planFromAnswer({ ...plan, reclaimableBytes: 5, items: [{ tmdbId: 1, mediaType: "MOVIE", title: "A", targets: [] }], error: "changed" });
+  assert.equal(fresh?.targetsFingerprint, "f".repeat(64));
   const exec = callbackBody(deleteSrc, "execute");
-  assert.match(exec, /setPlan\(\{ targetCount: fresh\.targetCount, targetsFingerprint: fresh\.targetsFingerprint, /, "a 409's fresh plan is confirmed against ITS set");
+  assert.match(exec, /if \(answer\.kind === "conflict"\)/);
 });
 
 // ── the hook's callbacks keep their identity ────────────────────────────────
@@ -157,7 +170,8 @@ test("a rules save installs the saved draft as the report's settings and the dra
   const reload = body.indexOf("await load({ resetDraft: true });");
   assert.ok(base > 0 && settings > 0 && reload > 0, "all three present");
   assert.ok(base < reload && settings < reload, "Save reads clean even when a Protect supersedes the reload");
-  assert.ok(body.indexOf("if (!res.ok)") < base, "only after the server accepted the save");
+  const refused = body.indexOf("if (!res.ok");
+  assert.ok(refused > 0 && refused < base, "only after the server accepted the save");
   assert.doesNotMatch(pageSrc, /resetDraftNext/, "a superseded load's reset can't stay armed");
 });
 
@@ -171,8 +185,19 @@ test("a failed first load offers a Retry that reloads", () => {
 
 test("the protected section counts every protection and says when the list is capped", () => {
   assert.match(pageSrc, /const protectedTotal = Math\.max\(report\.protectedTotal \?\? 0, report\.protected\.length\);/);
-  assert.match(pageSrc, /t\("adminManage\.cleanup\.protectedCount", \{ count: protectedTotal \}\)/);
-  assert.doesNotMatch(pageSrc, /protectedCount", \{ count: report\.protected\.length \}/, "the capped list's length is not the count");
-  assert.match(pageSrc, /\{protectedTotal > report\.protected\.length && \(/);
-  assert.match(pageSrc, /t\("adminManage\.cleanup\.protectedCapped", \{ cap: report\.protected\.length, total: protectedTotal \}\)/);
+  assert.match(pageSrc, /<ProtectedList titles=\{report\.protected\} total=\{protectedTotal\} /);
+  const list = partsSrc.slice(partsSrc.indexOf("export function ProtectedList("));
+  assert.match(list, /t\("adminManage\.cleanup\.protectedCount", \{ count: total \}\)/);
+  assert.doesNotMatch(list, /protectedCount", \{ count: titles\.length \}/, "the capped list's length is not the count");
+  assert.match(list, /\{total > titles\.length && \(/);
+  assert.match(list, /t\("adminManage\.cleanup\.protectedCapped", \{ cap: titles\.length, total \}\)/);
+});
+
+test("a rules save locks the rules while it runs, so no edit is replaced by the saved settings", () => {
+  const rules = partsSrc.slice(partsSrc.indexOf("export function RulesPanel("), partsSrc.indexOf("export function CleanupFilterBar("));
+  assert.match(rules, /onChange=\{\(e\) => onNumber\(field, e\.target\.value\)\}\s*disabled=\{savingRules\}/, "every number input");
+  assert.match(rules, /<Switch checked=\{draft\[field\]\} onCheckedChange=\{\(v\) => onToggle\(field, v\)\} disabled=\{savingRules\}/, "every switch");
+  assert.equal(rules.match(/<Switch\b/g)?.length, 1, "every switch is that one");
+  assert.equal(rules.match(/<input\b/g)?.length, 1, "every number input is that one");
+  assert.match(pageSrc, /savingRules=\{savingRules\}/);
 });

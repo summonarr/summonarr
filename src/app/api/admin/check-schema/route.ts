@@ -3,33 +3,12 @@ import { withAdmin } from "@/lib/api-auth";
 import { isCronAuthorized } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { expectedSchemaColumns } from "@/lib/schema-check";
 
-// Tracks the columns whose ABSENCE means a `db push` was skipped or refused —
-// in particular the multi-instance identity columns (guardrails 32/35), which
-// sit inside @@id/@@unique keys, so every scoped write fails at runtime when
-// they are missing while a pre-instance column list would still report allOk.
-const EXPECTED: Record<string, string[]> = {
-  User:                ["id","name","email","passwordHash","role","permissions","mediaServer","discordId","autoApprove","quotaExempt","deactivatedAt","purgedAt"],
-  PlexLibraryItem:     ["tmdbId","mediaType","serverInstance","filePath","plexRatingKey","plexRatingKeys","title","year","overview"],
-  JellyfinLibraryItem: ["tmdbId","mediaType","serverInstance","filePath","jellyfinItemId","jellyfinItemIds","title","year","overview"],
-  TVEpisodeCache:      ["source","tmdbId","seasonNumber","episodeNumber","addedAt"],
-  TVEpisodeCacheStaging: ["runId","source","tmdbId","seasonNumber","episodeNumber","addedAt"],
-  PlexLibraryItemStaging:     ["runId","tmdbId","mediaType","serverInstance","plexRatingKey","plexRatingKeys","addedAt"],
-  JellyfinLibraryItemStaging: ["runId","tmdbId","mediaType","serverInstance","jellyfinItemId","jellyfinItemIds","addedAt"],
-  PlayHistory:         ["id","source","serverInstance","tmdbId","mediaType","title","year","posterPath","startedAt","watched","sourceShowId"],
-  MediaRequest:        ["id","tmdbId","mediaType","arrInstance","title","posterPath","status","requestedBy"],
-  TmdbCache:           ["key","data","expiresAt"],
-  ActiveSession:       ["id","source","serverInstance","tmdbId","title","sourceShowId"],
-  MediaServerUser:     ["id","source","serverInstance","sourceUserId","username"],
-  RadarrWantedItem:    ["tmdbId","arrInstance"],
-  SonarrWantedItem:    ["tmdbId","arrInstance"],
-  RadarrAvailableItem: ["tmdbId","arrInstance"],
-  SonarrAvailableItem: ["tmdbId","arrInstance"],
-  // A table, not a column: absent ⇒ every column below reads missing (the
-  // never-watched upstream snapshot, guardrail 14d).
-  UpstreamWatchEvidence: ["source","serverInstance","itemKey","seasonNumber","mediaType","playCount","lastPlayedAt","fetchedAt"],
-};
-
+// Whether the database has every table and column of the schema this build was
+// generated from (schema-check.ts). A missing one means a `db push` was
+// skipped or refused.
+//
 // withAdmin requires an admin session. The extra isCronAuthorized check does
 // NOT demand the cron token too: for an admin it re-checks the session and, for
 // a cookie session, adds a same-origin check. A bare
@@ -53,9 +32,10 @@ export const GET = withAdmin(async (request, _ctx, _session) => {
   }
 
   const results: Record<string, { ok: boolean; missing: string[]; columns: string[] }> = {};
-  for (const [table, expected] of Object.entries(EXPECTED)) {
+  for (const [table, expected] of Object.entries(expectedSchemaColumns())) {
     const cols    = actual[table] ?? [];
-    const missing = expected.filter((c) => !cols.includes(c));
+    const present = new Set(cols);
+    const missing = expected.filter((c) => !present.has(c));
     results[table] = { ok: missing.length === 0, missing, columns: cols };
   }
 

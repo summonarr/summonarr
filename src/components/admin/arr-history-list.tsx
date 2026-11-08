@@ -137,8 +137,16 @@ export function ArrHistoryList({
       delete next[row.key];
       return next;
     });
-    const err = await onMarkFailed(row.lead);
-    setBusy(null);
+    let err: string | null;
+    try {
+      err = await onMarkFailed(row.lead);
+    } catch {
+      // The callback's contract is to resolve with a message; one that throws
+      // still leaves the row usable, never every Mark failed stuck disabled.
+      err = t("adminArr.history.markFailedError");
+    } finally {
+      setBusy(null);
+    }
     // Failed: the button comes back, and focus with it. Accepted: the row's
     // failed status takes the button's place, and focus goes there.
     refocus.current = row.key;
@@ -150,165 +158,238 @@ export function ArrHistoryList({
     refocus.current = row.key;
     setConfirming(null);
   }
+  function toggleExpanded(key: string) {
+    setExpanded((s) => {
+      const next = new Set(s);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
 
   if (events.length === 0) return <p className="m-0 py-6 text-center text-sm text-zinc-500">{t("adminArr.history.none")}</p>;
 
   return (
     <ul className="m-0 grid list-none gap-0 rounded-lg p-0" style={{ border: "1px solid var(--ds-border)" }}>
       {rows.map((row, i) => {
-        const e = row.lead;
-        const group = row.events.length > 1;
         const state = grabStates.get(row.key) ?? NO_GRAB_STATE;
-        const known = grabStateKnown(state, { complete });
-        const failed = state.failed || marked.has(markKey(e));
-        const isOpen = expanded.has(row.key);
-        const href = e.tmdbId !== null ? (e.service === "radarr" ? `/movie/${e.tmdbId}` : `/tv/${e.tmdbId}`) : null;
-        const reasonKey = e.reason ? DELETE_REASON_LABEL[e.reason.toLowerCase()] : undefined;
-        const details = [
-          e.indexer && t("adminArr.history.indexer", { name: e.indexer }),
-          e.downloadClient && t("adminArr.history.client", { name: e.downloadClient }),
-          e.releaseGroup,
-          e.size !== null ? fmt.size(e.size) : null,
-          e.reason && t("adminArr.history.reason", { reason: reasonKey ? t(reasonKey) : e.reason }),
-        ].filter((x): x is string => !!x);
-        const scope = row.seasons.length > 0
-          ? `${row.seasons.map(seasonCode).join(", ")} · ${t("adminArr.blocklist.episodes", { count: row.episodeCount })}`
-          : t("adminArr.blocklist.episodes", { count: row.episodeCount });
-        const listId = `arr-history-eps-${row.key}`;
-        // The paths of one file; a folded row's files are listed per episode.
-        const sharedDropped = row.events.every((x) => x.droppedPath === e.droppedPath) ? e.droppedPath : null;
+        const markable = row.lead.kind === "grabbed" && onMarkFailed !== undefined && row.lead.arrMediaId !== null;
         return (
-          <li key={row.key} className="grid gap-1 px-3 py-2.5" style={i > 0 ? { borderTop: "1px solid var(--ds-border)" } : undefined}>
-            <div className="flex flex-wrap items-center gap-2">
-              <Chip tone={KIND_TONE[e.kind]}>{t(KIND_LABEL[e.kind])}</Chip>
-              <span className="text-xs text-zinc-500">{fmt.dateTime(e.date)}</span>
-              {showTitle && (
-                href ? (
-                  <Link href={href} className="text-sm font-medium text-zinc-100 hover:underline">{e.mediaTitle || t("adminArr.history.unknownTitle")}</Link>
-                ) : (
-                  <span className="text-sm font-medium text-zinc-100">{e.mediaTitle || t("adminArr.history.unknownTitle")}</span>
-                )
-              )}
-              {/* By the arr's own id: a title with no TMDB id (Sonarr v3) is reachable this way too. */}
-              {renderManage && e.arrMediaId !== null && renderManage({ ...e, arrMediaId: e.arrMediaId })}
-              {group ? (
-                row.episodes.length > 0 ? (
-                  <button
-                    type="button"
-                    aria-expanded={isOpen}
-                    aria-controls={listId}
-                    onClick={() => setExpanded((s) => {
-                      const next = new Set(s);
-                      if (next.has(row.key)) next.delete(row.key);
-                      else next.add(row.key);
-                      return next;
-                    })}
-                    className="ds-hover-tint inline-flex items-center gap-1 rounded px-1 text-xs text-zinc-400"
-                  >
-                    <span className="ds-mono">{scope}</span>
-                    <ChevronDown className={`h-3 w-3 transition-transform ${isOpen ? "rotate-180" : ""}`} aria-hidden />
-                  </button>
-                ) : (
-                  row.episodeCount > 1 && <span className="text-xs text-zinc-400">{scope}</span>
-                )
-              ) : (
-                e.episode && (
-                  <span className="text-xs text-zinc-400">
-                    <span className="ds-mono">{episodeCode(e.episode)}</span>
-                    {e.episode.title && ` · ${e.episode.title}`}
-                  </span>
-                )
-              )}
-              {e.kind === "grabbed" && state.imported && <Chip tone="approved">{t("adminArr.history.kind.imported")}</Chip>}
-              {e.kind === "grabbed" && onMarkFailed && e.arrMediaId !== null && (
-                <span className="ml-auto flex flex-wrap items-center justify-end gap-1">
-                  {failed ? (
-                    // Focusable from script only: where focus goes after a confirmed mark.
-                    <span
-                      ref={(el) => {
-                        if (el) statuses.current.set(row.key, el);
-                        else statuses.current.delete(row.key);
-                      }}
-                      tabIndex={-1}
-                      className="inline-flex rounded"
-                    >
-                      {state.failed
-                        ? <Chip tone="declined">{t("adminArr.history.kind.failed")}</Chip>
-                        : <span className="text-xs text-zinc-500">{t("adminArr.history.markedFailed")}</span>}
-                    </span>
-                  ) : confirming === row.key ? (
-                    <>
-                      {row.episodeCount > 1 && <span className="text-xs text-zinc-300">{t("adminArr.history.wholeDownload", { count: row.episodeCount })}</span>}
-                      {state.imported
-                        ? <span className="text-xs text-amber-400">{t("adminArr.history.alreadyImported")}</span>
-                        : !known && <span className="text-xs text-amber-400">{t("adminArr.history.stateUnknown")}</span>}
-                      <Button ref={cancelRef} variant="ghost" size="xs" onClick={() => cancel(row)} disabled={busy !== null}>{t("adminArr.common.cancel")}</Button>
-                      <Button size="xs" className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]" onClick={() => void mark(row)} disabled={busy !== null}>
-                        {busy === row.key && <Loader2 className="animate-spin" />} {t("adminArr.history.confirmMarkFailed")}
-                      </Button>
-                    </>
-                  ) : (
-                    <Button
-                      ref={(el) => {
-                        if (el) openers.current.set(row.key, el);
-                        else openers.current.delete(row.key);
-                      }}
-                      variant="outline"
-                      size="xs"
-                      onClick={() => setConfirming(row.key)}
-                      disabled={busy !== null}
-                      title={t("adminArr.history.markFailedHint")}
-                    >
-                      <Ban /> {t("adminArr.history.markFailed")}
-                    </Button>
-                  )}
-                </span>
-              )}
-            </div>
-            {e.sourceTitle && <div className="break-all text-xs text-zinc-300">{e.sourceTitle}</div>}
-            <div className="flex flex-wrap items-center gap-1.5 text-xs text-zinc-500">
-              {e.quality && (
-                <Chip>
-                  {e.quality}
-                  {e.qualityTags.length > 0 && ` ${e.qualityTags.map((tag) => t(`adminManage.queue.qualityTag.${tag}`)).join(" ")}`}
-                </Chip>
-              )}
-              {e.languages.length > 0 && <span>{e.languages.join(", ")}</span>}
-              {e.customFormatScore !== null && e.customFormats.length > 0 && (
-                <span title={e.customFormats.join(", ")}>{t("adminArr.files.customFormats", { count: e.customFormats.length })} ({fmt.score(e.customFormatScore)})</span>
-              )}
-              {details.map((d) => <span key={d}>{d}</span>)}
-            </div>
-            {e.message && <div className="text-xs text-amber-400">{e.message}</div>}
-            {sharedDropped && <div className="break-all text-xs text-zinc-500">{t("adminArr.history.droppedFrom", { path: sharedDropped })}</div>}
-            {!group && e.importedPath && <div className="break-all text-xs text-zinc-500">{t("adminArr.history.importedTo", { path: e.importedPath })}</div>}
-            {e.kind === "renamed" && e.path && (
-              <div className="break-all text-xs text-zinc-500">{t("adminArr.history.renamedTo", { from: e.sourcePath ?? "?", to: e.path })}</div>
-            )}
-            {group && isOpen && (
-              <ul id={listId} className="m-0 grid list-none gap-0.5 p-0 pl-2 text-xs text-zinc-400" style={{ borderLeft: "2px solid var(--ds-border)" }}>
-                {row.episodes.map((ep) => {
-                  const code = episodeCode(ep);
-                  const files = row.events.flatMap((x) => (x.importedPath && x.episode && episodeCode(x.episode) === code ? [{ id: x.id, path: x.importedPath }] : []));
-                  return (
-                    <li key={code} className="grid">
-                      <span>
-                        <span className="ds-mono">{code}</span>
-                        {ep.title && ` · ${ep.title}`}
-                      </span>
-                      {files.map((f) => <span key={f.id} className="break-all text-zinc-500">{t("adminArr.history.importedTo", { path: f.path })}</span>)}
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-            {row.continuesBefore && <div className="text-xs text-zinc-500">{t("adminArr.history.continuesPrevious")}</div>}
-            {row.continuesAfter && <div className="text-xs text-zinc-500">{t("adminArr.history.continuesNext")}</div>}
-            {errors[row.key] && (
-              <p role="alert" className="m-0 flex items-center gap-1 text-xs" style={{ color: "var(--ds-danger)" }}>
-                <AlertTriangle className="h-3 w-3 shrink-0" /> {errors[row.key]}
-              </p>
-            )}
+          <HistoryRowItem
+            key={row.key}
+            row={row}
+            first={i === 0}
+            fmt={fmt}
+            showTitle={showTitle}
+            renderManage={renderManage}
+            imported={state.imported}
+            isOpen={expanded.has(row.key)}
+            onToggle={() => toggleExpanded(row.key)}
+            error={errors[row.key]}
+            action={markable ? (
+              <MarkFailedControl
+                row={row}
+                failed={state.failed || marked.has(markKey(row.lead))}
+                failedOnList={state.failed}
+                imported={state.imported}
+                known={grabStateKnown(state, { complete })}
+                confirming={confirming === row.key}
+                busy={busy}
+                cancelRef={cancelRef}
+                // A row's status and opener register under its key: where focus goes back to.
+                statusRef={(el) => {
+                  if (el) statuses.current.set(row.key, el);
+                  else statuses.current.delete(row.key);
+                }}
+                openerRef={(el) => {
+                  if (el) openers.current.set(row.key, el);
+                  else openers.current.delete(row.key);
+                }}
+                onAsk={() => setConfirming(row.key)}
+                onCancel={() => cancel(row)}
+                onConfirm={() => void mark(row)}
+              />
+            ) : null}
+          />
+        );
+      })}
+    </ul>
+  );
+}
+
+/**
+ * A grab's Mark failed, in three states: the failed status (the list's own
+ * failure records, or the marker a successful Mark failed leaves), the inline
+ * confirm, or the button that opens it.
+ */
+function MarkFailedControl({ row, failed, failedOnList, imported, known, confirming, busy, cancelRef, statusRef, openerRef, onAsk, onCancel, onConfirm }: {
+  row: HistoryRow;
+  failed: boolean;
+  /** The list's own records say it failed (else only this page's marker does). */
+  failedOnList: boolean;
+  imported: boolean;
+  /** The list could hold the records that would say how the grab ended (grabStateKnown). */
+  known: boolean;
+  confirming: boolean;
+  /** The row whose Mark failed is in flight, if any: every row's controls wait for it. */
+  busy: string | null;
+  cancelRef: React.Ref<HTMLButtonElement>;
+  statusRef: (el: HTMLSpanElement | null) => void;
+  openerRef: (el: HTMLButtonElement | null) => void;
+  onAsk: () => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const t = useT();
+  return (
+    <span className="ml-auto flex flex-wrap items-center justify-end gap-1">
+      {failed ? (
+        // Focusable from script only: where focus goes after a confirmed mark.
+        <span ref={statusRef} tabIndex={-1} className="inline-flex rounded">
+          {failedOnList
+            ? <Chip tone="declined">{t("adminArr.history.kind.failed")}</Chip>
+            : <span className="text-xs text-zinc-500">{t("adminArr.history.markedFailed")}</span>}
+        </span>
+      ) : confirming ? (
+        <>
+          {row.episodeCount > 1 && <span className="text-xs text-zinc-300">{t("adminArr.history.wholeDownload", { count: row.episodeCount })}</span>}
+          {imported
+            ? <span className="text-xs text-amber-400">{t("adminArr.history.alreadyImported")}</span>
+            : !known && <span className="text-xs text-amber-400">{t("adminArr.history.stateUnknown")}</span>}
+          <Button ref={cancelRef} variant="ghost" size="xs" onClick={onCancel} disabled={busy !== null}>{t("adminArr.common.cancel")}</Button>
+          <Button size="xs" className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]" onClick={onConfirm} disabled={busy !== null}>
+            {busy === row.key && <Loader2 className="animate-spin" />} {t("adminArr.history.confirmMarkFailed")}
+          </Button>
+        </>
+      ) : (
+        <Button ref={openerRef} variant="outline" size="xs" onClick={onAsk} disabled={busy !== null} title={t("adminArr.history.markFailedHint")}>
+          <Ban /> {t("adminArr.history.markFailed")}
+        </Button>
+      )}
+    </span>
+  );
+}
+
+/** One row of the list: a record, or a Sonarr download's per-episode records folded into one. */
+function HistoryRowItem({ row, first, fmt, showTitle, renderManage, imported, isOpen, onToggle, error, action }: {
+  row: HistoryRow;
+  first: boolean;
+  fmt: ReturnType<typeof queueFormatters>;
+  showTitle: boolean;
+  renderManage?: (event: ArrHistoryEvent & { arrMediaId: number }) => React.ReactNode;
+  /** A grab the list shows imported since. */
+  imported: boolean;
+  isOpen: boolean;
+  onToggle: () => void;
+  error: string | undefined;
+  /** A grab's Mark failed control, or null. */
+  action: React.ReactNode;
+}) {
+  const t = useT();
+  const e = row.lead;
+  const group = row.events.length > 1;
+  const href = e.tmdbId !== null ? (e.service === "radarr" ? `/movie/${e.tmdbId}` : `/tv/${e.tmdbId}`) : null;
+  const reasonKey = e.reason ? DELETE_REASON_LABEL[e.reason.toLowerCase()] : undefined;
+  const details = [
+    e.indexer && t("adminArr.history.indexer", { name: e.indexer }),
+    e.downloadClient && t("adminArr.history.client", { name: e.downloadClient }),
+    e.releaseGroup,
+    e.size !== null ? fmt.size(e.size) : null,
+    e.reason && t("adminArr.history.reason", { reason: reasonKey ? t(reasonKey) : e.reason }),
+  ].filter((x): x is string => !!x);
+  const scope = row.seasons.length > 0
+    ? `${row.seasons.map(seasonCode).join(", ")} · ${t("adminArr.blocklist.episodes", { count: row.episodeCount })}`
+    : t("adminArr.blocklist.episodes", { count: row.episodeCount });
+  const listId = `arr-history-eps-${row.key}`;
+  // The paths of one file; a folded row's files are listed per episode.
+  const sharedDropped = row.events.every((x) => x.droppedPath === e.droppedPath) ? e.droppedPath : null;
+  return (
+    <li className="grid gap-1 px-3 py-2.5" style={!first ? { borderTop: "1px solid var(--ds-border)" } : undefined}>
+      <div className="flex flex-wrap items-center gap-2">
+        <Chip tone={KIND_TONE[e.kind]}>{t(KIND_LABEL[e.kind])}</Chip>
+        <span className="text-xs text-zinc-500">{fmt.dateTime(e.date)}</span>
+        {showTitle && (
+          href ? (
+            <Link href={href} className="text-sm font-medium text-zinc-100 hover:underline">{e.mediaTitle || t("adminArr.history.unknownTitle")}</Link>
+          ) : (
+            <span className="text-sm font-medium text-zinc-100">{e.mediaTitle || t("adminArr.history.unknownTitle")}</span>
+          )
+        )}
+        {/* By the arr's own id: a title with no TMDB id (Sonarr v3) is reachable this way too. */}
+        {renderManage && e.arrMediaId !== null && renderManage({ ...e, arrMediaId: e.arrMediaId })}
+        {group ? (
+          row.episodes.length > 0 ? (
+            <button
+              type="button"
+              aria-expanded={isOpen}
+              aria-controls={listId}
+              onClick={onToggle}
+              className="ds-hover-tint inline-flex items-center gap-1 rounded px-1 text-xs text-zinc-400"
+            >
+              <span className="ds-mono">{scope}</span>
+              <ChevronDown className={`h-3 w-3 transition-transform ${isOpen ? "rotate-180" : ""}`} aria-hidden />
+            </button>
+          ) : (
+            row.episodeCount > 1 && <span className="text-xs text-zinc-400">{scope}</span>
+          )
+        ) : (
+          e.episode && (
+            <span className="text-xs text-zinc-400">
+              <span className="ds-mono">{episodeCode(e.episode)}</span>
+              {e.episode.title && ` · ${e.episode.title}`}
+            </span>
+          )
+        )}
+        {e.kind === "grabbed" && imported && <Chip tone="approved">{t("adminArr.history.kind.imported")}</Chip>}
+        {action}
+      </div>
+      {e.sourceTitle && <div className="break-all text-xs text-zinc-300">{e.sourceTitle}</div>}
+      <div className="flex flex-wrap items-center gap-1.5 text-xs text-zinc-500">
+        {e.quality && (
+          <Chip>
+            {e.quality}
+            {e.qualityTags.length > 0 && ` ${e.qualityTags.map((tag) => t(`adminManage.queue.qualityTag.${tag}`)).join(" ")}`}
+          </Chip>
+        )}
+        {e.languages.length > 0 && <span>{e.languages.join(", ")}</span>}
+        {e.customFormatScore !== null && e.customFormats.length > 0 && (
+          <span title={e.customFormats.join(", ")}>{t("adminArr.files.customFormats", { count: e.customFormats.length })} ({fmt.score(e.customFormatScore)})</span>
+        )}
+        {details.map((d) => <span key={d}>{d}</span>)}
+      </div>
+      {e.message && <div className="text-xs text-amber-400">{e.message}</div>}
+      {sharedDropped && <div className="break-all text-xs text-zinc-500">{t("adminArr.history.droppedFrom", { path: sharedDropped })}</div>}
+      {!group && e.importedPath && <div className="break-all text-xs text-zinc-500">{t("adminArr.history.importedTo", { path: e.importedPath })}</div>}
+      {e.kind === "renamed" && e.path && (
+        <div className="break-all text-xs text-zinc-500">{t("adminArr.history.renamedTo", { from: e.sourcePath ?? "?", to: e.path })}</div>
+      )}
+      {group && isOpen && <FoldedEpisodes row={row} listId={listId} />}
+      {row.continuesBefore && <div className="text-xs text-zinc-500">{t("adminArr.history.continuesPrevious")}</div>}
+      {row.continuesAfter && <div className="text-xs text-zinc-500">{t("adminArr.history.continuesNext")}</div>}
+      {error && (
+        <p role="alert" className="m-0 flex items-center gap-1 text-xs" style={{ color: "var(--ds-danger)" }}>
+          <AlertTriangle className="h-3 w-3 shrink-0" /> {error}
+        </p>
+      )}
+    </li>
+  );
+}
+
+/** A folded row's episodes, each with the file its import put down. */
+function FoldedEpisodes({ row, listId }: { row: HistoryRow; listId: string }) {
+  const t = useT();
+  return (
+    <ul id={listId} className="m-0 grid list-none gap-0.5 p-0 pl-2 text-xs text-zinc-400" style={{ borderLeft: "2px solid var(--ds-border)" }}>
+      {row.episodes.map((ep) => {
+        const code = episodeCode(ep);
+        const files = row.events.flatMap((x) => (x.importedPath && x.episode && episodeCode(x.episode) === code ? [{ id: x.id, path: x.importedPath }] : []));
+        return (
+          <li key={code} className="grid">
+            <span>
+              <span className="ds-mono">{code}</span>
+              {ep.title && ` · ${ep.title}`}
+            </span>
+            {files.map((f) => <span key={f.id} className="break-all text-zinc-500">{t("adminArr.history.importedTo", { path: f.path })}</span>)}
           </li>
         );
       })}

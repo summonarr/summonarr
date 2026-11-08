@@ -503,3 +503,34 @@ test("C110: a title whose own profile rejects a quality still sends that release
   const none =await (await call(requestReleases.GET, token, "/requests/r1/releases", "r1")).json() as { releases: Array<{ quality: { quality: { id: number } } }> };
   assert.deepEqual(none.releases.map((r) => r.quality.quality.id), [19, 7], "no profile on the row: the arr's own order");
 });
+
+test("an issue Replace handle is redeemable only by the user it was issued to — another admin's grab is 410 with nothing sent", async () => {
+  issueRow = movieIssue();
+  scriptMovieGrab(() => json({}));
+  const owner = await mintSession();
+  const other = await mintSession();
+  const [rel] = await (await call(issueReleases.GET, owner, "/issues/issue-1/releases", "issue-1")).json() as Array<{ guid: string }>;
+  calls = [];
+  const crossed = await call(issueReleases.POST, other, "/issues/issue-1/releases", "issue-1", { method: "POST", body: { guid: rel.guid, indexerId: 3 } });
+  assert.equal(crossed.status, 410);
+  assert.equal(moviePosts().length, 0);
+  assert.equal(casCalls, 0);
+  const mine = await call(issueReleases.POST, owner, "/issues/issue-1/releases", "issue-1", { method: "POST", body: { guid: rel.guid, indexerId: 3 } });
+  assert.equal(mine.status, 200, "the refusal didn't spend it");
+});
+
+test("a request Pick release handle is redeemable only by the user it was issued to", async () => {
+  requests = [{ id: "r1", mediaType: "MOVIE", tmdbId: 603, tvdbId: null, status: "APPROVED", arrInstance: "" }];
+  scriptMovieGrab(() => json({}));
+  const owner = await mintSession();
+  const other = await mintSession();
+  const listed = await (await call(requestReleases.GET, owner, "/requests/r1/releases", "r1")).json() as { releases: Array<{ guid: string }> };
+  const handle = listed.releases[0].guid;
+  calls = [];
+  const crossed = await call(requestReleases.POST, other, "/requests/r1/releases", "r1", { method: "POST", body: { release: handle } });
+  assert.equal(crossed.status, 410);
+  assert.equal(moviePosts().length, 0);
+  const mine = await call(requestReleases.POST, owner, "/requests/r1/releases", "r1", { method: "POST", body: { release: handle } });
+  assert.equal(mine.status, 200);
+  assert.equal(moviePosts().length, 1);
+});

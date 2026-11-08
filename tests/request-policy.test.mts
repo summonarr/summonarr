@@ -1,7 +1,8 @@
 // The shared request-policy steps (src/lib/request-policy.ts): instance
 // resolution — explicit > is4k > auto-route over configured instances > the
 // default, with the default fallback that re-checks the base REQUEST bit — the
-// in-transaction quota re-check, and the content-rating cap.
+// in-transaction quota re-check, the content-rating cap, and who auto-approves
+// where.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -9,7 +10,9 @@ const {
   resolveTargetInstance,
   assertQuotaInTx,
   QuotaExceededError,
-  blockedByRatingCap,
+  ratingCapVerdict,
+  ratingCapsVerdict,
+  autoApprovesOn,
   enforcedQuota,
 } = await import("../src/lib/request-policy.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
@@ -103,18 +106,44 @@ test("enforcedQuota: QUOTA_UNLIMITED and a zero limit enforce nothing", () => {
   assert.equal(enforcedQuota(REQUESTER, "MOVIE", user, { quotaLimit: "5", quotaPeriod: "week" })?.limit, 5);
 });
 
-test("the rating cap: only a capped non-admin pays the fetch; unknown certifications and TMDB failures pass", async () => {
+test("the rating cap: only a capped non-admin pays the fetch; unknown certifications pass", async () => {
   const cert = (c: string | undefined, calls: { n: number }) => async () => {
     calls.n++;
     return { certification: c } as never;
   };
   const calls = { n: 0 };
-  assert.equal(await blockedByRatingCap(REQUESTER, "PG-13", cert("R", calls)), true);
-  assert.equal(await blockedByRatingCap(REQUESTER, "PG-13", cert("PG", calls)), false);
-  assert.equal(await blockedByRatingCap(REQUESTER, "PG-13", cert(undefined, calls)), false);
-  assert.equal(await blockedByRatingCap(REQUESTER, "PG-13", async () => { throw new Error("tmdb down"); }), false);
+  assert.equal(await ratingCapVerdict(REQUESTER, "PG-13", cert("R", calls)), "blocked");
+  assert.equal(await ratingCapVerdict(REQUESTER, "PG-13", cert("PG", calls)), "allowed");
+  assert.equal(await ratingCapVerdict(REQUESTER, "PG-13", cert(undefined, calls)), "allowed");
   const before = calls.n;
-  assert.equal(await blockedByRatingCap(Permission.ADMIN, "PG-13", cert("R", calls)), false);
-  assert.equal(await blockedByRatingCap(REQUESTER, null, cert("R", calls)), false);
+  assert.equal(await ratingCapVerdict(Permission.ADMIN, "PG-13", cert("R", calls)), "allowed");
+  assert.equal(await ratingCapVerdict(REQUESTER, null, cert("R", calls)), "allowed");
   assert.equal(calls.n, before, "an admin or an uncapped user never fetches");
+});
+
+// A TMDB outage must neither block every capped user nor let a title past the
+// cap and straight into Radarr/Sonarr: the request is filed, never auto-approved.
+test("the rating cap: a certification that can't be read is UNVERIFIED — not allowed, not blocked", async () => {
+  const down = async () => { throw new Error("tmdb down"); };
+  assert.equal(await ratingCapVerdict(REQUESTER, "PG-13", down), "unverified");
+  assert.equal(await ratingCapsVerdict(["PG-13", "R"], down), "unverified");
+  assert.equal(await ratingCapsVerdict([], down), "allowed", "no cap, no lookup to fail");
+  // Several caps (an on-behalf filer's own beside the target's): the stricter wins.
+  const r = async () => ({ certification: "R" }) as never;
+  assert.equal(await ratingCapsVerdict(["NC-17", "PG-13"], r), "blocked");
+  assert.equal(await ratingCapsVerdict(["NC-17"], r), "allowed");
+});
+
+// A Discord auto-approve role counts as the global AUTO_APPROVE bit and nothing
+// more: like that bit it never reaches the 4K instance or a restricted named one.
+test("autoApprovesOn: a role grant is the global auto-approve bit — never 4K or a restricted instance", () => {
+  const NAMED_OPEN: Inst = { ...ANIME, slug: "kids", restricted: false };
+  for (const [inst, expected] of [[DEFAULT, true], [NAMED_OPEN, true], [FOURK, false], [ANIME, false]] as const) {
+    assert.equal(autoApprovesOn(REQUESTER, inst, {}, "MOVIE", true), expected, `role grant on "${inst.slug}"`);
+    assert.equal(autoApprovesOn(REQUESTER, inst, {}, "MOVIE"), false, `no grant on "${inst.slug}"`);
+  }
+  // The instance's own grant still opens it, role or not.
+  assert.equal(autoApprovesOn(REQUESTER, ANIME, { anime: { request: true, autoApprove: true } }, "TV", true), true);
+  assert.equal(autoApprovesOn(REQUESTER | Permission.AUTO_APPROVE_4K, FOURK, {}, "MOVIE", true), true);
+  assert.equal(autoApprovesOn(Permission.ADMIN, ANIME, {}, "MOVIE"), true);
 });

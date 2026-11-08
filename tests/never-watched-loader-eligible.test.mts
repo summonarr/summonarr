@@ -456,6 +456,8 @@ test("C123: the report never calls a title eligible while an instance of its ser
   assert.equal(arrServiceReadable([{ service: "sonarr", instance: "", error: "x" }], "TV"), false);
   // Structural: "eligible" carries the check (the delete route's refusal).
   const src = readFileSync(new URL("../src/lib/never-watched-report.ts", import.meta.url), "utf8");
-  const line = src.split("\n").find((l) => /const eligible =/.test(l)) ?? "";
+  const line = src.split("\n").find((l) => /const canDelete =/.test(l)) ?? "";
   assert.match(line, /arrServiceReadable\(arr\.errors, t\.mediaType\)/, line);
+  const eligibleLine = src.split("\n").find((l) => /^\s*eligible: .*verdict\.candidate/.test(l)) ?? "";
+  assert.match(eligibleLine, /canDelete &&/, eligibleLine);
 });

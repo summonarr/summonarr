@@ -6,7 +6,11 @@ import Link from "next/link";
 import { Card } from "@/components/ui/card";
 import { getAllUsersStats } from "@/lib/play-history";
 import { getCachedPlexMembersByInstance } from "@/lib/plex-membership";
-import { getLiveJellyfinUsers } from "@/lib/jellyfin-live-members";
+import { getCachedLiveJellyfinUsers } from "@/lib/jellyfin-live-members-cache";
+import { getStatsTimeZone } from "@/lib/stats-time-zone-data";
+import { parsePageNumber } from "@/lib/pagination";
+import { PaginationBar } from "@/components/media/pagination-bar";
+import { Suspense } from "react";
 import { Chip, PageHeader } from "@/components/ui/design";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
 import { ArrowDown, ArrowUp, ArrowUpDown } from "@/components/icons";
@@ -23,6 +27,10 @@ type SortDir = "asc" | "desc";
 const STATUS_FILTERS = ["all", "active", "removed"] as const;
 type StatusFilter = (typeof STATUS_FILTERS)[number];
 
+// Rows per page: every row is a table row with an avatar, and a large shared
+// server keeps every departed identity that still holds history.
+const USERS_PAGE_SIZE = 100;
+
 const DEFAULT_DIR: Record<SortField, SortDir> = {
   user: "asc",
   source: "asc",
@@ -30,6 +38,41 @@ const DEFAULT_DIR: Record<SortField, SortDir> = {
   hours: "desc",
   lastActive: "desc",
 };
+
+// The page's own URL for a view. Every link on it (sort headers, status pills)
+// builds through here, and a new view always starts on page 1.
+function usersHref(view: { search: string | undefined; status: StatusFilter; sort: SortField; dir: SortDir }): string {
+  const params = new URLSearchParams();
+  if (view.search) params.set("search", view.search);
+  if (view.status !== "all") params.set("status", view.status);
+  params.set("sort", view.sort);
+  params.set("dir", view.dir);
+  return `/admin/activity/users?${params.toString()}`;
+}
+
+type UserRow = { username: string; source: string; plays: number; hours: number; lastActive: Date | null };
+
+// The table's order for one sort field and direction.
+function compareUsers(sort: SortField, dir: SortDir): (a: UserRow, b: UserRow) => number {
+  const sign = dir === "asc" ? 1 : -1;
+  return (a, b) => {
+    switch (sort) {
+      case "user":
+        return a.username.localeCompare(b.username) * sign;
+      case "source":
+        return (a.source.localeCompare(b.source) || a.username.localeCompare(b.username)) * sign;
+      case "plays":
+        return (a.plays - b.plays) * sign;
+      case "hours":
+        return (a.hours - b.hours) * sign;
+      case "lastActive": {
+        const av = a.lastActive ? a.lastActive.getTime() : -Infinity;
+        const bv = b.lastActive ? b.lastActive.getTime() : -Infinity;
+        return (av - bv) * sign;
+      }
+    }
+  };
+}
 
 function SortHeader({
   label,
@@ -55,12 +98,6 @@ function SortHeader({
       : "asc"
     : DEFAULT_DIR[field];
 
-  const params = new URLSearchParams();
-  if (search) params.set("search", search);
-  if (status !== "all") params.set("status", status);
-  params.set("sort", field);
-  params.set("dir", nextDir);
-
   const alignClass = align === "right" ? "text-right" : "text-left";
   const flexAlign = align === "right" ? "justify-end" : "justify-start";
 
@@ -73,7 +110,7 @@ function SortHeader({
   return (
     <th scope="col" aria-sort={ariaSort} className={`py-1 px-4 ${alignClass}`}>
       <Link
-        href={`/admin/activity/users?${params.toString()}`}
+        href={usersHref({ search, status, sort: field, dir: nextDir })}
         className={`inline-flex items-center min-h-8 gap-1 select-none rounded hover:text-zinc-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)] ${flexAlign}`}
       >
         <span>{label}</span>
@@ -108,7 +145,7 @@ function plexOnServer(
 
 function jellyfinOnServer(
   u: { active: boolean; serverInstance: string; sourceUserId: string },
-  live: Awaited<ReturnType<typeof getLiveJellyfinUsers>> | null,
+  live: Awaited<ReturnType<typeof getCachedLiveJellyfinUsers>> | null,
 ): boolean {
   const users = live?.get(u.serverInstance);
   if (!users) return u.active;
@@ -119,13 +156,13 @@ function jellyfinOnServer(
 export default async function UsersActivityPage({
   searchParams,
 }: {
-  searchParams: Promise<{ search?: string | string[]; sort?: string; dir?: string; status?: string | string[] }>;
+  searchParams: Promise<{ search?: string | string[]; sort?: string; dir?: string; status?: string | string[]; page?: string | string[] }>;
 }) {
   await requireFeature("feature.admin.activity");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
-  const { search: searchRaw, sort: sortParam, dir: dirParam, status: statusRaw } = await searchParams;
+  const { search: searchRaw, sort: sortParam, dir: dirParam, status: statusRaw, page: pageParam } = await searchParams;
   // A repeated ?search= arrives as an array at runtime; `.toLowerCase()` on it
   // would 500 the page. Take the first value.
   const search = Array.isArray(searchRaw) ? searchRaw[0] : searchRaw;
@@ -144,7 +181,7 @@ export default async function UsersActivityPage({
     : "plays";
   const dir: SortDir = dirParam === "asc" ? "asc" : dirParam === "desc" ? "desc" : DEFAULT_DIR[sort];
 
-  const allStats = await getAllUsersStats();
+  const [allStats, timeZone] = await Promise.all([getAllUsersStats(), getStatsTimeZone()]);
 
   // "Still on the server" is read live from each server, not from the stored
   // `active` flag alone: nothing marks a Plex user inactive, and the hourly
@@ -154,7 +191,7 @@ export default async function UsersActivityPage({
   // server's current /Users — both falling back to `active` for a server that
   // couldn't be read.
   const [plexMembers, jellyfinLive] =
-    status === "all" ? [null, null] : await Promise.all([getCachedPlexMembersByInstance(), getLiveJellyfinUsers()]);
+    status === "all" ? [null, null] : await Promise.all([getCachedPlexMembersByInstance(), getCachedLiveJellyfinUsers()]);
   let users = allStats.map((u) => ({
     ...u,
     onServer: u.source === "plex" ? plexOnServer(u, plexMembers) : jellyfinOnServer(u, jellyfinLive),
@@ -167,24 +204,12 @@ export default async function UsersActivityPage({
     users = users.filter((u) => u.username.toLowerCase().includes(q));
   }
 
-  const mult = dir === "asc" ? 1 : -1;
-  users = [...users].sort((a, b) => {
-    switch (sort) {
-      case "user":
-        return a.username.localeCompare(b.username) * mult;
-      case "source":
-        return (a.source.localeCompare(b.source) || a.username.localeCompare(b.username)) * mult;
-      case "plays":
-        return (a.plays - b.plays) * mult;
-      case "hours":
-        return (a.hours - b.hours) * mult;
-      case "lastActive": {
-        const av = a.lastActive ? a.lastActive.getTime() : -Infinity;
-        const bv = b.lastActive ? b.lastActive.getTime() : -Infinity;
-        return (av - bv) * mult;
-      }
-    }
-  });
+  users = [...users].sort(compareUsers(sort, dir));
+
+  // A page past the end shows the last one (a filter that shrank the list).
+  const totalPages = Math.max(1, Math.ceil(users.length / USERS_PAGE_SIZE));
+  const page = Math.min(parsePageNumber(pageParam), totalPages);
+  const pageUsers = users.slice((page - 1) * USERS_PAGE_SIZE, page * USERS_PAGE_SIZE);
 
   return (
     <div className="ds-page-enter">
@@ -197,16 +222,11 @@ export default async function UsersActivityPage({
 
       <nav aria-label={t("adminActivity.users.statusAria")} className="mb-3 flex flex-wrap gap-2">
         {STATUS_FILTERS.map((f) => {
-          const params = new URLSearchParams();
-          if (search) params.set("search", search);
-          if (f !== "all") params.set("status", f);
-          params.set("sort", sort);
-          params.set("dir", dir);
           const selected = f === status;
           return (
             <Link
               key={f}
-              href={`/admin/activity/users?${params.toString()}`}
+              href={usersHref({ search, status: f, sort, dir })}
               aria-current={selected ? "true" : undefined}
               className={`px-3 py-1 text-xs rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)] ${
                 selected
@@ -253,14 +273,14 @@ export default async function UsersActivityPage({
               </tr>
             </thead>
             <tbody>
-              {users.length === 0 ? (
+              {pageUsers.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="py-12 text-center text-zinc-500 text-sm">
                     {t("adminActivity.users.empty")}
                   </td>
                 </tr>
               ) : (
-                users.map((u) => (
+                pageUsers.map((u) => (
                   <tr key={u.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30 transition-colors">
                     <td className="py-3 px-4">
                       <Link
@@ -297,7 +317,7 @@ export default async function UsersActivityPage({
                       {u.hours > 0 ? `${dec1.format(u.hours)}${hoursSuffix}` : <span className="text-zinc-500">—</span>}
                     </td>
                     <td className="py-3 px-4 text-zinc-400 text-xs">
-                      {u.lastActive ? relativeWithDateFallback(u.lastActive, locale) : t("adminActivity.users.never")}
+                      {u.lastActive ? relativeWithDateFallback(u.lastActive, locale, timeZone) : t("adminActivity.users.never")}
                     </td>
                     <td className="hidden sm:table-cell py-3 px-4 text-zinc-400 text-xs truncate max-w-[120px]">
                       {u.favPlatform ?? <span className="text-zinc-500">—</span>}
@@ -328,6 +348,10 @@ export default async function UsersActivityPage({
           </table>
         </div>
       </Card>
+
+      <Suspense>
+        <PaginationBar currentPage={page} totalPages={totalPages} />
+      </Suspense>
     </div>
   );
 }

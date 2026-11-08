@@ -9,6 +9,7 @@ import { sanitizeOptional } from "@/lib/sanitize";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
+import { tmdbImagePathOrNull } from "@/lib/tmdb-image-path";
 
 const PAGE_SIZE = 60;
 const SELECT = { tmdbId: true, mediaType: true, title: true, posterPath: true, createdAt: true } as const;
@@ -47,7 +48,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }
 
-  const parsed = await readJsonCapped<{ tmdbId?: number; mediaType?: string; title?: string; posterPath?: string }>(req, 16384);
+  const parsed = await readJsonCapped<{ tmdbId?: number; mediaType?: string; title?: string; posterPath?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const { tmdbId, mediaType } = parsed;
 
@@ -65,10 +66,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
 
   const title = (sanitizeOptional(parsed.title) ?? "").slice(0, 500);
-  const posterPath =
-    typeof parsed.posterPath === "string" && parsed.posterPath.length > 0 && parsed.posterPath.length <= 500
-      ? parsed.posterPath
-      : null;
+  // Concatenated into image.tmdb.org URLs when the list renders: anything but a
+  // plain TMDB path ("/abc.jpg") is dropped rather than stored.
+  const posterPath = tmdbImagePathOrNull(parsed.posterPath);
 
   try {
     const item = await prisma.hiddenItem.create({

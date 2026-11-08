@@ -20,6 +20,9 @@ globalThis.fetch = (() => {
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel } = await import("./_helpers.mts");
 const { loadDetailPageState, allNamed, emptyOnFailure } = await import("../src/lib/detail-page-data.ts");
+// The 4K settings are held for a few seconds (four-k-visibility.ts); every
+// settings change here must be read fresh.
+const { invalidateShow4kVisibilityCache } = await import("../src/lib/four-k-visibility.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 const { invalidateBlacklistCache } = await import("../src/lib/blacklist.ts");
 const { Permission, PRESETS } = await import("../src/lib/permissions.ts");
@@ -39,6 +42,7 @@ let libraryCalls: Array<{ model: string; args: { where: Where; select?: Record<s
 let warns: string[] = [];
 
 beforeEach(() => {
+  invalidateShow4kVisibilityCache();
   settings = {};
   requests = [];
   plexRows = [];
@@ -155,12 +159,14 @@ test("4K queue and availability are withheld until a 4K instance is configured a
   assert.deepEqual([hidden.show4k, hidden.arr4kPending, hidden.arr4kAvailable], [false, false, false]);
 
   settings = { radarr4kUrl: "http://radarr4k:7878", radarr4kApiKey: "key", request4kAll: "true" };
+  invalidateShow4kVisibilityCache();
   const shown = await loadDetailPageState(USER, MOVIE, "MOVIE");
   assert.deepEqual([shown.show4k, shown.arr4kPending, shown.arr4kAvailable], [true, true, true]);
   assert.equal(shown.arrPending, true);
 
   // A Sonarr 4K instance says nothing about a movie.
   settings = { sonarr4kUrl: "http://sonarr4k:8989", sonarr4kApiKey: "key", request4kAll: "true" };
+  invalidateShow4kVisibilityCache();
   assert.equal((await loadDetailPageState(USER, MOVIE, "MOVIE")).show4k, false);
 });
 

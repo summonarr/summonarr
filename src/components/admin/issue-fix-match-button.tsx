@@ -2,31 +2,39 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { Wrench, Search, X, Check, ChevronLeft, Loader2 } from "@/components/icons";
+import { Wrench, Search, X, ChevronLeft, Loader2 } from "@/components/icons";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
-import { posterUrl } from "@/lib/tmdb-types";
-import type { TmdbMedia } from "@/lib/tmdb-types";
-import type { PlexCandidate, CandidatesResponse } from "@/app/api/admin/fix-match/candidates/route";
-import type { FileInfoInstance, FileInfoResponse } from "@/app/api/admin/fix-match/file-info/route";
 import { withBasePath } from "@/lib/base-path";
 import { postMediaRequest } from "@/lib/client/media-request";
-import { runFixMatch, fixMatchErrorMessage, fixMatchWarningMessage } from "@/lib/client/fix-match";
-import { rich } from "@/components/settings/forms/rich";
+import { runFixMatch, fixMatchErrorMessage, fixMatchWarningMessage, type FixMatchOutcome } from "@/lib/client/fix-match";
+import { apiErrorText } from "@/lib/client/api-error";
+import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { useAsyncAction } from "@/hooks/use-async-action";
+import { arrServiceName } from "@/lib/arr-service-name";
 import { DEFAULT_MEDIA_INSTANCE, mediaInstanceLabel } from "@/lib/media-instances";
 import { useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 import { holdLiveRefresh, requestPageRefresh } from "@/lib/client/refresh-hold";
-
-type Side = "plex" | "jellyfin";
-
-type ServerStatus = "idle" | "fetching" | "selecting" | "applying" | "done" | "error";
-
-interface ServerState {
-  status: ServerStatus;
-  error?: string;
-  // A SUCCESSFUL remap can still warn (some copies failed to re-match, or an
-  // identical job was already running) — shown beside "Fixed", never as an error.
-  warning?: string;
-}
+import { candidatesErrorText, fetchFixMatchCandidates } from "@/lib/client/fix-match-candidates";
+import {
+  AddWrongAsRequest,
+  BRAND,
+  CurrentMatchInfo,
+  FileInfoSchema,
+  PlexCandidatesList,
+  SearchHitsSchema,
+  SearchResultRow,
+  SelectedMatchHeader,
+  ServerFixPanel,
+  searchHitsOf,
+  type AddWrongState,
+  type Candidates,
+  type FileInfo,
+  type FileInfoRow,
+  type SearchHit,
+  type ServerState,
+  type Side,
+} from "./issue-fix-match-parts";
 
 type Phase =
   | "search"
@@ -47,10 +55,11 @@ interface Props {
   serverInstance?: string;
 }
 
+
 // Picks which configured server to act on: the caller's hint if that server
 // actually holds the title, else the default server, else the first one that
 // does. null when no server holds it (nothing to fix on that side).
-function resolveInstance(rows: FileInfoInstance[], hint: string): string | null {
+function resolveInstance(rows: FileInfoRow[], hint: string): string | null {
   if (rows.length === 0) return null;
   if (rows.some((r) => r.serverInstance === hint)) return hint;
   if (rows.some((r) => r.serverInstance === DEFAULT_MEDIA_INSTANCE)) return DEFAULT_MEDIA_INSTANCE;
@@ -63,185 +72,137 @@ function resolveInstance(rows: FileInfoInstance[], hint: string): string | null 
 // refetched on every open, including reopening after a busy "hide" that keeps
 // state — re-resolving there would silently switch the fix back to the default
 // server. A normal close calls reset(), so a fresh open starts from scratch.
-function seedInstance(cur: string | null, rows: FileInfoInstance[], hint: string): string | null {
+function seedInstance(cur: string | null, rows: FileInfoRow[], hint: string): string | null {
   if (cur !== null && rows.some((r) => r.serverInstance === cur)) return cur;
   return resolveInstance(rows, hint);
 }
 
-const LEVEL_STYLES: Record<string, { border: string; bg: string; badge: string }> = {
-  exact:    { border: "border-l-2 border-green-500",       bg: "bg-green-500/5 hover:bg-green-500/10",     badge: "bg-green-500/20 text-green-400 border-green-500/40" },
-  strong:   { border: "border-l-2 border-emerald-500/70",  bg: "bg-emerald-500/5 hover:bg-emerald-500/10", badge: "bg-emerald-500/20 text-emerald-400 border-emerald-500/40" },
-  likely:   { border: "border-l-2 border-yellow-500/70",   bg: "bg-yellow-500/5 hover:bg-yellow-500/10",   badge: "bg-yellow-500/20 text-yellow-400 border-yellow-500/40" },
-  possible: { border: "border-l-2 border-zinc-500/50",     bg: "hover:bg-zinc-800",                        badge: "bg-zinc-700 text-zinc-400 border-zinc-600" },
-  wrong:    { border: "border-l-2 border-red-500/70",      bg: "bg-red-500/5 hover:bg-red-500/10",         badge: "bg-red-500/20 text-red-400 border-red-500/40" },
-  unknown:  { border: "border-l-2 border-transparent",     bg: "hover:bg-zinc-800",                        badge: "bg-zinc-800 text-zinc-500 border-zinc-700" },
-};
-
-// A row only PICKS its candidate; the footer's Apply sends it, so a misclick
-// while scrolling the list never rematches the item.
-function PlexCandidateRow({
-  candidate, onPick, picked, disabled, serverInstance,
-}: {
-  candidate:      PlexCandidate;
-  onPick:         (guid: string) => void;
-  picked:         boolean;
-  disabled:       boolean;
-  serverInstance: string;
-}) {
-  const t = useT();
-  const level   = LEVEL_STYLES[candidate.matchLevel] ? candidate.matchLevel : "unknown";
-  const style   = LEVEL_STYLES[level];
-  // Relative Plex thumb paths are server-local — proxy them against the same
-  // instance the candidates came from. Omitted when default.
-  const thumbSrc = candidate.thumb
-    ? withBasePath(`/api/admin/fix-match/thumb?${new URLSearchParams({
-        path: candidate.thumb,
-        ...(serverInstance ? { serverInstance } : {}),
-      })}`)
-    : null;
-
-  return (
-    <button
-      onClick={() => onPick(candidate.guid)}
-      disabled={disabled}
-      aria-pressed={picked}
-      className={`w-full text-left px-5 py-3.5 flex items-start gap-4 transition-colors
-        disabled:opacity-50 disabled:cursor-not-allowed ${style.border} ${style.bg}`}
-      style={picked ? { boxShadow: "inset 0 0 0 2px var(--ds-accent-ring)" } : undefined}
-    >
-      <div className="flex-shrink-0 w-14 h-[84px] rounded overflow-hidden bg-zinc-800 flex items-center justify-center mt-0.5">
-        {thumbSrc
-          // eslint-disable-next-line @next/next/no-img-element
-          ? <img src={thumbSrc} alt={candidate.name || t("adminQueue.fixMatch.thumb")} className="w-full h-full object-cover" />
-          : <span className="text-zinc-500 text-xs">?</span>}
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-base font-medium text-zinc-200 leading-tight">
-            {(candidate.tmdbTitle ?? candidate.name) || t("adminQueue.fixMatch.untitled")}
-          </span>
-          {candidate.year && <span className="text-sm text-zinc-500">({candidate.year})</span>}
-          <span className={`text-xs px-1.5 py-0.5 rounded border font-medium ${style.badge}`}>
-            {candidate.matchLevel === "exact" ? t("adminQueue.fixMatch.exactCheck") : t(`adminQueue.fixMatch.level.${level}`)}
-          </span>
-          {candidate.confidence > 0 && candidate.matchLevel !== "exact" && (
-            <span className="text-xs text-zinc-500">{candidate.confidence}%</span>
-          )}
-        </div>
-        <div className="flex items-center gap-3 mt-1 flex-wrap">
-          {candidate.tmdbId && <span className="text-xs font-mono text-zinc-500">tmdb:{candidate.tmdbId}</span>}
-          {candidate.imdbId && <span className="text-xs font-mono text-zinc-500">{candidate.imdbId}</span>}
-          {/* TMDB answers runtime 0 for many unreleased titles: never a bare `0 &&`. */}
-          {candidate.tmdbRuntime != null && candidate.tmdbRuntime > 0 && <span className="text-xs text-zinc-500">{t("adminQueue.fixMatch.minutes", { minutes: candidate.tmdbRuntime })}</span>}
-        </div>
-      </div>
-      <div className="flex-shrink-0 text-xs text-zinc-500 mt-1">
-        {picked ? <Check aria-hidden className="w-4 h-4 text-[var(--ds-accent-text)]" /> : t("adminQueue.fixMatch.select")}
-      </div>
-    </button>
-  );
+// A remap that went through: the job's own warning (a partial remap, a joined
+// job), then — when the issue couldn't be closed — that.
+function fixWarning(outcome: FixMatchOutcome, resolved: boolean, t: Translator): string | undefined {
+  const parts = [fixMatchWarningMessage(outcome, t), resolved ? null : t("adminQueue.fixMatch.issueNotResolved")];
+  return parts.filter((p): p is string => !!p).join(" ") || undefined;
 }
 
-// Minimal inline server picker — rendered only when more than one configured
-// server holds the title, i.e. only when "fix the match" is genuinely ambiguous.
-// A single-server deployment never sees it.
-function InstancePicker({
-  service, rows, value, onChange, disabled,
-}: {
-  service:  "plex" | "jellyfin";
-  rows:     FileInfoInstance[];
-  value:    string | null;
-  onChange: (slug: string) => void;
-  disabled: boolean;
-}) {
-  const t = useT();
-  if (rows.length < 2) return null;
-  return (
-    <div className="flex items-center gap-1.5 flex-wrap">
-      <span className="text-xs text-zinc-500 shrink-0">{t("adminQueue.fixMatch.server")}</span>
-      {rows.map((r) => (
-        <button
-          key={r.serverInstance}
-          onClick={() => onChange(r.serverInstance)}
-          disabled={disabled}
-          title={r.filePath ?? undefined}
-          className={`text-xs px-2 py-0.5 rounded border font-medium transition-colors disabled:opacity-50
-            ${r.serverInstance === value
-              ? "bg-indigo-500/20 border-indigo-500/50 text-indigo-300"
-              : "bg-zinc-900 border-zinc-700 text-zinc-400 hover:bg-zinc-800"}`}
-        >
-          {mediaInstanceLabel(service, r.serverInstance)}
-        </button>
-      ))}
-    </div>
-  );
+// The label a side's server goes by: empty for the default server, so a
+// single-server deployment renders exactly as before.
+function instanceLabelOf(side: Side, instance: string | null): string {
+  return instance && instance !== DEFAULT_MEDIA_INSTANCE ? mediaInstanceLabel(side, instance) : "";
 }
 
-// One brand colour per service: a fill/border tint and its per-theme text token
-// (guardrail 42). Literal class names so Tailwind generates them.
-const BRAND: Record<Side, { name: string; tint: string; text: string; textClass: string }> = {
-  plex:     { name: "Plex",     tint: "var(--ds-plex)",     text: "var(--ds-plex-text)",     textClass: "text-[var(--ds-plex-text)]" },
-  jellyfin: { name: "Jellyfin", tint: "var(--ds-jellyfin)", text: "var(--ds-jellyfin-text)", textClass: "text-[var(--ds-jellyfin-text)]" },
-};
-
-// A service's card on the confirm step: its state, the server picker and the
-// one action that starts its fix (Plex: search candidates; Jellyfin: apply).
-function ServerFixPanel({
-  side, instanceLabel, state, rows, instance, onInstance, pickerDisabled, actionLabel, onAction,
-}: {
-  side:           Side;
-  instanceLabel:  string;
-  state:          ServerState;
-  rows:           FileInfoInstance[];
-  instance:       string | null;
-  onInstance:     (slug: string) => void;
-  pickerDisabled: boolean;
-  actionLabel:    string;
-  onAction:       () => void;
-}) {
-  const t = useT();
-  const brand = BRAND[side];
-  return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 space-y-2.5">
-      <div className="flex items-center justify-between">
-        <span className={`text-sm font-semibold ${brand.textClass}`}>
-          {brand.name}{instanceLabel && <span className="ml-1.5 text-xs font-normal text-zinc-400">{instanceLabel}</span>}
-        </span>
-        {state.status === "done" && (
-          <span className="flex items-center gap-1.5 text-xs text-green-400"><Check className="w-3.5 h-3.5" /> {t("adminQueue.fixMatch.fixed")}</span>
-        )}
-        {state.status === "error" && (
-          <span className="text-xs text-red-400">{state.error}</span>
-        )}
-      </div>
-      {state.status === "done" && state.warning && (
-        <p className="text-xs text-amber-400 leading-snug">{state.warning}</p>
-      )}
-      <InstancePicker service={side} rows={rows} value={instance} onChange={onInstance} disabled={pickerDisabled} />
-      {state.status === "idle" || state.status === "error" ? (
-        // Brand tint fill + brand text token; .ds-hover-tint supplies the
-        // hover since the background is inline.
-        <button
-          onClick={onAction}
-          className="ds-hover-tint w-full text-xs px-3 py-2 rounded border font-medium transition-colors"
-          style={{
-            background: `color-mix(in oklab, ${brand.tint} 12%, transparent)`,
-            borderColor: `color-mix(in oklab, ${brand.tint} 35%, var(--ds-border))`,
-            color: brand.text,
-          }}
-        >
-          {actionLabel}
-        </button>
-      ) : state.status === "fetching" ? (
-        <p className="text-xs text-zinc-500">{t("adminQueue.fixMatch.loadingPlex")}</p>
-      ) : state.status === "applying" ? (
-        <p className="text-xs text-zinc-500">{t("adminQueue.fixMatch.applying")}</p>
-      ) : null}
-    </div>
-  );
+// The path shown for whichever server a side is pointed at; falls back to the
+// path the route resolved for the requested instance.
+function pathOf(fileInfo: FileInfo | null, side: Side, instance: string | null): string | null {
+  if (!fileInfo) return null;
+  const rows = side === "plex" ? fileInfo.plexInstances : fileInfo.jellyfinInstances;
+  return rows.find((r) => r.serverInstance === instance)?.filePath
+    ?? (side === "plex" ? fileInfo.plexFilePath : fileInfo.jellyfinFilePath)
+    ?? null;
 }
 
-// Multi-phase dialog (search → confirm → Plex candidates) for re-matching a mismatched library item to the correct TMDB ID and resolving the issue.
+// The TMDB search step: debounced, abortable, and remembered — Back from the
+// confirm step keeps the results on screen, so the same query isn't asked
+// again (the search route is rate limited). `resultsFor` is the query the
+// results answer: "No results" only once a search for THIS query came back
+// empty — never before the first debounce fired. `clear` forgets it all.
+function useFixMatchSearch(active: boolean, query: string, mediaType: "MOVIE" | "TV", t: Translator) {
+  const [searching, setSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState<SearchHit[]>([]);
+  const [resultsFor, setResultsFor] = useState<string | null>(null);
+  const [searchError, setSearchError] = useState("");
+  // The query whose results are on screen.
+  const lastSearched = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!active) return;
+    const q = query.trim();
+    if (!q) { setSearchResults([]); setResultsFor(null); setSearchError(""); lastSearched.current = null; return; }
+    // Back from the confirm step: these results are still on screen.
+    if (q === lastSearched.current) return;
+    // The debounce timer and an AbortController: a newer keystroke or the
+    // dialog closing cancels both the wait and the request in flight, so stale
+    // results from a previous keystroke can't overwrite the current ones.
+    const ac = new AbortController();
+    const timer = setTimeout(async () => {
+      setSearching(true);
+      setSearchError("");
+      const type = mediaType === "MOVIE" ? "movie" : "tv";
+      const res = await fetchJson(withBasePath(`/api/search?q=${encodeURIComponent(q)}&type=${type}`), {
+        schema: SearchHitsSchema,
+        signal: ac.signal,
+      });
+      setSearching(false);
+      if (res.ok) {
+        lastSearched.current = q;
+        setResultsFor(q);
+        setSearchResults(searchHitsOf(res.data));
+      } else if (res.kind !== "aborted") {
+        setSearchError(res.kind === "http"
+          ? apiErrorText(res.body, t("adminQueue.common.requestFailed", { status: res.status }))
+          : t("adminQueue.fixMatch.searchFailed"));
+      }
+    }, 350);
+    return () => {
+      clearTimeout(timer);
+      ac.abort();
+    };
+  }, [query, active, mediaType, t]);
+
+  const clear = useCallback(() => {
+    setSearching(false);
+    setSearchResults([]);
+    setResultsFor(null);
+    setSearchError("");
+    lastSearched.current = null;
+  }, []);
+
+  return { searching, searchResults, resultsFor, searchError, clear };
+}
+
+// The title's files on every configured server, read each time the dialog
+// opens. `onRows` seeds each side's server from the answer (seedInstance).
+function useFixMatchFileInfo(
+  open: boolean,
+  tmdbId: number,
+  mediaType: "MOVIE" | "TV",
+  serverInstance: string,
+  onRows: (info: FileInfo) => void,
+) {
+  const [fileInfo, setFileInfo] = useState<FileInfo | null>(null);
+  const [fileInfoError, setFileInfoError] = useState(false);
+  const onRowsRef = useRef(onRows);
+  useEffect(() => {
+    onRowsRef.current = onRows;
+  });
+  useEffect(() => {
+    if (!open) return;
+    const controller = new AbortController();
+    setFileInfoError(false);
+    // The hint is omitted when it's the default instance so the request stays
+    // byte-identical to the pre-multi-server one. The response lists EVERY
+    // server holding the title regardless, so one fetch is enough to resolve
+    // (or offer a choice of) the instance — no refetch on picker change.
+    const params = new URLSearchParams({ tmdbId: String(tmdbId), mediaType });
+    if (serverInstance) params.set("serverInstance", serverInstance);
+    void fetchJson(withBasePath(`/api/admin/fix-match/file-info?${params}`), {
+      schema: FileInfoSchema,
+      signal: controller.signal,
+    }).then((res) => {
+      if (res.ok) {
+        setFileInfo(res.data);
+        onRowsRef.current(res.data);
+      } else if (res.kind !== "aborted") {
+        setFileInfoError(true);
+      }
+    });
+    return () => controller.abort();
+  }, [open, tmdbId, mediaType, serverInstance]);
+  return { fileInfo, fileInfoError };
+}
+
+// Multi-phase dialog (search → confirm → Plex candidates) for re-matching a
+// mismatched library item to the correct TMDB ID and resolving the issue. Its
+// pieces, and the shapes it reads from its routes, are issue-fix-match-parts.tsx.
 export function IssueFixMatchButton({
   issueId, tmdbId, mediaType, title, onPlex, onJellyfin,
   serverInstance = DEFAULT_MEDIA_INSTANCE,
@@ -249,36 +210,36 @@ export function IssueFixMatchButton({
   const router = useRouter();
   const t = useT();
   const [open, setOpen] = useState(false);
+  const arrName = arrServiceName(mediaType);
 
   const [phase, setPhase]               = useState<Phase>("search");
   const [query, setQuery]               = useState(title);
-  const [searching, setSearching]       = useState(false);
-  const [searchResults, setSearchResults] = useState<TmdbMedia[]>([]);
-  const [searchError, setSearchError]   = useState("");
-  const [selected, setSelected]         = useState<TmdbMedia | null>(null);
+  const search = useFixMatchSearch(open && phase === "search", query, mediaType, t);
+  const { searching, searchResults, resultsFor, searchError, clear: clearSearch } = search;
+  const [selected, setSelected]         = useState<SearchHit | null>(null);
 
   const [plexState, setPlexState]         = useState<ServerState>({ status: "idle" });
   const [jellyfinState, setJellyfinState] = useState<ServerState>({ status: "idle" });
-  const [plexCandidates, setPlexCandidates] = useState<CandidatesResponse | null>(null);
+  const [plexCandidates, setPlexCandidates] = useState<Candidates | null>(null);
   // The Plex candidate picked in the list; the footer's Apply sends it.
   const [plexPick, setPlexPick] = useState<string | null>(null);
-  const [fileInfo, setFileInfo]           = useState<FileInfoResponse | null>(null);
-  const [fileInfoError, setFileInfoError] = useState(false);
   // Which configured server each side's fix targets. Resolved from the file-info
   // response (the dialog has no library row to read it off), overridable by the
   // admin when several servers hold the title. null ⇒ no server holds it.
   const [plexInstance, setPlexInstance]         = useState<string | null>(null);
   const [jellyfinInstance, setJellyfinInstance] = useState<string | null>(null);
-  const [addWrongState, setAddWrongState] = useState<"idle" | "adding" | "done" | "conflict" | "error">("idle");
+  const { fileInfo, fileInfoError } = useFixMatchFileInfo(open, tmdbId, mediaType, serverInstance, (info) => {
+    setPlexInstance((cur) => seedInstance(cur, info.plexInstances, serverInstance));
+    setJellyfinInstance((cur) => seedInstance(cur, info.jellyfinInstances, serverInstance));
+  });
+  const [addWrongState, setAddWrongState] = useState<AddWrongState>("idle");
 
   const inputRef = useRef<HTMLInputElement>(null);
-  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // The query whose results are on screen: Back from the confirm step keeps
-  // them, so the same query isn't asked again (the search route is rate limited).
-  const lastSearched = useRef<string | null>(null);
   // Bumped by reset(): an add-as-request still in flight when the dialog was
   // closed must not write its outcome into the next session of the dialog.
   const addGen = useRef(0);
+  // The Plex candidate read: aborted on unmount, and a newer read drops an older one.
+  const reads = useAsyncAction();
   // Stops the runFixMatch status polling on unmount (the server-side job keeps
   // running by design). One controller PER SIDE: Plex and Jellyfin can be
   // applied at the same time, and a single shared ref would lose the first
@@ -293,21 +254,18 @@ export function IssueFixMatchButton({
   const reset = useCallback(() => {
     setPhase("search");
     setQuery(title);
-    setSearching(false);
-    setSearchResults([]);
-    setSearchError("");
-    lastSearched.current = null;
+    clearSearch();
     setSelected(null);
     setPlexState({ status: "idle" });
     setJellyfinState({ status: "idle" });
+    reads.abort("candidates");
     setPlexCandidates(null);
     setPlexPick(null);
     addGen.current++;
     setAddWrongState("idle");
-    setFileInfoError(false);
     setPlexInstance(null);
     setJellyfinInstance(null);
-  }, [title]);
+  }, [title, reads, clearSearch]);
 
   const close = useCallback(() => {
     setOpen(false);
@@ -324,75 +282,15 @@ export function IssueFixMatchButton({
     return holdLiveRefresh();
   }, [open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const controller = new AbortController();
-    setFileInfoError(false);
-    // The hint is omitted when it's the default instance so the request stays
-    // byte-identical to the pre-multi-server one. The response lists EVERY
-    // server holding the title regardless, so one fetch is enough to resolve
-    // (or offer a choice of) the instance — no refetch on picker change.
-    const params = new URLSearchParams({ tmdbId: String(tmdbId), mediaType });
-    if (serverInstance) params.set("serverInstance", serverInstance);
-    fetch(withBasePath(`/api/admin/fix-match/file-info?${params}`), {
-      signal: controller.signal,
-    })
-      .then((r) => r.ok ? r.json() as Promise<FileInfoResponse> : null)
-      .then((data) => {
-        if (data) {
-          setFileInfo(data);
-          setPlexInstance((cur) => seedInstance(cur, data.plexInstances, serverInstance));
-          setJellyfinInstance((cur) => seedInstance(cur, data.jellyfinInstances, serverInstance));
-        } else setFileInfoError(true);
-      })
-      .catch((err) => {
-        if (err instanceof DOMException && err.name === "AbortError") return;
-        setFileInfoError(true);
-      });
-    return () => controller.abort();
-  }, [open, tmdbId, mediaType, serverInstance]);
-
-  useEffect(() => {
-    if (open && phase === "search") {
-      setTimeout(() => inputRef.current?.focus(), 50);
-    }
-  }, [open, phase]);
-
+  // The search input takes focus on open (DialogPopup's initialFocus); Back to
+  // the search step puts it there again.
   useEffect(() => {
     if (!open || phase !== "search") return;
-    if (searchTimer.current) clearTimeout(searchTimer.current);
-    const q = query.trim();
-    if (!q) { setSearchResults([]); setSearchError(""); lastSearched.current = null; return; }
-    // Back from the confirm step: these results are still on screen.
-    if (q === lastSearched.current) return;
-    // AbortController in addition to the debounce timer: cancels the in-flight
-    // fetch when the query changes mid-request OR the dialog closes, so stale
-    // results from a previous keystroke can't overwrite the current ones.
-    const ac = new AbortController();
-    searchTimer.current = setTimeout(async () => {
-      setSearching(true);
-      setSearchError("");
-      try {
-        const type = mediaType === "MOVIE" ? "movie" : "tv";
-        const res = await fetch(withBasePath(`/api/search?q=${encodeURIComponent(q)}&type=${type}`), { signal: ac.signal });
-        const json = await res.json().catch(() => null) as TmdbMedia[] | { error: string } | null;
-        if (!res.ok || !json || "error" in json) throw new Error(json && "error" in json ? json.error : t("adminQueue.common.requestFailed", { status: res.status }));
-        lastSearched.current = q;
-        setSearchResults(json as TmdbMedia[]);
-      } catch (err) {
-        if (err instanceof DOMException && err.name === "AbortError") return;
-        setSearchError(err instanceof Error ? err.message : t("adminQueue.fixMatch.searchFailed"));
-      } finally {
-        setSearching(false);
-      }
-    }, 350);
-    return () => {
-      if (searchTimer.current) clearTimeout(searchTimer.current);
-      ac.abort();
-    };
-  }, [query, open, phase, mediaType, t]);
+    const timer = setTimeout(() => inputRef.current?.focus(), 50);
+    return () => clearTimeout(timer);
+  }, [open, phase]);
 
-  function pickResult(result: TmdbMedia) {
+  function pickResult(result: SearchHit) {
     setSelected(result);
     setPhase("confirm");
     setPlexState({ status: "idle" });
@@ -404,26 +302,24 @@ export function IssueFixMatchButton({
     if (!selected) return;
     setPlexState({ status: "fetching" });
     setPlexPick(null);
-    try {
-      const params = new URLSearchParams({
-        server: "plex",
-        tmdbId: String(tmdbId),
-        mediaType,
-        correctTmdbId: String(selected.id),
-      });
-      // Same server the candidates (and their ratingKey) must come from as the
-      // POST that applies them. Omitted when default — see the file-info fetch.
-      if (plexInstance) params.set("serverInstance", plexInstance);
-      const res  = await fetch(withBasePath(`/api/admin/fix-match/candidates?${params}`));
-      // A reverse proxy's HTML 502/504 is not JSON — report the status, not a parser error.
-      const json = await res.json().catch(() => null) as (CandidatesResponse & { error?: string }) | null;
-      if (!res.ok || !json) throw new Error(json?.error ?? t("adminQueue.common.requestFailed", { status: res.status }));
-      setPlexCandidates(json);
-      setPlexState({ status: "selecting" });
-      setPhase("plex-candidates");
-    } catch (err) {
-      setPlexState({ status: "error", error: err instanceof Error ? err.message : t("adminQueue.claim.failed") });
+    // Same server the candidates (and their ratingKey) must come from as the
+    // POST that applies them; the default is left out of the query.
+    const res = await reads.run("candidates", (signal) =>
+      fetchFixMatchCandidates(
+        { server: "plex", tmdbId, mediaType, correctTmdbId: selected.id, serverInstance: plexInstance ?? undefined },
+        signal,
+      ));
+    // Closed, unmounted or superseded: nothing to show.
+    if (!res) return;
+    if (!res.ok) {
+      // The route's own (translated) reason; a reverse proxy's HTML 502/504 is
+      // no answer, never a parser error.
+      setPlexState({ status: "error", error: candidatesErrorText(res, t) });
+      return;
     }
+    setPlexCandidates(res.data);
+    setPlexState({ status: "selecting" });
+    setPhase("plex-candidates");
   }
 
   // The fallback close, for a fix that joined a remap already running (whose
@@ -431,14 +327,13 @@ export function IssueFixMatchButton({
   // issue stays resolved, so it is harmless when the job got there first. true
   // when the issue is closed.
   async function resolveIssue(correctedTitle: string): Promise<boolean> {
-    const res = await fetch(withBasePath(`/api/issues/${issueId}`), {
-      method:  "PATCH",
-      headers: { "Content-Type": "application/json" },
-      // Stored on the Issue and shown to the reporter — written in the admin's
-      // UI language rather than hardcoded English.
-      body:    JSON.stringify({ status: "RESOLVED", resolution: t("adminQueue.fixMatch.resolutionNote", { title: correctedTitle }) }),
-    }).catch(() => null);
-    return res?.ok === true;
+    const res = await fetchJson(withBasePath(`/api/issues/${issueId}`), {
+      // Stored on the Issue and shown to the reporter in the acting admin's
+      // language — the same note the job writes when it closes the issue
+      // itself (fix-match-run.ts closeIssueAfterFix).
+      init: jsonInit("PATCH", { status: "RESOLVED", resolution: t("adminQueue.fixMatch.resolutionNote", { title: correctedTitle }) }),
+    });
+    return res.ok || res.kind === "invalid";
   }
 
   // One apply for both services. Plex sends the candidate picked from its list;
@@ -453,6 +348,8 @@ export function IssueFixMatchButton({
     const instance = side === "plex" ? plexInstance : jellyfinInstance;
     setState({ status: "applying" });
     if (side === "plex") setPhase("confirm");
+    // A side's earlier poll (a retry after an error) never outlives its controller.
+    abort.current?.abort();
     const ac = new AbortController();
     abort.current = ac;
     try {
@@ -464,7 +361,7 @@ export function IssueFixMatchButton({
         issueId, issueTitle: selected.title,
       }, { signal: ac.signal });
       const resolved = outcome.issueResolved ?? await resolveIssue(selected.title);
-      setState({ status: "done", warning: [fixMatchWarningMessage(outcome, t), resolved ? null : t("adminQueue.fixMatch.issueNotResolved")].filter(Boolean).join(" ") || undefined });
+      setState({ status: "done", warning: fixWarning(outcome, resolved, t) });
       // Resolving is announced over SSE too; the shared refresh makes the two one.
       requestPageRefresh(() => router.refresh());
     } catch (err) {
@@ -499,18 +396,17 @@ export function IssueFixMatchButton({
 
   const busy = plexState.status === "fetching" || plexState.status === "applying" || jellyfinState.status === "applying";
 
-  // Path shown for whichever server each side is currently pointed at; falls back
-  // to the path the route resolved for the requested instance.
-  const plexPath     = (fileInfo?.plexInstances.find((r) => r.serverInstance === plexInstance)?.filePath)
-    ?? fileInfo?.plexFilePath ?? null;
-  const jellyfinPath = (fileInfo?.jellyfinInstances.find((r) => r.serverInstance === jellyfinInstance)?.filePath)
-    ?? fileInfo?.jellyfinFilePath ?? null;
-  // Empty for the default server, so a single-server deployment renders exactly
-  // as before.
-  const plexInstanceLabel = plexInstance && plexInstance !== DEFAULT_MEDIA_INSTANCE
-    ? mediaInstanceLabel("plex", plexInstance) : "";
-  const jellyfinInstanceLabel = jellyfinInstance && jellyfinInstance !== DEFAULT_MEDIA_INSTANCE
-    ? mediaInstanceLabel("jellyfin", jellyfinInstance) : "";
+  const plexPath = pathOf(fileInfo, "plex", plexInstance);
+  const jellyfinPath = pathOf(fileInfo, "jellyfin", jellyfinInstance);
+  const plexInstanceLabel = instanceLabelOf("plex", plexInstance);
+  const jellyfinInstanceLabel = instanceLabelOf("jellyfin", jellyfinInstance);
+  const arrTmdbId = fileInfo?.arrTmdbId ?? null;
+  const q = query.trim();
+
+  function goBack() {
+    if (phase === "plex-candidates") { setPhase("confirm"); setPlexState({ status: "idle" }); setPlexCandidates(null); setPlexPick(null); }
+    else { setPhase("search"); setSelected(null); }
+  }
 
   return (
     <>
@@ -536,10 +432,7 @@ export function IssueFixMatchButton({
               <div className="flex items-center gap-3">
                 {phase !== "search" && (
                   <button
-                    onClick={() => {
-                      if (phase === "plex-candidates") { setPhase("confirm"); setPlexState({ status: "idle" }); setPlexCandidates(null); setPlexPick(null); }
-                      else { setPhase("search"); setSelected(null); }
-                    }}
+                    onClick={goBack}
                     disabled={busy}
                     aria-label={t("adminQueue.fixMatch.back")}
                     title={t("adminQueue.fixMatch.back")}
@@ -562,84 +455,20 @@ export function IssueFixMatchButton({
               </DialogClose>
             </div>
 
-            <div className="px-6 py-3 border-b border-zinc-800 flex-shrink-0 space-y-2">
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-zinc-500 font-mono uppercase shrink-0">{t("adminQueue.fixMatch.current")}</span>
-                <span className="text-sm text-zinc-400 truncate">{title}</span>
-                <span className="text-xs font-mono text-zinc-500 shrink-0">#{tmdbId}</span>
-              </div>
-              {fileInfoError && (
-                <p className="text-xs text-orange-400">
-                  {t("adminQueue.fixMatch.fileInfoFailed")}
-                </p>
-              )}
-              {plexPath && (
-                <div className="flex items-center gap-2">
-                  {/* Brand as TEXT → the per-theme brand text token, not the
-                      warning colour (guardrail 42). */}
-                  <span className="text-xs font-semibold text-[var(--ds-plex-text)] w-16 shrink-0">
-                    {plexInstanceLabel || "Plex"}
-                  </span>
-                  <p className="text-xs font-mono text-zinc-500 truncate" title={plexPath}>
-                    {plexPath.replace(/\\/g, "/").split("/").pop()}
-                  </p>
-                </div>
-              )}
-              {jellyfinPath && (
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold text-[var(--ds-jellyfin-text)] w-16 shrink-0">
-                    {jellyfinInstanceLabel || "Jellyfin"}
-                  </span>
-                  <p className="text-xs font-mono text-zinc-500 truncate" title={jellyfinPath}>
-                    {jellyfinPath.replace(/\\/g, "/").split("/").pop()}
-                  </p>
-                </div>
-              )}
-              {fileInfo?.arrTmdbId !== null && fileInfo?.arrTmdbId !== undefined && fileInfo.arrTmdbId !== tmdbId && (
-                <div className="flex items-center gap-2 pt-0.5">
-                  <span className="text-xs font-semibold text-zinc-500 w-16 shrink-0">
-                    {mediaType === "MOVIE" ? "Radarr" : "Sonarr"}
-                  </span>
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-xs text-orange-400 font-mono shrink-0">→ TMDB #{fileInfo.arrTmdbId}</span>
-                    {fileInfo.arrTitle && (
-                      <span className="text-xs text-orange-400 truncate">{fileInfo.arrTitle}</span>
-                    )}
-                    {/* Disabled while a fix runs: picking now would re-offer
-                        the fix buttons for a new title over the one in flight. */}
-                    <button
-                      onClick={() => {
-                        if (!fileInfo.arrTmdbId) return;
-                        pickResult({
-                          id: fileInfo.arrTmdbId,
-                          mediaType: mediaType === "MOVIE" ? "movie" : "tv",
-                          title: fileInfo.arrTitle ?? `TMDB #${fileInfo.arrTmdbId}`,
-                          overview: "",
-                          posterPath: null,
-                          backdropPath: null,
-                          releaseDate: null,
-                          releaseYear: "",
-                          voteAverage: 0,
-                        });
-                      }}
-                      disabled={busy}
-                      className="text-xs px-2 py-0.5 rounded border border-orange-500/30 bg-orange-500/10
-                        text-orange-400 hover:bg-orange-500/20 transition-colors shrink-0 font-medium disabled:opacity-40"
-                    >
-                      {t("adminQueue.fixMatch.useThis")}
-                    </button>
-                  </div>
-                </div>
-              )}
-              {fileInfo?.arrTmdbId !== null && fileInfo?.arrTmdbId !== undefined && fileInfo.arrTmdbId === tmdbId && (
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold text-zinc-500 w-16 shrink-0">
-                    {mediaType === "MOVIE" ? "Radarr" : "Sonarr"}
-                  </span>
-                  <span className="text-xs text-emerald-400">{t("adminQueue.fixMatch.matchesCurrent")}</span>
-                </div>
-              )}
-            </div>
+            <CurrentMatchInfo
+              title={title}
+              tmdbId={tmdbId}
+              fileInfoError={fileInfoError}
+              plexPath={plexPath}
+              plexLabel={plexInstanceLabel || BRAND.plex.name}
+              jellyfinPath={jellyfinPath}
+              jellyfinLabel={jellyfinInstanceLabel || BRAND.jellyfin.name}
+              arrName={arrName}
+              arrTmdbId={arrTmdbId}
+              arrTitle={fileInfo?.arrTitle ?? null}
+              busy={busy}
+              onUseArr={pickResult}
+            />
 
             {phase === "search" && (
               <>
@@ -654,6 +483,7 @@ export function IssueFixMatchButton({
                       value={query}
                       onChange={(e) => setQuery(e.target.value)}
                       placeholder={mediaType === "MOVIE" ? t("adminQueue.fixMatch.searchMovies") : t("adminQueue.fixMatch.searchTv")}
+                      aria-label={mediaType === "MOVIE" ? t("adminQueue.fixMatch.searchMovies") : t("adminQueue.fixMatch.searchTv")}
                       className="w-full bg-zinc-800 border border-zinc-700 rounded-md pl-10 pr-3 py-2.5
                         text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500/60"
                     />
@@ -665,77 +495,22 @@ export function IssueFixMatchButton({
                 </div>
 
                 <div className="overflow-y-auto flex-1 divide-y divide-zinc-800/60">
-                  {searchResults.length === 0 && !searching && query.trim() && (
+                  {searchResults.length === 0 && !searching && !searchError && q && resultsFor === q && (
                     <p className="px-6 py-8 text-sm text-zinc-500 text-center">{t("adminQueue.fixMatch.noResults")}</p>
                   )}
-                  {searchResults.length === 0 && !query.trim() && (
+                  {searchResults.length === 0 && !q && (
                     <p className="px-6 py-8 text-sm text-zinc-500 text-center">{t("adminQueue.fixMatch.typeToSearch")}</p>
                   )}
-                  {searchResults.map((r) => {
-                    const thumb = posterUrl(r.posterPath, "w342");
-                    const isCurrentMatch = r.id === tmdbId;
-                    return (
-                      <button
-                        key={r.id}
-                        onClick={() => pickResult(r)}
-                        disabled={isCurrentMatch}
-                        className={`w-full text-left px-6 py-4 flex items-start gap-4 transition-colors
-                          ${isCurrentMatch
-                            ? "opacity-40 cursor-not-allowed"
-                            : "hover:bg-zinc-800/70"}`}
-                      >
-                        <div className="flex-shrink-0 w-12 h-[72px] rounded overflow-hidden bg-zinc-800">
-                          {thumb
-                            // eslint-disable-next-line @next/next/no-img-element
-                            ? <img src={thumb} alt={r.title} className="w-full h-full object-cover" />
-                            : <div className="w-full h-full flex items-center justify-center text-zinc-500 text-xs">?</div>}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-base font-medium text-zinc-200 leading-tight">{r.title}</span>
-                            {r.releaseYear && <span className="text-sm text-zinc-500">({r.releaseYear})</span>}
-                            {isCurrentMatch && <span className="text-xs text-zinc-500">{t("adminQueue.fixMatch.currentBadge")}</span>}
-                          </div>
-                          <span className="text-xs font-mono text-zinc-500 mt-0.5 block">TMDB #{r.id}</span>
-                          {r.overview && (
-                            <p className="text-xs text-zinc-500 mt-1 line-clamp-2 leading-snug">{r.overview}</p>
-                          )}
-                        </div>
-                        <div className="flex-shrink-0 text-xs text-zinc-500 mt-1">{t("adminQueue.fixMatch.select")}</div>
-                      </button>
-                    );
-                  })}
+                  {searchResults.map((r) => (
+                    <SearchResultRow key={r.id} result={r} isCurrent={r.id === tmdbId} onPick={pickResult} />
+                  ))}
                 </div>
               </>
             )}
 
             {phase === "confirm" && selected && (
               <div className="overflow-y-auto flex-1 flex flex-col">
-                <div className="px-6 py-4 border-b border-zinc-800 flex-shrink-0 flex gap-4 items-start">
-                  {(() => {
-                    const thumb = posterUrl(selected.posterPath, "w342");
-                    return thumb
-                      ? <div className="flex-shrink-0 w-16 h-[96px] rounded overflow-hidden">
-                          {/* eslint-disable-next-line @next/next/no-img-element -- tiny 64×96 picker thumbnail; next/image overhead isn't worth it here */}
-                          <img src={thumb} alt={selected.title} className="w-full h-full object-cover" />
-                        </div>
-                      : <div className="flex-shrink-0 w-16 h-[96px] rounded bg-zinc-800" />;
-                  })()}
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1">{t("adminQueue.fixMatch.correctMatch")}</p>
-                    <p className="text-base font-semibold text-zinc-100 leading-tight">{selected.title}</p>
-                    {selected.releaseYear && <p className="text-sm text-zinc-400 mt-0.5">{selected.releaseYear}</p>}
-                    <p className="text-xs font-mono text-zinc-500 mt-0.5">TMDB #{selected.id}</p>
-                    {fileInfo?.arrTmdbId === selected.id && (
-                      <p className="text-xs text-emerald-500 mt-0.5">
-                        {t("adminQueue.fixMatch.arrConfirmed", { arr: mediaType === "MOVIE" ? "Radarr" : "Sonarr" })}
-                      </p>
-                    )}
-                    {selected.overview && (
-                      <p className="text-xs text-zinc-500 mt-1.5 leading-snug line-clamp-3">{selected.overview}</p>
-                    )}
-                  </div>
-                </div>
+                <SelectedMatchHeader selected={selected} arrName={arrName} arrConfirmed={arrTmdbId === selected.id} />
 
                 <div className="px-6 py-4 space-y-3 flex-1">
                   {onPlex && (
@@ -748,7 +523,7 @@ export function IssueFixMatchButton({
                       onInstance={setPlexInstance}
                       pickerDisabled={busy || plexState.status === "done"}
                       actionLabel={t("adminQueue.fixMatch.searchPlex", { id: selected.id })}
-                      onAction={fetchPlexCandidates}
+                      onAction={() => void fetchPlexCandidates()}
                     />
                   )}
 
@@ -773,79 +548,21 @@ export function IssueFixMatchButton({
                   )}
 
                   {anyFixDone && (
-                    <div className="rounded-lg border border-zinc-700 bg-zinc-900 p-4 space-y-2">
-                      <p className="text-xs text-zinc-400 leading-snug">
-                        {/* One sentence with slots, so each language orders the words
-                            itself (a split before/after pair can't be reordered). */}
-                        {rich(t("adminQueue.fixMatch.wrongMatchPrompt"), {
-                          title: <span className="font-medium text-zinc-200">{title}</span>,
-                          id: <span className="font-mono text-zinc-500">#{tmdbId}</span>,
-                        })}
-                      </p>
-                      {addWrongState === "idle" && (
-                        <button
-                          onClick={addWrongItemAsRequest}
-                          className="text-xs px-3 py-1.5 rounded border font-medium transition-colors
-                            bg-zinc-800 border-zinc-600 text-zinc-300 hover:bg-zinc-700 hover:border-zinc-500"
-                        >
-                          {t("adminQueue.fixMatch.addAsRequest", { title })}
-                        </button>
-                      )}
-                      {addWrongState === "adding" && (
-                        <p className="text-xs text-zinc-500">{t("adminQueue.fixMatch.adding")}</p>
-                      )}
-                      {addWrongState === "done" && (
-                        <p className="flex items-center gap-1.5 text-xs text-green-400">
-                          <Check className="w-3.5 h-3.5" /> {t("adminQueue.fixMatch.added")}
-                        </p>
-                      )}
-                      {addWrongState === "conflict" && (
-                        <p className="text-xs text-zinc-500">{t("adminQueue.fixMatch.alreadyRequested")}</p>
-                      )}
-                      {addWrongState === "error" && (
-                        <p className="text-xs text-red-400">{t("adminQueue.fixMatch.addFailed")}</p>
-                      )}
-                    </div>
+                    <AddWrongAsRequest title={title} tmdbId={tmdbId} state={addWrongState} onAdd={() => void addWrongItemAsRequest()} />
                   )}
                 </div>
               </div>
             )}
 
             {phase === "plex-candidates" && plexCandidates && selected && (
-              <>
-                <div className="px-6 pt-4 pb-3 border-b border-zinc-700 flex-shrink-0">
-                  <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1.5">
-                    {t("adminQueue.fixMatch.plexCandidatesFor", { id: selected.id, count: plexCandidates.candidates.length })}
-                    {plexInstanceLabel && (
-                      <span className="ml-1.5 normal-case text-orange-400">{t("adminQueue.fixMatch.onInstance", { instance: plexInstanceLabel })}</span>
-                    )}
-                  </p>
-                  {plexCandidates.arrConfirmedTmdbId !== null && (
-                    <p className={`text-sm ${plexCandidates.arrConfirmedTmdbId === selected.id ? "text-emerald-400" : "text-yellow-400"}`}>
-                      {plexCandidates.arrConfirmedTmdbId === selected.id
-                        ? t("adminQueue.fixMatch.arrConfirmsId")
-                        : t("adminQueue.fixMatch.arrHasId", { id: plexCandidates.arrConfirmedTmdbId })}
-                    </p>
-                  )}
-                </div>
-
-                <div className="overflow-y-auto flex-1 divide-y divide-zinc-800/60">
-                  {plexCandidates.candidates.length === 0 ? (
-                    <p className="px-6 py-8 text-sm text-zinc-500 text-center">{t("adminQueue.fixMatch.noCandidates")}</p>
-                  ) : (
-                    plexCandidates.candidates.map((c) => (
-                      <PlexCandidateRow
-                        key={c.guid}
-                        candidate={c}
-                        onPick={setPlexPick}
-                        picked={c.guid === plexPick}
-                        disabled={plexState.status === "applying"}
-                        serverInstance={plexCandidates.serverInstance}
-                      />
-                    ))
-                  )}
-                </div>
-              </>
+              <PlexCandidatesList
+                candidates={plexCandidates}
+                selectedId={selected.id}
+                instanceLabel={plexInstanceLabel}
+                pick={plexPick}
+                applying={plexState.status === "applying"}
+                onPick={setPlexPick}
+              />
             )}
 
             <div className="px-6 py-4 border-t border-zinc-700 flex justify-end gap-2 flex-shrink-0">

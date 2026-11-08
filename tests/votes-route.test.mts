@@ -255,14 +255,24 @@ const deletionVoteModel = {
       ? groupRows
       : groupRows.map((g) => ({ tmdbId: g.tmdbId, mediaType: g.mediaType, _count: g._count }));
   },
-  findMany: async (args: { distinct?: string[]; where?: { userId?: unknown } }) => {
+  findMany: async (args: { distinct?: string[]; take?: number; where?: { userId?: unknown; tmdbId?: number; mediaType?: string } }) => {
     rec("deletionVote.findMany", args);
-    if (args.distinct) return repRows; // representative title/poster rows
+    if (args.distinct) return repRows; // representative title/poster rows (and the voted-title reads)
     if (typeof args.where?.userId === "string") return userVoteRows; // the caller's own votes
-    return otherReasonRows; // other users' recent reasons (userId: { not })
+    // Other users' recent reasons (userId: { not }), read per title.
+    const w = args.where;
+    // newest first, as the rows are listed; `take` bounds it like the real query.
+    return otherReasonRows
+      .filter((r) => w?.tmdbId === undefined || (r.tmdbId === w.tmdbId && r.mediaType === w.mediaType))
+      .slice(0, args.take);
   },
 };
 shadowPrismaModel(prisma, "deletionVote", deletionVoteModel);
+// The list's distinct-title COUNT (votes-list-data.ts countVotedTitles).
+shadowPrismaClientMethod(prisma, "$queryRaw", async (...args: unknown[]) => {
+  rec("$queryRaw", args);
+  return [{ count: BigInt(groupRows.length) }];
+});
 
 let plexHas = true;
 let jellyfinHas = false;
@@ -931,10 +941,47 @@ test("GET groups votes with voteCount, the caller's own vote/reason, and others'
     reasonEntries: [],
   });
   // The other-reasons read must select the vote id, or the entries carry none.
-  const otherReasonsRead = opsOf("deletionVote.findMany").find(
+  const otherReasonsReads = opsOf("deletionVote.findMany").filter(
     (o) => (o.args as { where?: { reason?: unknown } }).where?.reason !== undefined,
   );
-  assert.equal((otherReasonsRead?.args as { select?: { id?: boolean } })?.select?.id, true);
+  assert.equal((otherReasonsReads[0]?.args as { select?: { id?: boolean } })?.select?.id, true);
+  // One read per title on the page, so no title's reasons depend on another's.
+  assert.deepEqual(
+    otherReasonsReads.map((o) => { const w = (o.args as { where: { tmdbId: number; mediaType: string } }).where; return `${w.mediaType}:${w.tmdbId}`; }).sort(),
+    ["MOVIE:603", "TV:1399"],
+  );
+});
+
+test("GET shows each title its own other-voters' reasons: a heavily voted title on the page can't crowd another's out", async () => {
+  const now = new Date();
+  groupRows = [
+    { tmdbId: 1, mediaType: "MOVIE", _count: { id: 300 }, _max: { createdAt: now } },
+    { tmdbId: 2, mediaType: "MOVIE", _count: { id: 1 }, _max: { createdAt: now } },
+  ];
+  repRows = [];
+  userVoteRows = [];
+  // 300 newer reasoned votes on title 1, then the one on title 2.
+  otherReasonRows = [
+    ...Array.from({ length: 300 }, (_, i) => ({ tmdbId: 1, mediaType: "MOVIE", id: `busy-${i}`, reason: `reason ${i}` })),
+    { tmdbId: 2, mediaType: "MOVIE", id: "quiet-1", reason: "never watched" },
+  ];
+  const { token } = await mintSession();
+  const res = await inScope(() => listVotes(votesReq(token, { method: "GET" }), undefined));
+  const body = (await res.json()) as { items: Array<{ tmdbId: number; reasons: string[] }> };
+  assert.deepEqual(body.items.find((i) => i.tmdbId === 2)?.reasons, ["never watched"]);
+  assert.equal(body.items.find((i) => i.tmdbId === 1)?.reasons.length, 3);
+});
+
+test("GET on an unrestricted deployment counts the voted titles with one COUNT, not a read of every voted title", async () => {
+  const now = new Date();
+  groupRows = [{ tmdbId: 603, mediaType: "MOVIE", _count: { id: 2 }, _max: { createdAt: now } }];
+  const { token } = await mintSession();
+  const body = (await (await inScope(() => listVotes(votesReq(token, { method: "GET" }), undefined))).json()) as { total: number };
+  assert.equal(body.total, 1);
+  assert.equal(opsOf("$queryRaw").length, 1);
+  const unpaged = opsOf("deletionVote.groupBy").filter((o) => (o.args as { skip?: number }).skip === undefined);
+  assert.equal(unpaged.length, 0, "no groupBy over every voted title");
+  assert.equal(opsOf("deletionVote.findMany").filter((o) => (o.args as { take?: number }).take === undefined && (o.args as { distinct?: unknown }).distinct !== undefined && (o.args as { where?: { OR?: unknown } }).where?.OR === undefined).length, 0);
 });
 
 test("GET scopes ?mine=1 to the caller, filters ?q= by title, and falls back to the votes sort on junk", async () => {
@@ -943,11 +990,11 @@ test("GET scopes ?mine=1 to the caller, filters ?q= by title, and falls back to 
     listVotes(votesReq(token, { method: "GET", query: "?mine=1&q=matrix&sort=bogus" }), undefined),
   );
   assert.equal(res.status, 200);
-  // The PAGED call carries skip/take; the voted-titles read (the total and the
-  // guardrail-35 scope) runs first and carries neither. That read is what mine=1
-  // and q= scope: under the votes sort the paged call then counts EVERY voter's
-  // rows on those titles, so it carries neither filter itself.
-  const voted = opsOf("deletionVote.groupBy").find((o) => (o.args as { skip?: number }).skip === undefined)!.args as {
+  // The voted-titles read (the total and the guardrail-35 scope) runs first —
+  // a distinct read of the caller's titles — and is what mine=1 and q= scope:
+  // under the votes sort the paged call then counts EVERY voter's rows on those
+  // titles, so it carries neither filter itself.
+  const voted = opsOf("deletionVote.findMany").find((o) => (o.args as { distinct?: unknown }).distinct !== undefined)!.args as {
     where: { userId?: string; title?: { contains: string; mode: string } };
   };
   assert.equal(voted.where.userId, userId, "mine=1 must scope the voted-titles read to the caller");

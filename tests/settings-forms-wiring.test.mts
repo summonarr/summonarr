@@ -37,7 +37,7 @@ const SAVE_FORMS = [
 
 // A handler that doesn't call edited() itself hands the value to one that does.
 const DELEGATED: Record<string, RegExp> = {
-  "watch-grade-settings.tsx": /^onChange=\{\(e\) => set\(field, e\.target\.value\)\}$/,
+  "watch-grade-settings.tsx": /^onChange=\{\((e|value)\) => set\(field, (e\.target\.)?value\)\}$/,
   "forms/library-match-form.tsx": /^onChange=\{\(e\) => onChangePrefix\(e\.target\.value\)\}$/,
 };
 
@@ -61,15 +61,18 @@ test("an edit while a save is in flight keeps Save locked, and the answer doesn'
   // The delegates call it.
   assert.match(read("watch-grade-settings.tsx"), /function set\(field: Field, value: string\) \{\s*setValues\([^\n]*\);\s*edited\(\);\s*\}/);
   const match = read("forms/library-match-form.tsx");
-  assert.equal(count(match, /const onChange(Plex|Jellyfin)(Movie|Tv)Prefix\s*= \(v: string\) => \{ set\w+\(v\);\s*edited\(\); \};/), 4);
+  assert.match(match, /const onChangePrefix = \(key: PrefixKey\) => \(value: string\) => \{ setPrefixes\([^\n]*\);\s*edited\(\); \};/);
+  assert.equal(count(match, /onChange(Movie|Tv)Prefix=\{onChangePrefix\("\w+"\)\}/), 4);
 });
 
 test("the library pickers' boxes are edits too: a box ticked during a save isn't reported as saved", () => {
-  for (const file of ["forms/plex-connect-form.tsx", "forms/jellyfin-sync-form.tsx"]) {
-    const src = read(file);
-    assert.match(src, /const \{ status: saveStatus, message: \w+, save, edited \} = useSettingsSave\(\);/, file);
-    assert.match(src, /function toggle\((key|id): string\) \{\s*edited\(\);/, file);
-    assert.match(src, /const result = await save\(\{ (plex|jellyfin)Libraries: value \}\);\s*if \(result\.ok\) \{/, file);
+  // One picker for both servers (forms/media-server-library.tsx).
+  const src = read("forms/media-server-library.tsx");
+  assert.match(src, /const \{ status: saveStatus, message: \w+, save, edited \} = useSettingsSave\(\);/);
+  assert.match(src, /function toggle\(id: string\) \{\s*edited\(\);/);
+  assert.match(src, /const result = await save\(\{ \[service === "plex" \? "plexLibraries" : "jellyfinLibraries"\]: value \}\);\s*if \(result\.ok\) \{/);
+  for (const [file, service] of [["forms/plex-connect-form.tsx", "plex"], ["forms/jellyfin-sync-form.tsx", "jellyfin"]] as const) {
+    assert.match(read(file), new RegExp(`<LibraryPicker\\s+service="${service}"`), file);
   }
 });
 
@@ -85,10 +88,15 @@ test("a save is 'Saved' only when the route said ok: true", () => {
     const src = read(file);
     assert.doesNotMatch(src, /data\.ok !== false|body\.ok !== false|data\.ok === false/, `${file}: a 2xx without ok: true is not a save`);
   }
-  for (const file of ["forms/plex-connect-form.tsx", "forms/jellyfin-sync-form.tsx"]) {
-    assert.match(read(file), /saveOk = settingsPatchSucceeded\(res, body\);/, file);
+  // The server forms' Save & Test PATCHes through the shared helper, whose
+  // `ok` is settingsPatchSucceeded.
+  const media = read("forms/media-server-library.tsx");
+  assert.match(media, /const saved = await patchSettings\(body\);/);
+  assert.match(media, /if \(!saved\.ok\) \{/);
+  for (const file of ["forms/plex-connect-form.tsx", "forms/jellyfin-sync-form.tsx", "forms/api-key-setting-form.tsx", "forms/arr-form.tsx", "forms/email-form.tsx", "forms/discord-bot-form.tsx"]) {
+    assert.doesNotMatch(read(file), /fetch\(withBasePath\("\/api\/settings"\)/, file);
   }
-  assert.match(read("forms/api-key-setting-form.tsx"), /if \(!settingsPatchSucceeded\(res, data\)\) \{/);
+  assert.match(read("forms/api-key-setting-form.tsx"), /const result = await patchSettings\(\{ \[settingKey\]: value \}\);\s*if \(!result\.ok\) \{/);
 });
 
 // ── switches that save on flip ────────────────────────────────────────────────
@@ -145,11 +153,13 @@ test("play history and watch grades announce the result through the shared live-
     const src = read(file);
     assert.match(src, /<SaveStatusMessage status=\{status\} errorLabel=\{message \|\| undefined\} \/>/, file);
     assert.doesNotMatch(src, /<CheckCircle/, `${file}: no bare success icon`);
-    // A failure with no reason from the route still says what happened.
-    assert.match(src, /r\.status === 0 \? t\("settings\.common\.networkError"\) : t\("settings\.common\.saveFailedStatus", \{ status: r\.status \}\)/, file);
+    // A failure with no reason from the route still says what happened: the
+    // one shared wording (forms/shared.ts, tests/settings-save.test.mts).
+    assert.match(src, /saveFailureText\(t\)/, file);
   }
+  assert.match(read("forms/shared.ts"), /r\.status === 0 \? t\("settings\.common\.networkError"\) : t\("settings\.common\.saveFailedStatus", \{ status: r\.status \}\)/);
   assert.match(read("play-history-settings.tsx"), /\n {4}\}, failureText\);/);
-  assert.match(read("watch-grade-settings.tsx"), /await save\(fields\(\), \(r: SettingsPatchResult\) =>/);
+  assert.match(read("watch-grade-settings.tsx"), /await save\(fields, saveFailureText\(t\)\);/);
 });
 
 test("the OIDC allowlist announces a save through the live region", () => {
@@ -161,26 +171,55 @@ test("the OIDC allowlist announces a save through the live region", () => {
 // ── library loads ─────────────────────────────────────────────────────────────
 
 test("only the newest library load writes state, and an overtaken Save & Test reports the newest load", () => {
+  // One loader for both servers (forms/media-server-library.tsx).
+  const src = read("forms/media-server-library.tsx");
+  const load = src.slice(src.indexOf("const loadLibraries = useCallback"), src.indexOf("}, [service]);", src.indexOf("const loadLibraries = useCallback")));
+  assert.match(load, /const seq = \+\+loadSeq\.current;/);
+  // Every state write after the await is guarded.
+  assert.equal(count(load, /if \(superseded\(\)\) return \{ ok: false, count: 0, superseded: true \};/), 1);
+  assert.equal(count(load, /await /), 1, "one await, checked right after");
+  // A newer load aborts the older one.
+  assert.match(load, /inFlight\.current\?\.abort\(\);/);
+  // An overtaken Save & Test reports the newest load instead of leaving its spinner up.
+  assert.match(src, /latestLoad\.current = load;\s*return load;/);
+  assert.match(src, /let result = await loadLibraries\(\);[\s\S]{0,200}?while \(result\.superseded && latestLoad\.current\) result = await latestLoad\.current;/);
+  // An answer that isn't a library list is the load error, never a render crash.
+  assert.match(load, /const listed = res\.ok \? parseLibraryItems\(service, res\.data\) : null;/);
   for (const file of ["forms/plex-connect-form.tsx", "forms/jellyfin-sync-form.tsx"]) {
-    const src = read(file);
-    const load = src.slice(src.indexOf("const loadLibraries = useCallback"), src.indexOf("}, []);", src.indexOf("const loadLibraries = useCallback")));
-    assert.match(load, /const seq = \+\+loadSeq\.current;/, file);
-    // Every state write after an await is guarded: three exits, three checks.
-    assert.equal(count(load, /if \(superseded\(\)\) return \{ ok: false, count: 0, superseded: true \};/), 3, file);
-    // An overtaken Save & Test reports the newest load instead of leaving its spinner up.
-    assert.match(src, /latestLoad\.current = load;\s*return load;/, file);
-    assert.match(src, /let result = await loadLibraries\(\);[\s\S]{0,200}?while \(result\.superseded && latestLoad\.current\) result = await latestLoad\.current;/, file);
+    assert.match(read(file), /= useLibraryLoader\("(plex|jellyfin)", /, file);
   }
 });
 
-test("Plex: the Connected line's fade is tracked, and a failed import shows the route's reason", () => {
+test("Save & Test: an edit while it runs keeps it locked and its answer doesn't call the edited fields Connected", () => {
+  const src = read("forms/media-server-library.tsx");
+  assert.match(src, /setStatus\(\(s\) => \(s === "saving" \|\| s === "testing" \? s : "idle"\)\);/);
+  assert.match(src, /if \(editSeq\.current !== sentAt\) \{[\s\S]{0,160}?setStatus\("idle"\);/);
+  // The Connected line's fade is tracked, and cleared when a new one starts.
+  assert.match(src, /idleTimer\.current = setTimeout\(/);
+  assert.match(src, /async function saveAndTest[\s\S]*?if \(idleTimer\.current\) clearTimeout\(idleTimer\.current\);/);
+  for (const file of ["forms/plex-connect-form.tsx", "forms/jellyfin-sync-form.tsx"]) {
+    const form = read(file);
+    assert.doesNotMatch(form, /setTimeout\(/, file);
+    assert.doesNotMatch(form, /set(Server|Save)Status\(/, `${file}: field edits go through edited()`);
+    assert.match(form, /server\.edited\(\);/, file);
+  }
+});
+
+test("the full import runs as a background job and shows the route's reason when it fails", () => {
+  const src = read("forms/media-server-library.tsx");
+  assert.match(src, /runLibraryImport\(withBasePath\(`\/api\/sync\/\$\{service\}`\), signal\)/);
+  assert.match(src, /\{ ifBusy: "skip" \}/);
+  assert.match(src, /\{state\.error \|\| failedText\}/);
+  assert.match(read("forms/plex-connect-form.tsx"), /<LibraryImportResult state=\{importer\.state\} failedText=\{t\("settings\.form\.plex\.importFailed"\)\} \/>/);
+  assert.match(read("forms/jellyfin-sync-form.tsx"), /<LibraryImportResult state=\{sync\.state\} failedText=\{t\("settings\.form\.jellyfin\.syncFailed"\)\} \/>/);
+});
+
+test("Plex: Import and the picker follow the SAVED server URL, not the field (guardrail 36)", () => {
   const src = read("forms/plex-connect-form.tsx");
-  assert.match(src, /serverIdleTimer\.current = setTimeout\(/);
-  assert.match(src, /async function handleSaveServerUrl[\s\S]*?if \(serverIdleTimer\.current\) clearTimeout\(serverIdleTimer\.current\);/);
-  assert.doesNotMatch(src, /\n\s+setTimeout\(\(\) => setServerStatus/, "no untracked fade timer");
-  assert.match(src, /setImportError\(typeof body\.error === "string" \? body\.error : ""\);/);
-  assert.match(src, /\{importError \|\| t\("settings\.form\.plex\.importFailed"\)\}/);
-  assert.doesNotMatch(src, /throw new Error\(await res\.text\(\)\)/);
+  assert.match(src, /const \[savedServerUrl, setSavedServerUrl\] = useState\(initialServerUrl\);/);
+  assert.match(src, /if \(stored\) setSavedServerUrl\(sent\);/);
+  assert.match(src, /\{savedServerUrl && \(/);
+  assert.doesNotMatch(src, /\{serverUrl && \(/);
 });
 
 // ── Discord ───────────────────────────────────────────────────────────────────
@@ -232,4 +271,9 @@ test("webhook URLs: the copy timers are tracked and a blocked clipboard shows th
   // The token is still fetched on every click, and rides the ?token= query (guardrail 2).
   assert.match(src, /result = await resolveCopyUrl\(\);/);
   assert.match(src, /url: `\$\{base\}\?token=\$\{encodeURIComponent\(tok\)\}`/);
+  // Only a string token builds a URL (the answer is checked: a record of string | null),
+  // and a resolver that throws is shown as a failed fetch, not an unhandled rejection.
+  assert.match(src, /const WEBHOOK_TOKENS = v\.record\(v\.nullable\(v\.string\(\)\)\);/);
+  assert.match(src, /typeof tok === "string" && tok \? \{ kind: "url"/);
+  assert.match(src, /result = await resolveCopyUrl\(\);\s*\} catch \{[\s\S]{0,120}?result = \{ kind: "error" \};/);
 });

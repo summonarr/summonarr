@@ -7,6 +7,7 @@ import { sanitizeForLog } from "./sanitize";
 import { tmdbAuth } from "./tmdb-auth";
 import { processSingleton } from "./process-singleton";
 import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
+import { upstreamFailed, upstreamMissing, upstreamOk, type UpstreamFailed, type UpstreamResult } from "./upstream-result";
 
 const OMDB_BASE = "https://www.omdbapi.com";
 const OMDB_FETCH_TIMEOUT_MS = 10_000;
@@ -29,17 +30,27 @@ function omdbNegativeTtl(releaseDate?: string | null): number {
   return OMDB_NEGATIVE_TTL_BACK_CATALOG;
 }
 
-// OMDB returns quota/auth failures with Response="False" and an Error string —
-// sometimes as HTTP 200, but its key-validation layer (which also owns the daily
-// request counter) demonstrably answers HTTP 401 with the same JSON body
-// ("Invalid API key!", "Request limit reached!"). Both transports carry the same
-// discrimination problem: these are transient or operator-config conditions, so
-// they must never be negative-cached as "title not found", and quota messages
-// must trip the lockout on WHICHEVER transport they arrive.
-function isOmdbTransientError(msg: string | undefined): boolean {
-  if (!msg) return false;
-  const m = msg.toLowerCase();
-  return m.includes("limit") || m.includes("quota") || m.includes("invalid api key");
+// What an OMDb `Error` string means. OMDB returns quota/auth failures with
+// Response="False" and an Error string — sometimes as HTTP 200, but its
+// key-validation layer (which also owns the daily request counter) demonstrably
+// answers HTTP 401 with the same JSON body ("Invalid API key!", "Request limit
+// reached!"). Both transports carry the same discrimination problem, so ONE
+// classifier reads either:
+//   - "quota": a rate/quota limit — trips the lockout on WHICHEVER transport;
+//   - "invalidKey": the key was refused — latches the key (see noteKeyRejected),
+//     never the hour-long lockout;
+//   - "notFound": OMDb's own "no such title" ("Movie not found!", "Series not
+//     found!", "Incorrect IMDb ID.") — the ONLY error that may be negative-cached;
+//   - "other": anything else ("Error getting data.", a blank Error, a new
+//     message) — an unexplained failure, never cached as "not found": a 7-day
+//     tombstone for a title OMDb has is far worse than one more call.
+type OmdbErrorKind = "quota" | "invalidKey" | "notFound" | "other";
+export function classifyOmdbError(msg: string | undefined): OmdbErrorKind {
+  const m = (msg ?? "").toLowerCase();
+  if (m.includes("limit") || m.includes("quota")) return "quota";
+  if (m.includes("invalid api key")) return "invalidKey";
+  if (m.includes("not found") || m.includes("incorrect imdb id")) return "notFound";
+  return "other";
 }
 
 // In-memory quota lockout for the current process lifetime — does not survive restarts,
@@ -80,20 +91,34 @@ function tripQuotaLockout(reason: string) {
 // disable ratings for an hour. A RUN of them is a reachability verdict. Any
 // response at all — including a 4xx/5xx — proves the host is up and clears the
 // count.
+//
+// A run must also SPAN time. Callers send several lookups at once (the prewarm
+// 5, the ratings fallback 6), so one network blip that timed out a single
+// batch reached the count in one go — five failures, all at the same instant,
+// and an hour of no OMDb ratings for it. A real outage still trips within a
+// few batches (sequential 10s timeouts span 40s by the fifth).
 const TRANSPORT_FAILURE_LIMIT = 5;
+const TRANSPORT_FAILURE_MIN_SPAN_MS = 30_000;
+// When the current run of failures began (0 = no run). Its own singleton, so a
+// lockout object an older build left behind (dev hot reload) can't lack it.
+const transportRun = processSingleton("omdb:transport-run", () => ({ firstAt: 0 }));
 
 function noteTransportSuccess(): void {
   lockout.transportFailures = 0;
+  transportRun.firstAt = 0;
 }
 
 function noteTransportFailure(reason: string): void {
+  const now = Date.now();
+  if (lockout.transportFailures === 0) transportRun.firstAt = now;
   lockout.transportFailures++;
-  if (lockout.transportFailures < TRANSPORT_FAILURE_LIMIT) return;
-  lockout.transportFailures = 0;
+  if (lockout.transportFailures < TRANSPORT_FAILURE_LIMIT || now - transportRun.firstAt < TRANSPORT_FAILURE_MIN_SPAN_MS) return;
+  const count = lockout.transportFailures;
+  noteTransportSuccess();
   // Reuses the quota lockout rather than adding a second flag: every caller
   // already asks "should I skip OMDB right now", and unreachable and exhausted
-  // are the same answer to that question.
-  tripQuotaLockout(`${TRANSPORT_FAILURE_LIMIT} consecutive transport failures (${sanitizeForLog(reason)})`);
+  // are the same answer to that question (guardrail 40 reads it for that).
+  tripQuotaLockout(`${count} consecutive transport failures (${sanitizeForLog(reason)})`);
 }
 
 // A failure that means "no response arrived", as opposed to one that means "the
@@ -103,15 +128,10 @@ function isTransportFailure(err: unknown): boolean {
   return err instanceof SafeFetchError && (err.reason === "timeout" || err.reason === "network");
 }
 
-// Deliberately narrower than isOmdbTransientError: only rate/quota conditions trip the
-// lockout. "Invalid API key" stays transient (never negative-cached) but must NOT lock —
-// it's an operator-config problem, and an admin actively fixing their key needs immediate
-// feedback, not a 1h suspension.
-function isOmdbQuotaErrorMessage(msg: string | undefined): boolean {
-  if (!msg) return false;
-  const m = msg.toLowerCase();
-  return m.includes("limit") || m.includes("quota");
-}
+// Only rate/quota conditions trip the lockout. "Invalid API key" stays transient
+// (never negative-cached) but must NOT lock — it's an operator-config problem,
+// and an admin actively fixing their key needs immediate feedback, not a 1h
+// suspension.
 
 // ── Rejected key ───────────────────────────────────────────────────────────
 // OMDb's "Invalid API key!" (HTTP 401, or 200 with Response=False) must not
@@ -132,10 +152,6 @@ const rejectedKey = processSingleton<{ key: string | null; until: number }>(
   "omdb:rejected-key",
   () => ({ key: null, until: 0 }),
 );
-
-function isOmdbInvalidKeyMessage(msg: string | undefined): boolean {
-  return !!msg && msg.toLowerCase().includes("invalid api key");
-}
 
 function isKeyRejected(apiKey: string): boolean {
   return rejectedKey.key === apiKey && Date.now() < rejectedKey.until;
@@ -229,110 +245,155 @@ async function getApiKey(opts: { fresh?: boolean } = {}): Promise<string | null>
   return p;
 }
 
-// Direct OMDB lookup by IMDb ID: null = authoritative not-found, throws on
-// transient failures. Deliberately CACHE-FREE — the tmdb-keyed rows written by
-// fetchAndCacheOmdbForTmdb (this function's only caller) are the app's one
-// OMDB cache layer. The old imdb-keyed `omdb:<imdbId>` rows were written on
-// every fetch but essentially never read (both layers were always written and
-// expired together, so the imdb read only ever hit when the tmdb row had
-// already served), doubling every OMDB cache write for no serving value.
-export async function getOmdbRatings(imdbId: string, _releaseDate?: string | null): Promise<OmdbRatings | null> {
-  // Quota lockout: skip the network entirely. Throw — the function's existing transient
-  // semantics — so callers never negative-cache a lockout as "title not found".
+// The fields of an OMDb answer this module reads, each narrowed on its own: a
+// field of the wrong type reads as absent instead of flowing into the cache and
+// the UI as a non-string. Null when the body is not an object at all.
+interface OmdbBody {
+  response: string | undefined;
+  error: string | undefined;
+  title: string | undefined;
+  imdbRating: string | undefined;
+  imdbVotes: string | undefined;
+  metascore: string | undefined;
+  rottenTomatoes: string | undefined;
+}
+
+const strOf = (x: unknown): string | undefined => (typeof x === "string" ? x : undefined);
+
+function readOmdbBody(raw: unknown): OmdbBody | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const b = raw as Record<string, unknown>;
+  // The Ratings array is consulted ONLY for Rotten Tomatoes.
+  const rt = Array.isArray(b.Ratings)
+    ? b.Ratings.find((r): r is { Value?: unknown } => !!r && typeof r === "object" && (r as { Source?: unknown }).Source === "Rotten Tomatoes")
+    : undefined;
+  return {
+    response: strOf(b.Response),
+    error: strOf(b.Error),
+    title: strOf(b.Title),
+    imdbRating: strOf(b.imdbRating),
+    imdbVotes: strOf(b.imdbVotes),
+    metascore: strOf(b.Metascore),
+    rottenTomatoes: strOf(rt?.Value),
+  };
+}
+
+// OMDb writes "N/A" for a field it has no value for.
+const present = (value: string | undefined): string | null => (value && value !== "N/A" ? value : null);
+
+function ratingsFromBody(imdbId: string, body: OmdbBody): OmdbRatings {
+  const metascore = present(body.metascore);
+  return {
+    imdbId,
+    imdbRating: present(body.imdbRating),
+    imdbVotes: present(body.imdbVotes),
+    rottenTomatoes: present(body.rottenTomatoes),
+    metacritic: metascore ? `${metascore}/100` : null,
+  };
+}
+
+// The failure an OMDb error body is, acted on: a quota trips the lockout (on
+// either transport), a refused key is latched and failed with
+// OmdbKeyRejectedError (logged once per key, not per title).
+function failForOmdbError(apiKey: string, imdbId: string, kind: OmdbErrorKind, error: string | undefined, message: string): UpstreamFailed {
+  if (kind === "quota") tripQuotaLockout(`${error ?? ""} for ${imdbId}`);
+  if (kind === "invalidKey") {
+    noteKeyRejected(apiKey);
+    return upstreamFailed(new OmdbKeyRejectedError(message));
+  }
+  return upstreamFailed(new Error(message));
+}
+
+// Direct OMDB lookup by IMDb ID, as an answer or a failure: "ok" with the
+// ratings, "missing" for OMDb's own "no such title", "failed" for everything
+// else (network/timeout, a lockout, a refused key, a 5xx, an unexplained error
+// body) — which says nothing about the title and is never cached as an answer.
+//
+// Deliberately CACHE-FREE — the tmdb-keyed rows written by
+// fetchAndCacheOmdbForTmdb are the app's one OMDB cache layer. The old
+// imdb-keyed `omdb:<imdbId>` rows were written on every fetch but essentially
+// never read, doubling every OMDB cache write for no serving value.
+async function lookupOmdb(imdbId: string, apiKey: string): Promise<UpstreamResult<OmdbRatings>> {
+  // Quota lockout: skip the network entirely.
+  if (isOmdbQuotaLocked()) {
+    return upstreamFailed(new Error(`OMDB quota locked — skipping fetch for ${sanitizeForLog(imdbId)}`));
+  }
+
+  const url = new URL(OMDB_BASE);
+  url.searchParams.set("apikey", apiKey);
+  url.searchParams.set("i", imdbId);
+
+  let res: Response;
+  try {
+    res = await safeFetchTrusted(url.toString(), { allowedHosts: ["www.omdbapi.com"], timeoutMs: OMDB_FETCH_TIMEOUT_MS });
+  } catch (err) {
+    if (isTransportFailure(err)) noteTransportFailure((err as SafeFetchError).reason);
+    return upstreamFailed(err);
+  }
+  // A response of ANY status proves the host is reachable.
+  noteTransportSuccess();
+
+  if (!res.ok) {
+    if (res.status === 429) {
+      res.body?.cancel().catch(() => {});
+      tripQuotaLockout(`HTTP 429 for ${imdbId}`);
+      return upstreamFailed(new Error(`OMDB API returned 429 for ${sanitizeForLog(imdbId)}`));
+    }
+    // OMDB's key layer sends "Request limit reached!" as HTTP 401 + JSON body —
+    // read it defensively and run the SAME classification as the 200 path, or
+    // real daily exhaustion never trips the lockout and every quota defense
+    // keyed off it stays inert. A non-2xx is never "not found", whatever its
+    // body says.
+    const body = readOmdbBody(await res.json().catch(() => null));
+    const message = `OMDB API returned ${res.status} for ${sanitizeForLog(imdbId)}`;
+    return failForOmdbError(apiKey, imdbId, classifyOmdbError(body?.error), body?.error, message);
+  }
+
+  let body: OmdbBody | null;
+  try {
+    body = readOmdbBody(await res.json());
+  } catch (err) {
+    return upstreamFailed(err);
+  }
+  if (!body) return upstreamFailed(new Error(`OMDB answered ${sanitizeForLog(imdbId)} with no JSON object`));
+  if (body.response !== "True") {
+    const kind = classifyOmdbError(body.error);
+    if (kind === "notFound") {
+      // A genuine not-found: OMDb took the key.
+      noteKeyAccepted(apiKey);
+      return upstreamMissing();
+    }
+    const message = `OMDB transient error for ${sanitizeForLog(imdbId)}: ${sanitizeForLog(body.error ?? "no error text")}`;
+    return failForOmdbError(apiKey, imdbId, kind, body.error, message);
+  }
+
+  noteKeyAccepted(apiKey);
+  return upstreamOk(ratingsFromBody(imdbId, body));
+}
+
+// Logs a failed lookup once — a refused key was logged once already, by key,
+// not per title.
+function logLookupFailure(imdbId: string, err: unknown): void {
+  if (err instanceof OmdbKeyRejectedError) return;
+  const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
+  console.error(`[omdb] fetch failed for ${sanitizeForLog(imdbId)}: ${sanitizeForLog(reason)}`);
+}
+
+// The raw IMDb-id lookup with its long-standing contract: the ratings, null for
+// an authoritative not-found (or no key configured), a throw for every other
+// failure. fetchAndCacheOmdbForTmdb reads lookupOmdb's result directly.
+export async function getOmdbRatings(imdbId: string): Promise<OmdbRatings | null> {
+  // Lockout: throw — the transient semantics — WITHOUT the key read or a log.
   if (isOmdbQuotaLocked()) {
     throw new Error(`OMDB quota locked — skipping fetch for ${sanitizeForLog(imdbId)}`);
   }
-
   const apiKey = await getApiKey();
   if (!apiKey) return null;
-
-  try {
-    const url = new URL(OMDB_BASE);
-    url.searchParams.set("apikey", apiKey);
-    url.searchParams.set("i", imdbId);
-
-    const res = await safeFetchTrusted(url.toString(), { allowedHosts: ["www.omdbapi.com"], timeoutMs: OMDB_FETCH_TIMEOUT_MS });
-    // A response of ANY status proves the host is reachable.
-    noteTransportSuccess();
-    if (!res.ok) {
-      if (res.status === 429) {
-        tripQuotaLockout(`HTTP 429 for ${imdbId}`);
-      } else {
-        // OMDB's key layer sends "Request limit reached!" as HTTP 401 + JSON body
-        // (see isOmdbTransientError) — parse the body defensively and run the SAME
-        // quota discrimination as the 200-path, or real daily exhaustion never
-        // trips the lockout and every quota defense keyed off it stays inert.
-        // Invalid-key deliberately still doesn't lock (see isOmdbQuotaErrorMessage);
-        // it latches the key instead (see noteKeyRejected).
-        const body = (await res.json().catch(() => null)) as { Error?: string } | null;
-        if (body && isOmdbQuotaErrorMessage(body.Error)) {
-          tripQuotaLockout(`HTTP ${res.status} "${body.Error}" for ${imdbId}`);
-        } else if (body && isOmdbInvalidKeyMessage(body.Error)) {
-          noteKeyRejected(apiKey);
-          throw new OmdbKeyRejectedError(`OMDB API returned ${res.status} for ${sanitizeForLog(imdbId)}`);
-        }
-      }
-      // Transient upstream failure (5xx/429/401/etc.) — throw so the caller does
-      // NOT write a NOT_FOUND sentinel (a "no such title" cache entry) for it. Genuine "no OMDB entry" is only
-      // the Response!=="True" branch below.
-      throw new Error(`OMDB API returned ${res.status} for ${sanitizeForLog(imdbId)}`);
-    }
-
-    const data = await res.json() as {
-      Response: string;
-      Error?: string;
-      imdbID?: string;
-      imdbRating?: string;
-      imdbVotes?: string;
-      Ratings?: { Source: string; Value: string }[];
-      Metascore?: string;
-    };
-
-    if (data.Response !== "True") {
-      // OMDB signals quota exhaustion and bad keys as HTTP 200 with Response="False"
-      // and an Error string ("Request limit reached!", "Invalid API key!"). Those are
-      // transient/config conditions, not a genuine "no such title" — throw so the caller
-      // does NOT negative-cache them. Only a real not-found caches the sentinel.
-      // Rate/quota errors additionally trip the lockout (invalid-key deliberately doesn't).
-      if (isOmdbQuotaErrorMessage(data.Error)) {
-        tripQuotaLockout(`${data.Error} for ${imdbId}`);
-      }
-      if (isOmdbTransientError(data.Error)) {
-        const message = `OMDB transient error for ${sanitizeForLog(imdbId)}: ${sanitizeForLog(data.Error ?? "")}`;
-        if (!isOmdbQuotaErrorMessage(data.Error) && isOmdbInvalidKeyMessage(data.Error)) {
-          noteKeyRejected(apiKey);
-          throw new OmdbKeyRejectedError(message);
-        }
-        throw new Error(message);
-      }
-      // A genuine not-found: OMDb took the key.
-      noteKeyAccepted(apiKey);
-      return null;
-    }
-
-    noteKeyAccepted(apiKey);
-
-    const rt = data.Ratings?.find((r) => r.Source === "Rotten Tomatoes")?.Value ?? null;
-    const mc = data.Metascore && data.Metascore !== "N/A" ? `${data.Metascore}/100` : null;
-
-    return {
-      imdbId:         imdbId,
-      imdbRating:     data.imdbRating && data.imdbRating !== "N/A" ? data.imdbRating : null,
-      imdbVotes:      data.imdbVotes && data.imdbVotes !== "N/A" ? data.imdbVotes : null,
-      rottenTomatoes: rt && rt !== "N/A" ? rt : null,
-      metacritic:     mc,
-    };
-  } catch (err) {
-    const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
-    if (isTransportFailure(err)) noteTransportFailure(reason);
-    if (!(err instanceof OmdbKeyRejectedError)) {
-      console.error(`[omdb] fetch failed for ${sanitizeForLog(imdbId)}: ${sanitizeForLog(reason)}`);
-    }
-    // Every failure here (network/timeout/SSRF, or a transient error thrown
-    // above) propagates, so fetchAndCacheOmdbForTmdb's catch returns without
-    // negative-caching a title that may exist.
-    throw err;
-  }
+  const result = await lookupOmdb(imdbId, apiKey);
+  if (result.kind === "ok") return result.value;
+  if (result.kind === "missing") return null;
+  logLookupFailure(imdbId, result.error);
+  throw result.error;
 }
 
 // Admin connection test. Intentionally ignores the quota lockout and the rejected-key
@@ -364,7 +425,10 @@ export type OmdbResult =
   // `tmdbUnconfigured` marks the no-TMDB-token miss: neither transient nor negative-cached,
   // but not an authoritative absence either — the prewarm counts it as `failed` so a
   // missing TMDB_READ_TOKEN can't read as a green run in the cron history.
-  | { found: false; keyConfigured: boolean; quotaExhausted?: boolean; transient?: boolean; tmdbUnconfigured?: true };
+  // `keyRejected` marks the transient miss of a key OMDb refused (latched, see
+  // noteKeyRejected): every other title would answer the same, so a job walking
+  // a library can stop.
+  | { found: false; keyConfigured: boolean; quotaExhausted?: boolean; transient?: boolean; tmdbUnconfigured?: true; keyRejected?: true };
 
 // The tmdbId→imdbId resolve, isolated so fetchAndCacheOmdbForTmdb can run it
 // zero times (a caller-supplied known id), once (the normal cold path), or a
@@ -385,19 +449,74 @@ async function resolveImdbIdViaTmdb(tmdbId: number, mediaType: "movie" | "tv"): 
   if (!auth) return { kind: "noAuth" };
 
   const extUrl = new URL(`https://api.themoviedb.org/3/${mediaType}/${tmdbId}/external_ids`);
-  for (const [k, v] of Object.entries(auth.query)) extUrl.searchParams.set(k, v);
   const extRes = await safeFetchTrusted(extUrl.toString(), {
     allowedHosts: ["api.themoviedb.org"],
     headers: auth.headers,
     timeoutMs: OMDB_FETCH_TIMEOUT_MS,
   });
-  if (extRes.status === 404) return { kind: "gone" };
   if (!extRes.ok) {
+    // Unread bodies hold their socket until GC.
+    extRes.body?.cancel().catch(() => {});
+    if (extRes.status === 404) return { kind: "gone" };
     console.warn(`[omdb] TMDB external_ids fetch failed (${sanitizeForLog(extRes.status)}) for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}`);
     return { kind: "transient" };
   }
-  const ext = await extRes.json() as { imdb_id?: string | null };
-  return { kind: "id", imdbId: ext.imdb_id ?? null };
+  const ext: unknown = await extRes.json();
+  if (!ext || typeof ext !== "object") return { kind: "transient" };
+  const imdbId = (ext as { imdb_id?: unknown }).imdb_id;
+  // A non-string id is no id: TMDB's answer, an absent IMDb entry.
+  return { kind: "id", imdbId: typeof imdbId === "string" && imdbId ? imdbId : null };
+}
+
+// What OMDb holds for a TMDB title, with the tmdb→imdb resolve folded in.
+// "missing" is authoritative (TMDB 404 for the id, no IMDb id, or OMDb's own
+// "no such title" after the remap self-heal); "noAuth" is the no-TMDB-token
+// miss; "failed" is any failure.
+type TmdbOmdbAnswer =
+  | { kind: "ok"; ratings: OmdbRatings }
+  | { kind: "missing" }
+  | { kind: "noAuth" }
+  | { kind: "failed"; error: unknown };
+
+function answerForResolve(r: Exclude<ImdbResolve, { kind: "id" }>): TmdbOmdbAnswer {
+  if (r.kind === "noAuth") return { kind: "noAuth" };
+  if (r.kind === "gone") return { kind: "missing" };
+  return { kind: "failed", error: new Error("TMDB external_ids resolve failed") };
+}
+
+async function lookupOmdbForTmdb(
+  tmdbId: number,
+  mediaType: "movie" | "tv",
+  apiKey: string,
+  knownImdbId: string | null,
+): Promise<TmdbOmdbAnswer> {
+  let imdbId = knownImdbId;
+  const hinted = imdbId !== null;
+  if (!hinted) {
+    const resolved = await resolveImdbIdViaTmdb(tmdbId, mediaType);
+    if (resolved.kind !== "id") return answerForResolve(resolved);
+    imdbId = resolved.imdbId;
+  }
+
+  let result: UpstreamResult<OmdbRatings> = imdbId ? await lookupOmdb(imdbId, apiKey) : upstreamMissing();
+  if (result.kind === "missing" && hinted) {
+    // The hinted id is authoritatively unknown to OMDB — either a stale stored
+    // id or a rare imdb-id remap. Re-resolve live ONCE before negative-caching
+    // so the remap self-heals instead of negative-caching ("tombstoning") the
+    // title on the strength of a hint.
+    const resolved = await resolveImdbIdViaTmdb(tmdbId, mediaType);
+    if (resolved.kind !== "id") return answerForResolve(resolved);
+    if (resolved.imdbId && resolved.imdbId !== imdbId) {
+      imdbId = resolved.imdbId;
+      result = await lookupOmdb(imdbId, apiKey);
+    }
+  }
+  if (result.kind === "failed") {
+    if (imdbId) logLookupFailure(imdbId, result.error);
+    return { kind: "failed", error: result.error };
+  }
+  if (result.kind === "missing" || !imdbId) return { kind: "missing" };
+  return { kind: "ok", ratings: { ...result.value, imdbId } };
 }
 
 // OMDB only accepts IMDb IDs, not TMDB IDs — we must resolve via TMDB's external_ids endpoint first.
@@ -406,6 +525,9 @@ async function resolveImdbIdViaTmdb(tmdbId: number, mediaType: "movie" | "tv"): 
 // re-buying it on every refresh doubled the upstream call count of the steady-state path
 // (SWR revalidations and the prewarm both refresh from a stored row that already carries
 // the id; the detail pages fetch external_ids in their append_to_response anyway).
+//
+// Only an ANSWER is cached: ratings, or an authoritative not-found as the
+// NOT_FOUND sentinel. A failure caches nothing and reads `transient`.
 export async function fetchAndCacheOmdbForTmdb(
   tmdbId: number,
   mediaType: "movie" | "tv",
@@ -413,6 +535,7 @@ export async function fetchAndCacheOmdbForTmdb(
   knownImdbId?: string | null,
 ): Promise<OmdbResult> {
   const cacheKey = omdbCacheKey(mediaType, tmdbId);
+  // A settings read that throws rejects (the prewarm counts it as a failed item).
   const apiKey = await getApiKey();
   if (!apiKey) return { found: false, keyConfigured: false };
 
@@ -424,67 +547,32 @@ export async function fetchAndCacheOmdbForTmdb(
   }
   // The stored key is one OMDb refused (see noteKeyRejected): nothing to ask.
   if (isKeyRejected(apiKey)) {
-    return { found: false, keyConfigured: true, transient: true };
+    return { found: false, keyConfigured: true, transient: true, keyRejected: true };
   }
 
   try {
-    // Maps every non-"id" resolve outcome to its (pre-existing) OmdbResult.
-    const settleResolve = async (r: Exclude<ImdbResolve, { kind: "id" }>): Promise<OmdbResult> => {
-      if (r.kind === "noAuth") return { found: false, keyConfigured: true, tmdbUnconfigured: true };
-      if (r.kind === "gone") {
+    const answer = await lookupOmdbForTmdb(tmdbId, mediaType, apiKey, knownImdbId ?? null);
+    switch (answer.kind) {
+      case "noAuth":
+        return { found: false, keyConfigured: true, tmdbUnconfigured: true };
+      case "failed":
+        return answer.error instanceof OmdbKeyRejectedError
+          ? { found: false, keyConfigured: true, transient: true, keyRejected: true }
+          : { found: false, keyConfigured: true, transient: true };
+      case "missing":
         await setCache(cacheKey, NOT_FOUND_SENTINEL, omdbNegativeTtl(releaseDate));
         return { found: false, keyConfigured: true };
-      }
-      return { found: false, keyConfigured: true, transient: true };
-    };
-
-    let imdbId = knownImdbId ?? null;
-    const hinted = imdbId !== null;
-    if (!hinted) {
-      const resolved = await resolveImdbIdViaTmdb(tmdbId, mediaType);
-      if (resolved.kind !== "id") return settleResolve(resolved);
-      imdbId = resolved.imdbId;
+      case "ok":
+        await setCache(cacheKey, answer.ratings, libraryDetailsTtl(releaseDate));
+        return { found: true, data: answer.ratings };
     }
-
-    let omdbRatings = imdbId ? await getOmdbRatings(imdbId, releaseDate) : null;
-
-    if (!omdbRatings && hinted) {
-      // The hinted id is authoritatively unknown to OMDB (a transient failure
-      // would have thrown) — either a stale stored id or a rare imdb-id remap.
-      // Re-resolve live ONCE before negative-caching so the remap self-heals
-      // instead of negative-caching ("tombstoning") the title on the strength of a hint.
-      const resolved = await resolveImdbIdViaTmdb(tmdbId, mediaType);
-      if (resolved.kind !== "id") return settleResolve(resolved);
-      omdbRatings = resolved.imdbId && resolved.imdbId !== imdbId
-        ? await getOmdbRatings(resolved.imdbId, releaseDate)
-        : null;
-      imdbId = resolved.imdbId;
-    }
-
-    if (!omdbRatings) {
-      await setCache(cacheKey, NOT_FOUND_SENTINEL, omdbNegativeTtl(releaseDate));
-      return { found: false, keyConfigured: true };
-    }
-
-    const ratings: OmdbRatings = {
-      imdbId:         imdbId,
-      imdbRating:     omdbRatings.imdbRating,
-      imdbVotes:      omdbRatings.imdbVotes,
-      rottenTomatoes: omdbRatings.rottenTomatoes,
-      metacritic:     omdbRatings.metacritic,
-    };
-    await setCache(cacheKey, ratings, libraryDetailsTtl(releaseDate));
-    return { found: true, data: ratings };
   } catch (err) {
+    // A throw here is a TMDB resolve that never answered or a cache write —
+    // never an answer about the title, so nothing is negative-cached.
     const msg = err instanceof SafeFetchError
       ? `${err.reason}: ${err.message}`
       : err instanceof Error ? err.message : String(err);
-    // A refused key was logged once already, not once per title.
-    if (!(err instanceof OmdbKeyRejectedError)) {
-      console.error(`[omdb] Error fetching for ${sanitizeForLog(mediaType)}:${tmdbId}: ${sanitizeForLog(msg)}`);
-    }
-    // A transient OMDB/TMDB failure (5xx, network/timeout, quota/auth) reaches here as a
-    // throw — do NOT negative-cache it; the caller must avoid pinning a null result.
+    console.error(`[omdb] Error fetching for ${sanitizeForLog(mediaType)}:${tmdbId}: ${sanitizeForLog(msg)}`);
     return { found: false, keyConfigured: true, transient: true };
   }
 }

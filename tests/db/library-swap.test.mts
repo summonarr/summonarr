@@ -3,7 +3,7 @@
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { prisma, resetDb, closeDb } from "./_harness.mts";
-import { replacePlexLibraryForInstances, type PlexLibraryRow } from "@/lib/cron-auth.ts";
+import { replacePlexLibraryForInstances, type PlexLibraryRow } from "@/lib/library-staging.ts";
 
 before(resetDb);
 beforeEach(resetDb);

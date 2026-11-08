@@ -41,7 +41,12 @@ export const GET = withAuth(async (req, _ctx, session) => {
       where: { tmdbId_mediaType: { tmdbId: numericId, mediaType: type === "movie" ? "MOVIE" : "TV" } },
       select: { releaseYear: true },
     })
-    .catch(() => null);
+    .catch((err: unknown) => {
+      // Ratings still resolve without it; only the cache TTL bucket falls back
+      // to the back-catalog one.
+      console.warn("[ratings] release year read failed:", err instanceof Error ? err.message : err);
+      return null;
+    });
   const releaseDate = core?.releaseYear ? `${core.releaseYear}-01-01` : null;
 
   const result = await fetchUnifiedRatings(numericId, type, releaseDate);

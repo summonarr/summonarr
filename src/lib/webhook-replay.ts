@@ -33,7 +33,9 @@ function canonicalize(value: unknown, depth = 0): unknown {
     throw Object.assign(new Error(`webhook payload nested deeper than ${MAX_CANONICAL_DEPTH} levels`), { name: "WebhookPayloadTooDeep" });
   }
   if (Array.isArray(value)) return value.map((v) => canonicalize(v, depth + 1));
-  const out: Record<string, unknown> = {};
+  // A null-prototype object, so a "__proto__" key from JSON.parse stays an own
+  // property instead of hitting the prototype setter and vanishing from the digest.
+  const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   for (const key of Object.keys(value as Record<string, unknown>).sort()) {
     out[key] = canonicalize((value as Record<string, unknown>)[key], depth + 1);
   }
@@ -110,9 +112,7 @@ export async function clearWebhookReplayDigestJson(
   try {
     await prisma.webhookReplay.delete({ where: { digest: key } });
   } catch (err) {
-    if (
-      isPrismaErrorCode(err, "P2025")
-    ) {
+    if (isPrismaErrorCode(err, "P2025")) {
       // The row is already gone (e.g. the expiry sweep removed it). Nothing to do.
       return;
     }

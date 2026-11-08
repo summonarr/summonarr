@@ -9,12 +9,13 @@ import {
   type AgentKind,
   type SubscribableEvent,
 } from "./notify-events";
+import { NOTIFICATION_AGENTS_MAX } from "./api-body-limits";
 
 // Shared input parsing + output shaping for the /api/admin/notification-agents
 // routes. The secret NEVER leaves the server: the wire shape carries only
 // `hasSecret`.
 
-export const MAX_AGENTS = 25;
+export const MAX_AGENTS = NOTIFICATION_AGENTS_MAX;
 // Text-bearing tier (guardrail 30): an 8,000-char template expands under JSON
 // encoding (escapes, 2–4 bytes per non-ASCII char) and rides beside a 2,000-char
 // secret and URL — at 16 KB a CJK template 413'd before `templateTooLong` could
@@ -111,10 +112,25 @@ export type AgentInput = {
   secret: string | null | undefined;
 };
 
+const INVALID_SECRET = Symbol("invalid-secret");
+
+// undefined = leave as is (an update that omits it); null = clear (a create
+// without one); a string = set. A whitespace-only secret trims to "" and is a
+// CLEAR, not a value — otherwise it is stored as an empty string and slips past
+// the Gotify token guard.
+function parseSecretInput(raw: unknown, updating: boolean): string | null | undefined | typeof INVALID_SECRET {
+  if (raw === undefined) return updating ? undefined : null;
+  if (raw === null || raw === "") return null;
+  if (typeof raw === "string" && raw.length <= MAX_SECRET_CHARS && !SECRET_CONTROL_RE.test(raw)) return raw.trim() || null;
+  return INVALID_SECRET;
+}
+
 /** Error values are i18n keys under apiAdmin.agents.error.*. */
 export function parseAgentInput(
   body: Record<string, unknown>,
-  existing: { kind: string; name: string; enabled: boolean; events: string[]; config: unknown } | null,
+  // `secret` (the stored one) when the caller read it: only whether it is set
+  // matters here.
+  existing: { kind: string; name: string; enabled: boolean; events: string[]; config: unknown; secret?: string | null } | null,
 ): { ok: true; input: AgentInput } | { ok: false; error: string } {
   const kind = body.kind ?? existing?.kind;
   if (!isAgentKind(kind)) return { ok: false, error: "kind" };
@@ -134,16 +150,17 @@ export function parseAgentInput(
   const cfg = validateAgentConfig(kind, body.config ?? existing?.config);
   if (!cfg.ok) return { ok: false, error: cfg.error };
 
-  let secret: string | null | undefined;
-  if (body.secret === undefined) secret = existing ? undefined : null;
-  else if (body.secret === null || body.secret === "") secret = null;
-  // A whitespace-only secret trims to "" and is a CLEAR, not a value — otherwise
-  // it is stored as an empty string and slips past the Gotify token guard below.
-  else if (typeof body.secret === "string" && body.secret.length <= MAX_SECRET_CHARS && !SECRET_CONTROL_RE.test(body.secret)) secret = body.secret.trim() || null;
-  else return { ok: false, error: "secret" };
+  const secret = parseSecretInput(body.secret, existing !== null);
+  if (secret === INVALID_SECRET) return { ok: false, error: "secret" };
 
-  // Gotify refuses every message without an application token.
-  if (kind === "gotify" && (secret === null || (secret === undefined && !existing))) return { ok: false, error: "gotifyToken" };
+  // Gotify refuses every message without an application token. A PATCH that
+  // leaves the secret alone keeps the stored one, so an enabled channel needs
+  // one there (a row from before this guard may have none); a disabled one may
+  // stay as it is, so it can still be switched off or renamed.
+  if (kind === "gotify") {
+    const willHaveToken = secret === undefined ? existing?.secret !== null && existing?.secret !== "" : secret !== null;
+    if (!willHaveToken && (enabledRaw || !existing)) return { ok: false, error: "gotifyToken" };
+  }
 
   return { ok: true, input: { kind, name, enabled: enabledRaw, events, config: cfg.config, secret } };
 }

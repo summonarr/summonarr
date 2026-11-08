@@ -524,6 +524,60 @@ test("QuickConnect poll: any other upstream failure answers 502 WITHOUT the term
   assert.equal(body.code, undefined, "a transient failure must not tell the client to stop");
 });
 
+test("QuickConnect long-poll: a client that leaves while Jellyfin is being asked is answered at once, not after another tick", async () => {
+  settings.set("jellyfinRemoteUrl", "http://10.20.0.12:8096");
+  const controller = new AbortController();
+  respond = (url) => {
+    if (url.pathname === "/QuickConnect/Connect") {
+      // The browser goes away mid-poll; the abort listener is idle then.
+      controller.abort();
+      return jsonResponse({ Authenticated: false });
+    }
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+  const started = Date.now();
+  const res = await qcPollGet(new NextRequest("http://localhost:3000/api/auth/jellyfin/quickconnect?instance=remote&secret=qc-leave-secret&wait=1", {
+    method: "GET",
+    headers: { "user-agent": uniqueUa() },
+    signal: controller.signal,
+  }));
+  assert.equal(res.status, 499);
+  assert.equal(fetchCalls.filter((c) => c.url.pathname === "/QuickConnect/Connect").length, 1);
+  // The tick between polls is 2 s; answering before it means the slots were
+  // released without sleeping on a departed client.
+  assert.ok(Date.now() - started < 1_500, `took ${Date.now() - started} ms`);
+});
+
+test("QuickConnect long-poll: the request's own signal reaches the Jellyfin call, and an abort mid-call is a quiet 499, not a logged 502", async () => {
+  settings.set("jellyfinRemoteUrl", "http://10.20.0.13:8096");
+  const controller = new AbortController();
+  let linked = false;
+  respond = (url, init) => {
+    if (url.pathname === "/QuickConnect/Connect") {
+      // The browser goes away while Jellyfin is being asked.
+      controller.abort();
+      linked = init?.signal?.aborted === true;
+      return linked
+        ? Promise.reject(init?.signal?.reason ?? new Error("aborted"))
+        : jsonResponse({ Authenticated: false });
+    }
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+  const errorsBefore = errors.length;
+  const res = await qcPollGet(new NextRequest("http://localhost:3000/api/auth/jellyfin/quickconnect?instance=remote&secret=qc-abort-secret&wait=1", {
+    method: "GET",
+    headers: { "user-agent": uniqueUa() },
+    signal: controller.signal,
+  }));
+  assert.ok(linked, "the poll must pass the request's signal to the Jellyfin fetch");
+  assert.equal(res.status, 499);
+  assert.equal(
+    errors.slice(errorsBefore).filter((e) => e.includes("[jellyfin quickconnect] poll error")).length,
+    0,
+    "a client leaving is not a Jellyfin failure",
+  );
+});
+
 test("QuickConnect initiate: Jellyfin's 401 carries the quickconnect_disabled marker too", async () => {
   settings.set("jellyfinRemoteUrl", "http://10.20.0.11:8096");
   respond = (url) => {

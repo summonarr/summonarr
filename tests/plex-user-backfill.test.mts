@@ -85,15 +85,18 @@ let candidateRows: CandidateRow[] = [];
 const userFindManyCalls: unknown[] = [];
 const userUpdates: Array<{ where: { id: string }; data: Record<string, unknown> }> = [];
 let userUpdateImpl: (args: { where: { id: string } }) => Promise<unknown> = async (args) => args.where;
+// What the conditional bind reports: 0 = a sign-in bound the row meanwhile.
+let userUpdateCount = 1;
 
 shadowPrismaModel(prisma, "user", {
   findMany: async (args: unknown) => {
     userFindManyCalls.push(args);
     return candidateRows;
   },
-  update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+  updateMany: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
     userUpdates.push(args);
-    return userUpdateImpl(args);
+    await userUpdateImpl(args);
+    return { count: userUpdateCount };
   },
 });
 
@@ -189,6 +192,7 @@ beforeEach(() => {
   userFindManyCalls.length = 0;
   userUpdates.length = 0;
   userUpdateImpl = async (args) => args.where;
+  userUpdateCount = 1;
   settings.clear();
   settingReadKeys.length = 0;
   settingUpserts.length = 0;
@@ -302,8 +306,8 @@ test("happy path: owner + friend matched by normalized email; exact update shape
 
   // Exactly plexUserId is written — nothing else on the User row.
   assert.deepEqual(userUpdates, [
-    { where: { id: "u-owner" }, data: { plexUserId: "100" } },
-    { where: { id: "u-friend" }, data: { plexUserId: "201" } },
+    { where: { id: "u-owner", plexUserId: null }, data: { plexUserId: "100" } },
+    { where: { id: "u-friend", plexUserId: null }, data: { plexUserId: "201" } },
   ]);
 
   // Wire shape: the two real plex.tv hops, both carrying the admin token.
@@ -345,7 +349,8 @@ test("unmatched candidate: no update, ranAt still stamped, REFUSED warning names
   assert.equal(warns.length, 1);
   assert.ok(warns[0].includes("1 Plex-only user(s) could NOT be bound"), warns[0]);
   assert.ok(warns[0].includes("REFUSED on next Plex sign-in"), warns[0]);
-  assert.ok(warns[0].includes("ghost@nowhere.com (u-ghost)"), warns[0]);
+  assert.ok(warns[0].includes("u-ghost"), warns[0]);
+  assert.ok(!warns[0].includes("ghost@nowhere.com"), "no email in the log");
 });
 
 test("ambiguous email (two distinct account ids) is never bound; the same id listed twice is not ambiguous", async () => {
@@ -369,9 +374,9 @@ test("ambiguous email (two distinct account ids) is never bound; the same id lis
 
   await runPlexUserBackfillIfNeeded();
 
-  assert.deepEqual(userUpdates, [{ where: { id: "u-same" }, data: { plexUserId: "301" } }]);
+  assert.deepEqual(userUpdates, [{ where: { id: "u-same", plexUserId: null }, data: { plexUserId: "301" } }]);
   const unmatchedWarn = warns.find((w) => w.includes("could NOT be bound"));
-  assert.ok(unmatchedWarn?.includes("dup@example.com (u-dup)"), String(unmatchedWarn));
+  assert.ok(unmatchedWarn?.includes("u-dup"), String(unmatchedWarn));
 });
 
 test("an account with no email can never match — an empty candidate email lands in unmatched, not on a bogus bind", async () => {
@@ -409,7 +414,7 @@ test("union: a candidate present only in a NAMED instance's account list is boun
 
   await runPlexUserBackfillIfNeeded();
 
-  assert.deepEqual(userUpdates, [{ where: { id: "u-roamer" }, data: { plexUserId: "501" } }]);
+  assert.deepEqual(userUpdates, [{ where: { id: "u-roamer", plexUserId: null }, data: { plexUserId: "501" } }]);
   // Read order pins the union plumbing: registry first, then each instance's
   // token, default instance first. ServerUrl is never read (account-level hops).
   assert.deepEqual(settingReadKeys, [
@@ -458,9 +463,9 @@ test("cross-instance ambiguity: the same email with DIFFERENT ids across instanc
 
   await runPlexUserBackfillIfNeeded();
 
-  assert.deepEqual(userUpdates, [{ where: { id: "u-shared" }, data: { plexUserId: "301" } }]);
+  assert.deepEqual(userUpdates, [{ where: { id: "u-shared", plexUserId: null }, data: { plexUserId: "301" } }]);
   const unmatchedWarn = warns.find((w) => w.includes("could NOT be bound"));
-  assert.ok(unmatchedWarn?.includes("xdup@example.com (u-xdup)"), String(unmatchedWarn));
+  assert.ok(unmatchedWarn?.includes("u-xdup"), String(unmatchedWarn));
 });
 
 test("per-instance failure isolation: the default instance dying on the wire does not cost the named instance's binds", async () => {
@@ -479,7 +484,7 @@ test("per-instance failure isolation: the default instance dying on the wire doe
 
   await runPlexUserBackfillIfNeeded();
 
-  assert.deepEqual(userUpdates, [{ where: { id: "u-remote" }, data: { plexUserId: "601" } }]);
+  assert.deepEqual(userUpdates, [{ where: { id: "u-remote", plexUserId: null }, data: { plexUserId: "601" } }]);
   assert.equal(settingUpserts.length, 1); // the union still contributed accounts → ranAt stamped
   // The dead instance degrades to its own labeled warn (getPlexAccountsDetailed
   // swallows the per-hop failures and returns []) without aborting the union.
@@ -557,7 +562,8 @@ test("PIN: a unique violation on the update is WARNED (another user owns the ple
 
   assert.equal(userUpdates.length, 1);
   assert.equal(warns.length, 1, warns.join("\n"));
-  assert.ok(warns[0].includes("owner@example.com (u-race)"), warns[0]);
+  assert.ok(warns[0].includes("user u-race"), warns[0]);
+  assert.ok(!warns[0].includes("owner@example.com"), "no email in the log");
   assert.ok(warns[0].includes("another user already holds that plexUserId"), warns[0]);
   assert.ok(!warns.some((w) => w.includes("REFUSED")), "a conflict is not an email mismatch");
   assert.deepEqual(errors, []);
@@ -582,7 +588,8 @@ test("PIN: a NON-race update failure is surfaced as a bind failure and withholds
   assert.equal(userUpdates.length, 1);
   assert.equal(warns.length, 1, warns.join("\n"));
   assert.ok(warns[0].includes("1 matched Plex user(s) could not be saved"), warns[0]);
-  assert.ok(warns[0].includes("owner@example.com (u-db): connection terminated unexpectedly"), warns[0]);
+  assert.ok(warns[0].includes("u-db: connection terminated unexpectedly"), warns[0]);
+  assert.ok(!warns[0].includes("owner@example.com"), "no email in the log");
   assert.ok(warns[0].includes("next boot retries"), warns[0]);
   assert.ok(!warns.some((w) => w.includes("could NOT be bound") || w.includes("REFUSED")), "not an email mismatch");
   assert.equal(settingUpserts.length, 0, "the marker is withheld so the next boot binds the user");
@@ -615,7 +622,7 @@ test("never throws: a failing candidate query degrades to a [plex-backfill] erro
     findMany: async () => {
       throw boom;
     },
-    update: async () => ({}),
+    updateMany: async () => ({ count: 0 }),
   });
   try {
     await runPlexUserBackfillIfNeeded(); // must resolve — boot depends on it
@@ -626,9 +633,10 @@ test("never throws: a failing candidate query degrades to a [plex-backfill] erro
         userFindManyCalls.push(args);
         return candidateRows;
       },
-      update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+      updateMany: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
         userUpdates.push(args);
-        return userUpdateImpl(args);
+        await userUpdateImpl(args);
+        return { count: userUpdateCount };
       },
     });
   }
@@ -664,4 +672,17 @@ test("the boot gate reads the marker through the exported key and stays in the c
   const helper = readFileSync(new URL("../src/lib/plex-user-backfill.ts", import.meta.url), "utf8");
   assert.equal((helper.match(/"plexUserIdBackfillRanAt"/g) ?? []).length, 1, "the literal lives only in the constant");
   assert.equal((boot.match(/"plexUserIdBackfillRanAt"/g) ?? []).length, 0);
+});
+
+test("the bind is conditional on plexUserId still being null: a row a sign-in bound meanwhile keeps its id and is not counted", async () => {
+  candidateRows = [{ id: "u-signed-in", email: "owner@example.com" }];
+  configurePlex();
+  respond = plexResponder({ owner: { id: 100, email: "owner@example.com" }, friends: [] });
+  userUpdateCount = 0;
+
+  await runPlexUserBackfillIfNeeded();
+
+  assert.deepEqual(userUpdates, [{ where: { id: "u-signed-in", plexUserId: null }, data: { plexUserId: "100" } }]);
+  assert.ok(!warns.some((w) => w.includes("bound 1")), "nothing was bound by this run");
+  assert.equal(settingUpserts.length, 1, "the candidate is resolved, so the marker stamps");
 });

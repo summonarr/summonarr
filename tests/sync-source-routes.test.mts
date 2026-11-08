@@ -179,7 +179,10 @@ pgProto.end = async () => {};
 const { NextRequest } = await import("next/server");
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
-const { BATCH_TX_TIMEOUT } = await import("../src/lib/cron-auth.ts");
+const { BATCH_TX_TIMEOUT } = await import("../src/lib/batch-write.ts");
+// tmdb.ts backs off a list for a minute after every page of it failed; a test
+// that takes TMDB down must not leave that backoff to the next one.
+const { __resetTmdbBackoffsForTests } = await import("../src/lib/tmdb.ts");
 
 // ── op log ───────────────────────────────────────────────────────────────────
 type Op = { op: string; args?: unknown };
@@ -262,9 +265,12 @@ shadowPrismaModel(prisma, "auditLog", {
 });
 
 const settings = new Map<string, string>();
+// A Setting key whose point read throws (a transient DB error on one server's config).
+let settingReadFailsOn: string | null = null;
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) => {
     rec("setting.findUnique", args.where.key);
+    if (settingReadFailsOn === args.where.key) throw new Error(`setting ${args.where.key} read failed (unit test)`);
     const v = settings.get(args.where.key);
     return v === undefined ? null : { key: args.where.key, value: v };
   },
@@ -342,6 +348,7 @@ function registerArrInstance(service: "radarr" | "sonarr", slug: string): void {
 
 beforeEach(() => {
   advanceClock(31_000); // past both 30s API-key memos (see the Date mock above)
+  __resetTmdbBackoffsForTests();
   ops = [];
   txOptions = [];
   pgLockCalls = [];
@@ -364,6 +371,7 @@ beforeEach(() => {
   refreshCalls = 0;
   tmdbCacheRows.clear();
   lockAcquire = () => true;
+  settingReadFailsOn = null;
 });
 
 // ── the shared cron gate (guardrail 6) ───────────────────────────────────────
@@ -716,6 +724,39 @@ test("tv-episodes honours the library selection setting", async () => {
   const res = await call(tvEpisodes);
   assert.equal(res.status, 200);
   assert.ok(opsOf("setting.findUnique").some((o) => o.args === "plexLibraries"));
+});
+
+test("tv-episodes: a source left untouched records the run as FAILED (X-Cron-Degraded), still 200; a clean run carries no header", async () => {
+  // The skipped source's rows were kept on purpose, but the cron history read
+  // the 200 as a green run — an outage of every Plex server recorded OK.
+  settings.set("plexServerUrl", "http://10.0.0.5:32400");
+  settings.set("plexAdminToken", "plex-token");
+  settings.set("jellyfinUrl", "http://10.0.0.6:8096");
+  settings.set("jellyfinApiKey", "jf-key");
+  plexOk = false;
+  const res = await call(tvEpisodes);
+  assert.equal(res.status, 200, "the healthy source's rewrite still happened");
+  assert.equal(res.headers.get("X-Cron-Degraded"), "plex");
+  assert.deepEqual((await res.json()).skipped, ["plex"]);
+
+  plexOk = true;
+  const clean = await call(tvEpisodes);
+  assert.equal(clean.status, 200);
+  assert.equal(clean.headers.get("X-Cron-Degraded"), null);
+});
+
+test("tv-episodes: one server's config or selection read failing is recorded for THAT server — the other source still rebuilds", async () => {
+  settings.set("plexServerUrl", "http://10.0.0.5:32400");
+  settings.set("plexAdminToken", "plex-token");
+  settings.set("jellyfinUrl", "http://10.0.0.6:8096");
+  settings.set("jellyfinApiKey", "jf-key");
+  settingReadFailsOn = "plexLibraries";
+  const res = await call(tvEpisodes);
+  assert.equal(res.status, 200, "a failed read is a partial result, not a route failure");
+  const body = await res.json();
+  assert.ok((body.errors as string[]).some((e) => e.startsWith("Plex:") && e.includes("plexLibraries")), JSON.stringify(body.errors));
+  assert.deepEqual(body.skipped, ["plex"], "a server that could not be read is never wiped by a partial union");
+  assert.deepEqual(deletesOf("tVEpisodeCache").map((w) => w.source), ["jellyfin"], "the healthy source still refreshes");
 });
 
 test("tv-episodes reports per-source counts", async () => {

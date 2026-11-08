@@ -134,38 +134,70 @@ const EN = JSON.parse(
   readFileSync(path.join(here, "..", "src", "lib", "i18n", "messages", "en", "settingsForms.json"), "utf8"),
 ) as Record<string, string>;
 
-test("f99 (form): handleSave reads the per-variant `<service><v>Error` key BEFORE the generic `error`", () => {
-  assert.match(src, /const errorKey\s*=\s*`\$\{service\}\$\{v\}Error`/, "errorKey is derived like versionKey");
+test("f99 (form): Save & Test reads the per-variant `<service><v>Error` key when the route gives no reason of its own", async () => {
+  const { arrFormKeys } = await import("../src/components/settings/arr-options.ts");
+  assert.equal(arrFormKeys("radarr", "hd").error, "radarrError");
+  assert.equal(arrFormKeys("sonarr", "4k").error, "sonarr4kError");
+  assert.equal(arrFormKeys("sonarr", "4k").version, "sonarr4kVersion");
+  // useSettingsSave shows the route's message/error first, else this text: the
+  // variant key (the only key a 422 carries), else the fallback.
   assert.match(
     src,
-    /setMessage\(data\[errorKey\] \?\? data\.error \?\? t\("settings\.form\.common\.saveFailed"\)\)/,
-    "variant key first (only key present on a 422), then `error` (400/429), then the fallback",
+    /\(r\) => \{\s*const reason = r\.data\[keys\.error\];\s*return typeof reason === "string" && reason \? reason : t\("settings\.form\.common\.saveFailed"\);/,
   );
 });
 
+// An edit while Save & Test runs used to flip "saving" back to "idle", which
+// re-enabled Save for a second PATCH (and a second connection test).
+test("the connection form saves through the shared saver, and every field edit goes through edited()", () => {
+  const conn = src.slice(src.indexOf("function ArrConnectionForm("), src.indexOf("interface ArrDefaults"));
+  assert.match(conn, /const \{ status, message, save, edited \} = useSettingsSave\(\);/);
+  assert.doesNotMatch(src, /setStatus\("idle"\)/);
+  assert.doesNotMatch(src, /fetch\(withBasePath\("\/api\/settings"\)/, "no hand-rolled PATCH");
+  assert.equal((conn.match(/edited\(\);/g) ?? []).length, 3, "url, key and external URL");
+});
+
+// The mask as the field's value turned a partial edit into "••••<key>".
+test("the API key field starts empty; the mask is only the placeholder, and a blank field keeps the saved key", () => {
+  assert.match(src, /const \[apiKey, setApiKey\] = useState\(""\);/);
+  assert.match(src, /placeholder=\{keySaved \? SECRET_MASK_SENTINEL : undefined\}/);
+  assert.match(src, /\[keys\.apiKey\]: apiKey \|\| SECRET_MASK_SENTINEL,/);
+  assert.doesNotMatch(src, /"••••/, "no hand-typed mask");
+});
+
+// A slow first read against a wrong URL could land after the read that
+// followed the fix and turn "loaded" into "error".
+test("the options read is sequenced: each read supersedes the last, and the import doesn't hang off it", () => {
+  const fetchOptions = src.slice(src.indexOf("const fetchOptions = useCallback("), src.indexOf("useEffect(() => {"));
+  assert.match(fetchOptions, /await action\.run\("options", \(signal\) =>/);
+  assert.match(fetchOptions, /if \(!res\) return;/);
+  assert.match(fetchOptions, /readArrOptions\(res\.data\)/);
+  assert.match(src, /\{connected && variant !== "4k" && \(\s*<ArrImportSection/);
+  assert.doesNotMatch(src, /optionsStatus === "loaded" && variant !== "4k"/);
+});
+
 test("f98 (form): all three selects surface a stored value the server no longer lists as '(not found on server)'", () => {
-  assert.match(
-    src,
-    /\{rootFolder && !options\.rootFolders\.some\(\(f\) => f\.path === rootFolder\) && \(\s*<option value=\{rootFolder\}>\{t\("settings\.form\.arr\.folderNotFound", \{ folder: rootFolder \}\)\}<\/option>/,
-    "root folder",
-  );
-  assert.match(
-    src,
-    /\{qualityProfileId && !options\.qualityProfiles\.some\(\(p\) => String\(p\.id\) === qualityProfileId\) && \(\s*<option value=\{qualityProfileId\}>\{t\("settings\.form\.arr\.profileNotFound", \{ id: qualityProfileId \}\)\}<\/option>/,
-    "quality profile",
-  );
-  assert.match(
-    src,
-    /\{languageProfileId && !options\.languageProfiles!\.some\(\(p\) => String\(p\.id\) === languageProfileId\) && \(\s*<option value=\{languageProfileId\}>\{t\("settings\.form\.arr\.profileNotFound", \{ id: languageProfileId \}\)\}<\/option>/,
-    "language profile",
-  );
-  // The stale option must precede the live list so it sits directly under the
-  // placeholder, matching arr-instances-manager's layout.
+  // The one select both arr forms use lists a stale value, under the placeholder.
+  const select = readFileSync(path.join(here, "..", "src", "components", "settings", "arr-profile-select.tsx"), "utf8");
+  assert.match(select, /\{value && !options\.some\(\(o\) => o\.value === value\) && \(\s*<option value=\{value\}>\{staleLabel\(value\)\}<\/option>/);
+  const stale = select.indexOf("staleLabel(value)");
+  const live = select.indexOf("{options.map(");
+  assert.ok(stale > 0 && live > stale, "stale-value option renders before the server list");
+  assert.match(src, /staleLabel=\{\(folder\) => t\("settings\.form\.arr\.folderNotFound", \{ folder \}\)\}/, "root folder");
+  assert.equal((src.match(/staleLabel=\{\(id\) => t\("settings\.form\.arr\.profileNotFound", \{ id \}\)\}/g) ?? []).length, 2, "quality and language profile");
+  assert.doesNotMatch(src, /languageProfiles!/);
   // The labels are translated; the English catalog carries the wording.
   assert.equal(EN["settings.form.arr.folderNotFound"], "{folder} (not found on server)");
   assert.equal(EN["settings.form.arr.profileNotFound"], "Profile #{id} (not found on server)");
   assert.equal(EN["settings.form.common.saveFailed"], "Failed to save");
-  const stale = src.indexOf('t("settings.form.arr.folderNotFound"');
-  const live = src.indexOf("{options.rootFolders.map(");
-  assert.ok(stale > 0 && live > stale, "stale-value option renders before the server list");
+});
+
+test("the options answer is shape-checked before it fills a select", async () => {
+  const { readArrOptions } = await import("../src/components/settings/arr-options.ts");
+  const good = { rootFolders: [{ path: "/m" }], qualityProfiles: [{ id: 4, name: "HD" }] };
+  assert.deepEqual(readArrOptions(good), good);
+  assert.deepEqual(readArrOptions({ ...good, languageProfiles: [{ id: 1, name: "English" }] })?.languageProfiles, [{ id: 1, name: "English" }]);
+  assert.equal(readArrOptions({ ...good, qualityProfiles: [{ id: "4", name: "HD" }] }), null);
+  assert.equal(readArrOptions({ rootFolders: [] }), null);
+  assert.equal(readArrOptions(null), null);
 });

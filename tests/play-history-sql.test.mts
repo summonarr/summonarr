@@ -69,7 +69,10 @@ const {
   getTranscodeOffenders,
   getUserPlayStats,
   getWrappedForServerUsers,
+  clearActivityCache,
+  POPULAR_PER_PAGE,
 } = await import("../src/lib/play-history.ts");
+const { MAX_POPULAR_ROWS } = await import("../src/lib/play-history-popular.ts");
 const { invalidateStatsTimeZone } = await import("../src/lib/stats-time-zone-data.ts");
 
 // ── capture ─────────────────────────────────────────────────────────────────
@@ -212,7 +215,9 @@ test("getMostPopularOnServer: every mediaType × sort combination keeps $-indice
   assert.equal(combos, 9, "the matrix must stay exhaustive");
 });
 
-test("getMostPopularOnServer: the trending window is an extra BOUND param, and it shifts limit/offset", async () => {
+test("getMostPopularOnServer: the trending window is an extra BOUND param, and the ranking binds only its fixed row cap", async () => {
+  // Rankings are cached per (mediaType, sort): the matrix above filled them.
+  clearActivityCache();
   const [plain] = await capture(() => getMostPopularOnServer({ sort: "plays", page: 1, limit: 7 }));
   const [trending] = await capture(() => getMostPopularOnServer({ sort: "trending", page: 1, limit: 7 }));
 
@@ -225,29 +230,27 @@ test("getMostPopularOnServer: the trending window is an extra BOUND param, and i
   assert.ok(!plain.sql.includes("FILTER (WHERE arc_started_at"), "the non-trending path emits no arc window filter");
   assert.ok(trending.sql.includes("FILTER (WHERE arc_started_at"), "the trending path filters arcs by the window");
 
-  // LIMIT/OFFSET are the LAST two pushes, so they must be the last two indices
-  // in both shapes — this is what a mis-captured index variable breaks.
+  // A page is sliced from the cached ranking, so the statement has no OFFSET and
+  // its LIMIT is the ranking's cap — the LAST push, so the last index in both
+  // shapes (what a mis-captured index variable breaks).
   for (const [label, q] of [["plays", plain], ["trending", trending]] as const) {
     const n = q.params.length;
-    assert.ok(
-      q.sql.includes(`LIMIT $${n - 1} OFFSET $${n}`),
-      `${label}: LIMIT/OFFSET must bind the final two params ($${n - 1}, $${n}) — got ${excerpt(q.sql).slice(-60)}`,
-    );
-    assert.equal(q.params[n - 2], 7, `${label}: the limit value binds where the SQL says LIMIT`);
+    assert.match(q.sql, new RegExp(`LIMIT \\$${n}\\s*$`), `${label}: LIMIT must bind the final param ($${n}) — got ${excerpt(q.sql).slice(-60)}`);
+    assert.doesNotMatch(q.sql, /OFFSET/, `${label}: no per-page OFFSET`);
+    assert.equal(q.params[n - 1], MAX_POPULAR_ROWS, `${label}: the cap binds where the SQL says LIMIT, never the page size`);
   }
 });
 
-test("getMostPopularOnServer: page/limit clamps bind the CLAMPED values, never the caller's", async () => {
-  // MAX_POPULAR_PAGE / POPULAR_PER_PAGE clamp at the source (an unclamped page
-  // would defeat the cache and grow popularCache without bound).
-  const [q] = await capture(() => getMostPopularOnServer({ page: 10_000_000, limit: 10_000 }));
-  const n = q.params.length;
-  const limit = Number(q.params[n - 2]);
-  const offset = Number(q.params[n - 1]);
-
-  assert.ok(limit > 0 && limit < 10_000, `limit was clamped below the caller's 10000 (got ${limit})`);
-  assert.ok(offset >= 0 && Number.isFinite(offset), `offset stays a finite non-negative integer (got ${offset})`);
-  assert.equal(offset % limit, 0, "offset is a whole number of clamped pages");
+test("getMostPopularOnServer: page/limit clamps bound the slice; no caller value reaches the statement", async () => {
+  // MAX_POPULAR_PAGE / POPULAR_PER_PAGE clamp at the source, so a deep page can't
+  // read past the ranking's cap.
+  clearActivityCache();
+  let result: Awaited<ReturnType<typeof getMostPopularOnServer>> | null = null;
+  const [q] = await capture(async () => { result = await getMostPopularOnServer({ page: 10_000_000, limit: 10_000 }); });
+  assert.ok(!q.params.includes(10_000) && !q.params.includes(10_000_000), "the caller's page and limit are never bound");
+  assert.equal(q.params[q.params.length - 1], MAX_POPULAR_ROWS);
+  assert.equal(result!.page, MAX_POPULAR_ROWS / POPULAR_PER_PAGE, "the page is clamped to the last reachable one");
+  assert.deepEqual(result!.items, []);
 });
 
 // ── getHeatmapCellDetail: one params array, five queries ─────────────────────

@@ -61,6 +61,7 @@
   "shared.upload.chunkFailed": "Part {chunk} of {total} failed to upload (HTTP {status}).",
   "shared.upload.nonJson": "The server sent an unexpected response. The request was probably redirected, for example to the sign-in page.",
   "shared.upload.noCompletion": "The upload finished, but the server never confirmed the restore.",
+  "shared.upload.empty": "The backup file is empty.",
   "shared.upload.network": "The upload failed. Check your connection and try again.",
   "shared.upload.cancelled": "Upload cancelled."
 }

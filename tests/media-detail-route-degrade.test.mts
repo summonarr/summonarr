@@ -8,10 +8,11 @@
 //        that: 200, `cast: []`, one "[media]"-scoped error line (guardrail 7).
 //
 //   f48  The collection fetch + its availability pass must run in the SAME wave
-//        as the suggestions attach, not serialized behind it AND the third
-//        (deletionVote / watchlist / hidden) Prisma wave. Pinned by ordering:
-//        the /collection/ TMDB fetch must be issued BEFORE the deletionVote read
-//        (which the old code always ran first). The best-effort contract is
+//        as the suggestions attach, not serialized behind it. Pinned by
+//        ordering: the collection load starts before the detail's availability
+//        pass reads the library. The per-viewer reads (deletionVote / watchlist
+//        / hidden) join that wave too — they key only on the title and the
+//        viewer — instead of a third wave after it. The best-effort contract is
 //        preserved: a failing /collection/ still answers 200 with
 //        `collection: null`, and a successful-but-empty one ships `items: []`.
 //
@@ -156,7 +157,11 @@ for (const m of [
   shadowPrismaModel(prisma, m, {
     findMany: async () => { ops.push(`${m}.findMany`); return []; },
     findFirst: async () => { ops.push(`${m}.findFirst`); return null; },
-    findUnique: async () => { ops.push(`${m}.findUnique`); return null; },
+    // The cache key rides along for tmdbCache, so a test can tell which load a read starts.
+    findUnique: async (args?: { where?: { key?: string } }) => {
+      ops.push(m === "tmdbCache" && args?.where?.key ? `${m}.findUnique ${args.where.key}` : `${m}.findUnique`);
+      return null;
+    },
     count: async () => 0,
     groupBy: async () => [], aggregate: async () => ({ _count: { _all: 0 }, _sum: {}, _min: {}, _max: {} }),
     create: async () => ({}), createMany: async () => ({ count: 0 }), update: async () => ({}),
@@ -245,6 +250,23 @@ test("f47: a failing DETAIL fetch still 502s — only the credits leg is best-ef
   }
 });
 
+test("an id TMDB doesn't know is a 404, told apart from an outage's 502", async () => {
+  const { token } = await mintSession();
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = new URL(String(input));
+    if (/\/movie\/27205/.test(url.pathname)) return new Response(JSON.stringify({ status_code: 34 }), { status: 404, headers: { "content-type": "application/json" } });
+    return realFetch(input);
+  }) as unknown as typeof fetch;
+  try {
+    const res = await mediaGet(token, "movie", "27205");
+    assert.equal(res.status, 404);
+    assert.deepEqual(await res.json(), { error: "Not found" });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 // ── f48: collection runs in the suggestions wave, best-effort preserved ──────
 
 test("f48: a collection movie ships collection.items with the lite projection", async () => {
@@ -261,30 +283,35 @@ test("f48: a collection movie ships collection.items with the lite projection", 
   ]);
 });
 
-test("f48: the /collection/ fetch is issued BEFORE the third-wave deletionVote read (parallel, not serialized)", async () => {
+test("the collection load starts BEFORE the detail's availability pass reads the library (parallel, not serialized)", async () => {
   const { token } = await mintSession();
   const res = await mediaGet(token, "movie", "604");
   assert.equal(res.status, 200);
-  const collectionAt = ops.findIndex((o) => o === `fetch /3/collection/${COLLECTION_ID}`);
-  const voteAt = ops.findIndex((o) => o === "deletionVote.findFirst");
-  assert.ok(collectionAt >= 0, `collection was never fetched: ${ops.join(", ")}`);
-  assert.ok(voteAt >= 0, `deletionVote was never read: ${ops.join(", ")}`);
-  // The old code awaited the suggestions wave AND the deletionVote/watchlist/
-  // hidden wave before even starting getMovieCollection; the fix starts it as
-  // soon as collectionId is known, so it must precede that third wave.
-  assert.ok(collectionAt < voteAt, `collection fetch (#${collectionAt}) ran after deletionVote (#${voteAt}) — serialized again`);
+  // The collection's first step is its cache read; the old code awaited the
+  // suggestions wave AND the deletionVote/watchlist/hidden wave before even
+  // starting getMovieCollection, so it came after every library read.
+  const collectionStart = ops.findIndex((o) => o === `tmdbCache.findUnique collection:${COLLECTION_ID}`);
+  const firstLibraryRead = ops.findIndex((o) => o === "plexLibraryItem.findMany");
+  assert.ok(collectionStart >= 0, `the collection was never loaded: ${ops.join(", ")}`);
+  assert.ok(ops.includes(`fetch /3/collection/${COLLECTION_ID}`), "the cold cache fell through to TMDB");
+  assert.ok(firstLibraryRead >= 0, `no availability pass ran: ${ops.join(", ")}`);
+  assert.ok(collectionStart < firstLibraryRead, `the collection load (#${collectionStart}) waited for the availability pass (#${firstLibraryRead}) — serialized again`);
 });
 
-test("f48: the collection availability pass overlaps the suggestions wave rather than following the third wave", async () => {
+test("the viewer's own flags (deletion vote, watchlist, hidden) are read in the availability wave, not a third one after it", async () => {
   const { token } = await mintSession();
   await mediaGet(token, "movie", "604");
   // attachAllAvailability issues one plexLibraryItem read per non-empty attach
   // call (the suggestions rail is empty here, so: the detail pass + the
-  // collection pass). Both must land before the deletionVote read.
-  const voteAt = ops.findIndex((o) => o === "deletionVote.findFirst");
+  // collection pass). The per-viewer reads key only on the title and the user,
+  // so they start beside the detail pass instead of waiting for it.
   const attachReads = ops.map((o, i) => [o, i] as const).filter(([o]) => o === "plexLibraryItem.findMany").map(([, i]) => i);
   assert.ok(attachReads.length >= 2, `expected the detail + collection attach passes, saw ${attachReads.length}: ${ops.join(", ")}`);
-  assert.ok(attachReads.every((i) => i < voteAt), `an attach pass ran after the deletionVote read: ${ops.join(", ")}`);
+  for (const flag of ["deletionVote.findFirst", "watchlistItem.findFirst", "hiddenItem.findFirst"]) {
+    const at = ops.indexOf(flag);
+    assert.ok(at >= 0, `${flag} was never read: ${ops.join(", ")}`);
+    assert.ok(at < attachReads[0], `${flag} (#${at}) waited for the availability pass (#${attachReads[0]})`);
+  }
 });
 
 test("f48: a 500 on /collection/ alone still answers 200 with collection: null and a scoped error", async () => {
@@ -350,6 +377,8 @@ test("media: a canonical id past INT4 is the out-of-range 400", async () => {
 
 test("media: a failing 4K-visibility settings read is the localized 502, not an escaped throw", async () => {
   const { token } = await mintSession();
+  // The 4K settings are held for a few seconds; this read must be a fresh one.
+  (await import("../src/lib/four-k-visibility.ts")).invalidateShow4kVisibilityCache();
   shadowPrismaModel(prisma, "setting", {
     findUnique: async () => null,
     findMany: async (args: { where?: { key?: { in?: string[] } } } = {}) => {

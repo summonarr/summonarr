@@ -288,8 +288,8 @@ test("g-sonarr#4: languageNamesOf — list first, the single object only when th
 
 test("C048: the rename preview has a select-all toggle over the files it lists (a long show pre-ticks thousands)", async () => {
   const { readFileSync } = await import("node:fs");
-  const src = readFileSync(new URL("../src/components/admin/arr-title/files-tab.tsx", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../src/components/admin/arr-title/files-parts.tsx", import.meta.url), "utf8");
   const panel = src.slice(src.indexOf("adminArr.files.renameNone"), src.indexOf("{renames.map("));
-  assert.match(panel, /type="checkbox"[\s\S]*checked=\{renames\.every\(\(r\) => renameSelected\.has\(r\.fileId\)\)\}/);
-  assert.match(panel, /setRenameSelected\(e\.target\.checked \? new Set\(renames\.map\(\(r\) => r\.fileId\)\) : new Set\(\)\)/);
+  assert.match(panel, /type="checkbox"[\s\S]*checked=\{renames\.every\(\(r\) => selected\.has\(r\.fileId\)\)\}/);
+  assert.match(panel, /onSelectedChange\(e\.target\.checked \? new Set\(renames\.map\(\(r\) => r\.fileId\)\) : new Set\(\)\)/);
 });

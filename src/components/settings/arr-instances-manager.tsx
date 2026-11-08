@@ -7,10 +7,25 @@ import { Label } from "@/components/ui/label";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { AlertTriangle, CheckCircle, XCircle, Loader2, Trash2, RefreshCw, Copy, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { apiErrorText } from "@/lib/client/api-error";
+import { useCopyFeedback } from "@/hooks/use-copy-feedback";
 import { useT } from "@/components/i18n/i18n-provider";
-import { DEFAULT_ARR_INSTANCE, FOURK_ARR_INSTANCE, isValidInstanceSlug } from "@/lib/arr-instances";
 import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
-import { MINIMUM_AVAILABILITY_OPTIONS, type ArrOptions } from "./arr-options";
+import { MINIMUM_AVAILABILITY_OPTIONS, readArrOptions, type ArrOptions } from "./arr-options";
+import { ArrProfileSelect } from "./arr-profile-select";
+import {
+  draftsProblem,
+  instancesPayload,
+  newDraft,
+  readInstancesGet,
+  readSaveAnswer,
+  toDraft,
+  type ArrService,
+  type Draft,
+  type InstanceList,
+  type TestResult,
+} from "./arr-instances-data";
 
 // 24 random bytes as a hex string — same as generateSecret() in
 // forms/webhook-secret-form.tsx (the HD/4K webhook-secret field). Browser-only
@@ -26,82 +41,11 @@ function generateSecret(): string {
 // default and 4K instances have their own forms above; this one manages the
 // extra instances through /api/admin/arr-instances (guardrail 32). Secrets are
 // write-only: the saved value is never shown, and a blank field means "keep it".
+// The draft model, the answers' shape check and the save payload are in
+// arr-instances-data.ts.
 
-// A client-only identity per draft card (never sent): the list, the "copied"
-// check and the pending Remove are keyed by it, so removing one card can't hand
-// another card's state to its neighbour. Bumped only from handlers and effects.
-let lastDraftId = 0;
-const nextDraftId = () => ++lastDraftId;
-
-type ArrService = "radarr" | "sonarr";
 type SaveStatus = "idle" | "saving" | "ok" | "error";
-
-interface InstanceView {
-  slug: string;
-  name: string;
-  restricted: boolean;
-  serverAll: boolean;
-  skipLibraryCheck: boolean;
-  autoRoute: { animeOnly?: boolean } | null;
-  url: string;
-  // Absent on an older server's response.
-  externalUrl?: string;
-  rootFolder: string;
-  qualityProfileId: string;
-  minimumAvailability: string;
-  languageProfileId: string;
-  hasApiKey: boolean;
-  hasWebhookSecret: boolean;
-}
-
-interface Draft {
-  id: number;
-  slug: string;
-  name: string;
-  url: string;
-  // The address a browser uses ("Open in Radarr" links); "" = use `url`.
-  externalUrl: string;
-  apiKey: string;
-  rootFolder: string;
-  qualityProfileId: string;
-  minimumAvailability: string; // radarr only
-  languageProfileId: string; // sonarr v3 only
-  webhookSecret: string;
-  restricted: boolean;
-  serverAll: boolean;
-  skipLibraryCheck: boolean;
-  animeOnly: boolean;
-  hasApiKey: boolean;
-  hasWebhookSecret: boolean;
-  isNew: boolean;
-}
-
-function toDraft(v: InstanceView): Draft {
-  return {
-    id: nextDraftId(),
-    slug: v.slug,
-    name: v.name,
-    url: v.url,
-    externalUrl: v.externalUrl ?? "",
-    apiKey: "",
-    rootFolder: v.rootFolder,
-    qualityProfileId: v.qualityProfileId,
-    minimumAvailability: v.minimumAvailability ?? "",
-    languageProfileId: v.languageProfileId ?? "",
-    webhookSecret: "",
-    restricted: v.restricted,
-    serverAll: v.serverAll,
-    skipLibraryCheck: v.skipLibraryCheck,
-    animeOnly: v.autoRoute?.animeOnly === true,
-    hasApiKey: v.hasApiKey,
-    hasWebhookSecret: v.hasWebhookSecret,
-    isNew: false,
-  };
-}
-
-// Only named instances are managed here — the default ("") and legacy 4K ("4k")
-// have their own forms.
-const isNamed = (slug: string) => slug !== DEFAULT_ARR_INSTANCE && slug !== FOURK_ARR_INSTANCE;
+type CardOptions = ArrOptions | "loading" | "error" | undefined;
 
 function ServiceInstances({ service }: { service: ArrService }) {
   const t = useT();
@@ -113,11 +57,9 @@ function ServiceInstances({ service }: { service: ArrService }) {
   const [loadFailed, setLoadFailed] = useState(false);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [message, setMessage] = useState("");
-  const [tests, setTests] = useState<Record<string, { version?: string; error?: string }>>({});
-  // Draft ids (not positions), so they stay on the card they were set for.
-  const [copiedHook, setCopiedHook] = useState<number | null>(null);
-  // The draft whose Remove is waiting for confirmation. Anything that adds,
-  // removes or reloads drafts still resets it.
+  const [tests, setTests] = useState<Record<string, TestResult>>({});
+  // The draft whose Remove is waiting for confirmation (a draft id, not a
+  // position). Anything that adds, removes or reloads drafts still resets it.
   const [confirmRemove, setConfirmRemove] = useState<number | null>(null);
   // The server's version of the list these drafts were loaded from, sent back
   // as `baseVersion` so a save over a list changed elsewhere (another tab or
@@ -130,9 +72,8 @@ function ServiceInstances({ service }: { service: ArrService }) {
   const [dirty, setDirty] = useState(false);
   const [confirmRefresh, setConfirmRefresh] = useState(false);
   // Removed instances that still had PENDING/APPROVED requests pointing at
-  // them, from the last save's `removed` field (additive on the wire — an older
-  // server omits it). Those requests are stranded until re-routed or declined,
-  // so the admin is told which slugs and how many.
+  // them, from the last save's `removed` field. Those requests are stranded
+  // until re-routed or declined, so the admin is told which slugs and how many.
   const [strandedRemoved, setStrandedRemoved] = useState<Array<{ slug: string; openRequests: number }>>([]);
   // For each slug: its live root-folder/quality-profile options, or
   // "loading"/"error" while the fetch is running or after it failed.
@@ -144,22 +85,6 @@ function ServiceInstances({ service }: { service: ArrService }) {
   const optionsSeq = useRef<Record<string, number>>({});
   const saving = status === "saving";
 
-  // Full webhook URL the admin pastes into Radarr/Sonarr (the ?token= form —
-  // guardrail 2). Only shown after loading, which happens in the browser, so
-  // `window` exists; the typeof check is just a safety net.
-  const webhookUrl = (secret: string) =>
-    `${typeof window !== "undefined" ? window.location.origin : ""}${withBasePath(`/api/webhooks/${service}`)}?token=${encodeURIComponent(secret)}`;
-
-  async function copyHook(id: number, secret: string) {
-    try {
-      await navigator.clipboard.writeText(webhookUrl(secret));
-      setCopiedHook(id);
-      setTimeout(() => setCopiedHook(null), 2000);
-    } catch {
-      /* clipboard blocked — the URL is on screen, so it can be copied by hand */
-    }
-  }
-
   // Fetch an instance's real root folders + quality profiles from Radarr/Sonarr
   // (the same endpoint the main config uses). That endpoint reads the saved URL
   // and API key, so it only works once the connection is saved: it runs after
@@ -169,49 +94,51 @@ function ServiceInstances({ service }: { service: ArrService }) {
     optionsSeq.current[slug] = seq;
     const latest = () => optionsSeq.current[slug] === seq;
     setOptionsBySlug((prev) => ({ ...prev, [slug]: "loading" }));
-    try {
-      const res = await fetch(withBasePath(`/api/settings/arr-options?service=${service}&instance=${encodeURIComponent(slug)}`));
-      if (!res.ok) throw new Error();
-      const data = (await res.json()) as ArrOptions;
+    // Radarr/Sonarr each get 30 s per call there (arrFetch), and Sonarr may need two.
+    const res = await fetchJson(withBasePath(`/api/settings/arr-options?service=${service}&instance=${encodeURIComponent(slug)}`), { timeoutMs: 90_000 });
+    const data = res.ok ? readArrOptions(res.data) : null;
+    if (data) {
       if (latest()) setOptionsBySlug((prev) => ({ ...prev, [slug]: data }));
-    } catch {
+    } else {
       if (latest()) setOptionsBySlug((prev) => ({ ...prev, [slug]: "error" }));
     }
   }, [service]);
 
+  // The drafts become the server's list: every per-card state goes with the
+  // old drafts (the cards remount under new ids), and each configured
+  // instance's dropdowns are (re)loaded.
+  const applyList = useCallback((list: InstanceList) => {
+    setDrafts(list.named.map(toDraft));
+    setVersion(list.version);
+    list.named.forEach((i) => { if (i.hasApiKey && i.url) void fetchOptions(i.slug); });
+    setConfirmRemove(null);
+    setDirty(false);
+  }, [fetchOptions]);
+
   const load = useCallback(async () => {
-    try {
-      const res = await fetch(withBasePath("/api/admin/arr-instances"));
-      if (!res.ok) throw new Error();
-      const data = (await res.json()) as Partial<Record<ArrService, InstanceView[]>> & { versions?: Partial<Record<ArrService, unknown>> };
-      const named = (data[service] ?? []).filter((i) => isNamed(i.slug));
-      setDrafts(named.map(toDraft));
-      const v = data.versions?.[service];
-      setVersion(typeof v === "string" ? v : undefined);
-      named.forEach((i) => { if (i.hasApiKey && i.url) fetchOptions(i.slug); });
+    const res = await fetchJson(withBasePath("/api/admin/arr-instances"));
+    const list = res.ok ? readInstancesGet(res.data, service) : null;
+    if (list) {
+      applyList(list);
       setLoadFailed(false);
-      setConfirmRemove(null);
-      setCopiedHook(null);
-      setDirty(false);
       setStrandedRemoved([]);
       // Test results are keyed by slug and describe the config as it was at
       // the last Save & Test — stale once the instances are reloaded.
       setTests({});
       setStatus("idle");
-    } catch {
+    } else {
       // Saving an empty list means "remove every named instance", which
       // deletes their API keys and webhook secrets for good (they're encrypted
       // and can't be recovered). A failed load must never be mistaken for "no
       // instances", so flag it: saving is disabled and a message is shown.
       setLoadFailed(true);
-    } finally {
-      setConfirmRefresh(false);
-      setLoaded(true);
     }
-  }, [service, fetchOptions]);
+    setConfirmRefresh(false);
+    setLoaded(true);
+  }, [service, applyList]);
 
   useEffect(() => {
-    load();
+    void load();
   }, [load]);
 
   // While a save is in flight the editors are disabled (its response replaces
@@ -226,17 +153,9 @@ function ServiceInstances({ service }: { service: ArrService }) {
   };
 
   const addInstance = () => {
-    setDrafts((prev) => [
-      ...prev,
-      {
-        // Create the webhook secret automatically so the admin doesn't have to
-        // make one up — they just copy the webhook URL into Radarr/Sonarr.
-        id: nextDraftId(), slug: "", name: "", url: "", externalUrl: "", apiKey: "", rootFolder: "", qualityProfileId: "",
-        minimumAvailability: "", languageProfileId: "", webhookSecret: generateSecret(),
-        restricted: false, serverAll: false, skipLibraryCheck: false, animeOnly: false,
-        hasApiKey: false, hasWebhookSecret: false, isNew: true,
-      },
-    ]);
+    // Create the webhook secret automatically so the admin doesn't have to
+    // make one up — they just copy the webhook URL into Radarr/Sonarr.
+    setDrafts((prev) => [...prev, newDraft(generateSecret())]);
     setConfirmRemove(null);
     setDirty(true);
     clearStatus();
@@ -250,89 +169,43 @@ function ServiceInstances({ service }: { service: ArrService }) {
   };
 
   async function save() {
-    // Check slugs here first, before sending anything to the server — with the
-    // server's own rule (it refuses "hd", and "external", whose keys are the
-    // default instance's), minus the built-ins this manager never edits.
-    for (const d of drafts) {
-      if (!isNamed(d.slug) || !isValidInstanceSlug(d.slug)) {
-        setStatus("error");
-        setMessage(t("settings.arr.invalidSlug", { slug: d.slug }));
-        return;
-      }
-    }
-    const seen = new Set<string>();
-    for (const d of drafts) {
-      if (seen.has(d.slug)) {
-        setStatus("error");
-        setMessage(t("settings.instances.duplicateSlug", { slug: d.slug }));
-        return;
-      }
-      seen.add(d.slug);
+    const problem = draftsProblem(drafts);
+    if (problem) {
+      setStatus("error");
+      setMessage(problem.kind === "invalid"
+        ? t("settings.arr.invalidSlug", { slug: problem.slug })
+        : t("settings.instances.duplicateSlug", { slug: problem.slug }));
+      return;
     }
 
     setStatus("saving");
     setMessage("");
     setStrandedRemoved([]);
-    const instances = drafts.map((d) => ({
-      slug: d.slug,
-      name: d.name.trim() || d.slug,
-      url: d.url.trim(),
-      // null clears it (the links fall back to the connection URL).
-      externalUrl: d.externalUrl.trim() || null,
-      apiKey: d.apiKey ? d.apiKey : d.hasApiKey ? SECRET_MASK_SENTINEL : undefined,
-      rootFolder: d.rootFolder,
-      qualityProfileId: d.qualityProfileId || null,
-      // null deletes the saved value, so an empty dropdown means "use Radarr's/Sonarr's own default".
-      ...(service === "radarr" ? { minimumAvailability: d.minimumAvailability || null } : {}),
-      ...(service === "sonarr" ? { languageProfileId: d.languageProfileId || null } : {}),
-      webhookSecret: d.webhookSecret ? d.webhookSecret : d.hasWebhookSecret ? SECRET_MASK_SENTINEL : undefined,
-      restricted: d.restricted,
-      serverAll: d.serverAll,
-      skipLibraryCheck: d.skipLibraryCheck,
-      autoRoute: d.animeOnly ? { animeOnly: true } : null,
-    }));
-
-    try {
-      const res = await fetch(withBasePath("/api/admin/arr-instances"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // A 409 means the list changed elsewhere since it was loaded; nothing
-        // was written and the error says to Refresh.
-        body: JSON.stringify({ service, instances, ...(version !== undefined ? { baseVersion: version } : {}) }),
-      });
-      const data = (await res.json().catch(() => ({}))) as {
-        ok?: boolean;
-        error?: string;
-        instances?: InstanceView[];
-        testResults?: Record<string, { version?: string; error?: string }>;
-        // One entry per named instance this save removed, with how many
-        // PENDING/APPROVED requests still targeted it. Absent on an older
-        // server, so it is always read with `?? []`.
-        removed?: Array<{ slug: string; openRequests: number }>;
-        version?: unknown;
-      };
-      if (res.ok && data.ok) {
-        const named = (data.instances ?? []).filter((i) => isNamed(i.slug));
-        setDrafts(named.map(toDraft));
-        setVersion(typeof data.version === "string" ? data.version : undefined);
-        setTests(data.testResults ?? {});
-        // The connections are saved now, so (re)load each configured instance's
-        // root folders + quality profiles to fill the dropdowns.
-        named.forEach((i) => { if (i.hasApiKey && i.url) fetchOptions(i.slug); });
-        setConfirmRemove(null);
-        setCopiedHook(null);
-        setDirty(false);
-        setStrandedRemoved((data.removed ?? []).filter((r) => typeof r?.openRequests === "number" && r.openRequests > 0));
-        setStatus("ok");
-        setMessage(t("settings.common.saved"));
-      } else {
-        setStatus("error");
-        setMessage(data.error ?? t("settings.common.failedToSave"));
-      }
-    } catch {
+    const instances = instancesPayload(drafts, service);
+    // A 409 means the list changed elsewhere since it was loaded; nothing was
+    // written and the error says to Refresh. The save tests every connection,
+    // so it waits as long as the browser does.
+    const res = await fetchJson(withBasePath("/api/admin/arr-instances"), {
+      init: jsonInit("POST", { service, instances, ...(version !== undefined ? { baseVersion: version } : {}) }),
+      timeoutMs: Infinity,
+      fallbackError: t("settings.common.failedToSave"),
+    });
+    const body = res.ok && res.data && typeof res.data === "object" && !Array.isArray(res.data)
+      ? (res.data as Record<string, unknown>)
+      : null;
+    const answer = body && body.ok === true ? readSaveAnswer(body) : null;
+    if (!answer) {
       setStatus("error");
-      setMessage(t("settings.common.failedToSave"));
+      setMessage(res.ok ? apiErrorText(body, t("settings.common.failedToSave")) : res.error || t("settings.common.failedToSave"));
+      return;
     }
+    // The connections are saved now, so applyList (re)loads each configured
+    // instance's root folders + quality profiles to fill the dropdowns.
+    applyList(answer);
+    setTests(answer.testResults);
+    setStrandedRemoved(answer.stranded);
+    setStatus("ok");
+    setMessage(t("settings.common.saved"));
   }
 
   const label = service === "radarr" ? "Radarr" : "Sonarr";
@@ -356,301 +229,22 @@ function ServiceInstances({ service }: { service: ArrService }) {
           draft, so anything typed meanwhile would be silently discarded. */}
       {drafts.length > 0 && (
       <fieldset disabled={saving} className="min-w-0 space-y-4">
-      {drafts.map((d, idx) => {
-        const test = tests[d.slug];
-        const opts = optionsBySlug[d.slug];
-        // The loaded options, or null while loading / after an error / before a
-        // save — one narrowed value instead of casting `opts` at every use.
-        const ready: ArrOptions | null = opts && typeof opts === "object" ? opts : null;
-        const languageProfiles = ready?.languageProfiles ?? [];
-        // Why the dropdowns aren't showing yet, for the note under each field.
-        const optsNote = opts === "loading"
-          ? t("settings.arr.optsLoading")
-          : opts === "error"
-            ? t("settings.arr.optsError")
-            : t("settings.arr.optsSaveFirst");
-        return (
-          <div key={d.id} className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
-            <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
-              <div className="space-y-1.5">
-                <Label htmlFor={`${service}-${idx}-slug`}>{t("settings.instances.slug")}</Label>
-                <Input
-                  id={`${service}-${idx}-slug`}
-                  value={d.slug}
-                  disabled={!d.isNew}
-                  onChange={(e) => update(d.id, { slug: e.target.value.toLowerCase() })}
-                  placeholder="anime"
-                  className="bg-zinc-800 border-zinc-700 font-mono disabled:opacity-60"
-                />
-                {!d.isNew && <p className="text-xs text-zinc-500">{t("settings.instances.slugFixed")}</p>}
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor={`${service}-${idx}-name`}>{t("settings.instances.displayName")}</Label>
-                <Input
-                  id={`${service}-${idx}-name`}
-                  value={d.name}
-                  onChange={(e) => update(d.id, { name: e.target.value })}
-                  placeholder="Anime"
-                  className="bg-zinc-800 border-zinc-700"
-                />
-              </div>
-            </div>
-
-            <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
-              <div className="space-y-1.5">
-                <Label htmlFor={`${service}-${idx}-url`}>{t("settings.arr.url", { label })}</Label>
-                <Input
-                  id={`${service}-${idx}-url`}
-                  type="url"
-                  value={d.url}
-                  onChange={(e) => update(d.id, { url: e.target.value })}
-                  placeholder={service === "radarr" ? "http://radarr-anime:7878" : "http://sonarr-anime:8989"}
-                  className="bg-zinc-800 border-zinc-700 font-mono"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor={`${service}-${idx}-key`}>{t("settings.arr.apiKey")}</Label>
-                <Input
-                  id={`${service}-${idx}-key`}
-                  type="password"
-                  // A secret for Radarr/Sonarr, not a login: a browser or
-                  // password manager must not fill the Summonarr password in.
-                  autoComplete="new-password"
-                  data-1p-ignore
-                  data-lpignore="true"
-                  value={d.apiKey}
-                  onChange={(e) => update(d.id, { apiKey: e.target.value })}
-                  placeholder={d.hasApiKey ? SECRET_MASK_SENTINEL : t("settings.arr.apiKeyPlaceholder")}
-                  className="bg-zinc-800 border-zinc-700 font-mono"
-                />
-                {/* Same "saved, hidden" helper the notification channels show —
-                    the masked placeholder alone doesn't say whether a blank
-                    field means "nothing saved" or "saved, write-only". */}
-                {d.hasApiKey && !d.apiKey && (
-                  <p className="text-xs text-zinc-500">{t("settings.form.agents.secretKeep")}</p>
-                )}
-              </div>
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor={`${service}-${idx}-external-url`}>{t("settings.form.arr.externalUrl")}</Label>
-              <Input
-                id={`${service}-${idx}-external-url`}
-                type="url"
-                value={d.externalUrl}
-                onChange={(e) => update(d.id, { externalUrl: e.target.value })}
-                placeholder={service === "radarr" ? "https://radarr-anime.example.com" : "https://sonarr-anime.example.com"}
-                className="bg-zinc-800 border-zinc-700 font-mono"
-              />
-              <p className="text-xs text-zinc-500">{t("settings.form.arr.externalUrlHelp", { service: label })}</p>
-            </div>
-
-            <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <Label htmlFor={`${service}-${idx}-folder`}>{t("settings.arr.rootFolder")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
-                  {ready && (
-                    <button type="button" onClick={() => fetchOptions(d.slug)} className="flex items-center gap-1 min-h-8 px-2 -my-2 -mr-2 text-xs text-zinc-500 hover:text-zinc-100">
-                      <RefreshCw className="w-3 h-3" />{t("settings.common.refresh")}
-                    </button>
-                  )}
-                </div>
-                {ready ? (
-                  <StyledSelect
-                    compact
-                    id={`${service}-${idx}-folder`}
-                    value={d.rootFolder}
-                    onChange={(e) => update(d.id, { rootFolder: e.target.value })}
-                  >
-                    <option value="">{t("settings.arr.serviceDefault", { label })}</option>
-                    {/* If the saved folder is no longer on the server, the select
-                        would silently show the first option ("default") while
-                        still holding the old value — so list it, marked
-                        "not found", instead of hiding it. */}
-                    {d.rootFolder && !ready.rootFolders.some((f) => f.path === d.rootFolder) && (
-                      <option value={d.rootFolder}>{t("settings.arr.notFoundOnServer", { value: d.rootFolder })}</option>
-                    )}
-                    {ready.rootFolders.map((f) => (
-                      <option key={f.path} value={f.path}>{f.path}</option>
-                    ))}
-                  </StyledSelect>
-                ) : (
-                  <p className="text-xs text-zinc-500 h-8 flex items-center">{optsNote}</p>
-                )}
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor={`${service}-${idx}-profile`}>{t("settings.arr.qualityProfile")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
-                {ready ? (
-                  <StyledSelect
-                    compact
-                    id={`${service}-${idx}-profile`}
-                    value={d.qualityProfileId}
-                    onChange={(e) => update(d.id, { qualityProfileId: e.target.value })}
-                  >
-                    <option value="">{t("settings.arr.serviceDefault", { label })}</option>
-                    {d.qualityProfileId && !ready.qualityProfiles.some((p) => String(p.id) === d.qualityProfileId) && (
-                      <option value={d.qualityProfileId}>{t("settings.arr.notFoundOnServer", { value: t("settings.arr.profileNumber", { id: d.qualityProfileId }) })}</option>
-                    )}
-                    {ready.qualityProfiles.map((p) => (
-                      <option key={p.id} value={String(p.id)}>{p.name}</option>
-                    ))}
-                  </StyledSelect>
-                ) : (
-                  <p className="text-xs text-zinc-500 h-8 flex items-center">{optsNote}</p>
-                )}
-              </div>
-            </div>
-
-            {/* A fixed list, so it shows right away with no fetch. Sonarr's
-                language profile below DOES need the fetch (only Sonarr v3
-                provides that list). */}
-            {service === "radarr" && (
-              <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
-                <div className="space-y-1.5">
-                  <Label htmlFor={`${service}-${idx}-min-availability`}>{t("settings.arr.minAvailability")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
-                  <StyledSelect
-                    compact
-                    id={`${service}-${idx}-min-availability`}
-                    value={d.minimumAvailability}
-                    onChange={(e) => update(d.id, { minimumAvailability: e.target.value })}
-                  >
-                    <option value="">{t("settings.arr.serviceDefault", { label })}</option>
-                    {MINIMUM_AVAILABILITY_OPTIONS.map((o) => (
-                      <option key={o.value} value={o.value}>{t(o.labelKey)}</option>
-                    ))}
-                  </StyledSelect>
-                  <p className="text-xs text-zinc-500">{t("settings.arr.minAvailabilityHelp")}</p>
-                </div>
-              </div>
-            )}
-
-            {service === "sonarr" && languageProfiles.length > 0 && (
-              <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
-                <div className="space-y-1.5">
-                  <Label htmlFor={`${service}-${idx}-language-profile`}>{t("settings.arr.languageProfile")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
-                  <StyledSelect
-                    compact
-                    id={`${service}-${idx}-language-profile`}
-                    value={d.languageProfileId}
-                    onChange={(e) => update(d.id, { languageProfileId: e.target.value })}
-                  >
-                    <option value="">{t("settings.arr.serviceDefault", { label })}</option>
-                    {d.languageProfileId && !languageProfiles.some((p) => String(p.id) === d.languageProfileId) && (
-                      <option value={d.languageProfileId}>{t("settings.arr.notFoundOnServer", { value: t("settings.arr.profileNumber", { id: d.languageProfileId }) })}</option>
-                    )}
-                    {languageProfiles.map((p) => (
-                      <option key={p.id} value={String(p.id)}>{p.name}</option>
-                    ))}
-                  </StyledSelect>
-                  <p className="text-xs text-zinc-500">{t("settings.arr.languageProfileHelp")}</p>
-                </div>
-              </div>
-            )}
-
-            <div className="space-y-1.5">
-              <Label htmlFor={`${service}-${idx}-hook`}>{t("settings.arr.webhookSecret")} <span className="text-zinc-500">{t("settings.arr.webhookSecretHint", { label })}</span></Label>
-              <div className="flex gap-2">
-                <Input
-                  id={`${service}-${idx}-hook`}
-                  type="text"
-                  value={d.webhookSecret}
-                  onChange={(e) => update(d.id, { webhookSecret: e.target.value })}
-                  placeholder={d.hasWebhookSecret ? SECRET_MASK_SENTINEL : t("settings.arr.webhookSecretPlaceholder")}
-                  className="bg-zinc-800 border-zinc-700 font-mono"
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="shrink-0 border-zinc-700 text-zinc-300 hover:text-zinc-100"
-                  onClick={() => update(d.id, { webhookSecret: generateSecret() })}
-                >
-                  {t("settings.arr.generate")}
-                </Button>
-              </div>
-              {d.webhookSecret && (
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2">
-                    <span className="flex-1 font-mono text-xs text-zinc-300 truncate">{webhookUrl(d.webhookSecret)}</span>
-                    <button type="button" onClick={() => copyHook(d.id, d.webhookSecret)} className="shrink-0 p-2 -m-2 text-zinc-500 hover:text-zinc-100 transition-colors" aria-label={t("settings.arr.copyWebhook")}>
-                      {copiedHook === d.id ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
-                    </button>
-                  </div>
-                  <p className="text-xs text-zinc-500">{t("settings.arr.webhookHelp", { label })}</p>
-                </div>
-              )}
-              {d.hasWebhookSecret && !d.webhookSecret && (
-                <p className="text-xs text-zinc-500">{t("settings.arr.webhookSaved")}</p>
-              )}
-            </div>
-
-            <div className="flex flex-wrap gap-x-6 gap-y-2 pt-1">
-              <label className="flex items-center gap-2 text-sm text-zinc-300">
-                <input type="checkbox" checked={d.animeOnly} onChange={(e) => update(d.id, { animeOnly: e.target.checked })} />
-                {t("settings.arr.autoRouteAnime")}
-              </label>
-              <label className="flex items-center gap-2 text-sm text-zinc-300">
-                <input type="checkbox" checked={d.restricted} onChange={(e) => update(d.id, { restricted: e.target.checked })} />
-                {t("settings.instances.restricted")}
-              </label>
-              <label className="flex items-center gap-2 text-sm text-zinc-300">
-                <input type="checkbox" checked={d.serverAll} onChange={(e) => update(d.id, { serverAll: e.target.checked })} />
-                {t("settings.arr.openToAll")}
-              </label>
-              <label className="flex items-center gap-2 text-sm text-zinc-300">
-                <input type="checkbox" checked={d.skipLibraryCheck} onChange={(e) => update(d.id, { skipLibraryCheck: e.target.checked })} />
-                {t("settings.arr.separateLibrary")}
-              </label>
-            </div>
-
-            <div className="flex items-center justify-between pt-1">
-              {test?.version && <span className="text-xs text-green-400 flex items-center gap-1"><CheckCircle className="w-3.5 h-3.5" />{t("settings.arr.connectedVersion", { version: test.version })}</span>}
-              {test?.error && <span className="text-xs text-red-400 flex items-center gap-1"><XCircle className="w-3.5 h-3.5" />{test.error}</span>}
-              {!test && <span />}
-              {confirmRemove !== d.id && (
-                <button
-                  type="button"
-                  // A never-saved draft has nothing on the server to delete, so
-                  // drop it at once; only ask for confirmation on a saved one.
-                  onClick={() => (d.isNew ? removeInstance(d.id) : setConfirmRemove(d.id))}
-                  className="flex items-center gap-1 min-h-8 px-2 -my-2 -mr-2 text-xs text-red-400 hover:text-[var(--ds-danger-hover)]"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />{t("settings.common.remove")}
-                </button>
-              )}
-            </div>
-
-            {/* Removal only happens on Save, because the server replaces the
-                whole instance list at once. The message spells out what is
-                lost: the API key and webhook secret are encrypted and can't be
-                recovered. Requests already sent to this instance are kept. */}
-            {confirmRemove === d.id && (
-              <div className="rounded-md border border-red-500/40 bg-red-500/10 p-3 space-y-2">
-                <p className="text-xs text-red-400">
-                  {t("settings.arr.confirmRemove", { name: d.name.trim() || d.slug || t("settings.arr.thisInstance"), label })}{" "}
-                  <strong>{t("settings.arr.confirmRemoveKept")}</strong>
-                </p>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => removeInstance(d.id)}
-                    autoFocus
-                    className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />{t("settings.arr.removeInstance")}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setConfirmRemove(null)}
-                    className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
-                  >
-                    {t("settings.common.cancel")}
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        );
-      })}
+      {drafts.map((d, idx) => (
+        <InstanceCard
+          key={d.id}
+          service={service}
+          draft={d}
+          idx={idx}
+          test={tests[d.slug]}
+          options={optionsBySlug[d.slug]}
+          confirmingRemove={confirmRemove === d.id}
+          onUpdate={(patch) => update(d.id, patch)}
+          onRefreshOptions={() => void fetchOptions(d.slug)}
+          onAskRemove={() => (d.isNew ? removeInstance(d.id) : setConfirmRemove(d.id))}
+          onRemove={() => removeInstance(d.id)}
+          onCancelRemove={() => setConfirmRemove(null)}
+        />
+      ))}
       </fieldset>
       )}
 
@@ -667,7 +261,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
         {confirmRefresh ? (
           <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-400">
             {t("settings.media.discardPrompt")}
-            <button type="button" onClick={load} disabled={saving} className="min-h-8 px-2 text-red-400 hover:underline font-medium disabled:opacity-50">{t("settings.media.discard")}</button>
+            <button type="button" onClick={() => void load()} disabled={saving} className="min-h-8 px-2 text-red-400 hover:underline font-medium disabled:opacity-50">{t("settings.media.discard")}</button>
             <button type="button" onClick={() => setConfirmRefresh(false)} className="min-h-8 px-2 text-zinc-500 hover:text-zinc-100">{t("settings.common.cancel")}</button>
           </span>
         ) : (
@@ -676,13 +270,13 @@ function ServiceInstances({ service }: { service: ArrService }) {
       </div>
       {/* On its own line so a long save error wraps instead of running off
           the card beside the buttons at phone width. */}
-      {status === "ok" && <p className="text-sm text-green-400 flex items-center gap-1.5"><CheckCircle className="w-4 h-4 shrink-0" />{message}</p>}
-      {status === "error" && <p className="text-sm text-red-400 flex items-center gap-1.5"><XCircle className="w-4 h-4 shrink-0" />{message}</p>}
+      {status === "ok" && <p role="status" className="text-sm text-green-400 flex items-center gap-1.5"><CheckCircle className="w-4 h-4 shrink-0" />{message}</p>}
+      {status === "error" && <p role="alert" className="text-sm text-red-400 flex items-center gap-1.5"><XCircle className="w-4 h-4 shrink-0" />{message}</p>}
       {/* The save went through, but requests still pointed at an instance it
           removed: they can't be approved or pushed any more (the slug's
           connection is gone — guardrail 32) until re-routed or declined. */}
       {status === "ok" && strandedRemoved.length > 0 && (
-        <p className="text-sm text-amber-400 flex items-start gap-1.5">
+        <p role="status" className="text-sm text-amber-400 flex items-start gap-1.5">
           <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
           <span>
             {t("settings.arr.removedOpenRequests", {
@@ -695,12 +289,314 @@ function ServiceInstances({ service }: { service: ArrService }) {
         </p>
       )}
       {loadFailed && (
-        <p className="text-sm text-red-400 flex items-center gap-1.5">
+        <p role="alert" className="text-sm text-red-400 flex items-center gap-1.5">
           <XCircle className="w-4 h-4 shrink-0" />
           {t("settings.arr.loadFailed")}
         </p>
       )}
       <p className="text-xs text-zinc-500">{service === "radarr" ? t("settings.arr.sharedEndpointsMovies") : t("settings.arr.sharedEndpointsTv")}</p>
+    </div>
+  );
+}
+
+
+// One named instance's editor card. Its "copied" tick is its own (the card is
+// keyed by the draft id, so it never moves to a neighbour after a removal).
+function InstanceCard({
+  service, draft: d, idx, test, options, confirmingRemove,
+  onUpdate, onRefreshOptions, onAskRemove, onRemove, onCancelRemove,
+}: {
+  service: ArrService;
+  draft: Draft;
+  idx: number;
+  test: TestResult | undefined;
+  options: CardOptions;
+  confirmingRemove: boolean;
+  onUpdate: (patch: Partial<Draft>) => void;
+  onRefreshOptions: () => void;
+  // A never-saved draft has nothing on the server to delete, so the caller
+  // drops it at once; only a saved one asks for confirmation.
+  onAskRemove: () => void;
+  onRemove: () => void;
+  onCancelRemove: () => void;
+}) {
+  const t = useT();
+  const { copied, copy } = useCopyFeedback();
+  const label = service === "radarr" ? "Radarr" : "Sonarr";
+  // Full webhook URL the admin pastes into Radarr/Sonarr (the ?token= form —
+  // guardrail 2). Only shown after loading, which happens in the browser, so
+  // `window` exists; the typeof check is just a safety net. A blocked
+  // clipboard leaves the URL on screen to copy by hand.
+  const webhookUrl = (secret: string) =>
+    `${typeof window !== "undefined" ? window.location.origin : ""}${withBasePath(`/api/webhooks/${service}`)}?token=${encodeURIComponent(secret)}`;
+  const opts = options;
+  // The loaded options, or null while loading / after an error / before a
+  // save — one narrowed value instead of casting `opts` at every use.
+  const ready: ArrOptions | null = opts && typeof opts === "object" ? opts : null;
+  const languageProfiles = ready?.languageProfiles ?? [];
+  // Why the dropdowns aren't showing yet, for the note under each field.
+  const optsNote = opts === "loading"
+    ? t("settings.arr.optsLoading")
+    : opts === "error"
+      ? t("settings.arr.optsError")
+      : t("settings.arr.optsSaveFirst");
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
+      <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
+        <div className="space-y-1.5">
+          <Label htmlFor={`${service}-${idx}-slug`}>{t("settings.instances.slug")}</Label>
+          <Input
+            id={`${service}-${idx}-slug`}
+            value={d.slug}
+            disabled={!d.isNew}
+            onChange={(e) => onUpdate({ slug: e.target.value.toLowerCase() })}
+            placeholder="anime"
+            className="bg-zinc-800 border-zinc-700 font-mono disabled:opacity-60"
+          />
+          {!d.isNew && <p className="text-xs text-zinc-500">{t("settings.instances.slugFixed")}</p>}
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor={`${service}-${idx}-name`}>{t("settings.instances.displayName")}</Label>
+          <Input
+            id={`${service}-${idx}-name`}
+            value={d.name}
+            onChange={(e) => onUpdate({ name: e.target.value })}
+            placeholder="Anime"
+            className="bg-zinc-800 border-zinc-700"
+          />
+        </div>
+      </div>
+
+      <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
+        <div className="space-y-1.5">
+          <Label htmlFor={`${service}-${idx}-url`}>{t("settings.arr.url", { label })}</Label>
+          <Input
+            id={`${service}-${idx}-url`}
+            type="url"
+            value={d.url}
+            onChange={(e) => onUpdate({ url: e.target.value })}
+            placeholder={service === "radarr" ? "http://radarr-anime:7878" : "http://sonarr-anime:8989"}
+            className="bg-zinc-800 border-zinc-700 font-mono"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor={`${service}-${idx}-key`}>{t("settings.arr.apiKey")}</Label>
+          <Input
+            id={`${service}-${idx}-key`}
+            type="password"
+            // A secret for Radarr/Sonarr, not a login: a browser or
+            // password manager must not fill the Summonarr password in.
+            autoComplete="new-password"
+            data-1p-ignore
+            data-lpignore="true"
+            value={d.apiKey}
+            onChange={(e) => onUpdate({ apiKey: e.target.value })}
+            placeholder={d.hasApiKey ? SECRET_MASK_SENTINEL : t("settings.arr.apiKeyPlaceholder")}
+            className="bg-zinc-800 border-zinc-700 font-mono"
+          />
+          {/* Same "saved, hidden" helper the notification channels show —
+              the masked placeholder alone doesn't say whether a blank
+              field means "nothing saved" or "saved, write-only". */}
+          {d.hasApiKey && !d.apiKey && (
+            <p className="text-xs text-zinc-500">{t("settings.form.agents.secretKeep")}</p>
+          )}
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor={`${service}-${idx}-external-url`}>{t("settings.form.arr.externalUrl")}</Label>
+        <Input
+          id={`${service}-${idx}-external-url`}
+          type="url"
+          value={d.externalUrl}
+          onChange={(e) => onUpdate({ externalUrl: e.target.value })}
+          placeholder={service === "radarr" ? "https://radarr-anime.example.com" : "https://sonarr-anime.example.com"}
+          className="bg-zinc-800 border-zinc-700 font-mono"
+        />
+        <p className="text-xs text-zinc-500">{t("settings.form.arr.externalUrlHelp", { service: label })}</p>
+      </div>
+
+      <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <Label htmlFor={`${service}-${idx}-folder`}>{t("settings.arr.rootFolder")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
+            {ready && (
+              <button type="button" onClick={onRefreshOptions} className="flex items-center gap-1 min-h-8 px-2 -my-2 -mr-2 text-xs text-zinc-500 hover:text-zinc-100">
+                <RefreshCw className="w-3 h-3" />{t("settings.common.refresh")}
+              </button>
+            )}
+          </div>
+          {ready ? (
+            <ArrProfileSelect
+              id={`${service}-${idx}-folder`}
+              value={d.rootFolder}
+              onChange={(rootFolder) => onUpdate({ rootFolder })}
+              defaultLabel={t("settings.arr.serviceDefault", { label })}
+              options={ready.rootFolders.map((f) => ({ value: f.path, label: f.path }))}
+              staleLabel={(value) => t("settings.arr.notFoundOnServer", { value })}
+            />
+          ) : (
+            <p className="text-xs text-zinc-500 h-8 flex items-center">{optsNote}</p>
+          )}
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor={`${service}-${idx}-profile`}>{t("settings.arr.qualityProfile")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
+          {ready ? (
+            <ArrProfileSelect
+              id={`${service}-${idx}-profile`}
+              value={d.qualityProfileId}
+              onChange={(qualityProfileId) => onUpdate({ qualityProfileId })}
+              defaultLabel={t("settings.arr.serviceDefault", { label })}
+              options={ready.qualityProfiles.map((p) => ({ value: String(p.id), label: p.name }))}
+              staleLabel={(id) => t("settings.arr.notFoundOnServer", { value: t("settings.arr.profileNumber", { id }) })}
+            />
+          ) : (
+            <p className="text-xs text-zinc-500 h-8 flex items-center">{optsNote}</p>
+          )}
+        </div>
+      </div>
+
+      {/* A fixed list, so it shows right away with no fetch. Sonarr's
+          language profile below DOES need the fetch (only Sonarr v3
+          provides that list). */}
+      {service === "radarr" && (
+        <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
+          <div className="space-y-1.5">
+            <Label htmlFor={`${service}-${idx}-min-availability`}>{t("settings.arr.minAvailability")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
+            <StyledSelect
+              compact
+              id={`${service}-${idx}-min-availability`}
+              value={d.minimumAvailability}
+              onChange={(e) => onUpdate({ minimumAvailability: e.target.value })}
+            >
+              <option value="">{t("settings.arr.serviceDefault", { label })}</option>
+              {MINIMUM_AVAILABILITY_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{t(o.labelKey)}</option>
+              ))}
+            </StyledSelect>
+            <p className="text-xs text-zinc-500">{t("settings.arr.minAvailabilityHelp")}</p>
+          </div>
+        </div>
+      )}
+
+      {service === "sonarr" && languageProfiles.length > 0 && (
+        <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
+          <div className="space-y-1.5">
+            <Label htmlFor={`${service}-${idx}-language-profile`}>{t("settings.arr.languageProfile")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
+            <ArrProfileSelect
+              id={`${service}-${idx}-language-profile`}
+              value={d.languageProfileId}
+              onChange={(languageProfileId) => onUpdate({ languageProfileId })}
+              defaultLabel={t("settings.arr.serviceDefault", { label })}
+              options={languageProfiles.map((p) => ({ value: String(p.id), label: p.name }))}
+              staleLabel={(id) => t("settings.arr.notFoundOnServer", { value: t("settings.arr.profileNumber", { id }) })}
+            />
+            <p className="text-xs text-zinc-500">{t("settings.arr.languageProfileHelp")}</p>
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-1.5">
+        <Label htmlFor={`${service}-${idx}-hook`}>{t("settings.arr.webhookSecret")} <span className="text-zinc-500">{t("settings.arr.webhookSecretHint", { label })}</span></Label>
+        <div className="flex gap-2">
+          <Input
+            id={`${service}-${idx}-hook`}
+            type="text"
+            value={d.webhookSecret}
+            onChange={(e) => onUpdate({ webhookSecret: e.target.value })}
+            placeholder={d.hasWebhookSecret ? SECRET_MASK_SENTINEL : t("settings.arr.webhookSecretPlaceholder")}
+            className="bg-zinc-800 border-zinc-700 font-mono"
+          />
+          <Button
+            type="button"
+            variant="outline"
+            className="shrink-0 border-zinc-700 text-zinc-300 hover:text-zinc-100"
+            onClick={() => onUpdate({ webhookSecret: generateSecret() })}
+          >
+            {t("settings.arr.generate")}
+          </Button>
+        </div>
+        {d.webhookSecret && (
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2">
+              <span className="flex-1 font-mono text-xs text-zinc-300 truncate">{webhookUrl(d.webhookSecret)}</span>
+              <button type="button" onClick={() => void copy(webhookUrl(d.webhookSecret))} className="shrink-0 p-2 -m-2 text-zinc-500 hover:text-zinc-100 transition-colors" aria-label={t("settings.arr.copyWebhook")}>
+                {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
+              </button>
+            </div>
+            <p className="text-xs text-zinc-500">{t("settings.arr.webhookHelp", { label })}</p>
+          </div>
+        )}
+        {d.hasWebhookSecret && !d.webhookSecret && (
+          <p className="text-xs text-zinc-500">{t("settings.arr.webhookSaved")}</p>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-x-6 gap-y-2 pt-1">
+        <label className="flex items-center gap-2 text-sm text-zinc-300">
+          <input type="checkbox" checked={d.animeOnly} onChange={(e) => onUpdate({ animeOnly: e.target.checked })} />
+          {t("settings.arr.autoRouteAnime")}
+        </label>
+        <label className="flex items-center gap-2 text-sm text-zinc-300">
+          <input type="checkbox" checked={d.restricted} onChange={(e) => onUpdate({ restricted: e.target.checked })} />
+          {t("settings.instances.restricted")}
+        </label>
+        <label className="flex items-center gap-2 text-sm text-zinc-300">
+          <input type="checkbox" checked={d.serverAll} onChange={(e) => onUpdate({ serverAll: e.target.checked })} />
+          {t("settings.arr.openToAll")}
+        </label>
+        <label className="flex items-center gap-2 text-sm text-zinc-300">
+          <input type="checkbox" checked={d.skipLibraryCheck} onChange={(e) => onUpdate({ skipLibraryCheck: e.target.checked })} />
+          {t("settings.arr.separateLibrary")}
+        </label>
+      </div>
+
+      <div className="flex items-center justify-between pt-1">
+        {test?.version && <span className="text-xs text-green-400 flex items-center gap-1"><CheckCircle className="w-3.5 h-3.5" />{t("settings.arr.connectedVersion", { version: test.version })}</span>}
+        {test?.error && <span className="text-xs text-red-400 flex items-center gap-1"><XCircle className="w-3.5 h-3.5" />{test.error}</span>}
+        {!test && <span />}
+        {!confirmingRemove && (
+          <button
+            type="button"
+            // A never-saved draft has nothing on the server to delete, so
+            // drop it at once; only ask for confirmation on a saved one.
+            onClick={onAskRemove}
+            className="flex items-center gap-1 min-h-8 px-2 -my-2 -mr-2 text-xs text-red-400 hover:text-[var(--ds-danger-hover)]"
+          >
+            <Trash2 className="w-3.5 h-3.5" />{t("settings.common.remove")}
+          </button>
+        )}
+      </div>
+
+      {/* Removal only happens on Save, because the server replaces the
+          whole instance list at once. The message spells out what is
+          lost: the API key and webhook secret are encrypted and can't be
+          recovered. Requests already sent to this instance are kept. */}
+      {confirmingRemove && (
+        <div className="rounded-md border border-red-500/40 bg-red-500/10 p-3 space-y-2">
+          <p className="text-xs text-red-400">
+            {t("settings.arr.confirmRemove", { name: d.name.trim() || d.slug || t("settings.arr.thisInstance"), label })}{" "}
+            <strong>{t("settings.arr.confirmRemoveKept")}</strong>
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onRemove}
+              autoFocus
+              className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
+            >
+              <Trash2 className="w-3.5 h-3.5" />{t("settings.arr.removeInstance")}
+            </button>
+            <button
+              type="button"
+              onClick={onCancelRemove}
+              className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+            >
+              {t("settings.common.cancel")}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

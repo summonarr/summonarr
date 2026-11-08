@@ -7,15 +7,17 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { prisma } from "./prisma";
 import type { IssueGrab } from "@/generated/prisma";
-import { checkBodySize } from "./body-size";
+import { checkBodySize, readBodyBytesCapped } from "./body-size";
 import { checkRateLimit, getClientIp, ipBucketKey } from "./rate-limit";
 import { getArrInstances } from "./arr-instance-registry";
-import { arrSettingKey, DEFAULT_ARR_INSTANCE, type ArrInstanceConfig, type ArrService } from "./arr-instances";
+import { arrSettingKey, DEFAULT_ARR_INSTANCE, effectiveWebhookSecretFrom, LEGACY_WEBHOOK_SECRET_KEY, type ArrInstanceConfig, type ArrService } from "./arr-instances";
 import { checkAndRecordWebhookJson, clearWebhookReplayDigestJson } from "./webhook-replay";
 import { forwardArrHealthEvent } from "./arr-health-notify";
 import { emitNotificationEvent } from "./notify-agents";
 import { notifyAdminGrabCompletedPush } from "./push";
 import { autoResolveIssueForGrab } from "./issue-auto-resolve";
+import { warnOnChange, forgetWarnOnChange } from "./log-dedup";
+import { processSingleton } from "./process-singleton";
 
 const MAX_WEBHOOK_BYTES = 1_048_576;
 const SERVICE_NAME: Record<ArrService, string> = { radarr: "Radarr", sonarr: "Sonarr" };
@@ -30,8 +32,8 @@ export interface ArrWebhookContext<P> {
 /**
  * Authenticate an arr webhook, then hand its event to `dispatch`.
  *
- * `compareSecret` is the route's own SHA-256 + timingSafeEqual compare
- * (guardrail 2). It stays in the route file so the route audit
+ * `compareSecret` is the SHA-256 + timingSafeEqual compare (guardrail 2),
+ * safeCompareStrings called from the route's own handler, so the route audit
  * (scripts/audit-routes.mts), which never follows a guard into an import, can
  * see every webhook handler perform it.
  *
@@ -41,6 +43,23 @@ export interface ArrWebhookContext<P> {
  * Every answer `dispatch` returns keeps it — the 400 for an invalid id
  * included, since a retry of a bad payload can't help.
  */
+// Every configured instance carries its own webhook secret (Setting key
+// <service><Slug>WebhookSecret). The legacy shared `webhookSecret` remains the
+// DEFAULT instance's ("") secret when it has no per-instance secret of its own.
+async function loadInstanceSecrets(service: ArrService, instances: readonly ArrInstanceConfig[]): Promise<Array<{ slug: string; secret: string }>> {
+  const [secretRows, legacyRow] = await Promise.all([
+    prisma.setting.findMany({
+      where: { key: { in: instances.map((i) => arrSettingKey(service, i.slug, "WebhookSecret")) } },
+    }),
+    prisma.setting.findUnique({ where: { key: LEGACY_WEBHOOK_SECRET_KEY } }),
+  ]);
+  const secretByKey = new Map(secretRows.map((r) => [r.key, r.value ?? ""]));
+  return instances.map((inst) => ({
+    slug: inst.slug,
+    secret: effectiveWebhookSecretFrom(inst.slug, secretByKey.get(arrSettingKey(service, inst.slug, "WebhookSecret")), legacyRow?.value),
+  }));
+}
+
 export async function handleArrWebhook<P extends { eventType?: unknown }>(
   req: NextRequest,
   service: ArrService,
@@ -59,22 +78,8 @@ export async function handleArrWebhook<P extends { eventType?: unknown }>(
     return NextResponse.json({ error: "Too Many Requests" }, { status: 429 });
   }
 
-  // Every configured instance carries its own webhook secret (Setting key
-  // <service><Slug>WebhookSecret). The legacy shared `webhookSecret` remains the
-  // DEFAULT instance's ("") secret when it has no per-instance secret of its own.
   const instances = await getArrInstances(service);
-  const [secretRows, legacyRow] = await Promise.all([
-    prisma.setting.findMany({
-      where: { key: { in: instances.map((i) => arrSettingKey(service, i.slug, "WebhookSecret")) } },
-    }),
-    prisma.setting.findUnique({ where: { key: "webhookSecret" } }),
-  ]);
-  const secretByKey = new Map(secretRows.map((r) => [r.key, r.value ?? ""]));
-  const instanceSecrets = instances.map((inst) => {
-    const own = secretByKey.get(arrSettingKey(service, inst.slug, "WebhookSecret")) || "";
-    const secret = own || (inst.slug === DEFAULT_ARR_INSTANCE ? legacyRow?.value || "" : "");
-    return { slug: inst.slug, secret };
-  });
+  const instanceSecrets = await loadInstanceSecrets(service, instances);
 
   if (instanceSecrets.every((i) => i.secret.length === 0)) {
     console.warn(`${scope} secret not configured`);
@@ -94,9 +99,11 @@ export async function handleArrWebhook<P extends { eventType?: unknown }>(
   // oracle). Guardrail 2: keep ?token= + the timing-safe compare; no HMAC.
   let matchedSlug: string | null = null;
   let secret = "";
+  const matched: string[] = [];
   for (const inst of instanceSecrets) {
     const isMatch = token != null && inst.secret.length > 0 && compareSecret(token, inst.secret);
     if (!isMatch) continue;
+    matched.push(inst.slug);
     // Equal-secret collision (misconfig): the DEFAULT instance ("") wins; otherwise
     // the first configured instance in registry order wins (getArrInstances lists
     // the default first, so keeping the first match already yields that ordering).
@@ -110,10 +117,21 @@ export async function handleArrWebhook<P extends { eventType?: unknown }>(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   const arrInstance = matchedSlug;
+  // One secret on several instances can't tell them apart: every event is
+  // handled as the winner's. Said once per unchanged set, never refused (a
+  // refusal would drop the default instance's events too).
+  const sharedKey = `${scope}:shared-secret`;
+  if (matched.length > 1) {
+    const names = matched.map((slug) => slug || "default").join(", ");
+    warnOnChange(sharedKey, names, `${scope} one webhook secret matches several instances (${names}); events are handled as "${arrInstance || "default"}" — give each instance its own secret`);
+  } else {
+    forgetWarnOnChange(sharedKey);
+  }
 
-  const rawBytes = new Uint8Array(await req.arrayBuffer());
-  if (rawBytes.length > MAX_WEBHOOK_BYTES) {
-    console.warn(`${scope} 413 payload too large bytes=${rawBytes.length}`);
+  // Read at most one byte past the cap, never the whole body first.
+  const rawBytes = await readBodyBytesCapped(req, MAX_WEBHOOK_BYTES);
+  if (rawBytes === null) {
+    console.warn(`${scope} 413 payload too large bytes>${MAX_WEBHOOK_BYTES}`);
     return NextResponse.json({ error: "Payload too large" }, { status: 413 });
   }
   const rawBody = new TextDecoder().decode(rawBytes);
@@ -126,6 +144,8 @@ export async function handleArrWebhook<P extends { eventType?: unknown }>(
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
+    // Only the top level is checked here: each route narrows every field it
+    // reads through its payload view (arr-webhook-payload.ts), never `P` itself.
     payload = parsed;
   } catch (err) {
     console.warn(`${scope} 400 invalid JSON:`, err);
@@ -177,6 +197,12 @@ export async function handleArrWebhook<P extends { eventType?: unknown }>(
     return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
   }
 
+  // Pushes a failed delivery left for a later webhook, retried in the
+  // background (throttled, never awaited, never failing this delivery).
+  void retryPendingGrabPushes().catch((err: unknown) => {
+    console.warn(`${scope} grab push retry sweep failed:`, err instanceof Error ? err.message : err);
+  });
+
   try {
     return await dispatch({ payload, arrInstance, instances });
   } catch (err) {
@@ -204,7 +230,7 @@ export async function claimCompletedGrabs(grabs: IssueGrab[], service: ArrServic
   const now = new Date();
   await Promise.all(
     grabs.map(async (grab) => {
-      const retryKey = `grabPushRetry:${grab.id}`;
+      const retryKey = grabPushRetryKey(grab.id);
       if (grab.notifiedAt !== null) {
         // Already emitted. Consume the push-retry marker (CAS): a 0 count
         // means no pending retry, or another delivery already took it.
@@ -227,20 +253,13 @@ export async function claimCompletedGrabs(grabs: IssueGrab[], service: ArrServic
         void autoResolveIssueForGrab(grab, now);
       }
 
-      const outcome = await notifyAdminGrabCompletedPush({
-        userId: grab.triggeredById,
-        title: grab.title,
-        tmdbId: grab.tmdbId,
-        mediaType: grab.mediaType,
-        scope: grab.scope,
-        seasonNumber: grab.seasonNumber,
-        episodeNumber: grab.episodeNumber,
-        issueId: grab.issueId,
-      });
+      const outcome = await notifyAdminGrabCompletedPush(grabPushOf(grab));
       // "failed" → keep notifiedAt (emit stays claimed) and record a push-only
       // retry. "skipped-no-subs" / "skipped-no-keys" → leave notifiedAt set
       // (retrying won't help: the admin has no push subscription or keys set
       // up), but log so an operator can wire up an email/Discord backstop.
+      // "skipped-disabled" → push is switched off for the deployment: nothing
+      // to retry and nothing to log. "delivered" → done.
       if (outcome === "failed") {
         await prisma.setting.createMany({
           data: [{ key: retryKey, value: now.toISOString() }],
@@ -252,4 +271,80 @@ export async function claimCompletedGrabs(grabs: IssueGrab[], service: ArrServic
       }
     }),
   );
+}
+
+const GRAB_PUSH_RETRY_PREFIX = "grabPushRetry:";
+const grabPushRetryKey = (grabId: string) => `${GRAB_PUSH_RETRY_PREFIX}${grabId}`;
+
+type GrabPushFields = Pick<IssueGrab, "triggeredById" | "title" | "tmdbId" | "mediaType" | "scope" | "seasonNumber" | "episodeNumber" | "issueId">;
+const grabPushOf = (grab: GrabPushFields): Parameters<typeof notifyAdminGrabCompletedPush>[0] => ({
+  userId: grab.triggeredById,
+  title: grab.title,
+  tmdbId: grab.tmdbId,
+  mediaType: grab.mediaType,
+  scope: grab.scope,
+  seasonNumber: grab.seasonNumber,
+  episodeNumber: grab.episodeNumber,
+  issueId: grab.issueId,
+});
+
+/** A retry marker is retried only once it is this old: a fresh one belongs to the delivery that wrote it. */
+export const GRAB_PUSH_RETRY_MIN_AGE_MS = 10 * 60_000;
+/** Past this a push no longer helps (the grab is old news): the marker is dropped unsent. */
+export const GRAB_PUSH_RETRY_TTL_MS = 24 * 60 * 60_000;
+/** The sweep runs at most this often per process. */
+export const GRAB_PUSH_RETRY_SWEEP_INTERVAL_MS = 5 * 60_000;
+const MAX_GRAB_PUSH_RETRIES_PER_SWEEP = 20;
+
+const grabPushSweep = processSingleton("arr-webhook:grabPushSweep", () => ({ lastAt: Number.NEGATIVE_INFINITY }));
+
+/**
+ * Retry the web pushes a failed delivery left as `grabPushRetry:<grabId>`.
+ * Before this only a later Download for the SAME title retried one, and the
+ * first claim usually resolved the issue, so the marker stayed forever. Each
+ * marker is claimed by deleting it (a count of 0 means another delivery took
+ * it), the push is retried once, and a push that fails again writes the marker
+ * back with its ORIGINAL time, so the TTL counts from the first failure. The
+ * emit (notifiedAt) is never touched. Throttled per process unless `force`.
+ */
+export async function retryPendingGrabPushes(opts: {
+  now?: Date;
+  force?: boolean;
+  push?: typeof notifyAdminGrabCompletedPush;
+} = {}): Promise<{ retried: number; expired: number }> {
+  const now = opts.now ?? new Date();
+  const nowMs = now.getTime();
+  const out = { retried: 0, expired: 0 };
+  if (!opts.force && nowMs - grabPushSweep.lastAt < GRAB_PUSH_RETRY_SWEEP_INTERVAL_MS) return out;
+  grabPushSweep.lastAt = nowMs;
+  const push = opts.push ?? notifyAdminGrabCompletedPush;
+  const rows = await prisma.setting.findMany({
+    where: { key: { startsWith: GRAB_PUSH_RETRY_PREFIX } },
+    select: { key: true, value: true },
+    take: MAX_GRAB_PUSH_RETRIES_PER_SWEEP,
+  });
+  for (const row of rows) {
+    if (!row.key.startsWith(GRAB_PUSH_RETRY_PREFIX)) continue;
+    const at = Date.parse(row.value ?? "");
+    const age = Number.isFinite(at) ? nowMs - at : Number.POSITIVE_INFINITY;
+    if (age < GRAB_PUSH_RETRY_MIN_AGE_MS) continue;
+    const taken = await prisma.setting.deleteMany({ where: { key: { in: [row.key] } } });
+    if (taken.count === 0) continue;
+    if (age > GRAB_PUSH_RETRY_TTL_MS) {
+      out.expired++;
+      continue;
+    }
+    const grab = await prisma.issueGrab.findUnique({ where: { id: row.key.slice(GRAB_PUSH_RETRY_PREFIX.length) } });
+    if (!grab) continue;
+    out.retried++;
+    if ((await push(grabPushOf(grab))) === "failed") {
+      await prisma.setting.createMany({ data: [{ key: row.key, value: row.value ?? now.toISOString() }], skipDuplicates: true });
+    }
+  }
+  return out;
+}
+
+/** Test seam: let the next sweep run at once. */
+export function _resetGrabPushSweepForTests(): void {
+  grabPushSweep.lastAt = Number.NEGATIVE_INFINITY;
 }

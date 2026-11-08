@@ -48,8 +48,9 @@ test("MediaCard and DiscoverHero share the ratings merge and the availability ch
 
 test("RatingsBar keeps a screen-reader source name for every label compact mode hides", () => {
   const src = readFileSync(new URL("../src/components/media/ratings-bar.tsx", import.meta.url), "utf8");
-  assert.match(src, /\{compact && <span className="sr-only">Metacritic<\/span>\}/);
-  assert.match(src, /\{compact && <span className="sr-only">\{t\("media\.ratings\.trakt"\)\}<\/span>\}/);
-  assert.match(src, /\{compact \? <span className="sr-only">\{t\("media\.ratings\.mdblist"\)\}<\/span> : /);
-  assert.match(src, /\{compact \? <span className="sr-only">\{t\("media\.ratings\.tmdb"\)\}<\/span> : /);
+  // Each source's `lead` (the ratingCells table) is the label compact mode hides.
+  assert.match(src, /lead: compact && <span className="sr-only">Metacritic<\/span>,/);
+  assert.match(src, /lead: compact && <span className="sr-only">\{t\("media\.ratings\.trakt"\)\}<\/span>,/);
+  assert.match(src, /lead: compact \? <span className="sr-only">\{t\("media\.ratings\.mdblist"\)\}<\/span> : /);
+  assert.match(src, /lead: compact \? <span className="sr-only">\{t\("media\.ratings\.tmdb"\)\}<\/span> : /);
 });

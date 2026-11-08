@@ -307,6 +307,16 @@ shadowPrismaClientMethod(prisma, "$executeRawUnsafe", async (sql: string) => {
   onRaw?.(sql);
   return 1;
 });
+// A parameterised statement (one Prisma.sql value) is recorded with its values
+// written in, so both forms read alike.
+const renderSql = (q: { strings: readonly string[]; values: readonly unknown[] }) =>
+  q.strings.reduce((acc, part, i) => acc + part + (i < q.values.length ? String(q.values[i]) : ""), "");
+shadowPrismaClientMethod(prisma, "$executeRaw", async (q: { strings: readonly string[]; values: readonly unknown[] }) => {
+  const sql = renderSql(q);
+  rawSql.push(sql);
+  onRaw?.(sql);
+  return 1;
+});
 
 const credentialsRoute = await import("../src/app/api/auth/sign-in/credentials/route.ts");
 const mfaRoute = await import("../src/app/api/auth/sign-in/mfa/route.ts");
@@ -1077,7 +1087,7 @@ test("M1: a passkey becoming the FIRST factor discards a pending authenticator s
 // re-read the factor state inside it. `onRaw` fires when the lock is requested —
 // the moment a parallel enrollment that committed meanwhile becomes visible.
 
-const MFA_LOCK_SQL = (userId: string) => `SELECT pg_advisory_xact_lock(${MFA_USER_LOCK_NAMESPACE}, ${mfaUserLockKey(userId)})`;
+const MFA_LOCK_SQL = (userId: string) => `SELECT pg_advisory_xact_lock(${MFA_USER_LOCK_NAMESPACE}::int, ${mfaUserLockKey(userId)}::int)`;
 function onFirstLock(userId: string, fn: () => void): void {
   let fired = false;
   onRaw = (sql) => {
@@ -1365,6 +1375,25 @@ test("M2: a correct code resets the consecutive-failure counter", async () => {
   assert.equal(u.mfaLockedUntil, null);
 });
 
+test("M2: a failed lookup for the lockout's audit row never fails the request that imposed the lockout", async () => {
+  // The lockout is committed before it is reported, so the report is
+  // best-effort: a 500 here would hide the 429 and the audit row both.
+  const u = await seedUser({ mfaFailedAttempts: MFA_LOCKOUT_THRESHOLD - 1 });
+  const key = seedTotp(u.id as string);
+  const wrong = currentCode(key) === "000000" ? "111111" : "000000";
+  const ch = await challengeFor(u);
+  onUserRead = () => {
+    if (u.mfaLockedUntil) throw new Error("connection reset");
+  };
+  const res = await mfa({ mfaToken: ch.mfaToken, method: "totp", code: wrong });
+  assert.equal(res.status, 429);
+  assert.ok(u.mfaLockedUntil instanceof Date, "the lockout stands");
+  await new Promise((r) => setImmediate(r));
+  const rows = audit.filter((a) => JSON.parse(a.details as string).reason === "mfa_lockout");
+  assert.equal(rows.length, 1, "the lockout is still audited");
+  assert.equal(rows[0].userName, "unknown");
+});
+
 test("M2: lockouts escalate (15 min, doubling, capped at 24 h) and a second lockout lasts 30 minutes", async () => {
   assert.deepEqual([0, 1, 2, 3, 6, 7, 30].map((n) => lockoutDurationMs(n) / 60_000), [15, 30, 60, 120, 960, 1440, 1440]);
   const u = await seedUser({ mfaLockoutCount: 1, mfaLockedUntil: new Date(Date.now() - 60_000) });
@@ -1579,7 +1608,7 @@ test("L1: the password fingerprint is keyed by an HKDF subkey, NOT the raw sessi
 test("L4: recovery-code writes take the per-user MFA advisory lock BEFORE counting", async () => {
   const order: string[] = [];
   const tx = {
-    $executeRawUnsafe: async (sql: string) => { order.push(sql); return 1; },
+    $executeRaw: async (q: { strings: readonly string[]; values: readonly unknown[] }) => { order.push(renderSql(q)); return 1; },
     mfaRecoveryCode: {
       count: async () => { order.push("count"); return 0; },
       deleteMany: async () => { order.push("deleteMany"); return { count: 0 }; },
@@ -1588,7 +1617,7 @@ test("L4: recovery-code writes take the per-user MFA advisory lock BEFORE counti
   };
   const out = await ensureRecoveryCodesInTx(tx as never, "user-x");
   assert.equal(out!.length, 10);
-  assert.match(order[0], new RegExp(`^SELECT pg_advisory_xact_lock\\(${MFA_USER_LOCK_NAMESPACE}, ${mfaUserLockKey("user-x")}\\)$`));
+  assert.equal(order[0], `SELECT pg_advisory_xact_lock(${MFA_USER_LOCK_NAMESPACE}::int, ${mfaUserLockKey("user-x")}::int)`);
   assert.equal(order[1], "count", "the count runs under the lock");
   assert.ok(mfaUserLockKey("user-x") >= 0 && mfaUserLockKey("user-x") <= 0x7fffffff, "fits the (int, int) overload");
 });

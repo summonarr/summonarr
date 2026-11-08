@@ -61,6 +61,7 @@
   "shared.upload.chunkFailed": "L’envoi de la partie {chunk} sur {total} a échoué (HTTP {status}).",
   "shared.upload.nonJson": "Le serveur a envoyé une réponse inattendue. La requête a probablement été redirigée, par exemple vers la page de connexion.",
   "shared.upload.noCompletion": "L’envoi est terminé, mais le serveur n’a jamais confirmé la restauration.",
+  "shared.upload.empty": "Le fichier de sauvegarde est vide.",
   "shared.upload.network": "L’envoi a échoué. Vérifiez votre connexion et réessayez.",
   "shared.upload.cancelled": "Envoi annulé."
 }

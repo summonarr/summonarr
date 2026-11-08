@@ -107,16 +107,20 @@ const itemsOf = (s: SchemaNode | undefined) => s?.items;
 
 test("admin user PATCH answers { id } plus the one field group it applied; disable, re-enable, purge and 2FA reset answer { ok: true }", async () => {
   const src = handlerSource("/admin/users/{id}", "patch");
+  // The editable field lists live beside the route (admin-user-fields.ts).
+  const fields = libSource("admin-user-fields.ts");
   const sf = parse(src);
   const fieldKeys = new Set<string>(["id"]);
   const visit = (n: ts.Node) => {
     if (ts.isCallExpression(n) && n.expression.getText(sf) === "commitField") {
-      const arg = n.arguments[2];
+      // commitField(ctx, write, audit, answer, opts?)
+      const arg = n.arguments[3];
       assert.ok(arg && ts.isObjectLiteralExpression(arg), "commitField's answer is an object literal");
       for (const k of objectLiteralKeys(arg, sf)) {
         if (k === "[quotaField]") ["movieQuotaLimit", "movieQuotaDays", "tvQuotaLimit", "tvQuotaDays"].forEach((q) => fieldKeys.add(q));
         else if (k === "[notifKey]") {
-          const notif = /const notifKeys: NotifKey\[\] = \[([^\]]*)\]/.exec(src)?.[1] ?? "";
+          const notif = /export const USER_NOTIF_KEYS = \[([^\]]*)\] as const;/.exec(fields)?.[1] ?? "";
+          assert.ok(notif, "the notification switches are listed in USER_NOTIF_KEYS");
           for (const m of notif.matchAll(/"(\w+)"/g)) fieldKeys.add(m[1]);
         } else fieldKeys.add(k);
       }
@@ -124,8 +128,8 @@ test("admin user PATCH answers { id } plus the one field group it applied; disab
     ts.forEachChild(n, visit);
   };
   visit(sf);
-  // The quota branch picks its field from QUOTA_FIELDS; the role branch answers { id, role }.
-  assert.match(routeSource("/admin/users/{id}"), /const QUOTA_FIELDS = \["movieQuotaLimit", "movieQuotaDays", "tvQuotaLimit", "tvQuotaDays"\] as const;/);
+  // The quota handler's field is one of USER_QUOTA_FIELDS; the role handler answers { id, role }.
+  assert.match(fields, /export const USER_QUOTA_FIELDS = \["movieQuotaLimit", "movieQuotaDays", "tvQuotaLimit", "tvQuotaDays"\] as const;/);
   assert.match(src, /return commitField\([\s\S]*?\{ \[quotaField\]: nextVal \}/);
   assert.ok(jsonBodyKeys(src).some((k) => k.join() === "id,role"), "the role branch answers { id, role }");
   fieldKeys.add("role");
@@ -212,7 +216,8 @@ test("the never-watched page documents its title and season rows, the applied qu
   assert.deepEqual([...(props(titleRow).state?.enum ?? [])].sort(), states);
   assert.deepEqual([...(props(seasonRow).state?.enum ?? [])].sort(), states);
   assert.deepEqual((props(titleRow).reason?.enum ?? []).filter((r) => r !== null).sort(), unionMembers(verdict, "NwReason"));
-  const cleanup = libSource("library-cleanup.ts");
+  // The rule and exclusion unions live in the zero-import list module library-cleanup.ts re-exports.
+  const cleanup = libSource("library-cleanup-keys.ts");
   assert.deepEqual([...(itemsOf(props(props(titleRow).cleanup).matched)?.enum ?? [])].sort(), unionMembers(cleanup, "CleanupRule"));
   assert.deepEqual([...(itemsOf(props(props(titleRow).cleanup).excludedBy)?.enum ?? [])].sort(), unionMembers(cleanup.replace(/\/\/[^\n]*/g, ""), "CleanupExclusion"));
 
@@ -234,13 +239,15 @@ test("watch sync documents the page's pairs, accounts, suggestions and run state
   const pair = itemsOf(props(get).pairs);
   assert.deepEqual(keysOf(pair), answerKeysAt(handler, ["pairs"]));
   assert.deepEqual(keysOf(props(get).run), answerKeysAt(handler, ["run"]));
-  const serverUser = interfaceFields(routeSource("/admin/watch-sync"), "ServerUserOut");
+  // The page's account and suggestion shapes are built in watch-sync-view.ts.
+  const view = libSource("watch-sync-view.ts");
+  const serverUser = interfaceFields(view, "ServerUserOut");
   for (const s of [props(pair).plex, props(pair).jellyfin, itemsOf(props(get).plexUsers), itemsOf(props(get).jellyfinUsers)]) {
     assert.deepEqual(keysOf(s), serverUser);
   }
   assert.match(handler, /plexUsers: plexUsers\.map\(out\)/);
-  const suggestion = /const suggestions: Array<\{([^}]*)\}>/.exec(handler)?.[1] ?? "";
-  assert.deepEqual(keysOf(itemsOf(props(get).suggestions)), [...suggestion.matchAll(/(\w+): string/g)].map((m) => m[1]).sort());
+  assert.match(handler, /suggestions: watchSyncSuggestions\(/);
+  assert.deepEqual(keysOf(itemsOf(props(get).suggestions)), interfaceFields(view, "WatchSyncSuggestion"));
   const counts = props(pair).counts;
   assert.deepEqual(keysOf(counts), interfaceFields(data, "WatchSyncPairCounts"));
   assert.deepEqual(keysOf(props(counts).toJellyfin), interfaceFields(data, "WatchSyncMarkCounts"));
@@ -248,7 +255,9 @@ test("watch sync documents the page's pairs, accounts, suggestions and run state
   // A run answers runWatchSync's result; a pair stores the same per-pair shape.
   const run = await responseSchema("/admin/watch-sync/run", "get", "200");
   assert.match(routeSource("/admin/watch-sync/run"), /NextResponse\.json\(await runWatchSync\(\{ signal \}\)\)/);
-  assert.match(data, /lastResult: JSON\.parse\(JSON\.stringify\(r\)\)/);
+  // The stored result is a plain JSON copy of the pair's run result.
+  assert.match(data, /lastResult: toJsonValue\(r\)/);
+  assert.match(data, /function toJsonValue\(r: WatchSyncPairResult\)[^{]*\{\s*return JSON\.parse\(JSON\.stringify\(r\)\)/);
   assert.deepEqual(keysOf(run), interfaceFields(data, "WatchSyncRunResult"));
   const pairResult = itemsOf(props(run).pairs);
   assert.deepEqual(keysOf(pairResult), interfaceFields(data, "WatchSyncPairResult"));
@@ -266,7 +275,7 @@ test("watch sync documents the page's pairs, accounts, suggestions and run state
 test("cleanup protection answers the saved row and the removed count", async () => {
   const post = await responseSchema("/admin/cleanup/protect", "post", "201");
   // The upsert answers the whole row (no select), so the item is the model.
-  assert.match(handlerSource("/admin/cleanup/protect", "post"), /const item = await prisma\.cleanupProtection\.upsert\(\{\s*where:[^}]*\}[^}]*\},\s*create:[^\n]*\n\s*update: data,\s*\}\);/);
+  assert.match(handlerSource("/admin/cleanup/protect", "post"), /const item = await prisma\.cleanupProtection\.upsert\(\{\s*where:[^}]*\}[^}]*\},\s*create:[^\n]*\n\s*update: sent,\s*\}\);/);
   assert.deepEqual(keysOf(post), ["item"]);
   assert.deepEqual(keysOf(props(post).item), prismaModelFields("CleanupProtection"));
   const del = await responseSchema("/admin/cleanup/protect", "delete", "200");
@@ -342,14 +351,16 @@ test("/settings documents its masked map, the save's test results and the option
   assert.equal(get.type, "object");
   assert.deepEqual(get.additionalProperties, { type: "string" });
   assert.match(get.description ?? "", /mask/);
-  assert.match(handlerSource("/settings", "get"), /if \(SENSITIVE_KEYS\.has\(r\.key\)\) return \[r\.key, r\.value \? MASKED_VALUE : ""\];/);
-  assert.match(handlerSource("/settings", "get"), /if \(URL_KEYS\.has\(r\.key\) && r\.value\) return \[r\.key, stripUrlUserinfo\(r\.value\)\];/);
+  assert.match(handlerSource("/settings", "get"), /rows\.map\(\(r\) => \[r\.key, presentSettingValue\(r\.key, r\.value\)\]\)/);
+  const registry = libSource("settings-registry.ts");
+  assert.match(registry, /if \(def\?\.sensitive\) return value \? MASKED_VALUE : "";/);
+  assert.match(registry, /if \(def\?\.type\.kind === "url" && value\) return stripUrlUserinfo\(value\);/);
 
   // A 200 carries only passing tests (a failed one answers 422): each probe's
   // okKey, the email test's smtpTested, and the additive `ignored`.
   const patchSrc = handlerSource("/settings", "patch");
   assert.match(patchSrc, /if \(testFailed\) \{[\s\S]*?\{ status: 422 \}/);
-  assert.match(patchSrc, /testResults\.smtpTested = true;/);
+  assert.match(settings, /testResults\.smtpTested = true;/);
   assert.match(patchSrc, /const extra = ignored\.length > 0 \? \{ ignored \} : \{\};/);
   const okKeys = [...settings.matchAll(/okKey: "(\w+)"/g)].map((m) => m[1]);
   assert.ok(okKeys.length >= 5, okKeys.join());
@@ -366,11 +377,11 @@ test("/settings documents its masked map, the save's test results and the option
   assert.deepEqual(keysOf(itemsOf(props(arr).qualityProfiles)), interfaceFields(libSource("arr-title.ts"), "Choice"));
 
   const plexLib = await responseSchema("/settings/plex/libraries", "get", "200");
-  assert.deepEqual(keysOf(itemsOf(plexLib)), interfaceFields(libSource("plex.ts"), "PlexSection"));
-  assert.match(libSource("plex.ts"), /\.filter\(\(d\) => d\.type === "movie" \|\| d\.type === "show"\)/);
+  assert.deepEqual(keysOf(itemsOf(plexLib)), interfaceFields(libSource("plex-library.ts"), "PlexSection"));
+  assert.match(libSource("plex-library.ts"), /\.filter\(\(d\) => d\.type === "movie" \|\| d\.type === "show"\)/);
   const jfLib = await responseSchema("/settings/jellyfin/libraries", "get", "200");
-  assert.deepEqual(keysOf(itemsOf(jfLib)), interfaceFields(libSource("jellyfin.ts"), "JellyfinMediaFolder"));
-  assert.match(libSource("jellyfin.ts"), /\.filter\(\(f\) => f\.CollectionType === "movies" \|\| f\.CollectionType === "tvshows"\)/);
+  assert.deepEqual(keysOf(itemsOf(jfLib)), interfaceFields(libSource("jellyfin-library.ts"), "JellyfinMediaFolder"));
+  assert.match(libSource("jellyfin-library.ts"), /\.filter\(\(f\) => f\.CollectionType === "movies" \|\| f\.CollectionType === "tvshows"\)/);
   assert.deepEqual(props(itemsOf(jfLib)).collectionType?.enum, ["movies", "tvshows"]);
 
   const ratingBodies = successBodies(handlerSource("/settings/test-ratings", "post")).filter((k) => !k.includes("error"));
@@ -378,8 +389,55 @@ test("/settings documents its masked map, the save's test results and the option
 
   // The webhook tokens: exactly the four the route answers, each a plaintext token or null.
   const hooks = await responseSchema("/settings/webhook-urls", "get", "200");
-  assert.deepEqual(keysOf(hooks), answerKeysAt(handlerSource("/settings/webhook-urls", "get"), []));
+  // The route answers one field per entry of its SLOTS table.
+  const slotFields = [...routeSource("/settings/webhook-urls").matchAll(/\{ field: "(\w+)", service:/g)].map((m) => m[1]).sort();
+  assert.deepEqual(keysOf(hooks), slotFields);
+  assert.match(handlerSource("/settings/webhook-urls", "get"), /Object\.fromEntries\(SLOTS\.map\(/);
   for (const k of keysOf(hooks)) assert.equal(props(hooks)[k].nullable, true, k);
   assert.match(hooks.description ?? "", /ADMIN only/);
   assert.match(routeSource("/settings/webhook-urls"), /export const GET = withAdmin\(/);
+});
+
+test("PATCH /admin/server-users/{id} documents every answer its handler sends, and the ADMIN-only link", async () => {
+  const schema = await responseSchema("/admin/server-users/{id}", "patch", "200");
+  const src = routeSource("/admin/server-users/{id}");
+  const answers = jsonBodyKeys(src).filter((k) => !k.includes("error"));
+  // The two ternary branches of the policy answer are one conditional, so read them from the source.
+  assert.match(src, /\{ ok: true, pushed: true \}/);
+  assert.match(src, /\{ ok: true, pushed: false, warning: t\(/);
+  assert.deepEqual(answers, [["ok"]], "the link's answer");
+  assert.deepEqual(keysOf(schema), ["ok", "pushed", "warning"]);
+  assert.deepEqual(schema.required, ["ok"]);
+  assert.match(src, /hasPermission\(session\.user\.permissions, Permission\.ADMIN\)\) \{\n\s+return NextResponse\.json\(\{ error: t\("apiAdmin\.serverUsers\.onlyAdminLink"\) \}, \{ status: 403 \}\);/);
+});
+
+test("the secrets an admin settings write takes are writeOnly, and no admin success answer documents them", async () => {
+  const { getSpec } = await import("./_openapi-spec.mts");
+  const spec = await getSpec();
+  const SECRET = new Set(["apiKey", "webhookSecret", "adminToken", "secret"]);
+  const writes: string[] = [];
+  const leaks: string[] = [];
+  const walk = (node: SchemaNode | undefined, at: string, inResponse: boolean) => {
+    if (!node) return;
+    for (const [k, v] of Object.entries(node.properties ?? {})) {
+      if (SECRET.has(k)) (inResponse ? leaks : writes).push(`${at}.${k}${v.writeOnly === true ? "" : " (not writeOnly)"}`);
+      walk(v, `${at}.${k}`, inResponse);
+    }
+    walk(node.items, `${at}[]`, inResponse);
+    for (const part of [...(node.allOf ?? []), ...(node.oneOf ?? []), ...(node.anyOf ?? [])]) walk(part, at, inResponse);
+  };
+  for (const [path, methods] of Object.entries(spec.paths)) {
+    for (const [method, op] of Object.entries(methods)) {
+      walk(op.requestBody?.content["application/json"]?.schema, `${method.toUpperCase()} ${path} body`, false);
+      for (const [status, res] of Object.entries(op.responses)) {
+        // Only the admin surfaces store secrets; a TOTP setup or QuickConnect answers its own one-time secret by design.
+        if (status.startsWith("2") && /^\/(admin|settings)(\/|$)/.test(path)) {
+          walk(res.content?.["application/json"]?.schema, `${method.toUpperCase()} ${path} ${status}`, true);
+        }
+      }
+    }
+  }
+  assert.ok(writes.length >= 6, writes.join("\n"));
+  assert.deepEqual(writes.filter((w) => w.endsWith("(not writeOnly)")), []);
+  assert.deepEqual(leaks, []);
 });

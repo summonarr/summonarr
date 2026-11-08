@@ -803,6 +803,29 @@ test("watcher: every command ended → onDone once, no further poll", async () =
   assert.equal(h.watcher.isRunning("k"), false);
 });
 
+test("watcher: an onDone that throws is logged under [arr-command-watch], never an unhandled rejection, and the watch still ends", async () => {
+  const h = harness();
+  const errors: string[] = [];
+  const realError = console.error;
+  const rejections: unknown[] = [];
+  const onRejection = (reason: unknown) => { rejections.push(reason); };
+  process.on("unhandledRejection", onRejection);
+  console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
+  try {
+    h.watcher.start("k", target, [5], () => { throw new Error("refresh broke"); });
+    await h.fire();
+    await h.answer({ kind: "ok", states: [st(5, "completed")] });
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(rejections, []);
+    assert.ok(errors.some((e) => e.includes("[arr-command-watch]") && e.includes("refresh broke")), errors.join("\n"));
+    assert.equal(h.watcher.isRunning("k"), false);
+    assert.deepEqual(h.updates.at(-1)?.[1].states, [st(5, "completed")], "the final line was still shown");
+  } finally {
+    console.error = realError;
+    process.off("unhandledRejection", onRejection);
+  }
+});
+
 test("watcher: stop() while a read is out — its answer is dropped: no update, no onDone, no poll", async () => {
   const h = harness();
   let done = 0;
@@ -978,8 +1001,8 @@ test("the four pages no longer guess completion with a fixed timer — they foll
   const pages: Array<[string, RegExp]> = [
     ["arr-title/title-manager.tsx", /onDone: reread \? reload : undefined/],
     ["arr-title/files-tab.tsx", /watch\("rename",[^;]*onDone: \(\) => void load\(\)/],
-    ["arr-download-history.tsx", /watchCommand\("clear",[\s\S]*?onDone: \(\) => void loadRef\.current\(\)/],
-    ["arr-system.tsx", /watch\(key, \{ service, instance \}, \[id\], \{ pendingText: done, onDone: \(\) => void load\(\) \}\)/],
+    ["arr-download-history.tsx", /watchCommand\("clear",[\s\S]*?onDone: \(\) => void reload\(\)/],
+    ["arr-system-tasks.tsx", /watch\(key, \{ service, instance \}, \[id\], \{ pendingText: done, onDone: \(\) => void load\(\) \}\)/],
   ];
   for (const [file, follows] of pages) {
     const code = src(file);

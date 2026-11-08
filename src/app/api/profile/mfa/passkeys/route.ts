@@ -22,6 +22,7 @@ import {
   webAuthnConfigFromEnv,
   WebAuthnError,
   type RegistrationResponseJSON,
+  type VerifiedRegistration,
 } from "@/lib/mfa/webauthn";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
@@ -39,6 +40,62 @@ import { isPrismaErrorCode } from "@/lib/prisma-errors";
 //
 // When this is the account's FIRST second factor the response carries ten
 // one-time recovery codes and every OTHER session is signed out.
+type RegisterOutcome =
+  | { kind: "added"; recoveryCodes: string[] | null; firstFactor: boolean; revokedSessionIds: string[] }
+  | { kind: "gained-factor" }
+  | { kind: "max" };
+
+/**
+ * Stores the verified passkey under the per-user MFA lock, re-judging the
+ * account's factors there. The first factor also gets the recovery codes, and
+ * signs out the OTHER sessions in this same transaction: a separate one that
+ * failed would 500 a registration that already committed (codes never shown)
+ * and leave those sessions live (6d). A duplicate credential id throws the
+ * unique violation (P2002) to the caller.
+ */
+async function storePasskey(opts: {
+  userId: string;
+  sessionId: string | undefined;
+  factorVerified: boolean;
+  verified: VerifiedRegistration;
+  name: string;
+}): Promise<RegisterOutcome> {
+  const { userId, verified } = opts;
+  return prisma.$transaction(async (tx): Promise<RegisterOutcome> => {
+    // Lock FIRST, then read the factor state inside it: every enrollment
+    // write for this user (another passkey, TOTP setup/enable, recovery
+    // codes) takes the same lock, so this read can't be stale by the time
+    // the credential lands. The route's earlier read is a request old.
+    await lockUserMfaInTx(tx, userId);
+    const state = await getMfaStateInTx(tx, userId);
+    if (state.enabled && !opts.factorVerified) return { kind: "gained-factor" };
+    if (state.passkeys.length >= MAX_PASSKEYS_PER_USER) return { kind: "max" };
+    // The unique credentialId violation, if any, is this tx's FIRST write and
+    // propagates (guardrail 23) — nothing earlier to roll back silently.
+    await tx.webAuthnCredential.create({
+      data: {
+        userId,
+        credentialId: verified.credentialId,
+        publicKey: verified.publicKey,
+        signCount: BigInt(verified.signCount),
+        transports: verified.transports,
+        name: opts.name,
+        aaguid: verified.aaguid,
+        backupEligible: verified.backupEligible,
+        backedUp: verified.backedUp,
+      },
+    });
+    // First factor: a pending authenticator secret issued on the password
+    // alone must not be confirmable once the account has 2FA (totp/enable
+    // takes no password), so it goes.
+    if (!state.enabled) await tx.userTotp.deleteMany({ where: { userId, enabledAt: null } });
+    const recoveryCodes = await ensureRecoveryCodesInTx(tx, userId);
+    const firstFactor = !state.enabled;
+    const revokedSessionIds = firstFactor ? await revokeOtherUserSessionsInTx(tx, userId, opts.sessionId) : [];
+    return { kind: "added", recoveryCodes, firstFactor, revokedSessionIds };
+  });
+}
+
 export const POST = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
@@ -66,14 +123,18 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiAuth.mfa.passkeyResponseMissing") }, { status: 400 });
   }
   // Early answer only (it spends nothing); the authoritative check is the
-  // re-read under the lock below.
+  // re-read under the lock in storePasskey.
   const before = await getMfaState(user.id);
   if (before.enabled && !claims.factorVerified) {
     return NextResponse.json({ error: t("apiAuth.mfa.passkeySetupExpired") }, { status: 400 });
   }
 
-  let verified;
+  let verified: VerifiedRegistration;
   try {
+    // The cast only names the shape: verifyRegistrationResponse treats its
+    // input as untrusted and checks every field it reads (type, ids, the
+    // base64url of each binary field), refusing anything else with a
+    // WebAuthnError — whose code is answered below.
     verified = verifyRegistrationResponse({
       response: parsed.credential as RegistrationResponseJSON,
       expectedChallenge: claims.challenge,
@@ -89,48 +150,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
 
   const name = sanitizePasskeyName(parsed.name);
-
-  let outcome:
-    | { kind: "added"; recoveryCodes: string[] | null; firstFactor: boolean; revokedSessionIds: string[] }
-    | { kind: "gained-factor" }
-    | { kind: "max" };
+  let outcome: RegisterOutcome;
   try {
-    outcome = await prisma.$transaction(async (tx) => {
-      // Lock FIRST, then read the factor state inside it: every enrollment
-      // write for this user (another passkey, TOTP setup/enable, recovery
-      // codes) takes the same lock, so this read can't be stale by the time
-      // the credential lands. The `before` read above is a request old.
-      await lockUserMfaInTx(tx, user.id);
-      const state = await getMfaStateInTx(tx, user.id);
-      if (state.enabled && !claims.factorVerified) return { kind: "gained-factor" as const };
-      if (state.passkeys.length >= MAX_PASSKEYS_PER_USER) return { kind: "max" as const };
-      // The unique credentialId violation, if any, is this tx's FIRST write and
-      // propagates (guardrail 23) — nothing earlier to roll back silently.
-      await tx.webAuthnCredential.create({
-        data: {
-          userId: user.id,
-          credentialId: verified.credentialId,
-          publicKey: verified.publicKey,
-          signCount: BigInt(verified.signCount),
-          transports: verified.transports,
-          name,
-          aaguid: verified.aaguid,
-          backupEligible: verified.backupEligible,
-          backedUp: verified.backedUp,
-        },
-      });
-      // First factor: a pending authenticator secret issued on the password
-      // alone must not be confirmable once the account has 2FA (totp/enable
-      // takes no password), so it goes.
-      if (!state.enabled) await tx.userTotp.deleteMany({ where: { userId: user.id, enabledAt: null } });
-      const recoveryCodes = await ensureRecoveryCodesInTx(tx, user.id);
-      const firstFactor = !state.enabled;
-      // The first factor signs out the OTHER sessions in this same transaction:
-      // a separate one that failed would 500 a registration that already
-      // committed (codes never shown) and leave those sessions live (6d).
-      const revokedSessionIds = firstFactor ? await revokeOtherUserSessionsInTx(tx, user.id, session.sessionId) : [];
-      return { kind: "added" as const, recoveryCodes, firstFactor, revokedSessionIds };
-    });
+    outcome = await storePasskey({ userId: user.id, sessionId: session.sessionId, factorVerified: claims.factorVerified, verified, name });
   } catch (err) {
     if (isPrismaErrorCode(err, "P2002")) {
       return NextResponse.json({ error: t("apiAuth.mfa.passkeyAlreadyRegistered") }, { status: 409 });

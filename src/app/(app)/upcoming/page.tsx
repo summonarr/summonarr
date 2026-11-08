@@ -1,11 +1,11 @@
 export const dynamic = "force-dynamic";
 
 import type { Metadata } from "next";
-import { getUpcomingMovies, getUpcomingTV, type TmdbMedia } from "@/lib/tmdb";
 import { MediaCard } from "@/components/media/media-card";
 import { attachAllAvailability } from "@/lib/attach-all";
-import { prisma } from "@/lib/prisma";
-import { upcomingCutoffDate } from "@/lib/format-release-date";
+import { loadUpcomingTitles } from "@/lib/upcoming-list";
+import { attachRatingsUnified } from "@/lib/omdb-availability";
+import { localizeMedia } from "@/lib/tmdb-localize";
 import { Suspense } from "react";
 import { HideAvailableToggle } from "@/components/media/hide-available-toggle";
 import { requireAppSession } from "@/lib/require-app-session";
@@ -17,7 +17,8 @@ import { PageHeader, EmptyState } from "@/components/ui/design";
 import { PaginationBar } from "@/components/media/pagination-bar";
 import { AlertTriangle, Calendar } from "@/components/icons";
 import Link from "next/link";
-import { getTranslator } from "@/lib/i18n/server";
+import { getContentLocale, getTranslator } from "@/lib/i18n/server";
+import type { Translator } from "@/lib/i18n/translate";
 import { parsePageNumber } from "@/lib/pagination";
 import { first, type PageSearchParams } from "@/lib/search-params";
 import { canRequest } from "@/lib/permissions";
@@ -25,30 +26,6 @@ import { canRequest } from "@/lib/permissions";
 // One screenful, matching POPULAR_PER_PAGE. See the note at the slice below for
 // why this page needed bounding at all.
 const UPCOMING_PER_PAGE = 40;
-
-// Reads still-fresh (within 49h) not-yet-released titles from the UpcomingCacheItem table.
-async function getUpcomingFromCache(): Promise<TmdbMedia[]> {
-  const today = upcomingCutoffDate();
-  const rows = await prisma.upcomingCacheItem.findMany({
-    where: {
-      cachedAt: { gt: new Date(Date.now() - 49 * 60 * 60 * 1000) },
-      releaseDate: { gte: today },
-    },
-    orderBy: { releaseDate: "asc" },
-    take: 500,
-  });
-  return rows.map((r) => ({
-    id: r.tmdbId,
-    mediaType: r.mediaType === "MOVIE" ? "movie" : ("tv" as TmdbMedia["mediaType"]),
-    title: r.title,
-    overview: r.overview,
-    posterPath: r.posterPath,
-    backdropPath: r.backdropPath,
-    releaseDate: r.releaseDate,
-    releaseYear: r.releaseYear,
-    voteAverage: r.voteAverage,
-  }));
-}
 
 // Tab / bookmark / history title — the nav label, in the viewer's language.
 export async function generateMetadata(): Promise<Metadata> {
@@ -78,43 +55,13 @@ export default async function UpcomingPage({
   });
   const canRequestMovie = canRequest(session.user.permissions, "MOVIE", false);
   const canRequestTv = canRequest(session.user.permissions, "TV", false);
-  const raw: TmdbMedia[] = [];
-  let loadFailed = false;
-  try {
-    const today = upcomingCutoffDate();
-
-    let all = await getUpcomingFromCache();
-    const hasMovies = all.some((m) => m.mediaType === "movie");
-    const hasTV = all.some((m) => m.mediaType === "tv");
-    if (!hasMovies || !hasTV) {
-      // Fall back to live TMDB for whichever side the cache is missing — covers
-      // both a cold cache and the transitional state where prior runs cached
-      // currently-airing TV (past first_air_date) that the gte filter now drops.
-      const [movies, tv] = await Promise.all([
-        hasMovies ? Promise.resolve([] as TmdbMedia[]) : getUpcomingMovies(),
-        hasTV ? Promise.resolve([] as TmdbMedia[]) : getUpcomingTV(),
-      ]);
-      all = [...all, ...movies, ...tv];
-    }
-
-    const movies = all.filter((m) => m.mediaType === "movie");
-    const tv = all.filter((m) => m.mediaType === "tv");
-
-    const futureMovies = movies.filter((m) => m.releaseDate && m.releaseDate >= today);
-    const futureTV = tv.filter((m) => m.releaseDate && m.releaseDate >= today);
-
-    const maxLen = Math.max(futureMovies.length, futureTV.length);
-    for (let i = 0; i < maxLen; i++) {
-      if (i < futureMovies.length) raw.push(futureMovies[i]);
-      if (i < futureTV.length) raw.push(futureTV[i]);
-    }
-  } catch (err) {
-    loadFailed = true;
-    console.error("[upcoming] failed to load upcoming titles", err);
-  }
+  const { titles: raw, failed: loadFailed } = await loadUpcomingTitles();
 
   const show4k = await getShow4kVisibility(session);
-  let items = await attachAllAvailability(raw, session?.user.id, { show4k });
+  // Availability for the whole list (hideAvailable filters on it, and the page
+  // count follows the filter); ratings and translations only for the page
+  // shown, below — a cold language would otherwise fetch every title's.
+  let items = await attachAllAvailability(raw, session.user.id, { show4k, skipRatings: true, skipLocalize: true });
 
   if (hideAvailable) {
     // Gate on the user's own server visibility, matching /api/upcoming. Without
@@ -132,15 +79,19 @@ export default async function UpcomingPage({
   // resolving MDBList/OMDB server-side, before the grid finishes filling in.
   // One page is one batch.
   //
-  // The slice happens AFTER enrichment on purpose: hideAvailable filters on
-  // availability, so paginating first would give uneven pages. attachAll is a
-  // fixed handful of bulk queries regardless of list length, so enriching the
-  // full list costs about the same as enriching one page of it.
+  // The slice happens AFTER the availability pass on purpose: hideAvailable
+  // filters on availability, so paginating first would give uneven pages. That
+  // pass is a fixed handful of bulk queries regardless of list length; the
+  // ratings pass (MDBList/OMDB refreshes for every miss) runs on the page only.
   const totalPages = Math.max(1, Math.ceil(items.length / UPCOMING_PER_PAGE));
   // Clamped, not trusted: ?page=99 (or a page that shrank when the user turned
   // on Hide Available) lands on the last real page instead of an empty grid.
   const page = Math.min(totalPages, parsePageNumber(sp.page));
-  const pageItems = items.slice((page - 1) * UPCOMING_PER_PAGE, page * UPCOMING_PER_PAGE);
+  const [rated, contentLocale] = await Promise.all([
+    attachRatingsUnified(items.slice((page - 1) * UPCOMING_PER_PAGE, page * UPCOMING_PER_PAGE)),
+    getContentLocale(),
+  ]);
+  const pageItems = await localizeMedia(rated, contentLocale);
 
   return (
     <div className="ds-page-enter">
@@ -186,39 +137,7 @@ export default async function UpcomingPage({
       />
 
       {items.length === 0 ? (
-        loadFailed ? (
-          <EmptyState
-            icon={AlertTriangle}
-            title={t("browse.upcoming.loadFailed.title")}
-            description={t("browse.upcoming.loadFailed.description")}
-            cta={{ href: "/upcoming", label: t("browse.retry") }}
-          />
-        ) : raw.length === 0 ? (
-          // The TMDB helpers swallow outages into [] and an empty cache plus an
-          // empty answer lands here too, so this can't be blamed on the token.
-          <EmptyState
-            icon={AlertTriangle}
-            title={t("browse.upcoming.unavailable.title")}
-            description={t("browse.upcoming.unavailable.description")}
-            cta={{ href: "/upcoming", label: t("browse.retry") }}
-          />
-        ) : hideAvailable ? (
-          <EmptyState
-            icon={Calendar}
-            title={t("browse.upcoming.none.title")}
-            description={t("browse.upcoming.none.allAvailable")}
-            cta={{ href: "/upcoming", label: t("browse.showAvailable") }}
-          />
-        ) : (
-          // raw had titles but none survived enrichment: the user has hidden
-          // every one of them.
-          <EmptyState
-            icon={Calendar}
-            title={t("browse.upcoming.none.title")}
-            description={t("browse.upcoming.none.allHidden")}
-            cta={{ href: "/hidden", label: t("browse.manageHidden") }}
-          />
-        )
+        <UpcomingEmptyState loadFailed={loadFailed} hadTitles={raw.length > 0} hideAvailable={hideAvailable} t={t} />
       ) : (
         <>
           <div className="ds-media-grid">
@@ -239,5 +158,62 @@ export default async function UpcomingPage({
         </>
       )}
     </div>
+  );
+}
+
+// Why the list is empty, most specific cause first.
+function UpcomingEmptyState({
+  loadFailed,
+  hadTitles,
+  hideAvailable,
+  t,
+}: {
+  loadFailed: boolean;
+  /** Whether any title came back before the viewer's filters. */
+  hadTitles: boolean;
+  hideAvailable: boolean;
+  t: Translator;
+}) {
+  if (loadFailed) {
+    return (
+      <EmptyState
+        icon={AlertTriangle}
+        title={t("browse.upcoming.loadFailed.title")}
+        description={t("browse.upcoming.loadFailed.description")}
+        cta={{ href: "/upcoming", label: t("browse.retry") }}
+      />
+    );
+  }
+  if (!hadTitles) {
+    // The TMDB helpers swallow outages into [] and an empty cache plus an
+    // empty answer lands here too, so this can't be blamed on the token.
+    return (
+      <EmptyState
+        icon={AlertTriangle}
+        title={t("browse.upcoming.unavailable.title")}
+        description={t("browse.upcoming.unavailable.description")}
+        cta={{ href: "/upcoming", label: t("browse.retry") }}
+      />
+    );
+  }
+  if (hideAvailable) {
+    return (
+      <EmptyState
+        icon={Calendar}
+        title={t("browse.upcoming.none.title")}
+        description={t("browse.upcoming.none.allAvailable")}
+        cta={{ href: "/upcoming", label: t("browse.showAvailable") }}
+      />
+    );
+  }
+  // Titles came back but none survived enrichment: the user has hidden every
+  // one of them.
+  return (
+    <EmptyState
+      icon={Calendar}
+      title={t("browse.upcoming.none.title")}
+      description={t("browse.upcoming.none.allHidden")}
+      cta={{ href: "/hidden", label: t("browse.manageHidden") }}
+    />
   );
 }

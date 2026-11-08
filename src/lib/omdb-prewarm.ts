@@ -1,6 +1,6 @@
 import "server-only";
 import { prisma } from "./prisma";
-import { fetchAndCacheOmdbForTmdb, isOmdbQuotaLocked, omdbCacheKey } from "./omdb";
+import { fetchAndCacheOmdbForTmdb, isOmdbQuotaLocked, omdbCacheKey, type OmdbResult } from "./omdb";
 import { collectAllLibraryItems, LIBRARY_PAGE_SIZE } from "./library-iterator";
 import { tmdbDetailsKey } from "./tmdb-cache";
 import { readDetailsReleaseDates } from "./details-release-dates";
@@ -31,6 +31,76 @@ export interface OmdbPrewarmResult {
   quotaExhausted?: boolean;
 }
 
+// A configuration problem every remaining item would hit the same way: OMDb
+// refused the key, no TMDB token to resolve IMDb ids, or the OMDb key removed
+// mid-run. Null for an outcome that says nothing about the next item.
+type ConfigStop = "keyRejected" | "tmdbUnconfigured" | "keyRemoved";
+
+function configStopOf(r: PromiseSettledResult<OmdbResult>): ConfigStop | null {
+  if (r.status !== "fulfilled" || r.value.found) return null;
+  if (r.value.keyRejected) return "keyRejected";
+  if (r.value.tmdbUnconfigured) return "tmdbUnconfigured";
+  if (!r.value.keyConfigured) return "keyRemoved";
+  return null;
+}
+
+const CONFIG_STOP_TEXT: Record<ConfigStop, string> = {
+  keyRejected: "OMDb refused the API key",
+  tmdbUnconfigured: "there is no TMDB read token to resolve IMDb ids with",
+  keyRemoved: "the OMDb API key was removed",
+};
+
+// The counter each result lands in. A fulfilled promise can still be a
+// {found:false} miss. Only a real rating is fetched, and misses split on
+// `transient`: fetchAndCacheOmdbForTmdb RESOLVES (does not throw) with
+// transient:true on network/timeout/5xx/bad-key/quota failures. Counting those
+// as notFound would let a fully failed run (failed === 0) show as green in the
+// cron history. Only an authoritative miss (negative-cached upstream) is
+// notFound. Pure.
+function outcomeOf(r: PromiseSettledResult<OmdbResult>): "fetched" | "notFound" | "failed" {
+  if (r.status !== "fulfilled") return "failed";
+  if (r.value.found) return "fetched";
+  // omdb.ts already logged the per-item cause of a transient miss.
+  if (r.value.transient) return "failed";
+  // No TMDB token: nothing was fetched or negative-cached, so it is not an
+  // authoritative miss — count it failed so the misconfiguration shows up.
+  if (r.value.tmdbUnconfigured) return "failed";
+  // No OMDb key (removed mid-run): nothing was asked, nothing cached.
+  if (!r.value.keyConfigured) return "failed";
+  return "notFound";
+}
+
+// Which OMDB rows are still fresh (more than 25% of their TTL left — the same
+// rule as the other prewarms), and the IMDb ids already stored on the rows this
+// pass will refresh. A title's TMDB→IMDb id never really changes, so reusing it
+// skips one TMDB call per item. `data` comes along in the same freshness read
+// (OMDB rows are tiny) rather than in a second query for the stale keys.
+async function readOmdbRowState(keys: string[]): Promise<{ freshKeys: Set<string>; imdbIdByKey: Map<string, string> }> {
+  const freshKeys = new Set<string>();
+  const imdbIdByKey = new Map<string, string>();
+  for (let i = 0; i < keys.length; i += LIBRARY_PAGE_SIZE) {
+    const existingRows = await prisma.tmdbCache.findMany({
+      where: { key: { in: keys.slice(i, i + LIBRARY_PAGE_SIZE) } },
+      select: { key: true, cachedAt: true, expiresAt: true, data: true },
+    });
+    for (const r of existingRows) {
+      const originalTtlMs = r.expiresAt.getTime() - r.cachedAt.getTime();
+      if (r.expiresAt.getTime() - Date.now() > originalTtlMs * 0.25) {
+        freshKeys.add(r.key);
+        continue;
+      }
+      try {
+        const parsed: unknown = JSON.parse(r.data);
+        const imdbId = parsed && typeof parsed === "object" ? (parsed as { imdbId?: unknown }).imdbId : undefined;
+        if (typeof imdbId === "string" && imdbId) imdbIdByKey.set(r.key, imdbId);
+      } catch {
+        // Unparseable row — the refresh resolves the id live as before.
+      }
+    }
+  }
+  return { freshKeys, imdbIdByKey };
+}
+
 // Refreshes the OMDB ratings cache for every library item, skipping rows still
 // within 25% of their TTL and re-fetching the rest in throttled concurrent batches.
 export async function prewarmOmdbCache(opts: { signal?: AbortSignal } = {}): Promise<OmdbPrewarmResult> {
@@ -54,34 +124,7 @@ export async function prewarmOmdbCache(opts: { signal?: AbortSignal } = {}): Pro
     return { total: 0, fetched: 0, notFound: 0, skipped: 0, failed: 0 };
   }
 
-  const freshKeys = new Set<string>();
-  // IMDb ids already stored on the rows this pass will refresh. A title's
-  // TMDB→IMDb id never really changes, so reusing it skips one TMDB call per
-  // item. `data` comes along in the same freshness read (OMDB rows are tiny).
-  const imdbIdByKey = new Map<string, string>();
-  const omdbKeys = items.map((i) => omdbCacheKey(typeOf(i), i.tmdbId));
-  for (let i = 0; i < omdbKeys.length; i += LIBRARY_PAGE_SIZE) {
-    const slice = omdbKeys.slice(i, i + LIBRARY_PAGE_SIZE);
-    const existingRows = await prisma.tmdbCache.findMany({
-      where: { key: { in: slice } },
-      select: { key: true, cachedAt: true, expiresAt: true, data: true },
-    });
-    for (const r of existingRows) {
-      // "Fresh enough" = more than 25% of the row's TTL left (same rule as the other prewarms)
-      const originalTtlMs = r.expiresAt.getTime() - r.cachedAt.getTime();
-      if (r.expiresAt.getTime() - Date.now() > originalTtlMs * 0.25) {
-        freshKeys.add(r.key);
-        continue;
-      }
-      try {
-        const parsed = JSON.parse(r.data) as { imdbId?: unknown };
-        if (typeof parsed?.imdbId === "string" && parsed.imdbId) imdbIdByKey.set(r.key, parsed.imdbId);
-      } catch {
-        // Unparseable row — the refresh below resolves the id live as before.
-      }
-    }
-  }
-
+  const { freshKeys, imdbIdByKey } = await readOmdbRowState(items.map((i) => omdbCacheKey(typeOf(i), i.tmdbId)));
   const toFetch = items.filter((i) => !freshKeys.has(omdbCacheKey(typeOf(i), i.tmdbId)));
 
   const skipped = items.length - toFetch.length;
@@ -130,22 +173,22 @@ export async function prewarmOmdbCache(opts: { signal?: AbortSignal } = {}): Pro
       })
     );
     for (const r of results) {
-      // A fulfilled promise can still be a {found:false} miss. Count only a real
-      // rating as fetched, and split misses on `transient`: fetchAndCacheOmdbForTmdb
-      // RESOLVES (does not throw) with transient:true on network/timeout/5xx/bad-key/
-      // quota failures. Counting those as notFound would let a fully failed run
-      // (failed === 0) show as green in the cron history. Only an authoritative
-      // miss (negative-cached upstream) is notFound.
-      if (r.status === "fulfilled") {
-        if (r.value.found) fetched++;
-        else if (r.value.transient) failed++; // omdb.ts already logged the per-item cause
-        // No TMDB token: nothing was fetched or negative-cached, so it is not an
-        // authoritative miss — count it failed so the misconfiguration shows up.
-        else if (r.value.tmdbUnconfigured) failed++;
-        // No OMDb key (removed mid-run): nothing was asked, nothing cached.
-        else if (!r.value.keyConfigured) failed++;
-        else notFound++;
-      } else { failed++; console.warn("[omdb-prewarm] item failed:", r.reason); }
+      const outcome = outcomeOf(r);
+      if (outcome === "fetched") fetched++;
+      else if (outcome === "notFound") notFound++;
+      else failed++;
+      if (r.status === "rejected") console.warn("[omdb-prewarm] item failed:", r.reason);
+    }
+    // A whole batch failing for one configuration reason means every item left
+    // would fail the same way, each with no request at all: stop instead of
+    // walking (and sleeping through) the rest of the library under the lock.
+    // The items not asked count failed, as they would have.
+    const stop = configStopOf(results[0]);
+    if (stop && results.every((r) => configStopOf(r) === stop)) {
+      const rest = toFetch.length - (i + batch.length);
+      failed += rest;
+      console.warn(`[omdb-prewarm] ${CONFIG_STOP_TEXT[stop]} — stopping; ${rest} item(s) not asked`);
+      break;
     }
     if (isOmdbQuotaLocked()) {
       console.warn(`[omdb-prewarm] Quota hit mid-batch after ${fetched} fetches — stopping early`);

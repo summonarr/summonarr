@@ -626,6 +626,18 @@ test("plex start bounds the caller-supplied device strings", async () => {
   }
 });
 
+test("plex start sends a non-ASCII device name as a header-safe value instead of failing the PIN", async () => {
+  // A header value is a ByteString: "Chris’s iPhone" made fetch throw before
+  // plex.tv was asked, and the sign-in failed as a plex.tv error.
+  const res = await inScope(() =>
+    plexStart.POST(startPost(JSON.stringify({ clientId: VALID_CLIENT_ID, device: "Chris’s iPhone", platform: "иОС", model: "x\u0000y" }))),
+  );
+  assert.equal(res.status, 200);
+  assert.equal(fetchCalls[0].headers.get("X-Plex-Device"), "Chriss iPhone");
+  assert.equal(fetchCalls[0].headers.get("X-Plex-Platform"), "Web", "nothing printable left falls back to the default");
+  assert.equal(fetchCalls[0].headers.get("X-Plex-Model"), "xy");
+});
+
 test("plex start maps an upstream failure to 502 and sets no cookie", async () => {
   plexPinStatus = 500;
   const res = await inScope(() => plexStart.POST(startPost(JSON.stringify({ clientId: VALID_CLIENT_ID }))));

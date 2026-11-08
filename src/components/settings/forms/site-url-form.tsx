@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -15,10 +16,15 @@ export function SiteUrlForm({ initialUrl }: { initialUrl: string }) {
   // `message` is the route's own reason (invalid URL, a 429 cooldown), shown
   // in place of the bare "Failed to save".
   const { status, message, save, edited } = useSettingsSave();
+  const router = useRouter();
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    await save({ siteUrl: url });
+    const result = await save({ siteUrl: url });
+    // The Plex connect form builds its plex.tv return address from this value,
+    // handed down as a prop; refresh so it (and the router's cached tabs) read
+    // the saved one, not the page-load copy.
+    if (result.ok) router.refresh();
   }
 
   return (

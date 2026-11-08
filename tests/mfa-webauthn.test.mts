@@ -18,6 +18,7 @@ import {
   coseToPublicKey,
   webAuthnConfigFromEnv,
   fromBase64Url,
+  assertionCredentialId,
   WebAuthnError,
   type WebAuthnConfig,
 } from "../src/lib/mfa/webauthn.ts";
@@ -103,6 +104,25 @@ test("config: RP ID is AUTH_URL's host; only same-RP trusted origins are added; 
   assert.deepEqual(cfg.origins.sort(), ["https://app.requests.example.com", "https://requests.example.com"]);
   assert.equal(webAuthnConfigFromEnv({}), null);
   assert.equal(webAuthnConfigFromEnv({ AUTH_URL: "not a url" }), null);
+});
+
+test("config: an IP-address AUTH_URL host offers no passkeys (browsers refuse an IP RP ID); localhost still does", () => {
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.equal(webAuthnConfigFromEnv({ AUTH_URL: "http://192.168.1.10:3001" }), null);
+    assert.equal(webAuthnConfigFromEnv({ AUTH_URL: "http://[::1]:3000" }), null);
+  } finally {
+    console.warn = realWarn;
+  }
+  assert.equal(webAuthnConfigFromEnv({ AUTH_URL: "http://localhost:3000" })?.rpId, "localhost");
+});
+
+test("assertion shape: a non-object, an array or a wrong type is a shape error, never a throw of another kind", () => {
+  for (const bad of [null, "x", 1, [], { type: "public-key" }, { type: "other", id: "AQID", rawId: "AQID" }]) {
+    assert.throws(() => assertionCredentialId(bad), (err: unknown) => err instanceof WebAuthnError && (err.code === "shape" || err.code === "encoding"));
+  }
+  assert.equal(assertionCredentialId({ type: "public-key", id: "AQID", rawId: "AQID" }), "AQID");
 });
 
 test("base64url: padding, the standard alphabet and non-canonical encodings are refused", () => {

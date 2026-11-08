@@ -181,3 +181,39 @@ test("f129: the partial fallback is a bounded findMany (take: 2), not an unorder
     assert.equal(o.args.take, 2, "two rows is enough to prove ambiguity — never scan the whole catalog");
   }
 });
+
+// ── derived (non-curated) rows ───────────────────────────────────────────────
+
+test("a derived profile's own description is its rationale; anything else gets the translated generic one", async () => {
+  specs = [
+    spec({ id: "qp-desc", trashId: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", name: "Remux + WEB 2160p", payload: { trash_description: " Best <b>quality</b>.<br>Use&nbsp;it. " } }),
+    // A description that isn't text is no description.
+    spec({ id: "qp-odd", trashId: "ffffffffffffffffffffffffffffffff", name: "Anime", payload: { trash_description: 42 } }),
+    spec({ id: "qs", kind: "QUALITY_SIZE", trashId: "qs-movie", name: "movie", payload: {} }),
+  ];
+  const results = await resolveStarterPack();
+  const item = (id: string) => {
+    const row = results.find((r) => r.spec?.id === id);
+    assert.ok(row, `${id} should be listed`);
+    assert.equal(row.item.recommended, false);
+    return row.item;
+  };
+  assert.equal(item("qp-desc").rationale, "Best quality.\nUse it.");
+  assert.equal(item("qp-desc").rationaleKey, undefined, "the upstream text is the rationale");
+  assert.equal(item("qp-odd").rationaleKey, "trash.starter.derived.rationale.qualityProfile");
+  assert.match(item("qp-odd").rationale, /^TRaSH quality profile\./);
+  assert.equal(item("qs").rationaleKey, "trash.starter.derived.rationale.qualitySize");
+  assert.equal(item("qs").label, "Movies: movie quality sizes");
+});
+
+test("the derived rows are read with a column select, never the whole row", async () => {
+  await resolveStarterPack();
+  const derived = ops.find((o) => o.op === "findMany" && typeof (o.args.where as Where | undefined)?.kind === "object");
+  assert.ok(derived, "the derived-row read ran");
+  const select = derived.args.select as Record<string, unknown> | undefined;
+  assert.ok(select, "it selects its columns");
+  assert.equal("include" in derived.args, false);
+  for (const unused of ["upstreamPath", "upstreamSha", "fetchedAt", "description"]) {
+    assert.equal(unused in select, false, `${unused} is never read`);
+  }
+});

@@ -2,15 +2,18 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { Fragment, useEffect, useState } from "react";
+import { Fragment } from "react";
 import { Film, Tv2, Play, ChevronRight } from "@/components/icons";
 import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
 import { safeExternalHref } from "@/lib/safe-url";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { AvailabilityChips } from "@/components/media/availability-chips";
 import { mergeRatings } from "@/components/media/ratings-merge";
-import { requestRatings, type RatingsPayload } from "@/lib/client/ratings-batcher";
 import { useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
+import { isVisiblyAvailable } from "./availability-rules";
+import { mediaDetailPath, youtubeTrailerUrl } from "./media-links";
+import { useLiveRatings } from "./use-live-ratings";
 
 interface DiscoverHeroProps {
   media: TmdbMedia;
@@ -30,54 +33,12 @@ export function DiscoverHero({
   label,
 }: DiscoverHeroProps) {
   const t = useT();
-  const poster = posterUrl(media.posterPath, "w500");
-  const [liveRatings, setLiveRatings] = useState<RatingsPayload | null>(null);
-
-  useEffect(() => {
-    if (media.imdbRating !== undefined || media.rottenTomatoes !== undefined)
-      return;
-    let cancelled = false;
-    requestRatings(media.id, media.mediaType, media.releaseDate ?? null).then(
-      (data) => {
-        if (!cancelled && data) setLiveRatings(data);
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    media.id,
-    media.mediaType,
-    media.releaseDate,
-    media.imdbRating,
-    media.rottenTomatoes,
-  ]);
-
-  const detailPath =
-    media.mediaType === "movie" ? `/movie/${media.id}` : `/tv/${media.id}`;
+  const liveRatings = useLiveRatings(media);
   // Same "available" reading as MediaCard/AvailabilityBadges: a copy on a
   // server whose badges this viewer doesn't see must not suppress the Queued /
   // Requested chips (the raw flags hid them while showing no Plex chip either).
-  const isAvailable = !!(
-    (showPlex && media.plexAvailable) ||
-    (showJellyfin && media.jellyfinAvailable)
-  );
-  // media.trailerUrl is UNTRUSTED (MDBList `raw.trailer`) — gate it through
-  // safeExternalHref so a `javascript:`/`data:` URL can't become a clickable
-  // href (XSS). Matches the sibling TrailerButton. The YouTube fallback is a
-  // hardcoded https URL and needs no gate.
-  const trailerHref =
-    safeExternalHref(media.trailerUrl) ??
-    (media.trailerKey
-      ? `https://www.youtube.com/watch?v=${media.trailerKey}`
-      : null);
-  // Only the parts present, so the line never starts with a stray separator.
-  const metaParts = [
-    media.releaseYear || null,
-    media.certification || null,
-    media.runtime ? t("media.runtimeMinutes", { minutes: media.runtime }) : null,
-    media.mediaType === "movie" ? t("media.type.movie") : t("media.type.tv"),
-  ].filter((part): part is string => !!part);
+  const isAvailable = isVisiblyAvailable(media, showPlex, showJellyfin);
+  const metaParts = heroMetaParts(media, t);
 
   return (
     <section
@@ -104,38 +65,7 @@ export function DiscoverHero({
         }}
       />
 
-      {/* Poster */}
-      <div
-        className="relative"
-        style={{
-          aspectRatio: "2 / 3",
-          borderRadius: 8,
-          overflow: "hidden",
-          background: "var(--ds-bg-3)",
-        }}
-      >
-        {poster ? (
-          <Image
-            src={poster}
-            alt={media.title}
-            fill
-            sizes="180px"
-            className="object-cover"
-            priority
-          />
-        ) : (
-          <div
-            className="absolute inset-0 flex items-center justify-center"
-            style={{ color: "var(--ds-fg-subtle)" }}
-          >
-            {media.mediaType === "movie" ? (
-              <Film className="w-10 h-10" />
-            ) : (
-              <Tv2 className="w-10 h-10" />
-            )}
-          </div>
-        )}
-      </div>
+      <HeroPoster media={media} />
 
       {/* Content */}
       <div
@@ -205,46 +135,110 @@ export function DiscoverHero({
           </p>
         )}
 
-        <div className="flex flex-wrap" style={{ gap: 8, marginTop: 6 }}>
-          <Link
-            href={detailPath}
-            className="ds-tap ds-hover-tint inline-flex items-center justify-center gap-1.5 font-medium"
-            style={{
-              height: 32,
-              padding: "0 14px",
-              borderRadius: "var(--ds-r-md)",
-              background: "var(--ds-accent)",
-              color: "var(--ds-accent-fg)",
-              fontSize: 13,
-              border: 0,
-            }}
-          >
-            {t("media.hero.viewDetails")}
-            <ChevronRight style={{ width: 14, height: 14 }} />
-          </Link>
-          {trailerHref && (
-            <a
-              href={trailerHref}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="ds-tap ds-hover-tint inline-flex items-center justify-center gap-1.5 font-medium"
-              style={{
-                height: 32,
-                padding: "0 14px",
-                borderRadius: "var(--ds-r-md)",
-                background: "var(--ds-bg-2)",
-                color: "var(--ds-fg)",
-                fontSize: 13,
-                border: "1px solid var(--ds-border)",
-              }}
-            >
-              <Play style={{ width: 14, height: 14 }} />
-              {t("media.hero.trailer")}
-              <span className="sr-only"> {t("media.opensInNewTab")}</span>
-            </a>
-          )}
-        </div>
+        <HeroActions media={media} />
       </div>
     </section>
+  );
+}
+
+// Only the parts present, so the meta line never starts with a stray separator.
+function heroMetaParts(media: TmdbMedia, t: Translator): string[] {
+  return [
+    media.releaseYear || null,
+    media.certification || null,
+    media.runtime ? t("media.runtimeMinutes", { minutes: media.runtime }) : null,
+    media.mediaType === "movie" ? t("media.type.movie") : t("media.type.tv"),
+  ].filter((part): part is string => !!part);
+}
+
+function HeroPoster({ media }: { media: TmdbMedia }) {
+  const poster = posterUrl(media.posterPath, "w500");
+  return (
+    <div
+      className="relative"
+      style={{
+        aspectRatio: "2 / 3",
+        borderRadius: 8,
+        overflow: "hidden",
+        background: "var(--ds-bg-3)",
+      }}
+    >
+      {poster ? (
+        <Image
+          src={poster}
+          alt={media.title}
+          fill
+          sizes="180px"
+          className="object-cover"
+          priority
+        />
+      ) : (
+        <div
+          className="absolute inset-0 flex items-center justify-center"
+          style={{ color: "var(--ds-fg-subtle)" }}
+        >
+          {media.mediaType === "movie" ? (
+            <Film className="w-10 h-10" />
+          ) : (
+            <Tv2 className="w-10 h-10" />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// media.trailerUrl is UNTRUSTED (MDBList `raw.trailer`) — gated through
+// safeExternalHref so a `javascript:`/`data:` URL can't become a clickable
+// href (XSS). Matches the sibling TrailerButton. The YouTube fallback is a
+// fixed https host with the key as one query value.
+function trailerHref(media: TmdbMedia): string | null {
+  return safeExternalHref(media.trailerUrl) ?? (media.trailerKey ? youtubeTrailerUrl(media.trailerKey) : null);
+}
+
+// View details, and the trailer when there is one.
+function HeroActions({ media }: { media: TmdbMedia }) {
+  const t = useT();
+  const trailer = trailerHref(media);
+  return (
+    <div className="flex flex-wrap" style={{ gap: 8, marginTop: 6 }}>
+      <Link
+        href={mediaDetailPath(media)}
+        className="ds-tap ds-hover-tint inline-flex items-center justify-center gap-1.5 font-medium"
+        style={{
+          height: 32,
+          padding: "0 14px",
+          borderRadius: "var(--ds-r-md)",
+          background: "var(--ds-accent)",
+          color: "var(--ds-accent-fg)",
+          fontSize: 13,
+          border: 0,
+        }}
+      >
+        {t("media.hero.viewDetails")}
+        <ChevronRight style={{ width: 14, height: 14 }} />
+      </Link>
+      {trailer && (
+        <a
+          href={trailer}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="ds-tap ds-hover-tint inline-flex items-center justify-center gap-1.5 font-medium"
+          style={{
+            height: 32,
+            padding: "0 14px",
+            borderRadius: "var(--ds-r-md)",
+            background: "var(--ds-bg-2)",
+            color: "var(--ds-fg)",
+            fontSize: 13,
+            border: "1px solid var(--ds-border)",
+          }}
+        >
+          <Play style={{ width: 14, height: 14 }} />
+          {t("media.hero.trailer")}
+          <span className="sr-only"> {t("media.opensInNewTab")}</span>
+        </a>
+      )}
+    </div>
   );
 }

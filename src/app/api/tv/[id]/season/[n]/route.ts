@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { getTVSeasonEpisodesLocalized, tmdbLanguageFor } from "@/lib/tmdb";
 import type { TmdbEpisode } from "@/lib/tmdb-types";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { settleLimit } from "@/lib/concurrency";
+import { episodeMetadataUpdates, warmEpisodeMetadata } from "@/lib/tv-season-warm";
 import {
   getVisibleServerInstances,
   providerEpisodeSources,
@@ -32,7 +32,10 @@ export const GET = withAuth(async (
 
   const { id: rawId, n: rawN } = await params;
   const tmdbId = parseTmdbIdParam(rawId);
-  const seasonNumber = parseInt(rawN, 10);
+  // Canonical digits only, like the id: parseInt read "1abc" and "1.5" as
+  // season 1, so one season answered under URLs that weren't its own. 0 is the
+  // specials.
+  const seasonNumber = /^(?:0|[1-9]\d{0,3})$/.test(rawN) ? Number(rawN) : NaN;
   if (tmdbId === null) {
     return NextResponse.json({ error: t("apiUser.common.idPositive") }, { status: 400 });
   }
@@ -81,47 +84,11 @@ export const GET = withAuth(async (
   });
 
   // Fire-and-forget cache warm: backfill owned episodes' cached metadata from the
-  // fresh TMDB fetch. Unawaited by design — it's not part of the response, and a
-  // failed update self-heals on the next fetch. Errors swallowed intentionally.
-  // Bounded (guardrail 31): `ownedRows` scales with season size × visible sources,
-  // and rows whose cached metadata already matches are skipped, so a warm cache
-  // issues zero writes.
-  // From the ENGLISH list, never the localized one: TVEpisodeCache is shared by
-  // every viewer and stored data stays English (guardrail 40a). Warming it with
-  // the viewer's language made viewers in different languages rewrite every
-  // owned row back and forth on each expand — and the "already matches" check
-  // compared against the previous viewer's language, so it never short-circuited.
+  // fresh ENGLISH fetch (guardrail 40a; tv-season-warm.ts). Unawaited by design —
+  // it's not part of the response, and a failed update self-heals on the next
+  // fetch; warmEpisodeMetadata never throws and warns on failure.
   if (ownedRows.length > 0 && english.length > 0) {
-    const metaMap = new Map(english.map((e) => [e.episodeNumber, e]));
-    void settleLimit(ownedRows, 5, async (row) => {
-      const ep = metaMap.get(row.episodeNumber);
-      if (!ep) return;
-      const next = {
-        episodeName: ep.name ?? null,
-        airDate:     ep.airDate ?? null,
-        stillPath:   ep.stillPath ?? null,
-        runtime:     ep.runtime ?? null,
-        overview:    ep.overview || null,
-      };
-      if (
-        row.episodeName === next.episodeName
-        && row.airDate === next.airDate
-        && row.stillPath === next.stillPath
-        && row.runtime === next.runtime
-        && row.overview === next.overview
-      ) return;
-      await prisma.tVEpisodeCache.update({
-        where: {
-          source_tmdbId_seasonNumber_episodeNumber: {
-            source: row.source,
-            tmdbId,
-            seasonNumber,
-            episodeNumber: row.episodeNumber,
-          },
-        },
-        data: next,
-      }).catch(() => {});
-    });
+    void warmEpisodeMetadata(tmdbId, seasonNumber, episodeMetadataUpdates(ownedRows, english));
   }
 
   const ownedSet = new Set<number>();

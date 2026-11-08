@@ -113,6 +113,7 @@
   "trash.status.error": "Fehler",
   "trash.status.applied": "angewendet",
   "trash.status.ready": "bereit",
+  "trash.status.notConfigured": "nicht konfiguriert",
   "trash.spec.error.loadDetail": "Details konnten nicht geladen werden ({status})",
   "trash.spec.error.network": "Netzwerkfehler – bitte versuchen Sie es erneut",
   "trash.spec.error.apply": "Anwenden fehlgeschlagen ({status})",

@@ -4,7 +4,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { logAudit, auditContext } from "@/lib/audit";
 import { getPlexSessions, terminatePlexSession } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
-import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
+import { parseTerminateRequest, upstreamFailureDetail } from "@/lib/terminate-session-request";
 import { instanceDefaultLocale, translatorFor, translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Admin terminate-playback endpoint for Plex. POSTs to Plex's
@@ -26,23 +26,19 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
-  const sessionKey = typeof body.sessionKey === "string" ? body.sessionKey.trim() : "";
+  const request = parseTerminateRequest(body);
+  if (!request.ok) {
+    const error = request.error === "invalidServerInstance"
+      ? t("apiAdmin.common.invalidServerInstance", { slug: String(body.serverInstance) })
+      : t(`apiAdmin.terminate.${request.error}`);
+    return NextResponse.json({ error }, { status: 400 });
+  }
+  const { sessionKey, serverInstance } = request.value;
   // The fallback reason is shown on the VIEWER's player, so it is written in the
   // instance default language like every other message to viewers (guardrail
   // 14c), not the admin's request language. The web UI always sends a reason;
   // this fires for API callers without one (the native client).
-  const reason = typeof body.reason === "string" && body.reason.trim().length > 0
-    ? body.reason.trim().slice(0, 500)
-    : translatorFor(instanceDefaultLocale())("adminActivity.terminate.defaultReason");
-
-  if (!sessionKey) {
-    return NextResponse.json({ error: t("apiAdmin.terminate.sessionKeyRequired") }, { status: 400 });
-  }
-
-  if (body.serverInstance !== undefined && (typeof body.serverInstance !== "string" || !isValidMediaInstanceSlug(body.serverInstance))) {
-    return NextResponse.json({ error: t("apiAdmin.common.invalidServerInstance", { slug: String(body.serverInstance) }) }, { status: 400 });
-  }
-  const serverInstance = typeof body.serverInstance === "string" ? body.serverInstance : DEFAULT_MEDIA_INSTANCE;
+  const reason = request.value.reason ?? translatorFor(instanceDefaultLocale())("adminActivity.terminate.defaultReason");
 
   const plexConfig = await getPlexConfig(serverInstance);
   const serverUrl = plexConfig.url?.replace(/\/$/, "") ?? null;
@@ -62,8 +58,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   try {
     sessions = await getPlexSessions(serverUrl, token);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: t("apiAdmin.terminate.plexUnreachable", { detail: msg }) }, { status: 502 });
+    // The admin gets the coarse kind; the full error (it can name the server's
+    // internal address) goes to the log.
+    console.error("[terminate-session] session snapshot failed:", err);
+    return NextResponse.json({ error: t("apiAdmin.terminate.plexUnreachable", { detail: upstreamFailureDetail(err) }) }, { status: 502 });
   }
 
   const match = sessions.find((s) => s.sessionKey === sessionKey);
@@ -90,8 +88,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       reason,
     );
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: t("apiAdmin.terminate.plexUnreachable", { detail: msg }) }, { status: 502 });
+    console.error("[terminate-session] terminate request failed:", err);
+    return NextResponse.json({ error: t("apiAdmin.terminate.plexUnreachable", { detail: upstreamFailureDetail(err) }) }, { status: 502 });
   }
 
   // Session already terminated on Plex; a failed audit write must not 500 it.

@@ -7,10 +7,10 @@ import { parseHistoryKind } from "@/lib/arr-history";
 import { getTranslator } from "@/lib/i18n/server";
 import { PageHeader } from "@/components/ui/design";
 import { ArrDownloadHistory } from "@/components/admin/arr-download-history";
+import { first, type PageSearchParams } from "@/lib/search-params";
 
 export const dynamic = "force-dynamic";
 
-const first = (v: string | string[] | undefined) => (typeof v === "string" ? v : undefined);
 
 // ADMIN-only (guardrail 29, as the other arr pages). History and Blocklist
 // load client-side — live, paged Radarr/Sonarr reads; this render passes the
@@ -24,13 +24,8 @@ export async function generateMetadata(): Promise<Metadata> {
 export default async function ArrHistoryPage({
   searchParams,
 }: {
-  searchParams: Promise<{
-    tab?: string | string[];
-    service?: string | string[];
-    instance?: string | string[];
-    kind?: string | string[];
-    page?: string | string[];
-  }>;
+  // A repeated key arrives as an array; each reads its first value (first()).
+  searchParams: Promise<PageSearchParams>;
 }) {
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");

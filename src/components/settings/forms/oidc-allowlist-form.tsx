@@ -1,14 +1,16 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { check, v } from "@/lib/validate";
 import { formatAllowlistLines, parseDomainLines, parseGroupLines, type OidcAllowlist } from "@/lib/oidc-allowlist";
-import type { SaveStatus } from "./shared";
+import { useSettingsSave, type SettingsPatchResult } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
 import { rich } from "./rich";
 import { SaveStatusMessage } from "./save-status";
@@ -18,6 +20,32 @@ import { SaveStatusMessage } from "./save-status";
 // /api/admin/oidc-allowlist; the server validates and answers with what it
 // stored, which becomes the new baseline. The text boxes parse through the
 // shared helpers: groups split on newlines only (a comma can be part of a name).
+
+// What the route answers with: the allowlist it stored. Checked, because every
+// field of the form is rewritten from it.
+const StoredAllowlist = v.object({
+  allowlist: v.object({
+    groups: v.array(v.string()),
+    groupsClaim: v.string(),
+    requestGroupsScope: v.boolean(),
+    emailDomains: v.array(v.string()),
+    existingUsersOnly: v.boolean(),
+  }),
+});
+
+// The shared save state machine (forms/shared.ts), over this form's own route.
+// Saved means a 2xx that carries the stored allowlist.
+async function patchAllowlist(body: Record<string, unknown>): Promise<SettingsPatchResult> {
+  const res = await fetchJson(withBasePath("/api/admin/oidc-allowlist"), { init: jsonInit("PATCH", body) });
+  if (!res.ok) {
+    const data = typeof res.body === "object" && res.body !== null && !Array.isArray(res.body) ? (res.body as Record<string, unknown>) : {};
+    return { ok: false, status: res.status, data, error: res.error };
+  }
+  const stored = check(StoredAllowlist, res.data);
+  return stored.ok
+    ? { ok: true, status: res.status, data: stored.value, error: "" }
+    : { ok: false, status: res.status, data: {}, error: "" };
+}
 
 export function OidcAllowlistForm({
   initial,
@@ -36,9 +64,8 @@ export function OidcAllowlistForm({
   const [requestGroupsScope, setRequestGroupsScope] = useState(initial.requestGroupsScope);
   const [emailDomains, setEmailDomains] = useState(formatAllowlistLines(initial.emailDomains));
   const [existingUsersOnly, setExistingUsersOnly] = useState(initial.existingUsersOnly);
-  const [status, setStatus] = useState<SaveStatus>("idle");
-  const [error, setError] = useState<string | null>(null);
-  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The route's own reason for a refusal, else "Failed to save".
+  const { status, message, save, edited } = useSettingsSave(3000, patchAllowlist);
   const titleId = useId();
   const descId = useId();
   const groupsId = useId();
@@ -46,10 +73,6 @@ export function OidcAllowlistForm({
   const scopeId = useId();
   const domainsId = useId();
   const existingId = useId();
-
-  useEffect(() => () => {
-    if (resetTimer.current) clearTimeout(resetTimer.current);
-  }, []);
 
   const draft: OidcAllowlist = {
     groups: parseGroupLines(groups),
@@ -65,41 +88,18 @@ export function OidcAllowlistForm({
   // typed meanwhile.
   const saving = status === "saving";
 
-  function edited() {
-    setStatus("idle");
-    setError(null);
-  }
-
-  async function save() {
-    if (resetTimer.current) clearTimeout(resetTimer.current);
-    setStatus("saving");
-    setError(null);
-    try {
-      const res = await fetch(withBasePath("/api/admin/oidc-allowlist"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(draft),
-      });
-      const data: { allowlist?: OidcAllowlist; error?: string } = await res.json().catch(() => ({}));
-      if (!res.ok || !data.allowlist) {
-        setError(data.error ?? t("settings.form.common.saveFailed"));
-        setStatus("error");
-        return;
-      }
-      const stored = data.allowlist;
-      setSaved(stored);
-      setUnreadable(false);
-      setGroups(formatAllowlistLines(stored.groups));
-      setGroupsClaim(stored.groupsClaim);
-      setRequestGroupsScope(stored.requestGroupsScope);
-      setEmailDomains(formatAllowlistLines(stored.emailDomains));
-      setExistingUsersOnly(stored.existingUsersOnly);
-      setStatus("ok");
-      resetTimer.current = setTimeout(() => setStatus("idle"), 3000);
-    } catch {
-      setError(t("settings.form.common.saveFailed"));
-      setStatus("error");
-    }
+  async function handleSave() {
+    const result = await save({ ...draft }, () => t("settings.form.common.saveFailed"));
+    const answer = check(StoredAllowlist, result.data);
+    if (!result.ok || !answer.ok) return;
+    const stored = answer.value.allowlist;
+    setSaved(stored);
+    setUnreadable(false);
+    setGroups(formatAllowlistLines(stored.groups));
+    setGroupsClaim(stored.groupsClaim);
+    setRequestGroupsScope(stored.requestGroupsScope);
+    setEmailDomains(formatAllowlistLines(stored.emailDomains));
+    setExistingUsersOnly(stored.existingUsersOnly);
   }
 
   // Same row recipe as the sibling rows in the Authentication card: the card
@@ -208,7 +208,7 @@ export function OidcAllowlistForm({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <Button type="button" size="xs" onClick={save} disabled={!dirty || saving}>
+          <Button type="button" size="xs" onClick={handleSave} disabled={!dirty || saving}>
             {t("settings.form.oidcAllowlist.save")}
           </Button>
           {saving && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500" />}
@@ -217,7 +217,7 @@ export function OidcAllowlistForm({
           {status === "error" && (
             <span role="alert" className="basis-full flex items-center gap-1 text-xs text-red-400">
               <XCircle className="w-3.5 h-3.5 shrink-0" aria-hidden />
-              {error}
+              {message}
             </span>
           )}
         </div>

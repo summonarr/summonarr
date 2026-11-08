@@ -58,6 +58,18 @@ export class NotOnTitleError extends Error {
     this.what = what;
   }
 }
+/**
+ * A Sonarr release search with no season or episode named — its own class so
+ * a caller can tell invalid input from a stale id. The route refuses it first
+ * (400 releaseScopeInvalid); a NotOnTitleError("season") still, so anything
+ * mapping that (arr-admin-http's 409) answers as before.
+ */
+export class ReleaseScopeError extends NotOnTitleError {
+  constructor() {
+    super("season");
+    this.message = "a Sonarr release search needs a season or an episode";
+  }
+}
 /** A history record that is not a grab can't be marked failed. */
 export class NotAGrabError extends Error {}
 /** The download that grab belongs to is already marked failed (a season pack's other episodes, a second click). */
@@ -168,16 +180,33 @@ export async function findTitle(
   // A caller that reports a failed read itself (quietErrors) or answers on a
   // click inside a proxy's patience (timeoutMs, signal) — the Why? status.
   opts: Pick<ArrFetchOptions, "quietErrors" | "timeoutMs" | "signal"> = {},
-): Promise<{ arrId: number; raw: Record<string, unknown> | null } | null> {
-  const cfg = await configuredArrCfg(service, instance);
+): Promise<FoundTitle | null> {
+  return findTitleOn(await configuredArrCfg(service, instance), service, tmdbId, opts);
+}
+
+export type FoundTitle = { arrId: number; raw: Record<string, unknown> | null };
+
+export interface FindTitleOptions extends Pick<ArrFetchOptions, "quietErrors" | "timeoutMs" | "signal"> {
+  /**
+   * Sonarr's `series/lookup?term=tmdb:<id>` answer, shared with a caller that
+   * needs the same lookup (the add flow's preview and body): SkyHook is slow,
+   * and the lookup is read once per add instead of twice. Called only when the
+   * library read misses.
+   */
+  seriesLookup?: () => Promise<unknown>;
+}
+
+/** findTitle on an instance config already resolved. */
+export async function findTitleOn(cfg: ArrCfg, service: ArrService, tmdbId: number, opts: FindTitleOptions = {}): Promise<FoundTitle | null> {
+  const { seriesLookup, ...fetchOpts } = opts;
   if (service === "radarr") {
-    const movies = await arrFetch<unknown>(cfg, `/api/v3/movie?tmdbId=${tmdbId}`, opts);
+    const movies = await arrFetch<unknown>(cfg, `/api/v3/movie?tmdbId=${tmdbId}`, fetchOpts);
     const row = Array.isArray(movies) ? (movies as Array<{ id?: unknown; tmdbId?: unknown }>).find((m) => m?.tmdbId === tmdbId) : undefined;
     return typeof row?.id === "number" && row.id > 0 ? { arrId: row.id, raw: row as Record<string, unknown> } : null;
   }
-  const tvdbId = await resolveTmdbToTvdb(tmdbId);
+  const tvdbId = await withinCallerBound(resolveTmdbToTvdb(tmdbId), fetchOpts);
   if (tvdbId !== null) {
-    const library = await arrFetch<unknown>(cfg, `/api/v3/series?tvdbId=${tvdbId}`, opts);
+    const library = await arrFetch<unknown>(cfg, `/api/v3/series?tvdbId=${tvdbId}`, fetchOpts);
     const row = Array.isArray(library)
       ? (library as Array<{ id?: unknown; tvdbId?: unknown; tmdbId?: unknown }>).find((s) => s?.tvdbId === tvdbId)
       : undefined;
@@ -191,9 +220,46 @@ export async function findTitle(
   // answer one row for another show this library holds (`term=tmdb:84503` →
   // the series with tvdbId 84503). Sonarr v3's rows never carry a tmdbId, so
   // on v3 a series is found only through TMDB's TVDB cross-reference above.
-  const looked = await arrFetch<unknown>(cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`, opts);
+  const looked = seriesLookup ? await seriesLookup() : await arrFetch<unknown>(cfg, seriesLookupPath(tmdbId), fetchOpts);
   const row = Array.isArray(looked) ? (looked as Array<{ tmdbId?: unknown; id?: unknown } | null>).find((r) => r?.tmdbId === tmdbId) : undefined;
   return typeof row?.id === "number" && row.id > 0 ? { arrId: row.id, raw: null } : null;
+}
+
+/** Sonarr's lookup of a TMDB id (it asks SkyHook — slow). */
+export const seriesLookupPath = (tmdbId: number) => `/api/v3/series/lookup?term=tmdb:${tmdbId}`;
+
+/**
+ * Hold a hop that takes no signal of its own (the TMDB cross-reference) to
+ * the caller's own bound: its signal, or its timeout. The hop runs on — its
+ * answer is cached for the next caller — but this one stops waiting.
+ */
+function withinCallerBound<T>(work: Promise<T>, opts: Pick<ArrFetchOptions, "timeoutMs" | "signal">): Promise<T> {
+  const { signal, timeoutMs } = opts;
+  if (!signal && timeoutMs === undefined) return work;
+  if (signal?.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = () => {
+      done();
+      reject(signal?.reason);
+    };
+    const done = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        done();
+        // Named like AbortSignal.timeout's, so arrErrorKind reads it as a timeout.
+        reject(new DOMException(`timed out after ${timeoutMs}ms`, "TimeoutError"));
+      }, timeoutMs);
+    }
+    work.then(
+      (v) => { done(); resolve(v); },
+      (err: unknown) => { done(); reject(err); },
+    );
+  });
 }
 
 export interface TitleState {
@@ -322,14 +388,17 @@ async function editTitleNow(
   // separators aside) is not sent, so it is not audited either.
   const fields = editedFields(edit).filter((f) => f !== "rootFolderPath" || rootFolderMoving(edit, current));
   const body = editorBody(service, arrId, edit, current);
+  const seasons = service === "sonarr" && edit.seasons && edit.seasons.length > 0 ? edit.seasons : null;
+  // parseTitleEdit never combines seasons with another field, and editorBody
+  // never carries seasons: the two writes are never one edit. Refused before
+  // anything is sent should a caller ever combine them — the season PUT of a
+  // resource read BEFORE the editor's write would revert it.
+  if (body && seasons) throw new Error("a season edit is never combined with another field");
   if (body) {
     await arrFetch<unknown>(cfg, `/api/v3/${service === "radarr" ? "movie" : "series"}/editor`, { method: "PUT", body: JSON.stringify(body) });
   }
-  if (service === "sonarr" && edit.seasons && edit.seasons.length > 0) {
-    // After an editor write the series is re-read so the PUT carries its new
-    // values; with none, the resource just read is still current.
-    const fresh = body ? await readRaw(cfg, service, arrId) : raw;
-    await arrFetch<unknown>(cfg, resourcePath(service, arrId), { method: "PUT", body: JSON.stringify(withSeasonMonitoring(fresh, edit.seasons)) });
+  if (seasons) {
+    await arrFetch<unknown>(cfg, resourcePath(service, arrId), { method: "PUT", body: JSON.stringify(withSeasonMonitoring(raw, seasons)) });
   }
   // The write landed: a failed re-read must not turn it into an error (the
   // route would skip the audit and the admin retry an applied edit). The title
@@ -592,24 +661,44 @@ export async function markHistoryFailed(service: ArrService, instance: string, a
     ? e.kind === "failed" && e.id > event.id && e.downloadId === event.downloadId
     : failsIdlessGrab(event, e));
   if (history.some(failedSince)) throw new AlreadyFailedError();
-  // No await between this check and the claim below.
-  const now = Date.now();
-  for (const [k, c] of markClaims) if (c.expiresAt <= now) markClaims.delete(k);
-  const key = [service, instance, cfg.url, event.downloadId !== null ? `d:${event.downloadId}` : `h:${event.id}`].join("\u0000");
-  const held = markClaims.get(key);
-  if (held && event.id <= held.upTo) throw new MarkInProgressError();
-  const claim = { expiresAt: now + MARK_CLAIM_TTL_MS, upTo: history.reduce((m, e) => Math.max(m, e.id), event.id) };
-  markClaims.set(key, claim);
+  // No await between this check and the claim: claimMark is synchronous.
+  const claim = claimMark([service, instance, cfg.url, event.downloadId !== null ? `d:${event.downloadId}` : `h:${event.id}`].join("\u0000"), event, history);
   try {
     await sendMarkFailed(cfg, historyId);
   } catch (err) {
-    if (markClaims.get(key) === claim) {
-      if (definitelyRefused(err)) markClaims.delete(key);
-      else claim.expiresAt = Math.min(claim.expiresAt, Date.now() + MARK_UNKNOWN_HOLD_MS);
-    }
+    settleFailedMark(claim, err);
     throw err;
   }
   return event;
+}
+
+type MarkClaim = { key: string; entry: { expiresAt: number; upTo: number } };
+
+/**
+ * Claim a download for one mark, synchronously — MarkInProgressError when a
+ * live claim already covers this grab. The claim covers every grab the history
+ * held now (`upTo`, the highest id read), never a later re-grab. Expired
+ * claims are swept first.
+ */
+function claimMark(key: string, event: ArrHistoryEvent, history: readonly ArrHistoryEvent[]): MarkClaim {
+  const now = Date.now();
+  for (const [k, c] of markClaims) if (c.expiresAt <= now) markClaims.delete(k);
+  const held = markClaims.get(key);
+  if (held && event.id <= held.upTo) throw new MarkInProgressError();
+  let upTo = event.id;
+  for (const e of history) if (e.id > upTo) upTo = e.id;
+  const entry = { expiresAt: now + MARK_CLAIM_TTL_MS, upTo };
+  markClaims.set(key, entry);
+  return { key, entry };
+}
+
+// A mark that failed: a definite refusal hands the claim back; any other
+// failure (the arr may have taken it) keeps it MARK_UNKNOWN_HOLD_MS more at
+// most. A claim another mark has since replaced is left alone.
+function settleFailedMark(claim: MarkClaim, err: unknown): void {
+  if (markClaims.get(claim.key) !== claim.entry) return;
+  if (definitelyRefused(err)) markClaims.delete(claim.key);
+  else claim.entry.expiresAt = Math.min(claim.entry.expiresAt, Date.now() + MARK_UNKNOWN_HOLD_MS);
 }
 
 async function sendMarkFailed(cfg: ArrCfg, historyId: number): Promise<void> {
@@ -712,7 +801,8 @@ async function releaseQuery(cfg: ArrCfg, service: ArrService, arrId: number, sco
     await episodesOfSeries(cfg, arrId, [scope.episodeId]);
     return { query: `episodeId=${scope.episodeId}`, profile };
   }
-  throw new NotOnTitleError("season");
+  // A series has no whole-series release search.
+  throw new ReleaseScopeError();
 }
 
 /** Interactive search for the title (indexers are hit live). */

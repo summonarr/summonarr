@@ -136,6 +136,6 @@ test("a cold instance that can't be read is left out WITHOUT poisoning the other
 
 test("structural: the Users page reads the per-instance sets, never the union", () => {
   assert.doesNotMatch(PAGE, /getCachedPlexAllowlist/);
-  assert.match(PAGE, /await Promise\.all\(\[getCachedPlexMembersByInstance\(\), getLiveJellyfinUsers\(\)\]\)/);
+  assert.match(PAGE, /await Promise\.all\(\[getCachedPlexMembersByInstance\(\), getCachedLiveJellyfinUsers\(\)\]\)/);
   assert.match(PAGE, /onServer: u\.source === "plex" \? plexOnServer\(u, plexMembers\) : jellyfinOnServer\(u, jellyfinLive\),/);
 });

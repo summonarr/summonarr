@@ -1,7 +1,8 @@
 // "Open in Radarr / Sonarr" — the data half: resolve a title on one configured
 // instance to the URL of its page in that instance's web UI. One live read per
 // click, through arrFetch (guardrail 5); nothing cached, nothing written.
-import { arrFetch, getArrCfg, pickSeriesByTmdbId } from "./arr";
+import { arrFetch, getArrCfg, lookupSeriesByTmdbId, type ArrCfg } from "./arr";
+import { posInt } from "./arr-parse";
 import { arrSettingKey } from "./arr-instances";
 import { getSyncableArrInstances } from "./arr-instance-registry";
 import { arrAddUrl, arrBrowserBase, arrTitleUrl, titleSlugOf, type ArrLinkService } from "./arr-links";
@@ -22,6 +23,27 @@ export async function arrInstanceBrowserBase(service: ArrLinkService, instance: 
   return arrBrowserBase(get("ExternalUrl"), get("Url"));
 }
 
+// The title's own slug on the instance by its arr id, or null when the arr has none.
+async function slugByArrId(cfg: ArrCfg, service: ArrLinkService, arrId: number): Promise<string | null> {
+  const row = await arrFetch<{ titleSlug?: unknown } | null>(cfg, `/api/v3/${service === "radarr" ? "movie" : "series"}/${arrId}`);
+  return titleSlugOf(row?.titleSlug);
+}
+
+// The title's slug when the instance HOLDS it (by tmdb id), else null — an Add link then.
+async function heldSlugByTmdbId(cfg: ArrCfg, service: ArrLinkService, tmdbId: number): Promise<string | null> {
+  if (service === "radarr") {
+    const movies = await arrFetch<unknown>(cfg, `/api/v3/movie?tmdbId=${tmdbId}`);
+    const row = Array.isArray(movies) ? (movies as Array<{ tmdbId?: unknown; titleSlug?: unknown } | null>).find((m) => m?.tmdbId === tmdbId) : undefined;
+    return titleSlugOf(row?.titleSlug);
+  }
+  // Sonarr can't filter its library by TMDB id; its lookup marks a series it
+  // already has with a positive `id`, which is the cheap way to tell. The
+  // client's one lookup and wrong-series guard, Sonarr-sourced only: a TMDB
+  // cross-reference could name a series by TVDB id, never one in the library.
+  const row = await lookupSeriesByTmdbId<{ tmdbId?: unknown; id?: unknown; titleSlug?: unknown }>(cfg, tmdbId, { tvdbCrossRef: false });
+  return posInt(row?.id) !== null ? titleSlugOf(row?.titleSlug) : null;
+}
+
 /**
  * Where the link should land. Falls back to the instance's home page when the
  * title can't be looked up (the arr is down, or answered something
@@ -33,30 +55,11 @@ export async function resolveArrOpenUrl(service: ArrLinkService, instance: strin
   const cfg = await getArrCfg(service, instance);
   if (!cfg) return base;
   try {
-    if (service === "radarr") {
-      if ("arrId" in target) {
-        const movie = await arrFetch<{ titleSlug?: unknown }>(cfg, `/api/v3/movie/${target.arrId}`);
-        const slug = titleSlugOf(movie?.titleSlug);
-        return slug ? arrTitleUrl(base, service, slug) : base;
-      }
-      const movies = await arrFetch<Array<{ tmdbId?: unknown; titleSlug?: unknown }>>(cfg, `/api/v3/movie?tmdbId=${target.tmdbId}`);
-      const row = Array.isArray(movies) ? movies.find((m) => m?.tmdbId === target.tmdbId) : undefined;
-      const slug = titleSlugOf(row?.titleSlug);
-      return slug ? arrTitleUrl(base, service, slug) : arrAddUrl(base, target.tmdbId);
-    }
     if ("arrId" in target) {
-      const series = await arrFetch<{ titleSlug?: unknown }>(cfg, `/api/v3/series/${target.arrId}`);
-      const slug = titleSlugOf(series?.titleSlug);
+      const slug = await slugByArrId(cfg, service, target.arrId);
       return slug ? arrTitleUrl(base, service, slug) : base;
     }
-    // Sonarr can't filter its library by TMDB id; its lookup marks a series it
-    // already has with a positive `id`, which is the cheap way to tell.
-    const looked = await arrFetch<Array<{ tmdbId?: number; id?: unknown; titleSlug?: unknown }>>(
-      cfg, `/api/v3/series/lookup?term=tmdb:${target.tmdbId}`,
-    );
-    const row = pickSeriesByTmdbId(Array.isArray(looked) ? looked : [], target.tmdbId);
-    const inLibrary = typeof row?.id === "number" && row.id > 0;
-    const slug = inLibrary ? titleSlugOf(row?.titleSlug) : null;
+    const slug = await heldSlugByTmdbId(cfg, service, target.tmdbId);
     return slug ? arrTitleUrl(base, service, slug) : arrAddUrl(base, target.tmdbId);
   } catch (err) {
     console.warn(`[arr-links] ${service} instance "${instance}" lookup failed:`, err instanceof Error ? err.message : err);
@@ -82,11 +85,6 @@ export async function arrInstancesForTitle(service: ArrLinkService, tmdbId: numb
   ]);
   const holding = new Set([...wanted, ...available].map((r) => r.arrInstance));
   return configured.map((i) => ({ slug: i.slug, name: i.name, holds: holding.has(i.slug) }));
-}
-
-/** The configured instances whose synced cache holds this title (arrInstancesForTitle's holders). */
-export async function arrInstancesHolding(service: ArrLinkService, tmdbId: number): Promise<Array<{ slug: string; name: string }>> {
-  return (await arrInstancesForTitle(service, tmdbId)).filter((i) => i.holds).map(({ slug, name }) => ({ slug, name }));
 }
 
 /**

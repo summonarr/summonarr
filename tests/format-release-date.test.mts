@@ -42,11 +42,17 @@ test("upcomingCutoffDate moves to the UTC date at noon UTC", () => {
   assert.equal(upcomingCutoffDate(Date.parse("2026-11-07T12:00:00Z")), "2026-11-07");
 });
 
-test("the Upcoming page and GET /api/upcoming both cut at upcomingCutoffDate, never the bare UTC date", async () => {
+test("the Upcoming page and GET /api/upcoming share ONE list, cut at upcomingCutoffDate, never the bare UTC date", async () => {
   const { readFileSync } = await import("node:fs");
   for (const file of ["src/app/(app)/upcoming/page.tsx", "src/app/api/upcoming/route.ts"]) {
     const src = readFileSync(file, "utf8");
-    assert.equal((src.match(/upcomingCutoffDate\(\)/g) ?? []).length, 2, `${file}: the cache query and the list filter`);
-    assert.doesNotMatch(src, /new Date\(\)\.toISOString\(\)\.slice\(0, 10\)/, file);
+    assert.match(src, /await loadUpcomingTitles\(\)/, `${file}: reads the shared list`);
+    assert.doesNotMatch(src, /upcomingCacheItem|new Date\(\)\.toISOString\(\)\.slice\(0, 10\)/, file);
   }
+  const lib = readFileSync("src/lib/upcoming-list.ts", "utf8");
+  // One cutoff, computed once, used by the cache query and the list filter.
+  assert.equal((lib.match(/upcomingCutoffDate\(/g) ?? []).length, 1);
+  assert.match(lib, /releaseDate: \{ gte: today \}/);
+  assert.match(lib, /interleaveUpcoming\(\[\.\.\.cached, \.\.\.movies, \.\.\.tv\], today\)/);
+  assert.doesNotMatch(lib, /new Date\(\)\.toISOString\(\)\.slice\(0, 10\)/);
 });

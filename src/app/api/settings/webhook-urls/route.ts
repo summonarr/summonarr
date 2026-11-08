@@ -1,6 +1,17 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import {
+  arrSettingKey,
+  DEFAULT_ARR_INSTANCE,
+  effectiveWebhookSecretFrom,
+  FOURK_ARR_INSTANCE,
+  LEGACY_WEBHOOK_SECRET_KEY,
+  type ArrService,
+} from "@/lib/arr-instances";
 
 // Returns the webhook tokens for the settings-page copy buttons. This exists as
 // a separate admin-only endpoint — instead of passing the secrets as props on
@@ -10,24 +21,34 @@ import { prisma } from "@/lib/prisma";
 // (next.config.ts /api header). The Prisma extension decrypts Setting.value on
 // read, so these are plaintext tokens.
 //
-// radarr/sonarr fold in the legacy shared secret (matching how the webhook
-// handler resolves tokens); the 4K keys do not (they're per-instance).
-export const GET = withAdmin(async () => {
-  const keys = [
-    "webhookSecret",
-    "radarrWebhookSecret",
-    "sonarrWebhookSecret",
-    "radarr4kWebhookSecret",
-    "sonarr4kWebhookSecret",
-  ];
-  const rows = await prisma.setting.findMany({ where: { key: { in: keys } } });
-  const get = (k: string) => rows.find((r) => r.key === k)?.value || "";
-  const legacy = get("webhookSecret");
+// Each token is resolved the way the webhook handler resolves it
+// (effectiveWebhookSecretFrom): radarr/sonarr fold in the legacy shared secret,
+// the 4K keys do not (they're per-instance). One read for all of them.
+const SLOTS: ReadonlyArray<{ field: string; service: ArrService; instance: string }> = [
+  { field: "radarr", service: "radarr", instance: DEFAULT_ARR_INSTANCE },
+  { field: "sonarr", service: "sonarr", instance: DEFAULT_ARR_INSTANCE },
+  { field: "radarr4k", service: "radarr", instance: FOURK_ARR_INSTANCE },
+  { field: "sonarr4k", service: "sonarr", instance: FOURK_ARR_INSTANCE },
+];
 
-  return NextResponse.json({
-    radarr: get("radarrWebhookSecret") || legacy || null,
-    sonarr: get("sonarrWebhookSecret") || legacy || null,
-    radarr4k: get("radarr4kWebhookSecret") || null,
-    sonarr4k: get("sonarr4kWebhookSecret") || null,
+// Each copy click reads every token once; a person copying a few URLs stays
+// far under this. It bounds a stolen admin session (or a runaway script)
+// pulling the secrets in a loop (guardrail 2a: the token leaves the server
+// only on a deliberate copy).
+const WEBHOOK_URLS_LIMIT = 30;
+const WEBHOOK_URLS_WINDOW_MS = 60_000;
+
+export const GET = withAdmin(async (req, _ctx, session) => {
+  if (!checkRateLimit(`settings-webhook-urls:${session.user.id}`, WEBHOOK_URLS_LIMIT, WEBHOOK_URLS_WINDOW_MS)) {
+    return tooManyRequests(WEBHOOK_URLS_WINDOW_MS / 1000, translatorForRequest(req)("apiAdmin.common.tooManyRequestsLater"));
+  }
+  const ownKey = (s: (typeof SLOTS)[number]) => arrSettingKey(s.service, s.instance, "WebhookSecret");
+  const rows = await prisma.setting.findMany({
+    where: { key: { in: [LEGACY_WEBHOOK_SECRET_KEY, ...SLOTS.map(ownKey)] } },
   });
+  const value = new Map(rows.map((r) => [r.key, r.value]));
+  const legacy = value.get(LEGACY_WEBHOOK_SECRET_KEY);
+  return NextResponse.json(
+    Object.fromEntries(SLOTS.map((s) => [s.field, effectiveWebhookSecretFrom(s.instance, value.get(ownKey(s)), legacy) || null])),
+  );
 });

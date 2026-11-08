@@ -30,12 +30,15 @@ console.warn = () => {};
 // TMDB's answer per tmdb id; a fetch is recorded and may be parked.
 let tvdbFor = new Map<number, number>();
 let externalIdFetches: number[] = [];
+// TMDB answers 503 for these ids: a failed lookup, not "no tvdb id".
+let failingIds = new Set<number>();
 globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = new URL(String(input));
   const m = /^\/3\/tv\/(\d+)\/external_ids$/.exec(url.pathname);
   if (url.hostname !== "api.themoviedb.org" || !m) throw new Error(`unexpected fetch ${url}`);
   const id = Number(m[1]);
   externalIdFetches.push(id);
+  if (failingIds.has(id)) return new Response("busy", { status: 503 });
   return Response.json({ tvdb_id: tvdbFor.get(id) ?? null });
 }) as unknown as typeof fetch;
 
@@ -59,7 +62,7 @@ shadowPrismaModel(prisma, "tmdbCache", {
 });
 
 const { resolveTmdbToTvdb } = await import("../src/lib/arr.ts");
-const { crossRefFillIdle, lookupTmdbToTvdb, resolveArrTargets, tmdbToTvdbCacheKey } = await import("../src/lib/library-cleanup-arr.ts");
+const { crossRefFillIdle, lookupTmdbToTvdb, resolveArrTargets, resolveArrTargetsChecked, tmdbToTvdbCacheKey } = await import("../src/lib/library-cleanup-arr.ts");
 const { fillAiring } = await import("../src/lib/library-cleanup-data.ts");
 const { applyLocalProtection, createCoalescedReload } = await import("../src/lib/cleanup-delete-plan.ts");
 
@@ -74,6 +77,7 @@ beforeEach(async () => {
   await crossRefFillIdle();
   tvdbFor = new Map([[900, 9000], [901, 9001]]);
   externalIdFetches = [];
+  failingIds = new Set();
   cache = new Map();
   cacheReads = [];
 });
@@ -103,6 +107,21 @@ test("item 1: the delete route's 'fetch' resolution awaits TMDB, so a cold cache
   assert.equal([...targets.values()][0].length, 1);
 });
 
+test("a delete-path lookup that FAILS is unknown, not 'no tvdb id': the title is reported unresolved, and a title listed twice is resolved once", async () => {
+  failingIds = new Set([900]);
+  tvdbFor.delete(901); // TMDB answers: no tvdb id
+  const tvdbOf = await lookupTmdbToTvdb([900, 901], "fetch");
+  assert.equal(tvdbOf.has(900), false, "the failure is absent, never a null verdict");
+  assert.equal(tvdbOf.get(901), null);
+  const { targets, unresolved } = await resolveArrTargetsChecked([{ tmdbId: 900, mediaType: "TV" }, { tmdbId: 900, mediaType: "TV" }], v3Index(), "fetch");
+  assert.deepEqual([...unresolved], [[[...targets.keys()][0], ["default"]]]);
+  assert.equal(targets.size, 1);
+  failingIds = new Set();
+  const again = await resolveArrTargetsChecked([{ tmdbId: 900, mediaType: "TV" }, { tmdbId: 900, mediaType: "TV" }], v3Index(), "fetch");
+  assert.equal(again.unresolved.size, 0);
+  assert.equal([...again.targets.values()][0].length, 1, "one copy, not one per listing of the title");
+});
+
 test("item 1: concurrent cold reads share ONE background lookup per title", async () => {
   await Promise.all([lookupTmdbToTvdb([900, 901], "cached"), lookupTmdbToTvdb([900, 901], "cached"), lookupTmdbToTvdb([901], "cached")]);
   await crossRefFillIdle();
@@ -127,7 +146,7 @@ test("item 1: the read routes pass 'cached', the delete route 'fetch', and the r
   const read = (p: string) => readFileSync(new URL(`../src/${p}`, import.meta.url), "utf8");
   assert.match(read("app/api/admin/cleanup/route.ts"), /computeCleanupReport\(arr, new Date\(\), undefined, \{ resolveTargets: true, crossRef: "cached" \}\)/);
   const del = read("app/api/admin/cleanup/delete/route.ts");
-  assert.match(del, /resolveArrTargets\(items, arr, "fetch"\)/);
+  assert.match(del, /resolveArrTargetsChecked\(items, arr, "fetch"\)/);
   assert.match(del, /computeCleanupReport\(arr, now, items, \{ tvdbIds: tvdbIdsByKey, crossRef: "fetch" \}\)/);
   const data = read("lib/library-cleanup-data.ts");
   assert.match(data, /const crossRef = opts\.crossRef \?\? "cached";/);
@@ -246,6 +265,9 @@ test("item 2: the local patch protects / unprotects one row and the protected li
   const twoX = applyLocalProtection(applyLocalProtection(report, { tmdbId: 2, mediaType: "TV", title: null }, true, "x"), { tmdbId: 2, mediaType: "TV", title: null }, false, "x");
   assert.deepEqual(twoX.rows[1], report.rows[1], "another exclusion keeps the row held back");
   assert.equal(applyLocalProtection(on, { tmdbId: 1, mediaType: "MOVIE", title: "A" }, true, "y").protected.length, 1, "no duplicate entry");
+  // Protecting an already-listed title keeps the server's entry (its reason and date).
+  const held = { ...report, protected: [{ tmdbId: 1, mediaType: "MOVIE", title: "A", reason: "keeper", createdAt: "2026-01-01T00:00:00.000Z" }] };
+  assert.deepEqual(applyLocalProtection(held, { tmdbId: 1, mediaType: "MOVIE", title: "A" }, true, "y").protected, held.protected);
 });
 
 test("a local Protect / Unprotect moves the protected count with the list, and leaves a report without one alone", () => {

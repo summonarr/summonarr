@@ -131,7 +131,8 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
     },
     authorId: session.user.id,
     authorName: session.user.name ?? session.user.email ?? "Someone",
-    requesterFacingAuthor: session.user.name ?? t("shared.thread.admin"),
+    // The requester's label is resolved in THEIR language (requesterFacingAuthor).
+    authorDisplayName: session.user.name ?? null,
     text,
     authorIsManager: isManager,
   });

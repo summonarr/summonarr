@@ -6,6 +6,7 @@ import { resolveStarterPack, STARTER_PACK } from "@/lib/trash-recommendations";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { isFeatureEnabled } from "@/lib/features";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { lockBusyResponse } from "@/lib/lock-http";
 
@@ -42,11 +43,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // kind of Radarr/Sonarr writes as /api/admin/trash-guides/apply and shouldn't
   // be a lighter-gated way to trigger the same burst.
   if (!checkRateLimit(`admin-trash-starter-pack:${session.user.id}`, 10, 5 * 60 * 1000)) {
-    return NextResponse.json({ error: t("apiAdmin.common.tooManyRequestsShortly") }, { status: 429 });
+    return tooManyRequests(5 * 60, t("apiAdmin.common.tooManyRequestsShortly"));
   }
   return withAdvisoryLock(
     TRASH_SYNC_LOCK_ID,
-    async () => {
+    // The lock's signal stops the apply between specs (guardrail 41).
+    async (signal: AbortSignal) => {
       try {
         const items = await resolveStarterPack();
         // Only the curated STARTER_PACK entries (recommended:true). resolveStarterPack
@@ -54,11 +56,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         // picker); filtering on `i.spec` alone would push the ENTIRE TRaSH catalog
         // to Radarr/Sonarr and overwrite the operator's existing custom profiles.
         const curated = items.filter((i) => i.item.recommended);
-        const specIds = curated.filter((i) => i.spec).map((i) => i.spec!.id);
+        const specIds = curated.flatMap((i) => (i.spec ? [i.spec.id] : []));
         const missing = curated.filter((i) => !i.spec).map((i) => i.item.label);
 
         const startTime = Date.now();
-        const results = specIds.length > 0 ? await applySpecs(specIds) : [];
+        const results = specIds.length > 0 ? await applySpecs(specIds, "hd", { signal }) : [];
         const durationMs = Date.now() - startTime;
 
         const recreated = results.filter((r) => r.recreated).length;

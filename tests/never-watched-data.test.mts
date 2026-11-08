@@ -143,7 +143,10 @@ shadowPrismaModel(prisma, "setting", {
   findMany: async (args: { where?: Where }) =>
     [...settings.entries()].map(([key, value]) => ({ key, value })).filter((r) => matchWhere(r, args.where)),
 });
-shadowPrismaClientMethod(prisma, "$queryRaw", async () => {
+// The id list each season read was scoped to (the values bound in it).
+const seasonReadIds: unknown[][] = [];
+shadowPrismaClientMethod(prisma, "$queryRaw", async (q: { values?: unknown[] }) => {
+  seasonReadIds.push([...(q?.values ?? [])]);
   const bySeason = new Map<string, { tmdbId: number; seasonNumber: number; eps: Set<number>; dates: Array<Date | null> }>();
   for (const e of episodes) {
     const k = `${e.tmdbId}:${e.seasonNumber}`;
@@ -271,6 +274,18 @@ test("3. an episode recorded before its show was cached clears the show AND that
   assert.equal(seasons.get(2)!.state, "neverWatched");
   assert.equal(seasons.get(2)!.windowStart?.toISOString(), d("2025-04-01").toISOString(), "the season's first episode");
   assert.equal(seasons.get(3)!.state, "unobservable", "an undated episode makes the season's arrival unknowable");
+});
+
+test("the full read asks the episode cache only for the shows judged per season (the watched ones)", async () => {
+  seasonReadIds.length = 0;
+  const t = byId(await loadLibraryWatchFacts(null, { now: NOW, seasons: true }));
+  const watchedShows = [...t.values()].filter((x) => x.mediaType === "TV" && x.verdict.state === "watched").map((x) => x.tmdbId);
+  assert.ok(watchedShows.length > 0);
+  assert.equal(seasonReadIds.length, 1);
+  assert.deepEqual([...seasonReadIds[0]].sort(), [...new Set(watchedShows)].sort());
+  seasonReadIds.length = 0;
+  await loadLibraryWatchFacts(null, { now: NOW });
+  assert.equal(seasonReadIds.length, 0, "no season read without seasons");
 });
 
 test("an attributed episode play clears exactly its own season", async () => {

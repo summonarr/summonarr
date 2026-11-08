@@ -81,62 +81,78 @@ export type SessionStartError =
   | { kind: "size-too-large"; max: number }
   | { kind: "in-progress" };
 
-export async function startSession(
-  opts: SessionStartOpts,
-): Promise<{ ok: true; session: Session } | { ok: false; error: SessionStartError }> {
-  if (!UUID_RE.test(opts.uploadId)) return { ok: false, error: { kind: "invalid-id" } };
-  if (!Number.isFinite(opts.totalSize) || opts.totalSize <= 0) return { ok: false, error: { kind: "invalid-size" } };
+// The first refusal of a session's declared shape, or null when it is usable.
+function startOptsError(opts: SessionStartOpts): SessionStartError | null {
+  if (!UUID_RE.test(opts.uploadId)) return { kind: "invalid-id" };
+  // Whole bytes only: a fractional size could never be met, and would fail as
+  // a size mismatch only after the whole upload.
+  if (!Number.isSafeInteger(opts.totalSize) || opts.totalSize <= 0) return { kind: "invalid-size" };
   // Every chunk but a (degenerate) empty last one carries at least one byte, so
   // more chunks than bytes is never a real upload.
   if (!Number.isInteger(opts.totalChunks) || opts.totalChunks <= 0 || opts.totalChunks > opts.totalSize) {
-    return { ok: false, error: { kind: "invalid-size" } };
+    return { kind: "invalid-size" };
   }
-  if (opts.totalSize > MAX_CIPHERTEXT_BYTES) {
-    return { ok: false, error: { kind: "size-too-large", max: MAX_CIPHERTEXT_BYTES } };
-  }
+  if (opts.totalSize > MAX_CIPHERTEXT_BYTES) return { kind: "size-too-large", max: MAX_CIPHERTEXT_BYTES };
+  return null;
+}
 
-  // Mutex: every concurrent startSession waits for the previous one to finish
-  // (whether it claimed the slot or rejected). The earlier check-then-mkdtemp
-  // shape let two callers each pass the `active` check before either's mkdtemp
-  // resolved, leaving the loser's tempDir orphaned.
+// Runs `fn` with every other startSession waiting for it to finish (whether it
+// claimed the slot or rejected). The earlier check-then-mkdtemp shape let two
+// callers each pass the `active` check before either's mkdtemp resolved,
+// leaving the loser's tempDir orphaned.
+async function withStartMutex<T>(fn: () => Promise<T>): Promise<T> {
   const prev = state.startMutex;
   let resolveMutex!: () => void;
   state.startMutex = new Promise<void>((r) => { resolveMutex = r; });
   await prev;
-
   try {
-    const active = state.active;
-    if (active && !isExpired(active) && active.uploadId !== opts.uploadId) {
-      return { ok: false, error: { kind: "in-progress" } };
-    }
+    return await fn();
+  } finally {
+    resolveMutex();
+  }
+}
 
-    // A session whose file is being read by an in-flight import must never be
-    // reclaimed — even if the idle TTL lapsed (a large restore can take longer
-    // than the between-chunks window), and even for a retry carrying the SAME
-    // uploadId: reclaiming would rm the tempDir mid-read and corrupt the
-    // restore, and resuming would let fresh chunks race the read. Treat it as
-    // still in-progress for every caller; the importer's finally always
-    // clearSession()s it when done.
-    if (active && active.importing) {
-      return { ok: false, error: { kind: "in-progress" } };
-    }
+// What the slot's current session means for a start of `uploadId`, in this
+// order: another live upload holds it; it is being imported; it is this
+// upload's own (resume it); or it is free — an expired session is reclaimed.
+async function claimSlotFor(uploadId: string): Promise<"in-progress" | Session | "free"> {
+  const active = state.active;
+  if (!active) return "free";
+  if (!isExpired(active) && active.uploadId !== uploadId) return "in-progress";
+  // A session whose file is being read by an in-flight import must never be
+  // reclaimed — even if the idle TTL lapsed (a large restore can take longer
+  // than the between-chunks window), and even for a retry carrying the SAME
+  // uploadId: reclaiming would rm the tempDir mid-read and corrupt the
+  // restore, and resuming would let fresh chunks race the read. Treat it as
+  // still in-progress for every caller; the importer's finally always
+  // clearSession()s it when done.
+  if (active.importing) return "in-progress";
+  if (isExpired(active)) {
+    // Detach first: an append still writing to it sees the slot change and
+    // reports no-session instead of touching whatever comes next.
+    if (state.active === active) state.active = null;
+    await cleanupSession(active);
+    return "free";
+  }
+  return active; // the same uploadId, live: resume it
+}
 
-    if (active && isExpired(active)) {
-      // Detach first: an append still writing to it sees the slot change and
-      // reports no-session instead of touching whatever comes next.
-      if (state.active === active) state.active = null;
-      await cleanupSession(active);
-    } else if (active && active.uploadId === opts.uploadId) {
-      return { ok: true, session: active };
-    }
+export async function startSession(
+  opts: SessionStartOpts,
+): Promise<{ ok: true; session: Session } | { ok: false; error: SessionStartError }> {
+  const invalid = startOptsError(opts);
+  if (invalid) return { ok: false, error: invalid };
+
+  return withStartMutex(async () => {
+    const slot = await claimSlotFor(opts.uploadId);
+    if (slot === "in-progress") return { ok: false, error: { kind: "in-progress" } };
+    if (slot !== "free") return { ok: true, session: slot };
 
     const tempDir = await fs.mkdtemp(await tempPrefix());
-    const filePath = path.join(tempDir, "upload.bin");
-
     const session: Session = {
       uploadId: opts.uploadId,
       tempDir,
-      filePath,
+      filePath: path.join(tempDir, "upload.bin"),
       totalSize: opts.totalSize,
       totalChunks: opts.totalChunks,
       receivedChunks: 0,
@@ -145,9 +161,7 @@ export async function startSession(
     };
     state.active = session;
     return { ok: true, session };
-  } finally {
-    resolveMutex();
-  }
+  });
 }
 
 export type AppendError =
@@ -168,6 +182,50 @@ async function dropSession(s: Session): Promise<void> {
   await cleanupSession(s);
 }
 
+// Why this chunk can't be appended to `s` (checked before any write), or null.
+// An expired session is dropped here. Same never-reclaim-while-importing rule as
+// startSession: an importing session that outlived the idle TTL must not have
+// its tempDir rm'd out from under the in-flight read by a retried chunk. It
+// falls through to the index check instead (receivedChunks == totalChunks once
+// importing, so any retry reads as out-of-order and touches nothing).
+async function appendRefusal(s: Session, chunkIndex: number, byteLength: number): Promise<AppendError | null> {
+  if (isExpired(s) && !s.importing) {
+    await dropSession(s);
+    return { kind: "expired" };
+  }
+  if (chunkIndex !== s.receivedChunks) return { kind: "out-of-order", expected: s.receivedChunks };
+  if (s.bytesWritten + byteLength > s.totalSize) return { kind: "size-overflow", max: s.totalSize };
+  return null;
+}
+
+// Writes the chunk to the session's file: "no-session" when the session went
+// away under the write, true when it landed. A half-written chunk must never be
+// resumed, so any failure drops the session (fail closed); an unexpected one is
+// rethrown.
+async function writeChunk(s: Session, data: Uint8Array): Promise<true | "no-session"> {
+  try {
+    const handle = await fs.open(s.filePath, s.receivedChunks === 0 ? "w" : "a");
+    try {
+      await handle.write(data);
+    } finally {
+      await handle.close();
+    }
+  } catch (err) {
+    // Its directory gone under it (a concurrent reclaim) is just a session
+    // that no longer exists.
+    const gone = state.active !== s || (err as NodeJS.ErrnoException).code === "ENOENT";
+    await dropSession(s);
+    if (gone) return "no-session";
+    throw err;
+  }
+  if (state.active !== s) {
+    // Reclaimed while writing: the bytes went to a session that is gone.
+    await cleanupSession(s);
+    return "no-session";
+  }
+  return true;
+}
+
 async function appendChunkUnsafe(
   uploadId: string,
   chunkIndex: number,
@@ -179,45 +237,10 @@ async function appendChunkUnsafe(
   const s = state.active;
   if (!s) return { ok: false, error: { kind: "no-session" } };
   if (s.uploadId !== uploadId) return { ok: false, error: { kind: "session-mismatch" } };
-  // Same never-reclaim-while-importing rule as startSession: an importing
-  // session that outlived the idle TTL must not have its tempDir rm'd out from
-  // under the in-flight read by a retried chunk. It falls through to the index
-  // check instead (receivedChunks == totalChunks once importing, so any retry
-  // reads as out-of-order and touches nothing).
-  if (isExpired(s) && !s.importing) {
-    await dropSession(s);
-    return { ok: false, error: { kind: "expired" } };
-  }
-  if (chunkIndex !== s.receivedChunks) {
-    return { ok: false, error: { kind: "out-of-order", expected: s.receivedChunks } };
-  }
-  if (s.bytesWritten + data.byteLength > s.totalSize) {
-    return { ok: false, error: { kind: "size-overflow", max: s.totalSize } };
-  }
+  const refusal = await appendRefusal(s, chunkIndex, data.byteLength);
+  if (refusal) return { ok: false, error: refusal };
+  if ((await writeChunk(s, data)) === "no-session") return { ok: false, error: { kind: "no-session" } };
 
-  try {
-    const handle = await fs.open(s.filePath, s.receivedChunks === 0 ? "w" : "a");
-    try {
-      await handle.write(data);
-    } finally {
-      await handle.close();
-    }
-  } catch (err) {
-    // A half-written chunk must never be resumed: drop the session (fail
-    // closed). Its directory gone under it (a concurrent reclaim) is just a
-    // session that no longer exists.
-    if (state.active !== s || (err as NodeJS.ErrnoException).code === "ENOENT") {
-      await dropSession(s);
-      return { ok: false, error: { kind: "no-session" } };
-    }
-    await dropSession(s);
-    throw err;
-  }
-  if (state.active !== s) {
-    // Reclaimed while writing: the bytes went to a session that is gone.
-    await cleanupSession(s);
-    return { ok: false, error: { kind: "no-session" } };
-  }
   s.receivedChunks += 1;
   s.bytesWritten += data.byteLength;
   s.expiresAt = Date.now() + SESSION_TTL_MS;
@@ -275,9 +298,14 @@ export function hasActiveUploadSession(uploadId: string): boolean {
   return !!active && active.uploadId === uploadId && !isExpired(active);
 }
 
+// The assembled file, for the importer. Only a COMPLETE upload with no append
+// still queued is handed over: a partial file must never reach the importer, and
+// marking an incomplete session importing would pin the slot (startSession
+// refuses an importing session whatever its age).
 export function getSessionStream(uploadId: string): ReadableStream<Uint8Array> | null {
   const active = state.active;
   if (!active || active.uploadId !== uploadId) return null;
+  if (active.receivedChunks !== active.totalChunks || state.appendQueue.has(uploadId)) return null;
   // Mark the slot as importing so a concurrent startSession can't reclaim + rm
   // its tempDir while this stream is being read. clearSession (always called in
   // the importer's finally) frees the slot afterwards.

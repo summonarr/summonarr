@@ -22,61 +22,66 @@
 // hook follows one read per view.
 //
 // The lists' reads and their snapshots live in use-missing-reports.ts, the
-// rows' searches and "Search selected" in use-bulk-search.ts. This file is the
-// view: filters, paging, the one table every list renders through (each
-// list's own columns as data), and the bulk bar.
+// rows' searches and "Search selected" in use-bulk-search.ts, the pieces
+// around the list (stats, notices, filters, bulk bar) in
+// missing-report-parts.tsx and the pure rules in missing-report-rules.ts.
+// This file is the view: the state, paging, and the one table every list
+// renders through (each list's own columns as data).
 
 import { Fragment, useCallback, useDeferredValue, useMemo, useState } from "react";
-import Link from "next/link";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
-import { posterUrl } from "@/lib/tmdb-types";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { StyledSelect } from "@/components/ui/styled-select";
-import { Switch } from "@/components/ui/switch";
-import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
-import { Chip, EmptyState, FilterBar, StatCard } from "@/components/ui/design";
-import { Poster } from "@/components/admin/activity-ui";
-import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
-import { ManageTitleButton } from "@/components/admin/arr-title/title-manager";
+import { EmptyState, FilterBar } from "@/components/ui/design";
+import { arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { ArrSnapshotNote } from "@/components/admin/arr-snapshot-note";
+import { ReportTable } from "@/components/admin/report-table";
 import { useMissingReports, type Mode, type ReportKey, type Service } from "@/components/admin/use-missing-reports";
-import { readApiError } from "@/lib/client/api-error";
-import { rowKey, useBulkSearch, useBulkSelection, type BulkResult, type BulkRow } from "@/components/admin/use-bulk-search";
-import { manageTabFor } from "@/lib/arr-manage-links";
+import { rowKey, useBulkSearch, useBulkSelection, type BulkRow } from "@/components/admin/use-bulk-search";
+import { useAsyncAction } from "@/hooks/use-async-action";
+import { fetchJson } from "@/lib/client/fetch-json";
 import { missingDateFormatters } from "@/components/admin/missing-format";
-import { Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleDashed, Loader2, RefreshCw, RotateCcw, Search, X } from "@/components/icons";
-import type { MissingEpisode, MissingSeries } from "@/lib/arr-missing";
-import { ARR_ERROR_KIND_KEYS, isArrErrorKind } from "@/lib/arr-error-kind";
-import { BULK_SEARCH_MAX } from "@/lib/bulk-search-run";
+import { CheckCircle2, ChevronLeft, ChevronRight, CircleDashed, Loader2, RefreshCw } from "@/components/icons";
+import type { MissingSeries } from "@/lib/arr-missing";
+import {
+  applyFilters,
+  MissingEpisodesAnswer,
+  modeOf,
+  serviceOf,
+  shownInstance,
+  sortMovies,
+  sortSeries,
+  unmonitoredCount,
+  type Filters,
+  type MovieSort,
+  type SeriesSort,
+} from "@/components/admin/missing-report-rules";
+import {
+  EpisodeLines,
+  MissingBulkBar,
+  MissingBulkConfirmDialog,
+  MissingEpisodesDetail,
+  MissingExpanderCell,
+  MissingFilterRow,
+  MissingModeToggle,
+  MissingReportNotices,
+  MissingSearchCell,
+  MissingSelectCell,
+  MissingStats,
+  MissingTitleCell,
+  OtherListRunning,
+  SERVICE_LABEL,
+  td,
+  th,
+  type EpisodeState,
+} from "@/components/admin/missing-report-parts";
 
-type EpisodeState = { loading: boolean; error: string; episodes: MissingEpisode[] };
-
-type MovieSort = "recent" | "oldest" | "title";
-type SeriesSort = "recent" | "most" | "title";
-
-const SERVICE_LABEL: Record<Service, string> = { sonarr: "Sonarr", radarr: "Radarr" };
 // Rows rendered per page. A cutoff listing can be library-sized (Radarr's is a
 // row per movie), and every row carries a poster, links and a title manager —
 // the whole list re-rendered on each keystroke and each bulk-run settle.
 const PAGE_SIZE = 100;
 const SONARR_STATUSES = new Set(["continuing", "ended", "upcoming", "deleted"]);
-const episodeCode = (e: { seasonNumber: number; episodeNumber: number }) =>
-  `S${String(e.seasonNumber).padStart(2, "0")}E${String(e.episodeNumber).padStart(2, "0")}`;
 
-type Filters = { showUnmonitored: boolean; instance: string; query: string };
-function applyFilters<T extends { title: string; instance: string; monitored?: boolean }>(rows: readonly T[], f: Filters): T[] {
-  const q = f.query.trim().toLowerCase();
-  return rows.filter((r) =>
-    (f.showUnmonitored || r.monitored !== false) &&
-    (f.instance === "all" || r.instance === f.instance) &&
-    (!q || r.title.toLowerCase().includes(q)),
-  );
-}
-
-const th: React.CSSProperties = { padding: "8px 10px" };
-const td: React.CSSProperties = { padding: "6px 10px" };
 
 // A row of any list: what the shared lead (tick box, title, instance) and the
 // row's Search read.
@@ -118,16 +123,20 @@ export function MissingReport({
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [episodes, setEpisodes] = useState<Record<string, EpisodeState>>({});
 
+  // An expanded series' episode read, per row; a Refresh of its list drops it.
+  const episodeLoads = useAsyncAction();
+
   const run = useBulkSearch();
-  const { searches, selected, bulk, bulkPending, confirming, setConfirming, bulkAbort, listIdle, resetList, startSearch, cancelBulk } = run;
+  const { searches, selected, bulk, bulkPending, confirming, setConfirming, isBulkRunning, listIdle, resetList, startSearch, cancelBulk } = run;
   // A Refresh's fresh start for one list: its rows' searches and ticks
   // (resetList), and every expanded episode list — those belong to the old
-  // listing.
+  // listing, and so does a read of one still out.
   const resetRows = useCallback((k: ReportKey) => {
     resetList(k);
+    if (k === "sonarr:missing") episodeLoads.abort();
     setExpanded((prev) => new Set([...prev].filter((key) => !key.startsWith(`${k}|`))));
     setEpisodes((s) => Object.fromEntries(Object.entries(s).filter(([key]) => !key.startsWith(`${k}|`))));
-  }, [resetList]);
+  }, [resetList, episodeLoads]);
   const { current, reports, errors, loadingKeys, loadingHere, load, staleAt } = useMissingReports({
     service,
     mode,
@@ -167,27 +176,28 @@ export function MissingReport({
     return open;
   }
 
+  // Opening a missing series reads its episodes once (again after a failure).
+  // The read is checked against its shape; a second click while it is out
+  // starts nothing, and a Refresh of the list drops it (resetRows).
   async function toggleMissingSeries(row: MissingSeries) {
     const k = `sonarr:missing|${rowKey(row)}`;
     const wasOpen = toggleExpanded(k);
     if (wasOpen || (episodes[k] && !episodes[k].error)) return;
     setEpisodes((m) => ({ ...m, [k]: { loading: true, error: "", episodes: [] } }));
-    try {
-      const qs = new URLSearchParams({ instance: row.instance, seriesId: String(row.arrId) });
-      const res = await fetch(withBasePath(`/api/admin/missing/episodes?${qs}`));
-      if (!res.ok) {
-        const message = await readApiError(res, t("adminManage.missing.episodes.error"));
-        setEpisodes((m) => ({ ...m, [k]: { loading: false, error: message, episodes: [] } }));
-        return;
-      }
-      const data = (await res.json()) as { episodes: MissingEpisode[] };
-      setEpisodes((m) => ({ ...m, [k]: { loading: false, error: "", episodes: data.episodes } }));
-    } catch {
-      setEpisodes((m) => ({ ...m, [k]: { loading: false, error: t("adminManage.missing.episodes.error"), episodes: [] } }));
-    }
+    const qs = new URLSearchParams({ instance: row.instance, seriesId: String(row.arrId) });
+    const res = await episodeLoads.run(k, (signal) => fetchJson(withBasePath(`/api/admin/missing/episodes?${qs}`), {
+      schema: MissingEpisodesAnswer,
+      signal,
+      fallbackError: t("adminManage.missing.episodes.error"),
+    }), { ifBusy: "skip" });
+    if (!res) return;
+    setEpisodes((m) => ({ ...m, [k]: res.ok ? { loading: false, error: "", episodes: res.data.episodes } : { loading: false, error: res.error, episodes: [] } }));
   }
 
   const report = reports[current];
+  // The instance the filters apply: one the list on screen no longer has, or a
+  // list down to one instance (no picker), shows every instance.
+  const instanceShown = shownInstance(instance, report?.instances);
   const missingMovieItems = reports["radarr:missing"]?.items;
   const missingSeriesItems = reports["sonarr:missing"]?.items;
   const cutoffMovieItems = reports["radarr:cutoff"]?.items;
@@ -195,22 +205,22 @@ export function MissingReport({
 
   // The server sends each list in its default order; the other orders are
   // re-sorts of the filtered copy.
-  const movies = useMemo(() => {
-    const rows = applyFilters(missingMovieItems ?? [], { showUnmonitored, instance, query: deferredQuery });
-    if (movieSort === "oldest") rows.sort((a, b) => a.releasedAt.localeCompare(b.releasedAt));
-    else if (movieSort === "title") rows.sort((a, b) => a.title.localeCompare(b.title, locale));
-    return rows;
-  }, [missingMovieItems, movieSort, showUnmonitored, instance, deferredQuery, locale]);
-
-  const series = useMemo(() => {
-    const rows = applyFilters(missingSeriesItems ?? [], { showUnmonitored, instance, query: deferredQuery });
-    if (seriesSort === "most") rows.sort((a, b) => b.missing - a.missing || a.title.localeCompare(b.title, locale));
-    else if (seriesSort === "title") rows.sort((a, b) => a.title.localeCompare(b.title, locale));
-    return rows;
-  }, [missingSeriesItems, seriesSort, showUnmonitored, instance, deferredQuery, locale]);
-
-  const cutoffMovies = useMemo(() => applyFilters(cutoffMovieItems ?? [], { showUnmonitored: true, instance, query: deferredQuery }), [cutoffMovieItems, instance, deferredQuery]);
-  const cutoffSeries = useMemo(() => applyFilters(cutoffSeriesItems ?? [], { showUnmonitored: true, instance, query: deferredQuery }), [cutoffSeriesItems, instance, deferredQuery]);
+  const movies = useMemo(
+    () => sortMovies(applyFilters(missingMovieItems ?? [], { showUnmonitored, instance: instanceShown, query: deferredQuery }), movieSort, locale),
+    [missingMovieItems, movieSort, showUnmonitored, instanceShown, deferredQuery, locale],
+  );
+  const series = useMemo(
+    () => sortSeries(applyFilters(missingSeriesItems ?? [], { showUnmonitored, instance: instanceShown, query: deferredQuery }), seriesSort, locale),
+    [missingSeriesItems, seriesSort, showUnmonitored, instanceShown, deferredQuery, locale],
+  );
+  const cutoffMovies = useMemo(() => applyFilters(cutoffMovieItems ?? [], { showUnmonitored: true, instance: instanceShown, query: deferredQuery }), [cutoffMovieItems, instanceShown, deferredQuery]);
+  const cutoffSeries = useMemo(() => applyFilters(cutoffSeriesItems ?? [], { showUnmonitored: true, instance: instanceShown, query: deferredQuery }), [cutoffSeriesItems, instanceShown, deferredQuery]);
+  // A missing list's unmonitored card counts under the same instance and title
+  // filters as the cards beside it (hidden or not by the unmonitored switch).
+  const unmonitored = useMemo(
+    () => (report && mode === "missing" ? unmonitoredCount(report.items, { instance: instanceShown, query: deferredQuery }) : 0),
+    [report, mode, instanceShown, deferredQuery],
+  );
 
   // Each tab's count re-filters that service's WHOLE report: once per change of
   // the reports or the unmonitored switch, not on every keystroke and bulk tick.
@@ -226,7 +236,6 @@ export function MissingReport({
 
   const instanceName = (slug: string) => report?.instances.find((i) => i.slug === slug)?.name || slug || "—";
   const multiInstance = (report?.instances.length ?? 0) > 1;
-  const unmonitoredCount = report && mode === "missing" ? (report.items as Array<{ monitored?: boolean }>).filter((i) => i.monitored === false).length : 0;
   const label = SERVICE_LABEL[service];
   const instanceLabel = (slug: string) => arrInstanceLabel(service, instanceName(slug), slug);
 
@@ -234,7 +243,7 @@ export function MissingReport({
   const currentRows: ReadonlyArray<BulkRow> =
     current === "radarr:missing" ? movies : current === "sonarr:missing" ? series : current === "radarr:cutoff" ? cutoffMovies : cutoffSeries;
   const visibleCount = currentRows.length;
-  const viewKey = `${current}|${instance}|${query}|${showUnmonitored}|${movieSort}|${seriesSort}`;
+  const viewKey = `${current}|${instanceShown}|${query}|${showUnmonitored}|${movieSort}|${seriesSort}`;
   const pageCount = Math.max(1, Math.ceil(currentRows.length / PAGE_SIZE));
   const pageIndex = pageView.view === viewKey ? Math.min(pageView.page, pageCount - 1) : 0;
   const pageStart = pageIndex * PAGE_SIZE;
@@ -244,126 +253,8 @@ export function MissingReport({
   const pageRows = onPage(currentRows);
 
   // "Search selected" on this list (use-bulk-search.ts).
-  const {
-    selectable,
-    selectedOffPage,
-    selectedHidden,
-    selectedHere,
-    toRun,
-    atCap,
-    allSelected,
-    bulkRunning,
-    runningHere,
-    resultHere,
-    toggleSelected,
-    selectAll,
-    clearSelection,
-    requestBulk,
-    confirmBulk,
-    retryFailed,
-  } = useBulkSelection(run, { current, currentRows, pageRows, report, loadingKeys });
-
-  // "N started, M already complete, K failed" — the shorter forms when nothing
-  // was already complete.
-  const bulkSummary = (r: BulkResult) => {
-    const failed = r.failed.length;
-    if (r.already > 0) {
-      const vars = { started: r.started, already: r.already, failed };
-      return r.key.endsWith(":cutoff") ? t("adminArr.missingBulk.summaryCutoff", vars) : t("adminArr.missingBulk.summary", vars);
-    }
-    if (failed > 0) return t("adminArr.missingBulk.doneWithFailures", { started: r.started, failed });
-    return t("adminArr.missingBulk.done", { count: r.started });
-  };
-
-  // Once a search has started the button stays done until the next Refresh —
-  // a second click would only queue the same indexer hits again. A 409 ("nothing
-  // missing any more") is the title being complete, not a failure: shown in a
-  // neutral tone, and the button stays off — it would only 409 again. A row a
-  // running bulk search has yet to take is off too, or one click and the run
-  // would search it twice.
-  const searchCell = (key: ReportKey, r: { instance: string; arrId: number; title: string }) => {
-    const k = `${key}|${rowKey(r)}`;
-    const st = searches[k];
-    const svc = key.split(":")[0] as Service;
-    const ariaKey = key.endsWith(":cutoff") ? "adminManage.missing.cutoff.searchAria" : "adminManage.missing.searchAria";
-    const started = st?.outcome === "started";
-    const already = st?.outcome === "already";
-    return (
-      <td style={{ ...td, textAlign: "right", whiteSpace: "nowrap" }}>
-        <Button
-          size="xs"
-          variant="outline"
-          onClick={() => void startSearch(key, r)}
-          disabled={st?.busy || started || already || bulkPending.has(k)}
-          aria-label={started || already ? undefined : t(ariaKey, { service: SERVICE_LABEL[svc], title: r.title })}
-        >
-          {st?.busy ? <Loader2 className="animate-spin" /> : started ? <Check /> : already ? <CheckCircle2 /> : <Search />}
-          {started ? t("adminManage.missing.searchStarted") : already ? t("adminArr.missingBulk.rowAlready") : t("adminManage.missing.search")}
-        </Button>
-        {st?.outcome === "failed" && st.message && (
-          <div role="alert" style={{ fontSize: 11, color: "var(--ds-danger)", marginTop: 4, whiteSpace: "normal", maxWidth: 220, marginLeft: "auto" }}>
-            {st.message}
-          </div>
-        )}
-        {(already || started) && st.message && (
-          <div role="status" style={{ fontSize: 11, color: "var(--ds-fg-muted)", marginTop: 4, whiteSpace: "normal", maxWidth: 220, marginLeft: "auto" }}>
-            {st.message}
-          </div>
-        )}
-      </td>
-    );
-  };
-
-  const titleCell = (
-    svc: Service,
-    r: { title: string; year: number | null; posterPath: string | null; tmdbId: number | null; monitored?: boolean; instance: string; arrId: number },
-    href: string | null,
-  ) => (
-    <div className="flex items-center gap-2">
-      <Poster src={posterUrl(r.posterPath)} letter={(r.title[0] ?? "?").toUpperCase()} w={26} h={39} radius={3} />
-      <div className="min-w-0">
-        <div className="flex items-center gap-1" style={{ fontWeight: 500 }}>
-          <span className="min-w-0">
-            {href ? <Link href={href} className="hover:underline">{r.title}</Link> : r.title}
-            {r.year ? <span style={{ color: "var(--ds-fg-subtle)" }}> ({r.year})</span> : null}
-          </span>
-          <OpenInArrLink
-            service={svc}
-            instance={r.instance}
-            target={{ arrId: r.arrId }}
-            label={t("adminManage.openIn", { name: arrInstanceLabel(svc, instanceName(r.instance), r.instance) })}
-            iconOnly
-          />
-          {/* The title manager on what this mode is about: the file below cutoff, or the missing seasons (a movie's settings). */}
-          <ManageTitleButton
-            service={svc}
-            instance={r.instance}
-            target={{ arrId: r.arrId }}
-            instanceLabel={arrInstanceLabel(svc, instanceName(r.instance), r.instance)}
-            variant="icon"
-            initialTab={manageTabFor(mode, svc)}
-            // Removed from the arr: re-read the list so the row goes (not while
-            // a bulk run is going through it — a fresh listing resets every row).
-            onRemoved={() => {
-              if (!bulkAbort.current) void load(svc, mode);
-            }}
-          />
-        </div>
-        {r.monitored === false && <Chip style={{ marginTop: 2 }}>{t("adminManage.missing.unmonitored")}</Chip>}
-      </div>
-    </div>
-  );
-
-  const tableShell = (head: React.ReactNode, rows: React.ReactNode) => (
-    <div className="resp-table-scroll" style={{ border: "1px solid var(--ds-border)", borderRadius: 10 }}>
-      <table className="w-full" style={{ fontSize: 13, borderCollapse: "collapse", color: "var(--ds-fg)" }}>
-        <thead>
-          <tr style={{ background: "var(--ds-bg-2)", textAlign: "left", color: "var(--ds-fg-subtle)", fontSize: 11 }}>{head}</tr>
-        </thead>
-        <tbody>{rows}</tbody>
-      </table>
-    </div>
-  );
+  const selection = useBulkSelection(run, { current, currentRows, pageRows, report, loadingKeys });
+  const { selectable, atCap, allSelected, bulkRunning, toggleSelected, selectAll, confirmBulk } = selection;
 
   const selectHeader = (
     <th style={{ ...th, width: 32 }}>
@@ -382,38 +273,33 @@ export function MissingReport({
     const st = searches[k];
     const ticked = selected.has(k);
     return (
-      <td style={{ ...td, width: 32 }}>
-        <input
-          type="checkbox"
-          checked={ticked}
-          disabled={st?.busy || st?.outcome === "started" || st?.outcome === "already" || bulkRunning || (!ticked && atCap)}
-          onChange={() => toggleSelected(k)}
-          aria-label={t("adminArr.missingBulk.selectAria", { title: r.title })}
-          className="accent-[var(--ds-accent)]"
-        />
-      </td>
+      <MissingSelectCell
+        title={r.title}
+        ticked={ticked}
+        disabled={!!st?.busy || st?.outcome === "started" || st?.outcome === "already" || bulkRunning || (!ticked && atCap)}
+        onToggle={() => toggleSelected(k)}
+      />
     );
   };
-
-  const expanderCell = (k: string, title: string, onClick: () => void, cutoff = false) => {
-    const open = expanded.has(k);
-    const label = cutoff
-      ? open ? t("adminManage.missing.cutoff.collapse", { title }) : t("adminManage.missing.cutoff.expand", { title })
-      : open ? t("adminManage.missing.collapse", { title }) : t("adminManage.missing.expand", { title });
-    return (
-      <td style={td}>
-        <Button
-          size="icon-xs"
-          variant="ghost"
-          aria-expanded={open}
-          aria-label={label}
-          onClick={onClick}
-        >
-          {open ? <ChevronDown /> : <ChevronRight />}
-        </Button>
-      </td>
-    );
+  // The row's own Search (use-bulk-search.ts's startSearch unticks it first).
+  const searchCell = (key: ReportKey, r: { instance: string; arrId: number; title: string }) => {
+    const k = `${key}|${rowKey(r)}`;
+    return <MissingSearchCell reportKey={key} title={r.title} st={searches[k]} pending={bulkPending.has(k)} onSearch={() => void startSearch(key, r)} />;
   };
+  const titleCell = (svc: Service, r: ListRow) => (
+    <MissingTitleCell
+      service={svc}
+      mode={mode}
+      row={r}
+      href={r.tmdbId !== null ? `/${svc === "radarr" ? "movie" : "tv"}/${r.tmdbId}` : null}
+      arrLabel={arrInstanceLabel(svc, instanceName(r.instance), r.instance)}
+      // Removed from the arr: re-read the list so the row goes (not while
+      // a bulk run is going through it — a fresh listing resets every row).
+      onRemoved={() => {
+        if (!isBulkRunning()) void load(svc, mode);
+      }}
+    />
+  );
 
   // What every list's table starts with, head and row: the tick box, the
   // expander (the Sonarr lists), the title, and the instance when there are
@@ -430,28 +316,15 @@ export function MissingReport({
     <>
       {selectCell(r)}
       {expander}
-      <td style={td}>{titleCell(svc, r, r.tmdbId !== null ? `/${svc === "radarr" ? "movie" : "tv"}/${r.tmdbId}` : null)}</td>
+      <td style={td}>{titleCell(svc, r)}</td>
       {multiInstance && <td style={{ ...td, fontSize: 12, color: "var(--ds-fg-muted)" }}>{instanceName(r.instance)}</td>}
     </>
   );
-  // An expanded series' episodes: code, title, and the list's own last column.
-  const episodeLines = <E extends { seasonNumber: number; episodeNumber: number; title: string }>(label: string, eps: readonly E[], last: (e: E) => React.ReactNode) => (
-    <ul style={{ margin: 0, padding: 0, listStyle: "none", fontSize: 12 }} aria-label={label}>
-      {eps.map((e) => (
-        <li key={`${e.seasonNumber}:${e.episodeNumber}`} className="flex flex-wrap gap-x-3" style={{ padding: "2px 0" }}>
-          <span className="ds-mono" style={{ color: "var(--ds-fg-muted)" }}>{episodeCode(e)}</span>
-          <span style={{ flex: "1 1 200px" }}>{e.title || "—"}</span>
-          <span className="ds-mono" style={{ color: "var(--ds-fg-subtle)" }}>{last(e)}</span>
-        </li>
-      ))}
-    </ul>
-  );
-
   // The one table every list renders through: the lead, the list's own
   // columns, the row's Search — and under an expanded row, its detail across
   // every column after the expander. Only the page on screen is rendered.
   const listTable = <R extends ListRow>(key: ReportKey, rows: readonly R[], columns: ReadonlyArray<Column<R>>, expand?: Expand<R>) => {
-    const svc = key.split(":")[0] as Service;
+    const svc = serviceOf(key);
     const width = (expand ? 3 : 2) + (multiInstance ? 1 : 0) + columns.length + 1;
     const cells = (r: R, expander: React.ReactNode = null) => (
       <>
@@ -468,15 +341,18 @@ export function MissingReport({
         {searchCell(key, r)}
       </>
     );
-    return tableShell(
+    const head = (
       <>
         {leadHead(expand !== undefined)}
         {columns.map((c, i) => (
           <th key={i} style={c.right ? { ...th, textAlign: "right" } : th}>{c.head}</th>
         ))}
         <th style={th} />
-      </>,
-      onPage(rows).map((r) => {
+      </>
+    );
+    return (
+      <ReportTable head={head}>
+        {onPage(rows).map((r) => {
         if (!expand) {
           return (
             <tr key={rowKey(r)} className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>
@@ -488,7 +364,7 @@ export function MissingReport({
         return (
           <Fragment key={k}>
             <tr className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>
-              {cells(r, expanderCell(k, r.title, () => expand.toggle(r, k), expand.cutoff))}
+              {cells(r, <MissingExpanderCell open={expanded.has(k)} title={r.title} cutoff={expand.cutoff} onClick={() => expand.toggle(r, k)} />)}
             </tr>
             {expanded.has(k) && (
               <tr style={{ background: "var(--ds-bg-1)" }}>
@@ -500,7 +376,8 @@ export function MissingReport({
             )}
           </Fragment>
         );
-      }),
+        })}
+      </ReportTable>
     );
   };
 
@@ -559,22 +436,18 @@ export function MissingReport({
         {
           cutoff: false,
           toggle: (s) => void toggleMissingSeries(s),
-          detail: (s, k) => {
-            const ep = episodes[k];
-            return !ep || ep.loading ? (
-              <div className="flex items-center gap-2" style={{ color: "var(--ds-fg-subtle)", fontSize: 12 }}>
-                <Loader2 className="animate-spin" style={{ width: 12, height: 12 }} /> {t("adminManage.missing.episodes.loading")}
-              </div>
-            ) : ep.error ? (
-              <p role="alert" style={{ fontSize: 12, color: "var(--ds-danger)", margin: 0 }}>{ep.error}</p>
-            ) : ep.episodes.length === 0 ? (
-              <p style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>{t("adminManage.missing.episodes.empty")}</p>
-            ) : (
-              episodeLines(t("adminManage.missing.episodes.label", { title: s.title }), ep.episodes, (e) =>
-                t("adminManage.missing.episodes.aired", { date: aired(e.airDateUtc) }),
-              )
-            );
-          },
+          detail: (s, k) => (
+            <MissingEpisodesDetail
+              state={episodes[k]}
+              lines={(eps) => (
+                <EpisodeLines
+                  label={t("adminManage.missing.episodes.label", { title: s.title })}
+                  eps={eps}
+                  last={(e) => t("adminManage.missing.episodes.aired", { date: aired(e.airDateUtc) })}
+                />
+              )}
+            />
+          ),
         },
       ),
     "radarr:cutoff": () =>
@@ -593,7 +466,7 @@ export function MissingReport({
         {
           cutoff: true,
           toggle: (_s, k) => void toggleExpanded(k),
-          detail: (s) => episodeLines(t("adminManage.missing.cutoff.episodesLabel", { title: s.title }), s.episodes, (e) => e.quality ?? "—"),
+          detail: (s) => <EpisodeLines label={t("adminManage.missing.cutoff.episodesLabel", { title: s.title })} eps={s.episodes} last={(e) => e.quality ?? "—"} />,
         },
       ),
   };
@@ -635,179 +508,30 @@ export function MissingReport({
     // Something is listed, but the filters (title, instance, or hiding the
     // unmonitored titles) leave none of it on screen.
     const filtered = report.items.length > 0;
-    let stats: React.ReactNode;
-    if (current === "radarr:missing") {
-      stats = (
-        <>
-          <StatCard label={t("adminManage.missing.stat.movies")} value={movies.length} hint={t("adminManage.missing.stat.moviesHint")} />
-          <StatCard label={t("adminManage.missing.stat.over30")} value={movies.filter((m) => m.daysMissing >= 30).length} hint={t("adminManage.missing.stat.over30Hint")} />
-          <StatCard label={t("adminManage.missing.stat.unmonitored")} value={unmonitoredCount} hint={t("adminManage.missing.stat.unmonitoredHint")} />
-        </>
-      );
-    } else if (current === "sonarr:missing") {
-      stats = (
-        <>
-          <StatCard label={t("adminManage.missing.stat.series")} value={series.length} hint={t("adminManage.missing.stat.seriesHint")} />
-          <StatCard label={t("adminManage.missing.stat.episodes")} value={series.reduce((n, s) => n + s.missing, 0)} hint={t("adminManage.missing.stat.episodesHint")} />
-          <StatCard label={t("adminManage.missing.stat.unmonitored")} value={unmonitoredCount} hint={t("adminManage.missing.stat.unmonitoredHint")} />
-        </>
-      );
-    } else if (current === "radarr:cutoff") {
-      stats = <StatCard label={t("adminManage.missing.cutoff.stat.movies")} value={cutoffMovies.length} hint={t("adminManage.missing.cutoff.stat.moviesHint")} />;
-    } else {
-      stats = (
-        <>
-          <StatCard label={t("adminManage.missing.cutoff.stat.series")} value={cutoffSeries.length} hint={t("adminManage.missing.cutoff.stat.seriesHint")} />
-          <StatCard
-            label={t("adminManage.missing.cutoff.stat.episodes")}
-            value={cutoffSeries.reduce((n, s) => n + s.episodes.length, 0)}
-            hint={t("adminManage.missing.cutoff.stat.episodesHint")}
-          />
-        </>
-      );
-    }
     body = (
       <div className="flex flex-col gap-4">
-        <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>{stats}</div>
-
-        {report.errors.length > 0 && (
-          <div role="status" className="rounded-md bg-amber-500/15 text-amber-400" style={{ padding: "8px 12px", fontSize: 13 }}>
-            <p className="m-0">{t("adminManage.missing.arrErrors", { list: report.errors.map((e) => instanceLabel(e.instance)).join(", ") })}</p>
-            {/* Why, translated from the error's kind; the raw upstream text stays in the server log. */}
-            <ul className="m-0" style={{ paddingLeft: 18, marginTop: 4 }}>
-              {report.errors.map((e) => (
-                <li key={e.instance}>
-                  {t(ARR_ERROR_KIND_KEYS[isArrErrorKind(e.kind) ? e.kind : "other"], { name: instanceLabel(e.instance) })}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {/* Cutoff: an instance whose listing ran past the read's ceiling — the list is incomplete, and says so. */}
-        {report.truncated && report.truncated.length > 0 && (
-          <div role="status" className="rounded-md bg-amber-500/15 text-amber-400" style={{ padding: "8px 12px", fontSize: 13 }}>
-            <ul className="m-0" style={{ paddingLeft: 18 }}>
-              {report.truncated.map((e) => (
-                <li key={e.instance}>{t("adminManage.missing.cutoff.truncated", { name: instanceLabel(e.instance), read: e.read, total: e.total })}</li>
-              ))}
-            </ul>
-            <p className="m-0" style={{ marginTop: 4 }}>
-              {t("adminManage.missing.cutoff.truncatedHint", { action: t("adminArr.system.searchAllCutoff") })}{" "}
-              <Link href="/admin/arr-system?tab=tasks" className="underline">{t("adminArr.missingBulk.capLink")}</Link>
-            </p>
-          </div>
-        )}
-
-        <div className="flex flex-wrap items-center gap-2" style={{ fontSize: 13 }}>
-          <Input
-            value={query}
-            onChange={(e) => setQuery(e.target.value.slice(0, 200))}
-            placeholder={t("adminManage.missing.filter.titlePlaceholder")}
-            aria-label={t("adminManage.missing.filter.title")}
-            className="w-[200px]"
-          />
-          {multiInstance && (
-            <StyledSelect compact className="w-auto" value={instance} onChange={(e) => setInstance(e.target.value)} aria-label={t("adminManage.missing.filter.instance")}>
-              <option value="all">{t("adminManage.missing.filter.allInstances")}</option>
-              {report.instances.map((i) => <option key={i.slug} value={i.slug}>{i.name || i.slug}</option>)}
-            </StyledSelect>
-          )}
-          {current === "radarr:missing" && (
-            <StyledSelect compact className="w-auto" value={movieSort} onChange={(e) => setMovieSort(e.target.value as MovieSort)} aria-label={t("adminManage.missing.filter.sort")}>
-              <option value="recent">{t("adminManage.missing.sort.recentRelease")}</option>
-              <option value="oldest">{t("adminManage.missing.sort.oldestRelease")}</option>
-              <option value="title">{t("adminManage.missing.sort.title")}</option>
-            </StyledSelect>
-          )}
-          {current === "sonarr:missing" && (
-            <StyledSelect compact className="w-auto" value={seriesSort} onChange={(e) => setSeriesSort(e.target.value as SeriesSort)} aria-label={t("adminManage.missing.filter.sort")}>
-              <option value="recent">{t("adminManage.missing.sort.recentAired")}</option>
-              <option value="most">{t("adminManage.missing.sort.mostMissing")}</option>
-              <option value="title">{t("adminManage.missing.sort.title")}</option>
-            </StyledSelect>
-          )}
-          {mode === "missing" ? (
-            <label className="flex items-center gap-2" style={{ color: "var(--ds-fg)" }}>
-              <Switch checked={showUnmonitored} onCheckedChange={setShowUnmonitored} aria-label={t("adminManage.missing.filter.unmonitored")} />
-              {t("adminManage.missing.filter.unmonitored")}
-            </label>
-          ) : (
-            <span style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>{t("adminManage.missing.cutoff.monitoredOnly")}</span>
-          )}
+        <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
+          <MissingStats current={current} lists={{ movies, series, cutoffMovies, cutoffSeries }} unmonitored={unmonitored} />
         </div>
 
-        {(runningHere || selectedHere.length > 0 || (resultHere && visibleCount > 0)) && (
-          <div
-            role="region"
-            aria-label={t("adminArr.missingBulk.region")}
-            className="flex flex-col gap-2 rounded-lg"
-            style={{ padding: "8px 12px", fontSize: 13, border: "1px solid var(--ds-border)", background: "var(--ds-bg-1)" }}
-          >
-            {runningHere ? (
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="flex items-center gap-2" role="status">
-                  <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
-                  {runningHere.cancelling
-                    ? t("adminArr.missingBulk.cancelling")
-                    : t("adminArr.missingBulk.progress", { done: runningHere.done, total: runningHere.total })}
-                </span>
-                <Button size="sm" variant="outline" disabled={runningHere.cancelling} onClick={cancelBulk} aria-label={t("adminArr.missingBulk.cancelAria")}>
-                  <X /> {t("adminArr.common.cancel")}
-                </Button>
-              </div>
-            ) : (
-              <>
-                {resultHere && (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span role="status" className="flex flex-wrap items-center gap-x-2">
-                      {resultHere.failed.length === 0 && !resultHere.cancelled && <Check style={{ width: 14, height: 14 }} />}
-                      <span>{bulkSummary(resultHere)}</span>
-                      {resultHere.skipped > 0 && <span>{t("adminArr.missingBulk.skipped", { count: resultHere.skipped })}</span>}
-                      {resultHere.cancelled && resultHere.notRun > 0 && (
-                        <span>{t("adminArr.missingBulk.cancelled", { notRun: resultHere.notRun, total: resultHere.total })}</span>
-                      )}
-                    </span>
-                    {resultHere.failed.length > 0 && (
-                      <Button size="sm" variant="outline" onClick={retryFailed}>
-                        <RotateCcw /> {t("adminArr.missingBulk.retryFailed")}
-                      </Button>
-                    )}
-                  </div>
-                )}
-                {selectedHere.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span>{t("adminArr.missingBulk.selected", { count: selectedHere.length })}</span>
-                    {selectedOffPage > 0 && (
-                      <span style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>{t("adminArr.missingBulk.selectedOffPage", { count: selectedOffPage })}</span>
-                    )}
-                    {selectedHidden.length > 0 && (
-                      <span style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>{t("adminArr.missingBulk.selectedHidden", { count: selectedHidden.length })}</span>
-                    )}
-                    <Button size="sm" disabled={bulkRunning || loadingHere} onClick={requestBulk}>
-                      <Search /> {mode === "cutoff" ? t("adminArr.missingBulk.searchCutoff", { count: toRun.length }) : t("adminArr.missingBulk.search", { count: toRun.length })}
-                    </Button>
-                    <Button size="sm" variant="ghost" disabled={bulkRunning} onClick={clearSelection}>{t("adminArr.missingBulk.clear")}</Button>
-                    <span style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>
-                      {mode === "cutoff" ? t("adminArr.missingBulk.hintCutoff") : t("adminArr.missingBulk.hint")}
-                    </span>
-                  </div>
-                )}
-                {atCap && (
-                  <p className="m-0" style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>
-                    {t("adminArr.missingBulk.capNote", {
-                      max: BULK_SEARCH_MAX,
-                      action: mode === "cutoff" ? t("adminArr.system.searchAllCutoff") : t("adminArr.system.searchAllMissing"),
-                    })}{" "}
-                    <Link href="/admin/arr-system?tab=tasks" className="hover:underline" style={{ color: "var(--ds-accent-text)" }}>
-                      {t("adminArr.missingBulk.capLink")}
-                    </Link>
-                  </p>
-                )}
-              </>
-            )}
-          </div>
-        )}
+        <MissingReportNotices report={report} mode={modeOf(current)} instanceLabel={instanceLabel} />
+
+        <MissingFilterRow
+          current={current}
+          query={query}
+          onQuery={setQuery}
+          instances={multiInstance ? report.instances : null}
+          instance={instanceShown}
+          onInstance={setInstance}
+          movieSort={movieSort}
+          onMovieSort={setMovieSort}
+          seriesSort={seriesSort}
+          onSeriesSort={setSeriesSort}
+          showUnmonitored={showUnmonitored}
+          onShowUnmonitored={setShowUnmonitored}
+        />
+
+        <MissingBulkBar mode={mode} selection={selection} visibleCount={visibleCount} loadingHere={loadingHere} onCancel={cancelBulk} />
 
         {visibleCount === 0 ? (
           filtered ? (
@@ -831,25 +555,6 @@ export function MissingReport({
     );
   }
 
-  const modeButton = (m: Mode, text: string) => (
-    <button
-      type="button"
-      onClick={() => switchMode(m)}
-      aria-pressed={mode === m}
-      className="ds-hover-tint inline-flex items-center whitespace-nowrap font-medium border-0 min-h-9 sm:min-h-8"
-      style={{
-        padding: "5px 12px",
-        borderRadius: 6,
-        fontSize: 12,
-        background: mode === m ? "var(--ds-bg-2)" : "transparent",
-        boxShadow: mode === m ? "var(--ds-shadow-sm), inset 0 0 0 1px var(--ds-border-strong)" : undefined,
-        color: mode === m ? "var(--ds-fg)" : "var(--ds-fg-muted)",
-      }}
-    >
-      {text}
-    </button>
-  );
-
   return (
     <div className="flex flex-col gap-2">
       <FilterBar<Service>
@@ -861,15 +566,7 @@ export function MissingReport({
         onChange={switchTab}
         right={
           <div className="flex flex-wrap items-center gap-2">
-            <div
-              role="group"
-              aria-label={t("adminManage.missing.mode.label")}
-              className="flex"
-              style={{ padding: 2, background: "var(--ds-bg-1)", border: "1px solid var(--ds-border)", borderRadius: 8 }}
-            >
-              {modeButton("missing", t("adminManage.missing.mode.missing"))}
-              {modeButton("cutoff", t("adminManage.missing.mode.cutoff"))}
-            </div>
+            <MissingModeToggle mode={mode} onMode={switchMode} />
             {configured[service] ? (
               // Off while a bulk search runs on this tab: a Refresh clears every
               // row's search state, and the rows already searched could be ticked
@@ -887,75 +584,10 @@ export function MissingReport({
       {report && errors[current] && (
         <p role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{errors[current]}</p>
       )}
-      {/* A run keeps going on another tab or mode; its progress and Cancel stay reachable here. */}
-      {bulk && bulk.key !== current && (
-        <div role="status" className="flex flex-wrap items-center gap-2" style={{ fontSize: 12, color: "var(--ds-fg-muted)" }}>
-          <Loader2 className="animate-spin" style={{ width: 12, height: 12 }} />
-          {bulk.cancelling
-            ? t("adminArr.missingBulk.cancelling")
-            : t("adminArr.missingBulk.otherRunning", {
-                service: SERVICE_LABEL[bulk.key.split(":")[0] as Service],
-                mode: bulk.key.endsWith(":cutoff") ? t("adminManage.missing.mode.cutoff") : t("adminManage.missing.mode.missing"),
-                done: bulk.done,
-                total: bulk.total,
-              })}
-          <Button size="xs" variant="ghost" disabled={bulk.cancelling} onClick={cancelBulk} aria-label={t("adminArr.missingBulk.cancelAria")}>
-            <X /> {t("adminArr.common.cancel")}
-          </Button>
-        </div>
-      )}
+      {bulk && bulk.key !== current && <OtherListRunning bulk={bulk} onCancel={cancelBulk} />}
       {body}
 
-      <Dialog open={confirming !== null} onOpenChange={(o) => { if (!o) setConfirming(null); }}>
-        <DialogPortal>
-          <DialogBackdrop />
-          <DialogPopup className="max-w-md">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-700">
-              <DialogTitle className="text-base font-semibold text-zinc-100">
-                {confirming &&
-                  (confirming.key.endsWith(":cutoff")
-                    ? t("adminArr.missingBulk.confirmTitleCutoff", { count: confirming.count })
-                    : t("adminArr.missingBulk.confirmTitle", { count: confirming.count }))}
-              </DialogTitle>
-              <DialogClose
-                aria-label={t("adminArr.common.close")}
-                title={t("adminArr.common.close")}
-                className="text-zinc-500 hover:text-zinc-300 transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </DialogClose>
-            </div>
-            {confirming && (
-              <div className="flex flex-col gap-3 px-6 py-4 text-sm text-zinc-400">
-                <p className="m-0">
-                  {t("adminArr.missingBulk.confirmBody", { count: confirming.count, service: SERVICE_LABEL[confirming.key.split(":")[0] as Service] })}
-                </p>
-                {confirming.unmonitored > 0 && (
-                  <p className="m-0 text-amber-400">
-                    {t("adminArr.missingBulk.confirmUnmonitored", {
-                      count: confirming.unmonitored,
-                      service: SERVICE_LABEL[confirming.key.split(":")[0] as Service],
-                    })}
-                  </p>
-                )}
-              </div>
-            )}
-            <div className="flex items-center justify-between px-6 py-4 border-t border-zinc-700 bg-zinc-900">
-              <button type="button" onClick={() => setConfirming(null)} className="rounded px-2 py-1 text-sm text-zinc-500 hover:text-zinc-300">
-                {t("adminArr.common.cancel")}
-              </button>
-              {confirming && (
-                <Button size="sm" onClick={confirmBulk}>
-                  <Search />
-                  {confirming.key.endsWith(":cutoff")
-                    ? t("adminArr.missingBulk.searchCutoff", { count: confirming.count })
-                    : t("adminArr.missingBulk.search", { count: confirming.count })}
-                </Button>
-              )}
-            </div>
-          </DialogPopup>
-        </DialogPortal>
-      </Dialog>
+      <MissingBulkConfirmDialog confirming={confirming} onClose={() => setConfirming(null)} onConfirm={confirmBulk} />
     </div>
   );
 }

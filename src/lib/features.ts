@@ -17,7 +17,8 @@ import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
 
 // For You's cross-viewer co-watching (guardrail 40c). Exported because the
 // graph build, the per-viewer pass and the history import all branch on it.
-export const FOR_YOU_COWATCH_FEATURE_KEY = "feature.behavior.forYouCoWatch";
+// The registry entry below takes its key from here, so the two can't drift.
+export const FOR_YOU_COWATCH_FEATURE_KEY = "feature.behavior.forYouCoWatch" as const;
 
 export type FeatureCategory = "pages" | "behaviors" | "integrations" | "admin";
 
@@ -153,7 +154,7 @@ export const FEATURE_DEFINITIONS = [
     // Guardrail 40c. OFF by default on purpose: For You is then built ONLY
     // from each viewer's own records. Turning it off again deletes the shared
     // edges on the next warm run.
-    key: "feature.behavior.forYouCoWatch",
+    key: FOR_YOU_COWATCH_FEATURE_KEY,
     label: "For You: shared viewing",
     description: "Also suggest titles other people on this server watched alongside the same titles (\"people here who watched X also watched Y\"). Off: For You uses only each viewer's own history, ratings, favorites, watchlist and requests. When on, a suggestion needs at least 3 people who watched both titles, never names anyone, and looks exactly like any other suggestion.",
     category: "behaviors",
@@ -299,6 +300,11 @@ export type FeatureKey = (typeof FEATURE_DEFINITIONS)[number]["key"];
 
 export type FeatureFlags = Record<string, boolean>;
 
+// What getFeatureFlags resolves: every registered key, read-only. Indexing it
+// with a key the registry doesn't define fails to compile; it still passes
+// wherever a plain FeatureFlags map is taken.
+export type ResolvedFeatureFlags = Readonly<Record<FeatureKey, boolean>>;
+
 // Short-lived cache for the flag rows, plus "in-flight coalescing" (callers that
 // arrive while a read is running share that one read). isFeatureEnabled runs on
 // every authenticated page render and many route calls, and the sync orchestrator
@@ -314,8 +320,8 @@ export type FeatureFlags = Record<string, boolean>;
 // serving the old toggle until its TTL ran out.
 const FLAG_CACHE_TTL_MS = 10_000;
 const flagState = processSingleton("features:flagCache", () => ({
-  cache: null as { flags: FeatureFlags; expiresAt: number } | null,
-  inflight: null as Promise<FeatureFlags> | null,
+  cache: null as { flags: ResolvedFeatureFlags; expiresAt: number } | null,
+  inflight: null as Promise<ResolvedFeatureFlags> | null,
   // Generation counter: a read that was already in flight when invalidate ran
   // holds pre-write rows; without the gen check it would re-populate the cache
   // AFTER the invalidation and serve the stale toggle for a full TTL.
@@ -330,7 +336,7 @@ export function invalidateFeatureFlagCache(): void {
   flagState.inflight = null;
 }
 
-function computeFlags(map: Record<string, string>): FeatureFlags {
+function computeFlags(map: Record<string, string>): ResolvedFeatureFlags {
   const out: FeatureFlags = {};
   for (const def of FEATURE_DEFINITIONS) {
     const raw = map[def.key];
@@ -338,7 +344,9 @@ function computeFlags(map: Record<string, string>): FeatureFlags {
     else if (raw === "false") out[def.key] = false;
     else out[def.key] = def.defaultEnabled;
   }
-  return out;
+  // Frozen: the cached map is handed to every caller, and one that wrote into
+  // it would change the flags every other request sees.
+  return Object.freeze(out) as ResolvedFeatureFlags;
 }
 
 /**
@@ -346,33 +354,43 @@ function computeFlags(map: Record<string, string>): FeatureFlags {
  * back to the registered default. Pass an already-loaded `cfg` map (from an
  * existing prisma.setting.findMany scan) to bypass the cache and query entirely.
  */
-export async function getFeatureFlags(cfg?: Record<string, string>): Promise<FeatureFlags> {
+// One read of the flag rows. A failed read serves the last successful one
+// (`fresh: false`, never cached): every concurrent caller shares this read, so
+// one transient failure (a pool timeout) would fail every page render at once.
+// Only a read the admin has not invalidated since: invalidate clears the cache,
+// so a toggle is never undone. Never the registered defaults — they could
+// re-enable a page or integration an admin turned off.
+async function readFlags(): Promise<{ flags: ResolvedFeatureFlags; fresh: boolean }> {
+  let rows;
+  try {
+    rows = await prisma.setting.findMany({ where: { key: { in: [...FEATURE_KEYS] } } });
+  } catch (err) {
+    const lastGood = flagState.cache;
+    if (!lastGood) throw err;
+    const detail = err instanceof Error ? err.message : String(err);
+    warnOnChange(STALE_FLAGS_WARN_KEY, detail, `[features] flag read failed, serving the last successful read: ${detail}`);
+    return { flags: lastGood.flags, fresh: false };
+  }
+  forgetWarnOnChange(STALE_FLAGS_WARN_KEY);
+  return { flags: computeFlags(Object.fromEntries(rows.map((r) => [r.key, r.value]))), fresh: true };
+}
+
+/**
+ * Read all feature flags (cached ~10s, one query per refresh). Missing rows fall
+ * back to the registered default. Pass an already-loaded `cfg` map (from an
+ * existing prisma.setting.findMany scan) to bypass the cache and query entirely.
+ * The cached map is shared by every caller and frozen: copy it to change it.
+ */
+export async function getFeatureFlags(cfg?: Record<string, string>): Promise<ResolvedFeatureFlags> {
   if (cfg) return computeFlags(cfg);
   if (flagState.cache && Date.now() < flagState.cache.expiresAt) return flagState.cache.flags;
   if (flagState.inflight) return flagState.inflight;
   const gen = flagState.gen;
   const inflight = (async () => {
     try {
-      let rows;
-      try {
-        rows = await prisma.setting.findMany({ where: { key: { in: [...FEATURE_KEYS] } } });
-      } catch (err) {
-        // Every concurrent caller shares this one read, so one transient failure
-        // (a pool timeout) would fail every page render at once. Serve the last
-        // successful read instead, its expiry untouched so the next call retries.
-        // Only a read the admin has not invalidated since: invalidate clears the
-        // cache, so a toggle is never undone. Never the registered defaults —
-        // they could re-enable a page or integration an admin turned off.
-        const lastGood = flagState.cache;
-        if (!lastGood) throw err;
-        const detail = err instanceof Error ? err.message : String(err);
-        warnOnChange(STALE_FLAGS_WARN_KEY, detail, `[features] flag read failed, serving the last successful read: ${detail}`);
-        return lastGood.flags;
-      }
-      forgetWarnOnChange(STALE_FLAGS_WARN_KEY);
-      const flags = computeFlags(Object.fromEntries(rows.map((r) => [r.key, r.value])));
+      const { flags, fresh } = await readFlags();
       // Only cache if no invalidation happened while this read was in flight.
-      if (gen === flagState.gen) flagState.cache = { flags, expiresAt: Date.now() + FLAG_CACHE_TTL_MS };
+      if (fresh && gen === flagState.gen) flagState.cache = { flags, expiresAt: Date.now() + FLAG_CACHE_TTL_MS };
       return flags;
     } finally {
       // Clear only if a later invalidate/read hasn't already replaced the slot.

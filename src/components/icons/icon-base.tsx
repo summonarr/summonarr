@@ -1,16 +1,15 @@
 import type { ReactNode } from "react";
-import type { IconProps } from "./index";
+import { iconA11y } from "./icon-a11y";
+import type { IconProps } from "./types";
 
 // The <svg> every icon in this folder renders — one copy of the attributes and
 // the accessibility rule, so a change lands in every icon at once (it used to
 // be pasted into each file by hand). Each icon passes only its shapes.
 //
-// Decorative by default: an icon with no label is aria-hidden. A labelled icon
-// (aria-label / aria-labelledby) is exposed as role="img", because assistive
-// tech announces an un-roled labelled <svg> inconsistently. A caller's own
-// `role` / `aria-hidden` still wins: the spread comes last.
-export function IconBase({ size, children, ...props }: IconProps & { children: ReactNode }) {
-  const labelled = Boolean(props["aria-label"] || props["aria-labelledby"]);
+// Decorative by default; only a label exposes an icon (the rule is iconA11y).
+// role and aria-hidden are taken out of the spread so the rule decides them.
+export function IconBase({ size, children, role, "aria-hidden": ariaHidden, ...props }: IconProps & { children: ReactNode }) {
+  const a11y = iconA11y({ ...props, role, "aria-hidden": ariaHidden });
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -22,8 +21,8 @@ export function IconBase({ size, children, ...props }: IconProps & { children: R
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
-      role={labelled ? "img" : undefined}
-      aria-hidden={labelled || props.role === "img" ? undefined : true}
+      role={a11y.role}
+      aria-hidden={a11y["aria-hidden"]}
       {...props}
     >
       {children}

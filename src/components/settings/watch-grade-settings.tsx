@@ -1,18 +1,21 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson } from "@/lib/client/fetch-json";
+import { v, type Infer } from "@/lib/validate";
+import { useAsyncAction } from "@/hooks/use-async-action";
+import { NumberField } from "./forms/number-field";
 import { useT } from "@/components/i18n/i18n-provider";
 import { SaveStatusMessage } from "./forms/save-status";
-import { useSettingsSave, type SettingsPatchResult } from "./forms/shared";
+import { saveFailureText, useSettingsSave } from "./forms/shared";
 import {
   WATCH_GRADE_DEFAULTS,
   WATCH_GRADE_SETTING_KEYS,
-  type WatchGradePreview,
   type WatchGradeSpread,
 } from "@/lib/watch-grade";
 
@@ -27,6 +30,17 @@ const SPREAD_COLUMNS: { key: keyof WatchGradeSpread; i18nKey: string | null }[] 
   { key: "F", i18nKey: null },
   { key: "notGraded", i18nKey: "settings.watchGrade.notGraded" },
 ];
+
+// POST /api/admin/watch-grade/preview (WatchGradePreview), checked: the table
+// reads every column of both spreads.
+const Spread = v.object({ A: v.number(), B: v.number(), C: v.number(), D: v.number(), F: v.number(), notGraded: v.number() });
+const PreviewAnswer = v.object({
+  enabled: v.boolean(),
+  reason: v.nullable(v.literal("feature-off", "tracking-off")),
+  requesters: v.number(),
+  current: v.nullable(Spread),
+  proposed: v.nullable(Spread),
+});
 
 const BAND_FIELDS: { field: "bandA" | "bandB" | "bandC" | "bandD"; letter: string }[] = [
   { field: "bandA", letter: "A" },
@@ -45,9 +59,10 @@ const BAND_FIELDS: { field: "bandA" | "bandB" | "bandC" | "bandD"; letter: strin
 export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, string> }) {
   const t = useT();
   const [values, setValues] = useState<Record<Field, string>>(initial);
-  const [preview, setPreview] = useState<{ body: string; result: WatchGradePreview } | null>(null);
-  const [previewing, setPreviewing] = useState(false);
+  const [preview, setPreview] = useState<{ body: string; result: Infer<typeof PreviewAnswer> } | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const action = useAsyncAction();
+  const previewing = action.busy("preview");
 
   // An edit during a save keeps Save locked and isn't reported as saved
   // (useSettingsSave). Only a success fades; an error keeps its icon beside
@@ -55,52 +70,53 @@ export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, str
   const { status, message, save, edited } = useSettingsSave();
 
   function set(field: Field, value: string) {
-    setValues((v) => ({ ...v, [field]: value }));
+    setValues((prev) => ({ ...prev, [field]: value }));
     edited();
   }
 
   // What both Save and Preview send: every watch-grade key, trimmed.
-  function fields(): Record<string, string> {
+  const fields = useMemo(() => {
     const out: Record<string, string> = {};
     for (const field of Object.keys(WATCH_GRADE_SETTING_KEYS) as Field[]) {
       out[WATCH_GRADE_SETTING_KEYS[field]] = values[field].trim();
     }
     return out;
-  }
-  const body = () => JSON.stringify(fields());
+  }, [values]);
+  const body = useMemo(() => JSON.stringify(fields), [fields]);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    const result = await save(fields(), (r: SettingsPatchResult) =>
-      r.status === 0 ? t("settings.common.networkError") : t("settings.common.saveFailedStatus", { status: r.status }));
+    const result = await save(fields, saveFailureText(t));
     // The preview's "Now" row described the settings just replaced.
     if (result.ok) setPreview(null);
   }
 
   async function handlePreview() {
-    const sent = body();
-    setPreviewing(true);
+    const sent = body;
     setPreviewError(null);
-    try {
-      const res = await fetch(withBasePath("/api/admin/watch-grade/preview"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: sent,
-      });
-      const data = (await res.json().catch(() => null)) as (WatchGradePreview & { error?: string }) | null;
-      if (!res.ok || !data) {
-        setPreviewError(data?.error ?? t("settings.watchGrade.previewFailedStatus", { status: res.status }));
-        return;
-      }
-      setPreview({ body: sent, result: data });
-    } catch {
-      setPreviewError(t("settings.common.networkError"));
-    } finally {
-      setPreviewing(false);
+    const res = await action.run("preview", (signal) => fetchJson(withBasePath("/api/admin/watch-grade/preview"), {
+      init: { method: "POST", headers: { "Content-Type": "application/json" }, body: sent },
+      schema: PreviewAnswer,
+      signal,
+    }));
+    if (!res) return;
+    if (!res.ok) {
+      setPreviewError(
+        res.kind === "http"
+          ? res.error || t("settings.watchGrade.previewFailedStatus", { status: res.status })
+          : res.kind === "invalid"
+            ? t("settings.watchGrade.previewFailedStatus", { status: res.status })
+            : t("settings.common.networkError"),
+      );
+      return;
     }
+    setPreview({ body: sent, result: res.data });
   }
 
-  const stale = preview !== null && preview.body !== body();
+  const stale = preview !== null && preview.body !== body;
+  const spreads = preview?.result.enabled && preview.result.current && preview.result.proposed
+    ? { current: preview.result.current, proposed: preview.result.proposed, requesters: preview.result.requesters }
+    : null;
 
   const numberField = (
     field: Field,
@@ -109,20 +125,16 @@ export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, str
     bounds: { min: number; max: number },
     help: React.ReactNode,
   ) => (
-    <div className="space-y-1.5">
-      <Label htmlFor={id}>{label}</Label>
-      <Input
-        id={id}
-        type="number"
-        min={bounds.min}
-        max={bounds.max}
-        placeholder={String(WATCH_GRADE_DEFAULTS[field])}
-        value={values[field]}
-        onChange={(e) => set(field, e.target.value)}
-        className="bg-zinc-800 border-zinc-700 w-32"
-      />
-      <p className="text-xs text-zinc-500">{help}</p>
-    </div>
+    <NumberField
+      id={id}
+      label={label}
+      min={bounds.min}
+      max={bounds.max}
+      placeholder={String(WATCH_GRADE_DEFAULTS[field])}
+      value={values[field]}
+      onChange={(value) => set(field, value)}
+      help={help}
+    />
   );
 
   return (
@@ -202,7 +214,7 @@ export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, str
               : t("settings.watchGrade.previewNoHistory")}
           </p>
         )}
-        {preview?.result.enabled && preview.result.current && preview.result.proposed && (
+        {spreads && (
           <div className={stale ? "opacity-50" : undefined} aria-live="polite">
             <div className="overflow-x-auto">
               <table className="text-xs text-zinc-300 border-collapse">
@@ -218,16 +230,16 @@ export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, str
                   <tr>
                     <th scope="row" className="text-left font-normal text-zinc-500 pr-4 py-1 whitespace-nowrap">{t("settings.watchGrade.savedNow")}</th>
                     {SPREAD_COLUMNS.map((c) => (
-                      <td key={c.key} className="text-right tabular-nums px-2 py-1">{preview.result.current![c.key]}</td>
+                      <td key={c.key} className="text-right tabular-nums px-2 py-1">{spreads.current[c.key]}</td>
                     ))}
                   </tr>
                   <tr>
                     <th scope="row" className="text-left font-normal text-zinc-500 pr-4 py-1 whitespace-nowrap">{t("settings.watchGrade.theseValues")}</th>
                     {SPREAD_COLUMNS.map((c) => {
-                      const changed = preview.result.proposed![c.key] !== preview.result.current![c.key];
+                      const changed = spreads.proposed[c.key] !== spreads.current[c.key];
                       return (
                         <td key={c.key} className={`text-right tabular-nums px-2 py-1 ${changed ? "text-zinc-100 font-semibold" : ""}`}>
-                          {preview.result.proposed![c.key]}
+                          {spreads.proposed[c.key]}
                         </td>
                       );
                     })}
@@ -236,7 +248,7 @@ export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, str
               </table>
             </div>
             <p className="text-xs text-zinc-500 mt-1">
-              {t("settings.watchGrade.requesters", { count: preview.result.requesters })}
+              {t("settings.watchGrade.requesters", { count: spreads.requesters })}
               {stale ? ` ${t("settings.watchGrade.stale")}` : ""}
             </p>
           </div>

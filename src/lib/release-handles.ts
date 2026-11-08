@@ -31,21 +31,29 @@ const handles = processSingleton("release-handles", () => new Map<string, Entry>
 // evicted one turned that retry into "search again". Claims are few (one per
 // grab in flight), so skipping them keeps both bounds within a handful.
 
-function sweep(now: number): void {
+// Make room for `incoming` new handles in the whole map: expired entries go
+// first, then the issuer's own oldest unclaimed (they are searching anew), and
+// only then anyone's oldest unclaimed — rather than refuse the newcomer, since
+// the admin searching now is the one who will grab. Never past the bound
+// except by claims, which are skipped.
+function makeRoom(owner: string, incoming: number, now: number): void {
+  if (handles.size + incoming <= MAX_RELEASE_HANDLES) return;
   for (const [k, e] of handles) if (e.expiresAt <= now) handles.delete(k);
-  // Still full of live entries: drop the oldest unclaimed (insertion order)
-  // rather than refuse the newcomer — the admin searching now is the one who
-  // will grab. One walk: only claimed entries left ends it.
+  evictUnclaimed(incoming, (e) => e.owner === owner);
+  evictUnclaimed(incoming, () => true);
+}
+
+function evictUnclaimed(incoming: number, pick: (e: Entry) => boolean): void {
   for (const [k, e] of handles) {
-    if (handles.size < MAX_RELEASE_HANDLES) break;
-    if (!e.claimed) handles.delete(k);
+    if (handles.size + incoming <= MAX_RELEASE_HANDLES) return;
+    if (!e.claimed && pick(e)) handles.delete(k);
   }
 }
 
 // Make room for `incoming` new handles of `owner` within their share: their
 // own oldest unclaimed go first (insertion order), never anyone else's. A
 // single list larger than the share still goes in whole — the owner is
-// searching anew.
+// searching anew (up to the whole map's bound, MAX_RELEASE_HANDLES).
 function trimOwner(owner: string, incoming: number, now: number): void {
   let own = 0;
   for (const e of handles.values()) if (e.owner === owner && e.expiresAt > now) own++;
@@ -62,7 +70,9 @@ function trimOwner(owner: string, incoming: number, now: number): void {
 /**
  * Copies of `releases` with `guid` replaced by a fresh handle for `scope` (the
  * request, instance and season the search was for), issued to `owner` (the
- * user searching — what the per-user share counts). Nothing else changes.
+ * user searching — what the per-user share counts, and who alone may redeem
+ * them). Nothing else changes. A list longer than the whole map's bound is
+ * cut to it.
  */
 export function issueReleaseHandles<T extends { guid: string; indexerId: number; title?: string }>(
   scope: string,
@@ -70,9 +80,10 @@ export function issueReleaseHandles<T extends { guid: string; indexerId: number;
   opts: { owner: string; now?: number },
 ): T[] {
   const now = opts.now ?? Date.now();
-  trimOwner(opts.owner, releases.length, now);
-  if (handles.size + releases.length >= MAX_RELEASE_HANDLES) sweep(now);
-  return releases.map((r) => {
+  const issued = releases.length > MAX_RELEASE_HANDLES ? releases.slice(0, MAX_RELEASE_HANDLES) : releases;
+  trimOwner(opts.owner, issued.length, now);
+  makeRoom(opts.owner, issued.length, now);
+  return issued.map((r) => {
     const handle = randomBytes(16).toString("hex");
     handles.set(handle, { scope, owner: opts.owner, guid: r.guid, indexerId: r.indexerId, title: (r.title ?? "").slice(0, 300), expiresAt: now + RELEASE_HANDLE_TTL_MS, claimed: false });
     return { ...r, guid: handle };
@@ -80,10 +91,17 @@ export function issueReleaseHandles<T extends { guid: string; indexerId: number;
 }
 
 /**
- * The release behind a handle, or null when unknown, expired, or issued for a
- * different search. `title` is the release name, for the audit (never the guid).
+ * The release behind a handle, or null when unknown, expired, issued for a
+ * different search, or (when `owner` is given) issued to someone else — a
+ * handle that leaked through a log or a shared screen is no use to another
+ * account. `title` is the release name, for the audit (never the guid).
  */
-export function redeemReleaseHandle(scope: string, handle: string, now: number = Date.now()): { guid: string; indexerId: number; title: string } | null {
+export function redeemReleaseHandle(
+  scope: string,
+  handle: string,
+  now: number = Date.now(),
+  owner?: string,
+): { guid: string; indexerId: number; title: string } | null {
   const e = handles.get(handle);
   if (!e) return null;
   if (e.expiresAt <= now) {
@@ -91,6 +109,7 @@ export function redeemReleaseHandle(scope: string, handle: string, now: number =
     return null;
   }
   if (e.scope !== scope) return null;
+  if (owner !== undefined && e.owner !== owner) return null;
   return { guid: e.guid, indexerId: e.indexerId, title: e.title };
 }
 
@@ -101,12 +120,12 @@ export type ReleaseClaim = { guid: string; indexerId: number; title: string } | 
  * requests racing with the same handle (a double submit, a replay) exactly one
  * gets the release and the other `"busy"` — they would otherwise both send it
  * and the download client fetches it twice. `"unknown"` is redeemReleaseHandle's
- * null. The caller then spends it (`forgetReleaseHandle`) once the arr took the
+ * null (and, given `owner`, a handle issued to someone else). The caller then spends it (`forgetReleaseHandle`) once the arr took the
  * grab, or hands it back (`releaseReleaseHandle`) when the arr definitely
  * refused it.
  */
-export function claimReleaseHandle(scope: string, handle: string, now: number = Date.now()): ReleaseClaim {
-  const picked = redeemReleaseHandle(scope, handle, now);
+export function claimReleaseHandle(scope: string, handle: string, now: number = Date.now(), owner?: string): ReleaseClaim {
+  const picked = redeemReleaseHandle(scope, handle, now, owner);
   if (!picked) return "unknown";
   const e = handles.get(handle) as Entry;
   if (e.claimed) return "busy";

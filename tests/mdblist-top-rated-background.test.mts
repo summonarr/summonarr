@@ -97,3 +97,14 @@ test("the same read from a page still reaches MDBList", async () => {
   assert.deepEqual(items.map((m) => m.id), [42]);
   assert.deepEqual(fetchCalls.map((u) => u.pathname), ["/lists/top", "/lists/7/items"]);
 });
+
+test("a page's top-rated read never joins a background read of the same list in flight — the background one is refused at the reserve", async () => {
+  // Both start at once: with one shared coalesce key the page call joined the
+  // background call and got its [] back.
+  const [background, page] = await Promise.all([
+    getMdblistTopRated("movie", 2, { background: true }),
+    getMdblistTopRated("movie", 2),
+  ]);
+  assert.deepEqual(background, []);
+  assert.deepEqual(page.map((m) => m.id), [42]);
+});

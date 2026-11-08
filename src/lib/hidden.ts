@@ -17,8 +17,10 @@ import { prisma } from "./prisma";
 const MAX_HIDDEN_SET = 10_000;
 
 // The set's key for a title — the one spelling every caller filters with.
+// Lowercased like the set's own keys, so a caller holding the enum casing
+// ("MOVIE") matches too.
 export function hiddenKeyOf(item: { id: number; mediaType: string }): string {
-  return `${item.id}:${item.mediaType}`;
+  return `${item.id}:${item.mediaType.toLowerCase()}`;
 }
 
 export async function getUserHiddenSet(userId: string): Promise<Set<string>> {

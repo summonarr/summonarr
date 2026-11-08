@@ -217,6 +217,8 @@ function auditMatch(r: AuditRow, where: Record<string, unknown> | undefined): bo
 
 let auditCountOverride: number | null = null;
 let auditCountThrows = false;
+// Fails the login-details pass of the PII scrub (the one that writes `details`).
+let auditUpdateManyThrows = false;
 shadowPrismaModel(prisma, "auditLog", {
   count: async (args: { where?: Record<string, unknown> } = {}) => {
     rec("auditLog.count", args.where);
@@ -240,6 +242,7 @@ shadowPrismaModel(prisma, "auditLog", {
   },
   updateMany: async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
     rec("auditLog.updateMany", args.where);
+    if (auditUpdateManyThrows && "details" in args.data) throw new Error("simulated scrub failure");
     let n = 0;
     for (const r of auditRows) {
       if (!auditMatch(r, args.where)) continue;
@@ -348,6 +351,7 @@ beforeEach(() => {
   findManyThrowsAfter = null;
   findManyCalls = 0;
   auditCountThrows = false;
+  auditUpdateManyThrows = false;
 });
 
 // ── /api/admin/users — gating ────────────────────────────────────────────────
@@ -885,6 +889,29 @@ test("scrub: reports the counts and the cutoff it used", async () => {
   assert.ok(ageDays > 80 && ageDays < 100, `cutoff is ${ageDays.toFixed(0)}d, expected ~90d`);
 });
 
+test("scrub: one that fails part-way is still audited, naming the step that finished, and the error answers 500", async () => {
+  const t = await mintSession();
+  auditRows = [audit({ id: "old", createdAt: new Date(Date.now() - 200 * 86_400_000), action: "AUTH_LOGIN", details: '{"ip":"1.2.3.4"}' })];
+  auditUpdateManyThrows = true;
+  await assert.rejects(scrubAudit(t), /simulated scrub failure/);
+  const row = (opsOf("auditLog.create").map((o) => (o.args as { data: { action: string; target: string; details: string } }).data))
+    .find((d) => d.target === "audit-log:pii-scrub");
+  assert.ok(row, "the half-done scrub is on the record");
+  const details = JSON.parse(row.details) as Record<string, unknown>;
+  assert.equal(details.failed, true);
+  assert.equal(details.scrubbed, 1, "the column pass finished");
+  assert.equal(details.detailsScrubbed, null, "the login-details pass did not");
+});
+
+test("scrub: more than five in ten minutes by one admin is 429 with Retry-After", async () => {
+  const t = await mintSession();
+  for (let i = 0; i < 5; i++) assert.equal((await scrubAudit(t)).status, 200);
+  const over = await scrubAudit(t);
+  assert.equal(over.status, 429);
+  assert.equal(over.headers.get("Retry-After"), "600");
+  assert.equal((await scrubAudit(await mintSession())).status, 200, "the budget is per admin");
+});
+
 // ── /api/admin/audit-log/export ──────────────────────────────────────────────
 
 test("export: anonymous is 401 and a plain USER is 403", async () => {
@@ -921,6 +948,31 @@ test("export: its paper-trail row goes through the shared row builder — a cont
   assert.equal(JSON.parse(row.details as string).status, "started");
   await readAll(res);
   assert.ok(opsOf("auditLog.update").some((o) => (o.args as { where: { id: string } }).where.id === auditRows.find((r) => r.action === "AUDIT_LOG_EXPORT")?.id), "the same row is finalized");
+});
+
+test("export: the download carries PII, so no browser or shared cache may keep it (Cache-Control: no-store)", async () => {
+  const t = await mintSession();
+  auditRows = [audit({ id: "a1" })];
+  const res = await exportAudit(t);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  await readAll(res);
+});
+
+test("export: a download nobody reads is cut off, and its paper-trail row says aborted instead of staying \"started\"", async (ctx) => {
+  ctx.mock.timers.enable({ apis: ["setTimeout"] });
+  const t = await mintSession();
+  auditRows = [audit({ id: "a1" })];
+  const res = await exportAudit(t);
+  assert.equal(res.status, 200);
+  // Never read (a HEAD runs GET and reads nothing): the first-read cut-off fires.
+  ctx.mock.timers.tick(60_000);
+  for (let i = 0; i < 50 && opsOf("auditLog.update").length === 0; i++) await new Promise((r) => setImmediate(r));
+  const upd = opsOf("auditLog.update");
+  assert.equal(upd.length, 1, "the row was finalized");
+  const details = JSON.parse((upd[0].args as { data: { details: string } }).data.details);
+  assert.equal(details.status, "aborted");
+  assert.match(details.error, /never read/);
+  await res.body?.cancel().catch(() => {});
 });
 
 test("export: finalizes the audit row with the row count and completed status", async () => {

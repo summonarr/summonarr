@@ -37,6 +37,14 @@ export interface CronJobInfo {
 // The count is shown either way — this number only picks the colour.
 const RUNS_PER_HOUR_WARN_AT = 4;
 
+// `prev` with `name`'s message set, or removed for null.
+function withMessage(prev: Record<string, string>, name: string, message: string | null): Record<string, string> {
+  const next = { ...prev };
+  if (message) next[name] = message;
+  else delete next[name];
+  return next;
+}
+
 // Admin table of the app's scheduled (cron) jobs: when each last ran, whether
 // it worked, and a Run button to start one by hand.
 export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
@@ -52,25 +60,29 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
   const t = useT();
   const locale = useLocale();
 
-  async function triggerJob(endpoint: string, name: string) {
+  // A manual run as the row now shows it. It is recorded in the same run
+  // history as a scheduled one, so it is counted here too without a reload.
+  // `startedAt` is when the click sent it: the server records the start time.
+  function markRun(name: string, status: "ok" | "error", durationMs: number | null, startedAt: string) {
+    setJobs((prev) =>
+      prev.map((j) =>
+        j.name === name
+          ? { ...j, lastRun: startedAt, lastDuration: durationMs, lastStatus: status, runsLastHour: (j.runsLastHour ?? 0) + 1 }
+          : j,
+      ),
+    );
+  }
+
+  async function handleTriggerJob(endpoint: string, name: string) {
     setRunning((prev) => new Set(prev).add(name));
-    const setRunError = (message: string | null) =>
-      setRunErrors((prev) => {
-        const next = { ...prev };
-        if (message) next[name] = message;
-        else delete next[name];
-        return next;
-      });
-    const setSkipNote = (message: string | null) =>
-      setSkipNotes((prev) => {
-        const next = { ...prev };
-        if (message) next[name] = message;
-        else delete next[name];
-        return next;
-      });
+    // An event handler, never the render path (guardrail 16).
+    const startedAt = new Date().toISOString();
+    const setRunError = (message: string | null) => setRunErrors((prev) => withMessage(prev, name, message));
+    const setSkipNote = (message: string | null) => setSkipNotes((prev) => withMessage(prev, name, message));
     try {
       const res = await fetch(withBasePath(endpoint), { method: "POST" });
-      const data = (await res.json().catch(() => ({}))) as { durationMs?: number; error?: string; reason?: unknown };
+      const parsed: unknown = await res.json().catch(() => null);
+      const data = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
       // Real failures come back as a non-2xx status (e.g. upcoming's 502) or
       // as an `error` field on a 200 (a partly failed sync); a skip carries
       // X-Cron-Skipped (see manualRunOutcome).
@@ -87,32 +99,11 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
       setSkipNote(null);
       const succeeded = outcome === "ok";
       setRunError(succeeded ? null : typeof data.error === "string" && data.error ? data.error : `HTTP ${res.status}`);
-
-      setJobs((prev) =>
-        prev.map((j) =>
-          j.name === name
-            ? {
-                ...j,
-                lastRun: new Date().toISOString(),
-                lastDuration: data.durationMs ?? null,
-                lastStatus: succeeded ? "ok" : "error",
-                // A manual run is recorded in the same run history as a
-                // scheduled one, so count it here too without needing a reload.
-                runsLastHour: (j.runsLastHour ?? 0) + 1,
-              }
-            : j,
-        ),
-      );
+      markRun(name, succeeded ? "ok" : "error", typeof data.durationMs === "number" ? data.durationMs : null, startedAt);
     } catch {
       setSkipNote(null);
       setRunError(t("settings.common.networkError"));
-      setJobs((prev) =>
-        prev.map((j) =>
-          j.name === name
-            ? { ...j, lastRun: new Date().toISOString(), lastDuration: null, lastStatus: "error" as const, runsLastHour: (j.runsLastHour ?? 0) + 1 }
-            : j,
-        ),
-      );
+      markRun(name, "error", null, startedAt);
     } finally {
       setRunning((prev) => {
         const next = new Set(prev);
@@ -212,7 +203,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                     // Every row's visible label is the same word, so the
                     // accessible name carries the job.
                     aria-label={isRunning ? t("settings.cron.runningNamed", { name: job.name }) : t("settings.cron.runNamed", { name: job.name })}
-                    onClick={() => triggerJob(job.endpoint, job.name)}
+                    onClick={() => handleTriggerJob(job.endpoint, job.name)}
                     className="h-9 px-2.5 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1.5"
                   >
                     {isRunning ? (

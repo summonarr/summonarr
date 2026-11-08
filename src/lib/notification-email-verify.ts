@@ -19,6 +19,16 @@ import { createHash, randomBytes } from "node:crypto";
 export const VERIFY_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const IDENTIFIER_PREFIX = "notif-email:";
 
+/**
+ * Whether an account signed in this way sets its own notification address.
+ * Jellyfin only: Plex and OIDC addresses are owned by the provider and synced
+ * on every sign-in (src/lib/auth.ts), so an override would be clobbered on the
+ * next one.
+ */
+export function canSetOwnNotificationEmail(provider: string | null | undefined): boolean {
+  return provider === "jellyfin" || provider === "jellyfin-quickconnect";
+}
+
 export function generateVerifyToken(): { raw: string; hash: string } {
   const raw = randomBytes(32).toString("hex");
   return { raw, hash: hashVerifyToken(raw) };

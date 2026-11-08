@@ -4,7 +4,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { arrFailure, arrTitleGate, parseArrId, parseSeasonNumber, type ArrTitleTarget } from "@/lib/arr-admin-http";
 import type { GrabProgress } from "@/lib/arr";
 import { grabTitleRelease, searchTitleReleases, type ReleaseScope } from "@/lib/arr-title-data";
-import { auditContext, logAudit } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -104,7 +104,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (!checkRateLimit(`arr-title-grab:${session.user.id}`, GRAB_LIMIT_PER_MIN, 60_000)) {
     return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
   }
-  const picked = claimReleaseHandle(handleScope(target, scope), handle);
+  const picked = claimReleaseHandle(handleScope(target, scope), handle, Date.now(), session.user.id);
   if (picked === "unknown") return NextResponse.json({ error: t("apiUser.requests.releases.handleExpired") }, { status: 410 });
   if (picked === "busy") return NextResponse.json({ error: t("apiUser.requests.releases.grabInProgress") }, { status: 409 });
   const progress: GrabProgress = { sent: false };
@@ -125,8 +125,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
   forgetReleaseHandle(handle);
   void logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email ?? null,
+    ...auditActor(req, session),
     action: "ARR_RELEASE_GRAB",
     target: `${target.service}:${target.instance}:${target.arrId}`,
     details: {
@@ -139,7 +138,6 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       ...(scope && "seasonNumber" in scope ? { season: scope.seasonNumber } : {}),
       ...(scope && "episodeId" in scope ? { episodeId: scope.episodeId } : {}),
     },
-    ...auditContext(req, session),
   });
   return NextResponse.json({ ok: true });
 });

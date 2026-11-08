@@ -58,10 +58,20 @@ export async function GET(req: NextRequest) {
   // the login form) returns undefined for missing or unsafe input, and the
   // callback then falls back to "/".
   const returnTo = safeInternalPath(req.nextUrl.searchParams.get("callbackUrl"));
-  // The allowlist's opt-in "groups" scope. An unreadable (or unreachable)
-  // policy asks for nothing extra — the callback reads it again and refuses
-  // an unreadable one there.
-  const policy = await loadOidcAllowlist().catch(() => null);
+  // The allowlist's opt-in "groups" scope. An unreadable stored value asks for
+  // nothing extra (loadOidcAllowlist answers null; the callback refuses it). A
+  // read that FAILS ends the flow here: the callback fails closed on the same
+  // fault, and a flow started without the groups scope would refuse a
+  // group-gated user for the wrong reason once the database is back.
+  let policy;
+  try {
+    policy = await loadOidcAllowlist();
+  } catch (err) {
+    console.error("[oidc/start] allowlist read failed:", err instanceof Error ? err.message : err);
+    return isNative
+      ? NextResponse.json({ error: t("apiAuth.oidc.unavailable") }, { status: 503 })
+      : loginErrorRedirect(req, "oidc_unavailable");
+  }
   let auth;
   try {
     auth = await buildOidcAuthorization(redirectUri, returnTo, {

@@ -105,8 +105,18 @@ const TOPIC_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const HEADER_NAME_RE = /^[A-Za-z0-9-]{1,64}$/;
 // Headers the transport owns. Letting a template's auth header override one of
 // these would break the request or smuggle a second value. Idempotency-Key
-// carries the webhook's delivery id (WEBHOOK_DELIVERY_ID_HEADER).
-const RESERVED_HEADERS = new Set(["host", "content-type", "content-length", "transfer-encoding", "connection", "cookie", "user-agent", "idempotency-key"]);
+// carries the webhook's delivery id (WEBHOOK_DELIVERY_ID_HEADER). The
+// hop-by-hop and connection-control headers (and every Proxy-*) are refused at
+// save: the HTTP client refuses or misbehaves on them at send, which surfaced
+// only as an opaque "request could not be built" on every delivery.
+const RESERVED_HEADERS = new Set([
+  "host", "content-type", "content-length", "transfer-encoding", "connection", "cookie", "user-agent", "idempotency-key",
+  "keep-alive", "upgrade", "expect", "te", "trailer",
+]);
+const isReservedHeader = (name: string) => {
+  const lower = name.toLowerCase();
+  return RESERVED_HEADERS.has(lower) || lower.startsWith("proxy-");
+};
 
 /** Validates an admin-entered channel URL: absolute http(s), no credentials in it. */
 export function validateAgentUrl(raw: unknown): string | null {
@@ -158,39 +168,62 @@ function validateKindConfig(kind: AgentKind, raw: unknown): KindConfigResult {
   // The normalized URL has no credentials, so a `?`/`#` can only be the
   // delimiter itself (an escaped one is `%3F`/`%23`).
   if (kind !== "webhook" && /[?#]/.test(url)) return { ok: false, error: "url" };
-  if (kind === "webhook") {
-    const headerName = typeof r.headerName === "string" && r.headerName.trim() ? r.headerName.trim() : "Authorization";
-    if (!HEADER_NAME_RE.test(headerName) || RESERVED_HEADERS.has(headerName.toLowerCase())) return { ok: false, error: "headerName" };
-    let template: string | null = null;
-    if (typeof r.template === "string" && r.template.trim()) {
-      template = r.template;
-      if (template.length > MAX_TEMPLATE_CHARS) return { ok: false, error: "templateTooLong" };
-      // A template must render to valid JSON for EVERY sample, or some delivery
-      // would be a malformed body the receiver rejects: the full samples catch a
-      // placeholder outside any JSON string (every field set, text where the
-      // live value is text — `[{{arr.release}}]` is `[]` only while it is
-      // empty), the sparse one (every nullable field null — `media` absent, no
-      // text, no votes) catches `{"id": {{media.tmdbId}}}`, which a full sample
-      // renders as a bare number and the live `arr.manual_interaction` event
-      // (no media) renders as `{"id": }`.
-      try {
-        for (const [ev, ctx] of TEMPLATE_SAMPLES) JSON.parse(renderTemplate(template, buildWebhookPayload(ev, ctx)));
-      } catch {
-        return { ok: false, error: "templateInvalid" };
-      }
-    }
-    return { ok: true, value: { kind, config: { url, template, headerName } } };
+  if (kind === "webhook") return validateWebhookConfig(url, r);
+  if (kind === "ntfy") return validateNtfyConfig(url, r);
+  return validateGotifyConfig(url, r);
+}
+
+function validateWebhookConfig(url: string, r: Record<string, unknown>): KindConfigResult {
+  const headerName = typeof r.headerName === "string" && r.headerName.trim() ? r.headerName.trim() : "Authorization";
+  if (!HEADER_NAME_RE.test(headerName) || isReservedHeader(headerName)) return { ok: false, error: "headerName" };
+  let template: string | null = null;
+  if (typeof r.template === "string" && r.template.trim()) {
+    template = r.template;
+    if (template.length > MAX_TEMPLATE_CHARS) return { ok: false, error: "templateTooLong" };
+    if (!templateRendersJson(template)) return { ok: false, error: "templateInvalid" };
   }
-  if (kind === "ntfy") {
-    const topic = typeof r.topic === "string" ? r.topic.trim() : "";
-    if (!TOPIC_RE.test(topic)) return { ok: false, error: "topic" };
-    const priority = intIn(r.priority, 1, 5, 3);
-    if (priority === null) return { ok: false, error: "priority" };
-    return { ok: true, value: { kind, config: { url, topic, priority, attachPoster: r.attachPoster === true } } };
-  }
+  return { ok: true, value: { kind: "webhook", config: { url, template, headerName } } };
+}
+
+function validateNtfyConfig(url: string, r: Record<string, unknown>): KindConfigResult {
+  const topic = typeof r.topic === "string" ? r.topic.trim() : "";
+  if (!TOPIC_RE.test(topic)) return { ok: false, error: "topic" };
+  const priority = intIn(r.priority, 1, 5, 3);
+  if (priority === null) return { ok: false, error: "priority" };
+  return { ok: true, value: { kind: "ntfy", config: { url, topic, priority, attachPoster: r.attachPoster === true } } };
+}
+
+function validateGotifyConfig(url: string, r: Record<string, unknown>): KindConfigResult {
   const priority = intIn(r.priority, 0, 10, 5);
   if (priority === null) return { ok: false, error: "priority" };
-  return { ok: true, value: { kind, config: { url, priority } } };
+  return { ok: true, value: { kind: "gotify", config: { url, priority } } };
+}
+
+// A template must render to valid JSON for EVERY sample, or some delivery
+// would be a malformed body the receiver rejects: the full samples catch a
+// placeholder outside any JSON string (every field set, text where the live
+// value is text — `[{{arr.release}}]` is `[]` only while it is empty), the
+// sparse one (every nullable field null — `media` absent, no text, no votes)
+// catches `{"id": {{media.tmdbId}}}`, which a full sample renders as a bare
+// number and the live `arr.manual_interaction` event (no media) renders as
+// `{"id": }`. The answer depends on the template text alone, so it is kept:
+// every stored row is re-validated on each dispatch, and the sample renders
+// are the costly part.
+const TEMPLATE_VERDICT_MAX = 100;
+const templateVerdicts = new Map<string, boolean>();
+
+function templateRendersJson(template: string): boolean {
+  const known = templateVerdicts.get(template);
+  if (known !== undefined) return known;
+  let ok = true;
+  try {
+    for (const [ev, ctx] of TEMPLATE_SAMPLES) JSON.parse(renderTemplate(template, buildWebhookPayload(ev, ctx)));
+  } catch {
+    ok = false;
+  }
+  if (templateVerdicts.size >= TEMPLATE_VERDICT_MAX) templateVerdicts.clear();
+  templateVerdicts.set(template, ok);
+  return ok;
 }
 
 /**

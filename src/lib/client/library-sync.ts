@@ -14,6 +14,7 @@
 //   body, or the polls ran out — is never a failure: the run may still be going
 //   on the server (37a's status-0 convention).
 import { runReplaceFileJob } from "./replace-file-job";
+import { isGatewayStatus } from "../gateway-status";
 
 export type LibrarySyncService = "plex" | "jellyfin";
 
@@ -48,7 +49,7 @@ export function jobAnswerError(answer: JobAnswer): string | null {
  */
 export function isNoAnswer(answer: JobAnswer): boolean {
   if (answer.status === 0) return true;
-  return jobAnswerError(answer) === null && (answer.status === 502 || answer.status === 503 || answer.status === 504);
+  return jobAnswerError(answer) === null && isGatewayStatus(answer.status);
 }
 
 /** A resync's job answer (status 0 = none came) as an outcome. Pure. */

@@ -20,10 +20,14 @@ import {
   requestTimeoutSignal,
   type LoginAuth,
 } from "@/lib/client/plex-redirect-auth";
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
-}
+import {
+  abortableSleep,
+  anySignal,
+  isConnectedBody,
+  plexSignInDestination,
+  settingsPollStep,
+} from "@/lib/client/plex-done-flow";
+import { plexClientHeaders } from "@/lib/plex-client-headers";
 
 // Turn a failed POST /api/auth/sign-in/plex into a message that reflects the
 // ACTUAL failure class, instead of a blanket "you don't have access". The route
@@ -77,27 +81,18 @@ export default function PlexDonePage() {
     setFailed(true);
   }
 
-  async function completeLogin(auth: LoginAuth) {
+  async function completeLogin(auth: LoginAuth, signal: AbortSignal) {
     // Poll plex.tv directly until the user approves the PIN in the Plex UI. The
     // window is wall-clock (each request is bounded too), so a stalled
     // connection can't hold the spinner past it.
     let authToken: string | null = null;
     const deadline = pollDeadline(PIN_POLL_WINDOW_MS);
-    while (deadline.remaining() > 0) {
+    while (deadline.remaining() > 0 && !signal.aborted) {
       let delayMs = PIN_POLL_INTERVAL_MS;
       try {
         const r = await fetch(`https://plex.tv/api/v2/pins/${auth.pinId}`, {
-          headers: {
-            "X-Plex-Client-Identifier": auth.clientId,
-            "X-Plex-Product": "Summonarr",
-            "X-Plex-Version": "1.0",
-            "X-Plex-Model": "hosted",
-            "X-Plex-Device": "Web",
-            "X-Plex-Device-Name": "Summonarr",
-            "X-Plex-Platform": "Web",
-            Accept: "application/json",
-          },
-          signal: requestTimeoutSignal(PIN_POLL_REQUEST_TIMEOUT_MS),
+          headers: plexClientHeaders(auth.clientId),
+          signal: anySignal(signal, requestTimeoutSignal(PIN_POLL_REQUEST_TIMEOUT_MS)),
         });
         const step = plexPinPollStep(r.status, r.headers.get("retry-after"));
         if (step.kind === "expired") {
@@ -107,14 +102,18 @@ export default function PlexDonePage() {
           return;
         }
         if (step.kind === "read") {
-          const d = (await r.json().catch(() => null)) as { authToken?: unknown } | null;
-          if (d && typeof d.authToken === "string" && d.authToken) { authToken = d.authToken; break; }
+          const d: unknown = await r.json().catch(() => null);
+          const token = typeof d === "object" && d !== null ? (d as { authToken?: unknown }).authToken : undefined;
+          if (typeof token === "string" && token) { authToken = token; break; }
         } else {
           delayMs = step.delayMs;
         }
-      } catch { }
-      await sleep(Math.min(delayMs, deadline.remaining()));
+      } catch {
+        // A network error or a per-request timeout: poll again.
+      }
+      await abortableSleep(Math.min(delayMs, deadline.remaining()), signal);
     }
+    if (signal.aborted) return;
 
     if (!authToken) {
       fail(t("auth.plexDone.error.timeout"));
@@ -146,68 +145,51 @@ export default function PlexDonePage() {
       fail(await describePlexSignInFailure(result, t));
       return;
     }
-
-    const here = window.location.origin;
-    const safeRedirect = (candidate: string | undefined | null): string | null => {
-      if (!candidate) return null;
-      try {
-        const u = new URL(candidate, here);
-
-        if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-        if (u.origin !== here) return null;
-        return u.href;
-      } catch {
-        return null;
-      }
-    };
-
-    // callbackUrl is the base-path-STRIPPED in-app path (proxy.ts writes
-    // req.nextUrl.pathname; login-form re-validates it with safeInternalPath), and
-    // window.location does NOT apply Next's basePath the way router.push does — so
-    // it must go through withBasePath or a subpath deployment lands at the origin
-    // root. siteUrl is admin-configured and already absolute; withBasePath passes
-    // absolute URLs through untouched.
-    //
-    // A real deep link wins over siteUrl: safeRedirect rejects any candidate whose
-    // origin differs from this one, so siteUrl can only ever resolve to the app
-    // root — trying it first silently dropped the callbackUrl on every Plex
-    // sign-in, while credentials/QuickConnect router.push(callbackUrl) honoured it.
-    // Both candidates still go through safeRedirect (same-origin only).
-    const deepLink =
-      auth.callbackUrl && auth.callbackUrl !== "/"
-        ? safeRedirect(withBasePath(auth.callbackUrl))
-        : null;
-    window.location.href =
-      deepLink ?? safeRedirect(auth.siteUrl) ?? withBasePath("/");
+    // The session cookie is set; only the navigation is skipped once the page
+    // has gone (the user navigated elsewhere meanwhile).
+    if (signal.aborted) return;
+    window.location.href = plexSignInDestination(auth, window.location.origin);
   }
 
-  async function completeSettings() {
+  async function completeSettings(signal: AbortSignal) {
     // The server polls the PIN it bound to this admin (pin id + a per-attempt
     // client identifier in an HttpOnly cookie) and stores the owner token itself
     // once Plex approves it — the token never reaches the browser. Plex only
     // forwards here after approval, so the first poll normally saves it.
     setMessage(t("auth.plexDone.saving"));
     let connected = false;
+    let serverErrors = 0;
     const deadline = pollDeadline(PIN_POLL_WINDOW_MS);
-    while (deadline.remaining() > 0) {
+    while (deadline.remaining() > 0 && !signal.aborted) {
+      let delayMs = PIN_POLL_INTERVAL_MS;
       try {
         // Above the route's own 15s plex.tv timeout, so a slow plex.tv answer
         // still arrives.
         const r = await fetch(withBasePath("/api/auth/plex/pin"), {
           method: "PATCH",
-          signal: requestTimeoutSignal(SETTINGS_POLL_REQUEST_TIMEOUT_MS),
+          signal: anySignal(signal, requestTimeoutSignal(SETTINGS_POLL_REQUEST_TIMEOUT_MS)),
         });
-        if (r.status === 400 || r.status === 401 || r.status === 403 || r.status === 422) {
-          // No connect in progress for this session (expired / another admin),
-          // or plex.tv refused the token it issued: retrying the poll can't help.
+        serverErrors = r.status >= 500 ? serverErrors + 1 : 0;
+        const step = settingsPollStep(r.status, r.headers.get("retry-after"), r.headers.get("content-type"), serverErrors);
+        if (step.kind === "fail") {
           fail(t("auth.plexDone.error.saveFailed"), "settings");
           return;
         }
-        const d: { status?: string } = await r.json();
-        if (d.status === "connected") { connected = true; break; }
-      } catch { }
-      await sleep(Math.min(PIN_POLL_INTERVAL_MS, deadline.remaining()));
+        if (step.kind === "serverError") {
+          fail(t("auth.plexDone.error.saveServer"), "settings");
+          return;
+        }
+        if (step.kind === "read") {
+          if (isConnectedBody(await r.json().catch(() => null))) { connected = true; break; }
+        } else {
+          delayMs = step.delayMs;
+        }
+      } catch {
+        // A network error or a per-request timeout: poll again.
+      }
+      await abortableSleep(Math.min(delayMs, deadline.remaining()), signal);
     }
+    if (signal.aborted) return;
 
     if (!connected) {
       fail(t("auth.plexDone.error.connectionTimeout"), "settings");
@@ -224,9 +206,21 @@ export default function PlexDonePage() {
   // and bounced to /login while the first pass's poll was still running, so Plex
   // sign-in could never complete in development. The ref survives that remount.
   const startedRef = useRef(false);
+  // The running flow's cancel. A real unmount (a client-side Back) aborts the
+  // poll so it stops calling plex.tv and never navigates the user away from
+  // where they went. The abort is deferred one task: Strict Mode's simulated
+  // unmount re-runs the setup at once, which cancels it and keeps the flow.
+  const flowRef = useRef<{ ctrl: AbortController; abortTimer?: ReturnType<typeof setTimeout> } | null>(null);
 
   useEffect(() => {
-    if (startedRef.current) return;
+    const cleanup = () => {
+      const flow = flowRef.current;
+      if (flow) flow.abortTimer = setTimeout(() => flow.ctrl.abort(), 0);
+    };
+    if (startedRef.current) {
+      if (flowRef.current) clearTimeout(flowRef.current.abortTimer);
+      return cleanup;
+    }
     startedRef.current = true;
     const stored = sessionStorage.getItem("plex-redirect-auth");
 
@@ -254,11 +248,14 @@ export default function PlexDonePage() {
       return;
     }
 
+    const ctrl = new AbortController();
+    flowRef.current = { ctrl };
     if (auth.flow === "login") {
-      completeLogin(auth);
+      void completeLogin(auth, ctrl.signal);
     } else {
-      completeSettings();
+      void completeSettings(ctrl.signal);
     }
+    return cleanup;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

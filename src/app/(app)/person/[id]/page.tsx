@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { requireAppSession } from "@/lib/require-app-session";
 import { isTmdbIdInRange, parseTmdbIdParam } from "@/lib/tmdb-id";
 import { getEnrichedPerson } from "@/lib/person";
+import { isTmdbNotFound } from "@/lib/tmdb";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { isFeatureEnabled } from "@/lib/features";
 import { PersonView } from "@/components/media/person-view";
@@ -30,8 +31,7 @@ const loadPerson = cache(async (id: string) => {
   if (personId === null || !isTmdbIdInRange(personId)) notFound();
 
   const person = await getEnrichedPerson(personId, session).catch((err: unknown) => {
-    const message = err instanceof Error ? err.message : String(err);
-    if (/failed: 404\b/.test(message)) notFound();
+    if (isTmdbNotFound(err)) notFound();
     throw err;
   });
   return { session, person };

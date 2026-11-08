@@ -1,21 +1,14 @@
 // Cron/sync route authorization (guardrail 6): getCronActor / isCronAuthorized.
 import { NextRequest } from "next/server";
-import { createHash, timingSafeEqual } from "node:crypto";
 import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { parseBearerToken } from "@/lib/mobile-auth";
 import { machineIpAllowed } from "@/lib/api-auth";
+import { safeCompareStrings } from "@/lib/safe-compare";
 import {
   configuredTrustedOrigins,
   isTrustedRequestOrigin,
   parseTrustedOriginEntry,
 } from "@/lib/trusted-origin";
-
-// Hash both sides first so timingSafeEqual compares equal-length buffers regardless of input length
-function safeCompareStrings(a: string, b: string): boolean {
-  const ha = createHash("sha256").update(a).digest();
-  const hb = createHash("sha256").update(b).digest();
-  return timingSafeEqual(ha, hb);
-}
 
 // Cron/sync routes are excluded from the proxy.ts CSRF guard (cron containers POST
 // without an Origin header). The Bearer-token path is unconditional because callers
@@ -119,39 +112,3 @@ export async function getCronActor(request: NextRequest): Promise<CronActor | nu
 
   return null;
 }
-
-// The batch-write, episode-cache, library-staging and run-history helpers used
-// to live in this file. They have their own modules now; every name stays
-// importable from here so no caller changes.
-export {
-  BATCH_TX_TIMEOUT,
-  BATCH_TX_STATEMENT_TIMEOUT,
-  BATCH_TX_LOCK_TIMEOUT,
-  setBatchTxTimeouts,
-  POSTGRES_MAX_BIND_PARAMS,
-  createManyBatchSize,
-  batchCreateMany,
-} from "@/lib/batch-write";
-export {
-  earliestAddedPerEpisode,
-  episodeCacheDigest,
-  replaceEpisodeCacheForSource,
-} from "@/lib/episode-cache";
-export type { EpisodeCacheRow, EpisodeCacheDigest } from "@/lib/episode-cache";
-export {
-  replacePlexLibraryForInstances,
-  replaceJellyfinLibraryForInstances,
-  patchPlexShowFilePaths,
-} from "@/lib/library-staging";
-export type { PlexLibraryRow, JellyfinLibraryRow, LibraryInstanceBatch } from "@/lib/library-staging";
-export {
-  CRON_RUN_HISTORY_LIMIT,
-  recordCronRun,
-  CRON_SKIPPED_HEADER,
-  withCronRunRecording,
-  cronSkippedResponse,
-  parseCronLastRun,
-  parseCronRunHistory,
-  countCronRunsSince,
-} from "@/lib/cron-history";
-export type { CronRunEntry, CronLastRun } from "@/lib/cron-history";

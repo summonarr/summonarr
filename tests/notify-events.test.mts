@@ -60,10 +60,12 @@ test("webhook: header name charset, transport-owned headers refused, template mu
     ok: true,
     config: { url: "https://h.example/x", template: null, headerName: "Authorization" },
   });
-  for (const headerName of ["Content-Type", "host", "Content-Length", "X Bad", "Cookie"]) {
+  for (const headerName of ["Content-Type", "host", "Content-Length", "X Bad", "Cookie", "Upgrade", "Keep-Alive", "Expect", "TE", "Trailer", "Proxy-Authorization", "proxy-connection"]) {
     assert.deepEqual(validateAgentConfig("webhook", { url: "https://h.example/x", headerName }), { ok: false, error: "headerName" }, headerName);
   }
+  assert.ok(validateAgentConfig("webhook", { url: "https://h.example/x", headerName: "X-Proxy-Token" }).ok, "only a Proxy-* PREFIX is the transport's");
   assert.deepEqual(validateAgentConfig("webhook", { url: "https://h.example/x", template: "{ not json" }), { ok: false, error: "templateInvalid" });
+  assert.deepEqual(validateAgentConfig("webhook", { url: "https://h.example/x", template: "{ not json" }), { ok: false, error: "templateInvalid" }, "a remembered verdict answers the same");
   // A placeholder OUTSIDE quotes renders bare text → invalid JSON → refused.
   assert.deepEqual(validateAgentConfig("webhook", { url: "https://h.example/x", template: "{\"t\": {{title}} }" }), { ok: false, error: "templateInvalid" });
   assert.ok(validateAgentConfig("webhook", { url: "https://h.example/x", template: "{\"content\": \"{{title}}: {{text}}\"}" }).ok);

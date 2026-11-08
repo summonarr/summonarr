@@ -169,15 +169,15 @@ test("a single test's 400 always says: isWarning decides, a resource validator's
 });
 
 test("the Arr System page renders an uncertain row neutrally, before the red failure, and counts it apart in the summary", () => {
-  const src = read("src/components/admin/arr-system.tsx");
-  const uncertainAt = src.indexOf("if (r.uncertain === true) {");
+  const src = read("src/components/admin/arr-system-providers.tsx");
+  const uncertainAt = src.indexOf("if (view.uncertain === true) {");
   const dangerAt = src.indexOf('style={{ color: "var(--ds-danger)" }}>', uncertainAt);
   assert.ok(uncertainAt > 0 && dangerAt > uncertainAt, "the uncertain branch comes before the failure branch");
   const branch = src.slice(uncertainAt, dangerAt);
   assert.match(branch, /style=\{\{ color: "var\(--ds-fg-muted\)" \}\}/);
   assert.match(branch, /t\("adminArr\.system\.testUncertain", \{ service: SERVICE_LABEL\[service\] \}\)/);
   assert.ok(!/text-white|bg-white|#[0-9a-f]{3,6}\b/i.test(branch), "guardrail 42");
-  assert.match(src, /uncertain: answered\.filter\(\(r\) => r\.uncertain === true\)\.length/);
+  assert.match(read("src/components/admin/arr-system-state.ts"), /uncertain: answered\.filter\(\(r\) => r\.uncertain === true\)\.length/);
   assert.match(src, /t\("adminArr\.system\.testSummaryUncertain", \{ count: s\.uncertain \}\)/);
   assert.match(src, /s\.working \+ s\.uncertain === s\.count \? "text-zinc-400"/);
 

@@ -2,7 +2,8 @@
 /**
  * OpenAPI ↔ route parity auditor.
  *
- * The OpenAPI document in src/app/api/openapi/route.ts is hand-maintained, so it
+ * The OpenAPI document (src/lib/openapi/, served by src/app/api/openapi/route.ts)
+ * is hand-maintained, so it
  * silently drifts from the real route tree. This check fails CI when:
  *   1. a NEW API route ships that is neither documented in the spec nor listed
  *      in EXCEPTIONS below (the common drift — a route added without a doc);
@@ -45,7 +46,8 @@ function color(text: string, c: string): string {
 }
 
 const API_ROOT = join(process.cwd(), "src", "app", "api");
-const SPEC_FILE = join(API_ROOT, "openapi", "route.ts");
+/** One module per area of the document, each `export const <area>Paths: OpenApiPaths = { … }`. */
+const SPEC_PATHS_DIR = join(process.cwd(), "src", "lib", "openapi", "paths");
 
 /**
  * Routes intentionally absent from the public OpenAPI document. Each needs a
@@ -89,7 +91,6 @@ const EXCEPTIONS: Array<{ route: string; reason: string }> = [
   { route: "/admin/server-users", reason: "admin media-server user list" },
   { route: "/admin/server-users/bulk", reason: "admin bulk server-user action" },
   { route: "/admin/server-users/diagnose", reason: "admin diagnostic (no UI)" },
-  { route: "/admin/server-users/{id}", reason: "admin server-user detail" },
   { route: "/admin/trash-guides/apply", reason: "admin TRaSH-guides apply" },
   { route: "/admin/trash-guides/refresh", reason: "admin TRaSH-guides refresh" },
   { route: "/admin/trash-guides/status", reason: "admin TRaSH-guides status" },
@@ -98,8 +99,7 @@ const EXCEPTIONS: Array<{ route: string; reason: string }> = [
   { route: "/admin/trash-guides/spec/{id}", reason: "admin TRaSH-guides spec" },
   // Settings sub-routes — admin config surface.
   { route: "/settings/plex", reason: "admin Plex settings" },
-  // Jellyfin self-service notification-email verification (send + public confirm).
-  { route: "/profile/notification-email", reason: "start email verification (Jellyfin self-service)" },
+  // The public landing page the notification-email verification link opens.
   { route: "/profile/notification-email/confirm", reason: "public email-verification confirm landing" },
   // Cron — CRON_SECRET jobs; the documented cron set is representative, these are the rest.
   { route: "/cron/sync-download-policies", reason: "cron job (CRON_SECRET)" },
@@ -140,32 +140,39 @@ function specPath(file: string): string {
 
 /**
  * Extract documented paths AND the methods under each, from the hand-maintained
- * spec source.
+ * spec modules (src/lib/openapi/paths/*.ts).
  *
- * Structural, not evaluated. The spec is a plain object literal, so `eval`-ing
+ * Structural, not evaluated. The spec is plain object literals, so `eval`-ing
  * it would be more robust against reformatting — but this script runs in CI on
  * every push, and executing a source file to lint it is a bargain worth
- * declining. Path keys sit at 4-space indent and method keys at 6, so each
- * path's window runs to the next 4-space key.
+ * declining. In each module the path keys sit at 2-space indent and the method
+ * keys at 4, so each path's window runs to the next 2-space key. A path
+ * documented in two modules is drift too (the later one silently wins when the
+ * document is assembled), so it is reported as a duplicate.
  */
-function documentedOps(): Map<string, Set<string>> {
-  const src = readFileSync(SPEC_FILE, "utf8");
-  const pathRe = /^ {4}"(\/[^"]+)"\s*:\s*\{/gm;
-  const hits: Array<{ path: string; from: number }> = [];
-  for (let m = pathRe.exec(src); m !== null; m = pathRe.exec(src)) {
-    hits.push({ path: m[1], from: m.index + m[0].length });
-  }
+function documentedOps(): { ops: Map<string, Set<string>>; duplicates: string[] } {
   const out = new Map<string, Set<string>>();
-  for (let i = 0; i < hits.length; i++) {
-    const window = src.slice(hits[i].from, i + 1 < hits.length ? hits[i + 1].from : src.length);
-    const methods = new Set<string>();
-    const methodRe = /^ {6}(get|post|patch|put|delete|head|options)\s*:\s*\{/gm;
-    for (let m = methodRe.exec(window); m !== null; m = methodRe.exec(window)) {
-      methods.add(m[1].toUpperCase());
+  const duplicates: string[] = [];
+  const modules = readdirSync(SPEC_PATHS_DIR).filter((f) => f.endsWith(".ts")).sort();
+  for (const file of modules) {
+    const src = readFileSync(join(SPEC_PATHS_DIR, file), "utf8");
+    const pathRe = /^ {2}"(\/[^"]+)"\s*:\s*\{/gm;
+    const hits: Array<{ path: string; from: number }> = [];
+    for (let m = pathRe.exec(src); m !== null; m = pathRe.exec(src)) {
+      hits.push({ path: m[1], from: m.index + m[0].length });
     }
-    out.set(hits[i].path, methods);
+    for (let i = 0; i < hits.length; i++) {
+      const window = src.slice(hits[i].from, i + 1 < hits.length ? hits[i + 1].from : src.length);
+      const methods = new Set<string>();
+      const methodRe = /^ {4}(get|post|patch|put|delete|head|options)\s*:\s*\{/gm;
+      for (let m = methodRe.exec(window); m !== null; m = methodRe.exec(window)) {
+        methods.add(m[1].toUpperCase());
+      }
+      if (out.has(hits[i].path)) duplicates.push(`${hits[i].path} (${file})`);
+      out.set(hits[i].path, methods);
+    }
   }
-  return out;
+  return { ops: out, duplicates: duplicates.sort() };
 }
 
 /**
@@ -196,7 +203,7 @@ function main(): void {
   const files: string[] = [];
   walk(API_ROOT, files);
   const actual = new Set(files.map(specPath));
-  const documentedByPath = documentedOps();
+  const { ops: documentedByPath, duplicates } = documentedOps();
   const documented = new Set(documentedByPath.keys());
   const exceptionRoutes = new Set(EXCEPTIONS.map((e) => e.route));
   const methodExceptionOps = new Set(METHOD_EXCEPTIONS.map((e) => e.op));
@@ -243,14 +250,15 @@ function main(): void {
     .sort();
 
   const ok = undocumented.length === 0 && phantom.length === 0 && staleExceptions.length === 0 &&
-    undocumentedOps.length === 0 && phantomOps.length === 0 && staleMethodExceptions.length === 0;
+    undocumentedOps.length === 0 && phantomOps.length === 0 && staleMethodExceptions.length === 0 &&
+    duplicates.length === 0;
 
   if (json) {
     console.log(JSON.stringify(
       {
         actual: actual.size, documented: documented.size, exceptions: exceptionRoutes.size,
         undocumented, phantom, staleExceptions,
-        undocumentedOps, phantomOps, staleMethodExceptions,
+        undocumentedOps, phantomOps, staleMethodExceptions, duplicates,
       },
       null, 2,
     ));
@@ -279,6 +287,11 @@ function main(): void {
   if (phantom.length > 0) {
     console.log(color(`  ✗ ${phantom.length} documented path(s) with no route file (stale spec entry):`, COLORS.red + COLORS.bold));
     for (const p of phantom) console.log(color(`      ${p}`, COLORS.yellow));
+    console.log();
+  }
+  if (duplicates.length > 0) {
+    console.log(color(`  ✗ ${duplicates.length} path(s) documented in more than one spec module (the later module wins):`, COLORS.red + COLORS.bold));
+    for (const p of duplicates) console.log(color(`      ${p}`, COLORS.yellow));
     console.log();
   }
   if (undocumentedOps.length > 0) {

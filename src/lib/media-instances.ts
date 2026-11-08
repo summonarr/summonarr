@@ -95,6 +95,26 @@ export function jellyfinSettingKey(instance: MediaInstanceKey, field: JellyfinSe
   return `jellyfin${instanceKeySegment(instance)}${field}`;
 }
 
+// Setting keys join the slug and the field with no separator, so a slug that
+// is a field's leading word ("movie", "tv") derives the DEFAULT server's key
+// for another field: plexSettingKey("movie", "PathStripPrefix") is
+// plexSettingKey("", "MoviePathStripPrefix"). Such a slug can't hold its own
+// config without overwriting the default's. Existing keys can't change (every
+// deployment stores them), so a NEW instance must not take such a slug; an
+// already-registered one keeps reading as valid.
+const PLEX_FIELDS = ["ServerUrl", "AdminToken", "AdminEmail", "ServerReachable", "Libraries", "PathStripPrefix", "MoviePathStripPrefix", "TvPathStripPrefix"] as const satisfies readonly PlexSettingField[];
+const JELLYFIN_FIELDS = ["Url", "ApiKey", "Libraries", "PathStripPrefix", "MoviePathStripPrefix", "TvPathStripPrefix", "RestrictSignIn"] as const satisfies readonly JellyfinSettingField[];
+// A field added to either union without being listed here fails to compile.
+const _everyFieldListed: [Exclude<PlexSettingField, (typeof PLEX_FIELDS)[number]>, Exclude<JellyfinSettingField, (typeof JELLYFIN_FIELDS)[number]>] extends [never, never] ? true : never = true;
+void _everyFieldListed;
+const SETTING_FIELDS_BY_SERVICE: readonly (readonly string[])[] = [PLEX_FIELDS, JELLYFIN_FIELDS];
+
+export function mediaInstanceSlugCollidesWithDefault(slug: MediaInstanceKey): boolean {
+  if (slug === DEFAULT_MEDIA_INSTANCE) return false;
+  const segment = instanceKeySegment(slug);
+  return SETTING_FIELDS_BY_SERVICE.some((fields) => fields.some((field) => fields.includes(segment + field)));
+}
+
 // ─── ActiveSession id ─────────────────────────────────────────────────────────
 // Default instance keeps the exact legacy 2-segment format so every existing
 // single-server deployment sees byte-identical ids; named instances get a 3rd

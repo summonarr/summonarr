@@ -162,6 +162,11 @@ const matches = (r: Req, where: Record<string, unknown>): boolean => Object.entr
 // its own (a test sets it; it fires once). Applied after a pre-read and before
 // a conditional write, so a count taken from a pre-read is caught out.
 let concurrentStamp: Date | null = null;
+// The removal's request counts: the second one (right before the DELETE) runs this first.
+let groupByCalls = 0;
+let onSecondCount: (() => void) | null = null;
+// The unstamp write (cleanedUpAt back to null) throws.
+let failUnstamp = false;
 const raceIn = () => {
   if (!concurrentStamp) return;
   for (const r of requests) if (r.status === "AVAILABLE" && r.cleanedUpAt === null) r.cleanedUpAt = concurrentStamp;
@@ -175,6 +180,8 @@ shadowPrismaModel(prisma, "mediaRequest", {
     return hit.map((r) => ({ id: r.id }));
   },
   groupBy: async (args: { where: Record<string, unknown> }) => {
+    groupByCalls++;
+    if (groupByCalls === 2 && onSecondCount) onSecondCount();
     const by = new Map<string, number>();
     for (const r of requests.filter((x) => matches(x, args.where))) by.set(r.status, (by.get(r.status) ?? 0) + 1);
     return [...by].map(([status, n]) => ({ status, _count: { _all: n } }));
@@ -187,6 +194,7 @@ shadowPrismaModel(prisma, "mediaRequest", {
     return rows;
   },
   updateMany: async (args: { where: Record<string, unknown>; data: { cleanedUpAt: Date | null } }) => {
+    if (failUnstamp && args.data.cleanedUpAt === null) throw new Error("db down");
     const hit = requests.filter((x) => matches(x, args.where));
     for (const r of hit) r.cleanedUpAt = args.data.cleanedUpAt;
     return { count: hit.length };
@@ -290,6 +298,9 @@ const both = (...rs: Responder[]): Responder => (c) => {
 };
 
 beforeEach(() => {
+  groupByCalls = 0;
+  onSecondCount = null;
+  failUnstamp = false;
   calls = [];
   audits.length = 0;
   warnLines = [];
@@ -397,6 +408,31 @@ test("add (Sonarr): resolves through the series lookup and sends the monitor opt
   assert.deepEqual(post.seasons, [{ seasonNumber: 0, monitored: false }, { seasonNumber: 1, monitored: true }]);
   assert.equal(post.seriesType, "anime");
   assert.equal(post.monitored, true);
+  const lookups = arrCalls().filter((c) => c.path === "/api/v3/series/lookup" && c.query.get("term") === "tmdb:1399");
+  assert.equal(lookups.length, 1, "the slow SkyHook lookup is read once per add, not by the presence check and the body each");
+});
+
+test("add (Sonarr): a lookup row's wrong-typed fields are left out of the add, never forwarded", async () => {
+  const token = await mintSession();
+  responder = both((c) => {
+    if (c.origin !== SONARR) return undefined;
+    if (c.method === "GET" && c.path === "/api/v3/series" && c.query.get("tvdbId") === "121361") return json([]);
+    if (c.method === "GET" && c.path === "/api/v3/series/lookup" && c.query.get("term") === "tmdb:1399") {
+      return json([{ tmdbId: 1399, tvdbId: 121361, title: "Game of Thrones", year: "2011", titleSlug: 7, seasons: { 0: {} } }]);
+    }
+    if (c.method === "GET" && c.path === "/api/v3/languageprofile") return json({}, 404);
+    if (c.method === "POST" && c.path === "/api/v3/series") return json({ id: 31 }, 201);
+    return undefined;
+  }, sonarrBase);
+  tmdbCacheRows.set("tmdb-to-tvdb:1399", JSON.stringify({ tvdbId: 121361 }));
+  const res = await call(addRoute.POST, token, "/admin/arr/title/add", { method: "POST", body: {
+    service: "sonarr", tmdbId: 1399, qualityProfileId: 1, rootFolderPath: "/anime/", tags: [], monitor: "all", search: false,
+  } });
+  assert.equal(res.status, 201, "a non-array seasons no longer throws");
+  const post = writes().find((c) => c.path === "/api/v3/series")!.body as Record<string, unknown>;
+  assert.equal(post.year, undefined);
+  assert.equal(post.titleSlug, undefined);
+  assert.deepEqual(post.seasons, []);
 });
 
 test("add: putting a title back withdraws THIS instance's removal stamps (by tmdb or tvdb id), never another instance's", async () => {
@@ -522,6 +558,35 @@ test("remove: a failed delete removes the stamps it wrote; the execute needs the
   assert.equal((await call(removeRoute.POST, token, "/admin/arr/title/remove", { method: "POST", body: { service: "sonarr", id: 21, deleteFiles: true, addImportExclusion: true, execute: true, confirm: 21 } })).status, 200);
   const del = writes().find((c) => c.method === "DELETE")!;
   assert.deepEqual([del.query.get("deleteFiles"), del.query.get("addImportListExclusion")], ["true", "true"]);
+});
+
+test("remove: a request approved between the check and the delete still refuses it — the stamps go back and nothing is deleted", async () => {
+  const token = await mintSession();
+  requests = [{ id: "a", tmdbId: 603, tvdbId: null, mediaType: "MOVIE", arrInstance: "", status: "AVAILABLE", cleanedUpAt: null }];
+  onSecondCount = () => {
+    requests.push({ id: "b", tmdbId: 603, tvdbId: null, mediaType: "MOVIE", arrInstance: "", status: "APPROVED", cleanedUpAt: null });
+  };
+  const res = await call(removeRoute.POST, token, "/admin/arr/title/remove", { method: "POST", body: { service: "radarr", id: 11, deleteFiles: true, addImportExclusion: true, execute: true, confirm: 11 } });
+  assert.equal(res.status, 409);
+  assert.deepEqual(writes(), [], "no DELETE was sent");
+  assert.equal(requests[0].cleanedUpAt, null, "this call's stamp was handed back");
+  assert.equal(audits.length, 0);
+});
+
+test("remove: a failed unstamp after a refused delete never hides the arr's own error", async () => {
+  const token = await mintSession();
+  requests = [{ id: "a", tmdbId: 603, tvdbId: null, mediaType: "MOVIE", arrInstance: "", status: "AVAILABLE", cleanedUpAt: null }];
+  responder = both((c) => (c.method === "DELETE" ? json({ message: "boom" }, 500) : undefined), radarrBase);
+  failUnstamp = true;
+  void token;
+  const { removeTitle } = await import("../src/lib/arr-title-lifecycle.ts");
+  const { ArrResponseError } = await import("../src/lib/arr.ts");
+  await assert.rejects(
+    inScope(() => removeTitle("radarr", "", 11, { deleteFiles: true, addImportExclusion: true })),
+    (err: unknown) => err instanceof ArrResponseError && err.status === 500,
+    "the arr's failure, not the database's",
+  );
+  assert.ok(requests[0].cleanedUpAt instanceof Date, "the stamp stays (it costs at most one re-push)");
 });
 
 // ── a Sonarr series with no tmdbId (v3, or v4's 0) ───────────────────────────
@@ -790,8 +855,8 @@ test("add: a Sonarr add monitoring NOTHING sends and audits search: false; anoth
 test("add dialog: the search box is disabled and sends no search while nothing is monitored (structural)", async () => {
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../src/components/admin/arr-title/add-dialog.tsx", import.meta.url), "utf8");
-  assert.match(src, /const searchNoop = addSearchIsNoop\(service, service === "radarr" \? \{ monitored \} : \{ monitor \}\);/);
-  assert.match(src, /search: search && !searchNoop/);
+  assert.match(src, /const searchNoop = addSearchIsNoop\(service, service === "radarr" \? \{ monitored: form\.monitored \} : \{ monitor: form\.monitor \}\);/);
+  assert.match(src, /search: form\.search && !searchNoop/);
   assert.match(src, /disabled=\{searchNoop\}/);
   assert.match(src, /t\("adminArr\.add\.searchNeedsMonitor"\)/);
 });

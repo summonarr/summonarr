@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { WARM_ACTIVITY_LOCK_ID } from "@/lib/advisory-lock";
 import { warmActivityCache } from "@/lib/play-history";
-import { logAudit, auditContext } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { runAdminWarm } from "@/lib/warm-cooldown";
 
@@ -30,18 +30,19 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       const durationMs = Date.now() - startTime;
 
       await logAudit({
-        userId: session.user.id,
-        userName: session.user.name ?? session.user.email,
+        ...auditActor(req, session),
         action: "CACHE_WARM",
         target: "activity",
         details: { warmed, durationMs, trigger: "admin" },
-        ...auditContext(req, session),
       });
 
       return NextResponse.json({
         ok: true,
         warmed,
         lastWarmAt: new Date(claimedAt).toISOString(),
+        // Seconds until the next warm may start, so the button counts down the
+        // server's own cooldown instead of a copy of it.
+        retryAfter: Math.max(1, Math.ceil((claimedAt + COOLDOWN_MS - Date.now()) / 1000)),
       });
     },
   });

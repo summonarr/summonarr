@@ -30,7 +30,7 @@ export function legacyApnsEndpointFor(deviceToken: string): string {
   return `apns:${deviceToken}`;
 }
 
-// Same shape as the route's DEVICE_TOKEN_RE, lowercased (the route stored it so).
+// Same shape as push-body.ts's DEVICE_TOKEN_RE, lowercased (the route stored it so).
 const LEGACY_ENDPOINT_RE = /^apns:((?:[0-9a-f]{2}){32,100})$/;
 
 export function legacyApnsToken(endpoint: string): string | null {
@@ -41,25 +41,36 @@ export function legacyApnsToken(endpoint: string): string | null {
 // boot (instrumentation.ts) — idempotent, and a no-op once nothing is left; the
 // /api/push/apns route also migrates a legacy row on the device's next
 // register, and deletes either form on DELETE, so a failed or skipped run
-// costs nothing but time. Each row is its own statement (no interactive
-// transaction): a device that already has a hashed row (re-registered before
-// this ran) keeps that one and loses the legacy duplicate.
+// costs nothing but time. Which hashed handles already exist is read up front
+// (chunked under the bind-parameter limit, guardrail 23c); then each row is its
+// own conditional statement (no interactive transaction): a device that already
+// has a hashed row (re-registered before this ran) keeps that one and loses the
+// legacy duplicate.
+const HASHED_LOOKUP_CHUNK = 1_000;
+
 export async function migrateLegacyApnsEndpoints(): Promise<{ migrated: number; removed: number }> {
   const candidates = await prisma.pushSubscription.findMany({
     where: { platform: "ios", endpoint: { startsWith: "apns:" } },
     select: { id: true, endpoint: true },
   });
+  const legacy = candidates.flatMap((row) => {
+    const token = legacyApnsToken(row.endpoint);
+    return token ? [{ row, endpoint: apnsEndpointFor(token) }] : [];
+  });
+  const taken = new Set<string>();
+  for (let i = 0; i < legacy.length; i += HASHED_LOOKUP_CHUNK) {
+    const chunk = legacy.slice(i, i + HASHED_LOOKUP_CHUNK).map((l) => l.endpoint);
+    const rows = await prisma.pushSubscription.findMany({ where: { endpoint: { in: chunk } }, select: { endpoint: true } });
+    for (const r of rows) taken.add(r.endpoint);
+  }
   let migrated = 0;
   let removed = 0;
-  for (const row of candidates) {
-    const token = legacyApnsToken(row.endpoint);
-    if (!token) continue;
-    const endpoint = apnsEndpointFor(token);
-    const hashed = await prisma.pushSubscription.findUnique({ where: { endpoint }, select: { id: true } });
-    if (!hashed) {
+  for (const { row, endpoint } of legacy) {
+    if (!taken.has(endpoint)) {
       try {
         const res = await prisma.pushSubscription.updateMany({ where: { id: row.id, endpoint: row.endpoint }, data: { endpoint } });
         migrated += res.count;
+        if (res.count > 0) taken.add(endpoint);
         continue;
       } catch (err) {
         // A registration created the hashed row between the read and this

@@ -13,10 +13,10 @@ import {
   isPlexStreamOnlyReason,
   reasonCalloutKind,
   translateTranscodeReason,
-  UNKNOWN_REASON,
 } from "@/lib/transcode-reasons";
 import {
   ActivityCard,
+  ActivityGrid,
   AreaChart,
   Avatar,
   BarColumn,
@@ -28,9 +28,12 @@ import {
   StreamTypeBars,
   ZoneTag,
   WEEKDAY_KEYS,
-  sourceDotColor,
+  bucketLabel,
+  sourceMeta,
   streamTypeSegments,
+  utcShortDayFormatter,
 } from "@/components/admin/activity-ui";
+import { SLOT_MARK, splitAtSlot } from "@/components/admin/activity-format";
 import { foldStreamMethods } from "@/lib/activity-stream-mix";
 import { zoneShortLabel } from "@/lib/stats-time-zone";
 import { hourCounts, peakBucket, streamShares, weekdayCounts } from "@/lib/activity-stats-view";
@@ -88,8 +91,8 @@ function fmt1(n: number, locale: string): string {
 // render at that size, against ~20 ms reusing one).
 function useShortDay(locale: string): (day: string) => string {
   return useMemo(() => {
-    const fmt = new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", timeZone: "UTC" });
-    return (day: string) => fmt.format(new Date(`${day.slice(0, 10)}T00:00:00Z`));
+    const fmt = utcShortDayFormatter(locale);
+    return (day: string) => fmt(day.slice(0, 10));
   }, [locale]);
 }
 
@@ -133,15 +136,6 @@ function axisLabels(labels: string[]): string[] {
   return Array.from({ length: ticks }, (_, i) =>
     labels[Math.round((i / (ticks - 1)) * (labels.length - 1))],
   );
-}
-
-// The aggregate SQL's catch-all buckets are English literals; translate them
-// at render. Everything else in these charts is a codec, a client or a
-// resolution name, shown as the server reported it.
-function bucketLabel(label: string, t: Translator): string {
-  if (label === UNKNOWN_REASON || label === "unknown") return t("adminActivity.stats.unknown");
-  if (label === "Other") return t("adminActivity.stats.other");
-  return label;
 }
 
 // `complete` is false when play history doesn't cover the previous window
@@ -203,22 +197,6 @@ export function ActivityStatsRedesign({
 
 function StatsSection({ children }: { children: ReactNode }) {
   return <section style={{ marginBottom: 22 }}>{children}</section>;
-}
-
-function Grid({
-  className,
-  columns,
-  children,
-}: {
-  className: "resp-grid-2" | "resp-grid-3";
-  columns: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className={className} style={{ display: "grid", gridTemplateColumns: columns, gap: 10 }}>
-      {children}
-    </div>
-  );
 }
 
 const THREE_EQUAL = "repeat(3, minmax(0, 1fr))";
@@ -311,6 +289,17 @@ function StatsKpis({ stats, labelsFor }: { stats: ActivityStatsData; labelsFor: 
 
 /* ── Trends 2×2 ───────────────────────────────────────────────── */
 
+interface Trend {
+  label: string;
+  data: number[];
+  color: string;
+  // The value's unit, with its own spacing: the hours suffix sits flush ("12h",
+  // as on the KPI tile) and is translated (zh "小时"); GB is Intl's own unit,
+  // with its own spacing ("Go" in French).
+  unit: string;
+  labels: string[];
+}
+
 function TrendsSection({
   stats,
   days,
@@ -329,16 +318,7 @@ function TrendsSection({
   // oklch literals: the old hand-picked hues duplicated three of the six accent
   // fills (so "Plays" and "Bandwidth" were one colour under the cyan accent)
   // and never got the light-theme darkening the tokens carry (guardrail 42).
-  // `unit` carries its own spacing: the hours suffix sits flush ("12h", as on
-  // the KPI tile) and is translated (zh "小时"); GB is Intl's own unit, with
-  // its own spacing ("Go" in French).
-  const trends: {
-    label: string;
-    data: number[];
-    color: string;
-    unit: string;
-    labels: string[];
-  }[] = [
+  const trends: Trend[] = [
     {
       label: t("adminActivity.stats.playsPerDay"),
       data: stats.playsByDay.map((d) => d.count),
@@ -371,53 +351,49 @@ function TrendsSection({
 
   return (
     <StatsSection>
-      <Grid className="resp-grid-2" columns="repeat(2, minmax(0, 1fr))">
-        {trends.map((tr) => {
-          const peak = Math.max(...tr.data, 0);
-          // Per 24 hours of the window. The series has days + 1 entries (the
-          // rolling cutoff splits the oldest and newest days), but together
-          // they hold exactly `days` × 24 h of activity, so divide by `days`.
-          const avg =
-            days > 0 ? tr.data.reduce((s, v) => s + v, 0) / days : 0;
-          return (
-            <ActivityCard key={tr.label}>
-              <SectionHeader
-                label={tr.label}
-                sub={t("adminActivity.stats.lastDaysPeak", { days, peak: `${fmt1(peak, locale)}${tr.unit}` })}
-                right={
-                  <span
-                    style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
-                  >
-                    <span
-                      className="ds-mono"
-                      style={{
-                        fontSize: 10.5,
-                        color: "var(--ds-fg-subtle)",
-                        fontVariantNumeric: "tabular-nums",
-                      }}
-                    >
-                      {t("adminActivity.stats.avg", { value: `${fmt1(avg, locale)}${tr.unit}` })}
-                    </span>
-                    <ZoneTag
-                      zone={stats.timeZone}
-                      title={t("adminActivity.stats.zoneDaysTitle", { zone: stats.timeZone })}
-                    />
-                  </span>
-                }
-              />
-              <AreaChart
-                data={tr.data}
-                h={120}
-                color={tr.color}
-                labels={tr.labels}
-                valueSuffix={tr.unit}
-              />
-              <AxisLabels labels={axisLabels(tr.labels)} />
-            </ActivityCard>
-          );
-        })}
-      </Grid>
+      <ActivityGrid className="resp-grid-2" columns="repeat(2, minmax(0, 1fr))">
+        {trends.map((tr) => (
+          <TrendCard key={tr.label} trend={tr} days={days} timeZone={stats.timeZone} />
+        ))}
+      </ActivityGrid>
     </StatsSection>
+  );
+}
+
+// One daily series: its peak and average in the header, beside the zone its
+// days are counted in (guardrail 19g).
+function TrendCard({ trend: tr, days, timeZone }: { trend: Trend; days: number; timeZone: string }) {
+  const t = useT();
+  const locale = useLocale();
+  const peak = Math.max(...tr.data, 0);
+  // Per 24 hours of the window. The series has days + 1 entries (the rolling
+  // cutoff splits the oldest and newest days), but together they hold exactly
+  // `days` × 24 h of activity, so divide by `days`.
+  const avg = days > 0 ? tr.data.reduce((s, v) => s + v, 0) / days : 0;
+  return (
+    <ActivityCard>
+      <SectionHeader
+        label={tr.label}
+        sub={t("adminActivity.stats.lastDaysPeak", { days, peak: `${fmt1(peak, locale)}${tr.unit}` })}
+        right={
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <span
+              className="ds-mono"
+              style={{
+                fontSize: 10.5,
+                color: "var(--ds-fg-subtle)",
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {t("adminActivity.stats.avg", { value: `${fmt1(avg, locale)}${tr.unit}` })}
+            </span>
+            <ZoneTag zone={timeZone} title={t("adminActivity.stats.zoneDaysTitle", { zone: timeZone })} />
+          </span>
+        }
+      />
+      <AreaChart data={tr.data} h={120} color={tr.color} labels={tr.labels} valueSuffix={tr.unit} />
+      <AxisLabels labels={axisLabels(tr.labels)} />
+    </ActivityCard>
   );
 }
 
@@ -431,7 +407,7 @@ function TopChartsSection({ stats }: { stats: ActivityStatsData }) {
   const userMax = stats.topUsers[0]?.count ?? 1;
   return (
     <StatsSection>
-      <Grid className="resp-grid-3" columns={THREE_EQUAL}>
+      <ActivityGrid className="resp-grid-3" columns={THREE_EQUAL}>
         <ActivityCard>
           <SectionHeader
             label={t("adminActivity.stats.topViewers")}
@@ -473,7 +449,7 @@ function TopChartsSection({ stats }: { stats: ActivityStatsData }) {
           items={stats.topWatched.filter((m) => m.mediaType === "TV").slice(0, 8)}
           type="TV"
         />
-      </Grid>
+      </ActivityGrid>
     </StatsSection>
   );
 }
@@ -520,83 +496,91 @@ function TopTitlesCard({
   );
 }
 
+/* ── Breakdown cards ──────────────────────────────────────────── */
+
+// One single-series breakdown card: a heading (and an optional subtitle) over
+// HorizontalBars of rows whose catch-all buckets are translated (bucketLabel).
+interface Breakdown {
+  labelKey: string;
+  subKey?: string;
+  rows: { label: string; count: number }[];
+  // Omitted: HorizontalBars' default, the accent (i.e. --ds-chart-1).
+  color?: string;
+  labelWidth: number;
+}
+
+function BreakdownCard({ breakdown: b, sub }: { breakdown: Breakdown; sub?: string }) {
+  const t = useT();
+  return (
+    <ActivityCard>
+      <SectionHeader label={t(b.labelKey)} sub={sub ?? (b.subKey ? t(b.subKey) : undefined)} />
+      <HorizontalBars
+        items={b.rows.map((r) => ({ label: bucketLabel(r.label, t), count: r.count }))}
+        color={b.color}
+        labelWidth={b.labelWidth}
+      />
+    </ActivityCard>
+  );
+}
+
+const TOP_N = 8;
+
 /* ── Quality & infrastructure ─────────────────────────────────── */
 
 function QualitySection({ stats, days }: { stats: ActivityStatsData; days: number }) {
   const t = useT();
+  // One single-series chart per card; the ramp (--ds-chart-1..4) is walked in
+  // card order so neighbours differ.
+  const cards: Breakdown[] = [
+    {
+      labelKey: "adminActivity.popover.resolution",
+      rows: stats.resolutionBreakdown.map((r) => ({ label: r.bucket, count: r.count })),
+      color: "var(--ds-chart-2)",
+      labelWidth: 70,
+    },
+    {
+      labelKey: "adminActivity.field.videoCodec",
+      rows: stats.videoCodecBreakdown.map((r) => ({ label: r.codec, count: r.count })),
+      labelWidth: 70,
+    },
+    {
+      labelKey: "adminActivity.stats.audioCodec",
+      rows: stats.audioCodecBreakdown.map((r) => ({ label: r.codec, count: r.count })),
+      color: "var(--ds-chart-3)",
+      labelWidth: 70,
+    },
+    {
+      labelKey: "adminActivity.field.container",
+      rows: stats.containerBreakdown.map((r) => ({ label: r.container, count: r.count })),
+      color: "var(--ds-chart-4)",
+      labelWidth: 70,
+    },
+    {
+      labelKey: "adminActivity.field.bitrate",
+      subKey: "adminActivity.stats.distribution",
+      rows: stats.bitrateBuckets.map((r) => ({ label: r.bucket, count: r.count })),
+      color: "var(--ds-chart-2)",
+      labelWidth: 92,
+    },
+    {
+      labelKey: "adminActivity.stats.topPlayers",
+      subKey: "adminActivity.stats.clientApps",
+      rows: stats.topPlayers.slice(0, TOP_N).map((r) => ({ label: r.player, count: r.count })),
+      color: "var(--ds-chart-3)",
+      labelWidth: 100,
+    },
+  ];
   return (
     <StatsSection>
       <SectionHeader
         label={t("adminActivity.stats.qualityInfra")}
         sub={t("adminActivity.stats.howViewersStream", { days })}
       />
-      {/* One single-series chart per card; the ramp (--ds-chart-1..4) is
-          walked in card order so neighbours differ. HorizontalBars' default
-          colour is the accent, i.e. --ds-chart-1. */}
-      <Grid className="resp-grid-3" columns={THREE_EQUAL}>
-        <ActivityCard>
-          <SectionHeader label={t("adminActivity.popover.resolution")} />
-          <HorizontalBars
-            items={stats.resolutionBreakdown.map((r) => ({
-              label: bucketLabel(r.bucket, t),
-              count: r.count,
-            }))}
-            color="var(--ds-chart-2)"
-            labelWidth={70}
-          />
-        </ActivityCard>
-        <ActivityCard>
-          <SectionHeader label={t("adminActivity.field.videoCodec")} />
-          <HorizontalBars
-            items={stats.videoCodecBreakdown.map((r) => ({
-              label: bucketLabel(r.codec, t),
-              count: r.count,
-            }))}
-            labelWidth={70}
-          />
-        </ActivityCard>
-        <ActivityCard>
-          <SectionHeader label={t("adminActivity.stats.audioCodec")} />
-          <HorizontalBars
-            items={stats.audioCodecBreakdown.map((r) => ({
-              label: bucketLabel(r.codec, t),
-              count: r.count,
-            }))}
-            color="var(--ds-chart-3)"
-            labelWidth={70}
-          />
-        </ActivityCard>
-        <ActivityCard>
-          <SectionHeader label={t("adminActivity.field.container")} />
-          <HorizontalBars
-            items={stats.containerBreakdown.map((r) => ({
-              label: bucketLabel(r.container, t),
-              count: r.count,
-            }))}
-            color="var(--ds-chart-4)"
-            labelWidth={70}
-          />
-        </ActivityCard>
-        <ActivityCard>
-          <SectionHeader label={t("adminActivity.field.bitrate")} sub={t("adminActivity.stats.distribution")} />
-          <HorizontalBars
-            items={stats.bitrateBuckets.map((r) => ({
-              label: bucketLabel(r.bucket, t),
-              count: r.count,
-            }))}
-            color="var(--ds-chart-2)"
-            labelWidth={92}
-          />
-        </ActivityCard>
-        <ActivityCard>
-          <SectionHeader label={t("adminActivity.stats.topPlayers")} sub={t("adminActivity.stats.clientApps")} />
-          <HorizontalBars
-            items={stats.topPlayers.slice(0, 8).map((r) => ({ label: bucketLabel(r.player, t), count: r.count }))}
-            color="var(--ds-chart-3)"
-            labelWidth={100}
-          />
-        </ActivityCard>
-      </Grid>
+      <ActivityGrid className="resp-grid-3" columns={THREE_EQUAL}>
+        {cards.map((b) => (
+          <BreakdownCard key={b.labelKey} breakdown={b} />
+        ))}
+      </ActivityGrid>
     </StatsSection>
   );
 }
@@ -608,11 +592,10 @@ function TranscodeSection({ stats, days }: { stats: ActivityStatsData; days: num
   const locale = useLocale();
   const streamMix = foldStreamMethods(stats.transcodeRatio);
   const streamTypes = streamTypeSegments(t, streamMix);
-  const sourceSplit = stats.sourceSplit.map((r) => ({
-    label: r.source === "plex" ? "Plex" : "Jellyfin",
-    count: r.count,
-    color: sourceDotColor(r.source),
-  }));
+  const sourceSplit = stats.sourceSplit.map((r) => {
+    const meta = sourceMeta(r.source);
+    return { label: meta.label, count: r.count, color: meta.color };
+  });
   // Both the count and the percentage in the "N transcoded sessions · P% of
   // sessions" line come from transcodeTotal, so they always agree; every share
   // divides by the all-sessions total the bars below sum to (streamShares).
@@ -625,7 +608,7 @@ function TranscodeSection({ stats, days }: { stats: ActivityStatsData; days: num
 
   return (
     <StatsSection>
-      <Grid className="resp-grid-2" columns="minmax(0, 1.2fr) minmax(0, 1fr)">
+      <ActivityGrid className="resp-grid-2" columns="minmax(0, 1.2fr) minmax(0, 1fr)">
         <ActivityCard>
           <SectionHeader
             label={t("adminActivity.stats.whyTranscoding")}
@@ -643,95 +626,7 @@ function TranscodeSection({ stats, days }: { stats: ActivityStatsData; days: num
             color="var(--ds-warning)"
             labelWidth={230}
           />
-          {topReason && (
-            <div
-              style={{
-                marginTop: 14,
-                padding: "10px 12px",
-                // Tinted off the same warning token the icon beside it uses,
-                // so the callout follows the theme instead of a fixed amber.
-                background: "color-mix(in oklab, var(--ds-warning) 6%, transparent)",
-                border: "1px solid color-mix(in oklab, var(--ds-warning) 18%, transparent)",
-                borderRadius: 8,
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "flex-start",
-                  gap: 8,
-                }}
-              >
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 14 14"
-                  aria-hidden
-                  style={{
-                    color: "var(--ds-warning)",
-                    flexShrink: 0,
-                    marginTop: 1,
-                  }}
-                >
-                  <path
-                    d="M7 2v5M7 10v0"
-                    stroke="currentColor"
-                    strokeWidth="1.6"
-                    strokeLinecap="round"
-                  />
-                  <circle
-                    cx="7"
-                    cy="7"
-                    r="5.5"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.2"
-                  />
-                </svg>
-                <div
-                  style={{
-                    fontSize: 11.5,
-                    color: "var(--ds-fg-muted)",
-                    lineHeight: 1.45,
-                  }}
-                >
-                  {/* States only what the data holds: the most common
-                      reason and its share. It used to add "addressing it
-                      would meaningfully cut server transcode load" whatever
-                      the share — and for Plex, whose "reason" was a guess. */}
-                  {/* "No reason reported" is the server saying nothing for a
-                      NEW session — not a cause, and unlike Unknown it does
-                      not clear as data accumulates (guardrail 19c). */}
-                  {reasonCalloutKind(topReason.reason) === "unknown" ? (
-                    <>{t("adminActivity.stats.noReason", { pct: topReasonPct })}</>
-                  ) : reasonCalloutKind(topReason.reason) === "unreported" ? (
-                    <>{t("adminActivity.stats.noReasonReportedTop", { pct: topReasonPct })}</>
-                  ) : (
-                    <>
-                      {(() => {
-                        const [before, after] = t("adminActivity.stats.topReason", {
-                          pct: topReasonPct,
-                          reason: "\u0000",
-                        }).split("\u0000");
-                        return (
-                          <>
-                            {before}
-                            <span style={{ color: "var(--ds-fg)" }}>
-                              {translateTranscodeReason(topReason.reason, t)}
-                            </span>
-                            {after}
-                          </>
-                        );
-                      })()}
-                      {isPlexStreamOnlyReason(topReason.reason) && (
-                        <> {t("adminActivity.stats.plexNoReason")}</>
-                      )}
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
+          {topReason && <TopReasonCallout reason={topReason.reason} pct={topReasonPct} />}
         </ActivityCard>
         <ActivityCard>
           <SectionHeader
@@ -749,8 +644,74 @@ function TranscodeSection({ stats, days }: { stats: ActivityStatsData; days: num
           <SectionHeader label={t("adminActivity.stats.sourceSplit")} />
           <StreamTypeBars data={sourceSplit} />
         </ActivityCard>
-      </Grid>
+      </ActivityGrid>
     </StatsSection>
+  );
+}
+
+// The note under the reasons: the most common reason and its share — only what
+// the data holds. It used to add "addressing it would meaningfully cut server
+// transcode load" whatever the share, and for Plex, whose "reason" was a guess.
+function TopReasonCallout({ reason, pct }: { reason: string; pct: number }) {
+  const t = useT();
+  // "No reason reported" is the server saying nothing for a NEW session — not a
+  // cause, and unlike Unknown it does not clear as data accumulates (19c).
+  const kind = reasonCalloutKind(reason);
+  return (
+    <div
+      style={{
+        marginTop: 14,
+        padding: "10px 12px",
+        // Tinted off the same warning token the icon beside it uses,
+        // so the callout follows the theme instead of a fixed amber.
+        background: "color-mix(in oklab, var(--ds-warning) 6%, transparent)",
+        border: "1px solid color-mix(in oklab, var(--ds-warning) 18%, transparent)",
+        borderRadius: 8,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 14 14"
+          aria-hidden
+          style={{ color: "var(--ds-warning)", flexShrink: 0, marginTop: 1 }}
+        >
+          <path d="M7 2v5M7 10v0" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+          <circle cx="7" cy="7" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.2" />
+        </svg>
+        <div style={{ fontSize: 11.5, color: "var(--ds-fg-muted)", lineHeight: 1.45 }}>
+          {kind === "unknown" ? (
+            t("adminActivity.stats.noReason", { pct })
+          ) : kind === "unreported" ? (
+            t("adminActivity.stats.noReasonReportedTop", { pct })
+          ) : (
+            <>
+              <ReasonSentence pct={pct} reason={translateTranscodeReason(reason, t)} />
+              {isPlexStreamOnlyReason(reason) && <> {t("adminActivity.stats.plexNoReason")}</>}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// "Most common reason: <reason> (P% of transcodes)" with the reason set off in
+// the foreground colour. The translated sentence is split where its {reason}
+// goes; a translation without the slot still shows the reason, after it.
+function ReasonSentence({ pct, reason }: { pct: number; reason: string }) {
+  const t = useT();
+  const sentence = t("adminActivity.stats.topReason", { pct, reason: SLOT_MARK });
+  const parts = splitAtSlot(sentence);
+  const name = <span style={{ color: "var(--ds-fg)" }}>{reason}</span>;
+  if (!parts) return <>{sentence.split(SLOT_MARK).join("")} {name}</>;
+  return (
+    <>
+      {parts.before}
+      {name}
+      {parts.after}
+    </>
   );
 }
 
@@ -774,7 +735,7 @@ function WhenSection({ stats }: { stats: ActivityStatsData }) {
 
   return (
     <StatsSection>
-      <Grid className="resp-grid-2" columns="minmax(0, 1fr) minmax(0, 1.4fr)">
+      <ActivityGrid className="resp-grid-2" columns="minmax(0, 1fr) minmax(0, 1.4fr)">
         <ActivityCard>
           <SectionHeader
             label={t("adminActivity.stats.dayOfWeek")}
@@ -820,7 +781,7 @@ function WhenSection({ stats }: { stats: ActivityStatsData }) {
           <BarColumn data={hourData} h={120} titles={hourTitles} />
           <AxisLabels labels={[0, 6, 12, 18, 23].map(hourLabel)} />
         </ActivityCard>
-      </Grid>
+      </ActivityGrid>
     </StatsSection>
   );
 }
@@ -837,28 +798,24 @@ function AudienceSection({
   const t = useT();
   return (
     <StatsSection>
-      <Grid className="resp-grid-3" columns={THREE_EQUAL}>
-        <ActivityCard>
-          <SectionHeader
-            label={t("adminActivity.title.platforms")}
-            sub={t("adminActivity.title.unique", { count: stats.playsByPlatform.length })}
-          />
-          <HorizontalBars
-            items={stats.playsByPlatform.slice(0, 8).map((p) => ({ label: bucketLabel(p.platform, t), count: p.count }))}
-            labelWidth={100}
-          />
-        </ActivityCard>
-        <ActivityCard>
-          <SectionHeader
-            label={t("adminActivity.user.devices")}
-            sub={t("adminActivity.user.known", { count: stats.topDevices.length })}
-          />
-          <HorizontalBars
-            items={stats.topDevices.slice(0, 8).map((d) => ({ label: bucketLabel(d.device, t), count: d.count }))}
-            color="var(--ds-chart-2)"
-            labelWidth={100}
-          />
-        </ActivityCard>
+      <ActivityGrid className="resp-grid-3" columns={THREE_EQUAL}>
+        <BreakdownCard
+          breakdown={{
+            labelKey: "adminActivity.title.platforms",
+            rows: stats.playsByPlatform.slice(0, TOP_N).map((p) => ({ label: p.platform, count: p.count })),
+            labelWidth: 100,
+          }}
+          sub={t("adminActivity.title.unique", { count: stats.playsByPlatform.length })}
+        />
+        <BreakdownCard
+          breakdown={{
+            labelKey: "adminActivity.user.devices",
+            rows: stats.topDevices.slice(0, TOP_N).map((d) => ({ label: d.device, count: d.count })),
+            color: "var(--ds-chart-2)",
+            labelWidth: 100,
+          }}
+          sub={t("adminActivity.user.known", { count: stats.topDevices.length })}
+        />
         <ActivityCard>
           <SectionHeader
             label={t("adminActivity.stats.movieDecades")}
@@ -879,7 +836,7 @@ function AudienceSection({
             />
           )}
         </ActivityCard>
-      </Grid>
+      </ActivityGrid>
     </StatsSection>
   );
 }

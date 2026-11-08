@@ -11,20 +11,24 @@ import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
 import { Film, Tv2 } from "@/components/icons";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
 import { relativeWithDateFallback } from "../_relative";
+import { getStatsTimeZone } from "@/lib/stats-time-zone-data";
+import { mergeRecentlyAdded, newestDistinctTitles } from "@/lib/activity-recent-added";
 
 export const dynamic = "force-dynamic";
 
-interface RecentItem {
-  tmdbId: number;
-  title: string;
-  mediaType: "MOVIE" | "TV";
-  year: string | null;
-  addedAt: Date;
-  // A title present in both libraries carries both tags — the merge below unions
-  // sources rather than letting the second loop overwrite the first.
-  sources: { plex: boolean; jellyfin: boolean };
-  posterPath: string | null;
-}
+const RECENT_SELECT = { tmdbId: true, mediaType: true, title: true, year: true, addedAt: true } as const;
+// Newest first with the primary key as the tiebreak, so the paged reads below
+// walk one total order and never repeat or skip a row at a page boundary.
+const RECENT_ORDER = [
+  { addedAt: "desc" as const },
+  { tmdbId: "asc" as const },
+  { mediaType: "asc" as const },
+  { serverInstance: "asc" as const },
+];
+
+// Rows with an addedAt only (the where), typed as such for the merge.
+const withAddedAt = <R extends { addedAt: Date | null }>(rows: R[]) =>
+  rows.filter((r): r is R & { addedAt: Date } => r.addedAt !== null);
 
 export default async function RecentlyAddedPage() {
   await requireFeature("feature.admin.activity");
@@ -32,69 +36,32 @@ export default async function RecentlyAddedPage() {
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
   const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
 
-  const [plexItems, jellyfinItems] = await Promise.all([
-    prisma.plexLibraryItem.findMany({
-      where: { addedAt: { not: null } },
-      orderBy: { addedAt: "desc" },
-      take: 60,
-      select: { tmdbId: true, mediaType: true, title: true, year: true, addedAt: true },
-    }),
-    prisma.jellyfinLibraryItem.findMany({
-      where: { addedAt: { not: null } },
-      orderBy: { addedAt: "desc" },
-      take: 60,
-      select: { tmdbId: true, mediaType: true, title: true, year: true, addedAt: true },
-    }),
+  const [plexItems, jellyfinItems, timeZone] = await Promise.all([
+    newestDistinctTitles(async (skip, take) =>
+      withAddedAt(await prisma.plexLibraryItem.findMany({
+        where: { addedAt: { not: null } }, orderBy: RECENT_ORDER, skip, take, select: RECENT_SELECT,
+      })),
+    ),
+    newestDistinctTitles(async (skip, take) =>
+      withAddedAt(await prisma.jellyfinLibraryItem.findMany({
+        where: { addedAt: { not: null } }, orderBy: RECENT_ORDER, skip, take, select: RECENT_SELECT,
+      })),
+    ),
+    getStatsTimeZone(),
   ]);
 
-  // One pass over both libraries. A title held by two servers is two rows
-  // (library rows are keyed by serverInstance too), and one held by Plex and
-  // Jellyfin carries both tags: keep the newest addedAt (with its title and year)
-  // and union the sources rather than letting a later row overwrite them.
-  const rows = [
-    ...plexItems.map((i) => ({ ...i, src: "plex" as const })),
-    ...jellyfinItems.map((i) => ({ ...i, src: "jellyfin" as const })),
-  ].filter((i): i is typeof i & { addedAt: Date } => i.addedAt !== null);
-  const merged = new Map<string, RecentItem>();
-  for (const item of rows) {
-    const key = `${item.mediaType}:${item.tmdbId}`;
-    const existing = merged.get(key);
-    if (existing) {
-      existing.sources[item.src] = true;
-      if (item.addedAt.getTime() > existing.addedAt.getTime()) {
-        existing.addedAt = item.addedAt;
-        existing.title = item.title ?? existing.title;
-        existing.year = item.year ?? existing.year;
-      }
-      continue;
-    }
-    merged.set(key, {
-      tmdbId: item.tmdbId,
-      title: item.title ?? t("adminActivity.common.unknownTitle"),
-      mediaType: item.mediaType,
-      year: item.year ?? null,
-      addedAt: item.addedAt,
-      sources: { plex: item.src === "plex", jellyfin: item.src === "jellyfin" },
-      posterPath: null,
-    });
-  }
-  let items = Array.from(merged.values())
-    .sort((a, b) => b.addedAt.getTime() - a.addedAt.getTime())
-    .slice(0, 60);
-
-  if (items.length > 0) {
-    // The shared lookup (TmdbMediaCore first, then the :details cache), each
-    // title in its own media type's namespace.
-    const posters = await resolvePosterMap(items);
-    items = items.map((i) => ({ ...i, posterPath: posters[posterPathKey(i.tmdbId, i.mediaType)] ?? null }));
-  }
+  const merged = mergeRecentlyAdded(plexItems, jellyfinItems, t("adminActivity.common.unknownTitle"));
+  // The shared lookup (TmdbMediaCore first, then the :details cache), each
+  // title in its own media type's namespace.
+  const posters = merged.length > 0 ? await resolvePosterMap(merged) : {};
+  const items = merged.map((i) => ({ ...i, posterPath: posters[posterPathKey(i.tmdbId, i.mediaType)] ?? null }));
 
   return (
     <div className="ds-page-enter">
       <PageHeader
         title={t("adminActivity.tab.recentlyAdded")}
         subtitle={
-          // items is capped (slice above), so this is "the latest N", not a total.
+          // items is capped (mergeRecentlyAdded), so this is "the latest N", not a total.
           items.length > 0
             ? t("adminActivity.recent.subtitle", { count: items.length })
             : t("adminActivity.recent.subtitleEmpty")
@@ -153,7 +120,7 @@ export default async function RecentlyAddedPage() {
                   </Link>
                   <p className="text-[10px] text-zinc-500">
                     {item.year && <span>{item.year} · </span>}
-                    {relativeWithDateFallback(item.addedAt, locale)}
+                    {relativeWithDateFallback(item.addedAt, locale, timeZone)}
                   </p>
                 </div>
               </div>

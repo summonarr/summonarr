@@ -68,15 +68,25 @@ function warnLegacyPlaintextOnce(label: string): void {
   );
 }
 
-export function encryptToken(plaintext: string): string {
+// The whole envelope, not just the prefix: enc:v1:<32 hex IV>:<32 hex tag>:<hex ciphertext>.
+const CIPHERTEXT_SHAPE = /^enc:v1:[0-9a-f]{32}:[0-9a-f]{32}:(?:[0-9a-f]{2})*$/i;
+
+function isTokenCiphertext(value: string): boolean {
+  return CIPHERTEXT_SHAPE.test(value);
+}
+
+export function encryptToken(plaintext: string): string;
+export function encryptToken(plaintext: string | null | undefined): string | null | undefined;
+export function encryptToken(plaintext: string | null | undefined): string | null | undefined {
   // Empty/null is a legitimate "no value" passthrough — don't synthesize ciphertext for nothing.
   if (plaintext === null || plaintext === undefined || plaintext === "") return plaintext;
   // Idempotency guard: if the caller hands us an already-encrypted value (e.g. a value that
   // round-tripped through a raw-SQL read site bypassing the prisma extension), do not double-
   // encrypt — that produces enc:v1:<enc:v1:…> rows that decrypt back to inner ciphertext and
-  // get shipped as garbage tokens to upstream services. This is exactly the bc81802 regression
-  // class that guardrail 7a was written to prevent.
-  if (typeof plaintext === "string" && plaintext.startsWith(ENC_PREFIX)) return plaintext;
+  // get shipped as garbage tokens to upstream services (guardrail 7a). Only a value with
+  // the full envelope shape counts: a secret that merely starts with the prefix is
+  // encrypted like any other, or it would be stored in plaintext.
+  if (isTokenCiphertext(plaintext)) return plaintext;
   // The IV here is 16 bytes rather than the canonical 12 for GCM. It's still functional
   // (Node accepts any IV length for GCM) and there are existing rows on disk encoded this way.
   // Don't change it without a migration story for those rows.

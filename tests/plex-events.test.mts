@@ -153,6 +153,8 @@ const namedInstanceSettings = new Map<string, string>();
 let bootstrapRows: FakeSessionRow[] = []; // activeSession.findMany({ where: { source: "plex" } })
 const liveRows = new Map<string, FakeSessionRow>(); // activeSession.findUnique by id
 let settingUpsertError: Error | null = null;
+// When set, a setting upsert waits on it before it lands.
+let settingUpsertGate: Promise<void> | null = null;
 let playHistoryCreateError: Error | null = null;
 const settingUpserts: Array<{ key: string; value: string }> = [];
 // Holds the NEXT activeSession.findUnique for one id until `until` settles, so a
@@ -204,6 +206,7 @@ const fakePrisma = {
     upsert: async (args: SettingUpsertArgs) => {
       rec("setting", "upsert", args);
       if (settingUpsertError) throw settingUpsertError;
+      if (settingUpsertGate) await settingUpsertGate;
       settingUpserts.push({ key: args.where.key, value: args.create.value });
       return args.create;
     },
@@ -862,6 +865,18 @@ test("a stop for a session we never tracked cross-checks, then ledgers the key (
   assert.equal(deletesFor("plex:stop-ghost").length, 0);
 });
 
+test("a repeated stop for a key already finalized (row gone) costs no /status/sessions listing", async () => {
+  plexSnapshotSessions = [];
+  pushFrame(playingFrame({ sessionKey: "stop-twice", state: "stopped", viewOffset: 1_000 }));
+  await waitFor(() => isPlexSessionRecentlyFinalized("plex:stop-twice"), "the first stop ledgers the key");
+  await drain(20);
+  const sessBefore = sessionFetches().length;
+  pushFrame(playingFrame({ sessionKey: "stop-twice", state: "stopped", viewOffset: 1_000 }));
+  await waitFor(() => dbCalls.filter((c) => c.model === "activeSession" && c.op === "findUnique" && (c.args as ActiveWhereArgs).where?.id === "plex:stop-twice").length >= 2, "the second stop's row read");
+  await drain(20);
+  assert.equal(sessionFetches().length, sessBefore, "no cross-check for a key the ledger already holds");
+});
+
 test("PIN: a spurious stop for a session Plex STILL reports must not ledger it — that blinds a brand-new play", async () => {
   // A playback has no ActiveSession row until the 5s poller creates one (two
   // ticks for DLNA). A spurious stop inside that window used to ledger the key
@@ -1270,6 +1285,27 @@ test("a failed reachability write is not latched — the next report retries the
   assert.equal((JSON.parse(settingUpserts[settingUpserts.length - 1].value) as { reachable: boolean }).reachable, true);
 });
 
+test("overlapping reachability reports persist in call order: the last report is what the row and the latch end on", async () => {
+  // Hold the first upsert open so the second report is made while it is in flight.
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  settingUpsertGate = gate;
+  const upsBefore = settingUpserts.length;
+  const current = JSON.parse(settingUpserts[settingUpserts.length - 1].value) as { reachable: boolean };
+  const first = setPlexReachable(!current.reachable);
+  const second = setPlexReachable(current.reachable);
+  await drain(10);
+  assert.equal(settingUpserts.length, upsBefore, "the first write is still in flight; the second waits behind it");
+  settingUpsertGate = null;
+  release();
+  await Promise.all([first, second]);
+  assert.equal(settingUpserts.length, upsBefore + 2, "both flips persisted, one after the other");
+  assert.equal((JSON.parse(settingUpserts[settingUpserts.length - 1].value) as { reachable: boolean }).reachable, current.reachable);
+  // The latch matches the row: repeating the last value is deduped.
+  await setPlexReachable(current.reachable);
+  assert.equal(settingUpserts.length, upsBefore + 2);
+});
+
 // ═══ Phase I — connection lifecycle ═════════════════════════════════════════
 
 test("reconcile with unchanged settings is a no-op: no second connection, no re-bootstrap", async () => {
@@ -1595,4 +1631,13 @@ test("stopping every stream while a reconcile is mid-read leaves no orphaned str
     await drain(60);
   }
   assert.deepEqual(errors, [], "plex-events must never console.error");
+});
+
+test("resyncFireAt: debounce clamped between the cooldown floor and the burst deadline; past the cap, the plain cooldown", async () => {
+  const { resyncFireAt } = await import("../src/lib/plex-events.ts");
+  const now = 1_000_000;
+  assert.equal(resyncFireAt(now, 0, now + 120_000, false), now + 30_000, "the debounce");
+  assert.equal(resyncFireAt(now, now + 60_000, now + 120_000, false), now + 60_000, "never before the cooldown floor");
+  assert.equal(resyncFireAt(now, 0, now + 10_000, false), now + 10_000, "never after the burst deadline");
+  assert.equal(resyncFireAt(now, 0, now + 10_000, true), now + TIMELINE_RESYNC_COOLDOWN_MS, "capped: the cooldown, unclamped");
 });

@@ -78,3 +78,18 @@ test("a failed first load offers a Retry that reloads the view on screen", () =>
   assert.match(branch, /<Button[^>]*onClick=\{\(\) => void reload\(\)\}/);
   assert.match(branch, /t\("adminManage\.common\.retry"\)/);
 });
+
+test("a load's failure and an action's are kept apart: a reload never wipes the failure of a Protect or Check now", () => {
+  const load = /const load = useCallback\(async \(\) => \{([\s\S]*?)\n  \}, \[/.exec(src)?.[1] ?? "";
+  assert.match(load, /setLoadError\(""\);/);
+  assert.doesNotMatch(load, /setActionError/, "the load leaves an action's failure alone");
+  for (const head of ["async function setProtected(", "async function checkUpstream("]) {
+    const at = src.indexOf(head);
+    const body = src.slice(at, src.indexOf("\n  }\n", at));
+    assert.match(body, /setActionError\(""\);/, `${head} clears its own line`);
+    assert.doesNotMatch(body, /setLoadError/, `${head} never touches the load's`);
+  }
+  // Both are shown, each once.
+  assert.match(src, /const alerts = \[\.\.\.new Set\(\[actionError, loadError, del\.error\]\.filter\(Boolean\)\)\];/);
+  assert.match(src, /schema: NwPageWire,/, "the page is checked, not cast");
+});

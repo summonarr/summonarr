@@ -34,7 +34,8 @@ test("boot wires the check and exits on it in production", () => {
   assert.match(after, /nextAuthSecret: process\.env\.NEXTAUTH_SECRET/);
   assert.match(after, /cronSecret: process\.env\.CRON_SECRET/);
   assert.match(after, /tokenEncryptionKey: process\.env\.TOKEN_ENCRYPTION_KEY/);
-  assert.match(after, /if \(reuse\) \{[\s\S]*?process\.exit\(1\)/);
+  assert.match(after, /if \(reuse\) refuse\(reuse, "production"\);/);
+  assert.match(src, /if \(bootRefused\(checkBootEnv\(\), process\.env\.NODE_ENV\)\) process\.exit\(1\);/, "a recorded refusal exits");
 });
 
 test("a missing NEXTAUTH_SECRET is reported once, by the length check, which still exits in production", () => {
@@ -45,7 +46,18 @@ test("a missing NEXTAUTH_SECRET is reported once, by the length check, which sti
   assert.match(required[1], /"DATABASE_URL"/);
   assert.match(
     src,
-    /if \(!process\.env\.NEXTAUTH_SECRET \|\| process\.env\.NEXTAUTH_SECRET\.trim\(\)\.length < 32\) \{[\s\S]*?if \(process\.env\.NODE_ENV === "production"\) process\.exit\(1\);/,
+    /if \(!process\.env\.NEXTAUTH_SECRET \|\| process\.env\.NEXTAUTH_SECRET\.trim\(\)\.length < 32\) \{\s*refuse\([\s\S]*?"production",\s*\);/,
   );
 });
 
+test("boot refusals: every check is logged first, then ONE exit — always for an always-refusal, production-only otherwise", async () => {
+  const { bootRefused } = await import("../src/lib/boot-refusal.ts");
+  assert.equal(bootRefused([], "production"), false, "nothing refused");
+  assert.equal(bootRefused(["production"], "production"), true);
+  assert.equal(bootRefused(["production", "production"], "development"), false, "development keeps running");
+  assert.equal(bootRefused(["production", "always"], "development"), true, "an always-refusal exits everywhere");
+  assert.equal(bootRefused(["always"], undefined), true);
+  const src = readFileSync(new URL("../src/instrumentation.ts", import.meta.url), "utf8");
+  assert.match(src, /if \(proxyDecision\.fatal\) \{\s*refuse\(proxyDecision\.message[^,]*, "always"\);/, "the local-only refusal exits in every environment, as before");
+  assert.equal((src.match(/process\.exit\(1\)/g) ?? []).length, 2, "the encryption-key exit and the one exit after every check");
+});

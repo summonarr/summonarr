@@ -347,7 +347,7 @@ test("Approve while Radarr is dark rolls back and answers the kind, never the ad
   assert.equal(body.status, "PENDING", "rolled back");
   assert.equal(body.arrError, UNREACHABLE);
   assertNoAddress(body.arrError, "arrError");
-  assert.ok(errors.some((l) => l.includes("[arr] Failed to push request:") && l.includes("10.0.0.5:7878")));
+  assert.ok(errors.some((l) => l.includes("[arr] Approve push failed") && l.includes("10.0.0.5:7878")));
 });
 
 test("Approve answered 500 by Radarr: the generic status phrase reaches the delegate, the body reaches neither the answer nor the log", async () => {
@@ -375,6 +375,6 @@ test("batch Approve while Radarr is dark: failed[].error and the arrError summar
   assert.deepEqual(body.failed.map((f) => [f.id, f.error]), [["r1", UNREACHABLE], ["r2", UNREACHABLE]]);
   assert.equal(typeof body.arrError, "string");
   assertNoAddress(text, "the batch answer");
-  assert.ok(errors.some((l) => l.includes("[arr] Batch approve push failed for") && l.includes("10.0.0.5:7878")));
+  assert.ok(errors.some((l) => l.includes("[arr] Batch approve push failed") && l.includes("10.0.0.5:7878")));
   assert.deepEqual(rows.map((r) => r.status), ["PENDING", "PENDING"], "both rolled back");
 });

@@ -11,6 +11,7 @@ import { instanceDefaultLocale, translatorFor } from "./i18n/server-locale";
 import { titleResolver } from "./tmdb-localize";
 import { mediaLabelT } from "./notify-i18n";
 import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
+import { isPrismaErrorCode } from "./prisma-errors";
 import {
   buildGotifyBody,
   buildNtfyBody,
@@ -237,6 +238,12 @@ function requestFor(agent: LoadedAgent, p: WebhookPayload): { url: string; heade
   return { url: gotifyMessageUrl(cfg.url), headers, body: JSON.stringify(buildGotifyBody(cfg, p)) };
 }
 
+// The error's class name only — never its message (see deliverOnce).
+function errorClassName(err: unknown): string {
+  const name = err instanceof Error ? err.name : typeof err;
+  return /^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(name) ? name : "Error";
+}
+
 /** One attempt. Admin-entered URL ⇒ safeFetchAdminConfigured (guardrail 5a): LAN ok, metadata blocked. */
 export async function deliverOnce(agent: LoadedAgent, p: WebhookPayload): Promise<DeliveryResult> {
   const { url, headers, body } = requestFor(agent, p);
@@ -256,8 +263,9 @@ export async function deliverOnce(agent: LoadedAgent, p: WebhookPayload): Promis
     // else was thrown BEFORE the network call — e.g. undici's Headers rejecting
     // a header value. That is a config error (retrying can't fix it), and its
     // message embeds the offending value, i.e. the secret, so it must never
-    // reach lastError, the warn line or the Test response.
-    return { verdict: "fail", status: null, error: "request could not be built (check the secret and URL)" };
+    // reach lastError, the warn line or the Test response. Its class name is
+    // safe, and tells a header problem (TypeError) from anything else.
+    return { verdict: "fail", status: null, error: `request could not be built (${errorClassName(err)}; check the secret and URL)` };
   }
 }
 
@@ -270,8 +278,11 @@ function recordOutcome(agentId: string, r: DeliveryResult): Promise<void> {
       select: { id: true },
     })
     .then(() => undefined)
-    .catch(() => {
-      // Deleted between send and record, or a DB blip — bookkeeping only.
+    .catch((err: unknown) => {
+      // Deleted between send and record: nothing to record. Anything else is a
+      // real write failure — still bookkeeping only, but said.
+      if (isPrismaErrorCode(err, "P2025")) return;
+      console.warn(`[notify-agents] could not record a delivery outcome: ${err instanceof Error ? err.message : String(err)}`);
     });
 }
 

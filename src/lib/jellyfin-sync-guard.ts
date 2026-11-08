@@ -16,7 +16,8 @@
 // of what would be lost (a new or genuinely empty server is never blocked):
 //   - "empty": no movies AND no shows at all.
 //   - "empty-type": a type with stored rows comes back with zero titles while a
-//     selected (or, with no selection, any) library of it still exists.
+//     selected (or, with no selection, any) library of it still exists — a
+//     mixed or untyped library counts as one of each.
 //   - "missing-library": a type with stored rows comes back with zero titles,
 //     no selected library of it exists, and a selected library id is not on the
 //     server any more (recreating a library gives it a NEW id).
@@ -28,7 +29,14 @@
 
 export interface JellyfinFolderRef {
   id: string;
+  /** "movies", "tvshows", or anything else — a mixed or untyped library, which can hold either. */
   collectionType: "movies" | "tvshows" | string;
+}
+
+/** Can this library hold titles of `collectionType`? A mixed or untyped one can hold both. */
+function folderHolds(folder: JellyfinFolderRef, collectionType: "movies" | "tvshows"): boolean {
+  if (folder.collectionType === "movies" || folder.collectionType === "tvshows") return folder.collectionType === collectionType;
+  return true;
 }
 
 export type JellyfinHoldReason =
@@ -60,9 +68,9 @@ export function jellyfinHoldReason(input: JellyfinHoldInput): JellyfinHoldReason
   if (movieCount === 0 && tvCount === 0) return { kind: "empty" };
 
   const missing = missingSelectedIds(selectedIds, folders);
-  const covers = (collectionType: string) =>
-    folders.some((f) => f.collectionType === collectionType && (!selectedIds?.size || selectedIds.has(f.id)));
-  const lost: Array<{ mediaType: "MOVIE" | "TV"; collectionType: string }> = [];
+  const covers = (collectionType: "movies" | "tvshows") =>
+    folders.some((f) => folderHolds(f, collectionType) && (!selectedIds?.size || selectedIds.has(f.id)));
+  const lost: Array<{ mediaType: "MOVIE" | "TV"; collectionType: "movies" | "tvshows" }> = [];
   if (movieCount === 0 && heldMovieRows > 0) lost.push({ mediaType: "MOVIE", collectionType: "movies" });
   if (tvCount === 0 && heldTvRows > 0) lost.push({ mediaType: "TV", collectionType: "tvshows" });
   for (const l of lost) {

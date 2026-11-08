@@ -8,7 +8,7 @@
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { prisma, resetDb, closeDb } from "./_harness.mts";
-import { replaceEpisodeCacheForSource, type EpisodeCacheRow } from "@/lib/cron-auth.ts";
+import { replaceEpisodeCacheForSource, type EpisodeCacheRow } from "@/lib/episode-cache.ts";
 
 before(resetDb);
 beforeEach(resetDb);

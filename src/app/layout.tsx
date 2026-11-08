@@ -74,7 +74,17 @@ export default async function RootLayout({
 }>) {
   // Server-side reads the Summonarr session cookie so SummonarrSessionProvider's
   // initial value matches the cookie state on first paint (no loading flash).
-  const summonarrSessionClaims = await readSummonarrSession();
+  // Reading headers() opts this layout into per-request rendering, which causes
+  // Next.js 16 to read the `x-nonce` request header set by src/proxy.ts and stamp
+  // the matching `nonce` attribute on its emitted inline scripts so they pass CSP.
+  // We reuse it for the anti-FOUC theme script below (strict-dynamic requires it).
+  // The three reads are independent, so they run together.
+  const [summonarrSessionClaims, requestHeaders, locale] = await Promise.all([
+    readSummonarrSession(),
+    headers(),
+    getLocale(),
+  ]);
+  const nonce = requestHeaders.get("x-nonce") ?? undefined;
   const summonarrInitialSession = summonarrSessionClaims
     ? {
         user: {
@@ -96,12 +106,6 @@ export default async function RootLayout({
         expiresAt: summonarrSessionClaims.expiresAt,
       }
     : null;
-  // Reading headers() opts this layout into per-request rendering, which causes
-  // Next.js 16 to read the `x-nonce` request header set by src/proxy.ts and stamp
-  // the matching `nonce` attribute on its emitted inline scripts so they pass CSP.
-  // We reuse it for the anti-FOUC theme script below (strict-dynamic requires it).
-  const nonce = (await headers()).get("x-nonce") ?? undefined;
-  const locale = await getLocale();
   // The admin message areas (~240 KB raw) are sent only to a session that could
   // open admin UI — the same gate as the (app)/admin layout. Everyone else, the
   // login page included, gets the smaller catalog. A role change signs the

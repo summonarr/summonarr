@@ -102,3 +102,13 @@ test("firstMatchInOrder: at most `concurrency` probes in flight, none started af
   assert.equal(await none, -1);
   assert.equal(q.max(), 2);
 });
+
+test("firstMatchInOrder: a probe that throws counts as no — the walk still answers", async () => {
+  const hit = await firstMatchInOrder(["a", "b", "c"], async (x) => {
+    if (x === "a") throw new Error("probe blew up");
+    return x === "b";
+  }, 2);
+  assert.equal(hit, 1);
+  const none = await firstMatchInOrder(["a"], async () => { throw new Error("boom"); }, 1);
+  assert.equal(none, -1);
+});

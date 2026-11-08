@@ -16,7 +16,8 @@ test("formatDurationHM (en): h/m above an hour, m under, s under a minute, em-da
   assert.equal(formatDurationHM(-10, "en"), "—");
   assert.equal(formatDurationHM(Number.NaN, "en"), "—");
   assert.equal(formatDurationHM(45, "en"), "45s");
-  assert.equal(formatDurationHM(59.6, "en"), "60s");
+  assert.equal(formatDurationHM(59.4, "en"), "59s");
+  assert.equal(formatDurationHM(59.6, "en"), "1m", "rounds to a whole minute, never \"60s\"");
   assert.equal(formatDurationHM(60, "en"), "1m");
   assert.equal(formatDurationHM(900, "en"), "15m");
   assert.equal(formatDurationHM(3600, "en"), "1h 0m");

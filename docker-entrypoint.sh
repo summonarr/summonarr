@@ -69,6 +69,7 @@ _cron_int() {
 _db_wait=$(_cron_int "${SUMMONARR_DB_WAIT_SECONDS:-60}" 60)
 _db_deadline=$(( $(date +%s) + _db_wait ))
 _db_waiting=""
+_db_unanswered=""
 while :; do
   node --input-type=module <<'DBWAIT_EOF' && break
 // Exit 0 = go on (connected, Postgres answered with an error, or no way to
@@ -89,6 +90,7 @@ process.exit(code);
 DBWAIT_EOF
   if [ "$(date +%s)" -ge "$_db_deadline" ]; then
     echo "[entrypoint] WARNING: the database did not answer within ${_db_wait}s — continuing boot."
+    _db_unanswered=1
     break
   fi
   if [ -z "$_db_waiting" ]; then
@@ -110,15 +112,25 @@ done
 #   SUMMONARR_PRE_UPGRADE_DUMP_TIMEOUT  seconds before the dump is abandoned (default 900)
 #
 # "A push is about to change the schema" = `prisma migrate diff` (live DB →
-# schema.prisma) has statements other than the TmdbCache_key_idx drop/create
-# pair, which Prisma reports on EVERY run (the text_pattern_ops index never
-# round-trips through introspection) and which `db push` itself ignores. A fresh
-# database (no "User" table) has nothing to protect and is skipped.
+# schema.prisma) has statements other than those naming an index in
+# _PRISMA_DIFF_NOISE: Prisma reports their drop/create pair on EVERY run (a
+# raw-ops index such as text_pattern_ops never round-trips through
+# introspection) and `db push` itself ignores them. Space-separated index names;
+# tests/entrypoint.test.mts checks every raw-ops index in schema.prisma is here.
+# A fresh database (no "User" table) has nothing to protect and is skipped.
+#
+# Every database call here is bounded: the boot wait above may have given up,
+# and an unanswered connect would otherwise hang until the OS TCP timeout.
 #
 # NEVER blocks boot: every failure is a warning and the function returns 0.
+_PRISMA_DIFF_NOISE='TmdbCache_key_idx'
 _pre_upgrade_dump() {
   _dir="${SUMMONARR_PRE_UPGRADE_DUMP_DIR:-}"
   [ -z "$_dir" ] && return 0
+  if [ -n "$_db_unanswered" ]; then
+    echo "[entrypoint] WARNING: pre-upgrade dump skipped — the database did not answer."
+    return 0
+  fi
   if ! command -v pg_dump >/dev/null 2>&1 || ! command -v psql >/dev/null 2>&1; then
     echo "[entrypoint] WARNING: SUMMONARR_PRE_UPGRADE_DUMP_DIR is set but pg_dump/psql are not in this image — no pre-upgrade dump taken."
     return 0
@@ -137,7 +149,7 @@ _pre_upgrade_dump() {
   case "$_tmo" in ''|*[!0-9]*) _tmo=900 ;; esac
   [ "$_tmo" -lt 1 ] && _tmo=900
 
-  _has_user=$(PGPASSWORD="$POSTGRES_PASSWORD" psql -h postgres -U summonarr -d summonarr -tAqc "SELECT to_regclass('\"User\"') IS NOT NULL" 2>/dev/null) || _has_user=""
+  _has_user=$(PGPASSWORD="$POSTGRES_PASSWORD" PGCONNECT_TIMEOUT=10 psql -h postgres -U summonarr -d summonarr -tAqc "SELECT to_regclass('\"User\"') IS NOT NULL" 2>/dev/null) || _has_user=""
   if [ "$_has_user" = "f" ]; then
     return 0
   elif [ "$_has_user" != "t" ]; then
@@ -145,17 +157,20 @@ _pre_upgrade_dump() {
     return 0
   fi
 
-  _diff=$(node node_modules/prisma/build/index.js migrate diff --from-config-datasource --to-schema prisma/schema.prisma --script 2>/dev/null) || {
+  _diff=$(timeout 120 node node_modules/prisma/build/index.js migrate diff --from-config-datasource --to-schema prisma/schema.prisma --script 2>/dev/null) || {
     echo "[entrypoint] WARNING: pre-upgrade dump skipped — could not compute the schema diff."
     return 0
   }
-  _pending=$(printf '%s\n' "$_diff" | grep -v '^--' | grep -v '^[[:space:]]*$' | grep -v 'TmdbCache_key_idx' || true)
+  _pending=$(printf '%s\n' "$_diff" | grep -v '^--' | grep -v '^[[:space:]]*$' || true)
+  for _noise in $_PRISMA_DIFF_NOISE; do
+    _pending=$(printf '%s\n' "$_pending" | grep -vF "\"$_noise\"" || true)
+  done
   [ -z "$_pending" ] && return 0
 
   _stamp=$(date -u +%Y%m%dT%H%M%SZ)
   _out="$_dir/summonarr-pre-upgrade-$_stamp.dump"
   echo "[entrypoint] Schema changes pending — writing pre-upgrade dump to $_out"
-  if (umask 077; PGPASSWORD="$POSTGRES_PASSWORD" timeout "$_tmo" pg_dump -h postgres -U summonarr -d summonarr -Fc -f "$_out.partial") 2>&1; then
+  if (umask 077; PGPASSWORD="$POSTGRES_PASSWORD" PGCONNECT_TIMEOUT=10 timeout "$_tmo" pg_dump -h postgres -U summonarr -d summonarr -Fc -f "$_out.partial") 2>&1; then
     mv "$_out.partial" "$_out" || { rm -f "$_out.partial"; echo "[entrypoint] WARNING: could not finalize the pre-upgrade dump."; return 0; }
     echo "[entrypoint] Pre-upgrade dump written."
     # Newest first (names sort by UTC timestamp); drop everything past KEEP.
@@ -177,7 +192,10 @@ const { DATABASE_URL } = process.env;
 // out below), keeping the most recently written one. Ordered by createdAt: `id` is a cuid2
 // (random letter + hash), so it is NOT time-sortable and only breaks ties
 // deterministically. Idempotent — safe to run every start.
-// Skips cleanly on a fresh DB where the table hasn't been created yet.
+// Skips cleanly on a fresh DB where the table hasn't been created yet, and
+// skips the scan once a unique index over exactly that key exists: Postgres
+// already refuses duplicates then, so the window over the whole table would
+// find nothing.
 //
 // Best-effort by design: this runs BEFORE `prisma db push`, so a schema change
 // that renames a referenced column would otherwise crash-loop the container
@@ -208,10 +226,23 @@ try {
       SELECT 1 FROM information_schema.columns
       WHERE table_name = 'PlayHistory' AND column_name = 'serverInstance'
     `);
-    const partition = col.rowCount > 0
-      ? `source, "serverInstance", "sourceSessionId"`
-      : `source, "sourceSessionId"`;
-    const res = await client.query(`
+    const key = col.rowCount > 0
+      ? ['source', 'serverInstance', 'sourceSessionId']
+      : ['source', 'sourceSessionId'];
+    // Plain, valid, non-partial unique indexes on the table, by column set.
+    const uniques = await client.query(`
+      SELECT array_agg(a.attname::text) AS cols
+      FROM pg_index i
+      JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+      WHERE i.indrelid = '"PlayHistory"'::regclass
+        AND i.indisunique AND i.indisvalid
+        AND i.indpred IS NULL AND i.indexprs IS NULL
+      GROUP BY i.indexrelid
+    `);
+    const want = [...key].sort().join(',');
+    const enforced = uniques.rows.some((r) => [...r.cols].sort().join(',') === want);
+    const partition = key.map((c) => (c === 'source' ? c : `"${c}"`)).join(', ');
+    const res = enforced ? { rowCount: 0 } : await client.query(`
       DELETE FROM "PlayHistory"
       WHERE id IN (
         SELECT id FROM (
@@ -245,6 +276,9 @@ const { DATABASE_URL } = process.env;
 //
 // Clamp to wall-clock elapsed: a session physically cannot have played longer than
 // (stoppedAt - startedAt). Recomputes `watched` and `pausedDuration` from the clamp.
+// `watched` is judged against the same effective length as the app's finalize
+// (judgePlay in src/lib/play-history-record.ts): the credits start when a
+// marker is stored and lies within the file, else the duration.
 //
 // Idempotent — the WHERE filters out rows that don't need clamping, so re-runs are no-ops.
 // Skips cleanly on a fresh DB.
@@ -268,6 +302,14 @@ try {
       const parsed = t.rows[0]?.value ? parseInt(t.rows[0].value, 10) : NaN;
       if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 100) threshold = parsed;
     } catch { /* Setting table absent on fresh DB — fall back to 80 */ }
+    // creditsStartMs is newer than this script; an older table judges by duration.
+    const credits = await client.query(
+      `SELECT 1 FROM information_schema.columns WHERE table_name = 'PlayHistory' AND column_name = 'creditsStartMs'`,
+    );
+    const effective = credits.rowCount > 0
+      ? `CASE WHEN "creditsStartMs" > 0 AND "creditsStartMs" <= duration::bigint * 1000
+              THEN "creditsStartMs"::float / 1000 ELSE duration::float END`
+      : `duration::float`;
     const res = await client.query(
       `UPDATE "PlayHistory" SET
          "playDuration"   = LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int),
@@ -278,7 +320,7 @@ try {
          ),
          "watched" = CASE
            WHEN duration > 0
-           THEN (LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int)::float / duration::float * 100) >= $1
+           THEN (LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int)::float / (${effective}) * 100) >= $1
            ELSE false
          END
        WHERE "playDuration" > EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int
@@ -483,11 +525,15 @@ echo "Starting Summonarr..."
 # (advisory-lock DEFAULT_WORK_TIMEOUT_MS = 30min) so the SERVER decides when a
 # run has gone wrong — it aborts, returns non-2xx, and the retry is then a real
 # retry. Override with CRON_CALL_TIMEOUT (seconds).
+#
+# The client follows the URL's scheme, so a *_URL override may name an https
+# endpoint; the built-in loopback URLs are plain http.
 _cron_sync() {
   SYNC_CALL_URL="$1" SYNC_CALL_LABEL="$2" SYNC_CALL_QUIET="${3:-}" \
   SYNC_CALL_TIMEOUT_MS="$(( $(_cron_int "${CRON_CALL_TIMEOUT:-2100}" 2100) * 1000 ))" \
     node --input-type=module <<'JSEOF'
 import http from 'node:http';
+import https from 'node:https';
 const {
   SYNC_CALL_URL: url,
   SYNC_CALL_LABEL: label,
@@ -498,7 +544,8 @@ const {
 const timeoutMs = Number(timeoutRaw) > 0 ? Number(timeoutRaw) : 2100000;
 try {
   const status = await new Promise((resolve, reject) => {
-    const req = http.request(
+    const client = URL.canParse(url) && new URL(url).protocol === 'https:' ? https : http;
+    const req = client.request(
       url,
       { method: 'POST', headers: { Authorization: `Bearer ${CRON_SECRET}` } },
       (res) => {
@@ -677,6 +724,7 @@ _play_history_loop() {
     PH_TIMEOUT_MS="$(( $(_cron_int "${CRON_CALL_TIMEOUT:-2100}" 2100) * 1000 ))" \
       node --input-type=module <<'JSEOF' || true
 import http from 'node:http';
+import https from 'node:https';
 const { PH_URL: url, PH_HEALTH_URL: healthUrl, CRON_SECRET } = process.env;
 const intervalMs = Math.max(1000, Number(process.env.PH_INTERVAL_MS) || 5000);
 const timeoutMs = Number(process.env.PH_TIMEOUT_MS) > 0 ? Number(process.env.PH_TIMEOUT_MS) : 2100000;
@@ -686,7 +734,7 @@ const start = Date.now();
 let ready = false;
 while (!ready && Date.now() - start < 60_000) {
   try {
-    const r = await fetch(healthUrl);
+    const r = await fetch(healthUrl, { signal: AbortSignal.timeout(2000) });
     ready = r.ok;
     await r.arrayBuffer();
   } catch {}
@@ -696,9 +744,12 @@ if (!ready) console.warn('[entrypoint] play-history readiness probe timed out af
 
 // node:http for the reason _cron_sync gives. agent: false is a fresh connection
 // per poll, as when every poll was its own process: a kept-alive socket would
-// race the server's own 5s keep-alive timeout at this interval.
+// race the server's own 5s keep-alive timeout at this interval. The client
+// follows the URL's scheme, as in _cron_sync.
+// A URL that doesn't parse goes to http.request, which rejects it per poll.
+const client = URL.canParse(url) && new URL(url).protocol === 'https:' ? https : http;
 const poll = () => new Promise((resolve, reject) => {
-  const req = http.request(
+  const req = client.request(
     url,
     { method: 'POST', agent: false, headers: { Authorization: `Bearer ${CRON_SECRET}` } },
     (res) => {

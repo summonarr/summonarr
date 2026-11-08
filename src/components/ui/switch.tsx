@@ -44,7 +44,9 @@ type SwitchProps = Omit<React.ComponentProps<"button">, "type" | "role" | "onCli
   checked: boolean
   /** Called with the next value; the switch holds no state of its own. */
   onCheckedChange: (next: boolean) => void
-  /** Swaps the knob for a spinner (and sets aria-busy). Does not disable. */
+  /** Swaps the knob for a spinner (and sets aria-busy). It stays focusable
+   *  (not disabled, so focus isn't dropped mid-save) but ignores clicks until
+   *  the save it is showing settles. */
   loading?: boolean
   /** Track colour when on. */
   variant?: keyof typeof TRACK_ON
@@ -69,7 +71,9 @@ function Switch({
       aria-busy={loading || undefined}
       data-slot="switch"
       data-state={checked ? "on" : "off"}
-      onClick={() => onCheckedChange(!checked)}
+      onClick={() => {
+        if (!loading) onCheckedChange(!checked)
+      }}
       className={cn(
         "relative inline-flex shrink-0 items-center rounded-full transition-colors outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-hover)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--ds-bg-1)] disabled:cursor-not-allowed disabled:opacity-50",
         s.track,

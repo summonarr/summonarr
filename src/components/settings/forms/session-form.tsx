@@ -8,12 +8,19 @@ import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { useSettingsSave } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
+import { MAX_CONFIGURABLE_SESSION_SECONDS } from "@/lib/session-lifetime";
 
 interface SessionFormProps {
   initialDefaultDuration: string;
   initialMobileDuration: string;
   initialMaxDuration: string;
 }
+
+// The route refuses anything outside 60 s..90 days with a 400 (the settings
+// registry's bound, which tests/session-transport.test.mts holds equal to this
+// shared constant); the native max lets the browser say so before the request,
+// and the help text names the cap so the limit isn't a surprise.
+const MAX_SESSION_SECONDS = MAX_CONFIGURABLE_SESSION_SECONDS;
 
 export function SessionForm({ initialDefaultDuration, initialMobileDuration, initialMaxDuration }: SessionFormProps) {
   const t = useT();
@@ -32,11 +39,6 @@ export function SessionForm({ initialDefaultDuration, initialMobileDuration, ini
       sessionMaxDuration:     maxDuration,
     });
   }
-
-  // The route refuses anything outside 60..7776000 s (90 days) with a 400; the
-  // native max lets the browser say so before the request, and the help text
-  // names the cap so the limit isn't a surprise.
-  const MAX_SESSION_SECONDS = 7_776_000;
 
   return (
     <form onSubmit={handleSave} className="space-y-4">

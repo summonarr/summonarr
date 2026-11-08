@@ -8,6 +8,7 @@ import { setJellyfinDownloadPolicy } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { settleLimit } from "@/lib/concurrency";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
@@ -19,7 +20,7 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
   const t = translatorForRequest(req);
   // Each call pushes a policy to every Jellyfin user, so cap it at 5 per minute per admin.
   if (!checkRateLimit(`server-users-bulk:${session.user.id}`, 5, 60_000)) {
-    return NextResponse.json({ error: t("apiAdmin.serverUsers.tooManyBulk") }, { status: 429 });
+    return tooManyRequests(60, t("apiAdmin.serverUsers.tooManyBulk"));
   }
 
   const parsed = await readJsonCapped<{ source?: string; downloadsEnabled?: boolean }>(req, 16384);

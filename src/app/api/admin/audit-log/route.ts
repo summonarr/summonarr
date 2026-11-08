@@ -1,11 +1,18 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { logAudit, auditContext, getAuditPiiRetentionDays, REDACTED_USER_NAME } from "@/lib/audit";
-import { scrubTargetPiiFromAudit } from "@/lib/audit-scrub";
+import { auditActor, logAudit, getAuditPiiRetentionDays } from "@/lib/audit";
+import { AuditPiiScrubError, scrubAuditPii, type AuditPiiScrubCounts } from "@/lib/audit-pii-scrub";
+import { tooManyRequests } from "@/lib/http";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { buildAuditLogWhere } from "@/lib/audit-log-filter";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+
+// The manual PII scrub (audit-pii-scrub.ts, the cron's own pass) per admin per
+// window: it is idempotent and batched, so this only bounds a looping client
+// re-walking a large trail.
+const SCRUB_LIMIT = 5;
+const SCRUB_WINDOW_MS = 10 * 60 * 1000;
 
 export const GET = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
@@ -43,7 +50,7 @@ export const GET = withAdmin(async (req, _ctx, session) => {
 });
 
 export const DELETE = withAdmin(async (req, _ctx, session) => {
-  // Beyond the retention cutoff, scrub all remaining PII:
+  // Beyond the retention cutoff, scrub all remaining PII (scrubAuditPii):
   //   - ipAddress / userAgent: nulled on every row
   //   - userName: redacted on every row (still keyed by userId for joinability)
   //   - details: nulled on auth events (free-form payload may contain identifiers);
@@ -52,51 +59,43 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
   //     which go — the row keeps the account id, not who it was.
   // Window comes from the shared reader (auditPiiRetentionDays Setting, default
   // 90d) so this manual scrub and the scrub-audit-pii cron enforce one promise.
+  const t = translatorForRequest(req);
+  if (!checkRateLimit(`admin-audit-scrub:${session.user.id}`, SCRUB_LIMIT, SCRUB_WINDOW_MS)) {
+    return tooManyRequests(SCRUB_WINDOW_MS / 1000, t("apiAdmin.common.tooManyRequestsLater"));
+  }
   const retentionDays = await getAuditPiiRetentionDays();
   const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
 
-  const piiResult = await prisma.auditLog.updateMany({
-    where: {
-      createdAt: { lt: cutoff },
-      OR: [
-        { ipAddress: { not: null } },
-        { userAgent: { not: null } },
-        { userName: { not: REDACTED_USER_NAME } },
-      ],
-    },
-    data: { ipAddress: null, userAgent: null, userName: REDACTED_USER_NAME },
-  });
-
-  const detailsResult = await prisma.auditLog.updateMany({
-    where: {
-      createdAt: { lt: cutoff },
-      action: { in: ["AUTH_LOGIN_FAILED", "AUTH_LOGIN", "AUTH_LOGOUT"] },
-      details: { not: null },
-    },
-    data: { details: null },
-  });
-
-  const adminDetailsScrubbed = await scrubTargetPiiFromAudit(prisma, { createdAt: { lt: cutoff } });
-
+  // Audited however it ends: a scrub that stopped part-way still rewrote rows,
+  // and the trail says which steps finished before the error (guardrail 26:
+  // the swallowing writer, after the writes).
+  let result: AuditPiiScrubCounts | null = null;
+  let failure: unknown = null;
+  try {
+    result = await scrubAuditPii(cutoff);
+  } catch (err) {
+    failure = err;
+  }
+  const counts: Partial<AuditPiiScrubCounts> = result ?? (failure instanceof AuditPiiScrubError ? failure.done : {});
   void logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email,
+    ...auditActor(req, session),
     action: "SETTINGS_CHANGE",
     target: "audit-log:pii-scrub",
     details: {
       type: "audit-pii-scrub",
-      scrubbed: piiResult.count,
-      detailsScrubbed: detailsResult.count,
-      adminDetailsScrubbed,
+      scrubbed: counts.scrubbed ?? null,
+      detailsScrubbed: counts.authDetailsCleared ?? null,
+      adminDetailsScrubbed: counts.adminDetailsScrubbed ?? null,
       cutoff: cutoff.toISOString(),
+      ...(result === null ? { failed: true, error: (failure instanceof Error ? failure.message : String(failure)).slice(0, 500) } : {}),
     },
-    ...auditContext(req, session),
   });
+  if (result === null) throw failure;
 
   return NextResponse.json({
-    scrubbed: piiResult.count,
-    detailsScrubbed: detailsResult.count,
-    adminDetailsScrubbed,
+    scrubbed: result.scrubbed,
+    detailsScrubbed: result.authDetailsCleared,
+    adminDetailsScrubbed: result.adminDetailsScrubbed,
     cutoff: cutoff.toISOString(),
     retentionDays,
   });

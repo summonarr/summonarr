@@ -5,7 +5,7 @@ import { snapshotted } from "@/lib/arr-snapshot";
 import { arrFailure, arrGate, type ArrTarget, readWarnKey } from "@/lib/arr-admin-http";
 import { parseIdList, parsePaging } from "@/lib/arr-history";
 import { BlocklistUnsupportedError, loadBlocklistPage, removeFromBlocklist } from "@/lib/arr-history-data";
-import { auditContext, logAudit } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { forgetWarnOnChange } from "@/lib/log-dedup";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
@@ -86,8 +86,7 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
   }
   const mediaKey = target.service === "radarr" ? "movieId" : "seriesId";
   void logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email ?? null,
+    ...auditActor(req, session),
     action: "ARR_BLOCKLIST_CHANGE",
     target: `${target.service}:${target.instance}`,
     details: {
@@ -97,7 +96,6 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
       releases: removed.slice(0, MAX_AUDITED_RELEASES).map((r) => ({ id: r.id, release: r.release, [mediaKey]: r.arrMediaId })),
       ...(removed.length > MAX_AUDITED_RELEASES ? { releasesOmitted: removed.length - MAX_AUDITED_RELEASES } : {}),
     },
-    ...auditContext(req, session),
   });
   return NextResponse.json({ removed: ids.length });
 });

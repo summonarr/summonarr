@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { check, type Infer, type Schema } from "@/lib/validate";
 
 // Picks the right unit so a 16 KB cap doesn't render as "max 0MB": MB for
 // >=1 MiB, KB otherwise. Integer + unit suffix — 413 messages stay terse.
@@ -110,26 +111,29 @@ export function assertBodyBytesUnderCap(
   return null;
 }
 
-// One-shot capped JSON read: Content-Length fast-reject + a read that stops at the
-// cap (catches chunked-encoding bypasses) + JSON.parse. Returns the parsed object,
-// or a NextResponse to return verbatim (413 over cap, 400 on malformed JSON or a
-// body that is not an object; discriminate on `instanceof NextResponse`). Use on
-// every non-upload JSON route — proxyClientMaxBodySize (next.config.ts) is only a
-// backstop. Pick a cap fitting the largest legitimate payload (single objects
-// ~64 KB, bulk arrays more).
-export async function readJsonCapped<T = unknown>(
-  req: NextRequest,
-  maxBytes: number,
-): Promise<T | NextResponse> {
+// What reading a capped body found: the parsed JSON object, an empty body, one
+// that isn't usable (malformed JSON, an array, a primitive), or a response to
+// return as-is (413).
+type CappedBody =
+  | { kind: "object"; value: Record<string, unknown> }
+  | { kind: "empty" }
+  | { kind: "unusable" }
+  | { kind: "response"; response: NextResponse };
+
+// The one read under all three JSON readers: Content-Length fast-reject, a read
+// that stops at the cap (catches chunked-encoding bypasses), JSON.parse.
+async function readCappedObject(req: NextRequest, maxBytes: number): Promise<CappedBody> {
   const headerCheck = checkBodySize(req, maxBytes);
-  if (headerCheck) return headerCheck;
+  if (headerCheck) return { kind: "response", response: headerCheck };
   const raw = await readBodyBytesCapped(req, maxBytes);
-  if (raw === null) return tooLarge(maxBytes, req);
+  if (raw === null) return { kind: "response", response: tooLarge(maxBytes, req) };
+  const text = new TextDecoder().decode(raw);
+  if (text.trim() === "") return { kind: "empty" };
   let parsed: unknown;
   try {
-    parsed = JSON.parse(new TextDecoder().decode(raw));
+    parsed = JSON.parse(text);
   } catch {
-    return invalidBody(req);
+    return { kind: "unusable" };
   }
   // A body of `null` (or a bare number/string/boolean) is VALID JSON, so it parsed
   // cleanly and used to be handed back as if it were the expected object. Every
@@ -138,41 +142,58 @@ export async function readJsonCapped<T = unknown>(
   // object, so anything else is a malformed request, not a body. That includes a
   // top-level array: `typeof [] === "object"`, and a handler reading `body.ids` off
   // one gets undefined — its defaults — with no validation error.
-  if (!isJsonObject(parsed)) {
-    return invalidBody(req);
-  }
-  return parsed as T;
+  if (!isJsonObject(parsed)) return { kind: "unusable" };
+  return { kind: "object", value: parsed };
 }
 
-function isJsonObject(parsed: unknown): boolean {
+function isJsonObject(parsed: unknown): parsed is Record<string, unknown> {
   return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
+}
+
+// One-shot capped JSON read. Returns the parsed object, or a NextResponse to
+// return verbatim (413 over cap, 400 on an empty or malformed body or one that
+// is not an object; discriminate on `instanceof NextResponse`). Use on every
+// non-upload JSON route — proxyClientMaxBodySize (next.config.ts) is only a
+// backstop. Pick a cap fitting the largest legitimate payload (single objects
+// ~64 KB, bulk arrays more).
+//
+// Without a schema the object is returned as the caller's T UNCHECKED: the
+// route validates each field it reads. Pass a validate.ts schema to have the
+// shape checked here instead (a mismatch is the same 400); the value is then
+// the schema's own type, holding only the declared keys.
+export async function readJsonCapped<S extends Schema<unknown>>(
+  req: NextRequest,
+  maxBytes: number,
+  schema: S,
+): Promise<Infer<S> | NextResponse>;
+export async function readJsonCapped<T = unknown>(req: NextRequest, maxBytes: number): Promise<T | NextResponse>;
+export async function readJsonCapped(
+  req: NextRequest,
+  maxBytes: number,
+  schema?: Schema<unknown>,
+): Promise<unknown> {
+  const body = await readCappedObject(req, maxBytes);
+  if (body.kind === "response") return body.response;
+  if (body.kind !== "object") return invalidBody(req);
+  if (!schema) return body.value;
+  const checked = check(schema, body.value);
+  return checked.ok ? checked.value : invalidBody(req);
 }
 
 // Tolerant variant for routes where a missing/empty/malformed body is VALID
 // (all fields optional). Still enforces the size cap (413 over cap), but on an
 // empty/unparseable body returns `fallback` instead of 400 — preserving the
-// "no body = defaults" contract. Discriminate the 413 on `instanceof NextResponse`.
+// "no body = defaults" contract. `null` (or an array) is exactly a body it
+// cannot use, so it is the defaults too. Discriminate the 413 on
+// `instanceof NextResponse`.
 export async function readJsonCappedOr<T>(
   req: NextRequest,
   maxBytes: number,
   fallback: T,
 ): Promise<T | NextResponse> {
-  const headerCheck = checkBodySize(req, maxBytes);
-  if (headerCheck) return headerCheck;
-  const raw = await readBodyBytesCapped(req, maxBytes);
-  if (raw === null) return tooLarge(maxBytes, req);
-  if (raw.byteLength === 0) return fallback;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(new TextDecoder().decode(raw));
-  } catch {
-    return fallback;
-  }
-  // Same non-object guard as readJsonCapped, resolved the tolerant way: this variant's
-  // contract is "a body I cannot use means defaults", and `null` (or an array) is
-  // exactly that.
-  if (!isJsonObject(parsed)) return fallback;
-  return parsed as T;
+  const body = await readCappedObject(req, maxBytes);
+  if (body.kind === "response") return body.response;
+  return body.kind === "object" ? (body.value as T) : fallback;
 }
 
 // For routes where the body is OPTIONAL but, when sent, must be meant: an empty
@@ -186,18 +207,9 @@ export async function readOptionalJsonCapped<T>(
   maxBytes: number,
   fallback: T,
 ): Promise<T | NextResponse> {
-  const headerCheck = checkBodySize(req, maxBytes);
-  if (headerCheck) return headerCheck;
-  const raw = await readBodyBytesCapped(req, maxBytes);
-  if (raw === null) return tooLarge(maxBytes, req);
-  const text = new TextDecoder().decode(raw);
-  if (text.trim() === "") return fallback;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return invalidBody(req);
-  }
-  if (!isJsonObject(parsed)) return invalidBody(req);
-  return parsed as T;
+  const body = await readCappedObject(req, maxBytes);
+  if (body.kind === "response") return body.response;
+  if (body.kind === "empty") return fallback;
+  if (body.kind === "unusable") return invalidBody(req);
+  return body.value as T;
 }

@@ -1,6 +1,6 @@
 // Admin → Missing, "Search selected": the runner behind the bulk bar in
-// missing-report.tsx. Pure and zero-import so a client component can use it and
-// the unit suite can pin it — the component supplies the network call and the
+// missing-report.tsx. Pure (its one import is zero-import too) so a client
+// component can use it and the unit suite can pin it — the component supplies the network call and the
 // row-state reads; this decides the order, the pacing, cancellation and the one
 // retry after a 429.
 //
@@ -11,6 +11,8 @@
 // the cap (BULK_SEARCH_MAX, past which the library-wide "Search all missing" in
 // Arr System is the tool), the confirmation above BULK_SEARCH_CONFIRM_OVER,
 // Cancel, and the search route's per-admin rate limit.
+
+import { retryAfterDeltaSeconds } from "./client/rate-limit";
 
 /** Search requests in flight at once. */
 export const BULK_SEARCH_CONCURRENCY = 2;
@@ -36,9 +38,9 @@ export type SearchAttempt =
 
 /** A Retry-After header (delta-seconds) → how long to wait, bounded. An HTTP-date or garbage gets the default. */
 export function retryAfterMs(header: string | null): number {
-  const v = header?.trim() ?? "";
-  if (!/^\d{1,6}$/.test(v)) return RATE_LIMIT_DEFAULT_WAIT_MS;
-  return Math.min(RATE_LIMIT_MAX_WAIT_MS, Math.max(1_000, Number(v) * 1_000));
+  const seconds = retryAfterDeltaSeconds(header);
+  if (seconds === null) return RATE_LIMIT_DEFAULT_WAIT_MS;
+  return Math.min(RATE_LIMIT_MAX_WAIT_MS, Math.max(1_000, seconds * 1_000));
 }
 
 /** The search route's answer → an attempt. `message` is the route's (already translated) error text. */
@@ -99,27 +101,56 @@ export interface BulkSearchSummary<R> {
   cancelled: boolean;
 }
 
-/**
- * Searches `rows` (capped at BULK_SEARCH_MAX) BULK_SEARCH_CONCURRENCY at a time.
- * A 429 waits out its Retry-After (abortable) and retries that row ONCE; a
- * second 429, or a cancel during the wait, settles it as failed.
- */
-export async function runBulkSearch<R>(rows: readonly R[], hooks: BulkSearchHooks<R>): Promise<BulkSearchSummary<R>> {
-  const queue = capSelection(rows);
-  const sleep = hooks.sleep ?? abortableSleep;
-  const summary: BulkSearchSummary<R> = { started: 0, already: 0, failed: [], skipped: 0, notRun: 0, cancelled: false };
-  let next = 0;
+// The run's tally, and the one place a row's outcome is reported. A hook that
+// throws must not stop the worker that called it.
+function makeSettler<R>(hooks: BulkSearchHooks<R>, summary: BulkSearchSummary<R>) {
   let done = 0;
-
-  const settle = (row: R, outcome: SearchOutcome | "skipped", message: string) => {
+  return (row: R, outcome: SearchOutcome | "skipped", message: string) => {
     if (outcome === "started") summary.started++;
     else if (outcome === "already") summary.already++;
     else if (outcome === "failed") summary.failed.push(row);
     else summary.skipped++;
     done++;
-    hooks.onSettled(row, outcome, message);
-    hooks.onProgress?.(done);
+    try {
+      hooks.onSettled(row, outcome, message);
+      hooks.onProgress?.(done);
+    } catch {
+      // the UI's bookkeeping, not the run's
+    }
   };
+}
+
+// One shared back-off for every worker: a 429 says the ROUTE's per-admin
+// limit is spent, so the other worker's next request would be refused too.
+// Every worker waits out the latest pause before it sends again.
+function makeBackoff(sleep: (ms: number, signal: AbortSignal) => Promise<void>, signal: AbortSignal) {
+  let pause: Promise<void> = Promise.resolve();
+  return {
+    /** Starts (or extends) the pause and resolves when it is over. */
+    hold(ms: number): Promise<void> {
+      const before = pause;
+      pause = Promise.all([before, sleep(ms, signal)]).then(() => {});
+      return pause;
+    },
+    wait(): Promise<void> {
+      return pause;
+    },
+  };
+}
+
+/**
+ * Searches `rows` (capped at BULK_SEARCH_MAX) BULK_SEARCH_CONCURRENCY at a time.
+ * A 429 waits out its Retry-After (abortable) — every worker waits with it —
+ * and retries that row ONCE; a second 429, or a cancel during the wait,
+ * settles it as failed.
+ */
+export async function runBulkSearch<R>(rows: readonly R[], hooks: BulkSearchHooks<R>): Promise<BulkSearchSummary<R>> {
+  const queue = capSelection(rows);
+  const summary: BulkSearchSummary<R> = { started: 0, already: 0, failed: [], skipped: 0, notRun: 0, cancelled: false };
+  const settle = makeSettler(hooks, summary);
+  const backoff = makeBackoff(hooks.sleep ?? abortableSleep, hooks.signal);
+  let next = 0;
+
   // A throwing attempt must not kill its worker: the rows behind it would never
   // be taken, and the run would report them as neither done nor cancelled.
   const attempt = async (row: R): Promise<SearchAttempt> => {
@@ -129,17 +160,28 @@ export async function runBulkSearch<R>(rows: readonly R[], hooks: BulkSearchHook
       return { outcome: "failed", message: "" };
     }
   };
+  const skip = (row: R): boolean | null => {
+    try {
+      return hooks.skip(row);
+    } catch {
+      return null;
+    }
+  };
 
   const worker = async () => {
     while (next < queue.length && !hooks.signal.aborted) {
+      await backoff.wait();
+      if (next >= queue.length || hooks.signal.aborted) break;
       const row = queue[next++];
-      if (hooks.skip(row)) {
-        settle(row, "skipped", "");
+      const skipped = skip(row);
+      if (skipped !== false) {
+        // Unreadable row state: never searched, reported as failed.
+        settle(row, skipped === null ? "failed" : "skipped", "");
         continue;
       }
       let result = await attempt(row);
       if (result.outcome === "rateLimited") {
-        await sleep(result.retryAfterMs, hooks.signal);
+        await backoff.hold(result.retryAfterMs);
         if (!hooks.signal.aborted) result = await attempt(row);
       }
       settle(row, result.outcome === "rateLimited" ? "failed" : result.outcome, result.message);

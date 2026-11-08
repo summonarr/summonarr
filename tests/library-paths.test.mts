@@ -60,3 +60,10 @@ test("the settings form previews with the shared rule, not a copy of it", () => 
   assert.match(form, /import \{[^}]*\bstripRelPrefix\b[^}]*\} from "@\/lib\/library-paths"/);
   assert.doesNotMatch(form, /startsWith\(p\) \? \w+\.slice\(p\.length\)/, "a local copy of the strip rule");
 });
+
+test("stripMountPoint matches the mount on whole segments only, and normalises a backslashed mount like the path", () => {
+  assert.equal(stripMountPoint("/data/movies-4k/X/x.mkv", "/data/movies"), "/data/movies-4k/X/x.mkv");
+  assert.equal(stripMountPoint("/data/movies/X/x.mkv", "/data/movies"), "/X/x.mkv");
+  assert.equal(stripMountPoint("/data/movies/X/x.mkv", "/data/movies/"), "X/x.mkv");
+  assert.equal(stripMountPoint("C:\\Media\\Film\\f.mkv", "C:\\Media\\"), "Film/f.mkv");
+});

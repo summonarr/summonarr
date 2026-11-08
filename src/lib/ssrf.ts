@@ -2,6 +2,7 @@
 
 import dns from "dns/promises";
 import { isIP } from "net";
+import { ipv6ToBigInt } from "./ipv6-parse";
 
 // Recognise an IPv4-mapped IPv6 address (`::ffff:…`) in either the dotted-quad form
 // (`::ffff:127.0.0.1`) or the all-hex form (`::ffff:7f00:1`). Returns the unwrapped
@@ -21,48 +22,6 @@ function unwrapV4Mapped(addr: string): string | null {
   const lo = parseInt(m[2], 16);
   if (Number.isNaN(hi) || Number.isNaN(lo) || hi > 0xffff || lo > 0xffff) return null;
   return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
-}
-
-// Parse any valid IPv6 textual form — including `::` compression and a trailing
-// embedded IPv4 dotted-quad — into its 128-bit integer value, or null if it isn't
-// a parseable IPv6 literal. Used to recognise embedded-IPv4 addresses regardless
-// of how they're spelled/compressed, which the per-spelling regexes miss.
-function ipv6ToBigInt(addr: string): bigint | null {
-  let s = addr;
-  const pct = s.indexOf("%"); // strip zone id (fe80::1%eth0) — irrelevant to the value
-  if (pct !== -1) s = s.slice(0, pct);
-  if (!/^[0-9a-f:.]+$/i.test(s)) return null;
-
-  // Convert a trailing embedded IPv4 (…:a.b.c.d) into two hex groups first so the
-  // remainder parses as pure hextets.
-  const v4m = /:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
-  if (v4m) {
-    const o = [v4m[1], v4m[2], v4m[3], v4m[4]].map(Number);
-    if (o.some((n) => n > 255)) return null;
-    const hex = `${((o[0] << 8) | o[1]).toString(16)}:${((o[2] << 8) | o[3]).toString(16)}`;
-    s = s.slice(0, v4m.index + 1) + hex; // +1 keeps the colon before the v4
-  }
-
-  const dbl = s.indexOf("::");
-  let groups: string[];
-  if (dbl !== -1) {
-    if (s.indexOf("::", dbl + 1) !== -1) return null; // at most one `::`
-    const head = s.slice(0, dbl).split(":").filter(Boolean);
-    const tail = s.slice(dbl + 2).split(":").filter(Boolean);
-    const missing = 8 - head.length - tail.length;
-    if (missing < 1) return null;
-    groups = [...head, ...Array<string>(missing).fill("0"), ...tail];
-  } else {
-    groups = s.split(":");
-  }
-  if (groups.length !== 8) return null;
-
-  let value = 0n;
-  for (const g of groups) {
-    if (!/^[0-9a-f]{1,4}$/i.test(g)) return null;
-    value = (value << 16n) | BigInt(parseInt(g, 16));
-  }
-  return value;
 }
 
 // Recognise an IPv4 address embedded in IPv6 via well-known prefixes that the
@@ -167,56 +126,81 @@ function isAwsIpv6Imds(addr: string): boolean {
   return v === 0xfd000ec2000000000000000000000254n;
 }
 
-function isSafeAddr(addr: string): boolean {
-  // Embedded-IPv4 IPv6 — unwrap and recurse so IPv4 rules apply to ::ffff:1.2.3.4,
-  // ::ffff:0102:0304, NAT64 (incl. non-compressed), IPv4-compatible, and SIIT forms.
-  const v4 = unwrapV4Mapped(addr) ?? unwrapEmbeddedV4(addr);
-  if (v4 !== null) return isSafeAddr(v4);
+// An address rule: true means BLOCKED. Every rule sees the address with any
+// embedded IPv4 already unwrapped (passesPolicy), so a rule is written once for
+// the plain spelling.
+type AddrRule = (addr: string) => boolean;
 
-  // Loopback
-  if (/^127\./.test(addr)) return false;
-  if (/^::1$/.test(addr)) return false;
-  // Loopback in any other spelling (0:0:0:0:0:0:0:1, 0000:…:0001) — unwrapEmbeddedV4
-  // deliberately skips ::1, so the textual check above was the only guard.
-  if (addr.includes(":") && ipv6ToBigInt(addr) === 1n) return false;
-  // Unspecified / any-address
-  if (/^0\./.test(addr)) return false;
-  if (isUnspecifiedV6(addr)) return false;
-  // Link-local (APIPA)
-  if (/^fe[89ab][0-9a-f]:/i.test(addr)) return false; // fe80::/10, not just fe80:
-  if (/^169\.254\./.test(addr)) return false;
-  // Deprecated IPv6 site-local (fec0::/10) — still in some stacks; treat as private
-  if (/^fe[c-f][0-9a-f]:/i.test(addr)) return false;
-  // RFC1918 private IPv4 (10/8, 172.16/12, 192.168/16). These back the LAN that a
+// Blocked under EVERY policy, the admin one included: cloud metadata,
+// "all interfaces", and space no server legitimately lives in.
+const ALWAYS_BLOCKED: readonly AddrRule[] = [
+  // Link-local (APIPA) — the cloud metadata endpoint lives here.
+  (a) => /^169\.254\./.test(a),
+  (a) => /^fe[89ab][0-9a-f]:/i.test(a), // fe80::/10, not just fe80:
+  // Deprecated IPv6 site-local (fec0::/10) is treated as link-local by some
+  // stacks and could route off-LAN unexpectedly — blocked even for admins
+  // (they use RFC1918 or ULA for LAN servers, not fec0::/10).
+  (a) => /^fe[c-f][0-9a-f]:/i.test(a),
+  // Unspecified / any-address.
+  (a) => /^0\./.test(a),
+  isUnspecifiedV6,
+  // Multicast and reserved/broadcast: a typo'd 239.x/255.255.255.255 URL would
+  // otherwise emit an HTTP request that reaches every device on the segment.
+  (a) => /^(22[4-9]|23[0-9])\./.test(a),
+  (a) => /^ff/i.test(a),
+  (a) => /^(24[0-9]|25[0-5])\./.test(a),
+  // IPv6 tunnels whose payload is an IPv4 address (6to4, Teredo).
+  isDeprecatedIpv6Tunnel,
+];
+
+// Private space: blocked for user-supplied and trusted-host URLs, allowed for
+// admin-configured servers (Plex/Radarr/Sonarr/Jellyfin on the LAN or the same
+// host).
+const PRIVATE_BLOCKED: readonly AddrRule[] = [
+  // Loopback, in every spelling (0:0:0:0:0:0:0:1, 0000:…:0001 included —
+  // unwrapEmbeddedV4 deliberately skips ::1).
+  (a) => /^127\./.test(a),
+  (a) => /^::1$/.test(a),
+  (a) => a.includes(":") && ipv6ToBigInt(a) === 1n,
+  // RFC1918 private IPv4 (10/8, 172.16/12, 192.168/16). These back the LAN a
   // self-hosted deployment runs on (router, other containers, NAS, the very
-  // Radarr/Sonarr/Jellyfin/Plex boxes), so leaving them reachable is a blind-SSRF
-  // hole on the user-supplied-URL path (Web Push endpoints). Admins legitimately
-  // point at these — that lives in isSafeAddrForAdmin, NOT here.
-  if (/^10\./.test(addr)) return false;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(addr)) return false;
-  if (/^192\.168\./.test(addr)) return false;
-  // CGNAT shared address space (100.64/10) — also used for Docker internal ranges on some hosts
-  if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(addr)) return false;
-  // Multicast
-  if (/^(22[4-9]|23[0-9])\./.test(addr)) return false;
-  if (/^ff/i.test(addr)) return false;
-  // Reserved / broadcast
-  if (/^(24[0-9]|25[0-5])\./.test(addr)) return false;
-  // IPv6 tunneling addresses that can reach private space
-  if (isDeprecatedIpv6Tunnel(addr)) return false;
-  if (/^64:ff9b::/i.test(addr)) return false;
-  // ULA (fc00::/7) — private IPv6
-  if (/^f[cd][0-9a-f]{2}:/i.test(addr)) return false;
+  // Radarr/Sonarr/Jellyfin/Plex boxes), so leaving them reachable is a
+  // blind-SSRF hole on the user-supplied-URL path (Web Push endpoints).
+  (a) => /^10\./.test(a),
+  (a) => /^172\.(1[6-9]|2\d|3[01])\./.test(a),
+  (a) => /^192\.168\./.test(a),
+  // CGNAT shared address space (100.64/10) — also Docker internal ranges on some hosts.
+  (a) => /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(a),
+  // NAT64 well-known prefix that can reach private space.
+  (a) => /^64:ff9b::/i.test(a),
+  // ULA (fc00::/7) — private IPv6 (the AWS IPv6 metadata address included).
+  (a) => /^f[cd][0-9a-f]{2}:/i.test(a),
   // Special-purpose space a deployment can route internally: IETF protocol
   // assignments (192.0.0.0/24), benchmarking (198.18.0.0/15, often reused as
   // private LAN space), and RFC 8215 local-use NAT64 (64:ff9b:1::/48), which
   // translates to IPv4 behind a local NAT64 — private IPv4 included — at an
   // operator-chosen prefix length, so its payload can't be unwrapped reliably.
-  if (/^192\.0\.0\./.test(addr)) return false;
-  if (/^198\.1[89]\./.test(addr)) return false;
-  if (isLocalUseNat64(addr)) return false;
+  (a) => /^192\.0\.0\./.test(a),
+  (a) => /^198\.1[89]\./.test(a),
+  isLocalUseNat64,
+];
 
-  return true;
+// The full policy, for user-supplied and trusted-host URLs.
+const USER_POLICY: readonly AddrRule[] = [...ALWAYS_BLOCKED, ...PRIVATE_BLOCKED];
+// For admin-configured server URLs: private space is fine, but the AWS IPv6
+// metadata address — which the ULA carve-out would let through — is not.
+const ADMIN_POLICY: readonly AddrRule[] = [...ALWAYS_BLOCKED, isAwsIpv6Imds];
+
+function passesPolicy(addr: string, rules: readonly AddrRule[]): boolean {
+  // Embedded-IPv4 IPv6 — unwrap so IPv4 rules apply to ::ffff:1.2.3.4,
+  // ::ffff:0102:0304, NAT64 (incl. non-compressed), IPv4-compatible and SIIT forms.
+  const v4 = unwrapV4Mapped(addr) ?? unwrapEmbeddedV4(addr);
+  if (v4 !== null) return passesPolicy(v4, rules);
+  return !rules.some((blocked) => blocked(addr));
+}
+
+function isSafeAddr(addr: string): boolean {
+  return passesPolicy(addr, USER_POLICY);
 }
 
 function isLocalUseNat64(addr: string): boolean {
@@ -231,26 +215,7 @@ function isLocalUseNat64(addr: string): boolean {
 // blocking link-local and unspecified — the goal is to keep cloud metadata services and
 // 0.0.0.0 unreachable even when the admin has typo'd the URL.
 export function isSafeAddrForAdmin(addr: string): boolean {
-  const v4 = unwrapV4Mapped(addr) ?? unwrapEmbeddedV4(addr);
-  if (v4 !== null) return isSafeAddrForAdmin(v4);
-
-  if (/^169\.254\./.test(addr)) return false;
-  if (/^fe[89ab][0-9a-f]:/i.test(addr)) return false; // fe80::/10, not just fe80:
-  // Deprecated IPv6 site-local (fec0::/10) is treated as link-local by some
-  // stacks and could route off-LAN unexpectedly — keep it blocked even in
-  // admin mode (admins use RFC1918 or ULA for LAN servers, not fec0::/10).
-  if (/^fe[c-f][0-9a-f]:/i.test(addr)) return false;
-  if (/^0\./.test(addr)) return false;
-  if (isUnspecifiedV6(addr)) return false;
-  // Multicast and reserved/broadcast: no admin-configured server legitimately
-  // lives there, and a typo'd 239.x/255.255.255.255 URL would otherwise emit
-  // an HTTP request that reaches every device on the LAN segment.
-  if (/^(22[4-9]|23[0-9])\./.test(addr)) return false;
-  if (/^ff/i.test(addr)) return false;
-  if (/^(24[0-9]|25[0-5])\./.test(addr)) return false;
-  if (isDeprecatedIpv6Tunnel(addr)) return false;
-  if (isAwsIpv6Imds(addr)) return false;
-  return true;
+  return passesPolicy(addr, ADMIN_POLICY);
 }
 
 const DNS_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -301,6 +266,29 @@ export interface ResolveSafeUrlOptions {
   allowPrivate?: boolean;
 }
 
+// The string a safe URL is fetched as. Collapses ONLY the empty-path marker
+// ("https://h/" → "https://h"). Anchoring the strip to the end of the whole
+// serialized URL also ate a meaningful trailing segment separator:
+// "https://idp/application/o/token/" became ".../token", a DIFFERENT resource.
+// safe-fetch's admin and user modes fetch this exact string, so every OIDC
+// token/userinfo/JWKS call to an IdP whose endpoints canonically end in "/"
+// (Authentik) hit the wrong path — and since the request is issued with
+// redirect:"error", the upstream's 301 back to the canonical form surfaced as a
+// SafeFetchError instead of following.
+export function canonicalSafeUrl(url: URL): string {
+  const serialized = url.toString();
+  const isBareOrigin = url.pathname === "/" && !url.search && !url.hash;
+  return isBareOrigin ? serialized.replace(/\/$/, "") : serialized;
+}
+
+function policyCheck(opts: ResolveSafeUrlOptions): (addr: string) => boolean {
+  return opts.allowPrivate ? isSafeAddrForAdmin : isSafeAddr;
+}
+
+function unbracket(host: string): string {
+  return host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+}
+
 export async function resolveToSafeUrlWithAddrs(
   raw: string,
   opts: ResolveSafeUrlOptions = {},
@@ -313,27 +301,13 @@ export async function resolveToSafeUrlWithAddrs(
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return null;
 
-  const rawHost = url.hostname;
-  const host = rawHost.startsWith("[") && rawHost.endsWith("]") ? rawHost.slice(1, -1) : rawHost;
-
+  const host = unbracket(url.hostname);
   const addrs: string[] = isIP(host) ? [host] : await lookupHostCached(host);
 
   if (addrs.length === 0) return null;
   // All resolved addresses must be safe — a single unsafe IP in the result set is enough to block the request
-  const check = opts.allowPrivate ? isSafeAddrForAdmin : isSafeAddr;
-  if (!addrs.every(check)) return null;
-
-  // Collapse ONLY the empty-path marker ("https://h/" → "https://h"). Anchoring
-  // the strip to the end of the whole serialized URL also ate a meaningful
-  // trailing segment separator: "https://idp/application/o/token/" became
-  // ".../token", a DIFFERENT resource. safe-fetch's admin and user modes fetch
-  // this exact string, so every OIDC token/userinfo/JWKS call to an IdP whose
-  // endpoints canonically end in "/" (Authentik) hit the wrong path — and since
-  // the request is issued with redirect:"error", the upstream's 301 back to the
-  // canonical form surfaced as a SafeFetchError instead of following.
-  const serialized = url.toString();
-  const isBareOrigin = url.pathname === "/" && !url.search && !url.hash;
-  return { url: isBareOrigin ? serialized.replace(/\/$/, "") : serialized, addrs };
+  if (!addrs.every(policyCheck(opts))) return null;
+  return { url: canonicalSafeUrl(url), addrs };
 }
 
 export async function resolveToSafeUrl(
@@ -347,12 +321,13 @@ export async function resolveToSafeUrl(
 // Re-resolve `host` FRESH and verify every currently-resolving address is safe
 // under the chosen policy. Returns true on success.
 //
-// This is the fallback TOCTOU mitigation for the one path that still hands the
-// hostname to fetch() (the env-proxy path in safe-fetch.ts, where the proxy
-// resolves the name and the connection cannot be pinned): re-resolve
-// immediately before fetch() and refuse if any address now points somewhere
-// unsafe. The normal path does not rely on this — it connects to the addresses
-// `resolveSafeAddrsFresh` returns, so there is no later lookup to rebind.
+// This is the TOCTOU mitigation for the one path that still hands the hostname
+// to fetch() (the env-proxy path in safe-fetch.ts, where the proxy resolves the
+// name and the connection cannot be pinned): resolve immediately before
+// fetch() and refuse if any address points somewhere unsafe. The normal path
+// does not rely on this — it connects to the addresses `resolveSafeAddrsFresh`
+// returns, so there is no later lookup to rebind. Same lookup and policy as
+// resolveSafeAddrsFresh, answered as a boolean.
 //
 // This re-resolves FRESH (bypassing the 5-minute cache) so it genuinely queries
 // DNS again immediately before fetch(), rather than echoing the answer the
@@ -372,27 +347,19 @@ export async function verifyResolvedHost(
   host: string,
   opts: ResolveSafeUrlOptions = {},
 ): Promise<boolean> {
-  // Bracketed IPv6 literal — caller is responsible for unwrapping, but accept
-  // both forms defensively so callers don't have to special-case it.
-  const h = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
-
-  const addrs = isIP(h) ? [h] : await lookupHostCached(h, /* bypassCache */ true);
-  if (addrs.length === 0) return false;
-
-  const check = opts.allowPrivate ? isSafeAddrForAdmin : isSafeAddr;
-  return addrs.every(check);
+  return (await resolveSafeAddrsFresh(host, opts)) !== null;
 }
 
 // Resolve `host` FRESH (bypassing the cache) and return the addresses ONLY if
 // every one is safe under the policy, else null. safe-fetch connects to exactly
 // these addresses (a pinned `lookup`), so what was validated is what is dialled.
+// A bracketed IPv6 literal is accepted in either form.
 export async function resolveSafeAddrsFresh(
   host: string,
   opts: ResolveSafeUrlOptions = {},
 ): Promise<string[] | null> {
-  const h = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  const h = unbracket(host);
   const addrs = isIP(h) ? [h] : await lookupHostCached(h, /* bypassCache */ true);
   if (addrs.length === 0) return null;
-  const check = opts.allowPrivate ? isSafeAddrForAdmin : isSafeAddr;
-  return addrs.every(check) ? addrs : null;
+  return addrs.every(policyCheck(opts)) ? addrs : null;
 }

@@ -353,7 +353,14 @@ test("C015: every DELETE times out ⇒ failed + uncertain, and the stamps STAY �
   assert.equal(body.results[0].uncertain, true);
   assert.ok(r100("r100a").cleanedUpAt instanceof Date, "an unstamp would let the sync re-push a title the arr removed");
   assert.ok(r100("r100b").cleanedUpAt instanceof Date);
-  assert.equal(audits.length, 0, "nothing is KNOWN to have been deleted, so nothing is audited");
+  // The arr may have deleted the files (deleteFiles=true): a destructive action
+  // that may have happened is on the record, saying it failed and is uncertain.
+  assert.equal(audits.length, 1, "a delete that may have gone through is audited");
+  assert.equal(audits[0].action, "LIBRARY_CLEANUP_DELETE");
+  assert.equal(audits[0].details.status, "failed");
+  assert.equal(audits[0].details.uncertain, true);
+  assert.deepEqual(audits[0].details.deleted, []);
+  assert.deepEqual(audits[0].details.failed, ["radarr:default", "radarr:4k"]);
 });
 
 test("C015: a gateway's 504 on every DELETE is an unknown outcome too — the stamps stay", async () => {

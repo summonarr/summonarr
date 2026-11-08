@@ -1,9 +1,9 @@
 import "server-only";
 import type { SummonarrSession } from "@/lib/api-auth";
 import type { TmdbMedia } from "@/lib/tmdb-types";
-import { getTopRatedMovies, getTopRatedTV } from "@/lib/tmdb";
-import { getTraktPopularMovies, getTraktPopularTV } from "@/lib/trakt";
-import { getMdblistTopRated, mdblistCacheKey } from "@/lib/mdblist";
+import { getTopRatedWithStatus } from "@/lib/tmdb";
+import { getTraktPopularWithStatus } from "@/lib/trakt";
+import { getMdblistTopRatedWithStatus, mdblistCacheKey } from "@/lib/mdblist";
 import { omdbCacheKey } from "@/lib/omdb";
 import { getCacheStaleMany } from "@/lib/tmdb-cache";
 import { attachAllAvailability } from "@/lib/attach-all";
@@ -178,9 +178,14 @@ export interface TopRatedFilterOptions {
   toYear?: string;
 }
 
-// The availability / rating / vote-count / year filters. They read fields that
-// exist only after attachAllAvailability.
-export function applyFilters<T extends TmdbMedia>(items: T[], opts: TopRatedFilterOptions): T[] {
+// The availability / rating / vote-count / year filters. hideAvailable reads
+// fields that exist only after attachAllAvailability; minImdb reads `imdbOf`,
+// the enriched rating by default or the cached-ratings map on the cheap path.
+export function applyFilters<T extends TmdbMedia>(
+  items: T[],
+  opts: TopRatedFilterOptions,
+  imdbOf: (m: T) => string | null | undefined = (m) => m.imdbRating,
+): T[] {
   let result = items;
   if (opts.hideAvailable) {
     // Gate on the user's own server visibility: a Plex-pinned user must not have
@@ -191,7 +196,7 @@ export function applyFilters<T extends TmdbMedia>(items: T[], opts: TopRatedFilt
     const threshold = parseFloat(opts.minImdb);
     if (!isNaN(threshold)) {
       result = result.filter((m) => {
-        const r = parseFloat(m.imdbRating ?? "");
+        const r = parseFloat(imdbOf(m) ?? "");
         return !isNaN(r) && r >= threshold;
       });
     }
@@ -251,7 +256,11 @@ export async function readCachedImdbRatings(items: TmdbMedia[]): Promise<Map<str
 // Trakt's POPULAR lists — so sorting each page on its own let page 2 hold
 // higher-rated titles than page 1.
 export function sortByCachedImdb<T extends TmdbMedia>(items: T[], imdb: ReadonlyMap<string, string>): T[] {
-  return byRating(items, (m) => parseFloat(imdb.get(`${m.mediaType}:${m.id}`) ?? ""));
+  return byRating(items, (m) => parseFloat(cachedImdbOf(imdb, m) ?? ""));
+}
+
+function cachedImdbOf(imdb: ReadonlyMap<string, string>, m: TmdbMedia): string | undefined {
+  return imdb.get(`${m.mediaType}:${m.id}`);
 }
 
 export interface TopRatedResult {
@@ -262,9 +271,93 @@ export interface TopRatedResult {
   totalPages: number;
   /** How many of the three sources contributed anything. */
   sourceCount: number;
+  /**
+   * The providers ("tmdb" | "trakt" | "mdblist") whose list load threw or came
+   * back incomplete (a failed page, a backoff or lockout), so the pool is
+   * missing their titles. A cache hit and an unconfigured provider are complete.
+   */
+  failedSources: string[];
   /** Badge visibility, for the page's cards. */
   showPlex: boolean;
   showJellyfin: boolean;
+}
+
+type Pools = {
+  tmdbMovies: TmdbMedia[]; tmdbTv: TmdbMedia[];
+  traktMovies: TmdbMedia[]; traktTv: TmdbMedia[];
+  mdbMovies: TmdbMedia[]; mdbTv: TmdbMedia[];
+  failed: string[];
+};
+
+// The six source lists. A single down source degrades to an empty
+// contribution rather than failing the whole list, logged so a silently
+// missing source is diagnosable. A source fails when its load throws or when
+// its answer is incomplete (an outage the helper served as a short or empty
+// list).
+type SourceList = { items: TmdbMedia[]; complete: boolean };
+
+async function loadTopRatedSources(wantMovies: boolean, wantTv: boolean): Promise<Pools> {
+  const failed = new Set<string>();
+  const provider = (name: string) => name.slice(0, name.indexOf("-"));
+  const fromSource = (name: string, want: boolean, load: () => Promise<SourceList>): Promise<TmdbMedia[]> =>
+    want
+      ? load().then(
+          ({ items, complete }) => {
+            if (!complete) failed.add(provider(name));
+            return items;
+          },
+          (err: unknown) => {
+            console.error(`[top-rated] source ${name} failed:`, err instanceof Error ? err.message : err);
+            failed.add(provider(name));
+            return [];
+          },
+        )
+      : Promise.resolve([]);
+  const [tmdbMovies, tmdbTv, traktMovies, traktTv, mdbMovies, mdbTv] = await Promise.all([
+    fromSource("tmdb-movies", wantMovies, () => getTopRatedWithStatus("movie")),
+    fromSource("tmdb-tv", wantTv, () => getTopRatedWithStatus("tv")),
+    fromSource("trakt-movies", wantMovies, () => getTraktPopularWithStatus("movie")),
+    fromSource("trakt-tv", wantTv, () => getTraktPopularWithStatus("tv")),
+    fromSource("mdblist-movies", wantMovies, () => getMdblistTopRatedWithStatus("movie")),
+    fromSource("mdblist-tv", wantTv, () => getMdblistTopRatedWithStatus("tv")),
+  ]);
+  return { tmdbMovies, tmdbTv, traktMovies, traktTv, mdbMovies, mdbTv, failed: [...failed].sort() };
+}
+
+interface RankContext {
+  query: TopRatedQuery;
+  filterOpts: TopRatedFilterOptions;
+  offset: number;
+  enrich: (items: TmdbMedia[]) => Promise<TmdbMedia[]>;
+}
+
+// One media type's pool, filtered, ordered and paged. Every filter and the
+// ordering apply to the WHOLE pool before paging, so pages aren't short and
+// the totals are the filtered count.
+async function rankPool(pool: TmdbMedia[], ctx: RankContext): Promise<{ items: TmdbMedia[]; total: number }> {
+  if (pool.length === 0) return { items: [], total: 0 };
+  const { query, filterOpts, offset, enrich } = ctx;
+  const filled = await backfillMetadata(pool);
+  const page = (ranked: TmdbMedia[]) => ranked.slice(offset, offset + TOP_RATED_PER_PAGE);
+
+  // hideAvailable and a non-IMDb sort read fields that exist only after
+  // enrichment, so with either the WHOLE pool is enriched first. Ratings stay
+  // non-blocking: blocking on a whole pool's misses would burn the OMDB daily
+  // quota on one cold load (an uncached title drops out of minImdb until the
+  // post-response warm fills it).
+  if (query.hideAvailable || query.sortBy !== "imdb") {
+    const ranked = sortByRating(applyFilters(await enrich(filled), filterOpts), query.sortBy);
+    return { items: page(ranked), total: ranked.length };
+  }
+  // Everything else is answered from data in hand: votes and years from the
+  // source rows, the IMDb rating (filter and order alike) from the ratings
+  // cache, the same rows the enrichment's merge reads. Only the visible page
+  // is enriched.
+  const imdb = await readCachedImdbRatings(filled);
+  const kept = applyFilters(filled, filterOpts, (m) => cachedImdbOf(imdb, m));
+  const ranked = sortByCachedImdb(kept, imdb);
+  const slice = page(ranked);
+  return { items: slice.length > 0 ? await enrich(slice) : [], total: ranked.length };
 }
 
 export async function runTopRatedQuery(input: {
@@ -275,83 +368,42 @@ export async function runTopRatedQuery(input: {
 }): Promise<TopRatedResult> {
   const { query, page, session } = input;
   const userId = session.user.id;
-  const wantMovies = query.mediaType !== "tv";
-  const wantTv = query.mediaType !== "movies";
 
-  // A single down source degrades to an empty contribution rather than failing
-  // the whole list. Logged so a silently-missing source is diagnosable.
-  const fromSource = (name: string, want: boolean, load: () => Promise<TmdbMedia[]>): Promise<TmdbMedia[]> =>
-    want
-      ? load().catch((err: unknown) => {
-          console.error(`[top-rated] source ${name} failed:`, err instanceof Error ? err.message : err);
-          return [];
-        })
-      : Promise.resolve([]);
-
-  const [
-    tmdbMovies, tmdbTv,
-    traktMovies, traktTv,
-    mdbMovies, mdbTv,
-    show4k, plexEnabled, jellyfinEnabled, hidden,
-  ] = await Promise.all([
-    fromSource("tmdb-movies", wantMovies, getTopRatedMovies),
-    fromSource("tmdb-tv", wantTv, getTopRatedTV),
-    fromSource("trakt-movies", wantMovies, getTraktPopularMovies),
-    fromSource("trakt-tv", wantTv, getTraktPopularTV),
-    fromSource("mdblist-movies", wantMovies, () => getMdblistTopRated("movie")),
-    fromSource("mdblist-tv", wantTv, () => getMdblistTopRated("tv")),
+  const [sources, show4k, plexEnabled, jellyfinEnabled, hidden] = await Promise.all([
+    loadTopRatedSources(query.mediaType !== "tv", query.mediaType !== "movies"),
     getShow4kVisibility(session),
     isFeatureEnabled("feature.integration.plex"),
     isFeatureEnabled("feature.integration.jellyfin"),
     getUserHiddenSet(userId),
   ]);
+  const { tmdbMovies, tmdbTv, traktMovies, traktTv, mdbMovies, mdbTv } = sources;
   // Integration flags passed explicitly — they default to TRUE when omitted.
   const { showPlex, showJellyfin } = getBadgeVisibility(session, { plex: plexEnabled, jellyfin: jellyfinEnabled });
 
   // The viewer's hidden titles leave the POOL, before anything is paged —
   // guardrail 35a's rule for server-hidden titles. Removed from each page
   // instead (attachAllAvailability's own filter), pages came up short and the
-  // totals still counted them. The enrichment below is told not to re-read the set.
+  // totals still counted them. The enrichment is told not to re-read the set.
   const unhidden = (items: TmdbMedia[]) =>
     hidden.size === 0 ? items : items.filter((m) => !hidden.has(hiddenKeyOf(m)));
-  const allMovies = unhidden(dedupSources([tmdbMovies, traktMovies, mdbMovies]));
-  const allTv = unhidden(dedupSources([tmdbTv, traktTv, mdbTv]));
-
-  const offset = (page - 1) * TOP_RATED_PER_PAGE;
-  const filterOpts: TopRatedFilterOptions = {
-    hideAvailable: query.hideAvailable,
-    showPlex,
-    showJellyfin,
-    minImdb: query.minImdb,
-    minVotes: query.minVotes,
-    fromYear: query.fromYear,
-    toYear: query.toYear,
+  const ctx: RankContext = {
+    query,
+    offset: (page - 1) * TOP_RATED_PER_PAGE,
+    filterOpts: {
+      hideAvailable: query.hideAvailable,
+      showPlex,
+      showJellyfin,
+      minImdb: query.minImdb,
+      minVotes: query.minVotes,
+      fromYear: query.fromYear,
+      toYear: query.toYear,
+    },
+    enrich: (items) => attachAllAvailability(items, userId, { show4k, includeHidden: true }),
   };
-  // applyFilters and a non-IMDb sort read fields that exist only after
-  // enrichment, so with either active the WHOLE pool is enriched, filtered and
-  // sorted before paging (pages aren't short and the totals are the filtered
-  // count). Ratings stay non-blocking: blocking on a whole pool's misses would
-  // burn the OMDB daily quota on one cold load (a title whose rating is still
-  // uncached drops out of minImdb until the post-response warm fills it).
-  const filtersActive = topRatedHasFilters(query) || query.sortBy !== "imdb";
-  const enrich = (items: TmdbMedia[]) =>
-    attachAllAvailability(items, userId, { show4k, includeHidden: true });
-
-  const rank = async (pool: TmdbMedia[]): Promise<{ items: TmdbMedia[]; total: number }> => {
-    if (pool.length === 0) return { items: [], total: 0 };
-    const filled = await backfillMetadata(pool);
-    if (filtersActive) {
-      const ranked = sortByRating(applyFilters(await enrich(filled), filterOpts), query.sortBy);
-      return { items: ranked.slice(offset, offset + TOP_RATED_PER_PAGE), total: ranked.length };
-    }
-    // The default view: the whole pool ordered by cached IMDb rating (a cache
-    // read, no enrichment), then only the visible page enriched.
-    const ranked = sortByCachedImdb(filled, await readCachedImdbRatings(filled));
-    const slice = ranked.slice(offset, offset + TOP_RATED_PER_PAGE);
-    return { items: slice.length > 0 ? await enrich(slice) : [], total: ranked.length };
-  };
-
-  const [movies, tv] = await Promise.all([rank(allMovies), rank(allTv)]);
+  const [movies, tv] = await Promise.all([
+    rankPool(unhidden(dedupSources([tmdbMovies, traktMovies, mdbMovies])), ctx),
+    rankPool(unhidden(dedupSources([tmdbTv, traktTv, mdbTv])), ctx),
+  ]);
 
   return {
     movies: movies.items,
@@ -364,6 +416,7 @@ export async function runTopRatedQuery(input: {
       traktMovies.length || traktTv.length,
       mdbMovies.length || mdbTv.length,
     ].filter(Boolean).length,
+    failedSources: sources.failed,
     showPlex,
     showJellyfin,
   };

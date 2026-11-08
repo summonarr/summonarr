@@ -4,7 +4,9 @@
 // request spends nothing.
 //   /api/admin/arr/title/rename POST, /api/admin/arr/blocklist DELETE,
 //   /api/admin/arr/title/files DELETE, /api/admin/arr/title/episodes PATCH,
-//   /api/admin/arr/title/releases POST (before the release handle is claimed).
+//   /api/admin/arr/title/releases POST (before the release handle is claimed),
+//   /api/admin/arr/title PATCH, /api/admin/arr/providers PATCH,
+//   /api/admin/arr/tasks DELETE (a command cancel).
 //
 // Harness: tests/arr-fix-system.test.mts's (in-memory prisma, a scripted arr
 // behind a fetch stub, a synthetic request scope). The arr answers every call
@@ -107,6 +109,9 @@ const blocklistRoute = await import("../src/app/api/admin/arr/blocklist/route.ts
 const filesRoute = await import("../src/app/api/admin/arr/title/files/route.ts");
 const episodesRoute = await import("../src/app/api/admin/arr/title/episodes/route.ts");
 const releasesRoute = await import("../src/app/api/admin/arr/title/releases/route.ts");
+const titleRoute = await import("../src/app/api/admin/arr/title/route.ts");
+const providersRoute = await import("../src/app/api/admin/arr/providers/route.ts");
+const tasksRoute = await import("../src/app/api/admin/arr/tasks/route.ts");
 
 function inScope<T>(fn: () => Promise<T>): Promise<T> {
   const workStore = { route: "/arr-mutation-rate-limits.test", forceStatic: false, dynamicShouldError: false, afterContext: { after: () => {} } };
@@ -174,6 +179,27 @@ const CASES: Case[] = [
     reachesArr: true,
     send: (tk) => call(episodesRoute.PATCH, tk, "/admin/arr/title/episodes", { method: "PATCH", body: { service: "sonarr", id: 21, episodeIds: [101], monitored: false } }),
     malformed: (tk) => call(episodesRoute.PATCH, tk, "/admin/arr/title/episodes", { method: "PATCH", body: { service: "sonarr", id: 21, episodeIds: [101] } }),
+  },
+  {
+    name: "title edit",
+    limit: 60,
+    reachesArr: true,
+    send: (tk) => call(titleRoute.PATCH, tk, "/admin/arr/title", { method: "PATCH", body: { service: "radarr", id: 11, monitored: false } }),
+    malformed: (tk) => call(titleRoute.PATCH, tk, "/admin/arr/title", { method: "PATCH", body: { service: "radarr", id: 11, monitored: "no" } }),
+  },
+  {
+    name: "provider switch",
+    limit: 30,
+    reachesArr: true,
+    send: (tk) => call(providersRoute.PATCH, tk, "/admin/arr/providers", { method: "PATCH", body: { service: "radarr", kind: "downloadClient", id: 1, enable: false } }),
+    malformed: (tk) => call(providersRoute.PATCH, tk, "/admin/arr/providers", { method: "PATCH", body: { service: "radarr", kind: "downloadClient", id: "1", enable: false } }),
+  },
+  {
+    name: "command cancel",
+    limit: 30,
+    reachesArr: true,
+    send: (tk) => call(tasksRoute.DELETE, tk, "/admin/arr/tasks?service=radarr&commandId=5", { method: "DELETE" }),
+    malformed: (tk) => call(tasksRoute.DELETE, tk, "/admin/arr/tasks?service=radarr&commandId=x", { method: "DELETE" }),
   },
   {
     name: "release grab",

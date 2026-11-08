@@ -76,6 +76,14 @@ export function fixMatchJobKey(input: {
   return `${input.server}:${input.serverInstance}:${input.mediaType}:${input.tmdbId}->${input.correctTmdbId}`;
 }
 
+// The server and instance a job key names — read back here, beside the one
+// builder of the format, never re-split by a caller. Neither part can hold a
+// ":" (a server is "plex"/"jellyfin", an instance slug is alphanumeric).
+export function fixMatchJobScope(key: string): { server: string; serverInstance: string } {
+  const [server = "", serverInstance = ""] = key.split(":", 2);
+  return { server, serverInstance };
+}
+
 // Finished jobs stay readable this long so a client that lost a poll (proxy
 // blip, sleeping tab) can still collect the outcome; the cap bounds memory if
 // a script hammers the route under the rate limit.
@@ -158,27 +166,14 @@ export function startFixMatchJob(
   title: string | null = null,
 ): FixMatchJob {
   prune(now);
-  let running = 0;
-  for (const job of jobs.values()) {
-    if (job.key === key && (job.status === "running" || job.status === "queued")) return job;
-    if (job.status === "running") running += 1;
-  }
+  const active = findRunningFixMatchJob(key);
+  if (active) return active;
   const job: FixMatchJob = {
     id: randomUUID(), key, status: "running", startedAt: now,
     finishedAt: null, result: null, error: null, errorStatus: null, progress: null, title,
   };
-  if (running >= MAX_RUNNING_JOBS) {
-    if (waiting.length >= MAX_QUEUED_JOBS) {
-      throw new FixMatchError(
-        t
-          ? t("apiAdmin.fixMatch.tooManyRunning")
-          : "Too many fix-match operations are already queued — wait for some to finish and try again.",
-        429,
-      );
-    }
-    job.status = "queued";
-    jobs.set(job.id, job);
-    waiting.push({ job, run, t });
+  if (runningJobCount() >= MAX_RUNNING_JOBS) {
+    enqueue({ job, run, t });
     return job;
   }
   jobs.set(job.id, job);
@@ -186,7 +181,31 @@ export function startFixMatchJob(
   return job;
 }
 
+function runningJobCount(): number {
+  let running = 0;
+  for (const job of jobs.values()) if (job.status === "running") running += 1;
+  return running;
+}
+
+// Past the running cap: the job waits its turn, unless the queue itself is full.
+function enqueue(entry: QueuedRun): void {
+  if (waiting.length >= MAX_QUEUED_JOBS) {
+    throw new FixMatchError(
+      entry.t
+        ? entry.t("apiAdmin.fixMatch.tooManyRunning")
+        : "Too many fix-match operations are already queued — wait for some to finish and try again.",
+      429,
+    );
+  }
+  entry.job.status = "queued";
+  jobs.set(entry.job.id, entry.job);
+  waiting.push(entry);
+}
+
 function launch({ job, run, t }: QueuedRun): void {
+  // A job that waited in the queue starts its clock now: its elapsed time is
+  // the remap's, not the wait's.
+  if (job.status === "queued") job.startedAt = Date.now();
   job.status = "running";
   const report: FixMatchReport = (progress) => { job.progress = { ...progress, updatedAt: Date.now() }; };
   void Promise.resolve().then(() => run(report)).then(
@@ -241,8 +260,7 @@ export function awaitFixMatchJob(id: string): Promise<FixMatchJob | null> {
 
 // A slot freed: start queued jobs, oldest first, while there is room.
 function pump(): void {
-  let running = 0;
-  for (const job of jobs.values()) if (job.status === "running") running += 1;
+  let running = runningJobCount();
   while (running < MAX_RUNNING_JOBS && waiting.length > 0) {
     const next = waiting.shift() as QueuedRun;
     running += 1;

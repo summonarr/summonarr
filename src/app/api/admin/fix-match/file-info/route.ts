@@ -52,6 +52,84 @@ function arrTmdbIdAt(rows: readonly unknown[], fullPath: string): number | null 
   return null;
 }
 
+// Cache-first: the library page and the bad-match list keep one Radarr/Sonarr
+// folder map for the whole arr library (bad-matches.ts loadArrPathIndex,
+// across every syncable instance). A fix-match dialog open used to always pull
+// the ENTIRE library live; that map's basename index is tried first and the
+// live lists only on a miss. Read-only — nothing is built or written from
+// here, and only a tmdbId comes back: a basename two titles share gives none,
+// so the exact lookup decides it. A hit is as fresh as that map (its own TTL);
+// the hint is display-only, which is the trade.
+async function nameIndexHit(mediaType: "MOVIE" | "TV", fullPath: string, folderPath: string): Promise<number | null> {
+  // A Jellyfin SERIES row's Path is the series folder itself (not a file
+  // inside it), so for TV its own basename is the Sonarr folder name too.
+  const names = [folderPath.split("/").pop(), ...(mediaType === "TV" ? [fullPath.split("/").pop()] : [])]
+    .filter((n): n is string => !!n);
+  if (names.length === 0) return null;
+  try {
+    const byName = await cachedArrNameIndex(mediaType);
+    if (!byName) return null;
+    for (const n of names) {
+      const hit = byName.get(n);
+      if (hit != null) return hit;
+    }
+  } catch (err) {
+    console.warn("[fix-match/file-info] arr name cache read failed:", err instanceof Error ? err.message : err);
+  }
+  return null;
+}
+
+// The live lookup: each instance's whole list (cachedArrList keeps it for a
+// minute), matched on the path itself, not only its parent — a Jellyfin
+// series Path IS the series folder, so its parent is the library root and
+// never equals (or sits under) any Sonarr series path. Stops at the first
+// instance that manages the folder.
+async function liveArrHit(
+  instances: Awaited<ReturnType<typeof enabledArrInstances>>,
+  mediaType: "MOVIE" | "TV",
+  fullPath: string,
+): Promise<{ tmdbId: number | null; failed: boolean }> {
+  const service = mediaType === "MOVIE" ? "radarr" : "sonarr";
+  const endpoint = mediaType === "MOVIE" ? "movie" : "series";
+  let failed = false;
+  for (const inst of instances) {
+    try {
+      const cfg = await configuredArrCfg(inst.service, inst.slug);
+      const rows = await cachedArrList(service, inst.slug, () => arrFetch<unknown>(cfg, `/api/v3/${endpoint}`));
+      if (!Array.isArray(rows)) throw new Error(`${service} /api/v3/${endpoint} did not answer with a list`);
+      const hit = arrTmdbIdAt(rows, fullPath);
+      if (hit !== null) return { tmdbId: hit, failed };
+    } catch (err) {
+      // The message only: an ArrResponseError's body can quote upstream
+      // secrets (guardrail 5e).
+      failed = true;
+      console.warn("[fix-match/file-info] arr lookup failed:", arrErrorMessage(err));
+    }
+  }
+  return { tmdbId: null, failed };
+}
+
+// Which TMDB id Radarr/Sonarr have for the folder holding `filePath`, across
+// every enabled instance of the service, through the registry (guardrail 32):
+// a switched-off integration is never called, and a title only a named (4K,
+// anime) instance manages still resolves. `failed` = a lookup failed, so a
+// null id means "could not tell", not "not managed".
+async function arrTmdbIdFor(filePath: string, mediaType: "MOVIE" | "TV"): Promise<{ tmdbId: number | null; failed: boolean }> {
+  let instances: Awaited<ReturnType<typeof enabledArrInstances>>;
+  try {
+    instances = await enabledArrInstances(mediaType === "MOVIE" ? "radarr" : "sonarr");
+  } catch (err) {
+    console.warn("[fix-match/file-info] arr instance lookup failed:", err instanceof Error ? err.message : err);
+    return { tmdbId: null, failed: true };
+  }
+  if (instances.length === 0) return { tmdbId: null, failed: false };
+  const fullPath   = normaliseLibraryPath(filePath);
+  const folderPath = normaliseLibraryPath(filePath.replace(/\\/g, "/").replace(/\/[^/]+$/, ""));
+  const cached = await nameIndexHit(mediaType, fullPath, folderPath);
+  if (cached !== null) return { tmdbId: cached, failed: false };
+  return liveArrHit(instances, mediaType, fullPath);
+}
+
 export const GET = withIssueAdmin(async (request, _ctx, session) => {
   const t = translatorForRequest(request);
   // A name-cache miss downloads a whole Radarr/Sonarr table (up to the 50 MB
@@ -103,8 +181,6 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
     }),
   ]);
 
-  let arrTmdbId: number | null = null;
-  let arrLookupFailed = false;
   // Prefer the requested instance's path; fall back to any instance holding the
   // title so the Radarr/Sonarr hint still resolves when the caller hasn't picked
   // an instance yet and the title lives only on a named server.
@@ -113,68 +189,8 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
     ?? plexInstances.find((r) => r.filePath)?.filePath
     ?? jellyfinInstances.find((r) => r.filePath)?.filePath
     ?? null;
-
-  if (filePath) {
-    const service = mediaType === "MOVIE" ? "radarr" : "sonarr";
-    // Every enabled instance of the service, through the registry (guardrail
-    // 32): a switched-off integration is never called, and a title only a
-    // named (4K, anime) instance manages still resolves.
-    let instances: Awaited<ReturnType<typeof enabledArrInstances>> = [];
-    try {
-      instances = await enabledArrInstances(service);
-    } catch (err) {
-      arrLookupFailed = true;
-      console.warn("[fix-match/file-info] arr instance lookup failed:", err instanceof Error ? err.message : err);
-    }
-
-    if (instances.length > 0) {
-      const fullPath   = normaliseLibraryPath(filePath);
-      const folderPath = normaliseLibraryPath(filePath.replace(/\\/g, "/").replace(/\/[^/]+$/, ""));
-      const endpoint   = mediaType === "MOVIE" ? "movie" : "series";
-
-      // Cache-first: the library page and the bad-match list keep one
-      // Radarr/Sonarr folder map for the whole arr library (bad-matches.ts
-      // loadArrPathIndex, across every syncable instance). A fix-match dialog
-      // open used to always pull the ENTIRE library live; try that map's
-      // basename index first and only fetch on a miss. Read-only — nothing is
-      // built or written from here, and only a tmdbId comes back (a basename
-      // two titles share gives none, so the exact lookup below decides it).
-      try {
-        // A Jellyfin SERIES row's Path is the series folder itself (not a file
-        // inside it), so for TV its own basename is the Sonarr folder name too.
-        const names = [folderPath.split("/").pop(), ...(mediaType === "TV" ? [fullPath.split("/").pop()] : [])]
-          .filter((n): n is string => !!n);
-        const byName = names.length > 0 ? await cachedArrNameIndex(mediaType) : null;
-        if (byName) {
-          for (const n of names) {
-            const hit = byName.get(n);
-            if (hit != null) { arrTmdbId = hit; break; }
-          }
-        }
-      } catch (err) {
-        console.warn("[fix-match/file-info] arr name cache read failed:", err instanceof Error ? err.message : err);
-      }
-
-      // Match on the path itself, not only its parent: a Jellyfin series Path
-      // IS the series folder, so its parent is the library root and never
-      // equals (or sits under) any Sonarr series path. Stops at the first
-      // instance that manages the folder.
-      for (const inst of arrTmdbId === null ? instances : []) {
-        try {
-          const cfg = await configuredArrCfg(inst.service, inst.slug);
-          const rows = await cachedArrList(service, inst.slug, () => arrFetch<unknown>(cfg, `/api/v3/${endpoint}`));
-          if (!Array.isArray(rows)) throw new Error(`${service} /api/v3/${endpoint} did not answer with a list`);
-          const hit = arrTmdbIdAt(rows, fullPath);
-          if (hit !== null) { arrTmdbId = hit; break; }
-        } catch (err) {
-          // The message only: an ArrResponseError's body can quote upstream
-          // secrets (guardrail 5e).
-          arrLookupFailed = true;
-          console.warn("[fix-match/file-info] arr lookup failed:", arrErrorMessage(err));
-        }
-      }
-    }
-  }
+  const arr = filePath ? await arrTmdbIdFor(filePath, mediaType) : { tmdbId: null, failed: false };
+  const arrTmdbId = arr.tmdbId;
 
   const arrTitle = arrTmdbId !== null ? await cachedTmdbTitle(mediaType, arrTmdbId) : null;
 
@@ -193,6 +209,6 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
     jellyfinServerInstance: jellyfinItem ? serverInstance : null,
     plexInstances:     view(plexInstances),
     jellyfinInstances: view(jellyfinInstances),
-    arrError:          arrTmdbId === null && arrLookupFailed,
+    arrError:          arrTmdbId === null && arr.failed,
   } satisfies FileInfoResponse);
 });

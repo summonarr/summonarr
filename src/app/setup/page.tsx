@@ -3,22 +3,24 @@ import { redirect } from "next/navigation";
 import { getTranslator } from "@/lib/i18n/server";
 import { isBackupPasswordReady } from "@/lib/backup-password";
 import { AuthBrandHeader } from "@/components/auth/auth-brand-header";
+import { SetupShell } from "./setup-shell";
 
 export const dynamic = "force-dynamic";
-import { SetupShell } from "./setup-shell";
 
 // First-run wizard; inaccessible once any user exists so the admin account can't be hijacked
 export default async function SetupPage() {
-  const count = await prisma.user.count();
-  if (count > 0) redirect("/login");
+  const anyUser = await prisma.user.findFirst({ select: { id: true } });
+  if (anyUser) redirect("/login");
 
-  const siteTitleRow = await prisma.setting.findUnique({ where: { key: "siteTitle" } });
+  const [siteTitleRow, t] = await Promise.all([
+    prisma.setting.findUnique({ where: { key: "siteTitle" } }),
+    getTranslator(),
+  ]);
   const siteTitle = siteTitleRow?.value || "Summonarr";
 
   // The restore tab needs the same BACKUP_DB_PASSWORD the setup restore routes
   // require (they answer 503 without it). Only the boolean leaves the server.
   const importAvailable = isBackupPasswordReady();
-  const t = await getTranslator();
 
   // Header + card shape mirror login/page.tsx (AuthBrandHeader, max-w-sm, token
   // card): the restore path redirects straight from here to /login, so the two

@@ -25,36 +25,8 @@ import { idleAnchor, isNeverWatchedState, type NwEvidence, type NwVerdict } from
 
 export type CleanupMediaType = "MOVIE" | "TV";
 
-export type CleanupRule = "unwatched" | "neverWatched" | "votes";
-
-export type CleanupExclusion =
-  | "recentlyAdded"
-  | "activeRequest"
-  | "recentlyFulfilled"
-  | "watchlisted"
-  | "playingNow"
-  | "airing"
-  | "protected"
-  // A holding server's own watch records weren't checked (successfully and
-  // recently), so a play Summonarr never saw can't be ruled out.
-  | "upstreamUnchecked";
-
-export const CLEANUP_RULE_LABELS: Record<CleanupRule, string> = {
-  unwatched: "Unwatched",
-  neverWatched: "Never watched",
-  votes: "Deletion votes",
-};
-
-export const CLEANUP_EXCLUSION_LABELS: Record<CleanupExclusion, string> = {
-  recentlyAdded: "Recently added",
-  activeRequest: "Pending or approved request",
-  recentlyFulfilled: "Recently fulfilled request",
-  watchlisted: "On a watchlist",
-  playingNow: "Playing now",
-  airing: "Still airing",
-  protected: "Protected",
-  upstreamUnchecked: "Server history not checked",
-};
+export { CLEANUP_EXCLUSIONS, CLEANUP_RULES, type CleanupExclusion, type CleanupRule } from "./library-cleanup-keys";
+import type { CleanupExclusion, CleanupRule } from "./library-cleanup-keys";
 
 export interface CleanupSettings {
   unwatchedEnabled: boolean;

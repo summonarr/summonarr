@@ -3,7 +3,7 @@ import { escMd } from "@/lib/discord-notify";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { addToWatchlist, takeWatchlistAddToken } from "@/lib/watchlist-add";
 import { sessionForUser } from "@/lib/auto-request";
-import { TMDB_POSTER_BASE, editOriginal, linkedAccountRefusal, linkedSiteAccount, loadPending, truncateText } from "../reply";
+import { TMDB_POSTER_BASE, editOriginal, loadPending, requireLinkedSiteAccount, truncateText } from "../reply";
 import { watchlistListPayload } from "../commands/watchlist";
 import type { ComponentContext, PendingWatchlistAdd } from "../types";
 
@@ -22,10 +22,9 @@ export async function handleWatchlistAdd(ctx: ComponentContext): Promise<void> {
     await editOriginal(appId, token, { content: t("notify.bot.pick.invalid"), embeds: [], components: [] });
     return;
   }
-  const linked = await linkedSiteAccount(discordUserId);
-  const refusal = linkedAccountRefusal(t, linked);
-  if (refusal || linked.kind !== "ok") {
-    await editOriginal(appId, token, { content: refusal ?? t("notify.bot.linkRequired"), embeds: [], components: [] });
+  const linked = await requireLinkedSiteAccount(t, discordUserId);
+  if ("refusal" in linked) {
+    await editOriginal(appId, token, { content: linked.refusal, embeds: [], components: [] });
     return;
   }
   if (!takeWatchlistAddToken(linked.user.id)) {
@@ -56,10 +55,9 @@ export async function handleWatchlistRemove(ctx: ComponentContext): Promise<void
   const { interaction, t, appId, token, customId, discordUserId } = ctx;
   const [, ownerId] = customId.split(":");
   if (discordUserId !== ownerId) return;
-  const linked = await linkedSiteAccount(discordUserId);
-  const refusal = linkedAccountRefusal(t, linked);
-  if (refusal || linked.kind !== "ok") {
-    await editOriginal(appId, token, { content: refusal ?? t("notify.bot.linkRequired"), embeds: [], components: [] });
+  const linked = await requireLinkedSiteAccount(t, discordUserId);
+  if ("refusal" in linked) {
+    await editOriginal(appId, token, { content: linked.refusal, embeds: [], components: [] });
     return;
   }
   // The web DELETE's per-user budget.

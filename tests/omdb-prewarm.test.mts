@@ -372,6 +372,21 @@ test("no TMDB read token: cold items count as FAILED (not notFound) with zero fe
   }
 });
 
+test("a batch that fails wholly for one configuration reason stops the walk — every item left would fail the same way", async () => {
+  tables.plex = Array.from({ length: 12 }, (_, i): Row => ({ tmdbId: 730 + i, mediaType: "MOVIE" }));
+  delete process.env.TMDB_READ_TOKEN;
+  try {
+    // Every item is still counted failed, so the run reads red exactly as before.
+    assert.deepEqual(await prewarmOmdbCache(), { total: 12, fetched: 0, notFound: 0, skipped: 0, failed: 12 });
+    assert.ok(
+      warns.some((w) => w.includes("[omdb-prewarm] there is no TMDB read token") && w.includes("7 item(s) not asked")),
+      "the first batch of five decides; the other seven are never walked",
+    );
+  } finally {
+    process.env.TMDB_READ_TOKEN = TMDB_TOKEN;
+  }
+});
+
 test("a key removed mid-run (keyConfigured:false) counts the items failed, not notFound", async () => {
   tables.plex = [{ tmdbId: 780, mediaType: "MOVIE" }, { tmdbId: 781, mediaType: "MOVIE" }];
   mock.timers.tick(OMDB_KEY_MEMO_MS + 1_000); // omdb.ts must read the key afresh

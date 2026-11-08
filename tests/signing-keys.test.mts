@@ -58,6 +58,7 @@ afterEach(() => {
 const PURPOSES: SigningPurpose[] = [
   "session",
   "plex-flow",
+  "plex-connect",
   "qc-flow",
   "oidc-flow",
   "request-token",
@@ -257,20 +258,19 @@ test("request tokens use their own subkey, rotate through PREVIOUS, and refuse a
   assert.equal(verifyRequestToken(old, 603, "MOVIE", "u_alice"), true);
 });
 
-test("the PlexTokenCache key is its own subkey, not the raw secret (auth.ts)", () => {
-  const src = readFileSync(new URL("../src/lib/auth.ts", import.meta.url), "utf8");
+test("the PlexTokenCache key is its own subkey, not the raw secret (auth-plex.ts)", () => {
+  const src = readFileSync(new URL("../src/lib/auth-plex.ts", import.meta.url), "utf8");
   assert.match(src, /purposeHmacHex\(signingKey\("plex-token-cache"\), plexToken\)/);
-  assert.doesNotMatch(src, /createHmac\(/, "auth.ts HMACs nothing with a raw secret");
+  assert.doesNotMatch(src, /createHmac\(/, "auth-plex.ts HMACs nothing with a raw secret");
 });
 
-test("no module outside signing-keys.ts derives a key from NEXTAUTH_SECRET by hand, except the pre-existing MFA/connect subkeys", () => {
-  // mfa-token.ts, mfa-store.ts and the Plex connect cookie predate this module
+test("no module outside signing-keys.ts derives a key from NEXTAUTH_SECRET by hand, except the pre-existing MFA subkeys", () => {
+  // mfa-token.ts and mfa-store.ts predate this module
   // and already derive their own HKDF subkeys; everything else goes through it.
   const allowed = new Set([
     "src/lib/signing-keys.ts",
     "src/lib/mfa/mfa-token.ts",
     "src/lib/mfa/mfa-store.ts",
-    "src/lib/plex-flow-state.ts",
     "src/instrumentation.ts",
   ]);
   const files = [
@@ -279,6 +279,14 @@ test("no module outside signing-keys.ts derives a key from NEXTAUTH_SECRET by ha
     "src/lib/oidc.ts",
     "src/lib/request-token.ts",
     "src/lib/auth.ts",
+    "src/lib/auth-provider.ts",
+    "src/lib/auth-sign-in-context.ts",
+    "src/lib/auth-credentials.ts",
+    "src/lib/auth-plex.ts",
+    "src/lib/auth-jellyfin.ts",
+    "src/lib/auth-oidc.ts",
+    "src/lib/auth-session-durations.ts",
+    "src/lib/auth-session-mint.ts",
     "src/lib/plex-flow-state.ts",
   ];
   for (const f of files) {
@@ -287,9 +295,10 @@ test("no module outside signing-keys.ts derives a key from NEXTAUTH_SECRET by ha
     if (allowed.has(f)) continue;
     assert.equal(reads, 0, `${f} reads NEXTAUTH_SECRET directly`);
   }
-  // plex-flow-state.ts: only the connect cookie's own derivation may read it.
+  // plex-flow-state.ts: both Plex cookies sign through their own purposes.
   const plex = readFileSync(new URL("../src/lib/plex-flow-state.ts", import.meta.url), "utf8");
-  assert.equal((plex.match(/process\.env\.NEXTAUTH_SECRET\b/g) ?? []).length, 1);
+  assert.match(plex, /signPurposeJwt\("plex-connect"/);
+  assert.match(plex, /verifyPurposeJwt\("plex-connect"/);
 });
 
 // ── boot checks ──────────────────────────────────────────────────────────────
@@ -300,6 +309,9 @@ test("boot: NEXTAUTH_SECRET_PREVIOUS shorter than 32 is fatal, equal to the curr
   assert.equal(previousSecretProblem({ nextAuthSecret: SECRET, nextAuthSecretPrevious: OLD }), null);
   assert.equal(previousSecretProblem({ nextAuthSecret: SECRET, nextAuthSecretPrevious: "short" })?.fatal, true);
   assert.equal(previousSecretProblem({ nextAuthSecret: SECRET, nextAuthSecretPrevious: SECRET })?.fatal, false);
+  // A trailing newline from an env file is still the same value.
+  assert.equal(previousSecretProblem({ nextAuthSecret: SECRET, nextAuthSecretPrevious: `${SECRET}\n` })?.fatal, false);
+  assert.equal(previousSecretProblem({ nextAuthSecret: `${SECRET} `, nextAuthSecretPrevious: SECRET })?.fatal, false);
 });
 
 test("boot: NEXTAUTH_SECRET_PREVIOUS reused as CRON_SECRET or TOKEN_ENCRYPTION_KEY is a reuse error", () => {
@@ -318,5 +330,5 @@ test("boot: NEXTAUTH_SECRET_PREVIOUS reused as CRON_SECRET or TOKEN_ENCRYPTION_K
 test("boot: instrumentation wires both checks for the previous secret", () => {
   const src = readFileSync(new URL("../src/instrumentation.ts", import.meta.url), "utf8");
   assert.match(src, /nextAuthSecretPrevious: process\.env\.NEXTAUTH_SECRET_PREVIOUS/);
-  assert.match(src, /previousSecretProblem\(\{[\s\S]*?\}\);\s*if \(previous\?\.fatal\) \{[\s\S]*?process\.exit\(1\)/);
+  assert.match(src, /previousSecretProblem\(\{[\s\S]*?\}\);\s*if \(previous\?\.fatal\) \{\s*refuse\(previous\.message, "production"\);/);
 });

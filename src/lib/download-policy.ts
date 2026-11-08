@@ -5,6 +5,7 @@ import { normalizeEmail } from "./email-normalize";
 import { type MediaInstanceKey, mediaInstanceLabel } from "./media-instances";
 import { getSyncableMediaInstances } from "./media-instance-registry";
 import { noteJellyfinDepartures, offboardJellyfinIdentities } from "./jellyfin-offboarding";
+import { processSingleton } from "./process-singleton";
 
 interface PolicySyncResult {
   source: string;
@@ -46,7 +47,13 @@ export function isSafeToReconcileJellyfinUsers(fetchedCount: number, priorActive
 // state and reconcile anyway. In-memory per replica (the ledger idiom of
 // guardrail 27) — a restart just restarts the count.
 export const RECONCILE_CONFIRM_RUNS = 3;
-const refusedReconciles = new Map<MediaInstanceKey, { signature: string; runs: number }>();
+// Process-wide (guardrail 27a): the orchestrator's sync and the standalone cron
+// reach this from different route bundles, and per-chunk copies would split the
+// count.
+const refusedReconciles = processSingleton(
+  "download-policy:refusedReconciles",
+  () => new Map<MediaInstanceKey, { signature: string; runs: number }>(),
+);
 
 /**
  * Fetches all users from each configured media server, upserts them into
@@ -116,28 +123,35 @@ export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
   return results;
 }
 
-async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string, apiKey: string, autoDisableNew: boolean): Promise<InstanceSyncOutcome> {
-  const result: PolicySyncResult = { source: mediaInstanceLabel("jellyfin", instance), upserted: 0, enforced: 0, errors: 0 };
+type JellyfinUser = Awaited<ReturnType<typeof getJellyfinAllUsers>>[number];
+type ExistingJellyfinRow = {
+  sourceUserId: string;
+  username: string;
+  email: string | null;
+  isServerAdmin: boolean;
+  userId: string | null;
+  downloadsEnabled: boolean | null;
+  active: boolean;
+  manualUserLink: boolean;
+};
+type LinkCandidate = { id: string; email: string; mediaServer: string | null; jellyfinUserId: string | null };
 
-  let users;
-  try {
-    users = await getJellyfinAllUsers(baseUrl, apiKey);
-  } catch (err) {
-    console.warn("[download-policy] Jellyfin user fetch failed:", err instanceof Error ? err.message : String(err));
-    // Count the fetch failure so the cron run is recorded as not-ok rather than
-    // reporting zero errors on a sync that never actually ran.
-    result.errors++;
-    return { result, noOpinion: true };
-  }
+// The Summonarr accounts a run's users may be attributed to, looked up by
+// subject id and by email.
+interface LinkIndex {
+  byEmail: Map<string, LinkCandidate>;
+  bySubject: Map<string, LinkCandidate>;
+}
 
-  // Batch-load all existing records and all potentially-linked Summonarr accounts
-  // in two queries instead of 2×N individual lookups. Both sides of the join
-  // normalize before comparing so Jellyfin's raw email (which may differ in
-  // case from the local user's lowercase-stored email) still matches.
+// Batch-load all existing records and all potentially-linked Summonarr accounts
+// in two queries instead of 2×N individual lookups. Both sides of the join
+// normalize before comparing so Jellyfin's raw email (which may differ in
+// case from the local user's lowercase-stored email) still matches.
+async function loadJellyfinSyncState(instance: MediaInstanceKey, users: readonly JellyfinUser[]): Promise<{ existingRows: ExistingJellyfinRow[]; links: LinkIndex }> {
   const [existingRows, linkedUsers] = await Promise.all([
     prisma.mediaServerUser.findMany({
       where: { source: "jellyfin", serverInstance: instance },
-      select: { sourceUserId: true, downloadsEnabled: true, active: true, manualUserLink: true },
+      select: { sourceUserId: true, username: true, email: true, isServerAdmin: true, userId: true, downloadsEnabled: true, active: true, manualUserLink: true },
     }),
     prisma.user.findMany({
       where: {
@@ -154,150 +168,210 @@ async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string,
       select: { id: true, email: true, mediaServer: true, jellyfinUserId: true },
     }),
   ]);
+  return {
+    existingRows,
+    links: {
+      byEmail: new Map(linkedUsers.map((u) => [u.email, u])),
+      bySubject: new Map(linkedUsers.flatMap((u) => (u.jellyfinUserId ? [[u.jellyfinUserId, u] as const] : []))),
+    },
+  };
+}
 
-  const existingMap = new Map(existingRows.map((r) => [r.sourceUserId, r]));
-  const linkedMap = new Map(linkedUsers.map((u) => [u.email, u]));
-  const linkedBySubMap = new Map(
-    linkedUsers.flatMap((u) => (u.jellyfinUserId ? [[u.jellyfinUserId, u] as const] : [])),
+// Subject id first, email second. A subject match needs no mediaServer guard —
+// jellyfinUserId is unique and only Jellyfin sign-in writes it, so there is no
+// cross-provider collision to defend against (unlike an email match, which
+// could be a Plex-pinned user who happens to share the address).
+function resolveLinkedAccount(u: JellyfinUser, links: LinkIndex): string | null {
+  const linkedBySub = links.bySubject.get(u.id) ?? null;
+  if (linkedBySub) return linkedBySub.id;
+  const linkedByEmail = u.email ? (links.byEmail.get(normalizeEmail(u.email)) ?? null) : null;
+  return linkedByEmail && (!linkedByEmail.mediaServer || linkedByEmail.mediaServer.toLowerCase() === "jellyfin")
+    ? linkedByEmail.id
+    : null;
+}
+
+// Whether the upsert below would change nothing on an existing row — every
+// tracked field already holds what this run would write. Then no write is made.
+function jellyfinRowCurrent(
+  existing: ExistingJellyfinRow,
+  u: JellyfinUser,
+  next: { active: boolean; userId: string | null },
+): boolean {
+  return existing.downloadsEnabled !== null
+    && existing.username === u.name
+    && (!u.email || existing.email === u.email)
+    && existing.isServerAdmin === u.isAdmin
+    && existing.active === next.active
+    && (next.userId === null || existing.userId === next.userId);
+}
+
+// One server user: upsert its row (attribution, admin flag, active, the seeded
+// download policy), put a new departure on the offboarding ledger, and push a
+// disabled download policy the server has drifted from.
+async function syncJellyfinUser(
+  ctx: { instance: MediaInstanceKey; baseUrl: string; apiKey: string; autoDisableNew: boolean; links: LinkIndex; result: PolicySyncResult },
+  u: JellyfinUser,
+  existing: ExistingJellyfinRow | null,
+): Promise<void> {
+  const { instance, result } = ctx;
+  // An admin set this row's account binding by hand — automatic resolution
+  // must not overwrite it on the next hourly run.
+  const userId = existing?.manualUserLink ? null : resolveLinkedAccount(u, ctx.links);
+
+  // For new/unsynced users: auto-disable if the setting is on, otherwise seed from server.
+  // For existing users with an explicit value: keep it (honors manual flips to true).
+  const defaultForNew = ctx.autoDisableNew ? false : u.downloadsEnabled;
+  const downloadsEnabled = existing?.downloadsEnabled ?? defaultForNew;
+  // A user DISABLED on the server is as gone as a removed one: Jellyfin
+  // refuses their sign-in, so the row is inactive like a departed user's
+  // (guardrail 28 — soft, never deleted). Unlike a departure this is the
+  // server's explicit answer, not an absence, so the shrink guard
+  // doesn't apply. Re-enabling them on the server re-activates the row.
+  const active = !u.isDisabled;
+  // Newly inactive — an active row, or one seen for the first time already
+  // disabled. A row that was already inactive was offboarded on that run.
+  // Decided before the write below, from the row as this run first read it.
+  const newlyInactive = !active && existing?.active !== false;
+
+  if (!existing || !jellyfinRowCurrent(existing, u, { active, userId })) {
+    await prisma.mediaServerUser.upsert({
+      where: { source_serverInstance_sourceUserId: { source: "jellyfin", serverInstance: instance, sourceUserId: u.id } },
+      create: {
+        source: "jellyfin",
+        serverInstance: instance,
+        sourceUserId: u.id,
+        username: u.name,
+        email: u.email ?? null,
+        isServerAdmin: u.isAdmin,
+        downloadsEnabled,
+        active,
+        ...(userId ? { userId } : {}),
+      },
+      update: {
+        username: u.name,
+        ...(u.email ? { email: u.email } : {}),
+        isServerAdmin: u.isAdmin,
+        active, // re-activate a returning (or re-enabled) user
+        ...(userId ? { userId } : {}),
+        // Write server value only when we have no admin-set value yet (null).
+        ...(existing === null || existing.downloadsEnabled === null ? { downloadsEnabled } : {}),
+      },
+    });
+  }
+  result.upserted++;
+  // On the ledger now, not at the end of the run: the next run reads this row
+  // as already inactive and would never report the departure again.
+  if (newlyInactive) noteJellyfinDepartures([u.id]);
+
+  // Push only on DRIFT — u.downloadsEnabled is the server's CURRENT value
+  // from the same /Users fetch this run already made (absent Policy coerces
+  // to true, so only an explicit server-side false skips). Pushing when the
+  // server already reports disabled was a no-op that still paid the 2-call
+  // read-modify-write and re-opened its clobber window (the POST writes the
+  // FULL policy object, so a concurrent Jellyfin-dashboard edit of any
+  // field between our GET and POST is overwritten with the stale snapshot).
+  if (!u.isAdmin && downloadsEnabled === false && u.downloadsEnabled !== false) {
+    try {
+      await setJellyfinDownloadPolicy(ctx.baseUrl, ctx.apiKey, u.id, false);
+      result.enforced++;
+    } catch (err) {
+      console.warn(`[download-policy] Jellyfin enforce failed for ${u.name}:`, err instanceof Error ? err.message : String(err));
+      result.errors++;
+    }
+  }
+}
+
+// Whether this run may mark absent users inactive: the fetch looks complete, or
+// the same shrunken set has now been seen RECONCILE_CONFIRM_RUNS runs in a row.
+function reconcileAllowed(instance: MediaInstanceKey, users: readonly JellyfinUser[], priorActiveCount: number): boolean {
+  if (isSafeToReconcileJellyfinUsers(users.length, priorActiveCount)) {
+    refusedReconciles.delete(instance);
+    return true;
+  }
+  if (users.length === 0) return false;
+  // Confirmation counter (see RECONCILE_CONFIRM_RUNS): a degraded fetch is
+  // transient; a real mass departure repeats the IDENTICAL user-id set run
+  // after run. Only the same signature accumulates — any variation resets.
+  const signature = users.map((u) => u.id).sort().join(",");
+  const prior = refusedReconciles.get(instance);
+  const runs = prior?.signature === signature ? prior.runs + 1 : 1;
+  if (runs >= RECONCILE_CONFIRM_RUNS) {
+    console.warn(
+      `[download-policy] Jellyfin user shrink for instance "${instance}" confirmed across ${runs} runs (fetched ${users.length}, ${priorActiveCount} active) — accepting it as the server's real state and reconciling`,
+    );
+    // The counter is cleared AFTER the reconcile write succeeds (guardrail
+    // 27: ledger after the write it stands for) — clearing here would re-arm
+    // the full 3-run countdown whenever the write itself throws.
+    return true;
+  }
+  refusedReconciles.set(instance, { signature, runs });
+  console.warn(
+    `[download-policy] Skipping Jellyfin user reconcile for instance "${instance}": fetched ${users.length} users but ${priorActiveCount} were active — refusing to mass-deactivate on a possibly-degraded response (${runs}/${RECONCILE_CONFIRM_RUNS} identical observations)`,
   );
+  return false;
+}
 
+// Mark users no longer on the Jellyfin server as inactive (soft-delete). We
+// NEVER hard-delete a MediaServerUser — PlayHistory + ActiveSession FK it and
+// play history must survive the user's removal (the live poller is the only
+// writer; no backfill cron exists). isSafeToReconcileJellyfinUsers (above)
+// guards against a degraded (truncated but 200) fetch mass-deactivating
+// everyone absent.
+async function reconcileDepartedJellyfinUsers(
+  instance: MediaInstanceKey,
+  users: readonly JellyfinUser[],
+  existingRows: readonly ExistingJellyfinRow[],
+): Promise<void> {
+  const priorActiveCount = existingRows.filter((r) => r.active).length;
+  if (!reconcileAllowed(instance, users, priorActiveCount)) return;
+  const currentIds = users.map((u) => u.id);
+  const currentIdSet = new Set(currentIds);
+  const absent = existingRows
+    .filter((r) => r.active && !currentIdSet.has(r.sourceUserId))
+    .map((r) => r.sourceUserId);
+  // Scoped by serverInstance — load-bearing (guardrail 28). Without this, a
+  // user who exists only on a DIFFERENT Jellyfin server would look "absent"
+  // from THIS instance's fetch and get incorrectly soft-deleted, destroying
+  // their attribution to play history that survives on the other server.
+  await prisma.mediaServerUser.updateMany({
+    where: { source: "jellyfin", serverInstance: instance, sourceUserId: { notIn: currentIds }, active: true },
+    data: { active: false },
+  });
+  // Only now is the confirmed-shrink observation consumed: a failed write
+  // above keeps the counter, so the next hourly run reconciles immediately
+  // instead of restarting the 3-run countdown behind a log line that already
+  // claimed "reconciling".
+  refusedReconciles.delete(instance);
+  noteJellyfinDepartures(absent);
+}
+
+async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string, apiKey: string, autoDisableNew: boolean): Promise<InstanceSyncOutcome> {
+  const result: PolicySyncResult = { source: mediaInstanceLabel("jellyfin", instance), upserted: 0, enforced: 0, errors: 0 };
+
+  let users: JellyfinUser[];
+  try {
+    users = await getJellyfinAllUsers(baseUrl, apiKey);
+  } catch (err) {
+    console.warn("[download-policy] Jellyfin user fetch failed:", err instanceof Error ? err.message : String(err));
+    // Count the fetch failure so the cron run is recorded as not-ok rather than
+    // reporting zero errors on a sync that never actually ran.
+    result.errors++;
+    return { result, noOpinion: true };
+  }
+
+  const { existingRows, links } = await loadJellyfinSyncState(instance, users);
+  const existingMap = new Map(existingRows.map((r) => [r.sourceUserId, r]));
+  const ctx = { instance, baseUrl, apiKey, autoDisableNew, links, result };
   for (const u of users) {
     try {
-      const existing = existingMap.get(u.id) ?? null;
-      // Subject id first, email second. A subject match needs no mediaServer
-      // guard — jellyfinUserId is unique and only Jellyfin sign-in writes it, so
-      // there is no cross-provider collision to defend against (unlike an email
-      // match, which could be a Plex-pinned user who happens to share the address).
-      const linkedBySub = linkedBySubMap.get(u.id) ?? null;
-      const linkedByEmail = u.email ? (linkedMap.get(normalizeEmail(u.email)) ?? null) : null;
-      const resolved =
-        linkedBySub?.id ??
-        (linkedByEmail && (!linkedByEmail.mediaServer || linkedByEmail.mediaServer.toLowerCase() === "jellyfin")
-          ? linkedByEmail.id
-          : null);
-      // An admin set this row's account binding by hand — automatic resolution
-      // must not overwrite it on the next hourly run.
-      const userId = existing?.manualUserLink ? null : resolved;
-
-      // For new/unsynced users: auto-disable if the setting is on, otherwise seed from server.
-      // For existing users with an explicit value: keep it (honors manual flips to true).
-      const defaultForNew = autoDisableNew ? false : u.downloadsEnabled;
-      const downloadsEnabled = existing?.downloadsEnabled ?? defaultForNew;
-      // A user DISABLED on the server is as gone as a removed one: Jellyfin
-      // refuses their sign-in, so the row is inactive like a departed user's
-      // (guardrail 28 — soft, never deleted). Unlike a departure this is the
-      // server's explicit answer, not an absence, so the shrink guard below
-      // doesn't apply. Re-enabling them on the server re-activates the row.
-      const active = !u.isDisabled;
-      // Newly inactive — an active row, or one seen for the first time already
-      // disabled. A row that was already inactive was offboarded on that run.
-      // Decided before the write below, from the row as this run first read it.
-      const newlyInactive = !active && existing?.active !== false;
-
-      await prisma.mediaServerUser.upsert({
-        where: { source_serverInstance_sourceUserId: { source: "jellyfin", serverInstance: instance, sourceUserId: u.id } },
-        create: {
-          source: "jellyfin",
-          serverInstance: instance,
-          sourceUserId: u.id,
-          username: u.name,
-          email: u.email ?? null,
-          isServerAdmin: u.isAdmin,
-          downloadsEnabled,
-          active,
-          ...(userId ? { userId } : {}),
-        },
-        update: {
-          username: u.name,
-          ...(u.email ? { email: u.email } : {}),
-          isServerAdmin: u.isAdmin,
-          active, // re-activate a returning (or re-enabled) user
-          ...(userId ? { userId } : {}),
-          // Write server value only when we have no admin-set value yet (null).
-          ...(existing === null || existing.downloadsEnabled === null ? { downloadsEnabled } : {}),
-        },
-      });
-      result.upserted++;
-      // On the ledger now, not at the end of the run: the next run reads this row
-      // as already inactive and would never report the departure again.
-      if (newlyInactive) noteJellyfinDepartures([u.id]);
-
-      // Push only on DRIFT — u.downloadsEnabled is the server's CURRENT value
-      // from the same /Users fetch this run already made (absent Policy coerces
-      // to true, so only an explicit server-side false skips). Pushing when the
-      // server already reports disabled was a no-op that still paid the 2-call
-      // read-modify-write and re-opened its clobber window (the POST writes the
-      // FULL policy object, so a concurrent Jellyfin-dashboard edit of any
-      // field between our GET and POST is overwritten with the stale snapshot).
-      if (!u.isAdmin && downloadsEnabled === false && u.downloadsEnabled !== false) {
-        try {
-          await setJellyfinDownloadPolicy(baseUrl, apiKey, u.id, false);
-          result.enforced++;
-        } catch (err) {
-          console.warn(`[download-policy] Jellyfin enforce failed for ${u.name}:`, err instanceof Error ? err.message : String(err));
-          result.errors++;
-        }
-      }
+      await syncJellyfinUser(ctx, u, existingMap.get(u.id) ?? null);
     } catch (err) {
       console.warn(`[download-policy] Jellyfin upsert failed for ${u.name}:`, err instanceof Error ? err.message : String(err));
       result.errors++;
     }
   }
 
-  // Mark users no longer on the Jellyfin server as inactive (soft-delete). We
-  // NEVER hard-delete a MediaServerUser — PlayHistory + ActiveSession FK it and
-  // play history must survive the user's removal (the live poller is the only
-  // writer; no backfill cron exists). isSafeToReconcileJellyfinUsers (above)
-  // guards against a degraded (truncated but 200) fetch mass-deactivating
-  // everyone absent.
-  const priorActiveCount = existingRows.filter((r) => r.active).length;
-  let safeToReconcile = isSafeToReconcileJellyfinUsers(users.length, priorActiveCount);
-  if (safeToReconcile) {
-    refusedReconciles.delete(instance);
-  } else if (users.length > 0) {
-    // Confirmation counter (see RECONCILE_CONFIRM_RUNS): a degraded fetch is
-    // transient; a real mass departure repeats the IDENTICAL user-id set run
-    // after run. Only the same signature accumulates — any variation resets.
-    const signature = users.map((u) => u.id).sort().join(",");
-    const prior = refusedReconciles.get(instance);
-    const runs = prior?.signature === signature ? prior.runs + 1 : 1;
-    if (runs >= RECONCILE_CONFIRM_RUNS) {
-      console.warn(
-        `[download-policy] Jellyfin user shrink for instance "${instance}" confirmed across ${runs} runs (fetched ${users.length}, ${priorActiveCount} active) — accepting it as the server's real state and reconciling`,
-      );
-      safeToReconcile = true;
-      // The counter is cleared AFTER the updateMany below succeeds (guardrail
-      // 27: ledger after the write it stands for) — clearing here would re-arm
-      // the full 3-run countdown whenever the write itself throws.
-    } else {
-      refusedReconciles.set(instance, { signature, runs });
-      console.warn(
-        `[download-policy] Skipping Jellyfin user reconcile for instance "${instance}": fetched ${users.length} users but ${priorActiveCount} were active — refusing to mass-deactivate on a possibly-degraded response (${runs}/${RECONCILE_CONFIRM_RUNS} identical observations)`,
-      );
-    }
-  }
-  if (safeToReconcile) {
-    const currentIds = users.map((u) => u.id);
-    const currentIdSet = new Set(currentIds);
-    const absent = existingRows
-      .filter((r) => r.active && !currentIdSet.has(r.sourceUserId))
-      .map((r) => r.sourceUserId);
-    // Scoped by serverInstance — load-bearing (guardrail 28). Without this, a
-    // user who exists only on a DIFFERENT Jellyfin server would look "absent"
-    // from THIS instance's fetch and get incorrectly soft-deleted, destroying
-    // their attribution to play history that survives on the other server.
-    await prisma.mediaServerUser.updateMany({
-      where: { source: "jellyfin", serverInstance: instance, sourceUserId: { notIn: currentIds }, active: true },
-      data: { active: false },
-    });
-    // Only now is the confirmed-shrink observation consumed: a failed write
-    // above keeps the counter, so the next hourly run reconciles immediately
-    // instead of restarting the 3-run countdown behind a log line that already
-    // claimed "reconciling".
-    refusedReconciles.delete(instance);
-    noteJellyfinDepartures(absent);
-  }
-
+  await reconcileDepartedJellyfinUsers(instance, users, existingRows);
   return { result, noOpinion: users.length === 0 };
 }
 

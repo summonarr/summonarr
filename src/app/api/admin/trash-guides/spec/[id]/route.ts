@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { getSpecDetail } from "@/lib/trash";
-import { isValidInstanceSlug } from "@/lib/arr-instances";
-import type { ArrVariant } from "@/lib/arr";
+import { parseTrashVariant } from "@/lib/trash-variant";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const GET = withAdmin(async (
@@ -12,10 +11,8 @@ export const GET = withAdmin(async (
 ) => {
   const t = translatorForRequest(req);
   const { id } = await ctx.params;
-  // ?variant= is an instance slug ("" default, "4k", named); "hd" is the legacy default spelling.
-  const rawVariant = req.nextUrl.searchParams.get("variant") ?? "";
-  const variant: ArrVariant = rawVariant === "hd" ? "" : rawVariant.trim();
-  if (!isValidInstanceSlug(variant)) {
+  const variant = parseTrashVariant(req.nextUrl.searchParams.get("variant"));
+  if (variant === null) {
     return NextResponse.json({ error: t("apiAdmin.common.invalidInstance") }, { status: 400 });
   }
   const spec = await getSpecDetail(id, variant);

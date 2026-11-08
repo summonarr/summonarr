@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import {
   createSettingsSaver,
   patchSettings,
+  saveFailureText,
   settingsPatchSucceeded,
   type SaveStatus,
   type SettingsPatchResult,
@@ -227,4 +228,35 @@ test("cancel drops the pending fade", async (t) => {
   h.saver.cancel();
   t.mock.timers.tick(10_000);
   assert.equal(h.status, "ok");
+});
+
+test("a save still in flight at unmount writes no state and arms no fade", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = harness();
+  const done = h.saver.save({ a: 1 });
+  assert.equal(h.status, "saving");
+  h.saver.dispose();
+  h.answer(OK);
+  assert.deepEqual(await done, OK, "the caller still gets the answer");
+  assert.equal(h.status, "saving", "no state write after unmount");
+  // A refusal after unmount writes no message either.
+  const refused = h.saver.save({ a: 2 });
+  h.answer(REFUSED);
+  await refused;
+  assert.equal(h.message, "");
+  // StrictMode remounts: activate brings the saver back.
+  h.saver.activate();
+  const again = h.saver.save({ a: 3 });
+  h.answer(OK);
+  await again;
+  assert.equal(h.status, "ok");
+  t.mock.timers.tick(3000);
+  assert.equal(h.status, "idle");
+});
+
+test("the shared failure wording names a missing answer or the HTTP status", () => {
+  const t = (key: string, vars?: Readonly<Record<string, string | number>>) => `${key}${vars ? JSON.stringify(vars) : ""}`;
+  const word = saveFailureText(t);
+  assert.equal(word({ ok: false, status: 0, data: {}, error: "" }), "settings.common.networkError");
+  assert.equal(word({ ok: false, status: 502, data: {}, error: "" }), 'settings.common.saveFailedStatus{"status":502}');
 });

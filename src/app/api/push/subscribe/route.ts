@@ -1,14 +1,14 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { resolveToSafeUrl } from "@/lib/ssrf";
 import { encryptToken } from "@/lib/token-crypto";
-import { sanitizeText } from "@/lib/sanitize";
 import { readJsonCapped } from "@/lib/body-size";
 import { isFeatureEnabled } from "@/lib/features";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 import {
   clearPushEndpointRemovalInTx,
   countUserPushRegistrationsInTx,
@@ -17,24 +17,15 @@ import {
   lockUserPushRegistrationsInTx,
   tombstoneRemovedPushRowsInTx,
 } from "@/lib/push-registration";
+import { readPushSubscriptionCap } from "@/lib/push-cap";
+import { canonicalizePushEndpoint, checkWebPushEndpoint, parsePushLabel, type WebPushEndpointVerdict } from "@/lib/push-body";
 
-const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
-
-// The same canonical string resolveToSafeUrlWithAddrs ([ssrf.ts]) returns for a
-// safe URL — serialize, then collapse ONLY the bare-origin trailing slash — minus
-// the DNS resolve. Keep the two in step or unsubscribe misses the stored key.
-function canonicalizePushEndpoint(raw: string): string | null {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return null;
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-  const serialized = url.toString();
-  const isBareOrigin = url.pathname === "/" && !url.search && !url.hash;
-  return isBareOrigin ? serialized.replace(/\/$/, "") : serialized;
-}
+// The 400 for each way a Web Push endpoint fails the known-services check.
+const ENDPOINT_REFUSAL: Record<Exclude<WebPushEndpointVerdict, "ok">, string> = {
+  "invalid-url": "apiUser.push.endpointInvalidUrl",
+  "not-https": "apiUser.push.endpointHttps",
+  unrecognized: "apiUser.push.endpointUnrecognized",
+};
 
 export const POST = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
@@ -51,21 +42,20 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }
 
-  const parsed = await readJsonCapped<{ endpoint?: string; keys?: { p256dh?: string; auth?: string }; label?: string; resync?: unknown }>(req, 32768);
+  const parsed = await readJsonCapped<{ endpoint?: unknown; keys?: unknown; label?: unknown; resync?: unknown }>(req, 32768);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
-  const { endpoint, keys, label } = body;
   // The bell's once-per-page-load re-send of a subscription the browser already
   // holds (push-notifications.tsx), as opposed to the user turning push on. It
   // may restore a row the server lost — the 6g sign-out/password wipe deletes
   // every registration — but never one that was removed on purpose.
   const resync = body.resync === true;
-  if (!endpoint || !keys?.p256dh || !keys?.auth) {
+  const fields = readSubscriptionFields(body);
+  if (!fields) {
     return NextResponse.json({ error: t("apiUser.push.fieldsRequired") }, { status: 400 });
   }
-  const p256dh = keys.p256dh;
-  const auth = keys.auth;
+  const { endpoint, p256dh, auth } = fields;
 
   // Cheap field-length checks first — no DNS, no DB. Doing this before
   // resolveToSafeUrl avoids resolving a 64KB attacker-controlled URL.
@@ -74,49 +64,16 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
 
   // Allowlist known push services before DNS resolution to prevent SSRF via push endpoint registration
-  try {
-    const url = new URL(endpoint);
-    if (url.protocol !== "https:") {
-      return NextResponse.json({ error: t("apiUser.push.endpointHttps") }, { status: 400 });
-    }
-    const host = url.hostname.toLowerCase();
-    const allowedHosts = [
-      "fcm.googleapis.com",
-      "updates.push.services.mozilla.com",
-      "push.services.mozilla.com",
-    ];
-    const allowedSuffixes = [
-      ".notify.windows.com",
-      ".push.apple.com",
-      ".web.push.apple.com",
-      ".push.services.mozilla.com",
-    ];
-    const isAllowed = allowedHosts.includes(host)
-      || allowedSuffixes.some((suffix) => host.endsWith(suffix));
-    if (!isAllowed) {
-      return NextResponse.json({ error: t("apiUser.push.endpointUnrecognized") }, { status: 400 });
-    }
-  } catch {
-    return NextResponse.json({ error: t("apiUser.push.endpointInvalidUrl") }, { status: 400 });
-  }
+  const verdict = checkWebPushEndpoint(endpoint);
+  if (verdict !== "ok") return badRequest(t, ENDPOINT_REFUSAL[verdict]);
 
   const safeEndpoint = await resolveToSafeUrl(endpoint);
   if (!safeEndpoint) {
     return NextResponse.json({ error: t("apiUser.push.endpointDisallowed") }, { status: 400 });
   }
 
-  const capRow = await prisma.setting.findUnique({ where: { key: "maxPushSubscriptions" } });
-  const cap = parseRateLimit(capRow?.value, DEFAULT_MAX_PUSH_SUBSCRIPTIONS);
-
-  // sanitizeText also strips control chars and Unicode bidi-overrides, which
-  // matters because labels get captured by the audit log (auditContext bundles
-  // user-controlled strings into `details`) — a bidi-override would otherwise
-  // let a user spoof apparent identity in audit-table views.
-  // typeof-guard BEFORE the string method — the parsed body is untyped at
-  // runtime, so a numeric `label` threw on .replace and returned a 500.
-  const sanitizedLabel = typeof label === "string" && label
-    ? (sanitizeText(label).slice(0, 100) || undefined)
-    : undefined;
+  const cap = await readPushSubscriptionCap();
+  const sanitizedLabel = parsePushLabel(body.label);
 
   // Ownership, cap and write in one transaction under the per-user lock
   // (push-registration.ts), so two concurrent registrations can't both pass the
@@ -159,6 +116,22 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
   return NextResponse.json({ ok: true });
 });
+
+// The three subscription fields, each a non-empty string, or null when any is missing.
+function readSubscriptionFields(body: { endpoint?: unknown; keys?: unknown }): { endpoint: string; p256dh: string; auth: string } | null {
+  const keys = body.keys !== null && typeof body.keys === "object" ? (body.keys as { p256dh?: unknown; auth?: unknown }) : null;
+  const { endpoint } = body;
+  const p256dh = keys?.p256dh;
+  const auth = keys?.auth;
+  if (typeof endpoint !== "string" || !endpoint || typeof p256dh !== "string" || !p256dh || typeof auth !== "string" || !auth) {
+    return null;
+  }
+  return { endpoint, p256dh, auth };
+}
+
+function badRequest(t: Translator, key: string): NextResponse {
+  return NextResponse.json({ error: t(key) }, { status: 400 });
+}
 
 export const DELETE = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);

@@ -107,27 +107,44 @@ const COOKIE = getSessionCookieName();
 const ENDPOINT = "http://localhost:3000/api/admin/check-schema";
 const TRUSTED_ORIGIN = "http://localhost:3000";
 
-// ── the columns the route asserts (mirror of the route's EXPECTED) ───────────
-// Kept as a local fixture so a schema-contract change breaks these tests loudly.
-const EXPECTED: Record<string, string[]> = {
-  User: ["id", "name", "email", "passwordHash", "role", "permissions", "mediaServer", "discordId", "autoApprove", "quotaExempt", "deactivatedAt", "purgedAt"],
-  PlexLibraryItem: ["tmdbId", "mediaType", "serverInstance", "filePath", "plexRatingKey", "plexRatingKeys", "title", "year", "overview"],
-  JellyfinLibraryItem: ["tmdbId", "mediaType", "serverInstance", "filePath", "jellyfinItemId", "jellyfinItemIds", "title", "year", "overview"],
-  TVEpisodeCache: ["source", "tmdbId", "seasonNumber", "episodeNumber", "addedAt"],
-  TVEpisodeCacheStaging: ["runId", "source", "tmdbId", "seasonNumber", "episodeNumber", "addedAt"],
-  PlexLibraryItemStaging: ["runId", "tmdbId", "mediaType", "serverInstance", "plexRatingKey", "plexRatingKeys", "addedAt"],
-  JellyfinLibraryItemStaging: ["runId", "tmdbId", "mediaType", "serverInstance", "jellyfinItemId", "jellyfinItemIds", "addedAt"],
-  PlayHistory: ["id", "source", "serverInstance", "tmdbId", "mediaType", "title", "year", "posterPath", "startedAt", "watched", "sourceShowId"],
-  MediaRequest: ["id", "tmdbId", "mediaType", "arrInstance", "title", "posterPath", "status", "requestedBy"],
-  TmdbCache: ["key", "data", "expiresAt"],
-  ActiveSession: ["id", "source", "serverInstance", "tmdbId", "title", "sourceShowId"],
-  MediaServerUser: ["id", "source", "serverInstance", "sourceUserId", "username"],
-  RadarrWantedItem: ["tmdbId", "arrInstance"],
-  SonarrWantedItem: ["tmdbId", "arrInstance"],
-  RadarrAvailableItem: ["tmdbId", "arrInstance"],
-  SonarrAvailableItem: ["tmdbId", "arrInstance"],
-  UpstreamWatchEvidence: ["source", "serverInstance", "itemKey", "seasonNumber", "mediaType", "playCount", "lastPlayedAt", "fetchedAt"],
-};
+// ── the columns the route expects: every model and scalar column of the schema ─
+// Read here straight from prisma/schema.prisma — an oracle independent of the
+// generated client the route reads (schema-check.ts), so the two must agree.
+const { readFileSync } = await import("node:fs");
+const SCHEMA = readFileSync(new URL("../prisma/schema.prisma", import.meta.url), "utf8");
+const SCALAR = new Set(["String", "Int", "BigInt", "Float", "Decimal", "Boolean", "DateTime", "Json", "Bytes"]);
+const ENUMS = new Set([...SCHEMA.matchAll(/^enum (\w+) \{/gm)].map((m) => m[1]));
+function schemaColumns(): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const m of SCHEMA.matchAll(/^model (\w+) \{([\s\S]*?)\n\}/gm)) {
+    const cols: string[] = [];
+    for (const line of m[2].split("\n")) {
+      const f = /^\s+(\w+)\s+(\w+)(\[\])?\??/.exec(line);
+      if (f && (SCALAR.has(f[2]) || ENUMS.has(f[2]))) cols.push(f[1]);
+    }
+    out[m[1]] = cols;
+  }
+  return out;
+}
+const EXPECTED = schemaColumns();
+
+test("the schema maps no model or field to another name — the check reads model and field names as table and column names", () => {
+  assert.doesNotMatch(SCHEMA, /@map\(|@@map\(/);
+});
+
+test("the route expects every model and every scalar column of the schema, no more and no less", async () => {
+  const { expectedSchemaColumns } = await import("../src/lib/schema-check.ts");
+  const fromClient = expectedSchemaColumns();
+  const sorted = (o: Record<string, string[]>) => Object.fromEntries(Object.keys(o).sort().map((k) => [k, [...o[k]].sort()]));
+  assert.deepEqual(sorted(fromClient), sorted(EXPECTED));
+  // The multi-instance identity columns a skipped push most often lacks (guardrails 32/35).
+  for (const table of ["PlexLibraryItem", "JellyfinLibraryItem", "PlayHistory", "ActiveSession", "MediaServerUser"]) {
+    assert.ok(fromClient[table].includes("serverInstance"), `${table} lacks serverInstance`);
+  }
+  for (const table of ["MediaRequest", "RadarrWantedItem", "SonarrWantedItem", "RadarrAvailableItem", "SonarrAvailableItem"]) {
+    assert.ok(fromClient[table].includes("arrInstance"), `${table} lacks arrInstance`);
+  }
+});
 
 function rowsFor(tables: Record<string, string[]>): SchemaRow[] {
   const rows: SchemaRow[] = [];
@@ -277,7 +294,7 @@ test("admin BEARER + same-origin, schema complete → 200 { allOk:true, tables, 
   const admin = await mintToken("ADMIN");
   // Every expected table + column present, plus a bonus table to prove allTables
   // reflects the live introspection (sorted union), not just EXPECTED.
-  schemaRows = rowsFor({ ...EXPECTED, Setting: ["key", "value"] });
+  schemaRows = rowsFor({ ...EXPECTED, LegacyLeftover: ["key", "value"] });
 
   const res = await GET(req({ ...bearer(admin.token), ...sameOrigin }), undefined);
   assert.equal(res.status, 200);
@@ -297,7 +314,7 @@ test("admin BEARER + same-origin, schema complete → 200 { allOk:true, tables, 
   // Per-table `columns` echoes what introspection returned.
   assert.deepEqual(body.tables.MediaServerUser.columns, EXPECTED.MediaServerUser);
   // allTables is the sorted set of ALL introspected tables (incl. the bonus one).
-  assert.ok(body.allTables.includes("Setting"), "allTables reflects the live table set, not just EXPECTED");
+  assert.ok(body.allTables.includes("LegacyLeftover"), "allTables reflects the live table set, not just EXPECTED");
   assert.deepEqual(body.allTables, [...body.allTables].sort(), "allTables must be sorted");
 });
 

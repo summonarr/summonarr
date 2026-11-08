@@ -227,7 +227,7 @@ for (const m of ["plexLibraryItem", "jellyfinLibraryItem", "tVEpisodeCache", "ac
   shadowPrismaModel(prisma, m, { findMany: boom, findFirst: boom, findUnique: boom, count: boom });
 }
 
-const { loadCalendarTitles, buildCalendarFeed, resolveCalendarToken, warmCalendarCache, MAX_CALENDAR_WARM_FETCHES } =
+const { loadCalendarTitles, buildCalendarFeed, resolveCalendarToken, warmCalendarCache, MAX_CALENDAR_WARM_FETCHES, settledCalendarTitle } =
   await import("../src/lib/calendar-feed.ts");
 const feedRoute = await import("../src/app/api/calendar/feed/[token]/route.ts");
 const profileRoute = await import("../src/app/api/profile/calendar/route.ts");
@@ -439,6 +439,24 @@ test("tv: a season premiere with no episode list, and a bare next-episode date, 
     ["tv-7-next@summonarr", "2026-11-01", "Show – New episode"],
     ["tv-7-s3-premiere@summonarr", "2027-01-05", "Show – Season 3 premiere"],
   ]);
+});
+
+test("tv: a season listing only undated placeholder episodes still gets its premiere; a dated list covers it", () => {
+  const run = (airDate: string | null) =>
+    events.buildCalendarEvents(
+      [{ tmdbId: 9, mediaType: "tv", title: "Show" }],
+      {
+        movies: new Map(),
+        tv: new Map([[9, { seasons: [{ seasonNumber: 2, airDate: "2027-02-01" }], nextEpisode: null }]]),
+        episodes: new Map([[9, [{ seasonNumber: 2, episodeNumber: 1, name: null, airDate }]]]),
+      },
+      W,
+      null,
+    ).map((e) => e.uid);
+  assert.deepEqual(run(null), ["tv-9-s2-premiere@summonarr"]);
+  // A dated row (even one outside the window) is the season's own schedule.
+  assert.deepEqual(run("2027-02-01"), ["tv-9-s2e1@summonarr"]);
+  assert.deepEqual(run("2020-01-01"), []);
 });
 
 test("tv: next episode is suppressed only when the lists already carry THAT episode", () => {
@@ -786,6 +804,20 @@ test("warm: an expired blob that proves a title is finished is not re-fetched", 
   putCache("tv:301:calendar:v1", { status: "Ended", lastAirDate: "2010-01-01", seasons: [], nextEpisode: null }, past);
   await warmCalendarCache();
   assert.equal(fetchCalls.length, 0);
+});
+
+test("warm: a movie is settled once every known date is behind the window and nothing more is coming", () => {
+  const movie = { tmdbId: 1, mediaType: "movie" as const, title: "M" };
+  // W.from is 2026-09-01.
+  assert.equal(settledCalendarTitle(movie, { primary: "2020-01-01", digital: "2020-03-01", physical: "2020-05-01" }, W), true);
+  // An old film that never got a physical date is settled too.
+  assert.equal(settledCalendarTitle(movie, { primary: "2001-06-01" }, W), true);
+  // A recent theatrical release may still get its digital date: keep asking.
+  assert.equal(settledCalendarTitle(movie, { primary: "2026-07-15" }, W), false);
+  // Anything in or after the window, or nothing known, is never settled.
+  assert.equal(settledCalendarTitle(movie, { primary: "2001-06-01", digital: "2026-12-01" }, W), false);
+  assert.equal(settledCalendarTitle(movie, {}, W), false);
+  assert.equal(settledCalendarTitle(movie, { primary: "not-a-date" }, W), false);
 });
 
 test("warm: bounded by MAX_CALENDAR_WARM_FETCHES", async () => {

@@ -3,12 +3,14 @@
 import { useEffect, useRef, useState } from "react";
 import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from "react";
 import { useRouter } from "next/navigation";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { useLiveEvents } from "@/hooks/use-live-events";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import Image from "next/image";
-import { Film, Tv2, Loader2, Check, X, ExternalLink } from "@/components/icons";
+import { AlertTriangle, Film, Tv2, Loader2, Check, X, ExternalLink } from "@/components/icons";
 import Link from "next/link";
 import { RequestActions } from "./request-actions";
+import type { RequestMediaType } from "./request-action-rules";
 import { RequestThread } from "@/components/requests/request-thread";
 import { OpenInArrLink, arrInstanceLabel } from "./open-in-arr";
 import { ManageTitleButton } from "./arr-title/title-manager";
@@ -16,14 +18,28 @@ import { manageTabFor } from "@/lib/arr-manage-links";
 import { Chip } from "@/components/ui/design";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { withBasePath } from "@/lib/base-path";
-import { rateLimitMessage } from "@/lib/client/rate-limit";
-import { REQUEST_STATUS_TONE } from "@/lib/status-labels";
+import { fetchJson, jsonInit, type FetchJsonFailure } from "@/lib/client/fetch-json";
+import { REQUEST_STATUS_LABEL_KEY, REQUEST_STATUS_TONE } from "@/lib/status-labels";
 import { createRefreshGate } from "@/lib/refresh-gate";
 import { ADMIN_NOTE_MAX } from "@/lib/request-limits";
 import type { WatchGradeSummary } from "@/lib/watch-grade";
 import { WatchGradeChip } from "./watch-grade";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
+import {
+  BatchAnswer,
+  NO_PROGRESS,
+  batchErrorText,
+  idChunks,
+  offPageCount,
+  pendingIdsFor,
+  pendingIdsOf,
+  pruneSelection,
+  recordChunk,
+  settledIds,
+  titlesFor,
+  type BatchProgress,
+} from "./request-batch";
 
 export interface Requester {
   requestId: string;
@@ -65,7 +81,7 @@ export interface GroupedRequestRow {
   groupKey: string;
   tmdbId: number;
   title: string;
-  mediaType: string;
+  mediaType: RequestMediaType;
   posterUrl: string | null;
   releaseYear: string | null;
   ratings: MediaRatings | null;
@@ -128,10 +144,49 @@ function formatUserLabel(r: Requester, t: Translator) {
   return r.userName ?? r.userEmail;
 }
 
-const BATCH_ID_CAP = 100; // /api/requests/batch rejects more ids than this per call
+// A status's label; one the map doesn't know shows as stored, never as a
+// catalog key built at runtime that may not exist.
+function statusLabel(status: string, t: Translator): string {
+  const key = REQUEST_STATUS_LABEL_KEY[status];
+  return key ? t(key) : status;
+}
 
-function pendingIdsFor(group: GroupedRequestRow) {
-  return group.requesters.filter((r) => r.status === "PENDING").map((r) => r.requestId);
+// Why a batch run stopped, in the viewer's language. The route's 429 carries no
+// Retry-After, so it gets the generic "slow down"; any other refusal its own
+// reason; no answer at all the network line.
+function batchStopText(res: FetchJsonFailure, t: Translator): string {
+  if (res.kind === "http") {
+    if (res.status === 429) return t("shared.rateLimited.generic");
+    return res.error || t("adminQueue.common.requestFailed", { status: res.status });
+  }
+  if (res.kind === "invalid") return t("adminQueue.common.requestFailed", { status: res.status });
+  return t("shared.thread.networkError");
+}
+
+// One batch run: the selected ids in chunks the route accepts, in order. The
+// first refusal (or no answer) stops it: what the route answered before that
+// was applied, the chunk in flight and the unsent ones were not (or may not
+// have been — the refresh and the list's own pending check settle it).
+async function sendBatch(
+  ids: readonly string[],
+  status: "APPROVED" | "DECLINED",
+  adminNote: string | undefined,
+  signal: AbortSignal,
+): Promise<{ progress: BatchProgress; stop: FetchJsonFailure | null }> {
+  let progress = NO_PROGRESS;
+  for (const chunk of idChunks(ids)) {
+    const res = await fetchJson(withBasePath("/api/requests/batch"), {
+      init: jsonInit("PATCH", { ids: chunk, status, adminNote: adminNote || undefined }),
+      schema: BatchAnswer,
+      signal,
+      // An approval pushes each title to Radarr/Sonarr before the route
+      // answers: a long run is still working, not failed (guardrail 37a).
+      timeoutMs: Infinity,
+    });
+    if (!res.ok) return { progress, stop: res };
+    progress = recordChunk(progress, chunk, res.data);
+  }
+  return { progress, stop: null };
 }
 
 const ACTION_BTN: CSSProperties = {
@@ -180,20 +235,13 @@ const NEUTRAL_BTN: CSSProperties = {
   borderColor: "var(--ds-border)",
 };
 
-// Admin request queue: groups requests by title, drives per-group + batch
-// approve/decline, and paginates. Live-refreshes on request:* SSE events.
-export function AdminRequestList({ requests, page, total, pageSize, statusFilter, typeFilter, sort, instanceNames, canOpenArr = false, arrServices, initialOpenThread }: AdminRequestListProps) {
+// The list's refreshes. While a row's title manager is open the list's refresh
+// WAITS: a refresh can drop the row — its status left the ?status= filter, a
+// new request pushed it to the next page — and the dialog with it, unsaved
+// edits and all, or re-prop it mid-edit. The deferred refresh runs once the
+// last manager closes (the Download Queue pauses its poll the same way).
+function useListRefresh() {
   const router = useRouter();
-  const t = useT();
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const instanceLabel = (slug: string) =>
-    instanceNames?.[slug] ?? (slug === "4k" ? "4K" : slug);
-
-  // While a row's title manager is open the list's refresh WAITS: a refresh
-  // can drop the row — its status left the ?status= filter, a new request
-  // pushed it to the next page — and the dialog with it, unsaved edits and
-  // all, or re-prop it mid-edit. The deferred refresh runs once the last
-  // manager closes (the Download Queue pauses its poll the same way).
   const [refreshGate] = useState(createRefreshGate);
   const unmountedRef = useRef(false);
   function refreshList() {
@@ -228,32 +276,36 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
     if (open) return refreshGate.opened();
     if (refreshGate.closed() && !unmountedRef.current) scheduleRefresh();
   }
-  const [batchLoading, setBatchLoading] = useState(false);
-  const [batchNote, setBatchNote] = useState("");
-  const [showBatchNote, setShowBatchNote] = useState<"APPROVED" | "DECLINED" | null>(null);
-  const [batchError, setBatchError] = useState<string | null>(null);
-  const [confirmingApprove, setConfirmingApprove] = useState(false);
-
-  // The batch bar hides (but keeps its state) when the selection empties by
-  // unchecking boxes or Clear. Reset the armed approve-confirm, the decline
-  // note and any error then, so the NEXT selection opens in the neutral state
-  // rather than one click away from a batch approve. Adjusted during render
-  // (React's "store the previous value" pattern) instead of in an effect.
-  const selectionEmpty = selected.size === 0;
-  const [prevSelectionEmpty, setPrevSelectionEmpty] = useState(selectionEmpty);
-  if (selectionEmpty !== prevSelectionEmpty) {
-    setPrevSelectionEmpty(selectionEmpty);
-    if (selectionEmpty) {
-      setConfirmingApprove(false);
-      setShowBatchNote(null);
-      setBatchNote("");
-      setBatchError(null);
+  // The batch route emits request:updated per id BEFORE it responds, so by the
+  // time a run ends the SSE handler has already armed a 500ms refresh. Cancel
+  // it so the two collapse into the run's one immediate refresh — which stays
+  // as the fallback for when the SSE singleton is closed.
+  function refreshNow() {
+    if (refreshTimerRef.current) {
+      clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = null;
     }
+    refreshList();
+  }
+  return { refreshNow, onManagerActive };
+}
+
+// The batch selection: request ids, kept across pages (the bar names those on
+// other pages), checked live while a batch runs.
+function useSelection(requests: GroupedRequestRow[], filterKey: string) {
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+
+  // A new status or type filter starts a new selection: what was picked under
+  // the old one may not be shown at all now, and a batch would act on it
+  // unseen. (Paging keeps it: the bar says how many are on other pages.)
+  // Adjusted during render (React's "store the previous value" pattern).
+  const [prevFilterKey, setPrevFilterKey] = useState(filterKey);
+  if (filterKey !== prevFilterKey) {
+    setPrevFilterKey(filterKey);
+    if (selected.size > 0) setSelected(new Set());
   }
 
-  const allPendingIds = requests.flatMap((g) =>
-    g.requesters.filter((r) => r.status === "PENDING").map((r) => r.requestId),
-  );
+  const allPendingIds = pendingIdsOf(requests);
   const allPendingSelected = allPendingIds.length > 0 && allPendingIds.every((id) => selected.has(id));
 
   // Drop selected ids whose request is no longer PENDING (e.g. another admin
@@ -265,14 +317,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
   // may just be on another page (selecting across pages is allowed), so a
   // missing id is kept.
   useEffect(() => {
-    const onPage = new Set(requests.flatMap((g) => g.requesters.map((r) => r.requestId)));
-    const pending = new Set(
-      requests.flatMap((g) => g.requesters.filter((r) => r.status === "PENDING").map((r) => r.requestId)),
-    );
-    setSelected((prev) => {
-      const next = new Set([...prev].filter((id) => !onPage.has(id) || pending.has(id)));
-      return next.size === prev.size ? prev : next;
-    });
+    setSelected((prev) => pruneSelection(prev, requests));
   }, [requests]);
 
   function toggleAll() {
@@ -299,81 +344,90 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
     });
   }
 
+  // Removes only `done` from the CURRENT selection (a functional update), so a
+  // box ticked or unticked while a batch ran keeps the admin's choice.
+  function dropSettled(done: readonly string[]) {
+    setSelected((prev) => {
+      if (!done.some((id) => prev.has(id))) return prev;
+      const next = new Set(prev);
+      for (const id of done) next.delete(id);
+      return next;
+    });
+  }
+
+  return { selected, setSelected, allPendingIds, allPendingSelected, toggleAll, toggleGroup, dropSettled };
+}
+
+// Admin request queue: groups requests by title, drives per-group + batch
+// approve/decline, and paginates. Live-refreshes on request:* SSE events.
+export function AdminRequestList({ requests, page, total, pageSize, statusFilter, typeFilter, sort, instanceNames, canOpenArr = false, arrServices, initialOpenThread }: AdminRequestListProps) {
+  const t = useT();
+  const { selected, setSelected, allPendingIds, allPendingSelected, toggleAll, toggleGroup, dropSettled } =
+    useSelection(requests, `${statusFilter ?? ""}|${typeFilter ?? ""}`);
+  const instanceLabel = (slug: string) =>
+    instanceNames?.[slug] ?? (slug === "4k" ? "4K" : slug);
+  const { refreshNow, onManagerActive } = useListRefresh();
+  const batchRun = useAsyncAction();
+  const batchLoading = batchRun.busy("batch");
+  const [batchNote, setBatchNote] = useState("");
+  const [showBatchNote, setShowBatchNote] = useState<"APPROVED" | "DECLINED" | null>(null);
+  const [batchError, setBatchError] = useState<string | null>(null);
+  // A batch's adds that got no answer: shown above the list, not in the bar —
+  // those requests stay APPROVED, so they leave the selection and the bar.
+  const [batchNotice, setBatchNotice] = useState<string | null>(null);
+  const [confirmingApprove, setConfirmingApprove] = useState(false);
+
+  // The batch bar hides (but keeps its state) when the selection empties by
+  // unchecking boxes or Clear. Reset the armed approve-confirm, the decline
+  // note and any error then, so the NEXT selection opens in the neutral state
+  // rather than one click away from a batch approve. Adjusted during render
+  // (React's "store the previous value" pattern) instead of in an effect.
+  const selectionEmpty = selected.size === 0;
+  const [prevSelectionEmpty, setPrevSelectionEmpty] = useState(selectionEmpty);
+  if (selectionEmpty !== prevSelectionEmpty) {
+    setPrevSelectionEmpty(selectionEmpty);
+    if (selectionEmpty) {
+      setConfirmingApprove(false);
+      setShowBatchNote(null);
+      setBatchNote("");
+      setBatchError(null);
+    }
+  }
+
   async function batchAction(status: "APPROVED" | "DECLINED", adminNote?: string) {
-    setBatchLoading(true);
     setBatchError(null);
-    // The route takes at most BATCH_ID_CAP ids per call. A bigger selection
-    // (select-all across a long queue) is sent in sequential chunks; the first
-    // refusal stops the run and leaves the unsent + failed ids selected.
-    //
+    setBatchNotice(null);
     // The checkboxes stay live during the run, so the selection is never
-    // replaced with a snapshot: each write below only removes ids this run
-    // settled, and a box ticked or unticked meanwhile keeps the admin's choice.
-    const allIds = Array.from(selected);
-    // Ids in chunks the route answered; minus `stillPending`, they leave the selection.
-    const answered: string[] = [];
-    const stillPending: string[] = [];
-    let arrError: string | undefined;
-    const dropSettled = () => {
-      const keep = new Set(stillPending);
-      const done = answered.filter((id) => !keep.has(id));
-      setSelected((prev) => {
-        if (!done.some((id) => prev.has(id))) return prev;
-        const next = new Set(prev);
-        for (const id of done) next.delete(id);
-        return next;
-      });
-    };
-    // An earlier chunk's push failures stay selected, so their reason must stay
-    // on screen beside whatever stopped the run.
-    const withEarlier = (message: string) => (arrError ? `${arrError}\n${message}` : message);
-    try {
-      for (let i = 0; i < allIds.length; i += BATCH_ID_CAP) {
-        const chunk = allIds.slice(i, i + BATCH_ID_CAP);
-        const res = await fetch(withBasePath("/api/requests/batch"), {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ids: chunk, status, adminNote: adminNote || undefined }),
-        });
-        if (!res.ok) {
-          const data = (await res.json().catch(() => null)) as { error?: string } | null;
-          setBatchError(withEarlier(rateLimitMessage(res, t) ?? data?.error ?? t("adminQueue.common.requestFailed", { status: res.status })));
-          dropSettled();
-          refreshList();
-          return;
-        }
-        // A 200 can still carry rows whose Radarr/Sonarr push failed and were rolled
-        // back to PENDING. Keep exactly those selected, so the bar (and the reason in
-        // it) stays up and they can be retried or declined without re-picking them.
-        const data = (await res.json().catch(() => null)) as { arrError?: string; failed?: { id?: unknown }[] } | null;
-        for (const f of data?.failed ?? []) if (typeof f.id === "string") stillPending.push(f.id);
-        for (const id of chunk) answered.push(id);
-        arrError = arrError ?? data?.arrError;
-      }
-      dropSettled();
-      if (arrError) setBatchError(arrError);
+    // replaced with a snapshot: the run only removes the ids it settled, and a
+    // box ticked or unticked meanwhile keeps the admin's choice.
+    const run = await batchRun.run(
+      "batch",
+      (signal) => sendBatch(Array.from(selected), status, adminNote, signal),
+      { ifBusy: "skip" },
+    );
+    // Skipped (a run is going) or unmounted: nothing to apply.
+    if (!run) return;
+    const { progress, stop } = run;
+    // One way out, whatever happened: drop what was settled, keep on screen
+    // every chunk's push failures (those rows stay selected) beside whatever
+    // stopped the run, and refresh.
+    dropSettled(settledIds(progress));
+    setBatchError(batchErrorText(progress, stop ? batchStopText(stop, t) : null));
+    setBatchNotice(outcomeUnknownNotice(progress.outcomeUnknown));
+    if (!stop) {
       setShowBatchNote(null);
       setBatchNote("");
       setConfirmingApprove(false);
-      // The batch route emits request:updated per id BEFORE it responds, so by
-      // the time res.ok resolves the SSE handler above has already armed a 500ms
-      // refresh. Cancel it so the two collapse into this one immediate refresh —
-      // which stays as the fallback for when the SSE singleton is closed.
-      if (refreshTimerRef.current) {
-        clearTimeout(refreshTimerRef.current);
-        refreshTimerRef.current = null;
-      }
-      refreshList();
-    } catch {
-      // A network failure mid-run: the chunks answered before it were applied.
-      // Drop those; the chunk in flight and the unsent ones stay selected (the
-      // refresh, and the list's own pending check, settle whether it landed).
-      setBatchError(withEarlier(t("shared.thread.networkError")));
-      dropSettled();
-      refreshList();
-    } finally {
-      setBatchLoading(false);
     }
+    refreshNow();
+  }
+
+  // The adds that got no answer, by title where this page shows them.
+  function outcomeUnknownNotice(ids: readonly string[]): string | null {
+    if (ids.length === 0) return null;
+    const { titles, unknown } = titlesFor(ids, requests);
+    const names = unknown > 0 ? [...titles, t("adminQueue.list.onOtherPages", { count: unknown })] : titles;
+    return t("adminQueue.list.outcomeUnknown", { count: ids.length, titles: names.join(", ") });
   }
 
   const totalPages = Math.ceil(total / pageSize);
@@ -390,9 +444,37 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
 
   return (
     <div>
+      {batchNotice && (
+        <div
+          role="status"
+          className="flex items-start gap-2 text-amber-400"
+          style={{
+            marginBottom: 12,
+            padding: "8px 12px",
+            fontSize: 12,
+            borderRadius: 8,
+            background: "color-mix(in oklab, var(--ds-warning) 8%, transparent)",
+            border: "1px solid color-mix(in oklab, var(--ds-warning) 30%, transparent)",
+          }}
+        >
+          <AlertTriangle aria-hidden style={{ ...ICON_12, flexShrink: 0, marginTop: 2 }} />
+          <span className="flex-1 min-w-0">{batchNotice}</span>
+          <button
+            type="button"
+            className="ds-hover-tint"
+            onClick={() => setBatchNotice(null)}
+            aria-label={t("shared.common.dismiss")}
+            style={{ border: 0, background: "transparent", color: "var(--ds-fg-subtle)", padding: 2, borderRadius: 4 }}
+          >
+            <X aria-hidden style={ICON_12} />
+          </button>
+        </div>
+      )}
+
       {selected.size > 0 && (
         <BatchBar
           count={selected.size}
+          offPage={offPageCount(selected, requests)}
           loading={batchLoading}
           error={batchError}
           declining={showBatchNote === "DECLINED"}
@@ -465,6 +547,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
 // confirm), decline with an optional reason, clear.
 function BatchBar({
   count,
+  offPage,
   loading,
   error,
   declining,
@@ -478,6 +561,8 @@ function BatchBar({
   onClear,
 }: {
   count: number;
+  /** Selected ids this page doesn't show: named, so a batch never acts on them unseen. */
+  offPage: number;
   loading: boolean;
   error: string | null;
   declining: boolean;
@@ -507,96 +592,37 @@ function BatchBar({
         style={{ fontSize: 13, color: "var(--ds-accent-text)" }}
       >
         {t("adminQueue.list.selected", { count })}
+        {offPage > 0 && (
+          <span className="ds-mono" style={{ marginLeft: 6, fontSize: 11, fontWeight: 400, color: "var(--ds-fg-muted)" }}>
+            ({t("adminQueue.list.onOtherPages", { count: offPage })})
+          </span>
+        )}
       </span>
 
       {declining ? (
-        <>
-          {/* Capped at the routes' own limit, so a long reason is stopped here
-              rather than refused after submit. */}
-          <input
-            type="text"
-            value={note}
-            onChange={(e) => onNoteChange(e.target.value)}
-            maxLength={ADMIN_NOTE_MAX}
-            placeholder={t("adminQueue.common.declineReason")}
-            aria-label={t("adminQueue.actions.declineReasonAria")}
-            className="flex-1 min-w-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            style={{
-              padding: "5px 10px",
-              borderRadius: 6,
-              fontSize: 12,
-              background: "var(--ds-bg-1)",
-              color: "var(--ds-fg)",
-              border: "1px solid var(--ds-border)",
-            }}
-          />
-          <ActionButton onClick={() => onDeclining(false)} disabled={loading} style={NEUTRAL_BTN}>
-            {t("shared.common.cancel")}
-          </ActionButton>
-          <ActionButton
-            onClick={onDecline}
-            disabled={loading}
-            loading={loading}
-            icon={<X style={ICON_12} />}
-            style={{ background: "var(--ds-danger)", color: "var(--ds-on-status)" }}
-          >
-            {t("adminQueue.list.declineN", { count })}
-          </ActionButton>
-        </>
+        <DeclineControls
+          count={count}
+          loading={loading}
+          note={note}
+          onNoteChange={onNoteChange}
+          onCancel={() => onDeclining(false)}
+          onDecline={onDecline}
+        />
       ) : confirmingApprove ? (
-        <>
-          <span style={{ fontSize: 12, color: "var(--ds-fg-muted)" }}>
-            {t("adminQueue.list.approveConfirm", { count })}
-          </span>
-          <ActionButton onClick={() => onConfirmingApprove(false)} disabled={loading} style={NEUTRAL_BTN}>
-            {t("shared.common.cancel")}
-          </ActionButton>
-          <ActionButton
-            onClick={onApprove}
-            disabled={loading}
-            loading={loading}
-            icon={<Check style={ICON_12} />}
-            style={{ background: "var(--ds-success)", color: "var(--ds-on-status)" }}
-          >
-            {t("adminQueue.list.confirmApprove")}
-          </ActionButton>
-        </>
+        <ConfirmApproveControls
+          count={count}
+          loading={loading}
+          onCancel={() => onConfirmingApprove(false)}
+          onApprove={onApprove}
+        />
       ) : (
-        <>
-          <ActionButton
-            onClick={() => onConfirmingApprove(true)}
-            disabled={loading}
-            loading={loading}
-            icon={<Check style={ICON_12} />}
-            style={{ background: "var(--ds-success)", color: "var(--ds-on-status)" }}
-          >
-            {t("adminQueue.list.approveN", { count })}
-          </ActionButton>
-          <ActionButton
-            onClick={() => onDeclining(true)}
-            disabled={loading}
-            icon={<X style={ICON_12} />}
-            style={{
-              background: "transparent",
-              color: "var(--ds-danger)",
-              borderColor: "color-mix(in oklab, var(--ds-danger) 40%, transparent)",
-            }}
-          >
-            {t("adminQueue.list.declineN", { count })}
-          </ActionButton>
-          <ActionButton
-            onClick={onClear}
-            disabled={loading}
-            style={{
-              marginLeft: "auto",
-              background: "transparent",
-              color: "var(--ds-fg-subtle)",
-              borderColor: "var(--ds-border)",
-            }}
-          >
-            {t("adminQueue.list.clear")}
-          </ActionButton>
-        </>
+        <IdleControls
+          count={count}
+          loading={loading}
+          onArmApprove={() => onConfirmingApprove(true)}
+          onOpenDecline={() => onDeclining(true)}
+          onClear={onClear}
+        />
       )}
       {error && (
         // An earlier chunk's push failures and what stopped the run are one line each.
@@ -608,6 +634,138 @@ function BatchBar({
         </span>
       )}
     </div>
+  );
+}
+
+const APPROVE_BTN: CSSProperties = { background: "var(--ds-success)", color: "var(--ds-on-status)" };
+
+// Decline: the optional reason, Cancel and the decline itself.
+function DeclineControls({
+  count,
+  loading,
+  note,
+  onNoteChange,
+  onCancel,
+  onDecline,
+}: {
+  count: number;
+  loading: boolean;
+  note: string;
+  onNoteChange: (note: string) => void;
+  onCancel: () => void;
+  onDecline: () => void;
+}) {
+  const t = useT();
+  return (
+    <>
+      {/* Capped at the routes' own limit, so a long reason is stopped here
+          rather than refused after submit. */}
+      <input
+        type="text"
+        value={note}
+        onChange={(e) => onNoteChange(e.target.value)}
+        maxLength={ADMIN_NOTE_MAX}
+        placeholder={t("adminQueue.common.declineReason")}
+        aria-label={t("adminQueue.actions.declineReasonAria")}
+        className="flex-1 min-w-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        style={{
+          padding: "5px 10px",
+          borderRadius: 6,
+          fontSize: 12,
+          background: "var(--ds-bg-1)",
+          color: "var(--ds-fg)",
+          border: "1px solid var(--ds-border)",
+        }}
+      />
+      <ActionButton onClick={onCancel} disabled={loading} style={NEUTRAL_BTN}>
+        {t("shared.common.cancel")}
+      </ActionButton>
+      <ActionButton
+        onClick={onDecline}
+        disabled={loading}
+        loading={loading}
+        icon={<X style={ICON_12} />}
+        style={{ background: "var(--ds-danger)", color: "var(--ds-on-status)" }}
+      >
+        {t("adminQueue.list.declineN", { count })}
+      </ActionButton>
+    </>
+  );
+}
+
+// The armed approve: one more click approves the whole selection.
+function ConfirmApproveControls({
+  count,
+  loading,
+  onCancel,
+  onApprove,
+}: {
+  count: number;
+  loading: boolean;
+  onCancel: () => void;
+  onApprove: () => void;
+}) {
+  const t = useT();
+  return (
+    <>
+      <span style={{ fontSize: 12, color: "var(--ds-fg-muted)" }}>
+        {t("adminQueue.list.approveConfirm", { count })}
+      </span>
+      <ActionButton onClick={onCancel} disabled={loading} style={NEUTRAL_BTN}>
+        {t("shared.common.cancel")}
+      </ActionButton>
+      <ActionButton onClick={onApprove} disabled={loading} loading={loading} icon={<Check style={ICON_12} />} style={APPROVE_BTN}>
+        {t("adminQueue.list.confirmApprove")}
+      </ActionButton>
+    </>
+  );
+}
+
+// Nothing armed: Approve (asks first), Decline (opens the reason), Clear.
+function IdleControls({
+  count,
+  loading,
+  onArmApprove,
+  onOpenDecline,
+  onClear,
+}: {
+  count: number;
+  loading: boolean;
+  onArmApprove: () => void;
+  onOpenDecline: () => void;
+  onClear: () => void;
+}) {
+  const t = useT();
+  return (
+    <>
+      <ActionButton onClick={onArmApprove} disabled={loading} loading={loading} icon={<Check style={ICON_12} />} style={APPROVE_BTN}>
+        {t("adminQueue.list.approveN", { count })}
+      </ActionButton>
+      <ActionButton
+        onClick={onOpenDecline}
+        disabled={loading}
+        icon={<X style={ICON_12} />}
+        style={{
+          background: "transparent",
+          color: "var(--ds-danger)",
+          borderColor: "color-mix(in oklab, var(--ds-danger) 40%, transparent)",
+        }}
+      >
+        {t("adminQueue.list.declineN", { count })}
+      </ActionButton>
+      <ActionButton
+        onClick={onClear}
+        disabled={loading}
+        style={{
+          marginLeft: "auto",
+          background: "transparent",
+          color: "var(--ds-fg-subtle)",
+          borderColor: "var(--ds-border)",
+        }}
+      >
+        {t("adminQueue.list.clear")}
+      </ActionButton>
+    </>
   );
 }
 
@@ -632,11 +790,12 @@ function RequestGroupRow({
   onManagerActive: (open: boolean) => void;
   initialOpenThread?: string;
 }) {
-  const mounted = useHasMounted();
   const t = useT();
-  const locale = useLocale();
   const pendingIds = pendingIdsFor(group);
   const primaryRequester = group.requesters[0];
+  // A group always carries its requests; one that came through empty has
+  // nothing to show or act on, and must not take the list down with it.
+  if (!primaryRequester) return null;
   // The representative request: the first whose status is the row's aggregate.
   // Each field falls back to the primary on its own — a representative with no
   // note still shows the primary's note.
@@ -649,7 +808,6 @@ function RequestGroupRow({
   // Open in / Manage for THIS row's service only while its integration is on.
   const showArrLinks =
     canOpenArr && (arrServices?.[group.mediaType === "MOVIE" ? "radarr" : "sonarr"] ?? true);
-  const arrService = group.mediaType === "MOVIE" ? "radarr" : "sonarr";
   // Every instance a request of this title names, the default ("") included, once each.
   const groupArrInstances = [...new Set(group.requesters.map((r) => r.arrInstance))];
   const groupInstances = groupArrInstances.filter((slug) => slug !== "");
@@ -694,36 +852,7 @@ function RequestGroupRow({
         )}
       </div>
 
-      <div
-        className="relative shrink-0 overflow-hidden"
-        style={{
-          width: 40,
-          aspectRatio: "2 / 3",
-          borderRadius: 4,
-          background: "var(--ds-bg-3)",
-        }}
-      >
-        {group.posterUrl ? (
-          <Image
-            src={group.posterUrl}
-            alt={group.title}
-            fill
-            className="object-cover"
-            sizes="40px"
-          />
-        ) : (
-          <div
-            className="absolute inset-0 flex items-center justify-center"
-            style={{ color: "var(--ds-fg-subtle)" }}
-          >
-            {group.mediaType === "MOVIE" ? (
-              <Film style={{ width: 14, height: 14 }} />
-            ) : (
-              <Tv2 style={{ width: 14, height: 14 }} />
-            )}
-          </div>
-        )}
-      </div>
+      <PosterThumb group={group} />
 
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1 min-w-0" style={{ minHeight: TITLE_LINE_PX }}>
@@ -743,213 +872,37 @@ function RequestGroupRow({
             }}
           />
         </Link>
-        {/* One Open-in per instance the group's requests sit on — an HD
-            and a 4K request for one title are two instances, and the
-            icons must name both (guardrail 32), never only a representative. */}
-        {showArrLinks && groupArrInstances.map((slug) => (
-          <OpenInArrLink
-            key={`open:${slug}`}
-            service={arrService}
-            instance={slug}
-            target={{ tmdbId: group.tmdbId }}
-            label={t("adminManage.openIn", { name: arrInstanceLabel(arrService, instanceLabel(slug), slug) })}
-            iconOnly
+        {showArrLinks && (
+          <ArrTitleIcons
+            group={group}
+            groupArrInstances={groupArrInstances}
+            instanceLabel={instanceLabel}
+            onManagerActive={onManagerActive}
           />
-        ))}
-        {/* Only once it was pushed there: a pending title isn't on the instance yet. */}
-        {showArrLinks && groupArrInstances.map((slug) => {
-          const onInstance = group.requesters.filter((r) => r.arrInstance === slug);
-          const available = onInstance.some((r) => r.status === "AVAILABLE");
-          if (!available && !onInstance.some((r) => r.status === "APPROVED")) return null;
-          return (
-            <ManageTitleButton
-              key={`manage:${slug}`}
-              service={arrService}
-              instance={slug}
-              target={{ tmdbId: group.tmdbId }}
-              instanceLabel={arrInstanceLabel(arrService, instanceLabel(slug), slug)}
-              variant="icon"
-              initialTab={manageTabFor(available ? "requestAvailable" : "requestApproved", arrService)}
-              onActiveChange={onManagerActive}
-            />
-          );
-        })}
+        )}
         </div>
 
-        <p
-          className="ds-mono"
-          style={{
-            fontSize: 10.5,
-            color: "var(--ds-fg-subtle)",
-            marginTop: 2,
-          }}
-        >
-          {group.mediaType === "MOVIE" ? t("requests.mediaType.movie") : t("requests.mediaType.tv")}
-          {group.releaseYear ? ` · ${group.releaseYear}` : ""}
-          {group.ratings?.certification && (
-            <>
-              {" · "}
-              <span
-                className="inline-flex items-center font-medium"
-                style={{
-                  padding: "0 5px",
-                  borderRadius: 3,
-                  fontSize: 9.5,
-                  letterSpacing: 0.4,
-                  background: "var(--ds-bg-3)",
-                  color: "var(--ds-fg-muted)",
-                  border: "1px solid var(--ds-border)",
-                }}
-                title={t("adminQueue.list.contentRating")}
-              >
-                {group.ratings.certification}
-              </span>
-            </>
-          )}
-          {group.requesters.length > 1 && (
-            <>
-              {" · "}
-              <span style={{ color: "var(--ds-fg-muted)" }}>
-                {t("adminQueue.list.requesters", { count: group.requesters.length })}
-              </span>
-            </>
-          )}
-        </p>
+        <MetaLine group={group} />
 
-        {group.ratings && (
-          <div style={{ marginTop: 6 }}>
-            <RatingsBar
-              size="sm"
-              compact
-              imdbId={group.ratings.imdbId}
-              imdbRating={group.ratings.imdbRating}
-              imdbVotes={group.ratings.imdbVotes}
-              rottenTomatoes={group.ratings.rottenTomatoes}
-              rtAudienceScore={group.ratings.rtAudienceScore}
-              metacritic={group.ratings.metacritic}
-              traktRating={group.ratings.traktRating}
-              letterboxdRating={group.ratings.letterboxdRating}
-              mdblistScore={group.ratings.mdblistScore}
-              malRating={group.ratings.malRating}
-              rogerEbertRating={group.ratings.rogerEbertRating}
-              voteAverage={group.ratings.voteAverage ?? undefined}
-            />
-          </div>
-        )}
+        {group.ratings && <GroupRatings ratings={group.ratings} />}
 
         <div
           className="flex flex-col"
           style={{ marginTop: 6, gap: 3 }}
         >
           {group.requesters.map((r) => (
-            <div
+            <RequesterLine
               key={r.requestId}
-              className="flex items-center flex-wrap ds-mono"
-              style={{
-                fontSize: 10.5,
-                gap: 8,
-                color: "var(--ds-fg-muted)",
-              }}
-            >
-              <span>{formatUserLabel(r, t)}</span>
-              <WatchGradeChip
-                userId={r.userId}
-                userLabel={r.userName ?? r.userEmail}
-                summary={r.userWatchGrade}
-                compact
-              />
-              {r.userRequestCount > 1 && (
-                <span
-                  className="inline-flex items-center font-medium"
-                  style={{
-                    padding: "0 4px",
-                    borderRadius: 3,
-                    fontSize: 10,
-                    background: "var(--ds-bg-3)",
-                    color: "var(--ds-fg-muted)",
-                  }}
-                >
-                  {r.userRequestCount}
-                </span>
-              )}
-              <span style={{ color: "var(--ds-fg-subtle)" }}>
-                {mounted ? `· ${new Date(r.createdAt).toLocaleDateString(locale)}` : ""}
-              </span>
-              {mixedInstances && r.arrInstance !== "" && (
-                <span
-                  className="inline-flex items-center"
-                  style={{
-                    padding: "0 5px",
-                    borderRadius: 3,
-                    fontSize: 9.5,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.4,
-                    background: "color-mix(in oklab, var(--ds-accent) 14%, transparent)",
-                    color: "var(--ds-accent-text)",
-                  }}
-                >
-                  {instanceLabel(r.arrInstance)}
-                </span>
-              )}
-              {group.requesters.length > 1 && r.status !== group.aggregateStatus && (
-                <span
-                  className="inline-flex items-center"
-                  style={{
-                    padding: "0 5px",
-                    borderRadius: 3,
-                    fontSize: 9.5,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.4,
-                    background: "var(--ds-bg-3)",
-                    color: "var(--ds-fg-subtle)",
-                  }}
-                >
-                  {t(`requests.status.${r.status.toLowerCase()}`)}
-                </span>
-              )}
-              {r.note && (
-                <span
-                  className="italic truncate"
-                  style={{
-                    fontSize: 11,
-                    color: "var(--ds-fg-subtle)",
-                    maxWidth: 260,
-                  }}
-                  title={r.note}
-                >
-                  &ldquo;{r.note}&rdquo;
-                </span>
-              )}
-            </div>
+              r={r}
+              aggregateStatus={group.aggregateStatus}
+              several={group.requesters.length > 1}
+              mixedInstances={mixedInstances}
+              instanceLabel={instanceLabel}
+            />
           ))}
         </div>
 
-        {(group.onPlex || group.onJellyfin || groupInstances.length > 0) && (
-          <div
-            className="flex items-center flex-wrap"
-            style={{ gap: 4, marginTop: 6 }}
-          >
-            {group.onPlex && (
-              <span className="ds-chip ds-chip-plex">{t("adminQueue.list.onPlex")}</span>
-            )}
-            {group.onJellyfin && (
-              <span className="ds-chip ds-chip-jellyfin">{t("adminQueue.list.onJellyfin")}</span>
-            )}
-            {groupInstances.map((slug) => (
-              <span
-                key={slug}
-                className="ds-chip"
-                title={t("adminQueue.list.instanceTitle")}
-                style={{
-                  background: "color-mix(in oklab, var(--ds-accent) 14%, transparent)",
-                  color: "var(--ds-accent-text)",
-                }}
-              >
-                {instanceLabel(slug)}
-              </span>
-            ))}
-          </div>
-        )}
+        <AvailabilityChips group={group} groupInstances={groupInstances} instanceLabel={instanceLabel} />
 
         {representativeAdminNote && (
           <p
@@ -967,7 +920,7 @@ function RequestGroupRow({
 
       <div className="hidden sm:inline-flex items-center shrink-0" style={{ height: TITLE_LINE_PX }}>
         <Chip tone={REQUEST_STATUS_TONE[group.aggregateStatus]}>
-          {t(`requests.status.${group.aggregateStatus.toLowerCase()}`)}
+          {statusLabel(group.aggregateStatus, t)}
         </Chip>
       </div>
 
@@ -989,28 +942,328 @@ function RequestGroupRow({
 
       </div>
 
-      {/* One collapsed thread per requester: a group can hold several
-          people's requests for the same title, and each conversation is
-          private to its own requester. Nothing loads until it is opened. */}
-      <div>
-        {group.requesters.map((r) => (
-          <div key={r.requestId} className="flex flex-col items-start">
-            {group.requesters.length > 1 && (
-              <span style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", marginTop: 6 }}>
-                {formatUserLabel(r, t)}
-              </span>
-            )}
-            <RequestThread
-              requestId={r.requestId}
-              viewerIsManager
-              requestNote={r.note}
-              declineNote={r.status === "DECLINED" ? r.adminNote : null}
-              initialCount={r.commentCount}
-              defaultOpen={initialOpenThread === r.requestId}
-            />
-          </div>
-        ))}
-      </div>
+      <RequesterThreads requesters={group.requesters} initialOpenThread={initialOpenThread} />
+    </div>
+  );
+}
+
+function GroupRatings({ ratings }: { ratings: MediaRatings }) {
+  return (
+    <div style={{ marginTop: 6 }}>
+      <RatingsBar
+        size="sm"
+        compact
+        imdbId={ratings.imdbId}
+        imdbRating={ratings.imdbRating}
+        imdbVotes={ratings.imdbVotes}
+        rottenTomatoes={ratings.rottenTomatoes}
+        rtAudienceScore={ratings.rtAudienceScore}
+        metacritic={ratings.metacritic}
+        traktRating={ratings.traktRating}
+        letterboxdRating={ratings.letterboxdRating}
+        mdblistScore={ratings.mdblistScore}
+        malRating={ratings.malRating}
+        rogerEbertRating={ratings.rogerEbertRating}
+        voteAverage={ratings.voteAverage ?? undefined}
+      />
+    </div>
+  );
+}
+
+// One collapsed thread per requester: a group can hold several people's
+// requests for the same title, and each conversation is private to its own
+// requester. Nothing loads until it is opened.
+function RequesterThreads({ requesters, initialOpenThread }: { requesters: Requester[]; initialOpenThread?: string }) {
+  const t = useT();
+  return (
+    <div>
+      {requesters.map((r) => (
+        <div key={r.requestId} className="flex flex-col items-start">
+          {requesters.length > 1 && (
+            <span style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", marginTop: 6 }}>
+              {formatUserLabel(r, t)}
+            </span>
+          )}
+          <RequestThread
+            requestId={r.requestId}
+            viewerIsManager
+            requestNote={r.note}
+            declineNote={r.status === "DECLINED" ? r.adminNote : null}
+            initialCount={r.commentCount}
+            defaultOpen={initialOpenThread === r.requestId}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PosterThumb({ group }: { group: GroupedRequestRow }) {
+  return (
+    <div
+      className="relative shrink-0 overflow-hidden"
+      style={{
+        width: 40,
+        aspectRatio: "2 / 3",
+        borderRadius: 4,
+        background: "var(--ds-bg-3)",
+      }}
+    >
+      {group.posterUrl ? (
+        <Image
+          src={group.posterUrl}
+          alt={group.title}
+          fill
+          className="object-cover"
+          sizes="40px"
+        />
+      ) : (
+        <div
+          className="absolute inset-0 flex items-center justify-center"
+          style={{ color: "var(--ds-fg-subtle)" }}
+        >
+          {group.mediaType === "MOVIE" ? (
+            <Film style={{ width: 14, height: 14 }} />
+          ) : (
+            <Tv2 style={{ width: 14, height: 14 }} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Open in / Manage beside the title, for the row's own service (the caller
+// gates on its integration). One Open-in per instance the group's requests sit
+// on — an HD and a 4K request for one title are two instances, and the icons
+// must name both (guardrail 32), never only a representative.
+function ArrTitleIcons({
+  group,
+  groupArrInstances,
+  instanceLabel,
+  onManagerActive,
+}: {
+  group: GroupedRequestRow;
+  groupArrInstances: string[];
+  instanceLabel: (slug: string) => string;
+  onManagerActive: (open: boolean) => void;
+}) {
+  const t = useT();
+  const arrService = group.mediaType === "MOVIE" ? "radarr" : "sonarr";
+  return (
+    <>
+      {groupArrInstances.map((slug) => (
+        <OpenInArrLink
+          key={`open:${slug}`}
+          service={arrService}
+          instance={slug}
+          target={{ tmdbId: group.tmdbId }}
+          label={t("adminManage.openIn", { name: arrInstanceLabel(arrService, instanceLabel(slug), slug) })}
+          iconOnly
+        />
+      ))}
+      {/* Only once it was pushed there: a pending title isn't on the instance yet. */}
+      {groupArrInstances.map((slug) => {
+        const onInstance = group.requesters.filter((r) => r.arrInstance === slug);
+        const available = onInstance.some((r) => r.status === "AVAILABLE");
+        if (!available && !onInstance.some((r) => r.status === "APPROVED")) return null;
+        return (
+          <ManageTitleButton
+            key={`manage:${slug}`}
+            service={arrService}
+            instance={slug}
+            target={{ tmdbId: group.tmdbId }}
+            instanceLabel={arrInstanceLabel(arrService, instanceLabel(slug), slug)}
+            variant="icon"
+            initialTab={manageTabFor(available ? "requestAvailable" : "requestApproved", arrService)}
+            onActiveChange={onManagerActive}
+          />
+        );
+      })}
+    </>
+  );
+}
+
+// The small square tags of a row (the content rating, a request count, an
+// instance, a status): one shape, each with its own colours.
+const SMALL_TAG: CSSProperties = {
+  padding: "0 5px",
+  borderRadius: 3,
+  fontSize: 9.5,
+};
+const INSTANCE_TINT: CSSProperties = {
+  background: "color-mix(in oklab, var(--ds-accent) 14%, transparent)",
+  color: "var(--ds-accent-text)",
+};
+
+// "Movie · 1999 · R · 3 requesters"
+function MetaLine({ group }: { group: GroupedRequestRow }) {
+  const t = useT();
+  return (
+    <p
+      className="ds-mono"
+      style={{
+        fontSize: 10.5,
+        color: "var(--ds-fg-subtle)",
+        marginTop: 2,
+      }}
+    >
+      {group.mediaType === "MOVIE" ? t("requests.mediaType.movie") : t("requests.mediaType.tv")}
+      {group.releaseYear ? ` · ${group.releaseYear}` : ""}
+      {group.ratings?.certification && (
+        <>
+          {" · "}
+          <span
+            className="inline-flex items-center font-medium"
+            style={{
+              ...SMALL_TAG,
+              letterSpacing: 0.4,
+              background: "var(--ds-bg-3)",
+              color: "var(--ds-fg-muted)",
+              border: "1px solid var(--ds-border)",
+            }}
+            title={t("adminQueue.list.contentRating")}
+          >
+            {group.ratings.certification}
+          </span>
+        </>
+      )}
+      {group.requesters.length > 1 && (
+        <>
+          {" · "}
+          <span style={{ color: "var(--ds-fg-muted)" }}>
+            {t("adminQueue.list.requesters", { count: group.requesters.length })}
+          </span>
+        </>
+      )}
+    </p>
+  );
+}
+
+// One requester: who, their watch grade and request count, when, and — when
+// the group mixes them — the instance and a status that differs from the row's.
+function RequesterLine({
+  r,
+  aggregateStatus,
+  several,
+  mixedInstances,
+  instanceLabel,
+}: {
+  r: Requester;
+  aggregateStatus: string;
+  several: boolean;
+  mixedInstances: boolean;
+  instanceLabel: (slug: string) => string;
+}) {
+  const mounted = useHasMounted();
+  const t = useT();
+  const locale = useLocale();
+  return (
+    <div
+      className="flex items-center flex-wrap ds-mono"
+      style={{
+        fontSize: 10.5,
+        gap: 8,
+        color: "var(--ds-fg-muted)",
+      }}
+    >
+      <span>{formatUserLabel(r, t)}</span>
+      <WatchGradeChip
+        userId={r.userId}
+        userLabel={r.userName ?? r.userEmail}
+        summary={r.userWatchGrade}
+        compact
+      />
+      {r.userRequestCount > 1 && (
+        <span
+          className="inline-flex items-center font-medium"
+          style={{
+            padding: "0 4px",
+            borderRadius: 3,
+            fontSize: 10,
+            background: "var(--ds-bg-3)",
+            color: "var(--ds-fg-muted)",
+          }}
+        >
+          {r.userRequestCount}
+        </span>
+      )}
+      <span style={{ color: "var(--ds-fg-subtle)" }}>
+        {mounted ? `· ${new Date(r.createdAt).toLocaleDateString(locale)}` : ""}
+      </span>
+      {mixedInstances && r.arrInstance !== "" && (
+        <span
+          className="inline-flex items-center"
+          style={{ ...SMALL_TAG, textTransform: "uppercase", letterSpacing: 0.4, ...INSTANCE_TINT }}
+        >
+          {instanceLabel(r.arrInstance)}
+        </span>
+      )}
+      {several && r.status !== aggregateStatus && (
+        <span
+          className="inline-flex items-center"
+          style={{
+            ...SMALL_TAG,
+            textTransform: "uppercase",
+            letterSpacing: 0.4,
+            background: "var(--ds-bg-3)",
+            color: "var(--ds-fg-subtle)",
+          }}
+        >
+          {statusLabel(r.status, t)}
+        </span>
+      )}
+      {r.note && (
+        <span
+          className="italic truncate"
+          style={{
+            fontSize: 11,
+            color: "var(--ds-fg-subtle)",
+            maxWidth: 260,
+          }}
+          title={r.note}
+        >
+          &ldquo;{r.note}&rdquo;
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Where the title already is (Plex, Jellyfin) and the named instances its
+// requests target.
+function AvailabilityChips({
+  group,
+  groupInstances,
+  instanceLabel,
+}: {
+  group: GroupedRequestRow;
+  groupInstances: string[];
+  instanceLabel: (slug: string) => string;
+}) {
+  const t = useT();
+  if (!group.onPlex && !group.onJellyfin && groupInstances.length === 0) return null;
+  return (
+    <div
+      className="flex items-center flex-wrap"
+      style={{ gap: 4, marginTop: 6 }}
+    >
+      {group.onPlex && (
+        <span className="ds-chip ds-chip-plex">{t("adminQueue.list.onPlex")}</span>
+      )}
+      {group.onJellyfin && (
+        <span className="ds-chip ds-chip-jellyfin">{t("adminQueue.list.onJellyfin")}</span>
+      )}
+      {groupInstances.map((slug) => (
+        <span
+          key={slug}
+          className="ds-chip"
+          title={t("adminQueue.list.instanceTitle")}
+          style={INSTANCE_TINT}
+        >
+          {instanceLabel(slug)}
+        </span>
+      ))}
     </div>
   );
 }

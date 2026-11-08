@@ -188,7 +188,7 @@ test("parseNavBadges: an object is the new truth ({} = none); anything else keep
 test("ONE NavBadgesProvider in the layout wraps both nav surfaces; neither takes a frozen badge prop", () => {
   const layout = stripComments(src("../src/app/(app)/layout.tsx"));
   assert.equal(layout.match(/<NavBadgesProvider\b/g)?.length, 1, "one provider, not one per surface");
-  const inner = /<NavBadgesProvider initial=\{navBadges\} enabled=\{isAdmin\}>([\s\S]*?)<\/NavBadgesProvider>/.exec(layout)?.[1] ?? "";
+  const inner = /<NavBadgesProvider initial=\{navBadges\} enabled=\{isAdmin\} collapsedGroups=\{collapsedNavGroups\}>([\s\S]*?)<\/NavBadgesProvider>/.exec(layout)?.[1] ?? "";
   assert.match(inner, /<Sidebar\b/);
   assert.match(inner, /<MobileNav\b/);
   assert.ok(!/<(Sidebar|MobileNav)\b[^>]*navBadges=/.test(layout), "a surface still gets the layout's frozen value as a prop");
@@ -206,7 +206,10 @@ test("the provider reads inside an effect, on an interval, skipped in a hidden t
   const effect = /useEffect\(\(\) => \{([\s\S]*?)\n  \}, \[enabled\]\);/.exec(provider)?.[1] ?? "";
   assert.ok(effect, "the poll is not an effect keyed on `enabled`");
   assert.match(effect, /if \(!enabled\) return;/, "a non-admin would poll an ADMIN route");
-  assert.match(effect, /fetch\(withBasePath\("\/api\/admin\/arr-watch"\)/);
+  assert.match(effect, /fetchJson\(withBasePath\("\/api\/admin\/arr-watch"\)/);
+  // The interval and a returning tab can overlap: only the newest read writes.
+  assert.match(effect, /const mine = \+\+seq;/);
+  assert.match(effect, /if \(mine !== seq\) return;[\s\S]*?setBadges\(/);
   assert.match(effect, /setInterval\([\s\S]*?document\.visibilityState === "hidden"[\s\S]*?NAV_BADGE_POLL_MS\)/);
   assert.match(effect, /clearInterval\(timer\)/);
   assert.match(effect, /removeEventListener\("visibilitychange", onVisibility\)/);

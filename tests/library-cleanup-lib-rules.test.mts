@@ -185,7 +185,8 @@ test("C057 upstreamFailureText / arrFailureText: translated by code, the stored 
 
 test("C057: the three pages word upstream failures through the shared helpers, never the raw English", () => {
   const read = (p: string) => readFileSync(new URL(`../${p}`, import.meta.url), "utf8");
-  const cleanup = read("src/components/admin/library-cleanup.tsx");
+  // The page draws its banners in library-cleanup-parts.tsx.
+  const cleanup = read("src/components/admin/library-cleanup.tsx") + read("src/components/admin/library-cleanup-parts.tsx");
   const nw = read("src/components/admin/never-watched-report.tsx");
   const del = read("src/components/admin/cleanup-delete.tsx");
   for (const [name, src] of [["library-cleanup", cleanup], ["never-watched-report", nw]] as const) {

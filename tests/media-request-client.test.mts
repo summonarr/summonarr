@@ -116,3 +116,22 @@ test("a 200 from the token route that carries no token is a 502, never a token-l
   assert.equal(res.status, 502);
   assert.equal(posts().length, 0);
 });
+
+test("a network failure minting the retry's token returns the 403 — unless the caller aborted, which propagates", async () => {
+  postAnswers = [() => json(403, { error: "invalid request token" })];
+  tokenAnswers = [() => { throw new TypeError("fetch failed"); }];
+  const res = await postMediaRequest({ tmdbId: 1, mediaType: "MOVIE" }, "stale");
+  assert.equal(res.status, 403);
+
+  const ctrl = new AbortController();
+  postAnswers = [() => json(403, { error: "invalid request token" })];
+  tokenAnswers = [() => {
+    ctrl.abort();
+    throw new DOMException("aborted", "AbortError");
+  }];
+  await assert.rejects(
+    postMediaRequest({ tmdbId: 1, mediaType: "MOVIE" }, "stale", { signal: ctrl.signal }),
+    (err: unknown) => err instanceof DOMException && err.name === "AbortError",
+  );
+  assert.equal(posts().length, 2, "nothing is resent after the abort");
+});

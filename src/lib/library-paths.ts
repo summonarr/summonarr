@@ -3,12 +3,18 @@
 // settings form (a client component) imports it too, so its preview strips a
 // prefix exactly as the server does.
 
-/** A path relative to its inferred mount, or the path itself when the mount doesn't prefix it. */
+/**
+ * A path relative to its inferred mount, or the path itself when the mount
+ * doesn't prefix it. The mount is normalised like the path, and it only matches
+ * whole segments: "/data/movies" never strips "/data/movies-4k/X".
+ */
 export function stripMountPoint(filePath: string | null, mountPoint: string): string | null {
   if (!filePath) return null;
   const normalised = filePath.replace(/\\/g, "/");
-  if (mountPoint && normalised.startsWith(mountPoint)) return normalised.slice(mountPoint.length);
-  return normalised;
+  const mount = mountPoint.replace(/\\/g, "/");
+  if (!mount || !normalised.startsWith(mount)) return normalised;
+  const atBoundary = mount.endsWith("/") || normalised.length === mount.length || normalised[mount.length] === "/";
+  return atBoundary ? normalised.slice(mount.length) : normalised;
 }
 
 /**

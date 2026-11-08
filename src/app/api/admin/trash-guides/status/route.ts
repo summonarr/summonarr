@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { listSpecs, describeSchemaError } from "@/lib/trash";
-import { isValidInstanceSlug } from "@/lib/arr-instances";
-import type { ArrVariant } from "@/lib/arr";
+import { parseTrashVariant } from "@/lib/trash-variant";
 import type { TrashService } from "@/generated/prisma";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
@@ -14,10 +13,8 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
   if (!service) {
     return NextResponse.json({ error: t("apiAdmin.common.serviceRadarrOrSonarr") }, { status: 400 });
   }
-  // ?variant= is an instance slug ("" default, "4k", named); "hd" is the legacy default spelling.
-  const rawVariant = req.nextUrl.searchParams.get("variant") ?? "";
-  const variant: ArrVariant = rawVariant === "hd" ? "" : rawVariant.trim();
-  if (!isValidInstanceSlug(variant)) {
+  const variant = parseTrashVariant(req.nextUrl.searchParams.get("variant"));
+  if (variant === null) {
     return NextResponse.json({ error: t("apiAdmin.common.invalidInstance") }, { status: 400 });
   }
 

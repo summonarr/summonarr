@@ -26,7 +26,13 @@ import { zonedMidnightSql } from "@/lib/stats-time-zone";
 export type SqlFragment = { sql: string; binds: unknown[] };
 
 // The recognized PlayHistory.playMethod values; anything else narrows nothing.
-export const PLAY_METHODS: readonly string[] = ["DirectPlay", "DirectStream", "Transcode"];
+// The aggregate SQL reads them as literals from here too (play-history/sql.ts).
+export const PLAY_METHOD = {
+  directPlay: "DirectPlay",
+  directStream: "DirectStream",
+  transcode: "Transcode",
+} as const;
+export const PLAY_METHODS: readonly string[] = [PLAY_METHOD.directPlay, PLAY_METHOD.directStream, PLAY_METHOD.transcode];
 
 // The filters as they actually narrow the query: each is the recognised value,
 // or null when the param is absent or not one this module understands. The

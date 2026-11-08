@@ -182,8 +182,16 @@ shadowPrismaModel(prisma, "notification", {
 let issueMessageIds = new Set<string>();
 let issueIds = new Set<string>();
 let voteIds = new Set<string>();
+// Who filed an issue (or the issue a message belongs to). An id with no entry
+// matches any reporter, so the plain existence tests needn't set one.
+let reportedByOf = new Map<string, string>();
+const reporterMatches = (id: string, reportedBy: string | undefined) =>
+  reportedBy === undefined || !reportedByOf.has(id) || reportedByOf.get(id) === reportedBy;
 shadowPrismaModel(prisma, "issueMessage", {
-  count: async (args: { where: { id: string } }) => { rec("issueMessage.count", args.where); return issueMessageIds.has(args.where.id) ? 1 : 0; },
+  count: async (args: { where: { id: string; issue?: { reportedBy?: string } } }) => {
+    rec("issueMessage.count", args.where);
+    return issueMessageIds.has(args.where.id) && reporterMatches(args.where.id, args.where.issue?.reportedBy) ? 1 : 0;
+  },
   findMany: async () => [], findUnique: async () => null,
 });
 shadowPrismaModel(prisma, "deletionVote", {
@@ -194,7 +202,10 @@ shadowPrismaModel(prisma, "deletionVote", {
 type Issue = { id: string; title: string; claimedBy: string | null; claimedAt: Date | null; reportedBy: string; status: string };
 let issues: Issue[] = [];
 shadowPrismaModel(prisma, "issue", {
-  count: async (args: { where: { id: string } }) => { rec("issue.count", args.where); return issueIds.has(args.where.id) ? 1 : 0; },
+  count: async (args: { where: { id: string; reportedBy?: string } }) => {
+    rec("issue.count", args.where);
+    return issueIds.has(args.where.id) && reporterMatches(args.where.id, args.where.reportedBy) ? 1 : 0;
+  },
   findUnique: async (args: { where: { id: string } }) => {
     rec("issue.findUnique", args.where);
     const i = issues.find((x) => x.id === args.where.id);
@@ -215,11 +226,19 @@ shadowPrismaModel(prisma, "issue", {
 });
 
 let auditFails = false;
+// Rows a successful create wrote, for the report route's one-per-reporter read.
+let auditRows: Array<{ action: string; target: string; userId: string | null }> = [];
 shadowPrismaModel(prisma, "auditLog", {
-  create: async (args: unknown) => {
+  create: async (args: { data: { action: string; target: string; userId: string | null } }) => {
     rec("auditLog.create", args);
     if (auditFails) throw new Error("simulated audit failure");
+    auditRows.push({ action: args.data.action, target: args.data.target, userId: args.data.userId });
     return { id: "a1" };
+  },
+  findFirst: async (args: { where: { action: string; target: string; userId: string } }) => {
+    rec("auditLog.findFirst", args.where);
+    const w = args.where;
+    return auditRows.some((r) => r.action === w.action && r.target === w.target && r.userId === w.userId) ? { id: "a1" } : null;
   },
 });
 
@@ -330,6 +349,8 @@ beforeEach(() => {
   issueMessageIds = new Set();
   issueIds = new Set();
   voteIds = new Set();
+  reportedByOf = new Map();
+  auditRows = [];
   verifyTokens = [];
   afterTasks.length = 0;
   warns.length = 0;
@@ -612,6 +633,33 @@ test("a FAILED audit write makes the report FAIL — the audit IS the operation"
     () => postReport(me.token, { contentType: "issue", contentId: "i1" }),
     "a failed audit write must surface, not be swallowed",
   );
+});
+
+test("report 404s an issue or issue message the reporter can't see, exactly as a missing one; an issue manager can report it", async () => {
+  const me = await mintSession();
+  issueIds = new Set(["i-theirs", "i-mine"]);
+  issueMessageIds = new Set(["m-theirs"]);
+  reportedByOf = new Map([["i-theirs", "someone-else"], ["m-theirs", "someone-else"], ["i-mine", me.userId]]);
+  assert.equal((await postReport(me.token, { contentType: "issue", contentId: "i-theirs" })).status, 404);
+  assert.equal((await postReport(me.token, { contentType: "issue_message", contentId: "m-theirs" })).status, 404);
+  assert.equal((await postReport(me.token, { contentType: "issue", contentId: "i-mine" })).status, 200);
+  assert.equal(opsOf("auditLog.create").length, 1, "only the visible issue was reported");
+  const admin = await issueAdmin();
+  assert.equal((await postReport(admin.token, { contentType: "issue", contentId: "i-theirs" })).status, 200);
+  assert.equal((await postReport(admin.token, { contentType: "issue_message", contentId: "m-theirs" })).status, 200);
+});
+
+test("a repeat report of the same item by the same reporter answers ok and writes no second row; another reporter's is recorded", async () => {
+  const me = await mintSession();
+  const other = await mintSession();
+  issueIds = new Set(["i1"]);
+  assert.equal((await postReport(me.token, { contentType: "issue", contentId: "i1", reason: "spam" })).status, 200);
+  const again = await postReport(me.token, { contentType: "issue", contentId: "i1", reason: "spam again" });
+  assert.equal(again.status, 200);
+  assert.deepEqual(await again.json(), { ok: true });
+  assert.equal(opsOf("auditLog.create").length, 1);
+  assert.equal((await postReport(other.token, { contentType: "issue", contentId: "i1" })).status, 200);
+  assert.equal(opsOf("auditLog.create").length, 2);
 });
 
 test("report sanitizes and bounds the free-text fields", async () => {

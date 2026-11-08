@@ -1,8 +1,9 @@
-// Structural pin for the Settings page side nav — src/app/(app)/settings/page.tsx.
+// Structural pin for the Settings page side nav — src/app/(app)/settings/.
 //
-// Each tab renders its cards as `<div id="…">` sections, and TAB_SECTIONS is the
-// hand-maintained list the sticky side nav (SettingsNav) links to. Nothing tied
-// the two together, so a card could ship without a nav entry: it rendered, but
+// Each tab renders its cards as `<SettingsCard id="…">` sections (one module
+// per tab in _tabs/), and TAB_SECTIONS (_tabs/sections.ts) is the hand-
+// maintained list the sticky side nav (SettingsNav) links to. Nothing tied the
+// two together, so a card could ship without a nav entry: it rendered, but
 // nobody using the nav could find it. Four had — Watch Grades, Radarr 4K and
 // Sonarr 4K (Media) and IP Geolocation (Integrations).
 //
@@ -10,7 +11,7 @@
 // nav item whose section has scrolled past the top, walking the nav in its own
 // order, so a nav listed out of page order highlights the wrong entry.
 //
-// Source-level because the page imports .tsx components, which the node:test
+// Source-level because the tabs import .tsx components, which the node:test
 // loader cannot load (see tests/_loader.mjs) — same idiom as
 // tests/detail-page-invariants.test.mts.
 import { test } from "node:test";
@@ -18,14 +19,17 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const source = readFileSync(join(process.cwd(), "src", "app", "(app)", "settings", "page.tsx"), "utf-8");
+const DIR = join(process.cwd(), "src", "app", "(app)", "settings");
+const read = (...rel: string[]) => readFileSync(join(DIR, ...rel), "utf-8");
+const sections = read("_tabs", "sections.ts");
+const page = read("page.tsx");
 
 // TAB_SECTIONS: `  media: [ { id: "plex", … }, … ],` per tab.
 function navByTab(): Map<string, string[]> {
-  const start = source.indexOf("const TAB_SECTIONS");
+  const start = sections.indexOf("export const TAB_SECTIONS");
   assert.ok(start >= 0, "TAB_SECTIONS not found");
-  const end = source.indexOf("\n};", start);
-  const block = source.slice(start, end);
+  const end = sections.indexOf("\n};", start);
+  const block = sections.slice(start, end);
   const out = new Map<string, string[]>();
   let current: string | null = null;
   for (const line of block.split("\n")) {
@@ -42,26 +46,29 @@ function navByTab(): Map<string, string[]> {
   return out;
 }
 
-// The card ids each `{tab === "<id>" … && (` block renders, in page order.
-// Every card is a `<SettingsCard id="…">` (the helper defined in page.tsx), so a
-// card that bypasses the helper is invisible here and fails the membership
-// check below — which is the point: the helper is what gives it an anchor.
+// The card ids each tab module renders, in source order. The page picks the
+// module per tab in TabPanel (`case "<tab>": return <XTab`), and every card is a
+// `<SettingsCard id="…">` (the helper in _tabs/ui.tsx), so a card that
+// bypasses the helper is invisible here and fails the membership check below —
+// which is the point: the helper is what gives it an anchor.
 function cardsByTab(): Map<string, string[]> {
   const out = new Map<string, string[]>();
-  const openers = [...source.matchAll(/\{tab === "([a-z]+)"[^(]*&& \(/g)];
-  assert.ok(openers.length > 0, "no tab blocks found");
-  openers.forEach((m, i) => {
-    const from = m.index! + m[0].length;
-    const to = i + 1 < openers.length ? openers[i + 1].index! : source.length;
-    const ids = [...source.slice(from, to).matchAll(/<SettingsCard\s+id="([a-z0-9-]+)"/g)].map((c) => c[1]);
-    out.set(m[1], ids);
-  });
+  const cases = [...page.matchAll(/case "([a-z]+)": return <(\w+)Tab\b/g)];
+  assert.ok(cases.length > 0, "no tab cases found");
+  for (const [, tab, component] of cases) {
+    const file = `${component.replace(/[A-Z]/g, (c, i) => (i ? "-" : "") + c.toLowerCase())}-tab.tsx`;
+    const src = read("_tabs", file);
+    out.set(tab, [...src.matchAll(/<SettingsCard\s+id="([a-z0-9-]+)"/g)].map((c) => c[1]));
+  }
   return out;
 }
+
+const tabSources = () => [page, ...["site", "media", "notifications", "integrations", "features", "system"].map((t) => read("_tabs", `${t}-tab.tsx`))].join("\n");
 
 test("no card bypasses the SettingsCard helper", () => {
   // The old inline recipe — a bare <div> carrying the card style — is what let
   // descriptions drift between 14px subtle and 12px muted on one tab.
+  const source = tabSources();
   assert.doesNotMatch(source, /<div id="[a-z0-9-]+" style=\{\{\s*padding:\s*22/);
   assert.doesNotMatch(source, /<div style=\{\{\s*padding:\s*22/);
 });

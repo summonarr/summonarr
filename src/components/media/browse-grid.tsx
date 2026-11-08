@@ -33,7 +33,7 @@ interface BrowseGridProps {
   // end, an empty upstream page) must not blame the token.
   tokenMissing?: boolean;
   // HD request overlay on each card — same gate as the detail-page CTA.
-  canRequest?: boolean;
+  canRequest: boolean;
 }
 
 

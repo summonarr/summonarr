@@ -154,7 +154,7 @@ type SubRow = {
 let subRows: SubRow[] = [];
 let subSeq = 0;
 
-type SubWhere = { userId?: string | { in?: string[] }; platform?: string; endpoint?: string | { in?: string[]; startsWith?: string }; id?: string };
+type SubWhere = { userId?: string | { in?: string[] }; platform?: string; endpoint?: string | { in?: string[]; startsWith?: string }; id?: string | { in?: string[] } };
 function subMatches(row: SubRow, where: SubWhere | undefined): boolean {
   if (!where) return true;
   if (typeof where.userId === "string" && row.userId !== where.userId) return false;
@@ -165,15 +165,19 @@ function subMatches(row: SubRow, where: SubWhere | undefined): boolean {
     if (where.endpoint.in && !where.endpoint.in.includes(row.endpoint)) return false;
     if (where.endpoint.startsWith !== undefined && !row.endpoint.startsWith(where.endpoint.startsWith)) return false;
   }
-  if (where.id !== undefined && row.id !== where.id) return false;
+  if (typeof where.id === "string" && row.id !== where.id) return false;
+  if (where.id && typeof where.id === "object" && where.id.in && !where.id.in.includes(row.id)) return false;
   return true;
 }
 
 const pushModel = {
   findUnique: async (args: { where: { endpoint: string } }) =>
     subRows.find((r) => r.endpoint === args.where.endpoint) ?? null,
-  findMany: async (args: { where?: SubWhere }) =>
-    subRows.filter((r) => subMatches(r, args?.where)).map((r) => ({ ...r })),
+  findMany: async (args: { where?: SubWhere; orderBy?: { createdAt: "asc" }; take?: number }) => {
+    const rows = subRows.filter((r) => subMatches(r, args?.where));
+    if (args?.orderBy?.createdAt === "asc") rows.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    return rows.slice(0, args?.take ?? rows.length).map((r) => ({ ...r }));
+  },
   count: async (args: { where?: SubWhere }) => subRows.filter((r) => subMatches(r, args?.where)).length,
   findFirst: async (args: { where?: SubWhere }) => {
     const matched = subRows.filter((r) => subMatches(r, args?.where));
@@ -227,11 +231,12 @@ shadowPrismaModel(prisma, "pushSubscription", pushModel);
 type RemovalRow = { id: string; userId: string; endpointHash: string; removedAt: Date };
 let removalRows: RemovalRow[] = [];
 let removalSeq = 0;
-type RemovalWhere = { userId?: string; endpointHash?: string; id?: { in?: string[] } };
+type RemovalWhere = { userId?: string; endpointHash?: string | { in?: string[] }; id?: { in?: string[] } };
 function removalMatches(row: RemovalRow, where: RemovalWhere | undefined): boolean {
   if (!where) return true;
   if (where.userId !== undefined && row.userId !== where.userId) return false;
-  if (where.endpointHash !== undefined && row.endpointHash !== where.endpointHash) return false;
+  if (typeof where.endpointHash === "string" && row.endpointHash !== where.endpointHash) return false;
+  if (where.endpointHash && typeof where.endpointHash === "object" && where.endpointHash.in && !where.endpointHash.in.includes(row.endpointHash)) return false;
   if (where.id?.in && !where.id.in.includes(row.id)) return false;
   return true;
 }
@@ -259,6 +264,24 @@ const removalModel = {
     const row = { id: `removal-${++removalSeq}`, removedAt: new Date(), ...args.create };
     removalRows.push(row);
     return { ...row };
+  },
+  updateMany: async (args: { where: RemovalWhere; data: { removedAt: Date } }) => {
+    const hit = removalRows.filter((r) => removalMatches(r, args.where));
+    for (const r of hit) r.removedAt = args.data.removedAt;
+    return { count: hit.length };
+  },
+  // (userId, endpointHash) is UNIQUE: skipDuplicates skips a pair already stored.
+  createMany: async (args: { data: Array<{ userId: string; endpointHash: string }>; skipDuplicates?: boolean }) => {
+    let count = 0;
+    for (const d of args.data) {
+      if (removalRows.some((r) => r.userId === d.userId && r.endpointHash === d.endpointHash)) {
+        if (!args.skipDuplicates) throw new Error("unique violation");
+        continue;
+      }
+      removalRows.push({ id: `removal-${++removalSeq}`, removedAt: new Date(), ...d });
+      count++;
+    }
+    return { count };
   },
   deleteMany: async (args: { where: RemovalWhere }) => {
     const before = removalRows.length;
@@ -295,6 +318,15 @@ shadowPrismaModel(prisma, "user", {
     return u ? { ...u } : null;
   },
   update: async () => ({}),
+});
+
+// Audit rows the routes write (void logAudit — read after a tick).
+const auditRows: Array<{ action: string; target: string | null; details: unknown }> = [];
+shadowPrismaModel(prisma, "auditLog", {
+  create: async (args: { data: { action: string; target?: string | null; details?: unknown } }) => {
+    auditRows.push({ action: args.data.action, target: args.data.target ?? null, details: args.data.details });
+    return {};
+  },
 });
 
 // $transaction: interactive form only. The tx object exposes every delegate a
@@ -691,6 +723,21 @@ test("Remove device sticks: after DELETE {id} the browser's page-load resync is 
   assert.equal(subRows.length, 1);
 });
 
+test("a cap the admin LOWERED is enforced on the next registration: every row past it is evicted (and tombstoned), oldest first", async () => {
+  settings.set("maxPushSubscriptions", "2");
+  const { userId, token } = await mintSession();
+  for (const [slug, age] of [["a", 5_000], ["b", 4_000], ["c", 3_000], ["d", 2_000]] as const) seedAgedWebSub(userId, slug, age);
+
+  const res = await callRoute(subscribePost, pushReq("subscribe", { token, body: webBody("e") }));
+  assert.equal(res.status, 200);
+  assert.deepEqual(subRows.map((r) => r.endpoint), [`${FCM}/d`, `${FCM}/e`], "back to exactly the cap");
+  assert.deepEqual(
+    removalRows.map((r) => r.endpointHash).sort(),
+    [`${FCM}/a`, `${FCM}/b`, `${FCM}/c`].map(pushEndpointHash).sort(),
+    "each evicted browser is tombstoned",
+  );
+});
+
 test("a resync never evicts: an unknown endpoint at the cap is refused 410 and every other device stays", async () => {
   settings.set("maxPushSubscriptions", "2");
   const { userId, token } = await mintSession();
@@ -820,6 +867,29 @@ test("POST /api/push/apns rejects a non-hex device token (400) and a token owned
   assert.equal(conflict.status, 409);
   assert.deepEqual(await conflict.json(), { error: "Device already registered to another account" });
   assert.equal(subRows.length, 1, "the other account's device row is untouched");
+});
+
+test("POST /api/push/apns re-checks ownership under the lock: a device another account registered after the pre-check is a 409, and its row is not rewritten", async () => {
+  const RACED = "9a8b7c6d".repeat(8);
+  const { token } = await mintSession();
+  // The other account's registration commits between the route's pre-check and
+  // its transaction — the per-user lock serializes one account, not two.
+  const realExec = txObj.$executeRaw;
+  txObj.$executeRaw = async (strings: TemplateStringsArray | string, ...values: unknown[]) => {
+    txObj.$executeRaw = realExec;
+    seedIosSub("racing-account", RACED, { label: "Their phone" });
+    return realExec(strings, ...values);
+  };
+  try {
+    const res = await callRoute(apnsPost, pushReq("apns", { token, body: { deviceToken: RACED, label: "Mine now" } }));
+    assert.equal(res.status, 409);
+    assert.deepEqual(await res.json(), { error: "Device already registered to another account" });
+  } finally {
+    txObj.$executeRaw = realExec;
+  }
+  assert.equal(subRows.length, 1);
+  assert.equal(subRows[0].userId, "racing-account");
+  assert.equal(subRows[0].label, "Their phone", "the other account's row was not updated");
 });
 
 // ── /api/push/apns — the endpoint handle is a hash, never the raw token ──────
@@ -1014,11 +1084,54 @@ test("POST /api/push/announce-update (admin) broadcasts to EVERY iOS device acro
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { ok: true, sent: 1, failed: 1 });
   assert.equal(relayCalls.length, 2, "both iOS devices were hit; the web row was excluded");
+  await new Promise((r) => setImmediate(r));
+  const audit = auditRows.at(-1);
+  assert.equal(audit?.action, "PUSH_BROADCAST", "a broadcast to every device is audited");
+  assert.deepEqual(JSON.parse(String(audit?.details)), { kind: "app-update", sent: 1, failed: 1 });
   assert.deepEqual(
     relayCalls.map((c) => c.body.deviceToken).sort(),
     ["ios-a", "ios-b"],
   );
   for (const c of relayCalls) assert.equal(c.body.collapseId, "app_update");
+});
+
+test("POST /api/push/announce-update: the 2-per-hour budget is the SERVER's — a second admin can't double what every device receives", async () => {
+  const { refundHit } = await import("../src/lib/rate-limit.ts");
+  const drainServerBucket = () => { for (let i = 0; i < 5; i++) refundHit("push-announce-update:server"); };
+  drainServerBucket();
+  try {
+    seedIosSub("user-a", "ios-a");
+    const first = await mintSession({ role: "ADMIN" });
+    const second = await mintSession({ role: "ADMIN" });
+    assert.equal((await callRoute(announcePost, pushReq("announce-update", { token: first.token }))).status, 200);
+    assert.equal((await callRoute(announcePost, pushReq("announce-update", { token: second.token }))).status, 200);
+    relayCalls.length = 0;
+    const third = await callRoute(announcePost, pushReq("announce-update", { token: second.token }));
+    assert.equal(third.status, 429, "the server-wide budget is spent, whichever admin asks");
+    assert.equal(relayCalls.length, 0);
+  } finally {
+    drainServerBucket();
+  }
+});
+
+test("POST /api/push/announce-update: a failed device read answers 500 with an error and a [push] log line, not an unhandled throw", async () => {
+  const { refundHit } = await import("../src/lib/rate-limit.ts");
+  const realFindMany = pushModel.findMany;
+  pushModel.findMany = async () => { throw new Error("db down"); };
+  try {
+    const admin = await mintSession({ role: "ADMIN" });
+    const res = await callRoute(announcePost, pushReq("announce-update", { token: admin.token }));
+    assert.equal(res.status, 500);
+    assert.equal(typeof (await res.json()).error, "string");
+    const auditsBefore = auditRows.length;
+    assert.ok(errors.some((e) => e.startsWith("[push] update broadcast failed")), errors.join(" | "));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(auditRows.length, auditsBefore, "nothing was sent, so nothing is audited");
+  } finally {
+    pushModel.findMany = realFindMany;
+    errors.length = 0;
+    refundHit("push-announce-update:server");
+  }
 });
 
 test("POST /api/push/test: a web transport failure is a fixed phrase — the SafeFetchError message names the full endpoint the route truncates everywhere else", async () => {

@@ -19,7 +19,16 @@ import { getContentLocale } from "./i18n/server";
 export async function attachAllAvailability<T extends TmdbMedia>(
   items: T[],
   userId?: string,
-  options?: { blockRatings?: boolean; skipRatings?: boolean; show4k?: boolean; includeHidden?: boolean },
+  options?: {
+    blockRatings?: boolean;
+    skipRatings?: boolean;
+    show4k?: boolean;
+    includeHidden?: boolean;
+    // Leave TMDB text in English: for a caller that shows only a slice of a
+    // long list and localizes that slice itself (localizeMedia), rather than
+    // fetching translations for titles it never renders.
+    skipLocalize?: boolean;
+  },
 ): Promise<T[]> {
   if (items.length === 0) return items;
 
@@ -63,46 +72,58 @@ export async function attachAllAvailability<T extends TmdbMedia>(
     options?.skipRatings
       ? Promise.resolve(work)
       : attachRatingsUnified(work, { blocking: options?.blockRatings ?? false }),
-    getContentLocale().then((locale) => localizeMedia(work, locale)),
+    options?.skipLocalize ? Promise.resolve(work) : getContentLocale().then((locale) => localizeMedia(work, locale)),
   ]);
 
-  const plexMap     = new Map(withPlex.map((i)     => [`${i.id}:${i.mediaType}`, i.plexAvailable]));
-  const jellyfinMap = new Map(withJellyfin.map((i)  => [`${i.id}:${i.mediaType}`, i.jellyfinAvailable]));
-  const arrMap      = new Map(withArr.map((i)       => [`${i.id}:${i.mediaType}`, { arrPending: i.arrPending, arr4kPending: i.arr4kPending, arr4kAvailable: i.arr4kAvailable }]));
-  const reqMap      = new Map(withRequests.map((i)  => [`${i.id}:${i.mediaType}`, { requested: i.requested, requestedByMe: i.requestedByMe }]));
-  const ratingsMap  = new Map(withRatings.map((i)   => [`${i.id}:${i.mediaType}`, i]));
-  const textMap     = localized === work ? null : new Map(localized.map((i) => [`${i.id}:${i.mediaType}`, i]));
+  const plex = byMediaKey(withPlex);
+  const jellyfin = byMediaKey(withJellyfin);
+  const arr = byMediaKey(withArr);
+  const requests = byMediaKey(withRequests);
+  const ratings = byMediaKey(withRatings);
+  const text = localized === work ? null : byMediaKey(localized);
 
-  return work.map((item) => {
-    const k = `${item.id}:${item.mediaType}`;
-    const arr = arrMap.get(k);
-    const text = textMap?.get(k);
+  return work.map((item): T => {
+    const k = mediaKey(item);
+    const a = arr.get(k);
+    const r = requests.get(k);
     return {
       // The caller's item first, so its own fields survive whatever shape the
       // ratings pass returns; the ratings fields then win over it.
       ...item,
-      ...ratingsMap.get(k),
-      // Only the overlay's own fields — never let it overwrite enrichment.
-      ...(text
-        ? {
-            title: text.title,
-            overview: text.overview,
-            tagline: text.tagline,
-            posterPath: text.posterPath,
-            originalTitle: text.originalTitle,
-            genres: text.genres,
-            genreList: text.genreList,
-          }
-        : {}),
-      plexAvailable:     plexMap.get(k)           ?? false,
-      jellyfinAvailable: jellyfinMap.get(k)        ?? false,
-      arrPending:        arr?.arrPending           ?? false,
+      ...ratings.get(k),
+      ...localizedText(text?.get(k)),
+      plexAvailable:     plex.get(k)?.plexAvailable         ?? false,
+      jellyfinAvailable: jellyfin.get(k)?.jellyfinAvailable ?? false,
+      arrPending:        a?.arrPending                      ?? false,
       // Only surfaced when show4k is true; left undefined otherwise so the UI shows nothing.
-      arr4kPending:      arr?.arr4kPending,
-      arr4kAvailable:    arr?.arr4kAvailable,
-      requested:         reqMap.get(k)?.requested     ?? false,
-      requestedByMe:     reqMap.get(k)?.requestedByMe ?? false,
+      arr4kPending:      a?.arr4kPending,
+      arr4kAvailable:    a?.arr4kAvailable,
+      requested:         r?.requested                       ?? false,
+      requestedByMe:     r?.requestedByMe                   ?? false,
       ...(blSet.size > 0 && blSet.has(blacklistKey(item.id, item.mediaType)) ? { blacklisted: true } : {}),
-    } as T;
+    };
   });
+}
+
+// One title's identity across the passes: TMDB ids are per media type.
+const mediaKey = (i: Pick<TmdbMedia, "id" | "mediaType">) => `${i.id}:${i.mediaType}`;
+
+// A pass's answer by title, so each field is read from the pass that owns it
+// and no pass can overwrite another's.
+function byMediaKey<U extends Pick<TmdbMedia, "id" | "mediaType">>(list: readonly U[]): Map<string, U> {
+  return new Map(list.map((i) => [mediaKey(i), i]));
+}
+
+// Only the overlay's own fields — never let it overwrite enrichment.
+function localizedText(t: TmdbMedia | undefined): Partial<TmdbMedia> {
+  if (!t) return {};
+  return {
+    title: t.title,
+    overview: t.overview,
+    tagline: t.tagline,
+    posterPath: t.posterPath,
+    originalTitle: t.originalTitle,
+    genres: t.genres,
+    genreList: t.genreList,
+  };
 }

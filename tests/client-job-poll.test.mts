@@ -122,17 +122,46 @@ test("a network failure on the release search's FIRST request still rejects, as 
 const src = (p: string) => readFileSync(new URL(`../src/${p}`, import.meta.url), "utf8");
 
 test("the release search, Replace file, the title manager's file delete and Arr System's provider jobs poll through job-poll.ts, with no private loop", () => {
-  for (const file of ["lib/client/release-search-job.ts", "lib/client/replace-file-job.ts", "components/admin/arr-title/files-tab.tsx", "components/admin/arr-system.tsx"]) {
+  for (const file of ["lib/client/release-search-job.ts", "lib/client/replace-file-job.ts", "lib/client/title-file-delete.ts", "lib/client/arr-call.ts"]) {
     const text = src(file);
     assert.match(text, /await pollJob\(|return pollJob\(/, `${file} polls through pollJob`);
     assert.doesNotMatch(text, /for \(let i = 0; i < [A-Z_a-z.?()]+; i\+\+\)|while \(res\.status === 202\)/, `${file} keeps no loop of its own`);
   }
-  const files = src("components/admin/arr-title/files-tab.tsx");
-  assert.match(files, /pollJob\(fetch, withBasePath\(`\$\{path\}&job=\$\{encodeURIComponent\(start\.data\.job\)\}`\), \{\s*isAlive: alive,\s*intervalMs: DELETE_POLL_MS,\s*maxPolls: DELETE_MAX_POLLS,\s*failLimit: DELETE_FAILED_POLLS,/);
+  const files = src("lib/client/title-file-delete.ts");
+  assert.match(files, /pollJob\(globalThis\.fetch, jobUrl\(url, start\.data\.job\), \{\s*isAlive: \(\) => !signal\?\.aborted,\s*intervalMs: DELETE_POLL_MS,\s*maxPolls: DELETE_MAX_POLLS,\s*failLimit: DELETE_FAILED_POLLS,/);
   // A delete with no answer is "still running", never "failed".
-  assert.match(files, /if \(answer\.status === 0 \|\| data === null \|\| typeof data !== "object"\) return \{ ok: false, running: true \};/);
-  // Arr System: no counter of its own; no answer is "still running", never the change's failure.
-  const system = src("components/admin/arr-system.tsx");
-  assert.doesNotMatch(system, /polls\+\+|failedPolls|isTransientJobPollFailure/);
-  assert.match(system, /if \(answer\.status === 0\) return \{ error: stillRunning, status: 0, body: \{ stillRunning: true \} \};/);
+  assert.match(files, /if \(answer\.status === 0 \|\| data === null \|\| typeof data !== "object" \|\| Array\.isArray\(data\)\) return \{ kind: "running" \};/);
+  assert.match(src("components/admin/arr-title/files-tab.tsx"), /runTitleFileDelete\(/);
+  // Arr System's jobs (arr-call.ts): no counter of their own; no answer is "still running", never the change's failure.
+  const call = src("lib/client/arr-call.ts");
+  assert.doesNotMatch(call, /polls\+\+|failedPolls|isTransientJobPollFailure/);
+  assert.match(call, /if \(answer\.status === 0\) return \{ ok: false, status: 0, error: opts\.stillRunning, body: \{ \.\.\.STILL_RUNNING_BODY \}, aborted: false \};/);
+  assert.match(src("components/admin/arr-system-providers.tsx"), /arrCallJob\(/);
+});
+
+test("a 2xx that is not JSON, or came through a redirect, is a failed poll, never the job's answer", async () => {
+  const loginPage = () => new Response("<html>Sign in</html>", { status: 200, headers: { "content-type": "text/html" } });
+  const redirected = () => {
+    const res = json({ ok: true });
+    Object.defineProperty(res, "redirected", { value: true });
+    return res;
+  };
+  // Retried, then the job's own answer.
+  let s = scripted([loginPage(), redirected(), json({ deleted: 1 })]);
+  assert.deepEqual(await pollJob(s.fetchFn, "/x?job=j", opts()), { status: 200, data: { deleted: 1 } });
+  // failLimit of them in a row: no answer.
+  s = scripted([loginPage(), loginPage(), loginPage()]);
+  assert.deepEqual(await pollJob(s.fetchFn, "/x?job=j", opts({ failLimit: 3 })), { status: 0, data: null });
+});
+
+test("onGiveUp tells an unreachable server from a job still running at the poll budget", async () => {
+  const reasons: string[] = [];
+  const onGiveUp = (r: string) => reasons.push(r);
+  let s = scripted([new Error("offline"), new Error("offline")]);
+  await pollJob(s.fetchFn, "/x?job=j", opts({ failLimit: 2, onGiveUp }));
+  s = scripted([running(), running()]);
+  await pollJob(s.fetchFn, "/x?job=j", opts({ maxPolls: 2, onGiveUp }));
+  s = scripted([json({ deleted: 1 })]);
+  await pollJob(s.fetchFn, "/x?job=j", opts({ onGiveUp }));
+  assert.deepEqual(reasons, ["unreachable", "outOfPolls"]);
 });

@@ -734,3 +734,13 @@ test("user-supplied text in the subheading and details is escaped exactly once",
   // User: the title rides inside <strong> in the subheading.
   assert.ok(user.includes(`<strong style="color:#fafafa">${escaped}</strong>`));
 });
+
+test("a Resend refusal whose message is not text reports the status instead", async () => {
+  configureResend();
+  const reply = (body: unknown) => () =>
+    new Response(JSON.stringify(body), { status: 422, headers: { "content-type": "application/json" } });
+  respond = reply({ message: { nested: true } });
+  await assert.rejects(() => sendTestEmail("admin@example.com"), (err: Error) => err.message === "Resend send failed (422)");
+  respond = reply({ message: "Invalid `to` field" });
+  await assert.rejects(() => sendTestEmail("admin@example.com"), /Invalid `to` field/);
+});

@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { getPlexFriendEmails, type PlexServerMembers } from "@/lib/plex";
+import { getPlexFriendEmails, getPlexMachineId, PLEX_IDENTITY_TIMEOUT_MS, type PlexServerMembers } from "@/lib/plex";
 import { normalizeEmail } from "@/lib/email-normalize";
 import { getMediaInstances, type MediaInstanceConfig } from "@/lib/media-instance-registry";
 import { getPlexConfig } from "@/lib/plex-config";
@@ -24,7 +24,10 @@ import { processSingleton } from "@/lib/process-singleton";
 // the caller does NOT lock anyone out. A plex.tv outage must never log out the
 // whole user base. When a prior good set exists for an instance it is served
 // stale during an outage (continues enforcing the last-known membership)
-// instead of falling back to "no opinion".
+// instead of falling back to "no opinion". The one way an instance's set
+// shrinks to its admin alone: two refreshes in a row in which the server
+// identifies itself and plex.tv answers with nobody shared on it (the admin
+// unshared the last friend). One such answer is served stale.
 //
 // THE partial-failure rule: a configured instance that is INDETERMINATE — cold
 // (no prior good set) with its fetch failing or empty — poisons the WHOLE call
@@ -74,6 +77,14 @@ type SlugState = {
   // "unconfigured" verdict is never older than the current call — the refresh
   // resets lastAttemptAt on that outcome, so every call re-derives it.
   lastOutcome: AttemptOutcome | null;
+  // Bumped by expirePlexMembershipCache: a fetch started under an older
+  // generation (with the old admin token) settles without touching the cache.
+  generation: number;
+  // Consecutive CONFIRMED-empty answers (the server identified, plex.tv
+  // answered, nobody shared) while a prior set is cached. One is served stale
+  // (a truncated list must not log everyone out); the second replaces the
+  // cache, so removing the last friend does take effect.
+  emptyStreak: number;
 };
 
 // Process-wide (guardrail 27a): this module is reached from the proxy, page
@@ -90,7 +101,15 @@ const composed = processSingleton(
   () => ({ value: null as { key: string; members: PlexServerMembers } | null }),
 );
 
-async function fetchSlugAllowlist(slug: MediaInstanceKey): Promise<{ outcome: AttemptOutcome; entry?: CacheEntry }> {
+type FetchResult = {
+  outcome: AttemptOutcome;
+  entry?: CacheEntry;
+  // Set on an "indeterminate" answer that is really an authoritative empty
+  // list: the admin-only set to cache if the empty answer repeats.
+  confirmedEmpty?: CacheEntry;
+};
+
+async function fetchSlugAllowlist(slug: MediaInstanceKey, hasPriorSet: boolean): Promise<FetchResult> {
   const [{ url, token }, adminEmailRow] = await Promise.all([
     getPlexConfig(slug),
     prisma.setting.findUnique({ where: { key: plexSettingKey(slug, "AdminEmail") } }),
@@ -99,6 +118,13 @@ async function fetchSlugAllowlist(slug: MediaInstanceKey): Promise<{ outcome: At
   const serverUrl = url?.trim();
   // Unconfigured — this instance cannot be verified and doesn't need to be.
   if (!adminToken || !serverUrl) return { outcome: "unconfigured" };
+  // normalizeEmail matches the sign-in gate in auth.ts (authorizeWithPlex) so
+  // both membership checks share one normalization of the admin-email Setting.
+  const adminEmails = (): Set<string> => {
+    const emails = new Set<string>();
+    if (adminEmailRow?.value) emails.add(normalizeEmail(adminEmailRow.value));
+    return emails;
+  };
 
   // getPlexFriendEmails throws on a non-2xx plex.tv response and returns empty
   // sets when it can't resolve the server's machineId. An empty result would
@@ -106,21 +132,50 @@ async function fetchSlugAllowlist(slug: MediaInstanceKey): Promise<{ outcome: At
   // determine". (The admin email is added only after this guard so an
   // admin-only server isn't mistaken for a successful-but-empty fetch.)
   const members = await getPlexFriendEmails(adminToken, serverUrl);
-  if (members.ids.size === 0 && members.emails.size === 0) return { outcome: "indeterminate" };
-  // normalizeEmail matches the sign-in gate in auth.ts (authorizeWithPlex) so
-  // both membership checks share one normalization of the admin-email Setting.
-  if (adminEmailRow?.value) members.emails.add(normalizeEmail(adminEmailRow.value));
+  if (members.ids.size === 0 && members.emails.size === 0) {
+    // With a prior set cached, tell "nobody is shared any more" (the server
+    // identifies itself, so plex.tv's answer was scoped and empty) from "the
+    // server couldn't be identified". Only the former may ever replace the set.
+    if (!hasPriorSet || !(await getPlexMachineId(serverUrl, adminToken, PLEX_IDENTITY_TIMEOUT_MS))) {
+      return { outcome: "indeterminate" };
+    }
+    return { outcome: "indeterminate", confirmedEmpty: { ids: new Set(), emails: adminEmails(), fetchedAt: Date.now() } };
+  }
+  for (const email of adminEmails()) members.emails.add(email);
   return { outcome: "ok", entry: { ids: members.ids, emails: members.emails, fetchedAt: Date.now() } };
+}
+
+// The cache write for one settled attempt. Pure over `state`.
+function applyFetchResult(state: SlugState, res: FetchResult): AttemptOutcome {
+  if (res.entry) {
+    state.cache = res.entry;
+    state.emptyStreak = 0;
+  } else if (res.confirmedEmpty && state.cache) {
+    state.emptyStreak += 1;
+    if (state.emptyStreak >= 2) {
+      state.cache = res.confirmedEmpty;
+      state.lastOutcome = "ok";
+      return "ok";
+    }
+  } else {
+    state.emptyStreak = 0;
+  }
+  // failed/empty leaves the prior set — serve-stale
+  state.lastOutcome = res.outcome;
+  return res.outcome;
 }
 
 // De-dupe concurrent refreshes of one slug within a replica and back off after
 // a failure so a persistent outage doesn't trigger a fetch on every request.
 function startSlugRefresh(slug: MediaInstanceKey, state: SlugState, now: number): void {
   state.lastAttemptAt = now;
-  state.inflight = fetchSlugAllowlist(slug)
+  const generation = state.generation;
+  state.inflight = fetchSlugAllowlist(slug, state.cache !== null)
     .then((res) => {
-      if (res.entry) state.cache = res.entry; // failed/empty leaves the prior set — serve-stale
-      state.lastOutcome = res.outcome;
+      // Read with a token that has since been replaced: drop it, so the next
+      // call refetches with the new one instead of trusting this for a TTL.
+      if (state.generation !== generation) return res.outcome;
+      const outcome = applyFetchResult(state, res);
       // An "unconfigured" verdict must NOT arm the backoff: the attempt cost
       // three findUniques and zero plex.tv traffic (the backoff exists to
       // protect plex.tv), and honoring a cached "unconfigured" skip after the
@@ -130,11 +185,14 @@ function startSlugRefresh(slug: MediaInstanceKey, state: SlugState, now: number)
       // the reset, the next call re-reads the slug's config immediately: still
       // unconfigured → skip again (cheap); newly configured → a real fetch
       // that either completes the union or cold-poisons to null (fail open).
-      if (res.outcome === "unconfigured") state.lastAttemptAt = 0;
-      return res.outcome;
+      if (outcome === "unconfigured") state.lastAttemptAt = 0;
+      return outcome;
     })
     .catch((err) => {
-      state.lastOutcome = "indeterminate";
+      if (state.generation === generation) {
+        state.lastOutcome = "indeterminate";
+        state.emptyStreak = 0;
+      }
       console.warn(
         `[plex-membership] allowlist fetch failed for ${mediaInstanceLabel("plex", slug)}:`,
         err instanceof Error ? err.message : String(err),
@@ -173,7 +231,7 @@ async function consultInstances(now: number): Promise<Array<{ slug: MediaInstanc
   for (const { slug } of instances) {
     let state = slugStates.get(slug);
     if (!state) {
-      state = { cache: null, lastAttemptAt: 0, inflight: null, lastOutcome: null };
+      state = { cache: null, lastAttemptAt: 0, inflight: null, lastOutcome: null, generation: 0, emptyStreak: 0 };
       slugStates.set(slug, state);
     }
     const fresh = state.cache !== null && now - state.cache.fetchedAt < ALLOWLIST_TTL_MS;
@@ -285,4 +343,7 @@ export function expirePlexMembershipCache(slug: MediaInstanceKey): void {
   if (!state) return;
   if (state.cache) state.cache = { ...state.cache, fetchedAt: 0 };
   state.lastAttemptAt = 0;
+  // A fetch already in flight read the OLD token: its answer is discarded.
+  state.generation += 1;
+  state.emptyStreak = 0;
 }

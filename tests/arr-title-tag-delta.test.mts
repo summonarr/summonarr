@@ -24,6 +24,7 @@ import {
 } from "../src/components/admin/arr-title/snapshot-rules.ts";
 
 const SETTINGS = readFileSync(new URL("../src/components/admin/arr-title/settings-tab.tsx", import.meta.url), "utf8");
+const DRAFT = readFileSync(new URL("../src/components/admin/arr-title/settings-draft.ts", import.meta.url), "utf8");
 
 test("F005: a tag added over a snapshot survives the rebase onto a live list that gained a tag", () => {
   const snapshot = [1];
@@ -80,14 +81,15 @@ test("the derived list is ascending and duplicate-free", () => {
 });
 
 test("Settings derives draft.tags from the delta, sends tagDeltaChange, and toggles through toggleTagDelta", () => {
-  assert.match(SETTINGS, /type Edits = Partial<Omit<Draft, "tags">> & \{ tags\?: TagDelta \};/);
+  assert.match(DRAFT, /export type Edits = Partial<Omit<Draft, "tags">> & \{ tags\?: TagDelta \};/);
   assert.match(SETTINGS, /const \[edits, setEdits\] = useState<Edits>\(\{\}\);/);
-  assert.match(SETTINGS, /const \{ tags: tagDelta = NO_TAG_DELTA, \.\.\.fieldEdits \} = edits;/);
-  assert.match(SETTINGS, /const draft: Draft = \{ \.\.\.base, \.\.\.fieldEdits, tags: applyTagDelta\(base\.tags, tagDelta\) \};/);
-  assert.match(SETTINGS, /const tagsChange = tagDeltaChange\(base\.tags, tagDelta\);\s*if \(tagsChange\) c\.tags = tagsChange;/);
-  assert.match(SETTINGS, /onClick=\{\(\) => update\(\{ tags: toggleTagDelta\(tagDelta, base\.tags, tag\.id\) \}\)\}/);
+  assert.match(DRAFT, /const \{ tags: tagDelta = NO_TAG_DELTA, \.\.\.fieldEdits \} = edits;\s*return \{ \.\.\.base, \.\.\.fieldEdits, tags: applyTagDelta\(base\.tags, tagDelta\) \};/);
+  assert.match(SETTINGS, /const draft = applyEdits\(base, edits\);/);
+  assert.match(DRAFT, /const tagsChange = tagDeltaChange\(base\.tags, edits\.tags \?\? NO_TAG_DELTA\);\s*if \(tagsChange\) c\.tags = tagsChange;/);
+  assert.match(SETTINGS, /const tagDelta = edits\.tags \?\? NO_TAG_DELTA;/);
+  assert.match(SETTINGS, /onToggle=\{\(id\) => update\(\{ tags: toggleTagDelta\(tagDelta, base\.tags, id\) \}\)\}/);
   assert.match(SETTINGS, /function update\(patch: Edits\) \{/);
   // No absolute tag list is stored as an edit, and none is sent from draft.
   assert.doesNotMatch(SETTINGS, /update\(\{ tags: on \?/);
-  assert.doesNotMatch(SETTINGS, /c\.tags = draft\.tags/);
+  assert.doesNotMatch(SETTINGS + DRAFT, /c\.tags = draft\.tags/);
 });

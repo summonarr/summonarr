@@ -10,10 +10,11 @@ const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },
   // Limit referrer information sent to other origins
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-  // Disable browser features not needed by this app
+  // Disable browser features not needed by this app. (FLoC's interest-cohort
+  // is gone from browsers; Chromium logs an unrecognized feature for it.)
   {
     key: "Permissions-Policy",
-    value: "camera=(), microphone=(), geolocation=(), interest-cohort=()",
+    value: "camera=(), microphone=(), geolocation=()",
   },
   // Keep search engines and AI crawlers from indexing any response
   { key: "X-Robots-Tag", value: "noindex, nofollow, noarchive, nosnippet, noimageindex" },

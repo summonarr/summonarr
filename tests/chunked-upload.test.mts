@@ -589,9 +589,10 @@ test("a thrown network error becomes a network-coded error outcome (no raw messa
   assert.deepEqual(events, ["POST:0", "DELETE"]);
 });
 
-test("an empty file sends zero chunks and reports no-completion (pins current behavior)", async () => {
-  // ceil(0 / chunkSize) = 0 → the loop never runs, so a 0-byte file can never
-  // complete; the server-side startSession would reject totalSize 0 anyway.
+test("an empty file is refused up front as empty: no request at all, not even the cancel", async () => {
+  // ceil(0 / chunkSize) = 0 chunks, so it could never complete; the server-side
+  // startSession would reject totalSize 0 anyway. Saying "empty" beats "the
+  // server never confirmed the restore".
   const events: string[] = [];
   const calls = scriptFetch(events, () => jsonResponse(200, { complete: true, ok: true }));
   const outcome = await uploadInChunks({
@@ -599,9 +600,9 @@ test("an empty file sends zero chunks and reports no-completion (pins current be
     endpoint: "/api/x",
     onProgress: progressRecorder(events),
   });
-  assert.deepEqual(outcome, { kind: "error", status: null, code: "noCompletion" });
-  assert.deepEqual(events, ["progress:upload:0/0", "DELETE"]);
-  assert.equal(calls.length, 1); // only the cancel DELETE, no POSTs
+  assert.deepEqual(outcome, { kind: "error", status: null, code: "empty" });
+  assert.deepEqual(events, []);
+  assert.equal(calls.length, 0);
 });
 
 // ---------------------------------------------------------------------------
@@ -842,7 +843,7 @@ test("a gateway page still failing after the retries is the chunkFailed code wit
 test("chunkedUploadErrorMessage translates each code, and shows the server's own text as-is", () => {
   const de = createTranslator("de", CATALOGS.de, CATALOGS.en);
   const en = createTranslator("en", CATALOGS.en, CATALOGS.en);
-  for (const code of ["chunkFailed", "nonJson", "noCompletion", "network", "cancelled"] as const) {
+  for (const code of ["chunkFailed", "nonJson", "noCompletion", "empty", "network", "cancelled"] as const) {
     const outcome = { kind: "error" as const, status: 502, code, chunk: 2, total: 5 };
     const english = chunkedUploadErrorMessage(outcome, en);
     const german = chunkedUploadErrorMessage(outcome, de);

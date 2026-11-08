@@ -93,8 +93,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
       // of the Discord account (initiate-merge deliberately doesn't check).
       return NextResponse.json({ error: t("apiUser.discord.merge.alreadyLinked") }, { status: 409 });
     }
+    // Anything else (a DB outage, a transaction timeout) is the server failing,
+    // not a conflict the user can resolve: the claim rolled back with it, so the
+    // same code can be tried again.
     console.error("[discord/confirm-merge] merge failed:", err instanceof Error ? err.message : err);
-    return NextResponse.json({ error: t("apiUser.discord.merge.linkFailed") }, { status: 409 });
+    return NextResponse.json({ error: t("apiUser.discord.merge.linkFailed") }, { status: 500 });
   }
 
   // The link has committed: the roles follow the account's own row (its role

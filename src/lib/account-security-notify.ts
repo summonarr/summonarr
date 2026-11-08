@@ -22,6 +22,7 @@ import { resolveUserNotificationEmail } from "@/lib/notification-email";
 import { notifyUserSecurityEventEmail } from "@/lib/email";
 import { translatorForUser } from "@/lib/i18n/server-locale";
 import { processSingleton } from "@/lib/process-singleton";
+import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
 import type { Translator } from "@/lib/i18n/translate";
 
 export type AccountSecurityEvent =
@@ -135,19 +136,30 @@ export async function notifyAccountSecurityEvent(
 export const MAX_LOCKOUT_NOTICES = 10_000;
 // Process-wide (guardrail 27a): a per-chunk copy would mail once per chunk.
 const lockoutNotices = processSingleton("account-security:lockout-notices", () => new Map<string, number>());
+const LEDGER_FULL_WARN_KEY = "account-security:lockout-ledger-full";
 
 // Claims the one notice for `key` in the current window: the sign-in bucket's
 // email hash, or the step-up bucket's own `step-up-pw:<userId>` key (a distinct
 // namespace — a hex hash never starts with it). Synchronous on purpose:
 // concurrent attempts can never both claim it. Returns false when it was already
 // claimed, or when the ledger is full of live claims (the notice is best-effort;
-// the lockout itself still holds).
+// the lockout itself still holds). A full ledger is refused rather than evicted:
+// evicting a live claim would let a flood of other keys re-mail its owner. The
+// refusal is logged once, so a suppressed notice is visible to the operator.
 export function claimSignInLockoutNotice(key: string, windowMs: number, now = Date.now()): boolean {
   const until = lockoutNotices.get(key);
   if (until !== undefined && until > now) return false;
   if (until === undefined && lockoutNotices.size >= MAX_LOCKOUT_NOTICES) {
     for (const [k, expiresAt] of lockoutNotices) if (expiresAt <= now) lockoutNotices.delete(k);
-    if (lockoutNotices.size >= MAX_LOCKOUT_NOTICES) return false;
+    if (lockoutNotices.size >= MAX_LOCKOUT_NOTICES) {
+      warnOnChange(
+        LEDGER_FULL_WARN_KEY,
+        "full",
+        `[account] lockout notice ledger is full (${MAX_LOCKOUT_NOTICES} live claims); new lockout emails are suppressed until claims expire`,
+      );
+      return false;
+    }
+    forgetWarnOnChange(LEDGER_FULL_WARN_KEY);
   }
   lockoutNotices.set(key, now + windowMs);
   return true;

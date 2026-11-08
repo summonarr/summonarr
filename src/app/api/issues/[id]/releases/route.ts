@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withIssueAdmin } from "@/lib/api-auth";
 import { grabDefinitelyRefused, grabRefusalResponse } from "@/lib/release-grab";
-import { claimReleaseHandle, forgetReleaseHandle, issueReleaseHandles, releaseReleaseHandle } from "@/lib/release-handles";
+import { claimReleaseHandle, forgetReleaseHandle, issueReleaseHandles, releaseReleaseHandle, type ReleaseClaim } from "@/lib/release-handles";
 import { answerOf, releaseSearchJobResponse, runningReleaseSearchJob, startReleaseSearchJob } from "@/lib/release-search-jobs";
 import { tooManyRequests } from "@/lib/http";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -18,14 +18,14 @@ import {
   type GrabProgress,
 } from "@/lib/arr";
 import { seriesReleaseScopeSearchable } from "@/lib/release-scope";
-import { isValidInstanceSlug } from "@/lib/arr-instances";
-import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
+import { issueArrService, resolveIssueArrInstance, type IssueArrService } from "@/lib/issue-arr-instance";
 import { logAudit, auditContext } from "@/lib/audit";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import { recordIssueGrab } from "@/lib/issue-grab";
 import { promoteIssueInProgress } from "@/lib/issue-transitions";
+import type { Issue } from "@/generated/prisma";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -40,7 +40,7 @@ const SEARCH_LIMIT_PER_MIN = 20;
 // apikey'd download link, and this list reaches MANAGE_ISSUES delegates, not
 // only admins. The handle rides in the `guid` field, so the wire shape the
 // iOS app decodes (`[ArrRelease]`, POST `{ guid, indexerId }`) is unchanged.
-const handleScope = (issueId: string, service: "radarr" | "sonarr", instance: string) =>
+const handleScope = (issueId: string, service: IssueArrService, instance: string) =>
   ["issue", issueId, service, instance].join("\u0000");
 
 const VALID_SCOPES = ["FULL", "SEASON", "EPISODE"] as const;
@@ -67,37 +67,6 @@ function seriesScopeRefusal(
   return null;
 }
 
-// Resolves + validates the target instance slug for a release browse/grab.
-// The slug must be valid and name a CONFIGURED connection — the default ""
-// included. The default used to skip the check and fall through to the arr
-// helper's "Radarr is not configured" throw, which the catch answered as a 502
-// (an upstream-failure status for a local config state) in hardcoded English,
-// while the same condition on a named instance was a translated 422. The
-// default has no slug to print, so it gets the name-only message.
-// Returns a NextResponse on rejection.
-async function resolveInstanceOr(
-  raw: string | null | undefined,
-  service: "radarr" | "sonarr",
-  t: Translator,
-): Promise<string | NextResponse> {
-  const instance = typeof raw === "string" ? raw.trim() : "";
-  if (!isValidInstanceSlug(instance)) {
-    return NextResponse.json({ error: t("apiUser.common.invalidInstance") }, { status: 400 });
-  }
-  // The registry decides which slugs exist (guardrail 32): a de-registered
-  // instance's Url/ApiKey rows can outlive it, and a bare isArrConfigured would
-  // turn any slug a MANAGE_ISSUES delegate guesses into those Setting reads —
-  // and then into searches and grabs on a server the admin removed.
-  const configured = await getSyncableArrInstances(service);
-  if (!configured.some((i) => i.slug === instance)) {
-    const error = instance === ""
-      ? t("apiUser.common.notConfigured", { name: service === "radarr" ? "Radarr" : "Sonarr" })
-      : t("apiUser.issues.instanceNotConfigured", { service, instance });
-    return NextResponse.json({ error }, { status: 422 });
-  }
-  return instance;
-}
-
 // GET → the bare `[ArrRelease]` list, synchronously — the wire contract the iOS
 // app decodes. `&async=1` (the web panel) → 202 { job } at once: the search runs
 // in the background (release-search-jobs.ts, the guardrail-37a pattern — a
@@ -114,8 +83,10 @@ export const GET = withIssueAdmin(async (req, { params }: RouteContext, session)
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
-  const service = issue.mediaType === "MOVIE" ? ("radarr" as const) : ("sonarr" as const);
-  const instanceOr = await resolveInstanceOr(req.nextUrl.searchParams.get("instance"), service, t);
+  // The slug must be valid, its integration on and the instance one the
+  // registry lists as configured, the default "" included (issue-arr-instance.ts).
+  const service = issueArrService(issue.mediaType);
+  const instanceOr = await resolveIssueArrInstance(req.nextUrl.searchParams.get("instance"), service, t);
   if (instanceOr instanceof NextResponse) return instanceOr;
   const instance = instanceOr;
   const refused = seriesScopeRefusal(issue, t);
@@ -175,6 +146,100 @@ export const GET = withIssueAdmin(async (req, { params }: RouteContext, session)
   return NextResponse.json({ job: jobId }, { status: 202 });
 });
 
+type PickedRelease = Exclude<ReleaseClaim, "unknown" | "busy">;
+
+/**
+ * Send the picked release to the issue's instance. Resolves to the series'
+ * TVDB id it grabbed under (the row's, else resolved now; null for a movie), or
+ * the 422 when a series' TVDB id can't be resolved. Every failure decides the
+ * handle's fate itself (see the catch) and answers: the arr's own refusal
+ * where it explains itself, else the translated generic 502.
+ */
+async function grabPickedRelease(
+  issue: Issue,
+  handle: string,
+  picked: PickedRelease,
+  instance: string,
+  service: IssueArrService,
+  t: Translator,
+): Promise<{ tvdbId: number | null } | NextResponse> {
+  let tvdbId: number | null = issue.tvdbId;
+  // Set by the arr helper just before POST /api/v3/release goes out: a failure
+  // while it is still false (no config, the title lookup, the tvdb resolution)
+  // sent nothing, so the handle goes back and a retry needs no new search.
+  const progress: GrabProgress = { sent: false };
+  try {
+    if (issue.mediaType === "MOVIE") {
+      await grabMovieRelease(issue.tmdbId, picked.guid, picked.indexerId, instance, progress);
+      return { tvdbId };
+    }
+    if (!tvdbId) {
+      tvdbId = await resolveTvdbIdFromTmdbId(issue.tmdbId, instance);
+      if (!tvdbId) {
+        releaseReleaseHandle(handle);
+        return NextResponse.json({ error: t("apiUser.issues.tvdbUnresolved") }, { status: 422 });
+      }
+    }
+    // Both SEASON and EPISODE issues pass their seasonNumber, so the grab
+    // targets the right season. Only EPISODE issues pass an episodeNumber.
+    await grabSeriesRelease(
+      tvdbId,
+      picked.guid,
+      picked.indexerId,
+      issue.scope === "EPISODE" || issue.scope === "SEASON" ? issue.seasonNumber : null,
+      issue.scope === "EPISODE" ? issue.episodeNumber : null,
+      instance,
+      progress,
+    );
+    return { tvdbId };
+  } catch (err) {
+    // Nothing sent yet (no config, the title lookup or the tvdb resolution
+    // failed), or the arr definitely refused (a 4xx, or it doesn't have the
+    // title): the release may be tried again. No answer, or a 408/5xx (a
+    // timeout, a gateway that gave up mid-grab): it may well have taken it —
+    // never send it twice.
+    if (!progress.sent) releaseReleaseHandle(handle);
+    else if (grabDefinitelyRefused(err)) releaseReleaseHandle(handle);
+    else forgetReleaseHandle(handle);
+    // The arr's own refusals say what to do: search again (its 30-minute
+    // search cache no longer has the release) or why the indexer or client
+    // refused it (masked).
+    const refused = grabRefusalResponse(err, service === "radarr" ? "Radarr" : "Sonarr", t);
+    if (refused) return refused;
+    // Detail to the log, translated generic to the client (see the GET catch).
+    console.error("[releases] Grab failed:", arrErrorMessage(err));
+    return NextResponse.json({ error: t("apiUser.issues.arrFailed") }, { status: 502 });
+  }
+}
+
+// The grab the arr accepted, as an IssueGrab row. Kept OUTSIDE the grab's
+// try/catch: Radarr/Sonarr has already accepted the download, so a failure here
+// must not answer 502 "grab failed" (the admin would retry and download the same
+// release twice). The usual cause is the issue being deleted during the grab,
+// which breaks the IssueGrab -> Issue link (Prisma error P2003). The row
+// supersedes the issue's earlier pending grabs on this instance (one import, one
+// announcement — recordIssueGrab). The row's id, or null when it wasn't written.
+async function recordGrab(issue: Issue, userId: string, tvdbId: number | null, instance: string): Promise<string | null> {
+  try {
+    const grab = await recordIssueGrab({
+      issueId: issue.id,
+      triggeredById: userId,
+      tmdbId: issue.tmdbId,
+      tvdbId,
+      mediaType: issue.mediaType,
+      title: issue.title,
+      scope: issue.scope,
+      seasonNumber: issue.seasonNumber,
+      episodeNumber: issue.episodeNumber,
+      arrInstance: instance,
+    });
+    return grab.id;
+  } catch (err) {
+    console.warn("[releases] Grab succeeded but recording it failed (issue deleted mid-grab?):", err);
+    return null;
+  }
+}
+
 export const POST = withIssueAdmin(async (req, { params }: RouteContext, session) => {
   const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
@@ -190,12 +255,12 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
     return NextResponse.json({ error: t("apiUser.issues.resolvedBeforeGrab") }, { status: 409 });
   }
 
-  const parsed = await readJsonCapped<{ guid?: string; indexerId?: number; instance?: string }>(req, 65536);
+  const parsed = await readJsonCapped<{ guid?: unknown; indexerId?: unknown; instance?: unknown }>(req, 65536);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
-  const service = issue.mediaType === "MOVIE" ? ("radarr" as const) : ("sonarr" as const);
-  const instanceOr = await resolveInstanceOr(body.instance, service, t);
+  const service = issueArrService(issue.mediaType);
+  const instanceOr = await resolveIssueArrInstance(body.instance, service, t);
   if (instanceOr instanceof NextResponse) return instanceOr;
   const instance = instanceOr;
   // No release of a whole-series issue is ever grabbed under it (see
@@ -207,7 +272,8 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
   if (!guid || typeof guid !== "string") {
     return NextResponse.json({ error: t("apiUser.issues.guidRequired") }, { status: 400 });
   }
-  // Still checked, no longer used: the handle names the indexer (below).
+  // Still checked, no longer used: the handle names the indexer (below). The
+  // POST body `{ guid, indexerId }` is the wire contract the iOS app sends.
   if (!Number.isInteger(indexerId) || (indexerId as number) <= 0) {
     return NextResponse.json({ error: t("apiUser.issues.indexerIdInvalid") }, { status: 400 });
   }
@@ -222,7 +288,7 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
   // with one handle (a double submit, a replay) exactly one reaches the arr —
   // the CAS below (`not RESOLVED`) lets both through, and the download client
   // would fetch the release twice. An unknown handle never flips the issue.
-  const picked = claimReleaseHandle(handleScope(id, service, instance), guid);
+  const picked = claimReleaseHandle(handleScope(id, service, instance), guid, Date.now(), session.user.id);
   if (picked === "unknown") return NextResponse.json({ error: t("apiUser.requests.releases.handleExpired") }, { status: 410 });
   if (picked === "busy") return NextResponse.json({ error: t("apiUser.requests.releases.grabInProgress") }, { status: 409 });
 
@@ -249,87 +315,16 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
     return NextResponse.json({ error: t("apiUser.issues.resolvedBeforeGrab") }, { status: 409 });
   }
 
-  let resolvedTvdbId: number | null = issue.tvdbId;
-
-  // Set by the arr helper just before POST /api/v3/release goes out: a failure
-  // while it is still false (no config, the title lookup, the tvdb resolution)
-  // sent nothing, so the handle goes back and a retry needs no new search.
-  const progress: GrabProgress = { sent: false };
-  try {
-    if (issue.mediaType === "MOVIE") {
-      await grabMovieRelease(issue.tmdbId, picked.guid, picked.indexerId, instance, progress);
-    } else {
-      if (!resolvedTvdbId) {
-        resolvedTvdbId = await resolveTvdbIdFromTmdbId(issue.tmdbId, instance);
-        if (!resolvedTvdbId) {
-          releaseReleaseHandle(guid);
-          return NextResponse.json({ error: t("apiUser.issues.tvdbUnresolved") }, { status: 422 });
-        }
-      }
-      // Both SEASON and EPISODE issues pass their seasonNumber, so the grab
-      // targets the right season. Only EPISODE issues pass an episodeNumber.
-      await grabSeriesRelease(
-        resolvedTvdbId,
-        picked.guid,
-        picked.indexerId,
-        issue.scope === "EPISODE" || issue.scope === "SEASON" ? issue.seasonNumber : null,
-        issue.scope === "EPISODE" ? issue.episodeNumber : null,
-        instance,
-        progress,
-      );
-    }
-  } catch (err) {
-    // Nothing sent yet (no config, the title lookup or the tvdb resolution
-    // failed), or the arr definitely refused (a 4xx, or it doesn't have the
-    // title): the release may be tried again. No answer, or a 408/5xx (a
-    // timeout, a gateway that gave up mid-grab): it may well have taken it —
-    // never send it twice.
-    if (!progress.sent) releaseReleaseHandle(guid);
-    else if (grabDefinitelyRefused(err)) releaseReleaseHandle(guid);
-    else forgetReleaseHandle(guid);
-    // The arr's own refusals say what to do: search again (its 30-minute
-    // search cache no longer has the release) or why the indexer or client
-    // refused it (masked).
-    const refused = grabRefusalResponse(err, service === "radarr" ? "Radarr" : "Sonarr", t);
-    if (refused) return refused;
-    // Detail to the log, translated generic to the client (see the GET catch).
-    console.error("[releases] Grab failed:", arrErrorMessage(err));
-    return NextResponse.json({ error: t("apiUser.issues.arrFailed") }, { status: 502 });
-  }
-
+  const grabbed = await grabPickedRelease(issue, guid, picked, instance, service, t);
+  if (grabbed instanceof NextResponse) return grabbed;
   forgetReleaseHandle(guid);
-
-  // Recording the grab is kept OUTSIDE the try/catch above: Radarr/Sonarr has
-  // already accepted the download, so a failure here must not answer 502 "grab
-  // failed" (the admin would retry and download the same release twice). The
-  // usual cause is the issue being deleted during the grab, which breaks the
-  // IssueGrab -> Issue link (Prisma error P2003). The row supersedes the issue's
-  // earlier pending grabs on this instance (one import, one announcement —
-  // recordIssueGrab).
-  let grabId: string | null = null;
-  try {
-    const grab = await recordIssueGrab({
-      issueId: id,
-      triggeredById: session.user.id,
-      tmdbId: issue.tmdbId,
-      tvdbId: resolvedTvdbId,
-      mediaType: issue.mediaType,
-      title: issue.title,
-      scope: issue.scope,
-      seasonNumber: issue.seasonNumber,
-      episodeNumber: issue.episodeNumber,
-      arrInstance: instance,
-    });
-    grabId = grab.id;
-  } catch (err) {
-    console.warn("[releases] Grab succeeded but recording it failed (issue deleted mid-grab?):", err);
-  }
+  const grabId = await recordGrab(issue, session.user.id, grabbed.tvdbId, instance);
 
   // The grab itself. The status flip (if any) was audited right after its CAS
   // above, so this entry records only what happened here: which release went
   // to which instance. `grabId` is absent when the IssueGrab row could not be
-  // written (see the catch above) — the download still happened. The release
-  // NAME is recorded, never the guid (some indexers put the apikey in it).
+  // written (see recordGrab) — the download still happened. The release NAME
+  // is recorded, never the guid (some indexers put the apikey in it).
   // ARR_RELEASE_GRAB, like every other grab (request queue, title manager,
   // queue Grab now), so the audit log's "Release Grabbed" filter finds it; the
   // status flip above keeps its ISSUE_STATUS_CHANGE row.

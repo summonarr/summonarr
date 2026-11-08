@@ -30,15 +30,14 @@ test("an all-stale selection becomes empty, which saves as \"\" (every library)"
 });
 
 test("both pickers save and hint from the reconciled list, never the raw selection", () => {
-  for (const [file, body] of [["plex-connect-form.tsx", "plexLibraries"], ["jellyfin-sync-form.tsx", "jellyfinLibraries"]] as const) {
-    const src = form(file);
-    assert.match(src, /const effective = reconcileLibrarySelection\(selected, /, file);
-    assert.match(src, /const value = effective\.join\(","\);/, file);
-    assert.match(src, new RegExp(`await save\\(\\{ ${body}: value \\}\\)`), file);
-    assert.match(src, /\{effective\.length === 0 && /, `${file}: the "none selected" hint`);
-    assert.doesNotMatch(src, /Array\.from\(selected\)/, file);
-    assert.doesNotMatch(src, /selected\.size === 0/, file);
-  }
+  // One picker for both servers.
+  const src = form("media-server-library.tsx");
+  assert.match(src, /const effective = reconcileLibrarySelection\(selected, /);
+  assert.match(src, /const value = effective\.join\(","\);/);
+  assert.match(src, /await save\(\{ \[service === "plex" \? "plexLibraries" : "jellyfinLibraries"\]: value \}\)/);
+  assert.match(src, /\{effective\.length === 0 && /, `the "none selected" hint`);
+  assert.doesNotMatch(src, /Array\.from\(selected\)/);
+  assert.doesNotMatch(src, /selected\.size === 0/);
 });
 
 test("a remounted picker starts from the last saved selection, not the page-load prop", () => {
@@ -52,6 +51,6 @@ test("a remounted picker starts from the last saved selection, not the page-load
 
 test("the Jellyfin picker follows the SAVED config, like the Sync button (guardrail 36)", () => {
   const src = form("jellyfin-sync-form.tsx");
-  assert.match(src, /\{configured && \(\s*<JellyfinLibraryPicker/);
-  assert.doesNotMatch(src, /\{url && apiKey && \(\s*<JellyfinLibraryPicker/);
+  assert.match(src, /\{configured && \(\s*<LibraryPicker\s+service="jellyfin"/);
+  assert.doesNotMatch(src, /\{url && apiKey && \(\s*<LibraryPicker/);
 });

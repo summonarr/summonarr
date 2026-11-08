@@ -55,6 +55,8 @@ let findManyGate: Promise<void> | null = null;
 // Delays the outcome write by N macrotask rounds AFTER it is called, so a
 // fire-and-forget recordOutcome is observable as "not yet written".
 let updateDelayRounds = 0;
+// When set, the outcome write throws it.
+let updateFailure: unknown = null;
 shadowPrismaModel(prisma, "notificationAgent", {
   findMany: async (args: { where?: { enabled?: boolean } }) => {
     agentReads++;
@@ -63,6 +65,7 @@ shadowPrismaModel(prisma, "notificationAgent", {
     return rows;
   },
   update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+    if (updateFailure) throw updateFailure;
     if (updateDelayRounds > 0) await settle(updateDelayRounds);
     updates.push(args);
     return { id: args.where.id };
@@ -323,6 +326,22 @@ test("the Test button sends one immediate attempt even for a disabled agent and 
   assert.equal(JSON.parse(calls[0].body).title, "Test notification");
 });
 
+test("recording an outcome tolerates a deleted channel silently, and says any other write failure", async () => {
+  respond = () => new Response("", { status: 200 });
+  const agent = loadedAgentFromRow({ id: "gone", kind: "webhook", name: "gone", events: [], config: { url: "https://x.example/" }, secret: null })!;
+  const { Prisma } = await import("../src/generated/prisma/index.js");
+  try {
+    updateFailure = new Prisma.PrismaClientKnownRequestError("not found", { code: "P2025", clientVersion: "test" });
+    await sendAgentTest(agent, { event: "agent.test" });
+    assert.equal(warns.filter((w) => w.includes("could not record")).length, 0, "a channel deleted meanwhile is not news");
+    updateFailure = new Error("connection pool timeout");
+    await sendAgentTest(agent, { event: "agent.test" });
+    assert.equal(warns.filter((w) => w.includes("[notify-agents] could not record a delivery outcome")).length, 1);
+  } finally {
+    updateFailure = null;
+  }
+});
+
 // ── retries re-resolve the agent ────────────────────────────────────────────
 // The retry closure must not carry the LoadedAgent snapshot from attempt 0: an
 // admin may disable, delete, unsubscribe or re-point the channel while a retry
@@ -508,7 +527,7 @@ test("a secret undici's Headers rejects (NUL byte) is a config failure: never fe
     mock.timers.tick(15 * 60_000);
     await settle();
     assert.equal(calls.length, 0, "Headers rejected the value before any network call");
-    assert.deepEqual(updates.map((u) => [u.data.lastStatus, u.data.lastError]), [["failed", "request could not be built (check the secret and URL)"]]);
+    assert.deepEqual(updates.map((u) => [u.data.lastStatus, u.data.lastError]), [["failed", "request could not be built (TypeError; check the secret and URL)"]]);
     const leaks = (s: string) => s.includes(secret) || s.includes("invalid header value");
     assert.ok(!warns.some(leaks) && !errors.some(leaks), "the Headers TypeError (which embeds the secret) reached a log line");
     const r = await sendAgentTest(loadedAgentFromRow({ id: "nul", kind: "webhook", name: "nul", events: [], config: { url: "https://a.example/" }, secret })!, { event: "agent.test" });
@@ -592,9 +611,14 @@ test("every 'now available' sync path goes through fanOutAvailableWinners — no
     assert.match(hub, new RegExp(`from "\\./${m}"`), `the hub no longer imports ./${m} — the channel list above has rotted`);
   }
   const channelImport = new RegExp(`\\blib/(${[...CHANNEL_MODULES, "in-app-notify"].join("|")})(\\.ts)?["']`);
-  for (const p of ["src/app/api/sync/route.ts", "src/app/api/sync/plex/route.ts", "src/app/api/sync/jellyfin/route.ts"]) {
+  // The marking passes live in src/lib/available-marking.ts, shared by the
+  // orchestrator and the per-source Resync routes; the orchestrator's notify
+  // fallback calls the fan-out itself.
+  const fansOut = new Set(["src/app/api/sync/route.ts", "src/lib/available-marking.ts"]);
+  for (const p of ["src/app/api/sync/route.ts", "src/lib/available-marking.ts", "src/app/api/sync/plex/route.ts", "src/app/api/sync/jellyfin/route.ts"]) {
     const src = read(p);
-    assert.match(src, /fanOutAvailableWinners\(/, p);
+    if (fansOut.has(p)) assert.match(src, /fanOutAvailableWinners\(/, p);
+    else assert.match(src, /markResyncedLibrary\(/, `${p} must mark through the shared pass`);
     assert.doesNotMatch(src, channelImport, `${p} imports a notification channel module directly`);
     assert.doesNotMatch(src, /emitNotificationEvents?\(/, `${p} emits to the outbound channels at the call site`);
     assert.doesNotMatch(

@@ -1,7 +1,8 @@
 "use client";
 
 // Modal confirmation for deleting a single play record. Pure presentation —
-// the parent owns the deleting/error state and the DELETE call.
+// the parent owns the deleting/error state and the DELETE call
+// (useHistoryDelete).
 
 import {
   Dialog,
@@ -28,6 +29,7 @@ export function DeleteConfirm({
   onCancel: () => void;
 }) {
   const t = useT();
+  const segments = row.segmentCount;
   return (
     <Dialog
       open
@@ -76,7 +78,7 @@ export function DeleteConfirm({
             title: <span style={{ color: "var(--ds-fg)" }}>{row.title}</span>,
             user: (
               <span style={{ color: "var(--ds-fg)" }}>
-                {row.mediaServerUser.username}
+                {row.mediaServerUser?.username ?? t("adminActivity.common.unknownUser")}
               </span>
             ),
           })}
@@ -84,13 +86,13 @@ export function DeleteConfirm({
               paused and resumed, so it can stand for several database rows.
               Deleted play history cannot be rebuilt (guardrail 19: the live
               poller is its only writer), so warn before deleting several. */}
-          {(row.segmentCount ?? 1) > 1 && (
+          {segments > 1 && (
             <>
               {" "}
               {rich(t("adminActivity.deleteConfirm.sittings"), {
                 sittings: (
                   <span style={{ color: "var(--ds-fg)" }}>
-                    {t("adminActivity.deleteConfirm.sittingsCount", { count: row.segmentCount ?? 1 })}
+                    {t("adminActivity.deleteConfirm.sittingsCount", { count: segments })}
                   </span>
                 ),
               })}

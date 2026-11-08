@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 import { revokeAllUserSessions } from "@/lib/auth";
 import { clearSessionFootholdsInTx } from "@/lib/session-footholds";
 import { prisma } from "@/lib/prisma";
@@ -29,7 +30,7 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   const t = translatorForRequest(req);
   const { id } = await params;
   if (!checkRateLimit(`admin-user-mfa-reset:${session.user.id}`, 10, 60 * 1000)) {
-    return NextResponse.json({ error: t("apiAdmin.common.tooManyAttempts") }, { status: 429 });
+    return tooManyRequests(60, t("apiAdmin.common.tooManyAttempts"));
   }
   if (id === session.user.id) {
     return NextResponse.json(

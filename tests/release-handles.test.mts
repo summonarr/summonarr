@@ -4,6 +4,8 @@
 // its owner only until it expires — swept, not left to fill the map.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import {
   MAX_RELEASE_HANDLES,
   MAX_RELEASE_HANDLES_PER_OWNER,
@@ -19,7 +21,9 @@ import {
   _releaseSearchJobCountForTests,
   _resetReleaseSearchJobsForTests,
   pollReleaseSearchJob,
+  runningArrJob,
   runningReleaseSearchJob,
+  startArrJob,
   startReleaseSearchJob,
 } from "../src/lib/release-search-jobs.ts";
 
@@ -74,15 +78,15 @@ test("past the whole map's bound, the oldest live handles go and the newest stay
   const first = issueReleaseHandles("s", batch(MAX_RELEASE_HANDLES_PER_OWNER, "o0"), { owner: "o0", now: later });
   for (let i = 1; i < owners; i++) issueReleaseHandles("s", batch(MAX_RELEASE_HANDLES_PER_OWNER, `o${i}`), { owner: `o${i}`, now: later });
   assert.equal(redeemReleaseHandle("s", old.guid, later), null);
-  // A full map: the next search evicts the single oldest live handle and then
-  // overshoots by its own size (bounded by one list)…
-  issueReleaseHandles("s", batch(6, "x"), { owner: "X", now: later });
-  assert.equal(redeemReleaseHandle("s", first[0].guid, later), null);
-  assert.ok(redeemReleaseHandle("s", first[1].guid, later));
-  // …and the one after that evicts back BELOW the bound, oldest first.
-  const [newest] = issueReleaseHandles("s", batch(1, "y"), { owner: "Y", now: later });
-  for (const h of first.slice(0, 7)) assert.equal(redeemReleaseHandle("s", h.guid, later), null, h.title);
-  assert.ok(redeemReleaseHandle("s", first[7].guid, later));
+  // A full map: the next search evicts exactly as many of the oldest live
+  // handles as it brings, so the map never passes its bound…
+  const xs = issueReleaseHandles("s", batch(6, "x"), { owner: "X", now: later });
+  for (const h of first.slice(0, 6)) assert.equal(redeemReleaseHandle("s", h.guid, later), null, h.title);
+  assert.ok(redeemReleaseHandle("s", first[6].guid, later));
+  // …and a search by someone who already holds handles drops their own first.
+  const [newest] = issueReleaseHandles("s", batch(1, "x2"), { owner: "X", now: later });
+  assert.equal(redeemReleaseHandle("s", xs[0].guid, later), null, "the issuer's own oldest went");
+  assert.ok(redeemReleaseHandle("s", first[6].guid, later), "another owner's handle stayed");
   assert.ok(redeemReleaseHandle("s", newest.guid, later));
   _resetReleaseHandlesForTests();
 });
@@ -172,4 +176,61 @@ test("starting a job sweeps expired answers; a throwing search becomes a 500 ans
   } finally {
     console.error = origError;
   }
+});
+
+test("given an owner, redeem and claim refuse a handle issued to someone else", () => {
+  _resetReleaseHandlesForTests();
+  const now = 6_000_000;
+  const [issued] = issueReleaseHandles("s", batch(1, "mine"), { owner: "A", now });
+  assert.equal(redeemReleaseHandle("s", issued.guid, now, "B"), null);
+  assert.equal(claimReleaseHandle("s", issued.guid, now, "B"), "unknown");
+  assert.ok(redeemReleaseHandle("s", issued.guid, now, "A"));
+  assert.equal(typeof claimReleaseHandle("s", issued.guid, now, "A"), "object");
+  _resetReleaseHandlesForTests();
+});
+
+// Every route that claims a handle names the caller, so a handle leaked through
+// a log or a shared screen can't be spent by another account.
+test("every route that claims a release handle passes the caller as the owner", () => {
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name);
+      if (statSync(path).isDirectory()) walk(path);
+      else if (name.endsWith(".ts")) files.push(path);
+    }
+  };
+  walk(new URL("../src/app/api", import.meta.url).pathname);
+  let calls = 0;
+  for (const file of files) {
+    const src = readFileSync(file, "utf8");
+    for (const m of src.matchAll(/claimReleaseHandle\(([^;]*?)\);/g)) {
+      calls++;
+      assert.match(m[1], /,\s*session\.user\.id\s*$/, `${file}: claimReleaseHandle without the caller as owner`);
+    }
+  }
+  assert.ok(calls >= 3, `expected the three release routes, found ${calls} claim calls`);
+});
+
+test("a list longer than the whole map's bound is cut to it", () => {
+  _resetReleaseHandlesForTests();
+  const out = issueReleaseHandles("s", batch(MAX_RELEASE_HANDLES + 5, "big"), { owner: "A", now: 7_000_000 });
+  assert.equal(out.length, MAX_RELEASE_HANDLES);
+  _resetReleaseHandlesForTests();
+});
+
+test("a release search and an arr job under the same key never join each other", async () => {
+  _resetReleaseSearchJobsForTests();
+  let finish: (() => void) | null = null;
+  const done = new Promise<void>((r) => { finish = r; });
+  const run = () => done.then(() => ({ status: 200, body: null }));
+  const search = startReleaseSearchJob("u1", "same-key", run);
+  const arr = startArrJob("u1", "same-key", run);
+  assert.equal(arr.joined, false);
+  assert.notEqual(arr.jobId, search.jobId);
+  assert.equal(runningReleaseSearchJob("u1", "same-key"), search.jobId);
+  assert.equal(runningArrJob("u1", "same-key"), arr.jobId);
+  (finish as unknown as () => void)();
+  await done;
+  _resetReleaseSearchJobsForTests();
 });

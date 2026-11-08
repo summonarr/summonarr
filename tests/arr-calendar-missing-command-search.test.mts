@@ -243,18 +243,30 @@ test("C032: the Missing search (the calendar's Radarr path) flags its nothing-mi
   assert.deepEqual(writes().map((c) => c.body), [{ name: "MoviesSearch", movieIds: [1] }]);
 });
 
-test("C032: the calendar shows 'nothing left' only for a 409 carrying nothingMissing — any other 409 is a failure with the route's message", () => {
+test("C032: the calendar shows 'nothing left' only for a 409 carrying nothingMissing — any other 409 is a failure with the route's message", async () => {
+  const { searchOutcome } = await import("../src/components/admin/arr-calendar-state.ts");
+  const fail = (status: number, body: unknown, error = "") =>
+    ({ ok: false, kind: "http", status, error, body, detail: "" }) as const;
+  assert.deepEqual(searchOutcome(fail(409, { error: "Nothing missing", nothingMissing: true }, "Nothing missing"), "fallback"), { phase: "nothing" });
+  assert.deepEqual(
+    searchOutcome(fail(409, { error: "Episode 5 is no longer on the series" }, "Episode 5 is no longer on the series"), "fallback"),
+    { phase: "failed", message: "Episode 5 is no longer on the series" },
+    "a 409 without the flag is a failure with the route's own message",
+  );
+  assert.deepEqual(searchOutcome(fail(500, { detail: "no reason" }), "fallback"), { phase: "failed", message: "fallback" }, "a refusal with no reason of its own");
+  assert.deepEqual(searchOutcome(fail(409, { nothingMissing: "yes" }), "fallback"), { phase: "failed", message: "fallback" }, "only a boolean true flag");
+  assert.deepEqual(searchOutcome({ ok: true, status: 202, data: null }, "fallback"), { phase: "started" });
+  // No answer at all ends the spinner as a failure, never "nothing".
+  for (const kind of ["timeout", "network", "aborted", "invalid"] as const) {
+    assert.deepEqual(searchOutcome({ ok: false, kind, status: 0, error: "", body: null, detail: "" }, "fallback"), { phase: "failed", message: "fallback" }, kind);
+  }
+  // The page reads every answer through it, with a timeout.
   const code = src("components/admin/arr-calendar.tsx");
   const fn = /async function search\(cell: CalendarCell\) \{([\s\S]*?)\n  \}\n/.exec(code)?.[1] ?? "";
   assert.ok(fn, "the calendar's search() is found");
-  // The body is read before the 409 is judged, and the nothing state needs the flag.
-  assert.match(fn, /const data = res\.ok \? null : \(\(await res\.json\(\)/);
-  assert.match(fn, /if \(res\.status === 409 && data\?\.nothingMissing === true\) \{\s*setSearches\(\(s\) => \(\{ \.\.\.s, \[cell\.key\]: \{ phase: "nothing" \} \}\)\);/);
-  // No other path reaches the "nothing" phase.
-  assert.equal(fn.match(/phase: "nothing"/g)?.length, 1);
-  assert.doesNotMatch(fn, /if \(res\.status === 409\) \{/, "a bare 409 check is the old any-409-is-nothing mapping");
-  // The failure branch keeps the route's own message.
-  assert.match(fn, /\{ phase: "failed", message: data\?\.error \?\? t\("adminArr\.manage\.commandFailed"\) \}/);
+  assert.match(fn, /await fetchJson\(withBasePath\(path\), \{ init: jsonInit\("POST", body\), timeoutMs: SEARCH_TIMEOUT_MS \}\);/);
+  assert.match(fn, /setSearches\(\(s\) => \(\{ \.\.\.s, \[cell\.key\]: searchOutcome\(res, t\("adminArr\.manage\.commandFailed"\)\) \}\)\);/);
+  assert.doesNotMatch(code, /phase: "nothing" \}/, "no other path reaches the nothing phase");
 });
 
 // ── C035: a disposed watcher follows nothing ─────────────────────────────────

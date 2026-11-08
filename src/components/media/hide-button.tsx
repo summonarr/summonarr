@@ -2,79 +2,64 @@
 
 import { useState } from "react";
 import { EyeOff, Loader2 } from "@/components/icons";
-import { withBasePath } from "@/lib/base-path";
-import { rateLimitMessage } from "@/lib/client/rate-limit";
+import { hideTitle, hiddenFailureText, unhideTitle } from "@/lib/client/hidden-items";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
 import { DetailActionButton } from "./detail-action-button";
 
-// "Not Interested" toggle on movie/TV detail pages. Hidden titles are removed from
-// the user's discovery lists (attachAllAvailability filters them). Optimistic with
-// rollback, mirroring the watchlist/request buttons.
-export function HideButton({
-  tmdbId,
-  mediaType,
-  title,
-  posterPath,
-  initialHidden,
-}: {
+interface HideButtonProps {
   tmdbId: number;
   mediaType: "MOVIE" | "TV";
   title: string;
   posterPath?: string | null;
   initialHidden: boolean;
-}) {
+}
+
+// "Not Interested" toggle on movie/TV detail pages. Hidden titles are removed from
+// the user's discovery lists (attachAllAvailability filters them). Optimistic with
+// rollback, mirroring the watchlist/request buttons.
+//
+// Keyed on the title: client navigation from one title to another remounts the
+// button, so nothing — an override, an error, a request still in flight (aborted
+// with the old instance, its answer dropped) — carries across to the next title.
+export function HideButton(props: HideButtonProps) {
+  return <HideButtonForTitle key={`${props.mediaType}:${props.tmdbId}`} {...props} />;
+}
+
+function HideButtonForTitle({ tmdbId, mediaType, title, posterPath, initialHidden }: HideButtonProps) {
   const { toast } = useToast();
   const t = useT();
-  const [loading, setLoading] = useState(false);
+  const action = useAsyncAction();
   const [msg, setMsg] = useState("");
   // Local override until the parent catches up. `initialHidden` is otherwise
   // live — a mount-only useState painted the next title as already hidden.
   const [override, setOverride] = useState<boolean | null>(null);
-  const [seenTmdbId, setSeenTmdbId] = useState(tmdbId);
-  const titleChanged = seenTmdbId !== tmdbId;
-  if (titleChanged) {
-    setSeenTmdbId(tmdbId);
-    setOverride(null);
-    setLoading(false);
-    setMsg("");
-  } else if (override !== null && override === initialHidden) {
-    setOverride(null);
-  }
-  const hidden = titleChanged ? initialHidden : (override ?? initialHidden);
+  if (override !== null && override === initialHidden) setOverride(null);
+  const hidden = override ?? initialHidden;
+  const loading = action.busy("toggle");
 
   async function toggle() {
     if (loading) return;
     const next = !hidden;
     setOverride(next); // optimistic
-    setLoading(true);
     setMsg("");
-    try {
-      const res = next
-        ? await fetch(withBasePath("/api/hidden"), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tmdbId, mediaType, title, posterPath }),
-          })
-        : await fetch(withBasePath(`/api/hidden?tmdbId=${tmdbId}&mediaType=${mediaType}`), {
-            method: "DELETE",
-          });
-      // 409 on hide means it's already hidden — desired end state is still "hidden".
-      if (!res.ok && res.status !== 409) {
-        const data = await res.json().catch(() => ({}));
-        // Roll back to the pre-click state, NOT the prop: after an earlier
-        // successful toggle the prop is stale (nothing refreshes it here).
-        setOverride(!next);
-        setMsg(rateLimitMessage(res, t) ?? data.error ?? t("request.somethingWrong"));
-      } else {
-        toast({ title: next ? t("detail.hide.hiddenToast") : t("detail.hide.shownToast"), variant: "success" });
-      }
-    } catch {
-      setOverride(!next); // rollback to the pre-click state
-      setMsg(t("request.networkError"));
-    } finally {
-      setLoading(false);
+    const item = { tmdbId, mediaType };
+    const res = await action.run(
+      "toggle",
+      (signal) => (next ? hideTitle({ ...item, title, posterPath }, { signal }) : unhideTitle(item, { signal })),
+      { ifBusy: "skip" },
+    );
+    if (!res) return; // the button went away with its title
+    if (res.ok) {
+      toast({ title: next ? t("detail.hide.hiddenToast") : t("detail.hide.shownToast"), variant: "success" });
+      return;
     }
+    // Roll back to the pre-click state, NOT the prop: after an earlier
+    // successful toggle the prop is stale (nothing refreshes it here). Every
+    // failure — a refusal, a timeout, no answer — lands here.
+    setOverride(!next);
+    setMsg(hiddenFailureText(res.failure, t, t("request.somethingWrong"), t("request.networkError")));
   }
 
   // flex-col: the error renders UNDER the button (as RequestButton's does), never
@@ -84,22 +69,22 @@ export function HideButton({
       <DetailActionButton
         variant={hidden ? "muted" : "secondary"}
         onClick={toggle}
-        disabled={loading && !titleChanged}
-        busy={loading && !titleChanged}
+        disabled={loading}
+        busy={loading}
         aria-pressed={hidden}
         aria-label={hidden ? t("detail.hide.showLabel") : t("detail.hide.hideLabel")}
         title={hidden ? t("detail.hide.hiddenTitle") : t("detail.hide.hideTitle")}
         // The hidden state sits one surface deeper than the idle one.
         style={hidden ? { background: "var(--ds-bg-3)" } : undefined}
       >
-        {loading && !titleChanged ? (
+        {loading ? (
           <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
         ) : (
           <EyeOff style={{ width: 14, height: 14 }} />
         )}
         {hidden ? t("detail.hide.hidden") : t("detail.hide.notInterested")}
       </DetailActionButton>
-      {!titleChanged && msg && (
+      {msg && (
         <p
           className="ds-mono max-w-sm"
           role="alert"

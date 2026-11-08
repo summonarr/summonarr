@@ -5,17 +5,13 @@ import { Loader2, Check } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { withBasePath } from "@/lib/base-path";
-import { rateLimitMessage } from "@/lib/client/rate-limit";
-import { buildSecondFactor, type SecondFactorProof } from "@/lib/client/step-up";
 import { useT } from "@/components/i18n/i18n-provider";
 import { MIN_PASSWORD_LENGTH } from "@/lib/password-policy";
+import { useSecondFactorStepUp, type KnownSecondFactor } from "./use-second-factor-step-up";
+import { SecondFactorCodeField } from "./second-factor-code-field";
 
 // What the page knows about the account's two-factor setup when it rendered.
-export interface ChangePasswordSecondFactor {
-  enabled: boolean;
-  hasPasskeys: boolean;
-  webauthnAvailable: boolean;
-}
+export type ChangePasswordSecondFactor = KnownSecondFactor;
 
 interface ChangePasswordProps {
   hasPassword: boolean;
@@ -36,30 +32,10 @@ export function ChangePassword({ hasPassword, secondFactor }: ChangePasswordProp
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword]         = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [stepUpCode, setStepUpCode]           = useState("");
-  // The methods the server listed when it asked for a second factor.
-  const [serverMethods, setServerMethods]     = useState<string[] | null>(null);
   const [saving, setSaving]   = useState(false);
   const [success, setSuccess] = useState(false);
   const [error, setError]     = useState<string | null>(null);
-
-  const needsSecondFactor = !!secondFactor?.enabled || serverMethods !== null;
-  const passkeyPossible =
-    (!!secondFactor?.hasPasskeys && !!secondFactor.webauthnAvailable) || !!serverMethods?.includes("webauthn");
-
-  // The `secondFactor` body field, or null when the user must act first (an
-  // error is already shown).
-  async function secondFactorProof(): Promise<SecondFactorProof | null> {
-    const r = await buildSecondFactor({
-      code: stepUpCode,
-      passkeyPossible,
-      t,
-      failedMessage: () => t("profile.password.error.failed"),
-    });
-    if ("proof" in r) return r.proof;
-    if (r.error) setError(r.error);
-    return null;
-  }
+  const stepUp = useSecondFactorStepUp({ known: secondFactor, failedMessage: t("profile.password.error.failed") });
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -75,38 +51,26 @@ export function ChangePassword({ hasPassword, secondFactor }: ChangePasswordProp
     try {
       const body: Record<string, unknown> = { newPassword };
       if (hasPassword) body.currentPassword = currentPassword;
-      if (needsSecondFactor) {
-        const proof = await secondFactorProof();
-        if (!proof) return;
-        body.secondFactor = proof;
+      if (stepUp.needsSecondFactor) {
+        const r = await stepUp.secondFactorProof();
+        if (!("proof" in r)) {
+          if (r.error) setError(r.error);
+          return;
+        }
+        body.secondFactor = r.proof;
       }
-      // A code is single-use (a recovery code is consumed), so never resend one.
-      setStepUpCode("");
 
       const res = await fetch(withBasePath("/api/profile/password"), {
         method:  "PATCH",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify(body),
       });
+      const data: unknown = await res.json().catch(() => null);
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        if (data.secondFactorRequired) {
-          if (Array.isArray(data.methods)) setServerMethods(data.methods as string[]);
-          else setServerMethods((m) => m ?? []);
-          // With no proof sent, the server's text is written for clients that
-          // can't ask for a code; this form can, so say what to do here.
-          if (!body.secondFactor) {
-            setError(t("profile.mfa.stepUp.codeRequired"));
-            return;
-          }
-        }
-        // A two-factor lockout is a 429 with its own explanation and no Retry-After.
-        const lockedOut = res.status === 429 && !!body.secondFactor && typeof data.error === "string";
-        setError(lockedOut ? data.error : rateLimitMessage(res, t) ?? data.error ?? t("profile.password.error.failed"));
+        setError(stepUp.refusalMessage(res, data, !!body.secondFactor, t("profile.password.error.failed")));
         return;
       }
-      const data = await res.json().catch(() => ({}));
-      if (data.requiresRelogin) {
+      if (data && typeof data === "object" && (data as { requiresRelogin?: unknown }).requiresRelogin === true) {
         window.location.href = withBasePath("/login");
         return;
       }
@@ -115,9 +79,8 @@ export function ChangePassword({ hasPassword, secondFactor }: ChangePasswordProp
       setNewPassword("");
       setConfirmPassword("");
     } catch {
-      // The fetch can fail on a network error, and res.json() can fail if a
-      // proxy returns a non-JSON body. Without this catch the form would show
-      // nothing at all.
+      // A network error. A body that isn't JSON (a proxy's page) is read as
+      // no body above. Without this catch the form would show nothing at all.
       //
       // The message mentions sign-out because the server signs out every
       // session when the password changes. If the change saved but only the
@@ -177,23 +140,13 @@ export function ChangePassword({ hasPassword, secondFactor }: ChangePasswordProp
         />
       </div>
 
-      {needsSecondFactor && (
-        <div>
-          <label className="block text-sm text-zinc-400 mb-1" htmlFor="password-stepup-code">
-            {t("profile.mfa.stepUp.label")}{" "}
-            <span className="text-zinc-500">
-              {passkeyPossible ? t("profile.mfa.stepUp.hintWithPasskey") : t("profile.mfa.stepUp.hint")}
-            </span>
-          </label>
-          <Input
-            id="password-stepup-code"
-            autoComplete="one-time-code"
-            maxLength={24}
-            value={stepUpCode}
-            onChange={(e) => setStepUpCode(e.target.value)}
-            className="w-56"
-          />
-        </div>
+      {stepUp.needsSecondFactor && (
+        <SecondFactorCodeField
+          id="password-stepup-code"
+          value={stepUp.stepUpCode}
+          onChange={stepUp.setStepUpCode}
+          passkeyPossible={stepUp.passkeyPossible}
+        />
       )}
 
       {error && <p role="alert" className="text-sm text-red-400">{error}</p>}

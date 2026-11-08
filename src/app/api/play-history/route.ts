@@ -3,8 +3,7 @@ import { withPermission } from "@/lib/api-auth";
 import { Permission } from "@/lib/permissions";
 import { parsePageParam } from "@/lib/pagination";
 import { prisma } from "@/lib/prisma";
-import { resolvePosterPathMap, posterPathKey } from "@/lib/poster-cache";
-import { posterUrl } from "@/lib/tmdb-types";
+import { resolvePosterPathMap } from "@/lib/poster-cache";
 import { checkRateLimit } from "@/lib/rate-limit";
 import {
   composeWhere,
@@ -16,7 +15,17 @@ import {
 import { getPlayHistoryPlatforms } from "@/lib/play-history";
 import { getStatsTimeZone } from "@/lib/stats-time-zone-data";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import type { PlayHistory } from "@/generated/prisma";
+import {
+  groupedListSql,
+  parsePlayHistorySort,
+  shapeGroupedRow,
+  shapeUngroupedRow,
+  ungroupedListSql,
+  type PlayHistorySort,
+  type RawGroupedRow,
+  type RawUngroupedRow,
+  type SortDir,
+} from "@/lib/play-history-list";
 
 export const dynamic = "force-dynamic";
 
@@ -73,361 +82,81 @@ export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, sessio
   // the "Group continued watches" switch off in the filter bar.
   const ungrouped = params.get("ungrouped") === "true";
 
-  const sortDir = params.get("sortDir") === "asc" ? "asc" : "desc";
-  const sortByRaw = params.get("sortBy");
-  type SortField = "startedAt" | "title" | "playDuration" | "duration" | "source" | "platform";
-  const safeSortBy: SortField = ((): SortField => {
-    switch (sortByRaw) {
-      case "startedAt": return "startedAt";
-      case "title": return "title";
-      case "playDuration": return "playDuration";
-      case "duration": return "duration";
-      case "source": return "source";
-      case "platform": return "platform";
-      default: return "startedAt";
-    }
-  })();
+  const sortDir: SortDir = params.get("sortDir") === "asc" ? "asc" : "desc";
+  const sortBy = parsePlayHistorySort(params.get("sortBy"));
+  const timeZone = await getStatsTimeZone();
+  const pageArgs = { page, limit, skip };
 
   if (ungrouped) {
-    return ungroupedQuery(params, page, limit, skip, safeSortBy, sortDir);
+    return ungroupedQuery(params, timeZone, pageArgs, sortBy, sortDir);
   }
 
-  return groupedQuery(params, page, limit, skip, safeSortBy, sortDir);
+  return groupedQuery(params, timeZone, pageArgs, sortBy, sortDir);
 });
 
-async function ungroupedQuery(
-  params: URLSearchParams,
-  page: number,
-  limit: number,
-  skip: number,
-  sortBy: string,
-  sortDir: "asc" | "desc",
-) {
-  // Raw SQL rather than a Prisma `where`, for the SAME reason as the grouped
-  // path below: `search`. Prisma's `contains` emits an ILIKE with no ESCAPE
-  // clause, so the only way to keep a `%`/`_` in the term from acting as a
-  // wildcard there is to strip it — and a stripped term matches NOTHING for a
-  // username or title that legitimately contains one (`john_doe` searched as
-  // `johndoe`). Sharing parsePlayHistoryFilters with the grouped path and the
-  // export also means one definition of what each filter param means, for the
-  // three endpoints the admin table drives off one URLSearchParams.
-  //
-  // Same injection discipline as groupedQuery: filters are bound `$N`
-  // parameters, and the ORDER BY column comes from the caller's safeSortBy
-  // whitelist — no user data reaches SQL identifiers or structure.
-  const fragments = parsePlayHistoryFilters(params, await getStatsTimeZone());
-  const { whereSql, binds, nextBindIndex } = composeWhere(fragments);
+type PageArgs = { page: number; limit: number; skip: number };
 
-  const dir = sortDir.toUpperCase();
-  // `id` is a stable secondary sort so OFFSET pagination can't duplicate or
-  // skip rows when the primary column is non-unique (title/platform/source/
-  // duration/playDuration all repeat) and data shifts between page fetches.
-  // Mirrors the export path's (startedAt, id) tiebreaker.
-  //
-  // Deliberately NO `NULLS LAST` here, unlike the grouped query: Prisma emitted
-  // plain `ORDER BY <col> <dir>` for this path, so adding the clause would
-  // reshuffle nullable-column sorts (platform) for anyone with the grouping
-  // toggle off. The two modes have always differed here; this keeps it that way
-  // rather than smuggling an ordering change into a search fix.
-  const dataSql = `
-    SELECT h.*,
-      msu."username" AS msu_username,
-      msu."source" AS msu_source,
-      msu."thumbUrl" AS msu_thumb_url,
-      u."id" AS msu_user_id,
-      u."name" AS msu_user_name
-    FROM "PlayHistory" h
-    LEFT JOIN "MediaServerUser" msu ON msu.id = h."mediaServerUserId"
-    LEFT JOIN "User" u ON u.id = msu."userId"
-    WHERE 1=1 ${whereSql}
-    ORDER BY h."${sortBy}" ${dir}, h."id" ${dir}
-    LIMIT $${nextBindIndex} OFFSET $${nextBindIndex + 1}
-  `;
-
-  const countSql = `
-    SELECT COUNT(*)::int AS total
-    FROM "PlayHistory" h
-    WHERE 1=1 ${whereSql}
-  `;
-
-  const [rows, totalRows] = await Promise.all([
-    prisma.$queryRawUnsafe<RawUngroupedRow[]>(dataSql, ...binds, limit, skip),
-    prisma.$queryRawUnsafe<{ total: number }[]>(countSql, ...binds),
-  ]);
-
-  const total = totalRows[0]?.total ?? 0;
-
-  // Live TmdbMediaCore/TmdbCache paths. `posterUrl` (the web field) stays
-  // live-only as it always was; `posterPath` — the row's finalize-time snapshot,
-  // null for anything uncached at record time — falls back to the snapshot but
-  // now prefers the live path, which is what native clients read.
-  const livePaths = await resolvePosterPathMap(rows);
-  const itemsWithPosters = rows.map((row) => {
-    // Split the joined aliases back out so the response carries the same nested
-    // `mediaServerUser` object Prisma's `include` produced — the relation is a
-    // required FK, so it is always present. `user` keys off the joined id, not
-    // the name: a linked account with a null `name` is `{ name: null }`, which
-    // is what the relation returned, and NOT an absent link.
-    const { msu_username, msu_source, msu_thumb_url, msu_user_id, msu_user_name, ...it } = row;
-    const live =
-      it.tmdbId != null ? livePaths[posterPathKey(it.tmdbId, it.mediaType)] ?? null : null;
-    return {
-      ...it,
-      mediaServerUser: {
-        username: msu_username,
-        source: msu_source,
-        thumbUrl: msu_thumb_url,
-        user: msu_user_id != null ? { name: msu_user_name } : null,
-      },
-      posterPath: live ?? it.posterPath,
-      posterUrl: posterUrl(live, "w342"),
-      // In ungrouped mode every row is its own chain of one — surface segmentCount
-      // so the client can render the badge consistently in either mode.
-      segmentCount: 1,
-      chainId: it.referenceId ?? it.id,
-      totalPlayDuration: it.playDuration,
-      totalPausedDuration: it.pausedDuration,
-      firstStartedAt: it.startedAt,
-      lastStoppedAt: it.stoppedAt,
-    };
-  });
-
-  return NextResponse.json({
-    items: itemsWithPosters,
-    total,
-    page,
-    limit,
-    totalPages: Math.ceil(total / limit),
-    grouped: false,
-  });
-}
-
-async function groupedQuery(
-  params: URLSearchParams,
-  page: number,
-  limit: number,
-  skip: number,
-  sortBy: string,
-  sortDir: "asc" | "desc",
-) {
-  // NOTE on raw SQL here (and in lib/play-history.ts stats paths):
-  // All user-influenced filters (source, tmdbId, mediaType, dates, search, etc.)
-  // come from a strict whitelist or parseInt + bound parameters (via ? -> $N
-  // renumbering in composeWhere). ORDER BY column is taken from a server-side
-  // safeSortBy whitelist only. No user data is interpolated into SQL identifiers
-  // or structure. This is the complex dynamic-stats area; changes must preserve
-  // the whitelist + parameterization discipline to avoid injection.
-  //
-  // The filters pick CHAINS; the aggregates then cover every segment of a picked
-  // chain. Filtering segments before the window functions (as this did) cut a
-  // chain at a date-range edge and under-counted its segments and totals, and
-  // `watched=false` showed a chain finished in another segment as unwatched.
-  // `watched` is decided per chain (chain_watched, below), not per segment.
-  const filters = normalizePlayHistoryFilters(params, await getStatsTimeZone());
-  const { whereSql, binds, nextBindIndex } = composeWhere(
-    playHistoryFilterFragments({ ...filters, watched: null }),
-  );
-  const chainWatchedSql =
-    filters.watched === null ? "" : ` AND b.chain_watched = ${filters.watched === "true" ? "TRUE" : "FALSE"}`;
-  // With any segment filter, `matched` holds the chosen chain ids and `chainRows`
-  // pulls every segment of them: the OR lets Postgres serve it from the primary
-  // key and the referenceId index, and the COALESCE re-check keeps it exact.
-  // With none, every chain is chosen in full and the scan stays a plain one.
-  const matchedCte = `matched AS (
-      SELECT DISTINCT COALESCE(h."referenceId", h.id) AS chain_id
-      FROM "PlayHistory" h
-      WHERE 1=1 ${whereSql}
-    )`;
-  const withMatched = whereSql ? `${matchedCte},\n    ` : "";
-  const chainRows = whereSql
-    ? `(h.id IN (SELECT chain_id FROM matched) OR h."referenceId" IN (SELECT chain_id FROM matched))
-        AND COALESCE(h."referenceId", h.id) IN (SELECT chain_id FROM matched)`
-    : "1=1";
-
-  // chain_id = COALESCE("referenceId", id) groups a continued-watch chain
-  // (the finalize logic in src/lib/play-history.ts sets PlayHistory.referenceId
-  // on resume so all segments of a chain share one value). Window functions
-  // aggregate over the chain partition; ROW_NUMBER picks the latest segment
-  // as the representative row whose fields the UI displays.
-  //
-  // sortBy mapping when grouped:
-  //   startedAt    → latest segment's startedAt (most recent activity)
-  //   playDuration → SUM over chain (total watch time)
-  //   duration / title / source / platform → latest segment value
-  //
-  // Sort column comes from a static whitelist (safeSortBy) so it cannot be
-  // user-injected. Direction is also pre-validated to asc/desc. chain_id is
-  // appended as a stable secondary sort so OFFSET pagination can't duplicate
-  // or skip chains when the primary column is non-unique (source/platform/
-  // duration/title all repeat) — mirrors the ungrouped path's `id` tiebreaker.
-  const sortColumn = sortBy === "playDuration" ? "total_play_duration" : sortBy;
-
-  const dataLimitBind = nextBindIndex;
-  const dataOffsetBind = nextBindIndex + 1;
-  const dataSql = `
-    WITH ${withMatched}base AS (
-      SELECT h.*,
-        COALESCE(h."referenceId", h.id) AS chain_id,
-        ROW_NUMBER() OVER (
-          PARTITION BY COALESCE(h."referenceId", h.id)
-          ORDER BY h."startedAt" DESC
-        )::int AS rn,
-        COUNT(*) OVER (
-          PARTITION BY COALESCE(h."referenceId", h.id)
-        )::int AS segment_count,
-        SUM(h."playDuration") OVER (
-          PARTITION BY COALESCE(h."referenceId", h.id)
-        )::int AS total_play_duration,
-        SUM(COALESCE(h."pausedDuration", 0)) OVER (
-          PARTITION BY COALESCE(h."referenceId", h.id)
-        )::int AS total_paused_duration,
-        MIN(h."startedAt") OVER (
-          PARTITION BY COALESCE(h."referenceId", h.id)
-        ) AS first_started_at,
-        MAX(h."stoppedAt") OVER (
-          PARTITION BY COALESCE(h."referenceId", h.id)
-        ) AS last_stopped_at,
-        bool_or(h."watched") OVER (
-          PARTITION BY COALESCE(h."referenceId", h.id)
-        ) AS chain_watched,
-        bool_or(h."completed") OVER (
-          PARTITION BY COALESCE(h."referenceId", h.id)
-        ) AS chain_completed
-      FROM "PlayHistory" h
-      WHERE ${chainRows}
-    )
-    SELECT b.*,
-      msu.username AS msu_username,
-      msu.source AS msu_source,
-      msu."thumbUrl" AS msu_thumb_url
-    FROM base b
-    LEFT JOIN "MediaServerUser" msu ON msu.id = b."mediaServerUserId"
-    WHERE b.rn = 1${chainWatchedSql}
-    ORDER BY b."${sortColumn}" ${sortDir.toUpperCase()} NULLS LAST, b.chain_id ${sortDir.toUpperCase()}
-    LIMIT $${dataLimitBind} OFFSET $${dataOffsetBind}
-  `;
-
-  // The same chains the data query pages through: the chosen ones, narrowed by
-  // the chain-level `watched` when it is set.
-  const countSql =
-    filters.watched === null
-      ? `
-    SELECT COUNT(DISTINCT COALESCE(h."referenceId", h.id))::int AS total
-    FROM "PlayHistory" h
-    WHERE 1=1 ${whereSql}
-  `
-      : `
-    WITH ${withMatched}chains AS (
-      SELECT bool_or(h."watched") AS chain_watched
-      FROM "PlayHistory" h
-      WHERE ${chainRows}
-      GROUP BY COALESCE(h."referenceId", h.id)
-    )
-    SELECT COUNT(*)::int AS total
-    FROM chains b
-    WHERE 1=1${chainWatchedSql}
-  `;
-
-  // Run data + count concurrently. They share the same bind list except
-  // for limit/offset which only data uses.
-  const [rows, totalRows] = await Promise.all([
-    prisma.$queryRawUnsafe<RawGroupedRow[]>(dataSql, ...binds, limit, skip),
-    prisma.$queryRawUnsafe<{ total: number }[]>(countSql, ...binds),
-  ]);
-
-  const total = totalRows[0]?.total ?? 0;
-
-  // Resolve posters per (tmdbId, mediaType). Mirror the ungrouped path's
-  // contract so the UI doesn't need a mode switch for posterUrl (or posterPath).
-  const livePaths = await resolvePosterPathMap(rows);
-
-  const items = rows.map((r) => {
-    // Map snake_case raw columns to the camelCase shape the rest of the app
-    // consumes. The base PlayHistory columns already arrive camelCase via the
-    // SELECT b.* — only the window-function aliases need translation. The
-    // aliases are destructured OUT before the spread so the response carries
-    // each value once (the ungrouped path strips its aliases the same way);
-    // spreading `r` shipped every alias twice in two spellings.
-    const {
-      rn: _rn, chain_id: _chainId, segment_count: _segmentCount,
-      total_play_duration: _totalPlay, total_paused_duration: _totalPaused,
-      first_started_at: _firstStarted, last_stopped_at: _lastStopped,
-      chain_watched: _chainWatched, chain_completed: _chainCompleted,
-      msu_username: _msuUsername, msu_source: _msuSource, msu_thumb_url: _msuThumb,
-      ...base
-    } = r;
-    const mediaServerUser = r.msu_username != null
-      ? {
-          username: r.msu_username,
-          source: r.msu_source,
-          thumbUrl: r.msu_thumb_url,
-        }
-      : null;
-    const live =
-      r.tmdbId != null ? livePaths[posterPathKey(r.tmdbId, r.mediaType)] ?? null : null;
-    return {
-      ...base,
-      mediaServerUser,
-      posterPath: live ?? r.posterPath,
-      posterUrl: posterUrl(live, "w342"),
-      segmentCount: r.segment_count,
-      chainId: r.chain_id,
-      totalPlayDuration: r.total_play_duration,
-      totalPausedDuration: r.total_paused_duration,
-      firstStartedAt: r.first_started_at,
-      lastStoppedAt: r.last_stopped_at,
-      // Override the row's own watched/completed flags with the chain-wide
-      // booleans so the UI's "Watched" pill reflects whether *any* segment of
-      // this chain reached the threshold (a chain that finishes watched should
-      // still show watched even if the final segment was a 2-minute coda).
-      watched: r.chain_watched,
-      completed: r.chain_completed,
-    };
-  });
-
+// The answer both modes share: the page's items and the paging totals.
+function listResponse(items: unknown[], total: number, { page, limit }: PageArgs, grouped: boolean): NextResponse {
   return NextResponse.json({
     items,
     total,
     page,
     limit,
     totalPages: Math.ceil(total / limit),
-    grouped: true,
+    grouped,
   });
 }
 
-// PlayHistory's own columns as they arrive from a `SELECT h.*` / `SELECT b.*`
-// (already camelCase — Prisma's column names are the field names). Shared by
-// both raw paths; each extends it with its own aliases. The generated model
-// type, so a schema change can't leave this behind.
-type RawPlayHistoryRow = PlayHistory;
-
-// groupedQuery's row: the representative segment plus the window-function
-// aliases (snake_case) and the joined MediaServerUser fields.
-interface RawGroupedRow extends RawPlayHistoryRow {
-  chain_id: string;
-  rn: number;
-  segment_count: number;
-  total_play_duration: number;
-  total_paused_duration: number;
-  first_started_at: Date;
-  last_stopped_at: Date;
-  chain_watched: boolean;
-  chain_completed: boolean;
-  msu_username: string | null;
-  msu_source: string | null;
-  msu_thumb_url: string | null;
+// One row per segment (?ungrouped=true — the "Group continued watches" switch
+// off). Raw SQL rather than a Prisma `where`, for the SAME reason as the grouped
+// path: `search`. Prisma's `contains` emits an ILIKE with no ESCAPE clause, so
+// the only way to keep a `%`/`_` in the term from acting as a wildcard there is
+// to strip it — and a stripped term matches NOTHING for a username or title
+// that legitimately contains one (`john_doe` searched as `johndoe`). Sharing
+// parsePlayHistoryFilters with the grouped path and the export also means one
+// definition of what each filter param means, for the three endpoints the admin
+// table drives off one URLSearchParams.
+async function ungroupedQuery(
+  params: URLSearchParams,
+  timeZone: string,
+  pageArgs: PageArgs,
+  sortBy: PlayHistorySort,
+  sortDir: SortDir,
+) {
+  const { whereSql, binds, nextBindIndex } = composeWhere(parsePlayHistoryFilters(params, timeZone));
+  const { dataSql, countSql } = ungroupedListSql(whereSql, nextBindIndex, sortBy, sortDir);
+  const [rows, totalRows] = await Promise.all([
+    prisma.$queryRawUnsafe<RawUngroupedRow[]>(dataSql, ...binds, pageArgs.limit, pageArgs.skip),
+    prisma.$queryRawUnsafe<{ total: number }[]>(countSql, ...binds),
+  ]);
+  const livePaths = await resolvePosterPathMap(rows);
+  return listResponse(rows.map((row) => shapeUngroupedRow(row, livePaths)), totalRows[0]?.total ?? 0, pageArgs, false);
 }
 
-// ungroupedQuery's row: the segment itself plus the MediaServerUser join that
-// stands in for Prisma's `include` (and the User join behind its `user`
-// sub-select). The relation is a required FK, so the msu_* columns are only
-// nullable in the type, never in practice; msu_user_* genuinely can be null
-// (MediaServerUser.userId is optional).
-interface RawUngroupedRow extends RawPlayHistoryRow {
-  msu_username: string;
-  msu_source: string;
-  msu_thumb_url: string | null;
-  msu_user_id: string | null;
-  msu_user_name: string | null;
+// Default: continued watches (PlayHistory.referenceId chains) collapsed into
+// one logical viewing per chain, its latest segment the representative row and
+// the chain's aggregates beside it (play-history-list.ts). `watched` is decided
+// per chain, so it is left out of the segment filters and applied to the chain.
+async function groupedQuery(
+  params: URLSearchParams,
+  timeZone: string,
+  pageArgs: PageArgs,
+  sortBy: PlayHistorySort,
+  sortDir: SortDir,
+) {
+  const filters = normalizePlayHistoryFilters(params, timeZone);
+  const { whereSql, binds, nextBindIndex } = composeWhere(
+    playHistoryFilterFragments({ ...filters, watched: null }),
+  );
+  const { dataSql, countSql } = groupedListSql(whereSql, nextBindIndex, sortBy, sortDir, filters.watched);
+  // Data + count run concurrently on the same binds; only data takes limit/offset.
+  const [rows, totalRows] = await Promise.all([
+    prisma.$queryRawUnsafe<RawGroupedRow[]>(dataSql, ...binds, pageArgs.limit, pageArgs.skip),
+    prisma.$queryRawUnsafe<{ total: number }[]>(countSql, ...binds),
+  ]);
+  // Posters per (tmdbId, mediaType), on the ungrouped path's contract so the
+  // UI needs no mode switch for posterUrl (or posterPath).
+  const livePaths = await resolvePosterPathMap(rows);
+  return listResponse(rows.map((r) => shapeGroupedRow(r, livePaths)), totalRows[0]?.total ?? 0, pageArgs, true);
 }
-

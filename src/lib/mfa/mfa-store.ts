@@ -16,23 +16,19 @@ import "server-only";
 // so two concurrent requests presenting the same code/assertion can't both win.
 
 import { createHash, createHmac, hkdfSync } from "node:crypto";
-import { prisma } from "@/lib/prisma";
+import { Prisma } from "@/generated/prisma";
+import { prisma, type PrismaTxClient } from "@/lib/prisma";
 import { verifyTotp, generateTotpSecret } from "./totp";
 import { generateRecoveryCodes, hashRecoveryCode, normalizeRecoveryCode, recoveryHashesEqual } from "./recovery-codes";
 import {
   assertionCredentialId,
   verifyAuthenticationResponse,
   WebAuthnError,
-  type AuthenticationResponseJSON,
   type WebAuthnConfig,
 } from "./webauthn";
 
-// Same derivation as account-lifecycle.ts: the encryption extension changes
-// the client's type, so derive the tx client from the extended client.
-export type MfaTxClient = Omit<
-  typeof prisma,
-  "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends"
->;
+// The extended client's interactive-tx type (prisma.ts), under its old name.
+export type MfaTxClient = PrismaTxClient;
 
 export const MAX_PASSKEYS_PER_USER = 10;
 export const PASSKEY_NAME_MAX = 64;
@@ -173,9 +169,11 @@ export async function consumeRecoveryCode(userId: string, input: string): Promis
 
 export type PasskeyVerdict = { ok: true } | { ok: false; code: string };
 
+// `response` is the browser's assertion JSON as received; webauthn.ts checks
+// its shape.
 export async function verifyPasskeyForUser(
   userId: string,
-  response: AuthenticationResponseJSON,
+  response: unknown,
   expectedChallenge: string,
   config: WebAuthnConfig,
 ): Promise<PasskeyVerdict> {
@@ -212,7 +210,9 @@ export async function verifyPasskeyForUser(
 export type SecondFactorInput =
   | { method: "totp"; code: string }
   | { method: "recovery"; code: string }
-  | { method: "webauthn"; credential: AuthenticationResponseJSON };
+  // Unchecked browser JSON (an AuthenticationResponseJSON once webauthn.ts has
+  // checked it): only its outer type is known here.
+  | { method: "webauthn"; credential: unknown };
 
 export async function verifySecondFactor(
   userId: string,
@@ -301,8 +301,8 @@ export function mfaUserLockKey(userId: string): number {
 }
 
 export async function lockUserMfaInTx(tx: MfaTxClient, userId: string): Promise<void> {
-  // Both operands are integers computed here — never caller input.
-  await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(${MFA_USER_LOCK_NAMESPACE}, ${mfaUserLockKey(userId)})`);
+  // Bound parameters, cast so the call hits the (int, int) overload.
+  await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(${MFA_USER_LOCK_NAMESPACE}::int, ${mfaUserLockKey(userId)}::int)`);
 }
 
 // Replaces every recovery code with a fresh set; returns the plaintext (shown

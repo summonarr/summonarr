@@ -853,11 +853,18 @@ test("the panel never reads without a click, never acts on a stale verdict, and 
   const src = (p: string) => readFileSync(new URL(`../src/components/admin/${p}`, import.meta.url), "utf8");
   const actions = src("request-actions.tsx");
   const panel = src("request-arr-status.tsx");
+  // The verdict's words live beside the panel, in its pure view module.
+  const view = src("request-arr-status-view.ts");
   const list = src("admin-request-list.tsx");
-  // C073: the delete confirm and a status other than APPROVED unmount the panel, so both close it.
-  assert.match(actions, /onAskDelete=\{\(\) => \{ setShowStatus\(false\); setShowDeleteConfirm\(true\); \}\}/);
-  assert.match(actions, /onClick=\{onAskDelete\}/, "the Delete button asks through that handler");
-  assert.match(actions, /useEffect\(\(\) => \{\s*if \(status !== "APPROVED"\) setShowStatus\(false\);\s*\}, \[status\]\);/);
+  // C073: the delete confirm and a status other than APPROVED unmount the panel, so both close it:
+  // its open state is ApprovedActions' own, and the confirm renders instead of ApprovedActions.
+  const approved = actions.slice(actions.indexOf("function ApprovedActions("), actions.indexOf("function DeclineNoteForm("));
+  assert.match(approved, /const \[showStatus, setShowStatus\] = useState\(false\);/);
+  assert.equal(actions.match(/useState\(false\);\n\s*const statusPanelId/g)?.length, 1);
+  assert.equal(actions.match(/\bsetShowStatus\b/g)?.length, approved.match(/\bsetShowStatus\b/g)?.length, "nothing outside ApprovedActions holds the panel open");
+  assert.match(actions, /if \(showDeleteConfirm\) \{\s*return \(\s*<DeleteConfirm/);
+  assert.match(actions, /onAskDelete=\{\(\) => setShowDeleteConfirm\(true\)\}/);
+  assert.match(approved, /onClick=\{onAskDelete\}/, "the Delete button asks through that handler");
   // C075: a new representative request starts from no verdict.
   assert.match(actions, /<RequestArrStatusPanel[\s\S]*?key=\{requestId\}[\s\S]*?\/>/);
   // C075: a verdict that is being re-checked, or failed to re-check, offers no live action…
@@ -881,8 +888,35 @@ test("the panel never reads without a click, never acts on a stale verdict, and 
   assert.match(list, /arrInstanceName=\{instanceLabel\(representativeInstance\)\}/);
   // C155: a series monitored at the series level only gets its own wording and no Re-push (Re-push skips a monitored series).
   assert.match(panel, /const actionsFor = \(s: Loaded\): readonly NextAction\[\] => \(unmonitoredEpisodesOnly\(s\) \? \[\] : NEXT_ACTIONS\[s\.verdict\]\);/);
-  assert.match(panel, /unmonitoredEpisodesOnly\(s\)\s*\? t\("adminQueue\.arrStatus\.why\.unmonitoredEpisodes"/);
+  assert.match(view, /unmonitoredEpisodesOnly\(s\)\s*\? t\("adminQueue\.arrStatus\.why\.unmonitoredEpisodes"/);
   assert.ok(!/NEXT_ACTIONS\[status\.verdict\]/.test(panel), "the buttons go through actionsFor");
   // C154: the new verdict has its own wording.
-  assert.match(panel, /case "waitingForLibrary": return t\("adminQueue\.arrStatus\.why\.waitingForLibrary"/);
+  assert.match(view, /case "waitingForLibrary": return t\("adminQueue\.arrStatus\.why\.waitingForLibrary"/);
+});
+
+test("the panel reads every answer the route gives: its schema accepts an admin's and a delegate's, downloading, not in Radarr and unreachable", async () => {
+  const { ARR_STATUS_ANSWER } = await import("../src/components/admin/request-arr-status-view.ts");
+  const { check } = await import("../src/lib/validate.ts");
+  requests = [approvedMovie()];
+  const downloading = {
+    id: 7, movieId: 10, movie: { title: "The Matrix", tmdbId: 603 }, title: "Matrix.1999.1080p", downloadId: "d1",
+    size: 4e9, sizeleft: 1e9, status: "downloading", trackedDownloadStatus: "ok", trackedDownloadState: "downloading",
+    timeleft: "00:10:00", quality: { quality: { name: "Bluray-1080p" } },
+  };
+  const bodies: unknown[] = [];
+  responder = radarrResponder(movieRow(), [downloading], []);
+  for (const token of [await mintSession(), await mintSession({ role: "USER", permissions: Permission.MANAGE_REQUESTS })]) {
+    bodies.push(await (await get(token, "r1")).json());
+  }
+  responder = radarrResponder(null);
+  bodies.push(await (await get(await mintSession(), "r1")).json());
+  responder = (c) => (c.path === "/api/v3/movie" ? new Response("no", { status: 401 }) : undefined);
+  bodies.push(await (await get(await mintSession(), "r1")).json());
+  assert.deepEqual(bodies.map((b) => (b as StatusBody).verdict), ["downloading", "downloading", "notInArr", "unreachable"]);
+  for (const body of bodies) {
+    const read = check(ARR_STATUS_ANSWER, body);
+    assert.ok(read.ok, `the panel can't read ${JSON.stringify(body)}: ${read.ok ? "" : read.error}`);
+  }
+  // An answer the panel can't read is refused, not rendered: an unknown verdict.
+  assert.equal(check(ARR_STATUS_ANSWER, { ...(bodies[0] as object), verdict: "somethingNew" }).ok, false);
 });

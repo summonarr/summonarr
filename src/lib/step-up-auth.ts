@@ -127,54 +127,65 @@ export interface StepUpMessages {
 //
 // Returns null when the caller passed, otherwise the response to send. The
 // response shapes are a wire contract the web client (and the iOS app for the
-// sessions routes) branches on:
+// sessions routes) branches on — the mixed code spellings included, so they
+// stay as they are; every refusal carries a translated `message`:
 //   401 { error: "password-required", message }
-//   401 { error: "invalid-password" }
+//   401 { error: "invalid-password", message }
 //   401 { error: "session-too-old", message }
 //   429 { error: "rate_limit", message }
-export async function requireStepUp(opts: {
+type StepUpOptions = {
   req: NextRequest;
   session: SummonarrSession;
   confirmPassword: unknown;
   context: string;
   messages: StepUpMessages;
   t: Translator;
-}): Promise<NextResponse | null> {
-  const { session, t } = opts;
+};
+
+export async function requireStepUp(opts: StepUpOptions): Promise<NextResponse | null> {
   const user = await prisma.user.findUnique({
-    where: { id: session.user.id },
+    where: { id: opts.session.user.id },
     select: { passwordHash: true },
   });
-  if (!user) return NextResponse.json({ error: t("apiAuth.common.unauthorized") }, { status: 401 });
+  if (!user) return NextResponse.json({ error: opts.t("apiAuth.common.unauthorized") }, { status: 401 });
+  return user.passwordHash ? passwordStepUp(opts, user.passwordHash) : recentSignInStepUp(opts);
+}
 
-  if (user.passwordHash) {
-    if (typeof opts.confirmPassword !== "string" || opts.confirmPassword.length === 0) {
-      return NextResponse.json(
-        { error: "password-required", message: opts.messages.passwordRequired },
-        { status: 401 },
-      );
-    }
-    const verdict = await verifyStepUpPassword({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email,
-      passwordHash: user.passwordHash,
-      password: opts.confirmPassword,
-      context: opts.context,
-      req: opts.req,
-    });
-    if (verdict === "rate-limited") {
-      return NextResponse.json(
-        { error: "rate_limit", message: t("apiAuth.common.tooManyAttemptsWait15") },
-        { status: 429 },
-      );
-    }
-    if (verdict === "invalid") return NextResponse.json({ error: "invalid-password" }, { status: 401 });
-    return null;
+// A password account re-enters its password, against the one per-account
+// step-up budget (verifyStepUpPassword).
+async function passwordStepUp(opts: StepUpOptions, passwordHash: string): Promise<NextResponse | null> {
+  const { session, t } = opts;
+  if (typeof opts.confirmPassword !== "string" || opts.confirmPassword.length === 0) {
+    return NextResponse.json(
+      { error: "password-required", message: opts.messages.passwordRequired },
+      { status: 401 },
+    );
   }
+  const verdict = await verifyStepUpPassword({
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email,
+    passwordHash,
+    password: opts.confirmPassword,
+    context: opts.context,
+    req: opts.req,
+  });
+  if (verdict === "rate-limited") {
+    return NextResponse.json(
+      { error: "rate_limit", message: t("apiAuth.common.tooManyAttemptsWait15") },
+      { status: 429 },
+    );
+  }
+  if (verdict === "invalid") {
+    // `message` is additive: the code stays the one clients branch on.
+    return NextResponse.json({ error: "invalid-password", message: t("apiAuth.common.invalidPassword") }, { status: 401 });
+  }
+  return null;
+}
 
-  // SSO: no local password to challenge, so the proof is a recent full sign-in
-  // at the identity provider — the caller's own AuthSession must be young.
-  const callerSessionId = session.sessionId;
+// SSO: no local password to challenge, so the proof is a recent full sign-in
+// at the identity provider — the caller's own AuthSession must be young.
+async function recentSignInStepUp(opts: StepUpOptions): Promise<NextResponse | null> {
+  const callerSessionId = opts.session.sessionId;
   const caller = callerSessionId
     ? await prisma.authSession.findUnique({ where: { sessionId: callerSessionId }, select: { createdAt: true } })
     : null;

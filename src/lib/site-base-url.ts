@@ -1,4 +1,7 @@
 import { plexReturnBase } from "@/lib/client/plex-approval-url";
+import { warnOnChange } from "@/lib/log-dedup";
+
+const LOCAL_FALLBACK = "http://localhost:3000";
 
 /**
  * The app's public root for a URL an admin copies into another service (the
@@ -16,5 +19,16 @@ export function siteBaseUrl(
   authUrl: string | null | undefined,
   basePath: string | null | undefined,
 ): string {
-  return plexReturnBase(siteUrl?.trim() || authUrl?.trim() || "", "http://localhost:3000", basePath ?? "");
+  const configured = siteUrl?.trim() || authUrl?.trim() || "";
+  // Every link built on the fallback points at localhost, which works only on
+  // the server itself. Said once (guardrail 7b), and not in development, where
+  // localhost is the right answer.
+  if (!configured && process.env.NODE_ENV !== "development") {
+    warnOnChange(
+      "site-base-url:fallback",
+      "localhost",
+      `[site-base-url] neither the Site URL setting nor AUTH_URL is set; copied links use ${LOCAL_FALLBACK}`,
+    );
+  }
+  return plexReturnBase(configured, LOCAL_FALLBACK, basePath ?? "");
 }

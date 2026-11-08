@@ -583,3 +583,38 @@ test("the debounce is process-wide: a schedule from another copy of the module j
   await flush();
   assert.equal(refreshCalls("/Library/Refresh").length, 1, "one scan, not one per copy");
 });
+
+test("a default and a 4K import merged into one window wait on BOTH queues, not only the last one's", async (t) => {
+  arm(t);
+  settings.set("radarrUrl", "http://radarr.t30.example:7878");
+  settings.set("radarrApiKey", "r-key-30");
+  settings.set("radarr4kUrl", "http://radarr4k.t30.example:7878");
+  settings.set("radarr4kApiKey", "r4k-key-30");
+  settings.set("jellyfinUrl", "http://jf.t30.example:8096");
+  settings.set("jellyfinApiKey", "jf-key-30");
+  let defaultReads = 0;
+  respond = (url) => {
+    if (url.startsWith("http://radarr.t30.example:7878/api/v3/queue")) {
+      defaultReads++;
+      // The default instance is still downloading the title on the first check.
+      return okJson(defaultReads === 1 ? { records: [{ movie: { tmdbId: 31 } }], totalRecords: 1 } : { records: [], totalRecords: 0 });
+    }
+    if (url.startsWith("http://radarr4k.t30.example:7878/api/v3/queue")) return okJson({ records: [], totalRecords: 0 });
+    if (url.endsWith("/Library/Refresh")) return new Response(null, { status: 204 });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  const p1 = scheduleLibraryScan("movie", 31, "");
+  const p2 = scheduleLibraryScan("movie", 31, "4k"); // the 4K import lands second
+  assert.equal(p2, p1);
+  t.mock.timers.tick(DEBOUNCE);
+  await flush();
+  assert.equal(refreshCalls("/Library/Refresh").length, 0, "the default queue still holds the title");
+  assert.ok(warns.some((w) => w.includes("retry 1/4")));
+  // The default instance's queue cache lives 15s; the retry fires past it.
+  t.mock.timers.tick(DEBOUNCE + 1);
+  await flush();
+  await p1;
+  assert.equal(refreshCalls("/Library/Refresh").length, 1);
+  assert.ok(sent.some((s) => s.url.startsWith("http://radarr4k.t30.example:7878/api/v3/queue")), "the 4K queue was consulted too");
+});

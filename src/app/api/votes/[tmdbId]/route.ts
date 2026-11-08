@@ -6,8 +6,10 @@ import { tooManyRequests } from "@/lib/http";
 import { logAudit, auditContext } from "@/lib/audit";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { isFeatureEnabled } from "@/lib/features";
-import { isTmdbIdInRange, parseTmdbIdParam } from "@/lib/tmdb-id";
+import { deletionVoteMarkerKey } from "@/lib/deletion-vote-keys";
+import { parseVoteTitleParams, readDeletionVoteThreshold } from "@/lib/deletion-vote-threshold";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
 export const DELETE = withAuth(async (
   req,
@@ -28,14 +30,9 @@ export const DELETE = withAuth(async (
     return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
   }
 
-  const { tmdbId: rawId } = await params;
-  const tmdbId = parseTmdbIdParam(rawId);
-  if (tmdbId === null || !isTmdbIdInRange(tmdbId)) return NextResponse.json({ error: t("apiUser.votes.invalidTmdbId") }, { status: 400 });
-
-  const mediaType = req.nextUrl.searchParams.get("mediaType");
-  if (mediaType !== "MOVIE" && mediaType !== "TV") {
-    return NextResponse.json({ error: t("apiUser.votes.mediaTypeQueryInvalid") }, { status: 400 });
-  }
+  const title = parseVoteTitleParams((await params).tmdbId, req.nextUrl.searchParams);
+  if (!title.ok) return badTitleParams(title.error, t);
+  const { tmdbId, mediaType } = title;
 
   // Re-arm the one-shot threshold alert if removing this vote drops the tally
   // below the threshold. The notify path (votes POST) only alerts when it is the
@@ -47,12 +44,11 @@ export const DELETE = withAuth(async (
       where: { tmdbId, mediaType, userId: session.user.id },
     });
     if (removed.count > 0) {
-      const thresholdRow = await tx.setting.findUnique({ where: { key: "deletionVoteThreshold" } });
-      const threshold = parseInt(thresholdRow?.value ?? "0", 10);
+      const threshold = await readDeletionVoteThreshold(tx);
       if (threshold > 0) {
         const remaining = await tx.deletionVote.count({ where: { tmdbId, mediaType } });
         if (remaining < threshold) {
-          await tx.setting.deleteMany({ where: { key: `deletionVoteNotified:${tmdbId}:${mediaType}` } });
+          await tx.setting.deleteMany({ where: { key: deletionVoteMarkerKey(tmdbId, mediaType) } });
         }
       }
     }
@@ -79,19 +75,14 @@ export const PATCH = withAdmin(async (
     return NextResponse.json({ error: t("apiUser.votes.dismissRateLimited") }, { status: 429 });
   }
 
-  const { tmdbId: rawId } = await params;
-  const tmdbId = parseTmdbIdParam(rawId);
-  if (tmdbId === null || !isTmdbIdInRange(tmdbId)) return NextResponse.json({ error: t("apiUser.votes.invalidTmdbId") }, { status: 400 });
-
-  const mediaType = req.nextUrl.searchParams.get("mediaType");
-  if (mediaType !== "MOVIE" && mediaType !== "TV") {
-    return NextResponse.json({ error: t("apiUser.votes.mediaTypeQueryInvalid") }, { status: 400 });
-  }
+  const title = parseVoteTitleParams((await params).tmdbId, req.nextUrl.searchParams);
+  if (!title.ok) return badTitleParams(title.error, t);
+  const { tmdbId, mediaType } = title;
 
   // Wrap delete + Setting cleanup in a single transaction so a "notified" flag never
   // outlives the votes it referenced. The Setting key may not exist (notification
   // never fired), so the delete uses deleteMany — which is null-safe by design.
-  const settingKey = `deletionVoteNotified:${tmdbId}:${mediaType}`;
+  const settingKey = deletionVoteMarkerKey(tmdbId, mediaType);
   const [deleted] = await prisma.$transaction([
     prisma.deletionVote.deleteMany({ where: { tmdbId, mediaType } }),
     prisma.setting.deleteMany({ where: { key: settingKey } }),
@@ -108,3 +99,11 @@ export const PATCH = withAdmin(async (
 
   return NextResponse.json({ ok: true, dismissed: deleted.count });
 });
+
+// The 400 for a /api/votes/[tmdbId] call naming no valid title.
+function badTitleParams(error: "tmdbId" | "mediaType", t: Translator): NextResponse {
+  return NextResponse.json(
+    { error: t(error === "tmdbId" ? "apiUser.votes.invalidTmdbId" : "apiUser.votes.mediaTypeQueryInvalid") },
+    { status: 400 },
+  );
+}

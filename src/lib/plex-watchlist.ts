@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { PLEX_CLIENT_ID, parseTmdbGuid } from "@/lib/plex";
+import { plexClientIdentity } from "@/lib/plex-client-headers";
 import { isFeatureEnabled } from "@/lib/features";
 import { mapLimit } from "@/lib/concurrency";
 import { Permission, AUTO_REQUEST_MASK, effectivePermissions } from "@/lib/permissions";
@@ -158,9 +159,7 @@ function plexHeaders(token: string): Record<string, string> {
   return {
     Accept: "application/json",
     "X-Plex-Token": token,
-    "X-Plex-Client-Identifier": PLEX_CLIENT_ID,
-    "X-Plex-Product": "Summonarr",
-    "X-Plex-Version": "1.0",
+    ...plexClientIdentity(PLEX_CLIENT_ID),
   };
 }
 
@@ -205,11 +204,14 @@ export function parseWatchlistEntry(entry: unknown): PlexWatchlistItem | null {
   };
 }
 
-async function plexJson(url: string, token: string): Promise<unknown> {
+// `signal` ends the request in flight, not just the loop around it: a cron
+// that lost its lock otherwise waited out FETCH_TIMEOUT_MS per open request.
+async function plexJson(url: string, token: string, signal?: AbortSignal): Promise<unknown> {
   const res = await safeFetchTrusted(url, {
     allowedHosts: PLEX_WATCHLIST_HOSTS,
     headers: plexHeaders(token),
     timeoutMs: FETCH_TIMEOUT_MS,
+    signal,
   });
   if (res.status === 401) throw new PlexTokenRevokedError();
   if (!res.ok) throw new Error(`plex.tv answered ${res.status}`);
@@ -234,7 +236,7 @@ export async function fetchPlexWatchlistWithStats(
   for (let start = 0; start < MAX_WATCHLIST_ITEMS; start += PAGE_SIZE) {
     if (opts.signal?.aborted) break;
     const url = `${WATCHLIST_URL}?X-Plex-Container-Start=${start}&X-Plex-Container-Size=${PAGE_SIZE}&includeGuids=1`;
-    const data = (await plexJson(url, token)) as { MediaContainer?: { Metadata?: unknown; totalSize?: unknown } };
+    const data = (await plexJson(url, token, opts.signal)) as { MediaContainer?: { Metadata?: unknown; totalSize?: unknown } };
     const page = Array.isArray(data?.MediaContainer?.Metadata) ? (data.MediaContainer.Metadata as unknown[]) : [];
     for (const entry of page) {
       const item = parseWatchlistEntry(entry);
@@ -280,14 +282,15 @@ export async function resolveMissingTmdbIds(
     if (signal?.aborted) return;
     stats.attempted++;
     try {
-      const data = (await plexJson(`${METADATA_URL}${encodeURIComponent(item.ratingKey)}`, token)) as {
+      const data = (await plexJson(`${METADATA_URL}${encodeURIComponent(item.ratingKey)}`, token, signal)) as {
         MediaContainer?: { Metadata?: Array<{ Guid?: unknown }> };
       };
       item.tmdbId = tmdbIdFromPlexGuids(data?.MediaContainer?.Metadata?.[0]?.Guid);
       rememberMetadata(item.ratingKey, item.tmdbId, Date.now());
     } catch (err) {
       if (err instanceof PlexTokenRevokedError) throw err;
-      stats.failed++;
+      // An abort is the run ending, not a failed lookup.
+      if (!signal?.aborted) stats.failed++;
     }
   });
   return stats;
@@ -447,6 +450,8 @@ export interface PlexWatchlistSyncResult {
   tokensRevoked: number;
   // Users whose watchlist could not be read or processed this run (either path).
   errors: number;
+  // Titles due this run past the per-user per-run cap; filed on a later run.
+  deferred?: number;
   outcomes: Partial<Record<AutoRequestOutcome, number>>;
   // Present only while plexWatchlistServerSource is on.
   server?: PlexWatchlistServerResult;
@@ -573,6 +578,109 @@ async function collectServerTargets(
   return { targets, friendIds, unbridged };
 }
 
+// One server-path target's watchlist: the owner's discover list read with the
+// admin token, or a friend's through GraphQL. "private" when the friend keeps
+// it from the owner.
+async function readServerTargetWatchlist(
+  target: ServerTarget,
+  signal: AbortSignal | undefined,
+): Promise<{ status: "private" } | { status: "read"; items: PlexWatchlistItem[]; lookups: MetadataLookupStats }> {
+  if (target.graphId === null) {
+    return { status: "read", ...(await fetchPlexWatchlistWithStats(target.token, { signal })) };
+  }
+  const list = await fetchFriendWatchlist(target.token, target.graphId, { maxItems: MAX_WATCHLIST_ITEMS, signal });
+  if (list.status === "private") return { status: "private" };
+  const items: PlexWatchlistItem[] = [];
+  for (const node of list.nodes) {
+    const item = parseWatchlistEntry({ ratingKey: node.id, title: node.title, type: node.type });
+    if (item) items.push(item);
+  }
+  // No guid on a GraphQL node: every one is a cache hit or a lookup.
+  const lookups = await resolveMissingTmdbIds(items, target.token, signal);
+  return { status: "read", items, lookups };
+}
+
+type ServerUserRun = {
+  server: PlexWatchlistServerResult;
+  result: PlexWatchlistSyncResult;
+  statuses: Record<string, ServerWatchlistUserStatus>;
+  rejectToken: (token: string, slug: string) => void;
+  signal: AbortSignal | undefined;
+};
+
+// Read and file one consenting user through their server-path target. Returns
+// false when the run was aborted mid-user (the caller stops there).
+async function syncServerUser(user: CronUser, target: ServerTarget, run: ServerUserRun): Promise<boolean> {
+  const { server, result, statuses, signal } = run;
+  server.users++;
+  try {
+    const read = await readServerTargetWatchlist(target, signal);
+    if (read.status === "private") {
+      statuses[user.id] = "private";
+      server.private++;
+      return true;
+    }
+    server.lookupFailures += read.lookups.failed;
+    if (metadataLookupsDefeatedRead(read.items, read.lookups)) {
+      // Nothing resolved and lookups failed: "ok" would be a lie. A run
+      // error (the run degrades); the titles are retried next run.
+      statuses[user.id] = "error";
+      result.errors++;
+      console.error(`[plex-watchlist] server-path sync for user ${user.id}: ${read.lookups.failed} of ${read.lookups.attempted} metadata lookup(s) failed and nothing on the watchlist could be resolved`);
+      return true;
+    }
+    await fileWatchlistTitles(user, read.items, result, signal);
+    statuses[user.id] = "ok";
+    return true;
+  } catch (err) {
+    if (signal?.aborted) return false; // an abort mid-request is not this user's failure
+    statuses[user.id] = "error";
+    // The ADMIN token was rejected mid-run (GraphQL or a metadata lookup):
+    // stop using this instance. NEVER the user-token 401 branch — no Account
+    // row is touched.
+    if (err instanceof AdminTokenRejectedError || err instanceof PlexTokenRevokedError) {
+      run.rejectToken(target.token, target.slug);
+      return true;
+    }
+    result.errors++;
+    console.error(`[plex-watchlist] server-path sync failed for user ${user.id}: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
+    return true;
+  }
+}
+
+// The consenting, permitted users among those the targets resolved to.
+async function consentingServerUsers(userIds: string[]): Promise<CronUser[]> {
+  const autoEnroll = await settingIsTrue(PLEX_WATCHLIST_SERVER_AUTO_ENROLL_KEY);
+  const rows = await prisma.user.findMany({
+    where: {
+      id: { in: userIds },
+      deactivatedAt: null,
+      purgedAt: null,
+      plexWatchlistAutoRequest: true,
+      // Consent: the toggle defaults ON, so it alone is not consent to read a
+      // watchlist for someone who may never have opened Summonarr.
+      ...(autoEnroll ? {} : { plexWatchlistOptInAt: { not: null } }),
+    },
+    select: { id: true, role: true, permissions: true, name: true, email: true },
+  });
+  return rows.filter(hasAutoRequestBit);
+}
+
+// Best-effort: an observability write must never fail the run, but a failed
+// one leaves the profile and admin card on stale verdicts, so it is said.
+async function persistServerStatus(status: PlexWatchlistServerStatus): Promise<void> {
+  try {
+    const value = JSON.stringify(status);
+    await prisma.setting.upsert({
+      where: { key: PLEX_WATCHLIST_SERVER_STATUS_KEY },
+      create: { key: PLEX_WATCHLIST_SERVER_STATUS_KEY, value },
+      update: { value },
+    });
+  } catch (err) {
+    console.warn(`[plex-watchlist] could not save the server-path status: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
+  }
+}
+
 async function syncServerPath(
   tokenUserIds: ReadonlySet<string>,
   result: PlexWatchlistSyncResult,
@@ -610,99 +718,36 @@ async function syncServerPath(
   }
 
   if (targetByUser.size > 0 && !signal?.aborted) {
-    const autoEnroll = await settingIsTrue(PLEX_WATCHLIST_SERVER_AUTO_ENROLL_KEY);
-    const rows = await prisma.user.findMany({
-      where: {
-        id: { in: [...targetByUser.keys()] },
-        deactivatedAt: null,
-        purgedAt: null,
-        plexWatchlistAutoRequest: true,
-        // Consent: the toggle defaults ON, so it alone is not consent to read a
-        // watchlist for someone who may never have opened Summonarr.
-        ...(autoEnroll ? {} : { plexWatchlistOptInAt: { not: null } }),
-      },
-      select: { id: true, role: true, permissions: true, name: true, email: true },
-    });
-
-    for (const user of rows.filter(hasAutoRequestBit)) {
+    const run: ServerUserRun = { server, result, statuses, rejectToken, signal };
+    for (const user of await consentingServerUsers([...targetByUser.keys()])) {
       if (signal?.aborted) break; // guardrail 41
       const target = targetByUser.get(user.id)!;
       if (rejectedTokens.has(target.token)) {
         statuses[user.id] = "error";
         continue;
       }
-      server.users++;
-      try {
-        let items: PlexWatchlistItem[];
-        let lookups: MetadataLookupStats;
-        if (target.graphId === null) {
-          ({ items, lookups } = await fetchPlexWatchlistWithStats(target.token, { signal }));
-        } else {
-          const list = await fetchFriendWatchlist(target.token, target.graphId, { maxItems: MAX_WATCHLIST_ITEMS, signal });
-          if (list.status === "private") {
-            statuses[user.id] = "private";
-            server.private++;
-            continue;
-          }
-          items = [];
-          for (const node of list.nodes) {
-            const item = parseWatchlistEntry({ ratingKey: node.id, title: node.title, type: node.type });
-            if (item) items.push(item);
-          }
-          // No guid on a GraphQL node: every one is a cache hit or a lookup.
-          lookups = await resolveMissingTmdbIds(items, target.token, signal);
-        }
-        server.lookupFailures += lookups.failed;
-        if (metadataLookupsDefeatedRead(items, lookups)) {
-          // Nothing resolved and lookups failed: "ok" would be a lie. A run
-          // error (the run degrades); the titles are retried next run.
-          statuses[user.id] = "error";
-          result.errors++;
-          console.error(`[plex-watchlist] server-path sync for user ${user.id}: ${lookups.failed} of ${lookups.attempted} metadata lookup(s) failed and nothing on the watchlist could be resolved`);
-          continue;
-        }
-        await fileWatchlistTitles(user, items, result, signal);
-        statuses[user.id] = "ok";
-      } catch (err) {
-        if (signal?.aborted) break; // an abort mid-request is not this user's failure
-        statuses[user.id] = "error";
-        // The ADMIN token was rejected mid-run (GraphQL or a metadata lookup):
-        // stop using this instance. NEVER the user-token 401 branch — no Account
-        // row is touched.
-        if (err instanceof AdminTokenRejectedError || err instanceof PlexTokenRevokedError) {
-          rejectToken(target.token, target.slug);
-          continue;
-        }
-        result.errors++;
-        console.error(`[plex-watchlist] server-path sync failed for user ${user.id}: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
-      }
+      if (!(await syncServerUser(user, target, run))) break;
     }
   }
 
   // An aborted run read only some users: its map would erase everyone else's
   // last verdict (and could land after a newer run's). Keep the stored one.
   if (signal?.aborted) return server;
-
-  // Best-effort, swallowed: an observability write must never fail the run.
-  const status: PlexWatchlistServerStatus = { updatedAt: new Date().toISOString(), users: statuses, unmatchedFriends: server.unmatchedFriends };
-  try {
-    const value = JSON.stringify(status);
-    await prisma.setting.upsert({
-      where: { key: PLEX_WATCHLIST_SERVER_STATUS_KEY },
-      create: { key: PLEX_WATCHLIST_SERVER_STATUS_KEY, value },
-      update: { value },
-    });
-  } catch {
-    // ignored — see above
-  }
+  await persistServerStatus({ updatedAt: new Date().toISOString(), users: statuses, unmatchedFriends: server.unmatchedFriends });
   return server;
 }
 
+// The token path. A read whose every metadata lookup failed with nothing
+// resolved is a run error, as on the server path, never a quiet "ok".
 async function syncOneUser(user: CronUser, result: PlexWatchlistSyncResult, signal: AbortSignal | undefined): Promise<void> {
   const token = await storedPlexToken(user.id);
   if (!token) return;
-  const watchlist = await fetchPlexWatchlist(token, { signal });
-  await fileWatchlistTitles(user, watchlist, result, signal);
+  const { items, lookups } = await fetchPlexWatchlistWithStats(token, { signal });
+  if (signal?.aborted) return;
+  if (metadataLookupsDefeatedRead(items, lookups)) {
+    throw new Error(`${lookups.failed} of ${lookups.attempted} metadata lookup(s) failed and nothing on the watchlist could be resolved`);
+  }
+  await fileWatchlistTitles(user, items, result, signal);
 }
 
 // Shared by both paths: same ledger, same source string, same per-run cap — so

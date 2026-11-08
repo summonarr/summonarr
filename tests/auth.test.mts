@@ -1,6 +1,8 @@
-// Unit tests for the auth ORCHESTRATION layer (src/lib/auth.ts) — the module
-// that wires the owned-elsewhere primitives into sign-in flows, session mints,
-// and revocation. The contracts pinned here:
+// Unit tests for the auth ORCHESTRATION layer (src/lib/auth.ts and the
+// auth-*.ts modules it re-exports: one per sign-in step, plus the session mint)
+// — the modules that wire the owned-elsewhere primitives into sign-in flows,
+// session mints, and revocation. Everything is imported through auth.ts, the
+// one entry point importers use. The contracts pinned here:
 //
 //   auth() — the JWT-only session read (guardrail 29's personalization side):
 //   a valid cookie maps to the exact SummonarrSession shape (role-preset
@@ -2630,4 +2632,154 @@ test("plex: a plex.tv outage on the token-cache ping keeps the cache row and ver
   dbCalls.length = 0;
   await authorizeWithPlex({ plexToken: token }, makeReq(ua)).catch(() => null);
   assert.ok(dbCalls.includes("plexTokenCache.delete"), "a 401 purges the row");
+});
+
+// ── one audit row per refusal, the token cache's scope, the username bucket,
+//    the mint's single read, logged best-effort writes, typed inputs ─────────
+
+function respondOnePlexServer(account: () => Record<string, unknown>, friends: () => string[]): void {
+  respond = (url) => {
+    if (url.hostname === "plex.tv" && url.pathname === "/api/v2/user") return jsonResponse(account());
+    if (url.hostname === "plex.tv" && url.pathname === "/api/v2/ping") return jsonResponse({});
+    if (url.hostname === "203.0.113.10" && url.pathname === "/identity") return jsonResponse({ MediaContainer: { machineIdentifier: "machine-1" } });
+    if (url.hostname === "plex.tv" && url.pathname === "/api/users") {
+      return xmlResponse(friendsXml(friends().map((email) => ({ email, machineId: "machine-1" }))));
+    }
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+}
+
+test("plex: a member whose provisioning is refused is audited ONCE, under that reason — no trailing invalid_credentials row — and the refusal is padded", async () => {
+  settings.set("plexAdminToken", "admin-plex-token");
+  settings.set("plexServerUrl", "http://203.0.113.10:32400");
+  // A local account already holds the address the member's plex.tv account reports.
+  seedUser({ id: "u-local-collide", email: "collide@example.com" });
+  respondOnePlexServer(() => ({ id: 9191, email: "collide@example.com", username: "Collide", thumb: "" }), () => ["collide@example.com"]);
+
+  const workBefore = scryptWorkDone();
+  assert.equal(await authorizeWithPlex({ plexToken: "plex-tok-collide" }, makeReq(chromeUa("plex-refusal-once"))), null);
+  await flushAsync();
+  assert.ok(scryptWorkDone() > workBefore, "the refusal is padded with a dummy password check");
+  const failures = auditRows.filter((r) => r.action === "AUTH_LOGIN_FAILED");
+  assert.equal(failures.length, 1, "one refused sign-in, one AUTH_LOGIN_FAILED row");
+  assert.equal(auditDetails(failures[0]).reason, "email_collision_needs_rebind");
+  assert.equal(auditDetails(failures[0]).emailHash, hashAuditEmail("collide@example.com"));
+});
+
+test("plex: only a MEMBER's token answer is cached — a stranger leaves no row, and a row is not kept alive for someone no longer shared", async () => {
+  settings.set("plexAdminToken", "admin-plex-token");
+  settings.set("plexServerUrl", "http://203.0.113.10:32400");
+  let account: Record<string, unknown> = { id: 7001, email: "outsider@example.com", username: "Outsider", thumb: "" };
+  let friends = ["member@example.com"];
+  respondOnePlexServer(() => account, () => friends);
+
+  assert.equal(await authorizeWithPlex({ plexToken: "plex-tok-outsider-7001" }, makeReq(chromeUa("plex-cache-scope"))), null);
+  assert.equal(plexCacheRows.size, 0, "a stranger's email has no business in the token cache");
+
+  account = { id: 7002, email: "member@example.com", username: "Member", thumb: "" };
+  assert.ok(await authorizeWithPlex({ plexToken: "plex-tok-member-7002" }, makeReq(chromeUa("plex-cache-scope"))));
+  assert.equal(plexCacheRows.size, 1, "a member's answer is cached");
+  const row = [...plexCacheRows.values()][0];
+  assert.equal(row.email, "member@example.com");
+
+  // Un-shared since: the next sign-in is answered from the cache and refused —
+  // and leaves the row's lifetime exactly where it was.
+  row.expiresAt = new Date(0);
+  row.lastUsedAt = new Date(0);
+  friends = [];
+  fetchCalls.length = 0;
+  assert.equal(await authorizeWithPlex({ plexToken: "plex-tok-member-7002" }, makeReq(chromeUa("plex-cache-scope"))), null);
+  assert.ok(fetchCalls.some((c) => c.url.pathname === "/api/v2/ping"), "precondition: this sign-in took the token-cache path");
+  assert.equal(row.expiresAt.getTime(), 0, "a refused sign-in never extends the cache row");
+  assert.equal(row.lastUsedAt.getTime(), 0);
+});
+
+test("jellyfin: the per-username bucket keeps only WRONG passwords — a sign-in the server accepts, or one no server was asked about, gives its hit back", async () => {
+  const key = "jellyfin-user:bucket-owner";
+  const WINDOW_MS = 5 * 60 * 1000;
+
+  // No server configured: nothing was guessed.
+  assert.equal(await authorizeWithJellyfin({ username: "Bucket-Owner", password: "pw" }, makeReq(chromeUa("jf-bucket-nourl"))), null);
+  assert.equal(peekRateLimit(key, 1, WINDOW_MS), true, "an attempt no server judged keeps no hit");
+
+  settings.set("jellyfinUrl", "http://10.77.0.9:8096");
+  mediaServerUsers.push({ id: "msu-bucket", source: "jellyfin", serverInstance: "", sourceUserId: "jf-bucket", active: true });
+  let accept = true;
+  respond = (url) => {
+    if (url.pathname === "/Users/AuthenticateByName") {
+      return accept ? jsonResponse({ User: { Id: "jf-bucket", Name: "Owner" } }) : new Response("Unauthorized", { status: 401 });
+    }
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+  // The owner signs in from more devices than the bucket holds: every one is
+  // admitted, because none of them was a wrong guess.
+  for (let i = 0; i < 12; i++) {
+    assert.ok(
+      await authorizeWithJellyfin({ username: "Bucket-Owner", password: "pw" }, makeReq(chromeUa(`jf-bucket-device-${i}`))),
+      `sign-in ${i + 1} is admitted`,
+    );
+  }
+  assert.equal(peekRateLimit(key, 1, WINDOW_MS), true, "accepted passwords leave the bucket empty");
+
+  accept = false;
+  assert.equal(await authorizeWithJellyfin({ username: "bucket-owner", password: "wrong" }, makeReq(chromeUa("jf-bucket-wrong"))), null);
+  assert.equal(peekRateLimit(key, 1, WINDOW_MS), false, "a refused password spends the budget");
+});
+
+test("mint: ONE user read serves the disabled check, the permissions claim and mediaServer — and after setup no promotion transaction opens", async () => {
+  seedUser({ id: "u-one-read", email: "one-read@example.com", mediaServer: "plex", permissions: PRESETS.USER });
+  const user = mintableUser("u-one-read");
+  dbCalls.length = 0;
+  const result = await signInAndMintSession({ user, providerId: "credentials" });
+  assert.equal(result.user.mediaServer, "plex", "credentials carry the stored column");
+  assert.equal((await verifySessionJwt(result.token))?.permissions, PRESETS.USER.toString());
+  assert.equal(dbCalls.filter((c) => c === "user.findUnique").length, 1, "one read of the user row");
+  assert.equal(dbCalls.includes("$transaction"), false, "a sign-in after setup never waits on the setup lock");
+});
+
+test("best-effort sign-in writes that fail are logged under [auth], and the sign-in carries on", async () => {
+  seedUser({ id: "u-be-plex", email: "be@example.com", plexUserId: "px-be" });
+  const realUpdate = models.user.update;
+  models.user.update = async () => { throw new Error("constraint drift"); };
+  try {
+    assert.equal(asUser(await findOrCreatePlexUser({ plexUserId: "px-be", email: "be@example.com", name: "BE" })).id, "u-be-plex");
+  } finally {
+    models.user.update = realUpdate;
+  }
+  assert.ok(errors.some((e) => e.startsWith("[auth] plex sign-in profile refresh failed:") && e.includes("constraint drift")));
+
+  seedUser({ id: "u-be-jf", email: "jellyfin-jf-be@jellyfin.local", jellyfinUserId: "jf-be", jellyfinInstance: "", name: "Old Name" });
+  const realUpdateMany = models.user.updateMany;
+  models.user.updateMany = async () => { throw new Error("name write refused"); };
+  try {
+    assert.equal(asUser(await findOrCreateJellyfinUser("jf-be", "New Name")).id, "u-be-jf");
+  } finally {
+    models.user.updateMany = realUpdateMany;
+  }
+  assert.ok(errors.some((e) => e.startsWith("[auth] jellyfin sign-in name refresh failed:") && e.includes("name write refused")));
+});
+
+test("a sign-in input that is not a string refuses before any read or upstream call", async () => {
+  const req = makeReq(chromeUa("typed-inputs"));
+  assert.equal(await authorizeWithCredentials({ email: 42, password: "x" } as never, req), null);
+  assert.equal(await authorizeWithCredentials({ email: "a@b.co", password: ["x"] } as never, req), null);
+  assert.equal(await authorizeWithPlex({ plexToken: 123 } as never, req), null);
+  assert.equal(await authorizeWithJellyfin({ username: ["u"], password: "pw" } as never, req), null);
+  assert.equal(await authorizeWithJellyfinQuickConnect({ secret: { s: 1 } } as never, req), null);
+  assert.equal(dbCalls.length, 0);
+  assert.equal(fetchCalls.length, 0);
+});
+
+test("sessionDeadline: the header alone selects the never-expiring native deadline; a browser gets remember-me, else mobile, else desktop", async () => {
+  const { sessionDeadline } = await import("../src/lib/auth-session-durations.ts");
+  const durations = { desktopDuration: 3_600, mobileDuration: 604_800, maxDuration: 2_592_000 };
+  const nowSec = 1_800_000_000;
+  const at = (native: boolean, rememberMe: boolean, isMobile: boolean) => sessionDeadline({ native, rememberMe, isMobile, durations, nowSec });
+  for (const rememberMe of [false, true]) {
+    for (const isMobile of [false, true]) assert.equal(at(true, rememberMe, isMobile), NEVER_EXPIRES_AT_SEC);
+  }
+  assert.equal(at(false, true, true), nowSec + 2_592_000, "remember-me wins over the device class");
+  assert.equal(at(false, true, false), nowSec + 2_592_000);
+  assert.equal(at(false, false, true), nowSec + 604_800);
+  assert.equal(at(false, false, false), nowSec + 3_600);
 });

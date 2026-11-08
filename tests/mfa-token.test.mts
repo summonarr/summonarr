@@ -254,3 +254,17 @@ test("global cap: a full ledger evicts EXPIRED entries first, then the oldest li
     resetMfaTokenLedgerForTests();
   }
 });
+
+test("the ledger-reset seam refuses in a production build — nothing is wiped", async () => {
+  const env = process.env as Record<string, string | undefined>;
+  const saved = env.NODE_ENV;
+  const live = await signMfaSigninToken({ ...INPUT, userId: "prod-seam" });
+  env.NODE_ENV = "production";
+  try {
+    assert.throws(() => resetMfaTokenLedgerForTests(), /test seam/);
+    assert.ok(isTokenUsable(live.jti), "an in-flight challenge survives the refused call");
+  } finally {
+    if (saved === undefined) delete env.NODE_ENV;
+    else env.NODE_ENV = saved;
+  }
+});

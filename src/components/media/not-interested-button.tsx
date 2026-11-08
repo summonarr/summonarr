@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { EyeOff, Loader2 } from "@/components/icons";
-import { withBasePath } from "@/lib/base-path";
+import { hideTitle, hiddenFailureText, unhideTitle } from "@/lib/client/hidden-items";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
 
@@ -11,10 +11,11 @@ import { useT } from "@/components/i18n/i18n-provider";
 // bad pick can be tuned away where it appears rather than only from the title's
 // detail page (which is where the full-size HideButton lives).
 //
-// Same endpoint and same effect as HideButton: /api/hidden writes a HiddenItem,
-// and attachAllAvailability removes hidden titles from EVERY discovery surface
-// at once. router.refresh() re-renders the server component so the card drops
-// out of the grid — no client-side list state, matching house style.
+// Same endpoint and same effect as HideButton (src/lib/client/hidden-items.ts):
+// /api/hidden writes a HiddenItem, and attachAllAvailability removes hidden
+// titles from EVERY discovery surface at once. router.refresh() re-renders the
+// server component so the card drops out of the grid — no client-side list
+// state, matching house style.
 export function NotInterestedButton({
   tmdbId,
   mediaType,
@@ -29,56 +30,45 @@ export function NotInterestedButton({
   const router = useRouter();
   const { toast } = useToast();
   const t = useT();
-  const [loading, setLoading] = useState(false);
+  const action = useAsyncAction();
+  const loading = action.busy("hide");
 
   // The button is always visible on touch, in the poster corner, so a stray tap
   // is easy — and the card leaves the grid on the refresh that follows. Undo is
-  // the same DELETE the /hidden page's un-hide button sends.
+  // the same DELETE the /hidden page's un-hide button sends. It runs from the
+  // toast after this card has gone, so it is not tied to this component.
   async function undo() {
-    try {
-      const qs = new URLSearchParams({ tmdbId: String(tmdbId), mediaType });
-      const res = await fetch(withBasePath(`/api/hidden?${qs}`), { method: "DELETE" });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        toast({ title: data.error ?? t("media.notInterested.undoFailed"), variant: "error" });
-        return;
-      }
+    const res = await unhideTitle({ tmdbId, mediaType });
+    if (res.ok) {
       router.refresh();
-    } catch {
-      toast({ title: t("media.notInterested.undoNetworkError"), variant: "error" });
+      return;
     }
+    toast({
+      title: hiddenFailureText(res.failure, t, t("media.notInterested.undoFailed"), t("media.notInterested.undoNetworkError")),
+      variant: "error",
+    });
   }
 
   async function hide(e: React.MouseEvent) {
     // The whole card is a click target that navigates to the detail page; without
     // this the hide would also push a route.
     e.stopPropagation();
-    if (loading) return;
-    setLoading(true);
-    try {
-      const res = await fetch(withBasePath("/api/hidden"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tmdbId, mediaType, title, posterPath }),
+    const res = await action.run(
+      "hide",
+      (signal) => hideTitle({ tmdbId, mediaType, title, posterPath }, { signal }),
+      { ifBusy: "skip" },
+    );
+    if (!res) return;
+    if (res.ok) {
+      toast({
+        title: t("media.notInterested.hidden", { title }),
+        variant: "success",
+        action: { label: t("media.undo"), onClick: () => void undo() },
       });
-      // 409 = already hidden. The desired end state holds either way, so it is
-      // a success for this button (same reading as HideButton).
-      if (res.ok || res.status === 409) {
-        toast({
-          title: t("media.notInterested.hidden", { title }),
-          variant: "success",
-          action: { label: t("media.undo"), onClick: () => void undo() },
-        });
-        router.refresh();
-      } else {
-        const data = await res.json().catch(() => ({}));
-        toast({ title: data.error ?? t("media.notInterested.failed"), variant: "error" });
-      }
-    } catch {
-      toast({ title: t("media.networkError"), variant: "error" });
-    } finally {
-      setLoading(false);
+      router.refresh();
+      return;
     }
+    toast({ title: hiddenFailureText(res.failure, t, t("media.notInterested.failed"), t("media.networkError")), variant: "error" });
   }
 
   return (

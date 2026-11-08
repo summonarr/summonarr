@@ -9,7 +9,8 @@
 //
 // The component is a .tsx client module, so the node:test loader cannot import
 // it; these read the source. They fail loudly if the patch returns or if either
-// start signal is dropped.
+// start signal is dropped. The URL half of the click filter is a pure module
+// (navigation-progress-rules.ts), tested directly below.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -19,6 +20,11 @@ const SRC = readFileSync(
   resolve(process.cwd(), "src/components/layout/navigation-progress.tsx"),
   "utf8",
 );
+const RULES = readFileSync(
+  resolve(process.cwd(), "src/components/layout/navigation-progress-rules.ts"),
+  "utf8",
+);
+const { startsAppNavigation } = await import("../src/components/layout/navigation-progress-rules.ts");
 
 test("the bar does not patch history.pushState", () => {
   assert.doesNotMatch(
@@ -53,11 +59,24 @@ test("clicks the browser handles itself never start the bar", () => {
     /altKey/,
     /hasAttribute\("download"\)/,
     /target && target !== "_self"/,
-    /next\.origin !== window\.location\.origin/,
-    /next\.href === window\.location\.href/,
+    /startsAppNavigation\(anchor\.href, window\.location\)/,
   ]) {
     assert.match(SRC, guard, `missing guard: ${guard}`);
   }
+  assert.match(RULES, /next\.origin !== here\.origin/);
+  assert.match(RULES, /next\.href === here\.href/);
+});
+
+test("only a link to another page of this app starts the bar", () => {
+  const here = { href: "https://app.example/movies?genreId=28", origin: "https://app.example", pathname: "/movies", search: "?genreId=28" };
+  assert.equal(startsAppNavigation("/tv", here), true);
+  assert.equal(startsAppNavigation("/movies?genreId=12", here), true, "a query-only change is a navigation");
+  assert.equal(startsAppNavigation("https://app.example/movie/603", here), true);
+  assert.equal(startsAppNavigation("https://elsewhere.example/tv", here), false, "another origin leaves the app");
+  assert.equal(startsAppNavigation("/movies?genreId=28", here), false, "the same URL commits nothing");
+  assert.equal(startsAppNavigation("#cast", here), false, "a hash-only link commits nothing");
+  assert.equal(startsAppNavigation("/movies?genreId=28#top", here), false);
+  assert.equal(startsAppNavigation("http://[bad", here), false, "an unparseable href starts nothing");
 });
 
 test("an SVG anchor is rejected by type, not by truthiness", () => {
@@ -76,5 +95,5 @@ test("completion is keyed on the full URL, not the pathname alone", () => {
   // pathname; keying on it left the bar pinned across the viewport.
   assert.match(SRC, /useSearchParams\(\)/);
   assert.match(SRC, /const url = `\$\{pathname\}\?\$\{searchParams\.toString\(\)\}`/);
-  assert.match(SRC, /\}, \[url, stop\]\)/, "the completion effect must depend on the full url");
+  assert.match(SRC, /\}, \[url, finish\]\)/, "the completion effect must depend on the full url");
 });

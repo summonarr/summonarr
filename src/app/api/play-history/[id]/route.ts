@@ -107,6 +107,12 @@ export const DELETE = withPermission(Permission.ADMIN)(async (
   // audit row just recorded as permanently removed. Same call backfill-playtime makes.
   clearActivityCache();
 
+  // A concurrent delete removed the rows first: the outcome the caller asked
+  // for holds (so still 204 — a double-submitted delete is not an error, the
+  // chain branch's deleteMany no-ops alike), but THIS call deleted nothing, and
+  // the delete that did wrote the audit row.
+  if (deleted.count === 0) return new NextResponse(null, { status: 204 });
+
   // Rows already deleted; a failed audit write must not 500 a successful delete.
   void logAudit({
     userId: session.user.id,

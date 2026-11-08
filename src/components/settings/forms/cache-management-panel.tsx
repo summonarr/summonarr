@@ -1,9 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { AlertTriangle, Loader2, RefreshCw, RefreshCcw, Trash2, Database } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { useDelayed } from "@/hooks/use-delayed";
+import { useFocusReturn } from "@/hooks/use-focus-return";
 import type { Translator } from "@/lib/i18n/translate";
 import { useT } from "@/components/i18n/i18n-provider";
 
@@ -50,7 +53,7 @@ const CACHE_SOURCES: CacheSourceDef[] = [
   },
 ];
 
-type WarmResult = { fetched?: number; skipped?: number; total?: number; failed?: number; purged?: number; cleared?: number; error?: string };
+type WarmResult = { fetched?: number; skipped?: number; total?: number; failed?: number; purged?: number; cleared?: number };
 
 // A clear also resets other tables that keep copies of the same data (the grid
 // metadata table and the "For You" recommendation graph), so the cache-row count
@@ -63,6 +66,53 @@ function summarizeClear(t: Translator, d: ClearResult): string {
   if ((d.edgesCleared ?? 0) > 0) parts.push(t("settings.form.cache.clear.suggestionLinks", { count: d.edgesCleared ?? 0 }));
   if ((d.verdictsCleared ?? 0) > 0) parts.push(t("settings.form.cache.clear.ratingVerdicts", { count: d.verdictsCleared ?? 0 }));
   return t("settings.form.cache.clear.summary", { parts: parts.join(", ") });
+}
+
+// The answer's counts, each read only when it is a number.
+const COUNT_FIELDS = ["fetched", "skipped", "total", "failed", "purged", "cleared", "coreCleared", "edgesCleared", "verdictsCleared"] as const;
+
+function readCounts(data: unknown): ClearResult {
+  const d = data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
+  const out: ClearResult = {};
+  for (const key of COUNT_FIELDS) {
+    const n = d[key];
+    if (typeof n === "number" && Number.isFinite(n)) out[key] = n;
+  }
+  return out;
+}
+
+// One step's outcome: its summary on success; on failure the route's own
+// reason ("" when it gave none) and whether any answer came at all.
+type StepOutcome = { ok: true; text: string } | { ok: false; reason: string; reached: boolean; status: number };
+
+function readStep(
+  res: Awaited<ReturnType<typeof fetchJson>>,
+  summarize: (d: ClearResult) => string,
+): StepOutcome {
+  // A 2xx that still names an error (a warm that refused part-way) is a failure.
+  const errorField = res.ok && res.data && typeof res.data === "object" ? (res.data as { error?: unknown }).error : undefined;
+  if (res.ok && errorField === undefined) return { ok: true, text: summarize(readCounts(res.data)) };
+  if (res.ok) return { ok: false, reason: typeof errorField === "string" ? errorField : "", reached: true, status: res.status };
+  return { ok: false, reason: res.error, reached: res.kind === "http" || res.kind === "invalid", status: res.status };
+}
+
+// The clear and the warm requests, shared by each row and "Clear & Refetch All".
+// Neither has a client-side time limit: a warm re-downloads data for the whole
+// library before it answers (guardrail 37a: a slow success is not a failure).
+async function clearCache(t: Translator, source: CacheSourceId | "all"): Promise<StepOutcome> {
+  const res = await fetchJson(withBasePath(`/api/admin/clear-cache?source=${source}`), {
+    init: { method: "DELETE" },
+    timeoutMs: Infinity,
+  });
+  return readStep(res, (d) => summarizeClear(t, d));
+}
+
+async function warmSource(t: Translator, source: CacheSourceDef): Promise<StepOutcome> {
+  const res = await fetchJson(withBasePath(source.warmUrl), {
+    init: jsonInit("POST", source.warmBody ?? {}),
+    timeoutMs: Infinity,
+  });
+  return readStep(res, (d) => summarizeWarm(t, d));
 }
 
 function summarizeWarm(t: Translator, d: WarmResult): string {
@@ -88,46 +138,30 @@ function CacheSourceRow({ source, locked, onBusyChange }: {
   };
   const [confirmClear, setConfirmClear] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
-  // Kept in a ref so a new action cancels the previous action's timer (which
-  // would otherwise wipe the newer result early) and unmount cancels it too.
-  const msgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => { if (msgTimer.current) clearTimeout(msgTimer.current); }, []);
+  // A new action cancels the previous action's fade (which would otherwise
+  // wipe the newer result early); unmount cancels it too.
+  const fade = useDelayed();
+  // The confirm replaces the Clear button: focus moves into it (Cancel) and
+  // back to Clear when it closes or the clear ends.
+  const focus = useFocusReturn();
 
-  async function doClear() {
-    setBusy("clear");
-    setConfirmClear(false);
-    if (msgTimer.current) clearTimeout(msgTimer.current);
+  async function run(kind: "clear" | "refetch") {
+    setBusy(kind);
+    fade.cancel();
     setMsg(null);
-    try {
-      const res = await fetch(withBasePath(`/api/admin/clear-cache?source=${source.id}`), { method: "DELETE" });
-      const data: ClearResult = await res.json().catch(() => ({}));
-      if (res.ok) setMsg({ kind: "ok", text: summarizeClear(t, data) });
-      else setMsg({ kind: "err", text: data.error ?? t("settings.form.cache.clearFailed") });
-    } catch {
-      setMsg({ kind: "err", text: t("settings.form.common.requestFailed") });
-    }
+    const outcome = kind === "clear" ? await clearCache(t, source.id) : await warmSource(t, source);
+    // The button was disabled while it ran, so focus fell to <body>.
+    focus.returnToIfLost(kind);
+    if (outcome.ok) setMsg({ kind: "ok", text: outcome.text });
+    else if (!outcome.reached) setMsg({ kind: "err", text: t("settings.form.common.requestFailed") });
+    else setMsg({ kind: "err", text: outcome.reason || t(kind === "clear" ? "settings.form.cache.clearFailed" : "settings.form.cache.refetchFailed") });
     setBusy(null);
-    msgTimer.current = setTimeout(() => setMsg(null), 8000);
+    fade(() => setMsg(null), kind === "clear" ? 8000 : 10000);
   }
 
-  async function doRefetch() {
-    setBusy("refetch");
-    if (msgTimer.current) clearTimeout(msgTimer.current);
-    setMsg(null);
-    try {
-      const res = await fetch(withBasePath(source.warmUrl), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(source.warmBody ?? {}),
-      });
-      const data: WarmResult = await res.json().catch(() => ({}));
-      if (res.ok && !data.error) setMsg({ kind: "ok", text: summarizeWarm(t, data) });
-      else setMsg({ kind: "err", text: data.error ?? t("settings.form.cache.refetchFailed") });
-    } catch {
-      setMsg({ kind: "err", text: t("settings.form.common.requestFailed") });
-    }
-    setBusy(null);
-    msgTimer.current = setTimeout(() => setMsg(null), 10000);
+  function doClear() {
+    setConfirmClear(false);
+    void run("clear");
   }
 
   return (
@@ -141,11 +175,12 @@ function CacheSourceRow({ source, locked, onBusyChange }: {
         <div className="flex items-center gap-2">
           <span className="text-xs text-zinc-300">{t("settings.form.cache.confirmClear", { source: source.label })}</span>
           <Button type="button" size="sm" onClick={doClear} disabled={locked} className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] h-8 px-3 text-xs">{t("settings.form.cache.clear")}</Button>
-          <Button type="button" size="sm" variant="outline" onClick={() => setConfirmClear(false)} className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-8 px-3 text-xs">{t("settings.form.common.cancel")}</Button>
+          <Button type="button" size="sm" variant="outline" autoFocus onClick={() => { focus.returnTo("clear"); setConfirmClear(false); }} className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-8 px-3 text-xs">{t("settings.form.common.cancel")}</Button>
         </div>
       ) : (
         <div className="flex items-center gap-2">
           <Button
+            ref={focus.refFor("clear")}
             type="button"
             size="sm"
             variant="outline"
@@ -160,7 +195,8 @@ function CacheSourceRow({ source, locked, onBusyChange }: {
             type="button"
             size="sm"
             variant="outline"
-            onClick={doRefetch}
+            ref={focus.refFor("refetch")}
+            onClick={() => void run("refetch")}
             disabled={busy !== null || locked}
             className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-1.5 h-8 px-3 text-xs"
           >
@@ -187,8 +223,8 @@ export function CacheManagementPanel() {
   // coloured on its own; the panel-level status alone made a failed line look
   // identical to a successful one.
   const [lines, setLines] = useState<{ text: string; ok: boolean }[]>([]);
-  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
+  const reset = useDelayed();
+  const focus = useFocusReturn();
   // Rows with a clear or refetch in flight; run-all waits for them.
   const [busyRows, setBusyRows] = useState<ReadonlySet<CacheSourceId>>(() => new Set());
   const onRowBusy = useCallback((id: CacheSourceId, rowBusy: boolean) => {
@@ -205,7 +241,7 @@ export function CacheManagementPanel() {
 
   async function runAll() {
     if (rowBusy || running) return;
-    if (resetTimer.current) clearTimeout(resetTimer.current);
+    reset.cancel();
     setStatus("running");
     setConfirmAll(false);
     setLines([]);
@@ -215,36 +251,34 @@ export function CacheManagementPanel() {
     // Clear every source with one request, then refetch each source in turn.
     // Each refetch route has its own cooldown; if one answers 429 (too many
     // requests) it just shows as a failed line and the rest still run.
-    try {
-      const clearRes = await fetch(withBasePath("/api/admin/clear-cache?source=all"), { method: "DELETE" });
-      const clearData: ClearResult = await clearRes.json().catch(() => ({}));
-      if (clearRes.ok) out.push({ text: summarizeClear(t, clearData), ok: true });
-      else { anyError = true; out.push({ text: t("settings.form.cache.clearFailedDetail", { detail: clearData.error ?? clearRes.status }), ok: false }); }
-    } catch {
+    const cleared = await clearCache(t, "all");
+    if (cleared.ok) out.push({ text: cleared.text, ok: true });
+    else {
       anyError = true;
-      out.push({ text: t("settings.form.cache.clearFailedRequest"), ok: false });
+      out.push({
+        text: cleared.reached
+          ? t("settings.form.cache.clearFailedDetail", { detail: cleared.reason || cleared.status })
+          : t("settings.form.cache.clearFailedRequest"),
+        ok: false,
+      });
     }
     setLines([...out]);
 
     for (const source of CACHE_SOURCES) {
-      try {
-        const res = await fetch(withBasePath(source.warmUrl), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(source.warmBody ?? {}),
-        });
-        const data: WarmResult = await res.json().catch(() => ({}));
-        if (res.ok && !data.error) out.push({ text: `${source.label}: ${summarizeWarm(t, data)}`, ok: true });
-        else { anyError = true; out.push({ text: `${source.label}: ${data.error ?? t("settings.form.cache.refetchFailedLower")}`, ok: false }); }
-      } catch {
+      const warmed = await warmSource(t, source);
+      if (warmed.ok) out.push({ text: `${source.label}: ${warmed.text}`, ok: true });
+      else {
         anyError = true;
-        out.push({ text: `${source.label}: ${t("settings.form.cache.requestFailedLower")}`, ok: false });
+        const why = warmed.reached ? warmed.reason || t("settings.form.cache.refetchFailedLower") : t("settings.form.cache.requestFailedLower");
+        out.push({ text: `${source.label}: ${why}`, ok: false });
       }
       setLines([...out]);
     }
 
+    // The trigger was disabled while running, so focus fell to <body>.
+    focus.returnToIfLost("all");
     setStatus(anyError ? "error" : "done");
-    resetTimer.current = setTimeout(() => { setStatus("idle"); setLines([]); }, 15000);
+    reset(() => { setStatus("idle"); setLines([]); }, 15000);
   }
 
   return (
@@ -269,10 +303,11 @@ export function CacheManagementPanel() {
             <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" aria-hidden />
             <p className="text-sm text-zinc-200">{t("settings.form.cache.confirmAll")}</p>
             <Button type="button" size="sm" onClick={runAll} disabled={rowBusy} className="bg-amber-600 text-black hover:bg-amber-600/90 h-8 px-3 text-xs">{t("settings.form.cache.run")}</Button>
-            <Button type="button" size="sm" variant="outline" onClick={() => setConfirmAll(false)} className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-8 px-3 text-xs">{t("settings.form.common.cancel")}</Button>
+            <Button type="button" size="sm" variant="outline" autoFocus onClick={() => { focus.returnTo("all"); setConfirmAll(false); }} className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-8 px-3 text-xs">{t("settings.form.common.cancel")}</Button>
           </div>
         ) : (
           <Button
+            ref={focus.refFor("all")}
             type="button"
             variant="outline"
             onClick={() => setConfirmAll(true)}

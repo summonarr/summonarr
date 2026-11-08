@@ -25,14 +25,16 @@ import {
   liveTitleLanding,
   snapshotMayPaint,
   titleReadPath,
-  titleTargetKey,
-  titleTargetOfKey,
 } from "../src/components/admin/arr-title/snapshot-rules.ts";
 
 const read = (f: string) => readFileSync(new URL(`../src/components/admin/arr-title/${f}`, import.meta.url), "utf8");
 const MANAGER = read("title-manager.tsx");
+// The manager's read of its title.
+const LOAD = read("use-title-load.ts");
 const SETTINGS = read("settings-tab.tsx");
 const SEASONS = read("seasons-tab.tsx");
+// The Seasons tab's episode lists.
+const EPISODES = read("use-episode-lists.ts");
 const FILES = read("files-tab.tsx");
 const HISTORY = read("history-tab.tsx");
 
@@ -52,14 +54,6 @@ test("titleReadPath: one URL per target, by TMDB id or by the arr's own id", () 
   assert.equal(titleReadPath("sonarr", "4k", { arrId: 12 }), "/api/admin/arr/title?service=sonarr&instance=4k&id=12");
   // A slug is encoded, never spliced in raw.
   assert.equal(titleReadPath("sonarr", "a&b", { arrId: 1 }), "/api/admin/arr/title?service=sonarr&instance=a%26b&id=1");
-});
-
-test("titleTargetKey / titleTargetOfKey round-trip both target kinds", () => {
-  for (const target of [{ tmdbId: 603 }, { arrId: 12 }] as const) {
-    assert.deepEqual(titleTargetOfKey(titleTargetKey(target)), target);
-  }
-  assert.equal(titleTargetKey({ tmdbId: 7 }), "tmdb:7");
-  assert.equal(titleTargetKey({ arrId: 7 }), "arr:7");
 });
 
 test("liveTitleLanding: only an open-time read with NO snapshot painted replaces (and remounts Settings)", () => {
@@ -94,135 +88,138 @@ test("episodeSnapshotMayPaint: the newest unanswered (or failed) read of the sea
 
 test("title: the snapshot URL is the open-time live read's URL (one builder)", () => {
   // The endpoint is spelled only by the builder.
-  assert.ok(!/[`"']\/api\/admin\/arr\/title\?/.test(MANAGER), "no hand-built title URL in the manager");
-  assert.match(MANAGER, /const openPath = open \? titleReadPath\(service, instance, titleTargetOfKey\(targetKey\)\) : null;/);
-  assert.match(MANAGER, /const snap = useArrSnapshot<TitleState>\(openPath === null \? null : withBasePath\(openPath\), applyTitleSnapshot\);/);
-  // The open-time live read: the same target from the same key.
-  assert.match(MANAGER, /void load\(titleTargetOfKey\(targetKey\), true\);/);
-  assert.match(callbackBody(MANAGER, "load"), /await arrApi<TitleState>\(titleReadPath\(service, instance, by\), undefined, fallback\);/);
-  assert.match(MANAGER, /const targetKey = titleTargetKey\(target\);/);
+  for (const src of [MANAGER, LOAD]) assert.ok(!/[`"']\/api\/admin\/arr\/title\?/.test(src), "no hand-built title URL in the manager");
+  assert.match(LOAD, /const openPath = open \? titleReadPath\(service, instance, target\) : null;/);
+  assert.match(LOAD, /const snap = useArrSnapshot<unknown>\(openPath === null \? null : withBasePath\(openPath\), applyTitleSnapshot\);/);
+  // The open-time live read: the same target.
+  assert.match(LOAD, /void load\(target, true\);/);
+  assert.match(callbackBody(LOAD, "load"), /arrApi\(titleReadPath\(service, instance, by\), \{ schema: TITLE_STATE, signal \}, tRef\.current\("adminArr\.manage\.loadFailed"\)\)/);
+  // The target by its value: a parent re-render hands a new object.
+  assert.match(MANAGER, /const target = useStableTarget\(targetProp\);/);
+  assert.match(LOAD, /return useMemo\(\(\) => \(kind === "tmdb" \? \{ tmdbId: id \} : \{ arrId: id \}\), \[kind, id\]\);/);
 });
 
 test("title: the live answer rebases over a painted snapshot and marks live only once accepted", () => {
-  const load = callbackBody(MANAGER, "load");
-  const seqCheck = load.indexOf("if (seq !== loadSeq.current) return;");
+  const load = callbackBody(LOAD, "load");
+  const dropped = load.indexOf("if (!res) return;");
   const okAt = load.indexOf("if (res.ok) {");
   const elseAt = load.indexOf("} else {", okAt);
-  const live = load.indexOf("markTitleLive.current();");
-  assert.ok(seqCheck > 0 && okAt > seqCheck && live > okAt && live < elseAt, "markTitleLive() inside the accepted ok branch, after the sequence check");
-  assert.equal([...MANAGER.matchAll(/markTitleLive\.current\(\)/g)].length, 1);
-  // The ref follows the hook's callback for the url now open.
-  assert.match(MANAGER, /const markTitleLive = useRef\(snap\.markLive\);\s*useEffect\(\(\) => \{\s*markTitleLive\.current = snap\.markLive;\s*\}\);/);
+  const live = load.indexOf("markLive();");
+  assert.ok(dropped > 0 && okAt > dropped && live > okAt && live < elseAt, "markLive() inside the accepted ok branch, after a superseded read returned");
+  assert.equal([...LOAD.matchAll(/markLive\(\);/g)].length, 1);
+  // The url's own callback, carried by load's deps: no ref one render behind.
+  assert.match(LOAD, /const \{ markLive \} = snap;/);
   assert.match(load, /const landing = liveTitleLanding\(initial, snapshotPainted\.current\);/);
   assert.match(load, /setState\(\(prev\) => \(prev && landing === "rebase" \? \{ \.\.\.res\.data, title: mergeTitle\(prev\.title, res\.data\.title\) \} : res\.data\)\);/);
   // Only a replace remounts the Settings form.
   assert.match(load, /if \(landing === "replace"\) setVersion\(\(v\) => v \+ 1\);/);
-  assert.equal([...MANAGER.matchAll(/setVersion\(/g)].length, 1);
-  assert.match(load, /\}, \[service, instance, tRef\]\);/);
+  assert.equal([...LOAD.matchAll(/setVersion\(/g)].length, 1);
+  assert.match(load, /\}, \[action, service, instance, tRef, markLive\]\);/);
   // Every open starts with nothing painted, before its live read.
-  const reset = MANAGER.indexOf("snapshotPainted.current = false;");
-  assert.ok(reset > 0 && reset < MANAGER.indexOf("void load(titleTargetOfKey(targetKey), true);"));
+  const reset = LOAD.indexOf("snapshotPainted.current = false;");
+  assert.ok(reset > 0 && reset < LOAD.indexOf("void load(target, true);"));
 });
 
-test("title: a snapshot only fills an empty dialog and touches nothing else", () => {
-  const apply = callbackBody(MANAGER, "applyTitleSnapshot");
-  assert.match(apply, /setState\(\(prev\) => \(snapshotMayPaint\(prev !== null, false\) \? data : prev\)\);/);
-  assert.match(apply, /snapshotPainted\.current = true;/);
-  for (const forbidden of ["setVersion", "setLoadError", "setError", "setNotice", "setTab", "setVisited", "setSettingsDirty", "setSettingsSaving", "setConfirmDiscard", "setWatchKey", "stopWatches", "markTitleLive", "setBusy"]) {
+test("title: a snapshot only fills an empty dialog, once it passes the title's shape check, and touches nothing else", () => {
+  const at = LOAD.indexOf("const applyTitleSnapshot = (data: unknown) => {");
+  assert.ok(at > 0);
+  const apply = LOAD.slice(at, LOAD.indexOf("\n  };", at));
+  assert.match(apply, /const parsed = check\(TITLE_STATE, data\);\s*if \(!parsed\.ok \|\| !snapshotMayPaint\(state !== null, false\)\) return false;/);
+  assert.match(apply, /snapshotPainted\.current = true;\s*setState\(parsed\.value\);\s*return true;/);
+  for (const forbidden of ["setVersion", "setLoadError", "setError", "setNotice", "setTab", "setVisited", "setSettingsDirty", "setSettingsSaving", "setConfirmDiscard", "setWatchKey", "stopWatches", "markLive", "setBusy"]) {
     assert.ok(!apply.includes(forbidden), `applyTitleSnapshot must not call ${forbidden}`);
   }
-  assert.match(apply, /\}, \[\]\);$/);
 });
 
 test("title: Settings keeps edits across the rebase and Save waits for the live read", () => {
   assert.match(MANAGER, /<SettingsTab\s+key=\{version\}/);
-  assert.match(MANAGER, /baseIsSnapshot=\{snap\.staleAt !== null\}/);
+  assert.match(MANAGER, /baseIsSnapshot=\{staleAt !== null\}/);
+  assert.match(LOAD, /staleAt: snap\.staleAt,/);
   assert.match(SETTINGS, /<Button ref=\{saveRef\} size="sm" onClick=\{\(\) => void save\(\)\} disabled=\{!dirty \|\| saving \|\| confirmMove \|\| baseIsSnapshot\}>/);
   assert.match(SETTINGS, /baseIsSnapshot = false,/);
 });
 
 test("title: the stale note sits under the action row, refreshing until the live read answers or fails", () => {
-  assert.match(MANAGER, /<ArrSnapshotNote at=\{snap\.staleAt\} refreshing=\{loadError === ""\} \/>/);
+  assert.match(MANAGER, /<ArrSnapshotNote at=\{staleAt\} refreshing=\{loadError === ""\} \/>/);
   // Under the action row, above the status line.
   const note = MANAGER.indexOf("<ArrSnapshotNote");
-  assert.ok(note > MANAGER.indexOf("<OpenInArrLink") && note < MANAGER.indexOf("{error || loadError ? ("));
+  assert.ok(note > MANAGER.indexOf("<CommandBar") && note < MANAGER.indexOf("<StatusLine"));
 });
 
 // ---------------------------------------------------------------- episodes
 
-test("episodes: one URL per season read, a snapshot only on an empty list, gated per read", () => {
-  const load = callbackBody(SEASONS, "loadEpisodes");
+test("episodes: one URL per season read, a checked snapshot only on an empty list, gated per read", () => {
+  const load = callbackBody(EPISODES, "loadEpisodes");
   assert.match(load, /const path = `\/api\/admin\/arr\/title\/episodes\?\$\{titleQuery\(titleRef, \{ season: n \}\)\}`;/);
-  assert.match(load, /readArrSnapshot<EpisodesAnswer>\(withBasePath\(path\)\)/);
-  assert.match(load, /await arrApi<EpisodesAnswer>\(path, undefined, /);
-  assert.equal([...SEASONS.matchAll(/\/api\/admin\/arr\/title\/episodes\?/g)].length, 1, "the read URL is built once");
+  assert.match(load, /readArrSnapshot<unknown>\(withBasePath\(path\)\)/);
+  assert.match(load, /const parsed = snap \? check\(EPISODES_ANSWER, snap\.data\) : null;\s*if \(!snap \|\| !parsed\?\.ok\) return;/, "a snapshot that isn't an episode list is refused");
+  assert.match(load, /await arrApi\(path, \{ schema: EPISODES_ANSWER \}, /);
+  assert.equal([...(SEASONS + EPISODES).matchAll(/\/api\/admin\/arr\/title\/episodes\?/g)].length, 1, "the read URL is built once");
   // Only a season shown for the first time asks for its snapshot.
   const firstOnly = load.indexOf("if (!listsRef.current[n]?.episodes.length) {");
   assert.ok(firstOnly > 0 && firstOnly < load.indexOf("readArrSnapshot<"), "the snapshot read sits behind the empty-list check");
   assert.match(
     load,
-    /episodeSnapshotMayPaint\(\{\s*seq,\s*newest: listSeq\.current\[n\],\s*answered: doneSeq\.current\[n\],\s*failed: \(cur\?\.error \?\? ""\) !== "",\s*shown: cur\?\.episodes\.length \?\? 0,\s*writing: busyRef\.current !== null,\s*\}\);\s*if \(!paint\) return l;/,
+    /episodeSnapshotMayPaint\(\{\s*seq,\s*newest: listSeq\.current\[n\],\s*answered: doneSeq\.current\[n\],\s*failed: \(cur\?\.error \?\? ""\) !== "",\s*shown: cur\?\.episodes\.length \?\? 0,\s*writing: writing\(\),\s*\}\);\s*if \(!paint\) return l;/,
   );
   // A live answer clears the mark; a failed one keeps the snapshot marked.
   assert.match(load, /episodes: res\.data\.episodes, loadedAt: Date\.parse\(res\.data\.now\) \|\| 0, staleAt: null \}/);
   assert.match(load, /error: res\.error, episodes: l\[n\]\?\.episodes \?\? \[\], loadedAt: l\[n\]\?\.loadedAt \?\? 0, staleAt: l\[n\]\?\.staleAt \?\? null \}/);
-  // The snapshot only ever sets the list; never busy or the tab's error.
+  // The snapshot only ever sets the list; never the tab's busy state or error.
   const paintAt = load.indexOf("readArrSnapshot<");
   const snapBlock = load.slice(paintAt, load.indexOf("const res = await arrApi"));
-  for (const forbidden of ["setBusy", "setError", "setExpanded", "onTitle", "markSeen"]) {
+  for (const forbidden of ["setBusy", "setError", "setExpanded", "onTitle", "markSeen", "action."]) {
     assert.ok(!snapBlock.includes(forbidden), `the episode snapshot must not call ${forbidden}`);
   }
   assert.match(SEASONS, /<ArrSnapshotNote at=\{list\?\.staleAt \?\? null\} refreshing=\{list\?\.loading \?\? false\} \/>/);
-  // The refs the late snapshot reads follow every render.
-  assert.match(SEASONS, /useEffect\(\(\) => \{\s*listsRef\.current = lists;\s*busyRef\.current = busy;\s*\}\);/);
+  // What the late snapshot reads: the lists as last rendered, and the tab's writes live.
+  assert.match(EPISODES, /useEffect\(\(\) => \{\s*listsRef\.current = lists;\s*\}\);/);
+  assert.match(SEASONS, /const writing = useCallback\(\(\) => action\.anyBusy, \[action\]\);/);
 });
 
 // ---------------------------------------------------------------- files + history
 
-for (const [name, src, setter, field, writing] of [
-  ["files", FILES, "setFiles", "files", "busyRef.current !== null"],
-  ["history", HISTORY, "setEvents", "events", "false"],
+for (const [name, src, setter, schema, writing] of [
+  ["files", FILES, "setFiles", "FILES_ANSWER", "writing()"],
+  ["history", HISTORY, "setEvents", "EVENTS_ANSWER", "false"],
 ] as const) {
   test(`${name}: one URL for the live read and its snapshot, markLive only on an accepted answer`, () => {
     assert.match(src, new RegExp(`const readPath = useMemo\\(\\(\\) => \`/api/admin/arr/title/${name}\\?\\$\\{titleQuery\\(titleRef\\)\\}\`, \\[titleRef\\]\\);`));
-    assert.match(src, new RegExp(`const snap = useArrSnapshot<\\{ ${field}: [A-Za-z]+\\[\\] \\}>\\(withBasePath\\(readPath\\), applySnapshot\\);`));
+    assert.match(src, /const snap = useArrSnapshot<unknown>\(withBasePath\(readPath\), applySnapshot\);/);
     const load = callbackBody(src, "load");
-    assert.match(load, /await arrApi<[^>]+>\(readPath, undefined, /);
+    assert.match(load, new RegExp(`arrApi\\(readPath, \\{ schema: ${schema}, signal \\}, `));
     const okAt = load.indexOf("if (res.ok) {");
     const live = load.indexOf("markLive();");
     assert.ok(okAt > 0 && live > okAt && live < load.indexOf("} else {", okAt), "markLive() inside the ok branch");
-    assert.match(load, /\}, \[readPath, tRef, markLive\]\);/);
+    assert.match(load, /\}, \[action, readPath, tRef, markLive\]\);/);
   });
 
-  test(`${name}: a snapshot only fills an empty list, and touches nothing else`, () => {
-    const apply = callbackBody(src, "applySnapshot");
-    assert.match(apply, new RegExp(`${setter}\\(\\(prev\\) => \\(snapshotMayPaint\\(prev !== null, ${writing.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\) \\? data\\.${field} : prev\\)\\);`));
-    for (const forbidden of ["setError", "setSelected", "setConfirmDelete", "setRenames", "setRenameSelected", "setNotice", "setBusy", "setLoadFailed", "setLoading", "markLive", "watch("]) {
+  test(`${name}: a checked snapshot only fills an empty list, and touches nothing else`, () => {
+    const at = src.indexOf("const applySnapshot = (data: unknown) => {");
+    assert.ok(at > 0);
+    const apply = src.slice(at, src.indexOf("\n  };", at));
+    assert.match(apply, new RegExp(`const parsed = check\\(${schema}, data\\);\\s*if \\(!parsed\\.ok \\|\\| !snapshotMayPaint\\(${name === "files" ? "files" : "events"} !== null, ${writing.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)\\) return false;\\s*${setter}\\(parsed\\.value\\.${name === "files" ? "files" : "events"}\\);\\s*return true;`));
+    for (const forbidden of ["setError", "setLoadError", "setActionError", "setSelected", "setConfirmDelete", "setRenames", "setRenameSelected", "setNotice", "markLive", "watch(", "action.run"]) {
       assert.ok(!apply.includes(forbidden), `${name} applySnapshot must not call ${forbidden}`);
     }
-    assert.match(apply, /\}, \[\]\);$/);
   });
 }
 
-test("files and history: only the newest read lands — an older answer arriving last is dropped", () => {
+test("files and history: only the newest read lands — a newer one aborts the one before", () => {
   for (const [name, src, setter] of [["files", FILES, "setFiles"], ["history", HISTORY, "setEvents"]] as const) {
     const load = callbackBody(src, "load");
-    const seq = load.indexOf("const seq = ++loadSeq.current;");
-    const awaited = load.indexOf("await arrApi<");
-    const check = load.indexOf("if (seq !== loadSeq.current) return;");
-    assert.ok(seq >= 0 && seq < awaited, `${name}: numbered before the read goes out`);
-    assert.ok(check > awaited && check < load.indexOf("if (res.ok) {"), `${name}: checked after the answer, before anything lands`);
-    assert.ok(check < load.indexOf(setter) && check < load.indexOf("markLive();") && check < load.indexOf("setError("), `${name}: ${setter}, markLive and setError all wait for the check`);
+    const run = load.indexOf('action.run("load", (signal) =>');
+    const dropped = load.indexOf("if (!res) return;");
+    assert.ok(run >= 0 && dropped > run, `${name}: every read under one key; a superseded one returns before anything lands`);
+    assert.ok(dropped < load.indexOf(setter) && dropped < load.indexOf("markLive();") && dropped < load.indexOf("Error(res.error)"), `${name}: ${setter}, markLive and the error all wait for it`);
   }
-  // History's spinner is the newest read's to clear.
-  const history = callbackBody(HISTORY, "load");
-  assert.ok(history.indexOf("if (seq !== loadSeq.current) return;") < history.indexOf("setLoading(false);"));
+  // The spinner is the newest read's: the action's own busy state.
+  assert.match(HISTORY, /const loading = action\.busy\("load"\);/);
+  assert.match(FILES, /<ArrSnapshotNote at=\{snap\.staleAt\} refreshing=\{action\.busy\("load"\)\} \/>/);
 });
 
 test("files and history render the stale note", () => {
-  assert.match(FILES, /<ArrSnapshotNote at=\{snap\.staleAt\} refreshing=\{reads > 0\} \/>/);
-  assert.match(callbackBody(FILES, "load"), /readsOut\.current\+\+;\s*setReads\(readsOut\.current\);[\s\S]*readsOut\.current--;\s*setReads\(readsOut\.current\);/);
   assert.match(HISTORY, /<ArrSnapshotNote at=\{snap\.staleAt\} refreshing=\{loading\} \/>/);
-  // The delete path is untouched: it still names the files route itself.
-  assert.match(FILES, /const res = await runDelete\(`\/api\/admin\/arr\/title\/files\?\$\{titleQuery\(titleRef\)\}`, \[\.\.\.selected\]/);
+  // The delete names the same route and title as the read.
+  assert.match(FILES, /runTitleFileDelete\(withBasePath\(readPath\), \[\.\.\.selected\], t\("adminArr\.files\.deleteFailed"\), \{ signal \}\)/);
 });

@@ -4,7 +4,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { arrFailure, arrTitleGate, parseIdArray } from "@/lib/arr-admin-http";
 import { MAX_TITLE_FILE_IDS, TITLE_FILE_IDS_BODY_BYTES } from "@/lib/arr-title";
 import { loadRenamePreview, renameTitleFiles } from "@/lib/arr-title-data";
-import { auditContext, logAudit } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -56,12 +56,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
   const { files, commandIds } = renamed;
   void logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email ?? null,
+    ...auditActor(req, session),
     action: "ARR_FILE_RENAME",
     target: `${target.service}:${target.instance}:${target.arrId}`,
     details: { service: target.service, instance: target.instance, arrId: target.arrId, count: files },
-    ...auditContext(req, session),
   });
   return NextResponse.json({ files, commandIds }, { status: 202 });
 });

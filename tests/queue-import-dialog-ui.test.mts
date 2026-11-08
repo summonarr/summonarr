@@ -34,10 +34,29 @@ test("data shown belongs to the download it was loaded for: another row's files 
   assert.match(src, /\{error && files !== null && !pending && \(/, "an earlier row's error is not shown under the new row");
 });
 
-test("a correction's verdict ticks or unticks its file; a reset unticks one the arr can't import", () => {
+test("a correction's verdict ticks or unticks its file; a reset goes back to the arr's own verdict both ways", () => {
   const at = src.indexOf("async function applyEdit(");
   const body = src.slice(at, src.indexOf("\n  }\n", at));
   assert.match(body, /setSelected\(\(sel\) => nextImportSelection\(sel, file\.path, view\.importable\)\)/);
-  assert.match(body, /if \(!file\.importable\) setSelected\(\(sel\) => nextImportSelection\(sel, file\.path, false\)\)/);
+  // A reset re-selects a file the arr can import, as an Apply would, and unticks one it can't.
+  assert.match(body, /setSelected\(\(sel\) => nextImportSelection\(sel, file\.path, file\.importable\)\)/);
+  assert.doesNotMatch(body, /if \(!file\.importable\) setSelected/, "the reset never only deselects");
   assert.doesNotMatch(body, /new Set\(s\)\.add/, "never add-only");
+});
+
+test("an Apply still out when the dialog moves to another download never lands on that download's files", () => {
+  // Each Apply is a keyed run; the load effect for a new download aborts every run first.
+  const start = src.indexOf("useEffect(() => {\n    action.abort();");
+  assert.ok(start >= 0 && start < src.indexOf("}, [service, instance, downloadId, action]);"), "the load effect aborts the runs still out");
+  const at = src.indexOf("async function applyEdit(");
+  const body = src.slice(at, src.indexOf("\n  }\n", at));
+  assert.match(body, /const res = await action\.run\(`preview:\$\{file\.path\}`/);
+  assert.match(body, /if \(!res\) return null;/, "a dropped verdict applies nothing");
+  assert.ok(body.indexOf("if (!res) return null;") < body.indexOf("setEdits((m) => ({ ...m, [file.path]: override }))"));
+});
+
+test("a series' episodes that failed to load say so, with a Retry, instead of an empty season list", () => {
+  assert.match(src, /schema: ImportEpisodesAnswer,/);
+  assert.match(src, /\} else if \(series\.episodes === null\) \{[\s\S]*?role="alert"[\s\S]*?onClick=\{series\.retry\}/);
+  assert.doesNotMatch(src, /setEpisodes\(\[\]\)/, "a failure is never an empty list");
 });

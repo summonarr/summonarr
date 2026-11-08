@@ -16,6 +16,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { failedLoadState, isNearBottom, NEAR_BOTTOM_PX } from "@/lib/client/thread-view.ts";
+import { mergeReload, readComment, readComments } from "../src/components/requests/request-thread-data.ts";
 
 const read = (rel: string) => readFileSync(new URL(`../${rel}`, import.meta.url), "utf8");
 const THREADS = ["src/components/issues/issue-thread.tsx", "src/components/requests/request-thread.tsx"];
@@ -56,9 +57,11 @@ for (const file of THREADS) {
 
   test(`${file}: a bubble is "mine" when the viewer wrote it`, () => {
     const src = read(file);
-    assert.match(src, /authorId: string;/);
+    // The request thread checks the comment shape in its data module.
+    const shape = file.endsWith("request-thread.tsx") ? read("src/components/requests/request-thread-data.ts") : src;
+    assert.match(shape, /authorId: (string;|v\.string\(\),)/);
     assert.match(src, /const isMine = session \? \w+\.authorId === session\.user\.id : /);
-    assert.match(src, /email\?: string \| null;/, "email is only sent to managers");
+    assert.match(shape, /email(\?: string \| null;|: v\.optional\(v\.nullable\(v\.string\(\)\)\))/, "email is only sent to managers");
   });
 
   test(`${file}: ⌘↵ submits the textarea's own form`, () => {
@@ -67,3 +70,45 @@ for (const file of THREADS) {
     assert.doesNotMatch(src, /as unknown as React\.FormEvent/);
   });
 }
+
+test("issue thread: the reply box stays focusable while sending (read-only, never disabled by a send), and focus returns after it", () => {
+  const src = read("src/components/issues/issue-thread.tsx");
+  assert.match(src, /readOnly=\{sending\}/);
+  assert.match(src, /disabled=\{loadState !== "ready"\}/, "only an unloaded thread disables it");
+  assert.doesNotMatch(src, /disabled=\{sending \|\|[^}]*\}\s*className="flex-1 resize-none/);
+  assert.match(src, /setBody\(""\);[\s\S]{0,300}textareaRef\.current\?\.focus\(\);/);
+});
+
+test("request thread: a reload that misses the viewer's own new comment keeps it; malformed entries are dropped", () => {
+  const mk = (id: string) => ({
+    id, createdAt: "2026-01-01T00:00:00Z", body: id, fromAdmin: false, authorId: "u",
+    author: { name: "A", role: "USER" },
+  });
+  const a = mk("a"), b = mk("b"), mine = mk("mine");
+  // A reload sent before the POST committed: the list lacks the new comment.
+  assert.deepEqual(mergeReload([a, b], [a, mine], new Set(["mine"])).map((c) => c.id), ["a", "b", "mine"]);
+  // Once a list holds it, the list is the answer.
+  assert.deepEqual(mergeReload([a, mine], [a, mine], new Set()).map((c) => c.id), ["a", "mine"]);
+  // Only locally appended ids are carried over.
+  assert.deepEqual(mergeReload([b], [a], new Set()).map((c) => c.id), ["b"]);
+  assert.deepEqual(readComments([a, { id: "x" }, "junk", { ...b, author: null }]).map((c) => c.id), ["a"]);
+  assert.equal(readComment({ ...a, body: 5 }), null);
+  assert.deepEqual(readComment({ ...a, extra: 1 }), a);
+  const src = read("src/components/requests/request-thread.tsx");
+  assert.match(src, /pendingRef\.current\.add\(created\.id\);/);
+  assert.match(src, /setComments\(\(prev\) => mergeReload\(list, prev, pending\)\);/);
+  assert.doesNotMatch(src, /comments\.length \+ 1/, "no count read from a stale closure");
+});
+
+test("issue thread: live events while a reload is out cost one more read, not one each", () => {
+  const src = read("src/components/issues/issue-thread.tsx");
+  assert.match(src, /if \(live\.running\) \{\s*live\.again = true;\s*return;\s*\}/);
+  assert.match(src, /\} while \(live\.again && !lifeRef\.current\?\.signal\.aborted\);/);
+});
+
+test("the issue thread skips the live re-read for a message it already shows, and the reply route names the message", () => {
+  const thread = read("src/components/issues/issue-thread.tsx");
+  assert.match(thread, /if \(event\.messageId && shownIdsRef\.current\.has\(event\.messageId\)\) return;\s*liveReload\(\);/);
+  assert.match(thread, /shownIdsRef\.current = new Set\(messages\.map\(\(m\) => m\.id\)\);/);
+  assert.match(read("src/app/api/issues/[id]/messages/route.ts"), /emitSSE\(\{ type: "issuemessage:created", issueId: id, messageId: message\.id, userId: issue\.reportedBy \}\);/);
+});

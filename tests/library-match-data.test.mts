@@ -196,3 +196,23 @@ test("a flag a fix drops while the check is listing is not brought back by the c
   assert.deepEqual(again?.flags.map((f) => f.itemKey), ["b2"]);
   assert.equal(again?.counts.flagged, 1);
 });
+
+test("a Sonarr TMDB id resolved from its TVDB id is judged with, so an item carrying it agrees instead of staying a wrong match", async () => {
+  settings.set("sonarrUrl", SONARR);
+  settings.set("sonarrApiKey", "sonarr-key");
+  jfSeries = [
+    { Id: "s-a", Type: "Series", Name: "Alpha", Path: "/mnt/tv/Alpha Show", ProviderIds: { Tmdb: "5", Tvdb: "333" } },
+    { Id: "s-z", Type: "Series", Name: "Zulu", Path: "/mnt/tv/Zulu Show", ProviderIds: { Tmdb: "6", Tvdb: "444" } },
+  ];
+  sonarrSeries = [
+    { tvdbId: 111, title: "Alpha Show", path: "/tv/Alpha Show" },
+    { tvdbId: 222, title: "Zulu Show", path: "/tv/Zulu Show" },
+  ];
+  tvdbCache.set(111, 5); // the server's own id: Alpha is matched correctly
+  tvdbCache.set(222, 999);
+  const report = await runLibraryMatchCheck();
+  assert.ok(report);
+  assert.deepEqual(report.flags.filter((f) => f.mediaType === "TV").map((f) => [f.itemKey, f.arr?.tmdbId]), [["s-z", 999]]);
+  assert.equal(report.counts.agreed, 2, "the movie that agrees and Alpha");
+  assert.equal(report.counts.flagged, report.flags.length);
+});

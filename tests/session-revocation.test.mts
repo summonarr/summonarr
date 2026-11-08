@@ -5,7 +5,8 @@
 // "log out everywhere" takes effect on the next request instead of up to 60s
 // later. Properties that must hold: marks are never consumed on read (a cached
 // token can be replayed several times), session and user marks are independent
-// namespaces, and both sets are FIFO-bounded at 1024 entries so a long-lived
+// namespaces, and both ledgers drop marks past their useful age and are
+// capped (FORCE_REVOKE_MAX, oldest first past it) so a long-lived
 // process can't grow them unboundedly (auth#34). Per guardrail 27 the callers
 // mark AFTER the DB write succeeds — that ordering lives in the callers
 // (auth.ts, revoke routes), not here; this file pins the ledger itself.
@@ -16,13 +17,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  FORCE_REVOKE_MAX as CAP,
+  _forceRevokeLedgerSizesForTests,
   markUserForceRevalidate,
   markSessionForceRevoked,
   shouldForceDbCheck,
 } from "../src/lib/session-revocation.ts";
-
-// Mirrors FORCE_REVOKE_MAX in the module (not exported).
-const CAP = 1024;
 
 test("unmarked user + session never forces a DB check (baseline)", () => {
   assert.equal(shouldForceDbCheck("u_never_marked", "sess_never_marked"), false);
@@ -130,29 +130,38 @@ test("session ledger is FIFO-bounded at 1024: oldest entry is evicted first", ()
   assert.equal(shouldForceDbCheck("u", "evict_a:one-more"), true);
 });
 
-test("re-marking an existing key at capacity still evicts the oldest (current behavior pin)", () => {
-  // addBounded checks size >= CAP before Set.add, so re-marking an
-  // already-present key while full evicts the oldest entry even though the
-  // set would not have grown. Pinned as-is: the evicted session merely falls
-  // back to the bounded dbCheckedAt cache window, so the loss is a documented
-  // fast-path degradation, not a security hole.
+test("re-marking an existing key at capacity evicts nothing and moves it to the newest slot", () => {
   for (let i = 0; i < CAP; i++) markSessionForceRevoked(`evict_b:${i}`);
-  markSessionForceRevoked(`evict_b:${CAP - 1}`); // re-mark the newest entry
-  assert.equal(shouldForceDbCheck("u", "evict_b:0"), false); // oldest evicted
+  markSessionForceRevoked("evict_b:0"); // re-mark the oldest entry
+  assert.equal(shouldForceDbCheck("u", "evict_b:0"), true, "nothing evicted");
   assert.equal(shouldForceDbCheck("u", "evict_b:1"), true);
-  assert.equal(shouldForceDbCheck("u", `evict_b:${CAP - 1}`), true);
-  // Re-marking also does NOT refresh FIFO position — Set.add on an existing
-  // member keeps its original insertion slot. After the eviction above the set
-  // holds 1023 entries ordered 1..CAP-1; re-mark evict_b:1, then push two new
-  // keys (first refills to capacity, second evicts the oldest). The oldest is
-  // still evict_b:1 despite its recent re-mark.
-  markSessionForceRevoked("evict_b:1");
-  markSessionForceRevoked("evict_b:new-1"); // size back to CAP, no eviction
-  markSessionForceRevoked("evict_b:new-2"); // over capacity → evicts evict_b:1
+  // The next new key evicts the oldest, which is now evict_b:1.
+  markSessionForceRevoked("evict_b:new-1");
   assert.equal(shouldForceDbCheck("u", "evict_b:1"), false);
-  assert.equal(shouldForceDbCheck("u", "evict_b:2"), true);
+  assert.equal(shouldForceDbCheck("u", "evict_b:0"), true);
   assert.equal(shouldForceDbCheck("u", "evict_b:new-1"), true);
-  assert.equal(shouldForceDbCheck("u", "evict_b:new-2"), true);
+});
+
+test("marks past their useful age are dropped on the next mark, so the ledger stays small", () => {
+  const t0 = 2_000_000_000;
+  for (let i = 0; i < 500; i++) markUserForceRevalidate(`age_a:old${i}`, t0);
+  for (let i = 0; i < 500; i++) markSessionForceRevoked(`age_b:old${i}`, t0);
+  const before = _forceRevokeLedgerSizesForTests();
+  markUserForceRevalidate("age_a:new", t0 + 121);
+  markSessionForceRevoked("age_b:new", t0 + 121);
+  const after = _forceRevokeLedgerSizesForTests();
+  assert.ok(before.users >= 500 && before.sessions >= 500);
+  assert.equal(after.users, 1);
+  assert.equal(after.sessions, 1);
+  assert.equal(shouldForceDbCheck("age_a:new", "s"), true);
+  assert.equal(shouldForceDbCheck("age_a:old0", "s"), false, "a stale mark forces nothing a token still needs");
+});
+
+test("a bulk revocation of thousands of accounts keeps every mark inside the window", () => {
+  const t0 = 2_100_000_000;
+  for (let i = 0; i < 5_000; i++) markUserForceRevalidate(`bulk:${i}`, t0 + Math.floor(i / 100));
+  assert.equal(shouldForceDbCheck("bulk:0", "s", t0), true);
+  assert.equal(shouldForceDbCheck("bulk:4999", "s", t0), true);
 });
 
 test("user ledger is bounded independently; a session flood never evicts user marks", () => {

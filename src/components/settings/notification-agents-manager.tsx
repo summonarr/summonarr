@@ -10,47 +10,29 @@ import { Textarea } from "@/components/ui/textarea";
 import { Chip } from "@/components/ui/design";
 import { CheckCircle, Loader2, Trash2, XCircle } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { useT } from "@/components/i18n/i18n-provider";
 import { AGENT_KINDS, NOTIFY_EVENT_KEYS, TEMPLATE_FIELDS, type AgentKind } from "@/lib/notify-events";
+import {
+  DEFAULT_PRIORITY,
+  TestAnswer,
+  allEventsSelected,
+  bodyFrom,
+  draftFrom,
+  emptyDraft,
+  readAgents,
+  type AgentView,
+  type Draft,
+} from "./notification-agents-data";
 
 // Admin UI for the outbound notification channels (webhook / ntfy / Gotify).
 // Secrets are write-only: the list carries `hasSecret`, and a blank secret field
 // on edit means "keep the saved value".
 
-interface AgentView {
-  id: string;
-  kind: AgentKind;
-  name: string;
-  enabled: boolean;
-  events: string[];
-  config: Record<string, unknown>;
-  hasSecret: boolean;
-  // false: the stored config fails today's validation, so nothing is sent.
-  configValid?: boolean;
-  lastStatus: string | null;
-  lastError: string | null;
-}
-
 interface TestResult {
   ok: boolean;
   text: string;
-}
-
-interface Draft {
-  id: string | null;
-  kind: AgentKind;
-  name: string;
-  enabled: boolean;
-  events: string[];
-  url: string;
-  topic: string;
-  priority: string;
-  attachPoster: boolean;
-  headerName: string;
-  template: string;
-  secret: string;
-  clearSecret: boolean;
-  hasSecret: boolean;
 }
 
 // Literal keys so the i18n dead-string check can see them.
@@ -74,57 +56,6 @@ const EVENT_LABEL_KEYS: Record<(typeof NOTIFY_EVENT_KEYS)[number], string> = {
   "arr.queue_attention": "settings.form.agents.event.arr.queue_attention",
   "stream.concurrent": "settings.form.agents.event.stream.concurrent",
 };
-
-const DEFAULT_PRIORITY: Record<AgentKind, string> = { webhook: "", ntfy: "3", gotify: "5" };
-
-function emptyDraft(kind: AgentKind = "webhook"): Draft {
-  return {
-    id: null, kind, name: "", enabled: true, events: [...NOTIFY_EVENT_KEYS], url: "", topic: "",
-    priority: DEFAULT_PRIORITY[kind], attachPoster: false, headerName: "Authorization", template: "",
-    secret: "", clearSecret: false, hasSecret: false,
-  };
-}
-
-function draftFrom(a: AgentView): Draft {
-  const c = a.config;
-  return {
-    id: a.id, kind: a.kind, name: a.name, enabled: a.enabled, events: a.events,
-    url: typeof c.url === "string" ? c.url : "",
-    topic: typeof c.topic === "string" ? c.topic : "",
-    priority: typeof c.priority === "number" ? String(c.priority) : DEFAULT_PRIORITY[a.kind],
-    attachPoster: c.attachPoster === true,
-    headerName: typeof c.headerName === "string" ? c.headerName : "Authorization",
-    template: typeof c.template === "string" ? c.template : "",
-    secret: "", clearSecret: false, hasSecret: a.hasSecret,
-  };
-}
-
-function bodyFrom(d: Draft): Record<string, unknown> {
-  const config: Record<string, unknown> = { url: d.url.trim() };
-  if (d.kind === "webhook") {
-    config.headerName = d.headerName.trim() || "Authorization";
-    config.template = d.template.trim() ? d.template : null;
-  } else {
-    // Blank ⇒ leave the key out so the server applies its default (ntfy 3,
-    // Gotify 5). Number("") is 0, which Gotify would store and ntfy would 400 on.
-    const priority = d.priority.trim();
-    if (priority !== "") config.priority = Number(priority);
-    if (d.kind === "ntfy") {
-      config.topic = d.topic.trim();
-      config.attachPoster = d.attachPoster;
-    }
-  }
-  const body: Record<string, unknown> = { name: d.name.trim(), enabled: d.enabled, events: d.events, config };
-  if (!d.id) body.kind = d.kind;
-  if (d.clearSecret) body.secret = null;
-  else if (d.secret) body.secret = d.secret;
-  return body;
-}
-
-async function errorOf(res: Response): Promise<string> {
-  const data = (await res.json().catch(() => null)) as { error?: unknown } | null;
-  return data && typeof data.error === "string" ? data.error : "";
-}
 
 function withoutKey<T>(rec: Record<string, T>, key: string): Record<string, T> {
   if (!(key in rec)) return rec;
@@ -152,8 +83,7 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
   // List-level actions (delete) have no form to report into.
   const [actionError, setActionError] = useState("");
   // Per channel: two tests can overlap, and one finishing must not clear the
-  // other's spinner or result.
-  const [testing, setTesting] = useState<Record<string, true>>({});
+  // other's result. The spinner is the action's own busy key (test:<id>).
   const [testResults, setTestResults] = useState<Record<string, TestResult>>({});
   // Per channel: a toggle answered after a newer toggle of the same channel
   // must not roll the switch back over it.
@@ -164,20 +94,24 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
   // The form closes on save, so without this an edit leaves the list looking
   // exactly as before with no sign the change took.
   const [saved, setSaved] = useState(false);
+  // Every reload goes through one key: a newer one aborts the older, so an
+  // older list (still showing a deleted channel, or an older lastStatus) can
+  // never land over a newer one.
+  const action = useAsyncAction();
   // Nothing has come back yet (neither the list nor a failure).
   const loading = agents === null && !loadError;
 
   const load = useCallback(async () => {
-    try {
-      const res = await fetch(withBasePath("/api/admin/notification-agents"));
-      if (!res.ok) throw new Error();
-      const data = (await res.json()) as { agents: AgentView[] };
-      setAgents(data.agents);
-      setLoadError(false);
-    } catch {
+    const res = await action.run("load", (signal) => fetchJson(withBasePath("/api/admin/notification-agents"), { signal }));
+    if (res === undefined) return;
+    const list = res.ok ? readAgents(res.data) : null;
+    if (!list) {
       setLoadError(true);
+      return;
     }
-  }, []);
+    setAgents(list);
+    setLoadError(false);
+  }, [action]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -197,28 +131,24 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
-    if (!draft) return;
+    if (!draft || saving) return;
     setSaving(true);
     setFormError("");
     setSaved(false);
-    try {
-      const res = await fetch(withBasePath(draft.id ? `/api/admin/notification-agents/${draft.id}` : "/api/admin/notification-agents"), {
-        method: draft.id ? "PATCH" : "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(bodyFrom(draft)),
-      });
-      if (!res.ok) {
-        setFormError((await errorOf(res)) || t("settings.form.common.saveFailed"));
-        return;
-      }
-      closeDraft();
-      await load();
-      setSaved(true);
-    } catch {
-      setFormError(t("settings.form.common.saveFailed"));
-    } finally {
+    const res = await fetchJson(withBasePath(draft.id ? `/api/admin/notification-agents/${draft.id}` : "/api/admin/notification-agents"), {
+      init: jsonInit(draft.id ? "PATCH" : "POST", bodyFrom(draft)),
+      fallbackError: t("settings.form.common.saveFailed"),
+    });
+    // A 2xx that isn't JSON still saved.
+    if (!res.ok && res.kind !== "invalid") {
+      setFormError(res.error || t("settings.form.common.saveFailed"));
       setSaving(false);
+      return;
     }
+    closeDraft();
+    setSaving(false);
+    await load();
+    setSaved(true);
   }
 
   function openDraft(d: Draft, opts: { discard?: boolean } = {}) {
@@ -261,17 +191,15 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
     toggleSeq.current[a.id] = seq;
     setActionError("");
     mirrorEnabled(a.id, next);
-    const res = await fetch(withBasePath(`/api/admin/notification-agents/${a.id}`), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled: next }),
-    }).catch(() => null);
-    if (res?.ok) return;
-    const error = (res ? await errorOf(res) : "") || t("settings.form.common.requestFailed");
+    const res = await fetchJson(withBasePath(`/api/admin/notification-agents/${a.id}`), {
+      init: jsonInit("PATCH", { enabled: next }),
+      fallbackError: t("settings.form.common.requestFailed"),
+    });
+    if (res.ok || res.kind === "invalid") return;
     // A newer toggle of this channel owns the switch now; it reports its own outcome.
     if (toggleSeq.current[a.id] !== seq) return;
     // A switch that just flips back reads as a UI glitch; say why.
-    setActionError(error);
+    setActionError(res.error || t("settings.form.common.requestFailed"));
     // Roll both back before the reload: load() can itself fail and would
     // otherwise leave the optimistic state standing.
     mirrorEnabled(a.id, !next);
@@ -284,36 +212,39 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
     setConfirmDelete(null);
     setActionError("");
     setSaved(false);
-    const res = await fetch(withBasePath(`/api/admin/notification-agents/${a.id}`), { method: "DELETE" }).catch(() => null);
-    if (res?.ok) {
+    const res = await fetchJson(withBasePath(`/api/admin/notification-agents/${a.id}`), {
+      init: { method: "DELETE" },
+      fallbackError: t("settings.form.common.requestFailed"),
+    });
+    if (res.ok || res.kind === "invalid") {
       if (draft?.id === a.id) closeDraft();
       setPendingDraft((d) => (d && d.id === a.id ? null : d));
     } else {
       // A silent failure reads as a UI glitch; say the delete did not happen.
-      setActionError((res ? await errorOf(res) : "") || t("settings.form.common.requestFailed"));
+      setActionError(res.error || t("settings.form.common.requestFailed"));
     }
     await load();
   }
 
   async function test(a: AgentView) {
-    setTesting((s) => ({ ...s, [a.id]: true }));
     setTestResults((r) => withoutKey(r, a.id));
-    const report = (result: TestResult) => setTestResults((r) => ({ ...r, [a.id]: result }));
-    try {
-      const res = await fetch(withBasePath(`/api/admin/notification-agents/${a.id}/test`), { method: "POST" });
-      const data = (await res.json().catch(() => null)) as { ok?: boolean; status?: number | null; error?: string | null } | null;
-      if (res.ok && data?.ok) {
-        report({ ok: true, text: t("settings.form.agents.testOk", { status: data.status ?? 200 }) });
-      } else {
-        const err = data?.error || t("settings.form.common.testFailed");
-        report({ ok: false, text: t("settings.form.agents.testFailed", { error: err }) });
-      }
-    } catch {
-      report({ ok: false, text: t("settings.form.common.testFailed") });
-    } finally {
-      setTesting((s) => withoutKey(s, a.id));
-      void load();
+    const res = await action.run(`test:${a.id}`, (signal) => fetchJson(withBasePath(`/api/admin/notification-agents/${a.id}/test`), {
+      init: { method: "POST" },
+      schema: TestAnswer,
+      signal,
+    }), { ifBusy: "skip" });
+    if (res === undefined) return;
+    let result: TestResult;
+    if (res.ok && res.data.ok) {
+      result = { ok: true, text: t("settings.form.agents.testOk", { status: res.data.status ?? 200 }) };
+    } else if (res.ok || res.kind === "http") {
+      const err = (res.ok ? res.data.error : res.error) || t("settings.form.common.testFailed");
+      result = { ok: false, text: t("settings.form.agents.testFailed", { error: err }) };
+    } else {
+      result = { ok: false, text: t("settings.form.common.testFailed") };
     }
+    setTestResults((r) => ({ ...r, [a.id]: result }));
+    void load();
   }
 
   return (
@@ -322,8 +253,8 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
         <p className="text-sm rounded-md px-3 py-2 bg-amber-500/10 text-amber-400">{t("settings.form.agents.featureOff")}</p>
       )}
 
-      {loadError && <p className="text-sm text-red-400">{t("settings.form.agents.loadFailed")}</p>}
-      {actionError && <p className="text-sm text-red-400">{actionError}</p>}
+      {loadError && <p role="alert" className="text-sm text-red-400">{t("settings.form.agents.loadFailed")}</p>}
+      {actionError && <p role="alert" className="text-sm text-red-400">{actionError}</p>}
 
       {/* Same loading line as the arr/media managers. Without it the card
           showed only "Add channel" until the GET resolved, which reads as
@@ -339,126 +270,28 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
       {agents && agents.length > 0 && (
         <ul className="divide-y divide-zinc-800 rounded-md border border-zinc-800">
           {agents.map((a) => (
-            <li key={a.id} className="flex flex-wrap items-center gap-3 px-3 py-2.5">
-              <Switch
-                checked={a.enabled}
-                onCheckedChange={(next) => void toggleEnabled(a, next)}
-                size="sm"
-                // Named per row — "Enabled" ×N tells a screen reader nothing
-                // about which channel each switch belongs to.
-                aria-label={t("settings.form.agents.enabledFor", { name: a.name })}
-              />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="truncate text-sm font-medium text-zinc-100">{a.name}</span>
-                  <Chip tone="neutral">{t(`settings.form.agents.kind.${a.kind}`)}</Chip>
-                </div>
-                <p className="text-xs text-zinc-500">
-                  {t("settings.form.agents.eventsCount", { count: a.events.length })}
-                  {" · "}
-                  {a.lastStatus === "ok" && <span className="text-green-400">{t("settings.form.agents.status.ok")}</span>}
-                  {a.lastStatus === "failed" && <span className="text-red-400">{t("settings.form.agents.status.failed", { error: a.lastError ?? "" })}</span>}
-                  {!a.lastStatus && t("settings.form.agents.status.never")}
-                </p>
-                {a.configValid === false && (
-                  <p className="mt-1 flex items-center gap-1 text-xs text-red-400">
-                    <XCircle className="w-3.5 h-3.5 shrink-0" />
-                    {t("settings.form.agents.status.invalidConfig")}
-                  </p>
-                )}
-                {testResults[a.id] && (
-                  <p className={`mt-1 flex items-center gap-1 text-xs ${testResults[a.id].ok ? "text-green-400" : "text-red-400"}`}>
-                    {testResults[a.id].ok ? <CheckCircle className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                    {testResults[a.id].text}
-                  </p>
-                )}
-              </div>
-              {/* Own line under ~640px: the three buttons are ~175px, and with
-                  the switch and gaps the name column was squeezed to ~45px
-                  at 375px — the flex-1 text shrank instead of the row wrapping. */}
-              <div className="flex basis-full items-center gap-2 sm:basis-auto">
-                {/* The label stays while testing (spinner in front) so the
-                    button keeps its name and width instead of collapsing to
-                    an unnamed 14px icon. */}
-                <Button type="button" variant="outline" size="sm" className="border-zinc-700" disabled={!!testing[a.id]} aria-busy={!!testing[a.id]} onClick={() => void test(a)}>
-                  {testing[a.id] && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                  {t("settings.form.agents.test")}
-                </Button>
-                <Button type="button" variant="outline" size="sm" className="border-zinc-700" onClick={() => openDraft(draftFrom(a))}>
-                  {t("settings.form.agents.edit")}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="border-zinc-700 text-red-400 hover:text-[var(--ds-danger-hover)]"
-                  aria-label={t("settings.form.agents.delete")}
-                  aria-expanded={confirmDelete === a.id}
-                  onClick={() => { setPendingDraft(null); setConfirmDelete(confirmDelete === a.id ? null : a.id); }}
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </Button>
-              </div>
-
-              {/* Edit while the open form has unsaved edits: the same inline
-                  panel as Delete, instead of silently dropping them. */}
-              {pendingDraft?.id === a.id && (
-                <div className="basis-full rounded-md border border-red-500/40 bg-red-500/10 p-3 space-y-2">
-                  <p className="text-xs text-red-400">{t("settings.form.agents.confirmDiscard")}</p>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => openDraft(pendingDraft, { discard: true })}
-                      autoFocus
-                      className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
-                    >
-                      {t("settings.form.agents.discardAndEdit")}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPendingDraft(null)}
-                      className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
-                    >
-                      {t("settings.form.agents.keepEditing")}
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Unlike the arr/media managers' Remove (which lands on Save),
-                  this DELETE fires at once — the panel says so. */}
-              {confirmDelete === a.id && (
-                <div className="basis-full rounded-md border border-red-500/40 bg-red-500/10 p-3 space-y-2">
-                  <p className="text-xs text-red-400">
-                    {t("settings.form.agents.confirmDelete", { name: a.name })}{" "}
-                    <strong>{t("settings.form.agents.confirmDeleteNow")}</strong>
-                  </p>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void remove(a)}
-                      autoFocus
-                      className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />{t("settings.form.agents.delete")}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setConfirmDelete(null)}
-                      className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
-                    >
-                      {t("settings.form.common.cancel")}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </li>
+            <AgentRow
+              key={a.id}
+              agent={a}
+              testing={action.busy(`test:${a.id}`)}
+              testResult={testResults[a.id]}
+              confirmingDelete={confirmDelete === a.id}
+              pendingDraft={pendingDraft?.id === a.id ? pendingDraft : null}
+              onToggle={(next) => void toggleEnabled(a, next)}
+              onTest={() => void test(a)}
+              onEdit={() => openDraft(draftFrom(a))}
+              onToggleDelete={() => { setPendingDraft(null); setConfirmDelete(confirmDelete === a.id ? null : a.id); }}
+              onCancelDelete={() => setConfirmDelete(null)}
+              onDelete={() => void remove(a)}
+              onDiscardAndEdit={(d) => openDraft(d, { discard: true })}
+              onKeepEditing={() => setPendingDraft(null)}
+            />
           ))}
         </ul>
       )}
 
       {saved && !draft && (
-        <p className="text-sm text-green-400 flex items-center gap-1.5"><CheckCircle className="w-4 h-4 shrink-0" />{t("settings.form.common.saved")}</p>
+        <p role="status" className="text-sm text-green-400 flex items-center gap-1.5"><CheckCircle className="w-4 h-4 shrink-0" />{t("settings.form.common.saved")}</p>
       )}
 
       {/* Hidden until the list is known, like the siblings — adding into an
@@ -474,148 +307,13 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
           cards show — not the browser's unstyled "Please enter a URL" bubble. */}
       {draft && (
         <form ref={formRef} onSubmit={save} noValidate className="space-y-4 rounded-md border border-zinc-800 p-4">
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="agent-kind">{t("settings.form.agents.field.kind")}</Label>
-              <StyledSelect
-                id="agent-kind"
-                value={draft.kind}
-                disabled={!!draft.id}
-                onChange={(e) => {
-                  const kind = e.target.value as AgentKind;
-                  patchDraft({ kind, priority: DEFAULT_PRIORITY[kind] });
-                }}
-              >
-                {AGENT_KINDS.map((k) => (
-                  <option key={k} value={k}>{t(`settings.form.agents.kind.${k}`)}</option>
-                ))}
-              </StyledSelect>
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="agent-name">{t("settings.form.agents.field.name")}</Label>
-              <Input id="agent-name" value={draft.name} maxLength={100} onChange={(e) => patchDraft({ name: e.target.value })} className="bg-zinc-800 border-zinc-700" />
-            </div>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="agent-url">{t("settings.form.agents.field.url")}</Label>
-            <Input id="agent-url" type="url" value={draft.url} onChange={(e) => patchDraft({ url: e.target.value })} placeholder={draft.kind === "ntfy" ? "https://ntfy.sh" : draft.kind === "gotify" ? "https://gotify.example.com" : "https://example.com/hook"} className="bg-zinc-800 border-zinc-700 font-mono" />
-            <p className="text-xs text-zinc-500">{t(`settings.form.agents.urlHelp.${draft.kind}`)}</p>
-          </div>
-
-          {draft.kind === "ntfy" && (
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label htmlFor="agent-topic">{t("settings.form.agents.field.topic")}</Label>
-                <Input id="agent-topic" value={draft.topic} maxLength={64} onChange={(e) => patchDraft({ topic: e.target.value })} className="bg-zinc-800 border-zinc-700 font-mono" />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="agent-priority">{t("settings.form.agents.field.priority")}</Label>
-                <Input id="agent-priority" type="number" min={1} max={5} value={draft.priority} onChange={(e) => patchDraft({ priority: e.target.value })} className="bg-zinc-800 border-zinc-700" />
-              </div>
-              <label className="flex items-center gap-2 text-sm text-zinc-400 sm:col-span-2">
-                <input type="checkbox" checked={draft.attachPoster} onChange={(e) => patchDraft({ attachPoster: e.target.checked })} />
-                {t("settings.form.agents.field.attachPoster")}
-              </label>
-            </div>
-          )}
-
-          {draft.kind === "gotify" && (
-            <div className="space-y-1.5 max-w-[220px]">
-              <Label htmlFor="agent-priority">{t("settings.form.agents.field.priority")}</Label>
-              <Input id="agent-priority" type="number" min={0} max={10} value={draft.priority} onChange={(e) => patchDraft({ priority: e.target.value })} className="bg-zinc-800 border-zinc-700" />
-            </div>
-          )}
-
-          {draft.kind === "webhook" && (
-            <div className="space-y-1.5 max-w-[320px]">
-              <Label htmlFor="agent-header">{t("settings.form.agents.field.headerName")}</Label>
-              <Input id="agent-header" value={draft.headerName} maxLength={64} onChange={(e) => patchDraft({ headerName: e.target.value })} className="bg-zinc-800 border-zinc-700 font-mono" />
-            </div>
-          )}
-
-          <div className="space-y-1.5">
-            <Label htmlFor="agent-secret">
-              {t(`settings.form.agents.field.secret.${draft.kind}`)}
-              {draft.kind !== "gotify" && <span className="text-zinc-500 font-normal"> {t("settings.form.common.optional")}</span>}
-            </Label>
-            <div className="flex items-center gap-2">
-              <Input
-                id="agent-secret"
-                type="password"
-                // "off" is ignored on password fields; new-password is what keeps
-                // a browser from filling the Summonarr login into a channel token.
-                autoComplete="new-password"
-                data-1p-ignore
-                data-lpignore="true"
-                value={draft.secret}
-                disabled={draft.clearSecret}
-                onChange={(e) => patchDraft({ secret: e.target.value })}
-                placeholder={draft.hasSecret && !draft.clearSecret ? "••••••••" : ""}
-                className="bg-zinc-800 border-zinc-700 font-mono"
-              />
-              {/* "Clear token", no trash glyph: the Trash2 + "Remove" look is
-                  the row's delete-the-channel affordance; this only drops the
-                  saved token on the next Save. */}
-              {draft.hasSecret && draft.kind !== "gotify" && (
-                <Button type="button" variant="outline" size="sm" className="border-zinc-700 text-zinc-400 hover:text-zinc-100 shrink-0" onClick={() => patchDraft({ clearSecret: !draft.clearSecret, secret: "" })}>
-                  {draft.clearSecret ? t("settings.form.common.cancel") : t("settings.form.agents.clearSecret")}
-                </Button>
-              )}
-            </div>
-            {draft.hasSecret && !draft.clearSecret && <p className="text-xs text-zinc-500">{t("settings.form.agents.secretKeep")}</p>}
-          </div>
-
-          {draft.kind === "webhook" && (
-            <div className="space-y-1.5">
-              <Label htmlFor="agent-template">{t("settings.form.agents.field.template")}</Label>
-              <Textarea
-                id="agent-template"
-                value={draft.template}
-                onChange={(e) => patchDraft({ template: e.target.value })}
-                rows={5}
-                spellCheck={false}
-                placeholder={'{ "content": "{{title}} — {{message}}" }'}
-                className="bg-zinc-800 border-zinc-700 font-mono md:text-xs"
-              />
-              <p className="text-xs text-zinc-500">{t("settings.form.agents.templateHelp", { fields: TEMPLATE_FIELDS.map((f) => `{{${f}}}`).join(" ") })}</p>
-            </div>
-          )}
-
-          {/* <legend> must be the fieldset's FIRST child to name the checkbox
-              group for AT; nested in a div it was plain text. Select all sits
-              on its own row beneath it. */}
-          <fieldset className="space-y-2">
-            <legend className="text-sm font-medium text-zinc-100">{t("settings.form.agents.field.events")}</legend>
-            <div className="flex justify-end">
-              <button
-                type="button"
-                className="min-h-8 px-2 -my-2 -mr-2 text-xs text-indigo-400 hover:underline"
-                onClick={() => patchDraft({ events: draft.events.length === NOTIFY_EVENT_KEYS.length ? [] : [...NOTIFY_EVENT_KEYS] })}
-              >
-                {draft.events.length === NOTIFY_EVENT_KEYS.length ? t("settings.form.agents.selectNone") : t("settings.form.agents.selectAll")}
-              </button>
-            </div>
-            <div className="grid gap-1.5 sm:grid-cols-2">
-              {NOTIFY_EVENT_KEYS.map((ev) => (
-                <label key={ev} className="flex items-center gap-2 text-sm text-zinc-400">
-                  <input
-                    type="checkbox"
-                    checked={draft.events.includes(ev)}
-                    onChange={(e) => patchDraft({ events: e.target.checked ? [...draft.events, ev] : draft.events.filter((x) => x !== ev) })}
-                  />
-                  {t(EVENT_LABEL_KEYS[ev])}
-                </label>
-              ))}
-            </div>
+          {/* Locked while the save is in flight: the form closes on success,
+              so anything typed meanwhile would be silently dropped. */}
+          <fieldset disabled={saving} className="min-w-0 space-y-4">
+            <AgentFormFields draft={draft} patchDraft={patchDraft} />
           </fieldset>
 
-          <label className="flex items-center gap-2 text-sm text-zinc-400">
-            <Switch checked={draft.enabled} onCheckedChange={(next) => patchDraft({ enabled: next })} size="sm" />
-            {t("settings.form.agents.field.enabled")}
-          </label>
-
-          {formError && <p className="text-sm text-red-400">{formError}</p>}
+          {formError && <p role="alert" className="text-sm text-red-400">{formError}</p>}
 
           <div className="flex items-center gap-2">
             <Button type="submit" disabled={saving}>
@@ -628,5 +326,305 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
         </form>
       )}
     </div>
+  );
+}
+
+// One channel in the list: its switch, status, test result, actions and the
+// two inline confirm panels (discard edits, delete).
+function AgentRow({
+  agent: a,
+  testing,
+  testResult,
+  confirmingDelete,
+  pendingDraft,
+  onToggle,
+  onTest,
+  onEdit,
+  onToggleDelete,
+  onCancelDelete,
+  onDelete,
+  onDiscardAndEdit,
+  onKeepEditing,
+}: {
+  agent: AgentView;
+  testing: boolean;
+  testResult: TestResult | undefined;
+  confirmingDelete: boolean;
+  pendingDraft: Draft | null;
+  onToggle: (next: boolean) => void;
+  onTest: () => void;
+  onEdit: () => void;
+  onToggleDelete: () => void;
+  onCancelDelete: () => void;
+  onDelete: () => void;
+  onDiscardAndEdit: (d: Draft) => void;
+  onKeepEditing: () => void;
+}) {
+  const t = useT();
+  return (
+    <li className="flex flex-wrap items-center gap-3 px-3 py-2.5">
+      <Switch
+        checked={a.enabled}
+        onCheckedChange={onToggle}
+        size="sm"
+        // Named per row — "Enabled" ×N tells a screen reader nothing
+        // about which channel each switch belongs to.
+        aria-label={t("settings.form.agents.enabledFor", { name: a.name })}
+      />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="truncate text-sm font-medium text-zinc-100">{a.name}</span>
+          <Chip tone="neutral">{t(`settings.form.agents.kind.${a.kind}`)}</Chip>
+        </div>
+        <p className="text-xs text-zinc-500">
+          {t("settings.form.agents.eventsCount", { count: a.events.length })}
+          {" · "}
+          {a.lastStatus === "ok" && <span className="text-green-400">{t("settings.form.agents.status.ok")}</span>}
+          {a.lastStatus === "failed" && <span className="text-red-400">{t("settings.form.agents.status.failed", { error: a.lastError ?? "" })}</span>}
+          {!a.lastStatus && t("settings.form.agents.status.never")}
+        </p>
+        {a.configValid === false && (
+          <p className="mt-1 flex items-center gap-1 text-xs text-red-400">
+            <XCircle className="w-3.5 h-3.5 shrink-0" />
+            {t("settings.form.agents.status.invalidConfig")}
+          </p>
+        )}
+        {testResult && (
+          <p role="status" className={`mt-1 flex items-center gap-1 text-xs ${testResult.ok ? "text-green-400" : "text-red-400"}`}>
+            {testResult.ok ? <CheckCircle className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+            {testResult.text}
+          </p>
+        )}
+      </div>
+      {/* Own line under ~640px: the three buttons are ~175px, and with
+          the switch and gaps the name column was squeezed to ~45px
+          at 375px — the flex-1 text shrank instead of the row wrapping. */}
+      <div className="flex basis-full items-center gap-2 sm:basis-auto">
+        {/* The label stays while testing (spinner in front) so the
+            button keeps its name and width instead of collapsing to
+            an unnamed 14px icon. */}
+        <Button type="button" variant="outline" size="sm" className="border-zinc-700" disabled={testing} aria-busy={testing} onClick={onTest}>
+          {testing && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+          {t("settings.form.agents.test")}
+        </Button>
+        <Button type="button" variant="outline" size="sm" className="border-zinc-700" onClick={onEdit}>
+          {t("settings.form.agents.edit")}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="border-zinc-700 text-red-400 hover:text-[var(--ds-danger-hover)]"
+          aria-label={t("settings.form.agents.delete")}
+          aria-expanded={confirmingDelete}
+          onClick={onToggleDelete}
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </Button>
+      </div>
+
+      {/* Edit while the open form has unsaved edits: the same inline
+          panel as Delete, instead of silently dropping them. */}
+      {pendingDraft && (
+        <div className="basis-full rounded-md border border-red-500/40 bg-red-500/10 p-3 space-y-2">
+          <p className="text-xs text-red-400">{t("settings.form.agents.confirmDiscard")}</p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onDiscardAndEdit(pendingDraft)}
+              autoFocus
+              className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
+            >
+              {t("settings.form.agents.discardAndEdit")}
+            </button>
+            <button
+              type="button"
+              onClick={onKeepEditing}
+              className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+            >
+              {t("settings.form.agents.keepEditing")}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Unlike the arr/media managers' Remove (which lands on Save),
+          this DELETE fires at once — the panel says so. */}
+      {confirmingDelete && (
+        <div className="basis-full rounded-md border border-red-500/40 bg-red-500/10 p-3 space-y-2">
+          <p className="text-xs text-red-400">
+            {t("settings.form.agents.confirmDelete", { name: a.name })}{" "}
+            <strong>{t("settings.form.agents.confirmDeleteNow")}</strong>
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onDelete}
+              autoFocus
+              className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
+            >
+              <Trash2 className="w-3.5 h-3.5" />{t("settings.form.agents.delete")}
+            </button>
+            <button
+              type="button"
+              onClick={onCancelDelete}
+              className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+            >
+              {t("settings.form.common.cancel")}
+            </button>
+          </div>
+        </div>
+      )}
+    </li>
+  );
+}
+
+// The edit form's fields; which ones show depends on the channel's kind.
+function AgentFormFields({ draft, patchDraft }: { draft: Draft; patchDraft: (p: Partial<Draft>) => void }) {
+  const t = useT();
+  const allSelected = allEventsSelected(draft.events);
+  return (
+    <>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <Label htmlFor="agent-kind">{t("settings.form.agents.field.kind")}</Label>
+          <StyledSelect
+            id="agent-kind"
+            value={draft.kind}
+            disabled={!!draft.id}
+            onChange={(e) => {
+              const kind = AGENT_KINDS.find((k) => k === e.target.value);
+              if (kind) patchDraft({ kind, priority: DEFAULT_PRIORITY[kind] });
+            }}
+          >
+            {AGENT_KINDS.map((k: AgentKind) => (
+              <option key={k} value={k}>{t(`settings.form.agents.kind.${k}`)}</option>
+            ))}
+          </StyledSelect>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="agent-name">{t("settings.form.agents.field.name")}</Label>
+          <Input id="agent-name" value={draft.name} maxLength={100} onChange={(e) => patchDraft({ name: e.target.value })} className="bg-zinc-800 border-zinc-700" />
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="agent-url">{t("settings.form.agents.field.url")}</Label>
+        <Input id="agent-url" type="url" value={draft.url} onChange={(e) => patchDraft({ url: e.target.value })} placeholder={draft.kind === "ntfy" ? "https://ntfy.sh" : draft.kind === "gotify" ? "https://gotify.example.com" : "https://example.com/hook"} className="bg-zinc-800 border-zinc-700 font-mono" />
+        <p className="text-xs text-zinc-500">{t(`settings.form.agents.urlHelp.${draft.kind}`)}</p>
+      </div>
+
+      {draft.kind === "ntfy" && (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="agent-topic">{t("settings.form.agents.field.topic")}</Label>
+            <Input id="agent-topic" value={draft.topic} maxLength={64} onChange={(e) => patchDraft({ topic: e.target.value })} className="bg-zinc-800 border-zinc-700 font-mono" />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="agent-priority">{t("settings.form.agents.field.priority")}</Label>
+            <Input id="agent-priority" type="number" min={1} max={5} value={draft.priority} onChange={(e) => patchDraft({ priority: e.target.value })} className="bg-zinc-800 border-zinc-700" />
+          </div>
+          <label className="flex items-center gap-2 text-sm text-zinc-400 sm:col-span-2">
+            <input type="checkbox" checked={draft.attachPoster} onChange={(e) => patchDraft({ attachPoster: e.target.checked })} />
+            {t("settings.form.agents.field.attachPoster")}
+          </label>
+        </div>
+      )}
+
+      {draft.kind === "gotify" && (
+        <div className="space-y-1.5 max-w-[220px]">
+          <Label htmlFor="agent-priority">{t("settings.form.agents.field.priority")}</Label>
+          <Input id="agent-priority" type="number" min={0} max={10} value={draft.priority} onChange={(e) => patchDraft({ priority: e.target.value })} className="bg-zinc-800 border-zinc-700" />
+        </div>
+      )}
+
+      {draft.kind === "webhook" && (
+        <div className="space-y-1.5 max-w-[320px]">
+          <Label htmlFor="agent-header">{t("settings.form.agents.field.headerName")}</Label>
+          <Input id="agent-header" value={draft.headerName} maxLength={64} onChange={(e) => patchDraft({ headerName: e.target.value })} className="bg-zinc-800 border-zinc-700 font-mono" />
+        </div>
+      )}
+
+      <div className="space-y-1.5">
+        <Label htmlFor="agent-secret">
+          {t(`settings.form.agents.field.secret.${draft.kind}`)}
+          {draft.kind !== "gotify" && <span className="text-zinc-500 font-normal"> {t("settings.form.common.optional")}</span>}
+        </Label>
+        <div className="flex items-center gap-2">
+          <Input
+            id="agent-secret"
+            type="password"
+            // "off" is ignored on password fields; new-password is what keeps
+            // a browser from filling the Summonarr login into a channel token.
+            autoComplete="new-password"
+            data-1p-ignore
+            data-lpignore="true"
+            value={draft.secret}
+            disabled={draft.clearSecret}
+            onChange={(e) => patchDraft({ secret: e.target.value })}
+            placeholder={draft.hasSecret && !draft.clearSecret ? "••••••••" : ""}
+            className="bg-zinc-800 border-zinc-700 font-mono"
+          />
+          {/* "Clear token", no trash glyph: the Trash2 + "Remove" look is
+              the row's delete-the-channel affordance; this only drops the
+              saved token on the next Save. */}
+          {draft.hasSecret && draft.kind !== "gotify" && (
+            <Button type="button" variant="outline" size="sm" className="border-zinc-700 text-zinc-400 hover:text-zinc-100 shrink-0" onClick={() => patchDraft({ clearSecret: !draft.clearSecret, secret: "" })}>
+              {draft.clearSecret ? t("settings.form.common.cancel") : t("settings.form.agents.clearSecret")}
+            </Button>
+          )}
+        </div>
+        {draft.hasSecret && !draft.clearSecret && <p className="text-xs text-zinc-500">{t("settings.form.agents.secretKeep")}</p>}
+      </div>
+
+      {draft.kind === "webhook" && (
+        <div className="space-y-1.5">
+          <Label htmlFor="agent-template">{t("settings.form.agents.field.template")}</Label>
+          <Textarea
+            id="agent-template"
+            value={draft.template}
+            onChange={(e) => patchDraft({ template: e.target.value })}
+            rows={5}
+            spellCheck={false}
+            placeholder={'{ "content": "{{title}} — {{message}}" }'}
+            className="bg-zinc-800 border-zinc-700 font-mono md:text-xs"
+          />
+          <p className="text-xs text-zinc-500">{t("settings.form.agents.templateHelp", { fields: TEMPLATE_FIELDS.map((f) => `{{${f}}}`).join(" ") })}</p>
+        </div>
+      )}
+
+      {/* <legend> must be the fieldset's FIRST child to name the checkbox
+          group for AT; nested in a div it was plain text. Select all sits
+          on its own row beneath it. */}
+      <fieldset className="space-y-2">
+        <legend className="text-sm font-medium text-zinc-100">{t("settings.form.agents.field.events")}</legend>
+        <div className="flex justify-end">
+          <button
+            type="button"
+            className="min-h-8 px-2 -my-2 -mr-2 text-xs text-indigo-400 hover:underline"
+            onClick={() => patchDraft({ events: allSelected ? [] : [...NOTIFY_EVENT_KEYS] })}
+          >
+            {allSelected ? t("settings.form.agents.selectNone") : t("settings.form.agents.selectAll")}
+          </button>
+        </div>
+        <div className="grid gap-1.5 sm:grid-cols-2">
+          {NOTIFY_EVENT_KEYS.map((ev) => (
+            <label key={ev} className="flex items-center gap-2 text-sm text-zinc-400">
+              <input
+                type="checkbox"
+                checked={draft.events.includes(ev)}
+                onChange={(e) => patchDraft({ events: e.target.checked ? [...draft.events, ev] : draft.events.filter((x) => x !== ev) })}
+              />
+              {t(EVENT_LABEL_KEYS[ev])}
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
+      <label className="flex items-center gap-2 text-sm text-zinc-400">
+        <Switch checked={draft.enabled} onCheckedChange={(next) => patchDraft({ enabled: next })} size="sm" />
+        {t("settings.form.agents.field.enabled")}
+      </label>
+    </>
   );
 }

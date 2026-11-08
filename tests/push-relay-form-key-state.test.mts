@@ -34,7 +34,18 @@ test("a confirmed save re-derives keyIsSet from the value that was persisted", (
   assert.match(src, /const result = await save\(\{/);
   const okBranch = src.match(/if \(result\.ok\) \{([\s\S]*?)\n {4}\}/);
   assert.ok(okBranch, "handleSave success branch not found");
-  assert.match(okBranch[1], /setKeyIsSet\(relayKey\.length > 0\);/);
+  assert.match(okBranch[1], /setKeyIsSet\(relayKey\.length > 0 \|\| \(keyIsSet && !removeKey\)\);/);
   // Exactly one writer: the success branch. No optimistic update on Remove.
   assert.equal(src.match(/setKeyIsSet\(/g)?.length, 1);
+});
+
+// As the field's value, the mask turned an edit into "mask + typed", which the
+// route refuses. The field starts empty; Remove is an explicit mark.
+test("the key field starts empty over a saved key; Remove marks it for deletion, a blank field keeps it", () => {
+  assert.match(src, /const \[relayKey, setRelayKey\] = useState\(""\);/);
+  assert.doesNotMatch(src, /useState\(initialRelayKey\)/);
+  assert.match(src, /placeholder=\{keyIsSet && !removeKey \? SECRET_MASK_SENTINEL : undefined\}/);
+  const field = src.slice(src.indexOf("function relayKeyField("), src.indexOf("export function IosPushRelayForm("));
+  assert.match(field, /if \(typed\) return \{ apnsRelayKey: typed \};\s*return remove \? \{ apnsRelayKey: "" \} : \{\};/);
+  assert.match(src, /\.\.\.relayKeyField\(relayKey, removeKey\),/);
 });

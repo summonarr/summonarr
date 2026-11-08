@@ -34,12 +34,22 @@ export function takeWatchlistAddToken(userId: string): boolean {
   return checkRateLimit(`watchlist:${userId}`, 60, 60_000);
 }
 
+function alreadyAdded(t: Translator): AddToWatchlistResult {
+  return { ok: false, status: 409, reason: "already-added", error: t("apiUser.watchlist.alreadyAdded") };
+}
+
 export async function addToWatchlist(
   session: SummonarrSession,
   tmdbId: number,
   mediaType: "MOVIE" | "TV",
   t: Translator,
 ): Promise<AddToWatchlistResult> {
+  // An existing entry answers "already added" before TMDB is asked: a repeated
+  // tap or a Discord retry costs one indexed read, not a metadata lookup. The
+  // insert's P2002 below still decides a race between two adds.
+  const existing = await prisma.watchlistItem.count({ where: { userId: session.user.id, tmdbId, mediaType } });
+  if (existing > 0) return alreadyAdded(t);
+
   // Three-tier cached resolver — see votes/route.ts for the rationale.
   const verified = await resolveMediaMeta(tmdbId, mediaType);
   if (!verified) return { ok: false, status: 422, reason: "tmdb-unverified", error: t("apiUser.common.tmdbUnverified") };
@@ -51,9 +61,7 @@ export async function addToWatchlist(
       select: WATCHLIST_ITEM_SELECT,
     });
   } catch (err) {
-    if (isPrismaErrorCode(err, "P2002")) {
-      return { ok: false, status: 409, reason: "already-added", error: t("apiUser.watchlist.alreadyAdded") };
-    }
+    if (isPrismaErrorCode(err, "P2002")) return alreadyAdded(t);
     throw err;
   }
 

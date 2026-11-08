@@ -196,12 +196,12 @@ test("the plain acknowledgements and counts of the queue, history, blocklist and
 });
 
 test("the import dialog's files are one shape in the listing and the preview, field for field ImportCandidate", async () => {
-  const fields = interfaceFields(libSource("arr-queue.ts"), "ImportCandidate");
+  const fields = interfaceFields(libSource("arr-queue-import.ts"), "ImportCandidate");
   const listing = prop(await responseSchema("/admin/queue/import", "get", "200"), "files", "[]");
   const preview = prop(await responseSchema("/admin/queue/import/preview", "post", "200"), "files", "[]");
   assert.deepEqual(keysOf(listing), fields);
   assert.deepEqual(preview?.properties, listing?.properties);
-  assert.deepEqual(keysOf(prop(listing, "episodes", "[]")), interfaceFields(libSource("arr-queue.ts"), "QueueEpisode"));
+  assert.deepEqual(keysOf(prop(listing, "episodes", "[]")), interfaceFields(libSource("arr-queue-types.ts"), "QueueEpisode"));
 });
 
 test("the arr calendar documents the report and every entry field, its kinds and statuses from the code", async () => {
@@ -268,7 +268,8 @@ test("Arr System's tabs and the command status read document the projected rows,
   // PATCH's answer, which the job poll replays: { provider, timedOut? }.
   const patch = await responseSchema("/admin/arr/providers", "patch", "200");
   assert.deepEqual(saved?.properties, patch.properties);
-  assert.match(handlerSource("/admin/arr/providers", "patch"), /return NextResponse\.json\(timedOut \? \{ provider, timedOut: true \} : \{ provider \}\);/);
+  // The save itself is a helper the PATCH handler (and its background job) call.
+  assert.match(routeSource("/admin/arr/providers"), /return NextResponse\.json\(timedOut \? \{ provider, timedOut: true \} : \{ provider \}\);/);
   assert.deepEqual(keysOf(patch), ["provider", "timedOut"]);
   assert.deepEqual(prop(patch, "provider")?.oneOf?.map(keysOf), [keysOf(indexer), keysOf(client)]);
 

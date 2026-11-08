@@ -5,12 +5,15 @@ import { snapshotted } from "@/lib/arr-snapshot";
 import { arrFailure, arrGate, parseArrId } from "@/lib/arr-admin-http";
 import { isBulkAction, isTaskName, type ArrBulkAction } from "@/lib/arr-system";
 import { cancelCommand, loadTasks, runBulkAction, runTask } from "@/lib/arr-system-data";
-import { auditContext, logAudit } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { checkRateLimit } from "@/lib/rate-limit";
 
 const LIMIT_PER_MIN = 10;
+// Cancels per admin per minute: one per click on a queued command, so this
+// bounds a runaway client (each cancel reads the command, then deletes it).
+const CANCEL_LIMIT_PER_MIN = 30;
 
 // Admin → Arr System → Tasks (ADMIN).
 //   GET → { instances, errors, results: [{ service, instance, tasks, commands }] }:
@@ -32,8 +35,10 @@ const LIMIT_PER_MIN = 10;
 //   Both are audited ARR_COMMAND after the arr accepted them.
 //   DELETE ?service&instance&commandId — cancel a command still QUEUED (409
 //       once it started or finished — including when it starts between our
-//       read and the arr's cancel). Not audited.
-// Runs are rate-limited per admin.
+//       read and the arr's cancel). Audited ARR_COMMAND ({ cancelled: id })
+//       once the arr accepted the cancel, so a run that never happened is
+//       traceable to whoever stopped it; a refused cancel writes nothing.
+// Runs and cancels are rate-limited per admin, on separate budgets.
 // GET with `cached=1` → the last answer kept for this exact read, for display only
 // (src/lib/arr-snapshot.ts).
 export const GET = withAdmin(snapshotted(async () => {
@@ -65,12 +70,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     // Sonarr ApplicationUpdateCheck) installs an available update and restarts
     // the arr when run by hand, and a library-wide search hits every indexer.
     void logAudit({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email ?? null,
+      ...auditActor(req, session),
       action: "ARR_COMMAND",
       target: `${target.service}:${target.instance}`,
       details: { service: target.service, instance: target.instance, ...run },
-      ...auditContext(req, session),
     });
     return NextResponse.json(result, { status: 202 });
   } catch (err) {
@@ -78,17 +81,26 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
 });
 
-export const DELETE = withAdmin(async (req) => {
+export const DELETE = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const q = req.nextUrl.searchParams;
   const target = await arrGate(q.get("service"), q.get("instance"), t);
   if (target instanceof NextResponse) return target;
   const commandId = parseArrId(q.get("commandId"));
   if (commandId === null) return NextResponse.json({ error: t("apiAdmin.arr.idInvalid") }, { status: 400 });
+  if (!checkRateLimit(`arr-command-cancel:${session.user.id}`, CANCEL_LIMIT_PER_MIN, 60_000)) {
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
+  }
   try {
     await cancelCommand(target.service, target.instance, commandId);
   } catch (err) {
     return arrFailure(err, target, t, "command cancel");
   }
+  void logAudit({
+    ...auditActor(req, session),
+    action: "ARR_COMMAND",
+    target: `${target.service}:${target.instance}`,
+    details: { service: target.service, instance: target.instance, cancelled: commandId },
+  });
   return NextResponse.json({ ok: true });
 });

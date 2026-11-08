@@ -150,6 +150,8 @@ type DbUser = {
   deactivatedAt: Date | null;
   email: string | null;
   notificationEmail: string | null;
+  // The reporter's language, for what a reply is labelled in.
+  locale?: string | null;
 };
 const usersById = new Map<string, DbUser>();
 const sessionRows = new Set<string>();
@@ -299,6 +301,11 @@ shadowPrismaModel(prisma, "issueMessage", {
 shadowPrismaClientMethod(prisma, "$transaction", async (fn: (tx: unknown) => Promise<unknown>) => {
   rec("$transaction");
   return fn(prisma);
+});
+// The filing's per-reporter lock (createIssue's duplicate check + insert).
+shadowPrismaClientMethod(prisma, "$executeRaw", async (strings: TemplateStringsArray) => {
+  rec("$executeRaw", strings.join("?"));
+  return 0;
 });
 
 shadowPrismaModel(prisma, "issueGrab", {
@@ -642,6 +649,22 @@ test("POST create (TV, unconfigured Sonarr): tvdbId resolves to null server-side
   assert.equal(fetchCalls.length, 1, "the TV verify is the only wire call — Sonarr short-circuits with no config");
 });
 
+test("POST create (movie) sent with an EPISODE scope is stored as FULL with no season or episode, and the insert runs under the reporter's lock", async () => {
+  fetchImpl = tmdbVerifyFetch;
+  plexHas = true;
+  const { token } = await mintSession();
+
+  const res = await postIssue(token, createBody({ scope: "EPISODE", seasonNumber: 1, episodeNumber: 3 }));
+  assert.equal(res.status, 201);
+  const data = createdIssueData();
+  assert.equal(data.scope, "FULL");
+  assert.equal(data.seasonNumber, null);
+  assert.equal(data.episodeNumber, null);
+  const lock = ops.findIndex((o) => o.op === "$executeRaw" && String(o.args).includes("pg_advisory_xact_lock(4630"));
+  const read = ops.findIndex((o) => o.op === "issue.findFirst");
+  assert.ok(lock !== -1 && read > lock, "the duplicate check reads under the lock");
+});
+
 test("POST enqueues exactly one admin new-issue notify fan-out via after() that completes offline with unconfigured channels", async () => {
   fetchImpl = tmdbVerifyFetch;
   plexHas = true;
@@ -961,9 +984,10 @@ test("releases POST (happy grab): the resolved instance slug flows into IssueGra
   assert.equal(grab.data.tmdbId, 603);
   assert.equal(grab.data.triggeredById, admin.userId);
 
-  // The pre-grab CAS claims the issue IN_PROGRESS on a not-RESOLVED predicate.
+  // The pre-grab CAS flips the OPEN issue IN_PROGRESS on its own OPEN predicate,
+  // so of two callers that both read OPEN only the one whose write matched announces.
   const claim = opsOf("issue.updateMany")[0].args as { where: Record<string, unknown>; data: Record<string, unknown> };
-  assert.deepEqual(claim.where.status, { not: "RESOLVED" });
+  assert.deepEqual(claim.where.status, "OPEN");
   assert.equal(claim.data.status, "IN_PROGRESS");
   // Two audit rows: the OPEN→IN_PROGRESS flip (written right after its CAS, so
   // it exists even when the grab then fails — pinned below) and the grab itself.
@@ -1227,6 +1251,60 @@ test("PATCH reopen (RESOLVED→OPEN) clears the stale resolution; a non-reopen m
   assert.ok(!("resolution" in cas2.data));
 });
 
+test("PATCH reopen audits the resolution the row now holds (null), not the cleared note", async () => {
+  issueRow = { id: "issue-ra", status: "RESOLVED", reportedBy: "r", title: "t", mediaType: "MOVIE", tmdbId: 1, resolution: "replaced file", posterPath: null };
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+  assert.equal((await patchIssue(admin.token, "issue-ra", { status: "OPEN" })).status, 200);
+  const audits = opsOf("auditLog.create").map((o) => JSON.parse((o.args as { data: { details: string } }).data.details) as { after: Record<string, unknown> });
+  assert.equal(audits.length, 1);
+  assert.deepEqual(audits[0].after, { status: "OPEN", resolution: null });
+});
+
+test("PATCH `resolution: null` is an empty note: alone it is the empty-resolution 400, beside a status change it is dropped", async () => {
+  issueRow = { id: "issue-rnull", status: "OPEN", reportedBy: "r", title: "t", mediaType: "MOVIE", tmdbId: 1, resolution: null, posterPath: null };
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+  const alone = await patchIssue(admin.token, "issue-rnull", { resolution: null });
+  assert.equal(alone.status, 400);
+  assert.deepEqual(await alone.json(), { error: "resolution must not be empty" }, "never the misleading 'too long' text");
+  assert.equal(opsOf("issue.updateMany").length, 0);
+
+  const withStatus = await patchIssue(admin.token, "issue-rnull", { status: "IN_PROGRESS", resolution: null });
+  assert.equal(withStatus.status, 200);
+  const cas = opsOf("issue.updateMany")[0].args as { data: Record<string, unknown> };
+  assert.equal(cas.data.status, "IN_PROGRESS");
+  assert.ok(!("resolution" in cas.data));
+  // A non-string note is still the type/length refusal.
+  assert.equal((await patchIssue(admin.token, "issue-rnull", { resolution: 5 })).status, 400);
+});
+
+test("refetch and Replace release refuse an instance whose integration is OFF (404) or that the registry doesn't list (422), contacting nothing", async () => {
+  issueRow = { id: "issue-gate", status: "OPEN", reportedBy: "r", title: "The Matrix", mediaType: "MOVIE", tmdbId: 603, tvdbId: null, scope: "FULL", seasonNumber: null, episodeNumber: null };
+  settings.set("radarrUrl", "http://radarr.example.com:7878");
+  settings.set("radarrApiKey", "hd-api-key");
+  const admin = await mintSession({ role: "ADMIN" });
+
+  settings.set("feature.integration.radarr", "false");
+  invalidateFeatureFlagCache();
+  const off = await patchIssue(admin.token, "issue-gate", { refetch: true });
+  assert.equal(off.status, 404);
+  assert.deepEqual(await off.json(), { error: "Radarr integration is disabled" });
+  assert.equal((await getReleases(admin.token, "issue-gate", "?instance=")).status, 404);
+  assert.equal((await postRelease(admin.token, "issue-gate", { guid: "a".repeat(32), indexerId: 1 })).status, 404);
+
+  settings.delete("feature.integration.radarr");
+  invalidateFeatureFlagCache();
+  // Guardrail 32: keys left behind by a de-registered named instance are not an instance.
+  settings.set("radarrAnimeUrl", "http://radarr-anime.example.com:7878");
+  settings.set("radarrAnimeApiKey", "anime-key");
+  const stranded = await patchIssue(admin.token, "issue-gate", { refetch: true, instance: "anime" });
+  assert.equal(stranded.status, 422);
+  assert.deepEqual(await stranded.json(), { error: "radarr (anime) is not configured" });
+
+  assert.equal(fetchCalls.length, 0, "no refused request reached any server");
+  assert.equal(opsOf("issue.updateMany").length, 0);
+  assert.equal(opsOf("issueGrab.create").length, 0);
+});
+
 test("PATCH resolution-only edit on a RESOLVED issue leaves resolvedAt alone (the resolve time is the transition, not the last edit)", async () => {
   issueRow = { id: "issue-rn", status: "RESOLVED", reportedBy: "r", title: "t", mediaType: "MOVIE", tmdbId: 1, resolution: "old", posterPath: null };
   const admin = await mintSession({ role: "ISSUE_ADMIN" });
@@ -1421,6 +1499,26 @@ test("claim: a MATCHING expectation still claims, and still releases — the tog
   assert.equal((opsOf("auditLog.create")[0].args as { data: Record<string, unknown> }).data.action, "ISSUE_UNCLAIM");
 });
 
+test("claim: an issue deleted between the claim's swap and its re-read is a 404 — never a 200 with a null body, announced or audited", async () => {
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+  issueRow = { id: "issue-claim-gone", status: "OPEN", reportedBy: "reporter-g", title: "Sicario", claimedBy: null, claimedUser: null };
+  const realUpdateMany = issueModel.updateMany;
+  issueModel.updateMany = async (args) => {
+    const res = await realUpdateMany(args);
+    issueRow = null; // another admin deleted it right after this swap
+    return res;
+  };
+  try {
+    const res = await postClaim(admin.token, "issue-claim-gone", { expectedClaimedBy: null });
+    assert.equal(res.status, 404);
+    assert.deepEqual(await res.json(), { error: "Not found" });
+  } finally {
+    issueModel.updateMany = realUpdateMany;
+  }
+  assert.deepEqual(sseEvents, []);
+  assert.equal(opsOf("auditLog.create").length, 0);
+});
+
 test("claim: an ABSENT expectedClaimedBy keeps the ORIGINAL contract — a body-less caller still takes a claim over", async () => {
   // Backward compatibility, not an oversight: the shipped iOS build and any web
   // bundle older than this change POST with no body at all. Making the field
@@ -1504,6 +1602,48 @@ test("messages POST: a NAME-LESS manager's reply reaches the reporter as 'Admin'
   assert.equal(note.data.body, "Admin replied: on it");
   assert.equal(note.data.data.author, "Admin");
   assert.ok(!JSON.stringify(note).includes("@example.com"), JSON.stringify(note));
+});
+
+test("messages POST: a NAME-LESS manager's reply is labelled in the REPORTER's language, never the replying admin's", async () => {
+  usersById.set("reporter-es", {
+    role: "USER", permissions: 0n, mediaServer: null, sessionsRevokedAt: null,
+    passwordChangedAt: null, deactivatedAt: null, email: "es@example.com", notificationEmail: null, locale: "es",
+  });
+  usersById.set("reporter-en", {
+    role: "USER", permissions: 0n, mediaServer: null, sessionsRevokedAt: null,
+    passwordChangedAt: null, deactivatedAt: null, email: "en@example.com", notificationEmail: null, locale: "en",
+  });
+  const admin = await mintSession({ role: "ISSUE_ADMIN" }); // no display name
+  const post = (id: string, acceptLanguage: string) => {
+    const req = new NextRequest(`http://localhost:3000/api/issues/${id}/messages`, {
+      method: "POST",
+      headers: { cookie: `${COOKIE}=${admin.token}`, "content-type": "application/json", "accept-language": acceptLanguage },
+      body: JSON.stringify({ body: "on it" }),
+    });
+    return inScope(() => postMessageRoute(req, idCtx(id)));
+  };
+  // A Spanish-speaking admin replies to an English reporter: "Admin", not "Administrador".
+  issueRow = { id: "issue-l1", status: "IN_PROGRESS", reportedBy: "reporter-en", title: "Heat", mediaType: "MOVIE", tmdbId: 949, posterPath: null, claimedBy: null };
+  assert.equal((await post("issue-l1", "es")).status, 201);
+  // An English admin replies to a Spanish reporter: the reporter's word.
+  issueRow = { id: "issue-l2", status: "IN_PROGRESS", reportedBy: "reporter-es", title: "Heat", mediaType: "MOVIE", tmdbId: 949, posterPath: null, claimedBy: null };
+  assert.equal((await post("issue-l2", "en")).status, 201);
+  const notes = opsOf("notification.create").map((o) => (o.args as { data: { userId: string; data: { author: string } } }).data);
+  assert.deepEqual(notes.map((n) => [n.userId, n.data.author]), [["reporter-en", "Admin"], ["reporter-es", "Administrador"]]);
+});
+
+test("messages GET is gated on the issues feature flag for the reporter, like POST — an issue admin still reads the thread", async () => {
+  const reporter = await mintSession();
+  issueRow = { id: "issue-gated", status: "OPEN", reportedBy: reporter.userId, title: "t", mediaType: "MOVIE", tmdbId: 1, posterPath: null, claimedBy: null };
+  settings.set("feature.page.issues", "false");
+  const res = await inScope(() => getMessagesRoute(issuesReq(reporter.token, { method: "GET", path: "/issue-gated/messages" }), idCtx("issue-gated")));
+  assert.equal(res.status, 403);
+  assert.deepEqual(await res.json(), { error: "Issue reporting is disabled" });
+  assert.equal(opsOf("issueMessage.findMany").length, 0);
+
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+  const asAdmin = await inScope(() => getMessagesRoute(issuesReq(admin.token, { method: "GET", path: "/issue-gated/messages" }), idCtx("issue-gated")));
+  assert.equal(asAdmin.status, 200);
 });
 
 // ═══════════════════ filing the same report twice ════════════════════════════

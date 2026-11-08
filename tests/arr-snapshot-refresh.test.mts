@@ -20,6 +20,9 @@ import {
   snapshotted,
 } from "../src/lib/arr-snapshot.ts";
 
+// A session the wrapped handlers may read (snapshotted requires SummonarrSession's shape).
+const ADMIN_SESSION = { user: { id: "admin-1", role: "ADMIN", permissions: BigInt(0) } };
+
 beforeEach(() => resetArrSnapshotsForTests());
 
 const MIN = 60_000;
@@ -66,7 +69,7 @@ async function openAt(GET: ReturnType<typeof fakeRoute>["GET"], url: string, whe
   const real = Date.now;
   Date.now = () => whenMs;
   try {
-    await GET(at(url, lang), {}, { user: { id: "admin-1" } });
+    await GET(at(url, lang), {}, ADMIN_SESSION);
   } finally {
     Date.now = real;
   }
@@ -108,7 +111,7 @@ test("a cached open is a view too; a background re-read is NOT — a page nobody
   const real = Date.now;
   Date.now = () => t0 + 20 * 60 * MIN;
   try {
-    assert.equal((await queue.GET(at("http://x/api/admin/queue?cached=1"), {}, {})).status, 200);
+    assert.equal((await queue.GET(at("http://x/api/admin/queue?cached=1"), {}, ADMIN_SESSION)).status, 200);
   } finally {
     Date.now = real;
   }
@@ -236,6 +239,32 @@ test("bounded: at most maxPerRun re-reads, 2 at a time; a stopped run starts not
   assert.equal(route.calls.length - before, 4, "nothing started after the abort");
 });
 
+test("a view whose re-read is still out from an earlier run is not started again — the next run skips it until it settles", async () => {
+  const t0 = 1_000_000_000_000;
+  let release: () => void = () => {};
+  let hold = false;
+  const route = fakeRoute(async () => {
+    if (hold) await new Promise<void>((r) => { release = r; });
+    return Response.json({ rows: [] });
+  });
+  await openAt(route.GET, "http://x/api/admin/arr/storage", t0);
+  const opened = route.calls.length;
+  hold = true;
+  // The first run's lock timed out: it was told to stop, but its re-read keeps going.
+  const ctl = new AbortController();
+  const first = refreshArrSnapshots({ now: () => t0 + 16 * MIN, signal: ctl.signal });
+  while (route.calls.length === opened) await new Promise((r) => setImmediate(r));
+  ctl.abort();
+  hold = false;
+  const second = await refreshArrSnapshots({ now: () => t0 + 21 * MIN });
+  assert.equal(route.calls.length, opened + 1, "the arr is not asked twice for one view");
+  assert.equal(second.due, 0);
+  release();
+  await first;
+  const third = await refreshArrSnapshots({ now: () => t0 + 40 * MIN });
+  assert.equal(third.refreshed, 1, "once it settled, the view is due again");
+});
+
 test("a config write that clears the snapshots while a re-read is out wins: the answer is not put back", async () => {
   const t0 = 1_000_000_000_000;
   let release: () => void = () => {};
@@ -287,13 +316,15 @@ test("a re-read out across a clear never replaces the answer an admin's own read
 
 test("the cron route skips without a lock when nothing is due, and is wired into the container's cron loop and the System tab", () => {
   const route = readFileSync(new URL("../src/app/api/cron/refresh-arr-snapshots/route.ts", import.meta.url), "utf8");
-  assert.match(route, /if \(dueSnapshots\(\)\.length === 0\) return cronSkippedResponse\(/);
-  assert.match(route, /withCronRunRecording\("arr-snapshots", \(\) => withAdvisoryLock\(\s*ARR_SNAPSHOT_LOCK_ID,/);
+  // defineCronRoute answers a skip reason through cronSkippedResponse before the
+  // lock, and records the run under `target` (tests/cron-route.test.mts).
+  assert.match(route, /skipReason: \(\) => \(dueSnapshots\(\)\.length === 0 \? "no arr page view is due" : null\)/);
+  assert.match(route, /export const POST = defineCronRoute\(\{\s*target: "arr-snapshots",\s*lockId: ARR_SNAPSHOT_LOCK_ID,/);
   assert.match(route, /refreshArrSnapshots\(\{ signal \}\)/);
   const entry = readFileSync(new URL("../docker-entrypoint.sh", import.meta.url), "utf8");
   // One row of the entrypoint's schedule table: label, URL override, path,
   // interval var, default, quiet, first run, and the short-cadence loop.
   assert.match(entry, /\narr-snapshots\|ARR_SNAPSHOT_URL\|\/api\/cron\/refresh-arr-snapshots\|ARR_SNAPSHOT_INTERVAL\|300\|quiet\|300\|fast\n/);
-  const settings = readFileSync(new URL("../src/app/(app)/settings/page.tsx", import.meta.url), "utf8");
+  const settings = readFileSync(new URL("../src/app/(app)/settings/_tabs/cron-jobs.ts", import.meta.url), "utf8");
   assert.match(settings, /\{ target: "arr-snapshots", nameKey: "settings\.cron\.job\.arrSnapshots\.name", descriptionKey: "settings\.cron\.job\.arrSnapshots\.description", endpoint: "\/api\/cron\/refresh-arr-snapshots", envVar: "ARR_SNAPSHOT_INTERVAL", defaultSeconds: "300" \}/);
 });

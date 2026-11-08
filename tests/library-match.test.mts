@@ -271,7 +271,7 @@ test("dropMatchFlagInTx removes exactly the fixed item's flag (server + instance
 
 // ── the item move a single-item fix writes ─────────────────────────────────
 
-type Row = { tmdbId: number; mediaType: string; serverInstance: string; jellyfinItemId: string | null; jellyfinItemIds: string[]; filePath: string | null };
+type Row = { tmdbId: number; mediaType: string; serverInstance: string; jellyfinItemId: string | null; jellyfinItemIds: string[]; filePath: string | null; title?: string | null; year?: string | null };
 function libraryTx(rows: Row[]) {
   const key = (w: { tmdbId: number; mediaType: string; serverInstance: string }) => rows.find((r) => r.tmdbId === w.tmdbId && r.mediaType === w.mediaType && r.serverInstance === w.serverInstance);
   return {
@@ -328,4 +328,22 @@ test("moving a row's CANONICAL copy hands the row to its next copy (path unknown
   assert.equal(by(1), undefined, "a row left with no copy is deleted");
   assert.equal(by(2)?.jellyfinItemId, "solo");
   assert.deepEqual(by(9323, "remote")?.jellyfinItemIds, ["b2"], "another server's row is never touched");
+});
+
+test("parseLibraryMatchReport drops a flag without its shape and refuses counts that aren't numbers", () => {
+  const stored = report([flag("a"), flag("b")]);
+  const broken = { ...stored, flags: [stored.flags[0], { ...stored.flags[1], itemKey: 7 }, null, "x"] };
+  assert.deepEqual(parseLibraryMatchReport(JSON.stringify(broken))?.flags.map((f) => f.itemKey), ["a"]);
+  assert.equal(parseLibraryMatchReport(JSON.stringify({ ...stored, counts: { ...stored.counts, flagged: "1" } })), null);
+  assert.equal(parseLibraryMatchReport(JSON.stringify({ ...stored, counts: {} })), null);
+});
+
+test("a corrected title the server held no row for is created with the title and year the caller knows", async () => {
+  const rows: Row[] = [
+    { tmdbId: 9323, mediaType: "MOVIE", serverInstance: "", jellyfinItemId: "a1", jellyfinItemIds: ["a1", "b2"], filePath: "/m/a.mkv" },
+  ];
+  await moveItemToTitleInTx(libraryTx(rows) as never, "jellyfin", "", "MOVIE", "b2", "b2", 315837, "/m/b.mkv", { title: "Ghost in the Shell", year: "2017" });
+  assert.deepEqual(rows[1], {
+    tmdbId: 315837, mediaType: "MOVIE", serverInstance: "", jellyfinItemId: "b2", jellyfinItemIds: ["b2"], filePath: "/m/b.mkv", title: "Ghost in the Shell", year: "2017",
+  });
 });

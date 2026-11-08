@@ -50,12 +50,14 @@ test("(app) layout: the discordId lookup is batched with the other reads, not aw
   assert.doesNotMatch(after, /await prisma\./, "no serial prisma read may follow the batch");
 });
 
-test("(app) layout: the DB-checked login gate still precedes and sits outside the try/catch (guardrail 29)", () => {
+test("(app) layout: the DB-checked login gate precedes the reads and sits outside any try/catch (guardrail 29)", () => {
   const body = src.slice(src.indexOf("export default async function AppLayout"));
   const gate = body.indexOf('if (!session) redirect("/login")');
-  const tryStart = body.indexOf("try {");
   assert.ok(gate >= 0, "redirect gate must exist");
-  assert.ok(tryStart > gate, "redirect gate must precede the try/catch so NEXT_REDIRECT is never swallowed");
+  assert.ok(gate < body.indexOf("await Promise.allSettled(["), "redirect gate must precede the layout's reads");
+  // allSettled never rejects, so the body needs no try/catch; one around the
+  // gate would swallow NEXT_REDIRECT.
+  assert.equal(body.indexOf("try {"), -1, "the layout body has no try/catch");
 });
 
 // A failed read used to vanish into an empty `catch {}`: maintenance mode and
@@ -64,12 +66,12 @@ test("(app) layout: the DB-checked login gate still precedes and sits outside th
 test("(app) layout: a failed read is logged under [layout] on change, and the other reads still apply", () => {
   const body = src.slice(src.indexOf("export default async function AppLayout"));
   assert.doesNotMatch(body, /catch\s*\{\s*(\/\/[^\n]*\n\s*)*\}/, "no silent catch in the layout body");
-  const catchBlock = body.slice(body.indexOf("} catch (err) {"), body.indexOf("// Admins bypass maintenance mode"));
-  assert.match(catchBlock, /warnLayoutReads\(/, "the catch must log");
   assert.match(src, /warnOnChange\(LAYOUT_READS_WARN_KEY, failed, `\[layout\] /, "logged once per change (guardrail 7b), [layout]-scoped");
   // Each read is unwrapped on its own, so a rejection costs only that read.
   for (const name of ["settings", "feature flags", "user", "nav badges"]) {
     assert.match(body, new RegExp(`readValue\\("${name}", \\w+Res, failures\\)`), name);
   }
   assert.match(body, /if \(failures\.length\) \{\s*warnLayoutReads\(/);
+  // The render state is derived in one pure, tested place (tests/app-layout-state.test.mts).
+  assert.match(body, /appLayoutStateFrom\(\{ rows, flags, user, userReadOk: userRes\.status === "fulfilled" \}\)/);
 });

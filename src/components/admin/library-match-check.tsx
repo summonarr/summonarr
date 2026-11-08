@@ -8,10 +8,13 @@ import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { withBasePath } from "@/lib/base-path";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { runReplaceFileJob } from "@/lib/client/replace-file-job";
+import { isNoAnswer, jobAnswerError } from "@/lib/client/library-sync";
 import { matchCheckView, matchFlagKey as flagKey, noMatchFixes, recordMatchFix, type MatchFixes } from "@/lib/client/match-check-fixes";
-import { fixMatchErrorMessage, fixMatchWarningMessage, runFixMatch, type FixMatchProgressView } from "@/lib/client/fix-match";
-import { folderYear, fixableFlag, type MatchCounts, type MatchFlag, type MatchFlagKind } from "@/lib/library-match";
+import { fixMatchErrorMessage, fixMatchWarningMessage, runFixMatch, type FixMatchProgressView, type FixMatchRequest } from "@/lib/client/fix-match";
+import type { FixAllEntry } from "@/lib/client/fix-all-sequence";
+import { folderYear, fixableFlag, type MatchCounts, type MatchFlag, type MatchFlagArr, type MatchFlagKind } from "@/lib/library-match";
 import type { LibraryMatchSource } from "@/lib/library-match-data";
+import { FixAllControl, useFixAllRun } from "./fix-all-run";
 
 // Admin → Library's match check (src/lib/library-match.ts): every Plex and
 // Jellyfin item judged against the folder Radarr/Sonarr say it is in, painted
@@ -62,7 +65,30 @@ function titleWithYear(title: string | null, year: number | null, fallback: stri
 // warning — dropping the row at once threw the note away unread.
 type OnFixed = (flag: ClientMatchFlag, warning?: string) => void;
 
-function FixOneButton({ flag, onFixed }: { flag: ClientMatchFlag & { arr: { tmdbId: number } }; onFixed: OnFixed }) {
+/** A flag a Fix is offered for (fixableFlag): Radarr/Sonarr name the TMDB id to match it to. */
+type FixableMatchFlag = ClientMatchFlag & { arr: MatchFlagArr & { tmdbId: number } };
+
+// One item's remap (fix-match's item mode): the server reads the item's
+// current id from the stored report, never from here.
+function fixRequestOf(flag: FixableMatchFlag): FixMatchRequest {
+  return {
+    server: flag.server,
+    mediaType: flag.mediaType,
+    correctTmdbId: flag.arr.tmdbId,
+    itemKey: flag.itemKey,
+    ...(flag.serverInstance ? { serverInstance: flag.serverInstance } : {}),
+  };
+}
+
+type FlagEntry = FixAllEntry & { flag: FixableMatchFlag };
+
+function fixAllEntryOf(flag: FixableMatchFlag): FlagEntry {
+  return { key: flagKey(flag), title: titleWithYear(flag.title, flag.year, flag.folder ?? flag.itemKey), request: fixRequestOf(flag), flag };
+}
+
+// `locked`: the Fix all run still has this item to do — a second remap of it
+// from here would only make the run report it as failed when it got there.
+function FixOneButton({ flag, onFixed, locked }: { flag: FixableMatchFlag; onFixed: OnFixed; locked: boolean }) {
   const t = useT();
   const [state, setState] = useState<"idle" | "confirm" | "running" | "error">("idle");
   const [progress, setProgress] = useState<FixMatchProgressView | null>(null);
@@ -86,16 +112,7 @@ function FixOneButton({ flag, onFixed }: { flag: ClientMatchFlag & { arr: { tmdb
     setState("running");
     setMessage("");
     try {
-      const outcome = await runFixMatch(
-        {
-          server: flag.server,
-          mediaType: flag.mediaType,
-          correctTmdbId: flag.arr.tmdbId,
-          itemKey: flag.itemKey,
-          ...(flag.serverInstance ? { serverInstance: flag.serverInstance } : {}),
-        },
-        { onProgress: setProgress },
-      );
+      const outcome = await runFixMatch(fixRequestOf(flag), { onProgress: setProgress });
       const warning = fixMatchWarningMessage(outcome, t);
       onFixed(flag, warning ?? undefined);
     } catch (err) {
@@ -113,7 +130,7 @@ function FixOneButton({ flag, onFixed }: { flag: ClientMatchFlag & { arr: { tmdb
           {t("adminManage.library.match.confirmOne", { server: serviceLabel(flag.server, flag.serverInstance) })}
         </span>
         <div className="flex gap-2">
-          <button type="button" onClick={run} className={button} style={{ ...style, background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}>
+          <button type="button" onClick={run} disabled={locked} className={button} style={{ ...style, background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}>
             {t("adminManage.library.match.rematch")}
           </button>
           <button ref={cancelRef} type="button" onClick={() => { refocus.current = true; setState("idle"); }} className={`${button} ds-hover-tint`} style={{ ...style, border: "1px solid var(--ds-border)", color: "var(--ds-fg-muted)" }}>
@@ -129,7 +146,8 @@ function FixOneButton({ flag, onFixed }: { flag: ClientMatchFlag & { arr: { tmdb
         ref={triggerRef}
         type="button"
         onClick={() => setState("confirm")}
-        disabled={state === "running"}
+        disabled={state === "running" || locked}
+        title={locked ? t("adminManage.library.fixAllQueued") : undefined}
         className={button}
         style={{ ...style, background: "color-mix(in oklab, var(--ds-accent) 14%, transparent)", border: "1px solid color-mix(in oklab, var(--ds-accent) 35%, var(--ds-border))", color: "var(--ds-accent-text)" }}
       >
@@ -149,135 +167,7 @@ function FixOneButton({ flag, onFixed }: { flag: ClientMatchFlag & { arr: { tmdb
   );
 }
 
-function FixAllButton({ flags, onFixed }: { flags: Array<ClientMatchFlag & { arr: { tmdbId: number } }>; onFixed: OnFixed }) {
-  const t = useT();
-  const router = useRouter();
-  const [state, setState] = useState<"idle" | "confirm" | "running" | "done">("idle");
-  const [progress, setProgress] = useState({ done: 0, failed: 0, total: 0, stopped: false });
-  const [failures, setFailures] = useState<Array<{ key: string; title: string; error: string }>>([]);
-  // Stop request + unmount guard, as in the library diff's Fix all: the remap
-  // already running finishes on the server (its job is not cancelled), but no
-  // further one is started — and leaving the page stops the status poll.
-  const stopRef = useRef(false);
-  const abortRef = useRef<AbortController | null>(null);
-  const alive = useRef(true);
-  useEffect(() => {
-    alive.current = true;
-    return () => { alive.current = false; stopRef.current = true; abortRef.current?.abort(); };
-  }, []);
-  // The confirm replaces the focused button: focus goes to its Cancel, to Stop
-  // while running, and back to the button when it is offered again.
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const cancelRef = useRef<HTMLButtonElement>(null);
-  const stopButtonRef = useRef<HTMLButtonElement>(null);
-  const refocus = useRef(false);
-  useEffect(() => {
-    if (state === "confirm") cancelRef.current?.focus();
-    else if (state === "running") stopButtonRef.current?.focus();
-    else if (refocus.current) {
-      refocus.current = false;
-      triggerRef.current?.focus();
-    }
-  }, [state]);
-
-  const run = useCallback(async () => {
-    stopRef.current = false;
-    refocus.current = true;
-    setState("running");
-    const total = flags.length;
-    let done = 0;
-    let failed = 0;
-    const collected: Array<{ key: string; title: string; error: string }> = [];
-    setProgress({ done, failed, total, stopped: false });
-    setFailures([]);
-    // One at a time: each remap finishes on the server before the next starts.
-    for (const flag of flags) {
-      if (stopRef.current) break;
-      const ac = new AbortController();
-      abortRef.current = ac;
-      try {
-        const outcome = await runFixMatch({
-          server: flag.server,
-          mediaType: flag.mediaType,
-          correctTmdbId: flag.arr.tmdbId,
-          itemKey: flag.itemKey,
-          ...(flag.serverInstance ? { serverInstance: flag.serverInstance } : {}),
-        }, { signal: ac.signal });
-        // The row keeps the warning (FlagRow); a bulk run that dropped it read
-        // "N/N fixed" over a remap that was only partial.
-        onFixed(flag, fixMatchWarningMessage(outcome, t) ?? undefined);
-      } catch (err) {
-        // Unmounted mid-run: stop quietly — the job itself carries on.
-        if (err instanceof DOMException && err.name === "AbortError") break;
-        failed++;
-        collected.push({ key: flagKey(flag), title: titleWithYear(flag.title, flag.year, flag.folder ?? flag.itemKey), error: fixMatchErrorMessage(err, t) });
-      }
-      done++;
-      setProgress({ done, failed, total, stopped: false });
-      setFailures([...collected]);
-    }
-    if (!alive.current) return;
-    setProgress({ done, failed, total, stopped: done < total });
-    setState("done");
-    if (done > failed) router.refresh();
-  }, [flags, onFixed, router, t]);
-
-  if (flags.length === 0 && state === "idle") return null;
-  const button = "ds-tap inline-flex items-center font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed";
-  const style = { padding: "5px 12px", fontSize: 12, borderRadius: 6 } as const;
-  return (
-    <div className="flex flex-col items-end gap-1" style={{ maxWidth: 460 }}>
-      {state === "confirm" ? (
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          <span style={{ fontSize: 12, color: "var(--ds-fg-muted)" }}>{t("adminManage.library.match.confirmAll", { count: flags.length })}</span>
-          <button type="button" onClick={run} className={button} style={{ ...style, background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}>
-            {t("adminManage.library.match.rematchAll")}
-          </button>
-          <button ref={cancelRef} type="button" onClick={() => { refocus.current = true; setState("idle"); }} className={`${button} ds-hover-tint`} style={{ ...style, border: "1px solid var(--ds-border)", color: "var(--ds-fg-muted)" }}>
-            {t("adminManage.library.match.cancel")}
-          </button>
-        </div>
-      ) : (
-        <div className="flex items-center gap-2">
-          <button
-            ref={triggerRef}
-            type="button"
-            onClick={() => setState("confirm")}
-            disabled={state === "running" || flags.length === 0}
-            className={button}
-            style={{ ...style, background: "color-mix(in oklab, var(--ds-success) 14%, transparent)", border: "1px solid color-mix(in oklab, var(--ds-success) 35%, var(--ds-border))", color: "var(--ds-success)" }}
-          >
-            {state === "running"
-              ? t("adminManage.library.match.fixingAll", { done: progress.done, total: progress.total })
-              : state === "done"
-                ? (progress.stopped
-                  ? t("adminManage.library.diff.fixStopped", { fixed: progress.done - progress.failed, total: progress.total })
-                  : t("adminManage.library.match.fixedAll", { fixed: progress.total - progress.failed, total: progress.total }))
-                : t("adminManage.library.match.fixAll", { count: flags.length })}
-          </button>
-          {state === "running" && (
-            <button ref={stopButtonRef} type="button" onClick={() => { stopRef.current = true; }} className={`${button} ds-hover-tint`} style={{ ...style, border: "1px solid var(--ds-border)", color: "var(--ds-fg-muted)" }}>
-              {t("adminManage.library.diff.stop")}
-            </button>
-          )}
-        </div>
-      )}
-      {failures.length > 0 && (
-        <ul role="status" className="m-0 list-none p-0 text-right" style={{ fontSize: 11, lineHeight: 1.35 }}>
-          {failures.map((f) => (
-            <li key={f.key} className="text-red-400">
-              <span className="font-medium">{f.title}</span>
-              <span style={{ color: "var(--ds-fg-subtle)" }}> — </span>
-              {f.error}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function FlagRow({ flag, onFixed, fixedWarning }: { flag: ClientMatchFlag; onFixed: OnFixed; fixedWarning?: string }) {
+function FlagRow({ flag, onFixed, fixedWarning, locked }: { flag: ClientMatchFlag; onFixed: OnFixed; fixedWarning?: string; locked: boolean }) {
   const t = useT();
   const server = serviceLabel(flag.server, flag.serverInstance);
   const stated = folderYear(flag.folder);
@@ -342,9 +232,9 @@ function FlagRow({ flag, onFixed, fixedWarning }: { flag: ClientMatchFlag; onFix
           <div role="status" className="text-amber-400" style={{ fontSize: 11.5 }}>{fixedWarning}</div>
         )}
       </div>
-      {fixedWarning === undefined && fixableFlag({ ...flag, path: null }) && flag.arr?.tmdbId != null && (
+      {fixedWarning === undefined && fixableFlag(flag) && (
         <div className="shrink-0">
-          <FixOneButton flag={flag as ClientMatchFlag & { arr: { tmdbId: number } }} onFixed={onFixed} />
+          <FixOneButton flag={flag} onFixed={onFixed} locked={locked} />
         </div>
       )}
     </li>
@@ -386,29 +276,50 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
     for (const f of flags) out[f.kind]++;
     return out;
   }, [flags]);
-  const shown = kind === "all" ? flags : flags.filter((f) => f.kind === kind);
-  const fixable = shown.filter((f): f is ClientMatchFlag & { arr: { tmdbId: number } } => !fixed.has(flagKey(f)) && fixableFlag({ ...f, path: null }));
-  const unread = (report?.sources ?? []).filter((s) => !s.ok);
+  const shown = useMemo(() => (kind === "all" ? flags : flags.filter((f) => f.kind === kind)), [flags, kind]);
+  const fixable = useMemo(
+    () => shown.filter((f): f is FixableMatchFlag => !fixed.has(flagKey(f)) && fixableFlag(f)),
+    [shown, fixed],
+  );
+  const unread = useMemo(() => (report?.sources ?? []).filter((s) => !s.ok), [report]);
+
+  // Fix all: in the header, not beside the list — a run that fixes every flag
+  // empties the list, and its summary (and its run) must outlive that. The
+  // rows read `pending` to lock the items the run still has to do.
+  const fixAll = useFixAllRun();
+  const progress = fixAll.progress;
+  const fixAllLabel = fixAll.state === "running"
+    ? t("adminManage.library.match.fixingAll", { done: progress.handled, total: progress.total })
+    : fixAll.state === "done"
+      ? (progress.stopped
+        ? t("adminManage.library.diff.fixStopped", { fixed: progress.fixed, total: progress.total })
+        : t("adminManage.library.match.fixedAll", { fixed: progress.fixed, total: progress.total }))
+      : t("adminManage.library.match.fixAll", { count: fixable.length });
+  const startFixAll = () => void fixAll.start(fixable.map(fixAllEntryOf), (entry, warning) => onFixed(entry.flag, warning));
 
   async function check() {
     setChecking(true);
     setNote("");
     setError("");
     try {
+      const gaveUp: { reason: "unreachable" | "outOfPolls" | null } = { reason: null };
       const answer = await runReplaceFileJob(fetch, withBasePath("/api/admin/library/match-check"), {}, {
         intervalMs: CHECK_POLL_MS,
         maxPolls: CHECK_MAX_POLLS,
         isAlive: () => alive.current,
+        onGiveUp: (reason) => { gaveUp.reason = reason; },
       });
       if (!answer) return;
-      if (answer.status === 0) {
-        // No answer came: the check may still be running on the server — never call that a failure.
-        setNote(t("adminManage.library.match.stillRunning"));
+      // No answer came — the polls ran out, or a reverse proxy's own 502/503/504
+      // with no error of ours: the check may still be running on the server,
+      // never call that a failure. Polls that never reached the server say
+      // so, rather than claiming the check is still running.
+      if (isNoAnswer(answer)) {
+        setNote(t(gaveUp.reason === "unreachable" ? "adminManage.library.match.noAnswer" : "adminManage.library.match.stillRunning"));
         return;
       }
       if (answer.status < 200 || answer.status >= 300) {
-        const msg = (answer.data as { error?: unknown } | null)?.error;
-        setError(typeof msg === "string" && msg ? msg : t("adminManage.library.match.checkFailed"));
+        setError(jobAnswerError(answer) ?? t("adminManage.library.match.checkFailed"));
         return;
       }
       // No reset of `fixes` here: the refreshed report carries a new checkedAt,
@@ -486,10 +397,8 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
             {checking && <Loader2 className="animate-spin" style={{ width: 12, height: 12 }} />}
             {checking ? t("adminManage.library.match.checking") : t("adminManage.library.match.check")}
           </button>
-          {/* Here, not beside the list: a run that fixes every flag empties the
-              list, and its summary (and its run) must outlive that. It hides
-              itself while idle with nothing to fix. */}
-          <FixAllButton flags={fixable} onFixed={onFixed} />
+          {/* It hides itself while idle with nothing to fix. */}
+          <FixAllControl run={fixAll} count={fixable.length} label={fixAllLabel} onConfirm={startFixAll} outcomes="errors" maxWidth={460} />
         </div>
       </div>
 
@@ -504,7 +413,9 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
             </div>
           </div>
           <ul className="m-0 list-none p-0">
-            {shown.slice(0, RENDER_CAP).map((f) => <FlagRow key={flagKey(f)} flag={f} onFixed={onFixed} fixedWarning={fixed.get(flagKey(f))} />)}
+            {shown.slice(0, RENDER_CAP).map((f) => (
+              <FlagRow key={flagKey(f)} flag={f} onFixed={onFixed} fixedWarning={fixed.get(flagKey(f))} locked={fixAll.pending.has(flagKey(f))} />
+            ))}
           </ul>
           {shown.length > RENDER_CAP && (
             <p style={{ fontSize: 12, margin: 0, padding: "10px 16px", color: "var(--ds-fg-subtle)", borderTop: "1px solid var(--ds-border)" }}>

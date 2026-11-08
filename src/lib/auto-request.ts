@@ -280,6 +280,9 @@ export interface AutoRequestTally {
   refused: number;
   // Titles on a list the ledger says not to retry yet (or ever).
   alreadyHandled: number;
+  // Titles due but past this run's per-user cap: left for the next run.
+  // Optional so a tally built before it existed still type-checks; absent is 0.
+  deferred?: number;
   outcomes: Partial<Record<AutoRequestOutcome, number>>;
 }
 
@@ -316,18 +319,20 @@ export async function fileAutoRequestTitles(
   });
   const byKey = new Map(ledger.map((r) => [`${r.mediaType}:${r.tmdbId}`, r]));
   const now = Date.now();
-  const due = titles.filter((t) => {
-    const attempt = shouldAttemptAutoRequest(byKey.get(`${t.mediaType}:${t.tmdbId}`), now);
-    if (!attempt) tally.alreadyHandled++;
-    return attempt;
-  });
+  const due: typeof titles = [];
+  for (const t of titles) {
+    if (shouldAttemptAutoRequest(byKey.get(`${t.mediaType}:${t.tmdbId}`), now)) due.push(t);
+    else tally.alreadyHandled++;
+  }
   if (due.length === 0) return;
+  const batch = due.slice(0, MAX_AUTO_REQUESTS_PER_USER_PER_RUN);
+  if (due.length > batch.length) tally.deferred = (tally.deferred ?? 0) + (due.length - batch.length);
 
   // One context read per user, reused across titles (quota/grants/settings).
   const ctx = await loadRequestContext(user.id);
   // Sequential: each filing is several queries and, for an auto-approver, a
   // Radarr/Sonarr push. The per-run cap bounds the first sync of a long list.
-  for (const t of due.slice(0, MAX_AUTO_REQUESTS_PER_USER_PER_RUN)) {
+  for (const t of batch) {
     if (signal?.aborted) return; // guardrail 41 — return, never throw
     const attempt = await autoRequestTitle({ session, tmdbId: t.tmdbId, mediaType: t.mediaType, source, ctx });
     tally.outcomes[attempt.outcome] = (tally.outcomes[attempt.outcome] ?? 0) + 1;

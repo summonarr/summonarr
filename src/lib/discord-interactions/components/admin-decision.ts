@@ -1,213 +1,205 @@
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, addSeriesToSonarr, arrErrorMessage, arrWriteOutcomeUnknown, type AddProgress } from "@/lib/arr";
 import { localizedTitleFor } from "@/lib/tmdb-localize";
-import { notifyRequestStatusChange } from "@/lib/request-notifications";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { DOWNLOAD_CHECK_DELAY_MS, scheduleDownloadCheck } from "@/lib/download-check";
 import { logAudit } from "@/lib/audit";
+import { getMaintenanceStatus } from "@/lib/maintenance";
 import { effectivePermissions, hasPermission, Permission } from "@/lib/permissions";
-import { emitSSE } from "@/lib/sse-emitter";
+import {
+  announceStatus,
+  approvalAuditDetails,
+  approvalStands,
+  claimApproval,
+  claimDecline,
+  declineAuditDetails,
+  followUpDecidedApprovals,
+  notifyDecided,
+  pushApproval,
+  type PushOutcome,
+} from "@/lib/request-transition";
+import type { Translator } from "@/lib/i18n/translate";
 import { TMDB_POSTER_BASE, editOriginal, ephemeralFollowup, handledEmbed } from "../reply";
 import type { ComponentContext } from "../types";
 
 // `admin_approve:<requestId>` / `admin_decline:<requestId>` — the buttons on the
-// admin-channel "new request" embed.
+// admin-channel "new request" card. The decision itself is the web PATCH's
+// (request-transition.ts): the same claim, push, rollback, audit, notification
+// and download check. Only the gate and the card live here.
+
+const COLOR_APPROVED = 0x57f287;
+const COLOR_WARNING = 0xfee75c;
+const COLOR_DECLINED = 0xed4245;
+
+// The admin who clicked, as the card and the audit name them.
+interface Decider {
+  id: string;
+  name: string;
+}
+
+// The card's final edit. Every one passes `content: ""`: Discord's edit is a
+// partial PATCH, and withDiscordTimeout may already have written its "taking
+// longer" line into `content` on a slow arr push — an omitted field would leave
+// it standing above the finished embed. For the same reason an edit that leaves
+// out `components` keeps the card's buttons.
+type CardEdit = {
+  content: "";
+  embeds: Record<string, unknown>[];
+  components?: [];
+};
+
 export async function handleAdminDecision(ctx: ComponentContext): Promise<void> {
-  const { t, channelT, appId, token, customId, discordUserId } = ctx;
+  const { channelT, appId, token, customId } = ctx;
   const colonIdx = customId.indexOf(":");
   const action = customId.substring(0, colonIdx);
   const requestId = customId.substring(colonIdx + 1);
 
-  // Match the web UI gate (/api/requests/[id] PATCH → withPermission(MANAGE_REQUESTS)):
-  // anyone holding the MANAGE_REQUESTS permission bit (the ADMIN superbit, or a
-  // custom mask that includes it) can approve/decline — not just role=ADMIN. Look up by discordId,
-  // then resolve the effective permission mask (ADMIN superbit / legacy-unseeded → role
-  // preset) before checking the bit. `deactivatedAt: null` is load-bearing: deactivation
-  // leaves role/permissions/discordId intact, so a banned admin would still pass the
-  // MANAGE_REQUESTS check here and push approvals to the ARR instances — every
-  // session-backed transport already hard-fails them (verifyAndRefreshSession).
+  const decider = await authorizeDecider(ctx);
+  if (!decider) return;
+
+  const request = await loadDecisionRequest(requestId);
+  // The shared admin-channel card is written in the instance default language,
+  // and so is the title in it — the pending card it edits was built that way
+  // (discord-notify.ts, guardrail 40a); an English MediaRequest.title would flip
+  // it back on click. Embed titles don't render markdown, so no escMd.
+  const title = request
+    ? await localizedTitleFor({ title: request.title, tmdbId: request.tmdbId, mediaType: request.mediaType }, null)
+    : channelT("notify.bot.admin.requestFallback");
+
+  const edit = !request || request.status !== "PENDING"
+    ? handledCard(channelT, title)
+    : action === "admin_approve"
+      ? await approveFromDiscord(channelT, decider, request, title)
+      : await declineFromDiscord(channelT, decider, request, title);
+  await editOriginal(appId, token, edit);
+}
+
+// Match the web gate (withPermission(MANAGE_REQUESTS) on /api/requests/[id]):
+// anyone whose EFFECTIVE permissions hold MANAGE_REQUESTS (the ADMIN superbit,
+// or a custom mask with it) may decide — not just role=ADMIN. `deactivatedAt:
+// null` is load-bearing: deactivation leaves role, permissions and discordId
+// intact, so a banned admin would still pass and push approvals to the arr —
+// every session-backed transport already refuses them (verifyAndRefreshSession).
+// Refusals are told to the clicker alone; the shared card stays as it is.
+async function authorizeDecider(ctx: ComponentContext): Promise<Decider | null> {
+  const { t, appId, token, discordUserId } = ctx;
   const adminUser = await prisma.user.findFirst({
     where: { discordId: discordUserId, deactivatedAt: null },
     select: { id: true, name: true, email: true, role: true, permissions: true },
   });
-  const adminPerms = adminUser
-    ? effectivePermissions(adminUser.role, adminUser.permissions)
-    : 0n;
-  if (!adminUser || !hasPermission(adminPerms, Permission.MANAGE_REQUESTS)) {
+  const perms = adminUser ? effectivePermissions(adminUser.role, adminUser.permissions) : 0n;
+  if (!adminUser || !hasPermission(perms, Permission.MANAGE_REQUESTS)) {
     await ephemeralFollowup(appId, token, t("notify.bot.admin.noPermission"));
-    return;
+    return null;
   }
-  const maintRow = await prisma.setting.findUnique({ where: { key: "maintenanceEnabled" } });
-  if (maintRow?.value === "true") {
-    // ADMIN bit, not the role string — maintenance.ts's web bypass keys off the
-    // bit, and a bit-only granular admin shouldn't be blocked here either.
-    if (!hasPermission(adminPerms, Permission.ADMIN)) {
-      await ephemeralFollowup(appId, token, t("notify.bot.admin.maintenance"));
-      return;
-    }
+  // The ADMIN bit bypasses maintenance, as on the web (maintenance.ts), and an
+  // unreadable maintenance setting refuses everyone else.
+  if (!hasPermission(perms, Permission.ADMIN) && (await getMaintenanceStatus()).enabled) {
+    await ephemeralFollowup(appId, token, t("notify.bot.admin.maintenance"));
+    return null;
   }
   if (!checkRateLimit(`discord-admin-action:${adminUser.id}`, 30, 60 * 1000)) {
     await ephemeralFollowup(appId, token, t("notify.bot.admin.tooMany"));
-    return;
+    return null;
   }
+  return { id: adminUser.id, name: adminUser.name ?? adminUser.email };
+}
 
-  // adminNote: a decline here writes none, so the requester is told the note the
-  // row already holds — what the web and batch declines send too.
-  const request = await prisma.mediaRequest.findUnique({
-    where: { id: requestId },
-    select: { id: true, title: true, mediaType: true, tmdbId: true, posterPath: true, status: true, requestedBy: true, qualityProfileId: true, arrInstance: true, adminNote: true },
+// adminNote: a decline here writes none, so the requester is told the note the
+// row already holds — what the web and batch declines send too. The requester's
+// display name is for the audit row (never the email).
+function loadDecisionRequest(id: string) {
+  return prisma.mediaRequest.findUnique({
+    where: { id },
+    select: {
+      id: true, title: true, mediaType: true, tmdbId: true, posterPath: true, status: true, requestedBy: true,
+      qualityProfileId: true, arrInstance: true, adminNote: true, releaseYear: true,
+      user: { select: { name: true } },
+    },
   });
+}
 
-  // The shared admin-channel embed is written in the instance default language,
-  // and so is the title in it — the pending embed it edits was built that way
-  // (discord-notify.ts, guardrail 40a); an English MediaRequest.title would
-  // flip it back on click. Embed titles don't render markdown, so no escMd.
-  const channelTitle = request
-    ? await localizedTitleFor({ title: request.title, tmdbId: request.tmdbId, mediaType: request.mediaType }, null)
-    : null;
+type DecisionRequest = NonNullable<Awaited<ReturnType<typeof loadDecisionRequest>>>;
 
-  // Every final edit below passes `content: ""`: Discord's edit is a partial
-  // PATCH, and withDiscordTimeout may already have written its "taking longer"
-  // line into `content` on a slow arr push — an omitted field would leave it
-  // standing above the finished embed.
-  if (!request || request.status !== "PENDING") {
-    const embed = handledEmbed(channelT, channelTitle ?? channelT("notify.bot.admin.requestFallback"));
-    await editOriginal(appId, token, { content: "", embeds: [embed], components: [] });
-    return;
-  }
+async function approveFromDiscord(channelT: Translator, decider: Decider, request: DecisionRequest, title: string): Promise<CardEdit> {
+  if (!(await claimApproval(request.id, "PENDING"))) return handledCard(channelT, title);
+  announceStatus(request, "APPROVED");
+  // With the requester's stored quality profile, like the web approve.
+  const outcome = await pushApproval(request, "Discord approve");
+  // Audited like the web approve, plus where it came from. `arrFailed` (any
+  // definite push failure) is the field Discord rows always carried.
+  void logAudit({
+    userId: decider.id,
+    userName: decider.name,
+    action: "REQUEST_APPROVE",
+    target: `request:${request.id}`,
+    details: { ...approvalAuditDetails(request, "PENDING", outcome), tmdbId: request.tmdbId, via: "discord", arrFailed: !approvalStands(outcome) },
+    provider: "discord",
+  });
+  followUpDecidedApprovals([{ row: request, outcome }], {
+    actorId: decider.id,
+    checkName: "interactions:admin-approve-90s-download-check",
+    logScope: "interactions",
+  });
+  return approvalCard(channelT, decider, request.posterPath, title, outcome);
+}
 
-  const adminName = adminUser.name ?? adminUser.email;
-  // Non-null from here: `request` survived the guard above.
-  const localizedTitle: string = channelTitle ?? request.title;
-
-  if (action === "admin_approve") {
-    // Match the /api/requests/[id] PATCH path: set pendingNotifyAt so the sync
-    // orchestrator's 90s "not yet downloading" follow-up notifier fires for
-    // Discord-button approvals too. Arming the field is only half of it — the
-    // scheduleDownloadCheck below is what runs the check PROMPTLY at ~90s; the
-    // orchestrator sweep is the backstop for when this job is dropped or fails.
-    const claimed = await prisma.mediaRequest.updateMany({
-      where: { id: requestId, status: "PENDING" },
-      data: { status: "APPROVED", approvedAt: new Date(), pendingNotifyAt: new Date(Date.now() + DOWNLOAD_CHECK_DELAY_MS) },
-    });
-    if (claimed.count === 0) {
-      await editOriginal(appId, token, { content: "", embeds: [handledEmbed(channelT, localizedTitle)], components: [] });
-      return;
-    }
-    let arrFailed = false;
-    let arrPushOutcomeUnknown = false;
-    let pushedTvdbId: number | null = null;
-    const pushProgress: AddProgress = { sent: false };
-    try {
-      if (request.mediaType === "MOVIE") {
-        // Forward the requester's stored quality profile (a REQUEST_ADVANCED web
-        // requester may have chosen one) — parity with requests/[id] approve.
-        await addMovieToRadarr(request.tmdbId, request.arrInstance, request.qualityProfileId ?? undefined, request.requestedBy, pushProgress);
-      } else {
-        pushedTvdbId = await addSeriesToSonarr(request.tmdbId, request.arrInstance, request.qualityProfileId ?? undefined, request.requestedBy, pushProgress);
-      }
-    } catch (err) {
-      // Unknown only once the add itself was sent (AddProgress).
-      if (pushProgress.sent && arrWriteOutcomeUnknown(err)) {
-        // No definite answer (a timeout, a dropped connection, a gateway
-        // 502/504): the arr may have added it. The approval stands, like the
-        // web PATCH; the sync re-pushes an APPROVED title the arr doesn't hold.
-        console.error("[interactions] admin_approve arr push outcome unknown, left APPROVED:", arrErrorMessage(err));
-        arrPushOutcomeUnknown = true;
-      } else {
-        console.error("[interactions] admin_approve arr push failed:", arrErrorMessage(err));
-        // CAS on status: only roll back if still APPROVED — a concurrent webhook/sync
-        // may have flipped this row to AVAILABLE since we claimed it.
-        await prisma.mediaRequest.updateMany({ where: { id: requestId, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } });
-        arrFailed = true;
-      }
-    }
-    // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the
-    // series by this point, so a P2025 (row deleted mid-push) or transient DB error
-    // must not trip the APPROVED->PENDING rollback and leave Sonarr grabbing content
-    // the DB says is pending. updateMany no-ops on a concurrently deleted row.
-    if (!arrFailed && pushedTvdbId !== null) {
-      await prisma.mediaRequest.updateMany({ where: { id: requestId }, data: { tvdbId: pushedTvdbId } });
-    }
-    // Audit the Discord-driven approval the same way the HTTP /api/requests/[id] PATCH path does.
-    // Without this, an admin clicking "Approve" in Discord leaves no trace in the audit log.
-    void logAudit({
-      userId: adminUser.id,
-      userName: adminName,
-      action: "REQUEST_APPROVE",
-      target: `request:${request.id}`,
-      details: { tmdbId: request.tmdbId, mediaType: request.mediaType, title: request.title, via: "discord", arrFailed, ...(arrPushOutcomeUnknown ? { arrPushOutcomeUnknown } : {}) },
-      provider: "discord",
-    });
-    // Keep the admin request list live (parity with the web PATCH path's emit).
-    emitSSE({ type: "request:updated", requestId: request.id, status: arrFailed ? "PENDING" : "APPROVED", userId: request.requestedBy });
-    // Fan out push + email + Discord so a web/iOS requester without Discord linked
-    // is still notified. Skip self-notify when the admin approved their own request.
-    // Gate on the arr push sticking: on failure the row rolled back to PENDING, and
-    // telling the requester "approved" would be a lie (the web PATCH path gates the
-    // same way via arrPushSucceeded).
-    // `requestId`, not the row's `id`: RequestInfo names the field requestId
-    // (the web PATCH path passes `requestId: updated.id`), and the row's `id`
-    // is simply ignored — every Discord-driven decision used to emit
-    // `request.id: null` to the outbound channels.
-    if (!arrFailed && request.requestedBy !== adminUser.id) {
-      notifyRequestStatusChange("APPROVED", { ...request, requestId: request.id });
-    }
-    // Queued unconditionally, exactly like the web PATCH path: on an arr failure the
-    // row rolled back to PENDING and the job's own status re-read bails, so there is
-    // no second gate to keep in sync here.
-    scheduleDownloadCheck({
-      requestId: request.id,
-      tmdbId: request.tmdbId,
-      mediaType: request.mediaType,
-      arrInstance: request.arrInstance,
-      requestedBy: request.requestedBy,
-      title: request.title,
-    }, { name: "interactions:admin-approve-90s-download-check" });
-    const embed: Record<string, unknown> = {
-      color: arrFailed ? 0xFEE75C : 0x57F287,
-      title: arrFailed
-        ? channelT("notify.bot.admin.approvedArrFailedTitle", { title: localizedTitle })
-        : channelT("notify.bot.admin.approvedTitle", { title: localizedTitle }),
-      description: arrFailed
-        ? channelT("notify.bot.admin.approvedByArrFailed", { admin: adminName })
-        : channelT("notify.bot.admin.approvedBy", { admin: adminName }),
-      timestamp: new Date().toISOString(),
+// The card after an approve, true to where the request now stands.
+function approvalCard(channelT: Translator, decider: Decider, posterPath: string | null, title: string, outcome: PushOutcome): CardEdit {
+  const admin = decider.name;
+  if (outcome.kind === "rolled-back") {
+    // Back in the queue: the card says so and KEEPS its buttons (no
+    // `components`), so the request can be approved again or declined here.
+    return {
+      content: "",
+      embeds: [cardEmbed(COLOR_WARNING, channelT("notify.bot.admin.approveRolledBackTitle", { title }), channelT("notify.bot.admin.approveRolledBackBy", { admin }), posterPath)],
     };
-    if (request.posterPath) embed.thumbnail = { url: `${TMDB_POSTER_BASE}${request.posterPath}` };
-    await editOriginal(appId, token, { content: "", embeds: [embed], components: [] });
-  } else {
-    // approvedAt: null — a decline withdraws any approval, including one whose
-    // push failed and rolled back to PENDING (MediaRequest.approvedAt).
-    const claimed = await prisma.mediaRequest.updateMany({
-      where: { id: requestId, status: "PENDING" },
-      data: { status: "DECLINED", approvedAt: null },
-    });
-    if (claimed.count === 0) {
-      await editOriginal(appId, token, { content: "", embeds: [handledEmbed(channelT, localizedTitle)], components: [] });
-      return;
-    }
-    void logAudit({
-      userId: adminUser.id,
-      userName: adminName,
-      action: "REQUEST_DECLINE",
-      target: `request:${request.id}`,
-      details: { tmdbId: request.tmdbId, mediaType: request.mediaType, title: request.title, via: "discord" },
-      provider: "discord",
-    });
-    // Keep the admin request list live (parity with the web PATCH path's emit).
-    emitSSE({ type: "request:updated", requestId: request.id, status: "DECLINED", userId: request.requestedBy });
-    // Fan out push + email + Discord. Skip self-notify when the admin declined their own request.
-    if (request.requestedBy !== adminUser.id) {
-      notifyRequestStatusChange("DECLINED", { ...request, requestId: request.id });
-    }
-    const embed: Record<string, unknown> = {
-      color: 0xED4245,
-      title: channelT("notify.bot.admin.declinedTitle", { title: localizedTitle }),
-      description: channelT("notify.bot.admin.declinedBy", { admin: adminName }),
-      timestamp: new Date().toISOString(),
-    };
-    if (request.posterPath) embed.thumbnail = { url: `${TMDB_POSTER_BASE}${request.posterPath}` };
-    await editOriginal(appId, token, { content: "", embeds: [embed], components: [] });
   }
+  if (outcome.kind === "failed") {
+    // A definite failure whose rollback did not land: the request was not
+    // returned to the queue, and the arr does not hold it.
+    return {
+      content: "",
+      embeds: [cardEmbed(COLOR_WARNING, channelT("notify.bot.admin.approvedArrFailedTitle", { title }), channelT("notify.bot.admin.approvedByArrFailed", { admin }), posterPath)],
+      components: [],
+    };
+  }
+  return {
+    content: "",
+    embeds: [cardEmbed(COLOR_APPROVED, channelT("notify.bot.admin.approvedTitle", { title }), channelT("notify.bot.admin.approvedBy", { admin }), posterPath)],
+    components: [],
+  };
+}
+
+async function declineFromDiscord(channelT: Translator, decider: Decider, request: DecisionRequest, title: string): Promise<CardEdit> {
+  if (!(await claimDecline(request.id, "PENDING"))) return handledCard(channelT, title);
+  announceStatus(request, "DECLINED");
+  void logAudit({
+    userId: decider.id,
+    userName: decider.name,
+    action: "REQUEST_DECLINE",
+    target: `request:${request.id}`,
+    details: { ...declineAuditDetails(request, "PENDING"), tmdbId: request.tmdbId, via: "discord" },
+    provider: "discord",
+  });
+  void notifyDecided("DECLINED", [request], decider.id, "interactions");
+  return {
+    content: "",
+    embeds: [cardEmbed(COLOR_DECLINED, channelT("notify.bot.admin.declinedTitle", { title }), channelT("notify.bot.admin.declinedBy", { admin: decider.name }), request.posterPath)],
+    components: [],
+  };
+}
+
+// Someone else decided it first (or it was removed): the card says so and
+// drops its buttons.
+function handledCard(channelT: Translator, title: string): CardEdit {
+  return { content: "", embeds: [handledEmbed(channelT, title)], components: [] };
+}
+
+function cardEmbed(color: number, title: string, description: string, posterPath: string | null): Record<string, unknown> {
+  return {
+    color,
+    title,
+    description,
+    timestamp: new Date().toISOString(),
+    ...(posterPath ? { thumbnail: { url: `${TMDB_POSTER_BASE}${posterPath}` } } : {}),
+  };
 }

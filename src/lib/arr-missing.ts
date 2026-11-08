@@ -16,7 +16,7 @@
 // `monitored` is reported, never filtered on: an unmonitored title is missing
 // for a different reason (nothing is searching for it), and the page decides
 // whether to show it.
-import { posInt, PROJECTION_SCAN_FACTOR, text } from "./arr-parse";
+import { nonNegInt, posInt, PROJECTION_SCAN_FACTOR, text } from "./arr-parse";
 import { sonarrSeriesCompletion, type SonarrSeriesStatsRow } from "./sonarr-completion";
 
 // Ids are safe integers and every string the page shows is bounded (arr-parse).
@@ -59,15 +59,28 @@ export function tmdbPosterPathFromImages(images: unknown): string | null {
 // PROJECTION_SCAN_FACTOR times that deep (guardrail 5i).
 export const MAX_MISSING_ITEMS = 20_000;
 
-function judgeListing<T>(rows: unknown, judge: (row: Record<string, unknown>) => T | null): T[] {
-  if (!Array.isArray(rows)) return [];
+/**
+ * A judged listing, and whether a cap stopped it short: `read` of the
+ * listing's `total` rows were judged, and `truncated` means the rest never
+ * were — the list is incomplete, and the report says so.
+ */
+export interface JudgedListing<T> {
+  items: T[];
+  read: number;
+  total: number;
+  truncated: boolean;
+}
+
+function judgeListing<T>(rows: unknown, judge: (row: Record<string, unknown>) => T | null): JudgedListing<T> {
+  if (!Array.isArray(rows)) return { items: [], read: 0, total: 0, truncated: false };
   const out: T[] = [];
-  for (let i = 0, n = Math.min(rows.length, MAX_MISSING_ITEMS * PROJECTION_SCAN_FACTOR); i < n && out.length < MAX_MISSING_ITEMS; i++) {
+  let i = 0;
+  for (const n = Math.min(rows.length, MAX_MISSING_ITEMS * PROJECTION_SCAN_FACTOR); i < n && out.length < MAX_MISSING_ITEMS; i++) {
     const row: unknown = rows[i];
     const judged = row && typeof row === "object" ? judge(row as Record<string, unknown>) : null;
     if (judged) out.push(judged);
   }
-  return out;
+  return { items: out, read: i, total: rows.length, truncated: i < rows.length };
 }
 
 // ── movies ───────────────────────────────────────────────────────────────────
@@ -128,6 +141,11 @@ export function missingMovie(row: RadarrMovieRow, instance: string, nowMs: numbe
 
 /** One instance's /api/v3/movie listing → its missing movies, in listing order (at most MAX_MISSING_ITEMS). */
 export function missingMovieList(rows: unknown, instance: string, nowMs: number): MissingMovie[] {
+  return missingMovieListing(rows, instance, nowMs).items;
+}
+
+/** missingMovieList, saying whether a cap stopped it before the listing's end. */
+export function missingMovieListing(rows: unknown, instance: string, nowMs: number): JudgedListing<MissingMovie> {
   return judgeListing(rows, (row) => missingMovie(row, instance, nowMs));
 }
 
@@ -219,6 +237,11 @@ export function missingSeries(row: SonarrSeriesRow, instance: string): MissingSe
 
 /** One instance's /api/v3/series listing → its missing series, in listing order (at most MAX_MISSING_ITEMS). */
 export function missingSeriesList(rows: unknown, instance: string): MissingSeries[] {
+  return missingSeriesListing(rows, instance).items;
+}
+
+/** missingSeriesList, saying whether a cap stopped it before the listing's end. */
+export function missingSeriesListing(rows: unknown, instance: string): JudgedListing<MissingSeries> {
   return judgeListing(rows, (row) => missingSeries(row, instance));
 }
 
@@ -246,7 +269,7 @@ export interface MissingEpisode {
 // numbers, or null for an episode that is not missing.
 function missingEpisodeParts(r: SonarrEpisodeRow, nowMs: number): { seasonNumber: number; episodeNumber: number; aired: number } | null {
   const seasonNumber = posInt(r?.seasonNumber);
-  const episodeNumber = typeof r?.episodeNumber === "number" && Number.isInteger(r.episodeNumber) && r.episodeNumber >= 0 ? r.episodeNumber : null;
+  const episodeNumber = nonNegInt(r?.episodeNumber);
   const aired = arrDateMs(r?.airDateUtc);
   if (seasonNumber === null || episodeNumber === null || aired === null || aired > nowMs) return null;
   if (r.monitored !== true || r.hasFile === true) return null;
@@ -431,8 +454,8 @@ export function cutoffSeriesFromEpisodes(
       seenEpisodes.add(episodeId);
     }
     const seriesId = posInt(r.seriesId) ?? posInt(r.series?.id);
-    const seasonNumber = typeof r.seasonNumber === "number" && Number.isInteger(r.seasonNumber) && r.seasonNumber >= 0 ? r.seasonNumber : null;
-    const episodeNumber = typeof r.episodeNumber === "number" && Number.isInteger(r.episodeNumber) && r.episodeNumber >= 0 ? r.episodeNumber : null;
+    const seasonNumber = nonNegInt(r.seasonNumber);
+    const episodeNumber = nonNegInt(r.episodeNumber);
     if (seriesId === null || seasonNumber === null || episodeNumber === null) continue;
     const file = r.episodeFile && typeof r.episodeFile === "object" ? (r.episodeFile as { qualityCutoffNotMet?: unknown }) : null;
     if (file && file.qualityCutoffNotMet === false) continue;

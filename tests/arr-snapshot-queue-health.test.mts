@@ -136,50 +136,57 @@ test("health panel: the live fetch and the snapshot read name the same url, buil
   const src = code(HEALTH);
   assert.equal(count(src, 'const healthUrl = () => withBasePath("/api/admin/arr-health");'), 1, "one builder");
   assert.equal(count(src, '"/api/admin/arr-health"'), 1, "the path appears only in the builder");
-  // (with a timeout, so a read that never settles can't hold the spinner forever)
-  assert.match(loadBody(src), /await fetch\(healthUrl\(\), \{ signal: AbortSignal\.timeout\(LOAD_TIMEOUT_MS\) \}\)/);
-  assert.match(snapshotCall(src), /^useArrSnapshot<HealthReport>\(healthUrl\(\),/);
+  // Through arr-call.ts: its read timeout, so a read that never settles can't hold the spinner forever.
+  assert.match(loadBody(src), /arrCall\(healthUrl\(\), \{ schema: HEALTH_REPORT, signal, fallback: /);
+  assert.match(snapshotCall(src), /^useArrSnapshot<unknown>\(healthUrl\(\),/);
 });
 
 test("health panel: markLive runs only after a live report was accepted, never for a failure", () => {
   const body = loadBody(code(HEALTH));
   assert.equal(count(body, "markLive()"), 1);
-  const refused = body.indexOf("if (!res.ok || !data)");
+  const refused = body.indexOf("if (!res.ok) {");
   assert.ok(refused >= 0);
   const refusedBlock = blockAfter(body, refused);
   assert.doesNotMatch(refusedBlock, /markLive/, "not for a refused read");
-  const accepted = body.indexOf("setReport(data);");
+  const accepted = body.indexOf("setReport(res.data);");
   assert.ok(accepted > body.indexOf("{", refused) + refusedBlock.length - 1, "the report is set after the refusal check");
   assert.ok(body.indexOf("markLive()") > accepted, "markLive follows the accepted report");
-  const catchAt = body.indexOf("catch");
-  assert.ok(catchAt > body.indexOf("markLive()"), "markLive is in the try, before the catch");
-  assert.match(code(HEALTH), /\}, \[t, markLive\]\);/, "load's deps carry markLive");
+  assert.match(code(HEALTH), /\}, \[action, t, markLive\]\);/, "load's deps carry markLive");
 });
 
-test("health panel: overlapping loads — only the newest writes the report or the error, and only it clears `loading`", () => {
+test("health panel: overlapping loads — only the newest writes the report or the error, and only it is `loading`", () => {
   const src = code(HEALTH);
   const body = loadBody(src);
-  assert.match(src, /const seq = useRef\(0\);\s*const load = useCallback\(/);
-  assert.match(body, /^\{\s*const id = \+\+seq\.current;/, "each load takes the next id first");
-  // The sequence check sits between the answer and every write of it.
-  const check = body.indexOf("if (id !== seq.current) return;");
-  assert.ok(check > body.indexOf("await readJson<"), "after the answer is read");
-  for (const write of ["if (!res.ok || !data)", "setReport(data);", "markLive()"]) {
-    assert.ok(body.indexOf(write) > check, `${write} only for the newest load`);
+  // One key for every load: a newer one aborts the one before (use-async-action.ts), whose answer is dropped.
+  assert.match(body, /const res = await action\.run\("load", \(signal\) =>/);
+  const dropped = body.indexOf("if (!res) return;");
+  assert.ok(dropped > body.indexOf('action.run("load"'), "a superseded load's answer is dropped");
+  for (const write of ["setLoadError(res.error)", "setReport(res.data);", "markLive()"]) {
+    assert.ok(body.indexOf(write) > dropped, `${write} only for the newest load`);
   }
-  assert.match(body, /\} catch \{\s*if \(id === seq\.current\) setLoadError\(/, "a superseded failure writes no error");
-  assert.match(body, /\} finally \{\s*if \(id === seq\.current\) setLoading\(false\);\s*\}/, "only the newest clears loading");
-  assert.equal(count(body, "setLoading(false)"), 1);
+  assert.match(src, /const loading = action\.busy\("load"\);/, "the spinner is the newest load's");
+  assert.doesNotMatch(src, /setLoading\(/);
 });
 
 test("health panel: the snapshot only paints an empty panel; the stale note is shown; props stay { variant }", () => {
   const src = code(HEALTH);
   const call = snapshotCall(src);
-  assert.match(call, /setReport\(\(cur\) => cur \?\? data\)/);
-  assert.match(call, /setBase\(\(cur\) => cur \|\| data\.webhookBase \|\| ""\)/, "an address the admin typed is kept");
-  for (const setter of ["setLoadError", "setOpenSetup", "setSetup", "setLoading"]) {
+  assert.match(call, /const parsed = check\(HEALTH_REPORT, data\);\s*if \(!parsed\.ok \|\| report !== null\) return false;\s*setReport\(parsed\.value\);/, "a checked report, only over an empty panel — and a refusal says nothing was painted");
+  assert.match(call, /setBase\(\(cur\) => cur \|\| parsed\.value\.webhookBase \|\| ""\)/, "an address the admin typed is kept");
+  for (const setter of ["setLoadError", "setOpenSetup", "setSetup", "markLive"]) {
     assert.doesNotMatch(call, new RegExp(`\\b${setter}\\(`), `the snapshot leaves ${setter} alone`);
   }
   assert.equal(count(src, "<ArrSnapshotNote at={snapshotAt} refreshing={loading} />"), 1);
   assert.match(src, /export function ArrHealthPanel\(\{ variant \}: \{ variant: "full" \| "webhooks" \}\)/, "Arr System, Download Queue and Settings → Webhooks render it unchanged");
+});
+
+test("health panel: a setup is bounded and keyed per instance; its answer closes only its own form", () => {
+  const src = code(HEALTH);
+  const run = src.slice(src.indexOf("async function runSetup("), src.indexOf("const instances = report?.instances"));
+  assert.match(run, /action\.run\(\s*`setup:\$\{k\}`,/, "one run per instance, through arr-call.ts's write timeout");
+  assert.match(run, /arrCall\(withBasePath\("\/api\/admin\/arr-health\/webhook"\), \{[\s\S]*?schema: WEBHOOK_SETUP,\s*signal,/);
+  assert.match(run, /\{ ifBusy: "skip" \}/, "a second click never sends a second setup");
+  assert.match(run, /setOpenSetup\(\(cur\) => \(cur === k \? null : cur\)\);/, "another instance's form opened meanwhile stays open");
+  assert.doesNotMatch(run, /setOpenSetup\(null\)/);
+  assert.match(src, /setupBusy=\{action\.busy\(`setup:\$\{k\}`\)\}/);
 });

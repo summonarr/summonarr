@@ -15,7 +15,7 @@ interface TrailerButtonProps {
 export function TrailerButton({ trailerKey, trailerUrl }: TrailerButtonProps) {
   const t = useT();
   const href = trailerKey
-    ? `https://www.youtube.com/watch?v=${trailerKey}`
+    ? `https://www.youtube.com/watch?v=${encodeURIComponent(trailerKey)}`
     : safeExternalHref(trailerUrl);
   if (!href) return null;
   return (

@@ -23,9 +23,16 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import dns from "node:dns/promises";
 
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32);
 process.env.TMDB_READ_TOKEN = "test-token";
+
+// The safe-fetch resolver must never issue a real lookup (a Trakt client id is
+// configured in one test, and its pages are answered by the fetch stub below).
+const fakeLookup = async () => [{ address: "93.184.216.34", family: 4 }];
+(dns as { lookup: unknown }).lookup = fakeLookup;
+if ((dns as { lookup: unknown }).lookup !== fakeLookup) throw new Error("could not stub dns.lookup");
 
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel } = await import("./_helpers.mts");
@@ -77,15 +84,21 @@ let imdb = new Map<number, string>();
 let uncached = new Set<number>();
 let hiddenRows: Array<{ tmdbId: number; mediaType: "MOVIE" | "TV" }> = [];
 let coreReads: Array<{ where: unknown }> = [];
+/** A source list whose cache read throws, so its whole load fails. */
+let throwOnKeyPrefix: string | null = null;
+/** TMDB's movie list is a cache miss, so its pages are fetched (and fail). */
+let tmdbListMiss = false;
 
 const FRESH = () => new Date(Date.now() + 60 * 60 * 1000);
 shadowPrismaModel(prisma, "tmdbCache", {
   // The source lists: TMDB's movie top-rated list is the pool; every other
   // list key is a miss (and with no Trakt/MDBList key configured, empty).
-  findUnique: async (args: { where: { key: string } }) =>
-    args.where.key === "movies:top_rated"
+  findUnique: async (args: { where: { key: string } }) => {
+    if (throwOnKeyPrefix && args.where.key.startsWith(throwOnKeyPrefix)) throw new Error("cache read failed");
+    return args.where.key === "movies:top_rated" && !tmdbListMiss
       ? { key: args.where.key, data: JSON.stringify(pool), cachedAt: new Date(), expiresAt: FRESH() }
-      : null,
+      : null;
+  },
   // The ratings warm cache. Always a FRESH hit (a value or a "not found"
   // sentinel): a miss would send attachRatingsUnified into after(), which has
   // no request scope here.
@@ -120,9 +133,18 @@ for (const m of [
   shadowPrismaModel(prisma, m, { findMany: async () => [] });
 }
 shadowPrismaModel(prisma, "user", { findUnique: async () => null });
+/** A configured Trakt client id, so the popular lists are fetched (and fail). */
+let traktClientId: string | null = null;
+/** A configured MDBList key, so the top lists are fetched (and fail). */
+let mdblistApiKey: string | null = null;
 shadowPrismaModel(prisma, "setting", {
   findMany: async () => [],
-  findUnique: async () => null,
+  findUnique: async (args: { where: { key: string } }) =>
+    args.where.key === "traktClientId" && traktClientId
+      ? { key: "traktClientId", value: traktClientId }
+      : args.where.key === "mdblistApiKey" && mdblistApiKey
+        ? { key: "mdblistApiKey", value: mdblistApiKey }
+        : null,
 });
 
 function session(): SummonarrSession {
@@ -137,6 +159,59 @@ beforeEach(() => {
   coreReads = [];
   fetchCalls = 0;
   errors.length = 0;
+  throwOnKeyPrefix = null;
+  tmdbListMiss = false;
+  traktClientId = null;
+});
+
+test("a source whose load throws is reported in failedSources; the others still fill the pool", async () => {
+  const ok = await runTopRatedQuery({ query: MOVIES_ONLY, page: 1, session: session() });
+  assert.deepEqual(ok.failedSources, []);
+  throwOnKeyPrefix = "mdblist:top-rated:";
+  const r = await runTopRatedQuery({ query: MOVIES_ONLY, page: 1, session: session() });
+  assert.deepEqual(r.failedSources, ["mdblist"]);
+  assert.equal(r.totalMovies, POOL_SIZE, "TMDB's list still counts");
+});
+
+test("a Trakt list served incomplete by an outage is reported in failedSources, not read as a short list", async () => {
+  traktClientId = "test-client";
+  // Every Trakt page answers 500 through the fetch stub: the helper swallows it
+  // into an empty, incomplete list instead of throwing.
+  const r = await runTopRatedQuery({ query: MOVIES_ONLY, page: 1, session: session() });
+  assert.ok(fetchCalls > 0, "the Trakt pages were asked for");
+  assert.deepEqual(r.failedSources, ["trakt"]);
+  assert.equal(r.totalMovies, POOL_SIZE, "TMDB's list still counts");
+});
+
+test("a TMDB top-rated list whose pages fail is reported in failedSources, not read as an empty list", async () => {
+  tmdbListMiss = true;
+  // Every TMDB page answers 500 through the fetch stub (not retried): the
+  // loader serves an empty, incomplete list instead of throwing.
+  const r = await runTopRatedQuery({ query: MOVIES_ONLY, page: 1, session: session() });
+  assert.ok(fetchCalls > 0, "the TMDB pages were asked for");
+  assert.deepEqual(r.failedSources, ["tmdb"]);
+  assert.equal(r.totalMovies, 0);
+});
+
+test("an MDBList top-lists call that fails is reported in failedSources, not read as an empty list", async () => {
+  // The key memo lives for the process: drop it on the way in and out so the
+  // key is read here and is gone again for the later tests.
+  const singletons = (globalThis as unknown as Record<symbol, Map<string, { cache: unknown }>>)[
+    Symbol.for("summonarr.processSingletons")
+  ];
+  const memo = singletons.get("mdblist:api-key");
+  assert.ok(memo, "the MDBList key memo exists");
+  mdblistApiKey = "test-key";
+  memo.cache = null;
+  try {
+    const r = await runTopRatedQuery({ query: MOVIES_ONLY, page: 1, session: session() });
+    assert.ok(fetchCalls > 0, "the MDBList index was asked for");
+    assert.deepEqual(r.failedSources, ["mdblist"]);
+    assert.equal(r.totalMovies, POOL_SIZE, "TMDB's list still counts");
+  } finally {
+    mdblistApiKey = null;
+    memo.cache = null;
+  }
 });
 
 // ── the default view's order ────────────────────────────────────────────────
@@ -184,6 +259,26 @@ test("a hidden title leaves the FILTERED pool too", async () => {
   const r = await runTopRatedQuery({ query, page: 1, session: session() });
   assert.equal(r.movies.length, TOP_RATED_PER_PAGE);
   assert.equal(r.totalMovies, POOL_SIZE - 1);
+});
+
+test("vote, year and IMDb filters are answered from the source rows and the ratings cache; only the page is enriched", async () => {
+  // Titles 37-45 have no ratings row: enriching them would send the ratings
+  // merge into after(), which has no request scope here.
+  for (let id = 37; id <= POOL_SIZE; id++) uncached.add(id);
+  const query = parseTopRatedQuery((k) => ({ mediaType: "movies", minVotes: "100", fromYear: "1990" } as Record<string, string>)[k] ?? null);
+  const r = await runTopRatedQuery({ query, page: 1, session: session() });
+  assert.equal(r.movies.length, TOP_RATED_PER_PAGE);
+  assert.equal(r.totalMovies, POOL_SIZE);
+  assert.equal(fetchCalls, 0);
+});
+
+test("minImdb filters and orders by the same cached rating the default view sorts by", async () => {
+  imdb = new Map([[40, "9.9"], [2, "7.0"], [7, "8.1"]]);
+  const query = parseTopRatedQuery((k) => ({ mediaType: "movies", minImdb: "8" } as Record<string, string>)[k] ?? null);
+  const r = await runTopRatedQuery({ query, page: 1, session: session() });
+  assert.deepEqual(r.movies.map((m) => m.id), [40, 7]);
+  assert.equal(r.totalMovies, 2);
+  assert.equal(r.movies[0].imdbRating, "9.9", "the page is still enriched for the cards");
 });
 
 // ── backfill ────────────────────────────────────────────────────────────────

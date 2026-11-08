@@ -1082,3 +1082,29 @@ test("ACCEPTED TRADE-OFF: membership on ANY instance keeps a plex session — ev
     "no instance fetch may have failed — the survival must come from the union, not a poisoned fail-open",
   );
 });
+
+test("resignLifetimeSeconds: the deadline decides; a legacy token without one keeps its own exp as a hard ceiling", async () => {
+  const { resignLifetimeSeconds } = await import("../src/lib/session-refresh.ts");
+  const now = 1_000_000;
+  assert.equal(resignLifetimeSeconds({ expiresAt: now + 600, exp: now + 30 }, now), 600);
+  assert.equal(resignLifetimeSeconds({ expiresAt: now, exp: now + 30 }, now), null);
+  // No deadline claim: the remaining exp, never extended — a token with 10s
+  // left is re-signed with 10s, not lifted back up to a floor.
+  assert.equal(resignLifetimeSeconds({ exp: now + 10 }, now), 10);
+  assert.equal(resignLifetimeSeconds({ exp: now }, now), null);
+  // Neither claim: an hour, which the next re-sign then treats as its ceiling.
+  assert.equal(resignLifetimeSeconds({}, now), 3600);
+});
+
+test("a legacy token without a deadline claim is re-signed with its remaining exp, never more", async () => {
+  const { userId, sessionId } = await mint();
+  const token = await signSessionJwt(
+    { id: userId, role: "USER", permissions: "0", provider: "credentials", sessionId } as Omit<SessionClaims, "iat" | "exp">,
+    { expiresInSeconds: 20 },
+  );
+  const result = await verifyAndRefreshSession(token, COOKIE);
+  assert.ok(result?.refreshed);
+  assert.ok(result.refreshed.expiresInSeconds <= 20, `got ${result.refreshed.expiresInSeconds}`);
+  const exp = decodePayload(result.refreshed.token).exp as number;
+  assert.ok(exp <= nowSec() + 20);
+});

@@ -49,18 +49,7 @@ export default async function BackupPage() {
         />
         <div style={{ fontSize: 12.5, color: "var(--ds-fg-muted)", lineHeight: 1.6 }}>
           {t("adminManage.backup.notice.before")}{" "}
-          <code
-            className="ds-mono"
-            style={{
-              background: "var(--ds-bg-3)",
-              padding: "1px 5px",
-              borderRadius: 3,
-              fontSize: 11,
-              color: "var(--ds-fg)",
-            }}
-          >
-            BACKUP_DB_PASSWORD
-          </code>{" "}
+          <EnvVar name="BACKUP_DB_PASSWORD" />{" "}
           {t("adminManage.backup.notice.after")}
         </div>
       </div>
@@ -122,36 +111,31 @@ export default async function BackupPage() {
           <li>{t("adminManage.backup.notes.migrations")}</li>
           <li>
             {t("adminManage.backup.notes.auditBefore")}{" "}
-            <code
-              className="ds-mono"
-              style={{
-                background: "var(--ds-bg-3)",
-                padding: "1px 5px",
-                borderRadius: 3,
-                fontSize: 11,
-                color: "var(--ds-fg)",
-              }}
-            >
-              BACKUP_EXPORT
-            </code>{" "}
+            <EnvVar name="BACKUP_EXPORT" />{" "}
             /{" "}
-            <code
-              className="ds-mono"
-              style={{
-                background: "var(--ds-bg-3)",
-                padding: "1px 5px",
-                borderRadius: 3,
-                fontSize: 11,
-                color: "var(--ds-fg)",
-              }}
-            >
-              BACKUP_IMPORT
-            </code>{" "}
+            <EnvVar name="BACKUP_IMPORT" />{" "}
             {t("adminManage.backup.notes.auditAfter")}
           </li>
         </ul>
       </div>
     </div>
+  );
+}
+
+// An environment variable or audit action named inline in the page's text.
+const ENV_VAR_STYLE = {
+  background: "var(--ds-bg-3)",
+  padding: "1px 5px",
+  borderRadius: 3,
+  fontSize: 11,
+  color: "var(--ds-fg)",
+} as const;
+
+function EnvVar({ name }: { name: string }) {
+  return (
+    <code className="ds-mono" style={ENV_VAR_STYLE}>
+      {name}
+    </code>
   );
 }
 

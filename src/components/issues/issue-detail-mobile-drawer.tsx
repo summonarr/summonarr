@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/drawer";
 import { Chip } from "@/components/ui/design";
 import { IssueThread } from "@/components/issues/issue-thread";
+import { ISSUE_MOBILE_QUERY } from "@/components/issues/desktop-issue-thread";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { ISSUE_STATUS_LABEL_KEY, ISSUE_STATUS_TONE, ISSUE_TYPE_LABEL_KEY, issueDateFormat } from "@/lib/status-labels";
@@ -58,10 +59,10 @@ export function IssueDetailMobileDrawer({ selectedIssue, closeHref }: Props) {
   const mounted = useHasMounted();
   const t = useT();
   const locale = useLocale();
-  // Complement of the desktop pane's `xl` breakpoint; the pane's thread is gated
-  // on `(min-width: 1280px)` in desktop-issue-thread.tsx so exactly one IssueThread
-  // mounts per viewport. null (SSR/hydration) and false both render nothing.
-  const isMobile = useMediaQuery("(max-width: 1279.98px)") === true;
+  // Complement of the desktop pane's `xl` breakpoint (ISSUE_DESKTOP_QUERY in
+  // desktop-issue-thread.tsx), so exactly one IssueThread mounts per
+  // viewport. null (SSR/hydration) and false both render nothing.
+  const isMobile = useMediaQuery(ISSUE_MOBILE_QUERY) === true;
   const [stickyIssue, setStickyIssue] = useState<IssueDrawerPayload | null>(
     selectedIssue,
   );

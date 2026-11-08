@@ -85,86 +85,106 @@ export async function resolvePosterMap(
 export async function resolvePosterPathMap(
   items: PosterLookupItem[],
 ): Promise<Record<string, string>> {
-  // Per numeric id, the set of namespaces any caller asked about. An id requested
-  // with an unknown mediaType contributes both.
-  const wanted = new Map<number, Set<"movie" | "tv">>();
-  // Per numeric id, the namespaces a caller named EXPLICITLY. Tracked separately
-  // because `wanted` is a union across items: one untyped row (or a typed row of
-  // the OTHER medium) sharing the number would otherwise make the id look
-  // "unknown" and hand the typed row the wrong medium's art.
-  const explicit = new Map<number, Set<"movie" | "tv">>();
+  const { wanted, explicit } = collectWanted(items);
+  if (wanted.size === 0) return {};
+
+  const map: Record<string, string> = {};
+  const coreRows = await prisma.tmdbMediaCore.findMany({
+    where: { tmdbId: { in: [...wanted.keys()] } },
+    select: { tmdbId: true, mediaType: true, posterPath: true },
+  });
+  fillFromCore(map, wanted, coreRows);
+
+  const missing = detailsKeysToRead(map, wanted, explicit);
+  if (missing.size === 0) return finalize(map, wanted, explicit);
+  const rows = await prisma.tmdbCache.findMany({
+    where: { key: { in: [...missing.keys()] } },
+    select: { key: true, data: true },
+  });
+  fillFromDetails(map, missing, rows);
+  return finalize(map, wanted, explicit);
+}
+
+type Namespace = "movie" | "tv";
+type NamespacesById = Map<number, Set<Namespace>>;
+
+// `wanted`: per numeric id, the namespaces any caller asked about (an unknown
+// mediaType contributes both). `explicit`: the namespaces a caller NAMED.
+// Tracked separately because `wanted` is a union across items: one untyped row
+// (or a typed row of the OTHER medium) sharing the number would otherwise make
+// the id look "unknown" and hand the typed row the wrong medium's art.
+function collectWanted(items: PosterLookupItem[]): { wanted: NamespacesById; explicit: NamespacesById } {
+  const wanted: NamespacesById = new Map();
+  const explicit: NamespacesById = new Map();
   for (const item of items) {
     if (item.tmdbId == null) continue;
     const namespaces = namespacesFor(item.mediaType);
-    const set = wanted.get(item.tmdbId) ?? new Set<"movie" | "tv">();
+    const set = wanted.get(item.tmdbId) ?? new Set<Namespace>();
     for (const ns of namespaces) set.add(ns);
     wanted.set(item.tmdbId, set);
     if (namespaces.length === 1) {
-      const named = explicit.get(item.tmdbId) ?? new Set<"movie" | "tv">();
+      const named = explicit.get(item.tmdbId) ?? new Set<Namespace>();
       for (const ns of namespaces) named.add(ns);
       explicit.set(item.tmdbId, named);
     }
   }
-  if (wanted.size === 0) return {};
+  return { wanted, explicit };
+}
 
-  const ids = [...wanted.keys()];
-  const map: Record<string, string> = {};
-
-  const coreRows = await prisma.tmdbMediaCore.findMany({
-    where: { tmdbId: { in: ids } },
-    select: { tmdbId: true, mediaType: true, posterPath: true },
-  });
-  for (const row of coreRows) {
-    const ns = row.mediaType === "TV" ? "tv" : "movie";
+// TmdbMediaCore rows into the map, first poster per `<ns>:<id>` wins. Gated on
+// posterUrl so a malformed stored path falls through to the TmdbCache row
+// rather than being handed out as a dead path.
+function fillFromCore(
+  map: Record<string, string>,
+  wanted: NamespacesById,
+  rows: ReadonlyArray<{ tmdbId: number; mediaType: string; posterPath: string | null }>,
+): void {
+  for (const row of rows) {
+    const ns: Namespace = row.mediaType === "TV" ? "tv" : "movie";
     if (!wanted.get(row.tmdbId)?.has(ns)) continue;
     const key = `${ns}:${row.tmdbId}`;
     if (map[key]) continue;
-    // Gate on posterUrl so a malformed stored path falls through to the
-    // TmdbCache row below rather than being handed out as a dead path.
-    if (row.posterPath && posterUrl(row.posterPath, "w342")) {
-      map[key] = row.posterPath;
-    }
+    if (row.posterPath && posterUrl(row.posterPath, "w342")) map[key] = row.posterPath;
   }
+}
 
-  // details key → the `<ns>:<id>` key the map is filled under.
+// The `:details` cache keys still worth reading, each mapped to the
+// `<ns>:<id>` key it fills.
+function detailsKeysToRead(map: Record<string, string>, wanted: NamespacesById, explicit: NamespacesById): Map<string, string> {
   const missing = new Map<string, string>();
-  const want = (ns: "movie" | "tv", id: number) => missing.set(tmdbDetailsKey(ns, id), `${ns}:${id}`);
   for (const [id, namespaces] of wanted) {
     const named = explicit.get(id);
     for (const ns of namespaces) {
       if (map[`${ns}:${id}`]) continue;
       // A namespace the caller NAMED is always resolved on its own — the other
-      // medium's hit is not an answer for it.
-      if (named?.has(ns)) {
-        want(ns, id);
-        continue;
-      }
-      // Unknown mediaType ⇒ both namespaces were requested, but either one
-      // answers the question (finalize mirrors it), so one hit ends the search.
-      if (map[`movie:${id}`] || map[`tv:${id}`]) continue;
-      want(ns, id);
+      // medium's hit is not an answer for it. Unknown mediaType ⇒ both
+      // namespaces were requested, but either one answers the question
+      // (finalize mirrors it), so one hit ends the search.
+      if (!named?.has(ns) && (map[`movie:${id}`] || map[`tv:${id}`])) continue;
+      missing.set(tmdbDetailsKey(ns, id), `${ns}:${id}`);
     }
   }
-  if (missing.size === 0) return finalize(map, wanted, explicit);
+  return missing;
+}
 
-  const rows = await prisma.tmdbCache.findMany({
-    where: { key: { in: [...missing.keys()] } },
-    select: { key: true, data: true },
-  });
-
+// The posterPath out of each `:details` row. A row whose JSON can't be parsed
+// (or carries no usable path) just gives that id no poster.
+function fillFromDetails(
+  map: Record<string, string>,
+  missing: Map<string, string>,
+  rows: ReadonlyArray<{ key: string; data: string }>,
+): void {
   for (const row of rows) {
     const key = missing.get(row.key);
     if (!key || map[key]) continue;
+    let posterPath: unknown;
     try {
-      const parsed = JSON.parse(row.data) as { posterPath?: string | null };
-      if (parsed.posterPath && posterUrl(parsed.posterPath, "w342")) {
-        map[key] = parsed.posterPath;
-      }
+      posterPath = (JSON.parse(row.data) as { posterPath?: unknown } | null)?.posterPath;
     } catch {
-      // Skip a cache row whose JSON can't be parsed; the id just gets no poster.
+      continue;
     }
+    if (typeof posterPath === "string" && posterPath && posterUrl(posterPath, "w342")) map[key] = posterPath;
   }
-  return finalize(map, wanted, explicit);
 }
 
 // An id whose mediaType the caller did NOT know was looked up in both
@@ -174,11 +194,7 @@ export async function resolvePosterPathMap(
 // numeric id, so a single untyped row (or a typed row of the other medium)
 // sharing the number would otherwise leak a movie's art onto the TV row —
 // exactly the cross-namespace bug `posterPathKey` above documents.
-function finalize(
-  map: Record<string, string>,
-  wanted: Map<number, Set<"movie" | "tv">>,
-  explicit: Map<number, Set<"movie" | "tv">>,
-): Record<string, string> {
+function finalize(map: Record<string, string>, wanted: NamespacesById, explicit: NamespacesById): Record<string, string> {
   for (const [id, namespaces] of wanted) {
     if (namespaces.size < 2) continue;
     const named = explicit.get(id);

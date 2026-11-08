@@ -17,6 +17,10 @@ import {
   readPlexFlowCookie,
   buildPlexFlowSetCookie,
   buildPlexFlowClearedSetCookie,
+  signPlexConnectCookie,
+  verifyPlexConnectCookie,
+  readPlexConnectCookie,
+  PLEX_CONNECT_COOKIE,
 } from "../src/lib/plex-flow-state.ts";
 import { signQcFlowCookie } from "../src/lib/jellyfin-flow-state.ts";
 import { signPurposeJwt } from "../src/lib/signing-keys.ts";
@@ -144,6 +148,10 @@ test("validly-signed token with wrong payload types verifies to null", async () 
   assert.equal(await verifyPlexFlowCookie(await sign({ pinId: 1 })), null);
   assert.equal(await verifyPlexFlowCookie(await sign({ clientId: "c" })), null);
   assert.equal(await verifyPlexFlowCookie(await sign({ sub: "not-a-flow" })), null);
+  // A PIN id is a positive integer, as the connect cookie already required.
+  assert.equal(await verifyPlexFlowCookie(await sign({ pinId: 1.5, clientId: "c" })), null);
+  assert.equal(await verifyPlexFlowCookie(await sign({ pinId: 0, clientId: "c" })), null);
+  assert.equal(await verifyPlexFlowCookie(await sign({ pinId: -4, clientId: "c" })), null);
 });
 
 test("a QC flow cookie does not verify as Plex flow state (cross-flow confusion)", async () => {
@@ -220,4 +228,27 @@ test("full flow: set-cookie → echoed Cookie header → verified state matches"
   // The sign-in route's binding check: a body pinId from a different flow
   // (attacker-created PIN) does not match the cookie's pinId.
   assert.notEqual(state?.pinId, 111111);
+});
+
+test("the connect cookie signs under its own purpose key, typ and audience, and never verifies as flow state (or the reverse)", async () => {
+  const CONNECT = { pinId: 4242, clientId: "summonarr-connect-x", uid: "admin-1" };
+  const token = await signPlexConnectCookie(CONNECT);
+  assert.deepEqual(await verifyPlexConnectCookie(token), CONNECT);
+  const header = decodeHeader(token);
+  assert.equal(header.typ, "summonarr-plex-connect+jwt");
+  assert.equal(typeof header.kid, "string", "a kid, so a NEXTAUTH_SECRET_PREVIOUS rotation is honoured");
+  assert.equal(decodePayload(token).aud, "summonarr:plex-connect");
+  assert.equal(await verifyPlexFlowCookie(token), null);
+  assert.equal(await verifyPlexConnectCookie(await signPlexFlowCookie(STATE)), null);
+  // The plex-flow KEY with the connect typ/audience is still refused: the subkey differs.
+  const crossKey = await signPurposeJwt("plex-flow", { ...CONNECT }, {
+    typ: "summonarr-plex-connect+jwt", audience: "summonarr:plex-connect", ttlSeconds: 600,
+  });
+  assert.equal(await verifyPlexConnectCookie(crossKey), null);
+});
+
+test("readPlexConnectCookie reads the connect cookie by its exact name", () => {
+  assert.equal(readPlexConnectCookie(`a=1; ${PLEX_CONNECT_COOKIE}=tok; ${PLEX_FLOW_COOKIE}=other`), "tok");
+  assert.equal(readPlexConnectCookie(`${PLEX_FLOW_COOKIE}=other`), null);
+  assert.equal(readPlexConnectCookie(null), null);
 });

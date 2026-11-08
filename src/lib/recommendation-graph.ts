@@ -3,16 +3,11 @@ import { prisma } from "./prisma";
 import { Prisma, type MediaType } from "@/generated/prisma";
 import type { TmdbMedia } from "./tmdb-types";
 import { getCacheStaleMany, tmdbDetailsKey } from "./tmdb-cache";
-import {
-  getMovieSuggestions,
-  getTVSuggestions,
-  getTrending,
-  getPopularMovies,
-  getPopularTV,
-  SUGGESTIONS_CACHE_MAX,
-} from "./tmdb";
+import { getSuggestionsResult, getTrending, getPopularMovies, getPopularTV } from "./tmdb";
+import { upstreamFailed, type UpstreamResult } from "./upstream-result";
+import { check, v, type Infer } from "./validate";
 import { attachRatingsUnified } from "./omdb-availability";
-import { isMdblistQuotaLocked, mdblistTransportFailureCount } from "./mdblist";
+import { isMdblistKeyRejected, isMdblistQuotaLocked, mdblistTransportFailureCount } from "./mdblist";
 import { isOmdbQuotaLocked } from "./omdb";
 import { qualityScoreOf } from "./recommendation-quality";
 import { collectAllLibraryItems } from "./library-iterator";
@@ -23,7 +18,7 @@ import {
   BATCH_TX_STATEMENT_TIMEOUT,
   BATCH_TX_TIMEOUT,
   setBatchTxTimeouts,
-} from "./cron-auth";
+} from "./batch-write";
 import { describeTxFailure, seconds, txTrace } from "./tx-diagnostics";
 import { tmdbAuth } from "./tmdb-auth";
 import { FOR_YOU_COWATCH_FEATURE_KEY, isFeatureEnabled } from "./features";
@@ -130,18 +125,79 @@ const SLOW_PAGE_WRITE_MS = 10_000;
 const QUALITY_BATCH = 200;
 // The verdict pass is a cron: MDBList stops it at the reserve kept for pages.
 const BACKGROUND_RATINGS = { background: true } as const;
+// Rows per release-date fill statement (3 bind parameters each).
+const NODE_DATE_FILL_PAGE = 2_000;
+// A verdict written while a provider was not answering is real (it is always
+// written, guardrail 40) but may rest on fewer sources than the title has. It
+// is stamped so it falls stale after this long instead of QUALITY_TTL_MS, and
+// the next runs re-derive it once every provider answers again.
+const PARTIAL_VERDICT_RECHECK_MS = 24 * 60 * 60 * 1000;
 
 export interface GraphSource {
   tmdbId: number;
   mediaType: MediaType;
 }
 
-function key(tmdbId: number, mediaType: MediaType): string {
+// The one "<tmdbId>:<MOVIE|TV>" title key of the For You engine (both this file
+// and recommendations.ts; blacklist.ts's blacklistKey emits the same shape).
+export function titleKey(tmdbId: number, mediaType: MediaType): string {
   return `${tmdbId}:${mediaType}`;
 }
+const key = titleKey;
 
-function toTmdbMediaType(m: MediaType): "movie" | "tv" {
+export function toTmdbMediaType(m: MediaType): "movie" | "tv" {
   return m === "MOVIE" ? "movie" : "tv";
+}
+
+export function toDbMediaType(m: "movie" | "tv"): MediaType {
+  return m === "movie" ? "MOVIE" : "TV";
+}
+
+// A graph node to introduce (createMany skipDuplicates): just enough for the
+// ratings pass to look the title up later.
+// A type alias, not an interface: batchCreateMany takes Record-shaped rows.
+type TitleNode = {
+  tmdbId: number;
+  mediaType: MediaType;
+  releaseDate: string | null;
+};
+
+// One node per title, first occurrence wins — the dedupe every node writer needs.
+function uniqueTitleNodes(nodes: Iterable<TitleNode>): TitleNode[] {
+  const out = new Map<string, TitleNode>();
+  for (const n of nodes) {
+    const k = key(n.tmdbId, n.mediaType);
+    if (!out.has(k)) out.set(k, n);
+  }
+  return [...out.values()];
+}
+
+// Introduces nodes, and gives an existing node with no release date the one
+// it now has. createMany skipDuplicates never touches an existing row (it keeps
+// its verdict), so a title first created as a SOURCE — which carries no date —
+// kept a null releaseDate for good, and the ratings pass then sent no date to
+// the providers, whose negative-cache and details TTLs key on it. The fill is
+// one COALESCE-style UPDATE (only rows still null), never an overwrite. A raw
+// statement passed as ONE Prisma.sql value (guardrail 23a). Sequential on a
+// transaction client (guardrail 23c).
+async function writeTitleNodes(
+  db: { recommendationTitle: { createMany: (args: { data: TitleNode[]; skipDuplicates?: boolean }) => Promise<unknown> }; $executeRaw: (query: Prisma.Sql) => Promise<number> },
+  nodes: TitleNode[],
+): Promise<void> {
+  if (nodes.length === 0) return;
+  await batchCreateMany(db.recommendationTitle, nodes);
+  const dated = nodes.filter((n) => n.releaseDate !== null);
+  for (let i = 0; i < dated.length; i += NODE_DATE_FILL_PAGE) {
+    const rows = dated.slice(i, i + NODE_DATE_FILL_PAGE).map(
+      (n) => Prisma.sql`(${n.tmdbId}::int, ${n.mediaType}::"MediaType", ${n.releaseDate}::text)`,
+    );
+    await db.$executeRaw(Prisma.sql`
+      UPDATE "RecommendationTitle" AS r
+      SET "releaseDate" = v."releaseDate"
+      FROM (VALUES ${Prisma.join(rows)}) AS v("tmdbId", "mediaType", "releaseDate")
+      WHERE r."tmdbId" = v."tmdbId" AND r."mediaType" = v."mediaType" AND r."releaseDate" IS NULL
+    `);
+  }
 }
 
 // Column widths of the denormalized display fields on TitleSuggestion and
@@ -189,9 +245,39 @@ export interface TitleQualityRow {
 
 // ── Read side (the per-user hot path) ──────────────────────────────────────
 
-// Every edge out of the given source titles, position-ordered, as the same
-// TmdbMedia shape getMovieSuggestions/getTVSuggestions return — so the engine's
-// scoring loop cannot tell a graph-served list from a live one.
+// The display columns an edge row (TitleSuggestion or CoWatchSuggestion)
+// carries, as the TmdbMedia shape getSuggestionsResult returns — so the
+// engine's scoring loop cannot tell a graph-served list from a live one.
+interface EdgeDisplayRow {
+  tmdbId: number;
+  mediaType: MediaType;
+  title: string;
+  overview: string | null;
+  posterPath: string | null;
+  backdropPath: string | null;
+  releaseDate: string | null;
+  voteAverage: number;
+  voteCount: number;
+  originalLanguage: string | null;
+}
+
+function edgeRowToMedia(row: EdgeDisplayRow): TmdbMedia {
+  return {
+    id: row.tmdbId,
+    mediaType: toTmdbMediaType(row.mediaType),
+    title: row.title,
+    overview: row.overview ?? "",
+    posterPath: row.posterPath,
+    backdropPath: row.backdropPath,
+    releaseDate: row.releaseDate,
+    releaseYear: row.releaseDate?.slice(0, 4) ?? null,
+    voteAverage: row.voteAverage,
+    voteCount: row.voteCount,
+    originalLanguage: row.originalLanguage,
+  };
+}
+
+// Every edge out of the given source titles, position-ordered (edgeRowToMedia).
 //
 // TWO queries for every seed a user holds, in place of one cache read per seed.
 // The second one is what makes a KNOWN-EMPTY source distinguishable from an
@@ -230,22 +316,7 @@ export async function readGraphSuggestions(sources: GraphSource[]): Promise<Map<
 
   for (const [k, list] of bySource) {
     list.sort((a, b) => a.position - b.position);
-    out.set(
-      k,
-      list.map((row) => ({
-        id: row.tmdbId,
-        mediaType: toTmdbMediaType(row.mediaType),
-        title: row.title,
-        overview: row.overview ?? "",
-        posterPath: row.posterPath,
-        backdropPath: row.backdropPath,
-        releaseDate: row.releaseDate,
-        releaseYear: row.releaseDate?.slice(0, 4) ?? null,
-        voteAverage: row.voteAverage,
-        voteCount: row.voteCount,
-        originalLanguage: row.originalLanguage,
-      })),
-    );
+    out.set(k, list.map(edgeRowToMedia));
   }
   return out;
 }
@@ -263,19 +334,7 @@ export async function readCoWatchSuggestions(sources: GraphSource[]): Promise<Ma
   rows.sort((a, b) => a.position - b.position);
   for (const row of rows) {
     const k = key(row.sourceTmdbId, row.sourceMediaType);
-    const item: TmdbMedia = {
-      id: row.tmdbId,
-      mediaType: toTmdbMediaType(row.mediaType),
-      title: row.title,
-      overview: row.overview ?? "",
-      posterPath: row.posterPath,
-      backdropPath: row.backdropPath,
-      releaseDate: row.releaseDate,
-      releaseYear: row.releaseDate?.slice(0, 4) ?? null,
-      voteAverage: row.voteAverage,
-      voteCount: row.voteCount,
-      originalLanguage: row.originalLanguage,
-    };
+    const item = edgeRowToMedia(row);
     const list = out.get(k);
     if (list) list.push(item);
     else out.set(k, [item]);
@@ -397,17 +456,47 @@ interface PageWrite {
   steps: string;
 }
 
-async function writeSourcePage(page: FetchedSource[], run: string): Promise<PageWrite> {
+// Sources (and targets) are written in one fixed key order. The warm-library
+// prewarm and the recommendations run can write overlapping pages at once
+// (guardrail 40 accepts that rather than serializing the two crons); taking the
+// row locks in the same order keeps two such pages from deadlocking each other.
+function byTitleKey(a: { tmdbId: number; mediaType: MediaType }, b: { tmdbId: number; mediaType: MediaType }): number {
+  return a.tmdbId - b.tmdbId || (a.mediaType < b.mediaType ? -1 : a.mediaType > b.mediaType ? 1 : 0);
+}
+
+async function writeSourcePage(fetchedPage: FetchedSource[], run: string): Promise<PageWrite> {
+  const page = [...fetchedPage].sort((a, b) => byTitleKey(a.source, b.source));
   const edges = page.flatMap(({ source, suggestions }) =>
     suggestions.map((item, position) => ({
       sourceTmdbId: source.tmdbId,
       sourceMediaType: source.mediaType,
       tmdbId: item.id,
-      mediaType: (item.mediaType === "movie" ? "MOVIE" : "TV") as MediaType,
+      mediaType: toDbMediaType(item.mediaType),
       position,
       ...edgeDisplayColumns(item),
     })),
   );
+  // Introduce every NEW suggestion target as a graph node, carrying just
+  // enough (title + releaseDate) for the ratings pass to look it up later.
+  // skipDuplicates, never an update: an existing node already holds its
+  // verdict and its own metadata, and rewriting those from an edge would
+  // reset a title's rated state every time any source re-linked to it (only
+  // a missing release date is filled, see writeTitleNodes).
+  //
+  // This is what makes the quality pass a bounded indexed scan instead of a
+  // distinct-over-every-edge aggregate: targets announce themselves here,
+  // once, at the moment the edge that introduced them is written.
+  const targets = uniqueTitleNodes(edges.map((e) => ({ tmdbId: e.tmdbId, mediaType: e.mediaType, releaseDate: e.releaseDate })))
+    .sort(byTitleKey);
+  // The source stamps, one updateMany per distinct edge count (at most
+  // SUGGESTIONS_CACHE_MAX + 1 of them, usually a handful) in place of an
+  // awaited upsert per source.
+  const byCount = new Map<number, GraphSource[]>();
+  for (const { source, suggestions } of page) {
+    const list = byCount.get(suggestions.length);
+    if (list) list.push(source);
+    else byCount.set(suggestions.length, [source]);
+  }
 
   const trace = txTrace();
   trace.step("start transaction");
@@ -428,43 +517,23 @@ async function writeSourcePage(page: FetchedSource[], run: string): Promise<Page
         trace.step(`insert ${edges.length} edges`);
         if (edges.length > 0) await batchCreateMany(tx.titleSuggestion, edges);
 
-        // Introduce every NEW suggestion target as a graph node, carrying just
-        // enough (title + releaseDate) for the ratings pass to look it up later.
-        // skipDuplicates, never an update: an existing node already holds its
-        // verdict and its own metadata, and rewriting those from an edge would
-        // reset a title's rated state every time any source re-linked to it.
-        //
-        // This is what makes the quality pass a bounded indexed scan instead of a
-        // distinct-over-every-edge aggregate: targets announce themselves here,
-        // once, at the moment the edge that introduced them is written.
-        const targets = new Map<string, { tmdbId: number; mediaType: MediaType; releaseDate: string | null }>();
-        for (const edge of edges) {
-          const k = key(edge.tmdbId, edge.mediaType);
-          if (!targets.has(k)) {
-            targets.set(k, { tmdbId: edge.tmdbId, mediaType: edge.mediaType, releaseDate: edge.releaseDate });
-          }
-        }
-        trace.step(`add ${targets.size} titles`);
-        if (targets.size > 0) {
-          await batchCreateMany(tx.recommendationTitle, [...targets.values()]);
-        }
+        trace.step(`add ${targets.length} titles`);
+        await writeTitleNodes(tx, targets);
 
+        // createMany skipDuplicates then updateMany, never create-catch-
+        // duplicate: a caught unique violation inside a top-level interactive
+        // transaction silently converts the COMMIT to a ROLLBACK (guardrail 23),
+        // which would discard this whole page's edges while reporting success.
         trace.step(`stamp ${page.length} sources`);
+        await batchCreateMany(
+          tx.recommendationTitle,
+          page.map(({ source }) => ({ tmdbId: source.tmdbId, mediaType: source.mediaType, releaseDate: null })),
+        );
         const now = new Date();
-        for (const { source, suggestions } of page) {
-          // upsert, not create-catch-duplicate: a caught unique violation inside a
-          // top-level interactive transaction silently converts the COMMIT to a
-          // ROLLBACK (guardrail 23), which would discard this whole page's edges
-          // while reporting success.
-          await tx.recommendationTitle.upsert({
-            where: { tmdbId_mediaType: { tmdbId: source.tmdbId, mediaType: source.mediaType } },
-            create: {
-              tmdbId: source.tmdbId,
-              mediaType: source.mediaType,
-              suggestionsRefreshedAt: now,
-              suggestionCount: suggestions.length,
-            },
-            update: { suggestionsRefreshedAt: now, suggestionCount: suggestions.length },
+        for (const [suggestionCount, sources] of byCount) {
+          await tx.recommendationTitle.updateMany({
+            where: { OR: sources.map((s) => ({ tmdbId: s.tmdbId, mediaType: s.mediaType })) },
+            data: { suggestionsRefreshedAt: now, suggestionCount },
           });
         }
         trace.step("commit");
@@ -497,7 +566,11 @@ export interface GraphRefreshResult {
   requiredSources: number;
   requiredCovered: number;
   sourcesRefreshed: number;
+  // Fresh, inconclusive, or not reached this run (past the per-run cap, or
+  // after an abort) — so refreshed + skipped + failed covers every source.
   sourcesSkipped: number;
+  // Sources whose suggestions fetch failed (twice: once, then with the next
+  // page) or whose write failed. They keep their old edges and are retried.
   sourcesFailed: number;
   edgesWritten: number;
   sourcesSwept: number;
@@ -515,32 +588,30 @@ export interface GraphRefreshResult {
   coWatchFailed?: boolean;
 }
 
-const EMPTY_REFRESH: GraphRefreshResult = {
-  sources: 0,
-  requiredSources: 0,
-  requiredCovered: 0,
-  sourcesRefreshed: 0,
-  sourcesSkipped: 0,
-  sourcesFailed: 0,
-  edgesWritten: 0,
-  sourcesSwept: 0,
-  titlesRated: 0,
-  verdictsDeferred: 0,
-  ratingsFailed: 0,
-  coWatchEdges: 0,
-};
+// A refresh that did nothing — the one zero literal (recommendations.ts reports
+// it for a run whose refresh threw).
+export function emptyGraphResult(): GraphRefreshResult {
+  return {
+    sources: 0,
+    requiredSources: 0,
+    requiredCovered: 0,
+    sourcesRefreshed: 0,
+    sourcesSkipped: 0,
+    sourcesFailed: 0,
+    edgesWritten: 0,
+    sourcesSwept: 0,
+    titlesRated: 0,
+    verdictsDeferred: 0,
+    ratingsFailed: 0,
+    coWatchEdges: 0,
+  };
+}
 
-// Builds the edges for every stale source, oldest-first, up to `limit`.
-// Pass Infinity for the required set — see MAX_SOURCES_PER_RUN.
-// `run` names the pass in the logs ("library prewarm", "required seeds",
-// "speculative") — the warm-library and warm-recommendations crons both call this.
-async function refreshSuggestionEdges(
-  sources: GraphSource[],
-  stats: GraphRefreshResult,
-  limit: number,
-  run: string,
-  signal?: AbortSignal,
-): Promise<void> {
+// The sources whose edges are older than SOURCE_TTL_MS (or were never built),
+// oldest first — never-built ones first of all — so a library that cannot
+// finish in one run still makes monotonic progress instead of re-picking the
+// same arbitrary slice every cycle.
+async function staleSourcesOldestFirst(sources: GraphSource[]): Promise<GraphSource[]> {
   const refreshedAt = new Map<string, Date | null>();
   for (let i = 0; i < sources.length; i += TRIAGE_PAGE) {
     const nodes = await prisma.recommendationTitle.findMany({
@@ -549,86 +620,127 @@ async function refreshSuggestionEdges(
     });
     for (const n of nodes) refreshedAt.set(key(n.tmdbId, n.mediaType), n.suggestionsRefreshedAt);
   }
-
   const cutoff = Date.now() - SOURCE_TTL_MS;
-  const stale = sources.filter((s) => {
-    const at = refreshedAt.get(key(s.tmdbId, s.mediaType));
-    return at == null || at.getTime() < cutoff;
-  });
+  const builtAt = (s: GraphSource) => refreshedAt.get(key(s.tmdbId, s.mediaType))?.getTime() ?? -1;
+  return sources.filter((s) => builtAt(s) < cutoff).sort((a, b) => builtAt(a) - builtAt(b));
+}
+
+// A source asked again with the next page, and why: its fetch failed, or it
+// answered "nothing" on a page where nothing else answered either.
+interface Carried {
+  source: GraphSource;
+  failed: boolean;
+}
+
+// What one page's answers allow (guardrail 40 — never stamp a source from a
+// failed or inconclusive lookup). Pure.
+//
+// A FAILED fetch (getSuggestionsResult "failed": a timeout, a 5xx, a 429, a
+// partial answer) is never written: the source keeps its old edges and its old
+// stamp. It used to come back as [] — and when a neighbour on the page answered,
+// that [] was stamped as "TMDB has nothing similar", deleting the source's edges
+// for a week.
+//
+// An EMPTY answer is only a real "nothing" when TMDB is demonstrably up: some
+// source on the page answered with something. A page where nothing came back
+// writes nothing. Its sources are not simply dropped, though: never-built
+// sources sort first, so a block TMDB genuinely has nothing for would form the
+// same all-empty page every run and never be stamped. They — and the failed
+// ones — are asked AGAIN with the next page and judged with its answers, so a
+// zero is only ever stamped from an answer fetched alongside a non-empty one.
+// Once only: a carried source that fails or comes back inconclusive again is
+// counted and waits for the next run.
+export function judgeSourcePage(
+  page: GraphSource[],
+  results: UpstreamResult<TmdbMedia[]>[],
+  carriedCount: number,
+): { write: FetchedSource[]; carry: Carried[]; failed: number; skipped: number } {
+  const conclusive = results.some((r) => r.kind === "ok" && r.value.length > 0);
+  const write: FetchedSource[] = [];
+  const carry: Carried[] = [];
+  let failed = 0;
+  let skipped = 0;
+  for (let j = 0; j < page.length; j++) {
+    const r = results[j];
+    const wasCarried = j < carriedCount;
+    if (r.kind !== "ok") {
+      if (wasCarried) failed++;
+      else carry.push({ source: page[j], failed: true });
+      continue;
+    }
+    if (!conclusive) {
+      if (wasCarried) skipped++;
+      else carry.push({ source: page[j], failed: false });
+      continue;
+    }
+    write.push({ source: page[j], suggestions: r.value });
+  }
+  return { write, carry, failed, skipped };
+}
+
+// One source's suggestions as an answer or a failure; a throw (a cache read
+// failing, say) is a failure like any other.
+function fetchSourceSuggestions(source: GraphSource): Promise<UpstreamResult<TmdbMedia[]>> {
+  return getSuggestionsResult(toTmdbMediaType(source.mediaType), source.tmdbId).catch((err: unknown) => upstreamFailed(err));
+}
+
+// Builds the edges for every stale source, oldest-first, up to `limit`.
+// Pass Infinity for the required set — see MAX_SOURCES_PER_RUN.
+// `run` names the pass in the logs ("library prewarm", "required seeds",
+// "speculative") — the warm-library and warm-recommendations crons both call this.
+//
+// Every source lands in exactly one of sourcesRefreshed / sourcesFailed /
+// sourcesSkipped. Skipped covers the fresh ones, the inconclusive ones, and the
+// ones this run did not reach (past `limit`, or after an abort).
+async function refreshSuggestionEdges(
+  sources: GraphSource[],
+  stats: GraphRefreshResult,
+  limit: number,
+  run: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const stale = await staleSourcesOldestFirst(sources);
   // += : this runs twice a cycle (required set, then the speculative tail).
   stats.sourcesSkipped += sources.length - stale.length;
 
-  // Oldest first (never-built sources first of all), so a library that cannot
-  // finish in one run still makes monotonic progress instead of re-picking the
-  // same arbitrary slice every cycle.
-  stale.sort((a, b) => {
-    const at = refreshedAt.get(key(a.tmdbId, a.mediaType))?.getTime() ?? -1;
-    const bt = refreshedAt.get(key(b.tmdbId, b.mediaType))?.getTime() ?? -1;
-    return at - bt;
-  });
-
   const batch = Number.isFinite(limit) ? stale.slice(0, limit) : stale;
+  stats.sourcesSkipped += stale.length - batch.length;
   let slowest: PageWrite | null = null;
-  // The empty sources of the last INCONCLUSIVE page, asked once more with the
-  // next one (see below).
-  let carried: GraphSource[] = [];
-  for (let i = 0; i < batch.length; i += SOURCE_WRITE_PAGE) {
+  let carried: Carried[] = [];
+  let next = 0;
+  for (; next < batch.length; next += SOURCE_WRITE_PAGE) {
     // Stop when the lock's timeout aborts us; ignoring it would keep this
     // running after withAdvisoryLock released the lock (guardrail 41).
     if (signal?.aborted) break;
-    const carriedCount = carried.length;
-    const page = [...carried, ...batch.slice(i, i + SOURCE_WRITE_PAGE)];
-    carried = [];
-    const results = await settleLimit(page, SOURCE_CONCURRENCY, (source) =>
-      source.mediaType === "MOVIE"
-        ? getMovieSuggestions(source.tmdbId, SUGGESTIONS_CACHE_MAX)
-        : getTVSuggestions(source.tmdbId, SUGGESTIONS_CACHE_MAX),
+    const page = [...carried.map((c) => c.source), ...batch.slice(next, next + SOURCE_WRITE_PAGE)];
+    const results = await settleLimit(page, SOURCE_CONCURRENCY, fetchSourceSuggestions);
+    const judged = judgeSourcePage(
+      page,
+      results.map((r) => (r.status === "fulfilled" ? r.value : upstreamFailed(r.reason))),
+      carried.length,
     );
+    carried = judged.carry;
+    stats.sourcesFailed += judged.failed;
+    stats.sourcesSkipped += judged.skipped;
 
-    // getMovieSuggestions/getTVSuggestions hide upstream failures and return [],
-    // so an empty list could mean "TMDB has nothing" OR "TMDB is down". Saving a
-    // wrong "nothing" would serve it to every user for a week. So: if any
-    // source in this page got results, TMDB is up and the empty ones are real
-    // answers. If the whole page came back empty, treat it as an outage and
-    // write nothing.
-    //
-    // An all-empty page is NOT simply dropped, though: never-built sources sort
-    // first, so a block of titles TMDB genuinely has nothing for would form the
-    // same all-empty page every run and never be stamped (two uncached TMDB
-    // calls each, every run, forever). Its sources are asked AGAIN with the next
-    // page and judged with that page's answers — fetched together, so the rule
-    // above is unchanged: a zero is only ever stamped from an answer fetched
-    // alongside a non-empty one. Once only: a carried source that comes back
-    // inconclusive again waits for the next run.
-    const conclusive = results.some((r) => r.status === "fulfilled" && r.value.length > 0);
-    const fetched: FetchedSource[] = [];
-    for (let j = 0; j < page.length; j++) {
-      const r = results[j];
-      if (r.status !== "fulfilled") {
-        stats.sourcesFailed++;
-        continue;
-      }
-      if (!conclusive) {
-        if (j >= carriedCount) carried.push(page[j]);
-        else stats.sourcesSkipped++;
-        continue;
-      }
-      fetched.push({ source: page[j], suggestions: r.value });
-    }
-
-    if (fetched.length === 0) continue;
+    if (judged.write.length === 0) continue;
     try {
-      const written = await writeSourcePage(fetched, run);
+      const written = await writeSourcePage(judged.write, run);
       stats.edgesWritten += written.edges;
-      stats.sourcesRefreshed += fetched.length;
+      stats.sourcesRefreshed += judged.write.length;
       if (!slowest || written.ms > slowest.ms) slowest = written;
     } catch {
       // writeSourcePage logged the cause and the time per step.
-      stats.sourcesFailed += fetched.length;
+      stats.sourcesFailed += judged.write.length;
     }
   }
-  // The last page's carry had no next page (or the run was aborted first).
-  stats.sourcesSkipped += carried.length;
+  // The last page's carry had no next page (or the run was aborted first), and
+  // an abort leaves the rest of the batch unreached.
+  for (const c of carried) {
+    if (c.failed) stats.sourcesFailed++;
+    else stats.sourcesSkipped++;
+  }
+  stats.sourcesSkipped += Math.max(0, batch.length - next);
 
   // A page normally commits in about a second. One that took a third of the
   // transaction limit is the early sign of the stall that makes pages fail, so
@@ -639,6 +751,15 @@ async function refreshSuggestionEdges(
         `Time by step: ${slowest.steps}`,
     );
   }
+}
+
+// The trending/popular pool the cold-start shelf is filled from, trending first
+// (the freshest signal; a title on both lists then reads as trending). The ONE
+// read both warmFallbackPool and the per-user buildFallbackCandidates use, so
+// the warm here is exactly what the compute then hits in the cache.
+export async function fetchFallbackPool(): Promise<TmdbMedia[]> {
+  const [trending, popMovies, popTV] = await Promise.all([getTrending(), getPopularMovies(), getPopularTV()]);
+  return [...trending, ...popMovies, ...popTV];
 }
 
 // Reads the trending/popular lists and registers them as graph nodes.
@@ -653,14 +774,12 @@ async function refreshSuggestionEdges(
 // title keeps the verdict it has.
 async function warmFallbackPool(): Promise<void> {
   try {
-    const [trending, popMovies, popTV] = await Promise.all([getTrending(), getPopularMovies(), getPopularTV()]);
-    const pool = new Map<string, { tmdbId: number; mediaType: MediaType; releaseDate: string | null }>();
-    for (const item of [...trending, ...popMovies, ...popTV]) {
-      const mediaType: MediaType = item.mediaType === "movie" ? "MOVIE" : "TV";
-      const k = key(item.id, mediaType);
-      if (!pool.has(k)) pool.set(k, { tmdbId: item.id, mediaType, releaseDate: fitOrNull(item.releaseDate, EDGE_SHORT_MAX) });
-    }
-    if (pool.size > 0) await batchCreateMany(prisma.recommendationTitle, [...pool.values()]);
+    const pool = uniqueTitleNodes((await fetchFallbackPool()).map((item) => ({
+      tmdbId: item.id,
+      mediaType: toDbMediaType(item.mediaType),
+      releaseDate: fitOrNull(item.releaseDate, EDGE_SHORT_MAX),
+    })));
+    await writeTitleNodes(prisma, pool);
   } catch (err) {
     // Non-fatal: a cold-start user's shelf is the only thing downstream, and
     // buildFallbackCandidates already treats a pool failure as inconclusive.
@@ -730,43 +849,61 @@ const COWATCH_MAX_TITLES_PER_PERSON = 500;
 const COWATCH_STATEMENT_TIMEOUT = "60s";
 const COWATCH_TX_TIMEOUT_MS = 90_000;
 
-interface CoWatchEdgeRow {
-  srcId: number;
-  srcType: string;
-  dstId: number;
-  dstType: string;
-  together: number;
-  position: number;
+// One edge row of the co-watch aggregate, checked at runtime: $queryRaw's type
+// parameter is only a promise about the SQL, not a check of what came back.
+const CoWatchEdgeRowSchema = v.object({
+  srcId: v.int(),
+  srcType: v.string(),
+  dstId: v.int(),
+  dstType: v.string(),
+  together: v.int(),
+  position: v.int(),
+});
+type CoWatchEdgeRow = Infer<typeof CoWatchEdgeRowSchema>;
+
+type CoWatchDisplay = Omit<TmdbMedia, "id" | "mediaType">;
+
+const str = (x: unknown): string | null => (typeof x === "string" ? x : null);
+const finiteOr = (x: unknown, fallback: number): number => (typeof x === "number" && Number.isFinite(x) ? x : fallback);
+
+// The display fields of a cached `:details` blob, read field by field: the blob
+// is JSON from the cache table, and these values go straight into DB columns.
+// Null when it has no usable title. Pure.
+export function coWatchDisplayFromBlob(blob: unknown): CoWatchDisplay | null {
+  if (!blob || typeof blob !== "object" || Array.isArray(blob)) return null;
+  const b = blob as Record<string, unknown>;
+  const title = str(b.title);
+  if (!title) return null;
+  const releaseDate = str(b.releaseDate);
+  const originalLanguage = str(b.originalLanguage);
+  return {
+    title,
+    overview: str(b.overview) ?? "",
+    posterPath: str(b.posterPath),
+    backdropPath: str(b.backdropPath),
+    releaseDate,
+    releaseYear: releaseDate?.slice(0, 4) ?? null,
+    voteAverage: finiteOr(b.voteAverage, 0),
+    voteCount: finiteOr(b.voteCount, 0),
+    ...(originalLanguage ? { originalLanguage } : {}),
+  };
 }
 
 // TMDB display fields for co-watch targets, from LOCAL caches only — the build
 // makes no TMDB call. Co-watched titles are by definition watched on this
 // server, so warm-library has almost always cached their details; a title with
 // neither a details blob nor a TmdbMediaCore row is left out this run.
-async function coWatchDisplay(targets: GraphSource[]): Promise<Map<string, Omit<TmdbMedia, "id" | "mediaType">>> {
-  const out = new Map<string, Omit<TmdbMedia, "id" | "mediaType">>();
+async function coWatchDisplay(targets: GraphSource[]): Promise<Map<string, CoWatchDisplay>> {
+  const out = new Map<string, CoWatchDisplay>();
   for (let i = 0; i < targets.length; i += TRIAGE_PAGE) {
     const page = targets.slice(i, i + TRIAGE_PAGE);
     const blobKeys = page.map((t) => tmdbDetailsKey(t.mediaType, t.tmdbId));
-    const blobs = await getCacheStaleMany<TmdbMedia>(blobKeys);
+    const blobs = await getCacheStaleMany<unknown>(blobKeys);
     const missing: GraphSource[] = [];
     page.forEach((t, j) => {
-      const blob = blobs.get(blobKeys[j])?.value;
-      if (blob && typeof blob.title === "string" && blob.title.length > 0) {
-        out.set(key(t.tmdbId, t.mediaType), {
-          title: blob.title,
-          overview: blob.overview ?? "",
-          posterPath: blob.posterPath ?? null,
-          backdropPath: blob.backdropPath ?? null,
-          releaseDate: blob.releaseDate ?? null,
-          releaseYear: blob.releaseDate?.slice(0, 4) ?? null,
-          voteAverage: blob.voteAverage ?? 0,
-          voteCount: blob.voteCount ?? 0,
-          originalLanguage: blob.originalLanguage,
-        });
-      } else {
-        missing.push(t);
-      }
+      const shown = coWatchDisplayFromBlob(blobs.get(blobKeys[j])?.value);
+      if (shown) out.set(key(t.tmdbId, t.mediaType), shown);
+      else missing.push(t);
     });
     if (missing.length === 0) continue;
     const cores = await prisma.tmdbMediaCore.findMany({
@@ -806,10 +943,10 @@ async function coWatchDisplay(targets: GraphSource[]): Promise<Map<string, Omit<
 // tiny) re-ran the COUNT(DISTINCT) once per candidate pair. Measured on Postgres
 // 17 with ten heavy viewers: over 120s inlined, about 1.5s materialized.
 async function queryCoWatchEdges(): Promise<CoWatchEdgeRow[]> {
-  return prisma.$transaction(
+  const raw = await prisma.$transaction(
     async (tx) => {
       await tx.$executeRaw(Prisma.sql`SELECT set_config('statement_timeout', ${COWATCH_STATEMENT_TIMEOUT}, true)`);
-      return tx.$queryRaw<CoWatchEdgeRow[]>(Prisma.sql`
+      return tx.$queryRaw<unknown>(Prisma.sql`
         WITH watched AS (
           SELECT "mediaServerUserId", "tmdbId", "mediaType", MAX("startedAt") AS at FROM "PlayHistory"
             WHERE "watched" = true AND "tmdbId" IS NOT NULL AND "mediaType" IS NOT NULL
@@ -883,6 +1020,10 @@ async function queryCoWatchEdges(): Promise<CoWatchEdgeRow[]> {
     },
     { timeout: COWATCH_TX_TIMEOUT_MS },
   );
+  const checked = check(v.array(CoWatchEdgeRowSchema), raw);
+  // A row of the wrong shape fails the build (the previous edges stay).
+  if (!checked.ok) throw new Error(`co-watch aggregate returned an unexpected row: ${checked.error}`);
+  return checked.value;
 }
 
 function asMediaType(v: string): MediaType | null {
@@ -939,12 +1080,7 @@ async function refreshCoWatchEdges(stats: GraphRefreshResult, signal?: AbortSign
         if (edges.length > 0) await batchCreateMany(tx.coWatchSuggestion, edges);
         // Targets become graph nodes so the ratings pass can give them a
         // verdict (skipDuplicates: an existing node keeps its verdict).
-        const nodes = new Map<string, { tmdbId: number; mediaType: MediaType; releaseDate: string | null }>();
-        for (const e of edges) {
-          const k = key(e.tmdbId, e.mediaType);
-          if (!nodes.has(k)) nodes.set(k, { tmdbId: e.tmdbId, mediaType: e.mediaType, releaseDate: e.releaseDate ?? null });
-        }
-        if (nodes.size > 0) await batchCreateMany(tx.recommendationTitle, [...nodes.values()]);
+        await writeTitleNodes(tx, uniqueTitleNodes(edges.map((e) => ({ tmdbId: e.tmdbId, mediaType: e.mediaType, releaseDate: e.releaseDate ?? null }))));
       },
       { timeout: BATCH_TX_TIMEOUT },
     );
@@ -977,45 +1113,111 @@ async function staleQualityTitles(
     for (const r of rows) {
       if (r.qualityRatedAt !== null && r.qualityRatedAt.getTime() >= cutoff) continue;
       out.push({ tmdbId: r.tmdbId, mediaType: r.mediaType, releaseDate: r.releaseDate });
+      if (out.length >= limit) break;
     }
   }
   return out;
 }
 
-// Resolves quality verdicts for the titles the engine will actually score.
-//
-// PRIORITY-FIRST. Nothing rates a candidate on demand, so an unrated one is
-// ranked on relevance alone until some run reaches it. The run's budget goes
-// first to the suggestions of the REQUIRED sources (what real users will
-// actually see). Whatever is left goes to the general oldest-first scan, which
-// eventually covers the trending/popular pool and the rest of the library.
-async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefreshResult, signal?: AbortSignal): Promise<void> {
-  const cutoff = new Date(Date.now() - QUALITY_TTL_MS);
-
+// The titles this run rates, PRIORITY-FIRST: the stale suggestion targets of
+// the REQUIRED sources (what real users will actually see), then the general
+// oldest-first scan with whatever budget is left — never-rated titles first.
+async function verdictWorklist(required: GraphSource[]): Promise<TitleNode[]> {
   const priority = required.length > 0
     ? await staleQualityTitles(await requiredTargets(required), MAX_QUALITY_TITLES_PER_RUN)
     : [];
   const budget = Math.max(0, MAX_QUALITY_TITLES_PER_RUN - priority.length);
+  if (budget === 0) return priority;
 
-  const filler = budget > 0
-    ? await prisma.recommendationTitle.findMany({
-        where: { OR: [{ qualityRatedAt: null }, { qualityRatedAt: { lt: cutoff } }] },
-        // nulls first: a title that has never been rated is worth more than a
-        // re-derivation of a verdict that is merely a week old.
-        orderBy: { qualityRatedAt: { sort: "asc", nulls: "first" } },
-        take: budget,
-        select: { tmdbId: true, mediaType: true, releaseDate: true },
-      })
-    : [];
-
+  const filler = await prisma.recommendationTitle.findMany({
+    where: { OR: [{ qualityRatedAt: null }, { qualityRatedAt: { lt: new Date(Date.now() - QUALITY_TTL_MS) } }] },
+    // nulls first: a title that has never been rated is worth more than a
+    // re-derivation of a verdict that is merely a week old.
+    orderBy: { qualityRatedAt: { sort: "asc", nulls: "first" } },
+    take: budget,
+    select: { tmdbId: true, mediaType: true, releaseDate: true },
+  });
   // The filler scan can re-list a priority title; rating one twice would spend
   // budget on a verdict already written this run.
-  const seen = new Set(priority.map((t) => key(t.tmdbId, t.mediaType)));
-  const stale = [...priority];
-  for (const row of filler) {
-    if (seen.has(key(row.tmdbId, row.mediaType))) continue;
-    stale.push(row);
+  return uniqueTitleNodes([...priority, ...filler]);
+}
+
+// One batch's titles through the ratings providers, as bare TmdbMedia.
+//
+// blocking:true fetches the misses inline; this runs inside a cron request
+// whose response must not be sent before the verdicts are written.
+//
+// deferToAfter:false keeps the rest inline too. blocking:true alone still hands
+// every stale row's refresh to after(), and Next starts all of a request's
+// after() callbacks at once when the response closes. At one callback per
+// QUALITY_BATCH that is up to 50 batches of MDBList POSTs and OMDB/TMDB
+// refreshes landing together, on top of whichever cron runs next. Inline, each
+// batch's refresh finishes before the next batch begins, and it stays inside
+// the advisory lock this run holds.
+function rateTitles(slice: TitleNode[]): Promise<TmdbMedia[]> {
+  return attachRatingsUnified(
+    slice.map((c) => ({
+      id: c.tmdbId,
+      mediaType: toTmdbMediaType(c.mediaType),
+      // Neither field is a lookup key — MDBList and OMDB are both queried
+      // by tmdbId (+ releaseDate) — so there is nothing to carry here.
+      title: "",
+      overview: "",
+      posterPath: null,
+      backdropPath: null,
+      releaseDate: c.releaseDate,
+      releaseYear: c.releaseDate?.slice(0, 4) ?? null,
+      // Deliberately zero, and the stored verdict is deliberately TMDB-FREE:
+      // the prior's TMDB term is scored per CANDIDATE at read time, where that
+      // candidate's own voteAverage/voteCount are known (they ride on the edge
+      // row). Feeding a placebo pair in here would bake a wrong TMDB
+      // contribution into a verdict shared by every viewer — qualityScoreOf
+      // gates that term on the vote count, so zero is exactly "TMDB abstains",
+      // which is what this needs.
+      voteAverage: 0,
+      voteCount: 0,
+    })),
+    { blocking: true, deferToAfter: false, background: true },
+  );
+}
+
+// The verdict rows a rated batch earns. A NULL verdict ("nobody answered") can
+// only be trusted if the providers were reachable: attachRatingsUnified hides
+// its own upstream failures, so an outage would otherwise stamp week-long null
+// verdicts, and the obscurity penalty would then demote every low-vote title it
+// touched. A real verdict is authoritative however the rest of the batch fared
+// — a provider answered for THIS title. Pure.
+export function verdictRowsFor(
+  rated: TmdbMedia[],
+  providersAnswering: boolean,
+): { rows: { tmdbId: number; mediaType: MediaType; quality: number | null; evidence: number }[]; deferred: number } {
+  const rows: { tmdbId: number; mediaType: MediaType; quality: number | null; evidence: number }[] = [];
+  let deferred = 0;
+  for (const media of rated) {
+    const verdict = qualityScoreOf(media);
+    if (verdict === null && !providersAnswering) {
+      deferred++;
+      continue;
+    }
+    rows.push({ tmdbId: media.id, mediaType: toDbMediaType(media.mediaType), quality: verdict?.quality ?? null, evidence: verdict?.evidence ?? 0 });
   }
+  return { rows, deferred };
+}
+
+// When a verdict row is stamped. While a provider was not answering, a real
+// verdict may rest on fewer sources than the title has, so it is stamped to
+// fall stale after PARTIAL_VERDICT_RECHECK_MS rather than QUALITY_TTL_MS: still
+// written (guardrail 40), but re-derived within a day instead of in a week.
+export function verdictStamp(providersAnswering: boolean, now: number = Date.now()): Date {
+  return new Date(providersAnswering ? now : now - QUALITY_TTL_MS + PARTIAL_VERDICT_RECHECK_MS);
+}
+
+// Resolves quality verdicts for the titles the engine will actually score.
+//
+// PRIORITY-FIRST. Nothing rates a candidate on demand, so an unrated one is
+// ranked on relevance alone until some run reaches it (verdictWorklist).
+async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefreshResult, signal?: AbortSignal): Promise<void> {
+  const stale = await verdictWorklist(required);
   if (stale.length === 0) return;
 
   for (let i = 0; i < stale.length; i += QUALITY_BATCH) {
@@ -1033,82 +1235,36 @@ async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefre
     const mdblistFailuresBefore = mdblistTransportFailureCount();
     let rated: TmdbMedia[];
     try {
-      // blocking:true fetches the misses inline; this runs inside a cron request
-      // whose response must not be sent before the verdicts are written.
-      //
-      // deferToAfter:false keeps the rest inline too. blocking:true alone still
-      // hands every stale row's refresh to after(), and Next starts all of a
-      // request's after() callbacks at once when the response closes. At one
-      // callback per QUALITY_BATCH that is up to 50 batches of MDBList POSTs and
-      // OMDB/TMDB refreshes landing together, on top of whichever cron runs next.
-      // Inline, each batch's refresh finishes before the next batch begins, and
-      // it stays inside the advisory lock this run holds.
-      rated = await attachRatingsUnified(
-        slice.map((c) => ({
-          id: c.tmdbId,
-          mediaType: toTmdbMediaType(c.mediaType),
-          // Neither field is a lookup key — MDBList and OMDB are both queried
-          // by tmdbId (+ releaseDate) — so there is nothing to carry here.
-          title: "",
-          overview: "",
-          posterPath: null,
-          backdropPath: null,
-          releaseDate: c.releaseDate,
-          releaseYear: c.releaseDate?.slice(0, 4) ?? null,
-          // Deliberately zero, and the stored verdict is deliberately
-          // TMDB-FREE: the prior's TMDB term is scored per CANDIDATE at read
-          // time, where that candidate's own voteAverage/voteCount are known
-          // (they ride on the edge row). Feeding a placebo pair in here would
-          // bake a wrong TMDB contribution into a verdict shared by every
-          // viewer — qualityScoreOf gates that term on the vote count, so zero
-          // is exactly "TMDB abstains", which is what this needs.
-          voteAverage: 0,
-          voteCount: 0,
-        })),
-        { blocking: true, deferToAfter: false, background: true },
-      );
+      rated = await rateTitles(slice);
     } catch (err) {
       stats.ratingsFailed += slice.length;
       console.warn("[recommendation-graph] ratings lookup failed for a batch; verdicts unchanged:", err);
       continue;
     }
 
-    // A NULL verdict ("nobody answered") can only be trusted if the providers
-    // were reachable. attachRatingsUnified hides its own upstream failures, so
-    // the try/catch above does not fire on a network outage. Without this check
-    // an outage would stamp week-long null verdicts, and the obscurity penalty
-    // would then demote every low-vote title it touched.
-    //
-    // Checked AFTER the batch so a lockout tripped mid-batch is seen. This is
-    // why the transport circuit breakers (omdb.ts, mdblist.ts) matter: without
-    // them a run of timeouts would never set this flag. MDBList had none until
-    // 2026-10-28, so a night of MDBList timeouts stamped null verdicts here.
+    // The try/catch above does not fire on a network outage (attachRatingsUnified
+    // hides its own upstream failures), so whether the providers answered is
+    // read off their own state AFTER the batch, so a lockout tripped mid-batch
+    // is seen. This is why the transport circuit breakers (omdb.ts, mdblist.ts)
+    // matter: without them a run of timeouts would never set this flag. MDBList
+    // had none until 2026-10-28, so a night of MDBList timeouts stamped null
+    // verdicts here.
     //
     // The breaker alone still let the FIRST batch of a storm through: it trips
-    // on the fifth failure in a row, and one batch sends about three MDBList
-    // requests. So any MDBList request that got no answer during this batch
-    // also counts as not answering.
+    // on the fifth failure in a row, and one batch sends about two MDBList
+    // requests (a POST per media type). So any MDBList request that got no
+    // answer during this batch also counts as not answering.
     //
     // MDBList also reads as not answering once this cron is down to the reserve
     // the plan setting keeps for pages: it stopped asking, so a null is not a verdict.
+    //
+    // And a key MDBList refused is MDBList not answering either.
     const mdblistFailedInBatch = mdblistTransportFailureCount() !== mdblistFailuresBefore;
-    const providersAnswering = !isMdblistQuotaLocked(BACKGROUND_RATINGS) && !isOmdbQuotaLocked() && !mdblistFailedInBatch;
+    const providersAnswering = !isMdblistQuotaLocked(BACKGROUND_RATINGS) && !isOmdbQuotaLocked() && !mdblistFailedInBatch && !isMdblistKeyRejected();
 
-    const verdicts: Prisma.Sql[] = [];
-    for (const media of rated) {
-      const mediaType: MediaType = media.mediaType === "movie" ? "MOVIE" : "TV";
-      const verdict = qualityScoreOf(media);
-      // A real verdict is authoritative however the rest of the batch fared —
-      // a provider answered for THIS title. Only the nulls are in question.
-      if (verdict === null && !providersAnswering) {
-        stats.verdictsDeferred++;
-        continue;
-      }
-      verdicts.push(
-        Prisma.sql`(${media.id}::int, ${mediaType}::"MediaType", ${verdict?.quality ?? null}::float8, ${verdict?.evidence ?? 0}::float8)`,
-      );
-    }
-    if (verdicts.length === 0) continue;
+    const { rows, deferred } = verdictRowsFor(rated, providersAnswering);
+    stats.verdictsDeferred += deferred;
+    if (rows.length === 0) continue;
 
     // ONE statement per batch, in place of an awaited round trip per title.
     // qualityRatedAt is stamped even when nothing answered — PROVIDED the
@@ -1116,16 +1272,19 @@ async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefre
     // state the obscurity damp keys on, and leaving it null would both lose
     // that verdict and re-ask every run forever. A failed write leaves the
     // whole batch unrated, so it is re-asked next run.
+    const values = rows.map((r) =>
+      Prisma.sql`(${r.tmdbId}::int, ${r.mediaType}::"MediaType", ${r.quality}::float8, ${r.evidence}::float8)`,
+    );
     try {
       stats.titlesRated += await prisma.$executeRaw(Prisma.sql`
         UPDATE "RecommendationTitle" AS r
-        SET "quality" = v."quality", "evidence" = v."evidence", "qualityRatedAt" = ${new Date()}
-        FROM (VALUES ${Prisma.join(verdicts)}) AS v("tmdbId", "mediaType", "quality", "evidence")
+        SET "quality" = v."quality", "evidence" = v."evidence", "qualityRatedAt" = ${verdictStamp(providersAnswering)}
+        FROM (VALUES ${Prisma.join(values)}) AS v("tmdbId", "mediaType", "quality", "evidence")
         WHERE r."tmdbId" = v."tmdbId" AND r."mediaType" = v."mediaType"
       `);
     } catch (err) {
-      stats.ratingsFailed += verdicts.length;
-      console.error(`[recommendation-graph] verdict write failed for a batch of ${verdicts.length}; they are re-asked next run:`, err);
+      stats.ratingsFailed += rows.length;
+      console.error(`[recommendation-graph] verdict write failed for a batch of ${rows.length}; they are re-asked next run:`, err);
     }
   }
 }
@@ -1217,7 +1376,7 @@ export async function prewarmSuggestionEdges(opts: { signal?: AbortSignal } = {}
   // never enter a required set (it is built from ACTIVE users' seeds), so this is
   // the only pass that reaches them before the person signs back in.
   const { sources } = await collectGraphSources();
-  const stats: GraphRefreshResult = { ...EMPTY_REFRESH };
+  const stats: GraphRefreshResult = emptyGraphResult();
   if (sources.length > 0) await refreshSuggestionEdges(sources, stats, MAX_PREWARM_EDGE_SOURCES_PER_RUN, "library prewarm", opts.signal);
 
   return {
@@ -1257,9 +1416,9 @@ async function countCovered(required: GraphSource[]): Promise<number> {
 export async function refreshRecommendationGraph(
   opts: { required?: GraphSource[]; signal?: AbortSignal } = {},
 ): Promise<GraphRefreshResult> {
-  if (!tmdbAuth()) return { ...EMPTY_REFRESH };
+  if (!tmdbAuth()) return emptyGraphResult();
 
-  const stats: GraphRefreshResult = { ...EMPTY_REFRESH };
+  const stats: GraphRefreshResult = emptyGraphResult();
 
   const requiredAll = opts.required ?? [];
   const required = requiredAll.slice(0, MAX_REQUIRED_SOURCES);

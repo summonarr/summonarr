@@ -4,6 +4,10 @@ import { hasPermission, Permission } from "@/lib/permissions";
 import { requireFeature } from "@/lib/features";
 import { getMediaPlayStats } from "@/lib/play-history";
 import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
+import { prisma } from "@/lib/prisma";
+import { isTmdbIdInRange, parseTmdbIdParam } from "@/lib/tmdb-id";
+import { first, type PageSearchParams } from "@/lib/search-params";
+import { dominantMediaType, parseTitleMediaType, sampleDistributions } from "@/lib/activity-title-detail";
 import {
   TitleDetailView,
   type TitleDetailData,
@@ -11,34 +15,38 @@ import {
 
 export const dynamic = "force-dynamic";
 
-const COMPLETION_BUCKETS = [
-  "0-25%",
-  "25-50%",
-  "50-75%",
-  "75-95%",
-  "95-100%",
-];
-
 export default async function MediaActivityPage({
   params,
   searchParams,
 }: {
   params: Promise<{ tmdbId: string }>;
-  searchParams: Promise<{ type?: string }>;
+  searchParams: Promise<PageSearchParams>;
 }) {
   await requireFeature("feature.admin.activity");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const { tmdbId: tmdbIdStr } = await params;
-  const tmdbId = parseInt(tmdbIdStr, 10);
-  // tmdbId is an INT4 column: anything past it would throw in Postgres (500).
-  if (!Number.isInteger(tmdbId) || tmdbId < 1 || tmdbId > 2147483647) notFound();
+  // Canonical digits only, inside INT4 (the column's range: past it Postgres
+  // throws, a 500).
+  const tmdbId = parseTmdbIdParam(tmdbIdStr);
+  if (tmdbId === null || !isTmdbIdInRange(tmdbId)) notFound();
 
   // TMDB ids are namespaced per type, so a movie and a show can share one id.
   // When the linking surface passes ?type=, scope the stats to that media type.
-  const { type } = await searchParams;
-  const mediaType = type === "TV" || type === "tv" ? "TV" : type === "MOVIE" || type === "movie" ? "MOVIE" : undefined;
+  const mediaType = parseTitleMediaType(first((await searchParams).type));
+  // Untyped, and the id has plays as a film AND as a show: the stats would add
+  // the two titles together and link the library to whichever won, so go to
+  // the typed page of the one with more plays.
+  if (!mediaType) {
+    const typed = await prisma.playHistory.groupBy({
+      by: ["mediaType"],
+      where: { tmdbId, mediaType: { not: null } },
+      _count: { _all: true },
+    });
+    const dominant = dominantMediaType(typed.map((g) => ({ mediaType: g.mediaType, count: g._count._all })));
+    if (dominant) redirect(`/admin/activity/media/${tmdbId}?type=${dominant}`);
+  }
 
   const stats = await getMediaPlayStats(tmdbId, mediaType);
   // No plays at all (an unknown id, a negative one, or a title whose plays were
@@ -61,27 +69,7 @@ export default async function MediaActivityPage({
 
   // Per-play distributions getMediaPlayStats doesn't aggregate — derived from
   // the recent-plays sample (≤50 rows), labelled "recent sample" in the UI.
-  const completionCounts = [0, 0, 0, 0, 0];
-  const platformMap = new Map<string, number>();
-  let watchedCount = 0;
-  for (const p of stats.recentPlays) {
-    if (p.watched) watchedCount += 1;
-    if (p.platform) {
-      platformMap.set(p.platform, (platformMap.get(p.platform) ?? 0) + 1);
-    }
-    const pct =
-      p.duration > 0 ? (p.playDuration / p.duration) * 100 : 0;
-    const idx =
-      pct >= 95 ? 4 : pct >= 75 ? 3 : pct >= 50 ? 2 : pct >= 25 ? 1 : 0;
-    completionCounts[idx] += 1;
-  }
-  const completionHist = COMPLETION_BUCKETS.map((label, i) => ({
-    label,
-    count: completionCounts[i],
-  }));
-  const platforms = [...platformMap.entries()]
-    .map(([label, count]) => ({ label, count }))
-    .sort((a, b) => b.count - a.count);
+  const { watchedCount, completionHist, platforms } = sampleDistributions(stats.recentPlays);
 
   const data: TitleDetailData = {
     tmdbId,
@@ -95,6 +83,7 @@ export default async function MediaActivityPage({
     watchedCount,
     recentSampleSize: stats.recentPlays.length,
     libraryHref: stats.mediaType === "TV" ? `/tv/${tmdbId}` : `/movie/${tmdbId}`,
+    timeZone: stats.timeZone,
     topViewers: stats.topViewers,
     transcodeRatio: stats.transcodeRatio,
     resolutionBreakdown: stats.resolutionBreakdown,

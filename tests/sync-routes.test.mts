@@ -16,8 +16,9 @@
 //     (recentOnly = rawBody.full !== true): full drives Plex /all + a wholesale
 //     deleteMany, recentOnly drives Plex /recentlyAdded + Jellyfin's ~2h
 //     MinDateLastSaved window (RECENT_WINDOW_MS) and is INSERT-ONLY — any
-//     library-table deleteMany on the recentOnly path beyond Plex's
-//     ratingKey-scoped stale-mapping clear fails these tests loudly, because an
+//     library-table deleteMany on the recentOnly path beyond the stale-mapping
+//     clears (Plex: the incoming ratingKeys; Jellyfin: a stored row every copy
+//     of which arrives under another title) fails these tests loudly, because an
 //     empty window would otherwise nuke the whole library;
 //   - full-replace atomicity: the deleteMany and the batchCreateMany repopulate
 //     run inside ONE $transaction callback (with the advisory lock and
@@ -58,11 +59,15 @@ const pgProto = Client.prototype as unknown as {
   query: (text: string, values?: unknown[]) => Promise<PgResult>;
   end: () => Promise<void>;
 };
+// The Client each lock id was taken on, so a test can drop that connection
+// while held work is running (withAdvisoryLock aborts its signal on "end").
+const lockClients = new Map<number, { emit: (event: string) => boolean }>();
 pgProto.connect = async () => {};
-pgProto.query = async (text, values) => {
+pgProto.query = async function (this: { emit: (event: string) => boolean }, text, values) {
   if (text.includes("pg_try_advisory_lock")) {
     const lockId = Number((values ?? [])[0]);
     pgLockCalls.push({ op: "try", lockId });
+    lockClients.set(lockId, this);
     return { rows: [{ acquired: lockAcquire(lockId) }] };
   }
   if (text.includes("pg_advisory_unlock")) {
@@ -127,6 +132,7 @@ let casCalls = 0;
 // behaviour it was written against.
 let casWinnerIds: string[] = [];
 const requestUpdateManys: unknown[] = [];
+const mediaRequestFindManyWheres: Array<Record<string, unknown> | undefined> = [];
 // clearDeletionVotesForTmdbs' two writes + the in-app inbox fan-out. All three
 // are only reachable once the CAS actually returns a winner.
 const deletionVoteDeleteWheres: Array<Record<string, unknown> | undefined> = [];
@@ -156,8 +162,22 @@ function existingRowsFor(store: Map<string, number[]>, args: FindManyByTmdbArgs)
   return known.filter((id) => inList.includes(id)).map((tmdbId) => ({ tmdbId }));
 }
 
+// Stored rows the Jellyfin recentOnly write reads INSIDE its locked transaction
+// (the rows holding an incoming item id, for the re-identification clear).
+// Empty by default: no stored row holds an incoming copy.
+type StoredJellyfinRow = { tmdbId: number; mediaType: string; serverInstance: string; jellyfinItemId: string | null; jellyfinItemIds: string[] };
+const storedJellyfinRows: StoredJellyfinRow[] = [];
+
 function recordingDelegate(rec: TxRecord, model: string) {
   return {
+    findMany: async (args: { where: { serverInstance?: string; jellyfinItemId?: { in: string[] } } }) => {
+      rec.ops.push({ model, method: "findMany", args });
+      if (model !== "jellyfinLibraryItem") return [];
+      const ids = args.where.jellyfinItemId?.in ?? [];
+      return storedJellyfinRows
+        .filter((r) => r.serverInstance === args.where.serverInstance && r.jellyfinItemId !== null && ids.includes(r.jellyfinItemId))
+        .map(({ tmdbId, mediaType, jellyfinItemId, jellyfinItemIds }) => ({ tmdbId, mediaType, jellyfinItemId, jellyfinItemIds }));
+    },
     deleteMany: async (args?: unknown) => {
       rec.ops.push({ model, method: "deleteMany", args: args ?? null });
       return { count: 0 };
@@ -259,7 +279,10 @@ const fakePrisma = {
     findMany: async (args: FindManyByTmdbArgs) => existingRowsFor(existingJellyfinByType, args),
   },
   mediaRequest: {
-    findMany: async () => pendingRequests.map((r) => ({ ...r })),
+    findMany: async (args?: { where?: Record<string, unknown> }) => {
+      mediaRequestFindManyWheres.push(args?.where);
+      return pendingRequests.map((r) => ({ ...r }));
+    },
     updateMany: async (args: unknown) => {
       requestUpdateManys.push(args);
       return { count: 0 };
@@ -375,13 +398,14 @@ const fakePrisma = {
 // Dynamic imports so the env/global stubs above genuinely precede the module
 // graph (static imports would hoist past them).
 const { NextRequest } = await import("next/server");
-const { BATCH_TX_TIMEOUT, parseCronLastRun } = await import("../src/lib/cron-auth.ts");
+const { BATCH_TX_TIMEOUT } = await import("../src/lib/batch-write.ts");
+const { parseCronLastRun } = await import("../src/lib/cron-history.ts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { POST: postPlexSync, GET: getPlexSync } = await import("../src/app/api/sync/plex/route.ts");
 const { POST: postJellyfinSync, GET: getJellyfinSync } = await import("../src/app/api/sync/jellyfin/route.ts");
 const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
-const { CRON_SKIPPED_HEADER } = await import("../src/lib/cron-auth.ts");
+const { CRON_SKIPPED_HEADER } = await import("../src/lib/cron-history.ts");
 
 type Req = InstanceType<typeof NextRequest>;
 
@@ -574,6 +598,7 @@ async function settleFireAndForget(): Promise<void> {
 
 beforeEach(() => {
   pgLockCalls.length = 0;
+  lockClients.clear();
   lockAcquire = () => true;
   resetLogDedup(); // warnOnChange is process-wide; a prior test's signature must not mute this one's warn
   fetchCalls.length = 0;
@@ -586,15 +611,19 @@ beforeEach(() => {
   settings.clear();
   existingPlexByType.clear();
   existingJellyfinByType.clear();
+  storedJellyfinRows.length = 0;
   plexFindManyWheres.length = 0;
   failCreateManyOn = null;
   failSwapOnTables.clear();
   libraryStagingLoads.length = 0;
   libraryStagingDeletes.length = 0;
+  episodeStagingLoads.length = 0;
+  episodeStagingDeletes.length = 0;
   pendingRequests = [];
   requesterRows = [];
   sonarrWantedRows.length = 0;
   requestUpdateManys.length = 0;
+  mediaRequestFindManyWheres.length = 0;
   casCalls = 0;
   casWinnerIds = [];
   deletionVoteDeleteWheres.length = 0;
@@ -920,7 +949,7 @@ test("as the ONLY Plex server it still rewrites the episode cache — single-ser
 
 // One movie section (empty) + one show section with TMDB-identified shows
 // whose type=4 episode listing carries on-disk files — the data the full
-// path's skipShowFilePaths patch runs on.
+// path's show file-path patch runs on.
 function plexShowResponder(shows: Array<{ ratingKey: string; tmdbId: number; file: string }>): (url: URL) => Response {
   return (url) => {
     if (url.pathname === "/library/sections") {
@@ -957,8 +986,8 @@ test("plex { full: true } show file-path patch: ONE VALUES-joined UPDATE for eve
   assert.equal(res.status, 200);
   await settleFireAndForget();
 
-  // The full replace wrote the show rows pathless (skipShowFilePaths on the
-  // lone-server full path) …
+  // The full replace wrote the show rows pathless (the TV walk reads no
+  // path) …
   const tvRows = stagedLibraryRows<{ mediaType: string; plexRatingKey: string; filePath: string | null }>("plexLibraryItemStaging")
     .filter((r) => r.mediaType === "TV");
   assert.deepEqual(tvRows.map((r) => [r.plexRatingKey, r.filePath]).sort(), [["show-a", null], ["show-b", null]]);
@@ -1106,6 +1135,48 @@ test("jellyfin recentOnly episode refresh deletes ONLY the episodes it re-insert
   );
 });
 
+test("plex recentOnly merges ONLY the window's shows into the episode cache — no whole-library show walk and no whole-source rewrite (guardrail 13)", async () => {
+  // A recentOnly resync used to rebuild the WHOLE show map and rewrite the
+  // whole Plex episode cache, however small the window. It now walks only the
+  // shows /recentlyAdded returned and merges their episodes in, scoped to the
+  // tuples it re-inserts.
+  configurePlex();
+  respond = (url) => {
+    if (url.pathname === "/library/sections") {
+      return okJson({ MediaContainer: { Directory: [
+        { key: "1", title: "Movies", type: "movie" },
+        { key: "2", title: "TV", type: "show" },
+      ] } });
+    }
+    if (url.pathname === "/library/sections/1/recentlyAdded") return okJson({ MediaContainer: { totalSize: 0, Metadata: [] } });
+    if (url.pathname === "/library/sections/2/recentlyAdded") {
+      return okJson({ MediaContainer: { totalSize: 1, Metadata: [{ ratingKey: "show-new", type: "show", title: "New Show", Guid: [{ id: "tmdb://1399" }] }] } });
+    }
+    if (url.pathname === "/library/sections/2/all" && url.searchParams.get("type") === "4") {
+      return okJson({ MediaContainer: { totalSize: 2, Metadata: [
+        { grandparentRatingKey: "show-new", parentIndex: 1, index: 1, Media: [{ Part: [{ file: "/tv/new/s01e01.mkv" }] }] },
+        { grandparentRatingKey: "show-old", parentIndex: 4, index: 9, Media: [{ Part: [{ file: "/tv/old/s04e09.mkv" }] }] },
+      ] } });
+    }
+    throw new Error(`unexpected Plex fetch ${url}`);
+  };
+
+  const res = await postPlexSync(plexReq({ headers: AS_CRON })); // no body ⇒ recentOnly
+  assert.equal(res.status, 200);
+  await settleFireAndForget();
+
+  assert.ok(
+    !fetchCalls.some((c) => c.url.pathname === "/library/sections/2/all" && c.url.searchParams.get("type") === "2"),
+    "recentOnly must not page the whole show list to rebuild a library-wide map",
+  );
+  assert.deepEqual(episodeStagingLoads, [], "recentOnly must not stage a whole-source episode rewrite");
+  const episodeOps = transactions.flatMap((t) => t.ops).filter((o) => o.model === "tVEpisodeCache");
+  assert.deepEqual(episodeOps.map((o) => [o.method, o.args]), [
+    ["deleteMany", { where: { source: "plex", OR: [{ tmdbId: 1399, seasonNumber: 1, episodeNumber: { in: [1] } }] } }],
+    ["createMany", { data: [{ source: "plex", tmdbId: 1399, seasonNumber: 1, episodeNumber: 1, addedAt: null }], skipDuplicates: true }],
+  ], "only the window's show reaches the cache, and the delete is scoped to its re-inserted tuples");
+});
+
 test("the full flag is strictly boolean true: a truthy non-true value and a malformed body both fall back to recentOnly", async () => {
   configurePlex();
   respond = plexMovieResponder([]);
@@ -1126,6 +1197,31 @@ test("the full flag is strictly boolean true: a truthy non-true value and a malf
   const paths = fetchCalls.map((c) => c.url.pathname);
   assert.equal(paths.filter((p) => p === "/library/sections/1/recentlyAdded").length, 2);
   assert.ok(!paths.includes("/library/sections/1/all"));
+});
+
+test("a recentOnly resync reads only the requests for the titles it saw — and none at all for an empty window", async () => {
+  // Only a request for a title in this run's window can match, so the
+  // incremental path need not read the whole PENDING/APPROVED backlog.
+  configurePlex();
+  respond = plexMovieResponder([PLEX_ITEM_FULL, PLEX_ITEM_MIN]);
+  assert.equal((await postPlexSync(plexReq({ headers: AS_CRON }))).status, 200);
+  await settleFireAndForget();
+  assert.deepEqual(mediaRequestFindManyWheres, [
+    { status: { in: ["PENDING", "APPROVED"] }, OR: [{ mediaType: "MOVIE", tmdbId: { in: [603, 604] } }] },
+  ]);
+
+  mediaRequestFindManyWheres.length = 0;
+  respond = plexMovieResponder([]);
+  assert.equal((await postPlexSync(plexReq({ headers: AS_CRON }))).status, 200);
+  await settleFireAndForget();
+  assert.deepEqual(mediaRequestFindManyWheres, [], "an empty window can match nothing");
+
+  // A FULL resync still reads every pending request (a library-sized IN list
+  // would overrun the bind-parameter limit).
+  respond = plexMovieResponder([PLEX_ITEM_FULL]);
+  assert.equal((await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }))).status, 200);
+  await settleFireAndForget();
+  assert.deepEqual(mediaRequestFindManyWheres, [{ status: { in: ["PENDING", "APPROVED"] } }]);
 });
 
 test("guardrail 13: an EMPTY recentOnly window deletes NOTHING on either source (the nuke guard)", async () => {
@@ -1177,13 +1273,57 @@ test("jellyfin recentOnly rides a ~2h MinDateLastSaved window (RECENT_WINDOW_MS)
     `MinDateLastSaved must sit exactly RECENT_WINDOW_MS (2h) in the past — got ${minDateParam}`,
   );
 
-  // Guardrail 13: the Jellyfin recentOnly path has NO delete of any kind.
+  // Guardrail 13: with no stored row re-identified, the Jellyfin recentOnly
+  // path has NO delete of any kind.
   assertNoLibraryDeletes("jellyfinLibraryItem");
   const creates = opsFor("jellyfinLibraryItem", "createMany");
   assert.deepEqual(
     creates.map((c) => c.args),
     [{ data: [JF_ROW_551], skipDuplicates: true }],
     "recentOnly must insert only the NEW tmdbId, with skipDuplicates on",
+  );
+});
+
+test("jellyfin recentOnly drops a stored row Jellyfin RE-IDENTIFIED — only when every copy it holds moved, and only on this server", async () => {
+  // The Plex twin clears a stale ratingKey mapping; the Jellyfin path had no
+  // equivalent, so an item re-identified in Jellyfin left its old title's row
+  // reading as available until the next full sync.
+  configureJellyfin();
+  respond = jellyfinMovieResponder([
+    JF_ITEM_MIN, // jf-551 → 551
+    { Id: "jf-552", Name: "Third", ProviderIds: { Tmdb: "552" } },
+  ]);
+  storedJellyfinRows.push(
+    // Its only copy now arrives as 551: the old title is gone from this server.
+    { tmdbId: 900, mediaType: "MOVIE", serverInstance: "", jellyfinItemId: "jf-551", jellyfinItemIds: ["jf-551"] },
+    // Its canonical copy moved, but another copy still IS 901: the row stays.
+    { tmdbId: 901, mediaType: "MOVIE", serverInstance: "", jellyfinItemId: "jf-552", jellyfinItemIds: ["jf-552", "jf-901-other"] },
+    // Another server's row is never read (item ids are server-local).
+    { tmdbId: 902, mediaType: "MOVIE", serverInstance: "remote", jellyfinItemId: "jf-551", jellyfinItemIds: ["jf-551"] },
+  );
+
+  const res = await postJellyfinSync(jfReq({ headers: AS_CRON })); // no body ⇒ recentOnly
+  assert.equal(res.status, 200);
+  await settleFireAndForget();
+
+  const tx = libraryTx("jellyfinLibraryItem");
+  assert.deepEqual(
+    tx.ops.map((o) => `${o.model}.${o.method}`),
+    ["$executeRaw.raw", "jellyfinLibraryItem.findMany", "jellyfinLibraryItem.deleteMany", "jellyfinLibraryItem.createMany"],
+    "lock first, then the read, the clear and the insert — all in ONE transaction",
+  );
+  assert.match(String(tx.ops[0].args), /pg_advisory_xact_lock\(2001, 2\)/);
+  assert.deepEqual(
+    opsFor("jellyfinLibraryItem", "findMany").map((o) => o.args),
+    [{
+      where: { serverInstance: "", jellyfinItemId: { in: ["jf-551", "jf-552"] } },
+      select: { tmdbId: true, mediaType: true, jellyfinItemId: true, jellyfinItemIds: true },
+    }],
+  );
+  assert.deepEqual(
+    opsFor("jellyfinLibraryItem", "deleteMany").map((o) => o.args),
+    [{ where: { serverInstance: "", OR: [{ tmdbId: 900, mediaType: "MOVIE" }] } }],
+    "only the row whose every copy was re-identified, scoped to this server",
   );
 });
 
@@ -1643,6 +1783,64 @@ test("i18n: the admin Resync's error follows the caller's language; cron (no hin
   assert.equal(fetchCalls.length, 0);
 });
 
+// ── the episode refresh runs under the Resync's lock (guardrail 41) ─────────
+//
+// The refresh crawls the whole TV library and used to run detached after the
+// lock was released: back-to-back resyncs stacked crawls, an older one could
+// land last, and a lost lock never reached it. The caller is still answered as
+// soon as the library half is done; the lock is released only once the refresh
+// has finished.
+
+// The Jellyfin series fixture with its Episode listing held until released.
+function gatedJellyfinSeries(): { respond: (url: URL) => Response | Promise<Response>; release: () => void } {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const base = jellyfinSeriesResponder();
+  return {
+    respond: (url) => (url.searchParams.get("IncludeItemTypes") === "Episode" ? gate.then(() => base(url)) : base(url)),
+    release,
+  };
+}
+const unlocked = (lockId: number) => pgLockCalls.some((c) => c.op === "unlock" && c.lockId === lockId);
+// Waits on the lock's own release — an observable step, never a fixed sleep.
+async function untilUnlocked(lockId: number): Promise<void> {
+  for (let i = 0; i < 400 && !unlocked(lockId); i++) await new Promise<void>((r) => setImmediate(r));
+  assert.ok(unlocked(lockId), `lock ${lockId} was never released`);
+}
+const episodeCacheOps = () => transactions.flatMap((t) => t.ops).filter((o) => o.model === "tVEpisodeCache");
+
+test("a Resync answers before its episode refresh finishes, but holds the lock until the refresh has written", async () => {
+  configureJellyfin();
+  const gated = gatedJellyfinSeries();
+  respond = gated.respond;
+
+  const res = await postJellyfinSync(jfReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(res.status, 200, "the caller is answered while the episode crawl is still running");
+  assert.equal(unlocked(2112), false, "the lock must stay held while the episode refresh runs");
+  assert.deepEqual(episodeCacheOps(), [], "precondition: the refresh has not written yet");
+
+  gated.release();
+  await untilUnlocked(2112);
+  assert.ok(
+    episodeCacheOps().some((o) => o.method === "deleteMany"),
+    "the lock is released only after the episode cache was written",
+  );
+});
+
+test("a held episode refresh whose lock was LOST does not write (guardrail 41)", async () => {
+  configureJellyfin();
+  const gated = gatedJellyfinSeries();
+  respond = gated.respond;
+
+  const res = await postJellyfinSync(jfReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(res.status, 200);
+  lockClients.get(2112)?.emit("end"); // the lock's connection dropped: another resync may take it now
+  gated.release();
+  await untilUnlocked(2112);
+  assert.equal(episodeFetches().length, 1, "precondition: the refresh did fetch");
+  assert.deepEqual(episodeCacheOps(), [], "a refresh that lost its lock must not write beside the next one");
+});
+
 // ── background resync (the admin buttons — guardrail 37a) ───────────────────
 
 function pollReq(path: string, job: string, headers: Record<string, string>): Req {
@@ -1700,4 +1898,196 @@ test("the async flag is the admin's only: a cron caller asking for it still gets
   await settleFireAndForget();
   // …and a cron caller has no job to poll.
   assert.equal((await getPlexSync(pollReq("/api/sync/plex", "0".repeat(32), AS_CRON))).status, 403);
+});
+
+// ── Plex walks under the Resync's lock (guardrail 41) and show file paths ────
+// The lock's signal reaches every Plex walk: an abort mid-listing REJECTS (no
+// partial library ever reaches a write) and sends no further request. Show
+// file paths come from the type=4 episode listing on every path — never from
+// one allLeaves request per show.
+
+const PLEX_ORIGIN = new URL(PLEX_BASE).origin;
+const WIND_DOWN = "Sync stopped early: it lost its lock, so the remaining steps were skipped";
+const plexFetchesAfter = (index: number) => fetchCalls.slice(index).filter((c) => c.url.origin === PLEX_ORIGIN);
+const showPathPatches = () => rawStatements.filter((r) => r.sql.includes('UPDATE "PlexLibraryItem"'));
+
+// A movie section listed one item per page over two pages; `onPage` runs as
+// each page is served (the hook a test drops the lock from).
+function twoPageMovies(onPage: (start: number) => void): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname === "/library/sections") {
+      return okJson({ MediaContainer: { Directory: [{ key: "1", title: "Movies", type: "movie" }] } });
+    }
+    if (url.pathname === "/library/sections/1/all") {
+      const start = Number(url.searchParams.get("X-Plex-Container-Start"));
+      onPage(start);
+      return okJson({ MediaContainer: { totalSize: 2, Metadata: [{ ratingKey: `rk${800 + start}`, type: "movie", title: `M${start}`, Guid: [{ id: `tmdb://${800 + start}` }] }] } });
+    }
+    throw new Error(`unexpected Plex fetch ${url}`);
+  };
+}
+
+test("guardrail 41: a Plex Resync whose lock is lost mid-walk sends no further request, writes nothing, and answers the wind-down — not 'unreachable'", async () => {
+  configurePlex();
+  let dropAt = -1;
+  respond = twoPageMovies((start) => {
+    if (start !== 0) return;
+    dropAt = fetchCalls.length;
+    lockClients.get(2111)?.emit("end");
+  });
+
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  await untilUnlocked(2111);
+
+  assert.ok(dropAt > 0, "precondition: the lock dropped while the first page was served");
+  assert.deepEqual(plexFetchesAfter(dropAt).map((c) => c.url.href), [], "the walk must not ask for another page once the lock is gone");
+  assert.equal(res.status, 503, "a lost lock is a wind-down, never 'Plex unreachable' (502)");
+  assert.deepEqual(await bodyOf(res), { error: WIND_DOWN });
+  assert.equal(transactions.length, 0, "the stored rows stay: no write transaction ran");
+  assert.deepEqual(libraryStagingLoads, [], "no partial library was staged");
+  assert.deepEqual(showPathPatches(), []);
+  assert.ok(!errors.some((e) => e.includes("[sync/plex] Failed to fetch library:")), errors.join(" | "));
+  assert.equal(ledgerFor("plex-sync")?.ok, false, "the run is recorded as not completed");
+});
+
+// One movie section (empty) and one show section. Shows are listed at type=2
+// on /all and /recentlyAdded alike; their episodes (one each, carrying the
+// file) at type=4. The type=4 listing is paged one episode per page when
+// `pagedEpisodes` is set, with `onEpisodePage` run as each page is served. An
+// allLeaves read answers too, so a per-show probe would succeed — only the
+// request count can tell it ran.
+function plexShows(
+  shows: Array<{ ratingKey: string; tmdbId: number; file: string }>,
+  opts: { pagedEpisodes?: boolean; onEpisodePage?: (start: number) => void | Promise<void> } = {},
+): (url: URL) => Response | Promise<Response> {
+  return async (url) => {
+    const type = url.searchParams.get("type");
+    if (url.pathname === "/library/sections") {
+      return okJson({ MediaContainer: { Directory: [
+        { key: "1", title: "Movies", type: "movie" },
+        { key: "2", title: "TV", type: "show" },
+      ] } });
+    }
+    if (url.pathname === "/library/sections/1/all" || url.pathname === "/library/sections/1/recentlyAdded") {
+      return okJson({ MediaContainer: { totalSize: 0, Metadata: [] } });
+    }
+    if ((url.pathname === "/library/sections/2/all" || url.pathname === "/library/sections/2/recentlyAdded") && type === "2") {
+      return okJson({ MediaContainer: {
+        totalSize: shows.length,
+        Metadata: shows.map((s) => ({ ratingKey: s.ratingKey, type: "show", title: `Show ${s.tmdbId}`, Guid: [{ id: `tmdb://${s.tmdbId}` }] })),
+      } });
+    }
+    if (url.pathname === "/library/sections/2/all" && type === "4") {
+      const episodes = shows.map((s) => ({ grandparentRatingKey: s.ratingKey, parentIndex: 1, index: 1, Media: [{ Part: [{ file: s.file }] }] }));
+      if (!opts.pagedEpisodes) return okJson({ MediaContainer: { totalSize: episodes.length, Metadata: episodes } });
+      const start = Number(url.searchParams.get("X-Plex-Container-Start"));
+      await opts.onEpisodePage?.(start);
+      return okJson({ MediaContainer: { totalSize: episodes.length, Metadata: episodes.slice(start, start + 1) } });
+    }
+    if (url.pathname.endsWith("/allLeaves")) {
+      return okJson({ MediaContainer: { Metadata: [{ Media: [{ Part: [{ file: "/from/the/probe.mkv" }] }] }] } });
+    }
+    throw new Error(`unexpected Plex fetch ${url}`);
+  };
+}
+
+test("guardrail 41: a held Plex episode walk whose lock is lost stops paging and writes neither the episode cache nor a file path", async () => {
+  configurePlex();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let dropAt = -1;
+  respond = plexShows(
+    [{ ratingKey: "show-a", tmdbId: 1399, file: "/tv/a/s01e01.mkv" }, { ratingKey: "show-b", tmdbId: 1400, file: "/tv/b/s01e01.mkv" }],
+    {
+      pagedEpisodes: true,
+      onEpisodePage: async (start) => {
+        if (start !== 0) return;
+        await gate; // held until the caller has its answer
+        dropAt = fetchCalls.length;
+        lockClients.get(2111)?.emit("end");
+      },
+    },
+  );
+
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(res.status, 200, "the caller is answered while the episode walk is still running");
+  release();
+  await untilUnlocked(2111);
+
+  assert.ok(dropAt > 0, "precondition: the lock dropped during the episode walk");
+  assert.deepEqual(plexFetchesAfter(dropAt).map((c) => c.url.href), [], "the episode walk must not ask for another page once the lock is gone");
+  assert.deepEqual(episodeCacheOps(), [], "a walk that lost its lock must not rewrite the episode cache");
+  assert.deepEqual(showPathPatches(), [], "nor patch file paths beside the next run");
+  assert.ok(!errors.some((e) => e.includes("[sync/plex] Episode walk failed")), "a lost lock is not logged as a failed walk");
+});
+
+const SHOW_A = { ratingKey: "show-a", tmdbId: 1399, file: "/tv/a/s01e01.mkv" };
+const SHOW_B = { ratingKey: "show-b", tmdbId: 1400, file: "/tv/b/s01e01.mkv" };
+const allLeavesFetches = () => fetchCalls.filter((c) => c.url.pathname.endsWith("/allLeaves"));
+const episodeListings = () => fetchCalls.filter((c) => c.url.pathname === "/library/sections/2/all" && c.url.searchParams.get("type") === "4");
+function registerSecondPlexServer(): void {
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+}
+// The one patch statement's (ratingKey, path) pairs, for the default instance.
+function patchedShowPaths(): Array<[unknown, unknown]> {
+  const patches = showPathPatches();
+  assert.equal(patches.length, 1, `expected one file-path patch, saw ${patches.length}`);
+  const [{ values }] = patches;
+  assert.equal(values[values.length - 1], "", "scoped to the default instance");
+  const pairs: Array<[unknown, unknown]> = [];
+  for (let i = 0; i + 1 < values.length - 1; i += 2) pairs.push([values[i], values[i + 1]]);
+  return pairs.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+}
+
+for (const [label, full, multi] of [
+  ["a full resync of the only Plex server", true, false],
+  ["a full resync with a second Plex server registered", true, true],
+  ["a recent-only resync of the only Plex server", false, false],
+  ["a recent-only resync with a second Plex server registered", false, true],
+] as const) {
+  test(`${label} sends no per-show allLeaves request and lands the show file paths from the episode listing`, async () => {
+    configurePlex();
+    if (multi) registerSecondPlexServer();
+    respond = plexShows([SHOW_A, SHOW_B]);
+
+    const res = await postPlexSync(plexReq({ headers: AS_CRON, ...(full ? { body: JSON.stringify({ full: true }) } : {}) }));
+    assert.equal(res.status, 200);
+    await untilUnlocked(2111);
+
+    assert.deepEqual(allLeavesFetches().map((c) => c.url.pathname), [], "one request per show is gone from every sync path");
+    assert.equal(episodeListings().length, 1, "the paths come from ONE type=4 listing of the show section");
+    assert.deepEqual(patchedShowPaths(), [["show-a", SHOW_A.file], ["show-b", SHOW_B.file]]);
+  });
+}
+
+test("a recent-only resync fills the path of the shows it INSERTED only — a stored show row stays as the run found it", async () => {
+  for (const multi of [false, true]) {
+    settings.clear();
+    fetchCalls.length = 0;
+    rawStatements.length = 0;
+    pgLockCalls.length = 0;
+    configurePlex();
+    if (multi) registerSecondPlexServer();
+    existingPlexByType.set("TV", [SHOW_B.tmdbId]); // already in the library: not re-inserted
+    respond = plexShows([SHOW_A, SHOW_B]);
+
+    const res = await postPlexSync(plexReq({ headers: AS_CRON }));
+    assert.equal(res.status, 200);
+    await untilUnlocked(2111);
+    assert.deepEqual(patchedShowPaths(), [["show-a", SHOW_A.file]], `multi=${multi}: recentOnly is insert-only (guardrail 13)`);
+  }
+});
+
+test("with a second Plex server, a recent-only resync that inserted no show sends no episode listing at all", async () => {
+  configurePlex();
+  registerSecondPlexServer();
+  existingPlexByType.set("TV", [SHOW_A.tmdbId, SHOW_B.tmdbId]); // every windowed show is stored already
+  respond = plexShows([SHOW_A, SHOW_B]);
+
+  const res = await postPlexSync(plexReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await untilUnlocked(2111);
+  assert.deepEqual(episodeListings(), [], "nothing new to fill, so no type=4 walk of the whole show section");
+  assert.deepEqual(allLeavesFetches(), []);
+  assert.deepEqual(showPathPatches(), []);
 });

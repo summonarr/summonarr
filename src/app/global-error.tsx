@@ -5,7 +5,7 @@ import "./globals.css";
 import { withBasePath } from "@/lib/base-path";
 import { LOCALE_COOKIE, isLocale, negotiateLocale, type Locale } from "@/lib/i18n/locales";
 import { createTranslator } from "@/lib/i18n/translate";
-import { ACCENT_STORAGE_KEY, THEME_STORAGE_KEY, isAccent } from "@/lib/theme-constants";
+import { applyStoredTheme } from "@/lib/theme-constants";
 // Only the shared area, not the full CATALOGS: this boundary renders without
 // the root layout (so without I18nProvider), and bundling every catalog into
 // the crash page would cost far more than these few strings.
@@ -92,19 +92,12 @@ export default function GlobalError({
     setLocale(readClientLocale());
   }, []);
 
-  // Same storage keys + validation as the root layout's THEME_INIT_SCRIPT and
-  // theme-provider.tsx (all from src/lib/theme-constants.ts). Post-hydration,
+  // The same restore as the root layout's THEME_INIT_SCRIPT (both from
+  // src/lib/theme-constants.ts). Post-hydration,
   // so it never disagrees with SSR (guardrail 16).
   useEffect(() => {
     try {
-      const d = document.documentElement;
-      const t = localStorage.getItem(THEME_STORAGE_KEY);
-      const a = localStorage.getItem(ACCENT_STORAGE_KEY);
-      if (t === "light" || t === "dark") {
-        d.setAttribute("data-theme", t);
-        d.classList.toggle("dark", t === "dark");
-      }
-      if (isAccent(a)) d.setAttribute("data-accent", a);
+      applyStoredTheme(document, localStorage);
     } catch {
       // storage unavailable — keep the dark default
     }

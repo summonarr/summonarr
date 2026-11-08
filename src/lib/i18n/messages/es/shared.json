@@ -61,6 +61,7 @@
   "shared.upload.chunkFailed": "No se pudo subir la parte {chunk} de {total} (HTTP {status}).",
   "shared.upload.nonJson": "El servidor envió una respuesta inesperada. Probablemente la solicitud se redirigió, por ejemplo a la página de inicio de sesión.",
   "shared.upload.noCompletion": "La subida terminó, pero el servidor no confirmó la restauración.",
+  "shared.upload.empty": "El archivo de copia de seguridad está vacío.",
   "shared.upload.network": "La subida falló. Comprueba tu conexión e inténtalo de nuevo.",
   "shared.upload.cancelled": "Subida cancelada."
 }

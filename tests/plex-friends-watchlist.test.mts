@@ -345,3 +345,15 @@ test("resolvePlexAccountUsers: deactivated/purged accounts are dropped, not fall
   const r = await mod.resolvePlexAccountUsers(["100", "200", "300"]);
   assert.equal(r.size, 0);
 });
+
+test("pickPlexAccountUser: a manual pin decides alone; then the sign-in subject; then one unambiguous automatic link", () => {
+  const pin = (userId: string | null) => ({ userId, manualUserLink: true });
+  const auto = (userId: string | null) => ({ userId, manualUserLink: false });
+  assert.equal(mod.pickPlexAccountUser([pin("u-pin"), auto("u-auto")], "u-subject"), "u-pin");
+  assert.equal(mod.pickPlexAccountUser([pin(null)], "u-subject"), null, "pinned to nobody skips, even with a subject");
+  assert.equal(mod.pickPlexAccountUser([pin("a"), pin("b")], undefined), null, "conflicting pins skip");
+  assert.equal(mod.pickPlexAccountUser([auto("u-auto")], "u-subject"), "u-subject");
+  assert.equal(mod.pickPlexAccountUser([auto("u-auto"), auto(null)], undefined), "u-auto");
+  assert.equal(mod.pickPlexAccountUser([auto("a"), auto("b")], undefined), null, "ambiguous automatic links skip");
+  assert.equal(mod.pickPlexAccountUser([], undefined), null);
+});

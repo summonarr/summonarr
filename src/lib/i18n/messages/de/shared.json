@@ -61,6 +61,7 @@
   "shared.upload.chunkFailed": "Teil {chunk} von {total} konnte nicht hochgeladen werden (HTTP {status}).",
   "shared.upload.nonJson": "Der Server hat unerwartet geantwortet. Die Anfrage wurde vermutlich umgeleitet, zum Beispiel auf die Anmeldeseite.",
   "shared.upload.noCompletion": "Der Upload ist abgeschlossen, aber der Server hat die Wiederherstellung nie bestätigt.",
+  "shared.upload.empty": "Die Sicherungsdatei ist leer.",
   "shared.upload.network": "Der Upload ist fehlgeschlagen. Prüfe deine Verbindung und versuche es erneut.",
   "shared.upload.cancelled": "Upload abgebrochen."
 }

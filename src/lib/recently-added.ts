@@ -118,12 +118,33 @@ export function recentlyAddedSources(
   };
 }
 
+// `generation` is bumped by every clear (a backup restore): a load that began
+// before it neither stores its pre-restore list nor is joined by a caller
+// after it.
 const cacheState = processSingleton("recently-added:cache", () => ({
   entries: new Map<string, { items: TmdbMedia[]; expiresAt: number }>(),
+  generation: 0,
 }));
 
 export function clearRecentlyAddedCache(): void {
   cacheState.entries.clear();
+  cacheState.generation += 1;
+}
+
+// Room for one more entry: expired entries go first, then the oldest stored
+// (Map order is insertion order). Never the whole cache at once — that sent
+// every signature back to the database together.
+function makeRoomInCache(now: number): void {
+  const { entries } = cacheState;
+  if (entries.size < MAX_CACHE_ENTRIES) return;
+  for (const [sig, entry] of entries) {
+    if (entry.expiresAt <= now) entries.delete(sig);
+  }
+  while (entries.size >= MAX_CACHE_ENTRIES) {
+    const oldest = entries.keys().next();
+    if (oldest.done) break;
+    entries.delete(oldest.value);
+  }
 }
 
 function signatureOf(plex: readonly string[], jellyfin: readonly string[]): string {
@@ -137,34 +158,50 @@ function libraryWhere(instances: readonly string[]) {
   return { addedAt: { not: null }, tmdbId: { gt: 0 }, serverInstance: { in: [...instances] } };
 }
 
-async function loadRecentlyAdded(plex: readonly string[], jellyfin: readonly string[]): Promise<TmdbMedia[]> {
-  const [plexRows, jellyfinRows] = await Promise.all([
-    plex.length > 0
-      ? prisma.plexLibraryItem.findMany({
-          where: libraryWhere(plex),
-          orderBy: { addedAt: "desc" },
-          take: PER_SOURCE_TAKE,
-          select: LIB_SELECT,
-        })
-      : Promise.resolve([] as RecentLibraryRow[]),
-    jellyfin.length > 0
-      ? prisma.jellyfinLibraryItem.findMany({
-          where: libraryWhere(jellyfin),
-          orderBy: { addedAt: "desc" },
-          take: PER_SOURCE_TAKE,
-          select: LIB_SELECT,
-        })
-      : Promise.resolve([] as RecentLibraryRow[]),
-  ]);
+// One library row as the merge reads it. Explicit, so a schema change to a
+// column the merge depends on fails to compile here instead of being cast past.
+function toRecentRow(r: { tmdbId: number; mediaType: "MOVIE" | "TV"; addedAt: Date | null; title: string | null; year: string | null }): RecentLibraryRow {
+  return { tmdbId: r.tmdbId, mediaType: r.mediaType, addedAt: r.addedAt, title: r.title, year: r.year };
+}
 
-  const entries = mergeRecentlyAdded(
-    [plexRows as RecentLibraryRow[], jellyfinRows as RecentLibraryRow[]],
-    RECENTLY_ADDED_OVERFETCH,
-  );
+async function readRecentRows(source: "plex" | "jellyfin", instances: readonly string[]): Promise<RecentLibraryRow[]> {
+  if (instances.length === 0) return [];
+  const args = { where: libraryWhere(instances), orderBy: { addedAt: "desc" as const }, take: PER_SOURCE_TAKE, select: LIB_SELECT };
+  const rows = source === "plex" ? await prisma.plexLibraryItem.findMany(args) : await prisma.jellyfinLibraryItem.findMany(args);
+  return rows.map(toRecentRow);
+}
+
+// A shelf entry as a TmdbMedia card: TmdbMediaCore's title/poster/year when it
+// holds the title, else the library row's own title and year.
+function toShelfItem(
+  e: RecentlyAddedEntry,
+  c: { title: string; posterPath: string | null; releaseYear: string | null; voteAverage: number | null; certification: string | null } | undefined,
+  fallbackPoster: string | undefined,
+): TmdbMedia {
+  return {
+    id: e.tmdbId,
+    mediaType: e.mediaType === "TV" ? "tv" : "movie",
+    title: c?.title || e.title || "Unknown",
+    overview: "",
+    posterPath: c?.posterPath ?? fallbackPoster ?? null,
+    backdropPath: null,
+    releaseDate: null,
+    releaseYear: c?.releaseYear ?? e.year ?? null,
+    voteAverage: c?.voteAverage ?? 0,
+    ...(c?.certification ? { certification: c.certification } : {}),
+  };
+}
+
+async function loadRecentlyAdded(plex: readonly string[], jellyfin: readonly string[]): Promise<TmdbMedia[]> {
+  const [plexRows, jellyfinRows] = await Promise.all([readRecentRows("plex", plex), readRecentRows("jellyfin", jellyfin)]);
+  const entries = mergeRecentlyAdded([plexRows, jellyfinRows], RECENTLY_ADDED_OVERFETCH);
   if (entries.length === 0) return [];
 
   const coreRows = await prisma.tmdbMediaCore.findMany({
-    where: { tmdbId: { in: [...new Set(entries.map((e) => e.tmdbId))] } },
+    where: {
+      tmdbId: { in: [...new Set(entries.map((e) => e.tmdbId))] },
+      mediaType: { in: [...new Set(entries.map((e) => e.mediaType))] },
+    },
     select: { tmdbId: true, mediaType: true, title: true, posterPath: true, releaseYear: true, voteAverage: true, certification: true },
   });
   const core = new Map(coreRows.map((r) => [`${r.mediaType}:${r.tmdbId}`, r]));
@@ -176,21 +213,9 @@ async function loadRecentlyAdded(plex: readonly string[], jellyfin: readonly str
     ? await resolvePosterPathMap(needPoster.map((e) => ({ tmdbId: e.tmdbId, mediaType: e.mediaType })))
     : {};
 
-  return entries.map((e): TmdbMedia => {
-    const c = core.get(`${e.mediaType}:${e.tmdbId}`);
-    return {
-      id: e.tmdbId,
-      mediaType: e.mediaType === "TV" ? "tv" : "movie",
-      title: c?.title || e.title || "Unknown",
-      overview: "",
-      posterPath: c?.posterPath ?? fallbackPosters[posterPathKey(e.tmdbId, e.mediaType)] ?? null,
-      backdropPath: null,
-      releaseDate: null,
-      releaseYear: c?.releaseYear ?? e.year ?? null,
-      voteAverage: c?.voteAverage ?? 0,
-      ...(c?.certification ? { certification: c.certification } : {}),
-    };
-  });
+  return entries.map((e) =>
+    toShelfItem(e, core.get(`${e.mediaType}:${e.tmdbId}`), fallbackPosters[posterPathKey(e.tmdbId, e.mediaType)]),
+  );
 }
 
 /**
@@ -206,10 +231,14 @@ export async function getRecentlyAdded(instances: VisibleServerInstances): Promi
   const sig = signatureOf(instances.plex, instances.jellyfin);
   const hit = cacheState.entries.get(sig);
   if (hit && Date.now() < hit.expiresAt) return hit.items;
-  return coalesce(`recently-added:${sig}`, async () => {
+  const generation = cacheState.generation;
+  return coalesce(`recently-added:${generation}:${sig}`, async () => {
     const items = await loadRecentlyAdded(instances.plex, instances.jellyfin);
-    if (cacheState.entries.size >= MAX_CACHE_ENTRIES) cacheState.entries.clear();
-    cacheState.entries.set(sig, { items, expiresAt: Date.now() + RECENTLY_ADDED_TTL_MS });
+    // A clear landed while this loaded: hand the list to this caller, store nothing.
+    if (cacheState.generation !== generation) return items;
+    const now = Date.now();
+    makeRoomInCache(now);
+    cacheState.entries.set(sig, { items, expiresAt: now + RECENTLY_ADDED_TTL_MS });
     return items;
   });
 }

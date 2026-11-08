@@ -7,15 +7,15 @@
 // (the server refuses anything else); only the changed fields are sent
 // (PATCH /api/admin/arr/title).
 //
-// The form holds the admin's EDITS, not a copy of the title: a field they
-// haven't touched always shows the title as the arr last reported it, so a
-// background re-read (after a refresh, Radarr unmonitoring a movie whose file
-// vanished) can never be saved back over the arr as if the admin had chosen it.
-// While the title shown is the last-known SNAPSHOT (src/lib/arr-snapshot.ts),
-// edits are kept but Save waits: the live read rebases them first, so no save
-// is ever diffed against data that may be a day old. Tags are edited as the
-// ones turned on and off (TagDelta), never a whole list, so a tag added on the
-// arr since the snapshot survives that rebase.
+// The form holds the admin's EDITS, not a copy of the title (settings-draft.ts):
+// a field they haven't touched always shows the title as the arr last reported
+// it, so a background re-read (after a refresh, Radarr unmonitoring a movie
+// whose file vanished) can never be saved back over the arr as if the admin had
+// chosen it. While the title shown is the last-known SNAPSHOT
+// (src/lib/arr-snapshot.ts), edits are kept but Save waits: the live read
+// rebases them first, so no save is ever diffed against data that may be a day
+// old. Tags are edited as the ones turned on and off (TagDelta), never a whole
+// list, so a tag added on the arr since the snapshot survives that rebase.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -24,66 +24,15 @@ import { Switch } from "@/components/ui/switch";
 import { AlertTriangle, Check, Loader2 } from "@/components/icons";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { queueFormatters } from "@/components/admin/queue-format";
-import {
-  MINIMUM_AVAILABILITIES,
-  MONITOR_NEW_ITEMS,
-  SERIES_TYPES,
-  type ArrTitle,
-  type Choice,
-  type MinimumAvailability,
-  type MonitorNewItems,
-  type RootFolderChoice,
-  type SeriesType,
-  type TitleEdit,
-} from "@/lib/arr-title";
+import { MINIMUM_AVAILABILITIES, MONITOR_NEW_ITEMS, SERIES_TYPES, type ArrTitle, type Choice, type RootFolderChoice } from "@/lib/arr-title";
+import { TITLE_WRITE } from "@/lib/client/arr-answers";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { arrApi, type TitleRef } from "./shared";
-import { applyTagDelta, NO_TAG_DELTA, tagDeltaChange, toggleTagDelta, type TagDelta } from "./snapshot-rules";
+import { NO_TAG_DELTA, toggleTagDelta } from "./snapshot-rules";
+import { AVAILABILITY_LABEL, MONITOR_NEW_LABEL, oneOf, SERIES_TYPE_LABEL } from "./labels";
+import { applyEdits, draftOf, formBase, titleChanges, type Draft, type Edits } from "./settings-draft";
 
-type Draft = {
-  monitored: boolean;
-  qualityProfileId: number | null;
-  rootFolderPath: string | null;
-  tags: number[];
-  minimumAvailability: string | null;
-  seriesType: string | null;
-  seasonFolder: boolean | null;
-  monitorNewItems: string | null;
-};
-type Edits = Partial<Omit<Draft, "tags">> & { tags?: TagDelta };
-// The PATCH's fields, as the server's own edit type: a misspelt key or a value
-// outside the arr's vocabulary fails to compile instead of being ignored there.
-type TitleChanges = Omit<TitleEdit, "moveFiles" | "seasons">;
-
-const oneOf = <T extends string>(list: readonly T[], v: string | null): v is T => v !== null && (list as readonly string[]).includes(v);
-
-// Literal maps — never a built key (the i18n dead-key check can't see one).
-const AVAILABILITY_LABEL: Record<MinimumAvailability, string> = {
-  announced: "adminArr.availability.announced",
-  inCinemas: "adminArr.availability.inCinemas",
-  released: "adminArr.availability.released",
-};
-const SERIES_TYPE_LABEL: Record<SeriesType, string> = {
-  standard: "adminArr.seriesType.standard",
-  daily: "adminArr.seriesType.daily",
-  anime: "adminArr.seriesType.anime",
-};
-const MONITOR_NEW_LABEL: Record<MonitorNewItems, string> = {
-  all: "adminArr.monitorNew.all",
-  none: "adminArr.monitorNew.none",
-};
-
-function draftOf(title: ArrTitle): Draft {
-  return {
-    monitored: title.monitored,
-    qualityProfileId: title.qualityProfileId,
-    rootFolderPath: title.rootFolderPath,
-    tags: [...title.tags].sort((a, b) => a - b),
-    minimumAvailability: title.minimumAvailability,
-    seriesType: title.seriesType,
-    seasonFolder: title.seasonFolder,
-    monitorNewItems: title.monitorNewItems,
-  };
-}
+type Formatters = ReturnType<typeof queueFormatters>;
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
@@ -129,13 +78,15 @@ export function SettingsTab({
   const t = useT();
   const locale = useLocale();
   const fmt = useMemo(() => queueFormatters(locale), [locale]);
-  // A release date is a calendar date (Radarr stores midnight UTC) — shown as that date, in UTC.
-  const releaseDay = useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeZone: "UTC" }), [locale]);
-  const base = useMemo(() => draftOf(title), [title]);
+  const reported = useMemo(() => draftOf(title), [title]);
+  // What a save whose re-read failed sent, on the title it was sent over (settings-draft.ts formBase).
+  const [landed, setLanded] = useState<{ on: ArrTitle; draft: Draft } | null>(null);
+  const base = formBase(title, reported, landed);
   const [edits, setEdits] = useState<Edits>({});
-  const { tags: tagDelta = NO_TAG_DELTA, ...fieldEdits } = edits;
-  const draft: Draft = { ...base, ...fieldEdits, tags: applyTagDelta(base.tags, tagDelta) };
-  const [saving, setSaving] = useState(false);
+  const tagDelta = edits.tags ?? NO_TAG_DELTA;
+  const draft = applyEdits(base, edits);
+  const action = useAsyncAction();
+  const saving = action.busy("save");
   const [error, setError] = useState("");
   const [saved, setSaved] = useState<"plain" | "moving" | null>(null);
   // A root-folder change waits here for the admin's explicit choice about the files.
@@ -157,24 +108,7 @@ export function SettingsTab({
   const service = isMovie ? "Radarr" : "Sonarr";
 
   // What changed, as the PATCH body's fields.
-  const changes = (() => {
-    const c: TitleChanges = {};
-    if (draft.monitored !== base.monitored) c.monitored = draft.monitored;
-    if (draft.qualityProfileId !== base.qualityProfileId && draft.qualityProfileId !== null) c.qualityProfileId = draft.qualityProfileId;
-    if (draft.rootFolderPath !== base.rootFolderPath && draft.rootFolderPath !== null) c.rootFolderPath = draft.rootFolderPath;
-    const tagsChange = tagDeltaChange(base.tags, tagDelta);
-    if (tagsChange) c.tags = tagsChange;
-    // A value outside the arr's vocabulary (one it reported, kept selectable)
-    // is never sent: the server would refuse the whole edit.
-    if (isMovie) {
-      if (draft.minimumAvailability !== base.minimumAvailability && oneOf(MINIMUM_AVAILABILITIES, draft.minimumAvailability)) c.minimumAvailability = draft.minimumAvailability;
-    } else {
-      if (draft.seriesType !== base.seriesType && oneOf(SERIES_TYPES, draft.seriesType)) c.seriesType = draft.seriesType;
-      if (draft.seasonFolder !== base.seasonFolder && draft.seasonFolder !== null) c.seasonFolder = draft.seasonFolder;
-      if (draft.monitorNewItems !== base.monitorNewItems && oneOf(MONITOR_NEW_ITEMS, draft.monitorNewItems)) c.monitorNewItems = draft.monitorNewItems;
-    }
-    return c;
-  })();
+  const changes = titleChanges(base, edits, isMovie);
   const dirty = Object.keys(changes).length > 0;
   useEffect(() => {
     onDirtyChange?.(dirty);
@@ -203,21 +137,31 @@ export function SettingsTab({
       return;
     }
     setConfirmMove(false);
-    setSaving(true);
     setError("");
-    const res = await arrApi<{ title: ArrTitle | null }>(
-      "/api/admin/arr/title",
-      {
-        method: "PATCH",
-        body: { service: titleRef.service, instance: titleRef.instance, id: titleRef.arrId, ...changes, ...(moveFiles !== undefined ? { moveFiles } : {}) },
-      },
-      t("adminArr.settings.saveFailed"),
+    const sent = draft;
+    const res = await action.run(
+      "save",
+      (signal) =>
+        arrApi(
+          "/api/admin/arr/title",
+          {
+            method: "PATCH",
+            body: { service: titleRef.service, instance: titleRef.instance, id: titleRef.arrId, ...changes, ...(moveFiles !== undefined ? { moveFiles } : {}) },
+            schema: TITLE_WRITE,
+            signal,
+          },
+          t("adminArr.settings.saveFailed"),
+        ),
+      { ifBusy: "skip" },
     );
-    setSaving(false);
+    if (!res) return;
     if (!res.ok) {
       setError(res.error);
       return;
     }
+    // The arr has the edits. With no title back, they are shown as the title
+    // until the manager's re-read (onSaved(null)) hands in the real one.
+    setLanded(res.data.title === null ? { on: title, draft: sent } : null);
     setEdits({});
     setSaved(moveFiles ? "moving" : "plain");
     onSaved(res.data.title);
@@ -262,53 +206,16 @@ export function SettingsTab({
 
       {isMovie ? (
         <Field label={t("adminArr.settings.minimumAvailability")} hint={t("adminArr.settings.minimumAvailabilityHint")}>
-          <StyledSelect
-            compact
-            value={draft.minimumAvailability ?? ""}
-            onChange={(e) => update({ minimumAvailability: e.target.value })}
-            aria-label={t("adminArr.settings.minimumAvailability")}
-            className="sm:max-w-sm"
-          >
-            {draft.minimumAvailability === null && <option value="">—</option>}
-            {draft.minimumAvailability !== null && !oneOf(MINIMUM_AVAILABILITIES, draft.minimumAvailability) && (
-              <option value={draft.minimumAvailability}>{draft.minimumAvailability}</option>
-            )}
-            {MINIMUM_AVAILABILITIES.map((a) => <option key={a} value={a}>{t(AVAILABILITY_LABEL[a])}</option>)}
-          </StyledSelect>
+          <VocabularySelect
+            value={draft.minimumAvailability}
+            choices={MINIMUM_AVAILABILITIES}
+            labels={AVAILABILITY_LABEL}
+            onChange={(v) => update({ minimumAvailability: v })}
+            label={t("adminArr.settings.minimumAvailability")}
+          />
         </Field>
       ) : (
-        <>
-          <Field label={t("adminArr.settings.seriesType")} hint={t("adminArr.settings.seriesTypeHint")}>
-            <StyledSelect
-              compact
-              value={draft.seriesType ?? "standard"}
-              onChange={(e) => update({ seriesType: e.target.value })}
-              aria-label={t("adminArr.settings.seriesType")}
-              className="sm:max-w-sm"
-            >
-              {SERIES_TYPES.map((s) => <option key={s} value={s}>{t(SERIES_TYPE_LABEL[s])}</option>)}
-            </StyledSelect>
-          </Field>
-          {draft.seasonFolder !== null && (
-            <Field label={t("adminArr.settings.seasonFolder")}>
-              <Switch checked={draft.seasonFolder} onCheckedChange={(v) => update({ seasonFolder: v })} aria-label={t("adminArr.settings.seasonFolder")} />
-            </Field>
-          )}
-          {/* Sonarr v3 has no such setting — the field is absent there. */}
-          {draft.monitorNewItems !== null && (
-            <Field label={t("adminArr.settings.monitorNewItems")}>
-              <StyledSelect
-                compact
-                value={draft.monitorNewItems}
-                onChange={(e) => update({ monitorNewItems: e.target.value })}
-                aria-label={t("adminArr.settings.monitorNewItems")}
-                className="sm:max-w-sm"
-              >
-                {MONITOR_NEW_ITEMS.map((m) => <option key={m} value={m}>{t(MONITOR_NEW_LABEL[m])}</option>)}
-              </StyledSelect>
-            </Field>
-          )}
-        </>
+        <SeriesFields draft={draft} onChange={update} />
       )}
 
       <Field label={t("adminArr.settings.rootFolder")} hint={title.path ? t("adminArr.settings.currentPath", { path: title.path }) : undefined}>
@@ -336,82 +243,27 @@ export function SettingsTab({
         ) : tags.length === 0 ? (
           <span className="text-xs text-zinc-500">{t("adminArr.settings.noTags")}</span>
         ) : (
-          <div className="flex flex-wrap gap-1.5">
-            {tags.map((tag) => {
-              const on = draft.tags.includes(tag.id);
-              return (
-                <button
-                  key={tag.id}
-                  type="button"
-                  aria-pressed={on}
-                  onClick={() => update({ tags: toggleTagDelta(tagDelta, base.tags, tag.id) })}
-                  className="ds-hover-tint rounded-full px-2.5 py-1 text-xs transition-colors"
-                  style={{
-                    border: `1px solid ${on ? "var(--ds-accent)" : "var(--ds-border)"}`,
-                    background: on ? "var(--ds-accent-soft)" : "var(--ds-bg-2)",
-                    color: on ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
-                  }}
-                >
-                  {on && <Check className="mr-1 inline h-3 w-3" aria-hidden />}
-                  {tag.name}
-                </button>
-              );
-            })}
-          </div>
+          <TagToggles tags={tags} on={draft.tags} onToggle={(id) => update({ tags: toggleTagDelta(tagDelta, base.tags, id) })} />
         )}
       </Field>
 
-      {isMovie && (title.inCinemas || title.physicalRelease || title.digitalRelease) && (
-        <Field label={t("adminArr.settings.releaseDates")}>
-          <dl className="m-0 grid gap-1 text-xs text-zinc-400 sm:grid-cols-3">
-            {([["inCinemas", title.inCinemas], ["physical", title.physicalRelease], ["digital", title.digitalRelease]] as const).map(([k, v]) => (
-              <div key={k}>
-                <dt className="text-zinc-500">{t(`adminArr.releaseDate.${k}`)}</dt>
-                <dd className="m-0 text-zinc-300">{v ? releaseDay.format(Date.parse(v)) : "—"}</dd>
-              </div>
-            ))}
-          </dl>
-        </Field>
-      )}
+      {isMovie && <ReleaseDates title={title} locale={locale} />}
 
       {confirmMove && draft.rootFolderPath !== null && (
-        <div role="alertdialog" aria-label={t("adminArr.settings.moveConfirmTitle", { path: draft.rootFolderPath })} className="grid gap-3 rounded-lg p-3" style={{ border: "1px solid var(--ds-warning)", background: "color-mix(in oklab, var(--ds-warning) 10%, transparent)" }}>
-          <div className="grid gap-1 text-sm">
-            <span className="font-medium text-zinc-100">{t("adminArr.settings.moveConfirmTitle", { path: draft.rootFolderPath })}</span>
-            <span className="text-xs text-zinc-400">
-              {t("adminArr.settings.moveConfirmBody", { current: title.path ?? base.rootFolderPath ?? "—", size: fmt.size(title.sizeOnDisk) })}
-            </span>
-            {noSpace && target && (
-              <span className="flex items-center gap-1.5 text-xs text-amber-400">
-                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                {t("adminArr.settings.moveNoSpace", { path: target.path, free: fmt.size(target.freeSpace ?? 0), size: fmt.size(title.sizeOnDisk) })}
-              </span>
-            )}
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <button ref={moveChoiceRef} type="button" onClick={() => void save(true)} disabled={saving} className="ds-hover-tint rounded-md px-3 py-2 text-left text-sm" style={{ border: "1px solid var(--ds-border)", background: "var(--ds-bg-2)" }}>
-              <span className="block text-zinc-100">{t("adminArr.settings.moveFiles")}</span>
-              <span className="block text-xs text-zinc-500">{t("adminArr.settings.moveFilesOn")}</span>
-            </button>
-            <button type="button" onClick={() => void save(false)} disabled={saving} className="ds-hover-tint rounded-md px-3 py-2 text-left text-sm" style={{ border: "1px solid var(--ds-border)", background: "var(--ds-bg-2)" }}>
-              <span className="block text-zinc-100">{t("adminArr.settings.moveNo")}</span>
-              <span className="block text-xs text-zinc-500">{t("adminArr.settings.moveFilesOff")}</span>
-            </button>
-          </div>
-          <div>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                refocusSave.current = true;
-                setConfirmMove(false);
-              }}
-              disabled={saving}
-            >
-              {t("adminArr.common.cancel")}
-            </Button>
-          </div>
-        </div>
+        <MoveConfirm
+          to={draft.rootFolderPath}
+          from={title.path ?? base.rootFolderPath ?? "—"}
+          sizeOnDisk={title.sizeOnDisk}
+          noSpaceIn={noSpace ? target : null}
+          saving={saving}
+          firstChoiceRef={moveChoiceRef}
+          onChoose={(moveFiles) => void save(moveFiles)}
+          onCancel={() => {
+            refocusSave.current = true;
+            setConfirmMove(false);
+          }}
+          fmt={fmt}
+        />
       )}
 
       <div className="flex flex-wrap items-center justify-end gap-3 border-t pt-4" style={{ borderColor: "var(--ds-border)" }}>
@@ -434,5 +286,157 @@ export function SettingsTab({
         </Button>
       </div>
     </fieldset>
+  );
+}
+
+/**
+ * A select over the arr's own vocabulary. A value it reported outside that
+ * vocabulary stays selectable as it was sent, and no value shows as no choice
+ * — never as the first word, which then could not be picked (choosing it fires
+ * no change).
+ */
+function VocabularySelect<V extends string>({ value, choices, labels, onChange, label }: {
+  value: string | null;
+  choices: readonly V[];
+  labels: Record<V, string>;
+  onChange: (value: string) => void;
+  label: string;
+}) {
+  const t = useT();
+  return (
+    <StyledSelect compact value={value ?? ""} onChange={(e) => onChange(e.target.value)} aria-label={label} className="sm:max-w-sm">
+      {value === null && <option value="">—</option>}
+      {value !== null && !oneOf(choices, value) && <option value={value}>{value}</option>}
+      {choices.map((c) => <option key={c} value={c}>{t(labels[c])}</option>)}
+    </StyledSelect>
+  );
+}
+
+/** Sonarr's own: series type, season folders (when the arr reports it) and "monitor new seasons" (v4 only). */
+function SeriesFields({ draft, onChange }: { draft: Draft; onChange: (patch: Edits) => void }) {
+  const t = useT();
+  return (
+    <>
+      <Field label={t("adminArr.settings.seriesType")} hint={t("adminArr.settings.seriesTypeHint")}>
+        <VocabularySelect
+          value={draft.seriesType}
+          choices={SERIES_TYPES}
+          labels={SERIES_TYPE_LABEL}
+          onChange={(v) => onChange({ seriesType: v })}
+          label={t("adminArr.settings.seriesType")}
+        />
+      </Field>
+      {draft.seasonFolder !== null && (
+        <Field label={t("adminArr.settings.seasonFolder")}>
+          <Switch checked={draft.seasonFolder} onCheckedChange={(v) => onChange({ seasonFolder: v })} aria-label={t("adminArr.settings.seasonFolder")} />
+        </Field>
+      )}
+      {/* Sonarr v3 has no such setting — the field is absent there. */}
+      {draft.monitorNewItems !== null && (
+        <Field label={t("adminArr.settings.monitorNewItems")}>
+          <VocabularySelect
+            value={draft.monitorNewItems}
+            choices={MONITOR_NEW_ITEMS}
+            labels={MONITOR_NEW_LABEL}
+            onChange={(v) => onChange({ monitorNewItems: v })}
+            label={t("adminArr.settings.monitorNewItems")}
+          />
+        </Field>
+      )}
+    </>
+  );
+}
+
+/** The instance's tags as toggles: on is the form's list (the arr's with the admin's delta over it). */
+function TagToggles({ tags, on: onIds, onToggle }: { tags: Choice[]; on: readonly number[]; onToggle: (id: number) => void }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {tags.map((tag) => {
+        const on = onIds.includes(tag.id);
+        return (
+          <button
+            key={tag.id}
+            type="button"
+            aria-pressed={on}
+            onClick={() => onToggle(tag.id)}
+            className="ds-hover-tint rounded-full px-2.5 py-1 text-xs transition-colors"
+            style={{
+              border: `1px solid ${on ? "var(--ds-accent)" : "var(--ds-border)"}`,
+              background: on ? "var(--ds-accent-soft)" : "var(--ds-bg-2)",
+              color: on ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
+            }}
+          >
+            {on && <Check className="mr-1 inline h-3 w-3" aria-hidden />}
+            {tag.name}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Radarr's release dates: calendar dates (midnight UTC) — shown as that date, in UTC. */
+function ReleaseDates({ title, locale }: { title: ArrTitle; locale: string }) {
+  const t = useT();
+  const releaseDay = useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeZone: "UTC" }), [locale]);
+  if (!title.inCinemas && !title.physicalRelease && !title.digitalRelease) return null;
+  return (
+    <Field label={t("adminArr.settings.releaseDates")}>
+      <dl className="m-0 grid gap-1 text-xs text-zinc-400 sm:grid-cols-3">
+        {([["inCinemas", title.inCinemas], ["physical", title.physicalRelease], ["digital", title.digitalRelease]] as const).map(([k, v]) => (
+          <div key={k}>
+            <dt className="text-zinc-500">{t(`adminArr.releaseDate.${k}`)}</dt>
+            <dd className="m-0 text-zinc-300">{v ? releaseDay.format(Date.parse(v)) : "—"}</dd>
+          </div>
+        ))}
+      </dl>
+    </Field>
+  );
+}
+
+/** A root-folder change's explicit choice about the files: move them, or leave them where they are. */
+function MoveConfirm({ to, from, sizeOnDisk, noSpaceIn, saving, firstChoiceRef, onChoose, onCancel, fmt }: {
+  to: string;
+  from: string;
+  sizeOnDisk: number;
+  /** The new folder, when the files won't fit there (a warning, never a block). */
+  noSpaceIn: RootFolderChoice | null;
+  saving: boolean;
+  firstChoiceRef: React.Ref<HTMLButtonElement>;
+  onChoose: (moveFiles: boolean) => void;
+  onCancel: () => void;
+  fmt: Formatters;
+}) {
+  const t = useT();
+  return (
+    <div role="alertdialog" aria-label={t("adminArr.settings.moveConfirmTitle", { path: to })} className="grid gap-3 rounded-lg p-3" style={{ border: "1px solid var(--ds-warning)", background: "color-mix(in oklab, var(--ds-warning) 10%, transparent)" }}>
+      <div className="grid gap-1 text-sm">
+        <span className="font-medium text-zinc-100">{t("adminArr.settings.moveConfirmTitle", { path: to })}</span>
+        <span className="text-xs text-zinc-400">
+          {t("adminArr.settings.moveConfirmBody", { current: from, size: fmt.size(sizeOnDisk) })}
+        </span>
+        {noSpaceIn && (
+          <span className="flex items-center gap-1.5 text-xs text-amber-400">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            {t("adminArr.settings.moveNoSpace", { path: noSpaceIn.path, free: fmt.size(noSpaceIn.freeSpace ?? 0), size: fmt.size(sizeOnDisk) })}
+          </span>
+        )}
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <button ref={firstChoiceRef} type="button" onClick={() => onChoose(true)} disabled={saving} className="ds-hover-tint rounded-md px-3 py-2 text-left text-sm" style={{ border: "1px solid var(--ds-border)", background: "var(--ds-bg-2)" }}>
+          <span className="block text-zinc-100">{t("adminArr.settings.moveFiles")}</span>
+          <span className="block text-xs text-zinc-500">{t("adminArr.settings.moveFilesOn")}</span>
+        </button>
+        <button type="button" onClick={() => onChoose(false)} disabled={saving} className="ds-hover-tint rounded-md px-3 py-2 text-left text-sm" style={{ border: "1px solid var(--ds-border)", background: "var(--ds-bg-2)" }}>
+          <span className="block text-zinc-100">{t("adminArr.settings.moveNo")}</span>
+          <span className="block text-xs text-zinc-500">{t("adminArr.settings.moveFilesOff")}</span>
+        </button>
+      </div>
+      <div>
+        <Button variant="ghost" size="sm" onClick={onCancel} disabled={saving}>
+          {t("adminArr.common.cancel")}
+        </Button>
+      </div>
+    </div>
   );
 }

@@ -7,6 +7,11 @@
 // must not count it as a run either.
 export const CRON_SKIPPED_HEADER = "X-Cron-Skipped";
 
+// Marks a run that finished with failures while answering 200 (the entrypoint
+// fast-retries any non-2xx). Its PRESENCE records the run as failed; the value
+// is informational (a count on the cron routes, source names on the syncs).
+export const CRON_DEGRADED_HEADER = "X-Cron-Degraded";
+
 export type ManualRunOutcome = "ok" | "error" | "skipped";
 
 /**

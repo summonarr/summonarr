@@ -841,12 +841,14 @@ test("the same async save while one runs is joined (one PUT); a lost job is 404 
 });
 
 test("Arr System runs its provider tests and saves as polled jobs, counting polls — never holding the request, never reading the clock", () => {
-  const src = readFileSync(new URL("../src/components/admin/arr-system.tsx", import.meta.url), "utf8");
-  assert.match(src, /body: \{ \.\.\.init\.body, async: true \}/, "sent with async");
-  assert.match(src, /await pollJob\(fetch, withBasePath\(`\$\{path\}\?job=\$\{encodeURIComponent\(job\)\}`\), \{/, "polled at ?job= through the shared loop");
+  const src = readFileSync(new URL("../src/components/admin/arr-system-providers.tsx", import.meta.url), "utf8");
+  const call = readFileSync(new URL("../src/lib/client/arr-call.ts", import.meta.url), "utf8");
+  assert.match(call, /body: \{ \.\.\.opts\.body, async: true \}/, "sent with async");
+  assert.match(call, /return `\$\{url\}\$\{url\.includes\("\?"\) \? "&" : "\?"\}job=\$\{encodeURIComponent\(job\)\}`;/, "polled at ?job=");
+  assert.match(call, /await pollJob\(globalThis\.fetch, jobUrl\(url, job\), \{/, "through the shared loop");
   assert.match(src, /maxPolls: JOB_MAX_POLLS,/, "a counted cap");
-  assert.equal((src.match(/callJob<[^>]*>\(\s*"\/api\/admin\/arr\/providers(\/test)?"/g) ?? []).length, 2, "both the test and the save");
-  assert.doesNotMatch(src, /Date\.now\(\)|new Date\(\)/);
+  assert.equal((src.match(/arrCallJob\(withBasePath\("\/api\/admin\/arr\/providers(\/test)?"\)/g) ?? []).length, 2, "both the test and the save");
+  for (const text of [src, call]) assert.doesNotMatch(text, /Date\.now\(\)|new Date\(\)/);
 });
 
 // ── 13: the polled pages tick through the gate ───────────────────────────────
@@ -854,8 +856,8 @@ test("Arr System runs its provider tests and saves as polled jobs, counting poll
 test("the queue and Arr System poll through the load gate as a POLL; the queue's poll pauses while its title manager is open", () => {
   const src = (f: string) => readFileSync(new URL(`../src/components/admin/${f}`, import.meta.url), "utf8");
   const interval = /window\.setInterval\(\(\) => \{([^}]*)\}/;
-  // The queue polls from its data hook (use-queue-data.ts).
-  for (const file of ["use-queue-data.ts", "arr-system.tsx"]) {
+  // The queue polls from its data hook (use-queue-data.ts), Arr System from its tabs' useReport.
+  for (const file of ["use-queue-data.ts", "arr-system-parts.tsx"]) {
     const body = interval.exec(src(file))?.[1] ?? "";
     assert.match(body, /void load\("poll"\)/, `${file}: a tick is a poll — skipped while a read is out, never superseding it`);
   }

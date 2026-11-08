@@ -1,6 +1,6 @@
 "use client";
 
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { useHiddenRatingSources } from "./ratings-visibility";
 import { useT } from "@/components/i18n/i18n-provider";
 
@@ -32,8 +32,10 @@ interface RatingsBarProps {
 function formatVotes(raw: string): string {
   const n = parseInt(raw.replace(/,/g, ""), 10);
   if (isNaN(n)) return "";
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
+  // Rounded to thousands first: 999,700 rounds to 1000K, which reads as 1.0M.
+  const thousands = Math.round(n / 1_000);
+  if (thousands >= 1_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${thousands}K`;
   return String(n);
 }
 
@@ -106,54 +108,156 @@ function letterboxdColor(score: string): string {
   return byThreshold(score, parseFloat, [[3.5, "text-emerald-400"], [2.5, "text-yellow-400"]], "text-red-400", "text-zinc-400");
 }
 
-export function RatingsBar({
-  imdbRating,
-  imdbId,
-  imdbVotes,
-  rottenTomatoes,
-  metacritic,
-  rtAudienceScore,
-  traktRating,
-  letterboxdRating,
-  mdblistScore,
-  malRating,
-  rogerEbertRating,
-  jellyfinRating,
-  voteAverage,
-  size = "md",
-  compact = false,
-}: RatingsBarProps) {
-  // Admin-hidden sources (ratingsHiddenSources Setting via the layout provider).
-  const hidden = useHiddenRatingSources();
-  const t = useT();
+type Translate = ReturnType<typeof useT>;
 
-  const showImdb = !!imdbRating && !hidden.includes("imdb");
-  const showRt = !!rottenTomatoes && !hidden.includes("rottenTomatoes");
-  const showRtAudience = !!rtAudienceScore && !hidden.includes("rtAudience");
-  const showMetacritic = !!metacritic && !hidden.includes("metacritic");
-  const showTrakt = !!traktRating && !hidden.includes("trakt");
-  const showLetterboxd = !!letterboxdRating && !hidden.includes("letterboxd");
+// One rating source after IMDb: the badge's tooltip, then what it shows in
+// order (a label or icon, the score, an optional suffix). Every source renders
+// through the same wrapper, so adding one is one entry here.
+interface RatingCell {
+  key: string;
+  title: string;
+  lead: ReactNode;
+  value: ReactNode;
+  suffix?: ReactNode;
+}
+
+interface CellSizes {
+  textSm: string;
+  textXs: string;
+  iconSz: string;
+}
+
+// The sources to show, in display order; an absent or admin-hidden source is
+// left out. Compact mode drops the visible source labels; a `title` on a div is
+// not reliably announced, so each keeps a screen-reader name instead of reading
+// as a bare number.
+function ratingCells(
+  p: RatingsBarProps,
+  hidden: readonly string[],
+  compact: boolean,
+  { textSm, textXs, iconSz }: CellSizes,
+  t: Translate,
+): RatingCell[] {
+  const shown = (value: string | null | undefined, source: string): value is string =>
+    !!value && !hidden.includes(source);
+  const cells: RatingCell[] = [];
+  const { rottenTomatoes, rtAudienceScore, metacritic, traktRating, letterboxdRating, mdblistScore } = p;
+  const { malRating, rogerEbertRating, jellyfinRating, voteAverage } = p;
+
+  if (shown(rottenTomatoes, "rottenTomatoes")) {
+    cells.push({
+      key: "rt",
+      title: "Rotten Tomatoes",
+      lead: <span className={iconSz} role="img" aria-label="Rotten Tomatoes">{rtIcon(rottenTomatoes)}</span>,
+      value: <span className={`font-semibold ${rtColor(rottenTomatoes)} ${textSm}`}>{rottenTomatoes}</span>,
+    });
+  }
+  if (shown(rtAudienceScore, "rtAudience")) {
+    cells.push({
+      key: "rtAudience",
+      title: t("media.ratings.rtAudience"),
+      lead: <span className={iconSz} role="img" aria-label={t("media.ratings.rtAudience")}>🍿</span>,
+      value: <span className={`font-semibold ${rtAudienceColor(rtAudienceScore)} ${textSm}`}>{rtAudienceScore}</span>,
+    });
+  }
+  if (shown(metacritic, "metacritic")) {
+    cells.push({
+      key: "metacritic",
+      title: "Metacritic",
+      lead: compact && <span className="sr-only">Metacritic</span>,
+      value: (
+        <span className={`font-bold rounded px-1 py-0.5 ${textXs} ${metacriticBadge(metacritic)}`}>
+          {metacritic.replace("/100", "")}
+        </span>
+      ),
+      suffix: !compact && <span className={`text-zinc-500 ${textXs}`}>MC</span>,
+    });
+  }
+  if (shown(traktRating, "trakt")) {
+    cells.push({
+      key: "trakt",
+      title: t("media.ratings.trakt"),
+      lead: compact && <span className="sr-only">{t("media.ratings.trakt")}</span>,
+      value: (
+        <span className={`font-bold rounded px-1 py-0.5 ${textXs} ${traktBadge(traktRating)}`}>
+          {traktRating}
+        </span>
+      ),
+      suffix: !compact && <span className={`text-zinc-500 ${textXs}`}>TR</span>,
+    });
+  }
+  if (shown(letterboxdRating, "letterboxd")) {
+    cells.push({
+      key: "letterboxd",
+      title: t("media.ratings.letterboxd"),
+      lead: <span className={`font-semibold ${textXs} text-zinc-400`}>LB</span>,
+      value: <span className={`font-semibold ${letterboxdColor(letterboxdRating)} ${textSm}`}>{letterboxdRating}</span>,
+    });
+  }
   // Numeric guard, not just truthiness: MDBList's "no score" sentinel reaches
   // rows cached before the parser started rejecting it (mdblist.ts
   // aggregateScore), and "-1"/"0" are truthy strings that would print as real
-  // scores. Same shape as the showTmdb guard below.
+  // scores. Same shape as the TMDB guard below.
   const mdblistValue = mdblistScore != null ? Number(mdblistScore) : NaN;
-  const showMdblist =
-    Number.isFinite(mdblistValue) && mdblistValue > 0 && !hidden.includes("mdblist");
-  const showMal = !!malRating && !hidden.includes("mal");
-  const showRogerEbert = !!rogerEbertRating && !hidden.includes("rogerEbert");
-  const showJellyfin = !!jellyfinRating && !hidden.includes("jellyfin");
-  const showTmdb = !!voteAverage && voteAverage > 0 && !hidden.includes("tmdb");
+  if (mdblistScore && Number.isFinite(mdblistValue) && mdblistValue > 0 && !hidden.includes("mdblist")) {
+    cells.push({
+      key: "mdblist",
+      title: t("media.ratings.mdblist"),
+      lead: compact ? <span className="sr-only">{t("media.ratings.mdblist")}</span> : <span className={`text-zinc-500 ${textXs}`}>MDB</span>,
+      value: <span className={`font-semibold ${mdblistColor(mdblistScore)} ${textSm}`}>{mdblistScore}</span>,
+    });
+  }
+  if (shown(malRating, "mal")) {
+    cells.push({
+      key: "mal",
+      title: "MyAnimeList",
+      lead: <span className={`font-semibold text-sky-400 ${textXs}`}>MAL</span>,
+      value: <span className={`font-semibold text-zinc-100 ${textSm}`}>{malRating}</span>,
+    });
+  }
+  if (shown(rogerEbertRating, "rogerEbert")) {
+    cells.push({
+      key: "rogerEbert",
+      title: "Roger Ebert",
+      lead: <span className={`font-semibold text-zinc-400 ${textXs}`}>RE</span>,
+      value: <span className={`font-semibold text-zinc-100 ${textSm}`}>{rogerEbertRating}</span>,
+      suffix: !compact && <span className={`text-zinc-500 ${textXs}`}>/4</span>,
+    });
+  }
+  if (shown(jellyfinRating, "jellyfin")) {
+    cells.push({
+      key: "jellyfin",
+      title: t("media.ratings.jellyfin"),
+      lead: <span className={`font-semibold ${textXs}`} style={{ color: "var(--ds-jellyfin-text)" }}>JF</span>,
+      value: <span className={`font-semibold text-zinc-100 ${textSm}`}>{jellyfinRating}</span>,
+      suffix: !compact && <span className={`text-zinc-500 ${textXs}`}>/10</span>,
+    });
+  }
+  if (voteAverage && voteAverage > 0 && !hidden.includes("tmdb")) {
+    cells.push({
+      key: "tmdb",
+      title: t("media.ratings.tmdb"),
+      lead: compact ? <span className="sr-only">{t("media.ratings.tmdb")}</span> : <span className={`text-zinc-500 ${textXs}`}>TMDB</span>,
+      value: <span className={`font-semibold text-yellow-400 ${textSm}`}>{voteAverage.toFixed(1)}</span>,
+    });
+  }
+  return cells;
+}
 
-  const hasAny =
-    showImdb || showRt || showRtAudience || showMetacritic || showTrakt ||
-    showLetterboxd || showMdblist || showMal || showRogerEbert || showJellyfin || showTmdb;
-  if (!hasAny) return null;
+export function RatingsBar(props: RatingsBarProps) {
+  const { imdbRating, imdbId, imdbVotes, size = "md", compact = false } = props;
+  // Admin-hidden sources (ratingsHiddenSources Setting via the layout provider).
+  const hidden = useHiddenRatingSources();
+  const t = useT();
 
   const textSm = size === "sm" ? "text-[10px]" : "text-sm";
   const textXs = size === "sm" ? "text-[9px]"  : "text-xs";
   const gap    = size === "sm" ? "gap-x-1.5 gap-y-0.5" : "gap-4";
   const iconSz = size === "sm" ? "text-[11px]" : "text-base";
+
+  const showImdb = !!imdbRating && !hidden.includes("imdb");
+  const cells = ratingCells(props, hidden, compact, { textSm, textXs, iconSz }, t);
+  if (!showImdb && cells.length === 0) return null;
 
   // One body for the IMDb badge, linked when there is an id.
   const imdbBody = (
@@ -167,14 +271,11 @@ export function RatingsBar({
     </>
   );
 
-  // Compact mode drops the visible source labels below; a `title` on a div is
-  // not reliably announced, so each keeps a screen-reader name instead of
-  // reading as a bare number.
   return (
     <div className={`flex items-center flex-wrap ${gap}`}>
       {showImdb && imdbId ? (
         <a
-          href={`https://www.imdb.com/title/${imdbId}`}
+          href={`https://www.imdb.com/title/${encodeURIComponent(imdbId)}`}
           target="_blank"
           rel="noopener noreferrer"
           className="flex items-center gap-0.5 rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
@@ -191,83 +292,13 @@ export function RatingsBar({
         </div>
       ) : null}
 
-      {showRt && rottenTomatoes && (
-        <div className="flex items-center gap-0.5" title="Rotten Tomatoes">
-          <span className={iconSz} role="img" aria-label="Rotten Tomatoes">{rtIcon(rottenTomatoes)}</span>
-          <span className={`font-semibold ${rtColor(rottenTomatoes)} ${textSm}`}>{rottenTomatoes}</span>
+      {cells.map((cell) => (
+        <div key={cell.key} className="flex items-center gap-0.5" title={cell.title}>
+          {cell.lead}
+          {cell.value}
+          {cell.suffix}
         </div>
-      )}
-
-      {showRtAudience && rtAudienceScore && (
-        <div className="flex items-center gap-0.5" title={t("media.ratings.rtAudience")}>
-          <span className={iconSz} role="img" aria-label={t("media.ratings.rtAudience")}>🍿</span>
-          <span className={`font-semibold ${rtAudienceColor(rtAudienceScore)} ${textSm}`}>{rtAudienceScore}</span>
-        </div>
-      )}
-
-      {showMetacritic && metacritic && (
-        <div className="flex items-center gap-0.5" title="Metacritic">
-          {compact && <span className="sr-only">Metacritic</span>}
-          <span className={`font-bold rounded px-1 py-0.5 ${textXs} ${metacriticBadge(metacritic)}`}>
-            {metacritic.replace("/100", "")}
-          </span>
-          {!compact && <span className={`text-zinc-500 ${textXs}`}>MC</span>}
-        </div>
-      )}
-
-      {showTrakt && traktRating && (
-        <div className="flex items-center gap-0.5" title={t("media.ratings.trakt")}>
-          {compact && <span className="sr-only">{t("media.ratings.trakt")}</span>}
-          <span className={`font-bold rounded px-1 py-0.5 ${textXs} ${traktBadge(traktRating)}`}>
-            {traktRating}
-          </span>
-          {!compact && <span className={`text-zinc-500 ${textXs}`}>TR</span>}
-        </div>
-      )}
-
-      {showLetterboxd && letterboxdRating && (
-        <div className="flex items-center gap-0.5" title={t("media.ratings.letterboxd")}>
-          <span className={`font-semibold ${textXs} text-zinc-400`}>LB</span>
-          <span className={`font-semibold ${letterboxdColor(letterboxdRating)} ${textSm}`}>{letterboxdRating}</span>
-        </div>
-      )}
-
-      {showMdblist && mdblistScore && (
-        <div className="flex items-center gap-0.5" title={t("media.ratings.mdblist")}>
-          {compact ? <span className="sr-only">{t("media.ratings.mdblist")}</span> : <span className={`text-zinc-500 ${textXs}`}>MDB</span>}
-          <span className={`font-semibold ${mdblistColor(mdblistScore)} ${textSm}`}>{mdblistScore}</span>
-        </div>
-      )}
-
-      {showMal && malRating && (
-        <div className="flex items-center gap-0.5" title="MyAnimeList">
-          <span className={`font-semibold text-sky-400 ${textXs}`}>MAL</span>
-          <span className={`font-semibold text-zinc-100 ${textSm}`}>{malRating}</span>
-        </div>
-      )}
-
-      {showRogerEbert && rogerEbertRating && (
-        <div className="flex items-center gap-0.5" title="Roger Ebert">
-          <span className={`font-semibold text-zinc-400 ${textXs}`}>RE</span>
-          <span className={`font-semibold text-zinc-100 ${textSm}`}>{rogerEbertRating}</span>
-          {!compact && <span className={`text-zinc-500 ${textXs}`}>/4</span>}
-        </div>
-      )}
-
-      {showJellyfin && jellyfinRating && (
-        <div className="flex items-center gap-0.5" title={t("media.ratings.jellyfin")}>
-          <span className={`font-semibold ${textXs}`} style={{ color: "var(--ds-jellyfin-text)" }}>JF</span>
-          <span className={`font-semibold text-zinc-100 ${textSm}`}>{jellyfinRating}</span>
-          {!compact && <span className={`text-zinc-500 ${textXs}`}>/10</span>}
-        </div>
-      )}
-
-      {showTmdb && voteAverage ? (
-        <div className="flex items-center gap-0.5" title={t("media.ratings.tmdb")}>
-          {compact ? <span className="sr-only">{t("media.ratings.tmdb")}</span> : <span className={`text-zinc-500 ${textXs}`}>TMDB</span>}
-          <span className={`font-semibold text-yellow-400 ${textSm}`}>{voteAverage.toFixed(1)}</span>
-        </div>
-      ) : null}
+      ))}
     </div>
   );
 }

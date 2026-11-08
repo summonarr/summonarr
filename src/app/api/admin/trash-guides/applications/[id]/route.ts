@@ -3,7 +3,13 @@ import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
+import { isFeatureEnabled } from "@/lib/features";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+
+// One TRaSH spec's application on an instance: switch it on/off, or remove it.
+// Gated on the integration like apply/refresh/starter-pack: with TRaSH off the
+// page is hidden and nothing should still edit what the nightly sync pushes.
 
 export const PATCH = withAdmin(async (
   req,
@@ -11,6 +17,9 @@ export const PATCH = withAdmin(async (
   session,
 ) => {
   const t = translatorForRequest(req);
+  if (!(await isFeatureEnabled("trashGuidesEnabled"))) {
+    return NextResponse.json({ error: t("apiAdmin.trash.disabled") }, { status: 403 });
+  }
   const { id } = await ctx.params;
   const parsed = await readJsonCapped<{ enabled?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
@@ -19,19 +28,19 @@ export const PATCH = withAdmin(async (
     return NextResponse.json({ error: t("apiAdmin.trash.enabledBoolean") }, { status: 400 });
   }
 
-  const app = await prisma.trashApplication.findUnique({
-    where: { id },
-    include: { trashSpec: true },
-  });
-  if (!app) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-
-  // updateMany (not update) so a concurrent delete returns count:0 instead of
-  // throwing an unhandled P2025 → 500 (mirrors the issues route convention).
-  const updated = await prisma.trashApplication.updateMany({
-    where: { id },
-    data: { enabled: body.enabled },
-  });
-  if (updated.count === 0) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
+  // One statement: the write returns the spec the audit names, and a row that
+  // is gone (never there, or deleted concurrently) is P2025 → 404, not a 500.
+  let app;
+  try {
+    app = await prisma.trashApplication.update({
+      where: { id },
+      data: { enabled: body.enabled },
+      include: { trashSpec: true },
+    });
+  } catch (err) {
+    if (isPrismaErrorCode(err, "P2025")) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
+    throw err;
+  }
 
   await logAudit({
     userId: session.user.id,
@@ -51,17 +60,22 @@ export const DELETE = withAdmin(async (
   session,
 ) => {
   const t = translatorForRequest(req);
+  if (!(await isFeatureEnabled("trashGuidesEnabled"))) {
+    return NextResponse.json({ error: t("apiAdmin.trash.disabled") }, { status: 403 });
+  }
   const { id } = await ctx.params;
-  const app = await prisma.trashApplication.findUnique({
-    where: { id },
-    include: { trashSpec: true },
-  });
-  if (!app) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
 
-  // deleteMany (not delete) so a concurrent delete returns count:0 instead of
-  // throwing an unhandled P2025 → 500 (mirrors the issues route convention).
-  const deleted = await prisma.trashApplication.deleteMany({ where: { id } });
-  if (deleted.count === 0) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
+  // As in PATCH: the delete returns the row it removed, and a missing one is a 404.
+  let app;
+  try {
+    app = await prisma.trashApplication.delete({
+      where: { id },
+      include: { trashSpec: true },
+    });
+  } catch (err) {
+    if (isPrismaErrorCode(err, "P2025")) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
+    throw err;
+  }
 
   await logAudit({
     userId: session.user.id,

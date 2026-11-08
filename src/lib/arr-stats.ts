@@ -63,10 +63,12 @@ async function fetchDiskSpace(
   service: "radarr" | "sonarr",
   slug: string,
 ): Promise<DiskSpaceEntry[] | null | typeof FAILED> {
-  const cfg = await getArrCfg(service, slug);
-  if (!cfg) return null;
-
   try {
+    // Inside the try: a config read that throws (the database, a value that no
+    // longer decrypts) marks THIS instance unreachable, like a failed call —
+    // never the whole report.
+    const cfg = await getArrCfg(service, slug);
+    if (!cfg) return null;
     // Route through arrFetch (guardrail 5): 50 MB response cap, 30s timeout,
     // injects X-Api-Key, throws ArrResponseError on non-2xx.
     return diskSpaceEntries(await arrFetch<unknown>(cfg, "/api/v3/diskspace"));
@@ -81,6 +83,8 @@ async function fetchDiskSpace(
   }
 }
 
+const SERVICE_LABEL = { radarr: "Radarr", sonarr: "Sonarr" } as const;
+
 export async function getArrDiskSpace(): Promise<ArrDiskSpace> {
   // A service whose integration is switched off is not called at all — as on
   // every other admin arr page (enabledArrInstances): `radarr`/`sonarr` null,
@@ -93,37 +97,22 @@ export async function getArrDiskSpace(): Promise<ArrDiskSpace> {
     radarrOn ? getSyncableArrInstances("radarr") : [],
     sonarrOn ? getSyncableArrInstances("sonarr") : [],
   ]);
-
-  const [radarrRaw, sonarrRaw] = await Promise.all([
-    radarrInstances.some((i) => i.slug === "") ? fetchDiskSpace("radarr", "") : Promise.resolve(null),
-    sonarrInstances.some((i) => i.slug === "") ? fetchDiskSpace("sonarr", "") : Promise.resolve(null),
-  ]);
-
-  const unreachable: ArrDiskSpace["unreachable"] = [];
-  if (radarrRaw === FAILED) unreachable.push({ service: "radarr", slug: "", label: "Radarr" });
-  if (sonarrRaw === FAILED) unreachable.push({ service: "sonarr", slug: "", label: "Sonarr" });
-
-  const namedTargets = [
-    ...radarrInstances.filter((i) => i.slug !== "").map((i) => ({ service: "radarr" as const, inst: i })),
-    ...sonarrInstances.filter((i) => i.slug !== "").map((i) => ({ service: "sonarr" as const, inst: i })),
+  // Every instance, the default included, through one list: radarr then
+  // sonarr, each in registry order (the default first, 4K right after it).
+  const targets = [
+    ...radarrInstances.map((i) => ({ service: "radarr" as const, slug: i.slug, name: i.name })),
+    ...sonarrInstances.map((i) => ({ service: "sonarr" as const, slug: i.slug, name: i.name })),
   ];
-  const extraResults = await Promise.all(
-    namedTargets.map(async ({ service, inst }) => {
-      const entries = await fetchDiskSpace(service, inst.slug);
-      const label = `${service === "radarr" ? "Radarr" : "Sonarr"} (${inst.name})`;
-      if (entries === FAILED) {
-        unreachable.push({ service, slug: inst.slug, label });
-        return null;
-      }
-      if (!entries) return null;
-      return { service, slug: inst.slug, label, entries } satisfies ArrInstanceDiskSpace;
-    }),
-  );
+  const results = await Promise.all(targets.map((t) => fetchDiskSpace(t.service, t.slug)));
 
-  return {
-    radarr: radarrRaw === FAILED ? null : radarrRaw,
-    sonarr: sonarrRaw === FAILED ? null : sonarrRaw,
-    extra: extraResults.filter((r) => r !== null),
-    unreachable,
-  };
+  const out: ArrDiskSpace = { radarr: null, sonarr: null, extra: [], unreachable: [] };
+  targets.forEach((t, i) => {
+    const entries = results[i];
+    const label = t.slug === "" ? SERVICE_LABEL[t.service] : `${SERVICE_LABEL[t.service]} (${t.name})`;
+    if (entries === FAILED) out.unreachable.push({ service: t.service, slug: t.slug, label });
+    else if (entries === null) return;
+    else if (t.slug === "") out[t.service] = entries;
+    else out.extra.push({ service: t.service, slug: t.slug, label, entries });
+  });
+  return out;
 }

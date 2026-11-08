@@ -51,8 +51,8 @@ test("g-sonarr#1: a folded Sonarr pack removes with ONE record id; a pending row
 });
 
 test("g-sonarr#1: the queue page's Remove sends removalIds(row), never every record id", () => {
-  const page = src("components/admin/download-queue.tsx");
-  const body = /fetch\(withBasePath\("\/api\/admin\/queue\/remove"\)[\s\S]*?\}\),\s*\}\);/.exec(page)?.[0] ?? "";
+  const page = src("components/admin/queue-remove-dialog.tsx");
+  const body = /fetchJson\(withBasePath\("\/api\/admin\/queue\/remove"\)[\s\S]*?\}\),/.exec(page)?.[0] ?? "";
   assert.match(body, /ids: removalIds\(removing\)/);
   assert.doesNotMatch(body, /removing\.ids/);
 });
@@ -73,13 +73,17 @@ test("g-sonarr#2: blocklistRedownload — Sonarr below v4 searches; v4+ and Rada
 });
 
 test("g-sonarr#2: the Blocklist option's help follows the row's instance version, and the health report is read once per page", () => {
+  const dialog = src("components/admin/queue-remove-dialog.tsx");
+  const actions = src("components/admin/use-queue-actions.ts");
   const page = src("components/admin/download-queue.tsx");
-  assert.match(page, /const redownload = removing \? blocklistRedownload\(removing\.service, arrVersions\[`\$\{removing\.service\}:\$\{removing\.instance\}`\]\) : "skipped";/);
-  assert.match(page, /help: redownload === "searches"\s*\? t\("adminManage\.queue\.remove\.blocklistHelpSonarrV3"\)\s*: redownload === "unknown"\s*\? t\("adminManage\.queue\.remove\.blocklistHelpSonarrUnknown"\)\s*: t\("adminManage\.queue\.remove\.blocklistHelp"\),/);
+  assert.match(dialog, /const redownload = removing \? blocklistRedownload\(removing\.service, arrVersions\[`\$\{removing\.service\}:\$\{removing\.instance\}`\]\) : "skipped";/);
+  assert.match(dialog, /help: redownload === "searches"\s*\? t\("adminManage\.queue\.remove\.blocklistHelpSonarrV3"\)\s*: redownload === "unknown"\s*\? t\("adminManage\.queue\.remove\.blocklistHelpSonarrUnknown"\)\s*: t\("adminManage\.queue\.remove\.blocklistHelp"\),/);
   // The version comes from the health report, read once: the guard is set BEFORE the fetch,
   // so neither a load in flight nor a failed one is re-read by a later open.
-  assert.match(page, /async function loadVersions\(\) \{\s*if \(versionsRequested\.current\) return;\s*versionsRequested\.current = true;\s*try \{\s*const res = await fetch\(withBasePath\("\/api\/admin\/arr-health"\)\);/);
-  assert.equal((page.match(/versionsRequested\.current = /g) ?? []).length, 1, "never reset");
+  assert.match(actions, /async function loadVersions\(\) \{\s*if \(versionsRequested\.current\) return;\s*versionsRequested\.current = true;\s*const res = await fetchJson\(withBasePath\("\/api\/admin\/arr-health"\), \{ schema: HealthReport \}\);/);
+  assert.equal((actions.match(/versionsRequested\.current = /g) ?? []).length, 1, "never reset");
+  // Each health entry is checked on its own and keyed `service:slug`, the key the dialog reads.
+  assert.match(actions, /const i = check\(HealthEntry, raw\);\s*if \(i\.ok\) next\[`\$\{i\.value\.service\}:\$\{i\.value\.slug\}`\] = i\.value\.version \?\? null;/);
   assert.match(page, /if \(row\.service === "sonarr"\) void loadVersions\(\);/);
   // The cautious wording exists in every locale and names Sonarr v3 as the exception.
   const en = JSON.parse(src("lib/i18n/messages/en/adminManage.json")) as Record<string, string>;
@@ -163,10 +167,10 @@ test("g-pollers#6: recheckOutcome counts the refusals the 202 carries", () => {
 });
 
 test("g-pollers#6: the page's Re-check goes through recheckOutcome and shows no success when every instance refused", () => {
-  const page = src("components/admin/download-queue.tsx");
+  const page = src("components/admin/use-queue-actions.ts");
   const body = /async function recheck\(\) \{([\s\S]*?)\n  \}\n/.exec(page)?.[1] ?? "";
   assert.match(body, /const outcome = recheckOutcome\(data\);/);
-  assert.match(body, /if \(!outcome\.allFailed\) setNotice\(/);
+  assert.match(body, /if \(!outcome\.allFailed\) succeeded\(/);
   assert.doesNotMatch(body, /data\?\.errors\?\.length/);
   assert.match(body, /setRecheckFailed\(\{ all: outcome\.allFailed, failed: outcome\.failed \}\)/);
 });

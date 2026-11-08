@@ -87,8 +87,8 @@ export function connectionsToTry(server: PlexAccountServer, fallback: boolean): 
  * accepts; -1 when none does. Up to `concurrency` probes run at once
  * (mapLimit, guardrail 31), but the answer is always the earliest-RANKED
  * match, never merely the first to reply: it resolves once every item ranked
- * above the match has answered no, and no probe starts after that. `probe`
- * must not throw.
+ * above the match has answered no, and no probe starts after that. A probe
+ * that throws counts as no.
  */
 export async function firstMatchInOrder<T>(
   items: readonly T[],
@@ -98,9 +98,21 @@ export async function firstMatchInOrder<T>(
   const settle: Array<(matched: boolean) => void> = [];
   const results = items.map(() => new Promise<boolean>((resolve) => { settle.push(resolve); }));
   let decided = false;
+  // Every slot settles exactly once: a probe that throws counts as "no" (it
+  // used to leave its slot pending, so the walk never returned), and a slot
+  // skipped after the answer settles "no" too.
   void mapLimit(items, concurrency, async (item, i) => {
-    if (decided) return;
-    settle[i](await probe(item));
+    if (decided) {
+      settle[i](false);
+      return;
+    }
+    let matched = false;
+    try {
+      matched = await probe(item);
+    } catch {
+      matched = false;
+    }
+    settle[i](matched);
   });
   for (let i = 0; i < results.length; i++) {
     if (await results[i]) {

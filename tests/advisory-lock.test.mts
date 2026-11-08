@@ -8,7 +8,11 @@
 //   - the busy path: onBusy() runs, the work does not, and we never unlock a
 //     lock we never held;
 //   - an empty try-lock result counts as "not acquired" (fail closed);
-//   - the timeout: the AbortSignal fires with the timeout error BEFORE unlocking;
+//   - the timeout: the AbortSignal fires with the timeout error and the caller
+//     gets it at once, but the lock is HELD until the work settles (bounded by
+//     settleGraceMs), so the next tick cannot start a second run beside it;
+//   - the lock connection carries connect/query timeouts, and a failed connect
+//     still closes the client;
 //   - pg_advisory_unlock and client.end always run in the finally paths.
 //
 // There is no DB in the unit suite, so pg's Client prototype is replaced with
@@ -25,6 +29,9 @@ import {
   WARM_MDBLIST_LOCK_ID,
   TRASH_SYNC_LOCK_ID,
   AdvisoryLockTimeoutError,
+  LOCK_CONNECT_TIMEOUT_MS,
+  LOCK_QUERY_TIMEOUT_MS,
+  lockClientConfig,
   withAdvisoryLock,
 } from "../src/lib/advisory-lock.ts";
 
@@ -43,6 +50,11 @@ interface ClientProtoMock {
 }
 
 const calls: Call[] = [];
+
+// The module logs through console.error; captured so the grace-expiry line can
+// be asserted on and kept out of the test output.
+const loggedErrors: string[] = [];
+console.error = (...args: unknown[]) => { loggedErrors.push(args.map(String).join(" ")); };
 let tryLockRows: Array<{ acquired: boolean }> = [{ acquired: true }];
 
 // The client withAdvisoryLock creates internally, captured at connect() so a test
@@ -59,10 +71,14 @@ let failQueryContaining: string | null = null;
 // When true, end() rejects, as it does on an already-broken socket.
 let failEnd = false;
 
+// When set, connect() rejects with it (an unreachable or refusing server).
+let failConnect: Error | null = null;
+
 const proto = Client.prototype as unknown as ClientProtoMock;
 proto.connect = async function (this: EventEmitter) {
   calls.push({ op: "connect" });
   captureClient(this);
+  if (failConnect) throw failConnect;
 };
 proto.query = async (text, values) => {
   calls.push({ op: "query", text, values });
@@ -83,6 +99,18 @@ function reset(rows: Array<{ acquired: boolean }>): void {
   lastClient = null;
   failQueryContaining = null;
   failEnd = false;
+  failConnect = null;
+}
+
+const unlocked = () => queryTexts().some((t) => t.includes("pg_advisory_unlock"));
+
+// Waits for an observable step instead of a fixed sleep; fails after `ms`.
+async function waitFor(cond: () => boolean, what: string, ms = 2_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 2));
+  }
 }
 
 function queryTexts(): string[] {
@@ -190,20 +218,21 @@ test("work() rejection propagates, but the lock is still released", async () => 
   assert.equal(calls.at(-1)?.op, "end");
 });
 
-test("timeout: rejects AdvisoryLockTimeoutError, aborts the signal, still unlocks", async () => {
+test("timeout: rejects AdvisoryLockTimeoutError at once and aborts the signal; work that never settles keeps the lock only for the grace", async () => {
   reset([{ acquired: true }]);
   const seenSignals: AbortSignal[] = [];
+  const errorsBefore = loggedErrors.length;
   const pending = withAdvisoryLock(
     WARM_OMDB_LOCK_ID,
     (signal: AbortSignal) => {
       seenSignals.push(signal);
       // Never settles — simulates wedged work. A pending promise holds no
-      // event-loop handle and the module clears its timer, so the process
+      // event-loop handle and the module clears its timers, so the process
       // still exits promptly.
       return new Promise<never>(() => {});
     },
     () => "busy" as const,
-    { timeoutMs: 40 },
+    { timeoutMs: 40, settleGraceMs: 30 },
   );
   await assert.rejects(pending, (err: unknown) => {
     assert.ok(err instanceof AdvisoryLockTimeoutError);
@@ -213,11 +242,101 @@ test("timeout: rejects AdvisoryLockTimeoutError, aborts the signal, still unlock
   });
   assert.equal(seenSignals.length, 1);
   // The signal fires (with the timeout error as reason) so signal-aware work
-  // can stop issuing DB statements before pg_advisory_unlock runs.
+  // can stop issuing DB statements.
   assert.equal(seenSignals[0].aborted, true);
   assert.ok(seenSignals[0].reason instanceof AdvisoryLockTimeoutError);
-  assert.ok(queryTexts().some((t) => t.includes("pg_advisory_unlock")));
+  assert.equal(unlocked(), false, "the caller is answered before the lock is let go");
+  // Work that never settles is not allowed to hold the lock for ever.
+  await waitFor(() => calls.at(-1)?.op === "end", "the lock to be released after the grace");
+  assert.ok(unlocked());
+  assert.ok(
+    loggedErrors.slice(errorsBefore).some((e) => e.includes("still running") && e.includes(String(WARM_OMDB_LOCK_ID))),
+    "releasing a lock under running work is logged",
+  );
+});
+
+test("timeout: the lock is held until signal-aware work actually returns, then released", async () => {
+  // Signal-aware work still overshoots the abort by its in-flight batch (or the
+  // orchestrator's current arm). Unlocking at the timeout let the next tick
+  // start a second run beside it; the lock now outlives the overshoot.
+  reset([{ acquired: true }]);
+  let finishBatch: () => void = () => {};
+  const batchDone = new Promise<void>((r) => { finishBatch = r; });
+  let returned = false;
+  const errorsBefore = loggedErrors.length;
+  const pending = withAdvisoryLock(
+    WARM_OMDB_LOCK_ID,
+    async (signal: AbortSignal) => {
+      await new Promise<void>((r) => signal.addEventListener("abort", () => r(), { once: true }));
+      await batchDone; // the batch in flight when the abort landed
+      returned = true;
+      return "stopped";
+    },
+    () => "busy" as const,
+    { timeoutMs: 20 },
+  );
+  await assert.rejects(pending, AdvisoryLockTimeoutError);
+  assert.equal(unlocked(), false, "still held while the in-flight batch runs");
+  // A second caller in this window is refused by Postgres — modelled here by
+  // the lock still being held: no unlock has been issued.
+  finishBatch();
+  await waitFor(unlocked, "the unlock once the work returned");
+  assert.equal(returned, true);
   assert.equal(calls.at(-1)?.op, "end");
+  assert.equal(
+    loggedErrors.slice(errorsBefore).filter((e) => e.includes("still running")).length,
+    0,
+    "work that settled inside the grace is released quietly",
+  );
+});
+
+test("timeout: work that throws after the abort still releases the lock, with no unhandled rejection", async () => {
+  reset([{ acquired: true }]);
+  let fail: () => void = () => {};
+  const pending = withAdvisoryLock(
+    WARM_OMDB_LOCK_ID,
+    (signal: AbortSignal) =>
+      new Promise<never>((_, reject) => {
+        signal.addEventListener("abort", () => { fail = () => reject(new Error("late failure")); }, { once: true });
+      }),
+    () => "busy" as const,
+    { timeoutMs: 20 },
+  );
+  await assert.rejects(pending, AdvisoryLockTimeoutError);
+  assert.equal(unlocked(), false);
+  fail();
+  await waitFor(unlocked, "the unlock once the work rejected");
+});
+
+test("the lock connection carries connect and query timeouts", async () => {
+  // Without them a hung connect or try-lock waits out the OS TCP timeout, and
+  // every cron tick waits with it.
+  assert.deepEqual(lockClientConfig("postgres://x"), {
+    connectionString: "postgres://x",
+    connectionTimeoutMillis: LOCK_CONNECT_TIMEOUT_MS,
+    query_timeout: LOCK_QUERY_TIMEOUT_MS,
+  });
+  assert.ok(LOCK_CONNECT_TIMEOUT_MS > 0 && LOCK_CONNECT_TIMEOUT_MS <= 30_000);
+  assert.ok(LOCK_QUERY_TIMEOUT_MS > 0 && LOCK_QUERY_TIMEOUT_MS <= 30_000);
+  // …and the client withAdvisoryLock builds is the one configured with them.
+  reset([{ acquired: true }]);
+  await withAdvisoryLock(WARM_OMDB_LOCK_ID, async () => 1, () => 0);
+  const built = lastClient as unknown as { _connectionTimeoutMillis: number; connectionParameters: { query_timeout?: number } };
+  assert.equal(built._connectionTimeoutMillis, LOCK_CONNECT_TIMEOUT_MS);
+  assert.equal(built.connectionParameters.query_timeout, LOCK_QUERY_TIMEOUT_MS);
+});
+
+test("a failed connect rejects, never runs the work, and still closes the client", async () => {
+  reset([{ acquired: true }]);
+  failConnect = new Error("connect ECONNREFUSED (unit test)");
+  let ran = false;
+  await assert.rejects(
+    withAdvisoryLock(WARM_OMDB_LOCK_ID, async () => { ran = true; return 1; }, () => 0),
+    /ECONNREFUSED/,
+  );
+  assert.equal(ran, false);
+  assert.equal(unlocked(), false, "nothing was locked, so nothing is unlocked");
+  assert.equal(calls.at(-1)?.op, "end", "the client is closed on a failed connect too");
 });
 
 // ── connection-level failures while the lock is held ────────────────────────

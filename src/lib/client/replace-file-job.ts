@@ -13,7 +13,7 @@
 // as the job's own failure. A 404 (the job expired or a restart dropped it) is
 // the route's own answer and is returned like any other — its `error` says to
 // reload, not to retry.
-import { jobIdOf, pollJob } from "./job-poll";
+import { jobIdOf, pollJob, type JobPollOptions } from "./job-poll";
 
 export interface ReplaceJobAnswer {
   /** The HTTP status of the replace's answer; 0 when no answer came (network or proxy 5xx polls, or out of polls). */
@@ -29,12 +29,19 @@ export interface ReplaceJobOptions {
   intervalMs?: number;
   maxPolls?: number;
   failLimit?: number;
+  /** Why a status-0 answer came (pollJob's onGiveUp): an unreachable server, or a job still running. */
+  onGiveUp?: JobPollOptions["onGiveUp"];
 }
 
 const DEFAULT_INTERVAL_MS = 1_500;
 // 400 × 1.5 s ≈ 10 minutes — longer than any replace, shorter than the job's 10-minute answer TTL plus the run.
 const DEFAULT_MAX_POLLS = 400;
 const DEFAULT_FAIL_LIMIT = 5;
+
+/** `url` with `job=<id>` added, its own query kept. */
+export function jobPollUrl(url: string, job: string): string {
+  return `${url}${url.includes("?") ? "&" : "?"}job=${encodeURIComponent(job)}`;
+}
 
 /**
  * POST the replace as a background job and wait for its answer. Resolves with
@@ -56,12 +63,13 @@ export async function runReplaceFileJob(
   const job = res.status === 202 ? jobIdOf(data) : null;
   if (job === null) return { status: res.status, data };
 
-  const answer = await pollJob(fetchFn, `${url}?job=${encodeURIComponent(job)}`, {
+  const answer = await pollJob(fetchFn, jobPollUrl(url, job), {
     sleep: opts.sleep,
     isAlive: opts.isAlive,
     intervalMs: opts.intervalMs ?? DEFAULT_INTERVAL_MS,
     maxPolls: opts.maxPolls ?? DEFAULT_MAX_POLLS,
     failLimit: opts.failLimit ?? DEFAULT_FAIL_LIMIT,
+    onGiveUp: opts.onGiveUp,
   });
   if (answer === null || answer.status === 0) return answer;
   return { status: answer.status, data: answer.data ?? {} };

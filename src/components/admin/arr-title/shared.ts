@@ -1,8 +1,11 @@
-// Shared plumbing for the admin title manager's tabs: which title, how to talk
-// to /api/admin/arr/title/*, and the error text a refusal carries.
+// Shared plumbing for the admin title manager's tabs (and the other admin
+// Radarr/Sonarr pages): which title, how to talk to /api/admin/arr/*, and the
+// labels every one of them shows.
 import { useEffect, useRef } from "react";
 import { useT } from "@/components/i18n/i18n-provider";
 import { withBasePath } from "@/lib/base-path";
+import { ANY_OBJECT, arrCall, type ArrCallResult } from "@/lib/client/arr-call";
+import type { Schema } from "@/lib/validate";
 
 export type ArrServiceName = "radarr" | "sonarr";
 
@@ -19,28 +22,34 @@ export function titleQuery(ref: TitleRef, extra: Record<string, string | number>
   return q.toString();
 }
 
-export type ApiResult<T> = { ok: true; data: T } | { ok: false; error: string };
+export type ApiResult<T> = ArrCallResult<T>;
+
+export interface ApiInit<T> {
+  method?: string;
+  body?: unknown;
+  /** What the page reads off the answer (src/lib/client/arr-answers.ts); any JSON object when absent. */
+  schema?: Schema<T>;
+  /** The caller's abort: an unmount, a newer read of the same thing. */
+  signal?: AbortSignal;
+}
 
 /**
- * A JSON call to one of the title routes. A refusal's `error` (already
- * translated by the server) is passed through; a network failure or an
- * unreadable answer becomes `fallback`.
+ * A JSON call to one of the admin arr routes (arr-call.ts: a timeout, the
+ * shape check, never a throw). A refusal's `error` (already translated by the
+ * server) is passed through; no answer, an unreadable one or a timeout
+ * becomes `fallback`. `path` is the route's own; the base path is added here.
  */
-export async function arrApi<T>(path: string, init: { method?: string; body?: unknown } | undefined, fallback: string): Promise<ApiResult<T>> {
-  try {
-    const res = await fetch(withBasePath(path), {
-      method: init?.method ?? "GET",
-      ...(init?.body !== undefined ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(init.body) } : {}),
-    });
-    const data = (await res.json().catch(() => null)) as (T & { error?: string }) | null;
-    if (!res.ok || data === null) return { ok: false, error: data?.error ?? fallback };
-    return { ok: true, data };
-  } catch {
-    return { ok: false, error: fallback };
-  }
+export function arrApi<T>(path: string, init: ApiInit<T> & { schema: Schema<T> }, fallback: string): Promise<ApiResult<T>>;
+export function arrApi(path: string, init: ApiInit<Record<string, unknown>>, fallback: string): Promise<ApiResult<Record<string, unknown>>>;
+export function arrApi<T>(path: string, init: ApiInit<T>, fallback: string): Promise<ApiResult<T>> {
+  const schema = (init.schema ?? ANY_OBJECT) as Schema<T>;
+  return arrCall(withBasePath(path), { method: init.method, body: init.body, schema, signal: init.signal, fallback });
 }
 
 export const SERVICE_LABEL: Record<ArrServiceName, string> = { radarr: "Radarr", sonarr: "Sonarr" };
+
+/** An instance's key in a page's maps and its `?instance=` select: "service:slug". */
+export const arrInstanceKey = (i: { service: ArrServiceName; slug: string }) => `${i.service}:${i.slug}`;
 
 /**
  * The translator through a ref, for loaders that run from effects: the

@@ -91,30 +91,55 @@ test("structural: the component lists, counts and records fixes through match-ch
   assert.match(src, /\(\) => view\.flags\.filter\(\(f\) => !mediaType \|\| f\.mediaType === mediaType\)/, "rows come from the view, kept warning rows included");
   assert.match(src, /setFixes\(\(prev\) => recordMatchFix\(prev, checkedAt, flag, warning\)\)/);
   assert.match(src, /onFixed\(flag, warning \?\? undefined\);/, "Fix one passes the flag itself");
-  assert.match(src, /onFixed\(flag, fixMatchWarningMessage\(outcome, t\) \?\? undefined\);/, "so does Fix all");
+  assert.match(src, /fixAll\.start\(fixable\.map\(fixAllEntryOf\), \(entry, warning\) => onFixed\(entry\.flag, warning\)\)/, "so does Fix all");
+  const run = readFileSync(join(here, "../src/components/admin/fix-all-run.tsx"), "utf8");
+  assert.match(run, /if \(result\.kind !== "error"\) onFixed\?\.\(entry, result\.text\);/, "the run hands each remap's warning back");
   // Check now does NOT clear the fixes before the refresh: the new report's
   // checkedAt voids them (the "NEW check" test above), and clearing first
   // brought every fixed row back with a live Fix button until it arrived.
   const check = src.slice(src.indexOf("async function check("), src.indexOf("const chip = "));
   assert.match(check, /router\.refresh\(\);/);
   assert.doesNotMatch(check, /setFixes\(/, "no reset of this session's fixes before the refresh");
+  // A reverse proxy's own 502/503/504 during a long check is no answer, not a failure.
+  assert.match(check, /if \(isNoAnswer\(answer\)\) \{\s*setNote\(t\(gaveUp\.reason === "unreachable" \? "adminManage\.library\.match\.noAnswer" : "adminManage\.library\.match\.stillRunning"\)\);/);
+  assert.doesNotMatch(check, /answer\.status === 0/, "status 0 alone missed the proxy's timeout");
 });
 
 test("structural: Fix all can be stopped, stops on unmount, and stays mounted when the list empties", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const src = readFileSync(join(here, "../src/components/admin/library-match-check.tsx"), "utf8");
-  const fixAll = src.slice(src.indexOf("function FixAllButton("), src.indexOf("function FlagRow("));
-  assert.match(fixAll, /for \(const flag of flags\) \{\s*if \(stopRef\.current\) break;/, "the loop checks the stop flag between items");
-  assert.match(fixAll, /\}, \{ signal: ac\.signal \}\);/, "each poll can be aborted");
-  assert.match(fixAll, /return \(\) => \{ alive\.current = false; stopRef\.current = true; abortRef\.current\?\.abort\(\); \};/, "unmount stops the run");
-  assert.match(fixAll, /onClick=\{\(\) => \{ stopRef\.current = true; \}\}/, "a Stop button while running");
-  assert.match(fixAll, /if \(err instanceof DOMException && err\.name === "AbortError"\) break;/, "an abort is not a failure");
+  // The run is the shared one (fix-all-run.tsx + fix-all-sequence.ts), the same as the library diff's.
+  const run = readFileSync(join(here, "../src/components/admin/fix-all-run.tsx"), "utf8");
+  const loop = readFileSync(join(here, "../src/lib/client/fix-all-sequence.ts"), "utf8");
+  assert.match(loop, /for \(const entry of entries\) \{\s*if \(deps\.stopped\(\)\) break;/, "the loop checks the stop flag between items");
+  assert.match(run, /fix: \(request, signal\) => runFixMatch\(request, \{ signal \}\),/, "each poll can be aborted");
+  assert.match(run, /onTitleStart: \(ac\) => \{ abortRef\.current = ac; \},/);
+  assert.match(run, /return \(\) => \{ alive\.current = false; stopRef\.current = true; abortRef\.current\?\.abort\(\); \};/, "unmount stops the run");
+  assert.match(run, /if \(aborted \|\| !alive\.current\) return;/, "nothing is written, and no refresh asked for, after the page went away");
+  assert.match(run, /stop: \(\) => \{ stopRef\.current = true; \},/);
+  assert.match(run, /\{state === "running" && \(\s*<button ref=\{stopButtonRef\} type="button" onClick=\{run\.stop\}/, "a Stop button while running");
+  assert.match(loop, /if \(isAbortError\(err\)\) return \{ results, aborted: true \};/, "an abort is not a failure");
+  assert.match(loop, /return err instanceof DOMException && err\.name === "AbortError";/);
+  assert.doesNotMatch(src, /function FixAllButton|for \(const flag of flags\)/, "no private copy of the loop");
   // A run that fixed every flag empties the list; inside `flags.length > 0`
   // the button (and its summary) unmounted with it.
   const listBlock = src.slice(src.indexOf("{flags.length > 0 && ("), src.indexOf("{report && flags.length === 0 && ("));
   assert.ok(listBlock.length > 0);
-  assert.doesNotMatch(listBlock, /<FixAllButton/);
-  assert.match(src, /<FixAllButton flags=\{fixable\} onFixed=\{onFixed\} \/>/);
+  assert.doesNotMatch(listBlock, /<FixAllControl/);
+  assert.match(src, /<FixAllControl run=\{fixAll\} count=\{fixable\.length\} label=\{fixAllLabel\} onConfirm=\{startFixAll\} outcomes="errors" maxWidth=\{460\} \/>/);
+});
+
+test("structural: while Fix all runs, a row's own Fix is locked for an item the run still has to do", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(join(here, "../src/components/admin/library-match-check.tsx"), "utf8");
+  assert.match(src, /locked=\{fixAll\.pending\.has\(flagKey\(f\)\)\}/);
+  assert.match(src, /return \{ key: flagKey\(flag\), /, "the run's key is the row's key");
+  const one = src.slice(src.indexOf("function FixOneButton("), src.indexOf("function FlagRow("));
+  assert.match(one, /disabled=\{state === "running" \|\| locked\}/);
+  assert.match(one, /onClick=\{run\} disabled=\{locked\}/, "an open confirm can't start it either");
+  const run = readFileSync(join(here, "../src/components/admin/fix-all-run.tsx"), "utf8");
+  assert.match(run, /setPending\(new Set\(entries\.map\(\(e\) => e\.key\)\)\);/);
+  assert.match(run, /next\.delete\(entry\.key\);/, "a row unlocks once the run answered it");
 });
 
 test("structural: each confirm moves focus to its Cancel and back to the button that opened it", () => {
@@ -122,14 +147,22 @@ test("structural: each confirm moves focus to its Cancel and back to the button 
   const read = (p: string) => readFileSync(join(here, p), "utf8");
   const src = read("../src/components/admin/library-match-check.tsx");
   for (const [name, body] of [
-    ["FixOneButton", src.slice(src.indexOf("function FixOneButton("), src.indexOf("function FixAllButton("))],
-    ["FixAllButton", src.slice(src.indexOf("function FixAllButton("), src.indexOf("function FlagRow("))],
+    ["FixOneButton", src.slice(src.indexOf("function FixOneButton("), src.indexOf("function FlagRow("))],
+    // The library diff's and the match check's Fix all (the hook and its control).
+    ["the shared Fix all", read("../src/components/admin/fix-all-run.tsx")],
     ["MasterDbFillButton", read("../src/components/admin/master-db-fill-button.tsx")],
   ] as const) {
     assert.match(body, /=== "confirm"\) cancelRef\.current\?\.focus\(\);/, `${name}: Cancel takes focus`);
     assert.match(body, /ref=\{cancelRef\}/, name);
     assert.match(body, /ref=\{triggerRef\}/, name);
     assert.match(body, /triggerRef\.current\?\.focus\(\);/, `${name}: focus returns to the opener`);
-    assert.match(body, /onClick=\{\(\) => \{ refocus\.current = true; set(State|Phase)\("idle"\); \}\}/, `${name}: Cancel asks for it back`);
+    assert.match(
+      body,
+      /onClick=\{\(\) => \{ refocus\.current = true; (set(State|Phase)\("idle"\)|run\.cancelConfirm\(\)); \}\}/,
+      `${name}: Cancel asks for it back`,
+    );
   }
+  const run = read("../src/components/admin/fix-all-run.tsx");
+  assert.match(run, /else if \(state === "running"\) stopButtonRef\.current\?\.focus\(\);/, "Stop takes focus while running");
+  assert.match(run, /onClick=\{\(\) => \{ refocus\.current = true; onConfirm\(\); \}\}/, "a run's end hands focus back to the button too");
 });

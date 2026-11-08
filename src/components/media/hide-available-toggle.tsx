@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useT } from "@/components/i18n/i18n-provider";
+import { FilterToggleButton } from "./filter-toggle-button";
 
 interface HideAvailableToggleProps {
   active: boolean;
@@ -45,25 +46,14 @@ export function HideAvailableToggle({ active }: HideAvailableToggleProps) {
   }
 
   return (
-    <button
-      type="button"
+    <FilterToggleButton
+      pressed={shown}
       onClick={toggle}
-      aria-pressed={shown}
       aria-busy={isPending || undefined}
-      className="ds-tap ds-hover-tint inline-flex items-center gap-1.5 font-medium transition-opacity"
-      style={{
-        padding: "5px 12px",
-        minHeight: 32,
-        borderRadius: 8,
-        fontSize: 12,
-        background: shown ? "var(--ds-accent-soft)" : "var(--ds-bg-2)",
-        color: shown ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
-        border: `1px solid ${shown ? "var(--ds-accent-ring)" : "var(--ds-border)"}`,
-        whiteSpace: "nowrap",
-        opacity: isPending ? 0.7 : 1,
-      }}
+      className="transition-opacity"
+      style={{ whiteSpace: "nowrap", opacity: isPending ? 0.7 : 1 }}
     >
       {t("media.hideAvailable")}
-    </button>
+    </FilterToggleButton>
   );
 }

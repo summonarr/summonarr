@@ -1,7 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { logAudit } from "@/lib/audit";
-import { withAdvisoryLock, WARM_LIST_CACHE_LOCK_ID } from "@/lib/advisory-lock";
-import { cronSkippedResponse, getCronActor, withCronRunRecording } from "@/lib/cron-auth";
+import { WARM_LIST_CACHE_LOCK_ID } from "@/lib/advisory-lock";
+import { defineCronRoute } from "@/lib/cron-route";
 import {
   getTrending, getPopularMovies, getPopularTV,
   getUpcomingMovies, getUpcomingTV, getOnTheAirTV,
@@ -40,67 +38,34 @@ const WARM_TASKS: ReadonlyArray<{ name: string; fn: () => Promise<readonly unkno
   { name: "mdblistTV", fn: () => getMdblistTopRated("tv", undefined, BACKGROUND_MDBLIST) },
 ];
 
-export async function POST(request: NextRequest) {
-  const authCtx = await getCronActor(request);
-  if (!authCtx) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+export const POST = defineCronRoute({
+  target: "list-cache",
+  lockId: WARM_LIST_CACHE_LOCK_ID,
+  cacheWarm: true,
+  async run({ elapsedMs }) {
+    const results = await Promise.allSettled(WARM_TASKS.map((task) => task.fn().then((items) => items.length)));
 
-  // withCronRunRecording records every run (a throw, a lock connection that
-  // fails, a lock timeout and a degraded 200 included) and leaves a busy-lock
-  // skip unrecorded.
-  return withCronRunRecording("list-cache", () => withAdvisoryLock(
-    WARM_LIST_CACHE_LOCK_ID,
-    async () => {
-      const startTime = Date.now();
-
-      const results = await Promise.allSettled(WARM_TASKS.map((task) => task.fn().then((items) => items.length)));
-
-      const counts: Record<string, number> = {};
-      let errorCount = 0;
-      results.forEach((r, i) => {
-        const { name } = WARM_TASKS[i];
-        if (r.status === "fulfilled") {
-          counts[name] = r.value;
-          return;
-        }
-        counts[name] = 0;
-        errorCount++;
-        console.error(
-          `[warm-list-cache] ${name} failed:`,
-          r.reason instanceof Error ? r.reason.message : String(r.reason),
-        );
-      });
-
-      const durationMs = Date.now() - startTime;
-      const totalItems = Object.values(counts).reduce((s, n) => s + n, 0);
-
-      if (authCtx.trigger !== "cron") {
-        await logAudit({
-          userId: authCtx.userId,
-          userName: authCtx.userName,
-          action: "CACHE_WARM",
-          target: "list-cache",
-          details: { ...counts, totalItems, errors: errorCount, durationMs, trigger: authCtx.trigger },
-        });
+    const counts: Record<string, number> = {};
+    let errorCount = 0;
+    results.forEach((r, i) => {
+      const { name } = WARM_TASKS[i];
+      if (r.status === "fulfilled") {
+        counts[name] = r.value;
+        return;
       }
+      counts[name] = 0;
+      errorCount++;
+      console.error(
+        `[warm-list-cache] ${name} failed:`,
+        r.reason instanceof Error ? r.reason.message : String(r.reason),
+      );
+    });
 
-      // The admin "Run now" badge (cron-job-table.tsx) turns red on an `error`
-      // field. The status stays 200 on purpose: the container retries any
-      // non-2xx every CRON_RETRY_INTERVAL (300s) instead of waiting for the
-      // job's normal interval. `error` plus the X-Cron-Degraded header mean
-      // "finished, but with failures" — the header is what withCronRunRecording
-      // reads to record the run as not ok, so `ok` here matches the ledger.
-      return NextResponse.json({
-          ok: errorCount === 0,
-          ...counts,
-          totalItems,
-          errors: errorCount,
-          ...(errorCount > 0 ? { error: `${errorCount} of ${WARM_TASKS.length} list fetches failed` } : {}),
-          durationMs,
-          timestamp: new Date().toISOString(),
-        }, errorCount > 0 ? { headers: { "X-Cron-Degraded": String(errorCount) } } : undefined);
-    },
-    () => cronSkippedResponse(),
-  ));
-}
+    const totalItems = Object.values(counts).reduce((s, n) => s + n, 0);
+    return {
+      body: { ...counts, totalItems, errors: errorCount, durationMs: elapsedMs() },
+      problems: errorCount,
+      error: `${errorCount} of ${WARM_TASKS.length} list fetches failed`,
+    };
+  },
+});

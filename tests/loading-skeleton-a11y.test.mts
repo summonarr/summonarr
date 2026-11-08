@@ -1,5 +1,5 @@
 // Every loading skeleton tells assistive tech the page is loading: its root is
-// SkeletonRoot (src/components/loading/poster-grid-skeleton.tsx) — a busy
+// SkeletonRoot (src/components/loading/skeleton-primitives.tsx) — a busy
 // role="status" region named by a translated sr-only "Loading…". A bare
 // `<div className="animate-pulse">` root gave screen-reader users nothing.
 // The node:test loader can't render .tsx, so this pins the source.
@@ -17,7 +17,7 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-const KIT = "src/components/loading/poster-grid-skeleton.tsx";
+const KIT = "src/components/loading/skeleton-primitives.tsx";
 const kit = readFileSync(KIT, "utf8");
 const loadingFiles = walk("src/app/(app)").filter((p) => p.endsWith("loading.tsx"));
 const skeletonFiles = walk("src/components/loading").filter((p) => p.endsWith(".tsx"));

@@ -95,6 +95,9 @@ shadowPrismaModel(prisma, "tmdbCache", {
 });
 
 const { isSeriesDownloadedInSonarr, isSeriesDownloadingInSonarr, countSonarrQueue } = await import("../src/lib/arr.ts");
+// The queue check reuses a verified lookup for a while (arr-id-map.ts); a case
+// that changes the lookup's answer for the same show starts from a clean cache.
+const { _resetSeriesLookupCacheForTests } = await import("../src/lib/arr-id-map.ts");
 
 let instance = 0;
 beforeEach(() => {
@@ -108,6 +111,7 @@ beforeEach(() => {
   library = () => [];
   queuePages = [];
   queueStatus = 200;
+  _resetSeriesLookupCacheForTests();
 });
 
 const lookupCalls = () => calls.filter((u) => u.pathname === "/api/v3/series/lookup").length;
@@ -249,9 +253,11 @@ test("queue: a queued series with no usable tmdbId sends the check to the lookup
     assert.equal(await isSeriesDownloadingInSonarr(888), true, `${label}: the lookup maps 888 to the queued tvdbId`);
     assert.equal(lookupCalls(), 1, label);
 
+    _resetSeriesLookupCacheForTests();
     lookupAnswer = [{ tmdbId: 888, tvdbId: 5555 }];
     assert.equal(await isSeriesDownloadingInSonarr(888), false, `${label}: the lookup maps 888 elsewhere`);
 
+    _resetSeriesLookupCacheForTests();
     lookupAnswer = [];
     assert.equal(await isSeriesDownloadingInSonarr(888), null, `${label}: unresolvable is unknown, never 'not in queue'`);
 

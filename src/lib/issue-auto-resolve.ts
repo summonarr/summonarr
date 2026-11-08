@@ -76,7 +76,11 @@ export async function autoResolveIssueForGrab(grab: ClaimedGrab, now: Date = new
 
     emitSSE({ type: "issue:updated", issueId: issue.id, status: "RESOLVED", userId: issue.reportedBy });
     void logAudit({
-      userId: null,
+      // The system principal's id every automated audit row carries
+      // (cron-auth.ts CRON_SYSTEM_ACTOR, the offboarding revoke), so "hide cron"
+      // and an actor filter treat it like them; the name stays "system"
+      // (guardrail 5j).
+      userId: "system",
       userName: "system",
       action: "ISSUE_STATUS_CHANGE",
       target: `issue:${issue.id}`,

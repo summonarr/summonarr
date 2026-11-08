@@ -286,7 +286,22 @@ export function groupHistoryEvents(
   events: readonly ArrHistoryEvent[],
   edges: { hasPrevious: boolean; hasNext: boolean } | null = null,
 ): HistoryRow[] {
-  // Per Sonarr download: its records by id, cut into runs of one kind and moment.
+  const runOf = foldRuns(events);
+  const ends = { first: events[0], last: events[events.length - 1] };
+  const rows: HistoryRow[] = [];
+  const emitted = new Set<ArrHistoryEvent[]>();
+  for (const e of events) {
+    const run = runOf.get(e) ?? [e];
+    if (emitted.has(run)) continue;
+    emitted.add(run);
+    rows.push(rowOfRun(run, edges, ends));
+  }
+  return rows;
+}
+
+// Per Sonarr download: its records by id, cut into runs of one kind and
+// moment. Every folded record maps to its run (one shared array per run).
+function foldRuns(events: readonly ArrHistoryEvent[]): Map<ArrHistoryEvent, ArrHistoryEvent[]> {
   const byDownload = new Map<string, ArrHistoryEvent[]>();
   for (const e of events) {
     const k = foldKey(e);
@@ -305,46 +320,53 @@ export function groupHistoryEvents(
       runOf.set(e, run);
     }
   }
-  const first = events[0];
-  const last = events[events.length - 1];
-  const rows: HistoryRow[] = [];
-  const emitted = new Set<ArrHistoryEvent[]>();
-  for (const e of events) {
-    const run = runOf.get(e) ?? [e];
-    if (emitted.has(run)) continue;
-    emitted.add(run);
-    const lead = run.reduce((a, b) => (b.id > a.id ? b : a));
-    const sorted = [...run].sort(
-      (a, b) =>
-        (a.episode?.seasonNumber ?? -1) - (b.episode?.seasonNumber ?? -1) ||
-        (a.episode?.episodeNumber ?? -1) - (b.episode?.episodeNumber ?? -1) ||
-        a.id - b.id,
-    );
-    const episodes: HistoryEpisode[] = [];
-    const seen = new Set<string>();
-    const seasons = new Set<number>();
-    for (const x of sorted) {
-      const id = x.episode ? `se:${x.episode.seasonNumber}:${x.episode.episodeNumber}` : x.episodeId !== null ? `ep:${x.episodeId}` : `rec:${x.id}`;
-      if (seen.has(id)) continue;
-      seen.add(id);
-      if (x.episode) {
-        episodes.push(x.episode);
-        seasons.add(x.episode.seasonNumber);
-      }
+  return runOf;
+}
+
+// A run's records in episode order, and its distinct episodes (each counted
+// once however many records name it) and seasons.
+function runEpisodes(run: readonly ArrHistoryEvent[]): { sorted: ArrHistoryEvent[]; episodes: HistoryEpisode[]; distinct: number; seasons: number[] } {
+  const sorted = [...run].sort(
+    (a, b) =>
+      (a.episode?.seasonNumber ?? -1) - (b.episode?.seasonNumber ?? -1) ||
+      (a.episode?.episodeNumber ?? -1) - (b.episode?.episodeNumber ?? -1) ||
+      a.id - b.id,
+  );
+  const episodes: HistoryEpisode[] = [];
+  const seen = new Set<string>();
+  const seasons = new Set<number>();
+  for (const x of sorted) {
+    const id = x.episode ? `se:${x.episode.seasonNumber}:${x.episode.episodeNumber}` : x.episodeId !== null ? `ep:${x.episodeId}` : `rec:${x.id}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    if (x.episode) {
+      episodes.push(x.episode);
+      seasons.add(x.episode.seasonNumber);
     }
-    const pages = run.length > 1 && lead.service === "sonarr" && edges !== null;
-    rows.push({
-      key: `${lead.instance}:${lead.id}`,
-      lead,
-      events: sorted,
-      episodes,
-      episodeCount: lead.service === "sonarr" ? seen.size : 0,
-      seasons: [...seasons].sort((a, b) => a - b),
-      continuesBefore: pages && edges.hasPrevious && run.includes(first),
-      continuesAfter: pages && edges.hasNext && run.includes(last),
-    });
   }
-  return rows;
+  return { sorted, episodes, distinct: seen.size, seasons: [...seasons].sort((a, b) => a - b) };
+}
+
+// One list row for one run; a folded row at either end of a paged list may
+// continue on the neighbouring page.
+function rowOfRun(
+  run: ArrHistoryEvent[],
+  edges: { hasPrevious: boolean; hasNext: boolean } | null,
+  ends: { first: ArrHistoryEvent | undefined; last: ArrHistoryEvent | undefined },
+): HistoryRow {
+  const lead = run.reduce((a, b) => (b.id > a.id ? b : a));
+  const { sorted, episodes, distinct, seasons } = runEpisodes(run);
+  const pages = run.length > 1 && lead.service === "sonarr" && edges !== null;
+  return {
+    key: `${lead.instance}:${lead.id}`,
+    lead,
+    events: sorted,
+    episodes,
+    episodeCount: lead.service === "sonarr" ? distinct : 0,
+    seasons,
+    continuesBefore: pages && edges.hasPrevious && ends.first !== undefined && run.includes(ends.first),
+    continuesAfter: pages && edges.hasNext && ends.last !== undefined && run.includes(ends.last),
+  };
 }
 
 /** What the list's other records say happened to a grab's download since. */
@@ -377,6 +399,10 @@ export function failsIdlessGrab(grab: ArrHistoryEvent, e: ArrHistoryEvent): bool
  * to one kind holds no failures or imports, so it reads as neither — which is
  * why `grabStateKnown` says whether "neither" can be believed. A grab with no
  * downloadId is failed by `failsIdlessGrab`; nothing links an import to it.
+ *
+ * The rule as written, row by row: the list itself uses grabStatesFor (every
+ * row in one pass), and the tests hold the two to the same answer on
+ * generated lists (tests/arr-history-grab-states.test.mts).
  */
 export function grabStateOf(row: HistoryRow, events: readonly ArrHistoryEvent[]): GrabState {
   if (row.lead.kind !== "grabbed") return { failed: false, imported: false };

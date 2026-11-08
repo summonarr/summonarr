@@ -12,6 +12,7 @@ import { CommandNotQueuedError, ProviderNotFoundError, ProviderRejectedError, Un
 import { validationMessagesFromBody } from "./arr-system";
 import { isFeatureEnabled } from "./features";
 import type { Translator } from "./i18n/translate";
+import type { ArrErrorKind } from "./arr-error-kind";
 import { warnOnChange } from "./log-dedup";
 import { sanitizeForLog } from "./sanitize";
 
@@ -73,6 +74,65 @@ export function readWarnKey(route: string, target: ArrTarget): string {
   return `arr-read:${route}:${target.service}:${target.instance}`;
 }
 
+type FailureBody = { error: string; messages?: string[] };
+type KnownFailure = { status: number; body: FailureBody };
+type FailureRule = (err: unknown, service: string, t: Translator) => KnownFailure | null;
+
+// One rule per error class: `err instanceof cls` answers `status` with `message`.
+function onError<E extends Error>(
+  cls: abstract new (...args: never[]) => E,
+  status: number,
+  message: (err: E, service: string, t: Translator) => string,
+): FailureRule {
+  return (err, service, t) => (err instanceof cls ? { status, body: { error: message(err, service, t) } } : null);
+}
+
+// The arr refusing in its own words: its messages relayed (masked upstream by
+// validationMessagesFromBody / the provider parse) under the shared sentence.
+function rejected(messages: string[], status: number, service: string, t: Translator): KnownFailure {
+  const reason = messages.join(" ") || t("apiAdmin.arr.noReason");
+  return { status, body: { error: t("apiAdmin.arr.rejected", { service, reason }), messages } };
+}
+
+// Checked IN ORDER: a subclass's rule must come before its parent's.
+const KNOWN_FAILURES: readonly FailureRule[] = [
+  onError(ArrInstanceError, 404, (_e, service, t) => t("apiAdmin.missing.instanceUnknown", { service })),
+  onError(TitleNotFoundError, 404, (_e, service, t) => t("apiAdmin.arr.titleNotFound", { service })),
+  // The arr's library no longer holds the title (same answer as the request releases route).
+  onError(ArrItemNotFoundError, 409, (_e, service, t) => t("apiUser.requests.releases.notInArr", { service })),
+  onError(NotOnTitleError, 409, (e, _s, t) => t(`apiAdmin.arr.notOnTitle.${e.what}`)),
+  onError(NotAGrabError, 409, (_e, _s, t) => t("apiAdmin.arr.notAGrab")),
+  // Before AlreadyFailedError, its parent: a claim held by another mark (in
+  // flight, or its outcome unknown for ~90 s) is not proof the download
+  // failed — "already failed" there sent the admin away from a mark that may
+  // never have reached the arr.
+  onError(MarkInProgressError, 409, (_e, _s, t) => t("apiAdmin.arr.markInProgress")),
+  onError(AlreadyFailedError, 409, (_e, _s, t) => t("apiAdmin.arr.alreadyFailed")),
+  onError(BlocklistGoneError, 409, (_e, _s, t) => t("apiAdmin.arr.blocklistGone")),
+  onError(TitleEditError, 400, (e, service, t) => t(`apiAdmin.arr.edit.${e.field}`, { service })),
+  onError(UnknownTaskError, 400, (_e, service, t) => t("apiAdmin.arr.unknownTask", { service })),
+  onError(CommandNotQueuedError, 409, (_e, _s, t) => t("apiAdmin.arr.commandNotQueued")),
+  onError(ProviderNotFoundError, 404, (_e, service, t) => t("apiAdmin.arr.providerNotFound", { service })),
+  (err, service, t) => (err instanceof ProviderRejectedError ? rejected(err.messages, 400, service, t) : null),
+  (err, service, t) => {
+    if (!(err instanceof ArrResponseError)) return null;
+    // A 409 is the arr refusing in its own words ("Unable to cancel task",
+    // "Getting release from indexer failed") — relayed masked, like a 400.
+    if (err.status === 400 || err.status === 409) return rejected(validationMessagesFromBody(err.body), err.status, service, t);
+    if (err.status === 404) return { status: 404, body: { error: t("apiAdmin.arr.goneUpstream", { service }) } };
+    return null;
+  },
+];
+
+// Anything unexpected, by kind: the translated generic and its gateway status.
+const UNEXPECTED_FAILURE: Partial<Record<ArrErrorKind, { key: string; status: number }>> = {
+  auth: { key: "apiAdmin.arr.failedAuth", status: 502 },
+  timeout: { key: "apiAdmin.arr.failedTimeout", status: 504 },
+  unreachable: { key: "apiAdmin.arr.failedUnreachable", status: 502 },
+  server: { key: "apiAdmin.arr.failedServer", status: 502 },
+};
+const UNEXPECTED_DEFAULT = { key: "apiAdmin.arr.failed", status: 502 };
+
 /**
  * Every data-layer error → its response. The arr's own refusal reason (a 400's
  * validation messages) is relayed masked; anything unexpected is logged with
@@ -83,65 +143,9 @@ export function readWarnKey(route: string, target: ArrTarget): string {
  */
 export function arrFailure(err: unknown, target: ArrTarget, t: Translator, what: string, opts: { warnKey?: string } = {}): NextResponse {
   const service = ARR_SERVICE_LABEL[target.service];
-  if (err instanceof ArrInstanceError) {
-    return NextResponse.json({ error: t("apiAdmin.missing.instanceUnknown", { service }) }, { status: 404 });
-  }
-  if (err instanceof TitleNotFoundError) {
-    return NextResponse.json({ error: t("apiAdmin.arr.titleNotFound", { service }) }, { status: 404 });
-  }
-  // The arr's library no longer holds the title (same answer as the request releases route).
-  if (err instanceof ArrItemNotFoundError) {
-    return NextResponse.json({ error: t("apiUser.requests.releases.notInArr", { service }) }, { status: 409 });
-  }
-  if (err instanceof NotOnTitleError) {
-    return NextResponse.json({ error: t(`apiAdmin.arr.notOnTitle.${err.what}`) }, { status: 409 });
-  }
-  if (err instanceof NotAGrabError) {
-    return NextResponse.json({ error: t("apiAdmin.arr.notAGrab") }, { status: 409 });
-  }
-  // Before AlreadyFailedError, its parent: a claim held by another mark (in
-  // flight, or its outcome unknown for ~90 s) is not proof the download
-  // failed — "already failed" there sent the admin away from a mark that may
-  // never have reached the arr.
-  if (err instanceof MarkInProgressError) {
-    return NextResponse.json({ error: t("apiAdmin.arr.markInProgress") }, { status: 409 });
-  }
-  if (err instanceof AlreadyFailedError) {
-    return NextResponse.json({ error: t("apiAdmin.arr.alreadyFailed") }, { status: 409 });
-  }
-  if (err instanceof BlocklistGoneError) {
-    return NextResponse.json({ error: t("apiAdmin.arr.blocklistGone") }, { status: 409 });
-  }
-  if (err instanceof TitleEditError) {
-    return NextResponse.json({ error: t(`apiAdmin.arr.edit.${err.field}`, { service }) }, { status: 400 });
-  }
-  if (err instanceof UnknownTaskError) {
-    return NextResponse.json({ error: t("apiAdmin.arr.unknownTask", { service }) }, { status: 400 });
-  }
-  if (err instanceof CommandNotQueuedError) {
-    return NextResponse.json({ error: t("apiAdmin.arr.commandNotQueued") }, { status: 409 });
-  }
-  if (err instanceof ProviderNotFoundError) {
-    return NextResponse.json({ error: t("apiAdmin.arr.providerNotFound", { service }) }, { status: 404 });
-  }
-  if (err instanceof ProviderRejectedError) {
-    const reason = err.messages.join(" ") || t("apiAdmin.arr.noReason");
-    return NextResponse.json({ error: t("apiAdmin.arr.rejected", { service, reason }), messages: err.messages }, { status: 400 });
-  }
-  if (err instanceof ArrResponseError && err.status === 400) {
-    const messages = validationMessagesFromBody(err.body);
-    const reason = messages.join(" ") || t("apiAdmin.arr.noReason");
-    return NextResponse.json({ error: t("apiAdmin.arr.rejected", { service, reason }), messages }, { status: 400 });
-  }
-  if (err instanceof ArrResponseError && err.status === 404) {
-    return NextResponse.json({ error: t("apiAdmin.arr.goneUpstream", { service }) }, { status: 404 });
-  }
-  // A 409 is the arr refusing in its own words ("Unable to cancel task",
-  // "Getting release from indexer failed") — relayed masked, like a 400.
-  if (err instanceof ArrResponseError && err.status === 409) {
-    const messages = validationMessagesFromBody(err.body);
-    const reason = messages.join(" ") || t("apiAdmin.arr.noReason");
-    return NextResponse.json({ error: t("apiAdmin.arr.rejected", { service, reason }), messages }, { status: 409 });
+  for (const rule of KNOWN_FAILURES) {
+    const known = rule(err, service, t);
+    if (known) return NextResponse.json(known.body, { status: known.status });
   }
   if (opts.warnKey) {
     const detail = arrErrorMessage(err);
@@ -149,16 +153,6 @@ export function arrFailure(err: unknown, target: ArrTarget, t: Translator, what:
   } else {
     console.warn(`[arr-admin] ${target.service} instance "${sanitizeForLog(target.instance)}" ${what} failed:`, arrErrorMessage(err));
   }
-  switch (arrErrorKind(err)) {
-    case "auth":
-      return NextResponse.json({ error: t("apiAdmin.arr.failedAuth", { service }) }, { status: 502 });
-    case "timeout":
-      return NextResponse.json({ error: t("apiAdmin.arr.failedTimeout", { service }) }, { status: 504 });
-    case "unreachable":
-      return NextResponse.json({ error: t("apiAdmin.arr.failedUnreachable", { service }) }, { status: 502 });
-    case "server":
-      return NextResponse.json({ error: t("apiAdmin.arr.failedServer", { service }) }, { status: 502 });
-    default:
-      return NextResponse.json({ error: t("apiAdmin.arr.failed", { service }) }, { status: 502 });
-  }
+  const { key, status } = UNEXPECTED_FAILURE[arrErrorKind(err)] ?? UNEXPECTED_DEFAULT;
+  return NextResponse.json({ error: t(key, { service }) }, { status });
 }

@@ -27,7 +27,7 @@ import { verifySecondFactorGuarded, type GuardContext } from "./lockout";
 // What a second-factor step-up confirms (everything but a sign-in).
 type StepUpContext = Exclude<GuardContext["context"], "sign-in">;
 import { commitToken, releaseToken, reserveToken, verifyMfaStepUpToken } from "./mfa-token";
-import { webAuthnConfigFromEnv, type AuthenticationResponseJSON } from "./webauthn";
+import { webAuthnConfigFromEnv } from "./webauthn";
 
 // English text of apiAuth.mfa.unavailable.
 export const MFA_UNAVAILABLE_MESSAGE =
@@ -134,7 +134,7 @@ function parseStepUpFactor(raw: unknown): { input: SecondFactorInput; challengeT
   if (body.method === "webauthn") {
     if (!body.credential || typeof body.credential !== "object" || Array.isArray(body.credential)) return null;
     return {
-      input: { method: "webauthn", credential: body.credential as AuthenticationResponseJSON },
+      input: { method: "webauthn", credential: body.credential },
       challengeToken: body.challengeToken,
     };
   }
@@ -161,6 +161,19 @@ export function secondFactorRequiredResponse(t: Translator, state: MfaState, req
   );
 }
 
+// A passkey step-up's single-use challenge, claimed: it must be bound to this
+// user AND this session, and not already in use (reserveToken). Null ⇒ refuse.
+async function claimPasskeyChallenge(
+  challengeToken: unknown,
+  session: SummonarrSession,
+  userId: string,
+): Promise<{ challenge: string; jti: string } | null> {
+  const claims = await verifyMfaStepUpToken(challengeToken);
+  if (!claims || claims.userId !== userId || !session.sessionId || claims.sessionId !== session.sessionId) return null;
+  if (!reserveToken(claims.jti)) return null;
+  return { challenge: claims.challenge, jti: claims.jti };
+}
+
 // Call AFTER mfaReauthStepUp succeeded (or the route's own password step-up).
 // Returns the proof, or the response to send. `state` may be passed in when the
 // route already read it. `requiredMessage` replaces the `error` text of the
@@ -181,46 +194,34 @@ export async function mfaSecondFactorStepUp(
   const parsed = parseStepUpFactor(raw);
   if (!parsed) return secondFactorRequiredResponse(t, current, opts.requiredMessage);
 
-  let webauthnChallenge: string | undefined;
-  let reservedJti: string | null = null;
+  let passkey: { challenge: string; jti: string } | null = null;
   if (parsed.input.method === "webauthn") {
-    const claims = await verifyMfaStepUpToken(parsed.challengeToken);
-    if (
-      !claims ||
-      claims.userId !== user.id ||
-      !session.sessionId ||
-      claims.sessionId !== session.sessionId ||
-      !reserveToken(claims.jti)
-    ) {
-      return NextResponse.json(
-        { error: t("apiAuth.mfa.passkeyConfirmExpired"), secondFactorRequired: true },
-        { status: 400 },
-      );
+    passkey = await claimPasskeyChallenge(parsed.challengeToken, session, user.id);
+    if (!passkey) {
+      return NextResponse.json({ error: t("apiAuth.mfa.passkeyConfirmExpired"), secondFactorRequired: true }, { status: 400 });
     }
-    webauthnChallenge = claims.challenge;
-    reservedJti = claims.jti;
   }
 
   let verdict;
   try {
     verdict = await verifySecondFactorGuarded(user.id, parsed.input, {
-      webauthnChallenge,
+      webauthnChallenge: passkey?.challenge,
       webauthnConfig: webAuthnConfigFromEnv(),
       context: opts.context ?? "enrollment",
       ipAddress: getClientIp(req.headers),
       userAgent: req.headers.get("user-agent")?.slice(0, 512) ?? null,
     });
   } catch (err) {
-    if (reservedJti) releaseToken(reservedJti, { failed: false });
+    if (passkey) releaseToken(passkey.jti, { failed: false });
     throw err;
   }
-  if (reservedJti) {
+  if (passkey) {
     // Single-use on success. A failed assertion does NOT burn the challenge: it
     // counts one failure against it (releaseToken), like a wrong answer on a
     // sign-in challenge, and the challenge dies after MAX_TOKEN_FAILURES or its
     // five-minute expiry, whichever comes first.
-    if (verdict.ok) commitToken(reservedJti);
-    else releaseToken(reservedJti, { failed: true });
+    if (verdict.ok) commitToken(passkey.jti);
+    else releaseToken(passkey.jti, { failed: true });
   }
   if (!verdict.ok) {
     if (verdict.locked) return NextResponse.json({ error: t("apiAuth.mfa.locked") }, { status: 429 });

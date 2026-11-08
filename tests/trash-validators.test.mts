@@ -2,7 +2,8 @@
 // These run in refreshCatalog immediately after JSON.parse of upstream JSON; a false
 // return skips the upsert (preserving the prior good upstreamSha) and increments the
 // validationSkipped diagnostic — so the accept/reject boundary IS the safety contract
-// between arbitrary upstream bytes and the Arr apply path. Pins: required-vs-optional
+// between arbitrary upstream bytes and the Arr apply path. The appliers run them again
+// on the stored payload. Pins: required-vs-optional
 // fields per payload kind, the "optional but must be array/object when present" rules
 // that keep the apply loops from throwing on non-iterables, and the boolean (never
 // throwing) contract for every malformed shape.
@@ -80,14 +81,14 @@ test("group: {trash_id, name, custom_formats: []} is accepted (empty membership 
   );
 });
 
-test("group: members need only trash_id; extra member fields are ignored", () => {
+test("group: members need only trash_id; name and required are optional, extra fields ignored", () => {
   assert.equal(
     isCustomFormatGroupPayload({
       trash_id: "g1",
       name: "HDR Formats",
       custom_formats: [
         { trash_id: "cf1", name: "DV", required: true },
-        { trash_id: "cf2" }, // name/required not checked — apply only reads trash_id
+        { trash_id: "cf2" }, // name and required may be absent: not required, named by trash_id
       ],
       quality_profiles: { include: { "SQP-1": "..." } },
     }),
@@ -270,14 +271,58 @@ test("quality size: non-object payloads and missing trash_id are rejected", () =
   assert.equal(isQualitySizePayload({ trash_id: "", qualities: [] }), false);
 });
 
-test("quality size: typeof-number check means NaN/Infinity pass — unreachable via JSON.parse", () => {
-  // Pins current behavior: `typeof NaN === "number"`, so a NaN min is accepted. This is
-  // fine in practice because these guards only ever see JSON.parse output, and JSON has
-  // no NaN/Infinity literal — JSON.parse can never produce these values.
-  assert.equal(
-    isQualitySizePayload({ trash_id: "qs1", qualities: [{ quality: "q", min: NaN, max: Infinity }] }),
-    true,
-  );
+test("quality size: min, max and preferred must be finite — JSON's 1e999 parses to Infinity", () => {
+  const base = { trash_id: "qs1" };
+  const overflow = JSON.parse('{"quality":"q","min":0,"max":1e999}') as unknown;
+  assert.equal(isQualitySizePayload({ ...base, qualities: [overflow] }), false);
+  assert.equal(isQualitySizePayload({ ...base, qualities: [{ quality: "q", min: NaN, max: 1 }] }), false);
+  assert.equal(isQualitySizePayload({ ...base, qualities: [{ quality: "q", min: 0, max: Infinity }] }), false);
+  assert.equal(isQualitySizePayload({ ...base, qualities: [{ quality: "q", min: 0, max: 1, preferred: -Infinity }] }), false);
+  // preferred is sent as preferredSize when present, so a non-number is refused.
+  assert.equal(isQualitySizePayload({ ...base, qualities: [{ quality: "q", min: 0, max: 1, preferred: "5" }] }), false);
+  assert.equal(isQualitySizePayload({ ...base, qualities: [{ quality: "q", min: 0, max: 1, preferred: null }] }), false);
+  assert.equal(isQualitySizePayload({ ...base, qualities: [{ quality: "q", min: 0, max: 1, preferred: 0.5 }] }), true);
+});
+
+test("quality size: `type` names the spec, so it must be a string when present", () => {
+  assert.equal(isQualitySizePayload({ trash_id: "qs1", type: "movie", qualities: [] }), true);
+  assert.equal(isQualitySizePayload({ trash_id: "qs1", type: null, qualities: [] }), true);
+  assert.equal(isQualitySizePayload({ trash_id: "qs1", type: 7, qualities: [] }), false);
+  assert.equal(isQualitySizePayload({ trash_id: "qs1", type: { name: "movie" }, qualities: [] }), false);
+});
+
+test("group: a member's required flag and name must be a boolean and a string when present", () => {
+  const base = { trash_id: "g1", name: "n" };
+  assert.equal(isCustomFormatGroupPayload({ ...base, custom_formats: [{ trash_id: "cf1", required: false, name: "DV" }] }), true);
+  assert.equal(isCustomFormatGroupPayload({ ...base, custom_formats: [{ trash_id: "cf1", required: "true" }] }), false);
+  assert.equal(isCustomFormatGroupPayload({ ...base, custom_formats: [{ trash_id: "cf1", required: 1 }] }), false);
+  assert.equal(isCustomFormatGroupPayload({ ...base, custom_formats: [{ trash_id: "cf1", name: 5 }] }), false);
+  // The description lands in a string column.
+  assert.equal(isCustomFormatGroupPayload({ ...base, trash_description: "HDR", custom_formats: [] }), true);
+  assert.equal(isCustomFormatGroupPayload({ ...base, trash_description: ["HDR"], custom_formats: [] }), false);
+});
+
+test("quality profile: the scores and settings sent to the arr must have their own types", () => {
+  const base = { trash_id: "qp1", name: "n" };
+  for (const key of ["minFormatScore", "cutoffFormatScore", "minUpgradeFormatScore"]) {
+    assert.equal(isQualityProfilePayload({ ...base, [key]: 100 }), true, key);
+    assert.equal(isQualityProfilePayload({ ...base, [key]: null }), true, `${key}: null reads as absent`);
+    assert.equal(isQualityProfilePayload({ ...base, [key]: "100" }), false, key);
+    assert.equal(isQualityProfilePayload({ ...base, [key]: Infinity }), false, key);
+  }
+  for (const key of ["cutoff", "language", "score_set", "trash_description"]) {
+    assert.equal(isQualityProfilePayload({ ...base, [key]: "x" }), true, key);
+    assert.equal(isQualityProfilePayload({ ...base, [key]: 3 }), false, key);
+  }
+  assert.equal(isQualityProfilePayload({ ...base, upgradeAllowed: false }), true);
+  assert.equal(isQualityProfilePayload({ ...base, upgradeAllowed: "yes" }), false);
+});
+
+test("custom format: includeCustomFormatWhenRenaming must be a boolean when present", () => {
+  const base = { trash_id: "cf1", name: "n" };
+  assert.equal(isCustomFormatPayload({ ...base, includeCustomFormatWhenRenaming: true }), true);
+  assert.equal(isCustomFormatPayload({ ...base, includeCustomFormatWhenRenaming: null }), true);
+  assert.equal(isCustomFormatPayload({ ...base, includeCustomFormatWhenRenaming: "false" }), false);
 });
 
 // ---------------------------------------------------------------------------

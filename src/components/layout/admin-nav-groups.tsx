@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useState, type ReactNode } from "react";
 import { ChevronDown } from "@/components/icons";
 import {
   ADMIN_NAV_GROUPS,
@@ -10,8 +10,12 @@ import {
   type NavItem,
 } from "@/lib/nav-items";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson } from "@/lib/client/fetch-json";
+import { v } from "@/lib/validate";
 import { NAV_BADGE_MIN_REFETCH_MS, NAV_BADGE_POLL_MS, parseNavBadges } from "@/lib/nav-badges";
 import { useT } from "@/components/i18n/i18n-provider";
+import { groupBadgeLabelKey } from "./admin-nav-rules";
+import { collapsedGroupsCookie } from "@/lib/admin-nav-collapsed";
 
 // The admin nav's groups (Requests, Downloads, Library, Insights, System) for
 // both the desktop sidebar and the mobile drawer: a collapsible header per
@@ -30,7 +34,14 @@ const GROUP_IDS: ReadonlySet<string> = new Set(ADMIN_NAV_GROUPS.map((g) => g.id)
 
 export type NavBadges = Readonly<Record<string, number>>;
 
+// GET /api/admin/arr-watch carries the badges in `navBadges`; parseNavBadges
+// decides what a usable value is.
+const ArrWatchAnswer = v.object({ navBadges: v.optional(v.unknown()) });
+
 const NavBadgesContext = createContext<NavBadges | undefined>(undefined);
+// The collapsed groups the server rendered (the cookie the layout read).
+const NO_GROUPS: readonly AdminNavGroup[] = [];
+const ServerCollapsedContext = createContext<readonly AdminNavGroup[]>(NO_GROUPS);
 
 /** The admin nav's badges (href → count). Undefined ⇒ none. */
 export function useNavBadges(): NavBadges | undefined {
@@ -51,10 +62,13 @@ export function useNavBadges(): NavBadges | undefined {
 export function NavBadgesProvider({
   initial,
   enabled,
+  collapsedGroups = NO_GROUPS,
   children,
 }: {
   initial: NavBadges | undefined;
   enabled: boolean;
+  /** The admin nav groups the server renders collapsed (admin-nav-collapsed.ts). */
+  collapsedGroups?: readonly AdminNavGroup[];
   children: ReactNode;
 }) {
   const [badges, setBadges] = useState<NavBadges | undefined>(initial);
@@ -69,16 +83,27 @@ export function NavBadgesProvider({
     if (!enabled) return;
     let cancelled = false;
     let lastRead = Date.now();
+    // The interval and a tab coming back can both start a read: a newer one
+    // aborts the older, and only the newest may write, so a slow earlier
+    // answer never lands over a fresher count.
+    let seq = 0;
+    let inFlight: AbortController | null = null;
     async function reload() {
       lastRead = Date.now();
-      try {
-        const res = await fetch(withBasePath("/api/admin/arr-watch"), { credentials: "include" });
-        if (!res.ok) return;
-        const next = parseNavBadges(((await res.json()) as { navBadges?: unknown } | null)?.navBadges);
-        if (!cancelled && next !== null) setBadges(Object.keys(next).length > 0 ? next : undefined);
-      } catch {
-        // best-effort — the badge already shown stays
-      }
+      const mine = ++seq;
+      inFlight?.abort();
+      const ctrl = new AbortController();
+      inFlight = ctrl;
+      const res = await fetchJson(withBasePath("/api/admin/arr-watch"), {
+        schema: ArrWatchAnswer,
+        signal: ctrl.signal,
+        init: { credentials: "include" },
+      });
+      if (mine !== seq) return;
+      // Best-effort: a failed read keeps the badge already shown.
+      if (!res.ok) return;
+      const next = parseNavBadges(res.data.navBadges);
+      if (!cancelled && next !== null) setBadges(Object.keys(next).length > 0 ? next : undefined);
     }
     const timer = setInterval(() => {
       if (document.visibilityState === "hidden") return;
@@ -90,12 +115,17 @@ export function NavBadgesProvider({
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       cancelled = true;
+      inFlight?.abort();
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [enabled]);
 
-  return <NavBadgesContext.Provider value={badges}>{children}</NavBadgesContext.Provider>;
+  return (
+    <ServerCollapsedContext.Provider value={collapsedGroups}>
+      <NavBadgesContext.Provider value={badges}>{children}</NavBadgesContext.Provider>
+    </ServerCollapsedContext.Provider>
+  );
 }
 
 /** The stored collapsed set, or null when there is none or storage can't be read. */
@@ -109,16 +139,32 @@ function readStoredCollapsed(): Set<AdminNavGroup> | null {
   }
 }
 
+/** Mirror the choice into the cookie the layout reads; best-effort. */
+function writeCollapsedCookie(ids: ReadonlySet<AdminNavGroup>): void {
+  try {
+    document.cookie = collapsedGroupsCookie(ids);
+  } catch {}
+}
+
 function useCollapsedAdminGroups(): { collapsed: ReadonlySet<AdminNavGroup>; toggle: (id: AdminNavGroup) => void } {
-  const [collapsed, setCollapsed] = useState<ReadonlySet<AdminNavGroup>>(() => new Set());
-  // Read after mount so the first render matches the server's (every group
-  // open), and again whenever another instance (or tab) writes. Storage can
-  // throw (blocked site data, some private windows) — then every group simply
-  // stays open.
-  useEffect(() => {
+  // The first render is the server's: the groups its cookie named collapsed
+  // (guardrail 16 — nothing browser-only is read during render), so a hard
+  // load paints the chosen groups closed instead of flashing them open.
+  const serverCollapsed = useContext(ServerCollapsedContext);
+  const [collapsed, setCollapsed] = useState<ReadonlySet<AdminNavGroup>>(() => new Set(serverCollapsed));
+  // Then storage, read after mount and again whenever another instance (or
+  // tab) writes. A LAYOUT effect: the stored state lands before the browser
+  // paints, so a nav that mounts after hydration (the drawer, opened) never
+  // shows a stale set for a frame. The cookie is refreshed from storage, so a
+  // choice made before the cookie existed reaches the server's next render.
+  // Storage can throw (blocked site data, some private windows) — then the
+  // server's set stands.
+  useLayoutEffect(() => {
     const apply = () => {
       const stored = readStoredCollapsed();
-      if (stored) setCollapsed(stored);
+      if (!stored) return;
+      setCollapsed(stored);
+      writeCollapsedCookie(stored);
     };
     apply();
     window.addEventListener(SYNC_EVENT, apply);
@@ -134,6 +180,7 @@ function useCollapsedAdminGroups(): { collapsed: ReadonlySet<AdminNavGroup>; tog
     if (next.has(id)) next.delete(id);
     else next.add(id);
     setCollapsed(next);
+    writeCollapsedCookie(next);
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify([...next]));
       window.dispatchEvent(new Event(SYNC_EVENT));
@@ -142,11 +189,15 @@ function useCollapsedAdminGroups(): { collapsed: ReadonlySet<AdminNavGroup>; tog
   return { collapsed, toggle };
 }
 
-/** A count pill beside a nav item (or a collapsed group's header). Nothing for zero. */
-export function NavCountBadge({ count, href }: { count: number | undefined; href?: string }) {
+/**
+ * A count pill beside a nav item (or a collapsed group's header). Nothing for
+ * zero. Labelled by the item's own wording (`href`), or by `labelKey` when the
+ * caller knows better (a group's summed count).
+ */
+export function NavCountBadge({ count, href, labelKey: labelKeyProp }: { count: number | undefined; href?: string; labelKey?: string }) {
   const t = useT();
   if (!count || count <= 0) return null;
-  const labelKey = href ? NAV_BADGE_LABEL_KEYS[href] : undefined;
+  const labelKey = labelKeyProp ?? (href ? NAV_BADGE_LABEL_KEYS[href] : undefined);
   const label = labelKey ? t(labelKey, { count }) : String(count);
   return (
     <span
@@ -215,7 +266,9 @@ export function AdminNavGroupList({
                 style={{ width: 12, height: 12, transform: isCollapsed ? "rotate(-90deg)" : undefined }}
               />
               <span>{t(g.i18nKey)}</span>
-              {hiddenBadges > 0 && <NavCountBadge count={hiddenBadges} href={hiddenBadged[0].href} />}
+              {hiddenBadges > 0 && (
+                <NavCountBadge count={hiddenBadges} labelKey={groupBadgeLabelKey(hiddenBadged.map((item) => item.href))} />
+              )}
             </button>
             <div id={listId} className="flex flex-col" style={{ gap: drawer ? 0 : 1 }}>
               {shown.map((item) => renderItem(item))}

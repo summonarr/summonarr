@@ -132,6 +132,8 @@ const authSessionsById = new Map<string, { userId: string }>();
 // Fails the NEXT setting.upsert whose key matches — used to prove the
 // transaction rolls back rather than half-applying (guardrail 23).
 let failUpsertKey: string | null = null;
+// The key list of every Setting findMany (null: an unfiltered read).
+let settingKeyReads: Array<string[] | null> = [];
 // Runs once when the next registry save lock is taken — a test's stand-in for a
 // save that committed while this one waited on the lock.
 let onLock: (() => void) | null = null;
@@ -179,6 +181,7 @@ function makeClient(txId: number | null) {
     setting: {
       findMany: async (args?: { where?: { key?: { in?: string[] } } }) => {
         const only = args?.where?.key?.in;
+        settingKeyReads.push(only ?? null);
         const rows = [...settings.entries()].map(([key, value]) => ({ key, value }));
         return only ? rows.filter((r) => only.includes(r.key)) : rows;
       },
@@ -271,7 +274,7 @@ const fakePrisma = {
 // ── dynamic imports (env + globalThis stubs must precede the module graph) ──
 const { NextRequest } = await import("next/server");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
-const { BATCH_TX_TIMEOUT } = await import("../src/lib/cron-auth.ts");
+const { BATCH_TX_TIMEOUT } = await import("../src/lib/batch-write.ts");
 const { GET, POST } = await import("../src/app/api/admin/media-instances/route.ts");
 
 type Req = InstanceType<typeof NextRequest>;
@@ -400,6 +403,34 @@ test("POST: a missing/malformed `instances` → 400 with ZERO writes — coercin
   }
   assert.equal(txOptions.length, 0, "the transaction must not even open");
   assert.equal(libSlugs(plexLibrary).length, 4, "not one library row may be deleted by a rejected request");
+});
+
+test("POST: a slug listed twice → 400 before any write — the last entry's settings would win over the registry's first", async () => {
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  const res = await POST(postReq({ service: "plex", instances: [{ slug: "remote", serverUrl: "http://10.0.0.5:32400" }, { slug: "remote", serverUrl: "http://10.0.0.6:32400" }] }, admin.header), undefined);
+  assert.equal(res.status, 400);
+  assert.match(((await res.json()) as { error: string }).error, /listed twice: remote/);
+  assert.equal(txOptions.length, 0, "the transaction must not even open");
+});
+
+test("POST: the connection tests read every instance's URL and secret in ONE Setting query", async () => {
+  const admin = await mintSession("ADMIN");
+  respond = (url) => {
+    if (url.hostname === "plex.tv") return okJson({ ok: true });
+    return okJson({ MediaContainer: { machineIdentifier: "m" } });
+  };
+  settings.set("plexServerUrl", "http://10.0.0.4:32400");
+  settings.set("plexAdminToken", "tok-default");
+  settingKeyReads = [];
+  const res = await POST(postReq({ service: "plex", instances: [
+    { slug: "remote", serverUrl: "http://10.0.0.5:32400", adminToken: "tok-a" },
+    { slug: "other", serverUrl: "http://10.0.0.6:32400", adminToken: "tok-b" },
+  ] }, admin.header), undefined);
+  assert.equal(res.status, 200);
+  const connectionReads = settingKeyReads.filter((keys) => keys !== null && keys.every((k) => /(ServerUrl|AdminToken)$/.test(k)));
+  assert.equal(connectionReads.length, 1, `one read, not one per instance: ${JSON.stringify(connectionReads)}`);
+  assert.equal(connectionReads[0]!.length, 6, "the default and both named servers, URL and token each");
 });
 
 test("POST: an invalid slug → 400 before any write; an unknown service → 400", async () => {
@@ -609,6 +640,21 @@ test("a slug that COLLIDES with a default-instance key (\"movie\"/\"tv\") never 
   // The instance's own non-colliding keys are still cleaned up.
   assert.equal(settings.get("plexMovieServerUrl"), undefined);
   assert.equal(settings.get("plexMovieAdminToken"), undefined);
+});
+
+test("POST: a NEW slug that collides with a default-instance key is refused 400 with no write; an already-registered one is still saved", async () => {
+  const admin = await mintSession("ADMIN");
+  respond = () => okJson({ MediaContainer: { machineIdentifier: "m" } });
+  settings.set("plexMoviePathStripPrefix", "/mnt/media/movies");
+  const refused = await POST(postReq({ service: "plex", instances: [{ slug: "movie", serverUrl: "http://10.0.0.9:32400" }] }, admin.header), undefined);
+  assert.equal(refused.status, 400);
+  assert.match(((await refused.json()) as { error: string }).error, /"movie"/);
+  assert.equal(opsFor("setting", "upsert").length, 0, "nothing written: not the registry, not a connection setting");
+  assert.equal(settings.get("plexInstances"), undefined);
+
+  settings.set("plexInstances", JSON.stringify([{ slug: "movie", name: "Movie Box" }]));
+  const kept = await POST(postReq({ service: "plex", instances: [{ slug: "movie", name: "Movie Box", serverUrl: "http://10.0.0.9:32400" }] }, admin.header), undefined);
+  assert.equal(kept.status, 200, "a slug saved before the check can still be edited");
 });
 
 test("ONE transaction: the registry write AND every cleanup op share a single tx, opened with BATCH_TX_TIMEOUT", async () => {

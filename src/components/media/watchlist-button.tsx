@@ -5,13 +5,46 @@ import { useRouter } from "next/navigation";
 import { Bookmark, BookmarkCheck, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
+import { readApiError } from "@/lib/client/api-error";
+import { check, v } from "@/lib/validate";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
 import { DetailActionButton } from "./detail-action-button";
 
 // "Add to Watchlist" toggle for movie/TV detail pages. Personal save-for-later,
 // independent of availability or request permissions. Optimistic with rollback
-// on error, mirroring the request buttons' UX.
+// on error, mirroring the request buttons' UX. Callers key it by title
+// (detail-actions.tsx), so no state carries across a client navigation.
+
+// A 201 add's body: the item plus `autoRequest` when watchlist auto-request
+// applied (src/app/api/watchlist/route.ts).
+const AddAnswer = v.object({
+  autoRequest: v.optional(
+    v.object({
+      requested: v.optional(v.boolean()),
+      outcome: v.optional(v.string()),
+      message: v.optional(v.string()),
+    }),
+  ),
+});
+
+type Translate = ReturnType<typeof useT>;
+
+// The toast for an add that also tried to file a request: success when it
+// did, nothing when there was nothing to do (already requested or available),
+// otherwise why it didn't. Never fails the add itself.
+function autoRequestToast(
+  ar: { requested?: boolean; outcome?: string; message?: string } | undefined,
+  t: Translate,
+): { title: string; variant?: "success" } | null {
+  if (!ar) return null;
+  if (ar.requested) {
+    return { title: t("detail.watchlist.autoRequested", { message: ar.message ?? t("detail.watchlist.requested") }), variant: "success" };
+  }
+  if (ar.outcome === "already-requested" || ar.outcome === "already-available") return null;
+  return { title: t("detail.watchlist.notAutoRequested", { message: ar.message ?? t("request.somethingWrong") }) };
+}
+
 export function WatchlistButton({
   tmdbId,
   mediaType,
@@ -30,17 +63,10 @@ export function WatchlistButton({
   // that also auto-requested). `initialOnWatchlist` is otherwise live — a
   // mount-only useState painted the next title with this title's bookmark.
   const [override, setOverride] = useState<boolean | null>(null);
-  const [seenTmdbId, setSeenTmdbId] = useState(tmdbId);
-  const titleChanged = seenTmdbId !== tmdbId;
-  if (titleChanged) {
-    setSeenTmdbId(tmdbId);
-    setOverride(null);
-    setLoading(false);
-    setMsg("");
-  } else if (override !== null && override === initialOnWatchlist) {
+  if (override !== null && override === initialOnWatchlist) {
     setOverride(null);
   }
-  const on = titleChanged ? initialOnWatchlist : (override ?? initialOnWatchlist);
+  const on = override ?? initialOnWatchlist;
 
   async function toggle() {
     if (loading) return;
@@ -55,35 +81,27 @@ export function WatchlistButton({
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ tmdbId, mediaType }),
           })
-        : await fetch(withBasePath(`/api/watchlist?tmdbId=${tmdbId}&mediaType=${mediaType}`), {
-            method: "DELETE",
-          });
+        : await fetch(withBasePath(`/api/watchlist?tmdbId=${tmdbId}&mediaType=${mediaType}`), { method: "DELETE" });
       // 409 on add means it's already there — the desired end state is still "on".
       if (!res.ok && res.status !== 409) {
-        const data = await res.json().catch(() => ({}));
         // Roll back to the pre-click state, NOT the prop: after an earlier
         // successful toggle the prop is stale until something refreshes it.
         setOverride(!next);
-        setMsg(rateLimitMessage(res, t) ?? data.error ?? t("request.somethingWrong"));
-      } else {
-        toast({ title: next ? t("detail.watchlist.added") : t("detail.watchlist.removed"), variant: "success" });
-        // Watchlist auto-request: the add may also have filed a request. The
-        // field is present only when auto-request applied; a refusal (quota,
-        // blacklisted, already available…) never fails the add itself.
-        if (next && res.status === 201) {
-          const data = (await res.json().catch(() => ({}))) as {
-            autoRequest?: { requested?: boolean; outcome?: string; message?: string };
-          };
-          const ar = data.autoRequest;
-          if (ar?.requested) {
-            toast({ title: t("detail.watchlist.autoRequested", { message: ar.message ?? t("detail.watchlist.requested") }), variant: "success" });
-            // The HD RequestButton ORs the live `requested` prop — refresh so
-            // it re-reads and does not stay on "Request" (a second click 409s).
-            router.refresh();
-          } else if (ar && ar.outcome !== "already-requested" && ar.outcome !== "already-available") {
-            toast({ title: t("detail.watchlist.notAutoRequested", { message: ar.message ?? t("request.somethingWrong") }) });
-          }
-        }
+        setMsg(rateLimitMessage(res, t) ?? (await readApiError(res, t("request.somethingWrong"))));
+        return;
+      }
+      toast({ title: next ? t("detail.watchlist.added") : t("detail.watchlist.removed"), variant: "success" });
+      // Watchlist auto-request: the add may also have filed a request. The
+      // field is present only when auto-request applied; a refusal (quota,
+      // blacklisted, already available…) never fails the add itself.
+      if (next && res.status === 201) {
+        const parsed = check(AddAnswer, await res.json().catch(() => null));
+        const ar = parsed.ok ? parsed.value.autoRequest : undefined;
+        const follow = autoRequestToast(ar, t);
+        if (follow) toast(follow);
+        // The HD RequestButton ORs the live `requested` prop — refresh so
+        // it re-reads and does not stay on "Request" (a second click 409s).
+        if (ar?.requested) router.refresh();
       }
     } catch {
       setOverride(!next); // rollback to the pre-click state
@@ -100,12 +118,12 @@ export function WatchlistButton({
       <DetailActionButton
         variant={on ? "accent-soft" : "secondary"}
         onClick={toggle}
-        disabled={loading && !titleChanged}
-        busy={loading && !titleChanged}
+        disabled={loading}
+        busy={loading}
         aria-pressed={on}
         aria-label={on ? t("detail.watchlist.removeLabel") : t("detail.watchlist.addLabel")}
       >
-        {loading && !titleChanged ? (
+        {loading ? (
           <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
         ) : on ? (
           <BookmarkCheck style={{ width: 14, height: 14 }} />
@@ -114,7 +132,7 @@ export function WatchlistButton({
         )}
         {on ? t("detail.watchlist.on") : t("detail.watchlist.add")}
       </DetailActionButton>
-      {!titleChanged && msg && (
+      {msg && (
         <p
           className="ds-mono max-w-sm"
           role="alert"

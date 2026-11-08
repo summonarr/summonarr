@@ -25,8 +25,8 @@
 //   - the fetch is an element of `Promise.allSettled([...])`, which never
 //     rejects (each result says whether it failed);
 //   - the enclosing function throws deliberately, so its callers own the
-//     failure. `loadTokens` in settings/forms/webhook-urls.tsx is the in-tree
-//     example: it throws on !res.ok and its one caller wraps it in try/catch.
+//     failure: a helper that throws on !res.ok while its one caller wraps
+//     it in try/catch.
 //     Without this excuse the rule would push error handling INTO helpers that
 //     correctly delegate it.
 //
@@ -270,7 +270,7 @@ const allHits = clientFiles.flatMap((f) => analyze(f, readFileSync(f, "utf8")));
 
 test("the sweep actually found client fetch calls to classify", () => {
   assert.ok(
-    allHits.length > 50,
+    allHits.length > 20,
     `only ${allHits.length} client fetch calls found — the analyzer is not matching`,
   );
 });

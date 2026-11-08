@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
-import { logAudit, auditContext } from "@/lib/audit";
+import { logAuditOrFail, auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
 import {
   composeWhere,
@@ -13,6 +13,7 @@ import {
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { getStatsTimeZone } from "@/lib/stats-time-zone-data";
 import { bitrateToKbps } from "@/lib/bitrate";
+import type { Translator } from "@/lib/i18n/translate";
 
 export const dynamic = "force-dynamic";
 
@@ -93,6 +94,176 @@ function escapeCSV(value: unknown): string {
   return str;
 }
 
+// The filters as composeWhere bound them (play-history-filters.ts).
+type ExportWhere = { whereSql: string; binds: unknown[]; nextBindIndex: number };
+type ExportCursor = { startedAt: Date; id: string };
+
+/**
+ * One page of the export, newest first with `id` as the tiebreak, after
+ * `cursor` when given. Keyset over (startedAt, id) DESC — the predicate
+ * Prisma's `cursor` + `skip: 1` compiled to, written out because the filters
+ * are raw fragments. The expanded OR form (rather than a row comparison)
+ * mirrors src/lib/my-watch-history.ts, which avoids relying on Postgres
+ * inferring parameter types inside a row constructor.
+ */
+function fetchExportPage(where: ExportWhere, cursor: ExportCursor | null, take: number): Promise<ExportRow[]> {
+  const binds: unknown[] = [...where.binds];
+  let cursorSql = "";
+  if (cursor) {
+    cursorSql =
+      ` AND (h."startedAt" < $${where.nextBindIndex}` +
+      ` OR (h."startedAt" = $${where.nextBindIndex} AND h."id" < $${where.nextBindIndex + 1}))`;
+    binds.push(cursor.startedAt, cursor.id);
+  }
+  // Derived from the array so it can't drift from what was pushed —
+  // nextBindIndex when there's no cursor, nextBindIndex + 2 with one.
+  const limitBind = binds.length + 1;
+  binds.push(take);
+  return prisma.$queryRawUnsafe<ExportRow[]>(
+    `
+      SELECT ${EXPORT_SELECT}, msu."username" AS username
+      FROM "PlayHistory" h
+      LEFT JOIN "MediaServerUser" msu ON msu.id = h."mediaServerUserId"
+      WHERE 1=1 ${where.whereSql}${cursorSql}
+      ORDER BY h."startedAt" DESC, h."id" DESC
+      LIMIT $${limitBind}
+    `,
+    ...binds,
+  );
+}
+
+// One exported row as the JSON export writes it.
+function exportJsonRow(r: ExportRow) {
+  return {
+    id: r.id,
+    title: r.title,
+    mediaType: r.mediaType,
+    year: r.year,
+    seasonNumber: r.seasonNumber,
+    episodeNumber: r.episodeNumber,
+    episodeTitle: r.episodeTitle,
+    username: r.username,
+    source: r.source,
+    startedAt: r.startedAt.toISOString(),
+    stoppedAt: r.stoppedAt.toISOString(),
+    duration: r.duration,
+    playDuration: r.playDuration,
+    pausedDuration: r.pausedDuration,
+    watched: r.watched,
+    platform: r.platform,
+    player: r.player,
+    device: r.device,
+    playMethod: r.playMethod,
+    videoCodec: r.videoCodec,
+    audioCodec: r.audioCodec,
+    resolution: r.resolution,
+    bitrateKbps: exportBitrateKbps(r),
+    videoDecision: r.videoDecision,
+    audioDecision: r.audioDecision,
+    container: r.container,
+  };
+}
+
+// The column headers are deliberately fixed English identifiers (machine-
+// readable, stable across locales); only the prose notice is localized.
+const CSV_HEADERS = [
+  "Title", "Media Type", "Year", "Season", "Episode", "Episode Title",
+  "Username", "Source", "Started At", "Stopped At",
+  "Duration (s)", "Play Duration (s)", "Paused Duration (s)", "Watched",
+  "Platform", "Player", "Device",
+  "Play Method", "Video Codec", "Audio Codec", "Resolution", "Bitrate (kbps)",
+  "Video Decision", "Audio Decision", "Container",
+];
+
+// One exported row as a CSV line, in CSV_HEADERS' order.
+function exportCsvLine(r: ExportRow): string {
+  return [
+    r.title, r.mediaType, r.year,
+    r.seasonNumber, r.episodeNumber, r.episodeTitle,
+    r.username, r.source,
+    r.startedAt.toISOString(), r.stoppedAt.toISOString(),
+    r.duration, r.playDuration, r.pausedDuration,
+    r.watched, r.platform, r.player,
+    r.device, r.playMethod,
+    r.videoCodec, r.audioCodec, r.resolution,
+    exportBitrateKbps(r), r.videoDecision, r.audioDecision,
+    r.container,
+  ].map(escapeCSV).join(",");
+}
+
+/**
+ * Writes the CSV export page by page. `write` resolves once the consumer took
+ * the chunk (TransformStream backpressure), so pages are read only as fast as
+ * the client downloads them, and a cancelled download rejects the pending
+ * write and stops the loop there. At most MAX_EXPORT_ROWS rows; the page that
+ * reaches the cap asks for ONE more row, never written, so an export of
+ * exactly MAX_EXPORT_ROWS rows is not reported as cut.
+ */
+async function writeCsvExport(write: (text: string) => Promise<void>, where: ExportWhere, t: Translator): Promise<void> {
+  await write(UTF8_BOM + CSV_HEADERS.join(",") + "\n");
+  let cursor: ExportCursor | null = null;
+  let emitted = 0;
+  let truncated = false;
+  while (emitted < MAX_EXPORT_ROWS) {
+    const take = Math.min(PAGE_SIZE, MAX_EXPORT_ROWS - emitted);
+    const reachesCap = emitted + take >= MAX_EXPORT_ROWS;
+    const page = await fetchExportPage(where, cursor, reachesCap ? take + 1 : take);
+    if (page.length === 0) break;
+    truncated = page.length > take;
+    const rows = truncated ? page.slice(0, take) : page;
+    for (const r of rows) await write(exportCsvLine(r) + "\n");
+    emitted += rows.length;
+    const last = rows[rows.length - 1];
+    cursor = { startedAt: last.startedAt, id: last.id };
+    if (rows.length < take) break;
+  }
+  if (truncated) {
+    // CSV has no comment syntax, so this trailing notice IS a data record to
+    // every parser — escapeCSV keeps it a single well-formed field instead of
+    // a raw fragment that splits the row. The remedy has to be the date
+    // filters: this route reads no `cursor` param.
+    await write(escapeCSV(t("apiUser.playHistory.exportTruncated", { max: MAX_EXPORT_ROWS })) + "\n");
+  }
+}
+
+// The streaming CSV response. A failure while producing it is logged (a
+// truncated download is otherwise undiagnosable); a cancelled download — the
+// consumer gone, so the pending write rejected — is not a failure.
+function csvExportResponse(where: ExportWhere, t: Translator, filename: string): Response {
+  const encoder = new TextEncoder();
+  // Writing through a TransformStream makes `await writer.write(...)` wait for
+  // the consumer (the readable side buffers nothing ahead). Producing inside a
+  // ReadableStream's start() could not: enqueue never blocks, so every page was
+  // queried and queued however slowly the client read.
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+  const writer = writable.getWriter();
+  let consumerGone = false;
+  const write = (text: string) =>
+    writer.write(encoder.encode(text)).catch((err: unknown) => {
+      consumerGone = true;
+      throw err;
+    });
+
+  void (async () => {
+    try {
+      await writeCsvExport(write, where, t);
+      await writer.close().catch(() => { /* consumer already gone */ });
+    } catch (err) {
+      if (!consumerGone) {
+        console.error("[play-history-export] CSV export failed:", err instanceof Error ? err.message : err);
+      }
+      await writer.abort(err).catch(() => { /* consumer already gone */ });
+    }
+  })();
+
+  return new Response(readable, {
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${filename}.csv"`,
+    },
+  });
+}
+
 export async function GET(request: NextRequest) {
   const t = translatorForRequest(request);
   // Not wrapped in withPermission because this route streams a CSV body; the
@@ -121,7 +292,7 @@ export async function GET(request: NextRequest) {
   // by stripping the character, which silently exported the wrong rows (a
   // `john_doe` export searched for `johndoe`). See src/lib/play-history-filters.ts.
   const filters = normalizePlayHistoryFilters(params, await getStatsTimeZone());
-  const { whereSql, binds, nextBindIndex } = composeWhere(playHistoryFilterFragments(filters));
+  const where: ExportWhere = composeWhere(playHistoryFilterFragments(filters));
 
   // AFTER parameter validation on purpose, as in the audit-log export: a hit is
   // recorded on every call, so a mistyped date used to spend one of the five
@@ -136,208 +307,62 @@ export async function GET(request: NextRequest) {
   }
 
   // Play-history export streams up to MAX_EXPORT_ROWS of viewer PII (titles,
-  // usernames, devices, IP-correlated rows). Record a paper-trail row so the
-  // export is attributable — mirrors the audit-log export. The filters are
-  // logged (not the rows) so the trail captures scope without re-deriving PII.
+  // usernames, devices, IP-correlated rows). Its paper-trail row is written
+  // BEFORE any row leaves, and a failed write refuses the export: no viewer
+  // history goes out without its record (the audit-log export's rule). No
+  // mutation precedes it, so logAuditOrFail is the right writer (guardrail 26).
+  // The filters are logged (not the rows) so the trail captures scope without
+  // re-deriving PII.
   const ctx = auditContext(request, { user: { provider: session.user.provider } });
-  // await (not void) so the paper-trail row is durably written before up to
-  // MAX_EXPORT_ROWS of viewer PII stream out. A fire-and-forget audit could lose
-  // the record if the process/stream dies first.
-  await logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email ?? session.user.id,
-    action: "PLAY_HISTORY_EXPORT",
-    target: "play-history:export",
-    details: {
-      kind: "play-history",
-      format,
-      maxRows: MAX_EXPORT_ROWS,
-      // The VALIDATED values, not the raw params: an unrecognized source,
-      // mediaType, watched or tmdbId never narrows the query (`source=plexx`
-      // exports every row), so logging the raw string would record a scope the
-      // export did not actually have. The dates are logged as sent: they were
-      // validated above, and every accepted one narrows.
-      filters: {
-        source: filters.source,
-        mediaType: filters.mediaType,
-        watched: filters.watched,
-        userId: filters.userId,
-        tmdbId: filters.tmdbId,
-        playMethod: filters.playMethod,
-        platform: filters.platform,
-        startDate: params.get("startDate") || null,
-        endDate: params.get("endDate") || null,
-        fromDay: filters.fromDay,
-        toDay: filters.toDay,
-        ...(filters.fromDay || filters.toDay ? { timeZone: filters.timeZone } : {}),
-        search: filters.search,
-      },
-    },
-    ipAddress: ctx.ipAddress,
-    userAgent: ctx.userAgent,
-    provider: ctx.provider,
-  });
-
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-
-  if (format === "json") {
-    const rows = await prisma.$queryRawUnsafe<ExportRow[]>(
-      `
-        SELECT ${EXPORT_SELECT}, msu."username" AS username
-        FROM "PlayHistory" h
-        LEFT JOIN "MediaServerUser" msu ON msu.id = h."mediaServerUserId"
-        WHERE 1=1 ${whereSql}
-        ORDER BY h."startedAt" DESC
-        LIMIT $${nextBindIndex}
-      `,
-      ...binds,
-      MAX_EXPORT_ROWS,
-    );
-    const data = rows.map((r) => ({
-      id: r.id,
-      title: r.title,
-      mediaType: r.mediaType,
-      year: r.year,
-      seasonNumber: r.seasonNumber,
-      episodeNumber: r.episodeNumber,
-      episodeTitle: r.episodeTitle,
-      username: r.username,
-      source: r.source,
-      startedAt: r.startedAt.toISOString(),
-      stoppedAt: r.stoppedAt.toISOString(),
-      duration: r.duration,
-      playDuration: r.playDuration,
-      pausedDuration: r.pausedDuration,
-      watched: r.watched,
-      platform: r.platform,
-      player: r.player,
-      device: r.device,
-      playMethod: r.playMethod,
-      videoCodec: r.videoCodec,
-      audioCodec: r.audioCodec,
-      resolution: r.resolution,
-      bitrateKbps: exportBitrateKbps(r),
-      videoDecision: r.videoDecision,
-      audioDecision: r.audioDecision,
-      container: r.container,
-    }));
-    return new NextResponse(JSON.stringify(data, null, 2), {
-      headers: {
-        "Content-Type": "application/json",
-        "Content-Disposition": `attachment; filename="play-history-${timestamp}.json"`,
-      },
+  try {
+    await logAuditOrFail({
+      userId: session.user.id,
+      userName: session.user.name ?? session.user.email ?? session.user.id,
+      action: "PLAY_HISTORY_EXPORT",
+      target: "play-history:export",
+      details: { kind: "play-history", format, maxRows: MAX_EXPORT_ROWS, filters: auditedFilters(filters, params) },
+      ipAddress: ctx.ipAddress,
+      userAgent: ctx.userAgent,
+      provider: ctx.provider,
     });
+  } catch (err) {
+    console.error("[play-history-export] audit write failed; export refused:", err instanceof Error ? err.message : err);
+    return NextResponse.json({ error: t("apiUser.playHistory.exportFailed") }, { status: 500 });
   }
 
-  const headers = [
-    "Title", "Media Type", "Year", "Season", "Episode", "Episode Title",
-    "Username", "Source", "Started At", "Stopped At",
-    "Duration (s)", "Play Duration (s)", "Paused Duration (s)", "Watched",
-    "Platform", "Player", "Device",
-    "Play Method", "Video Codec", "Audio Codec", "Resolution", "Bitrate (kbps)",
-    "Video Decision", "Audio Decision", "Container",
-  ];
+  const filename = `play-history-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`;
+  if (format === "csv") return csvExportResponse(where, t, filename);
 
-  const encoder = new TextEncoder();
-
-  // Writing through a TransformStream makes `await writer.write(...)` wait for
-  // the consumer (the readable side buffers nothing ahead), so pages are read
-  // only as fast as the client downloads them. Producing inside a
-  // ReadableStream's start() could not: enqueue never blocks, so every page was
-  // queried and queued however slowly the client read, and a cancelled download
-  // kept querying until an enqueue threw. A cancel now rejects the pending write
-  // and the loop stops there.
-  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
-  const writer = writable.getWriter();
-  const write = (text: string) => writer.write(encoder.encode(text));
-
-  void (async () => {
-    try {
-      // The column headers are deliberately fixed English identifiers (machine-
-      // readable, stable across locales); only the prose notice below is localized.
-      await write(UTF8_BOM + headers.join(",") + "\n");
-
-      // Keyset cursor over (startedAt, id) DESC — the same predicate Prisma's
-      // `cursor` + `skip: 1` compiled to, written out because the filters are
-      // now raw fragments. The expanded OR form (rather than a row
-      // comparison) mirrors src/lib/my-watch-history.ts, which avoids relying
-      // on Postgres inferring parameter types inside a row constructor.
-      let cursor: { startedAt: Date; id: string } | null = null;
-      let emitted = 0;
-
-      while (emitted < MAX_EXPORT_ROWS) {
-        const remaining = MAX_EXPORT_ROWS - emitted;
-        const take = Math.min(PAGE_SIZE, remaining);
-
-        const pageBinds: unknown[] = [...binds];
-        let cursorSql = "";
-        if (cursor) {
-          cursorSql =
-            ` AND (h."startedAt" < $${nextBindIndex}` +
-            ` OR (h."startedAt" = $${nextBindIndex} AND h."id" < $${nextBindIndex + 1}))`;
-          pageBinds.push(cursor.startedAt, cursor.id);
-        }
-        // Derived from the array so it can't drift from what was pushed —
-        // nextBindIndex when there's no cursor, nextBindIndex + 2 with one.
-        const limitBind = pageBinds.length + 1;
-        pageBinds.push(take);
-
-        const page = await prisma.$queryRawUnsafe<ExportRow[]>(
-          `
-            SELECT ${EXPORT_SELECT}, msu."username" AS username
-            FROM "PlayHistory" h
-            LEFT JOIN "MediaServerUser" msu ON msu.id = h."mediaServerUserId"
-            WHERE 1=1 ${whereSql}${cursorSql}
-            ORDER BY h."startedAt" DESC, h."id" DESC
-            LIMIT $${limitBind}
-          `,
-          ...pageBinds,
-        );
-
-        if (page.length === 0) break;
-        for (const r of page) {
-          const line = [
-            escapeCSV(r.title), escapeCSV(r.mediaType), escapeCSV(r.year),
-            escapeCSV(r.seasonNumber), escapeCSV(r.episodeNumber), escapeCSV(r.episodeTitle),
-            escapeCSV(r.username), escapeCSV(r.source),
-            escapeCSV(r.startedAt.toISOString()), escapeCSV(r.stoppedAt.toISOString()),
-            escapeCSV(r.duration), escapeCSV(r.playDuration), escapeCSV(r.pausedDuration),
-            escapeCSV(r.watched), escapeCSV(r.platform), escapeCSV(r.player),
-            escapeCSV(r.device), escapeCSV(r.playMethod),
-            escapeCSV(r.videoCodec), escapeCSV(r.audioCodec), escapeCSV(r.resolution),
-            escapeCSV(exportBitrateKbps(r)), escapeCSV(r.videoDecision), escapeCSV(r.audioDecision),
-            escapeCSV(r.container),
-          ].join(",");
-          await write(line + "\n");
-        }
-
-        emitted += page.length;
-        const last = page[page.length - 1];
-        cursor = { startedAt: last.startedAt, id: last.id };
-
-        if (page.length < take) break;
-      }
-
-      if (emitted >= MAX_EXPORT_ROWS) {
-        // CSV has no comment syntax, so this trailing notice IS a data record to
-        // every parser — escapeCSV keeps it a single well-formed field instead of
-        // a raw fragment that splits the row. The remedy has to be the date
-        // filters: this route reads no `cursor` param, so the notice previously
-        // pointed at a knob that does not exist.
-        await write(escapeCSV(t("apiUser.playHistory.exportTruncated", { max: MAX_EXPORT_ROWS })) + "\n");
-      }
-
-      await writer.close().catch(() => { /* consumer already gone */ });
-    } catch (err) {
-      // A cancelled download rejects the pending write: nothing to report.
-      await writer.abort(err).catch(() => { /* consumer already gone */ });
-    }
-  })();
-
-  return new Response(readable, {
+  // JSON: one bare array (scripts parse it), at most MAX_EXPORT_ROWS, in the
+  // CSV's order.
+  const rows = await fetchExportPage(where, null, MAX_EXPORT_ROWS);
+  return new NextResponse(JSON.stringify(rows.map(exportJsonRow), null, 2), {
     headers: {
-      "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": `attachment; filename="play-history-${timestamp}.csv"`,
+      "Content-Type": "application/json",
+      "Content-Disposition": `attachment; filename="${filename}.json"`,
     },
   });
+}
+
+// The VALIDATED filter values, not the raw params: an unrecognized source,
+// mediaType, watched or tmdbId never narrows the query (`source=plexx` exports
+// every row), so logging the raw string would record a scope the export did not
+// actually have. The dates are logged as sent: they were validated, and every
+// accepted one narrows.
+function auditedFilters(filters: ReturnType<typeof normalizePlayHistoryFilters>, params: URLSearchParams) {
+  return {
+    source: filters.source,
+    mediaType: filters.mediaType,
+    watched: filters.watched,
+    userId: filters.userId,
+    tmdbId: filters.tmdbId,
+    playMethod: filters.playMethod,
+    platform: filters.platform,
+    startDate: params.get("startDate") || null,
+    endDate: params.get("endDate") || null,
+    fromDay: filters.fromDay,
+    toDay: filters.toDay,
+    ...(filters.fromDay || filters.toDay ? { timeZone: filters.timeZone } : {}),
+    search: filters.search,
+  };
 }

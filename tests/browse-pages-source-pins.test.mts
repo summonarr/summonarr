@@ -59,8 +59,12 @@ test("the gated pages carry no dead nullable-session branches", () => {
 test("/popular logs a dropped title and validates its media type", () => {
   const src = read("popular/page.tsx");
   // A rejected TMDB resolve still drops the title (its rank was taken up
-  // front), but no longer silently — the same line /api/popular logs.
-  assert.match(src, /if \(r\.status === "rejected"\) \{\s*console\.error\(`\[popular\] \$\{type\} detail resolve failed:`/);
+  // front), but no longer silently: the page resolves through the same shared
+  // helper /api/popular uses, which logs each drop.
+  assert.match(src, /resolvePopularTitles\(items, type, 8\)/);
+  assert.match(src, /const rankById = new Map\(items\.map\(\(item, i\) => \[item\.tmdbId, rankOffset \+ i \+ 1\]\)\)/);
+  const shared = readFileSync(join(process.cwd(), "src/lib/popular-titles.ts"), "utf-8");
+  assert.match(shared, /else console\.error\(`\[popular\] \$\{type\} detail resolve failed:`/);
   // ?mediaType=foo showed both sections with no tab marked and was copied into
   // every link.
   assert.match(src, /rawMediaType === "movies" \|\| rawMediaType === "tv" \? rawMediaType : undefined/);
@@ -82,22 +86,51 @@ test("/popular's two segmented controls share the design-system styling", () => 
   assert.equal(src.split("<SegmentedLinks").length - 1, 2);
   assert.doesNotMatch(src, /var\(--ds-bg-3\)/);
   const control = readFileSync(join(process.cwd(), "src/components/ui/design/segmented-links.tsx"), "utf-8");
-  assert.match(control, /inset 0 0 0 1px var\(--ds-border-strong\)/);
+  // The raised active segment lives in the look SegmentedLinks shares with FilterBar.
+  assert.match(control, /segmentedItemStyle\(isActive\)/);
+  const look = readFileSync(join(process.cwd(), "src/components/ui/design/segmented-style.ts"), "utf-8");
+  assert.match(look, /inset 0 0 0 1px var\(--ds-border-strong\)/);
   assert.match(control, /aria-current=\{isActive \? "page" : undefined\}/);
 });
 
-for (const [rel, genres] of [["movies/page.tsx", "getMovieGenres"], ["tv/page.tsx", "getTVGenres"]] as const) {
-  test(`${rel}: genre names follow the viewer's language and failures are logged`, () => {
+test("/movies and /tv are thin wrappers over ONE browse body", () => {
+  for (const [rel, mediaType] of [["movies/page.tsx", "movie"], ["tv/page.tsx", "tv"]] as const) {
     const src = read(rel);
-    // A language-keyed genre list has its own cache key; the English one the
-    // warm cron fills is untouched (guardrail 40a).
-    assert.match(src, new RegExp(`${genres}\\(tmdbLanguageFor\\(locale\\)\\)`));
-    // A TMDB outage on SSR used to leave no server-side trace at all.
-    assert.match(src, /\.catch\(\(err: unknown\) => \{\s*console\.error\("\[browse\] \w+ page query failed:"/);
-    assert.match(src, /console\.warn\("\[browse\] \w+ genre list failed:"/);
-    assert.match(src, /console\.warn\("\[browse\] \w+ watch-provider list failed:"/);
-    // One filter parser and one "any filter?" predicate (browse-filters.ts).
-    assert.match(src, /parseBrowseFilters\(searchParamGetter\(sp\)\)/);
-    assert.match(src, /hasActiveFilters\(browseFilters\)/);
-  });
-}
+    assert.match(src, new RegExp(`<BrowsePage mediaType="${mediaType}" session=\\{session\\} searchParams=\\{searchParams\\} />`));
+    assert.match(src, new RegExp(`browsePageTitle\\("${mediaType}"\\)`));
+    assert.doesNotMatch(src, /runBrowseQuery/, `${rel} keeps a private copy of the browse body`);
+  }
+});
+
+test("the shared browse body: genre names follow the viewer's language and failures are logged", () => {
+  const src = readFileSync(join(process.cwd(), "src/components/media/browse-page.tsx"), "utf-8");
+  // Each media type keeps its own genre fetcher.
+  assert.match(src, /movie: \{ genres: getMovieGenres,/);
+  assert.match(src, /tv: \{ genres: getTVGenres,/);
+  // A language-keyed genre list has its own cache key; the English one the
+  // warm cron fills is untouched (guardrail 40a).
+  assert.match(src, /config\.genres\(tmdbLanguageFor\(locale\)\)/);
+  // A TMDB outage on SSR used to leave no server-side trace at all.
+  assert.match(src, /\.catch\(\(err: unknown\) => \{\s*console\.error\(`\[browse\] \$\{config\.logLabel\} page query failed:`/);
+  assert.match(src, /console\.warn\(`\[browse\] \$\{config\.listLabel\} genre list failed:`/);
+  assert.match(src, /console\.warn\(`\[browse\] \$\{config\.listLabel\} watch-provider list failed:`/);
+  // One filter parser and one "any filter?" predicate (browse-filters.ts).
+  assert.match(src, /parseBrowseFilters\(searchParamGetter\(sp\)\)/);
+  assert.match(src, /hasActiveFilters\(browseFilters\)/);
+});
+
+test("/upcoming translates only the page it shows, not the whole up-to-500-title list", () => {
+  const src = read("upcoming/page.tsx");
+  assert.match(src, /attachAllAvailability\(raw, session\.user\.id, \{[^}]*skipLocalize: true[^}]*\}\)/, "the whole-list pass must skip the overlay");
+  assert.match(src, /localizeMedia\(rated, contentLocale\)/, "the shown slice is localized after the slice");
+  const attach = readFileSync(join(process.cwd(), "src", "lib", "attach-all.ts"), "utf-8");
+  assert.match(attach, /options\?\.skipLocalize \? Promise\.resolve\(work\) : getContentLocale\(\)/);
+});
+
+test("/top reads a failed source from runTopRatedQuery: a partial notice over results, a load failure over an empty page", () => {
+  const src = read("top/page.tsx");
+  assert.match(src, /failedSources, showPlex, showJellyfin,\n\s*\} = await runTopRatedQuery/);
+  assert.match(src, /sectionEmptyState\([^)]*failedSources\.length > 0\)/);
+  assert.match(src, /hasFilters && !sourcesFailed \?/, "a failed source is never blamed on the viewer's filters");
+  assert.match(src, /t\("browse\.top\.partialSources"/);
+});

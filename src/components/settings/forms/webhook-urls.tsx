@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useCallback, useEffect, useRef } from "react";
+import { fetchJson } from "@/lib/client/fetch-json";
+import { v } from "@/lib/validate";
 import { Copy, Check, Loader2, X } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
@@ -48,6 +50,9 @@ function CopyRow({
     let result: CopyResolution;
     try {
       result = await resolveCopyUrl();
+    } catch {
+      // A resolver that throws is a failed fetch, never an unhandled rejection.
+      result = { kind: "error" };
     } finally {
       setPending(false);
     }
@@ -126,6 +131,9 @@ function CopyRow({
 // per-service secret and fall back to the legacy shared one, the same way the webhook handler
 // does. The 4K rows point at the SAME endpoint with the 4K instance's own secret; the handler
 // works out which instance fired by which secret matched (guardrail 32).
+// GET /api/settings/webhook-urls: each row's token, or null when it has none.
+const WEBHOOK_TOKENS = v.record(v.nullable(v.string()));
+
 function SecretNeededRow({ label, message }: { label: string; message: string }) {
   return (
     <div className="space-y-1">
@@ -173,22 +181,15 @@ export function WebhookUrls({
   // after a save so the flags here follow it, but a rotation from another tab
   // or admin never reaches this component, and a cached token would survive it
   // — the copied URL would carry a value the webhook handler now rejects.
-  const loadTokens = useCallback(async (): Promise<Record<string, string | null>> => {
-    const res = await fetch(withBasePath("/api/settings/webhook-urls"));
-    if (!res.ok) throw new Error("failed to load webhook tokens");
-    return (await res.json()) as Record<string, string | null>;
-  }, []);
   const resolver = useCallback(
     (key: string, base: string) => async (): Promise<CopyResolution> => {
-      try {
-        const tok = (await loadTokens())[key];
-        // null: no secret saved for this row (removed since the page rendered).
-        return tok ? { kind: "url", url: `${base}?token=${encodeURIComponent(tok)}` } : { kind: "none" };
-      } catch {
-        return { kind: "error" };
-      }
+      const res = await fetchJson(withBasePath("/api/settings/webhook-urls"), { schema: WEBHOOK_TOKENS });
+      if (!res.ok) return { kind: "error" };
+      const tok = res.data[key];
+      // null: no secret saved for this row (removed since the page rendered).
+      return typeof tok === "string" && tok ? { kind: "url", url: `${base}?token=${encodeURIComponent(tok)}` } : { kind: "none" };
     },
-    [loadTokens],
+    [],
   );
 
   const masked = (base: string) => `${base}?token=••••••••`;

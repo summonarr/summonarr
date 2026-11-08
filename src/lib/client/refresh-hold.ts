@@ -60,8 +60,13 @@ export function requestPageRefresh(fn: () => void): void {
   }, PAGE_REFRESH_DEBOUNCE_MS);
 }
 
-/** Drop a refresh still waiting for its burst to settle (the page is going away). */
+/**
+ * Drop a refresh still waiting — for its burst to settle, or for a dialog's
+ * hold to be released (the page is going away). A deferred one would otherwise
+ * run when the closing dialog releases its hold and refresh the NEXT page.
+ */
 export function cancelPageRefresh(): void {
   if (refreshTimer !== null) clearTimeout(refreshTimer);
   refreshTimer = null;
+  pending = null;
 }

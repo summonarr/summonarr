@@ -89,11 +89,13 @@ interface LedgerEntry {
 }
 
 export const MAX_LEDGER = 50_000;
-let ledgerCap = MAX_LEDGER;
 export const MAX_LIVE_PER_SUBJECT = 5;
 const ledger = processSingleton("mfa-token:ledger", () => new Map<string, LedgerEntry>());
 // jti list per (purpose, subject) bucket, in mint order (oldest first).
 const bySubject = processSingleton("mfa-token:by-subject", () => new Map<string, string[]>());
+// The global cap. Process-wide like the ledger it bounds (guardrail 27a); only
+// the test seam below ever lowers it.
+const ledgerCap = processSingleton("mfa-token:ledger-cap", () => ({ value: MAX_LEDGER }));
 
 function bucketFor(purpose: Purpose, sub: string): string {
   return `${purpose}\u0000${sub}`;
@@ -114,11 +116,10 @@ function sweepExpired(now: number): void {
   for (const [jti, entry] of ledger) if (entry.expiresAt <= now) removeEntry(jti);
 }
 
-// Called by signPurposeToken, at mint time.
-function registerToken(jti: string, purpose: Purpose, sub: string, expSec: number): void {
-  const now = Date.now();
-  const bucket = bucketFor(purpose, sub);
-  const mine = (bySubject.get(bucket) ?? []).filter((j) => {
+// The bucket's tokens that are still live, oldest first; expired ones are
+// dropped from the ledger on the way.
+function liveTokensIn(bucket: string, now: number): string[] {
+  return (bySubject.get(bucket) ?? []).filter((j) => {
     const e = ledger.get(j);
     if (!e || e.expiresAt <= now) {
       removeEntry(j);
@@ -126,38 +127,54 @@ function registerToken(jti: string, purpose: Purpose, sub: string, expSec: numbe
     }
     return true;
   });
-  // Per-subject cap: the newest token wins, the subject's oldest of this purpose dies. A token
-  // another request is verifying RIGHT NOW (inFlight) is never the victim: the
-  // verifier may already have burned a single-use factor (a recovery code), and
-  // evicting the entry would make commitToken refuse the sign-in afterwards —
-  // anyone holding the password could thereby grief the owner's in-flight
-  // challenge (and cost them a recovery code) by minting five new ones. If every
-  // slot is in flight the cap is briefly exceeded; reserveToken bounds that to
-  // the handful of parallel verifications.
+}
+
+// Per-subject cap: the newest token wins, the subject's oldest of this purpose
+// dies. A token another request is verifying RIGHT NOW (inFlight) is never the
+// victim: the verifier may already have burned a single-use factor (a recovery
+// code), and evicting the entry would make commitToken refuse the sign-in
+// afterwards — anyone holding the password could thereby grief the owner's
+// in-flight challenge (and cost them a recovery code) by minting five new ones.
+// If every slot is in flight the cap is briefly exceeded; reserveToken bounds
+// that to the handful of parallel verifications.
+function enforceSubjectCap(bucket: string, now: number): void {
+  const mine = liveTokensIn(bucket, now);
   while (mine.length >= MAX_LIVE_PER_SUBJECT) {
     const victim = mine.findIndex((j) => !ledger.get(j)?.inFlight);
-    if (victim === -1) break;
+    if (victim === -1) return;
     removeEntry(mine.splice(victim, 1)[0]);
   }
-  if (ledger.size >= ledgerCap) sweepExpired(now);
-  // Still full of live entries: evict the oldest overall (Map iteration is
-  // insertion order), skipping in-flight ones. An evicted token is dead, never
-  // fresh again.
-  while (ledger.size >= ledgerCap) {
-    let oldest: string | undefined;
-    for (const [j, e] of ledger) {
-      if (!e.inFlight) {
-        oldest = j;
-        break;
-      }
-    }
-    if (oldest === undefined) break;
+}
+
+// The oldest entry overall (Map iteration is insertion order) that no request
+// is verifying right now, or undefined when every entry is in flight.
+function oldestIdleEntry(): string | undefined {
+  for (const [j, e] of ledger) if (!e.inFlight) return j;
+  return undefined;
+}
+
+// Global cap: a full ledger sheds expired entries first, then the oldest live
+// ones (skipping in-flight). It never refuses the newcomer, and an evicted
+// token is dead — never fresh again.
+function enforceLedgerCap(now: number): void {
+  if (ledger.size >= ledgerCap.value) sweepExpired(now);
+  while (ledger.size >= ledgerCap.value) {
+    const oldest = oldestIdleEntry();
+    if (oldest === undefined) return;
     removeEntry(oldest);
   }
+}
+
+// Called by signPurposeToken, at mint time.
+function registerToken(jti: string, purpose: Purpose, sub: string, expSec: number): void {
+  const now = Date.now();
+  const bucket = bucketFor(purpose, sub);
+  enforceSubjectCap(bucket, now);
+  enforceLedgerCap(now);
   ledger.set(jti, { bucket, expiresAt: expSec * 1000, failures: 0, consumed: false, inFlight: false });
-  const list = bySubject.get(bucket) ?? [];
-  list.push(jti);
-  bySubject.set(bucket, list.filter((j) => ledger.has(j)));
+  // removeEntry keeps bySubject in step with the ledger, so after the evictions
+  // above the bucket's list names only entries still registered.
+  bySubject.set(bucket, [...(bySubject.get(bucket) ?? []), jti]);
 }
 
 function liveEntry(jti: string): LedgerEntry | null {
@@ -220,11 +237,15 @@ export function recordTokenFailure(jti: string): number {
   return e.failures;
 }
 
-// Test seams only.
+// Test seams only. Wiping the ledger un-burns nothing (an unknown jti is dead),
+// but it does end every in-flight challenge, so a production build refuses.
 export function resetMfaTokenLedgerForTests(cap = MAX_LEDGER): void {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("[mfa-token] resetMfaTokenLedgerForTests is a test seam");
+  }
   ledger.clear();
   bySubject.clear();
-  ledgerCap = cap;
+  ledgerCap.value = cap;
 }
 export function mfaTokenLedgerSizeForTests(): { total: number; forSubject: (sub: string, purpose?: Purpose) => number } {
   const live = (bucket: string) => (bySubject.get(bucket) ?? []).filter((j) => liveEntry(j)).length;

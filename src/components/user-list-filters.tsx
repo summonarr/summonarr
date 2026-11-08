@@ -5,16 +5,22 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Search, X } from "@/components/icons";
 import { useT } from "@/components/i18n/i18n-provider";
 import { buildParamHref, sameListHref, searchEcho, shouldResyncSearch } from "@/lib/list-filter-url";
+import { SEGMENTED_TRACK_STYLE } from "@/components/ui/design/segmented-style";
 
 export function FilterPills({
   param,
   active,
   options,
   preserve,
+  label,
 }: {
   param: string;
   active: string;
   options: Array<{ value: string; label: string; count?: number }>;
+  /** What the pills choose (e.g. "Sort by"). Several groups often sit side by
+   *  side, so without it a screen reader hears "Most", "Recent" with no idea
+   *  which setting they control. */
+  label?: string;
   // Other query params to carry over when a pill is clicked. Everything else
   // (e.g. the page number) is dropped.
   preserve?: string[];
@@ -43,13 +49,10 @@ export function FilterPills({
   // Not `shrink-0`, so it can still wrap when the row truly doesn't fit.
   return (
     <div
+      role="group"
+      aria-label={label}
       className="flex flex-wrap gap-1 max-w-full w-fit"
-      style={{
-        padding: 2,
-        background: "var(--ds-bg-1)",
-        border: "1px solid var(--ds-border)",
-        borderRadius: 8,
-      }}
+      style={SEGMENTED_TRACK_STYLE}
     >
       {options.map((opt) => {
         const isActive = active === opt.value;
@@ -120,10 +123,69 @@ export function SearchBox({
   placeholder: string;
   preserve?: string[];
 }) {
+  const t = useT();
+  const { value, handleChange, handleClear } = useUrlSearchInput(param, initial, preserve);
+
+  // Full width only on small screens, where the parent row stacks into a
+  // column. From `sm` up it sizes to its content (with a min and max width), so
+  // it doesn't squeeze the FilterPills beside it — see the note there.
+  return (
+    <div className="relative w-full sm:w-auto sm:min-w-[12rem] sm:max-w-xs">
+      <div
+        className="flex items-center focus-within:ring-2 focus-within:ring-ring"
+        style={{
+          background: "var(--ds-bg-1)",
+          border: "1px solid var(--ds-border)",
+          borderRadius: 6,
+          height: 32,
+          padding: "0 8px 0 10px",
+        }}
+      >
+        <Search
+          className="shrink-0"
+          style={{ width: 14, height: 14, color: "var(--ds-fg-subtle)", marginRight: 8 }}
+        />
+        <input
+          type="text"
+          value={value}
+          onChange={handleChange}
+          placeholder={placeholder}
+          aria-label={placeholder}
+          // 16px below md: iOS Safari zooms the page when a control under 16px
+          // takes focus (same rule as Input and StyledSelect).
+          className="flex-1 min-w-0 bg-transparent border-0 outline-none text-base md:text-[13px]"
+          style={{ color: "var(--ds-fg)" }}
+        />
+        {value && (
+          <button
+            type="button"
+            onClick={handleClear}
+            aria-label={t("shared.common.clearSearch")}
+            // Hover and keyboard focus share one look, in CSS rather than
+            // inline styles written from mouse events.
+            className="inline-flex items-center justify-center transition-colors bg-transparent text-[var(--ds-fg-subtle)] hover:bg-[var(--ds-bg-3)] hover:text-[var(--ds-fg)] focus-visible:bg-[var(--ds-bg-3)] focus-visible:text-[var(--ds-fg)]"
+            style={{
+              width: 28,
+              height: 28,
+              borderRadius: 4,
+              border: 0,
+              marginLeft: 4,
+              marginRight: -4,
+            }}
+          >
+            <X style={{ width: 12, height: 12 }} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** The SearchBox's text, its debounced URL write and the resync rules. */
+function useUrlSearchInput(param: string, initial: string, preserve: string[] | undefined) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const t = useT();
   const [value, setValue] = useState(initial);
 
   // What the server will echo back for the last value this box sent to the
@@ -198,65 +260,5 @@ export function SearchBox({
     navigate("");
   }
 
-  // Full width only on small screens, where the parent row stacks into a
-  // column. From `sm` up it sizes to its content (with a min and max width), so
-  // it doesn't squeeze the FilterPills beside it — see the note there.
-  return (
-    <div className="relative w-full sm:w-auto sm:min-w-[12rem] sm:max-w-xs">
-      <div
-        className="flex items-center focus-within:ring-2 focus-within:ring-ring"
-        style={{
-          background: "var(--ds-bg-1)",
-          border: "1px solid var(--ds-border)",
-          borderRadius: 6,
-          height: 32,
-          padding: "0 8px 0 10px",
-        }}
-      >
-        <Search
-          className="shrink-0"
-          style={{ width: 14, height: 14, color: "var(--ds-fg-subtle)", marginRight: 8 }}
-        />
-        <input
-          type="text"
-          value={value}
-          onChange={handleChange}
-          placeholder={placeholder}
-          aria-label={placeholder}
-          // 16px below md: iOS Safari zooms the page when a control under 16px
-          // takes focus (same rule as Input and StyledSelect).
-          className="flex-1 min-w-0 bg-transparent border-0 outline-none text-base md:text-[13px]"
-          style={{ color: "var(--ds-fg)" }}
-        />
-        {value && (
-          <button
-            type="button"
-            onClick={handleClear}
-            aria-label={t("shared.common.clearSearch")}
-            className="inline-flex items-center justify-center transition-colors"
-            style={{
-              width: 28,
-              height: 28,
-              borderRadius: 4,
-              background: "transparent",
-              color: "var(--ds-fg-subtle)",
-              border: 0,
-              marginLeft: 4,
-              marginRight: -4,
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = "var(--ds-bg-3)";
-              e.currentTarget.style.color = "var(--ds-fg)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = "transparent";
-              e.currentTarget.style.color = "var(--ds-fg-subtle)";
-            }}
-          >
-            <X style={{ width: 12, height: 12 }} />
-          </button>
-        )}
-      </div>
-    </div>
-  );
+  return { value, handleChange, handleClear };
 }

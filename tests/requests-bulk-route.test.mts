@@ -66,13 +66,14 @@ test("every 'already greenlit' mirror lookup in src/ excludes stamped (cleanedUp
 });
 
 test("bulk: 'already-available' is produced ONLY by the pre-create gate; a mirrored row reads 'auto-approved'", () => {
-  const verdicts = CODE.match(/result: "already-available"/g) ?? [];
+  const verdicts = CODE.match(/return "already-available"/g) ?? [];
   assert.equal(verdicts.length, 1, "one already-available verdict: the gate before the create tx");
-  assert.match(CODE, /if \(mirroredKeys\.has\(keyOf\(p\.tmdbId, p\.mediaType\)\)\) \{\s*return \{ tmdbId: p\.tmdbId, mediaType: p\.mediaType, result: "auto-approved" \};/);
+  assert.doesNotMatch(CODE, /result: "already-available"/, "no outcome is built as already-available after the gate");
+  assert.match(CODE, /if \(mirroredKeys\.has\(key\)\) \{\s*outcomeByKey\.set\(key, \{ tmdbId: p\.tmdbId, mediaType: p\.mediaType, result: "auto-approved" \}\);/);
 });
 
 test("bulk: a present non-string onBehalfOfUserId is refused with 400 before any target is resolved", () => {
-  const guard = CODE.indexOf('typeof body.onBehalfOfUserId !== "string") {');
+  const guard = CODE.indexOf('typeof onBehalfOfUserId !== "string") {');
   const resolve_ = CODE.indexOf("const onBehalfId =");
   assert.ok(guard > 0 && resolve_ > guard, "the type guard precedes the target resolution");
   assert.match(CODE, /onBehalfIdInvalid"\) \}, \{ status: 400 \}/);
@@ -86,7 +87,7 @@ test("bulk: the per-call limit honours rateLimitRequests and a zero-row batch is
 });
 
 test("bulk: an INT4-overflowing tmdbId is a 400 before any keyed read (no per-item _token to bound it)", () => {
-  const range = CODE.indexOf("isTmdbIdInRange(it.tmdbId as number)");
+  const range = CODE.indexOf("isTmdbIdInRange(tmdbId)");
   const firstKeyedRead = CODE.indexOf("prisma.mediaRequest.findMany");
   assert.ok(range > 0 && firstKeyedRead > range, "the range check precedes the first tmdbId-keyed query");
   assert.match(CODE, /tmdbIdOutOfRange"\) \}, \{ status: 400 \}/);
@@ -141,7 +142,7 @@ test("bulk: a re-requested DECLINED row's comment thread moves to the row create
   assert.ok(drop > 0 && insert > drop, "threads are dropped (and read) before the insert");
   assert.match(
     CODE,
-    /const created = after\.filter\(\(r\) => !beforeIds\.has\(r\.id\)\);\s*for \(const r of created\) \{\s*const staleId = staleDeclinedIdByKey\.get\(keyOf\(r\.tmdbId, r\.mediaType\)\);\s*if \(staleId\) await restoreThread\(tx, r\.id, carriedThreads\.get\(staleId\)\);\s*\}\s*return created;/,
+    /const created = after\.filter\(\(r\) => !beforeIds\.has\(r\.id\)\);\s*for \(const r of created\) \{\s*const staleId = staleDeclinedIdByKey\.get\(keyOf\(r\.tmdbId, r\.mediaType\)\);\s*if \(staleId\) await restoreThread\(tx, r\.id, carriedThreads\.get\(staleId\)\);\s*\}\s*return \{ created, mirroredKeys \};/,
   );
 });
 
@@ -149,25 +150,42 @@ test("bulk: an auto-approval whose push failed is marked pushFailed and goes to 
   // The row rolls back to PENDING with its backstop cleared, so without an alert
   // it sits in the queue unnoticed; one per row would flood every admin channel
   // on a 50-item "Request all" (the header's rule). The result stays "created".
-  assert.match(CODE, /if \(rb\.count === 1\) rolledBack\.set\(keyOf\(p\.tmdbId, p\.mediaType\), row\.id\);\s*return \{ tmdbId: p\.tmdbId, mediaType: p\.mediaType, result: "created", pushFailed: true \};/);
+  // Only a rollback that LANDED counts: the shared state machine reports a
+  // failure whose row moved on as "failed", which is not PENDING.
+  assert.match(CODE, /if \(outcome\.kind === "rolled-back"\) rolledBack\.set\(row\.key, row\.id\);/);
+  assert.match(CODE, /outcome\.kind === "rolled-back"\s*\? \{ tmdbId: row\.tmdbId, mediaType: [^}]*result: "created", pushFailed: true \}/);
   const alerts = CODE.match(/alertAdminsNewRequest\(/g) ?? [];
   assert.equal(alerts.length, 1, "one alert call site");
-  const loopEnd = CODE.indexOf('scheduleDownloadChecks(downloadChecks, { name: "requests/bulk:90s-download-check" });');
+  const loopEnd = CODE.indexOf('scheduleDownloadChecks(downloadChecksFor(settled), { name: "requests/bulk:90s-download-check" });');
   const alert = CODE.indexOf("alertAdminsNewRequest(");
   assert.ok(loopEnd > 0 && alert > loopEnd, "the alert runs once, after the push loop");
   assert.match(CODE, /const firstRolledBack = prepared\.find\(\(p\) => rolledBack\.has\(keyOf\(p\.tmdbId, p\.mediaType\)\)\);\s*if \(firstRolledBack\) \{\s*alertAdminsNewRequest\(/);
   assert.doesNotMatch(CODE, /notifyAdminsNewRequest/, "per-channel admin notifiers stay behind the shared alert");
 });
 
-test("bulk: a push with no definite answer is never rolled back — it stays APPROVED like the single route", () => {
+test("bulk: the auto-approve push is the shared state machine's — no push or rollback of its own", () => {
   // A timeout, a dropped connection or a gateway 502/504 AFTER the add was sent
   // may have landed: the rollback (and its pushFailed mark) is for a definite
-  // refusal, or a failure before the add went out (AddProgress).
-  assert.match(CODE, /const pushProgress: AddProgress = \{ sent: false \};/);
-  assert.match(CODE, /addMovieToRadarr\(p\.tmdbId, p\.arrInstance, undefined, targetUserId, pushProgress\)/);
-  assert.match(CODE, /addSeriesToSonarr\(p\.tmdbId, p\.arrInstance, undefined, targetUserId, pushProgress\)/);
-  const unknown = CODE.indexOf("if (pushProgress.sent && arrWriteOutcomeUnknown(err)) {");
-  const rollback = CODE.indexOf('.updateMany({ where: { id: row.id, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } })');
-  const elseBranch = CODE.indexOf("} else {", unknown);
-  assert.ok(unknown > 0 && elseBranch > unknown && rollback > elseBranch, "the rollback sits in the definite-failure branch");
+  // refusal, or a failure before the add went out (AddProgress). That rule is
+  // request-transition.ts's (pinned in tests/request-transition.test.mts); bulk
+  // must not carry a second copy.
+  assert.match(CODE, /const settled = await pushApprovals\(toPush, "Bulk auto-approve"\);/);
+  assert.doesNotMatch(CODE, /addMovieToRadarr|addSeriesToSonarr|arrWriteOutcomeUnknown/, "bulk pushes only through pushApprovals");
+  assert.doesNotMatch(CODE, /data: \{ status: "PENDING"/, "bulk rolls nothing back itself");
+  // Bulk has no profile picker: every pushed row carries none.
+  assert.match(CODE, /requestedBy: targetUserId, qualityProfileId: null,/);
+});
+
+test("bulk: a title whose content rating could not be verified is filed but never auto-approved (ratingCapsVerdict)", () => {
+  // A TMDB outage must neither refuse every item of a capped target nor let a
+  // title past the cap straight into Radarr/Sonarr — the single route's rule.
+  assert.match(CODE, /verdict: await ratingCapsVerdict\(caps, routing\.detailsOf\(it\)\)/);
+  assert.match(CODE, /const unverifiedKeys = new Set\(checked\.filter\(\(c\) => c\.verdict === "unverified"\)/);
+  assert.match(CODE, /autoApprove:\s*!unverifiedKeys\.has\(keyOf\(r\.it\.tmdbId, r\.it\.mediaType\)\) &&/);
+  assert.match(CODE, /prepareItems\(ctx, capped\.toCreate, routing, staleDeclinedIdByKey, capped\.unverifiedKeys\)/);
+});
+
+test("bulk: the on-behalf audit row keeps counts and the filed titles, never the whole per-item result list", () => {
+  assert.match(CODE, /created: createdCount, resultCounts: countResults\(results\), filed: filedTitles\(outcomes\) \}/);
+  assert.doesNotMatch(CODE, /created: createdCount, results \}/, "a 50-row array in every audit row");
 });

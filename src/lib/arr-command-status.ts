@@ -270,6 +270,14 @@ export type WatchStep =
   | { next: "stop"; stopped: WatchStop; error: string }
   | { next: "poll"; delayMs: number; states: ArrCommandState[] | null };
 
+// Past the poll cap, whether this read may declare the timeout: an answer
+// always may; a read that brought none (a failure, a 429) only once those have
+// used up their own budget; a skipped poll never.
+function answeredOrOverrun(read: WatchRead, overrun: number): boolean {
+  if (read.kind === "ok") return true;
+  return read.kind !== "skipped" && overrun >= WATCH_MAX_FAILED_READS;
+}
+
 /**
  * After each read: finished (every command ended or gone), give up (refused,
  * too many failures in a row, or the poll cap), or read again — and when.
@@ -308,7 +316,7 @@ export function watchStep(read: WatchRead, counters: WatchCounters): { step: Wat
   // done if every command ended, otherwise the timeout — and the reads that
   // bring none get WATCH_MAX_FAILED_READS of their own before it gives up
   // (consecutive failures still stop it as an error first).
-  if (pastCap && (read.kind === "ok" || (read.kind !== "skipped" && overrun >= WATCH_MAX_FAILED_READS))) {
+  if (pastCap && answeredOrOverrun(read, overrun)) {
     return { step: { next: "stop", stopped: "timeout", error: "" }, counters: { polls, failures, overrun } };
   }
   const delayMs = read.kind === "rateLimited" ? WATCH_RATE_LIMITED_POLLS * WATCH_POLL_MS : WATCH_POLL_MS;
@@ -351,6 +359,36 @@ export interface CommandWatcher {
 }
 
 /**
+ * A read's states (for `live`, in that order) folded into the whole watch:
+ * every id in the order it was started with, an ended one keeping its stored
+ * state — the progress count and the final line still cover all of them. Ids
+ * that end on this read are added to `ended`. A read that doesn't answer for
+ * every id it was asked about is a failed read; its error is left blank, and
+ * the status line words that itself (readFailedGeneric).
+ */
+export function mergeEndedStates(
+  ids: readonly number[],
+  ended: Map<number, ArrCommandState>,
+  live: readonly number[],
+  states: readonly ArrCommandState[],
+): WatchRead {
+  const fresh = new Map(states.map((s) => [s.id, s]));
+  const answered: ArrCommandState[] = [];
+  for (const id of live) {
+    const s = fresh.get(id);
+    if (s === undefined) return { kind: "failed", error: "" };
+    answered.push(s);
+  }
+  for (const s of answered) if (isTerminalCommandStatus(s.status)) ended.set(s.id, s);
+  const out: ArrCommandState[] = [];
+  for (const id of ids) {
+    const s = ended.get(id) ?? fresh.get(id);
+    if (s !== undefined) out.push(s);
+  }
+  return { kind: "ok", states: out };
+}
+
+/**
  * The polling loop. One read at a time per watch — the next is scheduled only
  * from the previous answer, so a slow arr is never asked twice at once — and
  * only the run that scheduled a read may act on its answer: a stop, or a newer
@@ -380,20 +418,6 @@ export function createCommandWatcher(driver: WatchDriver): CommandWatcher {
     runs.delete(key);
   };
 
-  // The read's states (for `live`, in that order) folded into the whole watch:
-  // every id in the order it was started with, an ended one keeping its stored
-  // state — the progress count and the final line still cover all of them. A
-  // read that doesn't answer for every id it was asked about is a failed read.
-  const mergeEnded = (run: Run, live: readonly number[], states: readonly ArrCommandState[]): WatchRead => {
-    const fresh = new Map(states.map((s) => [s.id, s]));
-    if (live.some((id) => !fresh.has(id))) return { kind: "failed", error: "" };
-    for (const id of live) {
-      const s = fresh.get(id) as ArrCommandState;
-      if (isTerminalCommandStatus(s.status)) run.ended.set(id, s);
-    }
-    return { kind: "ok", states: run.ids.map((id) => run.ended.get(id) ?? (fresh.get(id) as ArrCommandState)) };
-  };
-
   const schedule = (key: string, run: Run, ms: number) => {
     run.handle = driver.schedule(() => {
       run.handle = null;
@@ -401,36 +425,50 @@ export function createCommandWatcher(driver: WatchDriver): CommandWatcher {
     }, ms);
   };
 
+  // One poll: skipped while hidden, else the ids still running, read and folded in.
+  async function readOnce(run: Run): Promise<WatchRead> {
+    if (driver.hidden()) return { kind: "skipped" };
+    const live = run.ids.filter((id) => !run.ended.has(id));
+    let read: WatchRead;
+    try {
+      read = await driver.read(run.target, live);
+    } catch (err) {
+      read = { kind: "failed", error: err instanceof Error ? err.message : "" };
+    }
+    return read.kind === "ok" ? mergeEndedStates(run.ids, run.ended, live, read.states) : read;
+  }
+
+  // The caller's onDone is its own code (a refresh, a re-read): a throw there
+  // must not escape the timer callback as an unhandled rejection.
+  function callOnDone(run: Run, states: ArrCommandState[]): void {
+    try {
+      run.onDone?.(states);
+    } catch (err) {
+      console.error("[arr-command-watch] onDone failed:", err instanceof Error ? err.message : err);
+    }
+  }
+
   async function tick(key: string, token: number): Promise<void> {
     const run = runs.get(key);
     if (!run || run.token !== token) return;
-    let read: WatchRead;
-    if (driver.hidden()) read = { kind: "skipped" };
-    else {
-      const live = run.ids.filter((id) => !run.ended.has(id));
-      try {
-        read = await driver.read(run.target, live);
-      } catch (err) {
-        read = { kind: "failed", error: err instanceof Error ? err.message : "" };
-      }
-      if (read.kind === "ok") read = mergeEnded(run, live, read.states);
-    }
+    const read = await readOnce(run);
     if (runs.get(key)?.token !== token) return;
     const { step, counters } = watchStep(read, run.counters);
     run.counters = counters;
-    if (step.next === "done") {
-      runs.delete(key);
-      driver.update(key, { states: step.states, error: "" });
-      run.onDone?.(step.states);
-      return;
+    switch (step.next) {
+      case "done":
+        runs.delete(key);
+        driver.update(key, { states: step.states, error: "" });
+        callOnDone(run, step.states);
+        return;
+      case "stop":
+        runs.delete(key);
+        driver.update(key, { stopped: step.stopped, error: step.error });
+        return;
+      case "poll":
+        if (step.states) driver.update(key, { states: step.states, error: "" });
+        schedule(key, run, step.delayMs);
     }
-    if (step.next === "stop") {
-      runs.delete(key);
-      driver.update(key, { stopped: step.stopped, error: step.error });
-      return;
-    }
-    if (step.states) driver.update(key, { states: step.states, error: "" });
-    schedule(key, run, step.delayMs);
   }
 
   return {

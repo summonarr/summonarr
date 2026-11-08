@@ -191,7 +191,7 @@ test("guardrail 7a: encryptToken is called only by the extension and the PushSub
   // plus an encryptingAdapter in auth.ts) and both were removed afterwards.
   const ALLOWED = new Set([
     // The extension itself — the one place encryption is supposed to happen.
-    "src/lib/prisma.ts",
+    "src/lib/prisma-crypto.ts",
     // PushSubscription is NOT covered by the extension (different table), so
     // these two writers encrypt explicitly. Round-trip pinned in tests/push-routes.
     "src/app/api/push/subscribe/route.ts",

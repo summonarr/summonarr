@@ -14,6 +14,7 @@ import {
   type GrabProgress,
 } from "@/lib/arr";
 import { isValidInstanceSlug } from "@/lib/arr-instances";
+import { arrNotConfiguredResponse } from "@/lib/arr-not-configured";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -31,6 +32,9 @@ type RouteContext = { params: Promise<{ id: string }> };
 // A release search hits every indexer the instance has; bounded per admin like
 // the other indexer-spending admin actions.
 const SEARCH_LIMIT_PER_MIN = 20;
+// A TV request's tvdbId resolution and season list are Sonarr library reads —
+// no indexer hit, so a far looser bound than a search's, but a bound.
+const SONARR_READ_LIMIT_PER_MIN = 60;
 const HANDLE_RE = /^[0-9a-f]{32}$/;
 const MAX_SEASON = 1_000;
 
@@ -88,12 +92,7 @@ async function loadRequest(id: string, t: Translator): Promise<LoadedRequest | N
   if (!isValidInstanceSlug(req.arrInstance)) {
     return NextResponse.json({ error: t("apiUser.common.invalidInstance") }, { status: 400 });
   }
-  if (!(await isArrConfigured(service, req.arrInstance))) {
-    const error = req.arrInstance === ""
-      ? t("apiUser.common.notConfigured", { name: service === "radarr" ? "Radarr" : "Sonarr" })
-      : t("apiUser.issues.instanceNotConfigured", { service, instance: req.arrInstance });
-    return NextResponse.json({ error }, { status: 422 });
-  }
+  if (!(await isArrConfigured(service, req.arrInstance))) return arrNotConfiguredResponse(t, service, req.arrInstance);
   // No cast: a field dropped from the select above must fail to compile here.
   return req;
 }
@@ -138,17 +137,13 @@ export const GET = withPermission(Permission.MANAGE_REQUESTS)(async (req, { para
   const background = req.nextUrl.searchParams.get("async") === "1";
 
   try {
-    // What to search, built per media type so the TV fields are known numbers
-    // inside the search closure below (no casts on control flow the compiler
-    // can't see).
-    let target: SearchTarget = { kind: "movie" };
-    if (loaded.mediaType === "TV") {
-      const tvdbId = await tvdbIdFor(loaded);
-      if (!tvdbId) return NextResponse.json({ error: t("apiUser.issues.tvdbUnresolved") }, { status: 422 });
-      // The season list costs one library read, no indexer hit — not rate limited.
-      if (season === undefined) return NextResponse.json({ seasons: await getSonarrSeasons(tvdbId, loaded.arrInstance) });
-      target = { kind: "tv", tvdbId, season };
+    // A TV request reads Sonarr before any search (its tvdbId, then the season
+    // list when no season is named).
+    if (loaded.mediaType === "TV" && !checkRateLimit(`request-releases-read:${session.user.id}`, SONARR_READ_LIMIT_PER_MIN, 60_000)) {
+      return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
     }
+    const target = await searchTargetFor(loaded, season, t);
+    if (target instanceof NextResponse) return target;
     const key = handleScope(loaded, target.kind === "movie" ? undefined : target.season);
     // Joining a search already running costs no indexer hit, so no rate token.
     const running = background ? runningReleaseSearchJob(session.user.id, key) : null;
@@ -156,16 +151,7 @@ export const GET = withPermission(Permission.MANAGE_REQUESTS)(async (req, { para
     if (!checkRateLimit(`request-releases:${session.user.id}`, SEARCH_LIMIT_PER_MIN, 60_000)) {
       return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
     }
-    const search = async (): Promise<NextResponse> => {
-      try {
-        const releases = target.kind === "movie"
-          ? await getReleasesForMovie(loaded.tmdbId, loaded.arrInstance)
-          : await getReleasesForSeries(target.tvdbId, "SEASON", target.season, null, loaded.arrInstance);
-        return NextResponse.json({ releases: issueReleaseHandles(key, releases, { owner: session.user.id }) });
-      } catch (err) {
-        return arrFailure(err, t, service, "search");
-      }
-    };
+    const search = () => searchReleases(loaded, target, key, session.user.id, t);
     if (!background) return await search();
     const { jobId } = startReleaseSearchJob(session.user.id, key, async () => answerOf(await search()));
     return NextResponse.json({ job: jobId }, { status: 202 });
@@ -173,6 +159,30 @@ export const GET = withPermission(Permission.MANAGE_REQUESTS)(async (req, { para
     return arrFailure(err, t, service, "search");
   }
 });
+
+// What to search: the movie, or one season of the series. Built per media type
+// so the TV fields are known numbers in the search below (no casts on control
+// flow the compiler can't see). A TV request with no season named answers its
+// season list instead (Sonarr has no whole-series release search).
+async function searchTargetFor(loaded: LoadedRequest, season: number | undefined, t: Translator): Promise<SearchTarget | NextResponse> {
+  if (loaded.mediaType !== "TV") return { kind: "movie" };
+  const tvdbId = await tvdbIdFor(loaded);
+  if (!tvdbId) return NextResponse.json({ error: t("apiUser.issues.tvdbUnresolved") }, { status: 422 });
+  if (season === undefined) return NextResponse.json({ seasons: await getSonarrSeasons(tvdbId, loaded.arrInstance) });
+  return { kind: "tv", tvdbId, season };
+}
+
+// One interactive search, its releases' guids swapped for handles bound to `key`.
+async function searchReleases(loaded: LoadedRequest, target: SearchTarget, key: string, owner: string, t: Translator): Promise<NextResponse> {
+  try {
+    const releases = target.kind === "movie"
+      ? await getReleasesForMovie(loaded.tmdbId, loaded.arrInstance)
+      : await getReleasesForSeries(target.tvdbId, "SEASON", target.season, null, loaded.arrInstance);
+    return NextResponse.json({ releases: issueReleaseHandles(key, releases, { owner }) });
+  } catch (err) {
+    return arrFailure(err, t, loaded.mediaType === "MOVIE" ? "radarr" : "sonarr", "search");
+  }
+}
 
 export const POST = withPermission(Permission.MANAGE_REQUESTS)(async (req, { params }: RouteContext, session) => {
   const t = translatorForRequest(req);
@@ -194,7 +204,7 @@ export const POST = withPermission(Permission.MANAGE_REQUESTS)(async (req, { par
   if (loaded instanceof NextResponse) return loaded;
   const service = loaded.mediaType === "MOVIE" ? "radarr" : "sonarr";
   // A movie search has no season; a TV handle is only good for its own season.
-  const picked = claimReleaseHandle(handleScope(loaded, loaded.mediaType === "MOVIE" ? undefined : season), handle);
+  const picked = claimReleaseHandle(handleScope(loaded, loaded.mediaType === "MOVIE" ? undefined : season), handle, Date.now(), session.user.id);
   if (picked === "unknown") return NextResponse.json({ error: t("apiUser.requests.releases.handleExpired") }, { status: 410 });
   if (picked === "busy") return NextResponse.json({ error: t("apiUser.requests.releases.grabInProgress") }, { status: 409 });
   const { guid, indexerId } = picked;

@@ -61,6 +61,7 @@
   "shared.upload.chunkFailed": "Caricamento della parte {chunk} di {total} non riuscito (HTTP {status}).",
   "shared.upload.nonJson": "Il server ha inviato una risposta inattesa. Probabilmente la richiesta è stata reindirizzata, ad esempio alla pagina di accesso.",
   "shared.upload.noCompletion": "Il caricamento è terminato, ma il server non ha mai confermato il ripristino.",
+  "shared.upload.empty": "Il file di backup è vuoto.",
   "shared.upload.network": "Caricamento non riuscito. Controlla la connessione e riprova.",
   "shared.upload.cancelled": "Caricamento annullato."
 }

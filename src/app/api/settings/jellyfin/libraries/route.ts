@@ -1,32 +1,21 @@
-import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
-import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { getJellyfinMediaFolders } from "@/lib/jellyfin";
-import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { listServerLibraries } from "@/lib/server-library-picker";
 
-export const GET = withAdmin(async (req, _ctx, _session) => {
-  const t = translatorForRequest(req);
-  // Which server to enumerate — see the Plex counterpart. Jellyfin ids are
-  // GUIDs so they do not collide, but listing the wrong server still offers
-  // libraries the target does not have.
-  const raw = new URL(req.url).searchParams.get("instance") ?? DEFAULT_MEDIA_INSTANCE;
-  if (raw !== DEFAULT_MEDIA_INSTANCE && !isValidMediaInstanceSlug(raw)) {
-    return NextResponse.json({ error: t("apiAdmin.common.invalidInstance") }, { status: 400 });
-  }
-  const { url, apiKey } = await getJellyfinConfig(raw);
-
-  if (!url || !apiKey) {
-    // 422, not 400: "not configured yet" is server state, not a bad request —
-    // the same status arr-options uses, so the three pickers agree.
-    return NextResponse.json({ error: t("apiAdmin.common.jellyfinNotConfiguredShort") }, { status: 422 });
-  }
-
-  try {
-    const folders = await getJellyfinMediaFolders(url, apiKey);
-    return NextResponse.json(folders);
-  } catch (err) {
-    console.error("[settings/jellyfin/libraries] Failed to fetch Jellyfin libraries:", err);
-    return NextResponse.json({ error: t("apiAdmin.settings.jellyfinConnectFailed") }, { status: 502 });
-  }
-});
+// One Jellyfin server's media folders, for the instance (?instance=) the picker
+// is choosing for (server-library-picker.ts). Jellyfin ids are GUIDs so they do
+// not collide, but listing the wrong server still offers libraries the target
+// does not have.
+export const GET = withAdmin(async (req) =>
+  listServerLibraries(req, {
+    load: async (instance) => {
+      const { url, apiKey } = await getJellyfinConfig(instance);
+      return url && apiKey ? { url, credential: apiKey } : null;
+    },
+    list: getJellyfinMediaFolders,
+    notConfiguredKey: "apiAdmin.common.jellyfinNotConfiguredShort",
+    failedKey: "apiAdmin.settings.jellyfinConnectFailed",
+    scope: "settings/jellyfin/libraries",
+  }),
+);

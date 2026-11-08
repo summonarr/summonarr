@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { discordUserOf, type CommandContext, type CommandInteraction } from "../types";
-import { editOriginal, interactionTranslator } from "../reply";
+import { editOriginal, interactionTranslator, interactionTranslatorSync } from "../reply";
+import { holdsAutoApproveRole, parseAutoApproveRoles } from "../request-gates";
 import { handleIssueCommand } from "./issue";
 import { handleLinkCommand } from "./link";
 import { handleRecentCommand } from "./recent";
@@ -22,11 +23,18 @@ const COMMAND_HANDLERS: Record<string, (ctx: CommandContext) => Promise<void>> =
 export async function handleCommand(interaction: CommandInteraction): Promise<void> {
   const appId = interaction.application_id;
   const token = interaction.token;
-  const interactionId = interaction.id as string;
   const data = interaction.data;
   const discordUser = discordUserOf(interaction);
+  // Every pending row and result button is keyed on the interaction id and the
+  // invoker: a payload missing either is refused rather than keyed on
+  // `undefined`, where two such interactions would share one row.
+  if (!discordUser || typeof interaction.id !== "string" || interaction.id.length === 0) {
+    await editOriginal(appId, token, { content: interactionTranslatorSync(interaction)("notify.bot.unexpected") }).catch(() => {});
+    return;
+  }
+  const interactionId = interaction.id;
   const discordUserId = discordUser.id;
-  const discordUsername = discordUser.username as string;
+  const discordUsername = discordUser.username;
   const commandName = data.name;
 
   const channelId = interaction.channel_id;
@@ -41,8 +49,7 @@ export async function handleCommand(interaction: CommandInteraction): Promise<vo
 
   const welcomeChannelId = welcomeRow?.value?.trim() || null;
   const requireLinked = requireLinkedRow?.value === "true";
-  const autoApproveRoles = (autoApproveRow?.value ?? "").split(",").map((r) => r.trim()).filter(Boolean);
-  const isExemptByRole = autoApproveRoles.length > 0 && memberRoles.some((r) => autoApproveRoles.includes(r));
+  const isExemptByRole = holdsAutoApproveRole(parseAutoApproveRoles(autoApproveRow?.value), memberRoles);
 
   if (welcomeChannelId && channelId) {
     const inWelcome = channelId === welcomeChannelId;

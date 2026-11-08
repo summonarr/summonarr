@@ -75,7 +75,9 @@ test("the route and the Library cleanup page both read the one shared constant",
   assert.match(route, /itemsInvalid", \{ max: CLEANUP_MAX_ITEMS \}/);
   assert.doesNotMatch(route, /MAX_ITEMS = \d/, "no private copy of the cap");
   assert.doesNotMatch(route, /function parseItems/);
-  const page = readFileSync(new URL("../src/components/admin/library-cleanup.tsx", import.meta.url), "utf8");
+  // The page and its pieces (library-cleanup-parts.tsx draws the table).
+  const page = readFileSync(new URL("../src/components/admin/library-cleanup.tsx", import.meta.url), "utf8")
+    + readFileSync(new URL("../src/components/admin/library-cleanup-parts.tsx", import.meta.url), "utf8");
   assert.match(page, /setSelected\(\(prev\) => toggleCleanupSelection\(prev, k\)\)/);
   assert.match(page, /setSelected\(\(prev\) => toggleAllCleanupSelection\(prev, selectableKeys\)\)/);
   assert.match(page, /checked=\{cleanupSelectAllOn\(selected, selectableKeys\)\}/);
@@ -86,12 +88,14 @@ test("the route and the Library cleanup page both read the one shared constant",
 
 test("the Library cleanup table draws at most one delete's worth of rows; select-all and the counts read the whole view", () => {
   const page = readFileSync(new URL("../src/components/admin/library-cleanup.tsx", import.meta.url), "utf8");
+  const parts = readFileSync(new URL("../src/components/admin/library-cleanup-parts.tsx", import.meta.url), "utf8");
   assert.match(page, /const RENDER_CAP = CLEANUP_MAX_ITEMS;/);
   assert.match(page, /const shown = visible\.slice\(0, RENDER_CAP\);/);
-  assert.match(page, /\{shown\.map\(\(r\) => \{/, "the table body maps the capped rows");
-  assert.doesNotMatch(page, /\{visible\.map\(/, "never every row");
-  assert.match(page, /const selectableVisible = visible\.filter\(/, "select-all reads the uncapped view");
-  assert.match(page, /const selectableKeys = selectableVisible\.map\(keyOf\);/);
+  assert.match(page, /<CleanupTable\s+shown=\{shown\}/, "the table is handed the capped rows");
+  assert.match(parts, /\{shown\.map\(\(r\) => \{/, "the table body maps the capped rows");
+  assert.doesNotMatch(page + parts, /\{visible\.map\(/, "never every row");
+  assert.match(page, /const selectableVisible = useMemo\(\(\) => visible\.filter\(/, "select-all reads the uncapped view");
+  assert.match(page, /const selectableKeys = useMemo\(\(\) => selectableVisible\.map\(keyOf\), \[selectableVisible\]\);/);
   assert.match(page, /\{visible\.length > shown\.length && \(/, "the page says rows were left out");
   assert.match(page, /t\("adminManage\.cleanup\.renderCap", \{ cap: shown\.length, total: visible\.length \}\)/);
 });

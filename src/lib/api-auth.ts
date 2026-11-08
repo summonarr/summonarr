@@ -44,7 +44,10 @@ export interface SummonarrSession {
   tokenExpiresAt?: number;
 }
 
-export type RequireAuthRole = "ADMIN" | "ISSUE_ADMIN";
+// ADMIN only. Issue management is a permission (withIssueAdmin checks the
+// MANAGE_ISSUES bit), never a role label: an ISSUE_ADMIN role option here would
+// authorize differently from the wrapper and drift from the bitmask.
+export type RequireAuthRole = "ADMIN";
 
 type RequireAuthOptions = {
   /** Required role. Omit for "any authenticated user". */
@@ -140,10 +143,9 @@ export async function requireAuth(
   return claimsToSession(result.claims);
 }
 
-// Exported for unit tests.
+// Exact, case-sensitive match on the signed role label. Exported for unit tests.
 export function hasRole(actual: string | undefined, required: RequireAuthRole): boolean {
-  if (required === "ADMIN") return actual === "ADMIN";
-  return actual === "ADMIN" || actual === "ISSUE_ADMIN";
+  return actual === required;
 }
 
 type AuthedHandler<Ctx> = (

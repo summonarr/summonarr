@@ -118,7 +118,13 @@ function tmdbKeyNamespaces(): string[] {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const src = readFileSync(path.join(here, "..", "src", "lib", "tmdb.ts"), "utf8");
   const out = new Set<string>();
-  for (const m of src.matchAll(/(?:const key = |setCache\()["'`]([a-z_]+):/g)) out.add(`${m[1]}:`);
+  for (const m of src.matchAll(/(?:const key = |setCache\(|loadResultPage<\w+>\()["'`]([a-z_]+):/g)) out.add(`${m[1]}:`);
+  // Key builders shared by the movie and TV readers (`${type}:${id}:credits`,
+  // creditsKey/suggestionsKey) write both namespaces.
+  if (/return `\$\{type\}:/.test(src)) {
+    out.add("movie:");
+    out.add("tv:");
+  }
   return [...out].sort();
 }
 

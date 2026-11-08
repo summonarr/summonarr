@@ -49,10 +49,15 @@ function parse(rel: string, text: string): ts.SourceFile {
 // Type aliases built from the client (`type MfaTxClient = Omit<typeof prisma, …>`,
 // `type AuditDb = Pick<typeof prisma, "auditLog">`). Collected across the whole
 // tree, because the alias is usually imported by the file that uses it.
-export function clientAliases(sf: ts.SourceFile): string[] {
+// An alias of a collected alias (`type MfaTxClient = PrismaTxClient`) counts
+// too, when `known` holds the aliases collected so far.
+export function clientAliases(sf: ts.SourceFile, known: ReadonlySet<string> = new Set()): string[] {
   const names: string[] = [];
   const visit = (node: ts.Node) => {
-    if (ts.isTypeAliasDeclaration(node) && /typeof prisma\b/.test(node.type.getText(sf))) names.push(node.name.text);
+    if (ts.isTypeAliasDeclaration(node)) {
+      const text = node.type.getText(sf);
+      if (/typeof prisma\b/.test(text) || text.split(/[^\w$]+/).some((word) => known.has(word))) names.push(node.name.text);
+    }
     ts.forEachChild(node, visit);
   };
   visit(sf);
@@ -150,10 +155,15 @@ export function findParallelTxQueries(rel: string, text: string, aliases: Set<st
 
 test("no transaction client runs queries in parallel (guardrail 23c)", () => {
   const files = walkSrc().map((rel) => ({ rel, text: readFileSync(join(ROOT, rel), "utf8") }));
-  const aliases = new Set(files.flatMap(({ rel, text }) => clientAliases(parse(rel, text))));
+  const parsed = files.map(({ rel, text }) => parse(rel, text));
+  const aliases = new Set<string>();
+  for (let size = -1; size !== aliases.size; ) {
+    size = aliases.size;
+    for (const sf of parsed) for (const name of clientAliases(sf, aliases)) aliases.add(name);
+  }
   // The alias collection itself is what lets the scan see helpers typed with
   // an imported alias; an empty set would quietly blind it.
-  for (const known of ["MfaTxClient", "LibraryTxClient"]) assert.ok(aliases.has(known), `alias ${known} not collected`);
+  for (const known of ["PrismaTxClient", "MfaTxClient", "LibraryTxClient"]) assert.ok(aliases.has(known), `alias ${known} not collected`);
   const hits = files.flatMap(({ rel, text }) => findParallelTxQueries(rel, text, aliases));
   assert.deepEqual(hits, [], "await each query on a transaction client in turn — a transaction is one connection");
 });

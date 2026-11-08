@@ -5,7 +5,8 @@ import { safeFetchTrusted, SafeFetchError, type SafeFetchOptions } from "./safe-
 import { sanitizeForLog } from "./sanitize";
 import { mapLimit, coalesce } from "./concurrency";
 import { processSingleton } from "./process-singleton";
-import { warnOnChange } from "./log-dedup";
+import { createHash } from "node:crypto";
+import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
 import {
   MDBLIST_PLAN_SETTING_KEY,
   budgetAllows,
@@ -95,6 +96,74 @@ async function getApiKey(opts: { fresh?: boolean } = {}): Promise<string | null>
     p.finally(() => { apiKeyMemo.inflight = null; }).catch(() => {});
   }
   return p;
+}
+
+// The key, or a throw turned into a failure: a settings read that fails (a DB
+// hiccup) must degrade like any other failure — never reject past a caller that
+// promises a result, and never read as "no key configured".
+async function readApiKey(): Promise<{ ok: true; key: string | null } | { ok: false }> {
+  try {
+    return { ok: true, key: await getApiKey() };
+  } catch (err) {
+    console.error(`[mdblist] API key read failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
+    return { ok: false };
+  }
+}
+
+// ── Rejected key ───────────────────────────────────────────────────────────
+// MDBList refusing the key (HTTP 401/403, or an error body naming the key) is
+// no limit — it must not pause every call for an hour, or an admin fixing their
+// key waits it out. But with nothing at all, every cold detail view and every
+// stale revalidation sent another doomed request and logged another line.
+//
+// So the KEY is remembered (omdb.ts's design): while the stored key is the one
+// MDBList refused, every call answers "failed" without the network. A changed
+// key is a different value, so it is tried at once (within getApiKey's 30s
+// memo); a passing Settings → Test clears it; the same key is tried again after
+// REJECTED_KEY_RETRY_MS. Process-wide (guardrail 27a). Said once per key
+// (guardrail 7b).
+const REJECTED_KEY_RETRY_MS = 60 * 60 * 1000;
+const REJECTED_KEY_WARN_KEY = "mdblist:rejected-key";
+const rejectedKey = processSingleton<{ key: string | null; until: number }>("mdblist:rejected-key", () => ({ key: null, until: 0 }));
+
+function isKeyRejected(apiKey: string): boolean {
+  return rejectedKey.key === apiKey && Date.now() < rejectedKey.until;
+}
+
+// Whether the key MDBList is being asked with right now is one it refused —
+// for a job that must read a refused key as "MDBList is not answering" (the For
+// You verdict pass, guardrail 40). Reads the memoized key; false before any read.
+export function isMdblistKeyRejected(): boolean {
+  const key = apiKeyMemo.cache?.value;
+  return !!key && isKeyRejected(key);
+}
+
+function noteKeyRejected(apiKey: string): void {
+  rejectedKey.key = apiKey;
+  rejectedKey.until = Date.now() + REJECTED_KEY_RETRY_MS;
+  // The key itself never reaches the log or the dedup map.
+  warnOnChange(
+    REJECTED_KEY_WARN_KEY,
+    createHash("sha256").update(apiKey).digest("hex").slice(0, 12),
+    "[mdblist] MDBList refused the API key — no MDBList ratings until the key is changed or Settings → Test succeeds; the same key is retried hourly",
+  );
+}
+
+// MDBList answered with this key: whatever it refused before, it takes it now.
+function noteKeyAccepted(apiKey: string): void {
+  if (rejectedKey.key !== apiKey) return;
+  rejectedKey.key = null;
+  rejectedKey.until = 0;
+  forgetWarnOnChange(REJECTED_KEY_WARN_KEY);
+}
+
+// A refusal of the key itself, from the status or the error text. A quota
+// message is never one (it pauses instead).
+function isKeyRefusal(status: number, errorText: string | null): boolean {
+  if (status === 401 || status === 403) return true;
+  if (!errorText || isQuotaErrorMessage(errorText)) return false;
+  const m = errorText.toLowerCase();
+  return m.includes("api key") || m.includes("apikey");
 }
 
 export type MdblistResult =
@@ -281,7 +350,7 @@ const TRANSPORT_FAILURE_LIMIT = 5;
 // Every request that got no answer since the process started. Unlike the
 // breaker's count it never resets, so a job can read it before and after a
 // batch and learn that MDBList failed DURING the batch even when the breaker
-// has not tripped: one For You verdict batch sends about three requests, fewer
+// has not tripped: one For You verdict batch sends about two requests, fewer
 // than the five the breaker needs. Its own singleton, so a runtime object an
 // older build left behind (dev hot reload) can't lack the field.
 const transportFailureTotal = processSingleton("mdblist:transport-failure-total", () => ({ count: 0 }));
@@ -402,12 +471,17 @@ export async function fetchAndCacheMdblistForTmdb(
   releaseDate?: string | null,
   opts: MdblistCallOptions = {},
 ): Promise<MdblistResult> {
-  const apiKey = await getApiKey();
+  const transient: MdblistResult = { found: false, keyConfigured: true, transient: true };
+  const read = await readApiKey();
+  if (!read.ok) return transient;
+  const apiKey = read.key;
   if (!apiKey) return { found: false, keyConfigured: false };
 
   if (await checkMdblistPause(opts)) {
     return { found: false, keyConfigured: true, quotaExhausted: true, transient: true };
   }
+  // The stored key is one MDBList refused (see noteKeyRejected): nothing to ask.
+  if (isKeyRejected(apiKey)) return transient;
 
   try {
     const mdbType = mediaType === "tv" ? "show" : "movie";
@@ -427,11 +501,15 @@ export async function fetchAndCacheMdblistForTmdb(
     }
 
     if (!res.ok) {
+      if (isKeyRefusal(res.status, null)) {
+        noteKeyRejected(apiKey);
+        return transient;
+      }
       console.warn(`[mdblist] API returned ${sanitizeForLog(res.status)} for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}`);
       // A transient 5xx must NOT be negative-cached — that would suppress a valid
       // item's ratings for the full 24h TTL. Only a 404 (handled above) is a real
       // "not found" worth caching. Matches the batch path's reasoning.
-      return { found: false, keyConfigured: true, transient: true };
+      return transient;
     }
 
     const data = await res.json() as unknown;
@@ -442,27 +520,42 @@ export async function fetchAndCacheMdblistForTmdb(
         pauseForLimit(res.headers, errMsg, `for ${mediaType}:${tmdbId}`);
         return { found: false, keyConfigured: true, quotaExhausted: true, transient: true };
       }
+      if (isKeyRefusal(res.status, errMsg)) {
+        noteKeyRejected(apiKey);
+        return transient;
+      }
       console.warn(`[mdblist] API error for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}: ${sanitizeForLog(errMsg)}`);
       // A 200-with-error-body (other than 404, handled above as a real not-found) is an
       // app-level error that may be transient — do NOT negative-cache it for 24h, or a
       // valid item's ratings stay suppressed for the full TTL. Matches the 5xx reasoning.
-      return { found: false, keyConfigured: true, transient: true };
+      return transient;
     }
+    // A body that is not one media object (an array, a null) is no ratings
+    // answer: read as one, it cached an all-null row for the title.
+    if (!isBatchRow(data)) {
+      console.warn(`[mdblist] unexpected answer for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)} — not a media object`);
+      return transient;
+    }
+    noteKeyAccepted(apiKey);
 
-    const ratings = parseBatchItem(data as MdblistBatchRaw);
+    const ratings = parseBatchItem(data);
 
     // TTL bucket: prefer the caller's releaseDate, but fall back to the
     // response's own year — a dateless caller (the prewarm's detail-less
     // items) otherwise pins a brand-new release into the 30-day back-catalog
     // bucket instead of the fresh-title one.
-    const respYear = (data as MdblistBatchRaw).year;
-    await setCache(cacheKey, ratings, libraryDetailsTtl(releaseDate ?? (respYear ? `${respYear}-01-01` : null)));
+    await setCache(cacheKey, ratings, libraryDetailsTtl(releaseDate ?? yearDate(data.year)));
     return { found: true, data: ratings };
   } catch (err) {
     const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
     console.error(`[mdblist] Error fetching for ${sanitizeForLog(mediaType)}:${tmdbId}: ${sanitizeForLog(reason)}`);
-    return { found: false, keyConfigured: true, transient: true };
+    return transient;
   }
+}
+
+// A response row's year as a date for the TTL bucket, or null.
+function yearDate(year: unknown): string | null {
+  return typeof year === "number" && Number.isInteger(year) && year > 0 ? `${year}-01-01` : null;
 }
 
 const MDBLIST_BATCH_SIZE = 200;
@@ -570,199 +663,256 @@ export function parseBatchItem(raw: MdblistBatchRaw): MdblistRatings {
   };
 }
 
+// One batch POST, retried once after a 503 (MDBList's "busy, try again").
+async function postBatchWithRetry(url: string, ids: number[]): Promise<Response> {
+  const init: SafeFetchOptions = {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+    timeoutMs: MDBLIST_BATCH_TIMEOUT_MS,
+  };
+  const res = await mdblistRequest(url, init);
+  if (res.status !== 503) return res;
+  await new Promise((r) => setTimeout(r, 1500));
+  return mdblistRequest(url, init);
+}
+
+// One cache write a batch page earns.
+interface BatchCacheWrite {
+  key: string;
+  value: MdblistRatings | typeof NOT_FOUND_SENTINEL;
+  ttl: number;
+}
+
+// What one answered page means: the ratings per REQUESTED id, the cache writes,
+// and the rows that bound to no requested id. Pure.
+//
+// Rows are matched by the response's TMDB id (batchRowTmdbId — tmdb_id/tmdbid/
+// ids.tmdb, never MDBList's internal `id`): MDBList may reorder rows, add rows
+// for ids not asked for, or omit ids. A row whose id isn't in the page never
+// binds positionally (that mis-binds it to the wrong requested item: wrong TTL,
+// a foreign id in the result map). A row that isn't an object is skipped, not
+// thrown on: one bad row must not cost the page's other ratings.
+//
+// Positional binding for a row with no TMDB id is safe only when the response
+// lines up with the request one to one: as many rows as ids, and none of them
+// carrying an id. In any other response a position names the wrong title, and
+// its ratings would be cached under that title's key for the full TTL.
+//
+// A SHORT response means MDBList simply has no data for the missing ids — it is
+// not a cut-off batch (the row count tracks the request size: 197/200, 87/88,
+// 8/9). So the missing ids get a "not found" marker like any other miss; if a
+// short answer was ever a blip, the cost is one MDBLIST_NEGATIVE_TTL (24h) and
+// it fixes itself. Two shapes are ambiguous and mark nothing: an EMPTY array
+// (indistinguishable from an upstream blip) and any response with UNMATCHED rows
+// (they took the place of requested ids MDBList never answered for).
+export function bindBatchPage(
+  rows: unknown[],
+  page: { id: number; releaseDate?: string | null }[],
+  mediaType: "movie" | "tv",
+): { ratings: Map<number, MdblistRatings>; writes: BatchCacheWrite[]; unmatchedRows: number; unmatchedKeys: string[] | null } {
+  const ratings = new Map<number, MdblistRatings>();
+  const writes: BatchCacheWrite[] = [];
+  let unmatchedRows = 0;
+  let unmatchedKeys: string[] | null = null;
+  const byId = new Map(page.map((p) => [p.id, p]));
+  const positionalOk = rows.length === page.length && rows.every((r) => isBatchRow(r) && batchRowTmdbId(r) == null);
+
+  for (let i = 0; i < rows.length; i++) {
+    const raw = rows[i];
+    let pageItem: (typeof page)[number] | undefined;
+    if (isBatchRow(raw)) {
+      const respTmdbId = batchRowTmdbId(raw);
+      pageItem = respTmdbId != null ? byId.get(respTmdbId) : positionalOk ? page[i] : undefined;
+    }
+    if (!pageItem || !isBatchRow(raw)) {
+      unmatchedRows++;
+      // Keys only (no values), so no rating/id data lands in logs.
+      unmatchedKeys ??= Object.keys(isBatchRow(raw) ? raw : {});
+      continue;
+    }
+    // The cache/result key is the REQUESTED TMDB id, never raw.id.
+    const parsed = parseBatchItem(raw);
+    ratings.set(pageItem.id, parsed);
+    // Prefer the requested item's date; fall back to the response row's year so
+    // dateless prewarm items land in the right TTL bucket.
+    writes.push({
+      key: mdblistCacheKey(mediaType, pageItem.id),
+      value: parsed,
+      ttl: libraryDetailsTtl(pageItem.releaseDate ?? yearDate(raw.year)),
+    });
+  }
+
+  if (unmatchedRows === 0 && rows.length > 0) {
+    for (const item of page) {
+      if (!ratings.has(item.id)) {
+        writes.push({ key: mdblistCacheKey(mediaType, item.id), value: NOT_FOUND_SENTINEL, ttl: MDBLIST_NEGATIVE_TTL });
+      }
+    }
+  }
+  return { ratings, writes, unmatchedRows, unmatchedKeys };
+}
+
+// What one page of a batch walk came to.
+type BatchPageResult =
+  // `empty`: MDBList answered with an empty array — likely a transient issue on
+  // its side rather than "every title absent", so the ids count as failed; the
+  // host answered, so the breaker is reset as on any answer.
+  | { kind: "answered"; ratings: Map<number, MdblistRatings>; empty: boolean }
+  // No ratings answer (a non-OK status, an error body, an empty array, a request
+  // that failed): counts toward the walk's failure breaker.
+  | { kind: "failed" }
+  // A limit answer: the pause is set and the walk stops; not a failure.
+  | { kind: "paused" }
+  // MDBList refused the key: every page would answer the same.
+  | { kind: "keyRejected" };
+
+async function fetchBatchPage(
+  url: string,
+  apiKey: string,
+  page: { id: number; releaseDate?: string | null }[],
+  mediaType: "movie" | "tv",
+  log: { unmatchedShapeLogged: boolean },
+): Promise<BatchPageResult> {
+  try {
+    const res = await postBatchWithRetry(url, page.map((item) => item.id));
+    if (res.status === 429) {
+      pauseForLimit(res.headers, await errorTextOf(res), `HTTP 429 on batch ${mediaType}`);
+      return { kind: "paused" };
+    }
+    if (!res.ok) {
+      if (isKeyRefusal(res.status, null)) return { kind: "keyRejected" };
+      console.warn(`[mdblist] batch ${mediaType} returned ${res.status}`);
+      return { kind: "failed" };
+    }
+
+    const data = await res.json() as unknown;
+    const errMsg = mdblistErrorMessage(data);
+    if (errMsg && isQuotaErrorMessage(errMsg)) {
+      pauseForLimit(res.headers, errMsg, `on batch ${mediaType}`);
+      return { kind: "paused" };
+    }
+    if (errMsg && isKeyRefusal(res.status, errMsg)) return { kind: "keyRejected" };
+    if (errMsg) {
+      // A 200-with-error body (a malformed request, a backend fault) is not a
+      // ratings answer. Log the real error and count it toward the breaker.
+      console.warn(`[mdblist] batch ${mediaType} API error: ${sanitizeForLog(errMsg)}`);
+      return { kind: "failed" };
+    }
+    noteKeyAccepted(apiKey);
+
+    // Rows stay `unknown` until isBatchRow says they can be read.
+    const rows: unknown[] = Array.isArray(data) ? data : [];
+    const bound = bindBatchPage(rows, page, mediaType);
+    if (bound.unmatchedKeys && !log.unmatchedShapeLogged) {
+      // ONCE per walk: a persistent MDBList field rename stays diagnosable
+      // without a line per page.
+      log.unmatchedShapeLogged = true;
+      console.warn(`[mdblist] batch row did not resolve to a requested TMDB id — row keys: [${bound.unmatchedKeys.join(",")}]`);
+    }
+    if (rows.length === 0) {
+      console.warn(`[mdblist] batch ${mediaType} returned empty array for ${page.length} items — skipping NOT_FOUND caching`);
+    } else if (bound.unmatchedRows > 0) {
+      console.warn(`[mdblist] batch ${mediaType} returned ${bound.unmatchedRows} unmatched row(s) (${rows.length} rows for ${page.length} ids) — skipping NOT_FOUND caching for omitted ids`);
+    }
+    // Flush a few writes at a time: a full page has up to 200, and all at once
+    // would swamp the small Prisma pool. A failed write lands in the catch below
+    // — caching is best-effort.
+    await mapLimit(bound.writes, MDBLIST_CACHE_WRITE_CONCURRENCY, (w) => setCache(w.key, w.value, w.ttl));
+    return { kind: "answered", ratings: bound.ratings, empty: rows.length === 0 };
+  } catch (err) {
+    const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
+    console.error(`[mdblist] batch error for ${mediaType}: ${reason}`);
+    return { kind: "failed" };
+  }
+}
+
+// A batch walk's ratings, and how many of the requested ids it FAILED for: ids
+// in pages that got no ratings answer, pages the failure breaker stopped, a
+// refused key, or a key read that failed. Ids a pause or the budget held back
+// were never sent and are not counted — the walk's caller reports those itself
+// (the pre-warm's quotaExhausted).
+export interface MdblistBatchOutcome {
+  ratings: Map<number, MdblistRatings>;
+  failedIds: number;
+}
+
 export async function fetchMdblistBatch(
   items: { id: number; releaseDate?: string | null }[],
   mediaType: "movie" | "tv",
   opts: MdblistBatchOptions = {},
 ): Promise<Map<number, MdblistRatings>> {
-  const result = new Map<number, MdblistRatings>();
-  if (items.length === 0) return result;
+  return (await fetchMdblistBatchOutcome(items, mediaType, opts)).ratings;
+}
 
-  // Log an unresolvable row's shape at most ONCE per call (covers all internal pages),
-  // so a persistent MDBList field rename is diagnosable without spamming a line per page.
-  let loggedUnmatchedShape = false;
+export async function fetchMdblistBatchOutcome(
+  items: { id: number; releaseDate?: string | null }[],
+  mediaType: "movie" | "tv",
+  opts: MdblistBatchOptions = {},
+): Promise<MdblistBatchOutcome> {
+  const outcome: MdblistBatchOutcome = { ratings: new Map(), failedIds: 0 };
+  if (items.length === 0) return outcome;
 
-  const apiKey = await getApiKey();
-  if (!apiKey) return result;
-  if (await checkMdblistPause(opts)) return result;
+  const read = await readApiKey();
+  if (!read.ok) {
+    outcome.failedIds = items.length;
+    return outcome;
+  }
+  const apiKey = read.key;
+  if (!apiKey) return outcome;
+  if (await checkMdblistPause(opts)) return outcome;
+
+  // Breaker state: a wall of consecutive failed pages (an upstream incident)
+  // must stop the walk instead of burning one request per remaining page. Reset
+  // on any success. The caller's breaker when it passes one (it spans that
+  // caller's calls).
+  const breaker = opts.breaker ?? newMdblistBatchBreaker();
+  // A refused key fails every page the same way: the walk (and a caller walking
+  // page by page through its breaker) stops at once.
+  const refused = (): MdblistBatchOutcome => {
+    breaker.tripped = true;
+    return outcome;
+  };
+  if (isKeyRejected(apiKey)) {
+    outcome.failedIds = items.length;
+    return refused();
+  }
 
   const mdbType = mediaType === "tv" ? "show" : "movie";
   const url = new URL(`${MDBLIST_REST_BASE}tmdb/${mdbType}/`);
   url.searchParams.set("apikey", apiKey);
-
-  // Breaker state: a wall of consecutive failed pages (upstream incident, an
-  // invalid key answering 200-with-error on every page) must stop the walk
-  // instead of burning one request per remaining page. Reset on any success.
-  // The caller's breaker when it passes one (it spans that caller's calls).
-  const breaker = opts.breaker ?? newMdblistBatchBreaker();
-  // True when the page failure just counted is the one that trips the breaker.
-  const pageFailed = (): boolean => {
-    if (++breaker.consecutiveFailures < MDBLIST_BATCH_MAX_CONSECUTIVE_FAILURES) return false;
-    breaker.tripped = true;
-    console.warn(`[mdblist] batch ${mediaType}: ${breaker.consecutiveFailures} consecutive page failures — stopping the walk`);
-    return true;
-  };
+  const log = { unmatchedShapeLogged: false };
 
   for (let offset = 0; offset < items.length; offset += MDBLIST_BATCH_SIZE) {
     // A pause tripped mid-run (this loop's own 429 breaks directly; a
-    // CONCURRENT caller's trip, the breaker, or the budget running down is only
-    // visible here) must stop later pages.
-    if (breaker.tripped || isMdblistQuotaLocked(opts)) break;
-    const page = items.slice(offset, offset + MDBLIST_BATCH_SIZE);
-    const ids  = page.map((item) => item.id);
-
-    let res: Response | null = null;
-    try {
-      const body = JSON.stringify({ ids });
-
-      for (let attempt = 0; attempt < 2; attempt++) {
-        res = await mdblistRequest(url.toString(), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body,
-          timeoutMs: MDBLIST_BATCH_TIMEOUT_MS,
-        });
-        if (res.status !== 503) break;
-        if (attempt === 0) {
-          await new Promise((r) => setTimeout(r, 1500));
-        }
-      }
-      if (!res) break;
-
-      if (res.status === 429) {
-        pauseForLimit(res.headers, await errorTextOf(res), `HTTP 429 on batch ${mediaType}`);
-        break;
-      }
-
-      if (!res.ok) {
-        console.warn(`[mdblist] batch ${mediaType} returned ${res.status}`);
-        if (pageFailed()) break;
-        continue;
-      }
-
-      const data = await res.json() as unknown;
-
-      const errMsg = mdblistErrorMessage(data);
-      if (errMsg && isQuotaErrorMessage(errMsg)) {
-        pauseForLimit(res.headers, errMsg, `on batch ${mediaType}`);
-        break;
-      }
-      if (errMsg) {
-        // A 200-with-error body (bad key, malformed request) is not a ratings
-        // answer. Log the real error and count it toward the failure breaker.
-        console.warn(`[mdblist] batch ${mediaType} API error: ${sanitizeForLog(errMsg)}`);
-        if (pageFailed()) break;
-        continue;
-      }
-      breaker.consecutiveFailures = 0;
-
-      // Rows stay `unknown` until isBatchRow says they can be read.
-      const arr: unknown[] = Array.isArray(data) ? data : [];
-
-      // Collect the page's cache upserts and flush them with bounded concurrency
-      // below, rather than awaiting each one serially in-loop.
-      const cacheWrites: Array<() => Promise<unknown>> = [];
-      // Rows that resolved to no REQUESTED item (a foreign id, an id-less row that
-      // can't be placed, or a row that isn't an object). They must not count
-      // toward "the response covered the full request" below, or the requested
-      // ids they displaced get a 24h NOT_FOUND sentinel MDBList never actually
-      // answered for.
-      let unmatchedRows = 0;
-
-      // Positional binding for a row with no TMDB id is safe only when the
-      // response lines up with the request one to one: as many rows as ids, and
-      // none of them carrying an id. MDBList leaves out unknown ids and may
-      // reorder rows, so in any other response a position names the wrong title,
-      // and its ratings would be cached under that title's key for the full TTL.
-      const positionalOk = arr.length === page.length
-        && arr.every((r) => isBatchRow(r) && batchRowTmdbId(r) == null);
-
-      for (let i = 0; i < arr.length; i++) {
-        const raw = arr[i];
-
-        // Match by the response's TMDB id (batchRowTmdbId — resolves tmdb_id/tmdbid/
-        // ids.tmdb, never MDBList's internal `id`). MDBList batch responses may return
-        // items in a different order than the request, so match by id, not position.
-        // A row whose TMDB id isn't in the page must NOT bind positionally (that
-        // mis-binds it to the wrong requested item: wrong TTL, foreign id in the
-        // result map). A row that isn't an object is skipped, not thrown on: one
-        // bad row must not cost the page's other ratings.
-        let pageItem: (typeof page)[number] | undefined;
-        if (isBatchRow(raw)) {
-          const respTmdbId = batchRowTmdbId(raw);
-          pageItem = respTmdbId != null
-            ? page.find((p) => p.id === respTmdbId)
-            : positionalOk ? page[i] : undefined;
-        }
-        // MDBList can return MORE items than requested (or unmatched ids), so
-        // page.find()/page[i] can be undefined — guard before any property access
-        // or the whole 200-item batch throws and silently yields zero ratings.
-        if (!pageItem || !isBatchRow(raw)) {
-          unmatchedRows++;
-          // Surface the real row shape ONCE if nothing resolves — makes a future
-          // MDBList field rename diagnosable instead of a silent zero-ratings run.
-          // Keys only (no values) so no rating/id data lands in logs.
-          if (!loggedUnmatchedShape) {
-            loggedUnmatchedShape = true;
-            console.warn(`[mdblist] batch row did not resolve to a requested TMDB id — row keys: [${Object.keys(isBatchRow(raw) ? raw : {}).join(",")}]`);
-          }
-          continue;
-        }
-        // Cache/result key is the REQUESTED TMDB id (pageItem.id), never raw.id,
-        // which is MDBList's own internal id.
-        const tmdbId = pageItem.id;
-
-        const ratings = parseBatchItem(raw);
-        result.set(tmdbId, ratings);
-
-        const cacheKey = mdblistCacheKey(mediaType, tmdbId);
-        // Prefer the requested item's date; fall back to the response row's
-        // year so dateless prewarm items land in the right TTL bucket.
-        const ttl = libraryDetailsTtl(pageItem.releaseDate ?? (raw.year ? `${raw.year}-01-01` : null));
-        cacheWrites.push(() => setCache(cacheKey, ratings, ttl));
-      }
-
-      // A SHORT response means MDBList simply has no data for the missing ids —
-      // it is not a cut-off batch. Live logs showed the row count tracks the
-      // request size (197/200, 87/88, 8/9), which is per-id absence, not
-      // truncation. So the missing ids get a "not found" marker like any other
-      // miss. Without it, every such id was re-requested on each page load and
-      // sent to the OMDB fallback each time. If a short answer was ever a blip,
-      // the cost is one MDBLIST_NEGATIVE_TTL (24h) and it fixes itself.
-      //
-      // Two shapes are still ambiguous and skip the marker: an EMPTY array
-      // (looks the same as an upstream blip) and any response with UNMATCHED
-      // rows (they took the place of requested ids MDBList never answered for).
-      if (unmatchedRows === 0 && arr.length > 0) {
-        for (const item of page) {
-          if (!result.has(item.id)) {
-            const cacheKey = mdblistCacheKey(mediaType, item.id);
-            cacheWrites.push(() => setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL));
-          }
-        }
-        // No log for the shortfall: it is expected, and a marked id drops out of
-        // the next run's page on its own. A real coverage collapse still shows
-        // up as missing ratings and in /api/admin/debug/ratings-state.
-      } else if (arr.length === 0) {
-        // An empty array likely means MDBList had a transient issue, not that all items are absent —
-        // skip negative-caching to avoid poisoning future lookups.
-        console.warn(`[mdblist] batch ${mediaType} returned empty array for ${page.length} items — skipping NOT_FOUND caching`);
-      } else {
-        console.warn(`[mdblist] batch ${mediaType} returned ${unmatchedRows} unmatched row(s) (${arr.length} rows for ${page.length} ids) — skipping NOT_FOUND caching for omitted ids`);
-      }
-
-      // Flush this page's cache writes a few at a time. A failed write jumps to
-      // the catch below, which logs and moves on to the next page — caching is
-      // best-effort.
-      await mapLimit(cacheWrites, MDBLIST_CACHE_WRITE_CONCURRENCY, (w) => w());
-    } catch (err) {
-      const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
-      console.error(`[mdblist] batch error for ${mediaType}: ${reason}`);
-      if (pageFailed()) break;
+    // CONCURRENT caller's trip or the budget running down is only visible here)
+    // must stop later pages.
+    if (isMdblistQuotaLocked(opts)) break;
+    if (breaker.tripped) {
+      outcome.failedIds += items.length - offset;
+      break;
     }
+    const page = items.slice(offset, offset + MDBLIST_BATCH_SIZE);
+    const result = await fetchBatchPage(url.toString(), apiKey, page, mediaType, log);
+    if (result.kind === "paused") break;
+    if (result.kind === "keyRejected") {
+      noteKeyRejected(apiKey);
+      outcome.failedIds += items.length - offset;
+      return refused();
+    }
+    if (result.kind === "failed") {
+      outcome.failedIds += page.length;
+      if (++breaker.consecutiveFailures >= MDBLIST_BATCH_MAX_CONSECUTIVE_FAILURES) {
+        breaker.tripped = true;
+        console.warn(`[mdblist] batch ${mediaType}: ${breaker.consecutiveFailures} consecutive page failures — stopping the walk`);
+      }
+      continue;
+    }
+    breaker.consecutiveFailures = 0;
+    if (result.empty) outcome.failedIds += page.length;
+    for (const [id, ratings] of result.ratings) outcome.ratings.set(id, ratings);
   }
-
-  return result;
+  return outcome;
 }
 
 // Coalesce concurrent cold-miss callers — see omdb.ts inflightCold rationale.
@@ -828,8 +978,9 @@ async function readMdblistForTmdb(
     return { found: true, data: cached };
   }
 
-  const apiKey = await getApiKey();
-  if (!apiKey) return { found: false, keyConfigured: false };
+  const read = await readApiKey();
+  if (!read.ok) return { found: false, keyConfigured: true, transient: true };
+  if (!read.key) return { found: false, keyConfigured: false };
 
   const inflightKey = coldInflightKey(cacheKey, opts);
   const existing = mdblistInflightCold.get(inflightKey);
@@ -840,9 +991,10 @@ async function readMdblistForTmdb(
   return p;
 }
 
-// Admin connection test. Ignores the pause and the budget (a recovered or
-// replaced key must be checkable at once) but still goes through mdblistRequest,
-// so the reply's usage report is what the settings page shows next.
+// Admin connection test. Ignores the pause, the budget and the refused-key
+// latch (a recovered or replaced key must be checkable at once) but still goes
+// through mdblistRequest, so the reply's usage report is what the settings page
+// shows next. A pass clears the latch for that key.
 export async function testMdblistConnection(): Promise<string> {
   const apiKey = await getApiKey({ fresh: true });
   if (!apiKey) throw new Error("No MDBList API key configured");
@@ -857,6 +1009,7 @@ export async function testMdblistConnection(): Promise<string> {
 
   const errMsg = mdblistErrorMessage(data, "unknown error");
   if (errMsg) throw new Error(`MDBList: ${errMsg}`);
+  noteKeyAccepted(apiKey);
   const title = (data as { title?: unknown } | null)?.title;
   return typeof title === "string" ? title : "OK";
 }
@@ -871,29 +1024,99 @@ interface MdblistListMeta {
   likes: number;
 }
 
-interface MdblistListItem {
-  id: number;
-  rank: number;
-  title: string;
-  year: number | null;
-  mediatype: string;
-  imdb_id: string | null;
-  tmdb_id: number | null;
-  score: number | null;
+const positiveInt = (x: unknown): number | null => (typeof x === "number" && Number.isSafeInteger(x) && x > 0 ? x : null);
+const countOf = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : 0);
+
+// The top-lists index, entry by entry: an entry without a positive integer id is
+// dropped (its id is put into a request path), and the rest is defaulted — so
+// a malformed entry is neither cached for TTL.DISCOVER nor thrown on. Pure.
+export function projectListMetas(data: unknown[]): MdblistListMeta[] {
+  const out: MdblistListMeta[] = [];
+  for (const raw of data) {
+    if (!isBatchRow(raw)) continue;
+    const r = raw as Record<string, unknown>;
+    const id = positiveInt(r.id);
+    if (id === null) continue;
+    out.push({
+      id,
+      name: typeof r.name === "string" ? r.name : "",
+      slug: typeof r.slug === "string" ? r.slug : "",
+      items: countOf(r.items),
+      likes: countOf(r.likes),
+    });
+  }
+  return out;
+}
+
+// One list's items as TmdbMedia skeletons, entry by entry: an entry that is not
+// an object, or has no positive integer tmdb_id, is skipped (a string id would
+// have become a TmdbMedia id); a non-string title reads as "". Deduped on
+// type+id: movie and TV ids are independent TMDB namespaces, and the projection
+// is unfiltered, so a bare-id set would drop a legitimate cross-type pair. Pure.
+export function projectListItems(data: unknown[]): TmdbMedia[] {
+  const seen = new Set<string>();
+  const out: TmdbMedia[] = [];
+  for (const raw of data) {
+    if (!isBatchRow(raw)) continue;
+    const r = raw as Record<string, unknown>;
+    const tmdbId = positiveInt(r.tmdb_id);
+    if (tmdbId === null) continue;
+    const mediaType = r.mediatype === "show" ? "tv" : "movie";
+    const dedupKey = `${mediaType}:${tmdbId}`;
+    if (seen.has(dedupKey)) continue;
+    seen.add(dedupKey);
+    const year = positiveInt(r.year);
+    out.push({
+      id: tmdbId,
+      mediaType,
+      title: typeof r.title === "string" ? r.title : "",
+      overview: "",
+      posterPath: null,
+      backdropPath: null,
+      releaseDate: null,
+      releaseYear: year !== null ? String(year) : null,
+      voteAverage: 0,
+    });
+  }
+  return out;
+}
+
+// The coalesce key of a list read: the cache key AND the caller class, as
+// coldInflightKey does — a page joining an in-flight background read would
+// share its refusal at the reserve and get [] back.
+function listCoalesceKey(cacheKey: string, opts: MdblistCallOptions): string {
+  return `${cacheKey}|${opts.background ? "bg" : "fg"}`;
 }
 
 // `opts.background` marks a cron caller (the warm-list-cache job): it stops at
-// the reserve kept for pages (guardrail 31b). Coalesced callers share whichever
-// call started first.
+// the reserve kept for pages (guardrail 31b). Coalesced callers of the same
+// class share whichever call started first.
+// The index is cached under ONE key whatever the limit (every caller asks for
+// the same five, and tests/mdblist.test.mts pins the shared row). A cached
+// index longer than the caller's limit is cut to it, so a smaller limit never
+// gets more lists than it asked for; a larger one gets what is cached. The
+// coalesce key carries the limit, so a caller never joins a call for another.
 export async function getMdblistTopLists(limit = 10, opts: MdblistCallOptions = {}): Promise<MdblistListMeta[]> {
-  const key = "mdblist:top-lists";
-  return coalesce(key, async () => {
-  const cached = await getCache<MdblistListMeta[]>(key);
-  if (cached?.length) return cached;
+  return (await fetchMdblistTopListsWithStatus(limit, opts)).lists;
+}
 
-  const apiKey = await getApiKey();
-  if (!apiKey) return [];
-  if (await checkMdblistPause(opts)) return [];
+// The top-list index and whether it is a real answer. `ok` is false when the
+// call was refused (rejected key, pause), failed, or answered with an error
+// body; no key at all is ok (MDBList simply isn't configured).
+async function fetchMdblistTopListsWithStatus(
+  limit: number,
+  opts: MdblistCallOptions,
+): Promise<{ lists: MdblistListMeta[]; ok: boolean }> {
+  const key = "mdblist:top-lists";
+  return coalesce(listCoalesceKey(`${key}:${limit}`, opts), async (): Promise<{ lists: MdblistListMeta[]; ok: boolean }> => {
+  const cached = await getCache<MdblistListMeta[]>(key);
+  if (cached?.length) return { lists: cached.slice(0, limit), ok: true };
+
+  const read = await readApiKey();
+  const apiKey = read.ok ? read.key : null;
+  if (!apiKey) return { lists: [], ok: read.ok };
+  if (isKeyRejected(apiKey)) return { lists: [], ok: false };
+  if (await checkMdblistPause(opts)) return { lists: [], ok: false };
 
   try {
     const url = new URL(`${MDBLIST_REST_BASE}lists/top`);
@@ -901,8 +1124,11 @@ export async function getMdblistTopLists(limit = 10, opts: MdblistCallOptions = 
     url.searchParams.set("limit", String(limit));
 
     const res = await mdblistRequest(url.toString());
-    if (res.status === 429) { pauseForLimit(res.headers, await errorTextOf(res), "HTTP 429 on top lists"); return []; }
-    if (!res.ok) return [];
+    if (res.status === 429) {
+      pauseForLimit(res.headers, await errorTextOf(res), "HTTP 429 on top lists");
+      return { lists: [], ok: false };
+    }
+    if (!res.ok) return { lists: [], ok: false };
 
     const data = await res.json() as unknown;
     // MDBList signals quota/auth failures as HTTP 200 with an { error } object
@@ -914,13 +1140,13 @@ export async function getMdblistTopLists(limit = 10, opts: MdblistCallOptions = 
       if (isQuotaErrorMessage(errMsg)) pauseForLimit(res.headers, errMsg, "on top lists");
       console.warn(`[mdblist] top lists API error: ${sanitizeForLog(errMsg)}`);
     }
-    if (!Array.isArray(data)) return [];
-    const lists = data as MdblistListMeta[];
+    if (!Array.isArray(data)) return { lists: [], ok: false };
+    const lists = projectListMetas(data);
     if (lists.length > 0) await setCache(key, lists, TTL.DISCOVER);
-    return lists;
+    return { lists, ok: true };
   } catch (err) {
     console.error("[mdblist] Failed to fetch top lists:", err);
-    return [];
+    return { lists: [], ok: false };
   }
   });
 }
@@ -938,12 +1164,13 @@ async function fetchMdblistListItemsWithStatus(
   // Callers filter by type in memory, so one upstream fetch serves both, and
   // coalesce merges the movie + TV requests the /top page fires at once.
   const key = `mdblist:list:${listId}`;
-  return coalesce(key, async (): Promise<{ items: TmdbMedia[]; ok: boolean }> => {
+  return coalesce(listCoalesceKey(key, opts), async (): Promise<{ items: TmdbMedia[]; ok: boolean }> => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached?.length) return { items: cached, ok: true };
 
-  const apiKey = await getApiKey();
-  if (!apiKey) return { items: [], ok: false };
+  const read = await readApiKey();
+  const apiKey = read.ok ? read.key : null;
+  if (!apiKey || isKeyRejected(apiKey)) return { items: [], ok: false };
   if (await checkMdblistPause(opts)) return { items: [], ok: false };
 
   try {
@@ -954,33 +1181,9 @@ async function fetchMdblistListItemsWithStatus(
     if (res.status === 429) { pauseForLimit(res.headers, await errorTextOf(res), "HTTP 429 on list items"); return { items: [], ok: false }; }
     if (!res.ok) return { items: [], ok: false };
 
-    const data = await res.json() as MdblistListItem[];
+    const data: unknown = await res.json();
     if (!Array.isArray(data)) return { items: [], ok: false };
-
-    // Dedup on type+id: movie and TV ids are independent TMDB namespaces, and
-    // this projection is unfiltered, so a bare-id set would drop a legitimate
-    // cross-type pair.
-    const seen = new Set<string>();
-    const result: TmdbMedia[] = [];
-    for (const item of data) {
-      if (!item.tmdb_id || item.tmdb_id <= 0) continue;
-      const itemType = item.mediatype === "show" ? "tv" : "movie";
-      const dedupKey = `${itemType}:${item.tmdb_id}`;
-      if (seen.has(dedupKey)) continue;
-      seen.add(dedupKey);
-
-      result.push({
-        id: item.tmdb_id,
-        mediaType: itemType as "movie" | "tv",
-        title: item.title ?? "",
-        overview: "",
-        posterPath: null,
-        backdropPath: null,
-        releaseDate: null,
-        releaseYear: item.year ? String(item.year) : null,
-        voteAverage: 0,
-      });
-    }
+    const result = projectListItems(data);
 
     // A genuinely-empty list is a SUCCESS (ok:true) — just nothing to cache.
     if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
@@ -1006,16 +1209,42 @@ export async function getMdblistTopRated(
   maxLists = 5,
   opts: MdblistCallOptions = {},
 ): Promise<TmdbMedia[]> {
+  return (await loadMdblistTopRated(mediaType, maxLists, opts)).items;
+}
+
+/**
+ * The default top-rated union with whether it is complete: false when the
+ * list index or any list failed (a pause, a 429, an error body, a throw).
+ * Never throws; a cache hit is complete, and an unconfigured MDBList is an
+ * empty, complete answer.
+ */
+export async function getMdblistTopRatedWithStatus(
+  mediaType: "movie" | "tv",
+): Promise<{ items: TmdbMedia[]; complete: boolean }> {
+  try {
+    return await loadMdblistTopRated(mediaType, 5, {});
+  } catch (err) {
+    console.error(`[mdblist] top-rated ${mediaType} failed:`, err instanceof Error ? err.message : err);
+    return { items: [], complete: false };
+  }
+}
+
+function loadMdblistTopRated(
+  mediaType: "movie" | "tv",
+  maxLists: number,
+  opts: MdblistCallOptions,
+): Promise<{ items: TmdbMedia[]; complete: boolean }> {
   const key = `mdblist:top-rated:${mediaType}`;
   // coalesce: the /top page and /api/top-rated both call this per request, so
   // simultaneous cold-cache callers must share one list fan-out (guardrail 31
-  // — same shape as the trakt/tmdb list helpers).
-  return coalesce(key, async () => {
+  // — same shape as the trakt/tmdb list helpers) — per caller class.
+  return coalesce(listCoalesceKey(key, opts), async (): Promise<{ items: TmdbMedia[]; complete: boolean }> => {
   const cached = await getCache<TmdbMedia[]>(key);
-  if (cached?.length) return cached;
+  if (cached?.length) return { items: cached, complete: true };
 
-  const lists = await getMdblistTopLists(maxLists, opts);
-  if (lists.length === 0) return [];
+  const index = await fetchMdblistTopListsWithStatus(maxLists, opts);
+  const lists = index.lists;
+  if (lists.length === 0) return { items: [], complete: index.ok };
 
   const settled = await Promise.all(
     lists.map((l) => fetchMdblistListItemsWithStatus(l.id, opts)),
@@ -1041,6 +1270,6 @@ export async function getMdblistTopRated(
   }
 
   if (result.length > 0 && allOk) await setCache(key, result, TTL.DISCOVER);
-  return result;
+  return { items: result, complete: allOk };
   });
 }

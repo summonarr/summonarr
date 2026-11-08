@@ -14,6 +14,7 @@ import type { NwArrSeasonStat } from "./never-watched";
 import { processSingleton } from "./process-singleton";
 import { safeMessage } from "./arr-parse";
 import { getCache } from "./tmdb-cache";
+import { TmdbToTvdbCache } from "./arr-id-map";
 
 export type ArrService = "radarr" | "sonarr";
 
@@ -246,6 +247,10 @@ export function invalidateArrLibraryIndexCache(): void {
   indexCache.gen++;
 }
 
+// `fresh` skips the stored listing, but still joins a listing already in
+// flight for the current generation: every change that could make that listing
+// stale (a cleanup delete, a title manager Add or Remove) invalidates first,
+// which moves the generation, so a joined listing never predates it.
 export async function getCachedArrLibraryIndex(opts: { fresh?: boolean } = {}): Promise<{ index: ArrLibraryIndex; at: Date }> {
   const ttl = indexCache.value && indexCache.value.errors.length > 0 ? INDEX_ERROR_TTL_MS : INDEX_TTL_MS;
   if (!opts.fresh && indexCache.value && Date.now() - indexCache.at < ttl) {
@@ -336,7 +341,12 @@ function scheduleCrossRefFill(tmdbIds: readonly number[]): void {
   crossRefFill.running = (async () => {
     try {
       while (crossRefFill.queued.size > 0) {
-        const batch = [...crossRefFill.queued].slice(0, CROSS_REF_FILL_BATCH);
+        // Taken off the Set's iterator: copying a 50k queue per batch was quadratic.
+        const batch: number[] = [];
+        for (const id of crossRefFill.queued) {
+          batch.push(id);
+          if (batch.length >= CROSS_REF_FILL_BATCH) break;
+        }
         await mapLimit(batch, CROSS_REF_CONCURRENCY, async (id) => {
           await resolveTmdbToTvdb(id);
         });
@@ -356,30 +366,54 @@ export function crossRefFillIdle(): Promise<void> {
   return crossRefFill.running ?? Promise.resolve();
 }
 
-// tmdbId → TMDB's tvdb id, for the given shows. "cached" answers only what the
-// cache already holds (a miss is absent from the map) and queues the misses.
+// tmdbId → TMDB's tvdb id, for the given shows (null: TMDB names none). An id
+// ABSENT from the map is unknown: in "cached" mode a cache miss (queued for the
+// background fill); in "fetch" mode a lookup that failed — resolveTmdbToTvdb
+// answers null for a failure and for "no tvdb id" alike, and caches only the
+// definitive answer, so a null with no cache row after it is the failure.
 export async function lookupTmdbToTvdb(tmdbIds: readonly number[], mode: CrossRefMode): Promise<Map<number, number | null>> {
   const out = new Map<number, number | null>();
   const ids = [...new Set(tmdbIds)];
   if (mode === "fetch") {
     await mapLimit(ids, CROSS_REF_CONCURRENCY, async (id) => {
-      out.set(id, await resolveTmdbToTvdb(id));
+      const tvdbId = await resolveTmdbToTvdb(id);
+      if (tvdbId !== null || (await cachedCrossRef(id)) !== undefined) out.set(id, tvdbId);
     });
     return out;
   }
   const misses: number[] = [];
   await mapLimit(ids, CROSS_REF_CONCURRENCY, async (id) => {
-    try {
-      const cached = await getCache<{ tvdbId: number | null }>(tmdbToTvdbCacheKey(id));
-      if (cached) out.set(id, cached.tvdbId);
-      else misses.push(id);
-    } catch {
-      // An unreadable cache row is a miss — never a verdict, never a throw.
-      misses.push(id);
-    }
+    const cached = await cachedCrossRef(id);
+    if (cached !== undefined) out.set(id, cached);
+    else misses.push(id);
   });
   if (misses.length > 0) scheduleCrossRefFill(misses);
   return out;
+}
+
+/** The cached cross-reference: the tvdb id, null for "TMDB names none", undefined for no (readable) row. */
+async function cachedCrossRef(tmdbId: number): Promise<number | null | undefined> {
+  try {
+    // The row resolveTmdbToTvdb writes; any other shape is a miss, since its
+    // tvdb id picks which Sonarr series a cleanup deletes.
+    const cached = await getCache(tmdbToTvdbCacheKey(tmdbId), TmdbToTvdbCache);
+    return cached ? cached.tvdbId : undefined;
+  } catch {
+    // An unreadable cache row is a miss — never a verdict, never a throw.
+    return undefined;
+  }
+}
+
+export interface ArrTargets {
+  /** cleanupKey → every instance entry to delete. */
+  targets: Map<string, ArrLibraryEntry[]>;
+  /**
+   * cleanupKey → the tvdb-only Sonarr instances whose copy couldn't be looked
+   * for, because TMDB's cross-reference for the show is unknown (a failed
+   * lookup, or a cache miss on a read path). Such a title may hold a copy the
+   * targets don't list.
+   */
+  unresolved: Map<string, string[]>;
 }
 
 // The delete targets for each title: every instance entry carrying its tmdbId,
@@ -390,39 +424,55 @@ export async function lookupTmdbToTvdb(tmdbIds: readonly number[], mode: CrossRe
 // selected titles that some tvdb-only instance could still hold, and only when
 // tvdb-only entries exist at all. `crossRef` is required on purpose: every
 // caller decides whether a miss may cost a TMDB call (the delete route) or must
-// not (a read path).
-export async function resolveArrTargets(
+// not (a read path). A title listed twice is resolved once.
+export async function resolveArrTargetsChecked(
   items: ReadonlyArray<{ tmdbId: number; mediaType: CleanupMediaType }>,
   index: ArrLibraryIndex,
   crossRef: CrossRefMode,
-): Promise<Map<string, ArrLibraryEntry[]>> {
-  const out = new Map<string, ArrLibraryEntry[]>();
+): Promise<ArrTargets> {
+  const targets = new Map<string, ArrLibraryEntry[]>();
+  const unresolved = new Map<string, string[]>();
   // The Sonarr instances that list any series tvdb-only — once per call.
   const tvdbOnlyInstances = new Set<string>();
   for (const list of index.tvdbOnly.values()) {
     for (const e of list) if (e.service === "sonarr") tvdbOnlyInstances.add(e.instance);
   }
-  const misses: Array<{ tmdbId: number; key: string; matched: ReadonlySet<string> }> = [];
+  const misses: Array<{ tmdbId: number; list: ArrLibraryEntry[]; key: string; unmatched: string[] }> = [];
   for (const it of items) {
     const key = cleanupKey(it.tmdbId, it.mediaType);
-    const hit = index.byKey.get(key) ?? [];
-    out.set(key, [...hit]);
+    if (targets.has(key)) continue;
+    const list = [...(index.byKey.get(key) ?? [])];
+    targets.set(key, list);
     if (it.mediaType !== "TV" || tvdbOnlyInstances.size === 0) continue;
-    const matched = new Set(hit.filter((e) => e.service === "sonarr").map((e) => e.instance));
-    if ([...tvdbOnlyInstances].some((i) => !matched.has(i))) misses.push({ tmdbId: it.tmdbId, key, matched });
+    const matched = new Set(list.filter((e) => e.service === "sonarr").map((e) => e.instance));
+    const unmatched = [...tvdbOnlyInstances].filter((i) => !matched.has(i));
+    if (unmatched.length > 0) misses.push({ tmdbId: it.tmdbId, list, key, unmatched });
   }
   if (misses.length > 0) {
     const tvdbOf = await lookupTmdbToTvdb(misses.map((m) => m.tmdbId), crossRef);
     for (const m of misses) {
+      if (!tvdbOf.has(m.tmdbId)) {
+        unresolved.set(m.key, m.unmatched.map((i) => i || "default"));
+        continue;
+      }
       const tvdbId = tvdbOf.get(m.tmdbId);
       if (tvdbId == null) continue;
-      const list = out.get(m.key)!;
+      const unmatched = new Set(m.unmatched);
       for (const e of index.tvdbOnly.get(tvdbId) ?? []) {
-        if (e.service === "sonarr" && !m.matched.has(e.instance)) list.push(e);
+        if (e.service === "sonarr" && unmatched.has(e.instance)) m.list.push(e);
       }
     }
   }
-  return out;
+  return { targets, unresolved };
+}
+
+/** resolveArrTargetsChecked's targets alone — for the read paths, where an unknown cross-reference only means fewer copies. */
+export async function resolveArrTargets(
+  items: ReadonlyArray<{ tmdbId: number; mediaType: CleanupMediaType }>,
+  index: ArrLibraryIndex,
+  crossRef: CrossRefMode,
+): Promise<Map<string, ArrLibraryEntry[]>> {
+  return (await resolveArrTargetsChecked(items, index, crossRef)).targets;
 }
 
 // Removes the title from that instance AND its files, and adds an import-list

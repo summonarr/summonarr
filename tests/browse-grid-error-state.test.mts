@@ -1,7 +1,7 @@
 // Review 2026-09 / P65 / f91 — BrowseGrid must not render the failure banner
 // AND the "TMDB token not configured" empty state together.
 //
-// The pages (movies/page.tsx, tv/page.tsx) map a runBrowseQuery rejection to
+// The browse body (components/media/browse-page.tsx) maps a runBrowseQuery rejection to
 // `{ items: [], failed: true }`, so on a TMDB outage `failed` is true AND the
 // item list is empty. The empty-state ternary therefore has to be gated on
 // `!failed`, or the grid shows the retry banner immediately followed by the

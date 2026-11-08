@@ -645,6 +645,28 @@ test("gives up after 24 probes without burning the CAS — the orchestrator fall
   await quiesce();
 });
 
+test("a probe that THROWS costs one attempt, not the poll: the next probe still finds the item and the requester is told", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let checks = 0;
+  const checkPlex = async () => {
+    checks++;
+    if (checks === 1) throw new Error("plex socket hang up");
+    return true;
+  };
+  const p = pollAndNotifyAvailable([reqRow("th1", "plex")], checkPlex, null, "throws");
+  t.mock.timers.tick(30_000);
+  await drain();
+  assert.equal(checks, 1);
+  assert.ok(warns.some((w) => w.includes("[throws] Plex availability probe failed") && w.includes("plex socket hang up")));
+  t.mock.timers.tick(30_000);
+  await drain();
+  await p;
+  assert.equal(checks, 2, "the loop went on after the throw");
+  assert.equal(claims.length, 1, "and the notify still ran");
+  await waitFor(() => createManyCalls.length === 1, "inbox write");
+  await quiesce();
+});
+
 // ── notifyRequestStatusChange ───────────────────────────────────────────────
 
 test("APPROVED: synchronous void, unconditional in-app row, discord+push+email legs each fired; email honors emailOnApproved; ONE outbound request.approved", async () => {

@@ -121,6 +121,11 @@ type Call = { host: string; path: string; method: string; ids: number[] };
 const calls: Call[] = [];
 let holdMdblistBatch: Promise<void> | null = null;
 let markBatchSent: () => void = () => {};
+// Switches for the tests that need MDBList to rate: the batch POST, or the
+// single-title endpoint.
+let batchRated = false;
+let singleRated = false;
+const ratedRow = (id: number) => ({ tmdb_id: id, ratings: [{ source: "imdb", value: 7.5, votes: 1000 }] });
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
   const method = init?.method ?? "GET";
@@ -134,8 +139,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const first = calls.filter((c) => c.host === "api.mdblist.com" && c.method === "POST").length === 1;
       if (first) markBatchSent();
       if (first && holdMdblistBatch) await holdMdblistBatch;
-      return json([]);
+      return json(batchRated ? ids.map(ratedRow) : []);
     }
+    if (singleRated) return json(ratedRow(Number(url.pathname.match(/\/(\d+)\/?$/)?.[1] ?? 0)));
     return json({ error: "not found" }, 404);
   }
   if (url.hostname === "api.themoviedb.org") {
@@ -194,6 +200,8 @@ beforeEach(() => {
   afterTasks.length = 0;
   holdMdblistBatch = null;
   markBatchSent = () => {};
+  batchRated = false;
+  singleRated = false;
 });
 
 // ── the route ────────────────────────────────────────────────────────────────
@@ -252,4 +260,33 @@ test("two concurrent deferred passes over the same cold titles send ONE MDBList 
   assert.equal(batchPosts().length, 1);
   assert.deepEqual(batchPosts()[0].ids, [50_000, 50_001, 50_002]);
   assert.equal(omdbCalls(), 3, "the first pass's own fallback ran once per title");
+});
+
+test("two concurrent BLOCKING passes over the same cold titles send ONE MDBList batch, and the second serves its answer inline", async () => {
+  const items = range(60_000, 2).map(movie);
+  batchRated = true;
+  let release: () => void = () => {};
+  holdMdblistBatch = new Promise<void>((r) => { release = r; });
+  const sent = new Promise<void>((r) => { markBatchSent = r; });
+
+  const first = attachRatingsUnified(items, { blocking: true, deferToAfter: false });
+  await sent; // the first pass's batch POST is on the wire, unanswered
+  const second = attachRatingsUnified(items, { blocking: true, deferToAfter: false });
+  release();
+  const [a, b] = await Promise.all([first, second]);
+
+  assert.equal(batchPosts().length, 1, "the second pass waits on the batch in flight instead of buying the same ids again");
+  assert.deepEqual(a.map((m) => m.imdbRating), ["7.5", "7.5"]);
+  assert.deepEqual(b.map((m) => m.imdbRating), ["7.5", "7.5"], "and serves its answer in this response");
+  assert.equal(omdbCalls(), 0);
+});
+
+test("every title MDBList's batch could not rate goes to OMDb — no single-title probe decides for the whole page", async () => {
+  // The single-title endpoint would rate anything; one probe of it used to
+  // decide that the whole page needed no OMDb fallback at all.
+  singleRated = true;
+  const rated = await attachRatingsUnified(range(70_000, 3).map(movie), { blocking: true, deferToAfter: false });
+  assert.equal(calls.filter((c) => c.host === "api.mdblist.com" && c.method === "GET").length, 0, "no probe");
+  assert.equal(omdbCalls(), 3);
+  assert.deepEqual(rated.map((m) => m.imdbRating), ["7.0", "7.0", "7.0"]);
 });

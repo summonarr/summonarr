@@ -8,7 +8,7 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { getClientIp } from "@/lib/rate-limit";
 import { localizeBackupMessage } from "@/lib/backup-messages";
 import { backupPasswordStatus, MIN_BACKUP_PASSWORD_LEN } from "@/lib/backup-password";
-import { setupRestoreDisabled, type BackupImportResult } from "@/lib/backup-import";
+import { setupClosedInTx, setupRestoreDisabled, type BackupImportResult } from "@/lib/backup-import";
 import { lockSetupInTx } from "@/lib/setup-lock";
 import type { Translator } from "@/lib/i18n/translate";
 import type { SummonarrSession } from "@/lib/api-auth";
@@ -136,9 +136,7 @@ export async function setupRestoreGate(
   }
   const closed = await prisma.$transaction(async (tx) => {
     await lockSetupInTx(tx);
-    const setupCompleted = await tx.setting.findUnique({ where: { key: "setup_completed_at" } });
-    const userCount = await tx.user.count();
-    return setupCompleted !== null || userCount > 0;
+    return setupClosedInTx(tx);
   });
   if (closed) return { closed: true };
   return backupPasswordOrResponse(t, "setup");

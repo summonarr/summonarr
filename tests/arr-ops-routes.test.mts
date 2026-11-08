@@ -558,6 +558,18 @@ test("import listing: qualities/languages are conveniences — failing to read t
   assert.deepEqual([body.files.length, body.qualities, body.languages], [2, [], []]);
 });
 
+test("import listing: a quality list that can't be read is logged once under [queue], not dropped silently — and not again while unchanged", async () => {
+  const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
+  resetLogDedup();
+  warnLines.length = 0;
+  responder = (c) => (c.path === "/api/v3/manualimport" ? json(manualRows) : c.path === "/api/v3/qualitydefinition" ? new Response("x", { status: 500 }) : c.path === "/api/v3/language" ? json([]) : undefined);
+  const token = await mintSession();
+  for (let i = 0; i < 2; i++) assert.equal((await call(importRoute.GET, token, "/admin/queue/import?service=radarr&downloadId=SAB_1")).status, 200);
+  const lines = warnLines.filter((l) => l.startsWith("[queue]") && l.includes("qualities for the import editor"));
+  assert.equal(lines.length, 1, warnLines.join("\n"));
+  resetLogDedup();
+});
+
 test("import: the command carries ONLY the arr's own matched rows — an injected path never reaches it (guardrail 5d) — and is audited without paths", async () => {
   responder = (c) => {
     if (c.path === "/api/v3/manualimport") return json(manualRows);
@@ -1151,6 +1163,17 @@ test("cutoff Search for a series: ONE EpisodeSearch for the monitored episodes w
   assert.ok(arrCalls().every((c) => c.query.get("seriesId") === null || c.query.get("seriesId") === "9"));
 });
 
+test("the tracked cutoff Search answers each queued command's id, as Search missing does; the page's own answer stays without them", async () => {
+  responder = (c) => {
+    if (c.path === "/api/v3/movie/1") return json({ id: 1, hasFile: true, monitored: true, movieFile: { qualityCutoffNotMet: true } });
+    if (c.method === "POST" && c.path === "/api/v3/command") return json({ id: 77 }, 201);
+    return undefined;
+  };
+  const { searchCutoff, searchCutoffTracked } = await import("../src/lib/arr-missing-data.ts");
+  assert.deepEqual(await searchCutoffTracked("radarr", "", 1), { commands: 1, seasons: [], episodes: 0, commandIds: [77] });
+  assert.deepEqual(await searchCutoff("radarr", "", 1), { commands: 1, seasons: [], episodes: 0 });
+});
+
 // ── 6: request releases ──────────────────────────────────────────────────────
 
 let releaseSeq = 0;
@@ -1202,6 +1225,20 @@ test("TV releases: no season ⇒ the season list only (no indexer hit); a season
   assert.equal(search.length, 1);
   assert.deepEqual([search[0].query.get("seriesId"), search[0].query.get("seasonNumber")], ["8", "2"]);
   assert.equal((await call(releasesRoute.GET, token, "/requests/r2/releases?season=x", { ctx: idCtx("r2") })).status, 400);
+});
+
+test("TV releases: the Sonarr reads before any search are bounded per caller — the 61st season list in a minute is a 429 that reads nothing", async () => {
+  requests = [{ id: "r2", mediaType: "TV", tmdbId: 1399, tvdbId: 121361, status: "APPROVED", arrInstance: "", user: { name: "A", email: "a@x" } }];
+  responder = (c) => (c.path === "/api/v3/series" ? json([{ id: 8, tvdbId: 121361, seasons: [] }]) : undefined);
+  const token = await mintSession();
+  for (let i = 0; i < 60; i++) {
+    assert.equal((await call(releasesRoute.GET, token, "/requests/r2/releases", { ctx: idCtx("r2") })).status, 200, `read ${i + 1}`);
+  }
+  const before = arrCalls().length;
+  const limited = await call(releasesRoute.GET, token, "/requests/r2/releases", { ctx: idCtx("r2") });
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get("retry-after"), "60");
+  assert.equal(arrCalls().length, before, "no Sonarr read past the bound");
 });
 
 test("grab: redeems the handle into the real guid on the request's instance and audits it WITHOUT the guid; a pending request or one not in Radarr is 409", async () => {

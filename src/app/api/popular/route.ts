@@ -2,31 +2,25 @@ import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { parsePageParam } from "@/lib/pagination";
 import { getMostPopularOnServer, POPULAR_PER_PAGE, type PopularSort } from "@/lib/play-history";
-import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
-import type { TmdbMedia } from "@/lib/tmdb-types";
-import { prisma } from "@/lib/prisma";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { settleLimit } from "@/lib/concurrency";
 import { isFeatureEnabled } from "@/lib/features";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { parsePopularMediaFilter, resolvePopularTitles, type PopularTitle } from "@/lib/popular-titles";
+import type { PopularResult } from "@/lib/play-history-popular";
 
 // Cap cold-cache TMDB detail fetches per page — a cold page can otherwise fan out
 // dozens of concurrent /movie & /tv lookups. Matches the TMDB list-page discipline.
 const DETAIL_CONCURRENCY = 5;
 
+const VALID_SORTS = new Set<PopularSort>(["plays", "viewers", "trending"]);
+// The type a filter leaves out: no query, nothing on the page.
+const SKIPPED: PopularResult = { items: [], totalItems: 0, totalPages: 1, page: 1 };
+
 // Native-client mirror of src/app/(app)/popular/page.tsx — most-played media on
 // the connected Plex/Jellyfin servers. Keep the resolve + enrich logic in sync
 // with that page (it is the same getMostPopularOnServer aggregation).
-type EnrichedMedia = TmdbMedia & {
-  plays: number;
-  allTimePlays: number;
-  viewers: number;
-  episodes: number;
-  totalHours: number;
-};
-
 export const GET = withAuth(async (request, _ctx, session) => {
   const t = translatorForRequest(request);
   if (!(await isFeatureEnabled("feature.page.popular"))) {
@@ -37,94 +31,31 @@ export const GET = withAuth(async (request, _ctx, session) => {
   }
 
   const sp = request.nextUrl.searchParams;
-  const mediaTypeFilter = sp.get("mediaType") || undefined; // "movies" | "tv" | undefined
-  const validSorts = new Set<PopularSort>(["plays", "viewers", "trending"]);
+  const mediaTypeFilter = parsePopularMediaFilter(sp.get("mediaType"));
+  if (mediaTypeFilter === null) {
+    return NextResponse.json({ error: t("apiUser.browse.popularMediaTypeInvalid") }, { status: 400 });
+  }
   const sortParam = sp.get("sort");
-  const sort: PopularSort = validSorts.has(sortParam as PopularSort)
-    ? (sortParam as PopularSort)
-    : "trending";
-  const page = parsePageParam(sp);
-  const show4k = await getShow4kVisibility(session);
+  const sort: PopularSort = VALID_SORTS.has(sortParam as PopularSort) ? (sortParam as PopularSort) : "trending";
+  const requestedPage = parsePageParam(sp);
 
   try {
+    const show4k = await getShow4kVisibility(session);
     const [moviesResult, tvResult] = await Promise.all([
-      mediaTypeFilter === "tv"
-        ? Promise.resolve({ items: [], totalItems: 0, totalPages: 1, page: 1 })
-        : getMostPopularOnServer({ mediaType: "MOVIE", sort, page }),
-      mediaTypeFilter === "movies"
-        ? Promise.resolve({ items: [], totalItems: 0, totalPages: 1, page: 1 })
-        : getMostPopularOnServer({ mediaType: "TV", sort, page }),
+      mediaTypeFilter === "tv" ? SKIPPED : getMostPopularOnServer({ mediaType: "MOVIE", sort, page: requestedPage }),
+      mediaTypeFilter === "movies" ? SKIPPED : getMostPopularOnServer({ mediaType: "TV", sort, page: requestedPage }),
     ]);
+    // getMostPopularOnServer clamps a deep ?page= to the last page a ranking
+    // holds; the page and rank offset answered are the page it SERVED.
+    const page = Math.max(moviesResult.page, tvResult.page);
 
-    async function resolveMedia(
-      items: typeof moviesResult.items,
-      type: "movie" | "tv",
-    ): Promise<EnrichedMedia[]> {
-      if (items.length === 0) return [];
-      const dbType = type === "movie" ? "MOVIE" : "TV";
-
-      // One query for the whole page, as the page does: every item shares
-      // mediaType and the freshness check, so a single `tmdbId IN (...)` list
-      // is all that's needed — not one OR branch (and one `new Date()`) per item.
-      const coreRows = await prisma.tmdbMediaCore.findMany({
-        where: {
-          tmdbId: { in: items.map((i) => i.tmdbId) },
-          mediaType: dbType,
-          expiresAt: { gt: new Date() },
-        },
-      });
-      const coreMap = new Map(coreRows.map((r) => [r.tmdbId, r]));
-
-      const results = await settleLimit(items, DETAIL_CONCURRENCY, async (item) => {
-          const core = coreMap.get(item.tmdbId);
-          const details: TmdbMedia = core
-            ? {
-                id: item.tmdbId,
-                mediaType: type,
-                title: core.title,
-                overview: "",
-                posterPath: core.posterPath ?? null,
-                backdropPath: null,
-                releaseDate: null,
-                releaseYear: core.releaseYear ?? "",
-                voteAverage: core.voteAverage,
-                certification: core.certification ?? undefined,
-              }
-            : type === "movie"
-              ? await getMovieDetails(item.tmdbId)
-              : await getTVDetails(item.tmdbId);
-          return {
-            ...details,
-            plays: item.plays,
-            allTimePlays: item.allTimePlays,
-            viewers: item.viewers,
-            episodes: item.episodes,
-            totalHours: item.totalHours,
-          };
-      });
-      // A title whose live TMDB resolve rejected is dropped from the page, so the
-      // rendered count can be fewer than the reported totals. Log the rejection so
-      // a transient TMDB failure that makes a most-played title vanish is
-      // diagnosable rather than silent.
-      for (const r of results) {
-        if (r.status === "rejected") {
-          console.error(`[popular] ${type} detail resolve failed:`, r.reason instanceof Error ? r.reason.message : r.reason);
-        }
-      }
-      return results
-        .filter((r): r is PromiseFulfilledResult<EnrichedMedia> => r.status === "fulfilled")
-        .map((r) => r.value);
-    }
-
-    let [movies, tv] = await Promise.all([
-      resolveMedia(moviesResult.items, "movie"),
-      resolveMedia(tvResult.items, "tv"),
+    const [movieTitles, tvTitles] = await Promise.all([
+      resolvePopularTitles(moviesResult.items, "movie", DETAIL_CONCURRENCY),
+      resolvePopularTitles(tvResult.items, "tv", DETAIL_CONCURRENCY),
     ]);
-
     // attachAllAvailability is generic, so the play stats come back typed.
-    const enrich = (items: EnrichedMedia[]) => attachAllAvailability(items, session.user.id, { show4k });
-
-    [movies, tv] = await Promise.all([enrich(movies), enrich(tv)]);
+    const enrich = (items: PopularTitle[]) => attachAllAvailability(items, session.user.id, { show4k });
+    const [movies, tv] = await Promise.all([enrich(movieTitles), enrich(tvTitles)]);
 
     // normalize emits `keywords` as a names array (string[]) at the source, so
     // the getMovieDetails/getTVDetails shape ships straight through — no per-route

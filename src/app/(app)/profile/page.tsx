@@ -1,12 +1,12 @@
 import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { parseRateLimit } from "@/lib/rate-limit";
+import { readPushSubscriptionCap } from "@/lib/push-cap";
 import { isNotificationEmailEnabled } from "@/lib/email";
 import { resolveUserNotificationEmail } from "@/lib/notification-email";
-import { parseVerifyIdentifier, verifyIdentifierPrefixFor } from "@/lib/notification-email-verify";
+import { canSetOwnNotificationEmail, parseVerifyIdentifier, verifyIdentifierPrefixFor } from "@/lib/notification-email-verify";
 import { redirect } from "next/navigation";
 import { DiscordLinkSection } from "@/components/discord-link-ui";
-import { NotificationPrefs } from "@/components/profile/notification-prefs";
+import { NotificationPrefs, type NotificationPrefValues } from "@/components/profile/notification-prefs";
 import { PushDevices } from "@/components/profile/push-devices";
 import { AuthSessions } from "@/components/profile/auth-sessions";
 import { ChangePassword } from "@/components/profile/change-password";
@@ -30,17 +30,24 @@ import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
 
-// Mirrors the default in /api/push/subscribe and /api/push/apns — the routes
-// that actually enforce `maxPushSubscriptions`. Their contract (via
-// `parseRateLimit`) is 0 = unlimited and a negative/junk value = this default,
-// and the label rendered here must agree with it.
-const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
+const NOTIFICATION_PREF_KEYS = [
+  "notifyOnApproved", "notifyOnAvailable", "notifyOnDeclined", "notifyOnComment",
+  "emailOnApproved", "emailOnAvailable", "emailOnDeclined", "emailOnComment",
+  "pushOnApproved", "pushOnAvailable", "pushOnDeclined", "pushOnComment",
+  "notifyOnIssue",
+] as const satisfies readonly (keyof NotificationPrefValues)[];
+type NotificationPrefKey = (typeof NOTIFICATION_PREF_KEYS)[number];
+
+// The most sessions listed. Native sessions never expire (guardrail 6c), so a
+// long-lived account's list only shrinks when the user revokes; newest first,
+// so the current device is always on it.
+const AUTH_SESSIONS_SHOWN = 100;
 
 export default async function ProfilePage() {
   const session = await authActive();
   if (!session) redirect("/login");
 
-  const [user, hasPassword, discordInviteSetting, pushDevices, maxPushSetting, authSessions, emailEnabled, calendarEnabled] = await Promise.all([
+  const [user, hasPassword, discordInviteSetting, pushDevices, pushCap, authSessions, emailEnabled, calendarEnabled] = await Promise.all([
     prisma.user.findUnique({
       where: { id: session.user.id },
       select: {
@@ -68,12 +75,14 @@ export default async function ProfilePage() {
       select: { id: true, label: true, createdAt: true },
       orderBy: { createdAt: "asc" },
     }),
-    prisma.setting.findUnique({ where: { key: "maxPushSubscriptions" } }),
+    // The cap the push routes enforce, through the same reader (push-cap.ts).
+    readPushSubscriptionCap(),
     // A row past its deadline is dead but stays until the purge cron sweeps it
     // (guardrail 6c) — list only live devices, as GET /api/sessions does.
     prisma.authSession.findMany({
       where: { userId: session.user.id, expiresAt: { gt: new Date() } },
       orderBy: { lastSeenAt: "desc" },
+      take: AUTH_SESSIONS_SHOWN,
       select: {
         id: true, sessionId: true, deviceType: true, deviceLabel: true,
         ipAddress: true, createdAt: true, lastSeenAt: true, expiresAt: true,
@@ -82,6 +91,9 @@ export default async function ProfilePage() {
     isNotificationEmailEnabled(),
     isFeatureEnabled(CALENDAR_FEATURE_KEY),
   ]);
+  // The row is gone (the account was deleted mid-request): nothing to show.
+  // Outside any try/catch, so the redirect is never swallowed (guardrail 29).
+  if (!user) redirect("/login");
   // Watchlist auto-request section: only for a user who can use it. The
   // permission check is free; the flag and token reads only run for them.
   const autoRequestPermitted =
@@ -96,8 +108,8 @@ export default async function ProfilePage() {
       ? await getPlexWatchlistConnection(
           {
             id: session.user.id,
-            plexWatchlistOptInAt: user?.plexWatchlistOptInAt ?? null,
-            plexWatchlistAutoRequest: user?.plexWatchlistAutoRequest ?? true,
+            plexWatchlistOptInAt: user.plexWatchlistOptInAt,
+            plexWatchlistAutoRequest: user.plexWatchlistAutoRequest,
           },
           plexAccount !== null,
         )
@@ -110,8 +122,7 @@ export default async function ProfilePage() {
   // address lives only in the VerificationToken row (/api/profile/notification-email
   // keeps one per user under `verifyIdentifierPrefixFor`). Surface it so a reload
   // shows "verification pending" with a resend instead of a blank field.
-  const isJellyfinUser =
-    session.user.provider === "jellyfin" || session.user.provider === "jellyfin-quickconnect";
+  const isJellyfinUser = canSetOwnNotificationEmail(session.user.provider);
 
   // Two-factor is offered only to local-credentials accounts (guardrail 6d).
   const mfaAvailable = session.user.provider === "credentials" && hasPassword;
@@ -152,8 +163,12 @@ export default async function ProfilePage() {
     !!mfaState &&
     !mfaState.enabled &&
     adminMfaPolicyApplies({ role: session.user.role, provider: session.user.provider, settingValue: requireMfaRow?.value });
-  const pushCap = parseRateLimit(maxPushSetting?.value, DEFAULT_MAX_PUSH_SUBSCRIPTIONS);
   const currentSessionId = session.sessionId;
+  const webauthnAvailable = webAuthnConfigFromEnv() !== null;
+  // The step-up the password change and the account deletion both ask for.
+  const secondFactor = mfaState
+    ? { enabled: mfaState.enabled, hasPasskeys: mfaState.passkeys.length > 0, webauthnAvailable }
+    : undefined;
 
   return (
     <div className="ds-page-enter">
@@ -164,53 +179,14 @@ export default async function ProfilePage() {
 
       <div className="max-w-2xl lg:max-w-6xl lg:grid lg:grid-cols-2 lg:gap-6">
         <div className="flex flex-col" style={{ gap: 20 }}>
-          <ProfileCard>
-            <div className="flex items-center" style={{ gap: 14 }}>
-              <div
-                className="flex shrink-0 items-center justify-center rounded-full"
-                style={{
-                  width: 44,
-                  height: 44,
-                  background: "var(--ds-bg-3)",
-                  color: "var(--ds-fg-muted)",
-                  border: "1px solid var(--ds-border)",
-                }}
-              >
-                <User style={{ width: 18, height: 18 }} />
-              </div>
-              <div className="min-w-0">
-                {user?.name && (
-                  <p
-                    className="font-semibold"
-                    style={{
-                      fontSize: 14,
-                      color: "var(--ds-fg)",
-                      margin: 0,
-                    }}
-                  >
-                    {user.name}
-                  </p>
-                )}
-                <p
-                  className="break-all"
-                  style={{
-                    fontSize: 12,
-                    color: "var(--ds-fg-muted)",
-                    margin: 0,
-                  }}
-                >
-                  {user?.email}
-                </p>
-              </div>
-            </div>
-          </ProfileCard>
+          <ProfileIdentity name={user.name} email={user.email} />
 
           <ProfileCard
             title="Discord"
             description={t("profile.discord.description")}
           >
             <DiscordLinkSection
-              linkedDiscordId={user?.discordId ?? null}
+              linkedDiscordId={user.discordId}
               discordInviteUrl={discordInviteUrl}
             />
           </ProfileCard>
@@ -222,15 +198,7 @@ export default async function ProfilePage() {
             >
               <ChangePassword
                 hasPassword={hasPassword}
-                secondFactor={
-                  mfaState
-                    ? {
-                        enabled: mfaState.enabled,
-                        hasPasskeys: mfaState.passkeys.length > 0,
-                        webauthnAvailable: webAuthnConfigFromEnv() !== null,
-                      }
-                    : undefined
-                }
+                secondFactor={secondFactor}
               />
             </ProfileCard>
           )}
@@ -254,7 +222,7 @@ export default async function ProfilePage() {
                     lastUsedAt: p.lastUsedAt?.toISOString() ?? null,
                   })),
                   recoveryCodesRemaining: mfaState.recoveryRemaining,
-                  webauthnAvailable: webAuthnConfigFromEnv() !== null,
+                  webauthnAvailable,
                 }}
               />
             </ProfileCard>
@@ -279,15 +247,7 @@ export default async function ProfilePage() {
           >
             <DeleteAccount
               requiresPassword={hasPassword}
-              secondFactor={
-                mfaState
-                  ? {
-                      enabled: mfaState.enabled,
-                      hasPasskeys: mfaState.passkeys.length > 0,
-                      webauthnAvailable: webAuthnConfigFromEnv() !== null,
-                    }
-                  : undefined
-              }
+              secondFactor={secondFactor}
             />
           </ProfileCard>
         </div>
@@ -302,35 +262,15 @@ export default async function ProfilePage() {
           >
             <NotificationPrefs
               emailEnabled={emailEnabled}
-              discordLinked={!!user?.discordId}
-              isAdminRole={
-                user?.role === "ADMIN" || user?.role === "ISSUE_ADMIN"
-              }
+              discordLinked={!!user.discordId}
+              isAdminRole={user.role === "ADMIN" || user.role === "ISSUE_ADMIN"}
               isJellyfin={isJellyfinUser}
               pendingEmail={pendingEmail}
-              notificationEmail={
-                user
-                  ? resolveUserNotificationEmail({
-                      email: user.email,
-                      notificationEmail: user.notificationEmail,
-                    })
-                  : null
-              }
-              prefs={{
-                notifyOnApproved: user?.notifyOnApproved ?? true,
-                notifyOnAvailable: user?.notifyOnAvailable ?? true,
-                notifyOnDeclined: user?.notifyOnDeclined ?? true,
-                notifyOnComment: user?.notifyOnComment ?? true,
-                emailOnApproved: user?.emailOnApproved ?? false,
-                emailOnAvailable: user?.emailOnAvailable ?? false,
-                emailOnDeclined: user?.emailOnDeclined ?? false,
-                emailOnComment: user?.emailOnComment ?? false,
-                pushOnApproved: user?.pushOnApproved ?? true,
-                pushOnAvailable: user?.pushOnAvailable ?? true,
-                pushOnDeclined: user?.pushOnDeclined ?? true,
-                pushOnComment: user?.pushOnComment ?? true,
-                notifyOnIssue: user?.notifyOnIssue ?? true,
-              }}
+              notificationEmail={resolveUserNotificationEmail({
+                email: user.email,
+                notificationEmail: user.notificationEmail,
+              })}
+              prefs={notificationPrefsOf(user)}
             />
           </ProfileCard>
 
@@ -340,7 +280,7 @@ export default async function ProfilePage() {
               description={t("profile.autoRequest.description")}
             >
               <AutoRequestPrefs
-                initialPlexWatchlist={user?.plexWatchlistAutoRequest ?? true}
+                initialPlexWatchlist={user.plexWatchlistAutoRequest}
                 plexConnected={plexConnected}
                 serverSource={plexWatchlistConnection?.serverSource ?? false}
                 serverOptedIn={plexWatchlistConnection?.serverOptedIn ?? false}
@@ -363,7 +303,7 @@ export default async function ProfilePage() {
                 status={trakt.status}
                 syncedAt={trakt.syncedAt}
                 uses={trakt.uses}
-                isJellyfin={isJellyfinUser || user?.mediaServer === "jellyfin"}
+                isJellyfin={isJellyfinUser || user.mediaServer === "jellyfin"}
               />
             </ProfileCard>
           )}
@@ -382,8 +322,8 @@ export default async function ProfilePage() {
               description={t("profile.calendar.description")}
             >
               <CalendarFeed
-                enabled={!!user?.calendarTokenHash}
-                createdAt={user?.calendarTokenHash ? (user.calendarTokenCreatedAt?.toISOString() ?? null) : null}
+                enabled={!!user.calendarTokenHash}
+                createdAt={user.calendarTokenHash ? (user.calendarTokenCreatedAt?.toISOString() ?? null) : null}
                 canSubscribeAll={hasPermission(session.user.permissions, Permission.MANAGE_REQUESTS)}
               />
             </ProfileCard>
@@ -391,6 +331,59 @@ export default async function ProfilePage() {
         </div>
       </div>
     </div>
+  );
+}
+
+// The notification switches the prefs form starts from.
+function notificationPrefsOf(user: Record<NotificationPrefKey, boolean>): NotificationPrefValues {
+  const out = {} as Record<NotificationPrefKey, boolean>;
+  for (const key of NOTIFICATION_PREF_KEYS) out[key] = user[key];
+  return out;
+}
+
+// The account's name and sign-in email, at the top of the page.
+function ProfileIdentity({ name, email }: { name: string | null; email: string }) {
+  return (
+    <ProfileCard>
+      <div className="flex items-center" style={{ gap: 14 }}>
+        <div
+          className="flex shrink-0 items-center justify-center rounded-full"
+          style={{
+            width: 44,
+            height: 44,
+            background: "var(--ds-bg-3)",
+            color: "var(--ds-fg-muted)",
+            border: "1px solid var(--ds-border)",
+          }}
+        >
+          <User style={{ width: 18, height: 18 }} />
+        </div>
+        <div className="min-w-0">
+          {name && (
+            <p
+              className="font-semibold"
+              style={{
+                fontSize: 14,
+                color: "var(--ds-fg)",
+                margin: 0,
+              }}
+            >
+              {name}
+            </p>
+          )}
+          <p
+            className="break-all"
+            style={{
+              fontSize: 12,
+              color: "var(--ds-fg-muted)",
+              margin: 0,
+            }}
+          >
+            {email}
+          </p>
+        </div>
+      </div>
+    </ProfileCard>
   );
 }
 

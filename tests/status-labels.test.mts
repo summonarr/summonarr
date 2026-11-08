@@ -27,6 +27,7 @@ import { join } from "node:path";
 
 const {
   REQUEST_STATUS_TONE,
+  REQUEST_STATUS_LABEL_KEY,
   ISSUE_STATUS_TONE,
   ISSUE_STATUS_LABEL_KEY,
   ISSUE_TYPE_LABEL_KEY,
@@ -125,6 +126,22 @@ test("DECLINED and PENDING carry distinct, non-success tones", () => {
   assert.equal(REQUEST_STATUS_TONE.DECLINED, "declined");
   assert.equal(REQUEST_STATUS_TONE.PENDING, "pending");
   assert.notEqual(REQUEST_STATUS_TONE.DECLINED, REQUEST_STATUS_TONE.APPROVED);
+});
+
+test("every RequestStatus has a label key, no key names a dropped status, and each key is in the catalog", () => {
+  const missing = REQUEST_STATUSES.filter((s) => REQUEST_STATUS_LABEL_KEY[s] === undefined);
+  assert.deepEqual(missing, [], `add these to REQUEST_STATUS_LABEL_KEY: ${missing.join(", ")}`);
+  const stale = Object.keys(REQUEST_STATUS_LABEL_KEY).filter((k) => !REQUEST_STATUSES.includes(k));
+  assert.deepEqual(stale, [], `remove these from REQUEST_STATUS_LABEL_KEY: ${stale.join(", ")}`);
+  for (const [status, key] of Object.entries(REQUEST_STATUS_LABEL_KEY)) {
+    assert.ok(EN[key], `REQUEST_STATUS_LABEL_KEY.${status} = "${key}" is not in the English catalog`);
+  }
+});
+
+test("the admin request queue reads its status labels through the map, never a key built at runtime", () => {
+  const list = readFileSync(join(process.cwd(), "src", "components", "admin", "admin-request-list.tsx"), "utf-8");
+  assert.doesNotMatch(list, /requests\.status\.\$\{/);
+  assert.match(list, /REQUEST_STATUS_LABEL_KEY/);
 });
 
 // ── IssueStatus ──────────────────────────────────────────────────────────────

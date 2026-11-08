@@ -193,7 +193,7 @@ function expectSuccess(r: ImportResult): ImportSuccess {
   return r as ImportSuccess;
 }
 
-// ── fixtures (statement shapes mirror db-export/route.ts exactly) ───────────
+// ── fixtures (statement shapes mirror backup-export.ts exactly) ─────────────
 const FP = computeSchemaFingerprint();
 const TEK_FP = tokenEncryptionKeyFingerprint();
 if (!TEK_FP) throw new Error("test key must yield a TEK fingerprint");
@@ -511,6 +511,65 @@ test("TEK-fingerprint mismatch warns (secrets undecryptable) but does not refuse
   assert.match(res.warning ?? "", /different TOKEN_ENCRYPTION_KEY/);
   assert.match(res.warning ?? "", /Re-enter them in Settings/);
   assert.equal(res.summary.executed, 1); // data still restored
+});
+
+test("a matching normalized fingerprint restores even when the byte fingerprint differs (comment-only schema edit)", async () => {
+  const { computeNormalizedSchemaFingerprint } = await import("../src/lib/backup-schema.ts");
+  const nfp = computeNormalizedSchemaFingerprint();
+  const ok = expectSuccess(
+    await runImport([
+      new Uint8Array(
+        await encrypt(`-- Schema-Fingerprint: ${WRONG_FP}\n-- Schema-Fingerprint-Normalized: ${nfp}\n${STMT.userInsert};\n`),
+      ),
+    ]),
+  );
+  assert.equal(ok.summary.executed, 1);
+  assert.doesNotMatch(ok.warning ?? "", /no schema fingerprint/);
+
+  // The normalized fingerprint is what decides once present: a mismatch refuses.
+  const refused = expectFailure(
+    await runImport([
+      new Uint8Array(
+        await encrypt(`-- Schema-Fingerprint: ${FP}\n-- Schema-Fingerprint-Normalized: ${WRONG_FP}\n${STMT.userInsert};\n`),
+      ),
+    ]),
+  );
+  assert.equal(refused.status, 409);
+  assert.ok(refused.error.includes(nfp));
+});
+
+test("invalid UTF-8 is refused as unreadable, never restored as replacement characters", async () => {
+  const bad = Buffer.concat([
+    Buffer.from(`-- Schema-Fingerprint: ${FP}\nINSERT INTO "public"."Setting" ("key", "value") VALUES ('k', '`, "utf8"),
+    Buffer.from([0xff, 0xfe]),
+    Buffer.from(`');\n`, "utf8"),
+  ]);
+  const enc = await collect(wrapEncryptStream(streamFrom([new Uint8Array(bad)]), PASSWORD));
+  const res = expectFailure(await runImport([new Uint8Array(enc)]));
+  assert.equal(res.status, 400);
+  assert.equal(res.error, "Failed to read backup");
+  assert.equal(txCalls.length, 0);
+
+  // A sequence cut off at the very end of the dump is corruption too.
+  const cut = Buffer.concat([Buffer.from(`${STMT.userInsert};\n`, "utf8"), Buffer.from([0xe2, 0x82])]);
+  const cutEnc = await collect(wrapEncryptStream(streamFrom([new Uint8Array(cut)]), PASSWORD));
+  assert.equal(expectFailure(await runImport([new Uint8Array(cutEnc)])).error, "Failed to read backup");
+  assert.equal(txCalls.length, 0);
+});
+
+test("an upload that breaks off inside the header is a clean read failure, not a thrown error", async () => {
+  const broken = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(HAPPY_ENC.subarray(0, 3)));
+    },
+    pull(controller) {
+      controller.error(new Error("client aborted"));
+    },
+  });
+  const res = expectFailure(await processBackupImport(broken, PASSWORD, "admin"));
+  assert.equal(res.status, 400);
+  assert.equal(res.error, "Failed to read backup");
+  assert.equal(txCalls.length, 0);
 });
 
 // ── the empty-restore refusal ───────────────────────────────────────────────

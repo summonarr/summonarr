@@ -22,6 +22,7 @@ import { prisma } from "./prisma";
 import { safeFetchAdminConfigured } from "./safe-fetch";
 import { applyFinalTick, recordCompletedSession, isPlayHistoryEnabled, isSourceEnabled, emitActiveSessionsSnapshot, reanchorActiveSessionsOnBoot, SESSION_ABSENCE_GRACE_MS } from "./play-history";
 import { getPlexSessions } from "./plex";
+import { PLEX_CLIENT_VERSION, PLEX_PRODUCT } from "./plex-client-headers";
 import { triggerFullSync } from "./internal-trigger";
 import { DEFAULT_MEDIA_INSTANCE, activeSessionId, mediaInstanceLabel, parseActiveSessionId, plexSettingKey, type MediaInstanceKey } from "./media-instances";
 import { getMediaInstances } from "./media-instance-registry";
@@ -257,6 +258,69 @@ function toProgressMs(viewOffset: number | undefined): bigint | null {
     : null;
 }
 
+// Reads an SSE body frame by frame until `keepReading` turns false, handing
+// each complete frame (without its "\n\n" terminator) to `onFrame`. Throws
+// when the stream ends or a frame outgrows MAX_SSE_BUFFER_BYTES, so the caller's
+// reconnect path takes over.
+export async function readSseFrames(
+  body: ReadableStream<Uint8Array>,
+  onFrame: (frame: string) => void,
+  keepReading: () => boolean,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (keepReading()) {
+    const { done, value } = await reader.read();
+    if (done) {
+      throw new Error("SSE stream ended");
+    }
+    buffer += decoder.decode(value, { stream: true });
+    // SSE spec allows either LF or CRLF line endings; Plex currently emits
+    // LF, but normalize defensively so the frame-boundary indexOf below
+    // doesn't desync if a future Plex build switches conventions.
+    if (buffer.includes("\r")) buffer = buffer.replace(/\r\n/g, "\n");
+
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary !== -1) {
+      const frame = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      onFrame(frame);
+      boundary = buffer.indexOf("\n\n");
+    }
+
+    // Bound the inter-frame buffer. Plex timeline frames are small JSON events;
+    // a (hostile/compromised) configured Plex endpoint that streams a huge blob
+    // with NO `\n\n` boundary would otherwise grow `buffer` without limit (heap
+    // exhaustion) AND force an O(n²) full-buffer rescan on every chunk. Past the
+    // cap the frame can't be legitimate — drop the connection so the backoff/
+    // reconnect path takes over instead of accumulating.
+    if (buffer.length > MAX_SSE_BUFFER_BYTES) {
+      throw new Error("SSE frame exceeded buffer cap");
+    }
+  }
+}
+
+// The bootstrap absence sweep's finalize: absent past the grace, so no final
+// tick and stoppedAt = lastSeenAt (see the poller's absence sweep) — the gap
+// since lastSeenAt is not playtime. Each ledger mark goes AFTER its
+// PlayHistory write commits (guardrail 27): a failed record must not
+// ledger-lock the sessionKey for an hour with no history row — it stays
+// un-finalized so the next poll re-creates the row and retries.
+async function finalizeAbsentSessions(stale: Array<Parameters<typeof recordCompletedSession>[0]>, nowMs: number): Promise<void> {
+  if (stale.length === 0) return;
+  await Promise.all(
+    stale.map(async (session) => {
+      try {
+        await recordCompletedSession(session);
+        markPlexSessionFinalized(session.id, nowMs);
+      } catch (err) {
+        console.warn(`[plex-events] bootstrap finalize failed for ${session.id}:`, err);
+      }
+    }),
+  );
+}
+
 // Debounce + dispatch for the scanner-triggered library re-sync, one per
 // manager. Plex emits a TimelineEntry per touched item; coalescing inside this
 // window keeps a full re-scan from N+1ing /api/sync. The trigger fires HTTP to
@@ -270,6 +334,16 @@ function toProgressMs(viewOffset: number | undefined): bigint | null {
 //   cooldown — and no sooner than TIMELINE_RESYNC_COOLDOWN_MS after the
 //              previous run this manager dispatched, so a long scan yields
 //              one trailing run per cooldown instead of one per lull.
+// When an armed resync fires. Uncapped: the debounce after this event, never
+// before the cooldown floor (`notBefore`), never after the burst's `deadline`.
+// Capped (the lock-race retries are spent): the plain cooldown, unclamped by
+// the deadline. Pure.
+export function resyncFireAt(now: number, notBefore: number, deadline: number, capped: boolean): number {
+  return capped
+    ? Math.max(now + TIMELINE_RESYNC_COOLDOWN_MS, notBefore)
+    : Math.min(Math.max(now + TIMELINE_RESYNC_DEBOUNCE_MS, notBefore), deadline);
+}
+
 class LibraryResyncScheduler {
   // Whether the owning manager is still running; checked on re-arm and on fire.
   // Declared + assigned in the constructor body (erasable syntax only).
@@ -329,9 +403,7 @@ class LibraryResyncScheduler {
     } else {
       this.resyncDeadline = Math.max(now + TIMELINE_RESYNC_MAX_WAIT_MS, notBefore);
     }
-    const fireAt = capped
-      ? Math.max(now + TIMELINE_RESYNC_COOLDOWN_MS, notBefore)
-      : Math.min(Math.max(now + TIMELINE_RESYNC_DEBOUNCE_MS, notBefore), this.resyncDeadline);
+    const fireAt = resyncFireAt(now, notBefore, this.resyncDeadline, capped);
     this.resyncTimer = setTimeout(() => {
       this.resyncTimer = null;
       // Re-check liveness at fire time too: a stop() between arming and firing
@@ -376,6 +448,100 @@ class LibraryResyncScheduler {
   }
 }
 
+// Throttle for the active-sessions SSE snapshot. emitActiveSessionsSnapshot reads
+// every ActiveSession row and broadcasts the full payload to every admin client, so
+// a scrubbing client (which changes progressMs on every event) would otherwise fan
+// out one full snapshot per event. Leading-edge emit + trailing-edge coalesce bounds
+// it to at most one snapshot per SNAPSHOT_THROTTLE_MS while still reflecting the final
+// state. The progressMs/progressUpdatedAt DB writes are NOT throttled — only the emit.
+class SessionsSnapshotThrottle {
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private lastAt = 0;
+
+  emit(): void {
+    const now = Date.now();
+    const elapsed = now - this.lastAt;
+    if (elapsed >= SNAPSHOT_THROTTLE_MS) {
+      this.lastAt = now;
+      void emitActiveSessionsSnapshot().catch((err) =>
+        console.warn("[plex-events] sessions snapshot emit failed:", err instanceof Error ? err.message : err),
+      );
+      return;
+    }
+    if (this.timer) return; // trailing emit already scheduled
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.lastAt = Date.now();
+      void emitActiveSessionsSnapshot().catch((err) =>
+        console.warn("[plex-events] sessions snapshot emit failed:", err instanceof Error ? err.message : err),
+      );
+    }, SNAPSHOT_THROTTLE_MS - elapsed);
+  }
+
+  cancel(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+  }
+}
+
+// Persists whether Summonarr can reach ONE instance's *local* Plex server.
+class PlexReachabilityReporter {
+  private readonly instance: MediaInstanceKey;
+  // Last reachability value this process persisted. Guards the upsert + SSE
+  // emit so an unchanged value (the 5s poller reports the same state every
+  // tick) doesn't write the row or fan out an event on every poll. null until
+  // the first persist, so a stale value in the DB is corrected on the first
+  // poll/connect.
+  private lastReachable: boolean | null = null;
+  // Persists run one after another in call order. Two overlapping calls (the
+  // bootstrap's true, the poller's false) could otherwise both pass the guard
+  // while nothing was latched, and land their upserts in the other order —
+  // leaving the row and the latch disagreeing, with later calls suppressed.
+  private chain: Promise<void> = Promise.resolve();
+
+  constructor(instance: MediaInstanceKey) {
+    this.instance = instance;
+  }
+
+  persist(reachable: boolean): Promise<void> {
+    const next = this.chain.then(() => this.write(reachable));
+    this.chain = next;
+    return next;
+  }
+
+  private async write(reachable: boolean): Promise<void> {
+    // Each manager owns its OWN server's status: the Setting key and the SSE
+    // event are both instance-qualified, so one server's manager can never
+    // overwrite another's. The default's key is still exactly
+    // "plexServerReachable", so a single-server deployment is unchanged.
+    // No-op when the value is unchanged since this process last persisted it.
+    if (this.lastReachable === reachable) return;
+    // Setting is the single source of truth used by the UI to render the
+    // server-reachability indicator. Store a JSON blob so we can add fields
+    // (lastChangedAt etc) without a schema change.
+    try {
+      const key = plexSettingKey(this.instance, "ServerReachable");
+      const value = JSON.stringify({ reachable, observedAt: new Date().toISOString() });
+      await prisma.setting.upsert({
+        where: { key },
+        create: { key, value },
+        update: { value },
+      });
+      // Only record the value as persisted after the write succeeds, so a
+      // failed upsert is retried on the next call rather than silently latched.
+      this.lastReachable = reachable;
+      // Broadcast so the UI updates without polling.
+      const { emitSSE } = await import("./sse-emitter");
+      emitSSE({ type: "plex:reachability", reachable, instance: this.instance });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[plex-events] persist reachability failed: ${msg}`);
+    }
+  }
+}
+
 class PlexEventStreamManager {
   // Which Plex instance this manager serves ("" = the default server). One
   // manager per registry slug — see the `managers` map at the bottom.
@@ -392,6 +558,8 @@ class PlexEventStreamManager {
   // that happened would otherwise resume and start a stream nothing can reach.
   private disposed = false;
   private readonly resync: LibraryResyncScheduler;
+  private readonly snapshots = new SessionsSnapshotThrottle();
+  private readonly reachability: PlexReachabilityReporter;
   // Coalesce concurrent reconcile() callers (boot + sync route + future paths)
   // so they can't both pass the "is anything changing?" check and end up each
   // calling stop() + start a new runLoop, leaving two SSE connections alive.
@@ -408,6 +576,7 @@ class PlexEventStreamManager {
   constructor(instance: MediaInstanceKey) {
     this.instance = instance;
     this.resync = new LibraryResyncScheduler(() => this.running, () => this.label());
+    this.reachability = new PlexReachabilityReporter(instance);
   }
 
   // Short per-instance tag for warn lines: "plex" for the default server
@@ -495,10 +664,7 @@ class PlexEventStreamManager {
     // Cancel any pending debounced resync so a stop() (token/URL change) doesn't
     // still fire a full sync after the stream is torn down.
     this.resync.cancel();
-    if (this.snapshotThrottleTimer) {
-      clearTimeout(this.snapshotThrottleTimer);
-      this.snapshotThrottleTimer = null;
-    }
+    this.snapshots.cancel();
     // A restarted stream starts fresh chains; ops already running finish on their own.
     this.sessionQueues.clear();
   }
@@ -515,25 +681,29 @@ class PlexEventStreamManager {
     const startedUrl = this.currentUrl;
     const startedToken = this.currentToken;
     const startedGeneration = this.loopGeneration;
-
-    while (
+    // `running` alone is not ownership: after a stop() and a restart it is
+    // true again for the NEW loop, and this one would then double the backoff
+    // the restart just reset. Every check below is against this loop's start.
+    const owns = () =>
       this.running &&
       this.loopGeneration === startedGeneration &&
       this.currentUrl === startedUrl &&
-      this.currentToken === startedToken
-    ) {
+      this.currentToken === startedToken;
+
+    while (owns()) {
       try {
         await this.connectAndConsume();
       } catch (err) {
-        if (!this.running) break;
+        if (!owns()) break;
         // Silent first failure; warn on persistent outages so an admin sees something.
         if (this.backoffMs >= MAX_BACKOFF_MS) {
           const msg = err instanceof Error ? err.message : String(err);
           console.warn(`[plex-events] ${this.label()} connection failing repeatedly: ${msg}`);
         }
       }
-      if (!this.running) break;
+      if (!owns()) break;
       await new Promise((resolve) => setTimeout(resolve, this.backoffMs));
+      if (!owns()) break;
       this.backoffMs = Math.min(this.backoffMs * 2, MAX_BACKOFF_MS);
     }
   }
@@ -576,74 +746,12 @@ class PlexEventStreamManager {
       if (!this.running || localAbort.signal.aborted || this.currentUrl !== url || this.currentToken !== token) {
         return;
       }
-      // Subscribe to playing + timeline event types. Playing drives the Now
-      // Playing card; timeline lets us invalidate the library cache when Plex's
-      // scanner adds/removes items. We deliberately do NOT subscribe to
-      // reachability — that reports plex.tv *remote-access* status, which is
-      // irrelevant for a self-hosted server reached over LAN/VPN; local
-      // reachability is derived from getPlexSessions succeeding instead (see
-      // persistReachability). Other notification types (transcode.*,
-      // preferences, account) are dropped server-side by the filter.
-      const sseUrl = `${url}/:/eventsource/notifications?filters=playing,timeline`;
-      const res = await safeFetchAdminConfigured(sseUrl, {
-        headers: {
-          Accept: "text/event-stream",
-          // The token rides a header, never the URL, so it can't land in a proxy or access log.
-          "X-Plex-Token": token,
-          // Required by Plex for any client-style request.
-          "X-Plex-Product": "Summonarr",
-          "X-Plex-Version": "1.0",
-        },
-        signal: localAbort.signal,
-        // SSE is a long-lived stream. The default 15s timeout would abort it
-        // after one quiet minute; the default 10 MB cap would trip after a few
-        // days of ping accumulation. Periodic reconnect (PERIODIC_RECYCLE_MS)
-        // keeps us under both ceilings without risking a runaway counter.
-        timeoutMs: PERIODIC_RECYCLE_MS + 60_000,
-        maxResponseBytes: Number.MAX_SAFE_INTEGER,
-      });
-
-      if (!res.ok || !res.body) {
-        throw new Error(`SSE status ${res.status}`);
-      }
-
+      const body = await this.openEventStream(url, token, localAbort.signal);
       // Stream established. Backoff is NOT reset here (nor on the first byte —
       // a flapping proxy still delivers one); the finally below resets it only
       // if this connection survives STABLE_CONNECTION_MS.
       connectedAt = Date.now();
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (this.running) {
-        const { done, value } = await reader.read();
-        if (done) {
-          throw new Error("SSE stream ended");
-        }
-        buffer += decoder.decode(value, { stream: true });
-        // SSE spec allows either LF or CRLF line endings; Plex currently emits
-        // LF, but normalize defensively so the frame-boundary indexOf below
-        // doesn't desync if a future Plex build switches conventions.
-        if (buffer.includes("\r")) buffer = buffer.replace(/\r\n/g, "\n");
-
-        let boundary = buffer.indexOf("\n\n");
-        while (boundary !== -1) {
-          const frame = buffer.slice(0, boundary);
-          buffer = buffer.slice(boundary + 2);
-          this.handleFrame(frame);
-          boundary = buffer.indexOf("\n\n");
-        }
-
-        // Bound the inter-frame buffer. Plex timeline frames are small JSON events;
-        // a (hostile/compromised) configured Plex endpoint that streams a huge blob
-        // with NO `\n\n` boundary would otherwise grow `buffer` without limit (heap
-        // exhaustion) AND force an O(n²) full-buffer rescan on every chunk. Past the
-        // cap the frame can't be legitimate — drop the connection so the backoff/
-        // reconnect path takes over instead of accumulating.
-        if (buffer.length > MAX_SSE_BUFFER_BYTES) {
-          throw new Error("SSE frame exceeded buffer cap");
-        }
-      }
+      await readSseFrames(body, (frame) => this.handleFrame(frame), () => this.running);
     } finally {
       clearTimeout(recycleTimer);
       // Tear this connection down on EVERY exit path — an early ownership
@@ -663,6 +771,39 @@ class PlexEventStreamManager {
       // still be stopped.
       if (this.abortController === localAbort) this.abortController = null;
     }
+  }
+
+  // Subscribe to playing + timeline event types. Playing drives the Now
+  // Playing card; timeline lets us invalidate the library cache when Plex's
+  // scanner adds/removes items. We deliberately do NOT subscribe to
+  // reachability — that reports plex.tv *remote-access* status, which is
+  // irrelevant for a self-hosted server reached over LAN/VPN; local
+  // reachability is derived from getPlexSessions succeeding instead (see
+  // persistReachability). Other notification types (transcode.*,
+  // preferences, account) are dropped server-side by the filter.
+  private async openEventStream(url: string, token: string, signal: AbortSignal): Promise<ReadableStream<Uint8Array>> {
+    const sseUrl = `${url}/:/eventsource/notifications?filters=playing,timeline`;
+    const res = await safeFetchAdminConfigured(sseUrl, {
+      headers: {
+        Accept: "text/event-stream",
+        // The token rides a header, never the URL, so it can't land in a proxy or access log.
+        "X-Plex-Token": token,
+        // Required by Plex for any client-style request.
+        "X-Plex-Product": PLEX_PRODUCT,
+        "X-Plex-Version": PLEX_CLIENT_VERSION,
+      },
+      signal,
+      // SSE is a long-lived stream. The default 15s timeout would abort it
+      // after one quiet minute; the default 10 MB cap would trip after a few
+      // days of ping accumulation. Periodic reconnect (PERIODIC_RECYCLE_MS)
+      // keeps us under both ceilings without risking a runaway counter.
+      timeoutMs: PERIODIC_RECYCLE_MS + 60_000,
+      maxResponseBytes: Number.MAX_SAFE_INTEGER,
+    });
+    if (!res.ok || !res.body) {
+      throw new Error(`SSE status ${res.status}`);
+    }
+    return res.body;
   }
 
   private async bootstrapReconcile(url: string, token: string): Promise<void> {
@@ -733,23 +874,7 @@ class PlexEventStreamManager {
       !seenKeys.has(r.sessionKey)
       && nowMs - r.lastSeenAt.getTime() >= SESSION_ABSENCE_GRACE_MS,
     );
-    if (stale.length === 0) return;
-
-    await Promise.all(
-      stale.map(async (session) => {
-        try {
-          // Absent past the grace: no final tick, stoppedAt = lastSeenAt (see the
-          // poller's absence sweep) — the gap since lastSeenAt is not playtime.
-          await recordCompletedSession(session);
-          // Ledger AFTER the PlayHistory write commits (guardrail 27): a failed record must
-          // not ledger-lock the sessionKey for an hour with no history row — leave
-          // it un-finalized so the next poll re-creates the row and retries.
-          markPlexSessionFinalized(session.id, nowMs);
-        } catch (err) {
-          console.warn(`[plex-events] bootstrap finalize failed for ${session.id}:`, err);
-        }
-      }),
-    );
+    await finalizeAbsentSessions(stale, nowMs);
   }
 
   private handleFrame(frame: string): void {
@@ -852,74 +977,13 @@ class PlexEventStreamManager {
     }
   }
 
-  // Throttle for the active-sessions SSE snapshot. emitActiveSessionsSnapshot reads
-  // every ActiveSession row and broadcasts the full payload to every admin client, so
-  // a scrubbing client (which changes progressMs on every event) would otherwise fan
-  // out one full snapshot per event. Leading-edge emit + trailing-edge coalesce bounds
-  // it to at most one snapshot per SNAPSHOT_THROTTLE_MS while still reflecting the final
-  // state. The progressMs/progressUpdatedAt DB writes are NOT throttled — only the emit.
-  private snapshotThrottleTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastSnapshotAt = 0;
-  private throttledEmitSessionsSnapshot(): void {
-    const now = Date.now();
-    const elapsed = now - this.lastSnapshotAt;
-    if (elapsed >= SNAPSHOT_THROTTLE_MS) {
-      this.lastSnapshotAt = now;
-      void emitActiveSessionsSnapshot().catch((err) =>
-        console.warn("[plex-events] sessions snapshot emit failed:", err instanceof Error ? err.message : err),
-      );
-      return;
-    }
-    if (this.snapshotThrottleTimer) return; // trailing emit already scheduled
-    this.snapshotThrottleTimer = setTimeout(() => {
-      this.snapshotThrottleTimer = null;
-      this.lastSnapshotAt = Date.now();
-      void emitActiveSessionsSnapshot().catch((err) =>
-        console.warn("[plex-events] sessions snapshot emit failed:", err instanceof Error ? err.message : err),
-      );
-    }, SNAPSHOT_THROTTLE_MS - elapsed);
-  }
-
-  // Last reachability value this process persisted. Guards the upsert + SSE
-  // emit so an unchanged value (the 5s poller reports the same state every
-  // tick) doesn't write the row or fan out an event on every poll. null until
-  // the first persist, so a stale value in the DB is corrected on the first
-  // poll/connect.
-  private lastReachable: boolean | null = null;
-
   // Persist whether Summonarr can reach the *local* Plex server. Called with
   // true after a successful getPlexSessions() (SSE bootstrap + 5s poller) and
   // false when that call throws. This is NOT plex.tv remote-access status —
   // that signal is intentionally ignored (irrelevant for a self-hosted server
   // reached over LAN/VPN). Exposed to the poller via setPlexReachable().
-  async persistReachability(reachable: boolean): Promise<void> {
-    // Each manager owns its OWN server's status: the Setting key and the SSE
-    // event are both instance-qualified, so one server's manager can never
-    // overwrite another's. The default's key is still exactly
-    // "plexServerReachable", so a single-server deployment is unchanged.
-    // No-op when the value is unchanged since this process last persisted it.
-    if (this.lastReachable === reachable) return;
-    // Setting is the single source of truth used by the UI to render the
-    // server-reachability indicator. Store a JSON blob so we can add fields
-    // (lastChangedAt etc) without a schema change.
-    try {
-      const key = plexSettingKey(this.instance, "ServerReachable");
-      const value = JSON.stringify({ reachable, observedAt: new Date().toISOString() });
-      await prisma.setting.upsert({
-        where: { key },
-        create: { key, value },
-        update: { value },
-      });
-      // Only record the value as persisted after the write succeeds, so a
-      // failed upsert is retried on the next call rather than silently latched.
-      this.lastReachable = reachable;
-      // Broadcast so the UI updates without polling.
-      const { emitSSE } = await import("./sse-emitter");
-      emitSSE({ type: "plex:reachability", reachable, instance: this.instance });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[plex-events] persist reachability failed: ${msg}`);
-    }
+  persistReachability(reachable: boolean): Promise<void> {
+    return this.reachability.persist(reachable);
   }
 
   private async applyLiveStateUpdate(
@@ -974,7 +1038,7 @@ class PlexEventStreamManager {
       // broadcast so a scrubbing client (progressMs changes every event) can't fan a
       // full multi-session snapshot out to every admin client on each event.
       if (result.count > 0) {
-        this.throttledEmitSessionsSnapshot();
+        this.snapshots.emit();
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1018,6 +1082,10 @@ class PlexEventStreamManager {
     const id = activeSessionId("plex", this.instance, sessionKey);
     try {
       const existing = await prisma.activeSession.findUnique({ where: { id } });
+      // Already finalized and gone: a repeated stop, or one for a key the
+      // ledger already holds, has nothing to cross-check — skip the full
+      // /status/sessions listing it would cost.
+      if (!existing && isPlexSessionRecentlyFinalized(id)) return;
       if (!existing) {
         // No row yet does NOT mean nothing is playing: a brand-new playback has
         // no ActiveSession until the 5s poller creates one (two ticks for DLNA).

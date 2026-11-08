@@ -306,3 +306,15 @@ test("readOptionalJsonCapped: the Content-Length fast path still 413s", async ()
   assert.ok(res instanceof NextResponse);
   assert.equal(res.status, 413);
 });
+
+test("readJsonCapped with a schema returns the checked shape and 400s a body that doesn't fit", async () => {
+  const { v } = await import("../src/lib/validate.ts");
+  const schema = v.object({ tmdbId: v.int(), title: v.string() });
+  const ok = await readJsonCapped(postJson(JSON.stringify({ tmdbId: 1, title: "Dune", extra: true })), 16 * KB, schema);
+  assert.ok(!(ok instanceof NextResponse));
+  assert.deepEqual(ok, { tmdbId: 1, title: "Dune" }, "only the declared keys come back");
+
+  const bad = await readJsonCapped(postJson(JSON.stringify({ tmdbId: "1", title: "Dune" })), 16 * KB, schema);
+  assert.ok(bad instanceof NextResponse);
+  assert.equal(bad.status, 400);
+});

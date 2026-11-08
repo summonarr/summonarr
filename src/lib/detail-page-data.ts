@@ -88,43 +88,15 @@ export function emptyOnFailure(scope: string, source: string, tmdbId: number) {
 
 const flagOn = (flags: FeatureFlags, key: FeatureKey): boolean => flags[key] ?? false;
 
-export async function loadDetailPageState(
-  session: SummonarrSession,
-  media: { id: number } & Parameters<typeof routableMedia>[0],
-  mediaType: DetailMediaType,
-): Promise<DetailPageState> {
-  const tmdbId = media.id;
-  const userId = session.user.id;
-  const permissions = session.user.permissions;
-  const isMovie = mediaType === "MOVIE";
-  const service = isMovie ? "radarr" : "sonarr";
-  const viewerKey = { userId_tmdbId_mediaType: { userId, tmdbId, mediaType } };
+type DetailMedia = { id: number } & Parameters<typeof routableMedia>[0];
+type VisibleInstances = ReturnType<typeof getVisibleServerInstances>;
 
-  // Which Plex/Jellyfin servers this viewer may see. Everything downstream keys off the two
-  // library rows below — the availability badges, the ratings bar's Jellyfin score, and the
-  // in-library gates on the "report issue" / "vote to delete" actions — so scoping the
-  // QUERIES (not their results) is what keeps a restricted server invisible end to end.
-  const visible = getVisibleServerInstances(session);
-  // Feature flags: the page flags hide the Report-issue and Vote-to-delete
-  // buttons when those features are off (otherwise they would only fail with a
-  // 403 on submit). The integration flags go to getBadgeVisibility, which would
-  // otherwise assume both servers are on and show badges (and those buttons) for
-  // a disabled Plex or Jellyfin.
-  const flags = getFeatureFlags();
-  const blacklisted = isBlacklisted(tmdbId, mediaType);
-  // Every live request of the viewer's on this title, 4K included.
-  const requests = prisma.mediaRequest.findMany({
-    where: { tmdbId, mediaType, requestedBy: userId, status: { not: "DECLINED" } },
-    select: { arrInstance: true },
-  });
-  // The non-4K ones. The hero's Requested badge counts them all; the main
-  // button owns only the default one or the one on the slug this title
-  // auto-routes to (resolveMainButtonRequested) — the rest belong to their
-  // "Request on X" button.
-  const userRequestsP = requests.then((rows) => rows.filter((r) => r.arrInstance !== FOURK_ARR_INSTANCE));
-  const queueSlugs = { in: [DEFAULT_ARR_INSTANCE, FOURK_ARR_INSTANCE] };
-
-  const reads = await allNamed({
+// Which Plex/Jellyfin servers this viewer may see. Everything downstream keys off the two
+// library rows below — the availability badges, the ratings bar's Jellyfin score, and the
+// in-library gates on the "report issue" / "vote to delete" actions — so scoping the
+// QUERIES (not their results) is what keeps a restricted server invisible end to end.
+function libraryReads(visible: VisibleInstances, tmdbId: number, mediaType: DetailMediaType) {
+  return {
     plexItem: visible.then((v) =>
       prisma.plexLibraryItem.findFirst({
         where: { tmdbId, mediaType, serverInstance: { in: v.plex } },
@@ -139,22 +111,101 @@ export async function loadDetailPageState(
         select: { communityRating: true },
       }),
     ),
-    // The default and 4K queue rows in one read.
+  };
+}
+
+// The default and 4K queue rows in one read, and the 4K copy on disk.
+function arrQueueReads(isMovie: boolean, tmdbId: number) {
+  const queueSlugs = { in: [DEFAULT_ARR_INSTANCE, FOURK_ARR_INSTANCE] };
+  const available4kKey = { tmdbId_arrInstance: { tmdbId, arrInstance: FOURK_ARR_INSTANCE } };
+  return {
     wanted: isMovie
       ? prisma.radarrWantedItem.findMany({ where: { tmdbId, arrInstance: queueSlugs }, select: { arrInstance: true } })
       : prisma.sonarrWantedItem.findMany({ where: { tmdbId, arrInstance: queueSlugs }, select: { arrInstance: true } }),
     available4k: isMovie
-      ? prisma.radarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: FOURK_ARR_INSTANCE } }, select: { tmdbId: true } })
-      : prisma.sonarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: FOURK_ARR_INSTANCE } }, select: { tmdbId: true } }),
+      ? prisma.radarrAvailableItem.findUnique({ where: available4kKey, select: { tmdbId: true } })
+      : prisma.sonarrAvailableItem.findUnique({ where: available4kKey, select: { tmdbId: true } }),
+  };
+}
+
+// Every live request of the viewer's on this title, 4K included; the non-4K
+// ones; and whether the main button owns one. The hero's Requested badge counts
+// every non-4K one; the main button owns only the default one or the one on the
+// slug this title auto-routes to (resolveMainButtonRequested) — the rest belong
+// to their "Request on X" button.
+function viewerRequestReads(media: DetailMedia, mediaType: DetailMediaType, userId: string) {
+  const requests = prisma.mediaRequest.findMany({
+    where: { tmdbId: media.id, mediaType, requestedBy: userId, status: { not: "DECLINED" } },
+    select: { arrInstance: true },
+  });
+  const userRequestsP = requests.then((rows) => rows.filter((r) => r.arrInstance !== FOURK_ARR_INSTANCE));
+  return {
     requests,
     userRequests: userRequestsP,
     requested: userRequestsP.then((userRequests) =>
       resolveMainButtonRequested(mediaType, userRequests.map((r) => r.arrInstance), routableMedia(media)),
     ),
+  };
+}
+
+// The viewer's own marks on the title: a deletion vote, the watchlist, hidden.
+function viewerMarkReads(tmdbId: number, mediaType: DetailMediaType, userId: string) {
+  const viewerKey = { userId_tmdbId_mediaType: { userId, tmdbId, mediaType } };
+  return {
     deletionVote: prisma.deletionVote.findFirst({
       where: { tmdbId, mediaType, userId },
       select: { id: true },
     }),
+    onWatchlist: prisma.watchlistItem.findUnique({ where: viewerKey, select: { id: true } }).then((row) => !!row),
+    onHidden: prisma.hiddenItem.findUnique({ where: viewerKey, select: { id: true } }).then((row) => !!row),
+  };
+}
+
+// The ADMIN extras. "Open in Radarr/Sonarr": one link per configured instance
+// whose synced cache holds the title. A cosmetic shortcut (JWT-level session is
+// fine — guardrail 29); the route behind it is ADMIN-gated itself. Nothing while
+// the integration is switched off — every route behind the links would answer
+// "integration disabled". The "never watched" chip (guardrail 14d) is null for
+// anyone else.
+function adminExtraReads(permissions: bigint, flags: Promise<FeatureFlags>, mediaType: DetailMediaType, tmdbId: number) {
+  const isMovie = mediaType === "MOVIE";
+  const service = isMovie ? "radarr" : "sonarr";
+  return {
+    arrLinks: hasPermission(permissions, Permission.ADMIN)
+      ? flags.then((f) =>
+          flagOn(f, isMovie ? "feature.integration.radarr" : "feature.integration.sonarr")
+            ? arrInstancesForTitle(service, tmdbId).catch(emptyOnFailure(isMovie ? "movie-page" : "tv-page", "arr-links", tmdbId))
+            : [],
+        )
+      : Promise.resolve([]),
+    neverWatched: getAdminTitleNeverWatched(permissions, tmdbId, mediaType),
+  };
+}
+
+export async function loadDetailPageState(
+  session: SummonarrSession,
+  media: DetailMedia,
+  mediaType: DetailMediaType,
+): Promise<DetailPageState> {
+  const tmdbId = media.id;
+  const userId = session.user.id;
+  const permissions = session.user.permissions;
+  const isMovie = mediaType === "MOVIE";
+
+  const visible = getVisibleServerInstances(session);
+  // Feature flags: the page flags hide the Report-issue and Vote-to-delete
+  // buttons when those features are off (otherwise they would only fail with a
+  // 403 on submit). The integration flags go to getBadgeVisibility, which would
+  // otherwise assume both servers are on and show badges (and those buttons) for
+  // a disabled Plex or Jellyfin.
+  const flags = getFeatureFlags();
+  const blacklisted = isBlacklisted(tmdbId, mediaType);
+
+  const reads = await allNamed({
+    ...libraryReads(visible, tmdbId, mediaType),
+    ...arrQueueReads(isMovie, tmdbId),
+    ...viewerRequestReads(media, mediaType, userId),
+    ...viewerMarkReads(tmdbId, mediaType, userId),
     blacklisted,
     // Named instances (non-default, non-4K): an explicit "Request on X" button
     // for each configured one the viewer may target. Shared with GET
@@ -166,22 +217,7 @@ export async function loadDetailPageState(
     // A 4K instance configured AND the viewer can request 4K.
     show4k: getShow4kVisibility(session, isMovie ? "movie" : "tv"),
     flags,
-    onWatchlist: prisma.watchlistItem.findUnique({ where: viewerKey, select: { id: true } }).then((row) => !!row),
-    onHidden: prisma.hiddenItem.findUnique({ where: viewerKey, select: { id: true } }).then((row) => !!row),
-    // "Open in Radarr/Sonarr" for an admin, one link per configured instance
-    // whose synced cache holds the title. A cosmetic shortcut (JWT-level
-    // session is fine — guardrail 29); the route behind it is ADMIN-gated
-    // itself. Nothing while the integration is switched off — every route
-    // behind the links would answer "integration disabled".
-    arrLinks: hasPermission(permissions, Permission.ADMIN)
-      ? flags.then((f) =>
-          flagOn(f, isMovie ? "feature.integration.radarr" : "feature.integration.sonarr")
-            ? arrInstancesForTitle(service, tmdbId).catch(emptyOnFailure(isMovie ? "movie-page" : "tv-page", "arr-links", tmdbId))
-            : [],
-        )
-      : Promise.resolve([]),
-    // ADMIN-only "never watched" chip (guardrail 14d) — null for anyone else.
-    neverWatched: getAdminTitleNeverWatched(permissions, tmdbId, mediaType),
+    ...adminExtraReads(permissions, flags, mediaType, tmdbId),
   });
 
   const wantedSlugs = new Set(reads.wanted.map((w) => w.arrInstance));

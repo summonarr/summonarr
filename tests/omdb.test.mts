@@ -202,7 +202,7 @@ test("happy body: exact field mapping (caller's imdbId wins over the body's), ex
       Metascore: "73",
     }),
   });
-  const result = await getOmdbRatings("tt0133093", "1999-03-31");
+  const result = await getOmdbRatings("tt0133093");
   assert.deepEqual(result, {
     imdbId: "tt0133093", // the input id, NOT the body's imdbID
     imdbRating: "8.8",
@@ -233,8 +233,7 @@ test('"N/A" and absent optional fields both map to null — an all-null result i
       Metascore: "N/A",
     }),
   });
-  const currentYear = new Date().getFullYear(); // mocked — 2026
-  const allNa = await getOmdbRatings("tt0000100", `${currentYear}-01-01`);
+  const allNa = await getOmdbRatings("tt0000100");
   assert.deepEqual(allNa, {
     imdbId: "tt0000100",
     imdbRating: null,
@@ -393,12 +392,46 @@ test("an OMDB transient error inside the chain maps to { transient: true } with 
       omdb: () => jsonResponse({ Response: "False", Error: "Invalid API key!" }),
     });
     const result = await fetchAndCacheOmdbForTmdb(605, "movie");
-    assert.deepEqual(result, { found: false, keyConfigured: true, transient: true });
+    assert.deepEqual(result, { found: false, keyConfigured: true, transient: true, keyRejected: true });
     assert.equal(cacheUpserts.length, 0); // neither omdb:tt0000200 nor the tmdb key
     assert.ok(warns.some((w) => w.includes("[omdb] OMDb refused the API key")), "the swallowed throw must be said");
   } finally {
     resetApiKey(DEFAULT_KEY);
   }
+});
+
+test("only OMDb's own 'no such title' is negative-cached — an unexplained error (\"Error getting data.\") caches nothing", async () => {
+  route({
+    tmdb: () => jsonResponse({ imdb_id: "tt0000300" }),
+    omdb: () => jsonResponse({ Response: "False", Error: "Error getting data." }),
+  });
+  assert.deepEqual(await fetchAndCacheOmdbForTmdb(610, "movie"), { found: false, keyConfigured: true, transient: true });
+  assert.equal(cacheUpserts.length, 0, "a backend hiccup must not tombstone the title for up to a week");
+  // A blank Error is no better an answer.
+  route({ tmdb: () => jsonResponse({ imdb_id: "tt0000301" }), omdb: () => jsonResponse({ Response: "False" }) });
+  assert.deepEqual(await fetchAndCacheOmdbForTmdb(611, "movie"), { found: false, keyConfigured: true, transient: true });
+  assert.equal(cacheUpserts.length, 0);
+
+  for (const [id, error] of [[612, "Movie not found!"], [613, "Series not found!"], [614, "Incorrect IMDb ID."]] as const) {
+    route({ tmdb: () => jsonResponse({ imdb_id: `tt0000${id}` }), omdb: () => jsonResponse({ Response: "False", Error: error }) });
+    assert.deepEqual(await fetchAndCacheOmdbForTmdb(id, "movie"), { found: false, keyConfigured: true }, error);
+    assert.ok(cacheRows.get(`omdb:tmdb:movie:${id}`)?.data.includes("_notFound"), `${error} is an answer`);
+  }
+});
+
+test("a field of the wrong type in OMDb's answer reads as absent, never as a non-string rating", async () => {
+  route({
+    omdb: () => jsonResponse({
+      Response: "True",
+      imdbRating: 8.1,
+      imdbVotes: ["many"],
+      Metascore: { v: 70 },
+      Ratings: [null, { Source: "Rotten Tomatoes", Value: 91 }, { Source: "Rotten Tomatoes", Value: "88%" }],
+    }),
+  });
+  assert.deepEqual(await getOmdbRatings("tt0000315"), {
+    imdbId: "tt0000315", imdbRating: null, imdbVotes: null, rottenTomatoes: null, metacritic: null,
+  });
 });
 
 test("no TMDB read token: keyConfigured-only miss — NO transient flag, no fetch, no cache write", async () => {

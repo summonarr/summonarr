@@ -32,14 +32,19 @@ test("claim: the label and the posted expectation come from the button's own cla
 
   const toggle = functionBody(src, "async function performToggle(");
   assert.match(toggle, /const expectedClaimedBy = localClaimedBy;/);
-  assert.match(toggle, /body: JSON\.stringify\(\{ expectedClaimedBy \}\)/, "the wire body is unchanged");
+  assert.match(toggle, /init: jsonInit\("POST", \{ expectedClaimedBy \}\)/, "the wire body is unchanged");
   assert.doesNotMatch(toggle, /expectedClaimedBy: claimedBy\b/, "never the raw prop");
+  assert.match(toggle, /\{ ifBusy: "skip" \}/, "a second click while one runs sends nothing");
   // A 2xx answers the updated row: its claimedBy becomes the button's.
-  const ok = toggle.slice(toggle.indexOf("return;\n      }"));
+  const ok = toggle.slice(toggle.indexOf("const updated = res.ok ? res.data : null;"));
+  assert.ok(ok.length > 0, "the success tail reads the answer's row");
   assert.match(ok, /updated\.claimedBy[\s\S]*?setLocalClaimedBy\(|setLocalClaimedBy\([\s\S]*?updated\.claimedBy/);
   assert.match(ok, /requestPageRefresh\(\(\) => router\.refresh\(\)\);/);
-  // A 409 falls back to the server-rendered claim, so a stale local claim can't loop.
-  assert.match(toggle, /if \(res\.status === 409\) \{\s*setLocalClaimedBy\(claimedBy\);\s*requestPageRefresh\(\(\) => router\.refresh\(\)\);\s*\}/);
+  // A 409 (stale) or a 404 (the issue is gone) falls back to the server-rendered
+  // claim and refreshes, so a stale local claim can't loop and a deleted issue leaves.
+  assert.match(toggle, /if \(res\.status === 409 \|\| res\.status === 404\) \{\s*setLocalClaimedBy\(claimedBy\);\s*requestPageRefresh\(\(\) => router\.refresh\(\)\);\s*\}/);
+  // The route's own reason is shown; only no answer at all reads as a network error.
+  assert.match(toggle, /setError\(res\.kind === "network" \|\| res\.kind === "timeout" \? t\("adminQueue\.claim\.networkError"\) : res\.error\);/);
 });
 
 test("status and delete: the buttons stay disabled from a successful change until currentStatus moves", () => {
@@ -54,9 +59,12 @@ test("status and delete: the buttons stay disabled from a successful change unti
     const fn = functionBody(actions, name);
     assert.match(fn, /^\s*if \(busy\) return;/, `${name} refuses while busy`);
     const ok = fn.indexOf("setActedFrom(currentStatus);");
-    assert.ok(ok > fn.indexOf("if (!res.ok)"), `${name} locks only after the server said yes`);
+    const refused = fn.indexOf("if (!res.ok");
+    assert.ok(refused > 0 && ok > refused, `${name} locks only after the server said yes`);
     assert.ok(ok < fn.indexOf("requestPageRefresh(() => router.refresh());"), name);
   }
+  // The lock is said on the card while it waits for the refresh, never dead buttons alone.
+  assert.match(actions, /\{actedFrom !== null && \(\s*<span role="status"[^>]*>\s*<Loader2[^>]*\/>\s*\{t\("adminQueue\.issueActions\.updating"\)\}/);
 });
 
 test("resolve: a sent note is cleared, a failure keeps the panel open, and Enter submits", () => {

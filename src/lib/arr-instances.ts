@@ -102,6 +102,15 @@ export function arrSettingKey(service: ArrService, instance: ArrInstanceKey, fie
   return `${service}${instanceKeySegment(instance)}${field}`;
 }
 
+// The secret an instance's webhook must present (guardrail 2): its own
+// `<service><Slug>WebhookSecret`, or — for the DEFAULT instance only — the
+// legacy shared `webhookSecret`. "" = none. The one rule the webhook handlers,
+// the health check and the settings copy buttons all apply.
+export const LEGACY_WEBHOOK_SECRET_KEY = "webhookSecret";
+export function effectiveWebhookSecretFrom(instance: ArrInstanceKey, own: string | null | undefined, legacy: string | null | undefined): string {
+  return own || (instance === DEFAULT_ARR_INSTANCE ? legacy || "" : "");
+}
+
 // Bridge from the legacy ArrVariant ("hd" | "4k") to the instance slug. Retained
 // so any remaining variant-typed call site keeps compiling during the transition.
 export function variantToInstanceKey(variant: "hd" | "4k"): ArrInstanceKey {

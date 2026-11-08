@@ -154,9 +154,43 @@ export function isWatchActive(w: CommandWatch | undefined): boolean {
   return w !== undefined && isLineActive(commandLine(w.states, w.stopped, w.error));
 }
 
-function lineText(line: CommandLine, w: CommandWatch, t: ReturnType<typeof useT>): string {
+type T = ReturnType<typeof useT>;
+
+// The arr's status word in the viewer's language; one the map doesn't know is
+// shown as the arr sent it.
+function statusWord(status: string, t: T): string {
+  const key = STATUS_KEYS[status];
+  return key ? t(key) : status;
+}
+
+// Radarr/Sonarr often finish a command with a result line that only repeats
+// the status ("Completed", "Completed."): it adds nothing to our own wording.
+function isBareCompletedMessage(message: string): boolean {
+  return /^completed\.?$/i.test(message.trim());
+}
+
+// How a finished command ended.
+function doneText(line: Extract<CommandLine, { kind: "done" }>, service: string, t: T): string {
+  switch (line.status) {
+    case "completed":
+      return line.message && !isBareCompletedMessage(line.message)
+        ? t("adminArr.commandWatch.completedWith", { message: line.message })
+        : t("adminArr.commandWatch.completed");
+    case "gone":
+      return t("adminArr.commandWatch.gone", { service });
+    case "unknown":
+      return t("adminArr.commandWatch.unknown", { service });
+    default: {
+      const status = statusWord(line.status, t);
+      if (line.message) return t("adminArr.commandWatch.statusWith", { status, message: line.message });
+      // A cancel was asked for: it needs no "Radarr gave no reason".
+      return line.status === "cancelled" ? status : t("adminArr.commandWatch.noReason", { status, service });
+    }
+  }
+}
+
+function lineText(line: CommandLine, w: CommandWatch, t: T): string {
   const service = SERVICE_LABEL[w.target.service];
-  const status = (s: string) => (STATUS_KEYS[s] ? t(STATUS_KEYS[s]) : s);
   switch (line.kind) {
     case "waiting":
       return w.pendingText;
@@ -169,23 +203,7 @@ function lineText(line: CommandLine, w: CommandWatch, t: ReturnType<typeof useT>
     case "error":
       return line.error ? t("adminArr.commandWatch.readFailed", { error: line.error }) : t("adminArr.commandWatch.readFailedGeneric");
     case "done":
-      switch (line.status) {
-        case "completed":
-          // The arr's own result line, unless it only repeats the word.
-          return line.message && !/^completed\.?$/i.test(line.message.trim())
-            ? t("adminArr.commandWatch.completedWith", { message: line.message })
-            : t("adminArr.commandWatch.completed");
-        case "gone":
-          return t("adminArr.commandWatch.gone", { service });
-        case "unknown":
-          return t("adminArr.commandWatch.unknown", { service });
-        case "cancelled":
-          return line.message ? t("adminArr.commandWatch.statusWith", { status: status(line.status), message: line.message }) : status(line.status);
-        default:
-          return line.message
-            ? t("adminArr.commandWatch.statusWith", { status: status(line.status), message: line.message })
-            : t("adminArr.commandWatch.noReason", { status: status(line.status), service });
-      }
+      return doneText(line, service, t);
   }
 }
 
@@ -204,9 +222,13 @@ export function CommandWatchLine({ watch, className = "" }: { watch: CommandWatc
     : tone === "neutral" ? <CircleDashed className="h-3.5 w-3.5 shrink-0" aria-hidden />
     : <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden />;
   const toneClass = tone === "success" ? "text-green-400" : tone === "warning" ? "text-amber-400" : tone === "danger" ? "" : "text-zinc-400";
+  // ONE live region for the line's whole life: a role that changed after mount
+  // (status → alert) isn't re-registered by some screen readers, so the failure
+  // went unannounced. A failure raises the politeness instead.
   return (
     <p
-      role={tone === "danger" ? "alert" : "status"}
+      role="status"
+      aria-live={tone === "danger" ? "assertive" : "polite"}
       className={cn("m-0 flex items-start gap-1.5 text-xs", toneClass, className)}
       style={tone === "danger" ? { color: "var(--ds-danger)" } : undefined}
     >

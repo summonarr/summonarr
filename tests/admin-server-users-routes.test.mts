@@ -571,10 +571,18 @@ test("the list projects manualUserLink and serverInstance", async () => {
   assert.equal(body.users[0].serverInstance, "remote");
 });
 
-test("the list is bounded so a pathological server can't return an unbounded row set", async () => {
+test("the list is bounded so a pathological server can't return an unbounded row set — and says when it was cut", async () => {
   const t = await mintSession();
-  await getList(t);
-  assert.equal((opsOf("mediaServerUser.findMany")[0].args as { take: number }).take, 10_000);
+  msuRows = [msu({ id: "a" })];
+  const full = await (await getList(t)).json();
+  // One row past the 10,000 bound is read, so a full list and a cut one differ.
+  assert.equal((opsOf("mediaServerUser.findMany")[0].args as { take: number }).take, 10_001);
+  assert.equal(full.truncated, false);
+
+  msuRows = Array.from({ length: 10_001 }, (_, i) => msu({ id: `u${i}` }));
+  const cut = await (await getList(t)).json();
+  assert.equal(cut.users.length, 10_000);
+  assert.equal(cut.truncated, true);
 });
 
 test("the list carries the auto-disable flag alongside the users", async () => {

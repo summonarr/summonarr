@@ -3,8 +3,8 @@
 FROM node:26.12.1-alpine3.23@sha256:bc2b334006f15c7167bbeb2f08f28c2df883f7594a0470e04454ebe7560cfe68 AS deps
 WORKDIR /app
 
-RUN apk upgrade --no-cache
-
+# No `apk upgrade` in the build stages: none of their OS packages reach the
+# runner image, which upgrades (with version floors) on its own below.
 COPY package*.json ./
 # patch-eslint-plugin-react.mjs runs from package.json's postinstall hook
 # to fix the eslint-plugin-react / ESLint 10 incompatibility. It has to
@@ -27,8 +27,6 @@ RUN --mount=type=cache,target=/root/.npm \
 # output into the target-arch builder stage.
 FROM --platform=$BUILDPLATFORM node:26.12.1-alpine3.23@sha256:bc2b334006f15c7167bbeb2f08f28c2df883f7594a0470e04454ebe7560cfe68 AS prisma-gen
 WORKDIR /app
-
-RUN apk upgrade --no-cache
 
 COPY package.json package-lock.json ./
 COPY scripts/prune-lockfile.mjs ./scripts/prune-lockfile.mjs
@@ -54,8 +52,6 @@ RUN npx prisma generate
 # ── Stage 2: builder ──────────────────────────────────────────────────────────
 FROM node:26.12.1-alpine3.23@sha256:bc2b334006f15c7167bbeb2f08f28c2df883f7594a0470e04454ebe7560cfe68 AS builder
 WORKDIR /app
-
-RUN apk upgrade --no-cache
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -89,7 +85,6 @@ RUN rm -rf .next/standalone/node_modules/@img/sharp-libvips-linux-* \
 FROM node:26.12.1-alpine3.23@sha256:bc2b334006f15c7167bbeb2f08f28c2df883f7594a0470e04454ebe7560cfe68 AS migrate-deps
 WORKDIR /app
 
-RUN apk upgrade --no-cache
 COPY package.json package-lock.json ./
 COPY scripts/prune-lockfile.mjs ./scripts/prune-lockfile.mjs
 # prisma + dotenv + pg, hash-pinned: prune-lockfile.mjs carves them plus
@@ -225,7 +220,10 @@ EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
-# Container health probe — hits the in-app /api/health endpoint. The start period
+# Container health probe — hits the in-app /api/health endpoint with busybox
+# wget, the same probe as both compose files: a node process per probe cost tens
+# of MB and a cold start every few seconds. -Y off: an operator's http_proxy
+# must not route the loopback probe. The start period
 # covers the whole boot: the database wait (up to 60s), the opt-in pre-upgrade
 # dump, the pre-push scripts and `prisma db push` before node even starts. A
 # failed probe inside it doesn't count, and the first passing one ends it, so a
@@ -234,7 +232,7 @@ ENV HOSTNAME=0.0.0.0
 # start_period (tests/entrypoint.test.mts). A large dump can still outrun it —
 # under Swarm or an autoheal sidecar, raise it further.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --start-interval=5s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+(process.env.BASE_PATH||'')+'/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+  CMD wget -q -Y off -T 4 -O /dev/null "http://127.0.0.1:${PORT:-3000}${BASE_PATH}/api/health" || exit 1
 
 # tini as PID 1: the kernel ignores any signal PID 1 has no handler for, so with
 # the shell script as PID 1 a `docker stop` during boot was ignored until the

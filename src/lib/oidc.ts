@@ -121,11 +121,20 @@ export function isOidcIssuerSecure(issuer: string | undefined): boolean {
   }
 }
 
+// The OIDC env, or null when it is incomplete or the issuer isn't https. The
+// one reading of it: isOidcConfigured and the discovery below both go through
+// it, so a caller that skipped the configured check still can't run discovery
+// against an http issuer or a missing client id.
+export function readOidcEnv(env: Record<string, string | undefined> = process.env): { issuer: URL; clientId: string; clientSecret: string } | null {
+  const issuer = env.OIDC_ISSUER;
+  const clientId = env.OIDC_CLIENT_ID;
+  const clientSecret = env.OIDC_CLIENT_SECRET;
+  if (!issuer || !clientId || !clientSecret || !isOidcIssuerSecure(issuer)) return null;
+  return { issuer: new URL(issuer), clientId, clientSecret };
+}
+
 export function isOidcConfigured(): boolean {
-  return (
-    !!(process.env.OIDC_ISSUER && process.env.OIDC_CLIENT_ID && process.env.OIDC_CLIENT_SECRET) &&
-    isOidcIssuerSecure(process.env.OIDC_ISSUER)
-  );
+  return readOidcEnv() !== null;
 }
 
 let configPromise: Promise<client.Configuration> | null = null;
@@ -142,9 +151,9 @@ const oidcCustomFetch: client.CustomFetch = (url, options) =>
 function getOidcConfig(): Promise<client.Configuration> {
   if (!configPromise) {
     configPromise = (async () => {
-      const issuer = new URL(process.env.OIDC_ISSUER!);
-      const clientId = process.env.OIDC_CLIENT_ID!;
-      const clientSecret = process.env.OIDC_CLIENT_SECRET!;
+      const env = readOidcEnv();
+      if (!env) throw new Error("[oidc] OIDC is not configured (OIDC_ISSUER must be https, with OIDC_CLIENT_ID and OIDC_CLIENT_SECRET set)");
+      const { issuer, clientId, clientSecret } = env;
       const config = await client.discovery(
         issuer,
         clientId,
@@ -336,6 +345,38 @@ export function buildOidcExchangeUrl(
   return url;
 }
 
+// The ID token's required identity: a non-blank `sub` and an `iss`.
+function requiredIdentity(claims: client.IDToken | undefined): { claims: client.IDToken; sub: string; issuer: string } {
+  if (!claims) throw new Error("[oidc] ID token missing");
+  const sub = typeof claims.sub === "string" ? claims.sub.trim() : "";
+  if (!sub) throw new Error("[oidc] ID token missing required `sub` claim");
+  const issuer = typeof claims.iss === "string" ? claims.iss : "";
+  if (!issuer) throw new Error("[oidc] ID token missing required `iss` claim");
+  return { claims, sub, issuer };
+}
+
+// Groups: the ID token first, then userinfo (several IdPs release group claims
+// only there). Asked for only when the allowlist has groups. No groups ⇒ the
+// allowlist refuses, so a userinfo failure fails closed.
+async function readGroups(
+  config: client.Configuration,
+  claims: Record<string, unknown>,
+  accessToken: string | undefined,
+  sub: string,
+  groupsClaim: string | undefined,
+): Promise<string[] | null> {
+  if (!groupsClaim) return null;
+  const fromToken = readGroupsClaim(claims, groupsClaim);
+  if (fromToken !== null || !accessToken) return fromToken;
+  try {
+    const info = await client.fetchUserInfo(config, accessToken, sub);
+    return readGroupsClaim(info as Record<string, unknown>, groupsClaim);
+  } catch (err) {
+    console.warn("[oidc] userinfo request for the groups claim failed:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
 export async function exchangeOidcCode(
   requestUrl: URL,
   flowState: OidcFlowState,
@@ -347,33 +388,8 @@ export async function exchangeOidcCode(
     expectedNonce: flowState.nonce,
     pkceCodeVerifier: flowState.codeVerifier,
   });
-  const claims = tokens.claims();
-  if (!claims) {
-    throw new Error("[oidc] ID token missing");
-  }
-  const sub = typeof claims.sub === "string" ? claims.sub.trim() : "";
-  if (!sub) {
-    throw new Error("[oidc] ID token missing required `sub` claim");
-  }
-  const issuer = typeof claims.iss === "string" ? claims.iss : "";
-  if (!issuer) {
-    throw new Error("[oidc] ID token missing required `iss` claim");
-  }
-  // Groups: the ID token first, then userinfo (several IdPs release group
-  // claims only there). Asked for only when the allowlist has groups.
-  let groups: string[] | null = null;
-  if (options.groupsClaim) {
-    groups = readGroupsClaim(claims as Record<string, unknown>, options.groupsClaim);
-    if (groups === null && tokens.access_token) {
-      try {
-        const info = await client.fetchUserInfo(config, tokens.access_token, sub);
-        groups = readGroupsClaim(info as Record<string, unknown>, options.groupsClaim);
-      } catch (err) {
-        // No groups ⇒ the allowlist refuses: a userinfo failure fails closed.
-        console.warn("[oidc] userinfo request for the groups claim failed:", err instanceof Error ? err.message : err);
-      }
-    }
-  }
+  const { claims: c, sub, issuer } = requiredIdentity(tokens.claims());
+  const groups = await readGroups(config, c as Record<string, unknown>, tokens.access_token, sub, options.groupsClaim);
   // Pull email/profile from claims directly. If the IdP only releases them via
   // userinfo, we could fetchUserInfo here — but most providers (Authelia,
   // Keycloak, Google, Authentik) include them in id_token when the openid+email+profile
@@ -381,19 +397,15 @@ export async function exchangeOidcCode(
   return {
     issuer,
     sub,
-    email: typeof claims.email === "string" ? claims.email : null,
-    emailVerified: claims.email_verified === true,
-    name: typeof claims.name === "string" ? claims.name : null,
-    preferredUsername:
-      typeof claims.preferred_username === "string" ? claims.preferred_username : null,
-    picture: typeof claims.picture === "string" ? claims.picture : null,
+    email: typeof c.email === "string" ? c.email : null,
+    emailVerified: c.email_verified === true,
+    name: typeof c.name === "string" ? c.name : null,
+    preferredUsername: typeof c.preferred_username === "string" ? c.preferred_username : null,
+    picture: typeof c.picture === "string" ? c.picture : null,
     idToken: tokens.id_token ?? "",
     accessToken: tokens.access_token ?? null,
     refreshToken: tokens.refresh_token ?? null,
-    expiresAt:
-      typeof tokens.expires_in === "number"
-        ? Math.floor(Date.now() / 1000) + tokens.expires_in
-        : null,
+    expiresAt: typeof tokens.expires_in === "number" ? Math.floor(Date.now() / 1000) + tokens.expires_in : null,
     groups,
   };
 }

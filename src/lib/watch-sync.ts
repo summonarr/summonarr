@@ -59,7 +59,7 @@ export function parseWatchSyncDirection(v: unknown): WatchSyncDirection | null {
 // Does a pair stored with `direction` sync toward `target`? An unknown stored
 // value syncs NOTHING (fail closed: a write into someone's account needs an
 // explicit direction).
-export function syncsToward(direction: string, target: "toJellyfin" | "toPlex"): boolean {
+export function syncsToward(direction: string | null, target: "toJellyfin" | "toPlex"): boolean {
   return direction === "both" || direction === target;
 }
 
@@ -106,12 +106,35 @@ export function readBackTo(readTo: Date | null): Date | undefined {
 // The newest viewedAt in a read — what every pair on that server has now been
 // read to. null when the read had no dated entry (keep the previous mark).
 export function newestViewedAt(entries: readonly PlexHistoryEntry[]): Date | null {
+  return newestDate(entries, (e) => e.viewedAt);
+}
+
+// The latest valid date among `items`; null when none has one.
+function newestDate<T>(items: readonly T[], dateOf: (item: T) => Date | null): Date | null {
   let best: number | null = null;
-  for (const e of entries) {
-    const t = e.viewedAt?.getTime();
+  for (const item of items) {
+    const t = dateOf(item)?.getTime();
     if (t !== undefined && Number.isFinite(t) && (best === null || t > best)) best = t;
   }
   return best === null ? null : new Date(best);
+}
+
+// One source play → a WatchSyncPlay through its title lookup: a movie by its own
+// key, an episode by its show's, with both episode numbers required. null =
+// unresolved (counted by the caller, never guessed at).
+function resolvePlay(
+  entry: { kind: "movie" | "episode"; itemKey: string; showKey: string | null; seasonNumber: number | null; episodeNumber: number | null },
+  viewedAt: Date | null,
+  titleFor: (key: string) => PlexTitle | null,
+): WatchSyncPlay | null {
+  if (entry.kind === "movie") {
+    const title = titleFor(entry.itemKey);
+    if (!title || title.mediaType !== "MOVIE") return null;
+    return { tmdbId: title.tmdbId, mediaType: "MOVIE", seasonNumber: null, episodeNumber: null, viewedAt };
+  }
+  const title = entry.showKey ? titleFor(entry.showKey) : null;
+  if (!title || title.mediaType !== "TV" || entry.seasonNumber === null || entry.episodeNumber === null) return null;
+  return { tmdbId: title.tmdbId, mediaType: "TV", seasonNumber: entry.seasonNumber, episodeNumber: entry.episodeNumber, viewedAt };
 }
 
 export interface PairPlaysResult {
@@ -144,15 +167,9 @@ export function playsForPair(
     // the first (full) run took it.
     if (since !== null && (e.viewedAt === null || e.viewedAt.getTime() < since)) continue;
     if (skipItemKeys.has(e.itemKey)) continue;
-    if (e.kind === "movie") {
-      const title = plexTitleForKey(e.itemKey);
-      if (!title || title.mediaType !== "MOVIE") { unresolved++; continue; }
-      plays.push({ tmdbId: title.tmdbId, mediaType: "MOVIE", seasonNumber: null, episodeNumber: null, viewedAt: e.viewedAt });
-      continue;
-    }
-    const title = e.showKey ? plexTitleForKey(e.showKey) : null;
-    if (!title || title.mediaType !== "TV" || e.seasonNumber === null || e.episodeNumber === null) { unresolved++; continue; }
-    plays.push({ tmdbId: title.tmdbId, mediaType: "TV", seasonNumber: e.seasonNumber, episodeNumber: e.episodeNumber, viewedAt: e.viewedAt });
+    const play = resolvePlay(e, e.viewedAt, plexTitleForKey);
+    if (play) plays.push(play);
+    else unresolved++;
   }
   return { plays, unresolved };
 }
@@ -170,12 +187,7 @@ export interface JellyfinPlayedInput {
 }
 
 export function newestPlayedAt(items: readonly JellyfinPlayedInput[]): Date | null {
-  let best: number | null = null;
-  for (const it of items) {
-    const t = it.lastPlayedAt?.getTime();
-    if (t !== undefined && Number.isFinite(t) && (best === null || t > best)) best = t;
-  }
-  return best === null ? null : new Date(best);
+  return newestDate(items, (it) => it.lastPlayedAt);
 }
 
 // The Jellyfin user's played items as plays: a movie resolves by its own item
@@ -190,15 +202,9 @@ export function playsFromJellyfin(
   let unresolved = 0;
   for (const it of items) {
     if (skipItemIds.has(it.itemKey)) continue;
-    if (it.kind === "movie") {
-      const title = jellyfinTitleForId(it.itemKey);
-      if (!title || title.mediaType !== "MOVIE") { unresolved++; continue; }
-      plays.push({ tmdbId: title.tmdbId, mediaType: "MOVIE", seasonNumber: null, episodeNumber: null, viewedAt: it.lastPlayedAt });
-      continue;
-    }
-    const title = it.showKey ? jellyfinTitleForId(it.showKey) : null;
-    if (!title || title.mediaType !== "TV" || it.seasonNumber === null || it.episodeNumber === null) { unresolved++; continue; }
-    plays.push({ tmdbId: title.tmdbId, mediaType: "TV", seasonNumber: it.seasonNumber, episodeNumber: it.episodeNumber, viewedAt: it.lastPlayedAt });
+    const play = resolvePlay(it, it.lastPlayedAt, jellyfinTitleForId);
+    if (play) plays.push(play);
+    else unresolved++;
   }
   return { plays, unresolved };
 }
@@ -340,27 +346,34 @@ export interface ProgressDecision {
   positionMs: number;
 }
 
+function activityMs(s: ProgressState): number | null {
+  return s.lastActivity?.getTime() ?? null;
+}
+
+// Which side's resume point is copied: the only side holding one, or — both
+// holding one — the side with the newer activity. null when neither holds one,
+// or when both do and which is newer can't be told.
+function resumeSource(plex: ProgressState, jellyfin: ProgressState): "plex" | "jellyfin" | null {
+  const plexResume = isResumePoint(plex);
+  const jfResume = isResumePoint(jellyfin);
+  if (!plexResume && !jfResume) return null;
+  if (!(plexResume && jfResume)) return plexResume ? "plex" : "jellyfin";
+  const a = activityMs(plex);
+  const b = activityMs(jellyfin);
+  if (a === null || b === null || a === b) return null;
+  return a > b ? "plex" : "jellyfin";
+}
+
 // One title's state on each side → the write to make, if any. `direction` is
 // the pair's; a side missing on a server (null) is never a target.
 export function decideProgress(
   plex: ProgressState | null,
   jellyfin: ProgressState | null,
-  direction: string,
+  direction: string | null,
 ): ProgressDecision | null {
-  const plexResume = isResumePoint(plex);
-  const jfResume = isResumePoint(jellyfin);
-  if (!plex || !jellyfin || (!plexResume && !jfResume)) return null;
-  const t = (s: ProgressState) => s.lastActivity?.getTime() ?? null;
-
-  let source: "plex" | "jellyfin";
-  if (plexResume && jfResume) {
-    const a = t(plex);
-    const b = t(jellyfin);
-    if (a === null || b === null || a === b) return null; // can't tell which is newer: leave both
-    source = a > b ? "plex" : "jellyfin";
-  } else {
-    source = plexResume ? "plex" : "jellyfin";
-  }
+  if (!plex || !jellyfin) return null;
+  const source = resumeSource(plex, jellyfin);
+  if (!source) return null;
   const src = source === "plex" ? plex : jellyfin;
   const dst = source === "plex" ? jellyfin : plex;
   const target = source === "plex" ? "toJellyfin" : "toPlex";
@@ -369,8 +382,8 @@ export function decideProgress(
   // Watched beats in-progress.
   if (isWatchedWithoutResume(dst)) return null;
   // The target saw activity at or after the source's: the user moved on there.
-  const ts = t(src);
-  const td = t(dst);
+  const ts = activityMs(src);
+  const td = activityMs(dst);
   if (td !== null && (ts === null || td >= ts)) return null;
   return { target, positionMs: Math.round(src.positionMs) };
 }
@@ -429,12 +442,7 @@ export function oldestFirst<T extends { viewedAt: Date | null }>(plays: readonly
 
 // The newest dated play in a chunk — the read point once it is queued.
 export function chunkReadTo(chunk: ReadonlyArray<{ viewedAt: Date | null }>): Date | null {
-  let best: number | null = null;
-  for (const p of chunk) {
-    const t = p.viewedAt?.getTime();
-    if (t !== undefined && Number.isFinite(t) && (best === null || t > best)) best = t;
-  }
-  return best === null ? null : new Date(best);
+  return newestDate(chunk, (p) => p.viewedAt);
 }
 
 // ── admin page ordering ──────────────────────────────────────────────────────

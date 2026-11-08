@@ -29,7 +29,7 @@
 // Harness: the sessions-routes idiom — real signed session JWTs (bearer
 // transport, which skips the UA-fingerprint binding per guardrail 6b) against
 // in-memory prisma stubs. The lib's grouped page/count queries are raw SQL
-// ($queryRawUnsafe), so the stub is a JS MIRROR of the query contract: it
+// ($queryRaw), so the stub is a JS MIRROR of the query contract: it
 // parses the bind positions out of the SQL shape (IN list, CAST, ILIKE,
 // cursor, LIMIT) and evaluates scoping/filtering/grouping over the in-memory
 // rows. That keeps these tests behavioral for the wire contract; the SQL
@@ -188,7 +188,7 @@ function pickSelect(row: HistoryRow, select: Record<string, true>): Record<strin
   return out;
 }
 
-// The list path's grouped ENTRY count rides $queryRawUnsafe (mirrored below);
+// The list path's grouped ENTRY count rides $queryRaw (mirrored below);
 // these delegate methods serve the stats aggregates + the entry-detail queries.
 //
 // `count` serves exactly one caller: the `stats.plays` headline, which counts
@@ -278,8 +278,9 @@ function rowMatchesSearch(r: HistoryRow, needle: string): boolean {
 function filteredRows(sql: string, binds: unknown[]): HistoryRow[] {
   const inMatch = sql.match(/"mediaServerUserId" IN \(([^)]*)\)/);
   assert.ok(inMatch, "page/count SQL must scope by mediaServerUserId IN (…)");
-  const idCount = (inMatch![1]!.match(/\$\d+/g) ?? []).length;
-  const msuIds = binds.slice(0, idCount) as string[];
+  // Each id by its own placeholder number: the page query binds its search
+  // column before the scope, so the ids are not always the first binds.
+  const msuIds = (inMatch![1]!.match(/\$\d+/g) ?? []).map((p) => binds[Number(p.slice(1)) - 1]) as string[];
   let rows = historyRows.filter((r) => msuIds.includes(r.mediaServerUserId));
 
   const castMatch = sql.match(/"mediaType" = CAST\(\$(\d+) AS "MediaType"\)/);
@@ -316,8 +317,13 @@ function groupedReps(rows: HistoryRow[], groupNeedle: string | null) {
   });
 }
 
-shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async (sql: string, ...binds: unknown[]) => {
-  rec("$queryRawUnsafe", { sql, binds });
+// The lib builds each statement with Prisma.sql and hands it over as ONE value
+// (guardrail 23a): `text` is the Postgres form with $N placeholders, `values`
+// the binds.
+shadowPrismaClientMethod(prisma, "$queryRaw", async (q: { text: string; values: unknown[] }) => {
+  const sql = q.text;
+  const binds = q.values;
+  rec("$queryRaw", { sql, binds });
   if (sql.includes("COUNT(DISTINCT")) {
     const keys = new Set(filteredRows(sql, binds).map(groupKey));
     return [{ total: keys.size }];
@@ -327,9 +333,11 @@ shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async (sql: string, ...binds
     sql.includes("AS group_matches") ? searchNeedle(sql, binds) : null,
   );
   const cursorMatch = sql.match(/"startedAt" < \$(\d+)/);
+  const cursorIdMatch = sql.match(/r\."id" < \$(\d+)/);
   if (cursorMatch) {
+    assert.ok(cursorIdMatch, "the keyset predicate binds the cursor id");
     const at = binds[Number(cursorMatch[1]) - 1] as Date;
-    const cid = binds[Number(cursorMatch[1])] as string;
+    const cid = binds[Number(cursorIdMatch![1]) - 1] as string;
     reps = reps.filter(
       (r) =>
         r.startedAt.getTime() < at.getTime() ||
@@ -508,7 +516,7 @@ beforeEach(() => {
 test("unauthenticated request is 401 and never touches PlayHistory", async () => {
   const res = await getMine(mineReq(null), undefined);
   assert.equal(res.status, 401);
-  assert.equal(opsOf("$queryRawUnsafe").length, 0);
+  assert.equal(opsOf("$queryRaw").length, 0);
   assert.equal(opsOf("mediaServerUser.findMany").length, 0);
 });
 
@@ -541,7 +549,7 @@ test("returns ONLY the caller's linked history — other users' rows never appea
   // linked-id set (not a caller-supplied value).
   const msuCall = opsOf("mediaServerUser.findMany")[0]!.args as { where: { OR: { userId?: string }[] } };
   assert.deepEqual(msuCall.where.OR, [{ userId: alice.userId }]);
-  const raw = opsOf("$queryRawUnsafe")[0]!.args as { binds: unknown[] };
+  const raw = opsOf("$queryRaw")[0]!.args as { binds: unknown[] };
   assert.deepEqual(new Set(raw.binds.slice(0, 2)), new Set(["msu-a1", "msu-a2"]));
 });
 
@@ -562,7 +570,7 @@ test("userId-shaped query params are ignored — no parameter can widen the scop
   assert.deepEqual(body.items.map((i) => i.id), [mine.id]);
   assert.ok(!body.items.some((i) => i.title === "Bob Secret Movie"));
   // The scope bind is still alice's linked id — nothing from the query string.
-  const raw = opsOf("$queryRawUnsafe")[0]!.args as { binds: unknown[] };
+  const raw = opsOf("$queryRaw")[0]!.args as { binds: unknown[] };
   assert.equal(raw.binds[0], "msu-a1");
 });
 
@@ -576,7 +584,7 @@ test("unlinked account gets linked:false and PlayHistory is never queried", asyn
   assert.deepEqual(body.items, []);
   assert.equal(body.total, 0);
   assert.deepEqual(body.stats, { plays: 0, playSeconds: 0 });
-  assert.equal(opsOf("$queryRawUnsafe").length, 0);
+  assert.equal(opsOf("$queryRaw").length, 0);
   assert.equal(opsOf("playHistory.aggregate").length, 0);
 });
 
@@ -632,7 +640,7 @@ test("payload is the lean self-view: admin forensics columns never serialize; po
   assert.equal(item.posterPath, "/matrix-row.jpg");
   assert.equal(typeof item.startedAt, "string"); // ISO-serialized for the client
   // The page SQL itself must never select the forensics columns.
-  const sql = (opsOf("$queryRawUnsafe")[0]!.args as { sql: string }).sql;
+  const sql = (opsOf("$queryRaw")[0]!.args as { sql: string }).sql;
   for (const col of ["ipAddress", "videoCodec", "bitrate", "location", "bandwidth"]) {
     assert.ok(!sql.includes(`"${col}"`), `page SQL must not select ${col}`);
   }
@@ -744,7 +752,7 @@ test("search matches title/episode case-insensitively; LIKE metacharacters are L
   const percent = await fetchMine(alice.token, { search: "100%" });
   assert.deepEqual(percent.body.items.map((i) => i.id), [literal.id]);
   // The bind itself must be the escaped pattern, ready for ESCAPE '\'.
-  const lastRaw = opsOf("$queryRawUnsafe").at(-2)!.args as { binds: unknown[] };
+  const lastRaw = opsOf("$queryRaw").at(-2)!.args as { binds: unknown[] };
   assert.ok(lastRaw.binds.includes("%100\\%%"), "search bind must be ILIKE-escaped");
 });
 
@@ -780,7 +788,7 @@ test("a cursor page reuses page one's total and stats in the same activity gener
 
   const first = await fetchMine(alice.token);
   assert.equal(first.body.total, 31);
-  const countSql = () => opsOf("$queryRawUnsafe").filter((o) => (o.args as { sql: string }).sql.includes("COUNT(DISTINCT")).length;
+  const countSql = () => opsOf("$queryRaw").filter((o) => (o.args as { sql: string }).sql.includes("COUNT(DISTINCT")).length;
   assert.equal(countSql(), 1);
   assert.equal(opsOf("playHistory.count").length, 1);
   assert.equal(opsOf("playHistory.aggregate").length, 1);
@@ -824,6 +832,15 @@ test("keyset cursor pages the caller's entries without overlap (same-timestamp i
     assert.ok(!seen.has(item.id), `row ${item.id} appeared on both pages`);
   }
   assert.equal(seen.size + second.body.items.length, 31);
+});
+
+test("a last page that is exactly full carries no cursor, so the client never fetches an empty page", async () => {
+  const alice = await mintSession();
+  addMsu("msu-a1", alice.userId);
+  for (let i = 0; i < 30; i++) addPlay("msu-a1");
+  const first = await fetchMine(alice.token);
+  assert.equal(first.body.items.length, 30);
+  assert.equal(first.body.nextCursor, null);
 });
 
 test("a malformed cursor fails soft to the first page", async () => {

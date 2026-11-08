@@ -24,6 +24,7 @@ import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 import type { Mode, ReportKey, Reports, Service } from "@/components/admin/use-missing-reports";
 import { readApiError } from "@/lib/client/api-error";
+import { listSelection, pageSelection, type SelectionRules } from "@/components/admin/bulk-selection";
 import {
   BULK_SEARCH_CONFIRM_OVER,
   BULK_SEARCH_MAX,
@@ -197,6 +198,11 @@ export function useBulkSearch() {
     setBulk((b) => (b ? { ...b, cancelling: true } : b));
   }
 
+  // Whether a bulk search is running right now, for a callback that must not
+  // act mid-run (a re-read would reset the rows the run holds). A live read, not
+  // the `bulk` of the render the callback was made in.
+  const isBulkRunning = useCallback(() => bulkAbort.current !== null, []);
+
   return {
     searches,
     selected,
@@ -206,7 +212,7 @@ export function useBulkSearch() {
     bulkResult,
     confirming,
     setConfirming,
-    bulkAbort,
+    isBulkRunning,
     listIdle,
     resetList,
     startSearch,
@@ -216,6 +222,9 @@ export function useBulkSearch() {
 }
 
 export type BulkSearch = ReturnType<typeof useBulkSearch>;
+
+// Stable, so a list with no report yet doesn't redo the whole-list passes every render.
+const NO_ROWS: ReadonlyArray<BulkRow> = [];
 
 // The selection on the list on screen. A tick outlives a page turn and a
 // filter change, so the selection is every ticked row of this tab and mode —
@@ -235,7 +244,7 @@ export function useBulkSelection(
     current: ReportKey;
     /** Every row the filters list, in the order shown, across every page. */
     currentRows: ReadonlyArray<BulkRow>;
-    /** The rows on screen: this page. */
+    /** The rows on screen: this page (a slice of currentRows). */
     pageRows: ReadonlyArray<BulkRow>;
     /** The list's unfiltered report. */
     report: Reports[ReportKey];
@@ -252,27 +261,16 @@ export function useBulkSelection(
     const st = searches[k];
     return !st?.busy && st?.outcome !== "started" && st?.outcome !== "already" && !bulkPending.has(k);
   }, [selKey, searches, bulkPending]);
-  // The header box works on the rows on screen: this page.
-  const selectable = pageRows.filter(isOpen);
-  const shownKeys = new Set(pageRows.map(selKey));
-  // The passes over the whole list (every page, and the unfiltered report) run
-  // once per change of what they read, not on every render.
-  const listedKeys = useMemo(() => new Set(currentRows.map(selKey)), [currentRows, selKey]);
-  const selectedListed = useMemo(() => currentRows.filter((r) => selected.has(selKey(r)) && isOpen(r)), [currentRows, selected, selKey, isOpen]);
-  const selectedShown = selectable.filter((r) => selected.has(selKey(r)));
-  const selectedOffPage = selectedListed.length - selectedShown.length;
-  const selectedHidden = useMemo(
-    () => ((report?.items ?? []) as ReadonlyArray<BulkRow>).filter((r) => !listedKeys.has(selKey(r)) && selected.has(selKey(r)) && isOpen(r)),
-    [report, listedKeys, selected, selKey, isOpen],
-  );
-  const selectedHere = [...selectedListed, ...selectedHidden];
-  // What a run takes — and so what the button says.
-  const toRun = capSelection(selectedHere);
-  const atCap = selectedHere.length >= BULK_SEARCH_MAX;
-  // The room the cap leaves on this page beside the ticks elsewhere.
-  const roomOnPage = BULK_SEARCH_MAX - selectedOffPage - selectedHidden.length;
-  // Every row on screen that the cap leaves room for is ticked.
-  const allSelected = selectedShown.length > 0 && selectedShown.length === Math.min(selectable.length, roomOnPage);
+  // Every row of the report is a BulkRow (each list's rows carry instance,
+  // arrId and title — checked on read, missing-report-shape.ts).
+  const reportItems: ReadonlyArray<BulkRow> = report?.items ?? NO_ROWS;
+  const rules = useMemo<SelectionRules<BulkRow>>(() => ({ selected, selKey, isOpen }), [selected, selKey, isOpen]);
+  // The passes over the whole list (every page, and the unfiltered report)
+  // run once per change of what they read; the page's own view is a page of
+  // rows, taken every render (bulk-selection.ts).
+  const list = useMemo(() => listSelection(currentRows, reportItems, rules), [currentRows, reportItems, rules]);
+  const { selectedHidden, selectedHere, toRun, atCap } = list;
+  const { selectable, shownKeys, selectedOffPage, roomOnPage, allSelected } = pageSelection(list, pageRows, rules);
   const bulkRunning = bulk !== null;
   const runningHere = bulk?.key === current ? bulk : null;
   const resultHere = bulkResult?.key === current ? bulkResult : null;
@@ -324,7 +322,7 @@ export function useBulkSelection(
   // Re-ticks exactly the rows the last run could not search.
   function retryFailed() {
     if (!bulkResult || bulkResult.key !== current) return;
-    const open = new Set(((report?.items ?? []) as ReadonlyArray<BulkRow>).filter(isOpen).map(selKey));
+    const open = new Set(reportItems.filter(isOpen).map(selKey));
     const failed = bulkResult.failed.filter((k) => open.has(k)).slice(0, BULK_SEARCH_MAX);
     setSelected((prev) => new Set([...[...prev].filter((k) => !k.startsWith(`${current}|`)), ...failed]));
   }

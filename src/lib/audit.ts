@@ -22,13 +22,28 @@ export type AuditParams = {
 // admin audit table (tooltip title attribute), so it gets the full
 // sanitizeForLog strip (controls + bidi overrides); ipAddress is normally a
 // validated getClientIp value but is sanitized the same way as an extra safety step.
+//
+// target and details are bounded too: a caller logging a large list (settings
+// keys, instance lists, error arrays) would otherwise write a row the viewer
+// and the export load whole. An oversized details is replaced by a marker
+// object, so the column still holds valid JSON for every reader.
+export const MAX_AUDIT_TARGET_LENGTH = 512;
+export const MAX_AUDIT_DETAILS_LENGTH = 16 * 1024;
+
+export function auditDetailsJson(details: Record<string, unknown> | undefined): string | null {
+  if (!details) return null;
+  const json = JSON.stringify(details);
+  if (json.length <= MAX_AUDIT_DETAILS_LENGTH) return json;
+  return JSON.stringify({ truncated: true, originalLength: json.length, keys: Object.keys(details).slice(0, 50) });
+}
+
 function auditRowData(params: AuditParams) {
   return {
     userId: params.userId,
     userName: sanitizeText(params.userName ?? "unknown"),
     action: params.action,
-    target: sanitizeText(params.target),
-    details: params.details ? JSON.stringify(params.details) : null,
+    target: sanitizeText(params.target).slice(0, MAX_AUDIT_TARGET_LENGTH),
+    details: auditDetailsJson(params.details),
     ipAddress: params.ipAddress ? sanitizeForLog(params.ipAddress) : null,
     userAgent: params.userAgent ? sanitizeForLog(params.userAgent) : null,
     provider: params.provider ?? null,
@@ -103,9 +118,12 @@ export async function getAuditPiiRetentionDays(): Promise<number> {
     const n = parseInt(row.value, 10);
     if (!Number.isInteger(n)) return AUDIT_PII_RETENTION_DEFAULT_DAYS;
     return Math.min(AUDIT_PII_RETENTION_MAX_DAYS, Math.max(AUDIT_PII_RETENTION_MIN_DAYS, n));
-  } catch {
-    // A read failure must not block the scrub — fall back to the documented default.
-    return AUDIT_PII_RETENTION_DEFAULT_DAYS;
+  } catch (err) {
+    // A failed read must never scrub MORE than the admin chose: the scrub is
+    // irreversible, and the default (90) is shorter than any longer setting.
+    // The longest window scrubs (next to) nothing; the next run reads again.
+    console.warn("[audit] couldn't read the PII retention setting; scrubbing with the longest window this run:", err instanceof Error ? err.message : err);
+    return AUDIT_PII_RETENTION_MAX_DAYS;
   }
 }
 
@@ -120,4 +138,29 @@ export function auditContext(
     userAgent: headers.get("user-agent")?.slice(0, 512) ?? null,
     provider: session?.user?.provider ?? null,
   };
+}
+
+// Who did it, and from where: the signed-in actor plus auditContext, spread
+// into a logAudit call. Read when called, so a background job that outlives
+// the request can hold the result.
+export function auditActor(
+  req: Request | { headers: Headers },
+  session: { user: { id: string; name?: string | null; email?: string | null; provider?: string } },
+) {
+  return {
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email ?? null,
+    ...auditContext(req, session),
+  };
+}
+
+// Rewrites the details of a row written earlier (an export's paper trail,
+// closed with how it ended). Swallows like logAudit: the operation it records
+// has already happened, so a failed write only leaves the row unfinished.
+export async function finalizeAuditRow(id: string, details: Record<string, unknown>, scope: string): Promise<void> {
+  try {
+    await prisma.auditLog.update({ where: { id }, data: { details: auditDetailsJson(details) } });
+  } catch (err) {
+    console.error(`${scope} failed to finalize audit row:`, err);
+  }
 }

@@ -10,7 +10,7 @@
 //          from a lookup made before it (`/api/v3/movie?tmdbId=`, the series or
 //          episode list) is an ordinary failure, never "search again".
 //
-// Both go through ONE helper, postReleaseGrab (src/lib/arr.ts), used by all
+// Both go through ONE helper, postReleaseGrab (src/lib/arr-releases.ts), used by all
 // three grab paths: the request "Pick release", the issue Replace, the title
 // manager. Scripted Radarr/Sonarr behind a stubbed DNS lookup, in-memory
 // settings.
@@ -161,7 +161,7 @@ test("C111/C011: no source POSTs /api/v3/release except postReleaseGrab", () => 
   // no query, which only a grab uses — may appear nowhere else, so a path
   // constant or another client can't route around the chokepoint either.
   const srcDir = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
-  const arrFile = join(srcDir, "lib", "arr.ts");
+  const arrFile = join(srcDir, "lib", "arr-releases.ts");
   const [grabStart, grabEnd] = functionBodyRange(readFileSync(arrFile, "utf8"), "export async function postReleaseGrab(");
   const inGrab = (p: string, at: number) => p === arrFile && at >= grabStart && at < grabEnd;
   const offenders: string[] = [];

@@ -1,5 +1,5 @@
 import { generateVapidKeys, sendPushNotification } from "@/lib/web-push";
-import { prisma } from "@/lib/prisma";
+import { prisma, type PrismaTxClient } from "@/lib/prisma";
 import { decryptToken } from "@/lib/token-crypto";
 import { isFeatureEnabled } from "@/lib/features";
 import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
@@ -12,6 +12,8 @@ import type { Locale } from "@/lib/i18n/locales";
 import type { Translator } from "@/lib/i18n/translate";
 import { issueTypeLabelT, mediaLabelT } from "@/lib/notify-i18n";
 import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
+import { processSingleton } from "@/lib/process-singleton";
+import { v, check } from "@/lib/validate";
 
 type VapidKeys = { publicKey: string; privateKey: string; contact: string };
 
@@ -68,6 +70,10 @@ function recipientLocales(users: readonly ({ locale?: string | null } | null | u
 // Recipient rows join the subscription to its user's stored locale.
 const WITH_LOCALE = { user: { select: { locale: true } } } as const;
 
+// How many sends of one notification run at once (guardrail 31): the device
+// list scales with the user base.
+const PUSH_FANOUT_CONCURRENCY = 8;
+
 // Row shape sendPush consumes — structurally satisfied by prisma.pushSubscription
 // findMany results (web rows have p256dh/auth; ios rows have deviceToken).
 type PushRow = {
@@ -105,6 +111,37 @@ export function buildVapidContact(smtpFrom?: string | null, smtpUser?: string | 
 
 const VAPID_UNREADABLE_WARN_KEY = "push:vapid-unreadable";
 
+// Stores `generated` as the VAPID pair unless one already exists. Runs under
+// advisory lock (1001, 5) so two concurrent requests can't each generate and
+// save a different pair; a caller that lost the race finds both rows and
+// writes nothing.
+async function storeVapidKeysIfAbsentInTx(tx: PrismaTxClient, generated: { publicKey: string; privateKey: string }): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 5)`;
+  const rows = await tx.setting.findMany({
+    where: { key: { in: ["vapidPublicKey", "vapidPrivateKey"] } },
+  });
+  const hasPublic = rows.some((r) => r.key === "vapidPublicKey");
+  const hasPrivate = rows.some((r) => r.key === "vapidPrivateKey");
+  if (hasPublic && hasPrivate) return;
+  // Only one half present: do NOT regenerate. Overwriting the surviving key
+  // would invalidate every existing web push subscription, and the missing
+  // half can't be rebuilt from the other one. So refuse and leave the stored
+  // half alone. getVapidKeysRaw() keeps returning null (it needs both), and
+  // web push stays off until an operator repairs the pair.
+  if (hasPublic || hasPrivate) throw new VapidPartialKeypairError();
+  // One at a time: a transaction is one connection (guardrail 23c).
+  await tx.setting.upsert({
+    where: { key: "vapidPublicKey" },
+    create: { key: "vapidPublicKey", value: generated.publicKey },
+    update: { value: generated.publicKey },
+  });
+  await tx.setting.upsert({
+    where: { key: "vapidPrivateKey" },
+    create: { key: "vapidPrivateKey", value: generated.privateKey },
+    update: { value: generated.privateKey },
+  });
+}
+
 export async function getOrCreateVapidPublicKey(): Promise<string> {
   // VAPID keys must never change once subscriptions exist: new keys would
   // invalidate every stored browser subscription.
@@ -116,37 +153,7 @@ export async function getOrCreateVapidPublicKey(): Promise<string> {
 
   const generated = generateVapidKeys();
   try {
-    await prisma.$transaction(async (tx) => {
-    // A Postgres advisory lock stops two concurrent requests from each
-    // generating and saving a different key pair.
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 5)`;
-
-    const rows = await tx.setting.findMany({
-      where: { key: { in: ["vapidPublicKey", "vapidPrivateKey"] } },
-    });
-    const hasPublic = rows.some((r) => r.key === "vapidPublicKey");
-    const hasPrivate = rows.some((r) => r.key === "vapidPrivateKey");
-    if (hasPublic && hasPrivate) return;
-    // Only one half present: do NOT regenerate. Overwriting the surviving key
-    // would invalidate every existing web push subscription, and the missing
-    // half can't be rebuilt from the other one. So refuse and leave the stored
-    // half alone. getVapidKeysRaw() keeps returning null (it needs both), and
-    // web push stays off until an operator repairs the pair.
-    if (hasPublic || hasPrivate) {
-      throw new VapidPartialKeypairError();
-    }
-    // One at a time: a transaction is one connection (guardrail 23c).
-    await tx.setting.upsert({
-      where: { key: "vapidPublicKey" },
-      create: { key: "vapidPublicKey", value: generated.publicKey },
-      update: { value: generated.publicKey },
-    });
-    await tx.setting.upsert({
-      where: { key: "vapidPrivateKey" },
-      create: { key: "vapidPrivateKey", value: generated.privateKey },
-      update: { value: generated.privateKey },
-    });
-    });
+    await prisma.$transaction((tx) => storeVapidKeysIfAbsentInTx(tx, generated));
   } catch (err) {
     if (err instanceof VapidPartialKeypairError) {
       // Leave the stored half intact. Return whatever public key exists so a
@@ -253,13 +260,18 @@ const DEFAULT_APNS_RELAY_URL = "https://summonapns.gadgetusaf.com/push";
 // Note: the cache holds the DECRYPTED relay key in memory for up to 30s, just
 // as omdb.ts does with its API key.
 const APNS_RELAY_TTL_MS = 30_000;
-let apnsRelayCache: { value: { url: string; key: string }; at: number } | null = null;
-let apnsRelayInflight: Promise<{ url: string; key: string }> | null = null;
-
-// Bumped by every invalidation. A read that was already running only saves
-// its result if no invalidation happened meanwhile; otherwise it would put the
-// OLD value back into the cache for another 30s.
-let apnsRelayEpoch = 0;
+type ApnsRelayConfig = { url: string; key: string };
+// Process-wide (guardrail 27a): the settings route invalidates from its own
+// chunk, and the senders (webhooks, crons, the poller) run in others. A
+// per-chunk cache meant an invalidation could miss the copy a sender reads.
+// `epoch` is bumped by every invalidation: a read that was already running
+// only saves its result if no invalidation happened meanwhile; otherwise it
+// would put the OLD value back into the cache for another 30s.
+const apnsRelay = processSingleton("push:apns-relay", () => ({
+  cache: null as { value: ApnsRelayConfig; at: number } | null,
+  inflight: null as Promise<ApnsRelayConfig> | null,
+  epoch: 0,
+}));
 
 /**
  * Clears the cache. Called by /api/settings after a relay change, so the
@@ -267,31 +279,31 @@ let apnsRelayEpoch = 0;
  * uses the new config instead of one up to 30s old.
  */
 export function invalidateApnsRelayCache(): void {
-  apnsRelayEpoch += 1;
-  apnsRelayCache = null;
-  apnsRelayInflight = null;
+  apnsRelay.epoch += 1;
+  apnsRelay.cache = null;
+  apnsRelay.inflight = null;
 }
 
-async function getApnsRelayConfig(): Promise<{ url: string; key: string }> {
+async function getApnsRelayConfig(): Promise<ApnsRelayConfig> {
   const now = Date.now();
-  if (apnsRelayCache && now - apnsRelayCache.at < APNS_RELAY_TTL_MS) return apnsRelayCache.value;
-  if (apnsRelayInflight) return apnsRelayInflight;
-  const epochAtStart = apnsRelayEpoch;
-  const load: Promise<{ url: string; key: string }> = readApnsRelayConfig()
+  if (apnsRelay.cache && now - apnsRelay.cache.at < APNS_RELAY_TTL_MS) return apnsRelay.cache.value;
+  if (apnsRelay.inflight) return apnsRelay.inflight;
+  const epochAtStart = apnsRelay.epoch;
+  const load: Promise<ApnsRelayConfig> = readApnsRelayConfig()
     .then((value) => {
-      if (apnsRelayEpoch === epochAtStart) apnsRelayCache = { value, at: Date.now() };
+      if (apnsRelay.epoch === epochAtStart) apnsRelay.cache = { value, at: Date.now() };
       return value;
     })
     .finally(() => {
       // Only clear our own slot: after an invalidation a newer load owns it, and
       // dropping that one would send the next caller to a redundant third read.
-      if (apnsRelayInflight === load) apnsRelayInflight = null;
+      if (apnsRelay.inflight === load) apnsRelay.inflight = null;
     });
-  apnsRelayInflight = load;
+  apnsRelay.inflight = load;
   return load;
 }
 
-async function readApnsRelayConfig(): Promise<{ url: string; key: string }> {
+async function readApnsRelayConfig(): Promise<ApnsRelayConfig> {
   const rows = await prisma.setting.findMany({
     where: { key: { in: ["apnsRelayUrl", "apnsRelayKey"] } },
   });
@@ -304,19 +316,34 @@ async function readApnsRelayConfig(): Promise<{ url: string; key: string }> {
   };
 }
 
-async function sendApns(subscription: PushRow, payload: PushPayload): Promise<boolean> {
-  if (!subscription.deviceToken) return false;
+// The relay's answers. Every field is optional and only read when it has the
+// right type: a body that doesn't fit is treated as no body at all.
+const RelayErrorBody = v.object({
+  error: v.optional(v.unknown()),
+  reason: v.optional(v.unknown()),
+  apnsReason: v.optional(v.unknown()),
+});
+const RelayOkBody = v.object({ ok: v.optional(v.unknown()), reason: v.optional(v.unknown()) });
+
+const textOf = (value: unknown): string | undefined => (typeof value === "string" && value.length > 0 ? value : undefined);
+
+async function readRelayBody<S extends typeof RelayErrorBody | typeof RelayOkBody>(res: Response, schema: S) {
+  const parsed = check(schema, await res.json().catch(() => null));
+  return parsed.ok ? parsed.value : null;
+}
+
+// The APNs payload: the generic alert in the recipient's language, plus — when
+// the device registered an E2E public key — the REAL title/body encrypted for
+// it, marked mutable so the on-device Notification Service Extension rewrites
+// the banner. The relay only ever sees ciphertext + the generic placeholder
+// (shown if decryption is unavailable). Falls back to the placeholder on any
+// encrypt failure.
+function buildApnsPayload(subscription: PushRow, payload: PushPayload): Record<string, unknown> {
   const alert = payload.alert ?? APNS_ALERTS[payload.category];
   const apnsPayload: Record<string, unknown> = {
     aps: { alert: { title: alert.title, body: alert.body }, sound: "default" },
     url: payload.url,
   };
-
-  // If the device registered an E2E public key, encrypt the REAL title/body and
-  // mark the payload mutable so the on-device Notification Service Extension
-  // rewrites the banner. The relay only ever sees ciphertext + the generic
-  // placeholder above (shown if decryption is unavailable). Falls back to the
-  // placeholder on any encrypt failure.
   if (subscription.publicKey) {
     try {
       const blob = encryptForDevice(
@@ -331,7 +358,61 @@ async function sendApns(subscription: PushRow, payload: PushPayload): Promise<bo
       console.error("[push] e2e encrypt failed:", err instanceof Error ? err.message : err);
     }
   }
+  return apnsPayload;
+}
 
+// A non-2xx relay answer: logged with WHY (the relay's JSON error body, if
+// any), never retried. The device token is normally kept (5xx and timeouts are
+// temporary); only a clearly permanent APNs reason deletes it.
+async function handleRelayFailure(res: Response, relayUrl: string, subscription: PushRow, category: ApnsCategory): Promise<void> {
+  const errBody = await readRelayBody(res, RelayErrorBody);
+  const error = textOf(errBody?.error);
+  const reason = textOf(errBody?.reason);
+  const apnsReason = textOf(errBody?.apnsReason);
+  const detail = [error, reason, apnsReason].filter((x): x is string => x !== undefined).join("; ");
+  if (res.status === 400) {
+    // The relay's payload validation refused what we sent. That is never
+    // transient: this category will fail for every device until the code
+    // changes, so say so plainly instead of reading like a relay hiccup.
+    console.error(
+      `[push] APNs relay rejected the payload (400: ${error ?? "no error given"}) — the relay's validation refused it; this is a Summonarr server bug (category "${category}"), not a transient failure`,
+    );
+  } else if (res.status === 401) {
+    console.error(
+      `[push] APNs relay rejected auth (401${detail ? `: ${detail}` : ""}) — set/verify the apnsRelayKey setting`,
+    );
+  } else if (res.status === 429) {
+    // Deliberately dropped, not retried. The relay's budget is per device
+    // (scoped to this server's apnsRelayKey when one is set), so a batch hitting it would schedule one detached
+    // retry per job into the same exhausted budget, and nothing would track
+    // or bound those timers. A lost alert is recovered by opening the app.
+    const retryAfter = res.headers.get("retry-after");
+    console.error(
+      `[push] APNs relay rate-limited (429${detail ? `: ${detail}` : ""})${retryAfter ? ` — retry after ${retryAfter}s` : ""}`,
+    );
+  } else if (res.status >= 500 && !detail) {
+    // The relay never answered. Its own 5xx replies are always JSON with a
+    // `reason` (plus `apnsReason` when Apple refused the push), so a 5xx
+    // without one is the reverse proxy in front of the relay (an HTML
+    // 502/503/504 page) saying it could not reach the relay.
+    console.error(
+      `[push] APNs relay unreachable: ${new URL(relayUrl).host} answered HTTP ${res.status} without the relay's JSON reply, so the proxy in front of it responded and the relay itself is down — push not delivered, device kept`,
+    );
+  } else {
+    console.error(`[push] APNs relay HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
+  }
+  // APNs "Unregistered" / "BadDeviceToken" is permanent: the app install is
+  // gone. Keeping the row would waste a relay call on every later send, and
+  // the dead row would still count toward the per-user device limit and push
+  // out a live device. Only these two reasons delete the row.
+  if (/unregistered|baddevicetoken/i.test(`${apnsReason ?? ""} ${reason ?? ""}`)) {
+    await prisma.pushSubscription.deleteMany({ where: { endpoint: subscription.endpoint } });
+  }
+}
+
+async function sendApns(subscription: PushRow, payload: PushPayload): Promise<boolean> {
+  if (!subscription.deviceToken) return false;
+  const apnsPayload = buildApnsPayload(subscription, payload);
   try {
     const token = decryptToken(subscription.deviceToken, "PushSubscription.deviceToken");
     const relay = await getApnsRelayConfig();
@@ -348,58 +429,10 @@ async function sendApns(subscription: PushRow, payload: PushPayload): Promise<bo
       timeoutMs: 10_000,
     });
     if (!res.ok) {
-      // A non-2xx answer is not retried, and the device token is normally kept
-      // (5xx and timeouts are temporary; the usual "unregistered" cleanup is on
-      // the success path below). Read the relay's JSON error body, if any, so
-      // the log says WHY, and so a clearly permanent APNs reason can still
-      // delete the dead token.
-      const errBody = (await res.json().catch(() => null)) as
-        | { error?: string; reason?: string; apnsReason?: string }
-        | null;
-      const detail = [errBody?.error, errBody?.reason, errBody?.apnsReason]
-        .filter((v): v is string => typeof v === "string" && v.length > 0)
-        .join("; ");
-      if (res.status === 400) {
-        // The relay's payload validation refused what we sent. That is never
-        // transient: this category will fail for every device until the code
-        // changes, so say so plainly instead of reading like a relay hiccup.
-        console.error(
-          `[push] APNs relay rejected the payload (400: ${errBody?.error ?? "no error given"}) — the relay's validation refused it; this is a Summonarr server bug (category "${payload.category}"), not a transient failure`,
-        );
-      } else if (res.status === 401) {
-        console.error(
-          `[push] APNs relay rejected auth (401${detail ? `: ${detail}` : ""}) — set/verify the apnsRelayKey setting`,
-        );
-      } else if (res.status === 429) {
-        // Deliberately dropped, not retried. The relay's budget is per device
-        // (scoped to this server's apnsRelayKey when one is set), so a batch hitting it would schedule one detached
-        // retry per job into the same exhausted budget, and nothing would track
-        // or bound those timers. A lost alert is recovered by opening the app.
-        const retryAfter = res.headers.get("retry-after");
-        console.error(
-          `[push] APNs relay rate-limited (429${detail ? `: ${detail}` : ""})${retryAfter ? ` — retry after ${retryAfter}s` : ""}`,
-        );
-      } else if (res.status >= 500 && !detail) {
-        // The relay never answered. Its own 5xx replies are always JSON with a
-        // `reason` (plus `apnsReason` when Apple refused the push), so a 5xx
-        // without one is the reverse proxy in front of the relay (an HTML
-        // 502/503/504 page) saying it could not reach the relay.
-        console.error(
-          `[push] APNs relay unreachable: ${new URL(relay.url).host} answered HTTP ${res.status} without the relay's JSON reply, so the proxy in front of it responded and the relay itself is down — push not delivered, device kept`,
-        );
-      } else {
-        console.error(`[push] APNs relay HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
-      }
-      // APNs "Unregistered" / "BadDeviceToken" is permanent: the app install is
-      // gone. Keeping the row would waste a relay call on every later send, and
-      // the dead row would still count toward the per-user device limit and push
-      // out a live device. Only these two reasons delete the row.
-      if (/unregistered|baddevicetoken/i.test(`${errBody?.apnsReason ?? ""} ${errBody?.reason ?? ""}`)) {
-        await prisma.pushSubscription.deleteMany({ where: { endpoint: subscription.endpoint } });
-      }
+      await handleRelayFailure(res, relay.url, subscription, payload.category);
       return false;
     }
-    const data = (await res.json().catch(() => null)) as { ok?: boolean; reason?: string } | null;
+    const data = await readRelayBody(res, RelayOkBody);
     if (data?.reason === "unregistered") {
       await prisma.pushSubscription.deleteMany({ where: { endpoint: subscription.endpoint } });
       return false;
@@ -463,7 +496,7 @@ export async function sendAppUpdateNoticeToAllIos(): Promise<{ sent: number; fai
   }));
   // Bounded fan-out (guardrail 31): the device list scales with the user base,
   // so cap in-flight relay POSTs instead of bursting them all at once.
-  const results = await settleLimit(subs, 8, (s) => sendApns(s, payloadFor(s.user)));
+  const results = await settleLimit(subs, PUSH_FANOUT_CONCURRENCY, (s) => sendApns(s, payloadFor(s.user)));
   let sent = 0;
   let failed = 0;
   for (const r of results) {
@@ -555,7 +588,11 @@ async function sendPush(
     );
     return true;
   } catch (err: unknown) {
-    const status = (err as { statusCode?: number }).statusCode;
+    // Read by shape, not instanceof: a thrown value may be anything (even null).
+    const status =
+      typeof err === "object" && err !== null && typeof (err as { statusCode?: unknown }).statusCode === "number"
+        ? (err as { statusCode: number }).statusCode
+        : undefined;
     // 410 Gone / 404 Not Found: the browser revoked this subscription, so
     // delete it rather than keep sending to it.
     if (status === 410 || status === 404) {
@@ -589,6 +626,39 @@ function requestDeepLink(requestId: string | null | undefined): string | undefin
   return `/requests/${requestId}`;
 }
 
+type LocaleSubscription = PushRow & { user: { locale?: string | null } | null };
+
+// Sends one notification to every device in `subs`, built once per recipient
+// language. Bounded fan-out; never throws (each send settles on its own).
+function deliverToSubscriptions(
+  keys: VapidKeys | null,
+  subs: readonly LocaleSubscription[],
+  payloadFor: (user: { locale?: string | null } | null | undefined) => PushPayload,
+): Promise<PromiseSettledResult<boolean>[]> {
+  return settleLimit(subs, PUSH_FANOUT_CONCURRENCY, (s) => sendPush(keys, s, payloadFor(s.user)));
+}
+
+// The shape every event push shares: push switched off ⇒ nothing; no devices
+// ⇒ nothing; otherwise the payload is built (titles resolved in every
+// recipient's language) and delivered. A failure anywhere is logged under
+// `logLabel` and never reaches the caller.
+async function notifyDevices<S extends LocaleSubscription>(
+  logLabel: string,
+  loadSubs: () => Promise<S[]>,
+  build: (subs: S[]) => Promise<(user: { locale?: string | null } | null | undefined) => PushPayload>,
+): Promise<void> {
+  try {
+    const ctx = await pushContext();
+    if (!ctx) return;
+    const subs = await loadSubs();
+    if (!subs.length) return;
+    const payloadFor = await build(subs);
+    await deliverToSubscriptions(ctx.keys, subs, payloadFor);
+  } catch (err) {
+    console.error(`[push] Failed to notify ${logLabel}:`, err);
+  }
+}
+
 export async function notifyAdminsNewRequestPush(data: {
   title: string;
   mediaType: string;
@@ -597,26 +667,20 @@ export async function notifyAdminsNewRequestPush(data: {
   requestId?: string;
   excludeUserId?: string;
 }) {
-  try {
-    const ctx = await pushContext();
-    if (!ctx) return;
-
-    const subs = await getAdminSubscriptions(data.excludeUserId);
-    if (!subs.length) return;
-
-    const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
-    const payloadFor = localizedPayloads((t, locale) => ({
-      title: t("notify.push.newRequest.title", { media: mediaLabelT(t, data.mediaType) }),
-      body: t("notify.push.newRequest.body", { title: resolve(data, locale), user: data.requestedBy }),
-      url: "/admin",
-      category: "new_request",
-      deepLink: requestDeepLink(data.requestId),
-    }));
-
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
-  } catch (err) {
-    console.error("[push] Failed to notify admins (request):", err);
-  }
+  await notifyDevices(
+    "admins (request)",
+    () => getAdminSubscriptions(data.excludeUserId),
+    async (subs) => {
+      const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
+      return localizedPayloads((t, locale) => ({
+        title: t("notify.push.newRequest.title", { media: mediaLabelT(t, data.mediaType) }),
+        body: t("notify.push.newRequest.body", { title: resolve(data, locale), user: data.requestedBy }),
+        url: "/admin",
+        category: "new_request",
+        deepLink: requestDeepLink(data.requestId),
+      }));
+    },
+  );
 }
 
 export async function notifyUserIssueMessagePush(data: {
@@ -627,28 +691,22 @@ export async function notifyUserIssueMessagePush(data: {
   body: string;
   issueId?: string;
 }) {
-  try {
-    const ctx = await pushContext();
-    if (!ctx) return;
-
-    const subs = await prisma.pushSubscription.findMany({
+  await notifyDevices(
+    "user (issue message)",
+    () => prisma.pushSubscription.findMany({
       where: { userId: data.userId, user: { notifyOnIssue: true, deactivatedAt: null } }, // guardrail 33
       include: WITH_LOCALE,
-    });
-    if (!subs.length) return;
-
-    const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
-    const payloadFor = localizedPayloads((t, locale) => ({
-      title: t("notify.push.userIssueMessage.title", { title: resolve(data, locale) }),
-      body: truncate(data.body, 100),
-      url: data.issueId ? `/issues?selected=${data.issueId}` : "/issues",
-      category: "issue_reply",
-    }));
-
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
-  } catch (err) {
-    console.error("[push] Failed to notify user (issue message):", err);
-  }
+    }),
+    async (subs) => {
+      const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
+      return localizedPayloads((t, locale) => ({
+        title: t("notify.push.userIssueMessage.title", { title: resolve(data, locale) }),
+        body: truncate(data.body, 100),
+        url: data.issueId ? `/issues?selected=${data.issueId}` : "/issues",
+        category: "issue_reply",
+      }));
+    },
+  );
 }
 
 export async function notifyUserRequestCommentPush(data: {
@@ -659,29 +717,23 @@ export async function notifyUserRequestCommentPush(data: {
   body: string;
   requestId: string;
 }) {
-  try {
-    const ctx = await pushContext();
-    if (!ctx) return;
-
-    const subs = await prisma.pushSubscription.findMany({
+  await notifyDevices(
+    "user (request comment)",
+    () => prisma.pushSubscription.findMany({
       where: { userId: data.userId, user: { pushOnComment: true, deactivatedAt: null } }, // guardrail 33
       include: WITH_LOCALE,
-    });
-    if (!subs.length) return;
-
-    const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
-    const payloadFor = localizedPayloads((t, locale) => ({
-      title: t("notify.push.userRequestComment.title", { title: resolve(data, locale) }),
-      body: truncate(data.body, 100),
-      url: `/requests?comments=${data.requestId}`,
-      category: "request_comment",
-      deepLink: requestDeepLink(data.requestId),
-    }));
-
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
-  } catch (err) {
-    console.error("[push] Failed to notify user (request comment):", err);
-  }
+    }),
+    async (subs) => {
+      const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
+      return localizedPayloads((t, locale) => ({
+        title: t("notify.push.userRequestComment.title", { title: resolve(data, locale) }),
+        body: truncate(data.body, 100),
+        url: `/requests?comments=${data.requestId}`,
+        category: "request_comment",
+        deepLink: requestDeepLink(data.requestId),
+      }));
+    },
+  );
 }
 
 export async function notifyAdminsRequestCommentPush(data: {
@@ -693,26 +745,20 @@ export async function notifyAdminsRequestCommentPush(data: {
   requestId: string;
   excludeUserId?: string;
 }) {
-  try {
-    const ctx = await pushContext();
-    if (!ctx) return;
-
-    const subs = await getAdminSubscriptions(data.excludeUserId, { pushOnComment: true });
-    if (!subs.length) return;
-
-    const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
-    const payloadFor = localizedPayloads((t, locale) => ({
-      title: t("notify.push.adminRequestComment.title", { title: resolve(data, locale) }),
-      body: `${data.userName}: ${truncate(data.body, 80)}`,
-      url: `/admin?comments=${data.requestId}`,
-      category: "request_comment",
-      deepLink: requestDeepLink(data.requestId),
-    }));
-
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
-  } catch (err) {
-    console.error("[push] Failed to notify admins (request comment):", err);
-  }
+  await notifyDevices(
+    "admins (request comment)",
+    () => getAdminSubscriptions(data.excludeUserId, { pushOnComment: true }),
+    async (subs) => {
+      const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
+      return localizedPayloads((t, locale) => ({
+        title: t("notify.push.adminRequestComment.title", { title: resolve(data, locale) }),
+        body: `${data.userName}: ${truncate(data.body, 80)}`,
+        url: `/admin?comments=${data.requestId}`,
+        category: "request_comment",
+        deepLink: requestDeepLink(data.requestId),
+      }));
+    },
+  );
 }
 
 export async function notifyUserIssueResolvedPush(data: {
@@ -723,29 +769,23 @@ export async function notifyUserIssueResolvedPush(data: {
   resolution?: string | null;
   issueId?: string;
 }) {
-  try {
-    const ctx = await pushContext();
-    if (!ctx) return;
-
-    const subs = await prisma.pushSubscription.findMany({
+  await notifyDevices(
+    "user (issue resolved)",
+    () => prisma.pushSubscription.findMany({
       where: { userId: data.userId, user: { notifyOnIssue: true, deactivatedAt: null } }, // guardrail 33
       include: WITH_LOCALE,
-    });
-    if (!subs.length) return;
-
-    const resolution = data.resolution?.trim();
-    const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
-    const payloadFor = localizedPayloads((t, locale) => ({
-      title: t("notify.push.issueResolved.title", { title: resolve(data, locale) }),
-      body: resolution ? truncate(resolution, 100) : t("notify.push.issueResolved.body"),
-      url: data.issueId ? `/issues?selected=${data.issueId}` : "/issues",
-      category: "issue_resolved",
-    }));
-
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
-  } catch (err) {
-    console.error("[push] Failed to notify user (issue resolved):", err);
-  }
+    }),
+    async (subs) => {
+      const resolution = data.resolution?.trim();
+      const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
+      return localizedPayloads((t, locale) => ({
+        title: t("notify.push.issueResolved.title", { title: resolve(data, locale) }),
+        body: resolution ? truncate(resolution, 100) : t("notify.push.issueResolved.body"),
+        url: data.issueId ? `/issues?selected=${data.issueId}` : "/issues",
+        category: "issue_resolved",
+      }));
+    },
+  );
 }
 
 export async function notifyAdminsIssueMessagePush(data: {
@@ -759,43 +799,50 @@ export async function notifyAdminsIssueMessagePush(data: {
   restrictToUserId?: string;
   issueId?: string;
 }) {
-  try {
-    const ctx = await pushContext();
-    if (!ctx) return;
-
-    const subs = await getIssueAdminSubscriptions({
+  await notifyDevices(
+    "admins (issue message)",
+    () => getIssueAdminSubscriptions({
       excludeUserId: data.excludeUserId,
       restrictToUserId: data.restrictToUserId,
-    });
-    if (!subs.length) return;
-
-    const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
-    const payloadFor = localizedPayloads((t, locale) => ({
-      title: data.fromAdmin
-        ? t("notify.push.adminIssueMessage.titleFromAdmin", { title: resolve(data, locale) })
-        : t("notify.push.adminIssueMessage.title", { title: resolve(data, locale) }),
-      body: `${data.userName}: ${truncate(data.body, 80)}`,
-      url: data.issueId ? `/admin/issues?selected=${data.issueId}` : "/admin/issues",
-      category: "issue_reply",
-    }));
-
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
-  } catch (err) {
-    console.error("[push] Failed to notify admins (issue message):", err);
-  }
+    }),
+    async (subs) => {
+      const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
+      return localizedPayloads((t, locale) => ({
+        title: data.fromAdmin
+          ? t("notify.push.adminIssueMessage.titleFromAdmin", { title: resolve(data, locale) })
+          : t("notify.push.adminIssueMessage.title", { title: resolve(data, locale) }),
+        body: `${data.userName}: ${truncate(data.body, 80)}`,
+        url: data.issueId ? `/admin/issues?selected=${data.issueId}` : "/admin/issues",
+        category: "issue_reply",
+      }));
+    },
+  );
 }
 
 // Result of the grab-complete push, read by the Radarr/Sonarr webhooks:
 // - "delivered": at least one device got it.
+// - "skipped-disabled": push notifications are switched off. Retrying won't help.
 // - "skipped-no-subs" / "skipped-no-keys": nothing could be sent (no devices,
-//   push turned off, or only web devices and no VAPID keys). Retrying won't help.
+//   or only web devices and no VAPID keys). Retrying won't help.
 // - "failed": a send was attempted and failed; the webhook retries later.
 export type AdminGrabPushOutcome =
   | "delivered"
+  | "skipped-disabled"
   | "skipped-no-subs"
   | "skipped-no-keys"
   | "failed";
 
+// " S01E02", " Season 1" or "" — the grabbed scope after the title.
+function grabScopeLabel(t: Translator, scope: string, seasonNumber?: number | null, episodeNumber?: number | null): string {
+  if (scope === "EPISODE" && seasonNumber != null && episodeNumber != null) {
+    return ` S${String(seasonNumber).padStart(2, "0")}E${String(episodeNumber).padStart(2, "0")}`;
+  }
+  if (scope === "SEASON" && seasonNumber != null) return ` ${t("notify.push.grab.season", { season: seasonNumber })}`;
+  return "";
+}
+
+// To the admin who pressed Replace (`userId`, any MANAGE_ISSUES holder) — not
+// to every admin.
 export async function notifyAdminGrabCompletedPush(data: {
   userId: string;
   title: string;
@@ -808,7 +855,7 @@ export async function notifyAdminGrabCompletedPush(data: {
 }): Promise<AdminGrabPushOutcome> {
   try {
     const ctx = await pushContext();
-    if (!ctx) return "skipped-no-keys";
+    if (!ctx) return "skipped-disabled";
 
     // deactivatedAt gate like getAdminSubscriptions/getIssueAdminSubscriptions
     // (guardrail 33): the triggering issue-admin may have been removed between
@@ -825,22 +872,17 @@ export async function notifyAdminGrabCompletedPush(data: {
     if (!ctx.keys && !subs.some((s) => s.platform === "ios")) return "skipped-no-keys";
 
     const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
-    const payloadFor = localizedPayloads((t, locale) => {
-      let scopeLabel = "";
-      if (data.scope === "EPISODE" && data.seasonNumber != null && data.episodeNumber != null) {
-        scopeLabel = ` S${String(data.seasonNumber).padStart(2, "0")}E${String(data.episodeNumber).padStart(2, "0")}`;
-      } else if (data.scope === "SEASON" && data.seasonNumber != null) {
-        scopeLabel = ` ${t("notify.push.grab.season", { season: data.seasonNumber })}`;
-      }
-      return {
-        title: t("notify.push.apnsTitle.grab_complete"),
-        body: t("notify.push.grab.body", { title: resolve(data, locale), scope: scopeLabel }),
-        url: `/issues?selected=${data.issueId}`,
-        category: "grab_complete",
-      };
-    });
+    const payloadFor = localizedPayloads((t, locale) => ({
+      title: t("notify.push.apnsTitle.grab_complete"),
+      body: t("notify.push.grab.body", {
+        title: resolve(data, locale),
+        scope: grabScopeLabel(t, data.scope, data.seasonNumber, data.episodeNumber),
+      }),
+      url: `/issues?selected=${data.issueId}`,
+      category: "grab_complete",
+    }));
 
-    const results = await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
+    const results = await deliverToSubscriptions(ctx.keys, subs, payloadFor);
     const anyDelivered = results.some((r) => r.status === "fulfilled" && r.value === true);
     return anyDelivered ? "delivered" : "failed";
   } catch (err) {
@@ -936,7 +978,7 @@ async function notifyRequestersPush(
       const payload = payloads(r, resolve)(userById.get(r.requestedBy));
       return userSubs.map((s) => ({ sub: s, payload }));
     });
-    await settleLimit(jobs, 8, (j) => sendPush(ctx.keys, j.sub, j.payload));
+    await settleLimit(jobs, PUSH_FANOUT_CONCURRENCY, (j) => sendPush(ctx.keys, j.sub, j.payload));
   } catch (err) {
     console.error(`[push] Failed to notify users (${logLabel}):`, err);
   }
@@ -971,25 +1013,19 @@ export async function notifyAdminsNewIssuePush(data: {
   issueId?: string;
   excludeUserId?: string;
 }) {
-  try {
-    const ctx = await pushContext();
-    if (!ctx) return;
-
-    const subs = await getIssueAdminSubscriptions({ excludeUserId: data.excludeUserId });
-    if (!subs.length) return;
-
-    const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
-    const payloadFor = localizedPayloads((t, locale) => ({
-      title: t("notify.push.newIssue.title"),
-      body: t("notify.push.newIssue.body", { title: resolve(data, locale), issue: issueTypeLabelT(t, data.issueType), user: data.reportedBy }),
-      url: data.issueId ? `/admin/issues?selected=${data.issueId}` : "/admin/issues",
-      category: "new_issue",
-    }));
-
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
-  } catch (err) {
-    console.error("[push] Failed to notify admins (issue):", err);
-  }
+  await notifyDevices(
+    "admins (issue)",
+    () => getIssueAdminSubscriptions({ excludeUserId: data.excludeUserId }),
+    async (subs) => {
+      const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
+      return localizedPayloads((t, locale) => ({
+        title: t("notify.push.newIssue.title"),
+        body: t("notify.push.newIssue.body", { title: resolve(data, locale), issue: issueTypeLabelT(t, data.issueType), user: data.reportedBy }),
+        url: data.issueId ? `/admin/issues?selected=${data.issueId}` : "/admin/issues",
+        category: "new_issue",
+      }));
+    },
+  );
 }
 
 // Radarr/Sonarr send ManualInteractionRequired when a downloaded release can't
@@ -1003,27 +1039,21 @@ export async function notifyAdminsManualInteractionRequiredPush(data: {
   title: string;
   instanceName?: string;
 }) {
-  try {
-    const ctx = await pushContext();
-    if (!ctx) return;
-
-    const subs = await getAdminSubscriptions();
-    if (!subs.length) return;
-
-    const title = truncate(data.title, 100);
-    const name = data.instanceName?.trim();
-    const where = name && name !== "Default" ? `${data.service} (${name})` : data.service;
-    const payloadFor = localizedPayloads((t) => ({
-      title: t("notify.push.manual.title", { where }),
-      body: t("notify.push.manual.body", { title, where }),
-      url: "/admin",
-      category: "manual_interaction",
-    }));
-
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
-  } catch (err) {
-    console.error("[push] Failed to notify admins (manual interaction):", err);
-  }
+  await notifyDevices(
+    "admins (manual interaction)",
+    () => getAdminSubscriptions(),
+    async () => {
+      const title = truncate(data.title, 100);
+      const name = data.instanceName?.trim();
+      const where = name && name !== "Default" ? `${data.service} (${name})` : data.service;
+      return localizedPayloads((t) => ({
+        title: t("notify.push.manual.title", { where }),
+        body: t("notify.push.manual.body", { title, where }),
+        url: "/admin",
+        category: "manual_interaction",
+      }));
+    },
+  );
 }
 
 export async function notifyAdminsDeletionVoteThresholdPush(data: {
@@ -1032,28 +1062,22 @@ export async function notifyAdminsDeletionVoteThresholdPush(data: {
   voteCount: number;
   tmdbId?: number;
 }) {
-  try {
-    const ctx = await pushContext();
-    if (!ctx) return;
-
-    const subs = await getAdminSubscriptions();
-    if (!subs.length) return;
-
-    const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
-    const payloadFor = localizedPayloads((t, locale) => ({
-      title: t("notify.push.deletionVote.title"),
-      body: t("notify.push.deletionVote.body", {
-        title: resolve(data, locale),
-        media: mediaLabelT(t, data.mediaType),
-        votes: String(data.voteCount),
-      }),
-      url: "/votes",
-      category: "deletion_votes",
-      deepLink: mediaDeepLink(data.mediaType, data.tmdbId),
-    }));
-
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
-  } catch (err) {
-    console.error("[push] Failed to notify admins (deletion vote):", err);
-  }
+  await notifyDevices(
+    "admins (deletion vote)",
+    () => getAdminSubscriptions(),
+    async (subs) => {
+      const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
+      return localizedPayloads((t, locale) => ({
+        title: t("notify.push.deletionVote.title"),
+        body: t("notify.push.deletionVote.body", {
+          title: resolve(data, locale),
+          media: mediaLabelT(t, data.mediaType),
+          votes: String(data.voteCount),
+        }),
+        url: "/votes",
+        category: "deletion_votes",
+        deepLink: mediaDeepLink(data.mediaType, data.tmdbId),
+      }));
+    },
+  );
 }

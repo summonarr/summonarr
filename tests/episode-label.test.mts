@@ -46,7 +46,7 @@ test("the live-session form drops each unknown part on its own, never S00 or E00
 });
 
 test("Now playing and Recent plays build their season/episode text through the shared helper", () => {
-  for (const rel of ["activity-now-playing.tsx", "activity-recent-plays.tsx"]) {
+  for (const rel of ["now-playing/session-card.tsx", "recent-plays/row.tsx"]) {
     const src = readFileSync(new URL(`../src/components/admin/${rel}`, import.meta.url), "utf8");
     assert.match(src, /import \{ formatSeasonEpisode \} from "@\/lib\/episode-label";/, rel);
     assert.match(src, /formatSeasonEpisode\((s|p)\.seasonNumber, \1\.episodeNumber\)/, rel);

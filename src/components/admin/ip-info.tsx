@@ -3,36 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Popover } from "@base-ui/react/popover";
 import { ChevronDown, Globe, Loader2, MapPin, Network } from "@/components/icons";
-import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
-
-type Lookup = {
-  ip: string;
-  hostname: string | null;
-  city: string | null;
-  region: string | null;
-  country: string | null;
-  postal: string | null;
-  latitude: number | null;
-  longitude: number | null;
-  timezone: string | null;
-  org: string | null;
-  bogon: boolean;
-};
-
-// Module-level cache shared across all IpInfo instances. Bounded so it can't grow
-// without limit as an admin scrolls activity surfaces with many distinct IPs —
-// evict the oldest-inserted entry once at capacity (Map preserves insertion order).
-const CACHE_MAX = 200;
-const cache = new Map<string, Lookup | "missing">();
-
-function cacheSet(ip: string, value: Lookup | "missing"): void {
-  if (cache.size >= CACHE_MAX && !cache.has(ip)) {
-    const oldest = cache.keys().next().value;
-    if (oldest !== undefined) cache.delete(oldest);
-  }
-  cache.set(ip, value);
-}
+import { cacheSet, cachedView, ipLookupCache, isFreshMissing, lookupIp, type IpError, type Lookup } from "@/components/admin/ip-info-cache";
 
 interface Props {
   ip: string;
@@ -53,14 +25,9 @@ export function IpInfo({ ip, inline = false, size = "xs" }: Props) {
   // same IP may have populated the cache after this instance mounted, in which
   // case the useState initializer would have returned null and `cache.has(ip)`
   // would short-circuit the popover fetch — leaving the popover blank.
-  const [data, setData] = useState<Lookup | null>(() => {
-    const c = cache.get(ip);
-    return c && c !== "missing" ? c : null;
-  });
+  const [data, setData] = useState<Lookup | null>(() => cachedView(ip).data);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(() => {
-    return cache.get(ip) === "missing" ? t("adminActivity.ip.notAvailable") : null;
-  });
+  const [error, setError] = useState<IpError | null>(() => cachedView(ip).error);
   // The ip this instance last fetched (null = none in flight / retry allowed).
   // Keyed by ip, not a boolean, so a changed `ip` prop is fetched afresh.
   const fetchedRef = useRef<string | null>(null);
@@ -76,23 +43,23 @@ export function IpInfo({ ip, inline = false, size = "xs" }: Props) {
   const [prevIp, setPrevIp] = useState(ip);
   if (prevIp !== ip) {
     setPrevIp(ip);
-    const c = cache.get(ip);
-    setData(c && c !== "missing" ? c : null);
-    setError(c === "missing" ? t("adminActivity.ip.notAvailable") : null);
+    const view = cachedView(ip);
+    setData(view.data);
+    setError(view.error);
     setLoading(false);
   }
 
-  function handleOpenChange(next: boolean) {
+  async function handleOpenChange(next: boolean) {
     setOpen(next);
     if (!next) return;
     // Re-read from cache on every open so a sibling-populated entry is reflected
     // even if this instance's useState initializer saw an empty cache at mount.
-    const cached = cache.get(ip);
-    if (cached === "missing") {
-      setError(t("adminActivity.ip.notAvailable"));
+    const cached = ipLookupCache.get(ip);
+    if (isFreshMissing(cached, Date.now())) {
+      setError({ kind: "missing" });
       return;
     }
-    if (cached) {
+    if (cached && !("missingAt" in cached)) {
       setData(cached);
       setError(null);
       return;
@@ -100,45 +67,21 @@ export function IpInfo({ ip, inline = false, size = "xs" }: Props) {
     if (fetchedRef.current === ip) return;
     fetchedRef.current = ip;
     const requested = ip;
-    const current = () => ipRef.current === requested;
     setLoading(true);
     setError(null);
-    fetch(withBasePath(`/api/admin/ip-lookup?ip=${encodeURIComponent(ip)}`))
-      .then(async (r) => {
-        if (r.status === 404) {
-          // The route answers 404 when `getIpLookup` has nothing — an unset
-          // ipinfo token is the common (and permanent) case, so negative-cache
-          // it in the shared map rather than re-hitting the backend on every
-          // open of every IP.
-          cacheSet(requested, "missing");
-          if (current()) setError(t("adminActivity.ip.notAvailable"));
-          return;
-        }
-        if (!r.ok) {
-          // 429 (rate limit), 5xx, or a brief upstream hiccup: these are
-          // temporary, so don't write the shared cache. The cache survives page
-          // changes, and caching a blip would show t("adminActivity.ip.notAvailable") for this IP
-          // everywhere until a full reload. Show the route's own message and
-          // reset the fetch guard so the next open tries again.
-          const body = (await r.json().catch(() => null)) as { error?: unknown } | null;
-          const msg = typeof body?.error === "string" && body.error ? body.error : null;
-          if (fetchedRef.current === requested) fetchedRef.current = null;
-          if (current()) setError(msg ?? t("adminActivity.ip.lookupFailed"));
-          return;
-        }
-        const json = (await r.json()) as Lookup;
-        cacheSet(requested, json);
-        if (current()) setData(json);
-      })
-      .catch(() => {
-        // Network error / aborted: transient, same rule as above.
-        if (fetchedRef.current === requested) fetchedRef.current = null;
-        if (current()) setError(t("adminActivity.ip.lookupFailed"));
-      })
-      .finally(() => {
-        if (current()) setLoading(false);
-      });
+    const outcome = await lookupIp(requested);
+    // A transient failure, or a 404 (whose cache entry expires), releases the
+    // guard so the next open asks again.
+    if (outcome.kind !== "found" && fetchedRef.current === requested) fetchedRef.current = null;
+    if (outcome.kind === "found") cacheSet(requested, outcome.lookup);
+    else if (outcome.kind === "missing") cacheSet(requested, { missingAt: Date.now() });
+    if (ipRef.current !== requested) return;
+    if (outcome.kind === "found") setData(outcome.lookup);
+    else setError(outcome.kind === "missing" ? { kind: "missing" } : { kind: "failed", message: outcome.message });
+    setLoading(false);
   }
+
+  const errorText = !error ? null : error.kind === "missing" ? t("adminActivity.ip.notAvailable") : error.message ?? t("adminActivity.ip.lookupFailed");
 
   return (
     <Popover.Root open={open} onOpenChange={handleOpenChange}>
@@ -161,7 +104,7 @@ export function IpInfo({ ip, inline = false, size = "xs" }: Props) {
                 </div>
               )}
 
-              {!loading && error && <div className="text-zinc-500">{error}</div>}
+              {!loading && errorText && <div className="text-zinc-500">{errorText}</div>}
 
               {!loading && !error && data && data.bogon && (
                 <div className="text-zinc-500">{t("adminActivity.ip.private")}</div>

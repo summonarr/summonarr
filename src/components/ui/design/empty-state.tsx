@@ -1,6 +1,6 @@
 import Link from "next/link";
 import type { IconComponent } from "@/components/icons";
-import type { ComponentType, SVGProps } from "react";
+import { isValidElement, type ComponentType, type SVGProps } from "react";
 import { cn } from "@/lib/utils";
 
 type IconLike =
@@ -8,8 +8,17 @@ type IconLike =
   | ComponentType<SVGProps<SVGSVGElement>>
   | React.ReactNode;
 
+// A plain function component, or a memo()/forwardRef() one — those are objects
+// carrying $$typeof, and unlike an element they can't be rendered as a child.
 function isComponent(icon: IconLike): icon is ComponentType<SVGProps<SVGSVGElement>> {
-  return typeof icon === "function";
+  if (typeof icon === "function") return true;
+  return typeof icon === "object" && icon !== null && "$$typeof" in icon && !isValidElement(icon);
+}
+
+/** Whether a node slot has something to show. Unlike a truthiness check, a
+ *  numeric 0 is content, not "nothing". */
+function hasContent(node: unknown): boolean {
+  return node !== null && node !== undefined && node !== false && node !== true && node !== "";
 }
 
 // `cta` and `action` fill the same slot, so the type allows one or the other:
@@ -30,10 +39,8 @@ type EmptyStateProps = {
   icon?: IconLike;
   /** Optional — when omitted the description renders on its own. */
   title?: React.ReactNode;
-  /** Friendly copy under the title. Preferred over `subtitle`. */
+  /** Friendly copy under the title. */
   description?: React.ReactNode;
-  /** Legacy slot — rendered identically to `description`. */
-  subtitle?: React.ReactNode;
   className?: string;
 } & EmptyStateFooter;
 
@@ -71,13 +78,10 @@ export function EmptyState({
   icon,
   title,
   description,
-  subtitle,
   cta,
   action,
   className,
 }: EmptyStateProps) {
-  const desc = description ?? subtitle;
-
   return (
     <div
       className={cn("text-center", className)}
@@ -91,8 +95,8 @@ export function EmptyState({
         alignItems: "center",
       }}
     >
-      {icon && <EmptyStateIcon icon={icon} />}
-      {title && (
+      {hasContent(icon) && <EmptyStateIcon icon={icon} />}
+      {hasContent(title) && (
         <div
           className="font-semibold"
           style={{
@@ -104,7 +108,7 @@ export function EmptyState({
           {title}
         </div>
       )}
-      {desc && (
+      {hasContent(description) && (
         <div
           style={{
             fontSize: 13,
@@ -113,7 +117,7 @@ export function EmptyState({
             lineHeight: 1.5,
           }}
         >
-          {desc}
+          {description}
         </div>
       )}
       {cta && (
@@ -131,7 +135,7 @@ export function EmptyState({
           </Link>
         </div>
       )}
-      {action && <div style={{ marginTop: 14 }}>{action}</div>}
+      {hasContent(action) && <div style={{ marginTop: 14 }}>{action}</div>}
     </div>
   );
 }

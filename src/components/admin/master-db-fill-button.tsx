@@ -5,9 +5,18 @@ import { Button } from "@/components/ui/button";
 import { Database, Loader2, AlertTriangle } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
-import { isNoAnswer, jobAnswerError, runLibrarySyncs, type LibrarySyncServer } from "@/lib/client/library-sync";
+import { runLibrarySyncs, type LibrarySyncServer } from "@/lib/client/library-sync";
 import { runReplaceFileJob } from "@/lib/client/replace-file-job";
 import { librarySyncText } from "./library-sync-text";
+import {
+  fillLibraryFailedEnd,
+  fillLibraryStep,
+  fillResetDelayMs,
+  fillWarmEnd,
+  fillWarmThrewEnd,
+  type FillEnd,
+  type FillLibraryStep,
+} from "./master-db-fill";
 
 // "pending": nothing failed, but a step has not answered yet and may still be
 // running on the server — never shown as a failure.
@@ -27,8 +36,10 @@ export function MasterDbFillButton({
   const t = useT();
   const locale = useLocale();
   const [phase, setPhase] = useState<Phase>("idle");
-  const [summary, setSummary] = useState<string | null>(null);
-  // The end-of-run reset has to be cancellable: a rerun started inside the 15-20s
+  // The last run's line and how it ended: its colour follows the run, not the
+  // button — a failure stays (red) while the admin opens and cancels the confirm.
+  const [summary, setSummary] = useState<FillEnd | null>(null);
+  // The end-of-run reset has to be cancellable: a rerun started inside the 20s
   // window would otherwise be flipped to "idle" mid-flight — spinner and summary
   // gone, button live again — inviting a second concurrent full fill.
   const resetTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -59,105 +70,66 @@ export function MasterDbFillButton({
     resetTimer.current = setTimeout(() => { setPhase("idle"); setSummary(null); }, ms);
   }
 
+  // Every way a run ends lands here once: its line, its colour, and whether
+  // the line clears itself (fillResetDelayMs — a failure stays).
+  function finish(end: FillEnd) {
+    setPhase(end.phase);
+    setSummary(end);
+    const delay = fillResetDelayMs(end.phase);
+    if (delay !== null) scheduleReset(delay);
+  }
+
+  // Phase 1 (every configured server's full resync), then phase 2 (the TMDB
+  // warm); null when the button unmounted mid-run.
+  async function runFill(): Promise<FillEnd | null> {
+    // Only the servers that are configured (the page lists them). Deciding
+    // this up front tells "not set up" apart from "broken": an unconfigured
+    // server is skipped, while a configured one that fails is always
+    // reported (guardrail 36). Every configured instance, default and named.
+    if (servers.length === 0) return { phase: "error", summary: t("adminManage.library.fill.noServers") };
+
+    let step: FillLibraryStep;
+    try {
+      const outcomes = await runLibrarySyncs(servers, {
+        url: (service) => withBasePath(`/api/sync/${service}`),
+        isAlive: () => alive.current,
+      });
+      if (!outcomes) return null;
+      step = fillLibraryStep(outcomes.map((o) => ({ outcome: o.outcome, text: librarySyncText(o.server, o.outcome, t, locale) })));
+    } catch {
+      return { phase: "error", summary: t("adminManage.library.fill.libraryFailed") };
+    }
+    // Every configured server FAILED ⇒ there is no library to warm from, so
+    // stop rather than running phase 2 over nothing and calling it a success.
+    // A server with no answer yet may still be syncing, so it doesn't stop it.
+    // A partial failure carries on to the TMDB warm — the server that did sync
+    // has real rows worth warming — and its text rides along in the summary.
+    if (step.allFailed) return fillLibraryFailedEnd(step, t);
+
+    setPhase("phase2");
+    let warm: Awaited<ReturnType<typeof runReplaceFileJob>>;
+    try {
+      // A background job too: a cold warm of a large library outlasts a
+      // reverse proxy's hold (guardrail 37a).
+      warm = await runReplaceFileJob(fetch, withBasePath("/api/admin/library-warm"), {}, {
+        intervalMs: WARM_POLL_MS,
+        maxPolls: WARM_MAX_POLLS,
+        isAlive: () => alive.current,
+      });
+    } catch {
+      return fillWarmThrewEnd(step, t);
+    }
+    if (!warm) return null;
+    return fillWarmEnd(step, warm, t, locale);
+  }
+
   async function handleFill() {
     clearTimeout(resetTimer.current);
     refocus.current = true;
     setPhase("phase1");
     setSummary(null);
-
-    const libraryParts: string[] = [];
-    let libraryDegraded = false;
-    let libraryPending = false;
-    try {
-      // Only the servers that are configured (the page lists them). Deciding
-      // this up front tells "not set up" apart from "broken": an unconfigured
-      // server is skipped, while a configured one that fails is always
-      // reported (guardrail 36). Every configured instance, default and named.
-      if (servers.length === 0) {
-        setPhase("error");
-        setSummary(t("adminManage.library.fill.noServers"));
-        scheduleReset(15_000);
-        return;
-      }
-
-      const outcomes = await runLibrarySyncs(servers, {
-        url: (service) => withBasePath(`/api/sync/${service}`),
-        isAlive: () => alive.current,
-      });
-      if (!outcomes) return;
-      const texts = outcomes.map((o) => librarySyncText(o.server, o.outcome, t, locale));
-
-      // Every configured server FAILED ⇒ there is no library to warm from, so
-      // stop rather than running phase 2 over nothing and calling it a success.
-      // A server with no answer yet may still be syncing, so it doesn't stop it.
-      if (outcomes.every((o) => o.outcome.kind === "failed")) {
-        setPhase("error");
-        setSummary(t("adminManage.library.fill.libraryFailedWith", { detail: texts.join(" · ") }));
-        scheduleReset(15_000);
-        return;
-      }
-      // A partial failure carries on to the TMDB warm — the server that did
-      // sync has real rows worth warming — but its text rides along in the
-      // summary so it cannot be mistaken for a clean run.
-      libraryParts.push(...texts);
-      libraryDegraded = outcomes.some((o) => o.outcome.kind === "failed");
-      libraryPending = outcomes.some((o) => o.outcome.kind === "noAnswer");
-    } catch {
-      setPhase("error");
-      setSummary(t("adminManage.library.fill.libraryFailed"));
-      scheduleReset(15_000);
-      return;
-    }
-
-    setPhase("phase2");
-    try {
-      // A background job too: a cold warm of a large library outlasts a
-      // reverse proxy's hold (guardrail 37a).
-      const warm = await runReplaceFileJob(fetch, withBasePath("/api/admin/library-warm"), {}, {
-        intervalMs: WARM_POLL_MS,
-        maxPolls: WARM_MAX_POLLS,
-        isAlive: () => alive.current,
-      });
-      if (!warm) return;
-      // Name every configured server, even one that scanned 0 items, so a
-      // failed server can never silently drop out of the summary.
-      const parts: string[] = [...libraryParts];
-      if (isNoAnswer(warm)) {
-        // No answer is not a failure: the warm may still be running.
-        parts.push(t("adminManage.library.fill.warmNoAnswer"));
-        setPhase(libraryDegraded ? "error" : "pending");
-        setSummary(parts.join(" · "));
-        scheduleReset(20_000);
-        return;
-      }
-      const warmError = jobAnswerError(warm);
-      if (warm.status < 200 || warm.status >= 300 || warmError) {
-        setPhase("error");
-        setSummary(warmError ?? t("adminManage.library.fill.warmFailedStatus", { status: warm.status }));
-        scheduleReset(15_000);
-        return;
-      }
-      const warmData = (warm.data ?? {}) as { fetched?: number; backfilled?: number; skipped?: number; failed?: number };
-      const fetched    = warmData.fetched    ?? 0;
-      const backfilled = warmData.backfilled ?? 0;
-      const skipped    = warmData.skipped    ?? 0;
-      const failed     = warmData.failed     ?? 0;
-      const tmdbParts: string[] = [];
-      if (fetched    > 0) tmdbParts.push(t("adminManage.library.fill.fetched", { value: fetched.toLocaleString(locale) }));
-      if (backfilled > 0) tmdbParts.push(t("adminManage.library.fill.backfilled", { value: backfilled.toLocaleString(locale) }));
-      if (skipped    > 0) tmdbParts.push(t("adminManage.library.fill.cached", { value: skipped.toLocaleString(locale) }));
-      if (failed     > 0) tmdbParts.push(t("adminManage.library.fill.failed", { value: failed.toLocaleString(locale) }));
-      parts.push(`TMDB: ${tmdbParts.join(", ") || t("adminManage.library.btn.items", { count: 0, formatted: "0" })}`);
-      // A summary that names a failed server or failed TMDB items must not
-      // render green — the two together read as "this worked" over the top of
-      // "this did not". A server with no answer yet isn't green either.
-      setPhase(libraryDegraded || failed > 0 ? "error" : libraryPending ? "pending" : "done");
-      setSummary(parts.join(" · "));
-    } catch {
-      setPhase("error");
-      setSummary(t("adminManage.library.fill.warmFailed"));
-    }
-    scheduleReset(20_000);
+    const end = await runFill();
+    if (end) finish(end);
   }
 
   if (phase === "confirm") {
@@ -224,11 +196,11 @@ export function MasterDbFillButton({
         </Button>
         {summary && (
           <span
-            role={phase === "error" ? "alert" : "status"}
-            aria-live={phase === "error" ? "assertive" : "polite"}
-            className={`text-xs ${phase === "error" ? "text-red-400" : phase === "pending" ? "text-zinc-400" : "text-green-400"}`}
+            role={summary.phase === "error" ? "alert" : "status"}
+            aria-live={summary.phase === "error" ? "assertive" : "polite"}
+            className={`text-xs ${summary.phase === "error" ? "text-red-400" : summary.phase === "pending" ? "text-zinc-400" : "text-green-400"}`}
           >
-            {summary}
+            {summary.summary}
           </span>
         )}
       </div>

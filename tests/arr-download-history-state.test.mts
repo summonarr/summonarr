@@ -110,9 +110,11 @@ test("the list believes a grab's state only where it could hold the newer record
   assert.match(list, /filtered = false,/);
 
   const page = readFileSync(new URL("../src/components/admin/arr-download-history.tsx", import.meta.url), "utf8");
+  const view = readFileSync(new URL("../src/components/admin/use-history-view.ts", import.meta.url), "utf8");
   // By the kind the history on screen was READ with, not the one being loaded.
   assert.match(page, /filtered=\{historyKind !== "all"\}/);
-  assert.match(page, /setHistory\(res\.data\);\s*setHistoryKind\(kind\);/);
+  assert.match(page, /historyKind=\{view\.historyKind\}/);
+  assert.match(view, /setHistory\(data\);\s*setHistoryKind\(view\.kind\);/);
 });
 
 // ── C037: Mark failed pins the view; Clear/Remove wait for the clear ─────────
@@ -127,23 +129,28 @@ const fnBody = (src: string, name: string) => {
 
 test("a Mark failed in flight holds the page's busy state from before its POST until it settles", () => {
   const body = fnBody(page(), "markFailed");
-  const set = body.indexOf('setBusy("mark")');
-  assert.ok(set >= 0, "Mark failed marks the page busy");
-  assert.ok(set < body.indexOf("fetch("), "before the POST goes out");
-  assert.match(body, /finally \{\s*setBusy\(null\);\s*\}/, "and releases it whatever the answer");
+  // The POST is the "mark" action: busy from the moment it starts, released whatever the answer (use-async-action.ts).
+  assert.match(body, /const res = await writes\.run\(\s*"mark",\s*\(signal\) => arrCall\(withBasePath\("\/api\/admin\/arr\/history\/failed"\)/);
+  assert.match(body, /\{ ifBusy: "skip" \}/);
   const src = page();
-  assert.match(src, /useState<"remove" \| "clear" \| "mark" \| null>/);
-  // The kind chips and both pagers hold still too (the tab and instance sit in the fieldset).
-  assert.match(src, /aria-pressed=\{kind === k\}\s*disabled=\{busy !== null\}/);
-  assert.equal([...src.matchAll(/<Pager [^>]*disabled=\{loading \|\| busy !== null\}/g)].length, 2);
+  assert.match(src, /const WRITES = \["mark", "remove", "clear"\] as const;/);
+  assert.match(src, /const busy = WRITES\.find\(\(k\) => writes\.busy\(k\)\) \?\? null;/);
+  // The tab and instance sit in a fieldset that holds still while a write is out.
+  assert.match(src, /const switching = busy !== null;/);
+  assert.match(src, /<fieldset disabled=\{switching\}/);
+  // The kind chips and both pagers hold still too.
+  assert.match(src, /aria-pressed=\{kind === k\}\s*disabled=\{busy\}/);
+  assert.match(src, /busy=\{busy !== null\}\s*onKind=/);
+  assert.equal([...src.matchAll(/<Pager [^>]*disabled=\{loading \|\| busy(?: !== null)?\}/g)].length, 2);
 });
 
 test("while Clear blocklist's command is followed, Clear and Remove stay disabled", () => {
   const src = page();
   assert.match(src, /const clearing = isWatchActive\(watches\.clear\);/);
-  assert.match(src, /disabled=\{selected\.size === 0 \|\| busy !== null \|\| clearing\} onClick=\{\(\) => void removeSelected\(\)\}/, "Remove selected");
-  assert.match(src, /disabled=\{busy !== null \|\| clearing\} onClick=\{\(\) => void clearAll\(\)\}/, "the confirm's Clear");
-  assert.match(src, /disabled=\{!blocklist \|\| blocklist\.totalRecords === 0 \|\| busy !== null \|\| clearing\} onClick=\{\(\) => setConfirmClear\(true\)\}/, "Clear");
+  assert.match(src, /disabled=\{selected\.size === 0 \|\| busy !== null \|\| clearing\} onClick=\{onRemove\}/, "Remove selected");
+  assert.match(src, /disabled=\{busy !== null \|\| clearing\} onClick=\{onClear\}/, "the confirm's Clear");
+  assert.match(src, /disabled=\{!blocklist \|\| blocklist\.totalRecords === 0 \|\| busy !== null \|\| clearing\} onClick=\{onAskClear\}/, "Clear");
+  assert.match(src, /clearing=\{clearing\}/);
 });
 
 // ── C036: a clear the arr answered with no command id re-reads once ──────────
@@ -151,7 +158,7 @@ test("while Clear blocklist's command is followed, Clear and Remove stay disable
 test("a clear answered with no command id re-reads the list instead of leaving it stale", () => {
   const body = fnBody(page(), "clearAll");
   const noId = body.slice(body.indexOf("} else {", body.indexOf("if (ids.length > 0)")));
-  assert.match(noId, /setNotice\(t\("adminArr\.blocklist\.cleared"\)\);\s*void loadRef\.current\(\);/);
+  assert.match(noId, /setNotice\(t\("adminArr\.blocklist\.cleared"\)\);\s*void reload\(\);/);
 });
 
 // ── C038: a row's Mark failed error doesn't outlive a successful retry ────────
@@ -163,6 +170,17 @@ test("a Mark failed retry clears the row's earlier error before it runs", () => 
   const cleared = body.search(/setErrors\(\(m\) => \{[\s\S]*?delete next\[row\.key\];[\s\S]*?\}\);/);
   assert.ok(cleared >= 0, "the row's error is deleted");
   assert.ok(cleared < body.indexOf("await onMarkFailed("), "before the attempt");
+});
+
+test("a Mark failed whose callback throws still frees the row's controls and says it failed", () => {
+  const list = readFileSync(new URL("../src/components/admin/arr-history-list.tsx", import.meta.url), "utf8");
+  const start = list.indexOf("async function mark(");
+  const body = list.slice(start, list.indexOf("\n  }\n", start));
+  assert.match(
+    body,
+    /try \{\s*err = await onMarkFailed\(row\.lead\);\s*\} catch \{[\s\S]*?err = t\("adminArr\.history\.markFailedError"\);\s*\} finally \{\s*setBusy\(null\);\s*\}/,
+  );
+  assert.ok(body.indexOf("} finally {") < body.indexOf("setConfirming(null);"), "the confirm closes either way");
 });
 
 test("a confirmed Mark failed moves focus to the row's failed status, not to the page", () => {
@@ -177,8 +195,10 @@ test("a confirmed Mark failed moves focus to the row's failed status, not to the
   // The effect focuses whichever the row renders: its button again, or its status.
   assert.match(list, /\(openers\.current\.get\(refocus\.current\) \?\? statuses\.current\.get\(refocus\.current\)\)\?\.focus\(\);/);
   // The status a failed row renders is a script-focusable element registered under the row's key.
-  const status = list.slice(list.indexOf("{failed ? ("), list.indexOf(") : confirming === row.key ? ("));
-  assert.match(status, /ref=\{\(el\) => \{\s*if \(el\) statuses\.current\.set\(row\.key, el\);\s*else statuses\.current\.delete\(row\.key\);\s*\}\}\s*tabIndex=\{-1\}/);
+  const status = list.slice(list.indexOf("{failed ? ("), list.indexOf(") : confirming ? ("));
+  assert.match(status, /<span ref=\{statusRef\} tabIndex=\{-1\}/);
+  assert.match(list, /statusRef=\{\(el\) => \{\s*if \(el\) statuses\.current\.set\(row\.key, el\);\s*else statuses\.current\.delete\(row\.key\);\s*\}\}/);
+  assert.match(list, /openerRef=\{\(el\) => \{\s*if \(el\) openers\.current\.set\(row\.key, el\);\s*else openers\.current\.delete\(row\.key\);\s*\}\}/);
   assert.match(status, /adminArr\.history\.markedFailed/, "it wraps the 'marked failed' text");
   assert.match(status, /adminArr\.history\.kind\.failed/, "and the failed chip the reload brings");
 });
@@ -306,4 +326,30 @@ test("a title the arr no longer has (404) reads as unknown and is not re-asked o
   } finally {
     Date.now = realNow;
   }
+});
+
+test("two loads at once share ONE title lookup per movie: the second waits on the first's read", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  blocklistNaming(4103, (() => gate.then(() => json({ title: "Shared", year: 2023, tmdbId: 88 }))) as unknown as () => Response);
+  const blocklistReads = () => calls.filter((c) => c.path === "/api/v3/blocklist").length;
+  const a = loadBlocklistPage("radarr", "", paging);
+  const b = loadBlocklistPage("radarr", "", paging);
+  // Both pages read, the first title lookup out — then give the second load
+  // its turns to reach the lookup before the answer comes back.
+  while (blocklistReads() < 2 || movieReads(4103) < 1) await new Promise((r) => setImmediate(r));
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  release();
+  const [first, second] = await Promise.all([a, b]);
+  assert.equal(movieReads(4103), 1, "one arr read for both loads");
+  assert.equal(first.records[0].mediaTitle, "Shared");
+  assert.equal(second.records[0].mediaTitle, "Shared");
+});
+
+// ── the URL keeps what isn't the page's ──────────────────────────────────────
+
+test("the page's URL sync sets only its own keys, keeping other params and the #fragment", () => {
+  const src = page();
+  assert.match(src, /window\.history\.replaceState\(null, "", withQuery\(window\.location, \{\s*tab,\s*service,\s*instance: rest\.join\(":"\),\s*kind: tab === "history" && kind !== "all" \? kind : null,\s*page: page > 1 \? String\(page\) : null,\s*\}\)\);/);
+  assert.doesNotMatch(src, /`\?\$\{q\.toString\(\)\}`/);
 });

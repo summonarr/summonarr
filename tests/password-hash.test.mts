@@ -21,6 +21,7 @@ import {
   dummyVerify,
   needsRehash,
   hashSlotStats,
+  isVerifiableHash,
   scryptWorkDone,
   MAX_PASSWORD_LENGTH,
   PasswordTooLongError,
@@ -123,14 +124,16 @@ test("stored parameters are bounded: an out-of-range or malformed set is refused
     const salt = randomBytes(16).toString("base64");
     const key = randomBytes(64).toString("base64");
     const hash = `scrypt:2:${params.ln}:${params.r}:${params.p}:${salt}:${key}`;
+    assert.equal(isVerifiableHash(hash), false, `${label}: refused at parse, never derived at those parameters`);
     const work = await workOf(async () => assert.equal(await verifyPassword("pw", hash), false, label));
-    assert.equal(work, 0, `${label}: refused without deriving`);
+    assert.equal(work, CURRENT_WORK, `${label}: refused after a current-cost dummy verify, never at the stored parameters`);
   }
   const salt = randomBytes(16).toString("base64");
   for (const bad of ["017:8:1", "17:08:1", "+17:8:1", "17:8:1.0", "0x11:8:1", "17:8", "17:8:1:9"]) {
     const hash = `scrypt:2:${bad}:${salt}:${salt}`;
+    assert.equal(isVerifiableHash(hash), false, bad);
     const work = await workOf(async () => assert.equal(await verifyPassword("pw", hash), false, bad));
-    assert.equal(work, 0, `${bad}: refused without deriving`);
+    assert.equal(work, CURRENT_WORK, `${bad}: refused after a current-cost dummy verify`);
   }
 });
 
@@ -140,7 +143,7 @@ test("every verify does the SAME scrypt work: current, legacy and the unknown-ac
   // emails have an account. Padding at the stored parameters closes that.
   const current = await hashPassword("pw");
   const legacy = await rawHash("pw", LEGACY_V1_PARAMS, "v1");
-  await dummyVerify(); // the dummy hash is warmed at load; make sure it is cached
+  await dummyVerify(); // make sure the dummy hash is cached
   assert.equal(await workOf(() => verifyPassword("pw", current)), CURRENT_WORK);
   assert.equal(await workOf(() => verifyPassword("nope", current)), CURRENT_WORK);
   assert.equal(await workOf(() => verifyPassword("pw", legacy)), CURRENT_WORK);
@@ -180,6 +183,13 @@ test("same password hashes to different strings (random salt), both verify", asy
   assert.notEqual(a, b);
   assert.equal(await verifyPassword("pw", a), true);
   assert.equal(await verifyPassword("pw", b), true);
+});
+
+test("a malformed or foreign stored hash costs a full verify, so such an account can't be told apart by timing", async () => {
+  await dummyVerify();
+  for (const hash of ["", "plaintext-not-a-hash", "bcrypt:2b:whatever", "scrypt:1::"]) {
+    assert.equal(await workOf(() => verifyPassword("pw", hash)), CURRENT_WORK, JSON.stringify(hash));
+  }
 });
 
 test("malformed / foreign hashes fail closed, never throw", async () => {
@@ -353,3 +363,18 @@ for (const path of SCRIPT_COPIES) {
     assert.equal(needsRehash(hash), false);
   });
 }
+
+test("importing the module runs no derivation (no import-time warm-up)", async () => {
+  assert.deepEqual(hashSlotStats(), { active: 0, queued: 0 });
+  // A second copy, as another server chunk would load it (guardrail 27a): an
+  // import-time warm-up would have taken a hash slot by the time import resolves.
+  const secondCopy = "../src/lib/password-hash.ts?chunk=import-side-effect";
+  await import(secondCopy);
+  assert.deepEqual(hashSlotStats(), { active: 0, queued: 0 });
+});
+
+test("boot warms the dummy hash in the background, never on the import path", () => {
+  const boot = readFileSync(new URL("../src/instrumentation.ts", import.meta.url), "utf8");
+  const start = boot.slice(boot.indexOf("function startBackgroundJobs("));
+  assert.match(start, /import\("@\/lib\/password-hash"\)\s*\.then\(\(\{ warmPasswordHashing \}\) => warmPasswordHashing\(\)\)/);
+});

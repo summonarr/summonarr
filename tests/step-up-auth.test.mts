@@ -188,7 +188,7 @@ test("requireStepUp: a password account gets password-required / invalid-passwor
   assert.deepEqual(await missing?.json(), { error: "password-required", message: "need-password" });
   const wrong = await requireStepUp({ req: req(), session: session(id, "s"), confirmPassword: "bad", context: "c", messages: MSGS, t });
   assert.equal(wrong?.status, 401);
-  assert.deepEqual(await wrong?.json(), { error: "invalid-password" });
+  assert.deepEqual(await wrong?.json(), { error: "invalid-password", message: "apiAuth.common.invalidPassword" });
   assert.equal(await requireStepUp({ req: req(), session: session(id, "s"), confirmPassword: PASSWORD, context: "c", messages: MSGS, t }), null);
 });
 
@@ -294,12 +294,12 @@ test("the security notice lists what is still connected — for a password chang
 });
 
 // Structural pin: a step-up route that called verifyPassword directly would get
-// its own, unaudited guess budget again. Only the sign-in path (auth.ts — its
+// its own, unaudited guess budget again. Only the sign-in path (auth-credentials.ts — its
 // own login-email/login-ip limiter) and this module may call it.
 test("no route verifies a step-up password except through verifyStepUpPassword", async () => {
   const { readdirSync, readFileSync } = await import("node:fs");
   const { join } = await import("node:path");
-  const allowed = new Set(["src/lib/password-hash.ts", "src/lib/step-up-auth.ts", "src/lib/auth.ts"]);
+  const allowed = new Set(["src/lib/password-hash.ts", "src/lib/step-up-auth.ts", "src/lib/auth-credentials.ts"]);
   const offenders: string[] = [];
   const walk = (dir: string) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -396,7 +396,7 @@ test("requireStepUp answers exactly as before around the lockout: 401 invalid-pa
   for (let i = 0; i < STEP_UP_PASSWORD_LIMIT - 1; i++) assert.equal(await guess(id, `wrong-${i}`), "invalid");
   const last = await requireStepUp({ req: req(), session: session(id, "s"), confirmPassword: "wrong-last", context: "revoke-all", messages: MSGS, t });
   assert.equal(last?.status, 401);
-  assert.deepEqual(await last?.json(), { error: "invalid-password" });
+  assert.deepEqual(await last?.json(), { error: "invalid-password", message: "apiAuth.common.invalidPassword" });
   const refused = await requireStepUp({ req: req(), session: session(id, "s"), confirmPassword: PASSWORD, context: "revoke-all", messages: MSGS, t });
   assert.equal(refused?.status, 429);
   assert.deepEqual(await refused?.json(), { error: "rate_limit", message: "apiAuth.common.tooManyAttemptsWait15" });

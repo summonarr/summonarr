@@ -1,16 +1,15 @@
 import { prisma } from "@/lib/prisma";
 import { escMd } from "@/lib/discord-notify";
-import { checkRateLimit } from "@/lib/rate-limit";
 import type { Translator } from "@/lib/i18n/translate";
 import {
   buildResultsPayload,
   editOriginal,
-  linkedAccountRefusal,
-  linkedSiteAccount,
   mediaTypeOption,
   optionValue,
+  requireLinkedSiteAccount,
   savePending,
   truncateText,
+  withinDiscordReadBudget,
 } from "../reply";
 import { searchForDiscord } from "../search";
 import type { CommandContext, PendingWatchlistAdd, TmdbResult } from "../types";
@@ -62,13 +61,12 @@ export async function watchlistListPayload(t: Translator, userId: string, discor
 export async function handleWatchlistCommand(ctx: CommandContext): Promise<void> {
   const { t, appId, token, interactionId, discordUserId, data } = ctx;
   const sub = Array.isArray(data.options) ? (data.options[0] as { name?: unknown; options?: unknown } | undefined) : undefined;
-  const linked = await linkedSiteAccount(discordUserId);
-  const refusal = linkedAccountRefusal(t, linked);
-  if (refusal || linked.kind !== "ok") {
-    await editOriginal(appId, token, { content: refusal ?? t("notify.bot.linkRequired") });
+  const linked = await requireLinkedSiteAccount(t, discordUserId);
+  if ("refusal" in linked) {
+    await editOriginal(appId, token, { content: linked.refusal });
     return;
   }
-  if (!checkRateLimit(`discord-read:${discordUserId}`, 20, 60_000)) {
+  if (!withinDiscordReadBudget(discordUserId)) {
     await editOriginal(appId, token, { content: t("notify.bot.tooFast") });
     return;
   }
@@ -98,7 +96,7 @@ export async function handleWatchlistCommand(ctx: CommandContext): Promise<void>
   }
   if (results.length === 0) {
     await editOriginal(appId, token, {
-      content: type === "movie" ? t("notify.bot.noResults.movie", { query }) : t("notify.bot.noResults.tv", { query }),
+      content: type === "movie" ? t("notify.bot.noResults.movie", { query: escMd(query) }) : t("notify.bot.noResults.tv", { query: escMd(query) }),
     });
     return;
   }

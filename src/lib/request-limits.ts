@@ -13,3 +13,8 @@ export const BULK_REQUEST_MAX_ITEMS = 50;
 // inputs cap at the same value, so a long reason is stopped while typing rather
 // than refused after submit.
 export const ADMIN_NOTE_MAX = 1000;
+
+// Longest note a requester may attach to a request (POST /api/requests, 400
+// "noteTooLong" past it). The request dialog's note field cuts typing at the
+// same length.
+export const REQUEST_NOTE_MAX = 500;

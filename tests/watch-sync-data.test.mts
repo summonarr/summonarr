@@ -873,3 +873,91 @@ test("resume points: a long Jellyfin resumable list can't fill the cap and starv
     jfLibRows.splice(jfLibRows.length - many.length, many.length);
   }
 });
+
+test("an unknown owner names plex.tv's own failure in the held pair's error", async () => {
+  respond = (url, method, token) => (url.hostname === "plex.tv" ? new Response("", { status: 503 }) : defaultRespond(url, method, token));
+  const r = await runWatchSync();
+  assert.match(r.pairs[0].toJellyfin?.error ?? "", /^Couldn't identify the Plex server owner this run \(.*503.*\); will retry$/);
+});
+
+test("a Jellyfin config read that fails once is asked again by the next pair, not cached for the run", async () => {
+  pairs = [pair("toJellyfin"), { ...pair("toJellyfin"), id: "p2", createdAt: new Date(1) }];
+  const realFindUnique = (prisma.setting as unknown as { findUnique: (a: { where: { key: string } }) => Promise<unknown> }).findUnique;
+  let failNext = true;
+  shadowPrismaModel(prisma, "setting", {
+    findUnique: async (a: { where: { key: string } }) => {
+      if (a.where.key === "jellyfinUrl" && failNext) { failNext = false; throw new Error("simulated settings read failure"); }
+      return realFindUnique(a);
+    },
+    findMany: async () => [...settings].map(([key, value]) => ({ key, value })),
+  });
+  try {
+    const r = await runWatchSync();
+    assert.match(r.pairs[0].toJellyfin?.error ?? "", /simulated settings read failure/);
+    assert.equal(r.pairs[1].toJellyfin?.error, undefined);
+    assert.equal(r.pairs[1].toJellyfin?.marked, 3);
+  } finally {
+    shadowPrismaModel(prisma, "setting", { findUnique: realFindUnique, findMany: async () => [...settings].map(([key, value]) => ({ key, value })) });
+  }
+});
+
+test("failed marks that share an error are written in one ledger update", async () => {
+  const realUpdate = jfLedger.stub.updateMany;
+  const failedWrites: string[][] = [];
+  jfLedger.stub.updateMany = async (a) => {
+    if (a.data.status === "failed") failedWrites.push([...(a.where.jellyfinItemId as { in: string[] }).in].sort());
+    return realUpdate(a);
+  };
+  respond = (url, method, token) =>
+    url.origin === JF && method === "POST" && url.pathname.startsWith("/UserPlayedItems/")
+      ? new Response("", { status: 500 })
+      : defaultRespond(url, method, token);
+  const r = await runWatchSync();
+  assert.equal(r.pairs[0].toJellyfin?.failed, 3);
+  assert.deepEqual(failedWrites, [["je12", "jm1", "jm2"]]);
+  assert.ok(jfLedger.rows.every((m) => m.status === "failed" && m.attempts === 1));
+});
+
+test("resume points are counted per title: a title with one failed copy is one failure, not also a success", async () => {
+  pairs = [progressPair("both")];
+  plexUser = { source: "plex", serverInstance: "", sourceUserId: "777", isServerAdmin: false };
+  jfResumable = ["jm2"];
+  jfState.set("jm2", { pos: 1_800_000, last: isoAgo(60) });
+  plexState.set("12", { lastViewedAt: NOW_S - 86_400 });
+  respond = (url, method, token) =>
+    url.origin === PLEX && url.pathname === "/:/progress" && url.searchParams.get("key") === "13"
+      ? new Response("", { status: 500 })
+      : defaultRespond(url, method, token);
+  const r = await runWatchSync();
+  assert.equal(r.pairs[0].progress?.failed, 1);
+  assert.equal(r.pairs[0].progress?.toPlex, 0);
+});
+
+test("a series' copies have their episode lists read concurrently, each once", async () => {
+  // Two copies of one show on Jellyfin; the first list answers only once the
+  // second has been asked for.
+  const lib = jfLibRows.find((r) => r.tmdbId === 900)!;
+  const saved = [...lib.jellyfinItemIds];
+  lib.jellyfinItemIds = ["jshow", "jshow2"];
+  let release!: () => void;
+  const secondAsked = new Promise<void>((resolve) => { release = resolve; });
+  const asked: string[] = [];
+  respond = async (url, method, token) => {
+    const parent = url.searchParams.get("ParentId");
+    if (url.origin === JF && url.pathname === "/Items" && (parent === "jshow" || parent === "jshow2")) {
+      asked.push(parent);
+      if (parent === "jshow2") release();
+      else await secondAsked;
+      return json({ Items: parent === "jshow" ? [{ Id: "je11", ParentIndexNumber: 1, IndexNumber: 1 }, { Id: "je12", ParentIndexNumber: 1, IndexNumber: 2 }] : [], TotalRecordCount: parent === "jshow" ? 2 : 0 });
+    }
+    return defaultRespond(url, method, token);
+  };
+  try {
+    const r = await runWatchSync();
+    assert.equal(r.pairs[0].toJellyfin?.error, undefined);
+    assert.deepEqual(asked.sort(), ["jshow", "jshow2"]);
+    assert.ok(marked.some((m) => m.startsWith("je12@")));
+  } finally {
+    lib.jellyfinItemIds = saved;
+  }
+});

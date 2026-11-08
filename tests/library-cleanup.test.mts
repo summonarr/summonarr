@@ -347,7 +347,8 @@ test("the page's bounds check accepts exactly what the write path accepts", () =
 });
 
 test("the page's number inputs take min/max from CLEANUP_NUMERIC_BOUNDS and keep Save off for a draft out of bounds", () => {
-  const src = readFileSync(new URL("../src/components/admin/library-cleanup.tsx", import.meta.url), "utf8");
+  // The rules form is library-cleanup-parts.tsx's RulesPanel.
+  const src = readFileSync(new URL("../src/components/admin/library-cleanup-parts.tsx", import.meta.url), "utf8");
   assert.match(src, /min=\{CLEANUP_NUMERIC_BOUNDS\[field\]\.min\}/);
   assert.match(src, /max=\{CLEANUP_NUMERIC_BOUNDS\[field\]\.max\}/);
   assert.doesNotMatch(src, /type="number"[^>]*\b(min|max)=\{\d+\}/, "no hard-coded bound");

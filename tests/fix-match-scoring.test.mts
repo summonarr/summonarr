@@ -53,3 +53,13 @@ test("pickSuggestedGuid: the IMDb-GUID hit is suggested unless a better-ranked c
   assert.equal(pickSuggestedGuid([c("x", "possible")], null), "x");
   assert.equal(pickSuggestedGuid([], null), null);
 });
+
+test("assessCandidate: a TMDB id naming another title is wrong, however well the rest fits — and never suggested", () => {
+  const target = { tmdbId: 222, imdbId: "", title: "Right", year: "2010", runtime: 100, genres: ["Drama"] };
+  const lookalike = { tmdbId: "999", imdbId: null, name: "Right", year: 2010, tmdbTitle: "Right", tmdbRuntime: 100, tmdbGenres: ["Drama"], radarrConfirmed: false };
+  const verdict = assessCandidate(lookalike, target);
+  assert.equal(verdict.matchLevel, "wrong");
+  assert.equal(pickSuggestedGuid([{ guid: "g1", matchLevel: verdict.matchLevel }], null), null);
+  // The same facts with no TMDB id of its own still score as a strong fit.
+  assert.equal(assessCandidate({ ...lookalike, tmdbId: null }, target).matchLevel, "strong");
+});

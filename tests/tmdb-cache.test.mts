@@ -354,3 +354,25 @@ test("no source file hand-builds a `…:details` key outside tmdb-cache.ts", asy
     );
   assert.deepEqual(offenders, [], "build the key with tmdbDetailsKey");
 });
+
+test("every read given a schema treats a row of the wrong shape as a miss; without one the row is returned as stored", async () => {
+  const { v } = await import("../src/lib/validate.ts");
+  const Movie = v.object({ title: v.string() });
+  seed("movie:1:details", JSON.stringify({ title: "Heat" }), 60_000);
+  seed("movie:2:details", JSON.stringify({}), 60_000); // a not-found stub under the same key shape
+  seed("movie:3:details", JSON.stringify({ title: "Old" }), -60_000);
+  seed("movie:4:details", JSON.stringify({ title: 4 }), -60_000);
+
+  assert.deepEqual(await getCache("movie:1:details", Movie), { title: "Heat" });
+  assert.equal(await getCache("movie:2:details", Movie), null);
+  assert.deepEqual(await getCache("movie:2:details"), {}, "no schema: as stored");
+  assert.equal(await getCacheEntry("movie:2:details", Movie), null);
+
+  const many = await getCacheMany(["movie:1:details", "movie:2:details"], Movie);
+  assert.deepEqual([...many.keys()], ["movie:1:details"]);
+
+  assert.deepEqual(await getCacheStale("movie:3:details", Movie), { value: { title: "Old" }, isStale: true });
+  assert.deepEqual(await getCacheStale("movie:4:details", Movie), { value: null, isStale: false });
+  const staleMany = await getCacheStaleMany(["movie:3:details", "movie:4:details"], Movie);
+  assert.deepEqual([...staleMany.keys()], ["movie:3:details"]);
+});

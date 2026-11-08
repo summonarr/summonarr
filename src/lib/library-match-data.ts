@@ -12,7 +12,7 @@
 // nothing (a down Radarr/Sonarr — never a wrongMatch on an item it would have
 // agreed with).
 import { Prisma } from "@/generated/prisma";
-import { prisma } from "@/lib/prisma";
+import { prisma, type PrismaTxClient } from "@/lib/prisma";
 import { isFeatureEnabled } from "@/lib/features";
 import { getSyncableMediaInstances } from "@/lib/media-instance-registry";
 import { jellyfinSettingKey, plexSettingKey } from "@/lib/media-instances";
@@ -24,13 +24,14 @@ import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import { arrErrorKind, arrFetch, getArrCfg, resolveTvdbToTmdb } from "@/lib/arr";
 import type { ArrErrorKind } from "@/lib/arr-error-kind";
 import {
-  compareMatchFlags,
   judgeLibraryMatches,
   type ArrMatchEntry,
   type MatchCounts,
   type MatchFlag,
+  type MatchServer,
   type ServerMatchEntry,
 } from "@/lib/library-match";
+import { check, v } from "@/lib/validate";
 
 export const LIBRARY_MATCH_REPORT_KEY = "libraryMatchCheck:report";
 // Serializes every write of the report row: the check storing a new report and
@@ -101,6 +102,33 @@ export function projectArrRows(service: "radarr" | "sonarr", instance: string, r
   return out;
 }
 
+type ServerSelection = Set<string> | undefined;
+
+/**
+ * One server's movie and show listing, or null when it isn't configured. The
+ * signal reaches the Plex walk, so an abort stops it mid-listing (it rejects,
+ * and the caller takes the source-failed path).
+ */
+async function listServerInstance(
+  server: MatchServer, slug: string, selected: ServerSelection, signal?: AbortSignal,
+): Promise<ServerMatchEntry[] | null> {
+  if (server === "plex") {
+    const cfg = await getPlexConfig(slug);
+    if (!cfg.url || !cfg.token) return null;
+    const url = cfg.url.replace(/\/$/, "");
+    const movies = await listPlexMatchEntries(url, cfg.token, slug, "MOVIE", selected, { signal });
+    return movies.concat(await listPlexMatchEntries(url, cfg.token, slug, "TV", selected, { signal }));
+  }
+  const cfg = await getJellyfinConfig(slug);
+  if (!cfg.url || !cfg.apiKey) return null;
+  const movies = await listJellyfinMatchEntries(cfg.url, cfg.apiKey, slug, "MOVIE", selected);
+  return movies.concat(await listJellyfinMatchEntries(cfg.url, cfg.apiKey, slug, "TV", selected));
+}
+
+const SERVER_LABEL: Record<MatchServer, string> = { plex: "Plex", jellyfin: "Jellyfin" };
+const selectionKeyOf = (server: MatchServer, slug: string) =>
+  server === "plex" ? plexSettingKey(slug, "Libraries") : jellyfinSettingKey(slug, "Libraries");
+
 async function readMediaServers(sources: LibraryMatchSource[], signal?: AbortSignal): Promise<ServerMatchEntry[]> {
   const [plexOn, jellyfinOn] = await Promise.all([
     isFeatureEnabled("feature.integration.plex"),
@@ -110,11 +138,12 @@ async function readMediaServers(sources: LibraryMatchSource[], signal?: AbortSig
     plexOn ? getSyncableMediaInstances("plex") : Promise.resolve([]),
     jellyfinOn ? getSyncableMediaInstances("jellyfin") : Promise.resolve([]),
   ]);
-  // Each server's own library selection, exactly as the sync reads it.
-  const selectionKeys = [
-    ...plexInstances.map((i) => plexSettingKey(i.slug, "Libraries")),
-    ...jellyfinInstances.map((i) => jellyfinSettingKey(i.slug, "Libraries")),
+  const servers: { server: MatchServer; slug: string }[] = [
+    ...plexInstances.map((i) => ({ server: "plex" as const, slug: i.slug })),
+    ...jellyfinInstances.map((i) => ({ server: "jellyfin" as const, slug: i.slug })),
   ];
+  // Each server's own library selection, exactly as the sync reads it.
+  const selectionKeys = servers.map((s) => selectionKeyOf(s.server, s.slug));
   const selectionRows = selectionKeys.length
     ? await prisma.setting.findMany({ where: { key: { in: selectionKeys } }, select: { key: true, value: true } })
     : [];
@@ -124,39 +153,17 @@ async function readMediaServers(sources: LibraryMatchSource[], signal?: AbortSig
   // RangeError past ~125k entries, which would mark a readable source down
   // (guardrail 5i).
   const entries: ServerMatchEntry[] = [];
-  for (const instance of plexInstances) {
+  // Every Plex server first, then every Jellyfin one.
+  for (const { server, slug } of servers) {
     if (signal?.aborted) break;
     try {
-      const cfg = await getPlexConfig(instance.slug);
-      if (!cfg.url || !cfg.token) continue;
-      const url = cfg.url.replace(/\/$/, "");
-      const selected = selection.get(plexSettingKey(instance.slug, "Libraries"));
-      const items = [
-        ...await listPlexMatchEntries(url, cfg.token, instance.slug, "MOVIE", selected),
-        ...await listPlexMatchEntries(url, cfg.token, instance.slug, "TV", selected),
-      ];
+      const items = await listServerInstance(server, slug, selection.get(selectionKeyOf(server, slug)), signal);
+      if (items === null) continue;
       for (const item of items) entries.push(item);
-      sources.push({ service: "plex", instance: instance.slug, ok: true, items: items.length });
+      sources.push({ service: server, instance: slug, ok: true, items: items.length });
     } catch (err) {
-      console.warn(`[library-match] Plex "${instance.slug}" could not be listed:`, err instanceof Error ? err.message : err);
-      sources.push({ service: "plex", instance: instance.slug, ok: false, items: 0 });
-    }
-  }
-  for (const instance of jellyfinInstances) {
-    if (signal?.aborted) break;
-    try {
-      const cfg = await getJellyfinConfig(instance.slug);
-      if (!cfg.url || !cfg.apiKey) continue;
-      const selected = selection.get(jellyfinSettingKey(instance.slug, "Libraries"));
-      const items = [
-        ...await listJellyfinMatchEntries(cfg.url, cfg.apiKey, instance.slug, "MOVIE", selected),
-        ...await listJellyfinMatchEntries(cfg.url, cfg.apiKey, instance.slug, "TV", selected),
-      ];
-      for (const item of items) entries.push(item);
-      sources.push({ service: "jellyfin", instance: instance.slug, ok: true, items: items.length });
-    } catch (err) {
-      console.warn(`[library-match] Jellyfin "${instance.slug}" could not be listed:`, err instanceof Error ? err.message : err);
-      sources.push({ service: "jellyfin", instance: instance.slug, ok: false, items: 0 });
+      console.warn(`[library-match] ${SERVER_LABEL[server]} "${slug}" could not be listed:`, err instanceof Error ? err.message : err);
+      sources.push({ service: server, instance: slug, ok: false, items: 0 });
     }
   }
   return entries;
@@ -184,6 +191,31 @@ async function readArrs(sources: LibraryMatchSource[], signal?: AbortSignal): Pr
 }
 
 /**
+ * Judge, then fill the TMDB id of every flagged Sonarr series that carries none
+ * (Sonarr v3, or v4's 0) from TMDB's own TVDB cross-reference — the mapping the
+ * sync's Sonarr cache uses — and judge again with it. Only the flagged series
+ * are resolved. The second pass is what makes the resolved id count: a server
+ * item carrying it agrees and leaves the report, and a resolved suggestion
+ * makes its flag fixable, which moves it up its kind before the stored list is
+ * cut. A failed lookup leaves the first verdict.
+ */
+async function judgeWithTvdbSuggestions(entries: ServerMatchEntry[], arr: ArrMatchEntry[]): Promise<{ flags: MatchFlag[]; counts: MatchCounts }> {
+  const first = judgeLibraryMatches(entries, arr);
+  const unresolved = new Set<number>();
+  for (const f of first.flags) {
+    if (f.arr && f.arr.tmdbId === null && f.arr.tvdbId !== null) unresolved.add(f.arr.tvdbId);
+  }
+  if (unresolved.size === 0) return first;
+  const { map } = await resolveTvdbToTmdb([...unresolved]).catch(() => ({ map: new Map<number, number>() }));
+  if (map.size === 0) return first;
+  const filled = arr.map((a) => {
+    const tmdbId = a.tmdbId === null && a.tvdbId !== null && unresolved.has(a.tvdbId) ? map.get(a.tvdbId) : undefined;
+    return tmdbId === undefined ? a : { ...a, tmdbId };
+  });
+  return judgeLibraryMatches(entries, filled);
+}
+
+/**
  * Run the check and store its report. Returns null when `signal` aborted part
  * way (guardrail 41) — nothing is stored then, and the previous report stays.
  */
@@ -195,20 +227,7 @@ export async function runLibraryMatchCheck(opts: { signal?: AbortSignal; now?: D
   const [entries, arr] = await Promise.all([readMediaServers(sources, opts.signal), readArrs(sources, opts.signal)]);
   if (opts.signal?.aborted) return null;
 
-  const { flags, counts } = judgeLibraryMatches(entries, arr);
-  // Sonarr v3 carries no TMDB id: a flag's suggestion comes from TMDB's own
-  // TVDB cross-reference, the mapping the sync's Sonarr cache uses. Only the
-  // flagged series are resolved.
-  const unresolved = [...new Set(flags.flatMap((f) => (f.arr && f.arr.tmdbId === null && f.arr.tvdbId !== null ? [f.arr.tvdbId] : [])))];
-  if (unresolved.length > 0) {
-    const { map } = await resolveTvdbToTmdb(unresolved).catch(() => ({ map: new Map<number, number>() }));
-    for (const f of flags) {
-      if (f.arr && f.arr.tmdbId === null && f.arr.tvdbId !== null) f.arr.tmdbId = map.get(f.arr.tvdbId) ?? null;
-    }
-    // A resolved suggestion makes a flag fixable, which moves it up its kind —
-    // sorted again before the cut below, or fixable series could be cut.
-    flags.sort(compareMatchFlags);
-  }
+  const { flags, counts } = await judgeWithTvdbSuggestions(entries, arr);
   if (opts.signal?.aborted) return null;
 
   const checkedAt = (opts.now ?? new Date()).toISOString();
@@ -255,16 +274,74 @@ function fixedDuringRun(before: LibraryMatchReport | null, current: LibraryMatch
   return out;
 }
 
-/** The stored report, or null when none was stored (or it is from another version). Exported for tests. */
+const nullableText = v.nullable(v.string());
+const nullableInt = v.nullable(v.int());
+const StoredFlag = v.object({
+  kind: v.literal("wrongMatch", "noTmdbId", "yearMismatch"),
+  server: v.literal("plex", "jellyfin"),
+  serverInstance: v.string(),
+  mediaType: v.literal("MOVIE", "TV"),
+  itemKey: v.string(),
+  title: nullableText,
+  year: nullableInt,
+  folder: nullableText,
+  file: nullableText,
+  path: nullableText,
+  serverTmdbId: nullableInt,
+  arr: v.nullable(v.object({
+    service: v.literal("radarr", "sonarr"),
+    instance: v.string(),
+    tmdbId: nullableInt,
+    tvdbId: nullableInt,
+    title: nullableText,
+    year: nullableInt,
+  })),
+  sibling: v.boolean(),
+});
+const StoredSource = v.object({
+  service: v.literal("plex", "jellyfin", "radarr", "sonarr"),
+  instance: v.string(),
+  ok: v.boolean(),
+  kind: v.optional(v.literal("auth", "timeout", "unreachable", "server", "notFound", "other")),
+  items: v.int(),
+});
+const StoredReportShell = v.object({
+  version: v.literal(1),
+  checkedAt: v.string(),
+  sources: v.array(v.unknown()),
+  counts: v.object({ checked: v.int(), agreed: v.int(), notManaged: v.int(), flagged: v.int() }),
+  flags: v.array(v.unknown()),
+  truncated: v.optional(v.int()),
+});
+
+/**
+ * The stored report, or null when none was stored, it is from another version,
+ * or its counts aren't numbers. A flag or source that doesn't have its shape is
+ * dropped: the fix route matches on a flag's server, instance and key, and the
+ * page renders the rest. Exported for tests.
+ */
 export function parseLibraryMatchReport(value: string | null | undefined): LibraryMatchReport | null {
   if (!value) return null;
+  let raw: unknown;
   try {
-    const parsed = JSON.parse(value) as Partial<LibraryMatchReport>;
-    if (parsed.version !== 1 || !Array.isArray(parsed.flags) || !Array.isArray(parsed.sources) || !parsed.counts || typeof parsed.checkedAt !== "string") return null;
-    return parsed as LibraryMatchReport;
+    raw = JSON.parse(value);
   } catch {
     return null;
   }
+  const shell = check(StoredReportShell, raw);
+  if (!shell.ok) return null;
+  const flags: MatchFlag[] = [];
+  for (const f of shell.value.flags) {
+    const parsed = check(StoredFlag, f);
+    if (parsed.ok) flags.push(parsed.value);
+  }
+  const sources: LibraryMatchSource[] = [];
+  for (const src of shell.value.sources) {
+    const parsed = check(StoredSource, src);
+    if (parsed.ok) sources.push(parsed.value);
+  }
+  const { version, checkedAt, counts, truncated } = shell.value;
+  return { version, checkedAt, sources, counts, flags, truncated: truncated ?? 0 };
 }
 
 export async function readLibraryMatchReport(): Promise<LibraryMatchReport | null> {
@@ -284,7 +361,7 @@ export function findMatchFlag(
 
 // The interactive-tx client of the EXTENDED prisma (the generated
 // Prisma.TransactionClient is not assignable to it — see account-lifecycle.ts).
-type TxClient = Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
+type TxClient = PrismaTxClient;
 type ReportTx = Pick<TxClient, "$executeRaw" | "setting">;
 
 /** Remove one item's flag from the stored report — the fix that resolved it, inside its transaction. */
@@ -306,15 +383,98 @@ type MoveTx = Pick<TxClient, "plexLibraryItem" | "jellyfinLibraryItem">;
 const keysOf = (canonical: string | null, all: string[]): string[] =>
   Array.from(new Set([...(canonical ? [canonical] : []), ...all]));
 
+/** One library row's item keys, whatever the server calls them. */
+interface RowKeys { tmdbId: number; canonical: string | null; keys: string[] }
+
+/** What a newly created target row starts with, until the next full sync. */
+/** `year` as the library rows store it (text, e.g. "2017"). */
+export interface MovedTitleDisplay { title: string | null; year: string | null }
+
+/** The PlexLibraryItem / JellyfinLibraryItem calls the move makes, under one set of names. */
+interface LibraryRowAdapter {
+  holders(moved: string[]): Promise<RowKeys[]>;
+  remove(tmdbId: number): Promise<unknown>;
+  /** `canonical` given: the row's canonical copy moved, so it takes this one and its path is unknown. */
+  setKeys(tmdbId: number, keys: string[], canonical?: string): Promise<unknown>;
+  target(): Promise<Omit<RowKeys, "tmdbId"> | null>;
+  createTarget(key: string): Promise<unknown>;
+  updateTarget(canonical: string, keys: string[]): Promise<unknown>;
+}
+
+interface MoveScope {
+  serverInstance: string;
+  mediaType: "MOVIE" | "TV";
+  correctTmdbId: number;
+  filePath: string | null;
+  display?: MovedTitleDisplay;
+}
+
+function rowWhere(tmdbId: number, scope: MoveScope) {
+  return { tmdbId_mediaType_serverInstance: { tmdbId, mediaType: scope.mediaType, serverInstance: scope.serverInstance } };
+}
+
+function createData(scope: MoveScope) {
+  return {
+    tmdbId: scope.correctTmdbId, mediaType: scope.mediaType, serverInstance: scope.serverInstance, filePath: scope.filePath,
+    ...(scope.display ? { title: scope.display.title, year: scope.display.year } : {}),
+  };
+}
+
+function plexRows(tx: MoveTx, scope: MoveScope): LibraryRowAdapter {
+  const { serverInstance, mediaType, correctTmdbId } = scope;
+  const db = tx.plexLibraryItem;
+  return {
+    holders: async (moved) => (await db.findMany({
+      where: { serverInstance, mediaType, tmdbId: { not: correctTmdbId }, OR: [{ plexRatingKey: { in: moved } }, { plexRatingKeys: { hasSome: moved } }] },
+      select: { tmdbId: true, plexRatingKey: true, plexRatingKeys: true },
+    })).map((h) => ({ tmdbId: h.tmdbId, canonical: h.plexRatingKey, keys: h.plexRatingKeys })),
+    remove: (tmdbId) => db.deleteMany({ where: { tmdbId, mediaType, serverInstance } }),
+    setKeys: (tmdbId, keys, canonical) => db.update({
+      where: rowWhere(tmdbId, scope),
+      data: canonical === undefined ? { plexRatingKeys: keys } : { plexRatingKey: canonical, plexRatingKeys: keys, filePath: null },
+    }),
+    target: async () => {
+      const t = await db.findUnique({ where: rowWhere(correctTmdbId, scope), select: { plexRatingKey: true, plexRatingKeys: true } });
+      return t ? { canonical: t.plexRatingKey, keys: t.plexRatingKeys } : null;
+    },
+    createTarget: (key) => db.create({ data: { ...createData(scope), plexRatingKey: key, plexRatingKeys: [key] } }),
+    updateTarget: (canonical, keys) => db.update({ where: rowWhere(correctTmdbId, scope), data: { plexRatingKey: canonical, plexRatingKeys: keys } }),
+  };
+}
+
+function jellyfinRows(tx: MoveTx, scope: MoveScope): LibraryRowAdapter {
+  const { serverInstance, mediaType, correctTmdbId } = scope;
+  const db = tx.jellyfinLibraryItem;
+  return {
+    holders: async (moved) => (await db.findMany({
+      where: { serverInstance, mediaType, tmdbId: { not: correctTmdbId }, OR: [{ jellyfinItemId: { in: moved } }, { jellyfinItemIds: { hasSome: moved } }] },
+      select: { tmdbId: true, jellyfinItemId: true, jellyfinItemIds: true },
+    })).map((h) => ({ tmdbId: h.tmdbId, canonical: h.jellyfinItemId, keys: h.jellyfinItemIds })),
+    remove: (tmdbId) => db.deleteMany({ where: { tmdbId, mediaType, serverInstance } }),
+    setKeys: (tmdbId, keys, canonical) => db.update({
+      where: rowWhere(tmdbId, scope),
+      data: canonical === undefined ? { jellyfinItemIds: keys } : { jellyfinItemId: canonical, jellyfinItemIds: keys, filePath: null },
+    }),
+    target: async () => {
+      const t = await db.findUnique({ where: rowWhere(correctTmdbId, scope), select: { jellyfinItemId: true, jellyfinItemIds: true } });
+      return t ? { canonical: t.jellyfinItemId, keys: t.jellyfinItemIds } : null;
+    },
+    createTarget: (key) => db.create({ data: { ...createData(scope), jellyfinItemId: key, jellyfinItemIds: [key] } }),
+    updateTarget: (canonical, keys) => db.update({ where: rowWhere(correctTmdbId, scope), data: { jellyfinItemId: canonical, jellyfinItemIds: keys } }),
+  };
+}
+
 /**
  * A remapped server item's library rows (fix-match item mode), until the next
  * full sync rewrites them from the server: the item leaves every OTHER title's
  * row on its server — a row left with no copy is deleted, a row whose canonical
  * copy it was falls back to its next copy (path unknown until the sync) — and
- * joins the corrected title's row, created when the server held no copy of it.
- * Only `oldKey`/`newKey` move: the other copies of the old title stay exactly
- * where they were, which is the whole point of fixing one item (guardrail 37's
- * every-copy remap would have rematched a correctly matched copy too).
+ * joins the corrected title's row, created when the server held no copy of it
+ * (with `display`'s title and year when the caller knows them). Only
+ * `oldKey`/`newKey` move: the other copies of the old title stay exactly where
+ * they were, which is the whole point of fixing one item (guardrail 37's
+ * every-copy remap would have rematched a correctly matched copy too). Every
+ * query is awaited in turn (guardrail 23c).
  */
 export async function moveItemToTitleInTx(
   tx: MoveTx,
@@ -325,50 +485,22 @@ export async function moveItemToTitleInTx(
   newKey: string,
   correctTmdbId: number,
   filePath: string | null,
+  display?: MovedTitleDisplay,
 ): Promise<void> {
+  const scope: MoveScope = { serverInstance, mediaType, correctTmdbId, filePath, display };
+  const rows = server === "plex" ? plexRows(tx, scope) : jellyfinRows(tx, scope);
   const moved = new Set([oldKey, newKey]);
-  const targetWhere = { tmdbId_mediaType_serverInstance: { tmdbId: correctTmdbId, mediaType, serverInstance } };
-  if (server === "plex") {
-    const holders = await tx.plexLibraryItem.findMany({
-      where: { serverInstance, mediaType, tmdbId: { not: correctTmdbId }, OR: [{ plexRatingKey: { in: [...moved] } }, { plexRatingKeys: { hasSome: [...moved] } }] },
-      select: { tmdbId: true, plexRatingKey: true, plexRatingKeys: true },
-    });
-    for (const h of holders) {
-      const rest = keysOf(h.plexRatingKey, h.plexRatingKeys).filter((k) => !moved.has(k));
-      const where = { tmdbId_mediaType_serverInstance: { tmdbId: h.tmdbId, mediaType, serverInstance } };
-      if (rest.length === 0) await tx.plexLibraryItem.deleteMany({ where: { tmdbId: h.tmdbId, mediaType, serverInstance } });
-      else if (h.plexRatingKey !== null && moved.has(h.plexRatingKey)) await tx.plexLibraryItem.update({ where, data: { plexRatingKey: rest[0], plexRatingKeys: rest, filePath: null } });
-      else await tx.plexLibraryItem.update({ where, data: { plexRatingKeys: rest } });
-    }
-    const target = await tx.plexLibraryItem.findUnique({ where: targetWhere, select: { plexRatingKey: true, plexRatingKeys: true } });
-    if (!target) {
-      await tx.plexLibraryItem.create({ data: { tmdbId: correctTmdbId, mediaType, serverInstance, plexRatingKey: newKey, plexRatingKeys: [newKey], filePath } });
-    } else {
-      await tx.plexLibraryItem.update({
-        where: targetWhere,
-        data: { plexRatingKey: target.plexRatingKey ?? newKey, plexRatingKeys: keysOf(target.plexRatingKey ?? newKey, [...target.plexRatingKeys, newKey]) },
-      });
-    }
+  for (const h of await rows.holders([...moved])) {
+    const rest = keysOf(h.canonical, h.keys).filter((k) => !moved.has(k));
+    if (rest.length === 0) await rows.remove(h.tmdbId);
+    else if (h.canonical !== null && moved.has(h.canonical)) await rows.setKeys(h.tmdbId, rest, rest[0]);
+    else await rows.setKeys(h.tmdbId, rest);
+  }
+  const target = await rows.target();
+  if (!target) {
+    await rows.createTarget(newKey);
     return;
   }
-  const holders = await tx.jellyfinLibraryItem.findMany({
-    where: { serverInstance, mediaType, tmdbId: { not: correctTmdbId }, OR: [{ jellyfinItemId: { in: [...moved] } }, { jellyfinItemIds: { hasSome: [...moved] } }] },
-    select: { tmdbId: true, jellyfinItemId: true, jellyfinItemIds: true },
-  });
-  for (const h of holders) {
-    const rest = keysOf(h.jellyfinItemId, h.jellyfinItemIds).filter((k) => !moved.has(k));
-    const where = { tmdbId_mediaType_serverInstance: { tmdbId: h.tmdbId, mediaType, serverInstance } };
-    if (rest.length === 0) await tx.jellyfinLibraryItem.deleteMany({ where: { tmdbId: h.tmdbId, mediaType, serverInstance } });
-    else if (h.jellyfinItemId !== null && moved.has(h.jellyfinItemId)) await tx.jellyfinLibraryItem.update({ where, data: { jellyfinItemId: rest[0], jellyfinItemIds: rest, filePath: null } });
-    else await tx.jellyfinLibraryItem.update({ where, data: { jellyfinItemIds: rest } });
-  }
-  const target = await tx.jellyfinLibraryItem.findUnique({ where: targetWhere, select: { jellyfinItemId: true, jellyfinItemIds: true } });
-  if (!target) {
-    await tx.jellyfinLibraryItem.create({ data: { tmdbId: correctTmdbId, mediaType, serverInstance, jellyfinItemId: newKey, jellyfinItemIds: [newKey], filePath } });
-  } else {
-    await tx.jellyfinLibraryItem.update({
-      where: targetWhere,
-      data: { jellyfinItemId: target.jellyfinItemId ?? newKey, jellyfinItemIds: keysOf(target.jellyfinItemId ?? newKey, [...target.jellyfinItemIds, newKey]) },
-    });
-  }
+  const canonical = target.canonical ?? newKey;
+  await rows.updateTarget(canonical, keysOf(canonical, [...target.keys, newKey]));
 }

@@ -40,8 +40,10 @@ test("hasPermission or/and modes", () => {
   const perms = Permission.REQUEST_MOVIE; // single bit
   assert.equal(hasPermission(perms, [Permission.REQUEST, Permission.REQUEST_MOVIE], "or"), true);
   assert.equal(hasPermission(perms, [Permission.REQUEST, Permission.REQUEST_MOVIE], "and"), false);
-  // Empty requirement list is trivially satisfied.
-  assert.equal(hasPermission(0n, [], "and"), true);
+  // An empty requirement list grants nothing (fail closed); only the superbit passes it.
+  assert.equal(hasPermission(0n, [], "and"), false);
+  assert.equal(hasPermission(Permission.MANAGE_USERS, [], "or"), false);
+  assert.equal(hasPermission(Permission.ADMIN, []), true);
   // No matching bit → denied.
   assert.equal(hasPermission(Permission.REQUEST_MOVIE, Permission.MANAGE_ISSUES), false);
 });
@@ -87,6 +89,9 @@ test("parsePermissions / serializePermissions round-trip via decimal string", ()
   assert.equal(parsePermissions(serializePermissions(mask)), mask);
   assert.equal(parsePermissions(null), 0n);
   assert.equal(parsePermissions("not-a-number"), 0n);
+  // Decimal only: "-1" would set every bit (the ADMIN superbit included).
+  for (const claim of ["-1", "0x1", "0b11", " 1", "1e3"]) assert.equal(parsePermissions(claim), 0n, claim);
+  assert.equal(parsePermissions((1n << 120n).toString()), 0n, "an unknown bit is dropped");
 });
 
 test("parseAndValidatePermissions rejects junk and unknown bits", () => {
@@ -168,18 +173,14 @@ test("canAutoApprove: a 4K grant does not leak into HD auto-approve", () => {
   assert.equal(canAutoApprove(Permission.AUTO_APPROVE_4K, "MOVIE", false), false);
 });
 
-test("parsePermissions: pins the lenient JWT-boundary parse (trust boundary, not a validator)", () => {
-  // parsePermissions only ever sees server-signed JWT claims, so it is
-  // deliberately lenient — validation of client-supplied input happens in
-  // parseAndValidatePermissions (which rejects "-1" and prefix forms via
-  // /^\d+$/). These pin the current lenient behavior so any tightening is a
-  // conscious decision:
-  // "-1" parses to -1n — in BigInt two's-complement that is an all-bits-set
-  // mask, which passes every hasPermission check including the ADMIN superbit.
-  assert.equal(parsePermissions("-1"), -1n);
-  assert.equal(hasPermission(parsePermissions("-1"), Permission.ADMIN), true);
-  // BigInt prefix forms are accepted as-is.
-  assert.equal(parsePermissions("0x10"), 16n);
+test("parsePermissions: the JWT-boundary parse is strict decimal, masked to the known bits", () => {
+  // It sees server-signed claims and stored masks, but BigInt alone reads "-1"
+  // as an all-bits-set mask (the ADMIN superbit included) and accepts prefix
+  // forms, so a hand-edited or corrupted value could read as everything.
+  assert.equal(parsePermissions("-1"), 0n);
+  assert.equal(hasPermission(parsePermissions("-1"), Permission.ADMIN), false);
+  assert.equal(parsePermissions("0x10"), 0n);
+  assert.equal(parsePermissions(String(Permission.ADMIN | Permission.MANAGE_USERS)), Permission.ADMIN | Permission.MANAGE_USERS);
   // Missing claim → no permissions.
   assert.equal(parsePermissions(undefined), 0n);
 });

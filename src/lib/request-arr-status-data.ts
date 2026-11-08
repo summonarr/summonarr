@@ -138,7 +138,18 @@ async function requesterPinned(target: StatusTarget): Promise<boolean> {
 // A library row on a server the REQUESTER can see — the same gate the sync's
 // marking pass applies (guardrail 35), so "it's on Plex" never names a
 // restricted server the request can't be marked available from.
+// A failed read is "not in the library", warned, like requesterPinned's — the
+// panel still answers from the arr instead of failing whole.
 async function inVisibleLibrary(target: StatusTarget): Promise<boolean> {
+  try {
+    return await readVisibleLibrary(target);
+  } catch (err) {
+    console.warn(`[request-arr-status] library check failed for ${target.mediaType} ${target.tmdbId}:`, err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+async function readVisibleLibrary(target: StatusTarget): Promise<boolean> {
   const visible = await getVisibleServerInstancesForUserId(target.requestedBy);
   const where = (instances: string[]) => ({ tmdbId: target.tmdbId, mediaType: target.mediaType, serverInstance: { in: instances } });
   const [plex, jellyfin] = await Promise.all([
@@ -148,42 +159,53 @@ async function inVisibleLibrary(target: StatusTarget): Promise<boolean> {
   return plex !== null || jellyfin !== null;
 }
 
+// A read's outcome as the judge takes it: the value, or the folded failure.
+function asRead<T>(work: Promise<T>, target: StatusTarget, what: string): Promise<ArrRead<T>> {
+  return work.then((value): ArrRead<T> => ({ ok: true, value }), (err) => failed<T>(target, what, err));
+}
+
+// The instance's own resource for the title (null when it doesn't have it),
+// and its arr id.
+async function readTitle(
+  cfg: Awaited<ReturnType<typeof configuredArrCfg>>,
+  target: StatusTarget,
+  opts: ReadOpts,
+): Promise<{ arrId: number | null; resource: ArrRead<Record<string, unknown> | null> }> {
+  try {
+    const found = (await findTitle(target.service, target.instance, target.tmdbId, opts)) ?? (await findByStoredTvdbId(cfg, target, opts));
+    const value = found === null ? null : found.raw ?? (await readResource(cfg, target.service, found.arrId, opts));
+    return { arrId: found?.arrId ?? null, resource: { ok: true, value } };
+  } catch (err) {
+    return { arrId: null, resource: failed(target, "title read", err) };
+  }
+}
+
 /**
  * The verdict for one request. Throws ArrInstanceError (arr-admin.ts) when the
  * instance is not a configured one; every Radarr/Sonarr failure is folded into
  * the `unreachable` verdict instead.
+ *
+ * The library and preference reads start first and run beside the arr reads;
+ * neither ever rejects. The queue and history are read only when the title
+ * still needs a download — judgeRequestArrStatus never reaches them otherwise.
  */
 export async function loadRequestArrStatus(target: StatusTarget, now: Date = new Date()): Promise<RequestArrStatus> {
   const cfg = await configuredArrCfg(target.service, target.instance);
   const libraryCheck = inVisibleLibrary(target);
-  // Settled now so a rejected library read can't go unhandled while the arr is read.
-  libraryCheck.catch(() => {});
   const pinnedCheck = requesterPinned(target);
   const opts: ReadOpts = { quietErrors: true, timeoutMs: READ_TIMEOUT_MS, signal: AbortSignal.timeout(STATUS_BUDGET_MS) };
 
-  let arrId: number | null = null;
-  let resource: ArrRead<Record<string, unknown> | null>;
-  try {
-    const found = (await findTitle(target.service, target.instance, target.tmdbId, opts)) ?? (await findByStoredTvdbId(cfg, target, opts));
-    arrId = found?.arrId ?? null;
-    resource = { ok: true, value: found === null ? null : found.raw ?? (await readResource(cfg, target.service, found.arrId, opts)) };
-  } catch (err) {
-    resource = failed(target, "title read", err);
-  }
-
+  const { arrId, resource } = await readTitle(cfg, target, opts);
   const inLibrary = await libraryCheck;
-  let queue: ArrRead<QueueItem[]> | null = null;
-  let failures: ArrRead<ArrHistoryEvent[]> | null = null;
-  let imports: ArrRead<ArrHistoryEvent[]> | null = null;
   const facts = resource.ok && resource.value !== null ? titleFacts(target.service, target.instance, resource.value, now.getTime()) : null;
-  if (arrId !== null && facts && !needsNoDownload(target.service, facts, inLibrary)) {
-    const id = arrId;
-    [queue, failures, imports] = await Promise.all([
-      readQueue(cfg, target, id, opts).then((value): ArrRead<QueueItem[]> => ({ ok: true, value }), (err) => failed<QueueItem[]>(target, "queue read", err)),
-      readHistory(cfg, target, id, "failed", opts).then((value): ArrRead<ArrHistoryEvent[]> => ({ ok: true, value }), (err) => failed<ArrHistoryEvent[]>(target, "history read", err)),
-      readHistory(cfg, target, id, "imported", opts).then((value): ArrRead<ArrHistoryEvent[]> => ({ ok: true, value }), (err) => failed<ArrHistoryEvent[]>(target, "import history read", err)),
-    ]);
-  }
+  const needsDownload = arrId !== null && facts !== null && !needsNoDownload(target.service, facts, inLibrary);
+  const [queue, failures, imports] = needsDownload
+    ? await Promise.all([
+        asRead(readQueue(cfg, target, arrId, opts), target, "queue read"),
+        asRead(readHistory(cfg, target, arrId, "failed", opts), target, "history read"),
+        asRead(readHistory(cfg, target, arrId, "imported", opts), target, "import history read"),
+      ])
+    : [null, null, null];
 
   return judgeRequestArrStatus({
     service: target.service,

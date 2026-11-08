@@ -49,8 +49,9 @@ test("HorizontalBars folds its items before computing the max and keying rows", 
 // ═══ the activity page's backfill map (C138 / guardrail 37c) ════════════════
 
 test("the Activity backfill resolves each Plex ratingKey to its ONE owner per instance — never last-write-wins", () => {
-  const src = read("../src/app/(app)/admin/activity/page.tsx");
-  assert.match(src, /import \{ indexPlexRowsByKey \} from "@\/lib\/plex-dedupe"/);
+  // The overview's session lookup lives in activity-session-tmdb.ts.
+  const src = read("../src/lib/activity-session-tmdb.ts");
+  assert.match(src, /import \{ indexPlexRowsByKey \} from "\.\/plex-dedupe"/);
   assert.match(src, /for \(const \[k, i\] of indexPlexRowsByKey\(rows\)\)/);
   assert.doesNotMatch(src, /for \(const k of i\.plexRatingKeys\)/, "an array entry overwrote another row's canonical key");
 });

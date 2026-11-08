@@ -66,8 +66,11 @@ test("the /votes page clamps ?page= through parsePageNumber", () => {
 });
 
 test("the /votes page pages 'my votes by count' over every voter's rows on the caller's titles", () => {
-  const branch = /if \(mine && sort === "votes"\) \{([\s\S]*?)\} else \{/.exec(page);
+  // The page reads the same list GET /api/votes does; the branch lives there.
+  assert.match(page, /await loadVotesList\(session, \{ page, mine, sort, q \}\)/);
+  const lib = readFileSync(new URL("../src/lib/votes-list-data.ts", import.meta.url), "utf8");
+  assert.match(lib, /const byTotalCount = opts\.mine && opts\.sort === "votes";/);
+  const branch = /if \(byTotalCount\) \{([\s\S]*?)\} else \{/.exec(lib);
   assert.ok(branch, "the mine-by-count branch is missing");
   assert.match(branch[1], /myVotesByCountScope\(session, where\)/);
-  assert.match(branch[1], /scopedWhere = scope\.where;/);
 });

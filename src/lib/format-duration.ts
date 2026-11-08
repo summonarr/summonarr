@@ -51,11 +51,14 @@ export function formatDurationMsLocalized(ms: number, locale: string): string {
 // English abbreviations are used — a bad tag must never blank a duration cell.
 export function formatDurationHM(seconds: number, locale: string): string {
   if (!Number.isFinite(seconds) || seconds <= 0) return "—";
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
+  // Whole seconds first, then split: rounding only the seconds part showed
+  // 59.5–59.9 s as "60s" instead of "1m".
+  const total = Math.round(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
   const part = (n: number, unit: DurationUnit) =>
     unitFormatter(locale, unit)?.format(n) ?? `${n}${ENGLISH_ABBR[unit]}`;
   if (h > 0) return `${part(h, "hour")} ${part(m, "minute")}`;
   if (m > 0) return part(m, "minute");
-  return part(Math.round(seconds), "second");
+  return part(total, "second");
 }

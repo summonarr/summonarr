@@ -2,6 +2,8 @@
 
 import * as React from "react";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson } from "@/lib/client/fetch-json";
+import { MeSchema, sessionAfterRead, type SessionState, type SessionStatus } from "./session-read";
 
 export interface SummonarrSession {
   user: {
@@ -21,7 +23,7 @@ export interface SummonarrSession {
   expiresAt?: number;
 }
 
-export type SessionStatus = "loading" | "authenticated" | "unauthenticated";
+export type { SessionStatus };
 
 interface ContextValue {
   session: SummonarrSession | null;
@@ -29,12 +31,29 @@ interface ContextValue {
   refresh: () => Promise<void>;
 }
 
+type State = SessionState<SummonarrSession>;
+
 const Ctx = React.createContext<ContextValue | null>(null);
+
+// What the provider holds when the server read `initial`: a session is
+// authenticated; none is "loading" until /api/auth/me has been asked.
+function seeded(initial: SummonarrSession | null): State {
+  return { session: initial, status: initial ? "authenticated" : "loading" };
+}
+
+// The prop's content, so a re-render that hands an identical session (every
+// RSC render builds a new object) changes nothing.
+const sessionKey = (s: SummonarrSession | null) => JSON.stringify(s);
 
 // The root layout reads the session cookie on the server (see
 // src/lib/session-server.ts) and passes it in as initialSession, so the page
-// doesn't flash a "loading" state on first paint. If it's null we still ask
-// /api/auth/me once on mount, in case a session exists that the server read missed.
+// doesn't flash a "loading" state on first paint. If it's null we ask
+// /api/auth/me, in case a session exists that the server read missed.
+//
+// A later render of the layout (router.refresh() after a role or permission
+// change, a re-signed cookie) hands a NEWER initialSession: it replaces what
+// the provider holds, so the nav and permission checks never keep the old
+// claims until a full reload.
 export function SummonarrSessionProvider({
   initialSession,
   children,
@@ -42,40 +61,36 @@ export function SummonarrSessionProvider({
   initialSession: SummonarrSession | null;
   children: React.ReactNode;
 }) {
-  const [session, setSession] = React.useState<SummonarrSession | null>(
-    initialSession,
-  );
-  const [status, setStatus] = React.useState<SessionStatus>(
-    initialSession ? "authenticated" : "loading",
-  );
+  const [state, setState] = React.useState<State>(() => seeded(initialSession));
+  const [renderedKey, setRenderedKey] = React.useState(() => sessionKey(initialSession));
+  const initialKey = sessionKey(initialSession);
+  if (renderedKey !== initialKey) {
+    setRenderedKey(initialKey);
+    // A server-read session is the newer truth; a null one is checked with
+    // /api/auth/me below, keeping what is shown until it answers.
+    if (initialSession) setState({ session: initialSession, status: "authenticated" });
+  }
 
+  // Only the newest refresh may write: an older one landing late can't
+  // overwrite a newer answer.
+  const seqRef = React.useRef(0);
   const refresh = React.useCallback(async () => {
-    try {
-      const res = await fetch(withBasePath("/api/auth/me"), { credentials: "include" });
-      if (res.ok) {
-        const body = (await res.json()) as { session: SummonarrSession | null };
-        setSession(body.session);
-        setStatus(body.session ? "authenticated" : "unauthenticated");
-      } else {
-        setSession(null);
-        setStatus("unauthenticated");
-      }
-    } catch {
-      // Network error — keep whatever session we had rather than dropping
-      // the user to unauthenticated on a transient blip.
-      setStatus(session ? "authenticated" : "unauthenticated");
-    }
-  }, [session]);
-
-  React.useEffect(() => {
-    if (initialSession == null) void refresh();
-    // Only run on mount; subsequent updates happen via refresh()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const seq = ++seqRef.current;
+    const res = await fetchJson(withBasePath("/api/auth/me"), { schema: MeSchema, init: { credentials: "include" } });
+    if (seq !== seqRef.current) return;
+    // Signed out only on a 401/403; no answer or a 5xx keeps what is shown.
+    setState((prev) => sessionAfterRead(prev, res));
   }, []);
 
+  // Ask /api/auth/me whenever the server read found no session — on mount,
+  // and on a later render that brings a null one.
+  React.useEffect(() => {
+    if (initialKey === "null") void refresh();
+  }, [initialKey, refresh]);
+
   const value = React.useMemo(
-    () => ({ session, status, refresh }),
-    [session, status, refresh],
+    () => ({ session: state.session, status: state.status, refresh }),
+    [state, refresh],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

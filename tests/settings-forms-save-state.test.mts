@@ -20,24 +20,58 @@ test("ApiKeySettingForm: the field starts empty — the mask is only a placehold
   assert.doesNotMatch(src, /"••••••••"/, "the mask comes from secret-mask.ts, never a local copy");
 });
 
-test("DiscordBotForm: a blank bot token is never sent (the route can't clear it) and the form says how to turn the bot off", () => {
+test("DiscordBotForm: a blank bot token is never sent (the route can't clear it) and the form says how to turn the bot off", async () => {
+  const keys = form("discord-bot-keys.ts");
   const src = form("discord-bot-form.tsx");
   // The one diff Save sends (and the dirty flag reads) drops a blank token.
-  const diff = src.slice(src.indexOf("function pendingChanges"), src.indexOf("export function DiscordBotForm"));
-  assert.match(diff, /current !== saved\[key\] && !\(key === "discordBotToken" && current === ""\)/);
+  assert.match(keys, /current !== saved\[key\] && !\(key === "discordBotToken" && current === ""\)/);
   const save = src.slice(src.indexOf("async function handleSave"), src.indexOf("// A labelled text input"));
   assert.match(save, /const changed = pendingChanges\(values, saved\);/);
-  assert.match(save, /body: JSON\.stringify\(changed\)/);
+  assert.match(save, /const result = await save\(changed\);/);
   // The hint shows while the field is blank over a saved token.
   assert.match(src, /\{values\.discordBotToken === "" && tokenSaved && \(\s*<p[^>]*>\{t\("settings\.form\.discord\.botTokenKept"\)\}<\/p>/);
+  const { discordFormInitial, pendingChanges, DISCORD_KEYS } = await import("../src/components/settings/forms/discord-bot-keys.ts");
+  const initial = discordFormInitial({ discordBotToken: "real-token", discordClientId: "1", discordRequireLinkedAccount: "true" });
+  // The token never reaches the browser, not even as the mask: only whether one is saved.
+  assert.equal(initial.values.discordBotToken, "");
+  assert.equal(initial.tokenSaved, true);
+  assert.equal(initial.values.discordRequireLinkedAccount, "true");
+  assert.equal(initial.values.discordRequireLinkedAccountSite, "false");
+  assert.equal(initial.values.discordGuildId, "");
+  assert.deepEqual(Object.keys(initial.values), [...DISCORD_KEYS], "every key, once");
+  assert.equal(discordFormInitial({}).tokenSaved, false);
+  assert.deepEqual(pendingChanges({ ...initial.values, discordGuildId: "9" }, initial.values), { discordGuildId: "9" });
+  assert.deepEqual(pendingChanges(initial.values, initial.values), {});
 });
 
-test("EmailForm: the SMTP port is a bounded number and Save waits for a valid one; the Saved line fades", () => {
+// The settings page reads exactly the keys the form edits: one list.
+test("DiscordBotForm: the settings page builds the form from the one key list", () => {
+  const tab = readFileSync(new URL("../src/app/(app)/settings/_tabs/notifications-tab.tsx", import.meta.url), "utf8");
+  assert.match(tab, /\.\.\.DISCORD_KEYS,/);
+  assert.match(tab, /<DiscordBotForm \{\.\.\.discordFormInitial\(cfg\)\} \/>/);
+  assert.doesNotMatch(tab, /initialBotToken/);
+});
+
+// An edit during Save & Test flipped "saving" to "idle" and re-enabled Save, so
+// a second click sent a second test email.
+test("EmailForm: the SMTP port is a bounded number and Save waits for a valid one; edits go through the shared saver", async () => {
   const src = form("email-form.tsx");
   assert.match(src, /id="smtp-port"\s+type="number"\s+inputMode="numeric"\s+min=\{1\}\s+max=\{65535\}/);
   assert.match(src, /const portValid = \/\^\\d\+\$\/\.test\(port\) && Number\(port\) >= 1 && Number\(port\) <= 65535;/);
   assert.match(src, /backend === "smtp" \? Boolean\(host\) && portValid :/);
-  assert.match(src, /okTimer\.current = setTimeout\(\(\) => setStatus\(\(s\) => \(s === "ok" \? "idle" : s\)\), 3000\);/);
+  assert.match(src, /const \{ status, message, save, edited \} = useSettingsSave\(\);/);
+  assert.doesNotMatch(src, /setStatus\(/, "no hand-rolled status");
+  assert.doesNotMatch(src, /useState\(initialPassword\)|useState\(initialResendApiKey\)/, "a secret field never starts as the mask");
+  const { emailSaveBody, ignoredKeys } = await import("../src/components/settings/forms/email-form-body.ts");
+  const base = { backend: "smtp" as const, host: "h", port: "587", user: "u", password: "", from: "f", resendApiKey: "", resendFrom: "r" };
+  assert.deepEqual(emailSaveBody(base), { emailBackend: "smtp", smtpHost: "h", smtpPort: "587", smtpUser: "u", smtpFrom: "f" },
+    "a blank password over a saved one is not sent: it is kept");
+  assert.equal(emailSaveBody({ ...base, password: "p" }).smtpPassword, "p");
+  assert.deepEqual(emailSaveBody({ ...base, backend: "resend" }), { emailBackend: "resend", resendFrom: "r" });
+  // The route answers what it left unchanged; the form says so instead of a bare "Saved".
+  assert.deepEqual(ignoredKeys({ ok: true, ignored: ["smtpHost", 3] }), ["smtpHost"]);
+  assert.deepEqual(ignoredKeys({ ok: true }), []);
+  assert.match(src, /setIgnored\(ignoredKeys\(result\.data\)\);/);
 });
 
 test("DeletionVoteThresholdForm: the input carries the route's 0–10000 range and the error is set only by a failure", () => {

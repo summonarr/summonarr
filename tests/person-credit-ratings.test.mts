@@ -52,7 +52,7 @@ shadowPrismaModel(prisma, "tmdbCache", {
   },
   deleteMany: async () => ({ count: 0 }),
 });
-for (const m of ["plexLibraryItem", "jellyfinLibraryItem", "mediaRequest", "radarrWantedItem", "sonarrWantedItem", "blacklistItem"]) {
+for (const m of ["plexLibraryItem", "jellyfinLibraryItem", "mediaRequest", "radarrWantedItem", "sonarrWantedItem", "radarrAvailableItem", "sonarrAvailableItem", "blacklistItem", "hiddenItem"]) {
   shadowPrismaModel(prisma, m, { findMany: async () => [] });
 }
 shadowPrismaModel(prisma, "tmdbMediaCore", { upsert: async () => ({}), updateMany: async () => ({ count: 0 }) });

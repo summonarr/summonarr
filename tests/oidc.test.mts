@@ -16,6 +16,7 @@ import {
   OIDC_STATE_COOKIE,
   buildOidcExchangeUrl,
   isOidcConfigured,
+  readOidcEnv,
   signOidcStateCookie,
   verifyOidcStateCookie,
 } from "../src/lib/oidc.ts";
@@ -93,6 +94,14 @@ test("isOidcConfigured requires all three OIDC_* env vars, non-empty", () => {
       else process.env[env] = val;
     }
   }
+});
+
+test("readOidcEnv is the one reading of the env: complete and https, or null", () => {
+  const full = { OIDC_ISSUER: "https://idp.example.com/realm", OIDC_CLIENT_ID: "summonarr", OIDC_CLIENT_SECRET: "s3cret" };
+  assert.equal(readOidcEnv(full)?.issuer.href, "https://idp.example.com/realm");
+  assert.equal(readOidcEnv({ ...full, OIDC_ISSUER: "http://idp.example.com" }), null, "an http issuer can never complete a sign-in");
+  assert.equal(readOidcEnv({ ...full, OIDC_CLIENT_ID: "" }), null);
+  assert.equal(readOidcEnv({ ...full, OIDC_ISSUER: "not a url" }), null);
 });
 
 test("sign → verify roundtrip returns exactly the stored flow state", async () => {

@@ -4,6 +4,7 @@ import { getEnrichedPerson } from "@/lib/person";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { isTmdbIdInRange, parseTmdbIdParam } from "@/lib/tmdb-id";
+import { isTmdbNotFound } from "@/lib/tmdb";
 
 // The enrichment lives in getEnrichedPerson (shared with the /person/[id] server
 // page) so the two can't drift. This handler is just auth + rate-limit + the
@@ -35,8 +36,7 @@ export const GET = withAuth(async (
     // 5xx, a network error, or a Prisma/enrichment failure must NOT masquerade as
     // a 404 — return 502 so a transient upstream/DB problem is distinguishable
     // from a genuinely missing person.
-    const message = err instanceof Error ? err.message : String(err);
-    if (/failed: 404\b/.test(message)) {
+    if (isTmdbNotFound(err)) {
       return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
     }
     return NextResponse.json({ error: t("apiUser.person.upstreamError") }, { status: 502 });

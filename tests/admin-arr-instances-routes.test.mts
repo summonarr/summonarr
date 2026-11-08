@@ -96,6 +96,7 @@ const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
 const { arrSettingKey } = await import("../src/lib/arr-instances.ts");
+const { SECRET_MASK_SENTINEL } = await import("../src/lib/secret-mask.ts");
 const { isSensitiveSettingKey } = await import("../src/lib/settings-sensitive-keys.ts");
 
 // ── op log ───────────────────────────────────────────────────────────────────
@@ -671,18 +672,41 @@ test("a save is audited with the slug list", async () => {
   assert.deepEqual(JSON.parse(data.details).instances, ["anime"]);
 });
 
-test("connection tests run only for instances that have BOTH url and apiKey", async () => {
+test("connection tests run only for instances whose address or key the save changed, and that have BOTH url and apiKey", async () => {
   const t = await mintSession();
-  registry("radarr", [{ slug: "anime", name: "Anime" }, { slug: "half", name: "Half" }]);
+  registry("radarr", [{ slug: "anime", name: "Anime" }, { slug: "half", name: "Half" }, { slug: "same", name: "Same" }]);
   settings.set(arrSettingKey("radarr", "anime", "Url"), "http://10.0.0.8:7878");
   settings.set(arrSettingKey("radarr", "anime", "ApiKey"), "k");
-  settings.set(arrSettingKey("radarr", "half", "Url"), "http://10.0.0.7:7878"); // no key
+  settings.set(arrSettingKey("radarr", "same", "Url"), "http://10.0.0.9:7878");
+  settings.set(arrSettingKey("radarr", "same", "ApiKey"), "k2");
   const body = await (await saveInstances(t, {
     service: "radarr",
-    instances: [{ slug: "anime", name: "Anime" }, { slug: "half", name: "Half" }],
+    instances: [
+      { slug: "anime", name: "Anime", url: "http://10.0.0.18:7878" },
+      { slug: "half", name: "Half", url: "http://10.0.0.7:7878" }, // a new address, but no key
+      { slug: "same", name: "Renamed", url: "http://10.0.0.9:7878" }, // the address it already had
+    ],
   })).json();
-  assert.ok(body.testResults.anime);
+  assert.ok(body.testResults.anime, "a changed address is tested");
   assert.ok(!body.testResults.half, "an instance with no api key should not be probed");
+  assert.ok(!body.testResults.same, "an unchanged connection is not probed");
+  assert.deepEqual(fetchCalls.filter((u) => u.pathname.includes("/system/status")).map((u) => u.host), ["10.0.0.18:7878"]);
+});
+
+test("a save that changes no address or key waits on no connection test", async () => {
+  const t = await mintSession();
+  registry("radarr", [{ slug: "anime", name: "Anime" }]);
+  settings.set(arrSettingKey("radarr", "anime", "Url"), "http://10.0.0.8:7878");
+  settings.set(arrSettingKey("radarr", "anime", "ApiKey"), "k");
+  // The default and 4K instances are configured too; the manager never posts
+  // them, and a save does not re-test them.
+  settings.set(arrSettingKey("radarr", "", "Url"), "http://10.0.0.5:7878");
+  settings.set(arrSettingKey("radarr", "", "ApiKey"), "default-key");
+  seed4k("radarr");
+  const body = await (await saveInstances(t, { service: "radarr", instances: [{ slug: "anime", name: "New name", apiKey: SECRET_MASK_SENTINEL }] })).json();
+  assert.equal(body.ok, true);
+  assert.deepEqual(body.testResults, {});
+  assert.equal(fetchCalls.filter((u) => u.pathname.includes("/system/status")).length, 0);
 });
 
 test("a failed connection test is reported without leaking the upstream body", async () => {
@@ -690,8 +714,8 @@ test("a failed connection test is reported without leaking the upstream body", a
   arrTestOk = false;
   registry("radarr", [{ slug: "anime", name: "Anime" }]);
   settings.set(arrSettingKey("radarr", "anime", "Url"), "http://10.0.0.8:7878");
-  settings.set(arrSettingKey("radarr", "anime", "ApiKey"), "bad");
-  const body = await (await saveInstances(t, { service: "radarr", instances: [{ slug: "anime", name: "Anime" }] })).json();
+  settings.set(arrSettingKey("radarr", "anime", "ApiKey"), "old");
+  const body = await (await saveInstances(t, { service: "radarr", instances: [{ slug: "anime", name: "Anime", apiKey: "bad" }] })).json();
   assert.equal(body.testResults.anime.error, "radarr connection failed");
   assert.ok(!JSON.stringify(body).includes("bad key"));
 });
@@ -1055,6 +1079,8 @@ for (const [label, q] of [
   ["mode=day with no day", "?mode=day"],
   ["mode=day with a bad date", "?mode=day&day=2026-1-1"],
   ["mode=day with a non-date", "?mode=day&day=yesterday"],
+  ["mode=day with an impossible month and day", "?mode=day&day=2024-13-45"],
+  ["mode=day with Feb 29 of a common year", "?mode=day&day=2026-02-29"],
 ] as const) {
   test(`heatmap-cell rejects ${label} with 400`, async () => {
     const t = await mintSession();
@@ -1092,7 +1118,7 @@ for (const [label, q] of [
 
 test("heatmap-cell accepts the boundary values", async () => {
   const t = await mintSession();
-  for (const q of ["?mode=hour&dow=0&hour=0", "?mode=hour&dow=6&hour=23", "?mode=day&day=2026-02-29"]) {
+  for (const q of ["?mode=hour&dow=0&hour=0", "?mode=hour&dow=6&hour=23", "?mode=day&day=2028-02-29"]) {
     assert.equal((await doHeatmap(t, q)).status, 200, `${q} should be accepted`);
   }
 });

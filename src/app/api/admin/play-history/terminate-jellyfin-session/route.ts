@@ -4,7 +4,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { logAudit, auditContext } from "@/lib/audit";
 import { getJellyfinSessions, terminateJellyfinSession } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
-import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
+import { parseTerminateRequest, upstreamFailureDetail } from "@/lib/terminate-session-request";
 import { instanceDefaultLocale, translatorFor, translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Admin terminate-playback endpoint for Jellyfin. Mirrors the Plex route: it
@@ -27,21 +27,17 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
-  const sessionKey = typeof body.sessionKey === "string" ? body.sessionKey.trim() : "";
+  const request = parseTerminateRequest(body);
+  if (!request.ok) {
+    const error = request.error === "invalidServerInstance"
+      ? t("apiAdmin.common.invalidServerInstance", { slug: String(body.serverInstance) })
+      : t(`apiAdmin.terminate.${request.error}`);
+    return NextResponse.json({ error }, { status: 400 });
+  }
+  const { sessionKey, serverInstance } = request.value;
   // Viewer-facing fallback, written in the instance default language (guardrail
   // 14c) — see the Plex route.
-  const reason = typeof body.reason === "string" && body.reason.trim().length > 0
-    ? body.reason.trim().slice(0, 500)
-    : translatorFor(instanceDefaultLocale())("adminActivity.terminate.defaultReason");
-
-  if (!sessionKey) {
-    return NextResponse.json({ error: t("apiAdmin.terminate.sessionKeyRequired") }, { status: 400 });
-  }
-
-  if (body.serverInstance !== undefined && (typeof body.serverInstance !== "string" || !isValidMediaInstanceSlug(body.serverInstance))) {
-    return NextResponse.json({ error: t("apiAdmin.common.invalidServerInstance", { slug: String(body.serverInstance) }) }, { status: 400 });
-  }
-  const serverInstance = typeof body.serverInstance === "string" ? body.serverInstance : DEFAULT_MEDIA_INSTANCE;
+  const reason = request.value.reason ?? translatorFor(instanceDefaultLocale())("adminActivity.terminate.defaultReason");
 
   const jellyfinConfig = await getJellyfinConfig(serverInstance);
   const serverUrl = jellyfinConfig.url?.replace(/\/$/, "") ?? null;
@@ -58,8 +54,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   try {
     sessions = await getJellyfinSessions(serverUrl, apiKey);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: t("apiAdmin.terminate.jellyfinUnreachable", { detail: msg }) }, { status: 502 });
+    // The admin gets the coarse kind; the full error (it can name the server's
+    // internal address) goes to the log.
+    console.error("[terminate-jellyfin-session] session snapshot failed:", err);
+    return NextResponse.json({ error: t("apiAdmin.terminate.jellyfinUnreachable", { detail: upstreamFailureDetail(err) }) }, { status: 502 });
   }
 
   // The card's sessionKey is the PlaySessionId; match on that, but also accept
@@ -81,8 +79,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   try {
     result = await terminateJellyfinSession(serverUrl, apiKey, match.sessionId, reason);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: t("apiAdmin.terminate.jellyfinUnreachable", { detail: msg }) }, { status: 502 });
+    console.error("[terminate-jellyfin-session] terminate request failed:", err);
+    return NextResponse.json({ error: t("apiAdmin.terminate.jellyfinUnreachable", { detail: upstreamFailureDetail(err) }) }, { status: 502 });
   }
 
   // Session already terminated on Jellyfin; a failed audit write must not 500 it.

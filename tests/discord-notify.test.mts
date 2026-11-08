@@ -103,6 +103,7 @@ const {
   notifyUserIssueMessage,
   notifyUserIssueResolved,
   notifyUsersRequestsDeclined,
+  forgetDiscordDmChannelsForTests,
 } = await import("../src/lib/discord-notify.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
@@ -196,6 +197,7 @@ beforeEach(() => {
   userFindManySelects.length = 0;
   respond = () => okJson({ id: "999999999999999999" });
   translationRows.clear();
+  forgetDiscordDmChannelsForTests();
 });
 
 // ── gating short-circuits ───────────────────────────────────────────────────
@@ -921,4 +923,61 @@ test("a bucket that reports nothing left holds the next post on that channel unt
 
   assert.equal(at.length, 2);
   assert.ok(at[1] - at[0] >= 120, `the second post waited for the bucket (${at[1] - at[0]}ms)`);
+});
+
+// ── delivery details ────────────────────────────────────────────────────────
+
+test("a notify channel id that is not a snowflake falls back to DMs and is warned about once", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: "general" });
+  userFindUniqueRow = linkedUser();
+  respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({}));
+  await notifyUserRequestAvailable("u1", "Dune", "MOVIE");
+  await notifyUserRequestAvailable("u1", "Dune", "MOVIE");
+  assert.ok(sent.every((r) => !r.url.includes("/channels/general")), "never posted to the bad id");
+  assert.equal(sent.filter((r) => r.url === `${API}/channels/222222222222222222/messages`).length, 2, "both went out as DMs");
+  assert.equal(warns.filter((w) => w.includes("discordNotifyChannelId")).length, 1);
+});
+
+test("a DM channel is opened once per user and reused; an open answering no id sends nothing", async () => {
+  setSettings({ discordBotToken: BOT });
+  userFindUniqueRow = linkedUser();
+  respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({}));
+  await notifyUserRequestAvailable("u1", "Dune", "MOVIE");
+  await notifyUserRequestAvailable("u1", "Dune", "MOVIE");
+  assert.equal(sent.filter((r) => r.url.endsWith("/users/@me/channels")).length, 1);
+  assert.equal(sent.filter((r) => r.url.endsWith("/messages")).length, 2);
+
+  forgetDiscordDmChannelsForTests();
+  sent.length = 0;
+  respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({}) : okJson({}));
+  await notifyUserRequestAvailable("u1", "Dune", "MOVIE");
+  assert.deepEqual(sent.map((r) => r.url), [`${API}/users/@me/channels`], "no post to /channels/undefined");
+  assert.ok(errors.some((e) => e.includes("no channel id")));
+});
+
+test("a multi-line message keeps every line inside the quote in a DM", async () => {
+  setSettings({ discordBotToken: BOT });
+  userFindUniqueRow = linkedUser();
+  respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({}));
+  await notifyUserIssueMessage("u1", "Dune", "Admin", "first line\nsecond line");
+  const dm = sent.find((r) => r.url.endsWith("/messages"))!;
+  const description = String((dm.body?.embeds as Array<Record<string, unknown>>)[0].description);
+  assert.match(description, /> first line\n> second line$/);
+});
+
+test("the admin fan-out posts to the channel at most five at a time", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindManyRows = Array.from({ length: 7 }, (_, i) => ({ discordId: `55555555555555555${i}`, role: "ADMIN", permissions: 1n }));
+  let inFlight = 0;
+  let peak = 0;
+  respond = async () => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise((r) => setImmediate(r));
+    inFlight--;
+    return okJson({});
+  };
+  await notifyAdminsIssueMessage("Dune", "bob", "hello");
+  assert.equal(sent.length, 7);
+  assert.ok(peak <= 5, `peak in flight was ${peak}`);
 });

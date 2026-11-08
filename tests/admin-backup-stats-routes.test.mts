@@ -453,6 +453,20 @@ for (const [label, over] of [
   });
 }
 
+test("a chunk with NO index header is a 400 — never read as chunk 0, so it restarts nothing and spends no restore attempt", async () => {
+  const t = await mintSession();
+  const { "x-chunk-index": _dropped, ...noIndex } = chunkHeaders();
+  for (let i = 0; i < 6; i++) {
+    const res = await postChunk(t, noIndex);
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, /upload headers/i);
+  }
+  // Six refusals later the chunk-0 budget (5 an hour) is untouched.
+  const ok = chunkHeaders();
+  assert.notEqual((await postChunk(t, ok)).status, 429);
+  await cancelUpload(t, ok["x-upload-id"]); // frees the one upload slot for the tests below
+});
+
 test("import rejects a file larger than MAX_CIPHERTEXT_BYTES with 413", async () => {
   const t = await mintSession();
   const res = await postChunk(t, chunkHeaders({ "x-file-size": String(MAX_CIPHERTEXT_BYTES + 1) }));

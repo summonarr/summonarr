@@ -1,6 +1,6 @@
 import { instanceDefaultLocale, translatorFor } from "@/lib/i18n/server-locale";
 import { discordUserOf, type ComponentContext, type ComponentInteraction } from "../types";
-import { editOriginal, ephemeralFollowup, interactionTranslator } from "../reply";
+import { editOriginal, ephemeralFollowup, interactionTranslator, interactionTranslatorSync } from "../reply";
 import { handleAdminDecision } from "./admin-decision";
 import { handleIssuePick } from "./issue";
 import { handlePick } from "./pick";
@@ -25,6 +25,10 @@ export async function handleComponent(interaction: ComponentInteraction): Promis
   const token = interaction.token;
   const customId = interaction.data.custom_id;
   const discordUser = discordUserOf(interaction);
+  if (!discordUser) {
+    await editOriginal(appId, token, { content: interactionTranslatorSync(interaction)("notify.bot.unexpectedShort") }).catch(() => {});
+    return;
+  }
   const discordUserId = discordUser.id;
   // The clicker's language for their own (ephemeral) replies; the admin-channel
   // embed edits use the instance default instead (`channelT`).

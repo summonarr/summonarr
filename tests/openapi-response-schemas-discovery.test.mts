@@ -134,7 +134,13 @@ test("each discovery list documents the envelope its handler answers, its titles
   const rail = home.properties?.carousels.items;
   assert.equal(rail?.properties?.items.items?.$ref, TMDB_REF);
   const homeSrc = handlerSource("/home", "get");
-  const railBodies = [...homeSrc.matchAll(/\{ id: "([\w-]+)", title: t\([^)]*\), items: /g)].map((m) => m[1]);
+  // Rails built inline (`{ id, title: t(…), items }`) and the TMDB rails' table
+  // (`{ id, titleKey, raw }`, each mapped to `{ id: r.id, title: t(r.titleKey), items }`).
+  const railBodies = [
+    ...[...homeSrc.matchAll(/\{ id: "([\w-]+)", title: t\([^)]*\), items: /g)].map((m) => m[1]),
+    ...[...homeSrc.matchAll(/\{ id: "([\w-]+)", titleKey: "[\w.]+", raw: /g)].map((m) => m[1]),
+  ];
+  assert.match(homeSrc, /tmdbRails\.map\(\(r\) => \(\{ id: r\.id, title: t\(r\.titleKey\), items: /);
   assert.ok(railBodies.length >= 9, railBodies.join(","));
   assert.deepEqual(keysOf(rail), ["id", "items", "title"]);
   const described = home.properties?.carousels.description ?? "";
@@ -146,6 +152,15 @@ test("each discovery list documents the envelope its handler answers, its titles
   assert.deepEqual(topRated.properties?.sortBy.enum, [...sortType.matchAll(/"(\w+)"/g)].map((m) => m[1]));
 });
 
+test("GET /search documents its results as TmdbMedia, the chokepoint's output, without ratings", async () => {
+  const schema = await responseSchema("/search", "get", "200");
+  assert.equal(schema.type, "array");
+  assert.equal(schema.items?.$ref, TMDB_REF);
+  const src = handlerSource("/search", "get");
+  assert.match(src, /const enriched = await attachAllAvailability\(results, session\.user\.id, \{ skipRatings: true, show4k \}\);/);
+  assert.match(src, /return NextResponse\.json\(enriched\);/);
+});
+
 test("/popular documents its envelope, its sort set and each title's play counts", async () => {
   const schema = await responseSchema("/popular", "get", "200");
   assert.deepEqual(keysOf(schema), successKeys("/popular"));
@@ -155,7 +170,9 @@ test("/popular documents its envelope, its sort set and each title's play counts
   for (const k of ["movies", "tv"]) {
     const item = schema.properties?.[k].items as SchemaNode;
     assert.equal(item.allOf?.[0].$ref, TMDB_REF, k);
-    const counts = /type EnrichedMedia = TmdbMedia & \{([^}]*)\}/.exec(src)?.[1] ?? "";
+    // Each title is resolvePopularTitles' PopularTitle (src/lib/popular-titles.ts).
+    const counts = /export type PopularTitle = TmdbMedia & \{([^}]*)\}/.exec(libSource("popular-titles.ts"))?.[1] ?? "";
+    assert.ok(counts.length > 0, "PopularTitle not found");
     assert.deepEqual(keysOf(item.allOf?.[1]), [...counts.matchAll(/(\w+):/g)].map((m) => m[1]).sort(), k);
   }
 });

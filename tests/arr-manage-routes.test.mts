@@ -710,8 +710,13 @@ test("the History page's event filter is translated PER SERVICE (the enums diffe
     [SONARR, ["5"]],
     [SONARR, ["3"]],
   ]);
-  assert.equal((await call(historyRoute.GET, token, "/admin/arr/history?service=radarr&kind=bogus")).status, 400);
-  assert.equal((await call(historyRoute.GET, token, "/admin/arr/history?service=radarr&pageSize=1000")).status, 400);
+  // An unknown kind is named as one — never reported as a paging error.
+  const badKind = await call(historyRoute.GET, token, "/admin/arr/history?service=radarr&kind=bogus");
+  assert.equal(badKind.status, 400);
+  assert.equal((await badKind.json()).error, "Unknown event type — use one of: grabbed, imported, failed, deleted, renamed, ignored");
+  const badPage = await call(historyRoute.GET, token, "/admin/arr/history?service=radarr&pageSize=1000");
+  assert.equal(badPage.status, 400);
+  assert.doesNotMatch((await badPage.json()).error, /^Unknown event type/);
 });
 
 test("the blocklist names titles the arr didn't embed, removes in ONE bulk call, clears via the arr's command — all audited", async () => {
@@ -848,8 +853,12 @@ test("a task run names one of the instance's OWN scheduled tasks; a library-wide
 
   calls = [];
   assert.equal((await call(tasksRoute.DELETE, token, "/admin/arr/tasks?service=sonarr&commandId=4", { method: "DELETE" })).status, 409, "completed, not queued");
+  assert.equal(audits.length, 3, "a refused cancel writes no audit row");
   assert.equal((await call(tasksRoute.DELETE, token, "/admin/arr/tasks?service=sonarr&commandId=5", { method: "DELETE" })).status, 200);
   assert.deepEqual(writes().map((c) => [c.method, c.path]), [["DELETE", "/api/v3/command/5"]]);
+  assert.equal(audits.length, 4, "an accepted cancel is audited");
+  assert.equal(audits[3].action, "ARR_COMMAND");
+  assert.deepEqual(JSON.parse(String(audits[3].details)), { service: "sonarr", instance: "", cancelled: 5 });
 });
 
 test("the tasks read never sends a command's body", async () => {

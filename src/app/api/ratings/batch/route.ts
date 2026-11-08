@@ -6,9 +6,10 @@ import type { TmdbMedia, MediaType } from "@/lib/tmdb-types";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { RATINGS_BATCH_MAX_ITEMS } from "@/lib/api-body-limits";
 
-// Keep in step with MAX_BATCH in src/lib/client/ratings-batcher.ts.
-const MAX_BATCH = 200;
+// The client batcher (src/lib/client/ratings-batcher.ts) reads the same constant.
+const MAX_BATCH = RATINGS_BATCH_MAX_ITEMS;
 
 // What one signed-in user may make this route fetch upstream. Every cold title
 // is an MDBList batch slot and, when MDBList can't rate it, a TMDB + OMDb chain
@@ -25,6 +26,38 @@ const COLD_LOOKUP_BUDGET = 600;
 const COLD_LOOKUP_WINDOW_MS = 60 * 60 * 1000;
 
 type ReqItem = { id: number; type: MediaType; releaseDate: string | null };
+
+// Every rating field the batch answers, in wire order (the spec's batch item
+// mirrors this list). A new ratings source is added here once.
+const RATING_FIELDS = [
+  "imdbId",
+  "imdbRating",
+  "imdbVotes",
+  "rottenTomatoes",
+  "rtAudienceScore",
+  "metacritic",
+  "traktRating",
+  "letterboxdRating",
+  "mdblistScore",
+  "malRating",
+  "rogerEbertRating",
+] as const satisfies ReadonlyArray<keyof TmdbMedia>;
+type RatingField = (typeof RATING_FIELDS)[number];
+type RatingsEntry = Record<RatingField, string | null>;
+
+// A vote count alone is not a rating: a title with nothing but imdbVotes is
+// left out of the map, as a title with no rating at all is.
+const PRESENCE_FIELDS = RATING_FIELDS.filter((f) => f !== "imdbVotes");
+
+function hasAnyRating(item: TmdbMedia): boolean {
+  return PRESENCE_FIELDS.some((f) => item[f] != null);
+}
+
+function projectRatings(item: TmdbMedia): RatingsEntry {
+  const entry = {} as RatingsEntry;
+  for (const f of RATING_FIELDS) entry[f] = item[f] ?? null;
+  return entry;
+}
 
 // POST /api/ratings/batch — resolves external ratings (IMDb/RT/Metacritic/etc.)
 // for up to MAX_BATCH deduped tmdbId+type items in one blocking pass; used to
@@ -81,33 +114,10 @@ export const POST = withAuth(async (req, _ctx, session) => {
     admitMiss: () => checkRateLimit(budgetKey, COLD_LOOKUP_BUDGET, COLD_LOOKUP_WINDOW_MS),
   });
 
-  const ratings: Record<string, unknown> = {};
+  const ratings: Record<string, RatingsEntry> = {};
   for (const item of enriched) {
-    if (
-      item.imdbId == null &&
-      item.imdbRating == null &&
-      item.rottenTomatoes == null &&
-      item.rtAudienceScore == null &&
-      item.metacritic == null &&
-      item.traktRating == null &&
-      item.letterboxdRating == null &&
-      item.mdblistScore == null &&
-      item.malRating == null &&
-      item.rogerEbertRating == null
-    ) continue;
-    ratings[`${item.mediaType}:${item.id}`] = {
-      imdbId: item.imdbId ?? null,
-      imdbRating: item.imdbRating ?? null,
-      imdbVotes: item.imdbVotes ?? null,
-      rottenTomatoes: item.rottenTomatoes ?? null,
-      rtAudienceScore: item.rtAudienceScore ?? null,
-      metacritic: item.metacritic ?? null,
-      traktRating: item.traktRating ?? null,
-      letterboxdRating: item.letterboxdRating ?? null,
-      mdblistScore: item.mdblistScore ?? null,
-      malRating: item.malRating ?? null,
-      rogerEbertRating: item.rogerEbertRating ?? null,
-    };
+    if (!hasAnyRating(item)) continue;
+    ratings[`${item.mediaType}:${item.id}`] = projectRatings(item);
   }
 
   return NextResponse.json({ ratings });

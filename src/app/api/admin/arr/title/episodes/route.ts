@@ -4,13 +4,14 @@ import { withAdmin } from "@/lib/api-auth";
 import { snapshotted } from "@/lib/arr-snapshot";
 import { arrFailure, arrTitleGate, parseIdArray, parseSeasonNumber, readWarnKey } from "@/lib/arr-admin-http";
 import { loadSeasonEpisodes, setEpisodesMonitored } from "@/lib/arr-title-data";
-import { auditContext, logAudit } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { forgetWarnOnChange } from "@/lib/log-dedup";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { TITLE_EPISODES_MAX_IDS } from "@/lib/api-body-limits";
 
-const MAX_EPISODES = 5_000;
+const MAX_EPISODES = TITLE_EPISODES_MAX_IDS;
 // The Seasons tab flips ONE episode per switch, so an admin working down a
 // season sends many in a row: generous, it only bounds a runaway client.
 const LIMIT_PER_MIN = 60;
@@ -65,12 +66,10 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     return arrFailure(err, target, t, "episode monitor");
   }
   void logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email ?? null,
+    ...auditActor(req, session),
     action: "ARR_TITLE_EDIT",
     target: `${target.service}:${target.instance}:${target.arrId}`,
     details: { service: target.service, instance: target.instance, arrId: target.arrId, fields: ["episodes"], episodes: episodeIds.length, monitored },
-    ...auditContext(req, session),
   });
   return NextResponse.json(result);
 });

@@ -127,11 +127,12 @@ test("every hideAvailable filter gates availability on the user's visible server
   // A sweep that inspects nothing passes vacuously and is worse than no pin —
   // and this one has already caught itself doing exactly that: an earlier
   // line-window heuristic silently skipped the site whose guard a comment had
-  // pushed out of range, and reported green. 10 reads across 5 sites today
-  // (/top and /api/top-rated now share one filter in src/lib/top-rated.ts, and
-  // the home page's check moved into a helper this walk stops at).
+  // pushed out of range, and reported green. 8 reads across 4 sites today
+  // (/top and /api/top-rated share one filter in src/lib/top-rated.ts, and the
+  // home page and /api/home share availableToViewer in src/lib/home-rails.ts,
+  // a helper this walk stops at).
   assert.ok(
-    inspected >= 10,
+    inspected >= 8,
     `only inspected ${inspected} availability reads under a hideAvailable guard — ` +
       `the walk or the context heuristic is broken, not the invariant`,
   );

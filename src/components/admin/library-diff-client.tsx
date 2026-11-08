@@ -1,15 +1,17 @@
 "use client";
 
-import { memo, useState, useCallback, useDeferredValue, useEffect, useMemo, useRef } from "react";
-import { useRouter } from "next/navigation";
+import { memo, useState, useDeferredValue, useMemo } from "react";
 import Image from "next/image";
 import { FixMatchButton } from "@/components/admin/fix-match-button";
 import { posterUrl } from "@/lib/tmdb-types";
-import { runFixMatch, fixMatchErrorMessage, fixMatchWarningMessage } from "@/lib/client/fix-match";
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { rich } from "@/components/settings/forms/rich";
 import { badMatchSideKey, fixAllEligible, suggestWrongSide, type DiffSource } from "@/lib/library-diff";
+import type { FixAllEntry } from "@/lib/client/fix-all-sequence";
+import { REQUEST_STATUS_LABEL_KEY } from "@/lib/status-labels";
+import { arrServiceName } from "@/lib/arr-service-name";
+import { FixAllControl, useFixAllRun, type FixAllRun } from "./fix-all-run";
 
 interface RequestSummary {
   total: number;
@@ -88,6 +90,153 @@ function statusChip(status: string) {
   }
 }
 
+// The card's styles that never change, built once.
+const CARD_POSTER_STYLE = { border: "1px solid var(--ds-border)" } as const;
+const CARD_POSTER_PLACEHOLDER_STYLE = {
+  width: 56,
+  height: 84,
+  borderRadius: 4,
+  background: "repeating-linear-gradient(135deg, var(--ds-bg-3) 0 10px, var(--ds-bg-2) 10px 20px)",
+  border: "1px solid var(--ds-border)",
+  color: "var(--ds-fg-subtle)",
+  fontSize: 9,
+} as const;
+const CARD_BODY_STYLE = { display: "flex", flexDirection: "column", gap: 4 } as const;
+const CARD_TITLE_STYLE = { fontSize: 13.5, color: "var(--ds-fg)", lineHeight: 1.3 } as const;
+const CARD_MONO_SUBTLE_STYLE = { fontSize: 10.5, color: "var(--ds-fg-subtle)" } as const;
+const CARD_TYPE_CHIP_STYLE = { fontSize: 9.5, textTransform: "uppercase", padding: "1px 6px" } as const;
+const CARD_OVERVIEW_STYLE = { margin: 0, fontSize: 11.5, color: "var(--ds-fg-subtle)", lineHeight: 1.45 } as const;
+const CARD_PATH_STYLE = { margin: 0, fontSize: 10, color: "var(--ds-fg-subtle)", lineHeight: 1.4 } as const;
+const CARD_PATH_SOURCE_STYLE = { fontFamily: "inherit", color: "var(--ds-fg-disabled)", marginLeft: 6 } as const;
+const STATUS_CHIP_STYLE = { fontSize: 9.5, padding: "1px 6px" } as const;
+
+function tmdbHref(mediaType: "MOVIE" | "TV", tmdbId: number): string {
+  return `https://www.themoviedb.org/${mediaType === "MOVIE" ? "movie" : "tv"}/${tmdbId}`;
+}
+
+function CardPoster({ thumb, alt }: { thumb: string | null; alt: string }) {
+  const t = useT();
+  return (
+    <div className="shrink-0">
+      {thumb ? (
+        <Image src={thumb} alt={alt} width={56} height={84} className="rounded object-cover" style={CARD_POSTER_STYLE} sizes="56px" />
+      ) : (
+        <div className="ds-mono flex items-center justify-center" style={CARD_POSTER_PLACEHOLDER_STYLE}>
+          {t("adminManage.library.diff.poster")}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The type, the server (named instances only), the rating and the TMDB link.
+function CardChips({ item, server }: { item: DiffItem; server?: Server }) {
+  const t = useT();
+  const typeLabel = item.mediaType === "MOVIE" ? t("adminManage.library.diff.movie") : t("adminManage.library.diff.tv");
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <span className="ds-chip" style={CARD_TYPE_CHIP_STYLE}>
+        {typeLabel}
+      </span>
+      {/* Server badge — rendered ONLY for a named instance (e.g.
+          "plex:remote"), so a single-server deployment keeps exactly the
+          chip row it always had. Colour is keyed off the service; the slug
+          lives in the text (same split as ServerUserTable's source badge). */}
+      {server && item.serverInstance !== "" && (
+        <span
+          className="ds-chip"
+          style={{
+            background: `color-mix(in oklab, ${SERVER_COLOURS[server].tint} 14%, transparent)`,
+            borderColor: `color-mix(in oklab, ${SERVER_COLOURS[server].tint} 35%, var(--ds-border))`,
+            color: SERVER_COLOURS[server].text,
+            fontSize: 9.5,
+            padding: "1px 6px",
+          }}
+        >
+          {mediaInstanceLabel(server, item.serverInstance)}
+        </span>
+      )}
+      {item.voteAverage != null && item.voteAverage > 0 && (
+        <span className="ds-mono" style={{ fontSize: 10.5, color: "var(--ds-fg-muted)" }}>
+          ★ {item.voteAverage.toFixed(1)}
+        </span>
+      )}
+      <a
+        href={tmdbHref(item.mediaType, item.tmdbId)}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="ds-mono transition-colors"
+        style={CARD_MONO_SUBTLE_STYLE}
+      >
+        TMDB #{item.tmdbId} ↗
+      </a>
+    </div>
+  );
+}
+
+// What Radarr/Sonarr say about the file: a mismatch (with its fix), in the
+// arr, or not in it; nothing when there is no path to judge.
+function ArrStatusLine({ item, server }: { item: DiffItem; server?: Server }) {
+  const t = useT();
+  const arrName = arrServiceName(item.mediaType);
+  if (item.arrMismatch && item.arrTmdbId !== null) {
+    return (
+      <div style={{ marginTop: 2 }} className="flex items-center gap-2 flex-wrap">
+        <span className="ds-mono" style={{ fontSize: 10, color: "var(--ds-warning)" }}>
+          {t("adminManage.library.diff.arrMismatch", { arr: arrName, id: item.arrTmdbId })}
+        </span>
+        {server && (
+          <FixMatchButton
+            server={server}
+            serverInstance={item.serverInstance}
+            tmdbId={item.tmdbId}
+            mediaType={item.mediaType}
+            correctTmdbId={item.arrTmdbId}
+            arrTmdbId={item.arrTmdbId}
+            label={t("adminManage.library.diff.fixShort", { server: server === "plex" ? "Plex" : "Jellyfin", id: item.arrTmdbId })}
+          />
+        )}
+      </div>
+    );
+  }
+  if (item.inArr) {
+    return (
+      <span className="ds-mono" style={{ marginTop: 2, fontSize: 10, color: "var(--ds-success)" }}>
+        {arrName} ✓
+      </span>
+    );
+  }
+  if (item.relPath) {
+    return (
+      <span className="ds-mono" style={{ marginTop: 2, fontSize: 10, color: "var(--ds-fg-subtle)" }}>
+        {t("adminManage.library.diff.notInArr", { arr: arrName })}
+      </span>
+    );
+  }
+  return null;
+}
+
+function RequestChips({ requests }: { requests: RequestSummary }) {
+  const t = useT();
+  if (requests.total <= 0) return null;
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap" style={{ marginTop: 2 }}>
+      <span className="ds-mono uppercase" style={{ fontSize: 10, color: "var(--ds-fg-subtle)", letterSpacing: "0.04em" }}>
+        {t("adminManage.library.diff.requests", { count: requests.total })}
+      </span>
+      {requests.statuses.map((s) => {
+        // One map from status to its catalog key; a status it doesn't know is shown as stored.
+        const key = REQUEST_STATUS_LABEL_KEY[s];
+        return (
+          <span key={s} className={statusChip(s)} style={STATUS_CHIP_STYLE}>
+            {key ? t(key) : s}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 // Memoized: a search keystroke re-filters the lists but keeps each item's
 // reference, so only cards whose props changed render again.
 const MediaCard = memo(function MediaCard({
@@ -100,10 +249,7 @@ const MediaCard = memo(function MediaCard({
   server?: Server;
 }) {
   const t = useT();
-  const thumb        = posterUrl(item.posterPath, "w342");
   const displayTitle = item.title || `TMDB #${item.tmdbId}`;
-  const typeLabel    = item.mediaType === "MOVIE" ? t("adminManage.library.diff.movie") : t("adminManage.library.diff.tv");
-  const arrName      = item.mediaType === "MOVIE" ? "Radarr" : "Sonarr";
 
   // The default instance keeps the exact legacy id so any existing
   // #item-<tmdbId>-<TYPE> deep link still resolves; a named server appends its
@@ -127,129 +273,33 @@ const MediaCard = memo(function MediaCard({
         boxShadow: highlight ? "0 0 0 1px var(--ds-accent-ring)" : undefined,
       }}
     >
-      <div className="shrink-0">
-        {thumb ? (
-          <Image
-            src={thumb}
-            alt={displayTitle}
-            width={56}
-            height={84}
-            className="rounded object-cover"
-            style={{ border: "1px solid var(--ds-border)" }}
-            sizes="56px"
-          />
-        ) : (
-          <div
-            className="ds-mono flex items-center justify-center"
-            style={{
-              width: 56,
-              height: 84,
-              borderRadius: 4,
-              background:
-                "repeating-linear-gradient(135deg, var(--ds-bg-3) 0 10px, var(--ds-bg-2) 10px 20px)",
-              border: "1px solid var(--ds-border)",
-              color: "var(--ds-fg-subtle)",
-              fontSize: 9,
-            }}
-          >
-            {t("adminManage.library.diff.poster")}
-          </div>
-        )}
-      </div>
+      <CardPoster thumb={posterUrl(item.posterPath, "w342")} alt={displayTitle} />
 
-      <div className="flex-1 min-w-0" style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div className="flex-1 min-w-0" style={CARD_BODY_STYLE}>
         <div className="flex items-baseline gap-1.5 flex-wrap">
-          <span
-            className="font-medium truncate"
-            style={{ fontSize: 13.5, color: "var(--ds-fg)", lineHeight: 1.3 }}
-          >
+          <span className="font-medium truncate" style={CARD_TITLE_STYLE}>
             {displayTitle}
           </span>
           {item.releaseYear && (
-            <span
-              className="ds-mono shrink-0"
-              style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
-            >
+            <span className="ds-mono shrink-0" style={CARD_MONO_SUBTLE_STYLE}>
               {item.releaseYear}
             </span>
           )}
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
-          <span
-            className="ds-chip"
-            style={{
-              fontSize: 9.5,
-              textTransform: "uppercase",
-              padding: "1px 6px",
-            }}
-          >
-            {typeLabel}
-          </span>
-          {/* Server badge — rendered ONLY for a named instance (e.g.
-              "plex:remote"), so a single-server deployment keeps exactly the
-              chip row it always had. Colour is keyed off the service; the slug
-              lives in the text (same split as ServerUserTable's source badge). */}
-          {server && item.serverInstance !== "" && (
-            <span
-              className="ds-chip"
-              style={{
-                background: `color-mix(in oklab, ${SERVER_COLOURS[server].tint} 14%, transparent)`,
-                borderColor: `color-mix(in oklab, ${SERVER_COLOURS[server].tint} 35%, var(--ds-border))`,
-                color: SERVER_COLOURS[server].text,
-                fontSize: 9.5,
-                padding: "1px 6px",
-              }}
-            >
-              {mediaInstanceLabel(server, item.serverInstance)}
-            </span>
-          )}
-          {item.voteAverage != null && item.voteAverage > 0 && (
-            <span
-              className="ds-mono"
-              style={{ fontSize: 10.5, color: "var(--ds-fg-muted)" }}
-            >
-              ★ {item.voteAverage.toFixed(1)}
-            </span>
-          )}
-          <a
-            href={`https://www.themoviedb.org/${item.mediaType === "MOVIE" ? "movie" : "tv"}/${item.tmdbId}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="ds-mono transition-colors"
-            style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
-          >
-            TMDB #{item.tmdbId} ↗
-          </a>
-        </div>
+        <CardChips item={item} server={server} />
 
         {item.overview && (
-          <p
-            className="line-clamp-2"
-            style={{
-              margin: 0,
-              fontSize: 11.5,
-              color: "var(--ds-fg-subtle)",
-              lineHeight: 1.45,
-            }}
-          >
+          <p className="line-clamp-2" style={CARD_OVERVIEW_STYLE}>
             {item.overview}
           </p>
         )}
 
         {item.relPath && (
-          <p
-            className="ds-mono break-all"
-            style={{
-              margin: 0,
-              fontSize: 10,
-              color: "var(--ds-fg-subtle)",
-              lineHeight: 1.4,
-            }}
-          >
+          <p className="ds-mono break-all" style={CARD_PATH_STYLE}>
             {item.relPath}
             {item.relPathFromArr && (
-              <span className="not-italic" style={{ fontFamily: "inherit", color: "var(--ds-fg-disabled)", marginLeft: 6 }}>
+              <span className="not-italic" style={CARD_PATH_SOURCE_STYLE}>
                 {t("adminManage.library.diff.sonarrPath")}
               </span>
             )}
@@ -258,52 +308,9 @@ const MediaCard = memo(function MediaCard({
 
         <DiffSourceNote source={item.diffSource} server={server} />
 
-        {item.arrMismatch && item.arrTmdbId !== null ? (
-          <div style={{ marginTop: 2 }} className="flex items-center gap-2 flex-wrap">
-            <span className="ds-mono" style={{ fontSize: 10, color: "var(--ds-warning)" }}>
-              {t("adminManage.library.diff.arrMismatch", { arr: arrName, id: item.arrTmdbId })}
-            </span>
-            {server && (
-              <FixMatchButton
-                server={server}
-                serverInstance={item.serverInstance}
-                tmdbId={item.tmdbId}
-                mediaType={item.mediaType}
-                correctTmdbId={item.arrTmdbId}
-                arrTmdbId={item.arrTmdbId}
-                label={t("adminManage.library.diff.fixShort", { server: server === "plex" ? "Plex" : "Jellyfin", id: item.arrTmdbId })}
-              />
-            )}
-          </div>
-        ) : item.inArr ? (
-          <span className="ds-mono" style={{ marginTop: 2, fontSize: 10, color: "var(--ds-success)" }}>
-            {arrName} ✓
-          </span>
-        ) : item.relPath ? (
-          <span className="ds-mono" style={{ marginTop: 2, fontSize: 10, color: "var(--ds-fg-subtle)" }}>
-            {t("adminManage.library.diff.notInArr", { arr: arrName })}
-          </span>
-        ) : null}
+        <ArrStatusLine item={item} server={server} />
 
-        {item.requests.total > 0 && (
-          <div className="flex items-center gap-1.5 flex-wrap" style={{ marginTop: 2 }}>
-            <span
-              className="ds-mono uppercase"
-              style={{ fontSize: 10, color: "var(--ds-fg-subtle)", letterSpacing: "0.04em" }}
-            >
-              {t("adminManage.library.diff.requests", { count: item.requests.total })}
-            </span>
-            {item.requests.statuses.map((s) => (
-              <span
-                key={s}
-                className={statusChip(s)}
-                style={{ fontSize: 9.5, padding: "1px 6px" }}
-              >
-                {t(`requests.status.${s.toLowerCase()}`)}
-              </span>
-            ))}
-          </div>
-        )}
+        <RequestChips requests={item.requests} />
       </div>
     </div>
   );
@@ -411,7 +418,7 @@ function BadMatchSide({
         <span className="ds-mono" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}>
           {item.releaseYear ? `${item.releaseYear} · ` : ""}
           <a
-            href={`https://www.themoviedb.org/${item.mediaType === "MOVIE" ? "movie" : "tv"}/${item.tmdbId}`}
+            href={tmdbHref(item.mediaType, item.tmdbId)}
             target="_blank"
             rel="noopener noreferrer"
             className="transition-colors"
@@ -444,13 +451,89 @@ function sideLabel(service: "plex" | "jellyfin", serverInstance: string): string
   return mediaInstanceLabel(service, serverInstance).toUpperCase();
 }
 
-function BadMatchCard({ match }: { match: ClientBadMatch }) {
+// The key Fix all runs a bad match's WRONG side under — and the key its card
+// checks to lock that side while the run still has it to do.
+function badMatchFixKey(side: Server, item: BadMatchSideData): string {
+  return `${side}:${item.serverInstance}:${item.mediaType}:${item.tmdbId}`;
+}
+
+// The Fix all entry for a match it may run (fixAllEligible: a verdict, the
+// id, and the wrong side's item key): remap the wrong side on the server it
+// actually lives on, like the card's own button does.
+function badMatchFixEntry(match: ClientBadMatch & { arrVerdict: Server; arrTmdbId: number }): FixAllEntry {
+  const wrongItem = match[match.arrVerdict];
+  return {
+    key: badMatchFixKey(match.arrVerdict, wrongItem),
+    title: wrongItem.title ?? `TMDB #${wrongItem.tmdbId}`,
+    request: {
+      server: match.arrVerdict,
+      tmdbId: wrongItem.tmdbId,
+      mediaType: wrongItem.mediaType,
+      correctTmdbId: match.arrTmdbId,
+      // Without it the route would use the default server and remap the wrong
+      // library. Omitted for the default server so that request body stays unchanged.
+      ...(wrongItem.serverInstance ? { serverInstance: wrongItem.serverInstance } : {}),
+    },
+  };
+}
+
+const NOTE_STYLE = { fontSize: 9.5, color: "var(--ds-fg-subtle)" } as const;
+
+// One server's half of a bad-match card: its item, and the fix it is offered —
+// dimmed when Radarr/Sonarr say the OTHER side is the wrong one.
+function BadMatchColumn({ match, side, locked }: { match: ClientBadMatch; side: Server; locked: boolean }) {
+  const t = useT();
+  const other: Server = side === "plex" ? "jellyfin" : "plex";
+  const item = match[side];
+  const correctId = match.arrTmdbId ?? match[other].tmdbId;
+  const { arrVerdict } = match;
+  let fix: React.ReactNode;
+  if (arrVerdict !== side && arrVerdict !== null) {
+    fix = (
+      <span className="ds-mono" style={{ fontSize: 9.5, color: "var(--ds-success)" }}>
+        {t("adminManage.library.diff.correctMatch")}
+      </span>
+    );
+  } else if (locked) {
+    // Fix all still has this side to do: a fix from here first would make the
+    // run report it as failed ("not found") when it got there.
+    fix = <span className="ds-mono" style={NOTE_STYLE}>{t("adminManage.library.fixAllQueued")}</span>;
+  } else if (badMatchSideKey(match, side)) {
+    fix = (
+      <FixMatchButton
+        server={side}
+        serverInstance={item.serverInstance}
+        tmdbId={item.tmdbId}
+        mediaType={item.mediaType}
+        correctTmdbId={correctId}
+        arrTmdbId={match.arrTmdbId}
+        label={t("adminManage.library.diff.fix", { server: side === "plex" ? "Plex" : "Jellyfin", id: correctId })}
+      />
+    );
+  } else {
+    fix = <span className="ds-mono" style={NOTE_STYLE}>{t("adminManage.library.diff.resyncToFix")}</span>;
+  }
+  return (
+    <div
+      className="flex-1 min-w-0"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+        opacity: arrVerdict === other ? 0.4 : 1,
+      }}
+    >
+      <BadMatchSide item={item} label={sideLabel(side, item.serverInstance)} server={side} filePath={match.relativePath} />
+      {fix}
+    </div>
+  );
+}
+
+function BadMatchCard({ match, pending }: { match: ClientBadMatch; pending: ReadonlySet<string> }) {
   const t = useT();
   const { arrVerdict, arrTmdbId } = match;
   // No arr verdict: the folder's year may still say which side is off.
   const yearHint = suggestWrongSide(match.relativePath, match.plex.releaseYear, match.jellyfin.releaseYear);
-  const plexCorrectId     = arrTmdbId ?? match.jellyfin.tmdbId;
-  const jellyfinCorrectId = arrTmdbId ?? match.plex.tmdbId;
 
   return (
     <div
@@ -523,216 +606,9 @@ function BadMatchCard({ match }: { match: ClientBadMatch }) {
       )}
 
       <div className="flex gap-3 flex-wrap md:flex-nowrap">
-        <div
-          className="flex-1 min-w-0"
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 8,
-            opacity: arrVerdict === "jellyfin" ? 0.4 : 1,
-          }}
-        >
-          <BadMatchSide item={match.plex} label={sideLabel("plex", match.plex.serverInstance)} server="plex" filePath={match.relativePath} />
-          {arrVerdict === "plex" || arrVerdict === null ? (
-            badMatchSideKey(match, "plex") ? (
-              <FixMatchButton
-                server="plex"
-                serverInstance={match.plex.serverInstance}
-                tmdbId={match.plex.tmdbId}
-                mediaType={match.plex.mediaType}
-                correctTmdbId={plexCorrectId}
-                arrTmdbId={match.arrTmdbId}
-                label={t("adminManage.library.diff.fix", { server: "Plex", id: plexCorrectId })}
-              />
-            ) : (
-              <span className="ds-mono" style={{ fontSize: 9.5, color: "var(--ds-fg-subtle)" }}>
-                {t("adminManage.library.diff.resyncToFix")}
-              </span>
-            )
-          ) : (
-            <span className="ds-mono" style={{ fontSize: 9.5, color: "var(--ds-success)" }}>
-              {t("adminManage.library.diff.correctMatch")}
-            </span>
-          )}
-        </div>
-
-        <div
-          className="flex-1 min-w-0"
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 8,
-            opacity: arrVerdict === "plex" ? 0.4 : 1,
-          }}
-        >
-          <BadMatchSide item={match.jellyfin} label={sideLabel("jellyfin", match.jellyfin.serverInstance)} server="jellyfin" filePath={match.relativePath} />
-          {arrVerdict === "jellyfin" || arrVerdict === null ? (
-            badMatchSideKey(match, "jellyfin") ? (
-              <FixMatchButton
-                server="jellyfin"
-                serverInstance={match.jellyfin.serverInstance}
-                tmdbId={match.jellyfin.tmdbId}
-                mediaType={match.jellyfin.mediaType}
-                correctTmdbId={jellyfinCorrectId}
-                arrTmdbId={match.arrTmdbId}
-                label={t("adminManage.library.diff.fix", { server: "Jellyfin", id: jellyfinCorrectId })}
-              />
-            ) : (
-              <span className="ds-mono" style={{ fontSize: 9.5, color: "var(--ds-fg-subtle)" }}>
-                {t("adminManage.library.diff.resyncToFix")}
-              </span>
-            )
-          ) : (
-            <span className="ds-mono" style={{ fontSize: 9.5, color: "var(--ds-success)" }}>
-              {t("adminManage.library.diff.correctMatch")}
-            </span>
-          )}
-        </div>
+        <BadMatchColumn match={match} side="plex" locked={pending.has(badMatchFixKey("plex", match.plex))} />
+        <BadMatchColumn match={match} side="jellyfin" locked={pending.has(badMatchFixKey("jellyfin", match.jellyfin))} />
       </div>
-    </div>
-  );
-}
-
-type FixResult = { key: string; title: string; kind: "ok" | "warn" | "error"; text?: string };
-
-function FixAllArrButton({ matches, onStart }: { matches: ClientBadMatch[]; onStart: () => void }) {
-  const t = useT();
-  const router  = useRouter();
-  // The cards' own rule: a side with no item key says "re-sync to fix".
-  const fixable = matches.filter(fixAllEligible);
-
-  const [state, setRunState] = useState<"idle" | "confirm" | "running" | "done">("idle");
-  const [progress, setProgress] = useState({ fixed: 0, failed: 0, partial: 0, handled: 0, total: 0, stopped: false });
-  // Every title's outcome, in order, so a long run is readable while it goes and
-  // after it ends: a partial remap's warning (guardrail 37) or the reason a title
-  // failed is shown beside its name, not discarded into an "N/N fixed" total.
-  const [results, setResults] = useState<FixResult[]>([]);
-  // Stop request + unmount guard. The title already running finishes on the
-  // server (its job is not cancelled), but no further title is started.
-  const stopRef = useRef(false);
-  const abortRef = useRef<AbortController | null>(null);
-  useEffect(() => () => { stopRef.current = true; abortRef.current?.abort(); }, []);
-
-  const handleFixAll = useCallback(async () => {
-    stopRef.current = false;
-    onStart();
-    setRunState("running");
-    setProgress({ fixed: 0, failed: 0, partial: 0, handled: 0, total: fixable.length, stopped: false });
-    setResults([]);
-
-    let fixed = 0;
-    let failed = 0;
-    let partial = 0;
-    let handled = 0;
-    const collected: FixResult[] = [];
-
-    for (const match of fixable) {
-      if (stopRef.current) break;
-      const { arrVerdict, arrTmdbId } = match;
-      if (!arrVerdict || arrTmdbId === null) continue;
-
-      const wrongItem = arrVerdict === "plex" ? match.plex : match.jellyfin;
-      const title = wrongItem.title ?? `TMDB #${wrongItem.tmdbId}`;
-      const key = `${arrVerdict}:${wrongItem.serverInstance}:${wrongItem.mediaType}:${wrongItem.tmdbId}`;
-      const ac = new AbortController();
-      abortRef.current = ac;
-      try {
-        // Background job + status poll (guardrail 37a). Titles are fixed one
-        // at a time: each finishes on the server before the next starts.
-        const outcome = await runFixMatch({
-          server:        arrVerdict,
-          tmdbId:        wrongItem.tmdbId,
-          mediaType:     wrongItem.mediaType,
-          correctTmdbId: arrTmdbId,
-          // Target the server the wrong item actually lives on, like the
-          // per-row FixMatchButton does. Without it the route would use the
-          // default server and remap the wrong library. Omitted for the
-          // default server so that request body stays unchanged.
-          ...(wrongItem.serverInstance ? { serverInstance: wrongItem.serverInstance } : {}),
-        }, { signal: ac.signal });
-        fixed++;
-        const warning = fixMatchWarningMessage(outcome, t);
-        if (warning) partial++;
-        collected.push(warning ? { key, title, kind: "warn", text: warning } : { key, title, kind: "ok" });
-      } catch (err) {
-        // Unmounted mid-run: stop quietly — the job itself carries on.
-        if (err instanceof DOMException && err.name === "AbortError") break;
-        failed++;
-        collected.push({ key, title, kind: "error", text: fixMatchErrorMessage(err, t) });
-      }
-      handled++;
-      setProgress({ fixed, failed, partial, handled, total: fixable.length, stopped: false });
-      setResults([...collected]);
-    }
-
-    if (stopRef.current && handled < fixable.length) {
-      setProgress({ fixed, failed, partial, handled, total: fixable.length, stopped: true });
-    }
-    setRunState("done");
-    if (fixed > 0) router.refresh();
-  }, [fixable, onStart, router, t]);
-
-  if (fixable.length === 0 && state === "idle") return null;
-
-  const buttonStyle = {
-    padding: "5px 12px",
-    fontSize: 12,
-    borderRadius: 6,
-  } as const;
-  const ghost = { ...buttonStyle, border: "1px solid var(--ds-border)", color: "var(--ds-fg-muted)" } as const;
-
-  return (
-    <div className="flex flex-col items-end gap-1" style={{ maxWidth: 440 }}>
-      {state === "confirm" ? (
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          <span style={{ fontSize: 12, color: "var(--ds-fg-muted)" }}>{t("adminManage.library.match.confirmAll", { count: fixable.length })}</span>
-          <button type="button" onClick={handleFixAll} className="ds-tap inline-flex items-center font-medium transition-colors" style={{ ...buttonStyle, background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}>
-            {t("adminManage.library.match.rematchAll")}
-          </button>
-          <button type="button" onClick={() => setRunState("idle")} className="ds-tap ds-hover-tint inline-flex items-center font-medium transition-colors" style={ghost}>
-            {t("adminManage.library.match.cancel")}
-          </button>
-        </div>
-      ) : (
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setRunState("confirm")}
-            disabled={state === "running" || fixable.length === 0}
-            className="ds-tap inline-flex items-center font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            style={{
-              ...buttonStyle,
-              background: "color-mix(in oklab, var(--ds-success) 14%, transparent)",
-              border: "1px solid color-mix(in oklab, var(--ds-success) 35%, var(--ds-border))",
-              color: "var(--ds-success)",
-            }}
-          >
-            {state === "idle"    && t("adminManage.library.diff.fixAll", { count: fixable.length })}
-            {state === "running" && t("adminManage.library.diff.fixing", { done: progress.handled, total: progress.total })}
-            {state === "done"    && (progress.stopped
-              ? t("adminManage.library.diff.fixStopped", { fixed: progress.fixed, total: progress.total })
-              : progress.partial > 0
-                ? t("adminManage.library.diff.fixDonePartial", { fixed: progress.fixed, total: progress.total, partial: progress.partial })
-                : t("adminManage.library.diff.fixDone", { fixed: progress.fixed, total: progress.total }))}
-          </button>
-          {state === "running" && (
-            <button type="button" onClick={() => { stopRef.current = true; }} className="ds-tap ds-hover-tint inline-flex items-center font-medium transition-colors" style={ghost}>
-              {t("adminManage.library.diff.stop")}
-            </button>
-          )}
-        </div>
-      )}
-      {results.length > 0 && (
-        <ul role="status" className="m-0 list-none p-0 text-right" style={{ fontSize: 11, lineHeight: 1.35, maxHeight: 160, overflowY: "auto" }}>
-          {results.map((o) => (
-            <li key={o.key} className={o.kind === "error" ? "text-red-400" : o.kind === "warn" ? "text-amber-400" : ""} style={o.kind === "ok" ? { color: "var(--ds-fg-subtle)" } : undefined}>
-              <span aria-hidden>{o.kind === "ok" ? "✓ " : o.kind === "warn" ? "⚠ " : "✕ "}</span>
-              <span className="font-medium">{o.title}</span>
-              {o.text && (<><span style={{ color: "var(--ds-fg-subtle)" }}> — </span>{o.text}</>)}
-            </li>
-          ))}
-        </ul>
-      )}
     </div>
   );
 }
@@ -910,6 +786,159 @@ function filterBadMatches(items: ClientBadMatch[], q: string): ClientBadMatch[] 
   );
 }
 
+// The search box and the filter chips.
+function DiffFilters({
+  search,
+  onSearch,
+  arrFilter,
+  onArrFilter,
+  requestFilter,
+  onToggleRequests,
+}: {
+  search: string;
+  onSearch: (q: string) => void;
+  arrFilter: ArrFilter;
+  onArrFilter: (f: ArrFilter) => void;
+  requestFilter: RequestFilter;
+  onToggleRequests: () => void;
+}) {
+  const t = useT();
+  const arrFilterOptions: { value: ArrFilter; label: string }[] = [
+    { value: "all",        label: t("adminManage.library.diff.filter.all") },
+    { value: "mismatch",   label: t("adminManage.library.diff.filter.mismatch") },
+    { value: "not_in_arr", label: t("adminManage.library.diff.filter.notInArr") },
+    { value: "matches",    label: t("adminManage.library.diff.filter.matches") },
+  ];
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <input
+        type="search"
+        placeholder={t("adminManage.library.diff.searchPlaceholder")}
+        aria-label={t("adminManage.library.diff.search")}
+        value={search}
+        onChange={(e) => onSearch(e.target.value)}
+        className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
+        style={{
+          height: 32,
+          width: 260,
+          padding: "0 12px",
+          fontSize: 13,
+          borderRadius: 8,
+          background: "var(--ds-bg-1)",
+          border: "1px solid var(--ds-border)",
+          color: "var(--ds-fg)",
+        }}
+      />
+
+      <div className="flex items-center gap-1.5">
+        {arrFilterOptions.map((opt) => (
+          <ArrFilterButton
+            key={opt.value}
+            active={arrFilter === opt.value}
+            onClick={() => onArrFilter(opt.value)}
+          >
+            {opt.label}
+          </ArrFilterButton>
+        ))}
+      </div>
+
+      <ArrFilterButton active={requestFilter === "has_requests"} onClick={onToggleRequests}>
+        {t("adminManage.library.diff.filter.hasRequests")}
+      </ArrFilterButton>
+    </div>
+  );
+}
+
+// Bad-match cards drawn at once. Each is two posters and up to two fix
+// buttons, so a library with thousands of mismatches (an agent change) would
+// put far more on the page than the columns' cap. Applied after the search,
+// like the columns' cap, so narrowing the search reaches any of them.
+const BAD_MATCH_RENDER_CAP = 200;
+
+// The suspected bad matches and their bulk Fix all. `fixAll` is the page's,
+// so the cards can lock what the run still has to do.
+function BadMatchSection({
+  matches,
+  totalBefore,
+  fixAll,
+}: {
+  matches: ClientBadMatch[];
+  totalBefore: number;
+  fixAll: FixAllRun;
+}) {
+  const t = useT();
+  const locale = useLocale();
+  // The cards' own rule: a side with no item key says "re-sync to fix".
+  const fixable = matches.filter(fixAllEligible);
+  const progress = fixAll.progress;
+  const label = fixAll.state === "running"
+    ? t("adminManage.library.diff.fixing", { done: progress.handled, total: progress.total })
+    : fixAll.state === "done"
+      ? (progress.stopped
+        ? t("adminManage.library.diff.fixStopped", { fixed: progress.fixed, total: progress.total })
+        : progress.partial > 0
+          ? t("adminManage.library.diff.fixDonePartial", { fixed: progress.fixed, total: progress.total, partial: progress.partial })
+          : t("adminManage.library.diff.fixDone", { fixed: progress.fixed, total: progress.total }))
+      : t("adminManage.library.diff.fixAll", { count: fixable.length });
+
+  return (
+    <section>
+      <div className="flex items-center gap-2.5 flex-wrap" style={{ marginBottom: 12 }}>
+        <span
+          className="ds-chip"
+          style={{
+            background: "color-mix(in oklab, var(--ds-warning) 14%, transparent)",
+            borderColor: "color-mix(in oklab, var(--ds-warning) 35%, var(--ds-border))",
+            color: "var(--ds-warning)",
+            fontSize: 10,
+            letterSpacing: "0.06em",
+            textTransform: "uppercase",
+            padding: "2px 8px",
+            fontWeight: 600,
+          }}
+        >
+          {t("adminManage.library.diff.badMatches")}
+        </span>
+        <span
+          className="ds-mono"
+          style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", letterSpacing: "0.04em" }}
+        >
+          {matches.length !== totalBefore
+            ? t("adminManage.library.diff.itemsOf", { count: matches.length, total: totalBefore })
+            : t("adminManage.library.diff.items", { count: matches.length })}
+          {" · "}{t("adminManage.library.diff.badMatchesHint")}
+        </span>
+        <div style={{ marginLeft: "auto" }}>
+          <FixAllControl
+            run={fixAll}
+            count={fixable.length}
+            label={label}
+            onConfirm={() => void fixAll.start(fixable.map(badMatchFixEntry))}
+            outcomes="all"
+            maxWidth={440}
+          />
+        </div>
+      </div>
+      {matches.length > BAD_MATCH_RENDER_CAP && (
+        <p role="status" className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", marginBottom: 8 }}>
+          {t("adminManage.library.diff.renderCap", { cap: BAD_MATCH_RENDER_CAP.toLocaleString(locale), total: matches.length.toLocaleString(locale) })}
+        </p>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {matches.slice(0, BAD_MATCH_RENDER_CAP).map((match) => (
+          // Server slugs are part of the key: with several servers the same
+          // relative path can appear in more than one bad-match pair.
+          <BadMatchCard
+            key={`${match.plex.serverInstance}:${match.jellyfin.serverInstance}:${match.relativePath}`}
+            match={match}
+            pending={fixAll.pending}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
 // Client view for the admin library-diff page: searchable/filterable Plex-only, Jellyfin-only, and suspected-bad-match lists with inline fix-match actions.
 export function LibraryDiffClient({
   onlyPlex,
@@ -932,12 +961,12 @@ export function LibraryDiffClient({
   const [search,        setSearch]        = useState("");
   const [arrFilter,     setArrFilter]     = useState<ArrFilter>("all");
   const [requestFilter, setRequestFilter] = useState<RequestFilter>("all");
-  // Once a bulk Fix all starts, its section stays: the progress and the
-  // per-title results must outlive the list emptying, whether the search
-  // filters every match out mid-run or the run fixed them all and the refresh
-  // brought an empty list. (Unmounting it also stopped the run.)
-  const [fixAllStarted, setFixAllStarted] = useState(false);
-  const onFixAllStart = useCallback(() => setFixAllStarted(true), []);
+  // The bulk Fix all's run lives here, above the section: once it starts, the
+  // section stays — the progress and the per-title results must outlive the
+  // list emptying, whether the search filters every match out mid-run or the
+  // run fixed them all and the refresh brought an empty list.
+  const fixAll = useFixAllRun();
+  const fixAllStarted = fixAll.started;
 
   // Typing stays responsive: the lists (up to RENDER_CAP cards a column)
   // follow the deferred query.
@@ -949,97 +978,19 @@ export function LibraryDiffClient({
 
   const filtersActive = !!search.trim() || arrFilter !== "all" || requestFilter !== "all";
 
-  const arrFilterOptions: { value: ArrFilter; label: string }[] = [
-    { value: "all",        label: t("adminManage.library.diff.filter.all") },
-    { value: "mismatch",   label: t("adminManage.library.diff.filter.mismatch") },
-    { value: "not_in_arr", label: t("adminManage.library.diff.filter.notInArr") },
-    { value: "matches",    label: t("adminManage.library.diff.filter.matches") },
-  ];
-
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center gap-2">
-        <input
-          type="search"
-          placeholder={t("adminManage.library.diff.searchPlaceholder")}
-          aria-label={t("adminManage.library.diff.search")}
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
-          style={{
-            height: 32,
-            width: 260,
-            padding: "0 12px",
-            fontSize: 13,
-            borderRadius: 8,
-            background: "var(--ds-bg-1)",
-            border: "1px solid var(--ds-border)",
-            color: "var(--ds-fg)",
-          }}
-        />
-
-        <div className="flex items-center gap-1.5">
-          {arrFilterOptions.map((opt) => (
-            <ArrFilterButton
-              key={opt.value}
-              active={arrFilter === opt.value}
-              onClick={() => setArrFilter(opt.value)}
-            >
-              {opt.label}
-            </ArrFilterButton>
-          ))}
-        </div>
-
-        <ArrFilterButton
-          active={requestFilter === "has_requests"}
-          onClick={() => setRequestFilter((f) => (f === "all" ? "has_requests" : "all"))}
-        >
-          {t("adminManage.library.diff.filter.hasRequests")}
-        </ArrFilterButton>
-      </div>
+      <DiffFilters
+        search={search}
+        onSearch={setSearch}
+        arrFilter={arrFilter}
+        onArrFilter={setArrFilter}
+        requestFilter={requestFilter}
+        onToggleRequests={() => setRequestFilter((f) => (f === "all" ? "has_requests" : "all"))}
+      />
 
       {(filteredBadMatches.length > 0 || fixAllStarted) && (
-        <section>
-          <div className="flex items-center gap-2.5 flex-wrap" style={{ marginBottom: 12 }}>
-            <span
-              className="ds-chip"
-              style={{
-                background: "color-mix(in oklab, var(--ds-warning) 14%, transparent)",
-                borderColor: "color-mix(in oklab, var(--ds-warning) 35%, var(--ds-border))",
-                color: "var(--ds-warning)",
-                fontSize: 10,
-                letterSpacing: "0.06em",
-                textTransform: "uppercase",
-                padding: "2px 8px",
-                fontWeight: 600,
-              }}
-            >
-              {t("adminManage.library.diff.badMatches")}
-            </span>
-            <span
-              className="ds-mono"
-              style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", letterSpacing: "0.04em" }}
-            >
-              {filteredBadMatches.length !== badMatches.length
-                ? t("adminManage.library.diff.itemsOf", { count: filteredBadMatches.length, total: badMatches.length })
-                : t("adminManage.library.diff.items", { count: filteredBadMatches.length })}
-              {" · "}{t("adminManage.library.diff.badMatchesHint")}
-            </span>
-            <div style={{ marginLeft: "auto" }}>
-              <FixAllArrButton matches={filteredBadMatches} onStart={onFixAllStart} />
-            </div>
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {filteredBadMatches.map((match) => (
-              // Server slugs are part of the key: with several servers the same
-              // relative path can appear in more than one bad-match pair.
-              <BadMatchCard
-                key={`${match.plex.serverInstance}:${match.jellyfin.serverInstance}:${match.relativePath}`}
-                match={match}
-              />
-            ))}
-          </div>
-        </section>
+        <BadMatchSection matches={filteredBadMatches} totalBefore={badMatches.length} fixAll={fixAll} />
       )}
 
       <div className="ds-two-up" style={{ gap: 20 }}>

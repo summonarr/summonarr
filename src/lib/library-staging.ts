@@ -6,6 +6,20 @@ import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { BATCH_TX_TIMEOUT, CREATE_MANY_BATCH, batchCreateMany, type LibraryTxClient } from "@/lib/batch-write";
 
+/**
+ * Advisory lock 2001,1 (PlexLibraryItem) / 2001,2 (JellyfinLibraryItem): every
+ * write to a library table serializes on it — the staged swaps below, the
+ * Resync routes' recent-only inserts and fix-match's remap. Named here so no
+ * writer re-types the pair (a typo would silently stop it serializing). Two
+ * LITERAL templates, never an interpolated key: pg_advisory_xact_lock has no
+ * (int, bigint) overload, and a fragment in a tagged $executeRaw is guardrail
+ * 23a's trap.
+ */
+export async function lockLibraryInTx(tx: Pick<LibraryTxClient, "$executeRaw">, source: "plex" | "jellyfin"): Promise<void> {
+  if (source === "plex") await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
+  else await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
+}
+
 /** One PlexLibraryItem row as the sync writers build it. */
 export type PlexLibraryRow = Prisma.PlexLibraryItemCreateManyInput;
 /** One JellyfinLibraryItem row as the sync writers build it. */
@@ -57,7 +71,7 @@ export interface LibraryInstanceBatch<R> {
 export async function replacePlexLibraryForInstances(batches: LibraryInstanceBatch<PlexLibraryRow>[]): Promise<void> {
   await replaceLibraryForInstances(batches, {
     staging: prisma.plexLibraryItemStaging,
-    lock: (tx) => tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`,
+    lock: (tx) => lockLibraryInTx(tx, "plex"),
     deleteInstance: (tx, slug) => tx.plexLibraryItem.deleteMany({ where: { serverInstance: slug } }),
     insertFromStaging: (tx, runId) => tx.$executeRaw`
       INSERT INTO "PlexLibraryItem" ("tmdbId", "mediaType", "serverInstance", "filePath", "plexRatingKey", "plexRatingKeys", "title", "year", "overview", "contentRating", "addedAt")
@@ -71,7 +85,7 @@ export async function replacePlexLibraryForInstances(batches: LibraryInstanceBat
 export async function replaceJellyfinLibraryForInstances(batches: LibraryInstanceBatch<JellyfinLibraryRow>[]): Promise<void> {
   await replaceLibraryForInstances(batches, {
     staging: prisma.jellyfinLibraryItemStaging,
-    lock: (tx) => tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`,
+    lock: (tx) => lockLibraryInTx(tx, "jellyfin"),
     deleteInstance: (tx, slug) => tx.jellyfinLibraryItem.deleteMany({ where: { serverInstance: slug } }),
     insertFromStaging: (tx, runId) => tx.$executeRaw`
       INSERT INTO "JellyfinLibraryItem" ("tmdbId", "mediaType", "serverInstance", "filePath", "jellyfinItemId", "jellyfinItemIds", "title", "year", "overview", "contentRating", "communityRating", "addedAt")
@@ -136,7 +150,8 @@ async function replaceLibraryForInstances<R extends { serverInstance?: string }>
 }
 
 /**
- * Patch the show file paths a `skipShowFilePaths` TV walk left null onto the
+ * Patch the show file paths the TV walk leaves null (a show item carries no
+ * file; the paths come from the type=4 episode listing) onto the
  * just-written PlexLibraryItem rows — ONE statement per CREATE_MANY_BATCH chunk,
  * never one `updateMany` per show.
  *

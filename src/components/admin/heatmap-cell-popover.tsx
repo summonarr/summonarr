@@ -6,14 +6,15 @@
 // renders the per-cell aggregate. Rendered in a body portal with position:fixed
 // so the heatmaps' `overflow-x: auto` containers can't clip it.
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import Link from "next/link";
 import { Loader2, X } from "@/components/icons";
 import type { HeatmapCellDetail } from "@/lib/play-history";
-import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { translateTranscodeReason } from "@/lib/transcode-reasons";
+import { cellLoadError, fetchHeatmapCell, joinParts, pct, type CellLoadError } from "@/components/admin/heatmap-cell-detail";
+import { mediaServerName } from "@/lib/media-server-name";
 
 const POPOVER_WIDTH = 264;
 const MARGIN = 8;
@@ -24,6 +25,115 @@ export interface HeatmapCellAnchor {
   y: number;
   w: number;
   h: number;
+}
+
+// Lazy-fetch the clicked cell's detail. queryString is stable (set once in the
+// parent's click handler), so this fires once per opened cell, and again per
+// Retry (`attempt`). A new cell, a Retry or closing the popover aborts the read
+// in flight. The raw transport/server detail goes to the console.
+function useCellDetail(queryString: string, attempt: number) {
+  const [detail, setDetail] = useState<HeatmapCellDetail | null>(null);
+  const [error, setError] = useState<CellLoadError | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    setDetail(null);
+    setError(null);
+    void fetchHeatmapCell(queryString, controller.signal).then((res) => {
+      if (res.ok) {
+        setDetail(res.data);
+        return;
+      }
+      if (res.kind === "aborted") return;
+      console.error("[heatmap-cell]", res.detail);
+      setError(cellLoadError(res));
+    });
+    return () => controller.abort();
+  }, [queryString, attempt]);
+  return { detail, error };
+}
+
+// Position below the cell when there's room, else above; clamp horizontally to
+// the viewport. Measured after layout so the height is known before placing;
+// re-measured when the body changes height (`body`, `failure`: loaded, failed).
+function usePlacement(ref: RefObject<HTMLDivElement | null>, anchor: HeatmapCellAnchor, body: unknown, failure: unknown) {
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    let left = anchor.x;
+    if (left + POPOVER_WIDTH + MARGIN > vw) left = vw - POPOVER_WIDTH - MARGIN;
+    if (left < MARGIN) left = MARGIN;
+    const below = anchor.y + anchor.h + 6;
+    const top = below + rect.height + MARGIN > vh ? anchor.y - rect.height - 6 : below;
+    setPos({ left, top: Math.max(MARGIN, top) });
+  }, [ref, anchor, body, failure]);
+  return pos;
+}
+
+// The popover is portaled to the end of <body>, so without this a keyboard
+// user would have to tab through the whole page to reach its links. Move
+// focus in once it is placed (a visibility:hidden element can't take focus),
+// and hand it back to whatever opened it on close.
+function useFocusHandoff(ref: RefObject<HTMLDivElement | null>, closeRef: RefObject<HTMLButtonElement | null>, placed: boolean) {
+  const movedFocusRef = useRef(false);
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const popover = ref.current;
+    return () => {
+      const active = document.activeElement;
+      const focusInside = !active || active === document.body || (popover?.contains(active) ?? false);
+      if (focusInside && opener?.isConnected) opener.focus();
+    };
+  }, [ref]);
+  useEffect(() => {
+    if (!placed || movedFocusRef.current) return;
+    movedFocusRef.current = true;
+    closeRef.current?.focus();
+  }, [placed, closeRef]);
+}
+
+// Dismiss on outside click, Escape, ANY page scroll and a resize. The
+// popover is position:fixed on an anchor measured once at click time, so a
+// scroll or a reflow would leave it floating over whatever moved underneath.
+// Scroll events don't bubble, hence `capture` — the heatmaps' own overflow
+// containers scroll too. The popover's own body scrolls when it is taller
+// than the viewport, so a scroll inside it is not a dismissal.
+//
+// The listeners are registered ONCE: both callers pass an inline onClose,
+// which a dependency would re-register on every parent render. They call the
+// latest one through a ref, updated after each commit.
+function useDismiss(ref: RefObject<HTMLDivElement | null>, onClose: () => void) {
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
+  useEffect(() => {
+    const close = () => onCloseRef.current();
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) close();
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") close();
+    }
+    function onScroll(e: Event) {
+      if (e.target instanceof Node && ref.current?.contains(e.target)) return;
+      close();
+    }
+    const scrollOpts: AddEventListenerOptions = { passive: true, capture: true };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, scrollOpts);
+    window.addEventListener("resize", close);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, scrollOpts);
+      window.removeEventListener("resize", close);
+    };
+  }, [ref]);
 }
 
 export function HeatmapCellPopover({
@@ -42,109 +152,14 @@ export function HeatmapCellPopover({
   onClose: () => void;
 }) {
   const t = useT();
-  const [detail, setDetail] = useState<HeatmapCellDetail | null>(null);
-  // A catalog key, translated at render (the raw transport/server message goes
-  // to the console) — so a 500 or "Failed to fetch" never reaches the UI in
-  // browser-English regardless of the UI language.
-  const [error, setError] = useState<string | null>(null);
-  // Bumped by Retry to re-run the fetch effect for the same cell.
+  // Bumped by Retry to re-run the fetch for the same cell.
   const [attempt, setAttempt] = useState(0);
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const { detail, error } = useCellDetail(queryString, attempt);
   const ref = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
-  const movedFocusRef = useRef(false);
-
-  // The popover is portaled to the end of <body>, so without this a keyboard
-  // user would have to tab through the whole page to reach its links. Move
-  // focus in once it is placed (a visibility:hidden element can't take focus),
-  // and hand it back to whatever opened it on close.
-  useEffect(() => {
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const popover = ref.current;
-    return () => {
-      const active = document.activeElement;
-      const focusInside = !active || active === document.body || (popover?.contains(active) ?? false);
-      if (focusInside && opener?.isConnected) opener.focus();
-    };
-  }, []);
-  useEffect(() => {
-    if (!pos || movedFocusRef.current) return;
-    movedFocusRef.current = true;
-    closeRef.current?.focus();
-  }, [pos]);
-
-  // Lazy-fetch the clicked cell's detail. queryString is stable (set once in the
-  // parent's click handler), so this fires once per opened cell.
-  useEffect(() => {
-    let cancelled = false;
-    setDetail(null);
-    setError(null);
-    fetch(withBasePath(`/api/admin/play-history/heatmap-cell?${queryString}`))
-      .then(async (res) => {
-        if (!res.ok) {
-          const d = (await res.json().catch(() => ({}))) as { error?: string };
-          throw new Error(d.error ?? `HTTP ${res.status}`);
-        }
-        return res.json() as Promise<HeatmapCellDetail>;
-      })
-      .then((d) => {
-        if (!cancelled) setDetail(d);
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        console.error("[heatmap-cell]", e);
-        setError("adminActivity.history.loadError");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [queryString, attempt]);
-
-  // Position below the cell when there's room, else above; clamp horizontally to
-  // the viewport. Measured after layout so the height is known before placing.
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    let left = anchor.x;
-    if (left + POPOVER_WIDTH + MARGIN > vw) left = vw - POPOVER_WIDTH - MARGIN;
-    if (left < MARGIN) left = MARGIN;
-    const below = anchor.y + anchor.h + 6;
-    const top = below + rect.height + MARGIN > vh ? anchor.y - rect.height - 6 : below;
-    setPos({ left, top: Math.max(MARGIN, top) });
-  }, [anchor, detail, error]);
-
-  // Dismiss on outside click, Escape, ANY page scroll and a resize. The
-  // popover is position:fixed on an anchor measured once at click time, so a
-  // scroll or a reflow would leave it floating over whatever moved underneath.
-  // Scroll events don't bubble, hence `capture` — the heatmaps' own overflow
-  // containers scroll too. The popover's own body scrolls when it is taller
-  // than the viewport, so a scroll inside it is not a dismissal.
-  useEffect(() => {
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    function onScroll(e: Event) {
-      if (e.target instanceof Node && ref.current?.contains(e.target)) return;
-      onClose();
-    }
-    const scrollOpts: AddEventListenerOptions = { passive: true, capture: true };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    window.addEventListener("scroll", onScroll, scrollOpts);
-    window.addEventListener("resize", onClose);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-      window.removeEventListener("scroll", onScroll, scrollOpts);
-      window.removeEventListener("resize", onClose);
-    };
-  }, [onClose]);
+  const pos = usePlacement(ref, anchor, detail, error);
+  useFocusHandoff(ref, closeRef, pos !== null);
+  useDismiss(ref, onClose);
 
   if (typeof document === "undefined") return null;
 
@@ -196,7 +211,7 @@ export function HeatmapCellPopover({
       <div style={{ padding: "10px 12px", overflowY: "auto", minHeight: 0 }}>
         {error ? (
           <div>
-            <p role="alert" style={{ color: "var(--ds-danger)", margin: 0 }}>{t(error)}</p>
+            <p role="alert" style={{ color: "var(--ds-danger)", margin: 0 }}>{"text" in error ? error.text : t(error.key)}</p>
             <button
               type="button"
               className="ds-hover-tint ds-mono"
@@ -253,15 +268,6 @@ export function HeatmapCellPopover({
 function CellBody({ detail }: { detail: HeatmapCellDetail }) {
   const t = useT();
   const locale = useLocale();
-  const m = detail.methods;
-  const methodTotal = m.directPlay + m.directStream + m.transcode + m.other;
-  const methodRows = [
-    { label: t("adminActivity.method.directPlay"), count: m.directPlay, color: "var(--ds-success, #2c9)" },
-    { label: t("adminActivity.method.directStream"), count: m.directStream, color: "var(--ds-accent)" },
-    { label: t("adminActivity.method.transcode"), count: m.transcode, color: "var(--ds-warning)" },
-    { label: t("adminActivity.method.other"), count: m.other, color: "var(--ds-fg-disabled)" },
-  ].filter((r) => r.count > 0);
-
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       {/* Headline numbers */}
@@ -271,25 +277,7 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
         <Stat value={detail.avgSessionMinutes.toLocaleString(locale)} unit={t("adminActivity.popover.unitMinAvg")} />
       </div>
 
-      {/* Transcode / stream mix */}
-      {methodRows.length > 0 && (
-        <Section title={t("adminActivity.popover.streamMethod")}>
-          <div style={{ display: "flex", height: 5, borderRadius: 999, overflow: "hidden", gap: 1 }}>
-            {methodRows.map((r) => (
-              <div
-                key={r.label}
-                style={{ flex: r.count, background: r.color }}
-                title={`${r.label}: ${r.count}`}
-              />
-            ))}
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "2px 10px", marginTop: 6 }}>
-            {methodRows.map((r) => (
-              <KV key={r.label} dot={r.color} k={r.label} v={`${r.count} · ${pct(r.count, methodTotal)}`} />
-            ))}
-          </div>
-        </Section>
-      )}
+      <StreamMethodSection methods={detail.methods} />
 
       {detail.topTranscodeReasons.length > 0 && (
         <Section title={t("adminActivity.popover.transcodeReasons")}>
@@ -339,63 +327,100 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
         <KV k={t("adminActivity.popover.finished")} v={`${detail.completedPct}% · ${detail.completedCount}/${detail.totalPlays}`} />
       </Section>
 
-      {/* Quality & network */}
-      <Section title={t("adminActivity.popover.qualityNetwork")}>
-        {detail.avgBitrateMbps > 0 && <KV k={t("adminActivity.popover.avgBitrate")} v={`${detail.avgBitrateMbps.toLocaleString(locale, { maximumFractionDigits: 1 })} Mbps`} />}
-        {detail.dataTransferredGb > 0 && <KV k={t("adminActivity.popover.data")} v={`${detail.dataTransferredGb.toLocaleString(locale, { maximumFractionDigits: 1 })} GB`} />}
-        {detail.topResolutions.length > 0 && (
-          <KV
-            k={t("adminActivity.popover.resolution")}
-            wrapValue
-            v={detail.topResolutions.map((r) => `${r.resolution} (${r.count})`).join(", ")}
-          />
-        )}
-        {(detail.network.lan > 0 || detail.network.wan > 0 || detail.network.relay > 0) && (
-          <KV
-            k={t("adminActivity.popover.network")}
-            wrapValue
-            v={[
-              detail.network.lan > 0 ? `LAN ${detail.network.lan}` : null,
-              detail.network.wan > 0 ? `WAN ${detail.network.wan}` : null,
-              detail.network.relay > 0 ? t("adminActivity.popover.relayCount", { count: detail.network.relay }) : null,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          />
-        )}
-      </Section>
+      <QualityNetworkSection detail={detail} />
 
-      {/* Source / type context */}
-      <Section title={t("adminActivity.popover.breakdown")}>
-        {(detail.source.plex > 0 || detail.source.jellyfin > 0) && (
-          <KV
-            k={t("adminActivity.popover.source")}
-            v={[
-              detail.source.plex > 0 ? `Plex ${detail.source.plex}` : null,
-              detail.source.jellyfin > 0 ? `Jellyfin ${detail.source.jellyfin}` : null,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          />
-        )}
-        {(detail.mediaType.movie > 0 || detail.mediaType.tv > 0) && (
-          <KV
-            k={t("adminActivity.popover.type")}
-            v={[
-              detail.mediaType.movie > 0 ? t("adminActivity.popover.moviesCount", { count: detail.mediaType.movie }) : null,
-              detail.mediaType.tv > 0 ? t("adminActivity.popover.tvCount", { count: detail.mediaType.tv }) : null,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          />
-        )}
-      </Section>
+      <BreakdownSection detail={detail} />
     </div>
   );
 }
 
-function pct(n: number, total: number): string {
-  return total > 0 ? `${Math.round((n / total) * 100)}%` : "0%";
+// Transcode / stream mix: a stacked bar and its legend.
+function StreamMethodSection({ methods: m }: { methods: HeatmapCellDetail["methods"] }) {
+  const t = useT();
+  const methodTotal = m.directPlay + m.directStream + m.transcode + m.other;
+  const methodRows = [
+    { label: t("adminActivity.method.directPlay"), count: m.directPlay, color: "var(--ds-success, #2c9)" },
+    { label: t("adminActivity.method.directStream"), count: m.directStream, color: "var(--ds-accent)" },
+    { label: t("adminActivity.method.transcode"), count: m.transcode, color: "var(--ds-warning)" },
+    { label: t("adminActivity.method.other"), count: m.other, color: "var(--ds-fg-disabled)" },
+  ].filter((r) => r.count > 0);
+  if (methodRows.length === 0) return null;
+  return (
+    <Section title={t("adminActivity.popover.streamMethod")}>
+      <div style={{ display: "flex", height: 5, borderRadius: 999, overflow: "hidden", gap: 1 }}>
+        {methodRows.map((r) => (
+          <div
+            key={r.label}
+            style={{ flex: r.count, background: r.color }}
+            title={`${r.label}: ${r.count}`}
+          />
+        ))}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "2px 10px", marginTop: 6 }}>
+        {methodRows.map((r) => (
+          <KV key={r.label} dot={r.color} k={r.label} v={`${r.count} · ${pct(r.count, methodTotal)}`} />
+        ))}
+      </div>
+    </Section>
+  );
+}
+
+// Bitrate, data, resolutions and where the streams came from (LAN/WAN/relay).
+function QualityNetworkSection({ detail }: { detail: HeatmapCellDetail }) {
+  const t = useT();
+  const locale = useLocale();
+  const oneDecimal = (n: number) => n.toLocaleString(locale, { maximumFractionDigits: 1 });
+  return (
+    <Section title={t("adminActivity.popover.qualityNetwork")}>
+      {detail.avgBitrateMbps > 0 && <KV k={t("adminActivity.popover.avgBitrate")} v={t("adminActivity.popover.bitrateValue", { value: oneDecimal(detail.avgBitrateMbps) })} />}
+      {detail.dataTransferredGb > 0 && <KV k={t("adminActivity.popover.data")} v={t("adminActivity.popover.dataValue", { value: oneDecimal(detail.dataTransferredGb) })} />}
+      {detail.topResolutions.length > 0 && (
+        <KV
+          k={t("adminActivity.popover.resolution")}
+          wrapValue
+          v={detail.topResolutions.map((r) => `${r.resolution} (${r.count})`).join(", ")}
+        />
+      )}
+      {(detail.network.lan > 0 || detail.network.wan > 0 || detail.network.relay > 0) && (
+        <KV
+          k={t("adminActivity.popover.network")}
+          wrapValue
+          v={joinParts([
+            detail.network.lan > 0 && t("adminActivity.popover.lanCount", { count: detail.network.lan }),
+            detail.network.wan > 0 && t("adminActivity.popover.wanCount", { count: detail.network.wan }),
+            detail.network.relay > 0 && t("adminActivity.popover.relayCount", { count: detail.network.relay }),
+          ])}
+        />
+      )}
+    </Section>
+  );
+}
+
+// Which server and which kind of title the plays were.
+function BreakdownSection({ detail }: { detail: HeatmapCellDetail }) {
+  const t = useT();
+  return (
+    <Section title={t("adminActivity.popover.breakdown")}>
+      {(detail.source.plex > 0 || detail.source.jellyfin > 0) && (
+        <KV
+          k={t("adminActivity.popover.source")}
+          v={joinParts([
+            detail.source.plex > 0 && t("adminActivity.popover.serverCount", { server: mediaServerName("plex"), count: detail.source.plex }),
+            detail.source.jellyfin > 0 && t("adminActivity.popover.serverCount", { server: mediaServerName("jellyfin"), count: detail.source.jellyfin }),
+          ])}
+        />
+      )}
+      {(detail.mediaType.movie > 0 || detail.mediaType.tv > 0) && (
+        <KV
+          k={t("adminActivity.popover.type")}
+          v={joinParts([
+            detail.mediaType.movie > 0 && t("adminActivity.popover.moviesCount", { count: detail.mediaType.movie }),
+            detail.mediaType.tv > 0 && t("adminActivity.popover.tvCount", { count: detail.mediaType.tv }),
+          ])}
+        />
+      )}
+    </Section>
+  );
 }
 
 function Stat({ value, unit, big }: { value: string; unit: string; big?: boolean }) {

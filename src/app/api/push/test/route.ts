@@ -2,11 +2,12 @@ import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { decryptToken } from "@/lib/token-crypto";
-import { sendPushNotification } from "@/lib/web-push";
+import { WebPushError, sendPushNotification } from "@/lib/web-push";
 import { SafeFetchError } from "@/lib/safe-fetch";
 import { sendApnsTestToUser, buildVapidContact } from "@/lib/push";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { translatorForRequest, translatorForUser } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
 type TestResult = {
   platform: "ios" | "web";
@@ -40,75 +41,79 @@ export const POST = withAuth(async (req, _ctx, session) => {
       { status: 404 },
     );
   }
-  // The push itself is in the recipient's language; the response is in the caller's.
-  const tUser = translatorForUser(subs[0].user);
 
   const results: TestResult[] = [];
-
-  // ── iOS (APNs via the central relay) ──
   if (subs.some((s) => s.platform === "ios")) {
     const ios = await sendApnsTestToUser(session.user.id);
-    results.push(...ios.map((r) => ({ platform: "ios" as const, endpoint: r.endpoint, ok: r.ok })));
+    for (const r of ios) results.push({ platform: "ios", endpoint: r.endpoint, ok: r.ok });
   }
-
-  // ── Web Push (VAPID) ── rows carry p256dh/auth; iOS rows leave them null.
+  // Web rows carry p256dh/auth; iOS rows leave them null.
   const webSubs = subs.filter(
     (s): s is typeof s & { p256dh: string; auth: string } => s.p256dh !== null && s.auth !== null,
   );
-  if (webSubs.length) {
-    const keyRows = await prisma.setting.findMany({
-      where: { key: { in: ["vapidPublicKey", "vapidPrivateKey", "smtpFrom", "smtpUser"] } },
-    });
-    const cfg = Object.fromEntries(keyRows.map((r) => [r.key, r.value]));
-    if (!cfg.vapidPublicKey || !cfg.vapidPrivateKey) {
-      results.push(
-        ...webSubs.map((s): TestResult => ({
-          platform: "web",
-          endpoint: s.endpoint.slice(0, 28) + "…",
-          ok: false,
-          message: t("apiUser.push.vapidMissing"),
-        })),
-      );
-    } else {
-      const vapidContact = buildVapidContact(cfg.smtpFrom, cfg.smtpUser);
-      const webResults = await Promise.all(
-        webSubs.map(async (sub): Promise<TestResult> => {
-          try {
-            await sendPushNotification(
-              {
-                endpoint: sub.endpoint,
-                keys: {
-                  p256dh: decryptToken(sub.p256dh, "PushSubscription.p256dh"),
-                  auth: decryptToken(sub.auth, "PushSubscription.auth"),
-                },
-              },
-              JSON.stringify({ title: "Summonarr", body: tUser("notify.push.apnsBody.test"), url: "/" }),
-              { contact: vapidContact, vapidPublicKey: cfg.vapidPublicKey, vapidPrivateKey: cfg.vapidPrivateKey },
-            );
-            return { platform: "web", endpoint: sub.endpoint.slice(0, 28) + "…", ok: true };
-          } catch (err: unknown) {
-            const e = err as { statusCode?: number; message?: string };
-            // A transport failure's message quotes the subscription's full
-            // endpoint URL (and on some paths its resolved address) — the very
-            // value every result below truncates to 28 characters. A fixed
-            // phrase says what happened; the WebPushError status still rides.
-            const message = err instanceof SafeFetchError
-              ? t("apiUser.common.couldNotConnect", { service: "Web Push" })
-              : e.message;
-            return {
-              platform: "web",
-              endpoint: sub.endpoint.slice(0, 28) + "…",
-              ok: false,
-              status: e.statusCode,
-              message,
-            };
-          }
-        }),
-      );
-      results.push(...webResults);
-    }
-  }
+  // The push itself is in the recipient's language; the response is in the caller's.
+  for (const r of await testWebSubscriptions(webSubs, t, translatorForUser(subs[0].user))) results.push(r);
 
   const allOk = results.length > 0 && results.every((r) => r.ok);
   return NextResponse.json({ results }, { status: allOk ? 200 : 502 });
 });
+
+// The endpoint as a result names it: a push-service URL is a delivery
+// capability for that browser, so only its first characters are shown.
+function displayEndpoint(endpoint: string): string {
+  return endpoint.slice(0, 28) + "…";
+}
+
+// One VAPID test push per web subscription. With no VAPID keys configured every
+// row reports so, with no network call.
+async function testWebSubscriptions(
+  webSubs: ReadonlyArray<{ endpoint: string; p256dh: string; auth: string }>,
+  t: Translator,
+  tUser: Translator,
+): Promise<TestResult[]> {
+  if (webSubs.length === 0) return [];
+  const keyRows = await prisma.setting.findMany({
+    where: { key: { in: ["vapidPublicKey", "vapidPrivateKey", "smtpFrom", "smtpUser"] } },
+  });
+  const cfg = Object.fromEntries(keyRows.map((r) => [r.key, r.value]));
+  if (!cfg.vapidPublicKey || !cfg.vapidPrivateKey) {
+    return webSubs.map((s): TestResult => ({
+      platform: "web",
+      endpoint: displayEndpoint(s.endpoint),
+      ok: false,
+      message: t("apiUser.push.vapidMissing"),
+    }));
+  }
+  const keys = { contact: buildVapidContact(cfg.smtpFrom, cfg.smtpUser), vapidPublicKey: cfg.vapidPublicKey, vapidPrivateKey: cfg.vapidPrivateKey };
+  const payload = JSON.stringify({ title: "Summonarr", body: tUser("notify.push.apnsBody.test"), url: "/" });
+  return Promise.all(
+    webSubs.map(async (sub): Promise<TestResult> => {
+      try {
+        await sendPushNotification(
+          {
+            endpoint: sub.endpoint,
+            keys: {
+              p256dh: decryptToken(sub.p256dh, "PushSubscription.p256dh"),
+              auth: decryptToken(sub.auth, "PushSubscription.auth"),
+            },
+          },
+          payload,
+          keys,
+        );
+        return { platform: "web", endpoint: displayEndpoint(sub.endpoint), ok: true };
+      } catch (err: unknown) {
+        return { platform: "web", endpoint: displayEndpoint(sub.endpoint), ok: false, ...webFailure(err, t) };
+      }
+    }),
+  );
+}
+
+// What a failed web send reports. A transport failure's message quotes the
+// subscription's full endpoint URL (and on some paths its resolved address) —
+// the very value every result truncates — so it becomes a fixed phrase. A push
+// service's refusal keeps its status.
+function webFailure(err: unknown, t: Translator): { status?: number; message?: string } {
+  if (err instanceof SafeFetchError) return { message: t("apiUser.common.couldNotConnect", { service: "Web Push" }) };
+  if (err instanceof WebPushError) return { status: err.statusCode, message: err.message };
+  return { message: err instanceof Error ? err.message : String(err) };
+}

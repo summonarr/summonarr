@@ -81,9 +81,9 @@ test("movies never use manual inputs", () => {
 });
 
 // ── season/episode picks across scope changes and seeded opens ───────────────
-// Two more pure helpers cut out the same way. keepSeasonEpisode is what the
-// render-time scope-change block runs: it used to reset every change to the
-// first season (Season 3 picked under SEASON became Season 1 under EPISODE) and
+// Two more pure helpers cut out the same way. keepSeasonEpisode is what a
+// scope change runs (withScope, from the scope select's onChange): it used to
+// reset every change to the first season (Season 3 picked under SEASON became Season 1 under EPISODE) and
 // clear the manual inputs. withSeedOptions keeps a watch-history seed the
 // library lists don't contain selectable instead of swapping it for the first
 // season's first episode.
@@ -130,12 +130,45 @@ test("the episode is never null while the chosen season has episodes", () => {
   }
 });
 
-test("the scope-change block re-validates through the helper and no longer wipes the manual inputs", () => {
-  const block = /if \(scope !== prevScope\) \{[\s\S]*?\n  \}\n/.exec(source);
-  assert.ok(block, "scope-change block not found");
-  assert.match(block[0], /keepSeasonEpisode\(tvSeasons, selectedSeason, selectedEpisode\)/);
-  assert.doesNotMatch(block[0], /setManualSeason\(""\)/);
-  assert.doesNotMatch(block[0], /tvSeasons\[0\]\.seasonNumber/);
+type Form = {
+  issueType: string; scope: "FULL" | "SEASON" | "EPISODE"; note: string;
+  selectedSeason: number | null; selectedEpisode: number | null; manualSeason: string; manualEpisode: string;
+};
+
+// withScope calls keepSeasonEpisode, so both are lifted into one module.
+function loadWithScope(): (form: Form, seasons: SeasonInfo[], scope: Form["scope"]) => Form {
+  const parts = ["keepSeasonEpisode", "withScope"].map((name) => {
+    const m = new RegExp(`function ${name}\\([\\s\\S]*?\\n\\}\\n`).exec(source);
+    assert.ok(m, `${name} helper must exist in report-issue-button.tsx`);
+    return m[0];
+  });
+  const js = ts.transpileModule(parts.join("\n"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+  }).outputText;
+  return new Function(`${js}\nreturn withScope;`)() as ReturnType<typeof loadWithScope>;
+}
+const withScope = loadWithScope();
+
+const FORM: Form = {
+  issueType: "BAD_VIDEO", scope: "SEASON", note: "", selectedSeason: 3, selectedEpisode: null, manualSeason: "3", manualEpisode: "",
+};
+
+test("a scope change re-validates the pick through keepSeasonEpisode and keeps the manual inputs", () => {
+  const next = withScope(FORM, LIST, "EPISODE");
+  assert.equal(next.scope, "EPISODE");
+  assert.equal(next.selectedSeason, 3, "Season 3 under SEASON stays Season 3 under EPISODE");
+  assert.equal(next.selectedEpisode, 4, "the episode is seeded, never null");
+  assert.equal(next.manualSeason, "3", "the manual inputs keep their values");
+  assert.equal(withScope(FORM, LIST, "SEASON"), FORM, "the same scope changes nothing");
+});
+
+test("the scope select runs withScope in its change handler, not a render-time reset", () => {
+  assert.match(source, /onChange=\{\(e\) => setForm\(\(f\) => withScope\(f, tvSeasons, e\.target\.value as IssueScope\)\)\}/);
+  assert.doesNotMatch(source, /prevScope/);
+});
+
+test("the dialog's X stays usable while the library loads; only a submit holds it", () => {
+  assert.match(source, /<DialogHeader title=\{title\} closeDisabled=\{isSubmitting\} t=\{t\} \/>/);
 });
 
 test("a seeded season/episode the library lists miss joins the options and stays selected", () => {
@@ -166,23 +199,22 @@ function openDialogText(): string {
   return source.slice(start, end);
 }
 
-test("openDialog checks its generation before writing the availability lists or picks", () => {
+test("openDialog writes the availability lists or picks only for the current open", () => {
+  // The load runs under one useAsyncAction key: a newer open replaces it and a
+  // close aborts it, and run() then resolves undefined — checked before any write.
   const body = openDialogText();
-  const firstGuard = body.indexOf("openGen.current !== myGen");
-  const listWrite = body.indexOf("setTvSeasons(seasons)");
-  assert.ok(firstGuard > 0 && listWrite > 0);
-  assert.ok(firstGuard < listWrite, "a stale response must be dropped before setTvSeasons");
-  // Right after EACH await: the fetch, then the body read.
-  assert.match(body, /await fetch\([^\n]*\);\n\s*if \(openGen\.current !== myGen\) return;/, "guard after the fetch");
-  assert.match(body, /await res\.json\(\);\n\s*if \(openGen\.current !== myGen\) return;/, "guard after the body read");
-  // The catch branch is guarded too, so a late failure can't flag a newer open.
-  const catchAt = body.indexOf("} catch {");
-  assert.match(body.slice(catchAt, catchAt + 120), /openGen\.current !== myGen[\s\S]*setAvailabilityFailed\(true\)/);
+  assert.match(body, /const res = await action\.run\("open", /);
+  const guard = body.indexOf("if (!res) return;");
+  const listWrite = body.indexOf("setLists({ seasons");
+  const failWrite = body.indexOf("failed: true");
+  assert.ok(guard > 0 && listWrite > guard && failWrite > guard, "a stale answer is dropped before any write");
+  const close = source.slice(source.indexOf("function closeDialog()"), source.indexOf("async function handleSubmit"));
+  assert.match(close, /action\.abort\("open"\)/, "closing the dialog drops the load in flight");
 });
 
 test("openDialog clears the previous open's lists and source label", () => {
   const body = openDialogText();
-  assert.match(body, /setTvSeasons\(\[\]\);/);
-  assert.match(body, /setAvailabilitySource\(null\);/);
-  assert.ok(body.indexOf("setAvailabilitySource(null)") < body.indexOf("await fetch("), "cleared before the reload");
+  assert.match(body, /setLists\(NO_LISTS\);/);
+  assert.ok(body.indexOf("setLists(NO_LISTS)") < body.indexOf("await action.run("), "cleared before the reload");
+  assert.match(source, /const NO_LISTS: LibraryLists = \{ seasons: \[\], source: null, failed: false \};/);
 });

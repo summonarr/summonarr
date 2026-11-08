@@ -1,24 +1,30 @@
 import "server-only";
-import { prisma } from "./prisma";
+import { prisma, type PrismaTxClient } from "./prisma";
 import { Prisma, type MediaType } from "@/generated/prisma";
-import { buildMediaInstanceRegistryWrite, getSyncableMediaInstances } from "./media-instance-registry";
+import { getSyncableMediaInstances, registeredSlugsForUpdateInTx } from "./media-instance-registry";
 import { DEFAULT_MEDIA_INSTANCE } from "./media-instances";
 import { linkedIdentityBranches } from "./my-watch-history";
 import { getPlexConfig } from "./plex-config";
 import { getJellyfinConfig } from "./jellyfin-config";
 import { getPlexUser, getPlexWatchHistory } from "./plex";
 import { getJellyfinFavorites, getJellyfinPlayedSince } from "./jellyfin";
+import { SafeFetchError } from "./safe-fetch";
 import { indexPlexRowsByKey } from "./plex-dedupe";
 import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
-import { BATCH_TX_TIMEOUT, batchCreateMany } from "./cron-auth";
+import { BATCH_TX_TIMEOUT, batchCreateMany } from "./batch-write";
 import { FOR_YOU_COWATCH_FEATURE_KEY, isFeatureEnabled } from "./features";
 import {
+  UNRESOLVED_HOLD_MS,
   foldJellyfinPlayed,
   foldPlexHistory,
+  groupPlexHistoryByAccount,
+  heldReadPoint,
   mergeServerWatchedRows,
   nextReadTo,
   sameServerWatchedRows,
   watchTitleKey,
+  type FoldBounds,
+  type FoldResult,
   type PlayDelta,
   type WatchTitle,
   type WatchedTitleRow,
@@ -142,32 +148,31 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-// The interactive-tx client of the EXTENDED prisma (upstream-watch-data.ts's shape).
-type TxClient = Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
-
 // Whether a NAMED instance is still registered, read with its service's registry
 // row LOCKED so a concurrent removal is ordered against this write (see the
 // header). The default instance can never be removed. A missing or unreadable
-// registry lists nothing. Mirrors stillRegisteredInTx in upstream-watch-data.ts.
-async function stillRegisteredInTx(tx: TxClient, source: Source, slug: string): Promise<boolean> {
+// registry lists nothing. Same reader as stillRegisteredInTx in upstream-watch-data.ts.
+async function stillRegisteredInTx(tx: PrismaTxClient, source: Source, slug: string): Promise<boolean> {
   if (slug === DEFAULT_MEDIA_INSTANCE) return true;
-  const { key } = buildMediaInstanceRegistryWrite(source, []);
-  const rows = await tx.$queryRaw<Array<{ value: string }>>(
-    Prisma.sql`SELECT "value" FROM "Setting" WHERE "key" = ${key} FOR UPDATE`,
-  );
-  const raw = rows[0]?.value;
-  if (!raw) return false;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.some((e) => !!e && typeof e === "object" && (e as { slug?: unknown }).slug === slug);
-  } catch {
-    return false;
-  }
+  return (await registeredSlugsForUpdateInTx(tx, source)).has(slug);
 }
 
 // "removed": the server was removed meanwhile. "stale": the read point is no
 // longer the one the deltas were counted from. Either way nothing was written.
 type CommitOutcome = "committed" | "removed" | "stale";
+
+interface IdentityCommit {
+  source: Source;
+  slug: string;
+  identityId: string;
+  // The read point the deltas were folded FROM, and the one to store.
+  fromReadTo: Date | null;
+  readTo: Date | null;
+  deltas: ReadonlyMap<string, PlayDelta>;
+  // The full favorite set read this run; null when favorites weren't read.
+  favorites: ReadonlySet<string> | null;
+  names: ReadonlyMap<string, string>;
+}
 
 // Write one identity's merged rows and its read point together, so a failure
 // leaves both as they were and the same plays are read — and counted — once.
@@ -178,52 +183,114 @@ type CommitOutcome = "committed" | "removed" | "stale";
 // counted these plays, so this one writes nothing. The swap goes first: from
 // then on the cursor row is locked to this transaction, and the stored rows,
 // read after it, are the ones the merge adds to.
-async function commitIdentity(
-  source: Source,
-  slug: string,
-  identityId: string,
-  fromReadTo: Date | null,
-  deltas: ReadonlyMap<string, PlayDelta>,
-  favorites: ReadonlySet<string> | null,
-  names: ReadonlyMap<string, string>,
-  readTo: Date | null,
-): Promise<CommitOutcome> {
+async function commitIdentity(c: IdentityCommit): Promise<CommitOutcome> {
+  // Nothing to write: no plays, no favorites read and the read point unmoved.
+  // Skipped so an idle identity doesn't lock the registry row for nothing
+  // (the cursor's importedAt is not read anywhere).
+  if (c.deltas.size === 0 && c.favorites === null && c.fromReadTo?.getTime() === c.readTo?.getTime()) return "committed";
   return prisma.$transaction(
     async (tx): Promise<CommitOutcome> => {
-      if (!(await stillRegisteredInTx(tx, source, slug))) return "removed";
-      const importedAt = new Date();
-      let swapped = (await tx.serverWatchCursor.updateMany({
-        where: { mediaServerUserId: identityId, readTo: fromReadTo },
-        data: { readTo, importedAt },
-      })).count === 1;
-      if (!swapped && fromReadTo === null) {
-        // Never read: no cursor row yet. A concurrent first commit's insert wins.
-        swapped = (await tx.serverWatchCursor.createMany({
-          data: [{ mediaServerUserId: identityId, readTo, importedAt }],
-          skipDuplicates: true,
-        })).count === 1;
-      }
-      if (!swapped) return "stale";
-      if (deltas.size > 0 || favorites !== null) {
+      if (!(await stillRegisteredInTx(tx, c.source, c.slug))) return "removed";
+      if (!(await swapReadPointInTx(tx, c.identityId, c.fromReadTo, c.readTo))) return "stale";
+      if (c.deltas.size > 0 || c.favorites !== null) {
         const existing: WatchedTitleRow[] = await tx.serverWatchedTitle.findMany({
-          where: { mediaServerUserId: identityId },
+          where: { mediaServerUserId: c.identityId },
           select: { tmdbId: true, mediaType: true, title: true, plays: true, lastWatchedAt: true, favorite: true },
         });
-        const merged = mergeServerWatchedRows(existing, deltas, favorites, titleNamer(names));
-        if (!sameServerWatchedRows(existing, merged)) {
-          await tx.serverWatchedTitle.deleteMany({ where: { mediaServerUserId: identityId } });
-          if (merged.length > 0) {
-            await batchCreateMany(
-              tx.serverWatchedTitle,
-              merged.map((r) => ({ ...r, mediaServerUserId: identityId })),
-            );
-          }
-        }
+        const merged = mergeServerWatchedRows(existing, c.deltas, c.favorites, titleNamer(c.names));
+        if (!sameServerWatchedRows(existing, merged)) await writeRowChangesInTx(tx, c.identityId, existing, merged);
       }
       return "committed";
     },
     { timeout: BATCH_TX_TIMEOUT },
   );
+}
+
+async function swapReadPointInTx(tx: PrismaTxClient, identityId: string, fromReadTo: Date | null, readTo: Date | null): Promise<boolean> {
+  const importedAt = new Date();
+  const swapped = (await tx.serverWatchCursor.updateMany({
+    where: { mediaServerUserId: identityId, readTo: fromReadTo },
+    data: { readTo, importedAt },
+  })).count === 1;
+  if (swapped || fromReadTo !== null) return swapped;
+  // Never read: no cursor row yet. A concurrent first commit's insert wins.
+  return (await tx.serverWatchCursor.createMany({
+    data: [{ mediaServerUserId: identityId, readTo, importedAt }],
+    skipDuplicates: true,
+  })).count === 1;
+}
+
+// Past this many changed rows a full rewrite is cheaper than row-by-row updates
+// (a first import, or a rename sweep across the library).
+const MAX_ROW_UPDATES = 200;
+
+// Only what changed: removed titles are deleted, changed ones updated, new ones
+// inserted. One new play is one UPDATE, not a rewrite of up to
+// MAX_SERVER_WATCHED_TITLES rows while the registry row is locked. Every query
+// awaits the last (guardrail 23c).
+async function writeRowChangesInTx(
+  tx: PrismaTxClient,
+  identityId: string,
+  existing: readonly WatchedTitleRow[],
+  merged: readonly WatchedTitleRow[],
+): Promise<void> {
+  const before = new Map(existing.map((r) => [watchTitleKey(r.tmdbId, r.mediaType), r]));
+  const after = new Map(merged.map((r) => [watchTitleKey(r.tmdbId, r.mediaType), r]));
+  const removed = existing.filter((r) => !after.has(watchTitleKey(r.tmdbId, r.mediaType)));
+  const added = merged.filter((r) => !before.has(watchTitleKey(r.tmdbId, r.mediaType)));
+  const changed = merged.filter((r) => {
+    const o = before.get(watchTitleKey(r.tmdbId, r.mediaType));
+    return o !== undefined && !sameServerWatchedRows([o], [r]);
+  });
+
+  if (changed.length > MAX_ROW_UPDATES) {
+    await tx.serverWatchedTitle.deleteMany({ where: { mediaServerUserId: identityId } });
+    if (merged.length > 0) {
+      await batchCreateMany(tx.serverWatchedTitle, merged.map((r) => ({ ...r, mediaServerUserId: identityId })));
+    }
+    return;
+  }
+  for (const type of ["MOVIE", "TV"] as const) {
+    const ids = removed.filter((r) => r.mediaType === type).map((r) => r.tmdbId);
+    if (ids.length > 0) {
+      await tx.serverWatchedTitle.deleteMany({ where: { mediaServerUserId: identityId, mediaType: type, tmdbId: { in: ids } } });
+    }
+  }
+  for (const r of changed) {
+    await tx.serverWatchedTitle.updateMany({
+      where: { mediaServerUserId: identityId, tmdbId: r.tmdbId, mediaType: r.mediaType },
+      data: { title: r.title, plays: r.plays, lastWatchedAt: r.lastWatchedAt, favorite: r.favorite },
+    });
+  }
+  if (added.length > 0) {
+    await batchCreateMany(tx.serverWatchedTitle, added.map((r) => ({ ...r, mediaServerUserId: identityId })));
+  }
+}
+
+// One identity's fold, holding its read point below a play whose item the
+// library doesn't know yet (UNRESOLVED_HOLD_MS): the read point stops just
+// before it and only plays up to there are counted, so that play — and the
+// ones after it — are read again, and counted once, next run.
+function foldHeld(
+  fold: (bounds: FoldBounds) => FoldResult,
+  readTo: Date | null,
+  next: Date | null,
+  now: Date,
+): { fold: FoldResult; next: Date | null } {
+  const first = fold({ holdUnresolvedSince: new Date(now.getTime() - UNRESOLVED_HOLD_MS) });
+  if (first.heldAt === null) return { fold: first, next };
+  const held = heldReadPoint(next, first.heldAt, readTo);
+  return { fold: fold({ readUntil: held }), next: held };
+}
+
+// The commit and its bookkeeping, shared by both servers. False when the server
+// was removed meanwhile: the caller stops, as the rest would be skipped too.
+async function commitAndCount(c: IdentityCommit, result: ServerHistoryImportResult): Promise<boolean> {
+  const outcome = await commitIdentity(c);
+  if (outcome === "removed") return false;
+  if (outcome === "stale") warnStale(c.source, c.identityId);
+  else result.identities++;
+  return true;
 }
 
 function warnStale(source: Source, identityId: string): void {
@@ -341,6 +408,9 @@ async function importPlexServer(slug: string, everyone: boolean, signal: AbortSi
   const names = namesOf(titles.values());
   const titleFor = (k: string) => titles.get(k) ?? null;
   const walkNewest = nextReadTo(null, history.entries.map((e) => e.viewedAt));
+  // Split by account once, so each identity folds only its own records.
+  const byAccount = groupPlexHistoryByAccount(history.entries, owner);
+  const now = new Date();
 
   for (const identity of eligible) {
     if (signal.aborted) {
@@ -348,19 +418,23 @@ async function importPlexServer(slug: string, everyone: boolean, signal: AbortSi
       return;
     }
     const readTo = identity.watchCursor?.readTo ?? null;
-    const { deltas, unresolved } = foldPlexHistory(history.entries, identity.sourceUserId, owner, readTo, titleFor);
-    result.unresolved += unresolved;
+    const own = byAccount.get(identity.sourceUserId) ?? [];
     // The walk covered everything up to its newest record for EVERY identity,
     // including ones with nothing new. A server with no dated history at all
     // anchors at the walk's start so the next run is incremental, not full.
-    const next = nextReadTo(readTo, [walkNewest]) ?? walkStartedAt;
-    if (deltas.size === 0 && readTo !== null && next.getTime() === readTo.getTime()) continue;
+    const held = foldHeld(
+      (bounds) => foldPlexHistory(own, identity.sourceUserId, owner, readTo, titleFor, bounds),
+      readTo,
+      nextReadTo(readTo, [walkNewest]) ?? walkStartedAt,
+      now,
+    );
+    const { deltas, unresolved } = held.fold;
+    result.unresolved += unresolved;
+    const next = held.next;
+    if (deltas.size === 0 && readTo !== null && next !== null && next.getTime() === readTo.getTime()) continue;
     try {
-      const outcome = await commitIdentity("plex", slug, identity.id, readTo, deltas, null, names, next);
-      // The server was removed during the walk: the rest would be skipped too.
-      if (outcome === "removed") return;
-      if (outcome === "stale") warnStale("plex", identity.id);
-      else result.identities++;
+      const commit = { source: "plex" as const, slug, identityId: identity.id, fromReadTo: readTo, readTo: next, deltas, favorites: null, names };
+      if (!(await commitAndCount(commit, result))) return;
     } catch (err) {
       result.failedIdentities++;
       console.error(`[server-history] Plex history write failed for server user ${identity.id}: ${errorText(err)}`);
@@ -389,49 +463,84 @@ async function importJellyfinServer(slug: string, everyone: boolean, signal: Abo
       result.aborted = true;
       return;
     }
-    const readTo = identity.watchCursor?.readTo ?? null;
-    const readStartedAt = new Date();
     try {
-      const played = await getJellyfinPlayedSince(url, apiKey, identity.sourceUserId, readTo ? { since: readTo, signal } : { signal });
-      // Favorites only matter for a person with an account (they seed THEIR
-      // shelf); an unlinked identity's history still feeds co-watching.
-      const favorites = isLinked(identity, subjects) ? await getJellyfinFavorites(url, apiKey, identity.sourceUserId, { signal }) : null;
-      if (signal.aborted) {
-        result.aborted = true;
-        return;
-      }
-
-      const ids: string[] = [];
-      for (const p of played) {
-        const id = p.kind === "movie" ? p.itemKey : p.showKey;
-        if (id) ids.push(id);
-      }
-      for (const f of favorites ?? []) ids.push(f.itemId);
-      const titles = await jellyfinTitles(slug, ids);
-      const { deltas, unresolved } = foldJellyfinPlayed(played, readTo, (id) => titles.get(id) ?? null);
-      result.unresolved += unresolved;
-
-      let favoriteKeys: Set<string> | null = null;
-      if (favorites !== null) {
-        favoriteKeys = new Set();
-        for (const f of favorites) {
-          const t = titles.get(f.itemId);
-          if (t && t.mediaType === (f.kind === "movie" ? "MOVIE" : "TV")) favoriteKeys.add(watchTitleKey(t.tmdbId, t.mediaType));
-        }
-      }
-      // A full read that found nothing dated anchors at its own start, so the
-      // next read is incremental instead of re-reading the whole list.
-      const next = nextReadTo(readTo, played.map((p) => p.lastPlayedAt)) ?? (readTo === null ? readStartedAt : null);
-      const outcome = await commitIdentity("jellyfin", slug, identity.id, readTo, deltas, favoriteKeys, namesOf(titles.values()), next);
-      // The server was removed meanwhile: the rest would be skipped too.
-      if (outcome === "removed") return;
-      if (outcome === "stale") warnStale("jellyfin", identity.id);
-      else result.identities++;
+      if (!(await importJellyfinIdentity(url, apiKey, slug, identity, isLinked(identity, subjects), signal, result))) return;
     } catch (err) {
+      // An unreachable server would fail every identity the same way: that is
+      // the SERVER's failure, counted and logged once by the run (guardrail 7b).
+      if (isTransportFailure(err)) throw err;
       result.failedIdentities++;
       console.error(`[server-history] Jellyfin history read failed for server user ${identity.id}: ${errorText(err)}`);
     }
   }
+}
+
+function isTransportFailure(err: unknown): boolean {
+  return err instanceof SafeFetchError && (err.reason === "network" || err.reason === "timeout");
+}
+
+// One Jellyfin user's played items since their read point (and, for a person
+// with an account, their favorites), folded and committed. False when the run
+// should stop for this server (removed meanwhile, or aborted).
+async function importJellyfinIdentity(
+  url: string,
+  apiKey: string,
+  slug: string,
+  identity: IdentityRow,
+  linked: boolean,
+  signal: AbortSignal,
+  result: ServerHistoryImportResult,
+): Promise<boolean> {
+  const readTo = identity.watchCursor?.readTo ?? null;
+  const readStartedAt = new Date();
+  const played = await getJellyfinPlayedSince(url, apiKey, identity.sourceUserId, readTo ? { since: readTo, signal } : { signal });
+  // Favorites only matter for a person with an account (they seed THEIR
+  // shelf); an unlinked identity's history still feeds co-watching.
+  const favorites = linked ? await getJellyfinFavorites(url, apiKey, identity.sourceUserId, { signal }) : null;
+  if (signal.aborted) {
+    result.aborted = true;
+    return false;
+  }
+
+  const ids: string[] = [];
+  for (const p of played) {
+    const id = p.kind === "movie" ? p.itemKey : p.showKey;
+    if (id) ids.push(id);
+  }
+  for (const f of favorites ?? []) ids.push(f.itemId);
+  const titles = await jellyfinTitles(slug, ids);
+  const titleFor = (id: string) => titles.get(id) ?? null;
+  // A full read that found nothing dated anchors at its own start, so the
+  // next read is incremental instead of re-reading the whole list.
+  const held = foldHeld(
+    (bounds) => foldJellyfinPlayed(played, readTo, titleFor, bounds),
+    readTo,
+    nextReadTo(readTo, played.map((p) => p.lastPlayedAt)) ?? (readTo === null ? readStartedAt : null),
+    readStartedAt,
+  );
+  result.unresolved += held.fold.unresolved;
+
+  let favoriteKeys: Set<string> | null = null;
+  if (favorites !== null) {
+    favoriteKeys = new Set();
+    for (const f of favorites) {
+      const t = titles.get(f.itemId);
+      if (t && t.mediaType === (f.kind === "movie" ? "MOVIE" : "TV")) favoriteKeys.add(watchTitleKey(t.tmdbId, t.mediaType));
+    }
+  }
+  return commitAndCount(
+    {
+      source: "jellyfin",
+      slug,
+      identityId: identity.id,
+      fromReadTo: readTo,
+      readTo: held.next,
+      deltas: held.fold.deltas,
+      favorites: favoriteKeys,
+      names: namesOf(titles.values()),
+    },
+    result,
+  );
 }
 
 // One pass over every configured Plex and Jellyfin server. Never throws: a
@@ -473,7 +582,10 @@ export async function importServerWatchHistory(opts: { signal?: AbortSignal; bud
   };
 
   // Unreadable flag ⇒ the narrower, viewer-only scope.
-  const everyone = await isFeatureEnabled(FOR_YOU_COWATCH_FEATURE_KEY).catch(() => false);
+  const everyone = await isFeatureEnabled(FOR_YOU_COWATCH_FEATURE_KEY).catch((err: unknown) => {
+    console.warn(`[server-history] could not read the co-watch switch, importing linked identities only: ${errorText(err)}`);
+    return false;
+  });
   await run("plex", (slug) => importPlexServer(slug, everyone, signal, result));
   await run("jellyfin", (slug) => importJellyfinServer(slug, everyone, signal, result));
   if (signal.aborted) result.aborted = true;

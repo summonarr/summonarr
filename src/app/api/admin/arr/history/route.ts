@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { snapshotted } from "@/lib/arr-snapshot";
 import { arrFailure, arrGate, readWarnKey } from "@/lib/arr-admin-http";
-import { parseHistoryKind, parsePaging } from "@/lib/arr-history";
+import { HISTORY_FILTER_KINDS, parseHistoryKind, parsePaging } from "@/lib/arr-history";
 import { loadHistoryPage } from "@/lib/arr-history-data";
 import { forgetWarnOnChange } from "@/lib/log-dedup";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -20,10 +20,12 @@ export const GET = withAdmin(snapshotted(async (req) => {
   const target = await arrGate(q.get("service"), q.get("instance"), t);
   if (target instanceof NextResponse) return target;
   const paging = parsePaging(q.get("page"), q.get("pageSize"));
+  if (!paging) return NextResponse.json({ error: t("apiAdmin.arr.pagingInvalid") }, { status: 400 });
+  // Absent or empty is every kind; anything else must name one.
   const rawKind = q.get("kind");
-  const kind = rawKind === null || rawKind === "" ? null : parseHistoryKind(rawKind);
-  if (!paging || kind === null && rawKind !== null && rawKind !== "") {
-    return NextResponse.json({ error: t("apiAdmin.arr.pagingInvalid") }, { status: 400 });
+  const kind = rawKind ? parseHistoryKind(rawKind) : null;
+  if (rawKind && kind === null) {
+    return NextResponse.json({ error: t("apiAdmin.arr.historyKindInvalid", { kinds: HISTORY_FILTER_KINDS.join(", ") }) }, { status: 400 });
   }
   const warnKey = readWarnKey("history", target);
   try {

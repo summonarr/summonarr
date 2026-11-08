@@ -1,5 +1,5 @@
 // Audit fix 2 / R9 — the shared /admin/arr/* error map in the OpenAPI spec
-// (`ARR_ERRORS`, src/app/api/openapi/route.ts) claims to document every answer
+// (`ARR_ERRORS`, src/lib/openapi/shared.ts) claims to document every answer
 // arrGate/arrTitleGate and arrFailure (src/lib/arr-admin-http.ts) share. It
 // listed 400/404/502/504 only, while arrFailure also answers 409 — a named
 // season/episode/file/history record not on the title, not a grab, already

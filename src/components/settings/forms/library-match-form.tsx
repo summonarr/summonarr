@@ -7,7 +7,9 @@ import { Label } from "@/components/ui/label";
 import { Loader2, RefreshCw } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
-import { readApiError } from "@/lib/client/api-error";
+import { fetchJson } from "@/lib/client/fetch-json";
+import { v } from "@/lib/validate";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { useSettingsSave } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
 import { stripRelPrefix, toMatchKey } from "@/lib/library-paths";
@@ -134,6 +136,17 @@ interface LibraryMatchFormProps {
   initialJellyfinTvPrefix:    string;
 }
 
+// The four prefixes, keyed by the Setting each one saves to.
+type PrefixKey =
+  | "plexMoviePathStripPrefix" | "plexTvPathStripPrefix"
+  | "jellyfinMoviePathStripPrefix" | "jellyfinTvPathStripPrefix";
+
+// GET /api/admin/library-sample-paths, checked: a block without its samples
+// would otherwise throw in render (`samples.length`).
+const MediaSamples = v.object({ mountPoint: v.string(), samples: v.array(v.string()) });
+const ServerSamplesSchema = v.object({ movie: MediaSamples, tv: MediaSamples });
+const SamplePaths = v.object({ plex: ServerSamplesSchema, jellyfin: ServerSamplesSchema });
+
 export function LibraryMatchForm({
   initialPlexMoviePrefix,
   initialPlexTvPrefix,
@@ -141,53 +154,44 @@ export function LibraryMatchForm({
   initialJellyfinTvPrefix,
 }: LibraryMatchFormProps) {
   const t = useT();
-  const [plexMoviePrefix,     setPlexMoviePrefix]     = useState(initialPlexMoviePrefix);
-  const [plexTvPrefix,        setPlexTvPrefix]        = useState(initialPlexTvPrefix);
-  const [jellyfinMoviePrefix, setJellyfinMoviePrefix] = useState(initialJellyfinMoviePrefix);
-  const [jellyfinTvPrefix,    setJellyfinTvPrefix]    = useState(initialJellyfinTvPrefix);
-  const [loading,             setLoading]             = useState(false);
-  const [plex,                setPlex]                = useState<ServerSamples | null>(null);
-  const [jellyfin,            setJellyfin]            = useState<ServerSamples | null>(null);
-  const [loadError,           setLoadError]           = useState("");
+  const [prefixes, setPrefixes] = useState<Record<PrefixKey, string>>({
+    plexMoviePathStripPrefix:     initialPlexMoviePrefix,
+    plexTvPathStripPrefix:        initialPlexTvPrefix,
+    jellyfinMoviePathStripPrefix: initialJellyfinMoviePrefix,
+    jellyfinTvPathStripPrefix:    initialJellyfinTvPrefix,
+  });
+  const [samples, setSamples] = useState<{ plex: ServerSamples; jellyfin: ServerSamples } | null>(null);
+  const [loadError, setLoadError] = useState("");
+  const action = useAsyncAction();
+  const loading = action.busy("load");
   // `saveMessage` is the route's own reason (a 429 cooldown, too long), shown
   // in place of the bare "Failed to save".
   const { status: saveStatus, message: saveMessage, save, edited } = useSettingsSave();
 
   async function loadSamples() {
-    setLoading(true);
     setLoadError("");
-    try {
-      const res = await fetch(withBasePath("/api/admin/library-sample-paths"));
-      if (!res.ok) {
-        // Surface the route's own { error } when it sent one; otherwise a
-        // bare "HTTP 500" tells the admin nothing they can act on.
-        setLoadError(await readApiError(res, t("settings.form.libraryMatch.loadFailed")));
-        return;
-      }
-      const data = await res.json() as { plex: ServerSamples; jellyfin: ServerSamples };
-      setPlex(data.plex);
-      setJellyfin(data.jellyfin);
-    } catch {
-      setLoadError(t("settings.form.libraryMatch.loadFailed"));
-    } finally {
-      setLoading(false);
+    const res = await action.run("load", (signal) =>
+      // Surface the route's own { error } when it sent one; otherwise a bare
+      // "HTTP 500" tells the admin nothing they can act on.
+      fetchJson(withBasePath("/api/admin/library-sample-paths"), {
+        schema: SamplePaths,
+        signal,
+        fallbackError: t("settings.form.libraryMatch.loadFailed"),
+      }));
+    if (!res) return;
+    if (!res.ok) {
+      setLoadError(res.error);
+      return;
     }
+    setSamples(res.data);
   }
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    await save({
-      plexMoviePathStripPrefix:     plexMoviePrefix,
-      plexTvPathStripPrefix:        plexTvPrefix,
-      jellyfinMoviePathStripPrefix: jellyfinMoviePrefix,
-      jellyfinTvPathStripPrefix:    jellyfinTvPrefix,
-    });
+    await save({ ...prefixes });
   }
 
-  const onChangePlexMoviePrefix     = (v: string) => { setPlexMoviePrefix(v);     edited(); };
-  const onChangePlexTvPrefix        = (v: string) => { setPlexTvPrefix(v);        edited(); };
-  const onChangeJellyfinMoviePrefix = (v: string) => { setJellyfinMoviePrefix(v); edited(); };
-  const onChangeJellyfinTvPrefix    = (v: string) => { setJellyfinTvPrefix(v);    edited(); };
+  const onChangePrefix = (key: PrefixKey) => (value: string) => { setPrefixes((p) => ({ ...p, [key]: value })); edited(); };
 
   // The <form> wraps the whole block so Enter inside any prefix field saves,
   // like every other form in this folder. "Load examples" is a Button, which
@@ -215,16 +219,16 @@ export function LibraryMatchForm({
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <LibraryMatchServerBlock
           label="Plex" accent="text-yellow-400"
-          data={plex}
-          moviePrefix={plexMoviePrefix} tvPrefix={plexTvPrefix}
-          onChangeMoviePrefix={onChangePlexMoviePrefix} onChangeTvPrefix={onChangePlexTvPrefix}
+          data={samples?.plex ?? null}
+          moviePrefix={prefixes.plexMoviePathStripPrefix} tvPrefix={prefixes.plexTvPathStripPrefix}
+          onChangeMoviePrefix={onChangePrefix("plexMoviePathStripPrefix")} onChangeTvPrefix={onChangePrefix("plexTvPathStripPrefix")}
           loading={loading} loadError={loadError !== ""}
         />
         <LibraryMatchServerBlock
           label="Jellyfin" accent="text-purple-400"
-          data={jellyfin}
-          moviePrefix={jellyfinMoviePrefix} tvPrefix={jellyfinTvPrefix}
-          onChangeMoviePrefix={onChangeJellyfinMoviePrefix} onChangeTvPrefix={onChangeJellyfinTvPrefix}
+          data={samples?.jellyfin ?? null}
+          moviePrefix={prefixes.jellyfinMoviePathStripPrefix} tvPrefix={prefixes.jellyfinTvPathStripPrefix}
+          onChangeMoviePrefix={onChangePrefix("jellyfinMoviePathStripPrefix")} onChangeTvPrefix={onChangePrefix("jellyfinTvPathStripPrefix")}
           loading={loading} loadError={loadError !== ""}
         />
       </div>

@@ -88,9 +88,11 @@ test("done page: the stashed state goes through the shape guard, never a bare ca
 });
 
 test("done page: both PIN polls carry a per-request timeout and run to a wall-clock deadline", () => {
-  assert.equal((PAGE.match(/signal: requestTimeoutSignal\(/g) ?? []).length, 2);
+  assert.equal((PAGE.match(/signal: anySignal\(signal, requestTimeoutSignal\(/g) ?? []).length, 2);
   assert.equal((PAGE.match(/const deadline = pollDeadline\(PIN_POLL_WINDOW_MS\);/g) ?? []).length, 2);
-  assert.equal((PAGE.match(/while \(deadline\.remaining\(\) > 0\)/g) ?? []).length, 2);
+  // Each loop also stops the moment the page goes away.
+  assert.equal((PAGE.match(/while \(deadline\.remaining\(\) > 0 && !signal\.aborted\)/g) ?? []).length, 2);
+  assert.equal((PAGE.match(/await abortableSleep\(Math\.min\(delayMs, deadline\.remaining\(\)\), signal\);/g) ?? []).length, 2);
   assert.doesNotMatch(PAGE, /i < 120/, "an iteration count alone does not bound the wait");
 });
 
@@ -100,4 +102,25 @@ test("done page: the login poll checks the status before reading the body, and m
   const jsonAt = login.indexOf("r.json()");
   assert.ok(stepAt > 0 && jsonAt > stepAt, "the status decides before any body is parsed");
   assert.match(login, /step\.kind === "expired"\) \{[\s\S]*?fail\(t\("auth\.plexDone\.error\.expired"\)\);\s*return;/);
+});
+
+test("done page: a real unmount aborts the running flow, a Strict Mode remount keeps it, and an aborted flow never navigates", () => {
+  assert.match(PAGE, /if \(flow\) flow\.abortTimer = setTimeout\(\(\) => flow\.ctrl\.abort\(\), 0\);/);
+  assert.match(PAGE, /if \(startedRef\.current\) \{\s*if \(flowRef\.current\) clearTimeout\(flowRef\.current\.abortTimer\);\s*return cleanup;/);
+  assert.match(PAGE, /void completeLogin\(auth, ctrl\.signal\);/);
+  assert.match(PAGE, /void completeSettings\(ctrl\.signal\);/);
+  const login = PAGE.slice(PAGE.indexOf("async function completeLogin"), PAGE.indexOf("async function completeSettings"));
+  assert.match(login, /if \(signal\.aborted\) return;\s*window\.location\.href = plexSignInDestination\(auth, window\.location\.origin\);/);
+  const settings = PAGE.slice(PAGE.indexOf("async function completeSettings"), PAGE.indexOf("const startedRef"));
+  assert.match(settings, /if \(signal\.aborted\) return;\s*if \(!connected\)/);
+});
+
+test("done page: the settings poll reads its answer through settingsPollStep, never an unchecked body", () => {
+  const settings = PAGE.slice(PAGE.indexOf("async function completeSettings"), PAGE.indexOf("const startedRef"));
+  assert.match(settings, /settingsPollStep\(r\.status, r\.headers\.get\("retry-after"\), r\.headers\.get\("content-type"\), serverErrors\)/);
+  assert.match(settings, /isConnectedBody\(await r\.json\(\)\.catch\(\(\) => null\)\)/);
+  assert.doesNotMatch(PAGE, /const d: \{ status\?: string \} = await r\.json\(\)/);
+  // The plex.tv headers come from the shared builder.
+  assert.match(PAGE, /headers: plexClientHeaders\(auth\.clientId\),/);
+  assert.doesNotMatch(PAGE, /"X-Plex-Product"/);
 });

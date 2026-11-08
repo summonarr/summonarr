@@ -5,8 +5,9 @@ import { queueActionFailure, serviceGate } from "@/lib/arr-queue-http";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { QUEUE_GRAB_MAX_IDS } from "@/lib/api-body-limits";
 
-const MAX_IDS = 500;
+const MAX_IDS = QUEUE_GRAB_MAX_IDS;
 
 // Admin → Download Queue, "Grab now" on a release Radarr/Sonarr are HOLDING
 // (a delay profile, an unavailable client, a fallback) — the arr's own Grab on

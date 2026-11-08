@@ -45,6 +45,36 @@ export function watchTitleKey(tmdbId: number, mediaType: MediaType): string {
   return `${tmdbId}:${mediaType}`;
 }
 
+// watchTitleKey back into its title, or null for a key it never made.
+export function parseWatchTitleKey(key: string): WatchTitle | null {
+  const m = /^([1-9][0-9]*):(MOVIE|TV)$/.exec(key);
+  if (!m) return null;
+  const tmdbId = Number(m[1]);
+  return Number.isSafeInteger(tmdbId) ? { tmdbId, mediaType: m[2] === "MOVIE" ? "MOVIE" : "TV" } : null;
+}
+
+// How long a play whose item the library cache doesn't know yet HOLDS its
+// identity's read point. Newly added media is often watched before the hourly
+// library sync indexes it; without the hold the read point moved past that
+// play and it was never imported. Past this the play is taken as never going
+// to resolve (deleted, unmatched) so a dead item can't stall the import.
+export const UNRESOLVED_HOLD_MS = 48 * 60 * 60 * 1000;
+
+// What a fold may count: plays strictly after `readTo` (the stored read point)
+// and, when `readUntil` is set, at or before it. `holdUnresolvedSince` asks for
+// the oldest dated unresolved play at or after that time (see heldReadPoint).
+export interface FoldBounds {
+  readUntil?: Date | null;
+  holdUnresolvedSince?: Date | null;
+}
+
+export interface FoldResult {
+  deltas: Map<string, PlayDelta>;
+  unresolved: number;
+  // The oldest dated unresolved play at or after holdUnresolvedSince, if any.
+  heldAt: Date | null;
+}
+
 function later(a: Date | null, b: Date | null): Date | null {
   if (!a) return b;
   if (!b) return a;
@@ -65,9 +95,47 @@ function addDelta(out: Map<string, PlayDelta>, title: WatchTitle, plays: number,
 // Whether a dated play falls in the unread window. With a read point, an
 // undated play can't be placed and is skipped (the full first read took it);
 // a play AT the read point was already counted (strictly after, never at).
-function inWindow(at: Date | null, readTo: Date | null): boolean {
+function inWindow(at: Date | null, readTo: Date | null, readUntil: Date | null = null): boolean {
+  if (readUntil !== null && (at === null || at.getTime() > readUntil.getTime())) return false;
   if (readTo === null) return true;
   return at !== null && at.getTime() > readTo.getTime();
+}
+
+function noteUnresolved(acc: { unresolved: number; heldAt: Date | null }, at: Date | null, holdSince: Date | null): void {
+  acc.unresolved++;
+  if (holdSince === null || at === null || at.getTime() < holdSince.getTime()) return;
+  if (acc.heldAt === null || at.getTime() < acc.heldAt.getTime()) acc.heldAt = at;
+}
+
+/**
+ * The read point a fold that found `heldAt` may move to: just before the held
+ * play, so it is read again — and resolved — next run, never past `next` and
+ * never back past `readTo`. Re-fold with this as `readUntil` so the plays
+ * after it are counted next run, not now (once, never twice).
+ */
+export function heldReadPoint(next: Date | null, heldAt: Date, readTo: Date | null): Date {
+  let point = new Date(heldAt.getTime() - 1);
+  if (next !== null && next.getTime() < point.getTime()) point = next;
+  if (readTo !== null && point.getTime() < readTo.getTime()) point = readTo;
+  return point;
+}
+
+// Plex: the server-wide history split by account ONCE, with the owner's local
+// id "1" rewritten to their plex.tv id (the watch-sync rule), so each identity
+// folds only its own records instead of the whole walk.
+export function groupPlexHistoryByAccount<R extends PlexHistoryRecord>(
+  records: Iterable<R>,
+  ownerAccountId: string | null,
+): Map<string, R[]> {
+  const out = new Map<string, R[]>();
+  for (const r of records) {
+    if (r.accountId === null) continue;
+    const account = r.accountId === "1" && ownerAccountId ? ownerAccountId : r.accountId;
+    const bucket = out.get(account);
+    if (bucket) bucket.push(r);
+    else out.set(account, [r]);
+  }
+  return out;
 }
 
 export interface PlexHistoryRecord {
@@ -90,24 +158,25 @@ export function foldPlexHistory(
   ownerAccountId: string | null,
   readTo: Date | null,
   titleFor: (ratingKey: string) => WatchTitle | null,
-): { deltas: Map<string, PlayDelta>; unresolved: number } {
+  bounds: FoldBounds = {},
+): FoldResult {
   const deltas = new Map<string, PlayDelta>();
-  let unresolved = 0;
+  const acc = { unresolved: 0, heldAt: null as Date | null };
   for (const r of records) {
     if (r.accountId === null) continue;
     const account = r.accountId === "1" && ownerAccountId ? ownerAccountId : r.accountId;
     if (account !== plexAccountId) continue;
-    if (!inWindow(r.viewedAt, readTo)) continue;
+    if (!inWindow(r.viewedAt, readTo, bounds.readUntil ?? null)) continue;
     const key = r.kind === "movie" ? r.itemKey : r.showKey;
     const title = key ? titleFor(key) : null;
     const want: MediaType = r.kind === "movie" ? "MOVIE" : "TV";
     if (!title || title.mediaType !== want) {
-      unresolved++;
+      noteUnresolved(acc, r.viewedAt, bounds.holdUnresolvedSince ?? null);
       continue;
     }
     addDelta(deltas, title, 1, r.viewedAt);
   }
-  return { deltas, unresolved };
+  return { deltas, ...acc };
 }
 
 export interface JellyfinPlayedRecord {
@@ -126,22 +195,23 @@ export function foldJellyfinPlayed(
   items: Iterable<JellyfinPlayedRecord>,
   readTo: Date | null,
   titleFor: (itemId: string) => WatchTitle | null,
-): { deltas: Map<string, PlayDelta>; unresolved: number } {
+  bounds: FoldBounds = {},
+): FoldResult {
   const deltas = new Map<string, PlayDelta>();
-  let unresolved = 0;
+  const acc = { unresolved: 0, heldAt: null as Date | null };
   for (const it of items) {
-    if (!inWindow(it.lastPlayedAt, readTo)) continue;
+    if (!inWindow(it.lastPlayedAt, readTo, bounds.readUntil ?? null)) continue;
     const key = it.kind === "movie" ? it.itemKey : it.showKey;
     const title = key ? titleFor(key) : null;
     const want: MediaType = it.kind === "movie" ? "MOVIE" : "TV";
     if (!title || title.mediaType !== want) {
-      unresolved++;
+      noteUnresolved(acc, it.lastPlayedAt, bounds.holdUnresolvedSince ?? null);
       continue;
     }
     const plays = readTo === null ? Math.max(1, Math.floor(it.playCount)) : 1;
     addDelta(deltas, title, plays, it.lastPlayedAt);
   }
-  return { deltas, unresolved };
+  return { deltas, ...acc };
 }
 
 // The newest dated play in a read — the identity's next read point. Never moves
@@ -196,8 +266,9 @@ export function mergeServerWatchedRows(
     }
     for (const k of favorites) {
       if (byKey.has(k)) continue;
-      const [id, type] = k.split(":");
-      const t: WatchTitle = { tmdbId: Number(id), mediaType: type as MediaType };
+      // A key watchTitleKey never made can't name a title: dropped, not guessed.
+      const t = parseWatchTitleKey(k);
+      if (!t) continue;
       byKey.set(k, { ...t, title: nameOf(t), plays: 0, lastWatchedAt: null, favorite: true });
     }
   }

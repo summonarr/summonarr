@@ -1,4 +1,5 @@
-// Unit tests for the Jellyfin HTTP client (src/lib/jellyfin.ts) — the sole
+// Unit tests for the Jellyfin HTTP client (src/lib/jellyfin.ts and its
+// jellyfin-*.ts siblings) — the sole
 // wire-facing layer between Summonarr and a Jellyfin server. Everything here
 // funnels through safeFetchAdminConfigured (the URL is admin-configured
 // Setting data), so the tests exercise the REAL safe-fetch/SSRF stack with a
@@ -83,7 +84,7 @@
 //     existing policy with only EnableContentDownloading overridden (posting a
 //     partial policy would wipe every other permission bit).
 //
-// No DB (jellyfin.ts imports only safe-fetch and log-dedup) and no network:
+// No DB (the jellyfin-*.ts client loads no prisma module) and no network:
 // globalThis.fetch is scripted per test. Base URLs are unique-per-test RFC1918
 // IP LITERALS — safeFetchAdminConfigured runs allowPrivate=true and ssrf.ts
 // short-circuits isIP() hosts past DNS entirely, so no dns.lookup stub is
@@ -253,6 +254,14 @@ test("QuickConnect poll GETs /QuickConnect/Connect with the encodeURIComponent'd
 
   respond = () => okJson({}, 410);
   await assert.rejects(() => pollJellyfinQuickConnect(B, "s"), /Jellyfin QuickConnect poll: 410/);
+});
+
+test("QuickConnect poll: an aborted caller signal rejects instead of asking Jellyfin's answer", async () => {
+  const B = nextBase();
+  respond = () => okJson({ Authenticated: false });
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(() => pollJellyfinQuickConnect(B, "s", { signal: controller.signal }));
 });
 
 test("QuickConnect answers of another shape: initiate without a Secret or Code rejects (no status); poll reads only a real true as signed in", async () => {
@@ -721,11 +730,13 @@ test("the availability probe finds a title that sits in a collection", async () 
 });
 
 test("every Jellyfin /Items query that can list a Movie or Series sends CollapseBoxSetItems=false", async () => {
-  // Structural: the behavioural tests above cover the sync and the probe; this
-  // holds every other /Items? literal in src to the same rule — the never-watched
-  // played-items read and fix-match's confirmation search included. A query
-  // limited to Episode can't be grouped (Folder.CollapseBoxSetItems only fires
-  // for Movie/Series or an untyped query) and is exempt.
+  // Structural: the behavioural tests above cover the sync and the probe. The
+  // client builds its /Items queries through jellyfinItemsUrl, which adds the
+  // flag itself (pinned in the next test), so the builder's own literal is the
+  // one exemption. Every other /Items? literal in src (fix-match's confirmation
+  // search) must name the flag on its line. A query limited to Episode can't be
+  // grouped (Folder.CollapseBoxSetItems only fires for Movie/Series or an
+  // untyped query) and is exempt.
   const { readdirSync, readFileSync, statSync } = await import("node:fs");
   const { join } = await import("node:path");
   const root = new URL("../src/", import.meta.url).pathname;
@@ -734,22 +745,59 @@ test("every Jellyfin /Items query that can list a Movie or Series sends Collapse
     const p = join(dir, name);
     return statSync(p).isDirectory() ? walk(p) : /\.(ts|tsx)$/.test(name) ? [p] : [];
   });
+  const BUILDER = "src/lib/jellyfin-http.ts";
   const offenders: string[] = [];
+  let builderSeen = false;
   let seen = 0;
   for (const file of walk(root)) {
+    const rel = file.replace(root, "src/");
     for (const line of readFileSync(file, "utf8").split("\n")) {
       if (!line.includes("/Items?") || line.trim().startsWith("//")) continue;
       seen++;
+      if (rel === BUILDER) {
+        builderSeen = true;
+        continue;
+      }
       const types = /IncludeItemTypes=([A-Za-z,$]+)/.exec(line)?.[1] ?? "";
       const episodesOnly = types !== "" && types.split(",").every((t) => t === "Episode");
       if (episodesOnly) continue;
       if (!line.includes("JELLYFIN_NO_COLLECTION_GROUPING") && !line.includes("CollapseBoxSetItems=false")) {
-        offenders.push(`${file.replace(root, "src/")}: ${line.trim().slice(0, 140)}`);
+        offenders.push(`${rel}: ${line.trim().slice(0, 140)}`);
       }
     }
   }
-  assert.ok(seen >= 8, `the scan found the /Items? queries (saw ${seen})`);
+  assert.ok(seen >= 2, `the scan found the /Items? queries (saw ${seen})`);
+  assert.ok(builderSeen, "the scan reached the builder");
   assert.deepEqual(offenders, []);
+});
+
+test("jellyfinItemsUrl adds CollapseBoxSetItems=false to every query that can list a Movie or Series, after the params that choose the items", async () => {
+  const { jellyfinItemsUrl } = await import("../src/lib/jellyfin-http.ts");
+  const B = "http://10.98.0.1:8096/";
+  assert.equal(
+    jellyfinItemsUrl(B, [["IncludeItemTypes", "Movie"], ["Recursive", "true"]]),
+    "http://10.98.0.1:8096/Items?IncludeItemTypes=Movie&CollapseBoxSetItems=false&Recursive=true",
+  );
+  assert.equal(
+    jellyfinItemsUrl(B, [["ParentId", "p"], ["IncludeItemTypes", "Series"], ["ExcludeItemTypes", "BoxSet"], ["Recursive", "true"]]),
+    "http://10.98.0.1:8096/Items?ParentId=p&IncludeItemTypes=Series&ExcludeItemTypes=BoxSet&CollapseBoxSetItems=false&Recursive=true",
+  );
+  // Mixed types, and an untyped query (by Ids), can list a Movie too.
+  assert.ok(jellyfinItemsUrl(B, [["IncludeItemTypes", "Movie,Episode"]]).includes("CollapseBoxSetItems=false"));
+  assert.equal(
+    jellyfinItemsUrl(B, [["userId", "u 1"], ["Ids", "a,b"], ["Fields", "SeriesId,ParentIndexNumber"]]),
+    "http://10.98.0.1:8096/Items?userId=u%201&Ids=a,b&CollapseBoxSetItems=false&Fields=SeriesId,ParentIndexNumber",
+    "values are encoded, commas kept",
+  );
+  // An Episode-only query is the one exemption; an omitted (falsy) param is left out.
+  assert.equal(
+    jellyfinItemsUrl(B, [null, ["IncludeItemTypes", "Episode"], false, ["ImageTypeLimit", 0]]),
+    "http://10.98.0.1:8096/Items?IncludeItemTypes=Episode&ImageTypeLimit=0",
+  );
+  // A value can never add a parameter.
+  const odd = new URL(jellyfinItemsUrl(B, [["ParentId", "x&IncludeItemTypes=Person#"], ["IncludeItemTypes", "Movie"]]));
+  assert.deepEqual(odd.searchParams.getAll("IncludeItemTypes"), ["Movie"]);
+  assert.equal(odd.searchParams.get("ParentId"), "x&IncludeItemTypes=Person#");
 });
 
 // ── fetchPage retry / fast-fail (via getJellyfinTmdbIds) ────────────────────
@@ -1758,4 +1806,181 @@ test("getJellyfinEpisodeIds: keeps each episode's Id, season (specials included)
     { seasonNumber: 0, episodeNumber: 4, episodeNumberEnd: null, itemId: "s0" },
     { seasonNumber: 2, episodeNumber: 5, episodeNumberEnd: null, itemId: "e5" },
   ]);
+});
+
+// ── payload checks, resolution, paging limits ───────────────────────────────
+
+test("sessions: the resolution label reads the stream's width too — a scope film is labelled by its class, not its short height", async () => {
+  const { jellyfinResolutionLabel } = await import("../src/lib/jellyfin-sessions.ts");
+  assert.equal(jellyfinResolutionLabel(1920, 800), "1080p", "1080p scope (2.40:1)");
+  assert.equal(jellyfinResolutionLabel(3840, 1600), "4K", "4K scope");
+  assert.equal(jellyfinResolutionLabel(1280, 536), "720p", "720p scope");
+  assert.equal(jellyfinResolutionLabel(1440, 1080), "1080p", "4:3 1080p by height");
+  assert.equal(jellyfinResolutionLabel(720, 480), "480p");
+  assert.equal(jellyfinResolutionLabel(undefined, 468), "468p");
+  assert.equal(jellyfinResolutionLabel(undefined, undefined), undefined);
+
+  const B = nextBase();
+  respond = () => okJson([{
+    Id: "s1", UserId: "u", UserName: "u",
+    NowPlayingItem: { Id: "m", Name: "Scope", Type: "Movie", MediaStreams: [{ Type: "Video", Codec: "hevc", Width: 3840, Height: 1600 }] },
+  }]);
+  const [s] = await getJellyfinSessions(B, "k");
+  assert.equal(s.resolution, "4K");
+});
+
+test("sessions: an answer that is not an array is a failed read, never 'nothing is playing'; an odd field degrades without hiding the session", async () => {
+  const B = nextBase();
+  respond = () => okJson({ Items: [] });
+  await assert.rejects(() => getJellyfinSessions(B, "k"), /Jellyfin sessions: unexpected response/);
+
+  respond = () => okJson([
+    null,
+    { Id: "s1", UserId: "u", NowPlayingItem: { Id: "i1", Name: 7, RunTimeTicks: "long", MediaStreams: "none", ProviderIds: { Tmdb: "550", Imdb: null } }, PlayState: { PositionTicks: 5 } },
+  ]);
+  const sessions = await getJellyfinSessions(B, "k");
+  assert.equal(sessions.length, 1, "the null entry is skipped; the odd session is kept");
+  assert.equal(sessions[0].itemId, "i1");
+  assert.equal(sessions[0].title, "", "a non-string Name reads as absent");
+  assert.equal(sessions[0].durationTicks, 0);
+  assert.equal(sessions[0].positionTicks, 5);
+  assert.deepEqual(sessions[0].providerIds, { Tmdb: "550" }, "a null provider never costs the session its Tmdb id");
+});
+
+test("library walk: a 2xx page that is not a QueryResult fails at once (not retried), never reads as an empty library", async () => {
+  const B = nextBase();
+  respond = () => okJson([{ Id: "m1" }]);
+  await assert.rejects(() => getJellyfinTmdbIds(B, "k", "MOVIE"), /unexpected body at StartIndex=0/);
+  assert.equal(sent.length, 1, "the same answer would come back on every try");
+
+  sent.length = 0;
+  respond = () => okJson({ Items: "corrupt", TotalRecordCount: 1 });
+  await assert.rejects(() => getJellyfinTmdbIds(B, "k", "MOVIE"), /unexpected body/);
+  assert.equal(sent.length, 1);
+});
+
+test("library walk: an odd field costs the field, not the title; Tmdb ids are digits in INT4 range; an unparseable DateCreated is no date", async () => {
+  const B = nextBase();
+  respond = () => okJson({
+    Items: [
+      { Id: "a", ProviderIds: { Tmdb: "550", Imdb: null }, Name: 7, ProductionYear: "1999", DateCreated: "not a date" },
+      { Id: "b", ProviderIds: { Tmdb: "551abc" } },
+      { Id: "c", ProviderIds: { Tmdb: "2147483648" } },
+      { Id: "d", ProviderIds: { Tmdb: "0" } },
+      { Id: "e", ProviderIds: { Tmdb: " 552 " }, DateCreated: "2024-01-01T00:00:00.000Z" },
+    ],
+    TotalRecordCount: 5,
+  });
+  const items = await getJellyfinTmdbIds(B, "k", "MOVIE");
+  assert.deepEqual([...items.keys()].sort((x, y) => x - y), [550, 552]);
+  assert.equal(items.get(550)!.title, null, "a non-string Name reads as absent");
+  assert.equal(items.get(550)!.year, "1999", "a numeric-string year still reads");
+  assert.equal(items.get(550)!.addedAt, null, "an Invalid Date is never stored as addedAt");
+});
+
+test("duplicates: a copy with an unparseable DateCreated never displaces a dated one", async () => {
+  const B = nextBase();
+  respond = () => okJson({
+    Items: [
+      // The garbled copy arrives first: an Invalid Date compared as NaN and kept it.
+      { Id: "z", ProviderIds: { Tmdb: "77" }, Name: "Garbled", DateCreated: "2024-13-45" },
+      { Id: "a", ProviderIds: { Tmdb: "77" }, Name: "Dated", DateCreated: "2024-01-01T00:00:00.000Z" },
+    ],
+    TotalRecordCount: 2,
+  });
+  const items = await getJellyfinTmdbIds(B, "k", "MOVIE");
+  assert.equal(items.get(77)!.title, "Dated");
+  assert.deepEqual(items.get(77)!.duplicateItemIds, ["z"]);
+});
+
+test("paging: a shortfall the last read settled on is read once on the next sync, not twice; a changed one is read again", async () => {
+  const B = nextBase();
+  let walks = 0;
+  let total = 10_000;
+  respond = (url) => {
+    const params = new URL(url).searchParams;
+    const start = Number(params.get("StartIndex"));
+    if (start === 0) walks++;
+    // Counts one more item than it ever serves.
+    const Items = Array.from({ length: Math.max(0, Math.min(5000, total - 1 - start)) }, (_, i) => ({ Id: `s${start + i}`, ProviderIds: { Tmdb: String(start + i + 1) } }));
+    return okJson({ Items, TotalRecordCount: total });
+  };
+  await getJellyfinTmdbIds(B, "k", "MOVIE");
+  assert.equal(walks, 2, "the first sync checks the shortfall with a second read");
+  walks = 0;
+  const again = await getJellyfinTmdbIds(B, "k", "MOVIE");
+  assert.equal(walks, 1, "the same shortfall is not read twice again");
+  assert.equal(again.size, 9_999);
+  walks = 0;
+  total = 10_001;
+  await getJellyfinTmdbIds(B, "k", "MOVIE");
+  assert.equal(walks, 2, "a different shortfall is checked again");
+});
+
+test("getJellyfinUserPlayedItems: a constant shortfall the last read settled on is read once on the next refresh", async () => {
+  const B = nextBase();
+  let walk = 0;
+  respond = (url) => {
+    if (new URL(url).searchParams.get("StartIndex") === "0") walk++;
+    return okJson({ Items: [{ Type: "Movie", Id: "m1" }], TotalRecordCount: 3 });
+  };
+  await getJellyfinUserPlayedItems(B, "k", "u", "IsPlayed");
+  assert.equal(walk, 2);
+  walk = 0;
+  const res = await getJellyfinUserPlayedItems(B, "k", "u", "IsPlayed");
+  assert.equal(walk, 1);
+  assert.equal(res.records, 1);
+});
+
+test("library scoping: one library's failure stops its siblings — a sibling waiting out a retry backoff sends nothing more", async (t: TestContext) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const B = nextBase();
+  respond = (url) => {
+    const parent = new URL(url).searchParams.get("ParentId");
+    if (parent === "libA") return okJson({ error: "revoked" }, 401);
+    return okJson({ error: "busy" }, 503);
+  };
+  await assert.rejects(() => getJellyfinTmdbIds(B, "k", "MOVIE", new Set(["libA", "libB"])), /401/);
+  await flush();
+  for (const ms of [2_000, 4_000, 6_000]) { t.mock.timers.tick(ms); await flush(); }
+  const libB = sent.filter((s) => new URL(s.url).searchParams.get("ParentId") === "libB");
+  assert.equal(libB.length, 1, "the sibling's retry never went out after the failure");
+  assert.deepEqual(warns.filter((w) => w.includes("[jellyfin] retry")), []);
+});
+
+test("library scoping: every library's pages share one budget — never more than three requests in flight", async () => {
+  const B = nextBase();
+  let inFlight = 0;
+  let peak = 0;
+  respond = async (url) => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise<void>((r) => setImmediate(r));
+    await new Promise<void>((r) => setImmediate(r));
+    inFlight--;
+    const parent = new URL(url).searchParams.get("ParentId")!;
+    const params = new URL(url).searchParams;
+    const start = Number(params.get("StartIndex"));
+    const Items = Array.from({ length: Math.min(5000, 15_000 - start) }, (_, i) => ({ Id: `${parent}-${start + i}`, ProviderIds: { Tmdb: String(start + i + 1) } }));
+    return okJson({ Items, TotalRecordCount: 15_000 });
+  };
+  await getJellyfinTmdbIds(B, "k", "MOVIE", new Set(["libA", "libB", "libC"]));
+  assert.equal(sent.length, 9, "three pages from each of three libraries");
+  assert.ok(peak <= 3, `peak ${peak} requests in flight`);
+});
+
+test("users: an answer that is neither a list nor a QueryResult is a failed fetch, never 'no users'", async () => {
+  const B = nextBase();
+  respond = () => okJson({});
+  await assert.rejects(() => getJellyfinAllUsers(B, "k"), /unexpected response shape/);
+  respond = () => okJson({ Items: "corrupt" });
+  await assert.rejects(() => getJellyfinAllUsers(B, "k"), /unexpected response shape/);
+  assert.equal(await getJellyfinUserCount(B, "k"), 0, "the count still reads an unreadable list as 0");
+});
+
+test("getJellyfinUserStates: a reply without Items is a failed read, never 'every item is gone'", async () => {
+  const { getJellyfinUserStates } = await import("../src/lib/jellyfin.ts");
+  const B = nextBase();
+  respond = () => okJson({});
+  await assert.rejects(() => getJellyfinUserStates(B, "k", "u", ["a1"]), /Jellyfin item read failed: unexpected response/);
 });

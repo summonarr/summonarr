@@ -111,6 +111,24 @@ test("the shared refresh waits for an open dialog, and a cancel drops it", () =>
   }
 });
 
+test("a cancel also drops a refresh a dialog's hold deferred, so its release refreshes nothing", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let runs = 0;
+    const release = holdLiveRefresh();
+    requestPageRefresh(() => { runs++; });
+    mock.timers.tick(PAGE_REFRESH_DEBOUNCE_MS);
+    assert.equal(runs, 0, "deferred behind the open dialog");
+    cancelPageRefresh(); // the page goes away (LiveRefresh unmounts)…
+    release(); // …and the dialog's cleanup releases its hold
+    assert.equal(runs, 0, "the old page's refresh never reaches the next page");
+    runOrDefer(() => { runs++; });
+    assert.equal(runs, 1, "nothing left held");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
 test("structural: LiveRefresh refreshes through the shared timer, never its own", () => {
   const src = read("src/components/live-refresh.tsx");
   assert.match(src, /requestPageRefresh\(\(\) => router\.refresh\(\)\);/);
@@ -154,7 +172,10 @@ test("structural: a refused grab is shown INSIDE the Fix file window, with Searc
   const src = read("src/components/admin/issue-actions.tsx");
   const dialog = src.slice(src.indexOf("function FixFileDialog("));
   assert.match(dialog, /\{releaseError && \(\s*<div role="alert"/, "the error renders inside the window");
-  assert.match(dialog, /onClick=\{\(\) => void loadReleases\(instance\)\}\s*disabled=\{working\}/, "Search again, disabled during a write");
+  // One Search again handler, used by both of its buttons (ReleasesView's empty
+  // or failed answer, and ReleasePicker's error strip) — each disabled during a write.
+  assert.match(dialog, /onSearchAgain=\{\(\) => void loadReleases\(instance\)\}/, "Search again re-runs this instance's search");
+  assert.equal(dialog.match(/onClick=\{onSearchAgain\}\s*disabled=\{working\}/g)?.length, 2, "Search again, disabled during a write");
   assert.match(dialog, /t\("adminQueue\.issueActions\.searchAgain"\)/);
 });
 

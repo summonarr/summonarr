@@ -3,7 +3,7 @@
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { prisma, resetDb, closeDb } from "./_harness.mts";
-import { patchPlexShowFilePaths } from "@/lib/cron-auth.ts";
+import { patchPlexShowFilePaths } from "@/lib/library-staging.ts";
 
 before(resetDb);
 beforeEach(resetDb);

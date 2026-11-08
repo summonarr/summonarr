@@ -261,6 +261,36 @@ test("request sources: each ledger source has its own bucket — a Trakt auto-re
   assert.equal(data.requestSources(auto, 5).other, 0, "never negative");
 });
 
+test("request sources: a request several ledger rows point at is credited to one source, never one per row", async () => {
+  rawResponder = () => [];
+  await data.getAutoRequestSources(null);
+  const sql = norm(rawCalls[0].sql);
+  assert.match(sql, /SELECT DISTINCT ON \(r\.id\) l\.source/);
+  assert.match(sql, /ORDER BY r\.id, l\."createdAt" ASC, l\.id ASC/);
+  assert.match(sql, /GROUP BY t\.source/);
+  assert.doesNotMatch(sql, /COUNT\(DISTINCT r\.id\)/);
+});
+
+test("fulfillment: every non-legacy approval is auto OR admin — one recorded before its request counts as auto", async () => {
+  rawResponder = () => [];
+  await data.getFulfillmentStats(null);
+  const sql = norm(rawCalls[0].sql);
+  assert.match(sql, /\(NOT legacy AND approve_s < (\?|\$\d+)::float8\) AS by_auto/);
+  assert.match(sql, /\(NOT legacy AND approve_s >= (\?|\$\d+)::float8\) AS by_admin/);
+  assert.doesNotMatch(sql, /ABS\(approve_s\)/);
+});
+
+test("deletion votes: the threshold is read through the shared parse the vote routes use", async () => {
+  settingRows.set("deletionVoteThreshold", "7abc");
+  try {
+    assert.equal((await data.getTopDeletionVotes()).threshold, 7);
+    settingRows.set("deletionVoteThreshold", "-3");
+    assert.equal((await data.getTopDeletionVotes()).threshold, 0);
+  } finally {
+    settingRows.delete("deletionVoteThreshold");
+  }
+});
+
 // ── users ───────────────────────────────────────────────────────────────────
 
 test("active users exclude disabled (and therefore purged) accounts", async () => {

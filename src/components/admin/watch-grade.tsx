@@ -1,9 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { AlertCircle, Film, Loader2, Tv2, X } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson } from "@/lib/client/fetch-json";
+import { WatchGradeDetailSchema } from "./watch-grade-schema";
 import { useModalA11y } from "@/hooks/use-modal-a11y";
 import {
   hasWatchGradeSignal,
@@ -129,15 +131,31 @@ export function WatchGradeChip({
   );
 }
 
-// The breakdown's filters, in chip order.
+type GradeSettings = NonNullable<WatchGradeDetail["settings"]>;
+
+// The breakdown's filters, in chip order, and their labels.
 const FILTERS: readonly WatchGradeFilter[] = ["all", "unwatched", "partial", "others", "watched", "grace", "untracked"];
+const FILTER_LABEL_KEYS: Record<WatchGradeFilter, string> = {
+  all: "requests.filter.all",
+  unwatched: "adminQueue.grade.state.unwatched",
+  partial: "adminQueue.grade.filter.partial",
+  others: "adminQueue.grade.state.others",
+  watched: "adminQueue.grade.state.watched",
+  grace: "adminQueue.grade.filter.grace",
+  untracked: "adminQueue.grade.state.untracked",
+};
 
-// A !res.ok answer: its text (the server's message, or the status) is shown as
-// is. Anything else that throws — a network failure, a body that isn't JSON —
-// carries browser text in no particular language, so it gets loadFailed.
-class GradeLoadError extends Error {}
+/** How many loaded rows each filter shows. */
+function countByFilter(verdicts: readonly RequestWatchVerdict[]): Record<WatchGradeFilter, number> {
+  const counts = Object.fromEntries(FILTERS.map((id) => [id, 0])) as Record<WatchGradeFilter, number>;
+  for (const v of verdicts) {
+    for (const id of FILTERS) if (verdictMatchesFilter(v, id)) counts[id]++;
+  }
+  return counts;
+}
 
-// Only ever set on a scored request the requester didn't fully watch.
+// Only ever set on a scored request the requester didn't fully watch. Each
+// fragment is its own " · …" clause, translated whole with its separator.
 function othersText(v: RequestWatchVerdict, t: Translator): string {
   if (!v.otherViewers) return "";
   return t("adminQueue.grade.progress.others", { count: v.otherViewers });
@@ -196,6 +214,185 @@ function StateChip({ v }: { v: RequestWatchVerdict }) {
   return <span className="ds-chip ds-chip-declined">{t("adminQueue.grade.state.unwatched")}</span>;
 }
 
+function VerdictRow({ v }: { v: RequestWatchVerdict }) {
+  const t = useT();
+  const locale = useLocale();
+  // Once per row: the line and its tooltip are the same text.
+  const progress = progressText(v, t);
+  return (
+    <div className="flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2">
+      {v.mediaType === "MOVIE" ? (
+        <Film className="w-3.5 h-3.5 shrink-0 text-zinc-500" />
+      ) : (
+        <Tv2 className="w-3.5 h-3.5 shrink-0 text-zinc-500" />
+      )}
+      <div className="min-w-0 flex-1">
+        <p className="text-xs text-zinc-200 truncate">
+          {v.title}
+          {v.releaseYear ? <span className="text-zinc-500"> ({v.releaseYear})</span> : null}
+        </p>
+        <p className="text-[11px] text-zinc-500 truncate" title={progress}>
+          {t("adminQueue.grade.availableOn", { date: new Date(v.fulfilledAt).toLocaleDateString(locale) })} · {progress}
+        </p>
+      </div>
+      <StateChip v={v} />
+    </div>
+  );
+}
+
+function GradeSummary({ grade, settings }: { grade: WatchGradeSummary; settings: GradeSettings }) {
+  const t = useT();
+  return (
+    <>
+      <div className="flex items-center gap-4 mb-3">
+        <div
+          aria-hidden="true"
+          className="flex items-center justify-center shrink-0 font-bold"
+          style={{
+            width: 52,
+            height: 52,
+            borderRadius: 999,
+            fontSize: 24,
+            border: `2px solid ${grade.letter ? LETTER_COLOR[grade.letter] : "var(--ds-border)"}`,
+            color: grade.letter ? LETTER_COLOR[grade.letter] : "var(--ds-fg-subtle)",
+          }}
+        >
+          {grade.letter ?? "—"}
+        </div>
+        <div className="min-w-0">
+          <p className="text-sm text-zinc-200">
+            {grade.score !== null ? t("adminQueue.grade.watchRate", { score: grade.score }) : t("adminQueue.grade.noScored")}
+          </p>
+          <p className="text-xs text-zinc-500 mt-0.5">{describeGrade(t, grade, settings)}</p>
+        </div>
+      </div>
+
+      <p className="text-[11px] leading-relaxed text-zinc-500 mb-3">
+        {t("adminQueue.grade.rules.counting", {
+          window:
+            settings.windowDays > 0
+              ? t("adminQueue.grade.rules.window", { days: settings.windowDays })
+              : t("adminQueue.grade.rules.anyTime"),
+          grace: settings.graceDays,
+        })}{" "}
+        {t("adminQueue.grade.rules.thresholds", {
+          movie: settings.watchedThresholdPercent,
+          tv: settings.tvEpisodePercent,
+        })}{" "}
+        {settings.otherViewers > 0
+          ? `${t("adminQueue.grade.rules.others", { count: settings.otherViewers })} `
+          : ""}
+        {t("adminQueue.grade.rules.bands", {
+          min: settings.minGradedRequests,
+          bands: watchGradeBands(settings).filter((b) => b.letter !== "F")
+            .map((b) => `${b.letter} ${b.min}%+`)
+            .join(", "),
+        })}
+      </p>
+    </>
+  );
+}
+
+function VerdictBreakdown({ detail, settings }: { detail: WatchGradeDetail; settings: GradeSettings }) {
+  const t = useT();
+  const [filter, setFilter] = useState<WatchGradeFilter>("all");
+  const verdicts = detail.requests;
+  // Counted from the rows loaded, not the summary: past the row cap the summary
+  // covers requests the list doesn't hold, and a chip would promise rows that
+  // aren't there. Uncut, the two agree (each filter is one summary bucket).
+  const counts = useMemo(() => countByFilter(verdicts), [verdicts]);
+  const shown = useMemo(() => verdicts.filter((v) => verdictMatchesFilter(v, filter)), [verdicts, filter]);
+  return (
+    <>
+      {verdicts.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-3" role="group" aria-label={t("adminQueue.grade.filterAria")}>
+          {FILTERS.filter((id) => id === "all" || counts[id] > 0).map((id) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setFilter(id)}
+              aria-pressed={filter === id}
+              className={`rounded-md px-2 py-0.5 text-[11px] border transition-colors ${
+                filter === id
+                  ? "border-indigo-500/60 bg-indigo-500/15 text-indigo-300"
+                  : "border-zinc-800 text-zinc-400 hover:text-zinc-100"
+              }`}
+            >
+              {t(FILTER_LABEL_KEYS[id])} {counts[id]}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="overflow-y-auto -mx-1 px-1 flex flex-col gap-1.5">
+        {verdicts.length === 0 ? (
+          <p className="text-xs text-zinc-500 py-4 text-center">
+            {settings.windowDays > 0
+              ? t("adminQueue.grade.emptyWindow", { days: settings.windowDays })
+              : t("adminQueue.grade.empty")}
+          </p>
+        ) : shown.length === 0 ? (
+          <p className="text-xs text-zinc-500 py-4 text-center">{t("adminQueue.grade.emptyFilter")}</p>
+        ) : (
+          shown.map((v) => <VerdictRow key={v.requestId} v={v} />)
+        )}
+        {detail.truncated && (
+          <p className="text-[11px] text-zinc-500 text-center py-1">
+            {t("adminQueue.grade.truncated", { count: verdicts.length })}
+          </p>
+        )}
+      </div>
+    </>
+  );
+}
+
+// The breakdown for one account, read when the modal opens and again on Retry.
+// The translator rides a ref: the request queue / users page router.refresh()
+// on every change, which hands the provider a new `t`, and as an effect
+// dependency that re-ran this (whole-account) grade computation under an open
+// modal.
+function useWatchGradeDetail(userId: string) {
+  const t = useT();
+  const [data, setData] = useState<WatchGradeDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const tRef = useRef(t);
+  useEffect(() => {
+    tRef.current = t;
+  }, [t]);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    void fetchJson(withBasePath(`/api/admin/users/${encodeURIComponent(userId)}/watch-grade`), {
+      schema: WatchGradeDetailSchema,
+      signal: ctrl.signal,
+      // The grade is computed over the whole account's history.
+      timeoutMs: 90_000,
+    }).then((res) => {
+      if (res.ok) {
+        setData(res.data);
+        return;
+      }
+      if (res.kind === "aborted") return;
+      // A refusal carries the server's sentence or its status; anything else
+      // (the network, a body that isn't the breakdown) has no text of its own
+      // in the viewer's language, so it gets loadFailed.
+      setError(res.kind === "http"
+        ? res.error || tRef.current("adminQueue.grade.loadFailedStatus", { status: res.status })
+        : tRef.current("adminQueue.grade.loadFailed"));
+    });
+    return () => ctrl.abort();
+  }, [userId, attempt]);
+
+  const retry = useCallback(() => {
+    setError(null);
+    setData(null);
+    setAttempt((n) => n + 1);
+  }, []);
+
+  return { data, error, retry };
+}
+
 export function WatchGradeModal({
   userId,
   userLabel,
@@ -206,64 +403,52 @@ export function WatchGradeModal({
   onClose: () => void;
 }) {
   const t = useT();
-  const locale = useLocale();
-  const [data, setData] = useState<WatchGradeDetail | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<WatchGradeFilter>("all");
+  const { data, error, retry } = useWatchGradeDetail(userId);
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const titleId = `watch-grade-title-${userId}`;
 
   useModalA11y(dialogRef, onClose, closeBtnRef);
 
-  // The translator through a ref: the request queue / users page router.refresh()
-  // on every change, which hands the provider a new `t`. As an effect dependency
-  // that re-ran this (whole-account) grade computation under an open modal.
-  const tRef = useRef(t);
-  useEffect(() => {
-    tRef.current = t;
-  }, [t]);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetch(withBasePath(`/api/admin/users/${encodeURIComponent(userId)}/watch-grade`))
-      .then(async (res) => {
-        if (!res.ok) {
-          const body = (await res.json().catch(() => null)) as { error?: string } | null;
-          throw new GradeLoadError(body?.error ?? tRef.current("adminQueue.grade.loadFailedStatus", { status: res.status }));
-        }
-        return (await res.json()) as WatchGradeDetail;
-      })
-      .then((detail) => {
-        if (!cancelled) setData(detail);
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof GradeLoadError ? err.message : tRef.current("adminQueue.grade.loadFailed"));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [userId]);
-
   const grade = data?.grade ?? null;
   const settings = data?.settings ?? null;
-  const verdicts = data?.requests ?? [];
-  const shown = verdicts.filter((v) => verdictMatchesFilter(v, filter));
-  const filterLabel: Record<WatchGradeFilter, string> = {
-    all: t("requests.filter.all"),
-    unwatched: t("adminQueue.grade.state.unwatched"),
-    partial: t("adminQueue.grade.filter.partial"),
-    others: t("adminQueue.grade.state.others"),
-    watched: t("adminQueue.grade.state.watched"),
-    grace: t("adminQueue.grade.filter.grace"),
-    untracked: t("adminQueue.grade.state.untracked"),
-  };
-  // Counted from the rows loaded, not the summary: past the row cap the summary
-  // covers requests the list doesn't hold, and a chip would promise rows that
-  // aren't there. Uncut, the two agree (each filter is one summary bucket).
-  const filters: { id: WatchGradeFilter; label: string; count: number }[] = grade
-    ? FILTERS.map((id) => ({ id, label: filterLabel[id], count: verdicts.filter((v) => verdictMatchesFilter(v, id)).length }))
-    : [];
+
+  let body: ReactNode = null;
+  if (error) {
+    body = (
+      <div role="alert" className="flex items-center gap-2 text-xs text-red-400">
+        <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+        <span className="flex-1">{error}</span>
+        <button
+          type="button"
+          onClick={retry}
+          className="rounded-md px-2 py-1 text-[11px] text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+        >
+          {t("shared.common.retry")}
+        </button>
+      </div>
+    );
+  } else if (!data) {
+    body = (
+      <div className="flex justify-center py-8">
+        <Loader2 className="w-5 h-5 animate-spin text-zinc-500" />
+        <span className="sr-only">{t("shared.common.loading")}</span>
+      </div>
+    );
+  } else if (!data.enabled) {
+    body = (
+      <p className="text-xs text-zinc-400">
+        {data.reason === "feature-off" ? t("adminQueue.grade.featureOff") : t("adminQueue.grade.needsHistory")}
+      </p>
+    );
+  } else if (grade && settings) {
+    body = (
+      <>
+        <GradeSummary grade={grade} settings={settings} />
+        <VerdictBreakdown detail={data} settings={settings} />
+      </>
+    );
+  }
 
   const overlay = (
     <div
@@ -295,133 +480,7 @@ export function WatchGradeModal({
           </button>
         </div>
         <p className="text-xs text-zinc-500 mb-4 truncate">{userLabel}</p>
-
-        {error ? (
-          <p className="flex items-center gap-2 text-xs text-red-400">
-            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-            {error}
-          </p>
-        ) : !data ? (
-          <div className="flex justify-center py-8">
-            <Loader2 className="w-5 h-5 animate-spin text-zinc-500" />
-          </div>
-        ) : !data.enabled ? (
-          <p className="text-xs text-zinc-400">
-            {data.reason === "feature-off"
-              ? t("adminQueue.grade.featureOff")
-              : t("adminQueue.grade.needsHistory")}
-          </p>
-        ) : grade && settings ? (
-          <>
-            <div className="flex items-center gap-4 mb-3">
-              <div
-                aria-hidden="true"
-                className="flex items-center justify-center shrink-0 font-bold"
-                style={{
-                  width: 52,
-                  height: 52,
-                  borderRadius: 999,
-                  fontSize: 24,
-                  border: `2px solid ${grade.letter ? LETTER_COLOR[grade.letter] : "var(--ds-border)"}`,
-                  color: grade.letter ? LETTER_COLOR[grade.letter] : "var(--ds-fg-subtle)",
-                }}
-              >
-                {grade.letter ?? "—"}
-              </div>
-              <div className="min-w-0">
-                <p className="text-sm text-zinc-200">
-                  {grade.score !== null ? t("adminQueue.grade.watchRate", { score: grade.score }) : t("adminQueue.grade.noScored")}
-                </p>
-                <p className="text-xs text-zinc-500 mt-0.5">{describeGrade(t, grade, settings)}</p>
-              </div>
-            </div>
-
-            <p className="text-[11px] leading-relaxed text-zinc-500 mb-3">
-              {t("adminQueue.grade.rules.counting", {
-                window:
-                  settings.windowDays > 0
-                    ? t("adminQueue.grade.rules.window", { days: settings.windowDays })
-                    : t("adminQueue.grade.rules.anyTime"),
-                grace: settings.graceDays,
-              })}{" "}
-              {t("adminQueue.grade.rules.thresholds", {
-                movie: settings.watchedThresholdPercent,
-                tv: settings.tvEpisodePercent,
-              })}{" "}
-              {settings.otherViewers > 0
-                ? `${t("adminQueue.grade.rules.others", { count: settings.otherViewers })} `
-                : ""}
-              {t("adminQueue.grade.rules.bands", {
-                min: settings.minGradedRequests,
-                bands: watchGradeBands(settings).filter((b) => b.letter !== "F")
-                  .map((b) => `${b.letter} ${b.min}%+`)
-                  .join(", "),
-              })}
-            </p>
-
-            {verdicts.length > 0 && (
-              <div className="flex flex-wrap gap-1.5 mb-3" role="group" aria-label={t("adminQueue.grade.filterAria")}>
-                {filters
-                  .filter((f) => f.id === "all" || f.count > 0)
-                  .map((f) => (
-                    <button
-                      key={f.id}
-                      type="button"
-                      onClick={() => setFilter(f.id)}
-                      aria-pressed={filter === f.id}
-                      className={`rounded-md px-2 py-0.5 text-[11px] border transition-colors ${
-                        filter === f.id
-                          ? "border-indigo-500/60 bg-indigo-500/15 text-indigo-300"
-                          : "border-zinc-800 text-zinc-400 hover:text-zinc-100"
-                      }`}
-                    >
-                      {f.label} {f.count}
-                    </button>
-                  ))}
-              </div>
-            )}
-
-            <div className="overflow-y-auto -mx-1 px-1 flex flex-col gap-1.5">
-              {verdicts.length === 0 ? (
-                <p className="text-xs text-zinc-500 py-4 text-center">
-                  {settings.windowDays > 0
-                    ? t("adminQueue.grade.emptyWindow", { days: settings.windowDays })
-                    : t("adminQueue.grade.empty")}
-                </p>
-              ) : shown.length === 0 ? (
-                <p className="text-xs text-zinc-500 py-4 text-center">{t("adminQueue.grade.emptyFilter")}</p>
-              ) : (
-                shown.map((v) => (
-                  <div
-                    key={v.requestId}
-                    className="flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2"
-                  >
-                    {v.mediaType === "MOVIE" ? (
-                      <Film className="w-3.5 h-3.5 shrink-0 text-zinc-500" />
-                    ) : (
-                      <Tv2 className="w-3.5 h-3.5 shrink-0 text-zinc-500" />
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <p className="text-xs text-zinc-200 truncate">
-                        {v.title}
-                        {v.releaseYear ? <span className="text-zinc-500"> ({v.releaseYear})</span> : null}
-                      </p>
-                      <p className="text-[11px] text-zinc-500 truncate" title={progressText(v, t)}>
-                        {t("adminQueue.grade.availableOn", { date: new Date(v.fulfilledAt).toLocaleDateString(locale) })} · {progressText(v, t)}
-                      </p>
-                    </div>
-                    <StateChip v={v} />
-                  </div>
-                ))
-              )}
-              {data.truncated && (
-                <p className="text-[11px] text-zinc-500 text-center py-1">
-                  {t("adminQueue.grade.truncated", { count: verdicts.length })}
-                </p>
-              )}
-            </div>
-          </>
-        ) : null}
+        {body}
       </div>
     </div>
   );

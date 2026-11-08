@@ -3,47 +3,68 @@
 import { useState, useEffect } from "react";
 import { Zap } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson } from "@/lib/client/fetch-json";
+import { check, v } from "@/lib/validate";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { useT } from "@/components/i18n/i18n-provider";
+
+// What the warm route answers: on success how many entries it warmed, and on
+// success or a 429 how long until the next warm may start (`retryAfter`,
+// seconds) — the button counts down the server's own cooldown.
+const WarmAnswer = v.object({
+  warmed: v.optional(v.number()),
+  retryAfter: v.optional(v.number()),
+});
+
+// The warm runs the stats aggregates, the calendar and the rewatch queries
+// before it answers: a slow success is still a success (guardrail 37a's
+// failure mode is reading it as a failure).
+const WARM_TIMEOUT_MS = 10 * 60_000;
+
+/** Whole seconds to wait, or 0 when the answer named none worth showing. */
+function cooldownSeconds(retryAfter: number | undefined): number {
+  return retryAfter !== undefined && retryAfter > 0 ? Math.ceil(retryAfter) : 0;
+}
 
 export function ActivityWarmButton() {
   const t = useT();
-  const [loading, setLoading] = useState(false);
+  const warm = useAsyncAction();
+  const loading = warm.busy("warm");
   const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
   const [cooldown, setCooldown] = useState(0);
 
   const handleWarm = async () => {
     if (loading || cooldown > 0) return;
-    setLoading(true);
     setMessage(null);
-
-    try {
-      const res = await fetch(withBasePath("/api/admin/activity-warm"), { method: "POST" });
-      // Tolerate a non-JSON body (e.g. a proxy's HTML error page) so the
-      // status-based message below still shows instead of a parse error.
-      const data = (await res.json().catch(() => ({}))) as {
-        warmed?: number;
-        error?: string;
-        retryAfter?: number;
-      };
-
-      if (res.ok) {
-        setMessage({ text: typeof data.warmed === "number" ? t("adminActivity.warm.warmedEntries", { count: data.warmed }) : t("adminActivity.warm.warmed"), type: "success" });
-        setCooldown(120);
-      } else {
-        setMessage({
-          text: data.error || t("adminActivity.warm.failed"),
-          type: "error",
-        });
-        if (data.retryAfter) setCooldown(data.retryAfter);
-      }
-    } catch {
+    const res = await warm.run(
+      "warm",
+      (signal) => fetchJson(withBasePath("/api/admin/activity-warm"), {
+        init: { method: "POST" },
+        schema: WarmAnswer,
+        signal,
+        timeoutMs: WARM_TIMEOUT_MS,
+        fallbackError: t("adminActivity.warm.failed"),
+      }),
+      { ifBusy: "skip" },
+    );
+    if (!res) return;
+    if (res.ok) {
       setMessage({
-        text: t("adminActivity.warm.unreachable"),
-        type: "error",
+        text: typeof res.data.warmed === "number"
+          ? t("adminActivity.warm.warmedEntries", { count: res.data.warmed })
+          : t("adminActivity.warm.warmed"),
+        type: "success",
       });
-    } finally {
-      setLoading(false);
+      setCooldown(cooldownSeconds(res.data.retryAfter));
+      return;
     }
+    if (res.kind === "aborted") return;
+    // No answer at all (the server, or the path to it, is down) reads as such;
+    // a refusal says the route's own reason (a 429 names its wait).
+    const reached = res.kind === "http" || res.kind === "invalid";
+    setMessage({ text: reached ? res.error : t("adminActivity.warm.unreachable"), type: "error" });
+    const refused = check(WarmAnswer, res.body);
+    if (refused.ok) setCooldown(cooldownSeconds(refused.value.retryAfter));
   };
 
   useEffect(() => {

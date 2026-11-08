@@ -18,9 +18,6 @@
 // the DB-backed path fails fast instead of hanging on a nonexistent database.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
 import { prisma } from "../src/lib/prisma.ts";
 import {
   FEATURE_DEFINITIONS,
@@ -168,25 +165,20 @@ test("each group contains exactly the definitions of its category, in registry o
   }
 });
 
-test("every registered flag is writable through /api/settings — an unlisted key is an INERT toggle", () => {
+test("every registered flag is writable through /api/settings — an unlisted key is an INERT toggle", async () => {
   // The failure this exists for, found in a live browser check rather than by
-  // any test: /api/settings validates against its own static SETTINGS_SCHEMA
-  // allowlist and silently `continue`s past an unrecognized key while still
-  // answering {ok:true}. A flag registered here but missing there therefore
-  // renders a switch in the Features tab that reports success, never persists,
-  // and reverts on reload — with no error anywhere to explain why.
-  const routeSrc = readFileSync(
-    resolve(dirname(fileURLToPath(import.meta.url)), "../src/app/api/settings/route.ts"),
-    "utf8",
-  );
-  const schema = routeSrc.slice(
-    routeSrc.indexOf("const SETTINGS_SCHEMA"),
-    routeSrc.indexOf("] as const", routeSrc.indexOf("const SETTINGS_SCHEMA")),
-  );
-  const allowed = new Set([...schema.matchAll(/\["([^"]+)",/g)].map((m) => m[1]));
-  assert.ok(allowed.size >= 50, `only parsed ${allowed.size} allowlisted setting keys — the pin would be vacuous`);
+  // any test: /api/settings validates against its own key registry and silently
+  // `continue`s past an unrecognized key while still answering {ok:true}. A flag
+  // registered here but missing there therefore renders a switch in the
+  // Features tab that reports success, never persists, and reverts on reload —
+  // with no error anywhere to explain why.
+  const { SETTING_KEYS, SETTINGS_REGISTRY } = await import("../src/lib/settings-registry.ts");
+  assert.ok(SETTING_KEYS.length >= 50, `only ${SETTING_KEYS.length} registry keys — the pin would be vacuous`);
   for (const key of FEATURE_KEYS) {
-    assert.ok(allowed.has(key), `${key} is registered but not writable via /api/settings — its toggle does nothing`);
+    const def = SETTINGS_REGISTRY.get(key);
+    assert.ok(def, `${key} is registered but not writable via /api/settings — its toggle does nothing`);
+    assert.equal(def.type.kind, "boolean", `${key} must store only "true"/"false"`);
+    assert.equal(def.cooldownExempt, true, `${key} is a per-click toggle and must skip the write cooldown`);
   }
 });
 
@@ -287,4 +279,19 @@ test("FeatureKey is the union of registered keys, so a mistyped key does not com
   void typo;
   const key: FeatureKey = "feature.page.top";
   assert.ok((FEATURE_KEYS as readonly string[]).includes(key));
+});
+
+test("the flag map handed to callers is frozen, so one caller can't change another's flags", async () => {
+  const flags = await getFeatureFlags({});
+  assert.ok(Object.isFrozen(flags));
+  assert.throws(() => { (flags as Record<string, boolean>)["feature.page.top"] = false; }, TypeError);
+});
+
+test("the resolved flag map is typed by registry key: an unregistered key does not compile", async () => {
+  const flags = await getFeatureFlags({});
+  assert.equal(flags["feature.page.top"], true);
+  // @ts-expect-error a key the registry doesn't define
+  assert.equal(flags["feature.page.nope"], undefined);
+  // @ts-expect-error the map is read-only
+  assert.throws(() => { flags["feature.page.top"] = false; }, TypeError);
 });

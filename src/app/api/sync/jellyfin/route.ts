@@ -5,22 +5,31 @@ import { buildSeriesItemIdIndex, getJellyfinTmdbIds, getJellyfinTVEpisodes, getJ
 import { mapLimit } from "@/lib/concurrency";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { jellyfinLibraryRow } from "@/lib/library-rows";
-import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey, isValidMediaInstanceSlug } from "@/lib/media-instances";
+import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { logAudit } from "@/lib/audit";
-import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } from "@/lib/permissions";
-import { getCronActor, cronSkippedResponse, BATCH_TX_TIMEOUT, batchCreateMany, replaceEpisodeCacheForSource, replaceJellyfinLibraryForInstances, withCronRunRecording, type CronActor, type JellyfinLibraryRow } from "@/lib/cron-auth";
-import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
-import { fanOutAvailableWinners } from "@/lib/request-notifications";
-import { sonarrIncompleteKeys } from "@/lib/arr-availability";
+import { getCronActor, type CronActor } from "@/lib/cron-auth";
+import { cronSkippedResponse, withCronRunRecording } from "@/lib/cron-history";
+import { BATCH_TX_TIMEOUT, batchCreateMany } from "@/lib/batch-write";
+import { mergeRecentEpisodesForSource, replaceEpisodeCacheForSource } from "@/lib/episode-cache";
+import { lockLibraryInTx, replaceJellyfinLibraryForInstances, type JellyfinLibraryRow } from "@/lib/library-staging";
+import { markResyncedLibrary } from "@/lib/available-marking";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import type { Translator } from "@/lib/i18n/translate";
-import { warnOnChange, forgetWarnOnChange } from "@/lib/log-dedup";
-import { withAdvisoryLock, JELLYFIN_RESYNC_LOCK_ID } from "@/lib/advisory-lock";
+import { JELLYFIN_RESYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { libraryJobResponse, startLibraryJob, wantsBackgroundRun } from "@/lib/library-sync-jobs";
-
-// 2 hours — intentionally wider than the 1-hour sync interval so one missed run is survivable
-const RECENT_WINDOW_MS = 2 * 60 * 60 * 1000;
+import {
+  RECENT_WINDOW_MS,
+  noteEpisodeCacheOwner,
+  ownsEpisodeCache,
+  parseLibrarySelection,
+  resyncJobKey,
+  resyncTarget,
+  reidentifiedJellyfinRows,
+  resyncWindDownResponse,
+  runResyncHoldingLock,
+  stampLibrarySyncSuccess,
+  type HoldLock,
+} from "@/lib/library-resync";
 
 // recentOnly episode refresh: at or below this many windowed series, fetch each
 // series' episodes directly (ParentId-scoped) instead of page-walking EVERY
@@ -40,17 +49,17 @@ export async function POST(request: NextRequest) {
   if (rawBody instanceof NextResponse) return rawBody;
 
   // Single-flight: a second resync (two admin clicks, a cron call) skips instead
-  // of walking the whole Jellyfin library again beside the first. Table writes were
-  // already serialized by their transaction locks; this bounds the upstream load.
-  const run = () => withCronRunRecording("jellyfin-sync", () => withAdvisoryLock(
+  // of walking the whole Jellyfin library again beside the first — including
+  // while this one's episode-cache refresh is still running (see the Plex twin).
+  const run = () => withCronRunRecording("jellyfin-sync", () => runResyncHoldingLock(
     JELLYFIN_RESYNC_LOCK_ID,
-    (signal: AbortSignal) => syncJellyfin(request, rawBody, actor, signal),
+    (signal, hold) => syncJellyfin(request, rawBody, actor, signal, hold),
     // X-Cron-Skipped keeps a busy answer out of the ledger (no run happened).
     () => cronSkippedResponse("jellyfin sync already running"),
   ));
   // An admin's { async: true } runs in the background — see the Plex twin.
   if (actor.trigger === "admin" && wantsBackgroundRun(rawBody)) {
-    return startLibraryJob(actor.userId, `jellyfin\u0000${JSON.stringify([rawBody.instance ?? null, rawBody.full === true])}`, run);
+    return startLibraryJob(actor.userId, resyncJobKey("jellyfin", rawBody), run);
   }
   return run();
 }
@@ -65,11 +74,7 @@ export async function GET(request: NextRequest) {
   return libraryJobResponse(actor.userId, request.nextUrl.searchParams.get("job") ?? "", t);
 }
 
-// A resync that lost its lock stops at a phase boundary (guardrail 41) — see
-// the Plex twin.
-function windDownResponse(t: Translator): Response {
-  return NextResponse.json({ error: t("apiAdmin.sync.windDown") }, { status: 503 });
-}
+type JellyfinServer = { baseUrl: string; apiKey: string; selectedIds: Set<string> | undefined };
 
 // Fetches the Jellyfin library (movies + TV), writes JellyfinLibraryItem rows
 // (recentOnly insert-only within the 2h window, or a full delete+replace), then
@@ -83,30 +88,19 @@ function windDownResponse(t: Translator): Response {
 // reasoning): no serverInstance column, one shared `source: "jellyfin"`
 // namespace, so a single-server resync cannot produce the whole-table union a
 // correct rewrite needs. It therefore rewrites the cache ONLY when it is the
-// sole configured Jellyfin server — the full path previously deleted
-// `source: "jellyfin"` unscoped and repopulated from this server alone, and even
-// the recentOnly path's tmdbId-scoped delete removes another server's episodes
-// for a show both of them hold.
-async function syncJellyfin(request: NextRequest, rawBody: Record<string, unknown>, actor: CronActor, signal: AbortSignal): Promise<Response> {
+// sole configured Jellyfin server — even the recentOnly path's scoped delete
+// removes another server's episodes for a show both of them hold.
+async function syncJellyfin(request: NextRequest, rawBody: Record<string, unknown>, actor: CronActor, signal: AbortSignal, hold: HoldLock): Promise<Response> {
   const t = translatorForRequest(request);
-  const recentOnly = rawBody.full !== true;
-
-  // Which server to resync. Absent ⇒ the default, so existing callers are
-  // unchanged. A malformed slug is rejected rather than coerced to "", which
-  // would aim a destructive scoped delete at the wrong server.
-  const instance: MediaInstanceKey =
-    typeof rawBody.instance === "string" ? rawBody.instance : DEFAULT_MEDIA_INSTANCE;
-  if (instance !== DEFAULT_MEDIA_INSTANCE && !isValidMediaInstanceSlug(instance)) {
+  const target = resyncTarget(rawBody);
+  if (!target) {
     return NextResponse.json({ error: t("apiAdmin.common.invalidInstance") }, { status: 400 });
   }
+  const { recentOnly, instance } = target;
 
-  // getMediaInstances, NOT getSyncableMediaInstances: the latter probes each
-  // instance with a setting.findMany, and this path is held to the same
-  // findUnique-only read shape as the other per-instance config readers
-  // (guardrail 35). Counting REGISTERED rather than CONFIGURED servers is also
-  // the safer error: a registered-but-unconfigured server has no episodes to
-  // contribute, so at worst this skips a rewrite the orchestrator will do anyway
-  // — the opposite mistake destroys another server's rows.
+  // getMediaInstances, NOT getSyncableMediaInstances: this path is held to the
+  // findUnique-only read shape of the other per-instance config readers
+  // (guardrail 35).
   const [jellyfinConfig, librariesRow, jellyfinInstances] = await Promise.all([
     getJellyfinConfig(instance),
     prisma.setting.findUnique({ where: { key: jellyfinSettingKey(instance, "Libraries") } }),
@@ -127,120 +121,38 @@ async function syncJellyfin(request: NextRequest, rawBody: Record<string, unknow
     return NextResponse.json({ error: t("apiAdmin.sync.unknownJellyfinInstance") }, { status: 400 });
   }
 
-  const baseUrl = jellyfinConfig.url.replace(/\/$/, "");
-  const apiKey = jellyfinConfig.apiKey;
-  const selectedJellyfinIds = librariesRow?.value
-    ? new Set(librariesRow.value.split(",").map((k) => k.trim()).filter(Boolean))
-    : undefined;
-
+  const server: JellyfinServer = {
+    baseUrl: jellyfinConfig.url.replace(/\/$/, ""),
+    apiKey: jellyfinConfig.apiKey,
+    selectedIds: parseLibrarySelection(librariesRow?.value),
+  };
   const minDateLastSaved = recentOnly ? new Date(Date.now() - RECENT_WINDOW_MS) : undefined;
 
   let movieIds: Awaited<ReturnType<typeof getJellyfinTmdbIds>>;
   let tvIds:    Awaited<ReturnType<typeof getJellyfinTmdbIds>>;
   try {
     [movieIds, tvIds] = await Promise.all([
-      getJellyfinTmdbIds(baseUrl, apiKey, "MOVIE", selectedJellyfinIds, minDateLastSaved),
-      getJellyfinTmdbIds(baseUrl, apiKey, "TV", selectedJellyfinIds, minDateLastSaved),
+      getJellyfinTmdbIds(server.baseUrl, server.apiKey, "MOVIE", server.selectedIds, minDateLastSaved),
+      getJellyfinTmdbIds(server.baseUrl, server.apiKey, "TV", server.selectedIds, minDateLastSaved),
     ]);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("[sync/jellyfin] Failed to fetch library:", msg);
-    return NextResponse.json(
-      { error: t("apiAdmin.sync.jellyfinUnreachable") },
-      { status: 502 }
-    );
+    console.error("[sync/jellyfin] Failed to fetch library:", err instanceof Error ? err.message : String(err));
+    return NextResponse.json({ error: t("apiAdmin.sync.jellyfinUnreachable") }, { status: 502 });
   }
 
   // Guardrail 41: the lock is gone (timed out, or its connection dropped), so a
   // second resync may already be running. Stop before writing anything; return,
   // never throw.
-  if (signal.aborted) return windDownResponse(t);
+  if (signal.aborted) return resyncWindDownResponse(t);
 
-  // Keyed on EVERY item id per series, not just the stored one — a show in two
-  // libraries files its episodes under two SeriesIds and the unlisted one's
-  // episodes would be dropped on the floor.
-  const seriesItemIdToTmdbId = buildSeriesItemIdIndex(tvIds);
-
-  // Fire-and-forget: episode cache is best-effort and must not block the main library write.
-  // On recentOnly, deletes are scoped to the exact episodes being re-inserted (see below) so
-  // unrelated cached episodes survive (the recentOnly tv filter is a 2h window, not the whole
-  // library).
-  const episodeRecentOnly = recentOnly;
-  // Decided BEFORE the fetch, like the Plex twin: bailing out inside the .then()
-  // still page-walked every Episode in the library first, then threw the whole
-  // result away on any multi-server install.
-  const ownsEpisodeCache = jellyfinInstances.length <= 1;
-  // A standing configuration, restated on every resync: log it once per count (guardrail 7b).
-  if (!ownsEpisodeCache) {
-    warnOnChange(
-      "sync/jellyfin:episode-cache-owner",
-      String(jellyfinInstances.length),
-      `[sync/jellyfin] ${jellyfinInstances.length} Jellyfin servers configured — leaving the shared TVEpisodeCache to the orchestrator, which rebuilds it from every server.`,
-    );
-  } else {
-    forgetWarnOnChange("sync/jellyfin:episode-cache-owner");
+  // Decided before the episode fetch: deciding afterwards page-walked every
+  // Episode in the library first, then threw the result away on any
+  // multi-server install. The refresh runs beside the library write below and
+  // is HELD: the lock stays taken until it has written.
+  noteEpisodeCacheOwner("jellyfin", jellyfinInstances.length);
+  if (ownsEpisodeCache(jellyfinInstances.length)) {
+    hold(refreshJellyfinEpisodes(server, buildSeriesItemIdIndex(tvIds), { recentOnly, signal }));
   }
-  (ownsEpisodeCache
-    ? (episodeRecentOnly && seriesItemIdToTmdbId.size > 0 && seriesItemIdToTmdbId.size <= PER_SERIES_EPISODE_REFRESH_MAX
-        // Bounded per-series fan-out (at most 3 shows fetched at once, matching
-        // the library walker's MAX_PARALLEL_PAGES). It returns the same episodes
-        // the full walk would after filtering by SeriesId, so the tmdbId-scoped
-        // delete + insert below is unchanged. size === 0 falls through to
-        // getJellyfinTVEpisodes, which returns [] without fetching anything.
-        ? mapLimit(Array.from(seriesItemIdToTmdbId.entries()), 3, ([itemId, tmdbId]) =>
-            getJellyfinEpisodesForShow(baseUrl, apiKey, itemId, tmdbId),
-          ).then((perSeries) => perSeries.flat())
-        : getJellyfinTVEpisodes(baseUrl, apiKey, selectedJellyfinIds, seriesItemIdToTmdbId))
-    : Promise.resolve(null)
-  )
-    .then(async (episodes) => {
-      if (episodes === null) return;
-      // recentOnly is insert-only within the window: an empty result means nothing new,
-      // so skip entirely (a delete here would violate guardrail 13). The full path,
-      // however, must clear on empty — getJellyfinTVEpisodes throws on a fetch failure
-      // (rejects → .catch), so an empty full result is a genuinely empty library whose
-      // stale episode ownership must be cleared.
-      if (episodeRecentOnly && episodes.length === 0) return;
-      if (episodeRecentOnly) {
-        // recentOnly stays inline: it is bounded by the 2-hour window, so the
-        // tmdbId-scoped delete plus its insert is small by construction and cheap
-        // to hold in one transaction. Advisory lock 2002,2 — Jellyfin
-        // TVEpisodeCache coordination, shared with /api/sync/route and
-        // /api/sync/tv-episodes so this scoped delete can't interleave with a
-        // wholesale rewrite from another runner.
-        await prisma.$transaction(async (tx) => {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
-          // Scoped to the exact (tmdbId, season, episode) tuples about to be re-inserted,
-          // NOT to the whole tmdbId: the MinDateLastSaved window returns only the library
-          // copies of a show saved in the last 2h, so a copy in another library (guardrail
-          // 37) contributes no episodes here — a tmdbId-wide delete wiped its seasons until
-          // the next full rebuild. Removed episodes are the full path's job.
-          const bySeason = new Map<string, { tmdbId: number; seasonNumber: number; episodeNumbers: number[] }>();
-          for (const e of episodes) {
-            const key = `${e.tmdbId}:${e.seasonNumber}`;
-            const group = bySeason.get(key);
-            if (group) group.episodeNumbers.push(e.episodeNumber);
-            else bySeason.set(key, { tmdbId: e.tmdbId, seasonNumber: e.seasonNumber, episodeNumbers: [e.episodeNumber] });
-          }
-          const seasonScopes = Array.from(bySeason.values()).map((g) => ({
-            tmdbId: g.tmdbId,
-            seasonNumber: g.seasonNumber,
-            episodeNumber: { in: g.episodeNumbers },
-          }));
-          if (seasonScopes.length > 0) {
-            await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", OR: seasonScopes } });
-          }
-          if (episodes.length > 0) {
-            await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source: "jellyfin" as const, ...e })));
-          }
-        }, { timeout: BATCH_TX_TIMEOUT });
-      } else {
-        // Full replace takes the staged-load + short-swap path (same lock, inside
-        // the helper) so the whole library never crosses the wire mid-transaction.
-        await replaceEpisodeCacheForSource("jellyfin", episodes);
-      }
-    })
-    .catch((err) => console.error("[sync/jellyfin] Episode cache failed:", err));
 
   // `serverInstance` is NOT optional here — see the Plex twin. The deletes below are
   // scoped to `instance`, so omitting it made a named-instance resync delete that
@@ -249,176 +161,33 @@ async function syncJellyfin(request: NextRequest, rawBody: Record<string, unknow
   // The row shape is shared with the orchestrator (library-rows.ts).
   const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => jellyfinLibraryRow(tmdbId, d, "MOVIE", instance));
   const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => jellyfinLibraryRow(tmdbId, d, "TV", instance));
-
   if (recentOnly) {
-    // Insert-only: never delete rows on this path — an empty window would nuke the whole library.
-    // The already-present check is scoped to `instance`: another server's row for the same
-    // tmdbId must not stop this server's own row from being inserted.
-    const [existingMovies, existingTv] = await Promise.all([
-      prisma.jellyfinLibraryItem.findMany({
-        where: { mediaType: "MOVIE", serverInstance: instance, tmdbId: { in: movieRows.map((r) => r.tmdbId) } },
-        select: { tmdbId: true },
-      }),
-      prisma.jellyfinLibraryItem.findMany({
-        where: { mediaType: "TV", serverInstance: instance, tmdbId: { in: tvRows.map((r) => r.tmdbId) } },
-        select: { tmdbId: true },
-      }),
-    ]);
-    const existingMovieSet = new Set(existingMovies.map((r) => r.tmdbId));
-    const existingTvSet    = new Set(existingTv.map((r) => r.tmdbId));
-    const newMovieRows = movieRows.filter((r) => !existingMovieSet.has(r.tmdbId));
-    const newTvRows    = tvRows.filter((r)    => !existingTvSet.has(r.tmdbId));
-    // Advisory lock 2001,2 — serializes Jellyfin library writes against orchestrator + concurrent
-    // per-source invocations (admin "Resync Jellyfin" while cron is mid-flight).
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
-      if (newMovieRows.length > 0) await batchCreateMany(tx.jellyfinLibraryItem, newMovieRows);
-      if (newTvRows.length    > 0) await batchCreateMany(tx.jellyfinLibraryItem, newTvRows);
-    }, { timeout: BATCH_TX_TIMEOUT });
+    await insertRecentJellyfinRows(instance, movieRows, tvRows);
   } else {
     // Full replace of THIS instance's rows only (guardrail 13) — an unscoped delete
-    // would wipe every other server's rows and repopulate only this one's
-    // (availability flicker until the next orchestrator run). The shared staged swap
-    // takes advisory lock 2001,2 (see the recentOnly branch above) inside its own
-    // short transaction — the same helper the orchestrator's Jellyfin arm uses.
+    // would wipe every other server's rows and repopulate only this one's. The
+    // shared staged swap takes advisory lock 2001,2 inside its own short
+    // transaction — the same helper the orchestrator's Jellyfin arm uses.
     await replaceJellyfinLibraryForInstances([{ slug: instance, rows: (movieRows as JellyfinLibraryRow[]).concat(tvRows) }]);
   }
 
-  // Stamp last-success so the orchestrator's 24h-stale fallback (sync/route.ts
-  // pendingAvailableNotify gate) doesn't fire falsely on deployments where the
-  // admin runs the per-source resync more recently than the orchestrator.
-  // ONLY for the shape whose success the orchestrator's own stamp means — every
-  // registered Jellyfin server synced clean: a FULL replace of the DEFAULT
-  // instance when it is the ONLY one (see the Plex twin for the starvation a
-  // named-instance, multi-server or recentOnly stamp causes).
+  // Stamp last-success for the orchestrator's 24h-stale fallback ONLY for the
+  // shape whose success the orchestrator's own stamp means — a FULL replace of
+  // the DEFAULT instance when it is the ONLY one (see the Plex twin for the
+  // starvation a named-instance, multi-server or recentOnly stamp causes).
   if (instance === DEFAULT_MEDIA_INSTANCE && !recentOnly && jellyfinInstances.length <= 1) {
-    await prisma.setting.upsert({
-      where: { key: "lastJellyfinSyncSucceededAt" },
-      update: { value: String(Date.now()) },
-      create: { key: "lastJellyfinSyncSucceededAt", value: String(Date.now()) },
-    }).catch((err) => console.error("[sync/jellyfin] failed to stamp lastJellyfinSyncSucceededAt:", err));
+    await stampLibrarySyncSuccess("jellyfin", "sync/jellyfin");
   }
 
-  if (signal.aborted) return windDownResponse(t);
+  if (signal.aborted) return resyncWindDownResponse(t);
 
-  const requests = await prisma.mediaRequest.findMany({
-    where: { status: { in: ["PENDING", "APPROVED"] } },
-    select: { id: true, tmdbId: true, mediaType: true, arrInstance: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
+  const { checked, marked } = await markResyncedLibrary({
+    source: "jellyfin",
+    instance: jellyfinInstances.find((i) => i.slug === instance),
+    library: { movieIds, tvIds },
+    scopeToLibrary: recentOnly,
+    logScope: "sync/jellyfin",
   });
-
-  // Sonarr completeness gate (guardrail 14a) — see the Plex route for the full
-  // reasoning: a series Sonarr still lists as wanted is incomplete, and library
-  // presence alone must not flip (or notify) its request. Pre-CAS.
-  const sonarrHeld = await sonarrIncompleteKeys(requests);
-
-  let toMark = requests.filter((req) =>
-    req.mediaType === "MOVIE"
-      ? movieIds.has(req.tmdbId)
-      : tvIds.has(req.tmdbId) && !sonarrHeld.has(`${req.tmdbId}:${req.arrInstance}`)
-  );
-
-  // Per-user visibility gate for a RESTRICTED named server (guardrail 35) — the Jellyfin
-  // twin of the Plex gate; see that route for the full reasoning. This run describes
-  // exactly ONE server, so the question is the same for every id: may this requester see
-  // `instance`? Only a restricted instance can answer no, so the default ("") server
-  // does no extra work and behaves byte-identically.
-  //
-  // PRE-CAS by construction: filtering `toMark` keeps gated rows out of BOTH the
-  // claimAvailableNotificationWinners call and the updateMany flips, so a gated request
-  // keeps notifiedAvailable = false, stays PENDING/APPROVED, and is re-evaluated later
-  // rather than having its once-only claim burned.
-  const instanceConfig = jellyfinInstances.find((i) => i.slug === instance);
-  if (instanceConfig?.restricted === true && toMark.length > 0) {
-    const requesterRows = await prisma.user.findMany({
-      where: { id: { in: [...new Set(toMark.map((r) => r.requestedBy))] } },
-      // `role` is NOT optional. The raw `permissions` column is @default(0) and is
-      // seeded only by a manual one-shot script, so an upgraded deployment can hold a
-      // role="ADMIN" row with permissions=0. Passing that raw would deny the ADMIN
-      // short-circuit HERE while every read path grants it (they all go through
-      // effectivePermissions) — stranding the operator's own requests as PENDING while
-      // the UI insists the title is available. Same reasoning as the orchestrator's
-      // loadRequesters.
-      select: { id: true, role: true, permissions: true, mediaServerGrants: true },
-    });
-    const byId = new Map(requesterRows.map((u) => [u.id, u]));
-    toMark = toMark.filter((r) => {
-      const u = byId.get(r.requestedBy);
-      if (!u) return false; // requester vanished mid-run — fail closed
-      return canViewMediaInstance(effectivePermissions(u.role, u.permissions), instanceConfig, parseMediaServerGrants(u.mediaServerGrants), "jellyfin");
-    });
-  }
-
-  if (toMark.length > 0) {
-    const unnotified = toMark.filter((r) => !r.notifiedAvailable);
-    if (unnotified.length > 0) {
-      // Gate notification by the requester's mediaServer preference — mirror the
-      // orchestrator's markLibraryRequests. A Jellyfin-pinned user must NOT get a "ready
-      // to watch" ping from a Plex resync (and vice versa); users with no preference are
-      // notified by whichever source sees the item first.
-      //
-      // The per-user media-server VISIBILITY gate now runs where `toMark` is built
-      // above — it has to, because this route IS generalized to named instances. The
-      // split below is the separate, older concern: which SOURCE the user prefers,
-      // not which server they may see.
-      const userRows = await prisma.user.findMany({
-        where: { id: { in: unnotified.map((r) => r.requestedBy) } },
-        select: { id: true, mediaServer: true },
-      });
-      const userMediaServer = new Map(userRows.map((u) => [u.id, u.mediaServer]));
-      const toNotify = unnotified.filter((r) => {
-        const ms = userMediaServer.get(r.requestedBy) ?? null;
-        return !ms || ms === "jellyfin";
-      });
-      // Preferred server is the OTHER source: flip to AVAILABLE but don't notify here.
-      const toMarkOnly = unnotified.filter((r) => {
-        const ms = userMediaServer.get(r.requestedBy) ?? null;
-        return !!ms && ms !== "jellyfin";
-      });
-      if (toNotify.length > 0) {
-        // CAS on notifiedAvailable so concurrent sync paths don't double-fire notifications;
-        // winner filter ensures we only notify on rows we actually flipped.
-        // `claimed` is every row the CAS flipped; `deliverable` drops the ones whose
-        // requester is disabled. Consequences of the TRANSITION key off `claimed` —
-        // that row went AVAILABLE too, and its claim is already burned, so nothing
-        // later would wipe its stale deletion votes. Only delivery keys off the split.
-        const { claimed, deliverable } = await claimAvailableNotifications(toNotify, { markAvailable: true });
-        if (claimed.length > 0) {
-          // The claim helper sets status/availableAt/notifiedAvailable but not
-          // pendingNotifyAt — disarm the 90s "still pending" backstop on the
-          // same transition (mirrors the orchestrator's post-claim clear).
-          await prisma.mediaRequest.updateMany({
-            where: { id: { in: claimed.map((w) => w.id) } },
-            data: { pendingNotifyAt: null },
-          });
-          void clearDeletionVotesForTmdbs(claimed);
-        }
-        if (deliverable.length > 0) {
-          void fanOutAvailableWinners(deliverable, "sync/jellyfin");
-        }
-      }
-      if (toMarkOnly.length > 0) {
-        // status IN (PENDING, APPROVED): only forward transitions — never resurrect
-        // a row an admin DECLINED after this run's snapshot (AVAILABLE is terminal).
-        const flipped = await prisma.mediaRequest.updateMany({
-          where: { id: { in: toMarkOnly.map((r) => r.id) }, status: { in: ["PENDING", "APPROVED"] } },
-          data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
-        });
-        if (flipped.count > 0) void clearDeletionVotesForTmdbs(toMarkOnly);
-      }
-    }
-
-    const alreadyNotified = toMark.filter((r) => r.notifiedAvailable);
-    if (alreadyNotified.length > 0) {
-      // Stamp availableAt on the flip (matches the orchestrator's markLibraryRequests).
-      // status IN (PENDING, APPROVED): gates timestamp rewrites on every sync tick
-      // AND refuses to resurrect a concurrently-DECLINED row (AVAILABLE is terminal).
-      const flipped = await prisma.mediaRequest.updateMany({
-        where: { id: { in: alreadyNotified.map((r) => r.id) }, status: { in: ["PENDING", "APPROVED"] } },
-        data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
-      });
-      if (flipped.count > 0) void clearDeletionVotesForTmdbs(alreadyNotified);
-    }
-  }
 
   // Attribution comes from the SAME DB-checked session read that authorized the
   // request (getCronActor in POST), consistent with the orchestrator/plex sync.
@@ -429,14 +198,102 @@ async function syncJellyfin(request: NextRequest, rawBody: Record<string, unknow
       userName: actor.userName,
       action: "LIBRARY_SYNC",
       target: "sync:jellyfin",
-      details: { movies: movieIds.size, tv: tvIds.size, marked: toMark.length, full: !recentOnly },
+      details: { movies: movieIds.size, tv: tvIds.size, marked, full: !recentOnly },
     });
   }
 
   return NextResponse.json({
     scanned: { movies: movieIds.size, tv: tvIds.size },
-    checked: requests.length,
-    marked: toMark.length,
+    checked,
+    marked,
     full: !recentOnly,
   });
 }
+
+// recentOnly is INSERT-ONLY (guardrail 13): never a delete of this server's
+// library — an empty window would nuke it. The one delete, the Plex twin's
+// stale-mapping clear: a stored row every copy of which now arrives under
+// ANOTHER title (an item Jellyfin re-identified) — otherwise the old title kept
+// reading as available until the next full sync. It reads only the rows
+// holding an incoming item id, inside the lock, so it is bounded by the batch.
+type JellyfinRow = ReturnType<typeof jellyfinLibraryRow>;
+async function insertRecentJellyfinRows(instance: MediaInstanceKey, movieRows: JellyfinRow[], tvRows: JellyfinRow[]): Promise<void> {
+  // The already-present check is scoped to `instance`: another server's row for
+  // the same tmdbId must not stop this server's own row from being inserted.
+  const [existingMovies, existingTv] = await Promise.all([
+    prisma.jellyfinLibraryItem.findMany({
+      where: { mediaType: "MOVIE", serverInstance: instance, tmdbId: { in: movieRows.map((r) => r.tmdbId) } },
+      select: { tmdbId: true },
+    }),
+    prisma.jellyfinLibraryItem.findMany({
+      where: { mediaType: "TV", serverInstance: instance, tmdbId: { in: tvRows.map((r) => r.tmdbId) } },
+      select: { tmdbId: true },
+    }),
+  ]);
+  const existingMovieSet = new Set(existingMovies.map((r) => r.tmdbId));
+  const existingTvSet    = new Set(existingTv.map((r) => r.tmdbId));
+  const newMovieRows = movieRows.filter((r) => !existingMovieSet.has(r.tmdbId));
+  const newTvRows    = tvRows.filter((r)    => !existingTvSet.has(r.tmdbId));
+  if (newMovieRows.length === 0 && newTvRows.length === 0) return;
+
+  const incomingItemIds = new Set<string>();
+  for (const r of [...newMovieRows, ...newTvRows]) {
+    if (r.jellyfinItemId) incomingItemIds.add(r.jellyfinItemId);
+    for (const id of r.jellyfinItemIds) incomingItemIds.add(id);
+  }
+
+  // Advisory lock 2001,2 serializes this with the orchestrator's swap and
+  // fix-match. Queries run one at a time on the transaction (guardrail 23c).
+  await prisma.$transaction(async (tx) => {
+    await lockLibraryInTx(tx, "jellyfin");
+    if (incomingItemIds.size > 0) {
+      const holders = await tx.jellyfinLibraryItem.findMany({
+        where: { serverInstance: instance, jellyfinItemId: { in: [...incomingItemIds] } },
+        select: { tmdbId: true, mediaType: true, jellyfinItemId: true, jellyfinItemIds: true },
+      });
+      const stale = reidentifiedJellyfinRows(holders, incomingItemIds);
+      if (stale.length > 0) {
+        await tx.jellyfinLibraryItem.deleteMany({
+          where: { serverInstance: instance, OR: stale.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType })) },
+        });
+      }
+    }
+    if (newMovieRows.length > 0) await batchCreateMany(tx.jellyfinLibraryItem, newMovieRows);
+    if (newTvRows.length    > 0) await batchCreateMany(tx.jellyfinLibraryItem, newTvRows);
+  }, { timeout: BATCH_TX_TIMEOUT });
+}
+
+// The episode refresh: fetch, then write once the lock is still ours. Fetch
+// and write failures are logged; nothing is thrown (it runs held, beside the
+// library write).
+async function refreshJellyfinEpisodes(
+  { baseUrl, apiKey, selectedIds }: JellyfinServer,
+  seriesIndex: Map<string, number>,
+  { recentOnly, signal }: { recentOnly: boolean; signal: AbortSignal },
+): Promise<void> {
+  try {
+    const episodes = recentOnly && seriesIndex.size > 0 && seriesIndex.size <= PER_SERIES_EPISODE_REFRESH_MAX
+      // Bounded per-series fan-out (at most 3 shows fetched at once, matching
+      // the library walker's MAX_PARALLEL_PAGES). It returns the same episodes
+      // the full walk would after filtering by SeriesId. size === 0 falls
+      // through to getJellyfinTVEpisodes, which returns [] without fetching.
+      ? (await mapLimit(Array.from(seriesIndex.entries()), 3, ([itemId, tmdbId]) =>
+          getJellyfinEpisodesForShow(baseUrl, apiKey, itemId, tmdbId),
+        )).flat()
+      : await getJellyfinTVEpisodes(baseUrl, apiKey, selectedIds, seriesIndex);
+    if (signal.aborted) return;
+    if (recentOnly) {
+      // Insert-only, scoped to the re-inserted tuples (guardrail 13).
+      await mergeRecentEpisodesForSource("jellyfin", episodes);
+    } else {
+      // A fetch failure threw above, so an empty full result is a genuinely
+      // empty library whose stale episode rows must be cleared. The staged load
+      // + short swap (same lock, inside the helper) keeps the whole library off
+      // the wire mid-transaction.
+      await replaceEpisodeCacheForSource("jellyfin", episodes);
+    }
+  } catch (err) {
+    console.error("[sync/jellyfin] Episode cache failed:", err);
+  }
+}
+

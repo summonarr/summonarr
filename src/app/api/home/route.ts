@@ -19,50 +19,13 @@ import { getFeatureFlags } from "@/lib/features";
 import { getRecentlyAddedForViewer, RECENTLY_ADDED_SIZE } from "@/lib/recently-added";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { settleSources } from "@/lib/settle-sources";
+import { dedupeUnion, mediaKey, projectRail, splitFeatured, type RailVisibility } from "@/lib/home-rails";
 
 // The home feed for native clients, mirroring the web home page
 // (src/app/(app)/page.tsx): the trending "featured" titles plus the same rails
 // the web shows. Keep the rail list, sizes and filtering in sync with that page.
 const RAIL_SIZE = 14;
 const RAIL_OVERFETCH = 20;
-
-function dedupeUnion(lists: TmdbMedia[][]): TmdbMedia[] {
-  const seen = new Set<string>();
-  const out: TmdbMedia[] = [];
-  for (const list of lists) {
-    for (const m of list) {
-      const k = `${m.mediaType}-${m.id}`;
-      if (seen.has(k)) continue;
-      seen.add(k);
-      out.push(m);
-    }
-  }
-  return out;
-}
-
-function project(
-  raw: TmdbMedia[],
-  enriched: Map<string, TmdbMedia>,
-  hideAvailable: boolean,
-  showPlex: boolean,
-  showJellyfin: boolean,
-  limit: number,
-): TmdbMedia[] {
-  const out: TmdbMedia[] = [];
-  for (const m of raw) {
-    const e = enriched.get(`${m.mediaType}-${m.id}`);
-    // A missing map entry means attachAllAvailability intentionally filtered the item
-    // (the user hid it). Drop it — do NOT fall back to the raw item, which would
-    // resurrect the hidden title onto the rail.
-    if (!e) continue;
-    // Gate hideAvailable on the user's pinned server so a Plex-pinned user doesn't hide
-    // Jellyfin-only titles (and vice versa).
-    if (hideAvailable && ((showPlex && e.plexAvailable) || (showJellyfin && e.jellyfinAvailable))) continue;
-    out.push(e);
-    if (out.length >= limit) break;
-  }
-  return out;
-}
 
 export const GET = withAuth(async (request, _ctx, session) => {
   const t = translatorForRequest(request);
@@ -112,66 +75,47 @@ export const GET = withAuth(async (request, _ctx, session) => {
       getShow4kVisibility(session),
     ]);
 
+    // The TMDB rails, each cut to the RAIL_OVERFETCH window: projectRail drops
+    // available/hidden titles and backfills toward RAIL_SIZE from the tail, so
+    // the whole window is enriched below or rails under-fill when a filter is on.
+    const overfetch = (list: TmdbMedia[]) => list.slice(0, RAIL_OVERFETCH);
     const trending = lists.trending;
-    const popMovies = lists["popular-movies"].slice(0, RAIL_OVERFETCH);
-    const popTV = lists["popular-tv"].slice(0, RAIL_OVERFETCH);
-    const upMovies = lists["upcoming-movies"].slice(0, RAIL_OVERFETCH);
-    const upTV = lists["on-the-air-tv"].slice(0, RAIL_OVERFETCH);
-    const topMovies = lists["top-rated-movies"].slice(0, RAIL_OVERFETCH);
-    const topTV = lists["top-rated-tv"].slice(0, RAIL_OVERFETCH);
-    const forYou = lists["for-you"].slice(0, RAIL_OVERFETCH);
+    const forYou = overfetch(lists["for-you"]);
     const recent = lists["recently-added"];
+    const tmdbRails = [
+      { id: "popular-movies", titleKey: "home.rail.popularMovies.title", raw: overfetch(lists["popular-movies"]) },
+      { id: "popular-tv", titleKey: "home.rail.popularTv.title", raw: overfetch(lists["popular-tv"]) },
+      { id: "upcoming-movies", titleKey: "home.rail.upcomingMovies.title", raw: overfetch(lists["upcoming-movies"]) },
+      { id: "on-the-air-tv", titleKey: "home.rail.onTheAir.title", raw: overfetch(lists["on-the-air-tv"]) },
+      { id: "top-rated-movies", titleKey: "home.rail.topMovies.title", raw: overfetch(lists["top-rated-movies"]) },
+      { id: "top-rated-tv", titleKey: "home.rail.topTv.title", raw: overfetch(lists["top-rated-tv"]) },
+    ];
 
-    // Enrich the full RAIL_OVERFETCH window (not just RAIL_SIZE): project() drops
-    // available/hidden items then backfills toward RAIL_SIZE from the tail, so the
-    // tail must be in the enriched map too or rails under-fill when a filter is on.
-    // Each list above is already cut to that window.
-    const candidateLists = [
+    const displaySet = dedupeUnion([
       trending,
-      popMovies,
-      popTV,
-      upMovies,
-      upTV,
-      topMovies,
-      topTV,
+      ...tmdbRails.map((r) => r.raw),
       forYou,
       // Last, so a title also on a TMDB rail keeps that richer record.
       recent,
-    ];
-    const displaySet = dedupeUnion(candidateLists);
+    ]);
     const enriched = await attachAllAvailability(displaySet, session.user.id, { show4k });
-    const emap = new Map(enriched.map((m) => [`${m.mediaType}-${m.id}`, m]));
+    const emap = new Map(enriched.map((m) => [mediaKey(m), m]));
+    const vis: RailVisibility = { hideAvailable, showPlex, showJellyfin };
+    const pick = (raw: TmdbMedia[], limit = RAIL_SIZE) => projectRail(raw, emap, vis, limit);
 
-    const trendingItems = project(trending, emap, hideAvailable, showPlex, showJellyfin, trending.length);
-    const featuredMovie = trendingItems.find((m) => m.mediaType === "movie");
-    const featuredTV = trendingItems.find((m) => m.mediaType === "tv");
-    const featuredKeys = new Set(
-      [featuredMovie, featuredTV]
-        .filter((m): m is TmdbMedia => m != null)
-        .map((m) => `${m.mediaType}-${m.id}`),
-    );
-    const trendingRest = trendingItems.filter(
-      (m) => !featuredKeys.has(`${m.mediaType}-${m.id}`),
-    );
+    const { featured, rest: trendingRest } = splitFeatured(pick(trending, trending.length));
 
     const carousels = [
       { id: "trending", title: t("home.trending.title"), items: trendingRest },
       // Additive: a carousel id older clients don't know renders generically.
       ...(recentEnabled
-        ? [{ id: "recently-added", title: t("home.rail.recent.title"), items: project(recent, emap, hideAvailable, showPlex, showJellyfin, RECENTLY_ADDED_SIZE) }]
+        ? [{ id: "recently-added", title: t("home.rail.recent.title"), items: pick(recent, RECENTLY_ADDED_SIZE) }]
         : []),
       ...(flags["feature.page.forYou"]
-        ? [{ id: "for-you", title: t("home.rail.forYou.title"), items: project(forYou, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) }]
+        ? [{ id: "for-you", title: t("home.rail.forYou.title"), items: pick(forYou) }]
         : []),
-      { id: "popular-movies", title: t("home.rail.popularMovies.title"), items: project(popMovies, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
-      { id: "popular-tv", title: t("home.rail.popularTv.title"), items: project(popTV, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
-      { id: "upcoming-movies", title: t("home.rail.upcomingMovies.title"), items: project(upMovies, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
-      { id: "on-the-air-tv", title: t("home.rail.onTheAir.title"), items: project(upTV, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
-      { id: "top-rated-movies", title: t("home.rail.topMovies.title"), items: project(topMovies, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
-      { id: "top-rated-tv", title: t("home.rail.topTv.title"), items: project(topTV, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
+      ...tmdbRails.map((r) => ({ id: r.id, title: t(r.titleKey), items: pick(r.raw) })),
     ].filter((c) => c.items.length > 0);
-
-    const featured = [featuredMovie, featuredTV].filter((m): m is TmdbMedia => m != null);
 
     return NextResponse.json({ featured, carousels });
   } catch (err) {

@@ -24,6 +24,7 @@ import {
   textOrNull,
   type Protocol,
 } from "./arr-parse";
+import { comparablePath } from "./arr-path";
 import { parseTimeSpan } from "./arr-queue";
 import type { ArrService } from "./arr-instances";
 
@@ -156,12 +157,17 @@ export function projectCommands(raw: unknown, limit = MAX_COMMANDS): ArrCommandR
     seen.add(id);
     const status = typeof r.status === "string" ? r.status.toLowerCase() : "";
     const trigger = typeof r.trigger === "string" ? r.trigger.toLowerCase() : "";
-    // CommandResource: `name` is the command ("RssSync"), `commandName` its label ("Rss Sync").
-    const commandName = text(r.name, 100) || text(r.commandName, 100);
+    // The arr's CommandResource and this row name the two the OTHER way round:
+    // upstream `name` is the command ("RssSync") and `commandName` its label
+    // ("Rss Sync"); the row's `name` is the label and `commandName` the
+    // command (the wire shape the page and its spec read). Each falls back to
+    // the other when the arr sent only one.
+    const command = text(r.name, 100) || text(r.commandName, 100);
+    const label = text(r.commandName, 100) || command;
     out.push({
       id,
-      name: text(r.commandName, 100) || commandName,
-      commandName,
+      name: label,
+      commandName: command,
       status: (COMMAND_STATUSES as readonly string[]).includes(status) ? (status as CommandStatus) : "unknown",
       trigger: trigger === "manual" ? "manual" : trigger === "scheduled" ? "scheduled" : "other",
       queued: isoOrNull(r.queued),
@@ -601,42 +607,21 @@ export const MAX_UNMAPPED = 500;
 export const MAX_ROOT_FOLDERS = 500;
 export const MAX_DISK_ENTRIES = 500;
 
-// A path compared as a path: either separator, no trailing one, and a Windows
-// drive path case-insensitively ("C:\Movies" and "c:/movies/" are one place).
-function comparablePath(p: string): string {
-  const s = p.replace(/\\/g, "/");
-  // One slice, never one per trailing separator (a path can end in hundreds).
-  // Not a /\/+$/ regex either: it backtracks over every run of separators.
-  let end = s.length;
-  while (end > 1 && s.charCodeAt(end - 1) === 47) end--;
-  const t = end === s.length ? s : s.slice(0, end);
-  return /^[A-Za-z]:/.test(t) ? t.toLowerCase() : t;
-}
-
 // A disk list with each path made comparable ONCE. Matching is roots × disks
-// (projectRootFolders, and the monitor's readDisks calling rootDisk/diskFor
+// (projectRootFolders, and the monitor's readDisks calling rootDiskIn/diskIn
 // per root over one list), and comparablePath per (root, disk) pair cost
-// seconds at the caps. Remembered per list, and re-made when any entry or its
-// path changed since, so a caller that edits a list is never matched stale.
-interface ComparableDisk { disk: ArrDisk; path: string; cmp: string; prefix: string }
-const comparableDiskLists = new WeakMap<readonly ArrDisk[], ComparableDisk[]>();
+// seconds at the caps. Built by the caller once per list and passed in — no
+// hidden cache, so a list edited between calls is simply indexed again.
+export interface ComparableDisk { disk: ArrDisk; cmp: string; prefix: string }
+/** A disk list prepared for matching (indexDisks). */
+export type DiskIndex = readonly ComparableDisk[];
 
-function comparableDisks(disks: readonly ArrDisk[]): ComparableDisk[] {
-  const known = comparableDiskLists.get(disks);
-  if (known && known.length === disks.length) {
-    let same = true;
-    for (let i = 0; i < known.length && same; i++) {
-      const d = disks[i];
-      same = known[i].disk === d && known[i].path === d.path;
-    }
-    if (same) return known;
-  }
+export function indexDisks(disks: readonly ArrDisk[]): DiskIndex {
   const out: ComparableDisk[] = [];
   for (const disk of disks) {
     const cmp = comparablePath(disk.path);
-    out.push({ disk, path: disk.path, cmp, prefix: cmp.endsWith("/") ? cmp : `${cmp}/` });
+    out.push({ disk, cmp, prefix: cmp.endsWith("/") ? cmp : `${cmp}/` });
   }
-  comparableDiskLists.set(disks, out);
   return out;
 }
 
@@ -655,7 +640,12 @@ function holderOf(p: string, disks: readonly ComparableDisk[]): ComparableDisk |
  * never "/mnt/media2/movies"; "/" holds everything when nothing nearer does).
  */
 export function diskFor(path: string, disks: readonly ArrDisk[]): ArrDisk | null {
-  return holderOf(comparablePath(path), comparableDisks(disks))?.disk ?? null;
+  return diskIn(path, indexDisks(disks));
+}
+
+/** diskFor over a list already indexed (indexDisks). */
+export function diskIn(path: string, disks: DiskIndex): ArrDisk | null {
+  return holderOf(comparablePath(path), disks)?.disk ?? null;
 }
 
 /**
@@ -681,10 +671,11 @@ export const DISK_MATCH_TOLERANCE_RATIO = 0.01;
  * guardrail 7c), so the two never disagree about which disk a folder is on.
  */
 export function rootDisk(root: Pick<ArrRootFolder, "path" | "freeSpace">, disks: readonly ArrDisk[]): ArrDisk | null {
-  return rootDiskIn(root, comparableDisks(disks));
+  return rootDiskIn(root, indexDisks(disks));
 }
 
-function rootDiskIn(root: Pick<ArrRootFolder, "path" | "freeSpace">, disks: readonly ComparableDisk[]): ArrDisk | null {
+/** rootDisk over a list already indexed (indexDisks) — one index for every root of a list. */
+export function rootDiskIn(root: Pick<ArrRootFolder, "path" | "freeSpace">, disks: DiskIndex): ArrDisk | null {
   const p = comparablePath(root.path);
   const holder = holderOf(p, disks);
   if (!holder) return null;
@@ -707,7 +698,7 @@ function rootDiskIn(root: Pick<ArrRootFolder, "path" | "freeSpace">, disks: read
 export function projectRootFolders(raw: unknown, disks: readonly ArrDisk[] = []): ArrRootFolder[] {
   if (!Array.isArray(raw)) return [];
   const out: ArrRootFolder[] = [];
-  const comparable = comparableDisks(disks);
+  const comparable = indexDisks(disks);
   for (const x of scanOf(raw, MAX_ROOT_FOLDERS)) {
     const r = obj(x);
     const id = posInt(r?.id);

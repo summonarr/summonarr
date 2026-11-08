@@ -67,15 +67,15 @@ export default async function ActivityHistoryPage({
       />
       <ActivityFilterBar />
       {/* Keyed on the period filters only. The table writes its own
-          from/to/watched into the URL, so a live refresh re-renders this page
-          with them; keyed on those too, every finished stream after a date
-          edit would remount the table and drop its page, search and user
-          filter. They only seed the table's state on a (re)mount. */}
+          filters, sort and page size into the URL, so a live refresh
+          re-renders this page with them; keyed on those too, every finished
+          stream after a filter edit would remount the table and drop its
+          page. They only seed the table's state on a (re)mount, which is how
+          they survive a period change. */}
       <ActivityHistoryTable
         key={`ht-${days}-${source ?? ""}-${mediaType ?? ""}`}
         source={source}
         mediaType={mediaType}
-        days={days}
         startDateIso={periodCutoff.toISOString()}
         timeZone={timeZone}
         initialFromDate={fromDate}

@@ -48,3 +48,12 @@ test("a type with no library on the server at all is not held", () => {
 test("a type with no stored rows answering empty is not held", () => {
   assert.equal(jellyfinHoldReason({ ...base, tvCount: 0, heldTvRows: 0 }), null);
 });
+
+test("a mixed or untyped library counts as holding both types: movies vanishing from it is held", () => {
+  const mixed = { id: "x1", collectionType: "mixed" };
+  const untyped = { id: "x2", collectionType: "" };
+  assert.deepEqual(jellyfinHoldReason({ ...base, folders: [mixed, SHOWS], movieCount: 0 }), { kind: "empty-type", mediaType: "MOVIE" });
+  assert.deepEqual(jellyfinHoldReason({ ...base, folders: [untyped, SHOWS], movieCount: 0 }), { kind: "empty-type", mediaType: "MOVIE" });
+  // A typed TV library still never vouches for movies.
+  assert.equal(jellyfinHoldReason({ ...base, folders: [SHOWS], movieCount: 0 }), null);
+});

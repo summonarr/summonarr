@@ -76,3 +76,26 @@ test("features-form wires the rules: a 429 schedules the retry and returns befor
   const schedule = src.slice(src.indexOf("function scheduleFlush()"), src.indexOf("function scheduleRetry("));
   assert.match(schedule, /if \(backingOff\.current\) return;/, "a flip during the backoff doesn't fire straight into another 429");
 });
+
+// The unmount sends what is pending with keepalive. An in-flight flush that
+// resumed afterwards found the same entries and sent them again, then armed a
+// timer nothing would clear.
+test("features-form: after unmount, nothing pending is sent twice and nothing is scheduled", () => {
+  const src = readFileSync(new URL("../src/components/settings/features-form.tsx", import.meta.url), "utf8");
+  const cleanup = src.slice(src.indexOf("return () => {\n      unmounted.current = true;"));
+  assert.ok(cleanup.length > 0, "the cleanup marks the form unmounted first");
+  assert.match(cleanup, /pendingRef\.current\.clear\(\);[\s\S]*keepalive: true/, "the pending set is handed to the keepalive request");
+  const flush = src.slice(src.indexOf("async function flush()"), src.indexOf("function scheduleFlush()"));
+  assert.match(flush, /const \{ reply, message \} = await sendBatch\(batch\);\s*\/\/[^\n]*\n\s*if \(unmounted\.current\) return;/);
+  const schedule = src.slice(src.indexOf("function scheduleFlush()"), src.indexOf("function scheduleRetry("));
+  assert.match(schedule, /if \(unmounted\.current\) return;/);
+});
+
+// A flag absent from the stored set rendered as its default but flipped from
+// `false`, so the first click sent the value already shown.
+test("features-form: a switch flips and reverts from the value it renders", () => {
+  const src = readFileSync(new URL("../src/components/settings/features-form.tsx", import.meta.url), "utf8");
+  assert.match(src, /seeded\[feature\.key\] \?\?= feature\.defaultEnabled;/);
+  assert.match(src, /const savedState = useRef<FeatureFlags>\(\{ \.\.\.seeded \}\);/);
+  assert.match(src, /: \(savedState\.current\[key\] \?\? seeded\[key\] \?\? false\);/);
+});

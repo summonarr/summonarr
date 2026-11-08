@@ -379,8 +379,10 @@ export function unmonitoredEpisodesOnly(s: Pick<RequestArrStatus, "verdict" | "s
 // verdict that doesn't need it never reaches the check.
 const kindOf = (read: ArrRead<unknown> | null): ArrErrorKind => (read && !read.ok ? read.kind : "other");
 
-export function judgeRequestArrStatus(input: ArrStatusInputs): RequestArrStatus {
-  const base: RequestArrStatus = {
+// The status before the arr's answer says anything: no title facts, no
+// downloads, no failures.
+function blankStatus(input: ArrStatusInputs): RequestArrStatus {
+  return {
     verdict: "waiting",
     service: input.service,
     arrId: null,
@@ -398,20 +400,70 @@ export function judgeRequestArrStatus(input: ArrStatusInputs): RequestArrStatus 
     since: new Date(input.sinceMs).toISOString(),
     checkedAt: new Date(input.nowMs).toISOString(),
   };
-  const done = (verdict: ArrStatusVerdict, extra: Partial<RequestArrStatus> = {}): RequestArrStatus => ({ ...base, ...extra, verdict });
+}
 
-  if (!input.resource.ok) return done("unreachable", { errorKind: input.resource.kind });
+// The status fields the title itself decides.
+function factFields(facts: TitleFacts): Partial<RequestArrStatus> {
+  return {
+    arrId: facts.title.arrId,
+    monitored: facts.title.monitored,
+    hasFile: facts.title.hasFile,
+    released: facts.released,
+    releasedAt: facts.releasedAt,
+    expectedAt: facts.expectedAt,
+    episodes: facts.episodes,
+  };
+}
+
+// The title's own DownloadFailed events since the request, newest first. A
+// Replace file / queue "Mark failed" writes this history row on purpose:
+// arr-watch already ignores it, and treating it as downloadFailed showed
+// delegates a false stuck-download after a replacement search.
+export function recentDownloadFailures(events: readonly ArrHistoryEvent[], sinceMs: number): ArrHistoryEvent[] {
+  return events
+    .filter((e) => e.kind === "failed" && !isManualMark(e))
+    .filter((e) => {
+      const ms = arrDateMs(e.date);
+      return ms !== null && ms >= sinceMs;
+    })
+    .sort((a, b) => (arrDateMs(b.date) ?? 0) - (arrDateMs(a.date) ?? 0) || b.id - a.id);
+}
+
+// The newest import's time, or null. A loop, never Math.max(...list):
+// spreading the arr's list into arguments throws RangeError past ~125k records
+// (guardrail 5i).
+export function lastImportMs(events: readonly ArrHistoryEvent[]): number | null {
+  let last: number | null = null;
+  for (const e of events) {
+    if (e.kind !== "imported") continue;
+    const ms = arrDateMs(e.date);
+    if (ms !== null && (last === null || ms > last)) last = ms;
+  }
+  return last;
+}
+
+function failureSummary(recent: readonly ArrHistoryEvent[]): RequestArrStatus["failures"] {
+  const last = recent[0];
+  return {
+    count: countFailedDownloads(recent),
+    lastAt: last.date,
+    message: scrubMessage(last.message, [last.sourceTitle, last.downloadId, last.downloadClient, last.indexer, last.droppedPath, last.importedPath]),
+  };
+}
+
+// The verdict ladder, in order: unreachable resource → not tracked → nothing
+// to download → queue → unmonitored → not released → a failure no import
+// answered → incomplete series → waiting. Each read is consulted only once the
+// ladder reaches it (a skipped read is null, see kindOf).
+export function judgeRequestArrStatus(input: ArrStatusInputs): RequestArrStatus {
+  const blank = blankStatus(input);
+  if (!input.resource.ok) return { ...blank, verdict: "unreachable", errorKind: input.resource.kind };
   const facts = input.resource.value === null ? null : titleFacts(input.service, input.instance, input.resource.value, input.nowMs);
   // Untracked by the arr, nothing holds a library title back.
-  if (!facts) return done(input.inLibrary ? "ready" : "notInArr");
+  if (!facts) return { ...blank, verdict: input.inLibrary ? "ready" : "notInArr" };
 
-  base.arrId = facts.title.arrId;
-  base.monitored = facts.title.monitored;
-  base.hasFile = facts.title.hasFile;
-  base.released = facts.released;
-  base.releasedAt = facts.releasedAt;
-  base.expectedAt = facts.expectedAt;
-  base.episodes = facts.episodes;
+  const base: RequestArrStatus = { ...blank, ...factFields(facts) };
+  const done = (verdict: ArrStatusVerdict, extra: Partial<RequestArrStatus> = {}): RequestArrStatus => ({ ...base, ...extra, verdict });
 
   if (needsNoDownload(input.service, facts, input.inLibrary)) {
     if (input.inLibrary) return done("ready");
@@ -423,45 +475,23 @@ export function judgeRequestArrStatus(input: ArrStatusInputs): RequestArrStatus 
   if (queue.length > 0) {
     // Needing attention first, then the furthest along.
     const sorted = [...queue].sort((a, b) => Number(b.attention) - Number(a.attention) || b.progress - a.progress);
-    base.downloads = sorted.slice(0, MAX_DOWNLOADS).map(projectDownload);
-    base.downloadCount = queue.length;
-    return done(queue.some((d) => d.attention) ? "importBlocked" : "downloading");
+    const downloads = { downloads: sorted.slice(0, MAX_DOWNLOADS).map(projectDownload), downloadCount: queue.length };
+    return done(queue.some((d) => d.attention) ? "importBlocked" : "downloading", downloads);
   }
 
   if (!facts.title.monitored || nothingMonitoredToSearch(input.service, facts)) return done("unmonitored");
   if (!facts.released) return done("notReleased");
 
   if (!input.failures?.ok) return done("unreachable", { errorKind: kindOf(input.failures) });
-  const recent = input.failures.value
-    .filter((e) => e.kind === "failed")
-    // Replace file / queue "Mark failed" writes this history row on purpose.
-    // arr-watch already ignores it; treating it as downloadFailed showed
-    // delegates a false stuck-download after a replacement search.
-    .filter((e) => !isManualMark(e))
-    .filter((e) => {
-      const ms = arrDateMs(e.date);
-      return ms !== null && ms >= input.sinceMs;
-    })
-    .sort((a, b) => (arrDateMs(b.date) ?? 0) - (arrDateMs(a.date) ?? 0) || b.id - a.id);
+  const recent = recentDownloadFailures(input.failures.value, input.sinceMs);
   if (recent.length > 0) {
-    const last = recent[0];
-    base.failures = {
-      count: countFailedDownloads(recent),
-      lastAt: last.date,
-      message: scrubMessage(last.message, [last.sourceTitle, last.downloadId, last.downloadClient, last.indexer, last.droppedPath, last.importedPath]),
-    };
+    const failures = failureSummary(recent);
     // The newest failure is the reason only when no import came at or after it.
-    if (!input.imports?.ok) return done("unreachable", { errorKind: kindOf(input.imports) });
-    // A loop, never Math.max(...list): spreading the arr's list into arguments
-    // throws RangeError past ~125k records (guardrail 5i).
-    let lastImportMs: number | null = null;
-    for (const e of input.imports.value) {
-      if (e.kind !== "imported") continue;
-      const ms = arrDateMs(e.date);
-      if (ms !== null && (lastImportMs === null || ms > lastImportMs)) lastImportMs = ms;
-    }
-    const lastFailureMs = arrDateMs(last.date);
-    if (lastImportMs === null || (lastFailureMs !== null && lastFailureMs > lastImportMs)) return done("downloadFailed");
+    if (!input.imports?.ok) return done("unreachable", { errorKind: kindOf(input.imports), failures });
+    const importedMs = lastImportMs(input.imports.value);
+    const lastFailureMs = arrDateMs(recent[0].date);
+    if (importedMs === null || (lastFailureMs !== null && lastFailureMs > importedMs)) return done("downloadFailed", { failures });
+    base.failures = failures;
   }
 
   if (input.service === "sonarr" && (facts.episodes?.withFile ?? 0) > 0) return done("incomplete");

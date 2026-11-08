@@ -1,37 +1,47 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useDelayed } from "@/hooks/use-delayed";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle, Loader2, ExternalLink, Copy, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { v } from "@/lib/validate";
 import { safeExternalHref } from "@/lib/safe-url";
+import { useAsyncAction } from "@/hooks/use-async-action";
+import { useCopyFeedback } from "@/hooks/use-copy-feedback";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { rich } from "@/components/settings/forms/rich";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StepUpPasswordForm } from "@/components/profile/step-up-password-form";
-import { stepUpNeedOf, withStepUpPassword } from "@/lib/client/step-up";
+import { useStepUpPost } from "@/components/use-step-up-post";
+
+// POST /api/discord/generate-link: a 12-character code that lives 10 minutes.
+const LinkToken = v.object({ token: v.string(), expiresAt: v.string() });
+// POST /api/discord/confirm-merge: how many requests moved to this account.
+const MergeDone = v.object({ migrated: v.optional(v.number()) });
 
 function TokenLinkFlow() {
   const t = useT();
   const locale = useLocale();
   const [token, setToken] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<Date | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   // The server's link code lives 10 minutes; past its expiresAt it is dead, so
   // it stops being offered for copying.
   const [expired, setExpired] = useState(false);
   // Minting a link code needs a step-up (guardrail 6g): the server answers
   // "password-required" and this flow asks for the password inline.
-  const [stepUp, setStepUp] = useState(false);
-  const [stepUpError, setStepUpError] = useState<string | null>(null);
-  const later = useDelayed();
+  const generate = useStepUpPost("/api/discord/generate-link", LinkToken, {
+    failed: t("profile.discord.error.generate"),
+    malformed: t("profile.discord.error.malformed"),
+  });
+  const { copied, copy } = useCopyFeedback();
+  // The clipboard refused (an insecure origin, a denied permission): the code
+  // is selected for copying by hand, and the line below says so.
+  const [copyFailed, setCopyFailed] = useState(false);
+  const tokenRef = useRef<HTMLParagraphElement>(null);
 
-  // Its own timer, not `later`: scheduling here would cancel a pending "copied"
-  // reset. Date.now() is read in the effect, never in render (guardrail 16).
+  // Date.now() is read in the effect, never in render (guardrail 16).
   useEffect(() => {
     if (!expiresAt) return;
     const id = setTimeout(() => setExpired(true), Math.max(0, expiresAt.getTime() - Date.now()));
@@ -40,46 +50,18 @@ function TokenLinkFlow() {
 
   async function copyToken() {
     if (!token || expired) return;
-    try {
-      await navigator.clipboard.writeText(token);
-      setCopied(true);
-      later(() => setCopied(false), 2000);
-    } catch {
-      /* clipboard unavailable (insecure context) or blocked — the token is
-         rendered beside this button for manual selection */
-    }
+    const ok = await copy(token);
+    setCopyFailed(!ok);
+    if (!ok && tokenRef.current) window.getSelection()?.selectAllChildren(tokenRef.current);
   }
 
   async function generateToken(confirmPassword?: string) {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(withBasePath("/api/discord/generate-link"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(withStepUpPassword({}, confirmPassword)),
-      });
-      // A proxy 502/504 answers with an HTML page (or nothing), and a bare
-      // res.json() would surface the raw SyntaxError text to the user.
-      const data = (await res.json().catch(() => ({}))) as { token?: string; expiresAt?: string; error?: string; message?: string };
-      const need = stepUpNeedOf(res.status, data);
-      if (need) {
-        setStepUp(true);
-        setStepUpError(need === "retry" ? t("profile.sessions.error.incorrectPassword") : null);
-        return;
-      }
-      if (!res.ok) throw new Error(data.message ?? data.error ?? t("profile.discord.error.generate"));
-      setStepUp(false);
-      setStepUpError(null);
-      if (!data.token || !data.expiresAt) throw new Error(t("profile.discord.error.malformed"));
-      setToken(data.token);
-      setExpiresAt(new Date(data.expiresAt));
-      setExpired(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("profile.error.generic"));
-    } finally {
-      setLoading(false);
-    }
+    const data = await generate.run({}, confirmPassword);
+    if (!data) return;
+    setToken(data.token);
+    setExpiresAt(new Date(data.expiresAt));
+    setExpired(false);
+    setCopyFailed(false);
   }
 
   return (
@@ -93,27 +75,27 @@ function TokenLinkFlow() {
         </li>
       </ol>
 
-      {stepUp ? (
+      {generate.stepUp ? (
         <StepUpPasswordForm
-          busy={loading}
-          error={stepUpError}
+          busy={generate.loading}
+          error={generate.stepUpError}
           onSubmit={(password) => void generateToken(password)}
-          onCancel={() => { setStepUp(false); setStepUpError(null); }}
+          onCancel={generate.cancelStepUp}
         />
       ) : (
-        <Button type="button" onClick={() => void generateToken()} disabled={loading}>
-          {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-          {loading ? t("profile.discord.generating") : t("profile.discord.generate")}
+        <Button type="button" onClick={() => void generateToken()} disabled={generate.loading}>
+          {generate.loading && <Loader2 className="w-4 h-4 animate-spin" />}
+          {generate.loading ? t("profile.discord.generating") : t("profile.discord.generate")}
         </Button>
       )}
 
-      {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
+      {generate.error && <p role="alert" className="text-sm text-red-400">{generate.error}</p>}
 
       {token && expiresAt && (
         <div className="rounded-md bg-zinc-800 border border-zinc-700 p-4 space-y-3">
           <p className="text-xs text-zinc-500 uppercase tracking-wide font-semibold">{t("profile.discord.yourToken")}</p>
           <div className="flex items-center gap-2">
-            <p className={`ds-mono text-sm font-bold break-all flex-1 ${expired ? "text-zinc-500 line-through" : "text-zinc-100"}`}>
+            <p ref={tokenRef} className={`ds-mono text-sm font-bold break-all flex-1 ${expired ? "text-zinc-500 line-through" : "text-zinc-100"}`}>
               {token}
             </p>
             {!expired && (
@@ -129,6 +111,9 @@ function TokenLinkFlow() {
               </Button>
             )}
           </div>
+          {!expired && copyFailed && (
+            <p role="status" className="text-xs text-amber-400">{t("profile.discord.copyFailed")}</p>
+          )}
           {expired ? (
             <p role="status" className="text-xs text-amber-400">
               {t("profile.discord.expired", { time: expiresAt.toLocaleTimeString(locale) })}
@@ -155,61 +140,47 @@ function WebMergeFlow() {
   const [discordId, setDiscordId] = useState("");
   const [code, setCode] = useState("");
   const [migrated, setMigrated] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   // Sending a merge code from the web needs a step-up (guardrail 6g).
-  const [stepUp, setStepUp] = useState(false);
-  const [stepUpError, setStepUpError] = useState<string | null>(null);
+  const send = useStepUpPost("/api/discord/initiate-merge", v.unknown(), { failed: t("profile.discord.error.sendCode") });
+  const confirm = useAsyncAction();
+  const [confirmError, setConfirmError] = useState<string | null>(null);
+  const loading = send.loading || confirm.busy("confirm");
+  const error = send.error ?? confirmError;
+  const clearErrors = () => {
+    send.clearError();
+    setConfirmError(null);
+  };
 
   async function sendCode(confirmPassword?: string) {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(withBasePath("/api/discord/initiate-merge"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(withStepUpPassword({ discordId: discordId.trim() }, confirmPassword)),
-      });
-      const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
-      const need = stepUpNeedOf(res.status, data);
-      if (need) {
-        setStepUp(true);
-        setStepUpError(need === "retry" ? t("profile.sessions.error.incorrectPassword") : null);
-        return;
-      }
-      if (!res.ok) throw new Error(data.message ?? data.error ?? t("profile.discord.error.sendCode"));
-      setStepUp(false);
-      setStepUpError(null);
-      setStep("code-sent");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("profile.error.generic"));
-    } finally {
-      setLoading(false);
-    }
+    setConfirmError(null);
+    if ((await send.run({ discordId: discordId.trim() }, confirmPassword)) === null) return;
+    setStep("code-sent");
   }
 
   async function confirmCode() {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(withBasePath("/api/discord/confirm-merge"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: code.trim() }),
-      });
-      // `message` first: several routes answer { error: "<slug>", message: "<sentence>" },
-      // and rendering `error` alone showed the raw machine code — e.g. literally
-      // "rate_limit" instead of "Too many attempts. Wait 10 minutes and try again."
-      const data = (await res.json().catch(() => ({}))) as { migrated?: number; error?: string; message?: string };
-      if (!res.ok) throw new Error(data.message ?? data.error ?? t("profile.discord.error.verify"));
-      setMigrated(data.migrated ?? 0);
-      setStep("done");
-      router.refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("profile.error.generic"));
-    } finally {
-      setLoading(false);
+    clearErrors();
+    const res = await confirm.run(
+      "confirm",
+      (signal) => fetchJson(withBasePath("/api/discord/confirm-merge"), {
+        init: jsonInit("POST", { code: code.trim() }),
+        schema: MergeDone,
+        signal,
+        // `message` first (apiErrorText): several routes answer { error:
+        // "<slug>", message: "<sentence>" }, and `error` alone showed the raw
+        // machine code — e.g. literally "rate_limit".
+        fallbackError: t("profile.discord.error.verify"),
+      }),
+      { ifBusy: "skip" },
+    );
+    if (!res) return;
+    if (!res.ok) {
+      // The route's own reason; no answer (or a proxy page) has none.
+      if (res.kind !== "aborted") setConfirmError(res.kind === "http" ? res.error : t("profile.error.generic"));
+      return;
     }
+    setMigrated(res.data.migrated ?? 0);
+    setStep("done");
+    router.refresh();
   }
 
   if (step === "done") {
@@ -242,7 +213,7 @@ function WebMergeFlow() {
               inputMode="numeric"
               pattern="[0-9]*"
               value={discordId}
-              onChange={(e) => { setDiscordId(e.target.value.replace(/\D/g, "")); setError(null); }}
+              onChange={(e) => { setDiscordId(e.target.value.replace(/\D/g, "")); clearErrors(); }}
               placeholder="123456789012345678"
               aria-label={t("profile.discord.userIdLabel")}
               className="ds-mono flex-1"
@@ -250,19 +221,19 @@ function WebMergeFlow() {
             <Button
               type="button"
               onClick={() => void sendCode()}
-              disabled={loading || stepUp || !/^\d{17,20}$/.test(discordId.trim())}
+              disabled={loading || send.stepUp || !/^\d{17,20}$/.test(discordId.trim())}
               className="shrink-0"
             >
               {loading && <Loader2 className="w-4 h-4 animate-spin" />}
               {t("profile.discord.sendCode")}
             </Button>
           </div>
-          {stepUp && (
+          {send.stepUp && (
             <StepUpPasswordForm
               busy={loading}
-              error={stepUpError}
+              error={send.stepUpError}
               onSubmit={(password) => void sendCode(password)}
-              onCancel={() => { setStepUp(false); setStepUpError(null); }}
+              onCancel={send.cancelStepUp}
             />
           )}
         </>
@@ -277,21 +248,21 @@ function WebMergeFlow() {
             <Input
               type="text"
               value={code}
-              onChange={(e) => { setCode(e.target.value.replace(/[^a-fA-F0-9]/g, "").toUpperCase().slice(0, 12)); setError(null); }}
+              onChange={(e) => { setCode(e.target.value.replace(/[^a-fA-F0-9]/g, "").toUpperCase().slice(0, 12)); clearErrors(); }}
               placeholder="A1B2C3D4E5F6"
               aria-label={t("profile.discord.codeLabel")}
               maxLength={12}
               autoComplete="one-time-code"
               className="ds-mono w-48 text-center tracking-widest"
             />
-            <Button type="button" onClick={confirmCode} disabled={loading || code.length !== 12}>
+            <Button type="button" onClick={() => void confirmCode()} disabled={loading || code.length !== 12}>
               {loading && <Loader2 className="w-4 h-4 animate-spin" />}
               {t("profile.discord.verifyLink")}
             </Button>
             <Button
               type="button"
               variant="ghost"
-              onClick={() => { setStep("idle"); setCode(""); setError(null); }}
+              onClick={() => { setStep("idle"); setCode(""); clearErrors(); }}
               disabled={loading}
               className="text-zinc-400 hover:text-zinc-100"
             >

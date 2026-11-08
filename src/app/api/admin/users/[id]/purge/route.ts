@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission } from "@/lib/permissions";
-import { purgeUserDataInTx, NotDeactivatedError, isPurgedRow, assertTargetNotAdminInTx, TargetBecameAdminError } from "@/lib/account-lifecycle";
+import { purgeUserDataInTx, NotDeactivatedError, isAdminTarget, isPurgedRow, assertTargetNotAdminInTx, TargetBecameAdminError } from "@/lib/account-lifecycle";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import { BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
+import { BATCH_TX_TIMEOUT } from "@/lib/batch-write";
 
 // POST /api/admin/users/[id]/purge — IRREVERSIBLY scrub a disabled account's
 // personal data.
@@ -33,16 +34,17 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (
   const t = translatorForRequest(req);
   const { id } = await params;
   if (!checkRateLimit(`admin-user-purge:${session.user.id}`, 5, 60 * 1000)) {
-    return NextResponse.json({ error: t("apiAdmin.common.tooManyAttempts") }, { status: 429 });
+    return tooManyRequests(60, t("apiAdmin.common.tooManyAttempts"));
   }
 
   const target = await prisma.user.findUnique({
     where: { id },
-    select: { id: true, role: true, name: true, email: true, deactivatedAt: true, purgedAt: true },
+    select: { id: true, role: true, permissions: true, name: true, email: true, deactivatedAt: true, purgedAt: true },
   });
   if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
 
-  if (target.role === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
+  // By role or by the ADMIN bit — the rule the in-transaction re-check applies.
+  if (isAdminTarget(target) && !hasPermission(session.user.permissions, Permission.ADMIN)) {
     return NextResponse.json({ error: t("apiAdmin.users.onlyAdminPurge") }, { status: 403 });
   }
   // isPurgedRow, not a bare `purgedAt` test (guardrail 33): a legacy tombstone

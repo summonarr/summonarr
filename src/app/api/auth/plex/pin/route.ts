@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
-import { safeFetchTrusted } from "@/lib/safe-fetch";
+import { createPlexPin, fetchPlexPin, WEB_PLEX_DEVICE } from "@/lib/plex-pin";
 import { logAudit } from "@/lib/audit";
 import { getClientIp } from "@/lib/rate-limit";
 import { savePlexAdminToken } from "@/lib/plex-admin-connect";
@@ -28,61 +28,23 @@ import { isSecureCookieContext } from "@/lib/session-cookie";
 // for every install, and the poll took any `?id=`, so the pair was guessable by
 // anyone: see plex-flow-state.ts.
 
-function plexPinHeaders(clientId: string): Record<string, string> {
-  return {
-    "X-Plex-Client-Identifier": clientId,
-    "X-Plex-Product": "Summonarr",
-    "X-Plex-Version": "1.0",
-    "X-Plex-Model": "hosted",
-    "X-Plex-Device": "Web",
-    "X-Plex-Device-Name": "Summonarr",
-    "X-Plex-Platform": "Web",
-    Accept: "application/json",
-  };
-}
-
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const clientId = newPlexConnectClientId();
-  const res = await safeFetchTrusted("https://plex.tv/api/v2/pins", {
-    allowedHosts: ["plex.tv"],
-    method: "POST",
-    headers: {
-      ...plexPinHeaders(clientId),
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: "strong=true",
-    timeoutMs: 15_000,
-  }).catch((err: unknown) => {
-    // A thrown SafeFetchError (DNS, timeout, non-public address) is the same
-    // "plex.tv didn't answer" as a refusal, not a 500. Logged for diagnosis.
-    console.error("[auth/plex/pin] PIN create failed:", err instanceof Error ? err.message : String(err));
-    return null;
-  });
-
-  if (!res?.ok) {
+  const pin = await createPlexPin(clientId, WEB_PLEX_DEVICE, "auth/plex/pin");
+  if (pin.kind === "failed") {
     return NextResponse.json({ error: t("apiAuth.plex.pinCreateFailedLower") }, { status: 502 });
   }
-
-  // A 2xx proxy page, an empty body or a JSON `null` is malformed, not a 500.
-  const data = (await res.json().catch(() => null)) as { id?: unknown; code?: unknown } | null;
-  if (
-    data === null ||
-    typeof data !== "object" ||
-    typeof data.id !== "number" ||
-    !Number.isInteger(data.id) ||
-    data.id <= 0 ||
-    typeof data.code !== "string"
-  ) {
+  if (pin.kind === "malformed") {
     return NextResponse.json({ error: t("apiAuth.plex.pinMalformedLower") }, { status: 502 });
   }
 
-  const cookie = await signPlexConnectCookie({ pinId: data.id, clientId, uid: session.user.id });
+  const cookie = await signPlexConnectCookie({ pinId: pin.id, clientId, uid: session.user.id });
   // The browser needs clientId for the app.plex.tv approval URL (Plex matches it
   // against the PIN). Giving it to the admin who started the flow is fine — the
   // secret is that NOBODY ELSE can assemble (pinId, clientId).
   const out = NextResponse.json(
-    { id: data.id, code: data.code, clientId },
+    { id: pin.id, code: pin.code, clientId },
     { headers: { "Cache-Control": "no-store" } },
   );
   out.headers.append("Set-Cookie", buildPlexConnectSetCookie(cookie, isSecureCookieContext()));
@@ -101,14 +63,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     return res;
   }
 
-  const res = await safeFetchTrusted(`https://plex.tv/api/v2/pins/${state.pinId}`, {
-    allowedHosts: ["plex.tv"],
-    headers: plexPinHeaders(state.clientId),
-    timeoutMs: 15_000,
-  }).catch((err: unknown) => {
-    console.error("[auth/plex/pin] PIN poll failed:", err instanceof Error ? err.message : String(err));
-    return null;
-  });
+  const res = await fetchPlexPin(state.pinId, state.clientId, "auth/plex/pin");
   if (!res?.ok) {
     return NextResponse.json({ error: t("apiAuth.plex.pinPollFailed") }, { status: 502 });
   }

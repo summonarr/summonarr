@@ -5,7 +5,7 @@ import { ARR_SERVICE_LABEL } from "@/lib/arr-admin";
 import { arrFailure, arrTitleGate } from "@/lib/arr-admin-http";
 import { dropArrTitleSnapshots } from "@/lib/arr-snapshot";
 import { RequestsActiveError, planTitleRemoval, removeTitle } from "@/lib/arr-title-lifecycle";
-import { auditContext, logAudit } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { invalidateArrLibraryIndexCache } from "@/lib/library-cleanup-arr";
@@ -68,8 +68,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // Deleted files leave the media servers only once they rescan.
   if (opts.deleteFiles && !result.alreadyGone) after(() => scheduleLibraryScan(target.service === "radarr" ? "movie" : "tv"));
   void logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email ?? null,
+    ...auditActor(req, session),
     action: "ARR_TITLE_DELETE",
     target: `${target.service}:${target.instance}:${target.arrId}`,
     details: {
@@ -84,7 +83,6 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       alreadyGone: result.alreadyGone,
       requestsStamped: result.requestsStamped,
     },
-    ...auditContext(req, session),
   });
   return NextResponse.json({ removed: true, alreadyGone: result.alreadyGone, requestsStamped: result.requestsStamped });
 });

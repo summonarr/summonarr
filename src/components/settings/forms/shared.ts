@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { apiErrorText } from "@/lib/client/api-error";
+import type { Translator } from "@/lib/i18n/translate";
 
 // Status types shared by the settings form files.
 export type SaveStatus = "idle" | "saving" | "ok" | "error";
@@ -48,6 +49,14 @@ export async function patchSettings(body: Record<string, unknown>): Promise<Sett
   return { ok: settingsPatchSucceeded(res, data), status: res.status, data, error: apiErrorText(data, "") };
 }
 
+/**
+ * The usual wording of a failure the route gave no reason for: no answer at
+ * all, or the HTTP status. Pass it as a save's `failureText`.
+ */
+export function saveFailureText(t: Translator): (result: SettingsPatchResult) => string {
+  return (r) => (r.status === 0 ? t("settings.common.networkError") : t("settings.common.saveFailedStatus", { status: r.status }));
+}
+
 // ── one form's save state ────────────────────────────────────────────────────
 
 type StatusUpdate = SaveStatus | ((s: SaveStatus) => SaveStatus);
@@ -69,8 +78,15 @@ export interface SettingsSaver {
    * the edit was not in the request.
    */
   edited(): void;
-  /** Drops the pending fade (on unmount). */
+  /** Drops the pending fade. */
   cancel(): void;
+  /**
+   * On unmount: drops the fade, and a save still in flight then writes no
+   * state and arms no timer (it still resolves with the answer).
+   */
+  dispose(): void;
+  /** On mount (again, under StrictMode's remount): state writes resume. */
+  activate(): void;
 }
 
 /**
@@ -94,6 +110,7 @@ export function createSettingsSaver(opts: {
   // Bumped on every edit. A save compares it with the value it was sent at.
   let editSeq = 0;
   let fade: ReturnType<typeof setTimeout> | null = null;
+  let disposed = false;
   const cancel = () => {
     if (fade) clearTimeout(fade);
     fade = null;
@@ -105,6 +122,9 @@ export function createSettingsSaver(opts: {
       setMessage("");
       const sentAt = editSeq;
       const result = await patch(body);
+      // Unmounted meanwhile: nothing left to show the answer, and a fade armed
+      // now would outlive the component.
+      if (disposed) return result;
       if (result.ok) {
         // Edited since the click: the form now holds unsaved changes.
         setStatus(editSeq === sentAt ? "ok" : "idle");
@@ -120,6 +140,13 @@ export function createSettingsSaver(opts: {
       setStatus((s) => (s === "saving" ? s : "idle"));
     },
     cancel,
+    dispose() {
+      disposed = true;
+      cancel();
+    },
+    activate() {
+      disposed = false;
+    },
   };
 }
 
@@ -128,10 +155,18 @@ export function createSettingsSaver(opts: {
  * SaveStatusMessage, `save(body)` for the submit, `edited()` for every field
  * change. Render the error as `message || t("settings.form.common.saveFailed")`.
  */
-export function useSettingsSave(resetMs = 3000) {
+export function useSettingsSave(
+  resetMs = 3000,
+  // A form that saves through its own route (not /api/settings) passes its
+  // PATCH here; it answers a SettingsPatchResult like patchSettings does.
+  patch?: (body: Record<string, unknown>) => Promise<SettingsPatchResult>,
+) {
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [message, setMessage] = useState("");
-  const [saver] = useState(() => createSettingsSaver({ setStatus, setMessage, resetMs }));
-  useEffect(() => saver.cancel, [saver]);
+  const [saver] = useState(() => createSettingsSaver({ setStatus, setMessage, resetMs, patch }));
+  useEffect(() => {
+    saver.activate();
+    return saver.dispose;
+  }, [saver]);
   return { status, message, save: saver.save, edited: saver.edited };
 }

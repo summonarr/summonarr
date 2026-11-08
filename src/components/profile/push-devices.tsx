@@ -5,7 +5,9 @@ import { useRouter } from "next/navigation";
 import { Trash2, Loader2, Smartphone, X } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 interface PushDevice {
@@ -25,45 +27,46 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
   const locale = useLocale();
   const router = useRouter();
   const mounted = useHasMounted();
-  const [removing, setRemoving] = useState<string | null>(null);
+  const action = useAsyncAction();
   const [confirmingRemove, setConfirmingRemove] = useState<string | null>(null);
+  // Devices this page removed. They stay hidden while router.refresh() is in
+  // flight, so a removed row never comes back with a live trash button.
+  const [removed, setRemoved] = useState<ReadonlySet<string>>(() => new Set());
   const [error, setError] = useState(false);
 
   async function remove(id: string) {
-    setRemoving(id);
     setConfirmingRemove(null);
     setError(false);
-    try {
-      const res = await fetch(withBasePath("/api/push/subscribe"), {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id }),
-      });
-      if (!res.ok) {
-        setError(true);
-        return;
-      }
-      router.refresh();
-    } catch {
+    const res = await action.run(
+      `remove:${id}`,
+      (signal) =>
+        fetchJson(withBasePath("/api/push/subscribe"), { init: jsonInit("DELETE", { id }), signal }),
+      { ifBusy: "skip" },
+    );
+    if (!res) return;
+    if (!res.ok) {
       setError(true);
-    } finally {
-      setRemoving(null);
+      return;
     }
+    setRemoved((prev) => new Set(prev).add(id));
+    router.refresh();
   }
 
-  if (devices.length === 0) {
+  const visible = devices.filter((d) => !removed.has(d.id));
+
+  if (visible.length === 0) {
     return (
       <p className="text-sm text-zinc-500">{t("profile.push.empty")}</p>
     );
   }
 
-  const capLabel = cap > 0 ? `${devices.length} / ${cap}` : String(devices.length);
+  const capLabel = cap > 0 ? `${visible.length} / ${cap}` : String(visible.length);
 
   return (
     <div className="space-y-2">
-      <p className="text-xs text-zinc-500 mb-3">{t("profile.push.registered", { count: devices.length, label: capLabel })}</p>
+      <p className="text-xs text-zinc-500 mb-3">{t("profile.push.registered", { count: visible.length, label: capLabel })}</p>
       {error && <p role="alert" className="text-xs text-red-400 mb-2">{t("profile.push.error.remove")}</p>}
-      {devices.map((device, i) => {
+      {visible.map((device, i) => {
         const deviceLabel = device.label || t("profile.push.deviceN", { n: i + 1 });
         return (
           <div
@@ -87,10 +90,10 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
                 aria-label={t("profile.push.removeNamed", { name: deviceLabel })}
                 title={t("profile.push.removeDevice")}
                 className="shrink-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10 h-10 w-10 px-0"
-                disabled={removing === device.id}
+                disabled={action.busy(`remove:${device.id}`)}
                 onClick={() => setConfirmingRemove(device.id)}
               >
-                {removing === device.id
+                {action.busy(`remove:${device.id}`)
                   ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   : <Trash2 className="w-3.5 h-3.5" />}
               </Button>

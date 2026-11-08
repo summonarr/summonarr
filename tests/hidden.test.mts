@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { prisma } from "../src/lib/prisma.ts";
-import { getUserHiddenSet } from "../src/lib/hidden.ts";
+import { getUserHiddenSet, hiddenKeyOf } from "../src/lib/hidden.ts";
 import { shadowPrismaModel } from "./_helpers.mts";
 
 type StubRow = { tmdbId: number; mediaType: "MOVIE" | "TV" };
@@ -52,4 +52,11 @@ test("no hidden rows → empty set", async () => {
   nextRows = [];
   const set = await getUserHiddenSet("u_1");
   assert.equal(set.size, 0);
+});
+
+test("hiddenKeyOf matches the set whichever casing the caller's media type has", async () => {
+  nextRows = [{ tmdbId: 603, mediaType: "MOVIE" }];
+  const set = await getUserHiddenSet("u_1");
+  assert.ok(set.has(hiddenKeyOf({ id: 603, mediaType: "movie" })));
+  assert.ok(set.has(hiddenKeyOf({ id: 603, mediaType: "MOVIE" })));
 });

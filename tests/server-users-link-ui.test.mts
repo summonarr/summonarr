@@ -56,7 +56,8 @@ test("a 401 reads as 'requires an administrator' like a 403 (the cron route answ
 });
 
 test("every control writes through the one shared path", () => {
-  assert.equal((table.match(/\bfetch\(/g) ?? []).length, 1, "only sendWrite calls fetch");
+  assert.equal((table.match(/\bfetchJson\(/g) ?? []).length, 1, "only sendWrite calls fetchJson");
+  assert.equal((table.match(/\bfetch\(/g) ?? []).length, 0, "no bare fetch beside it");
   for (const name of ["LinkPicker", "DownloadToggle", "SyncUsersButton", "BulkBar", "AutoDisableToggle"]) {
     assert.match(fn(name), /sendWrite\b/, name);
   }
@@ -91,7 +92,8 @@ test("a departed identity that still holds history stays listed (guardrail 28)",
 });
 
 test("a blank display name falls back to the email on every surface the page feeds", () => {
-  assert.match(page, /const displayName = \(name: string \| null\): string \| null => name\?\.trim\(\) \|\| null;/);
+  // The shared rule (src/lib/display-name.ts): a blank name is no name.
+  assert.match(page, /import \{ displayName \} from "@\/lib\/display-name";/);
   assert.match(page, /name: displayName\(u\.name\),\n\s*email: u\.email,\n\s*role: u\.role,/);
   assert.match(page, /\.map\(\(u\) => \(\{ id: u\.id, name: displayName\(u\.name\), email: u\.email \}\)\)/);
   assert.match(page, /user: \{ \.\.\.u\.user, name: displayName\(u\.user\.name\) \}/);

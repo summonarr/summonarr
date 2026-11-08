@@ -3,9 +3,9 @@ import { tooManyRequests } from "@/lib/http";
 import { withPermission } from "@/lib/api-auth";
 import { isArrConfigured } from "@/lib/arr";
 import { ArrInstanceError } from "@/lib/arr-admin";
+import { arrNotConfiguredResponse } from "@/lib/arr-not-configured";
 import { isValidInstanceSlug } from "@/lib/arr-instances";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import type { Translator } from "@/lib/i18n/translate";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -50,7 +50,7 @@ export const GET = withPermission(Permission.MANAGE_REQUESTS)(async (req, { para
   if (!isValidInstanceSlug(row.arrInstance)) {
     return NextResponse.json({ error: t("apiUser.common.invalidInstance") }, { status: 400 });
   }
-  if (!(await isArrConfigured(service, row.arrInstance))) return notConfigured(t, service, row.arrInstance);
+  if (!(await isArrConfigured(service, row.arrInstance))) return arrNotConfiguredResponse(t, service, row.arrInstance);
 
   try {
     const status = await loadRequestArrStatus({
@@ -74,14 +74,7 @@ export const GET = withPermission(Permission.MANAGE_REQUESTS)(async (req, { para
     });
   } catch (err) {
     // Configured keys for an instance the registry no longer lists (guardrail 32).
-    if (err instanceof ArrInstanceError) return notConfigured(t, service, row.arrInstance);
+    if (err instanceof ArrInstanceError) return arrNotConfiguredResponse(t, service, row.arrInstance);
     throw err;
   }
 });
-
-function notConfigured(t: Translator, service: "radarr" | "sonarr", instance: string): NextResponse {
-  const error = instance === ""
-    ? t("apiUser.common.notConfigured", { name: service === "radarr" ? "Radarr" : "Sonarr" })
-    : t("apiUser.issues.instanceNotConfigured", { service, instance });
-  return NextResponse.json({ error }, { status: 422 });
-}

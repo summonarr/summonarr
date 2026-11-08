@@ -55,7 +55,14 @@ const TOTAL_TMDB_PAGES = 500;
 
 // 20 results per page, ids derived from the page so a caller can tell which
 // TMDB page any item came from: page P yields ids P*100 … P*100+19.
+/** TMDB pages whose first result repeats the previous page's last (a rank that moved between cache fills). */
+let shiftedPages = new Set<number>();
 function pageBody(page: number) {
+  const body = pageBodyRaw(page);
+  if (shiftedPages.has(page)) body.results[0] = { ...body.results[0], id: (page - 1) * 100 + 19 };
+  return body;
+}
+function pageBodyRaw(page: number) {
   return {
     page,
     total_pages: TOTAL_TMDB_PAGES,
@@ -200,6 +207,21 @@ test("the FULL filtered window is returned — survivors past the 20th are not d
     r.items.length, 100,
     "5 TMDB pages x 20, nothing filtered out — a 20-item result means the slice is back",
   );
+});
+
+test("a title that sits on two adjacent TMDB pages of a window is returned once", async () => {
+  shiftedPages = new Set([2]);
+  try {
+    const r = await runBrowseQuery({
+      mediaType: "movie", page: 1, filters: {}, hideAvailable: true, session: session(),
+    });
+    const ids = r.items.map((m) => m.id);
+    assert.equal(new Set(ids).size, ids.length, "no id twice");
+    assert.equal(ids.length, 99);
+    assert.equal(ids.indexOf(119), 19, "the first occurrence keeps its place");
+  } finally {
+    shiftedPages = new Set();
+  }
 });
 
 // The consequence that makes the slice a correctness bug rather than a display

@@ -252,6 +252,20 @@ test("a manager's comment is fromAdmin and writes the REQUESTER's inbox row", as
   assert.equal(fetchCalls.length, 0);
 });
 
+test("a name-less manager's label is in the REQUESTER's language, not the commenting manager's", async () => {
+  const owner = await mintSession();
+  usersById.get(owner.userId)!.locale = "es";
+  const manager = await mintSession(MANAGER);
+  requestOwnedBy(owner.userId);
+  // The manager writes in English (no Accept-Language, the default locale).
+  assert.equal((await post(manager.token, "req-1", { body: "Which version?" })).status, 201);
+  await flush();
+  const note = (opsOf("notification.create")[0].args as { data: { body: string; data: string | { author: string } } }).data;
+  const payload = typeof note.data === "string" ? (JSON.parse(note.data) as { author: string }) : note.data;
+  assert.equal(payload.author, "Administrador");
+  assert.match(note.body, /^Administrador commented: /);
+});
+
 test("a deactivated requester gets NO inbox row (guardrail 33), and a missing row fails closed", async () => {
   const owner = await mintSession();
   const manager = await mintSession(MANAGER);

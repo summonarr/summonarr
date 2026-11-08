@@ -174,10 +174,14 @@ function schemaError(): Error {
   return e;
 }
 
+// When set, only reads of that service's specs throw — one service's refresh failing.
+let specReadThrowsFor: { service: string; error: Error } | null = null;
+
 shadowPrismaModel(prisma, "trashSpec", {
   findMany: async (args: { where?: Record<string, unknown>; include?: unknown; select?: unknown; orderBy?: unknown } = {}) => {
     rec("trashSpec.findMany", { where: args.where });
     if (specReadThrows) throw specReadThrows;
+    if (specReadThrowsFor && args.where?.service === specReadThrowsFor.service) throw specReadThrowsFor.error;
     const w = args.where ?? {};
     let rows = [...specs];
     const idFilter = w.id as { in?: string[]; notIn?: string[] } | undefined;
@@ -337,6 +341,7 @@ beforeEach(() => {
   ops = [];
   specs = [];
   specReadThrows = null;
+  specReadThrowsFor = null;
   pgLockCalls = [];
   fetchCalls.length = 0;
   warns.length = 0;
@@ -518,6 +523,15 @@ test("a named instance slug is accepted", async () => {
 test("apply trims surrounding whitespace from the variant before validating", async () => {
   const t = await mintSession();
   assert.equal((await postApply(t, { specIds: [], variant: "  4k  " })).status, 200);
+});
+
+test("every route reads ' hd ' as the default instance, and apply refuses a variant that isn't a string", async () => {
+  const t = await mintSession();
+  specs = [spec({ id: "s1" })];
+  assert.equal((await getStatus(t, `?service=radarr&variant=${encodeURIComponent(" hd ")}`)).status, 200);
+  assert.equal((await getSpec(t, "s1", `?variant=${encodeURIComponent(" hd ")}`)).status, 200);
+  assert.equal((await postApply(t, { specIds: [], variant: " hd " })).status, 200);
+  assert.equal((await postApply(t, { specIds: ["curated-0"], variant: 4 })).status, 400);
 });
 
 // ── 4: the shared advisory lock ──────────────────────────────────────────────
@@ -871,16 +885,15 @@ test("refresh reports a non-schema store failure per service with a generic line
 });
 
 // The manual refresh is judged like the cron's: a file that failed to download
-// fails the refresh, and a refresh that ran stamps trashLastRefreshAt (the
-// cron's cadence gate and the settings card's "last refreshed" line).
-test("refresh reports per-file failures and stamps the last refresh; a failed tree pull stamps nothing", async () => {
-  const t = await mintSession();
-  const stamps = () => opsOf("setting.upsert").filter((o) => o.args === "trashLastRefreshAt").length;
+// fails the refresh, and a refresh of BOTH services that ran stamps
+// trashLastRefreshAt (the cron's cadence gate and the settings card's "last
+// refreshed" line). The cron gate refreshes both services, so a stamp from a
+// refresh that left one out would hold that one's refresh off for an hour.
+const stamps = () => opsOf("setting.upsert").filter((o) => o.args === "trashLastRefreshAt").length;
 
-  // GitHub is down for the whole pull: nothing refreshed, nothing stamped.
-  await postRefresh(t, JSON.stringify({ service: "radarr" }));
-  assert.equal(stamps(), 0, "a refresh that never got the tree is not a refresh");
-
+// GitHub answers the tree (one radarr file, whose own download fails) and
+// nothing else.
+async function withTreeUp<T>(fn: () => Promise<T>): Promise<T> {
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = new URL(String(input));
@@ -892,17 +905,48 @@ test("refresh reports per-file failures and stamps the last refresh; a failed tr
     return new Response("{}", { status: 503 });
   }) as unknown as typeof fetch;
   try {
-    const res = await postRefresh(t, JSON.stringify({ service: "radarr" }));
-    assert.equal(res.status, 200);
-    const body = await res.json();
-    assert.equal(body.results.length, 1, "the service refreshed");
-    assert.ok(body.results[0].errors.length > 0, "fixture sanity: the file download failed");
-    assert.equal(body.ok, false, "a per-file failure is not a clean refresh");
-    for (const e of body.results[0].errors as string[]) assert.ok(body.errors.includes(`RADARR: ${e}`));
-    assert.equal(stamps(), 1, "a refresh that ran is stamped, as the cron stamps it");
+    return await fn();
   } finally {
     globalThis.fetch = realFetch;
   }
+}
+
+test("refresh reports per-file failures and stamps the last refresh; a failed tree pull stamps nothing", async () => {
+  const t = await mintSession();
+
+  // GitHub is down for the whole pull: nothing refreshed, nothing stamped.
+  await postRefresh(t);
+  assert.equal(stamps(), 0, "a refresh that never got the tree is not a refresh");
+  assert.ok(errors.some((e) => e.startsWith("[trash] catalog tree fetch failed")), "the failed pull is logged for the operator");
+
+  await withTreeUp(async () => {
+    const res = await postRefresh(t);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.results.length, 2, "both services refreshed");
+    const radarr = body.results.find((r: { service?: string }) => r.service === "RADARR") ?? body.results[0];
+    assert.ok(radarr.errors.length > 0, "fixture sanity: the file download failed");
+    assert.equal(body.ok, false, "a per-file failure is not a clean refresh");
+    for (const e of radarr.errors as string[]) assert.ok(body.errors.includes(`RADARR: ${e}`));
+    assert.equal(stamps(), 1, "a refresh of both services that ran is stamped, as the cron stamps it");
+  });
+});
+
+test("a refresh that left a service out — asked for one, or one threw — stamps nothing", async () => {
+  const t = await mintSession();
+  await withTreeUp(async () => {
+    // Asked for radarr only: it refreshed, sonarr didn't.
+    const single = await (await postRefresh(t, JSON.stringify({ service: "radarr" }))).json();
+    assert.equal(single.results.length, 1, "fixture sanity: radarr refreshed");
+    assert.equal(stamps(), 0, "a single-service refresh must not hold the cron's refresh of both off");
+
+    // Asked for both; sonarr's catalog read failed.
+    specReadThrowsFor = { service: "SONARR", error: new Error(INTERNAL_FAILURE) };
+    const partial = await (await postRefresh(t)).json();
+    assert.equal(partial.results.length, 1, "fixture sanity: only radarr refreshed");
+    assert.ok(partial.errors.some((e: string) => e.startsWith("SONARR: ")));
+    assert.equal(stamps(), 0, "a refresh where a service threw is not a full refresh");
+  });
 });
 
 test("starter-pack GET and POST answer a non-schema failure with a generic message and log the detail", async () => {

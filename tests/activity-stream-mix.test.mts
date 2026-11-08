@@ -83,7 +83,8 @@ test("the stats, title and user views draw their segments from the shared fold a
     assert.match(src, /const streamTypes = streamTypeSegments\(t, streamMix\);/, `${rel} builds its bars through the shared helper`);
     assert.doesNotMatch(src, /STREAM_META|STREAM_METHODS\.map/, `${rel} keeps no private copy of the method labels and colours`);
   }
-  const ui = readFileSync(new URL("../src/components/admin/activity-ui.tsx", import.meta.url), "utf8");
+  // The meta and the segment builder live in the directive-free format module (activity-ui re-exports them).
+  const ui = readFileSync(new URL("../src/components/admin/activity-format.ts", import.meta.url), "utf8");
   assert.match(ui, /export const STREAM_META: Record<StreamSegmentKey, \{ labelKey: string; color: string \}>/);
   assert.match(ui, /Other: \{ labelKey: "adminActivity\.method\.other", color: "var\(--ds-fg-disabled\)" \}/);
   assert.match(ui, /return streamMixSegments\(mix\)\.map\(/);

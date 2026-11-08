@@ -10,10 +10,11 @@ import { MAX_CATALOG_TITLES, NothingToImportError, parseQueueService, QueueGoneE
 import { isFeatureEnabled } from "./features";
 import type { Translator } from "./i18n/translate";
 import { sanitizeForLog } from "./sanitize";
+import { QUEUE_IMPORT_MAX_FILES } from "./api-body-limits";
 
 // A whole-series pack can hold hundreds of files; paths are long.
 export const IMPORT_MAX_BODY_BYTES = 512 * 1024;
-const MAX_FILES = 2_000;
+const MAX_FILES = QUEUE_IMPORT_MAX_FILES;
 const SERVICE_LABEL = { radarr: "Radarr", sonarr: "Sonarr" } as const;
 
 export type ServiceTarget = { service: "radarr" | "sonarr"; instance: string };

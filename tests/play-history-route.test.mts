@@ -170,6 +170,11 @@ const activeStore = new Map<string, ActiveRow>();
 let playHistoryCreateError: Error | null = null;
 // ActiveSession inserts for these ids throw (a title too long for its column).
 const activeCreateErrorFor = new Set<string>();
+// Another writer (an overlapping tick) gets there first: a create of one of
+// these ids finds the row already inserted; an update of one finds lastSeenAt
+// moved by 1ms — the CAS loses, the row stays as old as it was.
+const activeCreateRaceFor = new Set<string>();
+const activeUpdateRaceFor = new Set<string>();
 // The now-playing snapshot read (the only activeSession.findMany with an orderBy) throws.
 let snapshotReadError: Error | null = null;
 // The retention claim's row count, and a failing purge delete.
@@ -311,6 +316,7 @@ const fakePrisma = {
       if (!id) return { count: 0 };
       const row = activeStore.get(id);
       if (!row) return { count: 0 };
+      if (activeUpdateRaceFor.has(id)) row.lastSeenAt = new Date(row.lastSeenAt.getTime() - 1);
       // CAS on lastSeenAt: a stale prefetch loses to a concurrent writer.
       if (args.where.lastSeenAt instanceof Date && row.lastSeenAt.getTime() !== args.where.lastSeenAt.getTime()) {
         return { count: 0 };
@@ -322,11 +328,16 @@ const fakePrisma = {
       if (args.data.some((d) => activeCreateErrorFor.has(String(d.id)))) {
         throw new Error("value too long for type character varying(500)");
       }
+      // ON CONFLICT DO NOTHING: the count is the rows actually inserted.
+      let count = 0;
       for (const d of args.data) {
         const row = d as unknown as ActiveRow;
-        if (!activeStore.has(row.id)) activeStore.set(row.id, row);
+        if (activeCreateRaceFor.has(row.id) && !activeStore.has(row.id)) activeStore.set(row.id, { ...row });
+        if (activeStore.has(row.id)) continue;
+        activeStore.set(row.id, row);
+        count++;
       }
-      return { count: args.data.length };
+      return { count };
     },
     deleteMany: async (args: DeleteManyArgs) => {
       rec("activeSession", "deleteMany", args);
@@ -353,6 +364,11 @@ const fakePrisma = {
     findFirst: async (args: unknown) => {
       rec("playHistory", "findFirst", args);
       return null; // no resume-group chaining in these fixtures
+    },
+    // The retention purge reads the ids of one batch before deleting them.
+    findMany: async (args: unknown) => {
+      rec("playHistory", "findMany", args);
+      return [{ id: "old-1" }];
     },
     deleteMany: async (args: unknown) => {
       rec("playHistory", "deleteMany", args);
@@ -701,6 +717,8 @@ beforeEach(() => {
   jfSessionsDelayMs = 0;
   playHistoryCreateError = null;
   activeCreateErrorFor.clear();
+  activeCreateRaceFor.clear();
+  activeUpdateRaceFor.clear();
   snapshotReadError = null;
   retentionClaim = 0;
   playHistoryDeleteError = null;
@@ -1456,7 +1474,8 @@ test("the poller threads the probed INSTANCE into both reachability reports", ()
   // because no test exercises a named instance polling successfully. That
   // regression would silently report every server's health onto the DEFAULT
   // server's badge — the exact clobbering the per-instance keys exist to stop.
-  const source = readFileSync(new URL("../src/app/api/sync/play-history/route.ts", import.meta.url), "utf8");
+  // The Plex pass lives in session-poll-plex.ts (the route only orchestrates).
+  const source = readFileSync(new URL("../src/lib/session-poll-plex.ts", import.meta.url), "utf8");
   const calls = source.match(/setPlexReachable\([^)]*\)/g) ?? [];
   assert.equal(calls.length, 2, "expected exactly the success and failure reports");
   for (const call of calls) {
@@ -1795,6 +1814,58 @@ test("a failed jellyfin itemId-change finalize is skipped, not counted as starte
 });
 
 // ═══ Post-sync housekeeping failures degrade, never 500 ═════════════════════
+
+// ═══ Write outcomes: a write another tick won is counted nowhere ═══════════
+
+// Its own client address, so these ticks draw on a fresh per-IP bucket.
+const AS_CRON_OUTCOMES = { ...AS_CRON, "x-forwarded-for": "10.77.0.12" };
+
+test("a create another tick already made is not counted as started, and fetches no markers for it", async () => {
+  activeCreateRaceFor.add("plex:raced-new");
+  plexSnapshot = [plexSnap("raced-new", { viewOffset: 5_000 })];
+  const res = await POST(phReq({ headers: AS_CRON_OUTCOMES }));
+  assert.deepEqual((await bodyOf(res)).plex, { started: 0, updated: 0, ended: 0 });
+  await settle();
+  assert.equal(fetchLog.filter((f) => f.url.includes("/library/metadata/")).length, 0, "the winning tick fetched its own markers");
+});
+
+test("an update whose CAS lost to another writer is not counted as updated", async () => {
+  seed(makeRow("raced-upd", { progressMs: 60_000n, progressUpdatedAt: agoReal(10_000), lastSeenAt: agoReal(10_000) }));
+  activeUpdateRaceFor.add("plex:raced-upd");
+  plexSnapshot = [plexSnap("raced-upd", { viewOffset: 70_000 })];
+  const res = await POST(phReq({ headers: AS_CRON_OUTCOMES }));
+  assert.deepEqual((await bodyOf(res)).plex, { started: 0, updated: 0, ended: 0 });
+});
+
+test("GUARDRAIL 19: a jellyfin row matched to a live session under its OLD key is not absence-finalized when its update is lost", async () => {
+  // The row was created under the session's Id; this tick reports a new
+  // PlaySessionId and finds the row by that Id. Its CAS update loses, so the
+  // row keeps the old sessionKey — which the tick's PlaySessionIds don't hold —
+  // while its lastSeenAt is past the grace. Finalizing it would end a stream
+  // that is still playing, and the poller is Jellyfin's only writer.
+  seed(makeRow("old-psid", {
+    id: "jellyfin:old-psid", source: "jellyfin", sessionKey: "old-psid", sourceItemId: "jf-item-shared",
+    lastSeenAt: agoReal(SESSION_ABSENCE_GRACE_MS + 8_000), state: "playing",
+  }));
+  activeUpdateRaceFor.add("jellyfin:old-psid");
+  jfSnapshot = [{ ...jfSnap("new-psid", { itemId: "jf-item-shared", positionTicks: 600_000_000 }), Id: "old-psid" }];
+  const res = await POST(phReq({ headers: AS_CRON_OUTCOMES }));
+  assert.deepEqual((await bodyOf(res)).jellyfin, { started: 0, updated: 0, ended: 0 });
+  await settle();
+  assert.ok(activeStore.has("jellyfin:old-psid"), "the live session's row survives the sweep");
+  assert.equal(historyRows().filter((r) => r.source === "jellyfin").length, 0);
+});
+
+test("a tick refused by the per-IP rate limit is a 429 that records no cron run — overlapping ticks are not failed syncs", async () => {
+  const headers = { ...AS_CRON, "x-forwarded-for": "10.77.0.13" };
+  for (let i = 0; i < 30; i++) assert.equal((await POST(phReq({ headers }))).status, 200, `tick ${i + 1}`);
+  await settle();
+  settingUpserts.length = 0;
+  const limited = await POST(phReq({ headers }));
+  assert.equal(limited.status, 429);
+  await settle();
+  assert.equal(settingUpserts.filter((u) => u.key.startsWith("cron:lastRun:")).length, 0, "no run ledger row for a refused tick");
+});
 
 test("a failing now-playing snapshot degrades the run but keeps the 200 and every source's result", async () => {
   snapshotReadError = new Error("snapshot read failed");

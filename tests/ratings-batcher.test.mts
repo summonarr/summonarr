@@ -13,7 +13,7 @@
 //   • a key asked for again while its batch is on the wire joins that batch
 //     instead of costing a second POST.
 // No network: fetch is replaced with a scripted mock and restored in a finally.
-import { test } from "node:test";
+import { beforeEach, test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import type { RatingsPayload } from "../src/lib/client/ratings-batcher.ts";
@@ -22,7 +22,9 @@ import type { RatingsPayload } from "../src/lib/client/ratings-batcher.ts";
 // batcher (which statically imports base-path) loads, so the URL pin below is
 // exactly "/api/ratings/batch" regardless of the developer's shell env.
 delete process.env.NEXT_PUBLIC_BASE_PATH;
-const { requestRatings } = await import("../src/lib/client/ratings-batcher.ts");
+const { requestRatings, __resetRatingsBatcherForTests } = await import("../src/lib/client/ratings-batcher.ts");
+// Every test starts with nothing remembered and an immediate retry wait.
+beforeEach(() => __resetRatingsBatcherForTests({ retryDelayMs: 0 }));
 
 // ---------------------------------------------------------------------------
 // Scripted fetch mock (pattern: tests/chunked-upload.test.mts)
@@ -251,12 +253,13 @@ test("exactly MAX_BATCH requests fit one POST with no follow-up flush", async ()
 
 test("a failed oversize first batch still re-schedules and resolves the remainder", async () => {
   await withFetch(
-    (call, index) => (index === 0 ? jsonResponse(503, {}) : echoResponder(call)),
+    // The first batch (200 items) fails, and so does its one retry.
+    (call) => (call.items.length === 200 ? jsonResponse(503, {}) : echoResponder(call)),
     async (calls) => {
       const promises = Array.from({ length: 201 }, (_, i) => requestRatings(i + 1, "movie"));
       const results = await Promise.all(promises);
 
-      assert.equal(calls.length, 2);
+      assert.equal(calls.length, 3);
       for (const r of results.slice(0, 200)) assert.equal(r, null); // batch 1 failed → null
       assert.deepEqual(results[200], payloadFor("movie:201")); // batch 2 unaffected
     },
@@ -267,9 +270,11 @@ test("a failed oversize first batch still re-schedules and resolves the remainde
 // Error paths: always resolve(null), never reject, never hang
 // ---------------------------------------------------------------------------
 
-const failureModes: Array<[string, () => Response | Promise<Response>]> = [
-  ["a rejected fetch (network failure)", () => Promise.reject(new Error("network down"))],
-  ["a non-2xx response", () => jsonResponse(500, { error: "upstream boom" })],
+// [name, answer, POSTs sent]: a network failure and a 5xx are retried once.
+const failureModes: Array<[string, () => Response | Promise<Response>, number]> = [
+  ["a rejected fetch (network failure)", () => Promise.reject(new Error("network down")), 2],
+  ["a 5xx response", () => jsonResponse(500, { error: "upstream boom" }), 2],
+  ["a 4xx response", () => jsonResponse(400, { error: "bad batch" }), 1],
   [
     "an ok response whose JSON body fails to parse",
     () =>
@@ -278,15 +283,16 @@ const failureModes: Array<[string, () => Response | Promise<Response>]> = [
         status: 200,
         json: () => Promise.reject(new SyntaxError("unexpected token")),
       }) as unknown as Response,
+    1,
   ],
 ];
 
-for (const [name, respond] of failureModes) {
+for (const [name, respond, posts] of failureModes) {
   test(`${name} resolves every waiter to null instead of rejecting`, async () => {
     await withFetch(respond, async (calls) => {
       // A rejection here would fail the test — awaiting IS the never-rejects pin.
       const [a, b] = await Promise.all([requestRatings(1, "movie"), requestRatings(2, "tv")]);
-      assert.equal(calls.length, 1);
+      assert.equal(calls.length, posts);
       assert.equal(a, null);
       assert.equal(b, null);
     });
@@ -404,4 +410,38 @@ test("a batch the server never answers resolves its waiters null once the batch 
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test("a batch refused once (5xx or 429) is sent once more, and its answer resolves the cards", async () => {
+  const withRetryAfter = (status: number, retryAfter: string | null) =>
+    ({ ok: false, status, headers: { get: () => retryAfter }, json: () => Promise.resolve({}) }) as unknown as Response;
+  await withFetch(
+    (call, index) => (index === 0 ? withRetryAfter(429, "0") : echoResponder(call)),
+    async (calls) => {
+      assert.deepEqual(await requestRatings(41, "movie"), payloadFor("movie:41"));
+      assert.equal(calls.length, 2);
+    },
+  );
+  // A Retry-After past the short wait is not waited out: the cards resolve null.
+  await withFetch(
+    () => withRetryAfter(429, "60"),
+    async (calls) => {
+      assert.equal(await requestRatings(42, "movie"), null);
+      assert.equal(calls.length, 1);
+    },
+  );
+});
+
+test("an answered title is remembered: asking again sends nothing; a null answer is asked again", async () => {
+  await withFetch(
+    (call) => jsonResponse(200, { ratings: call.items.some((i) => i.id === 51) ? ratingsFor("movie:51") : {} }),
+    async (calls) => {
+      assert.deepEqual(await requestRatings(51, "movie"), payloadFor("movie:51"));
+      assert.deepEqual(await requestRatings(51, "movie"), payloadFor("movie:51"));
+      assert.equal(calls.length, 1);
+      assert.equal(await requestRatings(52, "movie"), null);
+      assert.equal(await requestRatings(52, "movie"), null);
+      assert.equal(calls.length, 3);
+    },
+  );
 });

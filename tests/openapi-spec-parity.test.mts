@@ -79,6 +79,7 @@ shadowPrismaModel(prisma, "setting", {
 });
 
 const openapi = await import("../src/app/api/openapi/route.ts");
+const { handlerCalls } = await import("./_openapi-spec.mts");
 
 function inScope<T>(fn: () => Promise<T>, cookie?: string): Promise<T> {
   const workStore = {
@@ -307,7 +308,10 @@ test("g-openapi#4: every /admin/arr/* operation behind arrFailure lists its 404,
     const key = `${method} ${path}`;
     const handler = handlerSlices(routeSource(path)).get(method);
     assert.ok(handler, `${key}: no ${method.toUpperCase()} handler in the route file`);
-    const failsThroughMap = /arrFailure\(|\bfailure\(/.test(handler);
+    // Followed through the route file's own helpers (a handler may hand its
+    // error to a local function that calls arrFailure).
+    const callees = new Set(handlerCalls(path, method).map((c) => c.callee));
+    const failsThroughMap = callees.has("arrFailure") || callees.has("failure");
     if (key in ARR_ERROR_EXEMPT) {
       seenExempt.add(key);
       assert.equal(failsThroughMap, false, `${key} is exempt (${ARR_ERROR_EXEMPT[key]}) but its handler calls arrFailure`);
@@ -470,7 +474,7 @@ test("the three release searches document one ArrRelease shape, field for field 
   assert.ok(fromRequests && fromIssues && fromAdmin);
   assert.deepEqual(fromIssues, fromRequests);
   assert.deepEqual(fromAdmin, fromRequests);
-  assert.deepEqual(keysOf(fromRequests), interfaceFields(libSource("arr.ts"), "ArrRelease"));
+  assert.deepEqual(keysOf(fromRequests), interfaceFields(libSource("arr-releases.ts"), "ArrRelease"));
   // The guid on the wire is the search's opaque handle, never the indexer's (guardrail 5e).
   assert.equal(fromRequests.properties?.guid.pattern, "^[0-9a-f]{32}$");
 });
@@ -480,7 +484,8 @@ test("GET /ratings documents every MdblistRatings field, and the batch map every
   const single = keysOf(jsonSchema(spec.paths["/ratings"].get, "200"));
   assert.deepEqual(single, interfaceFields(libSource("mdblist.ts"), "MdblistRatings"));
   const batchSrc = routeSource("/ratings/batch");
-  const projected = [...batchSrc.matchAll(/^\s+(\w+): item\.(\w+) \?\? null,$/gm)].map((m) => m[1]).sort();
+  const fieldList = /const RATING_FIELDS = \[([\s\S]*?)\] as const/.exec(batchSrc)?.[1] ?? "";
+  const projected = [...fieldList.matchAll(/"(\w+)"/g)].map((m) => m[1]).sort();
   assert.ok(projected.length >= 11, projected.join(","));
   const batchItem = jsonSchema(spec.paths["/ratings/batch"].post, "200")?.properties?.ratings?.additionalProperties;
   assert.deepEqual(keysOf(batchItem), projected);
@@ -537,7 +542,8 @@ test("every cron and sync operation behind getCronActor/isCronAuthorized lists a
     const src = routeSource(path.replace(/\{(\w+)\}/g, "[$1]"));
     for (const [method, op] of Object.entries(methods)) {
       const handler = handlerSlices(src).get(method) ?? src.slice(src.indexOf(`export async function ${method.toUpperCase()}`));
-      assert.match(handler, /getCronActor\(|isCronAuthorized\(/, `${method} ${path}`);
+      // defineCronRoute / withCronActor call getCronActor first (tests/cron-route.test.mts).
+      assert.match(handler, /getCronActor\(|isCronAuthorized\(|defineCronRoute\(|withCronActor\(/, `${method} ${path}`);
       const schemes = new Set((op.security ?? spec.security).flatMap((e) => Object.keys(e)));
       assert.ok(schemes.has("session") && schemes.has("sessionBearer"), `${method} ${path}: ${[...schemes].join(",")}`);
       // A poll (GET) is an admin's own job — the secret has no jobs; every run takes it.
@@ -557,7 +563,8 @@ test("enums copied from code match it: notification events and kinds, arr error 
   assert.deepEqual(post.kind?.enum, [...AGENT_KINDS]);
   const kinds = JSON.stringify(Object.keys(ARR_ERROR_KIND_KEYS));
   const text = JSON.stringify(spec);
-  const enums = [...text.matchAll(/"enum":(\["auth","timeout"[^\]]*\])/g)].map((m) => m[1]);
+  // A nullable field's enum ends in null (OpenAPI 3.0 checks `enum` before `nullable`).
+  const enums = [...text.matchAll(/"enum":(\["auth","timeout"[^\]]*\])/g)].map((m) => m[1].replace(/,null\]$/, "]"));
   assert.ok(enums.length >= 8, `found ${enums.length} arr error-kind enums`);
   for (const e of enums) assert.equal(e, kinds);
 });
@@ -565,8 +572,9 @@ test("enums copied from code match it: notification events and kinds, arr error 
 test("PATCH /settings documents what the handler does: unknown keys skipped, 413 cap, 500 on a failed write, tests before the write", async () => {
   const spec = await fullSpec();
   const src = handlerSlices(routeSource("/settings")).get("patch") ?? "";
-  assert.match(src, /if \(!isAllowedKey\(key\)\) continue;/);
-  assert.match(src, /readJsonCapped<Record<string, string>>\(req, 65536\)/);
+  assert.match(src, /checkSubmittedSettings\(body, /);
+  assert.match(libSource("settings-registry.ts"), /if \(!isSettingKey\(key\)\) continue;/);
+  assert.match(src, /readJsonCapped<Record<string, unknown>>\(req, 65536\)/);
   assert.match(src, /status: 500/);
   assert.match(src, /ignored/);
   const patch = spec.paths["/settings"].patch;

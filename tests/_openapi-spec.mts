@@ -70,6 +70,7 @@ export interface SchemaNode {
   format?: string;
   pattern?: string;
   nullable?: boolean;
+  writeOnly?: boolean;
   minimum?: number;
   maximum?: number;
   maxLength?: number;
@@ -107,10 +108,8 @@ export interface Spec {
   paths: Record<string, Record<string, SpecOp>>;
 }
 
-let cached: Spec | null = null;
-/** The served document, fetched once per process. */
-export async function getSpec(): Promise<Spec> {
-  if (cached) return cached;
+/** A fresh GET /api/openapi as an ADMIN: the served Response itself. */
+export async function specResponse(): Promise<Response> {
   const iat = Math.floor(Date.now() / 1000);
   const token = await signSessionJwt(
     { id: ADMIN.id, role: "ADMIN", permissions: Permission.ADMIN.toString(), provider: "credentials", sessionId: SESSION_ID, expiresAt: iat + 86_400 },
@@ -128,8 +127,15 @@ export async function getSpec(): Promise<Spec> {
     cookies: RequestCookiesAdapter.seal(new RequestCookies(reqHeaders)),
     usedDynamic: false,
   };
-  const res = await workAsyncStorage.run(workStore, () => workUnitAsyncStorage.run(requestStore, () =>
+  return workAsyncStorage.run(workStore, () => workUnitAsyncStorage.run(requestStore, () =>
     openapi.GET(new NextRequest("http://localhost:3000/api/openapi", { method: "GET", headers: { cookie } }), undefined)));
+}
+
+let cached: Spec | null = null;
+/** The served document, fetched once per process. */
+export async function getSpec(): Promise<Spec> {
+  if (cached) return cached;
+  const res = await specResponse();
   assert.equal(res.status, 200);
   cached = (await res.json()) as Spec;
   return cached;
@@ -206,6 +212,17 @@ export function prismaModelFields(model: string, skip: string[] = []): string[] 
   return [...body.matchAll(/^\s{2}(\w+)\s+\w+/gm)].map((m) => m[1]).filter((f) => !skip.includes(f)).sort();
 }
 
+/** The optional (`Type?`) scalar fields of a prisma model, sorted. */
+export function prismaOptionalFields(model: string): string[] {
+  const body = new RegExp(`model ${model} \\{([\\s\\S]*?)\\n\\}`).exec(readRepo("prisma/schema.prisma"))?.[1];
+  assert.ok(body, `model ${model} not found`);
+  return [...body.matchAll(/^\s{2}(\w+)\s+\w+\?/gm)].map((m) => m[1]).sort();
+}
+
+/** The names of an object schema's properties marked `nullable: true`, sorted. */
+export const nullableKeys = (schema: SchemaNode | undefined): string[] =>
+  Object.entries(schema?.properties ?? {}).filter(([, v]) => v.nullable === true).map(([k]) => k).sort();
+
 /**
  * The top-level keys of every object literal a handler answers with —
  * `NextResponse.json({ … })` / `Response.json({ … })` (and `json({ … })`
@@ -250,4 +267,114 @@ export function constObjectKeys(src: string, name: string): string[] {
   visit(sf);
   assert.ok(found, `const ${name} = { … } not found`);
   return found;
+}
+
+// ── A handler's calls, and the numbers it passes ─────────────────────────────
+
+/** A call a handler makes: the callee's name, its argument nodes, and the file they're in. */
+export interface HandlerCall {
+  callee: string;
+  args: readonly ts.Expression[];
+  file: string;
+  sf: ts.SourceFile;
+}
+
+const parsedFiles = new Map<string, ts.SourceFile>();
+function parseRepoFile(rel: string): ts.SourceFile {
+  let sf = parsedFiles.get(rel);
+  if (!sf) {
+    sf = ts.createSourceFile(rel, readRepo(rel), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    parsedFiles.set(rel, sf);
+  }
+  return sf;
+}
+
+const HTTP_METHOD_NAMES = new Set(["GET", "POST", "PATCH", "DELETE", "PUT"]);
+const isExported = (node: ts.Node) =>
+  ts.canHaveModifiers(node) && (ts.getModifiers(node) ?? []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+
+/** A file's top-level functions and consts by name, and its exported method handlers. */
+function topLevel(sf: ts.SourceFile): { locals: Map<string, ts.Node>; handlers: Map<string, ts.Node> } {
+  const locals = new Map<string, ts.Node>();
+  const handlers = new Map<string, ts.Node>();
+  for (const st of sf.statements) {
+    if (ts.isFunctionDeclaration(st) && st.name) {
+      (isExported(st) && HTTP_METHOD_NAMES.has(st.name.text) ? handlers : locals).set(st.name.text, st);
+    } else if (ts.isVariableStatement(st)) {
+      for (const d of st.declarationList.declarations) {
+        if (!ts.isIdentifier(d.name) || !d.initializer) continue;
+        (isExported(st) && HTTP_METHOD_NAMES.has(d.name.text) ? handlers : locals).set(d.name.text, d.initializer);
+      }
+    }
+  }
+  return { locals, handlers };
+}
+
+/**
+ * Every named call one operation's handler makes — directly, or through a
+ * function or const declared in its own route file (followed transitively).
+ * Calls a lib module makes on its behalf are not seen.
+ */
+export function handlerCalls(path: string, method: string): HandlerCall[] {
+  const file = `src/app/api${path.replace(/\{(\w+)\}/g, "[$1]")}/route.ts`;
+  const sf = parseRepoFile(file);
+  const { locals, handlers } = topLevel(sf);
+  const handler = handlers.get(method.toUpperCase());
+  assert.ok(handler, `no ${method.toUpperCase()} handler for ${path}`);
+  const out: HandlerCall[] = [];
+  const seen = new Set<string>();
+  const walk = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      out.push({ callee: node.expression.text, args: node.arguments, file, sf });
+    }
+    if (ts.isIdentifier(node) && locals.has(node.text) && !seen.has(node.text)) {
+      seen.add(node.text);
+      walk(locals.get(node.text) as ts.Node);
+    }
+    ts.forEachChild(node, walk);
+  };
+  walk(handler);
+  return out;
+}
+
+/**
+ * The number an expression evaluates to — a literal (`65_536`), a product or sum
+ * of them (`16 * 1024`), a top-level const of the same file, or a const imported
+ * from `@/lib/…` — or null when it can't be read statically.
+ */
+export function numericValue(expr: ts.Expression, file: string): number | null {
+  const sf = parseRepoFile(file);
+  if (ts.isParenthesizedExpression(expr) || ts.isAsExpression(expr) || ts.isSatisfiesExpression(expr)) return numericValue(expr.expression, file);
+  if (ts.isNumericLiteral(expr)) return Number(expr.text.replace(/_/g, ""));
+  if (ts.isBinaryExpression(expr)) {
+    const l = numericValue(expr.left, file);
+    const r = numericValue(expr.right, file);
+    if (l === null || r === null) return null;
+    if (expr.operatorToken.kind === ts.SyntaxKind.AsteriskToken) return l * r;
+    if (expr.operatorToken.kind === ts.SyntaxKind.PlusToken) return l + r;
+    return null;
+  }
+  if (!ts.isIdentifier(expr)) return null;
+  const local = topLevel(sf).locals.get(expr.text);
+  if (local && ts.isExpression(local)) return numericValue(local, file);
+  for (const st of sf.statements) {
+    if (!ts.isImportDeclaration(st) || !ts.isStringLiteral(st.moduleSpecifier)) continue;
+    const bindings = st.importClause?.namedBindings;
+    if (!bindings || !ts.isNamedImports(bindings)) continue;
+    const spec = bindings.elements.find((e) => e.name.text === expr.text);
+    if (!spec || !st.moduleSpecifier.text.startsWith("@/lib/")) continue;
+    const libFile = `src/lib/${st.moduleSpecifier.text.slice("@/lib/".length)}.ts`;
+    const exported = topLevel(parseRepoFile(libFile)).locals.get((spec.propertyName ?? spec.name).text);
+    return exported && ts.isExpression(exported) ? numericValue(exported, libFile) : null;
+  }
+  return null;
+}
+
+/** A top-level `const <name> = <number>` of a repo file, evaluated. */
+export function fileConstNumber(file: string, name: string): number {
+  const node = topLevel(parseRepoFile(file)).locals.get(name);
+  assert.ok(node && ts.isExpression(node), `${file}: no top-level const ${name}`);
+  const value = numericValue(node, file);
+  assert.ok(value !== null, `${file}: ${name} is not a static number`);
+  return value;
 }

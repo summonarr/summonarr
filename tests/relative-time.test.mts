@@ -42,15 +42,12 @@ test("future timestamps degrade to \"just now\" (never negative units)", () => {
   assert.equal(formatRelativeTime(Date.now() + 60 * 60_000), "just now");
 });
 
-// Pins CURRENT behavior, not an endorsement: an unparseable timestamp makes
-// new Date(...).getTime() return NaN, NaN fails every `<` threshold check, and
-// the function falls through to the days branch — rendering "NaNd ago" in the
-// activity/audit tables. If a malformed upstream timestamp should render
-// something friendlier (e.g. ""), change this test deliberately alongside src.
-test("unparseable input currently falls through to \"NaNd ago\"", () => {
-  assert.equal(formatRelativeTime("garbage"), "NaNd ago");
-  assert.equal(formatRelativeTime(new Date(NaN)), "NaNd ago");
-  assert.equal(formatRelativeTime(Number.NaN), "NaNd ago");
+// An unparseable timestamp renders nothing rather than "NaNd ago" in the
+// activity/audit tables, the same as the localized variant.
+test("unparseable input renders an empty string", () => {
+  assert.equal(formatRelativeTime("garbage"), "");
+  assert.equal(formatRelativeTime(new Date(NaN)), "");
+  assert.equal(formatRelativeTime(Number.NaN), "");
 });
 
 // ── formatRelativeTimeLocalized ─────────────────────────────────────────────
@@ -89,4 +86,20 @@ test("no component carries its own relative-time formatter", () => {
   };
   walk(root);
   assert.deepEqual(offenders, []);
+});
+
+test("an unparsable date renders nothing in every variant, never NaN", async () => {
+  const { formatRelativeTimeWithDateFallback } = await import("../src/lib/relative-time.ts");
+  assert.equal(formatRelativeTime("not a date"), "");
+  assert.equal(formatRelativeTimeWithDateFallback("not a date"), "");
+  assert.equal(formatRelativeTimeLocalized("not a date", "es"), "");
+});
+
+test("the date fallback starts at 30 days and takes a locale", async () => {
+  const { formatRelativeTimeWithDateFallback } = await import("../src/lib/relative-time.ts");
+  const day = 24 * 60 * 60_000;
+  assert.equal(formatRelativeTimeWithDateFallback(Date.now() - 29 * day), "29d ago");
+  const old = Date.UTC(2020, 0, 15, 12);
+  assert.equal(formatRelativeTimeWithDateFallback(old), "Jan 15, 2020");
+  assert.equal(formatRelativeTimeWithDateFallback(old, "de-DE"), new Date(old).toLocaleDateString("de-DE", { month: "short", day: "numeric", year: "numeric" }));
 });

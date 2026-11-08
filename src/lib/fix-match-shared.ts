@@ -1,23 +1,30 @@
 import nodePath from "node:path";
 import { getCache, tmdbDetailsKey } from "./tmdb-cache";
 import { processSingleton } from "./process-singleton";
+import { PLEX_CLIENT_ID } from "./plex-http";
+import { PLEX_PRODUCT } from "./plex-client-headers";
 
 // Helpers the fix-match routes share (the POST, candidates, file-info): one
 // definition of how a library path is compared with a Radarr/Sonarr folder, how
 // a cached TMDB title is read, and the Plex admin headers.
 
 /**
- * A library or arr path made comparable: Windows separators folded, one
- * trailing separator dropped, posix-normalised. A blank (or degenerate) path is
- * "" — never ".", which `posix.normalize("")` returns and which is truthy, so a
- * presence check on it passed for a row with no path at all.
+ * A library or arr path made comparable: Windows separators folded,
+ * posix-normalised, then the trailing separator dropped. Normalising FIRST
+ * matters: normalize collapses a run of separators but keeps a trailing one, so
+ * stripping before it left "/movies//" as "/movies/", which never matched.
+ * A blank (or degenerate) path is "" — never ".", which `posix.normalize("")`
+ * returns and which is truthy, so a presence check on it passed for a row with
+ * no path at all. The root alone ("/") is degenerate too.
  */
 export function normaliseLibraryPath(raw: string | null | undefined): string {
   if (typeof raw !== "string" || !raw.trim()) return "";
-  const folded = raw.replace(/\\/g, "/").replace(/\/$/, "");
-  if (!folded) return "";
-  const n = nodePath.posix.normalize(folded);
-  return n === "." ? "" : n;
+  const n = nodePath.posix.normalize(raw.replace(/\\/g, "/"));
+  // A scan, never a /\/+$/ regex (guardrail 5i: it backtracks over a run).
+  let end = n.length;
+  while (end > 0 && n.charCodeAt(end - 1) === 47 /* "/" */) end--;
+  const trimmed = n.slice(0, end);
+  return trimmed === "." ? "" : trimmed;
 }
 
 /**
@@ -60,8 +67,8 @@ export function plexAdminHeaders(token: string): Record<string, string> {
   return {
     Accept: "application/json",
     "X-Plex-Token": token,
-    "X-Plex-Client-Identifier": "summonarr-server",
-    "X-Plex-Product": "Summonarr",
+    "X-Plex-Client-Identifier": PLEX_CLIENT_ID,
+    "X-Plex-Product": PLEX_PRODUCT,
     "User-Agent": "Summonarr/1.0 (Node.js)",
   };
 }

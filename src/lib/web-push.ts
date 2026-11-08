@@ -20,6 +20,7 @@ import {
   createCipheriv,
 } from "node:crypto";
 import { safeFetch } from "@/lib/safe-fetch";
+import { processSingleton } from "@/lib/process-singleton";
 
 export interface VapidKeys {
   publicKey: string;
@@ -148,9 +149,25 @@ function importVapidPrivateKey(privateKeyB64: string, publicKeyB64: string) {
 
 // ---------- VAPID JWT (RFC 8292) ----------
 
-function buildVapidJwt(opts: { audience: string; contact: string; publicKey: string; privateKey: string }): string {
+interface VapidJwtOptions {
+  audience: string;
+  contact: string;
+  publicKey: string;
+  privateKey: string;
+}
+
+const VAPID_JWT_LIFETIME_SECONDS = 12 * 60 * 60;
+// A cached token is reused while it has at least this long left, so a push
+// service never sees one about to expire.
+const VAPID_JWT_MIN_REMAINING_SECONDS = 60 * 60;
+// One entry per push-service origin (FCM, autopush, Apple, …) per key; a handful
+// in practice. The bound only stops a flood of odd endpoints growing it forever.
+const VAPID_JWT_CACHE_MAX = 256;
+
+// Exported for tests: signs a fresh token on every call.
+export function signVapidJwt(opts: VapidJwtOptions): { jwt: string; exp: number } {
   const header = base64UrlEncode(Buffer.from(JSON.stringify({ typ: "JWT", alg: "ES256" })));
-  const exp = Math.floor(Date.now() / 1000) + 12 * 60 * 60; // 12 hours
+  const exp = Math.floor(Date.now() / 1000) + VAPID_JWT_LIFETIME_SECONDS;
   const claims = base64UrlEncode(
     Buffer.from(JSON.stringify({ aud: opts.audience, exp, sub: opts.contact })),
   );
@@ -164,23 +181,52 @@ function buildVapidJwt(opts: { audience: string; contact: string; publicKey: str
   // Node's default DER encoding; ieee-p1363 produces exactly that.
   const rawSig = signer.sign({ key: keyObj, dsaEncoding: "ieee-p1363" });
 
-  return `${signingInput}.${base64UrlEncode(rawSig)}`;
+  return { jwt: `${signingInput}.${base64UrlEncode(rawSig)}`, exp };
+}
+
+// Every subscription on one push service shares an audience, so a fan-out to
+// N devices signs once instead of N times (a key import plus an ECDSA sign each).
+const vapidJwtCache = processSingleton("web-push:vapidJwtCache", () => new Map<string, { jwt: string; exp: number }>());
+
+function buildVapidJwt(opts: VapidJwtOptions): string {
+  const key = [opts.audience, opts.contact, opts.publicKey, opts.privateKey].join("\0");
+  const now = Math.floor(Date.now() / 1000);
+  const hit = vapidJwtCache.get(key);
+  if (hit && hit.exp - now >= VAPID_JWT_MIN_REMAINING_SECONDS) return hit.jwt;
+  const fresh = signVapidJwt(opts);
+  if (!hit && vapidJwtCache.size >= VAPID_JWT_CACHE_MAX) vapidJwtCache.clear();
+  vapidJwtCache.set(key, fresh);
+  return fresh.jwt;
 }
 
 // ---------- Payload encryption (RFC 8291, aes128gcm) ----------
 
-interface EncryptResult {
-  body: Uint8Array;
+interface EncryptInput {
+  payload: Uint8Array;
+  /** The subscription's p256dh point (65-byte uncompressed). */
+  uaPublicKeyRaw: Uint8Array;
+  /** The subscription's 16-byte auth secret. */
+  authSecret: Uint8Array;
+  salt: Uint8Array;
+  /** This send's ephemeral application-server public point. */
+  asEphemeralPublicRaw: Uint8Array;
+  ecdhSharedSecret: Uint8Array;
 }
 
-function encryptPayload(
-  payload: Uint8Array,
-  uaPublicKeyRaw: Uint8Array,
-  authSecret: Uint8Array,
-  salt: Uint8Array,
-  asEphemeralPublicRaw: Uint8Array,
-  ecdhSharedSecret: Uint8Array,
-): EncryptResult {
+// RFC 8188 §2.1: the record size. 4096 is the standard choice, and the push
+// services' own payload limit, so the whole payload is always one record.
+const RECORD_SIZE = 4096;
+// Per record: the 0x02 last-record delimiter plus the 16-byte GCM tag.
+const RECORD_OVERHEAD = 1 + 16;
+export const MAX_PUSH_PAYLOAD_BYTES = RECORD_SIZE - RECORD_OVERHEAD;
+
+function encryptPayload(input: EncryptInput): Uint8Array {
+  const { payload, uaPublicKeyRaw, authSecret, salt, asEphemeralPublicRaw, ecdhSharedSecret } = input;
+  // A longer payload would need a second record; one record larger than rs is
+  // malformed and every push service refuses it.
+  if (payload.length > MAX_PUSH_PAYLOAD_BYTES) {
+    throw new Error(`Web Push payload is ${payload.length} bytes, over the ${MAX_PUSH_PAYLOAD_BYTES}-byte single-record limit`);
+  }
   // RFC 8291 §3.4 — derive IKM from the auth secret + ECDH shared secret + key info
   const keyInfo = Buffer.concat([
     Buffer.from("WebPush: info\0", "utf8"),
@@ -205,9 +251,7 @@ function encryptPayload(
   const ciphertext = Buffer.concat([encrypted, authTag]);
 
   // RFC 8188 §2.1 header: salt(16) || rs(4 BE) || idlen(1) || keyid(idlen)
-  // rs must be at least 18 (payload byte + delimiter + tag overhead). 4096 is the
-  // standard choice — larger than any realistic notification payload.
-  const rs = 4096;
+  const rs = RECORD_SIZE;
   const keyid = Buffer.from(asEphemeralPublicRaw);
   const header = Buffer.alloc(16 + 4 + 1 + keyid.length);
   Buffer.from(salt).copy(header, 0);
@@ -215,7 +259,7 @@ function encryptPayload(
   header.writeUInt8(keyid.length, 20);
   keyid.copy(header, 21);
 
-  return { body: new Uint8Array(Buffer.concat([header, ciphertext])) };
+  return new Uint8Array(Buffer.concat([header, ciphertext]));
 }
 
 // ---------- Public API ----------
@@ -261,14 +305,14 @@ export async function sendPushNotification(
   const ecdhSecret = new Uint8Array(diffieHellman({ privateKey: as.privateKey, publicKey: uaPublicKey }));
 
   const salt = new Uint8Array(randomBytes(16));
-  const { body } = encryptPayload(
-    new TextEncoder().encode(payload),
-    uaPublicRaw,
+  const body = encryptPayload({
+    payload: new TextEncoder().encode(payload),
+    uaPublicKeyRaw: uaPublicRaw,
     authSecret,
     salt,
-    asPublicRaw,
-    ecdhSecret,
-  );
+    asEphemeralPublicRaw: asPublicRaw,
+    ecdhSharedSecret: ecdhSecret,
+  });
 
   const headers: Record<string, string> = {
     Authorization: `vapid t=${jwt}, k=${options.vapidPublicKey}`,
@@ -288,9 +332,33 @@ export async function sendPushNotification(
   });
 
   if (!res.ok) {
-    const errBody = await res.text().catch(() => "");
-    throw new WebPushError(res.status, errBody);
+    throw new WebPushError(res.status, await readBodyPrefix(res, MAX_ERROR_BODY_BYTES));
   }
-  // Drain the response body so the underlying socket can be released.
-  await res.arrayBuffer().catch(() => undefined);
+  // Nothing in a success answer is used: release the socket without reading it.
+  await res.body?.cancel().catch(() => undefined);
+}
+
+// The endpoint comes from a browser's subscription, so its error answer is
+// untrusted: keep a short prefix (WebPushError.body is logged), never the
+// whole body safeFetch would allow.
+const MAX_ERROR_BODY_BYTES = 2048;
+
+async function readBodyPrefix(res: Response, maxBytes: number): Promise<string> {
+  const reader = res.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (total < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.byteLength;
+    }
+  } catch {
+    // A body that broke off keeps what arrived.
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return Buffer.concat(chunks).subarray(0, maxBytes).toString("utf8");
 }

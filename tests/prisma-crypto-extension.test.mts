@@ -30,32 +30,21 @@
 //   1. Coverage — the real operation list is read off the generated client at
 //      runtime, so a Prisma upgrade that ADDS an operation fails here rather
 //      than silently opening a hole in a version bump.
-//   2. Reachability — the six deliberately-unhandled operations must stay
-//      unused. `setting.delete()` returns the deleted row INCLUDING its value,
-//      and `account.delete()` returns the token columns; neither is wrapped, so
-//      both would hand the caller raw ciphertext. Today nothing calls them, and
-//      that — not the extension — is the only thing closing that hole. This
-//      test makes the boundary explicit: start using one and you must extend
-//      the extension first.
-//   3. Behaviour — the bypass guards (createMany/updateMany and their *AndReturn
-//      twins, which apply one payload to many rows and so cannot be encrypted
-//      per-key) must actually throw, and must throw BEFORE any query is issued.
+//   2. Reachability — the deliberately-unhandled operations that CAN surface a
+//      protected column (groupBy, aggregate) must stay unused. This test makes
+//      the boundary explicit: start using one and you must extend the
+//      extension first.
+//   3. Behaviour — each handler is called with a fake query (the handlers are
+//      exported from src/lib/prisma-crypto.ts), so what it sends the database
+//      and what it hands back are OBSERVED: reads decrypt, writes encrypt
+//      before the query, and the bypass guards (createMany/updateMany and their
+//      *AndReturn twins, which apply one payload to many rows and so cannot be
+//      encrypted per-key) throw BEFORE any query is issued.
 //
 // No database: the guards throw synchronously inside the extension, so they are
 // reachable with DATABASE_URL pointed at a closed port. The one test that
 // deliberately lets a call through asserts it fails on the CONNECTION instead,
 // which is what proves the guard was not what stopped it.
-//
-// KNOWN LIMIT, stated plainly: the decrypt/encrypt wiring is checked by reading
-// the handler SOURCE, not by observing a round-trip — the read path needs a real
-// query to decrypt, and this suite never touches a database. So it catches a
-// crypto call that was DELETED (the realistic refactor slip, and the shape both
-// historical gaps took) but not one that was left in place and made unreachable
-// by an early return. Verified by mutation: dropping the decrypt line from an
-// *OrThrow handler, dropping the encrypt from account.create, and adding a new
-// read handler with no decrypt are all caught; an `if (true) return query(args)`
-// inserted above intact code is not. Closing that last case needs an integration
-// test against a real Postgres, which is out of scope for this suite.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -89,30 +78,11 @@ console.log = (...args: unknown[]) => {
 
 const { prisma } = await import("../src/lib/prisma.ts");
 
-const SOURCE = readFileSync(new URL("../src/lib/prisma.ts", import.meta.url), "utf8");
+const { cryptoQueryExtension } = await import("../src/lib/prisma-crypto.ts");
+const { encryptToken } = await import("../src/lib/token-crypto.ts");
+const H = await import("./_crypto-handlers.mts");
 
 // ── what the extension actually handles ─────────────────────────────────────
-
-/** Operation names the extension declares under `query: { <model>: { … } }`. */
-function handledOperations(model: "setting" | "account"): string[] {
-  const queryBlock = SOURCE.slice(SOURCE.indexOf("query: {"));
-  const start = queryBlock.indexOf(`      ${model}: {`);
-  assert.ok(start >= 0, `the extension declares no query block for ${model} — parse or source drift`);
-  const segment = queryBlock.slice(start, queryBlock.indexOf("\n      },", start));
-  return [...segment.matchAll(/^\s{8}async (\w+)\(/gm)].map((m) => m[1]);
-}
-
-/** Source body of one declared handler, for checking it does real work. */
-function handlerBody(model: "setting" | "account", op: string): string {
-  const queryBlock = SOURCE.slice(SOURCE.indexOf("query: {"));
-  const modelStart = queryBlock.indexOf(`      ${model}: {`);
-  const segment = queryBlock.slice(modelStart, queryBlock.indexOf("\n      },", modelStart));
-  const start = segment.indexOf(`        async ${op}(`);
-  assert.ok(start >= 0, `${model}.${op} has no handler to read`);
-  // Handlers are uniformly indented, so the next 8-space `},` closes this one.
-  const end = segment.indexOf("\n        },", start);
-  return segment.slice(start, end === -1 ? undefined : end);
-}
 
 /** Real operations Prisma exposes on a delegate, read off the generated client. */
 function delegateOperations(model: "setting" | "account"): string[] {
@@ -121,25 +91,29 @@ function delegateOperations(model: "setting" | "account"): string[] {
 }
 
 const HANDLED = {
-  setting: handledOperations("setting"),
-  account: handledOperations("account"),
+  setting: Object.keys(cryptoQueryExtension.setting),
+  account: Object.keys(cryptoQueryExtension.account),
 };
 
 // Deliberately unhandled. `count` returns a scalar and `findRaw`/`aggregateRaw`
 // are MongoDB-only, so those three are structurally incapable of leaking a
-// column. `delete`, `groupBy` and `aggregate` CAN surface the protected columns
-// and are unhandled purely because nothing calls them — see the reachability
-// test below, which is what keeps that true.
-const EXPECTED_UNHANDLED = ["delete", "groupBy", "count", "aggregate", "findRaw", "aggregateRaw"];
+// column. `groupBy` and `aggregate` CAN surface the protected columns and are
+// unhandled purely because nothing calls them — see the reachability test
+// below, which is what keeps that true. An Account deleteMany returns a count,
+// so it needs no handler; Setting's releases the decrypt-failure banner.
+const EXPECTED_UNHANDLED = {
+  setting: ["groupBy", "count", "aggregate", "findRaw", "aggregateRaw"],
+  account: ["deleteMany", "groupBy", "count", "aggregate", "findRaw", "aggregateRaw"],
+};
 
 // ── non-vacuity ─────────────────────────────────────────────────────────────
 
-test("both the delegate enumeration and the source parse found real data", () => {
+test("both the delegate enumeration and the handler map found real data", () => {
   for (const model of ["setting", "account"] as const) {
     const ops = delegateOperations(model);
     assert.ok(ops.length >= 15, `only ${ops.length} operations enumerated on prisma.${model} — the probe is broken`);
     assert.ok(ops.includes("findMany") && ops.includes("upsert"), `prisma.${model} is missing core operations`);
-    assert.ok(HANDLED[model].length >= 10, `only ${HANDLED[model].length} handlers parsed for ${model} — the parse is broken`);
+    assert.ok(HANDLED[model].length >= 10, `only ${HANDLED[model].length} handlers for ${model}`);
   }
 });
 
@@ -158,137 +132,98 @@ test("every operation the extension declares is a REAL Prisma operation", () => 
   }
 });
 
-test("the unhandled set is exactly the six known-safe operations — a Prisma upgrade cannot widen it silently", () => {
+test("the unhandled set is exactly the known-safe operations — a Prisma upgrade cannot widen it silently", () => {
   for (const model of ["setting", "account"] as const) {
     const handled = new Set(HANDLED[model]);
     const unhandled = delegateOperations(model).filter((op) => !handled.has(op)).sort();
     assert.deepEqual(
       unhandled,
-      [...EXPECTED_UNHANDLED].sort(),
+      [...EXPECTED_UNHANDLED[model]].sort(),
       `${model}: the set of operations bypassing the crypto extension changed. If Prisma added an operation, ` +
         "decide deliberately whether it can surface Setting.value / the Account token columns and either handle " +
-        "it in src/lib/prisma.ts or add it to EXPECTED_UNHANDLED with a reason.",
+        "it in src/lib/prisma-crypto.ts or add it to EXPECTED_UNHANDLED with a reason.",
     );
   }
 });
 
-test("guardrail 7a: the *OrThrow twins are handled wherever their base operation is", () => {
-  // The documented recurring bug. findUniqueOrThrow is NOT an alias for
-  // findUnique — it is a separate operation with its own interception point,
-  // and an uncovered one returns ciphertext.
-  for (const model of ["setting", "account"] as const) {
-    const handled = new Set(HANDLED[model]);
-    for (const base of ["findUnique", "findFirst"]) {
-      assert.ok(handled.has(base), `${model}.${base} is not handled`);
-      assert.ok(
-        handled.has(`${base}OrThrow`),
-        `${model}.${base}OrThrow is NOT handled while ${model}.${base} is. They are separate Prisma operations, ` +
-          "not aliases — the OrThrow variant returns raw ciphertext to the caller.",
-      );
-    }
+test("every column model gets the same operation set from the one factory", () => {
+  // The protected columns differ but the operations that can reach them do
+  // not, so a handler present on one model and missing on another is a gap.
+  const base = [...HANDLED.account].sort();
+  assert.deepEqual([...Object.keys(cryptoQueryExtension.userTotp)].sort(), base);
+  assert.deepEqual([...Object.keys(cryptoQueryExtension.notificationAgent)].sort(), base);
+  assert.deepEqual([...HANDLED.setting].filter((op) => op !== "deleteMany").sort(), base);
+});
+
+// Declaring a handler is not the same as doing the work. These call each
+// handler with a fake query and look at what goes in and what comes out.
+
+const SENSITIVE_KEY = "radarrApiKey";
+
+test("every Account handler that returns rows decrypts all three token columns", async () => {
+  for (const column of ["access_token", "refresh_token", "id_token"]) {
+    await H.assertReadsDecrypt(cryptoQueryExtension.account, column, (c) => ({ id: "acc-1", [column]: c }));
   }
 });
 
-test("guardrail 7a: the *AndReturn twins are handled wherever their base operation is", () => {
-  // Same class: createManyAndReturn is a distinct operation from createMany.
-  for (const model of ["setting", "account"] as const) {
-    const handled = new Set(HANDLED[model]);
-    for (const base of ["createMany", "updateMany"]) {
-      assert.ok(handled.has(base), `${model}.${base} is not handled`);
-      assert.ok(
-        handled.has(`${base}AndReturn`),
-        `${model}.${base}AndReturn is NOT handled while ${model}.${base} is — a distinct operation, and the ` +
-          "AndReturn variant both writes AND reads back the protected column.",
-      );
-    }
-  }
-});
-
-// Declaring a handler is not the same as doing the work. A read handler that
-// exists but returns `query(args)` untouched passes every coverage check above
-// while shipping raw ciphertext to the caller — and it looks entirely
-// unremarkable in a diff. These two tests read the handler bodies and require
-// each one to actually invoke the crypto helper its position demands.
-
-const DECRYPT_HELPER = {
-  setting: "safeDecryptSettingValue",
-  account: "decryptAccountTokensInPlace",
-} as const;
-const ENCRYPT_HELPER = {
-  setting: /encryptToken|encryptSettingRowsInPlace/,
-  account: /encryptAccountTokensInPlace|assertNoAccountTokens/,
-} as const;
-
-const READ_OPS = ["findUnique", "findFirst", "findUniqueOrThrow", "findFirstOrThrow", "findMany"];
-const SINGLE_WRITE_OPS = ["create", "update", "upsert"];
-const MANY_WRITE_OPS = ["createMany", "updateMany", "createManyAndReturn", "updateManyAndReturn"];
-
-test("every READ handler actually decrypts — not just declared, but wired to the helper", () => {
-  for (const model of ["setting", "account"] as const) {
-    for (const op of READ_OPS) {
-      const body = handlerBody(model, op);
-      assert.ok(
-        body.includes(DECRYPT_HELPER[model]),
-        `${model}.${op} is declared but never calls ${DECRYPT_HELPER[model]} — it hands the caller raw ` +
-          `ciphertext while looking fully covered.\n  ${body.replace(/\s+/g, " ").slice(0, 160)}`,
-      );
-    }
-  }
-});
-
-test("every WRITE handler either encrypts or explicitly refuses the bypass", () => {
-  for (const model of ["setting", "account"] as const) {
-    for (const op of [...SINGLE_WRITE_OPS, ...MANY_WRITE_OPS]) {
-      const body = handlerBody(model, op);
-      const encrypts = ENCRYPT_HELPER[model].test(body);
-      const refuses = /is forbidden — use/.test(body);
-      assert.ok(
-        encrypts || refuses,
-        `${model}.${op} neither encrypts nor refuses — a write through it lands in PLAINTEXT at rest ` +
-          `(guardrail 7a).\n  ${body.replace(/\s+/g, " ").slice(0, 160)}`,
-      );
-    }
-    // The *AndReturn pair both writes AND reads back, so it owes the decrypt too
-    // — unless it refuses outright, in which case nothing is returned at all.
-    for (const op of ["createManyAndReturn", "updateManyAndReturn"]) {
-      const body = handlerBody(model, op);
-      if (/is forbidden — use/.test(body) && !body.includes("await query")) continue;
-      assert.ok(
-        body.includes(DECRYPT_HELPER[model]),
-        `${model}.${op} returns rows without decrypting them — it both writes and reads back`,
-      );
-    }
-  }
-});
-
-test("every single-row WRITE handler hands back plaintext — it decrypts the row its query returns", () => {
-  // create/update/upsert return the written row. UserTotp and NotificationAgent
-  // always decrypted it while Setting and Account returned the stored enc:v1
-  // value, so the same call shape gave a caller plaintext or ciphertext
-  // depending on the model. The encrypt must still come BEFORE the query.
-  for (const model of ["setting", "account"] as const) {
-    for (const op of SINGLE_WRITE_OPS) {
-      const body = handlerBody(model, op);
-      const queryAt = body.indexOf("await query(args)");
-      const decryptAt = body.indexOf(DECRYPT_HELPER[model], queryAt);
-      assert.ok(
-        queryAt >= 0 && decryptAt > queryAt,
-        `${model}.${op} returns the written row without decrypting it — the caller gets raw ciphertext.\n  ` +
-          body.replace(/\s+/g, " ").slice(0, 200),
-      );
-      const encryptAt = body.search(ENCRYPT_HELPER[model]);
-      assert.ok(encryptAt >= 0 && encryptAt < queryAt, `${model}.${op} must encrypt BEFORE the query runs`);
-    }
-  }
-});
-
-test("both models are covered identically — divergence is how one of them grows a hole", () => {
-  assert.deepEqual(
-    [...HANDLED.setting].sort(),
-    [...HANDLED.account].sort(),
-    "setting and account no longer intercept the same operation set. The protected columns differ but the " +
-      "operations that can reach them do not, so a handler present on one and missing on the other is a gap.",
+test("every Setting handler that returns rows decrypts a sensitive key's value", async () => {
+  await H.assertReadsDecrypt(
+    cryptoQueryExtension.setting,
+    "value",
+    (c) => ({ key: SENSITIVE_KEY, value: c }),
+    () => ({ where: { key: SENSITIVE_KEY } }),
   );
+});
+
+test("a Setting read of a key-less select names the row from where.key, and a plain key is never decrypted", async () => {
+  const plain = "plain-secret-value";
+  const { result } = await H.runHandler(cryptoQueryExtension.setting, "findUnique", { where: { key: SENSITIVE_KEY } }, { value: encryptToken(plain) });
+  assert.equal((result as { value: string }).value, plain);
+  const { result: flag } = await H.runHandler(cryptoQueryExtension.setting, "findUnique", { where: { key: "someFlag" } }, { key: "someFlag", value: "true" });
+  assert.equal((flag as { value: string }).value, "true");
+});
+
+test("single-row writes encrypt every branch before the query and hand back plaintext", async () => {
+  for (const column of ["access_token", "refresh_token", "id_token"]) {
+    await H.assertSingleWritesEncrypt(cryptoQueryExtension.account, column, (value) => ({ [column]: value }), { id: "acc-1" });
+  }
+  await H.assertSingleWritesEncrypt(
+    cryptoQueryExtension.setting,
+    "value",
+    (value) => ({ key: SENSITIVE_KEY, value }),
+    { key: SENSITIVE_KEY },
+  );
+});
+
+test("a Setting write of a NON-sensitive key stays plain text", async () => {
+  const { sent } = await H.runHandler(cryptoQueryExtension.setting, "upsert", {
+    where: { key: "someFlag" }, create: { key: "someFlag", value: "true" }, update: { value: "true" },
+  }, { key: "someFlag", value: "true" });
+  assert.equal((sent?.create as { value: string }).value, "true");
+  assert.equal((sent?.update as { value: string }).value, "true");
+});
+
+test("Setting createMany encrypts each sensitive row", async () => {
+  for (const op of ["createMany", "createManyAndReturn"]) {
+    const { sent } = await H.runHandler(cryptoQueryExtension.setting, op, {
+      data: [{ key: SENSITIVE_KEY, value: "s1" }, { key: "someFlag", value: "true" }],
+    }, op === "createMany" ? { count: 2 } : []);
+    const rows = sent?.data as Array<{ value: string }>;
+    H.assertEncrypted(rows[0].value, `${op} sensitive row`);
+    assert.equal(rows[1].value, "true", `${op} must leave a plain key alone`);
+  }
+});
+
+test("setting.delete releases that key's decrypt-failure entry (its row is decrypted like every read)", async () => {
+  const mod = await import("../src/lib/prisma.ts");
+  // Record a failure for the key through a corrupt read (its expected log line is dropped).
+  const logged = errors.length;
+  await H.runHandler(cryptoQueryExtension.setting, "findUnique", { where: { key: SENSITIVE_KEY } }, { key: SENSITIVE_KEY, value: "enc:v1:corrupt" });
+  errors.length = logged;
+  assert.ok(mod.getSettingDecryptFailures().includes(SENSITIVE_KEY));
+  // A row returned without its value: only the delete itself can release the entry.
+  await H.runHandler(cryptoQueryExtension.setting, "delete", { where: { key: SENSITIVE_KEY } }, { key: SENSITIVE_KEY });
+  assert.ok(!mod.getSettingDecryptFailures().includes(SENSITIVE_KEY), "a deleted key leaves the banner");
 });
 
 // ── reachability: the unhandled operations must stay unused ────────────────
@@ -313,7 +248,7 @@ test("nothing calls an operation that bypasses the crypto extension", () => {
   assert.ok(files.length > 400, `only ${files.length} files walked — the scan is broken`);
 
   // Only the operations that can actually surface a protected column.
-  const risky = ["delete", "groupBy", "aggregate"];
+  const risky = ["groupBy", "aggregate"];
   const pattern = new RegExp(`\\.(setting|account)\\.(${risky.join("|")})\\s*\\(`, "g");
   const offenders: string[] = [];
   for (const f of files) {
@@ -324,9 +259,9 @@ test("nothing calls an operation that bypasses the crypto extension", () => {
   assert.deepEqual(
     offenders,
     [],
-    "a call reached an operation the crypto extension does not intercept. `.delete()` returns the deleted row " +
-      "with its protected columns still encrypted; `.groupBy()`/`.aggregate()` can project them. Handle the " +
-      "operation in src/lib/prisma.ts first, or use the deleteMany/findMany equivalents that are covered.",
+    "a call reached an operation the crypto extension does not intercept: `.groupBy()`/`.aggregate()` can " +
+      "project the protected columns. Handle the operation in src/lib/prisma-crypto.ts first, or use the " +
+      "findMany equivalent that is covered.",
   );
 
   // Query extensions intercept TOP-LEVEL operations only. A nested relation
@@ -475,22 +410,19 @@ test("settingKeysFromDeleteWhere recognizes exactly the where-shapes callers use
   assert.equal(settingKeysFromDeleteWhere({ key: { startsWith: "a" } }), null);
 });
 
-test("setting.deleteMany releases the decrypt-failure entry for the deleted key(s)", () => {
-  // Same source-read technique as the read/write handler pins above (no DB to
-  // observe a round-trip): reverting the handler to a bare `return query(args)`
-  // must fail here.
-  const body = handlerBody("setting", "deleteMany");
-  assert.ok(
-    body.includes("settingDecryptFailures") && body.includes("settingKeysFromDeleteWhere"),
-    "setting.deleteMany no longer releases decrypt-failure entries — a corrupt row removed via " +
-      "Disconnect / de-register keeps the settings banner alive until the process restarts.\n  " +
-      body.replace(/\s+/g, " ").slice(0, 200),
-  );
-  // Release AFTER the delete resolves (guardrail 27 ordering): a failed delete
-  // must leave the entry in place.
-  const queryAt = body.indexOf("await query(args)");
-  const releaseAt = body.indexOf("settingDecryptFailures");
-  assert.ok(queryAt >= 0 && releaseAt > queryAt, "the release must run after `await query(args)`, not before");
+test("setting.deleteMany releases the decrypt-failure entry for the deleted key(s), only after the delete resolved", async () => {
+  const mod = await import("../src/lib/prisma.ts");
+  const key = "plexAdminToken";
+  const corrupt = () => H.runHandler(cryptoQueryExtension.setting, "findUnique", { where: { key } }, { key, value: "enc:v1:corrupt" });
+  const logged = errors.length;
+  await corrupt();
+  errors.length = logged; // the corrupt read's expected log line
+  assert.ok(mod.getSettingDecryptFailures().includes(key));
+  // A failed delete leaves the entry (guardrail 27 ordering).
+  await assert.rejects(cryptoQueryExtension.setting.deleteMany({ args: { where: { key } }, query: async () => { throw new Error("db down"); } }));
+  assert.ok(mod.getSettingDecryptFailures().includes(key), "a failed delete must leave the banner in place");
+  await H.runHandler(cryptoQueryExtension.setting, "deleteMany", { where: { key: { in: [key] } } }, { count: 1 });
+  assert.ok(!mod.getSettingDecryptFailures().includes(key), "a deleted key leaves the banner");
 });
 
 test("nothing here logged an unexpected error beyond the deliberate connection failures", () => {
@@ -535,7 +467,7 @@ test("settingKeyFromArgs names the row a key-less select cannot name itself", as
 });
 
 // ── behaviour: what actually reaches the database ───────────────────────────
-// Everything above reads the handler SOURCE. These record the statement values
+// The handler tests above call each handler with a fake query. These record the statement values
 // the pg driver is handed, by stubbing pg.Client for the length of one call, so
 // "the `{ set }` form is encrypted" is observed on the wire rather than inferred.
 // The stub reports no rows; Prisma's own "record not found" for the update is

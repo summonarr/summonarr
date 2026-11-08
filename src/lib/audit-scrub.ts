@@ -67,8 +67,9 @@ export function stripTargetPii(details: string, match?: DetailsMatch): string | 
 // Either the client or an interactive-transaction client.
 type AuditDb = Pick<typeof prisma, "auditLog">;
 
-// Removes the target-identity keys from every row matching `where` (which must
-// not carry its own OR — its AND terms are kept) and, when given, `match`.
+// Removes the target-identity keys from every row matching `where` (its own
+// OR and AND terms are kept: the PII-key OR is ANDed beside them, never laid
+// over them) and, when given, `match`.
 // Paged by a strict `id > last` bound, NOT Prisma's cursor + skip:1: the cursor
 // positions on the last row by id alone, and that row was just rewritten so it
 // no longer matches the filter — skip:1 then dropped the first STILL-matching
@@ -82,15 +83,18 @@ export async function scrubTargetPiiFromAudit(
   where: Prisma.AuditLogWhereInput,
   match?: DetailsMatch,
 ): Promise<number> {
-  const callerAnd = where.AND === undefined ? [] : Array.isArray(where.AND) ? where.AND : [where.AND];
+  const { AND, OR, ...rest } = where;
+  const callerAnd = AND === undefined ? [] : Array.isArray(AND) ? AND : [AND];
+  // The caller's OR stays a term of its own: a top-level OR here would replace it.
+  const callerTerms: Prisma.AuditLogWhereInput[] = [...callerAnd, ...(OR !== undefined ? [{ OR }] : [])];
+  const piiKeys: Prisma.AuditLogWhereInput = { OR: AUDIT_TARGET_PII_KEYS.map((key) => ({ details: { contains: `"${key}"` } })) };
   let scrubbed = 0;
   let lastId: string | undefined;
   for (;;) {
     const rows = await db.auditLog.findMany({
       where: {
-        ...where,
-        ...(lastId !== undefined ? { AND: [...callerAnd, { id: { gt: lastId } }] } : {}),
-        OR: AUDIT_TARGET_PII_KEYS.map((key) => ({ details: { contains: `"${key}"` } })),
+        ...rest,
+        AND: [...callerTerms, piiKeys, ...(lastId !== undefined ? [{ id: { gt: lastId } }] : [])],
       },
       select: { id: true, details: true },
       orderBy: { id: "asc" },

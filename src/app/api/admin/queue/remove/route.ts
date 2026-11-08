@@ -6,6 +6,7 @@ import { queueActionFailure, serviceGate } from "@/lib/arr-queue-http";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { QUEUE_REMOVE_MAX_IDS } from "@/lib/api-body-limits";
 
 const MAX_BODY_BYTES = 64 * 1024;
 // The page sends ONE record id per download (`removalIds` — any record of a
@@ -13,7 +14,7 @@ const MAX_BODY_BYTES = 64 * 1024;
 // several; they name downloads, and a fresh queue read selects ONE live id
 // per matched download in ONE bulk call (guardrail 5c / 5e). The bound only
 // keeps a body from being absurd.
-const MAX_IDS = 5_000;
+const MAX_IDS = QUEUE_REMOVE_MAX_IDS;
 
 // Admin → Download Queue, one row's Remove (ADMIN). Sends Radarr/Sonarr's own
 // bulk queue DELETE for the record id(s) it is given, on that instance —
@@ -38,22 +39,14 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const { service, instance } = target;
   const ids = body.ids;
   const action = body.action;
-  const legacy = body.removeFromClient;
-  const method: unknown = body.method !== undefined
-    ? body.method
-    : legacy === undefined || legacy === true ? "removeFromClient" : legacy === false ? "ignore" : null;
-  if (
-    !Array.isArray(ids) || ids.length === 0 || ids.length > MAX_IDS ||
-    !ids.every((id) => typeof id === "number" && Number.isSafeInteger(id) && id > 0) ||
-    !isQueueRemoveAction(action) ||
-    !isQueueRemoveMethod(method)
-  ) {
+  const method = parseRemoveMethod(body);
+  if (!isRecordIdList(ids) || !isQueueRemoveAction(action) || method === null) {
     return NextResponse.json({ error: t("apiAdmin.queue.removeBodyInvalid") }, { status: 400 });
   }
-  const uniqueIds = [...new Set(ids as number[])];
+  const uniqueIds = [...new Set(ids)];
   let sentIds: number[];
   try {
-    sentIds = await removeFromQueue(service, instance, uniqueIds, action, method as QueueRemoveMethod);
+    sentIds = await removeFromQueue(service, instance, uniqueIds, action, method);
   } catch (err) {
     return queueActionFailure(err, target, t, { goneKey: "apiAdmin.queue.gone", failedKey: "apiAdmin.queue.removeFailed", what: "remove" });
   }
@@ -67,3 +60,19 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   });
   return NextResponse.json({ ok: true });
 });
+
+function isRecordIdList(ids: unknown): ids is number[] {
+  return Array.isArray(ids) && ids.length > 0 && ids.length <= MAX_IDS &&
+    ids.every((id) => typeof id === "number" && Number.isSafeInteger(id) && id > 0);
+}
+
+// `method` when sent; else the older `removeFromClient` boolean (absent or
+// true ⇒ remove from the client, false ⇒ leave it there). Null when neither
+// reads as a method.
+function parseRemoveMethod(body: Record<string, unknown>): QueueRemoveMethod | null {
+  if (body.method !== undefined) return isQueueRemoveMethod(body.method) ? body.method : null;
+  const legacy = body.removeFromClient;
+  if (legacy === undefined || legacy === true) return "removeFromClient";
+  if (legacy === false) return "ignore";
+  return null;
+}

@@ -250,8 +250,11 @@ shadowPrismaModel(prisma, "account", {
     return { ...row };
   },
 });
+// A key whose read throws (a database fault on that one row).
+let settingReadThrows: string | null = null;
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) => {
+    if (args.where.key === settingReadThrows) throw new Error("setting read failed (unit test)");
     const value = settings.get(args.where.key);
     return value === undefined ? null : { key: args.where.key, value };
   },
@@ -553,6 +556,21 @@ test("start requests the groups scope only when the allowlist opts in", async ()
   assert.equal(await scopeOf(), "openid profile email");
   setAllowlist({ groups: ["a"], requestGroupsScope: true });
   assert.equal(await scopeOf(), "openid profile email groups");
+});
+
+test("start ends the flow when the allowlist read FAILS, rather than starting it without the groups scope", async () => {
+  settingReadThrows = OIDC_ALLOWLIST_SETTING_KEY;
+  try {
+    const web = await inScope(() => oidcStart.GET(new NextRequest(`${HTTP_AUTH_URL}/api/auth/oidc/start`, { headers: { "x-forwarded-for": nextIp() } })));
+    assert.equal(new URL(web.headers.get("location")!).searchParams.get("error"), "oidc_unavailable");
+    const native = await inScope(() => oidcStart.GET(new NextRequest(`${HTTP_AUTH_URL}/api/auth/oidc/start`, {
+      headers: { "x-forwarded-for": nextIp(), "x-summonarr-client": "ios; build=60" },
+    })));
+    assert.equal(native.status, 503);
+    assert.ok(errors.some((e) => e.includes("[oidc/start] allowlist read failed")), "the fault is logged");
+  } finally {
+    settingReadThrows = null;
+  }
 });
 
 // ── the admin route ──────────────────────────────────────────────────────────

@@ -1,48 +1,39 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, type CSSProperties, type ReactNode, type Ref } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
-import {
-  LayoutDashboard,
-  Film,
-  ClipboardList,
-  UserCircle,
-  ShieldCheck,
-  AlertTriangle,
-  Bell,
-  Menu,
-  Search,
-  X,
-  type IconComponent,
-} from "@/components/icons";
+import { Bell, Menu, Search, X } from "@/components/icons";
 import { getClientBadgeVisibility } from "@/lib/badge-visibility";
-import { cn } from "@/lib/utils";
-import {
-  filterNavByFeatures,
-  getVisibleAdminItems,
-  isNavItemActive,
-  userNavItems,
-  type NavItem,
-} from "@/lib/nav-items";
 import type { FeatureFlags } from "@/lib/features";
 import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
 import { useNavBadges } from "@/components/layout/admin-nav-groups";
 import { PushNotifications } from "@/components/layout/push-notifications";
 import { breadcrumbFor } from "@/components/layout/breadcrumb-label";
 import { useT } from "@/components/i18n/i18n-provider";
-import type { Translator } from "@/lib/i18n/translate";
 import { useDetailTitle } from "@/components/layout/detail-title";
 import { useNotifications } from "@/components/notifications/notification-store";
 import { SearchBar } from "@/components/layout/header";
+import { useFocusReturn } from "@/hooks/use-focus-return";
+import { buildMobileTabs, type MobileTab } from "@/components/layout/mobile-tabs";
+import { visibleAdminNavItems } from "@/components/layout/nav-visibility";
+import { UnreadCountBadge } from "@/components/layout/unread-badge";
 
-type Tab = {
-  href: string;
-  label: string;
-  icon: IconComponent;
-  match: (pathname: string) => boolean;
+// The 36×36 transparent icon control of the top bar (menu, search, close,
+// inbox): one style, so the four never drift apart.
+const TOP_BAR_ICON_STYLE: CSSProperties = {
+  width: 36,
+  height: 36,
+  borderRadius: 6,
+  background: "transparent",
+  color: "var(--ds-fg-muted)",
+  border: 0,
 };
+const TOP_BAR_ICON_CLASS = "ds-tap inline-flex items-center justify-center shrink-0";
+
+// Where focus goes when the search sheet closes on Escape or its X.
+const SEARCH_TRIGGER = "search-trigger";
 
 export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
   const tr = useT();
@@ -50,40 +41,51 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
   const navBadges = useNavBadges();
   const pathname = usePathname();
   const { session } = useSummonarrSession();
-  const role = session?.user?.role;
-  // The same Plex/Jellyfin badge rule the Header and server pages use, so every
-  // surface agrees on which badges this user sees.
-  const { showPlex, showJellyfin } = getClientBadgeVisibility(session?.user);
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const topBarRef = useRef<HTMLDivElement>(null);
+  const { returnTo, refFor } = useFocusReturn();
+
+  const closeSearch = useCallback(() => {
+    returnTo(SEARCH_TRIGGER);
+    setSearchOpen(false);
+  }, [returnTo]);
+
   // Cmd/Ctrl+K below lg: the header's SearchBar is mounted but hidden there
   // and ignores the key, so this bar opens its own search sheet instead. Once
-  // the sheet is open, its SearchBar owns the shortcut.
+  // the sheet is open, its SearchBar owns the shortcut. Escape closes the
+  // sheet when it came from the bar itself (or from nowhere): a dialog open
+  // elsewhere on the page handles its own Escape.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      const bar = topBarRef.current;
+      if (!bar || bar.offsetParent === null) return;
+      if (e.key === "Escape") {
+        const target = e.target instanceof Node ? e.target : null;
+        if (searchOpen && (target === null || target === document.body || bar.contains(target))) closeSearch();
+        return;
+      }
       if (!(e.key === "k" || e.key === "K") || !(e.metaKey || e.ctrlKey)) return;
-      if (searchOpen || !topBarRef.current || topBarRef.current.offsetParent === null) return;
+      if (searchOpen) return;
       e.preventDefault();
       setSearchOpen(true);
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [searchOpen]);
+  }, [searchOpen, closeSearch]);
   const onDrawerOpenChange = useCallback(
     (open: boolean) => setDrawerOpen(open),
     [],
   );
+  // The drawer covers the bar, and a page picked from it must not land with
+  // the search sheet still open.
+  const openDrawer = useCallback(() => {
+    setSearchOpen(false);
+    setDrawerOpen(true);
+  }, []);
 
-  const tabs = buildTabs(
-    role,
-    filterNavByFeatures(userNavItems, featureFlags),
-    session?.user?.permissions,
-    featureFlags,
-    tr,
-  );
-  const someTabActive = tabs.some((t) => t.match(pathname));
+  const tabs = buildMobileTabs(visibleAdminNavItems(session?.user, featureFlags), tr);
 
   const detailTitle = useDetailTitle();
   const crumbs = breadcrumbFor(pathname, detailTitle, tr);
@@ -107,185 +109,33 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
         }}
       >
         {searchOpen ? (
-          <>
-            <button
-              type="button"
-              onClick={() => setSearchOpen(false)}
-              className="ds-tap inline-flex items-center justify-center shrink-0"
-              aria-label={tr("nav.closeSearch")}
-              style={{
-                width: 36,
-                height: 36,
-                borderRadius: 6,
-                background: "transparent",
-                color: "var(--ds-fg-muted)",
-                border: "0",
-              }}
-            >
-              <X style={{ width: 16, height: 16 }} />
-            </button>
-            <SearchBar
-              showPlex={showPlex}
-              showJellyfin={showJellyfin}
-              variant="full"
-              autoFocus
-              onAfterSelect={() => setSearchOpen(false)}
-            />
-          </>
+          <SearchSheet onClose={closeSearch} onAfterSelect={() => setSearchOpen(false)} />
         ) : (
           <>
-            <button
-              type="button"
-              onClick={() => setDrawerOpen(true)}
-              aria-label={tr("nav.openMenu")}
-              className="ds-tap inline-flex items-center justify-center shrink-0"
-              style={{
-                width: 36,
-                height: 36,
-                borderRadius: 6,
-                background: "transparent",
-                color: "var(--ds-fg-muted)",
-                border: 0,
-              }}
-            >
+            <TopBarIconButton onClick={openDrawer} label={tr("nav.openMenu")}>
               <Menu style={{ width: 18, height: 18 }} />
-            </button>
-            <Link
-              href="/"
-              className="flex-1 min-w-0 flex items-center"
-              style={{ gap: 8 }}
-            >
-              <div
-                className="ds-mono font-bold shrink-0"
-                style={{
-                  width: 22,
-                  height: 22,
-                  borderRadius: 5,
-                  background: "var(--ds-accent)",
-                  color: "var(--ds-accent-fg)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: 11,
-                }}
-              >
-                S
-              </div>
-              <span
-                className="font-semibold truncate"
-                style={{
-                  fontSize: 14,
-                  letterSpacing: "-0.01em",
-                  color: "var(--ds-fg)",
-                }}
-              >
-                {breadcrumbLabel}
-              </span>
-            </Link>
-            <button
-              type="button"
+            </TopBarIconButton>
+            <HomeCrumb label={breadcrumbLabel} />
+            <TopBarIconButton
+              ref={refFor(SEARCH_TRIGGER)}
               onClick={() => setSearchOpen(true)}
-              aria-label={tr("nav.search")}
-              className="ds-tap inline-flex items-center justify-center shrink-0"
-              style={{
-                width: 36,
-                height: 36,
-                borderRadius: 6,
-                background: "transparent",
-                color: "var(--ds-fg-muted)",
-                border: 0,
-              }}
+              label={tr("nav.search")}
             >
               <Search style={{ width: 16, height: 16 }} />
-            </button>
+            </TopBarIconButton>
             {session && <NotificationsLink />}
             {session && <PushNotifications />}
           </>
         )}
       </div>
 
-      {/* Bottom tab bar */}
-      <nav
-        className="lg:hidden flex fixed inset-x-0 bottom-0 z-40"
-        style={{
-          padding: "6px 8px calc(6px + env(safe-area-inset-bottom, 0px))",
-          background: "color-mix(in oklab, var(--ds-bg-1) 92%, transparent)",
-          backdropFilter: "blur(16px)",
-          borderTop: "1px solid var(--ds-border)",
-          minHeight: 64,
-        }}
-      >
-        <div
-          className="grid w-full mx-auto"
-          style={{
-            gridTemplateColumns: `repeat(${tabs.length + 1}, 1fr)`,
-            gap: 4,
-            maxWidth: 520,
-          }}
-        >
-          {tabs.map((t) => {
-            const active = t.match(pathname);
-            return (
-              <Link
-                key={t.href}
-                href={t.href}
-                onClick={() => setSearchOpen(false)}
-                aria-current={active ? "page" : undefined}
-                className="ds-tap flex flex-col items-center justify-center"
-                style={{
-                  gap: 3,
-                  padding: "6px 4px",
-                  borderRadius: 8,
-                  minHeight: 48,
-                  color: active ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
-                  transition:
-                    "color 140ms var(--ds-ease), background 140ms var(--ds-ease)",
-                }}
-              >
-                <t.icon style={{ width: 18, height: 18 }} />
-                <span
-                  className="font-medium"
-                  style={{ fontSize: 10.5, letterSpacing: "-0.005em" }}
-                >
-                  {t.label}
-                </span>
-              </Link>
-            );
-          })}
-          <button
-            type="button"
-            onClick={() => setDrawerOpen(true)}
-            aria-label={tr("nav.more")}
-            aria-haspopup="dialog"
-            aria-expanded={drawerOpen}
-            className={cn(
-              "ds-tap flex flex-col items-center justify-center",
-            )}
-            style={{
-              gap: 3,
-              padding: "6px 4px",
-              border: 0,
-              background: "transparent",
-              borderRadius: 8,
-              minHeight: 48,
-              color:
-                drawerOpen || !someTabActive
-                  ? "var(--ds-accent-text)"
-                  : "var(--ds-fg-muted)",
-              transition:
-                "color 140ms var(--ds-ease), background 140ms var(--ds-ease)",
-            }}
-          >
-            <Menu style={{ width: 18, height: 18 }} />
-            <span
-              className="font-medium"
-              style={{ fontSize: 10.5, letterSpacing: "-0.005em" }}
-            >
-              {tr("nav.more")}
-            </span>
-          </button>
-        </div>
-      </nav>
+      <MobileTabBar
+        tabs={tabs}
+        pathname={pathname}
+        drawerOpen={drawerOpen}
+        onTab={() => setSearchOpen(false)}
+        onMore={openDrawer}
+      />
 
       <MobileNavDrawer
         open={drawerOpen}
@@ -294,6 +144,195 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
         navBadges={navBadges}
       />
     </>
+  );
+}
+
+function TopBarIconButton({
+  label,
+  onClick,
+  children,
+  ref,
+}: {
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+  ref?: Ref<HTMLButtonElement>;
+}) {
+  return (
+    <button
+      ref={ref}
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      className={TOP_BAR_ICON_CLASS}
+      style={TOP_BAR_ICON_STYLE}
+    >
+      {children}
+    </button>
+  );
+}
+
+// The search mode of the top bar: a close control and the full-width search.
+function SearchSheet({ onClose, onAfterSelect }: { onClose: () => void; onAfterSelect: () => void }) {
+  const tr = useT();
+  const { session } = useSummonarrSession();
+  // The same Plex/Jellyfin badge rule the Header and server pages use, so every
+  // surface agrees on which badges this user sees.
+  const { showPlex, showJellyfin } = getClientBadgeVisibility(session?.user);
+  return (
+    <>
+      <TopBarIconButton onClick={onClose} label={tr("nav.closeSearch")}>
+        <X style={{ width: 16, height: 16 }} />
+      </TopBarIconButton>
+      <SearchBar
+        showPlex={showPlex}
+        showJellyfin={showJellyfin}
+        variant="full"
+        autoFocus
+        onAfterSelect={onAfterSelect}
+      />
+    </>
+  );
+}
+
+// The brand glyph and the current page's breadcrumb, linking home. The link is
+// named for where it goes: its visible text is the CURRENT page, and reading
+// "Movies · Dune" for a link to Discover told a screen-reader user the wrong
+// destination.
+function HomeCrumb({ label }: { label: string }) {
+  const tr = useT();
+  return (
+    <Link
+      href="/"
+      aria-label={tr("nav.discover")}
+      className="flex-1 min-w-0 flex items-center"
+      style={{ gap: 8 }}
+    >
+      <div
+        className="ds-mono font-bold shrink-0"
+        style={{
+          width: 22,
+          height: 22,
+          borderRadius: 5,
+          background: "var(--ds-accent)",
+          color: "var(--ds-accent-fg)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 11,
+        }}
+      >
+        S
+      </div>
+      <span
+        className="font-semibold truncate"
+        style={{
+          fontSize: 14,
+          letterSpacing: "-0.01em",
+          color: "var(--ds-fg)",
+        }}
+      >
+        {label}
+      </span>
+    </Link>
+  );
+}
+
+const TAB_STYLE: CSSProperties = {
+  gap: 3,
+  padding: "6px 4px",
+  borderRadius: 8,
+  minHeight: 48,
+};
+const TAB_TRANSITION = "color 140ms var(--ds-ease), background 140ms var(--ds-ease)";
+const TAB_LABEL_STYLE: CSSProperties = { fontSize: 10.5, letterSpacing: "-0.005em" };
+
+// The bottom tab bar: the four tabs, then "More" (the drawer), which takes the
+// accent while the drawer is open or no tab claims the current page.
+function MobileTabBar({
+  tabs,
+  pathname,
+  drawerOpen,
+  onTab,
+  onMore,
+}: {
+  tabs: MobileTab[];
+  pathname: string;
+  drawerOpen: boolean;
+  onTab: () => void;
+  onMore: () => void;
+}) {
+  const tr = useT();
+  const someTabActive = tabs.some((t) => t.match(pathname));
+  return (
+    <nav
+      className="lg:hidden flex fixed inset-x-0 bottom-0 z-40"
+      style={{
+        padding: "6px 8px calc(6px + env(safe-area-inset-bottom, 0px))",
+        background: "color-mix(in oklab, var(--ds-bg-1) 92%, transparent)",
+        backdropFilter: "blur(16px)",
+        borderTop: "1px solid var(--ds-border)",
+        minHeight: 64,
+      }}
+    >
+      <div
+        className="grid w-full mx-auto"
+        style={{
+          gridTemplateColumns: `repeat(${tabs.length + 1}, 1fr)`,
+          gap: 4,
+          maxWidth: 520,
+        }}
+      >
+        {tabs.map((t) => {
+          const active = t.match(pathname);
+          return (
+            <Link
+              key={t.href}
+              href={t.href}
+              onClick={onTab}
+              aria-current={active ? "page" : undefined}
+              className="ds-tap flex flex-col items-center justify-center"
+              style={{
+                ...TAB_STYLE,
+                color: active ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
+                transition: TAB_TRANSITION,
+              }}
+            >
+              <t.icon style={{ width: 18, height: 18 }} />
+              <span className="font-medium" style={TAB_LABEL_STYLE}>
+                {t.label}
+              </span>
+            </Link>
+          );
+        })}
+        <button
+          type="button"
+          onClick={onMore}
+          aria-label={tr("nav.more")}
+          aria-haspopup="dialog"
+          aria-expanded={drawerOpen}
+          className="ds-tap flex flex-col items-center justify-center"
+          style={{
+            gap: TAB_STYLE.gap,
+            padding: TAB_STYLE.padding,
+            border: 0,
+            background: "transparent",
+            borderRadius: TAB_STYLE.borderRadius,
+            minHeight: TAB_STYLE.minHeight,
+            color:
+              drawerOpen || !someTabActive
+                ? "var(--ds-accent-text)"
+                : "var(--ds-fg-muted)",
+            transition: TAB_TRANSITION,
+          }}
+        >
+          <Menu style={{ width: 18, height: 18 }} />
+          <span className="font-medium" style={TAB_LABEL_STYLE}>
+            {tr("nav.more")}
+          </span>
+        </button>
+      </div>
+    </nav>
   );
 }
 
@@ -310,135 +349,11 @@ function NotificationsLink() {
     <Link
       href="/notifications"
       aria-label={unread > 0 ? t("nav.notificationsUnread", { count: unread }) : t("nav.crumb.notifications")}
-      className="ds-tap inline-flex items-center justify-center shrink-0 relative"
-      style={{
-        width: 36,
-        height: 36,
-        borderRadius: 6,
-        background: "transparent",
-        color: "var(--ds-fg-muted)",
-        border: 0,
-      }}
+      className={`${TOP_BAR_ICON_CLASS} relative`}
+      style={TOP_BAR_ICON_STYLE}
     >
       <Bell style={{ width: 16, height: 16 }} />
-      {unread > 0 && (
-        <span
-          aria-hidden
-          style={{
-            position: "absolute",
-            top: 2,
-            right: 2,
-            minWidth: 14,
-            height: 14,
-            padding: "0 3px",
-            borderRadius: 7,
-            background: "var(--ds-accent)",
-            color: "var(--ds-accent-fg)",
-            fontSize: 9,
-            fontWeight: 700,
-            lineHeight: "14px",
-            textAlign: "center",
-            boxSizing: "border-box",
-          }}
-        >
-          {unread > 99 ? "99+" : unread}
-        </span>
-      )}
+      <UnreadCountBadge count={unread} size="sm" />
     </Link>
   );
-}
-
-// Personal-section pages the Profile tab claims when it is present (the 4th slot
-// without admin access). They are carved out of the Requests tab's membership
-// so a page never lights two tabs; when an admin tab replaces Profile, these
-// light nothing and the "More" button takes the accent, exactly as before.
-const PROFILE_TAB_HREFS: ReadonlySet<string> = new Set(["/profile", "/donate"]);
-
-// Tab membership is derived from each NavItem's `section` through the shared
-// matcher, not a hand-kept path list: the old list lit "More" for /for-you (a
-// browse item) and for /watch-history and /my-stats while their personal-section
-// sibling /watchlist lit "Requests".
-function sectionMatcher(
-  section: NavItem["section"],
-  omit: ReadonlySet<string>,
-): (pathname: string) => boolean {
-  const members = userNavItems.filter((i) => i.section === section && !omit.has(i.href));
-  return (pathname) => members.some((i) => isNavItemActive(pathname, i));
-}
-
-// Builds the bottom tab bar list; the 4th slot is role/permission-gated (admin / issues / profile).
-function buildTabs(
-  role: string | undefined,
-  userItems: readonly { href: string }[],
-  sessionPerms: string | undefined,
-  featureFlags: Record<string, boolean> | undefined,
-  t: Translator,
-): Tab[] {
-  const has = (href: string) => userItems.some((i) => i.href === href);
-
-  const browseHref = has("/movies")
-    ? "/movies"
-    : has("/tv")
-      ? "/tv"
-      : "/popular";
-
-  const discover: Tab = {
-    href: "/",
-    label: t("nav.discover"),
-    icon: LayoutDashboard,
-    match: (p) => p === "/",
-  };
-  const browse: Tab = {
-    href: browseHref,
-    label: t("nav.tab.browse"),
-    icon: Film,
-    // Every browse-section page except Discover's own "/" (which has its tab).
-    match: sectionMatcher("browse", new Set(["/"])),
-  };
-  const requests: Tab = {
-    href: "/requests",
-    label: t("nav.requests"),
-    icon: ClipboardList,
-    match: sectionMatcher("personal", PROFILE_TAB_HREFS),
-  };
-
-  // Pick the 4th tab from the same admin-item list the sidebar uses, so it
-  // always points at a page this user is allowed to open (not a hardcoded
-  // "/admin" that some delegates would be redirected away from).
-  const permsStr = sessionPerms;
-  // Also drop items whose feature flag is off — those pages render a 404 (the
-  // Radarr/Sonarr pages an empty state), so the tab must never target one.
-  const adminItems = filterNavByFeatures(
-    getVisibleAdminItems(permsStr ? { role, permissions: permsStr } : role),
-    featureFlags,
-  );
-  const issuesOnly = adminItems.length === 1 && adminItems[0].href === "/admin/issues";
-
-  if (adminItems.length > 0 && !issuesOnly) {
-    const admin: Tab = {
-      href: adminItems[0].href,
-      label: t("nav.section.admin"),
-      icon: ShieldCheck,
-      match: (p) => p.startsWith("/admin") || p === "/settings",
-    };
-    return [discover, browse, requests, admin];
-  }
-
-  if (issuesOnly) {
-    const issues: Tab = {
-      href: "/admin/issues",
-      label: t("nav.tab.issues"),
-      icon: AlertTriangle,
-      match: (p) => p.startsWith("/admin/issues"),
-    };
-    return [discover, browse, requests, issues];
-  }
-
-  const profile: Tab = {
-    href: "/profile",
-    label: t("nav.profile"),
-    icon: UserCircle,
-    match: (p) => PROFILE_TAB_HREFS.has(p),
-  };
-  return [discover, browse, requests, profile];
 }

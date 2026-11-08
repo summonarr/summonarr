@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -8,166 +8,70 @@ import { CheckCircle, XCircle, Loader2, ChevronDown, ExternalLink } from "@/comp
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import { useHasMounted } from "@/hooks/use-has-mounted";
-import type { SaveStatus } from "./shared";
+import { useDelayed } from "@/hooks/use-delayed";
+import { useSettingsSave } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
+import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
 import { rich } from "./rich";
+import { pendingChanges, type DiscordFormInitial, type DiscordKey, type DiscordValues } from "./discord-bot-keys";
 
-interface DiscordBotFormProps {
-  initialBotToken: string;
-  initialClientId: string;
-  initialGuildId: string;
-  initialPublicKey: string;
-  initialAutoApproveRoles: string;
-  initialRequireLinkedAccount: boolean;
-  initialRequireLinkedAccountSite: boolean;
-  initialAdminRequestChannelId: string;
-  initialWelcomeChannelId: string;
-  initialNotifyChannelId: string;
-  initialInviteUrl: string;
-  initialLinkedRoleId: string;
-  initialPlexRoleId: string;
-  initialJellyfinRoleId: string;
-  initialAdminRoleId: string;
-  initialIssueAdminRoleId: string;
-}
-
-// Every setting this form saves, by its Setting key. Values are held as the
-// strings the route stores (the two checkboxes as "true"/"false"), so a single
-// diff against the last saved values covers all of them.
-const DISCORD_KEYS = [
-  "discordBotToken",
-  "discordClientId",
-  "discordGuildId",
-  "discordPublicKey",
-  "discordAutoApproveRoles",
-  "discordRequireLinkedAccount",
-  "discordRequireLinkedAccountSite",
-  "discordAdminRequestChannelId",
-  "discordWelcomeChannelId",
-  "discordNotifyChannelId",
-  "discordInviteUrl",
-  "discordLinkedRoleId",
-  "discordPlexRoleId",
-  "discordJellyfinRoleId",
-  "discordAdminRoleId",
-  "discordIssueAdminRoleId",
-] as const;
-type DiscordKey = (typeof DISCORD_KEYS)[number];
-type DiscordValues = Record<DiscordKey, string>;
-
-function valuesFromProps(p: DiscordBotFormProps): DiscordValues {
-  return {
-    discordBotToken: p.initialBotToken,
-    discordClientId: p.initialClientId,
-    discordGuildId: p.initialGuildId,
-    discordPublicKey: p.initialPublicKey,
-    discordAutoApproveRoles: p.initialAutoApproveRoles,
-    discordRequireLinkedAccount: p.initialRequireLinkedAccount ? "true" : "false",
-    discordRequireLinkedAccountSite: p.initialRequireLinkedAccountSite ? "true" : "false",
-    discordAdminRequestChannelId: p.initialAdminRequestChannelId,
-    discordWelcomeChannelId: p.initialWelcomeChannelId,
-    discordNotifyChannelId: p.initialNotifyChannelId,
-    discordInviteUrl: p.initialInviteUrl,
-    discordLinkedRoleId: p.initialLinkedRoleId,
-    discordPlexRoleId: p.initialPlexRoleId,
-    discordJellyfinRoleId: p.initialJellyfinRoleId,
-    discordAdminRoleId: p.initialAdminRoleId,
-    discordIssueAdminRoleId: p.initialIssueAdminRoleId,
-  };
-}
-
-// What Save sends: only the fields that differ from the last saved values.
-// Sending all 16 every time caused three problems: a Channels/Roles edit
-// re-registered the slash commands with Discord (the route does that whenever
-// the ids are in the body), every key got the 10s write cooldown (so saving
-// another tab within 10s failed with 429), and the audit log listed 16
-// "changed" keys whose values hadn't changed.
-//
-// A blank token is never sent: the route would drop it and answer ok, and this
-// form would then believe the token was gone (see the hint under the field for
-// how to turn the bot off).
-function pendingChanges(values: DiscordValues, saved: DiscordValues): Partial<DiscordValues> {
-  return Object.fromEntries(
-    DISCORD_KEYS.map((key) => [key, values[key]] as const)
-      .filter(([key, current]) => current !== saved[key] && !(key === "discordBotToken" && current === "")),
-  );
-}
+// The settings page builds the props with discordFormInitial
+// (discord-bot-keys.ts), which lists the form's keys once.
+type DiscordBotFormProps = DiscordFormInitial;
 
 const SNOWFLAKE_PLACEHOLDER = "123456789012345678";
 
 export function DiscordBotForm(props: DiscordBotFormProps) {
   const t = useT();
-  const [values, setValues] = useState<DiscordValues>(() => valuesFromProps(props));
+  const [values, setValues] = useState<DiscordValues>(props.values);
   // The last values we know the server has saved, one entry per setting key.
   // It starts as the page-load values and is updated after every successful
-  // save. We can't just compare against the `initial*` props: they never
-  // refresh, so after one save an already-saved field would be sent again
-  // (and hit the route's 10s per-key cooldown, a 429), and changing a field
-  // back to its page-load value would look like "no change" and never be saved.
-  const [saved, setSaved] = useState<DiscordValues>(() => valuesFromProps(props));
+  // save. We can't just compare against the props: they never refresh, so
+  // after one save an already-saved field would be sent again (and hit the
+  // route's 10s per-key cooldown, a 429), and changing a field back to its
+  // page-load value would look like "no change" and never be saved.
+  const [saved, setSaved] = useState<DiscordValues>(props.values);
   // Whether a token is saved. The token is masked on GET, so the route can't
   // tell a blank field from an echo and never clears it: a blank is not sent.
-  const [tokenSaved, setTokenSaved] = useState(props.initialBotToken.length > 0);
-  const [status, setStatus] = useState<SaveStatus>("idle");
-  const [message, setMessage] = useState("");
+  const [tokenSaved, setTokenSaved] = useState(props.tokenSaved);
+  // Only a success fades (after 5 s); an error (a bad snowflake, the 10s write
+  // cooldown) stays until the next edit or attempt, and an edit during a save
+  // keeps Save locked until the answer arrives (useSettingsSave).
+  const { status, message, save, edited } = useSettingsSave(5000);
+  // "No changes to save": nothing was sent, so it is this form's own note.
+  const [noChanges, setNoChanges] = useState(false);
+  const fadeNote = useDelayed();
   const [tab, setTab] = useState<"core" | "channels" | "roles">("core");
-  // Fade timer for the save line. Only a success fades; an error (a bad
-  // snowflake, the 10s write cooldown) stays until the next edit or attempt.
-  // Ref'd so a new attempt cancels the previous timer instead of letting it
-  // reset "saving" mid-flight; cleared on unmount.
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => {
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-  }, []);
 
   // Register Commands and Sync Roles act on the SAVED settings, so they wait
   // while the form holds unsaved edits rather than report success for values
   // the admin no longer sees.
   const dirty = Object.keys(pendingChanges(values, saved)).length > 0;
 
-  // An edit clears the last result, but never a save in flight: that keeps
-  // Save locked until the answer arrives.
+  // An edit clears the last result, but never a save in flight.
   function setField(key: DiscordKey, value: string) {
     setValues((prev) => ({ ...prev, [key]: value }));
-    setStatus((s) => (s === "saving" ? s : "idle"));
+    setNoChanges(false);
+    edited();
   }
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    setStatus("saving");
-    setMessage("");
-
     const changed = pendingChanges(values, saved);
     if (Object.keys(changed).length === 0) {
-      setMessage(t("settings.form.discord.noChanges"));
-      setStatus("ok");
-      saveTimer.current = setTimeout(() => setStatus("idle"), 5000);
+      setNoChanges(true);
+      fadeNote(() => setNoChanges(false), 5000);
       return;
     }
-
-    try {
-      const res = await fetch(withBasePath("/api/settings"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(changed),
-      });
-
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-
-      if (res.ok && data.ok) {
-        setSaved((prev) => ({ ...prev, ...changed }));
-        if (changed.discordBotToken) setTokenSaved(true);
-        setMessage(t("settings.form.discord.savedRestart"));
-        setStatus("ok");
-        saveTimer.current = setTimeout(() => setStatus("idle"), 5000);
-      } else {
-        setMessage(data.error ?? t("settings.form.common.saveFailed"));
-        setStatus("error");
-      }
-    } catch {
-      setMessage(t("settings.form.common.saveFailed"));
-      setStatus("error");
+    setNoChanges(false);
+    const result = await save(changed);
+    if (!result.ok) return;
+    setSaved((prev) => ({ ...prev, ...changed }));
+    if (changed.discordBotToken) {
+      // Saved: the field goes back to empty-over-a-saved-token.
+      setTokenSaved(true);
+      setValues((prev) => (prev.discordBotToken === changed.discordBotToken ? { ...prev, discordBotToken: "" } : prev));
+      setSaved((prev) => ({ ...prev, discordBotToken: "" }));
     }
   }
 
@@ -271,12 +175,12 @@ export function DiscordBotForm(props: DiscordBotFormProps) {
                 data-lpignore="true"
                 value={values.discordBotToken}
                 onChange={(e) => setField("discordBotToken", e.target.value)}
-                placeholder="••••••••••••••••"
+                placeholder={tokenSaved ? SECRET_MASK_SENTINEL : "••••••••••••••••"}
                 className="bg-zinc-800 border-zinc-700 font-mono"
               />
               <p className="text-xs text-zinc-500">{t("settings.form.discord.botTokenHelp")}</p>
               {values.discordBotToken === "" && tokenSaved && (
-                <p className="text-xs text-amber-400">{t("settings.form.discord.botTokenKept")}</p>
+                <p className="text-xs text-zinc-500">{t("settings.form.discord.botTokenKept")}</p>
               )}
             </div>
             {pair(
@@ -334,7 +238,11 @@ export function DiscordBotForm(props: DiscordBotFormProps) {
           <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
             {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
           </Button>
-          <SaveStatusMessage status={status} okLabel={message} errorLabel={message} />
+          {noChanges ? (
+            <SaveStatusMessage status="ok" okLabel={t("settings.form.discord.noChanges")} />
+          ) : (
+            <SaveStatusMessage status={status} okLabel={t("settings.form.discord.savedRestart")} errorLabel={message || undefined} />
+          )}
         </div>
       </form>
       </div>
@@ -367,12 +275,23 @@ export function DiscordBotForm(props: DiscordBotFormProps) {
 }
 
 // The answer of either action route (register-commands: { ok, message };
-// sync-roles: { synced, revoked, … }; both: { error } on a refusal).
+// sync-roles: { synced, revoked, … }; both: { error } on a refusal), read
+// field by field: a field of the wrong type is left out.
 interface DiscordActionAnswer {
   ok?: boolean;
   message?: string;
   synced?: number;
   error?: string;
+}
+
+function readActionAnswer(data: unknown): DiscordActionAnswer {
+  const d = data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
+  return {
+    ...(typeof d.ok === "boolean" ? { ok: d.ok } : {}),
+    ...(typeof d.message === "string" ? { message: d.message } : {}),
+    ...(typeof d.synced === "number" ? { synced: d.synced } : {}),
+    ...(typeof d.error === "string" ? { error: d.error } : {}),
+  };
 }
 
 // Register Commands / Sync Roles: a POST with no body to a route that reads the
@@ -390,33 +309,30 @@ function DiscordActionButton({ endpoint, label, busyLabel, help, blocked, succee
   const t = useT();
   const [status, setStatus] = useState<"idle" | "loading" | "ok" | "error">("idle");
   const [message, setMessage] = useState("");
-  // Only a success fades. Ref'd so a new attempt cancels the previous timer;
-  // cleared on unmount.
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => {
-    if (timer.current) clearTimeout(timer.current);
-  }, []);
+  // Only a success fades; a new attempt cancels the previous fade, and
+  // nothing fires after unmount.
+  const later = useDelayed();
 
   async function run() {
-    if (timer.current) clearTimeout(timer.current);
+    later.cancel();
     setStatus("loading");
     setMessage("");
+    // Plain fetch: a proxy's 502/504 page is not JSON, and its HTTP status is
+    // still shown instead of a bare "request failed".
     try {
       const res = await fetch(withBasePath(endpoint), { method: "POST" });
-      // A proxy's 502/504 page is not JSON: fall back to {} so the HTTP status
-      // is still shown instead of a bare "request failed".
-      const data = (await res.json().catch(() => ({}))) as DiscordActionAnswer;
+      const data = readActionAnswer(await res.json().catch(() => null));
       if (res.ok && succeeded(data)) {
         setStatus("ok");
         setMessage(okMessage(data));
-        timer.current = setTimeout(() => setStatus("idle"), 6000);
-      } else {
-        setStatus("error");
-        setMessage(
-          data.error ??
-            (res.ok ? t("settings.form.common.failed") : t("settings.form.common.requestFailedHttp", { status: res.status })),
-        );
+        later(() => setStatus("idle"), 6000);
+        return;
       }
+      setStatus("error");
+      setMessage(
+        data.error ??
+          (res.ok ? t("settings.form.common.failed") : t("settings.form.common.requestFailedHttp", { status: res.status })),
+      );
     } catch {
       setStatus("error");
       setMessage(t("settings.form.common.requestFailed"));
@@ -439,6 +355,16 @@ function DiscordActionButton({ endpoint, label, busyLabel, help, blocked, succee
         {status === "error" && <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />{message}</span>}
       </div>
       <p className="text-xs text-zinc-500 mt-1.5">{help}</p>
+    </div>
+  );
+}
+
+// One numbered step of the guide: its title, then its lines.
+function GuideStep({ title, children }: { title: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div className="space-y-1">
+      <p className="font-semibold text-zinc-200">{title}</p>
+      {children}
     </div>
   );
 }
@@ -477,8 +403,7 @@ function DiscordSetupGuide() {
       {open && (
         <div className="px-4 pb-4 pt-1 border-t border-zinc-700 space-y-4 text-sm text-zinc-400">
 
-          <div className="space-y-1">
-            <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s1.title")}</p>
+          <GuideStep title={t("settings.form.discord.guide.s1.title")}>
             <p>{t("settings.form.discord.guide.s1.body")}</p>
             <a
               href="https://discord.com/developers/applications"
@@ -488,10 +413,9 @@ function DiscordSetupGuide() {
             >
               discord.com/developers/applications <ExternalLink className="w-3 h-3" />
             </a>
-          </div>
+          </GuideStep>
 
-          <div className="space-y-1">
-            <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s2.title")}</p>
+          <GuideStep title={t("settings.form.discord.guide.s2.title")}>
             <p>
               {rich(t("settings.form.discord.guide.s2.body"), { bot: portal("bot"), reset: portal("resetToken"), field: hl(t("settings.form.discord.botToken")) })}
             </p>
@@ -501,32 +425,28 @@ function DiscordSetupGuide() {
                 off: <strong className="text-zinc-400">{t("settings.form.discord.portal.off")}</strong>,
               })}
             </p>
-          </div>
+          </GuideStep>
 
-          <div className="space-y-1">
-            <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s3.title")}</p>
+          <GuideStep title={t("settings.form.discord.guide.s3.title")}>
             <p>
               {rich(t("settings.form.discord.guide.s3.body"), { page: portal("generalInformation"), appId: portal("applicationId"), publicKey: portal("publicKey") })}
             </p>
-          </div>
+          </GuideStep>
 
-          <div className="space-y-1">
-            <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s4.title")}</p>
+          <GuideStep title={t("settings.form.discord.guide.s4.title")}>
             <p>
               {rich(t("settings.form.discord.guide.s4.body"), { devMode: portal("developerMode"), copyId: portal("copyServerId"), field: hl(t("settings.form.discord.guildId")) })}
             </p>
             <p className="text-zinc-500 text-xs">
               {t("settings.form.discord.guide.s4.note")}
             </p>
-          </div>
+          </GuideStep>
 
-          <div className="space-y-1">
-            <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s5.title")}</p>
+          <GuideStep title={t("settings.form.discord.guide.s5.title")}>
             <p>{rich(t("settings.form.discord.guide.s5.body"), { register: hl(t("settings.form.discord.register")) })}</p>
-          </div>
+          </GuideStep>
 
-          <div className="space-y-1">
-            <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s6.title")}</p>
+          <GuideStep title={t("settings.form.discord.guide.s6.title")}>
             <p>
               {rich(t("settings.form.discord.guide.s6.body"), { page: portal("generalInformation"), field: portal("interactionsEndpointUrl") })}
             </p>
@@ -536,10 +456,9 @@ function DiscordSetupGuide() {
             <p className="text-zinc-500 text-xs mt-1">
               {rich(t("settings.form.discord.guide.s6.note"), { save: <strong className="text-zinc-400">{t("settings.form.discord.portal.saveChanges")}</strong> })}
             </p>
-          </div>
+          </GuideStep>
 
-          <div className="space-y-1">
-            <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s7.title")}</p>
+          <GuideStep title={t("settings.form.discord.guide.s7.title")}>
             <p>
               {rich(t("settings.form.discord.guide.s7.body"), {
                 generator: portal("urlGenerator"),
@@ -556,10 +475,9 @@ function DiscordSetupGuide() {
             <p className="text-zinc-500 text-xs">
               {t("settings.form.discord.guide.s7.note")}
             </p>
-          </div>
+          </GuideStep>
 
-          <div className="space-y-1">
-            <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s8.title")} <span className="text-zinc-500 font-normal">{t("settings.form.common.optional")}</span></p>
+          <GuideStep title={<>{t("settings.form.discord.guide.s8.title")} <span className="text-zinc-500 font-normal">{t("settings.form.common.optional")}</span></>}>
             <p>
               {rich(t("settings.form.discord.guide.s8.body"), { mention: hl("@mention") })}
             </p>
@@ -583,7 +501,7 @@ function DiscordSetupGuide() {
             <p className="text-zinc-500 text-xs mt-1">
               {rich(t("settings.form.discord.guide.s8.note"), { format: <code className="text-zinc-400">@Username message</code> })}
             </p>
-          </div>
+          </GuideStep>
 
           <div className="rounded-md bg-zinc-900 border border-zinc-700 px-3 py-3 space-y-1">
             <p className="font-semibold text-zinc-300 text-xs uppercase tracking-wide mb-2">{t("settings.form.discord.guide.commands")}</p>

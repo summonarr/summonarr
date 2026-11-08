@@ -66,8 +66,9 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 // Dynamic imports so the env/console stubs precede the module-graph load.
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel } = await import("./_helpers.mts");
-const { getBadMatches, getBadMatchReport, loadArrPathIndex, cachedArrNameIndex } = await import("../src/lib/bad-matches.ts");
+const { getBadMatchReport, loadArrPathIndex, cachedArrNameIndex } = await import("../src/lib/bad-matches.ts");
 const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
+const badMatchList = async (activeType?: "MOVIE" | "TV") => (await getBadMatchReport(activeType)).badMatches;
 
 // ── scripted Radarr (cold-map tests only) ───────────────────────────────────
 const fetchCalls: string[] = [];
@@ -225,7 +226,7 @@ test("agreeing libraries across different mounts → no matches, poster lookup s
     jfItem(200, "MOVIE", "/data/movies/Beta (2019)/Beta.mkv"),
   ];
 
-  assert.deepEqual(await getBadMatches(), []);
+  assert.deepEqual(await badMatchList(), []);
   assert.equal(coreCalls.length, 0); // posterPathMap short-circuits on zero mismatches
   assert.equal(cacheUpserts.length, 0);
   // The arr path maps are consumed only per-match, so with zero mismatches they
@@ -256,7 +257,7 @@ test("a library table at the row cap is reported as capped (additive to the bad-
 
 test("a tmdbId disagreement at the same relative path is reported with both sides' metadata", async () => {
   seedConflictingMovies();
-  const matches = await getBadMatches();
+  const matches = await badMatchList();
   assert.deepEqual(matches, [
     {
       relativePath: "Alpha (2020)/Alpha.mkv", // mount-stripped, identical on both servers
@@ -281,7 +282,7 @@ test("Windows backslash paths on one server normalise and still align with a Lin
     jfItem(999, "MOVIE", "D:\\Media\\Movies\\Alpha (2020)\\Alpha.mkv"),
     jfItem(200, "MOVIE", "D:\\Media\\Movies\\Beta (2019)\\Beta.mkv"),
   ];
-  const matches = await getBadMatches();
+  const matches = await badMatchList();
   assert.equal(matches.length, 1);
   assert.equal(matches[0].relativePath, "Alpha (2020)/Alpha.mkv");
   assert.equal(matches[0].jellyfin.tmdbId, 999);
@@ -291,7 +292,7 @@ test("rows with null or empty filePath are ignored — no phantom matches, no cr
   seedConflictingMovies();
   plexRows.push(plexItem(300, "MOVIE", null), plexItem(301, "MOVIE", ""));
   jfRows.push(jfItem(3999, "MOVIE", null));
-  const matches = await getBadMatches();
+  const matches = await badMatchList();
   assert.deepEqual(matches.map((m) => m.relativePath), ["Alpha (2020)/Alpha.mkv"]);
 });
 
@@ -316,7 +317,7 @@ test("a second Plex server on an unrelated mount root still reports its bad matc
     jfItem(300, "MOVIE", "/data/movies/Delta (2018)/Delta.mkv"),
   ];
 
-  const matches = await getBadMatches();
+  const matches = await badMatchList();
   assert.deepEqual(matches.map((m) => m.relativePath), ["Gamma (2021)/Gamma.mkv"]);
   assert.equal(matches[0].plex.tmdbId, 777); // the named server's row
   assert.equal(matches[0].plexRatingKey, "plex-777");
@@ -345,7 +346,7 @@ test("a named instance's own strip prefix is applied to its rows, not the defaul
 
   // Sorted: report order follows the merge order (named instances, then the
   // default) and is incidental — what matters is that BOTH servers aligned.
-  const matches = await getBadMatches();
+  const matches = await badMatchList();
   assert.deepEqual(
     matches.map((m) => [m.relativePath, m.plex.tmdbId, m.jellyfin.tmdbId]).sort(),
     [["Alpha (2020)/Alpha.mkv", 100, 101], ["Gamma (2021)/Gamma.mkv", 777, 999]],
@@ -368,7 +369,7 @@ test("a named instance with no strip prefix of its own inherits the shared defau
     jfItem(999, "MOVIE", "/data/movies/Gamma (2021)/Gamma.mkv"),
   ];
 
-  const matches = await getBadMatches();
+  const matches = await badMatchList();
   assert.deepEqual(
     matches.map((m) => [m.relativePath, m.plex.tmdbId]).sort(),
     [["Alpha (2020)/Alpha.mkv", 100], ["Gamma (2021)/Gamma.mkv", 777]],
@@ -392,7 +393,7 @@ test("two Plex servers mirroring one relative path collapse to a single row, def
     jfItem(200, "MOVIE", "/data/movies/Beta (2019)/Beta.mkv"),
   ];
 
-  const matches = await getBadMatches();
+  const matches = await badMatchList();
   assert.deepEqual(matches.map((m) => m.relativePath), ["Alpha (2020)/Alpha.mkv"]);
   assert.equal(matches[0].plex.tmdbId, 100);
 
@@ -400,7 +401,7 @@ test("two Plex servers mirroring one relative path collapse to a single row, def
   // is deterministic — default instance last, so it wins — rather than whatever
   // order the rows happened to come back in.
   plexRows[2] = plexItem(101, "MOVIE", "/mnt/nas/video/Alpha (2020)/Alpha.mkv", "remote");
-  const [contested] = await getBadMatches();
+  const [contested] = await badMatchList();
   assert.equal(contested.plex.tmdbId, 100);
   assert.equal(contested.plexRatingKey, "plex-100");
 });
@@ -414,7 +415,7 @@ test("radarr agreeing with Plex flags the jellyfin side; the cache hit never re-
   // across different bind-mount roots.
   seedArrPaths("radarr", [["/radarr/movies/Alpha (2020)", 100]]);
 
-  const [match] = await getBadMatches();
+  const [match] = await badMatchList();
   assert.equal(match.arrTmdbId, 100);
   assert.equal(match.arrVerdict, "jellyfin"); // jellyfin holds the wrong id
   assert.deepEqual(cacheUpserts, []); // hit path must not churn the cache row
@@ -435,7 +436,7 @@ test("radarr agreeing with Jellyfin flags plex; an id matching neither side expo
     ["/radarr/movies/Beta (2019)", 555], // arr disagrees with BOTH — a third opinion is not a verdict
   ]);
 
-  const matches = await getBadMatches();
+  const matches = await badMatchList();
   assert.equal(matches.length, 2);
   const alpha = matches.find((m) => m.relativePath.startsWith("Alpha"))!;
   const beta = matches.find((m) => m.relativePath.startsWith("Beta"))!;
@@ -466,7 +467,7 @@ test("TV matches key on the SERIES folder (strip prefix applied) and consult the
   ];
   seedArrPaths("sonarr", [["/sonarr/tv/ShowX", 300]]);
 
-  const matches = await getBadMatches();
+  const matches = await badMatchList();
   assert.equal(matches.length, 1);
   const m = matches[0];
   // Series-level identity: NOT the season/episode path — folderOf() would
@@ -499,14 +500,14 @@ test("TV keys stay per-show with NO strip prefix configured — mounts are infer
   ];
 
   assert.deepEqual(
-    (await getBadMatches()).map((m) => [m.relativePath, m.plex.tmdbId, m.jellyfin.tmdbId]),
+    (await badMatchList()).map((m) => [m.relativePath, m.plex.tmdbId, m.jellyfin.tmdbId]),
     [["Show A", 300, 3999]],
   );
 
   // Both shows wrong: two DISTINCT keys, not one merged row.
   jfRows[2] = jfItem(4999, "TV", "/media/tv/Show B/Season 01/e01.mkv");
   assert.deepEqual(
-    (await getBadMatches()).map((m) => [m.relativePath, m.plex.tmdbId, m.jellyfin.tmdbId]),
+    (await badMatchList()).map((m) => [m.relativePath, m.plex.tmdbId, m.jellyfin.tmdbId]),
     [["Show A", 300, 3999], ["Show B", 400, 4999]],
   );
 });
@@ -532,13 +533,13 @@ test("activeType filters the report to the requested media type", async () => {
   // Mounts are inferred per (instance, MEDIA TYPE), so the movie rows infer
   // /plexmedia/movies/ (not the /plexmedia/ shared parent) and the "movies/"
   // library dir never reaches the key — no *MoviePathStripPrefix needed.
-  const all = await getBadMatches();
+  const all = await badMatchList();
   assert.deepEqual(all.map((m) => m.relativePath), ["Alpha (2020)/Alpha.mkv", "ShowX"]);
 
-  const movies = await getBadMatches("MOVIE");
+  const movies = await badMatchList("MOVIE");
   assert.deepEqual(movies.map((m) => m.relativePath), ["Alpha (2020)/Alpha.mkv"]);
 
-  const tv = await getBadMatches("TV");
+  const tv = await badMatchList("TV");
   assert.deepEqual(tv.map((m) => m.relativePath), ["ShowX"]);
 });
 
@@ -570,7 +571,7 @@ test("posters: TmdbMediaCore first, details-blob fallback for core misses AND nu
     expiresAt: new Date(Date.now() + 3600_000),
   });
 
-  const matches = await getBadMatches();
+  const matches = await badMatchList();
   const posters = Object.fromEntries(
     matches.flatMap((m) => [
       [m.plex.tmdbId, m.plex.posterPath],
@@ -596,7 +597,7 @@ test("a failing ARR map build warns with the [bad-matches] scope and is non-fata
     throw new Error("settings table unavailable");
   };
 
-  const matches = await getBadMatches();
+  const matches = await badMatchList();
   assert.equal(matches.length, 1); // the mismatch still surfaces
   assert.equal(matches[0].arrTmdbId, null);
   assert.equal(matches[0].arrVerdict, null);
@@ -611,12 +612,12 @@ test("a failing ARR map build warns with the [bad-matches] scope and is non-fata
 test("a one-show TV library with flat episodes keys on the show folder — a name starting 'Series' is not a season folder", async () => {
   plexRows = [plexItem(300, "TV", "/plexmedia/tv/Series of Unfortunate Events/e1.mkv")];
   jfRows = [jfItem(3999, "TV", "/data/tv/Series of Unfortunate Events/e1.mkv")];
-  assert.deepEqual((await getBadMatches()).map((m) => m.relativePath), ["Series of Unfortunate Events"]);
+  assert.deepEqual((await badMatchList()).map((m) => m.relativePath), ["Series of Unfortunate Events"]);
 
   // A real season folder still keeps the show folder as the key.
   plexRows = [plexItem(300, "TV", "/plexmedia/tv/Show A/Season 01/e1.mkv")];
   jfRows = [jfItem(3999, "TV", "/data/tv/Show A/Season 01/e1.mkv")];
-  assert.deepEqual((await getBadMatches()).map((m) => m.relativePath), ["Show A"]);
+  assert.deepEqual((await badMatchList()).map((m) => m.relativePath), ["Show A"]);
 });
 
 test("a Jellyfin series folder with a dotted name is a folder, not a file", async () => {
@@ -624,7 +625,7 @@ test("a Jellyfin series folder with a dotted name is a folder, not a file", asyn
   // with a ".D" extension moved the mount a level up and keyed the show "tv".
   plexRows = [plexItem(300, "TV", "/plexmedia/tv/Agents of S.H.I.E.L.D/Season 1/e1.mkv")];
   jfRows = [jfItem(3999, "TV", "/data/tv/Agents of S.H.I.E.L.D")];
-  assert.deepEqual((await getBadMatches()).map((m) => m.relativePath), ["Agents of S.H.I.E.L.D"]);
+  assert.deepEqual((await badMatchList()).map((m) => m.relativePath), ["Agents of S.H.I.E.L.D"]);
 });
 
 // ── the shared Radarr/Sonarr folder map ─────────────────────────────────────
@@ -632,12 +633,12 @@ test("a Jellyfin series folder with a dotted name is a folder, not a file", asyn
 test("a basename two Radarr titles share referees nothing; the same title under two roots still does", async () => {
   seedConflictingMovies();
   seedArrPaths("radarr", [["/radarr/a/Alpha (2020)", 100], ["/radarr/b/Alpha (2020)", 555]]);
-  const [ambiguous] = await getBadMatches();
+  const [ambiguous] = await badMatchList();
   assert.deepEqual([ambiguous.arrTmdbId, ambiguous.arrVerdict], [null, null]);
 
   cacheRows.clear();
   seedArrPaths("radarr", [["/radarr/hd/Alpha (2020)", 100], ["/radarr/4k/Alpha (2020)", 100]]);
-  const [mirrored] = await getBadMatches();
+  const [mirrored] = await badMatchList();
   assert.deepEqual([mirrored.arrTmdbId, mirrored.arrVerdict], [100, "jellyfin"]);
 });
 
@@ -726,4 +727,34 @@ test("a map missing a down instance is kept only briefly, not refetched on every
   const logged = warns.filter((w) => w.includes("[bad-matches] ARR path map fetch failed"));
   assert.equal(logged.length, 1, warns.join(" | "));
   assert.ok(logged[0].includes("radarr instance \"\"") && !logged[0].includes("hd-key"), logged[0]);
+});
+
+test("only the service a conflict is judged by is read: a movie-only report never touches the Sonarr map", async () => {
+  seedConflictingMovies();
+  seedArrPaths("radarr", [["/radarr/movies/Alpha (2020)", 100]]);
+  const [match] = await badMatchList();
+  assert.equal(match.arrVerdict, "jellyfin");
+  assert.ok(cacheGets.includes("arr:radarr:paths"));
+  assert.ok(!cacheGets.includes("arr:sonarr:paths"), `no Sonarr read (reads: ${cacheGets.join(", ")})`);
+});
+
+test("concurrent cold reads of one map share a single catalogue fetch per instance", async () => {
+  configureTwoRadarrs();
+  respond = (url) => okJson([{ tmdbId: url.origin === RADARR_HD ? 100 : 777, path: `/m/${url.origin.length}` }]);
+  const [a, b] = await Promise.all([loadArrPathIndex("MOVIE"), loadArrPathIndex("MOVIE")]);
+  assert.equal(a, b, "the second caller joins the first build");
+  assert.equal(fetchCalls.length, 2);
+});
+
+test("mount group keys round-trip, and a group whose first row has no path still gets a mount", async () => {
+  const { inferGroupMounts, mountGroupKey, parseMountGroupKey } = await import("../src/lib/bad-matches.ts");
+  assert.deepEqual(parseMountGroupKey(mountGroupKey("", "TV")), { serverInstance: "", mediaType: "TV" });
+  assert.deepEqual(parseMountGroupKey(mountGroupKey("uhd", "MOVIE")), { serverInstance: "uhd", mediaType: "MOVIE" });
+  const mounts = inferGroupMounts(new Map([
+    [mountGroupKey("", "MOVIE"), [
+      { filePath: null, mediaType: "MOVIE" as const },
+      { filePath: "/data/movies/Alpha (2020)/Alpha.mkv", mediaType: "MOVIE" as const },
+    ]],
+  ]));
+  assert.equal(mounts.get(mountGroupKey("", "MOVIE")), "/data/movies/");
 });

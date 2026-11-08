@@ -22,11 +22,11 @@ test("no TRaSH card schedules a bare setTimeout (it can't be cancelled when the 
 });
 
 test("every delayed action-state reset only moves its own state back to idle", () => {
-  let seen = 0;
+  const seenIn = new Set<string>();
   for (const f of files) {
     const src = readFileSync(new URL(f, DIR), "utf8");
     for (const m of src.matchAll(/later\w*\(\(\) => (set\w*State)\(([^;]*?)\), \d+\)/g)) {
-      seen++;
+      seenIn.add(f);
       assert.match(
         m[2],
         /^\(s\) => \(s === "(ok|error)" \? "idle" : s\)$/,
@@ -34,6 +34,20 @@ test("every delayed action-state reset only moves its own state back to idle", (
       );
     }
   }
-  // Non-vacuity: the cards' resets (token, save, sync, apply x2, refresh) were found.
-  assert.ok(seen >= 8, `expected the cards' delayed resets, found ${seen}`);
+  // Non-vacuity: the one run state machine every long action goes through
+  // (Refresh Catalog, Apply on both cards, Sync Now) was found.
+  assert.ok(seenIn.has("use-trash-run.ts"), `expected the run hook's delayed reset, found it in: ${[...seenIn].join(", ")}`);
+});
+
+test("the cards' long actions all run through the one state machine", () => {
+  const read = (f: string) => readFileSync(new URL(f, DIR), "utf8");
+  for (const f of ["use-catalog-refresh.ts", "spec-section.tsx", "starter-pack-card.tsx", "sync-settings-card.tsx"]) {
+    assert.match(read(f), /useTrashRun\(\)/, `${f} runs through useTrashRun`);
+    assert.doesNotMatch(read(f), /useDelayed\(/, `${f} keeps no timer of its own`);
+  }
+  // The Settings switches and the token save through the house settings save (guardrail 10).
+  for (const f of ["sync-settings-card.tsx", "github-token-card.tsx"]) {
+    assert.match(read(f), /useSettingsSave\(/, `${f} saves through useSettingsSave`);
+    assert.doesNotMatch(read(f), /\/api\/settings/, `${f} sends no hand-rolled settings PATCH`);
+  }
 });

@@ -7,7 +7,8 @@ import { requireFeature } from "@/lib/features";
 import { PageHeader, StatCard } from "@/components/ui/design";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
 import type { Translator } from "@/lib/i18n/translate";
-import { ISSUE_TYPE_LABEL_KEY } from "@/lib/status-labels";
+import { ISSUE_TYPE_LABEL_KEY, REQUEST_STATUS_LABEL_KEY } from "@/lib/status-labels";
+import { nameOrEmail } from "@/lib/display-name";
 import {
   PENDING_AGE_ALERT_DAYS,
   PENDING_AGE_WARN_DAYS,
@@ -37,6 +38,7 @@ import {
   getUserStats,
   getWatchGradeSpreadForStats,
   requestSources,
+  STUCK_REASONS,
   type DurationStat,
   type RequestSources,
   type StorageStats,
@@ -110,7 +112,7 @@ const REQUEST_STATUS_ORDER = ["AVAILABLE", "APPROVED", "PENDING", "DECLINED"] as
 function requestStatusParts(t: Translator) {
   return REQUEST_STATUS_ORDER.map((status) => ({
     status,
-    label: t(`requests.status.${status.toLowerCase()}`),
+    label: t(REQUEST_STATUS_LABEL_KEY[status]),
     color: STATUS_COLOR[status],
   }));
 }
@@ -177,7 +179,7 @@ export default async function StatsPage({
   const oldestPendingDays = f.ageDays(pending.oldestCreatedAt);
   const oldestIssueDays = f.ageDays(issues.oldestOpenCreatedAt);
   const unresolvedIssues = issues.open + issues.inProgress;
-  const stuckTotal = stuck.counts["push-failed"] + stuck.counts["not-in-arr"] + stuck.counts["slow-download"];
+  const stuckTotal = STUCK_REASONS.reduce((n, r) => n + stuck.counts[r], 0);
   const rangeLabel = t(`adminManage.stats.rangeLabel.${range}`);
 
   const kpis = [
@@ -332,7 +334,7 @@ function AttentionSection({
           <SubHeading>{t("adminManage.stats.stuckRequests")}</SubHeading>
           <MetricGrid
             columns="grid-cols-3"
-            items={(["push-failed", "not-in-arr", "slow-download"] as const).map((r) => ({
+            items={STUCK_REASONS.map((r) => ({
               label: reasonLabel[r],
               value: f.num(stuck.counts[r]),
               tone: stuck.counts[r] > 0 ? (r === "slow-download" ? "warning" : "danger") : undefined,
@@ -373,7 +375,11 @@ function PipelineSection({
 }) {
   const { t } = f;
   const s = overview.byStatus;
-  const greenlit = s.APPROVED + s.AVAILABLE;
+  // The approve → download pipeline only: a request created already AVAILABLE
+  // (`mirrored`, never approved) never went through it, and counting it on both
+  // sides of the rate overstated fulfilment.
+  const fulfilled = Math.max(0, s.AVAILABLE - overview.mirrored);
+  const greenlit = s.APPROVED + fulfilled;
   return (
     <StatsSection id="stats-pipeline" title={t("adminManage.stats.requests")} subtitle={rangeLabel}>
       <ShareBar
@@ -387,7 +393,7 @@ function PipelineSection({
           items={[
             { label: t("adminManage.stats.approvalRate"), value: approval.value, hint: approval.hint },
             { label: t("adminManage.stats.declineRate"), value: f.pct(share(s.DECLINED, decisions)) },
-            { label: t("adminManage.stats.fulfillmentRate"), value: f.pct(share(s.AVAILABLE, greenlit)), hint: t("adminManage.stats.fulfillmentRateHint") },
+            { label: t("adminManage.stats.fulfillmentRate"), value: f.pct(share(fulfilled, greenlit)), hint: t("adminManage.stats.fulfillmentRateHint") },
             { label: t("adminManage.stats.alreadyAvailable"), value: f.num(overview.mirrored), hint: t("adminManage.stats.alreadyAvailableHint") },
             { label: t("nav.movies"), value: f.num(overview.byMediaType.MOVIE) },
             { label: t("nav.tvShows"), value: f.num(overview.byMediaType.TV) },
@@ -510,7 +516,7 @@ function UsersSection({
             emptyLabel={t("adminManage.stats.noData")}
             rows={topRequesters.map((u) => ({
               key: u.id,
-              label: `${u.name ?? u.email}${u.disabled ? ` (${t("adminManage.stats.disabled")})` : ""}`,
+              label: `${nameOrEmail(u)}${u.disabled ? ` (${t("adminManage.stats.disabled")})` : ""}`,
               value: t("adminManage.stats.requestCount", { count: u.count }),
               detail: t("adminManage.stats.requesterDetail", { available: f.num(u.available), declined: f.num(u.declined) }),
             }))}
@@ -560,38 +566,9 @@ function LibrarySection({
         ]}
       />
       <div className="grid grid-cols-1 lg:grid-cols-2" style={{ gap: 16, marginTop: 18 }}>
-        {services.map((s) => {
-          const p = library.perService[s];
-          const servers = library.servers.filter((x) => x.service === s);
-          return (
-            <div
-              key={s}
-              style={{ padding: 16, background: "var(--ds-bg-3)", border: "1px solid var(--ds-border)", borderRadius: 8 }}
-            >
-              <SubHeading>{s === "plex" ? "Plex" : "Jellyfin"}</SubHeading>
-              <MetricGrid
-                columns="grid-cols-3"
-                items={[
-                  { label: t("nav.movies"), value: f.num(p.movies) },
-                  { label: t("adminManage.stats.series"), value: f.num(p.series) },
-                  { label: t("adminManage.stats.episodes"), value: f.num(p.episodes) },
-                ]}
-              />
-              {servers.length > 1 && (
-                <div style={{ marginTop: 14 }}>
-                  <RankList
-                    emptyLabel=""
-                    rows={servers.map((x) => ({
-                      key: x.slug || "default",
-                      label: x.slug ? x.name : t("adminManage.stats.defaultInstance"),
-                      value: t("adminManage.stats.moviesSeries", { movies: f.num(x.movies), series: f.num(x.series) }),
-                    }))}
-                  />
-                </div>
-              )}
-            </div>
-          );
-        })}
+        {services.map((s) => (
+          <ServiceLibraryCard key={s} f={f} service={s} library={library} />
+        ))}
       </div>
       <div style={{ marginTop: 20 }}>
         <SubHeading>{t("adminManage.stats.libraryGrowth")}</SubHeading>
@@ -612,6 +589,44 @@ function LibrarySection({
         <StatsNote>{t("adminManage.stats.libraryGrowthHint")}</StatsNote>
       </div>
     </StatsSection>
+  );
+}
+
+// One media server's library counts, with a per-server list when it runs more than one.
+function ServiceLibraryCard({
+  f, service, library,
+}: {
+  f: Fmt;
+  service: "plex" | "jellyfin";
+  library: Awaited<ReturnType<typeof getLibraryStats>>;
+}) {
+  const { t } = f;
+  const p = library.perService[service];
+  const servers = library.servers.filter((x) => x.service === service);
+  return (
+    <div style={{ padding: 16, background: "var(--ds-bg-3)", border: "1px solid var(--ds-border)", borderRadius: 8 }}>
+      <SubHeading>{service === "plex" ? "Plex" : "Jellyfin"}</SubHeading>
+      <MetricGrid
+        columns="grid-cols-3"
+        items={[
+          { label: t("nav.movies"), value: f.num(p.movies) },
+          { label: t("adminManage.stats.series"), value: f.num(p.series) },
+          { label: t("adminManage.stats.episodes"), value: f.num(p.episodes) },
+        ]}
+      />
+      {servers.length > 1 && (
+        <div style={{ marginTop: 14 }}>
+          <RankList
+            emptyLabel=""
+            rows={servers.map((x) => ({
+              key: x.slug || "default",
+              label: x.slug ? x.name : t("adminManage.stats.defaultInstance"),
+              value: t("adminManage.stats.moviesSeries", { movies: f.num(x.movies), series: f.num(x.series) }),
+            }))}
+          />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -753,6 +768,27 @@ function neverWatchedText(nw: NonNullable<StorageStats["neverWatched"]>, f: Fmt)
   }
 }
 
+function reclaimableText(r: NonNullable<StorageStats["reclaimable"]>, f: Fmt): string {
+  return r.titles === 0
+    ? f.t("adminManage.stats.reclaimableNone")
+    : f.t("adminManage.stats.reclaimableValue", { size: f.bytes(r.bytes), count: r.titles, value: f.num(r.titles) });
+}
+
+// A storage figure that leads to the page acting on it.
+function StorageFootnote({ title, text, href, linkLabel }: { title: string; text: string; href: string; linkLabel: string }) {
+  return (
+    <div style={{ marginTop: 16 }}>
+      <SubHeading>{title}</SubHeading>
+      <p style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0 }}>
+        {text}{" "}
+        <AccentLink href={href} inline>
+          {linkLabel}
+        </AccentLink>
+      </p>
+    </div>
+  );
+}
+
 // Live Radarr/Sonarr calls. Streamed behind a Suspense boundary so one slow or
 // unreachable instance (30 s timeout) no longer holds the whole page blank —
 // and a rejection is caught here, as WatchGradesSection does, so a transient DB
@@ -816,32 +852,20 @@ async function StorageSection({ f }: { f: Fmt }) {
             </StatsNote>
           ))}
           {storage.reclaimable && (
-            <div style={{ marginTop: 16 }}>
-              <SubHeading>{t("adminManage.stats.reclaimable")}</SubHeading>
-              <p style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0 }}>
-                {storage.reclaimable.titles === 0
-                  ? t("adminManage.stats.reclaimableNone")
-                  : t("adminManage.stats.reclaimableValue", {
-                      size: f.bytes(storage.reclaimable.bytes),
-                      count: storage.reclaimable.titles,
-                      value: f.num(storage.reclaimable.titles),
-                    })}{" "}
-                <AccentLink href="/admin/cleanup" inline>
-                  {t("adminManage.stats.reviewCleanup")}
-                </AccentLink>
-              </p>
-            </div>
+            <StorageFootnote
+              title={t("adminManage.stats.reclaimable")}
+              text={reclaimableText(storage.reclaimable, f)}
+              href="/admin/cleanup"
+              linkLabel={t("adminManage.stats.reviewCleanup")}
+            />
           )}
           {storage.neverWatched && (
-            <div style={{ marginTop: 16 }}>
-              <SubHeading>{t("adminManage.stats.neverWatched")}</SubHeading>
-              <p style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0 }}>
-                {neverWatchedText(storage.neverWatched, f)}{" "}
-                <AccentLink href="/admin/never-watched" inline>
-                  {t("adminManage.stats.reviewNeverWatched")}
-                </AccentLink>
-              </p>
-            </div>
+            <StorageFootnote
+              title={t("adminManage.stats.neverWatched")}
+              text={neverWatchedText(storage.neverWatched, f)}
+              href="/admin/never-watched"
+              linkLabel={t("adminManage.stats.reviewNeverWatched")}
+            />
           )}
         </div>
       </div>

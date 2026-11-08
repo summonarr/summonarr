@@ -10,6 +10,7 @@ import {
   jellyfinSettingKey,
   instanceKeySegment,
   isValidMediaInstanceSlug,
+  mediaInstanceSlugCollidesWithDefault,
   activeSessionId,
   parseActiveSessionId,
   DEFAULT_MEDIA_INSTANCE,
@@ -103,4 +104,15 @@ test("two Plex instances never collide on the same sessionKey — the collision 
   const defaultId = activeSessionId("plex", "", "5");
   const remoteId = activeSessionId("plex", "remote", "5");
   assert.notEqual(defaultId, remoteId);
+});
+
+test("a slug that is a setting field's leading word derives a DEFAULT key, and is flagged", () => {
+  assert.equal(plexSettingKey("movie", "PathStripPrefix"), plexSettingKey("", "MoviePathStripPrefix"));
+  assert.equal(mediaInstanceSlugCollidesWithDefault("movie"), true);
+  assert.equal(mediaInstanceSlugCollidesWithDefault("tv"), true);
+  // "server" + jellyfin's "Url" spells plex's "ServerUrl", but the two never
+  // share a prefix, so it is no collision.
+  assert.equal(mediaInstanceSlugCollidesWithDefault("server"), false);
+  assert.equal(mediaInstanceSlugCollidesWithDefault("remote"), false);
+  assert.equal(mediaInstanceSlugCollidesWithDefault(""), false);
 });

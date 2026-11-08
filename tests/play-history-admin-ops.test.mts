@@ -92,8 +92,13 @@ shadowPrismaModel(prisma, "user", {
 });
 // The audit paper trail (awaited by the export, void by the delete).
 const auditRows: unknown[] = [];
+let auditThrows = false;
 shadowPrismaModel(prisma, "auditLog", {
-  create: async (a: { data: unknown }) => { auditRows.push(a.data); return a.data; },
+  create: async (a: { data: unknown }) => {
+    if (auditThrows) throw new Error("simulated audit write failure");
+    auditRows.push(a.data);
+    return a.data;
+  },
 });
 
 // ── the exported rows + the raw-SQL dispatcher ────────────────────────────────
@@ -123,11 +128,26 @@ let rawCalls: string[] = [];
 // When true, every export page query answers a FULL page (the LIMIT it was sent),
 // so the CSV loop would page all the way to MAX_EXPORT_ROWS if nothing stopped it.
 let fullExportPages = false;
+// When set, the export's page queries share this many rows in all: each page
+// answers what it asked for until the rows run out.
+let exportRowBudget: number | null = null;
+// When set, the export's Nth page query (1-based) throws.
+let exportQueryThrowsAt: number | null = null;
 shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async (sql: string, ...binds: unknown[]) => {
   rawCalls.push(sql);
   // The export joins the username alias; everything else (the cached stats
   // getters) gets an empty result set.
   if (sql.includes('LEFT JOIN "MediaServerUser" msu')) {
+    if (exportQueryThrowsAt !== null && exportPageQueries() === exportQueryThrowsAt) {
+      throw new Error("simulated DB failure mid-export");
+    }
+    if (exportRowBudget !== null) {
+      const take = Math.min(Number(binds[binds.length - 1]), exportRowBudget);
+      exportRowBudget -= take;
+      const base = rawCalls.length * 1_000_000;
+      return Array.from({ length: take }, (_, i) =>
+        exportRow({ id: `ph-${base + i}`, startedAt: new Date(startedAt.getTime() - (base + i) * 1000) }));
+    }
     if (fullExportPages) {
       const take = Number(binds[binds.length - 1]);
       const base = rawCalls.length * 1_000_000;
@@ -142,12 +162,18 @@ const exportPageQueries = () => rawCalls.filter((sql) => sql.includes('LEFT JOIN
 
 // ── the delete target ────────────────────────────────────────────────────────
 const deletedIds: string[] = [];
+// A concurrent delete removed the row between the route's read and its delete.
+let deleteRaced = false;
 shadowPrismaModel(prisma, "playHistory", {
   findUnique: async (a: { where: { id: string } }) =>
     a.where.id === "ph-del"
       ? { id: "ph-del", mediaServerUserId: "msu-1", title: "Test Movie", source: "plex", tmdbId: 550, startedAt, stoppedAt, referenceId: null }
       : null,
-  delete: async (a: { where: { id: string } }) => { deletedIds.push(a.where.id); return { id: a.where.id }; },
+  delete: async (a: { where: { id: string } }) => {
+    if (deleteRaced) throw Object.assign(new Error("Record to delete does not exist."), { name: "PrismaClientKnownRequestError", code: "P2025" });
+    deletedIds.push(a.where.id);
+    return { id: a.where.id };
+  },
   deleteMany: async () => ({ count: 0 }),
 });
 
@@ -187,6 +213,10 @@ const { getTranscodeOffenders, clearActivityCache } = await import("../src/lib/p
 beforeEach(() => {
   rawCalls = [];
   fullExportPages = false;
+  exportRowBudget = null;
+  exportQueryThrowsAt = null;
+  auditThrows = false;
+  deleteRaced = false;
   deletedIds.length = 0;
   auditRows.length = 0;
   warns.length = 0;
@@ -306,6 +336,66 @@ test("the CSV export reads pages only as fast as the client downloads, and a can
   assert.equal(exportPageQueries(), beforeCancel, "nothing is queried after the download is cancelled");
 });
 
+// Reads a CSV export to the end and splits it into lines (the BOM dropped by the decoder).
+async function csvLines(res: Response): Promise<string[]> {
+  return (await res.text()).trimEnd().split("\n");
+}
+
+test("a CSV export of EXACTLY the cap is complete: no truncation row; one row more is cut and says so", async () => {
+  exportRowBudget = 10_000;
+  const exactToken = await mintAdmin();
+  const exact = await runInScope(exactToken, () => exportRoute(req("/api/play-history/export?format=csv", exactToken)));
+  assert.equal(exact.status, 200);
+  const exactLines = await csvLines(exact);
+  assert.equal(exactLines.length, 1 + 10_000, "the header and every row, and no notice");
+  assert.ok(!exactLines.at(-1)!.includes("truncated"), "a complete export is not reported as cut");
+
+  exportRowBudget = 10_001;
+  const token = await mintAdmin();
+  const over = await runInScope(token, () => exportRoute(req("/api/play-history/export?format=csv", token)));
+  const overLines = await csvLines(over);
+  assert.equal(overLines.length, 1 + 10_000 + 1, "the cap's rows, then the notice — the probe row is never written");
+  assert.match(overLines.at(-1)!, /truncated at 10000 rows/);
+});
+
+test("a DB failure part-way through a CSV export is logged, not swallowed; a cancelled download is not", async () => {
+  fullExportPages = true;
+  exportQueryThrowsAt = 2;
+  const token = await mintAdmin();
+  const res = await runInScope(token, () => exportRoute(req("/api/play-history/export?format=csv", token)));
+  await res.text().catch(() => "");
+  assert.ok(errors.some((e) => e.startsWith("[play-history-export]") && e.includes("simulated DB failure mid-export")), `no scoped log: ${errors.join(" | ")}`);
+
+  // The cancel path (the backpressure test's): the consumer going away logs nothing.
+  errors.length = 0;
+  exportQueryThrowsAt = null;
+  const token2 = await mintAdmin();
+  const res2 = await runInScope(token2, () => exportRoute(req("/api/play-history/export?format=csv", token2)));
+  const reader = res2.body!.getReader();
+  await reader.read();
+  await reader.cancel();
+  for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+  assert.deepEqual(errors.filter((e) => e.startsWith("[play-history-export]")), []);
+});
+
+test("an export whose paper-trail row can't be written is refused (500) before any row is read", async () => {
+  auditThrows = true;
+  for (const format of ["csv", "json"]) {
+    const token = await mintAdmin();
+    const res = await runInScope(token, () => exportRoute(req(`/api/play-history/export?format=${format}`, token)));
+    assert.equal(res.status, 500, format);
+    assert.deepEqual(await res.json(), { error: "The export could not be started — the server log has the details" });
+  }
+  assert.equal(exportPageQueries(), 0, "no viewer history is read without its audit row");
+});
+
+test("the JSON export orders by (startedAt, id) like the CSV, so equal start times come out in one stable order", async () => {
+  const token = await mintAdmin();
+  await runInScope(token, () => exportRoute(req("/api/play-history/export?format=json", token)));
+  const sql = rawCalls.find((q) => q.includes('LEFT JOIN "MediaServerUser" msu'))!;
+  assert.match(sql, /ORDER BY h\."startedAt" DESC, h\."id" DESC/);
+});
+
 // ═══ the history filter's platform list ═══════════════════════════════════════
 
 test("?distinct=platforms is served from the activity cache: one DISTINCT scan, repeated after a clear", async () => {
@@ -349,6 +439,17 @@ test("DELETE /api/play-history/[id] flushes the activity cache after the delete 
     primed * 2,
     "after the DELETE the cached getter must re-query — the stats/calendar/heatmap panels may not keep counting a play the audit row recorded as removed",
   );
+});
+
+test("DELETE that lost the race to a concurrent delete still answers 204 but audits nothing — the delete that won wrote the row", async () => {
+  deleteRaced = true;
+  const token = await mintAdmin();
+  const before = auditRows.length;
+  const res = await idMod.DELETE(req("/api/play-history/ph-del", token, "DELETE"), { params: Promise.resolve({ id: "ph-del" }) });
+  assert.equal(res.status, 204);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(auditRows.length, before, "no PLAY_HISTORY_DELETE for a delete this call didn't make");
+  assert.deepEqual(deletedIds, []);
 });
 
 test("neither route console.errors on its happy path (guardrail 7)", () => {

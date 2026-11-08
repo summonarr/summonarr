@@ -1,22 +1,17 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { encryptToken } from "@/lib/token-crypto";
-import { sanitizeText } from "@/lib/sanitize";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { isFeatureEnabled } from "@/lib/features";
 import { apnsEndpointFor, legacyApnsEndpointFor } from "@/lib/apns-endpoint";
 import { evictOldestForCapInTx, lockUserPushRegistrationsInTx } from "@/lib/push-registration";
-
-const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
-// APNs device tokens are 32 bytes (64 hex) today; Apple reserves the right to
-// grow them, so accept a generous range — but whole bytes only (even-length
-// hex, 32–100 bytes). The relay validates even-length; an odd-length token
-// would register here but never deliver.
-const DEVICE_TOKEN_RE = /^(?:[0-9a-fA-F]{2}){32,100}$/;
+import { readPushSubscriptionCap } from "@/lib/push-cap";
+import { parseApnsDeviceToken, parseApnsPublicKey, parsePushLabel } from "@/lib/push-body";
 
 // POST /api/push/apns — registers (or updates) an iOS device's APNs token as a
 // push subscription for the caller, capped per-user with oldest-eviction.
@@ -36,19 +31,12 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }
 
-  const parsed = await readJsonCapped<{ deviceToken?: string; label?: string; publicKey?: string | null }>(req, 16384);
+  const parsed = await readJsonCapped<{ deviceToken?: unknown; label?: unknown; publicKey?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
-  // Lowercased because the hex regex accepts either case and `endpoint` is the
-  // unique key the cross-account 409 guard below keys off: without this, the
-  // same physical device token re-sent uppercased misses the findUnique, skips
-  // the ownership check, and lands a SECOND row owned by the caller — every push
-  // that row is entitled to then goes to the original owner's device. It also
-  // keeps a case-shifted re-registration from duplicating instead of updating
-  // (which would leave the stale row pushing to a signed-out device).
-  const deviceToken = typeof body.deviceToken === "string" ? body.deviceToken.trim().toLowerCase() : "";
-  if (!DEVICE_TOKEN_RE.test(deviceToken)) {
+  const deviceToken = parseApnsDeviceToken(body.deviceToken);
+  if (deviceToken === null) {
     return NextResponse.json({ error: t("apiUser.push.deviceTokenInvalid") }, { status: 400 });
   }
 
@@ -70,79 +58,68 @@ export const POST = withAuth(async (req, _ctx, session) => {
     // ownership proof from the caller) would let any user hijack another
     // account's device token. Require the prior owner to DELETE first — a
     // legitimate device handoff goes through sign-out (mirrors /api/push/subscribe).
-    return NextResponse.json({ error: t("apiUser.push.deviceTaken") }, { status: 409 });
+    return deviceTaken(t);
   }
 
-  // typeof-guard BEFORE the string method: readJsonCapped<T>'s generic is a
-  // compile-time cast only, so `{"label":123}` reached .replace on a number and
-  // surfaced as a 500 instead of being ignored. Same rule the issues/messages
-  // route states explicitly.
-  const sanitizedLabel = typeof body.label === "string" && body.label
-    ? (sanitizeText(body.label).slice(0, 100) || undefined)
-    : undefined;
+  const label = parsePushLabel(body.label);
+  const publicKey = parseApnsPublicKey(body.publicKey);
+  const cap = await readPushSubscriptionCap();
 
-  // Optional E2E device public key (P-256, X9.63 uncompressed = 65 bytes,
-  // base64). Stored only if well-formed; a missing/malformed key just means this
-  // device gets generic (content-free) pushes instead of encrypted rich ones.
-  let validPublicKey: string | null = null;
-  if (typeof body.publicKey === "string" && body.publicKey.length > 0 && body.publicKey.length <= 128) {
-    const buf = Buffer.from(body.publicKey, "base64");
-    if (buf.length === 65 && buf[0] === 0x04) validPublicKey = body.publicKey;
-  }
-  // "Absent" must not mean "clear it" on the update branch. A re-POST on an APNs
-  // token refresh (or relaunch) while the device is locked can't read its
-  // Keychain P-256 key and omits publicKey — writing that null through would
-  // NULL an existing row's key, and sendApns then skips its encrypt branch
-  // forever, permanently downgrading that device to content-free pushes with no
-  // error anywhere. Only an explicit `publicKey: null` clears it.
-  const clearPublicKey = body.publicKey === null;
-
-  const capRow = await prisma.setting.findUnique({ where: { key: "maxPushSubscriptions" } });
-  const cap = parseRateLimit(capRow?.value, DEFAULT_MAX_PUSH_SUBSCRIPTIONS);
-
-  // Cap-check + oldest-eviction + upsert in one transaction under the per-user
-  // lock (push-registration.ts, shared with /api/push/subscribe), so concurrent
-  // registrations can't push the user one over the cap.
-  await prisma.$transaction(async (tx) => {
-    await lockUserPushRegistrationsInTx(tx, session.user.id);
+  // Ownership, cap-check, oldest-eviction and upsert in one transaction under
+  // the per-user lock (push-registration.ts, shared with /api/push/subscribe),
+  // so concurrent registrations can't push the user one over the cap.
+  const userId = session.user.id;
+  const outcome = await prisma.$transaction(async (tx) => {
+    await lockUserPushRegistrationsInTx(tx, userId);
+    // Ownership again, under the lock: the per-user lock doesn't serialize two
+    // ACCOUNTS, so another account may have registered this device since the
+    // check above, and the upsert's update branch would rewrite its row.
+    const owner = await tx.pushSubscription.findUnique({ where: { endpoint }, select: { userId: true } });
+    if (owner && owner.userId !== userId) return "taken" as const;
     // The caller's own legacy-handle row: rename it onto the hashed handle (so
     // the upsert below updates it, keeping its createdAt for the cap's
     // oldest-first eviction), or drop it if the hashed row already exists. A
     // concurrent rename's P2002 propagates (guardrail 23) — the device simply
     // re-registers on its next launch.
     if (legacyRow) {
-      if (hashedRow) await tx.pushSubscription.deleteMany({ where: { id: legacyRow.id, userId: session.user.id } });
-      else await tx.pushSubscription.updateMany({ where: { id: legacyRow.id, userId: session.user.id }, data: { endpoint } });
+      if (owner) await tx.pushSubscription.deleteMany({ where: { id: legacyRow.id, userId } });
+      else await tx.pushSubscription.updateMany({ where: { id: legacyRow.id, userId }, data: { endpoint } });
     }
     // Re-read under the lock: a device already registered here never evicts.
-    const current = await tx.pushSubscription.findUnique({ where: { endpoint }, select: { userId: true } });
-    if (current?.userId !== session.user.id) await evictOldestForCapInTx(tx, session.user.id, cap);
+    const current = legacyRow ? await tx.pushSubscription.findUnique({ where: { endpoint }, select: { userId: true } }) : owner;
+    if (current?.userId !== userId) await evictOldestForCapInTx(tx, userId, cap);
 
     await tx.pushSubscription.upsert({
       where: { endpoint },
       update: {
         platform: "ios",
         deviceToken: encryptToken(deviceToken),
-        ...((validPublicKey !== null || clearPublicKey) && { publicKey: validPublicKey }),
-        ...(sanitizedLabel !== undefined && { label: sanitizedLabel }),
+        ...(publicKey.kind !== "keep" && { publicKey: publicKey.value }),
+        ...(label !== undefined && { label }),
       },
       create: {
         endpoint,
         platform: "ios",
         deviceToken: encryptToken(deviceToken),
-        publicKey: validPublicKey,
-        userId: session.user.id,
-        label: sanitizedLabel,
+        publicKey: publicKey.kind === "set" ? publicKey.value : null,
+        userId,
+        label,
       },
     });
+    return "ok" as const;
   });
 
+  if (outcome === "taken") return deviceTaken(t);
   return NextResponse.json({ ok: true });
 });
 
+function deviceTaken(t: Translator): NextResponse {
+  return NextResponse.json({ error: t("apiUser.push.deviceTaken") }, { status: 409 });
+}
+
 export const DELETE = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<{ deviceToken?: string }>(req, 16384);
+  const parsed = await readJsonCapped<{ deviceToken?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 

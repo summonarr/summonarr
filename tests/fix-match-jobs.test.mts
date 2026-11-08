@@ -10,7 +10,7 @@ const errors: string[] = [];
 console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
 
 const {
-  startFixMatchJob, getFixMatchJob, findRunningFixMatchJob, fixMatchQueueAhead, listFixMatchJobs, fixMatchJobKey, FixMatchError, _resetFixMatchJobsForTests,
+  startFixMatchJob, getFixMatchJob, findRunningFixMatchJob, fixMatchQueueAhead, listFixMatchJobs, fixMatchJobKey, fixMatchJobScope, FixMatchError, _resetFixMatchJobsForTests,
   awaitFixMatchJob,
 } = await import("../src/lib/fix-match-jobs.ts");
 
@@ -192,4 +192,29 @@ test("awaitFixMatchJob resolves with the settled job — done, failed, already f
   gates[0]();
   assert.equal((await q)?.status, "done");
   for (const g of gates.slice(1)) g();
+});
+
+test("fixMatchJobScope reads back the server and instance of every key the builder makes, item mode included", () => {
+  for (const server of ["plex", "jellyfin"]) {
+    for (const serverInstance of ["", "remote", "4k"]) {
+      for (const extra of [{}, { itemKey: "abc:def->x" }]) {
+        const key = fixMatchJobKey({ server, serverInstance, mediaType: "MOVIE", tmdbId: 0, correctTmdbId: 2, ...extra });
+        assert.deepEqual(fixMatchJobScope(key), { server, serverInstance }, key);
+      }
+    }
+  }
+});
+
+test("a job that waited in the queue starts its clock when it starts running, not when it was queued", async () => {
+  const gates: Array<() => void> = [];
+  const gated = () => new Promise<{ ok: true }>((r) => { gates.push(() => r({ ok: true })); });
+  for (let i = 0; i < 4; i++) startFixMatchJob(`clock-${i}`, gated, 1_000);
+  const queued = startFixMatchJob("clock-q", gated, 1_000);
+  assert.equal(queued.status, "queued");
+  assert.equal(queued.startedAt, 1_000);
+  await settle();
+  gates[0]();
+  await settle();
+  assert.equal(queued.status, "running");
+  assert.ok(queued.startedAt > 1_000, "re-stamped at launch");
 });

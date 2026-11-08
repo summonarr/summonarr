@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { usePathname, useSearchParams } from "next/navigation";
+import { startsAppNavigation } from "./navigation-progress-rules";
 
 // A started bar hides itself after this long if no URL change ever arrives. A
 // cancelled navigation, a failed RSC fetch or a link that resolves to the page
@@ -16,28 +17,51 @@ export function NavigationProgress() {
   // complete the bar too.
   const searchParams = useSearchParams();
   const url = `${pathname}?${searchParams.toString()}`;
-  const [width, setWidth] = useState(0);
-  const [visible, setVisible] = useState(false);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const stallRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // The complete/hide timeouts scheduled by the URL-change effect. Kept in a
-  // ref so a NEW navigation can cancel them; otherwise the previous
-  // navigation's hide timer could fire mid-way through the next one.
-  const completionTimeouts = useRef<ReturnType<typeof setTimeout>[]>([]);
-  // Seeded with the mount URL so the completion effect does not run on mount.
-  const prevUrl = useRef(url);
+  const { visible, width, start, finish } = useProgressBar();
   // window.location's path + query as of the last committed navigation. Lets
   // a popstate (Back/Forward) that only moves between `#hash` entries — like
   // the settings side-nav's anchor links — be ignored, since no page load
   // follows it. Read in effects only (guardrail 16).
-  const committedLocation = useRef<string | null>(null);
+  const committedLocationRef = useRef<string | null>(null);
+  // Seeded with the mount URL so the completion effect does not run on mount.
+  const prevUrl = useRef(url);
 
-  const clearCompletionTimeouts = () => {
-    for (const id of completionTimeouts.current) clearTimeout(id);
-    completionTimeouts.current = [];
-  };
+  useNavigationStart(start, committedLocationRef);
 
-  const stop = useCallback(() => {
+  // Navigation COMPLETE — the new URL is live in this commit.
+  useEffect(() => {
+    if (url === prevUrl.current) return;
+    prevUrl.current = url;
+    committedLocationRef.current = window.location.pathname + window.location.search;
+    finish();
+  }, [url, finish]);
+
+  if (!visible) return null;
+
+  return (
+    <div
+      className="fixed top-0 left-0 z-[200] h-0.5 bg-indigo-500 transition-[width] duration-200 ease-out pointer-events-none"
+      style={{
+        width: `${width}%`,
+        // Glow follows the accent (bg-indigo-500 is token-mapped to it).
+        boxShadow: "0 0 8px 0 color-mix(in oklab, var(--ds-accent) 60%, transparent)",
+      }}
+    />
+  );
+}
+
+// The bar itself: `start` creeps it toward 85% (and gives up after
+// STALL_TIMEOUT_MS), `finish` fills it and fades it out. Every timer is owned
+// here; each call cancels the other's, so a new navigation never has the
+// previous one's hide timer fire midway, and unmount drops them all.
+function useProgressBar() {
+  const [width, setWidth] = useState(0);
+  const [visible, setVisible] = useState(false);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stallRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const completionTimeouts = useRef<ReturnType<typeof setTimeout>[]>([]);
+
+  const clearAll = useCallback(() => {
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
@@ -46,11 +70,12 @@ export function NavigationProgress() {
       clearTimeout(stallRef.current);
       stallRef.current = null;
     }
+    for (const id of completionTimeouts.current) clearTimeout(id);
+    completionTimeouts.current = [];
   }, []);
 
   const start = useCallback(() => {
-    stop();
-    clearCompletionTimeouts();
+    clearAll();
     setVisible(true);
     setWidth(0);
 
@@ -65,22 +90,42 @@ export function NavigationProgress() {
     }, 150);
 
     stallRef.current = setTimeout(() => {
-      stop();
+      clearAll();
       setVisible(false);
       setWidth(0);
     }, STALL_TIMEOUT_MS);
-  }, [stop]);
+  }, [clearAll]);
 
-  // Navigation START.
-  //
-  // We listen for link clicks in the capture phase (before the router sees
-  // the click), which is the earliest moment we can learn a navigation began.
-  // Watching history.pushState does NOT work: the App Router only calls it
-  // once the new URL is already committed, so the bar would start and finish
-  // at the same instant.
-  //
-  // Known gap: a programmatic router.push (the header search, for one) is not
-  // a click, so it starts no bar.
+  const finish = useCallback(() => {
+    clearAll();
+    const completeId = setTimeout(() => setWidth(100), 0);
+    const hideId = setTimeout(() => {
+      setVisible(false);
+      setWidth(0);
+    }, 300);
+    completionTimeouts.current = [completeId, hideId];
+  }, [clearAll]);
+
+  useEffect(() => clearAll, [clearAll]);
+
+  return { visible, width, start, finish };
+}
+
+// Navigation START.
+//
+// We listen for link clicks in the capture phase (before the router sees the
+// click), which is the earliest moment we can learn a navigation began.
+// Watching history.pushState does NOT work: the App Router only calls it once
+// the new URL is already committed, so the bar would start and finish at the
+// same instant.
+//
+// Known gaps: a programmatic router.push (the header search, for one) is not a
+// click, so it starts no bar. And a capture listener on document runs before
+// React's handlers, so `defaultPrevented` here only sees a cancel by an earlier
+// capture listener: a Link whose own onClick vetoes the navigation can't be told
+// apart from the Link's client navigation (both call preventDefault). The stall
+// timeout ends the bar for that click.
+function useNavigationStart(start: () => void, committedLocationRef: RefObject<string | null>) {
   useEffect(() => {
     const onDocumentClick = (e: MouseEvent) => {
       // Anything the browser will not treat as a plain in-page navigation:
@@ -97,84 +142,24 @@ export function NavigationProgress() {
       if (target && target !== "_self") return;
       if (!anchor.getAttribute("href")) return;
 
-      let next: URL;
-      try {
-        next = new URL(anchor.href, window.location.href);
-      } catch {
-        return;
-      }
-      // A different origin leaves the app entirely, and a same-URL or hash-only
-      // link commits no router navigation — in both cases the completion effect
-      // would never fire and the bar would ride its stall timeout for nothing.
-      if (next.origin !== window.location.origin) return;
-      if (next.href === window.location.href) return;
-      if (
-        next.pathname === window.location.pathname &&
-        next.search === window.location.search
-      ) {
-        return;
-      }
-
-      start();
+      if (startsAppNavigation(anchor.href, window.location)) start();
     };
 
     // Back/forward: the URL changes with no click to observe. A hash-only
     // entry change commits no router navigation, so it must not start the bar
-    // (same reasoning as the hash-only click guard above).
+    // (same reasoning as startsAppNavigation).
     const onPopState = () => {
       const here = window.location.pathname + window.location.search;
-      if (committedLocation.current !== null && here === committedLocation.current) return;
+      if (committedLocationRef.current !== null && here === committedLocationRef.current) return;
       start();
     };
 
-    committedLocation.current = window.location.pathname + window.location.search;
+    committedLocationRef.current = window.location.pathname + window.location.search;
     document.addEventListener("click", onDocumentClick, true);
     window.addEventListener("popstate", onPopState);
     return () => {
       document.removeEventListener("click", onDocumentClick, true);
       window.removeEventListener("popstate", onPopState);
     };
-  }, [start]);
-
-  // Navigation COMPLETE — the new URL is live in this commit.
-  useEffect(() => {
-    if (url === prevUrl.current) return;
-    prevUrl.current = url;
-    committedLocation.current = window.location.pathname + window.location.search;
-
-    stop();
-
-    const completeId = setTimeout(() => setWidth(100), 0);
-    const hideId = setTimeout(() => {
-      setVisible(false);
-      setWidth(0);
-    }, 300);
-    completionTimeouts.current = [completeId, hideId];
-
-    return () => {
-      clearTimeout(completeId);
-      clearTimeout(hideId);
-    };
-  }, [url, stop]);
-
-  // Unmount: drop every timer this component owns.
-  useEffect(() => {
-    return () => {
-      stop();
-      clearCompletionTimeouts();
-    };
-  }, [stop]);
-
-  if (!visible) return null;
-
-  return (
-    <div
-      className="fixed top-0 left-0 z-[200] h-0.5 bg-indigo-500 transition-[width] duration-200 ease-out pointer-events-none"
-      style={{
-        width: `${width}%`,
-        // Glow follows the accent (bg-indigo-500 is token-mapped to it).
-        boxShadow: "0 0 8px 0 color-mix(in oklab, var(--ds-accent) 60%, transparent)",
-      }}
-    />
-  );
+  }, [start, committedLocationRef]);
 }

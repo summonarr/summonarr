@@ -423,6 +423,38 @@ test("DELETE removes both keys and flushes PlexTokenCache", async () => {
   assert.equal(opsOf("plexTokenCache.deleteMany").length, 1);
 });
 
+test("DELETE removes the keys and flushes the cache in ONE transaction, then expires the member allowlist read with the old token", async () => {
+  settings.set("plexAdminToken", "tok");
+  settings.set("plexAdminEmail", "owner@example.com");
+  let inTx = false;
+  const seen: Array<[string, boolean]> = [];
+  const realSettingDelete = (prisma as unknown as { setting: { deleteMany: (a: unknown) => unknown } }).setting.deleteMany;
+  const realCacheDelete = (prisma as unknown as { plexTokenCache: { deleteMany: (a: unknown) => unknown } }).plexTokenCache.deleteMany;
+  (prisma as unknown as { setting: { deleteMany: (a: unknown) => unknown } }).setting.deleteMany = (a) => { seen.push(["setting", inTx]); return realSettingDelete(a); };
+  (prisma as unknown as { plexTokenCache: { deleteMany: (a: unknown) => unknown } }).plexTokenCache.deleteMany = (a) => { seen.push(["cache", inTx]); return realCacheDelete(a); };
+  shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
+    if (Array.isArray(arg)) return Promise.all(arg);
+    inTx = true;
+    try { return await (arg as (tx: unknown) => Promise<unknown>)(prisma); } finally { inTx = false; }
+  });
+  try {
+    const res = await deletePlex(await mintSession());
+    assert.equal(res.status, 200);
+  } finally {
+    (prisma as unknown as { setting: { deleteMany: (a: unknown) => unknown } }).setting.deleteMany = realSettingDelete;
+    (prisma as unknown as { plexTokenCache: { deleteMany: (a: unknown) => unknown } }).plexTokenCache.deleteMany = realCacheDelete;
+    shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) =>
+      Array.isArray(arg) ? Promise.all(arg) : (arg as (tx: unknown) => Promise<unknown>)(prisma));
+  }
+  assert.deepEqual(seen, [["setting", true], ["cache", true]]);
+  // The allowlist expiry is in-memory state this harness can't prime; the
+  // route source names it, so a dropped call fails here.
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../src/app/api/settings/plex/route.ts", import.meta.url), "utf8");
+  const del = src.slice(src.indexOf("export const DELETE"));
+  assert.match(del, /expirePlexMembershipCache\(DEFAULT_MEDIA_INSTANCE\)/);
+});
+
 test("DELETE removes ONLY the two Plex admin keys", async () => {
   settings.set("plexAdminToken", "tok");
   settings.set("plexAdminEmail", "owner@example.com");
@@ -560,6 +592,17 @@ test("webhook-urls reads an explicit key allowlist and reveals nothing else", as
   const asked = opsOf("setting.findMany")[0].args as string[];
   assert.ok(Array.isArray(asked) && asked.length === 5, "the read must name its keys");
   for (const k of asked) assert.match(k, /WebhookSecret$|^webhookSecret$/);
+});
+
+test("webhook-urls is rate limited per admin, answering 429 with Retry-After", async () => {
+  const t = await mintSession();
+  for (let i = 0; i < 30; i++) assert.equal((await getWebhookUrls(t)).status, 200, `read ${i + 1} is allowed`);
+  const refused = await getWebhookUrls(t);
+  assert.equal(refused.status, 429);
+  assert.equal(refused.headers.get("Retry-After"), "60");
+  assert.equal(opsOf("setting.findMany").length, 30, "a refused read touches no secret");
+  const other = await mintSession();
+  assert.equal((await getWebhookUrls(other)).status, 200, "another admin has their own budget");
 });
 
 // ── 5: arr-options ───────────────────────────────────────────────────────────

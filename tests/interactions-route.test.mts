@@ -431,7 +431,11 @@ let watchlistRows: WatchRow[] = [];
 shadowPrismaModel(prisma, "watchlistItem", {
   findMany: async (args: { where: { userId: string }; take?: number }) =>
     watchlistRows.filter((w) => w.userId === args.where.userId).slice(0, args.take ?? Infinity).map((w) => ({ ...w })),
-  count: async (args: { where: { userId: string } }) => watchlistRows.filter((w) => w.userId === args.where.userId).length,
+  count: async (args: { where: { userId: string; tmdbId?: number; mediaType?: string } }) =>
+    watchlistRows.filter((w) =>
+      w.userId === args.where.userId &&
+      (args.where.tmdbId === undefined || w.tmdbId === args.where.tmdbId) &&
+      (args.where.mediaType === undefined || w.mediaType === args.where.mediaType)).length,
   findFirst: async (args: { where: { userId: string; tmdbId: number; mediaType: string } }) =>
     watchlistRows.find((w) => w.userId === args.where.userId && w.tmdbId === args.where.tmdbId && w.mediaType === args.where.mediaType) ?? null,
   create: async (args: { data: WatchRow & { posterPath: string | null } }) => {
@@ -1282,7 +1286,7 @@ test("admin_approve: a push with no definite answer (gateway 504) stays APPROVED
   assert.ok(requestRows[0].pendingNotifyAt instanceof Date, "the backstop stays armed");
   assert.deepEqual(agentPosts.map((p) => p.event), ["request.approved"], "the approval stands, so it is announced");
   assert.equal((await finalEmbedEdit()).embeds?.[0]?.title, "✅ Approved — The Matrix");
-  assert.ok(errors.some((e) => e.includes("admin_approve arr push outcome unknown")));
+  assert.ok(errors.some((e) => e.includes("[arr] Discord approve push outcome unknown")));
 
   // Control: a definite refusal rolls back exactly as before.
   seedDecisionFixture("");
@@ -1292,8 +1296,64 @@ test("admin_approve: a push with no definite answer (gateway 504) stays APPROVED
   await post(button("admin_approve:req-1"));
   const edit = await finalEmbedEdit();
   assert.equal(requestRows[0].status, "PENDING");
-  assert.equal(edit.embeds?.[0]?.title, "⚠️ Approved (arr failed) — The Matrix");
+  assert.equal(edit.embeds?.[0]?.title, "⚠️ Back to pending (arr failed) — The Matrix");
   assert.deepEqual(agentPosts, []);
+});
+
+// The card used to read "Approved (arr failed) — please add manually" and drop
+// its buttons while the request sat PENDING in the app: nobody could retry or
+// decline it from Discord, and adding it by hand left the request PENDING.
+test("admin_approve: a push that rolls back to PENDING says so on the card and KEEPS the approve/decline buttons", async () => {
+  seedDecisionFixture("");
+  settings.set("radarrUrl", `http://${RADARR_HOST}:7878`);
+  settings.set("radarrApiKey", "radarr-key");
+  radarrAddStatus = 500;
+  await post(button("admin_approve:req-1"));
+  const edit = await finalEmbedEdit();
+  assert.equal(requestRows[0].status, "PENDING", "fixture sanity: the push failed and rolled back");
+  assert.equal(edit.embeds?.[0]?.title, "⚠️ Back to pending (arr failed) — The Matrix");
+  assert.match(String(edit.embeds?.[0]?.description), /back to pending/);
+  assert.equal(edit.content, "", "the timeout's line is still cleared");
+  assert.equal("components" in edit, false, "no `components` in the edit: Discord keeps the buttons");
+  assert.equal(requestRows[0].pendingNotifyAt, null, "the backstop went with the rollback");
+
+  // The buttons still work: a second approve that lands is an ordinary approval.
+  radarrAddStatus = null;
+  discordEdits.length = 0;
+  await post(button("admin_approve:req-1"));
+  const second = await finalEmbedEdit();
+  assert.equal(requestRows[0].status, "APPROVED");
+  assert.equal(second.embeds?.[0]?.title, "✅ Approved — The Matrix");
+  assert.deepEqual(second.components, []);
+});
+
+// The rollback is the shared state machine's: a write that fails is caught, and
+// the card, the audit and the live lists follow what actually happened.
+test("admin_approve: a rollback write that FAILS is caught — the card says the arr failed and the row stays APPROVED", async () => {
+  seedDecisionFixture("");
+  settings.set("radarrUrl", `http://${RADARR_HOST}:7878`);
+  settings.set("radarrApiKey", "radarr-key");
+  radarrAddStatus = 500;
+  const orig = (prisma as unknown as { mediaRequest: Record<string, unknown> }).mediaRequest;
+  const origUpdateMany = orig.updateMany as (a: { where: { status?: string }; data: Record<string, unknown> }) => Promise<unknown>;
+  shadowPrismaModel(prisma, "mediaRequest", {
+    ...orig,
+    updateMany: async (args: { where: { status?: string }; data: Record<string, unknown> }) => {
+      if (args.data.status === "PENDING") throw new Error("pool timeout");
+      return origUpdateMany(args);
+    },
+  });
+  try {
+    await post(button("admin_approve:req-1"));
+    const edit = await finalEmbedEdit();
+    assert.equal(requestRows[0].status, "APPROVED", "the rollback never landed");
+    assert.equal(edit.embeds?.[0]?.title, "⚠️ Approved (arr failed) — The Matrix");
+    assert.deepEqual(edit.components, []);
+  } finally {
+    shadowPrismaModel(prisma, "mediaRequest", orig);
+  }
+  assert.ok(errors.some((e) => e.includes("[requests] rollback to PENDING failed") && e.includes("pool timeout")));
+  errors.length = 0;
 });
 
 // ── admin buttons: the final edit clears the timeout's `content` ────────────
@@ -1448,6 +1508,24 @@ test("pick: the pending search row is consumed only once a pick is actually file
   } finally {
     shadowPrismaModel(prisma, "mediaRequest", { ...(prisma as unknown as { mediaRequest: Record<string, unknown> }).mediaRequest, findFirst: origFindFirst });
   }
+});
+
+// Maintenance on a pick follows the web's rule (maintenance.ts): the ADMIN BIT
+// of the clicker's linked, active account bypasses it — not the role label.
+test("pick: maintenance refuses a plain user, and lets through an account holding the ADMIN bit whatever its role label", async () => {
+  settings.set("maintenanceEnabled", "true");
+  const sid = seedPick("USER");
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(() => discordEdits.length > 0, 400);
+  assert.equal(discordEdits.at(-1)?.content, "The site is currently under maintenance. Please try again later.");
+  assert.equal(opsOf("mediaRequest.create").length, 0);
+
+  // A granular admin: role USER, the ADMIN bit in the mask.
+  appUsers[0].permissions = 1n;
+  discordEdits.length = 0;
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  assert.equal(opsOf("mediaRequest.create").length, 1, "the ADMIN bit bypasses maintenance");
 });
 
 test("pick: a filed pick consumes the pending search row", async () => {
@@ -1944,9 +2022,9 @@ test("a user's own result message is still cleared when its handler fails", asyn
   const origFindMany = orig.findMany as (a: { where?: { key?: { in?: string[] } } }) => Promise<unknown>;
   shadowPrismaModel(prisma, "setting", {
     ...orig,
-    // Only the pick's own settings read fails (the route's flag read passes).
+    // Only the pick's own Discord settings read fails (the route's flag read passes).
     findMany: async (a: { where?: { key?: { in?: string[] } } }) => {
-      if (a.where?.key?.in?.includes("maintenanceEnabled")) throw new Error("db down");
+      if (a.where?.key?.in?.includes("discordAutoApproveRoles")) throw new Error("db down");
       return origFindMany(a);
     },
   });
@@ -2024,4 +2102,97 @@ test("invalidating the key in ANOTHER chunk's copy of the signature module reach
   settings.set("discordPublicKey", other.publicKey.export({ format: "der", type: "spki" }).subarray(SPKI_PREFIX_LEN).toString("hex"));
   otherChunk.invalidatePublicKeyCache();
   assert.equal((await post(ping())).status, 401, "the rotated key is read again: the old signer is refused");
+});
+
+// ── the Discord command gates shared with the result buttons ─────────────────
+
+test("/request during maintenance: a member is refused; the ADMIN permission bit (not the role) lets an account through", async () => {
+  settings.set("maintenanceEnabled", "true");
+  tmdbSearchResults = [MATRIX];
+  linkMember();
+  await run(slash("request", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }]));
+  assert.match(String(lastEdit().content), /under maintenance/);
+  assert.equal(fetchCalls.filter((u) => u.hostname.endsWith("themoviedb.org")).length, 0, "nothing is searched");
+
+  appUsers[0].permissions = 1n; // the ADMIN bit, on a USER-role account
+  await run(slash("request", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }]));
+  assert.doesNotMatch(String(lastEdit().content), /under maintenance/);
+  assert.equal((lastEdit().components as unknown[]).length, 1, "the admin gets the result buttons");
+});
+
+test("/request with a blank or missing query searches nothing and says the search failed", async () => {
+  linkMember();
+  await run(slash("request", [{ name: "type", value: "movie" }, { name: "query", value: "   " }]));
+  assert.equal(lastEdit().content, "Search failed. Please try again.");
+  await run(slash("request", []));
+  assert.equal(lastEdit().content, "Search failed. Please try again.");
+  assert.equal(fetchCalls.filter((u) => u.hostname.endsWith("themoviedb.org")).length, 0);
+});
+
+test("a TMDB hit without an integer id is dropped, never offered as a button", async () => {
+  linkMember();
+  tmdbSearchResults = [{ id: "604", title: "Not an id" }, { title: "No id at all" }, MATRIX];
+  const cmd = slash("request", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }]);
+  await run(cmd);
+  const buttons = (lastEdit().components as Array<{ components: Array<{ custom_id: string }> }>)[0].components;
+  assert.equal(buttons.length, 1);
+  const stored = JSON.parse(pendingRows.get(`p:${cmd.id}:${MEMBER}`)!.data) as { results: Array<{ id: unknown }> };
+  assert.deepEqual(stored.results.map((r) => r.id), [603]);
+});
+
+test("/watchlist add with no results quotes the query markdown-escaped", async () => {
+  linkMember();
+  tmdbSearchResults = [];
+  await run(slash("watchlist", [sub("add", [{ name: "type", value: "movie" }, { name: "query", value: "a**b_c" }])]));
+  assert.equal(lastEdit().content, 'No movies found for **"a\\*\\*b\\_c"**.');
+});
+
+test("/issue: a filing that THROWS gives the search back — the next pick still works", async () => {
+  linkMember();
+  tmdbSearchResults = [MATRIX];
+  libraryTmdbIds = new Set([603]);
+  const cmd = slash("issue", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }, { name: "problem", value: "BAD_VIDEO" }]);
+  await run(cmd);
+  const orig = (prisma as unknown as { issue: Record<string, unknown> }).issue;
+  shadowPrismaModel(prisma, "issue", { ...orig, create: async () => { throw new Error("db down"); } });
+  try {
+    await run(click(`issuepick:${cmd.id}:${MEMBER}:0`), () => /unexpected/i.test(String(lastEdit().content)));
+  } finally {
+    shadowPrismaModel(prisma, "issue", orig);
+  }
+  assert.ok(pendingRows.has(`pi:${cmd.id}:${MEMBER}`), "the search survives a thrown filing");
+  await run(click(`issuepick:${cmd.id}:${MEMBER}:0`), () => opsOf("issue.create").length > 0);
+  assert.equal(opsOf("issue.create").length, 1);
+});
+
+test("/status reads 'in queue' from the request's OWN instance only", async () => {
+  linkMember();
+  const origReq = (prisma as unknown as { mediaRequest: Record<string, unknown> }).mediaRequest;
+  const origWanted = (prisma as unknown as { radarrWantedItem: Record<string, unknown> }).radarrWantedItem;
+  let instance = "4k";
+  shadowPrismaModel(prisma, "mediaRequest", {
+    ...origReq,
+    findMany: async () => [{ title: "Dune", mediaType: "MOVIE", status: "APPROVED", tmdbId: 438631, arrInstance: instance }],
+  });
+  // Wanted on the default instance only.
+  shadowPrismaModel(prisma, "radarrWantedItem", { ...origWanted, findMany: async () => [{ tmdbId: 438631, arrInstance: "" }] });
+  try {
+    await run(slash("status", []));
+    assert.match(String(lastEdit().content), /APPROVED — Pending/, "a 4K request is not queued by the default instance's copy");
+    instance = "";
+    await run(slash("status", []));
+    assert.match(String(lastEdit().content), /APPROVED — In Queue/);
+  } finally {
+    shadowPrismaModel(prisma, "mediaRequest", origReq);
+    shadowPrismaModel(prisma, "radarrWantedItem", origWanted);
+  }
+});
+
+test("a command or click whose payload names no user is answered with the generic error and touches nothing", async () => {
+  const cmd = { ...slash("request", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }]), member: { roles: [] } };
+  await run(cmd);
+  assert.equal(lastEdit().content, "An unexpected error occurred. Please try again.");
+  assert.equal(opsOf("user.findUnique").length, 0);
+  await run({ ...click("pick:1:2:0"), member: {} });
+  assert.equal(lastEdit().content, "An unexpected error occurred.");
 });

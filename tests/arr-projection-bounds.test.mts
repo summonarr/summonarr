@@ -621,6 +621,7 @@ test("the library match check, fix-match's candidates, Replace file and the Why?
   for (const file of [
     "src/lib/library-match-data.ts",
     "src/app/api/admin/fix-match/candidates/route.ts",
+    "src/lib/fix-match-candidates.ts",
     "src/lib/issue-replace.ts",
     "src/lib/request-arr-status.ts",
     "src/lib/arr-health.ts",
@@ -647,6 +648,30 @@ test("loadCalendar survives the review's 130k-episode Sonarr answer: capped, no 
   assert.deepEqual(report.entries.filter((e) => e.service === "radarr").map((e) => e.title), ["Honest"]);
 });
 
+test("loadCalendar says once when the queue outgrows the calendar's page ceiling, and not when it fits", async () => {
+  answers.clear();
+  answers.set(`${SONARR}/api/v3/calendar`, jsonOf([]));
+  answers.set(`${RADARR}/api/v3/calendar`, jsonOf([]));
+  answers.set(`${RADARR}/api/v3/queue`, emptyQueue);
+  answers.set(`${SONARR}/api/v3/queue`, untotalledPages(10_000, calendarData.QUEUE_PAGE_SIZE));
+  const warned: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (msg: unknown) => { warned.push(String(msg)); };
+  try {
+    await calendarData.loadCalendar(new Date(CAL_START), new Date(CAL_END), false, new Date(CAL_NOW));
+    await calendarData.loadCalendar(new Date(CAL_START), new Date(CAL_END), false, new Date(CAL_NOW));
+    const capped = warned.filter((m) => m.includes("only the first"));
+    assert.equal(capped.length, 1, "one unchanged condition is logged once");
+    assert.match(capped[0], /sonarr instance "" queue holds more records; only the first 1000 mark titles as downloading/);
+    warned.length = 0;
+    answers.set(`${SONARR}/api/v3/queue`, emptyQueue);
+    await calendarData.loadCalendar(new Date(CAL_START), new Date(CAL_END), false, new Date(CAL_NOW));
+    assert.deepEqual(warned.filter((m) => m.includes("only the first")), []);
+  } finally {
+    console.warn = realWarn;
+  }
+});
+
 test("loadMissingMovies and loadMissingSeries survive a 130k-title listing: capped per instance, no RangeError", async () => {
   answers.clear();
   answers.set(`${RADARR}/api/v3/movie`, jsonOf(Array.from({ length: HOSTILE }, (_, i) => ({ id: i + 1, digitalRelease: "2020-01-01T00:00:00Z" }))));
@@ -654,9 +679,17 @@ test("loadMissingMovies and loadMissingSeries survive a 130k-title listing: capp
   const movies = await missingData.loadMissingMovies(new Date(NOW));
   assert.deepEqual(movies.errors, []);
   assert.equal(movies.items.length, M.MAX_MISSING_ITEMS);
+  // The cap stopped the listing short, and the report says so — never a
+  // partial list shown as complete.
+  assert.deepEqual(movies.truncated, [{ instance: "", read: M.MAX_MISSING_ITEMS, total: HOSTILE }]);
   const series = await missingData.loadMissingSeries();
   assert.deepEqual(series.errors, []);
   assert.equal(series.items.length, M.MAX_MISSING_ITEMS);
+  assert.deepEqual(series.truncated, [{ instance: "", read: M.MAX_MISSING_ITEMS, total: HOSTILE }]);
+
+  // A listing judged to its end carries no flag at all.
+  answers.set(`${RADARR}/api/v3/movie`, jsonOf([{ id: 1, digitalRelease: "2020-01-01T00:00:00Z" }, { id: 2, hasFile: true }]));
+  assert.equal((await missingData.loadMissingMovies(new Date(NOW))).truncated, undefined);
 });
 
 test("the Calendar and Missing modules append one by one: no spread push anywhere in them", () => {
@@ -700,8 +733,9 @@ test("readQueuePages keeps at most PAGE_SIZE of each 200k-record page, and at mo
   answers.clear();
   answers.set(`${RADARR}/api/v3/queue`, hostilePage);
   served = [];
-  const records = await queueData.readQueuePages("radarr", "");
-  assertPagedRead(records, queueData.PAGE_SIZE, queueData.MAX_PAGES);
+  const listing = await queueData.readQueuePages("radarr", "");
+  assert.equal(listing.truncated, true, "the listing says the page ceiling cut it");
+  assertPagedRead(listing.records, queueData.PAGE_SIZE, queueData.MAX_PAGES);
   assert.equal(served.length, queueData.MAX_PAGES, "the page ceiling, not the list's end, stopped the read");
 });
 

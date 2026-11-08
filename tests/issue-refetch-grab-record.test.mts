@@ -542,7 +542,7 @@ test("a failed grab record (the issue deleted meanwhile) never changes the answe
   assert.ok(warns.some((w) => w.includes("Refetch search queued but recording the grab failed")), "the failure is logged, not swallowed silently");
 });
 
-test("a failed status write AFTER an accepted search answers arrError as before — and the grab is already recorded", async () => {
+test("a failed status write AFTER an accepted search is not an arr failure: the issue is answered with arrError null, the failure logged — and the grab is already recorded", async () => {
   issues.set(MATRIX.id, { ...MATRIX });
   const admin = await mintAdmin();
   fetchImpl = radarrAccepts;
@@ -550,7 +550,11 @@ test("a failed status write AFTER an accepted search answers arrError as before 
 
   const res = await refetch(admin.token, MATRIX.id, { instance: "4k" });
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { ...MATRIX, arrError: "Arr service request failed" });
+  // The search WAS queued: an `arrError` here sent the admin to queue a second
+  // search for a database hiccup.
+  assert.deepEqual(await res.json(), { ...MATRIX, arrError: null });
+  assert.ok(!errors.some((e) => e.includes("Issue refetch failed")), "not logged as the arr failing");
+  assert.ok(errors.some((e) => e.includes("Refetch search queued but updating the issue failed")), "the DB failure is logged");
   assert.equal(grabs.length, 1, "the search was accepted, so its download is still announced");
   assert.equal(grabs[0].arrInstance, "4k");
 });

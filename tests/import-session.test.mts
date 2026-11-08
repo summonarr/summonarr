@@ -417,3 +417,28 @@ test("an expired session reclaimed after its append wrote: the counters never mo
     await clearSession(idOld);
   }
 });
+
+test("a fractional declared size is refused up front, not after the whole upload", async () => {
+  const res = await startSession({ uploadId: crypto.randomUUID(), totalSize: 1000.5, totalChunks: 1 });
+  if (res.ok) assert.fail("a fractional size must be refused");
+  assert.deepEqual(res.error, { kind: "invalid-size" });
+});
+
+test("an incomplete upload is never handed to the importer, and is not pinned as importing", async () => {
+  const id = crypto.randomUUID();
+  const started = await startSession({ uploadId: id, totalSize: 8, totalChunks: 2 });
+  if (!started.ok) assert.fail("start must succeed");
+  try {
+    const first = await appendChunk(id, 0, bytes("1234"));
+    if (!first.ok) assert.fail("chunk must append");
+    assert.equal(getSessionStream(id), null, "half an upload is not a backup");
+    assert.notEqual(started.session.importing, true);
+    const last = await appendChunk(id, 1, bytes("5678"));
+    if (!last.ok || !last.complete) assert.fail("the upload completes");
+    const stream = getSessionStream(id);
+    assert.ok(stream);
+    assert.equal((await collect(stream)).toString("utf8"), "12345678");
+  } finally {
+    await clearSession(id);
+  }
+});

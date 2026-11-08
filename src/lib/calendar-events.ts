@@ -153,6 +153,148 @@ function isPlaceholderName(name: string | null | undefined, episodeNumber: numbe
   return n === "" || n === `Episode ${episodeNumber}` || n.toUpperCase() === "TBA";
 }
 
+type EventContext = { w: CalendarWindow; url: string | undefined; tr: Translator };
+
+function movieEvents(t: CalendarTitle, dates: MovieReleaseDates, { w, url, tr }: EventContext): IcsEvent[] {
+  const out: IcsEvent[] = [];
+  for (const kind of MOVIE_KINDS) {
+    const day = toDay(dates[kind]);
+    if (!inWindow(day, w)) continue;
+    out.push({
+      uid: `movie-${t.tmdbId}-${kind === "primary" ? "theatrical" : kind}@summonarr`,
+      date: day,
+      summary: `${t.title} (${tr(`notify.calendar.label.${kind}`)})`,
+      description: describe(tr(`notify.calendar.text.${kind}`), url),
+      url,
+    });
+  }
+  return out;
+}
+
+// What a show's episode rows already cover, for the premiere and next-episode
+// fallbacks below.
+type EpisodeCoverage = {
+  /** Seasons with at least one DATED episode row: their premiere needs no fallback. */
+  seasonsWithEpisodes: Set<number>;
+  /** In-window SxxEyy codes and days. */
+  episodeCodes: Set<string>;
+  episodeDays: Set<string>;
+};
+
+function episodeEvents(
+  t: CalendarTitle,
+  episodes: readonly CalendarEpisode[],
+  { w, url, tr }: EventContext,
+): { events: IcsEvent[]; coverage: EpisodeCoverage } {
+  const events: IcsEvent[] = [];
+  const coverage: EpisodeCoverage = { seasonsWithEpisodes: new Set(), episodeCodes: new Set(), episodeDays: new Set() };
+  for (const ep of episodes) {
+    if (ep.seasonNumber <= 0) continue; // specials never carry a dependable date
+    const day = toDay(ep.airDate);
+    // Only a dated row covers its season: a list of undated placeholders must
+    // not hide the season's own premiere date.
+    if (day !== null) coverage.seasonsWithEpisodes.add(ep.seasonNumber);
+    if (!inWindow(day, w)) continue;
+    // Only in-window rows "cover" a nextEpisode SxxEyy. A stale cached
+    // airDate outside the window emits nothing — treating it as covered
+    // dropped the upcoming fallback and the episode vanished from the feed.
+    coverage.episodeCodes.add(`${ep.seasonNumber}:${ep.episodeNumber}`);
+    coverage.episodeDays.add(day);
+    const code = `S${pad2(ep.seasonNumber)}E${pad2(ep.episodeNumber)}`;
+    const suffix = isPlaceholderName(ep.name, ep.episodeNumber) ? "" : ` – ${ep.name!.trim()}`;
+    events.push({
+      uid: `tv-${t.tmdbId}-s${ep.seasonNumber}e${ep.episodeNumber}@summonarr`,
+      date: day,
+      summary: `${t.title} ${code}${suffix}`,
+      description: describe(tr("notify.calendar.episodeAirDate"), url),
+      url,
+    });
+  }
+  return { events, coverage };
+}
+
+// A season premiere we have no dated episode list for yet.
+function premiereEvents(
+  t: CalendarTitle,
+  info: CalendarTvInfo,
+  coverage: EpisodeCoverage,
+  { w, url, tr }: EventContext,
+): IcsEvent[] {
+  const out: IcsEvent[] = [];
+  for (const s of info.seasons) {
+    if (s.seasonNumber <= 0 || coverage.seasonsWithEpisodes.has(s.seasonNumber)) continue;
+    const day = toDay(s.airDate);
+    if (!inWindow(day, w)) continue;
+    coverage.episodeDays.add(day);
+    out.push({
+      uid: `tv-${t.tmdbId}-s${s.seasonNumber}-premiere@summonarr`,
+      date: day,
+      summary: tr("notify.calendar.seasonPremiereSummary", { title: t.title, season: s.seasonNumber }),
+      description: describe(tr("notify.calendar.seasonPremiere"), url),
+      url,
+    });
+  }
+  return out;
+}
+
+// The next episode, when the episode lists don't already emit it — by its
+// SxxEyy when known (an in-window list row's own date wins), otherwise by
+// date. One stable UID, so a date change updates the event instead of adding one.
+function nextEpisodeEvent(
+  t: CalendarTitle,
+  info: CalendarTvInfo,
+  coverage: EpisodeCoverage,
+  { w, url, tr }: EventContext,
+): IcsEvent | null {
+  const next = info.nextEpisode;
+  const nextDay = toDay(next?.airDate);
+  if (!next || !inWindow(nextDay, w)) return null;
+  const s = next.seasonNumber;
+  const e = next.episodeNumber;
+  const hasCode = typeof s === "number" && s > 0 && typeof e === "number" && e > 0;
+  const covered = hasCode ? coverage.episodeCodes.has(`${s}:${e}`) : coverage.episodeDays.has(nextDay);
+  if (covered) return null;
+  const code = hasCode ? ` S${pad2(s)}E${pad2(e)}` : "";
+  const suffix = hasCode && !isPlaceholderName(next.name, e) ? ` – ${next.name!.trim()}` : "";
+  return {
+    uid: `tv-${t.tmdbId}-next@summonarr`,
+    date: nextDay,
+    summary: hasCode ? `${t.title}${code}${suffix}` : tr("notify.calendar.newEpisode", { title: t.title }),
+    description: describe(tr("notify.calendar.episodeAirDate"), url),
+    url,
+  };
+}
+
+function tvEvents(t: CalendarTitle, data: CalendarSourceData, ctx: EventContext): IcsEvent[] {
+  const { events, coverage } = episodeEvents(t, data.episodes.get(t.tmdbId) ?? [], ctx);
+  const info = data.tv.get(t.tmdbId);
+  if (!info) return events;
+  events.push(...premiereEvents(t, info, coverage, ctx));
+  const next = nextEpisodeEvent(t, info, coverage, ctx);
+  if (next) events.push(next);
+  return events;
+}
+
+/** By date, then UID. */
+function compareEvents(a: IcsEvent, b: IcsEvent): number {
+  if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+  if (a.uid !== b.uid) return a.uid < b.uid ? -1 : 1;
+  return 0;
+}
+
+/** First occurrence of each (mediaType, tmdbId); its display title wins. */
+export function dedupeCalendarTitles<T extends { mediaType: string; tmdbId: number }>(titles: readonly T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const t of titles) {
+    const key = `${t.mediaType}:${t.tmdbId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(t);
+  }
+  return out;
+}
+
 /**
  * Build the feed's events. Titles are deduplicated by (mediaType, tmdbId) —
  * the first occurrence's display title wins. Output is sorted by date, then
@@ -170,98 +312,16 @@ export function buildCalendarEvents(
   tr: Translator = translatorFor("en"),
 ): IcsEvent[] {
   const events: IcsEvent[] = [];
-  const seen = new Set<string>();
-
-  for (const t of titles) {
-    const key = `${t.mediaType}:${t.tmdbId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const url = titleUrl(siteUrl, t);
-
+  for (const t of dedupeCalendarTitles(titles)) {
+    const ctx: EventContext = { w, url: titleUrl(siteUrl, t), tr };
     if (t.mediaType === "movie") {
       const dates = data.movies.get(t.tmdbId);
-      if (!dates) continue;
-      for (const kind of MOVIE_KINDS) {
-        const day = toDay(dates[kind]);
-        if (!inWindow(day, w)) continue;
-        events.push({
-          uid: `movie-${t.tmdbId}-${kind === "primary" ? "theatrical" : kind}@summonarr`,
-          date: day,
-          summary: `${t.title} (${tr(`notify.calendar.label.${kind}`)})`,
-          description: describe(tr(`notify.calendar.text.${kind}`), url),
-          url,
-        });
-      }
-      continue;
-    }
-
-    const info = data.tv.get(t.tmdbId);
-    const episodes = data.episodes.get(t.tmdbId) ?? [];
-    const seasonsWithEpisodes = new Set<number>();
-    const episodeCodes = new Set<string>();
-    const episodeDays = new Set<string>();
-    for (const ep of episodes) {
-      if (ep.seasonNumber <= 0) continue; // specials never carry a dependable date
-      seasonsWithEpisodes.add(ep.seasonNumber);
-      const day = toDay(ep.airDate);
-      if (!inWindow(day, w)) continue;
-      // Only in-window rows "cover" a nextEpisode SxxEyy. A stale cached
-      // airDate outside the window emits nothing — treating it as covered
-      // dropped the upcoming fallback and the episode vanished from the feed.
-      episodeCodes.add(`${ep.seasonNumber}:${ep.episodeNumber}`);
-      episodeDays.add(day);
-      const code = `S${pad2(ep.seasonNumber)}E${pad2(ep.episodeNumber)}`;
-      const suffix = isPlaceholderName(ep.name, ep.episodeNumber) ? "" : ` – ${ep.name!.trim()}`;
-      events.push({
-        uid: `tv-${t.tmdbId}-s${ep.seasonNumber}e${ep.episodeNumber}@summonarr`,
-        date: day,
-        summary: `${t.title} ${code}${suffix}`,
-        description: describe(tr("notify.calendar.episodeAirDate"), url),
-        url,
-      });
-    }
-    if (!info) continue;
-
-    // A season premiere we have no episode list for yet.
-    for (const s of info.seasons) {
-      if (s.seasonNumber <= 0 || seasonsWithEpisodes.has(s.seasonNumber)) continue;
-      const day = toDay(s.airDate);
-      if (!inWindow(day, w)) continue;
-      episodeDays.add(day);
-      events.push({
-        uid: `tv-${t.tmdbId}-s${s.seasonNumber}-premiere@summonarr`,
-        date: day,
-        summary: tr("notify.calendar.seasonPremiereSummary", { title: t.title, season: s.seasonNumber }),
-        description: describe(tr("notify.calendar.seasonPremiere"), url),
-        url,
-      });
-    }
-
-    // The next episode, when the episode lists don't already emit it — by its
-    // SxxEyy when known (an in-window list row's own date wins), otherwise by
-    // date. One stable UID, so a date change updates the event instead of adding one.
-    const next = info.nextEpisode;
-    const nextDay = toDay(next?.airDate);
-    if (next && inWindow(nextDay, w)) {
-      const s = next.seasonNumber;
-      const e = next.episodeNumber;
-      const hasCode = typeof s === "number" && s > 0 && typeof e === "number" && e > 0;
-      const covered = hasCode ? episodeCodes.has(`${s}:${e}`) : episodeDays.has(nextDay);
-      if (!covered) {
-        const code = hasCode ? ` S${pad2(s)}E${pad2(e)}` : "";
-        const suffix = hasCode && !isPlaceholderName(next.name, e) ? ` – ${next.name!.trim()}` : "";
-        events.push({
-          uid: `tv-${t.tmdbId}-next@summonarr`,
-          date: nextDay,
-          summary: hasCode ? `${t.title}${code}${suffix}` : tr("notify.calendar.newEpisode", { title: t.title }),
-          description: describe(tr("notify.calendar.episodeAirDate"), url),
-          url,
-        });
-      }
+      if (dates) events.push(...movieEvents(t, dates, ctx));
+    } else {
+      events.push(...tvEvents(t, data, ctx));
     }
   }
-
-  events.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.uid < b.uid ? -1 : a.uid > b.uid ? 1 : 0));
+  events.sort(compareEvents);
   return events.slice(0, MAX_CALENDAR_EVENTS);
 }
 

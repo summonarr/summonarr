@@ -151,6 +151,8 @@ function makeClient(client: "db" | "tx") {
         return row ? project({ id: `row-${row.sessionId}`, ...row }, args.select) : null;
       },
       update: async () => ({}),
+      // revokeOtherUserSessionsInTx reads the ids it revokes before its delete.
+      findMany: async () => [...sessionRows.values()].map((row) => ({ sessionId: row.sessionId })),
       deleteMany: client === "db"
         ? markDelete("authSession")
         : async (args: unknown) => { ops.push({ op: "authSession.deleteMany", client, args }); return { count: 1 }; },
@@ -158,8 +160,11 @@ function makeClient(client: "db" | "tx") {
     pushSubscription: { deleteMany: del("pushSubscription") },
     discordLinkToken: { deleteMany: del("discordLinkToken") },
     discordMergeCode: { deleteMany: del("discordMergeCode") },
+    // The notification-email route's row lock before its pending-link replace.
+    $queryRaw: async () => [],
     verificationToken: {
-      // The notification-email route itself runs these outside any transaction.
+      // The notification-email route runs these in its own transaction (the
+      // "tx" client); a password change / sign-out runs them on "db" in its array.
       deleteMany: client === "db"
         ? (args: unknown) => {
             ops.push({ op: "verificationToken.deleteMany", client, args });

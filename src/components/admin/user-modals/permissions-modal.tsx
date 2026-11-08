@@ -1,15 +1,12 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect, type KeyboardEvent } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useRef, useCallback, useEffect, type KeyboardEvent, type ReactNode } from "react";
 import {
   ShieldCheck,
   Loader2,
   X,
 } from "@/components/icons";
-import { Permission, PRESETS, parsePermissions } from "@/lib/permissions";
-import { withBasePath } from "@/lib/base-path";
-import { rateLimitMessage } from "@/lib/client/rate-limit";
+import { Permission } from "@/lib/permissions";
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { CONTENT_RATING_CAPS } from "@/lib/content-rating";
 import { useModalA11y } from "@/hooks/use-modal-a11y";
@@ -24,9 +21,12 @@ import {
   type RestrictedMediaInstance,
   type User,
 } from "./shared";
+import { usePermissionEdits, type QuotaField, type QuotaText } from "./use-permission-edits";
 import { useT } from "@/components/i18n/i18n-provider";
 
-const PERMISSION_GROUPS: { titleKey: string; bits: { key: keyof typeof Permission }[] }[] = [
+type PermissionGroup = { titleKey: string; bits: { key: keyof typeof Permission }[] };
+
+const PERMISSION_GROUPS: PermissionGroup[] = [
   {
     titleKey: "adminManage.perm.group.request",
     bits: [
@@ -76,7 +76,7 @@ const PERMISSION_GROUPS: { titleKey: string; bits: { key: keyof typeof Permissio
 // show4k). Exposes every 4K bit defined in the permission model, including the
 // per-type auto-approve bits so an admin can grant "auto-approve 4K movies" (or
 // TV) without the blanket AUTO_APPROVE_4K.
-const PERMISSION_GROUP_4K: { titleKey: string; bits: { key: keyof typeof Permission }[] } = {
+const PERMISSION_GROUP_4K: PermissionGroup = {
   titleKey: "adminManage.perm.group.fourK",
   bits: [
     { key: "REQUEST_4K" },
@@ -87,6 +87,14 @@ const PERMISSION_GROUP_4K: { titleKey: string; bits: { key: keyof typeof Permiss
     { key: "AUTO_APPROVE_4K_TV" },
   ],
 };
+
+function SectionTitle({ children }: { children: ReactNode }) {
+  return <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">{children}</p>;
+}
+
+function SectionNote({ children }: { children: ReactNode }) {
+  return <p className="text-[10px] text-zinc-500 mb-2">{children}</p>;
+}
 
 function QuotaRow({
   label,
@@ -152,8 +160,201 @@ function QuotaRow({
   );
 }
 
-type QuotaField = "movieQuotaLimit" | "movieQuotaDays" | "tvQuotaLimit" | "tvQuotaDays";
-const QUOTA_FIELDS: readonly QuotaField[] = ["movieQuotaLimit", "movieQuotaDays", "tvQuotaLimit", "tvQuotaDays"];
+// Resetting replaces every custom grant at once, so it asks first — the same
+// Confirm/Cancel pair the table uses for Disable.
+function ResetToPreset({ role, onReset }: { role: User["role"]; onReset: () => void }) {
+  const t = useT();
+  const [confirming, setConfirming] = useState(false);
+  return (
+    <div className="flex items-center justify-end gap-1.5 mb-2">
+      {confirming ? (
+        <>
+          <span className="text-[11px] text-zinc-400">{t("adminManage.perm.reset.confirm")}</span>
+          <button
+            type="button"
+            onClick={() => { setConfirming(false); onReset(); }}
+            autoFocus
+            className="rounded-md px-2 py-1 text-[11px] font-medium bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-50"
+          >
+            {t("adminManage.perm.reset.button")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirming(false)}
+            className="rounded-md px-2 py-1 text-[11px] text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+          >
+            {t("adminManage.common.cancel")}
+          </button>
+        </>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setConfirming(true)}
+          className="rounded-md px-2 py-1 text-[11px] text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
+        >
+          {t("adminManage.perm.reset.toPreset", { role: t(roleLabelKey[role]) })}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function PermissionGroups({ groups, perms, onToggle }: { groups: PermissionGroup[]; perms: bigint; onToggle: (bit: bigint) => void }) {
+  const t = useT();
+  return (
+    <>
+      {groups.map((g) => (
+        <div key={g.titleKey} className="mb-3">
+          <SectionTitle>{t(g.titleKey)}</SectionTitle>
+          {g.bits.map((b) => (
+            <AdminToggleRow
+              key={b.key}
+              label={t(`adminManage.perm.bit.${b.key}`)}
+              checked={(perms & Permission[b.key]) !== 0n}
+              onChange={() => onToggle(Permission[b.key])}
+            />
+          ))}
+        </div>
+      ))}
+    </>
+  );
+}
+
+function InstanceGrantsSection({
+  instances,
+  grants,
+  onToggle,
+}: {
+  instances: NamedInstance[];
+  grants: InstanceGrantMap;
+  onToggle: (slug: string, field: "request" | "autoApprove") => void;
+}) {
+  const t = useT();
+  return (
+    <div className="mb-3">
+      <SectionTitle>{t("adminManage.perm.instance.title")}</SectionTitle>
+      <SectionNote>{t("adminManage.perm.instance.description")}</SectionNote>
+      {instances.map((inst) => {
+        const open = !inst.restricted || inst.serverAll;
+        return (
+          <div key={inst.slug} className="mb-2">
+            <p className="text-[11px] text-zinc-400 mb-0.5">
+              {inst.name}
+              {open && (
+                <span className="text-zinc-500"> — {t("adminManage.perm.instance.open")}</span>
+              )}
+            </p>
+            {!open && (
+              <AdminToggleRow
+                label={t("adminManage.perm.instance.request", { name: inst.name })}
+                checked={grants[inst.slug]?.request === true}
+                onChange={() => onToggle(inst.slug, "request")}
+              />
+            )}
+            <AdminToggleRow
+              label={t("adminManage.perm.instance.autoApprove", { name: inst.name })}
+              checked={grants[inst.slug]?.autoApprove === true}
+              onChange={() => onToggle(inst.slug, "autoApprove")}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Restricted Plex/Jellyfin servers. Rendered ONLY when at least one exists — a
+// deployment that has never restricted a server sees no trace of this feature.
+function MediaGrantsSection({
+  instances,
+  grants,
+  onToggle,
+}: {
+  instances: RestrictedMediaInstance[];
+  grants: MediaServerGrants;
+  onToggle: (service: "plex" | "jellyfin", slug: string) => void;
+}) {
+  const t = useT();
+  return (
+    <div className="mb-3">
+      <SectionTitle>{t("adminManage.perm.media.title")}</SectionTitle>
+      <SectionNote>{t("adminManage.perm.media.description")}</SectionNote>
+      {instances.map((inst) => (
+        <AdminToggleRow
+          // Slug alone collides across services — plex:remote and
+          // jellyfin:remote are different servers (see MediaServerGrants).
+          key={mediaInstanceLabel(inst.service, inst.slug)}
+          label={`${inst.name} (${mediaInstanceLabel(inst.service, inst.slug)})`}
+          checked={grants[inst.service]?.[inst.slug]?.view === true}
+          onChange={() => onToggle(inst.service, inst.slug)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function QuotaSection({
+  quota,
+  onText,
+  onCommit,
+}: {
+  quota: QuotaText;
+  onText: (field: QuotaField, text: string) => void;
+  onCommit: (field: QuotaField, text: string) => void;
+}) {
+  const t = useT();
+  return (
+    <div className="mt-3">
+      <SectionTitle>{t("adminManage.perm.quota.title")}</SectionTitle>
+      <SectionNote>{t("adminManage.perm.quota.description")}</SectionNote>
+      <QuotaRow
+        label={t("nav.movies")}
+        limit={quota.movieQuotaLimit}
+        days={quota.movieQuotaDays}
+        onLimit={(v) => onText("movieQuotaLimit", v)}
+        onDays={(v) => onText("movieQuotaDays", v)}
+        onBlurLimit={() => onCommit("movieQuotaLimit", quota.movieQuotaLimit)}
+        onBlurDays={() => onCommit("movieQuotaDays", quota.movieQuotaDays)}
+        noun={t("adminManage.perm.quota.movieNoun")}
+      />
+      <QuotaRow
+        label={t("adminManage.perm.quota.tv")}
+        limit={quota.tvQuotaLimit}
+        days={quota.tvQuotaDays}
+        onLimit={(v) => onText("tvQuotaLimit", v)}
+        onDays={(v) => onText("tvQuotaDays", v)}
+        onBlurLimit={() => onCommit("tvQuotaLimit", quota.tvQuotaLimit)}
+        onBlurDays={() => onCommit("tvQuotaDays", quota.tvQuotaDays)}
+        noun={t("adminManage.perm.quota.tv")}
+      />
+    </div>
+  );
+}
+
+function ContentCapSection({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const t = useT();
+  return (
+    <div className="mt-3">
+      <SectionTitle>{t("adminManage.perm.parental.title")}</SectionTitle>
+      <SectionNote>{t("adminManage.perm.parental.description")}</SectionNote>
+      <StyledSelect
+        compact
+        value={value}
+        // Never disabled: a disabled control drops keyboard focus to <body>
+        // and the modal's trap then lands on Close. A change made while a save
+        // is out is queued behind it (field-save.ts).
+        onChange={(e) => onChange(e.target.value)}
+        aria-label={t("adminManage.perm.parental.aria")}
+        className="w-auto"
+      >
+        <option value="">{t("adminManage.perm.parental.noLimit")}</option>
+        {CONTENT_RATING_CAPS.map((r) => (
+          <option key={r} value={r}>{t("adminManage.perm.parental.andUnder", { rating: r })}</option>
+        ))}
+      </StyledSelect>
+    </div>
+  );
+}
 
 export function PermissionsModal({
   u,
@@ -172,187 +373,29 @@ export function PermissionsModal({
   mediaInstances?: RestrictedMediaInstance[];
 }) {
   const t = useT();
-  const router = useRouter();
-  const [perms, setPerms] = useState<bigint>(() => parsePermissions(u.permissions));
-  const [grants, setGrants] = useState<InstanceGrantMap>(u.instanceGrants);
-  const [mediaGrants, setMediaGrants] = useState<MediaServerGrants>(u.mediaServerGrants);
-  // PATCHes in flight. A counter, not a boolean: a quota save finishing first
-  // would otherwise re-enable the toggles while a permission PATCH is still out,
-  // and the next toggle would send an absolute mask carrying the pending bit.
-  const [pending, setPending] = useState(0);
-  const saving = pending > 0;
-  const [error, setError] = useState<string | null>(null);
-  const [quota, setQuota] = useState({
-    movieQuotaLimit: u.movieQuotaLimit?.toString() ?? "",
-    movieQuotaDays: u.movieQuotaDays?.toString() ?? "",
-    tvQuotaLimit: u.tvQuotaLimit?.toString() ?? "",
-    tvQuotaDays: u.tvQuotaDays?.toString() ?? "",
-  });
-  // The last value sent (or loaded) per quota field. Compared against instead of
-  // the `u` prop, which stays stale until router.refresh lands — so an Enter
-  // followed by a blur, or a close right after either, doesn't PATCH twice.
-  const committedQuota = useRef<Record<QuotaField, number | null>>({
-    movieQuotaLimit: u.movieQuotaLimit ?? null,
-    movieQuotaDays: u.movieQuotaDays ?? null,
-    tvQuotaLimit: u.tvQuotaLimit ?? null,
-    tvQuotaDays: u.tvQuotaDays ?? null,
-  });
-  // Saves every uncommitted quota edit and resolves true once every quota save
-  // (these and any still in flight from a blur) succeeded. Refreshed after each
-  // render so the close handler below can stay stable for useModalA11y (which
-  // re-runs its focus-in effect whenever onClose changes) yet still see the
-  // latest text.
-  const flushQuotaRef = useRef<() => Promise<boolean>>(async () => true);
-  const quotaSavesRef = useRef(new Set<Promise<boolean>>());
-  const [confirmReset, setConfirmReset] = useState(false);
-  const [maxRating, setMaxRating] = useState<string>(u.maxContentRating ?? "");
+  const edits = usePermissionEdits(u);
   const titleId = `perm-modal-title-${u.id}`;
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
-  const isSuperAdmin = (perms & Permission.ADMIN) !== 0n;
+  const isSuperAdmin = (edits.perms & Permission.ADMIN) !== 0n;
 
-  // Closing (Escape, the X, or the backdrop) unmounts the quota inputs without
-  // firing their onBlur, which silently dropped a value just typed. Flush any
-  // uncommitted quota edit first and close only once it saved: a refused save
-  // (a limit of 0, a 429, the network) keeps the modal open with its error,
-  // instead of rolling back on an unmounted component nobody sees.
+  // The latest flush, so the close handler below can stay stable for
+  // useModalA11y (which re-runs its focus-in effect whenever onClose changes)
+  // yet still see the latest typed text.
+  const flushRef = useRef(edits.flush);
+  useEffect(() => {
+    flushRef.current = edits.flush;
+  });
+
+  // Closing (Escape, the X, or the backdrop) closes only once every change has
+  // been saved (usePermissionEdits' flush); a refused save keeps the modal open
+  // with its error.
   const handleClose = useCallback(async () => {
-    if (await flushQuotaRef.current()) onClose();
+    if (await flushRef.current()) onClose();
   }, [onClose]);
 
   // Focus-in + Tab-trap + Escape + focus-restore for this hand-rolled overlay.
   useModalA11y(dialogRef, handleClose, closeBtnRef);
-
-  // Every change in this modal works the same way: update local state first
-  // (an "optimistic" update), PATCH the one field that changed, and call
-  // `rollback` to undo the local change if the server refuses. The server's
-  // error message is shown, because some refusals are things an admin does on
-  // purpose and needs explained:
-  //   • clearing the last permission bit sends a mask of 0, which the route
-  //     rejects with a sentence explaining what to do instead;
-  //   • a quota limit of 0 is rejected because 0 already means "unlimited" —
-  //     the response spells out the real alternatives.
-  // The route also allows only 20 PATCHes a minute and this modal has up to 18
-  // checkboxes, so an admin clicking steadily down the list can hit a 429.
-  //
-  // The rollback only has to restore the value it captured: the nested updates
-  // below build new maps instead of editing `prev`, so no deep copy is needed.
-  // Resolves true when the server accepted the change.
-  async function patchUser(body: Record<string, unknown>, rollback: () => void): Promise<boolean> {
-    setPending((n) => n + 1);
-    setError(null);
-    try {
-      const res = await fetch(withBasePath(`/api/admin/users/${u.id}`), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as { error?: string } | null;
-        rollback();
-        setError(rateLimitMessage(res, t) ?? data?.error ?? t("adminManage.notif.failed", { status: res.status }));
-        return false;
-      }
-      router.refresh();
-      return true;
-    } catch {
-      // A network failure throws instead of returning a response, so the
-      // !res.ok branch above never runs. Roll back here too, and swallow the
-      // error: callers don't await this promise, so a throw would go unhandled.
-      rollback();
-      setError(t("adminManage.users.error.network"));
-      return false;
-    } finally {
-      setPending((n) => n - 1);
-    }
-  }
-
-  function toggle(bit: bigint) {
-    const wasSet = (perms & bit) !== 0n;
-    const next = wasSet ? perms & ~bit : perms | bit;
-    setPerms(next);
-    // Roll back ONLY this bit: restoring a captured whole mask would also undo
-    // a different checkbox clicked while this PATCH was in flight.
-    void patchUser({ permissions: next.toString() }, () =>
-      setPerms((cur) => (wasSet ? cur | bit : cur & ~bit)),
-    );
-  }
-
-  function applyPreset() {
-    setConfirmReset(false);
-    const prev = perms;
-    const next = PRESETS[u.role] ?? PRESETS.USER;
-    setPerms(next);
-    void patchUser({ permissions: next.toString() }, () => setPerms(prev));
-  }
-
-  async function toggleGrant(slug: string, field: "request" | "autoApprove") {
-    const prev = grants;
-    const entry = { ...prev[slug], [field]: !prev[slug]?.[field] };
-    const next: InstanceGrantMap = { ...prev, [slug]: entry };
-    setGrants(next);
-    await patchUser({ instanceGrants: next }, () => setGrants(prev));
-  }
-
-  // Visibility grant on a RESTRICTED Plex/Jellyfin server. Service-namespaced —
-  // the two service maps are written independently so granting plex:remote can
-  // never touch a jellyfin instance that happens to share the slug.
-  async function toggleMediaGrant(service: "plex" | "jellyfin", slug: string) {
-    const prev = mediaGrants;
-    const serviceMap = { ...(prev[service] ?? {}) };
-    serviceMap[slug] = { view: serviceMap[slug]?.view !== true };
-    const next: MediaServerGrants = { ...prev, [service]: serviceMap };
-    setMediaGrants(next);
-    await patchUser({ mediaServerGrants: next }, () => setMediaGrants(prev));
-  }
-
-  // Resolves true when there was nothing to save or the server accepted it.
-  function saveQuota(field: QuotaField, raw: string): Promise<boolean> {
-    const trimmed = raw.trim();
-    const value = trimmed === "" ? null : Math.max(0, Math.floor(Number(trimmed)));
-    if (value !== null && !Number.isFinite(value)) {
-      // Too large to be a number (1e400) or not one at all: nothing is saved,
-      // so say so and put back the saved value rather than leave unsaved text
-      // looking committed (and blocking every close after this one).
-      const saved = committedQuota.current[field];
-      setQuota((q) => ({ ...q, [field]: saved?.toString() ?? "" }));
-      setError(t("adminManage.perm.quota.invalid"));
-      return Promise.resolve(false);
-    }
-    // Show what is saved: "2.7" is sent as 2 and "-3" as 0.
-    setQuota((q) => ({ ...q, [field]: value?.toString() ?? "" }));
-    // Nothing changed, so nothing to save. This runs on blur, so without this
-    // check just tabbing through the four inputs would send four PATCHes — each
-    // writing a no-op audit row and using up the 20-per-minute rate limit
-    // shared with the permission checkboxes above.
-    const prev = committedQuota.current[field];
-    if (value === prev) return Promise.resolve(true);
-    committedQuota.current[field] = value;
-    // Rollback restores the server's value, not the typed text: the server
-    // refused, so what it holds is still what it held before.
-    const save = patchUser({ [field]: value }, () => {
-      committedQuota.current[field] = prev;
-      setQuota((q) => ({ ...q, [field]: prev?.toString() ?? "" }));
-    });
-    quotaSavesRef.current.add(save);
-    void save.finally(() => quotaSavesRef.current.delete(save));
-    return save;
-  }
-  useEffect(() => {
-    flushQuotaRef.current = async () => {
-      // Start a save for every uncommitted field; saves already in flight from
-      // a blur are tracked in quotaSavesRef and awaited too.
-      const started = QUOTA_FIELDS.map((field) => saveQuota(field, quota[field]));
-      const results = await Promise.all([...started, ...quotaSavesRef.current]);
-      return results.every(Boolean);
-    };
-  });
-
-  async function saveMaxRating(value: string) {
-    const prev = maxRating;
-    setMaxRating(value);
-    await patchUser({ maxContentRating: value === "" ? null : value }, () => setMaxRating(prev));
-  }
 
   const displayName = u.name ?? u.email;
   const groups = show4k ? [...PERMISSION_GROUPS, PERMISSION_GROUP_4K] : PERMISSION_GROUPS;
@@ -391,173 +434,34 @@ export function PermissionsModal({
           </div>
         ) : (
           <>
-            {/* Resetting replaces every custom grant at once, so it asks first —
-                the same Confirm/Cancel pair the table uses for Disable. */}
-            <div className="flex items-center justify-end gap-1.5 mb-2">
-              {confirmReset ? (
-                <>
-                  <span className="text-[11px] text-zinc-400">{t("adminManage.perm.reset.confirm")}</span>
-                  <button
-                    type="button"
-                    onClick={applyPreset}
-                    disabled={saving}
-                    autoFocus
-                    className="rounded-md px-2 py-1 text-[11px] font-medium bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-50"
-                  >
-                    {t("adminManage.perm.reset.button")}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setConfirmReset(false)}
-                    className="rounded-md px-2 py-1 text-[11px] text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
-                  >
-                    {t("adminManage.common.cancel")}
-                  </button>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => setConfirmReset(true)}
-                  disabled={saving}
-                  className="rounded-md px-2 py-1 text-[11px] text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
-                >
-                  {t("adminManage.perm.reset.toPreset", { role: t(roleLabelKey[u.role]) })}
-                </button>
-              )}
-            </div>
-            {groups.map((g) => (
-              <div key={g.titleKey} className="mb-3">
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">{t(g.titleKey)}</p>
-                {g.bits.map((b) => (
-                  <AdminToggleRow
-                    key={b.key}
-                    label={t(`adminManage.perm.bit.${b.key}`)}
-                    checked={(perms & Permission[b.key]) !== 0n}
-                    onChange={() => toggle(Permission[b.key])}
-                    busy={saving}
-                  />
-                ))}
-              </div>
-            ))}
+            <ResetToPreset role={u.role} onReset={edits.applyPreset} />
+            <PermissionGroups groups={groups} perms={edits.perms} onToggle={edits.toggle} />
 
             {namedInstances.length > 0 && (
-              <div className="mb-3">
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">{t("adminManage.perm.instance.title")}</p>
-                <p className="text-[10px] text-zinc-500 mb-2">
-                  {t("adminManage.perm.instance.description")}
-                </p>
-                {namedInstances.map((inst) => {
-                  const open = !inst.restricted || inst.serverAll;
-                  return (
-                    <div key={inst.slug} className="mb-2">
-                      <p className="text-[11px] text-zinc-400 mb-0.5">
-                        {inst.name}
-                        {open && (
-                          <span className="text-zinc-500"> — {t("adminManage.perm.instance.open")}</span>
-                        )}
-                      </p>
-                      {!open && (
-                        <AdminToggleRow
-                          label={t("adminManage.perm.instance.request", { name: inst.name })}
-                          checked={grants[inst.slug]?.request === true}
-                          onChange={() => toggleGrant(inst.slug, "request")}
-                          busy={saving}
-                        />
-                      )}
-                      <AdminToggleRow
-                        label={t("adminManage.perm.instance.autoApprove", { name: inst.name })}
-                        checked={grants[inst.slug]?.autoApprove === true}
-                        onChange={() => toggleGrant(inst.slug, "autoApprove")}
-                        busy={saving}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
+              <InstanceGrantsSection instances={namedInstances} grants={edits.grants} onToggle={edits.toggleGrant} />
             )}
 
-            {/* Restricted Plex/Jellyfin servers. Rendered ONLY when at least one
-                exists — a deployment that has never restricted a server sees no
-                trace of this feature. Sits inside the non-admin branch, so an
-                admin never gets a grants list implying they need one:
-                canViewMediaInstance short-circuits on the ADMIN bit. */}
+            {/* Sits inside the non-admin branch, so an admin never gets a
+                grants list implying they need one: canViewMediaInstance
+                short-circuits on the ADMIN bit. */}
             {mediaInstances.length > 0 && (
-              <div className="mb-3">
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">{t("adminManage.perm.media.title")}</p>
-                <p className="text-[10px] text-zinc-500 mb-2">
-                  {t("adminManage.perm.media.description")}
-                </p>
-                {mediaInstances.map((inst) => (
-                  <AdminToggleRow
-                    // Slug alone collides across services — plex:remote and
-                    // jellyfin:remote are different servers (see MediaServerGrants).
-                    key={mediaInstanceLabel(inst.service, inst.slug)}
-                    label={`${inst.name} (${mediaInstanceLabel(inst.service, inst.slug)})`}
-                    checked={mediaGrants[inst.service]?.[inst.slug]?.view === true}
-                    onChange={() => toggleMediaGrant(inst.service, inst.slug)}
-                    busy={saving}
-                  />
-                ))}
-              </div>
+              <MediaGrantsSection instances={mediaInstances} grants={edits.mediaGrants} onToggle={edits.toggleMediaGrant} />
             )}
 
-            <div className="mt-3">
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">{t("adminManage.perm.quota.title")}</p>
-              <p className="text-[10px] text-zinc-500 mb-2">{t("adminManage.perm.quota.description")}</p>
-              <QuotaRow
-                label={t("nav.movies")}
-                limit={quota.movieQuotaLimit}
-                days={quota.movieQuotaDays}
-                onLimit={(v) => setQuota((q) => ({ ...q, movieQuotaLimit: v }))}
-                onDays={(v) => setQuota((q) => ({ ...q, movieQuotaDays: v }))}
-                onBlurLimit={() => saveQuota("movieQuotaLimit", quota.movieQuotaLimit)}
-                onBlurDays={() => saveQuota("movieQuotaDays", quota.movieQuotaDays)}
-                noun={t("adminManage.perm.quota.movieNoun")}
-              />
-              <QuotaRow
-                label={t("adminManage.perm.quota.tv")}
-                limit={quota.tvQuotaLimit}
-                days={quota.tvQuotaDays}
-                onLimit={(v) => setQuota((q) => ({ ...q, tvQuotaLimit: v }))}
-                onDays={(v) => setQuota((q) => ({ ...q, tvQuotaDays: v }))}
-                onBlurLimit={() => saveQuota("tvQuotaLimit", quota.tvQuotaLimit)}
-                onBlurDays={() => saveQuota("tvQuotaDays", quota.tvQuotaDays)}
-                noun={t("adminManage.perm.quota.tv")}
-              />
-            </div>
-
-            <div className="mt-3">
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">{t("adminManage.perm.parental.title")}</p>
-              <p className="text-[10px] text-zinc-500 mb-2">{t("adminManage.perm.parental.description")}</p>
-              <StyledSelect
-                compact
-                value={maxRating}
-                // Not disabled while saving: a disabled control drops keyboard
-                // focus to <body> and the modal's trap then lands on Close (the
-                // switches had the same defect). Ignore changes mid-save instead.
-                onChange={(e) => { if (!saving) saveMaxRating(e.target.value); }}
-                aria-busy={saving || undefined}
-                aria-label={t("adminManage.perm.parental.aria")}
-                className="w-auto"
-              >
-                <option value="">{t("adminManage.perm.parental.noLimit")}</option>
-                {CONTENT_RATING_CAPS.map((r) => (
-                  <option key={r} value={r}>{t("adminManage.perm.parental.andUnder", { rating: r })}</option>
-                ))}
-              </StyledSelect>
-            </div>
+            <QuotaSection quota={edits.quota} onText={edits.setQuotaText} onCommit={(field, text) => void edits.saveQuota(field, text)} />
+            <ContentCapSection value={edits.maxRating} onChange={edits.saveMaxRating} />
           </>
         )}
 
-        {saving && (
+        {edits.saving && (
           <p className="text-xs text-zinc-500 flex items-center gap-1 mt-3">
             <Loader2 className="w-3 h-3 animate-spin" /> {t("adminManage.common.saving")}
           </p>
         )}
 
-        {error && (
+        {edits.error && (
           <p role="alert" aria-live="assertive" className="text-xs text-red-400 mt-3">
-            {error}
+            {edits.error}
           </p>
         )}
       </div>

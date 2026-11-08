@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Plus, Check, Loader2, Ban } from "@/components/icons";
 import { postMediaRequest } from "@/lib/client/media-request";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
+import { readApiError } from "@/lib/client/api-error";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
 import { DetailActionButton, DetailActionStatus } from "./detail-action-button";
@@ -14,6 +15,9 @@ import { DetailActionButton, DetailActionStatus } from "./detail-action-button";
 // The two differ only in what they add to the POST and in their wording, so the
 // request flow lives here once. Kept apart from RequestButton so the default
 // instance's request state never entangles with these.
+//
+// Callers key it by title (detail-actions.tsx), so a client navigation to
+// another title mounts a fresh instance and no state carries across.
 export interface VariantRequestLabels {
   // The CTA.
   request: string;
@@ -24,6 +28,10 @@ export interface VariantRequestLabels {
   // The toast after a request is created.
   requestedToast: string;
 }
+
+// What a variant adds to the POST: the 4K shorthand (guardrail 32) or a named
+// instance. Never the title's own fields — those are this component's.
+export type VariantRequestExtras = { is4k: true } | { arrInstance: string };
 
 export function VariantRequestButton({
   tmdbId,
@@ -38,7 +46,7 @@ export function VariantRequestButton({
   tmdbId: number;
   mediaType: "MOVIE" | "TV";
   // Added to the POST body: `{ is4k: true }` or `{ arrInstance: slug }`.
-  extras: Record<string, unknown>;
+  extras: VariantRequestExtras;
   labels: VariantRequestLabels;
   requestToken?: string;
   requested?: boolean;
@@ -59,16 +67,6 @@ export function VariantRequestButton({
   // only) — reading that as "requested" showed a Requested state for a request
   // that does not exist.
   const [foundAvailable, setFoundAvailable] = useState(false);
-  // Client nav reuses this instance across titles; `requested` is live so a
-  // refresh after a request on this title flips the status without a remount.
-  const [seenTmdbId, setSeenTmdbId] = useState(tmdbId);
-  const titleChanged = seenTmdbId !== tmdbId;
-  if (titleChanged) {
-    setSeenTmdbId(tmdbId);
-    setState(requested ? "requested" : "idle");
-    setMsg("");
-    setFoundAvailable(false);
-  }
 
   async function submit() {
     setState("loading");
@@ -76,20 +74,20 @@ export function VariantRequestButton({
     try {
       // Refreshes the page-minted token once if it expired while the tab sat
       // open (postMediaRequest).
-      const res = await postMediaRequest({ tmdbId, mediaType, ...extras }, requestToken);
+      // The title's own fields last, so the extras can never replace them.
+      const res = await postMediaRequest({ ...extras, tmdbId, mediaType }, requestToken);
       if (res.status === 409) {
         setState("requested");
         return;
       }
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
         // A 429 says when to retry (Retry-After), as RequestButton's does.
-        setMsg(rateLimitMessage(res, t) ?? data.error ?? t("request.somethingWrong"));
+        setMsg(rateLimitMessage(res, t) ?? (await readApiError(res, t("request.somethingWrong"))));
         setState("error");
         return;
       }
       const body = (await res.json().catch(() => null)) as { alreadyAvailable?: boolean } | null;
-      if (body?.alreadyAvailable) {
+      if (body?.alreadyAvailable === true) {
         setFoundAvailable(true);
         setState("idle");
         router.refresh();
@@ -105,7 +103,7 @@ export function VariantRequestButton({
   }
 
   // Availability wins over request state — once the copy is fetched there's nothing to request.
-  if (available || (!titleChanged && foundAvailable)) {
+  if (available || foundAvailable) {
     return (
       <DetailActionStatus variant="accent-soft">
         <Check style={{ width: 14, height: 14 }} />
@@ -114,7 +112,9 @@ export function VariantRequestButton({
     );
   }
 
-  if ((titleChanged ? !!requested : state === "requested" || requested)) {
+  // `requested` is live, so a refresh after a request on this title flips the
+  // status without a remount.
+  if (state === "requested" || requested) {
     return (
       <DetailActionStatus variant="accent-soft">
         <Check style={{ width: 14, height: 14 }} />
@@ -144,17 +144,17 @@ export function VariantRequestButton({
       <DetailActionButton
         variant="secondary"
         onClick={submit}
-        disabled={!titleChanged && state === "loading"}
-        busy={!titleChanged && state === "loading"}
+        disabled={state === "loading"}
+        busy={state === "loading"}
       >
-        {!titleChanged && state === "loading" ? (
+        {state === "loading" ? (
           <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
         ) : (
           <Plus style={{ width: 14, height: 14 }} />
         )}
         {labels.request}
       </DetailActionButton>
-      {!titleChanged && state === "error" && msg && (
+      {state === "error" && msg && (
         <p
           className="ds-mono max-w-sm"
           role="alert"

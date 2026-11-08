@@ -19,9 +19,9 @@ interface DiscoverRowProps {
       call, no For You shelf yet) still disappears: the message would be false. */
   allAvailable?: boolean;
   /** HD request overlay, scoped by the card's media type. Same gate as the
-      detail-page CTA. Omitted → overlay stays (fail open for a missed callsite). */
-  canRequestMovie?: boolean;
-  canRequestTv?: boolean;
+      detail-page CTA; required, so a callsite can't forget it. */
+  canRequestMovie: boolean;
+  canRequestTv: boolean;
 }
 
 // Server component (async for the request translator); only the home page renders it.

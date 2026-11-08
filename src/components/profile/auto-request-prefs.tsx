@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
+import { readApiError } from "@/lib/client/api-error";
 import { useT } from "@/components/i18n/i18n-provider";
 import { Switch } from "@/components/ui/switch";
 
@@ -32,7 +33,6 @@ export function AutoRequestPrefs({
   const t = useT();
   const needsOptIn = serverSource && !plexConnected && !serverOptedIn;
   const [on, setOn] = useState(initialPlexWatchlist && !needsOptIn);
-  const [optedIn, setOptedIn] = useState(serverOptedIn);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -49,11 +49,8 @@ export function AutoRequestPrefs({
         body: JSON.stringify({ plexWatchlist: next }),
       });
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
         setOn(!next);
-        setError(rateLimitMessage(res, t) ?? data?.error ?? t("profile.error.saveFailed"));
-      } else {
-        setOptedIn(next);
+        setError(rateLimitMessage(res, t) ?? (await readApiError(res, t("profile.error.saveFailed"))));
       }
     } catch {
       setOn(!next);
@@ -63,10 +60,13 @@ export function AutoRequestPrefs({
     }
   }
 
+  // The server records the opt-in exactly when this switch is on (PATCH
+  // /api/profile/auto-request sets plexWatchlistOptInAt on and clears it off),
+  // so on the server-token path "on" IS "opted in".
   let hint: string;
   if (plexConnected) hint = t("profile.autoRequest.plexConnected");
   else if (!serverSource) hint = t("profile.autoRequest.plexNotConnected");
-  else if (!optedIn || !on) hint = t("profile.autoRequest.plexServerOptIn");
+  else if (!on) hint = t("profile.autoRequest.plexServerOptIn");
   else if (serverStatus === "ok") hint = t("profile.autoRequest.plexServerConnected");
   else if (serverStatus === "private") hint = t("profile.autoRequest.plexServerPrivate");
   else hint = t("profile.autoRequest.plexServerPending");

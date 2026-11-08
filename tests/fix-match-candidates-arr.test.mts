@@ -198,3 +198,14 @@ test("an EXPIRED cached TMDB details row is a miss — its stale title never rea
   const live = await confirmCard("MOVIE");
   assert.equal(live.body.targetTitle, "Cached Title");
 });
+
+test("the confirm card never shows the right title as confirmed when the arr maps THIS folder to the wrong one", async () => {
+  respond = (url) => {
+    if (url.search === "?tmdbId=222") return [{ tmdbId: 222, path: "/media/movies-4k/Right Film (2010)" }];
+    if (url.search === "?tmdbId=111") return [{ tmdbId: 111, path: "/media/movies/Right Film (2010)" }];
+    return [];
+  };
+  const { status, body } = await confirmCard("MOVIE");
+  assert.equal(status, 200);
+  assert.deepEqual([body.arrConfirmedTmdbId, body.arrPathAgrees], [111, true]);
+});

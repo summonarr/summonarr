@@ -176,6 +176,18 @@ test("EXACT-VALUE PIN: arrays and nested arrays canonicalize to the same bytes a
   assert.equal(lastCreateDigest(), expected);
 });
 
+test("a __proto__ key from the parsed body is part of the digest", async () => {
+  const withProto = JSON.parse('{"eventType":"Download","__proto__":{"x":1}}') as unknown;
+  await checkAndRecordWebhookJson("sonarr", "k", withProto);
+  const expected = createHash("sha256")
+    .update("sonarr").update("\0").update("k").update("\0")
+    .update('{"__proto__":{"x":1},"eventType":"Download"}', "utf8")
+    .digest("hex");
+  assert.equal(lastCreateDigest(), expected);
+  // A body without it is a different delivery, not a replay.
+  assert.equal(await checkAndRecordWebhookJson("sonarr", "k", { eventType: "Download" }), true);
+});
+
 // JSON.parse is iterative, so a body under the routes' 1 MB cap parses ~500k
 // levels deep; the canonicaliser's recursion then overflowed the stack.
 function nested(levels: number): unknown {

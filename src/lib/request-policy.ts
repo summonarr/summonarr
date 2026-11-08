@@ -8,7 +8,7 @@ import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { routeMediaToSlug, type ArrInstanceConfig, type RoutableMedia } from "@/lib/arr-instances";
 import { exceedsCap } from "@/lib/content-rating";
-import { canRequestInstance, hasPermission, Permission, type InstanceGrants } from "@/lib/permissions";
+import { canAutoApproveInstance, canRequestInstance, hasPermission, Permission, type InstanceAccess, type InstanceGrants } from "@/lib/permissions";
 import { resolveUserQuota, parseQuotaLimit, quotaUsageWhere, type ResolvedQuota } from "@/lib/quota";
 
 // The policy steps every request-creation path shares — the web/auto-request
@@ -145,23 +145,55 @@ export async function resolveTargetInstance(opts: {
 }
 
 /**
- * Whether a capped, non-admin requester's content-rating cap blocks the title.
- * Only they pay the (cached) certification fetch; an unknown or unrated title,
- * and a TMDB failure, are allowed (see content-rating.ts).
+ * What content-rating caps make of a title:
+ *   allowed     no cap applies, or the title is within every cap. An unknown or
+ *               unrated certification is allowed (content-rating.ts).
+ *   blocked     the title exceeds a cap: refused.
+ *   unverified  the certification could not be read (TMDB down, a timeout).
+ *               Not refused — a TMDB outage must not block every capped user —
+ *               but never auto-approved: an admin reviews it, so an outage can't
+ *               slip a title past a cap and straight into Radarr/Sonarr.
+ * Only a request with a cap pays the (cached) certification fetch.
  */
-export async function blockedByRatingCap(
-  perms: bigint,
-  cap: string | null | undefined,
+export type RatingCapVerdict = "allowed" | "blocked" | "unverified";
+
+export async function ratingCapsVerdict(
+  caps: readonly string[],
   loadDetails: () => Promise<TmdbMedia>,
-): Promise<boolean> {
-  if (!cap || hasPermission(perms, Permission.ADMIN)) return false;
+): Promise<RatingCapVerdict> {
+  if (caps.length === 0) return "allowed";
   let cert: string | undefined;
   try {
     cert = (await loadDetails()).certification;
   } catch {
-    cert = undefined;
+    return "unverified";
   }
-  return exceedsCap(cert, cap);
+  return caps.some((cap) => exceedsCap(cert, cap)) ? "blocked" : "allowed";
+}
+
+/** The verdict for one requester's own cap; an ADMIN has none. */
+export function ratingCapVerdict(
+  perms: bigint,
+  cap: string | null | undefined,
+  loadDetails: () => Promise<TmdbMedia>,
+): Promise<RatingCapVerdict> {
+  return ratingCapsVerdict(cap && !hasPermission(perms, Permission.ADMIN) ? [cap] : [], loadDetails);
+}
+
+/**
+ * Whether a request auto-approves on `instance` (canAutoApproveInstance). A
+ * Discord auto-approve role (`roleGrant`) counts as the global AUTO_APPROVE bit
+ * and nothing more: like that bit, it never reaches the 4K instance (the
+ * AUTO_APPROVE_4K bits) or a restricted named instance (a per-user grant).
+ */
+export function autoApprovesOn(
+  perms: bigint,
+  instance: InstanceAccess,
+  grants: InstanceGrants,
+  mediaType: MediaType,
+  roleGrant = false,
+): boolean {
+  return canAutoApproveInstance(roleGrant ? perms | Permission.AUTO_APPROVE : perms, instance, grants, mediaType);
 }
 
 export interface QuotaFields {

@@ -1,6 +1,7 @@
 // Radarr/Sonarr health + the Summonarr webhook connection: the pure rules.
-// No I/O; the data half is arr-health-data.ts. safeMessage is the only import,
-// so a health line can't carry an indexer apikey to the browser (guardrail 5e).
+// No I/O; the data half is arr-health-data.ts. Its only import is the
+// zero-import arr-parse (safeMessage among it), so a health line can't carry
+// an indexer apikey to the browser (guardrail 5e).
 //
 //   • HEALTH is Radarr/Sonarr's own /api/v3/health list (indexers down, a
 //     download client unreachable, a missing root folder, …), reported as-is.
@@ -15,7 +16,7 @@
 //     Radarr/Sonarr version has are the ones sent. Only the events Summonarr
 //     handles are switched on; an existing entry keeps every other setting.
 
-import { safeMessage } from "@/lib/arr-parse";
+import { PROJECTION_SCAN_FACTOR, safeMessage } from "@/lib/arr-parse";
 
 export type ArrHealthService = "radarr" | "sonarr";
 
@@ -32,9 +33,9 @@ export const MAX_CHECKS = 50;
 const MAX_TEXT = 500;
 // The health list is the arr's, capped by arrFetch only by size, and each entry
 // runs safeMessage's masks; this runs from the background snapshot refresh too.
-// So it is READ at most this many times MAX_CHECKS deep (guardrail 5i).
-// arr-queue.ts's constant, repeated: safeMessage stays this module's only import.
-export const PROJECTION_SCAN_FACTOR = 10;
+// So it is READ at most PROJECTION_SCAN_FACTOR times MAX_CHECKS deep
+// (guardrail 5i) — arr-parse's one constant, shared by every arr projection.
+export { PROJECTION_SCAN_FACTOR };
 
 const str = (v: unknown, max = MAX_TEXT): string => (typeof v === "string" ? v.slice(0, max) : "");
 

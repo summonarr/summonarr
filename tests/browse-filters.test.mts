@@ -158,8 +158,10 @@ test("FilterBar reads the shared overlay and toggles hide-available from what it
   assert.match(bar, /push\(\{ hideAvailable: f\.hideAvailable \? undefined : "1" \}\)/);
   assert.doesNotMatch(bar, /activeHideAvailable/, "the stale committed prop must not drive the toggle");
   assert.match(bar, /hasActiveFilters\(f\)/, "one predicate for Clear filters");
-  // An unnamed provider id still gets a chip it can be removed from.
-  assert.match(bar, /activeProviderName \?\? t\("media\.filter\.serviceChip"/);
+  // An unnamed provider id still gets a chip it can be removed from (the chip
+  // rules are filter-bar-options.ts, tests/filter-bar-options.test.mts).
+  assert.match(src("src/components/media/filter-bar-options.ts"), /activeProviderName \?\? t\("media\.filter\.serviceChip"/);
+  assert.match(bar, /filterChips\(f, \{ genres, providers: sortedProviders, showCertification \}, t\)/);
   assert.match(bar, /\{chips\.length > 0 && \(/, "the chip row renders only when it has a chip");
 });
 

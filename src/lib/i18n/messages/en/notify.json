@@ -266,6 +266,8 @@
   "notify.bot.admin.approvedArrFailedTitle": "⚠️ Approved (arr failed) — {title}",
   "notify.bot.admin.approvedBy": "Approved by **{admin}**",
   "notify.bot.admin.approvedByArrFailed": "Approved by **{admin}** but could not be added to arr — please add manually.",
+  "notify.bot.admin.approveRolledBackTitle": "⚠️ Back to pending (arr failed) — {title}",
+  "notify.bot.admin.approveRolledBackBy": "Approved by **{admin}**, but it could not be added to arr, so it is back to pending — approve again to retry, or decline it.",
   "notify.bot.admin.declinedTitle": "❌ Declined — {title}",
   "notify.bot.admin.declinedBy": "Declined by **{admin}**",
   "notify.bot.inactiveButton": "This button is no longer active.",

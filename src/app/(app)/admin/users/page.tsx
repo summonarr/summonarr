@@ -5,7 +5,7 @@ import { hasPermission, mergeNamedInstanceAccess, Permission, parseInstanceGrant
 import type { Prisma } from "@/generated/prisma";
 import { UserTable, type NamedInstance, type RestrictedMediaInstance } from "@/components/admin/user-table";
 import { ServerUserTable } from "@/components/admin/server-user-table";
-import { SyncRolesButton } from "@/components/admin/request-actions";
+import { SyncRolesButton } from "@/components/admin/request-sync-buttons";
 import { CreateUserButton } from "@/components/admin/create-user-button";
 import { PageHeader, SectionHeader } from "@/components/ui/design";
 import { getTranslator } from "@/lib/i18n/server";
@@ -16,12 +16,18 @@ import { FOURK_ARR_INSTANCE } from "@/lib/arr-instances";
 import { isPurgedRow } from "@/lib/account-lifecycle";
 import { deriveUserSource } from "@/lib/user-source";
 import { getWatchGradeSummaries } from "@/lib/watch-grade-data";
+import { displayName } from "@/lib/display-name";
+import { parsePageNumber } from "@/lib/pagination";
+import { first, type PageSearchParams } from "@/lib/search-params";
+import { PaginationBar } from "@/components/media/pagination-bar";
+import { Suspense } from "react";
 
 export const dynamic = "force-dynamic";
 
-// Row budget for the table. When it is hit the UI says so rather than treating
-// the slice length as the registered total (the subtitle and the on-behalf
-// picker both used to). Auxiliary queries below are scoped to this page's ids.
+// Row budget for one page of the table (`?page=` reaches the rest). When it is
+// hit the UI says so rather than treating the slice length as the registered
+// total (the subtitle and the on-behalf picker both used to). Auxiliary queries
+// below are scoped to this page's ids.
 const USER_LIST_CAP = 1000;
 // The same budget for media-server identities: a large shared server keeps every
 // departed account that still holds history, and every row is serialized into
@@ -35,59 +41,89 @@ const SERVER_USER_LIST_CAP = 1000;
 // genuinely irrelevant and stays hidden.
 const SERVER_USER_WHERE: Prisma.MediaServerUserWhereInput = { OR: [{ active: true }, { playHistory: { some: {} } }] };
 
-// A synced account can carry an empty (or blank) display name; every surface
-// then falls back to the email instead of rendering nothing.
-const displayName = (name: string | null): string | null => name?.trim() || null;
+// Link targets for the manual account picker: a separate light read with its
+// own, higher budget, so an account past the table's cap can still be picked.
+const LINK_TARGET_CAP = 5000;
+const USER_ORDER = [{ name: "asc" as const }, { email: "asc" as const }];
 
-export default async function UsersPage() {
+// The per-user notification switches the table edits, selected and handed to
+// it as one group so a new preference is added in one place.
+const NOTIFICATION_PREF_SELECT = {
+  notifyOnApproved: true,
+  notifyOnAvailable: true,
+  notifyOnDeclined: true,
+  emailOnApproved: true,
+  emailOnAvailable: true,
+  emailOnDeclined: true,
+  pushOnApproved: true,
+  pushOnAvailable: true,
+  pushOnDeclined: true,
+  notifyOnIssue: true,
+  notifyOnComment: true,
+  emailOnComment: true,
+  pushOnComment: true,
+} as const satisfies Prisma.UserSelect;
+
+type NotificationPrefs = { -readonly [K in keyof typeof NOTIFICATION_PREF_SELECT]: boolean };
+
+function notificationPrefs(u: NotificationPrefs): NotificationPrefs {
+  const out = {} as NotificationPrefs;
+  for (const k of Object.keys(NOTIFICATION_PREF_SELECT) as (keyof NotificationPrefs)[]) out[k] = u[k];
+  return out;
+}
+
+// User.mediaServer is a free string column; only the two known providers
+// reach the table, anything else reads as unpinned.
+function mediaServerOf(value: string | null): "plex" | "jellyfin" | null {
+  return value === "plex" || value === "jellyfin" ? value : null;
+}
+
+// The table's columns, shared by the page read and the past-the-end re-read.
+const USER_ROW_SELECT = {
+  id: true,
+  name: true,
+  email: true,
+  role: true,
+  createdAt: true,
+  deactivatedAt: true,
+  purgedAt: true,
+  discordId: true,
+  permissions: true,
+  movieQuotaLimit: true,
+  movieQuotaDays: true,
+  tvQuotaLimit: true,
+  tvQuotaDays: true,
+  mediaServer: true,
+  maxContentRating: true,
+  // The provider SUBJECT columns are the authoritative binding for the
+  // source chip (deriveUserSource); the email suffix is only a fallback.
+  plexUserId: true,
+  jellyfinUserId: true,
+  ...NOTIFICATION_PREF_SELECT,
+  instanceGrants: true,
+  mediaServerGrants: true,
+  _count: { select: { requests: true } },
+} as const satisfies Prisma.UserSelect;
+
+const userPage = (page: number) =>
+  prisma.user.findMany({
+    select: USER_ROW_SELECT,
+    orderBy: USER_ORDER,
+    skip: (page - 1) * USER_LIST_CAP,
+    take: USER_LIST_CAP,
+  });
+
+export default async function UsersPage({ searchParams }: { searchParams: Promise<PageSearchParams> }) {
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_USERS)) redirect("/");
+  const sp = await searchParams;
+  const requestedPage = parsePageNumber(first(sp.page));
 
   const [
-    users, userCount, serverUsers, serverUserCount, autoDisableRow, radarr4kConfigured, sonarr4kConfigured,
+    requestedUsers, userCount, serverUsers, serverUserCount, autoDisableRow, radarr4kConfigured, sonarr4kConfigured,
     sonarrInstances, radarrInstances, plexInstances, jellyfinInstances,
   ] = await Promise.all([
-    prisma.user.findMany({
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        createdAt: true,
-        deactivatedAt: true,
-        purgedAt: true,
-        discordId: true,
-        permissions: true,
-        movieQuotaLimit: true,
-        movieQuotaDays: true,
-        tvQuotaLimit: true,
-        tvQuotaDays: true,
-        mediaServer: true,
-        maxContentRating: true,
-        // The provider SUBJECT columns are the authoritative binding for the
-        // source chip (deriveUserSource); the email suffix is only a fallback.
-        plexUserId: true,
-        jellyfinUserId: true,
-        notifyOnApproved: true,
-        notifyOnAvailable: true,
-        notifyOnDeclined: true,
-        emailOnApproved: true,
-        emailOnAvailable: true,
-        emailOnDeclined: true,
-        pushOnApproved: true,
-        pushOnAvailable: true,
-        pushOnDeclined: true,
-        notifyOnIssue: true,
-        notifyOnComment: true,
-        emailOnComment: true,
-        pushOnComment: true,
-        instanceGrants: true,
-        mediaServerGrants: true,
-        _count: { select: { requests: true } },
-      },
-      orderBy: [{ name: "asc" }, { email: "asc" }],
-      take: USER_LIST_CAP,
-    }),
+    userPage(requestedPage),
     prisma.user.count(),
     prisma.mediaServerUser.findMany({
       where: SERVER_USER_WHERE,
@@ -120,11 +156,17 @@ export default async function UsersPage() {
     getMediaInstances("plex"),
     getMediaInstances("jellyfin"),
   ]);
+  // A page past the end (accounts removed since the link was made) shows the
+  // last page instead of an empty table; only that case reads a second time.
+  const lastPage = Math.max(1, Math.ceil(userCount / USER_LIST_CAP));
+  const page = Math.min(requestedPage, lastPage);
+  const users = page === requestedPage ? requestedUsers : await userPage(page);
   const userIds = users.map((u) => u.id);
   // Scoped to the listed slice — an unbounded related read of every local-auth /
   // OIDC / 2FA row was the other half of the silent 1000 cap.
+  // No users ⇒ no rows to grade either, so no availability check.
   const [localAuthRows, oidcAccountRows, totpRows, passkeyRows, watchGrades] = userIds.length === 0
-    ? [[], [], [], [], await getWatchGradeSummaries([])]
+    ? [[], [], [], [], null]
     : await Promise.all([
       prisma.user.findMany({
         where: { id: { in: userIds }, passwordHash: { not: null } },
@@ -184,6 +226,19 @@ export default async function UsersPage() {
   // Linking a media-server identity to an account is ADMIN-only (guardrail 34d);
   // a MANAGE_USERS delegate sees the bindings read-only.
   const canLinkServerUsers = hasPermission(session.user.permissions, Permission.ADMIN);
+  // /api/discord/sync-roles is withAdmin, which admits the ADMIN role only; a
+  // MANAGE_USERS delegate would get a 403 on every click.
+  const canSyncRoles = session.user.role === "ADMIN";
+  // Purged accounts are excluded — they have no identity left to attribute
+  // history to (the route rejects them too).
+  const linkTargets = canLinkServerUsers
+    ? await prisma.user.findMany({
+        where: { purgedAt: null },
+        select: { id: true, name: true, email: true, purgedAt: true },
+        orderBy: USER_ORDER,
+        take: LINK_TARGET_CAP,
+      })
+    : [];
 
   return (
     <div className="ds-page-enter">
@@ -193,7 +248,7 @@ export default async function UsersPage() {
         right={
           <div className="flex items-center gap-2">
             <CreateUserButton />
-            <SyncRolesButton />
+            {canSyncRoles && <SyncRolesButton />}
           </div>
         }
       />
@@ -227,22 +282,10 @@ export default async function UsersPage() {
             tvQuotaDays: u.tvQuotaDays,
             _count: u._count,
             watchGrade: watchGrades?.get(u.id) ?? null,
-            notifyOnApproved: u.notifyOnApproved,
-            notifyOnAvailable: u.notifyOnAvailable,
-            notifyOnDeclined: u.notifyOnDeclined,
-            emailOnApproved: u.emailOnApproved,
-            emailOnAvailable: u.emailOnAvailable,
-            emailOnDeclined: u.emailOnDeclined,
-            pushOnApproved: u.pushOnApproved,
-            pushOnAvailable: u.pushOnAvailable,
-            pushOnDeclined: u.pushOnDeclined,
-            notifyOnIssue: u.notifyOnIssue,
-            notifyOnComment: u.notifyOnComment,
-            emailOnComment: u.emailOnComment,
-            pushOnComment: u.pushOnComment,
+            ...notificationPrefs(u),
             instanceGrants: parseInstanceGrants(u.instanceGrants),
             mediaServerGrants: parseMediaServerGrants(u.mediaServerGrants),
-            mediaServer: u.mediaServer as "plex" | "jellyfin" | null,
+            mediaServer: mediaServerOf(u.mediaServer),
             maxContentRating: u.maxContentRating,
             source: deriveUserSource({
               email: u.email,
@@ -257,6 +300,9 @@ export default async function UsersPage() {
           namedInstances={namedInstances}
           mediaInstances={mediaInstances}
         />
+        <Suspense>
+          <PaginationBar currentPage={page} totalPages={lastPage} />
+        </Suspense>
       </div>
 
       <div className="mt-10">
@@ -278,11 +324,9 @@ export default async function UsersPage() {
           hasJellyfin={hasJellyfin}
           autoDisableNew={autoDisableNew}
           canLink={canLinkServerUsers}
-          // Link targets for the manual account picker (admins only). Purged
-          // accounts are excluded — they have no identity left to attribute
-          // history to (the route rejects them too).
+          // Link targets for the manual account picker (admins only).
           accounts={canLinkServerUsers
-            ? users
+            ? linkTargets
                 .filter((u) => !isPurgedRow(u))
                 .map((u) => ({ id: u.id, name: displayName(u.name), email: u.email }))
             : []}

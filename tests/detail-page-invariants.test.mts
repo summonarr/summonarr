@@ -13,12 +13,12 @@
 //      while the hero beside them shows the 4K badge for the same titles. The
 //      movie page's Similar + Collection rows shipped that way.
 //   2. A TMDB details failure is a 404 ONLY when TMDB itself said 404. tmdbFetch
-//      throws a plain `TMDB <path> failed: <status>` for every non-2xx (5xx
-//      included), plus a missing-credentials Error and 429 exhaustion; a bare
+//      throws a TmdbHttpError for every non-2xx (5xx included), plus a
+//      missing-credentials Error and 429 exhaustion; a bare
 //      `catch { notFound() }` mapped all of them to the "might have been
 //      removed" page for a title that exists, instead of the (app)/error.tsx
-//      boundary with its retry. The person page's `/failed: 404\b/` shape is
-//      the established policy; both detail pages must match it.
+//      boundary with its retry. Every detail page (person included) asks
+//      isTmdbNotFound — the error's STATUS, never its message text.
 //   3. The requireAppSession() gate still precedes the TMDB fetch (the RSC
 //      layout-skip ordering the in-page comment explains), and no nullable
 //      `session ?` / `session?.` / `session &&` leftovers remain — the gate
@@ -92,13 +92,14 @@ test("a TMDB details failure maps to notFound() ONLY on a genuine 404", () => {
       src,
       /catch\s*(\([^)]*\))?\s*\{\s*notFound\(\);?\s*\}/,
       `${rel}: a bare catch → notFound() renders the 404 page for a TMDB outage/timeout/5xx ` +
-        `on a title that exists; only a "failed: 404" message may map to notFound()`,
+        `on a title that exists; only a TMDB 404 may map to notFound()`,
     );
     assert.match(
       src,
-      /failed: 404\\b/,
-      `${rel}: expected the person-page shape — \`if (/failed: 404\\b/.test(message)) notFound(); throw err;\``,
+      /if \(isTmdbNotFound\(err\)\) notFound\(\);/,
+      `${rel}: expected the shared shape — \`if (isTmdbNotFound(err)) notFound(); throw err;\``,
     );
+    assert.doesNotMatch(src, /failed: 404/, `${rel}: a 404 is read from the error's status, never its message`);
     // The rethrow is what reaches (app)/error.tsx; without it every failure is swallowed.
     const fetchAt = src.indexOf(`${detailsFn}(`);
     assert.ok(fetchAt > 0, `${rel}: expected a ${detailsFn}() call`);
@@ -120,8 +121,9 @@ test("the person page and GET /api/person/[id] parse the id the same strict way"
   assert.ok(guard, "person page: malformed ids short-circuit to notFound() through parseTmdbIdParam");
   assert.ok(guard.index < page.indexOf("getEnrichedPerson(personId"), "the guard precedes the TMDB-backed read");
   assert.ok(page.indexOf("await requireAppSession()") < guard.index, "the login gate still runs first");
-  // The 404-by-message policy is unchanged.
-  assert.match(page, /failed: 404\\b/);
+  // The same 404-by-status policy as the movie/TV pages.
+  assert.match(page, /if \(isTmdbNotFound\(err\)\) notFound\(\);/);
+  assert.doesNotMatch(page, /failed: 404/);
   const route = readFileSync(join(process.cwd(), "src", "app", "api", "person", "[id]", "route.ts"), "utf-8");
   assert.match(route, /const personId = parseTmdbIdParam\(id\);/);
   assert.doesNotMatch(route, /Number\(id\)/);

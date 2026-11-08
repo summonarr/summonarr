@@ -1,12 +1,13 @@
 import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@/generated/prisma";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import Link from "next/link";
 import { WarmCacheButton } from "@/components/admin/warm-cache-button";
 import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
 import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button";
-import { inferGroupMounts, loadArrPathIndex, type ArrPathIndex } from "@/lib/bad-matches";
+import { inferGroupMounts, loadArrPathIndex, mountGroupKey, type ArrPathIndex } from "@/lib/bad-matches";
 import { folderOf, stripMountPoint, stripRelPrefix, toMatchKey } from "@/lib/library-paths";
 import { LibraryDiffClient, type DiffItem, type ClientBadMatch } from "@/components/admin/library-diff-client";
 import { LibraryMatchCheck, type ClientMatchReport } from "@/components/admin/library-match-check";
@@ -67,6 +68,28 @@ interface BadMatch {
   arrVerdict:     ArrVerdict;
 }
 
+// Most `:details` blobs one enrichItems call reads for titles missing from the
+// core table.
+const BLOB_FALLBACK_CAP = 1_000;
+
+// The two fields this page reads from a cached TMDB details blob, each checked
+// for its type: a corrupt row (or one of another shape) gives no poster or
+// rating rather than a wrong-typed value in the client props.
+function posterAndRating(data: string): { posterPath: string | null | undefined; voteAverage: number | undefined } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const { posterPath, voteAverage } = parsed as { posterPath?: unknown; voteAverage?: unknown };
+  return {
+    posterPath: typeof posterPath === "string" || posterPath === null ? posterPath : undefined,
+    voteAverage: typeof voteAverage === "number" && Number.isFinite(voteAverage) ? voteAverage : undefined,
+  };
+}
+
 async function enrichItems(
   items: {
     tmdbId: number; mediaType: "MOVIE" | "TV"; filePath?: string | null;
@@ -118,32 +141,31 @@ async function enrichItems(
 
   // A core row with a null poster also falls back — the blob may still carry one
   // (consistent with poster-cache.ts; only costs extra reads for poster-less titles).
-  const misses = items.filter((i) => cacheMap.get(`${i.tmdbId}:${i.mediaType}`)?.posterPath == null);
-  if (misses.length) {
-    const cacheKeys = misses.map((i) => tmdbDetailsKey(i.mediaType, i.tmdbId));
+  // Each blob is a whole TMDB details document, so at most BLOB_FALLBACK_CAP
+  // distinct titles are read this way per call (the diff columns draw 500 cards
+  // each); the rest render without art until the core table is backfilled.
+  const blobKeyToItem = new Map<string, string>();
+  for (const i of items) {
+    if (blobKeyToItem.size >= BLOB_FALLBACK_CAP) break;
+    const itemKey = `${i.tmdbId}:${i.mediaType}`;
+    if (cacheMap.get(itemKey)?.posterPath == null) blobKeyToItem.set(tmdbDetailsKey(i.mediaType, i.tmdbId), itemKey);
+  }
+  if (blobKeyToItem.size > 0) {
     const cacheRows = await prisma.tmdbCache.findMany({
-      where: { key: { in: cacheKeys } },
+      where: { key: { in: [...blobKeyToItem.keys()] } },
       select: { key: true, data: true },
     });
     for (const row of cacheRows) {
-      try {
-        const parsed = JSON.parse(row.data) as { posterPath?: string | null; voteAverage?: number };
-        const parts = row.key.split(":");
-        const mediaType = parts[0] === "movie" ? "MOVIE" : "TV";
-        const tmdbId = parseInt(parts[1], 10);
-        if (!isNaN(tmdbId)) {
-          // Merge (not replace): a null-poster core hit re-enters as a miss, and a
-          // blob without voteAverage must not wipe the core's value.
-          const key = `${tmdbId}:${mediaType}`;
-          const prior = cacheMap.get(key);
-          cacheMap.set(key, {
-            posterPath: parsed.posterPath ?? prior?.posterPath ?? null,
-            voteAverage: parsed.voteAverage ?? prior?.voteAverage,
-          });
-        }
-      } catch {
-        // A corrupt cache row just leaves this title without a poster/rating.
-      }
+      const key = blobKeyToItem.get(row.key);
+      const blob = key ? posterAndRating(row.data) : null;
+      if (!key || !blob) continue;
+      // Merge (not replace): a null-poster core hit re-enters as a miss, and a
+      // blob without voteAverage must not wipe the core's value.
+      const prior = cacheMap.get(key);
+      cacheMap.set(key, {
+        posterPath: blob.posterPath ?? prior?.posterPath ?? null,
+        voteAverage: blob.voteAverage ?? prior?.voteAverage,
+      });
     }
   }
 
@@ -216,10 +238,10 @@ async function fetchOverviews(
 type StripPrefixField = "MoviePathStripPrefix" | "TvPathStripPrefix";
 type StripSettingKey = (instance: MediaInstanceKey, field: StripPrefixField) => string;
 
-// Keyed `<slug> <MEDIATYPE>` (a slug can hold no space), so every lookup must
-// use mountKey() rather than the bare serverInstance.
+// Keyed by (instance, media type) through bad-matches.ts's mountGroupKey, so
+// every lookup must use mountKey() rather than the bare serverInstance.
 function mountKey(row: { serverInstance: string; mediaType: "MOVIE" | "TV" }): string {
-  return `${row.serverInstance} ${row.mediaType}`;
+  return mountGroupKey(row.serverInstance, row.mediaType);
 }
 
 // One-path groups must NOT fall back to commonPathPrefix (it returns that
@@ -237,24 +259,16 @@ function mountsByInstance(rows: { serverInstance: string; mediaType: "MOVIE" | "
   return inferGroupMounts(groups);
 }
 
-// The Movie/Tv strip-prefix Setting keys for every NAMED instance present in a
-// row set — [] (and no query) for a single-server deployment.
-function namedStripKeys(rows: { serverInstance: string }[], settingKey: StripSettingKey): string[] {
-  const slugs = new Set<string>();
-  for (const r of rows) {
-    if (r.serverInstance !== DEFAULT_MEDIA_INSTANCE && isValidMediaInstanceSlug(r.serverInstance)) {
-      slugs.add(r.serverInstance);
-    }
-  }
-  return [...slugs].flatMap((s) => [settingKey(s, "MoviePathStripPrefix"), settingKey(s, "TvPathStripPrefix")]);
-}
-
 // Per-instance strip prefix, falling back to the shared default-instance key
 // when the server has no row of its own — which is every existing deployment.
 function stripResolver(cfg: Record<string, string>, settingKey: StripSettingKey) {
   return (instance: string, mediaType: "MOVIE" | "TV"): string => {
     const field: StripPrefixField = mediaType === "MOVIE" ? "MoviePathStripPrefix" : "TvPathStripPrefix";
-    return cfg[settingKey(instance, field)] ?? cfg[settingKey(DEFAULT_MEDIA_INSTANCE, field)] ?? "";
+    // A row left with a slug the registry would refuse derives no key of its own.
+    const own = instance !== DEFAULT_MEDIA_INSTANCE && isValidMediaInstanceSlug(instance)
+      ? cfg[settingKey(instance, field)]
+      : undefined;
+    return own ?? cfg[settingKey(DEFAULT_MEDIA_INSTANCE, field)] ?? "";
   };
 }
 
@@ -269,6 +283,72 @@ function defaultInstanceLast<T extends { serverInstance: string }>(rows: T[]): T
       : b.serverInstance === DEFAULT_MEDIA_INSTANCE ? -1
       : a.serverInstance.localeCompare(b.serverInstance),
   );
+}
+
+// Which server holds the WRONG id, by Radarr/Sonarr's answer: the one that
+// disagrees with the arr while the other agrees. No verdict when the arr has
+// no answer, or agrees with both or neither.
+function arrVerdictFor(plexTmdbId: number, jellyfinTmdbId: number, arrTmdbId: number | null): ArrVerdict {
+  if (arrTmdbId === null) return null;
+  const plexCorrect = plexTmdbId === arrTmdbId;
+  const jellyfinCorrect = jellyfinTmdbId === arrTmdbId;
+  if (plexCorrect && !jellyfinCorrect) return "jellyfin";
+  if (!plexCorrect && jellyfinCorrect) return "plex";
+  return null;
+}
+
+// Every title (`tmdbId:mediaType`) on each side, read over the WHOLE tables.
+// Only read when a side hit the row cap: the capped reads stop at a sort
+// position chosen independently on each side, so a title past one side's cut
+// would read as "only on" the other and every tile would count it as a
+// difference. Two narrow columns, so the full read stays light where the row
+// read (paths, titles) has to be capped.
+async function wholeLibraryTitleKeys(): Promise<{ plex: Set<string>; jellyfin: Set<string> }> {
+  type KeyRow = { tmdbId: number; mediaType: string };
+  const [plex, jellyfin] = await Promise.all([
+    prisma.$queryRaw<KeyRow[]>(Prisma.sql`SELECT DISTINCT "tmdbId", "mediaType"::text AS "mediaType" FROM "PlexLibraryItem"`),
+    prisma.$queryRaw<KeyRow[]>(Prisma.sql`SELECT DISTINCT "tmdbId", "mediaType"::text AS "mediaType" FROM "JellyfinLibraryItem"`),
+  ]);
+  const keys = (rows: KeyRow[]) => new Set(rows.map((r) => `${r.tmdbId}:${r.mediaType}`));
+  return { plex: keys(plex), jellyfin: keys(jellyfin) };
+}
+
+// No overview here: bad-match rows never render it (clientBadMatches omits it).
+type PathEntryBase = { tmdbId: number; mediaType: "MOVIE" | "TV"; serverInstance: string; filePath: string; title: string | null; year: string | null };
+type PlexPathEntry     = PathEntryBase & { ratingKey: string | null };
+type JellyfinPathEntry = PathEntryBase & { itemId: string | null };
+
+type LibraryRowKey = { tmdbId: number; mediaType: "MOVIE" | "TV"; serverInstance: string };
+// Each row's own join key, so an "only on X" row can be looked up on the other side.
+const rowKey = (r: LibraryRowKey) => `${r.tmdbId}:${r.mediaType}:${r.serverInstance}`;
+
+// One server's rows by match key. Every instance's rows normalise against
+// their OWN mount and strip prefix, then merge into one keyspace — the
+// Plex↔Jellyfin join is relative-path keyed and can't be instance-scoped (a
+// file is normally on a Plex server AND a Jellyfin server, under unrelated
+// slugs). Two instances holding the same relative path is a mirrored library,
+// so the collapse is correct; the default-last ordering decides the winner
+// deterministically. An empty match key is not an identity: paths sharing no
+// first segment infer a "" mount, and every such row would otherwise pile onto
+// one blank entry and pair two unrelated titles.
+function buildPathIndex<R extends LibraryRowKey & { filePath: string | null }, E>(
+  rows: R[],
+  mounts: Map<string, string>,
+  stripFor: (instance: string, mediaType: "MOVIE" | "TV") => string,
+  entry: (row: R, filePath: string) => E,
+): { pathMap: Map<string, E>; keyByRow: Map<string, string> } {
+  const pathMap = new Map<string, E>();
+  const keyByRow = new Map<string, string>();
+  for (const item of defaultInstanceLast(rows)) {
+    if (!item.filePath) continue;
+    const rel = stripMountPoint(item.filePath, mounts.get(mountKey(item)) ?? "");
+    if (!rel) continue;
+    const matchKey = toMatchKey(stripRelPrefix(rel, stripFor(item.serverInstance, item.mediaType)), item.mediaType);
+    if (!matchKey) continue;
+    keyByRow.set(rowKey(item), matchKey);
+    pathMap.set(matchKey, entry(item, item.filePath));
+  }
+  return { pathMap, keyByRow };
 }
 
 function TypeTab({
@@ -323,9 +403,10 @@ export default async function LibraryDiffPage({
   const [plexItems, jellyfinItems, prefixRows, matchReport, syncServers] = await Promise.all([
     prisma.plexLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, plexRatingKey: true, title: true, year: true, serverInstance: true }, orderBy: [{ serverInstance: "asc" }, { mediaType: "asc" }, { tmdbId: "asc" }], take: LIBRARY_ITEM_CAP }),
     prisma.jellyfinLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, jellyfinItemId: true, title: true, year: true, serverInstance: true }, orderBy: [{ serverInstance: "asc" }, { mediaType: "asc" }, { tmdbId: "asc" }], take: LIBRARY_ITEM_CAP }),
-    prisma.setting.findMany({ where: { key: { in: [
-      "plexMoviePathStripPrefix", "plexTvPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
-    ] } } }),
+    // Every server's strip prefixes in one read — the default instance's and
+    // each named one's (plex<Slug>MoviePathStripPrefix, …). The resolver below
+    // reads them by exact key, so nothing else ending this way is used.
+    prisma.setting.findMany({ where: { key: { endsWith: "PathStripPrefix" } }, select: { key: true, value: true } }),
     readLibraryMatchReport(),
     // Which servers are CONNECTED (every instance), so the Re-sync button syncs
     // each of them and skips one that is not there rather than POSTing to it and
@@ -374,21 +455,9 @@ export default async function LibraryDiffPage({
   const tvArrIndexPromise = oneSided ? Promise.resolve(noArrIndex) : loadArrPathIndex("TV");
   tvArrIndexPromise.catch(() => {});
 
+  // Keyed by the row's own instance, so a row left behind by a de-registered
+  // instance still gets its own prefix.
   const prefixCfg: Record<string, string> = Object.fromEntries(prefixRows.map((r) => [r.key, r.value]));
-
-  // Named servers' own strip prefixes (plex<Slug>MoviePathStripPrefix, …). The
-  // slug list comes from the library rows rather than the instance registry:
-  // those are exactly the instances with paths to normalise, and a row left
-  // behind by a de-registered instance still gets its own prefix. Skipped
-  // entirely — no extra query — when every row is on the default instance.
-  const namedPrefixKeys = [
-    ...namedStripKeys(plexItems, plexSettingKey),
-    ...namedStripKeys(jellyfinItems, jellyfinSettingKey),
-  ];
-  if (namedPrefixKeys.length > 0) {
-    const namedRows = await prisma.setting.findMany({ where: { key: { in: namedPrefixKeys } } });
-    for (const r of namedRows) prefixCfg[r.key] = r.value;
-  }
   const plexStripFor     = stripResolver(prefixCfg, plexSettingKey);
   const jellyfinStripFor = stripResolver(prefixCfg, jellyfinSettingKey);
 
@@ -418,8 +487,12 @@ export default async function LibraryDiffPage({
 
   const uncachedCount = Math.max(0, uniqueLibraryCount - freshLibraryCount);
 
-  const jellyfinSet = new Set(jellyfinItems.map((i) => `${i.tmdbId}:${i.mediaType}`));
-  const plexSet     = new Set(plexItems.map((i)     => `${i.tmdbId}:${i.mediaType}`));
+  // Past the row cap, membership comes from the whole tables, so every row the
+  // lists show as "only on X" really is (the lists themselves stay capped,
+  // under the banner that says so).
+  const wholeKeys = libraryCapped ? await wholeLibraryTitleKeys() : null;
+  const jellyfinSet = wholeKeys?.jellyfin ?? new Set(jellyfinItems.map((i) => `${i.tmdbId}:${i.mediaType}`));
+  const plexSet     = wholeKeys?.plex     ?? new Set(plexItems.map((i)     => `${i.tmdbId}:${i.mediaType}`));
 
   // The raw lists stay ROW-based (one card per server holding the title) —
   // that's what the diff columns and the type-tab counts render. The stat tiles
@@ -459,44 +532,14 @@ export default async function LibraryDiffPage({
   const plexMountPoints     = mountsByInstance(plexItems);
   const jellyfinMountPoints = mountsByInstance(jellyfinItems);
 
-  // No overview here: bad-match rows never render it (clientBadMatches omits it).
-  type PlexPathEntry     = { tmdbId: number; mediaType: "MOVIE" | "TV"; serverInstance: string; filePath: string; ratingKey: string | null; title: string | null; year: string | null };
-  type JellyfinPathEntry = { tmdbId: number; mediaType: "MOVIE" | "TV"; serverInstance: string; filePath: string; itemId: string | null;   title: string | null; year: string | null };
-
-  // Every instance's rows normalise against their OWN mount and strip prefix,
-  // then merge into one keyspace — the Plex↔Jellyfin join is relative-path
-  // keyed and can't be instance-scoped (a file is normally on a Plex server AND
-  // a Jellyfin server, under unrelated slugs). Two instances holding the same
-  // relative path is a mirrored library, so the collapse is correct; the
-  // default-last ordering decides the winner deterministically.
-  // An empty match key is not an identity: paths sharing no first segment infer
-  // a "" mount, and every such row would otherwise pile onto one blank entry and
-  // pair two unrelated titles.
-  const plexPathMap = new Map<string, PlexPathEntry>();
-  // Each row's own join key, so a "only on X" row can be looked up on the other side.
-  const rowKey = (r: { tmdbId: number; mediaType: "MOVIE" | "TV"; serverInstance: string }) => `${r.tmdbId}:${r.mediaType}:${r.serverInstance}`;
-  const plexKeyByRow = new Map<string, string>();
-  const jellyfinKeyByRow = new Map<string, string>();
-  for (const item of defaultInstanceLast(plexItems)) {
-    if (!item.filePath) continue;
-    const rel = stripMountPoint(item.filePath, plexMountPoints.get(mountKey(item)) ?? "");
-    if (!rel) continue;
-    const plexPrefix = plexStripFor(item.serverInstance, item.mediaType);
-    const matchKey = toMatchKey(stripRelPrefix(rel, plexPrefix), item.mediaType);
-    if (matchKey) plexKeyByRow.set(rowKey(item), matchKey);
-    if (matchKey) plexPathMap.set(matchKey, { tmdbId: item.tmdbId, mediaType: item.mediaType, serverInstance: item.serverInstance, filePath: item.filePath, ratingKey: item.plexRatingKey, title: item.title, year: item.year });
-  }
-
-  const jellyfinPathMap = new Map<string, JellyfinPathEntry>();
-  for (const item of defaultInstanceLast(jellyfinItems)) {
-    if (!item.filePath) continue;
-    const rel = stripMountPoint(item.filePath, jellyfinMountPoints.get(mountKey(item)) ?? "");
-    if (!rel) continue;
-    const jellyfinPrefix = jellyfinStripFor(item.serverInstance, item.mediaType);
-    const matchKey = toMatchKey(stripRelPrefix(rel, jellyfinPrefix), item.mediaType);
-    if (matchKey) jellyfinKeyByRow.set(rowKey(item), matchKey);
-    if (matchKey) jellyfinPathMap.set(matchKey, { tmdbId: item.tmdbId, mediaType: item.mediaType, serverInstance: item.serverInstance, filePath: item.filePath, itemId: item.jellyfinItemId, title: item.title, year: item.year });
-  }
+  const { pathMap: plexPathMap, keyByRow: plexKeyByRow } = buildPathIndex(
+    plexItems, plexMountPoints, plexStripFor,
+    (item, filePath): PlexPathEntry => ({ tmdbId: item.tmdbId, mediaType: item.mediaType, serverInstance: item.serverInstance, filePath, ratingKey: item.plexRatingKey, title: item.title, year: item.year }),
+  );
+  const { pathMap: jellyfinPathMap, keyByRow: jellyfinKeyByRow } = buildPathIndex(
+    jellyfinItems, jellyfinMountPoints, jellyfinStripFor,
+    (item, filePath): JellyfinPathEntry => ({ tmdbId: item.tmdbId, mediaType: item.mediaType, serverInstance: item.serverInstance, filePath, itemId: item.jellyfinItemId, title: item.title, year: item.year }),
+  );
 
   type RawBadMatch = {
     relativePath: string;
@@ -545,14 +588,6 @@ export default async function LibraryDiffPage({
       ? (tvArrByName.get(m.relativePath) ?? null)
       : (movieArrByName.get((folderOf(m.plexItem.filePath) || folderOf(m.jellyfinItem.filePath)).split("/").pop() ?? "") ?? null);
 
-    let arrVerdict: ArrVerdict = null;
-    if (arrTmdbId !== null) {
-      const plexCorrect     = m.plexItem.tmdbId     === arrTmdbId;
-      const jellyfinCorrect = m.jellyfinItem.tmdbId === arrTmdbId;
-      if (plexCorrect && !jellyfinCorrect)  arrVerdict = "jellyfin";
-      if (!plexCorrect && jellyfinCorrect)  arrVerdict = "plex";
-    }
-
     return {
       relativePath:   m.relativePath,
       plex:           bmPlexItems[i],
@@ -560,7 +595,7 @@ export default async function LibraryDiffPage({
       jellyfin:       bmJellyfinItems[i],
       jellyfinItemId: m.jellyfinItem.itemId,
       arrTmdbId,
-      arrVerdict,
+      arrVerdict: arrVerdictFor(m.plexItem.tmdbId, m.jellyfinItem.tmdbId, arrTmdbId),
     };
   });
 
@@ -572,44 +607,51 @@ export default async function LibraryDiffPage({
     if (!tvArrPathByTmdbId.has(tmdbId)) tvArrPathByTmdbId.set(tmdbId, path);
   }
 
+  const arrTmdbIdsFor = (item: LibraryItem) => (item.mediaType === "MOVIE" ? movieArrTmdbIds : tvArrTmdbIds);
+
   const toClientItem = (
     items: LibraryItem[],
-    // Which server these rows are on, and the OTHER server's rows by join key —
-    // the pair that explains why a title is on this server only.
-    keyByRow: Map<string, string>,
-    otherByPath: ReadonlyMap<string, OtherSidePathEntry>,
-    otherUnmatched: ReadonlySet<string>,
-    // Per-instance mounts, not one shared string — an item from a second server
-    // must be stripped with ITS root or the card renders a raw absolute path.
-    mountPoints: Map<string, string>,
-    arrMap: (item: LibraryItem) => Map<string, number>,
-    arrTmdbSet: (item: LibraryItem) => Set<number>,
+    side: {
+      // This server's rows by join key, and the OTHER server's rows by match
+      // key — the pair that explains why a title is on this server only.
+      keyByRow: Map<string, string>;
+      otherByPath: ReadonlyMap<string, OtherSidePathEntry>;
+      otherUnmatched: ReadonlySet<string>;
+      // Per-instance mounts, not one shared string — an item from a second
+      // server must be stripped with ITS root or the card renders a raw
+      // absolute path.
+      mountPoints: Map<string, string>;
+    },
   ): DiffItem[] =>
     items.map((item) => {
-      const mediaRelPath = stripMountPoint(item.filePath, mountPoints.get(mountKey(item)) ?? "");
+      const mediaRelPath = stripMountPoint(item.filePath, side.mountPoints.get(mountKey(item)) ?? "");
+      const matchKey = side.keyByRow.get(rowKey(item)) ?? null;
       // Both sides resolve against a folder-BASENAME index (see tvArrByName /
-      // movieArrByName): TV off the series folder, movies off the file's parent
-      // dir. The arr paths are absolute under a different bind-mount root, so a
-      // full-path lookup never matches.
+      // movieArrByName): the arr paths are absolute under a different
+      // bind-mount root, so a full-path lookup never matches. TV looks up its
+      // match key — the series folder AFTER the server's strip prefix, exactly
+      // as the bad-match list does; the first segment of the mount-relative
+      // path was the prefix itself ("tv") whenever one was set. Movies use the
+      // file's parent directory.
       const arrTmdbId = item.mediaType === "TV"
-        ? (mediaRelPath ? (arrMap(item).get(mediaRelPath.split("/")[0]) ?? null) : null)
-        : (item.filePath ? (arrMap(item).get(folderOf(item.filePath).split("/").pop() ?? "") ?? null) : null);
-      const inArr     = arrTmdbSet(item).has(item.tmdbId);
+        ? (matchKey ? (tvArrByName.get(matchKey) ?? null) : null)
+        : (item.filePath ? (movieArrByName.get(folderOf(item.filePath).split("/").pop() ?? "") ?? null) : null);
+      const inArr = arrTmdbIdsFor(item).has(item.tmdbId);
 
       const arrFallbackPath = (!mediaRelPath && item.mediaType === "TV")
         ? (tvArrPathByTmdbId.get(item.tmdbId) ?? null)
         : null;
 
-      const matchKey = keyByRow.get(rowKey(item)) ?? null;
+      const movieFolder = item.mediaType === "MOVIE" ? ownFolder(item.filePath, "MOVIE") : null;
       const folder = item.mediaType === "TV"
         ? (matchKey ? folderKey(matchKey) : null)
-        : (() => { const f = ownFolder(item.filePath, "MOVIE"); return f ? folderKey(f) : null; })();
+        : (movieFolder ? folderKey(movieFolder) : null);
 
       return {
         tmdbId:         item.tmdbId,
         mediaType:      item.mediaType,
         serverInstance: item.serverInstance,
-        diffSource:     diffSourceFor(matchKey, folder, item.mediaType, otherByPath, otherUnmatched),
+        diffSource:     diffSourceFor(matchKey, folder, item.mediaType, side.otherByPath, side.otherUnmatched),
         title:          item.title,
         posterPath:     item.posterPath,
         releaseYear:    item.releaseYear,
@@ -636,8 +678,12 @@ export default async function LibraryDiffPage({
   const plexOther = toOther(plexPathMap);
   const jellyfinOther = toOther(jellyfinPathMap);
 
-  const clientOnlyPlex     = toClientItem(onlyPlex,     plexKeyByRow, jellyfinOther, unmatchedFolders("jellyfin"), plexMountPoints,     (i) => i.mediaType === "MOVIE" ? movieArrByName : tvArrByName, (i) => i.mediaType === "MOVIE" ? movieArrTmdbIds : tvArrTmdbIds);
-  const clientOnlyJellyfin = toClientItem(onlyJellyfin, jellyfinKeyByRow, plexOther, unmatchedFolders("plex"), jellyfinMountPoints, (i) => i.mediaType === "MOVIE" ? movieArrByName : tvArrByName, (i) => i.mediaType === "MOVIE" ? movieArrTmdbIds : tvArrTmdbIds);
+  const clientOnlyPlex = toClientItem(onlyPlex, {
+    keyByRow: plexKeyByRow, otherByPath: jellyfinOther, otherUnmatched: unmatchedFolders("jellyfin"), mountPoints: plexMountPoints,
+  });
+  const clientOnlyJellyfin = toClientItem(onlyJellyfin, {
+    keyByRow: jellyfinKeyByRow, otherByPath: plexOther, otherUnmatched: unmatchedFolders("plex"), mountPoints: jellyfinMountPoints,
+  });
 
   const collator = diffCollator(locale);
   const diffCompare = makeDiffComparator(collator);
@@ -660,11 +706,14 @@ export default async function LibraryDiffPage({
   // to the old row counts on a single-server deployment, where the composite PK
   // makes one row exactly one title. (The type tabs below stay row-based on
   // purpose — they label the cards actually rendered, one per server.)
+  //
+  // Past the row cap both sets are the whole tables' (wholeLibraryTitleKeys).
+  const titleCounts = { plex: plexSet.size, jellyfin: jellyfinSet.size, inSync: inSyncCount };
   const stats = [
-    { label: t("adminManage.library.stat.plex"),     value: plexSet.size,     color: "var(--ds-plex-text)" },
-    { label: t("adminManage.library.stat.jellyfin"), value: jellyfinSet.size, color: "var(--ds-jellyfin-text)" },
-    { label: t("adminManage.library.stat.inSync"),          value: inSyncCount,      color: "var(--ds-success)"  },
-    { label: t("adminManage.library.stat.differences"),      value: (plexSet.size - inSyncCount) + (jellyfinSet.size - inSyncCount), color: "var(--ds-danger)" },
+    { label: t("adminManage.library.stat.plex"),     value: titleCounts.plex,     color: "var(--ds-plex-text)" },
+    { label: t("adminManage.library.stat.jellyfin"), value: titleCounts.jellyfin, color: "var(--ds-jellyfin-text)" },
+    { label: t("adminManage.library.stat.inSync"),          value: titleCounts.inSync,      color: "var(--ds-success)"  },
+    { label: t("adminManage.library.stat.differences"),      value: (titleCounts.plex - titleCounts.inSync) + (titleCounts.jellyfin - titleCounts.inSync), color: "var(--ds-danger)" },
     { label: t("adminManage.library.stat.badMatches"),      value: allRawBadMatches.length, color: "var(--ds-warning)" },
   ];
 

@@ -16,8 +16,9 @@
 //   - movie/TV page INTERLEAVING: page 0 of both types completes before page 1
 //     of either, so quota drains evenly instead of movies-first;
 //   - `fetched` counts the ids MDBList actually returned: a partial response
-//     is neither fetched nor failed; a REJECTED fetchMdblistBatch marks its
-//     whole page failed while the run still returns counters;
+//     is neither fetched nor failed; a page that got no ratings answer (a 5xx,
+//     an error body, a key read that failed) counts its ids failed while the
+//     run still returns counters;
 //   - the ordered short-circuits and quota stops: locked-at-start aborts
 //     BEFORE the mdblistApiKey Setting read with quotaExhausted:true; a 429
 //     mid-run trips the lockout, later pages are never issued, and the result
@@ -436,7 +437,7 @@ test("a partial batch response yields fetched < toFetch without counting failed"
   });
 });
 
-test("a rejected fetchMdblistBatch marks the whole page failed for BOTH types and the run still returns counters", async () => {
+test("a batch whose key read fails marks the whole page failed for BOTH types and the run still returns counters", async () => {
   tables.plex = [
     { tmdbId: 41, mediaType: "MOVIE" },
     { tmdbId: 42, mediaType: "MOVIE" },
@@ -461,8 +462,8 @@ test("a rejected fetchMdblistBatch marks the whole page failed for BOTH types an
       total: 3, fetched: 0, skipped: 0, failed: 3, purged: 0, quotaExhausted: undefined,
     });
     assert.equal(fetchCalls.length, 0); // the rejection precedes any wire call
-    assert.ok(warns.some((w) => w.includes("[mdblist-prewarm] movie batch failed:")));
-    assert.ok(warns.some((w) => w.includes("[mdblist-prewarm] tv batch failed:")));
+    // The batch degrades to "failed" instead of rejecting, and says why.
+    assert.ok(errors.some((e) => e.includes("[mdblist] API key read failed: settings table on fire")));
   } finally {
     settingRead = defaultSettingRead;
   }
@@ -478,8 +479,10 @@ test("an MDBList that keeps failing stops each media type after the breaker's li
   ];
   respond = () => new Response("upstream down", { status: 500 });
 
+  // Every page that went out and failed counts its ids failed (three per type
+  // before the breaker), so the run reads red; the pages never sent count nothing.
   assert.deepEqual(await prewarmMdblistCache(), {
-    total: 2000, fetched: 0, skipped: 0, failed: 0, purged: 0, quotaExhausted: undefined,
+    total: 2000, fetched: 0, skipped: 0, failed: 1200, purged: 0, quotaExhausted: undefined,
   });
   assert.equal(fetchCalls.filter((c) => c.url.pathname === "/tmdb/movie/").length, 3, "movies stop at the limit");
   assert.equal(fetchCalls.filter((c) => c.url.pathname === "/tmdb/show/").length, 3, "shows stop at the limit");

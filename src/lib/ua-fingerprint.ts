@@ -1,20 +1,14 @@
-
-
 // A coarse summary of a User-Agent: browser family, OS and device class only.
 // The raw UA string is never stored, so no identifying detail is kept. Used for
 // the device label and mobile/desktop session length — never for authorization.
 export interface UaFingerprint {
-
   browser: string;
-
   os: string;
-
   device: "mobile" | "tablet" | "desktop";
 }
 
 // Classifies a raw UA string into browser family / OS / device class.
 export function extractUaFingerprint(ua: string): UaFingerprint {
-
   const isTablet =
     /iPad/i.test(ua) ||
     (/Android/i.test(ua) && !/Mobile/i.test(ua));
@@ -29,9 +23,13 @@ export function extractUaFingerprint(ua: string): UaFingerprint {
 
   // Chromium-based browsers (Edge, Opera, Yandex, Samsung) are tested before
   // Chrome because their UAs also contain "Chrome/". Chrome is tested before
-  // Safari for the same reason (Chrome's UA also contains "Safari/").
+  // Safari for the same reason (Chrome's UA also contains "Safari/"). The iOS
+  // builds of Chrome, Firefox and Edge name themselves CriOS/, FxiOS/ and EdgiOS/
+  // (Edge on Android: EdgA/) and still carry "Safari/", so they go first too.
   const browser =
-    /Edg\//i.test(ua)              ? "edge"
+    /Edg(?:e|A|iOS)?\//i.test(ua)  ? "edge"
+    : /CriOS\//i.test(ua)          ? "chrome"
+    : /FxiOS\//i.test(ua)          ? "firefox"
     : /OPR\//i.test(ua)            ? "opera"
     : /YaBrowser\//i.test(ua)      ? "yandex"
     : /SamsungBrowser\//i.test(ua) ? "samsung"

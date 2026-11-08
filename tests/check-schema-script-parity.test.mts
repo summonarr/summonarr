@@ -28,12 +28,10 @@ test("no script under scripts/ carries its own information_schema column-expecta
   assert.deepEqual(offenders, []);
 });
 
-test("the maintained route's EXPECTED table names the multi-instance identity columns", () => {
+test("the maintained route derives its expectation from the schema, never a hand-kept table", () => {
   const src = readFileSync(join(ROOT, "src/app/api/admin/check-schema/route.ts"), "utf8");
-  for (const table of ["PlexLibraryItem", "JellyfinLibraryItem", "PlayHistory", "ActiveSession", "MediaServerUser"]) {
-    assert.match(src, new RegExp(`${table}:\\s*\\[[^\\]]*"serverInstance"`), `${table} lacks serverInstance`);
-  }
-  for (const table of ["MediaRequest", "RadarrWantedItem", "SonarrWantedItem", "RadarrAvailableItem", "SonarrAvailableItem"]) {
-    assert.match(src, new RegExp(`${table}:\\s*\\[[^\\]]*"arrInstance"`), `${table} lacks arrInstance`);
-  }
+  assert.match(src, /expectedSchemaColumns\(\)/);
+  assert.doesNotMatch(src, /\bconst EXPECTED\b/);
+  // What it derives (every model and column, the identity columns included) is
+  // pinned in tests/check-schema-route.test.mts.
 });

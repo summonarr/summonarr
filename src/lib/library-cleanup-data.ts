@@ -159,50 +159,87 @@ export async function loadCleanupTitles(
   const targets = opts.resolveTargets && arr ? await resolveArrTargets(facts.titles.filter(opts.resolveTargets), arr, opts.crossRef ?? "cached") : null;
 
   const byKey = new Map<string, CleanupTitle>();
-  for (const w of facts.titles) {
-    byKey.set(cleanupKey(w.tmdbId, w.mediaType), {
-      tmdbId: w.tmdbId,
-      mediaType: w.mediaType,
-      title: w.title,
-      posterPath: null,
-      year: w.year,
-      servers: w.servers,
-      addedAt: w.addedAt,
-      shelfStart: w.shelfStart,
-      playCount: w.evidence.plays,
-      lastPlayedAt: w.evidence.lastPlayedAt,
-      watch: w.verdict,
-      evidence: w.evidence,
-      upstreamUnchecked: w.upstreamUnchecked,
-      seasons: w.seasons,
-      votes: 0,
-      requests: [],
-      watchlisted: false,
-      playingNow: w.playingNow,
-      airing: null,
-      protected: false,
-    });
-  }
+  for (const w of facts.titles) byKey.set(cleanupKey(w.tmdbId, w.mediaType), cleanupTitleOf(w));
 
   const ids = [...new Set([...byKey.values()].map((t) => t.tmdbId))];
-  // A whole-library read aggregates unfiltered and drops non-library keys in
-  // memory: an `IN` list as long as the library would run into Postgres's bind
-  // parameter limit on a large one. A targeted read filters on its own few ids.
-  const scoped = only ? { tmdbId: { in: ids } } : {};
+  const byTvdb = indexTitlesByTvdb(byKey, arr, opts.tvdbIds, targets);
+  await attachSideFacts(byKey, byTvdb, ids, only !== undefined);
+  // Still-airing: Sonarr's own series status is authoritative for a show it
+  // manages. Any instance saying "continuing" wins over one saying "ended".
+  // Only the entries carrying a tmdbId here; a tvdb-only one (Sonarr v3) is
+  // reached through TMDB's cross-reference by fillAiring.
+  if (arr) {
+    for (const t of byKey.values()) {
+      if (t.mediaType !== "TV") continue;
+      const verdicts = (arr.byKey.get(cleanupKey(t.tmdbId, "TV")) ?? []).map((e) => e.airing).filter((a) => a !== null);
+      if (verdicts.length > 0) t.airing = verdicts.includes(true);
+    }
+  }
 
-  // tvdb id → the TV titles it names (cleanupRequestIdentity).
+  return { titles: [...byKey.values()], ctx: loadCtx, targets };
+}
+
+/** A library title's cleanup facts before votes, requests, watchlist, protection and TMDB metadata are attached. */
+function cleanupTitleOf(w: LibraryWatchTitle): CleanupTitle {
+  return {
+    tmdbId: w.tmdbId,
+    mediaType: w.mediaType,
+    title: w.title,
+    posterPath: null,
+    year: w.year,
+    servers: w.servers,
+    addedAt: w.addedAt,
+    shelfStart: w.shelfStart,
+    playCount: w.evidence.plays,
+    lastPlayedAt: w.evidence.lastPlayedAt,
+    watch: w.verdict,
+    evidence: w.evidence,
+    upstreamUnchecked: w.upstreamUnchecked,
+    seasons: w.seasons,
+    votes: 0,
+    requests: [],
+    watchlisted: false,
+    playingNow: w.playingNow,
+    airing: null,
+    protected: false,
+  };
+}
+
+/** tvdb id → the TV titles it names (cleanupRequestIdentity): the arr entries', the caller's and the resolved targets' ids. */
+function indexTitlesByTvdb(
+  byKey: ReadonlyMap<string, CleanupTitle>,
+  arr: ArrLibraryIndex | null,
+  extraTvdbIds: ReadonlyMap<string, readonly number[]> | undefined,
+  targets: ReadonlyMap<string, readonly ArrLibraryEntry[]> | null,
+): Map<number, CleanupTitle[]> {
   const byTvdb = new Map<number, CleanupTitle[]>();
   for (const [key, t] of byKey) {
     if (t.mediaType !== "TV") continue;
     const targetTvdb = (targets?.get(key) ?? []).flatMap((e) => (e.service === "sonarr" ? [e.tvdbId] : []));
-    for (const tvdbId of positiveIds([...(arr?.byKey.get(key) ?? []).map((e) => e.tvdbId), ...(opts.tvdbIds?.get(key) ?? []), ...targetTvdb])) {
+    for (const tvdbId of positiveIds([...(arr?.byKey.get(key) ?? []).map((e) => e.tvdbId), ...(extraTvdbIds?.get(key) ?? []), ...targetTvdb])) {
       const list = byTvdb.get(tvdbId);
       if (list) list.push(t);
       else byTvdb.set(tvdbId, [t]);
     }
   }
+  return byTvdb;
+}
+
+/**
+ * Votes, requests, watchlist entries, protections and TMDB metadata, onto the
+ * titles. A whole-library read aggregates unfiltered and drops non-library keys
+ * in memory: an `IN` list as long as the library would run into Postgres's bind
+ * parameter limit on a large one. A targeted read filters on its own few ids.
+ */
+async function attachSideFacts(
+  byKey: ReadonlyMap<string, CleanupTitle>,
+  byTvdb: ReadonlyMap<number, CleanupTitle[]>,
+  ids: number[],
+  targeted: boolean,
+): Promise<void> {
+  const scoped = targeted ? { tmdbId: { in: ids } } : {};
   const tvdbIds = [...byTvdb.keys()];
-  const requestScope = only
+  const requestScope = targeted
     ? { OR: [{ tmdbId: { in: ids } }, ...(tvdbIds.length > 0 ? [{ mediaType: "TV" as const, tvdbId: { in: tvdbIds } }] : [])] }
     : {};
 
@@ -224,14 +261,22 @@ export async function loadCleanupTitles(
     const t = get(v.tmdbId, v.mediaType);
     if (t) t.votes = v._count._all;
   }
+  // Collected per title and assigned once: CleanupTitleFacts.requests is readonly.
+  const requestsOf = new Map<CleanupTitle, CleanupRequestFact[]>();
   for (const r of requests) {
     // A request counts once per title, however many of its ids match.
     const matched = new Set<CleanupTitle>();
     const byTmdb = get(r.tmdbId, r.mediaType);
     if (byTmdb) matched.add(byTmdb);
     if (r.mediaType === "TV" && r.tvdbId != null) for (const t of byTvdb.get(r.tvdbId) ?? []) matched.add(t);
-    for (const t of matched) (t.requests as CleanupRequestFact[]).push({ status: r.status, availableAt: r.availableAt });
+    for (const t of matched) {
+      const list = requestsOf.get(t);
+      const fact = { status: r.status, availableAt: r.availableAt };
+      if (list) list.push(fact);
+      else requestsOf.set(t, [fact]);
+    }
   }
+  for (const [t, list] of requestsOf) t.requests = list;
   for (const w of watchlist) {
     const t = get(w.tmdbId, w.mediaType);
     if (t) t.watchlisted = true;
@@ -247,19 +292,6 @@ export async function loadCleanupTitles(
     t.posterPath = c.posterPath;
     if (c.releaseYear) t.year = c.releaseYear;
   }
-  // Still-airing: Sonarr's own series status is authoritative for a show it
-  // manages. Any instance saying "continuing" wins over one saying "ended".
-  // Only the entries carrying a tmdbId here; a tvdb-only one (Sonarr v3) is
-  // reached through TMDB's cross-reference by fillAiring.
-  if (arr) {
-    for (const t of byKey.values()) {
-      if (t.mediaType !== "TV") continue;
-      const verdicts = (arr.byKey.get(cleanupKey(t.tmdbId, "TV")) ?? []).map((e) => e.airing).filter((a) => a !== null);
-      if (verdicts.length > 0) t.airing = verdicts.includes(true);
-    }
-  }
-
-  return { titles: [...byKey.values()], ctx: loadCtx, targets };
 }
 
 // Why a shared facts load can't stand in for this read, or null when it can.
@@ -388,73 +420,29 @@ export async function computeCleanupReport(
   const settings = await loadCleanupSettings();
   const { titles: firstRead, ctx: partial } = await loadCleanupTitles(arr, only, { now, tvdbIds: opts.tvdbIds, shared: opts.shared });
   const ctx: CleanupContext = { now };
-  let titles = firstRead;
+  const judge = (titles: readonly CleanupTitle[]) => titles.map((t) => evaluateCleanupTitle(t, settings, ctx));
 
-  let verdicts = titles.map((t) => evaluateCleanupTitle(t, settings, ctx));
+  let titles = firstRead;
+  let verdicts = judge(titles);
   let targets: ReadonlyMap<string, readonly ArrLibraryEntry[]> | null = null;
   if (opts.resolveTargets && arr) {
-    const rowTitles = titles.filter((_, i) => verdicts[i].matched.length > 0);
-    targets = await resolveArrTargets(rowTitles, arr, crossRef);
-    const sonarrTvdb = (entries: readonly ArrLibraryEntry[]) =>
-      positiveIds(entries.flatMap((e) => (e.service === "sonarr" ? [e.tvdbId] : [])));
-    const rejudge: TitleKey[] = [];
-    const rejudgeTvdb = new Map<string, number[]>();
-    for (const t of rowTitles) {
-      if (t.mediaType !== "TV") continue;
-      const key = cleanupKey(t.tmdbId, t.mediaType);
-      const known = new Set([...sonarrTvdb(arr.byKey.get(key) ?? []), ...(opts.tvdbIds?.get(key) ?? [])]);
-      const ids = sonarrTvdb(targets.get(key) ?? []);
-      if (!ids.some((id) => !known.has(id))) continue;
-      rejudge.push({ tmdbId: t.tmdbId, mediaType: t.mediaType });
-      rejudgeTvdb.set(key, ids);
-    }
-    if (rejudge.length > 0) {
-      const again = await loadCleanupTitles(arr, rejudge, { now, tvdbIds: rejudgeTvdb });
-      const fresh = new Map(again.titles.map((t) => [cleanupKey(t.tmdbId, t.mediaType), t]));
-      titles = titles.map((t) => fresh.get(cleanupKey(t.tmdbId, t.mediaType)) ?? t);
-      verdicts = titles.map((t) => evaluateCleanupTitle(t, settings, ctx));
+    const resolved = await resolveTargetsAndRejudge(arr, titles, verdicts, { now, crossRef, tvdbIds: opts.tvdbIds });
+    targets = resolved.targets;
+    if (resolved.titles !== titles) {
+      titles = resolved.titles;
+      verdicts = judge(titles);
     }
   }
-  if (settings.excludeAiring) {
-    // Second look, only where the airing exclusion could change the outcome.
-    const unresolved = titles.filter((t, i) => t.mediaType === "TV" && t.airing === null && verdicts[i].matched.length > 0);
-    if (unresolved.length > 0) {
-      await fillAiring(unresolved, arr, crossRef);
-      verdicts = titles.map((t) => evaluateCleanupTitle(t, settings, ctx));
-    }
-  }
+  if (settings.excludeAiring && (await fillAiringWhereItMatters(titles, verdicts, arr, crossRef))) verdicts = judge(titles);
 
   const rows: CleanupRow[] = [];
   titles.forEach((t, i) => {
     const v = verdicts[i];
     if (v.matched.length === 0) return;
     const key = cleanupKey(t.tmdbId, t.mediaType);
-    const entries = targets?.get(key) ?? arr?.byKey.get(key) ?? [];
-    const lastActivity = latestDate(t.lastPlayedAt, t.evidence.softLastPlayedAt, v.observedSince);
-    rows.push({
-      tmdbId: t.tmdbId,
-      mediaType: t.mediaType,
-      title: t.title,
-      posterPath: t.posterPath,
-      year: t.year,
-      servers: [...t.servers].sort(),
-      addedAt: t.addedAt?.toISOString() ?? null,
-      lastPlayedAt: t.lastPlayedAt?.toISOString() ?? null,
-      playCount: t.playCount,
-      votes: t.votes,
-      idleDays: lastActivity ? Math.floor((now.getTime() - lastActivity.getTime()) / DAY_MS) : null,
-      arr: entries.map((e) => ({ service: e.service, instance: e.instance, sizeOnDisk: e.sizeOnDisk })),
-      sizeOnDisk: sizeOf(entries),
-      matched: v.matched,
-      excludedBy: v.excludedBy,
-      candidate: v.candidate,
-    });
+    rows.push(cleanupRowOf(t, v, targets?.get(key) ?? arr?.byKey.get(key) ?? [], now));
   });
-  rows.sort((a, b) =>
-    Number(b.candidate) - Number(a.candidate) ||
-    (b.sizeOnDisk ?? -1) - (a.sizeOnDisk ?? -1) ||
-    a.title.localeCompare(b.title),
-  );
+  rows.sort(compareCleanupRows);
 
   return {
     settings,
@@ -463,4 +451,81 @@ export async function computeCleanupReport(
     rows,
     libraryTitles: titles.length,
   };
+}
+
+const sonarrTvdbIds = (entries: readonly ArrLibraryEntry[]) =>
+  positiveIds(entries.flatMap((e) => (e.service === "sonarr" ? [e.tvdbId] : [])));
+
+/**
+ * The delete route's own targets for the ROWS (titles a rule matched), and the
+ * titles again with every show re-read narrowed whose targets brought a tvdb id
+ * the first read didn't know — a request linked only by that id is an
+ * exclusion. `titles` comes back unchanged (the same array) when nothing needed
+ * a second read.
+ */
+async function resolveTargetsAndRejudge(
+  arr: ArrLibraryIndex,
+  titles: CleanupTitle[],
+  verdicts: readonly CleanupVerdict[],
+  opts: { now: Date; crossRef: CrossRefMode; tvdbIds?: ReadonlyMap<string, readonly number[]> },
+): Promise<{ titles: CleanupTitle[]; targets: ReadonlyMap<string, readonly ArrLibraryEntry[]> }> {
+  const rowTitles = titles.filter((_, i) => verdicts[i].matched.length > 0);
+  const targets = await resolveArrTargets(rowTitles, arr, opts.crossRef);
+  const rejudge: TitleKey[] = [];
+  const rejudgeTvdb = new Map<string, number[]>();
+  for (const t of rowTitles) {
+    if (t.mediaType !== "TV") continue;
+    const key = cleanupKey(t.tmdbId, t.mediaType);
+    const known = new Set([...sonarrTvdbIds(arr.byKey.get(key) ?? []), ...(opts.tvdbIds?.get(key) ?? [])]);
+    const ids = sonarrTvdbIds(targets.get(key) ?? []);
+    if (!ids.some((id) => !known.has(id))) continue;
+    rejudge.push({ tmdbId: t.tmdbId, mediaType: t.mediaType });
+    rejudgeTvdb.set(key, ids);
+  }
+  if (rejudge.length === 0) return { titles, targets };
+  const again = await loadCleanupTitles(arr, rejudge, { now: opts.now, tvdbIds: rejudgeTvdb });
+  const fresh = new Map(again.titles.map((t) => [cleanupKey(t.tmdbId, t.mediaType), t]));
+  return { titles: titles.map((t) => fresh.get(cleanupKey(t.tmdbId, t.mediaType)) ?? t), targets };
+}
+
+/** The airing second look, only where the airing exclusion could change the outcome. True when it ran. */
+async function fillAiringWhereItMatters(
+  titles: CleanupTitle[],
+  verdicts: readonly CleanupVerdict[],
+  arr: ArrLibraryIndex | null,
+  crossRef: CrossRefMode,
+): Promise<boolean> {
+  const unresolved = titles.filter((t, i) => t.mediaType === "TV" && t.airing === null && verdicts[i].matched.length > 0);
+  if (unresolved.length === 0) return false;
+  await fillAiring(unresolved, arr, crossRef);
+  return true;
+}
+
+function cleanupRowOf(t: CleanupTitle, v: CleanupVerdict, entries: readonly ArrLibraryEntry[], now: Date): CleanupRow {
+  const lastActivity = latestDate(t.lastPlayedAt, t.evidence.softLastPlayedAt, v.observedSince);
+  return {
+    tmdbId: t.tmdbId,
+    mediaType: t.mediaType,
+    title: t.title,
+    posterPath: t.posterPath,
+    year: t.year,
+    servers: [...t.servers].sort(),
+    addedAt: t.addedAt?.toISOString() ?? null,
+    lastPlayedAt: t.lastPlayedAt?.toISOString() ?? null,
+    playCount: t.playCount,
+    votes: t.votes,
+    idleDays: lastActivity ? Math.floor((now.getTime() - lastActivity.getTime()) / DAY_MS) : null,
+    arr: entries.map((e) => ({ service: e.service, instance: e.instance, sizeOnDisk: e.sizeOnDisk })),
+    sizeOnDisk: sizeOf(entries),
+    matched: v.matched,
+    excludedBy: v.excludedBy,
+    candidate: v.candidate,
+  };
+}
+
+// Candidates first, then the biggest, then by title.
+function compareCleanupRows(a: CleanupRow, b: CleanupRow): number {
+  return Number(b.candidate) - Number(a.candidate) ||
+    (b.sizeOnDisk ?? -1) - (a.sizeOnDisk ?? -1) ||
+    a.title.localeCompare(b.title);
 }

@@ -46,12 +46,12 @@
 //   removal that commits first is seen and skipped; a refresh that commits
 //   first is deleted by the removal. Otherwise a server registered later under
 //   the same slug would inherit this one's evidence and "ok" status (14d).
-import { Prisma } from "@/generated/prisma";
-import { prisma } from "./prisma";
-import { BATCH_TX_TIMEOUT, batchCreateMany } from "./cron-auth";
+import { prisma, type PrismaTxClient } from "./prisma";
+import { BATCH_TX_TIMEOUT, batchCreateMany } from "./batch-write";
 import { mapLimit } from "./concurrency";
 import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
-import { buildMediaInstanceRegistryWrite, getMediaInstances, getSyncableMediaInstances } from "./media-instance-registry";
+import { describeTxFailure } from "./tx-diagnostics";
+import { getMediaInstances, getSyncableMediaInstances, registeredSlugsForUpdateInTx } from "./media-instance-registry";
 import { DEFAULT_MEDIA_INSTANCE, mediaInstanceLabel } from "./media-instances";
 import { getPlexConfig } from "./plex-config";
 import { getJellyfinConfig } from "./jellyfin-config";
@@ -120,6 +120,27 @@ class UpstreamBudgetError extends Error {
 // anything" — replacing the previous snapshot with it would drop every row.
 class UpstreamEmptyAnswerError extends Error {
   name = "UpstreamEmptyAnswerError";
+}
+
+// A failure in Summonarr's OWN database work for a server (the self-check reads,
+// the snapshot transaction) — logged as such, so an admin isn't sent to debug a
+// media server that answered fine. The stored status keeps the closed
+// vocabulary ("request failed"): the page has no words for a database error.
+class UpstreamStoreError extends Error {
+  name = "UpstreamStoreError";
+  readonly cause: unknown;
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.cause = cause;
+  }
+}
+
+async function inStorePhase<T>(work: () => Promise<T>): Promise<T> {
+  try {
+    return await work();
+  } catch (err) {
+    throw new UpstreamStoreError(err);
+  }
 }
 
 export interface UpstreamServerResult {
@@ -208,7 +229,7 @@ async function jellyfinSnapshot(slug: string, signal: AbortSignal | undefined): 
   const apiKey = cfg.apiKey?.trim();
   if (!url || !apiKey) return "unconfigured";
 
-  const users = await getJellyfinAllUsers(url, apiKey);
+  const users = await getJellyfinAllUsers(url, apiKey, { signal });
   // A server always has at least its admin. An empty 200 is a degraded read (a
   // de-elevated key, a truncating proxy) — writing it would wipe every user's
   // evidence (the guardrail-28 trap), so it is a failure.
@@ -216,42 +237,36 @@ async function jellyfinSnapshot(slug: string, signal: AbortSignal | undefined): 
 
   // One user failing fails the server (a snapshot missing a user drops their
   // evidence), and stops the others promptly instead of letting them run on.
-  const stop = new AbortController();
-  const forward = () => stop.abort();
-  if (signal?.aborted) stop.abort();
-  signal?.addEventListener("abort", forward, { once: true });
+  const abortOthers = new AbortController();
+  const stop = signal ? AbortSignal.any([signal, abortOthers.signal]) : abortOthers.signal;
   let failed = false;
   let failure: unknown = null;
   let records = 0;
   const items: JellyfinPlayedItem[] = [];
-  try {
-    await mapLimit(users, JELLYFIN_USER_CONCURRENCY, async (user) => {
-      if (stop.signal.aborted) return;
-      try {
-        const byItem = new Map<string, JellyfinPlayedItem>();
-        for (const filter of ["IsPlayed", "IsResumable"] as const) {
-          if (stop.signal.aborted) return;
-          const res = await getJellyfinUserPlayedItems(url, apiKey, user.id, filter, { signal: stop.signal });
-          records += res.records;
-          for (const it of res.items) {
-            const prev = byItem.get(it.itemKey);
-            byItem.set(it.itemKey, prev ? mergeUserItem(prev, it) : it);
-          }
+  await mapLimit(users, JELLYFIN_USER_CONCURRENCY, async (user) => {
+    if (stop.aborted) return;
+    try {
+      const byItem = new Map<string, JellyfinPlayedItem>();
+      for (const filter of ["IsPlayed", "IsResumable"] as const) {
+        if (stop.aborted) return;
+        const res = await getJellyfinUserPlayedItems(url, apiKey, user.id, filter, { signal: stop });
+        records += res.records;
+        for (const it of res.items) {
+          const prev = byItem.get(it.itemKey);
+          byItem.set(it.itemKey, prev ? mergeUserItem(prev, it) : it);
         }
-        // A loop, not push(...spread): a user with a six-figure played list would
-        // exceed the engine's argument limit and fail the whole server.
-        if (!stop.signal.aborted) for (const it of byItem.values()) items.push(it);
-      } catch (err) {
-        if (!failed) {
-          failed = true;
-          failure = err;
-        }
-        stop.abort();
       }
-    });
-  } finally {
-    signal?.removeEventListener("abort", forward);
-  }
+      // A loop, not push(...spread): a user with a six-figure played list would
+      // exceed the engine's argument limit and fail the whole server.
+      if (!stop.aborted) for (const it of byItem.values()) items.push(it);
+    } catch (err) {
+      if (!failed) {
+        failed = true;
+        failure = err;
+      }
+      abortOthers.abort();
+    }
+  });
   if (failed) throw failure;
   return {
     records,
@@ -265,30 +280,38 @@ async function jellyfinSnapshot(slug: string, signal: AbortSignal | undefined): 
   };
 }
 
+// Evidence keys looked up per library query. Two lists of this size bind
+// 10,000 parameters, well under Postgres's 32,766 (guardrail 23c).
+const MATCH_KEY_CHUNK = 5_000;
+
 // Rows whose key lands on a library title of THIS server — both key columns
 // (guardrails 37/37c: the singular canonical key OR any duplicate copy's key).
+// Only the library rows holding one of the evidence keys are read, in chunks,
+// never the whole library.
 async function countMatched(source: NwSource, slug: string, rows: UpstreamEvidenceRow[]): Promise<number> {
   if (rows.length === 0) return 0;
-  const library: Array<{ mediaType: string; keys: Array<string | null> }> =
-    source === "plex"
-      ? (
-          await prisma.plexLibraryItem.findMany({
-            where: { serverInstance: slug },
-            select: { mediaType: true, plexRatingKey: true, plexRatingKeys: true },
-          })
-        ).map((r) => ({ mediaType: r.mediaType, keys: [r.plexRatingKey, ...(r.plexRatingKeys ?? [])] }))
-      : (
-          await prisma.jellyfinLibraryItem.findMany({
-            where: { serverInstance: slug },
-            select: { mediaType: true, jellyfinItemId: true, jellyfinItemIds: true },
-          })
-        ).map((r) => ({ mediaType: r.mediaType, keys: [r.jellyfinItemId, ...(r.jellyfinItemIds ?? [])] }));
+  const keys = [...new Set(rows.map((r) => r.itemKey))];
   const movies = new Set<string>();
   const shows = new Set<string>();
-  for (const r of library) {
-    const target = r.mediaType === "MOVIE" ? movies : r.mediaType === "TV" ? shows : null;
-    if (!target) continue;
-    for (const k of r.keys) if (k) target.add(k);
+  const collect = (mediaType: string, held: Array<string | null>) => {
+    const target = mediaType === "MOVIE" ? movies : mediaType === "TV" ? shows : null;
+    if (target) for (const k of held) if (k) target.add(k);
+  };
+  for (let i = 0; i < keys.length; i += MATCH_KEY_CHUNK) {
+    const chunk = keys.slice(i, i + MATCH_KEY_CHUNK);
+    if (source === "plex") {
+      const found = await prisma.plexLibraryItem.findMany({
+        where: { serverInstance: slug, OR: [{ plexRatingKey: { in: chunk } }, { plexRatingKeys: { hasSome: chunk } }] },
+        select: { mediaType: true, plexRatingKey: true, plexRatingKeys: true },
+      });
+      for (const r of found) collect(r.mediaType, [r.plexRatingKey, ...(r.plexRatingKeys ?? [])]);
+    } else {
+      const found = await prisma.jellyfinLibraryItem.findMany({
+        where: { serverInstance: slug, OR: [{ jellyfinItemId: { in: chunk } }, { jellyfinItemIds: { hasSome: chunk } }] },
+        select: { mediaType: true, jellyfinItemId: true, jellyfinItemIds: true },
+      });
+      for (const r of found) collect(r.mediaType, [r.jellyfinItemId, ...(r.jellyfinItemIds ?? [])]);
+    }
   }
   return rows.filter((r) => (r.mediaType === "MOVIE" ? movies : shows).has(r.itemKey)).length;
 }
@@ -314,28 +337,14 @@ async function readStatus(source: NwSource, slug: string): Promise<NwUpstreamSta
   }
 }
 
-// The interactive-tx client of the EXTENDED prisma (account-lifecycle.ts's shape).
-type TxClient = Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
-
 // Whether a NAMED instance is still registered, read with its service's registry
 // row LOCKED, so a concurrent removal (which writes that row first, in the same
 // transaction as its cleanup) is ordered against this write. The default
 // instance is synthesized and can never be removed. A missing or unreadable
 // registry lists nothing.
-async function stillRegisteredInTx(tx: TxClient, source: NwSource, slug: string): Promise<boolean> {
+async function stillRegisteredInTx(tx: PrismaTxClient, source: NwSource, slug: string): Promise<boolean> {
   if (slug === DEFAULT_MEDIA_INSTANCE) return true;
-  const { key } = buildMediaInstanceRegistryWrite(source, []);
-  const rows = await tx.$queryRaw<Array<{ value: string }>>(
-    Prisma.sql`SELECT "value" FROM "Setting" WHERE "key" = ${key} FOR UPDATE`,
-  );
-  const raw = rows[0]?.value;
-  if (!raw) return false;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.some((e) => !!e && typeof e === "object" && (e as { slug?: unknown }).slug === slug);
-  } catch {
-    return false;
-  }
+  return (await registeredSlugsForUpdateInTx(tx, source)).has(slug);
 }
 
 // A FAILED server's status (a success's commits with its snapshot, in
@@ -379,44 +388,53 @@ function resultOf(source: NwSource, slug: string, status: NwUpstreamStatus, now:
   };
 }
 
+// What is wrong with a server this run, as a repeat-suppression state and its
+// log line; null = healthy. upstreamHealth already decided failed / unreliable /
+// incomplete; this only names WHY a "failed" snapshot failed.
+function healthCondition(
+  label: string,
+  result: UpstreamServerResult,
+  status: NwUpstreamStatus,
+  failure: unknown,
+): { state: string; message: string } | null {
+  const prefix = `[upstream-watch] ${label}:`;
+  if (!result.ok && failure instanceof UpstreamStoreError) {
+    const { kind, text } = describeTxFailure(failure.cause, { txTimeoutMs: BATCH_TX_TIMEOUT });
+    return {
+      state: `store-failed|${kind}`,
+      message: `${prefix} the server answered, but storing its snapshot in Summonarr's database failed (${text}); keeping the previous snapshot`,
+    };
+  }
+  if (!result.ok) {
+    return {
+      state: `failed|${result.error ?? ""}`,
+      message: `${prefix} could not read the server's own watch records (${result.error ?? "unknown error"}); keeping the previous snapshot`,
+    };
+  }
+  switch (result.health) {
+    case "failed":
+      // Records that match nothing at all are the broader fault: name that
+      // one even when most episodes are unplaced too.
+      return upstreamEpisodesUnplaced(status) && !(status.entries > 0 && status.matched === 0)
+        ? { state: "unplaced-episodes", message: `${prefix} most episode records carry no show id, so TV evidence can't be placed on a title — the response shape may have changed` }
+        : { state: "unmatched", message: `${prefix} the server returned watch records but none matched a library title — its response shape may have changed` };
+    case "unreliable":
+      return { state: "unreliable", message: `${prefix} fewer than half of the items Summonarr recorded as watched appear in the server's own watch records — they may be misread or incomplete` };
+    case "incomplete":
+      return { state: "incomplete", message: `${prefix} watch history is longer than the read cap; only the most recent records were read, so its titles stay held back from cleanup` };
+    default:
+      return null;
+  }
+}
+
 // An unhealthy server is a CONDITION recomputed every run — repeat-suppressed
 // (guardrail 7b), and forgotten once it clears so a recurrence logs again.
-function logHealth(source: NwSource, slug: string, result: UpstreamServerResult, status: NwUpstreamStatus): void {
+function logHealth(source: NwSource, slug: string, result: UpstreamServerResult, status: NwUpstreamStatus, failure: unknown): void {
   const label = mediaInstanceLabel(source, slug);
   const key = `upstream-watch:${label}`;
-  if (!result.ok) {
-    warnOnChange(
-      key,
-      `failed|${result.error ?? ""}`,
-      `[upstream-watch] ${label}: could not read the server's own watch records (${result.error ?? "unknown error"}); keeping the previous snapshot`,
-    );
-  } else if (result.health === "failed" && upstreamEpisodesUnplaced(status) && !(status.entries > 0 && status.matched === 0)) {
-    warnOnChange(
-      key,
-      "unplaced-episodes",
-      `[upstream-watch] ${label}: most episode records carry no show id, so TV evidence can't be placed on a title — the response shape may have changed`,
-    );
-  } else if (result.health === "failed") {
-    warnOnChange(
-      key,
-      "unmatched",
-      `[upstream-watch] ${label}: the server returned watch records but none matched a library title — its response shape may have changed`,
-    );
-  } else if (result.health === "unreliable") {
-    warnOnChange(
-      key,
-      "unreliable",
-      `[upstream-watch] ${label}: fewer than half of the items Summonarr recorded as watched appear in the server's own watch records — they may be misread or incomplete`,
-    );
-  } else if (result.health === "incomplete") {
-    warnOnChange(
-      key,
-      "incomplete",
-      `[upstream-watch] ${label}: watch history is longer than the read cap; only the most recent records were read, so its titles stay held back from cleanup`,
-    );
-  } else {
-    forgetWarnOnChange(key);
-  }
+  const condition = healthCondition(label, result, status, failure);
+  if (condition) warnOnChange(key, condition.state, condition.message);
+  else forgetWarnOnChange(key);
 }
 
 type ServerOutcome = UpstreamServerResult | "skipped" | "aborted";
@@ -428,7 +446,90 @@ type ServerOutcome = UpstreamServerResult | "skipped" | "aborted";
 function failureText(err: unknown): string {
   if (err instanceof UpstreamBudgetError) return UPSTREAM_ERROR_TEXT.timeout;
   if (err instanceof UpstreamEmptyAnswerError) return UPSTREAM_ERROR_TEXT.noRecords;
+  if (err instanceof UpstreamStoreError) return UPSTREAM_ERROR_TEXT.other;
   return safeUpstreamError(err);
+}
+
+interface SelfCheck {
+  matched: number;
+  samples: number;
+  agreed: number;
+}
+
+// The snapshot's self-check (header): how many rows land on a library title,
+// and how many of Summonarr's own recent completed plays the server reports.
+async function selfCheck(source: NwSource, slug: string, snapshot: Snapshot, now: Date): Promise<SelfCheck> {
+  const matched = await countMatched(source, slug, snapshot.rows);
+  const recorded = await recordedItemKeys(source, slug, agreementSince(now, snapshot.floor));
+  return { matched, ...computeAgreement(recorded, snapshot.rawItemKeys) };
+}
+
+function freshStatus(snapshot: Snapshot, check: SelfCheck, now: Date): NwUpstreamStatus {
+  return {
+    fetchedAt: now.toISOString(),
+    attemptedAt: now.toISOString(),
+    ok: true,
+    entries: snapshot.records,
+    matched: check.matched,
+    samples: check.samples,
+    agreed: check.agreed,
+    error: null,
+    truncated: snapshot.truncated,
+    episodeRecords: snapshot.episodeRecords,
+    unplacedEpisodes: snapshot.unplacedEpisodes,
+  };
+}
+
+// Replace this server's evidence and write its status, in ONE transaction under
+// the registry lock. False = the server was removed while it was being read,
+// and nothing was written (header).
+async function writeSnapshot(source: NwSource, slug: string, rows: UpstreamEvidenceRow[], status: NwUpstreamStatus, now: Date): Promise<boolean> {
+  const statusKey = upstreamStatusKey(source, slug);
+  const statusValue = JSON.stringify(status);
+  // Guardrails 23/23c: each write awaited in turn, nothing caught in here — a
+  // failed status write rolls the evidence replace back with it, and the
+  // server is recorded failed, its previous rows and status kept.
+  return prisma.$transaction(
+    async (tx) => {
+      if (!(await stillRegisteredInTx(tx, source, slug))) return false;
+      await tx.upstreamWatchEvidence.deleteMany({ where: { source, serverInstance: slug } });
+      await batchCreateMany(
+        tx.upstreamWatchEvidence,
+        rows.map((r) => ({
+          source,
+          serverInstance: slug,
+          itemKey: r.itemKey,
+          seasonNumber: r.seasonNumber,
+          mediaType: r.mediaType,
+          playCount: r.playCount,
+          lastPlayedAt: r.lastPlayedAt,
+          fetchedAt: now,
+        })),
+      );
+      await tx.setting.upsert({ where: { key: statusKey }, create: { key: statusKey, value: statusValue }, update: { value: statusValue } });
+      return true;
+    },
+    { timeout: BATCH_TX_TIMEOUT },
+  );
+}
+
+// A failed server's status: this attempt's error over the PREVIOUS snapshot's
+// facts, which stay true because its rows are kept.
+async function failedStatus(source: NwSource, slug: string, err: unknown, now: Date): Promise<NwUpstreamStatus> {
+  const prev = await readStatus(source, slug);
+  return {
+    fetchedAt: prev?.fetchedAt ?? null,
+    attemptedAt: now.toISOString(),
+    ok: false,
+    entries: prev?.entries ?? 0,
+    matched: prev?.matched ?? 0,
+    samples: prev?.samples ?? 0,
+    agreed: prev?.agreed ?? 0,
+    error: failureText(err),
+    truncated: prev?.truncated ?? false,
+    episodeRecords: prev?.episodeRecords ?? 0,
+    unplacedEpisodes: prev?.unplacedEpisodes ?? 0,
+  };
 }
 
 // `signal` is the LOCK's (guardrail 41: aborted → write nothing, return);
@@ -443,6 +544,7 @@ async function refreshServer(
 ): Promise<ServerOutcome> {
   const now = new Date();
   let status: NwUpstreamStatus;
+  let failure: unknown = null;
   try {
     const snapshot = await fetchSnapshot(serverSignal);
     if (snapshot === "unconfigured") return "skipped";
@@ -450,82 +552,27 @@ async function refreshServer(
     // abort (nothing written, no later server), not a "timed out" server.
     if (signal?.aborted) return "aborted";
     if (serverSignal.aborted) throw new UpstreamBudgetError(`${mediaInstanceLabel(source, slug)}: out of run budget`);
-    const matched = await countMatched(source, slug, snapshot.rows);
-    const recorded = await recordedItemKeys(source, slug, agreementSince(now, snapshot.floor));
-    const { samples, agreed } = computeAgreement(recorded, snapshot.rawItemKeys);
+    const check = await inStorePhase(() => selfCheck(source, slug, snapshot, now));
     // Last check before the write: an aborted run writes nothing for the
     // server in progress (guardrail 41).
     if (signal?.aborted) return "aborted";
     // Nothing at all from a server Summonarr saw completed plays on: keep the
     // previous snapshot rather than replace it with nothing (upstreamHealth
     // reads such a status as unreliable too, should one ever be stored).
-    if (snapshot.records === 0 && samples > 0) {
+    if (snapshot.records === 0 && check.samples > 0) {
       throw new UpstreamEmptyAnswerError(`${mediaInstanceLabel(source, slug)}: no watch records`);
     }
-    const fresh: NwUpstreamStatus = {
-      fetchedAt: now.toISOString(),
-      attemptedAt: now.toISOString(),
-      ok: true,
-      entries: snapshot.records,
-      matched,
-      samples,
-      agreed,
-      error: null,
-      truncated: snapshot.truncated,
-      episodeRecords: snapshot.episodeRecords,
-      unplacedEpisodes: snapshot.unplacedEpisodes,
-    };
-    const statusKey = upstreamStatusKey(source, slug);
-    const statusValue = JSON.stringify(fresh);
-    // Guardrails 23/23c: each write awaited in turn, nothing caught in here — a
-    // failed status write rolls the evidence replace back with it, and the
-    // server is recorded failed below, its previous rows and status kept.
-    const written = await prisma.$transaction(
-      async (tx) => {
-        // Removed while this server was being read: write nothing (header).
-        if (!(await stillRegisteredInTx(tx, source, slug))) return false;
-        await tx.upstreamWatchEvidence.deleteMany({ where: { source, serverInstance: slug } });
-        await batchCreateMany(
-          tx.upstreamWatchEvidence,
-          snapshot.rows.map((r) => ({
-            source,
-            serverInstance: slug,
-            itemKey: r.itemKey,
-            seasonNumber: r.seasonNumber,
-            mediaType: r.mediaType,
-            playCount: r.playCount,
-            lastPlayedAt: r.lastPlayedAt,
-            fetchedAt: now,
-          })),
-        );
-        await tx.setting.upsert({ where: { key: statusKey }, create: { key: statusKey, value: statusValue }, update: { value: statusValue } });
-        return true;
-      },
-      { timeout: BATCH_TX_TIMEOUT },
-    );
-    if (!written) return "skipped";
+    const fresh = freshStatus(snapshot, check, now);
+    if (!(await inStorePhase(() => writeSnapshot(source, slug, snapshot.rows, fresh, now)))) return "skipped";
     status = fresh;
   } catch (err) {
     if (signal?.aborted) return "aborted";
-    const prev = await readStatus(source, slug);
-    status = {
-      fetchedAt: prev?.fetchedAt ?? null,
-      attemptedAt: now.toISOString(),
-      ok: false,
-      entries: prev?.entries ?? 0,
-      matched: prev?.matched ?? 0,
-      samples: prev?.samples ?? 0,
-      agreed: prev?.agreed ?? 0,
-      error: failureText(err),
-      // The previous snapshot's rows are kept, so its facts are too.
-      truncated: prev?.truncated ?? false,
-      episodeRecords: prev?.episodeRecords ?? 0,
-      unplacedEpisodes: prev?.unplacedEpisodes ?? 0,
-    };
+    failure = err;
+    status = await failedStatus(source, slug, err, now);
     await writeStatus(source, slug, status);
   }
   const result = resultOf(source, slug, status, now);
-  logHealth(source, slug, result, status);
+  logHealth(source, slug, result, status, failure);
   return result;
 }
 

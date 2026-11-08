@@ -1,4 +1,4 @@
-// On-behalf request status line — the bulk route answers 2xx with `created: 0`
+// On-behalf request status line — the bulk pipeline answers 2xx with `created: 0`
 // for outcomes that are NEITHER "already requested" NOR "already available":
 // `no-permission` (target user lacks the instance grant), `rating-blocked`,
 // `blacklisted` and `error`. request-button.tsx used to read only `created`
@@ -9,8 +9,9 @@
 // two pure declarations are lifted out of the file with the TypeScript
 // compiler (the classic TS 6 in the tree, same as client-render-purity),
 // transpiled and imported from a data: URL — the REAL helper is executed, not
-// a copy of it. The `ItemResult` union is lifted from the bulk route the same
-// way so the map can never silently fall behind a new outcome.
+// a copy of it. The `ItemResult` union is lifted from the bulk pipeline
+// (src/lib/request-bulk.ts) the same way so the map can never silently fall
+// behind a new outcome.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -121,48 +122,69 @@ test("older server without `results` falls back to the created-based line", () =
   assert.equal(onBehalfMessage("some-future-outcome", 1), CREATED);
 });
 
+// A function declared anywhere in the module (a hook or a subcomponent).
+function declText(name: string): string {
+  let found: string | null = null;
+  const visit = (node: ts.Node) => {
+    if (found) return;
+    if ((ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)) && node.name?.text === name) {
+      found = node.getText(componentSf);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(componentSf);
+  assert.ok(found, `${name} not found in request-button.tsx`);
+  return found;
+}
+
 test("submitOnBehalf actually reads results[0].result off the bulk response", () => {
-  const fn = componentSf.statements
-    .find((s) => ts.isFunctionDeclaration(s) && s.name?.text === "RequestButton")
-    ?.getText(componentSf);
-  assert.ok(fn);
+  const fn = declText("submitOnBehalf");
   assert.match(fn, /onBehalfMessage\(data\.results\?\.\[0\]\?\.result, data\.created\)/);
   assert.doesNotMatch(fn, /data\.created \? "Requested for user/);
 });
 
-// ── the two pickers' loads ───────────────────────────────────────────────────
-function innerFnText(name: string): string {
-  const fn = componentSf.statements.find((s) => ts.isFunctionDeclaration(s) && s.name?.text === "RequestButton");
-  assert.ok(fn && ts.isFunctionDeclaration(fn) && fn.body);
-  const inner = fn.body.statements.find((s) => ts.isFunctionDeclaration(s) && s.name?.text === name);
-  assert.ok(inner, `${name} not found inside RequestButton`);
-  return inner.getText(componentSf);
-}
+test("a request filed for a user refreshes the page and clears the pick, so it isn't sent twice", () => {
+  const fn = declText("submitOnBehalf");
+  assert.match(fn, /\{ ifBusy: "skip" \}/, "a second click while the first is in flight sends nothing");
+  const success = fn.slice(fn.indexOf("if (!failed) {"));
+  assert.match(success, /setObUserId\(""\)/);
+  assert.match(success, /router\.refresh\(\)/);
+});
 
+// ── the two pickers' loads ───────────────────────────────────────────────────
 test("loadProfiles sends one live arr read at a time and records a failure", () => {
   // Request → Cancel → Request before the first answer used to fire a second
   // rate-limited Radarr/Sonarr read, and a failure was swallowed silently.
-  const body = innerFnText("loadProfiles");
+  const body = declText("loadProfiles");
   assert.match(body, /profilesState === "loading"\) return;/);
-  assert.ok(body.indexOf('setProfilesState("loading")') < body.indexOf("fetch("), "marked in flight before the fetch");
-  assert.match(body, /\.catch\(\(\) => setProfilesState\("error"\)\)/);
-  assert.match(body, /if \(!r\.ok\) throw/, "a non-ok answer is a failure, not an empty picker");
-  // The failure is shown where the picker would be.
-  assert.match(componentSource, /profilesState === "error" \? \([\s\S]{0,200}request\.profilesLoadFailed/);
+  assert.ok(body.indexOf('setProfilesState("loading")') < body.indexOf("fetchJson("), "marked in flight before the fetch");
+  // A non-ok answer, or one without the list (the schema), is a failure, not an empty picker.
+  assert.match(body, /if \(!res\.ok\) \{\s*setProfilesState\("error"\);/);
+  assert.match(body, /schema: ProfilesAnswer/);
+  assert.match(componentSource, /const ProfilesAnswer = v\.object\(\{\s*qualityProfiles: v\.array\(/);
+  // The failure is shown where the picker would be, and a load in flight shows a waiting picker.
+  assert.match(componentSource, /profilesState === "error"\) \{[\s\S]{0,300}request\.profilesLoadFailed/);
+  assert.match(componentSource, /profilesState === "loading"\) \{[\s\S]{0,300}request\.loadingProfiles/);
 });
 
 test("openOnBehalf fetches the user list once — an EMPTY answer is kept, not refetched", () => {
-  const body = innerFnText("openOnBehalf");
+  const body = declText("openOnBehalf");
   assert.match(body, /if \(obUsersState === "idle" \|\| obUsersState === "error"\) \{/);
   assert.doesNotMatch(body, /obUsers\.length === 0/, "an empty list must not trigger a refetch on every open");
   assert.match(body, /setObUsersState\("loaded"\)/);
   assert.match(componentSource, /obUsersState === "loaded" && obUsers\.length === 0 \? \([\s\S]{0,200}request\.noEligibleUsers/);
 });
 
+test("the note field stops at the route's own limit", () => {
+  assert.match(componentSource, /\.slice\(0, REQUEST_NOTE_MAX\)/);
+  assert.doesNotMatch(componentSource, /\.slice\(0, 500\)/);
+});
+
 test("the new picker hints exist in every locale", () => {
   for (const loc of ["en", "es", "fr", "de", "pt", "it", "zh"]) {
     const catalog = JSON.parse(readFileSync(resolve(ROOT, `src/lib/i18n/messages/${loc}/request.json`), "utf8")) as Record<string, string>;
-    for (const key of ["request.profilesLoadFailed", "request.noEligibleUsers", "request.collection.doneSkipped"]) {
+    for (const key of ["request.profilesLoadFailed", "request.loadingProfiles", "request.noEligibleUsers", "request.collection.doneSkipped"]) {
       assert.ok(Object.hasOwn(catalog, key), `${loc}: ${key}`);
     }
   }

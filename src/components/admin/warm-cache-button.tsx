@@ -1,58 +1,94 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Loader2, Flame } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { isNoAnswer, jobAnswerError } from "@/lib/client/library-sync";
+import { runReplaceFileJob } from "@/lib/client/replace-file-job";
+import { check, v } from "@/lib/validate";
+import { useAsyncAction } from "@/hooks/use-async-action";
+import { useDelayed } from "@/hooks/use-delayed";
 import { useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 
 interface WarmCacheButtonProps {
   uncachedCount: number;
 }
 
-// Admin control that POSTs to /api/admin/library-warm to fetch TMDB metadata
-// for uncached library items; shows "Cache warm" when nothing is uncached.
+// "partial": the run finished but some TMDB fetches failed — a warning, not a
+// success, or a run where most fetches failed reads as a clean one. "pending":
+// no answer came yet; the warm may still be running on the server.
+type Status = "idle" | "loading" | "done" | "partial" | "pending" | "error";
+
+// A cold warm of a large library outlasts a reverse proxy's hold, so it runs
+// as a background job polled every 3 s, for up to 30 minutes (guardrail 37a);
+// running out is "no answer", never a failure.
+const WARM_POLL_MS = 3_000;
+const WARM_MAX_POLLS = 600;
+// How long a finished run's line stays before the button goes back to idle.
+const RESULT_MS = 8_000;
+
+// The warm's counts (POST /api/admin/library-warm); a field it left out counts 0.
+const WarmCounts = v.object({
+  fetched: v.optional(v.number()),
+  skipped: v.optional(v.number()),
+  failed: v.optional(v.number()),
+});
+
+function warmOutcome(answer: { status: number; data: unknown }, t: Translator): { status: Status; text: string } {
+  if (isNoAnswer(answer)) return { status: "pending", text: t("adminManage.library.fill.warmNoAnswer") };
+  const error = jobAnswerError(answer);
+  if (answer.status < 200 || answer.status >= 300 || error) {
+    return { status: "error", text: error ?? t("adminManage.users.error.requestFailed", { status: answer.status }) };
+  }
+  const read = check(WarmCounts, answer.data);
+  const counts: { fetched?: number; skipped?: number; failed?: number } = read.ok ? read.value : {};
+  const { fetched = 0, skipped = 0, failed = 0 } = counts;
+  return failed > 0
+    ? { status: "partial", text: t("adminManage.library.btn.warmResultFailed", { fetched, skipped, failed }) }
+    : { status: "done", text: t("adminManage.library.btn.warmResult", { fetched, skipped }) };
+}
+
+// Admin control that warms the TMDB metadata of uncached library items
+// (/api/admin/library-warm); shows "Cache warm" when nothing is uncached.
 export function WarmCacheButton({ uncachedCount }: WarmCacheButtonProps) {
   const t = useT();
   const router = useRouter();
-  // "partial": the run finished but some TMDB fetches failed — a warning, not
-  // a success, or a run where most fetches failed reads as a clean one.
-  const [status, setStatus] = useState<"idle" | "loading" | "done" | "partial" | "error">("idle");
-  const [result, setResult] = useState<string | null>(null);
-  // Cancellable end-of-run reset (same shape as the sibling sync buttons): a
-  // prior run's timer landing mid-run flipped "loading" back to "idle", so the
-  // spinner vanished and the button re-enabled while the warm was still going.
-  const resetTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  useEffect(() => () => clearTimeout(resetTimer.current), []);
+  const action = useAsyncAction();
+  const [outcome, setOutcome] = useState<{ status: Status; text: string } | null>(null);
+  // The end-of-run reset is one cancellable slot (cleared on unmount): a prior
+  // run's timer landing mid-run flipped the button back to idle while the warm
+  // was still going.
+  const later = useDelayed();
+  const loading = action.busy("warm");
+  const status: Status = loading ? "loading" : outcome?.status ?? "idle";
 
   async function handleWarm() {
-    clearTimeout(resetTimer.current);
-    setStatus("loading");
-    setResult(null);
+    later.cancel();
+    setOutcome(null);
+    let answer: { status: number; data: unknown } | null | undefined;
     try {
-      const res = await fetch(withBasePath("/api/admin/library-warm"), { method: "POST" });
-      const data = (await res.json().catch(() => null)) as { fetched?: number; skipped?: number; total?: number; failed?: number; error?: string } | null;
-      if (!res.ok || data?.error) {
-        setStatus("error");
-        setResult(data?.error ?? t("adminManage.users.error.requestFailed", { status: res.status }));
-      } else {
-        const failed = data?.failed ?? 0;
-        setStatus(failed > 0 ? "partial" : "done");
-        setResult(failed > 0
-          ? t("adminManage.library.btn.warmResultFailed", { fetched: data?.fetched ?? 0, skipped: data?.skipped ?? 0, failed })
-          : t("adminManage.library.btn.warmResult", { fetched: data?.fetched ?? 0, skipped: data?.skipped ?? 0 }));
-        router.refresh();
-      }
+      answer = await action.run("warm", (signal) =>
+        runReplaceFileJob(fetch, withBasePath("/api/admin/library-warm"), {}, {
+          intervalMs: WARM_POLL_MS,
+          maxPolls: WARM_MAX_POLLS,
+          // Leaving the page stops the polls (the warm itself goes on).
+          isAlive: () => !signal.aborted,
+        }), { ifBusy: "skip" });
     } catch {
-      setStatus("error");
-      setResult(t("adminManage.library.btn.requestFailed"));
+      // The start request itself got no answer: nothing was started.
+      setOutcome({ status: "error", text: t("adminManage.library.btn.requestFailed") });
+      later(() => setOutcome(null), RESULT_MS);
+      return;
     }
-    clearTimeout(resetTimer.current);
-    // Clear the result WITH the status (as the sibling sync buttons do) — a
-    // "Fetched 120, skipped 4" line otherwise stayed on screen indefinitely in
-    // neutral grey once the button had returned to idle.
-    resetTimer.current = setTimeout(() => { setStatus("idle"); setResult(null); }, 8000);
+    if (!answer) return;
+    const next = warmOutcome(answer, t);
+    setOutcome(next);
+    if (next.status === "done" || next.status === "partial") router.refresh();
+    // The line clears WITH the status, as on the sibling sync buttons.
+    later(() => setOutcome(null), RESULT_MS);
   }
 
   if (uncachedCount === 0 && status === "idle") {
@@ -64,16 +100,17 @@ export function WarmCacheButton({ uncachedCount }: WarmCacheButtonProps) {
     );
   }
 
+  const result = loading ? null : outcome?.text ?? null;
   return (
     <div className="flex items-center gap-3">
       <Button
         variant="outline"
         size="sm"
-        onClick={handleWarm}
-        disabled={status === "loading"}
+        onClick={() => void handleWarm()}
+        disabled={loading}
         className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
       >
-        {status === "loading"
+        {loading
           ? <><Loader2 className="w-4 h-4 animate-spin" />{t("adminManage.library.btn.warming")}</>
           : <><Flame className="w-4 h-4" />{uncachedCount > 0 ? t("adminManage.library.btn.warmCacheCount", { count: uncachedCount }) : t("adminManage.library.btn.warmCache")}</>
         }

@@ -116,6 +116,7 @@ const { NextRequest } = await import("next/server");
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
+const { NEVER_EXPIRES_AT_SEC } = await import("../src/lib/session-lifetime.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { hashPassword, verifyPassword } = await import("../src/lib/password-hash.ts");
 const { normalizeEmail } = await import("../src/lib/email-normalize.ts");
@@ -207,10 +208,13 @@ const userModel = {
 };
 shadowPrismaModel(prisma, "user", userModel);
 
+// When a session's row was created (its sign-in) — the SSO step-up's recency
+// check reads it. Absent ⇒ just now.
+const sessionCreatedAt = new Map<string, Date>();
 const authSessionModel = {
   findUnique: async (args: { where: { sessionId: string } }) =>
     sessionRows.has(args.where.sessionId)
-      ? { id: `row-${args.where.sessionId}`, sessionId: args.where.sessionId, createdAt: new Date() }
+      ? { id: `row-${args.where.sessionId}`, sessionId: args.where.sessionId, createdAt: sessionCreatedAt.get(args.where.sessionId) ?? new Date() }
       : null,
   update: async () => ({}), // lastSeenAt fire-and-forget touch — no-op, unrecorded
   deleteMany: async (args: unknown) => {
@@ -312,6 +316,13 @@ shadowPrismaModel(prisma, "mediaServerUser", mediaServerUserModel);
 const txObj = {
   user: userModel,
   authSession: authSessionModel,
+  // The notification-email route's pending-link replace (delete + create) runs
+  // in a transaction behind a row lock on the user (`txRowLocks`).
+  verificationToken: verificationTokenModel,
+  $queryRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    txRowLocks.push({ sql: strings.join("?"), values });
+    return [];
+  },
   account: accountModel,
   pushSubscription: pushSubscriptionModel,
   discordLinkToken: discordLinkTokenModel,
@@ -331,6 +342,7 @@ const txObj = {
 // a concurrent write "inside" the verifyPassword window.
 let beforeTxCallback: (() => void) | null = null;
 const txLocks: string[] = [];
+const txRowLocks: Array<{ sql: string; values: unknown[] }> = [];
 let onTxLock: ((sql: string) => void) | null = null;
 let txCasRows = 1;
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
@@ -358,6 +370,8 @@ async function mintSession(opts: {
   passwordHash?: string | null;
   notificationEmail?: string | null;
   jellyfinUserId?: string | null;
+  // A native (iOS) session: the never-reached deadline (guardrail 6c).
+  native?: boolean;
 } = {}): Promise<{ userId: string; sessionId: string; token: string }> {
   seq++;
   const userId = `user-${seq}`;
@@ -394,7 +408,7 @@ async function mintSession(opts: {
       permissions: "0",
       provider: opts.provider ?? "credentials",
       sessionId,
-      expiresAt: iat + 86_400,
+      expiresAt: opts.native ? NEVER_EXPIRES_AT_SEC : iat + 86_400,
     },
     { expiresInSeconds: 7_200, iat },
   );
@@ -480,6 +494,7 @@ beforeEach(() => {
   ops.length = 0;
   txCalls = 0;
   txLocks.length = 0;
+  txRowLocks.length = 0;
   onTxLock = null;
   txCasRows = 1;
   fetchCalls.length = 0;
@@ -488,6 +503,7 @@ beforeEach(() => {
   settings.clear();
   usersById.clear();
   sessionRows.clear();
+  sessionCreatedAt.clear();
   calendarHashes.clear();
   accountDeleteThrows = false;
   verifyTokens = [];
@@ -755,6 +771,24 @@ test("notification-email happy path stores a PENDING (unverified) hashed token a
   assert.deepEqual(errors, []);
 });
 
+test("notification-email replaces the pending link in ONE transaction behind a lock on the user's row, so two racing requests leave one live link", async () => {
+  settings.set("enableUserEmails", "true");
+  settings.set("emailBackend", "resend");
+  settings.set("resendApiKey", "re_test_key");
+  settings.set("resendFrom", "Summonarr <noreply@example.com>");
+  fetchImpl = () => new Response(JSON.stringify({ id: "email_123" }), { status: 200 });
+  const { userId, token } = await mintSession({ provider: "jellyfin", passwordHash: null });
+  assert.equal((await postNotifEmail(token, { email: "notify@example.com" })).status, 200);
+  const del = opsOf("verificationToken.deleteMany");
+  const created = opsOf("verificationToken.create");
+  assert.equal(del.length, 1);
+  assert.equal(created.length, 1);
+  assert.ok(del[0].inTx && created[0].inTx, "the clear and the store commit together");
+  assert.equal(txRowLocks.length, 1, "the transaction locks the user's row first");
+  assert.match(txRowLocks[0].sql, /FROM "User" WHERE "id" = \? FOR UPDATE/);
+  assert.deepEqual(txRowLocks[0].values, [userId]);
+});
+
 test("notification-email: the pending token is persisted even when the send fails (502) — store precedes send", async () => {
   settings.set("enableUserEmails", "true");
   settings.set("emailBackend", "resend");
@@ -870,6 +904,39 @@ test("self-delete SKIPS the password step-up for an SSO account (session is the 
   assert.deepEqual(await res.json(), { ok: true });
   assert.equal(txCalls, 1, "an SSO delete still runs the deactivation");
   assert.deepEqual(Object.keys(passwordUpdateData()).sort(), ["deactivatedAt", "sessionsRevokedAt"]);
+});
+
+test("self-delete on an SSO account from a WEB session needs a RECENT sign-in: a stale session is refused 401 session-too-old and disables nothing", async () => {
+  const { sessionId, token } = await mintSession({ provider: "jellyfin", passwordHash: null });
+  sessionCreatedAt.set(sessionId, new Date(Date.now() - 10 * 60 * 1000)); // signed in 10 minutes ago
+  const res = await deleteProfile(token);
+  assert.equal(res.status, 401);
+  const body = (await res.json()) as { error: string; message: string };
+  assert.equal(body.error, "session-too-old");
+  assert.match(body.message, /sign in again/);
+  assert.equal(txCalls, 0, "a stale session must never open the deactivation tx");
+  assert.equal(opsOf("user.update").length, 0);
+  assert.equal(opsOf("authSession.deleteMany").length, 0);
+});
+
+test("self-delete on an SSO account from a NATIVE session needs no recent sign-in (the shipped app has no prompt)", async () => {
+  const { sessionId, token } = await mintSession({ provider: "plex", passwordHash: null, native: true });
+  sessionCreatedAt.set(sessionId, new Date(Date.now() - 30 * 24 * 3600 * 1000));
+  // The app's transport: a never-expiring token is a bearer token (guardrail 6h).
+  const req = new NextRequest("http://localhost:3000/api/profile", {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}`, "x-summonarr-client": "ios" },
+  });
+  const res = await inScope(() => profileDELETE(req, undefined));
+  assert.equal(res.status, 200);
+  assert.equal(txCalls, 1);
+});
+
+test("self-delete attempts on an SSO account spend the same per-account budget as a password account's", async () => {
+  const { sessionId, token } = await mintSession({ provider: "jellyfin", passwordHash: null });
+  sessionCreatedAt.set(sessionId, new Date(Date.now() - 10 * 60 * 1000));
+  for (let i = 0; i < 5; i++) assert.equal((await deleteProfile(token)).status, 401, `attempt ${i + 1}`);
+  assert.equal((await deleteProfile(token)).status, 429);
 });
 
 test("self-delete racing an admin removal writes NO self-delete audit row when the in-tx re-read finds the row already disabled", async () => {

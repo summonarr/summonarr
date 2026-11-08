@@ -185,6 +185,22 @@ test("a root folder is found by the longest prefix, on either separator", () => 
   assert.equal(rootFolderFor("/database/x", ["/data"]), null, "a prefix must end at a separator");
 });
 
+test("a root folder compares as the storage tab's disks do: a Windows drive in any case, either separator; a move needs another folder", async () => {
+  const { rootFolderMoving, parseTagIds } = await import("../src/lib/arr-title.ts");
+  assert.equal(rootFolderFor("c:\\Movies\\Heat (1995)", ["C:\\Movies"]), "C:\\Movies", "a Windows root matched in the other case");
+  assert.equal(rootFolderFor("C:/Movies/Heat", ["C:\\Movies\\"]), "C:\\Movies\\", "and with the other separator");
+  assert.equal(rootFolderFor("/Data/movies/x", ["/data/movies"]), null, "a Linux path stays case-sensitive");
+  assert.equal(rootFolderFor("/anything", ["/"]), null, "a root of / names no path");
+  assert.equal(rootFolderMoving({ rootFolderPath: "c:/movies/" }, { rootFolderPath: "C:\\Movies" }), false);
+  assert.equal(rootFolderMoving({ rootFolderPath: "/tv/" }, { rootFolderPath: "/tv" }), false);
+  assert.equal(rootFolderMoving({ rootFolderPath: "/TV" }, { rootFolderPath: "/tv" }), true);
+  assert.equal(rootFolderMoving({ rootFolderPath: "/tv" }, { rootFolderPath: null }), true);
+  assert.deepEqual(parseTagIds([3, 1, 3], 5), [3, 1]);
+  assert.equal(parseTagIds([1, 0], 5), null);
+  assert.equal(parseTagIds([1, 2, 3], 2), null);
+  assert.equal(parseTagIds("1", 5), null);
+});
+
 test("a series' totals exclude specials; a v3 series without monitorNewItems reads null", () => {
   const t = projectTitle("sonarr", "", {
     id: 5, title: "X", seasons: [

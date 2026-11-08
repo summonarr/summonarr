@@ -59,7 +59,8 @@ export function DisableLocalLoginToggle({
           <Button type="button" variant="destructive" onClick={() => void save(true)}>
             {t("settings.form.disableLocalLogin.title")}
           </Button>
-          <Button type="button" variant="ghost" onClick={() => setConfirming(false)}>
+          {/* The switch is disabled while this asks, so focus moves here. */}
+          <Button type="button" variant="ghost" autoFocus onClick={() => setConfirming(false)}>
             {t("settings.form.common.cancel")}
           </Button>
         </div>

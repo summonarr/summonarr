@@ -86,8 +86,8 @@ type SqlArg = { strings?: readonly string[]; values?: unknown[] };
 const sqlText = (q: SqlArg) => (q.strings ?? []).join("?");
 
 const fakeTx = {
-  $executeRawUnsafe: async (sql: string, ...params: unknown[]) => {
-    ops.push({ op: "$executeRawUnsafe", args: { sql, params } });
+  $executeRaw: async (strings: readonly string[], ...values: unknown[]) => {
+    ops.push({ op: "$executeRaw", args: { sql: strings.join("?"), values } });
     return 0;
   },
   // The web row's current link, read FOR UPDATE.
@@ -212,7 +212,7 @@ beforeEach(async () => {
 test("no account owns the discordId → plain link: lock, lookup, the web row's current link (locked), ONE user.update, migrated 0", async () => {
   const result = await mergeDiscordIntoWebAccount(WEB, DISCORD_ID, CLAIMED);
   assert.deepEqual(result, { migrated: 0 });
-  assert.deepEqual(opNames(), ["$executeRawUnsafe", "user.findUnique", "$queryRaw", "user.update"]);
+  assert.deepEqual(opNames(), ["$executeRaw", "user.findUnique", "$queryRaw", "user.update"]);
   assert.deepEqual(opArgs("user.update"), {
     where: { id: WEB },
     data: { discordId: DISCORD_ID },
@@ -229,7 +229,7 @@ test("re-linking a discordId the web user already owns is the plain link, not a 
   webRow = { id: WEB, discordId: DISCORD_ID };
   const result = await mergeDiscordIntoWebAccount(WEB, DISCORD_ID, CLAIMED);
   assert.deepEqual(result, { migrated: 0 });
-  assert.deepEqual(opNames(), ["$executeRawUnsafe", "user.findUnique", "$queryRaw", "user.update"]);
+  assert.deepEqual(opNames(), ["$executeRaw", "user.findUnique", "$queryRaw", "user.update"]);
   await settle();
   assert.deepEqual(roleDeletes(), [], "the same member is re-linked — its roles stay");
 });
@@ -281,25 +281,16 @@ test("a discordId owned by ANOTHER real web account refuses the merge before any
   );
   // Lock + lookup only — the throw precedes every mutation, so the real
   // transaction rolls back having changed nothing.
-  assert.deepEqual(opNames(), ["$executeRawUnsafe", "user.findUnique"]);
+  assert.deepEqual(opNames(), ["$executeRaw", "user.findUnique"]);
 });
 
-test("the double-click guard: per-discordUserId advisory lock, first 7 id bytes as a bigint, taken FIRST", async () => {
+test("the double-click guard: a per-discordUserId transaction lock, hashed in the two-key space, taken FIRST", async () => {
   await mergeDiscordIntoWebAccount(WEB, DISCORD_ID, CLAIMED);
-  assert.equal(opNames()[0], "$executeRawUnsafe");
-  // "1234567" (the first 7 ASCII bytes of the id) → hex 31323334353637.
-  assert.deepEqual(opArgs("$executeRawUnsafe"), {
-    sql: "SELECT pg_advisory_xact_lock($1::bigint)",
-    params: [0x31323334353637n],
+  assert.equal(opNames()[0], "$executeRaw");
+  assert.deepEqual(opArgs("$executeRaw"), {
+    sql: "SELECT pg_advisory_xact_lock(4631, hashtext(?))",
+    values: [DISCORD_ID],
   });
-
-  // A short id (under 7 bytes) just uses the bytes it has instead of throwing.
-  // 7 bytes = 56 bits, which always fits Postgres's signed 64-bit BIGINT.
-  ops.length = 0;
-  await mergeDiscordIntoWebAccount(WEB, "ab", CLAIMED);
-  const { params } = opArgs("$executeRawUnsafe") as { params: bigint[] };
-  assert.deepEqual(params, [0x6162n]);
-  assert.ok(0x31323334353637n < 2n ** 63n);
 });
 
 test("merge: conflicting requests (same tmdbId+mediaType+arrInstance) die, the rest migrate, migrated counts the moved", async () => {
@@ -405,7 +396,7 @@ test("the web row's current link is read FOR UPDATE, after the claim and the ref
   const read = ops.find((o) => o.op === "$queryRaw")?.args as { sql: string; values: unknown[] };
   assert.match(read.sql, /SELECT "discordId" FROM "User" WHERE "id" = \? FOR UPDATE/);
   assert.deepEqual(read.values, [WEB]);
-  assert.deepEqual(opNames(), ["$executeRawUnsafe", "claimCode", "user.findUnique", "$queryRaw", "user.update"]);
+  assert.deepEqual(opNames(), ["$executeRaw", "claimCode", "user.findUnique", "$queryRaw", "user.update"]);
 });
 
 test("REGRESSION PIN: the same title on a DIFFERENT arr instance is not a conflict", async () => {
@@ -547,7 +538,7 @@ test("PIN: the code claim runs INSIDE the merge transaction, on its tx, right af
     },
   });
   assert.equal(claimTx, fakeTx, "the claim must run on the transaction's own client");
-  assert.deepEqual(opNames().slice(0, 2), ["$executeRawUnsafe", "claimCode"], "lock first, then the claim, then the merge");
+  assert.deepEqual(opNames().slice(0, 2), ["$executeRaw", "claimCode"], "lock first, then the claim, then the merge");
 });
 
 test("PIN: a LOST claim throws DiscordCodeAlreadyUsedError and links, audits and revokes nothing", async () => {
@@ -558,7 +549,7 @@ test("PIN: a LOST claim throws DiscordCodeAlreadyUsedError and links, audits and
     (err: unknown) => err instanceof DiscordCodeAlreadyUsedError,
   );
   await settle();
-  const writes = opNames().filter((op) => !op.endsWith(".findUnique") && !op.endsWith(".findMany") && op !== "$executeRawUnsafe");
+  const writes = opNames().filter((op) => !op.endsWith(".findUnique") && !op.endsWith(".findMany") && op !== "$executeRaw");
   assert.deepEqual(writes, [], "no write may follow a lost claim");
   assert.equal(ops.filter((o) => o.op === "auditLog.create").length, 0, "nothing was linked, so nothing is audited");
   assert.deepEqual(roleDeletes(), [], "and no superseded member is revoked");

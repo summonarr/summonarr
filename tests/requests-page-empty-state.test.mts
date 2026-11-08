@@ -50,7 +50,10 @@ test("requests page: a past-the-end page offers a link back to page 1", () => {
   // The CTA is built from the same href helper the pager uses so status/sort/q
   // filters survive the jump back — now through EmptyState's cta slot, like
   // /votes and /issues, instead of an inline link in the description.
-  assert.match(src, /href: pageHref\(1\)/);
+  // The page hands the helper's page-1 href to its empty-state component,
+  // which puts it in the CTA.
+  assert.match(src, /firstPageHref=\{pageHref\(1\)\}/);
+  assert.match(src, /cta=\{\{ href: firstPageHref,/);
   assertCopy("requests.empty.backToFirst", /Back to page 1/);
 });
 

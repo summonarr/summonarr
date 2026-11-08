@@ -376,7 +376,7 @@ test("C112: no source builds a series-only /api/v3/release query", () => {
   assert.ok(literal > 0, "found the issue/request season query");
 
   const generic = files.flatMap((f) => [...f.code.matchAll(/\/api\/v3\/release\?\$\{/g)].map((m) => ({ path: f.path, index: m.index })));
-  const arrPath = join(srcDir, "lib", "arr.ts");
+  const arrPath = join(srcDir, "lib", "arr-releases.ts");
   const [start, end] = functionBodyRange(readFileSync(arrPath, "utf8"), "export async function searchReleasesByArrId(");
   assert.deepEqual(generic.map((g) => g.path === arrPath && g.index >= start && g.index < end), [true], "one generic builder, inside searchReleasesByArrId");
 
@@ -472,8 +472,20 @@ test("structural (C024): the Fix file window's release list searches through the
   assert.match(functionBody(src, "function close("), /stopReleaseSearch\(\);\s*onClose\(\);/, "closing supersedes the search");
   assert.match(functionBody(src, "function backToOptions("), /stopReleaseSearch\(\)/, "Back supersedes the search");
   assert.match(functionBody(src, "function pickInstance("), /stopReleaseSearch\(\)/, "an instance switch supersedes the search");
-  // No close while a write runs (the delete, the search, the grab).
-  assert.match(src, /onOpenChange=\{\(o\) => \{ if \(!o && !working\) close\(\); \}\}/);
+  // A close is always honoured, a write running or not: the server finishes
+  // the write (the delete is a background job), and a replace's polls run for
+  // up to ten minutes. Closing stops the search (above) and drops the grab's wait.
+  assert.match(src, /onOpenChange=\{\(o\) => \{ if \(!o\) close\(\); \}\}/);
+  assert.doesNotMatch(src, /!o && !working/, "no close refused while working");
+  const dialog = functionBody(src, "function FixFileDialog(");
+  const closeTag = dialog.slice(dialog.indexOf("<DialogClose"), dialog.indexOf("</DialogClose>"));
+  assert.doesNotMatch(closeTag, /disabled=/, "the X is never dead");
+  assert.match(closeTag, /aria-label=\{closeLabel\}/);
+  assert.match(dialog, /const closeLabel = working \? t\("adminQueue\.issueActions\.closeWhileWorking"\) : t\("adminQueue\.common\.close"\);/, "and says the write keeps running");
+  // The grab's wait is bounded and dropped with the window.
+  const grab = functionBody(src, "async function grabRelease(");
+  assert.match(grab, /await writes\.run\("grab", \(signal\) =>/);
+  assert.match(grab, /signal,\s*timeoutMs: GRAB_TIMEOUT_MS,/);
 });
 
 test("structural (C112): the release list is offered only for a searchable TV scope", () => {
@@ -503,5 +515,5 @@ test("structural: in the Fix file window the filter and the rejected toggle neve
   assert.match(picker, /onGrab\(selectedVisible\)/, "Grab sends the visible selection, nothing else");
   // The handle goes back as the server issued it (guardrail 5e).
   const grab = functionBody(src, "async function grabRelease(");
-  assert.match(grab, /body: JSON\.stringify\(\{ guid: rel\.guid, indexerId: rel\.indexerId, instance \}\)/);
+  assert.match(grab, /init: jsonInit\("POST", \{ guid: rel\.guid, indexerId: rel\.indexerId, instance \}\)/);
 });

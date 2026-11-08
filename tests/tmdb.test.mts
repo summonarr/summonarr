@@ -102,7 +102,17 @@ const {
   getMovieSuggestions,
   discoverMoviesPage,
   discoverTVPage,
+  getSuggestionsResult,
+  isTmdbNotFound,
+  TmdbHttpError,
+  verifyTmdbMedia,
+  verifyTmdbMediaResult,
+  getPopularMoviesPage,
+  getMovieGenres,
+  getWatchProviders,
+  __resetTmdbBackoffsForTests,
 } = await import("../src/lib/tmdb.ts");
+const { upcomingCutoffDate } = await import("../src/lib/format-release-date.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
 type CacheRow = { key: string; data: string; cachedAt: Date; expiresAt: Date };
@@ -213,6 +223,7 @@ const HOUR_MS = 3600 * 1000;
 
 beforeEach(() => {
   process.env.TMDB_READ_TOKEN = "test-tmdb-read-token";
+  __resetTmdbBackoffsForTests();
   cacheRows.clear();
   cacheUpserts.length = 0;
   cacheDeletes.length = 0;
@@ -455,23 +466,36 @@ test("trending: a 200 page with no `results` array degrades to an empty page —
 
 // settleLimit swallows every page's rejection, so a revoked token read as an
 // empty list with no server-side trace. One warning per change of reason.
-test("trending: a fan-out where EVERY page fails warns once per reason, and again after a recovery", async () => {
+test("trending: a fan-out where EVERY page fails warns once per reason, backs off for a minute, and warns again after a recovery", async () => {
   const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
   resetLogDedup();
-  respond = () => jsonResponse({ status_message: "Invalid API key" }, 401);
-  assert.deepEqual(await getTrending(), []);
-  const failed = warns.filter((w) => w.includes("[tmdb] every page of /trending/all/week failed"));
-  assert.equal(failed.length, 1, "one warning for the outage");
-  await getTrending();
-  assert.equal(warns.filter((w) => w.includes("every page of /trending/all/week")).length, 1, "the unchanged outage is not repeated");
-  // One page answering clears it, so the next outage is reported again.
-  respond = (url) => Number(url.searchParams.get("page")) === 1
-    ? jsonResponse(pageOf([{ ...rawMovie(51, "Back"), media_type: "movie" }], 5))
-    : jsonResponse({ status_message: "Invalid API key" }, 401);
-  await getTrending();
-  respond = () => jsonResponse({ status_message: "Invalid API key" }, 401);
-  await getTrending();
-  assert.equal(warns.filter((w) => w.includes("every page of /trending/all/week")).length, 2);
+  mock.timers.enable({ apis: ["Date"], now: Date.UTC(2026, 0, 1) });
+  try {
+    respond = () => jsonResponse({ status_message: "Invalid API key" }, 401);
+    assert.deepEqual(await getTrending(), []);
+    const failed = warns.filter((w) => w.includes("[tmdb] every page of /trending/all/week failed"));
+    assert.equal(failed.length, 1, "one warning for the outage");
+    // Inside the backoff the list is not asked for at all: an outage used to
+    // cost every render the whole fan-out again.
+    fetchCalls.length = 0;
+    assert.deepEqual(await getTrending(), []);
+    assert.equal(fetchCalls.length, 0, "no page is fetched during the backoff");
+    mock.timers.tick(60_000);
+    await getTrending();
+    assert.equal(fetchCalls.length, 5, "the backoff lapses after a minute");
+    assert.equal(warns.filter((w) => w.includes("every page of /trending/all/week")).length, 1, "the unchanged outage is not repeated");
+    // One page answering clears it (and sets no backoff), so the next outage is reported again.
+    mock.timers.tick(60_000);
+    respond = (url) => Number(url.searchParams.get("page")) === 1
+      ? jsonResponse(pageOf([{ ...rawMovie(51, "Back"), media_type: "movie" }], 5))
+      : jsonResponse({ status_message: "Invalid API key" }, 401);
+    await getTrending();
+    respond = () => jsonResponse({ status_message: "Invalid API key" }, 401);
+    await getTrending();
+    assert.equal(warns.filter((w) => w.includes("every page of /trending/all/week")).length, 2);
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test("trending: an all-empty (but fulfilled) fan-out returns [] and caches nothing", async () => {
@@ -503,7 +527,9 @@ test("top-rated movies: 20-page fan-out of /movie/top_rated with the >=200-vote 
 });
 
 test("upcoming TV: 10 discover pages anchored on today; past/dateless rows are filtered client-side", async () => {
-  const before = new Date().toISOString().slice(0, 10);
+  // The query is dated by upcomingCutoffDate(), which lags UTC on purpose, so
+  // the test compares with it rather than with the bare UTC date.
+  const before = upcomingCutoffDate();
   respond = (url) =>
     url.searchParams.get("page") === "1"
       ? jsonResponse(pageOf([
@@ -513,7 +539,7 @@ test("upcoming TV: 10 discover pages anchored on today; past/dateless rows are f
         ], 10))
       : jsonResponse(pageOf([], 10));
   const result = await getUpcomingTV();
-  const after = new Date().toISOString().slice(0, 10);
+  const after = upcomingCutoffDate();
 
   assert.equal(fetchCalls.length, 10);
   const call = fetchCalls[0];
@@ -773,6 +799,100 @@ test("getMovieSuggestions: the cache holds the WIDE list; the limit only slices 
   assert.equal(fetchCalls.length, callsAfterFirst, "the wide read is served from the same cache row");
 });
 
+test("getMovieSuggestions: a PARTIAL answer (one endpoint failed) is served but never cached, and reads as a failure to the graph", async () => {
+  respond = (url) => {
+    if (url.pathname === "/3/movie/12/similar") return jsonResponse({ status_message: "boom" }, 500);
+    if (url.pathname === "/3/movie/12/recommendations") return jsonResponse(pageOf([rawMovie(30, "Rec")]));
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  const served = await getMovieSuggestions(12);
+  assert.deepEqual(served.map((m) => m.id), [30], "the rail still gets what answered");
+  assert.equal(upsertFor("movie:12:suggestions:v3"), undefined, "a partial list is never pinned for the 7-day TTL");
+
+  const result = await getSuggestionsResult("movie", 12);
+  assert.equal(result.kind, "failed", "the graph must not stamp a partial list as the title's suggestions");
+
+  // Both endpoints answering is an answer — an empty one included.
+  respond = (url) => jsonResponse(pageOf(url.pathname.endsWith("/recommendations") ? [rawMovie(31, "Rec")] : []));
+  const ok = await getSuggestionsResult("movie", 13);
+  assert.equal(ok.kind, "ok");
+  assert.deepEqual(ok.kind === "ok" ? ok.value.map((m) => m.id) : null, [31]);
+  respond = () => jsonResponse(pageOf([]));
+  const empty = await getSuggestionsResult("tv", 14);
+  assert.deepEqual(empty, { kind: "ok", value: [] }, "TMDB answering with nothing is a real \"nothing\"");
+});
+
+test("TmdbHttpError: a 404 is recognised by its STATUS, not by a message that happens to read like one", async () => {
+  assert.equal(isTmdbNotFound(new TmdbHttpError("/movie/1", 404)), true);
+  assert.equal(isTmdbNotFound(new TmdbHttpError("/movie/1", 500)), false);
+  assert.equal(isTmdbNotFound(new Error("TMDB /movie/1 failed: 404")), false, "a message alone is not a status");
+  // The message keeps the shape the detail pages match on.
+  assert.match(new TmdbHttpError("/person/9", 404).message, /failed: 404\b/);
+  respond = () => jsonResponse({ status_message: "nope" }, 404);
+  await assert.rejects(() => searchMulti("a missing thing"), (err: unknown) => isTmdbNotFound(err));
+});
+
+test("verifyTmdbMediaResult: TMDB's own 'no such title' is missing; a failure to answer is failed — never 'not found'", async () => {
+  respond = () => jsonResponse({ status_message: "not found" }, 404);
+  assert.deepEqual(await verifyTmdbMediaResult(1, "movie"), { kind: "missing" });
+  respond = () => jsonResponse({ id: 2 });
+  assert.deepEqual(await verifyTmdbMediaResult(2, "movie"), { kind: "missing" }, "a record with no title vouches for nothing");
+  respond = () => jsonResponse({ status_message: "boom" }, 500);
+  const failed = await verifyTmdbMediaResult(3, "tv");
+  assert.equal(failed.kind, "failed");
+  assert.ok(warns.some((w) => w.includes("[tmdb] could not verify a title with TMDB (HTTP 500)")));
+  respond = () => jsonResponse(rawTV(4, "Real Show"));
+  assert.deepEqual(await verifyTmdbMediaResult(4, "tv"), { kind: "ok", value: { title: "Real Show", posterPath: "/p4.jpg", releaseYear: "2019" } });
+  // The legacy reader still collapses both to null for its callers.
+  respond = () => jsonResponse({ status_message: "boom" }, 500);
+  assert.equal(await verifyTmdbMedia(5, "movie"), null);
+});
+
+test("a cached details row whose release-date upgrade failed is not re-fetched on every read for ten minutes", async () => {
+  mock.timers.enable({ apis: ["Date"], now: Date.UTC(2026, 0, 1) });
+  try {
+    // Ratings already settled (no ratings lookup); the home-release fields predate the row.
+    seedCache("movie:880:details", {
+      id: 880, mediaType: "movie", title: "Old Row", overview: "", posterPath: null, backdropPath: null,
+      releaseDate: "2001-01-01", releaseYear: "2001", voteAverage: 7,
+      imdbRating: null, rtAudienceScore: null, mdblistScore: null,
+    }, 7 * 24 * HOUR_MS);
+    respond = () => jsonResponse({ status_message: "boom" }, 500);
+    const first = await getMovieDetails(880);
+    assert.equal(first.title, "Old Row");
+    assert.equal(fetchCalls.length, 1, "one release_dates attempt");
+    await getMovieDetails(880);
+    assert.equal(fetchCalls.length, 1, "the failed upgrade is not retried on the next read");
+    mock.timers.tick(10 * 60 * 1000);
+    respond = () => jsonResponse({ results: [] });
+    await getMovieDetails(880);
+    assert.equal(fetchCalls.length, 2, "it is retried once the backoff lapses");
+    assert.ok(upsertFor("movie:880:details"), "and the upgraded row is written");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a page with no total_pages reads as at least the page served, never NaN; a genres or providers payload missing fields degrades", async () => {
+  respond = () => jsonResponse({ results: [rawMovie(60, "Paged")] });
+  const page = await getPopularMoviesPage(3);
+  assert.equal(page.totalPages, 3);
+  assert.deepEqual(page.items.map((m) => m.id), [60]);
+
+  respond = () => jsonResponse({});
+  assert.deepEqual(await getMovieGenres(), []);
+  assert.equal(upsertFor("genres:movie"), undefined, "an answer with no genres list is not cached");
+
+  respond = () => jsonResponse({ results: [
+    { provider_id: 1, provider_name: "Zed", logo_path: "/z.png" },
+    { provider_id: 2, logo_path: "/nameless.png" },
+    null,
+    { provider_id: 3, provider_name: "Able", logo_path: "/a.png" },
+  ] });
+  const providers = await getWatchProviders("movie", "US");
+  assert.deepEqual(providers.map((p) => p.provider_name), ["Able", "Zed"]);
+});
+
 test("movie details self-heal: a poisoned raw row (no mediaType) is a MISS and is overwritten normalized", async () => {
   // The pre-key-split getMovieReleaseInfo wrote the RAW snake_case TMDB body
   // under movie:<id>:details. Serving it would hand callers a shape with
@@ -1030,6 +1150,7 @@ test("discover TV: movie-only sorts are translated to the TV field (Newest/Oldes
     ["primary_release_date.asc", "first_air_date.asc"],
     ["original_title.asc", "original_name.asc"],
     ["revenue.desc", "popularity.desc"],
+    ["revenue.asc", "popularity.asc"],
     ["vote_average.desc", "vote_average.desc"],
   ];
   for (const [input, expected] of cases) {

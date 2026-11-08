@@ -21,8 +21,18 @@ const RECENT = readFileSync(
   new URL("../src/components/admin/activity-recent-plays.tsx", import.meta.url),
   "utf8",
 );
+// The card's rows and its list loading live beside it (recent-plays/).
+const RECENT_ROW = readFileSync(
+  new URL("../src/components/admin/recent-plays/row.tsx", import.meta.url),
+  "utf8",
+);
+const RECENT_HOOK = readFileSync(
+  new URL("../src/components/admin/recent-plays/use-recent-plays.ts", import.meta.url),
+  "utf8",
+);
+// The play-history table's SQL lives beside the route (src/lib/play-history-list.ts).
 const ROUTE = readFileSync(
-  new URL("../src/app/api/play-history/route.ts", import.meta.url),
+  new URL("../src/lib/play-history-list.ts", import.meta.url),
   "utf8",
 );
 
@@ -42,10 +52,12 @@ test("f69: the recent-plays page-1 seed orders by (startedAt desc, id desc) to m
 });
 
 test("f67: activity-recent-plays uses the shared fmtBitrate, not a private formatter copy", () => {
-  assert.doesNotMatch(RECENT, /function formatBitrate\(/);
-  assert.doesNotMatch(RECENT, /bitrateToKbps/, "no direct bitrate math in the component");
-  assert.match(RECENT, /fmtBitrate,?\s*[\s\S]*?\} from "@\/components\/admin\/activity-ui"/);
-  assert.match(RECENT, /fmtBitrate\(play\.bitrate, play\.source\)/);
+  for (const src of [RECENT, RECENT_ROW, RECENT_HOOK]) {
+    assert.doesNotMatch(src, /function formatBitrate\(/);
+    assert.doesNotMatch(src, /bitrateToKbps/, "no direct bitrate math in the card");
+  }
+  assert.match(RECENT_ROW, /fmtBitrate,?\s*[\s\S]*?\} from "@\/components\/admin\/activity-ui"/);
+  assert.match(RECENT_ROW, /fmtBitrate\(play\.bitrate, play\.source\)/);
 });
 
 // ═══ the activity overview's data reads ═══════════════════════════════════════
@@ -58,9 +70,12 @@ test("the overview tests each Plex admin token for PRESENCE with a key-only read
 });
 
 test("the overview's live-session item lookup is scoped by source, so the [source, sourceItemId, …] index applies", () => {
-  assert.match(PAGE, /where: \{ OR: itemsBySource, tmdbId: \{ not: null \} \}/);
-  assert.match(PAGE, /source: src,\s*sourceItemId: \{ in:/);
-  assert.match(PAGE, /distinct: \["serverInstance", "sourceItemId"\]/, "still per server instance");
+  const LOOKUP = readFileSync(new URL("../src/lib/activity-session-tmdb.ts", import.meta.url), "utf8");
+  assert.match(LOOKUP, /\("source" = \$\{arm\.src\} AND "sourceItemId" IN \(\$\{Prisma\.join\(arm\.ids\)\}\)\)/);
+  assert.match(LOOKUP, /WHERE "tmdbId" IS NOT NULL AND/);
+  // One row per item, not every past play of it, and still per server instance.
+  assert.match(LOOKUP, /SELECT DISTINCT ON \("serverInstance", "sourceItemId"\)/, "still per server instance");
+  assert.match(LOOKUP, /ORDER BY "serverInstance", "sourceItemId", "startedAt" DESC/, "the newest play of each item");
 });
 
 test("the Activity pages resolve posters through the shared lookup — no hand-parsed TmdbCache rows", () => {
@@ -98,7 +113,7 @@ test("the personal views name the statistics zone on their day and hour buckets"
   assert.match(myStats, /<ActivityCalendar data=\{s\.activityCalendar\} today=\{s\.todayIso\} timeZone=\{s\.timeZone\} \/>/);
   // The shared HourHeatmap names the zone at the end of its hour axis, the full
   // name in the title.
-  const ui = readFileSync(new URL("../src/components/admin/activity-ui.tsx", import.meta.url), "utf8");
+  const ui = readFileSync(new URL("../src/components/admin/activity-heatmap.tsx", import.meta.url), "utf8");
   const heatmap = ui.slice(ui.indexOf("export function HourHeatmap("));
   assert.match(heatmap, /const zone = zoneShortLabel\(timeZone\);/);
   assert.match(heatmap, /title=\{t\("adminActivity\.heatmap\.zoneTitle", \{ zone: timeZone \}\)\}[\s\S]{0,400}\{zone\}\s*<\/div>/);
@@ -116,20 +131,22 @@ test("the recent-plays seed and the card's page-N requests share one page size",
   assert.equal(RECENT_PLAYS_PAGE_SIZE, 20);
   assert.match(PAGE, /import \{ RECENT_PLAYS_PAGE_SIZE \} from "@\/lib\/activity-constants"/);
   assert.doesNotMatch(PAGE, /take: 20\b/);
-  assert.match(RECENT, /filterParams\.set\("limit", String\(RECENT_PLAYS_PAGE_SIZE\)\)/);
-  assert.doesNotMatch(RECENT, />= 20\b/, "no private copy of the page size");
-  assert.doesNotMatch(RECENT, /"20"/, "no private copy of the page size");
+  assert.match(RECENT_HOOK, /filterParams\.set\("limit", String\(RECENT_PLAYS_PAGE_SIZE\)\)/);
+  for (const src of [RECENT, RECENT_ROW, RECENT_HOOK]) {
+    assert.doesNotMatch(src, />= 20\b/, "no private copy of the page size");
+    assert.doesNotMatch(src, /"20"/, "no private copy of the page size");
+  }
 });
 
 test("a live refresh past page 1 merges new plays by id instead of being ignored", () => {
-  const start = RECENT.indexOf("useEffect(() => {\n    if (page === 1)");
+  const start = RECENT_HOOK.indexOf("useEffect(() => {\n    if (page === 1)");
   assert.ok(start > 0, "the sync effect replaces on page 1");
-  const effect = RECENT.slice(start, RECENT.indexOf("}, [initialPlays, page]);", start));
-  assert.doesNotMatch(RECENT, /if \(page !== 1\) return;/, "past page 1 every refresh was dropped");
-  assert.match(effect, /setPlays\(\(prev\) => \{\s*const seen = new Set\(prev\.map\(\(p\) => p\.id\)\);/);
-  assert.match(effect, /initialPlays\.filter\(\(p\) => !seen\.has\(p\.id\)\)/);
-  // Past page 1 the paging state is left alone.
-  const merge = effect.slice(effect.indexOf("setPlays((prev)"));
+  const effect = RECENT_HOOK.slice(start, RECENT_HOOK.indexOf("}, [initialPlays, page]);", start));
+  assert.doesNotMatch(RECENT_HOOK, /if \(page !== 1\) return;/, "past page 1 every refresh was dropped");
+  // Past page 1 the new plays are merged in by id (tests/recent-plays-map.test.mts)
+  // and the paging state is left alone.
+  const merge = effect.slice(effect.indexOf("return;"));
+  assert.match(merge, /setPlays\(\(prev\) => mergeRefreshedPlays\(prev, initialPlays\)\);/);
   assert.doesNotMatch(merge, /setPage|setHasMore/);
 });
 
@@ -141,30 +158,42 @@ test("every recent-plays column header has an accessible name", () => {
   assert.doesNotMatch(head, /<th[^>]*\/>/, "no empty self-closing header cell");
 });
 
-test("Recent plays re-renders every minute so its relative times keep up (guardrail 16)", () => {
-  assert.match(RECENT, /import \{ useMinuteTick \} from "@\/hooks\/use-minute-tick"/);
-  assert.match(RECENT, /\n  useMinuteTick\(\);\n/);
-  assert.match(RECENT, /mounted \? formatRelativeTimeLocalized\(p\.startedAt, locale\) : ""/, "still mounted-gated");
+test("Recent plays' Started cells tick every minute on their own, not the whole table (guardrail 16)", () => {
+  assert.match(RECENT_ROW, /import \{ useMinuteTick \} from "@\/hooks\/use-minute-tick"/);
+  const cell = RECENT_ROW.slice(RECENT_ROW.indexOf("function StartedAgo("));
+  assert.match(cell.slice(0, cell.indexOf("\n}\n")), /\n  useMinuteTick\(\);\n/, "the cell owns the tick");
+  assert.match(RECENT_ROW, /mounted \? formatRelativeTimeLocalized\(iso, locale\) : ""/, "still mounted-gated");
+  assert.match(RECENT_ROW, /<StartedAgo iso=\{p\.startedAt\} \/>/);
+  assert.match(RECENT_ROW, /export const RecentPlayRow = memo\(function RecentPlayRow\(/, "rows skip the card's re-renders");
+  assert.doesNotMatch(RECENT, /useMinuteTick/, "the card itself no longer re-renders every minute");
   const hook = readFileSync(new URL("../src/hooks/use-minute-tick.ts", import.meta.url), "utf8");
-  assert.match(hook, /setInterval\(\(\) => setTick\(\(n\) => n \+ 1\), 60_000\)/);
-  assert.match(hook, /return \(\) => clearInterval\(id\);/);
+  assert.match(hook, /setInterval\(emit, 60_000\)/, "one shared minute ticker");
+  assert.match(hook, /clearInterval\(id\)/);
+  assert.match(hook, /useSyncExternalStore\(subscribe, getSnapshot, getServerSnapshot\)/, "every caller reads the one ticker");
   assert.doesNotMatch(hook, /Date\.now|new Date/, "the hook itself never reads the clock");
 });
 
 // ═══ Now playing ═══════════════════════════════════════════════════════════════
 
-const NOW_PLAYING = readFileSync(new URL("../src/components/admin/activity-now-playing.tsx", import.meta.url), "utf8");
+const SESSION_CARD = readFileSync(new URL("../src/components/admin/now-playing/session-card.tsx", import.meta.url), "utf8");
+const TERMINATE = readFileSync(new URL("../src/components/admin/now-playing/terminate-button.tsx", import.meta.url), "utf8");
 
+// The rule itself is unit-tested in tests/now-playing-rules.test.mts.
 test("a relayed session whose location already reads relay shows RELAY once", () => {
-  assert.match(NOW_PLAYING, /\{s\.relayed && s\.location !== "relay" && \(/);
+  assert.match(SESSION_CARD, /const net = networkSignals\(s\);/);
+  assert.match(SESSION_CARD, /\{net\.relay && \(/);
+  assert.match(SESSION_CARD, /if \(net\.empty\) return DASH;/, "nothing to show is a placeholder, never a blank cell");
 });
 
-test("a thrown terminate request shows translated copy, never the browser's raw message", () => {
-  const onSubmit = NOW_PLAYING.slice(NOW_PLAYING.indexOf("async function onSubmit("));
-  const catchBlock = onSubmit.slice(onSubmit.indexOf("} catch (err) {"), onSubmit.indexOf("setBusy(false);\n    }\n  }"));
-  assert.doesNotMatch(catchBlock, /err\.message|String\(err\)/);
-  assert.match(catchBlock, /setError\(t\("adminActivity\.terminate\.networkError"\)\)/);
-  assert.match(catchBlock, /console\.error\("\[activity-now-playing\] terminate failed:", err\)/);
+test("a terminate request with no answer shows translated copy, never the browser's raw message", () => {
+  const onSubmit = TERMINATE.slice(TERMINATE.indexOf("async function onSubmit("));
+  const body = onSubmit.slice(0, onSubmit.indexOf("\n  }\n"));
+  assert.doesNotMatch(body, /err\.message|String\(err\)|res\.detail\)/);
+  assert.match(body, /const outcome = terminateOutcome\(res, t\);/);
+  assert.match(body, /if \(outcome\.log\) console\.error\(`\[activity-now-playing\] terminate failed \(\$\{outcome\.log\}\)`\);/);
+  assert.match(body, /setError\(outcome\.message\);/);
+  assert.doesNotMatch(TERMINATE, /setTimeout/, "a successful terminate no longer waits on a timer to free the dialog");
+  assert.match(body, /\{ ifBusy: "skip" \}/, "a second submit while one is out never asks twice");
 });
 
 // ═══ Overview leaderboard ═════════════════════════════════════════════════════
@@ -194,6 +223,35 @@ test("the History rows are memoized with stable callbacks, so a search keystroke
   const table = readFileSync(new URL("../src/components/admin/activity-history-table.tsx", import.meta.url), "utf8");
   assert.match(table, /const toggleExpanded = useCallback\(\s*\(id: string\) => setExpandedId\(\(cur\) => \(cur === id \? null : id\)\),\s*\[\],\s*\);/);
   assert.match(table, /onToggle=\{toggleExpanded\}/);
-  assert.match(table, /onDelete=\{setDeleteRow\}/);
+  assert.match(table, /onDelete=\{openDelete\}/);
   assert.match(table, /const rowNodes = useMemo\(/);
+});
+
+// ═══ Expandable rows, leaderboard colours ═════════════════════════════════════
+
+test("an expandable Activity row toggles through a real button, not a focusable <tr>", () => {
+  for (const rel of ["activity-history/table-row.tsx", "recent-plays/row.tsx"]) {
+    const src = readFileSync(new URL(`../src/components/admin/${rel}`, import.meta.url), "utf8");
+    const tr = src.slice(src.indexOf("<tr\n"), src.indexOf(">", src.indexOf("<tr\n")));
+    assert.doesNotMatch(tr, /tabIndex|aria-expanded|onKeyDown/, `${rel}: the row is no longer a pseudo-button`);
+    assert.match(src, /<button\s+type="button"[\s\S]{0,120}aria-expanded=\{isExpanded\}\s+aria-controls=\{isExpanded \? detailId : undefined\}/, rel);
+    assert.match(src, /e\.stopPropagation\(\);\s+onToggle\(/, `${rel}: the button doesn't toggle twice through the row`);
+    assert.match(src, /id=\{detailId\}|id=\{id\}/, `${rel}: the detail row carries the id the button names`);
+  }
+});
+
+test("History rows stripe through a class, so the .history-row hover rule can show", () => {
+  const row = readFileSync(new URL("../src/components/admin/activity-history/table-row.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(row, /"color-mix\(in oklab, var\(--ds-fg\) 1\.2%, transparent\)"/, "no inline zebra fill");
+  assert.match(row, /background: isExpanded \? "var\(--ds-bg-3\)" : undefined,/);
+});
+
+test("leaderboard colours and keys follow the person or title, never the rank", () => {
+  const sections = readFileSync(new URL("../src/components/admin/activity-sections.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(sections, /POSTER_ACCENTS|% POSTER_ACCENTS\.length|\$\{m\.tmdbId\}-\$\{i\}/);
+  assert.match(sections, /accent=\{accentFor\(u\.id\)\}/);
+  assert.match(sections, /accent=\{accentFor\(m\.title\)\}/);
+  assert.match(sections, /key=\{`\$\{m\.mediaType\}-\$\{m\.tmdbId\}`\}/);
+  assert.match(sections, /\{mediaTypeLabel\(t, m\.mediaType\)\}/, "the type tag is translated, not the raw enum");
+  assert.match(SESSION_CARD, /import \{ accentFor \} from "@\/components\/admin\/activity-accent";/, "one hash for both");
 });
