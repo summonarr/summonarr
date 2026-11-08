@@ -27,11 +27,13 @@
 //     coalesces identical pending sets into ONE in-flight poll (and cleans up so
 //     a later identical set polls fresh), and gives up after 24 probes WITHOUT
 //     burning the once-only CAS;
-//   - notifyRequestStatusChange: returns void synchronously, writes the in-app
-//     inbox row regardless of the user's prefs, and fans out discord/push/email
-//     per status — the email leg reading exactly the per-status pref column
-//     (emailOnApproved/emailOnAvailable/emailOnDeclined) and staying silent when
-//     it's off;
+//   - notifyRequestStatusChange: returns void synchronously. APPROVED/DECLINED
+//     take the batch fan-out (notifyRequestStatusChanges) with one target: ONE
+//     owner read (the disabled-account gate, carrying the email opt-ins), the
+//     batch Discord/push recipient queries, ONE inbox createMany regardless of
+//     the user's prefs, and the email leg honouring emailOnApproved/
+//     emailOnDeclined — no singular per-user channel read is left. AVAILABLE
+//     takes its gate, then fanOutAvailableWinners;
 //   - disabled accounts (guardrail 33): a deactivated requester gets nothing on
 //     any channel, on both the single-request path and the batch CAS path.
 //
@@ -135,6 +137,11 @@ shadowPrismaModel(prisma, "setting", {
 type FindManyArgs = { where: Record<string, unknown> & { id?: { in?: string[] } }; select?: Record<string, unknown> };
 const discordAvailableQueries: FindManyArgs[] = [];
 const pushAvailableQueries: FindManyArgs[] = [];
+// The approved/declined fan-out's reads: its one owner read, then the batch
+// Discord and push notifiers' recipient queries.
+const activeOwnerReads: FindManyArgs[] = [];
+const discordStatusQueries: FindManyArgs[] = [];
+const pushStatusQueries: FindManyArgs[] = [];
 const emailPrefQueries: FindManyArgs[] = [];
 type EmailPrefRow = { id: string; email: string; notificationEmail: string | null; emailOnAvailable: boolean };
 let emailPrefRows: EmailPrefRow[] = [];
@@ -152,14 +159,8 @@ let disabledRequesterIds: string[] = [];
 
 shadowPrismaModel(prisma, "user", {
   findMany: async (args: FindManyArgs) => {
-    // claimAvailableNotificationWinners' disabled-recipient filter — the batch
-    // chokepoint that drops removed users from all four channels at once. It
-    // asks for exactly the disabled ids; an empty result means everyone is
-    // active, which is what these fan-out tests assume unless stated otherwise.
-    if (args.where.deactivatedAt !== undefined) {
-      disabledRecipientQueries.push(args);
-      return disabledRequesterIds.map((id) => ({ id }));
-    }
+    // The Discord and push batch notifiers carry their own deactivatedAt filter
+    // too (belt-and-braces), so they are recognised by their opt-in first.
     if (args.where.notifyOnAvailable === true) {
       discordAvailableQueries.push(args);
       return []; // no linked Discord users — the channel stops before its wire
@@ -168,28 +169,52 @@ shadowPrismaModel(prisma, "user", {
       pushAvailableQueries.push(args);
       return []; // no push-eligible users — the channel stops before its wire
     }
+    if (args.where.notifyOnApproved === true || args.where.notifyOnDeclined === true) {
+      discordStatusQueries.push(args);
+      return [];
+    }
+    if (args.where.pushOnApproved === true || args.where.pushOnDeclined === true) {
+      pushStatusQueries.push(args);
+      return [];
+    }
+    // notifyRequestStatusChanges' owner read: the disabled-account gate, which
+    // also carries the email leg's address, opt-ins and language.
+    if (args.where.deactivatedAt === null && args.select?.emailOnDeclined) {
+      activeOwnerReads.push(args);
+      const ids = args.where.id?.in ?? [];
+      return requesterDisabled ? [] : ids.map((id) => ({ id, ...(emailUserRow ?? {}) }));
+    }
+    // claimAvailableNotificationWinners' disabled-recipient filter — the batch
+    // chokepoint that drops removed users from all four channels at once. It
+    // asks for exactly the disabled ids; an empty result means everyone is
+    // active, which is what these fan-out tests assume unless stated otherwise.
+    if (args.where.deactivatedAt !== undefined) {
+      disabledRecipientQueries.push(args);
+      return disabledRequesterIds.map((id) => ({ id }));
+    }
     emailPrefQueries.push(args);
     return emailPrefImpl(args);
   },
   findUnique: async (args: FindUniqueArgs) => {
-    // notifyRequestStatusChange's disabled-account gate: one lookup that decides
-    // whether ANY channel runs for this requester (account removal disables
-    // rather than scrubs, so the row keeps a live email + push subscriptions).
-    // discord-notify's notifyUser also selects deactivatedAt now (guardrail 33 at the
-    // single-user chokepoint), so recognise ITS read by discordId first.
+    // The manual "mark available" gate: one lookup that decides whether ANY
+    // channel runs for this requester (account removal disables rather than
+    // scrubs, so the row keeps a live email + push subscriptions). discord-notify's
+    // notifyUser also selects deactivatedAt (guardrail 33 at the single-user
+    // chokepoint), so recognise ITS read by discordId first.
     if (args.select.discordId) {
       discordUserReads.push(args);
       return null; // unlinked — discord stops after recipient resolution
     }
     if (args.select.deactivatedAt) {
       activeGateReads.push(args);
-      return { deactivatedAt: requesterDisabled ? new Date("2026-07-01T00:00:00.000Z") : null };
+      return { ...(emailUserRow ?? {}), deactivatedAt: requesterDisabled ? new Date("2026-07-01T00:00:00.000Z") : null };
     }
+    // Any other per-user read is a singular channel path the hub no longer has.
     if (args.select.pushOnApproved || args.select.pushOnDeclined) {
       pushUserReads.push(args);
       return null;
     }
-    emailUserReads.push(args); // the hub's own per-status email-pref read
+    emailUserReads.push(args);
     return emailUserRow;
   },
 });
@@ -280,6 +305,7 @@ async function quiesce(): Promise<void> {
     await new Promise<void>((r) => setImmediate(r));
     const now = JSON.stringify([
       settingFindManyKeys.length, discordAvailableQueries.length, pushAvailableQueries.length,
+      activeOwnerReads.length, discordStatusQueries.length, pushStatusQueries.length,
       emailPrefQueries.length, discordUserReads.length, pushUserReads.length, emailUserReads.length,
       notifCreates.length, createManyCalls.length, resendPosts.length, fetchUrls.length, claims.length,
       agentPosts.length,
@@ -299,6 +325,9 @@ beforeEach(() => {
   settingFindManyKeys.length = 0;
   discordAvailableQueries.length = 0;
   pushAvailableQueries.length = 0;
+  activeOwnerReads.length = 0;
+  discordStatusQueries.length = 0;
+  pushStatusQueries.length = 0;
   emailPrefQueries.length = 0;
   emailPrefRows = [];
   emailPrefImpl = async () => emailPrefRows;
@@ -616,12 +645,34 @@ test("gives up after 24 probes without burning the CAS — the orchestrator fall
   await quiesce();
 });
 
+test("a probe that THROWS costs one attempt, not the poll: the next probe still finds the item and the requester is told", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let checks = 0;
+  const checkPlex = async () => {
+    checks++;
+    if (checks === 1) throw new Error("plex socket hang up");
+    return true;
+  };
+  const p = pollAndNotifyAvailable([reqRow("th1", "plex")], checkPlex, null, "throws");
+  t.mock.timers.tick(30_000);
+  await drain();
+  assert.equal(checks, 1);
+  assert.ok(warns.some((w) => w.includes("[throws] Plex availability probe failed") && w.includes("plex socket hang up")));
+  t.mock.timers.tick(30_000);
+  await drain();
+  await p;
+  assert.equal(checks, 2, "the loop went on after the throw");
+  assert.equal(claims.length, 1, "and the notify still ran");
+  await waitFor(() => createManyCalls.length === 1, "inbox write");
+  await quiesce();
+});
+
 // ── notifyRequestStatusChange ───────────────────────────────────────────────
 
 test("APPROVED: synchronous void, unconditional in-app row, discord+push+email legs each fired; email honors emailOnApproved; ONE outbound request.approved", async () => {
   configureChannels();
   agentRows.push(agentRow("request.approved", "request.available"));
-  emailUserRow = { email: "app@example.com", notificationEmail: null, emailOnApproved: true };
+  emailUserRow = { email: "app@example.com", notificationEmail: null, emailOnApproved: true, emailOnDeclined: false, locale: null };
 
   const ret = notifyRequestStatusChange("APPROVED", {
     requestedBy: "u-app",
@@ -634,7 +685,7 @@ test("APPROVED: synchronous void, unconditional in-app row, discord+push+email l
   });
   assert.equal(ret, undefined); // void — the approve route is never blocked on channels
 
-  await waitFor(() => notifCreates.length === 1 && resendPosts.length === 1 && agentPosts.length === 1, "approved fan-out");
+  await waitFor(() => createManyCalls.length === 1 && resendPosts.length === 1 && agentPosts.length === 1, "approved fan-out");
   await quiesce();
 
   // The outbound channels got exactly one event, carrying the request's own
@@ -643,8 +694,10 @@ test("APPROVED: synchronous void, unconditional in-app row, discord+push+email l
   assert.equal(agentPosts[0].event, "request.approved");
   assert.deepEqual(agentPosts[0].request, { id: "req-app", instance: "anime" });
 
-  // In-app inbox row: unconditional, shaped by the shared shaper.
-  assert.deepEqual(notifCreates[0].data, {
+  // In-app inbox row: unconditional, written by the batch writer every decision
+  // shares (one createMany), shaped by the shared shaper.
+  assert.equal(createManyCalls[0].skipDuplicates, true);
+  assert.deepEqual(createManyCalls[0].data, [{
     userId: "u-app",
     type: "REQUEST_APPROVED",
     title: "Dune",
@@ -653,19 +706,29 @@ test("APPROVED: synchronous void, unconditional in-app row, discord+push+email l
     mediaType: "MOVIE",
     posterPath: "/d.jpg",
     data: { v: 1 },
-  });
+  }]);
+  assert.equal(notifCreates.length, 0, "no single-row inbox write beside the batch one");
 
-  // Discord + push each reached their recipient resolution for this user.
-  assert.equal(discordUserReads.length, 1);
-  assert.equal(discordUserReads[0].where.id, "u-app");
-  assert.deepEqual(pushUserReads[0], { where: { id: "u-app" }, select: { pushOnApproved: true, locale: true } });
-
-  // Email leg read exactly the per-status pref column (+ the recipient's
-  // language), then mailed the user.
-  assert.deepEqual(emailUserReads[0], {
-    where: { id: "u-app" },
-    select: { email: true, notificationEmail: true, emailOnApproved: true, locale: true },
-  });
+  // ONE owner read per decision: the disabled-account gate carries the email
+  // leg's address, opt-ins and language, so the email leg reads nothing more.
+  assert.deepEqual(activeOwnerReads, [{
+    where: { id: { in: ["u-app"] }, deactivatedAt: null },
+    select: { id: true, email: true, notificationEmail: true, emailOnApproved: true, emailOnDeclined: true, locale: true },
+  }]);
+  // Discord + push each reached their BATCH recipient resolution for this user,
+  // opt-in and disabled-account filter in the query.
+  assert.deepEqual(discordStatusQueries.map((q) => q.where), [
+    { id: { in: ["u-app"] }, discordId: { not: null }, notifyOnApproved: true, deactivatedAt: null },
+  ]);
+  assert.deepEqual(pushStatusQueries, [{
+    where: { id: { in: ["u-app"] }, pushOnApproved: true, deactivatedAt: null },
+    select: { id: true, locale: true },
+  }]);
+  // The singular per-user channel paths are gone.
+  assert.equal(activeGateReads.length, 0, "no findUnique gate");
+  assert.equal(discordUserReads.length, 0, "no singular discord read");
+  assert.equal(pushUserReads.length, 0, "no singular push read");
+  assert.equal(emailUserReads.length, 0, "no second user read for the email leg");
   assert.equal(resendPosts[0].body.to, "app@example.com");
   assert.ok(resendPosts[0].body.subject.includes("Approved"), resendPosts[0].body.subject);
   assert.ok(resendPosts[0].body.subject.includes("Dune"));
@@ -674,19 +737,22 @@ test("APPROVED: synchronous void, unconditional in-app row, discord+push+email l
 
 test("DECLINED with emailOnDeclined off: the inbox row is still written but no email leaves", async () => {
   configureChannels();
-  emailUserRow = { email: "dec@example.com", notificationEmail: null, emailOnDeclined: false };
+  agentRows.push(agentRow("request.declined"));
+  emailUserRow = { email: "dec@example.com", notificationEmail: null, emailOnApproved: true, emailOnDeclined: false, locale: null };
 
   notifyRequestStatusChange("DECLINED", {
     requestedBy: "u-dec",
     title: "Andor",
     mediaType: "TV",
     adminNote: "duplicate request",
+    requestId: "req-dec",
+    arrInstance: "",
   });
 
-  await waitFor(() => notifCreates.length === 1 && emailUserReads.length === 1, "declined fan-out");
+  await waitFor(() => createManyCalls.length === 1 && pushStatusQueries.length === 1 && agentPosts.length === 1, "declined fan-out");
   await quiesce();
 
-  assert.deepEqual(notifCreates[0].data, {
+  assert.deepEqual(createManyCalls[0].data, [{
     userId: "u-dec",
     type: "REQUEST_DECLINED",
     title: "Andor",
@@ -695,10 +761,35 @@ test("DECLINED with emailOnDeclined off: the inbox row is still written but no e
     mediaType: "TV",
     posterPath: null,
     data: { v: 1 },
-  });
-  assert.deepEqual(emailUserReads[0].select, { email: true, notificationEmail: true, emailOnDeclined: true, locale: true });
-  assert.deepEqual(pushUserReads[0].select, { pushOnDeclined: true, locale: true });
+  }]);
+  assert.equal(activeOwnerReads.length, 1, "one user read per notification");
+  assert.equal(emailUserReads.length, 0);
+  assert.equal(discordStatusQueries[0].where.notifyOnDeclined, true);
+  assert.equal(pushStatusQueries[0].where.pushOnDeclined, true);
+  // The decline's note rides the outbound event.
+  assert.deepEqual([agentPosts[0].event, agentPosts[0].text], ["request.declined", "duplicate request"]);
   assert.equal(resendPosts.length, 0); // the opt-out gate lives in THIS module
+  assert.deepEqual(errors, []);
+});
+
+test("the email leg reads its opt-ins off the gate's one read: emailOnDeclined on mails, emailOnApproved off does not", async () => {
+  configureChannels();
+  emailUserRow = { email: "dec@example.com", notificationEmail: null, emailOnApproved: false, emailOnDeclined: true, locale: null };
+  notifyRequestStatusChange("DECLINED", { requestedBy: "u-dec2", title: "Andor", mediaType: "TV", adminNote: "already on the server", requestId: "req-dec2", arrInstance: "" });
+  await waitFor(() => resendPosts.length === 1, "declined email");
+  await quiesce();
+  assert.equal(resendPosts[0].body.to, "dec@example.com");
+  assert.ok(resendPosts[0].body.html.includes("already on the server"), "the note is in the mail");
+  assert.equal(activeOwnerReads.length, 1);
+  assert.equal(emailUserReads.length, 0);
+
+  resendPosts.length = 0;
+  activeOwnerReads.length = 0;
+  notifyRequestStatusChange("APPROVED", { requestedBy: "u-dec2", title: "Andor", mediaType: "TV", requestId: "req-dec2", arrInstance: "" });
+  await waitFor(() => createManyCalls.length === 2, "approved inbox row");
+  await quiesce();
+  assert.equal(resendPosts.length, 0, "emailOnApproved off sends no approval email");
+  assert.equal(activeOwnerReads.length, 1);
   assert.deepEqual(errors, []);
 });
 
@@ -813,27 +904,35 @@ test("a DISABLED requester reaches NO channel — one gate read and nothing else
   // Account removal disables rather than scrubs (src/lib/account-lifecycle.ts),
   // so this row still has a live notification email, a Discord link and push
   // subscriptions. An admin clearing out a removed user's leftover requests must
-  // not ping them on any of the four channels.
+  // not ping them on any channel, the outbound ones included.
   configureChannels();
+  agentRows.push(agentRow("request.approved", "request.declined"));
   requesterDisabled = true;
-  emailUserRow = { email: "gone@example.com", notificationEmail: null, emailOnApproved: true };
+  emailUserRow = { email: "gone@example.com", notificationEmail: null, emailOnApproved: true, emailOnDeclined: true, locale: null };
 
-  notifyRequestStatusChange("APPROVED", {
-    requestedBy: "u-gone",
-    title: "Dune",
-    mediaType: "MOVIE",
-    tmdbId: 438631,
-  });
+  for (const status of ["APPROVED", "DECLINED"] as const) {
+    activeOwnerReads.length = 0;
+    notifyRequestStatusChange(status, {
+      requestedBy: "u-gone",
+      title: "Dune",
+      mediaType: "MOVIE",
+      tmdbId: 438631,
+      requestId: "req-gone",
+      arrInstance: "",
+    });
 
-  await waitFor(() => activeGateReads.length === 1, "disabled-account gate read");
-  await quiesce();
+    await waitFor(() => activeOwnerReads.length === 1, "disabled-account gate read");
+    await quiesce();
 
-  assert.deepEqual(activeGateReads[0], { where: { id: "u-gone" }, select: { deactivatedAt: true } });
-  // Not one channel resolved a recipient, and no inbox row was written.
-  assert.equal(notifCreates.length, 0, "in-app");
-  assert.equal(discordUserReads.length, 0, "discord");
-  assert.equal(pushUserReads.length, 0, "push");
-  assert.equal(emailUserReads.length, 0, "email");
-  assert.equal(resendPosts.length, 0);
+    // The gate is the owner read itself: disabled accounts never come back.
+    assert.deepEqual(activeOwnerReads[0].where, { id: { in: ["u-gone"] }, deactivatedAt: null }, status);
+    // Not one channel resolved a recipient, and no inbox row was written.
+    assert.equal(createManyCalls.length + notifCreates.length, 0, `in-app (${status})`);
+    assert.equal(discordStatusQueries.length + discordUserReads.length, 0, `discord (${status})`);
+    assert.equal(pushStatusQueries.length + pushUserReads.length, 0, `push (${status})`);
+    assert.equal(emailUserReads.length, 0, `email (${status})`);
+    assert.equal(resendPosts.length, 0);
+    assert.equal(agentPosts.length, 0, `the outbound channels follow the gate too (${status})`);
+  }
   assert.deepEqual(errors, []);
 });

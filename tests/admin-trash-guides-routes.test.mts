@@ -174,10 +174,14 @@ function schemaError(): Error {
   return e;
 }
 
+// When set, only reads of that service's specs throw — one service's refresh failing.
+let specReadThrowsFor: { service: string; error: Error } | null = null;
+
 shadowPrismaModel(prisma, "trashSpec", {
   findMany: async (args: { where?: Record<string, unknown>; include?: unknown; select?: unknown; orderBy?: unknown } = {}) => {
     rec("trashSpec.findMany", { where: args.where });
     if (specReadThrows) throw specReadThrows;
+    if (specReadThrowsFor && args.where?.service === specReadThrowsFor.service) throw specReadThrowsFor.error;
     const w = args.where ?? {};
     let rows = [...specs];
     const idFilter = w.id as { in?: string[]; notIn?: string[] } | undefined;
@@ -275,7 +279,11 @@ function inScope<T>(fn: () => Promise<T>): Promise<T> {
   return workAsyncStorage.run(workStore, () => workUnitAsyncStorage.run(requestStore, fn));
 }
 
-function mk(path: string, token: string | null, init: { method: string; body?: string; query?: string }) {
+function mk(
+  path: string,
+  token: string | null,
+  init: { method: string; body?: string; query?: string; chunked?: boolean },
+) {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (token) headers.cookie = `${COOKIE}=${token}`;
   const r = new NextRequest(`http://localhost:3000${path}${init.query ?? ""}`, {
@@ -283,8 +291,9 @@ function mk(path: string, token: string | null, init: { method: string; body?: s
     headers,
     ...(init.body !== undefined ? { body: init.body } : {}),
   });
-  // refresh branches on content-length to decide whether to parse a body.
-  if (init.body !== undefined) r.headers.set("content-length", String(Buffer.byteLength(init.body)));
+  // A real client declares the length; `chunked` leaves it off, as a
+  // Transfer-Encoding: chunked request would.
+  if (init.body !== undefined && !init.chunked) r.headers.set("content-length", String(Buffer.byteLength(init.body)));
   return r;
 }
 
@@ -292,8 +301,8 @@ const getStatus = (t: string | null, q = "?service=radarr") =>
   inScope(() => status.GET(mk("/api/admin/trash-guides/status", t, { method: "GET", query: q }), undefined));
 const getSpec = (t: string | null, id: string, q = "") =>
   inScope(() => specDetail.GET(mk(`/api/admin/trash-guides/spec/${id}`, t, { method: "GET", query: q }), { params: Promise.resolve({ id }) }));
-const postRefresh = (t: string | null, body?: string) =>
-  inScope(() => refresh.POST(mk("/api/admin/trash-guides/refresh", t, { method: "POST", body }), undefined));
+const postRefresh = (t: string | null, body?: string, opts: { chunked?: boolean } = {}) =>
+  inScope(() => refresh.POST(mk("/api/admin/trash-guides/refresh", t, { method: "POST", body, ...opts }), undefined));
 const postApply = (t: string | null, body: unknown, raw?: string) =>
   inScope(() => apply.POST(mk("/api/admin/trash-guides/apply", t, { method: "POST", body: raw ?? JSON.stringify(body) }), undefined));
 const getStarter = (t: string | null) =>
@@ -332,6 +341,7 @@ beforeEach(() => {
   ops = [];
   specs = [];
   specReadThrows = null;
+  specReadThrowsFor = null;
   pgLockCalls = [];
   fetchCalls.length = 0;
   warns.length = 0;
@@ -515,6 +525,15 @@ test("apply trims surrounding whitespace from the variant before validating", as
   assert.equal((await postApply(t, { specIds: [], variant: "  4k  " })).status, 200);
 });
 
+test("every route reads ' hd ' as the default instance, and apply refuses a variant that isn't a string", async () => {
+  const t = await mintSession();
+  specs = [spec({ id: "s1" })];
+  assert.equal((await getStatus(t, `?service=radarr&variant=${encodeURIComponent(" hd ")}`)).status, 200);
+  assert.equal((await getSpec(t, "s1", `?variant=${encodeURIComponent(" hd ")}`)).status, 200);
+  assert.equal((await postApply(t, { specIds: [], variant: " hd " })).status, 200);
+  assert.equal((await postApply(t, { specIds: ["curated-0"], variant: 4 })).status, 400);
+});
+
 // ── 4: the shared advisory lock ──────────────────────────────────────────────
 
 for (const r of WRITE_ROUTES) {
@@ -664,6 +683,23 @@ for (const bad of ["plex", "RADARR", "", 1, null]) {
   });
 }
 
+test("refresh reads a body sent without Content-Length (chunked) instead of refreshing both", async () => {
+  const t = await mintSession();
+  const res = await postRefresh(t, JSON.stringify({ service: "radarr" }), { chunked: true });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.deepEqual(body.errors.map((e: string) => e.split(":")[0]), ["RADARR"], "only the named service is refreshed");
+});
+
+test("refresh rejects a malformed body sent without Content-Length", async () => {
+  const t = await mintSession();
+  assert.equal((await postRefresh(t, "nope", { chunked: true })).status, 400);
+  // An empty body is still "refresh both".
+  const empty = await postRefresh(t, "", { chunked: true });
+  assert.equal(empty.status, 200);
+  assert.deepEqual((await empty.json()).errors.map((e: string) => e.split(":")[0]), ["RADARR", "SONARR"]);
+});
+
 test("refresh accepts an explicit single service", async () => {
   const t = await mintSession();
   for (const service of ["radarr", "sonarr"]) {
@@ -784,6 +820,150 @@ test("starter-pack POST maps a missing schema to 409 with the hint, not a bare 5
   const body = await res.json();
   assert.equal(body.ok, false);
   assert.match(body.schemaDiagnostic, /prisma db push/);
+});
+
+test("an unconfigured service's specs fail per spec: apply still answers 200 and audits what it did", async () => {
+  // A Radarr-only install: the starter pack card pre-selects both services' specs.
+  settings.delete("sonarrUrl");
+  settings.delete("sonarrApiKey");
+  const t = await mintSession();
+  specs = [spec({ id: "s-sonarr", service: "SONARR", kind: "QUALITY_PROFILE", trashId: "qp-s" })];
+  const res = await postApply(t, { specIds: ["s-sonarr"] });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.ok, false);
+  assert.deepEqual(
+    body.results.map((r: { specId: string; ok: boolean; error: string }) => [r.specId, r.ok, r.error]),
+    [["s-sonarr", false, "SONARR is not configured"]],
+  );
+  assert.equal(opsOf("auditLog.create").length, 1);
+  // No application row is invented for an instance that doesn't exist.
+  assert.equal(opsOf("trashApplication.create").length + opsOf("trashApplication.upsert").length + opsOf("trashApplication.update").length, 0);
+});
+
+// The raw text of a store failure can name the database host or a query.
+const INTERNAL_FAILURE = "connect ECONNREFUSED 10.0.0.5:5432";
+
+test("status answers a non-schema failure with a generic message and logs the detail", async () => {
+  const t = await mintSession();
+  specReadThrows = new Error(INTERNAL_FAILURE);
+  const res = await getStatus(t);
+  assert.equal(res.status, 500);
+  const body = await res.json();
+  assert.deepEqual(body.specs, []);
+  assert.equal(body.service, "RADARR");
+  assert.ok(!body.error.includes("10.0.0.5"), `leaked: ${body.error}`);
+  assert.match(body.error, /server log/);
+  assert.ok(errors.some((e) => e.startsWith("[trash]") && e.includes("10.0.0.5")), "the detail belongs in the log");
+});
+
+test("refresh reports a non-schema store failure per service with a generic line and logs the detail", async () => {
+  const t = await mintSession();
+  // The tree arrives; the catalog read after it fails.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = new URL(String(input));
+    fetchCalls.push(url);
+    if (isTreeFetch(url)) {
+      return new Response(JSON.stringify({ tree: [] }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response("{}", { status: 503 });
+  }) as unknown as typeof fetch;
+  specReadThrows = new Error(INTERNAL_FAILURE);
+  try {
+    const res = await postRefresh(t, JSON.stringify({ service: "radarr" }));
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, false);
+    assert.equal(body.errors.length, 1);
+    assert.match(body.errors[0], /^RADARR: /);
+    assert.ok(!body.errors[0].includes("10.0.0.5"), `leaked: ${body.errors[0]}`);
+    assert.ok(errors.some((e) => e.startsWith("[trash]") && e.includes("10.0.0.5")));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+// The manual refresh is judged like the cron's: a file that failed to download
+// fails the refresh, and a refresh of BOTH services that ran stamps
+// trashLastRefreshAt (the cron's cadence gate and the settings card's "last
+// refreshed" line). The cron gate refreshes both services, so a stamp from a
+// refresh that left one out would hold that one's refresh off for an hour.
+const stamps = () => opsOf("setting.upsert").filter((o) => o.args === "trashLastRefreshAt").length;
+
+// GitHub answers the tree (one radarr file, whose own download fails) and
+// nothing else.
+async function withTreeUp<T>(fn: () => Promise<T>): Promise<T> {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = new URL(String(input));
+    fetchCalls.push(url);
+    if (isTreeFetch(url)) {
+      const tree = [{ path: "docs/json/radarr/cf/broken.json", type: "blob", sha: "sha-broken" }];
+      return new Response(JSON.stringify({ tree, truncated: false }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response("{}", { status: 503 });
+  }) as unknown as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+test("refresh reports per-file failures and stamps the last refresh; a failed tree pull stamps nothing", async () => {
+  const t = await mintSession();
+
+  // GitHub is down for the whole pull: nothing refreshed, nothing stamped.
+  await postRefresh(t);
+  assert.equal(stamps(), 0, "a refresh that never got the tree is not a refresh");
+  assert.ok(errors.some((e) => e.startsWith("[trash] catalog tree fetch failed")), "the failed pull is logged for the operator");
+
+  await withTreeUp(async () => {
+    const res = await postRefresh(t);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.results.length, 2, "both services refreshed");
+    const radarr = body.results.find((r: { service?: string }) => r.service === "RADARR") ?? body.results[0];
+    assert.ok(radarr.errors.length > 0, "fixture sanity: the file download failed");
+    assert.equal(body.ok, false, "a per-file failure is not a clean refresh");
+    for (const e of radarr.errors as string[]) assert.ok(body.errors.includes(`RADARR: ${e}`));
+    assert.equal(stamps(), 1, "a refresh of both services that ran is stamped, as the cron stamps it");
+  });
+});
+
+test("a refresh that left a service out — asked for one, or one threw — stamps nothing", async () => {
+  const t = await mintSession();
+  await withTreeUp(async () => {
+    // Asked for radarr only: it refreshed, sonarr didn't.
+    const single = await (await postRefresh(t, JSON.stringify({ service: "radarr" }))).json();
+    assert.equal(single.results.length, 1, "fixture sanity: radarr refreshed");
+    assert.equal(stamps(), 0, "a single-service refresh must not hold the cron's refresh of both off");
+
+    // Asked for both; sonarr's catalog read failed.
+    specReadThrowsFor = { service: "SONARR", error: new Error(INTERNAL_FAILURE) };
+    const partial = await (await postRefresh(t)).json();
+    assert.equal(partial.results.length, 1, "fixture sanity: only radarr refreshed");
+    assert.ok(partial.errors.some((e: string) => e.startsWith("SONARR: ")));
+    assert.equal(stamps(), 0, "a refresh where a service threw is not a full refresh");
+  });
+});
+
+test("starter-pack GET and POST answer a non-schema failure with a generic message and log the detail", async () => {
+  const t = await mintSession();
+  specReadThrows = new Error(INTERNAL_FAILURE);
+  const get = await getStarter(t);
+  assert.equal(get.status, 500);
+  const getBody = await get.json();
+  assert.deepEqual(getBody.items, []);
+  assert.ok(!getBody.error.includes("10.0.0.5"), `leaked: ${getBody.error}`);
+
+  const post = await postStarter(t);
+  assert.equal(post.status, 500);
+  const postBody = await post.json();
+  assert.equal(postBody.ok, false);
+  assert.ok(!postBody.error.includes("10.0.0.5"), `leaked: ${postBody.error}`);
+  assert.equal(errors.filter((e) => e.startsWith("[trash]") && e.includes("10.0.0.5")).length, 2);
 });
 
 test("a NON-schema read failure is still a 500 rather than being disguised as a hint", async () => {

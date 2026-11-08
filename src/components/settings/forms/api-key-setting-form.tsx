@@ -1,19 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2, Trash2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
+import { patchSettings } from "./shared";
 import { withBasePath } from "@/lib/base-path";
+import { apiErrorText } from "@/lib/client/api-error";
+import { useFocusReturn } from "@/hooks/use-focus-return";
 import { useT } from "@/components/i18n/i18n-provider";
-
-// The placeholder /api/settings sends instead of a stored secret, and ignores
-// when it comes back in a PATCH (route.ts `MASKED_VALUE` — keep the two equal).
-// An untouched field still holds it, so Test there checks the saved key.
-const MASKED_VALUE = "••••••••";
+import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
+import { timedFetch } from "@/lib/client/fetch-json";
 
 export function ApiKeySettingForm({
   initialApiKey,
@@ -23,6 +23,7 @@ export function ApiKeySettingForm({
   inputId,
   help,
 }: {
+  // The settings page passes the mask when a key is saved, "" when none is.
   initialApiKey: string;
   settingKey: string;
   // The /api/settings/test-ratings service to check the saved key against. Omit
@@ -35,13 +36,17 @@ export function ApiKeySettingForm({
 }) {
   const t = useT();
   const router = useRouter();
-  const [apiKey, setApiKey] = useState(initialApiKey);
-  // The value the server currently holds (as far as this form knows). The test
-  // endpoint checks the SAVED key, not what's typed in the box — so testing an
-  // edited, unsaved key would check the OLD one and could show "Connected" next
-  // to a mistyped new key. So when the field has unsaved changes, Test saves
-  // first and then tests (the same "Save & Test" approach as arr-form.tsx).
-  const [savedKey, setSavedKey] = useState(initialApiKey);
+  // The field starts EMPTY even when a key is saved: the mask is only its
+  // placeholder. As the field's value, a key pasted with the caret after it was
+  // saved as "••••••••<key>". An empty field with a saved key means "keep it",
+  // and Test then checks the saved key.
+  const [apiKey, setApiKey] = useState("");
+  // The value this form last saved ("" until it saves one). The test endpoint
+  // checks the SAVED key, not what's typed in the box — so testing an edited,
+  // unsaved key would check the OLD one and could show "Connected" next to a
+  // mistyped new key. So when the field has unsaved changes, Test saves first
+  // and then tests (the same "Save & Test" approach as arr-form.tsx).
+  const [savedKey, setSavedKey] = useState("");
   // Whether a key is SAVED on the server right now. The prop is set once at
   // page load and never refreshes, so after Remove it would still describe a
   // deleted key; this is updated after every successful PATCH instead (same
@@ -51,10 +56,17 @@ export function ApiKeySettingForm({
   const [saveError, setSaveError] = useState("");
   const [testStatus, setTestStatus] = useState<"idle" | "testing" | "ok" | "error">("idle");
   const [testMessage, setTestMessage] = useState("");
+  // Remove deletes the stored key at once, so it asks first (the cache panel's
+  // inline confirm). Focus moves into the confirm row and back to Remove.
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const focus = useFocusReturn();
+  // Bumped by every edit. A test that answers after an edit is for a key the
+  // field no longer holds, so its verdict is dropped.
+  const editSeq = useRef(0);
 
-  // The server ignores the placeholder value and an empty one only matters as
-  // an explicit Remove, so neither counts as a change to save.
-  const dirty = apiKey !== savedKey && apiKey.length > 0 && apiKey !== MASKED_VALUE;
+  // An empty field only matters as an explicit Remove, and the server ignores
+  // the bare mask, so neither counts as a change to save.
+  const dirty = apiKey !== savedKey && apiKey.length > 0 && apiKey !== SECRET_MASK_SENTINEL;
 
   // PATCHes one value for this setting. "" deletes the stored key (the route
   // treats ipinfoToken / omdbApiKey / mdblistApiKey as clearable), anything
@@ -62,36 +74,25 @@ export function ApiKeySettingForm({
   async function patchKey(value: string): Promise<boolean> {
     setStatus("saving");
     setSaveError("");
-    try {
-      const res = await fetch(withBasePath("/api/settings"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [settingKey]: value }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      if (!res.ok || data.ok === false) {
-        setSaveError(data.error ?? t("settings.form.common.saveFailed"));
-        setStatus("error");
-        return false;
-      }
-      setSavedKey(value);
-      setKeyIsSet(value.length > 0);
-      setStatus(value.length > 0 ? "saved" : "removed");
-      // The card's "Connected" badge is rendered by the server page from the
-      // stored key; refresh the RSC payload so it follows the save or remove
-      // without a full reload (client state in this form is preserved).
-      router.refresh();
-      return true;
-    } catch {
-      setSaveError(t("settings.form.common.saveFailed"));
+    const result = await patchSettings({ [settingKey]: value });
+    if (!result.ok) {
+      setSaveError(result.error || t("settings.form.common.saveFailed"));
       setStatus("error");
       return false;
     }
+    setSavedKey(value);
+    setKeyIsSet(value.length > 0);
+    setStatus(value.length > 0 ? "saved" : "removed");
+    // The card's "Connected" badge is rendered by the server page from the
+    // stored key; refresh the RSC payload so it follows the save or remove
+    // without a full reload (client state in this form is preserved).
+    router.refresh();
+    return true;
   }
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    if (!dirty) return;
+    if (!dirty || busy) return;
     // Clear any old test result: it was for the previous key, not the one being saved.
     setTestStatus("idle");
     setTestMessage("");
@@ -99,6 +100,8 @@ export function ApiKeySettingForm({
   }
 
   async function handleRemove() {
+    setConfirmingRemove(false);
+    focus.returnToIfLost("key");
     setTestStatus("idle");
     setTestMessage("");
     const removed = await patchKey("");
@@ -106,6 +109,7 @@ export function ApiKeySettingForm({
   }
 
   async function handleTest() {
+    const sentAt = editSeq.current;
     setTestStatus("testing");
     setTestMessage("");
     if (dirty) {
@@ -116,19 +120,39 @@ export function ApiKeySettingForm({
         return;
       }
     }
+    let ok = false;
+    let text: string;
     try {
-      const res = await fetch(withBasePath("/api/settings/test-ratings"), {
+      const res = await timedFetch(withBasePath("/api/settings/test-ratings"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ service: testService }),
       });
-      const data = (await res.json().catch(() => ({ ok: false }))) as { ok: boolean; message?: string; error?: string };
-      setTestStatus(data.ok ? "ok" : "error");
-      setTestMessage(data.ok ? (data.message ?? t("settings.form.common.connected")) : (data.error ?? t("settings.form.common.testFailed")));
+      const data: unknown = await res.json().catch(() => null);
+      const d = data && typeof data === "object" ? (data as { ok?: unknown; message?: unknown }) : {};
+      ok = d.ok === true;
+      text = ok
+        ? (typeof d.message === "string" && d.message ? d.message : t("settings.form.common.connected"))
+        : apiErrorText(data, t("settings.form.common.testFailed"));
     } catch {
-      setTestStatus("error");
-      setTestMessage(t("settings.form.common.testFailed"));
+      text = t("settings.form.common.testFailed");
     }
+    // Edited meanwhile: the verdict is for a key the field no longer holds.
+    if (editSeq.current !== sentAt) {
+      setTestStatus("idle");
+      return;
+    }
+    setTestStatus(ok ? "ok" : "error");
+    setTestMessage(text);
+  }
+
+  // An edit clears the last results, never a request in flight: that keeps
+  // Save, Remove and Test locked until the answer arrives.
+  function onEdit(value: string) {
+    editSeq.current += 1;
+    setApiKey(value);
+    setStatus((s) => (s === "saving" ? s : "idle"));
+    setTestStatus((s) => (s === "testing" ? s : "idle"));
   }
 
   const busy = status === "saving" || testStatus === "testing";
@@ -146,17 +170,21 @@ export function ApiKeySettingForm({
           <Input
             id={inputId}
             type="password"
+            autoComplete="new-password"
+            data-1p-ignore
+            data-lpignore="true"
             value={apiKey}
-            onChange={(e) => { setApiKey(e.target.value); setStatus("idle"); setTestStatus("idle"); }}
-            placeholder="••••••••"
+            onChange={(e) => onEdit(e.target.value)}
+            placeholder={keyIsSet ? SECRET_MASK_SENTINEL : undefined}
             className="bg-zinc-800 border-zinc-700 font-mono"
           />
-          {keyIsSet && (
+          {keyIsSet && !confirmingRemove && (
             <Button
+              ref={focus.refFor("key")}
               type="button"
               variant="outline"
               size="sm"
-              onClick={handleRemove}
+              onClick={() => setConfirmingRemove(true)}
               disabled={busy}
               className="border-zinc-700 text-zinc-400 hover:text-zinc-100 shrink-0 gap-1.5"
             >
@@ -165,6 +193,27 @@ export function ApiKeySettingForm({
             </Button>
           )}
         </div>
+        {keyIsSet && confirmingRemove && (
+          <div role="group" aria-label={t("settings.form.apiKey.removeKey")} className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-zinc-400">{t("settings.form.apiKey.confirmRemove")}</span>
+            <Button type="button" variant="destructive" size="sm" autoFocus disabled={busy} onClick={() => void handleRemove()}>
+              {t("settings.form.common.remove")}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => { focus.returnTo("key"); setConfirmingRemove(false); }}
+            >
+              {t("settings.form.common.cancel")}
+            </Button>
+          </div>
+        )}
+        {/* The placeholder alone doesn't say whether a blank field means
+            "nothing saved" or "saved, write-only" (arr-instances-manager's hint). */}
+        {keyIsSet && !apiKey && (
+          <p className="text-xs text-zinc-500">{t("settings.form.agents.secretKeep")}</p>
+        )}
         <p className="text-xs text-zinc-500">
           {help}
         </p>

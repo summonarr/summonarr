@@ -1,9 +1,4 @@
-import type { JSX, SVGProps } from "react";
-
-export type IconProps = SVGProps<SVGSVGElement> & {
-  size?: number | string;
-};
-export type IconComponent = (props: IconProps) => JSX.Element;
+export type { IconProps, IconComponent } from "./types";
 
 export { Activity } from "./activity";
 export { AlertCircle } from "./alert-circle";
@@ -26,11 +21,9 @@ export { CalendarDays } from "./calendar-days";
 export { Check } from "./check";
 export { CheckCircle } from "./check-circle";
 export { CheckCircle2 } from "./check-circle2";
-export { Check as CheckIcon } from "./check";
 export { ChevronDown } from "./chevron-down";
 export { ChevronLeft } from "./chevron-left";
 export { ChevronRight } from "./chevron-right";
-export { ChevronRight as ChevronRightIcon } from "./chevron-right";
 export { ChevronUp } from "./chevron-up";
 export { Circle } from "./circle";
 export { CircleDashed } from "./circle-dashed";
@@ -55,7 +48,7 @@ export { Home } from "./home";
 export { KeyRound } from "./key-round";
 export { LayoutDashboard } from "./layout-dashboard";
 export { Library } from "./library";
-export { Link } from "./link";
+export { LinkIcon } from "./link";
 export { List } from "./list";
 export { Loader2 } from "./loader2";
 export { Lock } from "./lock";

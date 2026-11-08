@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
-import { getBadMatches } from "@/lib/bad-matches";
+import { getBadMatchReport } from "@/lib/bad-matches";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Native-client bad-match list for the admin Library screen. Mirrors the
@@ -11,8 +11,9 @@ export const GET = withAdmin(async (request) => {
   const typeParam = request.nextUrl.searchParams.get("mediaType");
   const activeType = typeParam === "movie" ? "MOVIE" : typeParam === "tv" ? "TV" : undefined;
   try {
-    const badMatches = await getBadMatches(activeType);
-    return NextResponse.json({ badMatches });
+    // `capped` is additive: a library past the row cap was only partly compared.
+    const { badMatches, capped } = await getBadMatchReport(activeType);
+    return NextResponse.json({ badMatches, capped });
   } catch (err) {
     console.error("[library/bad-matches] Failed:", err);
     return NextResponse.json({ error: t("apiAdmin.library.badMatchesFailed") }, { status: 500 });

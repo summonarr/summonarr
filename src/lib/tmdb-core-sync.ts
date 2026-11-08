@@ -1,118 +1,105 @@
 import { prisma } from "./prisma";
-import { BATCH_TX_TIMEOUT } from "./cron-auth";
+import { BATCH_TX_TIMEOUT } from "./batch-write";
 import { libraryDetailsTtl } from "./tmdb-cache";
 import type { TmdbMedia } from "./tmdb-types";
 
 const LIST_TTL_MS = 12 * 3600 * 1000;
 
-// Items are sorted before the batch upsert to prevent deadlocks on concurrent transactions
-// that write overlapping sets in different orders.
-export async function syncTmdbMediaCore(items: TmdbMedia[]): Promise<void> {
-  if (!items.length) return;
-  const expiresAt = new Date(Date.now() + LIST_TTL_MS);
+/** The fields a TmdbMediaCore row is written from. */
+export type CoreMediaInput = Pick<
+  TmdbMedia,
+  "id" | "mediaType" | "title" | "posterPath" | "releaseYear" | "voteAverage" | "certification" | "releaseDate"
+>;
 
-  const sorted = [...items].sort(
-    (a, b) => a.id - b.id || a.mediaType.localeCompare(b.mediaType)
-  );
-  await prisma.$transaction(
-    [
-    ...sorted.map((m) =>
-      prisma.tmdbMediaCore.upsert({
-        where: {
-          tmdbId_mediaType: {
-            tmdbId: m.id,
-            mediaType: m.mediaType === "movie" ? "MOVIE" : "TV",
-          },
-        },
-        create: {
-          tmdbId:        m.id,
-          mediaType:     m.mediaType === "movie" ? "MOVIE" : "TV",
-          title:         m.title,
-          posterPath:    m.posterPath    ?? null,
-          releaseYear:   m.releaseYear   || null,
-          voteAverage:   m.voteAverage   ?? 0,
-          certification: m.certification ?? null,
-          expiresAt,
-        },
-        update: {
-          title:         m.title,
-          posterPath:    m.posterPath    ?? null,
-          releaseYear:   m.releaseYear   || null,
-          voteAverage:   m.voteAverage   ?? 0,
-          // undefined (skip), NOT null — same rule as upsertTmdbMediaCore below:
-          // list-shaped TmdbMedia never carries certification, so null here
-          // erased the cert a full details fetch or the library prewarm stored
-          // on every list warm (~4x/day via warm-list-cache), blanking the
-          // grid badges that read TmdbMediaCore.certification.
-          certification: m.certification ?? undefined,
-          // expiresAt deliberately NOT written here: an existing row may carry
-          // the longer age-aware TTL from upsertTmdbMediaCore/the prewarm
-          // (3–30 days), and overwriting it with the 12h list TTL let the daily
-          // purge delete a library title's row ~12h after it left the lists.
-          // The updateMany below only ever EXTENDS expiry (GREATEST semantics).
-          lastSyncedAt:  new Date(),
-        },
-      })
-    ),
-    // Runs after the upserts, so every row it touches is already locked by
-    // this transaction in sorted order — it acquires no new locks.
-    prisma.tmdbMediaCore.updateMany({
-      where: {
-        expiresAt: { lt: expiresAt },
-        OR: sorted.map((m) => ({
-          tmdbId:    m.id,
-          mediaType: m.mediaType === "movie" ? ("MOVIE" as const) : ("TV" as const),
-        })),
-      },
-      data: { expiresAt },
-    }),
-    ],
-    { timeout: BATCH_TX_TIMEOUT }
-  ).catch((err) => {
-    console.error("[tmdb-core-sync] batch upsert failed for", items.length, "items:", err);
-    throw err;
-  });
-}
+const toDbMediaType = (m: Pick<TmdbMedia, "mediaType">): "MOVIE" | "TV" => (m.mediaType === "movie" ? "MOVIE" : "TV");
 
-// Single-item upsert used after fetching a full detail page; uses age-aware TTL rather than the
-// fixed list TTL so library items aren't re-fetched sooner than they need to be.
-export async function upsertTmdbMediaCore(media: TmdbMedia): Promise<void> {
-  const expiresAt = new Date(
-    Date.now() + libraryDetailsTtl(media.releaseDate) * 1000
-  );
-  await prisma.tmdbMediaCore.upsert({
-    where: {
-      tmdbId_mediaType: {
-        tmdbId:    media.id,
-        mediaType: media.mediaType === "movie" ? "MOVIE" : "TV",
-      },
-    },
+// The columns every writer sets the same way on create AND update. Certification
+// and expiresAt are deliberately NOT here: each path has its own rule for them
+// (see coreUpsertArgs), and folding them in is how the two drifted before.
+const coreColumns = (m: CoreMediaInput) => ({
+  title:       m.title,
+  posterPath:  m.posterPath  ?? null,
+  releaseYear: m.releaseYear || null,
+  voteAverage: m.voteAverage ?? 0,
+});
+
+// The ONE upsert shape. Certification on update is undefined (skip), NOT null:
+// list-shaped TmdbMedia never carries certification, and neither does a leaner
+// TMDB fetch, so null here erased the cert a full details fetch or the library
+// prewarm stored, blanking the grid badges that read
+// TmdbMediaCore.certification. A title genuinely without a cert simply never
+// writes one (create keeps the null default).
+//
+// `updateExpiresAt` false is the list path: an existing row may carry the
+// longer age-aware TTL from a details write or the prewarm (3–30 days), and
+// overwriting it with the 12h list TTL let the daily purge delete a library
+// title's row ~12h after it left the lists. That path EXTENDS expiry separately.
+function coreUpsertArgs(m: CoreMediaInput, expiresAt: Date, updateExpiresAt: boolean) {
+  const mediaType = toDbMediaType(m);
+  return {
+    where: { tmdbId_mediaType: { tmdbId: m.id, mediaType } },
     create: {
-      tmdbId:        media.id,
-      mediaType:     media.mediaType === "movie" ? "MOVIE" : "TV",
-      title:         media.title,
-      posterPath:    media.posterPath    ?? null,
-      releaseYear:   media.releaseYear   || null,
-      voteAverage:   media.voteAverage   ?? 0,
-      certification: media.certification ?? null,
+      tmdbId: m.id,
+      mediaType,
+      ...coreColumns(m),
+      certification: m.certification ?? null,
       expiresAt,
     },
     update: {
-      title:         media.title,
-      posterPath:    media.posterPath    ?? null,
-      releaseYear:   media.releaseYear   || null,
-      voteAverage:   media.voteAverage   ?? 0,
-      // undefined (skip), NOT null: writers with a leaner TMDB fetch (the
-      // prewarm) have no certification on their media object — null here would
-      // erase the value a full getMovieDetails/getTVDetails stored, regressing
-      // the cert badge until the next full details fetch. A movie genuinely
-      // without a cert simply never writes one (create keeps the null default).
-      certification: media.certification ?? undefined,
-      expiresAt,
-      lastSyncedAt:  new Date(),
+      ...coreColumns(m),
+      certification: m.certification ?? undefined,
+      ...(updateExpiresAt ? { expiresAt } : {}),
+      lastSyncedAt: new Date(),
     },
-  }).catch((err) => {
-    console.error("[tmdb-core-sync] single upsert failed for tmdbId", media.id, ":", err);
-    throw err;
-  });
+  };
+}
+
+// Items are sorted before a batch upsert to prevent deadlocks on concurrent
+// transactions that write overlapping sets in different orders.
+function sortedForUpsert<T extends Pick<TmdbMedia, "id" | "mediaType">>(items: readonly T[]): T[] {
+  return [...items].sort((a, b) => a.id - b.id || a.mediaType.localeCompare(b.mediaType));
+}
+
+// Failures are thrown, not logged: every caller logs them once under its own
+// scope (tmdb.ts, the prewarm), and logging here too printed each one twice.
+export async function syncTmdbMediaCore(items: TmdbMedia[]): Promise<void> {
+  if (!items.length) return;
+  const expiresAt = new Date(Date.now() + LIST_TTL_MS);
+  const sorted = sortedForUpsert(items);
+  await prisma.$transaction(
+    [
+      ...sorted.map((m) => prisma.tmdbMediaCore.upsert(coreUpsertArgs(m, expiresAt, false))),
+      // Runs after the upserts, so every row it touches is already locked by
+      // this transaction in sorted order — it acquires no new locks. It only
+      // ever EXTENDS expiry (GREATEST semantics).
+      prisma.tmdbMediaCore.updateMany({
+        where: {
+          expiresAt: { lt: expiresAt },
+          OR: sorted.map((m) => ({ tmdbId: m.id, mediaType: toDbMediaType(m) })),
+        },
+        data: { expiresAt },
+      }),
+    ],
+    { timeout: BATCH_TX_TIMEOUT },
+  );
+}
+
+// The age-aware TTL rather than the fixed list TTL, so library items aren't
+// re-fetched sooner than they need to be.
+const detailsExpiry = (m: CoreMediaInput) => new Date(Date.now() + libraryDetailsTtl(m.releaseDate) * 1000);
+
+// Single-item upsert used after fetching a full detail page.
+export async function upsertTmdbMediaCore(media: CoreMediaInput): Promise<void> {
+  await prisma.tmdbMediaCore.upsert(coreUpsertArgs(media, detailsExpiry(media), true));
+}
+
+// upsertTmdbMediaCore for many titles in ONE transaction (sorted, like
+// syncTmdbMediaCore), each with its own age-aware TTL: one round trip for a
+// prewarm page's backfill instead of one per row. All or nothing.
+export async function upsertTmdbMediaCoreMany(items: readonly CoreMediaInput[]): Promise<void> {
+  if (!items.length) return;
+  await prisma.$transaction(
+    sortedForUpsert(items).map((m) => prisma.tmdbMediaCore.upsert(coreUpsertArgs(m, detailsExpiry(m), true))),
+    { timeout: BATCH_TX_TIMEOUT },
+  );
 }

@@ -121,6 +121,8 @@
   "adminArr.add.searchHint": "Caso contrário, ele aguarda a sincronização RSS e as buscas agendadas do próprio arr.",
   "adminArr.add.noRequest": "Isso adiciona o título diretamente — nenhuma solicitação é criada e ninguém é notificado.",
   "adminArr.add.submit": "Adicionar ao {name}",
+  "adminArr.add.noRootFolder": "{name} não tem nenhuma pasta raiz acessível — corrija primeiro as pastas raiz.",
+  "adminArr.add.noQualityProfile": "{name} não tem perfis de qualidade — crie um primeiro.",
   "adminArr.availability.announced": "Anunciado",
   "adminArr.availability.inCinemas": "Nos cinemas",
   "adminArr.availability.released": "Lançado",

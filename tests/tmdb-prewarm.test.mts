@@ -26,7 +26,11 @@
 //     unparseable body counts `failed` — a TMDB outage must not report as a
 //     successful warm — without throwing out of the page loop;
 //   - cross-source dedup on tmdbId:mediaType and the LIBRARY_PAGE_SIZE page
-//     buffer (a >500-item walk is processed in two flushes).
+//     buffer (a >500-item walk is processed in two flushes);
+//   - parity with the details path: for the same TMDB body the prewarm and
+//     getMovieDetails/getTVDetails store the SAME `:details` blob (one builder,
+//     buildDetailsMedia), undated titles and a missing production_countries
+//     included.
 //
 // Sibling ownership: tests/library-iterator.test.mts owns the iterator's
 // paging contracts (this file only feeds it in-memory library rows);
@@ -61,9 +65,13 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 
 // Dynamic imports so the stubs above genuinely precede the module-graph load.
 const { prisma } = await import("../src/lib/prisma.ts");
-const { shadowPrismaModel } = await import("./_helpers.mts");
+const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { LIBRARY_PAGE_SIZE } = await import("../src/lib/library-iterator.ts");
 const { prewarmLibraryCache } = await import("../src/lib/tmdb-prewarm.ts");
+const { getMovieDetails, getTVDetails } = await import("../src/lib/tmdb.ts");
+
+// No MDBList/OMDb key: the details path's ratings tiers stay off the wire.
+shadowPrismaModel(prisma, "setting", { findUnique: async () => null });
 
 // ── in-memory library delegates (cursor-aware findMany) ─────────────────────
 // Minimal faithful model of the where/orderBy/cursor/skip/take subset the
@@ -153,6 +161,14 @@ shadowPrismaModel(prisma, "tmdbMediaCore", {
   },
 });
 
+// The backfill's batch upsert: an array-form transaction of the stubbed
+// upserts above, all or nothing.
+let txCalls = 0;
+shadowPrismaClientMethod(prisma, "$transaction", async (ops: Promise<unknown>[]) => {
+  txCalls++;
+  return Promise.all(ops);
+});
+
 // ── scripted fetch ──────────────────────────────────────────────────────────
 type FetchCall = { url: URL; headers: Headers };
 const fetchCalls: FetchCall[] = [];
@@ -198,7 +214,7 @@ async function settleUntil(cond: () => boolean, what: string): Promise<void> {
   throw new Error(`condition never settled: ${what}`);
 }
 
-const ZERO = { total: 0, fetched: 0, backfilled: 0, skipped: 0, failed: 0 };
+const ZERO = { total: 0, fetched: 0, missing: 0, backfilled: 0, skipped: 0, failed: 0 };
 
 beforeEach(() => {
   tables.plex = [];
@@ -272,7 +288,7 @@ test("movie cold miss: exact TMDB wire shape, :details cache write with US cert 
   });
 
   const before = Date.now();
-  assert.deepEqual(await prewarmLibraryCache(), { total: 1, fetched: 1, backfilled: 0, skipped: 0, failed: 0 });
+  assert.deepEqual(await prewarmLibraryCache(), { total: 1, fetched: 1, missing: 0, backfilled: 0, skipped: 0, failed: 0 });
   const after = Date.now();
 
   // Wire: the per-type path, the movie append list (release_dates rides along
@@ -352,7 +368,7 @@ test("a stale row's unified-ratings fields survive the :details rewrite — carr
           videos: { results: [{ key: "real-key", site: "YouTube", type: "Trailer", official: true }] },
         });
 
-  assert.deepEqual(await prewarmLibraryCache(), { total: 2, fetched: 2, backfilled: 0, skipped: 0, failed: 0 });
+  assert.deepEqual(await prewarmLibraryCache(), { total: 2, fetched: 2, missing: 0, backfilled: 0, skipped: 0, failed: 0 });
 
   const blob42 = JSON.parse(cacheUpserts.find((u) => u.key === "movie:42:details")!.data) as Record<string, unknown>;
   assert.equal(blob42.title, "Fresh Title"); // the rewrite itself still lands
@@ -395,7 +411,7 @@ test("tv cold miss: tv path + tv append list, zero/empty seasons filtered, conte
     },
   });
 
-  assert.deepEqual(await prewarmLibraryCache(), { total: 1, fetched: 1, backfilled: 0, skipped: 0, failed: 0 });
+  assert.deepEqual(await prewarmLibraryCache(), { total: 1, fetched: 1, missing: 0, backfilled: 0, skipped: 0, failed: 0 });
 
   const call = fetchCalls[0];
   assert.equal(call.url.origin + call.url.pathname, "https://api.themoviedb.org/3/tv/1399");
@@ -431,7 +447,7 @@ test("the 25% threshold: a fresh row with a core row skips (zero writes); a sub-
     return jsonResponse({ id: 21, title: "Refetched", release_date: "2001-01-01" });
   };
 
-  assert.deepEqual(await prewarmLibraryCache(), { total: 2, fetched: 1, backfilled: 0, skipped: 1, failed: 0 });
+  assert.deepEqual(await prewarmLibraryCache(), { total: 2, fetched: 1, missing: 0, backfilled: 0, skipped: 1, failed: 0 });
   assert.equal(fetchCalls.length, 1);
   // The fresh+core item produced no writes; the refetched one rewrote its blob.
   assert.deepEqual(cacheUpserts.map((u) => u.key), ["movie:21:details"]);
@@ -455,13 +471,13 @@ test("fresh cache without a core row backfills from the cached JSON — no live 
   seedCacheRow("movie:31:details", 20 * HOUR_MS, "{corrupt json"); // fresh but unparseable
   // no core rows for either ⇒ both are backfill candidates
 
-  assert.deepEqual(await prewarmLibraryCache(), { total: 2, fetched: 0, backfilled: 1, skipped: 0, failed: 1 });
+  assert.deepEqual(await prewarmLibraryCache(), { total: 2, fetched: 0, missing: 0, backfilled: 1, skipped: 0, failed: 1 });
   assert.equal(fetchCalls.length, 0); // the whole point of the backfill path
   assert.equal(coreUpserts.length, 1);
   assert.deepEqual(coreUpserts[0].where, { tmdbId_mediaType: { tmdbId: 30, mediaType: "MOVIE" } });
   assert.equal(coreUpserts[0].create.title, "Cached Blob"); // parsed from the row, not fetched
   assert.ok(
-    warns.some((w) => w.includes("[prewarm] TmdbMediaCore backfill from cache failed:")),
+    warns.some((w) => w.includes("[prewarm] TmdbMediaCore backfill skipped an unusable cached blob: movie:31:details")),
     "the corrupt blob must be warned with the [prewarm] scope",
   );
 });
@@ -478,7 +494,7 @@ test("a failing item counts failed without aborting its batch or the next batch"
 
   // 6 stale items = one full CONCURRENCY batch + a single-item batch; the
   // second batch running at all proves the failure did not abort the loop.
-  assert.deepEqual(await prewarmLibraryCache(), { total: 6, fetched: 5, backfilled: 0, skipped: 0, failed: 1 });
+  assert.deepEqual(await prewarmLibraryCache(), { total: 6, fetched: 5, missing: 0, backfilled: 0, skipped: 0, failed: 1 });
   assert.equal(fetchCalls.length, 6); // every item was still attempted
   assert.ok(warns.some((w) => w.includes("[prewarm] item failed:")));
   // Batch-mates of the failed item (1,2,4,5) and the next batch (6) all wrote
@@ -507,7 +523,7 @@ test("stale fetches are bounded at CONCURRENCY=5 — the sixth is issued only af
 
   release();
   // NOTE: awaiting the run spans the real ~250ms BATCH_DELAY_MS between batches.
-  assert.deepEqual(await run, { total: 6, fetched: 6, backfilled: 0, skipped: 0, failed: 0 });
+  assert.deepEqual(await run, { total: 6, fetched: 6, missing: 0, backfilled: 0, skipped: 0, failed: 0 });
   assert.equal(fetchCalls.length, 6);
 });
 
@@ -524,10 +540,10 @@ test("fetch-level misses: a 404 writes a :missing tombstone and skips on the NEX
     return new Response("<html>not json</html>", { status: 200 });
   };
 
-  // The 404 is a definitive answer (counted fetched); the 500 and the
-  // unparseable body are TMDB failures and must reach `failed` — counting them
-  // fetched reported an outage as a successful warm.
-  assert.deepEqual(await prewarmLibraryCache(), { total: 3, fetched: 1, backfilled: 0, skipped: 0, failed: 2 });
+  // The 404 is a definitive answer, counted `missing` (not a refresh); the 500
+  // and the unparseable body are TMDB failures and must reach `failed` —
+  // counting them fetched reported an outage as a successful warm.
+  assert.deepEqual(await prewarmLibraryCache(), { total: 3, fetched: 0, missing: 1, backfilled: 0, skipped: 0, failed: 2 });
   assert.ok(!warns.some((w) => w.includes("[prewarm] item failed:")), "a counted miss is not double-logged");
   // The 404 (a dead library match) writes the negative tombstone — without it
   // every run re-fetched the same dead ids forever. 500/unparseable still
@@ -541,7 +557,7 @@ test("fetch-level misses: a 404 writes a :missing tombstone and skips on the NEX
 
   // Second run: the tombstoned id skips without a fetch; the transient pair retries.
   fetchCalls.length = 0;
-  assert.deepEqual(await prewarmLibraryCache(), { total: 3, fetched: 0, backfilled: 0, skipped: 1, failed: 2 });
+  assert.deepEqual(await prewarmLibraryCache(), { total: 3, fetched: 0, missing: 0, backfilled: 0, skipped: 1, failed: 2 });
   assert.ok(
     !fetchCalls.some((c) => c.url.pathname.endsWith("/movie/40")),
     "a live tombstone must spare the dead id its fetch",
@@ -563,7 +579,7 @@ test("a TMDB outage (429 / 401 / network SafeFetchError) counts failed, writes n
     return jsonResponse({ id, title: `M${id}`, release_date: "2010-01-01" });
   };
 
-  assert.deepEqual(await prewarmLibraryCache(), { total: 4, fetched: 1, backfilled: 0, skipped: 0, failed: 3 });
+  assert.deepEqual(await prewarmLibraryCache(), { total: 4, fetched: 1, missing: 0, backfilled: 0, skipped: 0, failed: 3 });
   assert.deepEqual(cacheUpserts.map((u) => u.key), ["movie:53:details"]);
   assert.ok(warns.some((w) => w.includes("[prewarm] TMDB movie:50 → HTTP 429")));
   assert.ok(warns.some((w) => w.includes("[prewarm] TMDB movie:51 → HTTP 401")));
@@ -589,7 +605,7 @@ test("cross-source dedup on tmdbId:mediaType and the 500-item page buffer: a 521
   seedCacheRow("tv:5:details", 20 * HOUR_MS);
   coreRows.add("5:TV");
 
-  assert.deepEqual(await prewarmLibraryCache(), { total: 521, fetched: 0, backfilled: 0, skipped: 521, failed: 0 });
+  assert.deepEqual(await prewarmLibraryCache(), { total: 521, fetched: 0, missing: 0, backfilled: 0, skipped: 521, failed: 0 });
   assert.equal(fetchCalls.length, 0);
 
   // The page buffer flushed once at LIBRARY_PAGE_SIZE and once for the tail:
@@ -602,4 +618,88 @@ test("cross-source dedup on tmdbId:mediaType and the 500-item page buffer: a 521
   assert.equal(freshnessCalls[0].keys[0], "movie:1:details");
   assert.ok(freshnessCalls[1].keys.includes("tv:5:details"));
   assert.ok(freshnessCalls[1].keys.includes("tv:5:details:missing"));
+});
+
+// ── parity with the details path ────────────────────────────────────────────
+
+test("the prewarm and the details path store the same :details blob for the same TMDB body", async () => {
+  const movieBody = {
+    id: 801, title: "Parity Film", original_title: "Film de parité", overview: "o",
+    poster_path: "/p.jpg", backdrop_path: null, release_date: "", vote_average: 6.1, vote_count: 40,
+    genres: [{ id: 18, name: "Drama" }], production_companies: [{ id: 1, name: "Studio" }],
+    origin_country: ["JP"], // and no production_countries
+    spoken_languages: [{ iso_639_1: "ja", english_name: "Japanese" }], original_language: "ja",
+    tagline: "", status: "Released", runtime: 101, homepage: "", budget: 0, revenue: 0,
+    keywords: { keywords: [{ id: 5, name: "kw" }] }, "watch/providers": { results: {} },
+    external_ids: { imdb_id: "tt0000801" },
+    release_dates: { results: [{ iso_3166_1: "US", release_dates: [{ certification: "PG", type: 3 }] }] },
+    videos: { results: [] }, belongs_to_collection: { id: 9, name: "Parity Collection" },
+  };
+  const tvBody = {
+    id: 802, name: "Parity Show", overview: "", poster_path: null, backdrop_path: null,
+    first_air_date: "", last_air_date: null, vote_average: 0, vote_count: 0,
+    networks: [{ id: 3, name: "Net" }], production_countries: [], origin_country: ["KR"],
+    episode_run_time: [45], number_of_seasons: 1, number_of_episodes: 2, in_production: true, type: "Scripted",
+    next_episode_to_air: { air_date: "2030-01-01" },
+    seasons: [{ season_number: 0, episode_count: 3 }, { season_number: 1, episode_count: 2, air_date: null, poster_path: null, name: "Season 1", overview: "" }],
+    content_ratings: { results: [{ iso_3166_1: "US", rating: "TV-14" }] },
+    external_ids: { imdb_id: "tt0000802", tvdb_id: 99 },
+    "watch/providers": { results: { US: { flatrate: [{ provider_id: 8, provider_name: "Stream", logo_path: null }] } } },
+    videos: { results: [{ key: "k", site: "YouTube", type: "Trailer", official: true }] },
+  };
+  respond = (url) => {
+    if (url.pathname === "/3/movie/801") return jsonResponse(movieBody);
+    if (url.pathname === "/3/tv/802") return jsonResponse(tvBody);
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+
+  tables.plex = [{ tmdbId: 801, mediaType: "MOVIE" }, { tmdbId: 802, mediaType: "TV" }];
+  assert.deepEqual(await prewarmLibraryCache(), { total: 2, fetched: 2, missing: 0, backfilled: 0, skipped: 0, failed: 0 });
+  const prewarmed = (key: string) => JSON.parse(cacheRows.get(key)!.data) as Record<string, unknown>;
+  const fromPrewarm = { movie: prewarmed("movie:801:details"), tv: prewarmed("tv:802:details") };
+
+  cacheRows.clear();
+  await getMovieDetails(801);
+  await getTVDetails(802);
+  assert.deepEqual(prewarmed("movie:801:details"), fromPrewarm.movie);
+  assert.deepEqual(prewarmed("tv:802:details"), fromPrewarm.tv);
+
+  // The conventions both writers now share.
+  assert.equal(fromPrewarm.movie.releaseDate, null, "an undated title stores null, not \"\"");
+  assert.equal(fromPrewarm.movie.releaseYear, null);
+  assert.deepEqual(fromPrewarm.movie.originCountryCodes, ["JP"], "a movie falls back to origin_country");
+  assert.equal("tagline" in fromPrewarm.movie, false, "absent data stays absent");
+  assert.equal(fromPrewarm.movie.imdbId, "tt0000801");
+  assert.equal(fromPrewarm.tv.tvdbId, 99);
+  assert.deepEqual(fromPrewarm.tv.originCountryCodes, ["KR"]);
+});
+
+test("the backfill writes a page's core rows in ONE transaction, takes the media type from the library item, and refuses a blob of the wrong shape", async () => {
+  tables.plex = [
+    { tmdbId: 60, mediaType: "TV" },
+    { tmdbId: 61, mediaType: "MOVIE" },
+    { tmdbId: 62, mediaType: "MOVIE" },
+  ];
+  // No mediaType in the blob: it used to be filed as TV whatever the item was.
+  seedCacheRow("tv:60:details", 20 * HOUR_MS, JSON.stringify({ id: 60, title: "Show", releaseDate: "2020-01-01" }));
+  seedCacheRow("movie:61:details", 20 * HOUR_MS, JSON.stringify({ id: 61, title: "Film", releaseDate: "2020-01-01" }));
+  seedCacheRow("movie:62:details", 20 * HOUR_MS, JSON.stringify({ id: 62, title: 62 }));
+  txCalls = 0;
+  assert.deepEqual(await prewarmLibraryCache(), { total: 3, fetched: 0, missing: 0, backfilled: 2, skipped: 0, failed: 1 });
+  assert.equal(txCalls, 1);
+  assert.deepEqual(
+    coreUpserts.map((u) => u.where.tmdbId_mediaType).sort((a, b) => a.tmdbId - b.tmdbId),
+    [{ tmdbId: 60, mediaType: "TV" }, { tmdbId: 61, mediaType: "MOVIE" }],
+  );
+});
+
+test("a failed batch falls back to one row at a time, so one bad row costs only itself", async () => {
+  tables.plex = [
+    { tmdbId: 70, mediaType: "MOVIE" },
+    { tmdbId: 71, mediaType: "MOVIE" },
+  ];
+  seedCacheRow("movie:70:details", 20 * HOUR_MS, JSON.stringify({ id: 70, title: "A" }));
+  seedCacheRow("movie:71:details", 20 * HOUR_MS, JSON.stringify({ id: 71, title: "B" }));
+  coreRejectIds = new Set([71]);
+  assert.deepEqual(await prewarmLibraryCache(), { total: 2, fetched: 0, missing: 0, backfilled: 1, skipped: 0, failed: 1 });
 });

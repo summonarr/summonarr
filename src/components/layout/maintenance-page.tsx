@@ -8,6 +8,7 @@ import {
   statePageCtaStyle,
 } from "@/components/layout/state-page";
 import { withBasePath } from "@/lib/base-path";
+import { signOutAndRedirect } from "@/components/auth/sign-out";
 import { useT } from "@/components/i18n/i18n-provider";
 
 // Shown by (app)/layout.tsx INSTEAD of the whole app for non-admins while
@@ -23,12 +24,7 @@ export function MaintenancePage({ message }: { message?: string }) {
 
   async function signOut() {
     setSigningOut(true);
-    try {
-      await fetch(withBasePath("/api/auth/sign-out"), { method: "POST", credentials: "include" });
-    } catch {
-      // Best-effort: go to the login page even if the request failed.
-    }
-    window.location.href = withBasePath("/login");
+    await signOutAndRedirect("/login");
   }
 
   const secondary = statePageCtaStyle("secondary");

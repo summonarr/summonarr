@@ -86,9 +86,17 @@ shadowPrismaModel(prisma, "mediaServerUser", {
       .map((r) => ({ id: r.id })),
 });
 
+// recentPlays — only lastActiveIso reads it here. Recorded so the read's shape
+// can be pinned.
+type RecentArgs = { take?: number; select?: Record<string, boolean>; orderBy?: unknown };
+const recentPlaysCalls: RecentArgs[] = [];
+let recentPlayRows: Array<{ startedAt: Date }> = [];
 shadowPrismaModel(prisma, "playHistory", {
   count: async () => topMediaRows.reduce((s, r) => s + Number(r.count), 0),
-  findMany: async () => [], // recentPlays — only lastActiveIso reads it
+  findMany: async (args: RecentArgs) => {
+    recentPlaysCalls.push(args);
+    return recentPlayRows;
+  },
 });
 
 // Only the topMedia aggregate is modelled; the other eleven queries in the
@@ -156,7 +164,10 @@ function topMedia(over: Partial<TopMediaRow> = {}): TopMediaRow {
 
 type StatsBody = {
   linked: boolean;
-  stats: { topMedia: { title: string; tmdbId: number | null; posterPath: string | null }[] } | null;
+  stats: {
+    topMedia: { title: string; tmdbId: number | null; posterPath: string | null }[];
+    lastActiveIso: string | null;
+  } | null;
 };
 
 async function fetchStats(token: string): Promise<StatsBody> {
@@ -176,6 +187,8 @@ beforeEach(() => {
   cacheRows = [];
   coreQueries = 0;
   cacheQueries = 0;
+  recentPlaysCalls.length = 0;
+  recentPlayRows = [];
 });
 
 // ── tests ────────────────────────────────────────────────────────────────────
@@ -247,4 +260,21 @@ test("no top media ⇒ no poster lookup at all; an unlinked account is stats-fre
   assert.equal(body.linked, false);
   assert.equal(body.stats, null);
   assert.equal(coreQueries, 0);
+});
+
+test("the recent-plays read fetches only the newest few rows and only the columns its readers use — never the IP address", async () => {
+  const token = await signedInUser();
+  msuRows.push({ id: "msu-5", userId: `user-${seq}`, source: "plex", sourceUserId: "p-5" });
+  const newest = new Date("2026-10-30T21:15:00.000Z");
+  recentPlayRows = [{ startedAt: newest }, { startedAt: new Date("2026-10-29T20:00:00.000Z") }];
+
+  const body = await fetchStats(token);
+  assert.equal(body.stats!.lastActiveIso, newest.toISOString(), "lastActiveIso is still the newest play's start");
+  assert.equal(recentPlaysCalls.length, 1);
+  const args = recentPlaysCalls[0];
+  assert.deepEqual(args.orderBy, { startedAt: "desc" });
+  assert.ok(typeof args.take === "number" && args.take <= 12, `at most the admin page's 12 rows, got take=${args.take}`);
+  assert.ok(args.select, "a select, not every PlayHistory column");
+  assert.equal(args.select!.ipAddress, undefined, "the IP address is never read into the stats bundle");
+  assert.equal(args.select!.startedAt, true);
 });

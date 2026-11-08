@@ -29,13 +29,6 @@ test("normalizePlexAccountId: the owner's local id '1' becomes their plex.tv id;
   assert.equal(W.normalizePlexAccountId(null, "555"), null);
 });
 
-test("historyStopBefore: any never-read pair ⇒ the whole history; otherwise the OLDEST read point minus the overlap", () => {
-  assert.equal(W.historyStopBefore([{ id: "a", plexAccountId: "1", historyReadTo: T(10) }, { id: "b", plexAccountId: "2", historyReadTo: null }]), undefined);
-  assert.equal(W.historyStopBefore([]), undefined);
-  const b = W.historyStopBefore([{ id: "a", plexAccountId: "1", historyReadTo: T(10) }, { id: "b", plexAccountId: "2", historyReadTo: T(5) }]);
-  assert.deepEqual(b, new Date(T(5).getTime() - W.WATCH_SYNC_HISTORY_OVERLAP_MS));
-});
-
 test("newestViewedAt: the latest dated entry; null with none dated", () => {
   assert.deepEqual(W.newestViewedAt([movie("m1", "1", T(2)), movie("m2", "1", null), movie("m1", "2", T(7))]), T(7));
   assert.equal(W.newestViewedAt([movie("m1", "1", null)]), null);
@@ -149,9 +142,9 @@ test("playsForPair: a Plex history entry for an item we scrobbled (echo) is skip
   assert.deepEqual(r.plays.map((p) => p.tmdbId), [100]);
 });
 
-test("jellyfinStopBefore / newestPlayedAt", () => {
-  assert.equal(W.jellyfinStopBefore(null), undefined);
-  assert.deepEqual(W.jellyfinStopBefore(T(10)), new Date(T(10).getTime() - W.WATCH_SYNC_HISTORY_OVERLAP_MS));
+test("readBackTo: a never-read pair reads everything; otherwise its read point minus the overlap / newestPlayedAt", () => {
+  assert.equal(W.readBackTo(null), undefined);
+  assert.deepEqual(W.readBackTo(T(10)), new Date(T(10).getTime() - W.WATCH_SYNC_HISTORY_OVERLAP_MS));
   assert.deepEqual(W.newestPlayedAt([
     { kind: "movie", itemKey: "a", showKey: null, seasonNumber: null, episodeNumber: null, lastPlayedAt: T(3) },
     { kind: "movie", itemKey: "b", showKey: null, seasonNumber: null, episodeNumber: null, lastPlayedAt: null },

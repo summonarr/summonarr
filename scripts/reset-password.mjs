@@ -32,6 +32,7 @@
 //     node scripts/reset-password.mjs user@example.com --stdin
 
 import { Client } from "pg";
+import { existsSync, readFileSync } from "node:fs";
 import { scrypt as scryptCb, randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 
@@ -113,7 +114,20 @@ function decodeCredential(value) {
   }
 }
 
+// docker-entrypoint.sh reads the bundled Postgres password from this Docker
+// secret when it is mounted (it wins over the env var), and a `docker compose
+// exec` process never sees the entrypoint's export — so read it the same way.
+const POSTGRES_PASSWORD_FILE = "/run/secrets/postgres_password";
+function loadPostgresPasswordFile() {
+  if (!existsSync(POSTGRES_PASSWORD_FILE)) return;
+  // The entrypoint's `$(cat …)` drops trailing newlines; match it.
+  const value = readFileSync(POSTGRES_PASSWORD_FILE, "utf8").replace(/\n+$/, "");
+  if (!value) throw new Error(`${POSTGRES_PASSWORD_FILE} is empty`);
+  process.env.POSTGRES_PASSWORD = value;
+}
+
 function connectionParams() {
+  loadPostgresPasswordFile();
   if (process.env.PGHOST && process.env.PGUSER && process.env.PGPASSWORD && process.env.PGDATABASE) {
     return {
       user: process.env.PGUSER,
@@ -152,6 +166,8 @@ function connectionParams() {
 
 // The same floor the app enforces at registration, password change and admin
 // create — a break-glass reset must not be the one way to set a weaker password.
+// Mirrors MIN_PASSWORD_LENGTH in src/lib/password-policy.ts (this script ships
+// standalone, with no app imports).
 const MIN_PASSWORD_LENGTH = 12;
 
 // The ADMIN superbit (Permission.ADMIN in src/lib/permissions.ts), as the

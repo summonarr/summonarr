@@ -13,10 +13,15 @@ import { emitSSE } from "@/lib/sse-emitter";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { canPostComment, canReadThread, parseCommentBody } from "@/lib/request-comments";
 import { announceRequestComment } from "@/lib/request-comment-notify";
+import { THREAD_READ_CAP } from "@/lib/api-body-limits";
+import { splitAtCap, truncationHeaders } from "@/lib/truncation";
+import { olderThanWhere, parseThreadCursor } from "@/lib/thread-cursor";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
 const FEATURE_KEY = "feature.behavior.requestComments";
+// The newest comments a thread read returns; older ones drop off (X-Truncated).
+const MAX_THREAD_MESSAGES = THREAD_READ_CAP;
 
 // Mirrors the issue messages route: a thread is private to the requester and
 // the people who manage requests. `email` is sent to managers only — the
@@ -38,13 +43,20 @@ export const GET = withAuth(async (req, { params }: RouteContext, session) => {
     return NextResponse.json({ error: t("apiUser.comments.disabled") }, { status: 403 });
   }
 
-  const comments = await prisma.requestComment.findMany({
-    where: { requestId: id },
+  // The NEWEST 500, answered oldest first: past the cap it is the oldest that
+  // drop off, never the latest replies (the same window a re-request carries —
+  // request-comment-carry.ts). The id breaks createdAt ties so the cut is stable.
+  // `?before=<createdAt>|<id>` reads the page of comments older than that one
+  // (same shape, same cap); X-Truncated then says whether still older ones remain.
+  const before = parseThreadCursor(req.nextUrl.searchParams.get("before"));
+  const newestFirst = await prisma.requestComment.findMany({
+    where: { requestId: id, ...olderThanWhere(before) },
     include: { author: { select: { name: true, role: true, ...(isManager ? { email: true } : {}) } } },
-    orderBy: { createdAt: "asc" },
-    take: 500,
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: MAX_THREAD_MESSAGES + 1,
   });
-  return NextResponse.json(comments);
+  const { rows, truncated } = splitAtCap(newestFirst, MAX_THREAD_MESSAGES);
+  return NextResponse.json(rows.reverse(), { headers: truncationHeaders(truncated, MAX_THREAD_MESSAGES) });
 });
 
 export const POST = withAuth(async (req, { params }: RouteContext, session) => {
@@ -128,7 +140,8 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
     },
     authorId: session.user.id,
     authorName: session.user.name ?? session.user.email ?? "Someone",
-    requesterFacingAuthor: session.user.name ?? t("shared.thread.admin"),
+    // The requester's label is resolved in THEIR language (requesterFacingAuthor).
+    authorDisplayName: session.user.name ?? null,
     text,
     authorIsManager: isManager,
   });

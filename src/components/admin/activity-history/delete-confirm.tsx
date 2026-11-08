@@ -1,7 +1,8 @@
 "use client";
 
 // Modal confirmation for deleting a single play record. Pure presentation —
-// the parent owns the deleting/error state and the DELETE call.
+// the parent owns the deleting/error state and the DELETE call
+// (useHistoryDelete).
 
 import {
   Dialog,
@@ -10,16 +11,9 @@ import {
   DialogPortal,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { rich } from "@/components/settings/forms/rich";
 import type { HistoryRow } from "./types";
 import { useT } from "@/components/i18n/i18n-provider";
-
-// Splits a translated template on {name} placeholders and drops in nodes.
-function rich(template: string, nodes: Record<string, React.ReactNode>): React.ReactNode[] {
-  return template.split(/(\{\w+\})/).map((part, i) => {
-    const m = /^\{(\w+)\}$/.exec(part);
-    return m && m[1] in nodes ? <span key={i}>{nodes[m[1]]}</span> : part;
-  });
-}
 
 export function DeleteConfirm({
   row,
@@ -35,6 +29,7 @@ export function DeleteConfirm({
   onCancel: () => void;
 }) {
   const t = useT();
+  const segments = row.segmentCount;
   return (
     <Dialog
       open
@@ -83,7 +78,7 @@ export function DeleteConfirm({
             title: <span style={{ color: "var(--ds-fg)" }}>{row.title}</span>,
             user: (
               <span style={{ color: "var(--ds-fg)" }}>
-                {row.mediaServerUser.username}
+                {row.mediaServerUser?.username ?? t("adminActivity.common.unknownUser")}
               </span>
             ),
           })}
@@ -91,13 +86,13 @@ export function DeleteConfirm({
               paused and resumed, so it can stand for several database rows.
               Deleted play history cannot be rebuilt (guardrail 19: the live
               poller is its only writer), so warn before deleting several. */}
-          {(row.segmentCount ?? 1) > 1 && (
+          {segments > 1 && (
             <>
               {" "}
               {rich(t("adminActivity.deleteConfirm.sittings"), {
                 sittings: (
                   <span style={{ color: "var(--ds-fg)" }}>
-                    {t("adminActivity.deleteConfirm.sittingsCount", { count: row.segmentCount ?? 1 })}
+                    {t("adminActivity.deleteConfirm.sittingsCount", { count: segments })}
                   </span>
                 ),
               })}

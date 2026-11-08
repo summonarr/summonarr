@@ -120,11 +120,16 @@ shadowPrismaModel(prisma, "user", {
   findMany: async () => { rec("user.findMany"); return []; },
   groupBy: async () => [],
 });
+// groupBy answers keyed "<model>:<by fields>"; anything unset groups to nothing.
+const groupByFixture = new Map<string, unknown[]>();
 for (const m of ["mediaRequest", "plexLibraryItem", "jellyfinLibraryItem", "issue", "tVEpisodeCache"]) {
   shadowPrismaModel(prisma, m, {
     count: async (args: unknown) => { rec(`${m}.count`, args); return 3; },
     findMany: async () => { rec(`${m}.findMany`); return []; },
-    groupBy: async () => { rec(`${m}.groupBy`); return []; },
+    groupBy: async (args: { by: string[] }) => {
+      rec(`${m}.groupBy`, args);
+      return groupByFixture.get(`${m}:${[args.by].flat().join(",")}`) ?? [];
+    },
     aggregate: async () => ({ _count: { _all: 0 }, _sum: {} }),
   });
 }
@@ -136,7 +141,20 @@ shadowPrismaModel(prisma, "setting", {
   },
   findMany: async () => [],
 });
-shadowPrismaModel(prisma, "auditLog", { create: async (args: unknown) => { rec("auditLog.create", args); return { id: "a1" }; } });
+const auditLogStub = {
+  create: async (args: unknown) => { rec("auditLog.create", args); return { id: "a1" }; },
+  update: async (args: unknown) => { rec("auditLog.update", args); return { id: "a1" }; },
+};
+shadowPrismaModel(prisma, "auditLog", auditLogStub);
+// The export's snapshot transaction. pg_tables comes back empty, so every table
+// is "skipped" and a drained export completes without a database.
+shadowPrismaClientMethod(prisma, "$transaction", async (fn: unknown) => {
+  rec("$transaction");
+  return (fn as (tx: unknown) => Promise<unknown>)({
+    $executeRawUnsafe: async () => 0,
+    $queryRawUnsafe: async () => [],
+  });
+});
 
 // $queryRaw feeds the stats aggregates; BigInt on purpose, so the route's own
 // serialization is what has to cope.
@@ -147,7 +165,18 @@ shadowPrismaClientMethod(prisma, "$queryRaw", async (strings: TemplateStringsArr
   if (sql.includes("month")) return [{ month: "2026-01", count: 5n }];
   return [];
 });
-shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async () => { rec("$queryRawUnsafe"); return []; });
+// A test can hold the export's first query (its pg_tables read) open.
+let holdQuery: { entered: () => void; until: Promise<void> } | null = null;
+shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async () => {
+  rec("$queryRawUnsafe");
+  const hold = holdQuery;
+  if (hold) {
+    holdQuery = null;
+    hold.entered();
+    await hold.until;
+  }
+  return [];
+});
 
 const stats = await import("../src/app/api/admin/stats/route.ts");
 const dbExport = await import("../src/app/api/admin/backup/db-export/route.ts");
@@ -305,6 +334,7 @@ test("export accepts a password at exactly the 12-character floor", async () => 
   const t = await mintSession();
   const res = await getExport(t);
   assert.notEqual(res.status, 503);
+  await res.body?.cancel(); // frees the one-export slot for the tests below
 });
 
 test("export rejects an 11-character password", async () => {
@@ -423,6 +453,20 @@ for (const [label, over] of [
   });
 }
 
+test("a chunk with NO index header is a 400 — never read as chunk 0, so it restarts nothing and spends no restore attempt", async () => {
+  const t = await mintSession();
+  const { "x-chunk-index": _dropped, ...noIndex } = chunkHeaders();
+  for (let i = 0; i < 6; i++) {
+    const res = await postChunk(t, noIndex);
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, /upload headers/i);
+  }
+  // Six refusals later the chunk-0 budget (5 an hour) is untouched.
+  const ok = chunkHeaders();
+  assert.notEqual((await postChunk(t, ok)).status, 429);
+  await cancelUpload(t, ok["x-upload-id"]); // frees the one upload slot for the tests below
+});
+
 test("import rejects a file larger than MAX_CIPHERTEXT_BYTES with 413", async () => {
   const t = await mintSession();
   const res = await postChunk(t, chunkHeaders({ "x-file-size": String(MAX_CIPHERTEXT_BYTES + 1) }));
@@ -467,6 +511,55 @@ test("no rejected chunk ever writes an audit row — nothing was imported", asyn
   await postChunk(t, chunkHeaders({ "x-file-size": String(MAX_CIPHERTEXT_BYTES + 1) }));
   await postChunk(t, chunkHeaders({ "x-chunk-index": "9" }));
   assert.equal(opsOf("auditLog.create").length, 0);
+});
+
+// A whole upload in one chunk, so the import runs. Neither body below can get
+// past the pipeline's checks, so nothing is ever restored.
+async function uploadWhole(token: string, body: Uint8Array): Promise<Response> {
+  return postChunk(token, chunkHeaders({ "x-chunk-total": "1", "x-file-size": String(body.byteLength) }), body);
+}
+
+test("a restore that ran and failed is audited as failed (wrong format version)", async () => {
+  const t = await mintSession();
+  // The encrypted-backup magic, then a version byte no reader knows: the
+  // decryptor refuses it before any key derivation.
+  const body = new Uint8Array(64);
+  body.set(new TextEncoder().encode("RBKBKP01"), 0);
+  body[8] = 9;
+  const res = await uploadWhole(t, body);
+  assert.equal(res.status, 400);
+  const created = opsOf("auditLog.create");
+  assert.equal(created.length, 1, "a failed restore attempt must leave a trail");
+  const data = (created[0].args as { data: { action: string; target: string; details: string } }).data;
+  assert.equal(data.action, "BACKUP_IMPORT");
+  assert.equal(data.target, "backup:full-db");
+  const details = JSON.parse(data.details) as Record<string, unknown>;
+  assert.equal(details.outcome, "failed");
+  assert.equal(details.status, 400);
+  assert.equal(details.mode, "admin-chunked");
+});
+
+test("a failed restore's audit row never carries the backup's SQL", async () => {
+  // Validation errors quote up to 80 characters of each blocked statement.
+  const { wrapEncryptStream } = await import("../src/lib/backup-crypto.ts");
+  const sql = new TextEncoder().encode('DROP TABLE "User" CASCADE /* sentinel-sql */;\n');
+  const enc = wrapEncryptStream(new ReadableStream<Uint8Array>({
+    start(c) { c.enqueue(sql); c.close(); },
+  }), GOOD_PASSWORD);
+  const body = new Uint8Array(await new Response(enc).arrayBuffer());
+  const t = await mintSession();
+  const res = await uploadWhole(t, body);
+  assert.equal(res.status, 200);
+  const json = await res.json();
+  assert.equal(json.ok, false);
+  assert.match(String(json.errors?.[0]), /sentinel-sql/, "the client still gets the list");
+  const created = opsOf("auditLog.create");
+  assert.equal(created.length, 1);
+  const details = (created[0].args as { data: { details: string } }).data.details;
+  assert.ok(!details.includes("sentinel-sql") && !details.includes("DROP TABLE"), details);
+  const parsed = JSON.parse(details) as Record<string, unknown>;
+  assert.equal(parsed.outcome, "failed");
+  assert.equal(parsed.errorCount, 1);
 });
 
 // ── DELETE (cancel) ──────────────────────────────────────────────────────────
@@ -529,12 +622,126 @@ test("export audits the pull — an untracked database export would be invisible
 test("a failing audit write does not turn a successful export into a 500", async () => {
   shadowPrismaModel(prisma, "auditLog", {
     create: async () => { rec("auditLog.create"); throw new Error("audit down"); },
+    update: async () => { rec("auditLog.update"); throw new Error("audit down"); },
   });
   const t = await mintSession();
   const res = await getExport(t);
   assert.equal(res.status, 200, "the stream was already built; a failed audit must not 500 it");
   await res.body?.cancel();
-  shadowPrismaModel(prisma, "auditLog", { create: async (args: unknown) => { rec("auditLog.create", args); return { id: "a1" }; } });
+  await settled();
+  assert.equal(opsOf("auditLog.update").length, 0, "no row was written, so none is finalized");
+  shadowPrismaModel(prisma, "auditLog", auditLogStub);
+});
+
+// Waits for the export's producer to unwind after a cancel or a drain.
+async function settled(): Promise<void> {
+  for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+}
+
+async function drain(res: Response): Promise<number> {
+  const reader = res.body!.getReader();
+  let bytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return bytes;
+    bytes += value.byteLength;
+  }
+}
+
+function auditDetails(op: { args?: unknown }): Record<string, unknown> {
+  const data = (op.args as { data: { details: string } }).data;
+  return JSON.parse(data.details) as Record<string, unknown>;
+}
+
+test("the export row is written as started, then finalized as aborted when the client cancels", async () => {
+  const t = await mintSession();
+  const res = await getExport(t);
+  assert.equal(res.status, 200);
+  const created = opsOf("auditLog.create");
+  assert.equal(created.length, 1);
+  assert.equal(auditDetails(created[0]).status, "started");
+  await res.body?.cancel();
+  await settled();
+  const updates = opsOf("auditLog.update");
+  assert.equal(updates.length, 1, "the row must record how the export ended");
+  assert.deepEqual((updates[0].args as { where: unknown }).where, { id: "a1" });
+  assert.equal(auditDetails(updates[0]).status, "aborted");
+});
+
+test("a fully drained export is finalized as completed, with its row count", async () => {
+  const t = await mintSession();
+  const res = await getExport(t);
+  assert.equal(res.status, 200);
+  assert.ok((await drain(res)) > 0, "the encrypted dump has a body");
+  await settled();
+  const updates = opsOf("auditLog.update");
+  assert.equal(updates.length, 1);
+  const details = auditDetails(updates[0]);
+  assert.equal(details.status, "completed");
+  assert.equal(details.totalRows, 0);
+});
+
+// ── one export at a time ─────────────────────────────────────────────────────
+
+test("a second export while one is still streaming is refused with 409, unaudited", async () => {
+  // Each export holds a REPEATABLE READ transaction (and a pooled connection)
+  // for as long as its client takes to download.
+  const t = await mintSession();
+  const first = await getExport(t);
+  assert.equal(first.status, 200);
+  ops = [];
+  const second = await getExport(t);
+  assert.equal(second.status, 409);
+  assert.match((await second.json()).error, /already running/i);
+  assert.equal(opsOf("auditLog.create").length, 0, "a refused export writes no audit row");
+
+  // Another admin is refused too: the slot is process-wide.
+  const other = await mintSession();
+  assert.equal((await getExport(other)).status, 409);
+
+  // Cancelling the first frees the slot at once.
+  await first.body?.cancel();
+  const third = await getExport(t);
+  assert.equal(third.status, 200);
+  await third.body?.cancel();
+});
+
+test("a cancel frees the slot at once, even while the export is waiting on the database", async () => {
+  let entered!: () => void;
+  const inQuery = new Promise<void>((r) => { entered = r; });
+  let releaseQuery!: () => void;
+  holdQuery = { entered, until: new Promise<void>((r) => { releaseQuery = r; }) };
+  const t = await mintSession();
+  const first = await getExport(t);
+  assert.equal(first.status, 200);
+  // Read until the producer is inside its first query.
+  const reader = first.body!.getReader();
+  let reachedQuery = false;
+  void inQuery.then(() => { reachedQuery = true; });
+  // A read pends once the producer stops writing, so race each one.
+  for (let i = 0; i < 20 && !reachedQuery; i++) await Promise.race([reader.read(), inQuery]);
+  assert.ok(reachedQuery, "the producer must be waiting on the database");
+
+  await reader.cancel();
+  const second = await getExport(t);
+  assert.equal(second.status, 200, "the slot must not wait for the stuck producer");
+
+  // The first producer unwinds later; its release must not free the slot the
+  // second export now holds.
+  releaseQuery();
+  await settled();
+  const third = await getExport(t);
+  assert.equal(third.status, 409);
+  await second.body?.cancel();
+});
+
+test("a drained export frees the slot too", async () => {
+  const t = await mintSession();
+  await drain(await getExport(t));
+  await settled();
+  const next = await getExport(t);
+  assert.equal(next.status, 200);
+  await next.body?.cancel();
 });
 
 test("the export never echoes BACKUP_DB_PASSWORD in its headers", async () => {
@@ -582,8 +789,35 @@ test("stats is read-only", async () => {
 test("stats reads the counts it claims to report", async () => {
   const t = await mintSession();
   await getStats(t);
-  assert.ok(opsOf("mediaRequest.count").length >= 5, "request status breakdown");
   assert.equal(opsOf("user.count").length, 1);
-  assert.ok(opsOf("issue.count").length >= 2, "total + open issues");
   assert.ok(opsOf("$queryRaw").length >= 2, "fulfillment average + monthly series");
+});
+
+test("stats: the request and issue breakdowns are one grouped read each, never a count per figure", async () => {
+  groupByFixture.set("mediaRequest:status", [
+    { status: "PENDING", _count: { _all: 4 } },
+    { status: "APPROVED", _count: { _all: 3 } },
+    { status: "AVAILABLE", _count: { _all: 7 } },
+    // DECLINED has no rows, so no group: it must read 0, not be missing.
+  ]);
+  groupByFixture.set("mediaRequest:mediaType", [{ mediaType: "MOVIE", _count: { _all: 9 } }, { mediaType: "TV", _count: { _all: 5 } }]);
+  groupByFixture.set("issue:status", [
+    { status: "OPEN", _count: { _all: 2 } },
+    { status: "RESOLVED", _count: { _all: 6 } },
+  ]);
+  try {
+    ops = [];
+    const t = await mintSession();
+    const body = await (await getStats(t)).json();
+    // The iOS AdminStats contract: same fields, same types.
+    assert.deepEqual(body.requests, { total: 14, pending: 4, approved: 3, available: 7, declined: 0, movie: 9, tv: 5 });
+    assert.deepEqual(body.issues, { total: 8, open: 2, inProgress: 0 });
+    assert.equal(opsOf("mediaRequest.count").length, 0);
+    assert.equal(opsOf("issue.count").length, 0);
+    const grouped = (name: string) => opsOf(name).map((o) => (o.args as { by: string[] }).by);
+    assert.deepEqual(grouped("mediaRequest.groupBy"), [["status"], ["mediaType"]]);
+    assert.deepEqual(grouped("issue.groupBy"), [["status"]]);
+  } finally {
+    groupByFixture.clear();
+  }
 });

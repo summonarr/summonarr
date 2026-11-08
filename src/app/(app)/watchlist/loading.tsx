@@ -1,11 +1,11 @@
 // Skeleton for the Watchlist: PageHeader, then WatchlistGrid's auto-fill 140px
 // grid of 2:3 poster tiles (radius 8 + hairline) with a one-line title under
 // each — the same grid, so nothing shifts when the real rows stream in.
-import { Bar, SKELETON_FILL, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { Bar, SKELETON_FILL, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle />
       <div>
         <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))" }}>
@@ -17,6 +17,6 @@ export default function Loading() {
           ))}
         </div>
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

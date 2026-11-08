@@ -37,6 +37,9 @@ export function LiveRefresh({
     requestPageRefresh(() => router.refresh());
   });
 
+  // LiveRefresh is rendered once per page, so its unmount means the page is
+  // going away: the refresh it drops (a button's, an event's, or one a dialog
+  // deferred) would only re-render the NEXT page.
   useEffect(() => () => cancelPageRefresh(), []);
 
   return null;

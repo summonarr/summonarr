@@ -500,6 +500,30 @@ test("arr-state: a scripted live Radarr check drives liveArrApi.result=true even
   assert.equal(writes.length, 0, "a live GET check writes nothing");
 });
 
+test("arr-state: a Radarr OUTAGE is reported as a failed live check — never a confident 'not wanted'", async () => {
+  // isMovieWantedInRadarr used to swallow every error into `false`, so during an
+  // outage the movie diagnostic read like a definitive answer and the route's own
+  // failure branch could never fire. It now throws, like the Sonarr completion check.
+  configureRadarr();
+  fetchImpl = (url) => {
+    if (url.pathname.endsWith("/api/v3/movie")) return jsonResponse({ message: "Service Unavailable" }, 503);
+    throw new Error(`unexpected Arr path ${url.pathname}`);
+  };
+  const token = await mintSession();
+  const res = await arrStateGET(arrReq(token, "?tmdbId=603&type=movie"), undefined);
+  assert.equal(res.status, 200, "an upstream Radarr failure degrades the section, never the whole dump");
+  const body = await bodyOf(res);
+
+  const instances = body.instances as Array<{ slug: string; liveArrApi: { result: boolean; error?: string } }>;
+  assert.deepEqual(instances[0].liveArrApi, { result: false, error: "live Arr check failed" });
+  assert.deepEqual(body.liveArrApi, { result: false, error: "live Arr check failed" }, "the legacy section carries the same flag");
+  const logged = errors.filter((e) => e.startsWith("[arr-state] live Arr check failed"));
+  assert.equal(logged.length, 1, "the real failure is logged server-side, once");
+  assert.ok(!logged[0].includes("radarr.debug-test"), "the log line names no server URL");
+  assert.ok(!JSON.stringify(body).includes("radarr.debug-test"), "the configured server URL never reaches the client");
+  assert.equal(writes.length, 0);
+});
+
 test("arr-state: with a legacy 4K instance configured the `fourK` section is derived from the per-instance pass — exactly one live call and one row read per instance", async () => {
   configureRadarr();
   settings.set("radarr4kUrl", "http://radarr4k.debug-test:7878");
@@ -596,7 +620,7 @@ test("arr-state: a FAILED Sonarr lookup reports cachedMapping=null + the generic
   seedCache("tvdb-to-tmdb:5678", { tmdbId: null }, 60_000);
   fetchImpl = (url) => {
     if (url.pathname.endsWith("/series/lookup")) return jsonResponse({ error: "sonarr down" }, 503);
-    // The per-instance live check swallows its own failure (isSeriesWantedInSonarr → false).
+    // Never reached: the failed lookup throws out of getSonarrSeriesCompletion first.
     if (url.pathname.endsWith("/api/v3/series")) return jsonResponse([]);
     throw new Error(`unexpected Arr path ${url.pathname}`);
   };
@@ -727,4 +751,17 @@ test("ratings-state HEADLINE: WITH &live=1 fetchUnifiedRatings runs — a `live`
   assert.equal(live.found, true);
   assert.ok(fetchCalls.length >= 1, "the live probe issued at least one provider request");
   assert.ok(fetchCalls.some((u) => u.hostname === "api.mdblist.com"), "MDBList (the primary source) was queried");
+});
+
+test("ratings-state: live probes spend provider quota, so past five a minute per admin they are 429 with Retry-After — the read-only dump never is", async () => {
+  // No provider key configured: each probe answers without leaving the process.
+  const token = await mintSession();
+  for (let i = 0; i < 5; i++) {
+    assert.equal((await ratingsStateGET(ratingsReq(token, "?tmdbId=603&type=movie&live=1"), undefined)).status, 200, `probe ${i + 1}`);
+  }
+  const over = await ratingsStateGET(ratingsReq(token, "?tmdbId=603&type=movie&live=1"), undefined);
+  assert.equal(over.status, 429);
+  assert.equal(over.headers.get("Retry-After"), "60");
+  assert.equal((await ratingsStateGET(ratingsReq(token, "?tmdbId=603&type=movie"), undefined)).status, 200, "the read-only dump is not limited");
+  assert.equal((await ratingsStateGET(ratingsReq(await mintSession(), "?tmdbId=603&type=movie&live=1"), undefined)).status, 200, "the budget is per admin");
 });

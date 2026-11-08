@@ -211,15 +211,21 @@ type LibRow = { tmdbId: number; mediaType: string; serverInstance: string };
 let plexLib: LibRow[] = [];
 let jellyfinLib: LibRow[] = [];
 
+// A (tmdbId, mediaType) condition as the routes write it: one id, or an `in` list
+// (the shared enrichment's per-type halves).
+type IdCond = { tmdbId?: number | { in: number[] }; mediaType?: string };
+const matchesIdCond = (c: IdCond, r: { tmdbId: number; mediaType: string }) =>
+  (c.mediaType === undefined || c.mediaType === r.mediaType) &&
+  (c.tmdbId === undefined || (typeof c.tmdbId === "number" ? c.tmdbId === r.tmdbId : c.tmdbId.in.includes(r.tmdbId)));
+
 function libModel(name: string, rows: () => LibRow[]) {
-  const scoped = (args: { where: { serverInstance?: { in: string[] }; OR?: Array<{ tmdbId: number; mediaType: string }>; tmdbId?: number; mediaType?: string } }) => {
+  const scoped = (args: { where: IdCond & { serverInstance?: { in: string[] }; OR?: IdCond[] } }) => {
     const inst = args.where.serverInstance?.in;
     assert.ok(Array.isArray(inst), `${name} query is not serverInstance-scoped — a restricted server would leak`);
     return rows().filter((r) => {
       if (!inst.includes(r.serverInstance)) return false;
-      if (args.where.OR) return args.where.OR.some((c) => c.tmdbId === r.tmdbId && c.mediaType === r.mediaType);
-      if (args.where.tmdbId !== undefined) return r.tmdbId === args.where.tmdbId && (args.where.mediaType === undefined || r.mediaType === args.where.mediaType);
-      return true;
+      if (args.where.OR) return args.where.OR.some((c) => matchesIdCond(c, r));
+      return matchesIdCond(args.where, r);
     });
   };
   return {
@@ -255,19 +261,20 @@ let requestRows: ReqRow[] = [];
 // Named so the one test that swaps in a throwing stub can put THIS back in a
 // finally, rather than re-declaring a second copy that can drift.
 const mediaRequestModel = {
-  findMany: async (args: { where: { OR?: Array<{ tmdbId: number; mediaType: string }>; requestedBy?: string; status?: unknown } }) => {
+  findMany: async (args: { where: { OR?: IdCond[]; requestedBy?: string; status?: unknown; permanentlyDeclined?: boolean } }) => {
     rec("mediaRequest.findMany", args.where);
     return requestRows.filter((r) => {
       if (r.status === "DECLINED") return false;
+      if (args.where.permanentlyDeclined === true) return false;
       if (args.where.requestedBy !== undefined && r.requestedBy !== args.where.requestedBy) return false;
-      if (args.where.OR) return args.where.OR.some((c) => c.tmdbId === r.tmdbId && c.mediaType === r.mediaType);
+      if (args.where.OR) return args.where.OR.some((c) => matchesIdCond(c, r));
       return true;
     });
   },
 };
 shadowPrismaModel(prisma, "mediaRequest", mediaRequestModel);
 
-for (const m of ["radarrWantedItem", "sonarrWantedItem"]) {
+for (const m of ["radarrWantedItem", "sonarrWantedItem", "radarrAvailableItem", "sonarrAvailableItem"]) {
   shadowPrismaModel(prisma, m, {
     findMany: async (args: unknown) => { rec(`${m}.findMany`, args); return []; },
   });
@@ -281,7 +288,11 @@ shadowPrismaModel(prisma, "tmdbMediaCore", {
   findMany: async () => [], findUnique: async () => null,
   upsert: async () => ({}), createMany: async () => ({ count: 0 }),
 });
-shadowPrismaModel(prisma, "hiddenItem", { findMany: async () => [] });
+// The viewer's "not interested" titles (userId → "tmdbId:mediaType").
+let hiddenRows: Array<{ userId: string; tmdbId: number; mediaType: string }> = [];
+shadowPrismaModel(prisma, "hiddenItem", {
+  findMany: async (args: { where: { userId: string } }) => hiddenRows.filter((h) => h.userId === args.where.userId),
+});
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) =>
   Array.isArray(arg) ? Promise.all(arg) : (arg as (tx: unknown) => Promise<unknown>)(prisma));
 
@@ -327,6 +338,7 @@ function registerInstance(service: "plex" | "jellyfin", slug: string, restricted
 
 beforeEach(() => {
   ops = [];
+  hiddenRows = [];
   fetchCalls.length = 0;
   warns.length = 0;
   errors.length = 0;
@@ -347,7 +359,11 @@ test("person: an anonymous request is 401 and never reaches TMDB", async () => {
   assert.deepEqual(fetchCalls, []);
 });
 
-for (const [label, id] of [["a non-numeric id", "abc"], ["zero", "0"], ["a negative id", "-4"], ["an empty id", ""]] as const) {
+for (const [label, id] of [
+  ["a non-numeric id", "abc"], ["zero", "0"], ["a negative id", "-4"], ["an empty id", ""],
+  // Non-canonical spellings Number() accepted: "1e3" is the integer 1000.
+  ["a fractional id", "1.5"], ["an exponent id", "1e3"], ["a hex id", "0x1F"], ["a padded id", " 12 "], ["a leading-zero id", "012"],
+] as const) {
   test(`person: ${label} is 400 and never reaches TMDB`, async () => {
     const me = await mintSession();
     const res = await getPerson(me.token, id);
@@ -499,6 +515,17 @@ test("person: a provider-narrowed viewer's badge mask does not widen the underly
 
 // ── person: per-user request state ───────────────────────────────────────────
 
+test("person: the viewer's own \"not interested\" titles leave the filmography, as on every discovery grid", async () => {
+  const me = await mintSession();
+  hiddenRows = [{ userId: me.userId, tmdbId: 603, mediaType: "MOVIE" }];
+  const body = await (await getPerson(me.token, "6384")).json();
+  assert.ok(!body.credits.some((c: { id: number; mediaType: string }) => c.id === 603 && c.mediaType === "movie"));
+  assert.ok(body.credits.some((c: { id: number }) => c.id === 1399), "the other credits stay");
+  const other = await mintSession();
+  const theirs = await (await getPerson(other.token, "6384")).json();
+  assert.ok(theirs.credits.some((c: { id: number }) => c.id === 603), "another viewer's list is untouched");
+});
+
 test("person: requestedByMe reflects the SESSION user, not any requester", async () => {
   const me = await mintSession();
   const them = await mintSession();
@@ -591,8 +618,15 @@ for (const [label, id, n] of [
   ["a non-numeric show id", "abc", "1"],
   ["a zero show id", "0", "1"],
   ["a negative show id", "-1", "1"],
+  // parseInt read these as 1399 and 1.
+  ["a show id with trailing garbage", "1399abc", "1"],
+  ["a fractional show id", "1.5", "1"],
   ["a non-numeric season", "1399", "abc"],
   ["a negative season", "1399", "-1"],
+  // parseInt read these as season 1.
+  ["a season with trailing garbage", "1399", "1abc"],
+  ["a fractional season", "1399", "1.5"],
+  ["a zero-padded season", "1399", "01"],
 ] as const) {
   test(`season: ${label} is 400 and never reaches TMDB`, async () => {
     const me = await mintSession();
@@ -613,6 +647,10 @@ test("season: a TMDB failure is 502 and no episode rows are read", async () => {
   const res = await getSeason(me.token, "1399", "1");
   assert.equal(res.status, 502);
   assert.equal(opsOf("tVEpisodeCache.findMany").length, 0);
+  // tmdbFetch throws without logging, so the route's own line is the only trace.
+  const scoped = warns.filter((w) => w.startsWith("[tv-season]"));
+  assert.equal(scoped.length, 1, `expected one scoped warning: ${warns.join(" | ")}`);
+  assert.match(scoped[0], /1399/);
 });
 
 test("season: the 31st request in the window is 429", async () => {
@@ -738,6 +776,33 @@ test("season: a failing warm never breaks the response (unawaited, errors swallo
     assert.deepEqual((await res.json()).owned, [1]);
   } finally {
     shadowPrismaModel(prisma, "tVEpisodeCache", tvEpisodeCacheModel);
+  }
+});
+
+test("season: a failed warm write is warned once under [tv-season], counted, never thrown", async () => {
+  const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
+  resetLogDedup();
+  plexLib = [{ tmdbId: 1399, mediaType: "TV", serverInstance: "" }];
+  episodeRows = [{ tmdbId: 1399, seasonNumber: 1, episodeNumber: 1, source: "plex" }];
+  shadowPrismaModel(prisma, "tVEpisodeCache", {
+    findMany: async (args: { where: { tmdbId: number; seasonNumber?: number; source: { in: string[] } } }) => {
+      rec("tVEpisodeCache.findMany", args.where);
+      return episodeRows.filter((e) => args.where.source.in.includes(e.source) && e.seasonNumber === args.where.seasonNumber);
+    },
+    update: async () => { throw new Error("disk full"); },
+  });
+  try {
+    const me = await mintSession();
+    assert.equal((await getSeason(me.token, "1399", "1")).status, 200);
+    for (let i = 0; i < 5 && !warns.some((w) => w.startsWith("[tv-season] episode metadata warm failed")); i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+    const lines = warns.filter((w) => w.startsWith("[tv-season] episode metadata warm failed"));
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /1 of 1 episode\(s\): disk full/);
+  } finally {
+    shadowPrismaModel(prisma, "tVEpisodeCache", tvEpisodeCacheModel);
+    resetLogDedup();
   }
 });
 

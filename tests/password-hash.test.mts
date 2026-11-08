@@ -11,7 +11,7 @@
 // copies of hashPassword write hashes the app accepts at the current cost.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { scrypt as scryptCb, randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 import { stripTypeScriptTypes } from "node:module";
@@ -21,12 +21,15 @@ import {
   dummyVerify,
   needsRehash,
   hashSlotStats,
+  isVerifiableHash,
   scryptWorkDone,
   MAX_PASSWORD_LENGTH,
+  PasswordTooLongError,
   MAX_CONCURRENT_HASHES,
   SCRYPT_PARAMS,
   LEGACY_V1_PARAMS,
 } from "../src/lib/password-hash.ts";
+import { MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH as POLICY_MAX } from "../src/lib/password-policy.ts";
 
 const scrypt = promisify(scryptCb) as (
   pw: string,
@@ -121,14 +124,16 @@ test("stored parameters are bounded: an out-of-range or malformed set is refused
     const salt = randomBytes(16).toString("base64");
     const key = randomBytes(64).toString("base64");
     const hash = `scrypt:2:${params.ln}:${params.r}:${params.p}:${salt}:${key}`;
+    assert.equal(isVerifiableHash(hash), false, `${label}: refused at parse, never derived at those parameters`);
     const work = await workOf(async () => assert.equal(await verifyPassword("pw", hash), false, label));
-    assert.equal(work, 0, `${label}: refused without deriving`);
+    assert.equal(work, CURRENT_WORK, `${label}: refused after a current-cost dummy verify, never at the stored parameters`);
   }
   const salt = randomBytes(16).toString("base64");
   for (const bad of ["017:8:1", "17:08:1", "+17:8:1", "17:8:1.0", "0x11:8:1", "17:8", "17:8:1:9"]) {
     const hash = `scrypt:2:${bad}:${salt}:${salt}`;
+    assert.equal(isVerifiableHash(hash), false, bad);
     const work = await workOf(async () => assert.equal(await verifyPassword("pw", hash), false, bad));
-    assert.equal(work, 0, `${bad}: refused without deriving`);
+    assert.equal(work, CURRENT_WORK, `${bad}: refused after a current-cost dummy verify`);
   }
 });
 
@@ -138,7 +143,7 @@ test("every verify does the SAME scrypt work: current, legacy and the unknown-ac
   // emails have an account. Padding at the stored parameters closes that.
   const current = await hashPassword("pw");
   const legacy = await rawHash("pw", LEGACY_V1_PARAMS, "v1");
-  await dummyVerify(); // the dummy hash is warmed at load; make sure it is cached
+  await dummyVerify(); // make sure the dummy hash is cached
   assert.equal(await workOf(() => verifyPassword("pw", current)), CURRENT_WORK);
   assert.equal(await workOf(() => verifyPassword("nope", current)), CURRENT_WORK);
   assert.equal(await workOf(() => verifyPassword("pw", legacy)), CURRENT_WORK);
@@ -180,6 +185,13 @@ test("same password hashes to different strings (random salt), both verify", asy
   assert.equal(await verifyPassword("pw", b), true);
 });
 
+test("a malformed or foreign stored hash costs a full verify, so such an account can't be told apart by timing", async () => {
+  await dummyVerify();
+  for (const hash of ["", "plaintext-not-a-hash", "bcrypt:2b:whatever", "scrypt:1::"]) {
+    assert.equal(await workOf(() => verifyPassword("pw", hash)), CURRENT_WORK, JSON.stringify(hash));
+  }
+});
+
 test("malformed / foreign hashes fail closed, never throw", async () => {
   assert.equal(await verifyPassword("pw", ""), false);
   assert.equal(await verifyPassword("pw", "plaintext-not-a-hash"), false);
@@ -213,6 +225,25 @@ test("dummy verify resolves (timing-equalization path is callable)", async () =>
 
 test("password length cap is the shared write/sign-in bound", () => {
   assert.equal(MAX_PASSWORD_LENGTH, 1024);
+  assert.equal(MAX_PASSWORD_LENGTH, POLICY_MAX, "re-exported from the client-safe policy module, not a second copy");
+  assert.equal(MIN_PASSWORD_LENGTH, 12);
+});
+
+test("the 12-character minimum is spelled once: no `length < 12` / minLength={12} / count: 12 literal under src/", () => {
+  const offenders: string[] = [];
+  const walk = (dir: URL): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const child = new URL(`${entry.name}${entry.isDirectory() ? "/" : ""}`, dir);
+      if (entry.isDirectory()) {
+        if (entry.name !== "generated") walk(child);
+      } else if (/\.(ts|tsx)$/.test(entry.name)) {
+        const text = readFileSync(child, "utf8");
+        if (/length\s*<\s*12\b|minLength=\{12\}|count:\s*12\b/.test(text)) offenders.push(child.pathname);
+      }
+    }
+  };
+  walk(new URL("../src/", import.meta.url));
+  assert.deepEqual(offenders, [], "use MIN_PASSWORD_LENGTH from src/lib/password-policy.ts");
 });
 
 test("unicode / multi-byte password roundtrips (utf8 input, no normalization)", async () => {
@@ -264,14 +295,24 @@ test("current behavior: verify honors the STORED key's length", async () => {
   assert.equal(needsRehash(shortHash), true);
 });
 
-test("password of exactly MAX_PASSWORD_LENGTH roundtrips (module imposes no cap)", async () => {
-  // MAX_PASSWORD_LENGTH is exported for CALLERS to enforce on write and
-  // sign-in; hashPassword/verifyPassword themselves accept it — the constant
-  // is shared policy, not a module-level guard.
+test("password of exactly MAX_PASSWORD_LENGTH roundtrips (the cap is inclusive)", async () => {
   const pw = "p".repeat(MAX_PASSWORD_LENGTH);
   assert.equal(pw.length, 1024);
   const hash = await hashPassword(pw);
   assert.equal(await verifyPassword(pw, hash), true);
+});
+
+test("one past MAX_PASSWORD_LENGTH: hashPassword refuses it, verifyPassword says false after one current-cost derive", async () => {
+  // The callers check the cap first (for their translated 400); the module
+  // enforces it again so a caller that forgets can't hash unbounded input.
+  const long = "x".repeat(MAX_PASSWORD_LENGTH + 1);
+  await assert.rejects(() => hashPassword(long), (err: unknown) => err instanceof PasswordTooLongError);
+  // Even against a hash OF that very password (built without hashPassword), the
+  // verify refuses — with the work of a current verify, so timing says nothing.
+  const matching = await rawHash(long, SCRYPT_PARAMS, "v2");
+  let ok: boolean | undefined;
+  assert.equal(await workOf(async () => { ok = await verifyPassword(long, matching); }), CURRENT_WORK);
+  assert.equal(ok, false);
 });
 
 // ── the CLI scripts' copies ─────────────────────────────────────────────────
@@ -322,3 +363,18 @@ for (const path of SCRIPT_COPIES) {
     assert.equal(needsRehash(hash), false);
   });
 }
+
+test("importing the module runs no derivation (no import-time warm-up)", async () => {
+  assert.deepEqual(hashSlotStats(), { active: 0, queued: 0 });
+  // A second copy, as another server chunk would load it (guardrail 27a): an
+  // import-time warm-up would have taken a hash slot by the time import resolves.
+  const secondCopy = "../src/lib/password-hash.ts?chunk=import-side-effect";
+  await import(secondCopy);
+  assert.deepEqual(hashSlotStats(), { active: 0, queued: 0 });
+});
+
+test("boot warms the dummy hash in the background, never on the import path", () => {
+  const boot = readFileSync(new URL("../src/instrumentation.ts", import.meta.url), "utf8");
+  const start = boot.slice(boot.indexOf("function startBackgroundJobs("));
+  assert.match(start, /import\("@\/lib\/password-hash"\)\s*\.then\(\(\{ warmPasswordHashing \}\) => warmPasswordHashing\(\)\)/);
+});

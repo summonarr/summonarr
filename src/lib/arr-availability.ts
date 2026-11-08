@@ -1,13 +1,24 @@
 import { prisma } from "@/lib/prisma";
 import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
+import { DEFAULT_ARR_INSTANCE, FOURK_ARR_INSTANCE } from "@/lib/arr-instances";
+import { getFeatureFlags } from "@/lib/features";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 
 /**
+ * The key every Radarr/Sonarr cache lookup is made on: a title on ONE
+ * instance. The cache rows and the requests are both keyed (tmdbId,
+ * arrInstance), so a 4K or named instance's state never answers for another's.
+ */
+export function arrRowKey(tmdbId: number, arrInstance: string): string {
+  return `${tmdbId}:${arrInstance}`;
+}
+
+/**
  * Guardrail 14a — the Sonarr completeness gate shared by every library-marking
- * pass (the orchestrator's markLibraryRequests and the per-source
- * /api/sync/plex + /api/sync/jellyfin routes).
+ * pass (the orchestrator's markLibraryPasses and the per-source Resync
+ * routes' markResyncedLibrary, available-marking.ts).
  *
- * Returns the `${tmdbId}:${arrInstance}` keys of the given requests whose series
+ * Returns the arrRowKey keys of the given requests whose series
  * Sonarr still lists as WANTED on that instance — i.e. incomplete: not every
  * aired, monitored, regular-season episode is on disk (the writer is
  * getSonarrWantedTmdbIds via sonarrSeriesCompletion). A TV request with such a
@@ -29,7 +40,9 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
  * longer the oracle for that instance's requests. Reading those stale rows
  * would strand every such request in APPROVED forever. The orchestrator passes
  * the syncable set it already read; the per-source routes let this helper
- * read it (two Setting queries).
+ * read it (two Setting queries), and so does an orchestrator run whose Sonarr
+ * refresh threw before it learned the set (`configuredSlugs` undefined): an
+ * unknown set must hold on the cached rows, never read as "nothing holds".
  */
 export async function sonarrIncompleteKeys(
   requests: readonly { tmdbId: number; mediaType: string; arrInstance: string }[],
@@ -44,7 +57,7 @@ export async function sonarrIncompleteKeys(
     where: { tmdbId: { in: tvIds }, arrInstance: { in: [...configured] } },
     select: { tmdbId: true, arrInstance: true },
   });
-  return new Set(rows.map((r) => `${r.tmdbId}:${r.arrInstance}`));
+  return new Set(rows.map((r) => arrRowKey(r.tmdbId, r.arrInstance)));
 }
 
 // "Pending" means the item exists in the Radarr/Sonarr wanted table — it does NOT confirm the item
@@ -64,15 +77,32 @@ export async function sonarrIncompleteKeys(
 // undefined forever rather than a type error. The detail pages that need per-instance
 // state query it directly for that reason. Propagating it through attach-all means
 // every list response starts emitting it — flip that pin deliberately, not by accident.
+//
+// A switched-OFF integration answers as though it tracks nothing: its cache is
+// never refreshed again (the sync just stops; nothing clears it), so its last
+// rows would light "pending" badges for titles it may long since have grabbed or
+// dropped. Its tables are not read at all then. The flags are the cached
+// process-wide read (features.ts); a flag read that fails falls back to reading
+// the cache, the behaviour from before the gate.
+async function arrIntegrationsOn(): Promise<{ radarr: boolean; sonarr: boolean }> {
+  try {
+    const flags = await getFeatureFlags();
+    return { radarr: flags["feature.integration.radarr"] !== false, sonarr: flags["feature.integration.sonarr"] !== false };
+  } catch {
+    return { radarr: true, sonarr: true };
+  }
+}
+
 export async function attachArrPending(
   items: TmdbMedia[],
   opts?: { include4k?: boolean },
 ): Promise<TmdbMedia[]> {
   if (items.length === 0) return items;
   const include4k = opts?.include4k ?? false;
+  const on = await arrIntegrationsOn();
 
-  const movieIds = items.filter((i) => i.mediaType === "movie").map((i) => i.id);
-  const tvIds    = items.filter((i) => i.mediaType === "tv").map((i) => i.id);
+  const movieIds = on.radarr ? items.filter((i) => i.mediaType === "movie").map((i) => i.id) : [];
+  const tvIds    = on.sonarr ? items.filter((i) => i.mediaType === "tv").map((i) => i.id) : [];
 
   const [radarrWanted, sonarrWanted, radarrAvail, sonarrAvail] = await Promise.all([
     movieIds.length > 0
@@ -113,8 +143,8 @@ export async function attachArrPending(
     const isMovie = item.mediaType === "movie";
     const bySlug = (isMovie ? movieMap : tvMap).get(item.id);
     const arrInstances = bySlug ? Object.fromEntries(bySlug) : undefined;
-    const def = bySlug?.get("");
-    const fourK = bySlug?.get("4k");
+    const def = bySlug?.get(DEFAULT_ARR_INSTANCE);
+    const fourK = bySlug?.get(FOURK_ARR_INSTANCE);
     return {
       ...item,
       arrPending: def?.pending ?? false,

@@ -6,52 +6,93 @@
 // first (what goes, and whether an APPROVED request would make the sync put it
 // straight back), then the remove, echoing the id the dry run named.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { AlertTriangle, Loader2, Trash2 } from "@/components/icons";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { queueFormatters } from "@/components/admin/queue-format";
-import type { ArrTitle } from "@/lib/arr-title";
+import { opensElsewhere } from "@/lib/arr-title-ui";
+import { REMOVE_PLAN, type RemovePlan } from "@/lib/client/arr-answers";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { arrApi, SERVICE_LABEL, type TitleRef } from "./shared";
 
-interface Plan {
-  title: ArrTitle;
-  requests: { pending: number; approved: number; available: number };
-}
-
-export function RemovePanel({ titleRef, instanceLabel, onRemoved }: { titleRef: TitleRef; instanceLabel: string; onRemoved: () => void }) {
+export function RemovePanel({ titleRef, instanceLabel, onRemoved, onLeave }: {
+  titleRef: TitleRef;
+  instanceLabel: string;
+  onRemoved: () => void;
+  /**
+   * The "open requests" link is being followed: the manager's own close rules
+   * decide (unsaved Settings edits ask first — the navigation is then
+   * cancelled), as the History tab's queue link does.
+   */
+  onLeave?: () => boolean;
+}) {
   const t = useT();
   const locale = useLocale();
   const fmt = useMemo(() => queueFormatters(locale), [locale]);
   const [open, setOpen] = useState(false);
   const [deleteFiles, setDeleteFiles] = useState(false);
   const [exclude, setExclude] = useState(false);
-  const [plan, setPlan] = useState<Plan | null>(null);
-  const [busy, setBusy] = useState<"plan" | "remove" | null>(null);
+  const [plan, setPlan] = useState<RemovePlan | null>(null);
   const [error, setError] = useState("");
+  // The dry run ("plan": Cancel aborts it, so a late plan never lands in a
+  // closed panel or over a newer one) and the remove ("remove").
+  const action = useAsyncAction();
+  const busy = action.busy("remove") ? "remove" : action.busy("plan") ? "plan" : null;
   const service = SERVICE_LABEL[titleRef.service];
   const base = { service: titleRef.service, instance: titleRef.instance, id: titleRef.arrId, deleteFiles, addImportExclusion: exclude };
+  // The panel is an alertdialog: focus moves to its Cancel when it opens (the
+  // Remove button that had it is gone), and back to Remove when Cancel closes it.
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const refocusTrigger = useRef(false);
+  useEffect(() => {
+    if (open) cancelRef.current?.focus();
+    else if (refocusTrigger.current) {
+      refocusTrigger.current = false;
+      triggerRef.current?.focus();
+    }
+  }, [open]);
+
+  // Cancel forgets the choices too: the panel stays mounted across tabs, and
+  // "delete the files" must never be pre-selected the next time it opens.
+  function cancel() {
+    refocusTrigger.current = true;
+    action.abort("plan");
+    setOpen(false);
+    setPlan(null);
+    setError("");
+    setDeleteFiles(false);
+    setExclude(false);
+  }
 
   async function loadPlan() {
     setOpen(true);
-    setBusy("plan");
+    setPlan(null);
     setError("");
-    const res = await arrApi<Plan>("/api/admin/arr/title/remove", { method: "POST", body: base }, t("adminArr.remove.failed"));
-    setBusy(null);
+    const res = await action.run("plan", (signal) =>
+      arrApi("/api/admin/arr/title/remove", { method: "POST", body: base, schema: REMOVE_PLAN, signal }, t("adminArr.remove.failed")),
+    );
+    // Cancelled, superseded by a newer dry run, or the manager closed.
+    if (!res) return;
     if (res.ok) setPlan(res.data);
     else setError(res.error);
   }
 
   async function remove() {
-    setBusy("remove");
     setError("");
-    const res = await arrApi<{ removed: true }>(
-      "/api/admin/arr/title/remove",
-      { method: "POST", body: { ...base, execute: true, confirm: titleRef.arrId } },
-      t("adminArr.remove.failed"),
+    const res = await action.run(
+      "remove",
+      (signal) =>
+        arrApi(
+          "/api/admin/arr/title/remove",
+          { method: "POST", body: { ...base, execute: true, confirm: titleRef.arrId }, signal },
+          t("adminArr.remove.failed"),
+        ),
+      { ifBusy: "skip" },
     );
-    setBusy(null);
+    if (!res) return;
     if (!res.ok) {
       setError(res.error);
       return;
@@ -63,7 +104,7 @@ export function RemovePanel({ titleRef, instanceLabel, onRemoved }: { titleRef: 
     return (
       <div className="flex flex-wrap items-center gap-3 border-t pt-4" style={{ borderColor: "var(--ds-border)" }}>
         <span className="min-w-0 flex-1 text-xs text-zinc-500">{t("adminArr.remove.hint", { name: instanceLabel })}</span>
-        <Button variant="outline" size="sm" onClick={() => void loadPlan()}>
+        <Button ref={triggerRef} variant="outline" size="sm" onClick={() => void loadPlan()}>
           <Trash2 /> {t("adminArr.remove.button", { name: instanceLabel })}
         </Button>
       </div>
@@ -106,7 +147,17 @@ export function RemovePanel({ titleRef, instanceLabel, onRemoved }: { titleRef: 
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>
             {t("adminArr.remove.blocked", { count: plan.requests.approved, service })}{" "}
-            <Link href="/admin" className="underline">{t("adminArr.remove.openRequests")}</Link>
+            <Link
+              href="/admin"
+              onClick={(e) => {
+                // A new tab or window leaves this page, and the manager, as they are.
+                if (!onLeave || opensElsewhere(e)) return;
+                if (!onLeave()) e.preventDefault();
+              }}
+              className="underline"
+            >
+              {t("adminArr.remove.openRequests")}
+            </Link>
           </span>
         </p>
       )}
@@ -116,7 +167,7 @@ export function RemovePanel({ titleRef, instanceLabel, onRemoved }: { titleRef: 
         </p>
       )}
       <div className="flex flex-wrap justify-end gap-2">
-        <Button variant="ghost" size="sm" onClick={() => { setOpen(false); setPlan(null); setError(""); }} disabled={busy === "remove"}>
+        <Button ref={cancelRef} variant="ghost" size="sm" onClick={cancel} disabled={busy === "remove"}>
           {t("adminArr.common.cancel")}
         </Button>
         <Button

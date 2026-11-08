@@ -10,9 +10,11 @@ import { getMediaInstances } from "./media-instance-registry";
 import { isFeatureEnabled } from "./features";
 import { coalesce } from "./concurrency";
 import { processSingleton } from "./process-singleton";
+import { REQUEST_APPROVAL_BACKFILL_KEY } from "./request-approval";
 import { getCachedArrLibraryIndex, type ArrLibraryEntry } from "./library-cleanup-arr";
 import { CLEANUP_FEATURE_KEY, computeCleanupReport } from "./library-cleanup-data";
 import { getWatchGradeSummaries } from "./watch-grade-data";
+import type { AutoRequestSource } from "./auto-request";
 import { watchGradeSpread, type WatchGradeSpread } from "./watch-grade";
 import {
   AUTO_APPROVE_WINDOW_SECONDS,
@@ -24,6 +26,7 @@ import {
 } from "./admin-stats";
 import { NEVER_WATCHED_FEATURE_KEY, shareLibraryWatchFacts } from "./never-watched-data";
 import { getNeverWatchedReport } from "./never-watched-report";
+import { DELETION_VOTE_THRESHOLD_KEY, parseDeletionVoteThreshold } from "./deletion-vote-keys";
 
 type Status = "PENDING" | "APPROVED" | "DECLINED" | "AVAILABLE";
 type Media = "MOVIE" | "TV";
@@ -37,6 +40,22 @@ const numOrNull = (v: unknown): number | null => (v == null ? null : Number(v));
 // Prisma.sql/Prisma.empty from "@/generated/prisma" as SQL and bound it as a
 // parameter ("syntax error at or near $1"). The unit loader shares one module
 // instance, so only a live render showed it.
+
+// A raw query's rows. $queryRaw answers an array; the guard keeps a stubbed or
+// unexpected answer from throwing in the folds below (one place, not per query).
+async function queryRows<T>(query: Prisma.Sql): Promise<T[]> {
+  const rows = await prisma.$queryRaw<T[]>(query);
+  return Array.isArray(rows) ? rows : [];
+}
+
+// The last 12 calendar months (UTC), oldest first, as a `months(start)` CTE
+// body: `WITH ${LAST_12_MONTHS_CTE} …`. Every month is present even with no rows.
+const LAST_12_MONTHS_CTE = Prisma.sql`months AS (
+  SELECT gs AS start FROM generate_series(
+    date_trunc('month', NOW() AT TIME ZONE 'UTC') - INTERVAL '11 months',
+    date_trunc('month', NOW() AT TIME ZONE 'UTC'),
+    '1 month'::interval) AS gs
+)`;
 
 // `AND r."createdAt" >= since` when a window applies, nothing otherwise.
 function sinceClause(since: Date | null, column = Prisma.sql`r."createdAt"`): Prisma.Sql {
@@ -103,35 +122,54 @@ const emptyDuration = (): DurationStat => ({ count: 0, medianSeconds: null, p90S
 //     available (approvedAt null, availableAt = its creation) and a PENDING
 //     request a library sync marked available (nobody approved it) used to land
 //     in the average as near-zero "fulfillments".
-//   - approvedAt = createdAt EXACTLY is the one-time backfill of rows older than
-//     the column (request-approval.ts): their approval time is unknown, so they
-//     sit out of the approve and download figures but still count request →
-//     available.
+//   - approvedAt = createdAt EXACTLY on a row created BEFORE the one-time
+//     backfill ran (request-approval.ts, its Setting marker) is a row older than
+//     the column: its approval time is unknown, so it sits out of the approve and
+//     download figures but still counts request → available. The marker bound is
+//     load-bearing: auto-approve sets approvedAt and Prisma fills createdAt in
+//     the same millisecond most of the time, so equality alone read most
+//     auto-approved requests as backfill and dropped them from every figure. No
+//     marker ⇒ the backfill never ran ⇒ no backfilled rows.
 // Known residue, accepted: availableAt is re-stamped when a title that left the
 // library comes back, so such a request reads slower than it was.
 export async function getFulfillmentStats(since: Date | null): Promise<FulfillmentStats> {
-  const rows = await prisma.$queryRaw<Array<{
+  const marker = await prisma.setting.findUnique({ where: { key: REQUEST_APPROVAL_BACKFILL_KEY } });
+  const backfillRanAt = marker ? new Date(marker.value) : null;
+  const legacy = backfillRanAt && !Number.isNaN(backfillRanAt.getTime())
+    ? Prisma.sql`(r."approvedAt" = r."createdAt" AND r."createdAt" < ${backfillRanAt})`
+    : Prisma.sql`false`;
+  // Each non-legacy row is EITHER auto- or admin-approved: an approval inside
+  // the auto window, or one recorded before its request (clock skew, imported
+  // rows), is auto; everything else is an admin's. The two counts add up to the
+  // non-legacy total.
+  const rows = await queryRows<{
     media_type: Media | null;
     approve_n: bigint; approve_med: number | null; approve_p90: number | null;
     download_n: bigint; download_med: number | null; download_p90: number | null;
     total_n: bigint; total_med: number | null; total_p90: number | null; total_avg: number | null;
     auto_n: bigint; admin_n: bigint;
-  }>>(Prisma.sql`
+  }>(Prisma.sql`
     WITH r AS (
       SELECT r."mediaType" AS media_type,
              EXTRACT(EPOCH FROM (r."approvedAt" - r."createdAt"))::float8 AS approve_s,
-             r."approvedAt" = r."createdAt" AS legacy,
+             ${legacy} AS legacy,
              CASE WHEN r.status = 'AVAILABLE' AND r."availableAt" > r."approvedAt"
                   THEN EXTRACT(EPOCH FROM (r."availableAt" - r."approvedAt"))::float8 END AS download_s,
              CASE WHEN r.status = 'AVAILABLE' AND r."availableAt" > r."createdAt"
                   THEN EXTRACT(EPOCH FROM (r."availableAt" - r."createdAt"))::float8 END AS total_s
       FROM "MediaRequest" r
       WHERE r."approvedAt" IS NOT NULL ${sinceClause(since)}
+    ),
+    k AS (
+      SELECT r.*,
+             (NOT legacy AND approve_s >= ${AUTO_APPROVE_WINDOW_SECONDS}::float8) AS by_admin,
+             (NOT legacy AND approve_s < ${AUTO_APPROVE_WINDOW_SECONDS}::float8) AS by_auto
+      FROM r
     )
     SELECT media_type,
-      COUNT(*) FILTER (WHERE NOT legacy AND approve_s >= ${AUTO_APPROVE_WINDOW_SECONDS}::float8)::bigint AS approve_n,
-      percentile_cont(0.5) WITHIN GROUP (ORDER BY approve_s) FILTER (WHERE NOT legacy AND approve_s >= ${AUTO_APPROVE_WINDOW_SECONDS}::float8) AS approve_med,
-      percentile_cont(0.9) WITHIN GROUP (ORDER BY approve_s) FILTER (WHERE NOT legacy AND approve_s >= ${AUTO_APPROVE_WINDOW_SECONDS}::float8) AS approve_p90,
+      COUNT(*) FILTER (WHERE by_admin)::bigint AS approve_n,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY approve_s) FILTER (WHERE by_admin) AS approve_med,
+      percentile_cont(0.9) WITHIN GROUP (ORDER BY approve_s) FILTER (WHERE by_admin) AS approve_p90,
       COUNT(download_s) FILTER (WHERE NOT legacy)::bigint AS download_n,
       percentile_cont(0.5) WITHIN GROUP (ORDER BY download_s) FILTER (WHERE NOT legacy) AS download_med,
       percentile_cont(0.9) WITHIN GROUP (ORDER BY download_s) FILTER (WHERE NOT legacy) AS download_p90,
@@ -139,9 +177,9 @@ export async function getFulfillmentStats(since: Date | null): Promise<Fulfillme
       percentile_cont(0.5) WITHIN GROUP (ORDER BY total_s) AS total_med,
       percentile_cont(0.9) WITHIN GROUP (ORDER BY total_s) AS total_p90,
       AVG(total_s)::float8 AS total_avg,
-      COUNT(*) FILTER (WHERE NOT legacy AND ABS(approve_s) < ${AUTO_APPROVE_WINDOW_SECONDS}::float8)::bigint AS auto_n,
-      COUNT(*) FILTER (WHERE NOT legacy AND approve_s >= ${AUTO_APPROVE_WINDOW_SECONDS}::float8)::bigint AS admin_n
-    FROM r
+      COUNT(*) FILTER (WHERE by_auto)::bigint AS auto_n,
+      COUNT(*) FILTER (WHERE by_admin)::bigint AS admin_n
+    FROM k
     GROUP BY GROUPING SETS ((), (media_type))
   `);
 
@@ -161,7 +199,7 @@ export async function getFulfillmentStats(since: Date | null): Promise<Fulfillme
       TV: { download: emptyDuration(), total: emptyDuration() },
     },
   };
-  for (const r of Array.isArray(rows) ? rows : []) {
+  for (const r of rows) {
     if (r.media_type === "MOVIE" || r.media_type === "TV") {
       out.byMediaType[r.media_type] = {
         download: dur(r.download_n, r.download_med, r.download_p90),
@@ -188,15 +226,8 @@ export interface MonthBucket {
 // with no requests. Range predicate on the raw timestamp so it can be served
 // from an index rather than formatting every row of the table.
 export async function getRequestsByMonth(): Promise<MonthBucket[]> {
-  const rows = await prisma.$queryRaw<Array<{ month: string; status: Status | null; count: bigint }>>(Prisma.sql`
-    WITH months AS (
-      SELECT gs AS start
-      FROM generate_series(
-        date_trunc('month', NOW() AT TIME ZONE 'UTC') - INTERVAL '11 months',
-        date_trunc('month', NOW() AT TIME ZONE 'UTC'),
-        '1 month'::interval
-      ) AS gs
-    )
+  const rows = await queryRows<{ month: string; status: Status | null; count: bigint }>(Prisma.sql`
+    WITH ${LAST_12_MONTHS_CTE}
     SELECT to_char(m.start, 'YYYY-MM') AS month, r.status, COUNT(r.id)::bigint AS count
     FROM months m
     LEFT JOIN "MediaRequest" r
@@ -205,7 +236,7 @@ export async function getRequestsByMonth(): Promise<MonthBucket[]> {
     ORDER BY m.start
   `);
   const byMonth = new Map<string, MonthBucket>();
-  for (const r of Array.isArray(rows) ? rows : []) {
+  for (const r of rows) {
     let b = byMonth.get(r.month);
     if (!b) {
       b = { month: r.month, count: 0, byStatus: { PENDING: 0, APPROVED: 0, DECLINED: 0, AVAILABLE: 0 } };
@@ -231,9 +262,9 @@ export interface PendingQueue {
 }
 
 export async function getPendingQueue(): Promise<PendingQueue> {
-  const [row] = await prisma.$queryRaw<Array<{
+  const [row] = await queryRows<{
     requests: bigint; titles: bigint; oldest: Date | null; warn: bigint; alert: bigint;
-  }>>(Prisma.sql`
+  }>(Prisma.sql`
     SELECT COUNT(*)::bigint AS requests,
            COUNT(DISTINCT (r."tmdbId", r."mediaType"))::bigint AS titles,
            MIN(r."createdAt") AS oldest,
@@ -241,7 +272,7 @@ export async function getPendingQueue(): Promise<PendingQueue> {
            COUNT(*) FILTER (WHERE r."createdAt" < NOW() - make_interval(days => ${PENDING_AGE_ALERT_DAYS}::int))::bigint AS alert
     FROM "MediaRequest" r
     WHERE r.status = 'PENDING' AND r."approvedAt" IS NULL
-  `) ?? [];
+  `);
   return {
     requests: num(row?.requests),
     titles: num(row?.titles),
@@ -261,9 +292,9 @@ export interface WantedTitle {
 
 // Pending titles ranked by how many different people asked for them.
 export async function getMostWantedPending(limit = 8): Promise<WantedTitle[]> {
-  const rows = await prisma.$queryRaw<Array<{
+  const rows = await queryRows<{
     tmdbId: number; mediaType: Media; title: string; requesters: bigint; oldest: Date;
-  }>>(Prisma.sql`
+  }>(Prisma.sql`
     SELECT r."tmdbId", r."mediaType", MAX(r.title) AS title,
            COUNT(DISTINCT r."requestedBy")::bigint AS requesters,
            MIN(r."createdAt") AS oldest
@@ -273,7 +304,7 @@ export async function getMostWantedPending(limit = 8): Promise<WantedTitle[]> {
     ORDER BY requesters DESC, oldest ASC, r."tmdbId" ASC
     LIMIT ${limit}::int
   `);
-  return (Array.isArray(rows) ? rows : []).map((r) => ({
+  return rows.map((r) => ({
     tmdbId: r.tmdbId,
     mediaType: r.mediaType,
     title: r.title,
@@ -282,7 +313,10 @@ export async function getMostWantedPending(limit = 8): Promise<WantedTitle[]> {
   }));
 }
 
-export type StuckReason = "push-failed" | "not-in-arr" | "slow-download";
+// Every stuck reason, in the order the stats page lists them. The type is
+// derived from it, so a new reason can't miss the page's totals or grid.
+export const STUCK_REASONS = ["push-failed", "not-in-arr", "slow-download"] as const;
+export type StuckReason = (typeof STUCK_REASONS)[number];
 
 export interface StuckRequest {
   id: string;
@@ -335,22 +369,29 @@ export async function getStuckRequests(limit = 10): Promise<StuckRequests> {
       FROM "MediaRequest" r
       WHERE r."approvedAt" IS NOT NULL AND r.status IN ('PENDING', 'APPROVED')
     )`;
-  const [counts, oldest] = await Promise.all([
-    prisma.$queryRaw<Array<{ reason: StuckReason; count: bigint }>>(Prisma.sql`
-      ${classified}
-      SELECT reason, COUNT(*)::bigint AS count FROM c WHERE reason IS NOT NULL GROUP BY reason
-    `),
-    prisma.$queryRaw<Array<{
-      id: string; tmdbId: number; mediaType: Media; title: string; arrInstance: string;
-      reason: StuckReason; approvedAt: Date; lastArrPushAt: Date | null;
-    }>>(Prisma.sql`
-      ${classified}
-      SELECT * FROM c WHERE reason IS NOT NULL ORDER BY "approvedAt" ASC, id ASC LIMIT ${limit}::int
-    `),
-  ]);
+  // ONE pass over the classification (its EXISTS probes run once per row): the
+  // oldest `limit` rows, plus each reason's first row to carry that reason's
+  // FULL count past the list's cut.
+  const all = await queryRows<{
+    id: string; tmdbId: number; mediaType: Media; title: string; arrInstance: string;
+    reason: StuckReason; approvedAt: Date; lastArrPushAt: Date | null;
+    reason_count: bigint; rn: bigint;
+  }>(Prisma.sql`
+    ${classified}
+    SELECT * FROM (
+      SELECT c.*,
+             COUNT(*) OVER (PARTITION BY c.reason)::bigint AS reason_count,
+             ROW_NUMBER() OVER (ORDER BY c."approvedAt" ASC, c.id ASC) AS rn,
+             ROW_NUMBER() OVER (PARTITION BY c.reason ORDER BY c."approvedAt" ASC, c.id ASC) AS rn_reason
+      FROM c
+      WHERE c.reason IS NOT NULL
+    ) t
+    WHERE t.rn <= ${limit}::int OR t.rn_reason = 1
+    ORDER BY t.rn ASC
+  `);
   const out: StuckRequests = { counts: { "push-failed": 0, "not-in-arr": 0, "slow-download": 0 }, oldest: [] };
-  for (const r of Array.isArray(counts) ? counts : []) out.counts[r.reason] = num(r.count);
-  out.oldest = (Array.isArray(oldest) ? oldest : []).map((r) => ({
+  for (const r of all) out.counts[r.reason] = num(r.reason_count);
+  out.oldest = all.filter((r) => num(r.rn) <= limit).map((r) => ({
     id: r.id,
     tmdbId: r.tmdbId,
     mediaType: r.mediaType,
@@ -363,30 +404,58 @@ export async function getStuckRequests(limit = 10): Promise<StuckRequests> {
   return out;
 }
 
-export interface RequestSources {
-  // Filed by the watchlist auto-request, per AutoRequestLedger source.
+// Filed by the watchlist auto-request, per AutoRequestLedger source.
+export interface AutoRequestSources {
+  // The in-app (Summonarr) watchlist.
   watchlist: number;
   plexWatchlist: number;
+  traktWatchlist: number;
+}
+
+export interface RequestSources extends AutoRequestSources {
   // Everything else: the web app, the iOS app, Discord and bulk requests, which
   // nothing records apart.
   other: number;
 }
 
-export async function getRequestSources(since: Date | null, total: number): Promise<RequestSources> {
-  const rows = await prisma.$queryRaw<Array<{ source: string; count: bigint }>>(Prisma.sql`
-    SELECT l.source, COUNT(DISTINCT r.id)::bigint AS count
-    FROM "MediaRequest" r
-    JOIN "AutoRequestLedger" l ON l."requestId" = r.id
-    WHERE TRUE ${sinceClause(since)}
-    GROUP BY l.source
+// Typed on AutoRequestSource, so a new ledger source fails to compile until it
+// has a bucket of its own here.
+const SOURCE_BUCKET: Record<AutoRequestSource, keyof AutoRequestSources> = {
+  watchlist: "watchlist",
+  "plex-watchlist": "plexWatchlist",
+  "trakt-watchlist": "traktWatchlist",
+};
+
+// Independent of the window's total, so it runs alongside the other aggregates;
+// requestSources() derives `other` once both are in. A request several ledger
+// rows point at (two people's watchlists, one request) is credited to ONE
+// source — the earliest ledger row's — so the buckets never sum past the
+// requests they count.
+export async function getAutoRequestSources(since: Date | null): Promise<AutoRequestSources> {
+  const rows = await queryRows<{ source: string; count: bigint }>(Prisma.sql`
+    SELECT t.source, COUNT(*)::bigint AS count
+    FROM (
+      SELECT DISTINCT ON (r.id) l.source
+      FROM "MediaRequest" r
+      JOIN "AutoRequestLedger" l ON l."requestId" = r.id
+      WHERE TRUE ${sinceClause(since)}
+      ORDER BY r.id, l."createdAt" ASC, l.id ASC
+    ) t
+    GROUP BY t.source
   `);
-  let watchlist = 0;
-  let plexWatchlist = 0;
-  for (const r of Array.isArray(rows) ? rows : []) {
-    if (r.source === "plex-watchlist") plexWatchlist += num(r.count);
-    else watchlist += num(r.count);
+  const out: AutoRequestSources = { watchlist: 0, plexWatchlist: 0, traktWatchlist: 0 };
+  for (const r of rows) {
+    // A value no AutoRequestSource names (none is written today) stays in `other`
+    // rather than being credited to a source it isn't.
+    const bucket = Object.hasOwn(SOURCE_BUCKET, r.source) ? SOURCE_BUCKET[r.source as AutoRequestSource] : null;
+    if (bucket) out[bucket] += num(r.count);
   }
-  return { watchlist, plexWatchlist, other: Math.max(0, total - watchlist - plexWatchlist) };
+  return out;
+}
+
+// `total` is the window's request count (getRequestOverview).
+export function requestSources(auto: AutoRequestSources, total: number): RequestSources {
+  return { ...auto, other: Math.max(0, total - auto.watchlist - auto.plexWatchlist - auto.traktWatchlist) };
 }
 
 export interface InstanceCount {
@@ -436,21 +505,16 @@ export async function getUserStats(since: Date | null): Promise<UserStats> {
   const [active, disabled, seen, requesters, months] = await Promise.all([
     countActiveUsers(),
     prisma.user.count({ where: { deactivatedAt: { not: null } } }),
-    prisma.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`
+    queryRows<{ n: bigint }>(Prisma.sql`
       SELECT COUNT(DISTINCT s."userId")::bigint AS n
       FROM "AuthSession" s JOIN "User" u ON u.id = s."userId"
       WHERE s."lastSeenAt" >= NOW() - INTERVAL '30 days' AND u."deactivatedAt" IS NULL
     `),
-    prisma.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`
+    queryRows<{ n: bigint }>(Prisma.sql`
       SELECT COUNT(DISTINCT r."requestedBy")::bigint AS n FROM "MediaRequest" r WHERE TRUE ${sinceClause(since)}
     `),
-    prisma.$queryRaw<Array<{ month: string; count: bigint }>>(Prisma.sql`
-      WITH months AS (
-        SELECT gs AS start FROM generate_series(
-          date_trunc('month', NOW() AT TIME ZONE 'UTC') - INTERVAL '11 months',
-          date_trunc('month', NOW() AT TIME ZONE 'UTC'),
-          '1 month'::interval) AS gs
-      )
+    queryRows<{ month: string; count: bigint }>(Prisma.sql`
+      WITH ${LAST_12_MONTHS_CTE}
       SELECT to_char(m.start, 'YYYY-MM') AS month, COUNT(u.id)::bigint AS count
       FROM months m
       LEFT JOIN "User" u ON u."createdAt" >= m.start AND u."createdAt" < m.start + INTERVAL '1 month'
@@ -460,9 +524,9 @@ export async function getUserStats(since: Date | null): Promise<UserStats> {
   return {
     active,
     disabled,
-    seenLast30Days: num(seen?.[0]?.n),
-    requesters: num(requesters?.[0]?.n),
-    newByMonth: (Array.isArray(months) ? months : []).map((m) => ({ month: m.month, count: num(m.count) })),
+    seenLast30Days: num(seen[0]?.n),
+    requesters: num(requesters[0]?.n),
+    newByMonth: months.map((m) => ({ month: m.month, count: num(m.count) })),
   };
 }
 
@@ -479,9 +543,9 @@ export interface TopRequester {
 // Grouped by account id (an email can change; the id can't), ties broken by
 // name then id so the list doesn't reshuffle between renders.
 export async function getTopRequesters(since: Date | null, limit = 10): Promise<TopRequester[]> {
-  const rows = await prisma.$queryRaw<Array<{
+  const rows = await queryRows<{
     id: string; name: string | null; email: string; count: bigint; available: bigint; declined: bigint; disabled: boolean;
-  }>>(Prisma.sql`
+  }>(Prisma.sql`
     SELECT u.id, u.name, u.email,
            COUNT(r.id)::bigint AS count,
            COUNT(r.id) FILTER (WHERE r.status = 'AVAILABLE')::bigint AS available,
@@ -494,7 +558,7 @@ export async function getTopRequesters(since: Date | null, limit = 10): Promise<
     ORDER BY count DESC, u.name ASC NULLS LAST, u.id ASC
     LIMIT ${limit}::int
   `);
-  return (Array.isArray(rows) ? rows : []).map((r) => ({
+  return rows.map((r) => ({
     id: r.id,
     name: r.name,
     email: r.email,
@@ -528,7 +592,7 @@ export async function getLibraryStats(): Promise<LibraryStats> {
   const [plexByInst, jfByInst, distinctRows, episodes, plexInst, jfInst] = await Promise.all([
     prisma.plexLibraryItem.groupBy({ by: ["serverInstance", "mediaType"], _count: { _all: true } }),
     prisma.jellyfinLibraryItem.groupBy({ by: ["serverInstance", "mediaType"], _count: { _all: true } }),
-    prisma.$queryRaw<Array<{ service: string; mediaType: Media; n: bigint }>>(Prisma.sql`
+    queryRows<{ service: string; mediaType: Media; n: bigint }>(Prisma.sql`
       SELECT 'plex' AS service, "mediaType", COUNT(DISTINCT "tmdbId")::bigint AS n FROM "PlexLibraryItem" GROUP BY "mediaType"
       UNION ALL
       SELECT 'jellyfin', "mediaType", COUNT(DISTINCT "tmdbId")::bigint FROM "JellyfinLibraryItem" GROUP BY "mediaType"
@@ -552,7 +616,7 @@ export async function getLibraryStats(): Promise<LibraryStats> {
     },
     servers: [],
   };
-  for (const r of Array.isArray(distinctRows) ? distinctRows : []) {
+  for (const r of distinctRows) {
     const target = r.service === "all" ? out.unique : r.service === "plex" ? out.perService.plex : r.service === "jellyfin" ? out.perService.jellyfin : null;
     if (!target) continue;
     if (r.mediaType === "MOVIE") target.movies = num(r.n);
@@ -562,44 +626,43 @@ export async function getLibraryStats(): Promise<LibraryStats> {
     if (e.source === "plex" || e.source === "jellyfin") out.perService[e.source].episodes = e._count._all;
   }
 
-  const addServers = (
-    service: "plex" | "jellyfin",
-    rows: Array<{ serverInstance: string; mediaType: string; _count: { _all: number } }>,
-    registry: Array<{ slug: string; name: string }>,
-  ) => {
-    const bySlug = new Map<string, ServerLibrary>();
-    for (const r of rows) {
-      let s = bySlug.get(r.serverInstance);
-      if (!s) {
-        const name = registry.find((i) => i.slug === r.serverInstance)?.name ?? r.serverInstance;
-        s = { service, slug: r.serverInstance, name, movies: 0, series: 0 };
-        bySlug.set(r.serverInstance, s);
-      }
-      if (r.mediaType === "MOVIE") s.movies += r._count._all;
-      else if (r.mediaType === "TV") s.series += r._count._all;
-    }
-    // Registry order: the default first, then the admin's order.
-    const order = (slug: string) => {
-      const i = registry.findIndex((x) => x.slug === slug);
-      return i < 0 ? Number.MAX_SAFE_INTEGER : i;
-    };
-    out.servers.push(...[...bySlug.values()].sort((a, b) => order(a.slug) - order(b.slug)));
-  };
-  addServers("plex", plexByInst, plexInst);
-  addServers("jellyfin", jfByInst, jfInst);
+  out.servers = [
+    ...serverLibraries("plex", plexByInst, plexInst),
+    ...serverLibraries("jellyfin", jfByInst, jfInst),
+  ];
   return out;
+}
+
+// One service's per-server title counts, in registry order (the default first,
+// then the admin's order); a slug no longer registered sorts last under its slug.
+function serverLibraries(
+  service: "plex" | "jellyfin",
+  rows: ReadonlyArray<{ serverInstance: string; mediaType: string; _count: { _all: number } }>,
+  registry: ReadonlyArray<{ slug: string; name: string }>,
+): ServerLibrary[] {
+  const position = new Map<string, { index: number; name: string }>();
+  registry.forEach((inst, index) => {
+    if (!position.has(inst.slug)) position.set(inst.slug, { index, name: inst.name });
+  });
+  const bySlug = new Map<string, ServerLibrary>();
+  for (const r of rows) {
+    let s = bySlug.get(r.serverInstance);
+    if (!s) {
+      s = { service, slug: r.serverInstance, name: position.get(r.serverInstance)?.name ?? r.serverInstance, movies: 0, series: 0 };
+      bySlug.set(r.serverInstance, s);
+    }
+    if (r.mediaType === "MOVIE") s.movies += r._count._all;
+    else if (r.mediaType === "TV") s.series += r._count._all;
+  }
+  const order = (slug: string) => position.get(slug)?.index ?? Number.MAX_SAFE_INTEGER;
+  return [...bySlug.values()].sort((a, b) => order(a.slug) - order(b.slug));
 }
 
 // Titles first added to ANY server in each of the last 12 months (UTC). Only
 // titles still in a library are visible — nothing records what was removed.
 export async function getLibraryGrowth(): Promise<Array<{ month: string; movies: number; series: number }>> {
-  const rows = await prisma.$queryRaw<Array<{ month: string; movies: bigint; series: bigint }>>(Prisma.sql`
-    WITH months AS (
-      SELECT gs AS start FROM generate_series(
-        date_trunc('month', NOW() AT TIME ZONE 'UTC') - INTERVAL '11 months',
-        date_trunc('month', NOW() AT TIME ZONE 'UTC'),
-        '1 month'::interval) AS gs
-    ),
+  const rows = await queryRows<{ month: string; movies: bigint; series: bigint }>(Prisma.sql`
+    WITH ${LAST_12_MONTHS_CTE},
     firsts AS (
       SELECT "tmdbId", "mediaType", MIN("addedAt") AS added
       FROM (
@@ -616,7 +679,7 @@ export async function getLibraryGrowth(): Promise<Array<{ month: string; movies:
     LEFT JOIN firsts f ON f.added >= m.start AND f.added < m.start + INTERVAL '1 month'
     GROUP BY m.start ORDER BY m.start
   `);
-  return (Array.isArray(rows) ? rows : []).map((r) => ({ month: r.month, movies: num(r.movies), series: num(r.series) }));
+  return rows.map((r) => ({ month: r.month, movies: num(r.movies), series: num(r.series) }));
 }
 
 // ─── Issues ──────────────────────────────────────────────────────────────────
@@ -646,7 +709,7 @@ export async function getIssueStats(since: Date | null): Promise<IssueStats> {
     prisma.issue.count({ where: { ...unresolved, messages: { none: { fromAdmin: true } } } }),
     prisma.issue.findFirst({ where: unresolved, orderBy: { createdAt: "asc" }, select: { createdAt: true } }),
     prisma.issue.count({ where: since ? { createdAt: { gte: since } } : {} }),
-    prisma.$queryRaw<Array<{ n: bigint; med: number | null; p90: number | null }>>(Prisma.sql`
+    queryRows<{ n: bigint; med: number | null; p90: number | null }>(Prisma.sql`
       SELECT COUNT(*)::bigint AS n,
              percentile_cont(0.5) WITHIN GROUP (ORDER BY s) AS med,
              percentile_cont(0.9) WITHIN GROUP (ORDER BY s) AS p90
@@ -658,7 +721,7 @@ export async function getIssueStats(since: Date | null): Promise<IssueStats> {
     `),
   ]);
   const s = new Map(byStatus.map((r) => [r.status, r._count._all]));
-  const r0 = resolve?.[0];
+  const r0 = resolve[0];
   return {
     open: s.get("OPEN") ?? 0,
     inProgress: s.get("IN_PROGRESS") ?? 0,
@@ -693,12 +756,11 @@ export async function getTopDeletionVotes(limit = 5): Promise<{ threshold: numbe
       orderBy: [{ _count: { id: "desc" } }, { _max: { createdAt: "desc" } }, { tmdbId: "asc" }],
       take: limit,
     }),
-    prisma.setting.findUnique({ where: { key: "deletionVoteThreshold" } }),
+    prisma.setting.findUnique({ where: { key: DELETION_VOTE_THRESHOLD_KEY } }),
     prisma.deletionVote.count(),
   ]);
-  const threshold = parseInt(thresholdRow?.value ?? "0", 10);
   return {
-    threshold: Number.isFinite(threshold) && threshold > 0 ? threshold : 0,
+    threshold: parseDeletionVoteThreshold(thresholdRow?.value),
     total,
     titles: groups.map((g) => ({
       tmdbId: g.tmdbId,
@@ -749,14 +811,21 @@ const STORAGE_TTL_MS = 5 * 60 * 1000;
 const storageCache = processSingleton("admin-stats:storage", () => ({ value: null as StorageStats | null, at: 0 }));
 
 export async function getStorageStats(opts: { fresh?: boolean } = {}): Promise<StorageStats> {
-  if (!opts.fresh && storageCache.value && Date.now() - storageCache.at < STORAGE_TTL_MS) return storageCache.value;
-  return coalesce("admin-stats:storage", async () => {
-    const value = await computeStorageStats(opts.fresh === true);
+  const fresh = opts.fresh === true;
+  if (!fresh && storageCache.value && Date.now() - storageCache.at < STORAGE_TTL_MS) return storageCache.value;
+  // A fresh caller never joins a non-fresh computation already in flight (it
+  // would get the cached library index it asked to skip).
+  return coalesce(fresh ? "admin-stats:storage:fresh" : "admin-stats:storage", async () => {
+    const value = await computeStorageStats(fresh);
     storageCache.value = value;
     storageCache.at = Date.now();
     return value;
   });
 }
+
+type ArrService = "radarr" | "sonarr";
+type ArrLibraryIndex = Awaited<ReturnType<typeof getCachedArrLibraryIndex>>["index"];
+type SharedWatchFacts = NonNullable<Parameters<typeof getNeverWatchedReport>[0]>["shared"];
 
 async function computeStorageStats(fresh: boolean): Promise<StorageStats> {
   const [disk, { index, at: indexAt }, radarr, sonarr, cleanupOn, neverWatchedOn] = await Promise.all([
@@ -768,10 +837,7 @@ async function computeStorageStats(fresh: boolean): Promise<StorageStats> {
     isFeatureEnabled(CLEANUP_FEATURE_KEY),
     isFeatureEnabled(NEVER_WATCHED_FEATURE_KEY),
   ]);
-  const instName = (service: "radarr" | "sonarr", slug: string) =>
-    (service === "radarr" ? radarr : sonarr).find((i) => i.slug === slug)?.name ?? slug;
-  const svcLabel = (service: "radarr" | "sonarr", slug: string) =>
-    `${service === "radarr" ? "Radarr" : "Sonarr"}${slug ? ` (${instName(service, slug)})` : ""}`;
+  const svcLabel = arrServiceLabeller(radarr, sonarr);
 
   const disks = mergeDiskGroups([
     ...(disk.radarr ? [{ source: "Radarr", entries: disk.radarr }] : []),
@@ -779,6 +845,49 @@ async function computeStorageStats(fresh: boolean): Promise<StorageStats> {
     ...disk.extra.map((g) => ({ source: g.label, entries: g.entries })),
   ]);
 
+  // Both reports below read the same whole-library watch facts (five
+  // whole-table PlayHistory aggregates, sessions, upstream evidence, requests,
+  // coverage): ONE load for this computation, for the same index and the same
+  // `now`, handed to each — and each still computes exactly what it computes on
+  // its own page (SharedWatchFacts). Lazy: a never-watched cache hit with
+  // cleanup off loads nothing.
+  const shared = cleanupOn || neverWatchedOn
+    ? shareLibraryWatchFacts(index, indexAt, { now: new Date(), seasons: neverWatchedOn })
+    : null;
+
+  // The never-watched report FIRST, and awaited before the cleanup report
+  // starts: its cache reads its generation before the shared load starts, so a
+  // report computed here can be stored for the page. Started by the cleanup
+  // report first, the load could predate an invalidation, and the report would
+  // be computed for this figure only.
+  const neverWatched = neverWatchedOn && shared ? await neverWatchedFigure(shared) : null;
+  const reclaimable = cleanupOn && shared ? await reclaimableFigure(index, shared) : null;
+
+  return {
+    disks,
+    unreachable: disk.unreachable,
+    libraries: librarySizes(index, svcLabel),
+    listingErrors: index.errors.map((e) => ({ service: e.service, slug: e.instance, name: svcLabel(e.service, e.instance) })),
+    reclaimable,
+    neverWatched,
+    computedAt: new Date().toISOString(),
+  };
+}
+
+// "Radarr" / "Sonarr (<instance name>)" — the default instance has no suffix.
+function arrServiceLabeller(
+  radarr: ReadonlyArray<{ slug: string; name: string }>,
+  sonarr: ReadonlyArray<{ slug: string; name: string }>,
+): (service: ArrService, slug: string) => string {
+  const names = { radarr: new Map<string, string>(), sonarr: new Map<string, string>() };
+  for (const i of radarr) if (!names.radarr.has(i.slug)) names.radarr.set(i.slug, i.name);
+  for (const i of sonarr) if (!names.sonarr.has(i.slug)) names.sonarr.set(i.slug, i.name);
+  return (service, slug) =>
+    `${service === "radarr" ? "Radarr" : "Sonarr"}${slug ? ` (${names[service].get(slug) ?? slug})` : ""}`;
+}
+
+// Titles and bytes on disk per Radarr/Sonarr instance, biggest first.
+function librarySizes(index: ArrLibraryIndex, svcLabel: (service: ArrService, slug: string) => string): InstanceLibrarySize[] {
   const sizes = new Map<string, InstanceLibrarySize>();
   const add = (e: ArrLibraryEntry) => {
     const key = `${e.service}:${e.instance}`;
@@ -792,65 +901,47 @@ async function computeStorageStats(fresh: boolean): Promise<StorageStats> {
   };
   for (const list of index.byKey.values()) list.forEach(add);
   for (const list of index.tvdbOnly.values()) list.forEach(add);
+  return [...sizes.values()].sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name));
+}
 
-  // Both reports below read the same whole-library watch facts (five
-  // whole-table PlayHistory aggregates, sessions, upstream evidence, requests,
-  // coverage): ONE load for this computation, for the same index and the same
-  // `now`, handed to each — and each still computes exactly what it computes on
-  // its own page (SharedWatchFacts). Lazy: a never-watched cache hit with
-  // cleanup off loads nothing.
-  const shared = cleanupOn || neverWatchedOn
-    ? shareLibraryWatchFacts(index, indexAt, { now: new Date(), seasons: neverWatchedOn })
-    : null;
-
-  // The never-watched report FIRST: its cache reads its generation before the
-  // shared load starts, so a report computed here can be stored for the page.
-  // Started by the cleanup report first, the load could predate an
-  // invalidation, and the report would be computed for this figure only.
-  let neverWatched: StorageStats["neverWatched"] = null;
-  if (neverWatchedOn && shared) {
-    try {
-      const { totals, seasons, trackingOn } = await getNeverWatchedReport({ shared });
-      neverWatched = {
-        titles: totals.never.titles,
-        bytes: totals.never.bytes,
-        seasons: totals.seasons.count,
-        seasonBytes: totals.seasons.bytes,
-        // The report's totals count unjudged TITLES only; a watched show's
-        // season can be unjudged too (an undated episode).
-        unknown: totals.unknown + seasons.filter((s) => s.state === "unobservable").length,
-        possible: totals.possible + seasons.filter((s) => s.state === "possiblyWatched").length,
-        trackingOn,
-      };
-    } catch (err) {
-      console.warn("[admin-stats] never-watched report failed:", err instanceof Error ? err.message : err);
-    }
+// The never-watched figure, or null when the report failed (logged).
+async function neverWatchedFigure(shared: SharedWatchFacts): Promise<StorageStats["neverWatched"]> {
+  try {
+    const { totals, seasons, trackingOn } = await getNeverWatchedReport({ shared });
+    return {
+      titles: totals.never.titles,
+      bytes: totals.never.bytes,
+      seasons: totals.seasons.count,
+      seasonBytes: totals.seasons.bytes,
+      // The report's totals count unjudged TITLES only; a watched show's
+      // season can be unjudged too (an undated episode).
+      unknown: totals.unknown + seasons.filter((s) => s.state === "unobservable").length,
+      possible: totals.possible + seasons.filter((s) => s.state === "possiblyWatched").length,
+      trackingOn,
+    };
+  } catch (err) {
+    console.warn("[admin-stats] never-watched report failed:", err instanceof Error ? err.message : err);
+    return null;
   }
+}
 
-  let reclaimable: StorageStats["reclaimable"] = null;
-  if (cleanupOn && shared) {
-    try {
-      // "cached": a page render never waits on TMDB (CrossRefMode).
-      const report = await computeCleanupReport(index, shared.now, undefined, { resolveTargets: true, crossRef: "cached", shared });
-      const candidates = report.rows.filter((r) => r.candidate);
-      reclaimable = {
-        titles: candidates.length,
-        bytes: candidates.reduce((sum, r) => sum + (r.sizeOnDisk ?? 0), 0),
-      };
-    } catch (err) {
-      console.warn("[admin-stats] cleanup report failed:", err instanceof Error ? err.message : err);
-    }
+// What Library cleanup would reclaim, or null when the report failed (logged).
+async function reclaimableFigure(
+  index: ArrLibraryIndex,
+  shared: NonNullable<SharedWatchFacts>,
+): Promise<StorageStats["reclaimable"]> {
+  try {
+    // "cached": a page render never waits on TMDB (CrossRefMode).
+    const report = await computeCleanupReport(index, shared.now, undefined, { resolveTargets: true, crossRef: "cached", shared });
+    const candidates = report.rows.filter((r) => r.candidate);
+    return {
+      titles: candidates.length,
+      bytes: candidates.reduce((sum, r) => sum + (r.sizeOnDisk ?? 0), 0),
+    };
+  } catch (err) {
+    console.warn("[admin-stats] cleanup report failed:", err instanceof Error ? err.message : err);
+    return null;
   }
-
-  return {
-    disks,
-    unreachable: disk.unreachable,
-    libraries: [...sizes.values()].sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name)),
-    listingErrors: index.errors.map((e) => ({ service: e.service, slug: e.instance, name: svcLabel(e.service, e.instance) })),
-    reclaimable,
-    neverWatched,
-    computedAt: new Date().toISOString(),
-  };
 }
 
 // ─── Watch grades (slow: play-history aggregates) ───────────────────────────
@@ -858,10 +949,11 @@ async function computeStorageStats(fresh: boolean): Promise<StorageStats> {
 // Letter spread across every active account that has filed a request. null
 // while grades are unavailable (feature off, tracking off) or on failure.
 export async function getWatchGradeSpreadForStats(): Promise<WatchGradeSpread | null> {
-  const rows = await prisma.mediaRequest.findMany({
+  // groupBy, not findMany + distinct: Prisma applies `distinct` in memory, so
+  // that shape sent every request row to Node to find the requesters.
+  const rows = await prisma.mediaRequest.groupBy({
+    by: ["requestedBy"],
     where: { user: { deactivatedAt: null } },
-    distinct: ["requestedBy"],
-    select: { requestedBy: true },
   });
   if (rows.length === 0) return null;
   const summaries = await getWatchGradeSummaries(rows.map((r) => r.requestedBy));

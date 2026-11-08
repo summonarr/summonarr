@@ -3,6 +3,7 @@ import { tmdbAuth } from "./tmdb-auth";
 import { safeFetchTrusted } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
 import { mapLimit } from "./concurrency";
+import { v, check } from "./validate";
 import { resolveTvdbToTmdb } from "./arr";
 import { foldDuplicateRatingKeys, plexLibraryRatingKeys, getPlexTmdbIds, type PlexLegacyGuidRef, type PlexLibraryItemData, type PlexSection } from "./plex";
 
@@ -25,6 +26,16 @@ const IMDB_FIND_CONCURRENCY = 5; // matches arr.ts's tvdb→tmdb fan-out bound
 // Both result types are cached from one /find call: the same imdb id is asked
 // once even when movie and TV libraries both carry legacy imdb guids.
 type ImdbToTmdbCache = { movie: number | null; tv: number | null };
+// A cached row of any other shape is a miss (asked again), never an id that
+// lands on a library row.
+const ImdbToTmdbCacheSchema = v.object({ movie: v.nullable(v.int()), tv: v.nullable(v.int()) });
+
+// The /find fields read. An answer that doesn't fit is a failed lookup (warned,
+// not cached), never a cached "no match".
+const FindResultSchema = v.object({
+  movie_results: v.optional(v.array(v.object({ id: v.int() }))),
+  tv_results: v.optional(v.array(v.object({ id: v.int() }))),
+});
 
 export interface ResolvedLegacyItem {
   tmdbId: number;
@@ -32,75 +43,148 @@ export interface ResolvedLegacyItem {
   data: PlexLibraryItemData;
 }
 
+export interface LegacyResolution {
+  items: ResolvedLegacyItem[];
+  // False when some lookup failed (TVDB batch, cache read, an uncached /find):
+  // a ref may be missing because the answer never came, not because there is
+  // none. A full replace fed by an incomplete set drops those titles until the
+  // next good run, so a caller that can hold its replace should.
+  complete: boolean;
+}
+
+const imdbCacheKey = (imdbId: string) => `imdb-to-tmdb:${imdbId}`;
+
+// thetvdb:// (the legacy default TV agent) — reuse the arr-side batch
+// resolver: cache → MediaRequest → TMDB /find, with its own negative TTLs.
+async function resolveTvdbRefs(
+  list: PlexLegacyGuidRef[],
+  out: ResolvedLegacyItem[],
+): Promise<{ resolvedKeys: Set<string>; hadErrors: boolean }> {
+  const resolvedKeys = new Set<string>();
+  const tvdbRefs = list.filter((r): r is PlexLegacyGuidRef & { tvdbId: number } => r.tvdbId != null);
+  if (tvdbRefs.length === 0) return { resolvedKeys, hadErrors: false };
+  const { map, hadErrors } = await resolveTvdbToTmdb(tvdbRefs.map((r) => r.tvdbId));
+  for (const ref of tvdbRefs) {
+    const tmdbId = map.get(ref.tvdbId);
+    if (tmdbId == null) continue;
+    out.push({ tmdbId, ratingKey: ref.ratingKey, data: ref.data });
+    resolvedKeys.add(ref.ratingKey);
+  }
+  return { resolvedKeys, hadErrors };
+}
+
+// One TMDB /find for an imdb id, cached either way. False when no usable
+// answer came back (nothing cached then).
+async function findImdbId(imdbId: string, auth: NonNullable<ReturnType<typeof tmdbAuth>>, cached: Map<string, ImdbToTmdbCache>): Promise<boolean> {
+  try {
+    const url = new URL(`https://api.themoviedb.org/3/find/${imdbId}`);
+    url.searchParams.set("external_source", "imdb_id");
+    const res = await safeFetchTrusted(url.toString(), {
+      allowedHosts: ["api.themoviedb.org"],
+      headers: auth.headers,
+      timeoutMs: 10_000,
+    });
+    if (!res.ok) {
+      console.warn("[plex-legacy] imdb-to-tmdb lookup returned %s for %s", sanitizeForLog(res.status), sanitizeForLog(imdbId));
+      return false;
+    }
+    const parsed = check(FindResultSchema, await res.json().catch(() => undefined));
+    if (!parsed.ok) {
+      console.warn("[plex-legacy] imdb-to-tmdb lookup for %s: unexpected answer (%s)", sanitizeForLog(imdbId), sanitizeForLog(parsed.error));
+      return false;
+    }
+    const entry: ImdbToTmdbCache = {
+      movie: parsed.value.movie_results?.[0]?.id ?? null,
+      tv:    parsed.value.tv_results?.[0]?.id ?? null,
+    };
+    cached.set(imdbCacheKey(imdbId), entry);
+    await setCache(
+      imdbCacheKey(imdbId),
+      entry,
+      entry.movie !== null || entry.tv !== null ? IMDB_TO_TMDB_TTL_RESOLVED : IMDB_TO_TMDB_TTL_UNRESOLVED,
+    );
+    return true;
+  } catch (err) {
+    console.warn("[plex-legacy] imdb-to-tmdb lookup failed for %s:", sanitizeForLog(imdbId), sanitizeForLog(err instanceof Error ? err.message : err));
+    return false;
+  }
+}
+
+// imdb:// (the legacy "Plex Movie" agent) — /find with external_source=imdb_id.
+// Returns whether every ref got an answer (cached or fetched).
+async function resolveImdbRefs(
+  imdbRefs: Array<PlexLegacyGuidRef & { imdbId: string }>,
+  mediaType: "MOVIE" | "TV",
+  out: ResolvedLegacyItem[],
+): Promise<boolean> {
+  if (imdbRefs.length === 0) return true;
+  const cached: Map<string, ImdbToTmdbCache> = await getCacheMany(imdbRefs.map((r) => imdbCacheKey(r.imdbId)), ImdbToTmdbCacheSchema);
+  // One lookup per distinct id: two copies of a title share an imdb id.
+  const uncached = [...new Set(imdbRefs.map((r) => r.imdbId).filter((id) => !cached.has(imdbCacheKey(id))))];
+  let complete = true;
+  if (uncached.length > 0) {
+    const auth = tmdbAuth();
+    if (!auth) {
+      complete = false;
+    } else {
+      const answered = await mapLimit(uncached, IMDB_FIND_CONCURRENCY, (id) => findImdbId(id, auth, cached));
+      if (answered.includes(false)) complete = false;
+    }
+  }
+  for (const ref of imdbRefs) {
+    const entry = cached.get(imdbCacheKey(ref.imdbId));
+    const tmdbId = mediaType === "MOVIE" ? entry?.movie : entry?.tv;
+    if (tmdbId != null) out.push({ tmdbId, ratingKey: ref.ratingKey, data: ref.data });
+  }
+  return complete;
+}
+
+/**
+ * Resolves legacy-agent refs to tmdb ids and says whether every lookup
+ * answered. Never throws: a failed stage keeps what resolved before it and
+ * reports `complete: false`.
+ */
+export async function resolvePlexLegacyGuidsDetailed(
+  refs: Map<string, PlexLegacyGuidRef>,
+  mediaType: "MOVIE" | "TV",
+): Promise<LegacyResolution> {
+  if (refs.size === 0) return { items: [], complete: true };
+  const out: ResolvedLegacyItem[] = [];
+  const list = Array.from(refs.values());
+  let complete = true;
+
+  let tvdbResolved = new Set<string>();
+  if (mediaType === "TV") {
+    try {
+      const tvdb = await resolveTvdbRefs(list, out);
+      tvdbResolved = tvdb.resolvedKeys;
+      if (tvdb.hadErrors) complete = false;
+    } catch (err) {
+      complete = false;
+      console.warn("[plex-legacy] tvdb guid resolution failed:", err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  // A show TVDB already resolved is not asked again by imdb id: that doubled
+  // the /find calls, and two answers that disagreed put two tmdb ids on one
+  // ratingKey.
+  const imdbRefs = list.filter(
+    (r): r is PlexLegacyGuidRef & { imdbId: string } => r.imdbId != null && !tvdbResolved.has(r.ratingKey),
+  );
+  try {
+    if (!(await resolveImdbRefs(imdbRefs, mediaType, out))) complete = false;
+  } catch (err) {
+    complete = false;
+    console.warn("[plex-legacy] imdb guid resolution failed:", err instanceof Error ? err.message : String(err));
+  }
+  return { items: out, complete };
+}
+
 export async function resolvePlexLegacyGuids(
   refs: Map<string, PlexLegacyGuidRef>,
   mediaType: "MOVIE" | "TV",
 ): Promise<ResolvedLegacyItem[]> {
-  if (refs.size === 0) return [];
-  const out: ResolvedLegacyItem[] = [];
-  const list = Array.from(refs.values());
-
-  try {
-    // thetvdb:// (the legacy default TV agent) — reuse the arr-side batch
-    // resolver: cache → MediaRequest → TMDB /find, with its own negative TTLs.
-    if (mediaType === "TV") {
-      const tvdbRefs = list.filter((r) => r.tvdbId != null);
-      if (tvdbRefs.length > 0) {
-        const { map } = await resolveTvdbToTmdb(tvdbRefs.map((r) => r.tvdbId!));
-        for (const ref of tvdbRefs) {
-          const tmdbId = map.get(ref.tvdbId!);
-          if (tmdbId != null) out.push({ tmdbId, ratingKey: ref.ratingKey, data: ref.data });
-        }
-      }
-    }
-
-    // imdb:// (the legacy "Plex Movie" agent) — /find with external_source=imdb_id.
-    const imdbRefs = list.filter((r) => r.imdbId != null);
-    if (imdbRefs.length > 0) {
-      const cached = await getCacheMany<ImdbToTmdbCache>(imdbRefs.map((r) => `imdb-to-tmdb:${r.imdbId}`));
-      const uncached = imdbRefs.filter((r) => !cached.has(`imdb-to-tmdb:${r.imdbId}`));
-      const auth = tmdbAuth();
-      if (auth && uncached.length > 0) {
-        await mapLimit(uncached, IMDB_FIND_CONCURRENCY, async (ref) => {
-          try {
-            const url = new URL(`https://api.themoviedb.org/3/find/${ref.imdbId}`);
-            url.searchParams.set("external_source", "imdb_id");
-            for (const [k, v] of Object.entries(auth.query)) url.searchParams.set(k, v);
-            const res = await safeFetchTrusted(url.toString(), {
-              allowedHosts: ["api.themoviedb.org"],
-              headers: auth.headers,
-              timeoutMs: 10_000,
-            });
-            if (!res.ok) {
-              console.warn("[plex-legacy] imdb-to-tmdb lookup returned %s for %s", sanitizeForLog(res.status), sanitizeForLog(ref.imdbId));
-              return;
-            }
-            const data = await res.json() as { movie_results?: { id: number }[]; tv_results?: { id: number }[] };
-            const entry: ImdbToTmdbCache = {
-              movie: data.movie_results?.[0]?.id ?? null,
-              tv:    data.tv_results?.[0]?.id ?? null,
-            };
-            cached.set(`imdb-to-tmdb:${ref.imdbId}`, entry);
-            await setCache(
-              `imdb-to-tmdb:${ref.imdbId}`,
-              entry,
-              entry.movie !== null || entry.tv !== null ? IMDB_TO_TMDB_TTL_RESOLVED : IMDB_TO_TMDB_TTL_UNRESOLVED,
-            );
-          } catch (err) {
-            console.warn("[plex-legacy] imdb-to-tmdb lookup failed for %s:", sanitizeForLog(ref.imdbId), sanitizeForLog(err instanceof Error ? err.message : err));
-          }
-        });
-      }
-      for (const ref of imdbRefs) {
-        const entry = cached.get(`imdb-to-tmdb:${ref.imdbId}`);
-        const tmdbId = mediaType === "MOVIE" ? entry?.movie : entry?.tv;
-        if (tmdbId != null) out.push({ tmdbId, ratingKey: ref.ratingKey, data: ref.data });
-      }
-    }
-  } catch (err) {
-    console.warn("[plex-legacy] legacy guid resolution failed:", err instanceof Error ? err.message : String(err));
-  }
-  return out;
+  return (await resolvePlexLegacyGuidsDetailed(refs, mediaType)).items;
 }
 
 // Merge resolved legacy items into the maps the sync writers consume, keeping
@@ -151,16 +235,24 @@ export function mergeResolvedLegacyItems(
 // modern Guid[] shows, so a rewrite fed by it (the standalone tv-episodes route,
 // the per-source Plex resync's recentOnly path) silently dropped the episodes of
 // every thetvdb:// / imdb:// show the orchestrator had cached, until its next
-// run. Same listing the internal walk pages, so no extra requests.
+// run. Same listing the internal walk pages, so no extra requests. `signal`
+// ends the walk (it rejects) when a caller's advisory lock is lost.
 export async function buildPlexShowKeyMap(
   serverUrl: string,
   token: string,
   selectedKeys: Set<string> | undefined,
   sections: PlexSection[],
+  signal?: AbortSignal,
 ): Promise<Map<string, number[]>> {
   const ratingKeyToTmdb = new Map<string, number[]>();
   const tvLegacy = new Map<string, PlexLegacyGuidRef>();
-  const tvIds = await getPlexTmdbIds(serverUrl, token, "TV", false, selectedKeys, sections, ratingKeyToTmdb, tvLegacy, true);
+  const tvIds = await getPlexTmdbIds(serverUrl, token, "TV", {
+    selectedKeys,
+    sections,
+    ratingKeyToTmdbOut: ratingKeyToTmdb,
+    legacyOut: tvLegacy,
+    signal,
+  });
   mergeResolvedLegacyItems(await resolvePlexLegacyGuids(tvLegacy, "TV"), tvIds, ratingKeyToTmdb);
   return ratingKeyToTmdb;
 }

@@ -1,7 +1,17 @@
 import "server-only";
 import { prisma } from "./prisma";
-import { checkMdblistPause, fetchMdblistBatch, mdblistPause } from "./mdblist";
+import {
+  checkMdblistPause,
+  fetchMdblistBatchOutcome,
+  mdblistCacheKey,
+  mdblistPause,
+  newMdblistBatchBreaker,
+  type MdblistBatchBreaker,
+  type MdblistBatchOutcome,
+} from "./mdblist";
 import { collectAllLibraryItems, LIBRARY_PAGE_SIZE } from "./library-iterator";
+import { tmdbDetailsKey } from "./tmdb-cache";
+import { readDetailsReleaseDates } from "./details-release-dates";
 
 // Titles per MDBList batch request.
 const BATCH_SIZE = 200;
@@ -14,8 +24,55 @@ const MAX_PREWARM_ITEMS = 200_000;
 // The exact stored text of a "not found" cache row (see NOT_FOUND_SENTINEL in mdblist.ts).
 const NOT_FOUND_DATA = JSON.stringify({ _notFound: true });
 
-interface DetailsCacheData {
-  releaseDate?: string | null;
+const typeOf = (i: { mediaType: "MOVIE" | "TV" }): "movie" | "tv" => (i.mediaType === "MOVIE" ? "movie" : "tv");
+
+// Deletes the "not found" markers among `keys`, so those titles get a fresh try
+// every run (tests/mdblist-prewarm.test.mts pins it). Valid rows are never
+// deleted, even with force=true: the refetch can stop early (quota, upstream
+// outage), and deleting first would leave every title it didn't reach with no
+// ratings at all. Instead, force skips the freshness check and each row is
+// overwritten in place.
+async function purgeNotFoundMarkers(keys: string[]): Promise<number> {
+  let purged = 0;
+  for (let i = 0; i < keys.length; i += LIBRARY_PAGE_SIZE) {
+    const where = { key: { in: keys.slice(i, i + LIBRARY_PAGE_SIZE) }, data: NOT_FOUND_DATA };
+    purged += (await prisma.tmdbCache.deleteMany({ where })).count;
+  }
+  return purged;
+}
+
+// The rows still fresh enough to skip: more than 25% of their TTL left (the
+// threshold every prewarm pass uses).
+async function freshRowKeys(keys: string[]): Promise<Set<string>> {
+  const fresh = new Set<string>();
+  for (let i = 0; i < keys.length; i += LIBRARY_PAGE_SIZE) {
+    const existingRows = await prisma.tmdbCache.findMany({
+      where: { key: { in: keys.slice(i, i + LIBRARY_PAGE_SIZE) } },
+      select: { key: true, cachedAt: true, expiresAt: true },
+    });
+    for (const r of existingRows) {
+      const originalTtlMs = r.expiresAt.getTime() - r.cachedAt.getTime();
+      if (r.expiresAt.getTime() - Date.now() > originalTtlMs * 0.25) fresh.add(r.key);
+    }
+  }
+  return fresh;
+}
+
+// One page of one media type through the batch endpoint, with the run's breaker
+// for that type. The batch reports its own failures (failedIds) and never
+// rejects; a throw here anyway counts the page failed rather than ending the run.
+async function warmPage(
+  page: { id: number; releaseDate: string | null }[],
+  type: "movie" | "tv",
+  breaker: MdblistBatchBreaker,
+): Promise<MdblistBatchOutcome> {
+  if (page.length === 0) return { ratings: new Map(), failedIds: 0 };
+  try {
+    return await fetchMdblistBatchOutcome(page, type, { ...BACKGROUND, breaker });
+  } catch (err) {
+    console.warn(`[mdblist-prewarm] ${type} batch failed:`, err);
+    return { ratings: new Map(), failedIds: page.length };
+  }
 }
 
 // Refreshes MDBList ratings cache for every library item, purging stale/NOT_FOUND
@@ -40,7 +97,8 @@ export async function prewarmMdblistCache(opts: { force?: boolean; signal?: Abor
   }
 
   const apiKey = await prisma.setting.findUnique({ where: { key: "mdblistApiKey" } });
-  if (!apiKey?.value) {
+  // Trimmed, as mdblist.ts reads it: a blank key is no key.
+  if (!apiKey?.value.trim()) {
     return { total: 0, fetched: 0, skipped: 0, failed: 0, purged: 0 };
   }
 
@@ -52,60 +110,15 @@ export async function prewarmMdblistCache(opts: { force?: boolean; signal?: Abor
     return { total: 0, fetched: 0, skipped: 0, failed: 0, purged: 0 };
   }
 
-  let purged = 0;
-  const mdblistKeys = items.map((i) => `mdblist:tmdb:${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}`);
-  for (let i = 0; i < mdblistKeys.length; i += LIBRARY_PAGE_SIZE) {
-    const slice = mdblistKeys.slice(i, i + LIBRARY_PAGE_SIZE);
-    // Only "not found" markers are deleted here, so those titles get a fresh try.
-    // Valid rows are never deleted, even with force=true: the refetch below can
-    // stop early (quota, upstream outage), and deleting first would leave every
-    // title it didn't reach with no ratings at all. Instead, force skips the
-    // freshness check below and each row is overwritten in place.
-    const where = { key: { in: slice }, data: NOT_FOUND_DATA };
-    const { count } = await prisma.tmdbCache.deleteMany({ where });
-    purged += count;
-  }
+  const mdblistKeys = items.map((i) => mdblistCacheKey(typeOf(i), i.tmdbId));
+  const purged = await purgeNotFoundMarkers(mdblistKeys);
+  const freshKeys = force ? new Set<string>() : await freshRowKeys(mdblistKeys);
 
-  const freshKeys = new Set<string>();
-  if (!force) {
-    for (let i = 0; i < mdblistKeys.length; i += LIBRARY_PAGE_SIZE) {
-      const slice = mdblistKeys.slice(i, i + LIBRARY_PAGE_SIZE);
-      const existingRows = await prisma.tmdbCache.findMany({
-        where: { key: { in: slice } },
-        select: { key: true, cachedAt: true, expiresAt: true },
-      });
-      // Same 25% remaining-TTL threshold used across all prewarm passes
-      for (const r of existingRows) {
-        const originalTtlMs = r.expiresAt.getTime() - r.cachedAt.getTime();
-        if (r.expiresAt.getTime() - Date.now() > originalTtlMs * 0.25) freshKeys.add(r.key);
-      }
-    }
-  }
-
-  const toFetch = force ? items : items.filter((i) => {
-    const key = `mdblist:tmdb:${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}`;
-    return !freshKeys.has(key);
-  });
+  const toFetch = force ? items : items.filter((i) => !freshKeys.has(mdblistCacheKey(typeOf(i), i.tmdbId)));
 
   const skipped = items.length - toFetch.length;
 
-  const releaseDateByKey = new Map<string, string | null>();
-  const detailKeys = toFetch.map((i) => `${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}:details`);
-  for (let i = 0; i < detailKeys.length; i += LIBRARY_PAGE_SIZE) {
-    const slice = detailKeys.slice(i, i + LIBRARY_PAGE_SIZE);
-    const detailRows = await prisma.tmdbCache.findMany({
-      where: { key: { in: slice } },
-      select: { key: true, data: true },
-    });
-    for (const row of detailRows) {
-      try {
-        const parsed = JSON.parse(row.data) as DetailsCacheData;
-        releaseDateByKey.set(row.key, parsed.releaseDate ?? null);
-      } catch {
-        releaseDateByKey.set(row.key, null);
-      }
-    }
-  }
+  const releaseDateByKey = await readDetailsReleaseDates(toFetch.map((i) => tmdbDetailsKey(i.mediaType, i.tmdbId)));
 
   let fetched = 0;
   let failed = 0;
@@ -113,15 +126,22 @@ export async function prewarmMdblistCache(opts: { force?: boolean; signal?: Abor
 
   const movieItems = toFetch
     .filter((i) => i.mediaType === "MOVIE")
-    .map((i) => ({ id: i.tmdbId, releaseDate: releaseDateByKey.get(`movie:${i.tmdbId}:details`) ?? null }));
+    .map((i) => ({ id: i.tmdbId, releaseDate: releaseDateByKey.get(tmdbDetailsKey("movie", i.tmdbId)) ?? null }));
   const tvItems = toFetch
     .filter((i) => i.mediaType === "TV")
-    .map((i) => ({ id: i.tmdbId, releaseDate: releaseDateByKey.get(`tv:${i.tmdbId}:details`) ?? null }));
+    .map((i) => ({ id: i.tmdbId, releaseDate: releaseDateByKey.get(tmdbDetailsKey("tv", i.tmdbId)) ?? null }));
 
   // Interleave movie and TV batch pages so quota is spread evenly rather than exhausted on movies first
   const moviePages = Math.ceil(movieItems.length / BATCH_SIZE);
   const tvPages    = Math.ceil(tvItems.length    / BATCH_SIZE);
   const totalPages = Math.max(moviePages, tvPages);
+
+  // One failure breaker per media type for the whole run. fetchMdblistBatch's own
+  // breaker lives for one call, and each call here is one page, so it could
+  // never trip: a persistent 5xx (or an invalid key answering 200-with-error)
+  // would cost a request per page to the end of the library. A type whose
+  // breaker tripped sends nothing more; the other carries on.
+  const breakers = { movie: newMdblistBatchBreaker(), tv: newMdblistBatchBreaker() };
 
   for (let page = 0; page < totalPages; page++) {
     // Stop when the advisory lock times out: withAdvisoryLock has already released
@@ -139,26 +159,24 @@ export async function prewarmMdblistCache(opts: { force?: boolean; signal?: Abor
       break;
     }
 
-    const moviePage = movieItems.slice(page * BATCH_SIZE, (page + 1) * BATCH_SIZE);
-    const tvPage    = tvItems.slice(page    * BATCH_SIZE, (page + 1) * BATCH_SIZE);
-
-    const [movieResults, tvResults] = await Promise.allSettled([
-      moviePage.length > 0 ? fetchMdblistBatch(moviePage, "movie", BACKGROUND) : Promise.resolve(new Map()),
-      tvPage.length    > 0 ? fetchMdblistBatch(tvPage,    "tv",    BACKGROUND) : Promise.resolve(new Map()),
-    ]);
-
-    if (movieResults.status === "fulfilled") {
-      fetched += movieResults.value.size;
-    } else {
-      failed += moviePage.length;
-      console.warn("[mdblist-prewarm] movie batch failed:", movieResults.reason);
+    const moviePage = breakers.movie.tripped ? [] : movieItems.slice(page * BATCH_SIZE, (page + 1) * BATCH_SIZE);
+    const tvPage    = breakers.tv.tripped    ? [] : tvItems.slice(page    * BATCH_SIZE, (page + 1) * BATCH_SIZE);
+    if (moviePage.length === 0 && tvPage.length === 0) {
+      // Only a tripped breaker can empty both before the last page.
+      console.warn(`[mdblist-prewarm] MDBList kept failing — stopping after ${fetched} fetches`);
+      break;
     }
 
-    if (tvResults.status === "fulfilled") {
-      fetched += tvResults.value.size;
-    } else {
-      failed += tvPage.length;
-      console.warn("[mdblist-prewarm] tv batch failed:", tvResults.reason);
+    const outcomes = await Promise.all([
+      warmPage(moviePage, "movie", breakers.movie),
+      warmPage(tvPage, "tv", breakers.tv),
+    ]);
+    for (const outcome of outcomes) {
+      fetched += outcome.ratings.size;
+      // The ids MDBList gave no ratings answer for — a 5xx, an error body, an
+      // empty answer, a failed request. Without this a run where every page
+      // failed reported failed: 0 and recorded green.
+      failed += outcome.failedIds;
     }
 
     const pageEnd = mdblistPause(BACKGROUND);

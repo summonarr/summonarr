@@ -23,6 +23,7 @@ import {
   appendChunk,
   getSessionStream,
   clearSession,
+  cancelSession,
 } from "../src/lib/import-session.ts";
 import { MAX_CIPHERTEXT_BYTES } from "../src/lib/backup-import.ts";
 
@@ -245,4 +246,199 @@ test("an importing-but-expired session is NEVER reclaimed — not even by a retr
   if (!fresh.ok) assert.fail("slot must be free after clearSession");
   assert.equal(fresh.session.receivedChunks, 0);
   await clearSession(id);
+});
+
+test("totalChunks must be a whole number no larger than the byte count", async () => {
+  for (const [totalSize, totalChunks] of [[10, 2.5], [4, 5], [1, 2]] as const) {
+    const r = await startSession({ uploadId: crypto.randomUUID(), totalSize, totalChunks });
+    if (r.ok) assert.fail(`totalSize=${totalSize} totalChunks=${totalChunks} must be rejected`);
+    assert.deepEqual(r.error, { kind: "invalid-size" });
+  }
+  // The boundary: one byte per chunk is a (silly but) real upload.
+  const id = crypto.randomUUID();
+  const edge = await startSession({ uploadId: id, totalSize: 4, totalChunks: 4 });
+  if (!edge.ok) assert.fail("totalChunks == totalSize must be accepted");
+  await clearSession(id);
+});
+
+test("the upload slot is process-wide: a second copy of the module sees the same session", async () => {
+  // Turbopack copies a lib module into every chunk that imports it; the setup
+  // and admin routes must still share one slot (guardrail 27a).
+  const specifier = "../src/lib/import-session.ts?chunk=second";
+  const other: typeof import("../src/lib/import-session.ts") = await import(specifier);
+  const id = crypto.randomUUID();
+  const started = await startSession({ uploadId: id, totalSize: 4, totalChunks: 1 });
+  if (!started.ok) assert.fail("start must succeed");
+  try {
+    const rival = await other.startSession({ uploadId: crypto.randomUUID(), totalSize: 4, totalChunks: 1 });
+    if (rival.ok) assert.fail("the other copy must see the slot taken");
+    assert.deepEqual(rival.error, { kind: "in-progress" });
+    assert.equal(other.hasActiveUploadSession(id), true);
+  } finally {
+    await clearSession(id);
+  }
+});
+
+test("a client cancel never touches a session that is being imported; the importer's clear still frees it", async () => {
+  // The uploader sends DELETE when the final chunk's request fails at a proxy
+  // (502/504) while the server is still restoring from the file.
+  const id = crypto.randomUUID();
+  const started = await startSession({ uploadId: id, totalSize: 4, totalChunks: 1 });
+  if (!started.ok) assert.fail("start must succeed");
+  const r = await appendChunk(id, 0, bytes("data"));
+  if (!r.ok) assert.fail("chunk must append");
+  const stream = getSessionStream(id);
+  assert.ok(stream);
+
+  await cancelSession(id);
+  assert.equal(await dirGone(started.session.tempDir), false, "the file being imported must stay");
+  const rival = await startSession({ uploadId: crypto.randomUUID(), totalSize: 4, totalChunks: 1 });
+  if (rival.ok) assert.fail("a second upload must not start beside the running restore");
+  assert.deepEqual(rival.error, { kind: "in-progress" });
+  assert.equal((await collect(stream)).toString("utf8"), "data");
+
+  await clearSession(id); // the importer's finally
+  assert.equal(await dirGone(started.session.tempDir), true);
+  const next = await startSession({ uploadId: crypto.randomUUID(), totalSize: 4, totalChunks: 1 });
+  if (!next.ok) assert.fail("the slot is free once the importer clears it");
+  await clearSession(next.session.uploadId);
+});
+
+test("a client cancel of an upload that is NOT importing frees the slot", async () => {
+  const id = crypto.randomUUID();
+  const started = await startSession({ uploadId: id, totalSize: 8, totalChunks: 2 });
+  if (!started.ok) assert.fail("start must succeed");
+  await cancelSession(crypto.randomUUID()); // another id: a no-op
+  assert.equal(await dirGone(started.session.tempDir), false);
+  await cancelSession(id);
+  assert.equal(await dirGone(started.session.tempDir), true);
+  const next = await startSession({ uploadId: crypto.randomUUID(), totalSize: 4, totalChunks: 1 });
+  if (!next.ok) assert.fail("slot must be free after the cancel");
+  await clearSession(next.session.uploadId);
+});
+
+// Holds fs.promises.open (or the handle's close) until released, so a test can
+// act while an append is mid-write. import-session reads `fs.open` at call time.
+function holdFsStep(step: "open" | "close"): { reached: Promise<void>; release: () => void; restore: () => void } {
+  const realOpen = fs.open;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  let reached!: () => void;
+  const reachedP = new Promise<void>((r) => { reached = r; });
+  (fs as { open: typeof fs.open }).open = (async (...args: Parameters<typeof fs.open>) => {
+    if (step === "open") {
+      reached();
+      await gate;
+      return realOpen(...args);
+    }
+    const handle = await realOpen(...args);
+    const realClose = handle.close.bind(handle);
+    handle.close = async () => {
+      reached();
+      await gate;
+      return realClose();
+    };
+    return handle;
+  }) as typeof fs.open;
+  return { reached: reachedP, release, restore: () => { (fs as { open: typeof fs.open }).open = realOpen; } };
+}
+
+test("a cancel during an in-flight append waits for it: no crash, no half-removed directory", async () => {
+  const id = crypto.randomUUID();
+  const started = await startSession({ uploadId: id, totalSize: 8, totalChunks: 2 });
+  if (!started.ok) assert.fail("start must succeed");
+  const hold = holdFsStep("open");
+  try {
+    const append = appendChunk(id, 0, bytes("aaaa"));
+    await hold.reached; // the append passed its checks and is about to write
+    const cancel = cancelSession(id);
+    hold.release();
+    const r = await append; // must resolve, never throw
+    await cancel;
+    assert.equal(r.ok, true, `the append that was already writing completes: ${JSON.stringify(r)}`);
+    assert.equal(await dirGone(started.session.tempDir), true, "the cancel then removed the session");
+    const next = await startSession({ uploadId: crypto.randomUUID(), totalSize: 4, totalChunks: 1 });
+    if (!next.ok) assert.fail("the slot is free");
+    await clearSession(next.session.uploadId);
+  } finally {
+    hold.restore();
+    await clearSession(id);
+  }
+});
+
+test("an expired session reclaimed while its append is opening the file: the append reports no-session", async () => {
+  const idOld = crypto.randomUUID();
+  const idNew = crypto.randomUUID();
+  const old = await startSession({ uploadId: idOld, totalSize: 8, totalChunks: 2 });
+  if (!old.ok) assert.fail("start must succeed");
+  const hold = holdFsStep("open");
+  try {
+    const append = appendChunk(idOld, 0, bytes("aaaa"));
+    await hold.reached;
+    old.session.expiresAt = Date.now() - 1; // the idle TTL lapses mid-append
+    const fresh = await startSession({ uploadId: idNew, totalSize: 4, totalChunks: 1 });
+    if (!fresh.ok) assert.fail("the expired slot is reclaimable");
+    hold.release();
+    const r = await append; // its directory is gone: ENOENT, reported, not thrown
+    assert.deepEqual(r, { ok: false, error: { kind: "no-session" } });
+    assert.equal(fresh.session.receivedChunks, 0);
+    assert.equal(fresh.session.bytesWritten, 0);
+  } finally {
+    hold.restore();
+    await clearSession(idNew);
+    await clearSession(idOld);
+  }
+});
+
+test("an expired session reclaimed after its append wrote: the counters never move on the new session", async () => {
+  const idOld = crypto.randomUUID();
+  const idNew = crypto.randomUUID();
+  const old = await startSession({ uploadId: idOld, totalSize: 8, totalChunks: 2 });
+  if (!old.ok) assert.fail("start must succeed");
+  const hold = holdFsStep("close");
+  try {
+    const append = appendChunk(idOld, 0, bytes("aaaa"));
+    await hold.reached; // written, closing
+    old.session.expiresAt = Date.now() - 1;
+    const fresh = await startSession({ uploadId: idNew, totalSize: 4, totalChunks: 1 });
+    if (!fresh.ok) assert.fail("the expired slot is reclaimable");
+    hold.release();
+    const r = await append;
+    assert.deepEqual(r, { ok: false, error: { kind: "no-session" } });
+    assert.equal(fresh.session.receivedChunks, 0, "the old append must not count on the new session");
+    assert.equal(fresh.session.bytesWritten, 0);
+    // The new session's own chunk 0 is still the one it expects.
+    const own = await appendChunk(idNew, 0, bytes("bbbb"));
+    if (!own.ok) assert.fail(`the new session's chunk 0 must append: ${JSON.stringify(own)}`);
+    assert.equal(own.complete, true);
+  } finally {
+    hold.restore();
+    await clearSession(idNew);
+    await clearSession(idOld);
+  }
+});
+
+test("a fractional declared size is refused up front, not after the whole upload", async () => {
+  const res = await startSession({ uploadId: crypto.randomUUID(), totalSize: 1000.5, totalChunks: 1 });
+  if (res.ok) assert.fail("a fractional size must be refused");
+  assert.deepEqual(res.error, { kind: "invalid-size" });
+});
+
+test("an incomplete upload is never handed to the importer, and is not pinned as importing", async () => {
+  const id = crypto.randomUUID();
+  const started = await startSession({ uploadId: id, totalSize: 8, totalChunks: 2 });
+  if (!started.ok) assert.fail("start must succeed");
+  try {
+    const first = await appendChunk(id, 0, bytes("1234"));
+    if (!first.ok) assert.fail("chunk must append");
+    assert.equal(getSessionStream(id), null, "half an upload is not a backup");
+    assert.notEqual(started.session.importing, true);
+    const last = await appendChunk(id, 1, bytes("5678"));
+    if (!last.ok || !last.complete) assert.fail("the upload completes");
+    const stream = getSessionStream(id);
+    assert.ok(stream);
+    assert.equal((await collect(stream)).toString("utf8"), "12345678");
+  } finally {
+    await clearSession(id);
+  }
 });

@@ -15,6 +15,7 @@ import {
 } from "@/lib/oidc";
 import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
 // Native completion of the OIDC flow — the counterpart to the JSON branch of
 // /api/auth/oidc/start. The browser flow never reaches here: it finishes inside
@@ -50,33 +51,9 @@ export async function POST(req: NextRequest) {
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
-  if (typeof body.code !== "string" || !body.code) {
-    return NextResponse.json({ error: t("apiAuth.oidc.codeRequired") }, { status: 400 });
-  }
-  if (typeof body.state !== "string" || !body.state) {
-    return NextResponse.json({ error: t("apiAuth.oidc.stateRequired") }, { status: 400 });
-  }
-  if (typeof body.flowState !== "string" || !body.flowState) {
-    return NextResponse.json({ error: t("apiAuth.oidc.flowExpired") }, { status: 400 });
-  }
-
-  const flowState = await verifyOidcStateCookie(body.flowState);
-  if (!flowState) {
-    return NextResponse.json({ error: t("apiAuth.oidc.flowExpired") }, { status: 400 });
-  }
-  // Bind the submitted state to the signed one. exchangeNativeOidcCode also
-  // passes it as expectedState, so this is belt-and-suspenders — but it fails
-  // here with a clear 400 instead of surfacing as an opaque exchange error.
-  if (flowState.state !== body.state) {
-    return NextResponse.json({ error: t("apiAuth.oidc.flowMismatch") }, { status: 400 });
-  }
-  // Refuse a flow state minted for the WEB handshake. Without this a stolen web
-  // flow cookie could be replayed through the native path to trade a code for a
-  // bearer token; the native marker is stamped at /start only for callers that
-  // identified as native.
-  if (!isNativeOidcState(flowState.state)) {
-    return NextResponse.json({ error: t("apiAuth.oidc.flowMismatch") }, { status: 400 });
-  }
+  const flow = await readNativeFlow(body, t);
+  if (flow instanceof NextResponse) return flow;
+  const { code, state, flowState } = flow;
 
   // Read before the exchange: it decides whether the exchange also fetches a
   // groups claim. A DB fault here is a 500, like the lookup below.
@@ -84,7 +61,7 @@ export async function POST(req: NextRequest) {
 
   let claims;
   try {
-    claims = await exchangeNativeOidcCode(body.code, body.state, flowState, oidcExchangeOptionsFor(policy));
+    claims = await exchangeNativeOidcCode(code, state, flowState, oidcExchangeOptionsFor(policy));
   } catch (err) {
     console.error(
       "[auth/sign-in/oidc] code exchange failed:",
@@ -129,4 +106,26 @@ export async function POST(req: NextRequest) {
   // bounded by the IdP: an authorization code is single-use, so a resubmitted
   // (code, flowState) pair fails at the exchange above.
   return buildSignInResponse(req, result);
+}
+
+// The submitted code and state, bound to the signed native flow state the app
+// was handed at /start — or the 400 that says which part is missing or wrong.
+async function readNativeFlow(body: Record<string, unknown>, t: Translator) {
+  const refuse = (key: string) => NextResponse.json({ error: t(key) }, { status: 400 });
+  if (typeof body.code !== "string" || !body.code) return refuse("apiAuth.oidc.codeRequired");
+  if (typeof body.state !== "string" || !body.state) return refuse("apiAuth.oidc.stateRequired");
+  if (typeof body.flowState !== "string" || !body.flowState) return refuse("apiAuth.oidc.flowExpired");
+
+  const flowState = await verifyOidcStateCookie(body.flowState);
+  if (!flowState) return refuse("apiAuth.oidc.flowExpired");
+  // Bind the submitted state to the signed one. exchangeNativeOidcCode also
+  // passes it as expectedState, so this is belt-and-suspenders — but it fails
+  // here with a clear 400 instead of surfacing as an opaque exchange error.
+  if (flowState.state !== body.state) return refuse("apiAuth.oidc.flowMismatch");
+  // Refuse a flow state minted for the WEB handshake. Without this a stolen web
+  // flow cookie could be replayed through the native path to trade a code for a
+  // bearer token; the native marker is stamped at /start only for callers that
+  // identified as native.
+  if (!isNativeOidcState(flowState.state)) return refuse("apiAuth.oidc.flowMismatch");
+  return { code: body.code, state: body.state, flowState };
 }

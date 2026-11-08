@@ -85,12 +85,15 @@ const { sseEmitter } = await import("../src/lib/sse-emitter.ts");
 const {
   MAX_PLAYTIME_DELTA_MS,
   MediaServerMismatchError,
+  STALE_FINALIZE_CONCURRENCY,
   appendPlayHistoryFilter,
   applyFinalTick,
   calculateWatched,
+  cleanupStaleSessions,
   computePlaytimeIncrement,
   getArcGapDays,
   getCompletionThreshold,
+  getRetentionCutoff,
   getWatchedThreshold,
   isPlayHistoryEnabled,
   isSourceEnabled,
@@ -99,7 +102,10 @@ const {
   recordCompletedSession,
   resolveMediaServerUser,
   resolveShowTmdbId,
+  invalidatePlayHistorySettings,
+  currentActivityGeneration,
 } = await import("../src/lib/play-history.ts");
+const { PURGE_BATCH_SIZE, PURGE_MAX_BATCHES } = await import("../src/lib/play-history-record.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
 
@@ -133,17 +139,22 @@ shadowPrismaModel(prisma, "plexLibraryItem", {
 });
 const jellyfinLibCalls: LibArgs[] = [];
 let jellyfinLibRow: { tmdbId: number | null } | null = null;
+// The Jellyfin branch reads findMany too (two rows can hold one item id).
+let jellyfinLibRows: Array<{ tmdbId: number; jellyfinItemId: string | null }> | null = null;
 shadowPrismaModel(prisma, "jellyfinLibraryItem", {
-  findFirst: async (args: LibArgs) => {
+  findMany: async (args: LibArgs) => {
     jellyfinLibCalls.push(args);
-    return jellyfinLibRow;
+    if (jellyfinLibRows) return jellyfinLibRows;
+    return jellyfinLibRow && jellyfinLibRow.tmdbId != null ? [{ tmdbId: jellyfinLibRow.tmdbId, jellyfinItemId: null }] : [];
   },
 });
 
 const activeSessionDeletes: Array<{ where: Record<string, unknown> }> = [];
 let activeSessionDeleteError: Error | null = null;
 const activeSessionUpdateManyCalls: Array<{ data: { lastSeenAt: Date } }> = [];
+let staleSessionRows: ActiveSession[] = [];
 let activeSessionUpdateManyError: Error | null = null;
+let snapshotReadError: Error | null = null;
 shadowPrismaModel(prisma, "activeSession", {
   deleteMany: async (args: { where: Record<string, unknown> }) => {
     activeSessionDeletes.push(args);
@@ -155,7 +166,13 @@ shadowPrismaModel(prisma, "activeSession", {
     if (activeSessionUpdateManyError) throw activeSessionUpdateManyError;
     return { count: 3 };
   },
-  findMany: async () => [], // emitActiveSessionsSnapshot on the non-skipSSE path
+  // cleanupStaleSessions' lastSeenAt-filtered read gets staleSessionRows; the
+  // snapshot read on the non-skipSSE path gets nothing (or snapshotReadError).
+  findMany: async (args?: { where?: { lastSeenAt?: unknown } }) => {
+    if (args?.where?.lastSeenAt) return staleSessionRows;
+    if (snapshotReadError) throw snapshotReadError;
+    return [];
+  },
 });
 
 type HistoryCreateArgs = { data: Array<Record<string, unknown>>; skipDuplicates?: boolean };
@@ -163,21 +180,49 @@ const historyCreates: HistoryCreateArgs[] = [];
 const historyFindFirstCalls: Array<Record<string, unknown>> = [];
 let priorPlayRow: { id: string; referenceId: string | null; watched: boolean } | null = null;
 let historyFindFirstError = false;
-const historyDeleteManyCalls: Array<{ where: { startedAt: { lt: Date } } }> = [];
+const historyDeleteManyCalls: Array<{ where: { startedAt: { lt: Date }; id?: { in: string[] } } }> = [];
 let historyDeleteCount = 0;
+// The retention purge reads ids in batches before each delete. Each read takes
+// the next queued batch; with none queued it answers one old row.
+const historyPurgeReads: Array<{ where: { startedAt: { lt: Date } }; take: number }> = [];
+let historyPurgeBatches: Array<Array<{ id: string }>> | null = null;
+// A finalize whose row already exists (createMany skipped it) refines it.
+let historyCreateInserts: number | null = null;
+const historyUpdateManyCalls: Array<{ where: Record<string, unknown>; data: Record<string, unknown> }> = [];
+// When set, each history write yields a macrotask while counted in flight, so a
+// test can see how many finalizes run at once.
+let historyCreateYield = false;
+let historyCreateInFlight = 0;
+let historyCreateMaxInFlight = 0;
 shadowPrismaModel(prisma, "playHistory", {
   createMany: async (args: HistoryCreateArgs) => {
     historyCreates.push(args);
-    return { count: args.data.length };
+    if (historyCreateYield) {
+      historyCreateInFlight++;
+      historyCreateMaxInFlight = Math.max(historyCreateMaxInFlight, historyCreateInFlight);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      historyCreateInFlight--;
+    }
+    return { count: historyCreateInserts ?? args.data.length };
+  },
+  updateMany: async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+    historyUpdateManyCalls.push(args);
+    return { count: 1 };
+  },
+  findMany: async (args: { where: { startedAt: { lt: Date } }; take: number }) => {
+    historyPurgeReads.push(args);
+    if (historyPurgeBatches) return historyPurgeBatches.shift() ?? [];
+    return [{ id: "old-1" }];
   },
   findFirst: async (args: Record<string, unknown>) => {
     historyFindFirstCalls.push(args);
     if (historyFindFirstError) throw new Error("history lookup down");
     return priorPlayRow;
   },
-  deleteMany: async (args: { where: { startedAt: { lt: Date } } }) => {
+  deleteMany: async (args: { where: { startedAt: { lt: Date }; id?: { in: string[] } } }) => {
     historyDeleteManyCalls.push(args);
-    return { count: historyDeleteCount };
+    // The rows a batch names, unless a test sets the count outright.
+    return { count: historyDeleteCount || (args.where.id?.in.length ?? 0) };
   },
 });
 
@@ -254,16 +299,24 @@ beforeEach(() => {
   plexLibRow = null;
   plexLibRows = null;
   jellyfinLibRow = null;
+  jellyfinLibRows = null;
   activeSessionDeletes.length = 0;
   activeSessionDeleteError = null;
   activeSessionUpdateManyCalls.length = 0;
   activeSessionUpdateManyError = null;
+  snapshotReadError = null;
   historyCreates.length = 0;
   historyFindFirstCalls.length = 0;
   priorPlayRow = null;
   historyFindFirstError = false;
   historyDeleteManyCalls.length = 0;
   historyDeleteCount = 0;
+  historyPurgeReads.length = 0;
+  historyPurgeBatches = null;
+  historyCreateInserts = null;
+  historyUpdateManyCalls.length = 0;
+  historyCreateMaxInFlight = 0;
+  staleSessionRows = [];
   tmdbCacheFindCalls.length = 0;
   tmdbCacheRow = null;
   tmdbCacheError = false;
@@ -702,6 +755,27 @@ test("resolveShowTmdbId: jellyfin keys map via JellyfinLibraryItem, serverInstan
   assert.equal(plexLibCalls.length, 0);
 });
 
+test("resolveShowTmdbId: two Jellyfin rows holding one item id resolve to the CANONICAL holder, else the lowest tmdbId, whatever order they arrive in", async () => {
+  // A recentOnly sync is insert-only and keyed by tmdbId, so a show re-identified
+  // on the server gets a second row carrying the same item id until the next full
+  // sync. Following arrival order persisted whichever row Postgres returned first.
+  for (const order of [
+    [{ tmdbId: 100, jellyfinItemId: "jf-a" }, { tmdbId: 200, jellyfinItemId: "jf-b" }],
+    [{ tmdbId: 200, jellyfinItemId: "jf-b" }, { tmdbId: 100, jellyfinItemId: "jf-a" }],
+  ]) {
+    jellyfinLibRows = order;
+    assert.equal(await resolveShowTmdbId("jellyfin", "jf-b", ""), 200, "the canonical holder owns the id");
+  }
+  for (const order of [
+    [{ tmdbId: 300, jellyfinItemId: "jf-c" }, { tmdbId: 50, jellyfinItemId: "jf-d" }],
+    [{ tmdbId: 50, jellyfinItemId: "jf-d" }, { tmdbId: 300, jellyfinItemId: "jf-c" }],
+  ]) {
+    jellyfinLibRows = order;
+    assert.equal(await resolveShowTmdbId("jellyfin", "jf-z", ""), 50, "no canonical holder: the lowest tmdbId");
+  }
+  assert.deepEqual(jellyfinLibCalls[0].select, { tmdbId: true, jellyfinItemId: true }, "the pick needs the canonical column");
+});
+
 // ═══ resolveMediaServerUser ═════════════════════════════════════════════════
 
 test("MediaServerMismatchError: a real Error subclass carrying the (source, sourceUserId) identity", () => {
@@ -1015,6 +1089,19 @@ test("recordCompletedSession: a named-instance session's watch lands with ITS se
   assert.deepEqual(activeSessionDeletes[0].where, { id: "plex:remote:key-1", lastSeenAt: session.lastSeenAt });
 });
 
+test("recordCompletedSession: a session mediaType outside MOVIE/TV is stored as null, never cast onto the history enum", async () => {
+  setSettings({});
+  for (const raw of ["music", "movie", "PHOTO"]) {
+    historyCreates.length = 0;
+    await recordCompletedSession(makeSession({ mediaType: raw }), { skipSSE: true });
+    assert.equal(historyCreates.length, 1);
+    assert.equal(historyCreates[0].data[0].mediaType, null, `${raw} is not a MediaType`);
+  }
+  historyCreates.length = 0;
+  await recordCompletedSession(makeSession({ mediaType: "TV" }), { skipSSE: true });
+  assert.equal(historyCreates[0].data[0].mediaType, "TV");
+});
+
 test("recordCompletedSession: sub-90s watches are dropped with no history row — but STILL CAS-delete the ActiveSession; 90s exactly is kept", async () => {
   setSettings({});
   const short = makeSession({
@@ -1290,6 +1377,96 @@ test("recordCompletedSession: skipSSE keeps batch callers silent; the default pa
   assert.deepEqual(sseEvents[1].sessions, []);
 });
 
+test("recordCompletedSession: a watch recorded EARLY (stale cleanup while it still played) is extended by its longer final record, never shortened", async () => {
+  setSettings({});
+  historyCreateInserts = 0; // the key already holds a row: createMany skipped this one
+  const session = makeSession(); // 2000 s played, watched (83% ≥ 80)
+  await recordCompletedSession(session, { skipSSE: true });
+
+  assert.equal(historyUpdateManyCalls.length, 1, "the skipped record refines the stored one");
+  assert.deepEqual(historyUpdateManyCalls[0].where, {
+    source: "plex",
+    serverInstance: "",
+    sourceSessionId: "key-1:2026-07-01T20:00:00.000Z",
+    // A CAS: only a SHORTER stored record is replaced, so a concurrent finalize
+    // can never shorten the row the other path wrote.
+    playDuration: { lt: 2000 },
+  });
+  assert.deepEqual(historyUpdateManyCalls[0].data, {
+    stoppedAt: session.lastSeenAt,
+    duration: 2400,
+    playDuration: 2000,
+    pausedDuration: 400,
+    watched: true,
+    completed: false,
+  });
+  assert.equal(activeSessionDeletes.length, 1, "the ActiveSession CAS delete still runs");
+
+  historyCreateInserts = null; // a fresh insert: nothing to refine
+  await recordCompletedSession(makeSession(), { skipSSE: true });
+  assert.equal(historyUpdateManyCalls.length, 1);
+});
+
+test("recordCompletedSession: lookup and cleanup failures are warned with the [play-history] scope, not swallowed silently", async () => {
+  setSettings({});
+  tmdbCacheError = true;
+  historyFindFirstError = true;
+  activeSessionDeleteError = new Error("deleteMany down");
+  await recordCompletedSession(makeSession(), { skipSSE: true });
+  assert.equal(historyCreates.length, 1, "the play still records");
+  assert.ok(warns.some((w) => w.startsWith("[play-history] poster lookup failed for movie:550:details")), warns.join("\n"));
+  assert.ok(warns.some((w) => w.startsWith("[play-history] resume-group lookup failed for plex:key-1")));
+  assert.ok(warns.some((w) => w.startsWith("[play-history] could not remove finalized session plex:key-1")));
+
+  // The sub-90s drop's delete warns the same way.
+  warns.length = 0;
+  await recordCompletedSession(makeSession({ playtimeMs: 1_000n, progressMs: 1_000n }), { skipSSE: true });
+  assert.ok(warns.some((w) => w.startsWith("[play-history] could not remove finalized session plex:key-1")));
+});
+
+test("recordCompletedSession: a failed sessions snapshot after the record resolves anyway — the play is recorded, so the SSE stop path must not read it as a failed finalize", async () => {
+  setSettings({});
+  snapshotReadError = new Error("snapshot read failed");
+  await recordCompletedSession(makeSession()); // must not reject
+  assert.equal(historyCreates.length, 1);
+  assert.deepEqual(sseEvents.map((e) => e.type), ["activity:history-updated"], "no snapshot could be built");
+  assert.ok(warns.some((w) => w.startsWith("[play-history] sessions snapshot after a finalize failed")));
+});
+
+test("recordCompletedSession: a mediaType outside the enum records as null instead of failing the insert and losing the watch", async () => {
+  setSettings({});
+  await recordCompletedSession(makeSession({ mediaType: "music", tmdbId: null }), { skipSSE: true });
+  assert.equal(historyCreates[0].data[0].mediaType, null);
+  await recordCompletedSession(makeSession({ mediaType: "TV" }), { skipSSE: true });
+  assert.equal(historyCreates[1].data[0].mediaType, "TV");
+});
+
+test("settings getters: invalidatePlayHistorySettings makes the next getter re-read at once instead of serving the 15s cache", async () => {
+  setSettings({ playHistoryEnabled: "false" });
+  assert.equal(await isPlayHistoryEnabled(), false);
+  const reads = settingFindManyCalls;
+  settingsRows = { playHistoryEnabled: "true" }; // saved — the clock has NOT moved
+  assert.equal(await isPlayHistoryEnabled(), false, "control: still inside the TTL, the cached value is served");
+  invalidatePlayHistorySettings();
+  assert.equal(await isPlayHistoryEnabled(), true);
+  assert.equal(settingFindManyCalls, reads + 1);
+});
+
+test("settings getters: the cache is process-wide — another chunk's getter is served by it, and one invalidation reaches both (guardrail 27a)", async () => {
+  setSettings({ playHistoryWatchedThreshold: "70" });
+  assert.equal(await getWatchedThreshold(), 70);
+  const reads = settingFindManyCalls;
+  const specifier = "../src/lib/play-history-settings.ts?chunk=settings";
+  const otherChunk: typeof import("../src/lib/play-history-settings.ts") = await import(specifier);
+  assert.notEqual(otherChunk.getWatchedThreshold, getWatchedThreshold, "a distinct module instance");
+  assert.equal(await otherChunk.getWatchedThreshold(), 70);
+  assert.equal(settingFindManyCalls, reads, "served from the one cache, no second read");
+
+  settingsRows = { playHistoryWatchedThreshold: "60" };
+  otherChunk.invalidatePlayHistorySettings();
+  assert.equal(await getWatchedThreshold(), 60, "the other chunk's invalidation reached this one");
+});
+
 // ═══ reanchorActiveSessionsOnBoot (guardrail 21) ════════════════════════════
 // ORDER-DEPENDENT PAIR: the once-guard is module-global for the process, so
 // the failure case must run FIRST (a failure releases the memo; a success
@@ -1313,6 +1490,20 @@ test("reanchorActiveSessionsOnBoot: concurrent boot callers share ONE updateMany
   await reanchorActiveSessionsOnBoot();
   assert.equal(activeSessionUpdateManyCalls.length, 1); // once per process — restart is the reset
   assert.equal(warns.length, 0);
+});
+
+// Guardrail 27a: play-history.ts is compiled into the boot chunk (via
+// plex-events) and the poller's route chunk. A per-chunk memo let the other
+// chunk's first call — an SSE manager first connecting hours after boot —
+// re-stamp every row mid-day. A cache-busted second import is the unit-test
+// analogue of that second chunk (the session-revocation.test pattern).
+test("reanchorActiveSessionsOnBoot: the once-guard is process-wide — another chunk's first call after the re-anchor writes nothing", async () => {
+  // The module that holds the memo (play-history.ts only re-exports it).
+  const specifier = "../src/lib/play-history-record.ts?chunk=boot";
+  const otherChunk: typeof import("../src/lib/play-history-record.ts") = await import(specifier);
+  assert.notEqual(otherChunk.reanchorActiveSessionsOnBoot, reanchorActiveSessionsOnBoot, "a distinct module instance");
+  assert.equal(await otherChunk.reanchorActiveSessionsOnBoot(), true);
+  assert.equal(activeSessionUpdateManyCalls.length, 0, "the process already re-anchored (previous test): no second write from another chunk");
 });
 
 // ═══ purgeOldHistory ════════════════════════════════════════════════════════
@@ -1339,6 +1530,78 @@ test("purgeOldHistory: a configured retention deletes rows older than now−N da
     Math.abs(lt.getTime() - (callClock - 30 * 24 * 60 * 60 * 1000)) < 2_000,
     "cutoff must be 30 days before the moment of the call",
   );
+});
+
+test("purgeOldHistory: the cutoff is getRetentionCutoff's — the purge and the never-watched window share one definition", async () => {
+  setSettings({ playHistoryRetentionDays: "45" });
+  const before = await getRetentionCutoff(new Date(Date.now()));
+  await purgeOldHistory();
+  const after = await getRetentionCutoff(new Date(Date.now()));
+  const lt = historyDeleteManyCalls[0].where.startedAt.lt;
+  assert.ok(before && after, "a configured retention has a cutoff");
+  assert.ok(
+    lt.getTime() >= before.getTime() && lt.getTime() <= after.getTime(),
+    "the purge must delete before exactly the moment the never-watched window may open from (guardrail 14d)",
+  );
+});
+
+test("purgeOldHistory: deletes in bounded batches until a short one, each delete re-checking the cutoff", async () => {
+  setSettings({ playHistoryRetentionDays: "30" });
+  const ids = (n: number, tag: string) => Array.from({ length: n }, (_, i) => ({ id: `${tag}-${i}` }));
+  historyPurgeBatches = [ids(PURGE_BATCH_SIZE, "a"), ids(PURGE_BATCH_SIZE, "b"), ids(3, "c")];
+  assert.equal(await purgeOldHistory(), PURGE_BATCH_SIZE * 2 + 3);
+  assert.equal(historyPurgeReads.length, 3, "a short batch ends the run");
+  assert.ok(historyPurgeReads.every((r) => r.take === PURGE_BATCH_SIZE));
+  assert.equal(historyDeleteManyCalls.length, 3);
+  const cutoff = historyPurgeReads[0].where.startedAt.lt;
+  for (const call of historyDeleteManyCalls) {
+    assert.equal(call.where.startedAt.lt, cutoff, "a row can only go for being past the cutoff");
+    assert.ok(call.where.id && call.where.id.in.length <= PURGE_BATCH_SIZE);
+  }
+  assert.deepEqual(historyDeleteManyCalls[2].where.id?.in, ["c-0", "c-1", "c-2"]);
+});
+
+test("purgeOldHistory: one call stops at its batch budget; the next run finishes the backlog", async () => {
+  setSettings({ playHistoryRetentionDays: "30" });
+  const full = Array.from({ length: PURGE_BATCH_SIZE }, (_, i) => ({ id: `r-${i}` }));
+  historyPurgeBatches = Array.from({ length: PURGE_MAX_BATCHES + 5 }, () => full);
+  assert.equal(await purgeOldHistory(), PURGE_BATCH_SIZE * PURGE_MAX_BATCHES);
+  assert.equal(historyDeleteManyCalls.length, PURGE_MAX_BATCHES);
+});
+
+test("purgeOldHistory: a purge that deleted rows clears the memoized aggregates; one that deleted nothing leaves them", async () => {
+  setSettings({ playHistoryRetentionDays: "30" });
+  historyPurgeBatches = [[]];
+  const before = currentActivityGeneration();
+  assert.equal(await purgeOldHistory(), 0);
+  assert.equal(currentActivityGeneration(), before, "nothing deleted, nothing to invalidate");
+
+  historyPurgeBatches = [[{ id: "old-1" }, { id: "old-2" }]];
+  assert.equal(await purgeOldHistory(), 2);
+  assert.ok(currentActivityGeneration() > before, "the stats computed over the deleted rows are dropped");
+});
+
+// ═══ cleanupStaleSessions ═══════════════════════════════════════════════════
+
+test("cleanupStaleSessions: every stale row is finalized with at most STALE_FINALIZE_CONCURRENCY in flight, and the batch emits ONE history SSE", async () => {
+  // A media-server outage of 30+ minutes ages every active session into one
+  // batch; an unbounded fan-out ran all of them against the max:5 pool at once.
+  staleSessionRows = Array.from({ length: 10 }, (_, i) =>
+    makeSession({ id: `plex:stale-${i}`, sessionKey: `stale-${i}`, tmdbId: null, sourceItemId: null }),
+  );
+  historyCreateYield = true;
+  try {
+    await cleanupStaleSessions(30);
+  } finally {
+    historyCreateYield = false;
+  }
+  assert.equal(historyCreates.length, 10, "every stale row is still recorded");
+  assert.ok(historyCreateMaxInFlight >= 1);
+  assert.ok(
+    historyCreateMaxInFlight <= STALE_FINALIZE_CONCURRENCY,
+    `at most ${STALE_FINALIZE_CONCURRENCY} finalizes may run at once, saw ${historyCreateMaxInFlight}`,
+  );
+  assert.equal(sseEvents.filter((e) => e.type === "activity:history-updated").length, 1, "one batched SSE, not one per session");
 });
 
 // ═══ guardrail-7 silence ════════════════════════════════════════════════════

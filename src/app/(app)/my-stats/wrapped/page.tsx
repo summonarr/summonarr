@@ -1,15 +1,16 @@
 import Link from "next/link";
 import { requireAppSession } from "@/lib/require-app-session";
-import { getMyWrapped } from "@/lib/my-watch-history";
-import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
-import { posterUrl } from "@/lib/tmdb-types";
+import { getMyWrapped, isMediaServerProvider } from "@/lib/my-watch-history";
+import { resolvePosterMap, posterSrcFor } from "@/lib/poster-cache";
 import { ChevronLeft, Sparkles } from "@/components/icons";
 import { EmptyState, PageHeader } from "@/components/ui/design";
 import { WrappedView, type WrappedData } from "@/components/watch-history/wrapped-view";
 import { TrackingOffState } from "@/components/watch-history/tracking-off-state";
 import { isPlayHistoryEnabled } from "@/lib/play-history";
+import { zonedDayKey } from "@/lib/stats-time-zone";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getTranslator } from "@/lib/i18n/server";
+import { first, type PageSearchParams } from "@/lib/search-params";
 
 export const dynamic = "force-dynamic";
 
@@ -22,10 +23,10 @@ export const dynamic = "force-dynamic";
 export default async function WrappedPage({
   searchParams,
 }: {
-  searchParams: Promise<{ year?: string }>;
+  searchParams: Promise<PageSearchParams>;
 }) {
   const session = await requireAppSession();
-  const t = await getTranslator();
+  const [t, trackingOn, sp] = await Promise.all([getTranslator(), isPlayHistoryEnabled(), searchParams]);
 
   const back = (
     <Link
@@ -46,7 +47,7 @@ export default async function WrappedPage({
   // Tracking off ⇒ nothing is recorded, so neither the year pills nor the
   // "not enough history" copy below is honest. Say so (the /popular gate) and
   // skip the aggregate read entirely.
-  if (!(await isPlayHistoryEnabled())) {
+  if (!trackingOn) {
     return (
       <div className="ds-page-enter">
         {back}
@@ -60,60 +61,13 @@ export default async function WrappedPage({
     );
   }
 
-  const sp = await searchParams;
-  const requested = sp.year && /^\d{4}$/.test(sp.year) ? parseInt(sp.year, 10) : undefined;
+  // A repeated ?year= arrives as an array: first() takes its first value.
+  const yearParam = first(sp.year);
+  const requested = yearParam && /^\d{4}$/.test(yearParam) ? parseInt(yearParam, 10) : undefined;
   const { linked, years, year, data } = await getMyWrapped(session.user.id, requested);
 
-  const provider = session.user.provider ?? "";
-  const serverProvider =
-    provider === "plex" || provider === "jellyfin" || provider === "jellyfin-quickconnect";
-
-  let view: WrappedData | null = null;
-  if (data && year != null) {
-    // Live TmdbCache posters are authoritative; fall back to the PlayHistory
-    // snapshot for titles no longer cached (same as the dashboard).
-    const posterItems = [...data.topTitles, ...(data.longestSitting ? [data.longestSitting] : [])];
-    const posters = await resolvePosterMap(posterItems);
-    const src = (tmdbId: number | null, mediaType: string | null, posterPath: string | null) =>
-      (tmdbId != null ? posters[posterPathKey(tmdbId, mediaType)] : undefined) ??
-      (posterPath ? posterUrl(posterPath, "w342") : null);
-    view = {
-      year,
-      isCurrentYear: year === new Date().getUTCFullYear(),
-      totals: data.totals,
-      movies: data.movies,
-      tv: data.tv,
-      topTitles: data.topTitles.map((t) => ({
-        title: t.title,
-        tmdbId: t.tmdbId,
-        mediaType: t.mediaType,
-        count: t.count,
-        hours: t.hours,
-        posterSrc: src(t.tmdbId, t.mediaType, t.posterPath),
-      })),
-      biggestDay: data.biggestDay,
-      busiestMonth: data.busiestMonth,
-      primeDow: data.primeDow,
-      primeHour: data.primeHour,
-      longestSitting: data.longestSitting
-        ? {
-            title: data.longestSitting.title,
-            tmdbId: data.longestSitting.tmdbId,
-            mediaType: data.longestSitting.mediaType,
-            seconds: data.longestSitting.seconds,
-            startedAt: data.longestSitting.startedAt,
-            posterSrc: src(
-              data.longestSitting.tmdbId,
-              data.longestSitting.mediaType,
-              data.longestSitting.posterPath,
-            ),
-          }
-        : null,
-      completion: data.completion,
-      topPlatform: data.topPlatform,
-      topDevice: data.topDevice,
-    };
-  }
+  const serverProvider = isMediaServerProvider(session.user.provider);
+  const view = data && year != null ? await wrappedViewOf(data, year) : null;
 
   return (
     <div className="ds-page-enter">
@@ -121,33 +75,7 @@ export default async function WrappedPage({
 
       <PageHeader title={t("personal.wrapped.title")} subtitle={t("personal.wrapped.subtitle")} />
 
-      {years.length > 1 && (
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
-          {years.map((y) => {
-            const active = y === year;
-            return (
-              <Link
-                key={y}
-                href={`/my-stats/wrapped?year=${y}`}
-                className="ds-mono ds-hover-tint"
-                aria-current={active ? "page" : undefined}
-                style={{
-                  fontSize: 12.5,
-                  padding: "5px 12px",
-                  borderRadius: 999,
-                  textDecoration: "none",
-                  border: "1px solid var(--ds-border)",
-                  background: active ? "var(--ds-accent)" : "var(--ds-bg-2)",
-                  color: active ? "var(--ds-accent-fg)" : "var(--ds-fg-muted)",
-                  fontWeight: active ? 600 : 400,
-                }}
-              >
-                {y}
-              </Link>
-            );
-          })}
-        </div>
-      )}
+      {years.length > 1 && <YearPicker years={years} active={year} />}
 
       {view ? (
         <WrappedView data={view} />
@@ -164,6 +92,84 @@ export default async function WrappedPage({
           }
         />
       )}
+    </div>
+  );
+}
+
+type WrappedRaw = NonNullable<Awaited<ReturnType<typeof getMyWrapped>>["data"]>;
+
+// The aggregates as the view's model, with each title's poster resolved. Live
+// TmdbCache posters are authoritative; fall back to the PlayHistory snapshot
+// for titles no longer cached (same as the dashboard).
+async function wrappedViewOf(data: WrappedRaw, year: number): Promise<WrappedData> {
+  const posterItems = [...data.topTitles, ...(data.longestSitting ? [data.longestSitting] : [])];
+  const posters = await resolvePosterMap(posterItems);
+  const src = (tmdbId: number | null, mediaType: string | null, posterPath: string | null) =>
+    posterSrcFor(posters, tmdbId, mediaType, posterPath);
+  const sitting = data.longestSitting;
+  return {
+    year,
+    // The year runs on the statistics zone's calendar, like the data.
+    isCurrentYear: year === Number(zonedDayKey(new Date(), data.timeZone).slice(0, 4)),
+    timeZone: data.timeZone,
+    totals: data.totals,
+    movies: data.movies,
+    tv: data.tv,
+    topTitles: data.topTitles.map((top) => ({
+      title: top.title,
+      tmdbId: top.tmdbId,
+      mediaType: top.mediaType,
+      count: top.count,
+      hours: top.hours,
+      posterSrc: src(top.tmdbId, top.mediaType, top.posterPath),
+    })),
+    biggestDay: data.biggestDay,
+    busiestMonth: data.busiestMonth,
+    primeDow: data.primeDow,
+    primeHour: data.primeHour,
+    longestSitting: sitting
+      ? {
+          title: sitting.title,
+          tmdbId: sitting.tmdbId,
+          mediaType: sitting.mediaType,
+          seconds: sitting.seconds,
+          startedAt: sitting.startedAt,
+          posterSrc: src(sitting.tmdbId, sitting.mediaType, sitting.posterPath),
+        }
+      : null,
+    completion: data.completion,
+    topPlatform: data.topPlatform,
+    topDevice: data.topDevice,
+  };
+}
+
+// One pill per year with data; the shown year is marked current.
+function YearPicker({ years, active }: { years: number[]; active: number | null }) {
+  return (
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
+      {years.map((y) => {
+        const isActive = y === active;
+        return (
+          <Link
+            key={y}
+            href={`/my-stats/wrapped?year=${y}`}
+            className="ds-mono ds-hover-tint"
+            aria-current={isActive ? "page" : undefined}
+            style={{
+              fontSize: 12.5,
+              padding: "5px 12px",
+              borderRadius: 999,
+              textDecoration: "none",
+              border: "1px solid var(--ds-border)",
+              background: isActive ? "var(--ds-accent)" : "var(--ds-bg-2)",
+              color: isActive ? "var(--ds-accent-fg)" : "var(--ds-fg-muted)",
+              fontWeight: isActive ? 600 : 400,
+            }}
+          >
+            {y}
+          </Link>
+        );
+      })}
     </div>
   );
 }

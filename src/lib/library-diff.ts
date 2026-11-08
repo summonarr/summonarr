@@ -10,6 +10,7 @@
 //   one server only is never random: the other server either holds the SAME
 //   file under a different TMDB id, lists the folder with no TMDB id at all, or
 //   does not have the file. Telling those apart is the source of the diff.
+import { folderYear as folderNameYear } from "./library-match";
 
 export type DiffSourceKind =
   /** The other server holds this very file/folder, matched to a different TMDB id. */
@@ -110,6 +111,25 @@ export function makeBadMatchComparator(collator: Intl.Collator) {
   };
 }
 
+type BadMatchKeys = { plexRatingKey: string | null; jellyfinItemId: string | null };
+
+/** The item key a bad match's side is fixed by; null when the row has none yet (its card says "re-sync to fix"). */
+export function badMatchSideKey(m: BadMatchKeys, side: "plex" | "jellyfin"): string | null {
+  return (side === "plex" ? m.plexRatingKey : m.jellyfinItemId) || null;
+}
+
+/**
+ * A bad match the bulk "Fix all" may send: Radarr/Sonarr named the wrong side
+ * and the id it belongs to, and that side has its item key — the rule the card
+ * applies before it offers a Fix. Without the key fix-match can only answer
+ * "re-sync first", so sending it is a predictable failure.
+ */
+export function fixAllEligible<M extends BadMatchKeys & { arrVerdict: "plex" | "jellyfin" | null; arrTmdbId: number | null }>(
+  m: M,
+): m is M & { arrVerdict: "plex" | "jellyfin"; arrTmdbId: number } {
+  return m.arrVerdict !== null && m.arrTmdbId !== null && badMatchSideKey(m, m.arrVerdict) !== null;
+}
+
 export function diffCollator(locale: string): Intl.Collator {
   try {
     return new Intl.Collator(locale, { numeric: true, sensitivity: "base" });
@@ -120,14 +140,15 @@ export function diffCollator(locale: string): Intl.Collator {
 
 /**
  * The "(YYYY)" in a path's folder names, deepest folder first — Radarr/Sonarr's
- * "Title (2017)" layout. null when no folder carries one (a file name is not
- * read: "Film.2017.1080p.mkv" years are too often a different number).
+ * "Title (2017)" layout, each folder read by the match check's own rule. null
+ * when no folder carries one (a file name is not read: "Film.2017.1080p.mkv"
+ * years are too often a different number).
  */
 export function folderYear(relativePath: string): number | null {
   const folders = relativePath.replace(/\\/g, "/").split("/").filter(Boolean).slice(0, -1);
   for (let i = folders.length - 1; i >= 0; i--) {
-    const m = /\((\d{4})\)\s*$/.exec(folders[i]) ?? /\((\d{4})\)/.exec(folders[i]);
-    if (m) return Number(m[1]);
+    const year = folderNameYear(folders[i]);
+    if (year !== null) return year;
   }
   return null;
 }
@@ -146,9 +167,10 @@ export function suggestWrongSide(
   const py = plexYear ? Number.parseInt(plexYear, 10) : NaN;
   const jy = jellyfinYear ? Number.parseInt(jellyfinYear, 10) : NaN;
   if (fy === null || Number.isNaN(py) || Number.isNaN(jy)) return null;
+  // parseInt yields integers, so "doesn't fit" is already two or more years off.
   const plexFits = Math.abs(py - fy) <= 1;
   const jellyfinFits = Math.abs(jy - fy) <= 1;
-  if (plexFits && !jellyfinFits && Math.abs(jy - fy) >= 2) return { wrong: "jellyfin", year: fy };
-  if (jellyfinFits && !plexFits && Math.abs(py - fy) >= 2) return { wrong: "plex", year: fy };
+  if (plexFits && !jellyfinFits) return { wrong: "jellyfin", year: fy };
+  if (jellyfinFits && !plexFits) return { wrong: "plex", year: fy };
   return null;
 }

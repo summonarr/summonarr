@@ -5,19 +5,27 @@
 // louder than the My Stats dashboard: a gradient hero, a #1 spotlight, and a
 // grid of bold stat cards. Every label is derived deterministically from the
 // data props (day/month/hour names via Intl in the ACTIVE UI locale — the same
-// value on the server and the client — and dates formatted in UTC) so there is
-// NO Date.now()/locale drift in the client render path (guardrail 16). Screenshot-friendly; no interactivity, so nothing here holds state.
+// value on the server and the client — and dates formatted in UTC, which prints
+// a day key's own date) so there is NO Date.now()/locale drift in the client
+// render path (guardrail 16). The days and hours are already the statistics
+// zone's (`timeZone`, from the server); the cards that show one name the zone.
+// Screenshot-friendly; no interactivity, so nothing here holds state.
 
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { Poster } from "@/components/admin/activity-ui";
+import { RankedTitleRow } from "./ranked-title-row";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { formatDurationHM } from "@/lib/format-duration";
+import { mediaHref } from "@/lib/media-href";
+import { zoneShortLabel } from "@/lib/stats-time-zone";
 import type { Translator } from "@/lib/i18n/translate";
 
 export interface WrappedData {
   year: number;
   isCurrentYear: boolean;
+  // The statistics zone the year, its days and its hours are counted in.
+  timeZone: string;
   totals: { plays: number; hours: number; titles: number };
   movies: { titles: number; hours: number };
   tv: { shows: number; episodes: number; hours: number };
@@ -84,11 +92,6 @@ function monthName(ym: string, locale: string): string {
   if (!(m >= 1 && m <= 12)) return ym;
   return capitalize(new Date(Date.UTC(2023, m - 1, 1)).toLocaleDateString(locale, { month: "short", timeZone: "UTC" }));
 }
-function mediaHref(tmdbId: number | null, mediaType: string | null): string | null {
-  if (tmdbId == null) return null;
-  return mediaType === "TV" ? `/tv/${tmdbId}` : `/movie/${tmdbId}`;
-}
-
 // Gradient palette cycled across the stat cards for the "wrapped" vibrancy.
 // Every stop sits at L ≤ .54 so the tile's white 10px kicker (opacity .85)
 // clears 4.5:1 on each end of the gradient (worst stop 4.52:1).
@@ -115,43 +118,64 @@ function WrappedStat({ grad, kicker, value, sub }: { grad: string; kicker: strin
   );
 }
 
-export function WrappedView({ data: w }: { data: WrappedData }) {
-  const t = useT();
-  const locale = useLocale();
-  const top = w.topTitles[0];
-  const heroHref = top ? mediaHref(top.tmdbId, top.mediaType) : null;
+type WrappedCard = { kicker: string; value: ReactNode; sub?: ReactNode };
+
+/** The gradient stat cards, in order; a card whose data is missing is left
+ *  out rather than shown empty. */
+function wrappedCards(w: WrappedData, t: Translator, locale: string): WrappedCard[] {
+  const n = (v: number) => v.toLocaleString(locale);
+  // The server buckets play starts in the statistics zone; the day and hour
+  // cards name it, so an evening viewer elsewhere isn't left reading "2 AM".
+  const zone = zoneShortLabel(w.timeZone);
+  const zoneTitle = t("adminActivity.stats.zoneDaysTitle", { zone: w.timeZone });
+  const prime = { dow: w.primeDow, hour: w.primeHour };
 
   const primeLine =
-    w.primeDow != null
-      ? w.primeHour != null
-        ? t("personal.wrapped.primeLine", { day: dayName(w.primeDow, locale), part: partOfDay(w.primeHour, t) })
-        : dayName(w.primeDow, locale)
-      : w.primeHour != null
-        ? capitalize(partOfDay(w.primeHour, t))
+    prime.dow != null
+      ? prime.hour != null
+        ? t("personal.wrapped.primeLine", { day: dayName(prime.dow, locale), part: partOfDay(prime.hour, t) })
+        : dayName(prime.dow, locale)
+      : prime.hour != null
+        ? capitalize(partOfDay(prime.hour, t))
         : "—";
 
-  const cards: { kicker: string; value: ReactNode; sub?: ReactNode }[] = [];
+  const cards: WrappedCard[] = [];
   cards.push({
     kicker: t("personal.wrapped.moviesVsTv"),
     value: `${w.movies.titles.toLocaleString(locale)} · ${w.tv.episodes.toLocaleString(locale)}`,
+    // Counts other than `count` are formatted here: the translator only
+    // stringifies, and `count` stays a number so it can pick the plural.
     sub: t("personal.wrapped.moviesVsTvSub", {
-      movies: w.movies.titles,
-      episodes: w.tv.episodes,
-      shows: w.tv.shows,
+      movies: n(w.movies.titles),
+      episodes: n(w.tv.episodes),
+      shows: n(w.tv.shows),
     }),
   });
+  // The day and hour behind these two cards are the statistics zone's, so they
+  // say which: in another zone a US evening viewer's "prime time" would read as
+  // the next morning with nothing to explain it.
   if (w.biggestDay) {
     cards.push({
       kicker: t("personal.wrapped.biggestBinge"),
-      value: fmtDay(w.biggestDay.day, locale),
-      sub: t("personal.wrapped.biggestBingeSub", { plays: w.biggestDay.plays, hours: w.biggestDay.hours }),
+      value: (
+        <>
+          {fmtDay(w.biggestDay.day, locale)}{" "}
+          <span className="ds-mono" title={zoneTitle} style={{ fontSize: 11, fontWeight: 500, opacity: 0.85 }}>{zone}</span>
+        </>
+      ),
+      sub: t("personal.wrapped.biggestBingeSub", { plays: n(w.biggestDay.plays), hours: n(w.biggestDay.hours) }),
     });
   }
-  if (w.primeDow != null || w.primeHour != null) {
+  if (prime.dow != null || prime.hour != null) {
     cards.push({
       kicker: t("personal.wrapped.primeTime"),
       value: primeLine,
-      sub: w.primeHour != null ? t("personal.wrapped.peakAround", { hour: hourLabel(w.primeHour, locale) }) : undefined,
+      sub:
+        prime.hour != null
+          ? t("personal.wrapped.peakAround", {
+              hour: `${hourLabel(prime.hour, locale)} ${zone}`,
+            })
+          : undefined,
     });
   }
   if (w.longestSitting) {
@@ -165,7 +189,7 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
     cards.push({
       kicker: t("personal.wrapped.finishRate"),
       value: `${Math.round((w.completion.watched / w.completion.total) * 100)}%`,
-      sub: t("personal.wrapped.finishRateSub", { watched: w.completion.watched, total: w.completion.total }),
+      sub: t("personal.wrapped.finishRateSub", { watched: n(w.completion.watched), total: n(w.completion.total) }),
     });
   }
   if (w.busiestMonth) {
@@ -175,13 +199,27 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
       sub: t("personal.wrapped.playsCount", { count: w.busiestMonth.plays }),
     });
   }
-  if (w.topDevice || w.topPlatform) {
+  // `||`, not `??`: a blank device name is no answer either.
+  const screen = w.topDevice || w.topPlatform;
+  if (screen) {
     cards.push({
       kicker: t("personal.wrapped.goToScreen"),
-      value: w.topDevice ?? w.topPlatform!,
+      value: screen,
       sub: w.topDevice && w.topPlatform ? t("personal.wrapped.onPlatform", { platform: w.topPlatform }) : undefined,
     });
   }
+
+  return cards;
+}
+
+export function WrappedView({ data: w }: { data: WrappedData }) {
+  const t = useT();
+  const locale = useLocale();
+  const top = w.topTitles[0];
+  const heroHref = top ? mediaHref(top.tmdbId, top.mediaType) : null;
+  const n = (v: number) => v.toLocaleString(locale);
+
+  const cards = wrappedCards(w, t, locale);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -231,7 +269,7 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
               )}
             </div>
             <div className="ds-mono" style={{ fontSize: 12.5, color: "var(--ds-fg-subtle)" }}>
-              {t("personal.wrapped.topSummary", { count: top.count, hours: top.hours })}
+              {t("personal.wrapped.topSummary", { count: top.count, hours: n(top.hours) })}
             </div>
           </div>
         </div>
@@ -251,25 +289,17 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
             {t("personal.wrapped.topList", { count: w.topTitles.length, year: w.year })}
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {w.topTitles.map((item, i) => {
-              const href = mediaHref(item.tmdbId, item.mediaType);
-              return (
-                <div key={`${item.title}-${i}`} style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <span className="ds-mono" style={{ width: 20, textAlign: "right", fontSize: 15, fontWeight: 700, color: "var(--ds-accent-text)" }}>{i + 1}</span>
-                  <Poster src={item.posterSrc} letter={(item.title[0] ?? "?").toUpperCase()} w={32} h={46} radius={4} />
-                  <div style={{ flex: 1, minWidth: 0, display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
-                    {href ? (
-                      <Link href={href} className="hover:underline" style={{ fontSize: 14, color: "var(--ds-fg)", textDecoration: "none", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</Link>
-                    ) : (
-                      <span style={{ fontSize: 14, color: "var(--ds-fg)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</span>
-                    )}
-                    <span className="ds-mono" style={{ fontSize: 12, color: "var(--ds-fg-subtle)", fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>
-                      {t("personal.wrapped.playsCount", { count: item.count })}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
+            {w.topTitles.map((item, i) => (
+              <RankedTitleRow
+                key={`${item.title}-${i}`}
+                size="large"
+                rank={i + 1}
+                title={item.title}
+                href={mediaHref(item.tmdbId, item.mediaType)}
+                posterSrc={item.posterSrc}
+                count={t("personal.wrapped.playsCount", { count: item.count })}
+              />
+            ))}
           </div>
         </div>
       )}

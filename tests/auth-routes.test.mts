@@ -123,10 +123,18 @@ function applySelect(
   return out;
 }
 
+// Every Setting/User read, so a test can prove a refusal came before the DB.
+let dbReads = 0;
+// When set, the next user.create throws it (a racing registration's unique violation).
+let userCreateThrows: unknown = null;
+
 const settingModel = {
-  findUnique: async (args: { where: { key: string } }) =>
-    settings.has(args.where.key) ? { key: args.where.key, value: settings.get(args.where.key)! } : null,
+  findUnique: async (args: { where: { key: string } }) => {
+    dbReads++;
+    return settings.has(args.where.key) ? { key: args.where.key, value: settings.get(args.where.key)! } : null;
+  },
   findMany: async (args: { where?: { key?: { in?: string[] } } }) => {
+    dbReads++;
     const keys = args.where?.key?.in ?? [...settings.keys()];
     return keys.filter((k) => settings.has(k)).map((k) => ({ key: k, value: settings.get(k)! }));
   },
@@ -144,8 +152,9 @@ const settingModel = {
 };
 
 const userModel = {
-  count: async () => users.length,
+  count: async () => { dbReads++; return users.length; },
   findUnique: async (args: { where: { id: string }; select?: Record<string, boolean> }) => {
+    dbReads++;
     const u = users.find((x) => x.id === args.where.id);
     return u ? applySelect(u as unknown as Record<string, unknown>, args.select) : null;
   },
@@ -162,6 +171,11 @@ const userModel = {
     return u ? applySelect(u as unknown as Record<string, unknown>, args.select) : null;
   },
   create: async (args: { data: Record<string, unknown>; select?: Record<string, boolean> }) => {
+    if (userCreateThrows) {
+      const err = userCreateThrows;
+      userCreateThrows = null;
+      throw err;
+    }
     const d = args.data;
     const row: UserRow = {
       id: (d.id as string | undefined) ?? `u-${++userSeq}`,
@@ -379,6 +393,8 @@ beforeEach(() => {
   userCreates.length = 0;
   userSeq = 0;
   failTransactions = false;
+  dbReads = 0;
+  userCreateThrows = null;
   warns.length = 0;
   errors.length = 0;
 });
@@ -545,6 +561,31 @@ test("register CSRF: a browser needs a trusted Origin (403); a native X-Summonar
   assert.equal(native.headers.getSetCookie().length, 0);
 });
 
+test("register CSRF: a bare host:port AUTH_TRUSTED_ORIGIN entry is skipped — it never makes the opaque \"null\" origin trusted", async () => {
+  // `new URL("summonarr.local:3001").origin` is "null", and so is a file: page's
+  // origin. The old reader added that "null" to the allowlist; the shared one
+  // (trusted-origin.ts) skips the entry, so nothing is trusted here.
+  const savedUrl = process.env.AUTH_URL;
+  try {
+    delete process.env.AUTH_URL;
+    process.env.AUTH_TRUSTED_ORIGIN = "summonarr.local:3001";
+    const opaque = await registerPost(
+      registerReq({ email: "opaque@example.com", password: STRONG_PASSWORD }, { origin: "file:///index.html" }),
+    );
+    assert.equal(opaque.status, 403);
+    assert.deepEqual(await bodyOf(opaque), { error: "Forbidden" });
+    assert.equal(users.length, 0);
+
+    // The real origin beside the bad entry still works.
+    process.env.AUTH_TRUSTED_ORIGIN = `summonarr.local:3001,${VALID_ORIGIN}`;
+    const real = await registerPost(registerReq({ email: "real@example.com", password: STRONG_PASSWORD }));
+    assert.equal(real.status, 201);
+  } finally {
+    process.env.AUTH_URL = savedUrl;
+    delete process.env.AUTH_TRUSTED_ORIGIN;
+  }
+});
+
 test("register rejects before reading the body: maintenance (503), disabled local login (403), and the per-IP rate cap (429)", async () => {
   const validBody = { email: "gate@example.com", password: STRONG_PASSWORD };
 
@@ -574,6 +615,46 @@ test("register rejects before reading the body: maintenance (503), disabled loca
   assert.equal(users.length, 0, "no gate-rejected request may create a user");
 });
 
+test("register: a fixed per-IP pre-limit answers 429 before ANY Setting or User read", async () => {
+  const ip = freshIp();
+  // Fill the DB-free bucket the route checks first.
+  for (let i = 0; i < 30; i++) checkRateLimit(`register-pre:${ip}`, 30, 15 * 60 * 1000);
+  dbReads = 0;
+  const res = await registerPost(registerReq({ email: "flood@example.com", password: STRONG_PASSWORD }, { ip }));
+  assert.equal(res.status, 429);
+  assert.deepEqual(await bodyOf(res), { error: "Too many requests — try again later" });
+  assert.equal(dbReads, 0, "the anonymous refusal costs no DB read");
+  assert.equal(users.length, 0);
+});
+
+test("register: a racing registration's unique violation is read by its Prisma CODE (P2002 → 403 closed), never by message text", async () => {
+  userCreateThrows = Object.assign(new Error("something unrelated"), { name: "PrismaClientKnownRequestError", code: "P2002" });
+  const raced = await registerPost(registerReq({ email: "race@example.com", password: STRONG_PASSWORD }));
+  assert.equal(raced.status, 403);
+  assert.deepEqual(await bodyOf(raced), { error: "Registration is closed" });
+
+  // A plain error that merely MENTIONS a unique constraint is not one: it propagates.
+  userCreateThrows = new Error("Unique constraint failed on the fields: (`email`)");
+  await assert.rejects(
+    () => registerPost(registerReq({ email: "race2@example.com", password: STRONG_PASSWORD })),
+    /Unique constraint failed/,
+  );
+  assert.equal(users.length, 0);
+});
+
+test("register: a first attempt that fails does not turn away a registration already in flight beside it", async () => {
+  // The locked in-transaction check decides; nothing in-process may answer
+  // "closed" for an attempt that never committed.
+  userCreateThrows = new Error("transient insert failure (unit test)");
+  const outcomes = await Promise.allSettled([
+    registerPost(registerReq({ email: "first@example.com", password: STRONG_PASSWORD })),
+    registerPost(registerReq({ email: "second@example.com", password: STRONG_PASSWORD })),
+  ]);
+  const statuses = outcomes.map((o) => (o.status === "fulfilled" ? o.value.status : "rejected")).sort();
+  assert.deepEqual(statuses, [201, "rejected"]);
+  assert.equal(users.length, 1);
+});
+
 // ── POST /api/auth/sign-out ─────────────────────────────────────────────────
 
 test("sign-out (cookie): fully revokes the session server-side and clears both cookie variants", async () => {
@@ -582,7 +663,7 @@ test("sign-out (cookie): fully revokes the session server-side and clears both c
   seedUser({ id: "u-co", email: "co@example.com", name: "Cookie User", createdAt: created });
   const token = await mintToken({ id: "u-co", sessionId: "sess-co", name: "Cookie User" });
 
-  const res = await signOutPost(signOutReq({ cookie: `${COOKIE}=${token}` }));
+  const res = await signOutPost(signOutReq({ cookie: `${COOKIE}=${token}`, "user-agent": "unit-test-agent" }));
   assert.equal(res.status, 200);
   assert.deepEqual(await bodyOf(res), { ok: true });
 
@@ -605,6 +686,9 @@ test("sign-out (cookie): fully revokes the session server-side and clears both c
   const audit = auditRows.at(-1);
   assert.equal(audit?.action, "AUTH_LOGOUT");
   assert.equal(audit?.userId, "u-co");
+  // Where from, like every other auth event.
+  assert.equal(typeof audit?.ipAddress, "string");
+  assert.equal(audit?.userAgent, "unit-test-agent");
 });
 
 test("sign-out is bearer-first: a bearer sign-out revokes the bearer's session, not the cookie's", async () => {
@@ -741,6 +825,16 @@ test("machine-session requires the CRON_SECRET bearer (401) and refuses when the
   }
 });
 
+test("machine-session tells an unauthenticated caller nothing about whether the feature is on", async () => {
+  // Disabled (the default): a wrong or missing secret reads exactly like it
+  // does when the feature is enabled — only the secret's holder learns more.
+  const off = await machineSessionPost(machineReq({ bearer: "wrong-secret" }));
+  settings.set("enableMachineSession", "true");
+  const on = await machineSessionPost(machineReq({ bearer: "wrong-secret" }));
+  assert.equal(off.status, 401);
+  assert.deepEqual(await bodyOf(off), await bodyOf(on));
+});
+
 test("machine-session mint: a valid request mints an admin-provider JWT delivered only as an HttpOnly cookie, never in the body", async () => {
   settings.set("enableMachineSession", "true");
   seedUser({ id: "admin-1", email: "admin@example.com", name: "Root Admin", role: "ADMIN" });
@@ -832,6 +926,29 @@ test("machine-session target resolution: no admin → 404; a non-admin requested
   const notAdmin = await machineSessionPost(machineReq({ bearer: CRON_SECRET, body: { userId: "plain-user" } }));
   assert.equal(notAdmin.status, 403);
   assert.deepEqual(await bodyOf(notAdmin), { error: "Requested user is not an admin" });
+});
+
+test("machine-session refuses a body it cannot use instead of minting for the oldest admin", async () => {
+  // A userId lost to a parse error (or sent with the wrong type) used to take the
+  // no-userId branch and mint a session for the OLDEST admin — a different
+  // principal than the caller asked for, with no error.
+  settings.set("enableMachineSession", "true");
+  seedUser({ id: "admin-1", email: "admin@example.com", role: "ADMIN" });
+  for (const body of ["{not json", '["admin-1"]', "null", { userId: 123 }, { userId: "" }, { userId: null }, { expiresIn: "300" }, { expiresIn: null }]) {
+    const res = await machineSessionPost(machineReq({ bearer: CRON_SECRET, body }));
+    assert.equal(res.status, 400, `body ${JSON.stringify(body)} must be refused`);
+    assert.deepEqual(await bodyOf(res), { error: "Invalid request body" });
+    assert.equal(res.headers.getSetCookie().length, 0, "no session cookie");
+  }
+  assert.equal(authSessions.size, 0, "no AuthSession may be created");
+
+  // A bodiless POST (and an empty object) still mints for the oldest active admin.
+  for (const body of [undefined, "", {}]) {
+    const ok = await machineSessionPost(machineReq({ bearer: CRON_SECRET, body }));
+    assert.equal(ok.status, 200, `body ${JSON.stringify(body)} keeps the default`);
+    const token = ok.headers.getSetCookie()[0].slice(COOKIE.length + 1).split(";")[0];
+    assert.equal((await verifySessionJwt(token))?.id, "admin-1");
+  }
 });
 
 // ── GET /api/auth/setup-status ──────────────────────────────────────────────

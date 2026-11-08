@@ -196,6 +196,7 @@ model User {
   requestComments   RequestComment[]
   issueGrabs        IssueGrab[]
   pushSubscriptions PushSubscription[]
+  pushRemovals      PushSubscriptionRemoval[]
   deletionVotes     DeletionVote[]
   discordLinkToken  DiscordLinkToken?
   discordMergeCode  DiscordMergeCode?
@@ -232,6 +233,25 @@ model PushSubscription {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+// A web push endpoint whose row was REMOVED on purpose — the profile's "Remove
+// device", or the per-user cap evicting it. That browser still holds its
+// subscription and re-sends it on every page load (the bell's resync,
+// push-notifications.tsx), so without this the removal was undone on its next
+// visit. A resync of a tombstoned endpoint is refused (410); a deliberate
+// subscribe clears it. The 6g sign-out/password wipe writes none: its resync is
+// how the owner's own browsers come back. Holds a hash, never the endpoint
+// (push-registration.ts); a few dozen newest per user are kept.
+model PushSubscriptionRemoval {
+  id           String   @id @default(cuid(2))
+  userId       String
+  endpointHash String
+  removedAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, endpointHash])
 }
 
 // Admin-configured outbound notification channel (generic JSON webhook, ntfy,
@@ -485,6 +505,8 @@ model MediaRequest {
   @@index([status, createdAt(sort: Desc)])
   @@index([tvdbId])
   @@index([status, availableAt])
+  // Kept although it is a boolean: false is the rare value, and the sync's
+  // notify fallback looks those rows up (status AVAILABLE AND NOT notified).
   @@index([notifiedAvailable])
 }
 
@@ -575,6 +597,10 @@ model TVEpisodeCache {
   addedAt     DateTime?
 
   @@id([source, tmdbId, seasonNumber, episodeNumber])
+  // Reads by `tmdbId IN (…)` with NO source predicate (For You's quit-show
+  // episode counts, the never-watched narrowed season read, which needs both
+  // sources) can't use the source-led PK: Postgres has no skip scan.
+  @@index([tmdbId, seasonNumber])
 }
 
 // ─── TV Episode Cache — staging buffer ────────────────────────────────────────
@@ -758,6 +784,10 @@ model TmdbCache {
   // Serves the admin settings-page provider counts (key startsWith "omdb:" →
   // LIKE 'omdb:%') — the default-collation PK btree can't serve a LIKE prefix
   // scan, so those counts full-scanned the largest cache table.
+  // Prisma can't read the ops class back, so `migrate diff` reports this index
+  // on every run: its name is in docker-entrypoint.sh's _PRISMA_DIFF_NOISE,
+  // which the pre-upgrade dump ignores (tests/entrypoint.test.mts checks every
+  // raw-ops index here is listed).
   @@index([key(ops: raw("text_pattern_ops"))])
 }
 
@@ -877,9 +907,15 @@ model Issue {
   messages IssueMessage[]
   grabs    IssueGrab[]
 
-  @@index([reportedBy])
+  // The user's issue list filters on reportedBy and orders by updatedAt DESC
+  // (app/(app)/issues/page.tsx); the prefix still serves reportedBy alone and
+  // the cascade from a deleted user.
+  @@index([reportedBy, updatedAt(sort: Desc)])
   @@index([claimedBy])
   @@index([status])
+  // GET /api/issues and the admin list page by (createdAt DESC, id DESC) with
+  // a (createdAt, id) cursor.
+  @@index([createdAt(sort: Desc), id])
 }
 
 model IssueMessage {
@@ -999,7 +1035,8 @@ model AuditLog {
   sessionId String?     @db.VarChar(64)
 
   @@index([createdAt(sort: Desc)])
-  @@index([userName])
+  // No index on userName: the audit page's user filter is a case-insensitive
+  // substring match (ILIKE '%x%'), which a btree can't serve.
   @@index([target])
   @@index([userId, createdAt(sort: Desc)])
   @@index([action, createdAt(sort: Desc)])
@@ -1065,6 +1102,10 @@ model UpstreamWatchEvidence {
   fetchedAt      DateTime
 
   @@id([source, serverInstance, itemKey, seasonNumber])
+  // The never-watched narrowed read looks evidence up by `itemKey IN (…)` with
+  // no source or server predicate (guardrail 14d: evidence is never filtered by
+  // either), which the source-led PK can't serve.
+  @@index([itemKey])
 }
 
 // ─── Watch sync (Plex ⇄ Jellyfin played state) ──────────────────────────────
@@ -1220,6 +1261,8 @@ enum AuditAction {
   ARR_TITLE_ADD
   // An admin removed a title from one Radarr/Sonarr instance (files optionally deleted).
   ARR_TITLE_DELETE
+  // An admin sent the fixed "update Summonarr" push to every iOS device.
+  PUSH_BROADCAST
 }
 
 // ─── Play History ────────────────────────────────────────────────────────────
@@ -1416,7 +1459,8 @@ model PlayHistory {
   @@index([tmdbId, mediaType])
   @@index([startedAt(sort: Desc)])
   @@index([source, sourceItemId, mediaServerUserId, startedAt])
-  @@index([watched])
+  // No index on `watched` alone: it is a near even split, and every query that
+  // filters on it also narrows by user, title or a startedAt range.
   @@index([referenceId])
   // Powers the arc-detection window functions in getMostPopularOnServer — partition key
   // (user, tmdbId, mediaType, season, episode) ordered by startedAt lets Postgres skip the sort.
@@ -1432,6 +1476,10 @@ model PlayHistory {
   // whole table on every admin TV page view. The movie twin is served by
   // [source, sourceItemId, …] above (never-watched-data.ts scopes it by source).
   @@index([sourceShowId])
+  // The Activity page resolves a live session with no tmdbId by its title
+  // (a DISTINCT ON ("title", "mediaType") lookup on every render and live
+  // refresh); without this it scans the whole table each time.
+  @@index([title, mediaType])
 }
 
 model ActiveSession {
@@ -1654,7 +1702,8 @@ model AutoRequestLedger {
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   tmdbId    Int
   mediaType MediaType
-  // "watchlist" (Summonarr watchlist add) | "plex-watchlist" (the cron)
+  // An AutoRequestSource: "watchlist" (Summonarr watchlist add) |
+  // "plex-watchlist" (the Plex cron) | "trakt-watchlist" (the Trakt cron)
   source    String    @db.VarChar(32)
   // An AutoRequestOutcome — see src/lib/auto-request.ts
   outcome   String    @db.VarChar(32)
@@ -1981,6 +2030,10 @@ model Notification {
   // Serves the unread-count query (userId, readAt: null) without scanning all
   // of a user's notifications.
   @@index([userId, readAt])
+  // The retention purge (notification-retention.ts) selects across ALL users
+  // by createdAt, ordered by it, one batch at a time; without this every batch
+  // was a sequential scan plus a sort.
+  @@index([createdAt])
 }
 
 enum MediaType {

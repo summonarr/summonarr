@@ -1,9 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import { escMd } from "@/lib/discord-notify";
-import { checkRateLimit } from "@/lib/rate-limit";
 import { isFeatureEnabled } from "@/lib/features";
 import { getRecentlyAdded } from "@/lib/recently-added";
-import { editOriginal, mediaTypeOption, optionValue, truncateText } from "../reply";
+import { editOriginal, mediaTypeOption, optionValue, truncateText, withinDiscordReadBudget } from "../reply";
 import { discordVisibleInstances } from "../search";
 import type { CommandContext } from "../types";
 
@@ -32,7 +31,7 @@ export async function handleRecentCommand(ctx: CommandContext): Promise<void> {
     await editOriginal(appId, token, { content: t("notify.bot.linkRequired") });
     return;
   }
-  if (!checkRateLimit(`discord-read:${discordUserId}`, 20, 60_000)) {
+  if (!withinDiscordReadBudget(discordUserId)) {
     await editOriginal(appId, token, { content: t("notify.bot.tooFast") });
     return;
   }

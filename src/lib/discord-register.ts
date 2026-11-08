@@ -5,6 +5,8 @@ import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { DISCORD_SLASH_COMMANDS, type DiscordCommandOption, type DiscordSlashCommand } from "@/lib/discord-commands";
 import { LOCALES, type Locale } from "@/lib/i18n/locales";
 import { CATALOGS } from "@/lib/i18n/catalogs";
+import { isFeatureEnabled } from "@/lib/features";
+import { isDiscordSnowflake } from "@/lib/discord-guild";
 
 // Shared Discord slash-command registration. The admin "Register commands"
 // button, the settings save, and the boot-time self-heal below all PUT the canonical
@@ -23,6 +25,12 @@ const DISCORD_HOSTS = ["discord.com"];
 // the schema that was last registered successfully, keyed so the boot sync can
 // tell "already current" from "needs a re-push" without a Discord round-trip.
 export const DISCORD_SCHEMA_HASH_KEY = "discordCommandsSchemaHash";
+
+// Non-sensitive too: `<clientId>:<guildId>` of the last successful guild-scoped
+// registration ("" after a global one). A later registration elsewhere — global,
+// or another guild — clears that guild's set, which would otherwise keep
+// offering every command there a second time.
+export const DISCORD_REGISTERED_GUILD_KEY = "discordCommandsRegisteredGuild";
 
 // ── Localized picker text ───────────────────────────────────────────────────
 // Discord shows each user the command descriptions (and choice labels) in their
@@ -163,9 +171,10 @@ function localizeOptions(
 export function localizeDiscordCommands(commands: readonly DiscordSlashCommand[]): unknown[] {
   return commands.map((cmd) => {
     const meta = DISCORD_COMMAND_I18N[cmd.name];
+    const desc = localizationsFor(meta?.description);
     return {
       ...cmd,
-      ...(localizationsFor(meta?.description) ? { description_localizations: localizationsFor(meta?.description) } : {}),
+      ...(desc ? { description_localizations: desc } : {}),
       ...(cmd.options ? { options: localizeOptions(cmd.options, meta?.options) } : {}),
     };
   });
@@ -175,7 +184,13 @@ export function localizeDiscordCommands(commands: readonly DiscordSlashCommand[]
 // localizations. Computed once — the catalogs are static.
 export const REGISTERED_DISCORD_COMMANDS = localizeDiscordCommands(DISCORD_SLASH_COMMANDS);
 
+// The ids are admin-set and land in the URL path: anything but a snowflake is
+// refused before a request is built (the register button and the boot sync
+// don't pass through the settings route's own check).
 export function discordCommandsUrl(clientId: string, guildId?: string | null): string {
+  if (!isDiscordSnowflake(clientId) || (guildId && !isDiscordSnowflake(guildId))) {
+    throw new Error("Discord client and guild ids must be Discord snowflakes");
+  }
   return guildId
     ? `${DISCORD_API}/applications/${clientId}/guilds/${guildId}/commands`
     : `${DISCORD_API}/applications/${clientId}/commands`;
@@ -191,40 +206,70 @@ function putCommandSet(botToken: string, url: string, commands: readonly unknown
   });
 }
 
-// Registers the commands. Guild-scoped: the guild PUT, then the global clear —
-// the returned Response is the first one that failed, else the guild PUT's, so
-// every caller's `res.ok` means BOTH landed. A failed clear therefore leaves
-// the schema hash unrecorded and the boot self-heal retries the whole
-// (idempotent) registration.
-export async function putDiscordCommands(botToken: string, clientId: string, guildId?: string | null): Promise<Response> {
-  const res = await putCommandSet(botToken, discordCommandsUrl(clientId, guildId), REGISTERED_DISCORD_COMMANDS);
-  if (!res.ok || !guildId) return res;
-  const cleared = await putCommandSet(botToken, discordCommandsUrl(clientId, null), []);
-  return cleared.ok ? res : cleared;
+// The guild a previous registration of this application left its commands in,
+// when it is not `guildId`; null otherwise.
+async function staleRegisteredGuild(clientId: string, guildId: string | null): Promise<string | null> {
+  const row = await prisma.setting.findUnique({ where: { key: DISCORD_REGISTERED_GUILD_KEY } }).catch(() => null);
+  const [storedClient, storedGuild] = (row?.value ?? "").split(":");
+  if (storedClient !== clientId || !isDiscordSnowflake(storedGuild) || storedGuild === guildId) return null;
+  return storedGuild;
 }
 
-// Hash the schema AND its registration scope: a guild↔global switch changes the
-// target endpoint, so it must re-register even when the command array is
-// identical.
-export function discordSchemaHash(guildId: string | null): string {
+// Registers the commands. Guild-scoped: the guild PUT, then the global clear;
+// either scope then clears the guild a previous registration used, when it is
+// another one. The returned Response is the first one that failed, else the
+// registration's own, so every caller's `res.ok` means all of it landed. A
+// failed clear therefore leaves the schema hash unrecorded and the boot
+// self-heal retries the whole (idempotent) registration. A former guild the bot
+// can no longer reach (403/404: removed from it) counts as cleared.
+export async function putDiscordCommands(botToken: string, clientId: string, guildId?: string | null): Promise<Response> {
+  if (!isDiscordSnowflake(clientId) || (guildId && !isDiscordSnowflake(guildId))) {
+    return new Response("Discord client and guild ids must be Discord snowflakes", { status: 400 });
+  }
+  const res = await putCommandSet(botToken, discordCommandsUrl(clientId, guildId), REGISTERED_DISCORD_COMMANDS);
+  if (!res.ok) return res;
+  if (guildId) {
+    const cleared = await putCommandSet(botToken, discordCommandsUrl(clientId, null), []);
+    if (!cleared.ok) return cleared;
+  }
+  const stale = await staleRegisteredGuild(clientId, guildId ?? null);
+  if (stale) {
+    const cleared = await putCommandSet(botToken, discordCommandsUrl(clientId, stale), []);
+    if (!cleared.ok && cleared.status !== 403 && cleared.status !== 404) return cleared;
+  }
+  return res;
+}
+
+// Hash the schema AND its registration target: the bot application and the
+// guild↔global scope both change the endpoint (discordCommandsUrl), so either
+// must re-register even when the command array is identical. Without the
+// application id, moving to another bot left the old app's hash matching and
+// the boot sync never registered the new one.
+export function discordSchemaHash(clientId: string, guildId: string | null): string {
   return createHash("sha256")
     .update(JSON.stringify(REGISTERED_DISCORD_COMMANDS))
+    .update(`client:${clientId}`)
     .update(guildId ? `guild:${guildId}` : "global")
     .digest("hex");
 }
 
-// Record the schema+scope hash after a successful registration so the boot sync
+// Record the schema+target hash after a successful registration so the boot sync
 // treats it as current. Called by the admin button, the settings save and the
 // boot path; a failure here only costs one redundant (idempotent)
-// re-registration next boot.
-export async function recordDiscordSchemaHash(guildId: string | null): Promise<void> {
-  const value = discordSchemaHash(guildId);
+// re-registration next boot. `clientId` is the application just registered;
+// a caller that doesn't pass it gets the stored discordClientId.
+export async function recordDiscordSchemaHash(guildId: string | null, clientId?: string): Promise<void> {
   // try/catch (not a trailing .catch): must swallow a SYNCHRONOUS throw too —
   // this is a best-effort bookkeeping write whose failure only costs one
   // redundant, idempotent re-registration on the next boot, and it must never
   // propagate into its caller (the register button / settings save).
   try {
+    const appId = clientId ?? (await prisma.setting.findUnique({ where: { key: "discordClientId" } }))?.value;
+    if (!appId) return;
+    const value = discordSchemaHash(appId, guildId);
     await prisma.setting.upsert({ where: { key: DISCORD_SCHEMA_HASH_KEY }, update: { value }, create: { key: DISCORD_SCHEMA_HASH_KEY, value } });
+    const target = guildId ? `${appId}:${guildId}` : "";
+    await prisma.setting.upsert({ where: { key: DISCORD_REGISTERED_GUILD_KEY }, update: { value: target }, create: { key: DISCORD_REGISTERED_GUILD_KEY, value: target } });
   } catch (err) {
     console.warn("[discord] failed to persist command schema hash:", err instanceof Error ? err.message : err);
   }
@@ -245,6 +290,9 @@ export async function recordDiscordSchemaHash(guildId: string | null): Promise<v
  * never throws, so a Discord outage at boot can't block startup.
  */
 export async function syncDiscordCommandsIfChanged(): Promise<void> {
+  // The integration switched off registers nothing: its commands would only
+  // answer "disabled".
+  if (!(await isFeatureEnabled("feature.integration.discord"))) return;
   const rows = await prisma.setting.findMany({
     where: { key: { in: ["discordBotToken", "discordClientId", "discordGuildId", DISCORD_SCHEMA_HASH_KEY] } },
   });
@@ -254,7 +302,7 @@ export async function syncDiscordCommandsIfChanged(): Promise<void> {
   if (!cfg.discordBotToken || !cfg.discordClientId) return; // Discord not configured
 
   const guildId = cfg.discordGuildId?.trim() || null;
-  if (cfg[DISCORD_SCHEMA_HASH_KEY] === discordSchemaHash(guildId)) return; // already current
+  if (cfg[DISCORD_SCHEMA_HASH_KEY] === discordSchemaHash(cfg.discordClientId, guildId)) return; // already current
 
   const res = await putDiscordCommands(cfg.discordBotToken, cfg.discordClientId, guildId);
   if (!res.ok) {
@@ -263,5 +311,5 @@ export async function syncDiscordCommandsIfChanged(): Promise<void> {
     console.warn(`[discord] boot command sync failed (${res.status}): ${text.slice(0, 200)}`);
     return;
   }
-  await recordDiscordSchemaHash(guildId);
+  await recordDiscordSchemaHash(guildId, cfg.discordClientId);
 }

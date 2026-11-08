@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { arrFailure, arrTitleGate, parseArrId } from "@/lib/arr-admin-http";
 import { markHistoryFailed } from "@/lib/arr-title-data";
-import { auditContext, logAudit } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { tooManyRequests } from "@/lib/http";
@@ -22,9 +22,8 @@ const LIMIT_PER_MIN = 30;
 //   after the arr accepted it (guardrail 26). 429 past LIMIT_PER_MIN.
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, 16 * 1024);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, 16 * 1024);
+  if (body instanceof NextResponse) return body;
   const target = await arrTitleGate(body.service, body.instance, body.arrId, t);
   if (target instanceof NextResponse) return target;
   if (!checkRateLimit(`arr-history-failed:${session.user.id}`, LIMIT_PER_MIN, 60_000)) {
@@ -41,12 +40,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return arrFailure(err, target, t, "mark failed");
   }
   void logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email ?? null,
+    ...auditActor(req, session),
     action: "ARR_MARK_FAILED",
     target: `${target.service}:${target.instance}:${target.arrId}`,
     details: { service: target.service, instance: target.instance, arrId: target.arrId, historyId, release: sourceTitle },
-    ...auditContext(req, session),
   });
   return NextResponse.json({ ok: true });
 });

@@ -43,6 +43,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel } = await import("./_helpers.mts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
+const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
 
 type AgentRow = { id: string; kind: string; name: string; enabled: boolean; events: string[]; config: unknown; secret: string | null };
 let agents: AgentRow[] = [];
@@ -54,6 +55,8 @@ let findManyGate: Promise<void> | null = null;
 // Delays the outcome write by N macrotask rounds AFTER it is called, so a
 // fire-and-forget recordOutcome is observable as "not yet written".
 let updateDelayRounds = 0;
+// When set, the outcome write throws it.
+let updateFailure: unknown = null;
 shadowPrismaModel(prisma, "notificationAgent", {
   findMany: async (args: { where?: { enabled?: boolean } }) => {
     agentReads++;
@@ -62,6 +65,7 @@ shadowPrismaModel(prisma, "notificationAgent", {
     return rows;
   },
   update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+    if (updateFailure) throw updateFailure;
     if (updateDelayRounds > 0) await settle(updateDelayRounds);
     updates.push(args);
     return { id: args.where.id };
@@ -175,11 +179,21 @@ test("feature flag off ⇒ nothing is read and nothing is sent", async () => {
   assert.equal(agentReads, 0);
 });
 
-test("a stored config that no longer validates is skipped, not sent", async () => {
+test("a stored config that no longer validates is skipped, not sent — and warned about once, not on every load", async () => {
+  resetLogDedup();
   agents = [{ id: "bad", kind: "ntfy", name: "bad", enabled: true, events: ["request.available"], config: { url: "https://n.example/", topic: "has space" }, secret: null }];
   emitNotificationEvent(AVAILABLE);
   await settle();
+  // A second dispatch past the cache (the 30s TTL in production) reads the row again.
+  invalidateAgentCache();
+  emitNotificationEvent(AVAILABLE);
+  await settle();
+  assert.equal(agentReads, 2);
   assert.equal(calls.length, 0);
+  const skipped = warns.filter((w) => w.includes("[notify-agents]"));
+  assert.equal(skipped.length, 1, `expected one warning across two loads, got ${JSON.stringify(skipped)}`);
+  assert.match(skipped[0], /"bad" \(ntfy\) stored config no longer validates \(topic\)/);
+  assert.equal(updates.length, 0, "the skip writes nothing onto the row");
 });
 
 test("a 4xx is a config error: recorded as failed, warned once, never retried", async () => {
@@ -224,6 +238,35 @@ test("a 5xx is retried at 30s / 2m / 10m, then given up and recorded once", asyn
     await settle();
     assert.equal(calls.length, 4, "three retries, then stop");
     assert.deepEqual(updates.map((u) => u.data.lastStatus), ["failed"]);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("every event gets its own delivery id, and a retry re-sends the SAME id in the body and the Idempotency-Key header", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let n = 0;
+    respond = () => (n++ === 0 ? new Response("", { status: 503 }) : new Response(null, { status: 200 }));
+    agents = [{ id: "a", kind: "webhook", name: "hook", enabled: true, events: ["request.available"], config: { url: "https://a.example/" }, secret: null }];
+    emitNotificationEvent(AVAILABLE);
+    await settle();
+    mock.timers.tick(30_000);
+    await settle();
+    assert.equal(calls.length, 2);
+    const [first, retry] = calls.map((c) => ({ body: JSON.parse(c.body) as { id: unknown }, header: c.headers.get("idempotency-key") }));
+    assert.equal(typeof first.body.id, "string");
+    assert.match(first.body.id as string, /^[0-9a-f-]{36}$/);
+    assert.equal(retry.body.id, first.body.id, "a retry must be recognisable as the same delivery");
+    assert.equal(first.header, first.body.id);
+    assert.equal(retry.header, first.body.id);
+    // Two events in one batch share a timestamp, never an id.
+    calls.length = 0;
+    emitNotificationEvents([AVAILABLE, { ...AVAILABLE, request: { id: "r2", instance: "" } }]);
+    await settle();
+    const ids = calls.map((c) => (JSON.parse(c.body) as { id: string }).id);
+    assert.equal(ids.length, 2);
+    assert.notEqual(ids[0], ids[1]);
   } finally {
     mock.timers.reset();
   }
@@ -283,6 +326,22 @@ test("the Test button sends one immediate attempt even for a disabled agent and 
   assert.equal(JSON.parse(calls[0].body).title, "Test notification");
 });
 
+test("recording an outcome tolerates a deleted channel silently, and says any other write failure", async () => {
+  respond = () => new Response("", { status: 200 });
+  const agent = loadedAgentFromRow({ id: "gone", kind: "webhook", name: "gone", events: [], config: { url: "https://x.example/" }, secret: null })!;
+  const { Prisma } = await import("../src/generated/prisma/index.js");
+  try {
+    updateFailure = new Prisma.PrismaClientKnownRequestError("not found", { code: "P2025", clientVersion: "test" });
+    await sendAgentTest(agent, { event: "agent.test" });
+    assert.equal(warns.filter((w) => w.includes("could not record")).length, 0, "a channel deleted meanwhile is not news");
+    updateFailure = new Error("connection pool timeout");
+    await sendAgentTest(agent, { event: "agent.test" });
+    assert.equal(warns.filter((w) => w.includes("[notify-agents] could not record a delivery outcome")).length, 1);
+  } finally {
+    updateFailure = null;
+  }
+});
+
 // ── retries re-resolve the agent ────────────────────────────────────────────
 // The retry closure must not carry the LoadedAgent snapshot from attempt 0: an
 // admin may disable, delete, unsubscribe or re-point the channel while a retry
@@ -316,6 +375,30 @@ test("a retry re-resolves the agent: one disabled or deleted in the meantime is 
       assert.equal(updates.length, 0, `${withdraw}: the retry wrote an outcome onto a channel the admin withdrew`);
       assert.equal(warns.filter((w) => w.includes("[notify-agents]")).length, 0, withdraw);
     }
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a retry pending when the integration flag is switched off is withdrawn: no fetch, no outcome", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    respond = () => new Response("down", { status: 503 });
+    agents = [{ id: "a", kind: "webhook", name: "hook", enabled: true, events: ["request.available"], config: { url: "https://a.example/" }, secret: null }];
+    emitNotificationEvent(AVAILABLE);
+    await settle();
+    assert.equal(calls.length, 1);
+    // The admin flips the kill switch while the 30s retry is pending (the
+    // settings route invalidates the flag cache on write — the test does too).
+    settings.set("feature.integration.webhooks", "false");
+    invalidateFeatureFlagCache();
+    mock.timers.tick(30_000);
+    await settle();
+    mock.timers.tick(15 * 60_000);
+    await settle();
+    assert.equal(calls.length, 1, "a pending retry posted after the integration was switched off");
+    assert.equal(updates.length, 0, "a withdrawn retry wrote an outcome");
+    assert.equal(warns.filter((w) => w.includes("[notify-agents]")).length, 0);
   } finally {
     mock.timers.reset();
   }
@@ -444,7 +527,7 @@ test("a secret undici's Headers rejects (NUL byte) is a config failure: never fe
     mock.timers.tick(15 * 60_000);
     await settle();
     assert.equal(calls.length, 0, "Headers rejected the value before any network call");
-    assert.deepEqual(updates.map((u) => [u.data.lastStatus, u.data.lastError]), [["failed", "request could not be built (check the secret and URL)"]]);
+    assert.deepEqual(updates.map((u) => [u.data.lastStatus, u.data.lastError]), [["failed", "request could not be built (TypeError; check the secret and URL)"]]);
     const leaks = (s: string) => s.includes(secret) || s.includes("invalid header value");
     assert.ok(!warns.some(leaks) && !errors.some(leaks), "the Headers TypeError (which embeds the secret) reached a log line");
     const r = await sendAgentTest(loadedAgentFromRow({ id: "nul", kind: "webhook", name: "nul", events: [], config: { url: "https://a.example/" }, secret })!, { event: "agent.test" });
@@ -519,16 +602,23 @@ test("every 'now available' sync path goes through fanOutAvailableWinners — no
   // The channel modules fanOutAvailableWinners itself composes. A sync route that
   // imports ANY of them (aliased or not), or emits to the outbound channels
   // itself, has re-listed a channel at the call site (guardrail 14c). Matching
-  // the import side closes the alias hole a call-paren regex leaves open.
-  const CHANNEL_MODULES = ["discord-notify", "push", "email", "in-app-notify", "notify-agents"];
+  // the import side closes the alias hole a call-paren regex leaves open. The
+  // hub writes inbox rows itself (one createMany of notification-data rows), so
+  // in-app-notify, the single-row writer, is only on the forbidden side.
+  const CHANNEL_MODULES = ["discord-notify", "push", "email", "notification-data", "notify-agents"];
   const hub = read("src/lib/request-notifications.ts");
   for (const m of CHANNEL_MODULES) {
     assert.match(hub, new RegExp(`from "\\./${m}"`), `the hub no longer imports ./${m} — the channel list above has rotted`);
   }
-  const channelImport = new RegExp(`\\blib/(${CHANNEL_MODULES.join("|")})(\\.ts)?["']`);
-  for (const p of ["src/app/api/sync/route.ts", "src/app/api/sync/plex/route.ts", "src/app/api/sync/jellyfin/route.ts"]) {
+  const channelImport = new RegExp(`\\blib/(${[...CHANNEL_MODULES, "in-app-notify"].join("|")})(\\.ts)?["']`);
+  // The marking passes live in src/lib/available-marking.ts, shared by the
+  // orchestrator and the per-source Resync routes; the orchestrator's notify
+  // fallback calls the fan-out itself.
+  const fansOut = new Set(["src/app/api/sync/route.ts", "src/lib/available-marking.ts"]);
+  for (const p of ["src/app/api/sync/route.ts", "src/lib/available-marking.ts", "src/app/api/sync/plex/route.ts", "src/app/api/sync/jellyfin/route.ts"]) {
     const src = read(p);
-    assert.match(src, /fanOutAvailableWinners\(/, p);
+    if (fansOut.has(p)) assert.match(src, /fanOutAvailableWinners\(/, p);
+    else assert.match(src, /markResyncedLibrary\(/, `${p} must mark through the shared pass`);
     assert.doesNotMatch(src, channelImport, `${p} imports a notification channel module directly`);
     assert.doesNotMatch(src, /emitNotificationEvents?\(/, `${p} emits to the outbound channels at the call site`);
     assert.doesNotMatch(

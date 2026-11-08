@@ -46,6 +46,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { AsyncLocalStorage } from "node:async_hooks";
 import dns from "node:dns/promises";
+import { ADMIN_NOTE_MAX } from "../src/lib/request-limits.ts";
 
 (globalThis as { AsyncLocalStorage?: unknown }).AsyncLocalStorage = AsyncLocalStorage;
 
@@ -69,6 +70,8 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 const fetchCalls: Array<{ url: URL; method: string; body?: string }> = [];
 let arrOk = true;
 let arrFailTmdbIds = new Set<number>();
+// Adds for these tmdbIds get a gateway 504: no definite answer from the arr.
+let arrGatewayTmdbIds = new Set<number>();
 let profilesOk = true;
 // A Sonarr library for PATCH { search: true } on a TV request: the series row
 // the tvdbId resolves to (id 77) and its episode list. null ⇒ the branches
@@ -77,6 +80,9 @@ let profilesOk = true;
 // accepts that many commands and answers 500 to every later one.
 let sonarrSearch: { episodes: unknown[]; seriesRows?: unknown[]; acceptCommands?: number } | null = null;
 let commandSeq = 500;
+// What Radarr's library answers for GET /api/v3/movie?tmdbId= (a movie Search).
+// null ⇒ the generic stub below.
+let radarrMovies: unknown[] | null = null;
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
@@ -98,6 +104,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     }
   }
 
+  if (radarrMovies && (init?.method ?? "GET") === "GET" && url.pathname.endsWith("/api/v3/movie") && url.searchParams.has("tmdbId")) {
+    return json(radarrMovies);
+  }
   if (url.pathname.includes("/api/v3/qualityprofile")) {
     // The whole QualityProfileResource, as Radarr sends it: the quality-profiles
     // route must forward only `{ id, name }` (its deepEqual below pins that).
@@ -128,9 +137,14 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       new RegExp(`"tmdbId"\\s*:\\s*${id}\\b`).test(body) || new RegExp(`"tvdbId"\\s*:\\s*${id}\\b`).test(body),
     );
     if (!arrOk || failing) return json({ message: "ARR ADD FAILED" }, 500);
+    if ([...arrGatewayTmdbIds].some((id) => new RegExp(`"tmdbId"\\s*:\\s*${id}\\b`).test(body))) {
+      return new Response("upstream timed out", { status: 504 });
+    }
     return json({ id: 1, tvdbId: 4242 });
   }
   if ((url.hostname === "themoviedb.org" || url.hostname.endsWith(".themoviedb.org"))) return json({ id: 603, title: "The Matrix", results: [] });
+  // Discord's DM-channel open (only a test that configures the bot gets here).
+  if (url.hostname === "discord.com" && url.pathname.endsWith("/users/@me/channels")) return json({ id: "333333333333333333" });
   return json({});
 }) as unknown as typeof fetch;
 
@@ -227,6 +241,7 @@ let reqRows: ReqRow[] = [];
 // Makes ONLY the post-Sonarr tvdbId bookkeeping write fail (the CAS transitions
 // never carry tvdbId), so a test can prove that write is outside the rollback try.
 let failTvdbBookkeeping = false;
+let failDeclineNoticeRead = false;
 
 function matchReq(r: ReqRow, where: Record<string, unknown> | undefined): boolean {
   if (!where) return true;
@@ -260,9 +275,14 @@ shadowPrismaModel(prisma, "mediaRequest", {
     const r = reqRows.find((x) => matchReq(x, args.where));
     return r ? { ...r } : null;
   },
-  findMany: async (args: { where?: Record<string, unknown> } = {}) => {
+  // Projects through `select` like Prisma does, so a column a route forgets to
+  // select is missing here too.
+  findMany: async (args: { where?: Record<string, unknown>; select?: Record<string, boolean> } = {}) => {
     rec("mediaRequest.findMany", args.where);
-    return reqRows.filter((r) => matchReq(r, args.where)).map((r) => ({ ...r }));
+    if (failDeclineNoticeRead && args.where?.status === "DECLINED") throw new Error("P2024 pool timeout");
+    return reqRows
+      .filter((r) => matchReq(r, args.where))
+      .map((r) => (args.select ? Object.fromEntries(Object.entries(r).filter(([k]) => args.select![k] === true)) : { ...r }));
   },
   updateMany: async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
     rec("mediaRequest.updateMany", args);
@@ -439,9 +459,12 @@ beforeEach(() => {
   settings.set("sonarrApiKey", "sonarr-key");
   arrOk = true;
   arrFailTmdbIds = new Set();
+  arrGatewayTmdbIds = new Set();
   profilesOk = true;
   sonarrSearch = null;
+  radarrMovies = null;
   failTvdbBookkeeping = false;
+  failDeclineNoticeRead = false;
   agentRows.length = 0;
   invalidateAgentCache();
 });
@@ -589,6 +612,42 @@ test("a FAILED push is REPORTED: `failed` names each rolled-back row, `arrError`
   assert.deepEqual(await (await doBatch(token, { ids: ["clean"], status: "APPROVED" })).json(), { ok: true });
 });
 
+// A gateway 504 after the add was sent is no answer: Radarr may already hold the
+// title. Like the single PATCH, the batch leaves that row APPROVED (the sync
+// re-pushes one the arr doesn't hold); only a definite failure rolls back.
+test("a batch push with no definite answer (gateway 504) stays APPROVED: reported apart from `failed`, notified, audited", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [
+    reqRow({ id: "ok", requestedBy: owner.userId, tmdbId: 100 }),
+    reqRow({ id: "slow", requestedBy: owner.userId, tmdbId: 777, title: "Slow Movie" }),
+    reqRow({ id: "bad", requestedBy: owner.userId, tmdbId: 999, title: "Bad Movie" }),
+  ];
+  arrGatewayTmdbIds = new Set([777]);
+  arrFailTmdbIds = new Set([999]);
+  const res = await doBatch(token, { ids: ["ok", "slow", "bad"], status: "APPROVED" });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+
+  const slow = reqRows.find((r) => r.id === "slow")!;
+  assert.equal(slow.status, "APPROVED", "no rollback on an unknown outcome");
+  assert.ok(slow.pendingNotifyAt instanceof Date, "the backstop stays armed");
+  assert.equal(reqRows.find((r) => r.id === "bad")!.status, "PENDING", "a definite failure still rolls back");
+
+  assert.deepEqual(body.failed.map((f: { id: string }) => f.id), ["bad"], "the queue keeps only rolled-back rows selected");
+  assert.deepEqual(body.outcomeUnknown, ["slow"]);
+
+  await drainAfter();
+  const inbox = opsOf("notification.createMany").flatMap((o) => (o.args as { data: Array<{ requestId?: string }> }).data);
+  assert.equal(inbox.length, 2, "the approval stands for ok and slow, so both are told; bad is not");
+
+  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+  const details = JSON.parse((opsOf("auditLog.create")[0].args as { data: { details: string } }).data.details);
+  assert.deepEqual(details.rolledBackIds, ["bad"]);
+  assert.deepEqual(details.outcomeUnknownIds, ["slow"]);
+  assert.equal(details.transitioned, 2);
+});
+
 // Sonarr has ALREADY accepted the series when the tvdbId write runs, so that write
 // must sit outside the try whose catch rolls APPROVED → PENDING — otherwise a
 // P2025 (row deleted mid-push) or a transient pool error reverts a request Sonarr
@@ -725,6 +784,77 @@ test("batch decline: a DEACTIVATED owner's request produces NO outbound request.
     agentPosts().map((p) => [p.event, p.request?.id, p.text]),
     [["request.declined", "r-live", "not this year"]],
     "exactly one outbound event, for the ACTIVE owner's request",
+  );
+});
+
+test("batch decline: a failed read of the decline notices leaves the committed decline a 200", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "r-1", requestedBy: owner.userId })];
+  failDeclineNoticeRead = true;
+
+  const res = await doBatch(token, { ids: ["r-1"], status: "DECLINED" });
+  assert.equal(res.status, 200);
+  assert.equal(reqRows[0].status, "DECLINED");
+});
+
+// The batch decline is the single decline's fan-out for many rows: the same
+// inbox row and the same admin note on every channel — each row's note as the
+// decline left it, so a batch that sends no note still carries a note already
+// stored on the row, exactly as the single decline does.
+test("single and batch declines of equivalent rows tell the requester the same thing — inbox type and body, and the row's stored note by email, Discord and the outbound channels", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  // A linked Discord account (a DM carries the note; the shared channel doesn't)
+  // and the Resend backend, so both channels reach the scripted wire.
+  appUsers.find((u) => u.id === owner.userId)!.discordId = "111111111111111111";
+  settings.set("discordBotToken", "bot-token");
+  settings.set("emailBackend", "resend");
+  settings.set("resendApiKey", "rk_test");
+  settings.set("smtpFrom", "noreply@summonarr.test");
+  settings.set("enableUserEmails", "true");
+  agentRows.push(agentRow("request.declined"));
+  reqRows = [
+    reqRow({ id: "single", requestedBy: owner.userId, tmdbId: 701, adminNote: "stored note" }),
+    reqRow({ id: "batch", requestedBy: owner.userId, tmdbId: 702, adminNote: "stored note" }),
+  ];
+
+  // Neither decision sends a note.
+  assert.equal((await doPatch(token, "single", { status: "DECLINED" })).status, 200);
+  assert.equal((await doBatch(token, { ids: ["batch"], status: "DECLINED" })).status, 200);
+  await drainAfter();
+  await settleAgentPosts(2);
+
+  const texts = Object.fromEntries(agentPosts().map((p) => [p.request?.id, p.text]));
+  assert.deepEqual(texts, { single: "stored note", batch: "stored note" }, "both carry the row's stored note");
+
+  // One inbox writer for both: the same type and body.
+  assert.equal(opsOf("notification.create").length, 0, "no single-row inbox write");
+  const inbox = opsOf("notification.createMany").map((o) => (o.args as { data: Array<{ userId: string; type: string; body: string }> }).data);
+  assert.deepEqual(
+    inbox.map((rows) => rows.map((r) => ({ userId: r.userId, type: r.type, body: r.body }))),
+    [0, 1].map(() => [{ userId: owner.userId, type: "REQUEST_DECLINED", body: "Your movie request was declined." }]),
+    "one identical inbox row per decision",
+  );
+
+  // Email and the Discord DM: one each per decision, identical, and both carry
+  // the stored note. The DM queue spaces DMs out, so wait for the second.
+  const emails = () => fetchCalls.filter((c) => c.url.href === "https://api.resend.com/emails");
+  const dms = () => fetchCalls.filter((c) => c.url.hostname === "discord.com" && /\/channels\/\d+\/messages$/.test(c.url.pathname));
+  for (let i = 0; i < 500 && (emails().length < 2 || dms().length < 2); i++) await new Promise((r) => setTimeout(r, 10));
+  const mails = emails().map((c) => JSON.parse(c.body!) as { to: string; subject: string; html: string });
+  assert.equal(mails.length, 2, "one decline email per decision");
+  for (const m of mails) {
+    assert.equal(m.to, `${owner.userId}@example.com`);
+    assert.ok(m.html.includes("stored note"), "the email carries the row's stored note");
+  }
+  assert.equal(mails[0].subject, mails[1].subject);
+  const embeds = dms().map((c) => (JSON.parse(c.body!) as { embeds: Array<{ title: string; description: string }> }).embeds[0]);
+  assert.equal(embeds.length, 2, "one Discord DM per decision");
+  for (const e of embeds) assert.ok(e.description.includes("stored note"), `the DM carries the row's stored note: ${e.description}`);
+  assert.deepEqual(
+    { title: embeds[0].title, description: embeds[0].description },
+    { title: embeds[1].title, description: embeds[1].description },
   );
 });
 
@@ -949,6 +1079,23 @@ test("batch rejects an over-long adminNote", async () => {
   assert.equal(res.status, 400);
 });
 
+// The queue's note inputs cap at ADMIN_NOTE_MAX (maxLength), so the routes must
+// accept exactly that many characters and refuse one more — or a reason the
+// form let through would still fail after submit.
+test("both routes accept an adminNote of exactly ADMIN_NOTE_MAX and refuse one character more", async () => {
+  assert.equal(ADMIN_NOTE_MAX, 1000, "the cap the API has always documented");
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId }), reqRow({ id: "r2", requestedBy: owner.userId })];
+  assert.equal((await doPatch(token, "r1", { status: "DECLINED", adminNote: "x".repeat(ADMIN_NOTE_MAX + 1) })).status, 400);
+  assert.equal((await doBatch(token, { ids: ["r2"], status: "DECLINED", adminNote: "y".repeat(ADMIN_NOTE_MAX + 1) })).status, 400);
+  assert.equal(reqRows[0].status, "PENDING", "a refused note writes nothing");
+  assert.equal((await doPatch(token, "r1", { status: "DECLINED", adminNote: "x".repeat(ADMIN_NOTE_MAX) })).status, 200);
+  assert.equal(reqRows[0].adminNote?.length, ADMIN_NOTE_MAX);
+  assert.equal((await doBatch(token, { ids: ["r2"], status: "DECLINED", adminNote: "y".repeat(ADMIN_NOTE_MAX) })).status, 200);
+  assert.equal(reqRows[1].adminNote?.length, ADMIN_NOTE_MAX);
+});
+
 test("batch is rate-limited per acting admin", async () => {
   const { token } = await manager();
   for (let i = 0; i < 10; i++) {
@@ -1016,6 +1163,36 @@ test("approve with a LISTED qualityProfileId claims the row and forwards that id
   const adds = fetchCalls.filter((c) => c.method === "POST" && c.url.pathname.includes("/api/v3/movie"));
   assert.equal(adds.length, 1);
   assert.equal((JSON.parse(adds[0].body!) as { qualityProfileId?: number }).qualityProfileId, 2);
+});
+
+// The admin's picker choice is stored on the row, so the profile the admin
+// picked is the one a later Re-push (and the sync's re-push) sends — it used to
+// be used once and dropped, and a retry after a failed approve fell back to the
+// requester's profile or the instance default.
+test("approve with a qualityProfileId STORES it: a Re-push after the approve sends the admin's choice", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, qualityProfileId: 1 })];
+  const res = await doPatch(token, "r1", { status: "APPROVED", qualityProfileId: 2, qualityProfileName: "Ultra-HD" });
+  assert.equal(res.status, 200);
+  assert.equal(reqRows[0].qualityProfileId, 2, "the override is the row's profile now");
+  assert.equal(((await res.json()) as { qualityProfileId: number }).qualityProfileId, 2);
+
+  fetchCalls.length = 0;
+  assert.equal((await doPatch(token, "r1", { retry: true })).status, 200);
+  const adds = fetchCalls.filter((c) => c.method === "POST" && c.url.pathname.includes("/api/v3/movie"));
+  assert.equal(adds.length, 1);
+  assert.equal((JSON.parse(adds[0].body!) as { qualityProfileId?: number }).qualityProfileId, 2, "the Re-push keeps the admin's choice");
+});
+
+test("approve WITHOUT a qualityProfileId leaves the requester's stored profile alone", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, qualityProfileId: 1 })];
+  await doPatch(token, "r1", { status: "APPROVED" });
+  assert.equal(reqRows[0].qualityProfileId, 1);
+  const claim = opsOf("mediaRequest.updateMany")[0].args as { data: Record<string, unknown> };
+  assert.equal("qualityProfileId" in claim.data, false);
 });
 
 // A TV request with no stored tvdbId has nothing to search: the route answers
@@ -1188,6 +1365,18 @@ for (const [label, seriesRows] of [
     assert.deepEqual(errors.filter((e) => e.includes("Search failed")), [], "an answer, not a logged failure");
   });
 }
+
+test("search on a movie Radarr no longer holds answers a translated arrError pointing at Re-push and queues nothing", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  radarrMovies = [{ id: 9, tmdbId: 604 }]; // another movie only
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, status: "APPROVED" })];
+  const res = await doPatch(token, "r1", { search: true });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).arrError, "Radarr doesn't have this title yet — re-push the request first");
+  assert.ok(!fetchCalls.some((c) => c.url.pathname.endsWith("/api/v3/command")), "no search command");
+  assert.deepEqual(errors.filter((e) => e.includes("Search failed")), [], "an answer, not a logged failure");
+});
 
 test("the approve write carries a CAS predicate on the CURRENT status", async () => {
   // The transition-table check ran against a stale read, so two concurrent
@@ -1416,6 +1605,104 @@ test("a single approve is audited with the before/after status", async () => {
   const details = JSON.parse(data.details);
   assert.equal(details.before.status, "PENDING");
   assert.equal(details.after.status, "APPROVED");
+});
+
+// The approval is audited once the push's outcome is known, so the trail says
+// whether the request reached Radarr/Sonarr or went back to PENDING.
+async function approveAuditDetails(tmdbId: number): Promise<Record<string, unknown>> {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: `r${tmdbId}`, requestedBy: owner.userId, tmdbId })];
+  await doPatch(token, `r${tmdbId}`, { status: "APPROVED" });
+  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+  const rows = opsOf("auditLog.create").map((o) => (o.args as { data: { action: string; details: string } }).data);
+  const approve = rows.filter((d) => d.action === "REQUEST_APPROVE");
+  assert.equal(approve.length, 1, "one REQUEST_APPROVE row");
+  return JSON.parse(approve[0].details) as Record<string, unknown>;
+}
+
+test("the single approve audit records the push outcome: landed, rolled back, or unknown", async () => {
+  const landed = await approveAuditDetails(100);
+  assert.equal(landed.arrPushSucceeded, true);
+  assert.equal(landed.rolledBack, false);
+  assert.equal("arrPushOutcomeUnknown" in landed, false);
+
+  ops = [];
+  arrFailTmdbIds = new Set([999]);
+  const refused = await approveAuditDetails(999);
+  assert.equal(reqRows[0].status, "PENDING", "fixture sanity: the push failed and rolled back");
+  assert.equal(refused.arrPushSucceeded, false);
+  assert.equal(refused.rolledBack, true);
+
+  ops = [];
+  arrGatewayTmdbIds = new Set([777]);
+  const unknown = await approveAuditDetails(777);
+  assert.equal(unknown.arrPushSucceeded, false);
+  assert.equal(unknown.rolledBack, false);
+  assert.equal(unknown.arrPushOutcomeUnknown, true);
+});
+
+test("a single approve whose push gets no definite answer (gateway 504) stays APPROVED: arrError + marker, notified, download check queued", async () => {
+  // Radarr may have added the title before the gateway gave up. Rolled back, the
+  // queue would offer to decline a title already downloading; the sync re-pushes
+  // an APPROVED title the arr doesn't hold instead.
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "slow", requestedBy: owner.userId, tmdbId: 777 })];
+  arrGatewayTmdbIds = new Set([777]);
+  const { result, queued } = await withTimeoutSpy(() => doPatch(token, "slow", { status: "APPROVED" }));
+  assert.equal(result.status, 200);
+  const body = await result.json();
+  assert.equal(body.status, "APPROVED");
+  assert.ok(typeof body.arrError === "string" && body.arrError.length > 0, "the admin is still told the push had trouble");
+  assert.equal(body.arrPushOutcomeUnknown, true);
+  assert.equal(reqRows[0].status, "APPROVED", "no rollback");
+  assert.ok(reqRows[0].pendingNotifyAt instanceof Date, "the backstop stays armed");
+  assert.equal(queued, 1, "the download check consumes the armed backstop");
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  const told = opsOf("notification.createMany").flatMap((o) => (o.args as { data: Array<{ type: string }> }).data);
+  assert.deepEqual(told.map((r) => r.type), ["REQUEST_APPROVED"], "the approval stands, so the requester is told");
+});
+
+test("search/retry flags must be the boolean true: a truthy string never reaches Radarr/Sonarr", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, status: "APPROVED" })];
+  for (const body of [{ search: "false" }, { retry: "false" }, { search: 1 }, { retry: "yes" }]) {
+    fetchCalls.length = 0;
+    const res = await doPatch(token, "r1", body);
+    assert.equal(res.status, 400, `${JSON.stringify(body)} is not a search or retry`);
+    const json = await res.json();
+    assert.equal("arrError" in json, false, "not answered as a search/retry");
+    assert.equal(fetchCalls.length, 0, `${JSON.stringify(body)} made no arr call`);
+  }
+  assert.equal(reqRows[0].status, "APPROVED");
+  // The real booleans still work.
+  const search = await doPatch(token, "r1", { search: true });
+  assert.equal(search.status, 200);
+  assert.ok(fetchCalls.length > 0, "search: true reaches Radarr");
+});
+
+test("the batch audit keeps every requested id and records what actually changed: claimed, rolled back, transitioned", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [
+    reqRow({ id: "ok", requestedBy: owner.userId, tmdbId: 100 }),
+    reqRow({ id: "already", requestedBy: owner.userId, tmdbId: 200, status: "APPROVED" }),
+    reqRow({ id: "bad", requestedBy: owner.userId, tmdbId: 999 }),
+  ];
+  arrFailTmdbIds = new Set([999]);
+  await doBatch(token, { ids: ["ok", "already", "bad"], status: "APPROVED" });
+  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+  const data = (opsOf("auditLog.create")[0].args as { data: { action: string; target: string; details: string } }).data;
+  assert.equal(data.action, "REQUEST_APPROVE");
+  assert.equal(data.target, "batch:3", "the target still counts the requested ids (the purge scrub keys on it)");
+  const details = JSON.parse(data.details);
+  assert.deepEqual(details.ids, ["ok", "already", "bad"]);
+  assert.equal(details.count, 3);
+  assert.deepEqual([...details.claimedIds].sort(), ["bad", "ok"]);
+  assert.deepEqual(details.rolledBackIds, ["bad"]);
+  assert.equal(details.transitioned, 1);
 });
 
 // ── the 90s download-check job is queued only for a push that LANDED ─────────

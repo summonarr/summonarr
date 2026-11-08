@@ -52,11 +52,11 @@ shadowPrismaModel(prisma, "auditLog", {
   create: async (args: CreateArgs) => {
     creates.push(args);
     if (createError) throw createError;
-    return args.data;
+    return { id: `row-${creates.length}`, ...args.data };
   },
 });
 
-const { logAudit, logAuditOrFail, auditContext } = await import("../src/lib/audit.ts");
+const { logAudit, logAuditOrFail, logAuditOrFailReturningId, logAuditTx, auditContext } = await import("../src/lib/audit.ts");
 
 beforeEach(() => {
   creates.length = 0;
@@ -193,6 +193,52 @@ test("logAudit and logAuditOrFail write byte-identical rows for identical params
   assert.deepEqual(creates[1].data, creates[0].data); // one mapping, two error policies
 });
 
+test("logAuditTx writes, on the transaction client it is given, the row logAuditOrFail writes — the user agent's controls and bidi overrides stripped", async () => {
+  const params = {
+    userId: "u9",
+    userName: "Admin",
+    action: "ISSUE_DELETE",
+    target: "issue:abc",
+    details: { action: "delete" },
+    ipAddress: "198.51.100.2",
+    userAgent: "curl/8\x1b[2J\u202Eevil",
+    provider: "credentials",
+  } as const;
+  await logAuditOrFail(params);
+  const txCreates: CreateArgs[] = [];
+  const tx = { auditLog: { create: async (args: CreateArgs) => { txCreates.push(args); return args.data; } } };
+  await logAuditTx(tx as unknown as Parameters<typeof logAuditTx>[0], params);
+  assert.equal(creates.length, 1, "the transaction client is written, never the global one");
+  assert.equal(txCreates.length, 1);
+  assert.deepEqual(txCreates[0].data, creates[0].data);
+  assert.equal(txCreates[0].data.userAgent, "curl/8[2Jevil");
+});
+
+test("logAuditOrFailReturningId writes the logAuditOrFail row, answers its id, and propagates a failed write", async () => {
+  const params = { userId: "u9", userName: "Admin", action: "AUDIT_LOG_EXPORT", target: "audit-log:export", userAgent: "curl/8\x1b[2J\u202Eevil" } as const;
+  await logAuditOrFail(params);
+  const id = await logAuditOrFailReturningId(params);
+  assert.equal(creates.length, 2);
+  assert.deepEqual(creates[1].data, creates[0].data);
+  assert.equal(creates[1].data.userAgent, "curl/8[2Jevil");
+  assert.deepEqual((creates[1] as { select?: unknown }).select, { id: true });
+  assert.equal(id, "row-2");
+  const boom = new Error("insert exploded");
+  createError = boom;
+  await assert.rejects(() => logAuditOrFailReturningId(params), (err: unknown) => err === boom);
+  assert.deepEqual(errors, []);
+});
+
+test("GUARDRAIL 23/26: logAuditTx PROPAGATES a failed write, so the transaction it sits in rolls back", async () => {
+  const boom = new Error("insert exploded");
+  const tx = { auditLog: { create: async () => { throw boom; } } };
+  await assert.rejects(
+    () => logAuditTx(tx as unknown as Parameters<typeof logAuditTx>[0], { userId: "u1", userName: "n", action: "ISSUE_DELETE", target: "issue:x" }),
+    (err: unknown) => err === boom,
+  );
+  assert.deepEqual(errors, []);
+});
+
 // ── auditContext ────────────────────────────────────────────────────────────
 
 test("auditContext caps the user-agent at 512 chars and nulls it when absent", () => {
@@ -252,4 +298,64 @@ test("behind a trusted proxy, audit rows record the RIGHTMOST forwarded hop (spo
     if (savedHops === undefined) delete process.env.TRUSTED_PROXY_HOPS;
     else process.env.TRUSTED_PROXY_HOPS = savedHops;
   }
+});
+
+// ── auditActor / finalizeAuditRow ───────────────────────────────────────────
+
+test("auditActor names the signed-in actor (name, else email) beside the request context", async () => {
+  const { auditActor } = await import("../src/lib/audit.ts");
+  const req = new Request("http://localhost/api/x", { headers: { "user-agent": "ua/1" } });
+  const named = auditActor(req, { user: { id: "u1", name: "Ann", email: "ann@example.com", provider: "credentials" } });
+  assert.equal(named.userId, "u1");
+  assert.equal(named.userName, "Ann");
+  assert.equal(named.userAgent, "ua/1");
+  assert.equal(named.provider, "credentials");
+  assert.equal(auditActor(req, { user: { id: "u2", name: null, email: "bob@example.com" } }).userName, "bob@example.com");
+  assert.equal(auditActor(req, { user: { id: "u3" } }).userName, null);
+});
+
+test("finalizeAuditRow rewrites the row's details and swallows a failed write with the caller's scope", async () => {
+  const { finalizeAuditRow } = await import("../src/lib/audit.ts");
+  const updates: Array<{ where: { id: string }; data: { details: string } }> = [];
+  let fail = false;
+  shadowPrismaModel(prisma, "auditLog", {
+    create: async (args: CreateArgs) => ({ id: "x", ...args.data }),
+    update: async (args: { where: { id: string }; data: { details: string } }) => {
+      if (fail) throw new Error("db down");
+      updates.push(args);
+      return {};
+    },
+  });
+  await finalizeAuditRow("row-1", { status: "completed", rows: 3 }, "[test-export]");
+  assert.deepEqual(updates, [{ where: { id: "row-1" }, data: { details: JSON.stringify({ status: "completed", rows: 3 }) } }]);
+  fail = true;
+  errors.length = 0;
+  await finalizeAuditRow("row-1", { status: "aborted" }, "[test-export]");
+  assert.ok(errors.some((e) => e.startsWith("[test-export] failed to finalize audit row:")), errors.join("\n"));
+});
+
+test("an oversized details is replaced by a marker that is still JSON, and a long target is cut", async () => {
+  const rows: CreateArgs[] = [];
+  shadowPrismaModel(prisma, "auditLog", { create: async (args: CreateArgs) => { rows.push(args); return { id: "r" }; } });
+  const creates = rows;
+  const { MAX_AUDIT_DETAILS_LENGTH, MAX_AUDIT_TARGET_LENGTH } = await import("../src/lib/audit.ts");
+  await logAudit({ userId: "u", userName: "n", action: "SETTINGS_CHANGE", target: "t".repeat(2_000), details: { keys: "k".repeat(MAX_AUDIT_DETAILS_LENGTH), other: 1 } });
+  const row = creates[0].data as { target: string; details: string };
+  assert.equal(row.target.length, MAX_AUDIT_TARGET_LENGTH);
+  const details = JSON.parse(row.details) as Record<string, unknown>;
+  assert.equal(details.truncated, true);
+  assert.deepEqual(details.keys, ["keys", "other"]);
+  assert.ok(row.details.length < 1_000);
+  creates.length = 0;
+  await logAudit({ userId: "u", userName: "n", action: "SETTINGS_CHANGE", target: "t", details: { a: 1 } });
+  assert.equal((creates[0].data as { details: string }).details, JSON.stringify({ a: 1 }), "a normal row is unchanged");
+});
+
+test("a failed retention read scrubs with the LONGEST window, never the shorter default", async () => {
+  const { getAuditPiiRetentionDays, AUDIT_PII_RETENTION_MAX_DAYS } = await import("../src/lib/audit.ts");
+  shadowPrismaModel(prisma, "setting", { findUnique: async () => { throw new Error("pool timeout"); } });
+  assert.equal(await getAuditPiiRetentionDays(), AUDIT_PII_RETENTION_MAX_DAYS);
+  assert.ok(warns.some((w) => w.includes("[audit] couldn't read the PII retention setting")));
+  shadowPrismaModel(prisma, "setting", { findUnique: async () => null });
+  assert.equal(await getAuditPiiRetentionDays(), 90, "no row is the documented default");
 });

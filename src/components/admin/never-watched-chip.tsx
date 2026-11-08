@@ -6,6 +6,7 @@
 import Link from "next/link";
 import { Chip } from "@/components/ui/design";
 import type { Translator } from "@/lib/i18n/translate";
+import { isNeverWatchedState } from "@/lib/never-watched";
 import type { TitleNeverWatched } from "@/lib/never-watched-report";
 
 // [1,2,3,5,7,8] → "1–3, 5, 7–8"
@@ -23,7 +24,7 @@ export function seasonRanges(seasons: readonly number[]): string {
 
 export function NeverWatchedChip({ info, t, locale }: { info: TitleNeverWatched | null; t: Translator; locale: string }) {
   if (!info) return null;
-  const never = info.state === "neverWatched" || info.state === "noPlaysSince";
+  const never = isNeverWatchedState(info.state);
   if (!never && info.neverWatchedSeasons.length === 0) return null;
   const date = info.windowStart
     ? new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeZone: "UTC" }).format(new Date(info.windowStart))

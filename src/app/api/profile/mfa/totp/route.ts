@@ -4,7 +4,8 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { revokeOtherUserSessions } from "@/lib/auth";
+import { revokeOtherUserSessionsInTx } from "@/lib/auth";
+import { markSessionForceRevoked } from "@/lib/session-revocation";
 import { dropRecoveryCodesIfNoFactorInTx, getMfaState, lockUserMfaInTx } from "@/lib/mfa/mfa-store";
 import { mfaReauthStepUp, mfaSecondFactorStepUp, secondFactorRequiredResponse } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
@@ -37,19 +38,28 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
     // delete a row that was confirmed after this request read "pending".
     await lockUserMfaInTx(tx, user.id);
     const fresh = await tx.userTotp.findUnique({ where: { userId: user.id }, select: { enabledAt: true } });
-    if (!proof.proved && fresh?.enabledAt) return { removed: 0, needsFactor: true as const, noneLeft: false };
+    if (!proof.proved && fresh?.enabledAt) {
+      return { removed: 0, needsFactor: true as const, noneLeft: false, revokedSessionIds: [] as string[] };
+    }
     const res = await tx.userTotp.deleteMany({
       where: proof.proved ? { userId: user.id } : { userId: user.id, enabledAt: null },
     });
     const noneLeft = await dropRecoveryCodesIfNoFactorInTx(tx, user.id);
-    return { removed: res.count, needsFactor: false as const, noneLeft };
+    // The last factor went: the account is password-only from now on, so any
+    // session that existed alongside the 2FA one is signed out (guardrail 6d)
+    // — in this transaction, so a failed sign-out can't 500 a removal that
+    // already committed and leave those sessions live.
+    const revokedSessionIds = res.count > 0 && before.enabled && noneLeft
+      ? await revokeOtherUserSessionsInTx(tx, user.id, session.sessionId)
+      : [];
+    return { removed: res.count, needsFactor: false as const, noneLeft, revokedSessionIds };
   });
   if (outcome.needsFactor) return secondFactorRequiredResponse(t, await getMfaState(user.id));
   if (outcome.removed === 0) return NextResponse.json({ error: t("apiAuth.mfa.noTotp") }, { status: 404 });
 
-  // The last factor went: the account is password-only from now on, so any
-  // session that existed alongside the 2FA one is signed out (guardrail 6d).
-  const revoked = before.enabled && outcome.noneLeft ? await revokeOtherUserSessions(user.id, session.sessionId) : 0;
+  // Committed: only now mark the revoked sessions in memory (guardrail 27).
+  for (const sessionId of outcome.revokedSessionIds) markSessionForceRevoked(sessionId);
+  const revoked = outcome.revokedSessionIds.length;
   if (before.totpEnabled) void notifyMfaSecurityEvent(user.id, "totp-removed");
   void logAudit({
     userId: user.id,

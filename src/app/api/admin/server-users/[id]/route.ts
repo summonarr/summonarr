@@ -7,6 +7,8 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { enforceUserDownloadPolicy } from "@/lib/download-policy";
 import { isPurgedRow } from "@/lib/account-lifecycle";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
+import type { SummonarrSession } from "@/lib/api-auth";
 
 // PATCH /api/admin/server-users/[id] — two independent admin actions on one
 // media-server identity:
@@ -24,6 +26,34 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // BOTH automatic linkers (resolveMediaServerUser on every 5s poll, and the hourly
 // Jellyfin user sync) skip a pinned row. Without that pin a manual fix would be
 // overwritten within seconds.
+type PatchBody = {
+  downloadsEnabled?: boolean;
+  userId?: string | null;
+  autoLink?: boolean;
+};
+
+const RECORD_SELECT = {
+  isServerAdmin: true,
+  source: true,
+  serverInstance: true,
+  active: true,
+  username: true,
+  userId: true,
+  manualUserLink: true,
+  downloadsEnabled: true,
+} as const;
+
+type ServerUserRecord = {
+  isServerAdmin: boolean;
+  source: string;
+  serverInstance: string;
+  active: boolean;
+  username: string;
+  userId: string | null;
+  manualUserLink: boolean;
+  downloadsEnabled: boolean | null;
+};
+
 export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   req,
   { params }: { params: Promise<{ id: string }> },
@@ -32,11 +62,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   const t = translatorForRequest(req);
   const { id } = await params;
 
-  const parsed = await readJsonCapped<{
-    downloadsEnabled?: boolean;
-    userId?: string | null;
-    autoLink?: boolean;
-  }>(req, 16384);
+  const parsed = await readJsonCapped<PatchBody>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
@@ -67,86 +93,102 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   if ((wantsLink || wantsAutoLink) && !hasPermission(session.user.permissions, Permission.ADMIN)) {
     return NextResponse.json({ error: t("apiAdmin.serverUsers.onlyAdminLink") }, { status: 403 });
   }
-
-  const record = await prisma.mediaServerUser.findUnique({
-    where: { id },
-    select: {
-      isServerAdmin: true,
-      source: true,
-      active: true,
-      username: true,
-      userId: true,
-      manualUserLink: true,
-    },
-  });
-  if (!record) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-
-  // ── Account linking (ADMIN only — gated above) ────────────────────────────
-  // Deliberately NOT gated on isServerAdmin, source, or `active`: those are
-  // download-policy concerns (below). Every identity — Plex or Jellyfin, admin or
-  // not, still on the server or long departed — owns watch history that has to
-  // land on the right account. A DEPARTED row is in fact the likeliest one to
-  // need re-attaching by hand: its history outlives the user's removal from the
-  // media server (guardrail 28), so refusing to link it would strand that
-  // history with no way to reach it.
-  if (wantsLink || wantsAutoLink) {
-    let nextUserId: string | null = null;
-
-    if (wantsLink && body.userId !== null) {
-      if (typeof body.userId !== "string" || body.userId.length === 0) {
-        return NextResponse.json({ error: t("apiAdmin.serverUsers.userIdInvalid") }, { status: 400 });
-      }
-      const target = await prisma.user.findUnique({
-        where: { id: body.userId },
-        select: { id: true, name: true, email: true, purgedAt: true },
-      });
-      if (!target) return NextResponse.json({ error: t("apiAdmin.serverUsers.userNotFound") }, { status: 404 });
-      // A purged account has had its identity scrubbed — attributing watch
-      // history to it would re-attach data to a row that exists only as a
-      // de-identified tombstone. A merely DISABLED account is fine and is the
-      // common case: it still owns its history (see account-lifecycle.ts).
-      // Shape-aware (see isPurgedRow) so a pre-`purgedAt` scrubbed row is caught too.
-      if (isPurgedRow(target)) {
-        return NextResponse.json(
-          { error: t("apiAdmin.serverUsers.purgedCannotLink") },
-          { status: 400 },
-        );
-      }
-      nextUserId = target.id;
-    }
-
-    const before = record.userId;
-    await prisma.mediaServerUser.update({
-      where: { id },
-      data: wantsAutoLink
-        // Hand the row back to automatic resolution. `userId` is left as-is —
-        // the next poll/sync re-derives it (and clears a stale value only if it
-        // resolves to someone else; an unresolvable row simply keeps what it has).
-        ? { manualUserLink: false }
-        : { userId: nextUserId, manualUserLink: true },
-    });
-
-    // Already committed — a failed audit write must not 500 it (guardrail 26).
-    void logAudit({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email,
-      action: "SERVER_USER_LINK",
-      target: `mediaServerUser:${id}`,
-      details: {
-        serverUser: record.username,
-        source: record.source,
-        mode: wantsAutoLink ? "auto" : nextUserId ? "manual-link" : "manual-unlink",
-        before,
-        after: wantsAutoLink ? before : nextUserId,
-      },
-      ...auditContext(req, session),
-    });
-
-    return NextResponse.json({ ok: true });
+  // The two halves are separate actions with separate rules (a departed row can
+  // be linked but has no policy to push), so a body naming both is refused
+  // whole rather than applying the link and silently dropping the policy.
+  if ((wantsLink || wantsAutoLink) && wantsPolicy) {
+    return NextResponse.json({ error: t("apiAdmin.serverUsers.linkOrPolicy") }, { status: 400 });
   }
 
-  // ── Download policy (Jellyfin only) ───────────────────────────────────────
-  if (typeof body.downloadsEnabled !== "boolean") {
+  const record = await prisma.mediaServerUser.findUnique({ where: { id }, select: RECORD_SELECT });
+  if (!record) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
+
+  const ctx = { req, t, session, id, record };
+  if (wantsLink || wantsAutoLink) return applyLink(ctx, wantsAutoLink ? { auto: true } : { auto: false, userId: body.userId });
+  return applyDownloadPolicy(ctx, body.downloadsEnabled);
+});
+
+interface PatchContext {
+  req: Request;
+  t: Translator;
+  session: SummonarrSession;
+  id: string;
+  record: ServerUserRecord;
+}
+
+// ── Account linking (ADMIN only — gated in PATCH) ──────────────────────────
+// Deliberately NOT gated on isServerAdmin, source, or `active`: those are
+// download-policy concerns (below). Every identity — Plex or Jellyfin, admin or
+// not, still on the server or long departed — owns watch history that has to
+// land on the right account. A DEPARTED row is in fact the likeliest one to
+// need re-attaching by hand: its history outlives the user's removal from the
+// media server (guardrail 28), so refusing to link it would strand that
+// history with no way to reach it.
+async function applyLink(
+  { req, t, session, id, record }: PatchContext,
+  mode: { auto: true } | { auto: false; userId: unknown },
+): Promise<NextResponse> {
+  let nextUserId: string | null = null;
+
+  if (!mode.auto && mode.userId !== null) {
+    if (typeof mode.userId !== "string" || mode.userId.length === 0) {
+      return NextResponse.json({ error: t("apiAdmin.serverUsers.userIdInvalid") }, { status: 400 });
+    }
+    const target = await prisma.user.findUnique({
+      where: { id: mode.userId },
+      select: { id: true, name: true, email: true, purgedAt: true },
+    });
+    if (!target) return NextResponse.json({ error: t("apiAdmin.serverUsers.userNotFound") }, { status: 404 });
+    // A purged account has had its identity scrubbed — attributing watch
+    // history to it would re-attach data to a row that exists only as a
+    // de-identified tombstone. A merely DISABLED account is fine and is the
+    // common case: it still owns its history (see account-lifecycle.ts).
+    // Shape-aware (see isPurgedRow) so a pre-`purgedAt` scrubbed row is caught too.
+    if (isPurgedRow(target)) {
+      return NextResponse.json(
+        { error: t("apiAdmin.serverUsers.purgedCannotLink") },
+        { status: 400 },
+      );
+    }
+    nextUserId = target.id;
+  }
+
+  const before = record.userId;
+  await prisma.mediaServerUser.update({
+    where: { id },
+    data: mode.auto
+      // Hand the row back to automatic resolution. `userId` is left as-is —
+      // the next poll/sync re-derives it (and clears a stale value only if it
+      // resolves to someone else; an unresolvable row simply keeps what it has).
+      ? { manualUserLink: false }
+      : { userId: nextUserId, manualUserLink: true },
+  });
+
+  // Already committed — a failed audit write must not 500 it (guardrail 26).
+  void logAudit({
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email,
+    action: "SERVER_USER_LINK",
+    target: `mediaServerUser:${id}`,
+    details: {
+      serverUser: record.username,
+      source: record.source,
+      mode: mode.auto ? "auto" : nextUserId ? "manual-link" : "manual-unlink",
+      before,
+      after: mode.auto ? before : nextUserId,
+    },
+    ...auditContext(req, session),
+  });
+
+  return NextResponse.json({ ok: true });
+}
+
+// ── Download policy (Jellyfin only) ─────────────────────────────────────────
+async function applyDownloadPolicy(
+  { req, t, session, id, record }: PatchContext,
+  downloadsEnabled: unknown,
+): Promise<NextResponse> {
+  if (typeof downloadsEnabled !== "boolean") {
     return NextResponse.json({ error: t("apiAdmin.common.downloadsEnabledBoolean") }, { status: 400 });
   }
   // Soft-deleted (active: false) rows are departed users hidden from the active
@@ -164,7 +206,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
 
   await prisma.mediaServerUser.update({
     where: { id },
-    data: { downloadsEnabled: body.downloadsEnabled },
+    data: { downloadsEnabled },
   });
 
   // Push the change to the media server immediately; log but don't fail the
@@ -180,9 +222,31 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     console.warn(`[server-users] Failed to push policy for ${id}:`, err instanceof Error ? err.message : String(err));
   }
 
+  // Committed — a failed audit write must not 500 it (guardrail 26). Recorded
+  // under the bulk action's name and shape (one user, pushed 0 or 1) so the
+  // audit log renders it the same way; a MANAGE_USERS delegate can make this
+  // change, so it must leave a trail like the bulk toggle does.
+  void logAudit({
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email,
+    action: "SERVER_USERS_BULK",
+    target: `mediaServerUser:${id}`,
+    details: {
+      scope: "single",
+      serverUser: record.username,
+      source: record.source,
+      serverInstance: record.serverInstance,
+      before: record.downloadsEnabled,
+      downloadsEnabled,
+      targetCount: 1,
+      pushed: pushed ? 1 : 0,
+    },
+    ...auditContext(req, session),
+  });
+
   return NextResponse.json(
     pushed
       ? { ok: true, pushed: true }
       : { ok: true, pushed: false, warning: t("apiAdmin.serverUsers.savedNotPushed") },
   );
-});
+}

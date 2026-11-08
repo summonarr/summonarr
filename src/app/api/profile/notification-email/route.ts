@@ -4,12 +4,14 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { normalizeEmail } from "@/lib/auth";
+import { PLAUSIBLE_EMAIL_RE } from "@/lib/email-normalize";
 import { checkRateLimit, peekRateLimit } from "@/lib/rate-limit";
 import { isNotificationEmailEnabled, sendNotificationEmailVerification } from "@/lib/email";
 import { localeForRequest } from "@/lib/i18n/server-locale";
 import { tooManyRequests } from "@/lib/http";
 import { isNativeSessionForStepUp, requireStepUp } from "@/lib/step-up-auth";
 import {
+  canSetOwnNotificationEmail,
   generateVerifyToken,
   buildVerifyIdentifier,
   verifyIdentifierPrefixFor,
@@ -17,8 +19,27 @@ import {
 } from "@/lib/notification-email-verify";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
-// RFC-5322-lite (matches the profile route). SMTP rejects the rest.
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// One pending verification per user: the prior one is cleared and the new hash
+// stored in ONE transaction that first locks the user's row, so two requests
+// racing each other serialize — the second's clear sees the first's row — and
+// only the latest link stays valid. Without the lock both clears ran before
+// either store, and both links (for two different addresses) stayed live.
+// Sequential awaits on the transaction (guardrail 23c).
+async function replacePendingVerification(userId: string, email: string, tokenHash: string): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 FROM "User" WHERE "id" = ${userId} FOR UPDATE`;
+    await tx.verificationToken.deleteMany({
+      where: { identifier: { startsWith: verifyIdentifierPrefixFor(userId) } },
+    });
+    await tx.verificationToken.create({
+      data: {
+        identifier: buildVerifyIdentifier(userId, email),
+        token: tokenHash,
+        expires: new Date(Date.now() + VERIFY_TTL_MS),
+      },
+    });
+  });
+}
 
 // POST { email, confirmPassword? } — begin verifying a self-service notification
 // email for a Jellyfin user. A one-time link is mailed to the CANDIDATE address; the address
@@ -30,14 +51,23 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // Fires outbound mail — blocked during maintenance like push/subscribe.
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
-  const provider = session.user.provider;
-  const isJellyfin = provider === "jellyfin" || provider === "jellyfin-quickconnect";
-  if (!isJellyfin) {
+  if (!canSetOwnNotificationEmail(session.user.provider)) {
     return NextResponse.json({ error: t("apiAuth.profile.notificationEmailReadOnly") }, { status: 403 });
   }
 
   const parsed = await readJsonCapped<{ email?: string; confirmPassword?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
+
+  // Validated before the send budget and the step-up: a typo or a server with no
+  // transport must neither burn one of the three sends nor ask for a password.
+  const rawEmail = typeof parsed.email === "string" ? parsed.email.trim() : "";
+  if (!rawEmail || rawEmail.length > 320 || !PLAUSIBLE_EMAIL_RE.test(rawEmail)) {
+    return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });
+  }
+
+  if (!(await isNotificationEmailEnabled())) {
+    return NextResponse.json({ error: t("apiAuth.profile.emailNotConfigured") }, { status: 400 });
+  }
 
   // 3 sends / 15 min per user — an authenticated user can't weaponize this into
   // an email-bombing tool against an arbitrary mailbox. PEEKED before the
@@ -75,29 +105,10 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return tooManyRequests(900, t("apiAuth.profile.tooManyVerificationEmails"));
   }
 
-  const rawEmail = typeof parsed.email === "string" ? parsed.email.trim() : "";
-  if (!rawEmail || rawEmail.length > 320 || !EMAIL_RE.test(rawEmail)) {
-    return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });
-  }
-
-  if (!(await isNotificationEmailEnabled())) {
-    return NextResponse.json({ error: t("apiAuth.profile.emailNotConfigured") }, { status: 400 });
-  }
-
   const email = normalizeEmail(rawEmail);
   const { raw: token, hash } = generateVerifyToken();
 
-  // One pending verification per user: clear any prior, then store the new hash.
-  await prisma.verificationToken.deleteMany({
-    where: { identifier: { startsWith: verifyIdentifierPrefixFor(session.user.id) } },
-  });
-  await prisma.verificationToken.create({
-    data: {
-      identifier: buildVerifyIdentifier(session.user.id, email),
-      token: hash,
-      expires: new Date(Date.now() + VERIFY_TTL_MS),
-    },
-  });
+  await replacePendingVerification(session.user.id, email, hash);
 
   try {
     // Written in the requesting user's language (they are the recipient).

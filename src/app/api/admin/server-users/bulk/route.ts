@@ -8,6 +8,7 @@ import { setJellyfinDownloadPolicy } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { settleLimit } from "@/lib/concurrency";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
@@ -19,7 +20,7 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
   const t = translatorForRequest(req);
   // Each call pushes a policy to every Jellyfin user, so cap it at 5 per minute per admin.
   if (!checkRateLimit(`server-users-bulk:${session.user.id}`, 5, 60_000)) {
-    return NextResponse.json({ error: t("apiAdmin.serverUsers.tooManyBulk") }, { status: 429 });
+    return tooManyRequests(60, t("apiAdmin.serverUsers.tooManyBulk"));
   }
 
   const parsed = await readJsonCapped<{ source?: string; downloadsEnabled?: boolean }>(req, 16384);
@@ -52,7 +53,7 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
   });
 
   const updated = await prisma.mediaServerUser.updateMany({
-    where: { id: { in: targets.map((t) => t.id) } },
+    where: { id: { in: targets.map((row) => row.id) } },
     data: { downloadsEnabled },
   });
 
@@ -61,10 +62,10 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
   // every user to the default server would push unknown (or colliding) ids
   // there while their own server never got the policy.
   const byInstance = new Map<string, typeof targets>();
-  for (const t of targets) {
-    const list = byInstance.get(t.serverInstance);
-    if (list) list.push(t);
-    else byInstance.set(t.serverInstance, [t]);
+  for (const row of targets) {
+    const list = byInstance.get(row.serverInstance);
+    if (list) list.push(row);
+    else byInstance.set(row.serverInstance, [row]);
   }
 
   let pushed = 0;

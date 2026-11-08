@@ -6,15 +6,17 @@
 // history, and a long series outlasts a reverse proxy's hold — the admin saw a
 // 502 on a replace that had in fact deleted the files.
 //
-// The loop is COUNTED, one poll at a time from each answer (never setInterval,
-// never a clock — guardrail 16's lesson in arr-command-status.ts): at most
-// `maxPolls` polls, and `failLimit` failed polls in a row (network, or a
-// proxy's own 5xx with no JSON body) give up. A 404
-// (the job expired or a restart dropped it) is the route's own answer and is
-// returned like any other — its `error` says to reload, not to retry.
+// The poll loop is the shared one (job-poll.ts): COUNTED, at most `maxPolls`
+// polls, and `failLimit` failed polls in a row (network, or a proxy's own
+// 5xx whose body is not JSON) give up — both answer status 0 ("no answer, it
+// may still be running"), never the proxy's 5xx: every caller reads a non-2xx
+// as the job's own failure. A 404 (the job expired or a restart dropped it) is
+// the route's own answer and is returned like any other — its `error` says to
+// reload, not to retry.
+import { jobIdOf, pollJob, type JobPollOptions } from "./job-poll";
 
 export interface ReplaceJobAnswer {
-  /** The HTTP status of the replace's answer; 0 when no answer came (network, or out of polls). */
+  /** The HTTP status of the replace's answer; 0 when no answer came (network or proxy 5xx polls, or out of polls). */
   status: number;
   data: unknown;
 }
@@ -27,6 +29,8 @@ export interface ReplaceJobOptions {
   intervalMs?: number;
   maxPolls?: number;
   failLimit?: number;
+  /** Why a status-0 answer came (pollJob's onGiveUp): an unreachable server, or a job still running. */
+  onGiveUp?: JobPollOptions["onGiveUp"];
 }
 
 const DEFAULT_INTERVAL_MS = 1_500;
@@ -34,11 +38,10 @@ const DEFAULT_INTERVAL_MS = 1_500;
 const DEFAULT_MAX_POLLS = 400;
 const DEFAULT_FAIL_LIMIT = 5;
 
-const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-const jobOf = (data: unknown): string | null => {
-  const job = data && typeof data === "object" ? (data as { job?: unknown }).job : undefined;
-  return typeof job === "string" && job !== "" ? job : null;
-};
+/** `url` with `job=<id>` added, its own query kept. */
+export function jobPollUrl(url: string, job: string): string {
+  return `${url}${url.includes("?") ? "&" : "?"}job=${encodeURIComponent(job)}`;
+}
 
 /**
  * POST the replace as a background job and wait for its answer. Resolves with
@@ -51,42 +54,23 @@ export async function runReplaceFileJob(
   body: Record<string, unknown>,
   opts: ReplaceJobOptions = {},
 ): Promise<ReplaceJobAnswer | null> {
-  const sleep = opts.sleep ?? wait;
-  const alive = opts.isAlive ?? (() => true);
   const res = await fetchFn(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...body, async: true }),
   });
   const data: unknown = await res.json().catch(() => ({}));
-  const job = res.status === 202 ? jobOf(data) : null;
+  const job = res.status === 202 ? jobIdOf(data) : null;
   if (job === null) return { status: res.status, data };
 
-  const pollUrl = `${url}?job=${encodeURIComponent(job)}`;
-  let failures = 0;
-  for (let i = 0; i < (opts.maxPolls ?? DEFAULT_MAX_POLLS); i++) {
-    await sleep(opts.intervalMs ?? DEFAULT_INTERVAL_MS);
-    if (!alive()) return null;
-    let poll: Response;
-    try {
-      poll = await fetchFn(pollUrl);
-    } catch {
-      if (++failures >= (opts.failLimit ?? DEFAULT_FAIL_LIMIT)) return { status: 0, data: null };
-      continue;
-    }
-    if (!alive()) return null;
-    if (poll.status === 202) {
-      failures = 0;
-      continue;
-    }
-    const answer: unknown = await poll.json().catch(() => null);
-    // A proxy's own 5xx (no JSON body) is a blip on the POLL, not the
-    // replace's answer — the route's 502 always carries its counts.
-    if (poll.status >= 500 && (answer === null || typeof answer !== "object")) {
-      if (++failures >= (opts.failLimit ?? DEFAULT_FAIL_LIMIT)) return { status: poll.status, data: answer };
-      continue;
-    }
-    return { status: poll.status, data: answer ?? {} };
-  }
-  return { status: 0, data: null };
+  const answer = await pollJob(fetchFn, jobPollUrl(url, job), {
+    sleep: opts.sleep,
+    isAlive: opts.isAlive,
+    intervalMs: opts.intervalMs ?? DEFAULT_INTERVAL_MS,
+    maxPolls: opts.maxPolls ?? DEFAULT_MAX_POLLS,
+    failLimit: opts.failLimit ?? DEFAULT_FAIL_LIMIT,
+    onGiveUp: opts.onGiveUp,
+  });
+  if (answer === null || answer.status === 0) return answer;
+  return { status: answer.status, data: answer.data ?? {} };
 }

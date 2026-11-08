@@ -6,7 +6,7 @@ import {
 import { parseBearerToken } from "@/lib/mobile-auth";
 import { verifySessionJwt } from "@/lib/session-jwt";
 import { revokeSessionById } from "@/lib/auth";
-import { logAudit } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
 
 // Sign-out. Revokes the session on the server (deletes its AuthSession row) and
 // clears both Summonarr session cookie variants in the browser.
@@ -35,6 +35,8 @@ export async function POST(req: NextRequest) {
         userName: claims.name ?? claims.email ?? "unknown",
         action: "AUTH_LOGOUT",
         target: "auth:logout",
+        // Where from, like every other auth event (the session forensics trail).
+        ...auditContext(req),
         provider: claims.provider ?? null,
       });
     }

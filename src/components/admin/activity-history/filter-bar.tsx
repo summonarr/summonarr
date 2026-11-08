@@ -1,21 +1,28 @@
 "use client";
 
-// Filter bar for the history table: debounced search input (the debounce
-// timer itself lives in the parent — this just renders the controlled input),
-// date range, export buttons, and the segmented/select filter row. All state
-// lives in the parent ActivityHistoryTable; this receives values + setters.
+// Filter bar for the history table: the search box (its debounce lives in the
+// table's useHistoryQuery — this renders the controlled draft), the date
+// range, the total and export buttons, and the segmented/select filter row.
+// All state lives in the parent ActivityHistoryTable; this receives the
+// filters as one object and one patch setter.
 
-import { useId } from "react";
-import type { MediaServerUserOption } from "./types";
+import type { CSSProperties } from "react";
+import type { HistoryFilters, MediaServerUserOption, WatchedFilter } from "./types";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { ZoneTag } from "@/components/admin/activity-ui";
+import { LabelledSegGroup } from "@/components/admin/activity-seg-group";
 import { mediaInstanceLabel, type MediaServerService } from "@/lib/media-instances";
+
+function isMediaServerService(source: string): source is MediaServerService {
+  return source === "plex" || source === "jellyfin";
+}
 
 // `distinct=users` returns `serverInstance` (additive) so the same username on
 // two same-type servers — the owner and every shared friend exist on both Plex
 // instances (guardrail 35) — can be told apart. Only a DUPLICATED username gets
 // the `(plex:remote)` suffix; a unique one stays bare, as before. The table
 // already disambiguates its rows per server; this makes the filter match it.
-function userOptions(users: MediaServerUserOption[]): { value: string; label: string }[] {
+export function userOptions(users: MediaServerUserOption[]): { value: string; label: string }[] {
   const seen = new Set<string>();
   const duplicated = new Set<string>();
   for (const u of users) {
@@ -25,11 +32,21 @@ function userOptions(users: MediaServerUserOption[]): { value: string; label: st
   return users.map((u) => {
     if (!duplicated.has(u.username)) return { value: u.id, label: u.username };
     const instance = u.serverInstance ?? "";
-    return { value: u.id, label: `${u.username} (${mediaInstanceLabel(u.source as MediaServerService, instance)})` };
+    // A source the app doesn't know has no instance label of its own.
+    const where = isMediaServerService(u.source)
+      ? mediaInstanceLabel(u.source, instance)
+      : [u.source, instance].filter(Boolean).join(":");
+    return { value: u.id, label: `${u.username} (${where})` };
   });
 }
 
-const inputStyle: React.CSSProperties = {
+const MONO_LABEL: CSSProperties = {
+  fontSize: 9.5,
+  color: "var(--ds-fg-subtle)",
+  letterSpacing: "0.08em",
+};
+
+const inputStyle: CSSProperties = {
   fontFamily: "inherit",
   fontSize: 11.5,
   padding: "5px 8px",
@@ -37,6 +54,26 @@ const inputStyle: React.CSSProperties = {
   color: "var(--ds-fg)",
   border: "1px solid var(--ds-border)",
   borderRadius: 6,
+};
+
+// The bar's outlined buttons (Clear filters) and filled ones (the exports).
+const OUTLINE_BUTTON: CSSProperties = {
+  fontSize: 11,
+  padding: "5px 10px",
+  borderRadius: 6,
+  background: "transparent",
+  border: "1px solid var(--ds-border)",
+  color: "var(--ds-fg-muted)",
+  whiteSpace: "nowrap",
+};
+const EXPORT_BUTTON: CSSProperties = {
+  fontSize: 12,
+  padding: "6px 11px",
+  borderRadius: 6,
+  background: "var(--ds-bg-2)",
+  border: "1px solid var(--ds-border)",
+  color: "var(--ds-fg-muted)",
+  whiteSpace: "nowrap",
 };
 
 // The native date picker's indicator follows `color-scheme`, which must track
@@ -55,61 +92,45 @@ function SegGroup<T extends string>({
   setValue: (v: T) => void;
   options: { value: T; label: string }[];
 }) {
-  const labelId = useId();
   return (
-    <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-      <span
-        id={labelId}
-        className="ds-mono uppercase"
-        style={{
-          fontSize: 9.5,
-          color: "var(--ds-fg-subtle)",
-          letterSpacing: "0.08em",
-        }}
-      >
-        {label}
-      </span>
-      <div
-        role="group"
-        aria-labelledby={labelId}
-        style={{
-          display: "inline-flex",
-          padding: 2,
-          background: "var(--ds-bg-1)",
-          border: "1px solid var(--ds-border)",
-          borderRadius: 7,
-        }}
-      >
-        {options.map((o) => (
+    <LabelledSegGroup
+      label={label}
+      style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+      labelClassName="ds-mono uppercase"
+      labelStyle={MONO_LABEL}
+      groupStyle={{
+        display: "inline-flex",
+        padding: 2,
+        background: "var(--ds-bg-1)",
+        border: "1px solid var(--ds-border)",
+        borderRadius: 7,
+      }}
+    >
+      {options.map((o) => {
+        const selected = value === o.value;
+        return (
           <button
             key={o.value}
             type="button"
-            aria-pressed={value === o.value}
+            aria-pressed={selected}
             onClick={() => setValue(o.value)}
             style={{
               padding: "3px 10px",
               fontSize: 11,
               borderRadius: 5,
-              background:
-                value === o.value ? "var(--ds-bg-3)" : "transparent",
-              color:
-                value === o.value
-                  ? "var(--ds-fg)"
-                  : "var(--ds-fg-muted)",
+              background: selected ? "var(--ds-bg-3)" : "transparent",
+              color: selected ? "var(--ds-fg)" : "var(--ds-fg-muted)",
               border: "1px solid",
-              borderColor:
-                value === o.value
-                  ? "var(--ds-border-strong)"
-                  : "transparent",
+              borderColor: selected ? "var(--ds-border-strong)" : "transparent",
               whiteSpace: "nowrap",
               transition: "all 100ms var(--ds-ease)",
             }}
           >
             {o.label}
           </button>
-        ))}
-      </div>
-    </div>
+        );
+      })}
+    </LabelledSegGroup>
   );
 }
 
@@ -127,14 +148,7 @@ function SelectField({
   const t = useT();
   return (
     <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-      <span
-        className="ds-mono uppercase"
-        style={{
-          fontSize: 9.5,
-          color: "var(--ds-fg-subtle)",
-          letterSpacing: "0.08em",
-        }}
-      >
+      <span className="ds-mono uppercase" style={MONO_LABEL}>
         {label}
       </span>
       <select
@@ -166,21 +180,123 @@ function SelectField({
   );
 }
 
-export function HistoryFilterBar({
-  search,
-  setSearch,
+function SearchBox({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const t = useT();
+  return (
+    <div style={{ position: "relative", flex: "1 1 240px", maxWidth: 360 }}>
+      <svg
+        width="13"
+        height="13"
+        viewBox="0 0 14 14"
+        style={{
+          position: "absolute",
+          left: 10,
+          top: "50%",
+          transform: "translateY(-50%)",
+          color: "var(--ds-fg-subtle)",
+        }}
+      >
+        <circle cx="6" cy="6" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+        <path d="M8.7 8.7L11 11" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      </svg>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={t("adminActivity.history.searchPlaceholder")}
+        aria-label={t("adminActivity.history.searchAria")}
+        className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        style={{
+          fontFamily: "inherit",
+          fontSize: 12.5,
+          width: "100%",
+          padding: "7px 30px 7px 30px",
+          background: "var(--ds-bg-1)",
+          color: "var(--ds-fg)",
+          border: "1px solid var(--ds-border)",
+          borderRadius: 8,
+        }}
+      />
+      {value && (
+        <button
+          onClick={() => onChange("")}
+          aria-label={t("adminActivity.history.clearSearch")}
+          style={{
+            position: "absolute",
+            right: 8,
+            top: "50%",
+            transform: "translateY(-50%)",
+            background: "transparent",
+            border: 0,
+            color: "var(--ds-fg-subtle)",
+            padding: 4,
+            lineHeight: 0,
+          }}
+        >
+          <svg width="11" height="11" viewBox="0 0 12 12">
+            <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
+        </button>
+      )}
+    </div>
+  );
+}
+
+// Each date bounds the other so the picker can't build an inverted range; a
+// typed or pasted one still can, so both fields read as invalid then and the
+// table says why instead of asking the API (which answers an unexplained "0
+// results"). The dates are whole days in the statistics zone (so a calendar
+// cell's deep link lists exactly the plays it counted), and the table's times
+// are shown in that zone too — the tag names it.
+function DateRange({
   fromDate,
-  setFromDate,
   toDate,
-  setToDate,
-  watched,
-  setWatched,
-  method,
-  setMethod,
-  userFilter,
-  setUserFilter,
-  platform,
-  setPlatform,
+  onChange,
+  invalid,
+  timeZone,
+}: {
+  fromDate: string;
+  toDate: string;
+  onChange: (patch: Pick<Partial<HistoryFilters>, "fromDate" | "toDate">) => void;
+  invalid: boolean;
+  timeZone: string;
+}) {
+  const t = useT();
+  return (
+    <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      <input
+        type="date"
+        className={dateInputClass}
+        value={fromDate}
+        max={toDate || undefined}
+        aria-label={t("adminActivity.history.fromDate")}
+        aria-invalid={invalid || undefined}
+        onChange={(e) => onChange({ fromDate: e.target.value })}
+        style={{ ...inputStyle, color: fromDate ? "var(--ds-fg)" : "var(--ds-fg-muted)" }}
+      />
+      <span className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-disabled)" }}>
+        →
+      </span>
+      <input
+        type="date"
+        className={dateInputClass}
+        value={toDate}
+        min={fromDate || undefined}
+        aria-label={t("adminActivity.history.toDate")}
+        aria-invalid={invalid || undefined}
+        onChange={(e) => onChange({ toDate: e.target.value })}
+        style={{ ...inputStyle, color: toDate ? "var(--ds-fg)" : "var(--ds-fg-muted)" }}
+      />
+      <ZoneTag zone={timeZone} title={t("adminActivity.history.zoneDatesTitle", { zone: timeZone })} />
+    </div>
+  );
+}
+
+export function HistoryFilterBar({
+  searchDraft,
+  setSearchDraft,
+  filters,
+  setFilter,
   grouped,
   setGrouped,
   users,
@@ -189,21 +305,14 @@ export function HistoryFilterBar({
   hasFilter,
   clearFilters,
   exportAs,
+  timeZone,
+  invertedRange,
 }: {
-  search: string;
-  setSearch: (v: string) => void;
-  fromDate: string;
-  setFromDate: (v: string) => void;
-  toDate: string;
-  setToDate: (v: string) => void;
-  watched: "" | "true" | "false";
-  setWatched: (v: "" | "true" | "false") => void;
-  method: string;
-  setMethod: (v: string) => void;
-  userFilter: string;
-  setUserFilter: (v: string) => void;
-  platform: string;
-  setPlatform: (v: string) => void;
+  // The search box's text, committed to `filters.search` after the debounce.
+  searchDraft: string;
+  setSearchDraft: (v: string) => void;
+  filters: HistoryFilters;
+  setFilter: (patch: Partial<HistoryFilters>) => void;
   grouped: boolean;
   setGrouped: (v: boolean) => void;
   users: MediaServerUserOption[];
@@ -212,6 +321,10 @@ export function HistoryFilterBar({
   hasFilter: boolean;
   clearFilters: () => void;
   exportAs: (format: "csv" | "json") => void;
+  // The statistics zone the date pickers' days are whole days in.
+  timeZone: string;
+  // The From day is after the To day.
+  invertedRange: boolean;
 }) {
   const t = useT();
   const locale = useLocale();
@@ -235,121 +348,15 @@ export function HistoryFilterBar({
           flexWrap: "wrap",
         }}
       >
-        <div style={{ position: "relative", flex: "1 1 240px", maxWidth: 360 }}>
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 14 14"
-            style={{
-              position: "absolute",
-              left: 10,
-              top: "50%",
-              transform: "translateY(-50%)",
-              color: "var(--ds-fg-subtle)",
-            }}
-          >
-            <circle
-              cx="6"
-              cy="6"
-              r="3.5"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.4"
-            />
-            <path
-              d="M8.7 8.7L11 11"
-              stroke="currentColor"
-              strokeWidth="1.4"
-              strokeLinecap="round"
-            />
-          </svg>
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={t("adminActivity.history.searchPlaceholder")}
-            aria-label={t("adminActivity.history.searchAria")}
-            className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            style={{
-              fontFamily: "inherit",
-              fontSize: 12.5,
-              width: "100%",
-              padding: "7px 30px 7px 30px",
-              background: "var(--ds-bg-1)",
-              color: "var(--ds-fg)",
-              border: "1px solid var(--ds-border)",
-              borderRadius: 8,
-            }}
-          />
-          {search && (
-            <button
-              onClick={() => setSearch("")}
-              aria-label={t("adminActivity.history.clearSearch")}
-              style={{
-                position: "absolute",
-                right: 8,
-                top: "50%",
-                transform: "translateY(-50%)",
-                background: "transparent",
-                border: 0,
-                color: "var(--ds-fg-subtle)",
-                padding: 4,
-                lineHeight: 0,
-              }}
-            >
-              <svg width="11" height="11" viewBox="0 0 12 12">
-                <path
-                  d="M3 3l6 6M9 3l-6 6"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                />
-              </svg>
-            </button>
-          )}
-        </div>
+        <SearchBox value={searchDraft} onChange={setSearchDraft} />
 
-        <div
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-          }}
-        >
-          {/* Each date bounds the other so the picker can't build an inverted
-              range (startDate > endDate), which the API answers with an
-              unexplained "0 results". */}
-          <input
-            type="date"
-            className={dateInputClass}
-            value={fromDate}
-            max={toDate || undefined}
-            aria-label={t("adminActivity.history.fromDate")}
-            onChange={(e) => setFromDate(e.target.value)}
-            style={{
-              ...inputStyle,
-              color: fromDate ? "var(--ds-fg)" : "var(--ds-fg-muted)",
-            }}
-          />
-          <span
-            className="ds-mono"
-            style={{ fontSize: 11, color: "var(--ds-fg-disabled)" }}
-          >
-            →
-          </span>
-          <input
-            type="date"
-            className={dateInputClass}
-            value={toDate}
-            min={fromDate || undefined}
-            aria-label={t("adminActivity.history.toDate")}
-            onChange={(e) => setToDate(e.target.value)}
-            style={{
-              ...inputStyle,
-              color: toDate ? "var(--ds-fg)" : "var(--ds-fg-muted)",
-            }}
-          />
-        </div>
+        <DateRange
+          fromDate={filters.fromDate}
+          toDate={filters.toDate}
+          onChange={setFilter}
+          invalid={invertedRange}
+          timeZone={timeZone}
+        />
 
         <div style={{ flex: 1 }} />
 
@@ -366,51 +373,21 @@ export function HistoryFilterBar({
         </div>
 
         {hasFilter && (
-          <button
-            onClick={clearFilters}
-            className="ds-mono"
-            style={{
-              fontSize: 11,
-              padding: "5px 10px",
-              borderRadius: 6,
-              background: "transparent",
-              border: "1px solid var(--ds-border)",
-              color: "var(--ds-fg-muted)",
-              whiteSpace: "nowrap",
-            }}
-          >
+          <button onClick={clearFilters} className="ds-mono" style={OUTLINE_BUTTON}>
             {t("adminActivity.history.clearFilters")}
           </button>
         )}
 
         <div style={{ display: "inline-flex", gap: 4 }}>
-          <button
-            onClick={() => exportAs("csv")}
-            style={{
-              fontSize: 12,
-              padding: "6px 11px",
-              borderRadius: 6,
-              background: "var(--ds-bg-2)",
-              border: "1px solid var(--ds-border)",
-              color: "var(--ds-fg-muted)",
-              whiteSpace: "nowrap",
-            }}
-          >
+          <button onClick={() => exportAs("csv")} style={EXPORT_BUTTON}>
             {t("adminActivity.history.exportCsv")}
           </button>
           <button
             onClick={() => exportAs("json")}
-            style={{
-              fontSize: 12,
-              padding: "6px 11px",
-              borderRadius: 6,
-              background: "var(--ds-bg-2)",
-              border: "1px solid var(--ds-border)",
-              color: "var(--ds-fg-muted)",
-              whiteSpace: "nowrap",
-            }}
+            aria-label={t("adminActivity.history.exportJsonAria")}
+            style={EXPORT_BUTTON}
           >
-            JSON
+            {t("adminActivity.history.exportJson")}
           </button>
         </div>
       </div>
@@ -423,10 +400,10 @@ export function HistoryFilterBar({
           flexWrap: "wrap",
         }}
       >
-        <SegGroup
+        <SegGroup<WatchedFilter>
           label={t("adminActivity.field.watched")}
-          value={watched}
-          setValue={setWatched}
+          value={filters.watched}
+          setValue={(watched) => setFilter({ watched })}
           options={[
             { value: "", label: t("adminActivity.filter.all") },
             { value: "true", label: t("adminActivity.common.yes") },
@@ -435,8 +412,8 @@ export function HistoryFilterBar({
         />
         <SegGroup
           label={t("adminActivity.field.stream")}
-          value={method}
-          setValue={setMethod}
+          value={filters.method}
+          setValue={(method) => setFilter({ method })}
           options={[
             { value: "", label: t("adminActivity.filter.all") },
             { value: "DirectPlay", label: t("adminActivity.method.direct") },
@@ -446,14 +423,14 @@ export function HistoryFilterBar({
         />
         <SelectField
           label={t("adminActivity.field.user")}
-          value={userFilter}
-          onChange={setUserFilter}
+          value={filters.userId}
+          onChange={(userId) => setFilter({ userId })}
           options={userOptions(users)}
         />
         <SelectField
           label={t("adminActivity.field.platform")}
-          value={platform}
-          onChange={setPlatform}
+          value={filters.platform}
+          onChange={(platform) => setFilter({ platform })}
           options={platforms.map((p) => ({ value: p, label: p }))}
         />
         <SegGroup

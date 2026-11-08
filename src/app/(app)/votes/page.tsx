@@ -11,160 +11,54 @@ import { VoteActions } from "@/components/votes/vote-actions";
 import { PaginationBar } from "@/components/media/pagination-bar";
 import { FilterPills, SearchBox } from "@/components/user-list-filters";
 import { requireFeature } from "@/lib/features";
-import { Prisma } from "@/generated/prisma";
-import { hiddenVoteTitles, scopeVotesWhere } from "@/lib/votes-visibility";
+import { loadVotesList, VOTES_PAGE_SIZE, type VoteListItem, type VoteListSort } from "@/lib/votes-list-data";
+import { parsePageNumber } from "@/lib/pagination";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { EmptyState, PageHeader } from "@/components/ui/design";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
 import { getTranslator } from "@/lib/i18n/server";
+import type { Translator } from "@/lib/i18n/translate";
+// A repeated query key (?q=a&q=b) arrives as an array; every read takes the
+// first value (`.trim()` on the array would throw and 500 the page).
+import { first, type PageSearchParams } from "@/lib/search-params";
 
-const PAGE_SIZE = 40;
-const VALID_SORTS = ["votes", "recent"] as const;
-
-// A repeated query key (?q=a&q=b) is delivered as an array, so every read takes
-// the first value — `.trim()` on the array throws and 500s the whole page.
-const first = (v: string | string[] | undefined): string | undefined =>
-  Array.isArray(v) ? v[0] : v;
+const VALID_SORTS = ["votes", "recent"] as const satisfies readonly VoteListSort[];
+// Reasons shown per title: the viewer's own first, then other voters' newest.
+const REASONS_SHOWN = 3;
 
 export default async function VotesPage({
   searchParams,
 }: {
-  searchParams: Promise<Record<string, string | string[] | undefined>>;
+  searchParams: Promise<PageSearchParams>;
 }) {
   await requireFeature("feature.page.votes");
   const [sp, session, t] = await Promise.all([searchParams, requireAppSession(), getTranslator()]);
-  const page = Math.max(1, parseInt(first(sp.page) ?? "1", 10) || 1);
+  // Clamped: an oversized ?page= would reach Prisma's skip as a huge offset.
+  const page = parsePageNumber(sp.page);
 
   const mine = first(sp.mine) === "1";
   const sortParam = first(sp.sort);
-  const sort = VALID_SORTS.includes(sortParam as typeof VALID_SORTS[number])
-    ? (sortParam as typeof VALID_SORTS[number])
-    : "votes";
-  // Feeds both the Prisma `contains` below (ILIKE, no ESCAPE clause) and the raw
-  // ILIKE further down — strip wildcard metacharacters and bound the length for
-  // both at once (search-box DoS, matches /api/votes).
+  const sort: VoteListSort = VALID_SORTS.find((s) => s === sortParam) ?? "votes";
+  // Feeds an ILIKE with no ESCAPE clause: strip wildcard metacharacters and
+  // bound the length (search-box DoS, matches /api/votes).
   const q = sanitizeContainsSearch((first(sp.q) ?? "").trim());
 
-  // `session` is never null here — requireAppSession() redirects instead of
-  // returning — so the "mine" filter keys on the flag alone.
-  const where: Prisma.DeletionVoteWhereInput = {
-    ...(mine ? { userId: session.user.id } : {}),
-    ...(q ? { title: { contains: q, mode: "insensitive" } } : {}),
-  };
-
-  // Count distinct (tmdbId, mediaType) groups for pagination without
-  // materializing one row per group into memory (which scales with the number
-  // of distinct voted titles). Mirrors the `where` above with parameterized
-  // fragments. Built before the queries below so the page query and the count
-  // query — which depend only on the request, not on each other — can share
-  // one round-trip.
-  const conditions: Prisma.Sql[] = [];
-  if (mine) conditions.push(Prisma.sql`"userId" = ${session.user.id}`);
-  if (q) conditions.push(Prisma.sql`"title" ILIKE ${`%${q}%`}`);
-  const whereSql = conditions.length
-    ? Prisma.sql`WHERE ${Prisma.join(conditions, " AND ")}`
-    : Prisma.empty;
-
-  // A title held only on servers this viewer holds no grant for is not on this
-  // list for them (guardrail 35; the same scope as GET /api/votes). The voted
-  // titles are read only when something IS hidden from this viewer, so an
-  // unrestricted deployment keeps the raw COUNT below; when they were read,
-  // the count is theirs minus the hidden ones and the raw query is skipped.
-  const { hidden, votedTitles } = await hiddenVoteTitles(session, where);
-  const scopedWhere = scopeVotesWhere(where, hidden);
-
-  const [grouped, [{ count }]] = await Promise.all([
-    prisma.deletionVote.groupBy({
-      by: ["tmdbId", "mediaType"],
-      where: scopedWhere,
-      _count: { id: true },
-      _max: { createdAt: true },
-      // Both sorts need a TIEBREAKER, because both are paginated with skip/take.
-      // Neither key is unique across groups — most titles hold exactly one vote,
-      // so ordering by _count alone leaves the bulk of the table in one tied
-      // block that Postgres may return in a different order per query. Two
-      // requests for two pages are two queries, so a title could appear on both
-      // pages while another appeared on neither. Appending the group key makes
-      // the order total, and it is free: [tmdbId, mediaType] is the group key
-      // already being computed.
-      orderBy: [
-        sort === "recent"
-          ? { _max: { createdAt: "desc" } }
-          : { _count: { id: "desc" } },
-        { tmdbId: "asc" },
-        { mediaType: "asc" },
-      ],
-      skip: (page - 1) * PAGE_SIZE,
-      take: PAGE_SIZE,
-    }),
-    votedTitles !== null
-      ? Promise.resolve([{ count: BigInt(votedTitles - hidden.length) }])
-      : prisma.$queryRaw<{ count: bigint }[]>(
-          Prisma.sql`SELECT COUNT(*)::bigint AS count FROM (SELECT 1 FROM "DeletionVote" ${whereSql} GROUP BY "tmdbId", "mediaType") AS g`,
-        ),
-  ]);
-  const totalPages = Math.max(1, Math.ceil(Number(count) / PAGE_SIZE));
-
-  // Batched lookup: one query for the whole page instead of several per title.
-  // Split by mediaType so each becomes a `tmdbId: { in: [...] }`
-  // predicate that the planner can serve from the composite (tmdbId, mediaType)
-  // PK efficiently. The rows carry `userId`, so "did the viewer vote on this"
-  // is derived in memory instead of re-reading the same row set filtered to
-  // the viewer. `userId` is server-side only and never reaches the client.
-  const movieIds = grouped.filter((g) => g.mediaType === "MOVIE").map((g) => g.tmdbId);
-  const tvIds = grouped.filter((g) => g.mediaType === "TV").map((g) => g.tmdbId);
-  const groupWhere: Prisma.DeletionVoteWhereInput = {
-    OR: [
-      ...(movieIds.length ? [{ mediaType: "MOVIE" as const, tmdbId: { in: movieIds } }] : []),
-      ...(tvIds.length ? [{ mediaType: "TV" as const, tmdbId: { in: tvIds } }] : []),
-    ],
-  };
-
-  const allVotes = grouped.length === 0
-    ? []
-    : await prisma.deletionVote.findMany({
-        where: groupWhere,
-        select: {
-          tmdbId: true,
-          mediaType: true,
-          userId: true,
-          title: true,
-          posterPath: true,
-          reason: true,
-          user: { select: { name: true } },
-        },
-        orderBy: { createdAt: "desc" },
-      });
-
-  const byKey = new Map<string, typeof allVotes>();
-  for (const v of allVotes) {
-    const k = `${v.mediaType}:${v.tmdbId}`;
-    let arr = byKey.get(k);
-    if (!arr) {
-      arr = [];
-      byKey.set(k, arr);
-    }
-    arr.push(v);
-  }
-
-  const items = grouped.map((g) => {
-    const k = `${g.mediaType}:${g.tmdbId}`;
-    const votes = byKey.get(k) ?? [];
-    const representative = votes[0];
-    const reasons = votes.filter((v) => v.reason).slice(0, 3);
-    return {
-      tmdbId: g.tmdbId,
-      mediaType: g.mediaType as "MOVIE" | "TV",
-      title: representative?.title ?? "",
-      posterPath: representative?.posterPath ?? null,
-      // `votes` holds EVERY vote for this title (groupWhere ignores the
-      // mine/q filters), so its length is the real total. g._count.id is
-      // filtered: under "My votes only" it is always 1. Mirrors /api/votes.
-      voteCount: votes.length || g._count.id,
-      userVoted: votes.some((v) => v.userId === session.user.id),
-      reasons: reasons.map((v) => ({ reason: v.reason!, userName: v.user.name ?? t("personal.votes.anonymous") })),
-    };
-  });
+  // The same list GET /api/votes answers (votes-list-data.ts): the paging
+  // scope hides titles held only on servers this viewer holds no grant for
+  // (guardrail 35a), and "my votes" by count pages over every voter's rows on
+  // the caller's titles so the order follows the real totals.
+  const { items: listed, total } = await loadVotesList(session, { page, mine, sort, q });
+  const totalPages = Math.max(1, Math.ceil(total / VOTES_PAGE_SIZE));
+  const names = await reasonAuthorNames(listed);
+  const anonymous = t("personal.votes.anonymous");
+  const viewerName = session.user.name ?? anonymous;
+  const items = listed.map((item) => ({
+    ...item,
+    reasons: [
+      ...(item.userReason?.trim() ? [{ reason: item.userReason.trim(), userName: viewerName }] : []),
+      ...item.reasonEntries.map((e) => ({ reason: e.reason, userName: names.get(e.id) ?? anonymous })),
+    ].slice(0, REASONS_SHOWN),
+  }));
 
   const isAdmin = hasPermission(session.user.permissions, Permission.ADMIN);
   const hasFilters = mine || sort !== "votes" || q !== "";
@@ -180,6 +74,7 @@ export default async function VotesPage({
         <FilterPills
           param="mine"
           active={mine ? "1" : ""}
+          label={t("personal.votes.filter.label")}
           options={[
             { value: "", label: t("personal.votes.filter.all") },
             { value: "1", label: t("personal.votes.filter.mine") },
@@ -190,6 +85,7 @@ export default async function VotesPage({
           <FilterPills
             param="sort"
             active={sort === "votes" ? "" : sort}
+            label={t("personal.votes.sort.label")}
             options={[
               { value: "", label: t("personal.votes.sort.most") },
               { value: "recent", label: t("personal.votes.sort.recent") },
@@ -205,7 +101,7 @@ export default async function VotesPage({
         </div>
       </div>
 
-      {items.length === 0 && Number(count) > 0 ? (
+      {items.length === 0 && total > 0 ? (
         // Past the last page (same as /requests): the pager is hidden when
         // totalPages <= 1, so "no votes yet" there would be both wrong and a
         // dead end.
@@ -228,128 +124,148 @@ export default async function VotesPage({
         />
       ) : (
         <div className="flex flex-col" style={{ gap: 8 }}>
-          {items.map((item) => {
-            const poster = posterUrl(item.posterPath);
-            const href = `/${item.mediaType === "MOVIE" ? "movie" : "tv"}/${item.tmdbId}`;
-            return (
-              <div
-                key={`${item.mediaType}-${item.tmdbId}`}
-                className="flex flex-wrap items-start transition-colors bg-[var(--ds-bg-2)] hover:bg-[var(--ds-bg-3)] border border-[var(--ds-border)]"
-                style={{
-                  gap: 14,
-                  padding: 14,
-                  borderRadius: 8,
-                }}
-              >
-                <Link
-                  href={href}
-                  className="flex items-start flex-1 min-w-0 group"
-                  style={{ gap: 14 }}
-                >
-                  <div
-                    className="relative shrink-0 overflow-hidden"
-                    style={{
-                      width: 44,
-                      aspectRatio: "2 / 3",
-                      borderRadius: 4,
-                      background: "var(--ds-bg-3)",
-                    }}
-                  >
-                    {poster ? (
-                      <Image
-                        src={poster}
-                        alt={item.title}
-                        width={44}
-                        height={66}
-                        className="w-full h-full object-cover"
-                      />
-                    ) : (
-                      // Same glyph fallback as /requests and /issues — the words
-                      // "No poster" don't fit a 44px tile.
-                      <div
-                        className="absolute inset-0 flex items-center justify-center"
-                        style={{ color: "var(--ds-fg-subtle)" }}
-                      >
-                        {item.mediaType === "MOVIE" ? (
-                          <Film style={{ width: 16, height: 16 }} />
-                        ) : (
-                          <Tv2 style={{ width: 16, height: 16 }} />
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="flex-1 min-w-0">
-                    {/* Row recipe shared with /requests and /issues: a <p> title (an
-                        <h3> here was an orphaned heading level) and the media type
-                        as the mono meta line, not a chip beside the title.
-                        DeletionVote stores no release year, so the line is type only. */}
-                    <p
-                      className="font-medium truncate transition-colors group-hover:text-[var(--ds-accent-text)]"
-                      style={{ fontSize: 14, margin: 0, color: "var(--ds-fg)" }}
-                    >
-                      {item.title}
-                    </p>
-                    <div
-                      className="ds-mono"
-                      style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", marginTop: 2 }}
-                    >
-                      {item.mediaType === "MOVIE" ? t("personal.common.movie") : t("personal.common.tv")}
-                    </div>
-
-                    <div
-                      className="ds-mono"
-                      style={{
-                        marginTop: 6,
-                        fontSize: 12,
-                        color: "var(--ds-accent-text)",
-                        fontWeight: 600,
-                      }}
-                    >
-                      {t("personal.votes.count", { count: item.voteCount })}
-                    </div>
-
-                    {item.reasons.length > 0 && (
-                      <div
-                        className="flex flex-col"
-                        style={{ gap: 3, marginTop: 6 }}
-                      >
-                        {item.reasons.map((r, i) => (
-                          <p
-                            // biome-ignore lint/suspicious/noArrayIndexKey: reasons are unordered snippets
-                            key={i}
-                            style={{
-                              fontSize: 11,
-                              color: "var(--ds-fg-subtle)",
-                              margin: 0,
-                            }}
-                          >
-                            <span style={{ color: "var(--ds-fg-muted)" }}>
-                              {r.userName}:
-                            </span>{" "}
-                            {r.reason}
-                          </p>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </Link>
-
-                <VoteActions
-                  tmdbId={item.tmdbId}
-                  mediaType={item.mediaType}
-                  userVoted={item.userVoted}
-                  isAdmin={isAdmin}
-                />
-              </div>
-            );
-          })}
+          {items.map((item) => (
+            <VoteRow key={`${item.mediaType}-${item.tmdbId}`} item={item} isAdmin={isAdmin} t={t} />
+          ))}
         </div>
       )}
 
       <Suspense>
         <PaginationBar currentPage={page} totalPages={totalPages} />
       </Suspense>
+    </div>
+  );
+}
+
+type VoteRowItem = Pick<VoteListItem, "tmdbId" | "mediaType" | "title" | "posterPath" | "voteCount" | "userVoted"> & {
+  reasons: Array<{ reason: string; userName: string }>;
+};
+
+// The display names behind the reasons on this page, by vote id: one bounded
+// read (at most a few reasons per title).
+async function reasonAuthorNames(items: readonly VoteListItem[]): Promise<Map<string, string | null>> {
+  const ids = items.flatMap((i) => i.reasonEntries.map((e) => e.id));
+  if (ids.length === 0) return new Map();
+  const rows = await prisma.deletionVote.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, user: { select: { name: true } } },
+  });
+  return new Map(rows.map((r) => [r.id, r.user.name]));
+}
+
+// One voted title: poster, title, vote count, a few reasons and the actions.
+function VoteRow({ item, isAdmin, t }: { item: VoteRowItem; isAdmin: boolean; t: Translator }) {
+  const poster = posterUrl(item.posterPath);
+  const href = `/${item.mediaType === "MOVIE" ? "movie" : "tv"}/${item.tmdbId}`;
+  return (
+    <div
+      className="flex flex-wrap items-start transition-colors bg-[var(--ds-bg-2)] hover:bg-[var(--ds-bg-3)] border border-[var(--ds-border)]"
+      style={{
+        gap: 14,
+        padding: 14,
+        borderRadius: 8,
+      }}
+    >
+      <Link
+        href={href}
+        className="flex items-start flex-1 min-w-0 group"
+        style={{ gap: 14 }}
+      >
+        <div
+          className="relative shrink-0 overflow-hidden"
+          style={{
+            width: 44,
+            aspectRatio: "2 / 3",
+            borderRadius: 4,
+            background: "var(--ds-bg-3)",
+          }}
+        >
+          {poster ? (
+            <Image
+              src={poster}
+              alt={item.title}
+              width={44}
+              height={66}
+              className="w-full h-full object-cover"
+            />
+          ) : (
+            // Same glyph fallback as /requests and /issues — the words
+            // "No poster" don't fit a 44px tile.
+            <div
+              className="absolute inset-0 flex items-center justify-center"
+              style={{ color: "var(--ds-fg-subtle)" }}
+            >
+              {item.mediaType === "MOVIE" ? (
+                <Film style={{ width: 16, height: 16 }} />
+              ) : (
+                <Tv2 style={{ width: 16, height: 16 }} />
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="flex-1 min-w-0">
+          {/* Row recipe shared with /requests and /issues: a <p> title (an
+              <h3> here was an orphaned heading level) and the media type
+              as the mono meta line, not a chip beside the title.
+              DeletionVote stores no release year, so the line is type only. */}
+          <p
+            className="font-medium truncate transition-colors group-hover:text-[var(--ds-accent-text)]"
+            style={{ fontSize: 14, margin: 0, color: "var(--ds-fg)" }}
+          >
+            {item.title}
+          </p>
+          <div
+            className="ds-mono"
+            style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", marginTop: 2 }}
+          >
+            {item.mediaType === "MOVIE" ? t("personal.common.movie") : t("personal.common.tv")}
+          </div>
+
+          <div
+            className="ds-mono"
+            style={{
+              marginTop: 6,
+              fontSize: 12,
+              color: "var(--ds-accent-text)",
+              fontWeight: 600,
+            }}
+          >
+            {t("personal.votes.count", { count: item.voteCount })}
+          </div>
+
+          {item.reasons.length > 0 && (
+            <div
+              className="flex flex-col"
+              style={{ gap: 3, marginTop: 6 }}
+            >
+              {item.reasons.map((r, i) => (
+                <p
+                  // biome-ignore lint/suspicious/noArrayIndexKey: reasons are unordered snippets
+                  key={i}
+                  style={{
+                    fontSize: 11,
+                    color: "var(--ds-fg-subtle)",
+                    margin: 0,
+                  }}
+                >
+                  <span style={{ color: "var(--ds-fg-muted)" }}>
+                    {r.userName}:
+                  </span>{" "}
+                  {r.reason}
+                </p>
+              ))}
+            </div>
+          )}
+        </div>
+      </Link>
+
+      <VoteActions
+        tmdbId={item.tmdbId}
+        mediaType={item.mediaType}
+        userVoted={item.userVoted}
+        isAdmin={isAdmin}
+      />
     </div>
   );
 }

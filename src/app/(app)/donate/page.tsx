@@ -3,21 +3,36 @@ import { prisma } from "@/lib/prisma";
 import { notFound } from "next/navigation";
 import { ExternalLink, Heart } from "@/components/icons";
 import { requireFeature } from "@/lib/features";
-import { DONATION_SETTING_KEYS, hasDonationLinks } from "@/lib/donations";
+import {
+  DONATION_SETTING_KEYS,
+  configuredDonations,
+  donationHref,
+  type DonationSettingKey,
+} from "@/lib/donations";
 import { PageHeader } from "@/components/ui/design";
 import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
 
-// Returns the URL only if it parses and uses https; anything else (bad input,
-// http:, javascript:) becomes null and the method is shown as plain text.
-function safeUrl(v: string): string | null {
-  try {
-    const u = new URL(v);
-    return u.protocol === "https:" ? u.toString() : null;
-  } catch {
-    return null;
-  }
+// The brand pill: the hex pairs set BOTH background and text, so the pill reads
+// the same on either theme (guardrail 42).
+function MethodPill({ label, bg, color }: { label: string; bg: string; color: string }) {
+  return (
+    <span
+      className="font-semibold inline-flex"
+      style={{ padding: "3px 12px", borderRadius: 999, fontSize: 12, background: bg, color }}
+    >
+      {label}
+    </span>
+  );
+}
+
+function MethodHint({ hint, margin }: { hint: string; margin: string }) {
+  return (
+    <p className="ds-mono" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", margin }}>
+      {hint}
+    </p>
+  );
 }
 
 export default async function DonatePage() {
@@ -29,87 +44,23 @@ export default async function DonatePage() {
   const rows = await prisma.setting.findMany({
     where: { key: { in: [...DONATION_SETTING_KEYS] } },
   });
-  const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  // Trimmed, blank ones dropped — the same rule as the nav gate.
+  const configured = configuredDonations(Object.fromEntries(rows.map((r) => [r.key, r.value])));
 
   // With no donation methods configured, the nav link is hidden and this page
   // returns a 404, so a direct visit can't land on an empty Support Us page.
-  if (!hasDonationLinks(cfg)) notFound();
+  if (configured.length === 0) notFound();
 
   const t = await getTranslator();
 
-  const methods = [
-    {
-      key: "donationPaypal",
-      label: "PayPal",
-      value: cfg.donationPaypal ?? "",
-      pillBg: "#ffc439",
-      pillColor: "#003087",
-      // The settings form suggests "paypal.me/yourname", so accept that form
-      // too — otherwise it would become "https://paypal.me/paypal.me/yourname".
-      href: (v: string) =>
-        v.startsWith("http")
-          ? safeUrl(v)
-          : /^(www\.)?paypal\.me\//i.test(v)
-            ? safeUrl(`https://${v}`)
-            : safeUrl(`https://paypal.me/${v.replace(/^@/, "")}`),
-      hint: t("personal.donate.paypalHint"),
-    },
-    {
-      key: "donationVenmo",
-      label: "Venmo",
-      value: cfg.donationVenmo ?? "",
-      pillBg: "#3d95ce",
-      pillColor: "#000000",
-      href: (v: string) =>
-        v.startsWith("http")
-          ? safeUrl(v)
-          : safeUrl(`https://venmo.com/${v.replace(/^@/, "")}`),
-      hint: t("personal.donate.venmoHint"),
-    },
-    {
-      key: "donationZelle",
-      label: "Zelle",
-      value: cfg.donationZelle ?? "",
-      pillBg: "#6d1ed4",
-      pillColor: "#ffffff",
-      href: () => "https://www.zellepay.com/",
-      hint: t("personal.donate.zelleHint"),
-      noLink: true,
-    },
-    {
-      key: "donationAmazon",
-      label: t("personal.donate.amazonLabel"),
-      value: cfg.donationAmazon ?? "",
-      pillBg: "#ff9900",
-      pillColor: "#000000",
-      href: (v: string) => safeUrl(v),
-      hint: t("personal.donate.amazonHint"),
-    },
-    {
-      key: "donationPatreon",
-      label: "Patreon",
-      value: cfg.donationPatreon ?? "",
-      pillBg: "#f96854",
-      pillColor: "#000000",
-      href: (v: string) =>
-        v.startsWith("http")
-          ? safeUrl(v)
-          : safeUrl(`https://www.patreon.com/${v.replace(/^@/, "")}`),
-      hint: t("personal.donate.patreonHint"),
-    },
-    {
-      key: "donationBuyMeACoffee",
-      label: "Buy Me a Coffee",
-      value: cfg.donationBuyMeACoffee ?? "",
-      pillBg: "#ffdd00",
-      pillColor: "#000000",
-      href: (v: string) =>
-        v.startsWith("http")
-          ? safeUrl(v)
-          : safeUrl(`https://www.buymeacoffee.com/${v.replace(/^@/, "")}`),
-      hint: t("personal.donate.coffeeHint"),
-    },
-  ].filter((m) => m.value);
+  const display: Record<DonationSettingKey, { label: string; pillBg: string; pillColor: string; hint: string }> = {
+    donationPaypal: { label: "PayPal", pillBg: "#ffc439", pillColor: "#003087", hint: t("personal.donate.paypalHint") },
+    donationVenmo: { label: "Venmo", pillBg: "#3d95ce", pillColor: "#000000", hint: t("personal.donate.venmoHint") },
+    donationZelle: { label: "Zelle", pillBg: "#6d1ed4", pillColor: "#ffffff", hint: t("personal.donate.zelleHint") },
+    donationAmazon: { label: t("personal.donate.amazonLabel"), pillBg: "#ff9900", pillColor: "#000000", hint: t("personal.donate.amazonHint") },
+    donationPatreon: { label: "Patreon", pillBg: "#f96854", pillColor: "#000000", hint: t("personal.donate.patreonHint") },
+    donationBuyMeACoffee: { label: "Buy Me a Coffee", pillBg: "#ffdd00", pillColor: "#000000", hint: t("personal.donate.coffeeHint") },
+  };
 
   return (
     <div className="ds-page-enter max-w-lg">
@@ -129,12 +80,14 @@ export default async function DonatePage() {
       />
 
       <div className="flex flex-col" style={{ gap: 10 }}>
-        {methods.map((m) => {
-          const resolved = m.href(m.value);
-          if (m.noLink || !resolved) {
+        {configured.map(({ key, value }) => {
+          const m = display[key];
+          // null: Zelle, a non-https value, or a PayPal email — shown as text.
+          const resolved = donationHref(key, value);
+          if (!resolved) {
             return (
               <div
-                key={m.key}
+                key={key}
                 style={{
                   padding: 18,
                   background: "var(--ds-bg-2)",
@@ -143,41 +96,21 @@ export default async function DonatePage() {
                 }}
               >
                 <div className="flex items-center" style={{ marginBottom: 10 }}>
-                  <span
-                    className="font-semibold inline-flex"
-                    style={{
-                      padding: "3px 12px",
-                      borderRadius: 999,
-                      fontSize: 12,
-                      background: m.pillBg,
-                      color: m.pillColor,
-                    }}
-                  >
-                    {m.label}
-                  </span>
+                  <MethodPill label={m.label} bg={m.pillBg} color={m.pillColor} />
                 </div>
-                <p
-                  className="ds-mono"
-                  style={{
-                    fontSize: 10.5,
-                    color: "var(--ds-fg-subtle)",
-                    margin: "0 0 4px",
-                  }}
-                >
-                  {m.hint}
-                </p>
+                <MethodHint hint={m.hint} margin="0 0 4px" />
                 <p
                   className="ds-mono"
                   style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0, wordBreak: "break-all" }}
                 >
-                  {m.value}
+                  {value}
                 </p>
               </div>
             );
           }
           return (
             <a
-              key={m.key}
+              key={key}
               href={resolved}
               target="_blank"
               rel="noopener noreferrer"
@@ -189,28 +122,8 @@ export default async function DonatePage() {
               }}
             >
               <div>
-                <span
-                  className="font-semibold inline-flex"
-                  style={{
-                    padding: "3px 12px",
-                    borderRadius: 999,
-                    fontSize: 12,
-                    background: m.pillBg,
-                    color: m.pillColor,
-                  }}
-                >
-                  {m.label}
-                </span>
-                <p
-                  className="ds-mono"
-                  style={{
-                    fontSize: 10.5,
-                    color: "var(--ds-fg-subtle)",
-                    margin: "12px 0 0",
-                  }}
-                >
-                  {m.hint}
-                </p>
+                <MethodPill label={m.label} bg={m.pillBg} color={m.pillColor} />
+                <MethodHint hint={m.hint} margin="12px 0 0" />
               </div>
               <ExternalLink
                 className="shrink-0 transition-colors text-[var(--ds-fg-subtle)] group-hover:text-[var(--ds-fg)]"

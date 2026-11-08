@@ -99,6 +99,12 @@ let activeSessions: SessionRow[] = [];
 let serverUsers: ServerUserRow[] = [];
 type EvidenceRow = { source: string; serverInstance: string; itemKey: string };
 let upstreamEvidence: EvidenceRow[] = [];
+// Watch-sync pairs (guardrail 19e), each with its two server identities. Their
+// ledgers (WatchSyncMark / WatchSyncPlexMark) go with the pair by the schema's
+// onDelete: Cascade, which a fake can't model — the pair delete is what's pinned.
+type PairIdentity = { source: string; serverInstance: string };
+type WatchSyncPairRow = { id: string; plexUser: PairIdentity; jellyfinUser: PairIdentity };
+let watchSyncPairs: WatchSyncPairRow[] = [];
 const auditRows: Array<Record<string, unknown>> = [];
 
 // Deliberately permissive: a `where` with no keys matches EVERY row, so a
@@ -126,6 +132,11 @@ const authSessionsById = new Map<string, { userId: string }>();
 // Fails the NEXT setting.upsert whose key matches — used to prove the
 // transaction rolls back rather than half-applying (guardrail 23).
 let failUpsertKey: string | null = null;
+// The key list of every Setting findMany (null: an unfiltered read).
+let settingKeyReads: Array<string[] | null> = [];
+// Runs once when the next registry save lock is taken — a test's stand-in for a
+// save that committed while this one waited on the lock.
+let onLock: (() => void) | null = null;
 
 function makeClient(txId: number | null) {
   const record = (model: string, op: string, where: Where, data?: unknown) => {
@@ -157,13 +168,25 @@ function makeClient(txId: number | null) {
   });
 
   return {
+    // The registry save lock (readMediaInstanceRegistryForSave). Journaled with
+    // its SQL so the tests can pin that the registry read follows it in the
+    // same transaction; `onLock` lets a test commit a "concurrent" save at the
+    // moment this one holds the lock.
+    $executeRaw: async (query: { sql?: string } | TemplateStringsArray) => {
+      const sql = "sql" in query && typeof query.sql === "string" ? query.sql : String(query);
+      record("$executeRaw", "lock", { sql });
+      onLock?.();
+      return 0;
+    },
     setting: {
       findMany: async (args?: { where?: { key?: { in?: string[] } } }) => {
         const only = args?.where?.key?.in;
+        settingKeyReads.push(only ?? null);
         const rows = [...settings.entries()].map(([key, value]) => ({ key, value }));
         return only ? rows.filter((r) => only.includes(r.key)) : rows;
       },
       findUnique: async (args: { where: { key: string } }) => {
+        record("setting", "findUnique", args.where);
         const value = settings.get(args.where.key);
         return value === undefined ? null : { key: args.where.key, value };
       },
@@ -190,12 +213,25 @@ function makeClient(txId: number | null) {
     activeSession: rowDelegate("activeSession", () => activeSessions, (r) => { activeSessions = r; }),
     mediaServerUser: rowDelegate("mediaServerUser", () => serverUsers, (r) => { serverUsers = r; }),
     // The removed server's upstream watch-record snapshot (guardrail 14d) —
-    // pinned in tests/audit-fix-nw-upstream.test.mts.
+    // pinned in tests/upstream-watch-instance-removal.test.mts.
     upstreamWatchEvidence: rowDelegate("upstreamWatchEvidence", () => upstreamEvidence, (r) => { upstreamEvidence = r; }),
     // For You's copy of the removed server's own history and its read points
     // (guardrail 40c) — journaled so the scoping and the transaction are pinned.
     serverWatchedTitle: rowDelegate("serverWatchedTitle", () => [] as Record<string, unknown>[], () => {}),
     serverWatchCursor: rowDelegate("serverWatchCursor", () => [] as Record<string, unknown>[], () => {}),
+    // Filtered through a relation (`{ plexUser: {...} }`); like whereMatches, an
+    // empty where matches every pair, so an unscoped delete fails loudly.
+    watchSyncPair: {
+      deleteMany: async (args?: { where?: Record<string, Where> }) => {
+        record("watchSyncPair", "deleteMany", args?.where);
+        const hit = (p: WatchSyncPairRow) =>
+          Object.entries(args?.where ?? {}).every(([rel, cond]) => whereMatches(p[rel as "plexUser" | "jellyfinUser"] ?? {}, cond));
+        const kept = watchSyncPairs.filter((p) => !hit(p));
+        const count = watchSyncPairs.length - kept.length;
+        watchSyncPairs = kept;
+        return { count };
+      },
+    },
     // PlayHistory has NO legitimate caller in this route — every op is journaled
     // so the guardrail-19 test can assert the model was never addressed at all.
     playHistory: rowDelegate("playHistory", () => [] as Record<string, unknown>[], () => {}),
@@ -238,7 +274,7 @@ const fakePrisma = {
 // ── dynamic imports (env + globalThis stubs must precede the module graph) ──
 const { NextRequest } = await import("next/server");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
-const { BATCH_TX_TIMEOUT } = await import("../src/lib/cron-auth.ts");
+const { BATCH_TX_TIMEOUT } = await import("../src/lib/batch-write.ts");
 const { GET, POST } = await import("../src/app/api/admin/media-instances/route.ts");
 
 type Req = InstanceType<typeof NextRequest>;
@@ -335,7 +371,9 @@ beforeEach(() => {
   activeSessions = [];
   serverUsers = [];
   upstreamEvidence = [];
+  watchSyncPairs = [];
   failUpsertKey = null;
+  onLock = null;
   respond = (url) => { throw new Error(`unexpected fetch ${url}`); };
 });
 
@@ -365,6 +403,34 @@ test("POST: a missing/malformed `instances` → 400 with ZERO writes — coercin
   }
   assert.equal(txOptions.length, 0, "the transaction must not even open");
   assert.equal(libSlugs(plexLibrary).length, 4, "not one library row may be deleted by a rejected request");
+});
+
+test("POST: a slug listed twice → 400 before any write — the last entry's settings would win over the registry's first", async () => {
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  const res = await POST(postReq({ service: "plex", instances: [{ slug: "remote", serverUrl: "http://10.0.0.5:32400" }, { slug: "remote", serverUrl: "http://10.0.0.6:32400" }] }, admin.header), undefined);
+  assert.equal(res.status, 400);
+  assert.match(((await res.json()) as { error: string }).error, /listed twice: remote/);
+  assert.equal(txOptions.length, 0, "the transaction must not even open");
+});
+
+test("POST: the connection tests read every instance's URL and secret in ONE Setting query", async () => {
+  const admin = await mintSession("ADMIN");
+  respond = (url) => {
+    if (url.hostname === "plex.tv") return okJson({ ok: true });
+    return okJson({ MediaContainer: { machineIdentifier: "m" } });
+  };
+  settings.set("plexServerUrl", "http://10.0.0.4:32400");
+  settings.set("plexAdminToken", "tok-default");
+  settingKeyReads = [];
+  const res = await POST(postReq({ service: "plex", instances: [
+    { slug: "remote", serverUrl: "http://10.0.0.5:32400", adminToken: "tok-a" },
+    { slug: "other", serverUrl: "http://10.0.0.6:32400", adminToken: "tok-b" },
+  ] }, admin.header), undefined);
+  assert.equal(res.status, 200);
+  const connectionReads = settingKeyReads.filter((keys) => keys !== null && keys.every((k) => /(ServerUrl|AdminToken)$/.test(k)));
+  assert.equal(connectionReads.length, 1, `one read, not one per instance: ${JSON.stringify(connectionReads)}`);
+  assert.equal(connectionReads[0]!.length, 6, "the default and both named servers, URL and token each");
 });
 
 test("POST: an invalid slug → 400 before any write; an unknown service → 400", async () => {
@@ -469,6 +535,45 @@ test("ActiveSession rows for the removed slug are deleted, scoped by source+serv
   );
 });
 
+test("WATCH SYNC (19e): removing a Plex instance deletes the pairs whose Plex account is on it, scoped — read points and ratingKey ledger go with them", async () => {
+  // Plex ratingKeys are per-server integers: a pair left behind would resume on
+  // a server later registered under the same slug with the old read point and
+  // a ledger that suppresses (or echo-skips) colliding keys.
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  watchSyncPairs = [
+    { id: "wp-remote", plexUser: { source: "plex", serverInstance: "remote" }, jellyfinUser: { source: "jellyfin", serverInstance: "" } },
+    { id: "wp-default", plexUser: { source: "plex", serverInstance: "" }, jellyfinUser: { source: "jellyfin", serverInstance: "" } },
+    // The same slug on the OTHER service: a Plex removal must not touch it.
+    { id: "wp-jf-remote", plexUser: { source: "plex", serverInstance: "keep" }, jellyfinUser: { source: "jellyfin", serverInstance: "remote" } },
+  ];
+  assert.equal((await POST(postReq(removeAll, admin.header), undefined)).status, 200);
+  await flush();
+
+  const del = opsFor("watchSyncPair", "deleteMany");
+  assert.equal(del.length, 1);
+  assert.deepEqual(del[0].where, { plexUser: { source: "plex", serverInstance: "remote" } });
+  assert.deepEqual(watchSyncPairs.map((p) => p.id).sort(), ["wp-default", "wp-jf-remote"]);
+  assert.equal(opsFor("mediaServerUser", "deleteMany").length, 0, "the identities themselves are only soft-deleted (guardrail 28)");
+  const details = JSON.parse(String(auditRows[0].details)) as { removedCounts: Record<string, { watchSyncPairs: number }> };
+  assert.equal(details.removedCounts.remote.watchSyncPairs, 1, "the audit names what was destroyed");
+});
+
+test("WATCH SYNC (19e): removing a Jellyfin instance deletes the pairs whose Jellyfin user is on it, scoped", async () => {
+  const admin = await mintSession("ADMIN");
+  settings.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  settings.set("jellyfinRemoteUrl", "http://10.0.0.9:8096");
+  settings.set("jellyfinRemoteApiKey", "jf-key");
+  watchSyncPairs = [
+    { id: "wp-jf-remote", plexUser: { source: "plex", serverInstance: "" }, jellyfinUser: { source: "jellyfin", serverInstance: "remote" } },
+    { id: "wp-jf-default", plexUser: { source: "plex", serverInstance: "" }, jellyfinUser: { source: "jellyfin", serverInstance: "" } },
+    { id: "wp-plex-remote", plexUser: { source: "plex", serverInstance: "remote" }, jellyfinUser: { source: "jellyfin", serverInstance: "" } },
+  ];
+  assert.equal((await POST(postReq({ service: "jellyfin", instances: [] }, admin.header), undefined)).status, 200);
+  assert.deepEqual(opsFor("watchSyncPair", "deleteMany")[0].where, { jellyfinUser: { source: "jellyfin", serverInstance: "remote" } });
+  assert.deepEqual(watchSyncPairs.map((p) => p.id).sort(), ["wp-jf-default", "wp-plex-remote"]);
+});
+
 test("Setting cleanup covers the WHOLE per-instance field union, not just the connection pair", async () => {
   const admin = await mintSession("ADMIN");
   seedPlexRemote();
@@ -537,6 +642,21 @@ test("a slug that COLLIDES with a default-instance key (\"movie\"/\"tv\") never 
   assert.equal(settings.get("plexMovieAdminToken"), undefined);
 });
 
+test("POST: a NEW slug that collides with a default-instance key is refused 400 with no write; an already-registered one is still saved", async () => {
+  const admin = await mintSession("ADMIN");
+  respond = () => okJson({ MediaContainer: { machineIdentifier: "m" } });
+  settings.set("plexMoviePathStripPrefix", "/mnt/media/movies");
+  const refused = await POST(postReq({ service: "plex", instances: [{ slug: "movie", serverUrl: "http://10.0.0.9:32400" }] }, admin.header), undefined);
+  assert.equal(refused.status, 400);
+  assert.match(((await refused.json()) as { error: string }).error, /"movie"/);
+  assert.equal(opsFor("setting", "upsert").length, 0, "nothing written: not the registry, not a connection setting");
+  assert.equal(settings.get("plexInstances"), undefined);
+
+  settings.set("plexInstances", JSON.stringify([{ slug: "movie", name: "Movie Box" }]));
+  const kept = await POST(postReq({ service: "plex", instances: [{ slug: "movie", name: "Movie Box", serverUrl: "http://10.0.0.9:32400" }] }, admin.header), undefined);
+  assert.equal(kept.status, 200, "a slug saved before the check can still be edited");
+});
+
 test("ONE transaction: the registry write AND every cleanup op share a single tx, opened with BATCH_TX_TIMEOUT", async () => {
   const admin = await mintSession("ADMIN");
   seedPlexRemote();
@@ -560,8 +680,9 @@ test("ONE transaction: the registry write AND every cleanup op share a single tx
     ...opsFor("upstreamWatchEvidence", "deleteMany"),
     ...opsFor("serverWatchedTitle", "deleteMany"),
     ...opsFor("serverWatchCursor", "deleteMany"),
+    ...opsFor("watchSyncPair", "deleteMany"),
   ];
-  assert.equal(cleanup.length, 7, "all seven cleanup ops ran");
+  assert.equal(cleanup.length, 8, "all eight cleanup ops ran");
   // The For You history rows are scoped through their server identity to the
   // removed (service, slug) — never a bare deleteMany (guardrail 40c / 35).
   for (const op of [...opsFor("serverWatchedTitle", "deleteMany"), ...opsFor("serverWatchCursor", "deleteMany")]) {
@@ -602,10 +723,10 @@ test("removal is audited post-commit with the slugs and row counts destroyed (gu
   assert.equal(auditRows[0].target, "media-instances:plex");
   const details = JSON.parse(String(auditRows[0].details)) as {
     removed: string[];
-    removedCounts: Record<string, { libraryItems: number; activeSessions: number; serverUsersDisabled: number }>;
+    removedCounts: Record<string, { libraryItems: number; activeSessions: number; serverUsersDisabled: number; watchSyncPairs: number }>;
   };
   assert.deepEqual(details.removed, ["remote"]);
-  assert.deepEqual(details.removedCounts.remote, { libraryItems: 2, activeSessions: 1, serverUsersDisabled: 1 });
+  assert.deepEqual(details.removedCounts.remote, { libraryItems: 2, activeSessions: 1, serverUsersDisabled: 1, watchSyncPairs: 0 });
 });
 
 test("a save that removes NOTHING performs no cleanup at all (the default instance is never a removal candidate)", async () => {
@@ -620,6 +741,7 @@ test("a save that removes NOTHING performs no cleanup at all (the default instan
   assert.equal(opsFor("activeSession", "deleteMany").length, 0);
   assert.equal(opsFor("mediaServerUser", "updateMany").length, 0);
   assert.equal(opsFor("setting", "deleteMany").length, 0);
+  assert.equal(opsFor("watchSyncPair", "deleteMany").length, 0);
   assert.deepEqual(libSlugs(plexLibrary), ["", "keep", "remote", "remote"]);
 });
 
@@ -897,4 +1019,148 @@ test("Plex connection test: token + reachable server → ok; an invalid token fa
     "a bad token keeps its own distinct message",
   );
   assert.deepEqual(fetchUrls.filter((u) => u.includes("10.0.0.5")), [], "no point probing the server with a token plex.tv rejected");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Secrets are type-checked and bounded before the transaction opens
+// ════════════════════════════════════════════════════════════════════════════
+
+test("a non-string or over-long adminToken / apiKey is 400 before the transaction opens", async () => {
+  // Each reached tx.setting.upsert as-is and failed inside the transaction — a
+  // 500 instead of a 400.
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ["plex", { adminToken: 123 }],
+    ["plex", { adminToken: null }],
+    ["plex", { adminToken: { set: "x" } }],
+    ["plex", { adminToken: "t".repeat(4097) }],
+    ["jellyfin", { apiKey: {} }],
+    ["jellyfin", { apiKey: [] }],
+  ];
+  for (const [service, fields] of cases) {
+    ops.length = 0;
+    const res = await POST(postReq({ service, instances: [{ slug: "remote", name: "Remote", ...fields }] }, admin.header), undefined);
+    assert.equal(res.status, 400, `${service} ${JSON.stringify(fields).slice(0, 60)} must be refused`);
+    assert.match(((await res.json()) as { error: string }).error, /for "remote" must be text of at most 4096 characters/);
+  }
+  assert.equal(txOptions.length, 0, "no transaction opened");
+  assert.equal(opsFor("setting", "upsert").length, 0);
+  assert.equal(settings.get("plexRemoteAdminToken"), "remote-token");
+
+  const ok = await POST(postReq({ service: "plex", instances: [{ slug: "remote", name: "Remote", adminToken: "t".repeat(4096) }, { slug: "keep", name: "Keep" }] }, admin.header), undefined);
+  assert.equal(ok.status, 200, "exactly the cap is accepted");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Concurrent saves: the removal diff is computed under the save lock
+// ════════════════════════════════════════════════════════════════════════════
+
+test("the registry read that decides removals runs in the transaction, after the save lock and before the registry write", async () => {
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  assert.equal((await POST(postReq(removeAll, admin.header), undefined)).status, 200);
+
+  const lockAt = ops.findIndex((o) => o.model === "$executeRaw");
+  const readAt = ops.findIndex((o) => o.model === "setting" && o.op === "findUnique" && (o.where as { key: string }).key === "plexInstances");
+  const writeAt = ops.findIndex((o) => o.model === "setting" && o.op === "upsert" && (o.where as { key: string }).key === "plexInstances");
+  assert.ok(lockAt >= 0 && readAt > lockAt && writeAt > readAt, "lock → registry read → registry write");
+  assert.match(String((ops[lockAt].where as { sql: string }).sql), /pg_advisory_xact_lock\(2101, 3\)/, "Plex's own save lock");
+  const txId = ops[writeAt].txId;
+  assert.ok(txId !== null);
+  assert.equal(ops[lockAt].txId, txId, "the lock is taken inside the save's transaction");
+  assert.equal(ops[readAt].txId, txId, "the registry is read through the transaction client, not the top-level one");
+});
+
+test("a server another save added while this one waited for the lock is removed WITH its rows, not orphaned", async () => {
+  // Read before the transaction, the diff never saw "west": the registry write
+  // dropped it and its token, library rows and sessions stayed forever.
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  onLock = () => {
+    onLock = null;
+    settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }, { slug: "keep", name: "Keep" }, { slug: "west", name: "West" }]));
+    settings.set("plexWestAdminToken", "west-token");
+    plexLibrary.push({ tmdbId: 9, mediaType: "MOVIE", serverInstance: "west" });
+  };
+  assert.equal((await POST(postReq(removeAll, admin.header), undefined)).status, 200);
+  assert.equal(settings.get("plexWestAdminToken"), undefined, "no orphaned token");
+  assert.deepEqual(libSlugs(plexLibrary), ["", "keep"], "west's library rows go with it");
+  assert.deepEqual(JSON.parse(settings.get("plexInstances") ?? "[]").map((e: { slug: string }) => e.slug), ["keep"]);
+});
+
+test("\"keep the saved token\" for a server another save just removed is a 409, not a tokenless re-add", async () => {
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  onLock = () => {
+    onLock = null;
+    settings.set("plexInstances", JSON.stringify([{ slug: "keep", name: "Keep" }]));
+    settings.delete("plexRemoteAdminToken");
+  };
+  const res = await POST(
+    postReq({ service: "plex", instances: [{ slug: "remote", name: "Remote", adminToken: MASK }, { slug: "keep", name: "Keep" }] }, admin.header),
+    undefined,
+  );
+  assert.equal(res.status, 409);
+  assert.equal(opsFor("setting", "upsert").length, 0, "nothing written");
+  assert.deepEqual(JSON.parse(settings.get("plexInstances") ?? "[]").map((e: { slug: string }) => e.slug), ["keep"]);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// baseVersion: a list edited from a stale load is refused, never applied
+// ════════════════════════════════════════════════════════════════════════════
+
+type Versions = { versions: Record<"plex" | "jellyfin", string> };
+
+test("GET hands out a version per service that tracks the NAMED servers only", async () => {
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  const v1 = ((await (await GET(getReq(admin.header), undefined)).json()) as Versions).versions;
+  assert.equal(typeof v1.plex, "string");
+  assert.equal(typeof v1.jellyfin, "string");
+
+  // The default server has its own form; an edit there must not refuse the
+  // named-server manager's next save.
+  settings.set("plexServerUrl", "http://10.0.0.2:32400");
+  assert.equal(((await (await GET(getReq(admin.header), undefined)).json()) as Versions).versions.plex, v1.plex);
+
+  settings.set("plexRemoteLibraries", "1,2,3");
+  const v2 = ((await (await GET(getReq(admin.header), undefined)).json()) as Versions).versions;
+  assert.notEqual(v2.plex, v1.plex, "a named server's field is part of the version");
+  assert.equal(v2.jellyfin, v1.jellyfin);
+});
+
+test("a stale baseVersion is 409 with ZERO writes and nothing removed; the current one saves and returns the next version", async () => {
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  const stale = ((await (await GET(getReq(admin.header), undefined)).json()) as Versions).versions.plex;
+  settings.set("plexRemoteServerUrl", "http://10.0.0.9:32400"); // edited in another tab
+
+  ops.length = 0;
+  const res = await POST(postReq({ ...removeAll, baseVersion: stale }, admin.header), undefined);
+  assert.equal(res.status, 409);
+  assert.match(((await res.json()) as { error: string }).error, /changed elsewhere/);
+  assert.equal(opsFor("setting", "upsert").length, 0, "nothing written");
+  assert.equal(opsFor("setting", "deleteMany").length, 0);
+  assert.equal(opsFor("plexLibraryItem", "deleteMany").length, 0, "nothing removed");
+  assert.deepEqual(libSlugs(plexLibrary), ["", "keep", "remote", "remote"]);
+  await flush();
+  assert.deepEqual(auditRows, [], "a refused save is not audited as a change");
+
+  const current = ((await (await GET(getReq(admin.header), undefined)).json()) as Versions).versions.plex;
+  const ok = await POST(postReq({ ...removeAll, baseVersion: current }, admin.header), undefined);
+  assert.equal(ok.status, 200);
+  const saved = (await ok.json()) as { version: string };
+  assert.deepEqual(libSlugs(plexLibrary), ["", "keep"], "the current version proceeds with the removal");
+  assert.equal(saved.version, ((await (await GET(getReq(admin.header), undefined)).json()) as Versions).versions.plex, "the POST's version is what GET now reports");
+});
+
+test("baseVersion must be a string when sent", async () => {
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  for (const baseVersion of [1, null, {}]) {
+    const res = await POST(postReq({ ...removeAll, baseVersion }, admin.header), undefined);
+    assert.equal(res.status, 400);
+  }
+  assert.equal(txOptions.length, 0);
 });

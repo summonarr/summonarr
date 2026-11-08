@@ -4,27 +4,39 @@ import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { revokeDiscordRolesOnUnlink } from "@/lib/discord-notify";
 
-// Unlink the caller's Discord account (used by the native clients).
-export const POST = withAuth(async (req, _ctx, session) => {
-  // Read the id BEFORE clearing it — the update nulls the only record of which
-  // Discord member to strip roles from.
-  const prev = await prisma.user.findUnique({
-    where: { id: session.user.id },
-    select: { discordId: true },
-  });
+// A concurrent link can change the id between the read and the clear; the
+// clear is retried on the new id this many times before giving up.
+const MAX_CLEAR_ATTEMPTS = 3;
 
-  await prisma.user.update({
-    where: { id: session.user.id },
-    data: { discordId: null },
-  });
+// Clears the caller's Discord link as a compare-and-swap on the id it read, and
+// returns the id this call actually cleared (null when nothing was linked). A
+// confirm-merge that links another Discord account between the read and the
+// write makes the swap miss: the id is read again, so the roles revoked below
+// always belong to the account that was unlinked.
+async function clearDiscordLink(userId: string): Promise<string | null> {
+  for (let attempt = 0; attempt < MAX_CLEAR_ATTEMPTS; attempt++) {
+    const prev = await prisma.user.findUnique({ where: { id: userId }, select: { discordId: true } });
+    if (!prev?.discordId) return null;
+    const { count } = await prisma.user.updateMany({
+      where: { id: userId, discordId: prev.discordId },
+      data: { discordId: null },
+    });
+    if (count === 1) return prev.discordId;
+  }
+  return null;
+}
+
+// Unlink the caller's Discord account (used by the native clients). Unlinking
+// nothing is a harmless 200 that writes, revokes and audits nothing.
+export const POST = withAuth(async (req, _ctx, session) => {
+  const cleared = await clearDiscordLink(session.user.id);
+  if (cleared === null) return NextResponse.json({ ok: true });
 
   // Remove the Discord roles Summonarr gave this user, but only AFTER the
   // unlink is saved (guardrail 27: DB write first, side effects second). It is
   // not awaited and handles its own errors: the account is already unlinked,
   // so a Discord API hiccup must not fail the request.
-  if (prev?.discordId) {
-    void revokeDiscordRolesOnUnlink(prev.discordId);
-  }
+  void revokeDiscordRolesOnUnlink(cleared);
   void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email,

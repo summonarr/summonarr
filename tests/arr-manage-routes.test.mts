@@ -441,6 +441,28 @@ test("the current root folder is never re-sent (no pointless move) nor audited, 
   assert.equal(audits.length, 0);
 });
 
+test("a root folder that differs only by a trailing separator is neither sent nor audited as a move", async () => {
+  const token = await mintSession();
+  // The series reports "/tv"; the instance lists "/tv/" — one folder.
+  responder = both((c) => {
+    if (c.method === "GET" && c.path === "/api/v3/series/21") return json(series({ rootFolderPath: "/tv" }));
+    if (c.method === "PUT" && c.path === "/api/v3/series/editor") return json([series({ rootFolderPath: "/tv", monitored: false })], 202);
+    return undefined;
+  }, sonarrBase);
+  const alone = await call(titleRoute.PATCH, token, "/admin/arr/title", { method: "PATCH", body: { service: "sonarr", id: 21, rootFolderPath: "/tv/", moveFiles: true } });
+  assert.equal(alone.status, 200);
+  assert.deepEqual(writes(), [], "no editor PUT: nothing moves");
+  calls = [];
+  // Beside a real change, only that change is written and audited.
+  const res = await call(titleRoute.PATCH, token, "/admin/arr/title", { method: "PATCH", body: { service: "sonarr", id: 21, rootFolderPath: "/tv/", moveFiles: true, monitored: false } });
+  assert.equal(res.status, 200);
+  assert.deepEqual(writes().map((c) => c.body), [{ seriesIds: [21], monitored: false, moveFiles: false }]);
+  assert.equal(audits.length, 1, "one audit: the monitored change; the trailing-slash-only edit wrote none");
+  const details = JSON.parse(audits[0].details as string) as { fields: string[]; rootFolderPath?: string };
+  assert.deepEqual(details.fields, ["monitored"]);
+  assert.equal(details.rootFolderPath, undefined, "no root-folder move is claimed");
+});
+
 test("a season flip PUTs back Sonarr's own series with ONLY that season changed", async () => {
   const token = await mintSession();
   responder = both((c) => (c.method === "PUT" && c.path === "/api/v3/series/21" ? json(series()) : undefined), sonarrBase);
@@ -688,8 +710,13 @@ test("the History page's event filter is translated PER SERVICE (the enums diffe
     [SONARR, ["5"]],
     [SONARR, ["3"]],
   ]);
-  assert.equal((await call(historyRoute.GET, token, "/admin/arr/history?service=radarr&kind=bogus")).status, 400);
-  assert.equal((await call(historyRoute.GET, token, "/admin/arr/history?service=radarr&pageSize=1000")).status, 400);
+  // An unknown kind is named as one — never reported as a paging error.
+  const badKind = await call(historyRoute.GET, token, "/admin/arr/history?service=radarr&kind=bogus");
+  assert.equal(badKind.status, 400);
+  assert.equal((await badKind.json()).error, "Unknown event type — use one of: grabbed, imported, failed, deleted, renamed, ignored");
+  const badPage = await call(historyRoute.GET, token, "/admin/arr/history?service=radarr&pageSize=1000");
+  assert.equal(badPage.status, 400);
+  assert.doesNotMatch((await badPage.json()).error, /^Unknown event type/);
 });
 
 test("the blocklist names titles the arr didn't embed, removes in ONE bulk call, clears via the arr's command — all audited", async () => {
@@ -719,6 +746,22 @@ test("the blocklist names titles the arr didn't embed, removes in ONE bulk call,
   ]);
   assert.deepEqual(audits.map((a) => a.action), ["ARR_BLOCKLIST_CHANGE", "ARR_BLOCKLIST_CHANGE"]);
   assert.equal((await call(blocklistRoute.DELETE, token, "/admin/arr/blocklist?service=radarr&ids=3,x", { method: "DELETE" })).status, 400);
+});
+
+test("a blocklist that reports no totalRecords is scanned past its first page — an id on page 2 is removed, not called gone", async () => {
+  const token = await mintSession();
+  const entries = Array.from({ length: 1_200 }, (_, i) => ({ id: i + 1, movieId: 11, sourceTitle: `R${i + 1}`, protocol: "torrent" }));
+  responder = both((c) => {
+    if (c.path === "/api/v3/blocklist" && c.method === "GET") {
+      const page = Number(c.query.get("page") ?? "1");
+      const size = Number(c.query.get("pageSize") ?? "50");
+      return json({ page, pageSize: size, records: entries.slice((page - 1) * size, page * size) });
+    }
+    if (c.path === "/api/v3/blocklist/bulk" && c.method === "DELETE") return new Response("", { status: 200 });
+    return undefined;
+  }, radarrBase);
+  assert.equal((await call(blocklistRoute.DELETE, token, "/admin/arr/blocklist?service=radarr&ids=1100", { method: "DELETE" })).status, 200);
+  assert.deepEqual(writes().map((c) => [c.method, c.path, c.body]), [["DELETE", "/api/v3/blocklist/bulk", { ids: [1100] }]]);
 });
 
 // ── 6: calendar ──────────────────────────────────────────────────────────────
@@ -810,8 +853,12 @@ test("a task run names one of the instance's OWN scheduled tasks; a library-wide
 
   calls = [];
   assert.equal((await call(tasksRoute.DELETE, token, "/admin/arr/tasks?service=sonarr&commandId=4", { method: "DELETE" })).status, 409, "completed, not queued");
+  assert.equal(audits.length, 3, "a refused cancel writes no audit row");
   assert.equal((await call(tasksRoute.DELETE, token, "/admin/arr/tasks?service=sonarr&commandId=5", { method: "DELETE" })).status, 200);
   assert.deepEqual(writes().map((c) => [c.method, c.path]), [["DELETE", "/api/v3/command/5"]]);
+  assert.equal(audits.length, 4, "an accepted cancel is audited");
+  assert.equal(audits[3].action, "ARR_COMMAND");
+  assert.deepEqual(JSON.parse(String(audits[3].details)), { service: "sonarr", instance: "", cancelled: 5 });
 });
 
 test("the tasks read never sends a command's body", async () => {
@@ -1174,6 +1221,20 @@ test("a single-episode action checks that ONE episode (no whole-series read) and
   assert.equal((await post([202])).status, 202);
   assert.ok(!arrCalls().some((c) => c.path === "/api/v3/episode" && c.query.has("seriesId")), "no full episode list for one id");
   assert.ok(arrCalls().some((c) => c.path === "/api/v3/episode/202"));
+});
+
+test("a few episode ids are read together, and one of another series still writes nothing", async () => {
+  const token = await mintSession();
+  responder = both((c) => (c.method === "PUT" && c.path === "/api/v3/episode/monitor" ? json([]) : undefined), sonarrBase);
+  const patch = (episodeIds: number[]) => call(episodesRoute.PATCH, token, "/admin/arr/title/episodes", { method: "PATCH", body: { service: "sonarr", id: 21, episodeIds, monitored: false } });
+  assert.equal((await patch([901, 101, 202])).status, 409);
+  assert.deepEqual(writes(), []);
+  // Read together, not one after another: the ids after the foreign one went out too.
+  const read = arrCalls().filter((c) => /^\/api\/v3\/episode\/\d+$/.test(c.path)).map((c) => c.path).sort();
+  assert.deepEqual(read, ["/api/v3/episode/101", "/api/v3/episode/202", "/api/v3/episode/901"]);
+  calls = [];
+  assert.equal((await patch([101, 201, 202])).status, 200);
+  assert.deepEqual(writes().map((c) => [c.method, c.path, c.body]), [["PUT", "/api/v3/episode/monitor", { episodeIds: [101, 201, 202], monitored: false }]]);
 });
 
 test("episode monitoring answers the re-read series, so its counts follow monitoring", async () => {

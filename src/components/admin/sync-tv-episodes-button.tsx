@@ -1,69 +1,40 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Tv2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson, LONG_RUN_TIMEOUT_MS } from "@/lib/client/fetch-json";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
-
-interface SyncResult {
-  plex?: number;
-  jellyfin?: number;
-  errors?: string[];
-}
+import { SyncResultText, useSyncButtonState } from "./sync-button-state";
+import { TV_EPISODE_SYNC_ANSWER, tvEpisodeSyncOutcome } from "./tv-episode-sync-text";
 
 export function SyncTVEpisodesButton() {
   const t = useT();
   const locale = useLocale();
-  const router = useRouter();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
-  const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
-  const [result, setResult] = useState<string | null>(null);
-  // The end-of-run reset has to be cancellable: a prior run's timer landing mid-run
-  // clears "Syncing Episodes…" and re-enables the button while the walk across
-  // every server is still going, inviting a second whole-table rebuild.
-  const resetTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  useEffect(() => () => clearTimeout(resetTimer.current), []);
+  const run = useSyncButtonState();
+  const { status, result } = run;
+  // Unmounting aborts the request and drops its answer (the server's rebuild
+  // carries on regardless).
+  const action = useAsyncAction();
 
   async function handleSync() {
-    clearTimeout(resetTimer.current);
-    setStatus("loading");
-    setResult(null);
-    try {
-      const res = await fetch(withBasePath("/api/sync/tv-episodes"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
-      const data = (await res.json().catch(() => null)) as (SyncResult & { error?: string }) | null;
-
-      if (!res.ok || data?.error) {
-        setStatus("error");
-        setResult(data?.error ?? t("adminManage.users.error.requestFailed", { status: res.status }));
-      } else if (data?.errors && data.errors.length > 0) {
-        setStatus("error");
-        setResult(data.errors.join("; "));
-      } else {
-        const total = (data?.plex ?? 0) + (data?.jellyfin ?? 0);
-        const parts: string[] = [];
-        // Same locale grouping as the total — "Plex 12345 · 13,023 episodes"
-        // mixed grouped and ungrouped digits in one line.
-        if ((data?.plex ?? 0) > 0) parts.push(`Plex ${(data?.plex ?? 0).toLocaleString(locale)}`);
-        if ((data?.jellyfin ?? 0) > 0) parts.push(`Jellyfin ${(data?.jellyfin ?? 0).toLocaleString(locale)}`);
-        setStatus("done");
-        setResult(parts.length > 0
-          ? t("adminManage.library.btn.episodesWithParts", { count: total, formatted: total.toLocaleString(locale), parts: parts.join(", ") })
-          : t("adminManage.library.btn.episodes", { count: 0, formatted: "0" }));
-        const search = searchParams.toString();
-        router.push(pathname + (search ? `?${search}` : ""));
-      }
-    } catch {
-      setStatus("error");
-      setResult(t("adminManage.library.btn.syncFailed"));
-    }
-    clearTimeout(resetTimer.current);
-    resetTimer.current = setTimeout(() => { setStatus("idle"); setResult(null); }, 10_000);
+    run.begin();
+    // The rebuild walks every episode of every server synchronously (the route
+    // allows 5 minutes), so no client timeout: one would call a slow success a
+    // failure while the server still finishes.
+    const res = await action.run("sync", (signal) =>
+      fetchJson(withBasePath("/api/sync/tv-episodes"), {
+        init: { method: "POST", headers: { "Content-Type": "application/json" } },
+        schema: TV_EPISODE_SYNC_ANSWER,
+        timeoutMs: LONG_RUN_TIMEOUT_MS,
+        signal,
+      }), { ifBusy: "skip" });
+    if (!res) return;
+    const outcome = tvEpisodeSyncOutcome(res, t, locale);
+    if (!outcome) return;
+    // Refresh whenever a cache was rewritten — the page's counts read it.
+    run.finish(outcome.status, outcome.text, outcome.refresh);
   }
 
   return (
@@ -78,15 +49,7 @@ export function SyncTVEpisodesButton() {
         <Tv2 className={`w-4 h-4 ${status === "loading" ? "animate-pulse" : ""}`} />
         {status === "loading" ? t("adminManage.library.btn.syncingEpisodes") : t("adminManage.library.btn.syncEpisodes")}
       </Button>
-      {result && (
-        <span
-          role={status === "error" ? "alert" : "status"}
-          aria-live={status === "error" ? "assertive" : "polite"}
-          className={`text-xs ${status === "error" ? "text-red-400" : "text-zinc-400"}`}
-        >
-          {result}
-        </span>
-      )}
+      <SyncResultText status={status} result={result} />
     </div>
   );
 }

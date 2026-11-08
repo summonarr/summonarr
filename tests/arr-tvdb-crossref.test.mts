@@ -1,6 +1,6 @@
 // Tests for the TVDB cross-reference fallback in Sonarr series resolution
-// (src/lib/arr.ts: resolveTmdbToTvdb, pickSeriesByTvdbCrossRef, and its use in
-// addSeriesToSonarr + the read paths).
+// (src/lib/arr-id-map.ts, re-exported by arr.ts: resolveTmdbToTvdb,
+// pickSeriesByTvdbCrossRef, and its use in addSeriesToSonarr + the read paths).
 //
 // The incident: approving TMDB 304842 ("The Drop: A Snowfall Saga", premiered
 // eight days earlier) failed with "Sonarr: no series found for tmdbId 304842".
@@ -50,6 +50,7 @@ let tmdbLookup: unknown[] = [];
 let tvdbLookup: (tvdbId: number) => unknown[] = () => [];
 let tmdbExternalIds: () => Response = () => json({ tvdb_id: null });
 let seriesLibrary: (tvdbId: string | null) => unknown[] = () => [];
+let seriesStatus = 200;
 let sonarrQueue: unknown = { records: [], totalRecords: 0 };
 
 function json(body: unknown, status = 200): Response {
@@ -67,7 +68,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     throw new Error(`unexpected lookup term ${term}`);
   }
   if (url.pathname === "/api/v3/series" && (init?.method ?? "GET") === "POST") return json({ id: 1 });
-  if (url.pathname === "/api/v3/series") return json(seriesLibrary(url.searchParams.get("tvdbId")));
+  if (url.pathname === "/api/v3/series") {
+    return seriesStatus === 200 ? json(seriesLibrary(url.searchParams.get("tvdbId"))) : json({ message: "boom" }, seriesStatus);
+  }
   if (url.pathname === "/api/v3/queue") return json(sonarrQueue);
   throw new Error(`unexpected fetch ${url}`);
 }) as unknown as typeof fetch;
@@ -108,12 +111,16 @@ shadowPrismaModel(prisma, "tmdbCache", {
 const {
   addSeriesToSonarr,
   getSeriesFirstAired,
+  getSonarrSeriesCompletion,
   isSeriesDownloadedInSonarr,
   isSeriesDownloadingInSonarr,
-  isSeriesWantedInSonarr,
   pickSeriesByTvdbCrossRef,
   resolveTmdbToTvdb,
+  resolveTvdbIdFromTmdbId,
 } = await import("../src/lib/arr.ts");
+// The read paths reuse a verified lookup for a while (arr-id-map.ts); every case
+// here scripts its own lookup answers, so none may be served a previous case's.
+const { _resetSeriesLookupCacheForTests } = await import("../src/lib/arr-id-map.ts");
 
 const DAY = 24 * 60 * 60;
 const TMDB = 304842;
@@ -153,7 +160,9 @@ beforeEach(() => {
   tvdbLookup = () => [];
   tmdbExternalIds = () => json({ tvdb_id: null });
   seriesLibrary = () => [];
+  seriesStatus = 200;
   sonarrQueue = { records: [], totalRecords: 0 };
+  _resetSeriesLookupCacheForTests();
 });
 
 // ═══ pickSeriesByTvdbCrossRef ═══════════════════════════════════════════════
@@ -300,27 +309,87 @@ test("webhook verify: stays Sonarr-sourced — a WRONG TMDB cross-reference can'
       : [];
 
   const verdict = await isSeriesDownloadedInSonarr({ tvdbId: TVDB, tmdbId: TMDB });
-  assert.deepEqual(verdict, { downloaded: true, episodeFileCount: 8, episodeCount: 8 });
+  assert.deepEqual(verdict, { downloaded: true, tmdbId: null, episodeFileCount: 8, episodeCount: 8 });
   assert.equal(lookups("tvdb:").length, 0, "the verify never consults the cross-reference");
   assert.ok(!warns.some((w) => w.includes("payload ids disagree")));
 });
 
 // ═══ live wanted / downloading verdicts ══════════════════════════════════════
 
-test("wanted: a PARTLY downloaded series is wanted — same guardrail-14a rule as the sync writer", async () => {
+test("live completion: a PARTLY downloaded series is not complete (still wanted) — same guardrail-14a rule as the sync writer", async () => {
+  // The arr-state diagnostic reads "wanted" as `!complete` off this one call.
   tmdbLookup = [dropRow()];
   const lib = (files: number) => (tvdbId: string | null) =>
     tvdbId === String(TVDB)
       ? [{ tvdbId: TVDB, status: "continuing", seasons: [{ seasonNumber: 1, monitored: true, statistics: { episodeFileCount: files, episodeCount: 24 } }] }]
       : [];
   seriesLibrary = lib(5);
-  assert.equal(await isSeriesWantedInSonarr(TMDB), true, "5 of 24 aired episodes is still wanted");
+  const partial = await getSonarrSeriesCompletion(TMDB);
+  assert.equal(partial?.complete, false, "5 of 24 aired episodes is still wanted");
+  assert.equal(partial?.episodeFileCount, 5);
+  assert.equal(partial?.episodeCount, 24);
+  assert.equal(partial?.tvdbId, TVDB);
   seriesLibrary = lib(24);
-  assert.equal(await isSeriesWantedInSonarr(TMDB), false, "a complete series is not wanted");
+  assert.equal((await getSonarrSeriesCompletion(TMDB))?.complete, true, "a complete series is not wanted");
   seriesLibrary = lib(0);
-  assert.equal(await isSeriesWantedInSonarr(TMDB), true);
+  assert.equal((await getSonarrSeriesCompletion(TMDB))?.complete, false);
   seriesLibrary = () => [];
-  assert.equal(await isSeriesWantedInSonarr(TMDB), false, "a series not in the library is not wanted");
+  assert.equal(await getSonarrSeriesCompletion(TMDB), null, "a series not in the library has no completion");
+});
+
+// ═══ resolveTvdbIdFromTmdbId — the tvdbId persisted onto an issue ════════════
+
+const unfilteredLibraryReads = () =>
+  calls.filter((c) => c.url.pathname === "/api/v3/series" && c.method === "GET" && !c.url.searchParams.has("tvdbId"));
+
+test("issue tvdbId: a cross-reference confirmed by Sonarr's own library row resolves with ONE filtered read — no lookup, no full library", async () => {
+  seedCrossRef(TMDB, TVDB);
+  tmdbLookup = [dropRow({ tvdbId: 1234 })]; // would answer differently if it were asked
+  seriesLibrary = (tvdbId) => (tvdbId === String(TVDB) ? [{ id: 9, tvdbId: TVDB, tmdbId: TMDB }] : []);
+  assert.equal(await resolveTvdbIdFromTmdbId(TMDB), TVDB);
+  assert.equal(lookups("tmdb:").length, 0, "Sonarr's own row confirmed it");
+  assert.equal(unfilteredLibraryReads().length, 0, "never the whole library");
+  assert.deepEqual(
+    calls.filter((c) => c.url.pathname === "/api/v3/series").map((c) => c.url.searchParams.get("tvdbId")),
+    [String(TVDB)],
+  );
+});
+
+test("issue tvdbId: a library row naming ANOTHER title, or none (Sonarr v3), never decides — the verified lookup does", async () => {
+  seedCrossRef(TMDB, TVDB);
+  for (const rowTmdbId of [71694, undefined, 0]) {
+    calls.length = 0;
+    _resetSeriesLookupCacheForTests();
+    seriesLibrary = (tvdbId) => (tvdbId === String(TVDB) ? [{ id: 9, tvdbId: TVDB, ...(rowTmdbId === undefined ? {} : { tmdbId: rowTmdbId }) }] : []);
+    // Sonarr's tmdb lookup names this title at another TVDB id: only it may decide.
+    tmdbLookup = [dropRow({ tvdbId: 1234 })];
+    assert.equal(await resolveTvdbIdFromTmdbId(TMDB), 1234, `row tmdbId=${rowTmdbId}`);
+    assert.equal(lookups("tmdb:").length, 1, `row tmdbId=${rowTmdbId}: the lookup was consulted`);
+    assert.equal(unfilteredLibraryReads().length, 0);
+  }
+});
+
+test("issue tvdbId: no cross-reference goes straight to the lookup; an unverified lookup is null, never a guess", async () => {
+  tmdbLookup = [dropRow()];
+  assert.equal(await resolveTvdbIdFromTmdbId(TMDB), TVDB);
+  assert.equal(calls.filter((c) => c.url.pathname === "/api/v3/series").length, 0, "no library read without a candidate");
+
+  calls.length = 0;
+  _resetSeriesLookupCacheForTests();
+  tmdbLookup = [dropRow({ tvdbId: 1, tmdbId: 9 }), dropRow({ tvdbId: 2, tmdbId: 8 })];
+  assert.equal(await resolveTvdbIdFromTmdbId(TMDB), null);
+  assert.equal(unfilteredLibraryReads().length, 0);
+});
+
+test("issue tvdbId: a Sonarr failure is null, and an unconfigured Sonarr is null with no call", async () => {
+  seedCrossRef(TMDB, TVDB);
+  seriesStatus = 503;
+  assert.equal(await resolveTvdbIdFromTmdbId(TMDB), null);
+
+  calls.length = 0;
+  settings.clear();
+  assert.equal(await resolveTvdbIdFromTmdbId(TMDB), null);
+  assert.equal(calls.length, 0);
 });
 
 test("downloading: an UNRESOLVABLE series is unknown (null), never a confident 'not in queue'", async () => {
@@ -339,14 +408,21 @@ test("downloading: an UNRESOLVABLE series is unknown (null), never a confident '
 // ═══ structure ══════════════════════════════════════════════════════════════
 
 test("structure: one tvdb lookup URL, used by the add path; the webhook verify is the lone opt-out", () => {
-  const source = readFileSync(new URL("../src/lib/arr.ts", import.meta.url), "utf8");
+  // arr.ts re-exports flat siblings; the rule holds across all of them.
+  const read = (file: string) => readFileSync(new URL(`../src/lib/${file}`, import.meta.url), "utf8");
+  const body = (source: string, signature: string) => {
+    const fn = source.slice(source.indexOf(signature));
+    return fn.slice(0, fn.indexOf("\n}\n"));
+  };
+  const source = ["arr.ts", "arr-client.ts", "arr-config.ts", "arr-id-map.ts", "arr-lookup.ts", "arr-add.ts", "arr-releases.ts", "arr-queue-cache.ts"].map(read).join("\n");
   assert.equal((source.match(/series\/lookup\?term=tvdb:\$\{/g) ?? []).length, 1, "exactly one tvdb lookup URL (the shared helper)");
 
-  const add = source.slice(source.indexOf("export async function addSeriesToSonarr"));
-  assert.match(add.slice(0, add.indexOf("\n}\n")), /lookupSeriesByTvdbCrossRef</, "the add path uses the shared fallback");
+  // The add path resolves through the same function as the read paths, and that
+  // function falls back to the cross-reference.
+  assert.match(body(read("arr-add.ts"), "async function lookupSeriesForAdd("), /resolveSonarrSeries\(/, "the add path uses the shared resolution");
+  assert.match(body(read("arr-id-map.ts"), "export async function resolveSonarrSeries("), /lookupSeriesByTvdbCrossRef\(/, "…which falls back to the cross-reference");
 
   // The call-site object form only — the helper's doc comment names the flag too.
   assert.equal((source.match(/\{ tvdbCrossRef: false \}/g) ?? []).length, 1, "one opt-out only");
-  const verify = source.slice(source.indexOf("export async function isSeriesDownloadedInSonarr"));
-  assert.match(verify.slice(0, verify.indexOf("\n}\n")), /\{ tvdbCrossRef: false \}/, "…and it is the webhook's download verify");
+  assert.match(body(read("arr.ts"), "export async function isSeriesDownloadedInSonarr"), /\{ tvdbCrossRef: false \}/, "…and it is the webhook's download verify");
 });

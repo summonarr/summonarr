@@ -6,12 +6,12 @@
 // so /movies never surfaces 4K state that only the Sonarr 4K backend explains.
 // The sole impurity is one setting.findMany; shadowed in-memory (the
 // jellyfin-config.test pattern). Permission logic is the REAL canRequest.
-import { test } from "node:test";
+import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { prisma } from "../src/lib/prisma.ts";
 import { Permission, PRESETS } from "../src/lib/permissions.ts";
 import type { SummonarrSession } from "../src/lib/api-auth.ts";
-import { getShow4kVisibility } from "../src/lib/four-k-visibility.ts";
+import { getShow4kVisibility, invalidateShow4kVisibilityCache } from "../src/lib/four-k-visibility.ts";
 import { shadowPrismaModel } from "./_helpers.mts";
 
 let settings: Record<string, string> = {};
@@ -27,6 +27,10 @@ const settingStub = {
 };
 
 shadowPrismaModel(prisma, "setting", settingStub);
+
+// Each test sets its own settings; the shared few-second hold must not carry
+// one test's answer into the next.
+beforeEach(() => invalidateShow4kVisibilityCache());
 
 function makeSession(permissions: bigint, role = "USER"): SummonarrSession {
   return {
@@ -97,4 +101,25 @@ test("request4kAll only widens 4K for users who can request the base type at all
   settings = { ...RADARR_4K, request4kAll: "true" };
   // No REQUEST/REQUEST_MOVIE bit → canRequest base check fails → still false.
   assert.equal(await getShow4kVisibility(makeSession(Permission.MANAGE_ISSUES), "movie"), false);
+});
+
+test("the settings are read once for a burst of viewers, and again after an invalidate", async () => {
+  settings = { ...RADARR_4K };
+  findManyCalls = 0;
+  const admin = makeSession(Permission.ADMIN, "ADMIN");
+  await Promise.all([getShow4kVisibility(admin), getShow4kVisibility(admin, "movie"), getShow4kVisibility(admin)]);
+  await getShow4kVisibility(admin, "tv");
+  assert.equal(findManyCalls, 1);
+  invalidateShow4kVisibilityCache();
+  settings = {};
+  assert.equal(await getShow4kVisibility(admin), false);
+  assert.equal(findManyCalls, 2);
+});
+
+test("both settings save paths drop the held 4K settings, so a saved 4K instance or request4kAll shows on the next page", async () => {
+  const { readFileSync } = await import("node:fs");
+  for (const rel of ["../src/app/api/settings/route.ts", "../src/app/api/admin/arr-instances/route.ts"]) {
+    const src = readFileSync(new URL(rel, import.meta.url), "utf8");
+    assert.match(src, /^\s+invalidateShow4kVisibilityCache\(\);$/m, rel);
+  }
 });

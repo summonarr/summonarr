@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { NextRequest } from "next/server";
 import {
   SNAPSHOT_REFRESH_TIERS,
+  SNAPSHOT_RETRY_MAX_WAIT_MS,
   SNAPSHOT_VIEW_WINDOW_MS,
   dueSnapshots,
   readSnapshot,
@@ -18,6 +19,9 @@ import {
   snapshotKey,
   snapshotted,
 } from "../src/lib/arr-snapshot.ts";
+
+// A session the wrapped handlers may read (snapshotted requires SummonarrSession's shape).
+const ADMIN_SESSION = { user: { id: "admin-1", role: "ADMIN", permissions: BigInt(0) } };
 
 beforeEach(() => resetArrSnapshotsForTests());
 
@@ -65,7 +69,7 @@ async function openAt(GET: ReturnType<typeof fakeRoute>["GET"], url: string, whe
   const real = Date.now;
   Date.now = () => whenMs;
   try {
-    await GET(at(url, lang), {}, { user: { id: "admin-1" } });
+    await GET(at(url, lang), {}, ADMIN_SESSION);
   } finally {
     Date.now = real;
   }
@@ -107,7 +111,7 @@ test("a cached open is a view too; a background re-read is NOT — a page nobody
   const real = Date.now;
   Date.now = () => t0 + 20 * 60 * MIN;
   try {
-    assert.equal((await queue.GET(at("http://x/api/admin/queue?cached=1"), {}, {})).status, 200);
+    assert.equal((await queue.GET(at("http://x/api/admin/queue?cached=1"), {}, ADMIN_SESSION)).status, 200);
   } finally {
     Date.now = real;
   }
@@ -148,6 +152,67 @@ test("a failed re-read keeps the last good answer; a throw is counted, not raise
   assert.deepEqual(JSON.parse(readSnapshot(key, t0 + 23 * MIN)!.body), { good: true });
 });
 
+test("a view whose re-reads keep failing backs off — a removed title is not retried (and the run not failed) on every 5-minute run for a day", async () => {
+  const t0 = 1_000_000_000_000;
+  let gone = false;
+  const route = fakeRoute(() => (gone ? Response.json({ error: "not found" }, { status: 404 }) : Response.json({ title: "x" })));
+  await openAt(route.GET, "http://x/api/admin/arr/title?service=radarr&instance=&id=7", t0);
+  gone = true;
+  const failedAt: number[] = [];
+  for (let now = t0 + 5 * MIN; now <= t0 + SNAPSHOT_VIEW_WINDOW_MS + 10 * MIN; now += 5 * MIN) {
+    if ((await refreshArrSnapshots({ now: () => now })).failed > 0) failedAt.push((now - t0) / MIN);
+  }
+  // Its own tier's interval after the first failure, then doubled, up to an hour.
+  assert.deepEqual(failedAt.slice(0, 5), [10, 20, 40, 80, 140]);
+  assert.equal(failedAt[5] - failedAt[4], SNAPSHOT_RETRY_MAX_WAIT_MS / MIN, "never longer than the cap");
+  assert.ok(failedAt.length < 30, `${failedAt.length} failed runs in a day, not one every 5 minutes`);
+  const key = snapshotKey("http://x/api/admin/arr/title?service=radarr&instance=&id=7", "en")!;
+  assert.deepEqual(JSON.parse(readSnapshot(key, t0 + 60 * MIN)!.body), { title: "x" }, "the last good answer is still kept");
+});
+
+test("a re-read that answers again resets the back-off: the view is back on its tier's interval", async () => {
+  const t0 = 1_000_000_000_000;
+  let fail = false;
+  const route = fakeRoute(() => (fail ? Response.json({ error: "down" }, { status: 502 }) : Response.json({ ok: 1 })));
+  await openAt(route.GET, "http://x/api/admin/arr/blocklist?service=sonarr", t0);
+  fail = true;
+  assert.equal((await refreshArrSnapshots({ now: () => t0 + 10 * MIN })).failed, 1);
+  assert.equal((await refreshArrSnapshots({ now: () => t0 + 20 * MIN })).failed, 1);
+  assert.equal(dueSnapshots(t0 + 35 * MIN).length, 0, "two failures in a row: twenty minutes, not ten");
+  fail = false;
+  assert.equal((await refreshArrSnapshots({ now: () => t0 + 40 * MIN })).refreshed, 1);
+  assert.equal(dueSnapshots(t0 + 49 * MIN).length, 1, "answered again: due ten minutes (less the slack) later");
+});
+
+test("failing views go after every view that answers — a dark instance never takes the per-run cap", async () => {
+  const t0 = 1_000_000_000_000;
+  let darkDown = false;
+  const history = fakeRoute((req) => (darkDown && new URL(req.url).searchParams.get("instance") === "dark"
+    ? Response.json({ error: "timeout" }, { status: 504 })
+    : Response.json({ ok: true })));
+  await openAt(history.GET, "http://x/api/admin/arr/history?service=sonarr&instance=dark", t0);
+  darkDown = true;
+  assert.equal((await refreshArrSnapshots({ now: () => t0 + 10 * MIN })).failed, 1);
+  await openAt(history.GET, "http://x/api/admin/arr/history?service=sonarr&instance=ok", t0 + 12 * MIN);
+  // The dark view is due again and further past due than the healthy one…
+  const due = dueSnapshots(t0 + 22 * MIN);
+  assert.deepEqual(due.map((d) => new URL(d.url).searchParams.get("instance")), ["ok", "dark"], "…but goes last");
+  assert.ok(due[1].overdueMs > due[0].overdueMs);
+  const result = await refreshArrSnapshots({ now: () => t0 + 22 * MIN, maxPerRun: 1 });
+  assert.deepEqual(result, { due: 2, refreshed: 1, failed: 0, deferred: 1, aborted: false });
+
+  // Across priorities too: a failing 5-minute view goes after a healthy 15-minute one.
+  resetArrSnapshotsForTests();
+  let queueUp = true;
+  const queue = fakeRoute(() => (queueUp ? Response.json({ items: [] }) : Response.json({ error: "down" }, { status: 502 })));
+  const tasks = fakeRoute(() => Response.json({ tasks: [] }));
+  await openAt(queue.GET, "http://x/api/admin/queue", t0);
+  await openAt(tasks.GET, "http://x/api/admin/arr/tasks", t0);
+  queueUp = false;
+  assert.equal((await refreshArrSnapshots({ now: () => t0 + 5 * MIN })).failed, 1);
+  assert.deepEqual(dueSnapshots(t0 + 15 * MIN).map((d) => new URL(d.url).pathname), ["/api/admin/arr/tasks", "/api/admin/queue"]);
+});
+
 test("bounded: at most maxPerRun re-reads, 2 at a time; a stopped run starts nothing new (guardrail 41)", async () => {
   const t0 = 1_000_000_000_000;
   let inFlight = 0;
@@ -174,6 +239,32 @@ test("bounded: at most maxPerRun re-reads, 2 at a time; a stopped run starts not
   assert.equal(route.calls.length - before, 4, "nothing started after the abort");
 });
 
+test("a view whose re-read is still out from an earlier run is not started again — the next run skips it until it settles", async () => {
+  const t0 = 1_000_000_000_000;
+  let release: () => void = () => {};
+  let hold = false;
+  const route = fakeRoute(async () => {
+    if (hold) await new Promise<void>((r) => { release = r; });
+    return Response.json({ rows: [] });
+  });
+  await openAt(route.GET, "http://x/api/admin/arr/storage", t0);
+  const opened = route.calls.length;
+  hold = true;
+  // The first run's lock timed out: it was told to stop, but its re-read keeps going.
+  const ctl = new AbortController();
+  const first = refreshArrSnapshots({ now: () => t0 + 16 * MIN, signal: ctl.signal });
+  while (route.calls.length === opened) await new Promise((r) => setImmediate(r));
+  ctl.abort();
+  hold = false;
+  const second = await refreshArrSnapshots({ now: () => t0 + 21 * MIN });
+  assert.equal(route.calls.length, opened + 1, "the arr is not asked twice for one view");
+  assert.equal(second.due, 0);
+  release();
+  await first;
+  const third = await refreshArrSnapshots({ now: () => t0 + 40 * MIN });
+  assert.equal(third.refreshed, 1, "once it settled, the view is due again");
+});
+
 test("a config write that clears the snapshots while a re-read is out wins: the answer is not put back", async () => {
   const t0 = 1_000_000_000_000;
   let release: () => void = () => {};
@@ -193,14 +284,47 @@ test("a config write that clears the snapshots while a re-read is out wins: the 
   assert.equal(readSnapshot(snapshotKey("http://x/api/admin/arr/storage", "en")!, t0 + 17 * MIN), null);
 });
 
+test("a re-read out across a clear never replaces the answer an admin's own read kept after it", async () => {
+  const t0 = 1_000_000_000_000;
+  let release: () => void = () => {};
+  let holding = false;
+  let held = false;
+  let answer = "old";
+  const route = fakeRoute(async () => {
+    const body = { instance: answer };
+    if (holding) {
+      holding = false;
+      held = true;
+      await new Promise<void>((r) => { release = r; });
+    }
+    return Response.json(body);
+  });
+  const url = "http://x/api/admin/arr/storage";
+  await openAt(route.GET, url, t0);
+  holding = true;
+  const run = refreshArrSnapshots({ now: () => t0 + 16 * MIN });
+  while (!held) await new Promise((r) => setImmediate(r));
+  // The background re-read read the old config; then the config changed and an admin's read kept the new answer.
+  const { clearArrSnapshots } = await import("../src/lib/arr-snapshot.ts");
+  clearArrSnapshots();
+  answer = "new";
+  await openAt(route.GET, url, t0 + 16 * MIN);
+  release();
+  await run;
+  assert.equal(readSnapshot(snapshotKey(url, "en")!, t0 + 17 * MIN)?.body, JSON.stringify({ instance: "new" }));
+});
+
 test("the cron route skips without a lock when nothing is due, and is wired into the container's cron loop and the System tab", () => {
   const route = readFileSync(new URL("../src/app/api/cron/refresh-arr-snapshots/route.ts", import.meta.url), "utf8");
-  assert.match(route, /if \(dueSnapshots\(\)\.length === 0\) return cronSkippedResponse\(/);
-  assert.match(route, /withCronRunRecording\("arr-snapshots", \(\) => withAdvisoryLock\(\s*ARR_SNAPSHOT_LOCK_ID,/);
+  // defineCronRoute answers a skip reason through cronSkippedResponse before the
+  // lock, and records the run under `target` (tests/cron-route.test.mts).
+  assert.match(route, /skipReason: \(\) => \(dueSnapshots\(\)\.length === 0 \? "no arr page view is due" : null\)/);
+  assert.match(route, /export const POST = defineCronRoute\(\{\s*target: "arr-snapshots",\s*lockId: ARR_SNAPSHOT_LOCK_ID,/);
   assert.match(route, /refreshArrSnapshots\(\{ signal \}\)/);
   const entry = readFileSync(new URL("../docker-entrypoint.sh", import.meta.url), "utf8");
-  assert.match(entry, /\/api\/cron\/refresh-arr-snapshots\}" "arr-snapshots" quiet/);
-  assert.match(entry, /ARR_SNAPSHOT_NEXT=\$\(_cron_next "\$rc" "\$NOW" "\$\{ARR_SNAPSHOT_INTERVAL:-300\}" 300\)/);
-  const settings = readFileSync(new URL("../src/app/(app)/settings/page.tsx", import.meta.url), "utf8");
-  assert.match(settings, /endpoint: "\/api\/cron\/refresh-arr-snapshots", interval: formatInterval\(t, process\.env\.ARR_SNAPSHOT_INTERVAL, "300"\), \.\.\.lastRunInfo\("arr-snapshots"\)/);
+  // One row of the entrypoint's schedule table: label, URL override, path,
+  // interval var, default, quiet, first run, and the short-cadence loop.
+  assert.match(entry, /\narr-snapshots\|ARR_SNAPSHOT_URL\|\/api\/cron\/refresh-arr-snapshots\|ARR_SNAPSHOT_INTERVAL\|300\|quiet\|300\|fast\n/);
+  const settings = readFileSync(new URL("../src/app/(app)/settings/_tabs/cron-jobs.ts", import.meta.url), "utf8");
+  assert.match(settings, /\{ target: "arr-snapshots", nameKey: "settings\.cron\.job\.arrSnapshots\.name", descriptionKey: "settings\.cron\.job\.arrSnapshots\.description", endpoint: "\/api\/cron\/refresh-arr-snapshots", envVar: "ARR_SNAPSHOT_INTERVAL", defaultSeconds: "300" \}/);
 });

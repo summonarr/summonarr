@@ -84,6 +84,7 @@ let jellyfinOk = true;         // Jellyfin episodes
 let tmdbOk = true;             // TMDB list endpoints
 let tmdbTrendingResults: unknown[] = []; // /trending/ rows (ratings pre-warm pin)
 let tmdbUpcomingMovieResults: unknown[] = []; // /movie/upcoming rows (upcoming degraded pin)
+let tmdbUpcomingMovieDown = false; // /movie/upcoming answers 500 (one-source TMDB outage)
 let mdblistBatchOk = true;     // MDBList batch POST (ratings per-item awaited-twin pin)
 // Guardrail 31a pin: a stale ratings row's refresh is ONE upstream call — a TMDB
 // external_ids lookup (OMDB not-found sentinel), an OMDB call by stored imdbId
@@ -117,7 +118,10 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
     // Trending only — lets the ratings batch-pre-warm pin pool a known item
     // set without touching what the other list endpoints return.
     if (url.pathname.includes("/trending/")) return json({ page: 1, total_pages: 1, results: tmdbTrendingResults });
-    if (url.pathname.includes("/movie/upcoming")) return json({ page: 1, total_pages: 1, results: tmdbUpcomingMovieResults });
+    if (url.pathname.includes("/movie/upcoming")) {
+      if (tmdbUpcomingMovieDown) return json({ status_message: "TMDB DOWN" }, 500);
+      return json({ page: 1, total_pages: 1, results: tmdbUpcomingMovieResults });
+    }
     return json({ page: 1, total_pages: 1, results: [] });
   }
   if (url.hostname === "www.omdbapi.com") {
@@ -175,7 +179,10 @@ pgProto.end = async () => {};
 const { NextRequest } = await import("next/server");
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
-const { BATCH_TX_TIMEOUT } = await import("../src/lib/cron-auth.ts");
+const { BATCH_TX_TIMEOUT } = await import("../src/lib/batch-write.ts");
+// tmdb.ts backs off a list for a minute after every page of it failed; a test
+// that takes TMDB down must not leave that backoff to the next one.
+const { __resetTmdbBackoffsForTests } = await import("../src/lib/tmdb.ts");
 
 // ── op log ───────────────────────────────────────────────────────────────────
 type Op = { op: string; args?: unknown };
@@ -258,9 +265,12 @@ shadowPrismaModel(prisma, "auditLog", {
 });
 
 const settings = new Map<string, string>();
+// A Setting key whose point read throws (a transient DB error on one server's config).
+let settingReadFailsOn: string | null = null;
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) => {
     rec("setting.findUnique", args.where.key);
+    if (settingReadFailsOn === args.where.key) throw new Error(`setting ${args.where.key} read failed (unit test)`);
     const v = settings.get(args.where.key);
     return v === undefined ? null : { key: args.where.key, value: v };
   },
@@ -338,6 +348,7 @@ function registerArrInstance(service: "radarr" | "sonarr", slug: string): void {
 
 beforeEach(() => {
   advanceClock(31_000); // past both 30s API-key memos (see the Date mock above)
+  __resetTmdbBackoffsForTests();
   ops = [];
   txOptions = [];
   pgLockCalls = [];
@@ -352,6 +363,7 @@ beforeEach(() => {
   tmdbOk = true;
   tmdbTrendingResults = [];
   tmdbUpcomingMovieResults = [];
+  tmdbUpcomingMovieDown = false;
   mdblistBatchOk = true;
   tmdbCacheThrowOnKey = null;
   refreshInFlight = 0;
@@ -359,6 +371,7 @@ beforeEach(() => {
   refreshCalls = 0;
   tmdbCacheRows.clear();
   lockAcquire = () => true;
+  settingReadFailsOn = null;
 });
 
 // ── the shared cron gate (guardrail 6) ───────────────────────────────────────
@@ -448,6 +461,24 @@ for (const a of ARR) {
     assert.ok(scopes.length > 0, "the healthy instance should still be refreshed");
     assert.deepEqual([...new Set(scopes)], [""], "only the instance whose fetch SUCCEEDED may be cleared");
     assert.ok(!scopes.includes("anime"), "the down instance's cache must survive untouched");
+    // ...but the run is DEGRADED, not green (guardrail 36: a configured server
+    // that failed is red), and says which instance to go look at.
+    assert.equal(res.headers.get("x-cron-degraded"), "anime", "the ledger reads this header to record ok:false");
+    const body = await res.json();
+    assert.deepEqual(body.failedInstances, ["anime"]);
+    assert.equal(typeof body.wanted, "number", "the existing counts stay in the body");
+    assert.equal(JSON.parse(settings.get(`cron:lastRun:${a.name}-sync`) ?? "{}").ok, false);
+  });
+
+  test(`${a.name}: every instance healthy is a plain green 200 — no degraded header`, async () => {
+    configureArr(a.service);
+    configureArr(a.service, "anime");
+    registerArrInstance(a.service, "anime");
+    const res = await call(a.route);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("x-cron-degraded"), null);
+    assert.equal((await res.json()).failedInstances, undefined);
+    assert.equal(JSON.parse(settings.get(`cron:lastRun:${a.name}-sync`) ?? "{}").ok, true);
   });
 
   test(`${a.name}: a failed DEFAULT-instance fetch abandons the run with 502, not 200`, async () => {
@@ -584,6 +615,21 @@ test("tv-episodes clears ONLY the jellyfin source when only Jellyfin is configur
   assert.deepEqual(deletesOf("tVEpisodeCache").map((w) => w.source), ["jellyfin"]);
 });
 
+test("tv-episodes keeps a populated cache when every server answers with no episodes", async () => {
+  settings.set("plexServerUrl", "http://10.0.0.5:32400");
+  settings.set("plexAdminToken", "plex-token");
+  shadowPrismaModel(prisma, "tVEpisodeCache", { ...cacheModel("tVEpisodeCache"), count: async () => 7 });
+  try {
+    const res = await call(tvEpisodes);
+    assert.equal(res.status, 200);
+    assert.deepEqual(deletesOf("tVEpisodeCache"), [], "an empty answer must not wipe stored episodes");
+    const body = await res.json();
+    assert.ok((body.skipped as string[]).includes("plex"));
+  } finally {
+    shadowPrismaModel(prisma, "tVEpisodeCache", cacheModel("tVEpisodeCache"));
+  }
+});
+
 test("tv-episodes reads each server's OWN library selection", () => {
   // Source-pinned: this harness's Plex responder returns no sections, so a
   // selection filters nothing observable and a revert to the default's key
@@ -695,6 +741,39 @@ test("tv-episodes honours the library selection setting", async () => {
   assert.ok(opsOf("setting.findUnique").some((o) => o.args === "plexLibraries"));
 });
 
+test("tv-episodes: a source left untouched records the run as FAILED (X-Cron-Degraded), still 200; a clean run carries no header", async () => {
+  // The skipped source's rows were kept on purpose, but the cron history read
+  // the 200 as a green run — an outage of every Plex server recorded OK.
+  settings.set("plexServerUrl", "http://10.0.0.5:32400");
+  settings.set("plexAdminToken", "plex-token");
+  settings.set("jellyfinUrl", "http://10.0.0.6:8096");
+  settings.set("jellyfinApiKey", "jf-key");
+  plexOk = false;
+  const res = await call(tvEpisodes);
+  assert.equal(res.status, 200, "the healthy source's rewrite still happened");
+  assert.equal(res.headers.get("X-Cron-Degraded"), "plex");
+  assert.deepEqual((await res.json()).skipped, ["plex"]);
+
+  plexOk = true;
+  const clean = await call(tvEpisodes);
+  assert.equal(clean.status, 200);
+  assert.equal(clean.headers.get("X-Cron-Degraded"), null);
+});
+
+test("tv-episodes: one server's config or selection read failing is recorded for THAT server — the other source still rebuilds", async () => {
+  settings.set("plexServerUrl", "http://10.0.0.5:32400");
+  settings.set("plexAdminToken", "plex-token");
+  settings.set("jellyfinUrl", "http://10.0.0.6:8096");
+  settings.set("jellyfinApiKey", "jf-key");
+  settingReadFailsOn = "plexLibraries";
+  const res = await call(tvEpisodes);
+  assert.equal(res.status, 200, "a failed read is a partial result, not a route failure");
+  const body = await res.json();
+  assert.ok((body.errors as string[]).some((e) => e.startsWith("Plex:") && e.includes("plexLibraries")), JSON.stringify(body.errors));
+  assert.deepEqual(body.skipped, ["plex"], "a server that could not be read is never wiped by a partial union");
+  assert.deepEqual(deletesOf("tVEpisodeCache").map((w) => w.source), ["jellyfin"], "the healthy source still refreshes");
+});
+
 test("tv-episodes reports per-source counts", async () => {
   const body = await (await call(tvEpisodes)).json();
   assert.equal(body.plex, 0);
@@ -746,14 +825,32 @@ test("upcoming takes advisory lock 2007 and releases it", async () => {
 test("a busy upcoming lock skips instead of running", async () => {
   lockAcquire = () => false;
   const res = await call(upcoming);
+  assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { skipped: true, reason: "already running" });
   assert.deepEqual(deletesOf("upcomingCacheItem"), []);
+  // A skip is not a run (guardrail 7b): X-Cron-Skipped keeps it out of the ledger.
+  assert.equal(res.headers.get("X-Cron-Skipped"), "1", "the busy answer must go through cronSkippedResponse");
+  assert.ok(
+    !opsOf("setting.upsert").some((o) => o.args === "cron:lastRun:upcoming-cache"),
+    "a lock-busy skip must write no cron:lastRun:upcoming-cache row",
+  );
 });
 
-test("a TMDB failure is logged and does not throw out of the handler", async () => {
+test("a run that happened IS recorded in the upcoming-cache ledger (control for the busy pin)", async () => {
+  await call(upcoming);
+  assert.ok(opsOf("setting.upsert").some((o) => o.args === "cron:lastRun:upcoming-cache"));
+});
+
+test("a TMDB outage keeps BOTH stored upcoming lists and answers 502 — never a green run that emptied the cache", async () => {
+  // The page helpers absorb failed pages and resolve [], which the route used to
+  // read as "nothing upcoming": it deleted both media types, inserted nothing and
+  // answered 200 with errors: 0, so /upcoming stayed empty until the next daily run.
   tmdbOk = false;
   const res = await call(upcoming);
-  assert.equal(res.status, 200, "a fetch failure is a partial result, not a 500");
+  assert.equal(res.status, 502, "a total failure with nothing written is the 502 case");
+  assert.deepEqual(deletesOf("upcomingCacheItem"), [], "neither stored list is deleted");
+  const body = await res.json();
+  assert.equal(body.errors, 2, "both sources count as failed");
 });
 
 test("upcoming: ONE source failing while the other wrote rows is 200 but DEGRADED — X-Cron-Degraded + `error`, the orchestrator's shape", async () => {
@@ -777,6 +874,17 @@ test("upcoming: ONE source failing while the other wrote rows is 200 but DEGRADE
   assert.equal(body.error, "Sync degraded — tv failed to refresh", "the Run-now verdict reads `error`");
   // The movie half was still replaced — a degraded run is not a skipped one.
   assert.deepEqual(deletesOf("upcomingCacheItem").map((w) => w.mediaType), ["MOVIE"]);
+});
+
+test("upcoming: a TMDB endpoint failing for ONE type keeps that type's stored list and reports it degraded", async () => {
+  tmdbUpcomingMovieDown = true;
+  const res = await call(upcoming);
+  assert.deepEqual(deletesOf("upcomingCacheItem").map((w) => w.mediaType), ["TV"], "only the type that answered is replaced");
+  const body = await res.json();
+  assert.equal(body.errors, 1);
+  // The stub's TV list is empty, so nothing was written: the total-failure 502.
+  // (With TV rows written it is the 200 + X-Cron-Degraded case pinned below.)
+  assert.equal(res.status, 502);
 });
 
 test("upcoming: a clean run carries neither the degraded header nor `error`; a TOTAL failure stays 502", async () => {
@@ -826,7 +934,15 @@ test("a busy ratings lock skips instead of double-burning provider quota", async
   settings.set("omdbApiKey", "a-key");
   lockAcquire = () => false;
   const res = await call(ratings);
+  assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { skipped: true, reason: "already running" });
+  // A skip is not a run (guardrail 7b) — unlike the no-API-key skip above, which
+  // is a completed no-op and IS recorded.
+  assert.equal(res.headers.get("X-Cron-Skipped"), "1", "the busy answer must go through cronSkippedResponse");
+  assert.ok(
+    !opsOf("setting.upsert").some((o) => o.args === "cron:lastRun:ratings-sync"),
+    "a lock-busy skip must write no cron:lastRun:ratings-sync row",
+  );
 });
 
 test("ratings releases its lock on the happy path", async () => {
@@ -849,6 +965,9 @@ test("ratings tolerates every TMDB list failing and still reports a result", asy
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.total, 0, "every list caught its own failure and degraded to empty");
+  // Nothing was warmed: that is a red run, not a green one.
+  assert.notEqual(res.headers.get("x-cron-degraded"), null, "an empty TMDB pool must mark the run degraded");
+  assert.equal(JSON.parse(settings.get("cron:lastRun:ratings-sync") ?? "{}").ok, false);
 });
 
 test("ratings pre-warms MDBList through the batch endpoint — one POST per type, ZERO single-item GETs, no OMDB drain", async () => {
@@ -867,6 +986,9 @@ test("ratings pre-warms MDBList through the batch endpoint — one POST per type
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.total, 2);
+  // Control for the degraded pin above: a pool that answered is a green run.
+  assert.equal(res.headers.get("x-cron-degraded"), null);
+  assert.equal(JSON.parse(settings.get("cron:lastRun:ratings-sync") ?? "{}").ok, true);
 
   const mdblistCalls = fetchCalls.filter((u) => u.hostname === "api.mdblist.com");
   assert.deepEqual(
@@ -984,7 +1106,7 @@ test("ratings observes withAdvisoryLock's AbortSignal at every batch boundary (g
   // warm keep running after lock 2008 is released, beside the next cron's copy.
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../src/app/api/sync/ratings/route.ts", import.meta.url), "utf8");
-  assert.match(src, /withAdvisoryLock\(\s*2008,\s*async \(signal\)/, "the lock callback must take the signal");
+  assert.match(src, /withAdvisoryLock\(\s*RATINGS_SYNC_LOCK_ID,\s*async \(signal\)/, "the lock callback must take the signal");
   assert.match(src, /warmBatch\(all, signal\)/, "the signal must reach the per-item pass");
   const warm = src.slice(src.indexOf("async function warmBatch"), src.indexOf("export async function POST"));
   assert.match(warm, /for \([^)]*\) \{\s*(\/\/[^\n]*\n\s*)*if \(signal\.aborted\) break;/, "warmBatch must break on abort at the batch boundary");

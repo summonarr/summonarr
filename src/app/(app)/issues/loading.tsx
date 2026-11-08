@@ -5,11 +5,11 @@
 // layout — rows with a 44px poster thumb inside 14px padding (~96px each) on
 // the left and the sticky 480px detail pane on the right (xl only, like the
 // page).
-import { Bar, ControlRow, SKELETON_CARD, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { Bar, ControlRow, SKELETON_CARD, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle subtitleLines={2} />
       <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
         <ControlRow w={340} />
@@ -46,6 +46,6 @@ export default function Loading() {
           </div>
         </aside>
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

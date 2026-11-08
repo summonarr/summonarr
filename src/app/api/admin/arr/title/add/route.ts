@@ -5,7 +5,7 @@ import { ARR_SERVICE_LABEL } from "@/lib/arr-admin";
 import { arrFailure, arrGate, parseArrId } from "@/lib/arr-admin-http";
 import { parseTitleAdd } from "@/lib/arr-title-add";
 import { TitleExistsError, TitleLookupError, addTitle, loadAddChoices } from "@/lib/arr-title-lifecycle";
-import { auditContext, logAudit } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { invalidateArrLibraryIndexCache } from "@/lib/library-cleanup-arr";
@@ -21,10 +21,11 @@ const ADDS_PER_MIN = 20;
 //       add defaults to preselect, and the arr id when it already has the title.
 //   POST { service, instance, tmdbId, qualityProfileId, rootFolderPath, tags,
 //       search, monitored + minimumAvailability? (Radarr) | monitor +
-//       seriesType? + seasonFolder? (Sonarr) } → 201 { arrId, title }. Every
-//       value must be one the instance offers (400, nothing written); a title
-//       it already has is 409 { arrId }. Audited ARR_TITLE_ADD after the arr
-//       accepted it. No MediaRequest is created — nobody asked for it, so
+//       seriesType? + seasonFolder? (Sonarr) } → 201 { arrId, title } (arrId
+//       null when the arr took the add but named no id, even on a re-read).
+//       Every value must be one the instance offers (400, nothing written); a
+//       title it already has is 409 { arrId }. Audited ARR_TITLE_ADD after the
+//       arr accepted it. No MediaRequest is created — nobody asked for it, so
 //       nobody is notified and no watch grade counts it.
 export const GET = withAdmin(async (req) => {
   const t = translatorForRequest(req);
@@ -42,15 +43,14 @@ export const GET = withAdmin(async (req) => {
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, 16 * 1024);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, 16 * 1024);
+  if (body instanceof NextResponse) return body;
   const target = await arrGate(body.service, body.instance, t);
   if (target instanceof NextResponse) return target;
   const add = parseTitleAdd(target.service, body);
   if (!add) return NextResponse.json({ error: t("apiAdmin.arr.addInvalid") }, { status: 400 });
   if (!checkRateLimit(`arr-title-add:${session.user.id}`, ADDS_PER_MIN, 60_000)) {
-    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
   }
   const service = ARR_SERVICE_LABEL[target.service];
   let result;
@@ -70,10 +70,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // title manager's Remove drops it the same way.
   invalidateNeverWatchedReport();
   void logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email ?? null,
+    ...auditActor(req, session),
     action: "ARR_TITLE_ADD",
-    target: `${target.service}:${target.instance}:${result.arrId}`,
+    // No arr id to name it by: the title's TMDB id does, never a made-up 0.
+    target: `${target.service}:${target.instance}:${result.arrId ?? `tmdb:${add.tmdbId}`}`,
     details: {
       service: target.service,
       instance: target.instance,
@@ -86,7 +86,6 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       search: add.search,
       ...(target.service === "radarr" ? { monitored: add.monitored } : { monitor: add.monitor }),
     },
-    ...auditContext(req, session),
   });
   return NextResponse.json(result, { status: 201 });
 });

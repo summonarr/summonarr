@@ -1,22 +1,13 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef, type CSSProperties, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
 import { LogOut, Bell, GitFork, type IconComponent } from "@/components/icons";
-
-async function signOutAndRedirect(callbackUrl: string) {
-  try {
-    await fetch(withBasePath("/api/auth/sign-out"), { method: "POST", credentials: "include" });
-  } catch {
-    // Best-effort: redirect to the login page even if the request failed.
-  }
-  window.location.href = withBasePath(callbackUrl);
-}
+import { signOutAndRedirect } from "@/components/auth/sign-out";
 import {
   userNavItems,
-  getVisibleAdminItems,
   filterNavByFeatures,
   navItemLabel,
   navItemHref,
@@ -29,6 +20,7 @@ import { PushNotifications } from "@/components/layout/push-notifications";
 import { AppearanceMenu } from "@/components/theme/appearance-menu";
 import { withBasePath } from "@/lib/base-path";
 import { AdminNavGroupList, NavCountBadge, type NavBadges } from "@/components/layout/admin-nav-groups";
+import { visibleAdminNavItems } from "@/components/layout/nav-visibility";
 import {
   Drawer,
   DrawerPortal,
@@ -54,12 +46,7 @@ export function MobileNavDrawer({
   const t = useT();
   const pathname = usePathname();
   const { session } = useSummonarrSession();
-  const role = session?.user?.role;
-  const perms = session?.user?.permissions;
-  const adminItems = filterNavByFeatures(
-    getVisibleAdminItems(perms ? { role, permissions: perms } : role),
-    featureFlags,
-  );
+  const adminItems = visibleAdminNavItems(session?.user, featureFlags);
 
   const browseItems = filterNavByFeatures(
     userNavItems.filter((i) => i.section === "browse"),
@@ -70,9 +57,19 @@ export function MobileNavDrawer({
     featureFlags,
   );
 
+  // A navigation closes the drawer. Keyed on the pathname ALONE: the
+  // callback rides a ref, so a caller passing an inline arrow can't close the
+  // drawer on every re-render (the one that opens it included).
+  const onOpenChangeRef = useRef(onOpenChange);
   useEffect(() => {
-    onOpenChange(false);
-  }, [pathname, onOpenChange]);
+    onOpenChangeRef.current = onOpenChange;
+  });
+  const shownPath = useRef(pathname);
+  useEffect(() => {
+    if (shownPath.current === pathname) return;
+    shownPath.current = pathname;
+    onOpenChangeRef.current(false);
+  }, [pathname]);
 
   // One matcher for every nav surface (nav-items.ts) — this drawer used to
   // carry its own copy that knew about the singular /movie/ detail route while
@@ -136,102 +133,8 @@ export function MobileNavDrawer({
               </>
             )}
 
-            <div
-              style={{
-                marginTop: 16,
-                paddingTop: 16,
-                borderTop: "1px solid var(--ds-border)",
-                display: "flex",
-                flexDirection: "column",
-                gap: 4,
-              }}
-            >
-              <div
-                className="flex items-center gap-3"
-                style={{
-                  padding: "10px 12px",
-                }}
-              >
-                <Bell
-                  className="shrink-0"
-                  style={{
-                    width: 18,
-                    height: 18,
-                    color: "var(--ds-fg-muted)",
-                  }}
-                />
-                <span
-                  className="font-medium flex-1"
-                  style={{ fontSize: 13, color: "var(--ds-fg)" }}
-                >
-                  {t("nav.pushNotifications")}
-                </span>
-                <PushNotifications />
-              </div>
-              {/* standalone: the drawer is a Drawer, not a base-ui Menu — the
-                  menuitemradio form throws "MenuRootContext is missing". */}
-              <AppearanceMenu standalone />
-              <button
-                type="button"
-                onClick={() => signOutAndRedirect("/login")}
-                className="ds-hover-tint flex items-center gap-3 w-full font-medium transition-colors"
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 6,
-                  background: "transparent",
-                  border: 0,
-                  fontSize: 13,
-                  color: "var(--ds-danger)",
-                }}
-              >
-                <LogOut style={{ width: 16, height: 16 }} />
-                {t("nav.signOut")}
-              </button>
-            </div>
-
-            <div
-              style={{
-                marginTop: 16,
-                paddingTop: 14,
-                borderTop: "1px solid var(--ds-border)",
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: 10,
-              }}
-            >
-              <a
-                href="https://github.com/Summonarr/Summonarr"
-                target="_blank"
-                rel="noopener noreferrer"
-                title={t("nav.footer.sourceTitle")}
-                className="flex items-center gap-2 text-[var(--ds-fg-subtle)] hover:text-[var(--ds-fg-muted)] transition-colors"
-              >
-                <GitFork className="h-3 w-3 shrink-0" />
-                <span
-                  className="ds-mono"
-                  style={{ fontSize: 10 }}
-                >
-                  {t("nav.footer.fork")}
-                </span>
-              </a>
-              <a
-                href="https://www.themoviedb.org"
-                target="_blank"
-                rel="noopener noreferrer"
-                title={t("nav.footer.tmdbTitle")}
-                className="flex items-center gap-2 text-[var(--ds-fg-subtle)] hover:text-[var(--ds-fg-muted)] transition-colors"
-              >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={withBasePath("/tmdb-logo.svg")} alt="TMDB" className="h-3 w-auto" />
-                <span
-                  className="ds-mono"
-                  style={{ fontSize: 10 }}
-                >
-                  {t("nav.footer.tmdb")}
-                </span>
-              </a>
-            </div>
+            <DrawerAccountActions />
+            <DrawerCredits />
             {/* No trailing spacer: DrawerContent already pads its bottom by
                 max(1.5rem, safe-area-inset-bottom), and the drawer (z-50)
                 overlays the bottom tab bar (z-40) rather than sitting above it. */}
@@ -239,6 +142,117 @@ export function MobileNavDrawer({
         </DrawerPopup>
       </DrawerPortal>
     </Drawer>
+  );
+}
+
+// The drawer's fixed styles, built once.
+const ACCOUNT_STYLE: CSSProperties = {
+  marginTop: 16,
+  paddingTop: 16,
+  borderTop: "1px solid var(--ds-border)",
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+};
+const CREDITS_STYLE: CSSProperties = {
+  marginTop: 16,
+  paddingTop: 14,
+  borderTop: "1px solid var(--ds-border)",
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: 10,
+};
+const CREDIT_TEXT_STYLE: CSSProperties = { fontSize: 10 };
+
+// Push notifications, the appearance picker and Sign out.
+function DrawerAccountActions() {
+  const t = useT();
+  return (
+    <div style={ACCOUNT_STYLE}>
+      <div
+        className="flex items-center gap-3"
+        style={{
+          padding: "10px 12px",
+        }}
+      >
+        <Bell
+          className="shrink-0"
+          style={{
+            width: 18,
+            height: 18,
+            color: "var(--ds-fg-muted)",
+          }}
+        />
+        <span
+          className="font-medium flex-1"
+          style={{ fontSize: 13, color: "var(--ds-fg)" }}
+        >
+          {t("nav.pushNotifications")}
+        </span>
+        <PushNotifications />
+      </div>
+      {/* standalone: the drawer is a Drawer, not a base-ui Menu — the
+          menuitemradio form throws "MenuRootContext is missing". */}
+      <AppearanceMenu standalone />
+      <button
+        type="button"
+        onClick={() => signOutAndRedirect("/login")}
+        className="ds-hover-tint flex items-center gap-3 w-full font-medium transition-colors"
+        style={{
+          padding: "10px 12px",
+          borderRadius: 6,
+          background: "transparent",
+          border: 0,
+          fontSize: 13,
+          color: "var(--ds-danger)",
+        }}
+      >
+        <LogOut style={{ width: 16, height: 16 }} />
+        {t("nav.signOut")}
+      </button>
+    </div>
+  );
+}
+
+function CreditLink({ href, title, icon, children }: { href: string; title: string; icon: ReactNode; children: ReactNode }) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={title}
+      className="flex items-center gap-2 text-[var(--ds-fg-subtle)] hover:text-[var(--ds-fg-muted)] transition-colors"
+    >
+      {icon}
+      <span className="ds-mono" style={CREDIT_TEXT_STYLE}>
+        {children}
+      </span>
+    </a>
+  );
+}
+
+// The source and TMDB credits.
+function DrawerCredits() {
+  const t = useT();
+  return (
+    <div style={CREDITS_STYLE}>
+      <CreditLink
+        href="https://github.com/Summonarr/Summonarr"
+        title={t("nav.footer.sourceTitle")}
+        icon={<GitFork className="h-3 w-3 shrink-0" />}
+      >
+        {t("nav.footer.fork")}
+      </CreditLink>
+      <CreditLink
+        href="https://www.themoviedb.org"
+        title={t("nav.footer.tmdbTitle")}
+        // eslint-disable-next-line @next/next/no-img-element
+        icon={<img src={withBasePath("/tmdb-logo.svg")} alt="TMDB" className="h-3 w-auto" />}
+      >
+        {t("nav.footer.tmdb")}
+      </CreditLink>
+    </div>
   );
 }
 

@@ -4,81 +4,59 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Plus, Check, Loader2 } from "@/components/icons";
 import type { TmdbMedia } from "@/lib/tmdb-types";
-import { withBasePath } from "@/lib/base-path";
 import { DetailActionButton } from "./detail-action-button";
 import { useT } from "@/components/i18n/i18n-provider";
-
-// Must match MAX_ITEMS in src/app/api/requests/bulk/route.ts. The route rejects
-// a larger batch outright (400 "Too many items"), so we send the list in
-// chunks of this size, one after another. The route's limit of 10 calls per
-// minute per user still allows 500 items per click — far more than any
-// TMDB collection has.
-const BULK_MAX_ITEMS = 50;
+import { useAsyncAction } from "@/hooks/use-async-action";
+import {
+  collectionRequestOutcome,
+  missingFromCollection,
+  postBulkChunk,
+  requestInChunks,
+  toBulkItem,
+  type CollectionRequestOutcome,
+} from "./collection-request";
 
 // "Request All (N)" button for a TMDB collection. The items already carry
-// availability flags from the server, so we work out which are missing here;
-// the server checks again when the request arrives.
+// availability flags from the server, so we work out which are missing here
+// (collection-request.ts); the server checks again when the request arrives.
 export function CollectionRequestAllButton({
   items,
-  canRequest = true,
+  declinedKeys = [],
+  canRequest,
 }: {
   items: TmdbMedia[];
-  canRequest?: boolean;
+  // `${mediaType}:${id}` of the viewer's permanently declined titles
+  // (permanentlyDeclinedKeys): the route skips them on every click.
+  declinedKeys?: string[];
+  canRequest: boolean;
 }) {
   const router = useRouter();
   const t = useT();
-  const [state, setState] = useState<"idle" | "loading" | "done" | "error">("idle");
-  const [msg, setMsg] = useState("");
+  const action = useAsyncAction();
+  const [result, setResult] = useState<CollectionRequestOutcome | null>(null);
+  const missing = missingFromCollection(items, declinedKeys);
 
-  // Skip titles already in the library, ones THIS user already requested, and
-  // blacklisted ones. Titles other users requested are included on purpose:
-  // the bulk route copies their status, so this user also gets the "now
-  // available" notification.
-  const missing = items.filter(
-    (m) => !m.plexAvailable && !m.jellyfinAvailable && !m.requestedByMe && !m.blacklisted,
-  );
-
-  if (!canRequest || missing.length === 0) return null;
+  // After a full success the refresh empties `missing`; the outcome stays on
+  // screen (and in the live region) instead of vanishing with the button.
+  if (!canRequest || (missing.length === 0 && result === null)) return null;
 
   async function requestAll() {
-    setState("loading");
-    setMsg("");
-    const payload = missing.map((m) => ({
-      tmdbId: m.id,
-      mediaType: m.mediaType === "movie" ? "MOVIE" : "TV",
-    }));
-    let created = 0;
-    let sent = 0;
-    // A partial failure (chunk k of n rejected) still refreshes: the rows the
-    // earlier chunks created are what the click was for.
-    const fail = (reason: string) => {
-      setMsg(sent > 0 ? t("request.collection.partial", { created, total: missing.length, reason }) : reason);
-      setState("error");
-      if (sent > 0) router.refresh();
-    };
-    try {
-      for (let i = 0; i < payload.length; i += BULK_MAX_ITEMS) {
-        const chunk = payload.slice(i, i + BULK_MAX_ITEMS);
-        const res = await fetch(withBasePath("/api/requests/bulk"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ items: chunk }),
-        });
-        const data: { created?: number; error?: string } = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          fail(data.error ?? t("request.somethingWrong"));
-          return;
-        }
-        created += data.created ?? 0;
-        sent += chunk.length;
-      }
-      setMsg(t("request.collection.done", { created, total: missing.length }));
-      setState("done");
-      router.refresh();
-    } catch {
-      fail(sent > 0 ? t("request.collection.networkErrorLower") : t("request.networkError"));
-    }
+    setResult(null);
+    const payload = missing.map(toBulkItem);
+    const summary = await action.run(
+      "request-all",
+      (signal) => requestInChunks(payload, (chunk) => postBulkChunk(chunk, signal, t("request.somethingWrong"))),
+      { ifBusy: "skip" },
+    );
+    if (!summary) return; // the page went away mid-run
+    const outcome = collectionRequestOutcome(summary, t);
+    setResult(outcome);
+    if (outcome.refresh) router.refresh();
   }
+
+  const state = action.busy("request-all") ? "loading" : (result?.state ?? "idle");
+  const msg = result?.message ?? "";
+  const showMsg = (state === "done" || state === "error") && !!msg;
 
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -87,7 +65,7 @@ export function CollectionRequestAllButton({
         variant={state === "done" ? "accent-soft" : "primary"}
         size="sm"
         onClick={requestAll}
-        disabled={state === "loading" || state === "done"}
+        disabled={state === "loading" || state === "done" || missing.length === 0}
         busy={state === "loading"}
       >
         {state === "loading" ? (
@@ -99,8 +77,15 @@ export function CollectionRequestAllButton({
         )}
         {state === "done" ? t("request.collection.requested") : t("request.collection.requestAll", { count: missing.length })}
       </DetailActionButton>
-      {(state === "done" || state === "error") && msg && (
+      {/* The live region is always mounted (visually hidden, out of the flex
+          flow), so it exists before the outcome lands and screen readers
+          announce it. The visible line below is the same text. */}
+      <span className="sr-only" role="status">
+        {showMsg ? msg : ""}
+      </span>
+      {showMsg && (
         <span
+          aria-hidden="true"
           className="ds-mono"
           style={{ fontSize: 11, color: state === "error" ? "var(--ds-danger)" : "var(--ds-fg-subtle)" }}
         >

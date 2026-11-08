@@ -93,13 +93,30 @@ export interface WebhookConfig { url: string; template: string | null; headerNam
 export interface NtfyConfig { url: string; topic: string; priority: number; attachPoster: boolean }
 export interface GotifyConfig { url: string; priority: number }
 export type AgentConfig = WebhookConfig | NtfyConfig | GotifyConfig;
+// A kind together with the config shape that kind validates to, so a reader can
+// narrow on `kind` instead of casting `config`.
+export type KindConfig =
+  | { kind: "webhook"; config: WebhookConfig }
+  | { kind: "ntfy"; config: NtfyConfig }
+  | { kind: "gotify"; config: GotifyConfig };
 
 export const MAX_TEMPLATE_CHARS = 8_000;
 const TOPIC_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const HEADER_NAME_RE = /^[A-Za-z0-9-]{1,64}$/;
 // Headers the transport owns. Letting a template's auth header override one of
-// these would break the request or smuggle a second value.
-const RESERVED_HEADERS = new Set(["host", "content-type", "content-length", "transfer-encoding", "connection", "cookie", "user-agent"]);
+// these would break the request or smuggle a second value. Idempotency-Key
+// carries the webhook's delivery id (WEBHOOK_DELIVERY_ID_HEADER). The
+// hop-by-hop and connection-control headers (and every Proxy-*) are refused at
+// save: the HTTP client refuses or misbehaves on them at send, which surfaced
+// only as an opaque "request could not be built" on every delivery.
+const RESERVED_HEADERS = new Set([
+  "host", "content-type", "content-length", "transfer-encoding", "connection", "cookie", "user-agent", "idempotency-key",
+  "keep-alive", "upgrade", "expect", "te", "trailer",
+]);
+const isReservedHeader = (name: string) => {
+  const lower = name.toLowerCase();
+  return RESERVED_HEADERS.has(lower) || lower.startsWith("proxy-");
+};
 
 /** Validates an admin-entered channel URL: absolute http(s), no credentials in it. */
 export function validateAgentUrl(raw: unknown): string | null {
@@ -126,9 +143,19 @@ function intIn(raw: unknown, min: number, max: number, fallback: number): number
 }
 
 export type ConfigResult = { ok: true; config: AgentConfig } | { ok: false; error: string };
+export type KindConfigResult = { ok: true; value: KindConfig } | { ok: false; error: string };
 
-/** Error strings are i18n keys under settingsForms.agents.error.*. */
+export function isAgentKind(v: unknown): v is AgentKind {
+  return typeof v === "string" && (AGENT_KINDS as readonly string[]).includes(v);
+}
+
+/** Error strings are i18n keys under apiAdmin.agents.error.*. */
 export function validateAgentConfig(kind: AgentKind, raw: unknown): ConfigResult {
+  const r = validateKindConfig(kind, raw);
+  return r.ok ? { ok: true, config: r.value.config } : r;
+}
+
+function validateKindConfig(kind: AgentKind, raw: unknown): KindConfigResult {
   const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const url = validateAgentUrl(r.url);
   if (!url) return { ok: false, error: "url" };
@@ -141,44 +168,72 @@ export function validateAgentConfig(kind: AgentKind, raw: unknown): ConfigResult
   // The normalized URL has no credentials, so a `?`/`#` can only be the
   // delimiter itself (an escaped one is `%3F`/`%23`).
   if (kind !== "webhook" && /[?#]/.test(url)) return { ok: false, error: "url" };
-  if (kind === "webhook") {
-    const headerName = typeof r.headerName === "string" && r.headerName.trim() ? r.headerName.trim() : "Authorization";
-    if (!HEADER_NAME_RE.test(headerName) || RESERVED_HEADERS.has(headerName.toLowerCase())) return { ok: false, error: "headerName" };
-    let template: string | null = null;
-    if (typeof r.template === "string" && r.template.trim()) {
-      template = r.template;
-      if (template.length > MAX_TEMPLATE_CHARS) return { ok: false, error: "templateTooLong" };
-      // A template must render to valid JSON for BOTH samples, or some delivery
-      // would be a malformed body the receiver rejects: the full sample catches a
-      // placeholder outside any JSON string, the sparse one (every nullable field
-      // null — `media` absent, no text, no votes) catches `{"id": {{media.tmdbId}}}`,
-      // which the full sample renders as a bare number and the live
-      // `arr.manual_interaction` event (no media) renders as `{"id": }`.
-      try {
-        for (const [ev, ctx] of TEMPLATE_SAMPLES) JSON.parse(renderTemplate(template, buildWebhookPayload(ev, ctx)));
-      } catch {
-        return { ok: false, error: "templateInvalid" };
-      }
-    }
-    return { ok: true, config: { url, template, headerName } };
-  }
-  if (kind === "ntfy") {
-    const topic = typeof r.topic === "string" ? r.topic.trim() : "";
-    if (!TOPIC_RE.test(topic)) return { ok: false, error: "topic" };
-    const priority = intIn(r.priority, 1, 5, 3);
-    if (priority === null) return { ok: false, error: "priority" };
-    return { ok: true, config: { url, topic, priority, attachPoster: r.attachPoster === true } };
-  }
-  const priority = intIn(r.priority, 0, 10, 5);
-  if (priority === null) return { ok: false, error: "priority" };
-  return { ok: true, config: { url, priority } };
+  if (kind === "webhook") return validateWebhookConfig(url, r);
+  if (kind === "ntfy") return validateNtfyConfig(url, r);
+  return validateGotifyConfig(url, r);
 }
 
-/** Reads a stored config defensively; a row that no longer validates is skipped. */
-export function parseStoredConfig(kind: string, raw: unknown): AgentConfig | null {
-  if (!(AGENT_KINDS as readonly string[]).includes(kind)) return null;
-  const r = validateAgentConfig(kind as AgentKind, raw);
-  return r.ok ? r.config : null;
+function validateWebhookConfig(url: string, r: Record<string, unknown>): KindConfigResult {
+  const headerName = typeof r.headerName === "string" && r.headerName.trim() ? r.headerName.trim() : "Authorization";
+  if (!HEADER_NAME_RE.test(headerName) || isReservedHeader(headerName)) return { ok: false, error: "headerName" };
+  let template: string | null = null;
+  if (typeof r.template === "string" && r.template.trim()) {
+    template = r.template;
+    if (template.length > MAX_TEMPLATE_CHARS) return { ok: false, error: "templateTooLong" };
+    if (!templateRendersJson(template)) return { ok: false, error: "templateInvalid" };
+  }
+  return { ok: true, value: { kind: "webhook", config: { url, template, headerName } } };
+}
+
+function validateNtfyConfig(url: string, r: Record<string, unknown>): KindConfigResult {
+  const topic = typeof r.topic === "string" ? r.topic.trim() : "";
+  if (!TOPIC_RE.test(topic)) return { ok: false, error: "topic" };
+  const priority = intIn(r.priority, 1, 5, 3);
+  if (priority === null) return { ok: false, error: "priority" };
+  return { ok: true, value: { kind: "ntfy", config: { url, topic, priority, attachPoster: r.attachPoster === true } } };
+}
+
+function validateGotifyConfig(url: string, r: Record<string, unknown>): KindConfigResult {
+  const priority = intIn(r.priority, 0, 10, 5);
+  if (priority === null) return { ok: false, error: "priority" };
+  return { ok: true, value: { kind: "gotify", config: { url, priority } } };
+}
+
+// A template must render to valid JSON for EVERY sample, or some delivery
+// would be a malformed body the receiver rejects: the full samples catch a
+// placeholder outside any JSON string (every field set, text where the live
+// value is text — `[{{arr.release}}]` is `[]` only while it is empty), the
+// sparse one (every nullable field null — `media` absent, no text, no votes)
+// catches `{"id": {{media.tmdbId}}}`, which a full sample renders as a bare
+// number and the live `arr.manual_interaction` event (no media) renders as
+// `{"id": }`. The answer depends on the template text alone, so it is kept:
+// every stored row is re-validated on each dispatch, and the sample renders
+// are the costly part.
+const TEMPLATE_VERDICT_MAX = 100;
+const templateVerdicts = new Map<string, boolean>();
+
+function templateRendersJson(template: string): boolean {
+  const known = templateVerdicts.get(template);
+  if (known !== undefined) return known;
+  let ok = true;
+  try {
+    for (const [ev, ctx] of TEMPLATE_SAMPLES) JSON.parse(renderTemplate(template, buildWebhookPayload(ev, ctx)));
+  } catch {
+    ok = false;
+  }
+  if (templateVerdicts.size >= TEMPLATE_VERDICT_MAX) templateVerdicts.clear();
+  templateVerdicts.set(template, ok);
+  return ok;
+}
+
+/**
+ * Reads a stored row's kind + config defensively. A row that no longer
+ * validates is skipped by the dispatcher; `error` says why (the same i18n key
+ * the save would have answered, or "kind" for an unknown kind).
+ */
+export function parseStoredConfig(kind: string, raw: unknown): KindConfigResult {
+  if (!isAgentKind(kind)) return { ok: false, error: "kind" };
+  return validateKindConfig(kind, raw);
 }
 
 export function sanitizeEvents(raw: unknown): SubscribableEvent[] | null {
@@ -197,6 +252,12 @@ export const WEBHOOK_PAYLOAD_VERSION = 1;
 const TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w500";
 
 export interface PayloadContext {
+  /**
+   * This event's delivery id, minted once per event by the dispatcher and kept
+   * on every retry, so a receiver can drop a retry it already processed.
+   * Absent only outside a real delivery (the validation samples, tests).
+   */
+  id?: string;
   /** Absolute app root, no trailing slash; null when AUTH_URL is unusable. */
   siteUrl: string | null;
   /** Rendered, localized headline ("Now available: Dune"). */
@@ -210,6 +271,9 @@ export interface PayloadContext {
 
 export interface WebhookPayload {
   version: number;
+  // Additive within version 1: the delivery id (PayloadContext.id) — identical
+  // on every retry of one event. Also sent as the webhook's Idempotency-Key.
+  id: string | null;
   event: NotifyEventKey;
   timestamp: string;
   title: string;
@@ -275,6 +339,7 @@ export function eventLink(ev: NotifyEvent, siteUrl: string | null): string | nul
 export function buildWebhookPayload(ev: NotifyEvent, ctx: PayloadContext): WebhookPayload {
   return {
     version: WEBHOOK_PAYLOAD_VERSION,
+    id: ctx.id ?? null,
     event: ev.event,
     timestamp: ctx.timestamp,
     title: ctx.title,
@@ -317,7 +382,7 @@ export function buildWebhookPayload(ev: NotifyEvent, ctx: PayloadContext): Webho
 
 // Every field a template may reference. Anything else renders as an empty string.
 export const TEMPLATE_FIELDS = [
-  "event", "timestamp", "title", "message", "url",
+  "id", "event", "timestamp", "title", "message", "url",
   "media.type", "media.tmdbId", "media.title", "media.year", "media.posterUrl",
   "request.id", "request.instance", "issue.id", "issue.type",
   "actor.name", "text", "votes",
@@ -416,6 +481,10 @@ export function classifyStatus(status: number): DeliveryVerdict {
 // Delay before each RETRY (attempt 1 is immediate). Three retries, then give up.
 export const RETRY_DELAYS_MS = [30_000, 120_000, 600_000] as const;
 
+// The webhook kind sends the payload's delivery id under this header too (a
+// reserved header name, so an admin's auth header can't collide with it).
+export const WEBHOOK_DELIVERY_ID_HEADER = "Idempotency-Key";
+
 // ─── Sample (template validation + the Test button) ─────────────────────────
 
 export const SAMPLE_EVENT: NotifyEvent = {
@@ -427,6 +496,7 @@ export const SAMPLE_EVENT: NotifyEvent = {
 };
 
 const SAMPLE_CONTEXT: PayloadContext = {
+  id: "00000000-0000-4000-8000-000000000000",
   siteUrl: "https://summonarr.example",
   title: "Test notification",
   message: "Your channel is working.",
@@ -441,7 +511,34 @@ const SAMPLE_CONTEXT: PayloadContext = {
 const SPARSE_SAMPLE_EVENT: NotifyEvent = { event: "agent.test", actor: null, text: null, votes: null };
 const SPARSE_SAMPLE_CONTEXT: PayloadContext = { siteUrl: null, title: "", message: "", mediaTitle: null, timestamp: "" };
 
+// Validation only (the Test button sends SAMPLE_EVENT): every field set, the
+// issue, votes and arr detail included, and every field that is TEXT on a live
+// event is non-numeric text here. Without it those placeholders rendered "" in
+// both samples, so `{"r": [{{arr.release}}]}` validated as `[]` and then broke
+// on every real arr event.
+const FULL_SAMPLE_EVENT: NotifyEvent = {
+  ...SAMPLE_EVENT,
+  request: { id: "sample-request", instance: "sample-instance" },
+  issue: { id: "sample-issue", type: "VIDEO" },
+  votes: 3,
+  arr: {
+    service: "sonarr",
+    instance: "sample-instance",
+    instanceName: "Sample Instance",
+    path: "/data/sample",
+    freeBytes: 50_000_000_000,
+    totalBytes: 1_000_000_000_000,
+    freePercent: 5,
+    thresholdPercent: 10,
+    release: "Some.Release-GRP",
+    downloadId: "SABnzbd_nzo_sample",
+    episodes: 2,
+    arrId: 42,
+  },
+};
+
 const TEMPLATE_SAMPLES: ReadonlyArray<readonly [NotifyEvent, PayloadContext]> = [
   [SAMPLE_EVENT, SAMPLE_CONTEXT],
+  [FULL_SAMPLE_EVENT, SAMPLE_CONTEXT],
   [SPARSE_SAMPLE_EVENT, SPARSE_SAMPLE_CONTEXT],
 ];

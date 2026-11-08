@@ -4,7 +4,8 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped, readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { revokeOtherUserSessions } from "@/lib/auth";
+import { revokeOtherUserSessionsInTx } from "@/lib/auth";
+import { markSessionForceRevoked } from "@/lib/session-revocation";
 import { dropRecoveryCodesIfNoFactorInTx, lockUserMfaInTx, sanitizePasskeyName } from "@/lib/mfa/mfa-store";
 import { mfaReauthStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
@@ -90,11 +91,17 @@ export const DELETE = withAuth(async (
     await lockUserMfaInTx(tx, user.id);
     const res = await tx.webAuthnCredential.deleteMany({ where: { id, userId: user.id } });
     const noneLeft = res.count > 0 ? await dropRecoveryCodesIfNoFactorInTx(tx, user.id) : false;
-    return { removed: res.count, noneLeft };
+    // The last factor went: sign out the OTHER sessions in this transaction,
+    // so a failed sign-out can't 500 a removal that already committed and
+    // leave those sessions live on a now password-only account.
+    const revokedSessionIds = noneLeft ? await revokeOtherUserSessionsInTx(tx, user.id, session.sessionId) : [];
+    return { removed: res.count, noneLeft, revokedSessionIds };
   });
   if (outcome.removed === 0) return NextResponse.json({ error: t("apiAuth.common.notFound") }, { status: 404 });
 
-  const revoked = outcome.noneLeft ? await revokeOtherUserSessions(user.id, session.sessionId) : 0;
+  // Committed: only now mark the revoked sessions in memory (guardrail 27).
+  for (const sessionId of outcome.revokedSessionIds) markSessionForceRevoked(sessionId);
+  const revoked = outcome.revokedSessionIds.length;
   void notifyMfaSecurityEvent(user.id, "passkey-removed");
   void logAudit({
     userId: user.id,

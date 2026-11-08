@@ -15,9 +15,12 @@ const SETTING_KEYS = [
   "trashSyncQualityProfiles",
   "trashSyncNaming",
   "trashSyncQualitySizes",
-  // Stamped by refreshTrashCatalog on every catalog refresh (src/lib/trash.ts);
-  // read here so the card can show "Last refreshed … ago".
+  // Stamped by runTrashSync (src/lib/trash.ts) when its hourly gate refreshes
+  // the catalog; read here so the card can show "Last refreshed … ago". The
+  // card re-reads this page after Sync Now or Refresh Catalog.
   "trashLastRefreshAt",
+  // Only whether one is stored reaches the token card, never the value.
+  "trashGithubToken",
 ] as const;
 
 export default async function TrashGuidesSettingsPage() {
@@ -41,7 +44,7 @@ export default async function TrashGuidesSettingsPage() {
   return (
     <div className="space-y-6 max-w-6xl">
       <SyncSettingsCard initialSettings={settings} lastRefreshAt={map.trashLastRefreshAt ?? null} />
-      <GithubTokenCard />
+      <GithubTokenCard tokenConfigured={Boolean(map.trashGithubToken)} />
     </div>
   );
 }

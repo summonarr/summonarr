@@ -24,8 +24,8 @@
 //      chunked variant consumes its limiter on chunk 0 only, for the same reason:
 //      a per-chunk limiter would 429 an honest multi-chunk restore partway.
 //
-// /api/events is DB-checked-auth (guardrail 29 reasoning: it is reachable on the
-// prefetch path proxy.ts skips, so a JWT-only check would honour a revoked or
+// /api/events is DB-checked-auth (guardrail 29 reasoning: the route must not
+// lean on the proxy alone, so a JWT-only check would honour a revoked or
 // demoted session until its natural expiry) and connection-capped. /api/openapi
 // is ADMIN-only and must not embed live secrets.
 //
@@ -224,6 +224,10 @@ beforeEach(() => {
   warns.length = 0;
   errors.length = 0;
   process.env.BACKUP_DB_PASSWORD = GOOD_PASSWORD;
+  // TRUST_PROXY=true (top of file) makes this an internet-facing instance, where
+  // a first-run restore needs the explicit opt-in. Opted in here so each test
+  // reaches the gate it is about; the opt-in itself has its own tests below.
+  process.env.SUMMONARR_ALLOW_SETUP_RESTORE = "true";
 });
 
 // ── 1: the setup gate slams shut ─────────────────────────────────────────────
@@ -324,29 +328,41 @@ test("a throttled setup/import never reaches the gate transaction", async () => 
 
 // ── setup/import-chunk ───────────────────────────────────────────────────────
 
-// NOTE the status divergence, pinned deliberately: the single-shot import
-// answers 409 while the chunked one answers 403 for the SAME closed-gate
-// condition. Both refuse, which is what matters, but a client switching between
-// the two transports sees different codes — so this is documented rather than
-// silently harmonised.
-test("import-chunk refuses with 403 once the instance has a user", async () => {
+// Both transports share one gate (backup-routes.ts), so they answer alike: they
+// used to diverge (409 vs 403) because only the chunked route checked the
+// internet-facing opt-in itself.
+test("import-chunk refuses with 409 once the instance has a user", async () => {
   userCount = 1;
   const res = await doChunk(chunkHeaders());
-  assert.equal(res.status, 403);
+  assert.equal(res.status, 409);
+  assert.match((await res.json()).error, /fresh server with no users/i);
 });
 
-test("import-chunk refuses with 403 once setup_completed_at is set", async () => {
+test("import-chunk refuses with 409 once setup_completed_at is set", async () => {
   settings.set("setup_completed_at", "2026-01-01T00:00:00Z");
-  assert.equal((await doChunk(chunkHeaders())).status, 403);
+  assert.equal((await doChunk(chunkHeaders())).status, 409);
 });
 
-test("the two setup transports both REFUSE a closed gate, even though the codes differ", async () => {
+test("the two setup transports refuse a closed gate with the same code", async () => {
   userCount = 1;
   const single = await doImport();
   const chunked = await doChunk(chunkHeaders());
-  assert.ok(single.status >= 400 && chunked.status >= 400, "both must refuse");
   assert.equal(single.status, 409);
-  assert.equal(chunked.status, 403);
+  assert.equal(chunked.status, 409);
+});
+
+test("an internet-facing instance without the opt-in refuses BOTH transports with 403, before the gate transaction", async () => {
+  // Pre-auth restore authenticates with BACKUP_DB_PASSWORD alone; behind a
+  // public proxy it needs SUMMONARR_ALLOW_SETUP_RESTORE. Checked first, so an
+  // unauthenticated caller gets no lock-43 contention and no DB reads.
+  delete process.env.SUMMONARR_ALLOW_SETUP_RESTORE;
+  userCount = 1; // even a closed gate answers the opt-in refusal first
+  for (const res of [await doImport(), await doChunk(chunkHeaders())]) {
+    assert.equal(res.status, 403);
+    assert.match((await res.json()).error, /SUMMONARR_ALLOW_SETUP_RESTORE/);
+  }
+  assert.equal(opsOf("$transaction").length, 0);
+  assert.deepEqual(advisoryLocks, []);
 });
 
 for (const [label, over] of [
@@ -372,6 +388,41 @@ test("a NON-ZERO chunk with no active session is 409, not a silent accept", asyn
   assert.match((await res.json()).error, /start at chunk 0|no active upload/i);
 });
 
+test("import-chunk refuses a missing or malformed chunk header with its badHeaders 400 — never read as chunk 0, no rate token, no gate", async () => {
+  // Number("") is 0: a request with no X-Chunk-Index used to count as chunk 0,
+  // spend the attempt and open a session.
+  const ip = "203.0.113.211";
+  const cases: Array<Record<string, string | undefined>> = [
+    { "x-chunk-index": undefined },
+    { "x-chunk-index": "" },
+    { "x-chunk-index": "-1" },
+    { "x-chunk-index": "1.5" },
+    { "x-chunk-index": "0x10" },
+    { "x-chunk-total": undefined },
+    { "x-chunk-total": "0" },
+    { "x-file-size": "" },
+    { "x-file-size": "1e3" },
+    { "x-upload-id": "" },
+  ];
+  for (const over of cases) {
+    const headers: Record<string, string> = { ...chunkHeaders(), "x-forwarded-for": ip };
+    for (const [k, v] of Object.entries(over)) {
+      if (v === undefined) delete headers[k];
+      else headers[k] = v;
+    }
+    const res = await inScope(() => setupChunk.POST(chunkReq(headers)));
+    assert.equal(res.status, 400, JSON.stringify(over));
+    assert.deepEqual(await res.json(), { error: "Missing or invalid upload headers." }, JSON.stringify(over));
+  }
+  assert.deepEqual(advisoryLocks, [], "no request reached the setup gate");
+  const valid = chunkHeaders({ "x-forwarded-for": ip });
+  const ok = await doChunk(valid);
+  assert.equal(ok.status, 200, "the malformed requests spent none of the IP's chunk-0 budget");
+  await inScope(() => setupChunk.DELETE(new NextRequest("http://localhost:3000/api/setup/import-chunk", {
+    method: "DELETE", headers: { "x-upload-id": valid["x-upload-id"] },
+  })));
+});
+
 test("import-chunk consumes its rate limiter on CHUNK 0 only", async () => {
   // A real backup is many chunks; a per-chunk limiter would 429 an honest
   // restore partway through and strand a half-uploaded session.
@@ -379,6 +430,46 @@ test("import-chunk consumes its rate limiter on CHUNK 0 only", async () => {
   for (let i = 0; i < 12; i++) {
     const res = await doChunk(chunkHeaders({ "x-chunk-index": "3", "x-forwarded-for": ip }));
     assert.notEqual(res.status, 429, `non-zero chunk ${i + 1} must not be rate-limited`);
+  }
+});
+
+test("import-chunk refuses a chunked over-cap body without buffering it, and frees the upload slot", async () => {
+  // checkBodySize only sees a declared Content-Length. A chunked body used to be
+  // read whole by req.arrayBuffer() before the size check — on a route that is
+  // unauthenticated while the first-run gate is open.
+  process.env.SUMMONARR_ALLOW_SETUP_RESTORE = "true";
+  try {
+    const MiB = 1024 * 1024;
+    let pulls = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls++;
+        controller.enqueue(new Uint8Array(MiB));
+        if (pulls >= 64) controller.close();
+      },
+    }, { highWaterMark: 0 });
+    const headers = chunkHeaders({ "x-file-size": String(64 * MiB), "x-chunk-total": "1" });
+    const req = new NextRequest("http://localhost:3000/api/setup/import-chunk", {
+      method: "POST",
+      headers: { "x-forwarded-for": freshIp(), ...headers },
+      body: stream,
+      duplex: "half",
+    } as unknown as ConstructorParameters<typeof NextRequest>[1]);
+    assert.equal(req.headers.get("content-length"), null);
+    const res = await inScope(() => setupChunk.POST(req));
+    assert.equal(res.status, 413);
+    assert.ok(pulls <= 24, `read ${pulls} MiB of a chunk capped at 20 MiB`);
+
+    // The slot was released: a fresh upload's chunk 0 is not "in progress".
+    const fresh = chunkHeaders();
+    const next = await doChunk(fresh);
+    assert.notEqual(next.status, 409);
+    assert.equal(next.status, 200);
+    await inScope(() => setupChunk.DELETE(new NextRequest("http://localhost:3000/api/setup/import-chunk", {
+      method: "DELETE", headers: { "x-upload-id": fresh["x-upload-id"] },
+    })));
+  } finally {
+    delete process.env.SUMMONARR_ALLOW_SETUP_RESTORE;
   }
 });
 
@@ -500,6 +591,24 @@ test("events: a plain USER never receives another user's request:* frame (the by
   assert.deepEqual(frames.map((f) => JSON.parse(f)), [
     { type: "connected" },
     { type: "request:new", requestId: "r-mine" },
+  ]);
+});
+
+test("events: an inbox event (request:updated) says whether it is about the viewer — `own`, never the other user's id", async () => {
+  // A request manager receives every request:* frame; the bell re-fetches the
+  // inbox only for its own (an inbox row exists only for the requester).
+  const token = await mintSession({ permissions: Permission.MANAGE_REQUESTS });
+  const res = await inScope(() => events.GET(), `${COOKIE}=${token}`);
+  const me = `u-${seq}`;
+  emitSSE({ type: "request:updated", requestId: "r-other", status: "APPROVED", userId: "someone-else" });
+  emitSSE({ type: "request:updated", requestId: "r-mine", status: "APPROVED", userId: me });
+  emitSSE({ type: "request:new", requestId: "r-new", userId: "someone-else" });
+  const frames = await readFrames(res, 4);
+  assert.deepEqual(frames.map((f) => JSON.parse(f)), [
+    { type: "connected" },
+    { type: "request:updated", requestId: "r-other", status: "APPROVED", own: false },
+    { type: "request:updated", requestId: "r-mine", status: "APPROVED", own: true },
+    { type: "request:new", requestId: "r-new" }, // not an inbox event: unchanged
   ]);
 });
 

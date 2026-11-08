@@ -155,6 +155,11 @@ shadowPrismaModel(prisma, "user", {
     const u = usersById.get(args.where.id);
     return u ? { ...u } : null;
   },
+  // The admin notify fan-out's push channel reads the active users first and
+  // keeps the permission holders (push.ts), then reads their devices — none
+  // here, so it still stops before any network call.
+  findMany: async () =>
+    [...usersById].filter(([, u]) => u.deactivatedAt === null).map(([id, u]) => ({ id, ...u })),
   update: async () => ({}),
 });
 
@@ -194,6 +199,7 @@ const COOKIE = getSessionCookieName();
 
 // ── business-model stubs ────────────────────────────────────────────────────
 const settings = new Map<string, string>();
+let claimThrows = false; // the claim write fails (a transient DB error after the vote committed)
 let claimCount = 1; // setting.createMany({skipDuplicates}) result — 1 ⇒ this caller won the one-shot claim
 const settingModel = {
   findUnique: async (args: { where: { key: string } }) => {
@@ -201,19 +207,32 @@ const settingModel = {
     const v = settings.get(args.where.key);
     return v === undefined ? null : { key: args.where.key, value: v };
   },
-  findMany: async (args: { where: { key: { in: string[] } } }) => {
+  upsert: async (args: { where: { key: string }; create: { key: string; value: string }; update: { value: string } }) => {
+    rec("setting.upsert", args);
+    settings.set(args.where.key, args.create.value);
+    return { key: args.where.key, value: args.create.value };
+  },
+  findMany: async (args: { where: { key: { in?: string[]; startsWith?: string } } }) => {
     rec("setting.findMany", args);
-    return args.where.key.in
+    const k = args.where.key;
+    if (k.startsWith !== undefined) {
+      return [...settings.entries()].filter(([key]) => key.startsWith(k.startsWith!)).map(([key, value]) => ({ key, value }));
+    }
+    return (k.in ?? [])
       .filter((k) => settings.has(k))
       .map((k) => ({ key: k, value: settings.get(k) }));
   },
   createMany: async (args: { data: { key: string; value: string }[]; skipDuplicates?: boolean }) => {
     rec("setting.createMany", args);
+    if (claimThrows) throw new Error("claim write failed");
     return { count: claimCount };
   },
-  deleteMany: async (args: { where: { key: string } }) => {
+  deleteMany: async (args: { where: { key: string | { in: string[] } } }) => {
     rec("setting.deleteMany", args);
-    return { count: 1 };
+    const keys = typeof args.where.key === "string" ? [args.where.key] : args.where.key.in;
+    let count = 0;
+    for (const k of keys) if (k.startsWith("deletionVotePending:")) count += settings.delete(k) ? 1 : 0; else count++;
+    return { count };
   },
 };
 shadowPrismaModel(prisma, "setting", settingModel);
@@ -250,14 +269,24 @@ const deletionVoteModel = {
       ? groupRows
       : groupRows.map((g) => ({ tmdbId: g.tmdbId, mediaType: g.mediaType, _count: g._count }));
   },
-  findMany: async (args: { distinct?: string[]; where?: { userId?: unknown } }) => {
+  findMany: async (args: { distinct?: string[]; take?: number; where?: { userId?: unknown; tmdbId?: number; mediaType?: string } }) => {
     rec("deletionVote.findMany", args);
-    if (args.distinct) return repRows; // representative title/poster rows
+    if (args.distinct) return repRows; // representative title/poster rows (and the voted-title reads)
     if (typeof args.where?.userId === "string") return userVoteRows; // the caller's own votes
-    return otherReasonRows; // other users' recent reasons (userId: { not })
+    // Other users' recent reasons (userId: { not }), read per title.
+    const w = args.where;
+    // newest first, as the rows are listed; `take` bounds it like the real query.
+    return otherReasonRows
+      .filter((r) => w?.tmdbId === undefined || (r.tmdbId === w.tmdbId && r.mediaType === w.mediaType))
+      .slice(0, args.take);
   },
 };
 shadowPrismaModel(prisma, "deletionVote", deletionVoteModel);
+// The list's distinct-title COUNT (votes-list-data.ts countVotedTitles).
+shadowPrismaClientMethod(prisma, "$queryRaw", async (...args: unknown[]) => {
+  rec("$queryRaw", args);
+  return [{ count: BigInt(groupRows.length) }];
+});
 
 let plexHas = true;
 let jellyfinHas = false;
@@ -415,6 +444,7 @@ beforeEach(() => {
   errors.length = 0;
   settings.clear();
   claimCount = 1;
+  claimThrows = false;
   voteCreateImpl = async (args) => ({ id: `vote-${++voteSeq}`, createdAt: new Date(), ...args.data });
   voteCounts = [];
   voteDeleteCount = 1;
@@ -527,6 +557,18 @@ test("an INT4-overflowing tmdbId is a 400 on POST /api/votes and DELETE /api/vot
   const admin = await mintSession({ role: "ADMIN" });
   const dismissed = await dismiss(admin.token, "2147483648", "MOVIE");
   assert.equal(dismissed.status, 400);
+  assert.equal(opsOf("deletionVote.deleteMany").length, 0);
+});
+
+// parseInt read "550abc" and "1.5" as 550 and 1, so one title answered under
+// paths that weren't its own. Only the canonical spelling is a tmdbId.
+test("DELETE /api/votes/[tmdbId] takes only a canonical id: a suffix, a fraction or a leading zero is a 400", async () => {
+  const { token } = await mintSession();
+  const admin = await mintSession({ role: "ADMIN" });
+  for (const raw of ["550abc", "1.5", "0550", "1e3"]) {
+    assert.equal((await del(token, raw, "MOVIE")).status, 400, raw);
+    assert.equal((await dismiss(admin.token, raw, "MOVIE")).status, 400, raw);
+  }
   assert.equal(opsOf("deletionVote.deleteMany").length, 0);
 });
 
@@ -679,6 +721,8 @@ test("threshold WINNER: the gate runs strictly AFTER the create, claims via crea
     "deletionVote.create",
     "setting.findUnique", // deletionVoteThreshold read
     "deletionVote.count",
+    "setting.findUnique", // already-alerted check
+    "setting.upsert", // pending marker, before the claim
     "setting.createMany", // the idempotent one-shot claim
     "deletionVote.count", // the dismiss-race recount, only after winning
   ]);
@@ -700,6 +744,46 @@ test("threshold WINNER: the gate runs strictly AFTER the create, claims via crea
   assert.deepEqual(errors, [], "the notify fan-out must complete without channel errors");
 });
 
+test("a crash between the claim and the send leaves a pending marker that the sweep finishes; a completed send clears it", async () => {
+  const { sweepPendingVoteAlerts, _resetVoteAlertSweepForTests } = await import("../src/lib/deletion-vote-threshold.ts");
+  settings.set("deletionVoteThreshold", "5");
+  voteCounts = [5, 5];
+  claimCount = 1;
+  const { userId, token } = await mintSession();
+  assert.equal((await post(token, voteBody(userId))).status, 201);
+  const pendingKey = "deletionVotePending:603:MOVIE";
+  assert.ok(settings.has(pendingKey), "intent is recorded before the claim");
+  assert.equal(opsOf("setting.upsert").length, 1);
+
+  // The process dies before after() runs: the marker stays. A fresh marker is left alone.
+  _resetVoteAlertSweepForTests();
+  const early = await sweepPendingVoteAlerts({ force: true });
+  assert.deepEqual(early, { delivered: 0, dropped: 0 });
+  assert.ok(settings.has(pendingKey));
+
+  // Once old enough, the sweep re-judges the title and delivers it.
+  settings.set(pendingKey, JSON.stringify({ at: new Date(Date.now() - 3_600_000).toISOString(), title: "The Matrix", posterPath: null }));
+  settings.set("deletionVoteNotified:603:MOVIE", "1");
+  voteCounts = [5];
+  const swept = await sweepPendingVoteAlerts({ force: true });
+  assert.deepEqual(swept, { delivered: 1, dropped: 0 });
+  assert.ok(!settings.has(pendingKey), "the marker is taken");
+
+  // A marker for a title whose votes are gone is dropped, not delivered.
+  settings.set(pendingKey, JSON.stringify({ at: new Date(Date.now() - 3_600_000).toISOString(), title: "The Matrix", posterPath: null }));
+  voteCounts = [2];
+  assert.deepEqual(await sweepPendingVoteAlerts({ force: true }), { delivered: 0, dropped: 1 });
+
+  // The normal path clears its marker after the send.
+  settings.delete("deletionVoteNotified:603:MOVIE");
+  voteCounts = [5, 5];
+  const again = await mintSession();
+  assert.equal((await post(again.token, voteBody(again.userId))).status, 201);
+  assert.ok(settings.has(pendingKey));
+  await afterTasks[afterTasks.length - 1]();
+  assert.ok(!settings.has(pendingKey), "a delivered alert removes its pending marker");
+});
+
 test("threshold LOSER (claim count 0 — another caller won): the vote STILL commits behind 201 and nothing is notified — the exact silent-rollback bug guardrail 23 documents", async () => {
   settings.set("deletionVoteThreshold", "5");
   voteCounts = [5];
@@ -715,6 +799,18 @@ test("threshold LOSER (claim count 0 — another caller won): the vote STILL com
   assert.equal(txCalls, 0, "no tx exists whose abort could discard the vote");
   assert.equal(opsOf("deletionVote.count").length, 1, "losers must not recount");
   assert.equal(afterTasks.length, 0, "only the single claim winner notifies");
+});
+
+test("a failing threshold alert never turns the committed vote into a 500", async () => {
+  settings.set("deletionVoteThreshold", "5");
+  voteCounts = [5];
+  claimThrows = true;
+  const { userId, token } = await mintSession();
+
+  const res = await post(token, voteBody(userId));
+  assert.equal(res.status, 201);
+  assert.equal(opsOf("deletionVote.create").length, 1);
+  assert.ok(errors.some((e) => e.includes("[votes] threshold alert failed")), "the failure is logged, not thrown");
 });
 
 test("the gate stays quiet below the threshold, and the winner's recount suppresses a dismiss-raced alert", async () => {
@@ -914,10 +1010,47 @@ test("GET groups votes with voteCount, the caller's own vote/reason, and others'
     reasonEntries: [],
   });
   // The other-reasons read must select the vote id, or the entries carry none.
-  const otherReasonsRead = opsOf("deletionVote.findMany").find(
+  const otherReasonsReads = opsOf("deletionVote.findMany").filter(
     (o) => (o.args as { where?: { reason?: unknown } }).where?.reason !== undefined,
   );
-  assert.equal((otherReasonsRead?.args as { select?: { id?: boolean } })?.select?.id, true);
+  assert.equal((otherReasonsReads[0]?.args as { select?: { id?: boolean } })?.select?.id, true);
+  // One read per title on the page, so no title's reasons depend on another's.
+  assert.deepEqual(
+    otherReasonsReads.map((o) => { const w = (o.args as { where: { tmdbId: number; mediaType: string } }).where; return `${w.mediaType}:${w.tmdbId}`; }).sort(),
+    ["MOVIE:603", "TV:1399"],
+  );
+});
+
+test("GET shows each title its own other-voters' reasons: a heavily voted title on the page can't crowd another's out", async () => {
+  const now = new Date();
+  groupRows = [
+    { tmdbId: 1, mediaType: "MOVIE", _count: { id: 300 }, _max: { createdAt: now } },
+    { tmdbId: 2, mediaType: "MOVIE", _count: { id: 1 }, _max: { createdAt: now } },
+  ];
+  repRows = [];
+  userVoteRows = [];
+  // 300 newer reasoned votes on title 1, then the one on title 2.
+  otherReasonRows = [
+    ...Array.from({ length: 300 }, (_, i) => ({ tmdbId: 1, mediaType: "MOVIE", id: `busy-${i}`, reason: `reason ${i}` })),
+    { tmdbId: 2, mediaType: "MOVIE", id: "quiet-1", reason: "never watched" },
+  ];
+  const { token } = await mintSession();
+  const res = await inScope(() => listVotes(votesReq(token, { method: "GET" }), undefined));
+  const body = (await res.json()) as { items: Array<{ tmdbId: number; reasons: string[] }> };
+  assert.deepEqual(body.items.find((i) => i.tmdbId === 2)?.reasons, ["never watched"]);
+  assert.equal(body.items.find((i) => i.tmdbId === 1)?.reasons.length, 3);
+});
+
+test("GET on an unrestricted deployment counts the voted titles with one COUNT, not a read of every voted title", async () => {
+  const now = new Date();
+  groupRows = [{ tmdbId: 603, mediaType: "MOVIE", _count: { id: 2 }, _max: { createdAt: now } }];
+  const { token } = await mintSession();
+  const body = (await (await inScope(() => listVotes(votesReq(token, { method: "GET" }), undefined))).json()) as { total: number };
+  assert.equal(body.total, 1);
+  assert.equal(opsOf("$queryRaw").length, 1);
+  const unpaged = opsOf("deletionVote.groupBy").filter((o) => (o.args as { skip?: number }).skip === undefined);
+  assert.equal(unpaged.length, 0, "no groupBy over every voted title");
+  assert.equal(opsOf("deletionVote.findMany").filter((o) => (o.args as { take?: number }).take === undefined && (o.args as { distinct?: unknown }).distinct !== undefined && (o.args as { where?: { OR?: unknown } }).where?.OR === undefined).length, 0);
 });
 
 test("GET scopes ?mine=1 to the caller, filters ?q= by title, and falls back to the votes sort on junk", async () => {
@@ -926,14 +1059,22 @@ test("GET scopes ?mine=1 to the caller, filters ?q= by title, and falls back to 
     listVotes(votesReq(token, { method: "GET", query: "?mine=1&q=matrix&sort=bogus" }), undefined),
   );
   assert.equal(res.status, 200);
-  // The PAGED call carries skip/take; the voted-titles read (the total and the
-  // guardrail-35 scope) runs first and carries neither.
-  const paged = opsOf("deletionVote.groupBy").find((o) => (o.args as { skip?: number }).skip !== undefined)!.args as {
+  // The voted-titles read (the total and the guardrail-35 scope) runs first —
+  // a distinct read of the caller's titles — and is what mine=1 and q= scope:
+  // under the votes sort the paged call then counts EVERY voter's rows on those
+  // titles, so it carries neither filter itself.
+  const voted = opsOf("deletionVote.findMany").find((o) => (o.args as { distinct?: unknown }).distinct !== undefined)!.args as {
     where: { userId?: string; title?: { contains: string; mode: string } };
+  };
+  assert.equal(voted.where.userId, userId, "mine=1 must scope the voted-titles read to the caller");
+  assert.deepEqual(voted.where.title, { contains: "matrix", mode: "insensitive" });
+  const paged = opsOf("deletionVote.groupBy").find((o) => (o.args as { skip?: number }).skip !== undefined)!.args as {
+    where: { userId?: string; title?: unknown; OR?: unknown };
     orderBy: unknown;
   };
-  assert.equal(paged.where.userId, userId, "mine=1 must scope the group query to the caller");
-  assert.deepEqual(paged.where.title, { contains: "matrix", mode: "insensitive" });
+  assert.equal(paged.where.userId, undefined, "the by-count page must not count only the caller's own row");
+  assert.equal(paged.where.title, undefined);
+  assert.deepEqual(paged.where.OR, [], "no voted title selects nothing");
   // The whole group key is a deliberate secondary sort, not incidental: groups tied
   // on _count (most titles sit at 1-2 votes) otherwise have no total order, so page=1
   // and page=2 can return them in different sequences and OFFSET paging duplicates one
@@ -949,6 +1090,87 @@ test("GET scopes ?mine=1 to the caller, filters ?q= by title, and falls back to 
   const body = (await res.json()) as { items: unknown[]; total: number };
   assert.deepEqual(body.items, []);
   assert.equal(body.total, 0);
+});
+
+// Under mine=1 the caller holds exactly one row per title
+// (@@unique([tmdbId, mediaType, userId])), so a caller-scoped groupBy ties every
+// group at _count 1 and "most votes" fell through to tmdbId order, while the
+// badge showed the real totals. A small groupBy that honours where/orderBy/skip
+// stands in for Postgres here, so the ORDER is what is asserted.
+type VoteRow = { tmdbId: number; mediaType: "MOVIE" | "TV"; userId: string; createdAt: Date };
+type KeyIn = { mediaType: string; tmdbId: { in: number[] } };
+function voteRowMatches(r: VoteRow, w: Record<string, unknown>): boolean {
+  const inKeys = (keys: KeyIn[]) => keys.some((k) => k.mediaType === r.mediaType && k.tmdbId.in.includes(r.tmdbId));
+  if (typeof w.userId === "string" && r.userId !== w.userId) return false;
+  if (w.OR && !inKeys(w.OR as KeyIn[])) return false;
+  if (w.NOT && inKeys((w.NOT as { OR: KeyIn[] }).OR)) return false;
+  if (w.AND && !(w.AND as Record<string, unknown>[]).every((x) => voteRowMatches(r, x))) return false;
+  return true;
+}
+function groupVoteRows(rows: VoteRow[], args: { where?: Record<string, unknown>; orderBy?: Array<Record<string, unknown>>; skip?: number; take?: number }) {
+  const groups = new Map<string, { tmdbId: number; mediaType: string; _count: { id: number }; _max: { createdAt: Date } }>();
+  for (const r of rows.filter((x) => voteRowMatches(x, args.where ?? {}))) {
+    const k = `${r.mediaType}:${r.tmdbId}`;
+    const g = groups.get(k) ?? { tmdbId: r.tmdbId, mediaType: r.mediaType, _count: { id: 0 }, _max: { createdAt: r.createdAt } };
+    g._count.id++;
+    if (r.createdAt > g._max.createdAt) g._max.createdAt = r.createdAt;
+    groups.set(k, g);
+  }
+  const keyOf = (g: { tmdbId: number; mediaType: string; _count: { id: number }; _max: { createdAt: Date } }, o: Record<string, unknown>): [number | string, string] => {
+    if (o._count) return [g._count.id, (o._count as { id: string }).id];
+    if (o._max) return [g._max.createdAt.getTime(), (o._max as { createdAt: string }).createdAt];
+    if (o.tmdbId) return [g.tmdbId, o.tmdbId as string];
+    return [g.mediaType, o.mediaType as string];
+  };
+  const sorted = [...groups.values()].sort((a, b) => {
+    for (const o of args.orderBy ?? []) {
+      const [x, dir] = keyOf(a, o);
+      const [y] = keyOf(b, o);
+      if (x !== y) return (x < y ? -1 : 1) * (dir === "desc" ? -1 : 1);
+    }
+    return 0;
+  });
+  return args.skip === undefined ? sorted : sorted.slice(args.skip, args.skip + (args.take ?? sorted.length));
+}
+
+test("GET ?mine=1 sorted by votes orders the caller's titles by their REAL vote totals", async () => {
+  const { userId, token } = await mintSession();
+  const rows: VoteRow[] = [
+    { tmdbId: 101, mediaType: "MOVIE", userId, createdAt: new Date("2026-01-03T00:00:00Z") },
+    { tmdbId: 202, mediaType: "MOVIE", userId, createdAt: new Date("2026-01-01T00:00:00Z") },
+    { tmdbId: 202, mediaType: "MOVIE", userId: "other-a", createdAt: new Date("2026-01-02T00:00:00Z") },
+    { tmdbId: 202, mediaType: "MOVIE", userId: "other-b", createdAt: new Date("2026-01-02T00:00:00Z") },
+    // Not the caller's title: never on their list, however many votes it holds.
+    { tmdbId: 303, mediaType: "MOVIE", userId: "other-a", createdAt: new Date("2026-01-02T00:00:00Z") },
+  ];
+  repRows = [
+    { tmdbId: 101, mediaType: "MOVIE", title: "One Vote", posterPath: null },
+    { tmdbId: 202, mediaType: "MOVIE", title: "Three Votes", posterPath: null },
+  ];
+  userVoteRows = [
+    { tmdbId: 101, mediaType: "MOVIE", id: "v-101", reason: null },
+    { tmdbId: 202, mediaType: "MOVIE", id: "v-202", reason: null },
+  ];
+  const stockGroupBy = deletionVoteModel.groupBy;
+  deletionVoteModel.groupBy = (async (args: Parameters<typeof groupVoteRows>[1]) => {
+    rec("deletionVote.groupBy", args);
+    return groupVoteRows(rows, args);
+  }) as typeof deletionVoteModel.groupBy;
+  try {
+    const res = await inScope(() =>
+      listVotes(votesReq(token, { method: "GET", query: "?mine=1&sort=votes" }), undefined),
+    );
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { items: Array<{ tmdbId: number; voteCount: number; userVoted: boolean }>; total: number };
+    assert.deepEqual(
+      body.items.map((i) => [i.tmdbId, i.voteCount, i.userVoted]),
+      [[202, 3, true], [101, 1, true]],
+      "the 3-vote title must lead, with its real total",
+    );
+    assert.equal(body.total, 2);
+  } finally {
+    deletionVoteModel.groupBy = stockGroupBy;
+  }
 });
 
 test("GET ?sort=recent orders by newest vote and carries the same full-group-key tiebreaker", async () => {

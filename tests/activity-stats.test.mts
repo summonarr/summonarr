@@ -31,7 +31,17 @@ process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32); // prisma.ts pulls in token-
 
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
-const { getPlayHistoryStats, getHeatmapCellDetail, clearActivityCache } = await import("../src/lib/play-history.ts");
+const {
+  getPlayHistoryStats,
+  getHeatmapCellDetail,
+  getTranscodeOffenders,
+  getMostPopularOnServer,
+  getAllUsersStats,
+  getWatchTimeLeaderboard,
+  getBusiestDay,
+  getPlayHistoryPlatforms,
+  clearActivityCache,
+} = await import("../src/lib/play-history.ts");
 const { parseActivityDays, ACTIVITY_DEFAULT_DAYS, ACTIVITY_MAX_DAYS } = await import("../src/lib/activity-days.ts");
 const reasons = await import("../src/lib/transcode-reasons.ts");
 
@@ -43,11 +53,26 @@ let captured: Captured[] = [];
 let canned: { marker: string; rows: unknown[] }[] = [];
 // While set, every statement waits on it — parks a computation mid-flight.
 let hold: Promise<void> | null = null;
+// Statements issued but not yet answered, and the most seen at once.
+let inFlight = 0;
+let peakInFlight = 0;
 
 shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async (sql: string, ...params: unknown[]) => {
   captured.push({ sql, params });
+  inFlight++;
+  peakInFlight = Math.max(peakInFlight, inFlight);
+  try {
+    if (hold) await hold;
+    return canned.find((c) => sql.includes(c.marker))?.rows ?? [];
+  } finally {
+    inFlight--;
+  }
+});
+// Tagged-template form (getAllUsersStats).
+shadowPrismaClientMethod(prisma, "$queryRaw", async (strings: TemplateStringsArray, ...params: unknown[]) => {
+  captured.push({ sql: Array.isArray(strings) ? strings.join("?") : String(strings), params });
   if (hold) await hold;
-  return canned.find((c) => sql.includes(c.marker))?.rows ?? [];
+  return [];
 });
 let settingRows: { key: string; value: string | null }[] = [];
 shadowPrismaModel(prisma, "setting", { findMany: async () => settingRows });
@@ -254,6 +279,251 @@ test("a load after a clear does not join the computation that predates it", asyn
   assert.equal(computations(captured), 2, "…and that one, started after the clear, was cached");
 });
 
+// ── the fan-out's footprint on the pool ──────────────────────────────────────
+
+async function settleMany(n = 20): Promise<void> {
+  for (let i = 0; i < n; i++) await settle();
+}
+
+test("an uncached stats load keeps at most three statements in flight, leaving pool connections free", async () => {
+  captured = [];
+  inFlight = 0;
+  peakInFlight = 0;
+  const release = holdStatements();
+  const load = getPlayHistoryStats({ days: freshDays() });
+  let parked: number;
+  try {
+    await settleMany();
+    parked = inFlight;
+  } finally {
+    release(); // never leave later tests parked behind a failed assertion
+  }
+  await load;
+  assert.equal(parked, 3, "parked at the cap — the fan-out did start");
+  assert.equal(peakInFlight, 3, "never more than three statements at once (the pool holds five)");
+  assert.ok(captured.length > 20, `every statement still ran (${captured.length})`);
+});
+
+test("the arc chain runs ONCE per stats load: completion rate and histogram come from one statement", async () => {
+  const queries = await capture(() => getPlayHistoryStats({ days: freshDays(), source: "plex" }));
+  const arcs = one(queries, "arc_flags");
+  const sql = flat(arcs.sql);
+  // Rate param bound and referenced; the window's own params come first.
+  assert.equal(arcs.params.length, 4, "cutoff, source, arc gap, completion ratio");
+  assert.match(sql, /COALESCE\("tmdbId"::text, 'title:' \|\| LOWER\(COALESCE\("title", ''\)\)\) AS arc_key/, "unmatched plays keep the title fallback");
+  assert.match(sql, />= \$4\)::bigint AS watched/);
+  for (const b of ["b0", "b25", "b50", "b75"]) assert.match(sql, new RegExp(`AS ${b}\\b`));
+});
+
+test("completion rate, buckets, and the hour/day-of-week margins are read from the folded statements", async () => {
+  canned = [
+    { marker: "AS b75", rows: [{ watched: 3n, total: 10n, b0: 2n, b25: 0n, b50: 3n, b75: 5n }] },
+    {
+      marker: "EXTRACT(DOW FROM",
+      rows: [
+        { dow: 1, hour: 20, count: 4n },
+        { dow: 1, hour: 21, count: 1n },
+        { dow: 5, hour: 20, count: 2n },
+        { dow: 0, hour: 3, count: 1n },
+      ],
+    },
+  ];
+  try {
+    const stats = await getPlayHistoryStats({ days: freshDays() });
+    assert.equal(stats.completionRate, 30);
+    assert.deepEqual(stats.completionBuckets, [
+      { bucket: "0-25%", count: 2 },
+      { bucket: "50-75%", count: 3 },
+      { bucket: "75-100%", count: 5 },
+    ], "empty buckets omitted, label order — the shape the per-bucket GROUP BY returned");
+    assert.deepEqual(stats.playsByHour, [{ hour: 3, count: 1 }, { hour: 20, count: 6 }, { hour: 21, count: 1 }]);
+    assert.deepEqual(stats.playsByDow, [{ dow: 0, count: 1 }, { dow: 1, count: 5 }, { dow: 5, count: 2 }]);
+    assert.equal(stats.heatmap.length, 4);
+  } finally {
+    canned = [];
+  }
+});
+
+test("the per-day series and the totals come from one daily and one summary statement", async () => {
+  // Days are bucketed in the statistics zone (the process zone here), so
+  // "today" is that zone's date, not the UTC one.
+  const { zonedDayKey, processTimeZone } = await import("../src/lib/stats-time-zone.ts");
+  const today = zonedDayKey(new Date(), processTimeZone());
+  canned = [
+    { marker: "AS viewers", rows: [{ day: today, plays: 0n, hours: 1.234, viewers: 0n, gb: 0 }] },
+    {
+      marker: "AS unique_titles",
+      rows: [{
+        plays: 7n, hours: 12.34, unique_viewers: 2n, unique_titles: 3n, avg_session_s: 600,
+        longest_session_s: 3600, pause_ratio: 0.1, avg_mbps: 8.04, total_gb: 1.26,
+      }],
+    },
+  ];
+  try {
+    const stats = await getPlayHistoryStats({ days: freshDays() });
+    assert.equal(stats.totalPlays, 7);
+    assert.equal(stats.totalWatchTimeHours, 12.3);
+    assert.equal(stats.uniqueViewers, 2);
+    assert.equal(stats.uniqueTitles, 3);
+    assert.equal(stats.avgBitrateMbps, 8);
+    assert.equal(stats.totalBandwidthGB, 1.3);
+    const last = <T,>(xs: T[]) => xs[xs.length - 1];
+    assert.deepEqual(last(stats.playsByDay), { day: today, count: 0 }, "a day with no watched play reads 0");
+    assert.deepEqual(last(stats.watchTimeByDay), { day: today, hours: 1.23 });
+    assert.deepEqual(last(stats.uniqueViewersByDay), { day: today, count: 0 });
+    assert.deepEqual(last(stats.bandwidthByDay), { day: today, gb: 0 });
+  } finally {
+    canned = [];
+  }
+});
+
+// ── every other aggregate: one computation per key, cleared by a finalize ────
+
+// Starts two cold loads of one key with every statement parked, releases them,
+// and returns how many statements carrying `marker` ran.
+async function coldPair<T>(load: () => Promise<T>, marker: string): Promise<{ count: number; a: T; b: T }> {
+  captured = [];
+  const release = holdStatements();
+  const pa = load();
+  const pb = load();
+  await settleMany();
+  release();
+  const [a, b] = await Promise.all([pa, pb]);
+  return { count: captured.filter((q) => q.sql.includes(marker)).length, a, b };
+}
+
+async function clearedMidFlight(load: () => Promise<unknown>, marker: string): Promise<number> {
+  captured = [];
+  const release = holdStatements();
+  const stale = load();
+  await settleMany();
+  clearActivityCache();
+  release();
+  await stale;
+  await load();
+  return captured.filter((q) => q.sql.includes(marker)).length;
+}
+
+test("concurrent cold heatmap-cell loads share one computation, and a clear mid-flight leaves it uncached", async () => {
+  const days = freshDays();
+  const q = { mode: "hour" as const, days, dow: 2, hour: 21 };
+  const pair = await coldPair(() => getHeatmapCellDetail(q), "AS reason");
+  assert.equal(pair.count, 1, "the five-statement cell ran once for both callers");
+  assert.equal(pair.a, pair.b, "both callers receive the one shared result");
+  const later = { ...q, days: freshDays() };
+  assert.equal(await clearedMidFlight(() => getHeatmapCellDetail(later), "AS reason"), 2);
+});
+
+test("concurrent cold transcode-offender loads share one computation, and a clear mid-flight leaves it uncached", async () => {
+  const days = freshDays();
+  const pair = await coldPair(() => getTranscodeOffenders({ days }), `JOIN "MediaServerUser" m`);
+  assert.equal(pair.count, 1);
+  assert.equal(pair.a, pair.b);
+  const later = freshDays();
+  assert.equal(await clearedMidFlight(() => getTranscodeOffenders({ days: later }), `JOIN "MediaServerUser" m`), 2);
+});
+
+test("concurrent cold /popular loads of one key share one window query; a load after a clear does not join it", async () => {
+  // Distinct media type per case: the ranking cache keys on (mediaType, sort).
+  const pair = await coldPair(() => getMostPopularOnServer({ mediaType: "MOVIE", page: 41 }), "completed_arcs");
+  assert.equal(pair.count, 1, "both callers shared ONE full-history window query");
+  // Each caller gets its own page object, sliced from the one shared ranking.
+  assert.deepEqual(pair.a, pair.b);
+
+  captured = [];
+  const release = holdStatements();
+  const before = getMostPopularOnServer({ mediaType: "TV", page: 42 });
+  await settleMany();
+  clearActivityCache();
+  const after = getMostPopularOnServer({ mediaType: "TV", page: 42 });
+  await settleMany();
+  release();
+  await Promise.all([before, after]);
+  assert.equal(captured.filter((q) => q.sql.includes("completed_arcs")).length, 2, "the post-clear caller computed afresh");
+});
+
+test("/popular pages are slices of ONE cached ranking: one statement serves every page and page size, and a deep page keeps the real totals", async () => {
+  clearActivityCache();
+  // 95 ranked titles, in the order the statement returns them.
+  const rows = Array.from({ length: 95 }, (_, i) => ({
+    tmdbId: i + 1, mediaType: "MOVIE", title: `Title ${i + 1}`, year: null,
+    plays: BigInt(200 - i), allTimePlays: 1n, viewers: 1n, episodes: 0n, totalHours: 1, total_items: 95n,
+  }));
+  canned = [{ marker: "completed_arcs", rows }];
+  try {
+    const queries = await capture(async () => {
+      const first = await getMostPopularOnServer({ mediaType: "MOVIE", sort: "viewers" });
+      assert.deepEqual(first.items.map((x) => x.tmdbId), Array.from({ length: 40 }, (_, i) => i + 1));
+      assert.deepEqual([first.page, first.totalItems, first.totalPages], [1, 95, 3]);
+
+      const last = await getMostPopularOnServer({ mediaType: "MOVIE", sort: "viewers", page: 3 });
+      assert.deepEqual(last.items.map((x) => x.tmdbId), Array.from({ length: 15 }, (_, i) => i + 81));
+
+      const small = await getMostPopularOnServer({ mediaType: "MOVIE", sort: "viewers", page: 2, limit: 10 });
+      assert.deepEqual(small.items.map((x) => x.tmdbId), Array.from({ length: 10 }, (_, i) => i + 11));
+      assert.equal(small.totalPages, 10);
+
+      // Past the end: an empty page, but the ranking's totals — not "0 items".
+      const deep = await getMostPopularOnServer({ mediaType: "MOVIE", sort: "viewers", page: 10_000 });
+      assert.deepEqual([deep.items.length, deep.page, deep.totalItems, deep.totalPages], [0, 100, 95, 3]);
+    });
+    assert.equal(queries.filter((q) => q.sql.includes("completed_arcs")).length, 1, "every page came from one ranking statement");
+  } finally {
+    canned = [];
+  }
+});
+
+test("the all-users aggregate is computed once per key and recomputed after a clear", async () => {
+  clearActivityCache();
+  const marker = `FROM "MediaServerUser" m`;
+  const pair = await coldPair(() => getAllUsersStats(), marker);
+  assert.equal(pair.count, 1, "search/sort/status renders share one aggregate");
+  captured = [];
+  await getAllUsersStats();
+  assert.equal(captured.length, 0, "served from the cache within the TTL");
+  clearActivityCache();
+  await getAllUsersStats();
+  assert.equal(captured.filter((q) => q.sql.includes(marker)).length, 1, "a finalize's clear forces a recompute");
+});
+
+test("the overview's watch-time leaderboard and busiest day are memoized and cleared like the other aggregates", async () => {
+  for (const [label, load, marker] of [
+    ["leaderboard", () => getWatchTimeLeaderboard({ days: 77, source: "plex" }), "AS hours"],
+    ["busiest day", () => getBusiestDay({ days: 77, source: "plex" }), "GROUP BY day ORDER BY count DESC"],
+  ] as const) {
+    clearActivityCache();
+    captured = [];
+    await load();
+    await load();
+    assert.equal(captured.filter((q) => q.sql.includes(marker)).length, 1, `${label}: two loads within the TTL run once`);
+    clearActivityCache();
+    await load();
+    assert.equal(captured.filter((q) => q.sql.includes(marker)).length, 2, `${label}: a clear forces a recompute`);
+  }
+});
+
+test("the leaderboard is one overall ranking with a stable tie-break, filtered like the stats page", async () => {
+  const q = one(await capture(() => getWatchTimeLeaderboard({ days: freshDays(), source: "jellyfin", mediaType: "TV" })), "AS hours");
+  const sql = flat(q.sql);
+  assert.doesNotMatch(sql, /PARTITION BY/, "a per-source cut the page then sliced away");
+  assert.match(sql, /ORDER BY hours DESC, m\."id" ASC LIMIT \$4/);
+  assert.match(sql, /COUNT\(\*\) FILTER \(WHERE p\."watched" = true\)::bigint AS plays/, "plays computed per row");
+  assert.deepEqual(q.params.slice(1), ["jellyfin", "TV", 8]);
+  const busiest = one(await capture(() => getBusiestDay({ days: freshDays() })), "GROUP BY day");
+  assert.match(flat(busiest.sql), /AND "watched" = true GROUP BY day ORDER BY count DESC, day DESC LIMIT 1/);
+});
+
+test("the platform list is read once and re-read after a clear", async () => {
+  clearActivityCache();
+  captured = [];
+  await getPlayHistoryPlatforms();
+  await getPlayHistoryPlatforms();
+  assert.equal(captured.filter((q) => q.sql.includes(`DISTINCT "platform"`)).length, 1);
+  clearActivityCache();
+  await getPlayHistoryPlatforms();
+  assert.equal(captured.filter((q) => q.sql.includes(`DISTINCT "platform"`)).length, 2);
+});
+
 // ── pure helpers ─────────────────────────────────────────────────────────────
 
 test("parseActivityDays mirrors what the pages render", () => {
@@ -268,7 +538,7 @@ test("parseActivityDays mirrors what the pages render", () => {
   assert.equal(parseActivityDays("99999"), ACTIVITY_MAX_DAYS);
 });
 
-test("every server page and route that reads ?days= uses parseActivityDays", () => {
+test("every server page and route that reads ?days= uses parseActivityDays (pages through parseActivityFilters)", () => {
   for (const path of [
     "../src/app/(app)/admin/activity/page.tsx",
     "../src/app/(app)/admin/activity/history/page.tsx",
@@ -278,8 +548,17 @@ test("every server page and route that reads ?days= uses parseActivityDays", () 
     "../src/components/admin/activity-filter-bar.tsx",
   ]) {
     const src = readFileSync(new URL(path, import.meta.url), "utf8");
-    assert.match(src, /parseActivityDays\(/, `${path} parses days through the shared helper`);
+    assert.match(src, /parseActivity(Days|Filters)\(/, `${path} parses days through the shared helper`);
     assert.doesNotMatch(src, /\|\| 30, 1\), 3650\)/, `${path} still carries a private copy of the clamp`);
+    assert.doesNotMatch(src, /\["plex", "jellyfin"\]\.includes\(/, `${path} still carries a private copy of the source whitelist`);
+  }
+  for (const path of [
+    "../src/app/(app)/admin/activity/page.tsx",
+    "../src/app/(app)/admin/activity/history/page.tsx",
+    "../src/app/(app)/admin/activity/stats/page.tsx",
+  ]) {
+    const src = readFileSync(new URL(path, import.meta.url), "utf8");
+    assert.match(src, /parseActivityFilters\(/, `${path}: one parser for days/source/mediaType, first value of a repeated key`);
   }
 });
 
@@ -330,8 +609,11 @@ test("reasonCalloutKind: Unknown (pre-capture rows), No reason reported (the ser
 
 test("the Statistics callout words its top reason through reasonCalloutKind, with its own 'unreported' sentence", () => {
   const src = readFileSync(new URL("../src/components/admin/activity-stats-redesign.tsx", import.meta.url), "utf8");
-  assert.match(src, /reasonCalloutKind\(topReason\.reason\) === "unknown"/);
-  assert.match(src, /reasonCalloutKind\(topReason\.reason\) === "unreported"/);
+  // One verdict per callout, read once and branched on.
+  assert.match(src, /\{topReason && <TopReasonCallout reason=\{topReason\.reason\} pct=\{topReasonPct\} \/>\}/);
+  assert.match(src, /const kind = reasonCalloutKind\(reason\);/);
+  assert.match(src, /kind === "unknown" \?/);
+  assert.match(src, /kind === "unreported" \?/);
   assert.match(src, /t\("adminActivity\.stats\.noReasonReportedTop"/);
   assert.doesNotMatch(src, /topReason\.reason === UNKNOWN_REASON/, "the UNKNOWN-only branch is gone");
   const en = JSON.parse(

@@ -82,5 +82,6 @@
   "media.filter.certAny": "Toute classification",
   "media.filter.certUpTo": "Jusqu'à {rating}",
   "media.filter.studio": "Studio",
-  "media.filter.network": "Chaîne"
+  "media.filter.network": "Chaîne",
+  "media.filter.serviceChip": "Service {id}"
 }

@@ -27,8 +27,8 @@ const {
   stripTargetPii, scrubTargetPiiFromAudit, scrubLegacySessionRevokePii, scrubRequesterPii, requesterAuditDetails, AUDIT_TARGET_PII_KEYS,
 } = await import("../src/lib/audit-scrub.ts");
 
-test("stripTargetPii removes exactly targetUser, targetEmail and requestedBy", () => {
-  assert.deepEqual([...AUDIT_TARGET_PII_KEYS], ["targetUser", "targetEmail", "requestedBy"]);
+test("stripTargetPii removes exactly the identity keys", () => {
+  assert.deepEqual([...AUDIT_TARGET_PII_KEYS], ["targetUser", "targetEmail", "requestedBy", "accountName", "serverUser", "traktUser"]);
   const out = stripTargetPii(JSON.stringify({ targetUser: "Alice", targetEmail: "a@example.com", role: "USER", nested: { targetUser: "kept" } }));
   assert.deepEqual(JSON.parse(out!), { role: "USER", nested: { targetUser: "kept" } }, "top-level keys only — nested values are not target identities");
   assert.deepEqual(JSON.parse(stripTargetPii(JSON.stringify({ targetEmail: "a@example.com" }))!), {});
@@ -211,8 +211,23 @@ test("scrubTargetPiiFromAudit pages on a strict id bound and keeps the caller's 
   const second = fakeDb(many);
   assert.equal(await scrubTargetPiiFromAudit(second.db, { target: "user:u1", AND: [{ details: { contains: '"keep":true' } }] }), 600);
   const page2 = second.calls.findManyWhere[1] as { AND: Where[] };
-  assert.deepEqual(page2.AND, [{ details: { contains: '"keep":true' } }, { id: { gt: "r00998" } }], "the caller's AND plus the id bound");
+  assert.deepEqual(page2.AND[0], { details: { contains: '"keep":true' } }, "the caller's AND");
+  assert.ok("OR" in page2.AND[1], "the PII-key OR as a term of its own");
+  assert.deepEqual(page2.AND[2], { id: { gt: "r00998" } }, "and the id bound");
+  assert.equal("OR" in page2, false, "nothing is laid over a caller's own OR");
   assert.ok(many.filter((_, i) => i % 2 === 1).every((r) => r.details!.includes('"targetUser"')));
+});
+
+test("scrubTargetPiiFromAudit keeps a caller's own OR — the scrub never widens past it", async () => {
+  const rows: Row[] = [
+    { id: "a", target: "user:u1", details: JSON.stringify({ targetUser: "Mine" }) },
+    { id: "b", target: "user:u2", details: JSON.stringify({ targetUser: "Theirs" }) },
+  ];
+  const { db, calls } = fakeDb(rows);
+  assert.equal(await scrubTargetPiiFromAudit(db, { OR: [{ target: "user:u1" }, { target: "user:nobody" }] }), 1);
+  assert.equal(rows[1].details, JSON.stringify({ targetUser: "Theirs" }), "a row outside the caller's OR is untouched");
+  const first = calls.findManyWhere[0] as { AND: Where[] };
+  assert.deepEqual(first.AND[0], { OR: [{ target: "user:u1" }, { target: "user:nobody" }] });
 });
 
 test("scrubTargetPiiFromAudit with a match predicate rewrites only the rows it accepts — and still terminates", async () => {
@@ -310,4 +325,22 @@ test("scrubRequesterPii: the exact match decides, even if an id held a LIKE wild
   assert.equal(await scrubRequesterPii(db, "u_1", email), 1);
   assert.deepEqual(JSON.parse(rows[0].details!), { title: "T", requesterId: "u_1" });
   assert.deepEqual(JSON.parse(rows[1].details!), { title: "T", requesterId: "uX1", requestedBy: email }, "uX1 is another account");
+});
+
+test("the retention scrub strips third-party account names from session-terminate, server-user link and Trakt rows — the purge reaches the user: row", async () => {
+  const aged = new Date("2026-01-01T00:00:00.000Z");
+  const cutoff = new Date("2026-07-01T00:00:00.000Z");
+  const rows: Row[] = [
+    { id: "a", target: "sess1", action: "PLEX_SESSION_TERMINATE", createdAt: aged, details: JSON.stringify({ mediaTitle: "T", accountName: "viewer", plexStatus: 200 }) },
+    { id: "b", target: "mediaServerUser:m1", action: "SERVER_USER_LINK", createdAt: aged, details: JSON.stringify({ serverUser: "bob", source: "jellyfin", mode: "manual-link" }) },
+    { id: "c", target: "user:u1", action: "SETTINGS_CHANGE", createdAt: aged, details: JSON.stringify({ kind: "trakt-connect", traktUser: "bobtrakt" }) },
+  ];
+  assert.equal(await scrubTargetPiiFromAudit(fakeDb(rows).db, { createdAt: { lt: cutoff } }), 3);
+  assert.deepEqual(JSON.parse(rows[0].details!), { mediaTitle: "T", plexStatus: 200 });
+  assert.deepEqual(JSON.parse(rows[1].details!), { source: "jellyfin", mode: "manual-link" });
+  assert.deepEqual(JSON.parse(rows[2].details!), { kind: "trakt-connect" });
+
+  const again: Row[] = [{ id: "d", target: "user:u1", action: "SETTINGS_CHANGE", details: JSON.stringify({ kind: "trakt-connect", traktUser: "bobtrakt" }) }];
+  assert.equal(await scrubTargetPiiFromAudit(fakeDb(again).db, { target: "user:u1" }), 1, "the purge's user: scrub covers it");
+  assert.deepEqual(JSON.parse(again[0].details!), { kind: "trakt-connect" });
 });

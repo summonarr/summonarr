@@ -31,10 +31,10 @@
 //      scrub-audit-pii issue deleteMany/updateMany against the live tables, so
 //      the tests pin that every delete carries a date predicate — an unbounded
 //      deleteMany here erases the whole audit log.
-//   5. purge-auth-sessions IS FAILURE-ISOLATED. Its ten deletes run under
-//      Promise.allSettled and it reports a NON-2xx when any leg fails, so
-//      withCronRunRecording marks the run failed while the body still carries
-//      the counts that did succeed.
+//   5. purge-auth-sessions IS FAILURE-ISOLATED. Its ten deletes run one at a
+//      time, a failing leg never stops the others, and a failure answers 200
+//      with X-Cron-Degraded, so withCronRunRecording marks the run failed while
+//      the body still carries the counts that did succeed.
 //
 // Harness: real handlers invoked with a NextRequest, over in-memory prisma stubs
 // and a monkey-patched `pg` Client.prototype (the tests/advisory-lock.test.mts /
@@ -228,19 +228,19 @@ const AL = await import("../src/lib/advisory-lock.ts");
 
 const ROUTES: CronRoute[] = [
   await load("arr-watch", AL.ARR_WATCH_LOCK_ID),
-  await load("purge-auth-sessions", 2001),
+  await load("purge-auth-sessions", AL.PURGE_AUTH_SESSIONS_LOCK_ID),
   await load("purge-notifications", AL.PURGE_NOTIFICATIONS_LOCK_ID),
   await load("refresh-arr-snapshots", AL.ARR_SNAPSHOT_LOCK_ID),
   await load("refresh-upstream-watch", AL.UPSTREAM_WATCH_LOCK_ID),
-  await load("scrub-audit-pii", 2002),
-  await load("sync-download-policies", 2009),
+  await load("scrub-audit-pii", AL.SCRUB_AUDIT_PII_LOCK_ID),
+  await load("sync-download-policies", AL.DOWNLOAD_POLICIES_LOCK_ID),
   await load("sync-plex-watchlists", AL.PLEX_WATCHLIST_LOCK_ID),
   await load("sync-trakt", AL.TRAKT_SYNC_LOCK_ID),
   await load("trash-diagnostic", null),
   await load("trash-sync", AL.TRASH_SYNC_LOCK_ID),
-  await load("warm-activity", null),
+  await load("warm-activity", AL.WARM_ACTIVITY_LOCK_ID),
   await load("warm-library", AL.WARM_LIBRARY_LOCK_ID),
-  await load("warm-list-cache", null),
+  await load("warm-list-cache", AL.WARM_LIST_CACHE_LOCK_ID),
   await load("warm-mdblist", AL.WARM_MDBLIST_LOCK_ID),
   await load("warm-omdb", AL.WARM_OMDB_LOCK_ID),
   await load("warm-recommendations", AL.WARM_RECOMMENDATIONS_LOCK_ID),
@@ -256,7 +256,7 @@ const SNAP = await import("../src/lib/arr-snapshot.ts");
 async function plantDueArrView(): Promise<void> {
   SNAP.resetArrSnapshotsForTests();
   const url = "http://localhost:3000/api/admin/queue";
-  await SNAP.snapshotted(async () => Response.json({ items: [] }))(new NextRequest(url, { headers: { "accept-language": "en" } }), {}, {});
+  await SNAP.snapshotted(async () => Response.json({ items: [] }))(new NextRequest(url, { headers: { "accept-language": "en" } }), {}, { user: { id: "admin-1", role: "ADMIN", permissions: BigInt(0) } });
   SNAP.rememberSnapshot(SNAP.snapshotKey(url, "en")!, '{"items":[]}', Date.now() - 10 * 60_000, { url, locale: "en", viewed: true });
 }
 
@@ -283,6 +283,10 @@ beforeEach(async () => {
   settings.set("feature.admin.neverWatched", "true");
   // watch-sync short-circuits before its lock while its feature (default OFF) is off.
   settings.set("feature.admin.watchSync", "true");
+  // trash-sync too (TRaSH Guides is OFF by default). A fresh last-refresh stamp
+  // keeps its run off GitHub: it only walks the (empty) application list.
+  settings.set("trashGuidesEnabled", "true");
+  settings.set("trashLastRefreshAt", new Date().toISOString());
   // arr-watch short-circuits before its lock unless a Radarr/Sonarr instance is
   // configured. An RFC1918 literal: admin-configured SSRF mode, no DNS; every
   // read answers the stub's 503.
@@ -416,9 +420,8 @@ for (const route of LOCKING) {
 // The withCronRunRecording-wrapped routes mark their busy answer X-Cron-Skipped
 // so NO ledger row is written for a run that never happened — otherwise the
 // System tab's runs/h (guardrail 7b's cadence readout) over-counts whenever a
-// run outlasts its tick. The warm-* routes record inside the work callback and
-// never recorded their skips; these now agree with them. sync-plex-watchlists
-// still answers a plain 200 skip and is recorded — not changed here.
+// run outlasts its tick. sync-plex-watchlists still answers a plain 200 skip
+// and is recorded — not changed here.
 for (const name of ["trash-sync", "sync-download-policies", "sync-trakt", "refresh-upstream-watch", "arr-watch", "refresh-arr-snapshots", "watch-sync"]) {
   test(`${name}: a BUSY lock writes NO cron:lastRun ledger row`, async () => {
     const route = ROUTES.find((r) => r.name === name)!;
@@ -430,8 +433,7 @@ for (const name of ["trash-sync", "sync-download-policies", "sync-trakt", "refre
 }
 
 // Every warm-* route answers a busy lock through cronSkippedResponse (the
-// X-Cron-Skipped marker) and records no run. warm-activity / warm-list-cache are
-// not in LOCKING (lockId null), so they are named explicitly here.
+// X-Cron-Skipped marker) and records no run.
 for (const name of ["warm-recommendations", "warm-library", "warm-activity", "warm-mdblist", "warm-omdb", "warm-list-cache"]) {
   test(`${name}: a BUSY lock answers X-Cron-Skipped and records no run`, async () => {
     const route = ROUTES.find((r) => r.name === name)!;
@@ -448,12 +450,38 @@ test("trash-sync: TRaSH Guides OFF (the default) is a 200 skip — no 500, no au
   // runTrashSync answers a disabled feature with errors:["trashGuidesEnabled is
   // off"]; turned into a 500 that made the DAILY job a 300s retry loop on every
   // stock deployment (288 failed runs + 288 SETTINGS_CHANGE audit rows a day).
+  settings.delete("trashGuidesEnabled");
+  invalidateFeatureFlagCache();
   const route = ROUTES.find((r) => r.name === "trash-sync")!;
   const res = await route.POST(authed(route));
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { skipped: true, reason: "TRaSH Guides disabled" });
   assert.equal(res.headers.get("x-cron-degraded"), null);
   assert.equal(opsOf("auditLog.create").length, 0, "a disabled feature is not a settings change");
+  // No run happened: it is decided before the lock (no pg connection) and kept
+  // out of the run history (guardrail 7b).
+  assert.equal(res.headers.get("x-cron-skipped"), "1");
+  assert.equal(ops.filter(isBookkeeping).length, 0, "a disabled run must not be recorded");
+  assert.deepEqual(pgLockCalls, []);
+});
+
+test("trash-diagnostic: a starter-pack probe that throws reads as NOT resolvable", async () => {
+  // Its errored report has neither count, and comparing two undefineds used to
+  // call it resolvable.
+  const route = ROUTES.find((r) => r.name === "trash-diagnostic")!;
+  shadowPrismaModel(prisma, "trashSpec", {
+    ...counter("trashSpec"),
+    findMany: async () => { throw new Error("trashSpec read exploded (unit test)"); },
+  });
+  try {
+    const res = await route.POST(authed(route));
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.match(body.report.starterPack.error, /exploded/);
+    assert.equal(body.summary.starterPackResolvable, false);
+  } finally {
+    shadowPrismaModel(prisma, "trashSpec", counter("trashSpec"));
+  }
 });
 
 for (const route of LOCKING) {
@@ -478,6 +506,37 @@ test("a busy lock is not unlocked — releasing another run's lock would let two
 test("every locking cron job uses a DISTINCT lock id", () => {
   const ids = LOCKING.map((r) => r.lockId);
   assert.equal(new Set(ids).size, ids.length, `duplicate cron lock ids: ${ids.join(", ")}`);
+});
+
+test("every named advisory lock id is distinct — the registry is the collision check", () => {
+  // A route passing a literal id would dodge this; every withAdvisoryLock
+  // caller names its id from advisory-lock.ts (the scan below).
+  const named = Object.entries(AL).filter(([k, v]) => k.endsWith("_LOCK_ID") && typeof v === "number") as Array<[string, number]>;
+  assert.ok(named.length >= 20, `expected the whole registry, saw ${named.length}`);
+  const byId = new Map<number, string[]>();
+  for (const [k, v] of named) byId.set(v, [...(byId.get(v) ?? []), k]);
+  const clashes = [...byId.entries()].filter(([, ks]) => ks.length > 1);
+  assert.deepEqual(clashes, [], `advisory lock ids claimed twice: ${JSON.stringify(clashes)}`);
+});
+
+test("no withAdvisoryLock caller passes a literal lock id", async () => {
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) { if (e.name !== "generated") walk(p); }
+      else if (/\.tsx?$/.test(e.name)) files.push(p);
+    }
+  };
+  walk("src");
+  const literal: string[] = [];
+  for (const f of files) {
+    if (f.endsWith("advisory-lock.ts")) continue;
+    if (/withAdvisoryLock\(\s*\d/.test(readFileSync(f, "utf8"))) literal.push(f);
+  }
+  assert.deepEqual(literal, [], "name the id in advisory-lock.ts instead of passing a number");
 });
 
 test("no cron lock id collides with the sync orchestrator's lock 2000", () => {
@@ -561,6 +620,47 @@ test("scrub-audit-pii: the scrub is cutoff-bounded and redacts all three PII col
   }
 });
 
+test("scrub-audit-pii: the userName pass writes and skips on the viewer's REDACTED_USER_NAME, not a private literal", async () => {
+  // The admin viewer renders a row as "redacted" by comparing with this
+  // constant; a scrub writing its own copy would drift from it, and re-touch
+  // every old row on each run once the two disagreed.
+  const { REDACTED_USER_NAME } = await import("../src/lib/audit.ts");
+  const seen: Array<{ where: Record<string, unknown>; data: Record<string, unknown> }> = [];
+  shadowPrismaModel(prisma, "auditLog", {
+    ...counter("auditLog"),
+    updateMany: async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+      seen.push(args);
+      return { count: 0 };
+    },
+  });
+  try {
+    await scrub.POST(authed(scrub));
+    const pii = seen.find((u) => "userName" in u.data);
+    assert.ok(pii, "the PII column pass is missing");
+    assert.equal(pii.data.userName, REDACTED_USER_NAME);
+    assert.deepEqual(
+      (pii.where.OR as Array<Record<string, unknown>>).find((o) => "userName" in o),
+      { userName: { not: REDACTED_USER_NAME } },
+    );
+  } finally {
+    shadowPrismaModel(prisma, "auditLog", counter("auditLog"));
+  }
+  // The values match today, so the run above can't tell the constant from a
+  // copy of it: the one scrub both paths run must name the constant, never the
+  // literal, and neither path may carry a scrub of its own.
+  const { readFileSync } = await import("node:fs");
+  const read = (file: string) => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+  const scrubSrc = read("src/lib/audit-pii-scrub.ts");
+  assert.doesNotMatch(scrubSrc, /["'`]\[redacted\]["'`]/, "the scrub carries its own \"[redacted]\" literal");
+  assert.match(scrubSrc, /userName: \{ not: REDACTED_USER_NAME \}/, "the scrub must skip rows already redacted by the constant");
+  assert.match(scrubSrc, /userName: REDACTED_USER_NAME \}/, "the scrub must write the constant");
+  for (const file of ["src/app/api/cron/scrub-audit-pii/route.ts", "src/app/api/admin/audit-log/route.ts"]) {
+    const src = read(file);
+    assert.match(src, /await scrubAuditPii\(cutoff\)/, `${file} runs the shared scrub`);
+    assert.doesNotMatch(src, /auditLog\.updateMany|REDACTED_USER_NAME/, `${file} carries a scrub of its own`);
+  }
+});
+
 test("scrub-audit-pii: it UPDATES rather than deletes — the audit trail survives redaction", async () => {
   await scrub.POST(authed(scrub));
   assert.equal(opsOf("auditLog.deleteMany").length, 0, "the PII scrub must never delete audit rows");
@@ -587,11 +687,13 @@ test("scrub-audit-pii: aged admin-action rows lose the TARGET user's name/email 
   const aged_ = (r: Row, w: { createdAt?: { lt?: Date } }) => !w.createdAt?.lt || r.createdAt < w.createdAt.lt;
   shadowPrismaModel(prisma, "auditLog", {
     ...counter("auditLog"),
-    findMany: async (args: { where: { createdAt?: { lt?: Date }; OR?: Array<{ details: { contains: string } }> }; cursor?: { id: string } }) => {
+    findMany: async (args: { where: { createdAt?: { lt?: Date }; AND?: Array<{ OR?: Array<{ details: { contains: string } }> }> }; cursor?: { id: string } }) => {
       rec("auditLog.findMany", args.where);
       if (args.cursor) return [];
+      // The PII-key OR is one of the where's AND terms (the caller's own OR is never overwritten).
+      const keyTerms = (args.where.AND ?? []).flatMap((t) => t.OR ?? []);
       return rows
-        .filter((r) => aged_(r, args.where) && (args.where.OR ?? []).some((o) => r.details?.includes(o.details.contains)))
+        .filter((r) => aged_(r, args.where) && keyTerms.some((o) => r.details?.includes(o.details.contains)))
         .map((r) => ({ id: r.id, details: r.details }));
     },
     updateMany: async (args: { where: { createdAt?: { lt?: Date }; id?: string; details?: string }; data: { details?: string | null } }) => {
@@ -631,14 +733,46 @@ test("purge-auth-sessions: one failing delete does NOT abort the other nine", as
   });
   const res = await purge.POST(authed(purge));
   const swept = ops.filter((o) => o.op.endsWith(".deleteMany")).length;
-  assert.ok(swept >= 9, `only ${swept} deletes were attempted — allSettled should run all of them`);
+  assert.equal(swept, 10, `only ${swept} deletes were attempted — a failing leg must not stop the rest`);
   const body = await res.json();
   assert.equal(body.errorCount, 1);
-  // Non-2xx so withCronRunRecording marks the run failed…
-  assert.equal(res.status, 500);
+  // 200 + X-Cron-Degraded, like every other cron, so withCronRunRecording
+  // marks the run failed without the entrypoint re-running a daily job every
+  // 300s (its fast retry on a non-2xx)…
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("x-cron-degraded"), "1");
+  assert.equal(body.ok, false);
+  assert.match(body.error, /1 table purge\(s\) failed/);
+  assert.equal(ledgerOk("auth-sessions:purge-expired"), false, "the ledger records the failed run");
   // …while the body still carries the counts that DID succeed.
   assert.equal(typeof body.deleted.authSessions, "number");
   shadowPrismaModel(prisma, "webhookReplay", counter("webhookReplay"));
+});
+
+test("purge-auth-sessions: the legs run one at a time, never all at once on the small Prisma pool", async () => {
+  let inFlight = 0;
+  let peak = 0;
+  const slow = (model: string) => ({
+    ...counter(model),
+    deleteMany: async (args: { where?: unknown } = {}) => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setImmediate(r));
+      inFlight--;
+      rec(`${model}.deleteMany`, args.where);
+      return { count: 0 };
+    },
+  });
+  const models = ["authSession", "discordLinkToken", "discordMergeCode", "discordSearchCache", "webhookReplay", "plexTokenCache", "tmdbMediaCore", "ipLookupCache", "auditLog"];
+  for (const m of models) shadowPrismaModel(prisma, m, slow(m));
+  try {
+    const res = await purge.POST(authed(purge));
+    assert.equal(res.status, 200);
+    assert.equal(opsOf("auditLog.deleteMany").length, 1);
+    assert.equal(peak, 1, `${peak} purge deletes ran at once`);
+  } finally {
+    for (const m of models) shadowPrismaModel(prisma, m, counter(m));
+  }
 });
 
 test("purge-auth-sessions: an all-clean run is 200 with errorCount 0", async () => {
@@ -647,6 +781,39 @@ test("purge-auth-sessions: an all-clean run is 200 with errorCount 0", async () 
   const body = await res.json();
   assert.equal(body.ok, true);
   assert.equal(body.errorCount, 0);
+  assert.equal(body.aborted, false);
+  assert.equal(res.headers.get("x-cron-degraded"), null);
+});
+
+test("purge-auth-sessions: a failing leg reports 0 under ITS key and is logged by name; the other counts stand", async () => {
+  shadowPrismaModel(prisma, "ipLookupCache", {
+    ...counter("ipLookupCache"),
+    deleteMany: async () => { throw new Error("ip cache delete exploded"); },
+  });
+  shadowPrismaModel(prisma, "authSession", {
+    ...counter("authSession"),
+    deleteMany: async () => ({ count: 7 }),
+  });
+  try {
+    const res = await purge.POST(authed(purge));
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("x-cron-degraded"), "1");
+    const body = await res.json() as { errorCount: number; deleted: Record<string, number> };
+    assert.equal(body.errorCount, 1);
+    assert.equal(body.deleted.ipLookupCache, 0);
+    assert.equal(body.deleted.authSessions, 7, "a leg that succeeded keeps its own count");
+    assert.deepEqual(Object.keys(body.deleted), [
+      "authSessions", "discordLinkTokens", "discordMergeCodes", "discordSearchCache", "webhookReplays",
+      "plexTokensExpired", "plexTokensLegacy", "tmdbMediaCore", "ipLookupCache", "auditLogs",
+    ]);
+    const line = errors.find((e) => e.includes("[cron/purge-auth-sessions]"));
+    assert.ok(line, `no scoped error log: ${errors.join(" | ")}`);
+    assert.match(line, /ipLookupCache/, "the log must name the table that failed, not an index");
+    assert.match(line, /ip cache delete exploded/);
+  } finally {
+    shadowPrismaModel(prisma, "ipLookupCache", counter("ipLookupCache"));
+    shadowPrismaModel(prisma, "authSession", counter("authSession"));
+  }
 });
 
 test("purge-auth-sessions: a failing leg is logged for the operator (guardrail 7 scope prefix)", async () => {
@@ -671,6 +838,9 @@ test("warm-library skips cleanly, and BEFORE taking its lock, when TMDB credenti
     const res = await route.POST(authed(route));
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { skipped: true, reason: "no TMDB credentials configured" });
+    // No run happened: answered as a skip and kept out of the run history.
+    assert.equal(res.headers.get("x-cron-skipped"), "1");
+    assert.equal(ops.filter(isBookkeeping).length, 0, "an unconfigured skip must not be recorded");
     assert.deepEqual(pgLockCalls, []);
   } finally {
     process.env.TMDB_READ_TOKEN = saved;
@@ -689,6 +859,9 @@ for (const [name, key, reason] of [
     const res = await route.POST(authed(route));
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { skipped: true, reason });
+    // No run happened: answered as a skip and kept out of the run history.
+    assert.equal(res.headers.get("x-cron-skipped"), "1");
+    assert.equal(ops.filter(isBookkeeping).length, 0, "an unconfigured skip must not be recorded");
     assert.deepEqual(pgLockCalls, []);
   });
 
@@ -769,6 +942,11 @@ function ledgerOk(target: string): boolean | undefined {
   return (JSON.parse(row.update.value) as { ok: boolean }).ok;
 }
 
+function ledgerWrites(target: string): number {
+  return opsOf("setting.upsert")
+    .filter((o) => (o.args as { where: { key: string } }).where.key === `cron:lastRun:${target}`).length;
+}
+
 const LEDGER_TARGET: Record<(typeof DERIVED_OK_ROUTES)[number], string> = {
   "warm-library": "library",
   "warm-list-cache": "list-cache",
@@ -787,6 +965,7 @@ for (const name of DERIVED_OK_ROUTES) {
     assert.equal(typeof body.ok, "boolean");
     const recorded = ledgerOk(LEDGER_TARGET[name]);
     assert.equal(recorded, body.ok, `${name}: ledger ok=${recorded} but body ok=${body.ok}`);
+    assert.equal(ledgerWrites(LEDGER_TARGET[name]), 1, `${name}: the run must be recorded exactly once`);
     if (body.ok) {
       assert.equal(body.error, undefined, "a clean run must not carry an error key — the badge reads it as failure");
       assert.equal(res.headers.get("x-cron-degraded"), null);
@@ -810,6 +989,9 @@ test("warm-list-cache: with upstream list fetches failing, the 200 body says ok:
   assert.match(body.error!, /list fetches failed/);
   assert.equal(res.headers.get("x-cron-degraded"), String(body.errors));
   assert.equal(ledgerOk("list-cache"), false);
+  // Each failure is logged by the task's name (its key in the body), with why.
+  const failedTasks = Object.entries(body).filter(([k, v]) => v === 0 && errors.some((e) => e.startsWith(`[warm-list-cache] ${k} failed:`)));
+  assert.equal(failedTasks.length, body.errors, `one named log line per failed task: ${errors.join(" | ")}`);
 });
 
 test("warm-library: an all-clean run is ok:true with NO error key and no degraded header", async () => {
@@ -832,15 +1014,79 @@ test("no warm route hardcodes `ok: true` in its response body — the verdict is
   }
 });
 
+// ── a run that THROWS is recorded as a failed run, exactly once ─────────────
+// The warm-* routes go through withCronRunRecording, so anything that escapes
+// the work — the warm itself, the lock connection, a lock timeout — lands in
+// the run history as ok:false instead of leaving the last green run standing.
+const WARM_LEDGER: Record<string, string> = {
+  "warm-activity": "activity",
+  "warm-library": "library",
+  "warm-list-cache": "list-cache",
+  "warm-mdblist": "mdblist",
+  "warm-omdb": "omdb",
+  "warm-recommendations": "recommendations",
+};
+
+for (const [name, target] of Object.entries(WARM_LEDGER)) {
+  test(`${name}: a lock connection that fails is recorded once as a failed run`, async () => {
+    const route = ROUTES.find((r) => r.name === name)!;
+    const realConnect = pgProto.connect;
+    pgProto.connect = async () => { throw new Error("connect refused (unit test)"); };
+    try {
+      await assert.rejects(route.POST(authed(route)), /connect refused/);
+    } finally {
+      pgProto.connect = realConnect;
+    }
+    assert.equal(ledgerWrites(target), 1, `${name} must record the failed run exactly once`);
+    assert.equal(ledgerOk(target), false);
+  });
+}
+
 // ── attribution comes from the SAME session read that authorized ────────────
 
 test("every cron route resolves its actor through getCronActor — no second readActiveSummonarrSessionFromRequest", async () => {
   const { readFileSync } = await import("node:fs");
   for (const route of ROUTES) {
     const src = readFileSync(`src/app/api/cron/${route.name}/route.ts`, "utf-8");
-    const usesAuth = /getCronActor\(|isCronAuthorized\(/.test(src);
+    // defineCronRoute / withCronActor (src/lib/cron-route.ts) call getCronActor
+    // first; tests/cron-route.test.mts pins that.
+    const usesAuth = /getCronActor\(|isCronAuthorized\(|defineCronRoute\(|withCronActor\(/.test(src);
     assert.ok(usesAuth, `${route.name} has no cron gate`);
     assert.ok(!src.includes("readActiveSummonarrSessionFromRequest"), `${route.name} re-reads the session for attribution — use getCronActor`);
+  }
+});
+
+test("every locking cron route is built on defineCronRoute — one shape for auth, skip, ledger, lock and answer", async () => {
+  const { readFileSync } = await import("node:fs");
+  for (const route of LOCKING) {
+    const code = readFileSync(`src/app/api/cron/${route.name}/route.ts`, "utf-8")
+      .split("\n").map((l) => { const i = l.indexOf("//"); return i === -1 ? l : l.slice(0, i); }).join("\n");
+    assert.match(code, /export const POST = defineCronRoute\(/, `${route.name} hand-rolls its cron plumbing`);
+    for (const piece of ["withAdvisoryLock(", "withCronRunRecording(", "getCronActor(", "X-Cron-Degraded"]) {
+      assert.ok(!code.includes(piece), `${route.name} still spells out ${piece} itself`);
+    }
+  }
+});
+
+test("warm-recommendations: a failed graph refresh is degraded with a COUNT in X-Cron-Degraded and the reason in `error`", async () => {
+  // It used to send the word "graph", the one cron whose header was not a count.
+  const route = ROUTES.find((r) => r.name === "warm-recommendations")!;
+  // The graph's source walk reads the watchlist; failing it fails the refresh.
+  shadowPrismaModel(prisma, "watchlistItem", {
+    ...counter("watchlistItem"),
+    findMany: async () => { throw new Error("graph store unavailable (unit test)"); },
+  });
+  try {
+    const res = await route.POST(authed(route));
+    assert.equal(res.status, 200);
+    const body = await res.json() as { ok: boolean; graphFailed: boolean; error?: string };
+    assert.equal(body.graphFailed, true, "the harness must actually fail the graph refresh");
+    assert.equal(body.ok, false);
+    assert.match(body.error ?? "", /graph refresh failed/);
+    assert.equal(res.headers.get("x-cron-degraded"), "1");
+    assert.equal(ledgerOk("recommendations"), false);
+  } finally {
+    shadowPrismaModel(prisma, "watchlistItem", counter("watchlistItem"));
   }
 });
 

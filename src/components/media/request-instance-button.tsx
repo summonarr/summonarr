@@ -1,18 +1,14 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
-import { Plus, Check, Loader2, Ban } from "@/components/icons";
-import { withBasePath } from "@/lib/base-path";
-import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
-import { DetailActionButton, DetailActionStatus } from "./detail-action-button";
+import { VariantRequestButton } from "./variant-request-button";
 
 // Secondary "Request on <instance>" action shown on movie/TV detail pages for
 // each configured NAMED Radarr/Sonarr instance the viewer may request on
 // (canRequestInstance). Posts the explicit arrInstance slug; the server
 // re-validates the instance and the caller's grant. The default instance stays
 // on RequestButton and 4K on Request4kButton — this covers named slugs only.
+// The request flow is VariantRequestButton's, shared with Request4kButton.
 export function RequestInstanceButton({
   tmdbId,
   mediaType,
@@ -36,120 +32,22 @@ export function RequestInstanceButton({
   // The title is admin-blacklisted — no request either (the request POST 403s).
   blacklisted?: boolean;
 }) {
-  const { toast } = useToast();
   const t = useT();
-  const router = useRouter();
-  const [state, setState] = useState<"idle" | "loading" | "requested" | "error">(
-    requested ? "requested" : "idle",
-  );
-  const [msg, setMsg] = useState("");
-  // The route answers 200 { alreadyAvailable: true } and creates NOTHING when
-  // the server finds the title is already available for this instance. Same
-  // handling as Request4kButton: show "Available", not a
-  // "Requested" state for a request that does not exist.
-  const [foundAvailable, setFoundAvailable] = useState(false);
-  // Client nav reuses this instance across titles (the parent key used to be
-  // the slug alone). `requested` is live so a refresh on this title flips
-  // the status without a remount.
-  const [seenTmdbId, setSeenTmdbId] = useState(tmdbId);
-  const titleChanged = seenTmdbId !== tmdbId;
-  if (titleChanged) {
-    setSeenTmdbId(tmdbId);
-    setState(requested ? "requested" : "idle");
-    setMsg("");
-    setFoundAvailable(false);
-  }
-
-  async function submit() {
-    setState("loading");
-    setMsg("");
-    try {
-      const res = await fetch(withBasePath("/api/requests"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tmdbId, mediaType, arrInstance: instance, _token: requestToken }),
-      });
-      if (res.status === 409) {
-        setState("requested");
-        return;
-      }
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setMsg(data.error ?? t("request.somethingWrong"));
-        setState("error");
-        return;
-      }
-      const body = (await res.json().catch(() => null)) as { alreadyAvailable?: boolean } | null;
-      if (body?.alreadyAvailable) {
-        setFoundAvailable(true);
-        setState("idle");
-        router.refresh();
-        return;
-      }
-      setState("requested");
-      toast({ title: t("request.requestedOn", { instance: instanceName }), variant: "success" });
-      router.refresh();
-    } catch {
-      setMsg(t("request.networkError"));
-      setState("error");
-    }
-  }
-
-  // Availability wins over request state — once the copy is fetched there's nothing to request.
-  if (available || (!titleChanged && foundAvailable)) {
-    return (
-      <DetailActionStatus variant="accent-soft">
-        <Check style={{ width: 14, height: 14 }} />
-        {t("request.availableOnInstance", { instance: instanceName })}
-      </DetailActionStatus>
-    );
-  }
-
-  if ((titleChanged ? !!requested : state === "requested" || requested)) {
-    return (
-      <DetailActionStatus variant="accent-soft">
-        <Check style={{ width: 14, height: 14 }} />
-        {t("request.requestedOn", { instance: instanceName })}
-      </DetailActionStatus>
-    );
-  }
-
-  // Blacklisted blocks all requests (per tmdbId+mediaType, every instance).
-  if (blacklisted) {
-    return (
-      <DetailActionStatus variant="muted">
-        <Ban style={{ width: 14, height: 14 }} />
-        {t("request.notAvailableToRequest")}
-      </DetailActionStatus>
-    );
-  }
-
-  // flex-col: the error renders UNDER the button (as RequestButton's does), never
-  // squeezed beside a 34px control in the wrapping action row.
   return (
-    <div className="flex flex-col items-start gap-2">
-      <DetailActionButton
-        variant="secondary"
-        onClick={submit}
-        disabled={!titleChanged && state === "loading"}
-        busy={!titleChanged && state === "loading"}
-      >
-        {!titleChanged && state === "loading" ? (
-          <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
-        ) : (
-          <Plus style={{ width: 14, height: 14 }} />
-        )}
-        {t("request.requestOn", { instance: instanceName })}
-      </DetailActionButton>
-      {!titleChanged && state === "error" && msg && (
-        <p
-          className="ds-mono max-w-sm"
-          role="alert"
-          style={{ fontSize: 11, color: "var(--ds-danger)", margin: 0 }}
-        >
-          {msg}
-        </p>
-      )}
-    </div>
+    <VariantRequestButton
+      tmdbId={tmdbId}
+      mediaType={mediaType}
+      extras={{ arrInstance: instance }}
+      labels={{
+        request: t("request.requestOn", { instance: instanceName }),
+        requested: t("request.requestedOn", { instance: instanceName }),
+        available: t("request.availableOnInstance", { instance: instanceName }),
+        requestedToast: t("request.requestedOn", { instance: instanceName }),
+      }}
+      requestToken={requestToken}
+      requested={requested}
+      available={available}
+      blacklisted={blacklisted}
+    />
   );
 }

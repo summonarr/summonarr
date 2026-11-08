@@ -5,7 +5,11 @@ import { Calendar, Check, Copy, Loader2, RefreshCw } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { useCopyFeedback } from "@/hooks/use-copy-feedback";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson } from "@/lib/client/fetch-json";
+import { v } from "@/lib/validate";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 interface CalendarFeedProps {
@@ -21,6 +25,15 @@ interface Generated {
   allUrl: string | null;
 }
 
+// POST /api/profile/calendar: the new feed's URLs, shown this once. A 2xx
+// without them is a failure, never an empty field and a link to nowhere.
+const CreatedAnswer = v.object({
+  url: v.string(),
+  webcalUrl: v.string(),
+  allUrl: v.optional(v.nullable(v.string())),
+  createdAt: v.optional(v.nullable(v.string())),
+});
+
 // Personal iCal feed controls. The subscribe URL is shown ONLY in the response
 // that generates it: the server stores a hash, never the token, so a lost URL is
 // replaced (which revokes the old one) rather than re-displayed.
@@ -31,50 +44,56 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
   const [active, setActive] = useState(enabled);
   const [since, setSince] = useState<string | null>(createdAt);
   const [generated, setGenerated] = useState<Generated | null>(null);
-  const [busy, setBusy] = useState<"generate" | "revoke" | null>(null);
+  // "generate" or "revoke"; both buttons wait while either runs.
+  const action = useAsyncAction();
   const [confirming, setConfirming] = useState<"regenerate" | "revoke" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function generate() {
-    setBusy("generate");
     setConfirming(null);
     setError(null);
-    try {
-      const res = await fetch(withBasePath("/api/profile/calendar"), { method: "POST" });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setError(data.error ?? t("profile.calendar.error.create"));
-        return;
-      }
-      setGenerated({ url: data.url, webcalUrl: data.webcalUrl, allUrl: data.allUrl ?? null });
-      setActive(true);
-      setSince(data.createdAt ?? null);
-    } catch {
-      setError(t("profile.calendar.error.create"));
-    } finally {
-      setBusy(null);
+    const res = await action.run(
+      "generate",
+      (signal) =>
+        fetchJson(withBasePath("/api/profile/calendar"), {
+          init: { method: "POST" },
+          schema: CreatedAnswer,
+          signal,
+          fallbackError: t("profile.calendar.error.create"),
+        }),
+      { ifBusy: "skip" },
+    );
+    if (!res) return;
+    if (!res.ok) {
+      setError(res.error);
+      return;
     }
+    const data = res.data;
+    setGenerated({ url: data.url, webcalUrl: data.webcalUrl, allUrl: data.allUrl ?? null });
+    setActive(true);
+    setSince(data.createdAt ?? null);
   }
 
   async function revoke() {
-    setBusy("revoke");
     setConfirming(null);
     setError(null);
-    try {
-      const res = await fetch(withBasePath("/api/profile/calendar"), { method: "DELETE" });
-      if (!res.ok) {
-        setError(t("profile.calendar.error.revoke"));
-        return;
-      }
-      setGenerated(null);
-      setActive(false);
-      setSince(null);
-    } catch {
+    const res = await action.run(
+      "revoke",
+      (signal) => fetchJson(withBasePath("/api/profile/calendar"), { init: { method: "DELETE" }, signal }),
+      { ifBusy: "skip" },
+    );
+    if (!res) return;
+    // A 2xx is the feed turned off, whatever its body says.
+    if (!res.ok && res.kind !== "invalid") {
       setError(t("profile.calendar.error.revoke"));
-    } finally {
-      setBusy(null);
+      return;
     }
+    setGenerated(null);
+    setActive(false);
+    setSince(null);
   }
+
+  const busy = action.anyBusy;
 
   return (
     <div className="space-y-3">
@@ -113,7 +132,7 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
         </p>
       )}
 
-      {error && <p className="text-sm text-red-400">{error}</p>}
+      {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
 
       {confirming ? (
         <div className="flex flex-wrap items-center gap-2">
@@ -139,22 +158,22 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
         <div className="flex flex-wrap gap-2">
           <Button
             type="button"
-            disabled={busy !== null}
+            disabled={busy}
             onClick={() => (active ? setConfirming("regenerate") : generate())}
             className="w-full sm:w-auto gap-1.5"
           >
-            {busy === "generate" ? <Loader2 className="w-4 h-4 animate-spin" /> : active ? <RefreshCw className="w-4 h-4" /> : <Calendar className="w-4 h-4" />}
+            {action.busy("generate") ? <Loader2 className="w-4 h-4 animate-spin" /> : active ? <RefreshCw className="w-4 h-4" /> : <Calendar className="w-4 h-4" />}
             {active ? t("profile.calendar.generateNew") : t("profile.calendar.create")}
           </Button>
           {active && (
             <Button
               type="button"
               variant="ghost"
-              disabled={busy !== null}
+              disabled={busy}
               onClick={() => setConfirming("revoke")}
               className="w-full sm:w-auto"
             >
-              {busy === "revoke" ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : null}
+              {action.busy("revoke") ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : null}
               {t("profile.calendar.turnOff")}
             </Button>
           )}
@@ -171,16 +190,9 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
 
 function FeedUrl({ label, url }: { label: string; url: string }) {
   const t = useT();
-  const [copied, setCopied] = useState(false);
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(url);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      setCopied(false);
-    }
-  }
+  // The URL is in the field beside the button for manual selection when the
+  // clipboard is blocked.
+  const { copied, failed, copy } = useCopyFeedback();
   return (
     <div className="space-y-1">
       <p className="text-xs font-medium text-zinc-400">{label}</p>
@@ -195,14 +207,15 @@ function FeedUrl({ label, url }: { label: string; url: string }) {
         <Button
           type="button"
           variant="ghost"
-          onClick={copy}
+          onClick={() => void copy(url)}
           aria-label={t("profile.calendar.copyFeedUrl", { label })}
           title={t("profile.calendar.copyLink")}
-          className="h-10 w-10 shrink-0 p-0 text-zinc-400 hover:text-zinc-100"
+          className="h-10 w-10 shrink-0 px-0 text-zinc-400 hover:text-zinc-100"
         >
           {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
         </Button>
       </div>
+      {failed && <p role="alert" className="text-xs text-amber-400">{t("profile.common.copyFailed")}</p>}
     </div>
   );
 }

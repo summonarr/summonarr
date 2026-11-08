@@ -67,9 +67,13 @@ const model = (name: string) => ({
   },
   findUnique: async (args: unknown) => {
     ops.push({ op: `${name}.findUnique`, args });
-    return null;
+    if (name !== "setting") return null;
+    const key = (args as { where: { key: string } }).where.key;
+    const value = settingRows.get(key);
+    return value === undefined ? null : { key, value };
   },
 });
+const settingRows = new Map<string, string>();
 for (const m of ["mediaRequest", "user", "issue", "plexLibraryItem", "jellyfinLibraryItem", "tVEpisodeCache", "deletionVote", "setting"]) {
   shadowPrismaModel(prisma, m, model(m));
 }
@@ -80,6 +84,7 @@ beforeEach(() => {
   groupByResults.clear();
   countResults.length = 0;
   rawResponder = () => [];
+  settingRows.clear();
 });
 
 const norm = (s: string) => s.replace(/\s+/g, " ");
@@ -149,10 +154,29 @@ test("fulfillment only weighs APPROVED requests, and keeps backfilled approvals 
   await data.getFulfillmentStats(null);
   const sql = norm(rawCalls[0].sql);
   assert.match(sql, /WHERE r\."approvedAt" IS NOT NULL/, "an unapproved (mirrored / library-marked) request must not count");
-  assert.match(sql, /r\."approvedAt" = r\."createdAt" AS legacy/);
+  assert.match(sql, /false AS legacy/, "no backfill marker ⇒ no row is a backfilled one");
   assert.match(sql, /COUNT\(download_s\) FILTER \(WHERE NOT legacy\)/);
   assert.match(sql, /percentile_cont\(0\.5\)/, "a median, not just a mean");
   assert.ok(!/AND r\."createdAt" >=/.test(sql), "all time adds no window");
+});
+
+test("fulfillment: a backfilled row is approvedAt = createdAt AND created BEFORE the backfill ran — never an auto-approve from after it", async () => {
+  // Auto-approve sets approvedAt and Prisma fills createdAt in the same
+  // millisecond most of the time, so equality alone read most auto-approved
+  // requests as backfill and dropped them from the auto share and download times.
+  const ranAt = "2026-09-17T10:00:00.000Z";
+  settingRows.set("requestApprovedAtBackfillRanAt", ranAt);
+  await data.getFulfillmentStats(null);
+  const sql = norm(rawCalls[0].sql);
+  assert.match(sql, /\(r\."approvedAt" = r\."createdAt" AND r\."createdAt" < (\?|\$\d+)\) AS legacy/, "the fragment is composed into the text, not bound as a value");
+  assert.ok(rawCalls[0].values.some((v) => v instanceof Date && v.toISOString() === ranAt), "bounded by the marker's own time");
+  assert.ok(!/r\."approvedAt" = r\."createdAt" AS legacy/.test(sql), "bare equality is the old shape");
+});
+
+test("fulfillment: an unparseable backfill marker counts nothing as backfilled rather than failing the page", async () => {
+  settingRows.set("requestApprovedAtBackfillRanAt", "not a date");
+  await data.getFulfillmentStats(null);
+  assert.match(norm(rawCalls[0].sql), /false AS legacy/);
 });
 
 test("fulfillment applies the period window to createdAt", async () => {
@@ -203,17 +227,68 @@ test("the pending queue excludes a PENDING row that carries an approval (a rolle
 });
 
 test("stuck requests match the *arr caches on the request's OWN instance (guardrail 32) and only look at approved rows", async () => {
-  rawResponder = (sql) =>
-    /GROUP BY reason/.test(sql)
-      ? [{ reason: "push-failed", count: 2n }, { reason: "slow-download", count: 1n }]
-      : [];
-  const s = await data.getStuckRequests();
+  const row = (id: string, reason: string, reasonCount: bigint, rn: bigint) => ({
+    id, tmdbId: 1, mediaType: "MOVIE", title: id, arrInstance: "", reason,
+    approvedAt: new Date("2026-09-01T00:00:00Z"), lastArrPushAt: null, reason_count: reasonCount, rn,
+  });
+  // limit 1: the oldest row, plus the first row of every other reason (past
+  // the cut, there only to carry its reason's full count).
+  rawResponder = () => [row("a", "slow-download", 1n, 1n), row("b", "push-failed", 2n, 2n)];
+  const s = await data.getStuckRequests(1);
+  assert.equal(rawCalls.length, 1, "the classification runs ONCE for the counts and the list");
   const sql = norm(rawCalls[0].sql);
   assert.match(sql, /"RadarrWantedItem" w WHERE w\."tmdbId" = r\."tmdbId" AND w\."arrInstance" = r\."arrInstance"/);
   assert.match(sql, /"SonarrWantedItem" w WHERE w\."tmdbId" = r\."tmdbId" AND w\."arrInstance" = r\."arrInstance"/);
   assert.match(sql, /WHERE r\."approvedAt" IS NOT NULL AND r\.status IN \('PENDING', 'APPROVED'\)/);
   assert.match(sql, /WHEN r\.status = 'PENDING' THEN 'push-failed'/);
+  assert.match(sql, /WHERE t\.rn <= (\?|\$\d+)::int OR t\.rn_reason = 1/);
   assert.deepEqual(s.counts, { "push-failed": 2, "not-in-arr": 0, "slow-download": 1 });
+  assert.deepEqual(s.oldest.map((r) => r.id), ["a"], "a row past the limit counts but is not listed");
+});
+
+// ── sources ─────────────────────────────────────────────────────────────────
+
+test("request sources: each ledger source has its own bucket — a Trakt auto-request is not an in-app watchlist one", async () => {
+  rawResponder = () => [
+    { source: "watchlist", count: 3n },
+    { source: "plex-watchlist", count: 2n },
+    { source: "trakt-watchlist", count: 4n },
+    { source: "something-new", count: 9n },
+  ];
+  const auto = await data.getAutoRequestSources(null);
+  assert.deepEqual(auto, { watchlist: 3, plexWatchlist: 2, traktWatchlist: 4 }, "an unknown source is credited to none");
+  assert.deepEqual(data.requestSources(auto, 20), { watchlist: 3, plexWatchlist: 2, traktWatchlist: 4, other: 11 });
+  assert.equal(data.requestSources(auto, 5).other, 0, "never negative");
+});
+
+test("request sources: a request several ledger rows point at is credited to one source, never one per row", async () => {
+  rawResponder = () => [];
+  await data.getAutoRequestSources(null);
+  const sql = norm(rawCalls[0].sql);
+  assert.match(sql, /SELECT DISTINCT ON \(r\.id\) l\.source/);
+  assert.match(sql, /ORDER BY r\.id, l\."createdAt" ASC, l\.id ASC/);
+  assert.match(sql, /GROUP BY t\.source/);
+  assert.doesNotMatch(sql, /COUNT\(DISTINCT r\.id\)/);
+});
+
+test("fulfillment: every non-legacy approval is auto OR admin — one recorded before its request counts as auto", async () => {
+  rawResponder = () => [];
+  await data.getFulfillmentStats(null);
+  const sql = norm(rawCalls[0].sql);
+  assert.match(sql, /\(NOT legacy AND approve_s < (\?|\$\d+)::float8\) AS by_auto/);
+  assert.match(sql, /\(NOT legacy AND approve_s >= (\?|\$\d+)::float8\) AS by_admin/);
+  assert.doesNotMatch(sql, /ABS\(approve_s\)/);
+});
+
+test("deletion votes: the threshold is read through the shared parse the vote routes use", async () => {
+  settingRows.set("deletionVoteThreshold", "7abc");
+  try {
+    assert.equal((await data.getTopDeletionVotes()).threshold, 7);
+    settingRows.set("deletionVoteThreshold", "-3");
+    assert.equal((await data.getTopDeletionVotes()).threshold, 0);
+  } finally {
+    settingRows.delete("deletionVoteThreshold");
+  }
 });
 
 // ── users ───────────────────────────────────────────────────────────────────
@@ -221,6 +296,16 @@ test("stuck requests match the *arr caches on the request's OWN instance (guardr
 test("active users exclude disabled (and therefore purged) accounts", async () => {
   await data.countActiveUsers();
   assert.deepEqual(ops.find((o) => o.op === "user.count")?.args, { where: { deactivatedAt: null } });
+});
+
+test("the watch-grade spread reads the active requesters as a GROUP BY, not a distinct findMany of every request", async () => {
+  // Prisma applies `distinct` in memory, so that shape read every request row.
+  assert.equal(await data.getWatchGradeSpreadForStats(), null, "no requesters, no spread");
+  assert.deepEqual(ops.find((o) => o.op === "mediaRequest.groupBy")?.args, {
+    by: ["requestedBy"],
+    where: { user: { deactivatedAt: null } },
+  });
+  assert.equal(ops.filter((o) => o.op === "mediaRequest.findMany").length, 0);
 });
 
 test("top requesters group by account id with a stable tiebreak", async () => {

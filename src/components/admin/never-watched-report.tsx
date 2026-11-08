@@ -3,7 +3,8 @@
 // Admin → Never watched (guardrail 14d). Every library title — and every season
 // of a show that HAS been watched — nobody has watched in this server's recorded
 // history, biggest first. The report is computed on the server, filtered, sorted
-// and paged there; this component only asks for a page. Every date is a
+// and paged there; this component only asks for a page, and checks it against
+// its shape (never-watched-wire.ts) before rendering. Every date is a
 // server-supplied ISO string formatted for the viewer, every "days" a server
 // count — nothing here reads the clock while rendering (guardrail 16).
 //
@@ -12,7 +13,7 @@
 // live. Without Library cleanup switched on this page is a report and nothing more.
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { posterUrl } from "@/lib/tmdb-types";
@@ -22,34 +23,40 @@ import { StyledSelect } from "@/components/ui/styled-select";
 import { Chip, EmptyState, FilterBar, SectionHeader, StatCard } from "@/components/ui/design";
 import { Poster } from "@/components/admin/activity-ui";
 import { HistoryPagination } from "@/components/admin/activity-history/pagination";
+import { ReportTable } from "@/components/admin/report-table";
 import { ArrowDown, ArrowUp, ArrowUpDown, EyeOff, Loader2, RefreshCw, Shield, ShieldOff, Trash2 } from "@/components/icons";
 import {
   CleanupPlanPanel,
   CleanupResultPanel,
-  arrInstanceLabel,
+  arrSlugLabel,
   cleanupKeyOf,
   dayFormatter,
   formatBytesIn,
-  readApiError,
   useCleanupDelete,
 } from "@/components/admin/cleanup-delete";
+import { apiErrorText } from "@/lib/client/api-error";
+import { fetchJson, LONG_RUN_TIMEOUT_MS, jsonInit } from "@/lib/client/fetch-json";
 import { runReplaceFileJob } from "@/lib/client/replace-file-job";
 import { arrFailureText, upstreamFailureText } from "@/lib/cleanup-error-text";
+import { check } from "@/lib/validate";
 import {
+  isNeverWatchedState,
   lastValidPage,
   upstreamCheckCounts,
   upstreamChipKey,
   type NwLevel,
   type NwSortKey,
   type NwStateFilter,
-  type NwUpstreamHealth,
 } from "@/lib/never-watched";
-import type { NeverWatchedReport, NwSeasonRow, NwTitleRow } from "@/lib/never-watched-report";
+import type { NwSeasonRow, NwTitleRow } from "@/lib/never-watched-report";
 import { CLEANUP_MAX_ITEMS } from "@/lib/library-cleanup";
+import { NwCheckResultWire, NwPageWire, type NwPage } from "@/components/admin/never-watched-wire";
 
-type Summary = Omit<NeverWatchedReport, "titles" | "seasons">;
-type Page = Summary & { rows: Array<NwTitleRow | NwSeasonRow>; total: number };
+type Page = NwPage;
 type Selected = { tmdbId: number; mediaType: "MOVIE" | "TV"; title: string; sizeOnDisk: number | null };
+type Day = (iso: string | null) => string;
+type FormatBytes = (n: number | null) => string;
+type Sort = { key: NwSortKey; dir: "asc" | "desc"; on: (key: NwSortKey) => void };
 
 // The selection never grows past what one delete takes — the route's own cap,
 // shared with Library cleanup's page so the three can't drift.
@@ -107,6 +114,10 @@ function bannerClass(tone: "warn" | "info") {
   return tone === "warn" ? "rounded-md bg-amber-500/15 text-amber-400" : "rounded-md bg-sky-500/15 text-sky-400";
 }
 
+function selectedOf(r: NwTitleRow): Selected {
+  return { tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title, sizeOnDisk: r.sizeOnDisk };
+}
+
 export function NeverWatchedReport({ initialLevel, initialState }: { initialLevel: NwLevel; initialState: NwStateFilter }) {
   const t = useT();
   const locale = useLocale();
@@ -126,7 +137,11 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
   const [limit, setLimit] = useState(50);
   const [data, setData] = useState<Page | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  // A load's failure and an action's (Protect, Check now) are kept apart: a
+  // reload clears only its own, so it never wipes an action's failure before
+  // the admin has read it — and an action never hides a failed load.
+  const [loadError, setLoadError] = useState("");
+  const [actionError, setActionError] = useState("");
   const [selected, setSelected] = useState<Map<string, Selected>>(new Map());
   // One entry per Protect/Unprotect in flight. A single key let a second row's
   // click re-enable the first row's button mid-request, and the first one's
@@ -157,7 +172,7 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
     setLoading(true);
-    setError("");
+    setLoadError("");
     const params = new URLSearchParams({
       level, state: stateFilter, sortBy: effectiveSort(level, sortBy), sortDir, page: String(page), limit: String(limit),
     });
@@ -173,29 +188,28 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
       params.set("fresh", "1");
       freshNext.current = false;
     }
-    try {
-      const res = await fetch(withBasePath(`/api/admin/never-watched?${params}`));
-      if (seq !== loadSeq.current) return;
-      if (!res.ok) {
-        setError(await readApiError(res, t("adminManage.neverWatched.error.load")));
-        return;
-      }
-      const next = (await res.json()) as Page;
-      if (seq !== loadSeq.current) return;
-      // A delete or protect shrank the list under the page on screen: step
-      // back to the last page that holds rows (the page change reloads it)
-      // rather than showing "Nothing matches" over a "51–50 of 50" pager.
-      const last = lastValidPage(next.total, limit);
-      if (next.rows.length === 0 && next.total > 0 && page > last) {
-        setPage(last);
-        return;
-      }
-      setData(next);
-    } catch {
-      if (seq === loadSeq.current) setError(t("adminManage.neverWatched.error.loadNetwork"));
-    } finally {
-      if (seq === loadSeq.current) setLoading(false);
+    // The first build of the report reads the whole library: no client-side timeout.
+    const res = await fetchJson(withBasePath(`/api/admin/never-watched?${params}`), {
+      schema: NwPageWire,
+      timeoutMs: LONG_RUN_TIMEOUT_MS,
+      fallbackError: t("adminManage.neverWatched.error.load"),
+    });
+    if (seq !== loadSeq.current) return;
+    setLoading(false);
+    if (!res.ok) {
+      setLoadError(res.kind === "network" ? t("adminManage.neverWatched.error.loadNetwork") : res.error);
+      return;
     }
+    const next = res.data;
+    // A delete or protect shrank the list under the page on screen: step
+    // back to the last page that holds rows (the page change reloads it)
+    // rather than showing "Nothing matches" over a "51–50 of 50" pager.
+    const last = lastValidPage(next.total, limit);
+    if (next.rows.length === 0 && next.total > 0 && page > last) {
+      setPage(last);
+      return;
+    }
+    setData(next);
   }, [level, stateFilter, type, sortBy, sortDir, page, limit, appliedQuery, eligibleOnly, t]);
 
   useEffect(() => {
@@ -249,7 +263,7 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
     setSelected((prev) => {
       const next = new Map(prev);
       if (next.has(k)) next.delete(k);
-      else if (next.size < MAX_SELECTION) next.set(k, { tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title, sizeOnDisk: r.sizeOnDisk });
+      else if (next.size < MAX_SELECTION) next.set(k, selectedOf(r));
       return next;
     });
   }
@@ -263,16 +277,17 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
   // Rows on hand belong to the other tab: say nothing about this one yet.
   const otherLevelRows = levelRows.length === 0 && (data?.rows.length ?? 0) > 0;
   const selectableOnPage = titleRows.filter((r) => r.eligible);
+  // Every selectable row on the page is ticked: the header box shows it, and a click clears them.
+  const allOnPage = selectableOnPage.length > 0 && selectableOnPage.every((r) => selected.has(cleanupKeyOf(r)));
 
   function toggleAllOnPage() {
     del.clearPlan();
-    const allOn = selectableOnPage.length > 0 && selectableOnPage.every((r) => selected.has(cleanupKeyOf(r)));
     setSelected((prev) => {
       const next = new Map(prev);
       for (const r of selectableOnPage) {
         const k = cleanupKeyOf(r);
-        if (allOn) next.delete(k);
-        else if (next.size < MAX_SELECTION) next.set(k, { tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title, sizeOnDisk: r.sizeOnDisk });
+        if (allOnPage) next.delete(k);
+        else if (next.size < MAX_SELECTION) next.set(k, selectedOf(r));
       }
       return next;
     });
@@ -281,17 +296,20 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
   async function setProtected(r: NwTitleRow, on: boolean) {
     const k = cleanupKeyOf(r);
     setBusyKeys((prev) => new Set(prev).add(k));
-    setError("");
+    setActionError("");
     try {
+      const fallbackError = on ? t("adminManage.cleanup.error.protect") : t("adminManage.cleanup.error.unprotect");
       const res = on
-        ? await fetch(withBasePath("/api/admin/cleanup/protect"), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title.slice(0, 500) }),
+        ? await fetchJson(withBasePath("/api/admin/cleanup/protect"), {
+            init: jsonInit("POST", { tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title.slice(0, 500) }),
+            fallbackError,
           })
-        : await fetch(withBasePath(`/api/admin/cleanup/protect?tmdbId=${r.tmdbId}&mediaType=${r.mediaType}`), { method: "DELETE" });
+        : await fetchJson(withBasePath(`/api/admin/cleanup/protect?tmdbId=${r.tmdbId}&mediaType=${r.mediaType}`), {
+            init: { method: "DELETE" },
+            fallbackError,
+          });
       if (!res.ok) {
-        setError(await readApiError(res, on ? t("adminManage.cleanup.error.protect") : t("adminManage.cleanup.error.unprotect")));
+        setActionError(res.kind === "network" || res.kind === "timeout" ? t("adminManage.cleanup.error.network") : res.error);
         return;
       }
       del.clearPlan();
@@ -301,8 +319,6 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
         return next;
       });
       await reload();
-    } catch {
-      setError(t("adminManage.cleanup.error.network"));
     } finally {
       // Only this row's entry: another row's request may still be running.
       setBusyKeys((prev) => {
@@ -316,7 +332,7 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
   async function checkUpstream() {
     setChecking(true);
     setCheckNote("");
-    setError("");
+    setActionError("");
     try {
       const answer = await runReplaceFileJob(fetch, withBasePath("/api/admin/never-watched/refresh"), {}, {
         intervalMs: CHECK_POLL_MS,
@@ -331,17 +347,20 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
         return;
       }
       if (answer.status < 200 || answer.status >= 300) {
-        const msg = (answer.data as { error?: unknown } | null)?.error;
-        setError(typeof msg === "string" && msg ? msg : t("adminManage.neverWatched.error.check"));
+        setActionError(apiErrorText(answer.data, t("adminManage.neverWatched.error.check")));
         return;
       }
-      const body = answer.data as { servers?: Array<{ ok: boolean; health: NwUpstreamHealth }> } | null;
-      const { unread, unhealthy } = upstreamCheckCounts(body?.servers ?? []);
+      const result = check(NwCheckResultWire, answer.data);
+      if (!result.ok) {
+        setActionError(t("adminManage.neverWatched.error.check"));
+        return;
+      }
+      const { unread, unhealthy } = upstreamCheckCounts(result.value.servers ?? []);
       const base = unread > 0 ? t("adminManage.neverWatched.checkedSomeFailed", { count: unread }) : t("adminManage.neverWatched.checked");
       setCheckNote(unhealthy > 0 ? `${base} ${t("adminManage.neverWatched.checkedSomeUnhealthy", { count: unhealthy })}` : base);
       await reload(true);
     } catch {
-      setError(t("adminManage.neverWatched.error.checkNetwork"));
+      setActionError(t("adminManage.neverWatched.error.checkNetwork"));
     } finally {
       setChecking(false);
     }
@@ -355,7 +374,17 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
     );
   }
   if (!data) {
-    return <p role="alert" style={{ color: "var(--ds-danger)", fontSize: 13 }}>{error || t("adminManage.neverWatched.error.load")}</p>;
+    // A failed FIRST load hides every control that would reload (filters,
+    // pager, the arr Retry), so this one is the way back without a page reload.
+    return (
+      <div className="flex flex-col items-start gap-2">
+        <p role="alert" style={{ color: "var(--ds-danger)", fontSize: 13, margin: 0 }}>{loadError || t("adminManage.neverWatched.error.load")}</p>
+        <Button size="xs" variant="outline" onClick={() => void reload()} disabled={loading}>
+          {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+          {t("adminManage.common.retry")}
+        </Button>
+      </div>
+    );
   }
 
   const totalPages = Math.max(1, Math.ceil(data.total / limit));
@@ -365,135 +394,20 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
   // holder): a de-registered or emptied server stays listed below but is never
   // named here, where nothing the admin does could clear it.
   const unchecked = data.coverage.filter((c) => c.holds && c.upstream.health !== "ok");
-
-  const sortHead = (k: NwSortKey, label: string, align?: "right") => {
-    const active = effectiveSort(level, sortBy) === k;
-    const Icon = !active ? ArrowUpDown : sortDir === "asc" ? ArrowUp : ArrowDown;
-    return (
-      <th key={k} style={{ ...th, textAlign: align ?? "left" }} aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : "none"}>
-        <button
-          type="button"
-          onClick={() => sortOn(k)}
-          className="inline-flex items-center gap-1 hover:text-zinc-100"
-          style={{ font: "inherit", color: active ? "var(--ds-fg)" : "inherit" }}
-        >
-          {label}
-          <Icon style={{ width: 11, height: 11, opacity: active ? 1 : 0.5 }} />
-        </button>
-      </th>
-    );
+  const sort: Sort = { key: effectiveSort(level, sortBy), dir: sortDir, on: sortOn };
+  // Each distinct failure once, the latest action's first.
+  const alerts = [...new Set([actionError, loadError, del.error].filter(Boolean))];
+  const empty = emptyStateKeys(data);
+  const resetPage = <T,>(set: (v: T) => void) => (v: T) => {
+    set(v);
+    setPage(1);
   };
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))" }}>
-        <StatCard
-          label={t("adminManage.neverWatched.stat.titles")}
-          value={num.format(data.totals.never.titles)}
-          hint={t("adminManage.neverWatched.stat.titlesHint", { size: formatBytes(data.totals.never.bytes), count: data.totals.never.unsized })}
-        />
-        <StatCard
-          label={t("adminManage.neverWatched.stat.seasons")}
-          value={num.format(data.totals.seasons.count)}
-          hint={t("adminManage.neverWatched.stat.seasonsHint", { size: formatBytes(data.totals.seasons.bytes) })}
-        />
-        <StatCard
-          label={t("adminManage.neverWatched.stat.eligible")}
-          value={data.cleanupEnabled ? num.format(data.totals.eligible.titles) : "—"}
-          hint={data.cleanupEnabled
-            ? t("adminManage.neverWatched.stat.eligibleHint", { size: formatBytes(data.totals.eligible.bytes) })
-            : t("adminManage.neverWatched.stat.eligibleOff")}
-        />
-        <StatCard
-          label={t("adminManage.neverWatched.stat.unknown")}
-          value={num.format(data.totals.unknown + data.totals.possible)}
-          hint={t("adminManage.neverWatched.stat.unknownHint", { unknown: data.totals.unknown, possible: data.totals.possible })}
-        />
-      </div>
-
-      {/* ── how far the claim can be trusted, per server ────────────────── */}
-      <section className="flex flex-col gap-2" style={panel} aria-labelledby="nw-coverage">
-        <div id="nw-coverage" className="-mb-3">
-          <SectionHeader
-            title={t("adminManage.neverWatched.coverage.title")}
-            right={
-              <Button size="sm" variant="outline" onClick={() => void checkUpstream()} disabled={checking}>
-                {checking ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-                {t("adminManage.neverWatched.coverage.checkNow")}
-              </Button>
-            }
-          />
-        </div>
-        <p style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>{t("adminManage.neverWatched.coverage.help")}</p>
-        {data.coverage.length === 0 ? (
-          <p style={{ fontSize: 13, color: "var(--ds-fg-muted)", margin: 0 }}>{t("adminManage.neverWatched.coverage.none")}</p>
-        ) : (
-          <ul className="flex flex-col gap-1" style={{ margin: 0, padding: 0, listStyle: "none", fontSize: 13 }}>
-            {data.coverage.map((c) => {
-              const u = c.upstream;
-              const chip = upstreamChipKey(u);
-              const pct = u.samples > 0 ? Math.round((u.agreed / u.samples) * 100) : null;
-              return (
-                <li key={c.server} className="flex flex-wrap items-center gap-x-3 gap-y-1" style={{ color: "var(--ds-fg)" }}>
-                  <span className="ds-mono" style={{ minWidth: 120, fontWeight: 600 }}>{c.server}</span>
-                  <span style={{ color: "var(--ds-fg-muted)" }}>
-                    {!c.tracked
-                      ? t("adminManage.neverWatched.coverage.untracked")
-                      : c.since
-                        ? t("adminManage.neverWatched.coverage.since", { date: day(c.since) })
-                        : t("adminManage.neverWatched.coverage.noHistory")}
-                  </span>
-                  <Chip tone={u.health === "ok" ? "approved" : u.health === "never" ? "neutral" : "declined"}>
-                    {t(HEALTH_KEYS[chip], {
-                      date: day(u.fetchedAt),
-                      pct: pct ?? 0,
-                      agreed: u.agreed,
-                      samples: u.samples,
-                    })}
-                  </Chip>
-                  {u.health === "failed" && u.error ? (
-                    <span style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>{upstreamFailureText(t, u)}</span>
-                  ) : null}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-        {checkNote && <p role="status" style={{ fontSize: 12, color: "var(--ds-fg-muted)", margin: 0 }}>{checkNote}</p>}
-      </section>
-
-      {!data.trackingOn && (
-        <p role="status" className={bannerClass("warn")} style={{ padding: "8px 12px", fontSize: 13, margin: 0 }}>
-          {t("adminManage.neverWatched.banner.trackingOff")}
-        </p>
-      )}
-      {data.unplacedPlays > 0 && (
-        <p role="status" className={bannerClass("info")} style={{ padding: "8px 12px", fontSize: 13, margin: 0 }}>
-          {t("adminManage.neverWatched.banner.unplaced", { count: data.unplacedPlays })}
-        </p>
-      )}
-      {data.cleanupEnabled && data.requireUpstreamCheck && unchecked.length > 0 && (
-        <p role="status" className={bannerClass("warn")} style={{ padding: "8px 12px", fontSize: 13, margin: 0 }}>
-          {t("adminManage.neverWatched.banner.unchecked", { list: unchecked.map((c) => c.server).join(", ") })}
-        </p>
-      )}
-      {data.arrErrors.length > 0 && (
-        <div role="status" className={`${bannerClass("warn")} flex flex-wrap items-center gap-2`} style={{ padding: "8px 12px", fontSize: 13 }}>
-          <span className="flex-1">
-            {t("adminManage.cleanup.arrErrorsList", { list: data.arrErrors.map((e) => arrFailureText(t, arrInstanceLabel(e.service, e.instance), e)).join("; ") })}
-          </span>
-          {/* Re-lists Radarr/Sonarr now instead of waiting out the shared cache. */}
-          <Button size="xs" variant="outline" onClick={() => void reload(true)} disabled={loading}>
-            {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-            {t("adminManage.common.retry")}
-          </Button>
-        </div>
-      )}
-      {!data.cleanupEnabled && (
-        <p role="status" className={bannerClass("info")} style={{ padding: "8px 12px", fontSize: 13, margin: 0 }}>
-          {t("adminManage.neverWatched.banner.cleanupOff")}
-        </p>
-      )}
+      <NwStatCards data={data} num={num} formatBytes={formatBytes} />
+      <CoverageSection data={data} day={day} checking={checking} checkNote={checkNote} onCheck={() => void checkUpstream()} />
+      <NwBanners data={data} unchecked={unchecked} loading={loading} onRetry={() => void reload(true)} />
 
       {/* ── tabs + filters ─────────────────────────────────────────────── */}
       <div className="flex flex-col gap-2">
@@ -504,64 +418,21 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
             { value: "season", label: t("adminManage.neverWatched.tab.seasons") },
           ]}
           active={level}
-          onChange={(v) => {
-            setLevel(v);
-            setPage(1);
-          }}
+          onChange={resetPage(setLevel)}
         />
-        <div className="flex flex-wrap items-center gap-2" style={{ fontSize: 13 }}>
-          <StyledSelect
-            compact
-            className="w-auto"
-            value={stateFilter}
-            onChange={(e) => {
-              setStateFilter(e.target.value as NwStateFilter);
-              setPage(1);
-            }}
-            aria-label={t("adminManage.neverWatched.filter.state")}
-          >
-            {(Object.keys(FILTER_KEYS) as NwStateFilter[]).map((f) => (
-              <option key={f} value={f}>{t(FILTER_KEYS[f])}</option>
-            ))}
-          </StyledSelect>
-          {level === "title" && (
-            <StyledSelect
-              compact
-              className="w-auto"
-              value={type}
-              onChange={(e) => {
-                setType(e.target.value as typeof type);
-                setPage(1);
-              }}
-              aria-label={t("adminManage.cleanup.filter.mediaType")}
-            >
-              <option value="all">{t("adminManage.cleanup.filter.moviesAndTv")}</option>
-              <option value="movie">{t("nav.movies")}</option>
-              <option value="tv">{t("adminManage.cleanup.tv")}</option>
-            </StyledSelect>
-          )}
-          {level === "title" && data.cleanupEnabled && (
-            <label className="inline-flex items-center gap-1.5" style={{ color: "var(--ds-fg)" }}>
-              <input
-                type="checkbox"
-                checked={eligibleOnly}
-                onChange={(e) => {
-                  setEligibleOnly(e.target.checked);
-                  setPage(1);
-                }}
-              />
-              {t("adminManage.neverWatched.filter.eligibleOnly")}
-            </label>
-          )}
-          <Input
-            value={query}
-            onChange={(e) => setQuery(e.target.value.slice(0, 100))}
-            placeholder={t("adminManage.cleanup.filter.titlePlaceholder")}
-            aria-label={t("adminManage.cleanup.filter.title")}
-            className="w-[200px]"
-          />
-          {loading && <Loader2 className="animate-spin" style={{ width: 14, height: 14, color: "var(--ds-fg-subtle)" }} />}
-          <div className="flex-1" />
+        <NwFilterRow
+          level={level}
+          cleanupEnabled={data.cleanupEnabled}
+          stateFilter={stateFilter}
+          onStateFilter={resetPage(setStateFilter)}
+          type={type}
+          onType={resetPage(setType)}
+          eligibleOnly={eligibleOnly}
+          onEligibleOnly={resetPage(setEligibleOnly)}
+          query={query}
+          onQuery={setQuery}
+          loading={loading}
+        >
           {data.cleanupEnabled && level === "title" && (
             <Button size="sm" variant="destructive" onClick={() => void del.dryRun()} disabled={selected.size === 0 || del.planning || del.executing}>
               {del.planning ? <Loader2 className="animate-spin" /> : <Trash2 />}
@@ -570,10 +441,12 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
                 : t("adminManage.cleanup.deleteSelected", { count: 0 })}
             </Button>
           )}
-        </div>
+        </NwFilterRow>
       </div>
 
-      {(error || del.error) && <p role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{error || del.error}</p>}
+      {alerts.map((message) => (
+        <p key={message} role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{message}</p>
+      ))}
       {data.cleanupEnabled && selected.size >= MAX_SELECTION && (
         <p style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>{t("adminManage.cleanup.selectionFull", { max: MAX_SELECTION })}</p>
       )}
@@ -589,87 +462,24 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
           </div>
         ) : null
       ) : levelRows.length === 0 ? (
-        <EmptyState
-          icon={EyeOff}
-          title={
-            !data.trackingOn
-              ? t("adminManage.neverWatched.empty.trackingOffTitle")
-              : data.historyStart === null
-                ? t("adminManage.neverWatched.empty.noHistoryTitle")
-                : t("adminManage.neverWatched.empty.title")
-          }
-          description={
-            !data.trackingOn
-              ? t("adminManage.neverWatched.empty.trackingOffDescription")
-              : data.historyStart === null
-                ? t("adminManage.neverWatched.empty.noHistoryDescription")
-                : t("adminManage.neverWatched.empty.description")
-          }
-        />
+        <EmptyState icon={EyeOff} title={t(empty.title)} description={t(empty.description)} />
       ) : level === "title" ? (
-        <div className="resp-table-scroll" style={{ border: "1px solid var(--ds-border)", borderRadius: 10 }}>
-          <table className="w-full" style={{ fontSize: 13, borderCollapse: "collapse", color: "var(--ds-fg)" }}>
-            <thead>
-              <tr style={{ background: "var(--ds-bg-2)", textAlign: "left", color: "var(--ds-fg-subtle)", fontSize: 11 }}>
-                {data.cleanupEnabled && (
-                  <th style={{ ...th, width: 32 }}>
-                    <input
-                      type="checkbox"
-                      aria-label={t("adminManage.cleanup.selectAll")}
-                      checked={selectableOnPage.length > 0 && selectableOnPage.every((r) => selected.has(cleanupKeyOf(r)))}
-                      onChange={toggleAllOnPage}
-                      disabled={selectableOnPage.length === 0}
-                    />
-                  </th>
-                )}
-                {sortHead("title", t("adminManage.cleanup.col.title"))}
-                <th style={th}>{t("adminManage.cleanup.col.on")}</th>
-                {sortHead("added", t("adminManage.cleanup.col.added"))}
-                {sortHead("since", t("adminManage.neverWatched.col.since"))}
-                {sortHead("days", t("adminManage.neverWatched.col.days"), "right")}
-                {sortHead("size", t("adminManage.cleanup.col.size"), "right")}
-                <th style={th}>{t("adminManage.neverWatched.col.status")}</th>
-                {data.cleanupEnabled && <th style={th} />}
-              </tr>
-            </thead>
-            <tbody>
-              {titleRows.map((r) => (
-                <TitleRow
-                  key={cleanupKeyOf(r)}
-                  r={r}
-                  cleanupEnabled={data.cleanupEnabled}
-                  checked={selected.has(cleanupKeyOf(r))}
-                  onToggle={() => toggle(r)}
-                  busy={busyKeys.has(cleanupKeyOf(r))}
-                  onProtect={(on) => void setProtected(r, on)}
-                  day={day}
-                  formatBytes={formatBytes}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <TitleTable
+          titleRows={titleRows}
+          cleanupEnabled={data.cleanupEnabled}
+          sort={sort}
+          allOnPage={allOnPage}
+          canSelectAll={selectableOnPage.length > 0}
+          onToggleAll={toggleAllOnPage}
+          isSelected={(r) => selected.has(cleanupKeyOf(r))}
+          onToggle={toggle}
+          isBusy={(r) => busyKeys.has(cleanupKeyOf(r))}
+          onProtect={(r, on) => void setProtected(r, on)}
+          day={day}
+          formatBytes={formatBytes}
+        />
       ) : (
-        <div className="resp-table-scroll" style={{ border: "1px solid var(--ds-border)", borderRadius: 10 }}>
-          <table className="w-full" style={{ fontSize: 13, borderCollapse: "collapse", color: "var(--ds-fg)" }}>
-            <thead>
-              <tr style={{ background: "var(--ds-bg-2)", textAlign: "left", color: "var(--ds-fg-subtle)", fontSize: 11 }}>
-                {sortHead("title", t("adminManage.neverWatched.col.season"))}
-                <th style={th}>{t("adminManage.cleanup.col.on")}</th>
-                <th style={{ ...th, textAlign: "right" }}>{t("adminManage.neverWatched.col.episodes")}</th>
-                {sortHead("since", t("adminManage.neverWatched.col.since"))}
-                {sortHead("days", t("adminManage.neverWatched.col.days"), "right")}
-                {sortHead("size", t("adminManage.cleanup.col.size"), "right")}
-                <th style={th}>{t("adminManage.neverWatched.col.status")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {seasonRows.map((r) => (
-                <SeasonRow key={`${r.tmdbId}:${r.seasonNumber}`} r={r} day={day} formatBytes={formatBytes} />
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <SeasonTable seasonRows={seasonRows} sort={sort} day={day} formatBytes={formatBytes} />
       )}
 
       {data.total > 0 && !otherLevelRows && (
@@ -677,10 +487,7 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
           page={page}
           setPage={(p) => setPage(Math.min(Math.max(1, p), totalPages))}
           limit={limit}
-          setLimit={(n) => {
-            setLimit(n);
-            setPage(1);
-          }}
+          setLimit={resetPage(setLimit)}
           total={data.total}
           totalPages={totalPages}
         />
@@ -700,9 +507,326 @@ function effectiveSort(level: NwLevel, sortBy: NwSortKey): NwSortKey {
   return level === "season" && sortBy === "added" ? "since" : sortBy;
 }
 
+// Why nothing is listed: recording is off, nothing has been recorded yet, or
+// nothing matches.
+function emptyStateKeys(data: Page): { title: string; description: string } {
+  if (!data.trackingOn) {
+    return { title: "adminManage.neverWatched.empty.trackingOffTitle", description: "adminManage.neverWatched.empty.trackingOffDescription" };
+  }
+  if (data.historyStart === null) {
+    return { title: "adminManage.neverWatched.empty.noHistoryTitle", description: "adminManage.neverWatched.empty.noHistoryDescription" };
+  }
+  return { title: "adminManage.neverWatched.empty.title", description: "adminManage.neverWatched.empty.description" };
+}
+
+function NwStatCards({ data, num, formatBytes }: { data: Page; num: Intl.NumberFormat; formatBytes: FormatBytes }) {
+  const t = useT();
+  return (
+    <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))" }}>
+      <StatCard
+        label={t("adminManage.neverWatched.stat.titles")}
+        value={num.format(data.totals.never.titles)}
+        hint={t("adminManage.neverWatched.stat.titlesHint", { size: formatBytes(data.totals.never.bytes), count: data.totals.never.unsized })}
+      />
+      <StatCard
+        label={t("adminManage.neverWatched.stat.seasons")}
+        value={num.format(data.totals.seasons.count)}
+        hint={t("adminManage.neverWatched.stat.seasonsHint", { size: formatBytes(data.totals.seasons.bytes) })}
+      />
+      <StatCard
+        label={t("adminManage.neverWatched.stat.eligible")}
+        value={data.cleanupEnabled ? num.format(data.totals.eligible.titles) : "—"}
+        hint={data.cleanupEnabled
+          ? t("adminManage.neverWatched.stat.eligibleHint", { size: formatBytes(data.totals.eligible.bytes) })
+          : t("adminManage.neverWatched.stat.eligibleOff")}
+      />
+      <StatCard
+        label={t("adminManage.neverWatched.stat.unknown")}
+        value={num.format(data.totals.unknown + data.totals.possible)}
+        hint={t("adminManage.neverWatched.stat.unknownHint", { unknown: data.totals.unknown, possible: data.totals.possible })}
+      />
+    </div>
+  );
+}
+
+// ── how far the claim can be trusted, per server ────────────────────────────
+function CoverageSection({ data, day, checking, checkNote, onCheck }: {
+  data: Page;
+  day: Day;
+  checking: boolean;
+  checkNote: string;
+  onCheck: () => void;
+}) {
+  const t = useT();
+  return (
+    <section className="flex flex-col gap-2" style={panel} aria-labelledby="nw-coverage">
+      <div id="nw-coverage" className="-mb-3">
+        <SectionHeader
+          title={t("adminManage.neverWatched.coverage.title")}
+          right={
+            <Button size="sm" variant="outline" onClick={onCheck} disabled={checking}>
+              {checking ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+              {t("adminManage.neverWatched.coverage.checkNow")}
+            </Button>
+          }
+        />
+      </div>
+      <p style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>{t("adminManage.neverWatched.coverage.help")}</p>
+      {data.coverage.length === 0 ? (
+        <p style={{ fontSize: 13, color: "var(--ds-fg-muted)", margin: 0 }}>{t("adminManage.neverWatched.coverage.none")}</p>
+      ) : (
+        <ul className="flex flex-col gap-1" style={{ margin: 0, padding: 0, listStyle: "none", fontSize: 13 }}>
+          {data.coverage.map((c) => {
+            const u = c.upstream;
+            const chip = upstreamChipKey(u);
+            const pct = u.samples > 0 ? Math.round((u.agreed / u.samples) * 100) : null;
+            return (
+              <li key={c.server} className="flex flex-wrap items-center gap-x-3 gap-y-1" style={{ color: "var(--ds-fg)" }}>
+                <span className="ds-mono" style={{ minWidth: 120, fontWeight: 600 }}>{c.server}</span>
+                <span style={{ color: "var(--ds-fg-muted)" }}>
+                  {!c.tracked
+                    ? t("adminManage.neverWatched.coverage.untracked")
+                    : c.since
+                      ? t("adminManage.neverWatched.coverage.since", { date: day(c.since) })
+                      : t("adminManage.neverWatched.coverage.noHistory")}
+                </span>
+                <Chip tone={u.health === "ok" ? "approved" : u.health === "never" ? "neutral" : "declined"}>
+                  {t(HEALTH_KEYS[chip], {
+                    date: day(u.fetchedAt),
+                    pct: pct ?? 0,
+                    agreed: u.agreed,
+                    samples: u.samples,
+                  })}
+                </Chip>
+                {u.health === "failed" && u.error ? (
+                  <span style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>{upstreamFailureText(t, u)}</span>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {checkNote && <p role="status" style={{ fontSize: 12, color: "var(--ds-fg-muted)", margin: 0 }}>{checkNote}</p>}
+    </section>
+  );
+}
+
+// What limits the report right now: recording off, unplaced plays, unchecked
+// servers, Radarr/Sonarr that couldn't be listed, cleanup off.
+function NwBanners({ data, unchecked, loading, onRetry }: {
+  data: Page;
+  unchecked: ReadonlyArray<{ server: string }>;
+  loading: boolean;
+  onRetry: () => void;
+}) {
+  const t = useT();
+  return (
+    <>
+      {!data.trackingOn && (
+        <p role="status" className={bannerClass("warn")} style={{ padding: "8px 12px", fontSize: 13, margin: 0 }}>
+          {t("adminManage.neverWatched.banner.trackingOff")}
+        </p>
+      )}
+      {data.unplacedPlays > 0 && (
+        <p role="status" className={bannerClass("info")} style={{ padding: "8px 12px", fontSize: 13, margin: 0 }}>
+          {t("adminManage.neverWatched.banner.unplaced", { count: data.unplacedPlays })}
+        </p>
+      )}
+      {data.cleanupEnabled && data.requireUpstreamCheck && unchecked.length > 0 && (
+        <p role="status" className={bannerClass("warn")} style={{ padding: "8px 12px", fontSize: 13, margin: 0 }}>
+          {t("adminManage.neverWatched.banner.unchecked", { list: unchecked.map((c) => c.server).join(", ") })}
+        </p>
+      )}
+      {data.arrErrors.length > 0 && (
+        <div role="status" className={`${bannerClass("warn")} flex flex-wrap items-center gap-2`} style={{ padding: "8px 12px", fontSize: 13 }}>
+          <span className="flex-1">
+            {t("adminManage.cleanup.arrErrorsList", { list: data.arrErrors.map((e) => arrFailureText(t, arrSlugLabel(e.service, e.instance), e)).join("; ") })}
+          </span>
+          {/* Re-lists Radarr/Sonarr now instead of waiting out the shared cache. */}
+          <Button size="xs" variant="outline" onClick={onRetry} disabled={loading}>
+            {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+            {t("adminManage.common.retry")}
+          </Button>
+        </div>
+      )}
+      {!data.cleanupEnabled && (
+        <p role="status" className={bannerClass("info")} style={{ padding: "8px 12px", fontSize: 13, margin: 0 }}>
+          {t("adminManage.neverWatched.banner.cleanupOff")}
+        </p>
+      )}
+    </>
+  );
+}
+
+// The state filter, the Titles-only type and "deletable now" filters, the
+// search box, and the page's action (the delete button) at the end.
+function NwFilterRow({
+  level, cleanupEnabled, stateFilter, onStateFilter, type, onType, eligibleOnly, onEligibleOnly, query, onQuery, loading, children,
+}: {
+  level: NwLevel;
+  cleanupEnabled: boolean;
+  stateFilter: NwStateFilter;
+  onStateFilter: (v: NwStateFilter) => void;
+  type: "all" | "movie" | "tv";
+  onType: (v: "all" | "movie" | "tv") => void;
+  eligibleOnly: boolean;
+  onEligibleOnly: (v: boolean) => void;
+  query: string;
+  onQuery: (v: string) => void;
+  loading: boolean;
+  children: ReactNode;
+}) {
+  const t = useT();
+  return (
+    <div className="flex flex-wrap items-center gap-2" style={{ fontSize: 13 }}>
+      <StyledSelect
+        compact
+        className="w-auto"
+        value={stateFilter}
+        onChange={(e) => onStateFilter(e.target.value as NwStateFilter)}
+        aria-label={t("adminManage.neverWatched.filter.state")}
+      >
+        {(Object.keys(FILTER_KEYS) as NwStateFilter[]).map((f) => (
+          <option key={f} value={f}>{t(FILTER_KEYS[f])}</option>
+        ))}
+      </StyledSelect>
+      {level === "title" && (
+        <StyledSelect
+          compact
+          className="w-auto"
+          value={type}
+          onChange={(e) => onType(e.target.value as typeof type)}
+          aria-label={t("adminManage.cleanup.filter.mediaType")}
+        >
+          <option value="all">{t("adminManage.cleanup.filter.moviesAndTv")}</option>
+          <option value="movie">{t("nav.movies")}</option>
+          <option value="tv">{t("adminManage.cleanup.tv")}</option>
+        </StyledSelect>
+      )}
+      {level === "title" && cleanupEnabled && (
+        <label className="inline-flex items-center gap-1.5" style={{ color: "var(--ds-fg)" }}>
+          <input type="checkbox" checked={eligibleOnly} onChange={(e) => onEligibleOnly(e.target.checked)} />
+          {t("adminManage.neverWatched.filter.eligibleOnly")}
+        </label>
+      )}
+      <Input
+        value={query}
+        onChange={(e) => onQuery(e.target.value.slice(0, 100))}
+        placeholder={t("adminManage.cleanup.filter.titlePlaceholder")}
+        aria-label={t("adminManage.cleanup.filter.title")}
+        className="w-[200px]"
+      />
+      {loading && <Loader2 className="animate-spin" style={{ width: 14, height: 14, color: "var(--ds-fg-subtle)" }} />}
+      <div className="flex-1" />
+      {children}
+    </div>
+  );
+}
+
+function SortHead({ k, label, align, sort }: { k: NwSortKey; label: string; align?: "right"; sort: Sort }) {
+  const active = sort.key === k;
+  const Icon = !active ? ArrowUpDown : sort.dir === "asc" ? ArrowUp : ArrowDown;
+  return (
+    <th style={{ ...th, textAlign: align ?? "left" }} aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}>
+      <button
+        type="button"
+        onClick={() => sort.on(k)}
+        className="inline-flex items-center gap-1 hover:text-zinc-100"
+        style={{ font: "inherit", color: active ? "var(--ds-fg)" : "inherit" }}
+      >
+        {label}
+        <Icon style={{ width: 11, height: 11, opacity: active ? 1 : 0.5 }} />
+      </button>
+    </th>
+  );
+}
+
+function TitleTable({
+  titleRows, cleanupEnabled, sort, allOnPage, canSelectAll, onToggleAll, isSelected, onToggle, isBusy, onProtect, day, formatBytes,
+}: {
+  titleRows: readonly NwTitleRow[];
+  cleanupEnabled: boolean;
+  sort: Sort;
+  allOnPage: boolean;
+  canSelectAll: boolean;
+  onToggleAll: () => void;
+  isSelected: (r: NwTitleRow) => boolean;
+  onToggle: (r: NwTitleRow) => void;
+  isBusy: (r: NwTitleRow) => boolean;
+  onProtect: (r: NwTitleRow, on: boolean) => void;
+  day: Day;
+  formatBytes: FormatBytes;
+}) {
+  const t = useT();
+  return (
+    <ReportTable
+      head={
+        <>
+          {cleanupEnabled && (
+            <th style={{ ...th, width: 32 }}>
+              <input
+                type="checkbox"
+                aria-label={t("adminManage.cleanup.selectAll")}
+                checked={allOnPage}
+                onChange={onToggleAll}
+                disabled={!canSelectAll}
+              />
+            </th>
+          )}
+          <SortHead k="title" label={t("adminManage.cleanup.col.title")} sort={sort} />
+          <th style={th}>{t("adminManage.cleanup.col.on")}</th>
+          <SortHead k="added" label={t("adminManage.cleanup.col.added")} sort={sort} />
+          <SortHead k="since" label={t("adminManage.neverWatched.col.since")} sort={sort} />
+          <SortHead k="days" label={t("adminManage.neverWatched.col.days")} align="right" sort={sort} />
+          <SortHead k="size" label={t("adminManage.cleanup.col.size")} align="right" sort={sort} />
+          <th style={th}>{t("adminManage.neverWatched.col.status")}</th>
+          {cleanupEnabled && <th style={th} />}
+        </>
+      }
+    >
+      {titleRows.map((r) => (
+        <TitleRow
+          key={cleanupKeyOf(r)}
+          r={r}
+          cleanupEnabled={cleanupEnabled}
+          checked={isSelected(r)}
+          onToggle={() => onToggle(r)}
+          busy={isBusy(r)}
+          onProtect={(on) => onProtect(r, on)}
+          day={day}
+          formatBytes={formatBytes}
+        />
+      ))}
+    </ReportTable>
+  );
+}
+
+function SeasonTable({ seasonRows, sort, day, formatBytes }: { seasonRows: readonly NwSeasonRow[]; sort: Sort; day: Day; formatBytes: FormatBytes }) {
+  const t = useT();
+  return (
+    <ReportTable
+      head={
+        <>
+          <SortHead k="title" label={t("adminManage.neverWatched.col.season")} sort={sort} />
+          <th style={th}>{t("adminManage.cleanup.col.on")}</th>
+          <th style={{ ...th, textAlign: "right" }}>{t("adminManage.neverWatched.col.episodes")}</th>
+          <SortHead k="since" label={t("adminManage.neverWatched.col.since")} sort={sort} />
+          <SortHead k="days" label={t("adminManage.neverWatched.col.days")} align="right" sort={sort} />
+          <SortHead k="size" label={t("adminManage.cleanup.col.size")} align="right" sort={sort} />
+          <th style={th}>{t("adminManage.neverWatched.col.status")}</th>
+        </>
+      }
+    >
+      {seasonRows.map((r) => (
+        <SeasonRow key={`${r.tmdbId}:${r.seasonNumber}`} r={r} day={day} formatBytes={formatBytes} />
+      ))}
+    </ReportTable>
+  );
+}
+
 function StateChips({ r }: { r: NwTitleRow | NwSeasonRow }) {
   const t = useT();
-  const never = r.state === "neverWatched" || r.state === "noPlaysSince";
+  const never = isNeverWatchedState(r.state);
   // Both "never" states read "Never watched"; the since column says whether the
   // title predates recording, and the tooltip spells the state out.
   return (
@@ -716,7 +840,7 @@ function StateChips({ r }: { r: NwTitleRow | NwSeasonRow }) {
   );
 }
 
-function SinceCell({ r, day }: { r: NwTitleRow | NwSeasonRow; day: (iso: string | null) => string }) {
+function SinceCell({ r, day }: { r: NwTitleRow | NwSeasonRow; day: Day }) {
   const t = useT();
   if (r.state === "unobservable") {
     return (
@@ -740,6 +864,23 @@ function SinceCell({ r, day }: { r: NwTitleRow | NwSeasonRow; day: (iso: string 
   );
 }
 
+// A row's first cell: the poster, the title linking to its page, and what goes under it.
+function PosterTitleCell({ posterPath, title, href, children }: { posterPath: string | null; title: string; href: string; children: ReactNode }) {
+  return (
+    <td style={td}>
+      <div className="flex items-center gap-2">
+        <Poster src={posterUrl(posterPath)} letter={(title[0] ?? "?").toUpperCase()} w={26} h={39} radius={3} />
+        <div>
+          <Link href={href} className="hover:underline" style={{ fontWeight: 500, color: "var(--ds-fg)" }}>
+            {title}
+          </Link>
+          {children}
+        </div>
+      </div>
+    </td>
+  );
+}
+
 function TitleRow({
   r, cleanupEnabled, checked, onToggle, busy, onProtect, day, formatBytes,
 }: {
@@ -749,12 +890,12 @@ function TitleRow({
   onToggle: () => void;
   busy: boolean;
   onProtect: (on: boolean) => void;
-  day: (iso: string | null) => string;
-  formatBytes: (n: number | null) => string;
+  day: Day;
+  formatBytes: FormatBytes;
 }) {
   const t = useT();
   const href = r.mediaType === "MOVIE" ? `/movie/${r.tmdbId}` : `/tv/${r.tmdbId}`;
-  const never = r.state === "neverWatched" || r.state === "noPlaysSince";
+  const never = isNeverWatchedState(r.state);
   const noRule = cleanupEnabled && never && r.cleanup.matched.length === 0;
   return (
     <tr className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>
@@ -770,24 +911,16 @@ function TitleRow({
           />
         </td>
       )}
-      <td style={td}>
-        <div className="flex items-center gap-2">
-          <Poster src={posterUrl(r.posterPath)} letter={(r.title[0] ?? "?").toUpperCase()} w={26} h={39} radius={3} />
-          <div>
-            <Link href={href} className="hover:underline" style={{ fontWeight: 500, color: "var(--ds-fg)" }}>
-              {r.title}
-            </Link>
-            {r.year ? <span style={{ color: "var(--ds-fg-subtle)" }}> ({r.year})</span> : null}
-            <div style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
-              {r.mediaType === "MOVIE" ? t("adminManage.cleanup.movie") : t("adminManage.cleanup.tv")}
-            </div>
-          </div>
+      <PosterTitleCell posterPath={r.posterPath} title={r.title} href={href}>
+        {r.year ? <span style={{ color: "var(--ds-fg-subtle)" }}> ({r.year})</span> : null}
+        <div style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
+          {r.mediaType === "MOVIE" ? t("adminManage.cleanup.movie") : t("adminManage.cleanup.tv")}
         </div>
-      </td>
+      </PosterTitleCell>
       <td style={{ ...td, fontSize: 11, color: "var(--ds-fg-muted)" }}>
         <div>{r.servers.join(", ")}</div>
         <div style={{ color: "var(--ds-fg-subtle)" }}>
-          {r.arr.length > 0 ? r.arr.map((a) => arrInstanceLabel(a.service, a.instance)).join(", ") : t("adminManage.cleanup.notInArr")}
+          {r.arr.length > 0 ? r.arr.map((a) => arrSlugLabel(a.service, a.instance)).join(", ") : t("adminManage.cleanup.notInArr")}
         </div>
       </td>
       <td className="ds-mono" style={tdMono}>{day(r.shelfStart ?? r.addedAt)}</td>
@@ -824,21 +957,13 @@ function TitleRow({
   );
 }
 
-function SeasonRow({ r, day, formatBytes }: { r: NwSeasonRow; day: (iso: string | null) => string; formatBytes: (n: number | null) => string }) {
+function SeasonRow({ r, day, formatBytes }: { r: NwSeasonRow; day: Day; formatBytes: FormatBytes }) {
   const t = useT();
   return (
     <tr className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>
-      <td style={td}>
-        <div className="flex items-center gap-2">
-          <Poster src={posterUrl(r.posterPath)} letter={(r.title[0] ?? "?").toUpperCase()} w={26} h={39} radius={3} />
-          <div>
-            <Link href={`/tv/${r.tmdbId}`} className="hover:underline" style={{ fontWeight: 500, color: "var(--ds-fg)" }}>
-              {r.title}
-            </Link>
-            <div style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>{t("adminManage.neverWatched.seasonN", { n: r.seasonNumber })}</div>
-          </div>
-        </div>
-      </td>
+      <PosterTitleCell posterPath={r.posterPath} title={r.title} href={`/tv/${r.tmdbId}`}>
+        <div style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>{t("adminManage.neverWatched.seasonN", { n: r.seasonNumber })}</div>
+      </PosterTitleCell>
       <td style={{ ...td, fontSize: 11, color: "var(--ds-fg-muted)" }}>{r.servers.join(", ")}</td>
       <td className="ds-mono" style={{ ...tdMono, textAlign: "right" }}>{r.episodes}</td>
       <td style={td}><SinceCell r={r} day={day} /></td>

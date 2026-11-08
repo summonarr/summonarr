@@ -26,7 +26,7 @@
 //   9. Warnings-only test results read as "working, with warnings"; Test All
 //      and single tests are rate-limited separately. A System.Text.Json arr's
 //      Test All flags no failure either way (C089 — the source facts are in
-//      tests/audit-fix4-test-all.test.mts): those rows reach the page as
+//      tests/arr-system-test-all-warnings.test.mts): those rows reach the page as
 //      `uncertain`, never failed.
 //  10. A "********" secret the arr sent is sent back to it unchanged in both
 //      the save and the test body (the secret-preservation contract).
@@ -458,6 +458,45 @@ test("a switch-ON refused for warnings alone is 409 { warningsOnly }, masked and
   assert.deepEqual(arrCalls(), [], "refused before anything reaches the arr");
 });
 
+test("accepting warnings never saves over an edit made in the arr while the test ran: re-read after the test, 409 and nothing PUT", async () => {
+  const token = await mintSession();
+  // The arr's resource as it reads AFTER the test: the admin changed the indexer's URL in Radarr meanwhile.
+  let reads = 0;
+  let edited: Record<string, unknown> = { ...INDEXER, fields: [{ name: "baseUrl", value: "https://api.other.example" }, { name: "apiKey", value: "********" }] };
+  responder = (c) => {
+    if (c.origin !== RADARR) return undefined;
+    if (c.path === "/api/v3/indexer/3" && c.method === "GET") return json(reads++ === 0 ? INDEXER : edited);
+    if (c.path === "/api/v3/indexer/3" && c.method === "PUT") return json({ ...(c.body as object) }, 202);
+    if (c.path === "/api/v3/indexer/test") return json([warning("No results")], 400);
+    return undefined;
+  };
+  const res = await patch(token, { kind: "indexer", id: 3, enableAutomaticSearch: true, acceptWarnings: true });
+  assert.equal(res.status, 409);
+  const text = await res.text();
+  const body = JSON.parse(text) as { error: string; changed?: boolean; warningsOnly?: boolean };
+  assert.equal(body.changed, true);
+  assert.equal(body.warningsOnly, undefined, "not a warnings prompt: switching anyway again would not help");
+  assert.ok(!text.includes("api.other.example") && !text.includes("nzbgeek"), "no provider fields reach the browser (5e)");
+  assert.deepEqual(writes().map((c) => c.path), ["/api/v3/indexer/test"], "tested, then nothing saved");
+  assert.equal(audits.length, 0);
+
+  // Only the switch being set differs (someone flipped the same switch in the arr): that is no conflict.
+  calls = [];
+  reads = 0;
+  edited = { ...INDEXER, enableAutomaticSearch: true };
+  const ok = await patch(token, { kind: "indexer", id: 3, enableAutomaticSearch: true, acceptWarnings: true });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(writes().map((c) => [c.path, c.query.get("forceSave")]), [["/api/v3/indexer/test", null], ["/api/v3/indexer/3", "true"]]);
+
+  // Another switch flipped in the arr meanwhile IS a change: the save would put it back.
+  calls = [];
+  audits.length = 0;
+  reads = 0;
+  edited = { ...INDEXER, enableRss: false };
+  assert.equal((await patch(token, { kind: "indexer", id: 3, enableAutomaticSearch: true, acceptWarnings: true })).status, 409);
+  assert.deepEqual(writes().map((c) => c.path), ["/api/v3/indexer/test"]);
+});
+
 test("an error with no message still counts as an error; the arr's isWarning decides over severity", () => {
   assert.equal(projectFailures([warning("a"), { errorMessage: "", isWarning: false }]).warningsOnly, false);
   assert.equal(projectFailures([warning("a"), "garbage"]).warningsOnly, false);
@@ -802,12 +841,14 @@ test("the same async save while one runs is joined (one PUT); a lost job is 404 
 });
 
 test("Arr System runs its provider tests and saves as polled jobs, counting polls — never holding the request, never reading the clock", () => {
-  const src = readFileSync(new URL("../src/components/admin/arr-system.tsx", import.meta.url), "utf8");
-  assert.match(src, /body: \{ \.\.\.init\.body, async: true \}/, "sent with async");
-  assert.match(src, /\$\{path\}\?job=\$\{encodeURIComponent\(job\)\}/, "polled at ?job=");
-  assert.match(src, /if \(polls >= JOB_MAX_POLLS\)/, "a counted cap");
-  assert.equal((src.match(/callJob<[^>]*>\(\s*"\/api\/admin\/arr\/providers(\/test)?"/g) ?? []).length, 2, "both the test and the save");
-  assert.doesNotMatch(src, /Date\.now\(\)|new Date\(\)/);
+  const src = readFileSync(new URL("../src/components/admin/arr-system-providers.tsx", import.meta.url), "utf8");
+  const call = readFileSync(new URL("../src/lib/client/arr-call.ts", import.meta.url), "utf8");
+  assert.match(call, /body: \{ \.\.\.opts\.body, async: true \}/, "sent with async");
+  assert.match(call, /return `\$\{url\}\$\{url\.includes\("\?"\) \? "&" : "\?"\}job=\$\{encodeURIComponent\(job\)\}`;/, "polled at ?job=");
+  assert.match(call, /await pollJob\(globalThis\.fetch, jobUrl\(url, job\), \{/, "through the shared loop");
+  assert.match(src, /maxPolls: JOB_MAX_POLLS,/, "a counted cap");
+  assert.equal((src.match(/arrCallJob\(withBasePath\("\/api\/admin\/arr\/providers(\/test)?"\)/g) ?? []).length, 2, "both the test and the save");
+  for (const text of [src, call]) assert.doesNotMatch(text, /Date\.now\(\)|new Date\(\)/);
 });
 
 // ── 13: the polled pages tick through the gate ───────────────────────────────
@@ -815,13 +856,19 @@ test("Arr System runs its provider tests and saves as polled jobs, counting poll
 test("the queue and Arr System poll through the load gate as a POLL; the queue's poll pauses while its title manager is open", () => {
   const src = (f: string) => readFileSync(new URL(`../src/components/admin/${f}`, import.meta.url), "utf8");
   const interval = /window\.setInterval\(\(\) => \{([^}]*)\}/;
-  for (const file of ["download-queue.tsx", "arr-system.tsx"]) {
+  // The queue polls from its data hook (use-queue-data.ts), Arr System from its tabs' useReport.
+  for (const file of ["use-queue-data.ts", "arr-system-parts.tsx"]) {
     const body = interval.exec(src(file))?.[1] ?? "";
     assert.match(body, /void load\("poll"\)/, `${file}: a tick is a poll — skipped while a read is out, never superseding it`);
   }
-  const queue = src("download-queue.tsx");
-  const effect = /useEffect\(\(\) => \{\s*if \(([^)]*)\) return;\s*const \w+ = window\.setInterval\([\s\S]*?\}, \[([^\]]*)\]\);/.exec(queue);
+  const effect = /useEffect\(\(\) => \{\s*if \(([^)]*)\) return;\s*const \w+ = window\.setInterval\([\s\S]*?\}, \[([^\]]*)\]\);/.exec(src("use-queue-data.ts"));
   assert.ok(effect, "the queue's poll effect");
-  assert.match(effect[1], /\bmanaging\b/, "no poll while the title manager is open");
-  assert.match(effect[2], /\bmanaging\b/, "and it resumes when it closes");
+  assert.match(effect[1], /\bpaused\b/, "no poll while the page has it paused");
+  assert.match(effect[2], /\bpaused\b/, "and it resumes when the pause lifts");
+  // The page pauses it while any of its dialogs is open, the title manager included.
+  const paused = /useQueueData\(\{[\s\S]*?\bpaused: ([^\n]*),\n/.exec(src("download-queue.tsx"));
+  assert.ok(paused, "the page hands the hook its pause");
+  for (const dialog of ["removing", "importing", "managing"]) {
+    assert.match(paused[1], new RegExp(`\\b${dialog} !== null`), `no poll while ${dialog} is open, and it resumes when it closes`);
+  }
 });

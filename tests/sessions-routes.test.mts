@@ -58,6 +58,7 @@ const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { hashPassword } = await import("../src/lib/password-hash.ts");
 const { shouldForceDbCheck } = await import("../src/lib/session-revocation.ts");
+const { NEVER_EXPIRES_AT_SEC } = await import("../src/lib/session-lifetime.ts");
 
 // ── recording op log ─────────────────────────────────────────────────────────
 type Op = { op: string; args?: unknown };
@@ -101,10 +102,12 @@ let deleteThrows = false; // flip tx.authSession.delete to reject (revoke-failur
 shadowPrismaModel(prisma, "authSession", {
   findUnique: async (args: { where: { sessionId: string } }) =>
     authSessionRows.get(args.where.sessionId) ?? null,
-  findMany: async (args: { where: { userId: string } }) => {
+  findMany: async (args: { where: { userId: string; expiresAt?: { gt?: Date } } }) => {
     rec("authSession.findMany", args);
+    const after = args.where.expiresAt?.gt;
     return [...authSessionRows.values()]
       .filter((r) => r.userId === args.where.userId)
+      .filter((r) => after === undefined || r.expiresAt.getTime() > after.getTime())
       .sort((a, b) => b.lastSeenAt.getTime() - a.lastSeenAt.getTime());
   },
   // lastSeenAt fire-and-forget touch on the auth path — no-op.
@@ -139,10 +142,19 @@ const txObj = {
       rec("tx.authSession.delete", args);
       return {};
     },
-    deleteMany: async (args: { where: { userId: string; NOT?: { sessionId: string } } }) => {
+    // revokeOtherUserSessionsInTx's shape: the rows' ids first, then the delete,
+    // both keyed { userId, sessionId?: { not: <kept> } }.
+    findMany: async (args: { where: { userId: string; sessionId?: { not: string } } }) => {
+      rec("tx.authSession.findMany", args);
+      const notSid = args.where.sessionId?.not;
+      return [...authSessionRows]
+        .filter(([sid, row]) => row.userId === args.where.userId && !(notSid && sid === notSid))
+        .map(([sessionId]) => ({ sessionId }));
+    },
+    deleteMany: async (args: { where: { userId: string; sessionId?: { not: string } } }) => {
       rec("tx.authSession.deleteMany", args);
       revokeAllLedgerAtDelete = shouldForceDbCheck(args.where.userId, "probe-session");
-      const notSid = args.where.NOT?.sessionId;
+      const notSid = args.where.sessionId?.not;
       let count = 0;
       for (const [sid, row] of [...authSessionRows]) {
         if (row.userId !== args.where.userId) continue;
@@ -316,6 +328,20 @@ test("GET lists ONLY the caller's devices, with a non-secret select and the call
   assert.equal(other?.isCurrent, false, "a sibling device is not current");
 });
 
+test("GET leaves out a row past its deadline (dead until the purge sweeps it) and keeps a never-expiring native session", async () => {
+  const caller = await mintSession();
+  addDevice(caller.userId, "sess-expired", { expiresAt: new Date(Date.now() - 60_000) });
+  addDevice(caller.userId, "sess-native", { expiresAt: new Date(NEVER_EXPIRES_AT_SEC * 1000) });
+
+  const res = await getSessions(caller.token);
+  assert.equal(res.status, 200);
+  const rows = (await res.json()) as Array<{ sessionId: string; indefinite: boolean }>;
+  const ids = rows.map((r) => r.sessionId).sort();
+  assert.deepEqual(ids, [caller.sessionId, "sess-native"].sort(), "the expired row is not listed as a live device");
+  assert.equal(rows.find((r) => r.sessionId === "sess-native")?.indefinite, true);
+  assert.ok(authSessionRows.has("sess-expired"), "the read deletes nothing (only the purge sweep may — guardrail 6c)");
+});
+
 // ═══════════════════════ DELETE /api/sessions (single) ═══════════════════════
 
 test("DELETE without a session → 401; a missing sessionId → 400", async () => {
@@ -366,7 +392,7 @@ test("DELETE non-self by a credential user requires the password: missing → 40
 
   const wrongPw = await del(caller.token, { sessionId: "sess-laptop", confirmPassword: "not-it" });
   assert.equal(wrongPw.status, 401);
-  assert.deepEqual(await wrongPw.json(), { error: "invalid-password" });
+  assert.deepEqual(await wrongPw.json(), { error: "invalid-password", message: "Invalid password" });
   assert.ok(authSessionRows.has("sess-laptop"));
 
   const ok = await del(caller.token, { sessionId: "sess-laptop", confirmPassword: CORRECT_PASSWORD });
@@ -429,7 +455,7 @@ test("revoke-all by a credential user demands the password: missing → 401, wro
 
   const wrongPw = await postRevokeAll(caller.token, { confirmPassword: "nope" });
   assert.equal(wrongPw.status, 401);
-  assert.deepEqual(await wrongPw.json(), { error: "invalid-password" });
+  assert.deepEqual(await wrongPw.json(), { error: "invalid-password", message: "Invalid password" });
   assert.equal(opsOf("tx.authSession.deleteMany").length, 0, "no deletion until step-up passes");
 });
 
@@ -448,8 +474,12 @@ test("revoke-all (includeCurrent=false) deletes every OTHER device, keeps the ca
   assert.equal(authSessionRows.has("sess-tv"), false);
   assert.ok(authSessionRows.has(caller.sessionId), "the caller stays signed in when includeCurrent=false");
   // The deleteMany excluded the caller's session id.
-  const dm = opsOf("tx.authSession.deleteMany")[0].args as { where: { userId: string; NOT?: { sessionId: string } } };
-  assert.equal(dm.where.NOT?.sessionId, caller.sessionId);
+  const dm = opsOf("tx.authSession.deleteMany")[0].args as { where: { userId: string; sessionId?: { not: string } } };
+  assert.equal(dm.where.sessionId?.not, caller.sessionId);
+  // Each revoked session is force-revoked by id too, so a cached check of it
+  // can't ride the fast path on this replica.
+  assert.equal(shouldForceDbCheck("someone-else", "sess-phone"), true, "a revoked session id is marked");
+  assert.equal(shouldForceDbCheck("someone-else", caller.sessionId), false, "the kept session is not");
   // Guardrail 27: user ledger mark comes after the delete.
   assert.equal(revokeAllLedgerAtDelete, false, "the user is NOT force-revalidated before the DB delete");
   assert.equal(shouldForceDbCheck(caller.userId, "anything"), true, "the user is force-revalidated after the delete");
@@ -522,4 +552,13 @@ test("revoke-all is per-user rate-limited (5/hour): the 6th attempt → 429", as
   const limited = await postRevokeAll(caller.token, {});
   assert.equal(limited.status, 429);
   assert.deepEqual(await limited.json(), { error: "rate_limit", message: "Too many revoke-all attempts. Try again later." });
+});
+
+test("sign out other devices never LOWERS the cutoff: it stamps one second before the caller's session, only when that is later than the stored one", async () => {
+  const { othersRevokedCutoff } = await import("../src/lib/sign-out-everywhere.ts");
+  const created = new Date("2026-11-01T10:00:00Z");
+  assert.deepEqual(othersRevokedCutoff(created, null), new Date("2026-11-01T09:59:59Z"));
+  assert.deepEqual(othersRevokedCutoff(created, new Date("2026-10-01T00:00:00Z")), new Date("2026-11-01T09:59:59Z"));
+  assert.equal(othersRevokedCutoff(created, new Date("2026-11-02T00:00:00Z")), null, "a later full-revoke cutoff stands");
+  assert.equal(othersRevokedCutoff(null, null), null, "no caller row ⇒ no stamp");
 });

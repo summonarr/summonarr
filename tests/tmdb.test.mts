@@ -48,9 +48,18 @@
 //    at 500;
 //  - degradation: no TMDB_READ_TOKEN ⇒ list helpers return [] with zero
 //    fetches and cache nothing, while searchMulti propagates the error (pinned
-//    as CURRENT behavior); UND_ERR_SOCKET rejections are retried twice even
-//    after safe-fetch wraps them in a SafeFetchError message, and non-socket
-//    network failures surface after exactly one attempt.
+//    as CURRENT behavior); a dropped connection in the shapes the transport
+//    really raises (ECONNRESET, "socket hang up", undici's "other side
+//    closed", a body torn mid-read) is retried twice after safe-fetch wraps it
+//    in a SafeFetchError, a gateway 502–504 is retried, and a plain network
+//    failure or a 404 surfaces after exactly one attempt;
+//  - a 200 page without a `results` array degrades to an empty page (served,
+//    never cached as the whole list), and an undated title stores null dates;
+//  - a lazy in-place upgrade of a cached details row keeps the row's expiry,
+//    and TMDB's IMDb id is kept on the details path (a ratings source with no
+//    id never erases it);
+//  - "today" for the upcoming lists is the shared Upcoming cutoff
+//    (upcomingCutoffDate), not the bare UTC date.
 //
 // No DB or network: prisma.tmdbCache / setting / tmdbMediaCore / $transaction
 // are shadowed in-memory (tests/_helpers.mts; setting.findUnique → null keeps
@@ -58,7 +67,7 @@
 // without touching the wire), globalThis.fetch is scripted per URL, and
 // dns/promises.lookup is stubbed so safe-fetch's SSRF resolver never issues a
 // real lookup for api.themoviedb.org.
-import { test, beforeEach } from "node:test";
+import { test, beforeEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import dns from "node:dns/promises";
 
@@ -93,7 +102,17 @@ const {
   getMovieSuggestions,
   discoverMoviesPage,
   discoverTVPage,
+  getSuggestionsResult,
+  isTmdbNotFound,
+  TmdbHttpError,
+  verifyTmdbMedia,
+  verifyTmdbMediaResult,
+  getPopularMoviesPage,
+  getMovieGenres,
+  getWatchProviders,
+  __resetTmdbBackoffsForTests,
 } = await import("../src/lib/tmdb.ts");
+const { upcomingCutoffDate } = await import("../src/lib/format-release-date.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
 type CacheRow = { key: string; data: string; cachedAt: Date; expiresAt: Date };
@@ -185,13 +204,15 @@ function rawTV(id: number, name: string, over: Record<string, unknown> = {}) {
   };
 }
 
-function seedCache(key: string, value: unknown, expiresInMs = 60 * 60 * 1000): void {
-  cacheRows.set(key, {
+function seedCache(key: string, value: unknown, expiresInMs = 60 * 60 * 1000): CacheRow {
+  const row = {
     key,
     data: JSON.stringify(value),
     cachedAt: new Date(Date.now() - 1000),
     expiresAt: new Date(Date.now() + expiresInMs),
-  });
+  };
+  cacheRows.set(key, row);
+  return row;
 }
 
 function upsertFor(key: string): CacheRow | undefined {
@@ -202,6 +223,7 @@ const HOUR_MS = 3600 * 1000;
 
 beforeEach(() => {
   process.env.TMDB_READ_TOKEN = "test-tmdb-read-token";
+  __resetTmdbBackoffsForTests();
   cacheRows.clear();
   cacheUpserts.length = 0;
   cacheDeletes.length = 0;
@@ -431,6 +453,51 @@ test("trending: a failed page is dropped and the partial result is SERVED but NO
   assert.equal(upsertFor("trending:week"), undefined);
 });
 
+test("trending: a 200 page with no `results` array degrades to an empty page — served, not cached as the whole list", async () => {
+  respond = (url) => {
+    const p = Number(url.searchParams.get("page"));
+    if (p === 2) return jsonResponse({ page: 2 }); // no results key at all
+    return jsonResponse(pageOf([{ ...rawMovie(40 + p, `Page ${p}`), media_type: "movie" }], 5));
+  };
+  const result = await getTrending();
+  assert.deepEqual(result.map((m) => m.id).sort((a, b) => a - b), [41, 43, 44, 45]);
+  assert.equal(upsertFor("trending:week"), undefined, "a malformed page makes the list incomplete");
+});
+
+// settleLimit swallows every page's rejection, so a revoked token read as an
+// empty list with no server-side trace. One warning per change of reason.
+test("trending: a fan-out where EVERY page fails warns once per reason, backs off for a minute, and warns again after a recovery", async () => {
+  const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
+  resetLogDedup();
+  mock.timers.enable({ apis: ["Date"], now: Date.UTC(2026, 0, 1) });
+  try {
+    respond = () => jsonResponse({ status_message: "Invalid API key" }, 401);
+    assert.deepEqual(await getTrending(), []);
+    const failed = warns.filter((w) => w.includes("[tmdb] every page of /trending/all/week failed"));
+    assert.equal(failed.length, 1, "one warning for the outage");
+    // Inside the backoff the list is not asked for at all: an outage used to
+    // cost every render the whole fan-out again.
+    fetchCalls.length = 0;
+    assert.deepEqual(await getTrending(), []);
+    assert.equal(fetchCalls.length, 0, "no page is fetched during the backoff");
+    mock.timers.tick(60_000);
+    await getTrending();
+    assert.equal(fetchCalls.length, 5, "the backoff lapses after a minute");
+    assert.equal(warns.filter((w) => w.includes("every page of /trending/all/week")).length, 1, "the unchanged outage is not repeated");
+    // One page answering clears it (and sets no backoff), so the next outage is reported again.
+    mock.timers.tick(60_000);
+    respond = (url) => Number(url.searchParams.get("page")) === 1
+      ? jsonResponse(pageOf([{ ...rawMovie(51, "Back"), media_type: "movie" }], 5))
+      : jsonResponse({ status_message: "Invalid API key" }, 401);
+    await getTrending();
+    respond = () => jsonResponse({ status_message: "Invalid API key" }, 401);
+    await getTrending();
+    assert.equal(warns.filter((w) => w.includes("every page of /trending/all/week")).length, 2);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
 test("trending: an all-empty (but fulfilled) fan-out returns [] and caches nothing", async () => {
   respond = () => jsonResponse(pageOf([], 5));
   assert.deepEqual(await getTrending(), []);
@@ -460,7 +527,9 @@ test("top-rated movies: 20-page fan-out of /movie/top_rated with the >=200-vote 
 });
 
 test("upcoming TV: 10 discover pages anchored on today; past/dateless rows are filtered client-side", async () => {
-  const before = new Date().toISOString().slice(0, 10);
+  // The query is dated by upcomingCutoffDate(), which lags UTC on purpose, so
+  // the test compares with it rather than with the bare UTC date.
+  const before = upcomingCutoffDate();
   respond = (url) =>
     url.searchParams.get("page") === "1"
       ? jsonResponse(pageOf([
@@ -470,7 +539,7 @@ test("upcoming TV: 10 discover pages anchored on today; past/dateless rows are f
         ], 10))
       : jsonResponse(pageOf([], 10));
   const result = await getUpcomingTV();
-  const after = new Date().toISOString().slice(0, 10);
+  const after = upcomingCutoffDate();
 
   assert.equal(fetchCalls.length, 10);
   const call = fetchCalls[0];
@@ -503,6 +572,31 @@ test("upcoming movies: region-pinned pages; already-released and dateless rows a
   assert.equal(call.url.searchParams.get("region"), "US");
   assert.deepEqual(result.map((m) => m.id), [311], `past/dateless rows must be dropped (today=${before})`);
   assert.equal(cacheUpserts[0]?.key, "movies:upcoming");
+});
+
+test("upcoming: a title releasing today stays listed through the evening west of UTC (the shared cutoff, not the UTC date)", async () => {
+  // 03:00 UTC on the 8th is the evening of the 7th across the Americas.
+  mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-08T03:00:00Z") });
+  try {
+    const today = { id: 3, mediaType: "movie" as const, title: "Out Today", overview: "", posterPath: null, backdropPath: null, releaseDate: "2026-11-07", releaseYear: "2026", voteAverage: 0, voteCount: 0 };
+    seedCache("movies:upcoming", [today]);
+    seedCache("tv:upcoming", [{ ...today, mediaType: "tv" as const }]);
+    assert.deepEqual((await getUpcomingMovies()).map((m) => m.id), [3]);
+    assert.deepEqual((await getUpcomingTV()).map((m) => m.id), [3]);
+
+    cacheRows.clear();
+    respond = (url) =>
+      url.searchParams.get("page") === "1"
+        ? jsonResponse(pageOf(url.pathname === "/3/movie/upcoming"
+          ? [rawMovie(305, "Opens Tonight", { release_date: "2026-11-07" })]
+          : [rawTV(304, "Premieres Tonight", { first_air_date: "2026-11-07" })], 10))
+        : jsonResponse(pageOf([], 10));
+    assert.deepEqual((await getUpcomingTV()).map((m) => m.id), [304]);
+    assert.equal(fetchCalls[0].url.searchParams.get("first_air_date.gte"), "2026-11-07");
+    assert.deepEqual((await getUpcomingMovies()).map((m) => m.id), [305]);
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test("upcoming cache hits are re-filtered against today so yesterday's titles leave the home rail", async () => {
@@ -626,6 +720,29 @@ test("movie details cold: append_to_response wire, certification kept, official 
   assert.deepEqual(suggestions.map((s) => s.id), [604, 606, 607]);
 });
 
+test("movie details: `recommendations`/`similar` with no `results` array don't throw, and the details are still cached", async () => {
+  respond = () => jsonResponse({ ...rawMovie(778, "No Rec Results", { release_date: "2001-01-01" }), recommendations: {}, similar: {} });
+  const result = await getMovieDetails(778);
+  assert.equal(result.title, "No Rec Results");
+  assert.ok(upsertFor("movie:778:details"), "the details row is written");
+});
+
+test("movie details cold: TMDB's IMDb id is stored even with no ratings source configured", async () => {
+  respond = () => jsonResponse({ ...rawMovie(779, "The Id", { release_date: "1999-03-31" }), external_ids: { imdb_id: "tt0133093" } });
+  const result = await getMovieDetails(779);
+  assert.equal(result.imdbId, "tt0133093");
+  assert.equal((JSON.parse(upsertFor("movie:779:details")!.data) as { imdbId?: string }).imdbId, "tt0133093");
+});
+
+test("an undated title stores null dates, never \"\"", async () => {
+  respond = () => jsonResponse(pageOf([
+    { ...rawMovie(780, "Undated Movie", { release_date: "" }), media_type: "movie" },
+    { ...rawTV(781, "Undated Show", { first_air_date: "" }), media_type: "tv" },
+  ]));
+  const result = await searchMulti("undated titles");
+  assert.deepEqual(result.map((m) => [m.id, m.releaseDate, m.releaseYear]), [[780, null, null], [781, null, null]]);
+});
+
 test("movie details: a `videos` block with no `results` array yields a null trailer instead of throwing", async () => {
   respond = () => jsonResponse({ ...rawMovie(777, "No Videos Results", { release_date: "2001-01-01" }), videos: {} });
   const result = await getMovieDetails(777);
@@ -682,6 +799,100 @@ test("getMovieSuggestions: the cache holds the WIDE list; the limit only slices 
   assert.equal(fetchCalls.length, callsAfterFirst, "the wide read is served from the same cache row");
 });
 
+test("getMovieSuggestions: a PARTIAL answer (one endpoint failed) is served but never cached, and reads as a failure to the graph", async () => {
+  respond = (url) => {
+    if (url.pathname === "/3/movie/12/similar") return jsonResponse({ status_message: "boom" }, 500);
+    if (url.pathname === "/3/movie/12/recommendations") return jsonResponse(pageOf([rawMovie(30, "Rec")]));
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  const served = await getMovieSuggestions(12);
+  assert.deepEqual(served.map((m) => m.id), [30], "the rail still gets what answered");
+  assert.equal(upsertFor("movie:12:suggestions:v3"), undefined, "a partial list is never pinned for the 7-day TTL");
+
+  const result = await getSuggestionsResult("movie", 12);
+  assert.equal(result.kind, "failed", "the graph must not stamp a partial list as the title's suggestions");
+
+  // Both endpoints answering is an answer — an empty one included.
+  respond = (url) => jsonResponse(pageOf(url.pathname.endsWith("/recommendations") ? [rawMovie(31, "Rec")] : []));
+  const ok = await getSuggestionsResult("movie", 13);
+  assert.equal(ok.kind, "ok");
+  assert.deepEqual(ok.kind === "ok" ? ok.value.map((m) => m.id) : null, [31]);
+  respond = () => jsonResponse(pageOf([]));
+  const empty = await getSuggestionsResult("tv", 14);
+  assert.deepEqual(empty, { kind: "ok", value: [] }, "TMDB answering with nothing is a real \"nothing\"");
+});
+
+test("TmdbHttpError: a 404 is recognised by its STATUS, not by a message that happens to read like one", async () => {
+  assert.equal(isTmdbNotFound(new TmdbHttpError("/movie/1", 404)), true);
+  assert.equal(isTmdbNotFound(new TmdbHttpError("/movie/1", 500)), false);
+  assert.equal(isTmdbNotFound(new Error("TMDB /movie/1 failed: 404")), false, "a message alone is not a status");
+  // The message keeps the shape the detail pages match on.
+  assert.match(new TmdbHttpError("/person/9", 404).message, /failed: 404\b/);
+  respond = () => jsonResponse({ status_message: "nope" }, 404);
+  await assert.rejects(() => searchMulti("a missing thing"), (err: unknown) => isTmdbNotFound(err));
+});
+
+test("verifyTmdbMediaResult: TMDB's own 'no such title' is missing; a failure to answer is failed — never 'not found'", async () => {
+  respond = () => jsonResponse({ status_message: "not found" }, 404);
+  assert.deepEqual(await verifyTmdbMediaResult(1, "movie"), { kind: "missing" });
+  respond = () => jsonResponse({ id: 2 });
+  assert.deepEqual(await verifyTmdbMediaResult(2, "movie"), { kind: "missing" }, "a record with no title vouches for nothing");
+  respond = () => jsonResponse({ status_message: "boom" }, 500);
+  const failed = await verifyTmdbMediaResult(3, "tv");
+  assert.equal(failed.kind, "failed");
+  assert.ok(warns.some((w) => w.includes("[tmdb] could not verify a title with TMDB (HTTP 500)")));
+  respond = () => jsonResponse(rawTV(4, "Real Show"));
+  assert.deepEqual(await verifyTmdbMediaResult(4, "tv"), { kind: "ok", value: { title: "Real Show", posterPath: "/p4.jpg", releaseYear: "2019" } });
+  // The legacy reader still collapses both to null for its callers.
+  respond = () => jsonResponse({ status_message: "boom" }, 500);
+  assert.equal(await verifyTmdbMedia(5, "movie"), null);
+});
+
+test("a cached details row whose release-date upgrade failed is not re-fetched on every read for ten minutes", async () => {
+  mock.timers.enable({ apis: ["Date"], now: Date.UTC(2026, 0, 1) });
+  try {
+    // Ratings already settled (no ratings lookup); the home-release fields predate the row.
+    seedCache("movie:880:details", {
+      id: 880, mediaType: "movie", title: "Old Row", overview: "", posterPath: null, backdropPath: null,
+      releaseDate: "2001-01-01", releaseYear: "2001", voteAverage: 7,
+      imdbRating: null, rtAudienceScore: null, mdblistScore: null,
+    }, 7 * 24 * HOUR_MS);
+    respond = () => jsonResponse({ status_message: "boom" }, 500);
+    const first = await getMovieDetails(880);
+    assert.equal(first.title, "Old Row");
+    assert.equal(fetchCalls.length, 1, "one release_dates attempt");
+    await getMovieDetails(880);
+    assert.equal(fetchCalls.length, 1, "the failed upgrade is not retried on the next read");
+    mock.timers.tick(10 * 60 * 1000);
+    respond = () => jsonResponse({ results: [] });
+    await getMovieDetails(880);
+    assert.equal(fetchCalls.length, 2, "it is retried once the backoff lapses");
+    assert.ok(upsertFor("movie:880:details"), "and the upgraded row is written");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a page with no total_pages reads as at least the page served, never NaN; a genres or providers payload missing fields degrades", async () => {
+  respond = () => jsonResponse({ results: [rawMovie(60, "Paged")] });
+  const page = await getPopularMoviesPage(3);
+  assert.equal(page.totalPages, 3);
+  assert.deepEqual(page.items.map((m) => m.id), [60]);
+
+  respond = () => jsonResponse({});
+  assert.deepEqual(await getMovieGenres(), []);
+  assert.equal(upsertFor("genres:movie"), undefined, "an answer with no genres list is not cached");
+
+  respond = () => jsonResponse({ results: [
+    { provider_id: 1, provider_name: "Zed", logo_path: "/z.png" },
+    { provider_id: 2, logo_path: "/nameless.png" },
+    null,
+    { provider_id: 3, provider_name: "Able", logo_path: "/a.png" },
+  ] });
+  const providers = await getWatchProviders("movie", "US");
+  assert.deepEqual(providers.map((p) => p.provider_name), ["Able", "Zed"]);
+});
+
 test("movie details self-heal: a poisoned raw row (no mediaType) is a MISS and is overwritten normalized", async () => {
   // The pre-key-split getMovieReleaseInfo wrote the RAW snake_case TMDB body
   // under movie:<id>:details. Serving it would hand callers a shape with
@@ -735,6 +946,57 @@ test("movie details cached: object-form keywords are migrated to names + keyword
   const rewrite = upsertFor("movie:889:details");
   assert.ok(rewrite, "the migrated shape must be written back");
   assert.deepEqual((JSON.parse(rewrite.data) as { keywords: unknown }).keywords, ["heist", "crew"]);
+});
+
+test("movie details cached: an in-place upgrade keeps the row's own expiry instead of a fresh TTL", async () => {
+  const seeded = seedCache("movie:891:details", {
+    id: 891, mediaType: "movie", title: "Upgraded In Place", overview: "",
+    posterPath: null, backdropPath: null, releaseDate: "2015-05-05", releaseYear: "2015",
+    voteAverage: 6, voteCount: 50, trailerKey: null,
+    imdbRating: null, rtAudienceScore: null, mdblistScore: null,
+    keywords: [{ id: 1, name: "heist" }], // object form ⇒ migrated and re-persisted
+    digitalReleaseDate: null, physicalReleaseDate: null,
+  }, 2 * 24 * HOUR_MS);
+  await getMovieDetails(891);
+  const rewrite = upsertFor("movie:891:details");
+  assert.ok(rewrite, "the migrated shape is written back");
+  assert.equal(rewrite.expiresAt.getTime(), seeded.expiresAt.getTime(), "not reset to now + 7 days");
+
+  const seededTv = seedCache("tv:891:details", {
+    id: 891, mediaType: "tv", title: "Upgraded Show", overview: "",
+    posterPath: null, backdropPath: null, releaseDate: "2015-05-05", releaseYear: "2015",
+    voteAverage: 6, voteCount: 50, trailerKey: null, seasons: [],
+    imdbRating: null, rtAudienceScore: null, mdblistScore: null,
+    keywords: [{ id: 1, name: "heist" }],
+  }, 2 * 24 * HOUR_MS);
+  await getTVDetails(891);
+  const tvRewrite = upsertFor("tv:891:details");
+  assert.ok(tvRewrite, "the TV row is migrated and written back too");
+  assert.equal(tvRewrite.expiresAt.getTime(), seededTv.expiresAt.getTime());
+  assert.equal(fetchCalls.length, 0);
+});
+
+test("movie details cached: a ratings backfill without an IMDb id keeps the row's id and its expiry", async () => {
+  const seeded = seedCache("movie:892:details", {
+    id: 892, mediaType: "movie", title: "Backfilled", overview: "",
+    posterPath: null, backdropPath: null, releaseDate: "2015-05-05", releaseYear: "2015",
+    voteAverage: 6, voteCount: 50, trailerKey: null, imdbId: "tt0892000",
+    // Ratings never fetched ⇒ the lazy upgrade fires.
+    keywords: [], keywordList: [], digitalReleaseDate: null, physicalReleaseDate: null,
+  }, 2 * 24 * HOUR_MS);
+  // A cached MDBList row with ratings but no IMDb id serves the upgrade with no fetch.
+  seedCache("mdblist:tmdb:movie:892", {
+    imdbId: null, imdbRating: "7.5", imdbVotes: "1,000", rottenTomatoes: "80%", rtAudienceScore: "75%",
+    metacritic: "70", traktRating: "7.4", letterboxdRating: "3.6", mdblistScore: "72", malRating: null,
+    rogerEbertRating: null, releasedDigital: null, trailerUrl: null,
+  });
+  const result = await getMovieDetails(892);
+  assert.equal(fetchCalls.length, 0);
+  assert.equal(result.imdbRating, "7.5", "the ratings landed");
+  assert.equal(result.imdbId, "tt0892000", "a null id from the ratings source never erases a known one");
+  const rewrite = upsertFor("movie:892:details");
+  assert.ok(rewrite);
+  assert.equal(rewrite.expiresAt.getTime(), seeded.expiresAt.getTime(), "the backfill keeps the row's expiry");
 });
 
 test("movie details cached: a row from before the home-release fields fills them with ONE /release_dates call and re-persists", async () => {
@@ -888,6 +1150,7 @@ test("discover TV: movie-only sorts are translated to the TV field (Newest/Oldes
     ["primary_release_date.asc", "first_air_date.asc"],
     ["original_title.asc", "original_name.asc"],
     ["revenue.desc", "popularity.desc"],
+    ["revenue.asc", "popularity.asc"],
     ["vote_average.desc", "vote_average.desc"],
   ];
   for (const [input, expected] of cases) {
@@ -943,19 +1206,58 @@ test("PINS CURRENT BEHAVIOR: no TMDB_READ_TOKEN makes searchMulti REJECT (lists 
   assert.equal(fetchCalls.length, 0);
 });
 
-test("UND_ERR_SOCKET rejections retry twice — the marker survives safe-fetch's error wrapping", async () => {
+test("dropped connections retry twice — in the shapes the transport really raises, after safe-fetch's wrapping", async () => {
+  // node:http raises ECONNRESET / "socket hang up"; undici's reset carries
+  // "other side closed" in its cause's message (which safe-fetch prefers over
+  // the code). Each must still read as a reset once wrapped in SafeFetchError.
+  const shapes: [string, () => Error][] = [
+    ["a TypeError caused by ECONNRESET", () => new TypeError("fetch failed", { cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }) })],
+    ["a bare socket hang up", () => Object.assign(new Error("socket hang up"), { code: "ECONNRESET" })],
+    ["undici's other side closed", () => new TypeError("fetch failed", { cause: Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" }) })],
+    ["undici's code-only reset", () => Object.assign(new TypeError("fetch failed"), { cause: { code: "UND_ERR_SOCKET" } })],
+  ];
+  for (const [label, reset] of shapes) {
+    fetchCalls.length = 0;
+    respond = (_url, callIndex) => {
+      if (callIndex < 2) throw reset();
+      return jsonResponse(pageOf([{ ...rawMovie(71, "Third Try"), media_type: "movie" }]));
+    };
+    const result = await searchMulti(`retry query ${label}`);
+    assert.equal(fetchCalls.length, 3, `${label}: two resets retried, third attempt served`);
+    assert.deepEqual(result.map((m) => m.id), [71]);
+  }
+});
+
+test("a body torn mid-read is retried like a dropped connection", async () => {
   respond = (_url, callIndex) => {
-    if (callIndex < 2) {
-      // Undici-shaped transient reset. safe-fetch wraps it in a SafeFetchError
-      // whose message embeds the cause code — tmdbFetch's retry detection must
-      // still see it there.
-      throw Object.assign(new TypeError("fetch failed"), { cause: { code: "UND_ERR_SOCKET" } });
+    if (callIndex === 0) {
+      const torn = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"results":['));
+          controller.error(new TypeError("terminated"));
+        },
+      });
+      return new Response(torn, { status: 200, headers: { "content-type": "application/json" } });
     }
-    return jsonResponse(pageOf([{ ...rawMovie(71, "Third Try"), media_type: "movie" }]));
+    return jsonResponse(pageOf([{ ...rawMovie(72, "Whole Body"), media_type: "movie" }]));
   };
-  const result = await searchMulti("retry query");
-  assert.equal(fetchCalls.length, 3); // two resets retried, third attempt served
-  assert.deepEqual(result.map((m) => m.id), [71]);
+  const result = await searchMulti("torn body query");
+  assert.equal(fetchCalls.length, 2);
+  assert.deepEqual(result.map((m) => m.id), [72]);
+});
+
+test("a gateway 503 is retried; a 404 gets exactly one attempt", async () => {
+  respond = (_url, callIndex) =>
+    callIndex === 0
+      ? jsonResponse({ status_message: "unavailable" }, 503)
+      : jsonResponse(pageOf([{ ...rawMovie(73, "After Gateway"), media_type: "movie" }]));
+  assert.deepEqual((await searchMulti("gateway query")).map((m) => m.id), [73]);
+  assert.equal(fetchCalls.length, 2);
+
+  fetchCalls.length = 0;
+  respond = () => jsonResponse({ status_message: "not found" }, 404);
+  await assert.rejects(() => searchMulti("missing query"), /failed: 404/);
+  assert.equal(fetchCalls.length, 1);
 });
 
 test("a non-socket network failure is NOT retried — it surfaces after exactly one attempt", async () => {

@@ -31,7 +31,7 @@ import { disabledAccountResponse } from "@/lib/sign-in-response";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { logAudit } from "@/lib/audit";
 import { getClientIp } from "@/lib/rate-limit";
-import { getMfaState } from "./mfa-store";
+import { getMfaState, type MfaState } from "./mfa-store";
 import { MFA_TOKEN_TTL_SECONDS, signMfaSigninToken } from "./mfa-token";
 import { webAuthnConfigFromEnv } from "./webauthn";
 
@@ -40,6 +40,31 @@ export const MFA_REQUIRED_MESSAGE = "Two-factor authentication required";
 export const WEBAUTHN_TIMEOUT_MS = MFA_TOKEN_TTL_SECONDS * 1000;
 
 export type MfaMethod = "totp" | "webauthn" | "recovery";
+
+// The passkey request options, with a fresh challenge — only when the account
+// has a passkey AND passkeys work on this deployment (webAuthnConfigFromEnv).
+function webauthnRequestOptions(state: MfaState) {
+  const config = webAuthnConfigFromEnv();
+  if (state.passkeys.length === 0 || !config) return undefined;
+  return {
+    challenge: randomBytes(32).toString("base64url"),
+    rpId: config.rpId,
+    allowCredentials: state.passkeys.map((p) => ({ type: "public-key" as const, id: p.credentialId, transports: p.transports })),
+    userVerification: "preferred" as const,
+    timeout: WEBAUTHN_TIMEOUT_MS,
+  };
+}
+
+// The methods offered, in the wire order. Can be empty (passkeys only, on a
+// deployment where passkeys can't run, and no recovery code left): that is the
+// truth, and the client shows `error`.
+function challengeMethods(state: MfaState, passkeyOffered: boolean): MfaMethod[] {
+  const methods: MfaMethod[] = [];
+  if (state.totpEnabled) methods.push("totp");
+  if (passkeyOffered) methods.push("webauthn");
+  if (state.recoveryRemaining > 0) methods.push("recovery");
+  return methods;
+}
 
 // `passwordVersion` is the fingerprint of the hash the password step VERIFIED
 // (authorizeWithCredentials' `_passwordVersion`), not of a re-read: a password
@@ -71,22 +96,8 @@ export async function mfaChallengeFor(
   // to learn something the password alone already discloses there.
   if (row.deactivatedAt) return disabledAccountResponse(t);
 
-  const config = webAuthnConfigFromEnv();
-  const webauthn =
-    state.passkeys.length > 0 && config
-      ? {
-          challenge: randomBytes(32).toString("base64url"),
-          rpId: config.rpId,
-          allowCredentials: state.passkeys.map((p) => ({ type: "public-key" as const, id: p.credentialId, transports: p.transports })),
-          userVerification: "preferred" as const,
-          timeout: WEBAUTHN_TIMEOUT_MS,
-        }
-      : undefined;
-
-  const methods: MfaMethod[] = [];
-  if (state.totpEnabled) methods.push("totp");
-  if (webauthn) methods.push("webauthn");
-  if (state.recoveryRemaining > 0) methods.push("recovery");
+  const webauthn = webauthnRequestOptions(state);
+  const methods = challengeMethods(state, webauthn !== undefined);
 
   const { token } = await signMfaSigninToken({
     userId: user.id,

@@ -11,6 +11,7 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import dns from "node:dns/promises";
+import { EventEmitter } from "node:events";
 import http from "node:http";
 import zlib from "node:zlib";
 import net from "node:net";
@@ -25,6 +26,7 @@ import {
   PINNED_CONNECT_TIMEOUT_MS,
   PINNED_IDLE_TIMEOUT_MS,
   MAX_CONTENT_ENCODINGS,
+  createDeflateDecoder,
 } from "../src/lib/safe-fetch.ts";
 
 type LookupFn = typeof dns.lookup;
@@ -102,20 +104,32 @@ test("REBIND: trusted mode pins too", async () => {
   assert.equal(hits.length, 0);
 });
 
-test("REBIND: an answer that flips to a private address after validation is refused (user)", async () => {
+test("REBIND: one lookup per request decides, and its answer is what is dialled (user)", async () => {
   const { port, hits } = await listen(ok);
-  stubDns((_h, n) => (n === 0 ? ["192.0.2.1"] : ["127.0.0.1"]));
+  // A resolver that would flip to loopback on a second question is never
+  // asked one: the request is refused or dialled on the first answer alone.
+  const dnsCalls = stubDns((_h, n) => (n === 0 ? ["127.0.0.1"] : ["192.0.2.1"]));
   const err = await rejection(safeFetch(`http://flip-user.test:${port}/`, { timeoutMs: 400 }));
   assert.equal(err.reason, "ssrf-blocked");
   assert.equal(hits.length, 0);
+  assert.deepEqual(dnsCalls.calls, ["flip-user.test"], "exactly one lookup");
 });
 
-test("REBIND: admin mode still blocks link-local after a flip to 169.254.169.254", async () => {
+test("REBIND: admin mode blocks link-local on its one lookup, and dials only what it validated", async () => {
   const { port, hits } = await listen(ok);
-  stubDns((_h, n) => (n === 0 ? ["127.0.0.1"] : ["169.254.169.254"]));
+  const dnsCalls = stubDns((_h, n) => (n === 0 ? ["169.254.169.254"] : ["127.0.0.1"]));
   const err = await rejection(safeFetchAdminConfigured(`http://flip-admin.test:${port}/`, { timeoutMs: 400 }));
   assert.equal(err.reason, "ssrf-blocked");
   assert.equal(hits.length, 0);
+  assert.deepEqual(dnsCalls.calls, ["flip-admin.test"]);
+
+  // The answer that passed is the one connected to, however the resolver
+  // answers afterwards.
+  const pinned = stubDns((_h, n) => (n === 0 ? ["127.0.0.1"] : ["169.254.169.254"]));
+  const res = await safeFetchAdminConfigured(`http://flip-admin-ok.test:${port}/`, { timeoutMs: 2000 });
+  assert.equal(await res.text(), "ok");
+  assert.equal(hits.length, 1);
+  assert.deepEqual(pinned.calls, ["flip-admin-ok.test"]);
 });
 
 test("PIN: admin mode dials the validated address for a name the OS cannot resolve; Host is the original name", async () => {
@@ -147,13 +161,14 @@ test("MULTI: one link-local record among private ones refuses the request (admin
   assert.equal(hits.length, 0);
 });
 
-test("MULTI: a single bad record appearing only in the FRESH answer refuses (trusted)", async () => {
+test("MULTI: a single bad record in the answer refuses (trusted)", async () => {
   const { port, hits } = await listen(ok);
-  stubDns((_h, n) => (n === 0 ? ["192.0.2.1"] : ["192.0.2.1", "10.0.0.5"]));
+  stubDns(() => ["192.0.2.1", "10.0.0.5"]);
   const err = await rejection(
     safeFetchTrusted(`http://multi-fresh.test:${port}/`, { allowedHosts: ["multi-fresh.test"], timeoutMs: 400 }),
   );
   assert.equal(err.reason, "ssrf-blocked");
+  assert.match(err.message, /trusted host resolves to unsafe address/);
   assert.equal(hits.length, 0);
 });
 
@@ -266,6 +281,40 @@ test("timeout: a stall mid-body surfaces as a timeout SafeFetchError on read", a
   await assert.rejects(res.text(), (e: unknown) => e instanceof SafeFetchError && e.reason === "timeout");
 });
 
+// A resolver that never answers — getaddrinfo with an unreachable nameserver.
+function hangDns(): void {
+  (dns as { lookup: unknown }).lookup = () => new Promise(() => { /* never settles */ });
+}
+
+test("DNS phase: a caller abort is the caller's, not a timeout — network, with the caller's reason", async () => {
+  hangDns();
+  const ac = new AbortController();
+  const p = safeFetch("http://dns-hang-caller.test/", { signal: ac.signal, timeoutMs: 5000 });
+  setTimeout(() => ac.abort(new Error("caller gave up")), 30);
+  const err = await settlesWithin(rejection(p), 2000);
+  assert.equal(err.reason, "network");
+  assert.match(err.message, /caller gave up/);
+  assert.doesNotMatch(err.message, /timed out|budget/);
+
+  // A caller signal already aborted before DNS starts is the same.
+  const done = new AbortController();
+  done.abort(new Error("cancelled early"));
+  const early = await rejection(safeFetch("http://dns-hang-early.test/", { signal: done.signal }));
+  assert.equal(early.reason, "network");
+  assert.match(early.message, /cancelled early/);
+});
+
+test("DNS phase: our own budget running out is still reason timeout", async () => {
+  hangDns();
+  const ac = new AbortController();
+  const err = await settlesWithin(rejection(safeFetch("http://dns-hang-budget.test/", { signal: ac.signal, timeoutMs: 60 })), 2000);
+  assert.equal(err.reason, "timeout");
+  assert.match(err.message, /exceeded the 60ms budget/);
+  // The caller's OWN deadline (a TimeoutError reason) reads as a timeout, as it does mid-request.
+  const own = await settlesWithin(rejection(safeFetch("http://dns-hang-own.test/", { signal: AbortSignal.timeout(40), timeoutMs: 5000 })), 2000);
+  assert.equal(own.reason, "timeout");
+});
+
 test("caller AbortSignal cancels the request", async () => {
   const { port } = await listen(() => { /* never respond */ });
   const ac = new AbortController();
@@ -373,6 +422,32 @@ test("a short brotli tail yields what decoded instead of erroring, as fetch does
   assert.ok(JSON_BODY.startsWith(text), "decoded prefix of the original");
 });
 
+test("the deflate decoder honours backpressure: an unread decoder does not inflate a whole high-ratio chunk", async () => {
+  // 32 MiB of zeros deflates to ~32 KB — one socket chunk. Its 'data' listener
+  // used to keep the inflater flowing, so the whole 32 MiB landed in the
+  // decoder's buffer before the byte cap downstream could see any of it.
+  const plain = 32 * 1024 * 1024;
+  for (const compress of [zlib.deflateSync, zlib.deflateRawSync]) {
+    const d = createDeflateDecoder();
+    d.write(compress(Buffer.alloc(plain)));
+    await new Promise((r) => setTimeout(r, 300)); // nobody reads
+    const bound = 4 * Math.max(d.readableHighWaterMark, 64 * 1024);
+    assert.ok(d.readableLength <= bound, `${compress.name}: ${d.readableLength} bytes buffered unread (bound ${bound})`);
+    // Read, and the whole body still decodes.
+    d.end();
+    let total = 0;
+    for await (const c of d) total += (c as Buffer).length;
+    assert.equal(total, plain, compress.name);
+  }
+});
+
+test("a deflate bomb served in one write is cut at maxResponseBytes", async () => {
+  const bomb = zlib.deflateSync(Buffer.alloc(16 * 1024 * 1024));
+  const { port } = await listen((_q, r) => { r.setHeader("content-encoding", "deflate"); r.end(bomb); });
+  const res = await safeFetchAdminConfigured(`http://127.0.0.1:${port}/`, { maxResponseBytes: 64 * 1024 });
+  await assert.rejects(res.arrayBuffer(), (e: unknown) => e instanceof SafeFetchError && e.reason === "size");
+});
+
 test("five stacked content-codings decode; a sixth is refused, as fetch refuses it", async () => {
   const { port } = await listen((req, r) => {
     const n = Number(req.url!.slice(1));
@@ -410,13 +485,34 @@ test("a decode failure keeps its reason in the error message", async () => {
     e instanceof SafeFetchError && e.reason === "network" && /^Response body read failed for \S+: \S.*$/.test(e.message));
 });
 
-test("redirects are refused, never followed", async () => {
+test("redirects are refused, never followed — and reported as reason \"redirect\", not a retryable network failure", async () => {
   const { port, hits } = await listen((req, r) => {
     if (req.url === "/start") { r.statusCode = 302; r.setHeader("location", "/next"); r.end(); } else r.end("followed");
   });
   const err = await rejection(safeFetchAdminConfigured(`http://127.0.0.1:${port}/start`));
   assert.match(err.message, /unexpected redirect/);
+  // A 3xx is deterministic: arr reads retry "network", notify agents re-queue it,
+  // and arrWriteOutcomeUnknown treats it as a write that may have happened.
+  assert.equal(err.reason, "redirect");
   assert.equal(hits.length, 1, "the redirect target must not be requested");
+});
+
+test("a redirect refused by fetch() itself (env-proxy path, redirect:\"error\") is reason \"redirect\" too", async () => {
+  process.env.NODE_USE_ENV_PROXY = "1";
+  process.env.HTTP_PROXY = "http://proxy.invalid:3128";
+  stubDns(() => ["127.0.0.1"]);
+  const realFetch = globalThis.fetch;
+  // undici's shape for redirect:"error": TypeError("fetch failed") with the reason as its cause.
+  globalThis.fetch = (async () => { throw new TypeError("fetch failed", { cause: new Error("unexpected redirect") }); }) as typeof fetch;
+  try {
+    const err = await rejection(safeFetchAdminConfigured("http://proxied-redirect.test:9/x"));
+    assert.equal(err.reason, "redirect");
+    // Any other fetch failure stays "network".
+    globalThis.fetch = (async () => { throw new TypeError("fetch failed", { cause: new Error("connect ECONNREFUSED") }); }) as typeof fetch;
+    assert.equal((await rejection(safeFetchAdminConfigured("http://proxied-refused.test:9/x"))).reason, "network");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test("POST bodies, methods and headers reach the server intact", async () => {
@@ -469,6 +565,172 @@ test("connection refused maps to a network SafeFetchError", async () => {
   await new Promise((r) => setTimeout(r, 20));
   const err = await rejection(safeFetchAdminConfigured(`http://127.0.0.1:${port}/`));
   assert.equal(err.reason, "network");
+});
+
+// ---------------------------------------------------------------------------
+// The pinned request always settles. doFetch awaits it with nothing
+// racing it, so any path that neither resolves nor rejects hung the caller
+// forever, whatever timeoutMs said.
+// ---------------------------------------------------------------------------
+
+// Fails the test instead of hanging the runner when `p` never settles.
+async function settlesWithin<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`still pending after ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([p, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// A raw TCP server that answers every request with `reply`, then closes the
+// socket or keeps it open. `closed` resolves once every accepted socket closed.
+async function rawServer(reply: string, keepOpen: boolean) {
+  const sockets: net.Socket[] = [];
+  const closed: Promise<void>[] = [];
+  const server = net.createServer((sock) => {
+    sockets.push(sock);
+    closed.push(new Promise<void>((r) => { sock.once("close", () => r()); }));
+    sock.on("error", () => { /* the client may reset it */ });
+    sock.once("data", () => {
+      const bytes = Buffer.from(reply, "latin1");
+      if (keepOpen) sock.write(bytes);
+      else sock.end(bytes);
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  return {
+    port: (server.address() as AddressInfo).port,
+    allClosed: () => Promise.all(closed),
+    close: () => { for (const s of sockets) s.destroy(); server.close(); },
+  };
+}
+
+test("a reason phrase new Response() refuses rejects at once as network, and the connection is torn down", async () => {
+  // 0x01 is accepted by Node's parser but makes the Response constructor throw,
+  // which used to escape as an uncaughtException with the promise left pending.
+  const cases: Array<{ name: string; method: string; keepOpen: boolean; length: number }> = [
+    { name: "GET, peer closes", method: "GET", keepOpen: false, length: 2 },
+    { name: "GET, peer keeps the socket open", method: "GET", keepOpen: true, length: 2 },
+    // The body never completes, so only our own teardown closes the socket.
+    { name: "GET, body still owed", method: "GET", keepOpen: true, length: 100 },
+    { name: "HEAD, peer keeps the socket open", method: "HEAD", keepOpen: true, length: 2 },
+  ];
+  for (const c of cases) {
+    const srv = await rawServer(`HTTP/1.1 200 O\x01K\r\nContent-Length: ${c.length}\r\n\r\nok`, c.keepOpen);
+    try {
+      const t0 = Date.now();
+      const err = await settlesWithin(
+        rejection(safeFetchAdminConfigured(`http://127.0.0.1:${srv.port}/`, { method: c.method, timeoutMs: 5000 })),
+        2000,
+      );
+      assert.equal(err.reason, "network", c.name);
+      assert.match(err.message, /Invalid statusText/, c.name);
+      assert.ok(Date.now() - t0 < 2000, `${c.name}: took ${Date.now() - t0}ms`);
+      await settlesWithin(srv.allClosed(), 2000);
+    } finally {
+      srv.close();
+    }
+  }
+});
+
+test("a 101 is refused at once as network, whether the peer closes or keeps the socket open", async () => {
+  for (const keepOpen of [false, true]) {
+    const srv = await rawServer("HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\nConnection: Upgrade\r\n\r\n", keepOpen);
+    try {
+      const t0 = Date.now();
+      const err = await settlesWithin(
+        rejection(safeFetchAdminConfigured(`http://127.0.0.1:${srv.port}/`, { timeoutMs: 5000 })),
+        2000,
+      );
+      assert.equal(err.reason, "network");
+      assert.match(err.message, /unexpected upgrade \(status 101\)/);
+      assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0}ms`);
+      await settlesWithin(srv.allClosed(), 2000);
+    } finally {
+      srv.close();
+    }
+  }
+});
+
+test("a caller abort while waiting for headers settles at once with the caller's reason", async () => {
+  let reached!: () => void;
+  const atServer = new Promise<void>((r) => { reached = r; });
+  const { port } = await listen(() => { reached(); /* never respond */ });
+  const ac = new AbortController();
+  const p = safeFetchAdminConfigured(`http://127.0.0.1:${port}/`, { signal: ac.signal, timeoutMs: 5000 });
+  await atServer;
+  const t0 = Date.now();
+  ac.abort(new Error("caller gave up"));
+  const err = await settlesWithin(rejection(p), 2000);
+  assert.equal(err.reason, "network");
+  assert.match(err.message, /caller gave up/);
+  assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0}ms`);
+});
+
+// A ClientRequest stand-in that reports nothing, the way Node ends some paths
+// (a 101 with no 'upgrade' listener) with neither 'response' nor 'error'.
+class MuteRequest extends EventEmitter {
+  destroyed = false;
+  closeOnEnd = false;
+  setTimeout(): this { return this; }
+  end(): this {
+    if (this.closeOnEnd) setImmediate(() => this.emit("close"));
+    return this;
+  }
+  destroy(): this { this.destroyed = true; return this; }
+}
+
+async function withMuteTransport<T>(closeOnEnd: boolean, run: (reqs: MuteRequest[]) => Promise<T>): Promise<T> {
+  const mod = http as unknown as { request: unknown };
+  const real = mod.request;
+  const reqs: MuteRequest[] = [];
+  mod.request = () => {
+    const r = new MuteRequest();
+    r.closeOnEnd = closeOnEnd;
+    reqs.push(r);
+    return r;
+  };
+  try {
+    return await run(reqs);
+  } finally {
+    mod.request = real;
+  }
+}
+
+test("a request the transport never reports on is still bounded by timeoutMs", async () => {
+  await withMuteTransport(false, async (reqs) => {
+    const t0 = Date.now();
+    const err = await settlesWithin(rejection(safeFetchAdminConfigured("http://127.0.0.1:9/", { timeoutMs: 200 })), 2000);
+    assert.equal(err.reason, "timeout");
+    assert.ok(Date.now() - t0 < 1500, `took ${Date.now() - t0}ms`);
+    assert.equal(reqs.length, 1);
+    assert.ok(reqs[0].destroyed, "the request is destroyed on abort");
+  });
+});
+
+test("a request the transport never reports on is still bounded by the caller's signal", async () => {
+  await withMuteTransport(false, async (reqs) => {
+    const ac = new AbortController();
+    const p = safeFetchAdminConfigured("http://127.0.0.1:9/", { signal: ac.signal, timeoutMs: 5000 });
+    setTimeout(() => ac.abort(new Error("caller gave up")), 50);
+    const err = await settlesWithin(rejection(p), 2000);
+    assert.match(err.message, /caller gave up/);
+    assert.ok(reqs[0].destroyed);
+  });
+});
+
+test("a request that closes with neither a response nor an error fails at once, not at the timeout", async () => {
+  await withMuteTransport(true, async () => {
+    const t0 = Date.now();
+    const err = await settlesWithin(rejection(safeFetchAdminConfigured("http://127.0.0.1:9/", { timeoutMs: 5000 })), 2000);
+    assert.equal(err.reason, "network");
+    assert.match(err.message, /connection closed before a response/);
+    assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0}ms`);
+  });
 });
 
 test("env-proxy mode cannot be pinned and falls back to fetch() (documented exception)", async () => {

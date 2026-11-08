@@ -2,6 +2,7 @@
   "shared.bell.empty": "Aún no tienes notificaciones.",
   "shared.bell.viewAll": "Ver todas",
   "shared.common.dismiss": "Descartar",
+  "shared.common.loading": "Cargando…",
   "shared.common.cancel": "Cancelar",
   "shared.maintenance.active": "El modo de mantenimiento está activo.",
   "shared.maintenance.blocked": "Los usuarios que no son administradores están bloqueados.",
@@ -29,6 +30,9 @@
   "shared.thread.loading": "Cargando mensajes…",
   "shared.thread.loadFailed": "No se pudieron cargar los mensajes.",
   "shared.thread.empty": "Aún no hay mensajes. Empieza la conversación abajo.",
+  "shared.thread.loadOlder": "Cargar mensajes anteriores",
+  "shared.thread.loadingOlder": "Cargando mensajes anteriores…",
+  "shared.thread.loadOlderFailed": "No se pudieron cargar los mensajes anteriores.",
   "shared.thread.unknownAuthor": "Desconocido",
   "shared.thread.admin": "Administrador",
   "shared.thread.placeholder": "Escribe un mensaje… (⌘↵ para enviar)",
@@ -56,5 +60,11 @@
   "shared.common.clearSearch": "Borrar búsqueda",
   "shared.thread.placeholderShortcut": "Escribe un mensaje… ({shortcut} para enviar)",
   "shared.rateLimited.generic": "Demasiadas solicitudes. Inténtalo de nuevo en breve.",
-  "shared.rateLimited.seconds": "Demasiadas solicitudes. Inténtalo de nuevo en {seconds} s."
+  "shared.rateLimited.seconds": "Demasiadas solicitudes. Inténtalo de nuevo en {seconds} s.",
+  "shared.upload.chunkFailed": "No se pudo subir la parte {chunk} de {total} (HTTP {status}).",
+  "shared.upload.nonJson": "El servidor envió una respuesta inesperada. Probablemente la solicitud se redirigió, por ejemplo a la página de inicio de sesión.",
+  "shared.upload.noCompletion": "La subida terminó, pero el servidor no confirmó la restauración.",
+  "shared.upload.empty": "El archivo de copia de seguridad está vacío.",
+  "shared.upload.network": "La subida falló. Comprueba tu conexión e inténtalo de nuevo.",
+  "shared.upload.cancelled": "Subida cancelada."
 }

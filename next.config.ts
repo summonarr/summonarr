@@ -10,17 +10,23 @@ const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },
   // Limit referrer information sent to other origins
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-  // Disable browser features not needed by this app
+  // Disable browser features not needed by this app. (FLoC's interest-cohort
+  // is gone from browsers; Chromium logs an unrecognized feature for it.)
   {
     key: "Permissions-Policy",
-    value: "camera=(), microphone=(), geolocation=(), interest-cohort=()",
+    value: "camera=(), microphone=(), geolocation=()",
   },
   // Keep search engines and AI crawlers from indexing any response
   { key: "X-Robots-Tag", value: "noindex, nofollow, noarchive, nosnippet, noimageindex" },
-  // Force HTTPS for 1 year (only effective when served over HTTPS)
+  // Force HTTPS for 1 year (only effective when served over HTTPS). This host
+  // only: includeSubDomains would force HTTPS on every sibling subdomain of a
+  // self-hosted domain (an apex deploy like https://example.com/request), and
+  // preload consents to the browsers' preload list — both the operator's call,
+  // made at their reverse proxy (docker-container/README.md). This value is
+  // fixed at build time, so it can't be a runtime setting.
   {
     key: "Strict-Transport-Security",
-    value: "max-age=31536000; includeSubDomains; preload",
+    value: "max-age=31536000",
   },
 ];
 
@@ -30,9 +36,14 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   experimental: {
     // Cap how much of a request body the proxy layer will buffer in memory.
-    // This is only a backstop: each route enforces its own, much smaller
-    // limit via readJsonCapped (guardrail 30).
-    proxyClientMaxBodySize: "50mb",
+    // Next clones EVERY non-GET body up to this size before src/proxy.ts runs —
+    // before any auth — so it is a per-request memory bound for anonymous
+    // callers too. Each route enforces its own, much smaller limit via
+    // readJsonCapped (guardrail 30). The largest legitimate body is a restore
+    // chunk (MAX_CHUNK_BYTES, 20 MiB, in the two *import-chunk routes); this
+    // must stay ABOVE it, because an over-limit body is truncated, not refused.
+    // tests/security-invariants.test.mts pins the ordering.
+    proxyClientMaxBodySize: "21mb",
   },
   logging: {
     fetches: { fullUrl: false },

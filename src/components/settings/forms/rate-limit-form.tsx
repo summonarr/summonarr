@@ -1,13 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
-import { withBasePath } from "@/lib/base-path";
-import type { SaveStatus } from "./shared";
+import { useSettingsSave } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
 
 interface RateLimitFormProps {
@@ -23,42 +22,16 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
   const [requests, setRequests] = useState(initialRequests);
   const [issues, setIssues] = useState(initialIssues);
   const [maxPushSubscriptions, setMaxPushSubscriptions] = useState(initialMaxPushSubscriptions);
-  const [status, setStatus] = useState<SaveStatus>("idle");
-  // An earlier save's idle timer must not fire into a later save (it would
-  // re-enable Save mid-flight or hide the new result early).
-  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => {
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-  }, []);
-  const [message, setMessage] = useState("");
+  const { status, message, save, edited } = useSettingsSave();
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-    setStatus("saving");
-    setMessage("");
-    try {
-      const res = await fetch(withBasePath("/api/settings"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          rateLimitRegister: register,
-          rateLimitRequests: requests,
-          rateLimitIssues: issues,
-          maxPushSubscriptions,
-        }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      if (res.ok && data.ok !== false) {
-        setStatus("ok");
-      } else {
-        setMessage(data.error ?? t("settings.form.common.saveFailed"));
-        setStatus("error");
-      }
-    } catch {
-      setStatus("error");
-    }
-    idleTimer.current = setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
+    await save({
+      rateLimitRegister: register,
+      rateLimitRequests: requests,
+      rateLimitIssues: issues,
+      maxPushSubscriptions,
+    });
   }
 
   return (
@@ -71,7 +44,7 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
             type="number"
             min="1"
             value={register}
-            onChange={(e) => { setRegister(e.target.value); setStatus("idle"); }}
+            onChange={(e) => { setRegister(e.target.value); edited(); }}
             placeholder="5"
             className="bg-zinc-800 border-zinc-700"
           />
@@ -83,7 +56,7 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
             type="number"
             min="1"
             value={requests}
-            onChange={(e) => { setRequests(e.target.value); setStatus("idle"); }}
+            onChange={(e) => { setRequests(e.target.value); edited(); }}
             placeholder="20"
             className="bg-zinc-800 border-zinc-700"
           />
@@ -95,7 +68,7 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
             type="number"
             min="1"
             value={issues}
-            onChange={(e) => { setIssues(e.target.value); setStatus("idle"); }}
+            onChange={(e) => { setIssues(e.target.value); edited(); }}
             placeholder="10"
             className="bg-zinc-800 border-zinc-700"
           />
@@ -108,9 +81,11 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
           <Input
             id="rl-push-subs"
             type="number"
-            min="0"
+            // The route's range; 0 is refused (there is no "no limit").
+            min="1"
+            max="100"
             value={maxPushSubscriptions}
-            onChange={(e) => { setMaxPushSubscriptions(e.target.value); setStatus("idle"); }}
+            onChange={(e) => { setMaxPushSubscriptions(e.target.value); edited(); }}
             placeholder="5"
             className="bg-zinc-800 border-zinc-700"
           />

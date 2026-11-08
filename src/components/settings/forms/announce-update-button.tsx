@@ -1,64 +1,90 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader2, AlertTriangle, Send } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson } from "@/lib/client/fetch-json";
+import { v } from "@/lib/validate";
+import { useDelayed } from "@/hooks/use-delayed";
+import { useFocusReturn } from "@/hooks/use-focus-return";
 import { useT } from "@/components/i18n/i18n-provider";
+
+const SentAnswer = v.object({ ok: v.literal(true), sent: v.optional(v.number()), failed: v.optional(v.number()) });
+
+// The send fans out to every registered device before it answers.
+const SEND_TIMEOUT_MS = 5 * 60_000;
 
 export function AnnounceUpdateButton() {
   const t = useT();
+  const id = useId();
   const [phase, setPhase] = useState<"idle" | "confirm" | "sending" | "done" | "error">("idle");
   const [summary, setSummary] = useState<string | null>(null);
-  // Timer that clears the result 10s after a send. Kept in a ref so it can be
-  // cancelled — otherwise an old timer could close a confirm box the admin
-  // opened again within those 10 seconds.
-  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
+  // Clears the result 10s after a send. A new confirm cancels it — otherwise
+  // an old timer could close a confirm box the admin opened again within those
+  // 10 seconds — and nothing fires after unmount.
+  const later = useDelayed();
+  // The confirm panel replaces the trigger, so focus moves into it and back to
+  // the trigger when it closes, never to <body>.
+  const focus = useFocusReturn();
 
   function openConfirm() {
-    if (resetTimer.current) clearTimeout(resetTimer.current);
+    later.cancel();
     setSummary(null);
     setPhase("confirm");
   }
 
+  function cancel() {
+    focus.returnTo("trigger");
+    setPhase("idle");
+  }
+
   async function handleSend() {
-    if (resetTimer.current) clearTimeout(resetTimer.current);
+    later.cancel();
     setPhase("sending");
     setSummary(null);
-    try {
-      const res = await fetch(withBasePath("/api/push/announce-update"), { method: "POST" });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; sent?: number; failed?: number; error?: string };
-      if (res.ok && data.ok) {
-        setPhase("done");
-        const sent = data.sent ?? 0;
-        const failed = data.failed ?? 0;
-        // One key carries both numbers so a translation can reorder the two
-        // clauses and pick its own joiner; the plural form follows `sent`.
-        setSummary(failed > 0
-          ? t("settings.form.announce.sentWithFailures", { count: sent, sent, failed })
-          : t("settings.form.announce.sent", { count: sent }));
-      } else {
-        setPhase("error");
-        setSummary(typeof data.error === "string" ? data.error : t("settings.form.announce.sendFailed"));
-      }
-    } catch {
+    const res = await fetchJson(withBasePath("/api/push/announce-update"), {
+      init: { method: "POST" },
+      schema: SentAnswer,
+      timeoutMs: SEND_TIMEOUT_MS,
+      fallbackError: t("settings.form.announce.sendFailed"),
+    });
+    // The trigger was disabled while sending, so focus fell to <body>.
+    focus.returnToIfLost("trigger");
+    if (res.ok) {
+      setPhase("done");
+      const sent = res.data.sent ?? 0;
+      const failed = res.data.failed ?? 0;
+      // One key carries both numbers so a translation can reorder the two
+      // clauses and pick its own joiner; the plural form follows `sent`.
+      setSummary(failed > 0
+        ? t("settings.form.announce.sentWithFailures", { count: sent, sent, failed })
+        : t("settings.form.announce.sent", { count: sent }));
+    } else {
       setPhase("error");
-      setSummary(t("settings.form.announce.sendFailed"));
+      setSummary(res.error || t("settings.form.announce.sendFailed"));
     }
-    resetTimer.current = setTimeout(() => { setPhase("idle"); setSummary(null); }, 10_000);
+    later(() => { setPhase("idle"); setSummary(null); }, 10_000);
   }
 
   if (phase === "confirm") {
     return (
-      <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 space-y-3">
+      <div
+        role="alertdialog"
+        aria-labelledby={`${id}-title`}
+        aria-describedby={`${id}-help`}
+        className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 space-y-3"
+        onKeyDown={(e) => {
+          if (e.key === "Escape") cancel();
+        }}
+      >
         <div className="flex items-start gap-2.5">
           <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
           <div className="space-y-1.5">
-            <p className="text-sm font-medium text-zinc-100">
+            <p id={`${id}-title`} className="text-sm font-medium text-zinc-100">
               {t("settings.form.announce.confirmTitle")}
             </p>
-            <p className="text-xs text-zinc-400">
+            <p id={`${id}-help`} className="text-xs text-zinc-400">
               {t("settings.form.announce.confirmHelp")}
             </p>
           </div>
@@ -71,10 +97,13 @@ export function AnnounceUpdateButton() {
           >
             {t("settings.form.announce.confirmSend")}
           </Button>
+          {/* Focus lands on Cancel, not Send: the send can't be recalled, so a
+              stray Enter must not fire it. */}
           <Button
             size="sm"
             variant="outline"
-            onClick={() => setPhase("idle")}
+            autoFocus
+            onClick={cancel}
             className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-7 px-3 text-xs"
           >
             {t("settings.form.common.cancel")}
@@ -88,6 +117,7 @@ export function AnnounceUpdateButton() {
     <div className="space-y-1.5">
       <div className="flex items-center gap-3 flex-wrap">
         <Button
+          ref={focus.refFor("trigger")}
           type="button"
           variant="outline"
           onClick={openConfirm}

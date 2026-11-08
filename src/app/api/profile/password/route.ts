@@ -8,7 +8,8 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { footholdDeletes } from "@/lib/session-footholds";
 import { notifyAccountSecurityEvent } from "@/lib/account-security-notify";
 import { invalidateUserSession } from "@/lib/auth";
-import { hashPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
+import { hashPassword } from "@/lib/password-hash";
+import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "@/lib/password-policy";
 import { verifyStepUpPassword } from "@/lib/step-up-auth";
 import { mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -41,7 +42,7 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiAuth.profile.newPasswordRequired") }, { status: 400 });
   }
 
-  if (newPassword.length < 12) {
+  if (newPassword.length < MIN_PASSWORD_LENGTH) {
     return NextResponse.json({ error: t("apiAuth.profile.newPasswordTooShort") }, { status: 400 });
   }
 
@@ -104,7 +105,7 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     undefined,
     // A client that predates this check (the shipped iOS app) shows `error` and
     // can't send a code, so the text says where the change CAN be made.
-    { requiredMessage: t("apiAuth.profile.secondFactorRequired") },
+    { requiredMessage: t("apiAuth.profile.secondFactorRequired"), context: "password-change" },
   );
   if (proof instanceof NextResponse) return proof;
 
@@ -135,7 +136,8 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
       where: { userId: session.user.id },
     }),
     // Anything a session holder could have planted that would outlive the
-    // sessions (guardrail 6g): push registrations and pending Discord links.
+    // sessions (guardrail 6g): push registrations, pending Discord links and
+    // pending notification-email verifications (session-footholds.ts).
     ...footholdDeletes(prisma, session.user.id),
   ]);
 

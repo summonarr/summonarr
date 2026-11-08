@@ -24,11 +24,17 @@
 //     scope and NEVER thrown to the caller — approve/decline routes must not
 //     500 because Discord hiccuped. The admin fan-out isolates per-recipient
 //     failures.
-//   - ROLE SYNC: assignDiscordRolesOnLink maps provider (synthetic
-//     @jellyfin.local email) and app role to the configured role ids. It grants
-//     (PUT) the roles the user should have and revokes (DELETE) every other role
-//     Summonarr manages. revokeDiscordRolesOnUnlink removes all managed roles.
-//     Both skip invalid snowflakes (a snowflake is Discord's numeric id format).
+//   - ROLE SYNC: assignDiscordRolesOnLink maps how the account signs in (the
+//     Plex or Jellyfin subject, the synthetic @jellyfin.local email; a local or
+//     OIDC account earns no server role) and its app role to the configured role
+//     ids. It grants (PUT) the roles the user should have and revokes (DELETE)
+//     every other role Summonarr manages. revokeDiscordRolesOnUnlink removes all
+//     managed roles. Both skip invalid snowflakes (a snowflake is Discord's
+//     numeric id format) and report "ok" / "skipped" / "failed".
+//   - PRIVACY: an issue message, an issue resolution and a decline note are
+//     private to their thread; a post in the shared channel pings without them.
+//   - RATE LIMITS: a 429 is retried after Discord's own wait, a bounded number
+//     of times, and never thrown to the caller.
 //
 // No DB or network: prisma.setting/prisma.user are shadowed in-memory
 // (tests/_helpers.mts), globalThis.fetch is scripted, and dns/promises.lookup
@@ -89,9 +95,15 @@ const {
   notifyAdminsNewRequestDiscord,
   notifyAdminsNewIssueDiscord,
   notifyAdminsIssueMessage,
-  notifyUserRequestApproved,
+  notifyUserDownloadPending,
   notifyUserRequestAvailable,
   notifyUsersRequestsApproved,
+  notifyAdminsRequestComment,
+  notifyUserRequestComment,
+  notifyUserIssueMessage,
+  notifyUserIssueResolved,
+  notifyUsersRequestsDeclined,
+  forgetDiscordDmChannelsForTests,
 } = await import("../src/lib/discord-notify.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
@@ -116,10 +128,12 @@ let userFindUniqueRow: UserRow | null = null;
 let userFindManyRows: UserRow[] = [];
 const userFindUniqueCalls: unknown[] = [];
 const userFindManyWheres: Array<Record<string, unknown>> = [];
+const userFindManySelects: Array<Record<string, unknown> | undefined> = [];
 shadowPrismaModel(prisma, "user", {
   findUnique: async (args: unknown) => { userFindUniqueCalls.push(args); return userFindUniqueRow; },
-  findMany: async (args: { where: Record<string, unknown> }) => {
+  findMany: async (args: { where: Record<string, unknown>; select?: Record<string, unknown> }) => {
     userFindManyWheres.push(args.where);
+    userFindManySelects.push(args.select);
     return userFindManyRows;
   },
 });
@@ -148,6 +162,18 @@ const CHANNEL = "444444444444444444"; // discordNotifyChannelId
 const ADMIN_CHANNEL = "445544554455445544"; // discordAdminRequestChannelId
 const DID = "111111111111111111"; // a linked user's Discord id
 
+// The role-sync input (DiscordRoleAccount): a Plex account by default.
+type RoleAccount = Parameters<typeof assignDiscordRolesOnLink>[1];
+const account = (over: Partial<RoleAccount> = {}): RoleAccount => ({
+  email: "alice@example.com",
+  role: "USER",
+  plexUserId: "plex-1",
+  jellyfinUserId: null,
+  hasLocalCredentials: false,
+  hasOidcAccount: false,
+  ...over,
+});
+
 // A fully-notifiable linked user; individual tests flip fields off.
 const linkedUser = (overrides: UserRow = {}): UserRow => ({
   discordId: DID,
@@ -168,8 +194,10 @@ beforeEach(() => {
   userFindManyRows = [];
   userFindUniqueCalls.length = 0;
   userFindManyWheres.length = 0;
+  userFindManySelects.length = 0;
   respond = () => okJson({ id: "999999999999999999" });
   translationRows.clear();
+  forgetDiscordDmChannelsForTests();
 });
 
 // ── gating short-circuits ───────────────────────────────────────────────────
@@ -185,10 +213,10 @@ test("feature flag off: every entry point returns before any fetch or user read,
   });
   userFindUniqueRow = linkedUser();
 
-  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE");
   await notifyAdminsNewRequestDiscord({ requestId: "r1", title: "Dune", mediaType: "MOVIE", requestedBy: "alice", note: null, posterPath: null });
   await notifyAdminsNewIssueDiscord({ issueId: "i1", title: "Dune", mediaType: "MOVIE", issueType: "OTHER", reportedBy: "alice", note: null, posterPath: null });
-  await assignDiscordRolesOnLink(DID, "alice@example.com", "USER");
+  await assignDiscordRolesOnLink(DID, account());
   await notifyAdminsIssueMessage("Dune", "alice", "hello");
   await notifyUsersRequestsApproved([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE" }]);
 
@@ -203,9 +231,11 @@ test("half-configured: missing botToken / channel / valid snowflake all short-ci
   // Flag on (default), channel present, but no bot token → getConfig() null,
   // and the user row is never read (config gates BEFORE recipient resolution).
   setSettings({ discordNotifyChannelId: CHANNEL });
-  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE");
+  await notifyUsersRequestsApproved([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE" }]);
   assert.equal(sent.length, 0);
   assert.equal(userFindUniqueCalls.length, 0);
+  assert.equal(userFindManyWheres.length, 0);
 
   // Bot token but no admin-request channel → the admin post is skipped.
   setSettings({ discordBotToken: BOT });
@@ -232,11 +262,12 @@ test("half-configured: missing botToken / channel / valid snowflake all short-ci
 
 test("DM path (no channel configured): opens the DM channel then posts, with no mention content", async () => {
   setSettings({ discordBotToken: BOT });
-  userFindUniqueRow = linkedUser();
+  userFindManyRows = [{ id: "u1", discordId: DID }];
   respond = (url) =>
     url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({});
 
-  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+  // An approval, one request or many, is this batch notifier's (request-notifications.ts).
+  await notifyUsersRequestsApproved([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE" }]);
 
   assert.equal(sent.length, 2);
   const [open, msg] = sent;
@@ -282,28 +313,29 @@ test("a DM is written in the linked user's language; a shared-channel post uses 
   delete process.env.SUMMONARR_DEFAULT_LOCALE;
   try {
     // DM to a Spanish user → Spanish.
+    const approve = () => notifyUsersRequestsApproved([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE" }]);
     setSettings({ discordBotToken: BOT });
-    userFindUniqueRow = linkedUser({ locale: "es" });
+    userFindManyRows = [{ id: "u1", discordId: DID, locale: "es" }];
     respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({}));
-    await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+    await approve();
     const dm = (sent[1].body?.embeds as Array<Record<string, unknown>>)[0];
     assert.equal(dm.title, "✅ Solicitud aprobada — Dune");
     assert.ok(String(dm.description).startsWith("Tu solicitud (**Película**) se aprobó"), String(dm.description));
-    assert.ok((userFindUniqueCalls[0] as { select: Record<string, unknown> }).select.locale, "the locale rides the existing user read");
+    assert.ok(userFindManySelects[0]?.locale, "the locale rides the existing recipient read");
 
     // Same Spanish user, but the notify channel is configured → everyone reads
     // it, so it stays in the instance default (English here).
     sent.length = 0;
     setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
-    await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+    await approve();
     const shared = (sent[0].body?.embeds as Array<Record<string, unknown>>)[0];
     assert.equal(shared.title, "✅ Request Approved — Dune");
 
     // An instance default of "es" moves the shared channel to Spanish.
     sent.length = 0;
     process.env.SUMMONARR_DEFAULT_LOCALE = "es";
-    userFindUniqueRow = linkedUser();
-    await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+    userFindManyRows = [{ id: "u1", discordId: DID }];
+    await approve();
     assert.equal((sent[0].body?.embeds as Array<Record<string, unknown>>)[0].title, "✅ Solicitud aprobada — Dune");
   } finally {
     if (before === undefined) delete process.env.SUMMONARR_DEFAULT_LOCALE;
@@ -317,21 +349,15 @@ test("the media title follows the EMBED's language: the user's in a DM, the chan
   translationRows.set("movie:438631:i18n:v2", JSON.stringify({ es: { title: "Duna" } }));
   try {
     setSettings({ discordBotToken: BOT });
-    userFindUniqueRow = linkedUser({ locale: "es" });
+    userFindManyRows = [{ id: "u1", discordId: DID, locale: "es" }];
     respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({}));
-    await notifyUserRequestApproved("u1", "Dune", "MOVIE", 438631);
+    await notifyUsersRequestsApproved([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 }]);
     assert.equal((sent[1].body?.embeds as Array<Record<string, unknown>>)[0].title, "✅ Solicitud aprobada — Duna");
 
     // A shared channel is read in the instance default — an English embed must
     // not carry the Spanish requester's title.
     sent.length = 0;
     setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
-    await notifyUserRequestApproved("u1", "Dune", "MOVIE", 438631);
-    assert.equal((sent[0].body?.embeds as Array<Record<string, unknown>>)[0].title, "✅ Request Approved — Dune");
-
-    // Batch path, same rule.
-    sent.length = 0;
-    userFindManyRows = [{ id: "u1", discordId: DID, locale: "es" }];
     await notifyUsersRequestsApproved([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 }]);
     assert.equal((sent[0].body?.embeds as Array<Record<string, unknown>>)[0].title, "✅ Request Approved — Dune");
 
@@ -349,10 +375,11 @@ test("the media title follows the EMBED's language: the user's in a DM, the chan
 test("recipient gating: no linked account or an opted-out preference sends nothing; other prefs stay independent", async () => {
   setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
 
-  // Opted out of approved notifications specifically…
+  // Opted out of approved notifications specifically (the download-pending
+  // follow-up rides that preference)…
   userFindUniqueRow = linkedUser({ notifyOnApproved: false });
-  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
-  assert.equal(sent.length, 0, "notifyOnApproved=false must gate the approved ping");
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE");
+  assert.equal(sent.length, 0, "notifyOnApproved=false must gate the download-pending ping");
 
   // …while the available preference on the same user still delivers.
   await notifyUserRequestAvailable("u1", "Dune", "MOVIE");
@@ -361,7 +388,7 @@ test("recipient gating: no linked account or an opted-out preference sends nothi
   // No linked Discord account at all → nothing, no error noise.
   sent.length = 0;
   userFindUniqueRow = linkedUser({ discordId: null });
-  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE");
   assert.equal(sent.length, 0);
   assert.equal(errors.length, 0);
 });
@@ -371,7 +398,7 @@ test("a failed Discord post degrades to a [discord-notify] error log and never t
   userFindUniqueRow = linkedUser();
   respond = () => new Response("Missing Access", { status: 403 });
 
-  await notifyUserRequestApproved("u1", "Dune", "MOVIE"); // must resolve, not reject
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE"); // must resolve, not reject
   assert.equal(sent.length, 1, "the post was attempted");
   assert.ok(
     errors.some((e) => e.includes("[discord-notify] Failed to send notification:") && e.includes("403")),
@@ -383,7 +410,7 @@ test("embed titles are clamped to 256 chars at the send boundary (Discord 400-dr
   setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
   userFindUniqueRow = linkedUser();
 
-  await notifyUserRequestApproved("u1", "x".repeat(300), "MOVIE");
+  await notifyUserDownloadPending("u1", "x".repeat(300), "MOVIE");
 
   const embed = (sent[0].body?.embeds as Array<Record<string, unknown>>)[0];
   const title = String(embed.title);
@@ -483,6 +510,9 @@ test("admin fan-out selects by MANAGE_ISSUES (role preset or explicit bit) and e
     assert.equal(s.url, `${API}/channels/${CHANNEL}/messages`);
     const embed = (s.body?.embeds as Array<Record<string, unknown>>)[0];
     assert.ok(String(embed.title).startsWith("💬 User Reply on Issue — Dune"), "default heading is the user-reply variant");
+    // Every linked user reads the shared channel; the issue thread is private.
+    assert.ok(!JSON.stringify(s.body).includes("the audio is wrong"), "the message body never reaches the shared channel");
+    assert.match(String(embed.description), /Open the issue in Summonarr/);
   }
 });
 
@@ -551,10 +581,11 @@ test("role assignment maps provider + app role to role ids and skips non-snowfla
   const byMethod = (m: string) =>
     sent.filter((s) => s.method === m).map((s) => s.url.split("/roles/")[1]).sort();
 
-  // Plex account (real email), plain USER → linked + plex granted; the jellyfin,
-  // admin and issue-admin roles are managed-but-not-desired, so they are revoked.
+  // Plex account (Plex subject id), plain USER → linked + plex granted; the
+  // jellyfin, admin and issue-admin roles are managed-but-not-desired, so they
+  // are revoked.
   setSettings(roleCfg);
-  await assignDiscordRolesOnLink(DID, "alice@example.com", "USER");
+  assert.equal(await assignDiscordRolesOnLink(DID, account()), "ok");
   assert.deepEqual(byMethod("PUT"), ["900000000000000002", "900000000000000003"]);
   assert.deepEqual(byMethod("DELETE"), ["900000000000000004", "900000000000000005", "900000000000000006"]);
   assert.deepEqual(
@@ -572,7 +603,7 @@ test("role assignment maps provider + app role to role ids and skips non-snowfla
   // Jellyfin account (synthetic @jellyfin.local email), ISSUE_ADMIN →
   // linked + jellyfin + issue-admin roles.
   sent.length = 0;
-  await assignDiscordRolesOnLink(DID, "bob@jellyfin.local", "ISSUE_ADMIN");
+  await assignDiscordRolesOnLink(DID, account({ email: "jellyfin-bob@jellyfin.local", plexUserId: null, jellyfinUserId: "jf-bob", role: "ISSUE_ADMIN" }));
   assert.deepEqual(byMethod("PUT"), ["900000000000000002", "900000000000000004", "900000000000000006"]);
   // The plex role is revoked on a Plex→Jellyfin switch, and the full-admin role
   // is revoked for an ISSUE_ADMIN — both previously accumulated silently.
@@ -582,11 +613,46 @@ test("role assignment maps provider + app role to role ids and skips non-snowfla
   sent.length = 0;
   setSettings({ ...roleCfg, discordPlexRoleId: "plex-members" });
   invalidateFeatureFlagCache();
-  await assignDiscordRolesOnLink(DID, "alice@example.com", "USER");
+  await assignDiscordRolesOnLink(DID, account());
   // The non-snowflake plex id is filtered out of BOTH sets — it is never granted
   // and never revoked, so a malformed config value can't produce a Discord call.
   assert.deepEqual(byMethod("PUT"), ["900000000000000002"]);
   assert.deepEqual(byMethod("DELETE"), ["900000000000000004", "900000000000000005", "900000000000000006"]);
+});
+
+test("the server role follows how the account signs in: none for a local or OIDC account, Plex only for Plex", async () => {
+  const guild = "900000000000000001";
+  setSettings({
+    discordBotToken: BOT,
+    discordGuildId: guild,
+    discordLinkedRoleId: "900000000000000002",
+    discordPlexRoleId: "900000000000000003",
+    discordJellyfinRoleId: "900000000000000004",
+  });
+  const byMethod = (m: string) =>
+    sent.filter((s) => s.method === m).map((s) => s.url.split("/roles/")[1]).sort();
+
+  // A local-password account with a real email signs in through neither
+  // server: the linked role only, and BOTH server roles are revoked. It used to
+  // get the Plex role for not having a @jellyfin.local address.
+  await assignDiscordRolesOnLink(DID, account({ plexUserId: null, hasLocalCredentials: true }));
+  assert.deepEqual(byMethod("PUT"), ["900000000000000002"]);
+  assert.deepEqual(byMethod("DELETE"), ["900000000000000003", "900000000000000004"]);
+
+  // An OIDC account: the same.
+  sent.length = 0;
+  await assignDiscordRolesOnLink(DID, account({ plexUserId: null, hasOidcAccount: true }));
+  assert.deepEqual(byMethod("PUT"), ["900000000000000002"]);
+
+  // A Jellyfin subject id earns the Jellyfin role even with a real email.
+  sent.length = 0;
+  await assignDiscordRolesOnLink(DID, account({ plexUserId: null, jellyfinUserId: "jf-1" }));
+  assert.deepEqual(byMethod("PUT"), ["900000000000000002", "900000000000000004"]);
+
+  // A legacy Plex row (no subject id yet, no password, no OIDC) still reads as Plex.
+  sent.length = 0;
+  await assignDiscordRolesOnLink(DID, account({ plexUserId: null }));
+  assert.deepEqual(byMethod("PUT"), ["900000000000000002", "900000000000000003"]);
 });
 
 test("unlink revokes every managed role — and only the managed ones", async () => {
@@ -640,7 +706,7 @@ test("unlink revokes every managed role — and only the managed ones", async ()
 test("role assignment: no guild config or invalid member id → zero fetches; a failed PUT only logs", async () => {
   // Bot token but no guild → nothing to do.
   setSettings({ discordBotToken: BOT, discordLinkedRoleId: "900000000000000002" });
-  await assignDiscordRolesOnLink(DID, "alice@example.com", "USER");
+  assert.equal(await assignDiscordRolesOnLink(DID, account()), "skipped");
   assert.equal(sent.length, 0);
 
   // Guild configured but the (external-input) Discord user id is not a snowflake.
@@ -650,12 +716,12 @@ test("role assignment: no guild config or invalid member id → zero fetches; a 
     discordLinkedRoleId: "900000000000000002",
   });
   invalidateFeatureFlagCache();
-  await assignDiscordRolesOnLink("not-a-snowflake", "alice@example.com", "USER");
+  await assignDiscordRolesOnLink("not-a-snowflake", account());
   assert.equal(sent.length, 0);
 
-  // A Discord-side failure is logged per role, never thrown.
+  // A Discord-side failure is logged per role, never thrown — and reported.
   respond = () => new Response("Missing Permissions", { status: 403 });
-  await assignDiscordRolesOnLink(DID, "alice@example.com", "USER");
+  assert.equal(await assignDiscordRolesOnLink(DID, account()), "failed");
   assert.equal(sent.length, 1);
   assert.ok(errors.some((e) => e.includes("[discord-notify] Failed to assign role") && e.includes("403")));
 });
@@ -702,4 +768,216 @@ test("bulk approve: an empty batch is a pure no-op (no config read, no query, no
   await notifyUsersRequestsApproved([]);
   assert.equal(sent.length, 0);
   assert.equal(userFindManyWheres.length, 0);
+});
+
+// ── request comments (guardrail 14e: the thread is private) ─────────────────
+
+test("a requester's comment pings managers in the ADMIN channel — never the shared notification channel", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL, discordAdminRequestChannelId: ADMIN_CHANNEL });
+  userFindManyRows = [
+    { discordId: "555555555555555555", role: "ADMIN", permissions: 1n },
+    { discordId: "666666666666666666", role: "USER", permissions: 0n }, // no MANAGE_REQUESTS
+  ];
+
+  await notifyAdminsRequestComment("Dune", "user@example.com", "my phone is 555", { excludeUserId: "u-req" });
+
+  assert.equal(sent.length, 1, "one targeted post per request manager");
+  assert.equal(sent[0].url, `${API}/channels/${ADMIN_CHANNEL}/messages`);
+  assert.ok(!sent.some((r) => r.url.includes(CHANNEL)), "the comment text never reaches the shared channel");
+  assert.equal(sent[0].body?.content, "<@555555555555555555>");
+  assert.deepEqual(sent[0].body?.allowed_mentions, { parse: [], users: ["555555555555555555"] });
+});
+
+test("a requester's comment with NO admin channel configured posts nowhere, even with a shared channel set", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindManyRows = [{ discordId: "555555555555555555", role: "ADMIN", permissions: 1n }];
+
+  await notifyAdminsRequestComment("Dune", "bob", "private text");
+
+  assert.equal(sent.length, 0);
+  assert.equal(userFindManyWheres.length, 0, "short-circuits before the manager read");
+});
+
+test("a manager's reply in the SHARED channel pings the requester without the comment text; a DM carries it", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindUniqueRow = linkedUser({ notifyOnComment: true });
+
+  await notifyUserRequestComment("u1", "Dune", "Admin", "the private reply");
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, `${API}/channels/${CHANNEL}/messages`);
+  assert.equal(sent[0].body?.content, `<@${DID}>`, "the requester is still pinged");
+  const shared = JSON.stringify(sent[0].body);
+  assert.ok(!shared.includes("the private reply"), "no comment text in a channel every linked user reads");
+
+  sent.length = 0;
+  setSettings({ discordBotToken: BOT }); // no channel ⇒ DM
+  await notifyUserRequestComment("u1", "Dune", "Admin", "the private reply");
+  const dm = sent.find((r) => r.url.endsWith("/messages"));
+  assert.ok(dm && JSON.stringify(dm.body).includes("the private reply"), "a DM is private, so it carries the text");
+});
+
+// ── private text stays out of the shared channel (guardrail 14e's rule) ─────
+
+test("an issue reply in the SHARED channel pings the reporter without the message; a DM carries it", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindUniqueRow = linkedUser();
+
+  await notifyUserIssueMessage("u1", "Dune", "Admin", "your private reply");
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, `${API}/channels/${CHANNEL}/messages`);
+  assert.equal(sent[0].body?.content, `<@${DID}>`, "the reporter is still pinged");
+  assert.ok(!JSON.stringify(sent[0].body).includes("your private reply"), "no message text in a channel every linked user reads");
+
+  sent.length = 0;
+  setSettings({ discordBotToken: BOT }); // no channel ⇒ DM
+  respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({}));
+  await notifyUserIssueMessage("u1", "Dune", "Admin", "your private reply");
+  const dm = sent.find((r) => r.url.endsWith("/messages"));
+  assert.ok(dm && JSON.stringify(dm.body).includes("your private reply"), "a DM is private, so it carries the text");
+});
+
+test("an issue resolution and a decline note stay out of the shared channel; a DM carries them", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindUniqueRow = linkedUser();
+
+  await notifyUserIssueResolved("u1", "Dune", "MOVIE", "re-encoded the private file");
+  userFindManyRows = [{ id: "u1", discordId: DID }];
+  // A decline's note: the row's own (what every decline sends), or a batch-wide one.
+  await notifyUsersRequestsDeclined([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE", adminNote: "a private note" }]);
+  await notifyUsersRequestsDeclined([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE" }], "a private batch note");
+
+  assert.equal(sent.length, 3);
+  for (const post of sent) {
+    assert.equal(post.url, `${API}/channels/${CHANNEL}/messages`);
+    const text = JSON.stringify(post.body);
+    assert.ok(!text.includes("private"), `private text in the shared channel: ${text}`);
+    assert.match(String((post.body?.embeds as Array<Record<string, unknown>>)[0].description), /Open the (issue|request) in Summonarr/);
+  }
+
+  sent.length = 0;
+  setSettings({ discordBotToken: BOT });
+  respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({}));
+  await notifyUserIssueResolved("u1", "Dune", "MOVIE", "re-encoded the private file");
+  await notifyUsersRequestsDeclined([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE", adminNote: "a private note" }]);
+  const dms = sent.filter((r) => r.url.endsWith("/messages")).map((r) => JSON.stringify(r.body));
+  assert.ok(dms.some((d) => d.includes("re-encoded the private file")));
+  assert.ok(dms.some((d) => d.includes("a private note")));
+});
+
+// ── Discord rate limits ──────────────────────────────────────────────────────
+
+test("a 429 is retried after Discord's retry_after, then sent; the caller never sees it", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindUniqueRow = linkedUser();
+  let calls = 0;
+  respond = () => (++calls === 1
+    ? new Response(JSON.stringify({ message: "You are being rate limited.", retry_after: 0.02, global: false }), { status: 429, headers: { "content-type": "application/json" } })
+    : okJson({}));
+
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE");
+
+  assert.equal(sent.length, 2, "the same post, sent again once Discord's wait passed");
+  assert.deepEqual(sent[0].body, sent[1].body);
+  assert.deepEqual(errors, [], "a retried 429 that then lands is not a failure");
+});
+
+test("the Retry-After header is honoured too, and retries are bounded: a channel that keeps answering 429 is logged, not thrown", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindUniqueRow = linkedUser();
+  respond = () => new Response("slow down", { status: 429, headers: { "retry-after": "0.01" } });
+
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE"); // must resolve
+
+  assert.equal(sent.length, 4, "one send plus three retries, then the 429 is the answer");
+  assert.ok(errors.some((e) => e.includes("[discord-notify] Failed to send notification:") && e.includes("429")));
+});
+
+test("a 429 asking for a wait past the budget is not retried", { timeout: 10_000 }, async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindUniqueRow = linkedUser();
+  respond = () => new Response(JSON.stringify({ retry_after: 600 }), { status: 429, headers: { "content-type": "application/json" } });
+
+  const started = Date.now();
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE");
+  assert.equal(sent.length, 1, "ten minutes is not worth holding a notification for");
+  assert.ok(Date.now() - started < 5_000);
+  assert.ok(errors.some((e) => e.includes("429")));
+});
+
+test("a bucket that reports nothing left holds the next post on that channel until it resets", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindUniqueRow = linkedUser();
+  const at: number[] = [];
+  respond = () => {
+    at.push(Date.now());
+    return new Response("{}", {
+      status: 200,
+      headers: { "content-type": "application/json", "x-ratelimit-remaining": at.length === 1 ? "0" : "4", "x-ratelimit-reset-after": "0.15" },
+    });
+  };
+
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE");
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE");
+
+  assert.equal(at.length, 2);
+  assert.ok(at[1] - at[0] >= 120, `the second post waited for the bucket (${at[1] - at[0]}ms)`);
+});
+
+// ── delivery details ────────────────────────────────────────────────────────
+
+test("a notify channel id that is not a snowflake falls back to DMs and is warned about once", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: "general" });
+  userFindUniqueRow = linkedUser();
+  respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({}));
+  await notifyUserRequestAvailable("u1", "Dune", "MOVIE");
+  await notifyUserRequestAvailable("u1", "Dune", "MOVIE");
+  assert.ok(sent.every((r) => !r.url.includes("/channels/general")), "never posted to the bad id");
+  assert.equal(sent.filter((r) => r.url === `${API}/channels/222222222222222222/messages`).length, 2, "both went out as DMs");
+  assert.equal(warns.filter((w) => w.includes("discordNotifyChannelId")).length, 1);
+});
+
+test("a DM channel is opened once per user and reused; an open answering no id sends nothing", async () => {
+  setSettings({ discordBotToken: BOT });
+  userFindUniqueRow = linkedUser();
+  respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({}));
+  await notifyUserRequestAvailable("u1", "Dune", "MOVIE");
+  await notifyUserRequestAvailable("u1", "Dune", "MOVIE");
+  assert.equal(sent.filter((r) => r.url.endsWith("/users/@me/channels")).length, 1);
+  assert.equal(sent.filter((r) => r.url.endsWith("/messages")).length, 2);
+
+  forgetDiscordDmChannelsForTests();
+  sent.length = 0;
+  respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({}) : okJson({}));
+  await notifyUserRequestAvailable("u1", "Dune", "MOVIE");
+  assert.deepEqual(sent.map((r) => r.url), [`${API}/users/@me/channels`], "no post to /channels/undefined");
+  assert.ok(errors.some((e) => e.includes("no channel id")));
+});
+
+test("a multi-line message keeps every line inside the quote in a DM", async () => {
+  setSettings({ discordBotToken: BOT });
+  userFindUniqueRow = linkedUser();
+  respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({}));
+  await notifyUserIssueMessage("u1", "Dune", "Admin", "first line\nsecond line");
+  const dm = sent.find((r) => r.url.endsWith("/messages"))!;
+  const description = String((dm.body?.embeds as Array<Record<string, unknown>>)[0].description);
+  assert.match(description, /> first line\n> second line$/);
+});
+
+test("the admin fan-out posts to the channel at most five at a time", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindManyRows = Array.from({ length: 7 }, (_, i) => ({ discordId: `55555555555555555${i}`, role: "ADMIN", permissions: 1n }));
+  let inFlight = 0;
+  let peak = 0;
+  respond = async () => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise((r) => setImmediate(r));
+    inFlight--;
+    return okJson({});
+  };
+  await notifyAdminsIssueMessage("Dune", "bob", "hello");
+  assert.equal(sent.length, 7);
+  assert.ok(peak <= 5, `peak in flight was ${peak}`);
 });

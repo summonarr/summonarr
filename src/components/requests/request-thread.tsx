@@ -8,14 +8,13 @@ import { useLiveEvents } from "@/hooks/use-live-events";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { COMMENT_MAX_CHARS } from "@/lib/request-comments";
-
-interface CommentData {
-  id: string;
-  createdAt: string;
-  body: string;
-  fromAdmin: boolean;
-  author: { name: string | null; email?: string; role: string };
-}
+import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
+import { failedLoadState, isNearBottom, prependOlder, type ThreadLoadState } from "@/lib/client/thread-view";
+import { THREAD_READ_CAP } from "@/lib/api-body-limits";
+import { fetchJson, jsonInit, timedFetch } from "@/lib/client/fetch-json";
+import { threadCursorOf } from "@/lib/thread-cursor";
+import { TRUNCATED_HEADER } from "@/lib/truncation";
+import { mergeReload, readComment, readComments, type CommentData } from "./request-thread-data";
 
 interface RequestThreadProps {
   requestId: string;
@@ -35,7 +34,7 @@ const COUNTER_AT = 1800;
 
 // A collapsible comment thread under a request row. Loads on first open, then
 // reloads on the live stream's request:comment event for this request. Bubbles
-// follow the chat convention: the viewer's own side is on the right.
+// follow the chat convention: the viewer's own comments are on the right.
 export function RequestThread({
   requestId,
   viewerIsManager,
@@ -48,38 +47,53 @@ export function RequestThread({
   const [open, setOpen] = useState(defaultOpen);
   const [comments, setComments] = useState<CommentData[]>([]);
   const [count, setCount] = useState(initialCount);
-  const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [loadState, setLoadState] = useState<ThreadLoadState>("idle");
   const [body, setBody] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  // Whether comments older than the shown ones may exist. Set by the first read
+  // (a full page may have more behind it) and by each "load older" answer; a live
+  // reload never changes it, since the merge keeps every comment already loaded.
+  const [olderState, setOlderState] = useState<"unknown" | "more" | "none">("unknown");
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [olderFailed, setOlderFailed] = useState(false);
+  const olderCtrlRef = useRef<AbortController | null>(null);
+  // The thread's own scroll box — the only thing ever scrolled, so a reload
+  // never moves the page (scrollIntoView scrolls every scrollable ancestor).
+  const listRef = useRef<HTMLDivElement>(null);
+  // Follow the newest comment on open and after the viewer's own send; a live
+  // reload follows only a reader who was already at the bottom.
+  const stickRef = useRef(true);
+  const { session } = useSummonarrSession();
   // Guardrail 16: dates differ between server and browser locale/timezone.
   const mounted = useHasMounted();
   const t = useT();
-  const locale = useLocale();
   const loadSeqRef = useRef(0);
+  // The viewer's own comments appended here that no reload has returned yet.
+  const pendingRef = useRef(new Set<string>());
 
   const load = useCallback(
-    (signal?: AbortSignal, { silent = false }: { silent?: boolean } = {}) => {
+    async (signal?: AbortSignal, { silent = false }: { silent?: boolean } = {}) => {
       const seq = ++loadSeqRef.current;
       if (!silent) setLoadState("loading");
-      return fetch(withBasePath(`/api/requests/${requestId}/comments`), { signal })
-        .then((r) => {
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          return r.json();
-        })
-        .then((data: CommentData[]) => {
-          if (seq !== loadSeqRef.current) return;
-          const list = Array.isArray(data) ? data : [];
-          setComments(list);
-          setCount(list.length);
-          setLoadState("ready");
-        })
-        .catch((err) => {
-          if (err?.name === "AbortError") return;
-          if (seq !== loadSeqRef.current) return;
-          if (!silent) setLoadState("error");
-        });
+      const res = await fetchJson(withBasePath(`/api/requests/${requestId}/comments`), { signal });
+      if (!res.ok && res.kind === "aborted") return;
+      if (seq !== loadSeqRef.current) return;
+      if (!res.ok) {
+        setLoadState((s) => failedLoadState(s, silent));
+        return;
+      }
+      const el = listRef.current;
+      stickRef.current = silent && el ? isNearBottom(el) : true;
+      const list = readComments(res.data);
+      for (const c of list) pendingRef.current.delete(c.id);
+      const pending = new Set(pendingRef.current);
+      setComments((prev) => mergeReload(list, prev, pending));
+      // The list is capped by the route (its newest 500), so it never lowers
+      // a count known to be higher; comments are never removed.
+      setCount((c) => Math.max(c, list.length));
+      setOlderState((s) => (s === "unknown" ? (list.length >= THREAD_READ_CAP ? "more" : "none") : s));
+      setLoadState("ready");
     },
     [requestId],
   );
@@ -90,6 +104,33 @@ export function RequestThread({
     void load(ctrl.signal);
     return () => ctrl.abort();
   }, [open, load]);
+
+  useEffect(() => () => olderCtrlRef.current?.abort(), []);
+
+  // The page of comments older than the oldest shown (the route's `before`
+  // cursor). The answer's X-Truncated header says whether still older ones remain.
+  async function loadOlder() {
+    const oldest = comments[0];
+    if (!oldest || loadingOlder) return;
+    olderCtrlRef.current?.abort();
+    const ctrl = new AbortController();
+    olderCtrlRef.current = ctrl;
+    setLoadingOlder(true);
+    setOlderFailed(false);
+    try {
+      const url = withBasePath(`/api/requests/${requestId}/comments?before=${encodeURIComponent(threadCursorOf(oldest))}`);
+      const res = await timedFetch(url, { signal: ctrl.signal });
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const page = readComments(await res.json());
+      stickRef.current = false;
+      setComments((prev) => prependOlder(prev, page));
+      setOlderState(res.headers.get(TRUNCATED_HEADER) === "true" ? "more" : "none");
+    } catch {
+      if (!ctrl.signal.aborted) setOlderFailed(true);
+    } finally {
+      if (!ctrl.signal.aborted) setLoadingOlder(false);
+    }
+  }
 
   useLiveEvents(
     useCallback(
@@ -103,7 +144,9 @@ export function RequestThread({
   );
 
   useEffect(() => {
-    if (open && loadState === "ready") bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    const el = listRef.current;
+    if (!open || loadState !== "ready" || !el || !stickRef.current) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [comments, loadState, open]);
 
   async function send(e: React.FormEvent) {
@@ -112,37 +155,41 @@ export function RequestThread({
     if (!text || sending) return;
     setSending(true);
     setSendError(null);
-    try {
-      const res = await fetch(withBasePath(`/api/requests/${requestId}/comments`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ body: text }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setSendError(data.error ?? t("shared.thread.sendFailed"));
-      } else {
-        const created: CommentData = await res.json();
-        // The live event for this comment can reload the thread first.
-        setComments((prev) => (prev.some((c) => c.id === created.id) ? prev : [...prev, created]));
-        setCount((c) => Math.max(c, comments.length + 1));
-        setBody("");
+    const res = await fetchJson(withBasePath(`/api/requests/${requestId}/comments`), {
+      init: jsonInit("POST", { body: text }),
+      fallbackError: t("shared.thread.sendFailed"),
+    });
+    setSending(false);
+    const created = res.ok ? readComment(res.data) : null;
+    if (!created) {
+      if (!res.ok && res.kind !== "invalid") {
+        setSendError(res.status === 0 ? t("shared.thread.networkError") : res.error);
+        return;
       }
-    } catch {
-      setSendError(t("shared.thread.networkError"));
-    } finally {
-      setSending(false);
+      // A 2xx that isn't a comment (a proxy page, a changed shape): the text
+      // stays, and a reload shows whether it was saved.
+      setSendError(t("shared.thread.sendFailed"));
+      void load(undefined, { silent: true });
+      return;
     }
+    setBody("");
+    stickRef.current = true;
+    // The live event for this comment can reload the thread first.
+    pendingRef.current.add(created.id);
+    setComments((prev) => (prev.some((c) => c.id === created.id) ? prev : [...prev, created]));
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      void send(e as unknown as React.FormEvent);
+      // A real submit of the textarea's own form, so onSubmit gets a real event.
+      e.currentTarget.form?.requestSubmit();
     }
   }
 
-  const label = count > 0 ? t("requests.thread.showCount", { count }) : t("requests.thread.show");
+  // The viewer's own sends are in `comments` before any reload counts them.
+  const shown = Math.max(count, comments.length);
+  const label = shown > 0 ? t("requests.thread.showCount", { count: shown }) : t("requests.thread.show");
 
   return (
     <div>
@@ -173,7 +220,7 @@ export function RequestThread({
             background: "var(--ds-bg-1)",
           }}
         >
-          <div className="space-y-3 overflow-y-auto" style={{ padding: "12px 14px", maxHeight: 288 }}>
+          <div ref={listRef} className="space-y-3 overflow-y-auto" style={{ padding: "12px 14px", maxHeight: 288 }}>
             {requestNote && (
               <p className="whitespace-pre-wrap break-words" style={{ fontSize: 11.5, color: "var(--ds-fg-muted)" }}>
                 <span style={{ color: "var(--ds-fg-subtle)" }}>{t("requests.thread.requestNote")}: </span>
@@ -205,41 +252,21 @@ export function RequestThread({
               <p className="text-xs" style={{ color: "var(--ds-fg-subtle)" }}>{t("shared.thread.empty")}</p>
             )}
 
+            {loadState === "ready" && olderState === "more" && (
+              <div className="flex items-center gap-2">
+                <Button type="button" size="xs" variant="ghost" disabled={loadingOlder} onClick={() => void loadOlder()}>
+                  {loadingOlder ? t("shared.thread.loadingOlder") : t("shared.thread.loadOlder")}
+                </Button>
+                {olderFailed && <p role="alert" className="text-xs text-red-400">{t("shared.thread.loadOlderFailed")}</p>}
+              </div>
+            )}
+
             {comments.map((c) => {
-              const authorName = c.author.name ?? c.author.email ?? t("shared.thread.unknownAuthor");
-              const isMine = c.fromAdmin === viewerIsManager;
-              return (
-                <div key={c.id} className={`flex gap-2.5 ${isMine ? "flex-row-reverse" : "flex-row"}`}>
-                  <div
-                    className="w-6 h-6 rounded-full shrink-0 flex items-center justify-center text-[10px] font-bold mt-0.5"
-                    style={{
-                      background: c.fromAdmin ? "var(--ds-accent)" : "var(--ds-bg-3)",
-                      color: c.fromAdmin ? "var(--ds-accent-fg)" : "var(--ds-fg-muted)",
-                    }}
-                  >
-                    {c.fromAdmin ? <ShieldCheck className="w-3.5 h-3.5" /> : (authorName[0] ?? "?").toUpperCase()}
-                  </div>
-                  <div className={`flex flex-col gap-0.5 max-w-[75%] ${isMine ? "items-end" : "items-start"}`}>
-                    <div
-                      className={`px-3 py-2 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${isMine ? "rounded-tr-sm" : "rounded-tl-sm"}`}
-                      style={{
-                        background: c.fromAdmin ? "var(--ds-accent)" : "var(--ds-bg-3)",
-                        color: c.fromAdmin ? "var(--ds-accent-fg)" : "var(--ds-fg)",
-                      }}
-                    >
-                      {c.body}
-                    </div>
-                    <p className="text-[10px] px-1" style={{ color: "var(--ds-fg-subtle)" }}>
-                      {c.fromAdmin ? t("shared.thread.admin") : authorName} ·{" "}
-                      {mounted
-                        ? new Date(c.createdAt).toLocaleString(locale, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
-                        : ""}
-                    </p>
-                  </div>
-                </div>
-              );
+              // Mine = I wrote it. By role, another manager's reply sat on a
+              // manager's own side; `viewerIsManager` is the no-session fallback.
+              const isMine = session ? c.authorId === session.user.id : c.fromAdmin === viewerIsManager;
+              return <CommentBubble key={c.id} comment={c} isMine={isMine} mounted={mounted} />;
             })}
-            <div ref={bottomRef} />
           </div>
 
           {closed ? (
@@ -276,9 +303,45 @@ export function RequestThread({
               </Button>
             </form>
           )}
-          {sendError && <p className="text-xs text-red-400" style={{ padding: "0 14px 8px" }}>{sendError}</p>}
+          {sendError && <p role="alert" className="text-xs text-red-400" style={{ padding: "0 14px 8px" }}>{sendError}</p>}
         </div>
       )}
+    </div>
+  );
+}
+
+function CommentBubble({ comment: c, isMine, mounted }: { comment: CommentData; isMine: boolean; mounted: boolean }) {
+  const t = useT();
+  const locale = useLocale();
+  const authorName = c.author.name ?? c.author.email ?? t("shared.thread.unknownAuthor");
+  return (
+    <div className={`flex gap-2.5 ${isMine ? "flex-row-reverse" : "flex-row"}`}>
+      <div
+        className="w-6 h-6 rounded-full shrink-0 flex items-center justify-center text-[10px] font-bold mt-0.5"
+        style={{
+          background: c.fromAdmin ? "var(--ds-accent)" : "var(--ds-bg-3)",
+          color: c.fromAdmin ? "var(--ds-accent-fg)" : "var(--ds-fg-muted)",
+        }}
+      >
+        {c.fromAdmin ? <ShieldCheck className="w-3.5 h-3.5" /> : (authorName[0] ?? "?").toUpperCase()}
+      </div>
+      <div className={`flex flex-col gap-0.5 max-w-[75%] ${isMine ? "items-end" : "items-start"}`}>
+        <div
+          className={`px-3 py-2 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${isMine ? "rounded-tr-sm" : "rounded-tl-sm"}`}
+          style={{
+            background: c.fromAdmin ? "var(--ds-accent)" : "var(--ds-bg-3)",
+            color: c.fromAdmin ? "var(--ds-accent-fg)" : "var(--ds-fg)",
+          }}
+        >
+          {c.body}
+        </div>
+        <p className="text-[10px] px-1" style={{ color: "var(--ds-fg-subtle)" }}>
+          {c.fromAdmin ? t("shared.thread.admin") : authorName} ·{" "}
+          {mounted
+            ? new Date(c.createdAt).toLocaleString(locale, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+            : ""}
+        </p>
+      </div>
     </div>
   );
 }

@@ -67,8 +67,10 @@ const settingValues: Record<string, () => string | null> = {
   mdblistPlan: () => planValue,
   omdbApiKey: () => omdbKey,
 };
+const settingReadKeys: string[] = [];
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) => {
+    settingReadKeys.push(args.where.key);
     const value = settingValues[args.where.key]?.() ?? null;
     return value === null ? null : { key: args.where.key, value };
   },
@@ -155,6 +157,20 @@ test("a background call stops at the reserve with zero fetches; a page still cal
   assert.equal(fetchCalls.length, 3);
   assert.equal(warns.filter((w) => w.includes("background jobs stop")).length, 1, "said once, not per refusal");
   assert.equal((await getMdblistUsageSnapshot()).backgroundStopped, true);
+});
+
+test("a page's cold read never joins a background read of the same title refused at the reserve", async () => {
+  // Still at the reserve from the test above. A background call refused there
+  // must not hand its refusal to a page asking for the same title at once.
+  respond = () => json(title, 200, usageHeaders(100_000, 24_999));
+  const [bg, page] = await Promise.all([
+    mdblist.getMdblistRatingsForTmdb(25, "movie", null, { background: true }),
+    mdblist.getMdblistRatingsForTmdb(25, "movie"),
+  ]);
+  assert.equal(bg.found, false);
+  assert.equal(!bg.found && bg.quotaExhausted, true, "the background read stops at the reserve");
+  assert.equal(page.found, true, "the page read goes out on its own");
+  assert.equal(fetchCalls.length, 1);
 });
 
 test("the ratings helpers carry the background flag to MDBList (For You and the ratings sync go through them)", async () => {
@@ -314,6 +330,14 @@ test("guardrail 27a: a second copy of mdblist.ts (another chunk) sees the same p
   assert.equal(other.isMdblistQuotaLocked(), true, "the pause tripped above, through the first copy");
   const snap = await other.getMdblistUsageSnapshot();
   assert.equal(snap.reportedLimit, 100_000, "and the usage MDBList reported to the first copy");
+
+  // The API-key memo too: once one copy has read the key, the other doesn't
+  // re-read it within the memo's 30s.
+  const keyReads = () => settingReadKeys.filter((k) => k === "mdblistApiKey").length;
+  await mdblist.fetchAndCacheMdblistForTmdb(8_000, "movie", "mdblist:tmdb:movie:8000");
+  const before = keyReads();
+  await other.fetchAndCacheMdblistForTmdb(8_001, "movie", "mdblist:tmdb:movie:8001");
+  assert.equal(keyReads(), before, "the second copy used the first copy's memo");
 });
 
 test("guardrail 27a: OMDb's lockout is process-wide too", async () => {

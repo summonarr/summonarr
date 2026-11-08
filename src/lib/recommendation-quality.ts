@@ -87,6 +87,18 @@ function parseVoteCount(raw: string | null | undefined): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+// TMDB's own score as a term of the prior: its 0..1 value and its weight, or
+// null when TMDB abstains (no score, or under MIN_TMDB_VOTES_FOR_QUALITY votes —
+// a 10.0 from four people is noise). The ONE definition both qualityScoreOf and
+// withTmdbTerm blend in.
+function tmdbTerm(voteAverage: number, voteCount: number): { value: number; weight: number } | null {
+  if (!(voteAverage > 0 && voteCount >= MIN_TMDB_VOTES_FOR_QUALITY)) return null;
+  return {
+    value: Math.min(1, voteAverage / 10),
+    weight: TMDB_QUALITY_WEIGHT_MAX * (voteCount / (voteCount + TMDB_QUALITY_VOTE_PIVOT)),
+  };
+}
+
 export interface QualityVerdict {
   // Weighted mean over the sources that answered, 0..1.
   quality: number;
@@ -144,13 +156,8 @@ export function qualityScoreOf(media: TmdbMedia): QualityVerdict | null {
   const audience = parseFloat((media.rtAudienceScore ?? "").replace("%", ""));
   if (Number.isFinite(audience)) add(Math.min(1, audience / 100), SECONDARY_QUALITY_WEIGHT);
 
-  if (media.voteAverage > 0 && (media.voteCount ?? 0) >= MIN_TMDB_VOTES_FOR_QUALITY) {
-    const votes = media.voteCount ?? 0;
-    add(
-      Math.min(1, media.voteAverage / 10),
-      TMDB_QUALITY_WEIGHT_MAX * (votes / (votes + TMDB_QUALITY_VOTE_PIVOT)),
-    );
-  }
+  const tmdb = tmdbTerm(media.voteAverage, media.voteCount ?? 0);
+  if (tmdb) add(tmdb.value, tmdb.weight);
 
   if (evidence <= 0) return null;
   return { quality: weighted / evidence, evidence };
@@ -163,20 +170,19 @@ export function qualityScoreOf(media: TmdbMedia): QualityVerdict | null {
 // that). TMDB's term cannot: qualityScoreOf gates it on a vote count, and the
 // count travels with the candidate row the engine is scoring — the graph would
 // have to guess it at write time. So the stored verdict is TMDB-free and this
-// folds the term back in at read time, weighted identically to the inline
-// version in qualityScoreOf. A title that fails the vote bar is returned
-// untouched, which is precisely "TMDB abstains".
+// folds the term back in at read time, through the same tmdbTerm qualityScoreOf
+// uses. A title that fails the vote bar is returned untouched, which is
+// precisely "TMDB abstains".
 export function withTmdbTerm(
   verdict: QualityVerdict | null,
   voteAverage: number,
   voteCount: number,
 ): QualityVerdict | null {
-  if (!(voteAverage > 0 && voteCount >= MIN_TMDB_VOTES_FOR_QUALITY)) return verdict;
-  const weight = TMDB_QUALITY_WEIGHT_MAX * (voteCount / (voteCount + TMDB_QUALITY_VOTE_PIVOT));
-  const value = Math.min(1, voteAverage / 10);
-  if (verdict === null) return { quality: value, evidence: weight };
-  const evidence = verdict.evidence + weight;
-  return { quality: (verdict.quality * verdict.evidence + value * weight) / evidence, evidence };
+  const tmdb = tmdbTerm(voteAverage, voteCount);
+  if (!tmdb) return verdict;
+  if (verdict === null) return { quality: tmdb.value, evidence: tmdb.weight };
+  const evidence = verdict.evidence + tmdb.weight;
+  return { quality: (verdict.quality * verdict.evidence + tmdb.value * tmdb.weight) / evidence, evidence };
 }
 
 // The score multiplier a verdict earns. Kept as ONE shared function so every

@@ -250,8 +250,11 @@ shadowPrismaModel(prisma, "account", {
     return { ...row };
   },
 });
+// A key whose read throws (a database fault on that one row).
+let settingReadThrows: string | null = null;
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) => {
+    if (args.where.key === settingReadThrows) throw new Error("setting read failed (unit test)");
     const value = settings.get(args.where.key);
     return value === undefined ? null : { key: args.where.key, value };
   },
@@ -555,6 +558,21 @@ test("start requests the groups scope only when the allowlist opts in", async ()
   assert.equal(await scopeOf(), "openid profile email groups");
 });
 
+test("start ends the flow when the allowlist read FAILS, rather than starting it without the groups scope", async () => {
+  settingReadThrows = OIDC_ALLOWLIST_SETTING_KEY;
+  try {
+    const web = await inScope(() => oidcStart.GET(new NextRequest(`${HTTP_AUTH_URL}/api/auth/oidc/start`, { headers: { "x-forwarded-for": nextIp() } })));
+    assert.equal(new URL(web.headers.get("location")!).searchParams.get("error"), "oidc_unavailable");
+    const native = await inScope(() => oidcStart.GET(new NextRequest(`${HTTP_AUTH_URL}/api/auth/oidc/start`, {
+      headers: { "x-forwarded-for": nextIp(), "x-summonarr-client": "ios; build=60" },
+    })));
+    assert.equal(native.status, 503);
+    assert.ok(errors.some((e) => e.includes("[oidc/start] allowlist read failed")), "the fault is logged");
+  } finally {
+    settingReadThrows = null;
+  }
+});
+
 // ── the admin route ──────────────────────────────────────────────────────────
 
 async function mintSession(role: string, permissions: bigint): Promise<string> {
@@ -649,6 +667,43 @@ test("validateOidcAllowlist: defaults, trimming/dedupe, and every refusal", () =
   assert.deepEqual(validateOidcAllowlist({ existingUsersOnly: "true" }), { ok: false, field: "existingUsersOnly" });
 });
 
+// An array whose index reads are counted, so a pin can tell "refused as soon as
+// the cap was passed" from "walked the whole list, then refused".
+function countingArray(items: string[]): { list: string[]; reads: () => number } {
+  let reads = 0;
+  const list = new Proxy(items, {
+    get(target, prop, receiver) {
+      if (typeof prop === "string" && /^\d+$/.test(prop)) reads++;
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  return { list, reads: () => reads };
+}
+
+test("validateOidcAllowlist: the entry cap counts distinct entries, keeps first-seen order, and refuses as soon as it is passed", () => {
+  // 60 entries collapsing to 50 distinct ones are accepted, in first-seen order.
+  const fifty = Array.from({ length: 50 }, (_, i) => `g${i}`);
+  const withDupes = [...fifty, ...fifty.slice(0, 10).map((g) => ` ${g} `)];
+  const accepted = validateOidcAllowlist({ groups: withDupes, emailDomains: [...fifty.map((g) => `${g}.example.com`), "G0.example.com"] });
+  assert.equal(accepted.ok, true);
+  if (accepted.ok) {
+    assert.deepEqual(accepted.value.groups, fifty);
+    assert.deepEqual(accepted.value.emailDomains, fifty.map((g) => `${g}.example.com`));
+  }
+  assert.deepEqual(
+    validateOidcAllowlist({ emailDomains: Array.from({ length: 51 }, (_, i) => `d${i}.example.com`) }),
+    { ok: false, field: "emailDomains" },
+  );
+
+  // A huge list is refused at the 51st distinct entry, not after reading all of it.
+  const groups = countingArray(Array.from({ length: 5_000 }, (_, i) => `group-${i}`));
+  assert.deepEqual(validateOidcAllowlist({ groups: groups.list }), { ok: false, field: "groups" });
+  assert.ok(groups.reads() <= 51, `read ${groups.reads()} entries`);
+  const domains = countingArray(Array.from({ length: 5_000 }, (_, i) => `d${i}.example.com`));
+  assert.deepEqual(validateOidcAllowlist({ emailDomains: domains.list }), { ok: false, field: "emailDomains" });
+  assert.ok(domains.reads() <= 51, `read ${domains.reads()} entries`);
+});
+
 test("parseOidcAllowlist: no row is the default (off); a row that doesn't parse or validate is null (refuse)", () => {
   assert.deepEqual(parseOidcAllowlist(undefined), DEFAULT_OIDC_ALLOWLIST);
   assert.deepEqual(parseOidcAllowlist(null), DEFAULT_OIDC_ALLOWLIST);
@@ -677,6 +732,18 @@ test("readGroupsClaim: arrays (strings only), a single string, absent → null, 
   assert.equal(readGroupsClaim({}, "constructor"), null);
 });
 
+test("readGroupsClaim: a dotted name reads a nested claim, the literal claim name wins, and no step reads the prototype", () => {
+  assert.deepEqual(readGroupsClaim({ realm_access: { roles: ["a", 2] } }, "realm_access.roles"), ["a"]);
+  assert.deepEqual(readGroupsClaim({ "a.b": ["x"], a: { b: ["y"] } }, "a.b"), ["x"]);
+  assert.deepEqual(readGroupsClaim({ "https://example.com/claims/groups": ["uri"] }, "https://example.com/claims/groups"), ["uri"]);
+  assert.equal(readGroupsClaim({}, "constructor.name"), null);
+  assert.equal(readGroupsClaim({ a: {} }, "a.constructor"), null);
+  assert.equal(readGroupsClaim({ a: Object.create({ b: ["inherited"] }) }, "a.b"), null, "own properties only");
+  assert.equal(readGroupsClaim({ a: ["x"] }, "a.length"), null, "never walks into an array");
+  assert.equal(readGroupsClaim({ a: "x" }, "a.b"), null);
+  assert.equal(readGroupsClaim({ a: { b: 5 } }, "a.b"), null);
+});
+
 test("every refusal maps to a code the login page words, and a native message that exists", () => {
   const loginForm = readFileSync(new URL("../src/app/login/login-form.tsx", import.meta.url), "utf8");
   const apiAuth = JSON.parse(readFileSync(new URL("../src/lib/i18n/messages/en/apiAuth.json", import.meta.url), "utf8")) as Record<string, string>;
@@ -693,4 +760,18 @@ test("every refusal maps to a code the login page words, and a native message th
   // The two refusals the app has always received as 409 still are (guardrail 25).
   assert.equal(oidcNativeRefusal("rebind_required").status, 409);
   assert.equal(oidcNativeRefusal("setup_required").status, 409);
+});
+
+test("the login page's ?error= lookup reads only the map's own keys, so a prototype name falls back to the generic message", () => {
+  const loginForm = readFileSync(new URL("../src/app/login/login-form.tsx", import.meta.url), "utf8");
+  const fn = loginForm.slice(loginForm.indexOf("function describeLoginErrorCode"));
+  const body = fn.slice(0, fn.indexOf("\n}\n"));
+  assert.match(body, /Object\.hasOwn\(LOGIN_ERROR_CODE_KEYS, code\) \? LOGIN_ERROR_CODE_KEYS\[code\] : "auth\.login\.error\.oidc\.generic"/);
+  assert.doesNotMatch(body, /LOGIN_ERROR_CODE_KEYS\[code\] \?\?/, "`??` never falls back for __proto__ (Object.prototype is not nullish)");
+  // Why the guard is needed: a plain object literal answers prototype names.
+  const literal: Record<string, string> = { rate_limited: "x" };
+  for (const code of ["__proto__", "constructor", "toString"]) {
+    assert.notEqual(literal[code] ?? null, null, `${code} reaches the prototype through a bare index`);
+    assert.equal(Object.hasOwn(literal, code), false);
+  }
 });

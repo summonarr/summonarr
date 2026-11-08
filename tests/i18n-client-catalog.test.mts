@@ -23,6 +23,7 @@ const {
   catalogAreas,
   SERVER_ONLY_AREAS,
   ADMIN_ONLY_AREAS,
+  AREA_NAMES,
 } = await import("../src/lib/i18n/catalogs.ts");
 const { LOCALES } = await import("../src/lib/i18n/locales.ts");
 
@@ -38,6 +39,19 @@ test("the area lists name real areas, and server-only and admin do not overlap",
     assert.ok(areas.has(a), `'${a}' is not a catalog area`);
   }
   assert.deepEqual(SERVER_ONLY_AREAS.filter((a) => ADMIN_ONLY_AREAS.includes(a)), []);
+});
+
+test("every locale wires exactly English's areas, and AREA_NAMES matches the files on disk", () => {
+  // A locale map missing an area falls back to English for that whole area,
+  // silently; the AREA_NAMES typing makes it a compile error, this the runtime pin.
+  for (const locale of LOCALES) {
+    assert.deepEqual(catalogAreas(locale).slice().sort(), catalogAreas("en").slice().sort(), `${locale}: areas differ from en`);
+  }
+  const onDisk = readdirSync(join(ROOT, "src/lib/i18n/messages/en"))
+    .filter((f) => f.endsWith(".json"))
+    .map((f) => f.slice(0, -".json".length))
+    .sort();
+  assert.deepEqual([...AREA_NAMES].sort(), onDisk);
 });
 
 test("clientCatalog: server-only never sent, admin only to admins, everything else always", () => {

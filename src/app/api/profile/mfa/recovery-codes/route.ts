@@ -4,7 +4,7 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { getMfaState, replaceRecoveryCodesInTx } from "@/lib/mfa/mfa-store";
+import { getMfaState, getMfaStateInTx, lockUserMfaInTx, replaceRecoveryCodesInTx } from "@/lib/mfa/mfa-store";
 import { mfaReauthStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -29,7 +29,19 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
   const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor, state);
   if (proof instanceof NextResponse) return proof;
-  const codes = await prisma.$transaction(async (tx) => replaceRecoveryCodesInTx(tx, user.id));
+  // Lock FIRST, then re-read the factor state inside it, like every other
+  // enrollment change: a 2FA disable (or the last factor's removal) committing
+  // after the read above would otherwise be followed by ten live recovery codes
+  // for a 2FA that no longer exists. Sequential awaits on the tx (guardrail 23c).
+  const codes = await prisma.$transaction(async (tx) => {
+    await lockUserMfaInTx(tx, user.id);
+    const now = await getMfaStateInTx(tx, user.id);
+    if (!now.enabled) return null;
+    return replaceRecoveryCodesInTx(tx, user.id);
+  });
+  if (!codes) {
+    return NextResponse.json({ error: t("apiAuth.mfa.enableFirst") }, { status: 400 });
+  }
   void notifyMfaSecurityEvent(user.id, "recovery-regenerated");
 
   void logAudit({

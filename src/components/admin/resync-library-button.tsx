@@ -1,109 +1,81 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { useRouter, usePathname, useSearchParams } from "next/navigation";
+import { useId } from "react";
 import { Button } from "@/components/ui/button";
 import { RefreshCw, XCircle } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { runLibrarySyncs, type LibrarySyncServer } from "@/lib/client/library-sync";
+import { useFocusReturn } from "@/hooks/use-focus-return";
+import { librarySyncText } from "./library-sync-text";
+import { SyncResultText, useSyncButtonState } from "./sync-button-state";
 
 export function ResyncLibraryButton({
-  plexConfigured,
-  jellyfinConfigured,
+  servers,
 }: {
-  plexConfigured: boolean;
-  jellyfinConfigured: boolean;
+  /** Every CONFIGURED Plex/Jellyfin server, default and named (guardrails 35, 36). */
+  servers: LibrarySyncServer[];
 }) {
   const t = useT();
   const locale = useLocale();
-  const router = useRouter();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
-  const [status, setStatus] = useState<"idle" | "confirm" | "loading" | "done" | "error">("idle");
-  const [result, setResult] = useState<string | null>(null);
-  // The end-of-run reset has to be cancellable: a prior run's timer landing mid-run
-  // flips "loading" back to "idle", so the spinner and counts vanish and the button
-  // re-enables while the full delete-and-replace is still POSTing.
-  const resetTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  useEffect(() => () => clearTimeout(resetTimer.current), []);
+  // The resyncs are polled background jobs; leaving the page stops the polls
+  // (isAlive) and the run's end applies nothing (sync-button-state.tsx).
+  const run = useSyncButtonState();
+  const { status, result } = run;
+  const focus = useFocusReturn();
+  const promptId = useId();
 
-  function scheduleReset() {
-    clearTimeout(resetTimer.current);
-    resetTimer.current = setTimeout(() => { setStatus("idle"); setResult(null); }, 10_000);
+  // The trigger is disabled while the run goes; at its end focus returns to it
+  // if the confirm's unmounting left it on <body>.
+  function finish(next: "done" | "error", text: string, refresh: boolean) {
+    focus.returnToIfLost("trigger");
+    run.finish(next, text, refresh);
   }
 
   async function handleResync() {
-    clearTimeout(resetTimer.current);
-    setStatus("loading");
-    setResult(null);
-    try {
-      // Call only the servers that are configured. Calling an absent one just
-      // returns "not configured", which used to show up as a red failure for a
-      // server the admin doesn't even run (guardrail 36).
-      //
-      // The booleans come from the page rather than from probing, so an absent
-      // server costs no request at all. They describe the DEFAULT instance,
-      // which is exactly right here: this button sends no `instance` slug, so
-      // the default is all it ever syncs (guardrail 35).
-      const targets = [
-        ...(plexConfigured ? [{ name: "Plex", path: "/api/sync/plex" }] : []),
-        ...(jellyfinConfigured ? [{ name: "Jellyfin", path: "/api/sync/jellyfin" }] : []),
-      ];
-
-      if (targets.length === 0) {
-        // Not an error — nothing is misconfigured, there is simply nothing to
-        // re-scan. Neutral styling says that; red would not.
-        setStatus("done");
-        setResult(t("adminManage.library.btn.noServers"));
-        scheduleReset();
-        return;
-      }
-
-      const outcomes = await Promise.all(
-        targets.map(async ({ name, path }) => {
-          try {
-            const res = await fetch(withBasePath(path), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ full: true }),
-            });
-            const data = (await res.json().catch(() => null)) as
-              | { scanned?: { movies: number; tv: number }; error?: string }
-              | null;
-            if (!res.ok || data?.error) {
-              return { name, ok: false, text: `${name} ${data?.error ?? t("adminManage.library.btn.failedStatus", { status: res.status })}` };
-            }
-            const count = (data?.scanned?.movies ?? 0) + (data?.scanned?.tv ?? 0);
-            return { name, ok: true, text: `${name} ${t("adminManage.library.btn.items", { count, formatted: count.toLocaleString(locale) })}` };
-          } catch {
-            return { name, ok: false, text: `${name} ${t("adminManage.library.btn.networkError")}` };
-          }
-        }),
-      );
-
-      const succeeded = outcomes.filter((o) => o.ok);
-      // Red whenever a CONFIGURED server failed — that is a real fault and the
-      // whole point of the distinction. But still refresh if any server did
-      // sync: those rows are what the admin clicked for, and withholding the
-      // refresh left the page showing pre-sync counts.
-      setStatus(succeeded.length === outcomes.length ? "done" : "error");
-      setResult(outcomes.map((o) => o.text).join(" · "));
-      if (succeeded.length > 0) {
-        const search = searchParams.toString();
-        router.push(pathname + (search ? `?${search}` : ""));
-      }
-    } catch {
-      setStatus("error");
-      setResult(t("adminManage.library.btn.syncFailed"));
+    run.begin();
+    // Only the servers that are configured: the page lists them, so an absent
+    // one costs no request and can't read as a red failure (guardrail 36).
+    // Every configured instance, default and named (guardrail 35) — each
+    // request names its own server, so each full replace stays scoped to it
+    // (guardrail 13).
+    if (servers.length === 0) {
+      // Not an error — nothing is misconfigured, there is simply nothing to
+      // re-scan. Neutral styling says that; red would not.
+      finish("done", t("adminManage.library.btn.noServers"), false);
+      return;
     }
-    scheduleReset();
+    try {
+      const outcomes = await runLibrarySyncs(servers, {
+        url: (service) => withBasePath(`/api/sync/${service}`),
+        isAlive: run.isAlive,
+      });
+      if (!outcomes) return;
+      // Red only when a CONFIGURED server failed — that is a real fault. A
+      // server with no answer yet may still be syncing and is not one. Still
+      // refresh if any server did sync: those rows are what the admin clicked
+      // for, and withholding the refresh left the page showing pre-sync counts.
+      finish(
+        outcomes.some((o) => o.outcome.kind === "failed") ? "error" : "done",
+        outcomes.map((o) => librarySyncText(o.server, o.outcome, t, locale)).join(" · "),
+        outcomes.some((o) => o.outcome.kind === "synced"),
+      );
+    } catch {
+      finish("error", t("adminManage.library.btn.syncFailed"), false);
+    }
   }
 
   if (status === "confirm") {
+    // Focus moves into the prompt (onto Cancel, the safe answer) so a keyboard
+    // user keeps their place and hears the question; Cancel hands it back.
     return (
-      <div className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800/60 px-3 py-2 w-fit">
+      <div
+        role="group"
+        aria-labelledby={promptId}
+        className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800/60 px-3 py-2 w-fit"
+      >
         <XCircle className="w-4 h-4 text-amber-400 shrink-0" />
-        <p className="text-sm text-zinc-200">{t("adminManage.library.btn.rescanConfirm")}</p>
+        <p id={promptId} className="text-sm text-zinc-200">{t("adminManage.library.btn.rescanConfirm")}</p>
         <Button
           size="sm"
           onClick={handleResync}
@@ -114,7 +86,11 @@ export function ResyncLibraryButton({
         <Button
           size="sm"
           variant="outline"
-          onClick={() => setStatus("idle")}
+          autoFocus
+          onClick={() => {
+            focus.returnTo("trigger");
+            run.cancel();
+          }}
           className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-7 px-3 text-xs"
         >
           {t("adminManage.common.cancel")}
@@ -126,24 +102,17 @@ export function ResyncLibraryButton({
   return (
     <div className="flex items-center gap-3">
       <Button
+        ref={focus.refFor("trigger")}
         variant="outline"
         size="sm"
-        onClick={() => { clearTimeout(resetTimer.current); setStatus("confirm"); }}
+        onClick={run.confirm}
         disabled={status === "loading"}
         className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
       >
         <RefreshCw className={`w-4 h-4 ${status === "loading" ? "animate-spin" : ""}`} />
         {status === "loading" ? t("adminManage.library.btn.syncing") : t("adminManage.library.btn.resyncLibraries")}
       </Button>
-      {result && (
-        <span
-          role={status === "error" ? "alert" : "status"}
-          aria-live={status === "error" ? "assertive" : "polite"}
-          className={`text-xs ${status === "error" ? "text-red-400" : "text-zinc-400"}`}
-        >
-          {result}
-        </span>
-      )}
+      <SyncResultText status={status} result={result} />
     </div>
   );
 }

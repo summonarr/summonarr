@@ -67,6 +67,13 @@ let plexUserOk = true;
 let arrOk = true;
 // What /api/v3/system/status reports; null answers 500 (version unknown).
 let arrVersion: string | null = "4.0.20.3014";
+// What /api/v3/rootfolder, /qualityprofile and /languageprofile answer.
+const ARR_ROOT_FOLDERS = [{ path: "/movies" }];
+const ARR_PROFILES = [{ id: 1, name: "HD" }];
+const ARR_LANGUAGE_PROFILES = [{ id: 1, name: "English" }];
+let arrRootFolders: unknown = ARR_ROOT_FOLDERS;
+let arrProfiles: unknown = ARR_PROFILES;
+let arrLanguageProfiles: unknown = ARR_LANGUAGE_PROFILES;
 let plexSectionsOk = true;
 let jellyfinFoldersOk = true;
 let providerOk = true;
@@ -101,16 +108,16 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   }
   // Radarr/Sonarr options.
   if (url.pathname.includes("/api/v3/rootfolder")) {
-    return arrOk ? json([{ path: "/movies" }]) : json({ error: "ARR DOWN" }, 500);
+    return arrOk ? json(arrRootFolders) : json({ error: "ARR DOWN" }, 500);
   }
   if (url.pathname.includes("/api/v3/qualityprofile")) {
-    return arrOk ? json([{ id: 1, name: "HD" }]) : json({ error: "ARR DOWN" }, 500);
+    return arrOk ? json(arrProfiles) : json({ error: "ARR DOWN" }, 500);
   }
   if (url.pathname.includes("/api/v3/system/status")) {
     return arrVersion === null ? json({ error: "STATUS DOWN" }, 500) : json({ appName: "Sonarr", version: arrVersion });
   }
   if (url.pathname.includes("/api/v3/languageprofile")) {
-    return json([{ id: 1, name: "English" }]);
+    return json(arrLanguageProfiles);
   }
   // Ratings providers (omdb / mdblist / trakt / ipinfo).
   return providerOk
@@ -133,6 +140,7 @@ const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
 const { arrSettingKey } = await import("../src/lib/arr-instances.ts");
+const { MAX_CHOICES, MAX_ROOT_FOLDER_CHOICES } = await import("../src/lib/arr-title.ts");
 const { isSensitiveSettingKey } = await import("../src/lib/settings-sensitive-keys.ts");
 
 // ── op log ───────────────────────────────────────────────────────────────────
@@ -288,6 +296,9 @@ beforeEach(() => {
   plexUserOk = true;
   arrOk = true;
   arrVersion = "4.0.20.3014";
+  arrRootFolders = ARR_ROOT_FOLDERS;
+  arrProfiles = ARR_PROFILES;
+  arrLanguageProfiles = ARR_LANGUAGE_PROFILES;
   plexSectionsOk = true;
   jellyfinFoldersOk = true;
   providerOk = true;
@@ -410,6 +421,38 @@ test("DELETE removes both keys and flushes PlexTokenCache", async () => {
   assert.equal(settings.get("plexAdminToken"), undefined);
   assert.equal(settings.get("plexAdminEmail"), undefined);
   assert.equal(opsOf("plexTokenCache.deleteMany").length, 1);
+});
+
+test("DELETE removes the keys and flushes the cache in ONE transaction, then expires the member allowlist read with the old token", async () => {
+  settings.set("plexAdminToken", "tok");
+  settings.set("plexAdminEmail", "owner@example.com");
+  let inTx = false;
+  const seen: Array<[string, boolean]> = [];
+  const realSettingDelete = (prisma as unknown as { setting: { deleteMany: (a: unknown) => unknown } }).setting.deleteMany;
+  const realCacheDelete = (prisma as unknown as { plexTokenCache: { deleteMany: (a: unknown) => unknown } }).plexTokenCache.deleteMany;
+  (prisma as unknown as { setting: { deleteMany: (a: unknown) => unknown } }).setting.deleteMany = (a) => { seen.push(["setting", inTx]); return realSettingDelete(a); };
+  (prisma as unknown as { plexTokenCache: { deleteMany: (a: unknown) => unknown } }).plexTokenCache.deleteMany = (a) => { seen.push(["cache", inTx]); return realCacheDelete(a); };
+  shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
+    if (Array.isArray(arg)) return Promise.all(arg);
+    inTx = true;
+    try { return await (arg as (tx: unknown) => Promise<unknown>)(prisma); } finally { inTx = false; }
+  });
+  try {
+    const res = await deletePlex(await mintSession());
+    assert.equal(res.status, 200);
+  } finally {
+    (prisma as unknown as { setting: { deleteMany: (a: unknown) => unknown } }).setting.deleteMany = realSettingDelete;
+    (prisma as unknown as { plexTokenCache: { deleteMany: (a: unknown) => unknown } }).plexTokenCache.deleteMany = realCacheDelete;
+    shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) =>
+      Array.isArray(arg) ? Promise.all(arg) : (arg as (tx: unknown) => Promise<unknown>)(prisma));
+  }
+  assert.deepEqual(seen, [["setting", true], ["cache", true]]);
+  // The allowlist expiry is in-memory state this harness can't prime; the
+  // route source names it, so a dropped call fails here.
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../src/app/api/settings/plex/route.ts", import.meta.url), "utf8");
+  const del = src.slice(src.indexOf("export const DELETE"));
+  assert.match(del, /expirePlexMembershipCache\(DEFAULT_MEDIA_INSTANCE\)/);
 });
 
 test("DELETE removes ONLY the two Plex admin keys", async () => {
@@ -551,6 +594,17 @@ test("webhook-urls reads an explicit key allowlist and reveals nothing else", as
   for (const k of asked) assert.match(k, /WebhookSecret$|^webhookSecret$/);
 });
 
+test("webhook-urls is rate limited per admin, answering 429 with Retry-After", async () => {
+  const t = await mintSession();
+  for (let i = 0; i < 30; i++) assert.equal((await getWebhookUrls(t)).status, 200, `read ${i + 1} is allowed`);
+  const refused = await getWebhookUrls(t);
+  assert.equal(refused.status, 429);
+  assert.equal(refused.headers.get("Retry-After"), "60");
+  assert.equal(opsOf("setting.findMany").length, 30, "a refused read touches no secret");
+  const other = await mintSession();
+  assert.equal((await getWebhookUrls(other)).status, 200, "another admin has their own budget");
+});
+
 // ── 5: arr-options ───────────────────────────────────────────────────────────
 
 for (const service of [undefined, "plex", "RADARR", ""]) {
@@ -597,6 +651,40 @@ test("arr-options returns root folders and quality profiles for a configured ins
   const body = await res.json();
   assert.deepEqual(body.rootFolders, [{ path: "/movies" }]);
   assert.deepEqual(body.qualityProfiles, [{ id: 1, name: "HD" }]);
+});
+
+// A root folder carries every unmapped folder under it, and a profile its whole
+// quality and custom-format list: the form reads paths, ids and names only.
+test("arr-options projects the arr's lists: a path per root folder, id and name per profile", async () => {
+  settings.set(arrSettingKey("radarr", "", "Url"), "http://10.0.0.2:7878");
+  settings.set(arrSettingKey("radarr", "", "ApiKey"), "radarr-key");
+  arrRootFolders = [
+    { id: 3, path: "/movies", accessible: true, freeSpace: 9e12, unmappedFolders: [{ name: "Old", path: "/movies/Old" }] },
+    { id: 4, path: "/movies", freeSpace: 1 },
+    { id: 5, path: "" },
+    null,
+  ];
+  arrProfiles = [
+    { id: 1, name: "HD", upgradeAllowed: true, cutoff: 7, items: [{ quality: { id: 7, name: "Bluray-1080p" }, allowed: true }], formatItems: [{ format: 2, name: "x265", score: 10 }] },
+    { id: 1, name: "duplicate" },
+    { id: "2", name: "string id" },
+    { id: 3 },
+  ];
+  const t = await mintSession();
+  const body = await (await getArrOptions(t, "?service=radarr")).json();
+  assert.deepEqual(body.rootFolders, [{ path: "/movies" }]);
+  assert.deepEqual(body.qualityProfiles, [{ id: 1, name: "HD" }]);
+});
+
+test("arr-options bounds each projected list (guardrail 5i)", async () => {
+  settings.set(arrSettingKey("radarr", "", "Url"), "http://10.0.0.2:7878");
+  settings.set(arrSettingKey("radarr", "", "ApiKey"), "radarr-key");
+  arrRootFolders = Array.from({ length: MAX_ROOT_FOLDER_CHOICES + 25 }, (_, i) => ({ path: `/r${i}` }));
+  arrProfiles = Array.from({ length: MAX_CHOICES + 25 }, (_, i) => ({ id: i + 1, name: `p${i}` }));
+  const t = await mintSession();
+  const body = await (await getArrOptions(t, "?service=radarr")).json();
+  assert.equal(body.rootFolders.length, MAX_ROOT_FOLDER_CHOICES);
+  assert.equal(body.qualityProfiles.length, MAX_CHOICES);
 });
 
 test("arr-options reads the NAMED instance's keys, not the default's", async () => {
@@ -669,6 +757,18 @@ test("arr-options offers a Sonarr v3's language profiles", async () => {
   const t = await mintSession();
   const body = await (await getArrOptions(t, "?service=sonarr")).json();
   assert.ok(asked("/api/v3/languageprofile"));
+  assert.deepEqual(body.languageProfiles, [{ id: 1, name: "English" }]);
+});
+
+test("arr-options projects a Sonarr v3's language profiles to id and name, dropping v4's placeholder", async () => {
+  configureSonarr();
+  arrVersion = "3.0.10.1567";
+  arrLanguageProfiles = [
+    { id: 1, name: "English", upgradeAllowed: true, cutoff: { id: 1, name: "English" }, languages: [{ language: { id: 1, name: "English" }, allowed: true }] },
+    { id: 2, name: "Deprecated" },
+  ];
+  const t = await mintSession();
+  const body = await (await getArrOptions(t, "?service=sonarr")).json();
   assert.deepEqual(body.languageProfiles, [{ id: 1, name: "English" }]);
 });
 

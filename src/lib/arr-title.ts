@@ -19,12 +19,14 @@ import {
   namesOf,
   nonNegInt,
   posInt,
+  PROJECTION_SCAN_FACTOR,
   qualityOf,
   text,
   textOrNull,
   type QualityTag,
 } from "./arr-parse";
 import type { ArrService } from "./arr-instances";
+import { comparablePath, isUnderComparable } from "./arr-path";
 
 export type { ArrService };
 
@@ -35,7 +37,22 @@ export type SeriesType = (typeof SERIES_TYPES)[number];
 export const MONITOR_NEW_ITEMS = ["all", "none"] as const;
 export type MonitorNewItems = (typeof MONITOR_NEW_ITEMS)[number];
 
-const isOneOf = <T extends string>(list: readonly T[], v: unknown): v is T => typeof v === "string" && (list as readonly string[]).includes(v);
+export const isOneOf = <T extends string>(list: readonly T[], v: unknown): v is T => typeof v === "string" && (list as readonly string[]).includes(v);
+
+/**
+ * A request body's tag ids: deduped, or null when it is not an array of at
+ * most `max` positive integers. The edit and the add share it.
+ */
+export function parseTagIds(v: unknown, max: number): number[] | null {
+  if (!Array.isArray(v) || v.length > max) return null;
+  const ids: number[] = [];
+  for (const t of v) {
+    const id = posInt(t);
+    if (id === null) return null;
+    ids.push(id);
+  }
+  return [...new Set(ids)];
+}
 
 // ── the title ────────────────────────────────────────────────────────────────
 
@@ -98,15 +115,24 @@ export interface ArrTitle {
 type Raw = Record<string, unknown>;
 const obj = (v: unknown): Raw | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as Raw) : null);
 
-/** The root folder a path sits under, from the instance's own list — for an arr that omits rootFolderPath. */
+/**
+ * The root folder a path sits under, from the instance's own list — for an arr
+ * that omits rootFolderPath. Paths compare as the storage tab's do (arr-path):
+ * either separator, a Windows drive case-insensitively. A root of "/" holds
+ * every path and so names none of them.
+ */
 export function rootFolderFor(path: string | null, rootFolders: readonly string[]): string | null {
   if (!path) return null;
+  const p = comparablePath(path);
   let best: string | null = null;
+  let bestLength = -1;
   for (const root of rootFolders) {
-    const prefix = root.replace(/[\\/]+$/, "");
-    if (prefix === "") continue;
-    const under = path === prefix || path.startsWith(`${prefix}/`) || path.startsWith(`${prefix}\\`);
-    if (under && (best === null || prefix.length > best.replace(/[\\/]+$/, "").length)) best = root;
+    const prefix = comparablePath(root);
+    if (prefix === "" || prefix === "/") continue;
+    if (isUnderComparable(p, prefix) && prefix.length > bestLength) {
+      best = root;
+      bestLength = prefix.length;
+    }
   }
   return best;
 }
@@ -145,17 +171,6 @@ export function projectTitle(service: ArrService, instance: string, raw: unknown
   const path = textOrNull(r.path, 1_000);
   const stats = obj(r.statistics);
   const seasons = service === "sonarr" ? seasonsOf(r.seasons) : [];
-  const regular = seasons.filter((s) => s.seasonNumber > 0);
-  const sum = (pick: (s: TitleSeason) => number) => regular.reduce((n, s) => n + pick(s), 0);
-  const episodeFileCount = service === "sonarr" ? (regular.length > 0 ? sum((s) => s.episodeFileCount) : nonNegInt(stats?.episodeFileCount) ?? 0) : 0;
-  const latest = (pick: (s: TitleSeason) => string | null, cmp: (a: string, b: string) => boolean) => {
-    let best: string | null = null;
-    for (const s of regular) {
-      const v = pick(s);
-      if (v && (best === null || cmp(v, best))) best = v;
-    }
-    return best;
-  };
   return {
     service,
     instance,
@@ -173,22 +188,72 @@ export function projectTitle(service: ArrService, instance: string, raw: unknown
     tags: idsOf(r.tags, 200),
     sizeOnDisk: bytes(r.sizeOnDisk ?? stats?.sizeOnDisk),
     added: isoOrNull(r.added),
-    hasFile: service === "radarr" ? bool(r.hasFile) : episodeFileCount > 0,
-    minimumAvailability: service === "radarr" ? textOrNull(r.minimumAvailability, 40) : null,
-    inCinemas: service === "radarr" ? isoOrNull(r.inCinemas) : null,
-    physicalRelease: service === "radarr" ? isoOrNull(r.physicalRelease) : null,
-    digitalRelease: service === "radarr" ? isoOrNull(r.digitalRelease) : null,
-    isAvailable: service === "radarr" ? (typeof r.isAvailable === "boolean" ? r.isAvailable : null) : null,
-    studio: service === "radarr" ? textOrNull(r.studio, 200) : null,
-    seriesType: service === "sonarr" ? textOrNull(r.seriesType, 40) : null,
-    seasonFolder: service === "sonarr" ? (typeof r.seasonFolder === "boolean" ? r.seasonFolder : null) : null,
-    monitorNewItems: service === "sonarr" ? textOrNull(r.monitorNewItems, 40) : null,
-    network: service === "sonarr" ? textOrNull(r.network, 200) : null,
-    episodeCount: service === "sonarr" ? (regular.length > 0 ? sum((s) => s.episodeCount) : nonNegInt(stats?.episodeCount) ?? 0) : 0,
-    episodeFileCount,
-    nextAiring: service === "sonarr" ? latest((s) => s.nextAiring, (a, b) => a < b) ?? isoOrNull(r.nextAiring) : null,
-    previousAiring: service === "sonarr" ? latest((s) => s.previousAiring, (a, b) => a > b) ?? isoOrNull(r.previousAiring) : null,
+    ...(service === "radarr" ? movieFields(r) : seriesFields(r, stats, seasons)),
     seasons,
+  };
+}
+
+type ServiceFields = Omit<ArrTitle,
+  "service" | "instance" | "arrId" | "title" | "year" | "tmdbId" | "tvdbId" | "imdbId" | "status" | "monitored"
+  | "qualityProfileId" | "rootFolderPath" | "path" | "tags" | "sizeOnDisk" | "added" | "seasons">;
+
+const boolOrNull = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
+
+// A movie's own fields; the series-only ones are null (and the counts 0).
+function movieFields(r: Raw): ServiceFields {
+  return {
+    hasFile: bool(r.hasFile),
+    minimumAvailability: textOrNull(r.minimumAvailability, 40),
+    inCinemas: isoOrNull(r.inCinemas),
+    physicalRelease: isoOrNull(r.physicalRelease),
+    digitalRelease: isoOrNull(r.digitalRelease),
+    isAvailable: boolOrNull(r.isAvailable),
+    studio: textOrNull(r.studio, 200),
+    seriesType: null,
+    seasonFolder: null,
+    monitorNewItems: null,
+    network: null,
+    episodeCount: 0,
+    episodeFileCount: 0,
+    nextAiring: null,
+    previousAiring: null,
+  };
+}
+
+// The earliest (or latest) of the regular seasons' dates, by ISO string order.
+function seasonDate(regular: readonly TitleSeason[], pick: (s: TitleSeason) => string | null, wins: (a: string, b: string) => boolean): string | null {
+  let best: string | null = null;
+  for (const s of regular) {
+    const v = pick(s);
+    if (v && (best === null || wins(v, best))) best = v;
+  }
+  return best;
+}
+
+// A series' own fields; the movie-only ones are null. The counts are the
+// regular seasons' (specials excluded, 14a), else the series statistics.
+function seriesFields(r: Raw, stats: Raw | null, seasons: readonly TitleSeason[]): ServiceFields {
+  const regular = seasons.filter((s) => s.seasonNumber > 0);
+  const sum = (pick: (s: TitleSeason) => number) => regular.reduce((n, s) => n + pick(s), 0);
+  // "Has a file" is ANY episode file, specials included: only the counts are
+  // regular-season (14a), and availability reads sonarrSeriesCompletion, not this.
+  const anyEpisodeFile = seasons.length > 0 ? seasons.some((s) => s.episodeFileCount > 0) : (nonNegInt(stats?.episodeFileCount) ?? 0) > 0;
+  return {
+    hasFile: anyEpisodeFile,
+    minimumAvailability: null,
+    inCinemas: null,
+    physicalRelease: null,
+    digitalRelease: null,
+    isAvailable: null,
+    studio: null,
+    seriesType: textOrNull(r.seriesType, 40),
+    seasonFolder: boolOrNull(r.seasonFolder),
+    monitorNewItems: textOrNull(r.monitorNewItems, 40),
+    network: textOrNull(r.network, 200),
+    episodeCount: regular.length > 0 ? sum((s) => s.episodeCount) : nonNegInt(stats?.episodeCount) ?? 0,
+    episodeFileCount: regular.length > 0 ? sum((s) => s.episodeFileCount) : nonNegInt(stats?.episodeFileCount) ?? 0,
+    nextAiring: seasonDate(regular, (s) => s.nextAiring, (a, b) => a < b) ?? isoOrNull(r.nextAiring),
+    previousAiring: seasonDate(regular, (s) => s.previousAiring, (a, b) => a > b) ?? isoOrNull(r.previousAiring),
   };
 }
 
@@ -204,7 +269,8 @@ export interface RootFolderChoice { path: string; freeSpace: number | null; acce
 // at most PROJECTION_SCAN_FACTOR times that, so junk or duplicates are bounded too.
 export const MAX_CHOICES = 2_000;
 export const MAX_ROOT_FOLDER_CHOICES = 500;
-export const PROJECTION_SCAN_FACTOR = 10;
+// arr-parse's, shared with every other arr projection (5i).
+export { PROJECTION_SCAN_FACTOR };
 
 export function projectChoices(raw: unknown, nameField: "name" | "label" = "name"): Choice[] {
   if (!Array.isArray(raw)) return [];
@@ -288,8 +354,9 @@ export function parseTitleEdit(service: ArrService, body: Record<string, unknown
     edit.moveFiles = body.moveFiles;
   }
   if (has("tags")) {
-    if (!Array.isArray(body.tags) || body.tags.length > MAX_TAGS || !body.tags.every((t) => posInt(t) !== null)) return null;
-    edit.tags = [...new Set(body.tags as number[])];
+    const tags = parseTagIds(body.tags, MAX_TAGS);
+    if (tags === null) return null;
+    edit.tags = tags;
   }
   const radarrOnly = ["minimumAvailability"];
   const sonarrOnly = ["seriesType", "seasonFolder", "monitorNewItems", "seasons"];
@@ -311,23 +378,31 @@ export function parseTitleEdit(service: ArrService, body: Record<string, unknown
     edit.monitorNewItems = body.monitorNewItems;
   }
   if (has("seasons")) {
-    if (!Array.isArray(body.seasons) || body.seasons.length === 0 || body.seasons.length > MAX_SEASONS) return null;
-    const seen = new Set<number>();
-    const seasons: SeasonMonitoring[] = [];
-    for (const s of body.seasons) {
-      const r = obj(s);
-      const n = nonNegInt(r?.seasonNumber);
-      if (!r || n === null || typeof r.monitored !== "boolean" || seen.has(n)) return null;
-      seen.add(n);
-      seasons.push({ seasonNumber: n, monitored: r.monitored });
-    }
+    const seasons = parseSeasonMonitoring(body.seasons);
+    if (seasons === null) return null;
     edit.seasons = seasons;
     // Season monitoring is its own write (a read-modify-write of the series)
     // after the editor's; combined, a failure between the two would leave an
-    // edit half applied and unaudited. The manager never sends them together.
-    if (Object.keys(edit).length > 1) return null;
+    // edit half applied and unaudited. The manager never sends them together,
+    // and editTitle relies on it (a season edit never has an editor body).
+    if ((Object.keys(edit) as Array<keyof TitleEdit>).some((k) => k !== "seasons")) return null;
   }
   return edit;
+}
+
+// The seasons to (un)monitor: a non-empty list of distinct season numbers.
+function parseSeasonMonitoring(v: unknown): SeasonMonitoring[] | null {
+  if (!Array.isArray(v) || v.length === 0 || v.length > MAX_SEASONS) return null;
+  const seen = new Set<number>();
+  const seasons: SeasonMonitoring[] = [];
+  for (const s of v) {
+    const r = obj(s);
+    const n = nonNegInt(r?.seasonNumber);
+    if (!r || n === null || typeof r.monitored !== "boolean" || seen.has(n)) return null;
+    seen.add(n);
+    seasons.push({ seasonNumber: n, monitored: r.monitored });
+  }
+  return seasons;
 }
 
 /** The fields an edit sets, for the audit row and "nothing to change". */
@@ -362,6 +437,16 @@ export function checkTitleEdit(edit: TitleEdit, catalog: TitleEditCatalog): void
 }
 
 /**
+ * Whether an edit moves the title to another root folder. "/tv" and "/tv/"
+ * name one folder, as do a Windows "C:\TV" and "c:/tv" (arr-path): a trailing
+ * separator must not queue a pointless move — nor be audited as one.
+ * editorBody and the edit's audited fields both ask this.
+ */
+export function rootFolderMoving(edit: Pick<TitleEdit, "rootFolderPath">, current: Pick<ArrTitle, "rootFolderPath">): boolean {
+  return edit.rootFolderPath !== undefined && comparablePath(edit.rootFolderPath) !== comparablePath(current.rootFolderPath ?? "");
+}
+
+/**
  * The body for Radarr's PUT /api/v3/movie/editor or Sonarr's PUT
  * /api/v3/series/editor for one title, or null when the edit changes nothing
  * the editor handles (season monitoring is a separate write). The editor sets
@@ -386,9 +471,7 @@ export function editorBody(service: ArrService, arrId: number, edit: TitleEdit, 
     set("seasonFolder", edit.seasonFolder);
     set("monitorNewItems", edit.monitorNewItems);
   }
-  // "/tv" and "/tv/" name one folder: a trailing separator must not queue a pointless move.
-  const bare = (p: string | null | undefined) => (p ?? "").replace(/[\\/]+$/, "");
-  const moving = edit.rootFolderPath !== undefined && edit.rootFolderPath !== current.rootFolderPath && bare(edit.rootFolderPath) !== bare(current.rootFolderPath);
+  const moving = rootFolderMoving(edit, current);
   if (moving) set("rootFolderPath", edit.rootFolderPath);
   body.moveFiles = moving && edit.moveFiles === true;
   if (edit.tags !== undefined) {

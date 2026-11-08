@@ -5,7 +5,7 @@
 // command, test or switch an indexer / download client. Every call goes
 // through arrFetch (guardrail 5). Nothing is cached; nothing in Summonarr is
 // written except the audit rows the routes add.
-import { ArrResponseError, arrErrorKind, arrErrorMessage, arrFetch, arrFetchNoContent } from "./arr";
+import { ArrResponseError, arrErrorKind, arrFetch, arrFetchNoContent, type ArrCfg } from "./arr";
 import type { ArrErrorKind } from "./arr-error-kind";
 import { configuredArrCfg, enabledArrInstances, postArrCommand, type ArrInstanceRef, type ArrService } from "./arr-admin";
 import {
@@ -20,6 +20,7 @@ import {
   projectTasks,
   projectTestAll,
   providerChangeApplied,
+  providerChangedBesides,
   testResultOf,
   validationFailuresFromBody,
   withProviderEnabled,
@@ -36,16 +37,17 @@ import {
   type ProviderTestResult,
   unsupportedIndexerUse,
 } from "./arr-system";
-import { settleLimit } from "./concurrency";
-import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
+import { settleArrInstances } from "./arr-instance-fanout";
 import { processSingleton } from "./process-singleton";
 
 const CONCURRENCY = 4;
 
-// The Tasks tab re-reads every 15 s. Its two reads are small and a healthy arr
+// The Tasks tab re-reads every 15 s, and every tab's read is re-run by the
+// snapshot refresh (guardrail 5h). The reads are small and a healthy arr
 // answers at once, so a dark instance is given up on well inside a poll
-// interval instead of holding the report for the 30 s default.
+// interval instead of holding the report — and a refresh slot — for the 30 s default.
 const POLLED_READ_TIMEOUT_MS = 10_000;
+const POLLED_READ = { quietErrors: true, timeoutMs: POLLED_READ_TIMEOUT_MS } as const;
 
 // Testing a provider waits on it: Test All runs every enabled one in turn, and
 // a dead indexer can hang for ~100 s before the arr gives up on it. The same
@@ -72,10 +74,15 @@ const PROVIDER_TEST_ALL_JOB_TIMEOUT_MS = 270_000;
 // log has it).
 export const PROVIDER_SETTLE_READS = 6;
 export const PROVIDER_SETTLE_INTERVAL_MS = 10_000;
-let settlePause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-/** Test seam: the pause between settle read-backs. */
-export function _setProviderSettlePauseForTests(fn: ((ms: number) => Promise<void>) | null): void {
-  settlePause = fn ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+type SettlePause = (ms: number) => Promise<void>;
+const sleep: SettlePause = (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+// The pause between settle read-backs: a caller passes its own (`opts.pause`);
+// the route-level tests, which can't, swap the default through the seam
+// below. Process-wide like every other override here (27a).
+const settleDefaults = processSingleton("arr-system-data:settle-pause", () => ({ pause: sleep }));
+/** Test seam: the default pause between settle read-backs; null restores the real wait. */
+export function _setProviderSettlePauseForTests(fn: SettlePause | null): void {
+  settleDefaults.pause = fn ?? sleep;
 }
 
 export interface InstanceReport<T> {
@@ -89,20 +96,16 @@ export interface InstanceReport<T> {
 // named once per unchanged condition (guardrail 7b — the tabs poll).
 async function perInstance<T>(scope: string, read: (inst: ArrInstanceRef) => Promise<T>): Promise<InstanceReport<T>> {
   const instances = await enabledArrInstances();
-  const settled = await settleLimit(instances, CONCURRENCY, read);
-  const report: InstanceReport<T> = { instances, errors: [], results: [] };
-  settled.forEach((s, i) => {
-    const inst = instances[i];
-    const logKey = `arr-system:${scope}:${inst.service}:${inst.slug}`;
-    if (s.status === "fulfilled") {
-      report.results.push({ service: inst.service, instance: inst.slug, ...s.value });
-      forgetWarnOnChange(logKey);
-      return;
-    }
-    const error = arrErrorMessage(s.reason);
-    report.errors.push({ service: inst.service, instance: inst.slug, error, kind: arrErrorKind(s.reason) });
-    warnOnChange(logKey, error, `[arr-system] ${inst.service} instance "${inst.slug}" ${scope} read failed: ${error}`);
+  const outcomes = await settleArrInstances(instances, CONCURRENCY, read, {
+    key: (inst) => `arr-system:${scope}:${inst.service}:${inst.slug}`,
+    message: (inst, error) => `[arr-system] ${inst.service} instance "${inst.slug}" ${scope} read failed: ${error}`,
   });
+  const report: InstanceReport<T> = { instances, errors: [], results: [] };
+  for (const o of outcomes) {
+    const { service, slug } = o.inst;
+    if (o.ok) report.results.push({ service, instance: slug, ...o.value });
+    else report.errors.push({ service, instance: slug, error: o.error, kind: o.kind });
+  }
   return report;
 }
 
@@ -112,8 +115,8 @@ export function loadTasks(): Promise<InstanceReport<{ tasks: ArrTask[]; commands
   return perInstance("tasks", async (inst) => {
     const cfg = await configuredArrCfg(inst.service, inst.slug);
     const [tasks, commands] = await Promise.all([
-      arrFetch<unknown>(cfg, "/api/v3/system/task", { quietErrors: true, timeoutMs: POLLED_READ_TIMEOUT_MS }),
-      arrFetch<unknown>(cfg, "/api/v3/command", { quietErrors: true, timeoutMs: POLLED_READ_TIMEOUT_MS }),
+      arrFetch<unknown>(cfg, "/api/v3/system/task", POLLED_READ),
+      arrFetch<unknown>(cfg, "/api/v3/command", POLLED_READ),
     ]);
     return { tasks: projectTasks(tasks), commands: projectCommands(commands) };
   });
@@ -162,10 +165,10 @@ export function loadProviders(): Promise<InstanceReport<{ indexers: ArrIndexer[]
   return perInstance("providers", async (inst) => {
     const cfg = await configuredArrCfg(inst.service, inst.slug);
     const [indexers, clients, tags] = await Promise.all([
-      arrFetch<unknown>(cfg, "/api/v3/indexer", { quietErrors: true }),
-      arrFetch<unknown>(cfg, "/api/v3/downloadclient", { quietErrors: true }),
+      arrFetch<unknown>(cfg, "/api/v3/indexer", POLLED_READ),
+      arrFetch<unknown>(cfg, "/api/v3/downloadclient", POLLED_READ),
       // Only names the tags; without it the page shows their ids, never fails.
-      arrFetch<unknown>(cfg, "/api/v3/tag", { quietErrors: true }).catch(() => []),
+      arrFetch<unknown>(cfg, "/api/v3/tag", POLLED_READ).catch(() => []),
     ]);
     return { indexers: projectIndexers(indexers), downloadClients: projectDownloadClients(clients), tags: projectTags(tags) };
   });
@@ -187,6 +190,11 @@ export class ProviderRejectedError extends Error {
  * them (setProviderEnabled's `acceptWarnings`).
  */
 export class ProviderWarningsError extends ProviderRejectedError {}
+/**
+ * The provider was edited in Radarr/Sonarr while its accepted-warnings test
+ * ran: saving the body read before it would revert that edit. Nothing sent.
+ */
+export class ProviderChangedError extends Error {}
 
 async function readProvider(service: ArrService, instance: string, kind: ProviderKind, id: number) {
   const cfg = await configuredArrCfg(service, instance);
@@ -278,10 +286,11 @@ async function readBackAfterTimeout(
   id: number,
   change: ProviderEnableChange,
   settle: "once" | "wait",
+  pause: SettlePause,
 ): Promise<ProviderChangeResult> {
   let { raw: now } = await readProvider(service, instance, kind, id);
   for (let i = 0; settle === "wait" && i < PROVIDER_SETTLE_READS && !providerChangeApplied(now, change); i++) {
-    await settlePause(PROVIDER_SETTLE_INTERVAL_MS);
+    await pause(PROVIDER_SETTLE_INTERVAL_MS);
     try {
       now = (await readProvider(service, instance, kind, id)).raw;
     } catch {
@@ -343,7 +352,9 @@ async function withProviderLock<T>(key: string, fn: () => Promise<T>): Promise<T
  *     anyway"): the arr's own /test is re-run here, server-side, on the changed
  *     resource, and only when it reports no errors — warnings, or nothing — is
  *     it saved with `forceSave`. An error is still ProviderRejectedError, and
- *     the browser can never turn a failing test into a save.
+ *     the browser can never turn a failing test into a save. The resource is
+ *     read again after the test: edited in the arr meanwhile (anything but the
+ *     switches being set) → ProviderChangedError, nothing saved.
  *   • A save that waits on the arr's test and times out is read back: the arr
  *     saves once its test passes, so the answer is what it holds now — read
  *     once, or (`settle: "wait"`, a background save) re-read until it holds
@@ -355,9 +366,16 @@ export async function setProviderEnabled(
   kind: ProviderKind,
   id: number,
   change: ProviderEnableChange,
-  opts: { acceptWarnings?: boolean; settle?: "once" | "wait" } = {},
+  opts: ProviderSaveOptions = {},
 ): Promise<ProviderChangeResult> {
   return withProviderLock([service, instance, kind, id].join("\u0000"), () => saveProvider(service, instance, kind, id, change, opts));
+}
+
+export interface ProviderSaveOptions {
+  acceptWarnings?: boolean;
+  settle?: "once" | "wait";
+  /** The pause between settle read-backs (default: a real wait). */
+  pause?: SettlePause;
 }
 
 async function saveProvider(
@@ -366,24 +384,18 @@ async function saveProvider(
   kind: ProviderKind,
   id: number,
   change: ProviderEnableChange,
-  opts: { acceptWarnings?: boolean; settle?: "once" | "wait" },
+  opts: ProviderSaveOptions,
 ): Promise<ProviderChangeResult> {
   const { cfg, raw } = await readProvider(service, instance, kind, id);
   const unsupported = kind === "indexer" ? unsupportedIndexerUse(raw, change) : null;
   if (unsupported) throw new ProviderUseUnsupportedError(unsupported);
   const body = JSON.stringify(withProviderEnabled(raw, change));
   const onlyOff = Object.values(change).every((v) => v === false);
-  let forceSave = onlyOff;
-  if (!onlyOff && opts.acceptWarnings) {
-    try {
-      await arrFetchNoContent(cfg, `${PROVIDER_PATH[kind]}/test`, { method: "POST", body, timeoutMs: PROVIDER_TEST_TIMEOUT_MS });
-    } catch (err) {
-      if (!(err instanceof ArrResponseError && err.status === 400)) throw err;
-      const failures = validationFailuresFromBody(err.body);
-      if (!failures.warningsOnly) throw new ProviderRejectedError(failures.messages);
-    }
-    forceSave = true;
-  }
+  if (!onlyOff && opts.acceptWarnings) await testAcceptingWarnings(cfg, service, instance, kind, id, change, raw, body);
+  // forceSave skips the arr's own test: a change that only turns things off
+  // (a failing indexer could otherwise never be partly switched off), or one
+  // whose test was just run here and passed with warnings at most.
+  const forceSave = onlyOff || opts.acceptWarnings === true;
   let saved: unknown;
   try {
     saved = await arrFetch<unknown>(cfg, `${PROVIDER_PATH[kind]}/${id}${forceSave ? "?forceSave=true" : ""}`, {
@@ -398,11 +410,38 @@ async function saveProvider(
       throw !forceSave && failures.warningsOnly ? new ProviderWarningsError(failures.messages) : new ProviderRejectedError(failures.messages);
     }
     if (!forceSave && arrErrorKind(err) === "timeout") {
-      return readBackAfterTimeout(service, instance, kind, id, change, opts.settle ?? "once");
+      return readBackAfterTimeout(service, instance, kind, id, change, opts.settle ?? "once", opts.pause ?? settleDefaults.pause);
     }
     throw err;
   }
   return { provider: projectProvider(kind, saved), applied: true, timedOut: false };
+}
+
+// `acceptWarnings`: the arr's own /test, run here on the changed resource. An
+// error still refuses (ProviderRejectedError) — the browser can never turn a
+// failing test into a save. The test can hold the body for two minutes, and the
+// save is the WHOLE resource read before it: an edit made in Radarr/Sonarr
+// meanwhile would be silently put back. So it is re-read, and only what was
+// tested is saved (ProviderChangedError otherwise).
+async function testAcceptingWarnings(
+  cfg: ArrCfg,
+  service: ArrService,
+  instance: string,
+  kind: ProviderKind,
+  id: number,
+  change: ProviderEnableChange,
+  raw: unknown,
+  body: string,
+): Promise<void> {
+  try {
+    await arrFetchNoContent(cfg, `${PROVIDER_PATH[kind]}/test`, { method: "POST", body, timeoutMs: PROVIDER_TEST_TIMEOUT_MS });
+  } catch (err) {
+    if (!(err instanceof ArrResponseError && err.status === 400)) throw err;
+    const failures = validationFailuresFromBody(err.body);
+    if (!failures.warningsOnly) throw new ProviderRejectedError(failures.messages);
+  }
+  const fresh = await readProvider(service, instance, kind, id);
+  if (providerChangedBesides(raw, fresh.raw, change)) throw new ProviderChangedError();
 }
 
 // ── storage ──────────────────────────────────────────────────────────────────
@@ -411,8 +450,8 @@ export function loadStorage(): Promise<InstanceReport<{ rootFolders: ArrRootFold
   return perInstance("storage", async (inst) => {
     const cfg = await configuredArrCfg(inst.service, inst.slug);
     const [roots, diskRaw] = await Promise.all([
-      arrFetch<unknown>(cfg, "/api/v3/rootfolder", { quietErrors: true }),
-      arrFetch<unknown>(cfg, "/api/v3/diskspace", { quietErrors: true }),
+      arrFetch<unknown>(cfg, "/api/v3/rootfolder", POLLED_READ),
+      arrFetch<unknown>(cfg, "/api/v3/diskspace", POLLED_READ),
     ]);
     const disks = projectDisks(diskRaw);
     return { rootFolders: projectRootFolders(roots, disks), disks };

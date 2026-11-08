@@ -114,38 +114,14 @@ export async function verifyAndRefreshSession(
   const verified = await verifySessionToken(token);
   if (!verified) return null;
   const claims = verified.claims;
-  if (!claims.sessionId) return null;
+  const sessionId = claims.sessionId;
+  if (!sessionId) return null;
   // Before anything else, fast path included: the binding is a property of the
   // token, so a mismatch is refused without a DB read.
   if (!isTransportAllowed(claims, transport)) return null;
 
   const now = Math.floor(Date.now() / 1000);
-
-  // Fast path: if the token was DB-validated recently, skip the DB round trip.
-  const dbCheckedAt = (claims as SessionClaims & { dbCheckedAt?: number })
-    .dbCheckedAt;
-  const checkInterval = recheckIntervalSeconds(claims);
-  // Honor the cache window only if this replica hasn't locally revoked the
-  // session/user since — otherwise force a DB hit so a "revoke this device" /
-  // "log out everywhere" issued here takes effect on the next request rather
-  // than up to checkInterval later.
-  //
-  // A token signed with anything but the CURRENT session subkey (the previous
-  // secret during a rotation, or the legacy raw secret) never takes the fast
-  // path either: the slow path below re-signs it with the current key, so a
-  // browser migrates on its very next request (guardrail 6h).
-  //
-  // A restore stamps a process-wide floor (invalidateCachedSessionChecks):
-  // every dbCheckedAt from before that moment misses this window, so a cookie
-  // checked in the last 10–60s cannot keep acting on the restored database.
-  const skipDbCheck =
-    typeof dbCheckedAt === "number" &&
-    now - dbCheckedAt <= checkInterval &&
-    verified.signedWithCurrentKey &&
-    !shouldForceDbCheck(claims.id, claims.sessionId) &&
-    !cachedSessionCheckIsStale(dbCheckedAt);
-
-  if (skipDbCheck) {
+  if (canSkipDbCheck(claims, sessionId, verified.signedWithCurrentKey, now)) {
     // The JWT's own exp (= the session deadline, re-signed that way on every
     // slow-path check) is all the time-based enforcement the fast path needs —
     // jose already rejected an expired token above.
@@ -171,219 +147,270 @@ export async function verifyAndRefreshSession(
   // stale cookie is dead the moment the rotation lands). The key carries the
   // transport too: a pre-claim token that is valid on both gets re-signed bound
   // to the one it arrived on, so the two results are not interchangeable.
-  return coalesce(`session-verify:${transport}:${allowRotation ? "r" : "n"}:${token}`, async () => {
-    const [authSessionRow, dbUser] = await Promise.all([
-      prisma.authSession.findUnique({ where: { sessionId: claims.sessionId } }),
-      prisma.user.findUnique({
-        where: { id: claims.id },
-        select: {
-          role: true,
-          permissions: true,
-          mediaServer: true,
-          sessionsRevokedAt: true,
-          passwordChangedAt: true,
-          deactivatedAt: true,
-          email: true,
-          notificationEmail: true,
-          plexUserId: true,
-        },
-      }),
-    ]);
+  return coalesce(`session-verify:${transport}:${allowRotation ? "r" : "n"}:${token}`, () =>
+    verifyAgainstDb(claims, sessionId, { transport, allowRotation, now }),
+  );
+}
 
-    if (!authSessionRow) return null;
-    if (!dbUser) return null;
+// Fast path: the token was DB-validated recently enough to skip the DB round
+// trip. Honored only if this replica hasn't locally revoked the session/user
+// since — otherwise force a DB hit so a "revoke this device" / "log out
+// everywhere" issued here takes effect on the next request rather than up to
+// the check interval later.
+//
+// A token signed with anything but the CURRENT session subkey (the previous
+// secret during a rotation, or the legacy raw secret) never takes the fast path
+// either: the slow path re-signs it with the current key, so a browser migrates
+// on its very next request (guardrail 6h).
+//
+// A restore stamps a process-wide floor (invalidateCachedSessionChecks): every
+// dbCheckedAt from before that moment misses this window, so a cookie checked
+// in the last 10–60s cannot keep acting on the restored database.
+function canSkipDbCheck(claims: SessionClaims, sessionId: string, signedWithCurrentKey: boolean, now: number): boolean {
+  const dbCheckedAt = claims.dbCheckedAt;
+  return (
+    typeof dbCheckedAt === "number" &&
+    now - dbCheckedAt <= recheckIntervalSeconds(claims) &&
+    signedWithCurrentKey &&
+    !shouldForceDbCheck(claims.id, sessionId, dbCheckedAt) &&
+    !cachedSessionCheckIsStale(dbCheckedAt)
+  );
+}
 
-    // A DISABLED account can never re-authenticate, even within a still-valid JWT
-    // exp window — absolute, not an iat cutoff. Set by account removal, either the
-    // user's own (src/app/api/profile/route.ts) or an admin's
-    // (src/app/api/admin/users/[id]/route.ts); cleared by the reactivate route.
-    // The sign-in paths refuse it separately (signInAndMintSession throws
-    // AccountDeactivatedError) — this is the gate for tokens already minted.
-    if (dbUser.deactivatedAt) return null;
+const SESSION_USER_SELECT = {
+  role: true,
+  permissions: true,
+  mediaServer: true,
+  sessionsRevokedAt: true,
+  passwordChangedAt: true,
+  deactivatedAt: true,
+  email: true,
+  notificationEmail: true,
+  plexUserId: true,
+} as const;
 
-    const revokedSec = dbUser.sessionsRevokedAt
-      ? Math.floor(dbUser.sessionsRevokedAt.getTime() / 1000)
-      : 0;
-    const passwordSec = dbUser.passwordChangedAt
-      ? Math.floor(dbUser.passwordChangedAt.getTime() / 1000)
-      : 0;
-    const cutoff = Math.max(revokedSec, passwordSec);
-    // `<=` (not `<`): the cutoffs are floored to whole seconds, and a revoked
-    // session's JWT is typically signed in the same second its AuthSession row was
-    // created — strict `<` would let that token's iat == cutoff slip past the
-    // cross-replica backstop. `<=` closes the same-second gap; the only false catch
-    // is a brand-new sign-in in the same second as an unrelated revoke, which is
-    // vanishingly rare and simply re-authenticates.
-    if (cutoff > 0 && typeof claims.iat === "number" && claims.iat <= cutoff) {
-      return null;
-    }
+type SessionUser = {
+  role: string;
+  permissions: bigint | null;
+  mediaServer: string | null;
+  sessionsRevokedAt: Date | null;
+  passwordChangedAt: Date | null;
+  deactivatedAt: Date | null;
+  email: string | null;
+  notificationEmail: string | null;
+  plexUserId: string | null;
+};
 
-    // Plex server-membership re-check. A user un-shared from the Plex server keeps
-    // a valid session JWT until it expires, so re-verify membership here on the
-    // slow DB-check path (~once/60s per session). The allowlist is cached per
-    // replica for 30 min, so plex.tv is hit at most once per replica per window
-    // regardless of how many Plex users are active. ADMINs are exempt (always on
-    // the allowlist anyway; never lock out the operator on an email mismatch).
-    // getCachedPlexAllowlist() returns null when membership can't be determined
-    // (unconfigured / plex.tv error) — fail open and don't revoke.
-    if (claims.provider === "plex" && dbUser.role !== "ADMIN") {
-      const allowlist = await getCachedPlexAllowlist();
-      if (allowlist) {
-        const candidateEmails = [dbUser.notificationEmail, dbUser.email, claims.email]
-          .filter((e): e is string => typeof e === "string" && e.length > 0)
-          .map((e) => e.toLowerCase().trim());
-        // Immutable plex.tv account id first — every email candidate goes stale
-        // the moment the user changes their plex.tv address, and an email-only
-        // match used to revoke every device of a still-shared member. Legacy rows
-        // with a null plexUserId keep the email-only behavior via the fallback.
-        const stillMember =
-          (dbUser.plexUserId != null && allowlist.ids.has(dbUser.plexUserId)) ||
-          candidateEmails.some((e) => allowlist.emails.has(e));
-        if (candidateEmails.length > 0 && !stillMember) {
-          // No longer shared on the Plex server — revoke ALL of this user's
-          // sessions (every device) by advancing sessionsRevokedAt past their
-          // tokens' iat, then reject this request.
-          await prisma.user
-            .update({ where: { id: claims.id }, data: { sessionsRevokedAt: new Date() } })
-            .catch(() => {});
-          return null;
-        }
-      }
-    }
+async function verifyAgainstDb(
+  claims: SessionClaims,
+  sessionId: string,
+  ctx: { transport: SessionTransport; allowRotation: boolean; now: number },
+): Promise<VerifyAndRefreshResult | null> {
+  // Two reads on the pool (not a transaction), so they may run together.
+  const [authSessionRow, dbUser] = await Promise.all([
+    prisma.authSession.findUnique({ where: { sessionId } }),
+    prisma.user.findUnique({ where: { id: claims.id }, select: SESSION_USER_SELECT }),
+  ]);
+  if (!authSessionRow || !dbUser) return null;
+  if (isRevokedForUser(claims, dbUser)) return null;
+  if (await plexMembershipRevoked(claims, dbUser)) return null;
 
-    void prisma.authSession
-      .update({ where: { sessionId: claims.sessionId }, data: { lastSeenAt: new Date() } })
-      .catch(() => {});
+  void prisma.authSession
+    .update({ where: { sessionId }, data: { lastSeenAt: new Date() } })
+    .catch(() => {});
 
-    const dbPermsStr = serializePermissions(dbUser.permissions ?? 0n);
-    const claimPermsStr =
-      typeof claims.permissions === "string" ? claims.permissions : "0";
+  const refreshed = await refreshPrivileges(claims, sessionId, dbUser, ctx);
+  if (!refreshed) return null;
+  const workingClaims = refreshMediaServer(refreshed, dbUser);
 
-    let workingClaims: SessionClaims & { dbCheckedAt?: number } = {
-      ...claims,
-      // Always carry the current DB permissions (raw decimal) into the re-signed
-      // token. effectivePermissions() is applied later when building the session
-      // for handlers (claimsToSession / auth()), never to the stored value.
-      permissions: dbPermsStr,
-      dbCheckedAt: now,
-    };
+  const resignExpiresIn = resignLifetimeSeconds(workingClaims, ctx.now);
+  if (resignExpiresIn === null) return null;
 
-    // Privilege change (role OR permissions) → rotate sessionId so a leaked
-    // pre-change token cannot be replayed. Renaming the AuthSession row is the
-    // whole revocation: every copy of the old token fails the row-presence check
-    // on the next slow-path verify, and markSessionForceRevoked (below) sends the
-    // next one on THIS process straight to the slow path.
-    //
-    // It deliberately does NOT stamp sessionsRevokedAt. That cutoff is per-USER
-    // (`iat <= cutoff`), so anchoring it to this token's iat also killed every
-    // OTHER session of the user minted earlier — every native device (a bearer
-    // token keeps its sign-in iat forever) and every browser not re-signed since
-    // — leaving their AuthSession rows listed as live. The cutoff is only read on
-    // the slow path, where the renamed row already rejects the old token, so the
-    // stamp bought nothing. revokeSessionById dropped the identical bump for the
-    // identical reason.
-    const privilegeChanged =
-      dbUser.role !== claims.role || dbPermsStr !== claimPermsStr;
-    if (privilegeChanged && !allowRotation) {
-      // No rotation for a caller that can't deliver the replacement (see
-      // VerifyAndRefreshOptions). The authz decision is unaffected: the fresh role
-      // below (and the fresh permissions above) are what this request gates on,
-      // so a demoted user gets nothing elevated. A browser's cookie still rotates
-      // on its next request through the proxy / withAuth.
-      workingClaims = { ...workingClaims, role: dbUser.role };
-    } else if (privilegeChanged) {
-      const newSessionId = randomUUID();
-      const rotated = await prisma.$transaction(async (tx) => {
-        const existingRow = await tx.authSession.findUnique({
-          where: { sessionId: claims.sessionId },
-          select: { id: true },
-        });
-        if (!existingRow) return false;
-        await tx.authSession.update({
-          where: { sessionId: claims.sessionId },
-          data: { sessionId: newSessionId },
-        });
-        return true;
-      }).catch(() => false);
-      if (!rotated) return null;
-      // After the rename committed (guardrail 27). (sessionId was checked
-      // non-empty at the top; the narrowing doesn't survive into this closure.)
-      if (claims.sessionId) markSessionForceRevoked(claims.sessionId);
-      workingClaims = { ...workingClaims, sessionId: newSessionId, role: dbUser.role };
-    }
-
-    // mediaServer refresh for credentials/oidc — plex/jellyfin/jellyfin-qc are pinned at sign-in
-    const provider = workingClaims.provider;
-    if (
-      provider !== "plex" &&
-      provider !== "jellyfin" &&
-      provider !== "jellyfin-quickconnect"
-    ) {
-      const dbMediaServer = dbUser.mediaServer ?? null;
-      if ((workingClaims.mediaServer ?? null) !== dbMediaServer) {
-        workingClaims = { ...workingClaims, mediaServer: dbMediaServer };
-      }
-    }
-
-    // Session deadline (`expiresAt` claim) — the value set at sign-in by
-    // initializeTokenOnSignIn, mirrored into AuthSession.expiresAt. It never
-    // moves, so a session can never outlive its configured duration; and nothing
-    // shortens it either: the re-sign below puts exp (and so the cookie's
-    // Max-Age) at EXACTLY the deadline for every role. Guardrail 6c — there is
-    // deliberately no inactivity window and no role-based ceiling here. Both
-    // used to exist: a 1-hour non-admin slide meant "remember me" ended after
-    // any hour-long gap no matter what sessionMaxDuration promised, and a 7-day
-    // ADMIN ceiling ended every admin session weekly. A native session's deadline
-    // is the never-reached sentinel (session-lifetime.ts), so it passes here
-    // forever and ends only through the revocation checks above.
-    let resignExpiresIn: number;
-    const sessionDeadline = workingClaims.expiresAt;
-    if (typeof sessionDeadline === "number") {
-      if (now >= sessionDeadline) return null;
-      resignExpiresIn = sessionDeadline - now;
-    } else {
-      // A token without a deadline claim (pre-claim legacy mints only — every
-      // current mint path sets it) keeps its own remaining exp.
-      const currentExp = workingClaims.exp;
-      resignExpiresIn =
-        typeof currentExp === "number" ? Math.max(60, currentExp - now) : 3600;
-    }
-
-    // Always re-sign on a DB check so dbCheckedAt advances even when nothing else
-    // changed; the fast path at the top of the function still skips this entirely.
-    // (The presented token passed the cutoff check above, so iat = now does too.)
-    const newToken = await signSessionJwt(
-      {
-        id: workingClaims.id,
-        role: workingClaims.role,
-        permissions: workingClaims.permissions,
-        email: workingClaims.email ?? null,
-        name: workingClaims.name ?? null,
-        provider: workingClaims.provider,
-        mediaServer: workingClaims.mediaServer ?? null,
-        sessionId: workingClaims.sessionId,
-        uaFingerprint: workingClaims.uaFingerprint,
-        isMobile: workingClaims.isMobile,
-        deviceLabel: workingClaims.deviceLabel,
-        expiresAt: workingClaims.expiresAt,
-        // The binding (guardrail 6h). isTransportAllowed passed above, so this is
-        // the token's own claim, or — for a token minted before the claim
-        // existed — the transport it arrived on, which is now pinned.
-        transport,
-        // Machine sessions carry their mint-time IP allowlist as a claim so
-        // machineIpAllowed (api-auth.ts) re-checks the caller IP on EVERY request.
-        // Dropping it here would strip the binding on the first re-sign — machine
-        // tokens are minted without dbCheckedAt, so their first request always
-        // re-signs — leaving the refreshed token usable from any IP.
-        ...(workingClaims.machineAllowedIps ? { machineAllowedIps: workingClaims.machineAllowedIps } : {}),
-        dbCheckedAt: now,
-      },
-      { expiresInSeconds: resignExpiresIn },
-    );
-
-    return {
-      claims: workingClaims,
-      refreshed: { token: newToken, expiresInSeconds: resignExpiresIn },
-    };
+  // Always re-sign on a DB check so dbCheckedAt advances even when nothing else
+  // changed; the fast path in verifyAndRefreshSession still skips this entirely.
+  // (The presented token passed the cutoff check above, so iat = now does too.)
+  const newToken = await signSessionJwt(resignedClaims(workingClaims, ctx.transport, ctx.now), {
+    expiresInSeconds: resignExpiresIn,
   });
+  return {
+    claims: workingClaims,
+    refreshed: { token: newToken, expiresInSeconds: resignExpiresIn },
+  };
+}
+
+// A DISABLED account can never re-authenticate, even within a still-valid JWT
+// exp window — absolute, not an iat cutoff. Set by account removal, either the
+// user's own (src/app/api/profile/route.ts) or an admin's
+// (src/app/api/admin/users/[id]/route.ts); cleared by the reactivate route.
+// The sign-in paths refuse it separately (signInAndMintSession throws
+// AccountDeactivatedError) — this is the gate for tokens already minted.
+//
+// Then the per-user cutoffs: any token minted at or before sessionsRevokedAt
+// or passwordChangedAt. `<=` (not `<`): the cutoffs are floored to whole
+// seconds, and a revoked session's JWT is typically signed in the same second
+// its AuthSession row was created — strict `<` would let that token's iat ==
+// cutoff slip past the cross-replica backstop. `<=` closes the same-second gap;
+// the only false catch is a brand-new sign-in in the same second as an
+// unrelated revoke, which is vanishingly rare and simply re-authenticates.
+function isRevokedForUser(claims: SessionClaims, dbUser: SessionUser): boolean {
+  if (dbUser.deactivatedAt) return true;
+  const revokedSec = dbUser.sessionsRevokedAt ? Math.floor(dbUser.sessionsRevokedAt.getTime() / 1000) : 0;
+  const passwordSec = dbUser.passwordChangedAt ? Math.floor(dbUser.passwordChangedAt.getTime() / 1000) : 0;
+  const cutoff = Math.max(revokedSec, passwordSec);
+  return cutoff > 0 && typeof claims.iat === "number" && claims.iat <= cutoff;
+}
+
+// Plex server-membership re-check. A user un-shared from the Plex server keeps
+// a valid session JWT until it expires, so re-verify membership here on the
+// slow DB-check path (~once/60s per session). The allowlist is cached per
+// replica for 30 min, so plex.tv is hit at most once per replica per window
+// regardless of how many Plex users are active. ADMINs are exempt (always on
+// the allowlist anyway; never lock out the operator on an email mismatch).
+// getCachedPlexAllowlist() returns null when membership can't be determined
+// (unconfigured / plex.tv error) — fail open and don't revoke.
+//
+// True when the user is no longer shared: ALL of their sessions (every device)
+// are then revoked by advancing sessionsRevokedAt past their tokens' iat, and
+// this request is refused.
+async function plexMembershipRevoked(claims: SessionClaims, dbUser: SessionUser): Promise<boolean> {
+  if (claims.provider !== "plex" || dbUser.role === "ADMIN") return false;
+  const allowlist = await getCachedPlexAllowlist();
+  if (!allowlist) return false;
+  const candidateEmails = [dbUser.notificationEmail, dbUser.email, claims.email]
+    .filter((e): e is string => typeof e === "string" && e.length > 0)
+    .map((e) => e.toLowerCase().trim());
+  // Immutable plex.tv account id first — every email candidate goes stale the
+  // moment the user changes their plex.tv address, and an email-only match used
+  // to revoke every device of a still-shared member. Legacy rows with a null
+  // plexUserId keep the email-only behavior via the fallback.
+  const stillMember =
+    (dbUser.plexUserId != null && allowlist.ids.has(dbUser.plexUserId)) ||
+    candidateEmails.some((e) => allowlist.emails.has(e));
+  if (candidateEmails.length === 0 || stillMember) return false;
+  await prisma.user
+    .update({ where: { id: claims.id }, data: { sessionsRevokedAt: new Date() } })
+    .catch(() => {});
+  return true;
+}
+
+// The claims carrying the DB's current role and permissions (raw decimal;
+// effectivePermissions() is applied later when building the session for
+// handlers — claimsToSession / auth() — never to the stored value), with
+// dbCheckedAt = now. Null when a rotation was needed and failed.
+//
+// Privilege change (role OR permissions) → rotate sessionId so a leaked
+// pre-change token cannot be replayed. Renaming the AuthSession row is the
+// whole revocation: every copy of the old token fails the row-presence check
+// on the next slow-path verify, and markSessionForceRevoked sends the next one
+// on THIS process straight to the slow path.
+//
+// It deliberately does NOT stamp sessionsRevokedAt. That cutoff is per-USER
+// (`iat <= cutoff`), so anchoring it to this token's iat also killed every
+// OTHER session of the user minted earlier — every native device (a bearer
+// token keeps its sign-in iat forever) and every browser not re-signed since —
+// leaving their AuthSession rows listed as live. The cutoff is only read on the
+// slow path, where the renamed row already rejects the old token, so the stamp
+// bought nothing. revokeSessionById dropped the identical bump for the
+// identical reason.
+//
+// No rotation for a caller that can't deliver the replacement (see
+// VerifyAndRefreshOptions). The authz decision is unaffected: the fresh role
+// and permissions are what this request gates on, so a demoted user gets
+// nothing elevated. A browser's cookie still rotates on its next request
+// through the proxy / withAuth.
+async function refreshPrivileges(
+  claims: SessionClaims,
+  sessionId: string,
+  dbUser: SessionUser,
+  ctx: { allowRotation: boolean; now: number },
+): Promise<SessionClaims | null> {
+  const dbPermsStr = serializePermissions(dbUser.permissions ?? 0n);
+  const claimPermsStr = typeof claims.permissions === "string" ? claims.permissions : "0";
+  const fresh: SessionClaims = { ...claims, permissions: dbPermsStr, dbCheckedAt: ctx.now };
+  const privilegeChanged = dbUser.role !== claims.role || dbPermsStr !== claimPermsStr;
+  if (!privilegeChanged) return fresh;
+  if (!ctx.allowRotation) return { ...fresh, role: dbUser.role };
+
+  const newSessionId = randomUUID();
+  const rotated = await prisma.$transaction(async (tx) => {
+    const existingRow = await tx.authSession.findUnique({ where: { sessionId }, select: { id: true } });
+    if (!existingRow) return false;
+    await tx.authSession.update({ where: { sessionId }, data: { sessionId: newSessionId } });
+    return true;
+  }).catch(() => false);
+  if (!rotated) return null;
+  // After the rename committed (guardrail 27).
+  markSessionForceRevoked(sessionId);
+  return { ...fresh, sessionId: newSessionId, role: dbUser.role };
+}
+
+// mediaServer refresh for credentials/oidc — plex/jellyfin/jellyfin-qc are
+// pinned at sign-in.
+function refreshMediaServer(claims: SessionClaims, dbUser: SessionUser): SessionClaims {
+  const provider = claims.provider;
+  if (provider === "plex" || provider === "jellyfin" || provider === "jellyfin-quickconnect") return claims;
+  const dbMediaServer = dbUser.mediaServer ?? null;
+  return (claims.mediaServer ?? null) === dbMediaServer ? claims : { ...claims, mediaServer: dbMediaServer };
+}
+
+/**
+ * Seconds the re-signed token lives, or null when the session is over.
+ *
+ * Session deadline (`expiresAt` claim) — the value set at sign-in by
+ * initializeTokenOnSignIn, mirrored into AuthSession.expiresAt. It never
+ * moves, so a session can never outlive its configured duration; and nothing
+ * shortens it either: the re-sign puts exp (and so the cookie's Max-Age) at
+ * EXACTLY the deadline for every role. Guardrail 6c — there is deliberately no
+ * inactivity window and no role-based ceiling here. Both used to exist: a
+ * 1-hour non-admin slide meant "remember me" ended after any hour-long gap no
+ * matter what sessionMaxDuration promised, and a 7-day ADMIN ceiling ended
+ * every admin session weekly. A native session's deadline is the never-reached
+ * sentinel (session-lifetime.ts), so it passes here forever and ends only
+ * through the revocation checks.
+ *
+ * A token without a deadline claim (pre-claim legacy mints only — every
+ * current mint path sets it) keeps its own exp as a HARD ceiling: a re-sign
+ * never extends it, so an actively used legacy token still dies on time. One
+ * with no exp at all gets an hour, which then becomes its ceiling.
+ */
+export function resignLifetimeSeconds(claims: Pick<SessionClaims, "expiresAt" | "exp">, now: number): number | null {
+  const sessionDeadline = claims.expiresAt;
+  if (typeof sessionDeadline === "number") {
+    return now >= sessionDeadline ? null : sessionDeadline - now;
+  }
+  const currentExp = claims.exp;
+  if (typeof currentExp !== "number") return LEGACY_NO_EXP_LIFETIME_SECONDS;
+  return currentExp > now ? currentExp - now : null;
+}
+
+const LEGACY_NO_EXP_LIFETIME_SECONDS = 3600;
+
+// The re-signed token's claims, from one explicit list: anything not named here
+// is dropped on purpose (the signer stamps iat, exp and the audience itself).
+function resignedClaims(from: SessionClaims, transport: SessionTransport, now: number): Omit<SessionClaims, "iat" | "exp"> {
+  return {
+    id: from.id,
+    role: from.role,
+    permissions: from.permissions,
+    email: from.email ?? null,
+    name: from.name ?? null,
+    provider: from.provider,
+    mediaServer: from.mediaServer ?? null,
+    sessionId: from.sessionId,
+    uaFingerprint: from.uaFingerprint,
+    isMobile: from.isMobile,
+    deviceLabel: from.deviceLabel,
+    expiresAt: from.expiresAt,
+    // The binding (guardrail 6h). isTransportAllowed passed, so this is the
+    // token's own claim, or — for a token minted before the claim existed — the
+    // transport it arrived on, which is now pinned.
+    transport,
+    // Machine sessions carry their mint-time IP allowlist as a claim so
+    // machineIpAllowed (api-auth.ts) re-checks the caller IP on EVERY request.
+    // Dropping it here would strip the binding on the first re-sign — machine
+    // tokens are minted without dbCheckedAt, so their first request always
+    // re-signs — leaving the refreshed token usable from any IP.
+    ...(from.machineAllowedIps ? { machineAllowedIps: from.machineAllowedIps } : {}),
+    dbCheckedAt: now,
+  };
 }

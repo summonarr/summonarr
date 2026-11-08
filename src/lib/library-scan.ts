@@ -10,6 +10,9 @@ import {
   type ArrVariant,
 } from "./arr";
 import { sanitizeForLog } from "./sanitize";
+import { processSingleton } from "./process-singleton";
+import { getSyncableMediaInstances } from "./media-instance-registry";
+import { DEFAULT_MEDIA_INSTANCE } from "./media-instances";
 
 export type ScanMediaType = "movie" | "tv";
 
@@ -33,17 +36,33 @@ interface PendingScan {
   firstScheduledAt: number;
 
   tmdbId?: number;
-  // Which Radarr/Sonarr instance's queue to wait on (guardrail 32). A 4K-only grab
-  // lives in the 4K queue, so checking the default instance would report "not
-  // downloading" and the rescan would fire before the file imports. undefined →
-  // the default instance ("") via the arr.ts helper defaults.
-  variant?: ArrVariant;
+  // Every Radarr/Sonarr instance whose queue the scan waits on (guardrail 32).
+  // A 4K-only grab lives in the 4K queue, so checking the default instance would
+  // report "not downloading" and the rescan would fire before the file imports;
+  // and when a default and a 4K import merge into one window, both queues must
+  // be idle. A call with no variant waits on the default instance ("").
+  variants: Set<ArrVariant>;
 }
 
-const pending = new Map<ScanMediaType, PendingScan>();
+// Process-wide (guardrail 27a): the webhook routes, the cleanup delete and the
+// title manager's remove each carry their own copy of this module, and a
+// per-copy map let a cleanup and an import webhook each scan the same backend.
+const pending = processSingleton("library-scan:pending", () => new Map<ScanMediaType, PendingScan>());
 // Scans currently running. A new schedule arriving mid-scan waits on the running
-// one instead of firing a parallel scan against the same backend.
-const inFlight = new Map<ScanMediaType, Promise<void>>();
+// one instead of firing a parallel scan against the same backend: the scan is
+// only the refresh CALL, and the server's own scan it starts picks up the file.
+const inFlight = processSingleton("library-scan:inFlight", () => new Map<ScanMediaType, Promise<void>>());
+
+/**
+ * Fold a new call into the pending scan's queue hint. A hint-less call means
+ * "check the whole queue" and widens a single-title hint; two different titles
+ * in one window widen to the whole queue too. The same title, or an already
+ * whole-queue check, stays as it is.
+ */
+function mergeTitleHint(existing: number | undefined, incoming: number | undefined): number | undefined {
+  if (incoming === undefined) return undefined;
+  return existing === incoming ? existing : undefined;
+}
 
 export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number, variant?: ArrVariant): Promise<void> {
   const running = inFlight.get(mediaType);
@@ -59,21 +78,8 @@ export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number, v
       clearTimeout(existing.timer);
       existing.timer = setTimeout(() => runScan(mediaType), SCAN_DEBOUNCE_MS);
     }
-    // Which instance's queue to wait on; when calls merge, the latest one wins
-    // (this only tunes timing, so best-effort is fine).
-    if (variant !== undefined) existing.variant = variant;
-
-    if (tmdbId === undefined) {
-      // A hint-less call means "check the whole queue"; it must widen a pending
-      // single-title hint, or the scan waits on one title while this caller's
-      // download is still in the queue.
-      existing.tmdbId = undefined;
-    } else if (existing.tmdbId !== undefined && existing.tmdbId !== tmdbId) {
-      // Two different titles merged into one scan window — fall back to checking the whole queue
-      existing.tmdbId = undefined;
-    }
-    // Otherwise it's the same title (nothing to change) or already a full-queue
-    // check, which a single-title hint can't narrow back down.
+    existing.variants.add(variant ?? "");
+    existing.tmdbId = mergeTitleHint(existing.tmdbId, tmdbId);
     return existing.promise;
   }
 
@@ -88,10 +94,70 @@ export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number, v
     retries: 0,
     firstScheduledAt: Date.now(),
     tmdbId,
-    variant,
+    variants: new Set([variant ?? ""]),
   };
   pending.set(mediaType, entry);
   return promise;
+}
+
+/**
+ * Is the title (or, with no hint, anything) still in this instance's queue?
+ * An unreadable queue (null from the helpers) counts as still pending, so the
+ * scan defers and retries rather than firing against a download in flight.
+ */
+async function queueStillBusy(mediaType: ScanMediaType, tmdbId: number | undefined, variant: ArrVariant): Promise<boolean> {
+  if (tmdbId !== undefined) {
+    const downloading = mediaType === "movie"
+      ? await isMovieDownloadingInRadarr(tmdbId, variant)
+      : await isSeriesDownloadingInSonarr(tmdbId, variant);
+    return downloading !== false;
+  }
+  const count = mediaType === "movie" ? await countRadarrQueue(variant) : await countSonarrQueue(variant);
+  return count === null || count > 0;
+}
+
+// An UNREADABLE queue is already modelled — both helpers return null and the
+// scan defers + retries rather than scan prematurely. A THROW was not: arrFetch
+// raises on a timeout, a non-2xx, or an unreachable host, and that escaped
+// runScan entirely. `pending` is cleared only after the scan is registered
+// in-flight, so the entry survived forever and every later scheduleLibraryScan
+// short-circuited on it — scans for that media type never ran again until a
+// restart. Fold a throw into the same "can't read it, assume pending" answer.
+async function anyQueueStillBusy(mediaType: ScanMediaType, entry: PendingScan): Promise<boolean> {
+  try {
+    for (const variant of entry.variants) {
+      if (await queueStillBusy(mediaType, entry.tmdbId, variant)) return true;
+    }
+    return false;
+  } catch (err) {
+    console.warn(
+      `[library-scan] ${sanitizeForLog(mediaType)} arr queue check failed, treating as pending:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return true;
+  }
+}
+
+const queueScope = (entry: PendingScan) => sanitizeForLog(entry.tmdbId !== undefined ? `tmdbId=${entry.tmdbId}` : "total queue");
+
+/** Re-arm the debounce for another queue check; false once the retries are spent. */
+function deferForQueue(mediaType: ScanMediaType, entry: PendingScan): boolean {
+  if (entry.retries >= MAX_QUEUE_WAIT_RETRIES) {
+    console.warn(
+      `[library-scan] ${sanitizeForLog(mediaType)} arr still pending (${queueScope(entry)}) after ${MAX_QUEUE_WAIT_RETRIES} retries, scanning anyway`,
+    );
+    return false;
+  }
+  entry.retries += 1;
+  // Clear before overwriting: a concurrent schedule may have armed a live
+  // timer on this entry, and dropping the handle leaks it — it would fire
+  // later against an unrelated entry and cut its debounce short.
+  clearTimeout(entry.timer);
+  entry.timer = setTimeout(() => runScan(mediaType), SCAN_DEBOUNCE_MS);
+  console.warn(
+    `[library-scan] ${sanitizeForLog(mediaType)} arr still pending (${queueScope(entry)}), retry ${entry.retries}/${MAX_QUEUE_WAIT_RETRIES} in ${SCAN_DEBOUNCE_MS}ms`,
+  );
+  return true;
 }
 
 async function runScan(mediaType: ScanMediaType): Promise<void> {
@@ -102,36 +168,7 @@ async function runScan(mediaType: ScanMediaType): Promise<void> {
   // below to detect a concurrent re-arm. See the ownership re-check.
   const myTimer = entry.timer;
 
-  // An UNREADABLE queue is already modelled — both helpers return null and the branches
-  // below defer + retry rather than scan prematurely. A THROW was not: arrFetch raises on
-  // a timeout, a non-2xx, or an unreachable host, and that escaped runScan entirely.
-  // `pending` is cleared only further down (after the scan is registered in-flight), so
-  // the entry survived forever and every later scheduleLibraryScan short-circuited on
-  // it — scans for that media type never ran again until a restart. Fold a throw into
-  // the same "can't read it, assume pending" answer.
-  let stillInQueue: boolean;
-  try {
-    if (entry.tmdbId !== undefined) {
-      const downloading = mediaType === "movie"
-        ? await isMovieDownloadingInRadarr(entry.tmdbId, entry.variant)
-        : await isSeriesDownloadingInSonarr(entry.tmdbId, entry.variant);
-      // null = queue unreadable → treat as "still pending" so we defer + retry
-      // rather than scan prematurely against a download that may be in flight.
-      stillInQueue = downloading !== false;
-    } else {
-      const count = mediaType === "movie"
-        ? await countRadarrQueue(entry.variant)
-        : await countSonarrQueue(entry.variant);
-      // null = couldn't read the queue → defer rather than scan prematurely.
-      stillInQueue = count === null || count > 0;
-    }
-  } catch (err) {
-    console.warn(
-      `[library-scan] ${sanitizeForLog(mediaType)} arr queue check failed, treating as pending:`,
-      err instanceof Error ? err.message : String(err),
-    );
-    stillInQueue = true;
-  }
+  const stillInQueue = await anyQueueStillBusy(mediaType, entry);
 
   // Ownership re-check, on the TIMER not the entry: scheduleLibraryScan mutates
   // the existing entry rather than replacing it, so the entry identity is
@@ -150,25 +187,7 @@ async function runScan(mediaType: ScanMediaType): Promise<void> {
   const current = pending.get(mediaType);
   if (current !== entry || current.timer !== myTimer) return;
 
-  if (stillInQueue) {
-    if (entry.retries < MAX_QUEUE_WAIT_RETRIES) {
-      entry.retries += 1;
-      // Clear before overwriting: a concurrent schedule may have armed a live
-      // timer on this entry, and dropping the handle leaks it — it would fire
-      // later against an unrelated entry and cut its debounce short.
-      clearTimeout(entry.timer);
-      entry.timer = setTimeout(() => runScan(mediaType), SCAN_DEBOUNCE_MS);
-      const scope = entry.tmdbId !== undefined ? `tmdbId=${entry.tmdbId}` : "total queue";
-      console.warn(
-        `[library-scan] ${sanitizeForLog(mediaType)} arr still pending (${sanitizeForLog(scope)}), retry ${entry.retries}/${MAX_QUEUE_WAIT_RETRIES} in ${SCAN_DEBOUNCE_MS}ms`,
-      );
-      return;
-    }
-    const scope = entry.tmdbId !== undefined ? `tmdbId=${entry.tmdbId}` : "total queue";
-    console.warn(
-      `[library-scan] ${sanitizeForLog(mediaType)} arr still pending (${sanitizeForLog(scope)}) after ${MAX_QUEUE_WAIT_RETRIES} retries, scanning anyway`,
-    );
-  }
+  if (stillInQueue && deferForQueue(mediaType, entry)) return;
 
   // Register the scan in inFlight BEFORE deleting the pending entry, so a
   // schedule arriving in between sees inFlight and waits on it.
@@ -196,16 +215,37 @@ async function runScan(mediaType: ScanMediaType): Promise<void> {
   }
 }
 
+// Every configured server of both services is refreshed (guardrail 35): a
+// title imported for a named instance lands on whichever server holds the file,
+// and availability is a union, so a default-only scan left a named server's
+// library stale until the next full sync. The registry read is best-effort: if
+// it fails, the default instance (the pre-multi-server behaviour) is scanned.
+async function configuredInstances(service: "plex" | "jellyfin"): Promise<string[]> {
+  try {
+    return (await getSyncableMediaInstances(service)).map((i) => i.slug);
+  } catch (err) {
+    console.error(`[library-scan] ${service} instance list failed, scanning the default only:`, err instanceof Error ? err.message : String(err));
+    return [DEFAULT_MEDIA_INSTANCE];
+  }
+}
+
+// A named server's log lines carry its slug; the default's stay as before.
+function scanLabel(service: string, mediaType: ScanMediaType, instance: string): string {
+  return instance === DEFAULT_MEDIA_INSTANCE ? `${service} ${mediaType}` : `${service}[${sanitizeForLog(instance)}] ${mediaType}`;
+}
+
 async function triggerLibraryScan(mediaType: ScanMediaType): Promise<void> {
-  const [plexConfig, jellyfinConfig] = await Promise.all([
-    getPlexConfig(),
-    getJellyfinConfig(),
+  const [plexSlugs, jellyfinSlugs] = await Promise.all([
+    configuredInstances("plex"),
+    configuredInstances("jellyfin"),
   ]);
+  const plexConfigs = await Promise.all(plexSlugs.map(async (instance) => ({ instance, config: await getPlexConfig(instance) })));
+  const jellyfinConfigs = await Promise.all(jellyfinSlugs.map(async (instance) => ({ instance, config: await getJellyfinConfig(instance) })));
 
-  const plexConfigured = !!(plexConfig.url && plexConfig.token);
-  const jellyfinConfigured = !!(jellyfinConfig.url && jellyfinConfig.apiKey);
+  const plexTargets = plexConfigs.filter((c) => c.config.url && c.config.token);
+  const jellyfinTargets = jellyfinConfigs.filter((c) => c.config.url && c.config.apiKey);
 
-  if (!plexConfigured && !jellyfinConfigured) {
+  if (plexTargets.length === 0 && jellyfinTargets.length === 0) {
     console.warn(`[library-scan] ${mediaType}: no backends configured, skipping`);
     return;
   }
@@ -214,28 +254,28 @@ async function triggerLibraryScan(mediaType: ScanMediaType): Promise<void> {
 
   const jobs: Promise<void>[] = [];
 
-  if (plexConfigured) {
-    const serverUrl = plexConfig.url!.replace(/\/$/, "");
-    const token = plexConfig.token!;
+  for (const { instance, config } of plexTargets) {
+    const serverUrl = config.url!.replace(/\/$/, "");
+    const token = config.token!;
+    const label = scanLabel("plex", mediaType, instance);
     jobs.push(
       (async () => {
         const sections = await getPlexLibrarySections(serverUrl, token);
         const targets = sections.filter((s) => s.type === plexSectionType);
         if (targets.length === 0) {
-          console.warn(`[library-scan] plex ${mediaType}: no ${plexSectionType} sections found`);
+          console.warn(`[library-scan] ${label}: no ${plexSectionType} sections found`);
           return;
         }
         await Promise.all(targets.map((s) => refreshPlexSection(serverUrl, token, s.key)));
-      })().catch((err) => console.error(`[library-scan] plex ${mediaType}:`, err)),
+      })().catch((err) => console.error(`[library-scan] ${label}:`, err)),
     );
   }
 
-  if (jellyfinConfigured) {
-    const baseUrl = jellyfinConfig.url!;
-    const apiKey = jellyfinConfig.apiKey!;
+  for (const { instance, config } of jellyfinTargets) {
+    const label = scanLabel("jellyfin", mediaType, instance);
     jobs.push(
-      refreshJellyfinLibrary(baseUrl, apiKey).catch((err) =>
-        console.error(`[library-scan] jellyfin ${mediaType}:`, err),
+      refreshJellyfinLibrary(config.url!, config.apiKey!).catch((err) =>
+        console.error(`[library-scan] ${label}:`, err),
       ),
     );
   }

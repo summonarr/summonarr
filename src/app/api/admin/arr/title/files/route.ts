@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { tooManyRequests } from "@/lib/http";
 import { withAdmin } from "@/lib/api-auth";
 import { snapshotted } from "@/lib/arr-snapshot";
 import { arrErrorMessage } from "@/lib/arr";
@@ -6,10 +7,11 @@ import { arrFailure, arrTitleGate, parseIdArray, readWarnKey } from "@/lib/arr-a
 import { parseIdList } from "@/lib/arr-history";
 import { MAX_TITLE_FILE_IDS, TITLE_FILE_IDS_BODY_BYTES } from "@/lib/arr-title";
 import { deleteTitleFiles, loadTitleFiles } from "@/lib/arr-title-data";
-import { auditContext, logAudit } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { forgetWarnOnChange } from "@/lib/log-dedup";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { answerOf, jobResponse, startArrJob } from "@/lib/release-search-jobs";
 import { sanitizeForLog } from "@/lib/sanitize";
 
@@ -30,10 +32,19 @@ import { sanitizeForLog } from "@/lib/sanitize";
 //       another disk is a copy), past a reverse proxy's hold — the admin saw
 //       "delete failed" while the arr finished it. The same owner deleting the
 //       same files of the same title while one runs joins it. Without `async`
-//       the delete answers inline (API callers).
+//       the delete answers inline (API callers). 429 past DELETE_LIMIT_PER_MIN
+//       per admin.
 //   GET ?job=<id> → that delete's poll: 202 { job, running } while it runs,
 //       then the DELETE's own status and body; 404 once it's gone (expired, or
 //       a restart — reload the files, never re-run it blindly).
+// Deletes per admin per minute: one per click (a ticked set is one call), so
+// this bounds a runaway client, not an admin clearing out a title.
+const DELETE_LIMIT_PER_MIN = 30;
+// `?fileIds=` is for a handful — a URL holds far fewer ids than a body, so a
+// longer list belongs in `{ fileIds }` (MAX_TITLE_FILE_IDS). The spec documents
+// both numbers.
+const MAX_QUERY_FILE_IDS = 1_000;
+
 const jobKey = (service: string, instance: string, arrId: number, fileIds: readonly number[]) =>
   `title-files\u0000${service}\u0000${instance}\u0000${arrId}\u0000${[...fileIds].sort((a, b) => a - b).join(",")}`;
 
@@ -67,18 +78,20 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
   let fileIds: number[] | null;
   let background = false;
   if (q.has("fileIds")) {
-    fileIds = parseIdList(q.get("fileIds"), 1_000);
+    fileIds = parseIdList(q.get("fileIds"), MAX_QUERY_FILE_IDS);
   } else {
-    const parsed = await readJsonCapped<Record<string, unknown>>(req, TITLE_FILE_IDS_BODY_BYTES);
-    if (parsed instanceof NextResponse) return parsed;
-    const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
-    fileIds = parseIdArray(body ? body.fileIds : null, MAX_TITLE_FILE_IDS);
-    background = body?.async === true;
+    const body = await readJsonCapped<Record<string, unknown>>(req, TITLE_FILE_IDS_BODY_BYTES);
+    if (body instanceof NextResponse) return body;
+    fileIds = parseIdArray(body.fileIds, MAX_TITLE_FILE_IDS);
+    background = body.async === true;
   }
   if (!fileIds) return NextResponse.json({ error: t("apiAdmin.arr.fileIdsInvalid") }, { status: 400 });
+  if (!checkRateLimit(`arr-title-file-delete:${session.user.id}`, DELETE_LIMIT_PER_MIN, 60_000)) {
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
+  }
   const ids = fileIds;
   // Read off the request now: a job outlives it.
-  const audit = auditContext(req, session);
+  const actor = auditActor(req, session);
   const remove = async (): Promise<NextResponse> => {
     let result;
     try {
@@ -89,12 +102,10 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
     const { deleted, error } = result;
     // What was deleted is audited even when a later delete failed (guardrail 26).
     void logAudit({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email ?? null,
+      ...actor,
       action: "ARR_FILE_DELETE",
       target: `${target.service}:${target.instance}:${target.arrId}`,
       details: { service: target.service, instance: target.instance, arrId: target.arrId, fileIds: deleted, count: deleted.length },
-      ...audit,
     });
     if (error) {
       console.warn(`[arr-admin] ${target.service} instance "${sanitizeForLog(target.instance)}" file delete stopped part-way:`, arrErrorMessage(error));

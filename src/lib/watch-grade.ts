@@ -132,14 +132,24 @@ export function watchGradeBands(settings: BandSettings): { letter: WatchGradeLet
   ];
 }
 
+// What 0 means for a field that accepts it. A tag, not the message text: the
+// English fragment and the translated key are each looked up from it, so
+// rewording one can never silently change which the other picks.
+type ZeroMeaning = "noLimit" | "off";
+const ZERO_TEXT: Record<ZeroMeaning, string> = { noLimit: "for no limit", off: "to turn it off" };
+const ZERO_KEY: Record<ZeroMeaning, string> = {
+  noLimit: "apiAdmin.watchGrade.rangeOrZeroNoLimit",
+  off: "apiAdmin.watchGrade.rangeOrZeroOff",
+};
+
 // One table serves the write-side validator (/api/settings) and the read-side
 // parser, so a value the settings route accepts can never be clamped into
 // something else on read. `zero` names what 0 means for the fields that accept it.
-const SETTING_BOUNDS: Record<keyof WatchGradeSettings, { min: number; max: number; zero: string | null }> = {
+const SETTING_BOUNDS: Record<keyof WatchGradeSettings, { min: number; max: number; zero: ZeroMeaning | null }> = {
   graceDays: { min: 1, max: 365, zero: null },
-  windowDays: { min: 30, max: 3650, zero: "for no limit" },
+  windowDays: { min: 30, max: 3650, zero: "noLimit" },
   tvEpisodePercent: { min: 1, max: 100, zero: null },
-  otherViewers: { min: 1, max: 100, zero: "to turn it off" },
+  otherViewers: { min: 1, max: 100, zero: "off" },
   // No 0: a D cutoff of 0 would make an F impossible.
   bandA: { min: 1, max: 100, zero: null },
   bandB: { min: 1, max: 100, zero: null },
@@ -170,13 +180,8 @@ export function watchGradeSettingError(key: string, value: string, t?: Translato
   if (!field) return null;
   if (parseBounded(value, field) !== null) return null;
   const b = SETTING_BOUNDS[field];
-  if (t) {
-    const vars = { key, min: b.min, max: b.max };
-    if (b.zero === "for no limit") return t("apiAdmin.watchGrade.rangeOrZeroNoLimit", vars);
-    if (b.zero === "to turn it off") return t("apiAdmin.watchGrade.rangeOrZeroOff", vars);
-    return t("apiAdmin.watchGrade.range", vars);
-  }
-  return `"${key}" must be an integer between ${b.min} and ${b.max}${b.zero ? `, or 0 ${b.zero}` : ""}`;
+  if (t) return t(b.zero ? ZERO_KEY[b.zero] : "apiAdmin.watchGrade.range", { key, min: b.min, max: b.max });
+  return `"${key}" must be an integer between ${b.min} and ${b.max}${b.zero ? `, or 0 ${ZERO_TEXT[b.zero]}` : ""}`;
 }
 
 // The rules that span fields, checked on write against the MERGED values (stored
@@ -473,20 +478,23 @@ function librarySeason(input: GradeUserInput, tmdbId: number, season: number): n
   return Math.max(0, input.libraryEpisodes.get(tmdbId)?.get(season) ?? 0);
 }
 
-function creditFor(
-  request: GradableRequest,
-  units: RequestPlayUnit[],
-  input: GradeUserInput,
-): { credit: number; episodes: EpisodeProgress | null } {
-  const threshold = input.watchedThresholdPercent;
-  if (request.mediaType === "MOVIE") {
-    if (units.some((u) => unitWatched(u, threshold))) return { credit: 1, episodes: null };
-    if (units.some(unitStarted)) return { credit: 0.5, episodes: null };
-    return { credit: 0, episodes: null };
-  }
+type Credit = { credit: number; episodes: EpisodeProgress | null };
 
-  // Per season; the best one is the show's credit. Specials and plays with no
-  // episode identity don't count toward any season.
+function creditFor(request: GradableRequest, units: RequestPlayUnit[], input: GradeUserInput): Credit {
+  return request.mediaType === "MOVIE" ? movieCredit(units, input.watchedThresholdPercent) : showCredit(request, units, input);
+}
+
+function movieCredit(units: RequestPlayUnit[], threshold: number): Credit {
+  if (units.some((u) => unitWatched(u, threshold))) return { credit: 1, episodes: null };
+  if (units.some(unitStarted)) return { credit: 0.5, episodes: null };
+  return { credit: 0, episodes: null };
+}
+
+// Per season; the best one is the show's credit. Specials and plays with no
+// episode identity don't count toward any season. A season the episode cache
+// doesn't know needs one watched episode (requiredEpisodes(0)).
+function showCredit(request: GradableRequest, units: RequestPlayUnit[], input: GradeUserInput): Credit {
+  const threshold = input.watchedThresholdPercent;
   const played = new Map<number, { watched: number; started: number }>();
   for (const u of units) {
     if (u.seasonNumber == null || u.seasonNumber <= 0 || u.episodeNumber == null) continue;
@@ -569,6 +577,66 @@ function foldByTitle(requests: GradableRequest[]): FoldedRequest[] {
   return out;
 }
 
+function groupByRequest<T extends { requestId: string }>(items: T[]): Map<string, T[]> {
+  const out = new Map<string, T[]>();
+  for (const item of items) {
+    const list = out.get(item.requestId);
+    if (list) list.push(item);
+    else out.set(item.requestId, [item]);
+  }
+  return out;
+}
+
+// Whether a request counts yet: never before coverage began (or for a user whose
+// watches can't be seen), not inside its grace period, scored after.
+function scoringStateFor(
+  fulfilledMs: number,
+  observable: boolean,
+  coverageStartMs: number | null,
+  nowMs: number,
+  graceDays: number,
+): { scoring: ScoringState; graceDaysLeft: number | null } {
+  if (!observable || coverageStartMs === null || fulfilledMs < coverageStartMs) return { scoring: "untracked", graceDaysLeft: null };
+  const graceEndsMs = fulfilledMs + graceDays * DAY_MS;
+  if (nowMs < graceEndsMs) return { scoring: "grace", graceDaysLeft: Math.ceil((graceEndsMs - nowMs) / DAY_MS) };
+  return { scoring: "scored", graceDaysLeft: null };
+}
+
+// Adds one verdict to the summary's buckets (verdictMatchesFilter mirrors them).
+function tallyVerdict(summary: WatchGradeSummary, v: RequestWatchVerdict): void {
+  if (v.scoring === "untracked") summary.untracked++;
+  else if (v.scoring === "grace") summary.inGrace++;
+  else {
+    summary.graded++;
+    if (v.watch === "watched") summary.watched++;
+    else if (v.watchedByOthers) summary.byOthers++;
+    else if (v.watch === "partial") summary.partial++;
+    else summary.unwatched++;
+  }
+}
+
+// The summary's status, score and letter once every verdict is tallied.
+// `creditSum` is the unrounded credit of the scored verdicts.
+function settleSummary(
+  summary: WatchGradeSummary,
+  identity: WatchGradeIdentity,
+  coverageStartMs: number | null,
+  creditSum: number,
+  settings: WatchGradeSettings,
+): void {
+  if (identity.kind === "unlinked") {
+    summary.status = "unlinked";
+  } else if (identity.kind === "untracked" || coverageStartMs === null) {
+    summary.status = "untracked";
+  } else {
+    if (summary.graded > 0) summary.score = Math.round((creditSum / summary.graded) * 100);
+    if (summary.graded >= settings.minGradedRequests && summary.score !== null) {
+      summary.status = "graded";
+      summary.letter = letterForScore(summary.score, settings);
+    }
+  }
+}
+
 export function gradeUser(input: GradeUserInput): UserWatchGrade {
   const { identity, settings, now } = input;
   const nowMs = now.getTime();
@@ -577,18 +645,8 @@ export function gradeUser(input: GradeUserInput): UserWatchGrade {
   const coverageStartMs =
     identity.kind === "tracked" && identity.coverageStart ? identity.coverageStart.getTime() : null;
 
-  const unitsByRequest = new Map<string, RequestPlayUnit[]>();
-  for (const u of input.units) {
-    const list = unitsByRequest.get(u.requestId);
-    if (list) list.push(u);
-    else unitsByRequest.set(u.requestId, [u]);
-  }
-  const otherWatchesByRequest = new Map<string, OtherViewerWatch[]>();
-  for (const w of input.otherWatches) {
-    const list = otherWatchesByRequest.get(w.requestId);
-    if (list) list.push(w);
-    else otherWatchesByRequest.set(w.requestId, [w]);
-  }
+  const unitsByRequest = groupByRequest(input.units);
+  const otherWatchesByRequest = groupByRequest(input.otherWatches);
 
   const requests = foldByTitle(
     input.requests.filter((r) => windowStartMs === null || r.fulfilledAt.getTime() >= windowStartMs),
@@ -598,21 +656,7 @@ export function gradeUser(input: GradeUserInput): UserWatchGrade {
   let creditSum = 0;
 
   const verdicts = requests.map((r): RequestWatchVerdict => {
-    const fulfilledMs = r.fulfilledAt.getTime();
-    let scoring: ScoringState;
-    let graceDaysLeft: number | null = null;
-    if (!observable || coverageStartMs === null || fulfilledMs < coverageStartMs) {
-      scoring = "untracked";
-    } else {
-      const graceEndsMs = fulfilledMs + settings.graceDays * DAY_MS;
-      if (nowMs < graceEndsMs) {
-        scoring = "grace";
-        graceDaysLeft = Math.ceil((graceEndsMs - nowMs) / DAY_MS);
-      } else {
-        scoring = "scored";
-      }
-    }
-
+    const { scoring, graceDaysLeft } = scoringStateFor(r.fulfilledAt.getTime(), observable, coverageStartMs, nowMs, settings.graceDays);
     const own = observable
       ? creditFor(r, unitsByRequest.get(r.id) ?? [], input)
       : { credit: 0, episodes: null };
@@ -627,19 +671,9 @@ export function gradeUser(input: GradeUserInput): UserWatchGrade {
         : null;
     const watchedByOthers = otherViewers !== null && otherViewers >= settings.otherViewers;
     const credit = watchedByOthers ? 1 : own.credit;
+    if (scoring === "scored") creditSum += credit;
 
-    if (scoring === "untracked") summary.untracked++;
-    else if (scoring === "grace") summary.inGrace++;
-    else {
-      summary.graded++;
-      creditSum += credit;
-      if (watch === "watched") summary.watched++;
-      else if (watchedByOthers) summary.byOthers++;
-      else if (watch === "partial") summary.partial++;
-      else summary.unwatched++;
-    }
-
-    return {
+    const verdict: RequestWatchVerdict = {
       requestId: r.id,
       tmdbId: r.tmdbId,
       mediaType: r.mediaType,
@@ -657,20 +691,11 @@ export function gradeUser(input: GradeUserInput): UserWatchGrade {
       graceDaysLeft,
       episodes: own.episodes,
     };
+    tallyVerdict(summary, verdict);
+    return verdict;
   });
 
-  if (identity.kind === "unlinked") {
-    summary.status = "unlinked";
-  } else if (identity.kind === "untracked" || coverageStartMs === null) {
-    summary.status = "untracked";
-  } else {
-    if (summary.graded > 0) summary.score = Math.round((creditSum / summary.graded) * 100);
-    if (summary.graded >= settings.minGradedRequests && summary.score !== null) {
-      summary.status = "graded";
-      summary.letter = letterForScore(summary.score, settings);
-    }
-  }
-
+  settleSummary(summary, identity, coverageStartMs, creditSum, settings);
   return { summary, verdicts };
 }
 
@@ -689,6 +714,25 @@ export function watchGradeSpread(summaries: Iterable<WatchGradeSummary>): WatchG
     else spread.notGraded++;
   }
   return spread;
+}
+
+// The breakdown's filters. Each but "all" is exactly one of the summary's
+// buckets (gradeUser's tally), so over a complete verdict list a filter's rows
+// are that bucket's count.
+export type WatchGradeFilter = "all" | "unwatched" | "partial" | "others" | "watched" | "grace" | "untracked";
+
+export function verdictMatchesFilter(v: RequestWatchVerdict, filter: WatchGradeFilter): boolean {
+  switch (filter) {
+    case "all":
+      return true;
+    case "grace":
+    case "untracked":
+      return v.scoring === filter;
+    case "others":
+      return v.scoring === "scored" && v.watchedByOthers;
+    default:
+      return v.scoring === "scored" && !v.watchedByOthers && v.watch === filter;
+  }
 }
 
 // "watched/scored" for the chip — the requests that earned full credit: the

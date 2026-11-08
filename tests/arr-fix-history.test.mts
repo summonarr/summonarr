@@ -296,7 +296,7 @@ test("the page the admin viewed is re-read first: a hit needs no scan, a miss fa
 
 // ── audit ────────────────────────────────────────────────────────────────────
 
-test("the removal audit names each release and its title; a clear records the count the admin confirmed", async () => {
+test("the removal audit names each release and its title; a clear records the size the arr reported, and apart the count the admin confirmed", async () => {
   const token = await mintSession();
   responder = both(
     blocklistOf(5, { 3: { sourceTitle: "The.Matrix.1999.CAM" }, 4: { sourceTitle: "x".repeat(800), movieId: 12 } }),
@@ -312,10 +312,39 @@ test("the removal audit names each release and its title; a clear records the co
     { id: 4, release: "x".repeat(500), movieId: 12 },
   ]);
 
-  assert.equal((await call(clearRoute.POST, token, "/admin/arr/blocklist/clear", { method: "POST", body: { service: "radarr", count: 42 } })).status, 202);
+  assert.equal((await call(clearRoute.POST, token, "/admin/arr/blocklist/clear", { method: "POST", body: { service: "radarr", count: 5 } })).status, 202);
   assert.equal((await call(clearRoute.POST, token, "/admin/arr/blocklist/clear", { method: "POST", body: { service: "radarr" } })).status, 202);
   assert.equal((await call(clearRoute.POST, token, "/admin/arr/blocklist/clear", { method: "POST", body: { service: "radarr", count: "lots" } })).status, 202);
-  assert.deepEqual(audits.slice(1).map(detailsOf).map((d) => [d.cleared, d.count]), [[true, 42], [true, null], [true, null]]);
+  // `count` is the arr's own total, read just before the clear; the body's
+  // `count` is what the admin confirmed (recorded as `confirmedCount`, and a
+  // different measured size refuses the clear — see the next test).
+  assert.deepEqual(audits.slice(1).map(detailsOf).map((d) => [d.cleared, d.count, d.confirmedCount]), [[true, 5, 5], [true, 5, null], [true, 5, null]]);
+});
+
+test("a clear whose confirmed count differs from the arr's size now is refused with a 409 and clears nothing", async () => {
+  const token = await mintSession();
+  let commandPosted = false;
+  responder = both(
+    blocklistOf(5, {}),
+    (c) => {
+      if (c.method === "POST" && c.path === "/api/v3/command") { commandPosted = true; return json({ id: 1 }, 201); }
+      return undefined;
+    },
+  );
+  const res = await call(clearRoute.POST, token, "/admin/arr/blocklist/clear", { method: "POST", body: { service: "radarr", count: 42 } });
+  assert.equal(res.status, 409);
+  assert.equal(commandPosted, false, "the arr was never told to clear");
+  assert.equal(audits.length, 0, "no clear, no clear audit");
+});
+
+test("a clear whose size read fails still clears, recording the count as unknown", async () => {
+  const token = await mintSession();
+  responder = both(
+    (c) => (c.method === "GET" && c.path === "/api/v3/blocklist" ? json({ message: "down" }, 500) : undefined),
+    (c) => (c.method === "POST" && c.path === "/api/v3/command" ? json({ id: 1 }, 201) : undefined),
+  );
+  assert.equal((await call(clearRoute.POST, token, "/admin/arr/blocklist/clear", { method: "POST", body: { service: "radarr", count: 9 } })).status, 202);
+  assert.deepEqual(audits.map(detailsOf).map((d) => [d.cleared, d.count, d.confirmedCount]), [[true, null, 9]]);
 });
 
 test("the Sonarr removal audit names the series", async () => {
@@ -537,8 +566,15 @@ test("History, Blocklist and Calendar re-read their list when the title manager 
   const blocks = (f: string) => [...src(f).matchAll(/<ManageTitleButton\b[\s\S]*?\/>/g)].map((m) => m[0]);
   const history = blocks("arr-download-history.tsx");
   assert.equal(history.length, 2, "the History rows and the Blocklist rows");
-  for (const b of history) assert.match(b, /onRemoved=\{\(\) => void loadRef\.current\(\)\}/);
+  for (const b of history) assert.match(b, /onRemoved=\{onRemoved\}/);
+  // Both panels are handed the view's reload — the loader of the view on screen now.
+  assert.equal([...src("arr-download-history.tsx").matchAll(/onRemoved=\{\(\) => void reload\(\)\}/g)].length, 2);
+  assert.match(src("use-history-view.ts"), /const reload = useCallback\(\(opts\?: \{ keepError\?: boolean \}\) => loadRef\.current\(opts\), \[\]\);/);
   const calendar = blocks("arr-calendar.tsx");
   assert.equal(calendar.length, 1);
-  assert.match(calendar[0], /onRemoved=\{\(\) => \{\s*if \(start !== null\) void load\(start, unmonitored\);\s*\}\}/);
+  // The row's manager reports a removal up to the page, which re-reads its window.
+  assert.match(calendar[0], /onRemoved=\{ctx\.onRemoved\}/);
+  const page = src("arr-calendar.tsx");
+  assert.match(page, /const reloadWindow = \(\) => \{\s*if \(start !== null\) void load\(start, unmonitored\);\s*\};/);
+  assert.match(page, /onRemoved: reloadWindow,/);
 });

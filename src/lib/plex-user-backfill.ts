@@ -41,179 +41,222 @@ import { isPrismaErrorCode } from "@/lib/prisma-errors";
 // its email rewritten to deleted-<id>@deleted.invalid, which matches the
 // Plex-only candidate shape exactly; this same filter excludes it.
 
+// The run marker. Written here when a run completes; READ only by the boot
+// caller (instrumentation.ts), which skips the backfill once it exists — this
+// helper stays re-runnable. One constant for both sides: renaming it on one side
+// alone would rerun the email-match backfill on every boot. The stored string
+// must not change, or existing installs lose their marker.
+export const PLEX_USER_BACKFILL_RAN_AT_KEY = "plexUserIdBackfillRanAt";
+
+// Emails stay out of these logs: the unmatched list can be the whole Plex-only
+// user base. The user id is what an admin needs to find the account.
+
+type Candidate = { id: string; email: string };
+
+function loadCandidates(): Promise<Candidate[]> {
+  return prisma.user.findMany({
+    where: {
+      plexUserId: null,
+      jellyfinUserId: null,
+      passwordHash: null,
+      deactivatedAt: null,
+      accounts: { none: { provider: "oidc" } },
+      NOT: { email: { endsWith: "@jellyfin.local" } },
+    },
+    select: { id: true, email: true },
+  });
+}
+
+interface PlexAccountIndex {
+  idByEmail: Map<string, string>;
+  ambiguousEmails: Set<string>;
+  accountsFetched: number;
+  // Any configured instance that did not hand back a COMPLETE account list —
+  // it threw, returned nothing, or (the quiet one) came back owner-only
+  // because getPlexAccountsDetailed's friends hop failed or 401'd. A person
+  // reachable only through the missing half is invisible to this run.
+  incompleteFetch: boolean;
+}
+
+// One instance's account list, or null when it gave none (already warned).
+async function fetchInstanceAccounts(token: string, label: string, index: PlexAccountIndex): Promise<PlexAccountInfo[] | null> {
+  try {
+    const result = await getPlexAccountsDetailed(token);
+    if (!result.ownerOk || !result.friendsOk) {
+      // Each hop is swallowed inside getPlexAccountsDetailed, so without this
+      // an owner-only list from a FAILED friends hop is indistinguishable
+      // from an admin who genuinely shares with nobody — and stamping the
+      // never-retry marker on it strands every friend permanently.
+      index.incompleteFetch = true;
+      console.warn(
+        `[plex-backfill] ${label} returned a partial account list (owner: ${result.ownerOk ? "ok" : "failed"}, shared users: ${result.friendsOk ? "ok" : "failed"}).`,
+      );
+    }
+    if (result.accounts.length === 0) {
+      console.warn(`[plex-backfill] ${label} returned no accounts; skipping this instance (token may be invalid).`);
+      index.incompleteFetch = true;
+      return null;
+    }
+    return result.accounts;
+  } catch (err) {
+    // Defensive — getPlexAccountsDetailed swallows its own hop failures, but
+    // a throw from one instance must not cost the others' contributions.
+    console.warn(`[plex-backfill] Account fetch failed for ${label}; skipping this instance:`, err instanceof Error ? err.message : String(err));
+    index.incompleteFetch = true;
+    return null;
+  }
+}
+
+// Account lists come from EVERY configured Plex instance (multi-server
+// support). The instance list is getMediaInstances (a single registry
+// findUnique on `plexInstances`, default entry always first) + direct
+// per-instance findUnique reads below — NOT getSyncableMediaInstances,
+// whose isMediaInstanceConfigured check issues a connection-keys findMany
+// (the unit harness's setting stub is findUnique+upsert-only, the same
+// constraint the play-history poller documents), and NOT getPlexConfig,
+// which reads ServerUrl unconditionally: reading the token FIRST preserves
+// "unconfigured ⇒ ServerUrl not even read, zero plex.tv traffic".
+//
+// A plex.tv email is user-changeable and not guaranteed unique across the
+// accounts an admin can see. If two distinct account ids normalize to the
+// same email — within one instance's list OR across instances — binding by
+// email could attach a local record to the wrong account, so such an email
+// is marked ambiguous and skipped — those users fall into `unmatched` and
+// an admin sets plexUserId explicitly instead. The same id re-listed (an
+// admin/friend shared across instances — getPlexAccountsDetailed is
+// account-level, so that is the normal multi-server case) is a no-op, not
+// ambiguous.
+async function indexPlexAccounts(): Promise<PlexAccountIndex> {
+  const instances = await getMediaInstances("plex");
+  const index: PlexAccountIndex = { idByEmail: new Map(), ambiguousEmails: new Set(), accountsFetched: 0, incompleteFetch: false };
+  for (const instance of instances) {
+    const tokenRow = await prisma.setting.findUnique({ where: { key: plexSettingKey(instance.slug, "AdminToken") } });
+    if (!tokenRow?.value) continue; // instance not configured — nothing to fetch from it
+    // No server address is needed: owner + friends both come account-level
+    // from plex.tv, not machine-scoped.
+    const accounts = await fetchInstanceAccounts(tokenRow.value, mediaInstanceLabel("plex", instance.slug), index);
+    if (!accounts) continue;
+    index.accountsFetched += accounts.length;
+    for (const a of accounts) {
+      if (!a.email || !a.id) continue;
+      const norm = normalizeEmail(a.email);
+      const existing = index.idByEmail.get(norm);
+      if (existing !== undefined && existing !== a.id) {
+        index.ambiguousEmails.add(norm);
+        continue;
+      }
+      index.idByEmail.set(norm, a.id);
+    }
+  }
+  return index;
+}
+
+interface BindOutcome {
+  bound: number;
+  unmatched: string[];
+  // A matched user whose write failed for another reason (the DB, not the
+  // email): a retry can fix it, so it holds the marker back.
+  bindFailures: Array<{ id: string; reason: string }>;
+}
+
+async function bindCandidates(candidates: Candidate[], index: PlexAccountIndex): Promise<BindOutcome> {
+  const outcome: BindOutcome = { bound: 0, unmatched: [], bindFailures: [] };
+  for (const u of candidates) {
+    const norm = normalizeEmail(u.email);
+    const plexId = index.ambiguousEmails.has(norm) ? undefined : index.idByEmail.get(norm);
+    if (!plexId) {
+      outcome.unmatched.push(u.id);
+      continue;
+    }
+    try {
+      // Conditional on the column still being null: a Plex sign-in that bound
+      // this row since the candidate read keeps its binding.
+      const res = await prisma.user.updateMany({
+        where: { id: u.id, plexUserId: null },
+        data: { plexUserId: plexId },
+      });
+      if (res.count > 0) outcome.bound++;
+    } catch (err) {
+      // A unique violation is NOT a benign race: candidates have a null
+      // plexUserId and Plex sign-in never binds an email-matched row, so a
+      // P2002 means a DIFFERENT User row already owns this plex id. Retrying
+      // cannot fix that, so it doesn't hold the marker back — but it must be
+      // named, or the account stays unbound with no operator signal.
+      if (isPrismaErrorCode(err, "P2002")) {
+        console.warn(
+          `[plex-backfill] Could not bind user ${u.id} to Plex account ${plexId}: another user already ` +
+            "holds that plexUserId. Plex sign-in for that account resolves to the other user; merge or fix the " +
+            "duplicate by hand.",
+        );
+        continue;
+      }
+      // Anything else is not an email mismatch: the user DID match, and the
+      // write failed. Counted apart from `unmatched` and withheld from the
+      // marker below, so the next boot binds them.
+      outcome.bindFailures.push({ id: u.id, reason: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return outcome;
+}
+
+// Withhold the never-retry marker when this run BOTH left someone unbound and
+// saw an incomplete fetch: that person may be sitting in the half we failed to
+// read, and stamping would strand them permanently (the read side in
+// instrumentation.ts treats an absent marker as "retry next boot"). A partial
+// failure that cost nobody a match still stamps — every candidate is resolved,
+// so there is nothing a retry could improve. A failed write holds it back too.
+function shouldStampMarker(index: PlexAccountIndex, outcome: BindOutcome): boolean {
+  if (outcome.bindFailures.length > 0) {
+    const affected = outcome.bindFailures.map((u) => `${u.id}: ${u.reason}`).join("; ");
+    console.warn(
+      `[plex-backfill] ${outcome.bindFailures.length} matched Plex user(s) could not be saved — not stamping the run ` +
+        `marker so the next boot retries. ${affected}`,
+    );
+  }
+  if (index.incompleteFetch && outcome.unmatched.length > 0) {
+    console.warn(
+      `[plex-backfill] ${outcome.unmatched.length} user(s) unbound after a partial account fetch — not stamping the ` +
+        "run marker so the next boot retries.",
+    );
+    return false;
+  }
+  return outcome.bindFailures.length === 0;
+}
+
 export async function runPlexUserBackfillIfNeeded(): Promise<void> {
   try {
-    const candidates = await prisma.user.findMany({
-      where: {
-        plexUserId: null,
-        jellyfinUserId: null,
-        passwordHash: null,
-        deactivatedAt: null,
-        accounts: { none: { provider: "oidc" } },
-        NOT: { email: { endsWith: "@jellyfin.local" } },
-      },
-      select: { id: true, email: true },
-    });
+    const candidates = await loadCandidates();
     if (candidates.length === 0) return;
 
-    // Account lists come from EVERY configured Plex instance (multi-server
-    // support). The instance list is getMediaInstances (a single registry
-    // findUnique on `plexInstances`, default entry always first) + direct
-    // per-instance findUnique reads below — NOT getSyncableMediaInstances,
-    // whose isMediaInstanceConfigured check issues a connection-keys findMany
-    // (the unit harness's setting stub is findUnique+upsert-only, the same
-    // constraint the play-history poller documents), and NOT getPlexConfig,
-    // which reads ServerUrl unconditionally: reading the token FIRST preserves
-    // "unconfigured ⇒ ServerUrl not even read, zero plex.tv traffic".
-    const instances = await getMediaInstances("plex");
-
-    // A plex.tv email is user-changeable and not guaranteed unique across the
-    // accounts an admin can see. If two distinct account ids normalize to the
-    // same email — within one instance's list OR across instances — binding by
-    // email could attach a local record to the wrong account, so such an email
-    // is marked ambiguous and skipped — those users fall into `unmatched` and
-    // an admin sets plexUserId explicitly instead. The same id re-listed (an
-    // admin/friend shared across instances — getPlexAccounts is account-level,
-    // so that is the normal multi-server case) is a no-op, not ambiguous.
-    const idByEmail = new Map<string, string>();
-    const ambiguousEmails = new Set<string>();
-    let accountsFetched = 0;
-    // Any configured instance that did not hand back a COMPLETE account list —
-    // it threw, returned nothing, or (the quiet one) came back owner-only
-    // because getPlexAccountsDetailed's friends hop failed or 401'd. A person
-    // reachable only through the missing half is invisible to this run.
-    let incompleteFetch = false;
-
-    for (const instance of instances) {
-      const tokenRow = await prisma.setting.findUnique({ where: { key: plexSettingKey(instance.slug, "AdminToken") } });
-      if (!tokenRow?.value) continue; // instance not configured — nothing to fetch from it
-
-      // getPlexAccounts ignores its serverUrl param (owner + friends both come
-      // account-level from plex.tv, not machine-scoped) — tolerate it missing.
-      const serverRow = await prisma.setting.findUnique({ where: { key: plexSettingKey(instance.slug, "ServerUrl") } });
-      const serverUrl = serverRow?.value ?? "";
-
-      const label = mediaInstanceLabel("plex", instance.slug);
-      let accounts: PlexAccountInfo[];
-      try {
-        const result = await getPlexAccountsDetailed(serverUrl, tokenRow.value);
-        accounts = result.accounts;
-        if (!result.ownerOk || !result.friendsOk) {
-          // Each hop is swallowed inside getPlexAccountsDetailed, so without this
-          // an owner-only list from a FAILED friends hop is indistinguishable
-          // from an admin who genuinely shares with nobody — and stamping the
-          // never-retry marker on it strands every friend permanently.
-          incompleteFetch = true;
-          console.warn(
-            `[plex-backfill] ${label} returned a partial account list (owner: ${result.ownerOk ? "ok" : "failed"}, shared users: ${result.friendsOk ? "ok" : "failed"}).`,
-          );
-        }
-      } catch (err) {
-        // Defensive — getPlexAccountsDetailed swallows its own hop failures, but
-        // a throw from one instance must not cost the others' contributions.
-        console.warn(`[plex-backfill] Account fetch failed for ${label}; skipping this instance:`, err instanceof Error ? err.message : String(err));
-        incompleteFetch = true;
-        continue;
-      }
-      if (accounts.length === 0) {
-        console.warn(`[plex-backfill] ${label} returned no accounts; skipping this instance (token may be invalid).`);
-        incompleteFetch = true;
-        continue;
-      }
-      accountsFetched += accounts.length;
-
-      for (const a of accounts) {
-        if (!a.email || !a.id) continue;
-        const norm = normalizeEmail(a.email);
-        const existing = idByEmail.get(norm);
-        if (existing !== undefined && existing !== a.id) {
-          ambiguousEmails.add(norm);
-          continue;
-        }
-        idByEmail.set(norm, a.id);
-      }
-    }
-
+    const index = await indexPlexAccounts();
     // Nothing fetched from ANY instance: either Plex is unconfigured (no
     // instance has a token — silent, same as before) or every configured
-    // instance failed/returned empty (each already warned above). Return
-    // WITHOUT stamping ranAt so the next boot retries.
-    if (accountsFetched === 0) return;
+    // instance failed/returned empty (each already warned). Return WITHOUT
+    // stamping ranAt so the next boot retries.
+    if (index.accountsFetched === 0) return;
 
-    let bound = 0;
-    const unmatched: { id: string; email: string }[] = [];
-    for (const u of candidates) {
-      const norm = normalizeEmail(u.email);
-      const plexId = ambiguousEmails.has(norm) ? undefined : idByEmail.get(norm);
-      if (!plexId) {
-        unmatched.push({ id: u.id, email: u.email });
-        continue;
-      }
-      try {
-        await prisma.user.update({
-          where: { id: u.id },
-          data: { plexUserId: plexId },
-        });
-        bound++;
-      } catch (err) {
-        // A unique violation is NOT a benign race: candidates have a null
-        // plexUserId and Plex sign-in never binds an email-matched row, so a
-        // P2002 means a DIFFERENT User row already owns this plex id. Retrying
-        // cannot fix that, so it doesn't hold the marker back — but it must be
-        // named, or the account stays unbound with no operator signal.
-        if (isPrismaErrorCode(err, "P2002")) {
-          console.warn(
-            `[plex-backfill] Could not bind ${u.email} (${u.id}) to Plex account ${plexId}: another user already ` +
-              "holds that plexUserId. Plex sign-in for that account resolves to the other user; merge or fix the " +
-              "duplicate by hand.",
-          );
-          continue;
-        }
-        // Anything else: swallowing it left the user in neither `bound` nor
-        // `unmatched`, so nothing warned and the marker stamped over a failure
-        // nobody could see.
-        console.warn(
-          `[plex-backfill] Binding ${u.email} failed:`,
-          err instanceof Error ? err.message : String(err),
-        );
-        unmatched.push({ id: u.id, email: u.email });
-      }
-    }
-
-    // Withhold the never-retry marker when this run BOTH left someone unbound and
-    // saw an incomplete fetch: that person may be sitting in the half we failed to
-    // read, and stamping would strand them permanently (the read side in
-    // instrumentation.ts treats an absent marker as "retry next boot"). A partial
-    // failure that cost nobody a match still stamps — every candidate is resolved,
-    // so there is nothing a retry could improve.
-    if (incompleteFetch && unmatched.length > 0) {
-      console.warn(
-        `[plex-backfill] ${unmatched.length} user(s) unbound after a partial account fetch — not stamping the ` +
-          "run marker so the next boot retries.",
-      );
-      return;
-    }
+    const outcome = await bindCandidates(candidates, index);
+    if (!shouldStampMarker(index, outcome)) return;
 
     await prisma.setting.upsert({
-      where: { key: "plexUserIdBackfillRanAt" },
-      create: { key: "plexUserIdBackfillRanAt", value: new Date().toISOString() },
+      where: { key: PLEX_USER_BACKFILL_RAN_AT_KEY },
+      create: { key: PLEX_USER_BACKFILL_RAN_AT_KEY, value: new Date().toISOString() },
       update: { value: new Date().toISOString() },
     });
 
-    if (bound > 0) {
-      console.warn(`[plex-backfill] bound ${bound} existing Plex user(s) to their plex.tv account id.`);
+    if (outcome.bound > 0) {
+      console.warn(`[plex-backfill] bound ${outcome.bound} existing Plex user(s) to their plex.tv account id.`);
     }
-    if (unmatched.length > 0) {
-      const affected = unmatched.map((u) => `${u.email} (${u.id})`).join(", ");
+    if (outcome.unmatched.length > 0) {
       console.warn(
-        `[plex-backfill] ${unmatched.length} Plex-only user(s) could NOT be bound — their User.email does not ` +
+        `[plex-backfill] ${outcome.unmatched.length} Plex-only user(s) could NOT be bound — their User.email does not ` +
           "match any email returned by plex.tv for ANY configured Plex instance's admin token. They will be " +
           "REFUSED on next Plex sign-in until an admin updates their email (or sets plexUserId manually). " +
-          `Affected: ${affected}`,
+          `Affected user ids: ${outcome.unmatched.join(", ")}`,
       );
     }
   } catch (err) {
     // Best-effort — never block boot or throw.
-    console.error("[plex-backfill] Backfill failed:", err);
+    console.error("[plex-backfill] Backfill failed:", err instanceof Error ? err.message : String(err));
   }
 }

@@ -19,7 +19,9 @@ export function IssuePlaybackContext({ value, t }: { value: unknown; t: Translat
   const client = [ctx.player ?? ctx.platform, ctx.device].filter(Boolean).join(" · ");
   const method = ctx.playMethod ? (METHOD_KEYS[ctx.playMethod] ? t(METHOD_KEYS[ctx.playMethod]) : ctx.playMethod) : null;
   const media = [ctx.videoCodec, ctx.resolution, ctx.audioCodec, ctx.container].filter(Boolean).join(" ");
-  const where = ctx.relayed ? "relay" : ctx.location;
+  // lan/wan are shown as the server reported them; a relayed play is named in
+  // the viewer's language.
+  const where = ctx.relayed ? t("adminActivity.field.relay") : ctx.location;
   return (
     <div style={{ marginTop: 6, fontSize: 11, color: "var(--ds-fg-subtle)" }}>
       <p className="ds-mono" style={{ margin: 0 }}>

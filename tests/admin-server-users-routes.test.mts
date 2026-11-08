@@ -66,7 +66,7 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 // A private-range IP address (not a hostname), so safeFetchAdminConfigured
 // accepts it without doing a DNS lookup.
 const JF_URL = "http://10.10.0.5:8096";
-type FetchCall = { url: URL; method: string };
+type FetchCall = { url: URL; method: string; headers: Headers };
 const fetchCalls: FetchCall[] = [];
 let failPolicyFor = new Set<string>();
 let usersFetchMode: "array" | "queryresult" | "500" | "throw" | "garbage" = "array";
@@ -75,7 +75,7 @@ let jellyfinUsersPayload: unknown[] = [];
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
   const method = init?.method ?? "GET";
-  fetchCalls.push({ url, method });
+  fetchCalls.push({ url, method, headers: new Headers(init?.headers) });
   const ok = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { "content-type": "application/json" } });
 
   // /Users/<id>/Policy — the write half of setJellyfinDownloadPolicy
@@ -571,10 +571,18 @@ test("the list projects manualUserLink and serverInstance", async () => {
   assert.equal(body.users[0].serverInstance, "remote");
 });
 
-test("the list is bounded so a pathological server can't return an unbounded row set", async () => {
+test("the list is bounded so a pathological server can't return an unbounded row set — and says when it was cut", async () => {
   const t = await mintSession();
-  await getList(t);
-  assert.equal((opsOf("mediaServerUser.findMany")[0].args as { take: number }).take, 10_000);
+  msuRows = [msu({ id: "a" })];
+  const full = await (await getList(t)).json();
+  // One row past the 10,000 bound is read, so a full list and a cut one differ.
+  assert.equal((opsOf("mediaServerUser.findMany")[0].args as { take: number }).take, 10_001);
+  assert.equal(full.truncated, false);
+
+  msuRows = Array.from({ length: 10_001 }, (_, i) => msu({ id: `u${i}` }));
+  const cut = await (await getList(t)).json();
+  assert.equal(cut.users.length, 10_000);
+  assert.equal(cut.truncated, true);
 });
 
 test("the list carries the auto-disable flag alongside the users", async () => {
@@ -656,6 +664,19 @@ test("diagnose reports a plain array response and categorises every user", async
   assert.equal(body.rawCount, 2);
   assert.equal(body.processedCount, 2);
   assert.equal(body.skippedCount, 0);
+});
+
+test("diagnose sends the user sync's own admin headers (jellyfinAdminHeaders), not a copy that can drift", async () => {
+  const { jellyfinAdminHeaders } = await import("../src/lib/jellyfin.ts");
+  const t = await mintSession();
+  jellyfinUsersPayload = [];
+  await getDiagnose(t);
+  const call = fetchCalls.find((c) => c.url.pathname.endsWith("/Users"));
+  assert.ok(call);
+  const expected = new Headers(jellyfinAdminHeaders("jf-admin-key"));
+  for (const [name, value] of expected) assert.equal(call.headers.get(name), value, name);
+  const sentNames = [...call.headers.keys()].filter((n) => n !== "accept");
+  assert.deepEqual(sentNames.sort(), [...expected.keys()].sort());
 });
 
 test("diagnose recognises the QueryResult{Items} response shape", async () => {

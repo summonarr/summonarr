@@ -2,16 +2,22 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { prisma } from "@/lib/prisma";
-import { getMdblistUsageSnapshot, isMdblistQuotaLocked } from "@/lib/mdblist";
-import { isOmdbQuotaLocked } from "@/lib/omdb";
+import { getMdblistUsageSnapshot, isMdblistQuotaLocked, mdblistCacheKey } from "@/lib/mdblist";
+import { isOmdbQuotaLocked, omdbCacheKey } from "@/lib/omdb";
 import { fetchUnifiedRatings, type UnifiedRatingsResult } from "@/lib/omdb-availability";
 import type { TmdbMedia } from "@/lib/tmdb-types";
+import { tmdbDetailsKey } from "@/lib/tmdb-cache";
+import { tooManyRequests } from "@/lib/http";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 // Ratings-pipeline counterpart to /api/admin/debug/arr-state: dumps provider
 // configuration, in-process quota lockouts, the raw ratings cache rows
 // (mdblist/omdb per-title keys), and the rating-relevant slice of the details
 // cache. Read-only unless ?live=1, which runs a real fetchUnifiedRatings call
-// (provider requests + cache writes via the existing helpers).
+// (provider requests + cache writes via the existing helpers) — those spend
+// the MDBList/OMDb daily quota, so live probes are rate-limited per admin
+// (LIVE_LIMIT_PER_MIN, 429 with Retry-After past it; the read-only dump isn't).
+const LIVE_LIMIT_PER_MIN = 5;
 
 type RatingsCacheReport = {
   key: string;
@@ -54,7 +60,7 @@ function describeRatingsRow(
   };
 }
 
-export const GET = withAdmin(async (req, _ctx, _session) => {
+export const GET = withAdmin(async (req, _ctx, session) => {
   const sp = req.nextUrl.searchParams;
   const tmdbIdRaw = sp.get("tmdbId");
   const type = sp.get("type");
@@ -66,11 +72,14 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
   }
   const liveRequested = sp.get("live") === "1";
+  if (liveRequested && !checkRateLimit(`ratings-state-live:${session.user.id}`, LIVE_LIMIT_PER_MIN, 60_000)) {
+    return tooManyRequests(60);
+  }
 
   const now = new Date();
-  const mdblistCacheKey = `mdblist:tmdb:${type}:${tmdbId}`;
-  const omdbCacheKey = `omdb:tmdb:${type}:${tmdbId}`;
-  const detailsCacheKey = `${type}:${tmdbId}:details`;
+  const mdblistKey = mdblistCacheKey(type, tmdbId);
+  const omdbKey = omdbCacheKey(type, tmdbId);
+  const detailsCacheKey = tmdbDetailsKey(type, tmdbId);
 
   const [mdblistKeyRow, omdbKeyRow, traktIdRow, mdblistCacheRow, omdbCacheRow, detailsCacheRow] = await Promise.all([
     // The Prisma extension decrypts Setting.value on read; only truthiness is
@@ -78,8 +87,8 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     prisma.setting.findUnique({ where: { key: "mdblistApiKey" } }),
     prisma.setting.findUnique({ where: { key: "omdbApiKey" } }),
     prisma.setting.findUnique({ where: { key: "traktClientId" } }),
-    prisma.tmdbCache.findUnique({ where: { key: mdblistCacheKey } }),
-    prisma.tmdbCache.findUnique({ where: { key: omdbCacheKey } }),
+    prisma.tmdbCache.findUnique({ where: { key: mdblistKey } }),
+    prisma.tmdbCache.findUnique({ where: { key: omdbKey } }),
     prisma.tmdbCache.findUnique({ where: { key: detailsCacheKey } }),
   ]);
 
@@ -126,12 +135,16 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
         // No details blob (or a dateless one): fall back to the core row's
         // releaseYear so the probe's cache writes land in the right TTL bucket
         // instead of defaulting every title to the 30-day back-catalog one.
+        // Best-effort: without it the probe still runs, in the default bucket.
         const core = await prisma.tmdbMediaCore
           .findUnique({
             where: { tmdbId_mediaType: { tmdbId, mediaType: type === "movie" ? "MOVIE" : "TV" } },
             select: { releaseYear: true },
           })
-          .catch(() => null);
+          .catch((err: unknown) => {
+            console.warn("[ratings-state] TmdbMediaCore release-year read failed:", err instanceof Error ? err.message : err);
+            return null;
+          });
         if (core?.releaseYear) releaseDate = `${core.releaseYear}-01-01`;
       }
       live = await fetchUnifiedRatings(tmdbId, type, releaseDate);
@@ -159,8 +172,8 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     // what is left today, and whether background jobs have stopped.
     mdblistUsage: await getMdblistUsageSnapshot(),
     cache: {
-      mdblist: describeRatingsRow(mdblistCacheKey, mdblistCacheRow, now),
-      omdb: describeRatingsRow(omdbCacheKey, omdbCacheRow, now),
+      mdblist: describeRatingsRow(mdblistKey, mdblistCacheRow, now),
+      omdb: describeRatingsRow(omdbKey, omdbCacheRow, now),
     },
     details: {
       key: detailsCacheKey,

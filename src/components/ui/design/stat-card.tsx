@@ -1,10 +1,21 @@
 import { cn } from "@/lib/utils";
+import { deltaToneOf, type DeltaTone } from "./delta-tone";
 
-// Metric tile: label + value, with an optional delta tinted green/red by its leading +/- and an optional hint line.
+export type { DeltaTone } from "./delta-tone";
+
+const TONE_COLOR: Record<DeltaTone, string> = {
+  up: "var(--ds-success)",
+  down: "var(--ds-danger)",
+  neutral: "var(--ds-fg-subtle)",
+};
+
+// Metric tile: label + value, with an optional delta tinted green/red (by
+// `deltaTone`, else by its leading sign) and an optional hint line.
 export function StatCard({
   label,
   value,
   delta,
+  deltaTone,
   hint,
   mono,
   className,
@@ -12,15 +23,12 @@ export function StatCard({
   label: React.ReactNode;
   value: React.ReactNode;
   delta?: string;
+  deltaTone?: DeltaTone;
   hint?: React.ReactNode;
   mono?: boolean;
   className?: string;
 }) {
-  const deltaColor = delta?.startsWith("+")
-    ? "var(--ds-success)"
-    : delta?.startsWith("-")
-      ? "var(--ds-danger)"
-      : "var(--ds-fg-subtle)";
+  const deltaColor = TONE_COLOR[deltaTone ?? (delta ? deltaToneOf(delta) : "neutral")];
 
   return (
     <div

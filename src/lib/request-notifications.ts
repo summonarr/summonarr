@@ -1,26 +1,26 @@
 import "server-only";
 import { settleLimit } from "./concurrency";
 import { prisma } from "./prisma";
-import { notifyUserRequestApproved, notifyUserRequestDeclined, notifyUsersRequestsAvailable } from "./discord-notify";
-import { notifyUserRequestApprovedPush, notifyUserRequestDeclinedPush, notifyUsersRequestsAvailablePush } from "./push";
+import { notifyUsersRequestsApproved, notifyUsersRequestsAvailable, notifyUsersRequestsDeclined } from "./discord-notify";
+import { notifyUsersRequestsApprovedPush, notifyUsersRequestsAvailablePush, notifyUsersRequestsDeclinedPush } from "./push";
 import { notifyUserRequestApprovedEmail, notifyUserRequestDeclinedEmail, notifyUserRequestAvailableEmail } from "./email";
 import { resolveUserNotificationEmail } from "./notification-email";
 import { claimAvailableNotificationWinners } from "./notify-available";
-import { createInAppNotification } from "./in-app-notify";
 import { buildNotificationData } from "./notification-data";
-import { emitNotificationEvent, emitNotificationEvents } from "./notify-agents";
+import { emitNotificationEvents } from "./notify-agents";
 import type { NotifyEvent } from "./notify-events";
 
 interface RequestInfo {
   requestedBy: string;
   title: string;
   mediaType: string;
+  // DECLINED: the row's stored note (see StatusChangeTarget).
   adminNote?: string | null;
   posterPath?: string | null;
   tmdbId?: number;
-  // Optional context for the outbound channels (notify-agents.ts) only.
-  requestId?: string;
-  arrInstance?: string;
+  // The row's id and instance (guardrail 32): the outbound event names both.
+  requestId: string;
+  arrInstance: string;
 }
 
 export interface PendingAvailableRequest {
@@ -49,46 +49,42 @@ function inAppBodyFor(type: InAppNotificationType, mediaType: string): string {
   return `Your ${label} request was declined.`;
 }
 
-// Best-effort in-app inbox write (the header bell). Wraps the shared writer with
-// this module's request-specific body copy. Fire-and-forget alongside the
-// email/push/Discord fan-out; UNCONDITIONAL — the inbox is a passive record the
-// user pulls, not a delivered channel to opt out of.
-function writeInAppNotification(
-  userId: string,
-  type: InAppNotificationType,
-  info: { title: string; mediaType: string; tmdbId?: number | null; posterPath?: string | null },
-): void {
-  createInAppNotification(userId, {
-    type,
-    title: info.title,
-    body: inAppBodyFor(type, info.mediaType),
-    tmdbId: info.tmdbId ?? null,
-    mediaType: info.mediaType,
-    posterPath: info.posterPath ?? null,
-    // The body is re-rendered from type + mediaType in the reader's language.
-    data: { v: 1 },
-  });
+// Whether a requester whose account watches on `mediaServer` can see the title
+// now: on their own server, or on the other one when theirs isn't configured. No
+// preference (null) takes either server. One rule for the poll's exit test and
+// the notify filter, so the poll never stops early for a row the filter drops.
+function satisfiedFor(
+  mediaServer: string | null,
+  inPlex: boolean,
+  inJellyfin: boolean,
+  plexConfigured: boolean,
+  jellyfinConfigured: boolean,
+): boolean {
+  if (!mediaServer) return inPlex || inJellyfin || (!plexConfigured && !jellyfinConfigured);
+  if (mediaServer === "plex") return inPlex || (!plexConfigured && (inJellyfin || !jellyfinConfigured));
+  if (mediaServer === "jellyfin") return inJellyfin || (!jellyfinConfigured && (inPlex || !plexConfigured));
+  return false;
 }
 
 // `inPlex`/`inJellyfin` are COLLAPSED booleans — the instance that proved
 // presence is not carried here — and that stays sound under multi-server
 // per-user visibility grants for one structural reason: every caller of this
-// function probes the DEFAULT ("") server only. pollAndNotifyAvailable's
-// checkPlex/checkJellyfin closures are built in the Radarr/Sonarr webhook
-// handlers from getPlexConfig()/getJellyfinConfig() with no slug argument, which
-// resolve DEFAULT_MEDIA_INSTANCE; the default instance is visible to every user
-// by construction (defaultInstanceConfig hard-codes restricted:false and
-// canViewMediaInstance short-circuits true on slug ""). So `true` here already
-// means "present on a server this requester can see", for every requester.
+// function probes only servers EVERY user can see. pollAndNotifyAvailable's
+// checkPlex/checkJellyfin closures are built by visibleAvailabilityChecks
+// (arr-webhook-events.ts) over the configured servers whose registry entry is
+// not restricted — the default ("") is never restricted (defaultInstanceConfig
+// hard-codes restricted:false), and canViewMediaInstance answers true for any
+// unrestricted instance. So `true` here already means "present on a server this
+// requester can see", for every requester.
 //
 // A restricted named instance can only enter the picture through the sync
 // orchestrator, which does carry per-instance presence and applies the
 // per-requester gate itself (presentForRequester in /api/sync/route.ts).
 //
-// If a caller ever probes a NAMED instance, this contract breaks and the two
-// booleans must become per-instance (an optional slug-set parameter, so the two
-// webhook call sites keep compiling) plus the same pre-CAS grants filter the
-// orchestrator applies. Do not widen the probe without doing that.
+// If a caller ever probes a RESTRICTED instance, this contract breaks and the
+// two booleans must become per-instance (an optional slug-set parameter) plus
+// the same pre-CAS grants filter the orchestrator applies. Do not widen the
+// probe without doing that.
 export async function notifyAvailablePerServer(
   pending: PendingAvailableRequest[],
   inPlex: boolean,
@@ -97,13 +93,9 @@ export async function notifyAvailablePerServer(
   jellyfinConfigured: boolean,
   logScope: string,
 ): Promise<void> {
-  const toNotify = pending.filter((req) => {
-    const ms = req.user?.mediaServer ?? null;
-    if (!ms) return inPlex || inJellyfin || (!plexConfigured && !jellyfinConfigured);
-    if (ms === "plex") return inPlex || (!plexConfigured && (inJellyfin || !jellyfinConfigured));
-    if (ms === "jellyfin") return inJellyfin || (!jellyfinConfigured && (inPlex || !plexConfigured));
-    return false;
-  });
+  const toNotify = pending.filter((req) =>
+    satisfiedFor(req.user?.mediaServer ?? null, inPlex, inJellyfin, plexConfigured, jellyfinConfigured),
+  );
   if (toNotify.length === 0) return;
 
   // CAS on notifiedAvailable prevents duplicate "now available" notifications when Plex
@@ -135,9 +127,9 @@ export interface AvailableWinner {
 
 // THE "now available" fan-out, for every path that has already won the
 // once-only claim (claimAvailableNotificationWinners / claimAvailableNotifications
-// — guardrail 14): the webhook poll above, all six sync-orchestrator /
-// per-source marking passes, AND the manual admin "mark available"
-// (dispatchRequestStatusChange below, after its own CAS + disabled-account
+// — guardrail 14): the webhook poll above, every library/arr marking pass
+// (src/lib/available-marking.ts, used by the orchestrator and both Resyncs), AND the manual admin "mark available"
+// (notifyRequestStatusChange below, after its own CAS + disabled-account
 // gate). Callers pass only the claimed, DELIVERABLE rows (disabled requesters
 // already dropped — guardrail 33), so every channel here fires exactly once
 // per transition. Adding a channel means adding it HERE, not at a call site —
@@ -154,7 +146,7 @@ export async function fanOutAvailableWinners(winners: AvailableWinner[], logScop
   // In-app inbox for the batch winners (one createMany, same CAS-once guarantee).
   void writeAvailableInAppNotifications(winners, logScope);
   // Outbound channels: one event per claimed request. This is the ONLY
-  // `request.available` emit — dispatchRequestStatusChange routes here rather
+  // `request.available` emit — notifyRequestStatusChange routes here rather
   // than emitting its own, or the manual path would fire the event twice.
   emitNotificationEvents(winners.map((w) => availableEvent(w)));
   // Email channel, so the user's `emailOnAvailable` preference is honoured on
@@ -170,6 +162,14 @@ function availableEvent(w: AvailableWinner): NotifyEvent {
   };
 }
 
+type InboxRow = {
+  requestedBy: string;
+  title: string;
+  mediaType: string;
+  tmdbId?: number | null;
+  posterPath?: string | null;
+};
+
 // Shared BATCH in-app inbox writer for the "now available" fan-out. Every
 // AVAILABLE transition — the webhook poll (notifyAvailablePerServer above), all
 // six sync-orchestrator/per-source claimAvailableNotificationWinners sites and
@@ -182,34 +182,33 @@ function availableEvent(w: AvailableWinner): NotifyEvent {
 // Best-effort: swallows its own errors so an inbox-write blip never aborts the
 // sync run or the triggering action. Call fire-and-forget:
 // `void writeAvailableInAppNotifications(...)`.
-export async function writeAvailableInAppNotifications(
-  winners: Array<{
-    requestedBy: string;
-    title: string;
-    mediaType: string;
-    tmdbId?: number | null;
-    posterPath?: string | null;
-  }>,
-  logScope = "notify",
-): Promise<void> {
-  if (winners.length === 0) return;
+export async function writeAvailableInAppNotifications(winners: InboxRow[], logScope = "notify"): Promise<void> {
+  await writeInboxRows(winners, "REQUEST_AVAILABLE", logScope);
+}
+
+// One createMany of inbox rows of one type, the body copy from inAppBodyFor.
+// Never throws.
+async function writeInboxRows(rows: InboxRow[], type: InAppNotificationType, logScope: string): Promise<void> {
+  if (rows.length === 0) return;
   try {
     await prisma.notification.createMany({
-      data: winners.map((r) =>
+      data: rows.map((r) =>
         buildNotificationData(r.requestedBy, {
-          type: "REQUEST_AVAILABLE",
+          type,
           title: r.title,
-          body: inAppBodyFor("REQUEST_AVAILABLE", r.mediaType),
+          body: inAppBodyFor(type, r.mediaType),
           tmdbId: r.tmdbId ?? null,
           mediaType: r.mediaType,
           posterPath: r.posterPath ?? null,
+          // The body is re-rendered from type + mediaType in the reader's language.
           data: { v: 1 },
         }),
       ),
       skipDuplicates: true,
     });
   } catch (err) {
-    console.error(`[${logScope}] in-app available write failed:`, err instanceof Error ? err.message : err);
+    const what = type === "REQUEST_AVAILABLE" ? "available" : type === "REQUEST_APPROVED" ? "approved" : "declined";
+    console.error(`[${logScope}] in-app ${what} write failed:`, err instanceof Error ? err.message : err);
   }
 }
 
@@ -302,6 +301,14 @@ export async function pollAndNotifyAvailable(
   const running = inFlightPolls.get(key);
   if (running) return running;
 
+  // A probe that throws costs its attempt, never the poll: a rejection here
+  // would end the loop before the notify and nobody would be told.
+  const probe = (check: () => Promise<boolean>, server: string) =>
+    check().catch((err: unknown) => {
+      console.warn(`[${logScope}] ${server} availability probe failed:`, err instanceof Error ? err.message : err);
+      return false;
+    });
+
   const poll = (async () => {
     let inPlex = false;
     let inJellyfin = false;
@@ -310,17 +317,15 @@ export async function pollAndNotifyAvailable(
       await new Promise((r) => setTimeout(r, ITEM_POLL_INTERVAL_MS));
 
       [inPlex, inJellyfin] = await Promise.all([
-        checkPlex && !inPlex ? checkPlex() : Promise.resolve(inPlex),
-        checkJellyfin && !inJellyfin ? checkJellyfin() : Promise.resolve(inJellyfin),
+        checkPlex && !inPlex ? probe(checkPlex, "Plex") : Promise.resolve(inPlex),
+        checkJellyfin && !inJellyfin ? probe(checkJellyfin, "Jellyfin") : Promise.resolve(inJellyfin),
       ]);
 
-      const allSatisfied = pending.every((req) => {
-        const ms = req.user?.mediaServer ?? null;
-        if (!ms) return inPlex || inJellyfin;
-        if (ms === "plex") return inPlex || (!plexConfigured && (inJellyfin || !jellyfinConfigured));
-        if (ms === "jellyfin") return inJellyfin || (!jellyfinConfigured && (inPlex || !plexConfigured));
-        return false;
-      });
+      // At least one server is configured here (the early return above), so the
+      // null case's "neither configured" term is always false, as it always was.
+      const allSatisfied = pending.every((req) =>
+        satisfiedFor(req.user?.mediaServer ?? null, inPlex, inJellyfin, plexConfigured, jellyfinConfigured),
+      );
       if (allSatisfied) break;
     }
 
@@ -332,75 +337,144 @@ export async function pollAndNotifyAvailable(
   return poll;
 }
 
+// One decided request (the web PATCH, the Discord buttons). Fire-and-forget:
+// the deciding route is never held on a channel. A self-action (an admin
+// deciding their own request) is the caller's to skip.
 export function notifyRequestStatusChange(
   status: "APPROVED" | "AVAILABLE" | "DECLINED",
   request: RequestInfo,
 ): void {
-  const { requestedBy } = request;
+  if (status === "AVAILABLE") {
+    notifyMarkedAvailable(request);
+    return;
+  }
+  // The batch fan-out with one target: its one owner read is the disabled-account
+  // gate (guardrail 33) and carries the email opt-ins, so a single decision and a
+  // batch one reach the same channels with the same text.
+  void notifyRequestStatusChanges(status, [{
+    id: request.requestId,
+    requestedBy: request.requestedBy,
+    title: request.title,
+    mediaType: request.mediaType,
+    tmdbId: request.tmdbId ?? null,
+    posterPath: request.posterPath ?? null,
+    arrInstance: request.arrInstance,
+    adminNote: request.adminNote,
+  }]);
+}
 
-  // Never notify a DISABLED account. Account removal disables rather than scrubs
-  // (see account-lifecycle.ts), so the row keeps a live notification email,
-  // Discord link and push subscriptions — without this gate an admin approving
-  // or declining a removed user's leftover request would still ping them. One
-  // lookup covers all four channels; the batch "now available" path has its own
-  // chokepoint in claimAvailableNotificationWinners.
+// The manual admin "mark available" is a claimed winner like any other
+// (requests/[id] runs the notifiedAvailable CAS before calling here), so once its
+// requester passes the disabled-account gate (guardrail 33 — account removal
+// keeps the email, Discord link and push subscriptions) it takes THE "now
+// available" fan-out — every channel plus the one outbound emit — instead of a
+// second, hand-maintained channel list (guardrail 14c).
+function notifyMarkedAvailable(request: RequestInfo): void {
   void prisma.user
-    .findUnique({ where: { id: requestedBy }, select: { deactivatedAt: true } })
+    .findUnique({ where: { id: request.requestedBy }, select: { deactivatedAt: true } })
     .then((u) => {
       if (u?.deactivatedAt) return;
-      dispatchRequestStatusChange(status, request);
+      return fanOutAvailableWinners([{
+        id: request.requestId,
+        requestedBy: request.requestedBy,
+        title: request.title,
+        mediaType: request.mediaType,
+        tmdbId: request.tmdbId,
+        posterPath: request.posterPath,
+        arrInstance: request.arrInstance,
+      }], "notify");
     })
     .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
 }
 
-function dispatchRequestStatusChange(
-  status: "APPROVED" | "AVAILABLE" | "DECLINED",
-  request: RequestInfo,
-): void {
-  const { requestedBy, title, mediaType, posterPath, tmdbId } = request;
+type StatusChangeRecipient = {
+  email: string;
+  notificationEmail: string | null;
+  emailOnApproved: boolean;
+  emailOnDeclined: boolean;
+  locale: string | null;
+};
 
-  // The manual admin "mark available" is a claimed winner like any other
-  // (requests/[id] runs the notifiedAvailable CAS before calling here, and the
-  // disabled-account gate above has passed), so it takes THE "now available"
-  // fan-out — every legacy channel plus the one outbound emit — instead of a
-  // second, hand-maintained channel list (guardrail 14c). A channel added to
-  // fanOutAvailableWinners reaches this path for free.
-  if (status === "AVAILABLE") {
-    fanOutAvailableWinners(
-      [{ id: request.requestId, requestedBy, title, mediaType, tmdbId, posterPath, arrInstance: request.arrInstance ?? "" }],
-      "notify",
-    ).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+// The outbound event for a decided request (guardrail 14c): a decline carries
+// the admin's note as its text.
+function statusEvent(
+  status: "APPROVED" | "DECLINED",
+  r: { id: string; title: string; mediaType: string; tmdbId?: number | null; posterPath?: string | null; arrInstance: string; adminNote?: string | null },
+): NotifyEvent {
+  return {
+    event: status === "APPROVED" ? "request.approved" : "request.declined",
+    media: { type: r.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: r.tmdbId ?? null, title: r.title, posterPath: r.posterPath ?? null },
+    request: { id: r.id, instance: r.arrInstance },
+    text: status === "DECLINED" ? (r.adminNote ?? null) : null,
+  };
+}
+
+export interface StatusChangeTarget {
+  id: string;
+  requestedBy: string;
+  title: string;
+  mediaType: string;
+  tmdbId: number | null;
+  posterPath: string | null;
+  // The request's own instance (guardrail 32).
+  arrInstance: string;
+  // DECLINED: the row's note as the decision left it (the one it wrote, else the
+  // one already stored), so a decision that sends no note never blanks one.
+  adminNote?: string | null;
+}
+
+/**
+ * THE APPROVED / DECLINED fan-out, for one decided request (notifyRequestStatusChange)
+ * or many (the batch approve/decline): the inbox row, Discord, push, the outbound
+ * channels and email. Owners are resolved ONCE, disabled accounts dropped for
+ * every channel (guardrail 33 — the outbound channels have no per-user gate of
+ * their own), and that one read carries the email address and opt-ins. A failed
+ * lookup drops the whole fan-out rather than guessing: the transition itself is
+ * already durable. Email sends are bounded (guardrail 31). AVAILABLE is not
+ * here: it is fanOutAvailableWinners' alone (guardrail 14c). Never throws.
+ */
+export async function notifyRequestStatusChanges(
+  status: "APPROVED" | "DECLINED",
+  targets: StatusChangeTarget[],
+  logScope = "notify",
+): Promise<void> {
+  if (targets.length === 0) return;
+  let owners: Array<{ id: string } & StatusChangeRecipient>;
+  try {
+    owners = await prisma.user.findMany({
+      where: { id: { in: [...new Set(targets.map((t) => t.requestedBy))] }, deactivatedAt: null },
+      select: { id: true, email: true, notificationEmail: true, emailOnApproved: true, emailOnDeclined: true, locale: true },
+    });
+  } catch (err) {
+    console.error(`[${logScope}] active-owner lookup failed; skipping notifications:`, err instanceof Error ? err.message : err);
     return;
   }
+  const ownerById = new Map(owners.map((u) => [u.id, u]));
+  const live = targets.filter((t) => ownerById.has(t.requestedBy));
+  if (live.length === 0) return;
 
-  emitNotificationEvent({
-    event: status === "APPROVED" ? "request.approved" : "request.declined",
-    media: { type: mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: tmdbId ?? null, title, posterPath: posterPath ?? null },
-    request: { id: request.requestId ?? null, instance: request.arrInstance ?? "" },
-    text: status === "DECLINED" ? (request.adminNote ?? null) : null,
-  });
-
+  const logFailure = (channel: string) => (err: unknown) =>
+    console.error(`[${logScope}] ${channel} notify failed:`, err instanceof Error ? err.message : err);
   if (status === "APPROVED") {
-    writeInAppNotification(requestedBy, "REQUEST_APPROVED", { title, mediaType, tmdbId, posterPath });
-    notifyUserRequestApproved(requestedBy, title, mediaType, tmdbId).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    notifyUserRequestApprovedPush({ userId: requestedBy, title, mediaType, tmdbId }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnApproved: true, locale: true } })
-      .then((u) => {
-        const to = u && resolveUserNotificationEmail(u);
-        if (to && u.emailOnApproved) notifyUserRequestApprovedEmail({ toEmail: to, title, mediaType, posterPath, tmdbId, locale: u.locale });
-      })
-      .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+    notifyUsersRequestsApproved(live).catch(logFailure("Discord"));
+    notifyUsersRequestsApprovedPush(live).catch(logFailure("push"));
+  } else {
+    notifyUsersRequestsDeclined(live).catch(logFailure("Discord"));
+    notifyUsersRequestsDeclinedPush(live).catch(logFailure("push"));
   }
+  void writeInboxRows(live, status === "APPROVED" ? "REQUEST_APPROVED" : "REQUEST_DECLINED", logScope);
+  emitNotificationEvents(live.map((t) => statusEvent(status, t)));
 
-  if (status === "DECLINED") {
-    writeInAppNotification(requestedBy, "REQUEST_DECLINED", { title, mediaType, tmdbId, posterPath });
-    notifyUserRequestDeclined(requestedBy, title, mediaType, request.adminNote, tmdbId).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    notifyUserRequestDeclinedPush({ userId: requestedBy, title, mediaType, tmdbId }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnDeclined: true, locale: true } })
-      .then((u) => {
-        const to = u && resolveUserNotificationEmail(u);
-        if (to && u.emailOnDeclined) notifyUserRequestDeclinedEmail({ toEmail: to, title, mediaType, tmdbId, adminNote: request.adminNote, posterPath, locale: u.locale });
-      })
-      .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-  }
+  const recipients = live.flatMap((t) => {
+    const u = ownerById.get(t.requestedBy)!;
+    if (!(status === "APPROVED" ? u.emailOnApproved : u.emailOnDeclined)) return [];
+    const to = resolveUserNotificationEmail(u);
+    return to ? [{ t, to, locale: u.locale ?? null }] : [];
+  });
+  await settleLimit(recipients, EMAIL_SEND_CONCURRENCY, async ({ t, to, locale }) => {
+    const send = status === "APPROVED"
+      ? notifyUserRequestApprovedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, posterPath: t.posterPath, tmdbId: t.tmdbId ?? undefined, locale })
+      : notifyUserRequestDeclinedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, tmdbId: t.tmdbId ?? undefined, adminNote: t.adminNote ?? null, posterPath: t.posterPath, locale });
+    await send.catch(logFailure("email"));
+  });
 }

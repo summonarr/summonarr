@@ -1,6 +1,7 @@
 import "server-only";
 import { Prisma } from "@/generated/prisma";
 import { prisma } from "./prisma";
+import { deletionVoteMarkerKey } from "./deletion-vote-keys";
 
 type MediaType = "MOVIE" | "TV";
 
@@ -141,7 +142,7 @@ export async function clearDeletionVotesForTmdbs(
       byType.set(mediaType, bucket);
     }
     bucket.add(tmdbId);
-    settingKeys.add(`deletionVoteNotified:${tmdbId}:${mediaType}`);
+    settingKeys.add(deletionVoteMarkerKey(tmdbId, mediaType));
   }
   try {
     await prisma.$transaction([

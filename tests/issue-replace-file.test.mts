@@ -190,11 +190,15 @@ shadowPrismaModel(prisma, "issue", {
     after?.();
     return row;
   },
-  // Honours the CAS's own predicate (`status: { not: "RESOLVED" }`), so a route
-  // that dropped it would flip a resolved issue — and the test below would see it.
-  updateMany: async (args: { where: { id?: string; status?: { not?: string } }; data: Record<string, unknown> }) => {
+  // Honours the CAS's own predicate (`status: { not: "RESOLVED" }`, or the
+  // OPEN flip's `status: "OPEN"`), so a route that dropped it would flip a
+  // resolved issue — and the test below would see it.
+  updateMany: async (args: { where: { id?: string; status?: string | { not?: string } }; data: Record<string, unknown> }) => {
     seq.push("db:issue.updateMany");
-    const refused = args.where.status?.not !== undefined && issueRow?.status === args.where.status.not;
+    const want = args.where.status;
+    const refused = typeof want === "string"
+      ? issueRow?.status !== want
+      : want?.not !== undefined && issueRow?.status === want.not;
     const count = casCount > 0 && issueRow && !refused ? 1 : 0;
     if (count > 0 && issueRow) Object.assign(issueRow, args.data);
     return { count };
@@ -563,19 +567,19 @@ test("follow-up search: scoped, and never a whole-season search beside files sti
   const byId = (...ids: number[]) => files.filter((f) => ids.includes(f.id));
   const season2 = { kind: "season", seasonNumber: 2 } as const;
   // The whole season deleted (2 episodes, nothing of it left) → a season pack can come back.
-  assert.deepEqual(replace.followUpSearch(season2, byId(503, 504), false, byId(501, 502)), { kind: "season", seasonNumber: 2 });
+  assert.deepEqual(replace.followUpSearch(season2, byId(503, 504), byId(501, 502), { anyCovered: false }), { kind: "season", seasonNumber: 2 });
   // One of its files deleted, the other still on disk → just that episode.
-  assert.deepEqual(replace.followUpSearch(season2, byId(503), false, byId(501, 502, 504)), { kind: "episodes", episodes: [ep(2, 1)] });
+  assert.deepEqual(replace.followUpSearch(season2, byId(503), byId(501, 502, 504), { anyCovered: false }), { kind: "episodes", episodes: [ep(2, 1)] });
   // Part of the deletion covered by a mark's redownload → exactly the rest.
-  assert.deepEqual(replace.followUpSearch(season2, byId(504), true, byId(501, 502)), { kind: "episodes", episodes: [ep(2, 2)] });
+  assert.deepEqual(replace.followUpSearch(season2, byId(504), byId(501, 502), { anyCovered: true }), { kind: "episodes", episodes: [ep(2, 2)] });
   // A series: the DELETED episodes only, never the series' missing backlog — files left in both seasons ⇒ named one by one.
-  assert.deepEqual(replace.followUpSearch({ kind: "series" }, byId(501, 503), false, byId(502, 504)), { kind: "plan", seasons: [], episodes: [ep(1, 1), ep(2, 1)] });
+  assert.deepEqual(replace.followUpSearch({ kind: "series" }, byId(501, 503), byId(502, 504), { anyCovered: false }), { kind: "plan", seasons: [], episodes: [ep(1, 1), ep(2, 1)] });
   // A whole season gone (2+ episodes, nothing of it left) ⇒ a season pack; one episode of the other ⇒ by name.
-  assert.deepEqual(replace.followUpSearch({ kind: "series" }, byId(501, 503, 504), false, byId(502)), { kind: "plan", seasons: [2], episodes: [ep(1, 1)] });
-  assert.deepEqual(replace.followUpSearch({ kind: "episode", seasonNumber: 1, episodeNumber: 1 }, byId(501), false, []), { kind: "episodes", episodes: [ep(1, 1)] });
-  assert.deepEqual(replace.followUpSearch({ kind: "movie" }, [files[0]], false, []), { kind: "movie" });
-  assert.equal(replace.followUpSearch({ kind: "movie" }, [files[0]], true, []), null, "a mark's redownload already searches the movie");
-  assert.equal(replace.followUpSearch(season2, [], true, []), null);
+  assert.deepEqual(replace.followUpSearch({ kind: "series" }, byId(501, 503, 504), byId(502), { anyCovered: false }), { kind: "plan", seasons: [2], episodes: [ep(1, 1)] });
+  assert.deepEqual(replace.followUpSearch({ kind: "episode", seasonNumber: 1, episodeNumber: 1 }, byId(501), [], { anyCovered: false }), { kind: "episodes", episodes: [ep(1, 1)] });
+  assert.deepEqual(replace.followUpSearch({ kind: "movie" }, [files[0]], [], { anyCovered: false }), { kind: "movie" });
+  assert.equal(replace.followUpSearch({ kind: "movie" }, [files[0]], [], { anyCovered: true }), null, "a mark's redownload already searches the movie");
+  assert.equal(replace.followUpSearch(season2, [], [], { anyCovered: true }), null);
 });
 
 test("follow-up search: a FULL series names deleted specials and episodes in any season — specials are never a season pack; no episode data ⇒ the Missing plan", () => {
@@ -592,12 +596,12 @@ test("follow-up search: a FULL series names deleted specials and episodes in any
     { id: 3, seriesId: 21, seasonNumber: 3, episodeNumber: 1, episodeFileId: 803, hasFile: true },
     { id: 4, seriesId: 21, seasonNumber: 3, episodeNumber: 2, episodeFileId: 804, hasFile: true },
   ]));
-  assert.deepEqual(replace.followUpSearch({ kind: "series" }, files, false, []), { kind: "plan", seasons: [3], episodes: [ep(0, 1), ep(0, 2)] });
+  assert.deepEqual(replace.followUpSearch({ kind: "series" }, files, [], { anyCovered: false }), { kind: "plan", seasons: [3], episodes: [ep(0, 1), ep(0, 2)] });
   // A lone deleted special beside the rest of the show.
-  assert.deepEqual(replace.followUpSearch({ kind: "series" }, files.slice(0, 1), false, files.slice(1)), { kind: "plan", seasons: [], episodes: [ep(0, 1)] });
+  assert.deepEqual(replace.followUpSearch({ kind: "series" }, files.slice(0, 1), files.slice(1), { anyCovered: false }), { kind: "plan", seasons: [], episodes: [ep(0, 1)] });
   // Files that name no episodes at all: nothing to name, so the Missing page's plan.
   const bare = files.map((f) => ({ ...f, episodes: [] }));
-  assert.deepEqual(replace.followUpSearch({ kind: "series" }, bare, false, []), { kind: "missing" });
+  assert.deepEqual(replace.followUpSearch({ kind: "series" }, bare, [], { anyCovered: false }), { kind: "missing" });
 });
 
 test("the Redownload Failed switch is read as the arr reports it, null when it doesn't say", () => {
@@ -675,7 +679,8 @@ test("an issue resolved before the delete (the CAS loses) deletes nothing", asyn
   const res = await postFiles(token, "issue-1", { instance: "", fileIds: [7], then: "search" });
   assert.equal(res.status, 409);
   assert.deepEqual(writes(), []);
-  assert.deepEqual(seq, ["db:issue.updateMany"]);
+  // The OPEN flip loses, then the not-RESOLVED claim does: both CAS writes, nothing else.
+  assert.deepEqual(seq, ["db:issue.updateMany", "db:issue.updateMany"]);
   assert.equal(audits.length, 0);
 });
 
@@ -688,7 +693,8 @@ test("an issue resolved AFTER the route's read is refused by the CAS's own predi
   assert.equal(res.status, 409);
   assert.equal(issueRow.status, "RESOLVED", "a resolved issue is never flipped back to IN_PROGRESS");
   assert.deepEqual(writes(), []);
-  assert.deepEqual(seq, ["db:issue.updateMany"]);
+  // The OPEN flip loses, then the not-RESOLVED claim does: both CAS writes, nothing else.
+  assert.deepEqual(seq, ["db:issue.updateMany", "db:issue.updateMany"]);
   assert.equal(audits.length, 0);
 });
 
@@ -1137,6 +1143,18 @@ test("pure: a grab is interactive when any grab of its download says releaseSour
   assert.equal(replace.isInteractiveGrab("sonarr", 21, raw("InteractiveSearch", { seriesId: 99 }), grab), false);
   assert.equal(replace.isInteractiveGrab("sonarr", 21, raw("InteractiveSearch", { eventType: "downloadFolderImported" }), grab), false, "only a grab record says how it was grabbed");
   assert.equal(replace.isInteractiveGrab("sonarr", 21, null, grab), false);
+});
+
+test("pure: a download id longer than the projection keeps is still matched — the raw record is compared as the projection stored it", async () => {
+  const { DOWNLOAD_ID_MAX } = await import("../src/lib/arr-history.ts");
+  // A torrent client's id can be long (a magnet's info hash plus a tracker suffix).
+  const longId = "D".repeat(DOWNLOAD_ID_MAX + 50);
+  const record = { ...SERIES_HISTORY[3], downloadId: longId };
+  const [grab] = projectHistoryRecords("sonarr", "", [record]);
+  assert.equal(grab.downloadId?.length, DOWNLOAD_ID_MAX, "the projection truncates");
+  assert.equal(replace.isInteractiveGrab("sonarr", 21, [{ ...record, data: { releaseSource: "InteractiveSearch" } }], grab), true);
+  // A different download id still never matches.
+  assert.equal(replace.isInteractiveGrab("sonarr", 21, [{ ...record, downloadId: `X${longId}`, data: { releaseSource: "InteractiveSearch" } }], grab), false);
 });
 
 test("markFailed on a grab picked by hand while Redownload Failed from Interactive Search is OFF: blocklisted, and searched for here", async () => {

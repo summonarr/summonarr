@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { readActiveSummonarrSession } from "@/lib/session-server";
-import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
+import { effectivePermissions, parsePermissions } from "@/lib/permissions";
+import { hasAdminAreaAccess } from "@/lib/admin-access";
 import { FixMatchTray } from "@/components/admin/fix-match-tray";
 import { adminMustEnrollMfa, MFA_ENROLL_PATH } from "@/lib/mfa/policy";
 
@@ -12,10 +13,10 @@ export default async function AdminLayout({ children }: { children: React.ReactN
   const claims = await readActiveSummonarrSession();
 
   // Any management bit grants access to the admin subtree (per-route guards + page
-  // guards do the finer work). ADMIN superbit always passes.
-  const allowed = claims && hasPermission(
+  // guards do the finer work). ADMIN superbit always passes. The same rule as
+  // the proxy's admin gates (admin-access.ts), so the two can't drift.
+  const allowed = claims && hasAdminAreaAccess(
     effectivePermissions(claims.role, parsePermissions(claims.permissions)),
-    [Permission.MANAGE_USERS, Permission.MANAGE_REQUESTS, Permission.MANAGE_ISSUES, Permission.ADMIN],
   );
   if (!allowed) {
     redirect("/");

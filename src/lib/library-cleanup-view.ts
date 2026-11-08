@@ -1,10 +1,10 @@
-// Library cleanup — how the report table is filtered and sorted (pure, no
-// runtime imports). The report itself is computed on the server and arrives
+// Library cleanup — how the report table is filtered and sorted (pure; its one
+// runtime import is the zero-import rule and exclusion lists). The report itself is computed on the server and arrives
 // whole; everything here runs in the browser over those rows. The state round-
 // trips through the URL (parse/serialize), so a filtered view survives a reload
 // and can be shared, and every parameter is whitelisted on the way in.
 
-import type { CleanupExclusion, CleanupRule } from "./library-cleanup";
+import { CLEANUP_EXCLUSIONS, CLEANUP_RULES, type CleanupExclusion, type CleanupRule } from "./library-cleanup-keys";
 
 export type CleanupViewMode = "candidates" | "held" | "all";
 export type CleanupSortKey = "size" | "idle" | "added" | "lastPlayed" | "plays" | "votes" | "title";
@@ -13,10 +13,8 @@ export type CleanupSizeFilter = "any" | "1g" | "10g" | "50g" | "100g" | "unknown
 export const CLEANUP_VIEW_MODES: readonly CleanupViewMode[] = ["candidates", "held", "all"];
 export const CLEANUP_SORT_KEYS: readonly CleanupSortKey[] = ["size", "idle", "added", "lastPlayed", "plays", "votes", "title"];
 export const CLEANUP_SIZE_FILTERS: readonly CleanupSizeFilter[] = ["any", "1g", "10g", "50g", "100g", "unknown"];
-const RULES: readonly CleanupRule[] = ["unwatched", "neverWatched", "votes"];
-const EXCLUSIONS: readonly CleanupExclusion[] = [
-  "recentlyAdded", "activeRequest", "recentlyFulfilled", "watchlisted", "playingNow", "airing", "protected", "upstreamUnchecked",
-];
+const RULES: readonly CleanupRule[] = CLEANUP_RULES;
+const EXCLUSIONS: readonly CleanupExclusion[] = CLEANUP_EXCLUSIONS;
 
 const GB = 1024 ** 3;
 const SIZE_FLOOR: Record<Exclude<CleanupSizeFilter, "any" | "unknown">, number> = {

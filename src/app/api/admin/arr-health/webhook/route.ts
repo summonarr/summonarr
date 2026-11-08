@@ -9,7 +9,7 @@ import {
   WebhookSchemaError,
 } from "@/lib/arr-health-data";
 import { parseQueueService } from "@/lib/arr-queue-data";
-import { auditContext, logAudit } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { calendarSiteUrl } from "@/lib/calendar-feed";
 import { isFeatureEnabled } from "@/lib/features";
@@ -36,9 +36,8 @@ const SERVICE_LABEL = { radarr: "Radarr", sonarr: "Sonarr" } as const;
 // LIMIT_PER_MIN.
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, MAX_BODY_BYTES);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, MAX_BODY_BYTES);
+  if (body instanceof NextResponse) return body;
   const service = parseQueueService(body.service);
   const instance = body.instance === undefined ? "" : body.instance;
   if (!service || typeof instance !== "string" || instance.length > 100) {
@@ -58,12 +57,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
   const audit = (details: Record<string, unknown>) =>
     void logAudit({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email ?? null,
+      ...auditActor(req, session),
       action: "SETTINGS_CHANGE",
       target: `arr-webhook:${service}:${instance}`,
       details: { service, instance, ...details },
-      ...auditContext(req, session),
     });
   let result;
   try {

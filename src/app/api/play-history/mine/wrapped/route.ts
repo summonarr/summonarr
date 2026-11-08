@@ -4,6 +4,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
 import { getMyWrapped } from "@/lib/my-watch-history";
 import { resolvePosterPathMap, posterPathKey } from "@/lib/poster-cache";
+import { zonedDayKey } from "@/lib/stats-time-zone";
 
 export const dynamic = "force-dynamic";
 
@@ -58,7 +59,10 @@ export const GET = withAuth(async (req, _ctx, session) => {
       // Server-side, like the web page — the client renders whatever this says
       // rather than comparing against its own clock, so a device with a skewed
       // date can't disagree with the server about which year is "this" one.
-      isCurrentYear: year === new Date().getUTCFullYear(),
+      // The year is the statistics zone's, like every bucket in the bundle.
+      isCurrentYear: year === Number(zonedDayKey(new Date(), data.timeZone).slice(0, 4)),
+      // Additive: the zone biggestDay, busiestMonth, primeDow and primeHour are in.
+      timeZone: data.timeZone,
       totals: data.totals,
       movies: data.movies,
       tv: data.tv,

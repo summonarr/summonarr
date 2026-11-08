@@ -1,4 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { AccountDeactivatedError, buildDeviceMeta, signInAndMintSession } from "@/lib/auth";
@@ -12,6 +11,7 @@ import { passwordVersion, type SecondFactorInput } from "@/lib/mfa/mfa-store";
 import { verifySecondFactorGuarded } from "@/lib/mfa/lockout";
 import { webAuthnConfigFromEnv, type AuthenticationResponseJSON } from "@/lib/mfa/webauthn";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { safeCompareStrings } from "@/lib/safe-compare";
 import type { Translator } from "@/lib/i18n/translate";
 
 // POST /api/auth/sign-in/mfa — the second half of a local-credentials sign-in
@@ -58,18 +58,8 @@ function parseInput(body: Record<string, unknown>): SecondFactorInput | null {
   return null;
 }
 
-function sameString(a: string, b: string): boolean {
-  const ab = Buffer.from(a, "utf8");
-  const bb = Buffer.from(b, "utf8");
-  return ab.length === bb.length && timingSafeEqual(ab, bb);
-}
-
 export async function POST(req: NextRequest) {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, MAX_MFA_BODY_BYTES);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed;
-
   const ip = getClientIp(req.headers);
   const ua = req.headers.get("user-agent")?.slice(0, 512) ?? null;
   const fail = (reason: string, userId?: string, details: Record<string, unknown> = {}) =>
@@ -84,10 +74,18 @@ export async function POST(req: NextRequest) {
       details: { reason, ...details },
     });
 
+  // Before the body is read: a refused request costs neither the 32 KB parse
+  // nor more than one audit row per window per IP. Auditing every refusal made
+  // the limiter itself the flood — one INSERT per junk request, unbounded. The
+  // dedupe key bounds no secret, so it is not a protected prefix (6e).
   if (!checkRateLimit(`mfa-ip:${ipBucketKey(ip)}`, IP_LIMIT, IP_WINDOW_MS)) {
-    fail("mfa_rate_limited");
+    if (checkRateLimit(`mfa-ip-audit:${ipBucketKey(ip)}`, 1, IP_WINDOW_MS)) fail("mfa_rate_limited");
     return NextResponse.json({ error: t("apiAuth.mfa.tooManyAttemptsMinutes") }, { status: 429 });
   }
+
+  const parsed = await readJsonCapped<Record<string, unknown>>(req, MAX_MFA_BODY_BYTES);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const claims = await verifyMfaSigninToken(body.mfaToken);
   if (!claims || !isTokenUsable(claims.jti)) return expired(t);
@@ -127,46 +125,10 @@ export async function POST(req: NextRequest) {
   });
   // A password change (or a purge, which nulls the hash) since the password
   // step kills the challenge.
-  if (!user?.passwordHash || !sameString(passwordVersion(user.passwordHash), claims.pwv)) return expired(t);
+  if (!user?.passwordHash || !safeCompareStrings(passwordVersion(user.passwordHash), claims.pwv)) return expired(t);
 
-  // Claim the challenge BEFORE touching the factor. The factor verifiers burn
-  // single-use state in the DB (a recovery code, a TOTP step, a passkey
-  // counter); claiming the token only afterwards let two parallel requests on
-  // one challenge both reach them, so one sign-in could spend two recovery
-  // codes. reserveToken is a synchronous check-and-set: the loser is refused
-  // here without verifying anything.
-  if (!reserveToken(claims.jti)) {
-    if (!isTokenUsable(claims.jti)) return expired(t);
-    return NextResponse.json({ error: t("apiAuth.mfa.alreadyVerifying") }, { status: 409 });
-  }
-
-  let verdict;
-  try {
-    verdict = await verifySecondFactorGuarded(user.id, input, {
-      webauthnChallenge: claims.webauthnChallenge,
-      webauthnConfig: webAuthnConfigFromEnv(),
-      context: "sign-in",
-      ipAddress: ip,
-      userAgent: ua,
-    });
-  } catch (err) {
-    releaseToken(claims.jti, { failed: false });
-    throw err;
-  }
-  if (!verdict.ok) {
-    if (verdict.locked) {
-      // Persistent lockout (lockout.ts): no code was checked against this
-      // account, so the token is released without a failure.
-      releaseToken(claims.jti, { failed: false });
-      fail("mfa_locked", user.id, { method: input.method });
-      return NextResponse.json({ error: t("apiAuth.mfa.locked") }, { status: 429 });
-    }
-    // The reserved account hit is KEPT (a real failed second factor), and the
-    // token edges toward burning (counted synchronously at release).
-    const failures = releaseToken(claims.jti, { failed: true });
-    fail("mfa_invalid", user.id, { method: input.method, check: verdict.reason, failures });
-    return NextResponse.json({ error: t("apiAuth.mfa.invalidCode") }, { status: 401 });
-  }
+  const refused = await verifyClaimedFactor(t, claims, user.id, input, ip, ua, fail);
+  if (refused) return refused;
 
   // One challenge, one session. Only the reservation holder gets here; this
   // fails only if the entry was evicted meanwhile.
@@ -193,4 +155,60 @@ export async function POST(req: NextRequest) {
     throw err;
   }
   return buildSignInResponse(req, result);
+}
+
+type AuditFailure = (reason: string, userId?: string, details?: Record<string, unknown>) => void;
+type MfaClaims = NonNullable<Awaited<ReturnType<typeof verifyMfaSigninToken>>>;
+
+// Claim the challenge, verify the factor, settle the claim. Answers the
+// refusal, or null once the factor verified (the claim is still reserved for
+// the caller to commit).
+async function verifyClaimedFactor(
+  t: Translator,
+  claims: MfaClaims,
+  userId: string,
+  input: SecondFactorInput,
+  ip: string,
+  ua: string | null,
+  fail: AuditFailure,
+): Promise<NextResponse | null> {
+  // Claim the challenge BEFORE touching the factor. The factor verifiers burn
+  // single-use state in the DB (a recovery code, a TOTP step, a passkey
+  // counter); claiming the token only afterwards let two parallel requests on
+  // one challenge both reach them, so one sign-in could spend two recovery
+  // codes. reserveToken is a synchronous check-and-set: the loser is refused
+  // here without verifying anything.
+  if (!reserveToken(claims.jti)) {
+    if (!isTokenUsable(claims.jti)) return expired(t);
+    return NextResponse.json({ error: t("apiAuth.mfa.alreadyVerifying") }, { status: 409 });
+  }
+
+  let verdict;
+  try {
+    verdict = await verifySecondFactorGuarded(userId, input, {
+      webauthnChallenge: claims.webauthnChallenge,
+      webauthnConfig: webAuthnConfigFromEnv(),
+      context: "sign-in",
+      ipAddress: ip,
+      userAgent: ua,
+    });
+  } catch (err) {
+    releaseToken(claims.jti, { failed: false });
+    throw err;
+  }
+  if (!verdict.ok) {
+    if (verdict.locked) {
+      // Persistent lockout (lockout.ts): no code was checked against this
+      // account, so the token is released without a failure.
+      releaseToken(claims.jti, { failed: false });
+      fail("mfa_locked", userId, { method: input.method });
+      return NextResponse.json({ error: t("apiAuth.mfa.locked") }, { status: 429 });
+    }
+    // The reserved account hit is KEPT (a real failed second factor), and the
+    // token edges toward burning (counted synchronously at release).
+    const failures = releaseToken(claims.jti, { failed: true });
+    fail("mfa_invalid", userId, { method: input.method, check: verdict.reason, failures });
+    return NextResponse.json({ error: t("apiAuth.mfa.invalidCode") }, { status: 401 });
+  }
+  return null;
 }

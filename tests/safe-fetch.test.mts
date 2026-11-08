@@ -51,11 +51,26 @@ test("redactUrlForLog strips the query string (where upstream secrets live)", ()
   );
 });
 
-test("redactUrlForLog strips embedded credentials but keeps path and fragment", () => {
+test("redactUrlForLog strips embedded credentials and the fragment, keeping the path", () => {
   assert.equal(
     redactUrlForLog("https://user:hunter2@example.com/a/b?q=1#frag"),
-    "https://example.com/a/b#frag",
+    "https://example.com/a/b",
   );
+});
+
+test("redactUrlForLog scrubs token-like path segments but keeps ids, slugs and hex item ids", () => {
+  const slack = redactUrlForLog("https://hooks.slack.com/services/T0000/B0000/Fp1lm3wQ2xKzNcYb7tR0vU9s");
+  assert.ok(!slack.includes("Fp1lm3wQ2xKzNcYb7tR0vU9s"), slack);
+  assert.ok(slack.startsWith("https://hooks.slack.com/services/T0000/B0000/"));
+  const alternating = redactUrlForLog("https://ntfy.example/a1b2c3d4e5f6g7h8i9j0");
+  assert.ok(!alternating.includes("a1b2c3d4e5f6g7h8i9j0"), alternating);
+  for (const url of [
+    "https://jf.local/Items/0123456789abcdef0123456789abcdef/Images",
+    "https://api.trakt.tv/movies/the-lord-of-the-rings-the-fellowship-of-the-ring-2001",
+    "https://plex.local/library/metadata/1234567/children",
+  ]) {
+    assert.equal(redactUrlForLog(url), url);
+  }
 });
 
 test("redactUrlForLog returns the sentinel for unparseable input", () => {

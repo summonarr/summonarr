@@ -2,40 +2,48 @@ export const dynamic = "force-dynamic";
 
 import type { Metadata } from "next";
 import { getMostPopularOnServer, isPlayHistoryEnabled, POPULAR_PER_PAGE, type PopularSort } from "@/lib/play-history";
-import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
-import type { TmdbMedia } from "@/lib/tmdb-types";
-import { prisma } from "@/lib/prisma";
 import { MediaCard } from "@/components/media/media-card";
 import { PaginationBar } from "@/components/media/pagination-bar";
 import { RangeLabel } from "@/components/media/range-label";
 import { attachAllAvailability } from "@/lib/attach-all";
-import { settleLimit } from "@/lib/concurrency";
+import { resolvePopularTitles, type PopularItem, type PopularTitle } from "@/lib/popular-titles";
 import { requireAppSession } from "@/lib/require-app-session";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
 import { isFeatureEnabled, requireFeature } from "@/lib/features";
-import Link from "next/link";
-import { Suspense } from "react";
+import { Suspense, type CSSProperties } from "react";
 import { PageHeader, EmptyState, SectionHeader } from "@/components/ui/design";
-import { TrendingUp, Film } from "@/components/icons";
+import { SegmentedLinks } from "@/components/ui/design/segmented-links";
+import { TrendingUp, Film, AlertTriangle } from "@/components/icons";
 import { getTranslator } from "@/lib/i18n/server";
 import type { Translator } from "@/lib/i18n/translate";
 import { canRequest } from "@/lib/permissions";
+import { parsePageNumber } from "@/lib/pagination";
+import { first, type PageSearchParams } from "@/lib/search-params";
 
-type EnrichedMedia = TmdbMedia & {
+type EnrichedMedia = PopularTitle & {
   // 1-based position in the SERVER-WIDE ranking (page offset included), taken
   // from the item's slot in the unfiltered page. Later steps can drop items (a
   // failed TMDB fetch, a title the viewer hid), so the rank is stored up front
   // instead of recounted from what survives — otherwise every later title
   // would show the wrong number.
   rank: number;
-  plays: number;
-  allTimePlays: number;
-  viewers: number;
-  episodes: number;
-  totalHours: number;
 };
+
+// One type's ranked page as cards, through the shared resolver /api/popular
+// uses (it logs each dropped title). The rank is the item's slot in the
+// unfiltered page, so a later drop never renumbers the survivors.
+async function resolveRanked(
+  items: readonly PopularItem[],
+  type: "movie" | "tv",
+  rankOffset: number,
+): Promise<{ titles: EnrichedMedia[]; allFailed: boolean }> {
+  const rankById = new Map(items.map((item, i) => [item.tmdbId, rankOffset + i + 1]));
+  const resolved = await resolvePopularTitles(items, type, 8);
+  const titles = resolved.map((m) => ({ ...m, rank: rankById.get(m.id) ?? 0 }));
+  return { titles, allFailed: items.length > 0 && titles.length === 0 };
+}
 
 // Labels are catalog keys, translated at render time (module scope has no
 // request locale).
@@ -51,6 +59,8 @@ const TYPE_OPTIONS = [
   { labelKey: "nav.tvShows", value: "tv" },
 ] as const;
 
+type MediaTypeFilter = (typeof TYPE_OPTIONS)[number]["value"];
+
 // Tab / bookmark / history title — the nav label, in the viewer's language.
 export async function generateMetadata(): Promise<Metadata> {
   const t = await getTranslator();
@@ -60,7 +70,7 @@ export async function generateMetadata(): Promise<Metadata> {
 export default async function PopularOnServerPage({
   searchParams,
 }: {
-  searchParams: Promise<Record<string, string>>;
+  searchParams: Promise<PageSearchParams>;
 }) {
   await requireFeature("feature.page.popular");
   const [sp, session, plexEnabled, jellyfinEnabled, t] = await Promise.all([
@@ -70,7 +80,6 @@ export default async function PopularOnServerPage({
     isFeatureEnabled("feature.integration.jellyfin"),
     getTranslator(),
   ]);
-  if (!session) return null;
   // Integration flags passed explicitly — they default to TRUE when omitted.
   const { showPlex, showJellyfin } = getBadgeVisibility(session, {
     plex: plexEnabled,
@@ -99,14 +108,17 @@ export default async function PopularOnServerPage({
     );
   }
 
-  const mediaTypeFilter = sp.mediaType || undefined;
-  const validSorts = new Set<PopularSort>(["plays", "viewers", "trending"]);
-  const sort: PopularSort = validSorts.has(sp.sort as PopularSort)
-    ? (sp.sort as PopularSort)
-    : "trending";
-  const requestedPage = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
-
-  const activeSort = SORT_OPTIONS.find((s) => s.value === sort)!;
+  // Only the two real types filter; anything else (a hand-edited ?mediaType=)
+  // is "all" — otherwise it showed both sections with no tab marked and was
+  // copied into every sort, empty-state and pager link.
+  const rawMediaType = first(sp.mediaType);
+  const mediaTypeFilter: MediaTypeFilter =
+    rawMediaType === "movies" || rawMediaType === "tv" ? rawMediaType : undefined;
+  // An unknown ?sort= is the default (trending, the first option).
+  const sortParam = first(sp.sort);
+  const activeSort = SORT_OPTIONS.find((s) => s.value === sortParam) ?? SORT_OPTIONS[0];
+  const sort = activeSort.value;
+  const requestedPage = parsePageNumber(sp.page);
 
   const [moviesResult, tvResult] = await Promise.all([
     mediaTypeFilter === "tv"
@@ -125,78 +137,17 @@ export default async function PopularOnServerPage({
   const totalTv = tvResult.totalItems;
   const rankOffset = (page - 1) * POPULAR_PER_PAGE;
 
-  async function resolveMedia(
-    items: typeof moviesResult.items,
-    type: "movie" | "tv",
-  ): Promise<EnrichedMedia[]> {
-    if (items.length === 0) return [];
-    const dbType = type === "movie" ? "MOVIE" : "TV";
-
-    // One query for the whole page: every item shares mediaType and the
-    // freshness check, so a single `tmdbId IN (...)` list is all that's needed.
-    const coreRows = await prisma.tmdbMediaCore.findMany({
-      where: {
-        tmdbId: { in: items.map((i) => i.tmdbId) },
-        mediaType: dbType,
-        expiresAt: { gt: new Date() },
-      },
-    });
-    const coreMap = new Map(coreRows.map((r) => [r.tmdbId, r]));
-
-    // At most 8 at a time, not a bare Promise.allSettled (guardrail 31). Items
-    // without a fresh TmdbMediaCore row hit TMDB, and on a cold cache that is
-    // all of them: 40 movies + 40 shows at once would burst past TMDB's ~50
-    // requests/second limit.
-    const results = await settleLimit(
-      items,
-      8,
-      async (item, i) => {
-        const core = coreMap.get(item.tmdbId);
-        const details: TmdbMedia = core
-          ? {
-              id: item.tmdbId,
-              mediaType: type,
-              title: core.title,
-              overview: "",
-              posterPath: core.posterPath ?? null,
-              backdropPath: null,
-              releaseDate: null,
-              releaseYear: core.releaseYear ?? "",
-              voteAverage: core.voteAverage,
-              certification: core.certification ?? undefined,
-            }
-          :
-            type === "movie"
-            ? await getMovieDetails(item.tmdbId)
-            : await getTVDetails(item.tmdbId);
-        return {
-          ...details,
-          // The slot index is the item's position in the unfiltered page, so a
-          // later drop (rejected fetch, hidden title) never renumbers survivors.
-          rank: rankOffset + i + 1,
-          plays: item.plays,
-          allTimePlays: item.allTimePlays,
-          viewers: item.viewers,
-          episodes: item.episodes,
-          totalHours: item.totalHours,
-        };
-      },
-    );
-    return results
-      .filter((r): r is PromiseFulfilledResult<EnrichedMedia> => r.status === "fulfilled")
-      .map((r) => r.value);
-  }
-
-  let [movies, tv] = await Promise.all([
-    resolveMedia(moviesResult.items, "movie"),
-    resolveMedia(tvResult.items, "tv"),
+  // At most 8 TMDB reads at a time (guardrail 31): items without a fresh
+  // TmdbMediaCore row hit TMDB, and on a cold cache that is all of them.
+  const [movieRanked, tvRanked] = await Promise.all([
+    resolveRanked(moviesResult.items, "movie", rankOffset),
+    resolveRanked(tvResult.items, "tv", rankOffset),
   ]);
-
-  async function enrich(items: EnrichedMedia[]): Promise<EnrichedMedia[]> {
-    return (await attachAllAvailability(items, session?.user.id, { show4k })) as EnrichedMedia[];
-  }
-
-  [movies, tv] = await Promise.all([enrich(movies), enrich(tv)]);
+  const enrich = (items: EnrichedMedia[]) => attachAllAvailability(items, session.user.id, { show4k });
+  const [movies, tv] = await Promise.all([enrich(movieRanked.titles), enrich(tvRanked.titles)]);
+  // Every ranked title failed to resolve (TMDB down with the core rows
+  // expired): the plays exist, so "no plays" would be false.
+  const resolveFailed = movieRanked.allFailed || tvRanked.allFailed;
 
   const showMovies = mediaTypeFilter !== "tv";
   const showTV = mediaTypeFilter !== "movies";
@@ -228,105 +179,39 @@ export default async function PopularOnServerPage({
       <PageHeader title={t("nav.popularOnServer")} subtitle={t(activeSort.descriptionKey)} />
 
       <div className="flex flex-col sm:flex-row gap-3 mb-6 flex-wrap">
-        <div
-          className="ds-no-scrollbar flex overflow-x-auto max-w-full"
-          style={{
-            padding: 2,
-            background: "var(--ds-bg-1)",
-            border: "1px solid var(--ds-border)",
-            borderRadius: 8,
-            gap: 0,
-          }}
-        >
-          {SORT_OPTIONS.map(({ value, labelKey }) => {
-            const isActive = sort === value;
-            return (
-              <Link
-                key={value}
-                href={buildHref({ sort: value === "trending" ? undefined : value })}
-                aria-current={isActive ? "page" : undefined}
-                className="ds-hover-tint inline-flex items-center whitespace-nowrap font-medium"
-                style={{
-                  // 32px hit area: these segments are the page's only controls
-                  // at phone width, and 5px padding alone left them ~26px tall.
-                  minHeight: 32,
-                  padding: "5px 12px",
-                  borderRadius: 6,
-                  fontSize: 12,
-                  background: isActive ? "var(--ds-bg-3)" : "transparent",
-                  color: isActive ? "var(--ds-fg)" : "var(--ds-fg-muted)",
-                }}
-              >
-                {t(labelKey)}
-              </Link>
-            );
-          })}
-        </div>
+        <SegmentedLinks
+          links={SORT_OPTIONS.map(({ value, labelKey }) => ({
+            key: value,
+            label: t(labelKey),
+            href: buildHref({ sort: value === "trending" ? undefined : value }),
+          }))}
+          active={sort}
+        />
 
         <div
           className="hidden sm:block self-stretch"
           style={{ width: 1, background: "var(--ds-border)", marginInline: 4 }}
         />
 
-        <div
-          className="ds-no-scrollbar flex overflow-x-auto max-w-full"
-          style={{
-            padding: 2,
-            background: "var(--ds-bg-1)",
-            border: "1px solid var(--ds-border)",
-            borderRadius: 8,
-          }}
-        >
-          {TYPE_OPTIONS.map(({ labelKey, value }) => {
-            const isActive = mediaTypeFilter === value;
-            return (
-              <Link
-                key={value ?? "all"}
-                href={buildHref({ mediaType: value })}
-                aria-current={isActive ? "page" : undefined}
-                className="ds-hover-tint inline-flex items-center whitespace-nowrap font-medium"
-                style={{
-                  // 32px hit area: these segments are the page's only controls
-                  // at phone width, and 5px padding alone left them ~26px tall.
-                  minHeight: 32,
-                  padding: "5px 12px",
-                  borderRadius: 6,
-                  fontSize: 12,
-                  background: isActive ? "var(--ds-bg-3)" : "transparent",
-                  color: isActive ? "var(--ds-fg)" : "var(--ds-fg-muted)",
-                }}
-              >
-                {t(labelKey)}
-              </Link>
-            );
-          })}
-        </div>
+        <SegmentedLinks
+          links={TYPE_OPTIONS.map(({ labelKey, value }) => ({
+            key: value ?? "all",
+            label: t(labelKey),
+            href: buildHref({ mediaType: value }),
+          }))}
+          active={mediaTypeFilter ?? "all"}
+        />
       </div>
 
       {!hasAny ? (
-        // Page overflow first: a past-the-end ?page= on the trending sort is
-        // not "nothing was played in 30 days".
-        page > 1 ? (
-          <EmptyState
-            icon={Film}
-            title={t("browse.empty.noMoreResults.title")}
-            description={t("browse.empty.noMoreResults.description")}
-            cta={{ href: buildHref({}), label: t("browse.empty.backToPage1") }}
-          />
-        ) : sort === "trending" ? (
-          <EmptyState
-            icon={TrendingUp}
-            title={t("browse.popular.noRecentPlays.title")}
-            description={t("browse.popular.noRecentPlays.description")}
-            cta={{ href: buildHref({ sort: "plays" }), label: t("browse.popular.noRecentPlays.cta") }}
-          />
-        ) : (
-          <EmptyState
-            icon={Film}
-            title={t("browse.popular.noHistory.title")}
-            description={t("browse.popular.noHistory.description")}
-          />
-        )
+        <PopularEmptyState
+          page={page}
+          sort={sort}
+          resolveFailed={resolveFailed}
+          backToFirstHref={buildHref({})}
+          allTimeHref={buildHref({ sort: "plays" })}
+          t={t}
+        />
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 40 }}>
           {showMovies && movies.length > 0 && (
@@ -372,6 +257,15 @@ export default async function PopularOnServerPage({
   );
 }
 
+// A stat line's figure, accented when it is what the active sort ranks by.
+function statStyle(emphasised: boolean): CSSProperties {
+  return {
+    whiteSpace: "nowrap",
+    color: emphasised ? "var(--ds-accent-text)" : "var(--ds-fg-subtle)",
+    fontWeight: emphasised ? 500 : 400,
+  };
+}
+
 function MediaGrid({
   items,
   showPlex,
@@ -408,7 +302,9 @@ function MediaGrid({
               fontSize: 10.5,
             }}
           >
-            {media.rank}
+            {/* The number alone announced no context ahead of the card's name. */}
+            <span aria-hidden="true">{media.rank}</span>
+            <span className="sr-only">{t("browse.popular.rank", { rank: media.rank })}</span>
           </div>
           <MediaCard
             media={media}
@@ -428,16 +324,7 @@ function MediaGrid({
               color: "var(--ds-fg-subtle)",
             }}
           >
-            <span
-              style={{
-                whiteSpace: "nowrap",
-                color:
-                  sort === "plays" || sort === "trending"
-                    ? "var(--ds-accent-text)"
-                    : "var(--ds-fg-subtle)",
-                fontWeight: sort === "plays" || sort === "trending" ? 500 : 400,
-              }}
-            >
+            <span style={statStyle(sort === "plays" || sort === "trending")}>
               {sort === "trending"
                 ? t("browse.popular.stat.plays30d", { count: media.plays })
                 : t("browse.popular.stat.plays", { count: media.plays })}
@@ -447,14 +334,7 @@ function MediaGrid({
                 · {t("browse.popular.stat.allTime", { count: media.allTimePlays })}
               </span>
             )}
-            <span
-              style={{
-                whiteSpace: "nowrap",
-                color:
-                  sort === "viewers" ? "var(--ds-accent-text)" : "var(--ds-fg-subtle)",
-                fontWeight: sort === "viewers" ? 500 : 400,
-              }}
-            >
+            <span style={statStyle(sort === "viewers")}>
               · {t("browse.popular.stat.viewers", { count: media.viewers })}
             </span>
             {media.mediaType === "tv" && media.episodes > 0 && (
@@ -469,5 +349,60 @@ function MediaGrid({
         </div>
       ))}
     </div>
+  );
+}
+
+// Page overflow first: a past-the-end ?page= on the trending sort is not
+// "nothing was played in 30 days"; then a TMDB failure, which is not "no plays".
+function PopularEmptyState({
+  page,
+  sort,
+  resolveFailed,
+  backToFirstHref,
+  allTimeHref,
+  t,
+}: {
+  page: number;
+  sort: PopularSort;
+  resolveFailed: boolean;
+  backToFirstHref: string;
+  allTimeHref: string;
+  t: Translator;
+}) {
+  if (page > 1) {
+    return (
+      <EmptyState
+        icon={Film}
+        title={t("browse.empty.noMoreResults.title")}
+        description={t("browse.empty.noMoreResults.description")}
+        cta={{ href: backToFirstHref, label: t("browse.empty.backToPage1") }}
+      />
+    );
+  }
+  if (resolveFailed) {
+    return (
+      <EmptyState
+        icon={AlertTriangle}
+        title={t("browse.popular.loadFailed.title")}
+        description={t("browse.popular.loadFailed.description")}
+      />
+    );
+  }
+  if (sort === "trending") {
+    return (
+      <EmptyState
+        icon={TrendingUp}
+        title={t("browse.popular.noRecentPlays.title")}
+        description={t("browse.popular.noRecentPlays.description")}
+        cta={{ href: allTimeHref, label: t("browse.popular.noRecentPlays.cta") }}
+      />
+    );
+  }
+  return (
+    <EmptyState
+      icon={Film}
+      title={t("browse.popular.noHistory.title")}
+      description={t("browse.popular.noHistory.description")}
+    />
   );
 }

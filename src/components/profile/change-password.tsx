@@ -5,16 +5,15 @@ import { Loader2, Check } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { withBasePath } from "@/lib/base-path";
-import { rateLimitMessage } from "@/lib/client/rate-limit";
-import { getPasskeyAssertion, isWebAuthnCancel, isWebAuthnSupported, type RequestOptionsJSON } from "@/lib/client/webauthn";
 import { useT } from "@/components/i18n/i18n-provider";
+import { MIN_PASSWORD_LENGTH } from "@/lib/password-policy";
+import { useSecondFactorStepUp, type KnownSecondFactor } from "./use-second-factor-step-up";
+import { SecondFactorCodeField } from "./second-factor-code-field";
+import { timedFetch } from "@/lib/client/fetch-json";
+import { useAsyncAction } from "@/hooks/use-async-action";
 
 // What the page knows about the account's two-factor setup when it rendered.
-export interface ChangePasswordSecondFactor {
-  enabled: boolean;
-  hasPasskeys: boolean;
-  webauthnAvailable: boolean;
-}
+export type ChangePasswordSecondFactor = KnownSecondFactor;
 
 interface ChangePasswordProps {
   hasPassword: boolean;
@@ -32,58 +31,14 @@ interface ChangePasswordProps {
 // answers `secondFactorRequired` (2FA turned on in another tab, say).
 export function ChangePassword({ hasPassword, secondFactor }: ChangePasswordProps) {
   const t = useT();
+  const action = useAsyncAction();
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword]         = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [stepUpCode, setStepUpCode]           = useState("");
-  // The methods the server listed when it asked for a second factor.
-  const [serverMethods, setServerMethods]     = useState<string[] | null>(null);
   const [saving, setSaving]   = useState(false);
   const [success, setSuccess] = useState(false);
   const [error, setError]     = useState<string | null>(null);
-
-  const needsSecondFactor = !!secondFactor?.enabled || serverMethods !== null;
-  const passkeyPossible =
-    (!!secondFactor?.hasPasskeys && !!secondFactor.webauthnAvailable) || !!serverMethods?.includes("webauthn");
-
-  // The `secondFactor` body field, or null when the user must act first (an
-  // error is already shown).
-  async function secondFactorProof(): Promise<Record<string, unknown> | null> {
-    const code = stepUpCode.trim();
-    if (code.length > 0) {
-      const digits = code.replace(/\s/g, "");
-      return { method: /^\d{6}$/.test(digits) ? "totp" : "recovery", code };
-    }
-    if (passkeyPossible && isWebAuthnSupported()) {
-      let res: Response;
-      let data: { error?: string; publicKey?: unknown; challengeToken?: unknown };
-      try {
-        res = await fetch(withBasePath("/api/profile/mfa/challenge"), {
-          method:  "POST",
-          headers: { "Content-Type": "application/json" },
-          body:    "{}",
-        });
-        data = await res.json().catch(() => ({}));
-      } catch {
-        // Nothing was sent yet, so unlike the change itself there is no sign-out to warn about.
-        setError(t("auth.login.error.network"));
-        return null;
-      }
-      if (!res.ok) {
-        setError(rateLimitMessage(res, t) ?? data.error ?? t("profile.password.error.failed"));
-        return null;
-      }
-      try {
-        const credential = await getPasskeyAssertion(data.publicKey as RequestOptionsJSON);
-        return { method: "webauthn", credential, challengeToken: data.challengeToken };
-      } catch (err) {
-        if (!isWebAuthnCancel(err)) setError(t("profile.mfa.stepUp.passkeyFailed"));
-        return null;
-      }
-    }
-    setError(t("profile.mfa.stepUp.codeRequired"));
-    return null;
-  }
+  const stepUp = useSecondFactorStepUp({ known: secondFactor, failedMessage: t("profile.password.error.failed") });
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -95,60 +50,60 @@ export function ChangePassword({ hasPassword, secondFactor }: ChangePasswordProp
       return;
     }
 
+    if (action.busy("save")) return;
     setSaving(true);
-    try {
-      const body: Record<string, unknown> = { newPassword };
-      if (hasPassword) body.currentPassword = currentPassword;
-      if (needsSecondFactor) {
-        const proof = await secondFactorProof();
-        if (!proof) return;
-        body.secondFactor = proof;
-      }
-      // A code is single-use (a recovery code is consumed), so never resend one.
-      setStepUpCode("");
-
-      const res = await fetch(withBasePath("/api/profile/password"), {
-        method:  "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        if (data.secondFactorRequired) {
-          if (Array.isArray(data.methods)) setServerMethods(data.methods as string[]);
-          else setServerMethods((m) => m ?? []);
-          // With no proof sent, the server's text is written for clients that
-          // can't ask for a code; this form can, so say what to do here.
-          if (!body.secondFactor) {
-            setError(t("profile.mfa.stepUp.codeRequired"));
-            return;
+    type Outcome =
+      | { kind: "error"; message: string }
+      | { kind: "stopped" }
+      | { kind: "relogin" }
+      | { kind: "saved" };
+    const out = await action.run(
+      "save",
+      async (signal): Promise<Outcome> => {
+        try {
+          const body: Record<string, unknown> = { newPassword };
+          if (hasPassword) body.currentPassword = currentPassword;
+          if (stepUp.needsSecondFactor) {
+            const r = await stepUp.secondFactorProof();
+            if (!("proof" in r)) return r.error ? { kind: "error", message: r.error } : { kind: "stopped" };
+            body.secondFactor = r.proof;
           }
+
+          const res = await timedFetch(withBasePath("/api/profile/password"), {
+            method:  "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body:    JSON.stringify(body),
+            signal,
+          });
+          const data: unknown = await res.json().catch(() => null);
+          if (!res.ok) {
+            return { kind: "error", message: stepUp.refusalMessage(res, data, !!body.secondFactor, t("profile.password.error.failed")) };
+          }
+          if (data && typeof data === "object" && (data as { requiresRelogin?: unknown }).requiresRelogin === true) {
+            return { kind: "relogin" };
+          }
+          return { kind: "saved" };
+        } catch {
+          // A network error. A body that isn't JSON (a proxy's page) is read as
+          // no body above. Without this catch the form would show nothing at all.
+          //
+          // The message mentions sign-out because the server signs out every
+          // session when the password changes. If the change saved but only the
+          // response was lost, the user is already signed out everywhere.
+          return { kind: "error", message: t("profile.password.error.network") };
         }
-        // A two-factor lockout is a 429 with its own explanation and no Retry-After.
-        const lockedOut = res.status === 429 && !!body.secondFactor && typeof data.error === "string";
-        setError(lockedOut ? data.error : rateLimitMessage(res, t) ?? data.error ?? t("profile.password.error.failed"));
-        return;
-      }
-      const data = await res.json().catch(() => ({}));
-      if (data.requiresRelogin) {
-        window.location.href = withBasePath("/login");
-        return;
-      }
+      },
+      { ifBusy: "skip" },
+    );
+    setSaving(false);
+    if (!out) return;
+    if (out.kind === "error") setError(out.message);
+    else if (out.kind === "relogin") window.location.href = withBasePath("/login");
+    else if (out.kind === "saved") {
       setSuccess(true);
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
-    } catch {
-      // The fetch can fail on a network error, and res.json() can fail if a
-      // proxy returns a non-JSON body. Without this catch the form would show
-      // nothing at all.
-      //
-      // The message mentions sign-out because the server signs out every
-      // session when the password changes. If the change saved but only the
-      // response was lost, the user is already signed out everywhere.
-      setError(t("profile.password.error.network"));
-    } finally {
-      setSaving(false);
     }
   }
 
@@ -180,8 +135,8 @@ export function ChangePassword({ hasPassword, secondFactor }: ChangePasswordProp
           autoComplete="new-password"
           value={newPassword}
           onChange={(e) => setNewPassword(e.target.value)}
-          placeholder={t("profile.password.minLength", { count: 12 })}
-          minLength={12}
+          placeholder={t("profile.password.minLength", { count: MIN_PASSWORD_LENGTH })}
+          minLength={MIN_PASSWORD_LENGTH}
           required
         />
       </div>
@@ -196,34 +151,24 @@ export function ChangePassword({ hasPassword, secondFactor }: ChangePasswordProp
           autoComplete="new-password"
           value={confirmPassword}
           onChange={(e) => setConfirmPassword(e.target.value)}
-          minLength={12}
+          minLength={MIN_PASSWORD_LENGTH}
           required
         />
       </div>
 
-      {needsSecondFactor && (
-        <div>
-          <label className="block text-sm text-zinc-400 mb-1" htmlFor="password-stepup-code">
-            {t("profile.mfa.stepUp.label")}{" "}
-            <span className="text-zinc-500">
-              {passkeyPossible ? t("profile.mfa.stepUp.hintWithPasskey") : t("profile.mfa.stepUp.hint")}
-            </span>
-          </label>
-          <Input
-            id="password-stepup-code"
-            autoComplete="one-time-code"
-            maxLength={24}
-            value={stepUpCode}
-            onChange={(e) => setStepUpCode(e.target.value)}
-            className="w-56"
-          />
-        </div>
+      {stepUp.needsSecondFactor && (
+        <SecondFactorCodeField
+          id="password-stepup-code"
+          value={stepUp.stepUpCode}
+          onChange={stepUp.setStepUpCode}
+          passkeyPossible={stepUp.passkeyPossible}
+        />
       )}
 
-      {error && <p className="text-sm text-red-400">{error}</p>}
+      {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
 
       {success && (
-        <p className="flex items-center gap-1.5 text-sm text-emerald-400">
+        <p role="status" className="flex items-center gap-1.5 text-sm text-emerald-400">
           <Check className="w-4 h-4" /> {hasPassword ? t("profile.password.updated") : t("profile.password.setDone")}
         </p>
       )}

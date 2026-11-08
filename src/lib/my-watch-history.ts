@@ -2,11 +2,14 @@ import { prisma } from "@/lib/prisma";
 import { escapeIlike, SEARCH_TERM_MAX_LEN } from "@/lib/sanitize";
 import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
 import {
+  currentActivityGeneration,
   getPlayStatsForServerUsers,
   getPlayYearsForServerUsers,
   getWrappedForServerUsers,
 } from "@/lib/play-history";
-import type { Prisma } from "@/generated/prisma";
+import { processSingleton } from "@/lib/process-singleton";
+import { getStatsTimeZone } from "@/lib/stats-time-zone-data";
+import { Prisma } from "@/generated/prisma";
 
 // Self-service watch history — the ONE scoping chokepoint for a user reading
 // their OWN PlayHistory. Every query below is filtered by the MediaServerUser
@@ -29,6 +32,13 @@ import type { Prisma } from "@/generated/prisma";
 //                                          just because their ids are null
 
 export const MY_HISTORY_PAGE_SIZE = 30;
+
+// A Plex/Jellyfin sign-in IS a media-server identity, so an empty personal view
+// means "nothing recorded yet", never "get your account linked" — only a local
+// or OIDC account can genuinely need linking. One list for every personal page.
+export function isMediaServerProvider(provider: string | null | undefined): boolean {
+  return provider === "plex" || provider === "jellyfin" || provider === "jellyfin-quickconnect";
+}
 
 export interface MyWatchHistoryItem {
   id: string;
@@ -168,8 +178,32 @@ export function linkedIdentityBranches(user: {
   return branches;
 }
 
-function branchMatches(row: Record<string, unknown>, branch: LinkedIdentityBranch): boolean {
-  return Object.entries(branch).every(([key, value]) => row[key] === value);
+// A branch and a row meet on one lookup key: a row matches a branch exactly
+// when one of the row's keys is the branch's key. Lets the batch resolvers
+// index by key instead of testing every (row, branch) pair.
+type IdentityRow = { userId: string | null; source: string; sourceUserId: string; manualUserLink: boolean };
+
+const subjectKey = (source: string, manualUserLink: boolean, sourceUserId: string) => `s:${source}:${manualUserLink}:${sourceUserId}`;
+
+function branchKey(branch: LinkedIdentityBranch): string {
+  return "userId" in branch ? `u:${branch.userId}` : subjectKey(branch.source, branch.manualUserLink, branch.sourceUserId);
+}
+
+function rowKeys(row: IdentityRow): string[] {
+  const subject = subjectKey(row.source, row.manualUserLink, row.sourceUserId);
+  return row.userId ? [`u:${row.userId}`, subject] : [subject];
+}
+
+function indexBy<T>(items: readonly T[], keysOf: (item: T) => string[]): Map<string, number[]> {
+  const out = new Map<string, number[]>();
+  items.forEach((item, i) => {
+    for (const k of keysOf(item)) {
+      const list = out.get(k);
+      if (list) list.push(i);
+      else out.set(k, [i]);
+    }
+  });
+  return out;
 }
 
 export interface AccountMediaIdentity {
@@ -217,11 +251,12 @@ export async function resolveAccountMediaIdentities(
     select: { id: true, source: true, sourceUserId: true, userId: true, manualUserLink: true },
   });
 
+  const rowsByKey = indexBy(rows, rowKeys);
   for (const u of users) {
-    const branches = branchesByUser.get(u.id)!;
-    const linked = rows
-      .filter((r) => branches.some((b) => branchMatches(r, b)))
-      .map((r) => ({ id: r.id, source: r.source }));
+    // Rows in their read order, each once (a row can meet two of one account's branches).
+    const matched = new Set<number>();
+    for (const b of branchesByUser.get(u.id)!) for (const i of rowsByKey.get(branchKey(b)) ?? []) matched.add(i);
+    const linked = [...matched].sort((a, b) => a - b).map((i) => ({ id: rows[i].id, source: rows[i].source }));
     const subjects: ("plex" | "jellyfin")[] = [];
     const subjectPairs: ["plex" | "jellyfin", string | null][] = [
       ["plex", u.plexUserId],
@@ -229,9 +264,8 @@ export async function resolveAccountMediaIdentities(
     ];
     for (const [source, subject] of subjectPairs) {
       if (!subject) continue;
-      const pinnedAway = rows.some(
-        (r) => r.source === source && r.sourceUserId === subject && r.manualUserLink && r.userId !== u.id,
-      );
+      const pinned = rowsByKey.get(subjectKey(source, true, subject)) ?? [];
+      const pinnedAway = pinned.some((i) => rows[i].userId !== u.id);
       if (!pinnedAway) subjects.push(source);
     }
     out.set(u.id, { linked, subjects });
@@ -278,12 +312,136 @@ export async function resolveMediaServerUserOwners(msuIds: string[]): Promise<Ma
     select: { id: true, plexUserId: true, jellyfinUserId: true },
   });
 
+  // Each account's branches indexed once; a row then looks its candidates up.
+  const usersByKey = indexBy(users, (u) => linkedIdentityBranches(u).map(branchKey));
   for (const row of rows) {
-    const owners = users.filter((u) => linkedIdentityBranches(u).some((b) => branchMatches(row, b)));
+    const candidates = new Set<number>();
+    for (const k of rowKeys(row)) for (const i of usersByKey.get(k) ?? []) candidates.add(i);
+    // In the users' read order, as before; the FK owner first if it is one.
+    const owners = [...candidates].sort((a, b) => a - b).map((i) => users[i]);
     const owner = owners.find((u) => u.id === row.userId) ?? owners[0];
     out.set(row.id, { userId: owner?.id ?? null, source: row.source, sourceUserId: row.sourceUserId });
   }
   return out;
+}
+
+// The identity ladder. tmdbId alone is NOT enough for TV — every episode of
+// a show shares the show's tmdbId, so season/episode are part of the key. The
+// entry detail reads the same ladder through groupIdentity(): change both.
+const HISTORY_GROUP_KEY_SQL = Prisma.sql`
+    CASE
+      WHEN h."tmdbId" IS NOT NULL THEN
+        'tmdb:' || h."tmdbId"::text || ':' || COALESCE(h."mediaType"::text, '')
+          || ':' || COALESCE(h."seasonNumber", -1)::text
+          || ':' || COALESCE(h."episodeNumber", -1)::text
+      -- serverInstance is part of the key. A sourceItemId is SERVER-LOCAL (a Plex
+      -- ratingKey is a small integer; Jellyfin derives its Guid from type+path, so two
+      -- servers mounting the same library produce the same id), and a user linked to
+      -- two servers resolves to one MediaServerUser row per instance. Without it, two
+      -- different unmatched titles — one per server — collapse into a single history
+      -- entry whose aggregates sum both. The tmdb: branch above deliberately does NOT
+      -- scope: a tmdbId is global, so the same film watched on either server IS one title.
+      WHEN h."sourceItemId" IS NOT NULL THEN 'item:' || h."source" || ':' || h."serverInstance" || ':' || h."sourceItemId"
+      ELSE 'row:' || h."id"
+    END`;
+
+// The filters a page and its count share. `scope` is what a GROUP is built
+// from: the caller's ids and the media type (part of every group's identity, so
+// it never splits one). `search` SELECTS groups, it doesn't shape them: a group
+// is listed when any of its plays matches, and its count, play time, flags and
+// representative still span every play — exactly what the entry detail shows.
+// A group's plays can be titled differently (an early "Episode 5" placeholder,
+// Plex vs Jellyfin naming), so filtering rows first would list a smaller entry.
+interface HistoryFilter {
+  scope: Prisma.Sql;
+  search: Prisma.Sql | null;
+}
+
+function historyFilter(ids: string[], mediaType: "MOVIE" | "TV" | null, search: string): HistoryFilter {
+  const byType = mediaType ? Prisma.sql` AND h."mediaType" = CAST(${mediaType} AS "MediaType")` : Prisma.empty;
+  const scope = Prisma.sql`h."mediaServerUserId" IN (${Prisma.join(ids)})${byType}`;
+  if (!search) return { scope, search: null };
+  // Escaped bind + `ESCAPE '\'` on every ILIKE — see escapeIlike in
+  // src/lib/sanitize.ts for why the pair is mandatory (the escape alone
+  // matches nothing; the clause alone leaves a wildcard-scan DoS open).
+  const pattern = `%${escapeIlike(search)}%`;
+  return {
+    scope,
+    search: Prisma.sql`(h."title" ILIKE ${pattern} ESCAPE '\\' OR h."episodeTitle" ILIKE ${pattern} ESCAPE '\\')`,
+  };
+}
+
+// The opaque `<startedAt-iso>|<id>` cursor; an absent or malformed one fails
+// soft to the first page.
+function parseHistoryCursor(raw: string | null | undefined): { at: Date; id: string } | null {
+  if (!raw) return null;
+  const sep = raw.indexOf("|");
+  if (sep <= 0) return null;
+  const at = new Date(raw.slice(0, sep));
+  const id = raw.slice(sep + 1);
+  return id && !Number.isNaN(at.getTime()) ? { at, id } : null;
+}
+
+// One entry per group: ROW_NUMBER picks the latest play as the representative;
+// COUNT/SUM/bool_or aggregate the whole group. The group key is computed once
+// per row (the `keyed` CTE) and every window partitions on it. The keyset
+// predicate applies to the REPRESENTATIVE rows, outside the windows, so a
+// group's aggregates always span every play in the filter scope, whichever page
+// it renders on. The lean column list is deliberate — no ipAddress, codecs,
+// bitrate, or network forensics ever leave this query (the admin surface keeps
+// those). `limit` is one more than a page, so the caller can tell whether
+// another page exists.
+function historyPageQuery(f: HistoryFilter, cursor: { at: Date; id: string } | null, limit: number): Prisma.Sql {
+  const matches = f.search ? Prisma.sql`,
+        bool_or(k.matches) OVER (PARTITION BY k.gk) AS group_matches` : Prisma.empty;
+  const matchesColumn = f.search ? Prisma.sql`, ${f.search} AS matches` : Prisma.empty;
+  const keyset = cursor
+    ? Prisma.sql` AND (r."startedAt" < ${cursor.at} OR (r."startedAt" = ${cursor.at} AND r."id" < ${cursor.id}))`
+    : Prisma.empty;
+  return Prisma.sql`
+    WITH keyed AS (
+      SELECT
+        h."id", h."source", h."startedAt", h."stoppedAt", h."duration",
+        h."playDuration", h."tmdbId", h."mediaType", h."title", h."year",
+        h."posterPath", h."seasonNumber", h."episodeNumber", h."episodeTitle",
+        h."platform", h."player", h."device", h."playMethod", h."watched", h."completed",
+        ${HISTORY_GROUP_KEY_SQL} AS gk${matchesColumn}
+      FROM "PlayHistory" h
+      WHERE ${f.scope}
+    ),
+    ranked AS (
+      SELECT
+        k."id", k."source", k."startedAt", k."stoppedAt", k."duration",
+        k."playDuration", k."tmdbId", k."mediaType", k."title", k."year",
+        k."posterPath", k."seasonNumber", k."episodeNumber", k."episodeTitle",
+        k."platform", k."player", k."device", k."playMethod",
+        ROW_NUMBER() OVER (PARTITION BY k.gk ORDER BY k."startedAt" DESC, k."id" DESC)::int AS rn,
+        COUNT(*) OVER (PARTITION BY k.gk)::int AS play_count,
+        SUM(k."playDuration") OVER (PARTITION BY k.gk)::int AS total_play_duration,
+        bool_or(k."watched") OVER (PARTITION BY k.gk) AS group_watched,
+        bool_or(k."completed") OVER (PARTITION BY k.gk) AS group_completed${matches}
+      FROM keyed k
+    )
+    SELECT r."id", r."source", r."startedAt", r."stoppedAt", r."duration",
+      r."playDuration", r."tmdbId", r."mediaType", r."title", r."year",
+      r."posterPath", r."seasonNumber", r."episodeNumber", r."episodeTitle",
+      r."platform", r."player", r."device", r."playMethod",
+      r.play_count, r.total_play_duration, r.group_watched, r.group_completed
+    FROM ranked r
+    WHERE r.rn = 1${f.search ? Prisma.sql` AND r.group_matches` : Prisma.empty}${keyset}
+    ORDER BY r."startedAt" DESC, r."id" DESC
+    LIMIT ${limit}
+  `;
+}
+
+// Consolidated-entry count for the filter scope: the distinct groups holding at
+// least one matching play — the same groups the page query lists.
+function historyCountQuery(f: HistoryFilter): Prisma.Sql {
+  return Prisma.sql`
+    SELECT COUNT(DISTINCT ${HISTORY_GROUP_KEY_SQL})::int AS total
+    FROM "PlayHistory" h
+    WHERE ${f.scope}${f.search ? Prisma.sql` AND ${f.search}` : Prisma.empty}
+  `;
 }
 
 export async function getMyWatchHistory(
@@ -302,110 +460,14 @@ export async function getMyWatchHistory(
     };
   }
 
-  // NOTE on raw SQL here: the only user-influenced inputs are the mediaType
-  // (whitelisted to the two enum literals), the search term (ILIKE-escaped and
-  // length-bounded, always a bound parameter), and the cursor (parsed into a
-  // Date + string bind, never interpolated). The linked-id list comes from the
-  // scope resolution above, never from the request. Everything rides $N binds;
-  // no user data ever lands in SQL structure. Preserve this discipline (it
-  // mirrors /api/play-history's grouped query).
-  const binds: unknown[] = [...ids];
-  const idPlaceholders = ids.map((_, i) => `$${i + 1}`).join(", ");
-  let filterSql = `h."mediaServerUserId" IN (${idPlaceholders})`;
-
-  if (opts.mediaType === "MOVIE" || opts.mediaType === "TV") {
-    binds.push(opts.mediaType);
-    filterSql += ` AND h."mediaType" = CAST($${binds.length} AS "MediaType")`;
-  }
+  // Every input rides a bound parameter (Prisma.sql): the mediaType is
+  // whitelisted to the two enum literals, the search term is ILIKE-escaped and
+  // length-bounded, the cursor is parsed into a Date + string, and the
+  // linked-id list comes from the scope resolution above, never the request.
+  const mediaType = opts.mediaType === "MOVIE" || opts.mediaType === "TV" ? opts.mediaType : null;
   const search = (opts.search?.trim() ?? "").slice(0, SEARCH_TERM_MAX_LEN);
-  if (search) {
-    // Escaped bind + `ESCAPE '\'` on every ILIKE below — see escapeIlike in
-    // src/lib/sanitize.ts for why the pair is mandatory (the escape alone
-    // matches nothing; the clause alone leaves a wildcard-scan DoS open).
-    binds.push(`%${escapeIlike(search)}%`);
-    const bind = binds.length;
-    filterSql += ` AND (h."title" ILIKE $${bind} ESCAPE '\\' OR h."episodeTitle" ILIKE $${bind} ESCAPE '\\')`;
-  }
-  // The count query reuses exactly the filter binds; cursor + limit binds are
-  // appended after this snapshot and belong to the page query only.
-  const filterBinds = [...binds];
-
-  // The identity ladder. tmdbId alone is NOT enough for TV — every episode of
-  // a show shares the show's tmdbId, so season/episode are part of the key.
-  const groupKeySql = `
-    CASE
-      WHEN h."tmdbId" IS NOT NULL THEN
-        'tmdb:' || h."tmdbId"::text || ':' || COALESCE(h."mediaType"::text, '')
-          || ':' || COALESCE(h."seasonNumber", -1)::text
-          || ':' || COALESCE(h."episodeNumber", -1)::text
-      -- serverInstance is part of the key. A sourceItemId is SERVER-LOCAL (a Plex
-      -- ratingKey is a small integer; Jellyfin derives its Guid from type+path, so two
-      -- servers mounting the same library produce the same id), and a user linked to
-      -- two servers resolves to one MediaServerUser row per instance. Without it, two
-      -- different unmatched titles — one per server — collapse into a single history
-      -- entry whose aggregates sum both. The tmdb: branch above deliberately does NOT
-      -- scope: a tmdbId is global, so the same film watched on either server IS one title.
-      WHEN h."sourceItemId" IS NOT NULL THEN 'item:' || h."source" || ':' || h."serverInstance" || ':' || h."sourceItemId"
-      ELSE 'row:' || h."id"
-    END`;
-
-  // Parse the opaque `<startedAt-iso>|<id>` cursor into a keyset predicate on
-  // the REPRESENTATIVE rows; an absent/malformed cursor fails soft to the
-  // first page. Applied outside the window CTE so a group's aggregates always
-  // span every play in the filter scope, no matter which page it renders on.
-  let cursorSql = "";
-  const cursorRaw = opts.cursor;
-  if (cursorRaw) {
-    const sep = cursorRaw.indexOf("|");
-    if (sep > 0) {
-      const at = new Date(cursorRaw.slice(0, sep));
-      const cursorId = cursorRaw.slice(sep + 1);
-      if (cursorId && !Number.isNaN(at.getTime())) {
-        binds.push(at, cursorId);
-        cursorSql = ` AND (r."startedAt" < $${binds.length - 1} OR (r."startedAt" = $${binds.length - 1} AND r."id" < $${binds.length}))`;
-      }
-    }
-  }
-
-  binds.push(MY_HISTORY_PAGE_SIZE);
-  const limitBind = binds.length;
-
-  // One entry per group: ROW_NUMBER picks the latest play as the
-  // representative; COUNT/SUM/bool_or aggregate the whole group. The lean
-  // column list is deliberate — no ipAddress, codecs, bitrate, or network
-  // forensics ever leave this query (the admin surface keeps those).
-  const pageSql = `
-    WITH ranked AS (
-      SELECT
-        h."id", h."source", h."startedAt", h."stoppedAt", h."duration",
-        h."playDuration", h."tmdbId", h."mediaType", h."title", h."year",
-        h."posterPath", h."seasonNumber", h."episodeNumber", h."episodeTitle",
-        h."platform", h."player", h."device", h."playMethod",
-        ROW_NUMBER() OVER (PARTITION BY ${groupKeySql} ORDER BY h."startedAt" DESC, h."id" DESC)::int AS rn,
-        COUNT(*) OVER (PARTITION BY ${groupKeySql})::int AS play_count,
-        SUM(h."playDuration") OVER (PARTITION BY ${groupKeySql})::int AS total_play_duration,
-        bool_or(h."watched") OVER (PARTITION BY ${groupKeySql}) AS group_watched,
-        bool_or(h."completed") OVER (PARTITION BY ${groupKeySql}) AS group_completed
-      FROM "PlayHistory" h
-      WHERE ${filterSql}
-    )
-    SELECT r."id", r."source", r."startedAt", r."stoppedAt", r."duration",
-      r."playDuration", r."tmdbId", r."mediaType", r."title", r."year",
-      r."posterPath", r."seasonNumber", r."episodeNumber", r."episodeTitle",
-      r."platform", r."player", r."device", r."playMethod",
-      r.play_count, r.total_play_duration, r.group_watched, r.group_completed
-    FROM ranked r
-    WHERE r.rn = 1${cursorSql}
-    ORDER BY r."startedAt" DESC, r."id" DESC
-    LIMIT $${limitBind}
-  `;
-
-  // Consolidated-entry count for the filter scope (filter binds only).
-  const countSql = `
-    SELECT COUNT(DISTINCT ${groupKeySql})::int AS total
-    FROM "PlayHistory" h
-    WHERE ${filterSql}
-  `;
+  const filter = historyFilter(ids, mediaType, search);
+  const cursor = parseHistoryCursor(opts.cursor);
 
   // Two aggregates, two deliberately different populations — do NOT collapse
   // them into one `aggregate()` call.
@@ -417,53 +479,129 @@ export async function getMyWatchHistory(
   // `playSeconds` stays UNFILTERED, which is why the two pages already agreed
   // on watch time. A session that stopped below the watched threshold is still
   // time the person spent watching; excluding it would under-report the hours.
-  const [rows, totalRows, playAgg, timeAgg] = await Promise.all([
-    prisma.$queryRawUnsafe<RawGroupedRow[]>(pageSql, ...binds),
-    prisma.$queryRawUnsafe<{ total: number }[]>(countSql, ...filterBinds),
-    prisma.playHistory.count({
-      where: { mediaServerUserId: { in: ids }, watched: true },
+  //
+  // The total and the stats describe the whole scope, not a page, so a cursor
+  // page reuses what page one computed (historyScopeCached). Page one always
+  // recomputes, so a fresh load is exact.
+  const scopeKey = [...ids].sort().join(",");
+  const cursorPage = cursor !== null;
+  const [fetched, total, stats] = await Promise.all([
+    prisma.$queryRaw<RawGroupedRow[]>(historyPageQuery(filter, cursor, MY_HISTORY_PAGE_SIZE + 1)),
+    historyScopeCached(`total:${scopeKey}|${mediaType ?? ""}|${search}`, cursorPage, async () => {
+      const totalRows = await prisma.$queryRaw<{ total: number }[]>(historyCountQuery(filter));
+      return totalRows[0]?.total ?? 0;
     }),
-    prisma.playHistory.aggregate({
-      where: { mediaServerUserId: { in: ids } },
-      _sum: { playDuration: true },
+    historyScopeCached(`stats:${scopeKey}`, cursorPage, async () => {
+      const [playAgg, timeAgg] = await Promise.all([
+        prisma.playHistory.count({
+          where: { mediaServerUserId: { in: ids }, watched: true },
+        }),
+        prisma.playHistory.aggregate({
+          where: { mediaServerUserId: { in: ids } },
+          _sum: { playDuration: true },
+        }),
+      ]);
+      return { plays: playAgg, playSeconds: timeAgg._sum.playDuration ?? 0 };
     }),
   ]);
 
+  // A cursor only when a further entry exists, so a last page that is exactly
+  // full doesn't send the client after an empty one.
+  const hasMore = fetched.length > MY_HISTORY_PAGE_SIZE;
+  const rows = hasMore ? fetched.slice(0, MY_HISTORY_PAGE_SIZE) : fetched;
   const posters = await resolvePosterMap(rows);
-  const items: MyWatchHistoryItem[] = rows.map((r) => ({
-    id: r.id,
-    source: r.source,
-    startedAt: r.startedAt.toISOString(),
-    stoppedAt: r.stoppedAt.toISOString(),
-    duration: r.duration,
-    playDuration: r.playDuration,
-    watched: r.group_watched,
-    completed: r.group_completed,
-    tmdbId: r.tmdbId,
-    mediaType: r.mediaType,
-    title: r.title,
-    year: r.year,
-    posterPath: r.posterPath,
-    seasonNumber: r.seasonNumber,
-    episodeNumber: r.episodeNumber,
-    episodeTitle: r.episodeTitle,
-    platform: r.platform,
-    player: r.player,
-    device: r.device,
-    playMethod: r.playMethod,
-    posterUrl: r.tmdbId != null ? posters[posterPathKey(r.tmdbId, r.mediaType)] ?? null : null,
-    playCount: r.play_count,
-    totalPlaySeconds: r.total_play_duration,
-  }));
+  const items: MyWatchHistoryItem[] = rows.map((r) =>
+    toHistoryItem(r, r, {
+      playCount: r.play_count,
+      totalPlaySeconds: r.total_play_duration,
+      watched: r.group_watched,
+      completed: r.group_completed,
+    }, posters),
+  );
 
-  const last = rows.length === MY_HISTORY_PAGE_SIZE ? rows[rows.length - 1] : null;
+  const last = hasMore ? rows[rows.length - 1] : null;
   return {
     linked: true,
     items,
-    total: totalRows[0]?.total ?? 0,
+    total,
     nextCursor: last ? `${last.startedAt.toISOString()}|${last.id}` : null,
     pageSize: MY_HISTORY_PAGE_SIZE,
-    stats: { plays: playAgg, playSeconds: timeAgg._sum.playDuration ?? 0 },
+    stats,
+  };
+}
+
+// The list's scope-wide figures (the filtered entry total, the all-time stats)
+// keyed by the linked id set + filters, so a link change is a new key. Valid
+// within one activity-cache generation: a finalize, delete or restore bumps it
+// (guardrail 19b) — the generation is read BEFORE computing and the value kept
+// only if no bump landed meanwhile. The short TTL covers writes that don't bump
+// it (a fix-match moving plays between groups). Process-wide (guardrail 27a).
+const HISTORY_SCOPE_TTL_MS = 2 * 60 * 1000;
+const HISTORY_SCOPE_MAX = 200;
+const historyScopeCache = processSingleton(
+  "my-watch-history:scopeCache",
+  () => new Map<string, { generation: number; expiresAt: number; value: unknown }>(),
+);
+
+async function historyScopeCached<T>(key: string, reuse: boolean, compute: () => Promise<T>): Promise<T> {
+  const generation = currentActivityGeneration();
+  if (reuse) {
+    const hit = historyScopeCache.get(key);
+    if (hit && hit.generation === generation && hit.expiresAt > Date.now()) return hit.value as T;
+  }
+  const value = await compute();
+  if (currentActivityGeneration() === generation) {
+    historyScopeCache.delete(key);
+    while (historyScopeCache.size >= HISTORY_SCOPE_MAX) {
+      const oldest = historyScopeCache.keys().next().value;
+      if (oldest === undefined) break;
+      historyScopeCache.delete(oldest);
+    }
+    historyScopeCache.set(key, { generation, expiresAt: Date.now() + HISTORY_SCOPE_TTL_MS, value });
+  }
+  return value;
+}
+
+// One list/detail item from a play's identity columns (the representative row
+// in the list, the group's anchor in the detail), the play that represents it
+// (the newest) and the group's aggregates. The one mapper both paths use, so
+// the two views of an entry can't drift.
+function toHistoryItem(
+  identity: Pick<
+    RawGroupedRow,
+    "tmdbId" | "mediaType" | "title" | "year" | "posterPath" | "seasonNumber" | "episodeNumber" | "episodeTitle"
+  >,
+  play: Pick<
+    RawGroupedRow,
+    "id" | "source" | "startedAt" | "stoppedAt" | "duration" | "playDuration" | "platform" | "player" | "device" | "playMethod"
+  >,
+  group: { playCount: number; totalPlaySeconds: number; watched: boolean; completed: boolean },
+  posters: Record<string, string>,
+): MyWatchHistoryItem {
+  return {
+    id: play.id,
+    source: play.source,
+    startedAt: play.startedAt.toISOString(),
+    stoppedAt: play.stoppedAt.toISOString(),
+    duration: play.duration,
+    playDuration: play.playDuration,
+    watched: group.watched,
+    completed: group.completed,
+    tmdbId: identity.tmdbId,
+    mediaType: identity.mediaType,
+    title: identity.title,
+    year: identity.year,
+    posterPath: identity.posterPath,
+    seasonNumber: identity.seasonNumber,
+    episodeNumber: identity.episodeNumber,
+    episodeTitle: identity.episodeTitle,
+    platform: play.platform,
+    player: play.player,
+    device: play.device,
+    playMethod: play.playMethod,
+    posterUrl: identity.tmdbId != null ? posters[posterPathKey(identity.tmdbId, identity.mediaType)] ?? null : null,
+    playCount: group.playCount,
+    totalPlaySeconds: group.totalPlaySeconds,
   };
 }
 
@@ -526,6 +664,51 @@ const ANCHOR_SELECT = {
   playMethod: true,
 } as const;
 
+// The identity ladder as data: which group a play belongs to. The list query
+// writes the same ladder in SQL (HISTORY_GROUP_KEY_SQL) — a change to
+// one rung there is a change here, or the list's count stops matching the detail.
+type GroupIdentity =
+  | { kind: "tmdb"; tmdbId: number; mediaType: "MOVIE" | "TV" | null; seasonNumber: number | null; episodeNumber: number | null }
+  | { kind: "item"; source: string; serverInstance: string; sourceItemId: string }
+  | { kind: "row"; id: string };
+
+function groupIdentity(row: {
+  id: string;
+  source: string;
+  serverInstance: string;
+  tmdbId: number | null;
+  mediaType: "MOVIE" | "TV" | null;
+  seasonNumber: number | null;
+  episodeNumber: number | null;
+  sourceItemId: string | null;
+}): GroupIdentity {
+  if (row.tmdbId != null) {
+    return { kind: "tmdb", tmdbId: row.tmdbId, mediaType: row.mediaType, seasonNumber: row.seasonNumber, episodeNumber: row.episodeNumber };
+  }
+  if (row.sourceItemId != null) {
+    return { kind: "item", source: row.source, serverInstance: row.serverInstance, sourceItemId: row.sourceItemId };
+  }
+  return { kind: "row", id: row.id };
+}
+
+// The group's member rows (null-safe equality: Prisma turns a null into IS NULL,
+// as COALESCE does in the SQL key).
+function groupWhereFor(g: GroupIdentity): Prisma.PlayHistoryWhereInput {
+  switch (g.kind) {
+    case "tmdb":
+      // Source-agnostic: a tmdbId is global, so the same film on either server
+      // is one title.
+      return { tmdbId: g.tmdbId, mediaType: g.mediaType, seasonNumber: g.seasonNumber, episodeNumber: g.episodeNumber };
+    case "item":
+      // serverInstance is part of the identity: a sourceItemId is only unique
+      // within one server (two Plex servers reuse the same small ratingKeys), so
+      // without it two unrelated titles would merge here.
+      return { tmdbId: null, source: g.source, serverInstance: g.serverInstance, sourceItemId: g.sourceItemId };
+    case "row":
+      return { id: g.id };
+  }
+}
+
 /**
  * Expand one consolidated entry into its full play-by-play breakdown. `rowId`
  * is any play id from the entry (clients pass the representative row's id).
@@ -551,29 +734,8 @@ export async function getMyWatchHistoryEntry(
   });
   if (!anchor) return null;
 
-  let groupWhere: Prisma.PlayHistoryWhereInput;
-  if (anchor.tmdbId != null) {
-    groupWhere = {
-      tmdbId: anchor.tmdbId,
-      mediaType: anchor.mediaType,
-      seasonNumber: anchor.seasonNumber,
-      episodeNumber: anchor.episodeNumber,
-    };
-  } else if (anchor.sourceItemId != null) {
-    // serverInstance is part of the identity, matching the list query's group key.
-    // A sourceItemId is only unique within one server (two Plex servers reuse the
-    // same small ratingKeys), so without it two unrelated titles would merge here.
-    groupWhere = {
-      tmdbId: null,
-      source: anchor.source,
-      serverInstance: anchor.serverInstance,
-      sourceItemId: anchor.sourceItemId,
-    };
-  } else {
-    groupWhere = { id: anchor.id };
-  }
   const scopedGroup: Prisma.PlayHistoryWhereInput = {
-    AND: [{ mediaServerUserId: { in: ids } }, groupWhere],
+    AND: [{ mediaServerUserId: { in: ids } }, groupWhereFor(groupIdentity(anchor))],
   };
 
   const [playRows, agg, anyWatched, anyCompleted] = await Promise.all([
@@ -625,32 +787,12 @@ export async function getMyWatchHistoryEntry(
 
   const posters: Record<string, string> =
     anchor.tmdbId != null ? await resolvePosterMap([anchor]) : {};
-  const item: MyWatchHistoryItem = {
-    id: newest.id,
-    source: newest.source,
-    startedAt: newest.startedAt.toISOString(),
-    stoppedAt: newest.stoppedAt.toISOString(),
-    duration: newest.duration,
-    playDuration: newest.playDuration,
-    watched: anyWatched !== null,
-    completed: anyCompleted !== null,
-    tmdbId: anchor.tmdbId,
-    mediaType: anchor.mediaType,
-    title: anchor.title,
-    year: anchor.year,
-    posterPath: anchor.posterPath,
-    seasonNumber: anchor.seasonNumber,
-    episodeNumber: anchor.episodeNumber,
-    episodeTitle: anchor.episodeTitle,
-    platform: newest.platform,
-    player: newest.player,
-    device: newest.device,
-    playMethod: newest.playMethod,
-    posterUrl:
-      anchor.tmdbId != null ? posters[posterPathKey(anchor.tmdbId, anchor.mediaType)] ?? null : null,
+  const item = toHistoryItem(anchor, newest, {
     playCount: agg._count._all,
     totalPlaySeconds: agg._sum.playDuration ?? 0,
-  };
+    watched: anyWatched !== null,
+    completed: anyCompleted !== null,
+  }, posters);
 
   return {
     item,
@@ -713,8 +855,11 @@ export async function getMyWrapped(
 }> {
   const ids = await resolveLinkedMediaServerUserIds(summonarrUserId);
   if (ids.length === 0) return { linked: false, years: [], year: null, data: null };
-  const years = await getPlayYearsForServerUsers(ids);
+  // One zone for the year list and the year's bundle, so a zone change between
+  // the two reads can't offer a year the bundle then counts differently.
+  const timeZone = await getStatsTimeZone();
+  const years = await getPlayYearsForServerUsers(ids, timeZone);
   if (years.length === 0) return { linked: true, years: [], year: null, data: null };
   const year = requestedYear && years.includes(requestedYear) ? requestedYear : years[0];
-  return { linked: true, years, year, data: await getWrappedForServerUsers(ids, year) };
+  return { linked: true, years, year, data: await getWrappedForServerUsers(ids, year, timeZone) };
 }

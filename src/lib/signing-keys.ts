@@ -26,6 +26,8 @@ import { SignJWT, jwtVerify, decodeProtectedHeader, type JWTPayload } from "jose
 export type SigningPurpose =
   | "session"
   | "plex-flow"
+  // plex-flow-state.ts: the admin "Connect Plex" cookie (guardrail 6f).
+  | "plex-connect"
   | "qc-flow"
   | "oidc-flow"
   | "request-token"

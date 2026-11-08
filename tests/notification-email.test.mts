@@ -134,3 +134,16 @@ test("notificationEmail is returned verbatim — no trimming or normalization", 
     "  padded@example.com  ",
   );
 });
+
+test("a purged account's tombstone address is never a delivery address", () => {
+  // Every reserved domain (reserved-email.ts) is a placeholder, the purge
+  // tombstone included — not only the two sign-in providers'.
+  assert.equal(
+    resolveUserNotificationEmail({ email: "deleted-abc@deleted.invalid", notificationEmail: null }),
+    null,
+  );
+  assert.equal(
+    resolveUserNotificationEmail({ email: "Deleted-ABC@Deleted.Invalid", notificationEmail: null }),
+    null,
+  );
+});

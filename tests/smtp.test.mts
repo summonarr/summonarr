@@ -37,6 +37,9 @@ class FakeSmtpSocket extends EventEmitter {
   // flag collapses them — losing the Error the first one carries.
   readonly destroyCalls: Array<Error | undefined> = [];
   greeted: boolean;
+  // A write this predicate matches is recorded but never completes — its
+  // callback is never called (a peer that stopped reading). No reply either.
+  stallWrite: ((data: string) => boolean) | null = null;
   readonly responder: Responder;
   readonly greeting: string | null;
 
@@ -62,6 +65,7 @@ class FakeSmtpSocket extends EventEmitter {
 
   write(data: string, _enc: string, cb: (err?: Error) => void): boolean {
     this.writes.push(data);
+    if (this.stallWrite?.(data)) return false;
     const reply = this.responder(data);
     if (reply !== null) {
       queueMicrotask(() => this.emit("data", Buffer.from(reply, "utf8")));
@@ -93,6 +97,8 @@ interface RunOptions {
   overrides?: Partial<Record<string, string | null>>;
   config?: Partial<SmtpConfig>;
   msg?: Partial<SmtpMessage>;
+  /** See FakeSmtpSocket.stallWrite. */
+  stallWrite?: (data: string) => boolean;
 }
 
 interface RunResult {
@@ -202,6 +208,7 @@ async function runSendMail(opts: RunOptions = {}): Promise<RunResult> {
 
   const fakeNetConnect = (options: net.TcpNetConnectOpts, cb?: () => void): net.Socket => {
     const s = new FakeSmtpSocket(responder, greeting);
+    s.stallWrite = opts.stallWrite ?? null;
     sockets.push(s);
     result.netConnectOpts.push({ host: String(options.host), port: Number(options.port) });
     if (cb) queueMicrotask(cb);
@@ -820,4 +827,92 @@ test("read timeout: a peer that goes silent mid-session is torn down, not awaite
     r.socketDestroys[0].map((e) => e?.message),
     ["SMTP read timeout", undefined],
   );
+});
+
+test("a non-ASCII display name in From/To goes out as RFC 2047 encoded-words; the address and the envelope are untouched", async () => {
+  const name = "Médiathèque";
+  const r = await runSendMail({
+    msg: { from: `${name} <noreply@example.com>`, to: '"Zoë Ünlü" <user@dest.example>' },
+  });
+  assert.equal(r.error, undefined);
+  const { headers } = extractMessage(r.writes);
+  const decode = (value: string) => {
+    const m = /^((?:=\?UTF-8\?B\?[A-Za-z0-9+/=]+\?=(?:\r\n )?)+) (<[^>]+>)$/.exec(value);
+    assert.ok(m, `not an encoded-word display name: ${value}`);
+    const text = [...m[1].matchAll(/=\?UTF-8\?B\?([A-Za-z0-9+/=]+)\?=/g)]
+      .map((w) => Buffer.from(w[1], "base64").toString("utf8"))
+      .join("");
+    return { text, addr: m[2] };
+  };
+  assert.deepEqual(decode(header(headers, "From")), { text: name, addr: "<noreply@example.com>" });
+  // The quotes are dropped: an encoded-word may not sit inside a quoted string.
+  assert.deepEqual(decode(header(headers, "To")), { text: "Zoë Ünlü", addr: "<user@dest.example>" });
+  for (const h of headers) assert.match(h, /^[\x20-\x7E]*$/, `8-bit header byte in: ${h}`);
+  assert.ok(r.writes.includes("MAIL FROM:<noreply@example.com>\r\n"));
+  assert.ok(r.writes.includes("RCPT TO:<user@dest.example>\r\n"));
+});
+
+test("write timeout: a peer that stops reading mid-DATA is torn down, not awaited forever", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  // Every command completes until the message payload, whose write never
+  // drains (its callback is never called) and draws no reply.
+  let markStalled!: () => void;
+  const stalled = new Promise<void>((resolve) => { markStalled = resolve; });
+  const pending = runSendMail({
+    stallWrite: (data) => {
+      if (!data.startsWith("From: ")) return false;
+      markStalled();
+      return true;
+    },
+  });
+  // The payload write is in flight, and its deadline was armed before it.
+  await stalled;
+  t.mock.timers.tick(30_000);
+  // Deadline the settle (see the read-timeout test): without the write timer
+  // this promise never settles.
+  const settled = await Promise.race([
+    pending.then((value) => ({ value })),
+    (async () => {
+      for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+      return null;
+    })(),
+  ]);
+  assert.ok(settled, "sendMail never settled — the write timeout never fired");
+  const r = settled.value;
+  assert.equal(asSmtpError(r.error).message, "SMTP write timed out after 30000ms");
+  assert.ok(r.writes.at(-1)?.startsWith("From: "), "the stalled payload was the last write");
+  assert.equal(r.socketDestroys[0][0]?.message, "SMTP write timeout");
+});
+
+test("a long ASCII subject is folded at spaces into lines near 76 characters, and unfolds byte for byte", async () => {
+  const subject = "Now Available: " + Array.from({ length: 40 }, (_, i) => `Word${i}`).join(" ") + "  end";
+  const r = await runSendMail({ msg: { subject } });
+  assert.equal(r.error, undefined);
+  const { headers } = extractMessage(r.writes);
+  const start = headers.findIndex((h) => h.startsWith("Subject: "));
+  const physical = [headers[start]];
+  for (let i = start + 1; headers[i]?.startsWith(" "); i++) physical.push(headers[i]);
+  assert.ok(physical.length > 1, "expected the subject to fold");
+  for (const line of physical) assert.ok(line.length <= 76, `line too long: ${line.length}`);
+  // Unfolding (RFC 5322 §2.2.3) removes each CRLF and keeps the space after it.
+  assert.equal(physical.join("").slice("Subject: ".length), subject);
+});
+
+test("an ASCII subject with no space to fold at goes out as encoded-words instead of an over-long line", async () => {
+  const subject = "x".repeat(1200);
+  const r = await runSendMail({ msg: { subject } });
+  assert.equal(r.error, undefined);
+  const { headers } = extractMessage(r.writes);
+  for (const h of headers) assert.ok(h.length <= 998, `header line of ${h.length}`);
+  const start = headers.findIndex((h) => h.startsWith("Subject: "));
+  assert.match(headers[start], /^Subject: =\?UTF-8\?B\?/);
+});
+
+test("a non-ASCII address that can't be encoded is refused before anything is sent", async () => {
+  for (const to of ["usér@exämple.com", "Zoë <zoë@exämple.com>"]) {
+    const r = await runSendMail({ msg: { to } });
+    assert.ok(r.error instanceof SmtpError, to);
+    assert.match(String(r.error.message), /SMTPUTF8/);
+    assert.equal(r.writes.length, 0, "nothing written");
+  }
 });

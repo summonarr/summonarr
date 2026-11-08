@@ -1,3 +1,4 @@
+import { timedFetch } from "@/lib/client/fetch-json";
 import { withBasePath } from "@/lib/base-path";
 import type { Translator } from "@/lib/i18n/translate";
 
@@ -18,6 +19,11 @@ export type FixMatchRequest = {
   correctTmdbId: number;
   canonicalGuid?: string;
   serverInstance?: string;
+  // The issue dialog: the WRONG_MATCH issue this fix answers, closed by the
+  // server's job when the remap succeeds (title mode only), and the corrected
+  // title its resolution note names.
+  issueId?: string;
+  issueTitle?: string;
 } & (
   | { tmdbId: number; itemKey?: undefined }
   // Item mode: one item the library match check flagged; the server reads its
@@ -29,7 +35,9 @@ export type FixMatchRequest = {
 // identical remap was already running server-side and this call attached to it
 // — i.e. THIS caller's candidate pick (if different) was not used. It is a flag
 // rather than text so the consumer can render it in its own language.
-export type FixMatchOutcome = { ok: true; warning?: string; joined?: boolean };
+// `issueResolved` (a fix sent with `issueId`): whether the server's job closed
+// that issue; absent when it can't say — a joined job closes it separately.
+export type FixMatchOutcome = { ok: true; warning?: string; joined?: boolean; issueResolved?: boolean };
 
 // What the UI gets on every poll while the job runs: the server's phase plus
 // wall-clock elapsed since the job started, so "Applying…" can become
@@ -56,7 +64,8 @@ export type FixMatchErrorCode =
   | "failed"
   // Status read 404'd: the server restarted and lost the in-memory job.
   | "jobLost"
-  // Too many consecutive status-read failures (network or non-2xx).
+  // Too many consecutive status-read failures (network, non-2xx, or an answer
+  // that is not the status route's JSON).
   | "pollLost"
   // The job was still running at MAX_WAIT_MS.
   | "timedOut";
@@ -95,15 +104,74 @@ export function fixMatchWarningMessage(outcome: FixMatchOutcome, t: Translator):
   return parts.length > 0 ? parts.join(" ") : null;
 }
 
-type StartBody = { ok?: boolean; jobId?: string; warning?: string; error?: string; joined?: boolean };
+type JobStatus = "queued" | "running" | "done" | "failed";
+const JOB_STATUSES: ReadonlySet<string> = new Set<JobStatus>(["queued", "running", "done", "failed"]);
+const PHASES: ReadonlySet<string> = new Set<FixMatchProgressView["phase"]>(["queued", "searching", "applying", "confirming"]);
+
+type StartBody = { ok: boolean; jobId?: string; warning?: string; error?: string; joined: boolean };
 type StatusBody = {
-  status?: "queued" | "running" | "done" | "failed";
+  status: JobStatus;
   queueAhead?: number;
-  startedAt?: number;
   progress?: Omit<FixMatchProgressView, "elapsedMs">;
-  result?: FixMatchOutcome;
+  result: FixMatchOutcome;
   error?: string;
 };
+
+const record = (v: unknown): Record<string, unknown> | null =>
+  v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+const bool = (v: unknown): boolean | undefined => (typeof v === "boolean" ? v : undefined);
+
+// The start POST's answer, field by field: anything of the wrong type reads as absent.
+function startBodyOf(raw: unknown): StartBody {
+  const r = record(raw) ?? {};
+  return { ok: r.ok === true, jobId: str(r.jobId) || undefined, warning: str(r.warning), error: str(r.error), joined: r.joined === true };
+}
+
+// A finished job's result, built from the fields the UI reads — never the
+// server's object spread through.
+function outcomeOf(raw: unknown): FixMatchOutcome {
+  const r = record(raw) ?? {};
+  const warning = str(r.warning);
+  const issueResolved = bool(r.issueResolved);
+  return {
+    ok: true,
+    ...(warning ? { warning } : {}),
+    ...(r.joined === true ? { joined: true } : {}),
+    ...(issueResolved !== undefined ? { issueResolved } : {}),
+  };
+}
+
+function progressOf(raw: unknown): StatusBody["progress"] {
+  const r = record(raw);
+  if (!r) return undefined;
+  const phase = str(r.phase);
+  return {
+    phase: phase && PHASES.has(phase) ? (phase as FixMatchProgressView["phase"]) : "applying",
+    remoteApplied: r.remoteApplied === true,
+    attempt: num(r.attempt) ?? 0,
+    attempts: num(r.attempts) ?? 0,
+    readFailures: num(r.readFailures) ?? 0,
+    ...(num(r.copy) !== undefined ? { copy: num(r.copy) } : {}),
+    ...(num(r.copies) !== undefined ? { copies: num(r.copies) } : {}),
+  };
+}
+
+// The status route's answer, or null when the body is not it (an auth proxy's
+// page, a stray JSON).
+function statusBodyOf(raw: unknown): StatusBody | null {
+  const r = record(raw);
+  const status = str(r?.status);
+  if (!r || !status || !JOB_STATUSES.has(status)) return null;
+  return {
+    status: status as JobStatus,
+    queueAhead: num(r.queueAhead),
+    progress: progressOf(r.progress),
+    result: outcomeOf(r.result),
+    error: str(r.error),
+  };
+}
 
 /** Fired on `window` when a job has been accepted, so the job tray refreshes at once. */
 export const FIX_MATCH_STARTED_EVENT = "fix-match:started";
@@ -130,32 +198,89 @@ export function hasStalled(now: number, lastChangeAt: number, reportsProgress: b
 }
 const MAX_CONSECUTIVE_POLL_FAILURES = 10;
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+// A wait the caller's abort cuts short.
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
+const abortError = () => new DOMException("Fix-match polling aborted", "AbortError");
+
+// POST the remap as a background job. Throws a FixMatchClientError on refusal.
+async function startFixMatch(body: FixMatchRequest, signal: AbortSignal | undefined): Promise<StartBody> {
+  const res = await timedFetch(withBasePath("/api/admin/fix-match"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...body, async: true }),
+    signal,
+  });
+  const started = startBodyOf(await res.json().catch(() => null));
+  if (!res.ok || !started.ok) {
+    throw started.error
+      ? new FixMatchClientError("failed", { status: res.status, message: started.error })
+      : new FixMatchClientError("http", { status: res.status });
+  }
+  return started;
+}
+
+// One status read: the job's status, or the HTTP status of a read that never
+// reached it (0 = the fetch failed). Throws jobLost on a 404 and rethrows an abort.
+async function readJobStatus(statusUrl: string, signal: AbortSignal | undefined): Promise<StatusBody | { failed: number }> {
+  let pollRes: Response;
+  try {
+    pollRes = await timedFetch(statusUrl, { signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    return { failed: 0 };
+  }
+  if (pollRes.status === 404) throw new FixMatchClientError("jobLost", { status: 404 });
+  // A 200 that is not the status route's JSON — an auth proxy's login page
+  // after a redirect — never reached the job: a failed poll, not "running".
+  if (!pollRes.ok || pollRes.redirected) return { failed: pollRes.status };
+  return statusBodyOf(await pollRes.json().catch(() => null)) ?? { failed: pollRes.status };
+}
+
+function progressView(job: StatusBody, startedLocally: number): FixMatchProgressView {
+  // startedLocally, never the job's startedAt: that is the SERVER clock, and
+  // mixing clocks renders a wrong elapsed timer under any skew.
+  const elapsedMs = Date.now() - startedLocally;
+  if (job.status === "queued") {
+    return { phase: "queued", remoteApplied: false, attempt: 0, attempts: 0, readFailures: 0, queueAhead: job.queueAhead ?? 0, elapsedMs };
+  }
+  const p = job.progress;
+  return {
+    phase: p?.phase ?? "applying",
+    remoteApplied: p?.remoteApplied ?? false,
+    attempt: p?.attempt ?? 0,
+    attempts: p?.attempts ?? 0,
+    readFailures: p?.readFailures ?? 0,
+    ...(p?.copies ? { copy: p.copy, copies: p.copies } : {}),
+    elapsedMs,
+  };
+}
 
 export async function runFixMatch(
   body: FixMatchRequest,
   opts: { onProgress?: (progress: FixMatchProgressView) => void; signal?: AbortSignal } = {},
 ): Promise<FixMatchOutcome> {
   const startedLocally = Date.now();
-  const res = await fetch(withBasePath("/api/admin/fix-match"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...body, async: true }),
-    signal: opts.signal,
-  });
-  let started: StartBody = {};
-  try { started = await res.json() as StartBody; } catch { }
-  if (!res.ok || !started.ok) {
-    throw started.error
-      ? new FixMatchClientError("failed", { status: res.status, message: started.error })
-      : new FixMatchClientError("http", { status: res.status });
-  }
+  const started = await startFixMatch(body, opts.signal);
   // A server that predates the job mode ignores `async` and answers the plain
   // synchronous result — honour it.
   if (!started.jobId) return started.warning ? { ok: true, warning: started.warning } : { ok: true };
 
   // Only a caller that PICKED a candidate can have had its pick ignored.
   const joined = Boolean(started.joined && body.canonicalGuid);
+  // A joined job's result speaks for the issue of whoever started it.
+  const ownIssueFlag = !started.joined;
   // Tell the job tray there is something new to show without waiting for its poll.
   if (typeof window !== "undefined") window.dispatchEvent(new Event(FIX_MATCH_STARTED_EVENT));
 
@@ -165,64 +290,41 @@ export async function runFixMatch(
   let lastSignature = "";
   let lastChangeAt = Date.now();
   while (Date.now() < deadline) {
-    await sleep(POLL_INTERVAL_MS);
+    await sleep(POLL_INTERVAL_MS, opts.signal);
     // The caller navigated away (component unmount): stop the 3s poll loop —
     // the server-side job keeps running by design. AbortError shape so callers
     // can distinguish it from a real failure.
-    if (opts.signal?.aborted) throw new DOMException("Fix-match polling aborted", "AbortError");
-    let pollRes: Response;
-    try {
-      pollRes = await fetch(statusUrl, { signal: opts.signal });
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") throw err;
+    if (opts.signal?.aborted) throw abortError();
+    const job = await readJobStatus(statusUrl, opts.signal);
+    if ("failed" in job) {
       if (++consecutiveFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
-        throw new FixMatchClientError("pollLost");
-      }
-      continue;
-    }
-    if (pollRes.status === 404) {
-      throw new FixMatchClientError("jobLost", { status: 404 });
-    }
-    if (!pollRes.ok) {
-      if (++consecutiveFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
-        throw new FixMatchClientError("pollLost", { status: pollRes.status });
+        throw new FixMatchClientError("pollLost", job.failed ? { status: job.failed } : {});
       }
       continue;
     }
     consecutiveFailures = 0;
-    const job = await pollRes.json().catch(() => ({})) as StatusBody;
     if (job.status === "done") {
-      const result = job.result ?? { ok: true };
-      return joined ? { ...result, joined: true } : result;
+      const { issueResolved, ...result } = job.result;
+      return {
+        ...result,
+        ...(joined ? { joined: true } : {}),
+        ...(ownIssueFlag && issueResolved !== undefined ? { issueResolved } : {}),
+      };
     }
     if (job.status === "failed") throw new FixMatchClientError("failed", { message: job.error ?? "" });
     // Waiting for a slot is not a stall, however long the jobs ahead take.
     if (job.status === "queued") {
       lastChangeAt = Date.now();
-      opts.onProgress?.({
-        phase: "queued", remoteApplied: false, attempt: 0, attempts: 0, readFailures: 0,
-        queueAhead: job.queueAhead ?? 0, elapsedMs: Date.now() - startedLocally,
-      });
-      continue;
+    } else {
+      const signature = progressSignature(job.progress);
+      if (signature !== lastSignature) {
+        lastSignature = signature;
+        lastChangeAt = Date.now();
+      } else if (hasStalled(Date.now(), lastChangeAt, job.progress !== undefined)) {
+        throw new FixMatchClientError("timedOut");
+      }
     }
-    const signature = progressSignature(job.progress);
-    if (signature !== lastSignature) {
-      lastSignature = signature;
-      lastChangeAt = Date.now();
-    } else if (hasStalled(Date.now(), lastChangeAt, job.progress !== undefined)) {
-      throw new FixMatchClientError("timedOut");
-    }
-    opts.onProgress?.({
-      phase: job.progress?.phase ?? "applying",
-      remoteApplied: job.progress?.remoteApplied ?? false,
-      attempt: job.progress?.attempt ?? 0,
-      attempts: job.progress?.attempts ?? 0,
-      readFailures: job.progress?.readFailures ?? 0,
-      ...(job.progress?.copies ? { copy: job.progress.copy, copies: job.progress.copies } : {}),
-      // startedLocally, never job.startedAt: the latter is the SERVER clock,
-      // and mixing clocks renders a wrong elapsed timer under any skew.
-      elapsedMs: Date.now() - startedLocally,
-    });
+    opts.onProgress?.(progressView(job, startedLocally));
   }
   throw new FixMatchClientError("timedOut");
 }

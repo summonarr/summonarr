@@ -22,9 +22,8 @@ const LIMIT_PER_MIN = 30;
 // 429 past LIMIT_PER_MIN.
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, IMPORT_MAX_BODY_BYTES);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, IMPORT_MAX_BODY_BYTES);
+  if (body instanceof NextResponse) return body;
   const target = await importGate(body.service, body.instance, body.downloadId, t);
   if (target instanceof NextResponse) return target;
   if (!checkRateLimit(`queue-import-preview:${session.user.id}`, LIMIT_PER_MIN, 60_000)) {

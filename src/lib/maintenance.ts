@@ -4,7 +4,9 @@ import type { SummonarrSession } from "./api-auth";
 import { prisma } from "./prisma";
 import { hasPermission, Permission } from "./permissions";
 
-export async function getMaintenanceStatus(): Promise<{ enabled: boolean; message: string }> {
+interface MaintenanceRead { enabled: boolean; message: string; unreadable: boolean }
+
+async function readMaintenanceStatus(): Promise<MaintenanceRead> {
   try {
     const rows = await prisma.setting.findMany({
       where: { key: { in: ["maintenanceEnabled", "maintenanceMessage"] } },
@@ -13,13 +15,26 @@ export async function getMaintenanceStatus(): Promise<{ enabled: boolean; messag
     return {
       enabled: cfg.maintenanceEnabled === "true",
       message: cfg.maintenanceMessage ?? "",
+      unreadable: false,
     };
   } catch {
     // A Settings read failure means we cannot prove maintenance is off; fail closed
     // so writes don't slip through during a database incident.
-    return { enabled: true, message: "" };
+    return { enabled: true, message: "", unreadable: true };
   }
 }
+
+// Read per call, never memoized: a toggle must take effect on the next request,
+// and the write paths (the settings route, a backup restore) have no hook here
+// to invalidate a cache.
+export async function getMaintenanceStatus(): Promise<{ enabled: boolean; message: string }> {
+  const { enabled, message } = await readMaintenanceStatus();
+  return { enabled, message };
+}
+
+// Shown when the flag couldn't be read: nobody switched maintenance on, so
+// "Under maintenance" would send the reader looking for the wrong cause.
+const UNREADABLE_MESSAGE = "Temporarily unavailable";
 
 // `session` is the DB-checked, bearer-first session the route's withAuth /
 // withAdmin / withIssueAdmin wrapper (or requireAuth) already resolved — pass
@@ -41,10 +56,10 @@ export async function maintenanceGuard(
 ): Promise<NextResponse | null> {
   const s = session === undefined ? await authActive() : session;
   if (s && hasPermission(s.user.permissions, Permission.ADMIN)) return null;
-  const { enabled, message } = await getMaintenanceStatus();
+  const { enabled, message, unreadable } = await readMaintenanceStatus();
   if (!enabled) return null;
   return NextResponse.json(
-    { error: "Service unavailable", message: message || "Under maintenance" },
+    { error: "Service unavailable", message: unreadable ? UNREADABLE_MESSAGE : message || "Under maintenance" },
     { status: 503 }
   );
 }

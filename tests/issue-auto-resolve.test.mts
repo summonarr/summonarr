@@ -77,10 +77,15 @@ test("a landed replacement resolves the issue, audits it as system, tells the re
   const audit = ops.find((o) => o.op === "auditLog.create")!.args!.data;
   assert.equal(audit.action, "ISSUE_STATUS_CHANGE");
   assert.equal(audit.userName, "system");
+  assert.equal(audit.userId, "system", "the system principal's id, as every automated audit row");
   assert.equal(JSON.parse(audit.details as string).trigger, "auto-resolve-replacement");
   const note = ops.find((o) => o.op === "notification.create")!.args!.data;
   assert.equal(note.userId, "reporter-1");
   assert.equal(note.type, "ISSUE_RESOLVED");
+  // The row an admin's resolve with no note stores (tests/issues-routes.test.mts):
+  // one writer, announceIssueResolved, for both.
+  assert.equal(note.body, "Your reported issue was resolved.");
+  assert.deepEqual(note.data, { v: 1, resolution: null });
 });
 
 test("feature switched off ⇒ nothing is written", async () => {

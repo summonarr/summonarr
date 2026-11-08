@@ -43,6 +43,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { playHistorySource } from "./_play-history-source.mts";
 
 const SCHEMA = readFileSync(new URL("../prisma/schema.prisma", import.meta.url), "utf8");
 
@@ -131,6 +132,18 @@ test("the schema parser found a realistic model set — a broken parse must not 
     ph.indexes.some((ix) => ix.cols.length === 2 && ix.cols[0] === "source" && ix.cols[1] === "startedAt"),
     `PlayHistory's [source, startedAt(sort: Desc)] index did not parse to [source, startedAt]: ${JSON.stringify(ph.indexes)}`,
   );
+});
+
+// ── activity title lookup ───────────────────────────────────────────────────
+
+test("PlayHistory is indexed on [title, mediaType] for the Activity page's title fallback", () => {
+  const ph = model("PlayHistory");
+  assert.ok(
+    ph.indexes.some((ix) => ix.cols.length === 2 && ix.cols[0] === "title" && ix.cols[1] === "mediaType"),
+    `the DISTINCT ON ("title", "mediaType") lookup has no index to use: ${JSON.stringify(ph.indexes)}`,
+  );
+  const page = readFileSync(new URL("../src/lib/activity-title-resolve-data.ts", import.meta.url), "utf8");
+  assert.match(page, /SELECT DISTINCT ON \("title", "mediaType"\)/, "the lookup the index serves");
 });
 
 // ── guardrail 28: play history outlives the account that made it ────────────
@@ -325,7 +338,8 @@ test("every model still maps to its own name — no @@map indirection", () => {
 test("the raw-SQL layer's hardcoded table names all exist as models", () => {
   // The other half of the same risk: a model RENAME leaves the SQL strings
   // pointing at a table that no longer exists, and only a live query notices.
-  const playHistory = readFileSync(new URL("../src/lib/play-history.ts", import.meta.url), "utf8");
+  // Every play-history module (the entry file and the play-history-*.ts it is split into).
+  const playHistory = playHistorySource();
   const referenced = new Set<string>();
   // Quoted PascalCase only. Models are PascalCase and columns are camelCase, so
   // this cleanly skips EXTRACT(DOW FROM "startedAt"), which borrows the FROM
@@ -336,13 +350,13 @@ test("the raw-SQL layer's hardcoded table names all exist as models", () => {
   // else in the module goes through the ORM. Naming them is a stronger
   // non-vacuity guard than a bare count.
   for (const expected of ["PlayHistory", "MediaServerUser"]) {
-    assert.ok(referenced.has(expected), `the scan no longer finds "${expected}" in play-history.ts's raw SQL — it is broken`);
+    assert.ok(referenced.has(expected), `the scan no longer finds "${expected}" in the play-history modules' raw SQL — it is broken`);
   }
   const missing = [...referenced].filter((t) => !models.has(t));
   assert.deepEqual(
     missing,
     [],
-    `play-history.ts's raw SQL references table(s) that are not models in schema.prisma: ${missing.join(", ")}`,
+    `the play-history modules' raw SQL references table(s) that are not models in schema.prisma: ${missing.join(", ")}`,
   );
 });
 
@@ -362,8 +376,10 @@ test("the raw-SQL layer's hardcoded table names all exist as models", () => {
 // column holding an array would be the same failure in the other direction: an
 // array literal written into jsonb.
 //
-// So this pin is the standing condition for that shortcut. If it goes red,
-// escapeSQL must be taught the real column type instead.
+// dumpTable now reads each column's real type and writes a Json column as its
+// own JSON text, so a new array-valued Json column no longer breaks a restore.
+// This pin stays as a cheap review prompt for the fallback path, which still
+// decides by JS shape when a column's type was not read.
 test("no Json column may hold a top-level array — db-export discriminates array columns by JS shape", () => {
   const jsonFields: string[] = [];
   for (const m of models.values()) {

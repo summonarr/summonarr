@@ -175,11 +175,12 @@ type LibWhere = {
   mediaType?: "MOVIE" | "TV";
   // A (tmdbId, mediaType) pair list, or titleKeysWhere's per-type `IN` halves.
   OR?: Array<{ tmdbId: number | { in: number[] }; mediaType: "MOVIE" | "TV" }>;
-  serverInstance: { in: string[] };
+  serverInstance: { in: string[] } | { notIn: string[] };
 };
 function matchLib(rows: LibRow[], where: LibWhere): LibRow[] {
   return rows.filter((r) => {
-    if (!where.serverInstance.in.includes(r.serverInstance)) return false;
+    const si = where.serverInstance;
+    if ("in" in si ? !si.in.includes(r.serverInstance) : si.notIn.includes(r.serverInstance)) return false;
     if (where.OR) {
       return where.OR.some((p) =>
         p.mediaType === r.mediaType && (typeof p.tmdbId === "number" ? p.tmdbId === r.tmdbId : p.tmdbId.in.includes(r.tmdbId)));
@@ -297,6 +298,8 @@ shadowPrismaModel(prisma, "deletionVote", {
   },
   count: async () => 0,
 });
+// GET /api/votes counts the voted titles with one COUNT when nothing is hidden.
+shadowPrismaClientMethod(prisma, "$queryRaw", async () => [{ count: BigInt(voteGroups.length) }]);
 
 // Routes under test (imported AFTER every stub is in place).
 const { POST: bulkRequest } = await import("../src/app/api/requests/bulk/route.ts");
@@ -556,6 +559,20 @@ test("GET /api/votes hides a title held ONLY on a restricted server from an ungr
 
   const admin = await listVotesFor(await mintSession(makeUser("boss", { role: "ADMIN", permissions: Permission.ADMIN })));
   assert.deepEqual(admin.items.map((i) => i.tmdbId).sort(), [500, 600, 700, 800]);
+});
+
+test("GET /api/votes hides a title held only on a server the registry no longer lists, as the availability reads do", async () => {
+  settings.set("plexInstances", RESTRICTED_PLEX);
+  plexRows = [
+    { tmdbId: 500, mediaType: "MOVIE", serverInstance: "gone" }, // a slug no registry entry names
+    { tmdbId: 800, mediaType: "MOVIE", serverInstance: "gone" },
+    { tmdbId: 800, mediaType: "MOVIE", serverInstance: "" },     // also on a visible server
+  ];
+  voteGroups = [500, 800].map((tmdbId) => ({ tmdbId, mediaType: "MOVIE" as const }));
+
+  const plain = await listVotesFor(await mintSession(makeUser("plain")));
+  assert.deepEqual(plain.items.map((i) => i.tmdbId), [800]);
+  assert.equal(plain.total, 1);
 });
 
 test("GET /api/votes on an unrestricted deployment reads no library row at all (the fast path)", async () => {

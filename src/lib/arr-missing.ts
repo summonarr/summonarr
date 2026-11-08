@@ -16,12 +16,11 @@
 // `monitored` is reported, never filtered on: an unmonitored title is missing
 // for a different reason (nothing is searching for it), and the page decides
 // whether to show it.
-import { PROJECTION_SCAN_FACTOR } from "./arr-queue";
+import { nonNegInt, posInt, PROJECTION_SCAN_FACTOR, text } from "./arr-parse";
 import { sonarrSeriesCompletion, type SonarrSeriesStatsRow } from "./sonarr-completion";
 
-const posInt = (v: unknown): number | null => (typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null);
-const count = (v: unknown): number => (typeof v === "number" && Number.isInteger(v) && v > 0 ? v : 0);
-const str = (v: unknown): string => (typeof v === "string" ? v : "");
+// Ids are safe integers and every string the page shows is bounded (arr-parse).
+const count = (v: unknown): number => posInt(v) ?? 0;
 
 /** A parseable timestamp as epoch ms, or null. Radarr/Sonarr send ISO strings. */
 export function arrDateMs(v: unknown): number | null {
@@ -60,15 +59,28 @@ export function tmdbPosterPathFromImages(images: unknown): string | null {
 // PROJECTION_SCAN_FACTOR times that deep (guardrail 5i).
 export const MAX_MISSING_ITEMS = 20_000;
 
-function judgeListing<T>(rows: unknown, judge: (row: Record<string, unknown>) => T | null): T[] {
-  if (!Array.isArray(rows)) return [];
+/**
+ * A judged listing, and whether a cap stopped it short: `read` of the
+ * listing's `total` rows were judged, and `truncated` means the rest never
+ * were — the list is incomplete, and the report says so.
+ */
+export interface JudgedListing<T> {
+  items: T[];
+  read: number;
+  total: number;
+  truncated: boolean;
+}
+
+function judgeListing<T>(rows: unknown, judge: (row: Record<string, unknown>) => T | null): JudgedListing<T> {
+  if (!Array.isArray(rows)) return { items: [], read: 0, total: 0, truncated: false };
   const out: T[] = [];
-  for (let i = 0, n = Math.min(rows.length, MAX_MISSING_ITEMS * PROJECTION_SCAN_FACTOR); i < n && out.length < MAX_MISSING_ITEMS; i++) {
+  let i = 0;
+  for (const n = Math.min(rows.length, MAX_MISSING_ITEMS * PROJECTION_SCAN_FACTOR); i < n && out.length < MAX_MISSING_ITEMS; i++) {
     const row: unknown = rows[i];
     const judged = row && typeof row === "object" ? judge(row as Record<string, unknown>) : null;
     if (judged) out.push(judged);
   }
-  return out;
+  return { items: out, read: i, total: rows.length, truncated: i < rows.length };
 }
 
 // ── movies ───────────────────────────────────────────────────────────────────
@@ -115,7 +127,7 @@ export function missingMovie(row: RadarrMovieRow, instance: string, nowMs: numbe
     instance,
     arrId,
     tmdbId: posInt(row.tmdbId),
-    title: str(row.title),
+    title: text(row.title),
     year: posInt(row.year),
     monitored: row.monitored === true,
     posterPath: tmdbPosterPathFromImages(row.images),
@@ -129,6 +141,11 @@ export function missingMovie(row: RadarrMovieRow, instance: string, nowMs: numbe
 
 /** One instance's /api/v3/movie listing → its missing movies, in listing order (at most MAX_MISSING_ITEMS). */
 export function missingMovieList(rows: unknown, instance: string, nowMs: number): MissingMovie[] {
+  return missingMovieListing(rows, instance, nowMs).items;
+}
+
+/** missingMovieList, saying whether a cap stopped it before the listing's end. */
+export function missingMovieListing(rows: unknown, instance: string, nowMs: number): JudgedListing<MissingMovie> {
   return judgeListing(rows, (row) => missingMovie(row, instance, nowMs));
 }
 
@@ -206,7 +223,7 @@ export function missingSeries(row: SonarrSeriesRow, instance: string): MissingSe
     arrId,
     tmdbId: posInt(row.tmdbId),
     tvdbId: posInt(row.tvdbId),
-    title: str(row.title),
+    title: text(row.title),
     year: posInt(row.year),
     monitored: row.monitored === true,
     status: typeof row.status === "string" && row.status !== "" ? row.status : null,
@@ -220,6 +237,11 @@ export function missingSeries(row: SonarrSeriesRow, instance: string): MissingSe
 
 /** One instance's /api/v3/series listing → its missing series, in listing order (at most MAX_MISSING_ITEMS). */
 export function missingSeriesList(rows: unknown, instance: string): MissingSeries[] {
+  return missingSeriesListing(rows, instance).items;
+}
+
+/** missingSeriesList, saying whether a cap stopped it before the listing's end. */
+export function missingSeriesListing(rows: unknown, instance: string): JudgedListing<MissingSeries> {
   return judgeListing(rows, (row) => missingSeries(row, instance));
 }
 
@@ -247,7 +269,7 @@ export interface MissingEpisode {
 // numbers, or null for an episode that is not missing.
 function missingEpisodeParts(r: SonarrEpisodeRow, nowMs: number): { seasonNumber: number; episodeNumber: number; aired: number } | null {
   const seasonNumber = posInt(r?.seasonNumber);
-  const episodeNumber = typeof r?.episodeNumber === "number" && Number.isInteger(r.episodeNumber) && r.episodeNumber >= 0 ? r.episodeNumber : null;
+  const episodeNumber = nonNegInt(r?.episodeNumber);
   const aired = arrDateMs(r?.airDateUtc);
   if (seasonNumber === null || episodeNumber === null || aired === null || aired > nowMs) return null;
   if (r.monitored !== true || r.hasFile === true) return null;
@@ -258,7 +280,7 @@ export function missingEpisodes(rows: readonly SonarrEpisodeRow[], nowMs: number
   const out: MissingEpisode[] = [];
   for (const r of rows) {
     const m = missingEpisodeParts(r, nowMs);
-    if (m) out.push({ seasonNumber: m.seasonNumber, episodeNumber: m.episodeNumber, title: str(r.title), airDateUtc: new Date(m.aired).toISOString() });
+    if (m) out.push({ seasonNumber: m.seasonNumber, episodeNumber: m.episodeNumber, title: text(r.title), airDateUtc: new Date(m.aired).toISOString() });
   }
   return out.sort((a, b) => a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber);
 }
@@ -324,8 +346,8 @@ function cutoffName(items: unknown, cutoff: unknown): string | null {
   for (const it of items as ProfileItem[]) {
     if (!it || typeof it !== "object") continue;
     // A quality GROUP carries its own id and name; a single quality is keyed by its quality id.
-    if (Array.isArray(it.items) && it.items.length > 0 && it.id === cutoff) return str(it.name) || null;
-    if (it.quality && it.quality.id === cutoff) return str(it.quality.name) || null;
+    if (Array.isArray(it.items) && it.items.length > 0 && it.id === cutoff) return text(it.name) || null;
+    if (it.quality && it.quality.id === cutoff) return text(it.quality.name) || null;
   }
   return null;
 }
@@ -337,7 +359,7 @@ export function qualityProfileInfo(raw: unknown): Map<number, QualityProfileInfo
   for (const p of raw as Array<{ id?: unknown; name?: unknown; cutoff?: unknown; items?: unknown } | null>) {
     const id = posInt(p?.id);
     if (id === null || !p) continue;
-    out.set(id, { name: str(p.name), cutoff: cutoffName(p.items, p.cutoff) });
+    out.set(id, { name: text(p.name), cutoff: cutoffName(p.items, p.cutoff) });
   }
   return out;
 }
@@ -375,7 +397,7 @@ export function cutoffMovie(row: RadarrCutoffRow, instance: string, profiles: Re
     instance,
     arrId,
     tmdbId: posInt(row.tmdbId),
-    title: str(row.title),
+    title: text(row.title),
     year: posInt(row.year),
     posterPath: tmdbPosterPathFromImages(row.images),
     quality: qualityName(row.movieFile),
@@ -432,8 +454,8 @@ export function cutoffSeriesFromEpisodes(
       seenEpisodes.add(episodeId);
     }
     const seriesId = posInt(r.seriesId) ?? posInt(r.series?.id);
-    const seasonNumber = typeof r.seasonNumber === "number" && Number.isInteger(r.seasonNumber) && r.seasonNumber >= 0 ? r.seasonNumber : null;
-    const episodeNumber = typeof r.episodeNumber === "number" && Number.isInteger(r.episodeNumber) && r.episodeNumber >= 0 ? r.episodeNumber : null;
+    const seasonNumber = nonNegInt(r.seasonNumber);
+    const episodeNumber = nonNegInt(r.episodeNumber);
     if (seriesId === null || seasonNumber === null || episodeNumber === null) continue;
     const file = r.episodeFile && typeof r.episodeFile === "object" ? (r.episodeFile as { qualityCutoffNotMet?: unknown }) : null;
     if (file && file.qualityCutoffNotMet === false) continue;
@@ -445,7 +467,7 @@ export function cutoffSeriesFromEpisodes(
         arrId: seriesId,
         tmdbId: posInt(r.series?.tmdbId),
         tvdbId: posInt(r.series?.tvdbId),
-        title: str(r.series?.title),
+        title: text(r.series?.title),
         year: posInt(r.series?.year),
         posterPath: null,
         profile: profile?.name || null,
@@ -454,7 +476,7 @@ export function cutoffSeriesFromEpisodes(
       };
       bySeries.set(seriesId, row);
     }
-    row.episodes.push({ seasonNumber, episodeNumber, title: str(r.title), quality: qualityName(r.episodeFile) });
+    row.episodes.push({ seasonNumber, episodeNumber, title: text(r.title), quality: qualityName(r.episodeFile) });
   }
   const out = [...bySeries.values()];
   for (const s of out) s.episodes.sort((a, b) => a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber);

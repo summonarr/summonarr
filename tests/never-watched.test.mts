@@ -229,6 +229,12 @@ test("upstream health: most episode records with NO show id is a broken parser �
   assert.equal(upstreamHealth(status(), NOW), "ok", "a row without the fields reads 0 episodes");
 });
 
+test("upstreamHealth: an unreadable fetchedAt can't prove the check is recent — stale, never ok", () => {
+  assert.equal(upstreamHealth(status({ fetchedAt: "not-a-date" }), NOW), "stale");
+  assert.equal(upstreamHealth({ ok: true, fetchedAt: "not-a-date", attemptedAt: null, entries: 5, matched: 5, samples: 0, agreed: 0, error: null }, NOW), "stale");
+  assert.equal(upstreamHealth(status({ fetchedAt: "not-a-date", ok: false }), NOW), "failed", "the earlier checks keep their order");
+});
+
 test("isUnhealthyUpstreamCheck / upstreamCheckCounts: a READ server the self-check refuses vs an unread one (audit C068)", () => {
   assert.equal(isUnhealthyUpstreamCheck({ ok: true, health: "failed" }), true);
   assert.equal(isUnhealthyUpstreamCheck({ ok: true, health: "unreliable" }), true);
@@ -267,6 +273,9 @@ test("trackingStampsFor stamps only an off → on flip of a tracking switch", ()
   );
   assert.deepEqual(out, [["playHistoryPlexTrackedSince", NOW.toISOString()]]);
   assert.deepEqual(trackingStampsFor([["playHistoryEnabled", "true"]], new Map(), NOW), [["playHistoryTrackedSince", NOW.toISOString()]], "absent counts as off");
+  for (const inherited of ["constructor", "toString", "__proto__"]) {
+    assert.deepEqual(trackingStampsFor([[inherited, "true"]], new Map(), NOW), [], `${inherited} is not a tracking switch`);
+  }
 });
 
 // ── query parsing ───────────────────────────────────────────────────────────

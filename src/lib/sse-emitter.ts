@@ -1,4 +1,5 @@
 import { EventEmitter } from "events";
+import type { ActiveSessionLive } from "@/lib/live-event-frames";
 
 declare global {
   var __sseEmitter: EventEmitter | undefined;
@@ -31,9 +32,13 @@ export type SSEEvent =
   | { type: "issue:new"; issueId: string; userId: string }
   | { type: "issue:updated"; issueId: string; status: string; userId: string }
   | { type: "issue:deleted"; issueId: string; userId: string }
-  | { type: "issuemessage:created"; issueId: string; userId: string }
+  // `messageId`: the new message, so a client that already shows it (its own
+  // send) skips the re-read.
+  | { type: "issuemessage:created"; issueId: string; messageId: string; userId: string }
 
-  | { type: "activity:sessions"; sessions: unknown[] }
+  // The same session shape the browser checks each frame against
+  // (live-event-frames.ts), so the server and client unions can't drift.
+  | { type: "activity:sessions"; sessions: ActiveSessionLive[] }
   | { type: "activity:history-updated" }
   // Emitted by plex-events.ts when local reachability flips for ONE server. The
   // current value is also persisted in Setting(plexSettingKey(instance,

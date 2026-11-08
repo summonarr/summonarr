@@ -33,10 +33,17 @@ export class BackupCryptoError extends Error {
   }
 }
 
-async function deriveKey(password: string, salt: Buffer): Promise<Buffer> {
+// Both wrappers check the password SYNCHRONOUSLY, before any stream exists, so a
+// caller's try/catch around them sees the refusal (and nothing has started
+// reading the source). deriveKey keeps the same check as a second line.
+function assertPassword(password: string): void {
   if (typeof password !== "string" || password.length === 0) {
     throw new BackupCryptoError("Password is required for encrypted backups");
   }
+}
+
+async function deriveKey(password: string, salt: Buffer): Promise<Buffer> {
+  assertPassword(password);
   // NFKC normalisation ensures identical passphrases with different Unicode forms produce the same key
   return pbkdf2P(password.normalize("NFKC"), salt, KDF_ITERATIONS, KEY_LEN, "sha256");
 }
@@ -70,6 +77,7 @@ export function wrapEncryptStream(
   source: ReadableStream<Uint8Array>,
   password: string,
 ): ReadableStream<Uint8Array> {
+  assertPassword(password);
   const salt = randomBytes(SALT_LEN);
   const iv = randomBytes(IV_LEN);
   const header = buildHeader(salt, iv);
@@ -113,6 +121,9 @@ export function wrapEncryptStream(
           }
         }
       } catch (err) {
+        // Release the source too: a producer suspended on backpressure (the
+        // db-export snapshot transaction) would otherwise wait for its timeout.
+        reader.cancel(err).catch(() => {});
         controller.error(err);
       }
     },
@@ -122,6 +133,51 @@ export function wrapEncryptStream(
   });
 }
 
+// The 40-byte header parsed from the front of an upload, plus whatever
+// ciphertext arrived in the same read.
+async function readDecryptHeader(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  password: string,
+): Promise<{ decipher: DecipherGCM; leftover: Buffer }> {
+  let headerBuf = Buffer.alloc(0);
+  while (headerBuf.length < HEADER_LEN) {
+    const { value, done } = await reader.read();
+    if (done) throw new BackupCryptoError("Backup file is truncated (incomplete header)");
+    headerBuf = Buffer.concat([headerBuf, Buffer.from(value)]);
+  }
+  if (!headerBuf.subarray(0, 8).equals(MAGIC)) {
+    throw new BackupCryptoError("Not a valid encrypted backup file (bad magic bytes)");
+  }
+  const version = headerBuf.readUInt8(8);
+  if (version !== VERSION) {
+    throw new BackupCryptoError(`Unsupported encrypted backup version: ${version}`);
+  }
+  const salt = Buffer.from(headerBuf.subarray(12, 28));
+  const iv = Buffer.from(headerBuf.subarray(28, 40));
+  const key = await deriveKey(password, salt);
+  const decipher = createDecipheriv("aes-256-gcm", key, iv) as DecipherGCM;
+  return { decipher, leftover: Buffer.from(headerBuf.subarray(HEADER_LEN)) };
+}
+
+// The last bytes of the upload: everything but the trailing tag is ciphertext,
+// and the tag must verify. Returns the final plaintext (possibly empty).
+function finishDecrypt(decipher: DecipherGCM, tail: Buffer): Buffer {
+  if (tail.length < TAG_LEN) {
+    throw new BackupCryptoError("Backup file is truncated (missing auth tag)");
+  }
+  const tag = tail.subarray(tail.length - TAG_LEN);
+  const remaining = tail.subarray(0, tail.length - TAG_LEN);
+  const pt = remaining.length > 0 ? decipher.update(remaining) : Buffer.alloc(0);
+  decipher.setAuthTag(tag);
+  let finalPt: Buffer;
+  try {
+    finalPt = decipher.final();
+  } catch {
+    throw new BackupCryptoError("Invalid password or corrupted backup");
+  }
+  return finalPt.length > 0 ? Buffer.concat([pt, finalPt]) : pt;
+}
+
 // Inverse of wrapEncryptStream: parses the header, then streams AES-256-GCM
 // decryption, verifying the trailing auth tag (throws BackupCryptoError on
 // truncation, bad magic/version, or a wrong password).
@@ -129,54 +185,24 @@ export function wrapDecryptStream(
   source: ReadableStream<Uint8Array>,
   password: string,
 ): ReadableStream<Uint8Array> {
+  assertPassword(password);
   const reader = source.getReader();
-
-  let headerBuf = Buffer.alloc(0);
   let decipher: DecipherGCM | null = null;
 
   // The 16-byte GCM auth tag sits at the very end of the file. We can't know a
   // chunk is the last one until the reader says "done", so always hold back the
   // newest 16 bytes in `tail` instead of decrypting them as ciphertext.
-  let tail = Buffer.alloc(0);
-  let done = false;
-
-  async function ensureHeader(): Promise<void> {
-    while (headerBuf.length < HEADER_LEN) {
-      const { value, done: readerDone } = await reader.read();
-      if (readerDone) {
-        throw new BackupCryptoError("Backup file is truncated (incomplete header)");
-      }
-      headerBuf = Buffer.concat([headerBuf, Buffer.from(value)]);
-    }
-
-    const magic = headerBuf.subarray(0, 8);
-    if (!magic.equals(MAGIC)) {
-      throw new BackupCryptoError("Not a valid encrypted backup file (bad magic bytes)");
-    }
-    const version = headerBuf.readUInt8(8);
-    if (version !== VERSION) {
-      throw new BackupCryptoError(`Unsupported encrypted backup version: ${version}`);
-    }
-    const salt = headerBuf.subarray(12, 28);
-    const iv = headerBuf.subarray(28, 40);
-    const key = await deriveKey(password, Buffer.from(salt));
-    decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(iv)) as DecipherGCM;
-
-    const leftover = headerBuf.subarray(HEADER_LEN);
-    headerBuf = Buffer.alloc(0);
-    if (leftover.length > 0) {
-      tail = Buffer.from(leftover);
-    }
-  }
+  let tail: Buffer = Buffer.alloc(0);
 
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
-        if (done) {
-          controller.close();
-          return;
+        if (!decipher) {
+          const header = await readDecryptHeader(reader, password);
+          decipher = header.decipher;
+          tail = header.leftover;
         }
-        if (!decipher) await ensureHeader();
+        const active = decipher;
 
         // Loop until something is enqueued or the stream closes: a pull that
         // fulfills without enqueuing is never re-invoked while a read is
@@ -185,25 +211,10 @@ export function wrapDecryptStream(
         // stalled the whole decrypt when chunk boundaries fell inside the
         // 16-byte reserve.
         for (;;) {
-          const { value, done: readerDone } = await reader.read();
-          if (readerDone) {
-            done = true;
-            if (tail.length < TAG_LEN) {
-              throw new BackupCryptoError("Backup file is truncated (missing auth tag)");
-            }
-            const tag = tail.subarray(tail.length - TAG_LEN);
-            const remaining = tail.subarray(0, tail.length - TAG_LEN);
-            if (remaining.length > 0) {
-              const pt = decipher!.update(remaining);
-              if (pt.length > 0) controller.enqueue(new Uint8Array(pt));
-            }
-            decipher!.setAuthTag(tag);
-            try {
-              const finalPt = decipher!.final();
-              if (finalPt.length > 0) controller.enqueue(new Uint8Array(finalPt));
-            } catch {
-              throw new BackupCryptoError("Invalid password or corrupted backup");
-            }
+          const { value, done } = await reader.read();
+          if (done) {
+            const pt = finishDecrypt(active, tail);
+            if (pt.length > 0) controller.enqueue(new Uint8Array(pt));
             controller.close();
             return;
           }
@@ -216,13 +227,15 @@ export function wrapDecryptStream(
           }
           const releasable = combined.subarray(0, combined.length - TAG_LEN);
           tail = Buffer.from(combined.subarray(combined.length - TAG_LEN));
-          const pt = decipher!.update(releasable);
+          const pt = active.update(releasable);
           if (pt.length > 0) {
             controller.enqueue(new Uint8Array(pt));
             return;
           }
         }
       } catch (err) {
+        // Stop the upload being read: nothing after a failed header or tag is used.
+        reader.cancel(err).catch(() => {});
         controller.error(err);
       }
     },
@@ -231,4 +244,3 @@ export function wrapDecryptStream(
     },
   });
 }
-

@@ -9,6 +9,7 @@
 // tests/db/notification-retention.test.mts.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { Client } from "pg";
 
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32);
@@ -31,7 +32,14 @@ const pgProto = Client.prototype as unknown as {
   query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[] }>;
   end: () => Promise<void>;
 };
-pgProto.connect = async () => {};
+// The lock's own client, so a test can drop its connection mid-run (pg's
+// connection-level 'error' channel), which aborts the run's signal.
+let lockClient: { emit(event: string, ...args: unknown[]): boolean } | null = null;
+function captureLockClient(client: { emit(event: string, ...args: unknown[]): boolean }): void {
+  lockClient = client;
+}
+(pgProto as unknown as { connect: (this: { emit(event: string, ...args: unknown[]): boolean }) => Promise<void> }).connect =
+  async function () { captureLockClient(this); };
 pgProto.query = async (text, values) => {
   if (text.includes("pg_try_advisory_lock")) {
     lockCalls.push({ op: "try", lockId: Number((values ?? [])[0]) });
@@ -64,9 +72,12 @@ function matches(r: Row, c: Clause): boolean {
   if (c.readAt && r.readAt === null) return false;
   return true;
 }
+// When set, the first notification read drops the lock's connection.
+let dropLockOnFirstRead = false;
 shadowPrismaModel(prisma, "notification", {
   findMany: async (args: { where: { OR: Clause[] }; take: number }) => {
     findManyCalls++;
+    if (dropLockOnFirstRead && findManyCalls === 1) lockClient?.emit("error", new Error("Connection terminated unexpectedly"));
     return rows.filter((r) => args.where.OR.some((c) => matches(r, c))).slice(0, args.take).map((r) => ({ id: r.id }));
   },
   deleteMany: async (args: { where: { id: { in: string[] } } }) => {
@@ -101,8 +112,20 @@ function authed(secret = CRON_SECRET) {
 
 beforeEach(() => {
   rows = []; findManyCalls = 0; deleteWheres = []; lockCalls = []; lockFree = true; errors.length = 0; audits.length = 0;
+  dropLockOnFirstRead = false; lockClient = null;
   delete process.env.NOTIFICATION_READ_RETENTION_DAYS;
   delete process.env.NOTIFICATION_RETENTION_DAYS;
+});
+
+test("Notification declares an index led by createdAt — the purge reads across every user by createdAt", () => {
+  // The only other indexes lead with userId, which the purge's where-shape never
+  // names, so each batch was a sequential scan plus a sort.
+  const schema = readFileSync(new URL("../prisma/schema.prisma", import.meta.url), "utf8");
+  const model = /^model Notification \{([\s\S]*?)^\}/m.exec(schema);
+  assert.ok(model, "Notification model did not parse");
+  const leads = [...model[1].matchAll(/^\s*@@index\(\[([^\]]*)\]/gm)].map((m) => m[1].split(",")[0].trim().replace(/\(.*\)$/, ""));
+  assert.ok(leads.length >= 2, `Notification's @@index lines did not parse: ${JSON.stringify(leads)}`);
+  assert.ok(leads.includes("createdAt"), `no Notification index leads with createdAt: ${JSON.stringify(leads)}`);
 });
 
 test("lock id is its own: distinct from every other cron lock", () => {
@@ -148,6 +171,20 @@ test("env configures both windows; the ceiling is never below the read window; f
   );
 });
 
+test("an oversized day count is capped, so the purge cutoffs stay valid Dates", () => {
+  // 999999999 days is past the Date range; the cutoff used to be an Invalid
+  // Date that Prisma refused on every run.
+  const huge = lib.notificationRetentionDays({
+    NOTIFICATION_READ_RETENTION_DAYS: "999999999",
+    NOTIFICATION_RETENTION_DAYS: "99999999999999999999",
+  } as unknown as NodeJS.ProcessEnv);
+  assert.deepEqual(huge, { readDays: lib.NOTIFICATION_RETENTION_MAX_DAYS, maxDays: lib.NOTIFICATION_RETENTION_MAX_DAYS });
+  const where = lib.notificationPurgeWhere(now, huge.readDays, huge.maxDays) as { OR: Array<{ createdAt: { lt: Date } }> };
+  for (const c of where.OR) assert.ok(Number.isFinite(c.createdAt.lt.getTime()), "purge cutoff is an Invalid Date");
+  // A value under the cap is kept as given.
+  assert.equal(lib.notificationRetentionDays({ NOTIFICATION_RETENTION_DAYS: "3650" } as unknown as NodeJS.ProcessEnv).maxDays, 3650);
+});
+
 test("deletes run in bounded id batches", async () => {
   const n = lib.NOTIFICATION_DELETE_BATCH * 2 + 5;
   rows = Array.from({ length: n }, (_, i) => ({ id: `n${i}`, createdAt: ago(500), readAt: null }));
@@ -184,6 +221,21 @@ test("route: authorized run purges, takes and releases its lock, audits", async 
     { op: "unlock", lockId: AL.PURGE_NOTIFICATIONS_LOCK_ID },
   ]);
   assert.equal(audits.length, 1);
+});
+
+test("route: a run stopped by its lock signal answers ok:false with X-Cron-Degraded, not a clean run", async () => {
+  // A stopped purge leaves retention behind; recorded as a success, the run
+  // ledger could not show the job falling behind.
+  rows = Array.from({ length: lib.NOTIFICATION_DELETE_BATCH + 5 }, (_, i) => ({ id: `n${i}`, createdAt: ago(500), readAt: null }));
+  dropLockOnFirstRead = true;
+  const res = await POST(authed());
+  assert.equal(res.status, 200, "still 200: the entrypoint fast-retries any non-2xx");
+  const body = await res.json() as { ok: boolean; aborted: boolean; deleted: number; error?: string };
+  assert.equal(body.aborted, true);
+  assert.equal(body.deleted, lib.NOTIFICATION_DELETE_BATCH, "the batch in flight finished; the rest waits for the next run");
+  assert.equal(body.ok, false);
+  assert.match(body.error ?? "", /stopped before it finished/);
+  assert.equal(res.headers.get("x-cron-degraded"), "1");
 });
 
 test("route: a busy lock skips without touching the table", async () => {

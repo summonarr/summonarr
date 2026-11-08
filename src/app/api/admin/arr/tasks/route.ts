@@ -3,14 +3,17 @@ import { tooManyRequests } from "@/lib/http";
 import { withAdmin } from "@/lib/api-auth";
 import { snapshotted } from "@/lib/arr-snapshot";
 import { arrFailure, arrGate, parseArrId } from "@/lib/arr-admin-http";
-import { isBulkAction, isTaskName } from "@/lib/arr-system";
+import { isBulkAction, isTaskName, type ArrBulkAction } from "@/lib/arr-system";
 import { cancelCommand, loadTasks, runBulkAction, runTask } from "@/lib/arr-system-data";
-import { auditContext, logAudit } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { checkRateLimit } from "@/lib/rate-limit";
 
 const LIMIT_PER_MIN = 10;
+// Cancels per admin per minute: one per click on a queued command, so this
+// bounds a runaway client (each cancel reads the command, then deletes it).
+const CANCEL_LIMIT_PER_MIN = 30;
 
 // Admin → Arr System → Tasks (ADMIN).
 //   GET → { instances, errors, results: [{ service, instance, tasks, commands }] }:
@@ -32,8 +35,10 @@ const LIMIT_PER_MIN = 10;
 //   Both are audited ARR_COMMAND after the arr accepted them.
 //   DELETE ?service&instance&commandId — cancel a command still QUEUED (409
 //       once it started or finished — including when it starts between our
-//       read and the arr's cancel). Not audited.
-// Runs are rate-limited per admin.
+//       read and the arr's cancel). Audited ARR_COMMAND ({ cancelled: id })
+//       once the arr accepted the cancel, so a run that never happened is
+//       traceable to whoever stopped it; a refused cancel writes nothing.
+// Runs and cancels are rate-limited per admin, on separate budgets.
 // GET with `cached=1` → the last answer kept for this exact read, for display only
 // (src/lib/arr-snapshot.ts).
 export const GET = withAdmin(snapshotted(async () => {
@@ -42,51 +47,60 @@ export const GET = withAdmin(snapshotted(async () => {
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, 4 * 1024);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, 4 * 1024);
+  if (body instanceof NextResponse) return body;
   const target = await arrGate(body.service, body.instance, t);
   if (target instanceof NextResponse) return target;
   const task = body.task;
   const action = body.action;
-  const isTask = task !== undefined && action === undefined && isTaskName(task);
-  const isAction = action !== undefined && task === undefined && isBulkAction(action);
-  if (!isTask && !isAction) return NextResponse.json({ error: t("apiAdmin.arr.taskBodyInvalid") }, { status: 400 });
+  // The guards narrow into `run` itself, so no cast stands between a guard and its call.
+  const run: { task: string } | { action: ArrBulkAction } | null =
+    action === undefined && isTaskName(task) ? { task }
+    : task === undefined && isBulkAction(action) ? { action }
+    : null;
+  if (run === null) return NextResponse.json({ error: t("apiAdmin.arr.taskBodyInvalid") }, { status: 400 });
   if (!checkRateLimit(`arr-tasks:${session.user.id}`, LIMIT_PER_MIN, 60_000)) {
-    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
   }
   try {
-    const result = isTask
-      ? await runTask(target.service, target.instance, task as string)
-      : await runBulkAction(target.service, target.instance, action as "searchMissing" | "searchCutoff");
+    const result = "task" in run
+      ? await runTask(target.service, target.instance, run.task)
+      : await runBulkAction(target.service, target.instance, run.action);
     // Audited both ways: the update check (Radarr ApplicationCheckUpdate,
     // Sonarr ApplicationUpdateCheck) installs an available update and restarts
     // the arr when run by hand, and a library-wide search hits every indexer.
     void logAudit({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email ?? null,
+      ...auditActor(req, session),
       action: "ARR_COMMAND",
       target: `${target.service}:${target.instance}`,
-      details: { service: target.service, instance: target.instance, ...(isTask ? { task } : { action }) },
-      ...auditContext(req, session),
+      details: { service: target.service, instance: target.instance, ...run },
     });
     return NextResponse.json(result, { status: 202 });
   } catch (err) {
-    return arrFailure(err, target, t, isTask ? `task ${String(task)}` : `bulk ${String(action)}`);
+    return arrFailure(err, target, t, "task" in run ? `task ${run.task}` : `bulk ${run.action}`);
   }
 });
 
-export const DELETE = withAdmin(async (req) => {
+export const DELETE = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const q = req.nextUrl.searchParams;
   const target = await arrGate(q.get("service"), q.get("instance"), t);
   if (target instanceof NextResponse) return target;
   const commandId = parseArrId(q.get("commandId"));
   if (commandId === null) return NextResponse.json({ error: t("apiAdmin.arr.idInvalid") }, { status: 400 });
+  if (!checkRateLimit(`arr-command-cancel:${session.user.id}`, CANCEL_LIMIT_PER_MIN, 60_000)) {
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
+  }
   try {
     await cancelCommand(target.service, target.instance, commandId);
   } catch (err) {
     return arrFailure(err, target, t, "command cancel");
   }
+  void logAudit({
+    ...auditActor(req, session),
+    action: "ARR_COMMAND",
+    target: `${target.service}:${target.instance}`,
+    details: { service: target.service, instance: target.instance, cancelled: commandId },
+  });
   return NextResponse.json({ ok: true });
 });

@@ -5,10 +5,13 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
 import { posterUrl } from "@/lib/tmdb-types";
+import { mediaHref } from "@/lib/media-href";
 import { X, Film, Tv2, Bookmark } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { EmptyState } from "@/components/ui/design";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { timedFetch } from "@/lib/client/fetch-json";
+import { useAsyncAction } from "@/hooks/use-async-action";
 
 export interface WatchlistGridItem {
   tmdbId: number;
@@ -17,74 +20,121 @@ export interface WatchlistGridItem {
   posterPath: string | null;
 }
 
-// Client grid for the /watchlist page. Renders poster cards linking to the detail
-// page, each with an optimistic remove (X) control that DELETEs the entry.
-// `cap` is the server page's `take` — when the initial list is exactly that
-// long, older titles exist that this page cannot show, and a footer says so.
-export function WatchlistGrid({
-  initialItems,
-  cap,
-}: {
-  initialItems: WatchlistGridItem[];
-  cap?: number;
-}) {
-  const [items, setItems] = useState(initialItems);
-  const [removing, setRemoving] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+const itemKey = (x: WatchlistGridItem) => `${x.tmdbId}:${x.mediaType}`;
+
+/** Every title on this slice was removed but the server holds more: offer a
+ *  reload instead of the "empty" state. */
+function CappedEmptyNotice({ cap, onReload }: { cap: number; onReload: () => void }) {
   const t = useT();
   const locale = useLocale();
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
-  const [reloadRequested, setReloadRequested] = useState(false);
-  // After router.refresh(), adopt the new server slice when the user asked
-  // for it (or when the visible list is already empty). Do not clobber an
-  // in-progress optimistic remove of a non-empty grid.
-  const [seenInitial, setSeenInitial] = useState(initialItems);
-  let visible = items;
-  if (initialItems !== seenInitial) {
-    setSeenInitial(initialItems);
-    if (reloadRequested || items.length === 0) {
-      setItems(initialItems);
-      setReloadRequested(false);
-      setError(null);
-      visible = initialItems;
-    }
-  }
-  const capped = cap != null && initialItems.length >= cap;
+  return (
+    <div
+      role="status"
+      style={{
+        marginBottom: 16,
+        padding: "10px 14px",
+        borderRadius: 8,
+        background: "color-mix(in oklab, var(--ds-warning) 12%, transparent)",
+        border: "1px solid color-mix(in oklab, var(--ds-warning) 30%, transparent)",
+        color: "var(--ds-warning)",
+        fontSize: 12.5,
+      }}
+    >
+      <p className="m-0">{t("personal.common.cappedEmpty", { n: cap.toLocaleString(locale) })}</p>
+      <button
+        type="button"
+        onClick={() => {
+          onReload();
+          startTransition(() => {
+            router.refresh();
+          });
+        }}
+        disabled={isPending}
+        className="ds-hover-tint"
+        style={{
+          marginTop: 10,
+          padding: "6px 12px",
+          borderRadius: 6,
+          border: "1px solid color-mix(in oklab, var(--ds-warning) 40%, transparent)",
+          background: "color-mix(in oklab, var(--ds-warning) 8%, transparent)",
+          color: "var(--ds-warning)",
+          fontSize: 12.5,
+          fontWeight: 500,
+          cursor: isPending ? "progress" : undefined,
+        }}
+      >
+        {isPending ? t("personal.common.loading") : t("personal.common.reload")}
+      </button>
+    </div>
+  );
+}
+
+// Client grid for the /watchlist page. Renders poster cards linking to the detail
+// page, each with an optimistic remove (X) control that DELETEs the entry.
+// `cap` is the server page's `take`; `truncated` says the server had more rows
+// than that (it reads cap + 1), so older titles exist that this page cannot
+// show and a footer says so.
+export function WatchlistGrid({
+  initialItems,
+  cap,
+  truncated = false,
+}: {
+  initialItems: WatchlistGridItem[];
+  cap?: number;
+  truncated?: boolean;
+}) {
+  const t = useT();
+  const locale = useLocale();
+  const [error, setError] = useState<string | null>(null);
+  // The titles this page removed (in flight or done). The grid is always the
+  // server's latest list minus these, so a router.refresh() — the reload
+  // below, or any other in the tree — shows what changed elsewhere while
+  // keeping this page's optimistic removes. A failed remove leaves the set
+  // and the tile is back at its own place in the server's order.
+  const action = useAsyncAction();
+  const [removed, setRemoved] = useState<ReadonlySet<string>>(() => new Set());
+  const visible = initialItems.filter((x) => !removed.has(itemKey(x)));
+  const capped = cap != null && truncated;
 
   async function remove(it: WatchlistGridItem) {
-    const key = `${it.tmdbId}:${it.mediaType}`;
-    setRemoving(key);
+    const key = itemKey(it);
     setError(null);
-    setItems((cur) => cur.filter((x) => `${x.tmdbId}:${x.mediaType}` !== key)); // optimistic
-    // Roll back only THIS item — restoring a stale whole-list snapshot would
-    // resurrect other items whose concurrent DELETE already succeeded.
-    // Re-insert at its original position (relative to the initial order) rather
-    // than appending: an appended tile lands below the fold on a full grid, so a
-    // failed remove used to look like a success. Same recipe as /hidden.
-    const order = (x: WatchlistGridItem) =>
-      initialItems.findIndex((y) => y.tmdbId === x.tmdbId && y.mediaType === x.mediaType);
+    setRemoved((cur) => new Set(cur).add(key)); // optimistic
+    // Undo only THIS item, so another item whose concurrent DELETE already
+    // succeeded stays gone.
     const restore = () => {
-      setItems((cur) => {
-        if (cur.some((x) => `${x.tmdbId}:${x.mediaType}` === key)) return cur;
-        const at = order(it);
-        const idx = cur.findIndex((x) => order(x) > at);
-        return idx === -1 ? [...cur, it] : [...cur.slice(0, idx), it, ...cur.slice(idx)];
+      setRemoved((cur) => {
+        const next = new Set(cur);
+        next.delete(key);
+        return next;
       });
       setError(t("personal.watchlist.removeError", { title: it.title }));
     };
-    try {
-      const res = await fetch(
-        withBasePath(`/api/watchlist?tmdbId=${it.tmdbId}&mediaType=${it.mediaType}`),
-        { method: "DELETE" },
-      );
-      if (!res.ok) restore();
-    } catch {
-      restore();
-    } finally {
-      setRemoving(null);
-    }
+    const ok = await action.run(
+      `remove:${key}`,
+      async (signal) => {
+        try {
+          const res = await timedFetch(
+            withBasePath(`/api/watchlist?tmdbId=${it.tmdbId}&mediaType=${it.mediaType}`),
+            { method: "DELETE", signal },
+          );
+          return res.ok;
+        } catch {
+          return false;
+        }
+      },
+      { ifBusy: "skip" },
+    );
+    if (ok === false) restore();
   }
+
+  const errorLine = error && (
+    <p role="alert" className="text-red-400" style={{ fontSize: 13, marginBottom: 12 }}>
+      {error}
+    </p>
+  );
 
   if (visible.length === 0) {
     // A drained capped slice is NOT a true empty list — older rows remain
@@ -93,49 +143,8 @@ export function WatchlistGrid({
     if (capped && cap != null) {
       return (
         <>
-          {error && (
-            <p role="alert" className="text-red-400" style={{ fontSize: 13, marginBottom: 12 }}>
-              {error}
-            </p>
-          )}
-          <div
-            role="status"
-            style={{
-              marginBottom: 16,
-              padding: "10px 14px",
-              borderRadius: 8,
-              background: "color-mix(in oklab, var(--ds-warning) 12%, transparent)",
-              border: "1px solid color-mix(in oklab, var(--ds-warning) 30%, transparent)",
-              color: "var(--ds-warning)",
-              fontSize: 12.5,
-            }}
-          >
-            <p className="m-0">{t("personal.common.cappedEmpty", { n: cap.toLocaleString(locale) })}</p>
-            <button
-              type="button"
-              onClick={() => {
-                setReloadRequested(true);
-                startTransition(() => {
-                  router.refresh();
-                });
-              }}
-              disabled={isPending}
-              className="ds-hover-tint"
-              style={{
-                marginTop: 10,
-                padding: "6px 12px",
-                borderRadius: 6,
-                border: "1px solid color-mix(in oklab, var(--ds-warning) 40%, transparent)",
-                background: "color-mix(in oklab, var(--ds-warning) 8%, transparent)",
-                color: "var(--ds-warning)",
-                fontSize: 12.5,
-                fontWeight: 500,
-                cursor: isPending ? "progress" : undefined,
-              }}
-            >
-              {isPending ? t("personal.common.loading") : t("personal.common.reload")}
-            </button>
-          </div>
+          {errorLine}
+          <CappedEmptyNotice cap={cap} onReload={() => setError(null)} />
         </>
       );
     }
@@ -151,67 +160,11 @@ export function WatchlistGrid({
 
   return (
     <>
-    {error && (
-      <p role="alert" className="text-red-400" style={{ fontSize: 13, marginBottom: 12 }}>
-        {error}
-      </p>
-    )}
+    {errorLine}
     <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))" }}>
-      {visible.map((it) => {
-        const key = `${it.tmdbId}:${it.mediaType}`;
-        const href = it.mediaType === "MOVIE" ? `/movie/${it.tmdbId}` : `/tv/${it.tmdbId}`;
-        const poster = posterUrl(it.posterPath, "w342");
-        return (
-          <div key={key} className="relative">
-            <Link href={href} className="block group">
-              <div
-                className="ds-card-lift relative overflow-hidden border border-[var(--ds-border)]"
-                style={{ aspectRatio: "2 / 3", borderRadius: 8, background: "var(--ds-bg-3)" }}
-              >
-                {poster ? (
-                  <Image src={poster} alt={it.title} fill className="object-cover" sizes="140px" />
-                ) : (
-                  <div className="flex items-center justify-center h-full" style={{ color: "var(--ds-fg-subtle)" }}>
-                    {it.mediaType === "MOVIE" ? <Film style={{ width: 28, height: 28 }} /> : <Tv2 style={{ width: 28, height: 28 }} />}
-                  </div>
-                )}
-              </div>
-              <div
-                className="line-clamp-2 font-medium"
-                style={{ fontSize: 12.5, color: "var(--ds-fg)", marginTop: 8, lineHeight: 1.3 }}
-              >
-                {it.title}
-              </div>
-            </Link>
-            {/* 40px hit area (the icon stays 14px): the control sits over the
-                poster link, so a near-miss navigates instead of removing. */}
-            <button
-              type="button"
-              onClick={() => remove(it)}
-              disabled={removing === key}
-              aria-label={t("personal.watchlist.removeAria", { title: it.title })}
-              title={t("personal.watchlist.remove")}
-              className="ds-hover-tint absolute"
-              style={{
-                top: 6,
-                right: 6,
-                width: 40,
-                height: 40,
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                borderRadius: 6,
-                background: "color-mix(in oklab, var(--ds-bg) 70%, transparent)",
-                color: "var(--ds-fg)",
-                border: "1px solid var(--ds-border)",
-                cursor: removing === key ? "progress" : undefined,
-              }}
-            >
-              <X style={{ width: 14, height: 14 }} />
-            </button>
-          </div>
-        );
-      })}
+      {visible.map((it) => (
+        <WatchlistCard key={itemKey(it)} item={it} onRemove={remove} />
+      ))}
     </div>
     {capped && (
       <p
@@ -222,5 +175,68 @@ export function WatchlistGrid({
       </p>
     )}
     </>
+  );
+}
+
+function WatchlistCard({
+  item: it,
+  onRemove,
+}: {
+  item: WatchlistGridItem;
+  onRemove: (it: WatchlistGridItem) => void;
+}) {
+  const t = useT();
+  // mediaType is always MOVIE or TV here, so the link always exists.
+  const href = mediaHref(it.tmdbId, it.mediaType) ?? "#";
+  const poster = posterUrl(it.posterPath, "w342");
+  return (
+    <div className="relative">
+      <Link href={href} className="block group">
+        <div
+          className="ds-card-lift relative overflow-hidden border border-[var(--ds-border)]"
+          style={{ aspectRatio: "2 / 3", borderRadius: 8, background: "var(--ds-bg-3)" }}
+        >
+          {poster ? (
+            // Decorative: the title below is the link's label, so a named
+            // poster read the title twice.
+            <Image src={poster} alt="" fill className="object-cover" sizes="140px" />
+          ) : (
+            <div className="flex items-center justify-center h-full" style={{ color: "var(--ds-fg-subtle)" }}>
+              {it.mediaType === "MOVIE" ? <Film style={{ width: 28, height: 28 }} /> : <Tv2 style={{ width: 28, height: 28 }} />}
+            </div>
+          )}
+        </div>
+        <div
+          className="line-clamp-2 font-medium"
+          style={{ fontSize: 12.5, color: "var(--ds-fg)", marginTop: 8, lineHeight: 1.3 }}
+        >
+          {it.title}
+        </div>
+      </Link>
+      {/* 40px hit area (the icon stays 14px): the control sits over the
+          poster link, so a near-miss navigates instead of removing. */}
+      <button
+        type="button"
+        onClick={() => onRemove(it)}
+        aria-label={t("personal.watchlist.removeAria", { title: it.title })}
+        title={t("personal.watchlist.remove")}
+        className="ds-hover-tint absolute"
+        style={{
+          top: 6,
+          right: 6,
+          width: 40,
+          height: 40,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          borderRadius: 6,
+          background: "color-mix(in oklab, var(--ds-bg) 70%, transparent)",
+          color: "var(--ds-fg)",
+          border: "1px solid var(--ds-border)",
+        }}
+      >
+        <X style={{ width: 14, height: 14 }} />
+      </button>
+    </div>
   );
 }

@@ -1,4 +1,5 @@
 import "server-only";
+import { randomUUID } from "node:crypto";
 import { prisma } from "./prisma";
 import { safeFetchAdminConfigured, SafeFetchError } from "./safe-fetch";
 import { isFeatureEnabled } from "./features";
@@ -9,6 +10,8 @@ import { calendarSiteUrl } from "./calendar-feed";
 import { instanceDefaultLocale, translatorFor } from "./i18n/server-locale";
 import { titleResolver } from "./tmdb-localize";
 import { mediaLabelT } from "./notify-i18n";
+import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
+import { isPrismaErrorCode } from "./prisma-errors";
 import {
   buildGotifyBody,
   buildNtfyBody,
@@ -19,12 +22,10 @@ import {
   parseStoredConfig,
   renderTemplate,
   RETRY_DELAYS_MS,
-  type AgentConfig,
+  WEBHOOK_DELIVERY_ID_HEADER,
   type DeliveryVerdict,
-  type GotifyConfig,
+  type KindConfig,
   type NotifyEvent,
-  type NtfyConfig,
-  type WebhookConfig,
   type WebhookPayload,
 } from "./notify-events";
 
@@ -43,14 +44,16 @@ const AGENT_FETCH_TIMEOUT_MS = 10_000;
 const AGENT_SEND_CONCURRENCY = 4;
 const AGENT_CACHE_TTL_MS = 30_000;
 
-export interface LoadedAgent {
+// `kind` and `config` come from one validated union, so requestFor narrows on
+// the kind with no casts.
+export type LoadedAgent = KindConfig & {
   id: string;
-  kind: "webhook" | "ntfy" | "gotify";
   name: string;
   events: string[];
-  config: AgentConfig;
   secret: string | null;
-}
+};
+
+type AgentSourceRow = { id: string; kind: string; name: string; events: string[]; config: unknown; secret: string | null };
 
 // Process-wide (see process-singleton.ts): the admin CRUD route invalidates it,
 // and a per-bundle copy would keep serving a deleted agent until its TTL ran out.
@@ -70,10 +73,29 @@ export function invalidateAgentCache(): void {
   agentState.inflight = null;
 }
 
-function toLoaded(row: { id: string; kind: string; name: string; events: string[]; config: unknown; secret: string | null }): LoadedAgent | null {
-  const config = parseStoredConfig(row.kind, row.config);
-  if (!config) return null;
-  return { id: row.id, kind: row.kind as LoadedAgent["kind"], name: row.name, events: row.events, config, secret: row.secret || null };
+function toLoaded(row: AgentSourceRow): { ok: true; agent: LoadedAgent } | { ok: false; error: string } {
+  const parsed = parseStoredConfig(row.kind, row.config);
+  if (!parsed.ok) return parsed;
+  return { ok: true, agent: { ...parsed.value, id: row.id, name: row.name, events: row.events, secret: row.secret || null } };
+}
+
+// An enabled channel whose stored config no longer validates (validation
+// tightened in an upgrade) is skipped, never sent. Say so ONCE per condition
+// (guardrail 7b — the load repeats every TTL), and again if it recurs after
+// being fixed; the admin list flags the row too (toPublicAgent's configValid).
+function usableAgents(rows: AgentSourceRow[]): LoadedAgent[] {
+  const agents: LoadedAgent[] = [];
+  for (const row of rows) {
+    const key = `notify-agents:invalid:${row.id}`;
+    const r = toLoaded(row);
+    if (r.ok) {
+      forgetWarnOnChange(key);
+      agents.push(r.agent);
+      continue;
+    }
+    warnOnChange(key, `${row.kind}:${r.error}`, `[notify-agents] "${row.name}" (${row.kind}) stored config no longer validates (${r.error}) — channel skipped`);
+  }
+  return agents;
 }
 
 async function loadEnabledAgents(): Promise<LoadedAgent[]> {
@@ -87,7 +109,7 @@ async function loadEnabledAgents(): Promise<LoadedAgent[]> {
         where: { enabled: true },
         select: { id: true, kind: true, name: true, events: true, config: true, secret: true },
       });
-      const agents = rows.map(toLoaded).filter((a): a is LoadedAgent => a !== null);
+      const agents = usableAgents(rows);
       // Only cache if no invalidation happened while this read was in flight.
       if (gen === agentState.gen) agentState.cache = { agents, expiresAt: Date.now() + AGENT_CACHE_TTL_MS };
       return agents;
@@ -181,7 +203,9 @@ async function buildPayloads(events: NotifyEvent[]): Promise<WebhookPayload[]> {
   return events.map((ev) => {
     const mediaTitle = ev.media ? resolve({ title: ev.media.title, tmdbId: ev.media.tmdbId ?? undefined, mediaType: ev.media.type }, locale) : null;
     const { title, message } = renderAgentText(ev, mediaTitle);
-    return buildWebhookPayload(ev, { siteUrl, title, message, mediaTitle, timestamp });
+    // One id per event, minted here so every retry (which reuses the payload)
+    // carries the same one; the timestamp is shared by the whole batch.
+    return buildWebhookPayload(ev, { id: randomUUID(), siteUrl, title, message, mediaTitle, timestamp });
   });
 }
 
@@ -196,20 +220,28 @@ export interface DeliveryResult {
 function requestFor(agent: LoadedAgent, p: WebhookPayload): { url: string; headers: Record<string, string>; body: string } {
   const headers: Record<string, string> = { "Content-Type": "application/json", "User-Agent": "Summonarr" };
   if (agent.kind === "webhook") {
-    const cfg = agent.config as WebhookConfig;
+    const cfg = agent.config;
+    // Receivers that dedupe read it here; a custom template may drop the body field.
+    if (p.id) headers[WEBHOOK_DELIVERY_ID_HEADER] = p.id;
     if (agent.secret) headers[cfg.headerName] = agent.secret;
     const body = cfg.template ? renderTemplate(cfg.template, p) : JSON.stringify(p);
     return { url: cfg.url, headers, body };
   }
   if (agent.kind === "ntfy") {
-    const cfg = agent.config as NtfyConfig;
+    const cfg = agent.config;
     if (agent.secret) headers.Authorization = `Bearer ${agent.secret}`;
     return { url: ntfyPublishUrl(cfg.url), headers, body: JSON.stringify(buildNtfyBody(cfg, p)) };
   }
-  const cfg = agent.config as GotifyConfig;
+  const cfg = agent.config;
   // Header, never the ?token= query string — a URL ends up in proxy access logs.
   if (agent.secret) headers["X-Gotify-Key"] = agent.secret;
   return { url: gotifyMessageUrl(cfg.url), headers, body: JSON.stringify(buildGotifyBody(cfg, p)) };
+}
+
+// The error's class name only — never its message (see deliverOnce).
+function errorClassName(err: unknown): string {
+  const name = err instanceof Error ? err.name : typeof err;
+  return /^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(name) ? name : "Error";
 }
 
 /** One attempt. Admin-entered URL ⇒ safeFetchAdminConfigured (guardrail 5a): LAN ok, metadata blocked. */
@@ -231,8 +263,9 @@ export async function deliverOnce(agent: LoadedAgent, p: WebhookPayload): Promis
     // else was thrown BEFORE the network call — e.g. undici's Headers rejecting
     // a header value. That is a config error (retrying can't fix it), and its
     // message embeds the offending value, i.e. the secret, so it must never
-    // reach lastError, the warn line or the Test response.
-    return { verdict: "fail", status: null, error: "request could not be built (check the secret and URL)" };
+    // reach lastError, the warn line or the Test response. Its class name is
+    // safe, and tells a header problem (TypeError) from anything else.
+    return { verdict: "fail", status: null, error: `request could not be built (${errorClassName(err)}; check the secret and URL)` };
   }
 }
 
@@ -245,8 +278,11 @@ function recordOutcome(agentId: string, r: DeliveryResult): Promise<void> {
       select: { id: true },
     })
     .then(() => undefined)
-    .catch(() => {
-      // Deleted between send and record, or a DB blip — bookkeeping only.
+    .catch((err: unknown) => {
+      // Deleted between send and record: nothing to record. Anything else is a
+      // real write failure — still bookkeeping only, but said.
+      if (isPrismaErrorCode(err, "P2025")) return;
+      console.warn(`[notify-agents] could not record a delivery outcome: ${err instanceof Error ? err.message : String(err)}`);
     });
 }
 
@@ -285,6 +321,10 @@ async function deliverWithRetry(agent: LoadedAgent, p: WebhookPayload, attempt =
 }
 
 async function retryDelivery(agentId: string, p: WebhookPayload, attempt: number): Promise<void> {
+  // The integration switch is the admin's kill switch for every channel, so a
+  // retry re-checks it too: switched off since attempt 0 ⇒ withdrawn, exactly
+  // like a disabled channel (no fetch, no outcome).
+  if (!(await isFeatureEnabled(AGENTS_FEATURE_KEY))) return;
   // loadEnabledAgents already filters enabled: true and re-validates the stored
   // config; the admin routes invalidate its cache on every write. Absent, or no
   // longer subscribed ⇒ the admin withdrew this delivery: no fetch, no outcome.
@@ -328,6 +368,7 @@ export async function sendAgentTest(agent: LoadedAgent, ev: NotifyEvent): Promis
   return r;
 }
 
-export function loadedAgentFromRow(row: { id: string; kind: string; name: string; events: string[]; config: unknown; secret: string | null }): LoadedAgent | null {
-  return toLoaded(row);
+export function loadedAgentFromRow(row: AgentSourceRow): LoadedAgent | null {
+  const r = toLoaded(row);
+  return r.ok ? r.agent : null;
 }

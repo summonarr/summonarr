@@ -444,6 +444,75 @@ test("remove refuses a bad body or an unconfigured slug before any upstream call
   assert.deepEqual(audits, []);
 });
 
+test("remove: a null instance is the default one, as on grab — one bulk DELETE on the default Radarr", async () => {
+  responder = liveQueue([radarrRecord(5)]);
+  const res = await call(removeRoute.POST, await mintSession(), "/admin/queue/remove", {
+    method: "POST",
+    body: { service: "radarr", instance: null, ids: [5], action: "remove" },
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(bulkDeletes().map((c) => [c.origin, c.body]), [[RADARR, { ids: [5] }]]);
+});
+
+test("remove: a record skipped by a walk over a queue that changed between pages is found on ONE re-read and sent by its own id", async () => {
+  // 251 records over two pages. The first record leaves the queue right after
+  // page 1 is served, so the walk's page 2 starts one record later and record
+  // 251 — page 1's last slot, now page 2's first — is never read.
+  let records = Array.from({ length: 251 }, (_, i) => radarrRecord(i + 1));
+  let page1Reads = 0;
+  responder = (c) => {
+    if (c.path === "/api/v3/queue") {
+      const page = Number(c.query.get("page"));
+      const start = (page - 1) * 250;
+      const res = json({ totalRecords: records.length, records: records.slice(start, start + 250) });
+      if (page === 1 && ++page1Reads === 1) records = records.slice(1);
+      return res;
+    }
+    if (c.method === "DELETE" && c.path === "/api/v3/queue/bulk") return json({});
+    return undefined;
+  };
+  const res = await call(removeRoute.POST, await mintSession(), "/admin/queue/remove", { method: "POST", body: { service: "radarr", ids: [251], action: "remove" } });
+  assert.equal(res.status, 200);
+  assert.deepEqual(bulkDeletes().map((c) => c.body), [{ ids: [251] }]);
+  assert.deepEqual(arrCalls().filter((c) => c.path === "/api/v3/queue").map((c) => c.query.get("page")), ["1", "2", "1"], "the two-page walk, then ONE re-read (250 records now: one page)");
+});
+
+test("remove: a posted id a single-page read doesn't hold is gone — no re-read", async () => {
+  responder = liveQueue([radarrRecord(7)]);
+  assert.equal((await call(removeRoute.POST, await mintSession(), "/admin/queue/remove", { method: "POST", body: { service: "radarr", ids: [8], action: "remove" } })).status, 409);
+  assert.equal(arrCalls().filter((c) => c.path === "/api/v3/queue").length, 1);
+  assert.equal(bulkDeletes().length, 0);
+});
+
+test("the queue past its page ceiling says so: a `truncated` entry for that instance with what was read of how many", async () => {
+  settings.set("feature.integration.sonarr", "false");
+  invalidateFeatureFlagCache();
+  responder = (c) => {
+    if (c.path !== "/api/v3/queue") return undefined;
+    if (c.origin !== RADARR) return json({ totalRecords: 1, records: [radarrRecord(1)] });
+    const page = Number(c.query.get("page"));
+    return json({ totalRecords: 12_345, records: Array.from({ length: 250 }, (_, i) => radarrRecord(page * 1_000 + i)) });
+  };
+  const res = await call(queueRoute.GET, await mintSession(), "/admin/queue");
+  assert.equal(res.status, 200);
+  const body = await res.json() as { truncated?: unknown };
+  assert.deepEqual(body.truncated, [{ service: "radarr", instance: "", read: 10_000, total: 12_345 }]);
+  responder = (c) => (c.path === "/api/v3/queue" ? json({ totalRecords: 1, records: [radarrRecord(1)] }) : undefined);
+  assert.equal("truncated" in (await (await call(queueRoute.GET, await mintSession(), "/admin/queue")).json() as object), false, "absent when every queue was read whole");
+});
+
+test("a TV request found by both its tmdb and its tvdb id names its requester ONCE", async () => {
+  settings.set("feature.integration.radarr", "false");
+  invalidateFeatureFlagCache();
+  requests = [
+    { id: "t1", mediaType: "TV", tmdbId: 300, tvdbId: 3000, status: "PENDING", arrInstance: "", user: { name: "Tess", email: "t@x" } },
+    { id: "t2", mediaType: "TV", tmdbId: 300, tvdbId: 3000, status: "APPROVED", arrInstance: "", user: { name: null, email: "u@x" } },
+  ];
+  responder = (c) => (c.path === "/api/v3/queue" ? json({ totalRecords: 1, records: [sonarrPackRecord(21, 1)] }) : undefined);
+  const body = await (await call(queueRoute.GET, await mintSession(), "/admin/queue")).json() as { items: Array<{ requesters: string[] }> };
+  assert.deepEqual(body.items.map((i) => i.requesters), [["Tess", "u@x"]]);
+});
+
 // ── 2b: import a blocked download ────────────────────────────────────────────
 
 const q = { quality: { id: 7, name: "Bluray-1080p" }, revision: { version: 1 } };
@@ -487,6 +556,18 @@ test("import listing: qualities/languages are conveniences — failing to read t
   assert.equal(res.status, 200);
   const body = await res.json() as { files: unknown[]; qualities: unknown[]; languages: unknown[] };
   assert.deepEqual([body.files.length, body.qualities, body.languages], [2, [], []]);
+});
+
+test("import listing: a quality list that can't be read is logged once under [queue], not dropped silently — and not again while unchanged", async () => {
+  const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
+  resetLogDedup();
+  warnLines.length = 0;
+  responder = (c) => (c.path === "/api/v3/manualimport" ? json(manualRows) : c.path === "/api/v3/qualitydefinition" ? new Response("x", { status: 500 }) : c.path === "/api/v3/language" ? json([]) : undefined);
+  const token = await mintSession();
+  for (let i = 0; i < 2; i++) assert.equal((await call(importRoute.GET, token, "/admin/queue/import?service=radarr&downloadId=SAB_1")).status, 200);
+  const lines = warnLines.filter((l) => l.startsWith("[queue]") && l.includes("qualities for the import editor"));
+  assert.equal(lines.length, 1, warnLines.join("\n"));
+  resetLogDedup();
 });
 
 test("import: the command carries ONLY the arr's own matched rows — an injected path never reaches it (guardrail 5d) — and is audited without paths", async () => {
@@ -695,6 +776,18 @@ test("preview on an arr without the reprocess endpoint: the correction still sho
   assert.equal(res.status, 200);
   const body = await res.json() as { rechecked: boolean; files: Array<{ target: string; rejections: string[] }> };
   assert.deepEqual([body.rechecked, body.files.map((f) => [f.target, f.rejections])], [false, [["Right Movie (2023)", ["Sample"]]]]);
+});
+
+test("preview: re-matching past the catalog's title cap is refused AS that — 400 naming the cap, before any catalog read or reprocess", async () => {
+  const rows = Array.from({ length: 21 }, (_, i) => ({ ...manualRows[1], path: `/downloads/Pack/part${i}.mkv`, relativePath: `part${i}.mkv` }));
+  responder = (c) => (c.path === "/api/v3/manualimport" && c.method === "GET" ? json(rows) : undefined);
+  const res = await call(previewRoute.POST, await mintSession(), "/admin/queue/import/preview", {
+    method: "POST",
+    body: { service: "radarr", downloadId: "SAB_1", files: rows.map((r, i) => ({ path: r.path, movieId: 100 + i })) },
+  });
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "Too many titles re-matched at once — at most 20 per import" });
+  assert.deepEqual(arrCalls().map((c) => `${c.method} ${c.path}`), ["GET /api/v3/manualimport"], "no /movie/{id} read, no reprocess, no command");
 });
 
 test("match search: the instance's own lookup, library titles only (positive id), bounded; a bad term is 400 before any call", async () => {
@@ -1070,6 +1163,17 @@ test("cutoff Search for a series: ONE EpisodeSearch for the monitored episodes w
   assert.ok(arrCalls().every((c) => c.query.get("seriesId") === null || c.query.get("seriesId") === "9"));
 });
 
+test("the tracked cutoff Search answers each queued command's id, as Search missing does; the page's own answer stays without them", async () => {
+  responder = (c) => {
+    if (c.path === "/api/v3/movie/1") return json({ id: 1, hasFile: true, monitored: true, movieFile: { qualityCutoffNotMet: true } });
+    if (c.method === "POST" && c.path === "/api/v3/command") return json({ id: 77 }, 201);
+    return undefined;
+  };
+  const { searchCutoff, searchCutoffTracked } = await import("../src/lib/arr-missing-data.ts");
+  assert.deepEqual(await searchCutoffTracked("radarr", "", 1), { commands: 1, seasons: [], episodes: 0, commandIds: [77] });
+  assert.deepEqual(await searchCutoff("radarr", "", 1), { commands: 1, seasons: [], episodes: 0 });
+});
+
 // ── 6: request releases ──────────────────────────────────────────────────────
 
 let releaseSeq = 0;
@@ -1121,6 +1225,20 @@ test("TV releases: no season ⇒ the season list only (no indexer hit); a season
   assert.equal(search.length, 1);
   assert.deepEqual([search[0].query.get("seriesId"), search[0].query.get("seasonNumber")], ["8", "2"]);
   assert.equal((await call(releasesRoute.GET, token, "/requests/r2/releases?season=x", { ctx: idCtx("r2") })).status, 400);
+});
+
+test("TV releases: the Sonarr reads before any search are bounded per caller — the 61st season list in a minute is a 429 that reads nothing", async () => {
+  requests = [{ id: "r2", mediaType: "TV", tmdbId: 1399, tvdbId: 121361, status: "APPROVED", arrInstance: "", user: { name: "A", email: "a@x" } }];
+  responder = (c) => (c.path === "/api/v3/series" ? json([{ id: 8, tvdbId: 121361, seasons: [] }]) : undefined);
+  const token = await mintSession();
+  for (let i = 0; i < 60; i++) {
+    assert.equal((await call(releasesRoute.GET, token, "/requests/r2/releases", { ctx: idCtx("r2") })).status, 200, `read ${i + 1}`);
+  }
+  const before = arrCalls().length;
+  const limited = await call(releasesRoute.GET, token, "/requests/r2/releases", { ctx: idCtx("r2") });
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get("retry-after"), "60");
+  assert.equal(arrCalls().length, before, "no Sonarr read past the bound");
 });
 
 test("grab: redeems the handle into the real guid on the request's instance and audits it WITHOUT the guid; a pending request or one not in Radarr is 409", async () => {

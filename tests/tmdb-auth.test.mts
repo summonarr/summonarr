@@ -25,15 +25,12 @@ test("shapes the token as a Bearer Authorization header — exact value, no extr
   assert.deepEqual(auth.headers, { Authorization: "Bearer eyJhbGciOi.test-read-token.abc123" });
 });
 
-test("query params are empty — the token never rides the URL", () => {
+test("the auth carries headers only — no query map for a token to ride the URL in", () => {
   process.env.TMDB_READ_TOKEN = "secret-read-token";
   const auth = tmdbAuth();
   assert.ok(auth);
-  assert.deepEqual(auth.query, {});
-  // The token is present in the headers…
+  assert.deepEqual(Object.keys(auth), ["headers"]);
   assert.equal(auth.headers.Authorization.includes("secret-read-token"), true);
-  // …but never anywhere in the query map (the part that would end up in the URL).
-  assert.equal(JSON.stringify(auth.query).includes("secret-read-token"), false);
 });
 
 test("env is read per call, not captured at module load", () => {

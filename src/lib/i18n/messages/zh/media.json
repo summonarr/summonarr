@@ -82,5 +82,6 @@
   "media.filter.certAny": "任意分级",
   "media.filter.certUpTo": "最高 {rating}",
   "media.filter.studio": "制片公司",
-  "media.filter.network": "电视网"
+  "media.filter.network": "电视网",
+  "media.filter.serviceChip": "服务 {id}"
 }

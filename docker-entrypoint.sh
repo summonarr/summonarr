@@ -1,11 +1,29 @@
 #!/bin/sh
 set -e
 
+# Boot phase: a stop request (docker stop → SIGTERM, forwarded by tini) ends
+# boot at the next step instead of carrying on into db push and the server
+# start. sh runs a trap only once the foreground command returns, so a step
+# already running (db push, a pre-upgrade dump) finishes first — this script
+# never cuts one off. The run-phase trap near the end replaces these.
+trap 'echo "[entrypoint] Stop requested during boot — exiting."; exit 143' TERM
+trap 'echo "[entrypoint] Stop requested during boot — exiting."; exit 130' INT
+
 # Prefer Docker secret file over env var so CRON_SECRET doesn't appear in docker inspect output.
 if [ -f /run/secrets/cron_secret ]; then
   CRON_SECRET=$(cat /run/secrets/cron_secret) || { echo "[entrypoint] ERROR: failed to read cron_secret"; exit 1; }
   [ -z "$CRON_SECRET" ] && { echo "[entrypoint] ERROR: cron_secret file is empty"; exit 1; }
   export CRON_SECRET
+fi
+
+# Same for the database password: it ends up in DATABASE_URL and PGPASSWORD, so
+# the env var shows in docker inspect. The postgres sidecar reads the same file
+# as POSTGRES_PASSWORD_FILE. scripts/*.mjs read it too — a `docker compose exec`
+# shell never inherits this export.
+if [ -f /run/secrets/postgres_password ]; then
+  POSTGRES_PASSWORD=$(cat /run/secrets/postgres_password) || { echo "[entrypoint] ERROR: failed to read postgres_password"; exit 1; }
+  [ -z "$POSTGRES_PASSWORD" ] && { echo "[entrypoint] ERROR: postgres_password file is empty"; exit 1; }
+  export POSTGRES_PASSWORD
 fi
 
 # Require a non-empty POSTGRES_PASSWORD before composing the connection string.
@@ -20,6 +38,68 @@ fi
 ENCODED_PASSWORD=$(node -e "process.stdout.write(encodeURIComponent(process.env.POSTGRES_PASSWORD))")
 export DATABASE_URL="postgresql://summonarr:${ENCODED_PASSWORD}@postgres:5432/summonarr"
 
+# Digits-only, no leading zero, or the supplied default. The interval knobs are
+# free-form env vars (SYNC_INTERVAL, RATINGS_SYNC_INTERVAL, CRON_RETRY_INTERVAL,
+# SUMMONARR_DB_WAIT_SECONDS, …); a typo like "1h" or "3600s" makes $(( ))
+# arithmetic a fatal shell error, and with `set -e` that kills a cron loop
+# subshell for the container's lifetime — every cron silently stops while the
+# healthcheck keeps reporting healthy. A plain digits-only check isn't enough on
+# its own: shell arithmetic treats a leading zero as OCTAL, so "009"/"018"
+# (all-digits, but invalid octal since octal digits stop at 7) hits the exact
+# same fatal $(( )) error, and "010" doesn't error but silently becomes decimal
+# 8. Reject any all-digit value that isn't exactly "0" or free of a leading zero.
+_cron_int() {
+  case "$1" in
+    ''|*[!0-9]*) echo "$2" ;;
+    0|[1-9]*)    echo "$1" ;;
+    *)           echo "$2" ;; # all-digits but leading-zero (e.g. "009") — octal-ambiguous
+  esac
+}
+
+# ── Wait for Postgres (bounded) ───────────────────────────────────────────────
+# compose's `depends_on: service_healthy` holds back only `docker compose up`;
+# when the daemon restarts both containers after a host reboot they start
+# together. Without a wait, every step below runs against a database that is
+# still starting: the opt-in dump reads it as "skip" (so the upgrade can run
+# without one), db push exits, and the container restart-loops.
+# SUMMONARR_DB_WAIT_SECONDS (default 60) bounds the wait; on timeout boot
+# carries on and db push fails loudly as it always did. "Up" means Postgres
+# ANSWERED — a wrong password or a missing database ends the wait too, and db
+# push then reports it. Same host, user and database as DATABASE_URL above.
+_db_wait=$(_cron_int "${SUMMONARR_DB_WAIT_SECONDS:-60}" 60)
+_db_deadline=$(( $(date +%s) + _db_wait ))
+_db_waiting=""
+_db_unanswered=""
+while :; do
+  node --input-type=module <<'DBWAIT_EOF' && break
+// Exit 0 = go on (connected, Postgres answered with an error, or no way to
+// probe); 1 = not answering yet. A server error carries `severity`; 57P03 is
+// Postgres saying it is still starting up or recovering.
+let code = 0;
+let client;
+try {
+  const { default: { Client } } = await import('pg');
+  client = new Client({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 3000 });
+  await client.connect();
+  await client.query('SELECT 1');
+  await client.end();
+} catch (err) {
+  if (client && (typeof err?.severity !== 'string' || err.code === '57P03')) code = 1;
+}
+process.exit(code);
+DBWAIT_EOF
+  if [ "$(date +%s)" -ge "$_db_deadline" ]; then
+    echo "[entrypoint] WARNING: the database did not answer within ${_db_wait}s — continuing boot."
+    _db_unanswered=1
+    break
+  fi
+  if [ -z "$_db_waiting" ]; then
+    echo "Waiting for the database..."
+    _db_waiting=1
+  fi
+  sleep 2
+done
+
 # ── Pre-upgrade safety dump (opt-in, best-effort) ─────────────────────────────
 # `prisma db push` below is the ONLY upgrade mechanism: no migration history, no
 # rollback. When SUMMONARR_PRE_UPGRADE_DUMP_DIR names a writable directory (mount
@@ -32,15 +112,25 @@ export DATABASE_URL="postgresql://summonarr:${ENCODED_PASSWORD}@postgres:5432/su
 #   SUMMONARR_PRE_UPGRADE_DUMP_TIMEOUT  seconds before the dump is abandoned (default 900)
 #
 # "A push is about to change the schema" = `prisma migrate diff` (live DB →
-# schema.prisma) has statements other than the TmdbCache_key_idx drop/create
-# pair, which Prisma reports on EVERY run (the text_pattern_ops index never
-# round-trips through introspection) and which `db push` itself ignores. A fresh
-# database (no "User" table) has nothing to protect and is skipped.
+# schema.prisma) has statements other than those naming an index in
+# _PRISMA_DIFF_NOISE: Prisma reports their drop/create pair on EVERY run (a
+# raw-ops index such as text_pattern_ops never round-trips through
+# introspection) and `db push` itself ignores them. Space-separated index names;
+# tests/entrypoint.test.mts checks every raw-ops index in schema.prisma is here.
+# A fresh database (no "User" table) has nothing to protect and is skipped.
+#
+# Every database call here is bounded: the boot wait above may have given up,
+# and an unanswered connect would otherwise hang until the OS TCP timeout.
 #
 # NEVER blocks boot: every failure is a warning and the function returns 0.
+_PRISMA_DIFF_NOISE='TmdbCache_key_idx'
 _pre_upgrade_dump() {
   _dir="${SUMMONARR_PRE_UPGRADE_DUMP_DIR:-}"
   [ -z "$_dir" ] && return 0
+  if [ -n "$_db_unanswered" ]; then
+    echo "[entrypoint] WARNING: pre-upgrade dump skipped — the database did not answer."
+    return 0
+  fi
   if ! command -v pg_dump >/dev/null 2>&1 || ! command -v psql >/dev/null 2>&1; then
     echo "[entrypoint] WARNING: SUMMONARR_PRE_UPGRADE_DUMP_DIR is set but pg_dump/psql are not in this image — no pre-upgrade dump taken."
     return 0
@@ -49,6 +139,9 @@ _pre_upgrade_dump() {
     echo "[entrypoint] WARNING: SUMMONARR_PRE_UPGRADE_DUMP_DIR=$_dir is not a writable directory — no pre-upgrade dump taken."
     return 0
   fi
+  # A dump cut off by a stop or a crash leaves its .partial behind, and the
+  # retention below only counts finished dumps — so clear those here.
+  rm -f "$_dir"/summonarr-pre-upgrade-*.dump.partial 2>/dev/null || true
   _keep="${SUMMONARR_PRE_UPGRADE_DUMP_KEEP:-3}"
   case "$_keep" in ''|*[!0-9]*) _keep=3 ;; esac
   [ "$_keep" -lt 1 ] && _keep=1
@@ -56,7 +149,7 @@ _pre_upgrade_dump() {
   case "$_tmo" in ''|*[!0-9]*) _tmo=900 ;; esac
   [ "$_tmo" -lt 1 ] && _tmo=900
 
-  _has_user=$(PGPASSWORD="$POSTGRES_PASSWORD" psql -h postgres -U summonarr -d summonarr -tAqc "SELECT to_regclass('\"User\"') IS NOT NULL" 2>/dev/null) || _has_user=""
+  _has_user=$(PGPASSWORD="$POSTGRES_PASSWORD" PGCONNECT_TIMEOUT=10 psql -h postgres -U summonarr -d summonarr -tAqc "SELECT to_regclass('\"User\"') IS NOT NULL" 2>/dev/null) || _has_user=""
   if [ "$_has_user" = "f" ]; then
     return 0
   elif [ "$_has_user" != "t" ]; then
@@ -64,17 +157,20 @@ _pre_upgrade_dump() {
     return 0
   fi
 
-  _diff=$(node node_modules/prisma/build/index.js migrate diff --from-config-datasource --to-schema prisma/schema.prisma --script 2>/dev/null) || {
+  _diff=$(timeout 120 node node_modules/prisma/build/index.js migrate diff --from-config-datasource --to-schema prisma/schema.prisma --script 2>/dev/null) || {
     echo "[entrypoint] WARNING: pre-upgrade dump skipped — could not compute the schema diff."
     return 0
   }
-  _pending=$(printf '%s\n' "$_diff" | grep -v '^--' | grep -v '^[[:space:]]*$' | grep -v 'TmdbCache_key_idx' || true)
+  _pending=$(printf '%s\n' "$_diff" | grep -v '^--' | grep -v '^[[:space:]]*$' || true)
+  for _noise in $_PRISMA_DIFF_NOISE; do
+    _pending=$(printf '%s\n' "$_pending" | grep -vF "\"$_noise\"" || true)
+  done
   [ -z "$_pending" ] && return 0
 
   _stamp=$(date -u +%Y%m%dT%H%M%SZ)
   _out="$_dir/summonarr-pre-upgrade-$_stamp.dump"
   echo "[entrypoint] Schema changes pending — writing pre-upgrade dump to $_out"
-  if (umask 077; PGPASSWORD="$POSTGRES_PASSWORD" timeout "$_tmo" pg_dump -h postgres -U summonarr -d summonarr -Fc -f "$_out.partial") 2>&1; then
+  if (umask 077; PGPASSWORD="$POSTGRES_PASSWORD" PGCONNECT_TIMEOUT=10 timeout "$_tmo" pg_dump -h postgres -U summonarr -d summonarr -Fc -f "$_out.partial") 2>&1; then
     mv "$_out.partial" "$_out" || { rm -f "$_out.partial"; echo "[entrypoint] WARNING: could not finalize the pre-upgrade dump."; return 0; }
     echo "[entrypoint] Pre-upgrade dump written."
     # Newest first (names sort by UTC timestamp); drop everything past KEEP.
@@ -96,15 +192,19 @@ const { DATABASE_URL } = process.env;
 // out below), keeping the most recently written one. Ordered by createdAt: `id` is a cuid2
 // (random letter + hash), so it is NOT time-sortable and only breaks ties
 // deterministically. Idempotent — safe to run every start.
-// Skips cleanly on a fresh DB where the table hasn't been created yet.
+// Skips cleanly on a fresh DB where the table hasn't been created yet, and
+// skips the scan once a unique index over exactly that key exists: Postgres
+// already refuses duplicates then, so the window over the whole table would
+// find nothing.
 //
 // Best-effort by design: this runs BEFORE `prisma db push`, so a schema change
 // that renames a referenced column would otherwise crash-loop the container
 // (set -e) before db push can reconcile. Any failure logs a warning and boot
-// continues.
-const { default: { Client } } = await import('pg');
-const client = new Client({ connectionString: DATABASE_URL });
+// continues — a missing pg module included, so the import sits inside the try.
+let client;
 try {
+  const { default: { Client } } = await import('pg');
+  client = new Client({ connectionString: DATABASE_URL });
   await client.connect();
   const exists = await client.query(`SELECT to_regclass('"PlayHistory"') AS t`);
   if (exists.rows[0].t !== null) {
@@ -126,10 +226,23 @@ try {
       SELECT 1 FROM information_schema.columns
       WHERE table_name = 'PlayHistory' AND column_name = 'serverInstance'
     `);
-    const partition = col.rowCount > 0
-      ? `source, "serverInstance", "sourceSessionId"`
-      : `source, "sourceSessionId"`;
-    const res = await client.query(`
+    const key = col.rowCount > 0
+      ? ['source', 'serverInstance', 'sourceSessionId']
+      : ['source', 'sourceSessionId'];
+    // Plain, valid, non-partial unique indexes on the table, by column set.
+    const uniques = await client.query(`
+      SELECT array_agg(a.attname::text) AS cols
+      FROM pg_index i
+      JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+      WHERE i.indrelid = '"PlayHistory"'::regclass
+        AND i.indisunique AND i.indisvalid
+        AND i.indpred IS NULL AND i.indexprs IS NULL
+      GROUP BY i.indexrelid
+    `);
+    const want = [...key].sort().join(',');
+    const enforced = uniques.rows.some((r) => [...r.cols].sort().join(',') === want);
+    const partition = key.map((c) => (c === 'source' ? c : `"${c}"`)).join(', ');
+    const res = enforced ? { rowCount: 0 } : await client.query(`
       DELETE FROM "PlayHistory"
       WHERE id IN (
         SELECT id FROM (
@@ -149,7 +262,7 @@ try {
 } catch (err) {
   console.error(`[entrypoint] PlayHistory dedup failed — continuing boot: ${err?.message ?? err}`);
 } finally {
-  await client.end().catch(() => {});
+  await client?.end().catch(() => {});
 }
 DEDUP_EOF
 
@@ -163,6 +276,9 @@ const { DATABASE_URL } = process.env;
 //
 // Clamp to wall-clock elapsed: a session physically cannot have played longer than
 // (stoppedAt - startedAt). Recomputes `watched` and `pausedDuration` from the clamp.
+// `watched` is judged against the same effective length as the app's finalize
+// (judgePlay in src/lib/play-history-record.ts): the credits start when a
+// marker is stored and lies within the file, else the duration.
 //
 // Idempotent — the WHERE filters out rows that don't need clamping, so re-runs are no-ops.
 // Skips cleanly on a fresh DB.
@@ -170,10 +286,11 @@ const { DATABASE_URL } = process.env;
 // Best-effort by design: this runs BEFORE `prisma db push`, so a schema change
 // that renames a referenced column would otherwise crash-loop the container
 // (set -e) before db push can reconcile. Any failure logs a warning and boot
-// continues.
-const { default: { Client } } = await import('pg');
-const client = new Client({ connectionString: DATABASE_URL });
+// continues — a missing pg module included, so the import sits inside the try.
+let client;
 try {
+  const { default: { Client } } = await import('pg');
+  client = new Client({ connectionString: DATABASE_URL });
   await client.connect();
   const exists = await client.query(`SELECT to_regclass('"PlayHistory"') AS t`);
   if (exists.rows[0].t !== null) {
@@ -185,6 +302,14 @@ try {
       const parsed = t.rows[0]?.value ? parseInt(t.rows[0].value, 10) : NaN;
       if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 100) threshold = parsed;
     } catch { /* Setting table absent on fresh DB — fall back to 80 */ }
+    // creditsStartMs is newer than this script; an older table judges by duration.
+    const credits = await client.query(
+      `SELECT 1 FROM information_schema.columns WHERE table_name = 'PlayHistory' AND column_name = 'creditsStartMs'`,
+    );
+    const effective = credits.rowCount > 0
+      ? `CASE WHEN "creditsStartMs" > 0 AND "creditsStartMs" <= duration::bigint * 1000
+              THEN "creditsStartMs"::float / 1000 ELSE duration::float END`
+      : `duration::float`;
     const res = await client.query(
       `UPDATE "PlayHistory" SET
          "playDuration"   = LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int),
@@ -195,7 +320,7 @@ try {
          ),
          "watched" = CASE
            WHEN duration > 0
-           THEN (LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int)::float / duration::float * 100) >= $1
+           THEN (LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int)::float / (${effective}) * 100) >= $1
            ELSE false
          END
        WHERE "playDuration" > EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int
@@ -207,7 +332,7 @@ try {
 } catch (err) {
   console.error(`[entrypoint] PlayHistory playDuration backfill failed — continuing boot: ${err?.message ?? err}`);
 } finally {
-  await client.end().catch(() => {});
+  await client?.end().catch(() => {});
 }
 BACKFILL_EOF
 
@@ -230,9 +355,10 @@ const TABLES = [
   "MediaRequest", "RadarrWantedItem", "RadarrAvailableItem",
   "SonarrWantedItem", "SonarrAvailableItem", "TrashApplication",
 ];
-const { default: { Client } } = await import('pg');
-const client = new Client({ connectionString: DATABASE_URL });
+let client;
 try {
+  const { default: { Client } } = await import('pg');
+  client = new Client({ connectionString: DATABASE_URL });
   await client.connect();
   for (const table of TABLES) {
     const t = await client.query(`SELECT to_regclass('"${table}"') AS t`);
@@ -253,7 +379,7 @@ try {
 } catch (err) {
   console.error(`[entrypoint] arrInstance backfill failed — continuing boot: ${err?.message ?? err}`);
 } finally {
-  await client.end().catch(() => {});
+  await client?.end().catch(() => {});
 }
 ARRINSTANCE_EOF
 
@@ -277,9 +403,10 @@ const TABLES = [
   "PlexLibraryItem", "JellyfinLibraryItem", "MediaServerUser",
   "PlayHistory", "ActiveSession",
 ];
-const { default: { Client } } = await import('pg');
-const client = new Client({ connectionString: DATABASE_URL });
+let client;
 try {
+  const { default: { Client } } = await import('pg');
+  client = new Client({ connectionString: DATABASE_URL });
   await client.connect();
   for (const table of TABLES) {
     const t = await client.query(`SELECT to_regclass('"${table}"') AS t`);
@@ -295,7 +422,7 @@ try {
 } catch (err) {
   console.error(`[entrypoint] serverInstance backfill failed — continuing boot: ${err?.message ?? err}`);
 } finally {
-  await client.end().catch(() => {});
+  await client?.end().catch(() => {});
 }
 MEDIAINSTANCE_EOF
 
@@ -398,11 +525,15 @@ echo "Starting Summonarr..."
 # (advisory-lock DEFAULT_WORK_TIMEOUT_MS = 30min) so the SERVER decides when a
 # run has gone wrong — it aborts, returns non-2xx, and the retry is then a real
 # retry. Override with CRON_CALL_TIMEOUT (seconds).
+#
+# The client follows the URL's scheme, so a *_URL override may name an https
+# endpoint; the built-in loopback URLs are plain http.
 _cron_sync() {
   SYNC_CALL_URL="$1" SYNC_CALL_LABEL="$2" SYNC_CALL_QUIET="${3:-}" \
   SYNC_CALL_TIMEOUT_MS="$(( $(_cron_int "${CRON_CALL_TIMEOUT:-2100}" 2100) * 1000 ))" \
     node --input-type=module <<'JSEOF'
 import http from 'node:http';
+import https from 'node:https';
 const {
   SYNC_CALL_URL: url,
   SYNC_CALL_LABEL: label,
@@ -413,7 +544,8 @@ const {
 const timeoutMs = Number(timeoutRaw) > 0 ? Number(timeoutRaw) : 2100000;
 try {
   const status = await new Promise((resolve, reject) => {
-    const req = http.request(
+    const client = URL.canParse(url) && new URL(url).protocol === 'https:' ? https : http;
+    const req = client.request(
       url,
       { method: 'POST', headers: { Authorization: `Bearer ${CRON_SECRET}` } },
       (res) => {
@@ -448,33 +580,14 @@ JSEOF
 # dead port while both health probes kept reporting healthy.
 CRON_BASE="http://localhost:${PORT:-3000}${BASE_PATH}"
 
-# Digits-only, no leading zero, or the supplied default. The interval knobs are
-# free-form env vars (SYNC_INTERVAL, RATINGS_SYNC_INTERVAL, CRON_RETRY_INTERVAL,
-# …); a typo like "1h" or "3600s" makes the $(( )) arithmetic below a fatal shell
-# error, and with `set -e` that kills the whole _cron_loop subshell for the
-# container's lifetime — every cron silently stops while the healthcheck keeps
-# reporting healthy. A plain digits-only check isn't enough on its own: shell
-# arithmetic treats a leading zero as OCTAL, so "009"/"018" (all-digits, but
-# invalid octal since octal digits stop at 7) hits the exact same fatal $(( ))
-# error, and "010" doesn't error but silently becomes decimal 8. Reject any
-# all-digit value that isn't exactly "0" or free of a leading zero.
-_cron_int() {
-  case "$1" in
-    ''|*[!0-9]*) echo "$2" ;;
-    0|[1-9]*)    echo "$1" ;;
-    *)           echo "$2" ;; # all-digits but leading-zero (e.g. "009") — octal-ambiguous
-  esac
-}
-
 # Compute the next-run timestamp for a job: full interval on success, a short
 # retry window on failure so a transient outage doesn't skip the job for an
 # entire (possibly 24h) interval.
 #
-# $4 is the JOB'S OWN default and every caller must pass it (mirroring
-# _play_history_loop's `_cron_int "${PLAY_HISTORY_SYNC_INTERVAL:-5}" 5`). A
-# single hardcoded fallback here would substitute an hour for a set-but-invalid
-# value ("86400s", "1d", "086400"), so a daily job would silently reschedule
-# itself 24x/day while the "Cron started" banner still echoed the raw value.
+# $4 is the JOB'S OWN default and every caller must pass it (_cron_loop passes
+# the schedule table's). A single hardcoded fallback here would substitute an
+# hour for a set-but-invalid value ("86400s", "1d", "086400"), so a daily job
+# would silently reschedule itself 24x/day.
 _cron_next() {
   _exit="$1"; _now="$2"; _interval=$(_cron_int "$3" "${4:-3600}")
   if [ "$_exit" -eq 0 ]; then
@@ -486,136 +599,105 @@ _cron_next() {
   fi
 }
 
+# The schedule: one row per job, and the only place a job's interval default
+# and first run live — the banner below is built from it.
+#
+#   label|URL override var|path under CRON_BASE|interval var|default (s)|quiet|first run (s)|loop
+#
+#   label      names the job in its log lines ("[sync ok]").
+#   quiet      "quiet" logs failures only: the job runs often, or is a no-op
+#              until its feature is on or configured.
+#   first run  seconds after start. Staggered so the jobs don't all hit the
+#              app at once; a loop also sleeps 60s before its first tick.
+#   loop       "main" runs the long jobs (full sync, warm-ups) one after
+#              another. "fast" holds the short-cadence jobs, so a full sync or a
+#              warm-up that runs for many minutes (a call may wait up to
+#              CRON_CALL_TIMEOUT) doesn't hold them back. Not one loop per job:
+#              the app's database pool is five connections, and the server's
+#              advisory locks already stop a job overlapping itself.
+#
+# Keep the defaults in step with docker-container/docker-compose.yml and the
+# Settings page (tests/entrypoint.test.mts checks both).
+_CRON_JOBS='
+sync|SYNC_URL|/api/sync|SYNC_INTERVAL|3600||0|main
+upcoming|UPCOMING_SYNC_URL|/api/sync/upcoming|UPCOMING_SYNC_INTERVAL|86400||120|main
+ratings|RATINGS_SYNC_URL|/api/sync/ratings|RATINGS_SYNC_INTERVAL|86400||180|main
+purge-sessions|PURGE_SESSIONS_URL|/api/cron/purge-auth-sessions|PURGE_SESSIONS_INTERVAL|86400||600|main
+purge-notifications|PURGE_NOTIFICATIONS_URL|/api/cron/purge-notifications|PURGE_NOTIFICATIONS_INTERVAL|86400||840|main
+warm-list-cache|LIST_CACHE_SYNC_URL|/api/cron/warm-list-cache|LIST_CACHE_SYNC_INTERVAL|21600||0|main
+warm-activity|WARM_ACTIVITY_URL|/api/cron/warm-activity|WARM_ACTIVITY_INTERVAL|1800|quiet|0|main
+warm-mdblist|WARM_MDBLIST_URL|/api/cron/warm-mdblist|WARM_MDBLIST_INTERVAL|86400||240|main
+warm-omdb|WARM_OMDB_URL|/api/cron/warm-omdb|WARM_OMDB_INTERVAL|86400||300|main
+warm-recommendations|WARM_RECOMMENDATIONS_URL|/api/cron/warm-recommendations|WARM_RECOMMENDATIONS_INTERVAL|43200||480|main
+warm-library|WARM_LIBRARY_URL|/api/cron/warm-library|WARM_LIBRARY_INTERVAL|86400||720|main
+scrub-audit-pii|SCRUB_AUDIT_PII_URL|/api/cron/scrub-audit-pii|SCRUB_AUDIT_PII_INTERVAL|86400|quiet|900|main
+trash-sync|TRASH_SYNC_URL|/api/cron/trash-sync|TRASH_SYNC_INTERVAL|86400||360|main
+sync-plex-watchlists|PLEX_WATCHLIST_SYNC_URL|/api/cron/sync-plex-watchlists|PLEX_WATCHLIST_SYNC_INTERVAL|1800|quiet|420|main
+sync-trakt|TRAKT_SYNC_URL|/api/cron/sync-trakt|TRAKT_SYNC_INTERVAL|1800|quiet|540|main
+refresh-upstream-watch|UPSTREAM_WATCH_SYNC_URL|/api/cron/refresh-upstream-watch|UPSTREAM_WATCH_SYNC_INTERVAL|86400|quiet|1020|main
+watch-sync|WATCH_SYNC_URL|/api/cron/watch-sync|WATCH_SYNC_INTERVAL|300|quiet|780|fast
+arr-watch|ARR_WATCH_URL|/api/cron/arr-watch|ARR_WATCH_INTERVAL|900|quiet|660|fast
+arr-snapshots|ARR_SNAPSHOT_URL|/api/cron/refresh-arr-snapshots|ARR_SNAPSHOT_INTERVAL|300|quiet|300|fast
+'
+
+# "Cron started." plus each job's interval as _cron_next will actually use it.
+# It used to echo the raw env value, so SYNC_INTERVAL=1h printed "1hs" while the
+# job ran hourly on its default; a value _cron_int can't use now gets a warning.
+_cron_banner() {
+  _banner="Cron started."
+  while IFS='|' read -r _label _urlvar _path _ivar _def _quiet _delay _loop; do
+    [ -n "$_label" ] || continue
+    eval "_raw=\${${_ivar}:-}"
+    _used=$(_cron_int "$_raw" "$_def")
+    if [ -n "$_raw" ] && [ "$_raw" != "$_used" ]; then
+      echo "[entrypoint] WARNING: ${_ivar}=${_raw} is not a whole number of seconds — using ${_used}."
+    fi
+    _banner="$_banner  $_label: ${_used}s"
+  done <<EOF
+$_CRON_JOBS
+EOF
+  echo "$_banner"
+}
+
+# One scheduler loop: every 60s, run the jobs of loop $1 that are due, one after
+# another. A job's next run is kept in _next_<its interval var>. Each call is
+# `&& rc=0 || rc=$?` so a failed job never trips set -e and kills the loop.
 _cron_loop() {
-  # Jobs that should run on startup (warm caches for first visitors):
-  SYNC_NEXT=0
-  LIST_CACHE_NEXT=0
-  WARM_ACTIVITY_NEXT=0
-
-  # Jobs staggered to avoid startup stampede:
-  NOW_INIT=$(date +%s)
-  UPCOMING_NEXT=$((NOW_INIT + 120))
-  RATINGS_NEXT=$((NOW_INIT + 180))
-  WARM_MDBLIST_NEXT=$((NOW_INIT + 240))
-  WARM_OMDB_NEXT=$((NOW_INIT + 300))
-  WARM_RECOMMENDATIONS_NEXT=$((NOW_INIT + 480))
-  WARM_LIBRARY_NEXT=$((NOW_INIT + 720))
-  PURGE_SESSIONS_NEXT=$((NOW_INIT + 600))
-  PURGE_NOTIFICATIONS_NEXT=$((NOW_INIT + 840))
-  SCRUB_AUDIT_PII_NEXT=$((NOW_INIT + 900))
-  TRASH_SYNC_NEXT=$((NOW_INIT + 360))
-  PLEX_WATCHLIST_NEXT=$((NOW_INIT + 420))
-  TRAKT_SYNC_NEXT=$((NOW_INIT + 540))
-  UPSTREAM_WATCH_NEXT=$((NOW_INIT + 1020))
-  WATCH_SYNC_NEXT=$((NOW_INIT + 780))
-  ARR_WATCH_NEXT=$((NOW_INIT + 660))
-  ARR_SNAPSHOT_NEXT=$((NOW_INIT + 300))
-
-  echo "Cron started. Sync: ${SYNC_INTERVAL:-3600}s  Upcoming: ${UPCOMING_SYNC_INTERVAL:-86400}s  Ratings: ${RATINGS_SYNC_INTERVAL:-86400}s  ListCache: ${LIST_CACHE_SYNC_INTERVAL:-21600}s  Activity: ${WARM_ACTIVITY_INTERVAL:-1800}s  MDBList: ${WARM_MDBLIST_INTERVAL:-86400}s  OMDB: ${WARM_OMDB_INTERVAL:-86400}s  Recommendations: ${WARM_RECOMMENDATIONS_INTERVAL:-43200}s  Library: ${WARM_LIBRARY_INTERVAL:-86400}s  ScrubPII: ${SCRUB_AUDIT_PII_INTERVAL:-86400}s  PurgeNotifications: ${PURGE_NOTIFICATIONS_INTERVAL:-86400}s  Trash: ${TRASH_SYNC_INTERVAL:-86400}s  PlexWatchlist: ${PLEX_WATCHLIST_SYNC_INTERVAL:-1800}s  Trakt: ${TRAKT_SYNC_INTERVAL:-1800}s  UpstreamWatch: ${UPSTREAM_WATCH_SYNC_INTERVAL:-86400}s  WatchSync: ${WATCH_SYNC_INTERVAL:-300}s  ArrWatch: ${ARR_WATCH_INTERVAL:-900}s  ArrPages: ${ARR_SNAPSHOT_INTERVAL:-300}s"
+  _this_loop="$1"
+  _start=$(date +%s)
+  while IFS='|' read -r _label _urlvar _path _ivar _def _quiet _delay _loop; do
+    [ "$_loop" = "$_this_loop" ] || continue
+    eval "_next_${_ivar}=\$((_start + _delay))"
+  done <<EOF
+$_CRON_JOBS
+EOF
   while true; do
     sleep 60
     NOW=$(date +%s)
-    if [ "$NOW" -ge "$SYNC_NEXT" ]; then
-      _cron_sync "${SYNC_URL:-${CRON_BASE}/api/sync}" "sync" && rc=0 || rc=$?
-      SYNC_NEXT=$(_cron_next "$rc" "$NOW" "${SYNC_INTERVAL:-3600}" 3600)
-    fi
-    if [ "$NOW" -ge "$UPCOMING_NEXT" ]; then
-      _cron_sync "${UPCOMING_SYNC_URL:-${CRON_BASE}/api/sync/upcoming}" "upcoming" && rc=0 || rc=$?
-      UPCOMING_NEXT=$(_cron_next "$rc" "$NOW" "${UPCOMING_SYNC_INTERVAL:-86400}" 86400)
-    fi
-    if [ "$NOW" -ge "$RATINGS_NEXT" ]; then
-      _cron_sync "${RATINGS_SYNC_URL:-${CRON_BASE}/api/sync/ratings}" "ratings" && rc=0 || rc=$?
-      RATINGS_NEXT=$(_cron_next "$rc" "$NOW" "${RATINGS_SYNC_INTERVAL:-86400}" 86400)
-    fi
-    if [ "$NOW" -ge "$PURGE_SESSIONS_NEXT" ]; then
-      _cron_sync "${PURGE_SESSIONS_URL:-${CRON_BASE}/api/cron/purge-auth-sessions}" "purge-sessions" && rc=0 || rc=$?
-      PURGE_SESSIONS_NEXT=$(_cron_next "$rc" "$NOW" "${PURGE_SESSIONS_INTERVAL:-86400}" 86400)
-    fi
-    if [ "$NOW" -ge "$PURGE_NOTIFICATIONS_NEXT" ]; then
-      _cron_sync "${PURGE_NOTIFICATIONS_URL:-${CRON_BASE}/api/cron/purge-notifications}" "purge-notifications" && rc=0 || rc=$?
-      PURGE_NOTIFICATIONS_NEXT=$(_cron_next "$rc" "$NOW" "${PURGE_NOTIFICATIONS_INTERVAL:-86400}" 86400)
-    fi
-    if [ "$NOW" -ge "$LIST_CACHE_NEXT" ]; then
-      _cron_sync "${LIST_CACHE_SYNC_URL:-${CRON_BASE}/api/cron/warm-list-cache}" "warm-list-cache" && rc=0 || rc=$?
-      LIST_CACHE_NEXT=$(_cron_next "$rc" "$NOW" "${LIST_CACHE_SYNC_INTERVAL:-21600}" 21600)
-    fi
-    if [ "$NOW" -ge "$WARM_ACTIVITY_NEXT" ]; then
-      _cron_sync "${WARM_ACTIVITY_URL:-${CRON_BASE}/api/cron/warm-activity}" "warm-activity" quiet && rc=0 || rc=$?
-      WARM_ACTIVITY_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_ACTIVITY_INTERVAL:-1800}" 1800)
-    fi
-    if [ "$NOW" -ge "$WARM_MDBLIST_NEXT" ]; then
-      _cron_sync "${WARM_MDBLIST_URL:-${CRON_BASE}/api/cron/warm-mdblist}" "warm-mdblist" && rc=0 || rc=$?
-      WARM_MDBLIST_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_MDBLIST_INTERVAL:-86400}" 86400)
-    fi
-    if [ "$NOW" -ge "$WARM_OMDB_NEXT" ]; then
-      _cron_sync "${WARM_OMDB_URL:-${CRON_BASE}/api/cron/warm-omdb}" "warm-omdb" && rc=0 || rc=$?
-      WARM_OMDB_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_OMDB_INTERVAL:-86400}" 86400)
-    fi
-    if [ "$NOW" -ge "$WARM_RECOMMENDATIONS_NEXT" ]; then
-      _cron_sync "${WARM_RECOMMENDATIONS_URL:-${CRON_BASE}/api/cron/warm-recommendations}" "warm-recommendations" && rc=0 || rc=$?
-      WARM_RECOMMENDATIONS_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_RECOMMENDATIONS_INTERVAL:-43200}" 43200)
-    fi
-    if [ "$NOW" -ge "$WARM_LIBRARY_NEXT" ]; then
-      _cron_sync "${WARM_LIBRARY_URL:-${CRON_BASE}/api/cron/warm-library}" "warm-library" && rc=0 || rc=$?
-      WARM_LIBRARY_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_LIBRARY_INTERVAL:-86400}" 86400)
-    fi
-    if [ "$NOW" -ge "$SCRUB_AUDIT_PII_NEXT" ]; then
-      _cron_sync "${SCRUB_AUDIT_PII_URL:-${CRON_BASE}/api/cron/scrub-audit-pii}" "scrub-audit-pii" quiet && rc=0 || rc=$?
-      SCRUB_AUDIT_PII_NEXT=$(_cron_next "$rc" "$NOW" "${SCRUB_AUDIT_PII_INTERVAL:-86400}" 86400)
-    fi
-    if [ "$NOW" -ge "$TRASH_SYNC_NEXT" ]; then
-      _cron_sync "${TRASH_SYNC_URL:-${CRON_BASE}/api/cron/trash-sync}" "trash-sync" && rc=0 || rc=$?
-      TRASH_SYNC_NEXT=$(_cron_next "$rc" "$NOW" "${TRASH_SYNC_INTERVAL:-86400}" 86400)
-    fi
-    # Watchlist auto-request (Plex half). A no-op unless the admin enabled
-    # feature.behavior.watchlistAutoRequest; quiet so the disabled no-op doesn't log.
-    if [ "$NOW" -ge "$PLEX_WATCHLIST_NEXT" ]; then
-      _cron_sync "${PLEX_WATCHLIST_SYNC_URL:-${CRON_BASE}/api/cron/sync-plex-watchlists}" "sync-plex-watchlists" quiet && rc=0 || rc=$?
-      PLEX_WATCHLIST_NEXT=$(_cron_next "$rc" "$NOW" "${PLEX_WATCHLIST_SYNC_INTERVAL:-1800}" 1800)
-    fi
-    # Per-user Trakt: watchlist auto-request + watch history for For You. A no-op
-    # until both Trakt app credentials are saved and a feature that uses them is
-    # on; quiet so the no-op doesn't log.
-    if [ "$NOW" -ge "$TRAKT_SYNC_NEXT" ]; then
-      _cron_sync "${TRAKT_SYNC_URL:-${CRON_BASE}/api/cron/sync-trakt}" "sync-trakt" quiet && rc=0 || rc=$?
-      TRAKT_SYNC_NEXT=$(_cron_next "$rc" "$NOW" "${TRAKT_SYNC_INTERVAL:-1800}" 1800)
-    fi
-    # The media servers' own watch records (Plex history, Jellyfin played items) —
-    # read-only evidence for the never-watched report and Library cleanup. A no-op
-    # while both of those features are off; quiet so the no-op doesn't log.
-    if [ "$NOW" -ge "$UPSTREAM_WATCH_NEXT" ]; then
-      _cron_sync "${UPSTREAM_WATCH_SYNC_URL:-${CRON_BASE}/api/cron/refresh-upstream-watch}" "refresh-upstream-watch" quiet && rc=0 || rc=$?
-      UPSTREAM_WATCH_NEXT=$(_cron_next "$rc" "$NOW" "${UPSTREAM_WATCH_SYNC_INTERVAL:-86400}" 86400)
-    fi
-    # Watch sync, Plex ⇄ Jellyfin: marks played in each admin-paired account what
-    # the other server counted as watched. A no-op while the feature is off or
-    # no pair exists; quiet so the every-5-minutes run doesn't log.
-    if [ "$NOW" -ge "$WATCH_SYNC_NEXT" ]; then
-      _cron_sync "${WATCH_SYNC_URL:-${CRON_BASE}/api/cron/watch-sync}" "watch-sync" quiet && rc=0 || rc=$?
-      WATCH_SYNC_NEXT=$(_cron_next "$rc" "$NOW" "${WATCH_SYNC_INTERVAL:-300}" 300)
-    fi
-    # The Radarr/Sonarr monitor: low disks, failed downloads, downloads newly
-    # needing attention → the notification channels, plus the Download Queue
-    # nav badge. A no-op until a Radarr or Sonarr instance is configured; quiet
-    # so the every-15-minutes run doesn't log.
-    if [ "$NOW" -ge "$ARR_WATCH_NEXT" ]; then
-      _cron_sync "${ARR_WATCH_URL:-${CRON_BASE}/api/cron/arr-watch}" "arr-watch" quiet && rc=0 || rc=$?
-      ARR_WATCH_NEXT=$(_cron_next "$rc" "$NOW" "${ARR_WATCH_INTERVAL:-900}" 900)
-    fi
-
-    # The admin Radarr/Sonarr pages' background re-reads: every view an admin
-    # opened in the last day, on its page's priority (5/10/15 min). Skipped
-    # (no ledger row) when nothing is due; quiet so the every-5-minutes run
-    # doesn't log.
-    if [ "$NOW" -ge "$ARR_SNAPSHOT_NEXT" ]; then
-      _cron_sync "${ARR_SNAPSHOT_URL:-${CRON_BASE}/api/cron/refresh-arr-snapshots}" "arr-snapshots" quiet && rc=0 || rc=$?
-      ARR_SNAPSHOT_NEXT=$(_cron_next "$rc" "$NOW" "${ARR_SNAPSHOT_INTERVAL:-300}" 300)
-    fi
+    while IFS='|' read -r _label _urlvar _path _ivar _def _quiet _delay _loop; do
+      [ "$_loop" = "$_this_loop" ] || continue
+      eval "_due=\$_next_${_ivar}"
+      [ "$NOW" -ge "$_due" ] || continue
+      eval "_url=\${${_urlvar}:-\${CRON_BASE}\${_path}}"
+      eval "_raw=\${${_ivar}:-}"
+      _cron_sync "$_url" "$_label" "$_quiet" && rc=0 || rc=$?
+      eval "_next_${_ivar}=\$(_cron_next \"\$rc\" \"\$NOW\" \"\$_raw\" \"\$_def\")"
+    done <<EOF
+$_CRON_JOBS
+EOF
   done
 }
 
-# Separate fast loop for play history — runs every 5s by default for granular tracking.
-# Decoupled from the main cron loop which ticks every 60s.
+# Separate fast loop for play history — every PLAY_HISTORY_SYNC_INTERVAL (5s by
+# default) for granular tracking, decoupled from the cron loops' 60s tick.
+#
+# ONE long-lived node process polls. A node per poll (as _cron_sync starts) was
+# ~17k process starts a day at the 5s default — constant CPU and memory churn on
+# a small host. It stays strictly serial (POST, wait for the answer, then sleep
+# the interval): play-history.ts relies on ticks never overlapping. A failed poll
+# (a routine 500/429, or no answer) is logged and polling carries on; if node
+# itself dies, the loop below starts a new one. CRON_SECRET reaches it through
+# the environment only, never argv.
 #
 # Why the readiness check instead of a flat sleep: every poll cycle bumps
 # ActiveSession.lastSeenAt; every cycle missed during boot ages it toward the
@@ -625,47 +707,86 @@ _cron_loop() {
 # fires as a side-effect of that first poll triggering reconcilePlexEventStream)
 # could finalize the in-progress session as stale, ledger-lock the sessionKey,
 # and make the Now Playing card permanently disappear from the user's view.
-# Poll /api/health (unauthenticated, no DB hit) and proceed within ~1s of
-# Node becoming reachable. 60s max is the same window the HEALTHCHECK
-# start-period uses.
+# Poll /api/health (unauthenticated, no DB hit) and start polling within ~1s of
+# Node becoming reachable; after 60s, poll anyway.
 _play_history_loop() {
-  # Routed through _cron_int like every other interval knob (see its comment) —
-  # this one feeds `sleep` directly rather than $(( )) arithmetic, but an empty
-  # or non-numeric value is fatal there too ("sleep: invalid number"), and under
-  # `set -e` that silently and permanently stops play-history/Now Playing
-  # polling while the healthcheck stays green.
+  # Routed through _cron_int like every other interval knob (see its comment): a
+  # bad value must not stop play-history/Now Playing polling. At least 1s — "0"
+  # would poll the server back to back.
   INTERVAL=$(_cron_int "${PLAY_HISTORY_SYNC_INTERVAL:-5}" 5)
+  if [ "$INTERVAL" -lt 1 ]; then INTERVAL=1; fi
   echo "Play history polling started (every ${INTERVAL}s)"
 
-  PORT_VALUE="${PORT:-3000}" BASE_PATH_VALUE="${BASE_PATH}" node --input-type=module <<'JSEOF'
-const port = process.env.PORT_VALUE;
-const url = `http://127.0.0.1:${port}${process.env.BASE_PATH_VALUE || ""}/api/health`;
-const start = Date.now();
-const MAX_MS = 60_000;
-while (Date.now() - start < MAX_MS) {
-  try {
-    const r = await fetch(url);
-    if (r.ok) process.exit(0);
-  } catch {}
-  await new Promise((res) => setTimeout(res, 500));
-}
-console.warn("[entrypoint] play-history readiness probe timed out after 60s; starting poll loop anyway");
-process.exit(0);
-JSEOF
-
   while true; do
-    # `|| true`: this subshell inherits set -e, and _cron_sync exits non-zero on
-    # any non-2xx poll (a transient 500/429 is routine). Unguarded, the FIRST
-    # failed poll would kill this loop permanently — play-history/Now Playing
-    # tracking silently stops until the container restarts, while the container
-    # still reports healthy. The _cron_loop calls are all guarded the same way.
-    _cron_sync "${PLAY_HISTORY_SYNC_URL:-${CRON_BASE}/api/sync/play-history}" "play-history" "1" || true
+    PH_URL="${PLAY_HISTORY_SYNC_URL:-${CRON_BASE}/api/sync/play-history}" \
+    PH_HEALTH_URL="http://127.0.0.1:${PORT:-3000}${BASE_PATH}/api/health" \
+    PH_INTERVAL_MS="$((INTERVAL * 1000))" \
+    PH_TIMEOUT_MS="$(( $(_cron_int "${CRON_CALL_TIMEOUT:-2100}" 2100) * 1000 ))" \
+      node --input-type=module <<'JSEOF' || true
+import http from 'node:http';
+import https from 'node:https';
+const { PH_URL: url, PH_HEALTH_URL: healthUrl, CRON_SECRET } = process.env;
+const intervalMs = Math.max(1000, Number(process.env.PH_INTERVAL_MS) || 5000);
+const timeoutMs = Number(process.env.PH_TIMEOUT_MS) > 0 ? Number(process.env.PH_TIMEOUT_MS) : 2100000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const start = Date.now();
+let ready = false;
+while (!ready && Date.now() - start < 60_000) {
+  try {
+    const r = await fetch(healthUrl, { signal: AbortSignal.timeout(2000) });
+    ready = r.ok;
+    await r.arrayBuffer();
+  } catch {}
+  if (!ready) await sleep(500);
+}
+if (!ready) console.warn('[entrypoint] play-history readiness probe timed out after 60s; starting poll loop anyway');
+
+// node:http for the reason _cron_sync gives. agent: false is a fresh connection
+// per poll, as when every poll was its own process: a kept-alive socket would
+// race the server's own 5s keep-alive timeout at this interval. The client
+// follows the URL's scheme, as in _cron_sync.
+// A URL that doesn't parse goes to http.request, which rejects it per poll.
+const client = URL.canParse(url) && new URL(url).protocol === 'https:' ? https : http;
+const poll = () => new Promise((resolve, reject) => {
+  const req = client.request(
+    url,
+    { method: 'POST', agent: false, headers: { Authorization: `Bearer ${CRON_SECRET}` } },
+    (res) => {
+      res.resume();                                   // drain and discard the body
+      res.on('end', () => resolve(res.statusCode));
+      res.on('error', reject);
+    },
+  );
+  req.setTimeout(timeoutMs, () => {
+    req.destroy(new Error(`no response after ${Math.round(timeoutMs / 1000)}s`));
+  });
+  req.on('error', reject);
+  req.end();
+});
+
+for (;;) {
+  try {
+    const status = await poll();
+    if (status < 200 || status >= 300) console.log(`[play-history failed: ${status}]`);
+  } catch (e) {
+    console.log(`[play-history failed: ${e?.message ?? e}]`);
+  }
+  await sleep(intervalMs);
+}
+JSEOF
+    # Only reached if node itself died; start a fresh poller after a pause.
     sleep "$INTERVAL"
   done
 }
 
-_cron_loop &
+_cron_banner
+
+_cron_loop main &
 CRON_PID=$!
+
+_cron_loop fast &
+FAST_PID=$!
 
 _play_history_loop &
 PH_PID=$!
@@ -673,18 +794,29 @@ PH_PID=$!
 node server.js &
 NODE_PID=$!
 
-# Forward SIGTERM/SIGINT so Docker can stop the container cleanly.
-trap "kill $NODE_PID $CRON_PID $PH_PID 2>/dev/null" TERM INT
+# Run phase: forward SIGTERM/SIGINT so Docker can stop the container cleanly.
+# `|| true`: kill fails when a loop has already died, and under set -e a failed
+# command in a trap would end this script while node is still draining.
+trap "kill $NODE_PID $CRON_PID $FAST_PID $PH_PID 2>/dev/null || true" TERM INT
 
 # POSIX: a trapped signal received during `wait` makes it return IMMEDIATELY
 # after the trap runs — it does not resume. A single bare `wait $NODE_PID`
-# would therefore let PID 1 exit while node is still draining its shutdown,
-# and Docker tears the container down (SIGKILL) mid-drain. Re-wait until node
-# has actually exited; `kill -0` probes liveness (fails once the wait reaped
-# it), and `|| true` keeps set -e from aborting on node's signal exit status.
-while kill -0 $NODE_PID 2>/dev/null; do
-  wait $NODE_PID || true
+# would therefore let this script exit while node is still draining its
+# shutdown, and Docker tears the container down (SIGKILL) mid-drain. Re-wait
+# until node has actually exited; `kill -0` probes liveness (fails once a wait
+# reaped it).
+#
+# The container exits with node's own status. A trap-interrupted wait returns
+# >128 while node is still alive, so rc is re-read on every pass and node's real
+# exit, read last, wins. `&& … || …` keeps set -e from aborting on it, and the
+# loop cleanup below can't replace it either.
+rc=0
+while :; do
+  wait "$NODE_PID" && rc=0 || rc=$?
+  kill -0 "$NODE_PID" 2>/dev/null || break
 done
-kill $CRON_PID $PH_PID 2>/dev/null
-wait $CRON_PID 2>/dev/null
-wait $PH_PID 2>/dev/null
+kill "$CRON_PID" "$FAST_PID" "$PH_PID" 2>/dev/null || true
+wait "$CRON_PID" 2>/dev/null || true
+wait "$FAST_PID" 2>/dev/null || true
+wait "$PH_PID" 2>/dev/null || true
+exit "$rc"

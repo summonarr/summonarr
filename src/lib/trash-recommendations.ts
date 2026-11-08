@@ -1,6 +1,6 @@
 import { prisma } from "./prisma";
 import { stripTrashHtml } from "./trash-html";
-import type { TrashService, TrashSpecKind } from "@/generated/prisma";
+import type { Prisma, TrashService, TrashSpecKind } from "@/generated/prisma";
 
 export interface StarterPackItem {
   service: TrashService;
@@ -130,41 +130,57 @@ function deriveLabel(spec: { service: TrashService; kind: TrashSpecKind; name: s
 // A quality profile's own TRaSH description (upstream English prose) wins over
 // the generic key — it is spec-specific and has no translation.
 function trashDescription(spec: { kind: TrashSpecKind; payload: unknown }): string | null {
-  if (spec.kind !== "QUALITY_PROFILE") return null;
-  const desc = (spec.payload as { trash_description?: string } | null)?.trash_description?.trim();
-  return desc ? stripTrashHtml(desc) : null;
+  if (spec.kind !== "QUALITY_PROFILE" || !spec.payload || typeof spec.payload !== "object") return null;
+  const desc = (spec.payload as { trash_description?: unknown }).trash_description;
+  const trimmed = typeof desc === "string" ? desc.trim() : "";
+  return trimmed ? stripTrashHtml(trimmed) : null;
 }
 
-function deriveRationale(spec: { kind: TrashSpecKind; payload: unknown }): string {
-  if (spec.kind === "QUALITY_PROFILE") {
-    return trashDescription(spec) ?? "TRaSH quality profile. Applying it cascades to every referenced custom format.";
-  }
-  if (spec.kind === "NAMING") return "TRaSH naming pattern — merged into Radarr/Sonarr's media-management config on apply.";
-  if (spec.kind === "QUALITY_SIZE") return "TRaSH per-quality min/preferred/max MB-per-minute template — overlaid on the live quality definitions.";
+// The English rationale of a derived row with no description of its own.
+function deriveRationale(kind: TrashSpecKind): string {
+  if (kind === "QUALITY_PROFILE") return "TRaSH quality profile. Applying it cascades to every referenced custom format.";
+  if (kind === "NAMING") return "TRaSH naming pattern — merged into Radarr/Sonarr's media-management config on apply.";
+  if (kind === "QUALITY_SIZE") return "TRaSH per-quality min/preferred/max MB-per-minute template — overlaid on the live quality definitions.";
   return "";
 }
 
-async function resolveCurated(item: StarterPackItem) {
+// The application columns a starter-pack status shows, on the default instance.
+const STARTER_INCLUDE = {
+  applications: {
+    where: { arrInstance: "" },
+    select: { enabled: true, appliedAt: true, lastError: true },
+  },
+} as const satisfies Prisma.TrashSpecInclude;
+type CuratedSpec = Prisma.TrashSpecGetPayload<{ include: typeof STARTER_INCLUDE }>;
+type StarterApplicationRow = CuratedSpec["applications"][number];
+
+function toStarterApplication(app: StarterApplicationRow | undefined): StarterPackStatus["application"] {
+  if (!app) return null;
+  return {
+    enabled: app.enabled,
+    appliedAt: app.appliedAt?.toISOString() ?? null,
+    lastError: app.lastError,
+  };
+}
+
+async function resolveCurated(item: StarterPackItem): Promise<CuratedSpec | null> {
   const { service, kind, match } = item;
   if (!match) return null;
-  const include = { applications: { where: { arrInstance: "" } } } as const;
 
-  let spec = null as Awaited<
-    ReturnType<typeof prisma.trashSpec.findFirst<{ include: { applications: true } }>>
-  > | null;
+  let spec: CuratedSpec | null = null;
   // Stable-id path. Only match.trashId is a candidate — match.slug is not a key
   // the sync ever stores (see the StarterPackItem.match doc), so querying it
   // was one guaranteed-miss round-trip per slug-bearing entry on every call.
   if (match.trashId) {
     spec = await prisma.trashSpec.findFirst({
       where: { service, kind, trashId: match.trashId },
-      include,
+      include: STARTER_INCLUDE,
     });
   }
   if (!spec && match.name) {
     spec = await prisma.trashSpec.findFirst({
       where: { service, kind, name: { equals: match.name, mode: "insensitive" } },
-      include,
+      include: STARTER_INCLUDE,
     });
   }
   if (!spec && match.name) {
@@ -179,7 +195,7 @@ async function resolveCurated(item: StarterPackItem) {
     // (POST reports the label in `missing`, GET renders it unsynced).
     const hits = await prisma.trashSpec.findMany({
       where: { service, kind, name: { contains: match.name, mode: "insensitive" } },
-      include,
+      include: STARTER_INCLUDE,
       take: 2,
     });
     const [only] = hits;
@@ -189,38 +205,41 @@ async function resolveCurated(item: StarterPackItem) {
 }
 
 export async function resolveStarterPack(): Promise<StarterPackStatus[]> {
-  const curatedSpecIds = new Set<string>();
-
   // Resolve all starter-pack items in parallel. Each item can take up to 3
   // queries, so running them one after another would stack up round-trips.
   const specs = await Promise.all(STARTER_PACK.map((item) => resolveCurated(item)));
+  const curatedSpecIds = new Set(specs.flatMap((spec) => (spec ? [spec.id] : [])));
 
   const results: StarterPackStatus[] = STARTER_PACK.map((item, i) => {
     const spec = specs[i];
-    if (spec) curatedSpecIds.add(spec.id);
     return {
       item,
       spec: spec ? { id: spec.id, name: spec.name, trashId: spec.trashId } : null,
-      application: spec?.applications[0]
-        ? {
-            enabled: spec.applications[0].enabled,
-            appliedAt: spec.applications[0].appliedAt?.toISOString() ?? null,
-            lastError: spec.applications[0].lastError,
-          }
-        : null,
+      application: toStarterApplication(spec?.applications[0]),
     };
   });
 
+  // The payload is read for a quality profile's own description (see
+  // trashDescription); the other kinds carry none.
   const others = await prisma.trashSpec.findMany({
     where: {
       kind: { in: ["QUALITY_PROFILE", "NAMING", "QUALITY_SIZE"] },
       ...(curatedSpecIds.size > 0 ? { id: { notIn: [...curatedSpecIds] } } : {}),
     },
-    include: { applications: { where: { arrInstance: "" } } },
+    select: {
+      id: true,
+      service: true,
+      kind: true,
+      trashId: true,
+      name: true,
+      payload: true,
+      applications: STARTER_INCLUDE.applications,
+    },
     orderBy: [{ service: "asc" }, { kind: "asc" }, { name: "asc" }],
   });
 
   for (const spec of others) {
+    const description = trashDescription(spec);
     results.push({
       item: {
         service: spec.service,
@@ -228,19 +247,13 @@ export async function resolveStarterPack(): Promise<StarterPackStatus[]> {
         label: deriveLabel(spec),
         labelKey: DERIVED_LABEL_KEY[spec.service][spec.kind],
         labelVars: { name: spec.name },
-        rationale: deriveRationale(spec),
+        rationale: description ?? deriveRationale(spec.kind),
         // No key when the upstream description is used — that text is the rationale.
-        rationaleKey: trashDescription(spec) ? undefined : DERIVED_RATIONALE_KEY[spec.kind],
+        rationaleKey: description ? undefined : DERIVED_RATIONALE_KEY[spec.kind],
         recommended: false,
       },
       spec: { id: spec.id, name: spec.name, trashId: spec.trashId },
-      application: spec.applications[0]
-        ? {
-            enabled: spec.applications[0].enabled,
-            appliedAt: spec.applications[0].appliedAt?.toISOString() ?? null,
-            lastError: spec.applications[0].lastError,
-          }
-        : null,
+      application: toStarterApplication(spec.applications[0]),
     });
   }
 

@@ -7,6 +7,7 @@ import {
   isNativeOidcState,
   isOidcConfigured,
   NATIVE_OIDC_CALLBACK_URL,
+  oidcLoginErrorRedirect,
   readOidcStateCookie,
   verifyOidcStateCookie,
 } from "@/lib/oidc";
@@ -23,19 +24,10 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // buildLoginRedirect does. No-op when BASE_PATH is unset (the default).
 const basePath = process.env.BASE_PATH ?? "";
 
+// Every web failure here also expires the flow cookie: the state it carries
+// is spent or unusable either way.
 function loginErrorRedirect(req: NextRequest, code: string): NextResponse {
-  // AUTH_URL is guaranteed set by the early guard in GET; fail closed otherwise
-  // rather than deriving the base from an attacker-influenceable request Host.
-  const base = process.env.AUTH_URL;
-  if (!base) {
-    const t = translatorForRequest(req);
-    return NextResponse.json({ error: t("apiAuth.common.authUrlMissing") }, { status: 500 });
-  }
-  const url = new URL(`${basePath}/login`, base);
-  url.searchParams.set("error", code);
-  const res = NextResponse.redirect(url.toString());
-  res.headers.append("Set-Cookie", clearOidcStateCookie());
-  return res;
+  return oidcLoginErrorRedirect(req, code, { clearStateCookie: true });
 }
 
 // Hand a native flow straight back to the app on its custom scheme, carrying
@@ -83,20 +75,79 @@ export async function GET(req: NextRequest) {
   // Native branch first: this request arrives in the app's web-auth view, which
   // never carries the flow cookie, so every cookie-based check below would
   // (correctly) fail. The state marker is the only signal available here.
-  if (isNativeFlow) {
-    const idpError = req.nextUrl.searchParams.get("error");
-    if (idpError) return nativeCallbackRedirect({ error: idpError.slice(0, 64) });
-    const code = req.nextUrl.searchParams.get("code");
-    if (!code) return nativeCallbackRedirect({ error: "oidc_no_code" });
-    return nativeCallbackRedirect({ code, state: returnedState });
+  if (isNativeFlow && returnedState) return handBackToApp(req.nextUrl.searchParams, returnedState);
+  return completeWebSignIn(req, authUrl);
+}
+
+// The native flow: hand whatever the IdP returned straight back to the app.
+function handBackToApp(params: URLSearchParams, state: string): NextResponse {
+  const idpError = params.get("error");
+  if (idpError) return nativeCallbackRedirect({ error: idpError.slice(0, 64) });
+  const code = params.get("code");
+  if (!code) return nativeCallbackRedirect({ error: "oidc_no_code" });
+  return nativeCallbackRedirect({ code, state });
+}
+
+// The web flow: verify the flow cookie, exchange the code, resolve the user,
+// mint the session cookie and send the browser to where it started.
+async function completeWebSignIn(req: NextRequest, authUrl: string): Promise<NextResponse> {
+  const flowState = await readFlowState(req);
+  if (flowState instanceof NextResponse) return flowState;
+
+  const dbUser = await resolveUser(req, flowState);
+  if (dbUser instanceof NextResponse) return dbUser;
+
+  const device = buildDeviceMeta(req.headers);
+  let result: Awaited<ReturnType<typeof signInAndMintSession>>;
+  try {
+    result = await signInAndMintSession({
+      // rememberMe only picks the configured duration; the lifetime itself is
+      // decided in initializeTokenOnSignIn (guardrail 6c), as for every provider.
+      user: { ...dbUser, ...device, ...(flowState.rememberMe ? { rememberMe: "true" } : {}) },
+      providerId: "oidc",
+    });
+  } catch (err) {
+    // A disabled account is an expected refusal, not a fault — the OIDC identity
+    // still resolves to a real row (account removal disables rather than scrubs,
+    // see account-lifecycle.ts), so it reaches the mint chokepoint and is turned
+    // away there. Distinct code, and no error log.
+    if (err instanceof AccountDeactivatedError) {
+      return loginErrorRedirect(req, "account_disabled");
+    }
+    // Don't let a transient DB failure during mint throw out of the handler and
+    // strand the OIDC state cookie — redirect to login with an error like the
+    // other failure paths in this route.
+    console.error("[oidc/callback] OIDC session mint failed:", err instanceof Error ? err.message : err);
+    return loginErrorRedirect(req, "oidc_session_error");
   }
 
+  // returnTo was already validated at /start and signed into the state cookie,
+  // so re-validating here is a second safety net in case /start ever regresses.
+  // Use the SAME validator: this redirect also carries the new session cookie,
+  // so an off-site target here would be an open redirect right after sign-in
+  // (a phishing hand-off).
+  const safeReturn = safeInternalPath(flowState.returnTo) ?? "/";
+  // safeInternalPath always returns a root-absolute path, so the BASE_PATH prefix
+  // is a plain concatenation (see the note on `basePath` above).
+  const res = NextResponse.redirect(new URL(`${basePath}${safeReturn}`, authUrl).toString());
+  res.headers.append(
+    "Set-Cookie",
+    serializeSessionCookie(result.token, { maxAgeSeconds: result.expiresInSeconds }),
+  );
+  res.headers.append("Set-Cookie", clearOidcStateCookie());
+  return res;
+}
+
+type OidcFlowState = NonNullable<Awaited<ReturnType<typeof verifyOidcStateCookie>>>;
+
+// The verified flow state, or the login-page refusal.
+async function readFlowState(req: NextRequest): Promise<OidcFlowState | NextResponse> {
   // The IdP's own refusal arrives as `error=` with no code. A user clicking
   // Deny/Cancel at the IdP is an expected outcome, not a fault: it gets its own
-  // code (login-form words it) and is NOT logged — the exchange below would
-  // otherwise throw on the error response and record a server error for a
-  // refusal (guardrail 7; contrast the silent AccountDeactivatedError branch).
-  // Read before the cookie so an expired state can't mask what the IdP said.
+  // code (login-form words it) and is NOT logged — the exchange would otherwise
+  // throw on the error response and record a server error for a refusal
+  // (guardrail 7; contrast the silent AccountDeactivatedError branch). Read
+  // before the cookie so an expired state can't mask what the IdP said.
   const idpError = req.nextUrl.searchParams.get("error");
   if (idpError) {
     return loginErrorRedirect(req, idpError === "access_denied" ? "oidc_access_denied" : "oidc_idp_error");
@@ -112,7 +163,15 @@ export async function GET(req: NextRequest) {
   if (!flowState) {
     return loginErrorRedirect(req, "oidc_state_invalid");
   }
+  return flowState;
+}
 
+type ResolvedUser = Extract<Awaited<ReturnType<typeof resolveOidcSignIn>>, { ok: true }>["user"];
+
+// The exchange and the allowlist + identity lookup, shared with the native
+// route so the two can't disagree (oidc-signin.ts). Every refusal is audited
+// there; a fault is logged here and answered on the login page.
+async function resolveUser(req: NextRequest, flowState: OidcFlowState): Promise<ResolvedUser | NextResponse> {
   // The allowlist is read first: it decides whether the exchange also has to
   // fetch a groups claim.
   let policy;
@@ -138,9 +197,6 @@ export async function GET(req: NextRequest) {
     return loginErrorRedirect(req, "oidc_exchange_failed");
   }
 
-  // Allowlist, identity lookup and notification address — shared with the
-  // native route so the two can't disagree (oidc-signin.ts). Every refusal is
-  // audited there.
   let outcome;
   try {
     outcome = await resolveOidcSignIn(claims, policy, req.headers);
@@ -151,45 +207,5 @@ export async function GET(req: NextRequest) {
   if (!outcome.ok) {
     return loginErrorRedirect(req, oidcWebErrorCode(outcome.reason));
   }
-  const dbUser = outcome.user;
-
-  const device = buildDeviceMeta(req.headers);
-  let result: Awaited<ReturnType<typeof signInAndMintSession>>;
-  try {
-    result = await signInAndMintSession({
-      user: { ...dbUser, ...device },
-      providerId: "oidc",
-    });
-  } catch (err) {
-    // A disabled account is an expected refusal, not a fault — the OIDC identity
-    // still resolves to a real row (account removal disables rather than scrubs,
-    // see account-lifecycle.ts), so it reaches the mint chokepoint and is turned
-    // away there. Distinct code, and no error log.
-    if (err instanceof AccountDeactivatedError) {
-      return loginErrorRedirect(req, "account_disabled");
-    }
-    // Don't let a transient DB failure during mint throw out of the handler and
-    // strand the OIDC state cookie — redirect to login with an error like the
-    // other failure paths in this route.
-    console.error("[oidc/callback] OIDC session mint failed:", err instanceof Error ? err.message : err);
-    return loginErrorRedirect(req, "oidc_session_error");
-  }
-
-  // AUTH_URL is guaranteed non-empty by the early guard at the top of GET.
-  const base = authUrl;
-  // returnTo was already validated at /start and signed into the state cookie,
-  // so re-validating here is a second safety net in case /start ever regresses.
-  // Use the SAME validator: this redirect also carries the new session cookie,
-  // so an off-site target here would be an open redirect right after sign-in
-  // (a phishing hand-off).
-  const safeReturn = safeInternalPath(flowState.returnTo) ?? "/";
-  // safeInternalPath always returns a root-absolute path, so the BASE_PATH prefix
-  // is a plain concatenation (see the note on `basePath` above).
-  const res = NextResponse.redirect(new URL(`${basePath}${safeReturn}`, base).toString());
-  res.headers.append(
-    "Set-Cookie",
-    serializeSessionCookie(result.token, { maxAgeSeconds: result.expiresInSeconds }),
-  );
-  res.headers.append("Set-Cookie", clearOidcStateCookie());
-  return res;
+  return outcome.user;
 }

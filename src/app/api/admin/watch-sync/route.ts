@@ -7,7 +7,8 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { WATCH_SYNC_FEATURE_KEY, markCountsByPair, watchSyncRunState } from "@/lib/watch-sync-data";
-import { compareNames, compareServerUsers, parseWatchSyncDirection } from "@/lib/watch-sync";
+import { compareServerUsers, parseWatchSyncDirection } from "@/lib/watch-sync";
+import { serverUserOut, splitServerUsers, watchSyncSuggestions, type ServerNames, type ServerUserRow } from "@/lib/watch-sync-view";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 // Watch sync, Plex ⇄ Jellyfin — the admin page's data (ADMIN). Pairs are made
@@ -25,9 +26,11 @@ import { isPrismaErrorCode } from "@/lib/prisma-errors";
 // No provider subject id, token or server address reaches the browser: an
 // account is its row id, username and server display name.
 
-type ServerUserOut = { id: string; username: string; server: string; active: boolean };
+// The pickable accounts are read with a bound, like the Users page's server
+// user list; past it the answer says so (`truncated`).
+const MAX_LISTED_ACCOUNTS = 10_000;
 
-async function serverNames(): Promise<{ plex: Map<string, string>; jellyfin: Map<string, string> }> {
+async function serverNames(): Promise<ServerNames> {
   const [plex, jellyfin] = await Promise.all([getMediaInstances("plex"), getMediaInstances("jellyfin")]);
   return {
     plex: new Map(plex.map((i) => [i.slug, i.name])),
@@ -35,50 +38,38 @@ async function serverNames(): Promise<{ plex: Map<string, string>; jellyfin: Map
   };
 }
 
+const SERVER_USER_SELECT = { id: true, source: true, serverInstance: true, username: true, active: true, userId: true } as const;
+
 export const GET = withAdmin(async (req) => {
   const t = translatorForRequest(req);
   if (!(await isFeatureEnabled(WATCH_SYNC_FEATURE_KEY))) {
     return NextResponse.json({ error: t("apiAdmin.watchSync.disabled") }, { status: 404 });
   }
   const names = await serverNames();
-  const serverUserSelect = { id: true, source: true, serverInstance: true, username: true, active: true, userId: true } as const;
-  const [pairs, users] = await Promise.all([
+  const [pairs, rows] = await Promise.all([
     prisma.watchSyncPair.findMany({
       select: {
         id: true, enabled: true, direction: true, syncProgress: true, historyReadTo: true, jellyfinReadTo: true, lastRunAt: true, lastResult: true, createdAt: true,
-        plexUser: { select: serverUserSelect },
-        jellyfinUser: { select: serverUserSelect },
+        plexUser: { select: SERVER_USER_SELECT },
+        jellyfinUser: { select: SERVER_USER_SELECT },
       },
       orderBy: { createdAt: "asc" },
     }),
     prisma.mediaServerUser.findMany({
       where: { source: { in: ["plex", "jellyfin"] }, active: true },
-      select: { ...serverUserSelect, user: { select: { name: true, email: true } } },
+      select: { ...SERVER_USER_SELECT, user: { select: { name: true, email: true } } },
       orderBy: { username: "asc" },
+      // One past the bound, to tell a full list from a cut one.
+      take: MAX_LISTED_ACCOUNTS + 1,
     }),
   ]);
+  const truncated = rows.length > MAX_LISTED_ACCOUNTS;
+  const { plex: plexUsers, jellyfin: jellyfinUsers } = splitServerUsers(truncated ? rows.slice(0, MAX_LISTED_ACCOUNTS) : rows);
   const counts = await markCountsByPair(pairs.map((p) => p.id));
-  const label = (u: { source: string; serverInstance: string }) =>
-    (u.source === "plex" ? names.plex : names.jellyfin).get(u.serverInstance) ?? (u.serverInstance || u.source);
-  const out = (u: { id: string; source: string; serverInstance: string; username: string; active: boolean }): ServerUserOut =>
-    ({ id: u.id, username: u.username, server: label(u), active: u.active });
+  const out = (u: ServerUserRow) => serverUserOut(names, u);
 
-  // Every list on the page reads A–Z by user name, ignoring case (the database
-  // order is case-sensitive: "GuestRoom" before "alice").
-  const plexUsers = users.filter((u) => u.source === "plex").sort(compareServerUsers);
-  const jellyfinUsers = users.filter((u) => u.source === "jellyfin").sort(compareServerUsers);
   pairs.sort((a, b) => compareServerUsers(a.plexUser, b.plexUser) || compareServerUsers(a.jellyfinUser, b.jellyfinUser));
-  const paired = new Set(pairs.map((p) => `${p.plexUser.id}\u0000${p.jellyfinUser.id}`));
-  // Suggestions: both identities linked to the same Summonarr account.
-  const suggestions: Array<{ plexUserId: string; jellyfinUserId: string; account: string }> = [];
-  for (const p of plexUsers) {
-    if (!p.userId) continue;
-    for (const j of jellyfinUsers) {
-      if (j.userId !== p.userId || paired.has(`${p.id}\u0000${j.id}`)) continue;
-      suggestions.push({ plexUserId: p.id, jellyfinUserId: j.id, account: p.user?.name || p.user?.email || p.username });
-    }
-  }
-  suggestions.sort((a, b) => compareNames(a.account, b.account));
+  const run = watchSyncRunState();
 
   return NextResponse.json({
     pairs: pairs.map((p) => ({
@@ -96,12 +87,11 @@ export const GET = withAdmin(async (req) => {
     })),
     plexUsers: plexUsers.map(out),
     jellyfinUsers: jellyfinUsers.map(out),
-    suggestions,
+    suggestions: watchSyncSuggestions(plexUsers, jellyfinUsers, pairs),
     // A run in progress in this process (cron or Run now).
-    run: (() => {
-      const s = watchSyncRunState();
-      return { running: s.running, startedAt: s.startedAt ? new Date(s.startedAt).toISOString() : null, pairId: s.pairId };
-    })(),
+    run: { running: run.running, startedAt: run.startedAt ? new Date(run.startedAt).toISOString() : null, pairId: run.pairId },
+    // Additive: the account lists stopped at the bound.
+    truncated,
   });
 });
 
@@ -122,7 +112,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     prisma.mediaServerUser.findUnique({ where: { id: plexUserId }, select: { id: true, source: true, active: true } }),
     prisma.mediaServerUser.findUnique({ where: { id: jellyfinUserId }, select: { id: true, source: true, active: true } }),
   ]);
-  if (!plex || plex.source !== "plex" || !jellyfin || jellyfin.source !== "jellyfin" || !jellyfin.active) {
+  // A NEW pair needs both identities active, matching the GET list (which hides
+  // inactive ones). runWatchSync checks only the Jellyfin side: nothing ever
+  // re-activates a Plex identity, so an EXISTING pair must not be stopped by a
+  // stale Plex flag (a server removed and re-added under its slug).
+  if (!plex || plex.source !== "plex" || !plex.active || !jellyfin || jellyfin.source !== "jellyfin" || !jellyfin.active) {
     return NextResponse.json({ error: t("apiAdmin.watchSync.pairInvalid") }, { status: 400 });
   }
   try {

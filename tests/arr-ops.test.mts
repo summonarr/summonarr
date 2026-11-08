@@ -44,6 +44,7 @@ const {
   liveRemovalIds,
   liveGrabIds,
   removalIds,
+  nextImportSelection,
 } = await import("../src/lib/arr-queue.ts");
 const {
   arrValidationMessage,
@@ -167,6 +168,36 @@ test("a row carries everything the arr's queue shows: quality + revision, langua
     packRecord(2, 2, { languages: [{ name: "English" }], customFormats: [{ name: "x265" }], customFormatScore: -1000, outputPath: "/dl/Show.S01" }),
   ]);
   assert.deepEqual([pack.languages, pack.customFormats, pack.customFormatScore, pack.outputPath], [["English"], ["x265"], -1000, "/dl/Show.S01"]);
+});
+
+test("a folded pack takes its most pressing record's phase: one import-blocked episode makes the row blocked, not 'downloading'", () => {
+  const [row] = foldQueueRecords("sonarr", "", [
+    packRecord(1, 1, { status: "downloading", trackedDownloadState: "downloading", trackedDownloadStatus: "ok" }),
+    packRecord(2, 2, { status: "completed", trackedDownloadState: "importBlocked", trackedDownloadStatus: "warning" }),
+    packRecord(3, 3, { status: "downloading", trackedDownloadState: "downloading", trackedDownloadStatus: "ok" }),
+  ]);
+  assert.deepEqual([row.phase, row.attention], ["importBlocked", true]);
+  assert.deepEqual(row.ids, [1, 2, 3]);
+  // A calmer later record never lowers it.
+  const [kept] = foldQueueRecords("sonarr", "", [
+    packRecord(4, 1, { status: "completed", trackedDownloadState: "importBlocked" }),
+    packRecord(5, 2, { status: "downloading", trackedDownloadState: "downloading" }),
+  ]);
+  assert.equal(kept.phase, "importBlocked");
+});
+
+test("the protocol reads the arr's enum number as well as its name (1 usenet, 2 torrent)", () => {
+  const rows = foldQueueRecords("radarr", "", [
+    { id: 1, movie: { title: "A" }, protocol: 2 },
+    { id: 2, movie: { title: "B" }, protocol: 1 },
+    { id: 3, movie: { title: "C" }, protocol: " Torrent " },
+    { id: 4, movie: { title: "D" }, protocol: 7 },
+  ]);
+  assert.deepEqual(rows.map((r) => r.protocol), ["torrent", "usenet", "torrent", "unknown"]);
+});
+
+test("record ids past the safe-integer range are dropped — never a row the arr can't be told about", () => {
+  assert.deepEqual(foldQueueRecords("radarr", "", [{ id: 2 ** 53 + 2, movie: { title: "Big" } }, { id: 9, movieId: 1e300, movie: { title: "Ok" } }]).map((r) => [r.ids, r.arrMediaId]), [[[9], null]]);
 });
 
 test("Radarr records are never folded — two downloads for one movie are two rows", () => {
@@ -365,6 +396,8 @@ test("parseImportSelection: shape only — the right service's fields, a series 
     ["radarr", { path: "/a.mkv", releaseGroup: "x".repeat(101) }],
     ["radarr", { path: "", movieId: 40 }],
     ["radarr", "/a.mkv"],
+    ["radarr", { path: "/a.mkv", movieId: 2 ** 60 }],
+    ["sonarr", { path: "/s.mkv", seriesId: 2 ** 53 + 2, episodeIds: [1] }],
   ] as const) {
     assert.equal(parseImportSelection(bad[0], bad[1]), null, JSON.stringify(bad));
   }
@@ -394,6 +427,16 @@ test("applyImportOverride: every object comes from the instance's catalog; an id
   expectRefusal(() => applyImportOverride("sonarr", sonarrRows[2], { seriesId: 7, episodeIds: [101] }, catalog), "episodes");
   expectRefusal(() => applyImportOverride("sonarr", sonarrRows[2], { seriesId: 99, episodeIds: [1] }, catalog), "series");
   expectRefusal(() => applyImportOverride("sonarr", { path: "/x.mkv", series: null }, { episodeIds: [101] }, catalog), "series");
+});
+
+test("a corrected quality keeps the file's own PROPER/REPACK/REAL revision — the arr would re-grab a relabelled v1 as an upgrade", () => {
+  const proper = { ...radarrRows[0], quality: { quality: { id: 7, name: "Bluray-1080p" }, revision: { version: 2, real: 1, isRepack: true } } };
+  assert.deepEqual(applyImportOverride("radarr", proper, { qualityId: 19 }, catalog).quality, { quality: bluray2160, revision: { version: 2, real: 1, isRepack: true } });
+  // Rebuilt from the arr's numbers in full shape, never passed through; none at all is a first release.
+  const partial = { ...radarrRows[0], quality: { quality: { id: 7 }, revision: { version: 3, extra: "x" } } };
+  assert.deepEqual(applyImportOverride("radarr", partial, { qualityId: 19 }, catalog).quality, { quality: bluray2160, revision: { version: 3, real: 0, isRepack: false } });
+  const bare = { ...radarrRows[0], quality: { quality: { id: 7 } } };
+  assert.deepEqual(applyImportOverride("radarr", bare, { qualityId: 19 }, catalog).quality, { quality: bluray2160, revision: { version: 1, real: 0, isRepack: false } });
 });
 
 test("a corrected file is importable with exactly the corrected values; overrideNeeds asks for exactly that catalog", () => {
@@ -437,6 +480,14 @@ test("defaultImportSelection: the clean matched files; when every matched file w
   assert.deepEqual([...defaultImportSelection(s)], ["/dl/Show.S01/Show.S01E02.mkv"]);
   const r = importCandidates("radarr", radarrRows);
   assert.deepEqual([...defaultImportSelection(r)], ["/downloads/Movie.2024/Movie.2024.mkv"], "the blocked import the admin came to override");
+});
+
+test("nextImportSelection: a file the arr now accepts is ticked, one it can't import any more is unticked (its box is disabled)", () => {
+  const start = new Set(["/a.mkv", "/b.mkv"]);
+  assert.deepEqual([...nextImportSelection(start, "/b.mkv", false)], ["/a.mkv"]);
+  assert.deepEqual([...nextImportSelection(start, "/c.mkv", true)], ["/a.mkv", "/b.mkv", "/c.mkv"]);
+  assert.deepEqual([...nextImportSelection(start, "/c.mkv", false)], ["/a.mkv", "/b.mkv"]);
+  assert.deepEqual([...start], ["/a.mkv", "/b.mkv"], "the current selection is not mutated");
 });
 
 test("download ids and import modes", () => {

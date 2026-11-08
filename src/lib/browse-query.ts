@@ -11,6 +11,8 @@ import { attachAllAvailability } from "@/lib/attach-all";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { isFeatureEnabled } from "@/lib/features";
+import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
+import { hasQueryFilters } from "@/lib/browse-filters";
 
 // The discover + enrichment pipeline behind /movies, /tv and /api/browse.
 //
@@ -38,6 +40,7 @@ import { isFeatureEnabled } from "@/lib/features";
 // tests/discovery-routes.test.mts). So this throws and each caller decides.
 
 const TMDB_PAGES_PER_VIRTUAL = 5;
+const EXTRA_PAGE_WARN_KEY = "browse:tmdb-extra-page";
 
 // Copied verbatim from the three callers — NOT rewritten. The fields are
 // strings on TmdbMedia (imdbRating/rottenTomatoes/rtAudienceScore), each parsed
@@ -68,6 +71,64 @@ function applyExternalRatingFilter(items: TmdbMedia[], ratingFilter: string): Tm
   });
 }
 
+// A filtered virtual page's TMDB pages after the first, fetched together, then
+// merged with it. Only the EXTRA pages are guarded — a transient failure there
+// degrades to fewer items, while a first-page failure is the caller's to
+// interpret. The response can't say it is short (the clients read a fixed
+// shape), so the failure is logged — once per distinct error, not once per
+// request (7b).
+//
+// Each TMDB page is cached on its own schedule, and popularity ranks move
+// between fills, so a title can sit on two adjacent pages: the merge keeps
+// its first occurrence only (the grid keys cards by id).
+async function fetchWindowItems(
+  fetchPage: (p: number) => Promise<{ items: TmdbMedia[]; totalPages: number }>,
+  firstPaged: { items: TmdbMedia[]; totalPages: number },
+  tmdbStartPage: number,
+  tmdbEndPage: number,
+): Promise<TmdbMedia[]> {
+  const restPages: number[] = [];
+  for (let p = tmdbStartPage + 1; p <= tmdbEndPage; p++) restPages.push(p);
+  let extraPageFailed = false;
+  const rest = await Promise.all(
+    restPages.map((p) => fetchPage(p).catch((err: unknown) => {
+      extraPageFailed = true;
+      const msg = err instanceof Error ? err.message : String(err);
+      warnOnChange(EXTRA_PAGE_WARN_KEY, msg, `[browse] a TMDB page of a filtered window failed, so it shows fewer items: ${msg}`);
+      return { items: [] as TmdbMedia[], totalPages: firstPaged.totalPages };
+    })),
+  );
+  if (!extraPageFailed && restPages.length > 0) forgetWarnOnChange(EXTRA_PAGE_WARN_KEY);
+  return dedupeMedia([firstPaged, ...rest].flatMap((pg) => pg.items));
+}
+
+/** First occurrence of each (id, media type), order kept. */
+export function dedupeMedia(items: TmdbMedia[]): TmdbMedia[] {
+  const seen = new Set<string>();
+  const out: TmdbMedia[] = [];
+  for (const m of items) {
+    const key = `${m.id}:${m.mediaType}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(m);
+  }
+  return out;
+}
+
+// The two filters TMDB can't apply. hideAvailable is gated on the user's own
+// visible servers — a Plex-pinned user must not have Jellyfin-only titles
+// hidden from them.
+function applyWindowFilters(
+  items: TmdbMedia[],
+  opts: { ratingFilter?: string; hideAvailable: boolean; showPlex: boolean; showJellyfin: boolean },
+): TmdbMedia[] {
+  let out = opts.ratingFilter ? applyExternalRatingFilter(items, opts.ratingFilter) : items;
+  if (opts.hideAvailable) {
+    out = out.filter((m) => !((opts.showPlex && m.plexAvailable) || (opts.showJellyfin && m.jellyfinAvailable)));
+  }
+  return out;
+}
+
 export interface BrowseQueryInput {
   mediaType: "movie" | "tv";
   /** Already clamped by the caller. */
@@ -87,12 +148,10 @@ export interface BrowseQueryResult {
 }
 
 export function browseHasFilters(f: DiscoverFilters, ratingFilter?: string): boolean {
+  // The term list is shared with the pages' UI predicate (browse-filters.ts).
   // watchRegion is deliberately excluded — it only qualifies watchProvider and
   // must not by itself flip the query from "popular" to "discover".
-  return !!(
-    f.genreId || f.keywordId || f.companyId || f.networkId || f.certification || f.minRating || ratingFilter || f.minVoteCount ||
-    f.fromYear || f.toYear || f.sortBy || f.watchProvider
-  );
+  return hasQueryFilters({ ...f, ratingFilter });
 }
 
 export async function runBrowseQuery(input: BrowseQueryInput): Promise<BrowseQueryResult> {
@@ -130,7 +189,14 @@ export async function runBrowseQuery(input: BrowseQueryInput): Promise<BrowseQue
     jellyfin: jellyfinEnabled,
   });
 
+  // A page past the end is EMPTY. TMDB clamps its page number at 500, so the
+  // fetch above served the last real page — under the requested number, which
+  // the route echoes back, so a client paging on would see the same titles
+  // again. Nothing is enriched for it.
   if (!needsLoop) {
+    if (page > Math.max(1, firstPaged.totalPages)) {
+      return { items: [], totalPages: firstPaged.totalPages, showPlex, showJellyfin };
+    }
     return {
       items: await attachAllAvailability(firstPaged.items, session.user.id, { show4k }),
       totalPages: firstPaged.totalPages,
@@ -140,28 +206,18 @@ export async function runBrowseQuery(input: BrowseQueryInput): Promise<BrowseQue
   }
 
   const totalPages = Math.max(1, Math.ceil(firstPaged.totalPages / TMDB_PAGES_PER_VIRTUAL));
+  if (page > totalPages) return { items: [], totalPages, showPlex, showJellyfin };
   const tmdbEndPage = Math.min(firstPaged.totalPages, tmdbStartPage + TMDB_PAGES_PER_VIRTUAL - 1);
 
-  // The window is fetched and enriched in one go rather than page-by-page. Only
-  // the EXTRA pages are guarded — a transient failure there degrades to fewer
-  // items, while a first-page failure is the caller's to interpret.
-  const restPages: number[] = [];
-  for (let p = tmdbStartPage + 1; p <= tmdbEndPage; p++) restPages.push(p);
-  const rest = await Promise.all(
-    restPages.map((p) => fetchPage(p).catch(() => ({ items: [] as TmdbMedia[], totalPages: firstPaged.totalPages }))),
-  );
-  const rawItems = [firstPaged, ...rest].flatMap((pg) => pg.items);
+  const rawItems = await fetchWindowItems(fetchPage, firstPaged, tmdbStartPage, tmdbEndPage);
 
   // Blocking on ratings is required when a rating filter is active — a
   // non-blocking read leaves uncached items unrated, and they would then be
   // filtered out, emptying the page on a cold cache.
-  let enriched = await attachAllAvailability(rawItems, session.user.id, { show4k, blockRatings: !!ratingFilter });
-  if (ratingFilter) enriched = applyExternalRatingFilter(enriched, ratingFilter);
-  // Gated on the user's own visible servers — a Plex-pinned user must not have
-  // Jellyfin-only titles hidden from them.
-  if (hideAvailable) {
-    enriched = enriched.filter((m) => !((showPlex && m.plexAvailable) || (showJellyfin && m.jellyfinAvailable)));
-  }
+  const enriched = applyWindowFilters(
+    await attachAllAvailability(rawItems, session.user.id, { show4k, blockRatings: !!ratingFilter }),
+    { ratingFilter, hideAvailable, showPlex, showJellyfin },
+  );
 
   // The whole filtered window is returned, NOT a 20-item slice.
   //

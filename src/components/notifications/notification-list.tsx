@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { Film, Tv2, Check, X, Bell, Trash2 } from "@/components/icons";
@@ -8,25 +8,23 @@ import { Button } from "@/components/ui/button";
 import { posterUrl } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { useMinuteTick } from "@/hooks/use-minute-tick";
+import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
 import { notificationHref } from "@/lib/notification-links";
 import { requestBodyKey } from "@/lib/notification-render";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
 import { EmptyState } from "@/components/ui/design";
-import { useNotifications } from "@/components/notifications/notification-store";
+import {
+  NotificationPageSchema,
+  useNotifications,
+  withReadAt,
+  type NotificationItem,
+} from "@/components/notifications/notification-store";
 
-export interface NotificationListItem {
-  id: string;
-  type: string;
-  title: string;
-  body: string;
-  tmdbId: number | null;
-  mediaType: "MOVIE" | "TV" | null;
-  posterPath: string | null;
-  readAt: string | null;
-  createdAt: string;
-}
+// The same row the shared store holds (GET /api/notifications' item shape).
+export type NotificationListItem = NotificationItem;
 
 // The server already renders every row's body in the viewer's language
 // (renderNotification, from the row's stored data — issue replies and
@@ -39,7 +37,87 @@ export function notificationBody(n: Pick<NotificationListItem, "type" | "body" |
   return key ? t(key) : n.body;
 }
 
-const POST = (body: string) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body });
+// A mutation's answer: only whether the route took it (the bodies carry
+// nothing this list reads). A 2xx with an unreadable body still happened.
+async function sent(url: string, init: RequestInit): Promise<boolean> {
+  const res = await fetchJson(withBasePath(url), { init });
+  return res.ok || res.kind === "invalid";
+}
+
+// One notification: poster, title, body and age (mounted-gated by the caller,
+// guardrail 16), with its mark-read and remove buttons.
+function NotificationRow({
+  n,
+  when,
+  onMarkRead,
+  onRemove,
+  t,
+}: {
+  n: NotificationListItem;
+  when: string;
+  onMarkRead: (id: string) => void;
+  onRemove: (id: string) => void;
+  t: Translator;
+}) {
+  const poster = posterUrl(n.posterPath, "w342");
+  return (
+    <div
+      className={`flex items-start transition-colors border border-[var(--ds-border)] hover:bg-[var(--ds-bg-3)] ${
+        n.readAt ? "bg-[var(--ds-bg-1)]" : "bg-[var(--ds-bg-2)]"
+      }`}
+      style={{ gap: 14, padding: 14, borderRadius: 8 }}
+    >
+      <Link href={notificationHref(n)} className="flex items-start flex-1 min-w-0 group" style={{ gap: 14 }}>
+        <span
+          className="relative shrink-0 overflow-hidden"
+          style={{ width: 44, height: 66, borderRadius: 4, background: "var(--ds-bg-3)", border: "1px solid var(--ds-border)" }}
+        >
+          {poster ? (
+            <Image src={poster} alt="" fill className="object-cover" sizes="44px" />
+          ) : (
+            <span className="flex items-center justify-center h-full" style={{ color: "var(--ds-fg-subtle)" }}>
+              {n.mediaType === "TV" ? <Tv2 style={{ width: 16, height: 16 }} /> : <Film style={{ width: 16, height: 16 }} />}
+            </span>
+          )}
+        </span>
+        <span className="block min-w-0 flex-1">
+          <span
+            className="block font-medium transition-colors group-hover:text-[var(--ds-accent-text)]"
+            style={{ fontSize: 14, color: "var(--ds-fg)" }}
+          >
+            {n.title}
+          </span>
+          <span className="block" style={{ fontSize: 12, color: "var(--ds-fg-muted)", lineHeight: 1.4, marginTop: 2 }}>{notificationBody(n, t)}</span>
+          <span className="ds-mono block" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", marginTop: 3 }}>{when}</span>
+        </span>
+      </Link>
+      <div className="flex flex-col items-center shrink-0" style={{ gap: 2, margin: "-6px -6px 0 0" }}>
+        {!n.readAt && (
+          <button
+            type="button"
+            onClick={() => onMarkRead(n.id)}
+            aria-label={t("personal.notifications.markRead")}
+            title={t("personal.notifications.markRead")}
+            className="ds-hover-tint inline-flex items-center justify-center"
+            style={{ width: 40, height: 40, borderRadius: 6, color: "var(--ds-accent-text)" }}
+          >
+            <Check style={{ width: 15, height: 15 }} />
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => onRemove(n.id)}
+          aria-label={t("personal.notifications.removeAria")}
+          title={t("personal.notifications.remove")}
+          className="ds-hover-tint inline-flex items-center justify-center"
+          style={{ width: 40, height: 40, borderRadius: 6, color: "var(--ds-fg-subtle)" }}
+        >
+          <X style={{ width: 15, height: 15 }} />
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export function NotificationList({ initialItems, initialTotal }: { initialItems: NotificationListItem[]; initialTotal: number }) {
   const [items, setItems] = useState(initialItems);
@@ -51,6 +129,8 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
   // pair (mirrors vote-actions' dismiss) — it deletes every notification.
   const [confirmingClear, setConfirmingClear] = useState(false);
   const mounted = useHasMounted();
+  // Keeps "2 minutes ago" moving on a page left open.
+  useMinuteTick();
   const t = useT();
   const locale = useLocale();
   // A counter bumped every time the whole list is wiped (clearAll). removeOne
@@ -63,34 +143,68 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
   // re-fetches on its 60s poll / SSE request+issue events — none of which fire
   // for a read or a delete. Without this nudge, "Mark all read" here left the
   // bell showing the old unread count on the same screen for up to a minute.
-  const { reload: reloadStore } = useNotifications();
+  const { items: storeItems, readAllGen, reload: reloadStore, markAllReadConfirmed: markAllReadInStore } = useNotifications();
+  // Every row this list has ever held (shown, loaded, removed) and the newest
+  // createdAt among them. Only a store row newer than that and never seen is
+  // a NEW notification to prepend; a row this page removed, or cleared, is
+  // never brought back from a store that has not re-fetched yet.
+  const seen = useRef({ ids: new Set(initialItems.map((n) => n.id)), newest: initialItems[0]?.createdAt ?? "" });
+  const readAllGenSeen = useRef(readAllGen);
+
+  // The other direction (store → this page). The bell marks everything read
+  // and live events re-fetch the store; without this, this page kept showing
+  // rows as unread and missed new ones until a full reload. new Date() is in
+  // an effect, never in render (guardrail 16).
+  useEffect(() => {
+    if (readAllGen === readAllGenSeen.current) return;
+    readAllGenSeen.current = readAllGen;
+    // The server marked EVERY row read, including the older pages loaded here
+    // that the store (one page) doesn't hold.
+    setItems((cur) => {
+      if (!cur.some((n) => !n.readAt)) return cur;
+      const at = new Date().toISOString();
+      return cur.map((n) => (n.readAt ? n : { ...n, readAt: at }));
+    });
+  }, [readAllGen]);
+
+  useEffect(() => {
+    if (storeItems.length === 0) return;
+    const s = seen.current;
+    const fresh = storeItems.filter((n) => !s.ids.has(n.id) && n.createdAt > s.newest);
+    for (const n of fresh) {
+      s.ids.add(n.id);
+      if (n.createdAt > s.newest) s.newest = n.createdAt;
+    }
+    const readAt = new Map(storeItems.flatMap((n) => (n.readAt ? [[n.id, n.readAt] as const] : [])));
+    setItems((cur) => {
+      const marked = cur.some((n) => !n.readAt && readAt.has(n.id))
+        ? cur.map((n) => (!n.readAt && readAt.has(n.id) ? { ...n, readAt: readAt.get(n.id) ?? n.readAt } : n))
+        : cur;
+      // The store is newest-first, as this list is.
+      return fresh.length > 0 ? [...fresh, ...marked] : marked;
+    });
+    if (fresh.length > 0) setTotal((n) => n + fresh.length);
+  }, [storeItems]);
 
   const anyUnread = items.some((n) => !n.readAt);
 
   async function markAllRead() {
-    // Track the exact rows this call flips so the rollback can restore their read
-    // state alone: a whole-list snapshot repaints rows a concurrent remove or
-    // clear-all already deleted server-side.
+    // The store's markAllRead, so the badge clears with the list and there is
+    // one copy of the request. This list flips its own rows first (it holds
+    // older pages the store doesn't) and tracks exactly which, so a rollback
+    // restores their read state alone: a whole-list snapshot repaints rows a
+    // concurrent remove or clear-all already deleted server-side.
     const flipped = new Set(items.filter((n) => !n.readAt).map((n) => n.id));
-    setItems((cur) => {
-      const at = new Date().toISOString();
-      return cur.map((n) => (flipped.has(n.id) ? { ...n, readAt: at } : n));
-    });
-    const res = await fetch(withBasePath("/api/notifications"), POST("{}")).catch(() => null);
-    // Roll back on a clean 4xx/5xx too (not just a thrown/network error) so the
-    // list can't show read locally while the server still has them unread.
-    if (!res || !res.ok) {
-      setItems((cur) => cur.map((n) => (flipped.has(n.id) ? { ...n, readAt: null } : n)));
-      return;
-    }
-    void reloadStore();
+    setItems((cur) => withReadAt(cur, flipped, new Date().toISOString()));
+    // Roll back on a clean 4xx/5xx too (not just a network error) so the list
+    // can't show read locally while the server still has them unread.
+    if (!(await markAllReadInStore())) setItems((cur) => withReadAt(cur, flipped, null));
   }
   async function markOneRead(id: string) {
-    const flipped = items.some((n) => n.id === id && !n.readAt);
-    if (flipped) setItems((cur) => cur.map((n) => (n.id === id ? { ...n, readAt: new Date().toISOString() } : n)));
-    const res = await fetch(withBasePath("/api/notifications"), POST(JSON.stringify({ ids: [id] }))).catch(() => null);
-    if (!res || !res.ok) {
-      if (flipped) setItems((cur) => cur.map((n) => (n.id === id ? { ...n, readAt: null } : n)));
+    const flipped = new Set(items.some((n) => n.id === id && !n.readAt) ? [id] : []);
+    setItems((cur) => withReadAt(cur, flipped, new Date().toISOString()));
+    if (!(await sent("/api/notifications", jsonInit("POST", { ids: [id] })))) {
+      setItems((cur) => withReadAt(cur, flipped, null));
       return;
     }
     void reloadStore();
@@ -104,11 +218,10 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
     if (index === -1) return;
     const removed = items[index];
     setItems((cur) => cur.filter((n) => n.id !== id));
-    setTotal((t) => Math.max(0, t - 1));
+    setTotal((n) => Math.max(0, n - 1));
     // Selection via query param — DELETE bodies are stripped by some proxies.
-    const res = await fetch(withBasePath(`/api/notifications?ids=${encodeURIComponent(id)}`), { method: "DELETE" }).catch(() => null);
     // If gen changed, a clear-all happened meanwhile — don't bring the row back.
-    if (res && res.ok) {
+    if (await sent(`/api/notifications?ids=${encodeURIComponent(id)}`, { method: "DELETE" })) {
       void reloadStore();
       return;
     }
@@ -119,7 +232,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
         next.splice(Math.min(index, next.length), 0, removed);
         return next;
       });
-      setTotal((t) => t + 1);
+      setTotal((n) => n + 1);
     }
   }
   async function clearAll() {
@@ -131,42 +244,46 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
     setTotal(0);
     setHasMore(false);
     // Ask for "delete all" explicitly with ?all=1 (an empty request never means "all").
-    const res = await fetch(withBasePath("/api/notifications?all=1"), { method: "DELETE" }).catch(() => null);
-    if (!res || !res.ok) {
-      setItems(prevItems);
-      setTotal(prevTotal);
+    if (!(await sent("/api/notifications?all=1", { method: "DELETE" }))) {
+      // Merge, never replace: a notification the store delivered while the
+      // DELETE was in flight is already in `seen`, so overwriting the list
+      // would drop it until a reload. It stays on top of the restored rows.
+      const prevIds = new Set(prevItems.map((n) => n.id));
+      setItems((cur) => [...cur.filter((n) => !prevIds.has(n.id)), ...prevItems]);
+      setTotal((n) => n + prevTotal);
       setHasMore(prevItems.length < prevTotal);
       return;
     }
     void reloadStore();
   }
   async function loadMore() {
+    // A clear-all while this page is in flight wins: its GET may have been
+    // served before the DELETE committed, and appending it would bring the
+    // deleted rows (and pagination) back.
+    const gen = listGen.current;
     setLoading(true);
     setError(null);
-    try {
-      const last = items[items.length - 1];
-      const q = last ? `?cursor=${encodeURIComponent(`${last.createdAt}|${last.id}`)}` : "";
-      const res = await fetch(withBasePath(`/api/notifications${q}`));
-      if (res.ok) {
-        const data = (await res.json()) as { items: NotificationListItem[]; total: number; nextCursor: string | null };
-        // De-dup by id — a row could have shifted into an already-loaded page as
-        // new notifications arrived since the last fetch.
-        setItems((cur) => {
-          const seen = new Set(cur.map((n) => n.id));
-          return [...cur, ...data.items.filter((n) => !seen.has(n.id))];
-        });
-        setTotal(data.total);
-        setHasMore(data.nextCursor != null);
-      } else {
-        setError(t("personal.common.loadMoreError"));
-      }
-    } catch {
+    const last = items[items.length - 1];
+    const q = last ? `?cursor=${encodeURIComponent(`${last.createdAt}|${last.id}`)}` : "";
+    const res = await fetchJson(withBasePath(`/api/notifications${q}`), { schema: NotificationPageSchema });
+    setLoading(false);
+    if (gen !== listGen.current) return;
+    if (!res.ok) {
       // Always show an error on failure — otherwise a failed load looks the
       // same as having nothing more to load.
       setError(t("personal.common.loadMoreError"));
-    } finally {
-      setLoading(false);
+      return;
     }
+    const data = res.data;
+    for (const n of data.items) seen.current.ids.add(n.id);
+    // De-dup by id — a row could have shifted into an already-loaded page as
+    // new notifications arrived since the last fetch.
+    setItems((cur) => {
+      const have = new Set(cur.map((n) => n.id));
+      return [...cur, ...data.items.filter((n) => !have.has(n.id))];
+    });
+    if (data.total !== undefined) setTotal(data.total);
+    setHasMore(data.nextCursor != null);
   }
 
   // Only show the empty state when there is nothing left to load either. After
@@ -211,74 +328,23 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
             </button>
           </div>
         ) : (
-          <Button type="button" variant="link" size="xs" onClick={() => setConfirmingClear(true)}>
+          <Button type="button" variant="link" size="xs" disabled={loading} onClick={() => setConfirmingClear(true)}>
             {t("personal.notifications.clearAll")}
           </Button>
         )}
       </div>
 
       <div className="flex flex-col" style={{ gap: 8 }}>
-        {items.map((n) => {
-          const poster = posterUrl(n.posterPath, "w342");
-          return (
-            <div
-              key={n.id}
-              className={`flex items-start transition-colors border border-[var(--ds-border)] hover:bg-[var(--ds-bg-3)] ${
-                n.readAt ? "bg-[var(--ds-bg-1)]" : "bg-[var(--ds-bg-2)]"
-              }`}
-              style={{ gap: 14, padding: 14, borderRadius: 8 }}
-            >
-              <Link href={notificationHref(n)} className="flex items-start flex-1 min-w-0 group" style={{ gap: 14 }}>
-                <span
-                  className="relative shrink-0 overflow-hidden"
-                  style={{ width: 44, height: 66, borderRadius: 4, background: "var(--ds-bg-3)", border: "1px solid var(--ds-border)" }}
-                >
-                  {poster ? (
-                    <Image src={poster} alt="" fill className="object-cover" sizes="44px" />
-                  ) : (
-                    <span className="flex items-center justify-center h-full" style={{ color: "var(--ds-fg-subtle)" }}>
-                      {n.mediaType === "TV" ? <Tv2 style={{ width: 16, height: 16 }} /> : <Film style={{ width: 16, height: 16 }} />}
-                    </span>
-                  )}
-                </span>
-                <span className="block min-w-0 flex-1">
-                  <span
-                    className="block font-medium transition-colors group-hover:text-[var(--ds-accent-text)]"
-                    style={{ fontSize: 14, color: "var(--ds-fg)" }}
-                  >
-                    {n.title}
-                  </span>
-                  <span className="block" style={{ fontSize: 12, color: "var(--ds-fg-muted)", lineHeight: 1.4, marginTop: 2 }}>{notificationBody(n, t)}</span>
-                  <span className="ds-mono block" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", marginTop: 3 }}>{mounted ? formatRelativeTimeLocalized(n.createdAt, locale) : ""}</span>
-                </span>
-              </Link>
-              <div className="flex flex-col items-center shrink-0" style={{ gap: 2, margin: "-6px -6px 0 0" }}>
-                {!n.readAt && (
-                  <button
-                    type="button"
-                    onClick={() => markOneRead(n.id)}
-                    aria-label={t("personal.notifications.markRead")}
-                    title={t("personal.notifications.markRead")}
-                    className="ds-hover-tint inline-flex items-center justify-center"
-                    style={{ width: 40, height: 40, borderRadius: 6, color: "var(--ds-accent-text)" }}
-                  >
-                    <Check style={{ width: 15, height: 15 }} />
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => removeOne(n.id)}
-                  aria-label={t("personal.notifications.removeAria")}
-                  title={t("personal.notifications.remove")}
-                  className="ds-hover-tint inline-flex items-center justify-center"
-                  style={{ width: 40, height: 40, borderRadius: 6, color: "var(--ds-fg-subtle)" }}
-                >
-                  <X style={{ width: 15, height: 15 }} />
-                </button>
-              </div>
-            </div>
-          );
-        })}
+        {items.map((n) => (
+          <NotificationRow
+            key={n.id}
+            n={n}
+            when={mounted ? formatRelativeTimeLocalized(n.createdAt, locale) : ""}
+            onMarkRead={markOneRead}
+            onRemove={removeOne}
+            t={t}
+          />
+        ))}
       </div>
 
       {hasMore && (

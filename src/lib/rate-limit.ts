@@ -1,13 +1,12 @@
+import { isIP } from "node:net";
+import { createHash } from "node:crypto";
 import { processSingleton } from "./process-singleton";
 import { warnOnChange } from "./log-dedup";
+import { ipv6Groups } from "./ipv6-parse";
 
-if (process.env.TRUST_PROXY !== "true") {
-  console.warn(
-    "[rate-limit] TRUST_PROXY is not set to 'true' — clients are rate-limited by User-Agent " +
-    "instead of IP address. Set TRUST_PROXY=true when running behind a trusted reverse proxy (Nginx, Traefik, etc.) " +
-    "that reliably sets X-Forwarded-For. Without it, per-IP limiting is disabled."
-  );
-}
+// Local-only mode (no TRUST_PROXY) is reported once at boot, by
+// evaluateLocalOnlyStartup (local-only.ts). A warning at import here fired once
+// per server chunk that bundled this module.
 
 interface RateLimitEntry {
   hits: number[];
@@ -131,28 +130,73 @@ function mapFor(key: string): Map<string, RateLimitEntry> {
   return protectedStoreFor(key)?.windows ?? windows;
 }
 
+// Room for one NEW key in a protected class's map. A full map is re-swept for
+// expired buckets (at most once per PROTECTED_SWEEP_INTERVAL_MS); if it is still
+// full of live buckets the new key is refused — never a live bucket evicted to
+// make room (guardrail 6e), so a spent guessing budget can't be handed back.
+function protectedHasRoom(store: ProtectedStore, now: number): boolean {
+  const map = store.windows;
+  if (map.size < MAX_PROTECTED_KEYS) return true;
+  if (now - store.lastSweep.at >= PROTECTED_SWEEP_INTERVAL_MS) {
+    store.lastSweep.at = now;
+    sweepExpired(map, now);
+  }
+  if (map.size < MAX_PROTECTED_KEYS) return true;
+  warnOnChange(
+    `rate-limit:protected-full:${store.cls}`,
+    "full",
+    `[rate-limit] the ${store.cls} limiter is full (${MAX_PROTECTED_KEYS} live buckets) — ${store.refuses}`,
+  );
+  return false;
+}
+
+// Room for one NEW key in the shared map: drop the least recently used key once
+// it holds MAX_KEYS. Always succeeds — only cheap, re-mintable keys live here.
+function evictForSharedKey(): void {
+  if (windows.size < MAX_KEYS) return;
+  const oldestKey = windows.keys().next().value;
+  if (oldestKey !== undefined) windows.delete(oldestKey);
+}
+
 // Makes room for one NEW key in `store`'s map (the shared map when null).
 // Returns false when it can't — only a protected store ever answers false.
 function makeRoom(store: ProtectedStore | null, now: number): boolean {
-  if (store) {
-    const map = store.windows;
-    if (map.size < MAX_PROTECTED_KEYS) return true;
-    if (now - store.lastSweep.at >= PROTECTED_SWEEP_INTERVAL_MS) {
-      store.lastSweep.at = now;
-      sweepExpired(map, now);
-    }
-    if (map.size < MAX_PROTECTED_KEYS) return true;
-    warnOnChange(
-      `rate-limit:protected-full:${store.cls}`,
-      "full",
-      `[rate-limit] the ${store.cls} limiter is full (${MAX_PROTECTED_KEYS} live buckets) — ${store.refuses}`,
-    );
-    return false;
-  }
-  if (windows.size >= MAX_KEYS) {
-    const oldestKey = windows.keys().next().value;
-    if (oldestKey !== undefined) windows.delete(oldestKey);
-  }
+  if (store) return protectedHasRoom(store, now);
+  evictForSharedKey();
+  return true;
+}
+
+// One key's bucket as of `now`, pruned to the hits still inside the window.
+interface OpenBucket {
+  store: ProtectedStore | null;
+  map: Map<string, RateLimitEntry>;
+  hits: number[];
+  now: number;
+}
+
+// Reads `key`'s bucket. One with no live hits left is dropped from its map right
+// here, so a key whose window lapsed starts fresh and its stale entry never
+// holds a slot a new key needs.
+function openBucket(key: string, windowMs: number): OpenBucket {
+  const store = protectedStoreFor(key);
+  const map = store?.windows ?? windows;
+  const now = Date.now();
+  const cutoff = now - windowMs;
+  const hits = (map.get(key)?.hits ?? []).filter((t) => t > cutoff);
+  if (hits.length === 0) map.delete(key);
+  return { store, map, hits, now };
+}
+
+// Records one hit at `bucket.now`. A key with no live hits is NEW to its map and
+// needs room first; returns false, recording nothing, when its full protected
+// class can't take it.
+function recordHit(key: string, bucket: OpenBucket, windowMs: number): boolean {
+  if (bucket.hits.length === 0 && !makeRoom(bucket.store, bucket.now)) return false;
+  bucket.hits.push(bucket.now);
+  // Delete then re-insert to move the key to the end of the Map's order: the
+  // shared map evicts from the front, so this marks it recently used.
+  bucket.map.delete(key);
+  bucket.map.set(key, { hits: bucket.hits, expiresAt: bucket.now + windowMs });
   return true;
 }
 
@@ -171,22 +215,9 @@ export function checkRateLimit(key: string, limit: number, windowMs: number): bo
 // refundHit treats as "nothing to remove".
 export function reserveRateLimit(key: string, limit: number, windowMs: number): number | null {
   if (limit <= 0) return 0;
-  const store = protectedStoreFor(key);
-  const map = store?.windows ?? windows;
-  const now = Date.now();
-  const cutoff = now - windowMs;
-  const entry = map.get(key);
-  const hits = (entry?.hits ?? []).filter((t) => t > cutoff);
-  if (hits.length === 0) map.delete(key);
-  if (hits.length >= limit) return null;
-
-  if (hits.length === 0 && !makeRoom(store, now)) return null;
-  hits.push(now);
-  // Delete then re-insert to move the key to the end of the Map's order; the
-  // eviction above drops keys from the front, so this marks it recently used.
-  map.delete(key);
-  map.set(key, { hits, expiresAt: now + windowMs });
-  return now;
+  const bucket = openBucket(key, windowMs);
+  if (bucket.hits.length >= limit) return null;
+  return recordHit(key, bucket, windowMs) ? bucket.now : null;
 }
 
 // Read-only counterpart of checkRateLimit: returns whether the key is still
@@ -196,21 +227,13 @@ export function reserveRateLimit(key: string, limit: number, windowMs: number): 
 // verify — see authorizeWithCredentials). Pairs with recordFailure.
 export function peekRateLimit(key: string, limit: number, windowMs: number): boolean {
   if (limit <= 0) return true;
-  const store = protectedStoreFor(key);
-  const map = store?.windows ?? windows;
-  const now = Date.now();
-  const cutoff = now - windowMs;
-  const entry = map.get(key);
-  const hits = (entry?.hits ?? []).filter((t) => t > cutoff);
-  if (hits.length === 0) {
-    map.delete(key);
-    // A new per-account key that its full protected class could not take must
-    // not read as "room left" — the gate fails closed exactly as reserve does.
-    // (Only a protected store: makeRoom on the shared map would evict a key
-    // without inserting one.)
-    return store ? makeRoom(store, now) : true;
-  }
-  return hits.length < limit;
+  const bucket = openBucket(key, windowMs);
+  if (bucket.hits.length > 0) return bucket.hits.length < limit;
+  // A new per-account key that its full protected class could not take must
+  // not read as "room left" — the gate fails closed exactly as reserve does.
+  // (Only a protected store: making room in the shared map would evict a key
+  // without inserting one.)
+  return bucket.store ? protectedHasRoom(bucket.store, bucket.now) : true;
 }
 
 // Removes the most recent hit for `key`: "this attempt was fine after all".
@@ -243,26 +266,12 @@ export function refundHit(key: string, hitAt?: number): void {
 
 // Records one hit for `key` (the "record" half of peek-then-record). Same
 // bookkeeping as checkRateLimit, but with no limit check: callers check with
-// peekRateLimit first.
+// peekRateLimit first. A full protected class can't take a new key, so the
+// failure has nowhere to go — and the next gate (peek/reserve) for that key
+// refuses anyway.
 export function recordFailure(key: string, windowMs: number): void {
-  const store = protectedStoreFor(key);
-  const map = store?.windows ?? windows;
-  const now = Date.now();
-  const cutoff = now - windowMs;
-  const entry = map.get(key);
-  const hits = (entry?.hits ?? []).filter((t) => t > cutoff);
-
-  // A full protected class can't take a new key; the failure has nowhere to go,
-  // and the next gate (peek/reserve) for that key refuses anyway (makeRoom).
-  if (hits.length === 0 && !makeRoom(store, now)) return;
-  hits.push(now);
-  // Move the key to the end of the Map's order (see checkRateLimit).
-  map.delete(key);
-  map.set(key, { hits, expiresAt: now + windowMs });
+  recordHit(key, openBucket(key, windowMs), windowMs);
 }
-
-import { isIP } from "node:net";
-import { createHash } from "node:crypto";
 
 function isValidIp(addr: string): boolean {
   return isIP(addr) !== 0;
@@ -275,11 +284,37 @@ function isValidIp(addr: string): boolean {
 // hole getClientIp exists to close. No realistic deployment fronts the app with
 // more than a handful of trusted proxies, so we clamp rather than trust an
 // oversized configured value.
-const MAX_TRUSTED_HOPS = 5;
-function parseTrustedHops(value: string | undefined): number {
+export const MAX_TRUSTED_HOPS = 5;
+export function parseTrustedHops(value: string | undefined): number {
   const n = parseInt(value ?? "", 10);
   if (Number.isNaN(n) || n < 1) return 1;
   return Math.min(n, MAX_TRUSTED_HOPS);
+}
+
+/**
+ * The boot warning for TRUSTED_PROXY_HOPS (null when there is nothing to say).
+ * parseTrustedHops quietly turns a typo ("abc", "0", "-1", "3abc") into 1 hop
+ * and an oversized value into MAX_TRUSTED_HOPS, so the operator is told what
+ * the app actually uses. Above 3 is unusual: each hop is one more
+ * X-Forwarded-For entry trusted for the client IP, and too many lets a client
+ * spoof its address. Warn-only; parseTrustedHops is the backstop.
+ */
+export function trustedProxyHopsWarning(raw: string | undefined): string | null {
+  const typed = raw?.trim() ?? "";
+  if (!typed) return null;
+  const hops = parseTrustedHops(typed);
+  const advice = "Set it to the actual number of trusted proxies in front of the app.";
+  const spoof =
+    "Each hop is an X-Forwarded-For entry trusted for client-IP derivation; an over-generous value lets clients spoof their IP.";
+  if (String(hops) !== typed) {
+    return parseInt(typed, 10) > MAX_TRUSTED_HOPS
+      ? `[startup] TRUSTED_PROXY_HOPS=${JSON.stringify(typed)} is above the maximum of ${MAX_TRUSTED_HOPS}; using ${hops}. ${spoof} ${advice}`
+      : `[startup] TRUSTED_PROXY_HOPS=${JSON.stringify(typed)} is not a whole number from 1 to ${MAX_TRUSTED_HOPS}; using ${hops}. ${advice}`;
+  }
+  if (hops > 3) {
+    return `[startup] TRUSTED_PROXY_HOPS=${hops} is unusually high (>3). ${spoof} The maximum is ${MAX_TRUSTED_HOPS}. ${advice}`;
+  }
+  return null;
 }
 
 // Bucket key for clients whose IP can't be trusted (TRUST_PROXY off, or no
@@ -287,6 +322,11 @@ function parseTrustedHops(value: string | undefined): number {
 // distinct buckets instead of every caller sharing one global "unknown" bucket —
 // the UA is still spoofable, so this is coarse abuse-isolation, not a real per-IP
 // limit, but it stops a single noisy client from exhausting everyone's quota.
+// A client that rotates its UA gets a fresh bucket each time; what bounds
+// guessing then is the per-credential buckets (PROTECTED_PREFIXES, plus the
+// token/secret-keyed ones), never this one. Local-only mode is a LAN deployment
+// the operator opts into (evaluateLocalOnlyStartup); behind a reverse proxy,
+// TRUST_PROXY=true keys these buckets on the real address.
 function untrustedBucket(headers: Headers): string {
   const ua = headers.get("user-agent") ?? "";
   return "unknown:" + createHash("sha256").update(ua).digest("hex").slice(0, 12);
@@ -340,47 +380,22 @@ export function ipBucketKey(ip: string): string {
   // address, or every mapped-v4 client would share one all-zero /64 bucket
   // (the same /64 as ::1). Dotted `::ffff:a.b.c.d`, hex-pair `::ffff:cb00:7107`,
   // and the expanded `0:0:0:0:0:ffff:…` form are the same address.
-  const groups = expandIpv6Groups(ip);
+  const groups = ipv6Groups(ip);
   if (groups) {
     const embedded = ipv4FromMappedGroups(groups);
     if (embedded) return embedded;
-    return `v6:${groups.slice(0, 4).map((g) => g.padStart(4, "0")).join(":")}`;
+    return `v6:${groups.slice(0, 4).map((g) => g.toString(16).padStart(4, "0")).join(":")}`;
   }
   return ip;
 }
 
-// Eight hextets, or null if the address can't be expanded. Shared by the /64
-// prefix and the v4-mapped unwrap so the two spellings of one address cannot
-// disagree.
-function expandIpv6Groups(ip: string): string[] | null {
-  const pct = ip.indexOf("%"); // zone index (fe80::1%eth0)
-  let s = (pct === -1 ? ip : ip.slice(0, pct)).toLowerCase();
-  // Embedded dotted-quad tail (64:ff9b::1.2.3.4) → two hextets
-  const v4 = s.match(/(\d{1,3}(?:\.\d{1,3}){3})$/);
-  if (v4) {
-    const oct = v4[1].split(".").map(Number);
-    if (oct.some((o) => o > 255)) return null;
-    s =
-      s.slice(0, s.length - v4[1].length) +
-      ((oct[0] << 8) | oct[1]).toString(16) + ":" + ((oct[2] << 8) | oct[3]).toString(16);
-  }
-  const halves = s.split("::");
-  if (halves.length > 2) return null;
-  const head = halves[0] ? halves[0].split(":") : [];
-  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
-  const groups =
-    halves.length === 2
-      ? [...head, ...Array(Math.max(0, 8 - head.length - tail.length)).fill("0"), ...tail]
-      : head;
-  if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
-  return groups;
-}
-
+// The /64 prefix and the v4-mapped unwrap both read ipv6Groups (the parser
+// the SSRF policy and the IP allowlist use), so the spellings of one address
+// cannot disagree.
 // IPv4-mapped IPv6 (::ffff:a.b.c.d / ::ffff:aabb:ccdd): 80 bits of zero, then
 // 0xffff, then the IPv4 address. SIIT (::ffff:0:a.b.c.d) is a different
 // prefix and is not folded here — it still gets a /64 key.
-function ipv4FromMappedGroups(groups: string[]): string | null {
-  const n = groups.map((g) => parseInt(g, 16));
+function ipv4FromMappedGroups(n: readonly number[]): string | null {
   if (n[0] !== 0 || n[1] !== 0 || n[2] !== 0 || n[3] !== 0 || n[4] !== 0 || n[5] !== 0xffff) return null;
   return `${(n[6] >> 8) & 255}.${n[6] & 255}.${(n[7] >> 8) & 255}.${n[7] & 255}`;
 }

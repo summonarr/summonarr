@@ -1,11 +1,19 @@
 
-// Strip HTML-injection (`<>`), NUL, control chars, and Unicode bidi-overrides
-// from user-supplied text before it's stored or displayed.
+// Strip HTML-injection (`<>`), NUL, control chars, invisible characters and
+// Unicode bidi-overrides from user-supplied text before it's stored or
+// displayed. The angle brackets go even though React escapes its output: the
+// same text reaches emails, Discord embeds and push payloads.
 export function sanitizeText(input: string): string {
   return input
     .replace(/[<>]/g, "")
     .replace(/\0/g, "")
-    .replace(/[\x01-\x08\x0B\x0C\x0E-\x1F]/g, "")
+    // C0 controls except tab, LF and CR (multi-line text survives), then DEL
+    // and the C1 range.
+    .replace(/[\x01-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, "")
+    // Zero-width space, word joiner and BOM: invisible, and used to make two
+    // strings that look identical compare different. ZWJ (U+200D) stays — it
+    // joins emoji sequences.
+    .replace(/[\u200B\u2060\uFEFF]/g, "")
     // Unicode bidi-override characters can reverse displayed text in logs/UI - strip them
     .replace(/[\u202A-\u202E\u2066-\u2069]/g, "")
     .trim();

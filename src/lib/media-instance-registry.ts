@@ -7,8 +7,9 @@
 // The default ("") instance is always synthesized so every existing
 // deployment — which has plexServerUrl/jellyfinUrl set but no registry Setting
 // yet — keeps working with zero config change. Named instances are added via
-// the admin settings UI, which writes the registry JSON through
-// saveMediaInstances().
+// the admin settings UI (/api/admin/media-instances), which writes the registry
+// JSON built by buildMediaInstanceRegistryWrite inside its own transaction,
+// under readMediaInstanceRegistryForSave's lock.
 //
 // Registry entries stay thin compared to arr-instance-registry.ts's
 // ArrInstanceConfig: nothing routes a request to a specific Plex/Jellyfin server
@@ -26,8 +27,10 @@
 // This module reads the database. The pure key-naming helpers live in
 // media-instances.ts and are reused here.
 
-import { prisma } from "./prisma";
-import { type MediaInstanceKey, type MediaServerService, DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug, plexSettingKey, jellyfinSettingKey } from "./media-instances";
+import { Prisma } from "@/generated/prisma";
+import { prisma, type PrismaTxClient } from "./prisma";
+import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
+import { type MediaInstanceKey, type MediaServerService, DEFAULT_MEDIA_INSTANCE, MEDIA_INSTANCE_NAME_MAX_LEN, isValidMediaInstanceSlug, plexSettingKey, jellyfinSettingKey } from "./media-instances";
 
 export interface MediaInstanceConfig {
   slug: MediaInstanceKey;
@@ -41,6 +44,17 @@ const REGISTRY_KEY: Record<MediaServerService, string> = {
   plex: "plexInstances",
   jellyfin: "jellyfinInstances",
 };
+
+// Serializes saves of one service's registry (the admin media-instances POST);
+// see readMediaInstanceRegistryForSave. Advisory, not a row lock, because the
+// row may not exist yet. Literal ids (no (int, bigint) overload); the arr
+// registry uses 2101/1 and 2101/2.
+const REGISTRY_SAVE_LOCK: Record<MediaServerService, Prisma.Sql> = {
+  plex: Prisma.sql`SELECT pg_advisory_xact_lock(2101, 3)`,
+  jellyfin: Prisma.sql`SELECT pg_advisory_xact_lock(2101, 4)`,
+};
+
+type RegistryTx = Pick<PrismaTxClient, "$executeRaw" | "setting">;
 
 // The synthesized default instance — always present, always visible to every
 // user. `restricted` is hard-coded false rather than configurable: guardrail 35
@@ -64,7 +78,7 @@ function normalizeEntry(raw: unknown): MediaInstanceConfig | null {
     slug,
     // Trimmed + bounded on READ too: rows written before the write-side cap can
     // carry an untrimmed or oversized name, and this label lands on buttons and chips.
-    name: typeof o.name === "string" && o.name.trim() ? o.name.trim().slice(0, 100) : slug,
+    name: typeof o.name === "string" && o.name.trim() ? o.name.trim().slice(0, MEDIA_INSTANCE_NAME_MAX_LEN) : slug,
     // Strict === true (the arr-instance-registry.ts idiom), not truthiness: a
     // hand-edited "false"/"0"/1 must not be read as restricted, and an absent
     // field on a pre-restricted-field registry blob reads as open, which is the
@@ -73,42 +87,97 @@ function normalizeEntry(raw: unknown): MediaInstanceConfig | null {
   };
 }
 
-async function readRegistryJson(service: MediaServerService): Promise<MediaInstanceConfig[]> {
-  const row = await prisma.setting.findUnique({ where: { key: REGISTRY_KEY[service] } });
-  if (!row?.value) return [];
+// An unreadable registry lists no named instance (the default still works),
+// so every named server drops out of sync, settings and visibility until an
+// admin saves the list again. Said once per distinct bad value (guardrail 7b).
+// A save over it is the recovery path, not a hazard: the "dropped slugs" diff
+// is against an empty list, so nothing is cleaned up.
+function parseRegistryValue(service: MediaServerService, value: string | null | undefined): MediaInstanceConfig[] {
+  if (!value) return [];
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(row.value);
-    if (!Array.isArray(parsed)) return [];
-    const out: MediaInstanceConfig[] = [];
-    const seen = new Set<string>([DEFAULT_MEDIA_INSTANCE]);
-    for (const entry of parsed) {
-      const norm = normalizeEntry(entry);
-      if (norm && !seen.has(norm.slug)) {
-        out.push(norm);
-        seen.add(norm.slug);
-      }
-    }
-    return out;
+    parsed = JSON.parse(value);
   } catch {
+    parsed = undefined;
+  }
+  const warnKey = `media-instances:registry:${service}`;
+  if (!Array.isArray(parsed)) {
+    warnOnChange(warnKey, value, `[media-instances] the ${REGISTRY_KEY[service]} setting is not a JSON array; named ${service} servers are ignored until the list is saved again`);
     return [];
   }
+  forgetWarnOnChange(warnKey);
+  const out: MediaInstanceConfig[] = [];
+  const seen = new Set<string>([DEFAULT_MEDIA_INSTANCE]);
+  for (const entry of parsed) {
+    const norm = normalizeEntry(entry);
+    if (norm && !seen.has(norm.slug)) {
+      out.push(norm);
+      seen.add(norm.slug);
+    }
+  }
+  return out;
+}
+
+async function readRegistryJson(service: MediaServerService): Promise<MediaInstanceConfig[]> {
+  const row = await prisma.setting.findUnique({ where: { key: REGISTRY_KEY[service] } });
+  return parseRegistryValue(service, row?.value);
+}
+
+// The registry as a SAVE must see it: inside the caller's transaction, after
+// the per-service save lock, so the "which named slugs did this list drop" diff
+// is against a list no other save can change before this one commits. Read
+// outside the lock, two saves interleaved: one that re-added a slug lost its
+// token to the other's cleanup, and one that added a slug had it overwritten
+// without its rows ever being cleaned up. Named entries only (the default is
+// synthesized, never stored). The registry ROW lock that orders a removal
+// against an upstream watch refresh (upstream-watch-data.ts) is still taken by
+// the caller's registry upsert, before any slug cleanup.
+export async function readMediaInstanceRegistryForSave(tx: RegistryTx, service: MediaServerService): Promise<MediaInstanceConfig[]> {
+  await tx.$executeRaw(REGISTRY_SAVE_LOCK[service]);
+  const row = await tx.setting.findUnique({ where: { key: REGISTRY_KEY[service] } });
+  return parseRegistryValue(service, row?.value);
+}
+
+// The registered NAMED slugs, read with the service's registry ROW locked
+// (FOR UPDATE) inside the caller's transaction, through the same parser every
+// other reader uses. A removal writes that row first, in the same transaction
+// as its cleanup, so a writer that re-checks its slug here is ordered against
+// it (guardrail 40c). A missing or unreadable registry lists nothing. Raw SQL
+// because Prisma has no row lock; the registry row is never encrypted.
+export async function registeredSlugsForUpdateInTx(
+  tx: Pick<PrismaTxClient, "$queryRaw">,
+  service: MediaServerService,
+): Promise<Set<string>> {
+  const rows = await tx.$queryRaw<Array<{ value: string }>>(
+    Prisma.sql`SELECT "value" FROM "Setting" WHERE "key" = ${REGISTRY_KEY[service]} FOR UPDATE`,
+  );
+  return new Set(parseRegistryValue(service, rows[0]?.value).map((i) => i.slug));
+}
+
+// The two Setting keys that make an instance's connection usable.
+function connectionKeys(service: MediaServerService, slug: MediaInstanceKey): [string, string] {
+  return service === "plex"
+    ? [plexSettingKey(slug, "ServerUrl"), plexSettingKey(slug, "AdminToken")]
+    : [jellyfinSettingKey(slug, "Url"), jellyfinSettingKey(slug, "ApiKey")];
+}
+
+// Which of `slugs` have both connection fields filled, in ONE Setting read.
+// Trimmed presence, not raw truthiness: every consumer trims before use
+// (authorizeWithPlex, plex-membership, the play-history poller), so a
+// whitespace-only value is not a usable config. Reading it as configured
+// showed the instance's sign-in tab and put it in the sync fan-out while
+// every actual connection refused.
+async function configuredSlugs(service: MediaServerService, slugs: MediaInstanceKey[]): Promise<Set<MediaInstanceKey>> {
+  const pairs = slugs.map((slug) => ({ slug, keys: connectionKeys(service, slug) }));
+  const rows = await prisma.setting.findMany({ where: { key: { in: pairs.flatMap((p) => p.keys) } } });
+  const filled = new Set(rows.filter((r) => r.value.trim()).map((r) => r.key));
+  return new Set(pairs.filter((p) => p.keys.every((k) => filled.has(k))).map((p) => p.slug));
 }
 
 // Whether an instance's connection is configured (the service-appropriate
 // required fields are both present).
 export async function isMediaInstanceConfigured(service: MediaServerService, slug: MediaInstanceKey): Promise<boolean> {
-  const [urlKey, authKey] =
-    service === "plex"
-      ? [plexSettingKey(slug, "ServerUrl"), plexSettingKey(slug, "AdminToken")]
-      : [jellyfinSettingKey(slug, "Url"), jellyfinSettingKey(slug, "ApiKey")];
-  const rows = await prisma.setting.findMany({ where: { key: { in: [urlKey, authKey] } } });
-  // Trimmed presence, not raw truthiness: every consumer trims before use
-  // (authorizeWithPlex, plex-membership, the play-history poller), so a
-  // whitespace-only value is not a usable config. Reading it as configured
-  // showed the instance's sign-in tab and put it in the sync fan-out while
-  // every actual connection refused.
-  const map = new Map(rows.map((r) => [r.key, r.value.trim()]));
-  return !!map.get(urlKey) && !!map.get(authKey);
+  return (await configuredSlugs(service, [slug])).has(slug);
 }
 
 // All registered instances for a service, default first, then registry
@@ -122,8 +191,13 @@ export async function getMediaInstances(service: MediaServerService): Promise<Me
 // sync orchestrator fans out over. Always includes the default if configured.
 export async function getSyncableMediaInstances(service: MediaServerService): Promise<MediaInstanceConfig[]> {
   const all = await getMediaInstances(service);
-  const results = await Promise.all(all.map((i) => isMediaInstanceConfigured(service, i.slug)));
-  return all.filter((_, idx) => results[idx]);
+  const configured = await configuredSlugs(service, all.map((i) => i.slug));
+  return all.filter((i) => configured.has(i.slug));
+}
+
+/** The Setting key that holds `service`'s registry of named servers. */
+export function registryKeyFor(service: MediaServerService): string {
+  return REGISTRY_KEY[service];
 }
 
 // The Setting row a registry save writes: validated, de-duped, serialized. The
@@ -137,29 +211,15 @@ export function buildMediaInstanceRegistryWrite(
   service: MediaServerService,
   entries: MediaInstanceConfig[],
 ): { key: string; value: string } {
-  const seen = new Set<string>([DEFAULT_MEDIA_INSTANCE]);
+  // normalizeEntry already refuses a non-string, default ("") or invalid
+  // slug; only the de-dupe is this function's own.
+  const seen = new Set<string>();
   const clean: MediaInstanceConfig[] = [];
   for (const e of entries) {
-    if (!e || typeof e.slug !== "string") continue;
-    if (e.slug === DEFAULT_MEDIA_INSTANCE || !isValidMediaInstanceSlug(e.slug) || seen.has(e.slug)) continue;
     const norm = normalizeEntry(e);
-    if (norm) {
-      clean.push(norm);
-      seen.add(norm.slug);
-    }
+    if (!norm || seen.has(norm.slug)) continue;
+    clean.push(norm);
+    seen.add(norm.slug);
   }
   return { key: REGISTRY_KEY[service], value: JSON.stringify(clean) };
-}
-
-// Persist the named-instance registry (admin settings). Callers must separately
-// write each instance's connection Setting rows via
-// plexSettingKey/jellyfinSettingKey — and, when removing an instance, clean up
-// its library/session rows too (see the admin media-instances route).
-export async function saveMediaInstances(service: MediaServerService, entries: MediaInstanceConfig[]): Promise<void> {
-  const { key, value } = buildMediaInstanceRegistryWrite(service, entries);
-  await prisma.setting.upsert({
-    where: { key },
-    create: { key, value },
-    update: { value },
-  });
 }

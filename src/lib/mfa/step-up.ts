@@ -22,9 +22,12 @@ import type { SummonarrSession } from "@/lib/api-auth";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import { getMfaState, type MfaState, type SecondFactorInput } from "./mfa-store";
-import { verifySecondFactorGuarded } from "./lockout";
+import { verifySecondFactorGuarded, type GuardContext } from "./lockout";
+
+// What a second-factor step-up confirms (everything but a sign-in).
+type StepUpContext = Exclude<GuardContext["context"], "sign-in">;
 import { commitToken, releaseToken, reserveToken, verifyMfaStepUpToken } from "./mfa-token";
-import { webAuthnConfigFromEnv, type AuthenticationResponseJSON } from "./webauthn";
+import { webAuthnConfigFromEnv } from "./webauthn";
 
 // English text of apiAuth.mfa.unavailable.
 export const MFA_UNAVAILABLE_MESSAGE =
@@ -36,8 +39,12 @@ export interface StepUpUser {
   email: string;
 }
 
-// The non-password half: is this session's account eligible at all?
-export async function mfaEligibleUser(session: SummonarrSession, t: Translator): Promise<StepUpUser | NextResponse> {
+// The one eligibility rule (both entry points below use it, so they can't
+// drift): a local-credentials session on an account that has a password.
+async function loadEligibleUser(
+  session: SummonarrSession,
+  t: Translator,
+): Promise<(StepUpUser & { passwordHash: string }) | NextResponse> {
   const user = await prisma.user.findUnique({
     where: { id: session.user.id },
     select: { id: true, name: true, email: true, passwordHash: true },
@@ -46,6 +53,13 @@ export async function mfaEligibleUser(session: SummonarrSession, t: Translator):
   if (session.user.provider !== "credentials" || !user.passwordHash) {
     return NextResponse.json({ error: t("apiAuth.mfa.unavailable") }, { status: 403 });
   }
+  return { id: user.id, name: user.name, email: user.email, passwordHash: user.passwordHash };
+}
+
+// The non-password half: is this session's account eligible at all?
+export async function mfaEligibleUser(session: SummonarrSession, t: Translator): Promise<StepUpUser | NextResponse> {
+  const user = await loadEligibleUser(session, t);
+  if (user instanceof NextResponse) return user;
   return { id: user.id, name: user.name, email: user.email };
 }
 
@@ -58,14 +72,8 @@ export async function mfaReauthStepUp(
   if (!checkRateLimit(`mfa-stepup:${session.user.id}`, 10, 15 * 60 * 1000)) {
     return tooManyRequests(15 * 60, t("apiAuth.common.tooManyAttemptsWait15"));
   }
-  const user = await prisma.user.findUnique({
-    where: { id: session.user.id },
-    select: { id: true, name: true, email: true, passwordHash: true },
-  });
-  if (!user) return NextResponse.json({ error: t("apiAuth.common.unauthorized") }, { status: 401 });
-  if (session.user.provider !== "credentials" || !user.passwordHash) {
-    return NextResponse.json({ error: t("apiAuth.mfa.unavailable") }, { status: 403 });
-  }
+  const user = await loadEligibleUser(session, t);
+  if (user instanceof NextResponse) return user;
   if (typeof password !== "string" || password.length === 0) {
     return NextResponse.json({ error: t("apiAuth.mfa.currentPasswordRequired") }, { status: 400 });
   }
@@ -126,7 +134,7 @@ function parseStepUpFactor(raw: unknown): { input: SecondFactorInput; challengeT
   if (body.method === "webauthn") {
     if (!body.credential || typeof body.credential !== "object" || Array.isArray(body.credential)) return null;
     return {
-      input: { method: "webauthn", credential: body.credential as AuthenticationResponseJSON },
+      input: { method: "webauthn", credential: body.credential },
       challengeToken: body.challengeToken,
     };
   }
@@ -153,6 +161,19 @@ export function secondFactorRequiredResponse(t: Translator, state: MfaState, req
   );
 }
 
+// A passkey step-up's single-use challenge, claimed: it must be bound to this
+// user AND this session, and not already in use (reserveToken). Null ⇒ refuse.
+async function claimPasskeyChallenge(
+  challengeToken: unknown,
+  session: SummonarrSession,
+  userId: string,
+): Promise<{ challenge: string; jti: string } | null> {
+  const claims = await verifyMfaStepUpToken(challengeToken);
+  if (!claims || claims.userId !== userId || !session.sessionId || claims.sessionId !== session.sessionId) return null;
+  if (!reserveToken(claims.jti)) return null;
+  return { challenge: claims.challenge, jti: claims.jti };
+}
+
 // Call AFTER mfaReauthStepUp succeeded (or the route's own password step-up).
 // Returns the proof, or the response to send. `state` may be passed in when the
 // route already read it. `requiredMessage` replaces the `error` text of the
@@ -163,7 +184,8 @@ export async function mfaSecondFactorStepUp(
   user: StepUpUser,
   raw: unknown,
   state?: MfaState,
-  opts: { requiredMessage?: string } = {},
+  // `context` names the action in a lockout's audit row (lockout.ts).
+  opts: { requiredMessage?: string; context?: StepUpContext } = {},
 ): Promise<SecondFactorProof | NextResponse> {
   const t = translatorForRequest(req);
   const current = state ?? (await getMfaState(user.id));
@@ -172,46 +194,34 @@ export async function mfaSecondFactorStepUp(
   const parsed = parseStepUpFactor(raw);
   if (!parsed) return secondFactorRequiredResponse(t, current, opts.requiredMessage);
 
-  let webauthnChallenge: string | undefined;
-  let reservedJti: string | null = null;
+  let passkey: { challenge: string; jti: string } | null = null;
   if (parsed.input.method === "webauthn") {
-    const claims = await verifyMfaStepUpToken(parsed.challengeToken);
-    if (
-      !claims ||
-      claims.userId !== user.id ||
-      !session.sessionId ||
-      claims.sessionId !== session.sessionId ||
-      !reserveToken(claims.jti)
-    ) {
-      return NextResponse.json(
-        { error: t("apiAuth.mfa.passkeyConfirmExpired"), secondFactorRequired: true },
-        { status: 400 },
-      );
+    passkey = await claimPasskeyChallenge(parsed.challengeToken, session, user.id);
+    if (!passkey) {
+      return NextResponse.json({ error: t("apiAuth.mfa.passkeyConfirmExpired"), secondFactorRequired: true }, { status: 400 });
     }
-    webauthnChallenge = claims.challenge;
-    reservedJti = claims.jti;
   }
 
   let verdict;
   try {
     verdict = await verifySecondFactorGuarded(user.id, parsed.input, {
-      webauthnChallenge,
+      webauthnChallenge: passkey?.challenge,
       webauthnConfig: webAuthnConfigFromEnv(),
-      context: "enrollment",
+      context: opts.context ?? "enrollment",
       ipAddress: getClientIp(req.headers),
       userAgent: req.headers.get("user-agent")?.slice(0, 512) ?? null,
     });
   } catch (err) {
-    if (reservedJti) releaseToken(reservedJti, { failed: false });
+    if (passkey) releaseToken(passkey.jti, { failed: false });
     throw err;
   }
-  if (reservedJti) {
+  if (passkey) {
     // Single-use on success. A failed assertion does NOT burn the challenge: it
     // counts one failure against it (releaseToken), like a wrong answer on a
     // sign-in challenge, and the challenge dies after MAX_TOKEN_FAILURES or its
     // five-minute expiry, whichever comes first.
-    if (verdict.ok) commitToken(reservedJti);
-    else releaseToken(reservedJti, { failed: true });
+    if (verdict.ok) commitToken(passkey.jti);
+    else releaseToken(passkey.jti, { failed: true });
   }
   if (!verdict.ok) {
     if (verdict.locked) return NextResponse.json({ error: t("apiAuth.mfa.locked") }, { status: 429 });

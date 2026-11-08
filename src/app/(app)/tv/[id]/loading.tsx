@@ -3,11 +3,11 @@
 // shell as the page: ds-detail-bleed, the aspect-video backdrop, the 160px
 // poster + title block in ds-detail-body, then the cast grid and the season
 // rows (44px poster thumb, 12px padding → ~90px each).
-import { Bar, CastSectionSkeleton, DetailHeroSkeleton, SKELETON_CARD } from "@/components/loading/poster-grid-skeleton";
+import { Bar, CastSectionSkeleton, DetailHeroSkeleton, SKELETON_CARD, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 export default function Loading() {
   return (
-    <div className="ds-detail-bleed animate-pulse">
+    <SkeletonRoot className="ds-detail-bleed">
       <DetailHeroSkeleton />
       <CastSectionSkeleton />
       {/* Same class as the real TVSeasons section (see CastSectionSkeleton). */}
@@ -26,6 +26,6 @@ export default function Loading() {
           ))}
         </div>
       </section>
-    </div>
+    </SkeletonRoot>
   );
 }

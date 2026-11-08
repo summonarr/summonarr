@@ -4,11 +4,11 @@
 // row with the movie/tv filter pills (32px) and a .ds-media-grid of
 // MediaCard tiles. No horizontal padding: PersonView sits directly in
 // <main>'s inset like every other page.
-import { Bar, MediaCardTile, SKELETON_FILL } from "@/components/loading/poster-grid-skeleton";
+import { Bar, MediaCardTile, SKELETON_FILL, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <div className="flex flex-wrap" style={{ gap: 20, paddingBottom: 24 }}>
         <div className="shrink-0" style={{ width: 120, height: 180, borderRadius: 8, background: SKELETON_FILL }} />
         <div className="flex flex-col" style={{ flex: 1, minWidth: 260, gap: 10 }}>
@@ -36,6 +36,6 @@ export default function Loading() {
           ))}
         </div>
       </section>
-    </div>
+    </SkeletonRoot>
   );
 }

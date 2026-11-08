@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { readJsonCapped } from "@/lib/body-size";
-import { logAudit, auditContext } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { invalidateBlacklistCache } from "@/lib/blacklist";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
@@ -12,7 +12,7 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // hidden from discovery (attachAllAvailability's default filter) and rejected at
 // the request chokepoint (POST /api/requests + /api/requests/bulk). ADMIN-only.
 //   GET    → list (newest first)
-//   POST   → add/update  { tmdbId, mediaType, title?, reason? }
+//   POST   → add/update  { tmdbId, mediaType, title?, reason? } → 201 { item, created }
 //   DELETE → remove      ?tmdbId=&mediaType=  (query params — DELETE bodies are
 //            stripped by some proxies)
 
@@ -49,6 +49,14 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiAdmin.common.reasonTooLong") }, { status: 400 });
   }
 
+  // Whether this POST adds a title or rewrites one already blocked: the manager's
+  // count goes up only for a new row (it loads at most 1000 rows, so it can't tell
+  // on its own). Read before the upsert; two racing POSTs for one new title can
+  // both say `created` — only the count is off then, never the row.
+  const existing = await prisma.blacklistItem.findUnique({
+    where: { tmdbId_mediaType: { tmdbId, mediaType } },
+    select: { tmdbId: true },
+  });
   const item = await prisma.blacklistItem.upsert({
     where: { tmdbId_mediaType: { tmdbId, mediaType } },
     create: { tmdbId, mediaType, title: sanitizeOptional(title) ?? null, reason: sanitizeOptional(reason) ?? null, addedBy: session.user.id },
@@ -57,14 +65,13 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   invalidateBlacklistCache();
   // Post-commit, non-transactional mutation ⇒ swallowing logAudit (guardrail 26).
   void logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email,
+    ...auditActor(req, session),
     action: "BLACKLIST_CHANGE",
     target: `blacklist:${mediaType}:${tmdbId}`,
     details: { op: "add", title: item.title, reason: item.reason },
-    ...auditContext(req, session),
   });
-  return NextResponse.json({ item }, { status: 201 });
+  // Additive: `created` is false when the title was already blocked.
+  return NextResponse.json({ item, created: existing === null }, { status: 201 });
 });
 
 export const DELETE = withAdmin(async (req, _ctx, session) => {
@@ -79,12 +86,10 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
   invalidateBlacklistCache();
   if (deleted.count > 0) {
     void logAudit({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email,
+      ...auditActor(req, session),
       action: "BLACKLIST_CHANGE",
       target: `blacklist:${mediaType}:${tmdbId}`,
       details: { op: "remove" },
-      ...auditContext(req, session),
     });
   }
   return NextResponse.json({ ok: true, removed: deleted.count });

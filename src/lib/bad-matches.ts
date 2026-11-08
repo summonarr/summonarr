@@ -1,5 +1,15 @@
 import { prisma } from "@/lib/prisma";
-import { TTL, getCache, setCache } from "@/lib/tmdb-cache";
+import { TTL, getCache, setCache, tmdbDetailsKey } from "@/lib/tmdb-cache";
+import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
+import { coalesce } from "@/lib/concurrency";
+import {
+  folderOf,
+  isMediaFileName,
+  isSeasonFolderName,
+  stripMountPoint,
+  stripRelPrefix,
+  toMatchKey,
+} from "@/lib/library-paths";
 import {
   DEFAULT_MEDIA_INSTANCE,
   isValidMediaInstanceSlug,
@@ -11,9 +21,11 @@ import {
 // Bad-match computation for native admin clients.
 //
 // MIRROR: src/app/(app)/admin/library/page.tsx computes this inline (alongside
-// the full library diff + stats, which this omits). Keep the path-stripping,
-// conflict-detection, and ARR-verdict logic here in sync with that page. The web
-// page is the richer surface; this is the headless subset the iOS client needs.
+// the full library diff + stats, which this omits). The path rules both use
+// live in library-paths.ts and the Radarr/Sonarr folder map in
+// loadArrPathIndex below; keep the conflict detection here in sync with that
+// page. The web page is the richer surface; this is the headless subset the iOS
+// client needs.
 
 const LIBRARY_ITEM_CAP = 25_000;
 
@@ -75,11 +87,11 @@ function singlePathMount(path: string, mediaType: "MOVIE" | "TV", siblingMounts:
   }
   if (best) return best;
   const segs = normalised.split("/").filter(Boolean);
-  const isFile = /\.[A-Za-z0-9]{1,5}$/.test(segs[segs.length - 1] ?? "");
+  const isFile = isMediaFileName(segs[segs.length - 1] ?? "");
   let keep = 1;
   if (isFile) {
     keep = 2;
-    if (mediaType === "TV" && segs.length >= 3 && /^(season|series|specials|s\d+$)/i.test(segs[segs.length - 2])) keep = 3;
+    if (mediaType === "TV" && segs.length >= 3 && isSeasonFolderName(segs[segs.length - 2])) keep = 3;
   }
   const mountLen = segs.length - keep;
   if (mountLen <= 0) return "";
@@ -87,115 +99,210 @@ function singlePathMount(path: string, mediaType: "MOVIE" | "TV", siblingMounts:
   return sep + segs.slice(0, mountLen).join("/") + "/";
 }
 
-// Mount per `<slug> <MEDIATYPE>` group — the one definition shared with the
-// admin library page (src/app/(app)/admin/library/page.tsx). Multi-path groups
-// take their common prefix; a one-path group goes through singlePathMount,
+// The key of one (server instance, media type) mount group: `<slug> <MEDIATYPE>`.
+// A slug can hold no space (isValidMediaInstanceSlug) and the default instance
+// is "", so the LAST space always separates the halves. Build and read it only
+// through these two, here and on the admin library page.
+export function mountGroupKey(serverInstance: string, mediaType: "MOVIE" | "TV"): string {
+  return `${serverInstance} ${mediaType}`;
+}
+
+export function parseMountGroupKey(groupKey: string): { serverInstance: string; mediaType: string } {
+  const at = groupKey.lastIndexOf(" ");
+  return { serverInstance: groupKey.slice(0, at), mediaType: groupKey.slice(at + 1) };
+}
+
+// Mount per mountGroupKey group — the one definition shared with the admin
+// library page (src/app/(app)/admin/library/page.tsx). Multi-path groups take
+// their common prefix; a one-path group goes through singlePathMount,
 // borrowing from the other groups of the SAME media type in this call (so pass
-// one service's groups at a time). Groups must hold only rows with a filePath.
+// one service's groups at a time). A row with no filePath is ignored.
 export function inferGroupMounts(
   byGroup: Map<string, { filePath: string | null; mediaType: "MOVIE" | "TV" }[]>,
 ): Map<string, string> {
-  const mediaTypeOf = (groupKey: string) => groupKey.slice(groupKey.indexOf(" ") + 1);
-  const inferred = new Map<string, string>();
+  const mediaTypeOf = (groupKey: string) => parseMountGroupKey(groupKey).mediaType;
+  const withPaths = new Map<string, { filePath: string; mediaType: "MOVIE" | "TV" }[]>();
   for (const [groupKey, group] of byGroup) {
+    const rows = group.flatMap((r) => (r.filePath ? [{ filePath: r.filePath, mediaType: r.mediaType }] : []));
+    if (rows.length > 0) withPaths.set(groupKey, rows);
+  }
+  const inferred = new Map<string, string>();
+  for (const [groupKey, group] of withPaths) {
     if (group.length > 1) inferred.set(groupKey, commonPathPrefix(group.map((r) => r.filePath)));
   }
   const out = new Map(inferred);
-  for (const [groupKey, group] of byGroup) {
-    if (out.has(groupKey) || group.length === 0) continue;
+  for (const [groupKey, group] of withPaths) {
+    if (out.has(groupKey)) continue;
     const siblings = [...inferred].filter(([k]) => mediaTypeOf(k) === mediaTypeOf(groupKey)).map(([, m]) => m);
-    out.set(groupKey, singlePathMount(group[0].filePath!, group[0].mediaType, siblings));
+    out.set(groupKey, singlePathMount(group[0].filePath, group[0].mediaType, siblings));
   }
   return out;
 }
 
-function stripMountPoint(filePath: string | null, mountPoint: string): string | null {
-  if (!filePath) return null;
-  const normalised = filePath.replace(/\\/g, "/");
-  if (mountPoint && normalised.startsWith(mountPoint)) return normalised.slice(mountPoint.length);
-  return normalised;
+// ── Radarr/Sonarr folder map ────────────────────────────────────────────────
+// One map per service, built from EVERY syncable instance's /api/v3/movie or
+// /api/v3/series and cached under ONE key: this module, the admin library page
+// and fix-match's file-info hint all read it. The cache holds each title's
+// full folder path; the basename index (what lines up across bind-mount roots,
+// /plexmedia vs /data) is derived from it in memory.
+
+/** Radarr/Sonarr folders → tmdbId. */
+export interface ArrPathIndex {
+  /** Each title's folder path, normalised (forward slashes, no trailing "/"). The first instance listing a folder wins. */
+  byPath: Map<string, number>;
+  /** Folder basename → tmdbId. A basename two different titles share is left out: it can't referee either. */
+  byName: Map<string, number>;
+  /** An instance could not be read, so titles only it manages are missing. */
+  incomplete: boolean;
 }
 
-function normaliseRelPath(rel: string, stripPrefix: string): string {
-  if (!stripPrefix) return rel;
-  const p = stripPrefix.endsWith("/") ? stripPrefix : stripPrefix + "/";
-  return rel.startsWith(p) ? rel.slice(p.length) : rel;
+// A partial or empty map is kept only briefly: long enough that a page render
+// stops re-fetching every catalogue while one instance is down (each fetch can
+// wait out its 30 s timeout), short enough that a Radarr restart costs minutes
+// of missing verdicts, not the 6 h a full map keeps.
+const ARR_PATHS_SHORT_TTL = 3 * 60;
+
+type StoredArrPaths = [string, number][] | { entries: [string, number][]; incomplete: boolean };
+
+function arrPathsCacheKey(mediaType: "MOVIE" | "TV"): string {
+  return `arr:${mediaType === "MOVIE" ? "radarr" : "sonarr"}:paths`;
 }
 
-function folderOf(filePath: string): string {
-  return filePath.replace(/\\/g, "/").replace(/\/[^/]+$/, "");
-}
-
-function toMatchKey(rel: string, mediaType: "MOVIE" | "TV"): string {
-  if (mediaType === "TV") return rel.split("/")[0];
-  return rel;
-}
-
-async function buildArrPathMap(mediaType: "MOVIE" | "TV"): Promise<Map<string, number>> {
-  // `:name` suffix — this map keys by folder BASENAME, while the web library
-  // page (admin/library/page.tsx) caches a FULL-normalized-path map under
-  // `arr:<service>:paths`. Sharing that key let whichever surface ran first
-  // poison the other for the whole TTL.ARR_PATHS window (basename lookups
-  // against full-path keys — or vice versa — all miss, so every arrVerdict
-  // silently reads null). Keep the two keys distinct.
-  const cacheKey = `arr:${mediaType === "MOVIE" ? "radarr" : "sonarr"}:paths:name`;
-  // `cached?.length`, not `cached`: `[]` is a truthy hit, so an empty map (a
-  // freshly-configured or still-importing instance answering 200 []) would stick
-  // for the full 6h TTL and null every arrVerdict.
-  const cached = await getCache<[string, number][]>(cacheKey);
-  if (cached?.length) return new Map(cached);
-
-  const map = new Map<string, number>();
-  try {
-    // Fan out over EVERY syncable instance — the web library page this module's
-    // header declares itself a MIRROR of merges all instances (a mismatched
-    // folder managed only by a 4K/anime instance still gets a verdict there),
-    // while this used to read only the default instance's settings and silently
-    // blank the native surface's arr verdicts on multi-instance deployments.
-    // First-wins merge (default instance is listed first by the registry) and
-    // skip-cache-on-partial-failure both match the page's buildArrPathMap.
-    const service = mediaType === "MOVIE" ? "radarr" : "sonarr";
-    const [{ getSyncableArrInstances }, { arrFetch, getArrCfg }] = await Promise.all([
-      import("@/lib/arr-instance-registry"),
-      import("@/lib/arr"),
-    ]);
-    const instances = await getSyncableArrInstances(service);
-    if (instances.length === 0) return map;
-
-    const endpoint = mediaType === "MOVIE" ? "movie" : "series";
-    type ArrItem = { tmdbId?: number; path?: string };
-    let anyInstanceFailed = false;
-    for (const inst of instances) {
-      try {
-        const cfg = await getArrCfg(service, inst.slug);
-        if (!cfg) continue;
-        // arrFetch (not a bare safeFetchAdminConfigured): it carries the 50 MB body
-        // cap. The default 10 MB silently truncated large libraries (guardrail 5),
-        // leaving every arrVerdict past the cut null with no log.
-        // arrFetch throws ArrResponseError on non-2xx, handled by the catch below.
-        const items = await arrFetch<ArrItem[]>(cfg, `/api/v3/${endpoint}`);
-        for (const item of items) {
-          if (!item.tmdbId || !item.path) continue;
-          // Key by the folder BASENAME, not the absolute path — Plex and Radarr/Sonarr
-          // usually have different bind-mount roots (/plexmedia vs /data), so absolute
-          // paths never match. Basenames ("Movie (2020)") line up across mounts.
-          const folderName = item.path.replace(/\\/g, "/").replace(/\/$/, "").split("/").pop();
-          if (folderName && !map.has(folderName)) map.set(folderName, item.tmdbId);
-        }
-      } catch (err) {
-        anyInstanceFailed = true;
-        console.warn(`[bad-matches] ARR path map fetch failed for instance "${inst.slug}":`, err instanceof Error ? err.message : err);
-      }
-    }
-    // Never cache a partial map — a down instance's titles would read as
-    // "not in arr" for the whole TTL window.
-    if (!anyInstanceFailed && map.size > 0) await setCache(cacheKey, [...map.entries()], TTL.ARR_PATHS);
-  } catch (err) {
-    // Don't swallow silently — a missing arr map makes every bad-match verdict
-    // null, which previously looked like "no problems found".
-    console.warn("[bad-matches] ARR path map fetch failed:", err instanceof Error ? err.message : err);
+function storedEntries(value: unknown): { entries: [string, number][]; incomplete: boolean } | null {
+  // A bare array is a complete map; `[]` is not a hit (an empty map is only
+  // ever stored in the object form, under the short TTL).
+  const raw = Array.isArray(value)
+    ? (value.length > 0 ? { entries: value as unknown[], incomplete: false } : null)
+    : value && typeof value === "object" && Array.isArray((value as { entries?: unknown }).entries)
+      ? { entries: (value as { entries: unknown[] }).entries, incomplete: (value as { incomplete?: unknown }).incomplete === true }
+      : null;
+  if (!raw) return null;
+  const entries: [string, number][] = [];
+  for (const e of raw.entries) {
+    if (Array.isArray(e) && typeof e[0] === "string" && typeof e[1] === "number") entries.push([e[0], e[1]]);
   }
-  return map;
+  return { entries, incomplete: raw.incomplete };
+}
+
+/** Folder basename → tmdbId, leaving out a basename two different titles share. */
+export function arrNameIndex(byPath: ReadonlyMap<string, number>): Map<string, number> {
+  const out = new Map<string, number>();
+  const ambiguous = new Set<string>();
+  for (const [path, tmdbId] of byPath) {
+    const name = path.split("/").pop();
+    if (!name || ambiguous.has(name)) continue;
+    const seen = out.get(name);
+    if (seen === undefined) out.set(name, tmdbId);
+    else if (seen !== tmdbId) {
+      out.delete(name);
+      ambiguous.add(name);
+    }
+  }
+  return out;
+}
+
+function toIndex(byPath: Map<string, number>, incomplete: boolean): ArrPathIndex {
+  return { byPath, byName: arrNameIndex(byPath), incomplete };
+}
+
+type ArrService = "radarr" | "sonarr";
+
+// One instance's catalogue as (folder path, tmdbId) pairs. Throws when the
+// instance can't be read or answers with something that isn't a list.
+async function fetchInstancePaths(service: ArrService, slug: string): Promise<[string, number][]> {
+  const { arrFetch, getArrCfg } = await import("@/lib/arr");
+  const cfg = await getArrCfg(service, slug);
+  if (!cfg) return [];
+  const endpoint = service === "radarr" ? "movie" : "series";
+  // arrFetch (not a bare safeFetchAdminConfigured): it carries the 50 MB
+  // body cap (guardrail 5) and throws ArrResponseError on a non-2xx.
+  const items = await arrFetch<unknown>(cfg, `/api/v3/${endpoint}`);
+  if (!Array.isArray(items)) throw new Error(`/api/v3/${endpoint} did not answer with a list`);
+  const out: [string, number][] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const { tmdbId, path } = item as { tmdbId?: unknown; path?: unknown };
+    if (typeof tmdbId !== "number" || !tmdbId || typeof path !== "string" || !path) continue;
+    out.push([path.replace(/\\/g, "/").replace(/\/$/, ""), tmdbId]);
+  }
+  return out;
+}
+
+// Every syncable instance's map, merged in registry order (the default
+// instance first), first claim wins. An instance that failed marks it
+// incomplete and warns once per unchanged reason (guardrail 7b).
+async function buildArrPathMap(
+  service: ArrService,
+  byPath: Map<string, number>,
+): Promise<{ instances: number; incomplete: boolean }> {
+  const [{ getSyncableArrInstances }, { arrErrorMessage }] = await Promise.all([
+    import("@/lib/arr-instance-registry"),
+    import("@/lib/arr"),
+  ]);
+  const instances = await getSyncableArrInstances(service);
+  if (instances.length === 0) return { instances: 0, incomplete: false };
+  // The handful of configured instances are read together, so one that is
+  // down costs its own timeout rather than adding it to everyone else's.
+  const lists = await Promise.allSettled(instances.map((inst) => fetchInstancePaths(service, inst.slug)));
+  let incomplete = false;
+  lists.forEach((result, i) => {
+    const slug = instances[i].slug;
+    const logKey = `bad-matches:arr-paths:${service}:${slug}`;
+    if (result.status === "rejected") {
+      incomplete = true;
+      const reason = arrErrorMessage(result.reason);
+      warnOnChange(logKey, reason, `[bad-matches] ARR path map fetch failed for ${service} instance "${slug}": ${reason}`);
+      return;
+    }
+    forgetWarnOnChange(logKey);
+    for (const [path, tmdbId] of result.value) if (!byPath.has(path)) byPath.set(path, tmdbId);
+  });
+  return { instances: instances.length, incomplete };
+}
+
+/**
+ * The Radarr (MOVIE) or Sonarr (TV) folder map, from the cache or built from
+ * every syncable instance. Never throws: a failure warns (once per unchanged
+ * condition, guardrail 7b) and leaves the map partial. Concurrent callers on a
+ * cold cache share one build (the admin library page and this module both ask).
+ */
+export function loadArrPathIndex(mediaType: "MOVIE" | "TV"): Promise<ArrPathIndex> {
+  const cacheKey = arrPathsCacheKey(mediaType);
+  return coalesce(`bad-matches:${cacheKey}`, () => loadArrPathIndexUncoalesced(mediaType, cacheKey));
+}
+
+async function loadArrPathIndexUncoalesced(mediaType: "MOVIE" | "TV", cacheKey: string): Promise<ArrPathIndex> {
+  const service: ArrService = mediaType === "MOVIE" ? "radarr" : "sonarr";
+  const byPath = new Map<string, number>();
+  try {
+    const cached = storedEntries(await getCache<unknown>(cacheKey));
+    if (cached) return toIndex(new Map(cached.entries), cached.incomplete);
+
+    const { instances, incomplete } = await buildArrPathMap(service, byPath);
+    if (instances === 0) return toIndex(byPath, false);
+    if (!incomplete && byPath.size > 0) {
+      await setCache(cacheKey, [...byPath.entries()], TTL.ARR_PATHS);
+    } else {
+      await setCache(cacheKey, { entries: [...byPath.entries()], incomplete } satisfies StoredArrPaths, ARR_PATHS_SHORT_TTL);
+    }
+    return toIndex(byPath, incomplete);
+  } catch (err) {
+    // Don't swallow silently: a missing map makes every bad-match verdict null,
+    // which used to look like "no problems found".
+    const reason = err instanceof Error ? err.message : String(err);
+    warnOnChange(`bad-matches:arr-paths:${service}`, reason, `[bad-matches] ARR path map fetch failed: ${reason}`);
+    return toIndex(byPath, true);
+  }
+}
+
+/**
+ * The cached basename index alone, or null when nothing is cached — never a
+ * Radarr/Sonarr call. For a caller with its own exact lookup to fall back on
+ * (fix-match's file-info).
+ */
+export async function cachedArrNameIndex(mediaType: "MOVIE" | "TV"): Promise<Map<string, number> | null> {
+  const cached = storedEntries(await getCache<unknown>(arrPathsCacheKey(mediaType)));
+  return cached ? arrNameIndex(new Map(cached.entries)) : null;
 }
 
 /**
@@ -210,8 +317,18 @@ async function posterPathMap(
   if (items.length === 0) return out;
 
   const pairs = [...new Map(items.map((i) => [`${i.tmdbId}:${i.mediaType}`, i])).values()];
+  // One `tmdbId IN (…)` per media type (the (tmdbId, mediaType) key serves
+  // both), not one OR term per pair — the wide-OR shape plans poorly once a
+  // badly mismatched library hands it hundreds of pairs.
+  const movieIds = pairs.filter((p) => p.mediaType === "MOVIE").map((p) => p.tmdbId);
+  const tvIds = pairs.filter((p) => p.mediaType === "TV").map((p) => p.tmdbId);
   const coreRows = await prisma.tmdbMediaCore.findMany({
-    where: { OR: pairs.map((p) => ({ tmdbId: p.tmdbId, mediaType: p.mediaType })) },
+    where: {
+      OR: [
+        ...(movieIds.length ? [{ mediaType: "MOVIE" as const, tmdbId: { in: movieIds } }] : []),
+        ...(tvIds.length ? [{ mediaType: "TV" as const, tmdbId: { in: tvIds } }] : []),
+      ],
+    },
     select: { tmdbId: true, mediaType: true, posterPath: true },
   });
   // Skip null-poster core rows so they fall through to the blob fallback below
@@ -223,18 +340,19 @@ async function posterPathMap(
   const misses = pairs.filter((p) => !out.has(`${p.tmdbId}:${p.mediaType}`));
   if (misses.length === 0) return out;
 
-  const cacheKeys = misses.map((i) => `${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}:details`);
+  const cacheKeys = misses.map((i) => tmdbDetailsKey(i.mediaType, i.tmdbId));
   const rows = await prisma.tmdbCache.findMany({
     where: { key: { in: cacheKeys } },
     select: { key: true, data: true },
   });
   for (const row of rows) {
     try {
-      const parsed = JSON.parse(row.data) as { posterPath?: string | null };
+      const parsed: unknown = JSON.parse(row.data);
+      const posterPath = (parsed as { posterPath?: unknown } | null)?.posterPath;
       const parts = row.key.split(":");
       const mediaType = parts[0] === "movie" ? "MOVIE" : "TV";
       const tmdbId = parseInt(parts[1], 10);
-      if (!isNaN(tmdbId)) out.set(`${tmdbId}:${mediaType}`, parsed.posterPath ?? null);
+      if (!isNaN(tmdbId)) out.set(`${tmdbId}:${mediaType}`, typeof posterPath === "string" ? posterPath : null);
     } catch {}
   }
   return out;
@@ -317,19 +435,17 @@ function stripResolver(cfg: Record<string, string>, settingKey: StripSettingKey)
 // collapses two entries for one physical file rather than corrupting anything;
 // the default instance is merged last so it wins that collapse.
 function buildPathMap(rows: LibraryRow[], stripFor: (instance: string, mediaType: "MOVIE" | "TV") => string): Map<string, PathEntry> {
-  // `<slug> <MEDIATYPE>` — a slug can hold no space (isValidMediaInstanceSlug),
-  // so the first one always separates the two halves.
   const byGroup = new Map<string, LibraryRow[]>();
   for (const row of rows) {
     if (!row.filePath) continue;
-    const groupKey = `${row.serverInstance} ${row.mediaType}`;
+    const groupKey = mountGroupKey(row.serverInstance, row.mediaType);
     const group = byGroup.get(groupKey);
     if (group) group.push(row);
     else byGroup.set(groupKey, [row]);
   }
 
   const out = new Map<string, PathEntry>();
-  const instanceOf = (groupKey: string) => groupKey.slice(0, groupKey.indexOf(" "));
+  const instanceOf = (groupKey: string) => parseMountGroupKey(groupKey).serverInstance;
   const ordered = [...byGroup.keys()].sort((a, b) => {
     const ai = instanceOf(a);
     const bi = instanceOf(b);
@@ -343,7 +459,7 @@ function buildPathMap(rows: LibraryRow[], stripFor: (instance: string, mediaType
     for (const item of group) {
       const rel = stripMountPoint(item.filePath, mount);
       if (!rel) continue;
-      const matchKey = toMatchKey(normaliseRelPath(rel, stripFor(item.serverInstance, item.mediaType)), item.mediaType);
+      const matchKey = toMatchKey(stripRelPrefix(rel, stripFor(item.serverInstance, item.mediaType)), item.mediaType);
       // An empty key is not an identity: paths sharing no first segment infer a
       // "" mount, and every such row would otherwise pile onto one blank entry
       // and pair two unrelated titles.
@@ -357,21 +473,47 @@ function buildPathMap(rows: LibraryRow[], stripFor: (instance: string, mediaType
   return out;
 }
 
-export async function getBadMatches(activeType?: "MOVIE" | "TV"): Promise<BadMatchItem[]> {
+// The same stable order as the admin library page, so a library past the cap
+// is cut at the same rows on every read instead of an arbitrary subset per table.
+const LIBRARY_ORDER = [{ serverInstance: "asc" as const }, { mediaType: "asc" as const }, { tmdbId: "asc" as const }];
+
+export interface BadMatchReport {
+  badMatches: BadMatchItem[];
+  /** A library table reached LIBRARY_ITEM_CAP rows: titles past it were not compared. */
+  capped: boolean;
+}
+
+type Conflict = { relativePath: string; plex: PathEntry; jellyfin: PathEntry };
+
+const STRIP_PREFIX_KEYS = [
+  "plexMoviePathStripPrefix",
+  "plexTvPathStripPrefix",
+  "jellyfinMoviePathStripPrefix",
+  "jellyfinTvPathStripPrefix",
+];
+
+// Both libraries (up to the cap) and every strip prefix they need.
+async function loadLibraries(): Promise<{
+  plexRows: LibraryRow[];
+  jellyfinRows: LibraryRow[];
+  prefixCfg: Record<string, string>;
+  capped: boolean;
+}> {
   const [plexItems, jellyfinItems, prefixRows] = await Promise.all([
     prisma.plexLibraryItem.findMany({
       select: { tmdbId: true, mediaType: true, filePath: true, plexRatingKey: true, title: true, year: true, serverInstance: true },
+      orderBy: LIBRARY_ORDER,
       take: LIBRARY_ITEM_CAP,
     }),
     prisma.jellyfinLibraryItem.findMany({
       select: { tmdbId: true, mediaType: true, filePath: true, jellyfinItemId: true, title: true, year: true, serverInstance: true },
+      orderBy: LIBRARY_ORDER,
       take: LIBRARY_ITEM_CAP,
     }),
-    prisma.setting.findMany({
-      where: { key: { in: ["plexMoviePathStripPrefix", "plexTvPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix"] } },
-    }),
+    prisma.setting.findMany({ where: { key: { in: STRIP_PREFIX_KEYS } } }),
   ]);
 
+  const capped = plexItems.length >= LIBRARY_ITEM_CAP || jellyfinItems.length >= LIBRARY_ITEM_CAP;
   const prefixCfg: Record<string, string> = Object.fromEntries(prefixRows.map((r) => [r.key, r.value]));
 
   // Named servers' own strip prefixes (plex<Slug>MoviePathStripPrefix, …). The
@@ -387,48 +529,78 @@ export async function getBadMatches(activeType?: "MOVIE" | "TV"): Promise<BadMat
     for (const r of namedRows) prefixCfg[r.key] = r.value;
   }
 
-  const plexPathMap = buildPathMap(
-    plexItems.map((i) => ({
+  return {
+    plexRows: plexItems.map((i) => ({
       tmdbId: i.tmdbId, mediaType: i.mediaType, filePath: i.filePath,
       serverInstance: i.serverInstance, key: i.plexRatingKey, title: i.title, year: i.year,
     })),
-    stripResolver(prefixCfg, plexSettingKey),
-  );
-
-  const jfPathMap = buildPathMap(
-    jellyfinItems.map((i) => ({
+    jellyfinRows: jellyfinItems.map((i) => ({
       tmdbId: i.tmdbId, mediaType: i.mediaType, filePath: i.filePath,
       serverInstance: i.serverInstance, key: i.jellyfinItemId, title: i.title, year: i.year,
     })),
-    stripResolver(prefixCfg, jellyfinSettingKey),
-  );
+    prefixCfg,
+    capped,
+  };
+}
 
-  const raw: { relativePath: string; plex: PathEntry; jellyfin: PathEntry }[] = [];
+// The relative paths both servers hold under different titles.
+function findConflicts(
+  plexPathMap: Map<string, PathEntry>,
+  jfPathMap: Map<string, PathEntry>,
+  activeType: "MOVIE" | "TV" | undefined,
+): Conflict[] {
+  const out: Conflict[] = [];
   for (const [relPath, plexItem] of plexPathMap) {
     const jellyfinItem = jfPathMap.get(relPath);
     if (!jellyfinItem) continue;
-    if (plexItem.tmdbId !== jellyfinItem.tmdbId || plexItem.mediaType !== jellyfinItem.mediaType) {
-      raw.push({ relativePath: relPath, plex: plexItem, jellyfin: jellyfinItem });
-    }
+    if (plexItem.tmdbId === jellyfinItem.tmdbId && plexItem.mediaType === jellyfinItem.mediaType) continue;
+    if (activeType && plexItem.mediaType !== activeType && jellyfinItem.mediaType !== activeType) continue;
+    out.push({ relativePath: relPath, plex: plexItem, jellyfin: jellyfinItem });
   }
+  return out;
+}
 
-  const filtered = activeType
-    ? raw.filter((m) => m.plex.mediaType === activeType || m.jellyfin.mediaType === activeType)
-    : raw;
+// Radarr's/Sonarr's tmdbId for the conflict's folder, and which side it says
+// is wrong (null when it agrees with both or neither).
+function arrVerdictFor(m: Conflict, index: ArrPathIndex): Pick<BadMatchItem, "arrTmdbId" | "arrVerdict"> {
+  // The basename index's key: for TV the SERIES folder — m.relativePath is
+  // already reduced to it by toMatchKey — while for movies it's the movie's
+  // own folder (the file's parent). Using folderOf for TV yields the SEASON
+  // folder and never matches Sonarr, so split by mediaType.
+  const folder = m.plex.mediaType === "TV"
+    ? m.relativePath
+    : (folderOf(m.plex.filePath) || folderOf(m.jellyfin.filePath)).split("/").pop() ?? "";
+  const arrTmdbId = index.byName.get(folder) ?? null;
+  let arrVerdict: "plex" | "jellyfin" | null = null;
+  if (arrTmdbId !== null) {
+    const plexCorrect = m.plex.tmdbId === arrTmdbId;
+    const jellyfinCorrect = m.jellyfin.tmdbId === arrTmdbId;
+    if (plexCorrect && !jellyfinCorrect) arrVerdict = "jellyfin";
+    if (!plexCorrect && jellyfinCorrect) arrVerdict = "plex";
+  }
+  return { arrTmdbId, arrVerdict };
+}
 
-  // Nothing to verdict → nothing to look up. The arr maps below are consumed only
-  // inside the per-match map, and on the common healthy library they used to be
-  // built anyway: two TmdbCache reads + a library-sized JSON.parse when warm, and
-  // when cold a full /api/v3/movie + /api/v3/series arrFetch across EVERY syncable
-  // instance — on every request, since a configured-but-empty instance is
-  // deliberately never cached (`cached?.length` above). posterPathMap already
-  // short-circuits on empty input; this guard covers the arr builders too.
-  if (filtered.length === 0) return [];
+const NO_ARR_INDEX: ArrPathIndex = { byPath: new Map(), byName: new Map(), incomplete: false };
+
+export async function getBadMatchReport(activeType?: "MOVIE" | "TV"): Promise<BadMatchReport> {
+  const { plexRows, jellyfinRows, prefixCfg, capped } = await loadLibraries();
+  const plexPathMap = buildPathMap(plexRows, stripResolver(prefixCfg, plexSettingKey));
+  const jfPathMap = buildPathMap(jellyfinRows, stripResolver(prefixCfg, jellyfinSettingKey));
+  const filtered = findConflicts(plexPathMap, jfPathMap, activeType);
+
+  // Nothing to verdict → nothing to look up. On the common healthy library the
+  // arr maps used to be built anyway: two TmdbCache reads + a library-sized
+  // JSON.parse when warm, and when cold a full /api/v3/movie + /api/v3/series
+  // arrFetch across EVERY syncable instance. Likewise only the service a
+  // conflict is judged by (the Plex side's media type) is read.
+  if (filtered.length === 0) return { badMatches: [], capped };
+  const needs = (type: "MOVIE" | "TV") => filtered.some((m) => m.plex.mediaType === type);
 
   const [posters, movieArr, tvArr] = await Promise.all([
     posterPathMap(filtered.flatMap((m) => [m.plex, m.jellyfin])),
-    buildArrPathMap("MOVIE"),
-    buildArrPathMap("TV"),
+    needs("MOVIE") ? loadArrPathIndex("MOVIE") : NO_ARR_INDEX,
+    needs("TV") ? loadArrPathIndex("TV") : NO_ARR_INDEX,
   ]);
 
   const side = (e: PathEntry): BadMatchSide => ({
@@ -440,34 +612,13 @@ export async function getBadMatches(activeType?: "MOVIE" | "TV"): Promise<BadMat
     serverInstance: e.serverInstance,
   });
 
-  return filtered.map((m) => {
-    const arrMap = m.plex.mediaType === "MOVIE" ? movieArr : tvArr;
-    // Match the arr map key (buildArrPathMap keys by the arr path basename): for
-    // TV that's the SERIES folder — m.relativePath is already reduced to it by
-    // toMatchKey — while for movies it's the movie's own folder (the file's
-    // parent). Using folderOf for TV yields the SEASON folder and never matches
-    // Sonarr, so split by mediaType (same selector as movieArr/tvArr above).
-    const folder = m.plex.mediaType === "TV"
-      ? m.relativePath
-      : (folderOf(m.plex.filePath) || folderOf(m.jellyfin.filePath)).split("/").pop() ?? "";
-    const arrTmdbId = arrMap.get(folder) ?? null;
-
-    let arrVerdict: "plex" | "jellyfin" | null = null;
-    if (arrTmdbId !== null) {
-      const plexCorrect = m.plex.tmdbId === arrTmdbId;
-      const jellyfinCorrect = m.jellyfin.tmdbId === arrTmdbId;
-      if (plexCorrect && !jellyfinCorrect) arrVerdict = "jellyfin";
-      if (!plexCorrect && jellyfinCorrect) arrVerdict = "plex";
-    }
-
-    return {
-      relativePath: m.relativePath,
-      plex: side(m.plex),
-      plexRatingKey: m.plex.key,
-      jellyfin: side(m.jellyfin),
-      jellyfinItemId: m.jellyfin.key,
-      arrTmdbId,
-      arrVerdict,
-    };
-  });
+  const badMatches = filtered.map((m): BadMatchItem => ({
+    relativePath: m.relativePath,
+    plex: side(m.plex),
+    plexRatingKey: m.plex.key,
+    jellyfin: side(m.jellyfin),
+    jellyfinItemId: m.jellyfin.key,
+    ...arrVerdictFor(m, m.plex.mediaType === "MOVIE" ? movieArr : tvArr),
+  }));
+  return { badMatches, capped };
 }

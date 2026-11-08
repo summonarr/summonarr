@@ -22,6 +22,9 @@ import { withBasePath } from "@/lib/base-path";
 import { queueTitleHref } from "@/lib/arr-manage-links";
 import { opensElsewhere } from "@/lib/arr-title-ui";
 import type { ArrHistoryEvent } from "@/lib/arr-history";
+import { EVENTS_ANSWER } from "@/lib/client/arr-answers";
+import { check } from "@/lib/validate";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { arrApi, titleQuery, useTRef, type TitleRef } from "./shared";
 import { snapshotMayPaint } from "./snapshot-rules";
 
@@ -44,21 +47,30 @@ export function HistoryTab({
   // null until the first read answers; a failed FIRST read is not "no history".
   const [events, setEvents] = useState<ArrHistoryEvent[] | null>(null);
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+  // The read, under one key: a newer one (a mark's re-read, Reload) aborts the
+  // one before, so an older answer arriving last can't bring back the list
+  // from before the change. The spinner is the newest read's.
+  const action = useAsyncAction();
+  const loading = action.busy("load");
 
   // The live read's URL — and its snapshot's (one builder: the server keys on it).
   const readPath = useMemo(() => `/api/admin/arr/title/history?${titleQuery(titleRef)}`, [titleRef]);
-  const applySnapshot = useCallback((data: { events: ArrHistoryEvent[] }) => {
-    if (!Array.isArray(data?.events)) return false;
-    setEvents((prev) => (snapshotMayPaint(prev !== null, false) ? data.events : prev));
-  }, []);
-  const snap = useArrSnapshot<{ events: ArrHistoryEvent[] }>(withBasePath(readPath), applySnapshot);
+  // A checked snapshot paints an EMPTY list only; declined, nothing stale is on screen.
+  const applySnapshot = (data: unknown) => {
+    const parsed = check(EVENTS_ANSWER, data);
+    if (!parsed.ok || !snapshotMayPaint(events !== null, false)) return false;
+    setEvents(parsed.value.events);
+    return true;
+  };
+  const snap = useArrSnapshot<unknown>(withBasePath(readPath), applySnapshot);
   const markLive = snap.markLive;
 
   const load = useCallback(async () => {
-    setLoading(true);
-    const res = await arrApi<{ events: ArrHistoryEvent[] }>(readPath, undefined, tRef.current("adminArr.history.loadFailed"));
-    setLoading(false);
+    const res = await action.run("load", (signal) =>
+      arrApi(readPath, { schema: EVENTS_ANSWER, signal }, tRef.current("adminArr.history.loadFailed")),
+    );
+    // Superseded by a newer read, or the manager closed.
+    if (!res) return;
     if (res.ok) {
       setEvents(res.data.events);
       setError("");
@@ -67,14 +79,14 @@ export function HistoryTab({
       // A failed re-read keeps the list it had.
       setError(res.error);
     }
-  }, [readPath, tRef, markLive]);
+  }, [action, readPath, tRef, markLive]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
   async function markFailed(e: ArrHistoryEvent): Promise<string | null> {
-    const res = await arrApi<{ ok: true }>(
+    const res = await arrApi(
       "/api/admin/arr/history/failed",
       { method: "POST", body: { service: titleRef.service, instance: titleRef.instance, arrId: titleRef.arrId, historyId: e.id } },
       t("adminArr.history.markFailedError"),

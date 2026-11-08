@@ -41,13 +41,16 @@ import { AlertTriangle, CalendarDays, Check, ChevronLeft, ChevronRight, Loader2,
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { check } from "@/lib/validate";
 import { posterUrl } from "@/lib/tmdb-types";
-import { ARR_ERROR_KIND_KEYS, isArrErrorKind, type ArrErrorKind } from "@/lib/arr-error-kind";
+import { ARR_ERROR_KIND_KEYS, isArrErrorKind } from "@/lib/arr-error-kind";
 import { manageTabFor, queueTitleHref } from "@/lib/arr-manage-links";
-import type { CalendarEntry, CalendarKind, CalendarStatus } from "@/lib/arr-calendar";
+import type { CalendarKind, CalendarStatus } from "@/lib/arr-calendar";
 import {
   CALENDAR_DAYS,
   addDays,
+  calendarBodyState,
   calendarDays,
   calendarRowCount,
   calendarViewQuery,
@@ -62,22 +65,19 @@ import {
   premiereOf,
   weekStart,
   type CalendarCell,
+  type CalendarDay,
+  type CalendarRow,
   type CalendarStatusFilter,
   type CalendarTypeFilter,
   type CalendarView,
 } from "@/lib/arr-calendar-days";
+import { CalendarReportSchema, searchOutcome, type CalendarReport, type SearchState } from "./arr-calendar-state";
 
 type Service = "radarr" | "sonarr";
 interface InstanceRef { service: Service; slug: string; name: string }
-interface Report {
-  instances: InstanceRef[];
-  errors: Array<{ service: Service; instance: string; kind: ArrErrorKind }>;
-  entries: CalendarEntry[];
-  now: string;
-}
+type Report = CalendarReport;
 /** A report and the window it was read for — a report is only ever drawn for its own window. */
 interface Loaded { start: number; unmonitored: boolean; report: Report }
-type SearchState = { phase: "busy" } | { phase: "started" } | { phase: "nothing" } | { phase: "failed"; message: string };
 
 const STATUS_TONE: Record<CalendarStatus, ChipTone> = {
   downloaded: "approved",
@@ -116,6 +116,14 @@ const PREMIERE_LABEL = {
 } as const;
 
 const canSearch = (c: CalendarCell) => c.status === "missing" && (c.service === "radarr" || c.episodeId !== null);
+
+// A read that never settles (a stuck proxy, a half-open connection) would hold
+// the spinner forever; the server's own arr reads give up well before this.
+const LOAD_TIMEOUT_MS = 90_000;
+// Likewise a Search: the route re-judges the title and queues the command on
+// the arr, each bounded on the server well inside this. Past it the cell shows
+// the failure and its Search comes back.
+const SEARCH_TIMEOUT_MS = 90_000;
 
 /**
  * The calendar read for one window. The live load and its snapshot both use
@@ -181,7 +189,10 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
   // clock stay as they are.
   const applySnapshot = useCallback((data: Report) => {
     if (start === null) return false;
-    setLoaded({ start, unmonitored, report: data });
+    // Stored data, checked like a live answer: a malformed one is declined.
+    const checked = check(CalendarReportSchema, data);
+    if (!checked.ok) return false;
+    setLoaded({ start, unmonitored, report: checked.value });
   }, [start, unmonitored]);
   const snap = useArrSnapshot<Report>(readUrl, applySnapshot);
   const { markLive } = snap;
@@ -191,13 +202,19 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(calendarReadUrl(from, withUnmonitored));
-      const data = (await res.json().catch(() => null)) as (Report & { error?: string }) | null;
+      // The answer is checked before anything draws it: a report with no
+      // entries list (or no clock) is a failed load, not a crash in render.
+      const res = await fetchJson(calendarReadUrl(from, withUnmonitored), {
+        schema: CalendarReportSchema,
+        timeoutMs: LOAD_TIMEOUT_MS,
+        fallbackError: t("adminArr.calendar.loadFailed"),
+      });
       if (id !== seq.current) return;
-      if (!res.ok || !data) {
-        setError(data?.error ?? t("adminArr.calendar.loadFailed"));
+      if (!res.ok) {
+        setError(res.error || t("adminArr.calendar.loadFailed"));
         return;
       }
+      const data = res.data;
       const current = weekStart(Date.parse(data.now), firstDayRef.current);
       if (followToday.current && Number.isFinite(current) && current !== from) {
         // The server says it is another week: read that one instead.
@@ -212,8 +229,6 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
       // status — but a search still in flight keeps its spinner (and its
       // disabled button) until its own answer arrives.
       setSearches((s) => Object.fromEntries(Object.entries(s).filter(([, v]) => v.phase === "busy")));
-    } catch {
-      if (id === seq.current) setError(t("adminArr.calendar.loadFailed"));
     } finally {
       if (id === seq.current) setLoading(false);
     }
@@ -239,25 +254,9 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
     const [path, body] = cell.service === "radarr"
       ? ["/api/admin/missing/search", { service: "radarr", instance: cell.instance, arrId: cell.arrId, mode: "missing" }]
       : ["/api/admin/arr/title/command", { service: "sonarr", instance: cell.instance, id: cell.arrId, action: "searchEpisodes", episodeIds: [cell.episodeId], missingOnly: true }];
-    try {
-      const res = await fetch(withBasePath(path), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const data = res.ok ? null : ((await res.json().catch(() => null)) as { error?: string; nothingMissing?: boolean } | null);
-      // Only the route's nothing-missing answer is "nothing left": its other
-      // 409s (an episode id no longer on the series after a Sonarr refresh, the
-      // arr's own refusal) are failures with the route's own message, and the
-      // Search button stays.
-      if (res.status === 409 && data?.nothingMissing === true) {
-        setSearches((s) => ({ ...s, [cell.key]: { phase: "nothing" } }));
-        return;
-      }
-      setSearches((s) => ({ ...s, [cell.key]: res.ok ? { phase: "started" } : { phase: "failed", message: data?.error ?? t("adminArr.manage.commandFailed") } }));
-    } catch {
-      setSearches((s) => ({ ...s, [cell.key]: { phase: "failed", message: t("adminArr.manage.commandFailed") } }));
-    }
+    const res = await fetchJson(withBasePath(path), { init: jsonInit("POST", body), timeoutMs: SEARCH_TIMEOUT_MS });
+    // Only the route's nothing-missing 409 is "nothing left" (searchOutcome).
+    setSearches((s) => ({ ...s, [cell.key]: searchOutcome(res, t("adminArr.manage.commandFailed")) }));
   }
 
   const dayFmt = useMemo(() => new Intl.DateTimeFormat(locale, { weekday: "long", month: "long", day: "numeric" }), [locale]);
@@ -317,10 +316,25 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
   // Nor can it be made while an instance the filters include couldn't be read:
   // the amber line above names it, and its schedule is unknown, not empty.
   const viewFailed = report !== null && failedInView(report.errors, instanceFilter, typeFilter);
+  const body = calendarBodyState({ hasReport: report !== null, hasError: error !== "", allDown, viewFailed, rows: days.length, inWindow: scoped.length });
   const statusText = (c: CalendarCell) =>
     c.status === "downloading" && c.progress !== null
       ? t("adminArr.status.downloadingProgress", { progress: pctFmt.format(c.progress) })
       : t(STATUS_LABEL[c.status]);
+
+  // Removed from the arr: re-read the weeks so its entries go.
+  const reloadWindow = () => {
+    if (start !== null) void load(start, unmonitored);
+  };
+  const rowContext: RowContext = {
+    searches,
+    multi,
+    nameOf,
+    statusText,
+    timeFmt,
+    onSearch: (c) => void search(c),
+    onRemoved: reloadWindow,
+  };
 
   // grid-cols-1 is minmax(0, 1fr): the column never grows past the page, so a
   // filter track wider than a phone scrolls inside itself instead of the page.
@@ -334,6 +348,7 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
         ]}
         active={typeFilter}
         onChange={setTypeFilter}
+        label={t("adminQueue.filter.typeLabel")}
         className="mb-0"
         right={
           <div className="flex flex-wrap items-center gap-2">
@@ -393,6 +408,7 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
         ]}
         active={statusFilter}
         onChange={setStatusFilter}
+        label={t("adminQueue.filter.statusLabel")}
         className="mb-0"
         right={multi ? (
           <StyledSelect compact className="w-auto" value={instanceFilter} onChange={(e) => setInstanceFilter(e.target.value)} aria-label={t("adminArr.common.instance")}>
@@ -422,140 +438,184 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
         </p>
       ))}
 
-      {report === null ? (
-        error ? null : <div className="flex items-center gap-2 py-10 text-sm text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> {t("adminArr.common.loading")}</div>
-      ) : days.length === 0 ? (
+      {body === "loading" && (
+        <div className="flex items-center gap-2 py-10 text-sm text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> {t("adminArr.common.loading")}</div>
+      )}
+      {body === "filteredEmpty" && (
         // Titles are in the window but the status/type chips hide them all.
-        error || allDown ? null : scoped.length > 0 ? (
-          <EmptyState
-            icon={CalendarDays}
-            title={t("adminArr.calendar.emptyFiltered")}
-            description={t("adminArr.calendar.emptyFilteredHint")}
-            action={
-              <Button variant="outline" size="sm" onClick={() => { setStatusFilter("all"); setTypeFilter("all"); }}>
-                {t("adminArr.calendar.clearFilters")}
-              </Button>
-            }
-          />
-        ) : viewFailed ? null : (
-          <EmptyState
-            icon={CalendarDays}
-            title={t("adminArr.calendar.empty")}
-            description={t(unmonitored ? "adminArr.calendar.emptyHintAll" : "adminArr.calendar.emptyHint")}
-          />
-        )
-      ) : (
+        <EmptyState
+          icon={CalendarDays}
+          title={t("adminArr.calendar.emptyFiltered")}
+          description={t("adminArr.calendar.emptyFilteredHint")}
+          action={
+            <Button variant="outline" size="sm" onClick={() => { setStatusFilter("all"); setTypeFilter("all"); }}>
+              {t("adminArr.calendar.clearFilters")}
+            </Button>
+          }
+        />
+      )}
+      {body === "empty" && (
+        <EmptyState
+          icon={CalendarDays}
+          title={t("adminArr.calendar.empty")}
+          description={t(unmonitored ? "adminArr.calendar.emptyHintAll" : "adminArr.calendar.emptyHint")}
+        />
+      )}
+      {body === "grid" && (
         <div className="grid grid-cols-1 gap-4 transition-opacity" style={loading ? { opacity: 0.6 } : undefined} aria-busy={loading}>
-          {days.map((day) => {
-            const isToday = day.key === localDayKey(todayMs);
-            return (
-              <section key={day.key} className="grid grid-cols-1 gap-2">
-                <h2 className="m-0 flex items-center gap-2 text-sm font-semibold text-zinc-100">
-                  {dayFmt.format(day.ms)}
-                  {isToday && <Chip tone="accent">{t("adminArr.calendar.todayChip")}</Chip>}
-                </h2>
-                <ul className="m-0 grid grid-cols-1 list-none gap-0 rounded-lg p-0" style={{ border: "1px solid var(--ds-border)", background: "var(--ds-bg-1)" }}>
-                  {day.rows.map((row, i) => {
-                    const e = row.entry;
-                    const href = row.tmdbId !== null ? (e.service === "radarr" ? `/movie/${row.tmdbId}` : `/tv/${row.tmdbId}`) : null;
-                    const premiere = premiereOf(e);
-                    const finale = finaleOf(e.finaleType);
-                    const releaseKinds = row.kinds.filter((k): k is Exclude<CalendarKind, "episode"> => k !== "episode");
-                    return (
-                      // The per-instance cells wrap under the title on a narrow screen.
-                      <li key={row.key} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2" style={i > 0 ? { borderTop: "1px solid var(--ds-border)" } : undefined}>
-                        <Poster src={posterUrl(row.posterPath)} letter={(e.title[0] ?? "?").toUpperCase()} w={26} h={39} radius={3} />
-                        <div className="min-w-0 flex-1 basis-48">
-                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                            {href ? (
-                              <Link href={href} className="truncate text-sm font-medium text-zinc-100 hover:underline">{e.title}</Link>
-                            ) : (
-                              <span className="truncate text-sm font-medium text-zinc-100">{e.title}</span>
-                            )}
-                            {e.kind === "episode" && e.seasonNumber !== null && e.episodeNumber !== null && (
-                              <span className="ds-mono text-xs text-zinc-400">{episodeCode({ seasonNumber: e.seasonNumber, episodeNumber: e.episodeNumber })}</span>
-                            )}
-                            {premiere && <Chip tone="accent">{t(PREMIERE_LABEL[premiere])}</Chip>}
-                            {finale && <Chip tone="pending">{t(FINALE_LABEL[finale])}</Chip>}
-                          </div>
-                          <div className="flex flex-wrap items-center gap-x-2 text-xs text-zinc-500">
-                            {e.kind === "episode" ? <span className="truncate">{e.episodeTitle ?? "—"}</span> : <span>{releaseKinds.map((k) => t(KIND_LABEL[k])).join(" · ")}</span>}
-                            {e.kind === "episode" && <span>{timeFmt.format(Date.parse(e.date))}</span>}
-                            {e.network && <span>{e.network}</span>}
-                          </div>
-                          {row.cells.map((c) => {
-                            const st = searches[c.key];
-                            const prefix = multi ? `${nameOf(c.service, c.instance)}: ` : "";
-                            if (st?.phase === "failed") {
-                              return <p key={c.key} role="alert" className="m-0 text-xs" style={{ color: "var(--ds-danger)" }}>{prefix}{st.message}</p>;
-                            }
-                            if (st?.phase === "nothing") {
-                              return <p key={c.key} role="status" className="m-0 text-xs text-zinc-400">{prefix}{t("adminArr.calendar.nothingToSearch")}</p>;
-                            }
-                            return null;
-                          })}
-                        </div>
-                        <div className="ml-auto flex shrink-0 flex-col items-end gap-1">
-                          {row.cells.map((c) => {
-                            const st = searches[c.key];
-                            const searchable = canSearch(c) && st?.phase !== "nothing";
-                            return (
-                              <div key={c.key} className="flex items-center gap-1.5">
-                                {multi && <span className="text-xs text-zinc-500">{nameOf(c.service, c.instance)}</span>}
-                                <Chip tone={STATUS_TONE[c.status]}>{statusText(c)}</Chip>
-                                {/* Radarr/Sonarr's own verdict on the download (import blocked, a
-                                    tracked warning): the queue row is where it gets fixed. */}
-                                {c.attention && (
-                                  <Link
-                                    href={queueTitleHref({ service: c.service, instance: c.instance, arrId: c.arrId })}
-                                    className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
-                                  >
-                                    <Chip tone="pending" className="hover:underline">
-                                      <AlertTriangle style={{ width: 11, height: 11 }} aria-hidden /> {t("adminManage.queue.attention")}
-                                    </Chip>
-                                  </Link>
-                                )}
-                                {searchable && (
-                                  <Button
-                                    variant="ghost"
-                                    size="icon-sm"
-                                    disabled={st?.phase === "busy" || st?.phase === "started"}
-                                    onClick={() => void search(c)}
-                                    title={st?.phase === "started" ? t("adminArr.calendar.searchStarted") : t("adminArr.calendar.search")}
-                                    aria-label={multi
-                                      ? t("adminArr.calendar.searchAriaOn", { title: e.title, instance: nameOf(c.service, c.instance) })
-                                      : t("adminArr.calendar.searchAria", { title: e.title })}
-                                  >
-                                    {st?.phase === "busy" ? <Loader2 className="animate-spin" /> : st?.phase === "started" ? <Check /> : <Search />}
-                                  </Button>
-                                )}
-                                {/* The title on THIS instance — a row folds every instance that carries it. */}
-                                <ManageTitleButton
-                                  service={c.service}
-                                  instance={c.instance}
-                                  target={{ arrId: c.arrId }}
-                                  instanceLabel={nameOf(c.service, c.instance)}
-                                  variant="icon"
-                                  initialTab={manageTabFor("calendar", c.service)}
-                                  // Removed from the arr: re-read the weeks so its entries go.
-                                  onRemoved={() => {
-                                    if (start !== null) void load(start, unmonitored);
-                                  }}
-                                />
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </section>
-            );
-          })}
+          {days.map((day) => (
+            <CalendarDaySection
+              key={day.key}
+              day={day}
+              heading={dayFmt.format(day.ms)}
+              isToday={day.key === localDayKey(todayMs)}
+              row={rowContext}
+            />
+          ))}
         </div>
       )}
       <p className="m-0 text-xs text-zinc-500">{t("adminArr.calendar.footnote")}</p>
+    </div>
+  );
+}
+
+// What every row of the grid needs from the page.
+interface RowContext {
+  searches: Readonly<Record<string, SearchState>>;
+  /** More than one instance configured: each cell names its instance. */
+  multi: boolean;
+  nameOf: (service: Service, slug: string) => string;
+  statusText: (c: CalendarCell) => string;
+  timeFmt: Intl.DateTimeFormat;
+  onSearch: (c: CalendarCell) => void;
+  onRemoved: () => void;
+}
+
+// One day: its heading (with a Today chip) and the titles on it.
+function CalendarDaySection({ day, heading, isToday, row }: { day: CalendarDay; heading: string; isToday: boolean; row: RowContext }) {
+  const t = useT();
+  return (
+    <section className="grid grid-cols-1 gap-2">
+      <h2 className="m-0 flex items-center gap-2 text-sm font-semibold text-zinc-100">
+        {heading}
+        {isToday && <Chip tone="accent">{t("adminArr.calendar.todayChip")}</Chip>}
+      </h2>
+      <ul className="m-0 grid grid-cols-1 list-none gap-0 rounded-lg p-0" style={{ border: "1px solid var(--ds-border)", background: "var(--ds-bg-1)" }}>
+        {day.rows.map((r, i) => (
+          <CalendarRowItem key={r.key} row={r} first={i === 0} ctx={row} />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+// One title on one day: poster, title and episode/release line, then a status
+// (and its actions) per instance that carries it. The per-instance cells wrap
+// under the title on a narrow screen.
+function CalendarRowItem({ row, first, ctx }: { row: CalendarRow; first: boolean; ctx: RowContext }) {
+  const t = useT();
+  const e = row.entry;
+  const href = row.tmdbId !== null ? (e.service === "radarr" ? `/movie/${row.tmdbId}` : `/tv/${row.tmdbId}`) : null;
+  const premiere = premiereOf(e);
+  const finale = finaleOf(e.finaleType);
+  const releaseKinds = row.kinds.filter((k): k is Exclude<CalendarKind, "episode"> => k !== "episode");
+  return (
+    <li className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2" style={first ? undefined : { borderTop: "1px solid var(--ds-border)" }}>
+      <Poster src={posterUrl(row.posterPath)} letter={(e.title[0] ?? "?").toUpperCase()} w={26} h={39} radius={3} />
+      <div className="min-w-0 flex-1 basis-48">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+          {href ? (
+            <Link href={href} className="truncate text-sm font-medium text-zinc-100 hover:underline">{e.title}</Link>
+          ) : (
+            <span className="truncate text-sm font-medium text-zinc-100">{e.title}</span>
+          )}
+          {e.kind === "episode" && e.seasonNumber !== null && e.episodeNumber !== null && (
+            <span className="ds-mono text-xs text-zinc-400">{episodeCode({ seasonNumber: e.seasonNumber, episodeNumber: e.episodeNumber })}</span>
+          )}
+          {premiere && <Chip tone="accent">{t(PREMIERE_LABEL[premiere])}</Chip>}
+          {finale && <Chip tone="pending">{t(FINALE_LABEL[finale])}</Chip>}
+        </div>
+        <div className="flex flex-wrap items-center gap-x-2 text-xs text-zinc-500">
+          {e.kind === "episode" ? <span className="truncate">{e.episodeTitle ?? "—"}</span> : <span>{releaseKinds.map((k) => t(KIND_LABEL[k])).join(" · ")}</span>}
+          {e.kind === "episode" && <span>{ctx.timeFmt.format(Date.parse(e.date))}</span>}
+          {e.network && <span>{e.network}</span>}
+        </div>
+        {row.cells.map((c) => (
+          <CellMessage key={c.key} c={c} ctx={ctx} />
+        ))}
+      </div>
+      <div className="ml-auto flex shrink-0 flex-col items-end gap-1">
+        {row.cells.map((c) => (
+          <CellActions key={c.key} c={c} title={e.title} ctx={ctx} />
+        ))}
+      </div>
+    </li>
+  );
+}
+
+// A cell's Search result worth a line under the title: a failure, or nothing
+// left to search for.
+function CellMessage({ c, ctx }: { c: CalendarCell; ctx: RowContext }) {
+  const t = useT();
+  const st = ctx.searches[c.key];
+  const prefix = ctx.multi ? `${ctx.nameOf(c.service, c.instance)}: ` : "";
+  if (st?.phase === "failed") {
+    return <p role="alert" className="m-0 text-xs" style={{ color: "var(--ds-danger)" }}>{prefix}{st.message}</p>;
+  }
+  if (st?.phase === "nothing") {
+    return <p role="status" className="m-0 text-xs text-zinc-400">{prefix}{t("adminArr.calendar.nothingToSearch")}</p>;
+  }
+  return null;
+}
+
+// One instance's status for the title, as the instance reports it, and what
+// can be done there: the queue row when the download needs attention, a
+// Search while it's missing, the title manager.
+function CellActions({ c, title, ctx }: { c: CalendarCell; title: string; ctx: RowContext }) {
+  const t = useT();
+  const st = ctx.searches[c.key];
+  const searchable = canSearch(c) && st?.phase !== "nothing";
+  const instanceName = ctx.nameOf(c.service, c.instance);
+  return (
+    <div className="flex items-center gap-1.5">
+      {ctx.multi && <span className="text-xs text-zinc-500">{instanceName}</span>}
+      <Chip tone={STATUS_TONE[c.status]}>{ctx.statusText(c)}</Chip>
+      {/* Radarr/Sonarr's own verdict on the download (import blocked, a
+          tracked warning): the queue row is where it gets fixed. */}
+      {c.attention && (
+        <Link
+          href={queueTitleHref({ service: c.service, instance: c.instance, arrId: c.arrId })}
+          className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
+        >
+          <Chip tone="pending" className="hover:underline">
+            <AlertTriangle style={{ width: 11, height: 11 }} aria-hidden /> {t("adminManage.queue.attention")}
+          </Chip>
+        </Link>
+      )}
+      {searchable && (
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          disabled={st?.phase === "busy" || st?.phase === "started"}
+          onClick={() => ctx.onSearch(c)}
+          title={st?.phase === "started" ? t("adminArr.calendar.searchStarted") : t("adminArr.calendar.search")}
+          aria-label={ctx.multi
+            ? t("adminArr.calendar.searchAriaOn", { title, instance: instanceName })
+            : t("adminArr.calendar.searchAria", { title })}
+        >
+          {st?.phase === "busy" ? <Loader2 className="animate-spin" /> : st?.phase === "started" ? <Check /> : <Search />}
+        </Button>
+      )}
+      {/* The title on THIS instance — a row folds every instance that carries it. */}
+      <ManageTitleButton
+        service={c.service}
+        instance={c.instance}
+        target={{ arrId: c.arrId }}
+        instanceLabel={instanceName}
+        variant="icon"
+        initialTab={manageTabFor("calendar", c.service)}
+        onRemoved={ctx.onRemoved}
+      />
     </div>
   );
 }

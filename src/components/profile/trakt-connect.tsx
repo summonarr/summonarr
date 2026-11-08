@@ -1,22 +1,26 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Check, Copy, ExternalLink, Link, Loader2, Unlink } from "@/components/icons";
+import { useState } from "react";
+import { Check, Copy, ExternalLink, LinkIcon, Loader2, Unlink } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { useCopyFeedback } from "@/hooks/use-copy-feedback";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { StepUpPasswordForm } from "@/components/profile/step-up-password-form";
 import { stepUpNeedOf, withStepUpPassword } from "@/lib/client/step-up";
+import { readDeviceCode, type DeviceCode } from "./trakt-device-poll";
+import { useTraktDevicePoll, type PollEnd } from "./use-trakt-device-poll";
 
 // The user's own Trakt connection (src/lib/trakt-user.ts, guardrail 34c).
 // Connecting is a device-code flow: the server hands back a short code, the
 // user enters it at trakt.tv/activate, and this component polls until Trakt
-// answers. Each use is the user's own switch: watchlist auto-request (shown
-// only while that feature is on and they may auto-request) and the For You
-// history (shown only while For You is on).
+// answers (use-trakt-device-poll.ts). Each use is the user's own switch:
+// watchlist auto-request (shown only while that feature is on and they may
+// auto-request) and the For You history (shown only while For You is on).
 
 export interface TraktConnectProps {
   connected: boolean;
@@ -30,10 +34,25 @@ export interface TraktConnectProps {
   isJellyfin: boolean;
 }
 
-interface DeviceCode {
-  userCode: string;
-  verificationUrl: string;
-  interval: number;
+type TraktStatus = TraktConnectProps["status"];
+
+// The switch and status fields of the GET-shaped state /api/profile/trakt
+// answers (getTraktProfileState). A field that isn't there is left as it is.
+function readTraktState(data: unknown): {
+  watchlistAutoRequest?: boolean;
+  historySeeds?: boolean;
+  status?: TraktStatus;
+  syncedAt?: string | null;
+} {
+  if (!data || typeof data !== "object") return {};
+  const d = data as Record<string, unknown>;
+  const status = d.status;
+  return {
+    ...(typeof d.watchlistAutoRequest === "boolean" ? { watchlistAutoRequest: d.watchlistAutoRequest } : {}),
+    ...(typeof d.historySeeds === "boolean" ? { historySeeds: d.historySeeds } : {}),
+    ...(status === "ok" || status === "error" || status === "reauth" || status === null ? { status } : {}),
+    ...(typeof d.syncedAt === "string" || d.syncedAt === null ? { syncedAt: d.syncedAt as string | null } : {}),
+  };
 }
 
 export function TraktConnect(props: TraktConnectProps) {
@@ -49,147 +68,111 @@ export function TraktConnect(props: TraktConnectProps) {
   const [device, setDevice] = useState<DeviceCode | null>(null);
   const [busy, setBusy] = useState<"start" | "disconnect" | "toggle" | null>(null);
   const [confirming, setConfirming] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Connecting Trakt needs a step-up (guardrail 6g): the server answers
   // "password-required" and this asks for the password inline.
   const [stepUp, setStepUp] = useState(false);
   const [stepUpError, setStepUpError] = useState<string | null>(null);
-  // The poll loop's timer, so a cancel or an unmount stops it.
-  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Bumped by every stop (cancel, unmount). A poll request already in flight
-  // when that happens would otherwise resume afterwards, reschedule itself and
-  // keep polling (and report "expired") for a flow the user abandoned.
-  const pollGen = useRef(0);
+  const poller = useTraktDevicePoll(endPoll);
 
-  useEffect(() => () => {
-    pollGen.current += 1;
-    if (pollTimer.current) clearTimeout(pollTimer.current);
-  }, []);
-
-  function stopPolling() {
-    pollGen.current += 1;
-    if (pollTimer.current) clearTimeout(pollTimer.current);
-    pollTimer.current = null;
-  }
-
-  function schedulePoll(intervalSeconds: number) {
-    stopPolling();
-    const gen = pollGen.current;
-    pollTimer.current = setTimeout(() => void poll(intervalSeconds, gen), Math.max(intervalSeconds, 2) * 1000);
-  }
-
-  async function poll(intervalSeconds: number, gen: number) {
-    try {
-      const res = await fetch(withBasePath("/api/profile/trakt/device/poll"), { method: "POST" });
-      const data = await res.json().catch(() => ({}));
-      if (pollGen.current !== gen) return;
-      if (!res.ok) {
-        // Transient (Trakt unreachable, rate limited): keep waiting.
-        if (res.status === 429 || res.status >= 500) {
-          schedulePoll(intervalSeconds * 2);
-          return;
-        }
-        setDevice(null);
-        setError(data?.error ?? t("profile.trakt.error.connect"));
+  // A poll run's outcome: the code is done with either way.
+  function endPoll(step: PollEnd) {
+    setDevice(null);
+    switch (step.kind) {
+      case "connected":
+        setConnected(true);
+        setUsername(step.username);
+        setStatus(null);
+        setSyncedAt(null);
+        void reloadState();
         return;
-      }
-      switch (data?.state) {
-        case "pending":
-          schedulePoll(intervalSeconds);
-          return;
-        case "connected":
-          setDevice(null);
-          setConnected(true);
-          setUsername(typeof data.username === "string" ? data.username : null);
-          setStatus(null);
-          setSyncedAt(null);
-          return;
-        case "denied":
-          setDevice(null);
-          setError(t("profile.trakt.error.denied"));
-          return;
-        case "conflict":
-          setDevice(null);
-          setError(t("profile.trakt.error.conflict"));
-          return;
-        default:
-          setDevice(null);
-          setError(t("profile.trakt.error.expired"));
-      }
-    } catch {
-      if (pollGen.current === gen) schedulePoll(intervalSeconds * 2);
+      case "denied":
+        setError(t("profile.trakt.error.denied"));
+        return;
+      case "conflict":
+        setError(t("profile.trakt.error.conflict"));
+        return;
+      case "failed":
+        setError(step.error || t("profile.trakt.error.connect"));
+        return;
+      case "expired":
+        setError(t("profile.trakt.error.expired"));
     }
+  }
+
+  // Apply the server's state for the switches and the sync line.
+  function applyState(data: unknown) {
+    const next = readTraktState(data);
+    if (next.watchlistAutoRequest !== undefined) setWatchlist(next.watchlistAutoRequest);
+    if (next.historySeeds !== undefined) setHistory(next.historySeeds);
+    if (next.status !== undefined) setStatus(next.status);
+    if (next.syncedAt !== undefined) setSyncedAt(next.syncedAt);
+  }
+
+  // A new connection starts from the server's switches, not the ones shown: a
+  // disconnect deletes the connection row, so a reconnect gets the defaults
+  // (both on) whatever the page still showed from before. A failure keeps what
+  // is shown; the next page load reads it again.
+  async function reloadState() {
+    const res = await fetchJson(withBasePath("/api/profile/trakt"));
+    if (res.ok && poller.alive()) applyState(res.data);
   }
 
   async function start(confirmPassword?: string) {
     setBusy("start");
     setError(null);
-    try {
-      const res = await fetch(withBasePath("/api/profile/trakt/device"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(withStepUpPassword({}, confirmPassword)),
-      });
-      const data = await res.json().catch(() => ({}));
-      const need = stepUpNeedOf(res.status, data);
-      if (need) {
-        setStepUp(true);
-        setStepUpError(need === "retry" ? t("profile.sessions.error.incorrectPassword") : null);
-        return;
-      }
-      if (!res.ok || typeof data?.userCode !== "string") {
-        setError(data?.message ?? data?.error ?? t("profile.trakt.error.connect"));
-        return;
-      }
-      setStepUp(false);
-      setStepUpError(null);
-      const interval = typeof data.interval === "number" && data.interval > 0 ? data.interval : 5;
-      setDevice({ userCode: data.userCode, verificationUrl: data.verificationUrl, interval });
-      schedulePoll(interval);
-    } catch {
+    const res = await fetchJson(withBasePath("/api/profile/trakt/device"), {
+      init: jsonInit("POST", withStepUpPassword({}, confirmPassword)),
+      fallbackError: t("profile.trakt.error.connect"),
+    });
+    // The page went while the code was being made: start no poll for it.
+    if (!poller.alive()) return;
+    setBusy(null);
+    if (!res.ok && res.status === 0) {
       setError(t("profile.error.network"));
-    } finally {
-      setBusy(null);
+      return;
     }
+    const data = res.ok ? res.data : res.body;
+    const need = stepUpNeedOf(res.status, data);
+    if (need) {
+      setStepUp(true);
+      setStepUpError(need === "retry" ? t("profile.sessions.error.incorrectPassword") : null);
+      return;
+    }
+    const code = res.ok ? readDeviceCode(data) : null;
+    if (!code) {
+      setError(res.ok ? t("profile.trakt.error.connect") : res.error);
+      return;
+    }
+    setStepUp(false);
+    setStepUpError(null);
+    setDevice(code);
+    poller.begin(code.interval, code.expiresIn);
   }
 
   function cancel() {
-    stopPolling();
+    poller.stop();
     setDevice(null);
-  }
-
-  async function copyCode() {
-    if (!device) return;
-    try {
-      await navigator.clipboard.writeText(device.userCode);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      setCopied(false);
-    }
   }
 
   async function disconnect() {
     setBusy("disconnect");
     setConfirming(false);
     setError(null);
-    try {
-      const res = await fetch(withBasePath("/api/profile/trakt"), { method: "DELETE" });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data?.error ?? t("profile.trakt.error.disconnect"));
-        return;
-      }
-      setConnected(false);
-      setUsername(null);
-      setStatus(null);
-      setSyncedAt(null);
-    } catch {
-      setError(t("profile.error.network"));
-    } finally {
-      setBusy(null);
+    const res = await fetchJson(withBasePath("/api/profile/trakt"), {
+      init: { method: "DELETE" },
+      fallbackError: t("profile.trakt.error.disconnect"),
+    });
+    if (!poller.alive()) return;
+    setBusy(null);
+    if (!res.ok) {
+      setError(res.status === 0 ? t("profile.error.network") : res.error);
+      return;
     }
+    setConnected(false);
+    setUsername(null);
+    setStatus(null);
+    setSyncedAt(null);
   }
 
   // Saves on flip and rolls back if the save fails.
@@ -199,23 +182,20 @@ export function TraktConnect(props: TraktConnectProps) {
     set(next);
     setBusy("toggle");
     setError(null);
-    try {
-      const res = await fetch(withBasePath("/api/profile/trakt"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [field]: next }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        set(!next);
-        setError(data?.error ?? t("profile.error.saveFailed"));
-      }
-    } catch {
+    const res = await fetchJson(withBasePath("/api/profile/trakt"), {
+      init: jsonInit("PATCH", { [field]: next }),
+      fallbackError: t("profile.error.saveFailed"),
+    });
+    if (!poller.alive()) return;
+    setBusy(null);
+    if (!res.ok) {
       set(!next);
-      setError(t("profile.error.network"));
-    } finally {
-      setBusy(null);
+      setError(res.status === 0 ? t("profile.error.network") : res.error);
+      return;
     }
+    // The saved state, both switches, as the server now has it.
+    const data = res.data;
+    applyState(data);
   }
 
   let statusLine: string | null = null;
@@ -238,32 +218,22 @@ export function TraktConnect(props: TraktConnectProps) {
           </p>
           {statusLine && <p className="text-xs text-zinc-500">{statusLine}</p>}
           {props.uses.watchlist && (
-            <div className="flex items-start justify-between gap-4 py-2">
-              <div>
-                <p className="text-sm font-medium text-zinc-200">{t("profile.trakt.watchlistLabel")}</p>
-                <p className="text-xs text-zinc-500 mt-0.5">{t("profile.trakt.watchlistHint")}</p>
-              </div>
-              <Switch
-                checked={watchlist}
-                disabled={busy !== null}
-                onCheckedChange={(v) => void toggle("watchlistAutoRequest", v)}
-                aria-label={t("profile.trakt.watchlistLabel")}
-              />
-            </div>
+            <TraktSwitchRow
+              label={t("profile.trakt.watchlistLabel")}
+              hint={t("profile.trakt.watchlistHint")}
+              checked={watchlist}
+              busy={busy !== null}
+              onFlip={(v) => void toggle("watchlistAutoRequest", v)}
+            />
           )}
           {props.uses.history && (
-            <div className="flex items-start justify-between gap-4 py-2">
-              <div>
-                <p className="text-sm font-medium text-zinc-200">{t("profile.trakt.historyLabel")}</p>
-                <p className="text-xs text-zinc-500 mt-0.5">{t("profile.trakt.historyHint")}</p>
-              </div>
-              <Switch
-                checked={history}
-                disabled={busy !== null}
-                onCheckedChange={(v) => void toggle("historySeeds", v)}
-                aria-label={t("profile.trakt.historyLabel")}
-              />
-            </div>
+            <TraktSwitchRow
+              label={t("profile.trakt.historyLabel")}
+              hint={t("profile.trakt.historyHint")}
+              checked={history}
+              busy={busy !== null}
+              onFlip={(v) => void toggle("historySeeds", v)}
+            />
           )}
           {confirming ? (
             <div className="flex flex-wrap items-center gap-2">
@@ -289,35 +259,7 @@ export function TraktConnect(props: TraktConnectProps) {
           )}
         </>
       ) : device ? (
-        <div className="space-y-3 rounded-md border border-[var(--ds-border)] bg-[var(--ds-bg-1)] p-3">
-          <p className="text-sm text-zinc-300">{t("profile.trakt.enterCode")}</p>
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="ds-mono text-2xl font-semibold tracking-widest text-zinc-100" aria-label={t("profile.trakt.codeLabel")}>
-              {device.userCode}
-            </span>
-            <Button type="button" variant="ghost" onClick={copyCode} aria-label={t("profile.trakt.copyCode")} title={t("profile.trakt.copyCode")}>
-              {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-            </Button>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <a
-              href={device.verificationUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--ds-border)] px-3 text-sm text-zinc-100 ds-hover-tint"
-            >
-              <ExternalLink className="w-4 h-4" />
-              {t("profile.trakt.openActivate")}
-            </a>
-            <Button type="button" variant="ghost" onClick={cancel}>
-              {t("profile.common.cancel")}
-            </Button>
-          </div>
-          <p className="flex items-center gap-1.5 text-xs text-zinc-500" role="status" aria-live="polite">
-            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            {t("profile.trakt.waiting")}
-          </p>
-        </div>
+        <DeviceCodePanel device={device} onCancel={cancel} />
       ) : (
         <>
           <p className="text-sm text-zinc-400">
@@ -339,7 +281,7 @@ export function TraktConnect(props: TraktConnectProps) {
             />
           ) : (
             <Button type="button" disabled={busy !== null} onClick={() => void start()} className="w-full sm:w-auto gap-1.5">
-              {busy === "start" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Link className="w-4 h-4" />}
+              {busy === "start" ? <Loader2 className="w-4 h-4 animate-spin" /> : <LinkIcon className="w-4 h-4" />}
               {t("profile.trakt.connect")}
             </Button>
           )}
@@ -351,6 +293,76 @@ export function TraktConnect(props: TraktConnectProps) {
           {error}
         </p>
       )}
+    </div>
+  );
+}
+
+function TraktSwitchRow({ label, hint, checked, busy, onFlip }: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  busy: boolean;
+  onFlip: (next: boolean) => void;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4 py-2">
+      <div>
+        <p className="text-sm font-medium text-zinc-200">{label}</p>
+        <p className="text-xs text-zinc-500 mt-0.5">{hint}</p>
+      </div>
+      {/* aria-disabled, not disabled: a natively disabled switch drops the
+          focus of the keyboard user who just flipped it. toggle() ignores a
+          flip while busy. */}
+      <Switch
+        checked={checked}
+        aria-disabled={busy || undefined}
+        className="aria-disabled:opacity-50"
+        onCheckedChange={onFlip}
+        aria-label={label}
+      />
+    </div>
+  );
+}
+
+// The pending code, the link to enter it at, and the waiting line.
+function DeviceCodePanel({ device, onCancel }: { device: DeviceCode; onCancel: () => void }) {
+  const t = useT();
+  // One tracked timer: a second click restarts the tick, nothing fires after unmount.
+  const { copied, failed, copy } = useCopyFeedback();
+  async function copyCode() {
+    await copy(device.userCode);
+  }
+  return (
+    <div className="space-y-3 rounded-md border border-[var(--ds-border)] bg-[var(--ds-bg-1)] p-3">
+      <p className="text-sm text-zinc-300">{t("profile.trakt.enterCode")}</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="ds-mono text-2xl font-semibold tracking-widest text-zinc-100" aria-label={t("profile.trakt.codeLabel")}>
+          {device.userCode}
+        </span>
+        <Button type="button" variant="ghost" onClick={copyCode} aria-label={t("profile.trakt.copyCode")} title={t("profile.trakt.copyCode")}>
+          {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+        </Button>
+      </div>
+      {/* No clipboard path worked (an insecure page, a denied permission). */}
+      {failed && <p role="alert" className="text-xs text-amber-400">{t("profile.common.copyFailed")}</p>}
+      <div className="flex flex-wrap gap-2">
+        <a
+          href={device.verificationUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--ds-border)] px-3 text-sm text-zinc-100 ds-hover-tint"
+        >
+          <ExternalLink className="w-4 h-4" />
+          {t("profile.trakt.openActivate")}
+        </a>
+        <Button type="button" variant="ghost" onClick={onCancel}>
+          {t("profile.common.cancel")}
+        </Button>
+      </div>
+      <p className="flex items-center gap-1.5 text-xs text-zinc-500" role="status" aria-live="polite">
+        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+        {t("profile.trakt.waiting")}
+      </p>
     </div>
   );
 }

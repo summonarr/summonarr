@@ -10,7 +10,8 @@ const errors: string[] = [];
 console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
 
 const {
-  startFixMatchJob, getFixMatchJob, findRunningFixMatchJob, fixMatchQueueAhead, listFixMatchJobs, fixMatchJobKey, FixMatchError, _resetFixMatchJobsForTests,
+  startFixMatchJob, getFixMatchJob, findRunningFixMatchJob, fixMatchQueueAhead, listFixMatchJobs, fixMatchJobKey, fixMatchJobScope, FixMatchError, _resetFixMatchJobsForTests,
+  awaitFixMatchJob,
 } = await import("../src/lib/fix-match-jobs.ts");
 
 const settle = () => new Promise((r) => setTimeout(r, 5));
@@ -155,4 +156,65 @@ test("findRunningFixMatchJob returns the running job for a key, null otherwise",
   await settle();
   assert.equal(findRunningFixMatchJob("kd"), null, "a settled job is not 'running'");
   void done;
+});
+
+test("awaitFixMatchJob resolves with the settled job — done, failed, already finished, or queued first — and null for an unknown id", async () => {
+  assert.equal(await awaitFixMatchJob("00000000-0000-4000-8000-000000000000"), null);
+
+  const gate: { release?: () => void } = {};
+  const job = startFixMatchJob("await-done", () => new Promise((r) => { gate.release = () => r({ ok: true, warning: "w" }); }));
+  const first = awaitFixMatchJob(job.id);
+  const second = awaitFixMatchJob(job.id);
+  let settled = false;
+  void first.then(() => { settled = true; });
+  await settle();
+  assert.equal(settled, false, "still running: nothing resolves yet");
+  gate.release?.();
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(a?.status, "done");
+  assert.deepEqual(a?.result, { ok: true, warning: "w" });
+  assert.equal(b?.id, job.id, "every waiter on the job is told");
+  assert.equal((await awaitFixMatchJob(job.id))?.status, "done", "an already-finished job resolves at once");
+
+  const failed = startFixMatchJob("await-failed", async () => { throw new FixMatchError("nope", 404); });
+  const f = await awaitFixMatchJob(failed.id);
+  assert.deepEqual([f?.status, f?.error, f?.errorStatus], ["failed", "nope", 404]);
+  const again = await Promise.race([awaitFixMatchJob(failed.id), settle().then(() => "still waiting")]);
+  assert.equal(typeof again === "string" ? again : again?.status, "failed", "an already-failed job resolves at once");
+
+  // A queued job is awaited through its whole wait and run.
+  const gates: Array<() => void> = [];
+  for (let i = 0; i < 4; i++) startFixMatchJob(`await-busy-${i}`, () => new Promise((r) => { gates.push(() => r({ ok: true })); }));
+  const queued = startFixMatchJob("await-queued", async () => ({ ok: true }));
+  assert.equal(queued.status, "queued");
+  const q = awaitFixMatchJob(queued.id);
+  await settle();
+  gates[0]();
+  assert.equal((await q)?.status, "done");
+  for (const g of gates.slice(1)) g();
+});
+
+test("fixMatchJobScope reads back the server and instance of every key the builder makes, item mode included", () => {
+  for (const server of ["plex", "jellyfin"]) {
+    for (const serverInstance of ["", "remote", "4k"]) {
+      for (const extra of [{}, { itemKey: "abc:def->x" }]) {
+        const key = fixMatchJobKey({ server, serverInstance, mediaType: "MOVIE", tmdbId: 0, correctTmdbId: 2, ...extra });
+        assert.deepEqual(fixMatchJobScope(key), { server, serverInstance }, key);
+      }
+    }
+  }
+});
+
+test("a job that waited in the queue starts its clock when it starts running, not when it was queued", async () => {
+  const gates: Array<() => void> = [];
+  const gated = () => new Promise<{ ok: true }>((r) => { gates.push(() => r({ ok: true })); });
+  for (let i = 0; i < 4; i++) startFixMatchJob(`clock-${i}`, gated, 1_000);
+  const queued = startFixMatchJob("clock-q", gated, 1_000);
+  assert.equal(queued.status, "queued");
+  assert.equal(queued.startedAt, 1_000);
+  await settle();
+  gates[0]();
+  await settle();
+  assert.equal(queued.status, "running");
+  assert.ok(queued.startedAt > 1_000, "re-stamped at launch");
 });

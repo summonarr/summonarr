@@ -8,6 +8,8 @@
 
 // "pt" is Brazilian Portuguese and "zh" Simplified Chinese — the defaults Intl
 // picks for those bare tags, so dates and numbers format to match the copy.
+// There is no Traditional Chinese catalog, so negotiateLocale never maps a
+// Traditional tag (zh-Hant, zh-TW/HK/MO) onto "zh".
 // Every catalog must carry exactly English's keys, plural variants included,
 // so a language whose plurals need categories English lacks (few/many: ru, pl…)
 // can't be added without first widening that rule.
@@ -36,16 +38,13 @@ export function isLocale(value: unknown): value is Locale {
   return typeof value === "string" && (LOCALES as readonly string[]).includes(value);
 }
 
-// Picks the best supported locale from an Accept-Language header. Matches on
-// the primary subtag only ("es-MX" → "es"), honours q-values, ignores q=0, and
-// falls back to `fallback` (the instance default on the server) for an absent
-// or unmatched header.
-export function negotiateLocale(
-  acceptLanguage: string | null | undefined,
-  fallback: Locale = DEFAULT_LOCALE,
-): Locale {
-  if (!acceptLanguage) return fallback;
-  const ranked = acceptLanguage
+type LanguageRange = { primary: string; subtags: string[]; q: number; index: number };
+
+// An Accept-Language header's ranges, best first: q-values honoured, q=0 and
+// empty tags dropped, ties kept in header order (the header lists them in
+// preference order).
+function rankedLanguageRanges(acceptLanguage: string): LanguageRange[] {
+  return acceptLanguage
     .split(",")
     .map((part, index) => {
       const [tag, ...params] = part.trim().split(";");
@@ -57,16 +56,49 @@ export function negotiateLocale(
           q = Number.isFinite(n) ? n : 0;
         }
       }
-      return { primary: tag.trim().toLowerCase().split("-")[0], q, index };
+      const [primary, ...subtags] = tag.trim().toLowerCase().split("-");
+      return { primary, subtags, q, index };
     })
     .filter((r) => r.primary && r.q > 0)
-    // Stable on equal q: earlier entries win, as the header lists them in
-    // preference order.
     .sort((a, b) => b.q - a.q || a.index - b.index);
-  for (const r of ranked) {
+}
+
+// Picks the best supported locale from an Accept-Language header. Matches on
+// the primary subtag only ("es-MX" → "es"), honours q-values, ignores q=0, and
+// falls back to `fallback` (the instance default on the server) for an absent
+// or unmatched header. One exception: a Traditional Chinese tag is skipped, not
+// read as "zh" (Simplified), and so is a bare "zh" ranked after it — Chrome
+// sends "zh-TW,zh;q=0.9", where the bare tag still means Traditional. An
+// explicit Simplified tag (zh-Hans, zh-CN/SG) still matches.
+export function negotiateLocale(
+  acceptLanguage: string | null | undefined,
+  fallback: Locale = DEFAULT_LOCALE,
+): Locale {
+  if (!acceptLanguage) return fallback;
+  let traditionalSeen = false;
+  for (const r of rankedLanguageRanges(acceptLanguage)) {
+    if (r.primary === "zh") {
+      const script = chineseScript(r.subtags);
+      if (script === "hant") {
+        traditionalSeen = true;
+        continue;
+      }
+      if (script === null && traditionalSeen) continue;
+    }
     if (isLocale(r.primary)) return r.primary;
   }
   return fallback;
+}
+
+// "hans"/"hant" from a zh tag's script subtag, else inferred from a region
+// that writes Traditional (TW, HK, MO) or Simplified (CN, SG); null for a bare
+// "zh" or any other region.
+function chineseScript(subtags: string[]): "hans" | "hant" | null {
+  if (subtags.includes("hant")) return "hant";
+  if (subtags.includes("hans")) return "hans";
+  if (subtags.some((s) => s === "tw" || s === "hk" || s === "mo")) return "hant";
+  if (subtags.some((s) => s === "cn" || s === "sg")) return "hans";
+  return null;
 }
 
 // Cookie value wins when valid; otherwise negotiate from the header.

@@ -1,11 +1,15 @@
 import type { SummonarrSession } from "@/lib/api-auth";
 import { hasPermission, parsePermissions, Permission } from "@/lib/permissions";
 
+// Only the two fields the predicate reads, so the client wrapper below needs
+// no cast and a future read of another session field is a compile error there.
+type BadgeSession = { user: Pick<SummonarrSession["user"], "permissions" | "mediaServer"> };
+
 // Admins (ADMIN bit) and issue managers see both badges regardless of their own
 // mediaServer preference; regular users only see the badge for the server they
 // authenticated with. Uses bits so granular MANAGE_ISSUES etc get full context.
 export function getBadgeVisibility(
-  session: SummonarrSession | null,
+  session: BadgeSession | null,
   integrations?: { plex?: boolean; jellyfin?: boolean },
 ): {
   showPlex: boolean;
@@ -57,7 +61,7 @@ export function getClientBadgeVisibility(
         permissions: parsePermissions(user.permissions),
         mediaServer: user.mediaServer ?? null,
       },
-    } as SummonarrSession,
+    },
     integrations,
   );
 }

@@ -348,3 +348,22 @@ test("guardrail 7: the happy path logs nothing", async () => {
   assert.deepEqual(warns, []);
   assert.deepEqual(errors, []);
 });
+
+// ── the web login page uses the same projection ────────────────────────────
+
+test("signInServerOptions keeps exactly { slug, name }, in order, and drops `restricted`", async () => {
+  const { signInServerOptions } = await import("../src/lib/sign-in-servers.ts");
+  const out = signInServerOptions([
+    { slug: "", name: "Home", restricted: false },
+    { slug: "remote", name: "Friend's", restricted: true },
+  ] as Array<{ slug: string; name: string; restricted: boolean }>);
+  assert.deepEqual(out, [{ slug: "", name: "Home" }, { slug: "remote", name: "Friend's" }]);
+  for (const entry of out) assert.deepEqual(Object.keys(entry), ["slug", "name"]);
+});
+
+test("the login page hands LoginForm the projected list, never the registry's config objects", async () => {
+  const { readFileSync } = await import("node:fs");
+  const page = readFileSync(new URL("../src/app/login/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /jellyfinInstances=\{signInServerOptions\(jellyfinInstances\)\}/);
+  assert.doesNotMatch(page, /jellyfinInstances=\{jellyfinInstances\}/);
+});

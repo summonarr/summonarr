@@ -10,6 +10,7 @@ import { Loader2, Filter, AlertTriangle } from "@/components/icons";
 import { EmptyState } from "@/components/ui/design";
 import { usePathname } from "next/navigation";
 import { useT } from "@/components/i18n/i18n-provider";
+import { hasActiveFilters, parseBrowseFilters } from "@/lib/browse-filters";
 
 interface BrowseGridProps {
   initialItems: TmdbMedia[];
@@ -32,14 +33,14 @@ interface BrowseGridProps {
   // end, an empty upstream page) must not blame the token.
   tokenMissing?: boolean;
   // HD request overlay on each card — same gate as the detail-page CTA.
-  canRequest?: boolean;
+  canRequest: boolean;
 }
 
 
 export function BrowseGrid({
-  initialItems,
-  initialTotalPages,
-  initialPage,
+  initialItems: items,
+  initialTotalPages: totalPages,
+  initialPage: currentPage,
   genres,
   watchProviders,
   showPlex,
@@ -53,22 +54,8 @@ export function BrowseGrid({
   const pathname = usePathname();
   const t = useT();
 
-  const genreId       = searchParams.get("genreId") || undefined;
-  const keywordId     = searchParams.get("keywordId") || undefined;
-  const keywordName   = searchParams.get("keywordName") || undefined;
-  const companyId     = searchParams.get("companyId") || undefined;
-  const companyName   = searchParams.get("companyName") || undefined;
-  const networkId     = searchParams.get("networkId") || undefined;
-  const networkName   = searchParams.get("networkName") || undefined;
-  const certification = searchParams.get("certification") || undefined;
-  const minRating     = searchParams.get("minRating") || undefined;
-  const ratingFilter  = searchParams.get("ratingFilter") || undefined;
-  const minVoteCount  = searchParams.get("minVoteCount") || undefined;
-  const fromYear      = searchParams.get("fromYear") || undefined;
-  const toYear        = searchParams.get("toYear") || undefined;
-  const sortBy        = searchParams.get("sortBy") || undefined;
-  const watchProvider = searchParams.get("watchProvider") || undefined;
-  const hideAvailable = searchParams.get("hideAvailable") === "1";
+  // The committed filters, parsed the one shared way (browse-filters.ts).
+  const filters = parseBrowseFilters((key) => searchParams.get(key));
 
   // The SERVER owns every filter and page change: the page reads the URL's
   // search params and renders `initialItems`, so this component does no
@@ -82,36 +69,17 @@ export function BrowseGrid({
   // arrives, and we show a spinner over the grid meanwhile.
   const [isPending, startTransition] = useTransition();
 
-  const items = initialItems;
-  const totalPages = initialTotalPages;
-  const currentPage = initialPage;
-
   // The "N results" / "Popular right now" line lives in the page's PageHeader
   // subtitle (movies/page.tsx, tv/page.tsx), not here.
-  const hasFilters = !!(genreId || keywordId || companyId || networkId || certification || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider || hideAvailable);
+  const hasFilters = hasActiveFilters(filters);
 
   return (
     <>
       <FilterBar
         genres={genres}
         watchProviders={watchProviders}
-        activeGenreId={genreId}
-        activeKeywordId={keywordId}
-        activeKeywordName={keywordName}
-        activeCompanyId={companyId}
-        activeCompanyName={companyName}
-        activeNetworkId={networkId}
-        activeNetworkName={networkName}
-        activeCertification={certification}
+        filters={filters}
         showCertification={!pathname.startsWith("/tv")}
-        activeMinRating={minRating}
-        activeRatingFilter={ratingFilter}
-        activeMinVoteCount={minVoteCount}
-        activeFromYear={fromYear}
-        activeToYear={toYear}
-        activeSortBy={sortBy}
-        activeWatchProvider={watchProvider}
-        activeHideAvailable={hideAvailable}
         maxYear={maxYear}
         navigate={startTransition}
       />
@@ -197,7 +165,7 @@ export function BrowseGrid({
                 // LCP (the page's main paint): preload the first row's
                 // posters. Same value on the server and at hydration, so no
                 // mismatch.
-                priority={i < 6 && items === initialItems}
+                priority={i < 6}
               />
             ))}
           </div>

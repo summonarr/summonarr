@@ -1,43 +1,58 @@
 import { after } from "next/server";
-import { emitNotificationEvent } from "@/lib/notify-agents";
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, addSeriesToSonarr, listQualityProfiles } from "@/lib/arr";
+import { listQualityProfiles } from "@/lib/arr";
 import { Prisma, type MediaRequest } from "@/generated/prisma";
 import type { SummonarrSession } from "@/lib/api-auth";
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { emitSSE } from "@/lib/sse-emitter";
-import { scheduleDownloadCheck } from "@/lib/download-check";
-import { notifyAdminsNewRequest } from "@/lib/email";
-import { notifyAdminsNewRequestPush } from "@/lib/push";
-import { notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
+import { DOWNLOAD_CHECK_DELAY_MS, scheduleDownloadCheck } from "@/lib/download-check";
 import { sanitizeForLog, sanitizeOptional } from "@/lib/sanitize";
-import { canRequestInstance, canAutoApproveInstance, parseInstanceGrants, hasPermission, Permission } from "@/lib/permissions";
+import { parseInstanceGrants, hasPermission, Permission, type InstanceGrants } from "@/lib/permissions";
 import { getArrInstancesWithConfigured } from "@/lib/arr-instance-registry";
+import type { ArrInstanceConfig } from "@/lib/arr-instances";
 import { getVisibleServerInstances } from "@/lib/media-visibility";
-import { routeMediaToSlug, type RoutableMedia } from "@/lib/arr-instances";
-import { resolveUserQuota, parseQuotaLimit, translateQuotaWindow, quotaUsageWhere, type ResolvedQuota } from "@/lib/quota";
+import { translateQuotaWindow, type ResolvedQuota } from "@/lib/quota";
 import { resolveMediaMeta } from "@/lib/request-meta";
 import { isBlacklisted } from "@/lib/blacklist";
-import { exceedsCap } from "@/lib/content-rating";
-import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import { instanceDefaultLocale, translatorFor } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
+import type { TmdbMedia } from "@/lib/tmdb-types";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
+import { greenlitPeerStatuses } from "@/lib/request-mirror";
+import { dropStaleDeclined, restoreThread } from "@/lib/request-comment-carry";
+import { REQUEST_NOTE_MAX } from "@/lib/request-limits";
+import { pushApproval } from "@/lib/request-transition";
+import {
+  QuotaExceededError,
+  alertAdminsNewRequest,
+  assertQuotaInTx,
+  autoApprovesOn,
+  detailsLoader,
+  enforcedQuota,
+  hasEarlierPending,
+  quotaUsed,
+  ratingCapVerdict,
+  resolveTargetInstance,
+  type AfterResponse,
+} from "@/lib/request-policy";
 
 // The request chokepoint — everything POST /api/requests does once the caller is
 // authenticated, rate-limited and its body validated: instance resolution and
 // access (guardrail 32), the quality-profile override, quota, TMDB verification,
 // the blacklist and content-rating gates, duplicate handling, the Serializable
 // create (guardrail 23), auto-approve + approvedAt (guardrail 34a) with the
-// Radarr/Sonarr push and its rollback, and the admin notify fan-out.
+// Radarr/Sonarr push and its rollback (the shared state machine in
+// request-transition.ts), and the admin notify fan-out.
 //
 // Extracted from src/app/api/requests/route.ts so the watchlist auto-request
 // (src/lib/auto-request.ts) files requests through EXACTLY the same path rather
 // than a second copy of it. The route maps the result onto its unchanged HTTP
 // responses; tests/requests-route.test.mts pins that wire contract.
 //
-// Must run inside a request scope: the pending branch schedules the admin notify
-// with after(). Both callers are route handlers.
+// Must run inside a request scope unless the caller passes its own
+// `afterResponse`: the pending branch schedules the admin notify with after().
+// The route and the auto-request are route handlers; the Discord picker, which
+// has already answered Discord, runs the alerts itself.
 
 // The Setting keys and User columns a request decision reads — one read serves
 // the route's own pre-body gates (rate limit, Discord link) and this module.
@@ -98,7 +113,15 @@ export type CreateMediaRequestFailure =
 export type CreateMediaRequestBranch = "auto-approve" | "pending" | "mirror-approved";
 
 export type CreateMediaRequestResult =
-  | { ok: false; status: number; error: string; reason: CreateMediaRequestFailure }
+  | {
+      ok: false;
+      status: number;
+      error: string;
+      reason: CreateMediaRequestFailure;
+      // The window that ran out, on a "quota" refusal — for a caller that words
+      // its own reply (the Discord picker).
+      quota?: { limit: number; windowLabel: string };
+    }
   | { ok: true; kind: "already-available"; title: string }
   | {
       ok: true;
@@ -106,6 +129,11 @@ export type CreateMediaRequestResult =
       branch: CreateMediaRequestBranch;
       // The auto-approve push failed and the row was rolled back to PENDING.
       pushFailed: boolean;
+      // The auto-approve add was sent and got no definite answer (a timeout, a
+      // dropped connection, a gateway 502/504 — arrWriteOutcomeUnknown): Radarr/Sonarr
+      // may have added the title. The row stays APPROVED; the sync re-pushes an
+      // APPROVED title the arr doesn't hold.
+      pushOutcomeUnknown: boolean;
       // The row as the route answers it (status already PENDING after a rollback).
       request: MediaRequest;
     };
@@ -121,8 +149,45 @@ export interface CreateMediaRequestInput {
   qualityProfileId?: number;
 }
 
-function fail(status: number, error: string, reason: CreateMediaRequestFailure): CreateMediaRequestResult {
+// What only some callers need. The web route and the auto-request pass none.
+export interface CreateMediaRequestOptions {
+  // Where the admin alerts run once the response is sent. Default after(), which
+  // needs a request scope; the Discord picker, already answered, runs them itself.
+  afterResponse?: AfterResponse;
+  // An auto-approve grant on top of the requester's permission (a Discord
+  // auto-approve role): the global auto-approve bit, never the 4K or a
+  // restricted instance's grant (autoApprovesOn). Never takes one away.
+  autoApprove?: boolean;
+  // The title's TMDB metadata when the caller already holds it from a
+  // server-side TMDB read (the Discord search results), so it is not re-fetched.
+  // Never a client-supplied value: the web route always verifies.
+  meta?: { title: string; posterPath: string | null; releaseYear: string | null };
+}
+
+type Refusal = Extract<CreateMediaRequestResult, { ok: false }>;
+
+function fail(status: number, error: string, reason: CreateMediaRequestFailure): Refusal {
   return { ok: false, status, error, reason };
+}
+
+// Re-exported for imports from before it moved to request-policy.ts.
+export { alertAdminsNewRequest };
+
+// What the create transaction committed: nothing (the title is already here), or
+// the row it created and on which branch. `announce`: a pending row that is the
+// first PENDING request for the title, so the admins are alerted.
+type CreateTxResult =
+  | { kind: "available" }
+  | { kind: "created"; branch: CreateMediaRequestBranch; request: MediaRequest; announce: boolean };
+
+function quotaRefusal(t: Translator, rq: { limit: number; windowLabel: string }): Refusal {
+  return {
+    ok: false,
+    status: 429,
+    error: t("apiUser.create.quota", { limit: rq.limit, window: translateQuotaWindow(t, rq.windowLabel) }),
+    reason: "quota",
+    quota: { limit: rq.limit, windowLabel: rq.windowLabel },
+  };
 }
 
 export async function createMediaRequest(
@@ -133,189 +198,46 @@ export async function createMediaRequest(
   // (translatorForRequest), the auto-request the user's. Only that text is
   // translated; `reason` and `status` are the machine-readable half.
   t: Translator = translatorFor(instanceDefaultLocale()),
+  opts: CreateMediaRequestOptions = {},
 ): Promise<CreateMediaRequestResult> {
   const { settings, userRecord } = ctx;
-  const body = input;
   const { tmdbId, mediaType, note } = input;
 
-  // Resolve which Radarr/Sonarr instance this request targets. Precedence:
-  //   explicit `arrInstance` slug (validated) > legacy `is4k:true` (→ "4k") >
-  //   auto-route by TMDB metadata (anime/genre/language rules) > default instance ("").
-  const service = mediaType === "MOVIE" ? "radarr" : "sonarr";
-  // One registry read + one batched connection probe serve every branch below:
-  // explicit-slug validation needs the FULL list, auto-routing the configured subset.
-  const { all: instances, configured: configuredSlugs } = await getArrInstancesWithConfigured(service);
-  const rawInstance = typeof body.arrInstance === "string" ? body.arrInstance.trim() : undefined;
-
-  let instanceSlug: string;
-  if (rawInstance !== undefined) {
-    // Explicit target (including "" for the default). Validated against the registry below.
-    instanceSlug = rawInstance;
-  } else if (body.is4k === true) {
-    // Legacy 4K button / native clients — shorthand for the "4k" instance.
-    instanceSlug = "4k";
-  } else {
-    // No explicit target — auto-route. Only pay the TMDB details fetch when at least
-    // one REGISTERED non-default instance carries an autoRoute rule; otherwise default.
-    // (Configured-ness is applied below, over the same already-read list.)
-    const autoCandidates = instances.filter((i) => i.slug !== "" && i.autoRoute);
-    if (autoCandidates.length === 0) {
-      instanceSlug = "";
-    } else {
-      let routable: RoutableMedia = { genreIds: [], originalLanguage: null, originCountries: [] };
-      try {
-        const detail = mediaType === "MOVIE" ? await getMovieDetails(tmdbId) : await getTVDetails(tmdbId);
-        routable = {
-          genreIds: detail.genreList?.map((g) => g.id) ?? [],
-          originalLanguage: detail.originalLanguage ?? null,
-          // ISO codes from the normalized details (populated since the
-          // originCountryCodes field landed; older cached rows lack it and
-          // degrade to [] — exactly the previous behavior — until TTL refresh).
-          originCountries: detail.originCountryCodes ?? [],
-        };
-      } catch {
-        // TMDB details unavailable ⇒ fall back to the default instance.
-      }
-      // Route only over configured instances so we never auto-select an unconfigured
-      // target — the subset of the list already read above, no second registry read.
-      const configured = instances.filter((i) => configuredSlugs.has(i.slug));
-      instanceSlug = routeMediaToSlug(configured, routable);
-    }
-  }
-
-  // Whether the client explicitly targeted an instance (arrInstance or the legacy
-  // is4k flag) vs. the server auto-routing it. Matters for the quality-profile
-  // override below: an explicit target means the client knew which instance's
-  // profile list it picked from; an auto-route means it didn't.
-  const instanceExplicit = rawInstance !== undefined || body.is4k === true;
-
-  let instance = instances.find((i) => i.slug === instanceSlug);
-  if (!instance) {
-    return fail(400, t("apiUser.create.instanceUnavailable"), "instance-unavailable");
-  }
-  // A non-default instance must have a configured connection (url + apiKey). The default
-  // instance ("") is always allowed — a request with no arr configured simply stays pending.
-  if (instanceSlug !== "" && !configuredSlugs.has(instanceSlug)) {
-    return fail(400, t("apiUser.create.instanceNotConfigured", { name: instance.name }), "instance-unavailable");
-  }
-
-  // Capability gate — the permission bitmask is authoritative (admins pass via the ADMIN
-  // superbit). The default instance is open to any base requester; "4k" gates on the
-  // REQUEST_4K* bits / request4kAll toggle; named instances gate on serverAll or a
-  // per-user instance grant.
-  const grants = parseInstanceGrants(userRecord?.instanceGrants);
-  if (!canRequestInstance(session.user.permissions, instance, grants, mediaType, settings.request4kAll === "true")) {
-    // An EXPLICITLY targeted instance the user can't access is a hard 403. An
-    // AUTO-ROUTED one falls back to the default instance instead: a base requester is
-    // never blocked by a server-side routing decision (the default is open to any
-    // requester, and an admin still reviews the resulting request). Auto-routing only
-    // ever selects a CONFIGURED instance, so the default fallback is always valid.
-    // Mirrors the Discord (interactions) and bulk request paths.
-    if (instanceExplicit) {
-      return fail(403, t("apiUser.create.forbidden"), "forbidden");
-    }
-    const defaultInstance = instances.find((i) => i.slug === "");
-    // Re-check against the DEFAULT instance before falling back. canRequestInstance
-    // gates on the base REQUEST/REQUEST_{MOVIE,TV} bit FIRST (permissions.ts) — a user
-    // who lacks it fails for EVERY instance, default included. Without this re-check a
-    // request-revoked user could bypass the base capability entirely by omitting the
-    // instance target: the auto-route sends them to a named instance they can't access,
-    // and the unconditional default fallback then created the request anyway. The
-    // fallback exists only for a *base requester* who merely lacks a NAMED-instance grant.
-    if (
-      !defaultInstance ||
-      !canRequestInstance(session.user.permissions, defaultInstance, grants, mediaType, settings.request4kAll === "true")
-    ) {
-      return fail(403, t("apiUser.create.forbidden"), "forbidden");
-    }
-    instanceSlug = "";
-    instance = defaultInstance;
-  }
-
-  // Advanced request option: an explicit quality profile is honored only for
-  // REQUEST_ADVANCED holders (ADMIN passes via the superbit) and is validated
-  // against the target instance's profiles, so a client can't smuggle an arbitrary
-  // id into the ARR add. Absent ⇒ the instance's configured default is used.
-  let chosenQualityProfileId: number | undefined;
-  if (body.qualityProfileId !== undefined) {
-    if (!Number.isInteger(body.qualityProfileId) || body.qualityProfileId <= 0) {
-      return fail(400, t("apiUser.requests.qualityProfileIdInvalid"), "invalid-quality-profile");
-    }
-    if (!hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED)) {
-      return fail(403, t("apiUser.create.profileForbidden"), "forbidden");
-    }
-    if (!instanceExplicit && instanceSlug !== "") {
-      // The request was AUTO-ROUTED to a non-default instance, but the client's
-      // profile picker (instance-blind /api/requests/quality-profiles) listed the
-      // DEFAULT instance's profiles — the picked id is meaningless here. Validating
-      // it against the routed instance either dead-ends the request (400 with no
-      // way to pick a valid id) or, on an id collision, silently applies a
-      // different profile. Drop the override and use the routed instance's
-      // configured default instead.
-      console.warn(
-        `[requests] dropping quality-profile override (picked against the default instance) for auto-routed instance "${instanceSlug}"`,
-      );
-    } else {
-      // An unreachable/erroring ARR instance must not 500 the request. Mirror the
-      // quality-profiles route: map a fetch failure to a clean 502. A request WITHOUT
-      // a profile skips this block entirely, so it still succeeds during an outage.
-      let profileList: Awaited<ReturnType<typeof listQualityProfiles>>;
-      try {
-        profileList = await listQualityProfiles(service, instanceSlug);
-      } catch (err) {
-        console.error(`[requests] Failed to fetch ${service} profiles:`, err);
-        return fail(502, t("apiUser.common.couldNotConnect", { service }), "arr-unreachable");
-      }
-      if (!profileList || !profileList.profiles.some((p) => p.id === body.qualityProfileId)) {
-        return fail(400, t("apiUser.create.profileInvalid"), "invalid-quality-profile");
-      }
-      chosenQualityProfileId = body.qualityProfileId;
-    }
-  }
-
-  // Per-media-type quota. QUOTA_UNLIMITED (and ADMIN) bypass; otherwise resolve
-  // the per-user override → global Settings window and pre-check before the
-  // (more expensive) TMDB verification below. Re-checked inside the tx.
-  const quotaApplies = !hasPermission(session.user.permissions, Permission.QUOTA_UNLIMITED);
-  let resolvedQuota: ResolvedQuota | null = null;
-  let enforceQuota = false;
-  if (quotaApplies) {
-    resolvedQuota = resolveUserQuota(
-      mediaType,
-      {
-        movieQuotaLimit: userRecord?.movieQuotaLimit ?? null,
-        movieQuotaDays: userRecord?.movieQuotaDays ?? null,
-        tvQuotaLimit: userRecord?.tvQuotaLimit ?? null,
-        tvQuotaDays: userRecord?.tvQuotaDays ?? null,
-      },
-      parseQuotaLimit(settings.quotaLimit),
-      settings.quotaPeriod ?? "week",
-    );
-    enforceQuota = resolvedQuota.limit > 0;
-    if (enforceQuota) {
-      const preCount = await prisma.mediaRequest.count({
-        where: quotaUsageWhere(session.user.id, mediaType, resolvedQuota.since),
-      });
-      if (preCount >= resolvedQuota.limit) {
-        return fail(429, t("apiUser.create.quota", { limit: resolvedQuota.limit, window: translateQuotaWindow(t, resolvedQuota.windowLabel) }), "quota");
-      }
-    }
-  }
-
-  if (note !== undefined && (typeof note !== "string" || note.length > 500)) {
+  // The pure input check first: a malformed note costs no registry read, quota
+  // count or Radarr/Sonarr call.
+  if (note !== undefined && (typeof note !== "string" || note.length > REQUEST_NOTE_MAX)) {
     return fail(400, t("apiUser.create.noteTooLong"), "invalid-note");
   }
   const sanitizedNote = sanitizeOptional(note);
 
-  let verified: Awaited<ReturnType<typeof resolveMediaMeta>> = null;
-  try {
-    verified = await resolveMediaMeta(tmdbId, mediaType);
-  } catch {
-    return fail(422, t("apiUser.common.tmdbUnverified"), "tmdb-unverified");
+  // The TMDB details, read at most once: auto-routing and the content-rating cap
+  // both want them.
+  const loadDetails = detailsLoader(tmdbId, mediaType);
+  const target = await resolveRequestInstance(session, ctx, input, loadDetails, t);
+  if (!target.ok) return target.refusal;
+  const { instance, grants } = target;
+  const instanceSlug = instance.slug;
+  const service = mediaType === "MOVIE" ? "radarr" : "sonarr";
+
+  const profile = profileOverride(session, input, instanceSlug, target.explicit, t);
+  if (profile.kind === "refused") return profile.refusal;
+
+  // Per-media-type quota. QUOTA_UNLIMITED (and ADMIN) bypass; otherwise resolve
+  // the per-user override → global Settings window and pre-check before the
+  // (more expensive) Radarr/Sonarr and TMDB reads below. Re-checked inside the tx.
+  const quota = enforcedQuota(session.user.permissions, mediaType, userRecord, settings);
+  if (quota && (await quotaUsed(prisma, session.user.id, mediaType, quota)) >= quota.limit) {
+    return quotaRefusal(t, quota);
   }
-  if (!verified) {
-    return fail(422, t("apiUser.common.tmdbUnverified"), "tmdb-unverified");
+
+  const chosenQualityProfileId = profile.kind === "verify" ? profile.qualityProfileId : undefined;
+  if (chosenQualityProfileId !== undefined) {
+    const refusal = await verifyQualityProfile(service, instanceSlug, chosenQualityProfileId, t);
+    if (refusal) return refusal;
   }
+
+  const meta = opts.meta ?? (await verifiedMeta(tmdbId, mediaType));
+  if (!meta) return fail(422, t("apiUser.common.tmdbUnverified"), "tmdb-unverified");
 
   // Blacklist gate — an admin-blocked title can never be requested. This is the
   // authoritative block (discovery hiding is best-effort UX) and must run before
@@ -325,62 +247,224 @@ export async function createMediaRequest(
   }
 
   // Parental control — block a request whose US certification exceeds the user's
-  // cap. Only capped, non-admin users pay the (cached) certification fetch;
-  // unknown/unrated titles are allowed (see content-rating.ts).
-  if (userRecord?.maxContentRating && !hasPermission(session.user.permissions, Permission.ADMIN)) {
-    let cert: string | undefined;
-    try {
-      const detail = mediaType === "MOVIE" ? await getMovieDetails(tmdbId) : await getTVDetails(tmdbId);
-      cert = detail.certification;
-    } catch {
-      cert = undefined;
-    }
-    if (exceedsCap(cert, userRecord.maxContentRating)) {
-      return fail(403, t("apiUser.create.ratingCap"), "rating-cap");
-    }
-  }
+  // cap. A certification that could not be read is not refused, but it is not
+  // auto-approved either (ratingCapsVerdict).
+  const rating = await ratingCapVerdict(session.user.permissions, userRecord?.maxContentRating, loadDetails);
+  if (rating === "blocked") return fail(403, t("apiUser.create.ratingCap"), "rating-cap");
 
-  const existing = await prisma.mediaRequest.findFirst({
-    where: { tmdbId, mediaType, requestedBy: session.user.id, arrInstance: instanceSlug },
+  const prior = await priorRequestGate(session.user.id, tmdbId, mediaType, instanceSlug, t);
+  if (!prior.ok) return prior.refusal;
+
+  // A Discord auto-approve role adds the global auto-approve bit, never more
+  // (autoApprovesOn).
+  const isAutoApprove = rating !== "unverified" &&
+    autoApprovesOn(session.user.permissions, instance, grants, mediaType, opts.autoApprove === true);
+  const availability = await availabilityFor(session, instance, tmdbId, mediaType, isAutoApprove);
+
+  const baseData = { tmdbId, mediaType, arrInstance: instanceSlug, qualityProfileId: chosenQualityProfileId ?? null, title: meta.title, posterPath: meta.posterPath, releaseYear: meta.releaseYear, note: sanitizedNote ?? null, requestedBy: session.user.id } as const;
+
+  const committed = await commitRequest({
+    userId: session.user.id,
+    tmdbId,
+    mediaType,
+    instanceSlug,
+    quota,
+    staleDeclinedId: prior.staleDeclinedId,
+    isAutoApprove,
+    availability,
+    baseData,
+    t,
   });
-
-  // Deferred until the create actually happens (inside the tx below) — deleting here
-  // destroyed the row (and the admin's adminNote) on every path that then aborts without
-  // creating a replacement: alreadyAvailable (deterministic once the title lands in the
-  // library), the in-tx quota re-check 429, and the P2002 409.
-  let staleDeclinedId: string | null = null;
-
-  if (existing) {
-    if (existing.permanentlyDeclined) {
-      return fail(403, t("apiUser.create.permanentlyDeclined"), "permanently-declined");
-    }
-    // An ordinary (non-permanent) decline is not terminal — let the user
-    // re-request: remember the stale DECLINED row (it is deleted inside the tx
-    // below) and fall through to a fresh create. APPROVED/AVAILABLE/PENDING
-    // still block with a 409.
-    if (existing.status === "DECLINED") {
-      staleDeclinedId = existing.id;
-    } else {
-      return fail(409, t("apiUser.create.alreadyRequested"), "already-requested");
-    }
+  if (!committed.ok) return committed.refusal;
+  if (committed.result.kind === "available") {
+    return { ok: true, kind: "already-available", title: meta.title };
   }
 
-  const isAutoApprove = canAutoApproveInstance(session.user.permissions, instance, grants, mediaType);
+  const { request, branch } = committed.result;
+  clearOwnDeletionVote(session.user.id, tmdbId, mediaType);
+  emitSSE({ type: "request:new", requestId: request.id, userId: session.user.id });
 
-  // Default-instance request: a Plex/Jellyfin library hit OR the default *arr-available
-  // cache counts as already-here. An instance with skipLibraryCheck (4K/opt-in) ignores
-  // the shared library — a copy at another quality must not block requesting this one —
-  // and only that instance's available cache counts.
-  //
-  // The library half is scoped to the servers THIS requester can see: a copy sitting on a
-  // restricted server they hold no grant for must not reject their request. Telling someone
-  // a title is "already available" when they cannot watch it leaves them no path forward,
-  // which is the whole reason visibility is per-user rather than global. Same shape as
-  // skipLibraryCheck above — an instance the requester can't reach doesn't block them.
+  // Admin fan-out for a row that ends up PENDING. Shared by the normal pending
+  // branch and the auto-approve rollback — a failed ARR push leaves a PENDING
+  // request that otherwise reached admins through no out-of-band channel at all
+  // (the request:new SSE only lands for admins with the web app already open).
+  const announceToAdmins = () =>
+    alertAdminsNewRequest({
+      requestId: request.id,
+      tmdbId,
+      mediaType,
+      instance: instanceSlug,
+      title: meta.title,
+      posterPath: meta.posterPath ?? null,
+      releaseYear: meta.releaseYear ?? null,
+      requestedBy: session.user.name ?? session.user.email ?? session.user.id,
+      note: sanitizedNote ?? null,
+      excludeUserId: session.user.id,
+    }, opts.afterResponse ?? after);
+
+  if (branch === "auto-approve") return finishAutoApproval(request, announceToAdmins);
+  // mirror-approved: the content is already greenlit by an earlier request — no
+  // arr push (already done) and no admin "new request" alert (nothing to
+  // review). The requester is still tracked, so the sync's "now available" pass
+  // notifies them just like the original requester.
+  if (branch === "pending" && committed.result.announce) announceToAdmins();
+  return { ok: true, kind: "created", branch, pushFailed: false, pushOutcomeUnknown: false, request };
+}
+
+// Resolve which Radarr/Sonarr instance this request targets, and whether the
+// requester may use it (guardrail 32). One registry read + one batched
+// connection probe serve every branch: explicit-slug validation needs the FULL
+// list, auto-routing the configured subset.
+async function resolveRequestInstance(
+  session: SummonarrSession,
+  ctx: RequestContext,
+  input: CreateMediaRequestInput,
+  loadDetails: () => Promise<TmdbMedia>,
+  t: Translator,
+): Promise<{ ok: true; instance: ArrInstanceConfig; grants: InstanceGrants; explicit: boolean } | { ok: false; refusal: Refusal }> {
+  const service = input.mediaType === "MOVIE" ? "radarr" : "sonarr";
+  const { all: instances, configured } = await getArrInstancesWithConfigured(service);
+  const grants = parseInstanceGrants(ctx.userRecord?.instanceGrants);
+  const target = await resolveTargetInstance({
+    instances,
+    configured,
+    arrInstance: input.arrInstance,
+    is4k: input.is4k,
+    loadDetails,
+    perms: session.user.permissions,
+    grants,
+    mediaType: input.mediaType,
+    request4kAll: ctx.settings.request4kAll === "true",
+  });
+  if (target.ok) return { ok: true, instance: target.instance, grants, explicit: target.explicit };
+  if (target.reason === "forbidden") return { ok: false, refusal: fail(403, t("apiUser.create.forbidden"), "forbidden") };
+  return {
+    ok: false,
+    refusal: target.instanceName !== undefined
+      ? fail(400, t("apiUser.create.instanceNotConfigured", { name: target.instanceName }), "instance-unavailable")
+      : fail(400, t("apiUser.create.instanceUnavailable"), "instance-unavailable"),
+  };
+}
+
+// Advanced request option: an explicit quality profile is honored only for
+// REQUEST_ADVANCED holders (ADMIN passes via the superbit), and only once
+// verified against the target instance's profiles (verifyQualityProfile), so a
+// client can't smuggle an arbitrary id into the ARR add. Absent ⇒ the instance's
+// configured default.
+function profileOverride(
+  session: SummonarrSession,
+  input: CreateMediaRequestInput,
+  instanceSlug: string,
+  // Whether the client explicitly targeted the instance (arrInstance or the
+  // legacy is4k flag) rather than the server auto-routing it.
+  explicit: boolean,
+  t: Translator,
+): { kind: "none" } | { kind: "verify"; qualityProfileId: number } | { kind: "refused"; refusal: Refusal } {
+  const id = input.qualityProfileId;
+  if (id === undefined) return { kind: "none" };
+  if (!Number.isInteger(id) || id <= 0) {
+    return { kind: "refused", refusal: fail(400, t("apiUser.requests.qualityProfileIdInvalid"), "invalid-quality-profile") };
+  }
+  if (!hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED)) {
+    return { kind: "refused", refusal: fail(403, t("apiUser.create.profileForbidden"), "forbidden") };
+  }
+  if (!explicit && instanceSlug !== "") {
+    // The request was AUTO-ROUTED to a non-default instance, but the client's
+    // profile picker (instance-blind /api/requests/quality-profiles) listed the
+    // DEFAULT instance's profiles — the picked id is meaningless here. Validating
+    // it against the routed instance either dead-ends the request (400 with no
+    // way to pick a valid id) or, on an id collision, silently applies a
+    // different profile. Drop the override and use the routed instance's
+    // configured default instead.
+    console.warn(
+      `[requests] dropping quality-profile override (picked against the default instance) for auto-routed instance "${instanceSlug}"`,
+    );
+    return { kind: "none" };
+  }
+  return { kind: "verify", qualityProfileId: id };
+}
+
+// The picked profile must be one the instance lists. An unreachable/erroring ARR
+// instance must not 500 the request: like the quality-profiles route, a fetch
+// failure is a clean 502. A request WITHOUT a profile never gets here, so it
+// still succeeds during an outage.
+async function verifyQualityProfile(service: "radarr" | "sonarr", instanceSlug: string, qualityProfileId: number, t: Translator): Promise<Refusal | null> {
+  let profileList: Awaited<ReturnType<typeof listQualityProfiles>>;
+  try {
+    profileList = await listQualityProfiles(service, instanceSlug);
+  } catch (err) {
+    console.error(`[requests] Failed to fetch ${service} profiles:`, err);
+    return fail(502, t("apiUser.common.couldNotConnect", { service }), "arr-unreachable");
+  }
+  if (!profileList || !profileList.profiles.some((p) => p.id === qualityProfileId)) {
+    return fail(400, t("apiUser.create.profileInvalid"), "invalid-quality-profile");
+  }
+  return null;
+}
+
+// The title's metadata, verified against TMDB (a cached core row counts); null
+// when TMDB can't vouch for the id.
+async function verifiedMeta(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise<{ title: string; posterPath: string | null; releaseYear: string | null } | null> {
+  try {
+    return await resolveMediaMeta(tmdbId, mediaType);
+  } catch {
+    return null;
+  }
+}
+
+// The requester's own earlier request for this title on this instance.
+// APPROVED/AVAILABLE/PENDING block with a 409; a permanent decline with a 403. An
+// ordinary decline is not terminal: its row is remembered and deleted in the
+// create transaction (commitRequest) — deleting it here destroyed the row (and
+// the admin's adminNote) on every path that then aborts without creating a
+// replacement: alreadyAvailable, the in-tx quota re-check 429, and the P2002 409.
+async function priorRequestGate(
+  userId: string,
+  tmdbId: number,
+  mediaType: "MOVIE" | "TV",
+  instanceSlug: string,
+  t: Translator,
+): Promise<{ ok: true; staleDeclinedId: string | null } | { ok: false; refusal: Refusal }> {
+  const existing = await prisma.mediaRequest.findFirst({
+    where: { tmdbId, mediaType, requestedBy: userId, arrInstance: instanceSlug },
+  });
+  if (!existing) return { ok: true, staleDeclinedId: null };
+  if (existing.permanentlyDeclined) {
+    return { ok: false, refusal: fail(403, t("apiUser.create.permanentlyDeclined"), "permanently-declined") };
+  }
+  if (existing.status === "DECLINED") return { ok: true, staleDeclinedId: existing.id };
+  return { ok: false, refusal: fail(409, t("apiUser.create.alreadyRequested"), "already-requested") };
+}
+
+interface Availability {
+  // A visible library copy, or (for an auto-approver) the instance's *arr cache.
+  alreadyAvailable: boolean;
+  // The instance's *arr-available cache holds the title.
+  arrHasInstance: boolean;
+}
+
+// Default-instance request: a Plex/Jellyfin library hit OR the default *arr-available
+// cache counts as already-here. An instance with skipLibraryCheck (4K/opt-in) ignores
+// the shared library — a copy at another quality must not block requesting this one —
+// and only that instance's available cache counts.
+//
+// The library half is scoped to the servers THIS requester can see: a copy sitting on a
+// restricted server they hold no grant for must not reject their request. Telling someone
+// a title is "already available" when they cannot watch it leaves them no path forward,
+// which is the whole reason visibility is per-user rather than global. Same shape as
+// skipLibraryCheck above — an instance the requester can't reach doesn't block them.
+async function availabilityFor(
+  session: SummonarrSession,
+  instance: ArrInstanceConfig,
+  tmdbId: number,
+  mediaType: "MOVIE" | "TV",
+  isAutoApprove: boolean,
+): Promise<Availability> {
   const skipLibraryCheck = instance.skipLibraryCheck;
+  const instanceSlug = instance.slug;
   const visible = await getVisibleServerInstances(session);
   // The instance's *arr-available cache is read for every requester: an auto-approver
-  // treats a hit as already-here, and the mirror branch below needs it as the only
+  // treats a hit as already-here, and the mirror branch needs it as the only
   // evidence (short of a visible library copy, which already returned) that an AVAILABLE
   // peer's status is true for THIS requester too.
   const [plexItem, jellyfinItem, arrHasInstance] = await Promise.all([
@@ -394,35 +478,41 @@ export async function createMediaRequest(
       ? prisma.radarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: instanceSlug } } }).then(r => r !== null)
       : prisma.sonarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: instanceSlug } } }).then(r => r !== null),
   ]);
-  const arrAvailable = isAutoApprove && arrHasInstance;
   // Check BOTH libraries — a Jellyfin-only install has no PlexLibraryItem rows, so
-  // a Plex-only check let users re-request titles already in their Jellyfin library
-  // (skipped for skipLibraryCheck instances, same reasoning as Plex above).
-  const alreadyAvailable = !!plexItem || !!jellyfinItem || arrAvailable;
+  // a Plex-only check let users re-request titles already in their Jellyfin library.
+  // The *arr cache counts only for an auto-approver: everyone else files a normal
+  // request, so the sync's arr marking pass can notify them when it lands.
+  return { alreadyAvailable: !!plexItem || !!jellyfinItem || (isAutoApprove && arrHasInstance), arrHasInstance };
+}
 
-  const baseData = { tmdbId, mediaType, arrInstance: instanceSlug, qualityProfileId: chosenQualityProfileId ?? null, title: verified.title, posterPath: verified.posterPath, releaseYear: verified.releaseYear, note: sanitizedNote ?? null, requestedBy: session.user.id } as const;
-
-  let createdRequest: MediaRequest | null = null;
-  let createdBranch: "auto-approve" | "pending" | "mirror-approved" | null = null;
-
+// The Serializable create: the in-tx quota re-check, the stale-decline swap and
+// the branch (auto-approve, mirror a greenlit peer, or pending). Serializable +
+// P2034 retry: concurrent creates at the quota boundary conflict on the
+// count+create and Postgres aborts one; without the retry that's a 500 instead
+// of the correct 429/409. (request-bulk.ts wraps its tx the same way.) The
+// callback re-runs on a retry, so everything it decides is in what it returns.
+async function commitRequest(args: {
+  userId: string;
+  tmdbId: number;
+  mediaType: "MOVIE" | "TV";
+  instanceSlug: string;
+  quota: ResolvedQuota | null;
+  staleDeclinedId: string | null;
+  isAutoApprove: boolean;
+  availability: Availability;
+  baseData: Prisma.MediaRequestUncheckedCreateInput;
+  t: Translator;
+}): Promise<{ ok: true; result: CreateTxResult } | { ok: false; refusal: Refusal }> {
+  const { userId, tmdbId, mediaType, instanceSlug, quota, staleDeclinedId, isAutoApprove, baseData, t } = args;
+  const { alreadyAvailable, arrHasInstance } = args.availability;
   try {
-    // Serializable + P2034 retry: concurrent creates at the quota boundary conflict
-    // on the count+create and Postgres aborts one; without the retry that's a 500
-    // instead of the correct 429/409. (bulk/route.ts wraps its tx the same way.)
-    await runWithSerializableRetry(() => prisma.$transaction(async (tx) => {
-
-      // Re-check quota inside the transaction to prevent races on concurrent requests
-      if (enforceQuota && resolvedQuota) {
-        const count = await tx.mediaRequest.count({
-          where: quotaUsageWhere(session.user.id, mediaType, resolvedQuota.since),
-        });
-        if (count >= resolvedQuota.limit) {
-          throw new Error("QUOTA_EXCEEDED");
-        }
-      }
+    const result = await runWithSerializableRetry(() => prisma.$transaction(async (tx): Promise<CreateTxResult> => {
+      // Re-check quota inside the transaction to prevent races on concurrent
+      // requests. A full window throws, rolling the transaction back (guardrail 23).
+      if (quota) await assertQuotaInTx(tx, userId, mediaType, quota);
 
       if (alreadyAvailable) {
-        return;
+        return { kind: "available" };
       }
 
       // Clear the stale DECLINED row only now that a create is guaranteed to follow, in
@@ -437,9 +527,10 @@ export async function createMediaRequest(
       // permanent between the read and here, the predicate no-ops the delete — the create
       // below then 409s on the surviving row rather than orphaning an APPROVED row's ARR
       // grab or evading a fresh permanent ban.
-      if (staleDeclinedId) {
-        await tx.mediaRequest.deleteMany({ where: { id: staleDeclinedId, status: "DECLINED", permanentlyDeclined: false } });
-      }
+      //
+      // The declined row's comment thread would cascade with it; it is read first and
+      // written back onto whichever row the branch below creates (request-comment-carry.ts).
+      const carried = await dropStaleDeclined(tx, staleDeclinedId);
 
       if (isAutoApprove) {
         // create (NOT upsert update:{}): a concurrent duplicate must hit the unique
@@ -447,24 +538,23 @@ export async function createMediaRequest(
         // mirror-approved branches. The no-op upsert update let two concurrent
         // auto-approvals BOTH "succeed" and both fire ARR side effects + a 201/SSE
         // for the same row (guardrail 23).
-        createdRequest = await tx.mediaRequest.create({
+        const request = await tx.mediaRequest.create({
           // pendingNotifyAt arms the orchestrator's 90s "download pending / awaiting
-          // release" backstop (sync/route.ts overdue scan only looks at rows with it set).
-          // Web auto-approve previously had no backstop — unlike admin PATCH approve
-          // (requests/[id]/route.ts) — so a stuck request never got a follow-up notification.
+          // release" backstop (sync/route.ts overdue scan only looks at rows with it set),
+          // like every admin approval (request-transition.ts).
           // approvedAt: auto-approve is an approval (MediaRequest.approvedAt).
-          data: { ...baseData, status: "APPROVED", approvedAt: new Date(), pendingNotifyAt: new Date(Date.now() + 90_000) },
+          data: { ...baseData, status: "APPROVED", approvedAt: new Date(), pendingNotifyAt: new Date(Date.now() + DOWNLOAD_CHECK_DELAY_MS) },
         });
-        createdBranch = "auto-approve";
-        return;
+        await restoreThread(tx, request.id, carried);
+        return { kind: "created", branch: "auto-approve", request, announce: false };
       }
 
-      // If another request for this exact title (+ same instance) is already APPROVED
-      // or AVAILABLE, the content is already greenlit / being fulfilled — there is
-      // nothing for an admin to review. Mirror that status so this requester is
-      // tracked and still receives the "now available" notification (the sync
-      // notifies every APPROVED row's requester), while skipping the admin
-      // "new request" alert.
+      // If another request for this exact title (+ same instance) is already
+      // greenlit (greenlitPeerStatuses: APPROVED, or AVAILABLE with this instance's
+      // *arr holding it), there is nothing for an admin to review. Mirror that status
+      // so this requester is tracked and still receives the "now available"
+      // notification (the sync notifies every APPROVED row's requester), while
+      // skipping the admin "new request" alert.
       //
       // No approvedAt: the copy made no decision of its own. The watch grade
       // counts it through the approval of the request it copied (per title).
@@ -473,19 +563,19 @@ export async function createMediaRequest(
       // 14b): an admin deliberately took the title off this instance. Copying it
       // would create an APPROVED row the sync re-pushes, re-downloading what was
       // deleted with no admin decision — so it goes to review like any request.
+      //
+      // An AVAILABLE peer counts only when the title is available to THIS requester:
+      // no visible library copy exists (that returned above), so the instance's
+      // *arr-available cache is the remaining evidence. Without it the peer may have
+      // been marked off a restricted server (guardrail 35) or off the HD copy of a 4K
+      // request — not an approval, so this request goes to review like any other.
       const greenlit = await tx.mediaRequest.findFirst({
-        where: { tmdbId, mediaType, arrInstance: instanceSlug, status: { in: ["APPROVED", "AVAILABLE"] }, cleanedUpAt: null },
+        where: { tmdbId, mediaType, arrInstance: instanceSlug, status: { in: greenlitPeerStatuses(arrHasInstance) }, cleanedUpAt: null },
         select: { status: true },
       });
       if (greenlit) {
-        // An AVAILABLE peer is copied only when the title is available to THIS requester:
-        // the peer may have been marked off a restricted server this requester holds no
-        // grant for (guardrail 35). No visible library copy exists (that returned above),
-        // so the instance's *arr-available cache is the remaining evidence — the same
-        // ungated signal the sync's arr marking pass uses. Otherwise mirror APPROVED and
-        // let the grant-gated sync marking pass promote (and notify) it.
-        const mirrorStatus = greenlit.status === "AVAILABLE" && !arrHasInstance ? "APPROVED" : greenlit.status;
-        createdRequest = await tx.mediaRequest.create({
+        const mirrorStatus = greenlit.status;
+        const request = await tx.mediaRequest.create({
           data: {
             ...baseData,
             status: mirrorStatus,
@@ -495,161 +585,88 @@ export async function createMediaRequest(
             ...(mirrorStatus === "AVAILABLE" ? { availableAt: new Date() } : {}),
           },
         });
-        createdBranch = "mirror-approved";
-        return;
+        await restoreThread(tx, request.id, carried);
+        return { kind: "created", branch: "mirror-approved", request, announce: false };
       }
 
-      createdRequest = await tx.mediaRequest.create({ data: baseData });
-      createdBranch = "pending";
+      // Only the first PENDING request for (tmdbId, mediaType, instance) alerts the
+      // admins. Decided here, in the Serializable tx, rather than after the commit:
+      // two concurrent requests for one title (different users) that each read "no
+      // PENDING peer" and insert one form a read/write cycle Postgres aborts
+      // (P2034), and the retry sees the committed peer. Checked after the commit,
+      // an interleaving where neither saw the other alerted twice.
+      const pendingPeer = await tx.mediaRequest.findFirst({
+        where: { tmdbId, mediaType, arrInstance: instanceSlug, status: "PENDING" },
+        select: { id: true },
+      });
+      const request = await tx.mediaRequest.create({ data: baseData });
+      await restoreThread(tx, request.id, carried);
+      return { kind: "created", branch: "pending", request, announce: !pendingPeer };
     }, { isolationLevel: "Serializable" }));
+    return { ok: true, result };
   } catch (err) {
-    if (err instanceof Error && err.message === "QUOTA_EXCEEDED") {
-      return fail(429, t("apiUser.create.quota", { limit: resolvedQuota?.limit ?? 0, window: translateQuotaWindow(t, resolvedQuota?.windowLabel) }), "quota");
-    }
-
+    if (err instanceof QuotaExceededError) return { ok: false, refusal: quotaRefusal(t, err) };
     if (isPrismaErrorCode(err, "P2002")) {
-      return fail(409, t("apiUser.create.alreadyRequested"), "already-requested");
+      return { ok: false, refusal: fail(409, t("apiUser.create.alreadyRequested"), "already-requested") };
     }
     throw err;
   }
+}
 
-  if (alreadyAvailable && !createdRequest) {
-    return { ok: true, kind: "already-available", title: verified.title };
-  }
-
-  if (!createdRequest || !createdBranch) {
-    throw new Error("Unexpected: request was not created");
-  }
-
-  const request = createdRequest as MediaRequest;
-
-  // Admin fan-out for a row that ends up PENDING. Shared by the normal pending branch
-  // below and the auto-approve rollback — a failed ARR push leaves a PENDING request that
-  // otherwise reached admins through no out-of-band channel at all (the earlier
-  // request:new SSE only lands for admins with the web app already open).
-  //
-  // Suppress duplicate admin alerts for a title that's still pending review: only
-  // the EARLIEST pending request for (tmdbId, mediaType, arrInstance) fires the admin
-  // notifications. Total ordering by (createdAt, id) makes this race-safe — among
-  // concurrent duplicate requests exactly one (the earliest) has no earlier peer
-  // and alerts; the rest find this row and skip.
-  const meta = verified;
-  const announcePendingToAdmins = async () => {
-    const earlierPending = await prisma.mediaRequest.findFirst({
-      where: {
-        tmdbId,
-        mediaType,
-        arrInstance: instanceSlug,
-        status: "PENDING",
-        id: { not: request.id },
-        OR: [
-          { createdAt: { lt: request.createdAt } },
-          { createdAt: request.createdAt, id: { lt: request.id } },
-        ],
-      },
-      select: { id: true },
-    });
-
-    if (!earlierPending) {
-      const requestedBy = session.user.name ?? session.user.email ?? session.user.id;
-      after(async () => {
-        emitNotificationEvent({
-          event: "request.created",
-          media: { type: mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId, title: meta.title, year: meta.releaseYear ?? null, posterPath: meta.posterPath ?? null },
-          request: { id: request.id, instance: instanceSlug },
-          actor: { name: requestedBy },
-          text: sanitizedNote ?? null,
-        });
-        await Promise.allSettled([
-          notifyAdminsNewRequest({ title: meta.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: meta.posterPath, tmdbId, releaseYear: meta.releaseYear, excludeUserId: session.user.id }),
-          notifyAdminsNewRequestPush({ title: meta.title, mediaType, tmdbId, requestedBy, requestId: request.id, excludeUserId: session.user.id }),
-          notifyAdminsNewRequestDiscord({ requestId: request.id, title: meta.title, mediaType, tmdbId, requestedBy, note: sanitizedNote ?? null, posterPath: meta.posterPath }),
-        ]);
-      });
-    }
-  };
-
-  // A request and a deletion vote for the same title are contradictory. The vote route
-  // already blocks voting when you've requested; mirror it here by clearing the caller's
-  // own delete-vote on request, so a vote-then-request can't leave both rows persisting.
-  // .catch is required, not decorative: a Prisma model method returns a LAZY
-  // PrismaPromise that only dispatches once a continuation is attached, so a bare
-  // `void deleteMany(...)` never ran at all. It also handles the rejection, which —
-  // detached after the response — would otherwise escape as a process-level
-  // unhandledRejection with no request context (same shape as requests/bulk).
+// A request and a deletion vote for the same title are contradictory. The vote route
+// already blocks voting when you've requested; mirror it here by clearing the caller's
+// own delete-vote on request, so a vote-then-request can't leave both rows persisting.
+// .catch is required, not decorative: a Prisma model method returns a LAZY
+// PrismaPromise that only dispatches once a continuation is attached, so a bare
+// `void deleteMany(...)` never ran at all. It also handles the rejection, which —
+// detached after the response — would otherwise escape as a process-level
+// unhandledRejection with no request context (same shape as requests/bulk).
+function clearOwnDeletionVote(userId: string, tmdbId: number, mediaType: "MOVIE" | "TV"): void {
   void prisma.deletionVote
-    .deleteMany({ where: { userId: session.user.id, tmdbId, mediaType } })
+    .deleteMany({ where: { userId, tmdbId, mediaType } })
     .catch((err) =>
       console.error(
         `[requests] deletionVote cleanup failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`,
       ),
     );
+}
 
-  if (createdBranch === "auto-approve") {
-    emitSSE({ type: "request:new", requestId: request.id, userId: session.user.id });
-
-    let pushedTvdbId: number | null = null;
+// The auto-approved row's push, through the shared state machine
+// (request-transition.ts). A rollback answers the PENDING row and tells the
+// admins; otherwise the row keeps its armed backstop, and the 90s check runs
+// PROMPTLY instead of waiting for the orchestrator's next sweep.
+async function finishAutoApproval(request: MediaRequest, announceToAdmins: () => void): Promise<CreateMediaRequestResult> {
+  const outcome = await pushApproval(request, "Auto-approve");
+  if (outcome.kind === "rolled-back") {
+    // The row now sits in the admin queue exactly like a normal pending request,
+    // so it must be announced like one — and it can't rely on the pendingNotifyAt
+    // backstop (cleared by the rollback), leaving this the only alert admins get.
+    // Its dedupe can only be a post-commit read: alert unless an EARLIER pending
+    // request for the title exists. A failed read alerts anyway — a duplicate
+    // alert is cheaper than a lost one, and the row is committed, so a throw here
+    // would answer 500 for a request that exists (and its retry 409).
+    let earlierPending = false;
     try {
-      if (mediaType === "MOVIE") {
-        await addMovieToRadarr(tmdbId, instanceSlug, chosenQualityProfileId, session.user.id);
-      } else {
-        pushedTvdbId = await addSeriesToSonarr(tmdbId, instanceSlug, chosenQualityProfileId, session.user.id);
-      }
+      earlierPending = await hasEarlierPending(request);
     } catch (err) {
-      console.error(`[arr] Auto-approve push failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
-      // CAS on status: only roll back if still APPROVED. A concurrent webhook/sync could
-      // have flipped this freshly-created row to AVAILABLE; a blind update would clobber
-      // that back to PENDING. Clear the pendingNotifyAt too — the ARR push failed, so
-      // there's no download to pend.
-      await prisma.mediaRequest.updateMany({ where: { id: request.id, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } });
-      // The client already saw request:new with status APPROVED; emit a corrective
-      // update so it reflects the rolled-back PENDING state, and return the PENDING
-      // shape rather than the stale APPROVED row (mirrors the PATCH rollback path).
-      emitSSE({ type: "request:updated", requestId: request.id, status: "PENDING", userId: session.user.id });
-      // The row now sits in the admin queue exactly like a normal pending request, so it
-      // must be announced like one — and it can't rely on the pendingNotifyAt backstop
-      // (cleared just above), leaving this the only alert admins get.
-      await announcePendingToAdmins();
-      // Both rolled-back fields, like the PATCH rollback body (requests/[id]): the
-      // row's pendingNotifyAt is null now, so the body must not carry the armed one.
-      return { ok: true, kind: "created", branch: "auto-approve", pushFailed: true, request: { ...request, status: "PENDING", pendingNotifyAt: null } };
+      console.error(`[requests] earlier-pending check failed, alerting anyway: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
     }
-
-    // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the series
-    // by this point, so a P2025 (row deleted mid-push) or transient DB error must not trip
-    // the APPROVED->PENDING rollback and leave Sonarr grabbing content the DB says is
-    // pending. updateMany no-ops on a concurrently deleted row instead of throwing.
-    if (pushedTvdbId !== null) {
-      await prisma.mediaRequest.updateMany({ where: { id: request.id }, data: { tvdbId: pushedTvdbId } });
-    }
-
-    // Run the pendingNotifyAt check PROMPTLY at ~90s instead of leaving it to the
-    // orchestrator's next sweep. Scheduled only here, on the push-succeeded path:
-    // unlike /api/requests/[id] the rollback above returns early having already
-    // cleared pendingNotifyAt, so a job queued for it would have nothing to do.
-    scheduleDownloadCheck({
-      requestId: request.id,
-      tmdbId,
-      mediaType,
-      arrInstance: instanceSlug,
-      requestedBy: session.user.id,
-      title: request.title,
-    }, { name: "requests:auto-approve-90s-download-check" });
-
-    return { ok: true, kind: "created", branch: createdBranch, pushFailed: false, request };
+    if (!earlierPending) announceToAdmins();
+    // Both rolled-back fields, like the PATCH rollback body (requests/[id]).
+    return { ok: true, kind: "created", branch: "auto-approve", pushFailed: true, pushOutcomeUnknown: false, request: { ...request, status: "PENDING", pendingNotifyAt: null } };
   }
-
-  if (createdBranch === "mirror-approved") {
-    // Content is already greenlit by an earlier request — no arr push (already
-    // done) and no admin "new request" alert (nothing to review). The requester
-    // is still tracked, so the sync's "now available" pass notifies them just
-    // like the original requester.
-    emitSSE({ type: "request:new", requestId: request.id, userId: session.user.id });
-    return { ok: true, kind: "created", branch: createdBranch, pushFailed: false, request };
-  }
-
-  emitSSE({ type: "request:new", requestId: request.id, userId: session.user.id });
-
-  await announcePendingToAdmins();
-  return { ok: true, kind: "created", branch: createdBranch, pushFailed: false, request };
+  // Not rolled back. Pushed, or an add with no definite answer (left APPROVED:
+  // the sync re-pushes an APPROVED title the arr doesn't hold), or a failure
+  // whose rollback did not land: the row moved on or the write failed — it is
+  // not PENDING, so it is not announced, and its armed backstop is consumed by
+  // the check.
+  scheduleDownloadCheck({
+    requestId: request.id,
+    tmdbId: request.tmdbId,
+    mediaType: request.mediaType,
+    arrInstance: request.arrInstance,
+    requestedBy: request.requestedBy,
+    title: request.title,
+  }, { name: "requests:auto-approve-90s-download-check" });
+  return { ok: true, kind: "created", branch: "auto-approve", pushFailed: false, pushOutcomeUnknown: outcome.kind === "unknown", request };
 }

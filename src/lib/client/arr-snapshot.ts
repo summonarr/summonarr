@@ -1,3 +1,4 @@
+import { timedFetch } from "@/lib/client/fetch-json";
 // Client half of "instant, then live" (src/lib/arr-snapshot.ts): read the last
 // answer the server kept for an admin arr read, so a page paints it at once while
 // its own live load is out. Display only — every action re-checks live on the
@@ -21,14 +22,23 @@ export interface ArrSnapshot<T> {
  * The last answer the server kept for `url`, or null when there is none (204),
  * the read failed, or the answer isn't a snapshot. Never throws: a missing
  * snapshot only means the page shows its usual loading state.
+ *
+ * `parse` checks the body's shape (a validate.ts `check`, or any narrowing
+ * function): null from it is "no snapshot", never a falsely typed paint.
+ * Without it the body is handed back as the caller's T unchecked.
  */
-export async function readArrSnapshot<T>(url: string, init: { signal?: AbortSignal } = {}): Promise<ArrSnapshot<T> | null> {
+export async function readArrSnapshot<T>(
+  url: string,
+  init: { signal?: AbortSignal; parse?: (data: unknown) => T | null } = {},
+): Promise<ArrSnapshot<T> | null> {
   try {
-    const res = await fetch(cachedUrl(url), { signal: init.signal, cache: "no-store" });
+    const res = await timedFetch(cachedUrl(url), { signal: init.signal, cache: "no-store" });
     if (res.status !== 200) return null;
     const at = res.headers.get(SNAPSHOT_HEADER);
     if (!at || Number.isNaN(Date.parse(at))) return null;
-    return { data: (await res.json()) as T, at };
+    const body: unknown = await res.json();
+    const data = init.parse ? init.parse(body) : (body as T);
+    return data === null ? null : { data, at };
   } catch {
     return null;
   }

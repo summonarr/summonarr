@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { isFeatureEnabled } from "@/lib/features";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { withAdvisoryLock, WATCH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { WATCH_SYNC_FEATURE_KEY, runWatchSync } from "@/lib/watch-sync-data";
@@ -31,7 +32,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const running = runningArrJob(owner, JOB_KEY);
   if (running) return NextResponse.json({ job: running }, { status: 202 });
   if (!checkRateLimit(`watch-sync-run:${owner}`, RATE_LIMIT, RATE_WINDOW_MS)) {
-    return NextResponse.json({ error: t("apiAdmin.common.tooManyRequestsLater") }, { status: 429 });
+    return tooManyRequests(RATE_WINDOW_MS / 1000, t("apiAdmin.common.tooManyRequestsLater"));
   }
   const run = () => withAdvisoryLock(
     WATCH_SYNC_LOCK_ID,

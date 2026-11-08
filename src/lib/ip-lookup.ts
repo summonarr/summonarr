@@ -4,6 +4,7 @@ import { prisma } from "./prisma";
 import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
 import { unwrapEmbeddedV4 } from "./ssrf";
+import { check, v, type Infer } from "./validate";
 
 const IPINFO_BASE = "https://ipinfo.io";
 const IPINFO_TIMEOUT_MS = 8_000;
@@ -41,17 +42,52 @@ export class IpLookupUnavailableError extends Error {
   }
 }
 
-interface IpinfoResponse {
-  ip?: string;
-  hostname?: string;
-  city?: string;
-  region?: string;
-  country?: string;
-  loc?: string;
-  org?: string;
-  postal?: string;
-  timezone?: string;
-  bogon?: boolean;
+// What ipinfo's /json answers. Checked, not cast: a non-string `loc` threw in
+// the split, and a non-string city or org reached the cache write.
+const IpinfoResponse = v.object({
+  ip: v.optional(v.string()),
+  hostname: v.optional(v.string()),
+  city: v.optional(v.string()),
+  region: v.optional(v.string()),
+  country: v.optional(v.string()),
+  loc: v.optional(v.string()),
+  org: v.optional(v.string()),
+  postal: v.optional(v.string()),
+  timezone: v.optional(v.string()),
+  bogon: v.optional(v.boolean()),
+});
+type IpinfoResponse = Infer<typeof IpinfoResponse>;
+
+/** The geo columns, all empty — a bogon's answer and its cache row. */
+const EMPTY_GEO = {
+  hostname: null,
+  city: null,
+  region: null,
+  country: null,
+  postal: null,
+  latitude: null,
+  longitude: null,
+  timezone: null,
+  org: null,
+} as const;
+
+/**
+ * One ipinfo /json call. The token rides the Authorization header, never the
+ * query string, so it can't land in an egress proxy's or ipinfo's access log.
+ */
+async function fetchIpinfo(ip: string, token: string): Promise<Response> {
+  return safeFetchTrusted(`${IPINFO_BASE}/${encodeURIComponent(ip)}/json`, {
+    allowedHosts: ["ipinfo.io"],
+    timeoutMs: IPINFO_TIMEOUT_MS,
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+  });
+}
+
+/** The answer's body, checked; one without the shape throws, naming the field (never its value). */
+async function readIpinfo(res: Response): Promise<IpinfoResponse> {
+  const parsed = check(IpinfoResponse, await res.json());
+  if (!parsed.ok) throw new Error(`malformed response (${parsed.error})`);
+  return parsed.value;
 }
 
 async function getToken(): Promise<string | null> {
@@ -66,7 +102,10 @@ function isPrivateOrReserved(ip: string): boolean {
   if (v === 6) {
     const lower = ip.toLowerCase();
     if (lower === "::1" || lower === "::") return true;
-    if (lower.startsWith("fe80:") || lower.startsWith("fc") || lower.startsWith("fd")) return true;
+    // Link-local is fe80::/10 (fe80–febf), not just `fe80:`; then the deprecated
+    // site-local fec0::/10, multicast ff00::/8, and ULA fc00::/7.
+    if (/^fe[89ab][0-9a-f]:/.test(lower) || /^fe[c-f][0-9a-f]:/.test(lower) || /^ff[0-9a-f]{2}:/.test(lower)) return true;
+    if (lower.startsWith("fc") || lower.startsWith("fd")) return true;
     // An IPv4 address carried inside IPv6 (`::ffff:192.168.1.10`, the hex-pair
     // `::ffff:c0a8:10a`, NAT64/SIIT/IPv4-compatible) is classified by the IPv4
     // table on its payload. Jellyfin on a dual-stack host reports RemoteEndPoint
@@ -87,6 +126,8 @@ function isPrivateOrReserved(ip: string): boolean {
   if (a === 172 && b >= 16 && b <= 31) return true;
   if (a === 192 && b === 168) return true;
   if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+  if (a === 192 && b === 0 && parts[2] === 0) return true; // IETF protocol assignments
+  if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking
   if (a === 0) return true;
   if (a >= 224) return true; // multicast / reserved
   return false;
@@ -153,25 +194,28 @@ function parseIpinfo(data: IpinfoResponse): {
   };
 }
 
+function storeBogon(ip: string) {
+  return prisma.ipLookupCache.upsert({
+    where: { ip },
+    create: { ip, notFound: true },
+    update: { ...EMPTY_GEO, notFound: true, fetchedAt: new Date() },
+  });
+}
+
+function storeFound(ip: string, data: IpinfoResponse) {
+  const parsed = parseIpinfo(data);
+  return prisma.ipLookupCache.upsert({
+    where: { ip },
+    create: { ip, ...parsed, notFound: false },
+    update: { ...parsed, notFound: false, fetchedAt: new Date() },
+  });
+}
+
 export async function getIpLookup(rawIp: string): Promise<IpLookup | null> {
   const ip = rawIp.trim();
   if (!ip || isIP(ip) === 0) return null;
 
-  if (isPrivateOrReserved(ip)) {
-    return {
-      ip,
-      hostname: null,
-      city: null,
-      region: null,
-      country: null,
-      postal: null,
-      latitude: null,
-      longitude: null,
-      timezone: null,
-      org: null,
-      bogon: true,
-    };
-  }
+  if (isPrivateOrReserved(ip)) return { ip, ...EMPTY_GEO, bogon: true };
 
   const cached = await prisma.ipLookupCache.findUnique({ where: { ip } });
   if (cached) {
@@ -184,43 +228,14 @@ export async function getIpLookup(rawIp: string): Promise<IpLookup | null> {
   if (!token) return cached ? rowToLookup(cached) : null;
 
   try {
-    const url = `${IPINFO_BASE}/${encodeURIComponent(ip)}/json?token=${encodeURIComponent(token)}`;
-    const res = await safeFetchTrusted(url, { allowedHosts: ["ipinfo.io"], timeoutMs: IPINFO_TIMEOUT_MS });
+    const res = await fetchIpinfo(ip, token);
     if (!res.ok) {
       console.error(`[ip-lookup] ipinfo returned HTTP ${res.status} for ${sanitizeForLog(ip)}`);
       if (cached) return rowToLookup(cached);
       throw new IpLookupUnavailableError(`HTTP ${res.status}`);
     }
-    const data = (await res.json()) as IpinfoResponse;
-
-    if (data.bogon) {
-      const row = await prisma.ipLookupCache.upsert({
-        where: { ip },
-        create: { ip, notFound: true },
-        update: {
-          hostname: null,
-          city: null,
-          region: null,
-          country: null,
-          postal: null,
-          latitude: null,
-          longitude: null,
-          timezone: null,
-          org: null,
-          notFound: true,
-          fetchedAt: new Date(),
-        },
-      });
-      return rowToLookup(row);
-    }
-
-    const parsed = parseIpinfo(data);
-    const row = await prisma.ipLookupCache.upsert({
-      where: { ip },
-      create: { ip, ...parsed, notFound: false },
-      update: { ...parsed, notFound: false, fetchedAt: new Date() },
-    });
-    return rowToLookup(row);
+    const data = await readIpinfo(res);
+    return rowToLookup(await (data.bogon ? storeBogon(ip) : storeFound(ip, data)));
   } catch (err) {
     if (err instanceof IpLookupUnavailableError) throw err;
     const reason = err instanceof SafeFetchError ? err.reason : err instanceof Error ? err.message : String(err);
@@ -233,10 +248,9 @@ export async function getIpLookup(rawIp: string): Promise<IpLookup | null> {
 export async function testIpinfoConnection(): Promise<string> {
   const token = await getToken();
   if (!token) throw new Error("No ipinfo token configured");
-  const url = `${IPINFO_BASE}/8.8.8.8/json?token=${encodeURIComponent(token)}`;
-  const res = await safeFetchTrusted(url, { allowedHosts: ["ipinfo.io"], timeoutMs: IPINFO_TIMEOUT_MS });
+  const res = await fetchIpinfo("8.8.8.8", token);
   if (!res.ok) throw new Error(`ipinfo returned HTTP ${res.status}`);
-  const data = (await res.json()) as IpinfoResponse;
-  if (!data.ip) throw new Error("ipinfo returned malformed response");
-  return data.org ?? data.ip;
+  const parsed = check(IpinfoResponse, await res.json());
+  if (!parsed.ok || !parsed.value.ip) throw new Error("ipinfo returned malformed response");
+  return parsed.value.org ?? parsed.value.ip;
 }

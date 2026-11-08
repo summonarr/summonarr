@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { readJsonCapped } from "@/lib/body-size";
 import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { invalidateAgentCache } from "@/lib/notify-agents";
 import { AGENT_BODY_CAP, AGENT_PUBLIC_SELECT, MAX_AGENTS, destinationDetails, parseAgentInput, toPublicAgent } from "@/lib/notify-agents-admin";
 
@@ -22,15 +23,21 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const r = parseAgentInput(parsed && typeof parsed === "object" ? parsed : {}, null);
   if (!r.ok) return NextResponse.json({ error: t(`apiAdmin.agents.error.${r.error}`) }, { status: 400 });
 
-  if ((await prisma.notificationAgent.count()) >= MAX_AGENTS) {
+  const { kind, name, enabled, events, config, secret } = r.input;
+  // The cap's count and the insert in ONE serializable transaction: two
+  // concurrent creates that both read count < MAX_AGENTS conflict, and the
+  // retry re-reads the count and refuses the second.
+  const row = await runWithSerializableRetry(() => prisma.$transaction(async (tx) => {
+    if ((await tx.notificationAgent.count()) >= MAX_AGENTS) return null;
+    // `secret` is plaintext here; the Prisma extension encrypts it (guardrail 7a).
+    return tx.notificationAgent.create({
+      data: { kind, name, enabled, events, config: config as object, secret: secret ?? null },
+      select: AGENT_PUBLIC_SELECT,
+    });
+  }, { isolationLevel: "Serializable" }));
+  if (!row) {
     return NextResponse.json({ error: t("apiAdmin.agents.error.tooMany", { max: MAX_AGENTS }) }, { status: 400 });
   }
-  const { kind, name, enabled, events, config, secret } = r.input;
-  // `secret` is plaintext here; the Prisma extension encrypts it (guardrail 7a).
-  const row = await prisma.notificationAgent.create({
-    data: { kind, name, enabled, events, config: config as object, secret: secret ?? null },
-    select: AGENT_PUBLIC_SELECT,
-  });
   invalidateAgentCache();
   void logAudit({
     userId: session.user.id,

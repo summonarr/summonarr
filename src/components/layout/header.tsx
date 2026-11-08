@@ -1,9 +1,8 @@
 "use client";
 
-import { useState, useEffect, useRef, useId } from "react";
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
-import { Search, Film, Tv2, Loader2, ChevronRight } from "@/components/icons";
+import { ChevronRight } from "@/components/icons";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -11,444 +10,22 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
-import { getVisibleAdminItems } from "@/lib/nav-items";
 import { PushNotifications } from "@/components/layout/push-notifications";
 import { NotificationBell } from "@/components/layout/notification-bell";
-
-async function signOutAndRedirect(callbackUrl: string) {
-  try {
-    await fetch(withBasePath("/api/auth/sign-out"), { method: "POST", credentials: "include" });
-  } catch {
-    // Best-effort: redirect to the login page even if the request failed.
-  }
-  window.location.href = withBasePath(callbackUrl);
-}
+import { signOutAndRedirect } from "@/components/auth/sign-out";
+import { avatarInitials } from "@/lib/avatar-initials";
 import { breadcrumbFor } from "@/components/layout/breadcrumb-label";
 import { useT } from "@/components/i18n/i18n-provider";
 import { useDetailTitle } from "@/components/layout/detail-title";
 import { AppearanceMenu } from "@/components/theme/appearance-menu";
-import Image from "next/image";
-import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
-import { withBasePath } from "@/lib/base-path";
 import { getClientBadgeVisibility } from "@/lib/badge-visibility";
+import { SearchBar } from "./search-bar";
+import { visibleAdminNavItems } from "./nav-visibility";
 
-type MediaFilter = "all" | "movie" | "tv";
-
-// Debounced media search combobox (⌘K); queries /api/search and routes to the
-// selected title's detail page.
-export function SearchBar({
-  showPlex,
-  showJellyfin,
-  variant = "inline",
-  autoFocus,
-  onAfterSelect,
-}: {
-  showPlex: boolean;
-  showJellyfin: boolean;
-  variant?: "inline" | "full";
-  autoFocus?: boolean;
-  onAfterSelect?: () => void;
-}) {
-  const t = useT();
-  const router = useRouter();
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<MediaFilter>("all");
-  const [results, setResults] = useState<TmdbMedia[]>([]);
-  const [loading, setLoading] = useState(false);
-  // True when the last search failed (non-OK response or network error), so
-  // the dropdown says so instead of claiming the title doesn't exist.
-  const [searchFailed, setSearchFailed] = useState(false);
-  const [open, setOpen] = useState(false);
-  // Keyboard-highlighted option (-1 = none). Mouse hover shares the same
-  // state so the highlight visual has a single source of truth.
-  const [activeIndex, setActiveIndex] = useState(-1);
-  // Unique id prefix per SearchBar. It is mounted twice (desktop header and
-  // mobile sheet), so fixed ids would appear twice in the page and confuse
-  // screen readers (aria-activedescendant / aria-controls point at them).
-  const optionIdBase = useId();
-  const listboxId = `${optionIdBase}-listbox`;
-  const containerRef = useRef<HTMLDivElement>(null);
-  // The shortcut hint reads "⌘K" on the server and on the first client render;
-  // the platform is only known after mount (guardrail 16 — no navigator read
-  // in the render path). Non-Mac users see it flip to "Ctrl K" post-hydration.
-  const [isMac, setIsMac] = useState(true);
-  useEffect(() => {
-    const platform =
-      (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData
-        ?.platform ??
-      navigator.platform ??
-      "";
-    setIsMac(/mac|iphone|ipad|ipod/i.test(platform));
-  }, []);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-
-  useEffect(() => {
-    function handleClick(e: MouseEvent) {
-      if (
-        containerRef.current &&
-        !containerRef.current.contains(e.target as Node)
-      ) {
-        setOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, []);
-
-  useEffect(() => {
-    if (!autoFocus) return;
-    const id = requestAnimationFrame(() => inputRef.current?.focus());
-    return () => cancelAnimationFrame(id);
-  }, [autoFocus]);
-
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault();
-        inputRef.current?.focus();
-        setOpen(true);
-      }
-      if (e.key === "Escape") {
-        setOpen(false);
-        inputRef.current?.blur();
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  useEffect(() => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    abortRef.current?.abort();
-    // Detach the aborted request so its `finally` can't clear the pending
-    // state this query sets below.
-    abortRef.current = null;
-    if (!query.trim()) {
-      setResults([]);
-      setSearchFailed(false);
-      setLoading(false);
-      setActiveIndex(-1);
-      setOpen(false);
-      return;
-    }
-
-    // Pending from the moment the query changes, not from when the debounced
-    // fetch starts — otherwise the 350ms window renders "No matches" (or the
-    // previous query's "Search is unavailable") for a search that hasn't run.
-    setLoading(true);
-    setSearchFailed(false);
-
-    debounceRef.current = setTimeout(async () => {
-      abortRef.current?.abort();
-      const controller = new AbortController();
-      abortRef.current = controller;
-      setLoading(true);
-      try {
-        const url = withBasePath(`/api/search?q=${encodeURIComponent(query)}${filter !== "all" ? `&type=${filter}` : ""}`);
-        const res = await fetch(url, { signal: controller.signal });
-        // /api/search can return { error } on 4xx/5xx — guard before .slice so a
-        // non-array body doesn't blow up the debounced handler.
-        const data: unknown = res.ok ? await res.json() : null;
-        setResults(Array.isArray(data) ? (data as TmdbMedia[]).slice(0, 8) : []);
-        setSearchFailed(!res.ok || !Array.isArray(data));
-        setActiveIndex(-1);
-        setOpen(true);
-      } catch (err) {
-        if ((err as Error).name !== "AbortError") {
-          setResults([]);
-          setSearchFailed(true);
-          setActiveIndex(-1);
-          setOpen(true);
-        }
-      } finally {
-        // Only the newest request may clear the spinner. An aborted older
-        // request finishes after its replacement has started, and would
-        // otherwise hide the spinner while the new search is still loading.
-        if (abortRef.current === controller) setLoading(false);
-      }
-    }, 350);
-
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-      abortRef.current?.abort();
-    };
-  }, [query, filter]);
-
-  function handleSelect(media: TmdbMedia) {
-    setOpen(false);
-    setQuery("");
-    setActiveIndex(-1);
-    onAfterSelect?.();
-    router.push(`/${media.mediaType}/${media.id}`);
-  }
-
-  // Minimal combobox keyboard support: ArrowDown/ArrowUp move the highlight
-  // (wrapping), Enter activates it. Escape is handled by the window-level
-  // listener above.
-  function handleInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (results.length === 0) return;
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      e.preventDefault();
-      if (!open) {
-        setOpen(true);
-        return;
-      }
-      setActiveIndex((i) =>
-        e.key === "ArrowDown"
-          ? (i + 1) % results.length
-          : i <= 0
-            ? results.length - 1
-            : i - 1,
-      );
-    } else if (e.key === "Enter" && open && activeIndex >= 0 && activeIndex < results.length) {
-      e.preventDefault();
-      handleSelect(results[activeIndex]);
-    }
-  }
-
-  const filterLabels: { value: MediaFilter; label: string }[] = [
-    { value: "all", label: t("search.filter.all") },
-    { value: "movie", label: t("search.filter.movies") },
-    { value: "tv", label: t("search.filter.tv") },
-  ];
-
-  const fieldHeight = variant === "full" ? 36 : 32;
-
-  return (
-    <div
-      ref={containerRef}
-      className={variant === "full" ? "relative flex-1 min-w-0" : "relative flex-1 min-w-0 max-w-[520px]"}
-    >
-      <div
-        className="flex items-center"
-        style={{
-          background: "var(--ds-bg-1)",
-          border: "1px solid var(--ds-border)",
-          borderRadius: 6,
-          height: fieldHeight,
-          padding: "0 8px 0 10px",
-          transition:
-            "border-color 120ms var(--ds-ease), background 120ms var(--ds-ease)",
-        }}
-      >
-        <Search
-          className="shrink-0"
-          style={{
-            width: 14,
-            height: 14,
-            color: "var(--ds-fg-subtle)",
-            marginRight: 8,
-          }}
-        />
-        <input
-          ref={inputRef}
-          type="search"
-          aria-label={t("nav.search")}
-          role="combobox"
-          aria-expanded={open && (Boolean(query.trim()) || results.length > 0)}
-          aria-controls={listboxId}
-          aria-autocomplete="list"
-          aria-activedescendant={
-            open && activeIndex >= 0 && activeIndex < results.length
-              ? `${optionIdBase}-option-${activeIndex}`
-              : undefined
-          }
-          placeholder={t("search.placeholder")}
-          value={query}
-          onChange={(e) => {
-            setQuery(e.target.value);
-            setOpen(true);
-          }}
-          onFocus={() => setOpen(true)}
-          onKeyDown={handleInputKeyDown}
-          className="flex-1 min-w-0 bg-transparent border-0 outline-none rounded-sm focus-visible:ring-2 focus-visible:ring-ring"
-          style={{
-            fontSize: variant === "full" ? 14 : 13,
-            color: "var(--ds-fg)",
-          }}
-        />
-        {loading ? (
-          <Loader2
-            style={{
-              width: 14,
-              height: 14,
-              color: "var(--ds-fg-subtle)",
-            }}
-            className="animate-spin"
-          />
-        ) : variant === "inline" ? (
-          <kbd className="ds-kbd">{isMac ? "⌘K" : "Ctrl K"}</kbd>
-        ) : null}
-      </div>
-
-      {open && (query.trim() || results.length > 0) && (
-        <div
-          id={listboxId}
-          role="listbox"
-          aria-label={t("search.results")}
-          style={{
-            position: "absolute",
-            top: "calc(100% + 6px)",
-            left: 0,
-            right: 0,
-            zIndex: 50,
-            background: "var(--ds-bg-2)",
-            border: "1px solid var(--ds-border)",
-            borderRadius: 8,
-            boxShadow: "var(--ds-shadow-lg)",
-            overflow: "hidden",
-          }}
-        >
-          <div
-            className="flex gap-1 px-3 pt-2 pb-1.5"
-            style={{ borderBottom: "1px solid var(--ds-border)" }}
-          >
-            {filterLabels.map(({ value, label }) => {
-              const isActive = filter === value;
-              return (
-                <button
-                  key={value}
-                  type="button"
-                  // preventDefault on mousedown keeps focus in the search input
-                  // so the results stay open. The filter itself changes in
-                  // onClick, which keyboard users (Enter/Space) can trigger too.
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => setFilter(value)}
-                  aria-pressed={isActive}
-                  className="inline-flex items-center gap-1 font-medium transition-colors"
-                  style={{
-                    // The full variant is the mobile search sheet: give the
-                    // chips a touch-sized target there.
-                    padding: variant === "full" ? "0 14px" : "2px 10px",
-                    minHeight: variant === "full" ? 32 : undefined,
-                    borderRadius: variant === "full" ? 6 : 4,
-                    fontSize: variant === "full" ? 13 : 11,
-                    background: isActive ? "var(--ds-accent-soft)" : "transparent",
-                    color: isActive ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
-                  }}
-                >
-                  {value === "movie" && <Film style={{ width: 12, height: 12 }} />}
-                  {value === "tv" && <Tv2 style={{ width: 12, height: 12 }} />}
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-          {/* The results body scrolls on its own: the listbox lives in the
-              sticky top bar (not the scrolling <main>) and the outer container
-              clips overflow for its rounded corners, so on a short viewport
-              (landscape phone, keyboard up) rows past the fold were
-              unreachable. */}
-          <div style={{ maxHeight: "min(70vh, 480px)", overflowY: "auto" }}>
-          {query.trim() && results.length === 0 && !loading ? (
-            <div
-              className="text-center"
-              style={{
-                padding: "14px 12px",
-                fontSize: 13,
-                color: "var(--ds-fg-subtle)",
-              }}
-            >
-              {searchFailed ? t("search.unavailable") : t("search.noMatches")}
-            </div>
-          ) : (
-            results.map((media, i) => {
-              const poster = posterUrl(media.posterPath, "w342");
-              return (
-                <button
-                  key={`${media.mediaType}-${media.id}`}
-                  id={`${optionIdBase}-option-${i}`}
-                  role="option"
-                  aria-selected={activeIndex === i}
-                  onClick={() => handleSelect(media)}
-                  className="flex items-center gap-2.5 w-full text-left transition-colors"
-                  style={{
-                    padding: "8px 12px",
-                    color: "var(--ds-fg)",
-                    background:
-                      activeIndex === i ? "var(--ds-bg-3)" : "transparent",
-                  }}
-                  onMouseEnter={() => setActiveIndex(i)}
-                  onMouseLeave={() => setActiveIndex(-1)}
-                >
-                  <div
-                    className="relative shrink-0 overflow-hidden"
-                    style={{
-                      width: 28,
-                      height: 40,
-                      borderRadius: 3,
-                      background: "var(--ds-bg-3)",
-                    }}
-                  >
-                    {poster ? (
-                      <Image
-                        src={poster}
-                        alt={media.title}
-                        fill
-                        className="object-cover"
-                        sizes="28px"
-                      />
-                    ) : (
-                      <div
-                        className="absolute inset-0 flex items-center justify-center"
-                        style={{ color: "var(--ds-fg-subtle)" }}
-                      >
-                        {media.mediaType === "movie" ? (
-                          <Film style={{ width: 14, height: 14 }} />
-                        ) : (
-                          <Tv2 style={{ width: 14, height: 14 }} />
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p
-                      className="font-medium truncate"
-                      style={{ fontSize: 13, color: "var(--ds-fg)" }}
-                    >
-                      {media.title}
-                    </p>
-                    <p
-                      className="ds-mono truncate"
-                      style={{ fontSize: 10, color: "var(--ds-fg-subtle)" }}
-                    >
-                      {media.releaseYear && `${media.releaseYear} · `}
-                      {t(media.mediaType === "movie" ? "media.type.movie" : "media.type.tv")}
-                      {showPlex && media.plexAvailable && (
-                        <span style={{ color: "var(--ds-plex-text)", marginLeft: 6 }}>
-                          · plex
-                        </span>
-                      )}
-                      {showJellyfin && media.jellyfinAvailable && (
-                        <span
-                          style={{ color: "var(--ds-jellyfin-text)", marginLeft: 6 }}
-                        >
-                          · jellyfin
-                        </span>
-                      )}
-                    </p>
-                  </div>
-                  <ChevronRight
-                    style={{
-                      width: 14,
-                      height: 14,
-                      color: "var(--ds-fg-subtle)",
-                    }}
-                  />
-                </button>
-              );
-            })
-          )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
+// The search lives in search-bar.tsx; re-exported for the mobile nav's sheet.
+export { SearchBar };
 
 // Desktop top bar: breadcrumb, search, push toggle, and the account dropdown.
 export function Header() {
@@ -456,25 +33,17 @@ export function Header() {
   const pathname = usePathname();
   const router = useRouter();
   const { session } = useSummonarrSession();
-  const role = session?.user?.role;
-  const permsStr = session?.user?.permissions;
   // Show "Settings" only to users who can actually open /settings (anyone else
   // is redirected away). We ask the shared nav resolver instead of checking
   // for ADMIN here, so this stays in step with the page's own gate.
-  const canOpenSettings = getVisibleAdminItems(permsStr ? { role, permissions: permsStr } : role)
-    .some((i) => i.href === "/settings");
+  const canOpenSettings = visibleAdminNavItems(session?.user).some((i) => i.href === "/settings");
   // Same Plex/Jellyfin badge rule as MobileNav and the server pages. It keys
   // on the user's `mediaServer`, not the sign-in `provider` — the two differ
   // for a local-password or OIDC account.
   const { showPlex, showJellyfin } = getClientBadgeVisibility(session?.user);
-  // `image` isn't part of SummonarrSession (the session is kept slim), so this
-  // is normally undefined and the avatar shows the user's initials instead.
-  const sessionUserImage = (session?.user as { image?: string | null } | undefined)?.image;
-  const initials = session?.user?.name
-    ?.split(" ")
-    .map((n: string) => n[0])
-    .join("")
-    .toUpperCase();
+  // The session carries no avatar image (it is kept slim): the avatar is the
+  // user's initials.
+  const initials = avatarInitials(session?.user?.name);
 
   const detailTitle = useDetailTitle();
   const crumbs = breadcrumbFor(pathname, detailTitle, t);
@@ -567,16 +136,6 @@ export function Header() {
                 border: "1px solid var(--ds-border)",
               }}
             >
-              {/*
-                Only render <AvatarImage> when we have a real src. Passing src=""
-                triggers a Radix/base-ui hydration mismatch (React #418) — server
-                renders the <img> in idle state, but on the client an empty src
-                fires `onerror` immediately, switching to the fallback before
-                hydration completes.
-              */}
-              {sessionUserImage ? (
-                <AvatarImage src={sessionUserImage} />
-              ) : null}
               <AvatarFallback
                 className="font-semibold"
                 style={{
@@ -585,7 +144,7 @@ export function Header() {
                   color: "var(--ds-fg)",
                 }}
               >
-                {initials ?? "?"}
+                {initials}
               </AvatarFallback>
             </Avatar>
           </DropdownMenuTrigger>

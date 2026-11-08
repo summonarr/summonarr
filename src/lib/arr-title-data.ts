@@ -37,6 +37,7 @@ import {
   projectRenames,
   projectRootFolderChoices,
   projectTitle,
+  rootFolderMoving,
   withSeasonMonitoring,
   type ArrTitle,
   type Choice,
@@ -57,6 +58,18 @@ export class NotOnTitleError extends Error {
     this.what = what;
   }
 }
+/**
+ * A Sonarr release search with no season or episode named — its own class so
+ * a caller can tell invalid input from a stale id. The route refuses it first
+ * (400 releaseScopeInvalid); a NotOnTitleError("season") still, so anything
+ * mapping that (arr-admin-http's 409) answers as before.
+ */
+export class ReleaseScopeError extends NotOnTitleError {
+  constructor() {
+    super("season");
+    this.message = "a Sonarr release search needs a season or an episode";
+  }
+}
 /** A history record that is not a grab can't be marked failed. */
 export class NotAGrabError extends Error {}
 /** The download that grab belongs to is already marked failed (a season pack's other episodes, a second click). */
@@ -68,9 +81,11 @@ export class AlreadyFailedError extends Error {}
  */
 export class MarkInProgressError extends AlreadyFailedError {}
 
-const resourcePath = (service: ArrService, arrId: number) => `/api/v3/${service === "radarr" ? "movie" : "series"}/${arrId}`;
+/** One movie's or series' resource path (Radarr /movie/{id}, Sonarr /series/{id}). */
+export const resourcePath = (service: ArrService, arrId: number) => `/api/v3/${service === "radarr" ? "movie" : "series"}/${arrId}`;
 
-async function readRaw(cfg: ArrCfg, service: ArrService, arrId: number): Promise<Record<string, unknown>> {
+/** The title's own resource, read fresh — TitleNotFoundError when the instance doesn't hold it. */
+export async function readRaw(cfg: ArrCfg, service: ArrService, arrId: number): Promise<Record<string, unknown>> {
   try {
     const raw = await arrFetch<unknown>(cfg, resourcePath(service, arrId));
     if (!raw || typeof raw !== "object" || Array.isArray(raw) || (raw as { id?: unknown }).id !== arrId) throw new TitleNotFoundError();
@@ -100,11 +115,26 @@ async function readEpisodes(cfg: ArrCfg, seriesId: number, seasonNumber?: number
   return seasonNumber === undefined ? episodes : episodes.filter((e) => e.seasonNumber === seasonNumber);
 }
 
-// Up to this many ids are checked one GET /api/v3/episode/{id} each; more read
+// Up to this many ids are checked one GET /api/v3/episode/{id} each, read
+// together (a fixed handful, so no limit is needed — guardrail 31); more read
 // the series' whole episode list once. A long anime or daily show has
 // thousands of episodes, and a single monitor switch or Search used to pull all
 // of them.
 const FEW_EPISODES = 10;
+
+/** One episode by id, only when it is one of `seriesId`'s (NotOnTitleError otherwise). */
+async function ownEpisode(cfg: ArrCfg, seriesId: number, id: number): Promise<TitleEpisode> {
+  let raw: unknown;
+  try {
+    raw = await arrFetch<unknown>(cfg, `/api/v3/episode/${id}`);
+  } catch (err) {
+    if (err instanceof ArrResponseError && err.status === 404) throw new NotOnTitleError("episode");
+    throw err;
+  }
+  const [ep] = projectEpisodes([raw]);
+  if (!ep || ep.id !== id || (raw as { seriesId?: unknown }).seriesId !== seriesId) throw new NotOnTitleError("episode");
+  return ep;
+}
 
 /**
  * The series' own episodes for `ids`, read fresh from Sonarr (guardrail 5e) —
@@ -113,18 +143,13 @@ const FEW_EPISODES = 10;
 async function episodesOfSeries(cfg: ArrCfg, seriesId: number, ids: readonly number[]): Promise<Map<number, TitleEpisode>> {
   if (ids.length === 0) throw new NotOnTitleError("episode");
   if (ids.length <= FEW_EPISODES) {
+    // Settled in full, then judged in id order: the same failure the one-by-one
+    // reads answered with.
+    const reads = await Promise.allSettled(ids.map((id) => ownEpisode(cfg, seriesId, id)));
     const out = new Map<number, TitleEpisode>();
-    for (const id of ids) {
-      let raw: unknown;
-      try {
-        raw = await arrFetch<unknown>(cfg, `/api/v3/episode/${id}`);
-      } catch (err) {
-        if (err instanceof ArrResponseError && err.status === 404) throw new NotOnTitleError("episode");
-        throw err;
-      }
-      const [ep] = projectEpisodes([raw]);
-      if (!ep || ep.id !== id || (raw as { seriesId?: unknown }).seriesId !== seriesId) throw new NotOnTitleError("episode");
-      out.set(id, ep);
+    for (const [i, r] of reads.entries()) {
+      if (r.status === "rejected") throw r.reason;
+      out.set(ids[i], r.value);
     }
     return out;
   }
@@ -155,16 +180,33 @@ export async function findTitle(
   // A caller that reports a failed read itself (quietErrors) or answers on a
   // click inside a proxy's patience (timeoutMs, signal) — the Why? status.
   opts: Pick<ArrFetchOptions, "quietErrors" | "timeoutMs" | "signal"> = {},
-): Promise<{ arrId: number; raw: Record<string, unknown> | null } | null> {
-  const cfg = await configuredArrCfg(service, instance);
+): Promise<FoundTitle | null> {
+  return findTitleOn(await configuredArrCfg(service, instance), service, tmdbId, opts);
+}
+
+export type FoundTitle = { arrId: number; raw: Record<string, unknown> | null };
+
+export interface FindTitleOptions extends Pick<ArrFetchOptions, "quietErrors" | "timeoutMs" | "signal"> {
+  /**
+   * Sonarr's `series/lookup?term=tmdb:<id>` answer, shared with a caller that
+   * needs the same lookup (the add flow's preview and body): SkyHook is slow,
+   * and the lookup is read once per add instead of twice. Called only when the
+   * library read misses.
+   */
+  seriesLookup?: () => Promise<unknown>;
+}
+
+/** findTitle on an instance config already resolved. */
+export async function findTitleOn(cfg: ArrCfg, service: ArrService, tmdbId: number, opts: FindTitleOptions = {}): Promise<FoundTitle | null> {
+  const { seriesLookup, ...fetchOpts } = opts;
   if (service === "radarr") {
-    const movies = await arrFetch<unknown>(cfg, `/api/v3/movie?tmdbId=${tmdbId}`, opts);
+    const movies = await arrFetch<unknown>(cfg, `/api/v3/movie?tmdbId=${tmdbId}`, fetchOpts);
     const row = Array.isArray(movies) ? (movies as Array<{ id?: unknown; tmdbId?: unknown }>).find((m) => m?.tmdbId === tmdbId) : undefined;
     return typeof row?.id === "number" && row.id > 0 ? { arrId: row.id, raw: row as Record<string, unknown> } : null;
   }
-  const tvdbId = await resolveTmdbToTvdb(tmdbId);
+  const tvdbId = await withinCallerBound(resolveTmdbToTvdb(tmdbId), fetchOpts);
   if (tvdbId !== null) {
-    const library = await arrFetch<unknown>(cfg, `/api/v3/series?tvdbId=${tvdbId}`, opts);
+    const library = await arrFetch<unknown>(cfg, `/api/v3/series?tvdbId=${tvdbId}`, fetchOpts);
     const row = Array.isArray(library)
       ? (library as Array<{ id?: unknown; tvdbId?: unknown; tmdbId?: unknown }>).find((s) => s?.tvdbId === tvdbId)
       : undefined;
@@ -178,9 +220,46 @@ export async function findTitle(
   // answer one row for another show this library holds (`term=tmdb:84503` →
   // the series with tvdbId 84503). Sonarr v3's rows never carry a tmdbId, so
   // on v3 a series is found only through TMDB's TVDB cross-reference above.
-  const looked = await arrFetch<unknown>(cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`, opts);
+  const looked = seriesLookup ? await seriesLookup() : await arrFetch<unknown>(cfg, seriesLookupPath(tmdbId), fetchOpts);
   const row = Array.isArray(looked) ? (looked as Array<{ tmdbId?: unknown; id?: unknown } | null>).find((r) => r?.tmdbId === tmdbId) : undefined;
   return typeof row?.id === "number" && row.id > 0 ? { arrId: row.id, raw: null } : null;
+}
+
+/** Sonarr's lookup of a TMDB id (it asks SkyHook — slow). */
+export const seriesLookupPath = (tmdbId: number) => `/api/v3/series/lookup?term=tmdb:${tmdbId}`;
+
+/**
+ * Hold a hop that takes no signal of its own (the TMDB cross-reference) to
+ * the caller's own bound: its signal, or its timeout. The hop runs on — its
+ * answer is cached for the next caller — but this one stops waiting.
+ */
+function withinCallerBound<T>(work: Promise<T>, opts: Pick<ArrFetchOptions, "timeoutMs" | "signal">): Promise<T> {
+  const { signal, timeoutMs } = opts;
+  if (!signal && timeoutMs === undefined) return work;
+  if (signal?.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = () => {
+      done();
+      reject(signal?.reason);
+    };
+    const done = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        done();
+        // Named like AbortSignal.timeout's, so arrErrorKind reads it as a timeout.
+        reject(new DOMException(`timed out after ${timeoutMs}ms`, "TimeoutError"));
+      }, timeoutMs);
+    }
+    work.then(
+      (v) => { done(); resolve(v); },
+      (err: unknown) => { done(); reject(err); },
+    );
+  });
 }
 
 export interface TitleState {
@@ -195,18 +274,34 @@ export interface TitleState {
   tags: Choice[] | null;
 }
 
+/** The instance's own choices: quality profiles, root folders and tags, projected (guardrail 5i). */
+export interface TitleCatalog {
+  qualityProfiles: Choice[];
+  rootFolders: RootFolderChoice[];
+  tags: Choice[];
+}
+
 /**
- * The three lists, each on its own: /api/v3/rootfolder computes free space and
- * scans every root's directory, so a dead mount makes it slow or failing — and
- * one 5xx must not lock the admin out of the Seasons, Files and History tabs,
- * which need none of them.
+ * The instance's three choice lists. Strict (an edit's or an add's check):
+ * any list that fails fails the read. `tolerant` (opening the manager): each
+ * list on its own, null when it failed — /api/v3/rootfolder computes free
+ * space and scans every root's directory, so a dead mount makes it slow or
+ * failing, and one 5xx must not lock the admin out of the Seasons, Files and
+ * History tabs, which need none of them.
  */
-async function readCatalogTolerant(cfg: ArrCfg): Promise<Omit<TitleState, "title">> {
-  const [profiles, folders, tags] = await Promise.allSettled([
+export function readCatalog(cfg: ArrCfg, opts: { tolerant: true }): Promise<Omit<TitleState, "title">>;
+export function readCatalog(cfg: ArrCfg, opts?: { tolerant?: false }): Promise<TitleCatalog>;
+export async function readCatalog(cfg: ArrCfg, opts: { tolerant?: boolean } = {}): Promise<TitleCatalog | Omit<TitleState, "title">> {
+  const reads = [
     arrFetch<unknown>(cfg, "/api/v3/qualityprofile"),
     arrFetch<unknown>(cfg, "/api/v3/rootfolder"),
     arrFetch<unknown>(cfg, "/api/v3/tag"),
-  ]);
+  ] as const;
+  if (!opts.tolerant) {
+    const [profiles, folders, tags] = await Promise.all(reads);
+    return { qualityProfiles: projectChoices(profiles), rootFolders: projectRootFolderChoices(folders), tags: projectChoices(tags, "label") };
+  }
+  const [profiles, folders, tags] = await Promise.allSettled(reads);
   return {
     qualityProfiles: profiles.status === "fulfilled" ? projectChoices(profiles.value) : null,
     rootFolders: folders.status === "fulfilled" ? projectRootFolderChoices(folders.value) : null,
@@ -214,24 +309,11 @@ async function readCatalogTolerant(cfg: ArrCfg): Promise<Omit<TitleState, "title
   };
 }
 
-async function readCatalog(cfg: ArrCfg) {
-  const [profiles, folders, tags] = await Promise.all([
-    arrFetch<unknown>(cfg, "/api/v3/qualityprofile"),
-    arrFetch<unknown>(cfg, "/api/v3/rootfolder"),
-    arrFetch<unknown>(cfg, "/api/v3/tag"),
-  ]);
-  return {
-    qualityProfiles: projectChoices(profiles),
-    rootFolders: projectRootFolderChoices(folders),
-    tags: projectChoices(tags, "label"),
-  };
-}
-
 export async function loadTitle(service: ArrService, instance: string, arrId: number, known: Record<string, unknown> | null = null): Promise<TitleState> {
   const cfg = await configuredArrCfg(service, instance);
   const [raw, catalog] = await Promise.all([
     known && known.id === arrId ? Promise.resolve(known) : readRaw(cfg, service, arrId),
-    readCatalogTolerant(cfg),
+    readCatalog(cfg, { tolerant: true }),
   ]);
   const title = projectTitle(service, instance, raw, (catalog.rootFolders ?? []).map((f) => f.path));
   if (!title) throw new TitleNotFoundError();
@@ -302,17 +384,21 @@ async function editTitleNow(
     tagIds: new Set(catalog?.tags.map((t) => t.id) ?? []),
     seasonNumbers: new Set(current.seasons.map((s) => s.seasonNumber)),
   });
-  // What actually changes: a root folder equal to the current one is not sent.
-  const fields = editedFields(edit).filter((f) => f !== "rootFolderPath" || edit.rootFolderPath !== current.rootFolderPath);
+  // What actually changes: a root folder that is the current one (trailing
+  // separators aside) is not sent, so it is not audited either.
+  const fields = editedFields(edit).filter((f) => f !== "rootFolderPath" || rootFolderMoving(edit, current));
   const body = editorBody(service, arrId, edit, current);
+  const seasons = service === "sonarr" && edit.seasons && edit.seasons.length > 0 ? edit.seasons : null;
+  // parseTitleEdit never combines seasons with another field, and editorBody
+  // never carries seasons: the two writes are never one edit. Refused before
+  // anything is sent should a caller ever combine them — the season PUT of a
+  // resource read BEFORE the editor's write would revert it.
+  if (body && seasons) throw new Error("a season edit is never combined with another field");
   if (body) {
     await arrFetch<unknown>(cfg, `/api/v3/${service === "radarr" ? "movie" : "series"}/editor`, { method: "PUT", body: JSON.stringify(body) });
   }
-  if (service === "sonarr" && edit.seasons && edit.seasons.length > 0) {
-    // After an editor write the series is re-read so the PUT carries its new
-    // values; with none, the resource just read is still current.
-    const fresh = body ? await readRaw(cfg, service, arrId) : raw;
-    await arrFetch<unknown>(cfg, resourcePath(service, arrId), { method: "PUT", body: JSON.stringify(withSeasonMonitoring(fresh, edit.seasons)) });
+  if (seasons) {
+    await arrFetch<unknown>(cfg, resourcePath(service, arrId), { method: "PUT", body: JSON.stringify(withSeasonMonitoring(raw, seasons)) });
   }
   // The write landed: a failed re-read must not turn it into an error (the
   // route would skip the audit and the admin retry an applied edit). The title
@@ -575,24 +661,44 @@ export async function markHistoryFailed(service: ArrService, instance: string, a
     ? e.kind === "failed" && e.id > event.id && e.downloadId === event.downloadId
     : failsIdlessGrab(event, e));
   if (history.some(failedSince)) throw new AlreadyFailedError();
-  // No await between this check and the claim below.
-  const now = Date.now();
-  for (const [k, c] of markClaims) if (c.expiresAt <= now) markClaims.delete(k);
-  const key = [service, instance, cfg.url, event.downloadId !== null ? `d:${event.downloadId}` : `h:${event.id}`].join("\u0000");
-  const held = markClaims.get(key);
-  if (held && event.id <= held.upTo) throw new MarkInProgressError();
-  const claim = { expiresAt: now + MARK_CLAIM_TTL_MS, upTo: history.reduce((m, e) => Math.max(m, e.id), event.id) };
-  markClaims.set(key, claim);
+  // No await between this check and the claim: claimMark is synchronous.
+  const claim = claimMark([service, instance, cfg.url, event.downloadId !== null ? `d:${event.downloadId}` : `h:${event.id}`].join("\u0000"), event, history);
   try {
     await sendMarkFailed(cfg, historyId);
   } catch (err) {
-    if (markClaims.get(key) === claim) {
-      if (definitelyRefused(err)) markClaims.delete(key);
-      else claim.expiresAt = Math.min(claim.expiresAt, Date.now() + MARK_UNKNOWN_HOLD_MS);
-    }
+    settleFailedMark(claim, err);
     throw err;
   }
   return event;
+}
+
+type MarkClaim = { key: string; entry: { expiresAt: number; upTo: number } };
+
+/**
+ * Claim a download for one mark, synchronously — MarkInProgressError when a
+ * live claim already covers this grab. The claim covers every grab the history
+ * held now (`upTo`, the highest id read), never a later re-grab. Expired
+ * claims are swept first.
+ */
+function claimMark(key: string, event: ArrHistoryEvent, history: readonly ArrHistoryEvent[]): MarkClaim {
+  const now = Date.now();
+  for (const [k, c] of markClaims) if (c.expiresAt <= now) markClaims.delete(k);
+  const held = markClaims.get(key);
+  if (held && event.id <= held.upTo) throw new MarkInProgressError();
+  let upTo = event.id;
+  for (const e of history) if (e.id > upTo) upTo = e.id;
+  const entry = { expiresAt: now + MARK_CLAIM_TTL_MS, upTo };
+  markClaims.set(key, entry);
+  return { key, entry };
+}
+
+// A mark that failed: a definite refusal hands the claim back; any other
+// failure (the arr may have taken it) keeps it MARK_UNKNOWN_HOLD_MS more at
+// most. A claim another mark has since replaced is left alone.
+function settleFailedMark(claim: MarkClaim, err: unknown): void {
+  if (markClaims.get(claim.key) !== claim.entry) return;
+  if (definitelyRefused(err)) markClaims.delete(claim.key);
+  else claim.entry.expiresAt = Math.min(claim.entry.expiresAt, Date.now() + MARK_UNKNOWN_HOLD_MS);
 }
 
 async function sendMarkFailed(cfg: ArrCfg, historyId: number): Promise<void> {
@@ -695,7 +801,8 @@ async function releaseQuery(cfg: ArrCfg, service: ArrService, arrId: number, sco
     await episodesOfSeries(cfg, arrId, [scope.episodeId]);
     return { query: `episodeId=${scope.episodeId}`, profile };
   }
-  throw new NotOnTitleError("season");
+  // A series has no whole-series release search.
+  throw new ReleaseScopeError();
 }
 
 /** Interactive search for the title (indexers are hit live). */

@@ -28,6 +28,8 @@ import {
   base64UrlDecode,
   generateVapidKeys,
   sendPushNotification,
+  signVapidJwt,
+  MAX_PUSH_PAYLOAD_BYTES,
   WebPushError,
 } from "../src/lib/web-push.ts";
 import type { PushSubscription, SendOptions } from "../src/lib/web-push.ts";
@@ -418,4 +420,83 @@ test("sendPushNotification: private/loopback endpoints are blocked by the SSRF p
     }
   });
   assert.equal(calls.length, 0);
+});
+
+test("VAPID JWT: every signature is a verifiable 64-byte r||s, including r/s with leading zero bytes", async () => {
+  // About 1 in 128 signatures has a 0x00 high byte in r or s — the case a
+  // hand-rolled DER conversion gets wrong. Sign enough times to meet some.
+  // Sends reuse a cached token, so sign directly to get a fresh signature each time.
+  const keyObj = vapidPublicKeyObject(VAPID.publicKey);
+  for (let i = 0; i < 64; i++) {
+    const { jwt } = signVapidJwt({
+      audience: "https://203.0.113.5",
+      contact: SEND_OPTS.contact,
+      publicKey: VAPID.publicKey,
+      privateKey: VAPID.privateKey,
+    });
+    const { signingInput, signature } = parseJwt(jwt);
+    assert.equal(signature.length, 64);
+    assert.equal(
+      createVerify("sha256").update(signingInput).verify({ key: keyObj, dsaEncoding: "ieee-p1363" }, signature),
+      true,
+    );
+  }
+});
+
+const authJwt = (call: CapturedCall): string => {
+  const m = call.headers.get("authorization")!.match(/^vapid t=([A-Za-z0-9_.-]+), k=/);
+  assert.ok(m);
+  return m[1];
+};
+
+test("VAPID JWT: sends to one push service reuse one token; another origin gets its own", async () => {
+  const a1 = makeUa("https://203.0.113.7/wp/one");
+  const a2 = makeUa("https://203.0.113.7/wp/two");
+  const b = makeUa("https://203.0.113.8/wp/one");
+  const { calls } = await withFetchStub(ok201, async () => {
+    await sendPushNotification(a1.subscription, "x", SEND_OPTS);
+    await sendPushNotification(a2.subscription, "x", SEND_OPTS);
+    await sendPushNotification(b.subscription, "x", SEND_OPTS);
+  });
+  assert.equal(authJwt(calls[0]), authJwt(calls[1]));
+  assert.notEqual(authJwt(calls[0]), authJwt(calls[2]));
+  assert.equal(parseJwt(authJwt(calls[2])).claims.aud, "https://203.0.113.8");
+});
+
+test("payload encryption: a payload that would not fit one 4096-byte record is refused before any network call", async () => {
+  const ua = makeUa();
+  // The largest payload that fits still decrypts.
+  const fits = "a".repeat(MAX_PUSH_PAYLOAD_BYTES);
+  const { calls } = await withFetchStub(ok201, () => sendPushNotification(ua.subscription, fits, SEND_OPTS));
+  const { rs, padded } = decryptAsUa(ua, calls[0].body);
+  assert.equal(rs, 4096);
+  assert.equal(padded.length + 16, 4096);
+  await withFetchStub(noFetchExpected, () =>
+    assert.rejects(sendPushNotification(ua.subscription, fits + "a", SEND_OPTS), /single-record limit/),
+  );
+});
+
+test("sendPushNotification: a huge push-service error body is cut to a short prefix and not read past it", async () => {
+  const ua = makeUa();
+  let pulls = 0;
+  const endless = () =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulls += 1;
+          if (pulls > 1000) controller.close();
+          else controller.enqueue(new TextEncoder().encode("e".repeat(1000)));
+        },
+      }),
+      { status: 400 },
+    );
+  await withFetchStub(
+    endless,
+    () =>
+      assert.rejects(
+        sendPushNotification(ua.subscription, "hello", SEND_OPTS),
+        (err: unknown) => err instanceof WebPushError && err.statusCode === 400 && err.body === "e".repeat(2048),
+      ),
+  );
+  assert.ok(pulls < 10, `read ${pulls} chunks of an error body`);
 });

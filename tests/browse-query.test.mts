@@ -19,6 +19,10 @@
 //
 // The pins below are written so that reintroducing either one goes red.
 //
+// Also pinned: an EXTRA page of the window that fails still degrades to fewer
+// items (the response shape has no "partial" flag), but no longer silently —
+// it is logged under the [browse] scope, once per distinct error (7b).
+//
 // No DB and no network: the TMDB layer is reached through a scripted
 // globalThis.fetch (matching tests/tmdb.test.mts) and every Prisma delegate the
 // enrichment touches is shadowed in-memory via tests/_helpers.mts (matching
@@ -34,18 +38,31 @@ process.env.TMDB_READ_TOKEN = "test-token";
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel } = await import("./_helpers.mts");
 const { runBrowseQuery } = await import("../src/lib/browse-query.ts");
+const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
+
+const warns: string[] = [];
+console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" ")); };
 type SummonarrSession = import("../src/lib/api-auth.ts").SummonarrSession;
 
 // ── scripted TMDB ───────────────────────────────────────────────────────────
 
 /** Every TMDB page request this run made, in order, as page numbers. */
 let fetchedPages: number[] = [];
+/** TMDB pages that answer 500. */
+let failingPages = new Set<number>();
 /** Total TMDB pages the scripted API claims to have. */
 const TOTAL_TMDB_PAGES = 500;
 
 // 20 results per page, ids derived from the page so a caller can tell which
 // TMDB page any item came from: page P yields ids P*100 … P*100+19.
+/** TMDB pages whose first result repeats the previous page's last (a rank that moved between cache fills). */
+let shiftedPages = new Set<number>();
 function pageBody(page: number) {
+  const body = pageBodyRaw(page);
+  if (shiftedPages.has(page)) body.results[0] = { ...body.results[0], id: (page - 1) * 100 + 19 };
+  return body;
+}
+function pageBodyRaw(page: number) {
   return {
     page,
     total_pages: TOTAL_TMDB_PAGES,
@@ -66,6 +83,9 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = new URL(typeof input === "string" ? input : input.toString());
   const page = parseInt(url.searchParams.get("page") ?? "1", 10);
   fetchedPages.push(page);
+  if (failingPages.has(page)) {
+    return new Response(JSON.stringify({ status_message: "boom" }), { status: 500, headers: { "content-type": "application/json" } });
+  }
   return new Response(JSON.stringify(pageBody(page)), {
     status: 200,
     headers: { "content-type": "application/json" },
@@ -146,8 +166,11 @@ function session(): SummonarrSession {
 
 beforeEach(() => {
   fetchedPages = [];
+  failingPages = new Set();
   plexHeld = new Set();
   settings = new Map();
+  warns.length = 0;
+  resetLogDedup();
 });
 
 // ── the window ──────────────────────────────────────────────────────────────
@@ -186,6 +209,21 @@ test("the FULL filtered window is returned — survivors past the 20th are not d
   );
 });
 
+test("a title that sits on two adjacent TMDB pages of a window is returned once", async () => {
+  shiftedPages = new Set([2]);
+  try {
+    const r = await runBrowseQuery({
+      mediaType: "movie", page: 1, filters: {}, hideAvailable: true, session: session(),
+    });
+    const ids = r.items.map((m) => m.id);
+    assert.equal(new Set(ids).size, ids.length, "no id twice");
+    assert.equal(ids.length, 99);
+    assert.equal(ids.indexOf(119), 19, "the first occurrence keeps its place");
+  } finally {
+    shiftedPages = new Set();
+  }
+});
+
 // The consequence that makes the slice a correctness bug rather than a display
 // one: page 2 starts a fresh window, so anything page 1 withheld is unreachable.
 test("virtual pages 1 and 2 are disjoint, so a dropped survivor is reachable from NEITHER", async () => {
@@ -208,6 +246,27 @@ test("virtual pages 1 and 2 are disjoint, so a dropped survivor is reachable fro
   const union = new Set([...ids1, ...ids2]);
   assert.equal(union.size, expected.size, `expected ${expected.size} distinct items across two pages, got ${union.size}`);
   for (const id of expected) assert.ok(union.has(id), `id ${id} is unreachable from either page`);
+});
+
+test("a failed extra page degrades to fewer items and is logged once per distinct error, not per request", async () => {
+  failingPages = new Set([3]);
+  const r = await runBrowseQuery({
+    mediaType: "movie", page: 1, filters: {}, hideAvailable: true, session: session(),
+  });
+  assert.equal(r.items.length, 80, "the other four pages' items are still served");
+  assert.ok(!r.items.some((i) => i.id >= 300 && i.id < 400), "nothing from the failed page");
+  const browseWarns = () => warns.filter((w) => w.startsWith("[browse]"));
+  assert.equal(browseWarns().length, 1, "the failure is not silent");
+  assert.match(browseWarns()[0], /failed: 500/);
+
+  await runBrowseQuery({ mediaType: "movie", page: 1, filters: {}, hideAvailable: true, session: session() });
+  assert.equal(browseWarns().length, 1, "the same outage on the next request stays quiet");
+
+  failingPages = new Set();
+  await runBrowseQuery({ mediaType: "movie", page: 1, filters: {}, hideAvailable: true, session: session() });
+  failingPages = new Set([4]);
+  await runBrowseQuery({ mediaType: "movie", page: 1, filters: {}, hideAvailable: true, session: session() });
+  assert.equal(browseWarns().length, 2, "once a window succeeds, a new failure is reported again");
 });
 
 test("hideAvailable actually removes held titles, and only those", async () => {

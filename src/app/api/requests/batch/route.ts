@@ -1,150 +1,54 @@
 import { NextResponse } from "next/server";
-import { emitNotificationEvents } from "@/lib/notify-agents";
-import { withPermission } from "@/lib/api-auth";
+import { withPermission, type SummonarrSession } from "@/lib/api-auth";
 import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, addSeriesToSonarr, arrErrorMessage, arrErrorMessageForClient } from "@/lib/arr";
-import { notifyUsersRequestsApproved, notifyUsersRequestsDeclined } from "@/lib/discord-notify";
-import { notifyUsersRequestsApprovedPush, notifyUsersRequestsDeclinedPush } from "@/lib/push";
-import { notifyUserRequestApprovedEmail, notifyUserRequestDeclinedEmail } from "@/lib/email";
-import { resolveUserNotificationEmail } from "@/lib/notification-email";
-import { buildNotificationData } from "@/lib/notification-data";
-import { emitSSE } from "@/lib/sse-emitter";
-import { scheduleDownloadChecks } from "@/lib/download-check";
+import { arrErrorMessageForClient } from "@/lib/arr";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { logAudit, auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { readJsonCapped } from "@/lib/body-size";
 import { maintenanceGuard } from "@/lib/maintenance";
-import { settleLimit } from "@/lib/concurrency";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { ADMIN_NOTE_MAX } from "@/lib/request-limits";
 import type { Translator } from "@/lib/i18n/translate";
+import {
+  announceStatus,
+  claimPendingBatch,
+  followUpDecidedApprovals,
+  notifyDecided,
+  pushApprovals,
+} from "@/lib/request-transition";
+import { REQUEST_BATCH_MAX_IDS, REQUEST_BATCH_MAX_PERMANENT } from "@/lib/api-body-limits";
 
-// Cap concurrent ARR pushes (guardrail 31) — mirrors the bulk route's
-// ARR_CONCURRENCY so a large batch approve doesn't burst every Radarr/Sonarr
-// add at once.
-const ARR_CONCURRENCY = 5;
+// Ids per batch, and the tighter cap on a PERMANENT decline: permanent declines
+// are terminal (they block re-requests), so one click can't blast a hundred
+// users' requests into that state.
+const MAX_BATCH_IDS = REQUEST_BATCH_MAX_IDS;
+const MAX_PERMANENT_DECLINES = REQUEST_BATCH_MAX_PERMANENT;
 
-const VALID_STATUSES = ["APPROVED", "DECLINED"] as const;
-type ValidStatus = (typeof VALID_STATUSES)[number];
-
-interface EmailTarget {
-  requestedBy: string;
-  title: string;
-  mediaType: string;
-  posterPath?: string | null;
-  tmdbId?: number | null;
+// The decision this call makes on every listed PENDING request.
+interface BatchDecision {
+  ids: string[];
+  status: "APPROVED" | "DECLINED";
+  // undefined: no note sent, every row keeps its own.
+  adminNote: string | null | undefined;
+  // Only ever true on a decline.
+  permanent: boolean;
 }
 
-// Mirrors the single-request route's email channel (notifyRequestStatusChange):
-// resolve each owner's notification email + per-status opt-in pref, then fan out.
-// Fire-and-forget; per-row failures are swallowed by the email helpers.
-async function fanOutEmails(targets: EmailTarget[], status: "APPROVED" | "DECLINED", adminNote?: string | null): Promise<void> {
-  if (targets.length === 0) return;
-  try {
-    const userIds = [...new Set(targets.map((t) => t.requestedBy))];
-    const users = await prisma.user.findMany({
-      // deactivatedAt: null — account removal disables rather than scrubs
-      // (guardrail 33), so a removed user keeps a live notification email and
-      // would otherwise still get emailed by a later batch approve/decline.
-      // Mirrors the same guard just added to the Discord/push plural notifiers.
-      where: { id: { in: userIds }, deactivatedAt: null },
-      select: { id: true, email: true, notificationEmail: true, emailOnApproved: true, emailOnDeclined: true, locale: true },
-    });
-    const userMap = new Map(users.map((u) => [u.id, u]));
-    for (const t of targets) {
-      const u = userMap.get(t.requestedBy);
-      if (!u) continue;
-      const to = resolveUserNotificationEmail(u);
-      if (!to) continue;
-      if (status === "APPROVED") {
-        if (!u.emailOnApproved) continue;
-        void notifyUserRequestApprovedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, posterPath: t.posterPath, tmdbId: t.tmdbId ?? undefined, locale: u.locale });
-      } else {
-        if (!u.emailOnDeclined) continue;
-        void notifyUserRequestDeclinedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, tmdbId: t.tmdbId ?? undefined, adminNote: adminNote ?? null, posterPath: t.posterPath, locale: u.locale });
-      }
-    }
-  } catch (err) {
-    console.error("[requests/batch] email fan-out failed:", err instanceof Error ? err.message : err);
-  }
+// What an approval batch reports beside `ok`: each definite push failure (the
+// queue keeps those rows selected for another try), and each add that got no
+// definite answer and stays APPROVED.
+interface ApprovalReport {
+  failures: { id: string; title: string; error: string }[];
+  rolledBackIds: string[];
+  // A definite failure whose rollback did not land (the row moved on, or the
+  // write failed): reported as failed, but it is not PENDING.
+  rollbackMissedIds: string[];
+  outcomeUnknownIds: string[];
 }
 
-// Mirrors the single-request path's inbox write (writeInAppNotification →
-// createInAppNotification in request-notifications.ts): the header bell /
-// /notifications inbox must record a REQUEST_APPROVED / REQUEST_DECLINED row for
-// every batch transition too. The batch route previously fanned out only
-// Discord/push/email and left the inbox empty. One bounded createMany (guardrail
-// 31) instead of per-user creates; body copy matches inAppBodyFor. Unconditional —
-// the inbox is a passive record the user pulls, not a channel to opt out of.
-// Fire-and-forget; a failed inbox write must never break the batch action.
-async function writeBatchInboxRows(
-  targets: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number | null; posterPath?: string | null }>,
-  type: "REQUEST_APPROVED" | "REQUEST_DECLINED",
-): Promise<void> {
-  if (targets.length === 0) return;
-  const bodyFor = (mediaType: string) => {
-    const label = mediaType === "MOVIE" ? "movie" : "TV show";
-    return type === "REQUEST_APPROVED"
-      ? `Your ${label} request was approved and is downloading.`
-      : `Your ${label} request was declined.`;
-  };
-  try {
-    // Guardrail 33: account removal disables rather than scrubs — mirror the
-    // deactivatedAt gate the email/Discord/push fan-outs already apply, or a
-    // later re-enabled account signs in to a bell full of stale batch rows for
-    // requests it never saw actioned.
-    const activeIds = new Set(
-      (
-        await prisma.user.findMany({
-          where: { id: { in: [...new Set(targets.map((t) => t.requestedBy))] }, deactivatedAt: null },
-          select: { id: true },
-        })
-      ).map((u) => u.id),
-    );
-    const liveTargets = targets.filter((t) => activeIds.has(t.requestedBy));
-    if (liveTargets.length === 0) return;
-    await prisma.notification.createMany({
-      data: liveTargets.map((t) =>
-        buildNotificationData(t.requestedBy, {
-          type,
-          title: t.title,
-          body: bodyFor(t.mediaType),
-          tmdbId: t.tmdbId ?? null,
-          mediaType: t.mediaType,
-          posterPath: t.posterPath ?? null,
-          // Re-rendered from type + mediaType in the reader's language.
-          data: { v: 1 },
-        }),
-      ),
-    });
-  } catch (err) {
-    console.error("[requests/batch] in-app inbox write failed:", err instanceof Error ? err.message : err);
-  }
-}
-
-// Guardrail 33 / 14c: account removal DISABLES, so a removed requester's leftover
-// PENDING row still has a live email, Discord link and push subscriptions — and
-// the outbound channels (webhook/ntfy/Gotify) have no per-user gate of their own.
-// Every channel below must therefore start from the SAME already-filtered set,
-// resolved once per batch; the per-channel `deactivatedAt: null` predicates the
-// legacy notifiers carry stay as belt-and-braces. A failed lookup drops the
-// whole fan-out rather than guessing — the transition itself is already durable,
-// and telling a disabled account about it is the thing we must not do.
-async function filterActiveOwners<T extends { requestedBy: string }>(targets: T[]): Promise<T[]> {
-  if (targets.length === 0) return targets;
-  try {
-    const active = await prisma.user.findMany({
-      where: { id: { in: [...new Set(targets.map((t) => t.requestedBy))] }, deactivatedAt: null },
-      select: { id: true },
-    });
-    const activeIds = new Set(active.map((u) => u.id));
-    return targets.filter((t) => activeIds.has(t.requestedBy));
-  } catch (err) {
-    console.error("[requests/batch] active-owner lookup failed; skipping notifications:", err instanceof Error ? err.message : err);
-    return [];
-  }
-}
+const NO_APPROVALS: ApprovalReport = { failures: [], rolledBackIds: [], rollbackMissedIds: [], outcomeUnknownIds: [] };
 
 export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
@@ -155,36 +59,50 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     return NextResponse.json({ error: t("apiUser.requests.batch.rateLimited") }, { status: 429 });
   }
 
-  const parsed = await readJsonCapped<{ ids?: unknown; status?: unknown; adminNote?: unknown; permanent?: unknown }>(req, 1048576);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed;
+  const raw = await readJsonCapped<Record<string, unknown>>(req, 1048576);
+  if (raw instanceof NextResponse) return raw;
+  const decision = parseBatchDecision(raw, t);
+  if (decision instanceof NextResponse) return decision;
 
-  const { ids, status, adminNote, permanent } = body;
+  // Claims only the rows still PENDING, in one statement (claimPendingBatch):
+  // every side effect below keys off what THIS call moved — never an id that
+  // was already decided, or claimed by a concurrent batch.
+  const claimed = await claimPendingBatch(decision.ids, decision.status, { adminNote: decision.adminNote, permanent: decision.permanent });
+  for (const row of claimed) announceStatus(row, decision.status);
+  const claimedIds = claimed.map((r) => r.id);
 
-  if (!Array.isArray(ids) || ids.length === 0 || ids.length > 100) {
-    return NextResponse.json({ error: t("apiUser.requests.batch.idsInvalid") }, { status: 400 });
-  }
-  if (!ids.every((id) => typeof id === "string")) {
-    return NextResponse.json({ error: t("apiUser.requests.batch.idsStrings") }, { status: 400 });
-  }
-  if (!VALID_STATUSES.includes(status as ValidStatus)) {
-    return NextResponse.json({ error: t("apiUser.requests.batch.statusInvalid") }, { status: 400 });
-  }
-  if (adminNote !== undefined && (typeof adminNote !== "string" || adminNote.length > 1000)) {
-    return NextResponse.json({ error: t("apiUser.common.adminNoteTooLong") }, { status: 400 });
-  }
-  if (permanent !== undefined && typeof permanent !== "boolean") {
-    return NextResponse.json({ error: t("apiUser.requests.batch.permanentBoolean") }, { status: 400 });
-  }
+  let report = NO_APPROVALS;
+  if (decision.status === "APPROVED") report = await approveClaimed(claimedIds, session, t);
+  else await notifyDeclined(claimedIds, session);
 
-  const typedIds = ids as string[];
-  const typedStatus = status as ValidStatus;
-  const typedAdminNote = sanitizeOptional(adminNote as string | undefined);
-  const typedPermanent = permanent === true && typedStatus === "DECLINED";
+  auditBatch(req, session, decision, claimedIds, report);
 
-  // Permanent declines are terminal (block re-requests); cap below the general 100 ceiling
-  // so an admin can't blast 100 users' requests into the permanent state in a single click.
-  if (typedPermanent && typedIds.length > 25) {
+  // Additive: `failed` lists every row whose push definitely failed; `arrError`
+  // is the one-line summary the single-request PATCH returns under the same
+  // name, which the group Approve button renders as-is. `outcomeUnknown` lists
+  // the ids whose add got no answer and that stay APPROVED (never in `failed`,
+  // which the queue keeps selected for retry). Each is omitted when empty, so a
+  // clean batch reads `{ ok: true }` as before.
+  return NextResponse.json({
+    ok: true,
+    ...(report.failures.length > 0 ? { failed: report.failures, arrError: summarizeArrFailures(report.failures, t) } : {}),
+    ...(report.outcomeUnknownIds.length > 0 ? { outcomeUnknown: report.outcomeUnknownIds } : {}),
+  });
+});
+
+// The body, narrowed field by field: readJsonCapped proves only that it is a
+// JSON object.
+function parseBatchDecision(raw: Record<string, unknown>, t: Translator): BatchDecision | NextResponse {
+  const { ids, status, adminNote, permanent } = raw;
+  const bad = (key: string) => NextResponse.json({ error: t(key) }, { status: 400 });
+  if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_BATCH_IDS) return bad("apiUser.requests.batch.idsInvalid");
+  if (!ids.every((id): id is string => typeof id === "string")) return bad("apiUser.requests.batch.idsStrings");
+  if (status !== "APPROVED" && status !== "DECLINED") return bad("apiUser.requests.batch.statusInvalid");
+  if (adminNote !== undefined && (typeof adminNote !== "string" || adminNote.length > ADMIN_NOTE_MAX)) return bad("apiUser.common.adminNoteTooLong");
+  if (permanent !== undefined && typeof permanent !== "boolean") return bad("apiUser.requests.batch.permanentBoolean");
+
+  const isPermanent = permanent === true && status === "DECLINED";
+  if (isPermanent && ids.length > MAX_PERMANENT_DECLINES) {
     return NextResponse.json(
       // Human text in `error` like every sibling 400 (both web callers render
       // `data.error` verbatim); the machine token rides under `code`.
@@ -192,207 +110,84 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
       { status: 400 },
     );
   }
+  return {
+    ids,
+    status,
+    // An absent note leaves every stored one; sanitizeOptional maps "" to null.
+    adminNote: adminNote === undefined ? undefined : sanitizeOptional(adminNote),
+    permanent: isPermanent,
+  };
+}
 
-  const pendingNotifyAt = typedStatus === "APPROVED" ? new Date(Date.now() + 90_000) : null;
+// Push the claimed approvals (bounded) through the shared state machine, then
+// ONE batched download check for the rows that kept their backstop — a 100-id
+// batch would otherwise fill the whole delayed-job run queue — and "approved"
+// to the requesters whose approval stands (not the acting admin's own rows).
+async function approveClaimed(claimedIds: string[], session: SummonarrSession, t: Translator): Promise<ApprovalReport> {
+  // The full rows for just the ids THIS call claimed and that are still
+  // APPROVED, so an already-approved row is never re-pushed.
+  const approved = await prisma.mediaRequest.findMany({ where: { id: { in: claimedIds }, status: "APPROVED" } });
+  const settled = await pushApprovals(approved, "Batch approve");
+  followUpDecidedApprovals(settled, { actorId: session.user.id, checkName: "requests/batch:90s-download-check", logScope: "requests/batch" });
 
-  // Atomically CLAIM the rows (PENDING -> typedStatus) in ONE `UPDATE … WHERE id IN
-  // (…) AND status = 'PENDING' RETURNING id, requestedBy`. The returned rows are
-  // exactly the ones THIS call transitioned: Postgres re-evaluates the status
-  // predicate per row at write time (after taking the row lock), so a concurrent
-  // batch on the same ids finds them already non-PENDING and gets them back in
-  // ITS result set — never both. That is the same CAS the old per-id updateMany
-  // loop gave, minus up to 100 sequential round-trips per click, and the
-  // returned `requestedBy` is what the SSE emit below needs, so no re-read. The
-  // even older bulk findMany(PENDING) + updateMany shared a pre-update snapshot
-  // that two concurrent calls could both act on — do not regress to that.
-  const claimed = await prisma.mediaRequest.updateManyAndReturn({
-    where: { id: { in: typedIds }, status: "PENDING" },
-    data: {
-      status: typedStatus,
-      // The approval the watch grade reads (MediaRequest.approvedAt): stamped on
-      // approve, withdrawn on decline — a PENDING row can carry one from an
-      // approval whose push failed and rolled back.
-      approvedAt: typedStatus === "APPROVED" ? new Date() : null,
-      pendingNotifyAt,
-      // Guard on the RAW body field: sanitizeOptional never returns undefined
-      // (it maps undefined → null), so guarding on typedAdminNote would always
-      // be true and wipe the stored note on every batch transition.
-      ...(adminNote !== undefined ? { adminNote: typedAdminNote } : {}),
-      // Approving clears any prior decline; otherwise an APPROVED row keeps
-      // permanentlyDeclined=true and the owner's future re-requests stay blocked.
-      ...(typedStatus === "APPROVED" ? { permanentlyDeclined: false } : { permanentlyDeclined: typedPermanent }),
-    },
-    select: { id: true, requestedBy: true },
+  const report: ApprovalReport = { failures: [], rolledBackIds: [], rollbackMissedIds: [], outcomeUnknownIds: [] };
+  // In `approved` order, not completion order, so the reported list is stable.
+  for (const { row, outcome } of settled) {
+    if (outcome.kind === "unknown") report.outcomeUnknownIds.push(row.id);
+    if (outcome.kind !== "rolled-back" && outcome.kind !== "failed") continue;
+    (outcome.kind === "rolled-back" ? report.rolledBackIds : report.rollbackMissedIds).push(row.id);
+    // The kind, never the arr's internal URL: the caller may be a delegate (guardrail 5g).
+    report.failures.push({ id: row.id, title: row.title, error: arrErrorMessageForClient(outcome.error, t) });
+  }
+  return report;
+}
+
+// Tell each declined request's owner, with the note as the decline left it —
+// the one this call wrote, else the one already stored — exactly what the single
+// decline sends. Only rows this call moved, and never the acting admin's own.
+async function notifyDeclined(claimedIds: string[], session: SummonarrSession): Promise<void> {
+  // The decline already committed: a failed read here must not turn it into a 500.
+  const declined = await prisma.mediaRequest.findMany({
+    where: { id: { in: claimedIds }, status: "DECLINED" },
+    select: { id: true, requestedBy: true, title: true, mediaType: true, tmdbId: true, posterPath: true, arrInstance: true, adminNote: true },
+  }).catch((err) => {
+    console.error("[requests/batch] decline notice read failed:", err instanceof Error ? err.message : String(err));
+    return [];
   });
-  const claimedIds = claimed.map((r) => r.id);
-  const ownerMap = new Map(claimed.map((r) => [r.id, r.requestedBy]));
-  // The set of rows THIS call transitioned — drives every side effect below.
-  const pendingBeforeIds = new Set(claimedIds);
-  // Hoisted to function scope so the SSE emit below can report the TRUE status of
-  // rows whose ARR push failed (rolled back to PENDING), not the batch target.
-  const failedIds = new Set<string>();
-  // Why each failed push failed, returned to the caller. The batch used to answer a
-  // bare { ok: true } regardless, so the admin saw a clean approve while the rows
-  // quietly went back to PENDING — the reason existed only in the server log.
-  const failureReasons = new Map<string, string>();
-  let failures: { id: string; title: string; error: string }[] = [];
+  void notifyDecided("DECLINED", declined, session.user.id, "requests/batch");
+}
 
-  if (typedStatus === "APPROVED") {
-    // Load the full rows for just the ids THIS call claimed (the claim above
-    // returned only id + requestedBy), so already-approved rows are never re-pushed.
-    const approved = await prisma.mediaRequest.findMany({
-      where: { id: { in: [...pendingBeforeIds] }, status: "APPROVED" },
-    });
-
-    await settleLimit(approved, ARR_CONCURRENCY, async (r) => {
-      let pushedTvdbId: number | null = null;
-      try {
-        const variant = r.arrInstance;
-        // Honor the profile the requester chose at request time (REQUEST_ADVANCED);
-        // absent ⇒ the instance default. Mirrors requests/[id] effectiveProfileId
-        // and the sync re-push — batch approve previously discarded it.
-        const profileId = r.qualityProfileId ?? undefined;
-        if (r.mediaType === "MOVIE") {
-          await addMovieToRadarr(r.tmdbId, variant, profileId, r.requestedBy);
-        } else {
-          pushedTvdbId = await addSeriesToSonarr(r.tmdbId, variant, profileId, r.requestedBy);
-        }
-      } catch (err) {
-        console.error("[arr] Batch approve push failed for", r.id, arrErrorMessage(err));
-        failedIds.add(r.id);
-        // The kind, never the arr's internal URL: the caller may be a delegate (guardrail 5g).
-        failureReasons.set(r.id, arrErrorMessageForClient(err, t));
-      }
-      // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the
-      // series by this point, so a P2025 (row deleted mid-push) or transient DB error
-      // must not land the id in failedIds and roll a genuinely-grabbed request back to
-      // PENDING. updateMany no-ops on a concurrently deleted row instead of throwing.
-      if (pushedTvdbId !== null) {
-        await prisma.mediaRequest.updateMany({ where: { id: r.id }, data: { tvdbId: pushedTvdbId } });
-      }
-    });
-
-    // In `approved` order, not completion order, so the reported list is stable.
-    failures = approved
-      .filter((r) => failedIds.has(r.id))
-      .map((r) => ({ id: r.id, title: r.title, error: failureReasons.get(r.id) ?? t("apiUser.requests.batch.arrFailedDefault") }));
-
-    // Roll back rows whose ARR push failed so they aren't stuck APPROVED with no ARR backing.
-    if (failedIds.size > 0) {
-      await prisma.mediaRequest.updateMany({
-        where: { id: { in: [...failedIds] }, status: "APPROVED" },
-        data: { status: "PENDING", pendingNotifyAt: null },
-      }).catch((err) => console.error("[requests/batch] rollback to PENDING failed:", err));
-    }
-
-    // Run the pendingNotifyAt check PROMPTLY at ~90s for every row that actually
-    // landed in ARR, instead of leaving it to the orchestrator's next sweep. One
-    // batched job, not one per row — a 100-id batch would otherwise fill the whole
-    // delayed-job run queue. Rolled-back rows are excluded: they had
-    // pendingNotifyAt cleared above, so there is nothing left to check.
-    scheduleDownloadChecks(
-      approved
-        .filter((r) => !failedIds.has(r.id))
-        .map((r) => ({
-          requestId: r.id,
-          tmdbId: r.tmdbId,
-          mediaType: r.mediaType,
-          arrInstance: r.arrInstance,
-          requestedBy: r.requestedBy,
-          title: r.title,
-        })),
-      { name: "requests/batch:90s-download-check" },
-    );
-
-    // Notify only the ones that actually made it into ARR — otherwise users get
-    // a misleading "Approved!" ping for a request that's actually back to PENDING.
-    // Skip rows the acting admin owns — no self-notification for one's own request.
-    // Then drop DISABLED owners once, for every channel (filterActiveOwners).
-    const notifyTargets = await filterActiveOwners(
-      approved.filter((r) => !failedIds.has(r.id) && r.requestedBy !== session.user.id),
-    );
-    if (notifyTargets.length > 0) {
-      notifyUsersRequestsApproved(notifyTargets).catch(() => {});
-      notifyUsersRequestsApprovedPush(notifyTargets).catch(() => {});
-      void fanOutEmails(notifyTargets, "APPROVED");
-      void writeBatchInboxRows(notifyTargets, "REQUEST_APPROVED");
-      emitNotificationEvents(notifyTargets.map((r) => ({
-        event: "request.approved" as const,
-        media: { type: r.mediaType === "MOVIE" ? "MOVIE" as const : "TV" as const, tmdbId: r.tmdbId, title: r.title, posterPath: r.posterPath ?? null },
-        request: { id: r.id, instance: r.arrInstance },
-      })));
-    }
-  }
-
-  if (typedStatus === "DECLINED") {
-    // Mirror the APPROVED path: notify only the rows this batch actually transitioned
-    // (PENDING → DECLINED), not ids that were already DECLINED before the call — those
-    // were left untouched by the claim above and must not get a duplicate decline ping.
-    const declined = await prisma.mediaRequest.findMany({
-      where: { id: { in: [...pendingBeforeIds] }, status: "DECLINED" },
-      select: { id: true, requestedBy: true, title: true, mediaType: true, tmdbId: true, posterPath: true, arrInstance: true },
-    });
-    // Skip rows the acting admin owns — no self-notification for one's own request.
-    // Then drop DISABLED owners once, for every channel (filterActiveOwners).
-    const declineTargets = await filterActiveOwners(declined.filter((r) => r.requestedBy !== session.user.id));
-    notifyUsersRequestsDeclined(declineTargets, typedAdminNote).catch(() => {});
-    notifyUsersRequestsDeclinedPush(declineTargets).catch(() => {});
-    void fanOutEmails(declineTargets, "DECLINED", typedAdminNote);
-    void writeBatchInboxRows(declineTargets, "REQUEST_DECLINED");
-    emitNotificationEvents(declineTargets.map((r) => ({
-      event: "request.declined" as const,
-      media: { type: r.mediaType === "MOVIE" ? "MOVIE" as const : "TV" as const, tmdbId: r.tmdbId, title: r.title, posterPath: r.posterPath ?? null },
-      request: { id: r.id, instance: r.arrInstance },
-      text: typedAdminNote ?? null,
-    })));
-  }
-
-  // Emit only for rows THIS call actually transitioned (claimedIds) — an
-  // unclaimed id (already non-PENDING, or claimed by a concurrent batch) was
-  // left untouched, and announcing the batch target for it would push a status
-  // the row never entered. ownerMap came back with the claim itself.
-  for (const id of claimedIds) {
-    const userId = ownerMap.get(id);
-    if (!userId) continue;
-    // A row whose ARR push failed was rolled back to PENDING — emit its TRUE
-    // status, not the batch target, so clients don't show it stuck APPROVED.
-    const effectiveStatus = typedStatus === "APPROVED" && failedIds.has(id) ? "PENDING" : typedStatus;
-    emitSSE({ type: "request:updated", requestId: id, status: effectiveStatus, userId });
-  }
-
-  // Permanent declines get their own audit action so they're trivially queryable;
-  // the (capped) typedIds list is preserved in full so the trail is reproducible.
-  const auditAction =
-    typedStatus === "APPROVED"
-      ? "REQUEST_APPROVE"
-      : typedPermanent
-        ? "BATCH_REQUEST_DECLINE"
-        : "REQUEST_DECLINE";
-
+// Permanent declines get their own audit action so they're trivially queryable;
+// the (capped) id list is kept in full so the trail is reproducible, beside what
+// actually happened: `claimedIds` are the rows THIS call moved off PENDING (an id
+// already non-PENDING, or claimed by a concurrent batch, is not among them),
+// `rolledBackIds` the approvals whose push failed and went back to PENDING, and
+// `transitioned` the rows left in the batch's target status. Request ids only —
+// batch rows name no requester (guardrail 33). Post-commit: the swallowing
+// variant (guardrail 26).
+function auditBatch(req: Request, session: SummonarrSession, decision: BatchDecision, claimedIds: string[], report: ApprovalReport): void {
+  const action =
+    decision.status === "APPROVED" ? "REQUEST_APPROVE" : decision.permanent ? "BATCH_REQUEST_DECLINE" : "REQUEST_DECLINE";
   void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email,
-    action: auditAction,
-    target: `batch:${typedIds.length}`,
+    action,
+    target: `batch:${decision.ids.length}`,
     details: {
       batch: true,
-      count: typedIds.length,
-      ids: typedIds,
-      adminNote: typedAdminNote ?? null,
-      permanent: typedPermanent,
+      count: decision.ids.length,
+      ids: decision.ids,
+      claimedIds,
+      rolledBackIds: report.rolledBackIds,
+      ...(report.rollbackMissedIds.length > 0 ? { rollbackMissedIds: report.rollbackMissedIds } : {}),
+      ...(report.outcomeUnknownIds.length > 0 ? { outcomeUnknownIds: report.outcomeUnknownIds } : {}),
+      transitioned: claimedIds.length - report.rolledBackIds.length,
+      adminNote: decision.adminNote ?? null,
+      permanent: decision.permanent,
     },
     ...auditContext(req, session),
   });
-
-  // Additive: `failed` lists every row whose push failed and was rolled back to
-  // PENDING; `arrError` is the one-line summary the single-request PATCH already
-  // returns under the same name, which the group Approve button renders as-is.
-  // Both are omitted when every push landed, so a clean batch reads as before.
-  return NextResponse.json({
-    ok: true,
-    ...(failures.length > 0 ? { failed: failures, arrError: summarizeArrFailures(failures, t) } : {}),
-  });
-});
+}
 
 // Names the first few failures with their reasons and counts the rest, so a
 // 100-row batch can't produce an unbounded message.

@@ -1,8 +1,11 @@
 import * as client from "openid-client";
 import { type JWTPayload } from "jose";
+import { NextResponse, type NextRequest } from "next/server";
 import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
 import { signPurposeJwt, verifyPurposeJwt } from "@/lib/signing-keys";
 import { readGroupsClaim } from "@/lib/oidc-allowlist";
+import { isSecureCookieContext } from "@/lib/session-cookie";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Summonarr's OIDC (OpenID Connect) sign-in client. Configured by the OIDC_*
 // env vars and talks to a single identity provider (IdP).
@@ -37,20 +40,12 @@ export const OIDC_STATE_COOKIE_SECURE = "__Host-summonarr-oidc-flow";
 export const OIDC_STATE_COOKIE_PATH = `${process.env.BASE_PATH ?? ""}/api/auth/oidc`;
 const OIDC_STATE_TTL_SECONDS = 5 * 60;
 
-// Same rule as session-cookie.ts: an https AUTH_URL is secure, an http one is
-// not, and an unset/odd one is secure in production.
-function isSecureOidcCookieContext(): boolean {
-  const url = process.env.AUTH_URL ?? "";
-  if (url.startsWith("https://")) return true;
-  if (url.startsWith("http://")) return false;
-  return process.env.NODE_ENV === "production";
-}
-
 // The flow cookie's name and attributes for this deployment. Shared by the set
 // (oidc/start), read and clear (oidc/callback) sites so they can never drift —
-// a mismatched name or Path silently fails to read or expire the cookie.
+// a mismatched name or Path silently fails to read or expire the cookie. Secure
+// or not by the session cookie's own rule (isSecureCookieContext).
 export function oidcStateCookie(): { name: string; path: string; secure: boolean } {
-  return isSecureOidcCookieContext()
+  return isSecureCookieContext()
     ? { name: OIDC_STATE_COOKIE_SECURE, path: "/", secure: true }
     : { name: OIDC_STATE_COOKIE, path: OIDC_STATE_COOKIE_PATH, secure: false };
 }
@@ -65,6 +60,35 @@ export function serializeOidcStateCookie(value: string): string {
 export function clearOidcStateCookie(): string {
   const { name, path, secure } = oidcStateCookie();
   return `${name}=; Path=${path}; Max-Age=0; HttpOnly; SameSite=Lax${secure ? "; Secure" : ""}`;
+}
+
+// Subpath deployments (BASE_PATH=/request): a root-absolute path resolved
+// against AUTH_URL — `new URL("/login", "https://host/request")` — yields
+// "https://host/login" and DROPS the base path, so the redirect would land on a
+// 404 outside the app. Prefixed exactly like proxy.ts's login redirect.
+const OIDC_BASE_PATH = process.env.BASE_PATH ?? "";
+
+// A web OIDC failure, for both /start and /callback: /start is reached by a
+// TOP-LEVEL navigation, so a JSON body would render raw in the tab. It redirects
+// to /login?error=<code> (login-form words the code). Fails closed to a JSON 500
+// when AUTH_URL is unset rather than deriving the base from an
+// attacker-influenceable request Host. The callback also expires the flow
+// cookie on the way out (`clearStateCookie`); /start has set none yet.
+export function oidcLoginErrorRedirect(
+  req: NextRequest,
+  code: string,
+  opts: { clearStateCookie?: boolean } = {},
+): NextResponse {
+  const base = process.env.AUTH_URL;
+  if (!base) {
+    const t = translatorForRequest(req);
+    return NextResponse.json({ error: t("apiAuth.common.authUrlMissing") }, { status: 500 });
+  }
+  const url = new URL(`${OIDC_BASE_PATH}/login`, base);
+  url.searchParams.set("error", code);
+  const res = NextResponse.redirect(url.toString());
+  if (opts.clearStateCookie) res.headers.append("Set-Cookie", clearOidcStateCookie());
+  return res;
 }
 
 // The flow cookie's value from a Cookie header — ONLY under this deployment's
@@ -97,11 +121,20 @@ export function isOidcIssuerSecure(issuer: string | undefined): boolean {
   }
 }
 
+// The OIDC env, or null when it is incomplete or the issuer isn't https. The
+// one reading of it: isOidcConfigured and the discovery below both go through
+// it, so a caller that skipped the configured check still can't run discovery
+// against an http issuer or a missing client id.
+export function readOidcEnv(env: Record<string, string | undefined> = process.env): { issuer: URL; clientId: string; clientSecret: string } | null {
+  const issuer = env.OIDC_ISSUER;
+  const clientId = env.OIDC_CLIENT_ID;
+  const clientSecret = env.OIDC_CLIENT_SECRET;
+  if (!issuer || !clientId || !clientSecret || !isOidcIssuerSecure(issuer)) return null;
+  return { issuer: new URL(issuer), clientId, clientSecret };
+}
+
 export function isOidcConfigured(): boolean {
-  return (
-    !!(process.env.OIDC_ISSUER && process.env.OIDC_CLIENT_ID && process.env.OIDC_CLIENT_SECRET) &&
-    isOidcIssuerSecure(process.env.OIDC_ISSUER)
-  );
+  return readOidcEnv() !== null;
 }
 
 let configPromise: Promise<client.Configuration> | null = null;
@@ -118,9 +151,9 @@ const oidcCustomFetch: client.CustomFetch = (url, options) =>
 function getOidcConfig(): Promise<client.Configuration> {
   if (!configPromise) {
     configPromise = (async () => {
-      const issuer = new URL(process.env.OIDC_ISSUER!);
-      const clientId = process.env.OIDC_CLIENT_ID!;
-      const clientSecret = process.env.OIDC_CLIENT_SECRET!;
+      const env = readOidcEnv();
+      if (!env) throw new Error("[oidc] OIDC is not configured (OIDC_ISSUER must be https, with OIDC_CLIENT_ID and OIDC_CLIENT_SECRET set)");
+      const { issuer, clientId, clientSecret } = env;
       const config = await client.discovery(
         issuer,
         clientId,
@@ -178,6 +211,10 @@ interface OidcFlowState {
   // Optional same-site post-login destination. Must be validated by the
   // caller before being stamped here — the callback route trusts this value.
   returnTo?: string;
+  // The web login form's "remember me" box. It only picks which configured
+  // duration initializeTokenOnSignIn applies (guardrail 6c); a native flow
+  // never carries it.
+  rememberMe?: boolean;
 }
 
 // Signed with the "oidc-flow" subkey, its own typ and audience (guardrail 6h),
@@ -209,6 +246,7 @@ export async function verifyOidcStateCookie(token: string): Promise<OidcFlowStat
     codeVerifier: payload.codeVerifier,
     redirectUri: payload.redirectUri,
     returnTo: typeof payload.returnTo === "string" ? payload.returnTo : undefined,
+    ...(payload.rememberMe === true ? { rememberMe: true } : {}),
   };
 }
 
@@ -307,6 +345,38 @@ export function buildOidcExchangeUrl(
   return url;
 }
 
+// The ID token's required identity: a non-blank `sub` and an `iss`.
+function requiredIdentity(claims: client.IDToken | undefined): { claims: client.IDToken; sub: string; issuer: string } {
+  if (!claims) throw new Error("[oidc] ID token missing");
+  const sub = typeof claims.sub === "string" ? claims.sub.trim() : "";
+  if (!sub) throw new Error("[oidc] ID token missing required `sub` claim");
+  const issuer = typeof claims.iss === "string" ? claims.iss : "";
+  if (!issuer) throw new Error("[oidc] ID token missing required `iss` claim");
+  return { claims, sub, issuer };
+}
+
+// Groups: the ID token first, then userinfo (several IdPs release group claims
+// only there). Asked for only when the allowlist has groups. No groups ⇒ the
+// allowlist refuses, so a userinfo failure fails closed.
+async function readGroups(
+  config: client.Configuration,
+  claims: Record<string, unknown>,
+  accessToken: string | undefined,
+  sub: string,
+  groupsClaim: string | undefined,
+): Promise<string[] | null> {
+  if (!groupsClaim) return null;
+  const fromToken = readGroupsClaim(claims, groupsClaim);
+  if (fromToken !== null || !accessToken) return fromToken;
+  try {
+    const info = await client.fetchUserInfo(config, accessToken, sub);
+    return readGroupsClaim(info as Record<string, unknown>, groupsClaim);
+  } catch (err) {
+    console.warn("[oidc] userinfo request for the groups claim failed:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
 export async function exchangeOidcCode(
   requestUrl: URL,
   flowState: OidcFlowState,
@@ -318,33 +388,8 @@ export async function exchangeOidcCode(
     expectedNonce: flowState.nonce,
     pkceCodeVerifier: flowState.codeVerifier,
   });
-  const claims = tokens.claims();
-  if (!claims) {
-    throw new Error("[oidc] ID token missing");
-  }
-  const sub = typeof claims.sub === "string" ? claims.sub.trim() : "";
-  if (!sub) {
-    throw new Error("[oidc] ID token missing required `sub` claim");
-  }
-  const issuer = typeof claims.iss === "string" ? claims.iss : "";
-  if (!issuer) {
-    throw new Error("[oidc] ID token missing required `iss` claim");
-  }
-  // Groups: the ID token first, then userinfo (several IdPs release group
-  // claims only there). Asked for only when the allowlist has groups.
-  let groups: string[] | null = null;
-  if (options.groupsClaim) {
-    groups = readGroupsClaim(claims as Record<string, unknown>, options.groupsClaim);
-    if (groups === null && tokens.access_token) {
-      try {
-        const info = await client.fetchUserInfo(config, tokens.access_token, sub);
-        groups = readGroupsClaim(info as Record<string, unknown>, options.groupsClaim);
-      } catch (err) {
-        // No groups ⇒ the allowlist refuses: a userinfo failure fails closed.
-        console.warn("[oidc] userinfo request for the groups claim failed:", err instanceof Error ? err.message : err);
-      }
-    }
-  }
+  const { claims: c, sub, issuer } = requiredIdentity(tokens.claims());
+  const groups = await readGroups(config, c as Record<string, unknown>, tokens.access_token, sub, options.groupsClaim);
   // Pull email/profile from claims directly. If the IdP only releases them via
   // userinfo, we could fetchUserInfo here — but most providers (Authelia,
   // Keycloak, Google, Authentik) include them in id_token when the openid+email+profile
@@ -352,19 +397,15 @@ export async function exchangeOidcCode(
   return {
     issuer,
     sub,
-    email: typeof claims.email === "string" ? claims.email : null,
-    emailVerified: claims.email_verified === true,
-    name: typeof claims.name === "string" ? claims.name : null,
-    preferredUsername:
-      typeof claims.preferred_username === "string" ? claims.preferred_username : null,
-    picture: typeof claims.picture === "string" ? claims.picture : null,
+    email: typeof c.email === "string" ? c.email : null,
+    emailVerified: c.email_verified === true,
+    name: typeof c.name === "string" ? c.name : null,
+    preferredUsername: typeof c.preferred_username === "string" ? c.preferred_username : null,
+    picture: typeof c.picture === "string" ? c.picture : null,
     idToken: tokens.id_token ?? "",
     accessToken: tokens.access_token ?? null,
     refreshToken: tokens.refresh_token ?? null,
-    expiresAt:
-      typeof tokens.expires_in === "number"
-        ? Math.floor(Date.now() / 1000) + tokens.expires_in
-        : null,
+    expiresAt: typeof tokens.expires_in === "number" ? Math.floor(Date.now() / 1000) + tokens.expires_in : null,
     groups,
   };
 }

@@ -1,6 +1,8 @@
-// Unit tests for the auth ORCHESTRATION layer (src/lib/auth.ts) — the module
-// that wires the owned-elsewhere primitives into sign-in flows, session mints,
-// and revocation. The contracts pinned here:
+// Unit tests for the auth ORCHESTRATION layer (src/lib/auth.ts and the
+// auth-*.ts modules it re-exports: one per sign-in step, plus the session mint)
+// — the modules that wire the owned-elsewhere primitives into sign-in flows,
+// session mints, and revocation. Everything is imported through auth.ts, the
+// one entry point importers use. The contracts pinned here:
 //
 //   auth() — the JWT-only session read (guardrail 29's personalization side):
 //   a valid cookie maps to the exact SummonarrSession shape (role-preset
@@ -100,6 +102,7 @@ import { createRequire } from "node:module";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, createHmac, hkdfSync } from "node:crypto";
 import dns from "node:dns/promises";
+import type { AuthorizedSignIn } from "../src/lib/auth.ts";
 
 // Next's async-local-storage shim captures globalThis.AsyncLocalStorage at
 // module load — assign it BEFORE anything pulls in next/headers.
@@ -593,7 +596,7 @@ const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { shouldForceDbCheck } = await import("../src/lib/session-revocation.ts");
 const { checkRateLimit, peekRateLimit, recordFailure } = await import("../src/lib/rate-limit.ts");
 const { PRESETS, Permission } = await import("../src/lib/permissions.ts");
-const { hashPassword } = await import("../src/lib/password-hash.ts");
+const { hashPassword, scryptWorkDone } = await import("../src/lib/password-hash.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 
 // ── fixtures / helpers ──────────────────────────────────────────────────────
@@ -1210,6 +1213,24 @@ test("plex multi-instance: a stranger on NO instance is refused invalid_credenti
   assert.equal(fetchCalls.filter((c) => c.url.pathname === "/api/users").length, 2);
 });
 
+test("plex multi-instance: when every server's member list fails to load the refusal is audited membership_check_failed, not invalid_credentials", async () => {
+  const ua = chromeUa("plex-multi-all-down");
+  seedTwoPlexInstances();
+  respondTwoPlexServers(
+    { id: 4747, email: "member@example.com", username: "Member", thumb: "" },
+    {
+      "admin-token-default": () => new Response("upstream exploded", { status: 500 }),
+      "admin-token-remote": () => new Response("upstream exploded", { status: 503 }),
+    },
+  );
+
+  const result = await authorizeWithPlex({ plexToken: "plex-tok-all-down" }, makeReq(ua));
+  assert.equal(result, null, "fails closed: no member list, no sign-in");
+  await flushAsync();
+  assert.equal(auditDetails().reason, "membership_check_failed");
+  assert.ok(!users.some((u) => u.email === "member@example.com"));
+});
+
 test("plex multi-instance: a blank-config default (token without URL) is skipped, not fatal — the named instance still admits", async () => {
   const ua = chromeUa("plex-multi-skip");
   // The pre-generalization "tab shows but every attempt refuses" deployment
@@ -1665,8 +1686,10 @@ test("jellyfin QuickConnect (34e): a server the identity isn't bound to is refus
   settings.set("jellyfinRemoteRestrictSignIn", "false");
   seedUser({ id: "u-jf-qc", email: "jellyfin-jf-qc@jellyfin.local", jellyfinUserId: "jf-qc", jellyfinInstance: "" });
   jellyfinSignInAs("jf-qc");
+  const workBefore = scryptWorkDone();
   assert.equal(await authorizeWithJellyfinQuickConnect({ secret: "qc-bound-elsewhere" }, makeReq(chromeUa("qc-mismatch")), "remote"), null);
   await flushAsync();
+  assert.ok(scryptWorkDone() > workBefore, "an identity refusal is padded like the password path's");
   assert.equal(lastAudit().provider, "jellyfin-quickconnect");
   assert.equal(auditDetails().reason, "instance_mismatch");
 });
@@ -1708,6 +1731,42 @@ test("jellyfin QuickConnect: instance selects which server's URL is used, and it
   );
   assert.ok(result, "QuickConnect against a configured named instance must succeed");
   assert.equal(fetchCalls[0]?.url.origin, "http://10.77.10.7:8096");
+});
+
+test("jellyfin QuickConnect shares the password path's tail: unconfigured URL, a refused secret, and the membership gate each refuse under the quickconnect provider", async () => {
+  // (a) No URL for the instance: refused without a fetch.
+  assert.equal(await authorizeWithJellyfinQuickConnect({ secret: "qc-nourl" }, makeReq(chromeUa("qc-nourl"))), null);
+  assert.equal(fetchCalls.length, 0);
+  assert.ok(errors.some((e) => e.includes("[jellyfin quickconnect auth] Jellyfin URL is not configured")));
+
+  // (b) The server refuses the secret: padded and audited exactly like the
+  // password path's refusal, so neither timing nor the audit reason tells the
+  // two sign-ins apart.
+  settings.set("jellyfinUrl", "http://10.77.12.1:8096");
+  respond = () => new Response("Unauthorized", { status: 401 });
+  const workBefore = scryptWorkDone();
+  assert.equal(await authorizeWithJellyfinQuickConnect({ secret: "qc-refused" }, makeReq(chromeUa("qc-refused"))), null);
+  await flushAsync();
+  assert.ok(scryptWorkDone() > workBefore, "the refused secret is padded with a dummy password check");
+  assert.equal(lastAudit().provider, "jellyfin-quickconnect");
+  assert.equal(auditDetails().reason, "invalid_credentials");
+
+  // (c) A valid secret for an account that is no member of this instance.
+  jellyfinSignInAs("jf-qc-stranger");
+  assert.equal(await authorizeWithJellyfinQuickConnect({ secret: "qc-stranger" }, makeReq(chromeUa("qc-stranger"))), null);
+  await flushAsync();
+  assert.equal(lastAudit().provider, "jellyfin-quickconnect");
+  assert.equal(auditDetails().reason, "not_authorized");
+  assert.ok(warns.some((w) => w.includes("[jellyfin quickconnect auth] sign-in refused")));
+  assert.equal(users.length, 0, "nothing is provisioned on any refusal");
+
+  // (d) A member signs in with the device payload and the remember-me choice.
+  mediaServerUsers.push({ id: "msu-qc-member", source: "jellyfin", serverInstance: "", sourceUserId: "jf-qc-stranger", active: true });
+  const ok = await authorizeWithJellyfinQuickConnect({ secret: "qc-member", rememberMe: "true" }, makeReq(chromeUa("qc-member")));
+  assert.ok(ok);
+  assert.equal(ok.email, "jellyfin-jf-qc-stranger@jellyfin.local");
+  assert.equal(ok.rememberMe, "true");
+  assert.match(ok._sessionId, UUID_RE);
 });
 
 test("jellyfin QuickConnect: the per-secret bucket (hashed key) refuses brute redemption before any fetch", async () => {
@@ -1934,7 +1993,7 @@ test("oidc: email collision with an unbound row is REFUSED (SSO-takeover guard);
 
 // ── signInAndMintSession ────────────────────────────────────────────────────
 
-function mintableUser(id: string, opts: { ua?: string; rememberMe?: string } = {}): Record<string, unknown> {
+function mintableUser(id: string, opts: { ua?: string; rememberMe?: string } = {}): AuthorizedSignIn {
   const row = userById(id);
   const device = buildDeviceMeta(new Headers({ "user-agent": opts.ua ?? chromeUa(`mint-${id}`) }));
   return {
@@ -2364,4 +2423,385 @@ test("credentials: a successful sign-in refunds ITS OWN reserved hit, not a conc
   } finally {
     Date.now = realNow;
   }
+});
+
+// ── provisioning races, name hygiene, log hygiene, the mint's row ordering ──
+
+const P2002 = () => Object.assign(new Error("Unique constraint failed"), { name: "PrismaClientKnownRequestError", code: "P2002" });
+
+// The first user.create throws P2002 after `winner` lands the racing request's
+// row — two first sign-ins of one identity, this one losing.
+async function withCreateRace<T>(winner: (data: Record<string, unknown>) => void, fn: () => Promise<T>): Promise<T> {
+  const realCreate = models.user.create;
+  let raced = false;
+  models.user.create = async (args) => {
+    if (!raced) {
+      raced = true;
+      winner(args.data);
+      throw P2002();
+    }
+    return realCreate(args);
+  };
+  try {
+    return await fn();
+  } finally {
+    models.user.create = realCreate;
+  }
+}
+
+test("a concurrent FIRST sign-in that loses the create race (P2002) resolves to the winner's account — and the 34e binding is still checked", async () => {
+  // Jellyfin, same server: the winner's identity comes back, no second row.
+  const jf = asUser(await withCreateRace(
+    (d) => { seedUser({ id: "u-jf-winner", email: d.email as string, jellyfinUserId: d.jellyfinUserId as string, jellyfinInstance: d.jellyfinInstance as string }); },
+    () => findOrCreateJellyfinUser("jf-race", "Racer"),
+  ));
+  assert.equal(jf.id, "u-jf-winner");
+
+  // Jellyfin, the winner signed in through ANOTHER server first: refused, never adopted.
+  const mismatch = await withCreateRace(
+    (d) => { seedUser({ id: "u-jf-other", email: d.email as string, jellyfinUserId: d.jellyfinUserId as string, jellyfinInstance: "remote" }); },
+    () => findOrCreateJellyfinUser("jf-race-2", "Racer"),
+  );
+  assert.equal(refusalReason(mismatch), "instance_mismatch");
+
+  // Plex: the winner's identity.
+  const px = asUser(await withCreateRace(
+    (d) => { seedUser({ id: "u-px-winner", email: d.email as string, plexUserId: d.plexUserId as string }); },
+    () => findOrCreatePlexUser({ plexUserId: "px-race", email: "race@example.com" }),
+  ));
+  assert.equal(px.id, "u-px-winner");
+
+  // Plex, the collision was on the EMAIL (another account took it meanwhile): the rebind refusal.
+  const collided = await withCreateRace(
+    (d) => { seedUser({ id: "u-px-email", email: d.email as string }); },
+    () => findOrCreatePlexUser({ plexUserId: "px-race-2", email: "taken@example.com" }),
+  );
+  assert.equal(collided, PROVIDER_REBIND_REQUIRED);
+
+  // OIDC: the P2002 surfaces from the create $transaction and is answered outside it.
+  const oidc = asUser(await withCreateRace(
+    (d) => {
+      seedUser({ id: "u-oidc-winner", email: d.email as string });
+      seedOidcAccount({ userId: "u-oidc-winner", providerAccountId: "sub-race" });
+    },
+    () => findOrCreateOidcUser(oidcClaims({ sub: "sub-race", email: "oidc-race@example.com" })),
+  ));
+  assert.equal(oidc.id, "u-oidc-winner");
+
+  // Anything other than a unique violation still propagates.
+  const realCreate = models.user.create;
+  models.user.create = async () => { throw new Error("connection reset"); };
+  try {
+    await assert.rejects(() => findOrCreatePlexUser({ plexUserId: "px-boom", email: "boom@example.com" }), /connection reset/);
+  } finally {
+    models.user.create = realCreate;
+  }
+});
+
+test("jellyfin: a display name made only of stripped characters is NO name — a returning user keeps theirs, a new one is created with null", async () => {
+  seedUser({ id: "u-jf-named", email: "jellyfin-jf-named@jellyfin.local", name: "Stored Name", jellyfinUserId: "jf-named", jellyfinInstance: "" });
+  const back = asUser(await findOrCreateJellyfinUser("jf-named", "<>"));
+  assert.equal(back.name, "Stored Name", "an empty sanitized name must not replace the stored one in the session");
+  assert.equal(userById("u-jf-named").name, "Stored Name");
+
+  const fresh = asUser(await findOrCreateJellyfinUser("jf-blank", "   "));
+  assert.equal(fresh.name, null);
+  assert.equal(userById(fresh.id).name, null, "stored as null, like the Plex and OIDC paths — never \"\"");
+});
+
+test("provider refusals never write the raw email to the log: rebind warns name the colliding user's id and the email hash; pre-setup warns name no address", async () => {
+  seedUser({ id: "u-holds-email", email: "victim@example.com", role: "ADMIN" });
+  warns.length = 0;
+  assert.equal(await findOrCreatePlexUser({ plexUserId: "px-log", email: "Victim@Example.com" }), PROVIDER_REBIND_REQUIRED);
+  assert.equal(await findOrCreateOidcUser(oidcClaims({ sub: "sub-log", email: "victim@example.com" })), PROVIDER_REBIND_REQUIRED);
+  const rebind = warns.filter((w) => w.includes("Manual rebind required"));
+  assert.equal(rebind.length, 2);
+  for (const w of rebind) {
+    assert.ok(w.includes("u-holds-email"), "the admin needs the colliding row's id to rebind");
+    assert.ok(w.includes(hashAuditEmail("victim@example.com")), "the keyed hash correlates with the audit row");
+  }
+
+  settings.delete("setup_completed_at");
+  users.length = 0;
+  await findOrCreatePlexUser({ plexUserId: "px-pre", email: "pre@example.com" });
+  await findOrCreateOidcUser(oidcClaims({ sub: "sub-pre", email: "pre-oidc@example.com" }));
+  assert.ok(warns.some((w) => w.includes("pre-setup")), "precondition: the pre-setup refusals logged");
+  for (const addr of ["victim@example.com", "pre@example.com", "pre-oidc@example.com"]) {
+    assert.ok(!warns.some((w) => w.toLowerCase().includes(addr)), `${addr} must not be in the log`);
+  }
+});
+
+test("mint: a sign-in step that fails leaves NO AuthSession row — promotion and the permissions read run first, and a failed JWT sign removes the row it wrote", async () => {
+  // (a) The first-admin promotion throws (pre-setup credentials sign-in, DB down).
+  settings.delete("setup_completed_at");
+  seedUser({ id: "u-first", email: "first@example.com" });
+  failTransactions = true;
+  await assert.rejects(() => signInAndMintSession({ user: mintableUser("u-first"), providerId: "credentials" }), /transaction failure/);
+  failTransactions = false;
+  assert.equal([...authSessions.values()].filter((r) => r.userId === "u-first").length, 0, "no orphan row from a failed promotion");
+
+  // (b) The JWT can't be signed: the row written for it is removed again.
+  settings.set("setup_completed_at", "2026-01-01T00:00:00.000Z");
+  seedUser({ id: "u-nosign", email: "nosign@example.com" });
+  const secret = process.env.NEXTAUTH_SECRET;
+  delete process.env.NEXTAUTH_SECRET;
+  try {
+    await assert.rejects(() => signInAndMintSession({ user: mintableUser("u-nosign"), providerId: "credentials" }), /NEXTAUTH_SECRET/);
+  } finally {
+    process.env.NEXTAUTH_SECRET = secret;
+  }
+  assert.equal([...authSessions.values()].filter((r) => r.userId === "u-nosign").length, 0, "no device row without a token");
+  await flushAsync();
+  assert.ok(!auditRows.some((a) => a.action === "AUTH_LOGIN" && a.userId === "u-nosign"), "no AUTH_LOGIN for a session that never existed");
+});
+
+test("plex: the per-token bucket is keyed on a HASH of the token, and a tripped bucket refuses before any plex.tv call", async () => {
+  const plexToken = "plex-token-bucket-0123456789";
+  const key = `plex:${createHash("sha256").update(plexToken).digest("hex").slice(0, 16)}`;
+  for (let i = 0; i < 10; i++) checkRateLimit(key, 10, 5 * 60 * 1000);
+  assert.equal(await authorizeWithPlex({ plexToken }, makeReq(chromeUa("plex-bucket"))), null);
+  assert.equal(fetchCalls.length, 0, "a rate-limited token never reaches plex.tv");
+  await flushAsync();
+  assert.equal(lastAudit().provider, "plex");
+  assert.equal(auditDetails().reason, "rate_limited");
+});
+
+test("plex: a token-cache hit whose cache-row refresh fails (purged concurrently, P2025) still signs the member in", async () => {
+  const ua = chromeUa("plex-cache-race");
+  settings.set("plexAdminToken", "admin-plex-token");
+  settings.set("plexServerUrl", "http://203.0.113.10:32400");
+  const FRIENDS_XML =
+    '<?xml version="1.0"?><MediaContainer size="1">' +
+    '<User id="1" email="cache@example.com"><Server id="1" machineIdentifier="machine-1"/></User>' +
+    "</MediaContainer>";
+  respond = (url) => {
+    if (url.hostname === "plex.tv" && url.pathname === "/api/v2/user") return jsonResponse({ id: 5151, email: "cache@example.com", username: "Cache", thumb: "" });
+    if (url.hostname === "plex.tv" && url.pathname === "/api/v2/ping") return jsonResponse({});
+    if (url.hostname === "203.0.113.10" && url.pathname === "/identity") return jsonResponse({ MediaContainer: { machineIdentifier: "machine-1" } });
+    if (url.hostname === "plex.tv" && url.pathname === "/api/users") return new Response(FRIENDS_XML, { status: 200, headers: { "content-type": "application/xml" } });
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+  assert.ok(await authorizeWithPlex({ plexToken: "plex-tok-cache-race" }, makeReq(ua)), "the live sign-in writes the cache row");
+  const realUpdate = models.plexTokenCache.update;
+  models.plexTokenCache.update = async () => {
+    throw Object.assign(new Error("record not found"), { name: "PrismaClientKnownRequestError", code: "P2025" });
+  };
+  try {
+    fetchCalls.length = 0;
+    const cached = await authorizeWithPlex({ plexToken: "plex-tok-cache-race" }, makeReq(ua));
+    assert.ok(fetchCalls.some((c) => c.url.pathname === "/api/v2/ping"), "precondition: this sign-in took the token-cache path");
+    assert.ok(cached, "a failed cache-lifetime bump must not fail a verified sign-in");
+  } finally {
+    models.plexTokenCache.update = realUpdate;
+  }
+});
+
+test("plex: a plex.tv outage on the token-cache ping keeps the cache row and verifies live; only a 401 purges it", async () => {
+  const ua = chromeUa("plex-ping-outage");
+  settings.set("plexAdminToken", "admin-plex-token");
+  settings.set("plexServerUrl", "http://203.0.113.10:32400");
+  const FRIENDS_XML =
+    '<?xml version="1.0"?><MediaContainer size="1">' +
+    '<User id="1" email="outage@example.com"><Server id="1" machineIdentifier="machine-1"/></User>' +
+    "</MediaContainer>";
+  let pingStatus = 200;
+  respond = (url) => {
+    if (url.hostname === "plex.tv" && url.pathname === "/api/v2/user") return jsonResponse({ id: 6161, email: "outage@example.com", username: "Outage", thumb: "" });
+    if (url.hostname === "plex.tv" && url.pathname === "/api/v2/ping") return jsonResponse({}, pingStatus);
+    if (url.hostname === "203.0.113.10" && url.pathname === "/identity") return jsonResponse({ MediaContainer: { machineIdentifier: "machine-1" } });
+    if (url.hostname === "plex.tv" && url.pathname === "/api/users") return new Response(FRIENDS_XML, { status: 200, headers: { "content-type": "application/xml" } });
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+  const token = "plex-tok-ping-outage";
+  assert.ok(await authorizeWithPlex({ plexToken: token }, makeReq(ua)), "the live sign-in writes the cache row");
+  assert.equal(plexCacheRows.size, 1, "fixture sanity: one cache row");
+  const [tokenHash] = [...plexCacheRows.keys()];
+
+  // plex.tv answers the ping with a 503: no answer about the token.
+  pingStatus = 503;
+  fetchCalls.length = 0;
+  dbCalls.length = 0;
+  assert.ok(await authorizeWithPlex({ plexToken: token }, makeReq(ua)), "the full lookup still signs the member in");
+  assert.ok(fetchCalls.some((c) => c.url.pathname === "/api/v2/ping"), "precondition: this sign-in took the token-cache path");
+  assert.ok(fetchCalls.some((c) => c.url.pathname === "/api/v2/user"), "an unanswered ping is never honored: plex.tv verifies the token live");
+  assert.equal(dbCalls.includes("plexTokenCache.delete"), false, "an outage must not purge the row");
+  assert.ok(plexCacheRows.has(tokenHash));
+
+  // plex.tv refuses the token: the row goes.
+  pingStatus = 401;
+  dbCalls.length = 0;
+  await authorizeWithPlex({ plexToken: token }, makeReq(ua)).catch(() => null);
+  assert.ok(dbCalls.includes("plexTokenCache.delete"), "a 401 purges the row");
+});
+
+// ── one audit row per refusal, the token cache's scope, the username bucket,
+//    the mint's single read, logged best-effort writes, typed inputs ─────────
+
+function respondOnePlexServer(account: () => Record<string, unknown>, friends: () => string[]): void {
+  respond = (url) => {
+    if (url.hostname === "plex.tv" && url.pathname === "/api/v2/user") return jsonResponse(account());
+    if (url.hostname === "plex.tv" && url.pathname === "/api/v2/ping") return jsonResponse({});
+    if (url.hostname === "203.0.113.10" && url.pathname === "/identity") return jsonResponse({ MediaContainer: { machineIdentifier: "machine-1" } });
+    if (url.hostname === "plex.tv" && url.pathname === "/api/users") {
+      return xmlResponse(friendsXml(friends().map((email) => ({ email, machineId: "machine-1" }))));
+    }
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+}
+
+test("plex: a member whose provisioning is refused is audited ONCE, under that reason — no trailing invalid_credentials row — and the refusal is padded", async () => {
+  settings.set("plexAdminToken", "admin-plex-token");
+  settings.set("plexServerUrl", "http://203.0.113.10:32400");
+  // A local account already holds the address the member's plex.tv account reports.
+  seedUser({ id: "u-local-collide", email: "collide@example.com" });
+  respondOnePlexServer(() => ({ id: 9191, email: "collide@example.com", username: "Collide", thumb: "" }), () => ["collide@example.com"]);
+
+  const workBefore = scryptWorkDone();
+  assert.equal(await authorizeWithPlex({ plexToken: "plex-tok-collide" }, makeReq(chromeUa("plex-refusal-once"))), null);
+  await flushAsync();
+  assert.ok(scryptWorkDone() > workBefore, "the refusal is padded with a dummy password check");
+  const failures = auditRows.filter((r) => r.action === "AUTH_LOGIN_FAILED");
+  assert.equal(failures.length, 1, "one refused sign-in, one AUTH_LOGIN_FAILED row");
+  assert.equal(auditDetails(failures[0]).reason, "email_collision_needs_rebind");
+  assert.equal(auditDetails(failures[0]).emailHash, hashAuditEmail("collide@example.com"));
+});
+
+test("plex: only a MEMBER's token answer is cached — a stranger leaves no row, and a row is not kept alive for someone no longer shared", async () => {
+  settings.set("plexAdminToken", "admin-plex-token");
+  settings.set("plexServerUrl", "http://203.0.113.10:32400");
+  let account: Record<string, unknown> = { id: 7001, email: "outsider@example.com", username: "Outsider", thumb: "" };
+  let friends = ["member@example.com"];
+  respondOnePlexServer(() => account, () => friends);
+
+  assert.equal(await authorizeWithPlex({ plexToken: "plex-tok-outsider-7001" }, makeReq(chromeUa("plex-cache-scope"))), null);
+  assert.equal(plexCacheRows.size, 0, "a stranger's email has no business in the token cache");
+
+  account = { id: 7002, email: "member@example.com", username: "Member", thumb: "" };
+  assert.ok(await authorizeWithPlex({ plexToken: "plex-tok-member-7002" }, makeReq(chromeUa("plex-cache-scope"))));
+  assert.equal(plexCacheRows.size, 1, "a member's answer is cached");
+  const row = [...plexCacheRows.values()][0];
+  assert.equal(row.email, "member@example.com");
+
+  // Un-shared since: the next sign-in is answered from the cache and refused —
+  // and leaves the row's lifetime exactly where it was.
+  row.expiresAt = new Date(0);
+  row.lastUsedAt = new Date(0);
+  friends = [];
+  fetchCalls.length = 0;
+  assert.equal(await authorizeWithPlex({ plexToken: "plex-tok-member-7002" }, makeReq(chromeUa("plex-cache-scope"))), null);
+  assert.ok(fetchCalls.some((c) => c.url.pathname === "/api/v2/ping"), "precondition: this sign-in took the token-cache path");
+  assert.equal(row.expiresAt.getTime(), 0, "a refused sign-in never extends the cache row");
+  assert.equal(row.lastUsedAt.getTime(), 0);
+});
+
+test("jellyfin: the per-username bucket keeps only WRONG passwords — a sign-in the server accepts, or one no server was asked about, gives its hit back", async () => {
+  const key = "jellyfin-user:bucket-owner";
+  const WINDOW_MS = 5 * 60 * 1000;
+
+  // No server configured: nothing was guessed.
+  assert.equal(await authorizeWithJellyfin({ username: "Bucket-Owner", password: "pw" }, makeReq(chromeUa("jf-bucket-nourl"))), null);
+  assert.equal(peekRateLimit(key, 1, WINDOW_MS), true, "an attempt no server judged keeps no hit");
+
+  settings.set("jellyfinUrl", "http://10.77.0.9:8096");
+  mediaServerUsers.push({ id: "msu-bucket", source: "jellyfin", serverInstance: "", sourceUserId: "jf-bucket", active: true });
+  let accept = true;
+  respond = (url) => {
+    if (url.pathname === "/Users/AuthenticateByName") {
+      return accept ? jsonResponse({ User: { Id: "jf-bucket", Name: "Owner" } }) : new Response("Unauthorized", { status: 401 });
+    }
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+  // The owner signs in from more devices than the bucket holds: every one is
+  // admitted, because none of them was a wrong guess.
+  for (let i = 0; i < 12; i++) {
+    assert.ok(
+      await authorizeWithJellyfin({ username: "Bucket-Owner", password: "pw" }, makeReq(chromeUa(`jf-bucket-device-${i}`))),
+      `sign-in ${i + 1} is admitted`,
+    );
+  }
+  assert.equal(peekRateLimit(key, 1, WINDOW_MS), true, "accepted passwords leave the bucket empty");
+
+  accept = false;
+  assert.equal(await authorizeWithJellyfin({ username: "bucket-owner", password: "wrong" }, makeReq(chromeUa("jf-bucket-wrong"))), null);
+  assert.equal(peekRateLimit(key, 1, WINDOW_MS), false, "a refused password spends the budget");
+});
+
+test("jellyfin: a server that fails (5xx or unreachable) gives the hit back — only a 401 answer is a spent guess", async () => {
+  const key = "jellyfin-user:flaky-owner";
+  const WINDOW_MS = 5 * 60 * 1000;
+  settings.set("jellyfinUrl", "http://10.77.0.9:8096");
+  let mode: "503" | "throw" | "401" = "503";
+  respond = (url) => {
+    if (url.pathname !== "/Users/AuthenticateByName") throw new Error(`unexpected fetch to ${url}`);
+    if (mode === "throw") throw new Error("connect ECONNREFUSED");
+    return new Response("x", { status: mode === "503" ? 503 : 401 });
+  };
+  for (const m of ["503", "throw"] as const) {
+    mode = m;
+    for (let i = 0; i < 12; i++) {
+      assert.equal(await authorizeWithJellyfin({ username: "Flaky-Owner", password: "pw" }, makeReq(chromeUa(`jf-flaky-${m}-${i}`))), null);
+    }
+    assert.equal(peekRateLimit(key, 1, WINDOW_MS), true, `${m}: failures of the server spend no budget`);
+  }
+  mode = "401";
+  assert.equal(await authorizeWithJellyfin({ username: "flaky-owner", password: "bad" }, makeReq(chromeUa("jf-flaky-401"))), null);
+  assert.equal(peekRateLimit(key, 1, WINDOW_MS), false, "a 401 spends the budget");
+});
+
+test("mint: ONE user read serves the disabled check, the permissions claim and mediaServer — and after setup no promotion transaction opens", async () => {
+  seedUser({ id: "u-one-read", email: "one-read@example.com", mediaServer: "plex", permissions: PRESETS.USER });
+  const user = mintableUser("u-one-read");
+  dbCalls.length = 0;
+  const result = await signInAndMintSession({ user, providerId: "credentials" });
+  assert.equal(result.user.mediaServer, "plex", "credentials carry the stored column");
+  assert.equal((await verifySessionJwt(result.token))?.permissions, PRESETS.USER.toString());
+  assert.equal(dbCalls.filter((c) => c === "user.findUnique").length, 1, "one read of the user row");
+  assert.equal(dbCalls.includes("$transaction"), false, "a sign-in after setup never waits on the setup lock");
+});
+
+test("best-effort sign-in writes that fail are logged under [auth], and the sign-in carries on", async () => {
+  seedUser({ id: "u-be-plex", email: "be@example.com", plexUserId: "px-be" });
+  const realUpdate = models.user.update;
+  models.user.update = async () => { throw new Error("constraint drift"); };
+  try {
+    assert.equal(asUser(await findOrCreatePlexUser({ plexUserId: "px-be", email: "be@example.com", name: "BE" })).id, "u-be-plex");
+  } finally {
+    models.user.update = realUpdate;
+  }
+  assert.ok(errors.some((e) => e.startsWith("[auth] plex sign-in profile refresh failed:") && e.includes("constraint drift")));
+
+  seedUser({ id: "u-be-jf", email: "jellyfin-jf-be@jellyfin.local", jellyfinUserId: "jf-be", jellyfinInstance: "", name: "Old Name" });
+  const realUpdateMany = models.user.updateMany;
+  models.user.updateMany = async () => { throw new Error("name write refused"); };
+  try {
+    assert.equal(asUser(await findOrCreateJellyfinUser("jf-be", "New Name")).id, "u-be-jf");
+  } finally {
+    models.user.updateMany = realUpdateMany;
+  }
+  assert.ok(errors.some((e) => e.startsWith("[auth] jellyfin sign-in name refresh failed:") && e.includes("name write refused")));
+});
+
+test("a sign-in input that is not a string refuses before any read or upstream call", async () => {
+  const req = makeReq(chromeUa("typed-inputs"));
+  assert.equal(await authorizeWithCredentials({ email: 42, password: "x" } as never, req), null);
+  assert.equal(await authorizeWithCredentials({ email: "a@b.co", password: ["x"] } as never, req), null);
+  assert.equal(await authorizeWithPlex({ plexToken: 123 } as never, req), null);
+  assert.equal(await authorizeWithJellyfin({ username: ["u"], password: "pw" } as never, req), null);
+  assert.equal(await authorizeWithJellyfinQuickConnect({ secret: { s: 1 } } as never, req), null);
+  assert.equal(dbCalls.length, 0);
+  assert.equal(fetchCalls.length, 0);
+});
+
+test("sessionDeadline: the header alone selects the never-expiring native deadline; a browser gets remember-me, else mobile, else desktop", async () => {
+  const { sessionDeadline } = await import("../src/lib/auth-session-durations.ts");
+  const durations = { desktopDuration: 3_600, mobileDuration: 604_800, maxDuration: 2_592_000 };
+  const nowSec = 1_800_000_000;
+  const at = (native: boolean, rememberMe: boolean, isMobile: boolean) => sessionDeadline({ native, rememberMe, isMobile, durations, nowSec });
+  for (const rememberMe of [false, true]) {
+    for (const isMobile of [false, true]) assert.equal(at(true, rememberMe, isMobile), NEVER_EXPIRES_AT_SEC);
+  }
+  assert.equal(at(false, true, true), nowSec + 2_592_000, "remember-me wins over the device class");
+  assert.equal(at(false, true, false), nowSec + 2_592_000);
+  assert.equal(at(false, false, true), nowSec + 604_800);
+  assert.equal(at(false, false, false), nowSec + 3_600);
 });

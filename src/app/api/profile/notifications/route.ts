@@ -1,16 +1,26 @@
 import { NextResponse } from "next/server";
+import type { Prisma } from "@/generated/prisma";
 import { auditContext, logAudit } from "@/lib/audit";
 import { withAuth } from "@/lib/api-auth";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
-import { normalizeEmail } from "@/lib/auth";
+import { normalizeEmail, PLAUSIBLE_EMAIL_RE } from "@/lib/email-normalize";
 import { isNotificationEmailEnabled } from "@/lib/email";
 import { prisma } from "@/lib/prisma";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { canSetOwnNotificationEmail } from "@/lib/notification-email-verify";
+import type { Translator } from "@/lib/i18n/translate";
 
-// RFC-5322-lite: local@domain, at least one dot in the domain, no whitespace.
-// Intentionally loose — SMTP will reject anything the regex lets through.
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// The boolean preference columns a PATCH may set. Each must be a User column:
+// `data` is typed as Prisma's update input, so a misspelt key fails to compile.
+const PREF_KEYS = [
+  "notifyOnApproved", "notifyOnAvailable", "notifyOnDeclined",
+  "emailOnApproved", "emailOnAvailable", "emailOnDeclined",
+  "pushOnApproved", "pushOnAvailable", "pushOnDeclined",
+  "notifyOnIssue",
+  "notifyOnComment", "emailOnComment", "pushOnComment",
+] as const satisfies ReadonlyArray<keyof Prisma.UserUpdateInput>;
+type PrefKey = (typeof PREF_KEYS)[number];
 
 // Current notification preferences for the signed-in user. The web settings
 // page reads these server-side; native clients need a REST surface.
@@ -36,96 +46,64 @@ export const GET = withAuth(async (req, _ctx, session) => {
   return NextResponse.json({ ...prefs, emailEnabled });
 });
 
+/**
+ * The notificationEmail a PATCH may write, or the refusal. Only two values pass:
+ *   - null or an empty string clears it;
+ *   - the CURRENTLY STORED address, unchanged — a no-op the iOS client's
+ *     setNotificationEmail helper sends, since it PATCHes the whole prefs object
+ *     back. That value is already verified (it matched Jellyfin when it was set,
+ *     or the user confirmed possession through the token flow), and rejecting it
+ *     403'd those clients. Equality only — this can never bind a new address.
+ * A NEW address is 403: a Jellyfin account has no provider-verified email the
+ * way Plex and OIDC do (Jellyfin's API exposes no user email field at all), so
+ * accepting one here would let a user redirect Summonarr's outbound mail at ANY
+ * mailbox — an email-bombing / harassment vector with the server's own
+ * SMTP/Resend reputation behind it. The verification flow (POST
+ * /api/profile/notification-email + /confirm) mails a one-time token and binds
+ * an address only on proven possession; it is the ONLY way to set a new one.
+ */
+async function notificationEmailWrite(raw: unknown, userId: string, t: Translator): Promise<{ value: string | null } | NextResponse> {
+  if (raw === null || (typeof raw === "string" && raw.trim() === "")) return { value: null };
+  if (typeof raw !== "string") {
+    return NextResponse.json({ error: t("apiAuth.profile.invalidNotificationEmail") }, { status: 400 });
+  }
+  if (raw.length > 320 || !PLAUSIBLE_EMAIL_RE.test(raw.trim())) {
+    return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });
+  }
+  const candidate = normalizeEmail(raw);
+  const me = await prisma.user.findUnique({ where: { id: userId }, select: { notificationEmail: true } });
+  if (me?.notificationEmail && candidate === normalizeEmail(me.notificationEmail)) return { value: candidate };
+  return NextResponse.json({ error: t("apiAuth.profile.verifyAddressFirst") }, { status: 403 });
+}
+
 export const PATCH = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   // Personal mutation — blocked during maintenance like push/subscribe and the
   // profile delete/password routes. GET stays open.
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
-  const parsed = await readJsonCapped<{
-    notifyOnApproved?: boolean; notifyOnAvailable?: boolean; notifyOnDeclined?: boolean;
-    emailOnApproved?: boolean;  emailOnAvailable?: boolean;  emailOnDeclined?: boolean;
-    pushOnApproved?: boolean;   pushOnAvailable?: boolean;   pushOnDeclined?: boolean;
-    notifyOnIssue?: boolean;
-    notifyOnComment?: boolean; emailOnComment?: boolean; pushOnComment?: boolean;
-    notificationEmail?: string | null;
-  }>(req, 16384);
+  const parsed = await readJsonCapped<Partial<Record<PrefKey, unknown>> & { notificationEmail?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
-  const data: Record<string, boolean | string | null> = {};
-  if (typeof body.notifyOnApproved === "boolean") data.notifyOnApproved = body.notifyOnApproved;
-  if (typeof body.notifyOnAvailable === "boolean") data.notifyOnAvailable = body.notifyOnAvailable;
-  if (typeof body.notifyOnDeclined === "boolean") data.notifyOnDeclined = body.notifyOnDeclined;
-  if (typeof body.emailOnApproved === "boolean")  data.emailOnApproved  = body.emailOnApproved;
-  if (typeof body.emailOnAvailable === "boolean") data.emailOnAvailable = body.emailOnAvailable;
-  if (typeof body.emailOnDeclined === "boolean")  data.emailOnDeclined  = body.emailOnDeclined;
-  if (typeof body.pushOnApproved === "boolean")   data.pushOnApproved   = body.pushOnApproved;
-  if (typeof body.pushOnAvailable === "boolean")  data.pushOnAvailable  = body.pushOnAvailable;
-  if (typeof body.pushOnDeclined === "boolean")   data.pushOnDeclined   = body.pushOnDeclined;
-  if (typeof body.notifyOnIssue === "boolean")    data.notifyOnIssue    = body.notifyOnIssue;
-  if (typeof body.notifyOnComment === "boolean")  data.notifyOnComment  = body.notifyOnComment;
-  if (typeof body.emailOnComment === "boolean")   data.emailOnComment   = body.emailOnComment;
-  if (typeof body.pushOnComment === "boolean")    data.pushOnComment    = body.pushOnComment;
+  // Non-boolean values and unknown keys are ignored (the iOS client PATCHes the
+  // whole prefs object back).
+  const data: Prisma.UserUpdateInput = {};
+  for (const key of PREF_KEYS) {
+    const v = body[key];
+    if (typeof v === "boolean") data[key] = v;
+  }
 
   // notificationEmail is Jellyfin-users-only: Plex and OIDC notificationEmail values are
   // owned by the auth provider and synced on every sign-in in src/lib/auth.ts. Allowing
   // non-Jellyfin users to override here would just be clobbered on their next sign-in.
   if ("notificationEmail" in body) {
-    const provider = session.user.provider;
-    const isJellyfin = provider === "jellyfin" || provider === "jellyfin-quickconnect";
-    if (!isJellyfin) {
+    if (!canSetOwnNotificationEmail(session.user.provider)) {
       return NextResponse.json({ error: t("apiAuth.profile.notificationEmailReadOnly") }, { status: 403 });
     }
-
-    const raw = body.notificationEmail;
-    if (raw === null || (typeof raw === "string" && raw.trim() === "")) {
-      data.notificationEmail = null;
-    } else if (typeof raw === "string") {
-      if (raw.length > 320 || !EMAIL_RE.test(raw.trim())) {
-        return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });
-      }
-      // A Jellyfin-authenticated user has no provider-verified email the way Plex
-      // and OIDC users do (those addresses are owned and synced by the IdP on every
-      // sign-in). If we accepted an arbitrary notificationEmail here, a user could
-      // redirect Summonarr's outbound mail (approved / available / declined / issue
-      // notifications) to ANY address — including a victim's mailbox — turning the
-      // notification system into an email-bombing / harassment vector with the
-      // server's own SMTP/Resend reputation behind it.
-      //
-      // The self-service verification flow — POST /api/profile/notification-email
-      // + /confirm — mails a one-time token and binds the address only after the
-      // user proves possession. It is the ONLY way to set a NEW address: Jellyfin's
-      // API exposes no user email field (UserDto carries none in any version), so
-      // the old "match the address your Jellyfin server reports" probe always came
-      // back empty and every new-address PATCH landed here regardless.
-      const candidate = normalizeEmail(raw);
-      const me = await prisma.user.findUnique({
-        where: { id: session.user.id },
-        select: { notificationEmail: true },
-      });
-
-      // An unchanged write-back of the CURRENTLY STORED address is a no-op, and
-      // that value is already verified — either it matched Jellyfin when it was
-      // set, or the user confirmed possession through the token flow. Rejecting it
-      // 403'd clients that simply PATCH the whole prefs object back (the iOS
-      // setNotificationEmail helper does exactly that) for a value this server is
-      // already using. Equality only — this can never bind a new address.
-      if (me?.notificationEmail && candidate === normalizeEmail(me.notificationEmail)) {
-        data.notificationEmail = candidate;
-      } else {
-        // Nothing server-authoritative to bind a NEW address to. Accepting a
-        // free-form one here would reopen the notification-redirect / harassment
-        // vector, so point the caller at the verification flow — it mails a
-        // one-time token and binds only on proven possession.
-        return NextResponse.json(
-          { error: t("apiAuth.profile.verifyAddressFirst") },
-          { status: 403 },
-        );
-      }
-    } else {
-      return NextResponse.json({ error: t("apiAuth.profile.invalidNotificationEmail") }, { status: 400 });
-    }
+    const email = await notificationEmailWrite(body.notificationEmail, session.user.id, t);
+    if (email instanceof NextResponse) return email;
+    data.notificationEmail = email.value;
   }
 
   if (Object.keys(data).length === 0) {

@@ -1,11 +1,9 @@
 import { NextResponse } from "next/server";
 import { requireStepUp } from "@/lib/step-up-auth";
-import { clearSessionFootholdsInTx } from "@/lib/session-footholds";
 import { notifyAccountSecurityEvent } from "@/lib/account-security-notify";
 import { withAuth } from "@/lib/api-auth";
-import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { markUserForceRevalidate } from "@/lib/session-revocation";
+import { signOutEverywhere } from "@/lib/sign-out-everywhere";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -13,12 +11,14 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // One-shot "sign out everywhere" endpoint. Two modes via the includeCurrent body flag:
 //
 //   includeCurrent=false (default): revoke every other AuthSession row, keep the caller
-//     signed in. The caller's JWT continues to work; up to ~60s replica lag exists for
-//     any stolen JWT replayed elsewhere (acceptable for "kill my old laptop" UX).
+//     signed in.
 //
-//   includeCurrent=true: bump User.sessionsRevokedAt — verifyAndRefreshSession()
-//     (src/lib/session-refresh.ts) rejects every JWT minted before this timestamp on
-//     every replica, so the caller is also signed out. Use this when you suspect compromise.
+//   includeCurrent=true: every row, and User.sessionsRevokedAt = now —
+//     verifyAndRefreshSession() (src/lib/session-refresh.ts) rejects every JWT minted
+//     before it, so the caller is signed out too. Use this when you suspect compromise.
+//
+// The write itself (rows, cutoff, footholds, calendar token, the in-memory
+// revocation marks) is signOutEverywhere (src/lib/sign-out-everywhere.ts).
 //
 // Step-up auth mirrors DELETE /api/sessions: credentials users prove with
 // confirmPassword, SSO users must hold a session younger than 5 minutes.
@@ -51,79 +51,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   });
   if (denied) return denied;
 
-  let deletedCount = 0;
-  if (includeCurrent) {
-    // Replica-safe full revoke: bump sessionsRevokedAt then delete all rows.
-    // verifyAndRefreshSession() rejects any JWT whose iat (issued-at time) is older
-    // than this timestamp.
-    await prisma.$transaction(async (tx) => {
-      await tx.user.update({
-        where: { id: session.user.id },
-        // The calendar feed URL is a bearer credential like a session (the
-        // password change clears it for the same reason).
-        data: { sessionsRevokedAt: new Date(), calendarTokenHash: null, calendarTokenCreatedAt: null },
-      });
-      const result = await tx.authSession.deleteMany({ where: { userId: session.user.id } });
-      deletedCount = result.count;
-      await clearSessionFootholdsInTx(tx, session.user.id);
-    });
-  } else {
-    // Delete every other session row AND bump sessionsRevokedAt to a value just
-    // before the current session's createdAt, so verifyAndRefreshSession() rejects any
-    // cached JWT for the deleted sessions on every replica within the next
-    // dbCheckedAt cycle (otherwise the cached state passes for up to 60s after
-    // row deletion). The current session survives because its iat > createdAt
-    // > new sessionsRevokedAt value.
-    await prisma.$transaction(async (tx) => {
-      // One at a time: a transaction is one connection (guardrail 23c).
-      const callerRow = session.sessionId
-        ? await tx.authSession.findUnique({
-            where: { sessionId: session.sessionId },
-            select: { createdAt: true },
-          })
-        : null;
-      const userRow = await tx.user.findUnique({
-        where: { id: session.user.id },
-        select: { sessionsRevokedAt: true },
-      });
-      const result = await tx.authSession.deleteMany({
-        where: {
-          userId: session.user.id,
-          ...(session.sessionId ? { NOT: { sessionId: session.sessionId } } : {}),
-        },
-      });
-      deletedCount = result.count;
-      // What a signed-out device could have planted goes with it (guardrail 6g):
-      // push registrations (this browser re-registers itself on its next page
-      // load), pending Discord links, and the calendar feed URL.
-      await clearSessionFootholdsInTx(tx, session.user.id);
-      await tx.user.update({
-        where: { id: session.user.id },
-        data: { calendarTokenHash: null, calendarTokenCreatedAt: null },
-      });
-      if (callerRow) {
-        const cutoff = new Date(callerRow.createdAt.getTime() - 1000);
-        // Never DECREASE sessionsRevokedAt — a prior full revoke may have set it
-        // to a higher value, and overwriting would weaken that cutoff for any
-        // older JWT that's still in flight.
-        const existing = userRow?.sessionsRevokedAt;
-        if (!existing || cutoff > existing) {
-          await tx.user.update({
-            where: { id: session.user.id },
-            data: { sessionsRevokedAt: cutoff },
-          });
-        }
-      }
-    });
-  }
-
-  // Close the dbCheckedAt fast-path window on THIS replica immediately. The rows
-  // are gone, but a session validated within the last cache interval (≤60s, ≤10s
-  // with admin-area access) would otherwise keep riding the cached state. A
-  // per-user mark forces a DB re-check for all of this user's sessions on the
-  // next request; the surviving caller row still passes. Other replicas
-  // converge via the row deletion + sessionsRevokedAt cutoff.
-  markUserForceRevalidate(session.user.id);
+  const deletedCount = await signOutEverywhere(session.user.id, session.sessionId, includeCurrent);
   void notifyAccountSecurityEvent(session.user.id, includeCurrent ? "signed-out-all" : "signed-out-others");
 
   void logAudit({

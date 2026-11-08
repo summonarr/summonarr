@@ -6,7 +6,8 @@ import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit, auditContext } from "@/lib/audit";
-import { revokeOtherUserSessions } from "@/lib/auth";
+import { revokeOtherUserSessionsInTx } from "@/lib/auth";
+import { markSessionForceRevoked } from "@/lib/session-revocation";
 import { confirmTotpEnrollmentInTx, ensureRecoveryCodesInTx, getMfaStateInTx, lockUserMfaInTx, type ConfirmTotpResult } from "@/lib/mfa/mfa-store";
 import { mfaEligibleUser } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
@@ -48,8 +49,14 @@ export const POST = withAuth(async (req, _ctx, session) => {
     await lockUserMfaInTx(tx, user.id);
     const before = await getMfaStateInTx(tx, user.id);
     const result: ConfirmTotpResult = await confirmTotpEnrollmentInTx(tx, user.id, code);
-    if (result !== "ok") return { result, recoveryCodes: null as string[] | null, firstFactor: false };
-    return { result, recoveryCodes: await ensureRecoveryCodesInTx(tx, user.id), firstFactor: !before.enabled };
+    if (result !== "ok") return { result, recoveryCodes: null as string[] | null, firstFactor: false, revokedSessionIds: [] as string[] };
+    const recoveryCodes = await ensureRecoveryCodesInTx(tx, user.id);
+    const firstFactor = !before.enabled;
+    // The first factor signs out the OTHER sessions in this same transaction:
+    // a separate one that failed would 500 an enable that already committed
+    // (codes never shown) and leave those sessions live (guardrail 6d).
+    const revokedSessionIds = firstFactor ? await revokeOtherUserSessionsInTx(tx, user.id, session.sessionId) : [];
+    return { result, recoveryCodes, firstFactor, revokedSessionIds };
   });
   if (outcome.result === "no-pending") {
     return NextResponse.json({ error: t("apiAuth.mfa.startSetupFirst") }, { status: 400 });
@@ -62,7 +69,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
 
   const { firstFactor } = outcome;
-  const revoked = firstFactor ? await revokeOtherUserSessions(user.id, session.sessionId) : 0;
+  // Committed: only now mark the revoked sessions in memory (guardrail 27).
+  for (const sessionId of outcome.revokedSessionIds) markSessionForceRevoked(sessionId);
+  const revoked = outcome.revokedSessionIds.length;
   void notifyMfaSecurityEvent(user.id, "totp-enabled");
   void logAudit({
     userId: user.id,

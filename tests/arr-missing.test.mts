@@ -84,6 +84,14 @@ test("a row without a usable Radarr id is skipped; a missing tmdbId is reported 
   assert.equal(missingMovie(movie({ tmdbId: undefined, digitalRelease: ago(1) }), "", NOW)?.tmdbId, null);
 });
 
+test("ids past the safe-integer range are no Radarr id, and a title reaching the browser is bounded", () => {
+  assert.equal(missingMovie(movie({ id: 2 ** 53 + 2, digitalRelease: ago(1) }), "", NOW), null);
+  assert.equal(missingMovie(movie({ id: 1e300, digitalRelease: ago(1) }), "", NOW), null);
+  const m = missingMovie(movie({ tmdbId: 1e300, year: 2 ** 60, title: "x".repeat(1_000), digitalRelease: ago(1) }), "", NOW);
+  assert.ok(m);
+  assert.deepEqual([m.tmdbId, m.year, m.title.length], [null, null, 500]);
+});
+
 test("the poster path is taken only from a TMDB poster URL — the only image host the CSP allows", () => {
   assert.equal(
     tmdbPosterPathFromImages([

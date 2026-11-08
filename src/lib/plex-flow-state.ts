@@ -1,5 +1,5 @@
-import { hkdfSync, randomUUID } from "node:crypto";
-import { SignJWT, jwtVerify, type JWTPayload } from "jose";
+import { randomUUID } from "node:crypto";
+import type { JWTPayload } from "jose";
 import { signPurposeJwt, verifyPurposeJwt } from "@/lib/signing-keys";
 
 // Server-side state binding for the Plex PIN sign-in flow.
@@ -33,29 +33,34 @@ export async function signPlexFlowCookie(state: PlexFlowState): Promise<string> 
   });
 }
 
+// plex.tv PIN ids are positive integers; anything else in a signed payload is
+// a token minted by something else, and is refused.
+function isPinId(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
 export async function verifyPlexFlowCookie(token: string): Promise<PlexFlowState | null> {
   const payload = await verifyPurposeJwt("plex-flow", token, PLEX_FLOW_JWT);
-  if (
-    !payload ||
-    typeof payload.pinId !== "number" ||
-    typeof payload.clientId !== "string"
-  ) {
-    return null;
-  }
+  if (!payload || !isPinId(payload.pinId) || typeof payload.clientId !== "string") return null;
   return {
     pinId: payload.pinId,
     clientId: payload.clientId,
   };
 }
 
-export function readPlexFlowCookie(cookieHeader: string | null): string | null {
+// The value of cookie `name` in a Cookie header, or null.
+function readCookie(cookieHeader: string | null, name: string): string | null {
   if (!cookieHeader) return null;
   for (const piece of cookieHeader.split(/;\s*/)) {
     const eq = piece.indexOf("=");
     if (eq === -1) continue;
-    if (piece.slice(0, eq) === PLEX_FLOW_COOKIE) return piece.slice(eq + 1);
+    if (piece.slice(0, eq) === name) return piece.slice(eq + 1);
   }
   return null;
+}
+
+export function readPlexFlowCookie(cookieHeader: string | null): string | null {
+  return readCookie(cookieHeader, PLEX_FLOW_COOKIE);
 }
 
 // Cookie Path must include BASE_PATH. On a subpath deployment the sign-in routes
@@ -97,19 +102,13 @@ export function buildPlexFlowClearedSetCookie(): string {
 // who started it. The poll reads them from the cookie — never from the query —
 // and saves the token server-side, so the token never reaches the browser.
 //
-// Signed with an HKDF subkey of NEXTAUTH_SECRET (its own purpose, typ and
-// audience), never the raw secret the session JWT is signed with.
+// Signed with the "plex-connect" subkey (its own typ and audience, guardrail
+// 6h), never the raw secret the session JWT is signed with. A cookie in flight
+// when this moved off its hand-rolled HKDF key fails once; it lives ten minutes.
 
 export const PLEX_CONNECT_COOKIE = "summonarr-plex-connect";
 const PLEX_CONNECT_TTL_SECONDS = 10 * 60;
-const PLEX_CONNECT_TYP = "summonarr-plex-connect+jwt";
-const PLEX_CONNECT_AUD = "summonarr:plex-connect";
-
-function connectKey(): Uint8Array {
-  const secret = process.env.NEXTAUTH_SECRET;
-  if (!secret) throw new Error("[plex-flow] NEXTAUTH_SECRET must be set");
-  return new Uint8Array(hkdfSync("sha256", secret, "summonarr-plex-connect", "summonarr:plex-connect:v1", 32));
-}
+const PLEX_CONNECT_JWT = { typ: "summonarr-plex-connect+jwt", audience: "summonarr:plex-connect" };
 
 export interface PlexConnectState {
   pinId: number;
@@ -124,45 +123,22 @@ export function newPlexConnectClientId(): string {
 }
 
 export async function signPlexConnectCookie(state: PlexConnectState): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ ...state } as JWTPayload)
-    .setProtectedHeader({ alg: "HS256", typ: PLEX_CONNECT_TYP })
-    .setAudience(PLEX_CONNECT_AUD)
-    .setIssuedAt(now)
-    .setExpirationTime(now + PLEX_CONNECT_TTL_SECONDS)
-    .sign(connectKey());
+  return signPurposeJwt("plex-connect", { ...state } as JWTPayload, {
+    ...PLEX_CONNECT_JWT,
+    ttlSeconds: PLEX_CONNECT_TTL_SECONDS,
+  });
 }
 
 export async function verifyPlexConnectCookie(token: string): Promise<PlexConnectState | null> {
-  try {
-    const { payload, protectedHeader } = await jwtVerify(token, connectKey(), {
-      algorithms: ["HS256"],
-      audience: PLEX_CONNECT_AUD,
-    });
-    if (protectedHeader.typ !== PLEX_CONNECT_TYP) return null;
-    if (
-      typeof payload.pinId !== "number" ||
-      !Number.isInteger(payload.pinId) ||
-      payload.pinId <= 0 ||
-      typeof payload.clientId !== "string" ||
-      typeof payload.uid !== "string"
-    ) {
-      return null;
-    }
-    return { pinId: payload.pinId, clientId: payload.clientId, uid: payload.uid };
-  } catch {
+  const payload = await verifyPurposeJwt("plex-connect", token, PLEX_CONNECT_JWT);
+  if (!payload || !isPinId(payload.pinId) || typeof payload.clientId !== "string" || typeof payload.uid !== "string") {
     return null;
   }
+  return { pinId: payload.pinId, clientId: payload.clientId, uid: payload.uid };
 }
 
 export function readPlexConnectCookie(cookieHeader: string | null): string | null {
-  if (!cookieHeader) return null;
-  for (const piece of cookieHeader.split(/;\s*/)) {
-    const eq = piece.indexOf("=");
-    if (eq === -1) continue;
-    if (piece.slice(0, eq) === PLEX_CONNECT_COOKIE) return piece.slice(eq + 1);
-  }
-  return null;
+  return readCookie(cookieHeader, PLEX_CONNECT_COOKIE);
 }
 
 // Scoped to the one route that reads it (BASE_PATH included, same reason as

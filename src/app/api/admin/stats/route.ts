@@ -20,17 +20,10 @@ export const dynamic = "force-dynamic";
 // can't disagree about what a number means.
 export const GET = withAdmin(async (_req, _ctx, _session) => {
   const [
-    totalRequests,
-    pendingRequests,
-    approvedRequests,
-    availableRequests,
-    declinedRequests,
-    movieRequests,
-    tvRequests,
+    requestsByStatus,
+    requestsByType,
     totalUsers,
-    totalIssues,
-    openIssues,
-    inProgressIssues,
+    issuesByStatus,
     fulfillment,
     requestsByMonth,
     recentRequests,
@@ -41,18 +34,13 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
     stuck,
     diskSpace,
   ] = await Promise.all([
-    prisma.mediaRequest.count(),
-    prisma.mediaRequest.count({ where: { status: "PENDING" } }),
-    prisma.mediaRequest.count({ where: { status: "APPROVED" } }),
-    prisma.mediaRequest.count({ where: { status: "AVAILABLE" } }),
-    prisma.mediaRequest.count({ where: { status: "DECLINED" } }),
-    prisma.mediaRequest.count({ where: { mediaType: "MOVIE" } }),
-    prisma.mediaRequest.count({ where: { mediaType: "TV" } }),
+    // One grouped read per breakdown, not a count per figure: every query here
+    // runs at once, and the pool has five connections.
+    prisma.mediaRequest.groupBy({ by: ["status"], _count: { _all: true } }),
+    prisma.mediaRequest.groupBy({ by: ["mediaType"], _count: { _all: true } }),
     // Accounts that can sign in — disabled and purged ones used to be counted.
     countActiveUsers(),
-    prisma.issue.count(),
-    prisma.issue.count({ where: { status: "OPEN" } }),
-    prisma.issue.count({ where: { status: "IN_PROGRESS" } }),
+    prisma.issue.groupBy({ by: ["status"], _count: { _all: true } }),
     getFulfillmentStats(null),
     getRequestsByMonth(),
     prisma.mediaRequest.findMany({
@@ -88,15 +76,22 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
 
   const avgSeconds = fulfillment.total.avgSeconds;
 
+  // A group with no rows is absent from a groupBy, so every figure defaults to
+  // 0; a total is the sum over every group (each row has exactly one status).
+  const requestStatus = new Map(requestsByStatus.map((r) => [r.status, r._count._all]));
+  const requestType = new Map(requestsByType.map((r) => [r.mediaType, r._count._all]));
+  const issueStatus = new Map(issuesByStatus.map((r) => [r.status, r._count._all]));
+  const sum = (counts: Map<unknown, number>) => [...counts.values()].reduce((a, b) => a + b, 0);
+
   return NextResponse.json({
     requests: {
-      total: totalRequests,
-      pending: pendingRequests,
-      approved: approvedRequests,
-      available: availableRequests,
-      declined: declinedRequests,
-      movie: movieRequests,
-      tv: tvRequests,
+      total: sum(requestStatus),
+      pending: requestStatus.get("PENDING") ?? 0,
+      approved: requestStatus.get("APPROVED") ?? 0,
+      available: requestStatus.get("AVAILABLE") ?? 0,
+      declined: requestStatus.get("DECLINED") ?? 0,
+      movie: requestType.get("MOVIE") ?? 0,
+      tv: requestType.get("TV") ?? 0,
     },
     users: totalUsers,
     library: {
@@ -109,7 +104,7 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
       // Additive: distinct titles across every server of both services.
       unique: library.unique,
     },
-    issues: { total: totalIssues, open: openIssues, inProgress: inProgressIssues },
+    issues: { total: sum(issueStatus), open: issueStatus.get("OPEN") ?? 0, inProgress: issueStatus.get("IN_PROGRESS") ?? 0 },
     // Request → available, over APPROVED requests only (see getFulfillmentStats).
     avgFulfillmentHours: avgSeconds === null ? null : avgSeconds / 3600,
     // Every one of the last 12 calendar months, zero months included.

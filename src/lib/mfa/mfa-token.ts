@@ -29,7 +29,7 @@
 // in-flight token, which the 5-minute expiry makes harmless.
 
 import { hkdfSync, randomBytes } from "node:crypto";
-import { SignJWT, jwtVerify } from "jose";
+import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 import { processSingleton } from "@/lib/process-singleton";
 
 export const MFA_TOKEN_TTL_SECONDS = 5 * 60;
@@ -89,11 +89,13 @@ interface LedgerEntry {
 }
 
 export const MAX_LEDGER = 50_000;
-let ledgerCap = MAX_LEDGER;
 export const MAX_LIVE_PER_SUBJECT = 5;
 const ledger = processSingleton("mfa-token:ledger", () => new Map<string, LedgerEntry>());
 // jti list per (purpose, subject) bucket, in mint order (oldest first).
 const bySubject = processSingleton("mfa-token:by-subject", () => new Map<string, string[]>());
+// The global cap. Process-wide like the ledger it bounds (guardrail 27a); only
+// the test seam below ever lowers it.
+const ledgerCap = processSingleton("mfa-token:ledger-cap", () => ({ value: MAX_LEDGER }));
 
 function bucketFor(purpose: Purpose, sub: string): string {
   return `${purpose}\u0000${sub}`;
@@ -114,11 +116,10 @@ function sweepExpired(now: number): void {
   for (const [jti, entry] of ledger) if (entry.expiresAt <= now) removeEntry(jti);
 }
 
-// Called by every sign* function below, at mint time.
-function registerToken(jti: string, purpose: Purpose, sub: string, expSec: number): void {
-  const now = Date.now();
-  const bucket = bucketFor(purpose, sub);
-  const mine = (bySubject.get(bucket) ?? []).filter((j) => {
+// The bucket's tokens that are still live, oldest first; expired ones are
+// dropped from the ledger on the way.
+function liveTokensIn(bucket: string, now: number): string[] {
+  return (bySubject.get(bucket) ?? []).filter((j) => {
     const e = ledger.get(j);
     if (!e || e.expiresAt <= now) {
       removeEntry(j);
@@ -126,38 +127,54 @@ function registerToken(jti: string, purpose: Purpose, sub: string, expSec: numbe
     }
     return true;
   });
-  // Per-subject cap: the newest token wins, the subject's oldest of this purpose dies. A token
-  // another request is verifying RIGHT NOW (inFlight) is never the victim: the
-  // verifier may already have burned a single-use factor (a recovery code), and
-  // evicting the entry would make commitToken refuse the sign-in afterwards —
-  // anyone holding the password could thereby grief the owner's in-flight
-  // challenge (and cost them a recovery code) by minting five new ones. If every
-  // slot is in flight the cap is briefly exceeded; reserveToken bounds that to
-  // the handful of parallel verifications.
+}
+
+// Per-subject cap: the newest token wins, the subject's oldest of this purpose
+// dies. A token another request is verifying RIGHT NOW (inFlight) is never the
+// victim: the verifier may already have burned a single-use factor (a recovery
+// code), and evicting the entry would make commitToken refuse the sign-in
+// afterwards — anyone holding the password could thereby grief the owner's
+// in-flight challenge (and cost them a recovery code) by minting five new ones.
+// If every slot is in flight the cap is briefly exceeded; reserveToken bounds
+// that to the handful of parallel verifications.
+function enforceSubjectCap(bucket: string, now: number): void {
+  const mine = liveTokensIn(bucket, now);
   while (mine.length >= MAX_LIVE_PER_SUBJECT) {
     const victim = mine.findIndex((j) => !ledger.get(j)?.inFlight);
-    if (victim === -1) break;
+    if (victim === -1) return;
     removeEntry(mine.splice(victim, 1)[0]);
   }
-  if (ledger.size >= ledgerCap) sweepExpired(now);
-  // Still full of live entries: evict the oldest overall (Map iteration is
-  // insertion order), skipping in-flight ones. An evicted token is dead, never
-  // fresh again.
-  while (ledger.size >= ledgerCap) {
-    let oldest: string | undefined;
-    for (const [j, e] of ledger) {
-      if (!e.inFlight) {
-        oldest = j;
-        break;
-      }
-    }
-    if (oldest === undefined) break;
+}
+
+// The oldest entry overall (Map iteration is insertion order) that no request
+// is verifying right now, or undefined when every entry is in flight.
+function oldestIdleEntry(): string | undefined {
+  for (const [j, e] of ledger) if (!e.inFlight) return j;
+  return undefined;
+}
+
+// Global cap: a full ledger sheds expired entries first, then the oldest live
+// ones (skipping in-flight). It never refuses the newcomer, and an evicted
+// token is dead — never fresh again.
+function enforceLedgerCap(now: number): void {
+  if (ledger.size >= ledgerCap.value) sweepExpired(now);
+  while (ledger.size >= ledgerCap.value) {
+    const oldest = oldestIdleEntry();
+    if (oldest === undefined) return;
     removeEntry(oldest);
   }
+}
+
+// Called by signPurposeToken, at mint time.
+function registerToken(jti: string, purpose: Purpose, sub: string, expSec: number): void {
+  const now = Date.now();
+  const bucket = bucketFor(purpose, sub);
+  enforceSubjectCap(bucket, now);
+  enforceLedgerCap(now);
   ledger.set(jti, { bucket, expiresAt: expSec * 1000, failures: 0, consumed: false, inFlight: false });
-  const list = bySubject.get(bucket) ?? [];
-  list.push(jti);
-  bySubject.set(bucket, list.filter((j) => ledger.has(j)));
+  // removeEntry keeps bySubject in step with the ledger, so after the evictions
+  // above the bucket's list names only entries still registered.
+  bySubject.set(bucket, [...(bySubject.get(bucket) ?? []), jti]);
 }
 
 function liveEntry(jti: string): LedgerEntry | null {
@@ -220,11 +237,15 @@ export function recordTokenFailure(jti: string): number {
   return e.failures;
 }
 
-// Test seams only.
+// Test seams only. Wiping the ledger un-burns nothing (an unknown jti is dead),
+// but it does end every in-flight challenge, so a production build refuses.
 export function resetMfaTokenLedgerForTests(cap = MAX_LEDGER): void {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("[mfa-token] resetMfaTokenLedgerForTests is a test seam");
+  }
   ledger.clear();
   bySubject.clear();
-  ledgerCap = cap;
+  ledgerCap.value = cap;
 }
 export function mfaTokenLedgerSizeForTests(): { total: number; forSubject: (sub: string, purpose?: Purpose) => number } {
   const live = (bucket: string) => (bySubject.get(bucket) ?? []).filter((j) => liveEntry(j)).length;
@@ -235,6 +256,55 @@ export function mfaTokenLedgerSizeForTests(): { total: number; forSubject: (sub:
     forSubject: (sub, purpose) =>
       purpose ? live(bucketFor(purpose, sub)) : purposes.reduce((n, p) => n + live(bucketFor(p, sub)), 0),
   };
+}
+
+// ─── sign / verify, shared by the three purposes ────────────────────────────
+
+const MAX_TOKEN_LENGTH = 4096;
+
+// Mints a `purpose` token for `sub` with the purpose's own key, typ and
+// audience, and registers its jti in the ledger. `claims` are the purpose's
+// extra claims; validating them on the way back is the caller's job.
+async function signPurposeToken(
+  purpose: Purpose,
+  sub: string,
+  claims: JWTPayload,
+): Promise<{ token: string; jti: string; exp: number }> {
+  const now = Math.floor(Date.now() / 1000);
+  const exp = now + MFA_TOKEN_TTL_SECONDS;
+  const jti = randomBytes(16).toString("base64url");
+  const token = await new SignJWT(claims)
+    .setProtectedHeader({ alg: "HS256", typ: TYP[purpose] })
+    .setSubject(sub)
+    .setAudience(AUDIENCE[purpose])
+    .setJti(jti)
+    .setIssuedAt(now)
+    .setExpirationTime(exp)
+    .sign(keyFor(purpose));
+  registerToken(jti, purpose, sub, exp);
+  return { token, jti, exp };
+}
+
+type VerifiedPurposePayload = JWTPayload & { sub: string; jti: string; exp: number };
+
+// The payload of a valid `purpose` token, or null: wrong key, audience or typ
+// (the header's typ is compared exactly too), expired, oversized, or missing
+// its sub/jti/exp. Never throws — an unset NEXTAUTH_SECRET is a null here.
+async function verifyPurposeToken(purpose: Purpose, token: unknown): Promise<VerifiedPurposePayload | null> {
+  if (typeof token !== "string" || token.length === 0 || token.length > MAX_TOKEN_LENGTH) return null;
+  try {
+    const { payload, protectedHeader } = await jwtVerify(token, keyFor(purpose), {
+      algorithms: ["HS256"],
+      audience: AUDIENCE[purpose],
+      typ: TYP[purpose],
+    });
+    if (protectedHeader.typ !== TYP[purpose]) return null;
+    const { sub, jti, exp } = payload;
+    if (typeof sub !== "string" || typeof jti !== "string" || typeof exp !== "number") return null;
+    return { ...payload, sub, jti, exp };
+  } catch {
+    return null;
+  }
 }
 
 // ─── sign-in challenge token ────────────────────────────────────────────────
@@ -259,51 +329,29 @@ export interface MfaSigninClaims {
 }
 
 export async function signMfaSigninToken(input: Omit<MfaSigninClaims, "jti" | "exp">): Promise<{ token: string; jti: string; exp: number }> {
-  const now = Math.floor(Date.now() / 1000);
-  const exp = now + MFA_TOKEN_TTL_SECONDS;
-  const jti = randomBytes(16).toString("base64url");
-  const token = await new SignJWT({
+  return signPurposeToken("mfa-signin", input.userId, {
     native: input.native,
     pwv: input.pwv,
     ...(input.rememberMe !== undefined ? { rm: input.rememberMe } : {}),
     ...(input.webauthnChallenge ? { wch: input.webauthnChallenge } : {}),
-  })
-    .setProtectedHeader({ alg: "HS256", typ: TYP["mfa-signin"] })
-    .setSubject(input.userId)
-    .setAudience(AUDIENCE["mfa-signin"])
-    .setJti(jti)
-    .setIssuedAt(now)
-    .setExpirationTime(exp)
-    .sign(keyFor("mfa-signin"));
-  registerToken(jti, "mfa-signin", input.userId, exp);
-  return { token, jti, exp };
+  });
 }
 
 export async function verifyMfaSigninToken(token: unknown): Promise<MfaSigninClaims | null> {
-  if (typeof token !== "string" || token.length === 0 || token.length > 4096) return null;
-  try {
-    const { payload, protectedHeader } = await jwtVerify(token, keyFor("mfa-signin"), {
-      algorithms: ["HS256"],
-      audience: AUDIENCE["mfa-signin"],
-      typ: TYP["mfa-signin"],
-    });
-    if (protectedHeader.typ !== TYP["mfa-signin"]) return null;
-    if (typeof payload.sub !== "string" || typeof payload.jti !== "string" || typeof payload.exp !== "number") return null;
-    if (typeof payload.native !== "boolean" || typeof payload.pwv !== "string") return null;
-    if (payload.rm !== undefined && typeof payload.rm !== "string") return null;
-    if (payload.wch !== undefined && typeof payload.wch !== "string") return null;
-    return {
-      userId: payload.sub,
-      jti: payload.jti,
-      exp: payload.exp,
-      native: payload.native,
-      pwv: payload.pwv,
-      rememberMe: payload.rm as string | undefined,
-      webauthnChallenge: payload.wch as string | undefined,
-    };
-  } catch {
-    return null;
-  }
+  const payload = await verifyPurposeToken("mfa-signin", token);
+  if (!payload) return null;
+  if (typeof payload.native !== "boolean" || typeof payload.pwv !== "string") return null;
+  if (payload.rm !== undefined && typeof payload.rm !== "string") return null;
+  if (payload.wch !== undefined && typeof payload.wch !== "string") return null;
+  return {
+    userId: payload.sub,
+    jti: payload.jti,
+    exp: payload.exp,
+    native: payload.native,
+    pwv: payload.pwv,
+    rememberMe: payload.rm,
+    webauthnChallenge: payload.wch,
+  };
 }
 
 // ─── passkey registration token ─────────────────────────────────────────────
@@ -324,43 +372,25 @@ export interface PasskeyRegisterClaims {
 }
 
 export async function signPasskeyRegisterToken(input: { userId: string; sessionId: string; challenge: string; factorVerified: boolean }): Promise<{ token: string; jti: string; exp: number }> {
-  const now = Math.floor(Date.now() / 1000);
-  const exp = now + MFA_TOKEN_TTL_SECONDS;
-  const jti = randomBytes(16).toString("base64url");
-  const token = await new SignJWT({ sid: input.sessionId, ch: input.challenge, fv: input.factorVerified })
-    .setProtectedHeader({ alg: "HS256", typ: TYP["passkey-register"] })
-    .setSubject(input.userId)
-    .setAudience(AUDIENCE["passkey-register"])
-    .setJti(jti)
-    .setIssuedAt(now)
-    .setExpirationTime(exp)
-    .sign(keyFor("passkey-register"));
-  registerToken(jti, "passkey-register", input.userId, exp);
-  return { token, jti, exp };
+  return signPurposeToken("passkey-register", input.userId, {
+    sid: input.sessionId,
+    ch: input.challenge,
+    fv: input.factorVerified,
+  });
 }
 
 export async function verifyPasskeyRegisterToken(token: unknown): Promise<PasskeyRegisterClaims | null> {
-  if (typeof token !== "string" || token.length === 0 || token.length > 4096) return null;
-  try {
-    const { payload, protectedHeader } = await jwtVerify(token, keyFor("passkey-register"), {
-      algorithms: ["HS256"],
-      audience: AUDIENCE["passkey-register"],
-      typ: TYP["passkey-register"],
-    });
-    if (protectedHeader.typ !== TYP["passkey-register"]) return null;
-    if (typeof payload.sub !== "string" || typeof payload.jti !== "string" || typeof payload.exp !== "number") return null;
-    if (typeof payload.sid !== "string" || typeof payload.ch !== "string" || typeof payload.fv !== "boolean") return null;
-    return {
-      userId: payload.sub,
-      sessionId: payload.sid,
-      challenge: payload.ch,
-      factorVerified: payload.fv,
-      jti: payload.jti,
-      exp: payload.exp,
-    };
-  } catch {
-    return null;
-  }
+  const payload = await verifyPurposeToken("passkey-register", token);
+  if (!payload) return null;
+  if (typeof payload.sid !== "string" || typeof payload.ch !== "string" || typeof payload.fv !== "boolean") return null;
+  return {
+    userId: payload.sub,
+    sessionId: payload.sid,
+    challenge: payload.ch,
+    factorVerified: payload.fv,
+    jti: payload.jti,
+    exp: payload.exp,
+  };
 }
 
 // ─── enrollment step-up passkey challenge ───────────────────────────────────
@@ -376,34 +406,12 @@ export interface MfaStepUpClaims {
 }
 
 export async function signMfaStepUpToken(input: { userId: string; sessionId: string; challenge: string }): Promise<{ token: string; jti: string; exp: number }> {
-  const now = Math.floor(Date.now() / 1000);
-  const exp = now + MFA_TOKEN_TTL_SECONDS;
-  const jti = randomBytes(16).toString("base64url");
-  const token = await new SignJWT({ sid: input.sessionId, ch: input.challenge })
-    .setProtectedHeader({ alg: "HS256", typ: TYP["mfa-stepup"] })
-    .setSubject(input.userId)
-    .setAudience(AUDIENCE["mfa-stepup"])
-    .setJti(jti)
-    .setIssuedAt(now)
-    .setExpirationTime(exp)
-    .sign(keyFor("mfa-stepup"));
-  registerToken(jti, "mfa-stepup", input.userId, exp);
-  return { token, jti, exp };
+  return signPurposeToken("mfa-stepup", input.userId, { sid: input.sessionId, ch: input.challenge });
 }
 
 export async function verifyMfaStepUpToken(token: unknown): Promise<MfaStepUpClaims | null> {
-  if (typeof token !== "string" || token.length === 0 || token.length > 4096) return null;
-  try {
-    const { payload, protectedHeader } = await jwtVerify(token, keyFor("mfa-stepup"), {
-      algorithms: ["HS256"],
-      audience: AUDIENCE["mfa-stepup"],
-      typ: TYP["mfa-stepup"],
-    });
-    if (protectedHeader.typ !== TYP["mfa-stepup"]) return null;
-    if (typeof payload.sub !== "string" || typeof payload.jti !== "string" || typeof payload.exp !== "number") return null;
-    if (typeof payload.sid !== "string" || typeof payload.ch !== "string") return null;
-    return { userId: payload.sub, sessionId: payload.sid, challenge: payload.ch, jti: payload.jti, exp: payload.exp };
-  } catch {
-    return null;
-  }
+  const payload = await verifyPurposeToken("mfa-stepup", token);
+  if (!payload) return null;
+  if (typeof payload.sid !== "string" || typeof payload.ch !== "string") return null;
+  return { userId: payload.sub, sessionId: payload.sid, challenge: payload.ch, jti: payload.jti, exp: payload.exp };
 }

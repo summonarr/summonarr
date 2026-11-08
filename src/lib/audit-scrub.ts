@@ -12,7 +12,7 @@ import type { prisma } from "./prisma";
 // `requestedBy` (the requester's name, which fell back to the email before
 // 2026-10-20). Those outlived every other trace of the person — a purged
 // account's "Deleted user" row sat next to audit rows still spelling out their
-// name and email. These keys are removed:
+// name and email. These keys are removed (AUDIT_TARGET_PII_KEYS):
 //   - on the retention schedule, from every aged row (both scrub paths), and
 //   - at account purge, inside the purge transaction (purgeUserDataInTx), from
 //     every row ABOUT the purged user (`user:<id>` target), from the admin
@@ -32,7 +32,13 @@ import type { prisma } from "./prisma";
 // the record of whom the erasure removed, so it keeps the name and email until
 // the retention scrub.
 
-export const AUDIT_TARGET_PII_KEYS = ["targetUser", "targetEmail", "requestedBy"] as const;
+// Beyond the target/requester names above: `accountName` (the viewer's
+// media-server account on a session-terminate row), `serverUser` (the media
+// server username on a server-user link row) and `traktUser` (the Trakt handle
+// on a Trakt-connect row). They name a third party's account and the row
+// outlives it, so the retention scrub removes them like the others; the
+// Trakt-connect row sits under `user:<id>`, so a purge reaches it too.
+export const AUDIT_TARGET_PII_KEYS = ["targetUser", "targetEmail", "requestedBy", "accountName", "serverUser", "traktUser"] as const;
 
 const SCRUB_BATCH = 500;
 
@@ -67,8 +73,9 @@ export function stripTargetPii(details: string, match?: DetailsMatch): string | 
 // Either the client or an interactive-transaction client.
 type AuditDb = Pick<typeof prisma, "auditLog">;
 
-// Removes the target-identity keys from every row matching `where` (which must
-// not carry its own OR — its AND terms are kept) and, when given, `match`.
+// Removes the target-identity keys from every row matching `where` (its own
+// OR and AND terms are kept: the PII-key OR is ANDed beside them, never laid
+// over them) and, when given, `match`.
 // Paged by a strict `id > last` bound, NOT Prisma's cursor + skip:1: the cursor
 // positions on the last row by id alone, and that row was just rewritten so it
 // no longer matches the filter — skip:1 then dropped the first STILL-matching
@@ -82,15 +89,18 @@ export async function scrubTargetPiiFromAudit(
   where: Prisma.AuditLogWhereInput,
   match?: DetailsMatch,
 ): Promise<number> {
-  const callerAnd = where.AND === undefined ? [] : Array.isArray(where.AND) ? where.AND : [where.AND];
+  const { AND, OR, ...rest } = where;
+  const callerAnd = AND === undefined ? [] : Array.isArray(AND) ? AND : [AND];
+  // The caller's OR stays a term of its own: a top-level OR here would replace it.
+  const callerTerms: Prisma.AuditLogWhereInput[] = [...callerAnd, ...(OR !== undefined ? [{ OR }] : [])];
+  const piiKeys: Prisma.AuditLogWhereInput = { OR: AUDIT_TARGET_PII_KEYS.map((key) => ({ details: { contains: `"${key}"` } })) };
   let scrubbed = 0;
   let lastId: string | undefined;
   for (;;) {
     const rows = await db.auditLog.findMany({
       where: {
-        ...where,
-        ...(lastId !== undefined ? { AND: [...callerAnd, { id: { gt: lastId } }] } : {}),
-        OR: AUDIT_TARGET_PII_KEYS.map((key) => ({ details: { contains: `"${key}"` } })),
+        ...rest,
+        AND: [...callerTerms, piiKeys, ...(lastId !== undefined ? [{ id: { gt: lastId } }] : [])],
       },
       select: { id: true, details: true },
       orderBy: { id: "asc" },

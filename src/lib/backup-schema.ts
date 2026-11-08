@@ -32,6 +32,8 @@ export const BACKUP_TABLES = [
   "IssueMessage",
   "IssueGrab",
   "PushSubscription",
+  // Removed web push endpoints (hashes only); a child of User, like the row above.
+  "PushSubscriptionRemoval",
   "DeletionVote",
   "PlexLibraryItem",
   "JellyfinLibraryItem",
@@ -120,27 +122,68 @@ export const BACKUP_ENUMS = [
   "RecommendationSeed",
 ] as const;
 
-// Stable fingerprint of the live schema, derived from the bytes of
-// prisma/schema.prisma. Embedded in every export and verified on every
-// import — a mismatch refuses the restore *before* TRUNCATE runs, so a
-// version-skewed file can't half-replace the DB.
+// Stable fingerprints of the live schema, derived from prisma/schema.prisma.
+// Embedded in every export and verified on every import — a mismatch refuses
+// the restore *before* TRUNCATE runs, so a version-skewed file can't
+// half-replace the DB.
 //
 // Hashing the file (rather than Prisma.dmmf.datamodel) is deliberate:
 // BaseDMMF strips enums and certain field metadata at runtime, and the
 // schema file is copied into the standalone Docker runner image.
 //
-// A whitespace-only or comment-only edit will change the fingerprint —
-// that's a small price for the simplicity of byte-level hashing. Re-export
-// the backup if it bites.
+// Two of them:
+//   - computeSchemaFingerprint: the raw bytes. Every backup carries it as
+//     `Schema-Fingerprint`, which is all an older importer reads, so its
+//     algorithm never changes (tests/backup-schema.test.mts pins it).
+//   - computeNormalizedSchemaFingerprint: the text with comments removed and
+//     whitespace collapsed, carried as `Schema-Fingerprint-Normalized`. The
+//     importer prefers it, so a release that only edits a comment or
+//     reformats the schema still restores the backups made before it.
 let cachedFingerprint: string | null = null;
+let cachedNormalizedFingerprint: string | null = null;
+
+function readSchemaText(): string {
+  return readFileSync(join(process.cwd(), "prisma", "schema.prisma"), "utf-8");
+}
+
+function shortHash(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
+}
 
 export function computeSchemaFingerprint(): string {
   if (cachedFingerprint !== null) return cachedFingerprint;
-  const path = join(process.cwd(), "prisma", "schema.prisma");
-  const contents = readFileSync(path, "utf-8");
-  cachedFingerprint = createHash("sha256")
-    .update(contents)
-    .digest("hex")
-    .slice(0, 16);
+  cachedFingerprint = shortHash(readSchemaText());
   return cachedFingerprint;
+}
+
+export function computeNormalizedSchemaFingerprint(): string {
+  if (cachedNormalizedFingerprint !== null) return cachedNormalizedFingerprint;
+  cachedNormalizedFingerprint = shortHash(normalizeSchemaText(readSchemaText()));
+  return cachedNormalizedFingerprint;
+}
+
+// Prisma schema text with `//` comments (doc comments included) removed and
+// every run of whitespace collapsed to one space. A `//` inside a string
+// literal (`@default("https://…")`) is text, not a comment.
+export function normalizeSchemaText(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"' && text[j] !== "\n") j += text[j] === "\\" ? 2 : 1;
+      out += text.slice(i, Math.min(j + 1, text.length));
+      i = j + 1;
+      continue;
+    }
+    if (ch === "/" && text[i + 1] === "/") {
+      const nl = text.indexOf("\n", i);
+      i = nl === -1 ? text.length : nl;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out.replace(/\s+/g, " ").trim();
 }

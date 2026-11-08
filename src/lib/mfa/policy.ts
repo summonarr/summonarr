@@ -29,6 +29,16 @@ export function mfaEnforcementDisabledByEnv(env: Record<string, string | undefin
   return env[MFA_ENFORCEMENT_ESCAPE_ENV] === "true";
 }
 
+// Pure rule, setting aside the Setting: could the policy apply to this session
+// at all? The cheap gate adminMustEnrollMfa checks before reading the Setting.
+function sessionEligibleForAdminMfaPolicy(
+  role: string | undefined,
+  provider: string | undefined,
+  env?: Record<string, string | undefined>,
+): boolean {
+  return !mfaEnforcementDisabledByEnv(env) && role === "ADMIN" && provider === "credentials";
+}
+
 // Pure rule: does the policy apply to this session at all (before looking at
 // whether the account has enrolled)?
 export function adminMfaPolicyApplies(opts: {
@@ -37,16 +47,14 @@ export function adminMfaPolicyApplies(opts: {
   settingValue: string | null | undefined;
   env?: Record<string, string | undefined>;
 }): boolean {
-  if (mfaEnforcementDisabledByEnv(opts.env)) return false;
-  if (opts.settingValue !== "true") return false;
-  return opts.role === "ADMIN" && opts.provider === "credentials";
+  return opts.settingValue === "true" && sessionEligibleForAdminMfaPolicy(opts.role, opts.provider, opts.env);
 }
 
 export async function adminMustEnrollMfa(claims: { id: string; role?: string; provider?: string }): Promise<boolean> {
-  // Cheap gates first: most sessions never reach the Setting read.
-  if (mfaEnforcementDisabledByEnv() || claims.role !== "ADMIN" || claims.provider !== "credentials") return false;
+  // Cheap gate first: most sessions never reach the Setting read.
+  if (!sessionEligibleForAdminMfaPolicy(claims.role, claims.provider)) return false;
   const row = await prisma.setting.findUnique({ where: { key: REQUIRE_MFA_FOR_ADMINS_KEY } });
-  if (!adminMfaPolicyApplies({ role: claims.role, provider: claims.provider, settingValue: row?.value })) return false;
+  if (row?.value !== "true") return false;
   const state = await getMfaState(claims.id);
   return !state.enabled;
 }

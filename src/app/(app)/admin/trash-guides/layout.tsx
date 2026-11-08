@@ -2,11 +2,13 @@ import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
-import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
+import { loadTrashInstances } from "./_shared";
 import { getTranslator } from "@/lib/i18n/server";
 import { PageHeader } from "@/components/ui/design";
 import { TrashGuidesNav } from "@/components/admin/trash-guides/trash-guides-nav";
 import { TruncationBanner } from "@/components/admin/trash-guides/banners";
+import { SLOT } from "@/lib/i18n/slot";
+import { SlotText } from "@/components/i18n/slot-text";
 
 export const dynamic = "force-dynamic";
 
@@ -16,9 +18,8 @@ export default async function TrashGuidesLayout({ children }: { children: React.
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
-  const [radarrInstances, sonarrInstances, truncRow] = await Promise.all([
-    getSyncableArrInstances("radarr"),
-    getSyncableArrInstances("sonarr"),
+  const [[radarrInstances, sonarrInstances], truncRow] = await Promise.all([
+    loadTrashInstances(),
     prisma.setting.findUnique({ where: { key: "trashLastRefreshTruncatedAt" } }),
   ]);
 
@@ -30,23 +31,23 @@ export default async function TrashGuidesLayout({ children }: { children: React.
   const truncatedAtRaw = truncRow?.value ?? null;
   let recentTruncation: { at: string } | null = null;
   if (truncatedAtRaw) {
-    const t = Date.parse(truncatedAtRaw);
+    const truncatedAtMs = Date.parse(truncatedAtRaw);
     // eslint-disable-next-line react-hooks/purity -- server component; Date.now() runs once per request
-    if (!Number.isNaN(t) && Date.now() - t < TRUNCATION_STALE_MS) {
+    if (!Number.isNaN(truncatedAtMs) && Date.now() - truncatedAtMs < TRUNCATION_STALE_MS) {
       recentTruncation = { at: truncatedAtRaw };
     }
   }
 
   const t = await getTranslator();
-  const [introBefore, introAfter] = t("trash.header.subtitle", { link: "\u0000" }).split("\u0000");
 
   return (
     <div className="ds-page-enter">
       <PageHeader
         title={t("adminArr.trash.title")}
         subtitle={
-          <>
-            {introBefore}
+          // The link sits wherever the locale's sentence puts {link}; a
+          // translation without it renders as it is (SlotText).
+          <SlotText text={t("trash.header.subtitle", { link: SLOT })}>
             <a
               href="https://trash-guides.info"
               target="_blank"
@@ -56,8 +57,7 @@ export default async function TrashGuidesLayout({ children }: { children: React.
             >
               trash-guides.info
             </a>
-            {introAfter}
-          </>
+          </SlotText>
         }
       />
       <TrashGuidesNav

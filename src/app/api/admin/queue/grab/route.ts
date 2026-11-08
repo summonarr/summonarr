@@ -1,14 +1,13 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
-import { ArrResponseError, arrErrorMessage } from "@/lib/arr";
-import { grabPending, QueueGoneError, QueueInstanceError } from "@/lib/arr-queue-data";
-import { serviceGate } from "@/lib/arr-queue-http";
+import { grabPending } from "@/lib/arr-queue-data";
+import { queueActionFailure, serviceGate } from "@/lib/arr-queue-http";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import { sanitizeForLog } from "@/lib/sanitize";
+import { QUEUE_GRAB_MAX_IDS } from "@/lib/api-body-limits";
 
-const MAX_IDS = 500;
+const MAX_IDS = QUEUE_GRAB_MAX_IDS;
 
 // Admin → Download Queue, "Grab now" on a release Radarr/Sonarr are HOLDING
 // (a delay profile, an unavailable client, a fallback) — the arr's own Grab on
@@ -18,9 +17,8 @@ const MAX_IDS = 500;
 // (guardrail 26), with the ids SENT.
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, 16 * 1024);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, 16 * 1024);
+  if (body instanceof NextResponse) return body;
   const target = await serviceGate(body.service, body.instance, t);
   if (target instanceof NextResponse) return target;
   const ids = body.ids;
@@ -28,19 +26,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiAdmin.queue.grabBodyInvalid") }, { status: 400 });
   }
   const uniqueIds = [...new Set(ids as number[])];
-  const label = target.service === "radarr" ? "Radarr" : "Sonarr";
   let sentIds: number[];
   try {
     sentIds = await grabPending(target.service, target.instance, uniqueIds);
   } catch (err) {
-    if (err instanceof QueueInstanceError) {
-      return NextResponse.json({ error: t("apiAdmin.missing.instanceUnknown", { service: label }) }, { status: 404 });
-    }
-    if (err instanceof QueueGoneError || (err instanceof ArrResponseError && err.status === 404)) {
-      return NextResponse.json({ error: t("apiAdmin.queue.notPending") }, { status: 409 });
-    }
-    console.warn(`[queue] ${target.service} instance "${sanitizeForLog(target.instance)}" grab failed:`, arrErrorMessage(err));
-    return NextResponse.json({ error: t("apiAdmin.queue.grabFailed", { service: label }) }, { status: 502 });
+    return queueActionFailure(err, target, t, { goneKey: "apiAdmin.queue.notPending", failedKey: "apiAdmin.queue.grabFailed", what: "grab" });
   }
   void logAudit({
     userId: session.user.id,

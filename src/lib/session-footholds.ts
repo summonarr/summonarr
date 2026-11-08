@@ -38,19 +38,23 @@ function pendingNotificationEmailWhere(userId: string) {
   return { identifier: { startsWith: verifyIdentifierPrefixFor(userId) } };
 }
 
+// The ONE list of foothold deletes. Both forms below are built from it, so a
+// table added here is cleared by the password change (array form) AND by every
+// sign-out-everywhere / admin revoke / 2FA reset (interactive form).
+const FOOTHOLD_DELETES = [
+  (db: FootholdClient, userId: string) => db.pushSubscription.deleteMany({ where: { userId } }),
+  (db: FootholdClient, userId: string) => db.discordLinkToken.deleteMany({ where: { userId } }),
+  (db: FootholdClient, userId: string) => db.discordMergeCode.deleteMany({ where: { userId } }),
+  (db: FootholdClient, userId: string) => db.verificationToken.deleteMany({ where: pendingNotificationEmailWhere(userId) }),
+] as const;
+
+// Array-$transaction form: the deletes as unstarted queries for the caller's batch.
 export function footholdDeletes(db: FootholdClient, userId: string) {
-  return [
-    db.pushSubscription.deleteMany({ where: { userId } }),
-    db.discordLinkToken.deleteMany({ where: { userId } }),
-    db.discordMergeCode.deleteMany({ where: { userId } }),
-    db.verificationToken.deleteMany({ where: pendingNotificationEmailWhere(userId) }),
-  ] as const;
+  return FOOTHOLD_DELETES.map((del) => del(db, userId));
 }
 
-// Interactive-transaction form: one statement at a time on the tx connection.
+// Interactive-transaction form: one statement at a time on the tx connection
+// (guardrail 23c) — never a Promise.all over the tx.
 export async function clearSessionFootholdsInTx(tx: FootholdClient, userId: string): Promise<void> {
-  await tx.pushSubscription.deleteMany({ where: { userId } });
-  await tx.discordLinkToken.deleteMany({ where: { userId } });
-  await tx.discordMergeCode.deleteMany({ where: { userId } });
-  await tx.verificationToken.deleteMany({ where: pendingNotificationEmailWhere(userId) });
+  for (const del of FOOTHOLD_DELETES) await del(tx, userId);
 }

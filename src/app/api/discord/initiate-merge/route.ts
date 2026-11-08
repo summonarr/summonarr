@@ -7,13 +7,24 @@ import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { isNativeSessionForStepUp, requireStepUp } from "@/lib/step-up-auth";
 import { generateDiscordMergeCode } from "@/lib/discord-merge-code";
+import { isFeatureEnabled } from "@/lib/features";
+import { check, v } from "@/lib/validate";
 
 const DISCORD_API = "https://discord.com/api/v10";
 const DISCORD_HOSTS = ["discord.com"];
 const SNOWFLAKE_RE = /^\d{17,20}$/;
+// Discord's answer to opening a DM channel: only its id is read, and it goes
+// into the next request's path, so it must be a snowflake.
+const DmChannel = v.object({ id: v.string() });
 
 export const POST = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
+  // With the Discord integration switched off nothing is linked and nobody is
+  // DM'd, even with a bot token still saved. First, so a refusal spends no rate
+  // limit, step-up or write.
+  if (!(await isFeatureEnabled("feature.integration.discord"))) {
+    return NextResponse.json({ error: t("apiUser.discord.disabled") }, { status: 403 });
+  }
   const parsed = await readJsonCapped<{ discordId?: unknown; confirmPassword?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const discordId = String(parsed.discordId ?? "").trim();
@@ -110,7 +121,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
     });
     if (!dmRes.ok) throw new Error(`Could not open DM channel (${dmRes.status}): ${await dmRes.text()}`);
 
-    const { id: channelId } = (await dmRes.json()) as { id: string };
+    const channel = check(DmChannel, await dmRes.json().catch(() => undefined));
+    if (!channel.ok || !SNOWFLAKE_RE.test(channel.value.id)) {
+      throw new Error(`Discord returned no usable DM channel id${channel.ok ? "" : ` (${channel.error})`}`);
+    }
+    const channelId = channel.value.id;
 
     const msgRes = await safeFetchTrusted(`${DISCORD_API}/channels/${channelId}/messages`, {
       method: "POST",

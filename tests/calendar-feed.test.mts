@@ -190,9 +190,12 @@ shadowPrismaModel(prisma, "watchlistItem", {
       .map((w) => ({ tmdbId: w.tmdbId, mediaType: w.mediaType, title: w.title }));
   },
 });
+// Every key the cache reads asked for, in order.
+const cacheKeysRead: string[] = [];
 shadowPrismaModel(prisma, "tmdbCache", {
   findMany: async (args: { where: { key: { in: string[] }; expiresAt?: { gt: Date } } }) => {
     reads.push("tmdbCache.findMany");
+    cacheKeysRead.push(...args.where.key.in);
     return args.where.key.in.flatMap((k) => {
       const r = cache.get(k);
       if (!r) return [];
@@ -224,7 +227,7 @@ for (const m of ["plexLibraryItem", "jellyfinLibraryItem", "tVEpisodeCache", "ac
   shadowPrismaModel(prisma, m, { findMany: boom, findFirst: boom, findUnique: boom, count: boom });
 }
 
-const { loadCalendarTitles, buildCalendarFeed, resolveCalendarToken, warmCalendarCache, MAX_CALENDAR_WARM_FETCHES } =
+const { loadCalendarTitles, buildCalendarFeed, resolveCalendarToken, warmCalendarCache, MAX_CALENDAR_WARM_FETCHES, settledCalendarTitle } =
   await import("../src/lib/calendar-feed.ts");
 const feedRoute = await import("../src/app/api/calendar/feed/[token]/route.ts");
 const profileRoute = await import("../src/app/api/profile/calendar/route.ts");
@@ -313,6 +316,7 @@ beforeEach(() => {
   requests = [];
   watchlist = [];
   cache.clear();
+  cacheKeysRead.length = 0;
   settings.clear();
   reads.length = 0;
   fetchCalls.length = 0;
@@ -435,6 +439,24 @@ test("tv: a season premiere with no episode list, and a bare next-episode date, 
     ["tv-7-next@summonarr", "2026-11-01", "Show – New episode"],
     ["tv-7-s3-premiere@summonarr", "2027-01-05", "Show – Season 3 premiere"],
   ]);
+});
+
+test("tv: a season listing only undated placeholder episodes still gets its premiere; a dated list covers it", () => {
+  const run = (airDate: string | null) =>
+    events.buildCalendarEvents(
+      [{ tmdbId: 9, mediaType: "tv", title: "Show" }],
+      {
+        movies: new Map(),
+        tv: new Map([[9, { seasons: [{ seasonNumber: 2, airDate: "2027-02-01" }], nextEpisode: null }]]),
+        episodes: new Map([[9, [{ seasonNumber: 2, episodeNumber: 1, name: null, airDate }]]]),
+      },
+      W,
+      null,
+    ).map((e) => e.uid);
+  assert.deepEqual(run(null), ["tv-9-s2-premiere@summonarr"]);
+  // A dated row (even one outside the window) is the season's own schedule.
+  assert.deepEqual(run("2027-02-01"), ["tv-9-s2e1@summonarr"]);
+  assert.deepEqual(run("2020-01-01"), []);
 });
 
 test("tv: next episode is suppressed only when the lists already carry THAT episode", () => {
@@ -568,6 +590,36 @@ test("buildCalendarFeed: end-to-end from cache rows; declined title absent; link
   assert.ok(es.includes("X-WR-CALNAME:Summonarr – Mis estrenos"), es.slice(0, 400));
   assert.ok(es.includes("SUMMARY:Keep\\, Me (Digital)"));
   assert.ok(ics.includes("X-WR-CALNAME:Summonarr – My releases"), "no locale ⇒ English, as before");
+});
+
+test("buildCalendarFeed reads a full :details blob only as the fallback for a title its small date blob can't place", async () => {
+  const me = addUser();
+  const now = new Date();
+  requests = [
+    { requestedBy: me.id, tmdbId: 40, mediaType: "MOVIE", title: "Has Release Info", status: "APPROVED", createdAt: now },
+    { requestedBy: me.id, tmdbId: 41, mediaType: "MOVIE", title: "Details Only", status: "APPROVED", createdAt: now },
+    { requestedBy: me.id, tmdbId: 42, mediaType: "MOVIE", title: "No Primary", status: "APPROVED", createdAt: now },
+    { requestedBy: me.id, tmdbId: 50, mediaType: "TV", title: "Calendar Show", status: "APPROVED", createdAt: now },
+    { requestedBy: me.id, tmdbId: 51, mediaType: "TV", title: "Details Show", status: "APPROVED", createdAt: now },
+  ];
+  putCache("movie:40:release-info:v2", { primary: iso(3), digital: null, physical: null });
+  putCache("movie:40:details", { releaseDate: iso(9) });
+  putCache("movie:41:details", { releaseDate: iso(4) });
+  putCache("movie:42:release-info:v2", { digital: iso(20) });
+  putCache("movie:42:details", { releaseDate: iso(5) });
+  putCache("tv:50:calendar:v1", { status: "Returning Series", lastAirDate: null, seasons: [], nextEpisode: { airDate: iso(6), seasonNumber: 2, episodeNumber: 1, name: "Back" } });
+  putCache("tv:50:details", { status: "Returning Series", seasons: [], nextEpisodeAirDate: iso(8) });
+  putCache("tv:51:details", { status: "Returning Series", seasons: [], nextEpisodeAirDate: iso(7) });
+
+  const unfolded = (await buildCalendarFeed({ kind: "user", userId: me.id })).replace(/\r\n /g, "");
+  assert.ok(!cacheKeysRead.includes("movie:40:details"), "a primary date in the release info makes the details blob unnecessary");
+  assert.ok(!cacheKeysRead.includes("tv:50:details"), "a calendar blob makes the details blob unnecessary");
+  assert.ok(cacheKeysRead.includes("movie:41:details") && cacheKeysRead.includes("movie:42:details") && cacheKeysRead.includes("tv:51:details"));
+  assert.ok(unfolded.includes("SUMMARY:Has Release Info (Theatrical)"));
+  assert.ok(unfolded.includes("SUMMARY:Details Only (Theatrical)"), "no release info ⇒ the details date still places it");
+  assert.ok(unfolded.includes("SUMMARY:No Primary (Theatrical)") && unfolded.includes("SUMMARY:No Primary (Digital)"), "a missing primary falls back to details; the digital date stays");
+  assert.ok(unfolded.includes("SUMMARY:Calendar Show S02E01 – Back"), "the calendar blob wins over details");
+  assert.equal((unfolded.match(/Details Show/g) ?? []).length, 1, "a show with only a details blob is still placed");
 });
 
 test("resolveCalendarToken re-checks the found row's hash (a lookup that returns the wrong row is refused)", async () => {
@@ -752,6 +804,20 @@ test("warm: an expired blob that proves a title is finished is not re-fetched", 
   putCache("tv:301:calendar:v1", { status: "Ended", lastAirDate: "2010-01-01", seasons: [], nextEpisode: null }, past);
   await warmCalendarCache();
   assert.equal(fetchCalls.length, 0);
+});
+
+test("warm: a movie is settled once every known date is behind the window and nothing more is coming", () => {
+  const movie = { tmdbId: 1, mediaType: "movie" as const, title: "M" };
+  // W.from is 2026-09-01.
+  assert.equal(settledCalendarTitle(movie, { primary: "2020-01-01", digital: "2020-03-01", physical: "2020-05-01" }, W), true);
+  // An old film that never got a physical date is settled too.
+  assert.equal(settledCalendarTitle(movie, { primary: "2001-06-01" }, W), true);
+  // A recent theatrical release may still get its digital date: keep asking.
+  assert.equal(settledCalendarTitle(movie, { primary: "2026-07-15" }, W), false);
+  // Anything in or after the window, or nothing known, is never settled.
+  assert.equal(settledCalendarTitle(movie, { primary: "2001-06-01", digital: "2026-12-01" }, W), false);
+  assert.equal(settledCalendarTitle(movie, {}, W), false);
+  assert.equal(settledCalendarTitle(movie, { primary: "not-a-date" }, W), false);
 });
 
 test("warm: bounded by MAX_CALENDAR_WARM_FETCHES", async () => {

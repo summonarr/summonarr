@@ -115,6 +115,8 @@ shadowPrismaModel(prisma, "setting", {
 });
 
 let requestRow: Record<string, unknown> | null = null;
+type ThreadRow = { id: string; createdAt: Date; body: string };
+let threadRows: ThreadRow[] = [];
 shadowPrismaModel(prisma, "mediaRequest", {
   findUnique: async (args: unknown) => { rec("mediaRequest.findUnique", args); return requestRow ? { ...requestRow } : null; },
 });
@@ -123,7 +125,22 @@ shadowPrismaModel(prisma, "requestComment", {
     rec("requestComment.create", args);
     return { id: `c-${Date.now()}-${Math.random()}`, createdAt: new Date(), author: { name: "n", role: "USER" }, ...args.data };
   },
-  findMany: async (args: unknown) => { rec("requestComment.findMany", args); return []; },
+  // Honours orderBy (createdAt, then id) and take over `threadRows`, like the real query.
+  findMany: async (args: { orderBy?: unknown; take?: number }) => {
+    rec("requestComment.findMany", args);
+    const order = (Array.isArray(args.orderBy) ? args.orderBy : args.orderBy ? [args.orderBy] : []) as Array<Record<string, "asc" | "desc">>;
+    const rows = [...threadRows].sort((a, b) => {
+      for (const o of order) {
+        const [k, dir] = Object.entries(o)[0];
+        const av = a[k as keyof ThreadRow] as Date | string;
+        const bv = b[k as keyof ThreadRow] as Date | string;
+        const c = av < bv ? -1 : av > bv ? 1 : 0;
+        if (c !== 0) return dir === "desc" ? -c : c;
+      }
+      return 0;
+    });
+    return args.take === undefined ? rows : rows.slice(0, args.take);
+  },
 });
 shadowPrismaModel(prisma, "notification", {
   create: async (args: { data: Record<string, unknown> }) => { rec("notification.create", args); return { id: "n", ...args.data }; },
@@ -164,8 +181,10 @@ function req(token: string | null, method: string, id: string, body?: string) {
 }
 const post = (token: string | null, id: string, body: unknown, raw?: string) =>
   inScope(() => postComment(req(token, "POST", id, raw ?? JSON.stringify(body)), ctx(id)));
-const list = (token: string | null, id: string) =>
-  inScope(() => getComments(req(token, "GET", id), ctx(id)));
+const list = (token: string | null, id: string, query = "") =>
+  inScope(() => getComments(new NextRequest(`http://localhost:3000/api/requests/${id}/comments${query}`, {
+    headers: token ? { cookie: `${COOKIE}=${token}` } : {},
+  }), ctx(id)));
 const flush = () => new Promise((r) => setImmediate(r));
 
 function requestOwnedBy(userId: string, over: Record<string, unknown> = {}) {
@@ -181,6 +200,7 @@ beforeEach(() => {
   fetchCalls.length = 0;
   settings.clear();
   requestRow = null;
+  threadRows = [];
   auditThrows = false;
   invalidateFeatureFlagCache();
 });
@@ -232,6 +252,20 @@ test("a manager's comment is fromAdmin and writes the REQUESTER's inbox row", as
   assert.equal(note.userId, owner.userId);
   assert.equal(note.type, "REQUEST_COMMENT");
   assert.equal(fetchCalls.length, 0);
+});
+
+test("a name-less manager's label is in the REQUESTER's language, not the commenting manager's", async () => {
+  const owner = await mintSession();
+  usersById.get(owner.userId)!.locale = "es";
+  const manager = await mintSession(MANAGER);
+  requestOwnedBy(owner.userId);
+  // The manager writes in English (no Accept-Language, the default locale).
+  assert.equal((await post(manager.token, "req-1", { body: "Which version?" })).status, 201);
+  await flush();
+  const note = (opsOf("notification.create")[0].args as { data: { body: string; data: string | { author: string } } }).data;
+  const payload = typeof note.data === "string" ? (JSON.parse(note.data) as { author: string }) : note.data;
+  assert.equal(payload.author, "Administrador");
+  assert.match(note.body, /^Administrador commented: /);
 });
 
 test("a deactivated requester gets NO inbox row (guardrail 33), and a missing row fails closed", async () => {
@@ -292,6 +326,41 @@ test("GET selects email for a manager only, never for the requester", async () =
   const finds = opsOf("requestComment.findMany").map((o) => (o.args as { include: { author: { select: Record<string, unknown> } } }).include.author.select);
   assert.equal("email" in finds[0], false, "the requester's read must not select the author email");
   assert.equal(finds[1].email, true);
+});
+
+test("GET returns the NEWEST 500 comments of a longer thread, oldest first — the latest replies are never the ones cut", async () => {
+  const owner = await mintSession();
+  requestOwnedBy(owner.userId);
+  const t0 = Date.parse("2026-10-01T00:00:00.000Z");
+  threadRows = Array.from({ length: 501 }, (_, i) => ({
+    id: `c-${String(i).padStart(4, "0")}`,
+    createdAt: new Date(t0 + i * 60_000),
+    body: `comment ${i}`,
+  }));
+  const res = await list(owner.token, "req-1");
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as ThreadRow[];
+  assert.equal(body.length, 500);
+  assert.equal(body.at(-1)?.body, "comment 500", "the newest comment is answered");
+  assert.equal(body[0].body, "comment 1", "the oldest is the one past the cap");
+  assert.ok(body.every((c, i) => i === 0 || Date.parse(String(c.createdAt)) > Date.parse(String(body[i - 1].createdAt))), "ascending");
+});
+
+test("GET with ?before= asks for the comments strictly older than that one, under the same cap; a malformed cursor reads the newest page", async () => {
+  const owner = await mintSession();
+  requestOwnedBy(owner.userId);
+  const at = "2026-10-01T12:00:00.000Z";
+  await list(owner.token, "req-1", `?before=${encodeURIComponent(`${at}|c-9`)}`);
+  await list(owner.token, "req-1", "?before=garbage");
+  await list(owner.token, "req-1");
+  const finds = opsOf("requestComment.findMany").map((o) => o.args as { where: Record<string, unknown>; take: number });
+  assert.deepEqual(finds[0].where, {
+    requestId: "req-1",
+    OR: [{ createdAt: { lt: new Date(at) } }, { createdAt: new Date(at), id: { lt: "c-9" } }],
+  });
+  assert.equal(finds[0].take, 501, "the same cap, one probe row past it");
+  assert.deepEqual(finds[1].where, { requestId: "req-1" });
+  assert.deepEqual(finds[2].where, { requestId: "req-1" });
 });
 
 test("a comment is audited as REQUEST_COMMENT under request:<id> with ids and title only — never the body or an email", async () => {

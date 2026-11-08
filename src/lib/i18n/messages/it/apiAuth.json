@@ -3,7 +3,6 @@
   "apiAuth.common.forbidden": "Accesso negato",
   "apiAuth.common.invalidCredentials": "Credenziali non valide",
   "apiAuth.common.invalidEmail": "Indirizzo email non valido",
-  "apiAuth.common.invalidJson": "JSON non valido",
   "apiAuth.common.invalidPassword": "Password non valida",
   "apiAuth.common.invalidServer": "Server non valido",
   "apiAuth.common.reservedEmail": "Questo indirizzo email è riservato e non può essere usato per un account.",

@@ -2,6 +2,7 @@
   "shared.bell.empty": "Aucune notification pour le moment.",
   "shared.bell.viewAll": "Tout voir",
   "shared.common.dismiss": "Ignorer",
+  "shared.common.loading": "Chargement…",
   "shared.common.cancel": "Annuler",
   "shared.maintenance.active": "Le mode maintenance est actif.",
   "shared.maintenance.blocked": "Les utilisateurs non administrateurs sont bloqués.",
@@ -29,6 +30,9 @@
   "shared.thread.loading": "Chargement des messages…",
   "shared.thread.loadFailed": "Impossible de charger les messages.",
   "shared.thread.empty": "Aucun message pour le moment. Lancez la conversation ci-dessous.",
+  "shared.thread.loadOlder": "Charger les messages plus anciens",
+  "shared.thread.loadingOlder": "Chargement des messages plus anciens…",
+  "shared.thread.loadOlderFailed": "Impossible de charger les messages plus anciens.",
   "shared.thread.unknownAuthor": "Inconnu",
   "shared.thread.admin": "Admin",
   "shared.thread.placeholder": "Écrivez un message… (⌘↵ pour envoyer)",
@@ -56,5 +60,11 @@
   "shared.common.clearSearch": "Effacer la recherche",
   "shared.thread.placeholderShortcut": "Écrivez un message… ({shortcut} pour envoyer)",
   "shared.rateLimited.generic": "Trop de requêtes. Réessayez dans un instant.",
-  "shared.rateLimited.seconds": "Trop de requêtes. Réessayez dans {seconds} s."
+  "shared.rateLimited.seconds": "Trop de requêtes. Réessayez dans {seconds} s.",
+  "shared.upload.chunkFailed": "L’envoi de la partie {chunk} sur {total} a échoué (HTTP {status}).",
+  "shared.upload.nonJson": "Le serveur a envoyé une réponse inattendue. La requête a probablement été redirigée, par exemple vers la page de connexion.",
+  "shared.upload.noCompletion": "L’envoi est terminé, mais le serveur n’a jamais confirmé la restauration.",
+  "shared.upload.empty": "Le fichier de sauvegarde est vide.",
+  "shared.upload.network": "L’envoi a échoué. Vérifiez votre connexion et réessayez.",
+  "shared.upload.cancelled": "Envoi annulé."
 }

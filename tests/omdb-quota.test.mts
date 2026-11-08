@@ -61,16 +61,18 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel } = await import("./_helpers.mts");
-const { fetchAndCacheOmdbForTmdb, getOmdbRatings, getOmdbRatingsForTmdb, isOmdbQuotaLocked } =
+const { fetchAndCacheOmdbForTmdb, getOmdbRatings, getOmdbRatingsForTmdb, isOmdbQuotaLocked, testOmdbConnection } =
   await import("../src/lib/omdb.ts");
 type OmdbRatings = import("../src/lib/omdb.ts").OmdbRatings;
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
 // getApiKey reads the omdbApiKey Setting; getCache/setCache (tmdb-cache.ts)
 // read/upsert TmdbCache rows. Both shadowed in-memory.
+// Only the rejected-key walk at the bottom changes it.
+let omdbKey = "test-omdb-key";
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) =>
-    args.where.key === "omdbApiKey" ? { key: "omdbApiKey", value: "test-omdb-key" } : null,
+    args.where.key === "omdbApiKey" ? { key: "omdbApiKey", value: omdbKey } : null,
 });
 
 type CacheRow = { key: string; data: string; cachedAt: Date; expiresAt: Date };
@@ -175,7 +177,7 @@ test("while locked, a cached tmdb-keyed value is still served (cache read preced
 
 test("while locked, fetchAndCacheOmdbForTmdb short-circuits with quotaExhausted+transient", async () => {
   script(null);
-  assert.deepEqual(await fetchAndCacheOmdbForTmdb(550, "movie", "omdb:tmdb:movie:550"), {
+  assert.deepEqual(await fetchAndCacheOmdbForTmdb(550, "movie"), {
     found: false,
     keyConfigured: true,
     quotaExhausted: true,
@@ -284,14 +286,16 @@ test("a RUN of timeouts trips the lockout, but a single one does not", async () 
   script(omdbTimeout());
 
   // Threshold, not one-strike: a quota body is authoritative immediately, but a
-  // lone timeout is a blip and must not suspend ratings for an hour.
+  // lone timeout is a blip and must not suspend ratings for an hour. Each
+  // sequential timeout takes OMDB_FETCH_TIMEOUT_MS (10s) in real life.
   for (let i = 0; i < 4; i++) {
     await assert.rejects(() => getOmdbRatings(`tt000010${i}`), /timed out/);
     assert.equal(isOmdbQuotaLocked(), false, `${i + 1} timeout(s) is a blip, not a verdict`);
+    mock.timers.tick(10_000);
   }
 
   await assert.rejects(() => getOmdbRatings("tt0000105"), /timed out/);
-  assert.equal(isOmdbQuotaLocked(), true, "the 5th consecutive transport failure IS a reachability verdict");
+  assert.equal(isOmdbQuotaLocked(), true, "the 5th consecutive transport failure, 40s into the run, IS a reachability verdict");
   assert.ok(warns.some((w) => w.includes("consecutive transport failures")), "the trip warn names the cause");
 });
 
@@ -300,7 +304,10 @@ test("any response clears the transport count — failures must be CONSECUTIVE t
   assert.equal(isOmdbQuotaLocked(), false);
 
   script(omdbTimeout());
-  for (let i = 0; i < 4; i++) await assert.rejects(() => getOmdbRatings(`tt000020${i}`), /timed out/);
+  for (let i = 0; i < 4; i++) {
+    await assert.rejects(() => getOmdbRatings(`tt000020${i}`), /timed out/);
+    mock.timers.tick(10_000);
+  }
 
   // One real response proves the host is up. Note it is a 502 — the point is
   // that ANY response clears the count, not that the call succeeded.
@@ -308,6 +315,98 @@ test("any response clears the transport count — failures must be CONSECUTIVE t
   await assert.rejects(() => getOmdbRatings("tt0000210"), /502/);
 
   script(omdbTimeout());
-  for (let i = 0; i < 4; i++) await assert.rejects(() => getOmdbRatings(`tt000022${i}`), /timed out/);
+  for (let i = 0; i < 4; i++) {
+    await assert.rejects(() => getOmdbRatings(`tt000022${i}`), /timed out/);
+    mock.timers.tick(10_000);
+  }
   assert.equal(isOmdbQuotaLocked(), false, "the count restarted at the response — 4 + 4 is not 5 in a row");
+});
+
+test("a BURST of parallel timeouts (one batch hitting one blip) is not a run — it trips nothing", async () => {
+  // After the test above, and early enough that the lockout this trips (an
+  // hour) has lapsed by the rejected-key walk below (T0+8h).
+  mock.timers.setTime(T0 + 6 * HOUR_MS + 10 * 60_000);
+  script(() => new Response("<html>ok</html>", { status: 502 }));
+  await assert.rejects(() => getOmdbRatings("tt0000230"), /502/); // clears any count left above
+  script(omdbTimeout());
+  // Six lookups at once — the prewarm's batch of five plus one — all timing out
+  // at the same instant: past the count, but spanning no time at all.
+  const burst = Array.from({ length: 6 }, (_, i) => assert.rejects(() => getOmdbRatings(`tt000024${i}`), /timed out/));
+  await Promise.all(burst);
+  assert.equal(isOmdbQuotaLocked(), false, "one blip must not suspend OMDb for an hour");
+  // The run continuing 30s later is a reachability verdict.
+  mock.timers.tick(30_000);
+  await assert.rejects(() => getOmdbRatings("tt0000250"), /timed out/);
+  assert.equal(isOmdbQuotaLocked(), true);
+});
+
+// ── the rejected key (appended to the walk: unlocked from T0+8h) ────────────
+// "Invalid API key!" must not trip the hour-long lockout (above), but without
+// anything every cold title re-asked OMDb and logged two error lines. The KEY
+// is latched instead: while it is the stored key, fetchAndCacheOmdbForTmdb asks
+// nobody; a changed key, a passing Settings → Test, or an hour clear it.
+const API_KEY_MEMO_MS = 30_000; // omdb.ts's getApiKey memo
+const REFUSED = { found: false, keyConfigured: true, transient: true, keyRejected: true };
+const unauthorized = () => () =>
+  new Response(JSON.stringify({ Response: "False", Error: "Invalid API key!" }), {
+    status: 401,
+    headers: { "content-type": "application/json" },
+  });
+const rated = omdbBody({ Response: "True", Title: "The Matrix", imdbRating: "8.7" });
+
+test("an invalid key is latched: the next cold titles ask nobody, the lockout stays off, and it is said once", async () => {
+  mock.timers.setTime(T0 + 8 * HOUR_MS); // past every lockout, and the key memo
+  omdbKey = "key-omdb-refuses";
+  warns.length = 0;
+  errors.length = 0;
+
+  script(unauthorized());
+  assert.deepEqual(await fetchAndCacheOmdbForTmdb(901, "movie", null, "tt0000901"), REFUSED);
+  assert.equal(fetchCalls.length, 1);
+
+  script(null); // any fetch fails the test
+  assert.deepEqual(await fetchAndCacheOmdbForTmdb(902, "movie", null, "tt0000902"), REFUSED);
+  assert.deepEqual(await getOmdbRatingsForTmdb(903, "movie"), REFUSED, "a page's cold read goes through the same gate");
+  assert.equal(fetchCalls.length, 0);
+  assert.equal(isOmdbQuotaLocked(), false, "never the hour-long lockout");
+  assert.equal(warns.filter((w) => w.includes("[omdb] OMDb refused the API key")).length, 1);
+  assert.equal(errors.length, 0, "no per-title error lines");
+  assert.equal(cacheRows.has("omdb:tmdb:movie:902"), false, "never negative-cached");
+});
+
+test("a changed key is asked at once", async () => {
+  omdbKey = "replacement-key";
+  mock.timers.setTime(T0 + 8 * HOUR_MS + API_KEY_MEMO_MS + 1_000);
+  script(rated);
+  assert.equal((await fetchAndCacheOmdbForTmdb(904, "movie", null, "tt0000904")).found, true);
+  assert.equal(fetchCalls.length, 1);
+});
+
+test("switching back to the refused key keeps it refused, and a passing Settings → Test clears it", async () => {
+  omdbKey = "key-omdb-refuses";
+  mock.timers.setTime(T0 + 8 * HOUR_MS + 2 * (API_KEY_MEMO_MS + 1_000));
+  script(null);
+  assert.deepEqual(await fetchAndCacheOmdbForTmdb(905, "movie", null, "tt0000905"), REFUSED);
+
+  script(rated);
+  assert.equal(await testOmdbConnection(), "The Matrix", "the Test ignores the latch");
+  assert.equal(fetchCalls.length, 1);
+  assert.equal((await fetchAndCacheOmdbForTmdb(906, "movie", null, "tt0000906")).found, true);
+  assert.equal(fetchCalls.length, 2, "the cleared key is asked again");
+});
+
+test("a key refused on the 200 transport is latched too, and asked again after an hour (an OMDb key works once activated)", async () => {
+  const start = T0 + 9 * HOUR_MS;
+  mock.timers.setTime(start);
+  script(omdbBody({ Response: "False", Error: "Invalid API key!" }));
+  assert.deepEqual(await fetchAndCacheOmdbForTmdb(907, "movie", null, "tt0000907"), REFUSED);
+
+  script(null);
+  mock.timers.setTime(start + HOUR_MS - 1);
+  assert.deepEqual(await fetchAndCacheOmdbForTmdb(908, "movie", null, "tt0000908"), REFUSED);
+
+  mock.timers.setTime(start + HOUR_MS);
+  script(rated);
+  assert.equal((await fetchAndCacheOmdbForTmdb(909, "movie", null, "tt0000909")).found, true);
+  assert.equal(fetchCalls.length, 1);
 });

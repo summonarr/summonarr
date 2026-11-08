@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,7 +9,27 @@ import { StyledSelect } from "@/components/ui/styled-select";
 import { Dialog, DialogBackdrop, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import { Loader2, Check, UserPlus, AlertTriangle } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { v } from "@/lib/validate";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { useT } from "@/components/i18n/i18n-provider";
+import { MIN_PASSWORD_LENGTH } from "@/lib/password-policy";
+import { roleLabelKey, type User } from "@/components/admin/user-modals/shared";
+
+type Role = User["role"];
+
+// Every role, in the order the dialog lists them. A Record, so a role added to
+// User["role"] doesn't compile until it has a place here (and a label in
+// roleLabelKey) — a hand-typed <option> list dropped it silently.
+const ROLE_RANK: Record<Role, number> = { USER: 0, ISSUE_ADMIN: 1, ADMIN: 2 };
+const ROLES = (Object.keys(ROLE_RANK) as Role[]).sort((a, b) => ROLE_RANK[a] - ROLE_RANK[b]);
+const isRole = (value: string): value is Role => Object.prototype.hasOwnProperty.call(ROLE_RANK, value);
+
+// The 201 answer is the created user; only its (normalised) email is shown.
+const CreatedUser = v.object({ email: v.optional(v.string()) });
+
+// How long the "created" line stays beside the button.
+const CREATED_NOTICE_MS = 10_000;
 
 // Admin "Create user" — the only in-app path to a local username/password account
 // (public registration closes after the first user). Posts to POST /api/admin/users
@@ -17,17 +37,25 @@ import { useT } from "@/components/i18n/i18n-provider";
 export function CreateUserButton() {
   const t = useT();
   const router = useRouter();
+  const action = useAsyncAction();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState("USER");
-  const [loading, setLoading] = useState(false);
+  const [role, setRole] = useState<Role>("USER");
+  const loading = action.busy("create");
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<string | null>(null);
 
+  // The confirmation is a passing note, not state the page keeps.
+  useEffect(() => {
+    if (!created) return;
+    const timer = setTimeout(() => setCreated(null), CREATED_NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [created]);
+
   // 12 mirrors POST /api/admin/users (and register + profile/password).
-  const canSubmit = email.trim().length > 0 && password.length >= 12 && !loading;
+  const canSubmit = email.trim().length > 0 && password.length >= MIN_PASSWORD_LENGTH && !loading;
 
   function resetForm() {
     setName("");
@@ -39,28 +67,27 @@ export function CreateUserButton() {
 
   async function submit() {
     if (!canSubmit) return;
-    setLoading(true);
     setError(null);
-    try {
-      const res = await fetch(withBasePath("/api/admin/users"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: email.trim(), password, name: name.trim() || undefined, role }),
-      });
-      const data: { email?: string; error?: string } = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setError(data.error ?? t("adminManage.createUser.failed"));
-        return;
-      }
-      setCreated(data.email ?? email.trim());
-      resetForm();
-      setOpen(false);
-      router.refresh();
-    } catch {
-      setError(t("adminManage.createUser.failed"));
-    } finally {
-      setLoading(false);
+    const typedEmail = email.trim();
+    // "skip": a second Enter while the first create is out must not send a second account.
+    const res = await action.run("create", (signal) =>
+      fetchJson(withBasePath("/api/admin/users"), {
+        init: jsonInit("POST", { email: typedEmail, password, name: name.trim() || undefined, role }),
+        schema: CreatedUser,
+        signal,
+        // A password hash queues behind other sign-ins; give the create room.
+        timeoutMs: 60_000,
+        fallbackError: t("adminManage.createUser.failed"),
+      }), { ifBusy: "skip" });
+    if (!res) return;
+    if (!res.ok) {
+      setError(res.error);
+      return;
     }
+    setCreated(res.data.email ?? typedEmail);
+    resetForm();
+    setOpen(false);
+    router.refresh();
   }
 
   return (
@@ -88,6 +115,10 @@ export function CreateUserButton() {
       <Dialog
         open={open}
         onOpenChange={(o) => {
+          // No dismissing (Escape, backdrop) mid-submit: a failure would land on
+          // a closed dialog and be wiped on reopen, and a late success would
+          // close a dialog the admin had reopened.
+          if (!o && loading) return;
           setOpen(o);
           if (!o) setError(null);
         }}
@@ -141,7 +172,7 @@ export function CreateUserButton() {
                   id="cu-password"
                   type="password"
                   autoComplete="new-password"
-                  minLength={12}
+                  minLength={MIN_PASSWORD_LENGTH}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••••••"
@@ -149,10 +180,10 @@ export function CreateUserButton() {
               </div>
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="cu-role">{t("adminManage.createUser.role")}</Label>
-                <StyledSelect id="cu-role" value={role} onChange={(e) => setRole(e.target.value)}>
-                  <option value="USER">{t("adminManage.users.role.USER")}</option>
-                  <option value="ISSUE_ADMIN">{t("adminManage.users.role.ISSUE_ADMIN")}</option>
-                  <option value="ADMIN">{t("adminManage.users.role.ADMIN")}</option>
+                <StyledSelect id="cu-role" value={role} onChange={(e) => { if (isRole(e.target.value)) setRole(e.target.value); }}>
+                  {ROLES.map((r) => (
+                    <option key={r} value={r}>{t(roleLabelKey[r])}</option>
+                  ))}
                 </StyledSelect>
               </div>
               {error && (

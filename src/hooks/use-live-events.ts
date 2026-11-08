@@ -2,64 +2,11 @@
 
 import { useEffect, useRef } from "react";
 import { withBasePath } from "@/lib/base-path";
+import { parseLiveEvent, type LiveEvent } from "@/lib/live-event-frames";
 
-export type LiveEvent =
-  | { type: "connected" }
-  // Client-synthesized (never sent by the server): the shared stream errored.
-  | { type: "disconnected" }
-  | { type: "request:new"; requestId: string }
-  | { type: "request:updated"; requestId: string; status: string }
-  | { type: "request:deleted"; requestId: string }
-  | { type: "request:comment"; requestId: string }
-  | { type: "issue:new"; issueId: string }
-  | { type: "issue:updated"; issueId: string; status: string }
-  | { type: "issue:deleted"; issueId: string }
-  | { type: "issuemessage:created"; issueId: string }
-  | { type: "activity:sessions"; sessions: ActiveSessionLive[] }
-  | { type: "activity:history-updated" }
-  | { type: "plex:reachability"; reachable: boolean; instance: string };
-
-export interface ActiveSessionLive {
-  id: string;
-  source: string;
-  state: string;
-  mediaServerUserId: string;
-  serverUsername: string;
-  title: string;
-  tmdbId: number | null;
-  mediaType: string | null;
-  year: string | null;
-  seasonNumber: number | null;
-  episodeNumber: number | null;
-  episodeTitle: string | null;
-  progressPercent: number;
-  progressMs: number;
-  durationMs: number;
-  startedAt: string | null;
-  platform: string | null;
-  player: string | null;
-  device: string | null;
-  ipAddress: string | null;
-  playMethod: string | null;
-  videoCodec: string | null;
-  audioCodec: string | null;
-  resolution: string | null;
-  bitrate: number | null;
-  videoDecision: string | null;
-  audioDecision: string | null;
-  container: string | null;
-  posterUrl: string | null;
-  // Network metadata from /status/sessions Session + Player sub-objects.
-  location: string | null;
-  bandwidth: number | null;
-  secure: boolean | null;
-  relayed: boolean | null;
-  // Intro/credits marker offsets in ms, from /library/metadata?includeMarkers=1.
-  introStartMs: number | null;
-  introEndMs: number | null;
-  creditsStartMs: number | null;
-  creditsEndMs: number | null;
-}
+// The frame types and their runtime check live in one browser-safe module
+// (src/lib/live-event-frames.ts); re-exported so consumers keep this import.
+export type { ActiveSessionLive, LiveEvent } from "@/lib/live-event-frames";
 
 type Subscriber = (event: LiveEvent) => void;
 // Module-level singleton: a single SSE connection is shared across all useLiveEvents consumers
@@ -72,27 +19,36 @@ let retryTimer: ReturnType<typeof setTimeout> | null = null;
 // interval of re-authenticating.
 const PERMANENT_FAILURE_RETRY_MS = 30_000;
 
+// Every subscriber gets the event even when an earlier one throws: one broken
+// consumer must not starve the others, or the lifecycle code after a dispatch.
+function dispatch(event: LiveEvent): void {
+  for (const sub of subscribers) {
+    try {
+      sub(event);
+    } catch (err) {
+      console.error("[live-events] subscriber failed:", err);
+    }
+  }
+}
+
 function ensureEventSource() {
   if (singleton) return;
   // SSE reconnects automatically on error; do not replace with WebSocket
   const es = new EventSource(withBasePath("/api/events"));
   es.onmessage = (e: MessageEvent) => {
-    try {
-      const event = JSON.parse(e.data as string) as LiveEvent;
-      for (const sub of subscribers) sub(event);
-    } catch {
-
-    }
+    const event = typeof e.data === "string" ? parseLiveEvent(e.data) : null;
+    // A frame this client doesn't know (or a malformed one) is dropped.
+    if (event) dispatch(event);
   };
   es.onerror = () => {
-    for (const sub of subscribers) sub({ type: "disconnected" });
     // CONNECTING → the browser is auto-retrying a transient drop; nothing to do.
     // CLOSED → permanent failure (an HTTP-error/wrong-MIME reconnect — e.g. the
     // server tore the stream down at the reauth tick and the reconnect got a
     // 401). The browser will NEVER retry on its own, and a dead singleton would
     // make ensureEventSource() a no-op forever — live updates gone until a full
     // page reload. Drop the singleton and re-probe on a timer so a
-    // re-authenticated session picks the stream back up.
+    // re-authenticated session picks the stream back up. The lifecycle runs
+    // BEFORE the subscribers hear about it, so none of them can stop the reset.
     if (es.readyState === EventSource.CLOSED) {
       es.close();
       if (singleton === es) singleton = null;
@@ -103,9 +59,10 @@ function ensureEventSource() {
           if (subscribers.size > 0) ensureEventSource();
         }, PERMANENT_FAILURE_RETRY_MS);
       }
-      return;
+    } else {
+      console.warn("[live-events] SSE connection error, browser will retry");
     }
-    console.warn("[live-events] SSE connection error, browser will retry");
+    dispatch({ type: "disconnected" });
   };
   singleton = es;
 }

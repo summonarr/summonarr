@@ -41,7 +41,9 @@ const {
   sonarrCalendarEntries,
 } = await import("../src/lib/arr-calendar.ts");
 const {
+  calendarBodyState,
   calendarDays,
+  calendarRowCount,
   calendarViewQuery,
   failedInView,
   finaleOf,
@@ -346,6 +348,14 @@ test("one row per title per day: a movie's dates on one day, and a title on two 
     [2, [":5:missing", "anime:50:downloaded"]],
     [3, [":6:missing"]],
   ]);
+
+  // A chip's count is exactly the rows calendarDays draws: the folds above count once.
+  const drawn = (entries: Parameters<typeof calendarDays>[0]) => calendarDays(entries).reduce((n, d) => n + d.rows.length, 0);
+  for (const entries of [[...hd, ...uhd, ...other], [...s1, ...s2, ...s3], [...hd, ...uhd, ...other, ...s1, ...s2, ...s3], []]) {
+    assert.equal(calendarRowCount(entries), drawn(entries));
+  }
+  assert.equal(calendarRowCount([...hd, ...uhd, ...other]), 3);
+  assert.equal(calendarRowCount([...s1, ...s2, ...s3]), 2);
 });
 
 test("a cell needs attention when any of its instance's entries for the title that day does, in either order", () => {
@@ -469,7 +479,24 @@ test("statuses are the viewer's day's, an empty view with a failed instance make
   assert.match(CAL_SRC, /\.map\(\(e\) => \(\{ \.\.\.e, status: localEntryStatus\(e, nowMs\) \}\)\)/);
   assert.match(CAL_SRC, /const nowMs = Date\.parse\(report\.now\);/, "the report's clock, never Date.now() (guardrail 16)");
   assert.match(CAL_SRC, /const viewFailed = report !== null && failedInView\(report\.errors, instanceFilter, typeFilter\);/);
-  assert.match(CAL_SRC, /\) : viewFailed \? null : \(\s*<EmptyState\s+icon=\{CalendarDays\}\s+title=\{t\("adminArr\.calendar\.empty"\)\}/);
+  // The body is one named state; "nothing on the calendar" renders only for "empty".
+  assert.match(CAL_SRC, /const body = calendarBodyState\(\{ hasReport: report !== null, hasError: error !== "", allDown, viewFailed, rows: days\.length, inWindow: scoped\.length \}\);/);
+  assert.match(CAL_SRC, /\{body === "empty" && \(\s*<EmptyState\s+icon=\{CalendarDays\}\s+title=\{t\("adminArr\.calendar\.empty"\)\}/);
+  assert.equal([...CAL_SRC.matchAll(/title=\{t\("adminArr\.calendar\.empty"\)\}/g)].length, 1);
   assert.match(CAL_SRC, /t\(unmonitored \? "adminArr\.calendar\.emptyHintAll" : "adminArr\.calendar\.emptyHint"\)/);
   assert.match(CAL_SRC, /\{c\.attention && \(\s*<Link\s+href=\{queueTitleHref\(\{ service: c\.service, instance: c\.instance, arrId: c\.arrId \}\)\}/);
+});
+
+test("the calendar body's state keeps its precedence: no empty-calendar claim while anything in view is unknown", () => {
+  const base = { hasReport: true, hasError: false, allDown: false, viewFailed: false, rows: 0, inWindow: 0 };
+  assert.equal(calendarBodyState({ ...base, hasReport: false }), "loading");
+  assert.equal(calendarBodyState({ ...base, hasReport: false, hasError: true }), "none", "a failed first load shows its alert, not a spinner");
+  assert.equal(calendarBodyState({ ...base, rows: 3 }), "grid");
+  assert.equal(calendarBodyState({ ...base, rows: 3, viewFailed: true, hasError: true }), "grid", "rows always draw");
+  assert.equal(calendarBodyState({ ...base, hasError: true, inWindow: 5 }), "none");
+  assert.equal(calendarBodyState({ ...base, allDown: true, inWindow: 5 }), "none", "every instance down: no claim, not even 'filtered'");
+  assert.equal(calendarBodyState({ ...base, inWindow: 5 }), "filteredEmpty");
+  assert.equal(calendarBodyState({ ...base, inWindow: 5, viewFailed: true }), "filteredEmpty", "the filters hide rows that WERE read");
+  assert.equal(calendarBodyState({ ...base, viewFailed: true }), "none", "an instance in view couldn't be read: its schedule is unknown");
+  assert.equal(calendarBodyState(base), "empty");
 });

@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { DiscordCodeAlreadyUsedError, mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
-import { assignDiscordRolesOnLink } from "@/lib/discord-notify";
+import { DiscordAlreadyLinkedError, DiscordCodeAlreadyUsedError, mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
+import { assignDiscordRolesForUser } from "@/lib/discord-notify";
+import { isFeatureEnabled } from "@/lib/features";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -14,6 +15,12 @@ import { discordMergeCodeMatches, isDiscordMergeCodeMac, normalizeDiscordMergeCo
 
 export const POST = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
+  // The integration switch covers linking (features.ts), not only the bot's
+  // commands: with it off nothing is linked. Before the rate limit, so a
+  // refusal spends nothing.
+  if (!(await isFeatureEnabled("feature.integration.discord"))) {
+    return NextResponse.json({ error: t("apiUser.discord.disabled") }, { status: 403 });
+  }
   if (!checkRateLimit(`discord-merge:${session.user.id}`, 5, 10 * 60 * 1000)) {
     await prisma.discordMergeCode.deleteMany({ where: { userId: session.user.id } });
     return NextResponse.json(
@@ -56,27 +63,20 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiUser.discord.merge.incorrect") }, { status: 400 });
   }
 
+  let migrated: number;
   try {
     // The code is consumed INSIDE the merge transaction (claimCode): a
     // concurrent double-submit merges once, and a failed merge rolls the delete
     // back so the user can retry. The claim names the exact row verified above,
     // so a code re-sent in between is not consumed by the old one.
-    const { migrated } = await mergeDiscordIntoWebAccount(session.user.id, record.discordId, {
+    ({ migrated } = await mergeDiscordIntoWebAccount(session.user.id, record.discordId, {
       claimCode: async (tx) => {
         const { count } = await tx.discordMergeCode.deleteMany({
           where: { userId: session.user.id, discordId: record.discordId, code: record.code },
         });
         return count === 1;
       },
-    });
-
-    await assignDiscordRolesOnLink(
-      record.discordId,
-      session.user.email ?? "",
-      (session.user.role as "ADMIN" | "ISSUE_ADMIN" | "USER") ?? "USER"
-    );
-
-    return NextResponse.json({ ok: true, migrated, discordId: record.discordId });
+    }));
   } catch (err) {
     if (err instanceof DiscordCodeAlreadyUsedError) {
       // Lost the claim. A double-submit whose twin already linked THIS Discord
@@ -88,6 +88,21 @@ export const POST = withAuth(async (req, _ctx, session) => {
       }
       return NextResponse.json({ error: t("apiUser.discord.merge.noPending") }, { status: 400 });
     }
-    return NextResponse.json({ error: t("apiUser.discord.merge.linkFailed") }, { status: 409 });
+    if (err instanceof DiscordAlreadyLinkedError) {
+      // The expected refusal, told only now that the caller has proven control
+      // of the Discord account (initiate-merge deliberately doesn't check).
+      return NextResponse.json({ error: t("apiUser.discord.merge.alreadyLinked") }, { status: 409 });
+    }
+    // Anything else (a DB outage, a transaction timeout) is the server failing,
+    // not a conflict the user can resolve: the claim rolled back with it, so the
+    // same code can be tried again.
+    console.error("[discord/confirm-merge] merge failed:", err instanceof Error ? err.message : err);
+    return NextResponse.json({ error: t("apiUser.discord.merge.linkFailed") }, { status: 500 });
   }
+
+  // The link has committed: the roles follow the account's own row (its role
+  // and how it signs in), and a failure here is logged, never a failed link.
+  await assignDiscordRolesForUser(record.discordId, session.user.id);
+
+  return NextResponse.json({ ok: true, migrated, discordId: record.discordId });
 });

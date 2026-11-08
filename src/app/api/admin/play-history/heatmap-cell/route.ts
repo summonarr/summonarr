@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { getHeatmapCellDetail, type HeatmapCellQuery } from "@/lib/play-history";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { isIsoDate } from "@/lib/ics";
 
 // Drill-down behind the click popover on the activity heatmaps. Returns the
 // per-cell aggregate (plays, transcode mix, watch time, quality/network) for a
@@ -23,7 +24,9 @@ export const GET = withAdmin(async (req) => {
 
   if (mode === "day") {
     const day = searchParams.get("day") ?? "";
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+    // A real calendar date, not just its shape: "2024-13-45" matches the
+    // pattern but fails Postgres's ::date cast as a 500.
+    if (!isIsoDate(day)) {
       return NextResponse.json({ error: t("apiAdmin.heatmap.day") }, { status: 400 });
     }
     query.day = day;

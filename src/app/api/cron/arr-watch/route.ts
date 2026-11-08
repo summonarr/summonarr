@@ -1,6 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { cronSkippedResponse, getCronActor, withCronRunRecording } from "@/lib/cron-auth";
-import { withAdvisoryLock, ARR_WATCH_LOCK_ID } from "@/lib/advisory-lock";
+import { defineCronRoute } from "@/lib/cron-route";
+import { ARR_WATCH_LOCK_ID } from "@/lib/advisory-lock";
 import { hasWatchableArrInstance, runArrWatch } from "@/lib/arr-watch-data";
 
 // The Radarr/Sonarr monitor (src/lib/arr-watch.ts + arr-watch-data.ts): per
@@ -15,46 +14,22 @@ import { hasWatchableArrInstance, runArrWatch } from "@/lib/arr-watch-data";
 // given up on before the next tick, and far under the lock's 30-minute default.
 const ARR_WATCH_WORK_TIMEOUT_MS = 10 * 60_000;
 
-export async function POST(request: NextRequest) {
-  const authCtx = await getCronActor(request);
-  if (!authCtx) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
+export const POST = defineCronRoute({
+  target: "arr-watch",
+  lockId: ARR_WATCH_LOCK_ID,
+  timeoutMs: ARR_WATCH_WORK_TIMEOUT_MS,
   // Neither integration on, or nothing configured: no run, no lock, no
-  // upstream traffic — and no ledger row (X-Cron-Skipped), since no run happened.
-  if (!(await hasWatchableArrInstance())) return cronSkippedResponse("no Radarr/Sonarr instance configured");
-
-  return withCronRunRecording("arr-watch", () => withAdvisoryLock(
-    ARR_WATCH_LOCK_ID,
-    async (signal: AbortSignal) => {
-      const startTime = Date.now();
-      // Observes the lock's AbortSignal at every instance boundary and writes
-      // nothing once it fires (guardrail 41).
-      const result = await runArrWatch({ signal });
-      const durationMs = Date.now() - startTime;
-
-      // 200 on a partial failure (the entrypoint fast-retries any non-2xx);
-      // X-Cron-Degraded is what marks the run failed in the ledger. A failed
-      // read keeps that part's previous state.
-      const problems = result.errors.length + (result.aborted ? 1 : 0);
-      const ok = problems === 0;
-      return NextResponse.json(
-        {
-          ok,
-          ...result,
-          ...(ok
-            ? {}
-            : { error: result.aborted ? "the run was stopped before it finished" : `${result.errors.length} Radarr/Sonarr read(s) failed` }),
-          durationMs,
-          trigger: authCtx.trigger,
-          timestamp: new Date().toISOString(),
-        },
-        ok ? undefined : { headers: { "X-Cron-Degraded": String(problems) } },
-      );
-    },
-    // A lock-busy skip is not a run (guardrail 7b).
-    () => cronSkippedResponse(),
-    { timeoutMs: ARR_WATCH_WORK_TIMEOUT_MS },
-  ));
-}
+  // upstream traffic — and no ledger row, since no run happened.
+  skipReason: async () => ((await hasWatchableArrInstance()) ? null : "no Radarr/Sonarr instance configured"),
+  async run({ signal, actor, elapsedMs }) {
+    // Observes the lock's AbortSignal at every instance boundary and writes
+    // nothing once it fires (guardrail 41). A failed read keeps that part's
+    // previous state.
+    const result = await runArrWatch({ signal });
+    return {
+      body: { ...result, durationMs: elapsedMs(), trigger: actor.trigger },
+      problems: result.errors.length + (result.aborted ? 1 : 0),
+      error: result.aborted ? "the run was stopped before it finished" : `${result.errors.length} Radarr/Sonarr read(s) failed`,
+    };
+  },
+});

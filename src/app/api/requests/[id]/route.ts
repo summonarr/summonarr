@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
-import { withAuth, withPermission } from "@/lib/api-auth";
+import { withAuth, withPermission, type SummonarrSession } from "@/lib/api-auth";
 import { Permission, hasPermission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, searchMovieInRadarr, arrErrorMessage, arrErrorMessageForClient } from "@/lib/arr";
-import { addSeriesToSonarr, listQualityProfiles } from "@/lib/arr";
+import { searchMovieInRadarr, arrErrorMessage, arrErrorMessageForClient, ArrItemNotFoundError, listQualityProfiles } from "@/lib/arr";
 import { MissingInstanceError, NothingMissingError, SeriesNotOnInstanceError, findSeriesIdOnInstance, searchMissing } from "@/lib/arr-missing-data";
 import { emitSSE } from "@/lib/sse-emitter";
 import { logAudit, auditContext } from "@/lib/audit";
@@ -12,13 +11,31 @@ import { sanitizeOptional } from "@/lib/sanitize";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { scheduleDownloadCheck } from "@/lib/download-check";
 import { readJsonCapped } from "@/lib/body-size";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { ADMIN_NOTE_MAX } from "@/lib/request-limits";
+import type { Translator } from "@/lib/i18n/translate";
+import {
+  REQUEST_STATUSES,
+  addRequestToArr,
+  announceStatus,
+  approvalAuditDetails,
+  claimApproval,
+  claimDecline,
+  claimMarkAvailable,
+  claimReopen,
+  declineAuditDetails,
+  followUpDecidedApprovals,
+  isAllowedTransition,
+  isRequestStatus,
+  notifyDecided,
+  pushApproval,
+  stampTvdbId,
+} from "@/lib/request-transition";
 
-const VALID_STATUSES = ["APPROVED", "DECLINED", "AVAILABLE", "PENDING"] as const;
-type ValidStatus = (typeof VALID_STATUSES)[number];
+// Longest quality-profile name the audit row records beside the id.
+const QUALITY_PROFILE_NAME_MAX = 100;
 
 export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   req,
@@ -35,422 +52,394 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
 
   const { id } = await params;
 
-  const parsed = await readJsonCapped<{ status?: string; retry?: boolean; search?: boolean; adminNote?: string; permanent?: boolean; qualityProfileId?: number; qualityProfileName?: string }>(req, 16384);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed;
+  const raw = await readJsonCapped<Record<string, unknown>>(req, 16384);
+  if (raw instanceof NextResponse) return raw;
+  const body = parsePatchBody(raw, t);
+  if (body instanceof NextResponse) return body;
 
-  const { status, retry, search, adminNote, permanent, qualityProfileId, qualityProfileName } = body;
+  const existing = await loadRequest(id);
+  if (!existing) return notFound(t);
 
-  if (adminNote !== undefined && (typeof adminNote !== "string" || adminNote.length > 1000)) {
-    return NextResponse.json({ error: t("apiUser.common.adminNoteTooLong") }, { status: 400 });
-  }
-  // Optional one-time quality-profile override for the ARR push on approval. Only
-  // consumed by the APPROVE transition below; ignored on other transitions. The
-  // name is carried purely so the audit log reads "720p" instead of a bare id.
-  if (qualityProfileId !== undefined && (!Number.isInteger(qualityProfileId) || qualityProfileId <= 0)) {
-    return NextResponse.json({ error: t("apiUser.requests.qualityProfileIdInvalid") }, { status: 400 });
-  }
-  if (qualityProfileName !== undefined && (typeof qualityProfileName !== "string" || qualityProfileName.length > 100)) {
-    return NextResponse.json({ error: t("apiUser.requests.qualityProfileNameTooLong") }, { status: 400 });
-  }
-  const sanitizedAdminNote = sanitizeOptional(adminNote);
-
-  const existing = await prisma.mediaRequest.findUnique({ where: { id }, include: { user: { select: { name: true, email: true } } } });
-  if (!existing) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
-
-  if (search) {
-    if (existing.status !== "APPROVED" && existing.status !== "AVAILABLE") {
-      return NextResponse.json(
-        { error: t("apiUser.requests.searchInvalidStatus") },
-        { status: 400 }
-      );
-    }
-
-    if (adminNote !== undefined) {
-      // updateMany, like every other write in this handler: a bare update throws
-      // P2025 when the row is deleted between the read above and this write, and
-      // nothing catches it — a concurrent delete answered 500 where the sibling
-      // note-only path and DELETE both answer 404.
-      const noteWrite = await prisma.mediaRequest.updateMany({ where: { id }, data: { adminNote: sanitizedAdminNote } });
-      if (noteWrite.count === 0) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
-      // Audit the note change so silent edits via search/retry leave a trail.
-      // The status-transition branches already audit via logAudit.
-      if ((existing.adminNote ?? null) !== (sanitizedAdminNote ?? null)) {
-        void logAudit({
-          userId: session.user.id,
-          userName: session.user.name ?? session.user.email ?? "unknown",
-          action: "SETTINGS_CHANGE",
-          target: `request:${id}:adminNote`,
-          details: { via: "search", from: existing.adminNote ?? null, to: sanitizedAdminNote ?? null },
-          ...auditContext(req, session),
-        });
-      }
-    }
-    const variant = existing.arrInstance;
-    const searchedNote = adminNote !== undefined ? sanitizedAdminNote : existing.adminNote;
-    // A TV request with no stored tvdbId was never pushed (or predates the
-    // bookkeeping write): there is nothing to search. Answer with a translated
-    // arrError rather than throwing an English Error into the generic arr catch.
-    if (existing.mediaType !== "MOVIE" && !existing.tvdbId) {
-      return NextResponse.json({ ...existing, adminNote: searchedNote, arrError: t("apiUser.requests.searchNoTvdbId") });
-    }
-    let arrError: string | null = null;
-    try {
-      if (existing.mediaType === "MOVIE") {
-        await searchMovieInRadarr(existing.tmdbId, variant);
-      } else {
-        // NEVER SeriesSearch: it searches every monitored season, files on disk
-        // included, so a partly downloaded series also gets upgrade grabs and a
-        // season search per COMPLETE season. Queue the Missing page's plan
-        // instead (planSeriesSearch — SeasonSearch for a season with nothing on
-        // disk, one EpisodeSearch for the rest), judged live on the request's
-        // own instance (guardrail 32).
-        const seriesId = await findSeriesIdOnInstance(variant, existing.tvdbId as number);
-        const result = await searchMissing("sonarr", variant, seriesId, new Date());
-        // Sonarr refused a command part-way: what was queued IS running, but
-        // the rest wasn't — a bare success would say the whole plan started.
-        if (result.partial) arrError = t("apiUser.requests.searchPartial");
-      }
-    } catch (err) {
-      if (err instanceof NothingMissingError) {
-        // An answer, not a failure: no aired, monitored episode is missing —
-        // every one is on disk, OR none is monitored (a series added with
-        // "Monitor: Future"), so the wording claims neither. An upgrade search
-        // is the title manager's, never this button's.
-        arrError = t("apiUser.requests.searchNothingMissing");
-      } else if (err instanceof MissingInstanceError) {
-        // Its message is the bare slug ("" for the default instance) — relayed
-        // through arrErrorMessage it would read as an empty, i.e. successful, answer.
-        arrError = t("apiUser.requests.searchInstanceUnavailable");
-      } else if (err instanceof SeriesNotOnInstanceError) {
-        // Removed in Sonarr since the push (or pushed elsewhere): Re-push
-        // adds it back — an answer, translated, not a logged failure.
-        arrError = t("apiUser.requests.searchSeriesNotInSonarr");
-      } else {
-        // The detail to the log; the caller (a MANAGE_REQUESTS delegate, maybe)
-        // gets the failure's kind, never the arr's internal URL (guardrail 5g).
-        console.error("[arr] Search failed:", arrErrorMessage(err));
-        arrError = arrErrorMessageForClient(err, t);
-      }
-    }
-    return NextResponse.json({ ...existing, adminNote: searchedNote, arrError });
-  }
-
-  if (retry) {
-    if (existing.status !== "APPROVED") {
-      return NextResponse.json(
-        { error: t("apiUser.requests.retryInvalidStatus") },
-        { status: 400 }
-      );
-    }
-
-    if (adminNote !== undefined) {
-      const noteWrite = await prisma.mediaRequest.updateMany({ where: { id }, data: { adminNote: sanitizedAdminNote } });
-      if (noteWrite.count === 0) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
-      if ((existing.adminNote ?? null) !== (sanitizedAdminNote ?? null)) {
-        void logAudit({
-          userId: session.user.id,
-          userName: session.user.name ?? session.user.email ?? "unknown",
-          action: "SETTINGS_CHANGE",
-          target: `request:${id}:adminNote`,
-          details: { via: "retry", from: existing.adminNote ?? null, to: sanitizedAdminNote ?? null },
-          ...auditContext(req, session),
-        });
-      }
-    }
-    const variant = existing.arrInstance;
-    // Forward the requester's stored profile on retry, consistent with the approve
-    // path's effectiveProfileId — a bare re-push previously dropped it to default.
-    const retryProfileId = existing.qualityProfileId ?? undefined;
-    let arrError: string | null = null;
-    let pushedTvdbId: number | null = null;
-    try {
-      if (existing.mediaType === "MOVIE") {
-        await addMovieToRadarr(existing.tmdbId, variant, retryProfileId, existing.requestedBy);
-      } else {
-        pushedTvdbId = await addSeriesToSonarr(existing.tmdbId, variant, retryProfileId, existing.requestedBy);
-      }
-    } catch (err) {
-      console.error("[arr] Retry push failed:", arrErrorMessage(err));
-      arrError = arrErrorMessageForClient(err, t);
-    }
-    // Bookkeeping write kept OUT of the try above (mirrors the approve branch
-    // below and requests/route.ts): Sonarr has already accepted the series by
-    // this point, so a DB hiccup here must not be reported as an ARR push
-    // failure — and updateMany no-ops on a concurrently deleted row instead of
-    // throwing P2025.
-    if (pushedTvdbId !== null) {
-      await prisma.mediaRequest.updateMany({ where: { id }, data: { tvdbId: pushedTvdbId } });
-    }
-    return NextResponse.json({ ...existing, adminNote: adminNote !== undefined ? sanitizedAdminNote : existing.adminNote, arrError });
-  }
-
+  const pc: PatchContext = { req, session, t, id, existing, adminNote: body.adminNote, sanitizedAdminNote: sanitizeOptional(body.adminNote) };
+  if (body.search) return searchRequest(pc);
+  if (body.retry) return retryRequest(pc);
   // Note-only edit: `adminNote` with no status/search/retry updates the admin
   // reply in place (an empty note clears it — sanitizeOptional maps "" to null).
   // Status transitions below stay strictly validated; the old client behavior of
   // sending the CURRENT status alongside the note always 422'd on the
   // same-status transition, so a standalone note edit needs its own path.
-  if (status === undefined && adminNote !== undefined) {
-    const r = await prisma.mediaRequest.updateMany({ where: { id }, data: { adminNote: sanitizedAdminNote } });
-    if (r.count === 0) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
-    if ((existing.adminNote ?? null) !== (sanitizedAdminNote ?? null)) {
-      void logAudit({
-        userId: session.user.id,
-        userName: session.user.name ?? session.user.email ?? "unknown",
-        action: "SETTINGS_CHANGE",
-        target: `request:${id}:adminNote`,
-        details: { via: "note", from: existing.adminNote ?? null, to: sanitizedAdminNote ?? null },
-        ...auditContext(req, session),
-      });
-    }
-    const noted = await prisma.mediaRequest.findUnique({
-      where: { id },
-      include: { user: { select: { name: true, email: true } } },
-    });
-    if (!noted) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
-    emitSSE({ type: "request:updated", requestId: id, status: noted.status, userId: existing.requestedBy });
-    return NextResponse.json(noted);
-  }
-
-  if (!status || !VALID_STATUSES.includes(status as ValidStatus)) {
-    return NextResponse.json(
-      { error: t("apiUser.common.statusOneOf", { values: VALID_STATUSES.join(", ") }) },
-      { status: 400 }
-    );
-  }
-
-  const VALID_TRANSITIONS: Record<string, string[]> = {
-    PENDING:   ["APPROVED", "DECLINED"],
-    APPROVED:  ["AVAILABLE", "DECLINED"],
-    DECLINED:  ["PENDING", "APPROVED"],
-    AVAILABLE: [],
-  };
-
-  const currentStatus = existing.status;
-  const allowed = VALID_TRANSITIONS[currentStatus] ?? [];
-  if (!allowed.includes(status)) {
-    return NextResponse.json(
-      { error: t("apiUser.requests.invalidTransition", { from: currentStatus, to: status }) },
-      { status: 422 }
-    );
-  }
-
-  if (status === "APPROVED" && existing.status !== "APPROVED") {
-    // Validate the one-time profile override against the request's OWN instance
-    // BEFORE the CAS — the same membership check the create path runs
-    // (request-create.ts). A stale picker id (profile deleted in Radarr/Sonarr
-    // since the list loaded) otherwise CAS'd the row to APPROVED, audited the
-    // approval, had the arr answer 400 and rolled back to PENDING, surfacing a
-    // generic "Arr request failed (400)" instead of this clean 400.
-    if (qualityProfileId !== undefined) {
-      const service = existing.mediaType === "MOVIE" ? "radarr" : "sonarr";
-      let profileList: Awaited<ReturnType<typeof listQualityProfiles>>;
-      try {
-        profileList = await listQualityProfiles(service, existing.arrInstance);
-      } catch (err) {
-        console.error(`[requests] Failed to fetch ${service} profiles:`, err);
-        return NextResponse.json({ error: t("apiUser.common.couldNotConnect", { service }) }, { status: 502 });
-      }
-      if (!profileList || !profileList.profiles.some((p) => p.id === qualityProfileId)) {
-        return NextResponse.json({ error: t("apiUser.create.profileInvalid") }, { status: 400 });
-      }
-    }
-    // CAS (compare-and-swap): the write only lands if the status is still the one
-    // we read, so two admins approving at once can't both succeed.
-    const claimed = await prisma.mediaRequest.updateMany({
-      where: { id, status: existing.status },
-      data: {
-        status: "APPROVED",
-        // The approval the watch grade reads (MediaRequest.approvedAt). Re-stamped
-        // when an approval whose push failed and rolled back is approved again.
-        approvedAt: new Date(),
-        // Approving clears a prior decline; otherwise an APPROVED row keeps
-        // permanentlyDeclined=true and re-requests stay blocked (see the
-        // permanentlyDeclined gate in requests/route.ts).
-        permanentlyDeclined: false,
-        // Guard on the RAW body field: sanitizeOptional never returns undefined
-        // (it maps undefined → null), so guarding on sanitizedAdminNote would
-        // always be true and wipe the stored note on every status transition.
-        ...(adminNote !== undefined ? { adminNote: sanitizedAdminNote } : {}),
-        // Arms a download check ~90s from now that warns if the item still isn't in the download queue.
-        pendingNotifyAt: new Date(Date.now() + 90_000),
-      },
-    });
-    if (claimed.count === 0) {
-      return NextResponse.json({ error: t("apiUser.requests.modifiedConcurrently") }, { status: 409 });
-    }
-  } else if (status === "DECLINED" && existing.status !== "DECLINED") {
-    // CAS on current status prevents double-decline races
-    const claimed = await prisma.mediaRequest.updateMany({
-      where: { id, status: existing.status },
-      data: {
-        status: "DECLINED",
-        // A decline withdraws any approval — including one whose push failed and
-        // rolled back to PENDING — so it can't count if the title arrives anyway.
-        approvedAt: null,
-        permanentlyDeclined: permanent === true,
-        // Same RAW-field guard as the APPROVED branch above.
-        ...(adminNote !== undefined ? { adminNote: sanitizedAdminNote } : {}),
-        pendingNotifyAt: null,
-      },
-    });
-    if (claimed.count === 0) {
-      return NextResponse.json({ error: t("apiUser.requests.modifiedConcurrently") }, { status: 409 });
-    }
-  } else {
-    // CAS on current status: the transition-table check ran against the stale
-    // `existing` read, so two concurrent admins could both pass it. The status
-    // predicate makes the write atomic — a row already moved yields count=0 → 409.
-    const claimed = await prisma.mediaRequest.updateMany({
-      where: { id, status: existing.status },
-      data: {
-        status: status as ValidStatus,
-        // Same RAW-field guard as the APPROVED branch above.
-        ...(adminNote !== undefined ? { adminNote: sanitizedAdminNote } : {}),
-
-        ...(status === "AVAILABLE" || status === "DECLINED" ? { pendingNotifyAt: null } : {}),
-
-        // Reopening a permanently-declined request to PENDING must clear the sticky
-        // flag, else the row shows PENDING while the user stays blocked from re-requesting
-        // (requests/route.ts permanentlyDeclined gate).
-        ...(status === "PENDING" && existing.status === "DECLINED" ? { permanentlyDeclined: false } : {}),
-
-        ...(status === "AVAILABLE" && !existing.availableAt ? { availableAt: new Date() } : {}),
-      },
-    });
-    if (claimed.count === 0) {
-      return NextResponse.json({ error: t("apiUser.requests.modifiedConcurrently") }, { status: 409 });
-    }
-  }
-
-  const updated = await prisma.mediaRequest.findUnique({
-    where: { id },
-    include: { user: { select: { name: true, email: true } } },
-  });
-  if (!updated) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
-
-  emitSSE({ type: "request:updated", requestId: id, status: updated.status, userId: existing.requestedBy });
-
-  // The requester by id (+ display name), never the email: an account purge
-  // finds these rows by the id (audit-scrub.ts scrubRequesterPii).
-  const requester = requesterAuditDetails(existing.requestedBy, existing.user?.name);
-  // An admin acting on their OWN request shouldn't get a self-notification ("your
-  // request was approved/declined/available") — they just performed the action.
-  const selfAction = existing.requestedBy === session.user.id;
-  if (status === "APPROVED" && existing.status !== "APPROVED") {
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_APPROVE", target: `request:${id}`, details: { title: updated.title, mediaType: updated.mediaType, year: updated.releaseYear, ...requester, before: { status: existing.status }, after: { status }, ...(qualityProfileId !== undefined ? { qualityProfileId, qualityProfileName: qualityProfileName ?? null } : {}) }, ...auditContext(req, session) });
-  } else if (status === "DECLINED" && existing.status !== "DECLINED") {
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_DECLINE", target: `request:${id}`, details: { title: updated.title, mediaType: updated.mediaType, year: updated.releaseYear, ...requester, adminNote: updated.adminNote, before: { status: existing.status }, after: { status } }, ...auditContext(req, session) });
-  }
-
-  if (status === "APPROVED" && existing.status !== "APPROVED") {
-    const variant = updated.arrInstance;
-    // The admin's one-time picker choice (qualityProfileId) wins; otherwise fall
-    // back to the profile the requester chose at request time (REQUEST_ADVANCED),
-    // else the instance default (undefined).
-    const effectiveProfileId = qualityProfileId ?? updated.qualityProfileId ?? undefined;
-    let arrError: string | null = null;
-    let arrPushSucceeded = false;
-    let pushedTvdbId: number | null = null;
-    let rolledBack = false;
-    try {
-      if (updated.mediaType === "MOVIE") {
-        await addMovieToRadarr(updated.tmdbId, variant, effectiveProfileId, updated.requestedBy);
-      } else {
-        pushedTvdbId = await addSeriesToSonarr(updated.tmdbId, variant, effectiveProfileId, updated.requestedBy);
-      }
-      arrPushSucceeded = true;
-    } catch (err) {
-      console.error("[arr] Failed to push request:", arrErrorMessage(err));
-      arrError = arrErrorMessageForClient(err, t);
-      // Roll status back to PENDING so the request isn't stuck APPROVED with no
-      // ARR backing — admin sees the failure in the response (`arrError`) and
-      // can retry. Matches the Discord interactions auto-approve rollback shape.
-      // updateMany (not update): a concurrently moved row no-ops instead of
-      // throwing, and `count` tells us whether the rollback actually landed so
-      // the response body below can reflect it.
-      const rb = await prisma.mediaRequest.updateMany({
-        where: { id, status: "APPROVED" },
-        data: { status: "PENDING", pendingNotifyAt: null },
-      }).catch((rbErr) => {
-        console.error("[requests] rollback to PENDING failed:", rbErr);
-        return { count: 0 };
-      });
-      rolledBack = rb.count === 1;
-      // Correct the optimistic APPROVED SSE emitted before the push — without this,
-      // clients show the request stuck APPROVED when it's actually back to PENDING.
-      emitSSE({ type: "request:updated", requestId: id, status: "PENDING", userId: existing.requestedBy });
-    }
-
-    // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the series
-    // by this point, so a P2025 (row deleted mid-push) or transient DB error must not trip
-    // the APPROVED->PENDING rollback and leave Sonarr grabbing content the DB says is
-    // pending. updateMany no-ops on a concurrently deleted row instead of throwing.
-    if (pushedTvdbId !== null) {
-      await prisma.mediaRequest.updateMany({ where: { id }, data: { tvdbId: pushedTvdbId } });
-    }
-
-    // Only notify if ARR push actually succeeded — otherwise the user gets a
-    // misleading "Approved!" ping for a request that's actually back to PENDING.
-    // Skip when the admin approved their own request (selfAction).
-    if (arrPushSucceeded && !selfAction) {
-      notifyRequestStatusChange("APPROVED", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId, requestId: updated.id, arrInstance: updated.arrInstance });
-    }
-
-    // Run the pendingNotifyAt check PROMPTLY at ~90s instead of leaving it to the
-    // orchestrator's next sweep. Scheduled only on the push-succeeded path, like
-    // the POST auto-approve and batch routes: the rollback above already cleared
-    // pendingNotifyAt, so a job queued for that row would only burn a bounded
-    // delayed-job slot — and, should the admin re-approve inside the 90s window,
-    // it would fire alongside the re-approve's own job for the same row.
-    if (arrPushSucceeded) {
-      scheduleDownloadCheck({
-        requestId: id,
-        tmdbId: updated.tmdbId,
-        mediaType: updated.mediaType,
-        arrInstance: variant,
-        requestedBy: updated.requestedBy,
-        title: updated.title,
-      }, { name: "requests:90s-download-check" });
-    }
-
-    // `updated` was read before the arr push; after a rollback it is stale
-    // (APPROVED + armed pendingNotifyAt for a row that is PENDING again). A
-    // bearer/native client has no SSE stream to correct it, so the body must
-    // reflect the rolled-back state — same contract the POST auto-approve path
-    // pins ("the response must reflect the rolled-back state").
-    return NextResponse.json({
-      ...updated,
-      ...(rolledBack ? { status: "PENDING", pendingNotifyAt: null } : {}),
-      arrError,
-    });
-  }
-
-  if (status === "AVAILABLE" && existing.status !== "AVAILABLE") {
-    let casCount = 0;
-    try {
-      const cas = await prisma.mediaRequest.updateMany({
-        where: { id, notifiedAvailable: false },
-        data: { notifiedAvailable: true },
-      });
-      casCount = cas.count;
-    } catch (err) {
-      console.error("[requests] Failed to CAS notifiedAvailable:", err);
-    }
-    if (casCount === 1) {
-      void clearDeletionVotesForTmdbs([{ tmdbId: updated.tmdbId, mediaType: updated.mediaType }]);
-      if (!selfAction) {
-        notifyRequestStatusChange("AVAILABLE", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId, requestId: updated.id, arrInstance: updated.arrInstance });
-      }
-    }
-  }
-
-  if (status === "DECLINED" && existing.status !== "DECLINED" && !selfAction) {
-    notifyRequestStatusChange("DECLINED", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, adminNote: updated.adminNote, posterPath: updated.posterPath, tmdbId: updated.tmdbId, requestId: updated.id, arrInstance: updated.arrInstance });
-  }
-
-  return NextResponse.json(updated);
+  if (body.status === undefined && body.adminNote !== undefined) return editNote(pc);
+  return transitionRequest(pc, body);
 });
+
+// The PATCH body, narrowed field by field: readJsonCapped proves only that it
+// is a JSON object.
+interface PatchBody {
+  // Checked by transitionRequest, which answers the 400 that names the values.
+  status: unknown;
+  // Strictly `true`: a truthy non-boolean such as "false" must not trigger an
+  // arr search or re-push.
+  search: boolean;
+  retry: boolean;
+  // Qualifies a decline only.
+  permanent: boolean;
+  adminNote: string | undefined;
+  // Optional one-time quality-profile override for the ARR push on approval,
+  // ignored on other transitions. The name is carried purely so the audit log
+  // reads "720p" instead of a bare id.
+  qualityProfileId: number | undefined;
+  qualityProfileName: string | undefined;
+}
+
+function parsePatchBody(raw: Record<string, unknown>, t: Translator): PatchBody | NextResponse {
+  const { adminNote, qualityProfileId, qualityProfileName } = raw;
+  if (adminNote !== undefined && (typeof adminNote !== "string" || adminNote.length > ADMIN_NOTE_MAX)) {
+    return NextResponse.json({ error: t("apiUser.common.adminNoteTooLong") }, { status: 400 });
+  }
+  if (qualityProfileId !== undefined && (typeof qualityProfileId !== "number" || !Number.isInteger(qualityProfileId) || qualityProfileId <= 0)) {
+    return NextResponse.json({ error: t("apiUser.requests.qualityProfileIdInvalid") }, { status: 400 });
+  }
+  if (qualityProfileName !== undefined && (typeof qualityProfileName !== "string" || qualityProfileName.length > QUALITY_PROFILE_NAME_MAX)) {
+    return NextResponse.json({ error: t("apiUser.requests.qualityProfileNameTooLong") }, { status: 400 });
+  }
+  return {
+    status: raw.status,
+    search: raw.search === true,
+    retry: raw.retry === true,
+    permanent: raw.permanent === true,
+    adminNote,
+    qualityProfileId,
+    qualityProfileName,
+  };
+}
+
+function loadRequest(id: string) {
+  return prisma.mediaRequest.findUnique({ where: { id }, include: { user: { select: { name: true, email: true } } } });
+}
+
+type ExistingRequest = NonNullable<Awaited<ReturnType<typeof loadRequest>>>;
+
+// What every PATCH mode reads: the caller, the row as read at the start, and
+// the body's note (raw, to tell "absent" from "cleared", and sanitized).
+interface PatchContext {
+  req: Request;
+  session: SummonarrSession;
+  t: Translator;
+  id: string;
+  existing: ExistingRequest;
+  adminNote: string | undefined;
+  sanitizedAdminNote: string | null;
+}
+
+function notFound(t: Translator): NextResponse {
+  return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
+}
+
+// The transition table ran against the read at the start; the claim's
+// compare-and-swap found the row moved since.
+function conflict(t: Translator): NextResponse {
+  return NextResponse.json({ error: t("apiUser.requests.modifiedConcurrently") }, { status: 409 });
+}
+
+// The note a transition writes: the body's, sanitized, only when it sent one.
+// Guarding on the RAW field matters: sanitizeOptional maps undefined to null, so
+// the sanitized value alone would wipe the stored note on every transition.
+function noteWrite(pc: PatchContext): string | null | undefined {
+  return pc.adminNote !== undefined ? pc.sanitizedAdminNote : undefined;
+}
+
+// Writes the body's admin note when one was sent, and audits a change of it.
+// updateMany, like every other write in this handler: a bare update throws P2025
+// when the row is deleted between the read and this write, and nothing catches
+// it — a concurrent delete would answer 500 where DELETE answers 404. Returns
+// that 404, or null to carry on. The audit runs after the write has committed,
+// so it is the swallowing logAudit (guardrail 26); `via` names the mode, so a
+// silent edit through search or retry still leaves a trail.
+async function writeAdminNote(pc: PatchContext, via: "search" | "retry" | "note"): Promise<NextResponse | null> {
+  const { req, session, t, id, existing, adminNote, sanitizedAdminNote } = pc;
+  if (adminNote === undefined) return null;
+  const noteWritten = await prisma.mediaRequest.updateMany({ where: { id }, data: { adminNote: sanitizedAdminNote } });
+  if (noteWritten.count === 0) return notFound(t);
+  if ((existing.adminNote ?? null) !== (sanitizedAdminNote ?? null)) {
+    void logAudit({
+      userId: session.user.id,
+      userName: session.user.name ?? session.user.email ?? "unknown",
+      action: "SETTINGS_CHANGE",
+      target: `request:${id}:adminNote`,
+      details: { via, from: existing.adminNote ?? null, to: sanitizedAdminNote ?? null },
+      ...auditContext(req, session),
+    });
+  }
+  return null;
+}
+
+// The note the answer carries: the one just written, else the stored one.
+function answeredNote(pc: PatchContext): string | null {
+  return pc.adminNote !== undefined ? pc.sanitizedAdminNote : pc.existing.adminNote;
+}
+
+// What a Search queues: the movie, or the series by the tvdbId the push
+// stored. A TV request with none was never pushed (or predates the bookkeeping
+// write) and has nothing to search.
+type SearchTarget = { kind: "movie"; tmdbId: number } | { kind: "series"; tvdbId: number };
+
+function searchTargetOf(existing: ExistingRequest): SearchTarget | null {
+  if (existing.mediaType === "MOVIE") return { kind: "movie", tmdbId: existing.tmdbId };
+  return existing.tvdbId ? { kind: "series", tvdbId: existing.tvdbId } : null;
+}
+
+// Queues the search on the request's own instance (guardrail 32) and answers the
+// translated arrError, or null when everything queued.
+async function queueSearch(target: SearchTarget, variant: string, t: Translator): Promise<string | null> {
+  if (target.kind === "movie") {
+    await searchMovieInRadarr(target.tmdbId, variant);
+    return null;
+  }
+  // NEVER SeriesSearch: it searches every monitored season, files on disk
+  // included, so a partly downloaded series also gets upgrade grabs and a
+  // season search per COMPLETE season. Queue the Missing page's plan
+  // instead (planSeriesSearch — SeasonSearch for a season with nothing on
+  // disk, one EpisodeSearch for the rest), judged live.
+  const seriesId = await findSeriesIdOnInstance(variant, target.tvdbId);
+  const result = await searchMissing("sonarr", variant, seriesId, new Date());
+  // Sonarr refused a command part-way: what was queued IS running, but the
+  // rest wasn't — a bare success would say the whole plan started.
+  return result.partial ? t("apiUser.requests.searchPartial") : null;
+}
+
+// A search that threw, as the caller is answered. Most are answers, not
+// failures, and are translated; the rest are logged.
+function searchFailureText(err: unknown, t: Translator): string {
+  // No aired, monitored episode is missing — every one is on disk, OR none is
+  // monitored (a series added with "Monitor: Future"), so the wording claims
+  // neither. An upgrade search is the title manager's, never this button's.
+  if (err instanceof NothingMissingError) return t("apiUser.requests.searchNothingMissing");
+  // Its message is the bare slug ("" for the default instance) — relayed
+  // through arrErrorMessage it would read as an empty, i.e. successful, answer.
+  if (err instanceof MissingInstanceError) return t("apiUser.requests.searchInstanceUnavailable");
+  // Removed in Sonarr since the push (or pushed elsewhere): Re-push adds it back.
+  if (err instanceof SeriesNotOnInstanceError) return t("apiUser.requests.searchSeriesNotInSonarr");
+  // The movie twin: Radarr no longer holds it, and Re-push adds it back.
+  if (err instanceof ArrItemNotFoundError) return t("apiUser.requests.releases.notInArr", { service: "Radarr" });
+  // The detail to the log; the caller (a MANAGE_REQUESTS delegate, maybe) gets
+  // the failure's kind, never the arr's internal URL (guardrail 5g).
+  console.error("[arr] Search failed:", arrErrorMessage(err));
+  return arrErrorMessageForClient(err, t);
+}
+
+async function searchRequest(pc: PatchContext): Promise<NextResponse> {
+  const { t, existing } = pc;
+  if (existing.status !== "APPROVED" && existing.status !== "AVAILABLE") {
+    return NextResponse.json({ error: t("apiUser.requests.searchInvalidStatus") }, { status: 400 });
+  }
+
+  const missing = await writeAdminNote(pc, "search");
+  if (missing) return missing;
+  const searchedNote = answeredNote(pc);
+  const target = searchTargetOf(existing);
+  // Answered with a translated arrError rather than an English Error thrown into
+  // the generic arr failure below.
+  if (!target) {
+    return NextResponse.json({ ...existing, adminNote: searchedNote, arrError: t("apiUser.requests.searchNoTvdbId") });
+  }
+  let arrError: string | null;
+  try {
+    arrError = await queueSearch(target, existing.arrInstance, t);
+  } catch (err) {
+    arrError = searchFailureText(err, t);
+  }
+  return NextResponse.json({ ...existing, adminNote: searchedNote, arrError });
+}
+
+// Re-push an APPROVED request whose title the arr may have lost, with its
+// stored profile — the admin's approve-time choice or the requester's. A failed
+// re-push answers the arr's error and leaves the row APPROVED: unlike an
+// approval, there is no decision to roll back.
+async function retryRequest(pc: PatchContext): Promise<NextResponse> {
+  const { t, id, existing } = pc;
+  if (existing.status !== "APPROVED") {
+    return NextResponse.json({ error: t("apiUser.requests.retryInvalidStatus") }, { status: 400 });
+  }
+
+  const missing = await writeAdminNote(pc, "retry");
+  if (missing) return missing;
+  let arrError: string | null = null;
+  let pushedTvdbId: number | null = null;
+  try {
+    pushedTvdbId = await addRequestToArr(existing);
+  } catch (err) {
+    console.error("[arr] Retry push failed:", arrErrorMessage(err));
+    arrError = arrErrorMessageForClient(err, t);
+  }
+  // Outside the try: Sonarr has already accepted the series, so a DB hiccup
+  // here must not be reported as an ARR push failure.
+  if (pushedTvdbId !== null) await stampTvdbId(id, pushedTvdbId);
+  return NextResponse.json({ ...existing, adminNote: answeredNote(pc), arrError });
+}
+
+async function editNote(pc: PatchContext): Promise<NextResponse> {
+  const { t, id } = pc;
+  const missing = await writeAdminNote(pc, "note");
+  if (missing) return missing;
+  const noted = await loadRequest(id);
+  if (!noted) return notFound(t);
+  announceStatus(noted, noted.status);
+  return NextResponse.json(noted);
+}
+
+// A status change, dispatched per target. The transition table rules out a
+// same-status "transition", so each handler knows the row really moves.
+async function transitionRequest(pc: PatchContext, body: PatchBody): Promise<NextResponse> {
+  const { t, existing } = pc;
+  const status = body.status;
+  if (!isRequestStatus(status)) {
+    return NextResponse.json({ error: t("apiUser.common.statusOneOf", { values: REQUEST_STATUSES.join(", ") }) }, { status: 400 });
+  }
+  if (!isAllowedTransition(existing.status, status)) {
+    return NextResponse.json({ error: t("apiUser.requests.invalidTransition", { from: existing.status, to: status }) }, { status: 422 });
+  }
+  switch (status) {
+    case "APPROVED":
+      return approveRequest(pc, body);
+    case "DECLINED":
+      return declineRequest(pc, body.permanent);
+    case "AVAILABLE":
+      return markAvailable(pc);
+    case "PENDING":
+      return reopenRequest(pc);
+  }
+}
+
+// Validate the one-time profile override against the request's OWN instance
+// BEFORE the claim — the same membership check the create path runs
+// (request-create.ts). A stale picker id (profile deleted in Radarr/Sonarr since
+// the list loaded) otherwise approved the row, audited the approval, had the arr
+// answer 400 and rolled back, surfacing a generic "Arr request failed (400)".
+async function refuseUnlistedProfile(pc: PatchContext, qualityProfileId: number): Promise<NextResponse | null> {
+  const { t, existing } = pc;
+  const service = existing.mediaType === "MOVIE" ? "radarr" : "sonarr";
+  let profileList: Awaited<ReturnType<typeof listQualityProfiles>>;
+  try {
+    profileList = await listQualityProfiles(service, existing.arrInstance);
+  } catch (err) {
+    console.error(`[requests] Failed to fetch ${service} profiles:`, err);
+    return NextResponse.json({ error: t("apiUser.common.couldNotConnect", { service }) }, { status: 502 });
+  }
+  if (!profileList || !profileList.profiles.some((p) => p.id === qualityProfileId)) {
+    return NextResponse.json({ error: t("apiUser.create.profileInvalid") }, { status: 400 });
+  }
+  return null;
+}
+
+async function approveRequest(pc: PatchContext, body: PatchBody): Promise<NextResponse> {
+  const { req, session, t, id, existing } = pc;
+  const { qualityProfileId, qualityProfileName } = body;
+  if (qualityProfileId !== undefined) {
+    const refusal = await refuseUnlistedProfile(pc, qualityProfileId);
+    if (refusal) return refusal;
+  }
+  // The admin's picker choice is stored on the row, so the push below, a later
+  // Re-push and the sync's re-push all use it; without one the row keeps the
+  // requester's choice, else the instance default.
+  if (!(await claimApproval(id, existing.status, { adminNote: noteWrite(pc), qualityProfileId }))) return conflict(t);
+
+  const updated = await loadRequest(id);
+  if (!updated) return notFound(t);
+  announceStatus(updated, updated.status);
+
+  const outcome = await pushApproval(updated, "Approve");
+  // Post-commit, so the swallowing variant (guardrail 26).
+  void logAudit({
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email,
+    action: "REQUEST_APPROVE",
+    target: `request:${id}`,
+    details: {
+      ...approvalAuditDetails(existing, existing.status, outcome),
+      ...(qualityProfileId !== undefined ? { qualityProfileId, qualityProfileName: qualityProfileName ?? null } : {}),
+    },
+    ...auditContext(req, session),
+  });
+  followUpDecidedApprovals([{ row: updated, outcome }], {
+    actorId: session.user.id,
+    checkName: "requests:90s-download-check",
+    logScope: "requests",
+  });
+
+  // `updated` was read before the push; after a rollback it is stale (APPROVED +
+  // armed pendingNotifyAt for a row that is PENDING again). A bearer/native
+  // client has no SSE stream to correct it, so the body reflects the rolled-back
+  // state — the same contract as the POST auto-approve. `arrError` names any
+  // failure's kind, never the arr's address (guardrail 5g). Additive:
+  // `arrPushOutcomeUnknown` marks an APPROVED row whose push got no answer.
+  return NextResponse.json({
+    ...updated,
+    ...(outcome.kind === "rolled-back" ? { status: "PENDING", pendingNotifyAt: null } : {}),
+    arrError: outcome.kind === "pushed" ? null : arrErrorMessageForClient(outcome.error, t),
+    ...(outcome.kind === "unknown" ? { arrPushOutcomeUnknown: true } : {}),
+  });
+}
+
+async function declineRequest(pc: PatchContext, permanent: boolean): Promise<NextResponse> {
+  const { req, session, t, id, existing } = pc;
+  if (!(await claimDecline(id, existing.status, { permanent, adminNote: noteWrite(pc) }))) return conflict(t);
+
+  const updated = await loadRequest(id);
+  if (!updated) return notFound(t);
+  announceStatus(updated, updated.status);
+  void logAudit({
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email,
+    action: "REQUEST_DECLINE",
+    target: `request:${id}`,
+    details: declineAuditDetails({ ...existing, adminNote: updated.adminNote }, existing.status),
+    ...auditContext(req, session),
+  });
+  // The note as the decline left it: the one it wrote, else the stored one.
+  void notifyDecided("DECLINED", [updated], session.user.id, "requests");
+  return NextResponse.json(updated);
+}
+
+// The manual "mark available". Its "now available" fan-out is a once-only
+// claim like every other path's (guardrail 14): a sync or webhook may have
+// announced the title already. A failed claim write announces nothing.
+async function claimAvailableNotice(id: string): Promise<boolean> {
+  try {
+    const cas = await prisma.mediaRequest.updateMany({ where: { id, notifiedAvailable: false }, data: { notifiedAvailable: true } });
+    return cas.count === 1;
+  } catch (err) {
+    console.error("[requests] Failed to CAS notifiedAvailable:", err);
+    return false;
+  }
+}
+
+async function markAvailable(pc: PatchContext): Promise<NextResponse> {
+  const { session, t, id, existing } = pc;
+  if (!(await claimMarkAvailable(id, existing.status, { adminNote: noteWrite(pc), stampAvailableAt: !existing.availableAt }))) {
+    return conflict(t);
+  }
+  const updated = await loadRequest(id);
+  if (!updated) return notFound(t);
+  announceStatus(updated, updated.status);
+
+  if (await claimAvailableNotice(id)) {
+    void clearDeletionVotesForTmdbs([{ tmdbId: updated.tmdbId, mediaType: updated.mediaType }]);
+    // An admin marking their own request needs no "your request is available".
+    if (updated.requestedBy !== session.user.id) {
+      notifyRequestStatusChange("AVAILABLE", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId, requestId: updated.id, arrInstance: updated.arrInstance });
+    }
+  }
+  return NextResponse.json(updated);
+}
+
+async function reopenRequest(pc: PatchContext): Promise<NextResponse> {
+  const { t, id, existing } = pc;
+  if (!(await claimReopen(id, existing.status, { adminNote: noteWrite(pc) }))) return conflict(t);
+  const updated = await loadRequest(id);
+  if (!updated) return notFound(t);
+  announceStatus(updated, updated.status);
+  return NextResponse.json(updated);
+}
 
 // Two callers share this handler:
 //   - An admin (MANAGE_REQUESTS) can delete any request (existing behavior;
@@ -470,7 +459,7 @@ export const DELETE = withAuth(async (
   if (maint) return maint;
 
   const { id } = await params;
-  const existing = await prisma.mediaRequest.findUnique({ where: { id }, include: { user: { select: { name: true, email: true } } } });
+  const existing = await loadRequest(id);
   if (!existing) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
   const isAdmin = hasPermission(session.user.permissions, Permission.MANAGE_REQUESTS);

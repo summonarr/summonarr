@@ -4,12 +4,12 @@
 // bare poster tiles — a rounded-lg 2:3 poster (mb-2), a text-xs title line
 // (16px) and a text-[10px] year · added line (15px). Not the MediaCard grid:
 // these tiles have no card chrome.
-import { Bar, SKELETON_FILL, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { Bar, SKELETON_FILL, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 import { ActivityTabsSkeleton } from "@/components/loading/activity-section-skeleton";
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle />
       <ActivityTabsSkeleton />
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
@@ -25,6 +25,6 @@ export default function Loading() {
           </div>
         ))}
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

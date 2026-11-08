@@ -8,7 +8,6 @@ import { cn } from "@/lib/utils";
 import { withBasePath } from "@/lib/base-path";
 import {
   userNavItems,
-  getVisibleAdminItems,
   filterNavByFeatures,
   navItemLabel,
   navItemHref,
@@ -18,6 +17,7 @@ import {
 import type { FeatureFlags } from "@/lib/features";
 import { useT } from "@/components/i18n/i18n-provider";
 import { AdminNavGroupList, NavCountBadge, useNavBadges } from "@/components/layout/admin-nav-groups";
+import { visibleAdminNavItems } from "@/components/layout/nav-visibility";
 
 export function Sidebar({
   siteTitle,
@@ -32,14 +32,10 @@ export function Sidebar({
   const pathname = usePathname();
   const t = useT();
   const { session } = useSummonarrSession();
-  const role = session?.user?.role;
-  const perms = session?.user?.permissions;
 
   const visibleUserItems = filterNavByFeatures(userNavItems, featureFlags);
-  const visibleAdminItems = filterNavByFeatures(
-    getVisibleAdminItems(perms ? { role, permissions: perms } : role),
-    featureFlags,
-  );
+  // The same list the mobile tab bar picks its admin slot from.
+  const visibleAdminItems = visibleAdminNavItems(session?.user, featureFlags);
 
   const browseItems = visibleUserItems.filter((i) => i.section === "browse");
   const personalItems = visibleUserItems.filter(
@@ -59,44 +55,7 @@ export function Sidebar({
         borderRight: "1px solid var(--ds-border)",
       }}
     >
-      {/* Brand */}
-      <Link
-        href="/"
-        className="flex items-center gap-2.5"
-        style={{
-          padding: "16px 16px 14px",
-          borderBottom: "1px solid var(--ds-border)",
-        }}
-      >
-        <div
-          className="ds-mono font-bold"
-          style={{
-            width: 26,
-            height: 26,
-            borderRadius: 6,
-            background: "var(--ds-accent)",
-            color: "var(--ds-accent-fg)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 13,
-            boxShadow:
-              "0 0 0 1px color-mix(in oklab, var(--ds-accent) 40%, transparent), inset 0 -1px 0 rgba(0,0,0,.15)",
-          }}
-        >
-          S
-        </div>
-        <span
-          className="font-semibold truncate"
-          style={{
-            letterSpacing: "-0.01em",
-            fontSize: 14,
-            color: "var(--ds-fg)",
-          }}
-        >
-          {siteTitle || "Summonarr"}
-        </span>
-      </Link>
+      <SidebarBrand siteTitle={siteTitle} />
 
       {/* Nav */}
       <nav
@@ -132,49 +91,99 @@ export function Sidebar({
         )}
       </nav>
 
-      {/* Footer — source link + TMDB attribution. No opacity dimming: fg-subtle
-          is already the lowest text tier, and halving it put the (required)
-          TMDB notice near 2:1. Hover is a colour step instead. */}
+      <SidebarFooter />
+    </aside>
+  );
+}
+
+// The brand row at the top: the accent glyph and the site title, linking home.
+function SidebarBrand({ siteTitle }: { siteTitle?: string }) {
+  return (
+    <Link
+      href="/"
+      className="flex items-center gap-2.5"
+      style={{
+        padding: "16px 16px 14px",
+        borderBottom: "1px solid var(--ds-border)",
+      }}
+    >
       <div
-        className="flex flex-col gap-2.5"
+        className="ds-mono font-bold"
         style={{
-          padding: "10px 14px 12px",
-          borderTop: "1px solid var(--ds-border)",
+          width: 26,
+          height: 26,
+          borderRadius: 6,
+          background: "var(--ds-accent)",
+          color: "var(--ds-accent-fg)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 13,
+          boxShadow:
+            "0 0 0 1px color-mix(in oklab, var(--ds-accent) 40%, transparent), inset 0 -1px 0 rgba(0,0,0,.15)",
         }}
       >
-        <a
-          href="https://github.com/Summonarr/Summonarr"
-          target="_blank"
-          rel="noopener noreferrer"
-          title={t("nav.footer.sourceTitle")}
-          className="flex items-center gap-2 text-[var(--ds-fg-subtle)] hover:text-[var(--ds-fg-muted)] transition-colors"
-        >
-          <GitFork className="h-3 w-3 shrink-0" />
-          <span
-            className="ds-mono"
-            style={{ fontSize: 10 }}
-          >
-            {t("nav.footer.fork")}
-          </span>
-        </a>
-        <a
-          href="https://www.themoviedb.org"
-          target="_blank"
-          rel="noopener noreferrer"
-          title={t("nav.footer.tmdbTitle")}
-          className="flex items-center gap-2 text-[var(--ds-fg-subtle)] hover:text-[var(--ds-fg-muted)] transition-colors"
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={withBasePath("/tmdb-logo.svg")} alt="TMDB" className="h-3 w-auto" />
-          <span
-            className="ds-mono"
-            style={{ fontSize: 10 }}
-          >
-            {t("nav.footer.tmdb")}
-          </span>
-        </a>
+        S
       </div>
-    </aside>
+      <span
+        className="font-semibold truncate"
+        style={{
+          letterSpacing: "-0.01em",
+          fontSize: 14,
+          color: "var(--ds-fg)",
+        }}
+      >
+        {siteTitle || "Summonarr"}
+      </span>
+    </Link>
+  );
+}
+
+// Footer — source link + TMDB attribution. No opacity dimming: fg-subtle
+// is already the lowest text tier, and halving it put the (required)
+// TMDB notice near 2:1. Hover is a colour step instead.
+function SidebarFooter() {
+  const t = useT();
+  return (
+    <div
+      className="flex flex-col gap-2.5"
+      style={{
+        padding: "10px 14px 12px",
+        borderTop: "1px solid var(--ds-border)",
+      }}
+    >
+      <a
+        href="https://github.com/Summonarr/Summonarr"
+        target="_blank"
+        rel="noopener noreferrer"
+        title={t("nav.footer.sourceTitle")}
+        className="flex items-center gap-2 text-[var(--ds-fg-subtle)] hover:text-[var(--ds-fg-muted)] transition-colors"
+      >
+        <GitFork className="h-3 w-3 shrink-0" />
+        <span
+          className="ds-mono"
+          style={{ fontSize: 10 }}
+        >
+          {t("nav.footer.fork")}
+        </span>
+      </a>
+      <a
+        href="https://www.themoviedb.org"
+        target="_blank"
+        rel="noopener noreferrer"
+        title={t("nav.footer.tmdbTitle")}
+        className="flex items-center gap-2 text-[var(--ds-fg-subtle)] hover:text-[var(--ds-fg-muted)] transition-colors"
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={withBasePath("/tmdb-logo.svg")} alt="TMDB" className="h-3 w-auto" />
+        <span
+          className="ds-mono"
+          style={{ fontSize: 10 }}
+        >
+          {t("nav.footer.tmdb")}
+        </span>
+      </a>
+    </div>
   );
 }
 

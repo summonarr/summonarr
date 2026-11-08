@@ -63,11 +63,13 @@ export function previousSecretProblem(env: BootSecrets): { fatal: boolean; messa
         "value NEXTAUTH_SECRET had before the rotation; unset it to sign out the sessions that value signed.",
     };
   }
-  if (prev === env.nextAuthSecret) {
+  // Trimmed like every other comparison here: a trailing newline from an env
+  // file must not hide a half-done rotation.
+  if (prev.trim() === env.nextAuthSecret?.trim()) {
     return {
       fatal: false,
       message:
-        "[startup] NEXTAUTH_SECRET_PREVIOUS equals NEXTAUTH_SECRET, so it is ignored. To rotate, set " +
+        "[startup] NEXTAUTH_SECRET_PREVIOUS has the same value as NEXTAUTH_SECRET, so it does nothing. To rotate, set " +
         "NEXTAUTH_SECRET to a new value and keep the old one as NEXTAUTH_SECRET_PREVIOUS.",
     };
   }

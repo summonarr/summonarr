@@ -278,11 +278,11 @@ test("guard: the admin bypass does not hinge on the User-Agent any more (guardra
   assert.equal(otherUa, null);
 });
 
-test("guard: a Settings read failure fails closed — anonymous requests get 503", async () => {
+test("guard: a Settings read failure fails closed — anonymous requests get 503, not told it is maintenance", async () => {
   settingsReadFails = true;
   const res = await withRequestContext({}, () => maintenanceGuard());
   assert.equal(res?.status, 503);
-  assert.deepEqual(await res!.json(), { error: "Service unavailable", message: "Under maintenance" });
+  assert.deepEqual(await res!.json(), { error: "Service unavailable", message: "Temporarily unavailable" });
 });
 
 // ── maintenanceGuard(session) — the wrapper-session passthrough ─────────────

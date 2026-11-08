@@ -1,4 +1,4 @@
-import { BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
+import { BATCH_TX_TIMEOUT } from "@/lib/batch-write";
 import { prisma } from "@/lib/prisma";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
 

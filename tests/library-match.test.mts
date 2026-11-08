@@ -18,7 +18,9 @@ const {
   fixableFlag,
   folderYear,
   ownFolder,
+  fileName,
 } = await import("../src/lib/library-match.ts");
+const { folderYear: diffFolderYear } = await import("../src/lib/library-diff.ts");
 const { projectArrRows, parseLibraryMatchReport, dropMatchFlagInTx, moveItemToTitleInTx, LIBRARY_MATCH_REPORT_KEY } =
   await import("../src/lib/library-match-data.ts");
 type ServerMatchEntry = import("../src/lib/library-match.ts").ServerMatchEntry;
@@ -169,6 +171,34 @@ test("folderYear / ownFolder read the folder the item sits in", () => {
   assert.equal(ownFolder(null), null);
 });
 
+test("folderYear reads Radarr's id-tagged folders, and agrees with the library diff's reading of the same folder", () => {
+  assert.equal(folderYear("Film (2017) {tmdb-123}"), 2017);
+  assert.equal(folderYear("Blade Runner (1982) (Final Cut)"), 1982);
+  assert.equal(folderYear("Remake (1990) (2023)"), 2023, "a trailing year still wins");
+  for (const folder of ["Film (2017) {tmdb-123}", "Black Christmas (2006)", "Doctor Who", "Remake (1990) (2023)"]) {
+    assert.equal(diffFolderYear(`${folder}/f.mkv`), folderYear(folder), folder);
+  }
+  // …so the match check now judges such a folder by its year.
+  const { flags } = judgeLibraryMatches([
+    jf({ itemKey: "tagged", path: "/mnt/movies/Black Christmas (2006) {tmdb-16938}/bc.mkv", tmdbIds: [1], year: 1974 }),
+  ], []);
+  assert.deepEqual(flags.map((f) => [f.itemKey, f.kind]), [["tagged", "yearMismatch"]]);
+});
+
+test("a dotted folder name is a folder: a show's path never names a file, a movie's only by a video extension", () => {
+  assert.equal(ownFolder("/tv/Agents of S.H.I.E.L.D", "TV"), "Agents of S.H.I.E.L.D");
+  assert.equal(fileName("/tv/Agents of S.H.I.E.L.D", "TV"), null);
+  assert.equal(ownFolder("/movies/M.A.S.H", "MOVIE"), "M.A.S.H");
+  assert.equal(fileName("/movies/M.A.S.H", "MOVIE"), null);
+  assert.equal(ownFolder("/m/X (1999)/x.mkv", "MOVIE"), "X (1999)");
+  assert.equal(fileName("/m/X (1999)/x.mkv"), "x.mkv");
+  // An unmanaged show is judged — and named — by its own folder, not the library root.
+  const { flags } = judgeLibraryMatches([
+    { ...jf({ itemKey: "shield", path: "/mnt/tv/Agents of S.H.I.E.L.D" }), mediaType: "TV" },
+  ], []);
+  assert.deepEqual(flags.map((f) => [f.kind, f.folder, f.file]), [["noTmdbId", "Agents of S.H.I.E.L.D", null]]);
+});
+
 test("projectArrRows keeps only rows with a folder and reads ids strictly (Sonarr v4's tmdbId 0 is none)", () => {
   const rows = projectArrRows("sonarr", "anime", [
     { tvdbId: 81797, tmdbId: 0, imdbId: "tt0388629", title: "One Piece", year: 1999, path: "/tv/One Piece" },
@@ -223,6 +253,14 @@ test("dropMatchFlagInTx removes exactly the fixed item's flag (server + instance
   assert.deepEqual(after.flags.map((f) => `${f.server}:${f.serverInstance}:${f.itemKey}`), ["plex::a", "jellyfin:remote:a", "jellyfin::b"]);
   assert.equal(after.counts.flagged, 3);
 
+  // A listing that served one item twice stored its flag twice: both go, and
+  // the count falls by both.
+  const twice = reportTx(JSON.stringify(report([flag("a"), flag("a"), flag("c")])));
+  await dropMatchFlagInTx(twice.tx as never, "jellyfin", "", "a");
+  const afterTwice = parseLibraryMatchReport(twice.value())!;
+  assert.deepEqual(afterTwice.flags.map((f) => f.itemKey), ["c"]);
+  assert.equal(afterTwice.counts.flagged, 1);
+
   const none = reportTx(JSON.stringify(report([flag("b")])));
   await dropMatchFlagInTx(none.tx as never, "jellyfin", "", "a");
   assert.ok(!none.calls.some((c) => c.startsWith("write:")), "nothing to drop, nothing written");
@@ -233,7 +271,7 @@ test("dropMatchFlagInTx removes exactly the fixed item's flag (server + instance
 
 // ── the item move a single-item fix writes ─────────────────────────────────
 
-type Row = { tmdbId: number; mediaType: string; serverInstance: string; jellyfinItemId: string | null; jellyfinItemIds: string[]; filePath: string | null };
+type Row = { tmdbId: number; mediaType: string; serverInstance: string; jellyfinItemId: string | null; jellyfinItemIds: string[]; filePath: string | null; title?: string | null; year?: string | null };
 function libraryTx(rows: Row[]) {
   const key = (w: { tmdbId: number; mediaType: string; serverInstance: string }) => rows.find((r) => r.tmdbId === w.tmdbId && r.mediaType === w.mediaType && r.serverInstance === w.serverInstance);
   return {
@@ -290,4 +328,22 @@ test("moving a row's CANONICAL copy hands the row to its next copy (path unknown
   assert.equal(by(1), undefined, "a row left with no copy is deleted");
   assert.equal(by(2)?.jellyfinItemId, "solo");
   assert.deepEqual(by(9323, "remote")?.jellyfinItemIds, ["b2"], "another server's row is never touched");
+});
+
+test("parseLibraryMatchReport drops a flag without its shape and refuses counts that aren't numbers", () => {
+  const stored = report([flag("a"), flag("b")]);
+  const broken = { ...stored, flags: [stored.flags[0], { ...stored.flags[1], itemKey: 7 }, null, "x"] };
+  assert.deepEqual(parseLibraryMatchReport(JSON.stringify(broken))?.flags.map((f) => f.itemKey), ["a"]);
+  assert.equal(parseLibraryMatchReport(JSON.stringify({ ...stored, counts: { ...stored.counts, flagged: "1" } })), null);
+  assert.equal(parseLibraryMatchReport(JSON.stringify({ ...stored, counts: {} })), null);
+});
+
+test("a corrected title the server held no row for is created with the title and year the caller knows", async () => {
+  const rows: Row[] = [
+    { tmdbId: 9323, mediaType: "MOVIE", serverInstance: "", jellyfinItemId: "a1", jellyfinItemIds: ["a1", "b2"], filePath: "/m/a.mkv" },
+  ];
+  await moveItemToTitleInTx(libraryTx(rows) as never, "jellyfin", "", "MOVIE", "b2", "b2", 315837, "/m/b.mkv", { title: "Ghost in the Shell", year: "2017" });
+  assert.deepEqual(rows[1], {
+    tmdbId: 315837, mediaType: "MOVIE", serverInstance: "", jellyfinItemId: "b2", jellyfinItemIds: ["b2"], filePath: "/m/b.mkv", title: "Ghost in the Shell", year: "2017",
+  });
 });

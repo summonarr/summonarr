@@ -14,14 +14,18 @@ import { redirect } from "next/navigation";
 import { getTranslator } from "@/lib/i18n/server";
 import { LocaleSync } from "@/components/i18n/locale-sync";
 import { hasPermission, Permission } from "@/lib/permissions";
-import { getFeatureFlags, type FeatureFlags } from "@/lib/features";
+import { getFeatureFlags } from "@/lib/features";
 import { readArrWatchNavBadges } from "@/lib/arr-watch-data";
-import { DONATION_SETTING_KEYS, hasDonationLinks } from "@/lib/donations";
-import { parseHiddenRatingSources } from "@/lib/ratings-visibility";
+import { DONATION_SETTING_KEYS } from "@/lib/donations";
+import { appLayoutStateFrom } from "@/lib/app-layout-state";
+import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
+import { sanitizeForLog } from "@/lib/sanitize";
 import { RatingsVisibilityProvider } from "@/components/media/ratings-visibility";
 import { DetailTitleProvider } from "@/components/layout/detail-title";
 import { NotificationStoreProvider } from "@/components/notifications/notification-store";
 import { NavBadgesProvider } from "@/components/layout/admin-nav-groups";
+import { cookies } from "next/headers";
+import { ADMIN_NAV_COLLAPSED_COOKIE, parseCollapsedGroupsCookie } from "@/lib/admin-nav-collapsed";
 
 // One settings read per request, shared by generateMetadata and the layout
 // body. Next only de-duplicates `fetch()` calls between those two, not Prisma
@@ -35,6 +39,22 @@ const LAYOUT_SETTING_KEYS = [
 const readLayoutSettings = cache(async () =>
   prisma.setting.findMany({ where: { key: { in: LAYOUT_SETTING_KEYS } } }),
 );
+
+type ReadFailure = { name: string; detail: string };
+
+// One layout read's value, or undefined with its failure noted under `name`.
+function readValue<T>(name: string, r: PromiseSettledResult<T>, failures: ReadFailure[]): T | undefined {
+  if (r.status === "fulfilled") return r.value;
+  failures.push({ name, detail: sanitizeForLog(r.reason instanceof Error ? r.reason.message : r.reason) });
+  return undefined;
+}
+
+// Every (app) page render reaches the layout, so a failing read would repeat
+// once per page view for the whole outage: log it on change only (guardrail 7b).
+const LAYOUT_READS_WARN_KEY = "layout:reads";
+function warnLayoutReads(failed: string, detail: string): void {
+  warnOnChange(LAYOUT_READS_WARN_KEY, failed, `[layout] read failed, rendering with defaults: ${detail}`);
+}
 
 export async function generateMetadata(): Promise<Metadata> {
   try {
@@ -52,55 +72,43 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   // requireAppSession(), because Next can skip this layout's render on some
   // client navigations. authActive() checks the database, so a revoked session
   // or a demoted role is honored, not just the JWT's signature and expiry.
-  // Keep this redirect ABOVE the try/catch below: redirect() works by throwing,
+  // Keep this redirect outside any try/catch: redirect() works by throwing,
   // and a catch around it would swallow the redirect.
   const session = await authActive();
   if (!session) redirect("/login");
   const isAdmin = hasPermission(session.user.permissions, Permission.ADMIN);
 
-  let motdBody  = "";
-  let motdTitle = "";
-  let siteTitle = "";
-  let discordInviteUrl = "";
-  let userDiscordId: string | null = null;
-  let storedLocale: string | null = null;
-  let localeKnown = false;
-  let maintenanceEnabled = false;
-  let maintenanceMessage = "";
-  let featureFlags: FeatureFlags | undefined;
-  let hiddenRatingSources: string[] = [];
-  let navBadges: Awaited<ReturnType<typeof readArrWatchNavBadges>>;
-  try {
-    // The discordId lookup runs in parallel with the settings/flags reads
-    // instead of after them, saving a full DB round-trip per page. The cost:
-    // sites with no Discord invite do one small extra lookup they don't need.
-    const [rows, flags, user, badges] = await Promise.all([
-      readLayoutSettings(),
-      getFeatureFlags(),
-      prisma.user.findUnique({ where: { id: session.user.id }, select: { discordId: true, locale: true } }),
-      // The Download Queue's "needs attention" count (the Radarr/Sonarr
-      // monitor's last run) — one row read, admins only; never throws.
-      isAdmin ? readArrWatchNavBadges() : Promise.resolve(undefined),
-    ]);
-    navBadges = badges;
-    const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-    hiddenRatingSources = parseHiddenRatingSources(cfg.ratingsHiddenSources);
-    motdBody            = cfg.motdEnabled === "true" ? (cfg.motdBody ?? "") : "";
-    motdTitle           = cfg.motdTitle            ?? "";
-    siteTitle           = cfg.siteTitle           ?? "";
-    discordInviteUrl    = cfg.discordInviteUrl    ?? "";
-    maintenanceEnabled  = cfg.maintenanceEnabled === "true";
-    maintenanceMessage  = cfg.maintenanceMessage  ?? "";
-    // Auto-hide the Donate nav link when no donation methods are configured —
-    // nothing to link to, regardless of the feature toggle.
-    featureFlags        = hasDonationLinks(cfg) ? flags : { ...flags, "feature.page.donate": false };
-    userDiscordId       = discordInviteUrl ? (user?.discordId ?? null) : null;
-    storedLocale        = user?.locale ?? null;
-    localeKnown         = user !== null;
-  } catch {
-    // A failed settings read keeps the defaults above, so a DB hiccup here
-    // never takes down every page in the app.
+  // The discordId lookup runs in parallel with the settings/flags reads
+  // instead of after them, saving a full DB round-trip per page. The cost:
+  // sites with no Discord invite do one small extra lookup they don't need.
+  // Settled one by one: a failed user or flags read must not discard the
+  // settings that WERE read (maintenance mode among them). A failed read keeps
+  // its defaults, so a DB hiccup here never takes down every page in the app.
+  const [rowsRes, flagsRes, userRes, badgesRes] = await Promise.allSettled([
+    readLayoutSettings(),
+    getFeatureFlags(),
+    prisma.user.findUnique({ where: { id: session.user.id }, select: { discordId: true, locale: true } }),
+    // The Download Queue's "needs attention" count (the Radarr/Sonarr
+    // monitor's last run) — one row read, admins only; never throws.
+    isAdmin ? readArrWatchNavBadges() : Promise.resolve(undefined),
+  ]);
+  const failures: ReadFailure[] = [];
+  const rows = readValue("settings", rowsRes, failures) ?? [];
+  const flags = readValue("feature flags", flagsRes, failures);
+  const user = readValue("user", userRes, failures);
+  const navBadges = readValue("nav badges", badgesRes, failures);
+  if (failures.length) {
+    warnLayoutReads(
+      failures.map((f) => f.name).join(","),
+      failures.map((f) => `${f.name}: ${f.detail}`).join("; "),
+    );
+  } else {
+    forgetWarnOnChange(LAYOUT_READS_WARN_KEY);
   }
+  const {
+    motdBody, motdTitle, siteTitle, discordInviteUrl, userDiscordId, storedLocale, localeKnown,
+    maintenanceEnabled, maintenanceMessage, featureFlags, hiddenRatingSources,
+  } = appLayoutStateFrom({ rows, flags, user, userReadOk: userRes.status === "fulfilled" });
 
   // Admins bypass maintenance mode so they can still manage settings during downtime.
   if (maintenanceEnabled && !isAdmin) {
@@ -108,6 +116,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   }
 
   const t = await getTranslator();
+  // Which admin nav groups this browser keeps collapsed, so they render closed.
+  const collapsedNavGroups = parseCollapsedGroupsCookie((await cookies()).get(ADMIN_NAV_COLLAPSED_COOKIE)?.value);
   return (
     <RatingsVisibilityProvider hidden={hiddenRatingSources}>
     {/* Wraps Header/MobileNav as well as {children}: the detail pages
@@ -120,7 +130,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     {/* One badge poll for both nav surfaces: this layout renders the first
         value, but it does not re-render on client navigation, so the provider
         re-reads the admin badge (GET /api/admin/arr-watch) while the app is open. */}
-    <NavBadgesProvider initial={navBadges} enabled={isAdmin}>
+    <NavBadgesProvider initial={navBadges} enabled={isAdmin} collapsedGroups={collapsedNavGroups}>
     <div
       className="flex h-screen overflow-hidden"
       style={{ background: "var(--ds-bg)", color: "var(--ds-fg)" }}

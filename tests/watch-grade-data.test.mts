@@ -90,11 +90,13 @@ const {
   getWatchGradeAvailability,
   getWatchGradeSummaries,
   getUserWatchGradeDetail,
+  invalidateWatchGradeSettings,
   mergedWatchGradeSettings,
   previewWatchGradeSpread,
   MAX_VERDICT_ROWS,
 } = await import("../src/lib/watch-grade-data.ts");
 const { WATCH_GRADE_DEFAULTS } = await import("../src/lib/watch-grade.ts");
+const { clearActivityCache } = await import("../src/lib/play-history.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
 
 const DAY = 86_400_000;
@@ -156,6 +158,8 @@ let requests: DbRequest[] = [];
 let plays: DbPlay[] = [];
 let episodes: DbEpisode[] = [];
 let failPlayAggregate = false;
+// Runs inside the play aggregate, i.e. while a grade computation is in flight.
+let onPlayAggregate: (() => void | Promise<void>) | null = null;
 const authSessions = new Map<string, { sessionId: string; userId: string; expiresAt: Date }>();
 
 function setSettings(rows: Record<string, string>): void {
@@ -246,7 +250,11 @@ beforeEach(() => {
   episodes = [];
   errors.length = 0;
   failPlayAggregate = false;
+  onPlayAggregate = null;
   setSettings({ ...TRACKING_ON });
+  // The list summaries are cached per activity generation; a bump starts each
+  // test from an empty cache.
+  clearActivityCache();
 });
 
 // ── matchers (narrow on purpose — an unexpected query shape throws) ─────────
@@ -361,6 +369,16 @@ shadowPrismaModel(prisma, "mediaRequest", {
     ops.push({ op: "mediaRequest.findMany", args });
     return requests.filter((r) => requestMatches(r, args.where)).map((r) => ({ ...r }));
   },
+  // One row per distinct `by` tuple among the matching requests, as SQL GROUP BY.
+  groupBy: async (args: { by: (keyof DbRequest)[]; where: Record<string, unknown> }) => {
+    ops.push({ op: "mediaRequest.groupBy", args });
+    const groups = new Map<string, Record<string, unknown>>();
+    for (const r of requests.filter((x) => requestMatches(x, args.where))) {
+      const row = Object.fromEntries(args.by.map((k) => [k, r[k]]));
+      groups.set(JSON.stringify(row), row);
+    }
+    return [...groups.values()];
+  },
 });
 
 shadowPrismaModel(prisma, "playHistory", {
@@ -418,6 +436,7 @@ shadowPrismaClientMethod(prisma, "$queryRaw", async (sql: SqlArg) => {
   }
   if (sql.text.includes(`JOIN (VALUES`)) {
     if (failPlayAggregate) throw new Error("simulated aggregate failure");
+    await onPlayAggregate?.();
     // (VALUES ($1::text, $2::text), …) — two bound values per link, then the request ids.
     const linkValueCount = (sql.text.match(/::text/g) ?? []).length;
     const linkValues = sql.values.slice(0, linkValueCount) as string[];
@@ -983,7 +1002,32 @@ test("computeWatchGrades grades with a settings override — window, cutoffs, re
     { graded: 4, score: 75, letter: "A", min: 4 },
   );
   assert.ok(!("OR" in (opsOf("mediaRequest.findMany")[0].args as { where: object }).where), "the override's window drives the request read");
-  assert.equal(opsOf("setting.findMany").length, 1, "availability still reads what is stored, once");
+  assert.equal(
+    opsOf("setting.findMany").filter((o) => JSON.stringify(o.args).includes("watchGradeBandA")).length,
+    0,
+    "availability reuses the stored settings it just read; the override never replaces them",
+  );
+});
+
+test("availability holds the stored grade settings briefly, and a save or restore's invalidation reads them again", async () => {
+  setSettings({ ...TRACKING_ON, watchGradeBandA: "90" });
+  ops = [];
+  const gradeReads = () => opsOf("setting.findMany").filter((o) =>
+    JSON.stringify(o.args).includes("watchGradeBandA")).length;
+  const first = await getWatchGradeAvailability();
+  const second = await getWatchGradeAvailability();
+  assert.ok(first.enabled && second.enabled);
+  assert.equal(first.settings.bandA, 90);
+  assert.equal(gradeReads(), 1, "the second read is served from the memo");
+
+  // A save changes the stored value; within the TTL only the invalidation surfaces it.
+  settings.set("watchGradeBandA", "85");
+  assert.equal(((await getWatchGradeAvailability()) as typeof first).settings.bandA, 90, "still the memo");
+  invalidateWatchGradeSettings();
+  const fresh = await getWatchGradeAvailability();
+  assert.ok(fresh.enabled);
+  assert.equal(fresh.settings.bandA, 85);
+  assert.equal(gradeReads(), 2);
 });
 
 test("mergedWatchGradeSettings: body keys win, a blank one means the default, a missing one keeps the stored value — unrepaired", async () => {
@@ -1018,9 +1062,15 @@ test("previewWatchGradeSpread: every requester graded under the stored and the p
   const preview = await previewWatchGradeSpread({ ...WATCH_GRADE_DEFAULTS, bandA: 95, bandB: 70, bandC: 50, bandD: 30 });
   assert.equal(preview.enabled, true);
   assert.equal(preview.requesters, 4);
-  const reads = opsOf("mediaRequest.findMany").map((o) => (o.args as { where: object }).where);
-  assert.deepEqual(reads[0], { status: "AVAILABLE", approvedAt: { not: null } });
-  assert.deepEqual(reads[1], { status: "AVAILABLE", approvedAt: null });
+  // The approved requesters are a GROUP BY — a findMany with `distinct` is
+  // deduplicated by Prisma in memory, after every request row was read.
+  assert.deepEqual(opsOf("mediaRequest.groupBy")[0]?.args, {
+    by: ["requestedBy"],
+    where: { status: "AVAILABLE", approvedAt: { not: null } },
+  });
+  const reads = opsOf("mediaRequest.findMany").map((o) => o.args as { where: object; distinct?: string[] });
+  assert.ok(!reads.some((r) => r.distinct?.includes("requestedBy")), "no distinct-requester findMany");
+  assert.deepEqual(reads[0].where, { status: "AVAILABLE", approvedAt: null });
   // Stored: keen 100 → A, mixed 67 → B, never 0 → F; duplicate has one scored request, no letter.
   assert.deepEqual(preview.current, { A: 1, B: 1, C: 0, D: 0, F: 1, notGraded: 1 });
   // Proposed: keen 100 → A, mixed 67 → C (B now needs 70), never 0 → F.
@@ -1077,6 +1127,75 @@ test("a failing aggregate degrades list surfaces to 'no grades' and is logged; d
   assert.equal(await getWatchGradeSummaries(["u"]), null);
   assert.ok(errors.some((e) => e.startsWith("[watch-grade]")), errors.join("\n"));
   await assert.rejects(() => getUserWatchGradeDetail("u"), /simulated aggregate failure/);
+});
+
+// ═══ list summary cache (guardrail 19b) ═══════════════════════════════════════
+
+function gradedUser(): void {
+  historySince("plex", 400);
+  user("u", { plexUserId: "p-u" });
+  msu("m", { source: "plex", sourceUserId: "p-u" });
+  const reqs = [request("u", 60), request("u", 70), request("u", 80)];
+  play("m", reqs[0], 55);
+}
+const playAggregates = () => opsOf("$queryRaw").filter((o) => (o.args as SqlArg).text.includes("JOIN (VALUES")).length;
+
+test("list summaries: a second read inside the TTL reuses the result, concurrent reads share one computation", async () => {
+  gradedUser();
+  const [a, b] = await Promise.all([getWatchGradeSummaries(["u"]), getWatchGradeSummaries(["u"])]);
+  assert.equal(playAggregates(), 1, "two cold renders at once run one computation");
+  assert.equal(a!.get("u")!.letter, "D");
+  assert.notEqual(a, b, "each caller gets its own map");
+  a!.delete("u"); // what one caller does with its map never reaches the cache
+  const again = await getWatchGradeSummaries(["u", "u"]);
+  assert.equal(playAggregates(), 1, "a later render reuses it");
+  assert.deepEqual(again, b);
+  clockOffsetMs += 2 * 60 * 1000;
+  await getWatchGradeSummaries(["u"]);
+  assert.equal(playAggregates(), 2, "past the TTL it is computed again");
+});
+
+test("list summaries: a play-history clear (a finalize, a delete) forces a recompute", async () => {
+  gradedUser();
+  await getWatchGradeSummaries(["u"]);
+  clearActivityCache();
+  await getWatchGradeSummaries(["u"]);
+  assert.equal(playAggregates(), 2);
+});
+
+test("list summaries: a result computed ACROSS a clear is returned but never stored", async () => {
+  gradedUser();
+  onPlayAggregate = () => clearActivityCache();
+  const during = await getWatchGradeSummaries(["u"]);
+  assert.equal(during!.get("u")!.letter, "D", "the caller still gets its answer");
+  onPlayAggregate = null;
+  await getWatchGradeSummaries(["u"]);
+  assert.equal(playAggregates(), 2, "the pre-clear result was not cached");
+});
+
+test("list summaries: a result from before a clear never replaces one computed after it", async () => {
+  gradedUser();
+  // The first computation is held inside its play aggregate while a clear lands
+  // and a second, post-clear computation runs to completion and is stored.
+  onPlayAggregate = async () => {
+    onPlayAggregate = null;
+    clearActivityCache();
+    await getWatchGradeSummaries(["u"]);
+  };
+  await getWatchGradeSummaries(["u"]);
+  assert.equal(playAggregates(), 2);
+  await getWatchGradeSummaries(["u"]);
+  assert.equal(playAggregates(), 2, "the post-clear result is still the one served");
+});
+
+test("list summaries: changed settings are never served the old grades", async () => {
+  gradedUser();
+  await getWatchGradeSummaries(["u"]);
+  // Stricter cutoffs: the 33% watch rate is an F, not a D.
+  setSettings({ ...TRACKING_ON, watchGradeBandA: "90", watchGradeBandB: "80", watchGradeBandC: "70", watchGradeBandD: "60" });
+  const after = await getWatchGradeSummaries(["u"]);
+  assert.equal(playAggregates(), 2);
+  assert.equal(after!.get("u")!.letter, "F");
 });
 
 // ═══ route ═══════════════════════════════════════════════════════════════════

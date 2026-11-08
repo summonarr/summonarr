@@ -10,8 +10,10 @@ import "server-only";
 /**
  * Run `fn` over `items` with at most `limit` invocations in flight at once.
  * Mirrors `Promise.all`: results preserve input order and the returned promise
- * rejects if any `fn` rejects. Use when each task handles its own errors (or
- * when a rejection should abort the batch).
+ * rejects with the first rejection. Use when each task handles its own errors
+ * (or when a rejection should abort the batch): after a rejection no worker
+ * claims another item, so the upstream calls and writes stop with the batch.
+ * Tasks already in flight still run to completion.
  */
 export async function mapLimit<T, R>(
   items: readonly T[],
@@ -23,13 +25,19 @@ export async function mapLimit<T, R>(
   const workers = Math.max(1, Math.min(Math.floor(limit) || 1, n));
   const results = new Array<R>(n);
   let cursor = 0;
+  let failed = false;
 
   async function run(): Promise<void> {
     // `cursor++` is atomic between awaits on a single-threaded event loop, so no
     // two workers ever claim the same index.
-    while (cursor < n) {
+    while (!failed && cursor < n) {
       const i = cursor++;
-      results[i] = await fn(items[i], i);
+      try {
+        results[i] = await fn(items[i], i);
+      } catch (err) {
+        failed = true;
+        throw err;
+      }
     }
   }
 

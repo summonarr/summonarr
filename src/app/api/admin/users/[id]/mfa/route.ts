@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 import { revokeAllUserSessions } from "@/lib/auth";
 import { clearSessionFootholdsInTx } from "@/lib/session-footholds";
 import { prisma } from "@/lib/prisma";
@@ -9,18 +10,7 @@ import { Permission, hasPermission } from "@/lib/permissions";
 import { clearMfaLockoutInTx, deleteAllMfaInTx, getMfaState } from "@/lib/mfa/mfa-store";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-
-class TargetBecameAdminError extends Error {}
-
-// An admin target is one with role ADMIN OR the ADMIN superbit. The two are kept
-// in lockstep by the users PATCH, but this gate guards stripping an admin's
-// second factor, so it must not depend on that invariant holding for legacy or
-// hand-edited rows.
-function isAdminTarget(row: { role: string; permissions?: bigint | null } | null | undefined): boolean {
-  if (!row) return false;
-  if (row.role === "ADMIN") return true;
-  return typeof row.permissions === "bigint" && (row.permissions & Permission.ADMIN) !== 0n;
-}
+import { isAdminTarget, lockTargetInTx, TargetBecameAdminError, TargetGoneError } from "@/lib/account-lifecycle";
 
 // DELETE /api/admin/users/[id]/mfa — reset a user's two-factor authentication
 // (lost phone / lost security key). Removes their authenticator app, every
@@ -40,7 +30,7 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   const t = translatorForRequest(req);
   const { id } = await params;
   if (!checkRateLimit(`admin-user-mfa-reset:${session.user.id}`, 10, 60 * 1000)) {
-    return NextResponse.json({ error: t("apiAdmin.common.tooManyAttempts") }, { status: 429 });
+    return tooManyRequests(60, t("apiAdmin.common.tooManyAttempts"));
   }
   if (id === session.user.id) {
     return NextResponse.json(
@@ -66,19 +56,18 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   // (the same shape as admin revoke-all) rather than a prior tx. Not folded
   // into the helper itself — Jellyfin offboarding uses it without wanting to
   // drop factors or footholds. Guardrail 23: this catch is OUTSIDE the tx and
-  // only maps the in-tx admin-target refusal; a failed write propagates.
+  // only maps the in-tx admin-target and row-gone refusals; a failed write
+  // propagates.
   try {
     await revokeAllUserSessions(id, async (tx) => {
       // The role read above is stale by the time the tx opens: a promotion to
       // ADMIN landing in between would let a delegated MANAGE_USERS holder strip
       // an admin's second factor. Re-resolve it under advisory lock 42 — the lock
       // the role-change and deactivate paths take (admin/users/[id]/route.ts) —
-      // and decide on that value.
-      await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
-      const fresh = await tx.user.findUnique({ where: { id }, select: { role: true, permissions: true } });
-      if (isAdminTarget(fresh ?? target) && !hasPermission(session.user.permissions, Permission.ADMIN)) {
-        throw new TargetBecameAdminError();
-      }
+      // and decide on that value. A row gone since the read above is a 404, not
+      // a write against nothing (which would 500 on the update below).
+      const fresh = await lockTargetInTx(tx, id, hasPermission(session.user.permissions, Permission.ADMIN));
+      if (!fresh) throw new TargetGoneError();
       await deleteAllMfaInTx(tx, id);
       // A lost phone is exactly when an owner locks themselves out guessing.
       await clearMfaLockoutInTx(tx, id);
@@ -91,6 +80,9 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   } catch (err) {
     if (err instanceof TargetBecameAdminError) {
       return NextResponse.json({ error: t("apiAdmin.users.onlyAdminResetMfa") }, { status: 403 });
+    }
+    if (err instanceof TargetGoneError) {
+      return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
     }
     throw err;
   }

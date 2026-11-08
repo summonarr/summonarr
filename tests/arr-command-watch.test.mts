@@ -727,6 +727,13 @@ test("a watch reads its ids COMMAND_READ_MAX_IDS at a time, one request after an
   assert.equal(reads, 2, "the third chunk is never read");
   const src = readFileSync(new URL("../src/components/admin/arr-command-watch.tsx", import.meta.url), "utf8");
   assert.match(src, /readCommandsInChunks\(ids, \(chunk\) => readChunk\(target, chunk\)\)/, "the browser hook polls through it");
+  // Each read is bounded in time: the watcher counts reads, so one that never
+  // settled would freeze the line (an abort lands in the catch as a failed read).
+  const readChunkSrc = src.slice(src.indexOf("async function readChunk("), src.indexOf("\n}\n", src.indexOf("async function readChunk(")));
+  assert.match(readChunkSrc, /await fetch\(withBasePath\(`\/api\/admin\/arr\/commands\?\$\{q\.toString\(\)\}`\), \{ cache: "no-store", signal: AbortSignal\.timeout\(READ_TIMEOUT_MS\) \}\);/);
+  assert.match(readChunkSrc, /\} catch \{\s*return \{ kind: "failed", error: fallback \};\s*\}$/);
+  const timeout = Number(/const READ_TIMEOUT_MS = ([\d_]+);/.exec(src)?.[1].replace(/_/g, ""));
+  assert.ok(timeout >= 30_000 && timeout <= 120_000, "above the route's arr timeouts, bounded");
 });
 
 // ── the polling loop, driven by hand ─────────────────────────────────────────
@@ -794,6 +801,29 @@ test("watcher: every command ended → onDone once, no further poll", async () =
   assert.deepEqual(done, [[st(5, "completed")]]);
   assert.equal(h.pending().length, 0);
   assert.equal(h.watcher.isRunning("k"), false);
+});
+
+test("watcher: an onDone that throws is logged under [arr-command-watch], never an unhandled rejection, and the watch still ends", async () => {
+  const h = harness();
+  const errors: string[] = [];
+  const realError = console.error;
+  const rejections: unknown[] = [];
+  const onRejection = (reason: unknown) => { rejections.push(reason); };
+  process.on("unhandledRejection", onRejection);
+  console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
+  try {
+    h.watcher.start("k", target, [5], () => { throw new Error("refresh broke"); });
+    await h.fire();
+    await h.answer({ kind: "ok", states: [st(5, "completed")] });
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(rejections, []);
+    assert.ok(errors.some((e) => e.includes("[arr-command-watch]") && e.includes("refresh broke")), errors.join("\n"));
+    assert.equal(h.watcher.isRunning("k"), false);
+    assert.deepEqual(h.updates.at(-1)?.[1].states, [st(5, "completed")], "the final line was still shown");
+  } finally {
+    console.error = realError;
+    process.off("unhandledRejection", onRejection);
+  }
 });
 
 test("watcher: stop() while a read is out — its answer is dropped: no update, no onDone, no poll", async () => {
@@ -971,8 +1001,8 @@ test("the four pages no longer guess completion with a fixed timer — they foll
   const pages: Array<[string, RegExp]> = [
     ["arr-title/title-manager.tsx", /onDone: reread \? reload : undefined/],
     ["arr-title/files-tab.tsx", /watch\("rename",[^;]*onDone: \(\) => void load\(\)/],
-    ["arr-download-history.tsx", /watchCommand\("clear",[\s\S]*?onDone: \(\) => void loadRef\.current\(\)/],
-    ["arr-system.tsx", /watch\(key, \{ service, instance \}, \[id\], \{ pendingText: done, onDone: \(\) => void load\(\) \}\)/],
+    ["arr-download-history.tsx", /watchCommand\("clear",[\s\S]*?onDone: \(\) => void reload\(\)/],
+    ["arr-system-tasks.tsx", /watch\(key, \{ service, instance \}, \[id\], \{ pendingText: done, onDone: \(\) => void load\(\) \}\)/],
   ];
   for (const [file, follows] of pages) {
     const code = src(file);

@@ -541,7 +541,16 @@ test("claimSignInLockoutNotice: one claim per key per window, and a full ledger 
 
   resetSignInLockoutNoticesForTests();
   for (let i = 0; i < MAX_LOCKOUT_NOTICES; i++) assert.equal(claimSignInLockoutNotice(`fill-${i}`, 1000, t0), true);
-  assert.equal(claimSignInLockoutNotice("newcomer", 1000, t0 + 1), false, "full of live claims");
+  const warned: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (msg: unknown) => { warned.push(String(msg)); };
+  try {
+    assert.equal(claimSignInLockoutNotice("newcomer", 1000, t0 + 1), false, "full of live claims");
+    assert.equal(claimSignInLockoutNotice("another", 1000, t0 + 2), false, "still full");
+  } finally {
+    console.warn = realWarn;
+  }
+  assert.equal(warned.filter((m) => m.includes("lockout notice ledger is full")).length, 1, "a suppressed notice is logged once");
   assert.equal(claimSignInLockoutNotice("newcomer", 1000, t0 + 1000), true, "expired claims are swept to make room");
 });
 

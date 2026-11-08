@@ -173,3 +173,27 @@ test("PINS CURRENT BEHAVIOR: a validly-signed token with NO exp claim verifies",
   assert.equal(claims.id, "u_alice");
   assert.equal(claims.exp, undefined);
 });
+
+test("a validly-signed token whose optional claims have the wrong types verifies to null", async () => {
+  for (const bad of [
+    { permissions: 42 },
+    { expiresAt: "never" },
+    { dbCheckedAt: "now" },
+    { machineAllowedIps: "10.0.0.0/8" },
+    { machineAllowedIps: [10] },
+    { isMobile: "yes" },
+    { sessionId: { id: 1 } },
+  ]) {
+    const token = await signSessionJwt({ ...CLAIMS, ...bad } as never, { expiresInSeconds: 3600 });
+    assert.equal(await verifySessionJwt(token), null, JSON.stringify(bad));
+  }
+});
+
+test("null optional claims and claims the type list doesn't name still verify, kept as they are", async () => {
+  const token = await signSessionJwt({ ...CLAIMS, name: null, email: null, mediaServer: null, extra: "kept" } as never, { expiresInSeconds: 3600 });
+  const claims = await verifySessionJwt(token);
+  assert.ok(claims);
+  assert.equal(claims.name, null);
+  assert.equal((claims as Record<string, unknown>).extra, "kept");
+  assert.equal(typeof claims.exp, "number");
+});

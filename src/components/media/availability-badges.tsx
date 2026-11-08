@@ -1,10 +1,11 @@
 "use client";
 
 // Client component only so it can read the UI translator; every caller is a
-// server page passing plain booleans.
-import { PlayCircle, MonitorPlay, Clock, CheckCircle } from "@/components/icons";
+// server page passing plain booleans. The rules are availability-rules.ts and
+// the chips AvailabilityChipList, shared with the cards and the Discover hero.
 import { cn } from "@/lib/utils";
-import { useT } from "@/components/i18n/i18n-provider";
+import { AvailabilityChipList } from "./availability-chips";
+import { availabilityChips, isVisiblyAvailable } from "./availability-rules";
 
 export interface AvailabilityBadgesProps {
   plexAvailable?: boolean;
@@ -20,87 +21,18 @@ export interface AvailabilityBadgesProps {
   className?: string;
 }
 
-export function AvailabilityBadges({
-  plexAvailable,
-  jellyfinAvailable,
-  arrPending,
-  requested,
-  arr4kAvailable,
-  arr4kPending,
-  showPlex,
-  showJellyfin,
-  show4k,
-  className,
-}: AvailabilityBadgesProps) {
-  const t = useT();
-  // These flags come from cached library data, so the badges are only as fresh
-  // as the last library sync.
-  const isAvailable = !!(
-    (showPlex && plexAvailable) ||
-    (showJellyfin && jellyfinAvailable)
-  );
-  const showPlexBadge = showPlex && plexAvailable;
-  const showJellyfinBadge = showJellyfin && jellyfinAvailable;
-  const showQueueBadge = !isAvailable && !!arrPending;
-  const showRequestedBadge = !isAvailable && !arrPending && !!requested;
-  // 4K is tracked separately from the normal (HD) state — a title can be
-  // downloading in HD while already present in 4K — so these badges show
-  // alongside the ones above, not instead of them.
-  const show4kAvailBadge = !!(show4k && arr4kAvailable);
-  const show4kQueueBadge = !!(show4k && !arr4kAvailable && arr4kPending);
-
-  if (
-    !showPlexBadge && !showJellyfinBadge && !showQueueBadge &&
-    !showRequestedBadge && !show4kAvailBadge && !show4kQueueBadge
-  ) {
-    return null;
-  }
-
+export function AvailabilityBadges({ showPlex, showJellyfin, show4k, className, ...flags }: AvailabilityBadgesProps) {
+  const options = {
+    showPlex,
+    showJellyfin,
+    show4k: !!show4k,
+    isAvailable: isVisiblyAvailable(flags, showPlex, showJellyfin),
+    showRequested: true,
+  };
+  if (availabilityChips(flags, options).length === 0) return null;
   return (
     <div className={cn("flex flex-wrap items-center gap-1", className)}>
-      {showPlexBadge && (
-        <span className="ds-chip ds-chip-plex">
-          <PlayCircle style={{ width: 10, height: 10 }} />
-          {t("media.badge.onPlex")}
-        </span>
-      )}
-      {showJellyfinBadge && (
-        <span className="ds-chip ds-chip-jellyfin">
-          <MonitorPlay style={{ width: 10, height: 10 }} />
-          {t("media.badge.onJellyfin")}
-        </span>
-      )}
-      {show4kAvailBadge && (
-        <span
-          className="ds-chip"
-          style={{
-            background: "var(--ds-accent-soft)",
-            color: "var(--ds-accent-text)",
-            border: "1px solid var(--ds-accent-ring)",
-          }}
-        >
-          <CheckCircle style={{ width: 10, height: 10 }} />
-          {t("media.badge.available4k")}
-        </span>
-      )}
-      {showQueueBadge && (
-        <span className="ds-chip ds-chip-pending">
-          <Clock style={{ width: 10, height: 10 }} />
-          {t("media.badge.queued")}
-        </span>
-      )}
-      {show4kQueueBadge && (
-        <span className="ds-chip ds-chip-pending">
-          <Clock style={{ width: 10, height: 10 }} />
-          {t("media.badge.queued4k")}
-        </span>
-      )}
-      {showRequestedBadge && (
-        <span className="ds-chip ds-chip-accent">
-          <CheckCircle style={{ width: 10, height: 10 }} />
-          {t("media.badge.requested")}
-        </span>
-      )}
+      <AvailabilityChipList flags={flags} variant="full" {...options} />
     </div>
   );
 }

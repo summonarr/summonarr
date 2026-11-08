@@ -57,6 +57,37 @@ export interface DownloadCheckOptions {
   consumeWhenDownloading?: boolean;
 }
 
+export type ReleaseStatus = { released: true } | { released: false; soonestReleaseDate: string };
+
+/**
+ * Whether a movie's digital/physical dates say it is out yet: unreleased only
+ * when every known date lies after `now`, and then the soonest of them.
+ */
+export function movieReleaseStatus(dates: ReadonlyArray<string | null | undefined>, now: Date): ReleaseStatus {
+  const known = dates.filter((d): d is string => !!d);
+  const futureDates = known.filter((d) => new Date(d) > now);
+  if (futureDates.length === 0 || futureDates.length < known.length) return { released: true };
+  // Sort CHRONOLOGICALLY, not lexicographically. A bare .sort() is
+  // string-ordering: it agrees with date order only while every value
+  // is the same ISO-8601 shape in the same zone. Radarr returning one
+  // date with an offset (…T02:00:00+02:00) and one in Z would pick the
+  // later release as "soonest" and tell the user the wrong date.
+  // Matches the comparator the sync orchestrator uses on this exact data.
+  const soonest = [...futureDates].sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
+  return { released: false, soonestReleaseDate: soonest };
+}
+
+// Whether the title is out yet, from Radarr's release dates or Sonarr's first
+// air date. Unknown dates read as released (the "pending" notice).
+async function releaseStatus(tmdbId: number, mediaType: "MOVIE" | "TV", arrInstance: ArrVariant, now: Date): Promise<ReleaseStatus> {
+  if (mediaType === "MOVIE") {
+    const info = await getMovieReleaseInfo(tmdbId);
+    return info ? movieReleaseStatus([info.digitalRelease, info.physicalRelease], now) : { released: true };
+  }
+  const firstAired = await getSeriesFirstAired(tmdbId, arrInstance);
+  return firstAired && new Date(firstAired) > now ? { released: false, soonestReleaseDate: firstAired } : { released: true };
+}
+
 export async function runDownloadCheck(target: DownloadCheckTarget, opts: DownloadCheckOptions = {}): Promise<void> {
   const { requestId, tmdbId, mediaType, arrInstance, requestedBy, title } = target;
 
@@ -82,36 +113,7 @@ export async function runDownloadCheck(target: DownloadCheckTarget, opts: Downlo
     return;
   }
 
-  const now = new Date();
-  let released = true;
-  let soonestReleaseDate: string | null = null;
-
-  if (mediaType === "MOVIE") {
-    const info = await getMovieReleaseInfo(tmdbId);
-    if (info) {
-      const futureDates = [info.digitalRelease, info.physicalRelease]
-        .filter((d): d is string => !!d && new Date(d) > now);
-      const pastDates = [info.digitalRelease, info.physicalRelease]
-        .filter((d): d is string => !!d && new Date(d) <= now);
-
-      if (pastDates.length === 0 && futureDates.length > 0) {
-        released = false;
-        // Sort CHRONOLOGICALLY, not lexicographically. A bare .sort() is
-        // string-ordering: it agrees with date order only while every value
-        // is the same ISO-8601 shape in the same zone. Radarr returning one
-        // date with an offset (…T02:00:00+02:00) and one in Z would pick the
-        // later release as "soonest" and tell the user the wrong date.
-        // Matches the comparator the sync orchestrator uses on this exact data.
-        soonestReleaseDate = futureDates.sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
-      }
-    }
-  } else {
-    const firstAired = await getSeriesFirstAired(tmdbId, arrInstance);
-    if (firstAired && new Date(firstAired) > now) {
-      released = false;
-      soonestReleaseDate = firstAired;
-    }
-  }
+  const release = await releaseStatus(tmdbId, mediaType, arrInstance, new Date());
 
   const requester = await prisma.user.findUnique({
     where: { id: requestedBy },
@@ -144,8 +146,8 @@ export async function runDownloadCheck(target: DownloadCheckTarget, opts: Downlo
   // the orchestrator's disabledRequesters short-circuit in /api/sync.
   if (requester?.deactivatedAt) return;
 
-  if (!released) {
-    await notifyUserAwaitingRelease(requestedBy, title, mediaType, soonestReleaseDate, tmdbId);
+  if (!release.released) {
+    await notifyUserAwaitingRelease(requestedBy, title, mediaType, release.soonestReleaseDate, tmdbId);
   } else {
     await notifyUserDownloadPending(requestedBy, title, mediaType, tmdbId);
   }

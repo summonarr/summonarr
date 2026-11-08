@@ -1,13 +1,14 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { safeFetchTrusted } from "@/lib/safe-fetch";
+import { createPlexPin, plexDeviceValue, WEB_PLEX_DEVICE } from "@/lib/plex-pin";
 import {
   buildPlexFlowSetCookie,
   signPlexFlowCookie,
 } from "@/lib/plex-flow-state";
-import { assertBodyBytesUnderCap, checkBodySize } from "@/lib/body-size";
+import { readOptionalJsonCapped } from "@/lib/body-size";
 import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { isSecureCookieContext } from "@/lib/session-cookie";
 
 // Server-side PIN creation for the Plex sign-in flow. Returns the PIN id +
 // code AND sets a short-lived signed cookie binding the pinId to this
@@ -17,15 +18,6 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const MAX_START_BODY_BYTES = 4 * 1024;
 
-const PLEX_TV_HOSTS = ["plex.tv"];
-
-function isSecureCookieContext(): boolean {
-  const url = process.env.AUTH_URL ?? "";
-  if (url.startsWith("https://")) return true;
-  if (url.startsWith("http://")) return false;
-  return process.env.NODE_ENV === "production";
-}
-
 export async function POST(req: NextRequest) {
   const t = translatorForRequest(req);
   const ipKey = getClientIpKey(req.headers);
@@ -33,27 +25,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: t("apiAuth.common.tooManyRequests") }, { status: 429 });
   }
 
-  const headerCheck = checkBodySize(req, MAX_START_BODY_BYTES);
-  if (headerCheck) return headerCheck;
-  const raw = new Uint8Array(await req.arrayBuffer());
-  const sizeCheck = assertBodyBytesUnderCap(raw, MAX_START_BODY_BYTES);
-  if (sizeCheck) return sizeCheck;
-
-  let body: Record<string, unknown> = {};
-  if (raw.byteLength > 0) {
-    let decoded: unknown;
-    try {
-      decoded = JSON.parse(new TextDecoder().decode(raw));
-    } catch {
-      return NextResponse.json({ error: t("apiAuth.common.invalidJson") }, { status: 400 });
-    }
-    // A valid-JSON non-object (`null`, a bare number) would otherwise throw on
-    // the property reads below and 500 this unauthenticated route.
-    if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) {
-      return NextResponse.json({ error: t("apiAuth.common.invalidJson") }, { status: 400 });
-    }
-    body = decoded as Record<string, unknown>;
-  }
+  // An empty body reads as {} and is refused below for its missing clientId;
+  // malformed JSON or a non-object (`null`, a bare number, an array) is a 400
+  // and an oversized body a 413, never a property read that 500s.
+  const parsed = await readOptionalJsonCapped<Record<string, unknown>>(req, MAX_START_BODY_BYTES, {});
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const clientId =
     typeof body.clientId === "string" && /^[a-f0-9-]{8,64}$/i.test(body.clientId)
@@ -63,51 +40,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: t("apiAuth.plex.clientIdRequired") }, { status: 400 });
   }
 
-  const platform = typeof body.platform === "string" ? body.platform.slice(0, 32) : "Web";
-  const device = typeof body.device === "string" ? body.device.slice(0, 32) : "Web";
-  const model = typeof body.model === "string" ? body.model.slice(0, 32) : "hosted";
-
-  const res = await safeFetchTrusted("https://plex.tv/api/v2/pins", {
-    allowedHosts: PLEX_TV_HOSTS,
-    method: "POST",
-    headers: {
-      "X-Plex-Client-Identifier": clientId,
-      "X-Plex-Product": "Summonarr",
-      "X-Plex-Version": "1.0",
-      "X-Plex-Model": model,
-      "X-Plex-Device": device,
-      "X-Plex-Device-Name": "Summonarr",
-      "X-Plex-Platform": platform,
-      "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
-    },
-    body: "strong=true",
-    timeoutMs: 15_000,
-  }).catch((err: unknown) => {
-    // A thrown SafeFetchError (DNS failure, non-public resolved address,
-    // timeout) is an operator-side egress problem; log it so a "Plex PIN
-    // create failed" on the login page can be diagnosed from the server log.
-    console.error(
-      "[auth/plex/start] PIN create failed:",
-      err instanceof Error ? err.message : String(err),
-    );
-    return null;
-  });
-
-  if (!res) {
+  // The app's own device strings, made header-safe (plexDeviceValue).
+  const pin = await createPlexPin(clientId, {
+    platform: plexDeviceValue(body.platform, WEB_PLEX_DEVICE.platform),
+    device: plexDeviceValue(body.device, WEB_PLEX_DEVICE.device),
+    model: plexDeviceValue(body.model, WEB_PLEX_DEVICE.model),
+  }, "auth/plex/start");
+  if (pin.kind === "failed") {
     return NextResponse.json({ error: t("apiAuth.plex.pinCreateFailed") }, { status: 502 });
   }
-  if (!res.ok) {
-    console.error("[auth/plex/start] plex.tv returned", res.status);
-    return NextResponse.json({ error: t("apiAuth.plex.pinCreateFailed") }, { status: 502 });
-  }
-  const data = (await res.json()) as { id?: number; code?: string };
-  if (typeof data.id !== "number" || typeof data.code !== "string") {
+  if (pin.kind === "malformed") {
     return NextResponse.json({ error: t("apiAuth.plex.pinMalformed") }, { status: 502 });
   }
 
   const cookieValue = await signPlexFlowCookie({
-    pinId: data.id,
+    pinId: pin.id,
     clientId,
   });
 
@@ -115,8 +62,8 @@ export async function POST(req: NextRequest) {
   // signed flow-state token in the body to submit back at sign-in.
   const isNative = hasNativeClientHeader(req.headers.get(NATIVE_CLIENT_HEADER));
   const response = NextResponse.json({
-    pinId: data.id,
-    code: data.code,
+    pinId: pin.id,
+    code: pin.code,
     ...(isNative ? { flowState: cookieValue } : {}),
   });
   response.headers.append(

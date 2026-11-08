@@ -1,27 +1,45 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { FIX_MATCH_STARTED_EVENT } from "@/lib/client/fix-match";
+import { fetchJson } from "@/lib/client/fetch-json";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { useT } from "@/components/i18n/i18n-provider";
+import { trayJobsFrom, trayStatusText, type TrayJob } from "@/components/admin/fix-match-labels";
+import { v } from "@/lib/validate";
 
-type TrayJob = {
-  id: string;
-  status: "queued" | "running" | "done" | "failed";
-  title: string | null;
-  server: string;
-  startedAt: number;
-  finishedAt: number | null;
-  queueAhead?: number;
-  progress?: { phase: string; attempt: number; attempts: number; copy?: number; copies?: number };
-  warning?: string;
-  error?: string;
-};
-
-// While anything is queued or running the list is re-read at this pace; with
-// nothing active it is read once on mount and when a job starts.
+// While anything is queued or running the list is re-read at this pace. With
+// nothing active it is read on mount, when a job starts in this tab, when the
+// tab comes back into view, and at the slow idle pace, so a job another admin
+// (or another tab) started shows up without a reload.
 const ACTIVE_POLL_MS = 6_000;
+const IDLE_POLL_MS = 60_000;
+
+// The jobs this tab's admin dismissed, for this browser session: a reload
+// keeps them dismissed while the server still lists them (for up to an hour).
+const DISMISSED_KEY = "summonarr:fix-match-tray:dismissed";
+const DISMISSED_MAX = 100;
+
+function readDismissed(): Set<string> {
+  try {
+    const raw: unknown = JSON.parse(sessionStorage.getItem(DISMISSED_KEY) ?? "[]");
+    return new Set(Array.isArray(raw) ? raw.filter((x): x is string => typeof x === "string").slice(-DISMISSED_MAX) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveDismissed(ids: ReadonlySet<string>): void {
+  try {
+    sessionStorage.setItem(DISMISSED_KEY, JSON.stringify([...ids].slice(-DISMISSED_MAX)));
+  } catch {}
+}
+
+// The feed's envelope; each job is checked on its own (trayJobsFrom), so one
+// malformed entry is dropped instead of costing the whole list.
+const JobsFeed = v.object({ jobs: v.array(v.unknown()) });
 
 // Where an admin finds the outcome of a fix-match after hiding its dialog or
 // leaving the page: a small pill bottom-right listing recent jobs (running,
@@ -31,57 +49,69 @@ export function FixMatchTray() {
   const t = useT();
   const [jobs, setJobs] = useState<TrayJob[]>([]);
   const [open, setOpen] = useState(false);
-  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
+  // Read on the client only: the tray renders nothing until its first read lands.
+  const [dismissed, setDismissed] = useState<Set<string>>(() => (typeof window === "undefined" ? new Set() : readDismissed()));
   const [hasActive, setHasActive] = useState(false);
-  const alive = useRef(true);
+  // A 401/403: this session can't read the feed, so the idle poll stops.
+  const [denied, setDenied] = useState(false);
+  // Reads can overlap (the poll and a start event): a new read aborts the one
+  // in flight ("restart"), so a slow older answer never rolls a job back to
+  // "running" or switches the poll off under a job that just started. Unmount
+  // aborts it too.
+  const reads = useAsyncAction();
 
   const refresh = useCallback(async () => {
-    let next: TrayJob[] = [];
-    try {
-      const res = await fetch(withBasePath("/api/admin/fix-match/jobs"));
-      if (res.ok) next = ((await res.json()) as { jobs?: TrayJob[] }).jobs ?? [];
-    } catch {
-      // A blip leaves the tray as it was on the next successful read.
+    const res = await reads.run("refresh", (signal) =>
+      fetchJson(withBasePath("/api/admin/fix-match/jobs"), { schema: JobsFeed, signal }));
+    if (!res) return;
+    let next: TrayJob[];
+    if (res.ok) {
+      next = trayJobsFrom(res.data.jobs);
+    } else if (res.kind === "http" && (res.status === 401 || res.status === 403)) {
+      // Signed out (or no longer allowed): nothing here can be read again.
+      next = [];
+      setDenied(true);
+    } else {
+      // Any other failure keeps the tray — and the poll — as they were, so a
+      // job still running server-side is not dropped by one bad read.
       return;
     }
-    if (!alive.current) return;
     setJobs(next);
     setHasActive(next.some((j) => j.status === "queued" || j.status === "running"));
-  }, []);
+  }, [reads]);
 
   useEffect(() => {
-    alive.current = true;
     const onStarted = () => { setOpen(true); void refresh(); };
+    const onVisible = () => { if (!document.hidden) void refresh(); };
     window.addEventListener(FIX_MATCH_STARTED_EVENT, onStarted);
+    document.addEventListener("visibilitychange", onVisible);
     void refresh();
     return () => {
-      alive.current = false;
       window.removeEventListener(FIX_MATCH_STARTED_EVENT, onStarted);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [refresh]);
 
-  // Re-read only while something is queued or running.
+  // Re-read only while the tab is in view (coming back into view reads at
+  // once, above): fast while something is queued or running, slowly otherwise.
   useEffect(() => {
-    if (!hasActive) return;
-    const id = setInterval(() => { void refresh(); }, ACTIVE_POLL_MS);
+    if (denied) return;
+    const id = setInterval(() => { if (!document.hidden) void refresh(); }, hasActive ? ACTIVE_POLL_MS : IDLE_POLL_MS);
     return () => clearInterval(id);
-  }, [hasActive, refresh]);
+  }, [hasActive, denied, refresh]);
+
+  function dismiss(id: string) {
+    setDismissed((prev) => {
+      const next = new Set(prev).add(id);
+      saveDismissed(next);
+      return next;
+    });
+  }
 
   const visible = jobs.filter((j) => !dismissed.has(j.id));
   if (visible.length === 0) return null;
   const active = visible.filter((j) => j.status === "queued" || j.status === "running").length;
 
-  const statusText = (j: TrayJob): string => {
-    if (j.status === "queued") return t("adminQueue.fixMatch.queued", { ahead: j.queueAhead ?? 0 });
-    if (j.status === "running") {
-      const copies = j.progress?.copies ?? 0;
-      return copies > 1
-        ? `${t("adminQueue.fixMatch.tray.running")} · ${t("adminQueue.fixMatch.copyOf", { copy: j.progress?.copy ?? 1, copies })}`
-        : t("adminQueue.fixMatch.tray.running");
-    }
-    if (j.status === "failed") return j.error || t("adminQueue.fixMatch.tray.failed");
-    return j.warning || t("adminQueue.fixMatch.tray.done");
-  };
   const tone = (j: TrayJob): string =>
     j.status === "failed" ? "var(--ds-danger)" : j.status === "done" && !j.warning ? "var(--ds-success)" : j.status === "done" ? "var(--ds-warning)" : "var(--ds-fg-muted)";
 
@@ -106,17 +136,17 @@ export function FixMatchTray() {
                   {j.title ?? t("adminQueue.fixMatch.tray.untitled")}
                 </span>
                 <span className="ds-mono shrink-0" style={{ fontSize: 10, color: "var(--ds-fg-subtle)" }}>
-                  {mediaInstanceLabel(j.server === "jellyfin" ? "jellyfin" : "plex", "")}
+                  {mediaInstanceLabel(j.server === "jellyfin" ? "jellyfin" : "plex", j.serverInstance ?? "")}
                 </span>
               </div>
               <div className="flex items-start justify-between gap-2">
-                <span style={{ color: tone(j), lineHeight: 1.35 }}>{statusText(j)}</span>
+                <span style={{ color: tone(j), lineHeight: 1.35 }}>{trayStatusText(j, t)}</span>
                 {(j.status === "done" || j.status === "failed") && (
                   <button
                     type="button"
                     className="shrink-0"
                     style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
-                    onClick={() => setDismissed((prev) => new Set(prev).add(j.id))}
+                    onClick={() => dismiss(j.id)}
                   >
                     {t("shared.common.dismiss")}
                   </button>

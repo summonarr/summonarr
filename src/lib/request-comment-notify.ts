@@ -7,6 +7,7 @@ import { resolveUserNotificationEmail } from "./notification-email";
 import { notifyUserRequestComment, notifyAdminsRequestComment } from "./discord-notify";
 import { notifyUserRequestCommentPush, notifyAdminsRequestCommentPush } from "./push";
 import { notifyUserRequestCommentEmail, notifyAdminsRequestCommentEmail } from "./email";
+import { translatorForUser } from "./i18n/server-locale";
 
 export interface RequestCommentAnnouncement {
   request: {
@@ -21,16 +22,37 @@ export interface RequestCommentAnnouncement {
   authorId: string;
   /** Name shown to managers (they see emails across the request surface). */
   authorName: string;
-  /** Name shown to the requester: never the author's email (a manager without a display name reads "Admin"). */
-  requesterFacingAuthor: string;
+  /** The author's display name; null when they have none. */
+  authorDisplayName: string | null;
   text: string;
   authorIsManager: boolean;
+}
+
+/**
+ * The name the REQUESTER sees for a manager's comment: the display name, or
+ * "Admin" in the REQUESTER's language — never the manager's email (the thread's
+ * GET strips `author.email` for a requester, and the notifications must not undo
+ * that), and never the commenting manager's language. The issue twin is
+ * reporterFacingAuthor (issue-reply-notify.ts).
+ */
+export function requesterFacingAuthor(authorDisplayName: string | null, requester: { locale?: string | null }): string {
+  return authorDisplayName ?? translatorForUser(requester)("shared.thread.admin");
+}
+
+// A channel's failure is still swallowed (the comment is committed and the other
+// channels must go out), but it is logged once under the channel's name so a
+// misconfigured sender is visible.
+function logFailure(channel: string) {
+  return (err: unknown): null => {
+    console.error(`[request-comments] ${channel} failed:`, err instanceof Error ? err.message : err);
+    return null;
+  };
 }
 
 // Fans a new request comment out to its audience (request-comments.ts
 // commentAudience): the requester when a manager wrote it, every other manager
 // when the requester did. Best-effort and never throws — the comment is already
-// committed (guardrail 26), and each channel swallows its own failure.
+// committed (guardrail 26), and each channel's failure is logged and swallowed.
 //
 // Gating is read ONCE per recipient (guardrail 33: not per channel). A removed
 // account keeps its email, Discord link and push subscriptions, and the senders
@@ -66,43 +88,44 @@ export async function announceRequestComment(a: RequestCommentAnnouncement): Pro
           where: { id: request.requestedBy },
           select: { deactivatedAt: true, email: true, notificationEmail: true, emailOnComment: true, locale: true },
         })
-        .catch(() => null);
+        .catch(logFailure("requester lookup"));
       if (!requester || requester.deactivatedAt != null) return;
+      const author = requesterFacingAuthor(a.authorDisplayName, requester);
 
-      void notifyUserRequestComment(request.requestedBy, request.title, a.requesterFacingAuthor, text, media).catch(() => {});
+      void notifyUserRequestComment(request.requestedBy, request.title, author, text, media).catch(logFailure("requester discord"));
       void notifyUserRequestCommentPush({
         userId: request.requestedBy, title: request.title, tmdbId: request.tmdbId, mediaType: request.mediaType, body: text, requestId: request.id,
-      }).catch(() => {});
+      }).catch(logFailure("requester push"));
       createInAppNotification(request.requestedBy, {
         type: "REQUEST_COMMENT",
         title: request.title,
-        body: `${a.requesterFacingAuthor} commented: ${text.slice(0, 400)}`,
+        body: `${author} commented: ${text.slice(0, 400)}`,
         tmdbId: request.tmdbId,
         mediaType: request.mediaType,
         posterPath: request.posterPath,
         // Re-rendered in the reader's language at read time (notification-render.ts).
-        data: { v: 1, author: a.requesterFacingAuthor, text: text.slice(0, 400) },
+        data: { v: 1, author, text: text.slice(0, 400) },
       });
       if (requester.emailOnComment) {
         const toEmail = resolveUserNotificationEmail(requester);
         if (toEmail) {
           void notifyUserRequestCommentEmail({
             toEmail, title: request.title, tmdbId: request.tmdbId, mediaType: request.mediaType,
-            authorName: a.requesterFacingAuthor, body: text, requestId: request.id, locale: requester.locale,
-          }).catch(() => {});
+            authorName: author, body: text, requestId: request.id, locale: requester.locale,
+          }).catch(logFailure("requester email"));
         }
       }
       return;
     }
 
     if (audience.to === "managers") {
-      void notifyAdminsRequestComment(request.title, a.authorName, text, { excludeUserId: a.authorId, ...media }).catch(() => {});
+      void notifyAdminsRequestComment(request.title, a.authorName, text, { excludeUserId: a.authorId, ...media }).catch(logFailure("manager discord"));
       void notifyAdminsRequestCommentPush({
         title: request.title, tmdbId: request.tmdbId, mediaType: request.mediaType, userName: a.authorName, body: text, requestId: request.id, excludeUserId: a.authorId,
-      }).catch(() => {});
+      }).catch(logFailure("manager push"));
       void notifyAdminsRequestCommentEmail({
         title: request.title, tmdbId: request.tmdbId, mediaType: request.mediaType, userName: a.authorName, body: text, requestId: request.id, excludeUserId: a.authorId,
-      }).catch(() => {});
+      }).catch(logFailure("manager email"));
     }
   } catch (err) {
     console.error("[request-comments] announce failed:", err instanceof Error ? err.message : err);

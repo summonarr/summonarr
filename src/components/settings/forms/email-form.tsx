@@ -4,23 +4,36 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Loader2 } from "@/components/icons";
+import { AlertTriangle, Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
-import { withBasePath } from "@/lib/base-path";
-import type { SaveStatus } from "./shared";
+import { useSettingsSave } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
+import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
 import { rich } from "./rich";
+import { emailSaveBody, ignoredKeys } from "./email-form-body";
 
 interface EmailFormProps {
   initialBackend: "smtp" | "resend";
   initialHost: string;
   initialPort: string;
   initialUser: string;
+  // The settings page passes the mask when a secret is saved, "" when none is.
   initialPassword: string;
   initialFrom: string;
   initialResendApiKey: string;
   initialResendFrom: string;
 }
+
+// The field labels for the keys the route can answer `ignored` with.
+const FIELD_LABEL_KEYS: Record<string, string> = {
+  smtpHost: "settings.form.email.smtpHost",
+  smtpPort: "settings.form.email.port",
+  smtpUser: "settings.form.email.username",
+  smtpPassword: "settings.form.email.password",
+  smtpFrom: "settings.form.email.fromAddress",
+  resendApiKey: "settings.form.email.resendKey",
+  resendFrom: "settings.form.email.fromAddress",
+};
 
 export function EmailForm({
   initialBackend,
@@ -37,53 +50,48 @@ export function EmailForm({
   const [host,         setHost]         = useState(initialHost);
   const [port,         setPort]         = useState(initialPort || "587");
   const [user,         setUser]         = useState(initialUser);
-  const [password,     setPassword]     = useState(initialPassword);
+  const [password,     setPassword]     = useState("");
   const [from,         setFrom]         = useState(initialFrom);
-  const [resendApiKey, setResendApiKey] = useState(initialResendApiKey);
+  const [resendApiKey, setResendApiKey] = useState("");
   const [resendFrom,   setResendFrom]   = useState(initialResendFrom);
-  const [status,       setStatus]       = useState<SaveStatus>("idle");
-  const [message,      setMessage]      = useState("");
+  const [passwordSaved, setPasswordSaved] = useState(initialPassword.length > 0);
+  const [resendKeySaved, setResendKeySaved] = useState(initialResendApiKey.length > 0);
+  // Only the "Saved" line fades; an error stays until the next edit or save,
+  // and an edit while Save & Test runs keeps Save locked, so a second click
+  // can't send a second test email (useSettingsSave).
+  const { status, message, save, edited } = useSettingsSave();
+  const [okText, setOkText] = useState("");
+  const [ignored, setIgnored] = useState<string[]>([]);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    setStatus("saving");
-    setMessage("");
-
-    const body: Record<string, string> = { emailBackend: backend };
-    if (backend === "smtp") {
-      body.smtpHost = host;
-      body.smtpPort = port;
-      body.smtpUser = user;
-      body.smtpPassword = password;
-      body.smtpFrom = from;
-    } else {
-      body.resendApiKey = resendApiKey;
-      body.resendFrom = resendFrom;
-    }
-
-    try {
-      const res = await fetch(withBasePath("/api/settings"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; smtpError?: string; smtpTested?: boolean };
-
-      if (res.ok && data.ok) {
-        setMessage(data.smtpTested ? t("settings.form.email.savedTested") : t("settings.form.common.saved"));
-        setStatus("ok");
-      } else {
-        setMessage(data.smtpError ?? data.error ?? t("settings.form.common.saveFailed"));
-        setStatus("error");
-      }
-    } catch {
-      setMessage(t("settings.form.common.saveFailed"));
-      setStatus("error");
-    }
+    setIgnored([]);
+    const body = emailSaveBody({ backend, host, port, user, password, from, resendApiKey, resendFrom });
+    const result = await save(body, (r) => {
+      const reason = r.data.smtpError;
+      return typeof reason === "string" && reason ? reason : t("settings.form.common.saveFailed");
+    });
+    if (!result.ok) return;
+    setOkText(result.data.smtpTested === true ? t("settings.form.email.savedTested") : t("settings.form.common.saved"));
+    setIgnored(ignoredKeys(result.data));
+    if (body.smtpPassword) { setPasswordSaved(true); setPassword(""); }
+    if (body.resendApiKey) { setResendKeySaved(true); setResendApiKey(""); }
   }
 
-  const canSubmit = backend === "smtp" ? Boolean(host) : Boolean(resendApiKey);
+  // Every field edit: clears the last result, never a save in flight.
+  function change<T>(set: (value: T) => void) {
+    return (value: T) => {
+      set(value);
+      setIgnored([]);
+      edited();
+    };
+  }
+
+  // The route refuses a port outside 1–65535 and can't store a blank one
+  // (email.ts would read it as invalid), so the form doesn't send either.
+  const portValid = /^\d+$/.test(port) && Number(port) >= 1 && Number(port) <= 65535;
+  const canSubmit = backend === "smtp" ? Boolean(host) && portValid : Boolean(resendApiKey) || resendKeySaved;
+  const ignoredText = ignored.map((k) => (FIELD_LABEL_KEYS[k] ? t(FIELD_LABEL_KEYS[k]) : k)).join(", ");
 
   return (
     <form onSubmit={handleSave} className="space-y-4">
@@ -95,7 +103,7 @@ export function EmailForm({
               key={b}
               type="button"
               aria-pressed={backend === b}
-              onClick={() => { setBackend(b); setStatus("idle"); }}
+              onClick={() => change(setBackend)(b)}
               className={
                 "px-3 py-1.5 rounded-md transition-colors " +
                 (backend === b
@@ -117,7 +125,7 @@ export function EmailForm({
               <Input
                 id="smtp-host"
                 value={host}
-                onChange={(e) => { setHost(e.target.value); setStatus("idle"); }}
+                onChange={(e) => change(setHost)(e.target.value)}
                 placeholder="smtp.example.com"
                 className="bg-zinc-800 border-zinc-700 font-mono"
               />
@@ -126,8 +134,12 @@ export function EmailForm({
               <Label htmlFor="smtp-port">{t("settings.form.email.port")}</Label>
               <Input
                 id="smtp-port"
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={65535}
                 value={port}
-                onChange={(e) => { setPort(e.target.value); setStatus("idle"); }}
+                onChange={(e) => change(setPort)(e.target.value)}
                 placeholder="587"
                 className="bg-zinc-800 border-zinc-700 font-mono"
               />
@@ -139,7 +151,7 @@ export function EmailForm({
               <Input
                 id="smtp-user"
                 value={user}
-                onChange={(e) => { setUser(e.target.value); setStatus("idle"); }}
+                onChange={(e) => change(setUser)(e.target.value)}
                 placeholder="user@example.com"
                 className="bg-zinc-800 border-zinc-700"
               />
@@ -149,11 +161,17 @@ export function EmailForm({
               <Input
                 id="smtp-password"
                 type="password"
+                autoComplete="new-password"
+                data-1p-ignore
+                data-lpignore="true"
                 value={password}
-                onChange={(e) => { setPassword(e.target.value); setStatus("idle"); }}
-                placeholder="••••••••••••••••"
+                onChange={(e) => change(setPassword)(e.target.value)}
+                placeholder={passwordSaved ? SECRET_MASK_SENTINEL : "••••••••••••••••"}
                 className="bg-zinc-800 border-zinc-700 font-mono"
               />
+              {passwordSaved && !password && (
+                <p className="text-xs text-zinc-500">{t("settings.form.agents.secretKeep")}</p>
+              )}
             </div>
           </div>
           <div className="space-y-1.5">
@@ -161,7 +179,7 @@ export function EmailForm({
             <Input
               id="smtp-from"
               value={from}
-              onChange={(e) => { setFrom(e.target.value); setStatus("idle"); }}
+              onChange={(e) => change(setFrom)(e.target.value)}
               placeholder="Summonarr <noreply@example.com>"
               className="bg-zinc-800 border-zinc-700"
             />
@@ -175,11 +193,17 @@ export function EmailForm({
             <Input
               id="resend-api-key"
               type="password"
+              autoComplete="new-password"
+              data-1p-ignore
+              data-lpignore="true"
               value={resendApiKey}
-              onChange={(e) => { setResendApiKey(e.target.value); setStatus("idle"); }}
-              placeholder="re_••••••••••••••••"
+              onChange={(e) => change(setResendApiKey)(e.target.value)}
+              placeholder={resendKeySaved ? SECRET_MASK_SENTINEL : "re_••••••••••••••••"}
               className="bg-zinc-800 border-zinc-700 font-mono"
             />
+            {resendKeySaved && !resendApiKey && (
+              <p className="text-xs text-zinc-500">{t("settings.form.agents.secretKeep")}</p>
+            )}
             <p className="text-xs text-zinc-500">
               {rich(t("settings.form.email.resendKeyHelp"), {
                 link: (
@@ -195,7 +219,7 @@ export function EmailForm({
             <Input
               id="resend-from"
               value={resendFrom}
-              onChange={(e) => { setResendFrom(e.target.value); setStatus("idle"); }}
+              onChange={(e) => change(setResendFrom)(e.target.value)}
               placeholder="Summonarr <noreply@yourdomain.com>"
               className="bg-zinc-800 border-zinc-700"
             />
@@ -208,8 +232,14 @@ export function EmailForm({
         <Button type="submit" disabled={status === "saving" || !canSubmit} className="bg-indigo-600 hover:bg-indigo-500">
           {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.saveAndTest")}
         </Button>
-        <SaveStatusMessage status={status} okLabel={message} errorLabel={message} />
+        <SaveStatusMessage status={status} okLabel={okText || undefined} errorLabel={message || undefined} />
       </div>
+      {ignored.length > 0 && (
+        <p role="status" className="flex items-start gap-1.5 text-sm text-amber-400">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          {t("settings.form.email.ignored", { fields: ignoredText })}
+        </p>
+      )}
     </form>
   );
 }

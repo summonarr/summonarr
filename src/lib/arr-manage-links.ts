@@ -119,7 +119,7 @@ export function matchesQueueTitle(
 
 /**
  * Per TMDB id, the configured instances whose synced wanted/available cache
- * holds it — arrInstancesHolding's answer for a whole list in one read. Kept
+ * holds it — arrInstancesForTitle's holders, for a whole list in one read. Kept
  * in the configured (registry) order, each instance once; a cache row for an
  * instance that is no longer configured is ignored.
  */

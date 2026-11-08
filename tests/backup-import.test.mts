@@ -41,6 +41,10 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
+// The cap is env-configurable (default 4 GB); the boundary test below allocates
+// the cap in memory, so pin the suite to the historical 500 MB.
+process.env.BACKUP_MAX_RESTORE_MB = "500";
+
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32); // prisma.ts pulls in token-crypto
 delete process.env.TRUST_PROXY;
 delete process.env.SUMMONARR_ALLOW_SETUP_RESTORE;
@@ -95,7 +99,22 @@ const fakeTx = {
   },
 };
 
+// The live Setting table the process memos read from (outside the restore's
+// transaction): the Discord key, the session lengths, the feature flags.
+const liveSettings = new Map<string, string>();
 const fakePrisma = {
+  setting: {
+    findUnique: async (args: { where: { key: string } }) => {
+      const value = liveSettings.get(args.where.key);
+      return value === undefined ? null : { key: args.where.key, value };
+    },
+    findMany: async (args: { where?: { key?: { in?: string[] } } } = {}) => {
+      const keys = args.where?.key?.in;
+      return [...liveSettings.entries()]
+        .filter(([key]) => !keys || keys.includes(key))
+        .map(([key, value]) => ({ key, value }));
+    },
+  },
   $transaction: async (fn: (tx: typeof fakeTx) => Promise<unknown>, opts?: Record<string, unknown>) => {
     txCalls.push(opts);
     try {
@@ -112,13 +131,15 @@ const fakePrisma = {
 
 // Dynamic imports so the global pre-seed and env stubs genuinely precede the
 // module-graph load (static imports would hoist above them).
-const { processBackupImport, MAX_PLAINTEXT_BYTES, MAX_CIPHERTEXT_BYTES } =
+const { processBackupImport, MAX_PLAINTEXT_BYTES, MAX_CIPHERTEXT_BYTES, restoreTxTimeoutMs } =
   await import("../src/lib/backup-import.ts");
 const { wrapEncryptStream, ENCRYPTED_MAGIC } = await import("../src/lib/backup-crypto.ts");
 const { BACKUP_TABLES, computeSchemaFingerprint } = await import("../src/lib/backup-schema.ts");
 const { tokenEncryptionKeyFingerprint } = await import("../src/lib/token-crypto.ts");
 const { cachedSessionCheckIsStale, invalidateCachedSessionChecks } =
   await import("../src/lib/session-revocation.ts");
+const { arrSnapshotStats, clearArrSnapshots, rememberSnapshot, snapshotKey } =
+  await import("../src/lib/arr-snapshot.ts");
 
 // ── stream helpers ──────────────────────────────────────────────────────────
 function streamFrom(chunks: Uint8Array[], onCancel?: () => void): ReadableStream<Uint8Array> {
@@ -172,7 +193,7 @@ function expectSuccess(r: ImportResult): ImportSuccess {
   return r as ImportSuccess;
 }
 
-// ── fixtures (statement shapes mirror db-export/route.ts exactly) ───────────
+// ── fixtures (statement shapes mirror backup-export.ts exactly) ─────────────
 const FP = computeSchemaFingerprint();
 const TEK_FP = tokenEncryptionKeyFingerprint();
 if (!TEK_FP) throw new Error("test key must yield a TEK fingerprint");
@@ -270,6 +291,8 @@ beforeEach(() => {
   delete process.env.TRUST_PROXY;
   delete process.env.SUMMONARR_ALLOW_SETUP_RESTORE;
   invalidateCachedSessionChecks(0); // a restore's session-check floor is process-wide
+  clearArrSnapshots();
+  liveSettings.clear();
 });
 
 // ── caps ────────────────────────────────────────────────────────────────────
@@ -280,6 +303,22 @@ test("size-cap constants: 500 MB plaintext, ciphertext cap = plaintext + 4096", 
   // header — so this pin is what catches an accidental cap change.
   assert.equal(MAX_PLAINTEXT_BYTES, 500 * 1024 * 1024);
   assert.equal(MAX_CIPHERTEXT_BYTES, MAX_PLAINTEXT_BYTES + 4096);
+});
+
+test("BACKUP_MAX_RESTORE_MB sets the cap; default is 4 GB; junk falls back to the default", async () => {
+  const load = async (v: string | undefined, tag: string) => {
+    if (v === undefined) delete process.env.BACKUP_MAX_RESTORE_MB;
+    else process.env.BACKUP_MAX_RESTORE_MB = v;
+    return (await import(`../src/lib/backup-import.ts?cap=${tag}`)).MAX_PLAINTEXT_BYTES as number;
+  };
+  try {
+    assert.equal(await load("2048", "a"), 2048 * 1024 * 1024);
+    assert.equal(await load(undefined, "b"), 4096 * 1024 * 1024);
+    assert.equal(await load("0", "c"), 4096 * 1024 * 1024);
+    assert.equal(await load("abc", "d"), 4096 * 1024 * 1024);
+  } finally {
+    process.env.BACKUP_MAX_RESTORE_MB = "500";
+  }
 });
 
 test("ciphertext cap boundary: one byte over → 413 before any KDF; exactly at cap passes the gate", async () => {
@@ -474,6 +513,65 @@ test("TEK-fingerprint mismatch warns (secrets undecryptable) but does not refuse
   assert.equal(res.summary.executed, 1); // data still restored
 });
 
+test("a matching normalized fingerprint restores even when the byte fingerprint differs (comment-only schema edit)", async () => {
+  const { computeNormalizedSchemaFingerprint } = await import("../src/lib/backup-schema.ts");
+  const nfp = computeNormalizedSchemaFingerprint();
+  const ok = expectSuccess(
+    await runImport([
+      new Uint8Array(
+        await encrypt(`-- Schema-Fingerprint: ${WRONG_FP}\n-- Schema-Fingerprint-Normalized: ${nfp}\n${STMT.userInsert};\n`),
+      ),
+    ]),
+  );
+  assert.equal(ok.summary.executed, 1);
+  assert.doesNotMatch(ok.warning ?? "", /no schema fingerprint/);
+
+  // The normalized fingerprint is what decides once present: a mismatch refuses.
+  const refused = expectFailure(
+    await runImport([
+      new Uint8Array(
+        await encrypt(`-- Schema-Fingerprint: ${FP}\n-- Schema-Fingerprint-Normalized: ${WRONG_FP}\n${STMT.userInsert};\n`),
+      ),
+    ]),
+  );
+  assert.equal(refused.status, 409);
+  assert.ok(refused.error.includes(nfp));
+});
+
+test("invalid UTF-8 is refused as unreadable, never restored as replacement characters", async () => {
+  const bad = Buffer.concat([
+    Buffer.from(`-- Schema-Fingerprint: ${FP}\nINSERT INTO "public"."Setting" ("key", "value") VALUES ('k', '`, "utf8"),
+    Buffer.from([0xff, 0xfe]),
+    Buffer.from(`');\n`, "utf8"),
+  ]);
+  const enc = await collect(wrapEncryptStream(streamFrom([new Uint8Array(bad)]), PASSWORD));
+  const res = expectFailure(await runImport([new Uint8Array(enc)]));
+  assert.equal(res.status, 400);
+  assert.equal(res.error, "Failed to read backup");
+  assert.equal(txCalls.length, 0);
+
+  // A sequence cut off at the very end of the dump is corruption too.
+  const cut = Buffer.concat([Buffer.from(`${STMT.userInsert};\n`, "utf8"), Buffer.from([0xe2, 0x82])]);
+  const cutEnc = await collect(wrapEncryptStream(streamFrom([new Uint8Array(cut)]), PASSWORD));
+  assert.equal(expectFailure(await runImport([new Uint8Array(cutEnc)])).error, "Failed to read backup");
+  assert.equal(txCalls.length, 0);
+});
+
+test("an upload that breaks off inside the header is a clean read failure, not a thrown error", async () => {
+  const broken = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(HAPPY_ENC.subarray(0, 3)));
+    },
+    pull(controller) {
+      controller.error(new Error("client aborted"));
+    },
+  });
+  const res = expectFailure(await processBackupImport(broken, PASSWORD, "admin"));
+  assert.equal(res.status, 400);
+  assert.equal(res.error, "Failed to read backup");
+  assert.equal(txCalls.length, 0);
+});
+
 // ── the empty-restore refusal ───────────────────────────────────────────────
 
 test("a dump with zero data statements is refused — never TRUNCATE on an empty restore", async () => {
@@ -562,6 +660,28 @@ test("a refused or rolled-back restore leaves the session-check floor alone", as
   assert.equal(cachedSessionCheckIsStale(before), false, "the floor is set only after the transaction commits");
 });
 
+// The restore replaced the Setting table, Radarr/Sonarr instances included,
+// and a `cached=1` read skips its route's instance checks (guardrail 5h).
+const keepArrSnapshot = () =>
+  rememberSnapshot(snapshotKey("http://x/api/admin/arr/history?service=sonarr&instance=anime", "en")!, "{}");
+
+test("a committed restore drops every kept admin arr answer", async () => {
+  keepArrSnapshot();
+  assert.equal(arrSnapshotStats().entries, 1);
+  expectSuccess(await runImport([new Uint8Array(HAPPY_ENC)]));
+  assert.equal(arrSnapshotStats().entries, 0);
+});
+
+test("a refused or rolled-back restore keeps the arr answers", async () => {
+  keepArrSnapshot();
+  expectFailure(await runImport([new Uint8Array(COMMENTS_ONLY_ENC)]));
+  assert.equal(arrSnapshotStats().entries, 1, "refused before the database was touched");
+  failOnSqlIncludes = "'siteUrl'";
+  expectFailure(await runImport([new Uint8Array(HAPPY_ENC)]));
+  assert.equal(txRejections, 1);
+  assert.equal(arrSnapshotStats().entries, 1, "rolled back: the config they were read under is unchanged");
+});
+
 test("conflict-skipped rows (0 affected) are attributed per table and surface as a warning", async () => {
   affectedForInsert = 0; // every INSERT reports ON CONFLICT DO NOTHING dropped it
   const res = expectSuccess(await runImport([new Uint8Array(HAPPY_ENC)]));
@@ -593,4 +713,114 @@ test("a mid-import failure throws through the transaction: 500, rolled-back mess
   // were attempted inside the tx and are all discarded, never half-written.
   assert.equal(txRejections, 1);
   assert.ok(txOps.some((op) => op.startsWith("TRUNCATE TABLE ")), "failure happened after writes began");
+});
+
+// ── the transaction timeout ─────────────────────────────────────────────────
+
+test("the restore timeout scales with the statement count as well as the size", () => {
+  const MB = 1024 * 1024;
+  // A small dump keeps the 10-minute floor (the happy path pins the options).
+  assert.equal(restoreTxTimeoutMs(1 * MB, 10), 10 * 60 * 1000);
+  // Size alone: one second per MB.
+  assert.equal(restoreTxTimeoutMs(1500 * MB, 1000), 1500 * 1000);
+  // Many tiny rows: every statement is its own round trip, so 300 MB of
+  // PlayHistory INSERTs (a million statements) must not get the 10-minute floor.
+  const many = restoreTxTimeoutMs(300 * MB, 1_000_000);
+  assert.ok(many > 300 * 1000 && many > 10 * 60 * 1000, `got ${many}ms`);
+  assert.equal(many, 2_000_000);
+});
+
+// ── reading the spool back ──────────────────────────────────────────────────
+
+test("a multi-MB statement replays byte-identical, in order, without re-copying the spool per read", async () => {
+  // A 5 MB Setting value between two small rows. The spool is read back in
+  // 64 KB pieces; joining every piece onto the unread remainder copied a big
+  // statement once per piece (about 200 MB of copying for this one).
+  const big = "x".repeat(5 * 1024 * 1024);
+  const before = `INSERT INTO "public"."Setting" ("key", "value") VALUES ('a', 'first')`;
+  const huge = `INSERT INTO "public"."Setting" ("key", "value") VALUES ('big', '${big}')`;
+  const after = `INSERT INTO "public"."Setting" ("key", "value") VALUES ('z', 'last')`;
+  const sql = `-- Schema-Fingerprint: ${FP}\n${before};\n${huge};\n${after};\n`;
+  const enc = await encrypt(sql);
+
+  const realConcat = Buffer.concat;
+  let copied = 0;
+  Buffer.concat = ((list: readonly Uint8Array[], total?: number) => {
+    const out = realConcat(list, total);
+    copied += out.length;
+    return out;
+  }) as typeof Buffer.concat;
+  let res: ImportResult;
+  try {
+    res = await runImport([new Uint8Array(enc)]);
+  } finally {
+    Buffer.concat = realConcat;
+  }
+  expectSuccess(res);
+  assert.deepEqual(txOps.slice(2, 5), [
+    `${before} ON CONFLICT DO NOTHING`,
+    `${huge} ON CONFLICT DO NOTHING`,
+    `${after} ON CONFLICT DO NOTHING`,
+  ]);
+  // Decrypt, spool write and spool read each copy the dump about once.
+  assert.ok(copied < 6 * sql.length, `copied ${copied} bytes for a ${sql.length}-byte dump`);
+});
+
+// ── the other process memos ─────────────────────────────────────────────────
+
+const DISCORD_KEY_SPECIFIER = "../src/lib/discord-interactions/signature.ts?chunk=interactions";
+const FLAG = "feature.admin.backup";
+
+async function memoReaders() {
+  // The interactions route lives in another chunk; a cache-busted copy of the
+  // module stands in for it (guardrail 27a).
+  const signature: typeof import("../src/lib/discord-interactions/signature.ts") = await import(DISCORD_KEY_SPECIFIER);
+  const { getSessionDurations, invalidateSessionDurationsCache } = await import("../src/lib/auth.ts");
+  const { getFeatureFlags, invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
+  // Start each test from empty memos (they are process-wide).
+  signature.invalidatePublicKeyCache();
+  invalidateSessionDurationsCache();
+  invalidateFeatureFlagCache();
+  return {
+    key: () => signature.getPublicKey(),
+    desktop: async () => (await getSessionDurations()).desktopDuration,
+    flag: async () => (await getFeatureFlags())[FLAG],
+  };
+}
+
+async function primeMemos() {
+  const read = await memoReaders();
+  liveSettings.set("discordPublicKey", "aa".repeat(32));
+  liveSettings.set("sessionDefaultDuration", "7200");
+  liveSettings.set(FLAG, "false");
+  assert.equal(await read.key(), "aa".repeat(32));
+  assert.equal(await read.desktop(), 7200);
+  assert.equal(await read.flag(), false);
+  // The restore brings a different Setting table.
+  liveSettings.set("discordPublicKey", "bb".repeat(32));
+  liveSettings.set("sessionDefaultDuration", "5400");
+  liveSettings.set(FLAG, "true");
+  return read;
+}
+
+test("a committed restore drops the memos built from the replaced Settings (Discord key, session lengths, flags)", async () => {
+  const read = await primeMemos();
+  expectSuccess(await runImport([new Uint8Array(HAPPY_ENC)]));
+  // The Discord key has no TTL: without the drop, interactions are verified
+  // against the old key until a restart.
+  assert.equal(await read.key(), "bb".repeat(32));
+  // Sessions minted now carry the restored length for life (guardrail 6c).
+  assert.equal(await read.desktop(), 5400);
+  assert.equal(await read.flag(), true);
+});
+
+test("a refused or rolled-back restore keeps those memos", async () => {
+  const read = await primeMemos();
+  expectFailure(await runImport([new Uint8Array(COMMENTS_ONLY_ENC)]));
+  failOnSqlIncludes = "'siteUrl'";
+  expectFailure(await runImport([new Uint8Array(HAPPY_ENC)]));
+  assert.equal(txRejections, 1);
+  assert.equal(await read.key(), "aa".repeat(32), "nothing was replaced, so the memo stands");
+  assert.equal(await read.desktop(), 7200);
+  assert.equal(await read.flag(), false);
 });

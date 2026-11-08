@@ -13,7 +13,8 @@
 //      PRESENCE, not validity, is the CORS-sound skip signal, and auth is
 //      still enforced after the skip);
 //   4. session gating (public paths pass anonymously; protected pages 302 to
-//      /login with callbackUrl + cleared cookies; protected APIs get a
+//      /login with callbackUrl, clearing a missing/junk cookie but never a
+//      well-signed one, which may be a pre-rotation copy; protected APIs get a
 //      machine-readable 401; verifyAndRefreshSession is DB-checked so a
 //      revoked AuthSession row rejects a still-valid JWT — the guardrail-29
 //      "never JWT-only" principle at the proxy layer);
@@ -54,11 +55,12 @@
 // shared dependency graph stays cached, so the in-memory prisma stubs hold
 // across all three instances.
 //
-// NOT covered (Next-applied config, not proxy logic): the matcher's
-// prefetch-`missing` clause — the reason page/layout auth must be DB-checked
-// per guardrail 29 — and BASE_PATH stripping of nextUrl.pathname (tests hand
-// the proxy an already-stripped pathname; the BASE_PATH test pins only the
-// redirect-URL prefixing the proxy itself performs).
+// The matcher is Next-applied config, pinned in tests/proxy-matcher.test.mts
+// through Next's own matcher: page prefetches skip the proxy — the reason
+// page/layout auth must be DB-checked per guardrail 29 — and /api never does.
+// NOT covered: BASE_PATH stripping of nextUrl.pathname (tests hand the proxy an
+// already-stripped pathname; the BASE_PATH test pins only the redirect-URL
+// prefixing the proxy itself performs).
 //
 // No DB or network: prisma delegates are shadowed in-memory (tests/
 // _helpers.mts), fetch throws, and the JWTs are REAL jose tokens whose claims
@@ -94,7 +96,7 @@ const { signSessionJwt, verifySessionJwt } = await import("../src/lib/session-jw
 // The DOWNSTREAM verifier — the second of the two session checks every /api/*
 // request pays. Imported so the forwarded-credential tests can measure the
 // whole two-pass cost, not just the proxy's half.
-const { withAuth } = await import("../src/lib/api-auth.ts");
+const { withAuth, withAdmin, withIssueAdmin } = await import("../src/lib/api-auth.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
 const { API_VERSION, MIN_CLIENT } = await import("../src/lib/api-version.ts");
@@ -116,10 +118,14 @@ type DbUser = {
 const usersById = new Map<string, DbUser>();
 const sessionRows = new Set<string>(); // sessionIds with a live AuthSession row
 let dbReads = 0;
+// Simulates the database being unreachable: every session read throws.
+let dbDown = false;
+const DB_DOWN_ERROR = "Can't reach database server at `db:5432`";
 
 shadowPrismaModel(prisma, "authSession", {
   findUnique: async (args: { where: { sessionId: string } }) => {
     dbReads++;
+    if (dbDown) throw new Error(DB_DOWN_ERROR);
     return sessionRows.has(args.where.sessionId)
       ? { id: `row-${args.where.sessionId}`, sessionId: args.where.sessionId }
       : null;
@@ -131,6 +137,7 @@ shadowPrismaModel(prisma, "authSession", {
 shadowPrismaModel(prisma, "user", {
   findUnique: async (args: { where: { id: string } }) => {
     dbReads++;
+    if (dbDown) throw new Error(DB_DOWN_ERROR);
     const u = usersById.get(args.where.id);
     return u ? { ...u } : null;
   },
@@ -198,6 +205,18 @@ const { proxy: proxyBareOrigin } = (await import(
   bustedProxyHref("bare-origin")
 )) as typeof import("../src/proxy.ts");
 process.env.AUTH_TRUSTED_ORIGIN = savedAltOrigin;
+
+// Two more for the CSP's connect-src, which reads OIDC_ISSUER at module load: a
+// real issuer, and a scheme-less one (`new URL()` parses it with origin "null").
+process.env.OIDC_ISSUER = "https://idp.example.com/realms/summonarr";
+const { proxy: proxyWithOidc } = (await import(
+  bustedProxyHref("oidc")
+)) as typeof import("../src/proxy.ts");
+process.env.OIDC_ISSUER = "idp.example.com:8443";
+const { proxy: proxyBadOidc } = (await import(
+  bustedProxyHref("bad-oidc")
+)) as typeof import("../src/proxy.ts");
+delete process.env.OIDC_ISSUER;
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 const SELF = "http://localhost:3000";
@@ -310,6 +329,7 @@ function setCookies(res: Response): string[] {
 
 beforeEach(() => {
   dbReads = 0;
+  dbDown = false;
 });
 
 // ── the TRUST_PROXY / local-only Host gate ──────────────────────────────────
@@ -1210,4 +1230,161 @@ test("a bearer request after a role change passes WITHOUT rotating, and the app'
   assert.ok(sessionRows.has(sessionId), "the native session's row must not be renamed");
   const second = await proxy(req("/api/requests", { headers: asBearer(token) }));
   assertPassedThrough(second, "the app's original token must still pass the proxy");
+});
+
+// ── AUTH_URL that doesn't parse ─────────────────────────────────────────────
+
+test("a blank or scheme-less AUTH_URL never 500s a redirect: the login and admin-denial redirects fall back to the request's origin", async () => {
+  const saved = process.env.AUTH_URL;
+  try {
+    for (const bad of ["", "   ", "summonarr.example.com:3001"]) {
+      process.env.AUTH_URL = bad;
+      const unauth = await proxy(req("/movies"));
+      assert.equal(unauth.status, 302, `AUTH_URL=${JSON.stringify(bad)}`);
+      assert.equal(unauth.headers.get("location"), `${SELF}/login?callbackUrl=%2Fmovies`);
+
+      const { token } = await mintSession({ role: "USER" }); // no MANAGE_* bits
+      const denied = await proxy(req("/admin", { headers: asBearer(token) }));
+      assert.equal(denied.status, 307);
+      assert.equal(denied.headers.get("location"), `${SELF}/`);
+    }
+    // A usable AUTH_URL still wins over the request's own origin.
+    process.env.AUTH_URL = "https://requests.example.com";
+    const viaAuthUrl = await proxy(req("/movies"));
+    assert.equal(viaAuthUrl.headers.get("location"), "https://requests.example.com/login?callbackUrl=%2Fmovies");
+  } finally {
+    process.env.AUTH_URL = saved;
+  }
+});
+
+// ── the login redirect never deletes a cookie it can't prove is junk ────────
+
+test("a page request carrying the PRE-rotation cookie after a privilege change → login redirect WITHOUT clearing the (rotated) cookie", async () => {
+  const { userId, sessionId, token } = await mintSession({ role: "USER", transport: "cookie" });
+  usersById.get(userId)!.role = "ISSUE_ADMIN"; // promoted in another tab
+  // This pass rotates the session (renames the row) and hands back a new cookie.
+  const rotating = await proxy(req("/movies", { headers: asCookie(token) }));
+  assertPassedThrough(rotating);
+  assert.ok(!sessionRows.has(sessionId), "precondition: the session was rotated");
+  assert.ok(setCookies(rotating).some((c) => c.startsWith(`${COOKIE}=`) && !c.includes("Max-Age=0")));
+
+  // A prefetch or second tab that sent the OLD cookie lands after the rotation.
+  const stale = await proxy(req("/movies", { headers: asCookie(token) }));
+  assert.equal(stale.status, 302);
+  assert.equal(stale.headers.get("location"), `${SELF}/login?callbackUrl=%2Fmovies`);
+  assert.deepEqual(
+    setCookies(stale).filter((c) => c.includes("Max-Age=0")),
+    [],
+    "Max-Age=0 here would delete the rotated cookie the browser now holds",
+  );
+
+  // A forged token is still cleared (the junk case the redirect exists for).
+  const forged = await proxy(req("/movies", { headers: asCookie(`${token.slice(0, -4)}AAAA`) }));
+  assert.ok(setCookies(forged).some((c) => c.startsWith(`${COOKIE}=;`) && c.includes("Max-Age=0")));
+});
+
+// ── a database outage during the session check ─────────────────────────────
+
+test("an unreachable database answers 503 on a protected API or page — no 500, no login redirect, no cookie cleared", async () => {
+  const { token } = await mintSession();
+  dbDown = true;
+
+  const api = await proxy(req("/api/requests", { headers: asCookie(token) }));
+  assert.equal(api.status, 503);
+  assert.match((await bodyOf(api) as { error: string }).error, /try again/i);
+  assert.equal(api.headers.get("retry-after"), "5");
+
+  const page = await proxy(req("/movies", { headers: asCookie(token) }));
+  assert.equal(page.status, 503, "not a redirect to /login: the session may be fine");
+  assert.equal(page.headers.get("location"), null);
+  assert.deepEqual(setCookies(page), [], "a database blip must never sign anyone out");
+
+  const bearer = await proxy(req("/api/requests", { headers: asBearer(token) }));
+  assert.equal(bearer.status, 503);
+});
+
+test("an unreachable database still serves public paths, anonymously", async () => {
+  const { token } = await mintSession();
+  dbDown = true;
+  for (const path of ["/login", "/api/health", "/robots.txt"]) {
+    const res = await proxy(req(path, { headers: asCookie(token) }));
+    assertPassedThrough(res, `${path} must stay reachable during a database outage`);
+    assert.deepEqual(setCookies(res), [], "no session was resolved, so none is re-signed");
+  }
+});
+
+test("the outage is logged once while it lasts, and again once it recurs after the database answered", async () => {
+  const warnsAbout = () => warns.filter((w) => w.startsWith("[proxy] the session check failed")).length;
+  const { token } = await mintSession();
+  // Start from a database that answers (the tests above left an outage logged).
+  assertPassedThrough(await proxy(req("/api/requests", { headers: asCookie(token) })));
+  const before = warnsAbout();
+  dbDown = true;
+  for (let i = 0; i < 5; i++) await proxy(req("/api/requests", { headers: asCookie(token) }));
+  assert.equal(warnsAbout() - before, 1, "one line per outage, not one per request (guardrail 7b)");
+  assert.ok(warns.some((w) => w.includes(DB_DOWN_ERROR)), "the line says what failed");
+
+  dbDown = false;
+  assertPassedThrough(await proxy(req("/api/requests", { headers: asCookie(token) })));
+  dbDown = true;
+  await proxy(req("/api/requests", { headers: asCookie(token) }));
+  assert.equal(warnsAbout() - before, 2, "a new outage after recovery is reported again");
+});
+
+// ── public pages match whole path segments ──────────────────────────────────
+
+test("a public page covers its own path and subtree only — a look-alike name is NOT public", async () => {
+  for (const path of ["/login", "/login/", "/register", "/setup", "/auth/plex/done"]) {
+    assertPassedThrough(await proxy(req(path)), `${path} is public`);
+  }
+  for (const path of ["/login-history", "/registered-devices", "/setup-wizard", "/auth/plexus"]) {
+    const res = await proxy(req(path));
+    assert.equal(res.status, 302, `${path} merely starts with a public name — it must be gated`);
+    assert.ok(res.headers.get("location")?.startsWith(`${SELF}/login?`));
+  }
+});
+
+// ── the admin rules: permission-based, case-folded ──────────────────────────
+
+test("an ISSUE_ADMIN whose management bits were all cleared is refused at /api/admin/* — exactly as every per-route guard refuses them", async () => {
+  // The backstop used to admit the ISSUE_ADMIN role by its LABEL. No route does:
+  // they are withAdmin, withIssueAdmin or withPermission, all of which read the
+  // role ADMIN or the bits, so the label let a cleared delegate through to
+  // nothing but a 403 one layer down.
+  const cleared = await mintSession({ role: "ISSUE_ADMIN", permissions: String(Permission.REQUEST) });
+  const res = await proxy(req("/api/admin/fix-match/search", { headers: asCookie(cleared.token) }));
+  assert.equal(res.status, 403);
+  assert.deepEqual(await bodyOf(res), { error: "Forbidden" });
+
+  // The route-level guards agree, so the backstop refuses no one a route admits.
+  for (const guard of [withIssueAdmin, withAdmin]) {
+    const routed = await guard(okHandler)(req("/api/admin/fix-match/search", { headers: asCookie(cleared.token) }), undefined);
+    assert.equal(routed.status, 403);
+  }
+
+  // The preset ISSUE_ADMIN (MANAGE_ISSUES from the role) still passes.
+  const preset = await mintSession({ role: "ISSUE_ADMIN" });
+  assertPassedThrough(await proxy(req("/api/admin/fix-match/search", { headers: asCookie(preset.token) })));
+});
+
+test("every admin rule folds case: /API/Settings and /API/Admin/… are refused like their lowercase forms", async () => {
+  const delegate = await mintSession({ role: "USER", permissions: String(Permission.MANAGE_REQUESTS) });
+  const settings = await proxy(req("/API/Settings", { headers: asCookie(delegate.token) }));
+  assert.equal(settings.status, 403, "the settings backstop is not dodged by case");
+
+  const user = await mintSession({ role: "USER" });
+  const admin = await proxy(req("/API/Admin/users", { headers: asCookie(user.token) }));
+  assert.equal(admin.status, 403, "nor the /api/admin backstop");
+  assert.deepEqual(await bodyOf(admin), { error: "Forbidden" });
+});
+
+// ── the CSP's connect-src ───────────────────────────────────────────────────
+
+test("connect-src names the OIDC issuer's origin, and an issuer that isn't an http(s) URL is left out — never `null`", async () => {
+  const csp = async (p: typeof proxy) => (await p(req("/login"))).headers.get("content-security-policy") ?? "";
+  assert.match(await csp(proxyWithOidc), /connect-src 'self' https:\/\/plex\.tv https:\/\/idp\.example\.com;/);
+  const bad = await csp(proxyBadOidc);
+  assert.match(bad, /connect-src 'self' https:\/\/plex\.tv;/);
+  assert.ok(!bad.includes("null"), "a scheme-less issuer must not add the `null` source");
+  assert.match(await csp(proxy), /connect-src 'self' https:\/\/plex\.tv;/, "no issuer, no extra source");
 });

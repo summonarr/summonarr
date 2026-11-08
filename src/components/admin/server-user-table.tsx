@@ -1,20 +1,27 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
-import { Download, Ban, ShieldCheck, Link, Loader2, RefreshCw, Users } from "@/components/icons";
+import { Download, Ban, ShieldCheck, LinkIcon, Loader2, RefreshCw, Users } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { v, type Infer, type Schema } from "@/lib/validate";
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { Switch } from "@/components/ui/switch";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { EmptyState } from "@/components/ui/design";
 import { useT } from "@/components/i18n/i18n-provider";
+import { useMediaQuery } from "@/hooks/use-media-query";
+import { useFocusReturn } from "@/hooks/use-focus-return";
 import type { Translator } from "@/lib/i18n/translate";
+import { MEDIA_SERVER_SOURCES, serverUserView, type MediaServerSource } from "./server-user-groups";
 
 interface ServerUser {
   id: string;
+  // The page hands the column as stored; the table lists "plex" and "jellyfin"
+  // only (server-user-groups.ts), so another value is neither shown nor counted.
   source: string;
   // Multi-server support — "" is the default (and, for a single-server
   // deployment, only) instance. Distinguishes same-named users across two
@@ -63,26 +70,65 @@ const NONE = "__none__";
 // are ADMIN-gated (and the link picker is shown to admins only), while the Users
 // page admits MANAGE_USERS delegates, so a 403 is "you need an administrator",
 // translated — never the route's raw English `{ error: "Forbidden" }` echoed
-// into a French or Spanish UI.
+// into a French or Spanish UI. A 401 reads the same: the auth wrappers answer it
+// for a missing session, and the cron routes (getCronActor) for any non-ADMIN.
 function failureMessage(status: number, serverError: string | undefined, t: Translator): string {
-  if (status === 403) return t("adminManage.serverUsers.requiresAdmin");
+  if (status === 401 || status === 403) return t("adminManage.serverUsers.requiresAdmin");
   return serverError ?? t("adminManage.notif.failed", { status });
 }
 
+type WriteResult<T> = { ok: true; data: T | null } | { ok: false; error: string };
+
+// The one write path for every control on this table. Each caller names the
+// shape it reads from a 2xx (`schema`); a 2xx that isn't that JSON — a proxy's
+// page, a changed route — is a failure, never a silent success. A non-2xx
+// answer goes through failureMessage — or `genericError` for a route whose own
+// errors are untranslated English — and no answer at all (a network failure, a
+// proxy's own 5xx page) is the translated network error. No client timeout: a
+// policy push or the whole policy sync can take longer than any fixed window,
+// and a timeout would roll back a write the server went on to make. The caller
+// owns refresh and any rollback.
+async function sendWrite<S extends Schema<unknown>>(
+  url: string,
+  init: { method: "PATCH" | "POST"; body?: unknown },
+  t: Translator,
+  schema: S,
+  genericError?: string,
+): Promise<WriteResult<Infer<S>>> {
+  const res = await fetchJson(withBasePath(url), {
+    init: init.body === undefined ? { method: init.method } : jsonInit(init.method, init.body),
+    schema: v.nullable(schema),
+  });
+  // Checked against v.nullable(schema) above; TypeScript can't see through the generic.
+  if (res.ok) return { ok: true, data: res.data as Infer<S> | null };
+  if (res.kind === "http") {
+    const authFailure = res.status === 401 || res.status === 403;
+    return { ok: false, error: genericError && !authFailure ? genericError : failureMessage(res.status, res.error || undefined, t) };
+  }
+  if (res.kind === "invalid") return { ok: false, error: genericError ?? failureMessage(res.status, undefined, t) };
+  return { ok: false, error: t("adminManage.serverUsers.networkError") };
+}
+
+// What each write's 2xx carries that a control reads.
+const NO_ANSWER = v.unknown();
+const POLICY_ANSWER = v.object({ pushed: v.optional(v.boolean()), warning: v.optional(v.string()) });
+const POLICY_SYNC_ANSWER = v.object({ ok: v.optional(v.boolean()), skipped: v.optional(v.boolean()), errors: v.optional(v.number()) });
+const BULK_ANSWER = v.object({ pushed: v.optional(v.number()), errors: v.optional(v.number()) });
+
 // DS brand chip recipes (solid brand fill, black text) — the same classes the
 // Users table above uses, so Plex/Jellyfin read as one family down the page.
-const sourceStyles: Record<string, string> = {
+const sourceStyles: Record<MediaServerSource, string> = {
   plex:     "ds-chip-plex",
   jellyfin: "ds-chip-jellyfin",
 };
 
 // Fixed (non-theme) fills, so the initials colour is fixed too: black on the
 // light yellow-600 (white there is ~2.9:1), white on the dark purple-700.
-const avatarColors: Record<string, string> = {
+const avatarColors: Record<MediaServerSource, string> = {
   plex:     "bg-yellow-600",
   jellyfin: "bg-purple-700",
 };
-const avatarText: Record<string, string> = {
+const avatarText: Record<MediaServerSource, string> = {
   plex:     "text-black",
   jellyfin: "text-white",
 };
@@ -110,21 +156,15 @@ function LinkPicker({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(withBasePath(`/api/admin/server-users/${row.id}`), {
+      const result = await sendWrite(`/api/admin/server-users/${row.id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          next === AUTO ? { autoLink: true } : { userId: next === NONE ? null : next },
-        ),
-      });
-      const data = (await res.json().catch(() => null)) as { error?: string } | null;
-      if (!res.ok || data?.error) {
-        setError(failureMessage(res.status, data?.error, t));
+        body: next === AUTO ? { autoLink: true } : { userId: next === NONE ? null : next },
+      }, t, NO_ANSWER);
+      if (!result.ok) {
+        setError(result.error);
         return;
       }
       router.refresh();
-    } catch {
-      setError(t("adminManage.serverUsers.networkError"));
     } finally {
       setLoading(false);
     }
@@ -136,7 +176,7 @@ function LinkPicker({
         {loading ? (
           <Loader2 className="w-3 h-3 animate-spin text-zinc-500 shrink-0" />
         ) : (
-          <Link className={`w-3 h-3 shrink-0 ${row.userId ? "text-zinc-400" : "text-zinc-600"}`} />
+          <LinkIcon className={`w-3 h-3 shrink-0 ${row.userId ? "text-zinc-400" : "text-zinc-600"}`} />
         )}
         {/* The house select (compact = Input's 32px) — text-base below md so
             iOS Safari doesn't zoom on focus; 12px on desktop keeps the row dense. */}
@@ -191,7 +231,7 @@ function LinkedAccountLabel({ row }: { row: ServerUser }) {
   return (
     <div className="flex flex-col gap-1" title={t("adminManage.serverUsers.requiresAdmin")}>
       <div className="flex items-center gap-1.5 min-w-0">
-        <Link className={`w-3 h-3 shrink-0 ${row.userId ? "text-zinc-400" : "text-zinc-600"}`} />
+        <LinkIcon className={`w-3 h-3 shrink-0 ${row.userId ? "text-zinc-400" : "text-zinc-600"}`} />
         <span className="max-w-[170px] truncate text-xs text-zinc-300">{label}</span>
       </div>
       {row.manualUserLink && (
@@ -240,27 +280,22 @@ function DownloadToggle({
     setError(null);
     setWarning(null);
     try {
-      const res = await fetch(withBasePath(`/api/admin/server-users/${userId}`), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ downloadsEnabled: next }),
-      });
-      const data = (await res.json().catch(() => null)) as
-        | { error?: string; pushed?: boolean; warning?: string }
-        | null;
-      if (!res.ok || data?.error) {
+      const result = await sendWrite(
+        `/api/admin/server-users/${userId}`,
+        { method: "PATCH", body: { downloadsEnabled: next } },
+        t,
+        POLICY_ANSWER,
+      );
+      if (!result.ok) {
+        // Refused or never reached the server — roll back the optimistic state.
         setOptimistic(optimistic);
-        setError(failureMessage(res.status, data?.error, t));
+        setError(result.error);
         return;
       }
-      if (data?.pushed === false) {
-        setWarning(data.warning ?? t("adminManage.serverUsers.savedNotPushed"));
+      if (result.data?.pushed === false) {
+        setWarning(result.data.warning ?? t("adminManage.serverUsers.savedNotPushed"));
       }
       router.refresh();
-    } catch {
-      // Network failure — roll back the optimistic state too.
-      setOptimistic(optimistic);
-      setError(t("adminManage.serverUsers.networkError"));
     } finally {
       setLoading(false);
     }
@@ -309,19 +344,35 @@ function SyncUsersButton() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A 200 that is not a clean run: the advisory lock was held (`skipped`), or
+  // some policies failed (`ok: false` — the route keeps 200 on a partial
+  // failure and marks the run degraded). Its English `error` is never shown.
+  const [notice, setNotice] = useState<string | null>(null);
 
   async function sync() {
     setLoading(true);
     setError(null);
+    setNotice(null);
     try {
-      const res = await fetch(withBasePath("/api/cron/sync-download-policies"), { method: "POST" });
-      if (!res.ok) {
-        setError(res.status === 403 ? t("adminManage.serverUsers.requiresAdmin") : t("adminManage.serverUsers.syncFailed"));
+      const result = await sendWrite(
+        "/api/cron/sync-download-policies",
+        { method: "POST" },
+        t,
+        POLICY_SYNC_ANSWER,
+        t("adminManage.serverUsers.syncFailed"),
+      );
+      if (!result.ok) {
+        setError(result.error);
         return;
       }
+      if (result.data?.skipped === true) {
+        setNotice(t("adminManage.serverUsers.syncSkipped"));
+        return;
+      }
+      if (result.data?.ok === false) {
+        setNotice(t("adminManage.serverUsers.syncErrors", { count: result.data.errors ?? 0 }));
+      }
       router.refresh();
-    } catch {
-      setError(t("adminManage.serverUsers.syncFailed"));
     } finally {
       setLoading(false);
     }
@@ -338,9 +389,36 @@ function SyncUsersButton() {
         {loading ? t("adminManage.serverUsers.syncing") : t("adminManage.serverUsers.sync")}
       </button>
       {error && <span role="alert" className="text-xs text-red-400">{error}</span>}
+      {!error && notice && <span role="status" className="text-xs text-amber-400">{notice}</span>}
     </div>
   );
 }
+
+type BulkKind = "disable" | "enable";
+
+// One entry per bulk write, read by both the toolbar and its confirm.
+const BULK_KINDS: Record<BulkKind, {
+  downloadsEnabled: boolean;
+  labelKey: string;
+  confirmKey: string;
+  tone: string;
+  icon: typeof Ban;
+}> = {
+  disable: {
+    downloadsEnabled: false,
+    labelKey: "adminManage.serverUsers.bulk.disableAll",
+    confirmKey: "adminManage.serverUsers.bulk.confirmDisable",
+    tone: "bg-red-500/10 text-red-400 hover:bg-red-500/20",
+    icon: Ban,
+  },
+  enable: {
+    downloadsEnabled: true,
+    labelKey: "adminManage.serverUsers.bulk.enableAll",
+    confirmKey: "adminManage.serverUsers.bulk.confirmEnable",
+    tone: "bg-green-500/10 text-green-400 hover:bg-green-500/20",
+    icon: Download,
+  },
+};
 
 function BulkBar({
   source,
@@ -351,82 +429,118 @@ function BulkBar({
 }) {
   const t = useT();
   const router = useRouter();
-  const [loading, setLoading] = useState<"disable" | "enable" | null>(null);
+  const [loading, setLoading] = useState<BulkKind | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The route saves every row and answers 200 even when some users' policy
+  // could not be pushed to Jellyfin (`errors`). A failed enable-push never
+  // self-heals (the hourly reconcile re-pushes disables only), so say so.
+  const [warning, setWarning] = useState<string | null>(null);
   // A bulk write overwrites every per-user setting and can't be undone (the
   // opposite button restores a uniform state, not the previous mix), so each
   // one asks first — the same inline confirm as the library Resync button.
-  const [confirming, setConfirming] = useState<"disable" | "enable" | null>(null);
+  const [confirming, setConfirming] = useState<BulkKind | null>(null);
+  // The confirm replaces the button that opened it: focus moves into it, and
+  // back to that button on Cancel or (if still lost) when the write ends.
+  const focus = useFocusReturn();
 
-  async function bulk(downloadsEnabled: boolean) {
+  async function bulk(kind: BulkKind) {
     setConfirming(null);
-    setLoading(downloadsEnabled ? "enable" : "disable");
+    setLoading(kind);
     setError(null);
+    setWarning(null);
     try {
-      const res = await fetch(withBasePath("/api/admin/server-users/bulk"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source, downloadsEnabled }),
-      });
-      if (!res.ok) {
-        setError(res.status === 403 ? t("adminManage.serverUsers.requiresAdmin") : t("adminManage.serverUsers.failed"));
+      const result = await sendWrite(
+        "/api/admin/server-users/bulk",
+        { method: "POST", body: { source, downloadsEnabled: BULK_KINDS[kind].downloadsEnabled } },
+        t,
+        BULK_ANSWER,
+      );
+      if (!result.ok) {
+        setError(result.error);
         return;
       }
+      const notPushed = result.data?.errors ?? 0;
+      if (notPushed > 0) setWarning(t("adminManage.serverUsers.bulk.notPushed", { count: notPushed }));
       router.refresh();
-    } catch {
-      setError(t("adminManage.serverUsers.failed"));
     } finally {
+      focus.returnToIfLost(kind);
       setLoading(null);
     }
   }
 
   if (confirming) {
-    const enable = confirming === "enable";
     return (
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs text-zinc-300">
-          {enable ? t("adminManage.serverUsers.bulk.confirmEnable", { label }) : t("adminManage.serverUsers.bulk.confirmDisable", { label })}
-        </span>
-        <button
-          onClick={() => bulk(enable)}
-          className={`px-2 py-0.5 text-xs rounded border transition-colors ${
-            enable
-              ? "border-[var(--ds-border)] bg-green-500/10 text-green-400 hover:bg-green-500/20"
-              : "border-[var(--ds-border)] bg-red-500/10 text-red-400 hover:bg-red-500/20"
-          }`}
-        >
-          {enable ? t("adminManage.serverUsers.bulk.enableAll") : t("adminManage.serverUsers.bulk.disableAll")}
-        </button>
-        <button
-          onClick={() => setConfirming(null)}
-          className="px-2 py-0.5 text-xs rounded border border-zinc-700 text-zinc-400 hover:text-zinc-100 transition-colors"
-        >
-          {t("adminManage.common.cancel")}
-        </button>
-      </div>
+      <BulkConfirm
+        kind={confirming}
+        label={label}
+        onConfirm={() => void bulk(confirming)}
+        onCancel={() => {
+          focus.returnTo(confirming);
+          setConfirming(null);
+        }}
+      />
     );
   }
 
   return (
     <div className="flex items-center gap-2">
       <span className="text-xs text-zinc-500">{label}:</span>
-      <button
-        onClick={() => setConfirming("disable")}
-        disabled={loading !== null}
-        className="flex items-center gap-1 px-2 py-0.5 text-xs rounded border border-[var(--ds-border)] bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
-      >
-        {loading === "disable" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Ban className="w-3 h-3" />}
-        {t("adminManage.serverUsers.bulk.disableAll")}
-      </button>
-      <button
-        onClick={() => setConfirming("enable")}
-        disabled={loading !== null}
-        className="flex items-center gap-1 px-2 py-0.5 text-xs rounded border border-[var(--ds-border)] bg-green-500/10 text-green-400 hover:bg-green-500/20 transition-colors disabled:opacity-50"
-      >
-        {loading === "enable" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
-        {t("adminManage.serverUsers.bulk.enableAll")}
-      </button>
+      {(["disable", "enable"] as const).map((kind) => {
+        const { icon: Icon, labelKey, tone } = BULK_KINDS[kind];
+        return (
+          <button
+            key={kind}
+            ref={focus.refFor(kind)}
+            onClick={() => setConfirming(kind)}
+            disabled={loading !== null}
+            className={`flex items-center gap-1 px-2 py-0.5 text-xs rounded border border-[var(--ds-border)] ${tone} transition-colors disabled:opacity-50`}
+          >
+            {loading === kind ? <Loader2 className="w-3 h-3 animate-spin" /> : <Icon className="w-3 h-3" />}
+            {t(labelKey)}
+          </button>
+        );
+      })}
       {error && <span role="alert" className="text-xs text-red-400">{error}</span>}
+      {!error && warning && <span role="status" className="text-xs text-amber-400">{warning}</span>}
+    </div>
+  );
+}
+
+// The question a bulk write asks first. Focus starts on Cancel — the answer
+// that changes nothing — and the group is labelled by the question, so a
+// screen reader announces it.
+function BulkConfirm({
+  kind,
+  label,
+  onConfirm,
+  onCancel,
+}: {
+  kind: BulkKind;
+  label: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const t = useT();
+  const promptId = useId();
+  const { confirmKey, labelKey, tone } = BULK_KINDS[kind];
+  return (
+    <div role="group" aria-labelledby={promptId} className="flex flex-wrap items-center gap-2">
+      <span id={promptId} className="text-xs text-zinc-300">
+        {t(confirmKey, { label })}
+      </span>
+      <button
+        onClick={onConfirm}
+        className={`px-2 py-0.5 text-xs rounded border transition-colors border-[var(--ds-border)] ${tone}`}
+      >
+        {t(labelKey)}
+      </button>
+      <button
+        autoFocus
+        onClick={onCancel}
+        className="px-2 py-0.5 text-xs rounded border border-zinc-700 text-zinc-400 hover:text-zinc-100 transition-colors"
+      >
+        {t("adminManage.common.cancel")}
+      </button>
     </div>
   );
 }
@@ -438,28 +552,27 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Follow the server value, as DownloadToggle does: useState reads `initial`
+  // once and router.refresh() keeps component state, so another admin's change
+  // (or this one's, re-read) never showed until a full navigation.
+  useEffect(() => {
+    setOn(initial);
+  }, [initial]);
+
   async function toggle() {
     const next = !on;
     setOn(next);
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(withBasePath("/api/admin/server-users"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ autoDisableNew: next }),
-      });
-      const data = (await res.json().catch(() => null)) as { error?: string } | null;
-      if (!res.ok || data?.error) {
+      const result = await sendWrite("/api/admin/server-users", { method: "PATCH", body: { autoDisableNew: next } }, t, NO_ANSWER);
+      if (!result.ok) {
+        // Refused or never reached the server — roll back the optimistic state.
         setOn(on);
-        setError(failureMessage(res.status, data?.error, t));
+        setError(result.error);
         return;
       }
       router.refresh();
-    } catch {
-      // Network failure — roll back the optimistic state too.
-      setOn(on);
-      setError(t("adminManage.serverUsers.networkError"));
     } finally {
       setLoading(false);
     }
@@ -488,113 +601,14 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
 export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts, canLink }: ServerUserTableProps) {
   const t = useT();
   const [search, setSearch] = useState("");
+  // The account control renders in ONE place per row: the mobile stack below
+  // md, the Linked-account column from md up. Mounting it in both kept two
+  // copies of every account <option> per row and split their error state.
+  // null (SSR and hydration) renders the desktop column, like the server did.
+  const mdUp = useMediaQuery("(min-width: 48rem)");
+  const view = useMemo(() => serverUserView(users, search), [users, search]);
 
-  const query = search.trim().toLowerCase();
-  const filtered = query
-    ? users.filter(
-        (u) =>
-          u.username.toLowerCase().includes(query) ||
-          (u.email ?? "").toLowerCase().includes(query),
-      )
-    : users;
-
-  const plexUsers = filtered.filter((u) => u.source === "plex");
-  const jellyfinUsers = filtered.filter((u) => u.source === "jellyfin");
-  const disabledJellyfinCount = jellyfinUsers.filter(
-    (u) => !u.isServerAdmin && u.downloadsEnabled === false,
-  ).length;
-
-  function renderGroup(group: ServerUser[], source: "plex" | "jellyfin") {
-    if (group.length === 0) return null;
-    return group.map((u) => {
-      const initials = u.username.slice(0, 2).toUpperCase();
-
-      return (
-        <tr key={u.id} className="border-b border-zinc-800/50 last:border-0 hover:bg-zinc-800/20 transition-colors">
-          {/* Avatar + name */}
-          {/* max-w-0 + w-full is what lets `truncate` below engage in an
-              auto-layout table: without a width bound a long email widened
-              the table past its wrapper and clipped the Downloads column. */}
-          <td className="py-2.5 pl-4 pr-3 max-w-0 w-full">
-            <div className="flex items-center gap-2.5 min-w-0">
-              {/* Plex/Jellyfin avatar URL comes from an arbitrary upstream host (can't be
-                  added to next/image remotePatterns up front); the shared Avatar falls back
-                  to initials when the thumb is missing or fails to load. */}
-              <Avatar className={`size-7 shrink-0 ${avatarColors[source] ?? "bg-zinc-700"}`}>
-                {u.thumbUrl ? <AvatarImage src={u.thumbUrl} alt={u.username} /> : null}
-                <AvatarFallback className={`bg-transparent text-[10px] font-bold ${avatarText[source] ?? "text-zinc-100"}`}>
-                  {initials}
-                </AvatarFallback>
-              </Avatar>
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-sm font-medium text-zinc-100 truncate">{u.username}</span>
-                  {u.isServerAdmin && (
-                    <ShieldCheck className="w-3 h-3 text-indigo-400 shrink-0" aria-label={t("adminManage.serverUsers.serverAdmin")} />
-                  )}
-                  {!u.active && (
-                    <Badge
-                      className="border-zinc-700 bg-zinc-800 text-zinc-400 text-[10px] shrink-0"
-                      title={t("adminManage.serverUsers.departedTitle")}
-                    >
-                      {t("adminManage.serverUsers.departed")}
-                    </Badge>
-                  )}
-                </div>
-                {u.email && (
-                  <span className="text-[11px] text-zinc-500 truncate block">{u.email}</span>
-                )}
-                {/* The Source and Linked-account columns are hidden on narrow
-                    screens; stack them here so a phone can still tell Plex from
-                    Jellyfin and fix a row's attribution. */}
-                <div className="md:hidden mt-1 flex flex-wrap items-center gap-1.5">
-                  <Badge className={`sm:hidden text-[10px] ${sourceStyles[source] ?? ""}`}>
-                    {mediaInstanceLabel(source, u.serverInstance)}
-                  </Badge>
-                  {canLink ? <LinkPicker row={u} accounts={accounts} /> : <LinkedAccountLabel row={u} />}
-                </div>
-              </div>
-            </div>
-          </td>
-
-          {/* Source badge — includes the instance slug for a named server
-              (e.g. "jellyfin:remote") so a same-named user on two servers of
-              the same provider is distinguishable; unchanged ("jellyfin") for
-              the default/only instance in a single-server deployment. */}
-          <td className="py-2.5 px-3 hidden sm:table-cell">
-            <Badge className={`text-[10px] ${sourceStyles[source] ?? ""}`}>
-              {mediaInstanceLabel(source, u.serverInstance)}
-            </Badge>
-          </td>
-
-          {/* Linked Summonarr account — whose watch history this identity feeds */}
-          <td className="py-2.5 px-3 hidden md:table-cell">
-            {canLink ? <LinkPicker row={u} accounts={accounts} /> : <LinkedAccountLabel row={u} />}
-          </td>
-
-          {/* Downloads toggle (Jellyfin only — Plex sharing API does not support
-              remote toggle). A departed row (guardrail 28) gets the same
-              placeholder as Plex: the route 404s its policy branch because
-              there is no server-side account left to push a policy to, so a
-              live switch there could only ever snap back. */}
-          <td className="py-2.5 pl-3 pr-4 text-right">
-            {source === "jellyfin" && u.active ? (
-              <DownloadToggle
-                userId={u.id}
-                username={u.username}
-                enabled={u.downloadsEnabled}
-                disabled={u.isServerAdmin}
-              />
-            ) : (
-              <span className="text-[11px] text-zinc-500">—</span>
-            )}
-          </td>
-        </tr>
-      );
-    });
-  }
-
-  if (users.length === 0) {
+  if (view.total === 0) {
     return (
       <div className="flex flex-col gap-3 py-2">
         {hasJellyfin && <AutoDisableToggle initial={autoDisableNew} />}
@@ -631,18 +645,14 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts, 
 
       <div className="rounded-xl border border-zinc-800 overflow-x-auto">
         <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-zinc-800 bg-zinc-900/60">
-              <th scope="col" className="py-2 pl-4 pr-3 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500">{t("adminManage.serverUsers.col.user")}</th>
-              <th scope="col" className="py-2 px-3 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hidden sm:table-cell">{t("adminManage.serverUsers.col.source")}</th>
-              <th scope="col" className="py-2 px-3 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hidden md:table-cell">{t("adminManage.serverUsers.col.linked")}</th>
-              <th scope="col" className="py-2 pl-3 pr-4 text-right text-[11px] font-semibold uppercase tracking-wider text-zinc-500">{t("adminManage.serverUsers.col.downloads")}</th>
-            </tr>
-          </thead>
+          <ServerUserTableHead />
           <tbody className="bg-zinc-900/30">
-            {renderGroup(plexUsers, "plex")}
-            {renderGroup(jellyfinUsers, "jellyfin")}
-            {filtered.length === 0 && (
+            {MEDIA_SERVER_SOURCES.flatMap((source) =>
+              view.groups[source].map((u) => (
+                <ServerUserRow key={u.id} u={u} source={source} mdUp={mdUp} canLink={canLink} accounts={accounts} />
+              )),
+            )}
+            {view.shown === 0 && (
               <tr>
                 <td colSpan={4} className="py-6 px-4 text-center text-sm text-zinc-500">
                   {t("adminManage.serverUsers.noMatch", { query: search.trim() })}
@@ -656,15 +666,133 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts, 
       {/* Both counts use the same search-filtered set, so they always agree. */}
       <p className="text-[11px] text-zinc-500">
         {search.trim()
-          ? t("adminManage.serverUsers.countOf", { count: filtered.length, total: users.length })
-          : t("adminManage.serverUsers.count", { count: filtered.length })}
+          ? t("adminManage.serverUsers.countOf", { count: view.shown, total: view.total })
+          : t("adminManage.serverUsers.count", { count: view.shown })}
         {hasJellyfin && (
           <>
             {" · "}
-            {t("adminManage.serverUsers.disabledCount", { count: disabledJellyfinCount })}
+            {t("adminManage.serverUsers.disabledCount", { count: view.disabledJellyfin })}
           </>
         )}
       </p>
     </div>
+  );
+}
+
+function ServerUserTableHead() {
+  const t = useT();
+  const th = "text-[11px] font-semibold uppercase tracking-wider text-zinc-500";
+  return (
+    <thead>
+      <tr className="border-b border-zinc-800 bg-zinc-900/60">
+        <th scope="col" className={`py-2 pl-4 pr-3 text-left ${th}`}>{t("adminManage.serverUsers.col.user")}</th>
+        <th scope="col" className={`py-2 px-3 text-left ${th} hidden sm:table-cell`}>{t("adminManage.serverUsers.col.source")}</th>
+        <th scope="col" className={`py-2 px-3 text-left ${th} hidden md:table-cell`}>{t("adminManage.serverUsers.col.linked")}</th>
+        <th scope="col" className={`py-2 pl-3 pr-4 text-right ${th}`}>{t("adminManage.serverUsers.col.downloads")}</th>
+      </tr>
+    </thead>
+  );
+}
+
+function ServerUserRow({
+  u,
+  source,
+  mdUp,
+  canLink,
+  accounts,
+}: {
+  u: ServerUser;
+  source: MediaServerSource;
+  /** useMediaQuery's answer: null until hydrated, which renders the desktop column. */
+  mdUp: boolean | null;
+  canLink: boolean;
+  accounts: LinkableAccount[];
+}) {
+  const t = useT();
+  const initials = u.username.slice(0, 2).toUpperCase();
+  // Guardrail 34d: the picker for an admin, the binding read-only otherwise.
+  const linkControl = canLink ? <LinkPicker row={u} accounts={accounts} /> : <LinkedAccountLabel row={u} />;
+
+  return (
+    <tr className="border-b border-zinc-800/50 last:border-0 hover:bg-zinc-800/20 transition-colors">
+      {/* Avatar + name */}
+      {/* max-w-0 + w-full is what lets `truncate` below engage in an
+          auto-layout table: without a width bound a long email widened
+          the table past its wrapper and clipped the Downloads column. */}
+      <td className="py-2.5 pl-4 pr-3 max-w-0 w-full">
+        <div className="flex items-center gap-2.5 min-w-0">
+          {/* Plex/Jellyfin avatar URL comes from an arbitrary upstream host (can't be
+              added to next/image remotePatterns up front); the shared Avatar falls back
+              to initials when the thumb is missing or fails to load. */}
+          <Avatar className={`size-7 shrink-0 ${avatarColors[source]}`}>
+            {u.thumbUrl ? <AvatarImage src={u.thumbUrl} alt={u.username} /> : null}
+            <AvatarFallback className={`bg-transparent text-[10px] font-bold ${avatarText[source]}`}>
+              {initials}
+            </AvatarFallback>
+          </Avatar>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span className="text-sm font-medium text-zinc-100 truncate">{u.username}</span>
+              {u.isServerAdmin && (
+                <ShieldCheck className="w-3 h-3 text-indigo-400 shrink-0" aria-label={t("adminManage.serverUsers.serverAdmin")} />
+              )}
+              {!u.active && (
+                <Badge
+                  className="border-zinc-700 bg-zinc-800 text-zinc-400 text-[10px] shrink-0"
+                  title={t("adminManage.serverUsers.departedTitle")}
+                >
+                  {t("adminManage.serverUsers.departed")}
+                </Badge>
+              )}
+            </div>
+            {u.email && (
+              <span className="text-[11px] text-zinc-500 truncate block">{u.email}</span>
+            )}
+            {/* The Source and Linked-account columns are hidden on narrow
+                screens; stack them here so a phone can still tell Plex from
+                Jellyfin and fix a row's attribution. */}
+            <div className="md:hidden mt-1 flex flex-wrap items-center gap-1.5">
+              <Badge className={`sm:hidden text-[10px] ${sourceStyles[source]}`}>
+                {mediaInstanceLabel(source, u.serverInstance)}
+              </Badge>
+              {mdUp === false && linkControl}
+            </div>
+          </div>
+        </div>
+      </td>
+
+      {/* Source badge — includes the instance slug for a named server
+          (e.g. "jellyfin:remote") so a same-named user on two servers of
+          the same provider is distinguishable; unchanged ("jellyfin") for
+          the default/only instance in a single-server deployment. */}
+      <td className="py-2.5 px-3 hidden sm:table-cell">
+        <Badge className={`text-[10px] ${sourceStyles[source]}`}>
+          {mediaInstanceLabel(source, u.serverInstance)}
+        </Badge>
+      </td>
+
+      {/* Linked Summonarr account — whose watch history this identity feeds */}
+      <td className="py-2.5 px-3 hidden md:table-cell">
+        {mdUp !== false && linkControl}
+      </td>
+
+      {/* Downloads toggle (Jellyfin only — Plex sharing API does not support
+          remote toggle). A departed row (guardrail 28) gets the same
+          placeholder as Plex: the route 404s its policy branch because
+          there is no server-side account left to push a policy to, so a
+          live switch there could only ever snap back. */}
+      <td className="py-2.5 pl-3 pr-4 text-right">
+        {source === "jellyfin" && u.active ? (
+          <DownloadToggle
+            userId={u.id}
+            username={u.username}
+            enabled={u.downloadsEnabled}
+            disabled={u.isServerAdmin}
+          />
+        ) : (
+          <span className="text-[11px] text-zinc-500">—</span>
+        )}
+      </td>
+    </tr>
   );
 }

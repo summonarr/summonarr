@@ -111,8 +111,8 @@ const fakePrisma = {
 
 (globalThis as unknown as { prisma: unknown }).prisma = fakePrisma;
 
-const { replacePlexLibraryForInstances, replaceJellyfinLibraryForInstances, BATCH_TX_TIMEOUT, POSTGRES_MAX_BIND_PARAMS } =
-  await import("../src/lib/cron-auth.ts");
+const { replacePlexLibraryForInstances, replaceJellyfinLibraryForInstances } = await import("../src/lib/library-staging.ts");
+const { BATCH_TX_TIMEOUT, POSTGRES_MAX_BIND_PARAMS } = await import("../src/lib/batch-write.ts");
 
 function reset() {
   calls.length = 0;

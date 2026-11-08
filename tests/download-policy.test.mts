@@ -104,6 +104,8 @@ const userStore = new Map<string, UserRow>();
 const sessionStore = new Map<string, { sessionId: string; userId: string }>();
 const auditRows: Array<{ action: string; target: string; userId: string | null; details: string | null }> = [];
 let txThrows = 0; // fail the next N revoke transactions
+let reconcileThrows = 0; // fail the next N reconcile updateManys (a busy pool)
+const settingThrowKeys = new Set<string>(); // setting.findUnique keys that throw
 
 function seedUser(row: Partial<UserRow> & { id: string }, sessions = 2): void {
   userStore.set(row.id, {
@@ -129,6 +131,7 @@ function compoundKeyOf(r: { source: string; serverInstance: string; sourceUserId
 
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) => {
+    if (settingThrowKeys.has(args.where.key)) throw new Error(`setting read failed (unit test): ${args.where.key}`);
     const value = settings.get(args.where.key);
     return value !== undefined ? { key: args.where.key, value } : null;
   },
@@ -243,6 +246,10 @@ shadowPrismaModel(prisma, "mediaServerUser", {
     // like real Prisma (no filter on that field, matching every instance) so a
     // test that deliberately reverts the guardrail-28 scoping exercises the
     // ACTUAL historical bug shape instead of accidentally matching nothing.
+    if (reconcileThrows > 0) {
+      reconcileThrows--;
+      throw new Error("Unable to start a transaction in the given time (unit test)");
+    }
     let count = 0;
     for (const r of msuStore.values()) {
       if (
@@ -369,6 +376,8 @@ function resetOffboarding(): void {
   sessionStore.clear();
   auditRows.length = 0;
   txThrows = 0;
+  reconcileThrows = 0;
+  settingThrowKeys.clear();
   __resetProcessSingletonForTests(OFFBOARD_PENDING_KEY);
   settings.set("jellyfinUrl", DEFAULT_URL);
   settings.set("jellyfinApiKey", "key-default");
@@ -575,4 +584,92 @@ test("offboarding: a failed revoke is reported and retried on the next run", asy
   const second = await syncDownloadPolicies();
   assert.ok(second.every((r) => r.errors === 0), JSON.stringify(second));
   assert.equal(sessionsOf("u-gone"), 0, "the identity stayed pending and is signed out on the retry");
+});
+
+// Offboarding learns of a departure only on the active→inactive TRANSITION, which
+// the sync sees once. The id must reach the pending ledger the moment its
+// inactive write commits: a run that throws AFTER that write (and before the
+// offboarding pass) used to drop it, and every later run read the row as already
+// inactive — the member's sessions (the iOS app's never expire) lived on.
+test("offboarding: a DISABLED member's departure survives a run that throws after the inactive write (the reconcile updateMany fails)", async () => {
+  resetOffboarding();
+  seedRow("row-dis", "j-dis", { userId: "u-dis" });
+  seedRow("row-keep", "j-keep");
+  seedUser({ id: "u-dis", jellyfinUserId: "j-dis" });
+  respond = (url) => {
+    if (url === `${DEFAULT_URL}/Users`) return okJson([user("j-dis", { IsDisabled: true }), user("j-keep")]);
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  reconcileThrows = 1;
+  const first = await syncDownloadPolicies();
+  assert.equal(msuStore.get("row-dis")!.active, false, "precondition: the disabled write committed before the throw");
+  assert.ok(first.some((r) => r.errors > 0), "the failed run is reported");
+
+  const second = await syncDownloadPolicies();
+  assert.ok(second.every((r) => r.errors === 0), JSON.stringify(second));
+  assert.equal(sessionsOf("u-dis"), 0, "the disabled member is signed out despite the failed run");
+  await flush();
+  assert.equal(offboardAudits().length, 1, "exactly once");
+});
+
+test("offboarding: an earlier server's departure survives a run that throws reading a LATER server's config", async () => {
+  resetOffboarding();
+  settings.set("jellyfinRemoteUrl", REMOTE_URL);
+  settings.set("jellyfinRemoteApiKey", "key-remote");
+  settings.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  seedRow("row-gone", "j-gone", { userId: "u-gone" });
+  seedRow("row-keep", "j-keep");
+  seedRow("row-remote", "j-other", { serverInstance: "remote" });
+  seedUser({ id: "u-gone", jellyfinUserId: "j-gone" });
+  respond = (url) => {
+    if (url === `${DEFAULT_URL}/Users`) return okJson([user("j-keep")]);
+    if (url === `${REMOTE_URL}/Users`) return okJson([user("j-other")]);
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  // getJellyfinConfig("remote") runs after the default server's prune committed.
+  settingThrowKeys.add("jellyfinRemoteUrl");
+  await assert.rejects(syncDownloadPolicies(), /setting read failed/);
+  assert.equal(msuStore.get("row-gone")!.active, false, "precondition: the default server's prune committed");
+  assert.equal(sessionsOf("u-gone"), 2, "no offboarding pass ran in the failed run");
+
+  settingThrowKeys.clear();
+  await syncDownloadPolicies();
+  assert.equal(sessionsOf("u-gone"), 0, "the departure was kept and is decided on the next run");
+  await flush();
+  assert.equal(offboardAudits().length, 1);
+});
+
+test("an unchanged server user is not re-written; a changed one is", async () => {
+  settings.clear();
+  msuStore.clear();
+  settings.set("jellyfinUrl", DEFAULT_URL);
+  settings.set("jellyfinApiKey", "key-default");
+  seedMsu({ id: "row-same", source: "jellyfin", serverInstance: "", sourceUserId: "s1", username: "sam", email: null, isServerAdmin: false, downloadsEnabled: true, active: true, manualUserLink: false });
+  seedMsu({ id: "row-renamed", source: "jellyfin", serverInstance: "", sourceUserId: "s2", username: "old-name", email: null, isServerAdmin: false, downloadsEnabled: true, active: true, manualUserLink: false });
+  respond = (url) => {
+    if (url === `${DEFAULT_URL}/Users`) {
+      return okJson([
+        { Id: "s1", Name: "sam", Policy: { IsAdministrator: false, EnableContentDownloading: true } },
+        { Id: "s2", Name: "new-name", Policy: { IsAdministrator: false, EnableContentDownloading: true } },
+      ]);
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const delegate = (prisma as unknown as { mediaServerUser: { upsert: (args: { where: { source_serverInstance_sourceUserId: { sourceUserId: string } } }) => Promise<unknown> } }).mediaServerUser;
+  const original = delegate.upsert;
+  const written: string[] = [];
+  delegate.upsert = async (args) => {
+    written.push(args.where.source_serverInstance_sourceUserId.sourceUserId);
+    return original(args);
+  };
+  try {
+    const results = await syncDownloadPolicies();
+    assert.equal(results[0].upserted, 2, "both are still counted as synced");
+  } finally {
+    delegate.upsert = original;
+  }
+  assert.deepEqual(written, ["s2"]);
+  assert.equal(msuStore.get("row-renamed")!.username, "new-name");
 });

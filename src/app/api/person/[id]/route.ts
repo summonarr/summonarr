@@ -3,6 +3,8 @@ import { withAuth } from "@/lib/api-auth";
 import { getEnrichedPerson } from "@/lib/person";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { isTmdbIdInRange, parseTmdbIdParam } from "@/lib/tmdb-id";
+import { isTmdbNotFound } from "@/lib/tmdb";
 
 // The enrichment lives in getEnrichedPerson (shared with the /person/[id] server
 // page) so the two can't drift. This handler is just auth + rate-limit + the
@@ -18,10 +20,10 @@ export const GET = withAuth(async (
   }
 
   const { id } = await params;
-  const personId = Number(id);
-  // TMDB person ids are whole numbers, so "1.5" or "1e3" is rejected up front
-  // instead of being sent to TMDB.
-  if (!Number.isInteger(personId) || personId <= 0) {
+  // Canonical digits only, so "1.5", "1e3" or " 12 " is rejected up front
+  // instead of being sent to TMDB (Number.isInteger let "1e3" through as 1000).
+  const personId = parseTmdbIdParam(id);
+  if (personId === null || !isTmdbIdInRange(personId)) {
     return NextResponse.json({ error: t("apiUser.person.invalidId") }, { status: 400 });
   }
 
@@ -34,8 +36,7 @@ export const GET = withAuth(async (
     // 5xx, a network error, or a Prisma/enrichment failure must NOT masquerade as
     // a 404 — return 502 so a transient upstream/DB problem is distinguishable
     // from a genuinely missing person.
-    const message = err instanceof Error ? err.message : String(err);
-    if (/failed: 404\b/.test(message)) {
+    if (isTmdbNotFound(err)) {
       return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
     }
     return NextResponse.json({ error: t("apiUser.person.upstreamError") }, { status: 502 });

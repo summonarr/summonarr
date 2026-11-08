@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { logAudit, auditContext } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
+import { BATCH_TX_TIMEOUT } from "@/lib/batch-write";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Cache "sources" map to TmdbCache key prefixes — plus, below, the derived
@@ -14,12 +14,14 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // metadata lives — including the country/language/keyword/watch-provider fields — and previously had
 // no clear button (only a warm one). MDBList and OMDB are the external ratings caches.
 // The tmdb list must name EVERY key namespace src/lib/tmdb.ts writes (a drift pin in
-// tests/review-2026-09-p44.test.mts scans that file): `movies:` is a separate entry because
+// tests/clear-cache-tmdb-prefixes.test.mts scans that file): `movies:` is a separate entry because
 // `movie:` does not prefix-match `movies:popular` / `movies:upcoming` / `movies:top_rated` /
 // `movies:popular:page:<p>` (the "s" precedes the colon), and `search:` / `collection:` were
 // simply missing — search results and collection pages kept serving stale rows after a
 // "cleared" TMDB cache.
-const SOURCE_PREFIXES: Record<string, string[]> = {
+// `satisfies`, not an annotation: the annotation widened the keys to `string`,
+// so Source was `string` and isSource narrowed nothing.
+const SOURCE_PREFIXES = {
   tmdb: [
     "movie:",
     "movies:",
@@ -34,7 +36,7 @@ const SOURCE_PREFIXES: Record<string, string[]> = {
   ],
   mdblist: ["mdblist:"],
   omdb: ["omdb:"],
-};
+} as const satisfies Record<string, readonly string[]>;
 
 type Source = keyof typeof SOURCE_PREFIXES | "all";
 
@@ -43,6 +45,86 @@ function isSource(v: string): v is Source {
   // ?source=toString / constructor / valueOf passed the guard and then blew up
   // on `prefixes.map` — a 500 where the 400 below is the intended answer.
   return v === "all" || Object.hasOwn(SOURCE_PREFIXES, v);
+}
+
+type ClearCounts = { cleared: number; coreCleared: number; edgesCleared: number; verdictsCleared: number };
+
+// TmdbMediaCore and the recommendation graph's edges: denormalized copies of
+// the TMDB data a tmdb clear removes, read without ever consulting TmdbCache.
+async function clearDerivedTmdb(done: ClearCounts): Promise<void> {
+  // TmdbMediaCore is the normalized grid-metadata table (/top, /popular, the
+  // admin library, request-meta, poster-cache). It is written as a
+  // side-effect of the same fetches this clears and read INSTEAD of the JSON
+  // blob, so leaving it behind meant every grid kept the stale title, poster,
+  // year and rating after a "cleared" TMDB cache.
+  done.coreCleared = (await prisma.tmdbMediaCore.deleteMany({})).count;
+
+  // The recommendation graph's edges are copies of TMDB's suggestion lists
+  // (title/overview/poster/backdrop ride on the edge row — readGraphSuggestions
+  // never re-reads TmdbCache), and the node's suggestionsRefreshedAt stamp is
+  // what decides whether they get rebuilt. Clearing one without the other is
+  // not an option in either direction:
+  //   - edges kept + cache cleared  => For You serves the old metadata for a
+  //     full SOURCE_TTL_MS while every other page shows the new;
+  //   - edges deleted + stamp kept  => readGraphSuggestions reports the source
+  //     as COVERED WITH NO SUGGESTIONS, which is an authoritative answer
+  //     (guardrail 40) — full coverage, so the run is conclusive and it
+  //     REPLACES every shelf with a fallback one.
+  // The second is much worse than doing nothing, which is why the unstamp and
+  // the delete share a transaction and the unstamp goes first. Both statements
+  // are unbounded over graph-sized tables (up to ~800k edge rows), so the tx
+  // takes BATCH_TX_TIMEOUT (guardrail 4) — under Prisma's 5s default a large
+  // graph rolled back with P2028 and 500'd a half-applied clear.
+  done.edgesCleared = await prisma.$transaction(async (tx) => {
+    await tx.recommendationTitle.updateMany({
+      data: { suggestionsRefreshedAt: null, suggestionCount: 0 },
+    });
+    const edges = (await tx.titleSuggestion.deleteMany({})).count;
+    // The co-watch edges (guardrail 40c) carry the same denormalized TMDB
+    // display fields. They have no coverage stamp — the next warm run simply
+    // rebuilds them whole — so a plain delete is safe.
+    return edges + (await tx.coWatchSuggestion.deleteMany({})).count;
+  }, { timeout: BATCH_TX_TIMEOUT });
+}
+
+// Runs the clear step by step, setting each count only once its step has
+// COMMITTED, so a clear that fails part-way can report what it removed.
+//
+// The steps are separate statements on purpose. A failure part-way leaves the
+// later tables STALE, never inconsistent — the one pair whose split would be
+// harmful (edges deleted, coverage stamp kept) shares a transaction above —
+// and every step is idempotent, so pressing Clear again finishes the job. One
+// transaction over TmdbCache, TmdbMediaCore and the graph would hold every
+// row lock for the whole wipe, and a large cache would roll the lot back.
+async function clearCaches(source: Source, done: ClearCounts): Promise<void> {
+  const prefixes = source === "all" ? Object.values(SOURCE_PREFIXES).flat() : SOURCE_PREFIXES[source];
+  done.cleared = (await prisma.tmdbCache.deleteMany({
+    where: { OR: prefixes.map((p) => ({ key: { startsWith: p } })) },
+  })).count;
+
+  // ── Everything else derived from the cleared source ──────────────────────
+  // A "clear" that only empties TmdbCache stopped being a reset: three other
+  // tables hold DENORMALIZED COPIES of the same upstream data and are read
+  // without ever consulting TmdbCache, so they kept serving the exact rows the
+  // admin pressed this button to get rid of.
+  if (source === "tmdb" || source === "all") await clearDerivedTmdb(done);
+
+  if (source === "mdblist" || source === "omdb" || source === "all") {
+    // Quality verdicts are derived from MDBList/OMDB, so a ratings clear has to
+    // reach them too — otherwise re-fetched ratings would not affect a single
+    // For You ranking until the verdict's own 7-day TTL rolled. Deliberately
+    // NOT touched by source=tmdb: a verdict has no TMDB input (the graph rates
+    // with voteAverage/voteCount zeroed and the TMDB term is re-blended per
+    // candidate at read time — guardrail 40).
+    done.verdictsCleared = (await prisma.recommendationTitle.updateMany({
+      where: { qualityRatedAt: { not: null } },
+      data: { quality: null, evidence: 0, qualityRatedAt: null },
+    })).count;
+  }
+  // UserRecommendation is deliberately left alone. Its rows are rebuilt from
+  // the graph by the next warm-recommendations run, and clearing them would
+  // blank every user's For You page for up to 12h to save the same staleness
+  // window that leaving them costs. Nothing here may wipe a shelf.
 }
 
 export const DELETE = withAdmin(async (req, _ctx, session) => {
@@ -64,91 +146,26 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
     );
   }
 
-  const prefixes =
-    sourceParam === "all"
-      ? Object.values(SOURCE_PREFIXES).flat()
-      : SOURCE_PREFIXES[sourceParam];
-
-  const { count } = await prisma.tmdbCache.deleteMany({
-    where: { OR: prefixes.map((p) => ({ key: { startsWith: p } })) },
-  });
-
-  // ── Everything else derived from the cleared source ──────────────────────
-  // A "clear" that only empties TmdbCache stopped being a reset: three other
-  // tables hold DENORMALIZED COPIES of the same upstream data and are read
-  // without ever consulting TmdbCache, so they kept serving the exact rows the
-  // admin pressed this button to get rid of.
-  const resetTmdb = sourceParam === "tmdb" || sourceParam === "all";
-  const resetRatings = sourceParam === "mdblist" || sourceParam === "omdb" || sourceParam === "all";
-
-  let coreCleared = 0;
-  let edgesCleared = 0;
-  let verdictsCleared = 0;
-
-  if (resetTmdb) {
-    // TmdbMediaCore is the normalized grid-metadata table (/top, /popular, the
-    // admin library, request-meta, poster-cache). It is written as a
-    // side-effect of the same fetches this clears and read INSTEAD of the JSON
-    // blob, so leaving it behind meant every grid kept the stale title, poster,
-    // year and rating after a "cleared" TMDB cache.
-    coreCleared = (await prisma.tmdbMediaCore.deleteMany({})).count;
-
-    // The recommendation graph's edges are copies of TMDB's suggestion lists
-    // (title/overview/poster/backdrop ride on the edge row — readGraphSuggestions
-    // never re-reads TmdbCache), and the node's suggestionsRefreshedAt stamp is
-    // what decides whether they get rebuilt. Clearing one without the other is
-    // not an option in either direction:
-    //   - edges kept + cache cleared  => For You serves the old metadata for a
-    //     full SOURCE_TTL_MS while every other page shows the new;
-    //   - edges deleted + stamp kept  => readGraphSuggestions reports the source
-    //     as COVERED WITH NO SUGGESTIONS, which is an authoritative answer
-    //     (guardrail 40) — full coverage, so the run is conclusive and it
-    //     REPLACES every shelf with a fallback one.
-    // The second is much worse than doing nothing, which is why the unstamp and
-    // the delete share a transaction and the unstamp goes first. Both statements
-    // are unbounded over graph-sized tables (up to ~800k edge rows), so the tx
-    // takes BATCH_TX_TIMEOUT (guardrail 4) — under Prisma's 5s default a large
-    // graph rolled back with P2028 and 500'd a half-applied clear.
-    await prisma.$transaction(async (tx) => {
-      await tx.recommendationTitle.updateMany({
-        data: { suggestionsRefreshedAt: null, suggestionCount: 0 },
-      });
-      edgesCleared = (await tx.titleSuggestion.deleteMany({})).count;
-      // The co-watch edges (guardrail 40c) carry the same denormalized TMDB
-      // display fields. They have no coverage stamp — the next warm run simply
-      // rebuilds them whole — so a plain delete is safe.
-      edgesCleared += (await tx.coWatchSuggestion.deleteMany({})).count;
-    }, { timeout: BATCH_TX_TIMEOUT });
-  }
-
-  if (resetRatings) {
-    // Quality verdicts are derived from MDBList/OMDB, so a ratings clear has to
-    // reach them too — otherwise re-fetched ratings would not affect a single
-    // For You ranking until the verdict's own 7-day TTL rolled. Deliberately
-    // NOT touched by source=tmdb: a verdict has no TMDB input (the graph rates
-    // with voteAverage/voteCount zeroed and the TMDB term is re-blended per
-    // candidate at read time — guardrail 40).
-    verdictsCleared = (await prisma.recommendationTitle.updateMany({
-      where: { qualityRatedAt: { not: null } },
-      data: { quality: null, evidence: 0, qualityRatedAt: null },
-    })).count;
-  }
-
-  // UserRecommendation is deliberately left alone. Its rows are rebuilt from
-  // the graph by the next warm-recommendations run, and clearing them would
-  // blank every user's For You page for up to 12h to save the same staleness
-  // window that leaving them costs. Nothing here may wipe a shelf.
-
-  // Cache already cleared; a failed audit write must not 500 a successful clear.
-  void logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email,
-    // Reuse the existing cache-clear audit action; the cleared source is carried in details.
+  const done: ClearCounts = { cleared: 0, coreCleared: 0, edgesCleared: 0, verdictsCleared: 0 };
+  // One action for every source (its label reads "Cache cleared"); the source
+  // and what each step removed are in the details. A failed audit write must
+  // not 500 a clear (guardrail 26): logAudit swallows.
+  const audit = (failure?: { failed: true; error: string }) => void logAudit({
+    ...auditActor(req, session),
     action: "RATINGS_CACHE_CLEAR",
     target: "tmdbCache",
-    details: { source: sourceParam, cleared: count, coreCleared, edgesCleared, verdictsCleared },
-    ...auditContext(req, session),
+    details: { source: sourceParam, ...done, ...failure },
   });
 
-  return NextResponse.json({ source: sourceParam, cleared: count, coreCleared, edgesCleared, verdictsCleared });
+  // A destructive half-clear is audited too, with the counts it reached,
+  // before the error propagates.
+  try {
+    await clearCaches(sourceParam, done);
+  } catch (err) {
+    audit({ failed: true, error: (err instanceof Error ? err.message : String(err)).slice(0, 500) });
+    throw err;
+  }
+  audit();
+
+  return NextResponse.json({ source: sourceParam, cleared: done.cleared, coreCleared: done.coreCleared, edgesCleared: done.edgesCleared, verdictsCleared: done.verdictsCleared });
 });

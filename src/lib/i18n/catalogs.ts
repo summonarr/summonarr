@@ -6,7 +6,9 @@
 // so separate areas can be translated in parallel without colliding in one big
 // file. Keys stay fully qualified ("nav.movies") inside each file, and a key
 // may live in only one area — the test fails on a duplicate. Adding an area
-// means adding its import to EVERY locale below.
+// means adding its name to AREA_NAMES and its import to EVERY locale below;
+// AREAS is typed by AREA_NAMES, so a locale missing an area fails to compile
+// instead of silently falling back to English.
 //
 // Statically imported (not lazily): the server translates from every area, and
 // the root layout ships the client-visible subset (see clientCatalog).
@@ -182,9 +184,37 @@ import zhSettingsForms from "./messages/zh/settingsForms.json";
 import zhShared from "./messages/zh/shared.json";
 import zhTrash from "./messages/zh/trash.json";
 
+export const AREA_NAMES = [
+  "adminActivity",
+  "adminArr",
+  "adminManage",
+  "adminQueue",
+  "apiAdmin",
+  "apiAuth",
+  "apiUser",
+  "appearance",
+  "auth",
+  "browse",
+  "detail",
+  "home",
+  "media",
+  "nav",
+  "notify",
+  "personal",
+  "profile",
+  "request",
+  "requests",
+  "search",
+  "settings",
+  "settingsForms",
+  "shared",
+  "trash",
+] as const;
+export type AreaName = (typeof AREA_NAMES)[number];
+
 // Every area of every locale, keyed by area name, so a caller can compose a
 // catalog from the areas it needs. CATALOGS below is the union (server use).
-const AREAS: Record<Locale, Record<string, Messages>> = {
+const AREAS: Record<Locale, Record<AreaName, Messages>> = {
   en: { adminActivity: enAdminActivity, adminArr: enAdminArr, adminManage: enAdminManage, adminQueue: enAdminQueue, apiAdmin: enApiAdmin, apiAuth: enApiAuth, apiUser: enApiUser, appearance: enAppearance, auth: enAuth, browse: enBrowse, detail: enDetail, home: enHome, media: enMedia, nav: enNav, notify: enNotify, personal: enPersonal, profile: enProfile, request: enRequest, requests: enRequests, search: enSearch, settings: enSettings, settingsForms: enSettingsForms, shared: enShared, trash: enTrash },
   es: { adminActivity: esAdminActivity, adminArr: esAdminArr, adminManage: esAdminManage, adminQueue: esAdminQueue, apiAdmin: esApiAdmin, apiAuth: esApiAuth, apiUser: esApiUser, appearance: esAppearance, auth: esAuth, browse: esBrowse, detail: esDetail, home: esHome, media: esMedia, nav: esNav, notify: esNotify, personal: esPersonal, profile: esProfile, request: esRequest, requests: esRequests, search: esSearch, settings: esSettings, settingsForms: esSettingsForms, shared: esShared, trash: esTrash },
   fr: { adminActivity: frAdminActivity, adminArr: frAdminArr, adminManage: frAdminManage, adminQueue: frAdminQueue, apiAdmin: frApiAdmin, apiAuth: frApiAuth, apiUser: frApiUser, appearance: frAppearance, auth: frAuth, browse: frBrowse, detail: frDetail, home: frHome, media: frMedia, nav: frNav, notify: frNotify, personal: frPersonal, profile: frProfile, request: frRequest, requests: frRequests, search: frSearch, settings: frSettings, settingsForms: frSettingsForms, shared: frShared, trash: frTrash },
@@ -194,10 +224,10 @@ const AREAS: Record<Locale, Record<string, Messages>> = {
   zh: { adminActivity: zhAdminActivity, adminArr: zhAdminArr, adminManage: zhAdminManage, adminQueue: zhAdminQueue, apiAdmin: zhApiAdmin, apiAuth: zhApiAuth, apiUser: zhApiUser, appearance: zhAppearance, auth: zhAuth, browse: zhBrowse, detail: zhDetail, home: zhHome, media: zhMedia, nav: zhNav, notify: zhNotify, personal: zhPersonal, profile: zhProfile, request: zhRequest, requests: zhRequests, search: zhSearch, settings: zhSettings, settingsForms: zhSettingsForms, shared: zhShared, trash: zhTrash },
 };
 
-function merge(areas: Record<string, Messages>, pick?: (area: string) => boolean): Messages {
+function merge(areas: Record<AreaName, Messages>, pick?: (area: AreaName) => boolean): Messages {
   const out: Record<string, string> = {};
-  for (const [name, messages] of Object.entries(areas)) {
-    if (!pick || pick(name)) Object.assign(out, messages);
+  for (const name of AREA_NAMES) {
+    if (!pick || pick(name)) Object.assign(out, areas[name]);
   }
   return out;
 }
@@ -219,8 +249,8 @@ export const CATALOGS: Record<Locale, Messages> = Object.fromEntries(
 //
 // Everything else ships to everyone. Server-side translation is unaffected: it
 // reads CATALOGS, which still holds every area.
-export const SERVER_ONLY_AREAS: readonly string[] = ["apiAdmin", "apiAuth", "apiUser"];
-export const ADMIN_ONLY_AREAS: readonly string[] = [
+export const SERVER_ONLY_AREAS: readonly AreaName[] = ["apiAdmin", "apiAuth", "apiUser"];
+export const ADMIN_ONLY_AREAS: readonly AreaName[] = [
   "adminArr",
   "adminManage",
   "adminQueue",
@@ -247,8 +277,8 @@ export function clientCatalog(locale: Locale, includeAdmin: boolean): Messages {
 }
 
 /** Area names that exist for a locale — for tests pinning the two lists above. */
-export function catalogAreas(locale: Locale): string[] {
-  return Object.keys(AREAS[locale]);
+export function catalogAreas(locale: Locale): AreaName[] {
+  return Object.keys(AREAS[locale]) as AreaName[];
 }
 
 export const FALLBACK_MESSAGES: Messages = CATALOGS.en;

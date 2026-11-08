@@ -3,8 +3,10 @@
 // arrFetch/arrFetchNoContent (guardrail 5), and every instance is addressed by
 // its arrInstance slug (guardrail 32): a title can sit in the default, the 4K
 // and a named instance at once, and a cleanup removes it from every one.
+import { createHash } from "node:crypto";
 import { ArrResponseError, arrErrorKind, arrFetch, arrFetchNoContent, getArrCfg, resolveTmdbToTvdb, type ArrCfg } from "./arr";
 import type { ArrErrorKind } from "./arr-error-kind";
+import { asRecord } from "./arr-client";
 import { getSyncableArrInstances } from "./arr-instance-registry";
 import { coalesce, mapLimit, settleLimit } from "./concurrency";
 import { isFeatureEnabled } from "./features";
@@ -13,6 +15,7 @@ import type { NwArrSeasonStat } from "./never-watched";
 import { processSingleton } from "./process-singleton";
 import { safeMessage } from "./arr-parse";
 import { getCache } from "./tmdb-cache";
+import { TmdbToTvdbCache } from "./arr-id-map";
 
 export type ArrService = "radarr" | "sonarr";
 
@@ -134,13 +137,20 @@ async function fetchListing<T>(cfg: ArrCfg, path: string): Promise<T> {
   }
 }
 
+// A listing this code can't read as one (no config by the time it is listed, a
+// body that isn't an array) throws like a failed request: an empty answer would
+// read as a healthy instance holding nothing, and failedArrInstances — which the
+// delete route relies on not to half-delete a title — would never name it.
 async function listInstance(service: ArrService, instance: string): Promise<ArrLibraryEntry[]> {
   const cfg = await getArrCfg(service, instance);
-  if (!cfg) return [];
+  if (!cfg) throw new Error("instance not configured");
   if (service === "radarr") {
-    const rows = await fetchListing<RadarrMovieRow[]>(cfg, "/api/v3/movie");
+    const rows = await fetchListing<unknown>(cfg, "/api/v3/movie");
+    if (!Array.isArray(rows)) throw new Error("unexpected listing body");
     const out: ArrLibraryEntry[] = [];
-    for (const r of Array.isArray(rows) ? rows : []) {
+    for (const row of rows) {
+      const r: RadarrMovieRow | null = asRecord(row);
+      if (!r) continue;
       const arrId = posInt(r.id);
       if (arrId === null) continue;
       out.push({
@@ -155,9 +165,13 @@ async function listInstance(service: ArrService, instance: string): Promise<ArrL
     }
     return out;
   }
-  const rows = await fetchListing<SonarrSeriesRow[]>(cfg, "/api/v3/series");
+  const rows = await fetchListing<unknown>(cfg, "/api/v3/series");
+  if (!Array.isArray(rows)) throw new Error("unexpected listing body");
   const out: ArrLibraryEntry[] = [];
-  for (const r of Array.isArray(rows) ? rows : []) {
+  for (const row of rows) {
+    // Every field is read through a guard below, so the declared shape is a reading aid.
+    const r = asRecord(row) as SonarrSeriesRow | null;
+    if (!r) continue;
     const arrId = posInt(r.id);
     if (arrId === null) continue;
     out.push({
@@ -239,6 +253,10 @@ export function invalidateArrLibraryIndexCache(): void {
   indexCache.gen++;
 }
 
+// `fresh` skips the stored listing, but still joins a listing already in
+// flight for the current generation: every change that could make that listing
+// stale (a cleanup delete, a title manager Add or Remove) invalidates first,
+// which moves the generation, so a joined listing never predates it.
 export async function getCachedArrLibraryIndex(opts: { fresh?: boolean } = {}): Promise<{ index: ArrLibraryIndex; at: Date }> {
   const ttl = indexCache.value && indexCache.value.errors.length > 0 ? INDEX_ERROR_TTL_MS : INDEX_TTL_MS;
   if (!opts.fresh && indexCache.value && Date.now() - indexCache.at < ttl) {
@@ -276,6 +294,18 @@ export function failedArrInstances(index: Pick<ArrLibraryIndex, "errors">, media
   return index.errors.filter((e) => e.service === service).map((e) => e.instance || "default");
 }
 
+// The exact set a cleanup dry run planned — every (title, instance, arr entry) —
+// as one opaque value the execute echoes back (guardrail 14b). The count alone
+// let a same-sized DIFFERENT set through: one copy dropping out while another
+// appeared on a second instance would delete an entry the admin never saw.
+// Order-free (sorted), so only the set matters.
+export function cleanupTargetsFingerprint(
+  plan: ReadonlyArray<{ tmdbId: number; mediaType: CleanupMediaType; targets: ReadonlyArray<Pick<ArrLibraryEntry, "service" | "instance" | "arrId">> }>,
+): string {
+  const lines = plan.flatMap((p) => p.targets.map((t) => `${p.mediaType}:${p.tmdbId}>${t.service}:${t.instance}:${t.arrId}`)).sort();
+  return createHash("sha256").update(lines.join("\n")).digest("hex");
+}
+
 // How a lookup reaches TMDB's tmdb→tvdb cross-reference (resolveTmdbToTvdb).
 // "fetch" — the delete route: a miss is a live TMDB call, awaited, because the
 // delete must find every copy it was asked to remove (14b). "cached" — every
@@ -291,7 +321,7 @@ export function failedArrInstances(index: Pick<ArrLibraryIndex, "errors">, media
 export type CrossRefMode = "fetch" | "cached";
 
 // MUST equal the key resolveTmdbToTvdb (arr.ts) reads and writes — pinned by
-// tests/audit-fix2-R3-cleanup.test.mts.
+// tests/cleanup-read-paths.test.mts.
 export function tmdbToTvdbCacheKey(tmdbId: number): string {
   return `tmdb-to-tvdb:${tmdbId}`;
 }
@@ -317,7 +347,12 @@ function scheduleCrossRefFill(tmdbIds: readonly number[]): void {
   crossRefFill.running = (async () => {
     try {
       while (crossRefFill.queued.size > 0) {
-        const batch = [...crossRefFill.queued].slice(0, CROSS_REF_FILL_BATCH);
+        // Taken off the Set's iterator: copying a 50k queue per batch was quadratic.
+        const batch: number[] = [];
+        for (const id of crossRefFill.queued) {
+          batch.push(id);
+          if (batch.length >= CROSS_REF_FILL_BATCH) break;
+        }
         await mapLimit(batch, CROSS_REF_CONCURRENCY, async (id) => {
           await resolveTmdbToTvdb(id);
         });
@@ -337,62 +372,113 @@ export function crossRefFillIdle(): Promise<void> {
   return crossRefFill.running ?? Promise.resolve();
 }
 
-// tmdbId → TMDB's tvdb id, for the given shows. "cached" answers only what the
-// cache already holds (a miss is absent from the map) and queues the misses.
+// tmdbId → TMDB's tvdb id, for the given shows (null: TMDB names none). An id
+// ABSENT from the map is unknown: in "cached" mode a cache miss (queued for the
+// background fill); in "fetch" mode a lookup that failed — resolveTmdbToTvdb
+// answers null for a failure and for "no tvdb id" alike, and caches only the
+// definitive answer, so a null with no cache row after it is the failure.
 export async function lookupTmdbToTvdb(tmdbIds: readonly number[], mode: CrossRefMode): Promise<Map<number, number | null>> {
   const out = new Map<number, number | null>();
   const ids = [...new Set(tmdbIds)];
   if (mode === "fetch") {
     await mapLimit(ids, CROSS_REF_CONCURRENCY, async (id) => {
-      out.set(id, await resolveTmdbToTvdb(id));
+      const tvdbId = await resolveTmdbToTvdb(id);
+      if (tvdbId !== null || (await cachedCrossRef(id)) !== undefined) out.set(id, tvdbId);
     });
     return out;
   }
   const misses: number[] = [];
   await mapLimit(ids, CROSS_REF_CONCURRENCY, async (id) => {
-    try {
-      const cached = await getCache<{ tvdbId: number | null }>(tmdbToTvdbCacheKey(id));
-      if (cached) out.set(id, cached.tvdbId);
-      else misses.push(id);
-    } catch {
-      // An unreadable cache row is a miss — never a verdict, never a throw.
-      misses.push(id);
-    }
+    const cached = await cachedCrossRef(id);
+    if (cached !== undefined) out.set(id, cached);
+    else misses.push(id);
   });
   if (misses.length > 0) scheduleCrossRefFill(misses);
   return out;
 }
 
+/** The cached cross-reference: the tvdb id, null for "TMDB names none", undefined for no (readable) row. */
+async function cachedCrossRef(tmdbId: number): Promise<number | null | undefined> {
+  try {
+    // The row resolveTmdbToTvdb writes; any other shape is a miss, since its
+    // tvdb id picks which Sonarr series a cleanup deletes.
+    const cached = await getCache(tmdbToTvdbCacheKey(tmdbId), TmdbToTvdbCache);
+    return cached ? cached.tvdbId : undefined;
+  } catch {
+    // An unreadable cache row is a miss — never a verdict, never a throw.
+    return undefined;
+  }
+}
+
+export interface ArrTargets {
+  /** cleanupKey → every instance entry to delete. */
+  targets: Map<string, ArrLibraryEntry[]>;
+  /**
+   * cleanupKey → the tvdb-only Sonarr instances whose copy couldn't be looked
+   * for, because TMDB's cross-reference for the show is unknown (a failed
+   * lookup, or a cache miss on a read path). Such a title may hold a copy the
+   * targets don't list.
+   */
+  unresolved: Map<string, string[]>;
+}
+
 // The delete targets for each title: every instance entry carrying its tmdbId,
-// plus — for a show no Sonarr entry names by tmdbId — the tvdbId-only entries
-// TMDB's own cross-reference points at. Bounded: the TVDB lookup runs only for
-// the selected titles that missed, and only when tvdb-only entries exist at all.
-// `crossRef` is required on purpose: every caller decides whether a miss may
-// cost a TMDB call (the delete route) or must not (a read path).
+// plus — on every Sonarr instance that did not name the show by tmdbId — the
+// tvdbId-only entries TMDB's own cross-reference points at. A v4 Sonarr naming
+// the show doesn't make a v3 instance's tvdb-only copy any less a copy (14b:
+// every holder is a target). Bounded: the TVDB lookup runs only for the
+// selected titles that some tvdb-only instance could still hold, and only when
+// tvdb-only entries exist at all. `crossRef` is required on purpose: every
+// caller decides whether a miss may cost a TMDB call (the delete route) or must
+// not (a read path). A title listed twice is resolved once.
+export async function resolveArrTargetsChecked(
+  items: ReadonlyArray<{ tmdbId: number; mediaType: CleanupMediaType }>,
+  index: ArrLibraryIndex,
+  crossRef: CrossRefMode,
+): Promise<ArrTargets> {
+  const targets = new Map<string, ArrLibraryEntry[]>();
+  const unresolved = new Map<string, string[]>();
+  // The Sonarr instances that list any series tvdb-only — once per call.
+  const tvdbOnlyInstances = new Set<string>();
+  for (const list of index.tvdbOnly.values()) {
+    for (const e of list) if (e.service === "sonarr") tvdbOnlyInstances.add(e.instance);
+  }
+  const misses: Array<{ tmdbId: number; list: ArrLibraryEntry[]; key: string; unmatched: string[] }> = [];
+  for (const it of items) {
+    const key = cleanupKey(it.tmdbId, it.mediaType);
+    if (targets.has(key)) continue;
+    const list = [...(index.byKey.get(key) ?? [])];
+    targets.set(key, list);
+    if (it.mediaType !== "TV" || tvdbOnlyInstances.size === 0) continue;
+    const matched = new Set(list.filter((e) => e.service === "sonarr").map((e) => e.instance));
+    const unmatched = [...tvdbOnlyInstances].filter((i) => !matched.has(i));
+    if (unmatched.length > 0) misses.push({ tmdbId: it.tmdbId, list, key, unmatched });
+  }
+  if (misses.length > 0) {
+    const tvdbOf = await lookupTmdbToTvdb(misses.map((m) => m.tmdbId), crossRef);
+    for (const m of misses) {
+      if (!tvdbOf.has(m.tmdbId)) {
+        unresolved.set(m.key, m.unmatched.map((i) => i || "default"));
+        continue;
+      }
+      const tvdbId = tvdbOf.get(m.tmdbId);
+      if (tvdbId == null) continue;
+      const unmatched = new Set(m.unmatched);
+      for (const e of index.tvdbOnly.get(tvdbId) ?? []) {
+        if (e.service === "sonarr" && unmatched.has(e.instance)) m.list.push(e);
+      }
+    }
+  }
+  return { targets, unresolved };
+}
+
+/** resolveArrTargetsChecked's targets alone — for the read paths, where an unknown cross-reference only means fewer copies. */
 export async function resolveArrTargets(
   items: ReadonlyArray<{ tmdbId: number; mediaType: CleanupMediaType }>,
   index: ArrLibraryIndex,
   crossRef: CrossRefMode,
 ): Promise<Map<string, ArrLibraryEntry[]>> {
-  const out = new Map<string, ArrLibraryEntry[]>();
-  const misses: Array<{ tmdbId: number; key: string }> = [];
-  for (const it of items) {
-    const key = cleanupKey(it.tmdbId, it.mediaType);
-    const hit = index.byKey.get(key) ?? [];
-    out.set(key, [...hit]);
-    if (it.mediaType === "TV" && index.tvdbOnly.size > 0 && !hit.some((e) => e.service === "sonarr")) {
-      misses.push({ tmdbId: it.tmdbId, key });
-    }
-  }
-  if (misses.length > 0) {
-    const tvdbOf = await lookupTmdbToTvdb(misses.map((m) => m.tmdbId), crossRef);
-    for (const m of misses) {
-      const tvdbId = tvdbOf.get(m.tmdbId);
-      if (tvdbId == null) continue;
-      out.get(m.key)!.push(...(index.tvdbOnly.get(tvdbId) ?? []));
-    }
-  }
-  return out;
+  return (await resolveArrTargetsChecked(items, index, crossRef)).targets;
 }
 
 // Removes the title from that instance AND its files, and adds an import-list

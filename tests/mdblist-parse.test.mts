@@ -267,3 +267,11 @@ test("PINS CURRENT BEHAVIOR: a first-alias hit with value null shadows a later a
   const out = parse({ ratings: [src("audience", null), src("popcornrating", 80)] });
   assert.equal(out.rtAudienceScore, null);
 });
+
+test("a malformed `ratings` (an object, or non-object entries) reads as no rating instead of throwing", () => {
+  const fromObject = parse({ ratings: {} as unknown as MdblistBatchRaw["ratings"] });
+  assert.equal(fromObject.imdbRating, null);
+  assert.equal(fromObject.rottenTomatoes, null);
+  const fromJunk = parse({ ratings: [null, 7, "imdb", src("imdb", 6.1)] as unknown as MdblistBatchRaw["ratings"] });
+  assert.equal(fromJunk.imdbRating, "6.1", "the junk entries are skipped, the real one still read");
+});

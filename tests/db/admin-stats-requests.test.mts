@@ -11,8 +11,10 @@ import {
   getPendingQueue,
   getMostWantedPending,
   getStuckRequests,
-  getRequestSources,
+  getAutoRequestSources,
+  requestSources,
   getTopRequesters,
+  getWatchGradeSpreadForStats,
 } from "@/lib/admin-stats-data.ts";
 import { invalidateFeatureFlagCache } from "@/lib/features.ts";
 
@@ -33,6 +35,8 @@ async function seedFulfillment() {
   await makeRequest(u.id, { createdAt: b, approvedAt: plus(b, 1), status: "APPROVED" });
   const c = daysAgo(30); // TV, legacy backfill (approvedAt === createdAt), available a day later
   await makeRequest(u.id, { mediaType: "TV", createdAt: c, approvedAt: c, availableAt: plus(c, 86400), status: "AVAILABLE" });
+  // The one-time backfill ran after `c` was created (request-approval.ts marker).
+  await prisma.setting.create({ data: { key: "requestApprovedAtBackfillRanAt", value: daysAgo(20).toISOString() } });
   // never approved: must not appear in any figure
   await makeRequest(u.id, { createdAt: daysAgo(5), status: "PENDING" });
   await makeRequest(u.id, { createdAt: daysAgo(5), status: "AVAILABLE", availableAt: daysAgo(4) });
@@ -55,6 +59,27 @@ test("getFulfillmentStats without a window: medians, legacy rows, auto vs admin,
   assert.equal(s.byMediaType.TV.download.count, 0);
   assert.equal(s.byMediaType.TV.download.medianSeconds, null);
   assert.deepEqual(s.byMediaType.TV.total, { count: 1, medianSeconds: 86400, p90Seconds: 86400 });
+});
+
+test("getFulfillmentStats: an auto-approve stamped in the same millisecond as createdAt AFTER the backfill is auto-approved, not legacy", async () => {
+  // request-create.ts sets approvedAt: new Date() and Prisma fills createdAt in
+  // the same millisecond most of the time. Equality alone read these as backfill.
+  const u = await makeUser();
+  await prisma.setting.create({ data: { key: "requestApprovedAtBackfillRanAt", value: daysAgo(20).toISOString() } });
+  const d = daysAgo(3);
+  await makeRequest(u.id, { createdAt: d, approvedAt: d, availableAt: plus(d, 5400), status: "AVAILABLE" });
+  const s = await getFulfillmentStats(null);
+  assert.equal(s.autoApproved, 1, "counted as auto-approved");
+  assert.deepEqual(s.download, { count: 1, medianSeconds: 5400, p90Seconds: 5400 }, "its download time counts");
+});
+
+test("getFulfillmentStats with NO backfill marker counts no row as legacy", async () => {
+  const u = await makeUser();
+  const d = daysAgo(3);
+  await makeRequest(u.id, { createdAt: d, approvedAt: d, availableAt: plus(d, 600), status: "AVAILABLE" });
+  const s = await getFulfillmentStats(null);
+  assert.equal(s.autoApproved, 1);
+  assert.equal(s.download.count, 1);
 });
 
 test("getFulfillmentStats with a window: the optional since clause drops the old row", async () => {
@@ -190,10 +215,14 @@ test("getStuckRequests: classifies push-failed / slow-download / not-in-arr and 
   for (const quiet of ["freshMovie", "okMovie", "unpushed"]) assert.equal(reasons.has(ids[quiet]), false, quiet);
   // oldest approval first
   assert.deepEqual(s.oldest.map((r) => r.id).slice(0, 2), [ids.slowMovie, ids.slowTv]);
-  // the limit applies to the list, not to the counts
+  // the limit applies to the list, not to the counts: every reason keeps its
+  // full total, push-failed included although its row is past the cut
   const limited = await getStuckRequests(2);
-  assert.equal(limited.oldest.length, 2);
-  assert.equal(limited.counts["not-in-arr"], 2);
+  assert.deepEqual(limited.oldest.map((r) => r.id), [ids.slowMovie, ids.slowTv]);
+  assert.deepEqual(limited.counts, { "push-failed": 1, "not-in-arr": 2, "slow-download": 2 });
+  const one = await getStuckRequests(1);
+  assert.deepEqual(one.oldest.map((r) => r.id), [ids.slowMovie]);
+  assert.deepEqual(one.counts, { "push-failed": 1, "not-in-arr": 2, "slow-download": 2 });
 });
 
 test("getStuckRequests: a disabled Radarr silences its movie verdicts but not PENDING push failures", async () => {
@@ -207,19 +236,43 @@ test("getStuckRequests: a disabled Radarr silences its movie verdicts but not PE
   assert.ok(!got.has(ids.slowMovie) && !got.has(ids.lostMovie));
 });
 
-test("getRequestSources: ledger sources counted with and without a window", async () => {
+test("getAutoRequestSources: ledger sources counted with and without a window, Trakt apart from the in-app watchlist", async () => {
   const u = await makeUser();
   const r1 = await makeRequest(u.id, { tmdbId: 1, createdAt: daysAgo(2) });
   const r2 = await makeRequest(u.id, { tmdbId: 2, createdAt: daysAgo(2) });
   const r3 = await makeRequest(u.id, { tmdbId: 3, createdAt: daysAgo(40) });
+  const r5 = await makeRequest(u.id, { tmdbId: 5, createdAt: daysAgo(2) });
   await makeRequest(u.id, { tmdbId: 4, createdAt: daysAgo(2) }); // plain web request: no ledger row
-  for (const [r, source, tmdbId] of [[r1, "watchlist", 1], [r2, "plex-watchlist", 2], [r3, "watchlist", 3]] as const) {
+  for (const [r, source, tmdbId] of [
+    [r1, "watchlist", 1], [r2, "plex-watchlist", 2], [r3, "watchlist", 3], [r5, "trakt-watchlist", 5],
+  ] as const) {
     await prisma.autoRequestLedger.create({
       data: { userId: u.id, tmdbId, mediaType: "MOVIE", source, outcome: "requested", requestId: r.id },
     });
   }
-  assert.deepEqual(await getRequestSources(null, 10), { watchlist: 2, plexWatchlist: 1, other: 7 });
-  assert.deepEqual(await getRequestSources(daysAgo(30), 3), { watchlist: 1, plexWatchlist: 1, other: 1 });
+  assert.deepEqual(await getAutoRequestSources(null), { watchlist: 2, plexWatchlist: 1, traktWatchlist: 1 });
+  assert.deepEqual(await getAutoRequestSources(daysAgo(30)), { watchlist: 1, plexWatchlist: 1, traktWatchlist: 1 });
+  // `other` is the window's total less every auto-requested source.
+  assert.deepEqual(requestSources(await getAutoRequestSources(null), 10), { watchlist: 2, plexWatchlist: 1, traktWatchlist: 1, other: 6 });
+  assert.deepEqual(requestSources(await getAutoRequestSources(daysAgo(30)), 4), { watchlist: 1, plexWatchlist: 1, traktWatchlist: 1, other: 1 });
+});
+
+test("getWatchGradeSpreadForStats: grades each ACTIVE requester once, read as a grouped query", async () => {
+  // Tracking on (the grade is hidden without it); the watch-grade flag defaults on.
+  await prisma.setting.createMany({
+    data: [{ key: "playHistoryEnabled", value: "true" }, { key: "playHistoryPlexEnabled", value: "true" }],
+  });
+  invalidateFeatureFlagCache();
+  const active = await makeUser();
+  const gone = await makeUser({ deactivated: true });
+  const idle = await makeUser();
+  // Two fulfilled requests for one active user: still one requester. No
+  // media-server identity is linked, so each is untracked — a signal, no letter.
+  for (const u of [active, active, gone]) {
+    await makeRequest(u.id, { status: "AVAILABLE", createdAt: daysAgo(41), approvedAt: daysAgo(40), availableAt: daysAgo(35) });
+  }
+  await makeRequest(idle.id, { status: "PENDING" });
+  assert.deepEqual(await getWatchGradeSpreadForStats(), { A: 0, B: 0, C: 0, D: 0, F: 0, notGraded: 1 });
 });
 
 test("getTopRequesters: counts per account, tie-broken by name, window and limit", async () => {

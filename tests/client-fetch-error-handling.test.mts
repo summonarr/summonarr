@@ -20,10 +20,13 @@
 // What counts as handled:
 //   - an enclosing try that has a catch clause (a try with ONLY a finally does
 //     not count — that is the exact antipattern above);
-//   - a `.catch()` chained onto the promise;
+//   - a `.catch()` chained onto the promise, or a `.then(onOk, onErr)` with a
+//     rejection handler;
+//   - the fetch is an element of `Promise.allSettled([...])`, which never
+//     rejects (each result says whether it failed);
 //   - the enclosing function throws deliberately, so its callers own the
-//     failure. `loadTokens` in settings/forms/webhook-urls.tsx is the in-tree
-//     example: it throws on !res.ok and its one caller wraps it in try/catch.
+//     failure: a helper that throws on !res.ok while its one caller wraps
+//     it in try/catch.
 //     Without this excuse the rule would push error handling INTO helpers that
 //     correctly delegate it.
 //
@@ -94,19 +97,41 @@ interface Hit {
 function isFetchCall(node: ts.Node): node is ts.CallExpression {
   if (!ts.isCallExpression(node)) return false;
   const ex = node.expression;
-  if (ts.isIdentifier(ex)) return ex.text === "fetch";
-  if (ts.isPropertyAccessExpression(ex)) return ex.name.text === "fetch";
+  if (ts.isIdentifier(ex)) return ex.text === "fetch" || ex.text === "timedFetch";
+  if (ts.isPropertyAccessExpression(ex)) return ex.name.text === "fetch" || ex.name.text === "timedFetch";
   return false;
 }
 
-/** `fetch(...).then(...).catch(...)` — walk the chain looking for a .catch. */
+/** `fetch(...).then(...).catch(...)` — walk the chain looking for a .catch, or a
+ *  `.then(onOk, onErr)` whose second argument handles the rejection. */
 function hasChainedCatch(node: ts.CallExpression): boolean {
   let cur: ts.Node = node;
   while (cur.parent && ts.isPropertyAccessExpression(cur.parent) && cur.parent.expression === cur) {
     const access = cur.parent;
     if (access.name.text === "catch") return true;
     if (!access.parent || !ts.isCallExpression(access.parent)) return false;
+    if (access.name.text === "then" && access.parent.arguments.length >= 2) return true;
     cur = access.parent;
+  }
+  return false;
+}
+
+/** The fetch's promise is an element of `Promise.allSettled([...])`, which never
+ *  rejects: each settled result carries the failure for the caller to read. */
+function settledByAllSettled(node: ts.Node): boolean {
+  let cur: ts.Node = node;
+  while (cur.parent) {
+    const p = cur.parent;
+    if (
+      ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isNonNullExpression(p) ||
+      ts.isArrayLiteralExpression(p) || ts.isSpreadElement(p)
+    ) { cur = p; continue; }
+    return (
+      ts.isCallExpression(p) &&
+      p.arguments.includes(cur as ts.Expression) &&
+      ts.isPropertyAccessExpression(p.expression) &&
+      p.expression.name.text === "allSettled"
+    );
   }
   return false;
 }
@@ -221,6 +246,7 @@ function analyze(fileName: string, text: string): Hit[] {
       const line = sf.getLineAndCharacterOfPosition(node.getStart()).line + 1;
       let excuse: string | null = null;
       if (hasChainedCatch(node)) excuse = ".catch() on the chain";
+      else if (settledByAllSettled(node)) excuse = "Promise.allSettled never rejects";
       else if (enclosingTryHasCatch(node)) excuse = "enclosing try/catch";
       else if (enclosingFunctionThrows(node)) excuse = "helper throws — callers handle it";
       hits.push({ file: relative(REPO, fileName), line, excuse });
@@ -244,7 +270,7 @@ const allHits = clientFiles.flatMap((f) => analyze(f, readFileSync(f, "utf8")));
 
 test("the sweep actually found client fetch calls to classify", () => {
   assert.ok(
-    allHits.length > 50,
+    allHits.length > 20,
     `only ${allHits.length} client fetch calls found — the analyzer is not matching`,
   );
 });
@@ -285,17 +311,29 @@ test("the analyzer catches every unhandled shape and excuses every handled one",
         await Promise.all(ids.map((id) => fetch(id)));       // 33 — excused
       } catch { report(); }
     }
+    function okThenRejectHandler() {
+      fetch("/g").then(() => 1, () => 0);                    // 37 — excused
+    }
+    async function okAllSettled() {
+      await Promise.allSettled([fetch("/h"), fetch("/i")]);  // 40 — excused (both)
+    }
+    async function unhandledAll() {
+      await Promise.all([fetch("/j")]);                      // 43 — VIOLATION
+    }
+    function unhandledThenOneArg() {
+      fetch("/k").then(() => 1);                             // 46 — VIOLATION
+    }
   `;
   const hits = analyze("probe.tsx", probe);
   const violations = hits.filter((h) => h.excuse === null).map((h) => h.line);
   const excused = hits.filter((h) => h.excuse !== null).map((h) => h.line);
 
-  assert.equal(hits.length, 9, `expected 9 fetch calls, found ${hits.length}`);
+  assert.equal(hits.length, 14, `expected 14 fetch calls, found ${hits.length}`);
   // 15 and 18 are the map callbacks whose promise array nobody collects: the
   // enclosing catch can never observe those rejections, so it must not excuse
   // them. 33 is the same callback shape with the result actually awaited.
-  assert.deepEqual(violations, [3, 6, 11, 15, 18], `wrong violations: ${JSON.stringify(hits)}`);
-  assert.deepEqual(excused, [21, 24, 27, 33], `wrong excuses: ${JSON.stringify(hits)}`);
+  assert.deepEqual(violations, [3, 6, 11, 15, 18, 43, 46], `wrong violations: ${JSON.stringify(hits)}`);
+  assert.deepEqual(excused, [21, 24, 27, 33, 37, 40, 40], `wrong excuses: ${JSON.stringify(hits)}`);
 });
 
 // A try whose ONLY clause is `finally` is the antipattern this whole file

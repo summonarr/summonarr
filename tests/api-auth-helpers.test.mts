@@ -1,13 +1,12 @@
 // Unit tests for two module-level guards in src/lib/api-auth.ts (exported for
 // unit tests):
 //
-// hasRole — the role check behind requireAuth/withAdmin/withIssueAdmin. Its
-// hierarchy is deliberately asymmetric: required ADMIN admits ONLY the literal
-// "ADMIN", while required ISSUE_ADMIN admits ADMIN or ISSUE_ADMIN (admins can
-// do everything an issue-admin can, never the reverse). Matching is exact and
-// case-sensitive — role strings come from signed JWT claims minted from the
-// Prisma enum, so any other spelling is a forgery/corruption and must fail
-// closed.
+// hasRole — the role check behind requireAuth/withAdmin. The only role it
+// knows is ADMIN, and it admits ONLY the literal "ADMIN" (issue management is
+// the MANAGE_ISSUES permission, checked by withIssueAdmin, never a role label).
+// Matching is exact and case-sensitive — role strings come from signed JWT
+// claims minted from the Prisma enum, so any other spelling is a
+// forgery/corruption and must fail closed.
 //
 // machineIpAllowed — the per-request IP re-check for machine sessions. The
 // allowlist is snapshotted into the claims at mint time; absent/empty (or a
@@ -44,22 +43,11 @@ test("required ADMIN admits only the literal 'ADMIN'", () => {
   assert.equal(hasRole("", "ADMIN"), false);
 });
 
-test("required ISSUE_ADMIN admits ADMIN or ISSUE_ADMIN, nothing else", () => {
-  assert.equal(hasRole("ADMIN", "ISSUE_ADMIN"), true); // ADMIN superset
-  assert.equal(hasRole("ISSUE_ADMIN", "ISSUE_ADMIN"), true);
-  assert.equal(hasRole("USER", "ISSUE_ADMIN"), false);
-  assert.equal(hasRole(undefined, "ISSUE_ADMIN"), false);
-  assert.equal(hasRole("", "ISSUE_ADMIN"), false);
-});
-
 test("matching is exact and case-sensitive — near-miss spellings fail closed", () => {
-  for (const required of ["ADMIN", "ISSUE_ADMIN"] as const) {
-    assert.equal(hasRole("admin", required), false);
-    assert.equal(hasRole("Admin", required), false);
-    assert.equal(hasRole("issue_admin", required), false);
-    assert.equal(hasRole(" ADMIN", required), false); // no trimming
-    assert.equal(hasRole("SUPER_ADMIN", required), false); // no substring match
-  }
+  assert.equal(hasRole("admin", "ADMIN"), false);
+  assert.equal(hasRole("Admin", "ADMIN"), false);
+  assert.equal(hasRole(" ADMIN", "ADMIN"), false); // no trimming
+  assert.equal(hasRole("SUPER_ADMIN", "ADMIN"), false); // no substring match
 });
 
 // ── machineIpAllowed ────────────────────────────────────────────────────────

@@ -20,6 +20,11 @@
 //
 // Pure and dependency-free so the route and the tests share one definition.
 
+/** A Discord id (a "snowflake"): 17–20 digits. Anything else never names a Discord object. */
+export function isDiscordSnowflake(id: unknown): id is string {
+  return typeof id === "string" && /^\d{17,20}$/.test(id);
+}
+
 export type DiscordGuildVerdict = "ok" | "not-configured" | "wrong-guild";
 
 export function discordGuildVerdict(

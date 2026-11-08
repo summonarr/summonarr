@@ -66,13 +66,10 @@ export function supersededGrabsWhere(grab: {
  */
 export async function recordIssueGrab(data: Prisma.IssueGrabUncheckedCreateInput): Promise<{ id: string }> {
   const grab = await prisma.issueGrab.create({ data });
-  // Without the row's own timestamp there is no safe "earlier" to retire.
-  if (grab.createdAt instanceof Date) {
-    try {
-      await prisma.issueGrab.updateMany({ where: supersededGrabsWhere(grab), data: { notifiedAt: new Date() } });
-    } catch (err) {
-      console.warn("[issues] Recorded the grab but retiring the issue's earlier pending grabs failed:", err);
-    }
+  try {
+    await prisma.issueGrab.updateMany({ where: supersededGrabsWhere(grab), data: { notifiedAt: new Date() } });
+  } catch (err) {
+    console.warn("[issues] Recorded the grab but retiring the issue's earlier pending grabs failed:", err);
   }
   return grab;
 }

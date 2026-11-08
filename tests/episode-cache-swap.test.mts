@@ -1,4 +1,4 @@
-// Unit tests for replaceEpisodeCacheForSource (src/lib/cron-auth.ts) — the
+// Unit tests for replaceEpisodeCacheForSource (src/lib/episode-cache.ts) — the
 // whole-table TVEpisodeCache rewrite shared by the orchestrator, the two
 // per-source resync routes and /api/sync/tv-episodes.
 //
@@ -19,7 +19,12 @@
 //     one source cannot blend their rows (reachable: the orchestrator holds lock
 //     2000, the admin Resync routes do not);
 //   - the runId's staged rows are dropped even when the swap throws;
-//   - an empty row set still clears the table (unchanged from the old shape).
+//   - an empty row set still clears the table (unchanged from the old shape);
+//   - an UNCHANGED set is not rewritten: when the table's own digest (computed
+//     by Postgres) matches this call's rows, nothing is staged or swapped, and
+//     every doubt (no answer, a different count or digest, a failed query) means
+//     the full rewrite above. tests/db/episode-cache-digest.test.mts proves the
+//     JS and SQL digests agree on a real Postgres.
 //
 // No DB: src/lib/prisma.ts caches its client on globalThis, so the fake below is
 // seeded before the module graph loads.
@@ -82,8 +87,17 @@ const txClient = {
   },
 };
 
+// What the fake table "holds" for the unchanged-set check: a digest row, a
+// throw, or (undefined) no answer — which must read as "changed".
+let stored: { rows: number; digest: string | null } | "throw" | undefined;
+
 const fakePrisma = {
   tVEpisodeCacheStaging: stagingModel,
+  $queryRaw: async (query: { text?: string; values?: unknown[] }) => {
+    rec("$queryRaw", { sql: String(query.text ?? "").replace(/\s+/g, " ").trim(), params: query.values });
+    if (stored === "throw") throw new Error("function md5(text) does not exist");
+    return stored === undefined ? [] : [stored];
+  },
   $transaction: async (fn: (tx: typeof txClient) => Promise<unknown>, opts?: unknown) => {
     txOptions = opts;
     rec("$transaction:enter");
@@ -99,7 +113,13 @@ const fakePrisma = {
 
 (globalThis as unknown as { prisma: unknown }).prisma = fakePrisma;
 
-const { replaceEpisodeCacheForSource, BATCH_TX_TIMEOUT, POSTGRES_MAX_BIND_PARAMS } = await import("../src/lib/cron-auth.ts");
+const {
+  replaceEpisodeCacheForSource,
+  episodeCacheDigest,
+  earliestAddedPerEpisode,
+} = await import("../src/lib/episode-cache.ts");
+const { BATCH_TX_TIMEOUT, POSTGRES_MAX_BIND_PARAMS } = await import("../src/lib/batch-write.ts");
+const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
 
 function reset() {
   calls.length = 0;
@@ -107,6 +127,8 @@ function reset() {
   swapThrows = false;
   sweepThrows = false;
   txOptions = undefined;
+  stored = undefined;
+  resetLogDedup();
 }
 
 const rowsOf = (n: number) =>
@@ -240,7 +262,8 @@ test("the sweep runs BEFORE anything is staged", async () => {
 
 test("an empty episode set still clears the table", async () => {
   reset();
-  await replaceEpisodeCacheForSource("plex", []);
+  stored = { rows: 5, digest: "0".repeat(32) };
+  assert.equal(await replaceEpisodeCacheForSource("plex", []), "replaced");
 
   assert.equal(opsOf("staging.createMany").length, 0, "nothing to stage");
   assert.equal(
@@ -270,4 +293,172 @@ test("a library-sized load is chunked, sequentially, still outside the transacti
     loads.every((c) => (c.args as CreateManyArgs).skipDuplicates === true),
     "skipDuplicates survives, so a duplicated episode row cannot fail the load",
   );
+});
+
+// ── The unchanged-set skip ──────────────────────────────────────────────────
+
+const { readFileSync } = await import("node:fs");
+
+type Row = Parameters<typeof episodeCacheDigest>[0][number];
+
+/** What the table holds after a rewrite of `rows` — the digest Postgres would report. */
+const tableHolding = (rows: Row[]) => episodeCacheDigest(earliestAddedPerEpisode(rows));
+
+const richRows = (): Row[] => [
+  { tmdbId: 7, seasonNumber: 1, episodeNumber: 1, episodeName: "Pilot", airDate: "2020-01-01", stillPath: "/a.jpg", runtime: 45, overview: "One.", addedAt: new Date("2024-03-01T10:00:00.123Z") },
+  { tmdbId: 7, seasonNumber: 1, episodeNumber: 2, episodeName: "Two", airDate: null, stillPath: null, runtime: null, overview: null, addedAt: null },
+  { tmdbId: 9, seasonNumber: 2, episodeNumber: 5, episodeName: "", airDate: "2021-06-30", stillPath: "/b.jpg", runtime: 0, overview: "Five.", addedAt: new Date("2023-12-31T23:59:59.999Z") },
+];
+
+test("an unchanged set is neither staged nor swapped — one read, outside any transaction", async () => {
+  reset();
+  const rows = richRows();
+  stored = tableHolding(rows);
+  assert.equal(await replaceEpisodeCacheForSource("plex", rows), "unchanged");
+
+  assert.equal(opsOf("staging.createMany").length, 0, "nothing staged");
+  assert.equal(opsOf("$transaction:enter").length, 0, "no swap transaction");
+  assert.equal(opsOf("tx.tVEpisodeCache.deleteMany").length, 0, "nothing deleted");
+  assert.equal(
+    opsOf("staging.deleteMany").filter((c) => "createdAt" in (c.args as DeleteManyArgs).where).length, 1,
+    "the crashed-run sweep still runs",
+  );
+
+  const reads = opsOf("$queryRaw");
+  assert.equal(reads.length, 1, "one comparison read");
+  assert.equal(reads[0].inTransaction, false);
+  assert.deepEqual(reads[0].params, ["plex"], "the source is a bound parameter");
+  assert.match(reads[0].sql ?? "", /FROM "TVEpisodeCache" WHERE "source" = \$1/);
+  assert.doesNotMatch(reads[0].sql ?? "", /\b(INSERT|UPDATE|DELETE)\b/i, "the comparison never writes");
+});
+
+test("the order rows arrive in does not matter", async () => {
+  reset();
+  stored = tableHolding(richRows());
+  assert.equal(await replaceEpisodeCacheForSource("jellyfin", richRows().reverse()), "unchanged");
+});
+
+test("a change in any single column rewrites", async () => {
+  const changes: Array<[string, (r: Row) => Row]> = [
+    ["tmdbId", (r) => ({ ...r, tmdbId: r.tmdbId + 1000 })],
+    ["seasonNumber", (r) => ({ ...r, seasonNumber: r.seasonNumber + 1 })],
+    ["episodeNumber", (r) => ({ ...r, episodeNumber: r.episodeNumber + 100 })],
+    ["episodeName", (r) => ({ ...r, episodeName: "Renamed" })],
+    ["airDate", (r) => ({ ...r, airDate: "1999-09-09" })],
+    ["stillPath", (r) => ({ ...r, stillPath: "/other.jpg" })],
+    ["runtime", (r) => ({ ...r, runtime: 46 })],
+    ["overview", (r) => ({ ...r, overview: "Changed." })],
+    ["addedAt", (r) => ({ ...r, addedAt: new Date("2024-03-01T10:00:00.124Z") })],
+    ["episodeName → null", (r) => ({ ...r, episodeName: null })],
+  ];
+  for (const [label, change] of changes) {
+    reset();
+    stored = tableHolding(richRows());
+    const rows = richRows();
+    rows[0] = change(rows[0]);
+    assert.equal(await replaceEpisodeCacheForSource("plex", rows), "replaced", label);
+    assert.equal(opsOf("tx.tVEpisodeCache.deleteMany").length, 1, `${label}: the swap ran`);
+  }
+});
+
+test("an added or removed episode rewrites", async () => {
+  reset();
+  stored = tableHolding(richRows());
+  assert.equal(await replaceEpisodeCacheForSource("plex", richRows().slice(1)), "replaced");
+  reset();
+  stored = tableHolding(richRows());
+  assert.equal(
+    await replaceEpisodeCacheForSource("plex", [...richRows(), { tmdbId: 9, seasonNumber: 2, episodeNumber: 6 }]),
+    "replaced",
+  );
+});
+
+test("a matching digest with a different row count still rewrites", async () => {
+  reset();
+  const { digest } = tableHolding(richRows());
+  stored = { rows: 4, digest };
+  assert.equal(await replaceEpisodeCacheForSource("plex", richRows()), "replaced");
+});
+
+test("no answer, or a malformed one, means rewrite", async () => {
+  reset();
+  stored = undefined;
+  assert.equal(await replaceEpisodeCacheForSource("plex", richRows()), "replaced");
+  reset();
+  stored = { rows: "3" as unknown as number, digest: tableHolding(richRows()).digest };
+  assert.equal(await replaceEpisodeCacheForSource("plex", richRows()), "replaced");
+});
+
+test("a failed comparison rewrites, and warns once per change of error", async () => {
+  reset();
+  const warnings: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    stored = "throw";
+    assert.equal(await replaceEpisodeCacheForSource("plex", richRows()), "replaced");
+    assert.equal(await replaceEpisodeCacheForSource("plex", richRows()), "replaced");
+    assert.equal(warnings.length, 1, "an unchanged failure is not repeated every sync (guardrail 7b)");
+    assert.match(warnings[0], /\[episode-cache\] could not compare the stored plex episodes/);
+
+    stored = tableHolding(richRows());
+    assert.equal(await replaceEpisodeCacheForSource("plex", richRows()), "unchanged", "a working check skips again");
+
+    stored = "throw";
+    await replaceEpisodeCacheForSource("plex", richRows());
+    assert.equal(warnings.length, 2, "a failure that comes back after a success is reported again");
+  } finally {
+    console.warn = realWarn;
+  }
+});
+
+test("an empty set against an empty table is a no-op", async () => {
+  reset();
+  stored = { rows: 0, digest: null };
+  assert.equal(await replaceEpisodeCacheForSource("plex", []), "unchanged");
+  assert.equal(opsOf("$transaction:enter").length, 0);
+});
+
+test("duplicates across servers compare as the set the swap would write", async () => {
+  const base = { tmdbId: 7, seasonNumber: 1, episodeNumber: 1, episodeName: "Pilot" };
+  const rows: Row[] = [
+    { ...base, addedAt: new Date("2024-05-01T00:00:00Z") },
+    { ...base, addedAt: new Date("2024-01-01T00:00:00Z") },
+  ];
+  reset();
+  stored = episodeCacheDigest([{ ...base, addedAt: new Date("2024-01-01T00:00:00Z") }]);
+  assert.equal(await replaceEpisodeCacheForSource("plex", rows), "unchanged", "the earliest arrival is what is stored");
+  reset();
+  stored = episodeCacheDigest([{ ...base, addedAt: new Date("2024-05-01T00:00:00Z") }]);
+  assert.equal(await replaceEpisodeCacheForSource("plex", rows), "replaced");
+});
+
+test("the digest tells null from empty, and no value can shift into the next field", () => {
+  const one = (r: Partial<Row>) => episodeCacheDigest([{ tmdbId: 1, seasonNumber: 1, episodeNumber: 1, ...r }]).digest;
+  assert.notEqual(one({ overview: null }), one({ overview: "" }));
+  assert.notEqual(one({ runtime: null }), one({ runtime: 0 }));
+  assert.notEqual(one({ addedAt: null }), one({ addedAt: new Date(0) }));
+  // A naive "|" join renders both of these as "x|y|z".
+  assert.notEqual(one({ episodeName: "x|y", airDate: "z" }), one({ episodeName: "x", airDate: "y|z" }));
+  assert.deepEqual(episodeCacheDigest([]), { rows: 0, digest: null });
+});
+
+test("the digest covers exactly the columns the swap writes, in JS and in SQL", () => {
+  const src = readFileSync(new URL("../src/lib/episode-cache.ts", import.meta.url), "utf8");
+  const schema = readFileSync(new URL("../prisma/schema.prisma", import.meta.url), "utf8");
+
+  const insertCols = (src.match(/INSERT INTO "TVEpisodeCache" \(([^)]*)\)/)?.[1] ?? "")
+    .split(",").map((c) => c.trim().replace(/"/g, "")).filter((c) => c && c !== "source");
+  const sqlBlock = src.match(/const EPISODE_ROW_TEXT_SQL = Prisma\.sql`([\s\S]*?)`;/)?.[1] ?? "";
+  const sqlCols = [...sqlBlock.matchAll(/"(\w+)"/g)].map((m) => m[1]);
+  const jsBody = src.match(/function episodeRowText\([^)]*\)[^{]*\{([\s\S]*?)\n\}/)?.[1] ?? "";
+  const jsCols = [...jsBody.matchAll(/\br\.(\w+)/g)].map((m) => m[1]);
+  const modelBody = schema.match(/model TVEpisodeCache \{([\s\S]*?)\n\}/)?.[1] ?? "";
+  const modelCols = [...modelBody.matchAll(/^\s+(\w+)\s+\w/gm)].map((m) => m[1]).filter((c) => c !== "source");
+
+  const sorted = (xs: string[]) => [...new Set(xs)].sort();
+  assert.ok(insertCols.length >= 9, "found the swap's INSERT column list");
+  assert.deepEqual(sorted(sqlCols), sorted(insertCols), "the SQL digest reads every column the swap writes");
+  assert.deepEqual(sorted(jsCols), sorted(insertCols), "the JS digest reads every column the swap writes");
+  assert.deepEqual(sorted(modelCols), sorted(insertCols), "the swap writes every column of the model");
 });

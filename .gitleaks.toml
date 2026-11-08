@@ -71,9 +71,18 @@
 #    The same release added two more: a NEXTAUTH_SECRET fixture,
 #    "purge-pii-2026-10-20-secret-0123456789ab" (the item-5 shape, one
 #    character short of the counting run), in
-#    tests/audit-2026-10-20-purge-pii.test.mts, and a fourth invented
+#    tests/account-purge-audit-pii.test.mts, and a fourth invented
 #    Discord snowflake, "876543210987654321" (a descending digit run, item
 #    5's pattern), in tests/discord-routes.test.mts.
+#
+# 7. tests/discord-routes.test.mts also configures a Discord application id
+#    and guild id that must be valid snowflakes (the settings registry
+#    checks the shape), so the fixtures are two more invented digit
+#    patterns, "999888777666555444" and "555444333000111222". tests/
+#    trash.test.mts feeds an indexer error message carrying the
+#    self-describing placeholder "SECRET1234567890" to prove the
+#    key is masked before it reaches a response. None is a real value;
+#    each is allowlisted (not edited) because gitleaks scans history.
 
 [extend]
 useDefault = true
@@ -98,4 +107,7 @@ regexes = [
   '''c0ffee0123456789c0ffee0123456789''',
   '''purge-pii-2026-10-20-secret-0123456789ab''',
   '''876543210987654321''',
+  '''999888777666555444''',
+  '''555444333000111222''',
+  '''SECRET1234567890''',
 ]

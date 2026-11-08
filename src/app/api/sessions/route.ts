@@ -10,8 +10,11 @@ import { isIndefiniteDeadline } from "@/lib/session-lifetime";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const GET = withAuth(async (_req, _ctx, session) => {
+  // A row past its deadline is dead (session-refresh refuses it) but stays until
+  // the purge cron sweeps it (guardrail 6c) — don't list it as a live device. A
+  // native session's sentinel deadline is far in the future, so it stays listed.
   const sessions = await prisma.authSession.findMany({
-    where: { userId: session.user.id },
+    where: { userId: session.user.id, expiresAt: { gt: new Date() } },
     orderBy: { lastSeenAt: "desc" },
     select: {
       id:          true,

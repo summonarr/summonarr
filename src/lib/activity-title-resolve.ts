@@ -25,6 +25,9 @@ export type ActivityMediaType = "MOVIE" | "TV";
 export interface UnmappedTitlePair {
   title: string;
   mediaType: ActivityMediaType | null;
+  // Present only when every unmapped entry under this pair agrees on one year.
+  // It narrows a title held under several tmdbIds (two films called "Dune").
+  year?: string;
 }
 
 export interface ResolvedTitle {
@@ -38,6 +41,7 @@ interface TitleEntry {
   title: string;
   tmdbId: number | null;
   mediaType: string | null;
+  year?: string | null;
 }
 
 export function toActivityMediaType(value: string | null | undefined): ActivityMediaType | null {
@@ -50,18 +54,22 @@ export function titleResolveKey(title: string, mediaType: string | null | undefi
 }
 
 // The distinct (title, mediaType) pairs still needing a tmdbId, in first-seen
-// order. Empty titles are dropped — nothing could match them.
+// order. Empty titles are dropped — nothing could match them. A pair carries a
+// year only when its entries all name the same one; mixed or missing years
+// leave it off, so the year never narrows on a guess.
 export function collectUnmappedPairs(items: readonly TitleEntry[]): UnmappedTitlePair[] {
-  const seen = new Set<string>();
-  const out: UnmappedTitlePair[] = [];
+  const byKey = new Map<string, { pair: UnmappedTitlePair; year: string | null | undefined }>();
   for (const m of items) {
     if (m.tmdbId != null || !m.title) continue;
     const mediaType = toActivityMediaType(m.mediaType);
     const key = titleResolveKey(m.title, mediaType);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ title: m.title, mediaType });
+    const year = m.year ? m.year : null;
+    const prior = byKey.get(key);
+    if (!prior) byKey.set(key, { pair: { title: m.title, mediaType }, year });
+    else if (prior.year !== year) prior.year = null;
   }
+  const out: UnmappedTitlePair[] = [];
+  for (const { pair, year } of byKey.values()) out.push(year ? { ...pair, year } : pair);
   return out;
 }
 
@@ -85,6 +93,46 @@ export function addTitleResolutions(
     if (!(key in map)) map[key] = { tmdbId: r.tmdbId, mediaType: toActivityMediaType(r.mediaType) };
   }
   return map;
+}
+
+// The library-table twin of addTitleResolutions. A library can hold one title
+// under several tmdbIds (two films called "Dune", two shows sharing a name), and
+// keeping whichever row the read returned first linked the play to the wrong
+// title. When the play's year is known (`pairs`), only rows of that year count
+// for a title the library holds more than once; a key whose remaining rows still
+// disagree on the tmdbId is left out, so the play keeps no link instead of a
+// guessed one. Keys the map already holds stay as they are.
+export function addUnambiguousTitleResolutions(
+  map: TitleResolveMap,
+  rows: readonly { title: string | null; tmdbId: number | null; mediaType: string | null; year?: string | null }[],
+  pairs: readonly UnmappedTitlePair[] = [],
+): TitleResolveMap {
+  const yearOf = new Map<string, string>();
+  for (const p of pairs) if (p.year) yearOf.set(titleResolveKey(p.title, p.mediaType), p.year);
+  const byKey = new Map<string, { tmdbId: number; mediaType: ActivityMediaType | null; year: string | null }[]>();
+  for (const r of rows) {
+    if (!r.title || r.tmdbId == null) continue;
+    const key = titleResolveKey(r.title, r.mediaType);
+    if (key in map) continue;
+    const list = byKey.get(key) ?? [];
+    list.push({ tmdbId: r.tmdbId, mediaType: toActivityMediaType(r.mediaType), year: r.year ?? null });
+    byKey.set(key, list);
+  }
+  for (const [key, list] of byKey) {
+    const pick = singleTmdbId(list) ?? singleTmdbId(list.filter((c) => c.year != null && c.year === yearForKey(yearOf, key)));
+    if (pick) map[key] = { tmdbId: pick.tmdbId, mediaType: pick.mediaType };
+  }
+  return map;
+}
+
+// A row key is typed; the pair that asked may be type-less (`:<title>`).
+function yearForKey(yearOf: ReadonlyMap<string, string>, key: string): string | undefined {
+  return yearOf.get(key) ?? yearOf.get(`:${key.slice(key.indexOf(":") + 1)}`);
+}
+
+function singleTmdbId<T extends { tmdbId: number }>(list: readonly T[]): T | null {
+  if (list.length === 0) return null;
+  return list.every((c) => c.tmdbId === list[0].tmdbId) ? list[0] : null;
 }
 
 // Exact (type, title) match; a type-less lookup falls back to a typed match,
@@ -123,4 +171,25 @@ export function resolveUnmappedEntry<T extends TitleEntry>(
   const r = lookupTitleResolution(map, entry.title, entry.mediaType);
   if (!r) return entry;
   return { ...entry, tmdbId: r.tmdbId, mediaType: entry.mediaType ?? r.mediaType };
+}
+
+// What the Activity overview may PERSIST onto a live session it resolved. The
+// render backfills ActiveSession.tmdbId so later renders skip the lookup, and
+// the finalize copies it into PlayHistory, while the poller never overwrites a
+// stored id it can't resolve itself. So only an ITEM-level match (the session's
+// own server item, through play history or the library) is written. A
+// title-only match is a guess: same-titled remakes, two shows sharing a name, or
+// a music track matching a film. It stays display-only. Nor is a media type the
+// session lacks invented: the item's own type is written, and a session whose
+// type and item type are both unknown, or disagree, is left for the sync.
+export function sessionBackfill(
+  sessionMediaType: string | null | undefined,
+  resolved: { tmdbId: number; mediaType: string | null; via: "item" | "title" } | undefined,
+): { tmdbId: number; mediaType: ActivityMediaType } | null {
+  if (!resolved || resolved.via !== "item") return null;
+  const own = toActivityMediaType(sessionMediaType);
+  const item = toActivityMediaType(resolved.mediaType);
+  if (own && item && own !== item) return null;
+  const mediaType = own ?? item;
+  return mediaType ? { tmdbId: resolved.tmdbId, mediaType } : null;
 }

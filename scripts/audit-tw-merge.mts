@@ -56,7 +56,7 @@ import { dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
-import { matchGroup } from "../src/lib/tw-merge.ts";
+import { matchGroup, utilityBase } from "../src/lib/tw-merge.ts";
 
 const COLORS = {
   reset: "\x1b[0m",
@@ -230,8 +230,6 @@ function tokensUsedInSrc(): Set<string> {
   return used;
 }
 
-const VARIANT = /^(?:[a-z0-9-]+(?:\/[a-zA-Z0-9_-]+)?|\[[^\]]+\]|data-\[[^\]]+\]|aria-\[[^\]]+\]|group-[a-z0-9-]+(?:\/[a-zA-Z0-9_-]+)?|peer-[a-z0-9-]+(?:\/[a-zA-Z0-9_-]+)?|has-\[[^\]]+\]|supports-\[[^\]]+\]|max-[a-z0-9-]+|min-[a-z0-9-]+):/;
-
 /**
  * The static text of every string literal in one source file — plain strings,
  * JSX attribute strings, and each static chunk of a template literal.
@@ -261,14 +259,15 @@ export function stringLiteralChunks(source: string, fileName = "file.tsx"): stri
   return chunks;
 }
 
-/** Every variant-stripped, whitespace-separated token in one file's string literals. */
+/** Every variant-stripped, whitespace-separated token in one file's string
+ *  literals — stripped by tw-merge's own parse (`utilityBase`), so a token is
+ *  audited exactly as twMerge will classify it. */
 export function classTokensInSource(source: string, fileName = "file.tsx"): Set<string> {
   const used = new Set<string>();
   for (const chunk of stringLiteralChunks(source, fileName)) {
-    for (let token of chunk.split(/\s+/)) {
-      let variant;
-      while ((variant = token.match(VARIANT))) token = token.slice(variant[0].length);
-      if (token) used.add(token.replace(/!$/, ""));
+    for (const raw of chunk.split(/\s+/)) {
+      const token = utilityBase(raw);
+      if (token) used.add(token);
     }
   }
   return used;
@@ -382,13 +381,13 @@ const KIND_HINT: Record<Finding["kind"], string> = {
 const ARBITRARY_FAMILIES = [
   "text", "border", "border-t", "border-x", "border-s", "ring", "ring-offset", "outline", "outline-offset",
   "divide", "divide-x", "divide-y", "shadow", "inset-shadow", "drop-shadow", "text-shadow", "inset-ring",
-  "decoration", "underline-offset", "bg", "stroke", "fill", "leading", "tracking",
+  "decoration", "underline-offset", "bg", "stroke", "fill", "leading", "tracking", "from", "via", "to",
 ];
 const ARBITRARY_VALUES = [
   "[var(--x)]", "[10px]", "[0.5rem]", "[1.5em]", "[-1px]", "[50%]", "[2]", "[#f00]", "[red]", "[currentColor]",
   "[transparent]", "[color:var(--x)]", "[length:var(--x)]", "[calc(1px+2px)]", "[clamp(1px,2px,3px)]",
   "[min(1px,2px)]", "[thin]", "[medium]", "[rgb(1_2_3)]", "[oklch(0.5_0.1_20)]", "[0_0_2px_black]",
-  "(--x)", "(length:--x)", "(color:--x)",
+  "(--x)", "(length:--x)", "(color:--x)", "[url(/x.png)]", "(image:--x)",
 ];
 
 function propsOf(signature: string): { props: Set<string>; suffix: string } {

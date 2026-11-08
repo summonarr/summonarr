@@ -1,14 +1,14 @@
 import "server-only";
 import { prisma } from "./prisma";
-import { setCache, getCacheStale, libraryDetailsTtl } from "./tmdb-cache";
-import { upsertTmdbMediaCore } from "./tmdb-core-sync";
+import { setCache, getCacheStale, libraryDetailsTtl, tmdbDetailsKey } from "./tmdb-cache";
+import { upsertTmdbMediaCore, upsertTmdbMediaCoreMany, type CoreMediaInput } from "./tmdb-core-sync";
+import { check, v } from "./validate";
 import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
 import { iterateLibrary, LIBRARY_PAGE_SIZE } from "./library-iterator";
 import type { LibraryItem } from "./library-iterator";
 import { tmdbAuth } from "./tmdb-auth";
 import type { TmdbMedia } from "./tmdb-types";
-import { extractHomeReleaseDates } from "./home-release-dates";
-import { buildStudioList } from "./studio-list";
+import { buildDetailsMedia, type TmdbDetailsBody } from "./tmdb";
 
 const CONCURRENCY = 5;
 const BATCH_DELAY_MS = 250;
@@ -42,116 +42,19 @@ const UNIFIED_RATINGS_FIELDS = [
   "rogerEbertRating", "releasedDigital",
 ] as const;
 
-interface RawSeason {
-  season_number: number;
-  episode_count: number;
-  air_date?: string | null;
-  poster_path?: string | null;
-  name?: string;
-  overview?: string;
-}
+type PrewarmStats = { fetched: number; missing: number; backfilled: number; skipped: number; failed: number };
 
-interface RawProvider {
-  provider_id: number;
-  provider_name: string;
-  logo_path: string | null;
-}
+// What one title's fetch came to: details stored, a 404 tombstoned (the title
+// isn't on TMDB — a definitive answer, but not a refresh), or no answer
+// (SafeFetchError, non-404 non-2xx such as 429/401/5xx, unparseable body).
+// Those already warned here and must reach the caller's `failed` counter, or a
+// TMDB outage reports as a successful warm. Never throws for those misses, so
+// the page loop keeps going.
+type FetchOutcome = "fetched" | "missing" | "failed";
 
-interface RawItem {
-  id: number;
-  title?: string;
-  name?: string;
-  original_title?: string;
-  original_name?: string;
-  overview?: string;
-  poster_path?: string | null;
-  backdrop_path?: string | null;
-  release_date?: string;
-  first_air_date?: string;
-  last_air_date?: string | null;
-  vote_average?: number;
-  vote_count?: number;
-  seasons?: RawSeason[];
-  videos?: { results?: { key: string; site: string; type: string; official: boolean }[] };
-  belongs_to_collection?: { id: number; name: string } | null;
-
-  runtime?: number;
-  episode_run_time?: number[];
-  status?: string;
-  type?: string;
-  in_production?: boolean;
-  tagline?: string;
-  imdb_id?: string;
-  homepage?: string | null;
-  budget?: number | null;
-  revenue?: number | null;
-  genres?: { id: number; name: string }[];
-  networks?: { id: number; name: string }[];
-  production_companies?: { id: number; name: string }[];
-  production_countries?: { iso_3166_1: string; name: string }[];
-  origin_country?: string[];
-  spoken_languages?: { iso_639_1: string; english_name?: string; name?: string }[];
-  original_language?: string;
-  number_of_seasons?: number;
-  number_of_episodes?: number;
-  next_episode_to_air?: { air_date?: string | null } | null;
-  keywords?: { keywords?: { id: number; name: string }[]; results?: { id: number; name: string }[] };
-  "watch/providers"?: { results?: Record<string, { flatrate?: RawProvider[]; rent?: RawProvider[]; buy?: RawProvider[] }> };
-  external_ids?: { imdb_id?: string | null; tvdb_id?: number | null };
-  release_dates?: { results?: { iso_3166_1: string; release_dates: { certification?: string; type?: number; release_date?: string }[] }[] };
-  content_ratings?: { results?: { iso_3166_1: string; rating?: string }[] };
-}
-
-let pwRegionNames: Intl.DisplayNames | null = null;
-let pwLanguageNames: Intl.DisplayNames | null = null;
-function pwRegion(code: string): string {
-  try { pwRegionNames ??= new Intl.DisplayNames(["en"], { type: "region" }); return pwRegionNames.of(code.toUpperCase()) ?? code; } catch { return code; }
-}
-function pwLanguage(code: string): string {
-  try { pwLanguageNames ??= new Intl.DisplayNames(["en"], { type: "language" }); return pwLanguageNames.of(code) ?? code; } catch { return code; }
-}
-function pwKeywords(raw?: RawItem["keywords"]): { id: number; name: string }[] | undefined {
-  const list = raw?.keywords ?? raw?.results;
-  if (!list?.length) return undefined;
-  return list.slice(0, 12).map((k) => ({ id: k.id, name: k.name }));
-}
-// Mirrors extractTrailerKey in tmdb.ts (not exported there): official YouTube
-// trailer first, then any trailer, then official teaser, then any teaser.
-function pwTrailerKey(videos?: RawItem["videos"]): string | null {
-  if (!videos?.results?.length) return null;
-  const trailers = videos.results.filter((v) => v.site === "YouTube" && v.type === "Trailer");
-  const teasers  = videos.results.filter((v) => v.site === "YouTube" && v.type === "Teaser");
-  const official = trailers.find((v) => v.official) ?? trailers[0] ?? teasers.find((v) => v.official) ?? teasers[0];
-  return official?.key ?? null;
-}
-function pwWatchProviders(raw?: RawItem["watch/providers"], region = "US"): TmdbMedia["watchProviders"] {
-  const r = raw?.results?.[region];
-  if (!r) return undefined;
-  const out: NonNullable<TmdbMedia["watchProviders"]> = [];
-  const seen = new Set<number>();
-  const add = (type: "stream" | "rent" | "buy", list?: RawProvider[]) => {
-    for (const p of list ?? []) {
-      if (seen.has(p.provider_id)) continue;
-      seen.add(p.provider_id);
-      out.push({ type, name: p.provider_name, logoPath: p.logo_path });
-    }
-  };
-  add("stream", r.flatrate); add("rent", r.rent); add("buy", r.buy);
-  return out.length ? out : undefined;
-}
-
-// Resolves `true` when TMDB gave a definitive answer (details stored, or a 404
-// tombstoned) and `false` when it didn't (SafeFetchError, non-404 non-2xx such
-// as 429/401/5xx, unparseable body) — those already warned here and must reach
-// the caller's `failed` counter, or a TMDB outage reports as a successful warm.
-// Never throws for those misses, so the page loop keeps going.
-async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise<boolean> {
+function prewarmUrl(tmdbId: number, mediaType: "MOVIE" | "TV"): string {
   const type = mediaType === "MOVIE" ? "movie" : "tv";
-  const auth = tmdbAuth();
-  if (!auth) return false;
-
   const url = new URL(`${TMDB_BASE}/${type}/${tmdbId}`);
-  for (const [k, v] of Object.entries(auth.query)) url.searchParams.set(k, v);
   // release_dates/content_ratings included so the prewarm rewrite of the shared
   // :details blob (and the TmdbMediaCore upsert) carries the US certification —
   // omitting them made every prewarm refresh silently drop a previously-stored
@@ -165,343 +68,332 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
       ? "seasons,keywords,watch/providers,external_ids,content_ratings,videos"
       : "keywords,watch/providers,external_ids,release_dates,videos",
   );
+  return url.toString();
+}
 
+// The parts of a details body buildDetailsMedia dereferences without a guard:
+// an id, and every nested list it filters or maps must be a list when present.
+const results = v.optional(v.object({ results: v.optional(v.array(v.unknown())) }));
+const DETAILS_ENVELOPE = v.object({
+  id: v.int(),
+  seasons: v.optional(v.array(v.unknown())),
+  genres: v.optional(v.array(v.unknown())),
+  production_companies: v.optional(v.array(v.unknown())),
+  production_countries: v.optional(v.array(v.unknown())),
+  release_dates: results,
+  content_ratings: results,
+  videos: results,
+});
+
+// TMDB's details body, "missing" for a 404, or null when there was no usable
+// answer (already warned).
+async function fetchDetailsBody(
+  tmdbId: number,
+  mediaType: "MOVIE" | "TV",
+  headers: Record<string, string>,
+): Promise<TmdbDetailsBody | "missing" | null> {
+  const label = `${mediaType === "MOVIE" ? "movie" : "tv"}:${tmdbId}`;
   let res: Response;
   try {
     // Use safeFetchTrusted instead of Next.js fetch so the request bypasses the Next cache and
     // never gets deduped or revalidated against a stale store entry.
-    res = await safeFetchTrusted(url.toString(), {
+    res = await safeFetchTrusted(prewarmUrl(tmdbId, mediaType), {
       allowedHosts: ["api.themoviedb.org"],
-      headers: auth.headers,
+      headers,
       timeoutMs: TMDB_FETCH_TIMEOUT_MS,
     });
   } catch (err) {
     if (err instanceof SafeFetchError) {
-      console.warn(`[prewarm] TMDB ${type}:${tmdbId} → ${err.reason} (${err.message})`);
-      return false;
+      console.warn(`[prewarm] TMDB ${label} → ${err.reason} (${err.message})`);
+      return null;
     }
     throw err;
   }
   if (!res.ok) {
-    if (res.status === 404) {
-      // Tombstone the dead id so the triage skips it on later runs. Silent —
-      // the title simply isn't on TMDB; noise here would flood every run.
-      await setCache(`${type}:${tmdbId}:details:missing`, { _notFound: true }, MISSING_TOMBSTONE_TTL);
-      return true;
-    }
-    console.warn(`[prewarm] TMDB ${type}:${tmdbId} → HTTP ${res.status}`);
-    return false;
+    // Nothing reads a refused answer's body; release the connection.
+    await res.body?.cancel().catch(() => {});
+    if (res.status === 404) return "missing";
+    console.warn(`[prewarm] TMDB ${label} → HTTP ${res.status}`);
+    return null;
   }
 
   // Read as text first so we can log a diagnostic snippet if JSON parsing fails — `await res.json()`
   // throws a SyntaxError whose message renders non-printable leading bytes invisibly ("Unexpected
   // token '', \"\"..."), making the failure mode impossible to diagnose from the log alone.
   const bodyText = await res.text();
-  let raw: RawItem;
   try {
-    raw = JSON.parse(bodyText) as RawItem;
+    const body: unknown = JSON.parse(bodyText);
+    const parsed = check(DETAILS_ENVELOPE, body);
+    if (!parsed.ok) {
+      console.warn(`[prewarm] TMDB ${label} answered an unusable body: ${parsed.error}`);
+      return null;
+    }
+    // The checked copy keeps only the envelope's keys; the builder reads the
+    // full body, so hand it the original.
+    return body as TmdbDetailsBody;
   } catch (err) {
     const head = bodyText.slice(0, 80);
     const hex = Buffer.from(bodyText.slice(0, 16), "utf-8").toString("hex");
     console.warn(
-      `[prewarm] TMDB ${type}:${tmdbId} JSON.parse failed (len=${bodyText.length}, ` +
+      `[prewarm] TMDB ${label} JSON.parse failed (len=${bodyText.length}, ` +
       `ce=${res.headers.get("content-encoding") ?? "none"}, ` +
       `ct=${res.headers.get("content-type") ?? "none"}, head=${JSON.stringify(head)}, hex=${hex}):`,
       err instanceof Error ? err.message : String(err),
     );
-    return false;
+    return null;
   }
-  const rawDate = mediaType === "MOVIE" ? raw.release_date : raw.first_air_date;
-  // US certification, extracted the same way getMovieDetails/getTVDetails do.
-  const certification =
-    (mediaType === "MOVIE"
-      ? raw.release_dates?.results?.find((x) => x.iso_3166_1 === "US")
-          ?.release_dates.find((d) => d.certification)?.certification
-      : raw.content_ratings?.results?.find((x) => x.iso_3166_1 === "US")?.rating) || undefined;
-
-  const seasons = mediaType === "TV"
-    ? (raw.seasons ?? [])
-        .filter((s) => s.season_number > 0 && s.episode_count > 0)
-        .map((s) => ({
-          seasonNumber: s.season_number,
-          episodeCount: s.episode_count,
-          airDate: s.air_date ?? null,
-          posterPath: s.poster_path ?? null,
-          name: s.name ?? `Season ${s.season_number}`,
-          overview: s.overview ?? "",
-        }))
-    : undefined;
-
-  const title = (mediaType === "MOVIE" ? raw.title : raw.name) ?? "";
-  // null (not "Unknown") — the normalize writers (tmdb.ts) use null for a
-  // missing year, and both persist the same :details key / TmdbMediaCore row.
-  const releaseYear = rawDate ? rawDate.substring(0, 4) : null;
-  const originalTitle = mediaType === "MOVIE" ? raw.original_title : raw.original_name;
-  const studios = (mediaType === "TV" && raw.networks?.length ? raw.networks : raw.production_companies) ?? [];
-  const countries = raw.production_countries?.length
-    ? raw.production_countries.map((c) => c.name || pwRegion(c.iso_3166_1))
-    : (raw.origin_country?.map(pwRegion) ?? []);
-  // ISO codes beside the display names: the anime auto-route matches "JP"
-  // against these, and the normalize writers (tmdb.ts) store them under this
-  // same :details key — TV prefers origin_country (already ISO codes), movies
-  // take production_countries.
-  const countryCodes = mediaType === "TV" && raw.origin_country?.length
-    ? raw.origin_country
-    : (raw.production_countries?.length
-        ? raw.production_countries.map((c) => c.iso_3166_1)
-        : (raw.origin_country ?? []));
-  // Index-aligned with `countries` (normalizeMovie/normalizeTV store the same
-  // pairing as `productionCountryCodes`). Omitting it made every prewarm rewrite
-  // drop the codes localizedProductionCountry needs, so a non-English viewer got
-  // TMDB's English country name for library titles.
-  const productionCountryCodes = raw.production_countries?.length
-    ? raw.production_countries.map((c) => c.iso_3166_1)
-    : (raw.origin_country ?? []);
-  // Match the normalize shape (src/lib/tmdb.ts): `genres`/`keywords` = names (back-compat),
-  // `genreList`/`keywordList` = id+name. Both writers persist the same `:details` cache key.
-  const genreObjs = raw.genres?.map((g) => ({ id: g.id, name: g.name })) ?? [];
-  const keywordObjs = pwKeywords(raw.keywords) ?? [];
-
-  // Carry-forward read (stale/expired-in-place rows still serve here; a row the
-  // purge already deleted has nothing to carry). See UNIFIED_RATINGS_FIELDS.
-  const prior = (await getCacheStale<Partial<TmdbMedia>>(`${type}:${tmdbId}:details`)).value;
-  const carriedRatings: Record<string, unknown> = {};
-  if (prior) {
-    for (const f of UNIFIED_RATINGS_FIELDS) {
-      // undefined = never ratings-fetched (keep it undefined so the details
-      // lazy-upgrade can still fire); null = authoritative "no rating" — both
-      // distinctions must survive the rewrite, so only defined values carry.
-      if (prior[f] !== undefined) carriedRatings[f] = prior[f];
-    }
-  }
-  const newTrailerKey = pwTrailerKey(raw.videos);
-  // assignUnifiedRatings' guard, preserved across the rewrite: trailerUrl only
-  // ever fills in when TMDB itself has no trailer.
-  if (!newTrailerKey && prior?.trailerUrl !== undefined) carriedRatings.trailerUrl = prior.trailerUrl;
-
-  await setCache(`${type}:${tmdbId}:details`, {
-    ...carriedRatings,
-    id: raw.id,
-    mediaType: type,
-    title,
-    // `?? ""` (not null) — TmdbMedia.overview is a non-nullable string and the
-    // normalize writers use "", so the shared :details key keeps one nullability.
-    overview: raw.overview ?? "",
-    posterPath: raw.poster_path ?? null,
-    backdropPath: raw.backdrop_path ?? null,
-    releaseDate: rawDate ?? null,
-    releaseYear,
-    voteAverage: raw.vote_average ?? 0,
-    voteCount: raw.vote_count ?? 0,
-    ...(certification && { certification }),
-    // Same extraction as getMovieDetails — omitting it would erase the detail
-    // page's Release dates section on every prewarm rewrite (the cert-drop class).
-    ...(mediaType === "MOVIE" && (() => {
-      const home = extractHomeReleaseDates(raw.release_dates);
-      return { digitalReleaseDate: home.digital, physicalReleaseDate: home.physical };
-    })()),
-    ...(seasons !== undefined && { seasons }),
-    // trailerKey/collection mirror getMovieDetails/getTVDetails — omitting them
-    // made every prewarm refresh erase the trailer button and the collection
-    // row from library titles' detail pages (see the append_to_response note).
-    trailerKey: newTrailerKey,
-    ...(mediaType === "MOVIE" && raw.belongs_to_collection
-      ? { collectionId: raw.belongs_to_collection.id, collectionName: raw.belongs_to_collection.name }
-      : {}),
-
-    genres:          genreObjs.map((g) => g.name),
-    genreList:       genreObjs,
-    studios:         studios.map((c) => c.name),
-    studioList:      buildStudioList(mediaType, raw.networks, raw.production_companies),
-    tagline:         raw.tagline ?? null,
-    status:          raw.status ?? null,
-    // /tv carries no top-level imdb_id — it lives in the appended external_ids,
-    // so reading only raw.imdb_id nulled the id on every TV rewrite. `prior` is
-    // the last fallback because a ratings hit can supply one TMDB never had.
-    imdbId:          raw.external_ids?.imdb_id ?? raw.imdb_id ?? prior?.imdbId ?? null,
-    runtime:         raw.runtime ?? (raw.episode_run_time?.[0] ?? null),
-    numberOfSeasons: raw.number_of_seasons ?? null,
-    numberOfEpisodes: raw.number_of_episodes ?? null,
-
-    originalTitle:       originalTitle && originalTitle !== title ? originalTitle : null,
-    originalLanguage:    raw.original_language ?? null,
-    spokenLanguages:     raw.spoken_languages?.map((l) => l.english_name || l.name || pwLanguage(l.iso_639_1)) ?? [],
-    productionCountries: countries,
-    productionCountryCodes,
-    originCountryCodes:  countryCodes,
-    homepage:            raw.homepage || null,
-    budget:              raw.budget || null,
-    revenue:             raw.revenue || null,
-    keywords:            keywordObjs.map((k) => k.name),
-    keywordList:         keywordObjs,
-    watchProviders:      pwWatchProviders(raw["watch/providers"]) ?? [],
-    tvdbId:              raw.external_ids?.tvdb_id ?? null,
-    lastAirDate:         raw.last_air_date ?? null,
-    inProduction:        raw.in_production ?? null,
-    tvType:              raw.type ?? null,
-    nextEpisodeAirDate:  raw.next_episode_to_air?.air_date ?? null,
-  }, libraryDetailsTtl(rawDate));
-  await upsertTmdbMediaCore({
-    id: raw.id,
-    mediaType: type,
-    title,
-    overview: raw.overview ?? "",
-    posterPath: raw.poster_path ?? null,
-    backdropPath: raw.backdrop_path ?? null,
-    releaseDate: rawDate ?? null,
-    releaseYear,
-    voteAverage: raw.vote_average ?? 0,
-    ...(certification && { certification }),
-  });
-  return true;
 }
 
-async function processPrewarmPage(
-  page: LibraryItem[],
-  stats: { fetched: number; backfilled: number; skipped: number; failed: number },
-  signal?: AbortSignal,
-): Promise<void> {
-  const cacheKey = (i: LibraryItem) =>
-    `${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}:details`;
+// The unified-ratings fields (and the never-displace-a-trailerKey trailerUrl)
+// carried forward from the previous row, which this rewrite cannot re-derive.
+// See UNIFIED_RATINGS_FIELDS.
+function carriedForward(prior: Partial<TmdbMedia> | null, media: TmdbMedia): Record<string, unknown> {
+  const carried: Record<string, unknown> = {};
+  if (!prior) return carried;
+  for (const f of UNIFIED_RATINGS_FIELDS) {
+    // undefined = never ratings-fetched (keep it undefined so the details
+    // lazy-upgrade can still fire); null = authoritative "no rating" — both
+    // distinctions must survive the rewrite, so only defined values carry.
+    if (prior[f] !== undefined) carried[f] = prior[f];
+  }
+  // assignUnifiedRatings' guard, preserved across the rewrite: trailerUrl only
+  // ever fills in when TMDB itself has no trailer.
+  if (!media.trailerKey && prior.trailerUrl !== undefined) carried.trailerUrl = prior.trailerUrl;
+  return carried;
+}
 
-  const keys = page.map(cacheKey);
-  const missingKey = (i: LibraryItem) => `${cacheKey(i)}:missing`;
-  const cacheRows = await prisma.tmdbCache.findMany({
-    where: { key: { in: [...keys, ...page.map(missingKey)] } },
-    select: { key: true, cachedAt: true, expiresAt: true },
-  });
-  const freshKeySet = new Set<string>();
+async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise<FetchOutcome> {
+  const auth = tmdbAuth();
+  if (!auth) return "failed";
+  const type = mediaType === "MOVIE" ? "movie" : "tv";
+  const body = await fetchDetailsBody(tmdbId, mediaType, auth.headers);
+  if (body === null) return "failed";
+  if (body === "missing") {
+    // Tombstone the dead id so the triage skips it on later runs. Silent —
+    // the title simply isn't on TMDB; noise here would flood every run.
+    await setCache(`${tmdbDetailsKey(type, tmdbId)}:missing`, { _notFound: true }, MISSING_TOMBSTONE_TTL);
+    return "missing";
+  }
+
+  // The same builder getMovieDetails/getTVDetails write this key with, so the
+  // stored shape never depends on which writer filled it.
+  const media = buildDetailsMedia(body, type);
+  const key = tmdbDetailsKey(type, tmdbId);
+  // Carry-forward read (stale/expired-in-place rows still serve here; a row the
+  // purge already deleted has nothing to carry).
+  const prior = (await getCacheStale<Partial<TmdbMedia>>(key)).value;
+  const carried = carriedForward(prior, media);
+  // TMDB's external_ids answer first; `prior` is the fallback because a ratings
+  // hit can supply an id TMDB never had.
+  media.imdbId = media.imdbId ?? prior?.imdbId ?? null;
+
+  await setCache(key, { ...carried, ...media }, libraryDetailsTtl(media.releaseDate));
+  await upsertTmdbMediaCore(media);
+  return "fetched";
+}
+
+type PageTriage = { fresh: LibraryItem[]; dead: LibraryItem[]; stale: LibraryItem[] };
+
+const detailsKeyOf = (i: LibraryItem) => tmdbDetailsKey(i.mediaType, i.tmdbId);
+const missingKeyOf = (i: LibraryItem) => `${detailsKeyOf(i)}:missing`;
+
+// Sorts a page by its cache rows. "Fresh" means the row still has more than
+// 25% of its original TTL remaining — below that threshold it's cheaper to
+// re-fetch now than risk a cache miss in production during peak traffic. A
+// LIVE `:missing` tombstone (a TMDB 404 on a prior run) marks a known-dead id,
+// skipped without a fetch — but a fresh row wins over a tombstone: a later
+// fix-match that repopulated the blob serves. The raw rows include expired
+// ones, so expiry is checked here.
+export function triagePrewarmPage(
+  page: readonly LibraryItem[],
+  rows: readonly { key: string; cachedAt: Date; expiresAt: Date }[],
+  now: number = Date.now(),
+): PageTriage {
+  const freshKeys = new Set<string>();
   const tombstoned = new Set<string>();
-  // "Fresh" means the row still has more than 25% of its original TTL remaining — below that threshold
-  // it's cheaper to re-fetch now than risk a cache miss in production during peak traffic.
-  for (const r of cacheRows) {
+  for (const r of rows) {
     if (r.key.endsWith(":details:missing")) {
-      // A LIVE tombstone (fetchAndStore hit a TMDB 404 on a prior run) — the
-      // raw findMany returns expired rows too, so gate on expiry ourselves.
-      if (r.expiresAt.getTime() > Date.now()) tombstoned.add(r.key);
+      if (r.expiresAt.getTime() > now) tombstoned.add(r.key);
       continue;
     }
     const originalTtlMs = r.expiresAt.getTime() - r.cachedAt.getTime();
-    if (r.expiresAt.getTime() - Date.now() > originalTtlMs * 0.25) freshKeySet.add(r.key);
+    if (r.expiresAt.getTime() - now > originalTtlMs * 0.25) freshKeys.add(r.key);
   }
+  const out: PageTriage = { fresh: [], dead: [], stale: [] };
+  for (const i of page) {
+    if (freshKeys.has(detailsKeyOf(i))) out.fresh.push(i);
+    else if (tombstoned.has(missingKeyOf(i))) out.dead.push(i);
+    else out.stale.push(i);
+  }
+  return out;
+}
 
-  const freshItems = page.filter((i) => freshKeySet.has(cacheKey(i)));
-  // Tombstoned ids are known-dead — skip the fetch entirely (a fresh row wins
-  // over a tombstone: a later fix-match that repopulated the blob serves).
-  const deadItems = page.filter((i) => !freshKeySet.has(cacheKey(i)) && tombstoned.has(missingKey(i)));
-  stats.skipped += deadItems.length;
-  const staleItems = page.filter((i) => !freshKeySet.has(cacheKey(i)) && !tombstoned.has(missingKey(i)));
+// The fields a TmdbMediaCore row is rebuilt from, read off a cached :details
+// blob. A blob that lacks them is not used (and counted failed) rather than
+// written half-empty.
+const CachedCoreFields = v.object({
+  id: v.int(),
+  title: v.string(),
+  posterPath: v.optional(v.nullable(v.string())),
+  releaseYear: v.optional(v.nullable(v.string())),
+  releaseDate: v.optional(v.nullable(v.string())),
+  voteAverage: v.optional(v.nullable(v.number())),
+  certification: v.optional(v.nullable(v.string())),
+});
 
-  if (freshItems.length > 0) {
-    const coreRows = await prisma.tmdbMediaCore.findMany({
-      where: { OR: freshItems.map((x) => ({ tmdbId: x.tmdbId, mediaType: x.mediaType })) },
-      select: { tmdbId: true, mediaType: true },
-    });
-    const coreSet = new Set(coreRows.map((r) => `${r.tmdbId}:${r.mediaType}`));
+// The core row for one cached blob, or null when the blob is unusable. The
+// media type comes from the LIBRARY ITEM (the cache key), never the blob: a
+// blob without one used to be filed as TV.
+export function coreInputFromCachedDetails(data: string, item: LibraryItem): CoreMediaInput | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  const parsed = check(CachedCoreFields, raw);
+  if (!parsed.ok || parsed.value.id !== item.tmdbId) return null;
+  const c = parsed.value;
+  return {
+    id: c.id,
+    mediaType: item.mediaType === "MOVIE" ? "movie" : "tv",
+    title: c.title,
+    posterPath: c.posterPath ?? null,
+    releaseYear: c.releaseYear ?? null,
+    releaseDate: c.releaseDate ?? null,
+    voteAverage: c.voteAverage ?? 0,
+    certification: c.certification ?? undefined,
+  };
+}
 
-    // Items with a fresh TmdbCache entry but no TmdbMediaCore row missed a previous upsert; backfill
-    // from the cached JSON rather than making a live TMDB request.
-    const toBackfill = freshItems.filter((i) => !coreSet.has(`${i.tmdbId}:${i.mediaType}`));
-    stats.skipped += freshItems.length - toBackfill.length;
+// Items with a fresh TmdbCache entry but no TmdbMediaCore row missed a previous
+// upsert; backfill them from the cached JSON rather than making a live TMDB
+// request — in one transaction, falling back to one row at a time so a single
+// bad row costs only itself. Returns what it added to the stats.
+async function backfillCoreRows(fresh: readonly LibraryItem[]): Promise<Pick<PrewarmStats, "backfilled" | "skipped" | "failed">> {
+  const out = { backfilled: 0, skipped: 0, failed: 0 };
+  if (fresh.length === 0) return out;
+  const coreRows = await prisma.tmdbMediaCore.findMany({
+    where: { OR: fresh.map((x) => ({ tmdbId: x.tmdbId, mediaType: x.mediaType })) },
+    select: { tmdbId: true, mediaType: true },
+  });
+  const coreSet = new Set(coreRows.map((r) => `${r.tmdbId}:${r.mediaType}`));
+  const toBackfill = fresh.filter((i) => !coreSet.has(`${i.tmdbId}:${i.mediaType}`));
+  out.skipped = fresh.length - toBackfill.length;
+  if (toBackfill.length === 0) return out;
 
-    if (toBackfill.length > 0) {
-      const backfillKeys = toBackfill.map(cacheKey);
-      const cachedRows = await prisma.tmdbCache.findMany({
-        where: { key: { in: backfillKeys } },
-        select: { data: true },
-      });
-      for (const row of cachedRows) {
-        try {
-          await upsertTmdbMediaCore(JSON.parse(row.data) as TmdbMedia);
-          stats.backfilled++;
-        } catch (err) {
-          stats.failed++;
-          console.warn("[prewarm] TmdbMediaCore backfill from cache failed:", err);
-        }
+  const byKey = new Map(toBackfill.map((i) => [detailsKeyOf(i), i]));
+  const cachedRows = await prisma.tmdbCache.findMany({
+    where: { key: { in: [...byKey.keys()] } },
+    select: { key: true, data: true },
+  });
+  const inputs: CoreMediaInput[] = [];
+  for (const row of cachedRows) {
+    const item = byKey.get(row.key);
+    const input = item ? coreInputFromCachedDetails(row.data, item) : null;
+    if (input) inputs.push(input);
+    else {
+      out.failed++;
+      console.warn(`[prewarm] TmdbMediaCore backfill skipped an unusable cached blob: ${row.key}`);
+    }
+  }
+  try {
+    await upsertTmdbMediaCoreMany(inputs);
+    out.backfilled += inputs.length;
+  } catch {
+    for (const input of inputs) {
+      try {
+        await upsertTmdbMediaCore(input);
+        out.backfilled++;
+      } catch (err) {
+        out.failed++;
+        console.warn("[prewarm] TmdbMediaCore backfill from cache failed:", err);
       }
     }
   }
+  return out;
+}
 
-  for (let i = 0; i < staleItems.length; i += CONCURRENCY) {
+async function processPrewarmPage(page: LibraryItem[], stats: PrewarmStats, signal?: AbortSignal): Promise<void> {
+  const cacheRows = await prisma.tmdbCache.findMany({
+    where: { key: { in: [...page.map(detailsKeyOf), ...page.map(missingKeyOf)] } },
+    select: { key: true, cachedAt: true, expiresAt: true },
+  });
+  const { fresh, dead, stale } = triagePrewarmPage(page, cacheRows);
+  stats.skipped += dead.length;
+  const backfill = await backfillCoreRows(fresh);
+  stats.backfilled += backfill.backfilled;
+  stats.skipped += backfill.skipped;
+  stats.failed += backfill.failed;
+
+  for (let i = 0; i < stale.length; i += CONCURRENCY) {
     // Guardrail 41: stop at the batch boundary once the advisory lock has
     // timed out — a page holds up to LIBRARY_PAGE_SIZE stale items, i.e.
     // minutes of lock-free TMDB fetching if the walk ignored the abort here.
     if (signal?.aborted) return;
-    const batch = staleItems.slice(i, i + CONCURRENCY);
-    const results = await Promise.allSettled(
-      batch.map((item) => fetchAndStore(item.tmdbId, item.mediaType)),
-    );
+    const batch = stale.slice(i, i + CONCURRENCY);
+    const results = await Promise.allSettled(batch.map((item) => fetchAndStore(item.tmdbId, item.mediaType)));
     for (const r of results) {
-      // A fulfilled `false` already warned inside fetchAndStore — count it
-      // failed without a second log line.
-      if (r.status === "fulfilled") {
-        if (r.value) stats.fetched++;
-        else stats.failed++;
-      } else { stats.failed++; console.warn("[prewarm] item failed:", r.reason); }
+      // A fulfilled "failed" already warned inside fetchAndStore — count it
+      // without a second log line.
+      if (r.status === "fulfilled") stats[r.value]++;
+      else { stats.failed++; console.warn("[prewarm] item failed:", r.reason); }
     }
-    if (i + CONCURRENCY < staleItems.length) {
+    if (i + CONCURRENCY < stale.length) {
       await new Promise((resolve) => setTimeout(resolve, BATCH_DELAY_MS));
     }
   }
 }
 
-// Walk the Plex + Jellyfin libraries (deduped), fetching each title's full TMDB
-// detail page into the cache so browse/detail views hit warm rows; fresh entries
-// are skipped and cache-only rows are backfilled into TmdbMediaCore without a live fetch.
-export async function prewarmLibraryCache(opts: { signal?: AbortSignal } = {}): Promise<{ total: number; fetched: number; backfilled: number; skipped: number; failed: number }> {
-  if (!tmdbAuth()) {
-    return { total: 0, fetched: 0, backfilled: 0, skipped: 0, failed: 0 };
-  }
-
+// Every distinct library title, Plex first then Jellyfin, movies then TV, in
+// pages of LIBRARY_PAGE_SIZE, stopping at MAX_PREWARM_ITEMS. The abort is
+// checked per ITEM rather than per page: a page only fills every
+// LIBRARY_PAGE_SIZE items, so a per-page check could keep fetching for
+// hundreds of items past it (see the note in omdb-prewarm). An aborted walk
+// yields no partial page: flushing it would issue up to LIBRARY_PAGE_SIZE - 1
+// more fetches after the lock was released.
+// `walk.total` counts every distinct title seen, a partial page dropped by an
+// abort included.
+async function* libraryPages(signal: AbortSignal | undefined, walk: { total: number }): AsyncGenerator<LibraryItem[]> {
   const seen = new Set<string>();
-  let total = 0;
-  const stats = { fetched: 0, backfilled: 0, skipped: 0, failed: 0 };
-
-  const sources = ["plex", "jellyfin"] as const;
-  const mediaTypes = ["MOVIE", "TV"] as const;
-
-  let pageBuffer: LibraryItem[] = [];
-
-  const flushPage = async () => {
-    if (pageBuffer.length === 0) return;
-    await processPrewarmPage(pageBuffer, stats, opts.signal);
-    pageBuffer = [];
-  };
-
-  outer: for (const source of sources) {
-    for (const mediaType of mediaTypes) {
+  let page: LibraryItem[] = [];
+  for (const source of ["plex", "jellyfin"] as const) {
+    for (const mediaType of ["MOVIE", "TV"] as const) {
       for await (const item of iterateLibrary(source, mediaType)) {
-        // See the note in omdb-prewarm. Checked per ITEM rather than per page:
-        // the page buffer only flushes every LIBRARY_PAGE_SIZE items, so a
-        // per-page check could keep fetching for hundreds of items past the
-        // abort.
-        if (opts.signal?.aborted) {
-          console.warn(`[prewarm] aborted after ${total} items — the advisory lock timed out`);
-          break outer;
+        if (signal?.aborted) {
+          console.warn(`[prewarm] aborted after ${walk.total} items — the advisory lock timed out`);
+          return;
         }
         const k = `${item.tmdbId}:${item.mediaType}`;
         if (seen.has(k)) continue;
         seen.add(k);
-        total++;
-        pageBuffer.push(item);
-
-        if (pageBuffer.length >= LIBRARY_PAGE_SIZE) await flushPage();
-        if (total >= MAX_PREWARM_ITEMS) {
+        walk.total = seen.size;
+        page.push(item);
+        if (page.length >= LIBRARY_PAGE_SIZE) {
+          yield page;
+          page = [];
+        }
+        if (seen.size >= MAX_PREWARM_ITEMS) {
           console.warn(`[prewarm] Reached MAX_PREWARM_ITEMS (${MAX_PREWARM_ITEMS}) — library scan truncated`);
-          break outer;
+          if (page.length > 0 && !signal?.aborted) yield page;
+          return;
         }
       }
     }
   }
+  if (page.length > 0 && !signal?.aborted) yield page;
+}
 
-  // An aborted walk must not flush its partial page: that would issue up to
-  // LIBRARY_PAGE_SIZE - 1 more fetches after the lock was released, which is
-  // exactly the overshoot the per-item check above exists to prevent.
-  if (!opts.signal?.aborted) await flushPage();
-
-  if (total === 0) {
-    return { total: 0, ...stats };
+// Walk the Plex + Jellyfin libraries (deduped), fetching each title's full TMDB
+// detail page into the cache so browse/detail views hit warm rows; fresh entries
+// are skipped and cache-only rows are backfilled into TmdbMediaCore without a live fetch.
+// `missing` counts titles TMDB answered 404 for (tombstoned, not refreshed).
+export async function prewarmLibraryCache(opts: { signal?: AbortSignal } = {}): Promise<{ total: number; fetched: number; missing: number; backfilled: number; skipped: number; failed: number }> {
+  const stats: PrewarmStats = { fetched: 0, missing: 0, backfilled: 0, skipped: 0, failed: 0 };
+  if (!tmdbAuth()) return { total: 0, ...stats };
+  const walk = { total: 0 };
+  for await (const page of libraryPages(opts.signal, walk)) {
+    await processPrewarmPage(page, stats, opts.signal);
   }
-
-  return { total, ...stats };
+  return { total: walk.total, ...stats };
 }

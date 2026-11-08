@@ -2,6 +2,8 @@
 
 import { Moon, Sun } from "@/components/icons";
 import { ACCENTS, useTheme, type Accent, type Theme } from "./theme-provider";
+import { isAccent, isTheme } from "@/lib/theme-constants";
+import { radioKeyTarget } from "./radio-keys";
 import { useLocale, useSetLocale, useT } from "@/components/i18n/i18n-provider";
 import { LOCALES, LOCALE_LABELS, isLocale, type Locale } from "@/lib/i18n/locales";
 import {
@@ -37,11 +39,48 @@ const sectionHeaderStyle: React.CSSProperties = {
   color: "var(--ds-fg-subtle)",
 };
 
+/* The swatch shown beside an accent's name, in both forms. */
+function Swatch({ color }: { color: string }) {
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        width: 14,
+        height: 14,
+        borderRadius: 999,
+        background: color,
+        border: "1px solid var(--ds-border)",
+        display: "inline-block",
+        flexShrink: 0,
+      }}
+    />
+  );
+}
+
+type AppearanceOption<T extends string> = {
+  value: T;
+  label: string;
+  /** Rendered before the label: an icon or a Swatch. */
+  lead?: React.ReactNode;
+  lang?: string;
+};
+
+type AppearanceSection<T extends string> = {
+  key: string;
+  header: string;
+  label: string;
+  value: T;
+  options: AppearanceOption<T>[];
+  /** Takes any string and ignores one that isn't a known value, so the menu
+   *  form's untyped onValueChange can call it directly. */
+  onChange: (v: string) => void;
+};
+
 /* Standalone (non-menu) variant. The menu form below uses base-ui menu radio
    items, which THROW ("MenuRootContext is missing") outside a DropdownMenu. The
    mobile nav drawer is not a menu, so it uses this version: the same options as
-   plain buttons in a radiogroup (each one is tabbed to; there is no arrow-key
-   navigation). */
+   plain buttons in a radiogroup, following the ARIA radio pattern — one Tab
+   stop (the checked option) and the arrow keys move and select. */
 function StandaloneRadioGroup<T extends string>({
   label,
   value,
@@ -50,25 +89,38 @@ function StandaloneRadioGroup<T extends string>({
 }: {
   label: string;
   value: T;
-  options: { value: T; label: string; swatch?: string; icon?: React.ReactNode; lang?: string }[];
+  options: AppearanceOption<T>[];
   onChange: (v: T) => void;
 }) {
+  const selectedIndex = options.findIndex((o) => o.value === value);
+  const onKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const next = radioKeyTarget(e.key, index, options.length);
+    if (next === null) return;
+    e.preventDefault();
+    const buttons = e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]');
+    buttons?.[next]?.focus();
+    onChange(options[next].value);
+  };
   return (
     <div
       role="radiogroup"
       aria-label={label}
       style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "2px 8px 8px" }}
     >
-      {options.map((o) => {
+      {options.map((o, i) => {
         const selected = o.value === value;
+        // Roving tab stop: the checked option, or the first when none is.
+        const tabbable = selectedIndex === -1 ? i === 0 : selected;
         return (
           <button
             key={o.value}
             type="button"
             role="radio"
             aria-checked={selected}
+            tabIndex={tabbable ? 0 : -1}
             lang={o.lang}
             onClick={() => onChange(o.value)}
+            onKeyDown={(e) => onKeyDown(e, i)}
             className="ds-tap ds-hover-tint flex items-center gap-2 font-medium transition-colors"
             style={{
               padding: "7px 10px",
@@ -80,22 +132,7 @@ function StandaloneRadioGroup<T extends string>({
               border: `1px solid ${selected ? "var(--ds-accent)" : "var(--ds-border)"}`,
             }}
           >
-            {o.swatch ? (
-              <span
-                aria-hidden="true"
-                style={{
-                  width: 14,
-                  height: 14,
-                  borderRadius: 999,
-                  background: o.swatch,
-                  border: "1px solid var(--ds-border)",
-                  display: "inline-block",
-                  flexShrink: 0,
-                }}
-              />
-            ) : (
-              o.icon
-            )}
+            {o.lead}
             {o.label}
           </button>
         );
@@ -104,120 +141,108 @@ function StandaloneRadioGroup<T extends string>({
   );
 }
 
+/* The menu form of one section. base-ui hands onValueChange an untyped value;
+   the section's onChange checks it before the setter sees it. */
+function MenuRadioSection<T extends string>({ section }: { section: AppearanceSection<T> }) {
+  return (
+    <DropdownMenuRadioGroup
+      aria-label={section.label}
+      value={section.value}
+      onValueChange={(v) => {
+        if (typeof v === "string") section.onChange(v);
+      }}
+    >
+      {section.options.map((o) => (
+        <DropdownMenuRadioItem key={o.value} value={o.value} lang={o.lang}>
+          {o.lead}
+          {o.label}
+        </DropdownMenuRadioItem>
+      ))}
+    </DropdownMenuRadioGroup>
+  );
+}
+
+/** The three sections, built once for both forms. */
+function useAppearanceSections(): [AppearanceSection<Theme>, AppearanceSection<Accent>, AppearanceSection<Locale>] {
+  const { theme, setTheme, accent, setAccent } = useTheme();
+  const t = useT();
+  const locale = useLocale();
+  const setLocale = useSetLocale();
+  return [
+    {
+      key: "theme",
+      header: t("appearance.theme"),
+      label: t("appearance.theme"),
+      value: theme,
+      onChange: (v) => {
+        if (isTheme(v)) setTheme(v);
+      },
+      options: [
+        { value: "dark", label: t("appearance.dark"), lead: <Moon className="size-4" /> },
+        { value: "light", label: t("appearance.light"), lead: <Sun className="size-4" /> },
+      ],
+    },
+    {
+      key: "accent",
+      header: t("appearance.accent"),
+      label: t("appearance.accentColor"),
+      value: accent,
+      onChange: (v) => {
+        if (isAccent(v)) setAccent(v);
+      },
+      options: ACCENTS.map((a) => ({
+        value: a,
+        label: t(`appearance.accent.${a}`),
+        lead: <Swatch color={ACCENT_SWATCH[a]} />,
+      })),
+    },
+    {
+      key: "language",
+      header: t("appearance.language"),
+      label: t("appearance.language"),
+      value: locale,
+      onChange: (v) => {
+        if (isLocale(v)) setLocale(v);
+      },
+      options: LOCALES.map((l) => ({ value: l, label: LOCALE_LABELS[l], lang: l })),
+    },
+  ];
+}
+
 /**
  * `standalone` renders the non-menu form for contexts that are NOT a base-ui
  * Menu (e.g. the mobile nav drawer). Default (false) keeps the menuitemradio
  * form required by the header account dropdown's keyboard model.
  */
 export function AppearanceMenu({ standalone = false }: { standalone?: boolean } = {}) {
-  const { theme, setTheme, accent, setAccent } = useTheme();
-  const t = useT();
-  const locale = useLocale();
-  const setLocale = useSetLocale();
-  const accentLabel = (a: Accent) => t(`appearance.accent.${a}`);
+  const [theme, accent, language] = useAppearanceSections();
+  const header = (section: { header: string }) => (
+    <div style={sectionHeaderStyle} aria-hidden="true">
+      {section.header}
+    </div>
+  );
 
   if (standalone) {
     return (
       <>
-        <div style={sectionHeaderStyle} aria-hidden="true">
-          {t("appearance.theme")}
-        </div>
-        <StandaloneRadioGroup<Theme>
-          label={t("appearance.theme")}
-          value={theme}
-          onChange={setTheme}
-          options={[
-            { value: "dark", label: t("appearance.dark"), icon: <Moon className="size-4" /> },
-            { value: "light", label: t("appearance.light"), icon: <Sun className="size-4" /> },
-          ]}
-        />
-        <div style={sectionHeaderStyle} aria-hidden="true">
-          {t("appearance.accent")}
-        </div>
-        <StandaloneRadioGroup<Accent>
-          label={t("appearance.accentColor")}
-          value={accent}
-          onChange={setAccent}
-          options={ACCENTS.map((a) => ({
-            value: a,
-            label: accentLabel(a),
-            swatch: ACCENT_SWATCH[a],
-          }))}
-        />
-        <div style={sectionHeaderStyle} aria-hidden="true">
-          {t("appearance.language")}
-        </div>
-        <StandaloneRadioGroup<Locale>
-          label={t("appearance.language")}
-          value={locale}
-          onChange={setLocale}
-          options={LOCALES.map((l) => ({ value: l, label: LOCALE_LABELS[l], lang: l }))}
-        />
+        {header(theme)}
+        <StandaloneRadioGroup<Theme> label={theme.label} value={theme.value} onChange={theme.onChange} options={theme.options} />
+        {header(accent)}
+        <StandaloneRadioGroup<Accent> label={accent.label} value={accent.value} onChange={accent.onChange} options={accent.options} />
+        {header(language)}
+        <StandaloneRadioGroup<Locale> label={language.label} value={language.value} onChange={language.onChange} options={language.options} />
       </>
     );
   }
 
   return (
     <>
-      <div style={sectionHeaderStyle} aria-hidden="true">
-        {t("appearance.theme")}
-      </div>
-      <DropdownMenuRadioGroup
-        aria-label={t("appearance.theme")}
-        value={theme}
-        onValueChange={(v) => setTheme(v as Theme)}
-      >
-        <DropdownMenuRadioItem value="dark">
-          <Moon className="size-4" /> {t("appearance.dark")}
-        </DropdownMenuRadioItem>
-        <DropdownMenuRadioItem value="light">
-          <Sun className="size-4" /> {t("appearance.light")}
-        </DropdownMenuRadioItem>
-      </DropdownMenuRadioGroup>
-
-      <div style={sectionHeaderStyle} aria-hidden="true">
-        {t("appearance.accent")}
-      </div>
-      <DropdownMenuRadioGroup
-        aria-label={t("appearance.accentColor")}
-        value={accent}
-        onValueChange={(v) => setAccent(v as Accent)}
-      >
-        {ACCENTS.map((a) => (
-          <DropdownMenuRadioItem key={a} value={a}>
-            <span
-              aria-hidden="true"
-              style={{
-                width: 14,
-                height: 14,
-                borderRadius: 999,
-                background: ACCENT_SWATCH[a],
-                border: "1px solid var(--ds-border)",
-                display: "inline-block",
-                flexShrink: 0,
-              }}
-            />
-            {accentLabel(a)}
-          </DropdownMenuRadioItem>
-        ))}
-      </DropdownMenuRadioGroup>
-
-      <div style={sectionHeaderStyle} aria-hidden="true">
-        {t("appearance.language")}
-      </div>
-      <DropdownMenuRadioGroup
-        aria-label={t("appearance.language")}
-        value={locale}
-        onValueChange={(v) => {
-          if (isLocale(v)) setLocale(v);
-        }}
-      >
-        {LOCALES.map((l) => (
-          <DropdownMenuRadioItem key={l} value={l} lang={l}>
-            {LOCALE_LABELS[l]}
-          </DropdownMenuRadioItem>
-        ))}
-      </DropdownMenuRadioGroup>
+      {header(theme)}
+      <MenuRadioSection section={theme} />
+      {header(accent)}
+      <MenuRadioSection section={accent} />
+      {header(language)}
+      <MenuRadioSection section={language} />
     </>
   );
 }

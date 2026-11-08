@@ -197,6 +197,7 @@ async function tokenFor(u: DbUser): Promise<string> {
 
 // ── settings (feature flag, quota, …) ───────────────────────────────────────
 const settings = new Map<string, string>();
+let statusWriteFails = false;
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) => {
     const v = settings.get(args.where.key);
@@ -211,6 +212,7 @@ shadowPrismaModel(prisma, "setting", {
   },
   upsert: async (args: { where: { key: string }; create: { value: string } }) => {
     rec("setting.upsert", args);
+    if (statusWriteFails && args.where.key === "plexWatchlistServerStatus") throw new Error("db write failed");
     settings.set(args.where.key, args.create.value);
     return {};
   },
@@ -330,6 +332,7 @@ shadowPrismaModel(prisma, "auditLog", { create: async (args: unknown) => { rec("
 // ── watchlist table ──────────────────────────────────────────────────────────
 let watchlistConflict = false;
 shadowPrismaModel(prisma, "watchlistItem", {
+  count: async () => 0,
   create: async (args: { data: Record<string, unknown> }) => {
     rec("watchlistItem.create", args);
     if (watchlistConflict) {
@@ -392,6 +395,7 @@ beforeEach(() => {
   inPlex = false;
   watchlistConflict = false;
   ledgerWriteFails = false;
+  statusWriteFails = false;
   msuRows = [];
   resetLogDedup();
   plexWatchlist.__resetPlexMetadataCacheForTests();
@@ -737,11 +741,13 @@ test("cron: new filings are capped per user per run; the rest follow on later ru
   respond = plexWatchlistResponder({
     "tok-long": Array.from({ length: cap + 5 }, (_, i) => ({ ratingKey: `k${i}`, type: "movie", tmdb: 5000 + i })),
   });
-  await inScope(() => plexWatchlist.syncPlexWatchlists());
+  const first = await inScope(() => plexWatchlist.syncPlexWatchlists());
   assert.equal(opsOf("mediaRequest.create").length, cap);
+  assert.equal((first as { deferred?: number }).deferred, 5, "the titles past the cap are counted, not dropped from the tally");
   ops.length = 0;
-  await inScope(() => plexWatchlist.syncPlexWatchlists());
+  const second = await inScope(() => plexWatchlist.syncPlexWatchlists());
   assert.equal(opsOf("mediaRequest.create").length, 5);
+  assert.equal((second as { deferred?: number }).deferred, undefined, "nothing left over");
 });
 
 test("cron: an aborted lock signal stops before the next user (guardrail 41) and returns rather than throwing", async () => {
@@ -1026,8 +1032,32 @@ test("server path: an abort between friends stops before the next friend's watch
     if (url.hostname === "community.plex.tv" && String((body as { query: string }).query).includes("userV2")) ctl.abort();
     return res;
   };
+  // The last complete run's verdicts. An aborted run read one friend at most:
+  // writing its partial map would erase everyone else's "ok".
+  const prior = JSON.stringify({ updatedAt: "2026-01-01T00:00:00.000Z", users: { "someone-else": "ok", other: "private" }, unmatchedFriends: 3 });
+  settings.set("plexWatchlistServerStatus", prior);
   await inScope(() => plexWatchlist.syncPlexWatchlists({ signal: ctl.signal }));
   assert.equal(graphqlWatchlistReads().length, 1);
+  assert.equal(settings.get("plexWatchlistServerStatus"), prior, "the stored snapshot is left as it was");
+  assert.equal(opsOf("setting.upsert").length, 0, "no status write after the abort (guardrail 41)");
+});
+
+test("server path: an unbridged friend listed by two instances with different owner tokens is ONE friend", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  configurePlex("remote", "admin-2");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  respond = serverResponder({
+    "admin-1": { friends: [{ uuid: "uuid-501", id: "501", list: [603] }], unbridged: ["uuid-ghost"] },
+    "admin-2": { friends: [], unbridged: ["UUID-GHOST"] },
+  });
+  const r = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(r.server?.instances, 2);
+  assert.equal(r.server?.friends, 2, "501 and the ghost — not the ghost twice");
+  assert.equal(r.server?.unmatchedFriends, 1);
+  assert.equal(serverStatus().unmatchedFriends, 1);
 });
 
 // ─── the metadata lookup cache + lookup-failure accounting ───────────────────
@@ -1281,4 +1311,62 @@ test("i18n: a chokepoint refusal reaches autoRequest.message translated, and the
   const dup = await addToWatchlistWith(addUser(), { cookie: "summonarr-locale=es" });
   assert.equal(dup.status, 409);
   assert.deepEqual(await dup.json(), { error: "Ya está en tu lista de seguimiento" });
+});
+
+test("token path: every metadata lookup failing with nothing resolved is a run error, as on the server path — never a quiet success", async () => {
+  settings.set(FLAG, "true");
+  const u = addUser();
+  plexTokens.set(u.id, "tok-nog");
+  respond = (url) => {
+    if (url.hostname === "discover.provider.plex.tv") {
+      return json({ MediaContainer: { totalSize: 1, Metadata: [{ ratingKey: "nog", type: "movie", title: "No guid" }] } });
+    }
+    if (url.hostname === "metadata.provider.plex.tv") return json({}, 503);
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const r = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(r.errors, 1);
+  assert.equal(r.requested, 0);
+  assert.equal(plexWatchlist.plexWatchlistRunProblems(r), 1, "the run degrades");
+  assert.ok(errors.some((e) => e.includes(`[plex-watchlist] sync failed for user ${u.id}`) && e.includes("metadata lookup")));
+});
+
+test("server path: a failed status write is warned, and the run still answers", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  respond = serverResponder({ "admin-1": { friends: [{ uuid: "uuid-501", id: "501", list: "private" }] } });
+  statusWriteFails = true;
+  const r = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(r.server?.private, 1);
+  assert.ok(warns.some((w) => w.startsWith("[plex-watchlist]") && w.includes("server-path status") && w.includes("db write failed")), warns.join("\n"));
+});
+
+test("an abort ends a watchlist request in flight, not only the loop around it", async () => {
+  settings.set(FLAG, "true");
+  const u = addUser();
+  plexTokens.set(u.id, "tok-hang");
+  // plex.tv never answers; like a real fetch, the request ends when its signal does.
+  const realFetch = globalThis.fetch;
+  let inFlight = 0;
+  globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+    inFlight++;
+    return new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+    });
+  }) as typeof fetch;
+  try {
+    const controller = new AbortController();
+    const started = Date.now();
+    const run = inScope(() => plexWatchlist.syncPlexWatchlists({ signal: controller.signal }));
+    for (let i = 0; i < 200 && inFlight === 0; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(inFlight, 1, "the watchlist request is in flight");
+    controller.abort();
+    const r = await run;
+    assert.ok(Date.now() - started < 5_000, "returned on the abort, not after the request timeout");
+    assert.equal(r.requested, 0);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

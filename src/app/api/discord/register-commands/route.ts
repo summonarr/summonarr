@@ -26,7 +26,7 @@ export const POST = withAdmin(async (req, _ctx, _session) => {
 
   // Record the schema hash so the boot self-heal treats this registration as
   // current and won't redundantly re-push on the next restart.
-  await recordDiscordSchemaHash(guildId);
+  await recordDiscordSchemaHash(guildId, cfg.discordClientId);
   const message = guildId
     ? t("apiUser.discord.commands.registeredGuild", { guildId })
     : t("apiUser.discord.commands.registeredGlobally");

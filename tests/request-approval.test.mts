@@ -9,18 +9,19 @@
 // here:
 //
 //   1. ONLY DECISIONS WRITE IT. Only the /api/requests routes, Discord
-//      interactions and the one-time backfill may even mention the column (the
-//      grade's data layer and the OpenAPI doc may read it). A sync, a webhook or
-//      the availability claim writing it would count unapproved requests again —
-//      and a variable holding the write, or raw SQL, is found too.
+//      interactions, the decision state machine they claim through
+//      (request-transition.ts) and the one-time backfill may even mention the
+//      column (the grade's data layer and the OpenAPI doc may read it). A sync, a
+//      webhook or the availability claim writing it would count unapproved
+//      requests again — and a variable holding the write, or raw SQL, is found too.
 //   2. APPROVE SETS IT, DECLINE CLEARS IT, NOTHING ELSE TOUCHES IT. Across every
 //      MediaRequest write in src/: a literal `status: "APPROVED"` sets it
 //      unconditionally, except the sync's revert of an AVAILABLE row, which is
 //      not an approval; `status: "DECLINED"` clears it; `status: "PENDING"` (the
 //      push-failure rollbacks — the approval was made, only the push failed) and
 //      `status: "AVAILABLE"` leave it alone. A request that copies a greenlit
-//      peer's status records none of its own. The routes with a computed status
-//      (batch, bulk) are pinned by shape here and behaviorally elsewhere.
+//      peer's status records none of its own. Bulk, the one write with a
+//      computed status, is pinned by shape here and behaviorally elsewhere.
 //   3. THE BACKFILL RUNS ONCE EVER. Rows older than the column are stamped with
 //      createdAt in the same transaction as a Setting marker; any later boot
 //      sees the marker and does nothing, because a null approvedAt then means
@@ -45,7 +46,7 @@ const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { Prisma } = await import("@/generated/prisma");
 const { backfillRequestApprovals, REQUEST_APPROVAL_BACKFILL_KEY } = await import("../src/lib/request-approval.ts");
-const { BATCH_TX_TIMEOUT } = await import("../src/lib/cron-auth.ts");
+const { BATCH_TX_TIMEOUT } = await import("../src/lib/batch-write.ts");
 
 // ═══ the backfill ════════════════════════════════════════════════════════════
 
@@ -180,23 +181,36 @@ test("instrumentation awaits the backfill before the fire-and-forget startup wor
 
 // ═══ structural pins over the source ═════════════════════════════════════════
 
-const DECISION_ROUTES = [
-  // The Discord bot's decision paths, split out of src/app/api/interactions/route.ts:
-  // the /request result pick (auto-approve + mirror) and the admin approve/decline buttons.
-  "src/lib/discord-interactions/components/pick.ts",
-  "src/lib/discord-interactions/components/admin-decision.ts",
-  "src/app/api/requests/[id]/route.ts",
-  "src/app/api/requests/batch/route.ts",
-  "src/app/api/requests/bulk/route.ts",
+// The files that RECORD approval: every MediaRequest write that stamps or clears
+// approvedAt lives in one of these.
+const RECORDERS = [
+  // The decision state machine: the single PATCH, the batch PATCH and the
+  // Discord admin buttons claim every approve and decline through it.
+  "src/lib/request-transition.ts",
+  // POST /api/requests/bulk's create transaction (the route's item pipeline).
+  "src/lib/request-bulk.ts",
   // POST /api/requests' create + auto-approve, extracted from the route so the
   // watchlist auto-request files through the same chokepoint. The route itself
   // no longer writes a MediaRequest.
   "src/lib/request-create.ts",
 ];
+// The decision paths that claim through request-transition.ts: they may name
+// the column, never write a status of their own (pinned below).
+const DECISION_CALLERS = [
+  // The Discord bot's admin approve/decline buttons. (The /request result pick
+  // files through src/lib/request-create.ts and writes no MediaRequest of its own.)
+  "src/lib/discord-interactions/components/admin-decision.ts",
+  "src/app/api/requests/[id]/route.ts",
+  "src/app/api/requests/batch/route.ts",
+];
+const DECISION_ROUTES = [...RECORDERS, ...DECISION_CALLERS];
 const BACKFILL = "src/lib/request-approval.ts";
 // May read the column (or document it), never write it.
 const READERS = [
-  "src/app/api/openapi/route.ts",
+  // The API document (src/lib/openapi/) describes the column.
+  "src/lib/openapi/components.ts",
+  "src/lib/openapi/paths/admin-users.ts",
+  "src/lib/openapi/paths/requests.ts",
   "src/lib/watch-grade-data.ts",
   "src/lib/admin-stats-data.ts",
   "src/app/(app)/admin/stats/page.tsx",
@@ -330,7 +344,7 @@ test("approvedAt is mentioned only where requests are decided, by the backfill, 
   const allowed = new Set([...DECISION_ROUTES, BACKFILL, ...READERS]);
   const stray = [...mentions.keys()].filter((rel) => !allowed.has(rel));
   assert.deepEqual(stray, [], "only decisions record approval — reading it somewhere new means adding that file to READERS on purpose");
-  for (const rel of [...DECISION_ROUTES, BACKFILL]) assert.ok(mentions.has(rel), `${rel} records approval`);
+  for (const rel of [...RECORDERS, BACKFILL]) assert.ok(mentions.has(rel), `${rel} records approval`);
   assert.deepEqual(
     [...mentions].filter(([, m]) => m.sql).map(([rel]) => rel).sort(),
     [BACKFILL, ...RAW_SQL_READERS].sort(),
@@ -360,10 +374,16 @@ test("across every MediaRequest write: approving sets approvedAt, declining clea
     else if (status === "PENDING" || status === "AVAILABLE") untouched.push(w);
   }
   // Guards against a scan that silently matches nothing.
-  assert.ok(approves.length >= 4, `expected the literal approve writes, found ${approves.length}`);
+  assert.ok(approves.length >= 3, `expected the literal approve writes, found ${approves.length}`);
   assert.ok(reverts.length >= 1, `expected the sync's AVAILABLE→APPROVED revert, found ${reverts.length}`);
   assert.ok(declines.length >= 2, `expected the literal decline writes, found ${declines.length}`);
-  assert.ok(untouched.length >= 12, `expected the rollbacks and the fulfilment flips, found ${untouched.length}`);
+  // The rollbacks and fulfilment flips live in a few shared modules now (one
+  // approve/decline state machine, one available-marking pass, the Sonarr
+  // flip), so the floor counts those and the scan must reach each of them.
+  assert.ok(untouched.length >= 7, `expected the rollbacks and the fulfilment flips, found ${untouched.length}`);
+  for (const rel of ["src/lib/request-transition.ts", "src/lib/available-marking.ts", "src/lib/sonarr-webhook-flip.ts"]) {
+    assert.ok(untouched.some((w) => w.file === rel), `the scan must reach the status writes in ${rel}`);
+  }
 
   for (const w of approves) {
     const direct = ts.isObjectLiteralExpression(w.data) ? prop(w.data, "approvedAt") : undefined;
@@ -388,10 +408,10 @@ test("across every MediaRequest write: approving sets approvedAt, declining clea
   }
 });
 
-test("computed-status writes: a copy records no approval of its own, batch follows its decision, bulk stamps auto-approved rows only", () => {
+test("computed-status writes: a copy records no approval of its own, bulk stamps auto-approved rows only", () => {
   const computed = allWrites.filter((w) => approvedAtAssignments(w.data).length > 0 && literalStatus(w.data) === null);
   const byFile = new Map(computed.map((w) => [w.file, w]));
-  assert.deepEqual([...byFile.keys()].sort(), ["src/app/api/requests/batch/route.ts", "src/app/api/requests/bulk/route.ts"]);
+  assert.deepEqual([...byFile.keys()].sort(), ["src/lib/request-bulk.ts"]);
 
   // Copies of a greenlit peer's status (web and Discord): no approvedAt at all.
   const copies = allWrites.filter((w) => {
@@ -404,19 +424,39 @@ test("computed-status writes: a copy records no approval of its own, batch follo
     return (ts.isPropertyAccessExpression(init) && init.getText().endsWith(".status")) ||
       (ts.isIdentifier(init) && init.text === "mirrorStatus");
   });
-  assert.deepEqual(copies.map((w) => w.file).sort(), ["src/lib/discord-interactions/components/pick.ts", "src/lib/request-create.ts"]);
+  // The Discord pick copies through request-create.ts too.
+  assert.deepEqual(copies.map((w) => w.file).sort(), ["src/lib/request-create.ts"]);
 
-  const batch = byFile.get("src/app/api/requests/batch/route.ts")!;
-  assert.equal(
-    prop(batch.data as ts.ObjectLiteralExpression, "approvedAt")?.initializer.getText(),
-    `typedStatus === "APPROVED" ? new Date() : null`,
-  );
-
-  const bulk = byFile.get("src/app/api/requests/bulk/route.ts")!;
+  const bulk = byFile.get("src/lib/request-bulk.ts")!;
   const [stamp] = approvedAtAssignments(bulk.data);
   let conditional: ts.Node = stamp;
   while (!ts.isConditionalExpression(conditional) && conditional !== bulk.data) conditional = conditional.parent;
   assert.ok(ts.isConditionalExpression(conditional), "the bulk stamp sits under a condition");
   assert.equal(conditional.condition.getText(), "isAutoApproved", "only an auto-approved bulk row records approval");
   assert.match(sourceFile(bulk.file).getText(), /const isAutoApproved = !mirror && p\.autoApprove;/, "a mirrored bulk row is never auto-approved");
+});
+
+// The batch claim used to compute its status (`typedStatus === "APPROVED" ? new
+// Date() : null`); it is now one literal write per decision, so the
+// across-every-write pin above holds it like any other approve or decline.
+test("the batch claim writes a LITERAL approve and a LITERAL decline, each through the shared claim's CAS on PENDING", () => {
+  const rel = "src/lib/request-transition.ts";
+  const writes = mediaRequestWrites(rel).filter((w) => w.method === "updateManyAndReturn");
+  assert.deepEqual(writes.map((w) => literalStatus(w.data)).sort(), ["APPROVED", "DECLINED"]);
+  const text = sourceFile(rel).getText();
+  assert.match(text, /const where = \{ id: \{ in: ids \}, status: "PENDING" as const \};/);
+});
+
+// ONE state machine: the decision paths claim, push and roll back through
+// request-transition.ts and write no status of their own. A second copy is how
+// the paths drifted (a PENDING announced for a rollback that never landed, an
+// uncaught rollback, a download check queued for a rolled-back row).
+test("the single PATCH, the batch PATCH and the Discord buttons write no request status themselves", () => {
+  for (const rel of DECISION_CALLERS) {
+    const statusWrites = mediaRequestWrites(rel).filter((w) => ts.isObjectLiteralExpression(w.data) && prop(w.data, "status"));
+    assert.deepEqual(statusWrites.map(at), [], `${rel} writes a status outside request-transition.ts`);
+    const text = sourceFile(rel).getText();
+    assert.match(text, /from "@\/lib\/request-transition"/, `${rel} claims through the state machine`);
+    assert.doesNotMatch(text, /addMovieToRadarr|addSeriesToSonarr|arrWriteOutcomeUnknown/, `${rel} pushes outside the state machine`);
+  }
 });

@@ -32,15 +32,14 @@ import {
   arrWriteOutcomeUnknown,
   getArrAddDefaults,
   lookupSeriesByTmdbId,
+  pickSeriesByTmdbId,
   resolveSingleTvdbToTmdb,
   type ArrCfg,
 } from "./arr";
 import { configuredArrCfg, type ArrService } from "./arr-admin";
-import { findTitle } from "./arr-title-data";
+import { TitleNotFoundError, findTitle, findTitleOn, readCatalog, readRaw, resourcePath, seriesLookupPath } from "./arr-title-data";
 import {
   checkTitleEdit,
-  projectChoices,
-  projectRootFolderChoices,
   projectTitle,
   type ArrTitle,
   type Choice,
@@ -48,7 +47,6 @@ import {
 } from "./arr-title";
 import type { TitleAdd } from "./arr-title-add";
 
-const resourcePath = (service: ArrService, arrId: number) => `/api/v3/${service === "radarr" ? "movie" : "series"}/${arrId}`;
 const mediaTypeOf = (service: ArrService) => (service === "radarr" ? "MOVIE" : "TV") as "MOVIE" | "TV";
 
 /** The title is on the instance already (an add) — `arrId` names it for the manager. */
@@ -72,11 +70,9 @@ export class RequestsActiveError extends Error {
 
 async function readTitle(cfg: ArrCfg, service: ArrService, instance: string, arrId: number): Promise<ArrTitle | null> {
   try {
-    const raw = await arrFetch<unknown>(cfg, resourcePath(service, arrId));
-    const title = projectTitle(service, instance, raw);
-    return title && title.arrId === arrId ? title : null;
+    return projectTitle(service, instance, await readRaw(cfg, service, arrId));
   } catch (err) {
-    if (err instanceof ArrResponseError && err.status === 404) return null;
+    if (err instanceof TitleNotFoundError) return null;
     throw err;
   }
 }
@@ -171,76 +167,136 @@ export async function removeTitle(
   const counts = await requestCounts(service, instance, ids);
   if (counts.approved > 0) throw new RequestsActiveError(counts.approved);
 
-  // Stamp FIRST: without it, the next sync reads the title's disappearance as a
-  // lost file and re-adds it. ONE conditional write, and the rows it returns are
-  // the stamps this call owns: only rows not already stamped, so a concurrent
-  // removal's stamps are never counted, audited or unstamped here, and an
-  // unstamp below never clears an older stamp.
-  const identity = requestIdentity(ids);
-  const stamped = identity
-    ? await prisma.mediaRequest.updateManyAndReturn({
-      where: { ...identity, mediaType: mediaTypeOf(service), arrInstance: instance, status: "AVAILABLE", cleanedUpAt: null },
-      data: { cleanedUpAt: now },
-      select: { id: true },
-    })
-    : [];
-  const stampedIds = stamped.map((r) => r.id);
+  const stamps = new RemovalStamps(service, instance, arrId, requestIdentity(ids), now);
+  await stamps.stamp();
+  // A request approved since the check above would re-add the title on the
+  // next sync: checked once more right before the DELETE, with this call's
+  // stamps handed back. (Narrows the window to the check-to-DELETE gap; the
+  // approval path takes no lock this could share.)
+  const again = await requestCounts(service, instance, ids);
+  if (again.approved > 0) {
+    await stamps.unstamp("an approval landed before the delete");
+    throw new RequestsActiveError(again.approved);
+  }
 
   const flags = service === "radarr"
     ? `deleteFiles=${opts.deleteFiles}&addImportExclusion=${opts.addImportExclusion}`
     : `deleteFiles=${opts.deleteFiles}&addImportListExclusion=${opts.addImportExclusion}`;
+  try {
+    await arrFetchNoContent(cfg, `${resourcePath(service, arrId)}?${flags}`, { method: "DELETE" });
+  } catch (err) {
+    const outcome = await deleteFailedOutcome(cfg, service, instance, arrId, err);
+    if (outcome === "alreadyGone" || outcome === "removed") {
+      await stamps.reassert();
+      return { title, alreadyGone: outcome === "alreadyGone", requestsStamped: stamps.count };
+    }
+    if (outcome === "refused") await stamps.unstamp("the arr refused the delete");
+    throw err;
+  }
+  await stamps.reassert();
+  return { title, alreadyGone: false, requestsStamped: stamps.count };
+}
+
+/**
+ * A failed DELETE, judged: "alreadyGone" (a 404 — the goal is met), "removed"
+ * (a re-read shows the title gone after all — by this call, most likely, so it
+ * reads as removed and keeps the route's library rescan), "refused" (the arr
+ * definitely refused and the title is still there: the stamps go), or
+ * "unknown" (the failure stands and the stamps stay). Any failure but a 404 may still
+ * have deleted it — a timeout or a dropped connection after the arr acted, or
+ * a concurrent removal that won — so only a re-read showing the title STILL
+ * on the instance proves the delete didn't happen.
+ */
+async function deleteFailedOutcome(cfg: ArrCfg, service: ArrService, instance: string, arrId: number, err: unknown): Promise<"alreadyGone" | "removed" | "refused" | "unknown"> {
+  if (err instanceof ArrResponseError && err.status === 404) return "alreadyGone";
+  let stillThere: boolean | null;
+  try {
+    stillThere = (await readTitle(cfg, service, instance, arrId)) !== null;
+  } catch {
+    stillThere = null;
+  }
+  if (stillThere === false) return "removed";
+  // An unstamp on a deleted title re-downloads it (14b), whereas a stamp left
+  // on a present one costs at most one automatic re-push later. An UNKNOWN
+  // outcome (timeout, network, a gateway's 502/504) keeps the stamps even when
+  // the re-read says "still there": the arr may still be holding the DELETE —
+  // behind its database lock — and finish it later.
+  return stillThere === true && !arrWriteOutcomeUnknown(err) ? "refused" : "unknown";
+}
+
+/**
+ * The cleanup stamps one removal owns (guardrail 14b). `stamp` is ONE
+ * conditional write, and the rows it returns are this call's: only rows not
+ * already stamped, so a concurrent removal's stamps are never counted, audited
+ * or unstamped here, and an unstamp never clears an older stamp.
+ */
+class RemovalStamps {
+  private ids: string[] = [];
+  private readonly service: ArrService;
+  private readonly instance: string;
+  private readonly arrId: number;
+  private readonly identity: ReturnType<typeof requestIdentity>;
+  private readonly now: Date;
+
+  constructor(service: ArrService, instance: string, arrId: number, identity: ReturnType<typeof requestIdentity>, now: Date) {
+    this.service = service;
+    this.instance = instance;
+    this.arrId = arrId;
+    this.identity = identity;
+    this.now = now;
+  }
+
+  get count(): number {
+    return this.ids.length;
+  }
+
+  private where() {
+    return { ...this.identity, mediaType: mediaTypeOf(this.service), arrInstance: this.instance, status: "AVAILABLE" as const };
+  }
+
+  private label(): string {
+    return `${this.service}:${this.instance || "default"}:${this.arrId}`;
+  }
+
+  // Stamp FIRST: without it, the next sync reads the title's disappearance as
+  // a lost file and re-adds it.
+  async stamp(): Promise<void> {
+    if (!this.identity) return;
+    const rows = await prisma.mediaRequest.updateManyAndReturn({
+      where: { ...this.where(), cleanedUpAt: null },
+      data: { cleanedUpAt: this.now },
+      select: { id: true },
+    });
+    this.ids = rows.map((r) => r.id);
+  }
+
   // The title is gone from the instance: this call now OWNS the stamp on every
   // AVAILABLE request routed there. A concurrent removal (or a cleanup execute)
   // that stamped first and then saw its own delete refused unstamps by ITS time
   // — re-asserted with this call's, its unstamp misses the rows, and if it
-  // already ran this writes them back (14b). Only null vs set is ever read.
-  // Best-effort: the delete is durable, so a failed write is logged, not thrown.
-  const reassertStamp = async () => {
-    if (!identity) return;
+  // already ran this writes them back (14b). Only null vs set is ever read, so
+  // overwriting an older stamp's time is the point, not a loss. Best-effort:
+  // the delete is durable, so a failed write is logged, not thrown.
+  async reassert(): Promise<void> {
+    if (!this.identity) return;
     try {
-      await prisma.mediaRequest.updateMany({
-        where: { ...identity, mediaType: mediaTypeOf(service), arrInstance: instance, status: "AVAILABLE" },
-        data: { cleanedUpAt: now },
-      });
+      await prisma.mediaRequest.updateMany({ where: this.where(), data: { cleanedUpAt: this.now } });
     } catch (err) {
-      console.error(`[arr-title] re-asserting the cleanup stamp after removing ${service}:${instance || "default"}:${arrId} failed:`, err instanceof Error ? err.message : err);
+      console.error(`[arr-title] re-asserting the cleanup stamp after removing ${this.label()} failed:`, err instanceof Error ? err.message : err);
     }
-  };
-  try {
-    await arrFetchNoContent(cfg, `${resourcePath(service, arrId)}?${flags}`, { method: "DELETE" });
-  } catch (err) {
-    // Gone already: the goal is met, and the stamps are right.
-    if (err instanceof ArrResponseError && err.status === 404) {
-      await reassertStamp();
-      return { title, alreadyGone: true, requestsStamped: stampedIds.length };
-    }
-    // Any other failure may still have deleted it — a timeout or a dropped
-    // connection after the arr acted, or a concurrent removal that won. Only a
-    // re-read showing the title STILL on the instance proves the delete didn't
-    // happen; an unstamp on a deleted title re-downloads it (14b), whereas a
-    // stamp left on a present one costs at most one automatic re-push later.
-    // An UNKNOWN outcome (timeout, network, a gateway's 502/504) keeps the
-    // stamps even then: the arr may still be holding the DELETE — behind its
-    // database lock, while a GET answers "still there" — and finish it later.
-    let stillThere: boolean | null;
-    try {
-      stillThere = (await readTitle(cfg, service, instance, arrId)) !== null;
-    } catch {
-      stillThere = null;
-    }
-    if (stillThere === false) {
-      // Removed after all — by this call, most likely, so it reads as removed
-      // here (alreadyGone: false keeps the route's library rescan).
-      await reassertStamp();
-      return { title, alreadyGone: false, requestsStamped: stampedIds.length };
-    }
-    if (stillThere && stampedIds.length > 0 && !arrWriteOutcomeUnknown(err)) {
-      await prisma.mediaRequest.updateMany({ where: { id: { in: stampedIds }, cleanedUpAt: now }, data: { cleanedUpAt: null } });
-    }
-    throw err;
   }
-  await reassertStamp();
-  return { title, alreadyGone: false, requestsStamped: stampedIds.length };
+
+  // Hand back the stamps this call wrote, by its own time only. Best-effort:
+  // a failure here must not hide the error the caller is about to throw, so it
+  // is logged and the stamps stay (they cost at most one re-push later).
+  async unstamp(why: string): Promise<void> {
+    if (this.ids.length === 0) return;
+    try {
+      await prisma.mediaRequest.updateMany({ where: { id: { in: this.ids }, cleanedUpAt: this.now }, data: { cleanedUpAt: null } });
+    } catch (err) {
+      console.error(`[arr-title] removing the cleanup stamps for ${this.label()} (${why}) failed:`, err instanceof Error ? err.message : err);
+    }
+  }
 }
 
 // ── adding ───────────────────────────────────────────────────────────────────
@@ -262,15 +318,53 @@ export interface AddChoices {
   defaults: { qualityProfileId: number | null; rootFolderPath: string | null; minimumAvailability: string | null };
 }
 
-type LookupMovie = { tmdbId?: number; title?: string; year?: number; titleSlug?: string; images?: unknown };
-type LookupSeries = { tmdbId?: number; tvdbId?: number; title?: string; year?: number; titleSlug?: string; images?: unknown; seasons?: Array<{ seasonNumber?: number }> };
+// A lookup row, read field by field: what an add body forwards, each field
+// only when it has the type the arr sent it as (a wrong-typed one is left
+// out, never forwarded). `images` goes back to the arr it came from as is.
+interface LookupTitle { title: string; year?: number; titleSlug?: string; images?: unknown }
+interface LookupMovie extends LookupTitle { tmdbId: number }
+interface LookupSeries extends LookupTitle { tvdbId: number; seasons: number[] }
+
+type Row = Record<string, unknown>;
+const rowOf = (v: unknown): Row | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as Row) : null);
+const positiveInt = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : null);
+
+function lookupTitle(r: Row): LookupTitle | null {
+  if (typeof r.title !== "string") return null;
+  const year = positiveInt(r.year);
+  return {
+    title: r.title,
+    ...(year !== null ? { year } : {}),
+    ...(typeof r.titleSlug === "string" ? { titleSlug: r.titleSlug } : {}),
+    ...(r.images !== undefined ? { images: r.images } : {}),
+  };
+}
+
+// The season numbers a series lookup lists (0, the specials, included).
+function lookupSeasons(v: unknown): number[] {
+  if (!Array.isArray(v)) return [];
+  const out: number[] = [];
+  for (const s of v) {
+    const n = rowOf(s)?.seasonNumber;
+    if (typeof n === "number" && Number.isSafeInteger(n) && n >= 0) out.push(n);
+  }
+  return out;
+}
+
+function projectLookupSeries(raw: unknown): LookupSeries | null {
+  const r = rowOf(raw);
+  const tvdbId = positiveInt(r?.tvdbId);
+  const base = r ? lookupTitle(r) : null;
+  return r && base && tvdbId !== null ? { ...base, tvdbId, seasons: lookupSeasons(r.seasons) } : null;
+}
 
 async function lookupMovie(cfg: ArrCfg, tmdbId: number): Promise<LookupMovie | null> {
-  const rows = await arrFetch<LookupMovie[]>(cfg, `/api/v3/movie/lookup?term=tmdb:${tmdbId}`);
+  const rows = await arrFetch<unknown>(cfg, `/api/v3/movie/lookup?term=tmdb:${tmdbId}`);
   // A `tmdb:` term the arr doesn't recognise degrades to a title search, so
   // only the row naming THIS id counts (the request add's rule).
-  const list = Array.isArray(rows) ? rows : [];
-  return list.find((m) => m?.tmdbId === tmdbId) ?? null;
+  const row = Array.isArray(rows) ? rows.map(rowOf).find((m) => m?.tmdbId === tmdbId) : undefined;
+  const base = row ? lookupTitle(row) : null;
+  return base ? { ...base, tmdbId } : null;
 }
 
 async function firstLanguageProfile(cfg: ArrCfg): Promise<number | null> {
@@ -283,29 +377,41 @@ async function firstLanguageProfile(cfg: ArrCfg): Promise<number | null> {
   }
 }
 
-async function lookupSeries(cfg: ArrCfg, tmdbId: number): Promise<LookupSeries | null> {
-  // Sonarr by tmdb id, then TMDB's own TVDB cross-reference (guardrail 14a).
-  return lookupSeriesByTmdbId<LookupSeries & { tmdbId?: number; tvdbId?: number }>(cfg, tmdbId);
+/**
+ * Sonarr's `tmdb:` lookup, read at most once per add: findTitle (when the
+ * library misses) and the series lookup below share it. SkyHook makes it slow.
+ */
+function sharedSeriesLookup(cfg: ArrCfg, tmdbId: number): () => Promise<unknown> {
+  let answer: Promise<unknown> | null = null;
+  return () => (answer ??= arrFetch<unknown>(cfg, seriesLookupPath(tmdbId)));
+}
+
+/**
+ * Sonarr by tmdb id, then TMDB's own TVDB cross-reference (guardrail 14a) —
+ * resolveSonarrSeries' order. The shared `tmdb:` answer settles the common
+ * case; only a miss there (or an unusable answer) asks the full resolution,
+ * which reads the lookup again before its cross-reference.
+ */
+async function lookupSeries(cfg: ArrCfg, tmdbId: number, lookup: () => Promise<unknown>): Promise<LookupSeries | null> {
+  const rows = await lookup();
+  const list = Array.isArray(rows) ? rows.map(rowOf) : null;
+  const direct = list && list.every((r) => r !== null) ? pickSeriesByTmdbId(list as Row[], tmdbId) : null;
+  return projectLookupSeries(direct ?? (await lookupSeriesByTmdbId(cfg, tmdbId)));
 }
 
 export async function loadAddChoices(service: ArrService, instance: string, tmdbId: number): Promise<AddChoices> {
   const cfg = await configuredArrCfg(service, instance);
-  const [found, profiles, folders, tags, defaults, looked] = await Promise.all([
-    findTitle(service, instance, tmdbId),
-    arrFetch<unknown>(cfg, "/api/v3/qualityprofile"),
-    arrFetch<unknown>(cfg, "/api/v3/rootfolder"),
-    arrFetch<unknown>(cfg, "/api/v3/tag"),
+  const lookup = sharedSeriesLookup(cfg, tmdbId);
+  const [found, catalog, defaults, looked] = await Promise.all([
+    findTitleOn(cfg, service, tmdbId, service === "sonarr" ? { seriesLookup: lookup } : {}),
+    readCatalog(cfg),
     getArrAddDefaults(service, instance),
-    service === "radarr" ? lookupMovie(cfg, tmdbId) : lookupSeries(cfg, tmdbId),
+    service === "radarr" ? lookupMovie(cfg, tmdbId) : lookupSeries(cfg, tmdbId, lookup),
   ]);
   return {
     presentArrId: found?.arrId ?? null,
-    preview: looked && typeof looked.title === "string"
-      ? { tmdbId, title: looked.title.slice(0, 300), year: typeof looked.year === "number" && looked.year > 0 ? looked.year : null }
-      : null,
-    qualityProfiles: projectChoices(profiles),
-    rootFolders: projectRootFolderChoices(folders),
-    tags: projectChoices(tags, "label"),
+    preview: looked ? { tmdbId, title: looked.title.slice(0, 300), year: looked.year ?? null } : null,
+    ...catalog,
     defaults: {
       qualityProfileId: defaults?.qualityProfileId ?? null,
       rootFolderPath: defaults?.rootFolder ?? null,
@@ -370,9 +476,10 @@ async function seriesIdByTvdb(cfg: ArrCfg, tvdbId: number): Promise<number | nul
  * never withdrawn, and the retry only hits "already there" (409). So the title
  * is re-read (`reread`: Radarr by tmdbId, Sonarr by the tvdbId it was sent —
  * seriesIdByTvdb), and found there it is treated as added. A created resource
- * with no id is resolved the same way rather than recorded as 0.
+ * with no id is resolved the same way; still not found, the add happened with
+ * no id to name it (null), never a made-up 0.
  */
-async function postAdd(cfg: ArrCfg, service: ArrService, body: string, reread: () => Promise<number | null>): Promise<number> {
+async function postAdd(cfg: ArrCfg, service: ArrService, body: string, reread: () => Promise<number | null>): Promise<number | null> {
   let created: { id?: unknown } | null;
   try {
     created = await arrFetch<{ id?: unknown }>(cfg, service === "radarr" ? "/api/v3/movie" : "/api/v3/series", { method: "POST", body });
@@ -383,63 +490,67 @@ async function postAdd(cfg: ArrCfg, service: ArrService, body: string, reread: (
     return arrId;
   }
   if (typeof created?.id === "number" && created.id > 0) return created.id;
-  return (await reread()) ?? 0;
+  return reread();
 }
 
 /**
  * Add a title with the admin's choices. The profile, root folder and tags must
  * be the instance's own (TitleEditError otherwise — nothing is written); a
  * title it already has is TitleExistsError; one its lookup can't find is
- * TitleLookupError. Answers the new arr id.
+ * TitleLookupError. Answers the new arr id — null when the arr took the add
+ * but neither its answer nor a re-read named one.
  */
-export async function addTitle(service: ArrService, instance: string, add: TitleAdd): Promise<{ arrId: number; title: string }> {
+export async function addTitle(service: ArrService, instance: string, add: TitleAdd): Promise<{ arrId: number | null; title: string }> {
   const cfg = await configuredArrCfg(service, instance);
-  const [found, profiles, folders, tags] = await Promise.all([
-    findTitle(service, instance, add.tmdbId),
-    arrFetch<unknown>(cfg, "/api/v3/qualityprofile"),
-    arrFetch<unknown>(cfg, "/api/v3/rootfolder"),
-    arrFetch<unknown>(cfg, "/api/v3/tag"),
+  const lookup = sharedSeriesLookup(cfg, add.tmdbId);
+  const [found, catalog] = await Promise.all([
+    findTitleOn(cfg, service, add.tmdbId, service === "sonarr" ? { seriesLookup: lookup } : {}),
+    readCatalog(cfg),
   ]);
   if (found) throw new TitleExistsError(found.arrId);
   checkTitleEdit(
     { qualityProfileId: add.qualityProfileId, rootFolderPath: add.rootFolderPath, tags: add.tags },
     {
-      profileIds: new Set(projectChoices(profiles).map((p) => p.id)),
-      rootFolders: new Set(projectRootFolderChoices(folders).map((f) => f.path)),
-      tagIds: new Set(projectChoices(tags, "label").map((t) => t.id)),
+      profileIds: new Set(catalog.qualityProfiles.map((p) => p.id)),
+      rootFolders: new Set(catalog.rootFolders.map((f) => f.path)),
+      tagIds: new Set(catalog.tags.map((t) => t.id)),
       seasonNumbers: new Set(),
     },
   );
 
-  if (service === "radarr") {
-    const movie = await lookupMovie(cfg, add.tmdbId);
-    if (!movie || typeof movie.title !== "string") throw new TitleLookupError();
-    // Only the listed fields, never the whole lookup row (the request add's rule).
-    const arrId = await postAdd(cfg, service, JSON.stringify({
-      tmdbId: add.tmdbId,
-      title: movie.title,
-      year: movie.year,
-      titleSlug: movie.titleSlug,
-      images: movie.images,
-      rootFolderPath: add.rootFolderPath,
-      qualityProfileId: add.qualityProfileId,
-      ...(add.minimumAvailability ? { minimumAvailability: add.minimumAvailability } : {}),
-      tags: add.tags,
-      monitored: add.monitored === true,
-      addOptions: { searchForMovie: add.search },
-    }), () => presentArrId(service, instance, add.tmdbId));
-    await clearRemovalStamps(service, instance, { tmdbId: add.tmdbId, tvdbId: null });
-    return { arrId, title: movie.title };
-  }
+  return service === "radarr" ? addMovie(cfg, instance, add) : addSeries(cfg, instance, add, lookup);
+}
 
-  const series = await lookupSeries(cfg, add.tmdbId);
-  if (!series || typeof series.title !== "string" || typeof series.tvdbId !== "number") throw new TitleLookupError();
+async function addMovie(cfg: ArrCfg, instance: string, add: TitleAdd): Promise<{ arrId: number | null; title: string }> {
+  const movie = await lookupMovie(cfg, add.tmdbId);
+  if (!movie) throw new TitleLookupError();
+  // Only the listed fields, never the whole lookup row (the request add's rule).
+  const arrId = await postAdd(cfg, "radarr", JSON.stringify({
+    tmdbId: add.tmdbId,
+    title: movie.title,
+    year: movie.year,
+    titleSlug: movie.titleSlug,
+    images: movie.images,
+    rootFolderPath: add.rootFolderPath,
+    qualityProfileId: add.qualityProfileId,
+    ...(add.minimumAvailability ? { minimumAvailability: add.minimumAvailability } : {}),
+    tags: add.tags,
+    monitored: add.monitored === true,
+    addOptions: { searchForMovie: add.search },
+  }), () => presentArrId("radarr", instance, add.tmdbId));
+  await clearRemovalStamps("radarr", instance, { tmdbId: add.tmdbId, tvdbId: null });
+  return { arrId, title: movie.title };
+}
+
+async function addSeries(cfg: ArrCfg, instance: string, add: TitleAdd, lookup: () => Promise<unknown>): Promise<{ arrId: number | null; title: string }> {
+  const series = await lookupSeries(cfg, add.tmdbId, lookup);
+  if (!series) throw new TitleLookupError();
   const defaults = await getArrAddDefaults("sonarr", instance);
   // Sonarr v3 refuses an add without a language profile; v4 has none (404).
   const languageProfileId = defaults?.languageProfileId ?? (await firstLanguageProfile(cfg));
   const monitor = add.monitor ?? "all";
   const tvdbId = series.tvdbId;
-  const arrId = await postAdd(cfg, service, JSON.stringify({
+  const arrId = await postAdd(cfg, "sonarr", JSON.stringify({
     tvdbId,
     title: series.title,
     year: series.year,
@@ -447,9 +558,7 @@ export async function addTitle(service: ArrService, instance: string, add: Title
     images: series.images,
     // Sonarr sets each season's and episode's monitoring from addOptions.monitor;
     // the seasons only need to be listed.
-    seasons: (series.seasons ?? [])
-      .filter((s) => typeof s?.seasonNumber === "number")
-      .map((s) => ({ seasonNumber: s.seasonNumber, monitored: monitor !== "none" && (s.seasonNumber as number) > 0 })),
+    seasons: series.seasons.map((seasonNumber) => ({ seasonNumber, monitored: monitor !== "none" && seasonNumber > 0 })),
     rootFolderPath: add.rootFolderPath,
     qualityProfileId: add.qualityProfileId,
     // Sonarr v3 only (v4 has no language profiles).
@@ -460,6 +569,6 @@ export async function addTitle(service: ArrService, instance: string, add: Title
     monitored: monitor !== "none",
     addOptions: { monitor, searchForMissingEpisodes: add.search },
   }), () => seriesIdByTvdb(cfg, tvdbId));
-  await clearRemovalStamps(service, instance, { tmdbId: add.tmdbId, tvdbId });
+  await clearRemovalStamps("sonarr", instance, { tmdbId: add.tmdbId, tvdbId });
   return { arrId, title: series.title };
 }

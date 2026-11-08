@@ -1,32 +1,23 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Download, Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText, AlertTriangle } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
-import { uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
+import { chunkedUploadErrorMessage, uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
 import { withBasePath } from "@/lib/base-path";
+import { importResultFrom, type ImportResult, type ImportSummary } from "@/components/admin/backup-import-result";
+// The encrypted-backup header check, shared with the first-run restore (/setup).
+import { isEncryptedBackupFile } from "@/lib/client/backup-file";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 const MB = 1024 * 1024;
 
-// Magic bytes at the start of every encrypted backup file; used to reject plain-SQL uploads
-const ENCRYPTED_MAGIC = "RBKBKP01";
-
-async function isEncryptedFile(file: File): Promise<boolean> {
-  if (file.size < ENCRYPTED_MAGIC.length) return false;
-  const head = await file.slice(0, ENCRYPTED_MAGIC.length).arrayBuffer();
-  const bytes = new Uint8Array(head);
-  for (let i = 0; i < ENCRYPTED_MAGIC.length; i++) {
-    if (bytes[i] !== ENCRYPTED_MAGIC.charCodeAt(i)) return false;
-  }
-  return true;
-}
-
-// `exportReady` is the server page's read of BACKUP_DB_PASSWORD (set, ≥12
-// chars — the db-export route's own 503 gate); false swaps the Download button
-// for a warning so the admin learns it here instead of from a tab of raw JSON.
+// `exportReady` is the server page's read of BACKUP_DB_PASSWORD
+// (isBackupPasswordReady — the db-export route's own 503 gate); false swaps the
+// Download button for a warning so the admin learns it here instead of from a
+// tab of raw JSON.
 export function BackupUI({
   mode,
   exportReady = true,
@@ -114,9 +105,12 @@ function DbExportSection({ ready }: { ready: boolean }) {
   );
 }
 
-function DbImportSection() {
+// The restore's state and steps. A new file (picked or dropped) starts over —
+// result, progress and any open confirmation — and only the CURRENT file's
+// header check may land: a slow check of a file already replaced never marks
+// the new one encrypted (or not).
+function useDbImport() {
   const t = useT();
-  const locale = useLocale();
   const [file, setFile] = useState<File | null>(null);
   const [encrypted, setEncrypted] = useState<boolean | null>(null);
   // Raw bytes; formatted at render so the size follows the viewer's locale
@@ -125,35 +119,35 @@ function DbImportSection() {
   const [dragging, setDragging] = useState(false);
   const [importing, setImporting] = useState(false);
   const [confirming, setConfirming] = useState(false);
-  const sizeFmt = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 });
-  const formatSize = (bytes: number) =>
-    bytes > MB ? `${sizeFmt.format(bytes / MB)} MB` : `${sizeFmt.format(bytes / 1024)} KB`;
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Bumped by every file change: a header check of an older file is dropped.
+  const fileSeq = useRef(0);
+  // Cancel (and leaving the page) stops the upload and its server session —
+  // before the final chunk; once that is sent the server is already restoring
+  // and finishes on its own.
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => uploadAbortRef.current?.abort(), []);
   const [progress, setProgress] = useState<ChunkedUploadProgress | null>(null);
-  const [result, setResult] = useState<
-    | {
-        ok: boolean;
-        summary?: { total: number; executed: number; skipped: number; errors: number };
-        errors?: string[];
-        error?: string;
-        warning?: string;
-      }
-    | null
-  >(null);
+  const [result, setResult] = useState<ImportResult | null>(null);
 
   async function handleFileChange(f: File | null) {
+    // The file being restored stays put until its restore ends: swapping it
+    // reset the progress and result while the old upload kept running.
+    if (importing) return;
+    const seq = ++fileSeq.current;
     setFile(f);
     setResult(null);
     setProgress(null);
-    setSizeBytes(null);
+    // A confirmation was for the file it was given on, never the next one.
+    setConfirming(false);
+    setSizeBytes(f ? f.size : null);
     setEncrypted(null);
     if (!f) return;
     try {
-      const isEnc = await isEncryptedFile(f);
-      setEncrypted(isEnc);
-      setSizeBytes(f.size);
+      const isEnc = await isEncryptedBackupFile(f);
+      if (seq === fileSeq.current) setEncrypted(isEnc);
     } catch {
-      setResult({ ok: false, error: t("adminManage.backup.error.read") });
+      if (seq === fileSeq.current) setResult({ ok: false, error: t("adminManage.backup.error.read") });
     }
   }
 
@@ -169,38 +163,44 @@ function DbImportSection() {
     setProgress({ uploaded: 0, total: file.size, phase: "upload" });
 
     // uploadInChunks folds fetch failures into an "error" outcome, but it can
-    // still throw before its own try (crypto.randomUUID is undefined outside a
-    // secure context — a plain-HTTP LAN deployment). Unguarded, that rejection
-    // left `importing` true forever: a spinner with no way to retry.
+    // still throw before its own try. Unguarded, that rejection left
+    // `importing` true forever: a spinner with no way to retry.
     let outcome: Awaited<ReturnType<typeof uploadInChunks>>;
+    const abort = new AbortController();
+    uploadAbortRef.current = abort;
     try {
       outcome = await uploadInChunks({
         file,
         endpoint: withBasePath("/api/admin/backup/db-import-chunk"),
         onProgress: setProgress,
+        signal: abort.signal,
       });
     } catch (err) {
       setImporting(false);
       setResult({ ok: false, error: err instanceof Error ? err.message : t("adminManage.backup.error.upload") });
       return;
+    } finally {
+      if (uploadAbortRef.current === abort) uploadAbortRef.current = null;
     }
 
     setImporting(false);
 
     if (outcome.kind === "error") {
-      setResult({ ok: false, error: outcome.error });
+      setResult({ ok: false, error: chunkedUploadErrorMessage(outcome, t) });
       return;
     }
-    const data = outcome.data as {
-      ok: boolean;
-      summary?: { total: number; executed: number; skipped: number; errors: number };
-      errors?: string[];
-      warning?: string;
-    };
-    setResult({ ok: data.ok, summary: data.summary, errors: data.errors, warning: data.warning });
+    setResult(importResultFrom(outcome.data));
+  }
+
+  // Stops an upload still sending chunks; uploadInChunks drops the server's
+  // session and answers "cancelled".
+  function cancelUpload() {
+    uploadAbortRef.current?.abort();
   }
 
   function clearFile() {
+    if (importing) return;
+    fileSeq.current++;
     // Reset the uncontrolled input too, or re-picking the same file fires no
     // change event and the drop zone stays empty.
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -212,6 +212,44 @@ function DbImportSection() {
     setConfirming(false);
   }
 
+  return {
+    file, encrypted, sizeBytes, dragging, setDragging, importing, confirming, setConfirming, fileInputRef,
+    progress, result, handleFileChange, handleImport, cancelUpload, clearFile,
+  };
+}
+
+type DbImport = ReturnType<typeof useDbImport>;
+
+function DbImportSection() {
+  const imp = useDbImport();
+  const { result, confirming, importing, progress } = imp;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <DropZone imp={imp} />
+      <FileButtons imp={imp} />
+      {!result?.summary && !confirming && <RestoreButton imp={imp} />}
+      {!result?.summary && confirming && <ConfirmRestore imp={imp} />}
+      {importing && progress && <UploadProgress progress={progress} onCancel={imp.cancelUpload} />}
+      {result?.summary && <ImportSummaryPanel result={result} summary={result.summary} />}
+      {result?.error && <ImportError text={result.error} />}
+    </div>
+  );
+}
+
+function useSizeFormat() {
+  const locale = useLocale();
+  const sizeFmt = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 });
+  const formatSize = (bytes: number) =>
+    bytes > MB ? `${sizeFmt.format(bytes / MB)} MB` : `${sizeFmt.format(bytes / 1024)} KB`;
+  return { sizeFmt, formatSize };
+}
+
+// Drop a file here (or pick one below): the file, its size and whether its
+// header is an encrypted backup's.
+function DropZone({ imp }: { imp: DbImport }) {
+  const t = useT();
+  const { formatSize } = useSizeFormat();
+  const { file, encrypted, sizeBytes, dragging, setDragging, importing, handleFileChange } = imp;
   const dropBorder =
     encrypted === false
       ? "var(--ds-danger)"
@@ -220,361 +258,405 @@ function DbImportSection() {
         : "var(--ds-border-strong, var(--ds-border))";
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <div
-        onDragEnter={(e) => {
-          e.preventDefault();
-          setDragging(true);
-        }}
-        onDragOver={(e) => {
-          // Without preventDefault the browser's own drop runs and navigates
-          // away to (or downloads) the dropped file.
-          e.preventDefault();
-          e.dataTransfer.dropEffect = "copy";
-          setDragging(true);
-        }}
-        onDragLeave={(e) => {
-          // dragleave fires when the pointer crosses onto a CHILD of the zone
-          // too; only clear once it has actually left the zone.
-          if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
-          setDragging(false);
-        }}
-        onDrop={(e) => {
-          e.preventDefault();
-          setDragging(false);
-          const dropped = e.dataTransfer.files[0];
-          if (dropped) void handleFileChange(dropped);
-        }}
-        style={{
-          border: `1px dashed ${dragging ? "var(--ds-accent-ring)" : dropBorder}`,
-          borderRadius: 8,
-          padding: 18,
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          gap: 10,
-          minHeight: 110,
-          textAlign: "center",
-          background: dragging
-            ? "var(--ds-accent-soft)"
-            : file
-              ? "var(--ds-bg-inset, var(--ds-bg))"
-              : "transparent",
-          transition: "background 120ms, border-color 120ms",
-        }}
-      >
-        {file ? (
-          <>
-            <div className="flex items-center gap-2">
-              {encrypted === true ? (
-                <FileCheck style={{ width: 18, height: 18, color: "var(--ds-success)" }} />
-              ) : encrypted === false ? (
-                <FileX style={{ width: 18, height: 18, color: "var(--ds-danger)" }} />
-              ) : (
-                <FileText style={{ width: 18, height: 18, color: "var(--ds-fg-muted)" }} />
-              )}
-              <span className="ds-mono font-medium break-all" style={{ fontSize: 12 }}>
-                {file.name}
-              </span>
-              {sizeBytes !== null && (
-                <span
-                  className="ds-mono"
-                  style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
-                >
-                  · {formatSize(sizeBytes)}
-                </span>
-              )}
-            </div>
-            {encrypted === true && (
+    <div
+      onDragEnter={(e) => {
+        e.preventDefault();
+        if (!importing) setDragging(true);
+      }}
+      onDragOver={(e) => {
+        // Without preventDefault the browser's own drop runs and navigates
+        // away to (or downloads) the dropped file — mid-restore too, so it
+        // stays; "none" shows the drop won't be taken.
+        e.preventDefault();
+        e.dataTransfer.dropEffect = importing ? "none" : "copy";
+        if (!importing) setDragging(true);
+      }}
+      onDragLeave={(e) => {
+        // dragleave fires when the pointer crosses onto a CHILD of the zone
+        // too; only clear once it has actually left the zone.
+        if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+        setDragging(false);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragging(false);
+        if (importing) return;
+        const dropped = e.dataTransfer.files[0];
+        if (dropped) void handleFileChange(dropped);
+      }}
+      style={{
+        border: `1px dashed ${dragging ? "var(--ds-accent-ring)" : dropBorder}`,
+        borderRadius: 8,
+        padding: 18,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 10,
+        minHeight: 110,
+        textAlign: "center",
+        background: dragging
+          ? "var(--ds-accent-soft)"
+          : file
+            ? "var(--ds-bg-inset, var(--ds-bg))"
+            : "transparent",
+        transition: "background 120ms, border-color 120ms",
+      }}
+    >
+      {file ? (
+        <>
+          <div className="flex items-center gap-2">
+            {encrypted === true ? (
+              <FileCheck style={{ width: 18, height: 18, color: "var(--ds-success)" }} />
+            ) : encrypted === false ? (
+              <FileX style={{ width: 18, height: 18, color: "var(--ds-danger)" }} />
+            ) : (
+              <FileText style={{ width: 18, height: 18, color: "var(--ds-fg-muted)" }} />
+            )}
+            <span className="ds-mono font-medium break-all" style={{ fontSize: 12 }}>
+              {file.name}
+            </span>
+            {sizeBytes !== null && (
               <span
-                className="ds-chip ds-chip-approved inline-flex items-center"
-                style={{ gap: 4, fontSize: 10, letterSpacing: "0.04em" }}
+                className="ds-mono"
+                style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
               >
-                <CheckCircle style={{ width: 10, height: 10 }} />
-                {t("adminManage.backup.validHeader")}
+                · {formatSize(sizeBytes)}
               </span>
             )}
-            {encrypted === false && (
-              <span
-                className="ds-chip ds-chip-declined"
-                style={{ fontSize: 10, letterSpacing: "0.04em" }}
-              >
-                {t("adminManage.backup.notEncrypted")}
-              </span>
-            )}
-          </>
-        ) : (
-          <>
-            <Upload
-              style={{ width: 22, height: 22, color: "var(--ds-fg-subtle)" }}
-            />
+          </div>
+          {encrypted === true && (
             <span
-              className="ds-mono uppercase"
-              style={{
-                fontSize: 10.5,
-                color: "var(--ds-fg-subtle)",
-                letterSpacing: "0.06em",
-              }}
+              className="ds-chip ds-chip-approved inline-flex items-center"
+              style={{ gap: 4, fontSize: 10, letterSpacing: "0.04em" }}
             >
-              {t("adminManage.backup.drop")}
+              <CheckCircle style={{ width: 10, height: 10 }} />
+              {t("adminManage.backup.validHeader")}
             </span>
-          </>
-        )}
-      </div>
-
-      <div className="flex items-center gap-2 flex-wrap">
-        <label
-          // Styled as the secondary Button beside it (same recipe, so the pair
-          // reads as one control row); a <label> is not a <button>, so the
-          // pointer and the focus ring (from the sr-only input inside) are
-          // restated here rather than coming from the base rule / focus-visible.
-          className={cn(
-            buttonVariants({ variant: "secondary", size: "sm" }),
-            "cursor-pointer focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50",
           )}
-        >
-          {t("adminManage.backup.chooseFile")}
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".enc"
-            onChange={(e) => {
-              const picked = e.target.files?.[0] ?? null;
-              // Empty the input once read: a later drop or Clear replaces the
-              // file in state, and re-picking the same file must still fire.
-              e.target.value = "";
-              void handleFileChange(picked);
-            }}
-            // sr-only, not hidden: display:none drops the input from the tab
-            // order and a <label> can't take focus, so keyboard users could
-            // never open the chooser.
-            className="sr-only"
+          {encrypted === false && (
+            <span
+              className="ds-chip ds-chip-declined"
+              style={{ fontSize: 10, letterSpacing: "0.04em" }}
+            >
+              {t("adminManage.backup.notEncrypted")}
+            </span>
+          )}
+        </>
+      ) : (
+        <>
+          <Upload
+            style={{ width: 22, height: 22, color: "var(--ds-fg-subtle)" }}
           />
-        </label>
-        {file && (
-          <Button variant="secondary" size="sm" onClick={clearFile}>
-            {t("adminManage.backup.clear")}
-          </Button>
-        )}
-      </div>
-
-      {!result?.summary && !confirming && (
-        <Button
-          onClick={() => setConfirming(true)}
-          disabled={!file || !encrypted || importing}
-        >
-          {importing ? (
-            <>
-              <Loader2 className="animate-spin" />
-              {progress?.phase === "import"
-                ? t("adminManage.backup.importing")
-                : progress
-                  ? t("adminManage.backup.uploadingPct", { pct: Math.round((progress.uploaded / progress.total) * 100) })
-                  : t("adminManage.backup.starting")}
-            </>
-          ) : (
-            <>
-              <Upload /> {t("adminManage.backup.restoreFromFile")}
-            </>
-          )}
-        </Button>
-      )}
-
-      {!result?.summary && confirming && (
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 10,
-            padding: 14,
-            borderRadius: 8,
-            background: "color-mix(in oklab, var(--ds-danger) 8%, transparent)",
-            border: "1px solid color-mix(in oklab, var(--ds-danger) 40%, var(--ds-border))",
-          }}
-        >
-          <span style={{ fontSize: 12.5, color: "var(--ds-fg)" }}>
-            {t("adminManage.backup.confirm")}
-          </span>
-          <div className="flex items-center gap-2 flex-wrap">
-            <Button variant="secondary" size="sm" onClick={() => setConfirming(false)}>
-              {t("adminManage.common.cancel")}
-            </Button>
-            <Button onClick={handleImport} disabled={importing}>
-              <Upload /> {t("adminManage.backup.confirmYes")}
-            </Button>
-          </div>
-        </div>
-      )}
-
-      {importing && progress && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <div
-            style={{
-              height: 6,
-              borderRadius: 999,
-              background: "var(--ds-bg-3)",
-              overflow: "hidden",
-            }}
-          >
-            <div
-              style={{
-                height: "100%",
-                width: `${Math.round((progress.uploaded / progress.total) * 100)}%`,
-                background: "var(--ds-accent)",
-                transition: "width 120ms",
-              }}
-            />
-          </div>
-          <div
-            className="ds-mono"
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              fontSize: 10.5,
-              color: "var(--ds-fg-subtle)",
-            }}
-          >
-            <span>
-              {sizeFmt.format(progress.uploaded / MB)} MB /{" "}
-              {sizeFmt.format(progress.total / MB)} MB
-            </span>
-            <span>
-              {progress.phase === "import" ? t("adminManage.backup.restoringOnServer") : t("adminManage.backup.uploading")}
-            </span>
-          </div>
-        </div>
-      )}
-
-      {result?.summary && (
-        <div
-          style={{
-            padding: 14,
-            background: "var(--ds-bg-inset, var(--ds-bg))",
-            border: "1px solid var(--ds-border)",
-            borderRadius: 8,
-          }}
-        >
-          <div
+          <span
             className="ds-mono uppercase"
             style={{
               fontSize: 10.5,
               color: "var(--ds-fg-subtle)",
               letterSpacing: "0.06em",
-              marginBottom: 10,
             }}
           >
-            {result.ok ? t("adminManage.backup.resultOk") : t("adminManage.backup.resultErrors")}
-          </div>
-          <div
-            className="grid grid-cols-2 sm:grid-cols-4"
-            style={{ gap: 10 }}
-          >
-            {[
-              { label: t("adminManage.backup.kpi.total"), value: result.summary.total, color: "var(--ds-fg)" },
-              { label: t("adminManage.backup.kpi.executed"), value: result.summary.executed, color: "var(--ds-success)" },
-              { label: t("adminManage.backup.kpi.skipped"), value: result.summary.skipped, color: "var(--ds-warning)" },
-              {
-                label: t("adminManage.backup.kpi.errors"),
-                value: result.summary.errors,
-                color: result.summary.errors > 0 ? "var(--ds-danger)" : "var(--ds-fg-subtle)",
-              },
-            ].map((kpi) => (
-              <div key={kpi.label}>
-                <div
-                  className="ds-mono uppercase"
-                  style={{
-                    fontSize: 10,
-                    color: "var(--ds-fg-subtle)",
-                    letterSpacing: "0.06em",
-                  }}
-                >
-                  {kpi.label}
-                </div>
-                <div
-                  className="ds-mono font-semibold"
-                  style={{
-                    fontSize: 18,
-                    color: kpi.color,
-                    marginTop: 2,
-                    fontVariantNumeric: "tabular-nums",
-                  }}
-                >
-                  {kpi.value.toLocaleString(locale)}
-                </div>
-              </div>
-            ))}
-          </div>
-          {result.warning && (
+            {t("adminManage.backup.drop")}
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Choose a file (the keyboard's way in) and Clear.
+function FileButtons({ imp }: { imp: DbImport }) {
+  const t = useT();
+  const { file, importing, fileInputRef, handleFileChange, clearFile } = imp;
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <label
+        // Styled as the secondary Button beside it (same recipe, so the pair
+        // reads as one control row); a <label> is not a <button>, so the
+        // pointer and the focus ring (from the sr-only input inside) are
+        // restated here rather than coming from the base rule / focus-visible.
+        className={cn(
+          buttonVariants({ variant: "secondary", size: "sm" }),
+          "cursor-pointer focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50",
+          // The base recipe's disabled look keys off :disabled, which a
+          // <label> never has — mirror it while the input inside is disabled.
+          importing && "pointer-events-none opacity-50",
+        )}
+      >
+        {t("adminManage.backup.chooseFile")}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".enc"
+          disabled={importing}
+          onChange={(e) => {
+            const picked = e.target.files?.[0] ?? null;
+            // Empty the input once read: a later drop or Clear replaces the
+            // file in state, and re-picking the same file must still fire.
+            e.target.value = "";
+            void handleFileChange(picked);
+          }}
+          // sr-only, not hidden: display:none drops the input from the tab
+          // order and a <label> can't take focus, so keyboard users could
+          // never open the chooser.
+          className="sr-only"
+        />
+      </label>
+      {file && (
+        <Button variant="secondary" size="sm" onClick={clearFile} disabled={importing}>
+          {t("adminManage.backup.clear")}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+// "Restore from file" — it only opens the confirmation; while a restore runs it
+// shows how far it got.
+function RestoreButton({ imp }: { imp: DbImport }) {
+  const t = useT();
+  const { file, encrypted, importing, progress, setConfirming } = imp;
+  return (
+    <Button
+      onClick={() => setConfirming(true)}
+      disabled={!file || !encrypted || importing}
+    >
+      {importing ? (
+        <>
+          <Loader2 className="animate-spin" />
+          {progress?.phase === "import"
+            ? t("adminManage.backup.importing")
+            : progress
+              ? t("adminManage.backup.uploadingPct", { pct: Math.round((progress.uploaded / progress.total) * 100) })
+              : t("adminManage.backup.starting")}
+        </>
+      ) : (
+        <>
+          <Upload /> {t("adminManage.backup.restoreFromFile")}
+        </>
+      )}
+    </Button>
+  );
+}
+
+// The overwrite warning and the destructive "Yes, restore", enabled only for a
+// file whose header check passed.
+function ConfirmRestore({ imp }: { imp: DbImport }) {
+  const t = useT();
+  const { encrypted, importing, setConfirming, handleImport } = imp;
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+        padding: 14,
+        borderRadius: 8,
+        background: "color-mix(in oklab, var(--ds-danger) 8%, transparent)",
+        border: "1px solid color-mix(in oklab, var(--ds-danger) 40%, var(--ds-border))",
+      }}
+    >
+      <span style={{ fontSize: 12.5, color: "var(--ds-fg)" }}>
+        {t("adminManage.backup.confirm")}
+      </span>
+      <div className="flex items-center gap-2 flex-wrap">
+        <Button variant="secondary" size="sm" onClick={() => setConfirming(false)}>
+          {t("adminManage.common.cancel")}
+        </Button>
+        <Button onClick={() => void handleImport()} disabled={importing || encrypted !== true}>
+          <Upload /> {t("adminManage.backup.confirmYes")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// The upload's bar, its byte count and phase, and Cancel while chunks are
+// still being sent (once the last one is out the server is restoring).
+function UploadProgress({ progress, onCancel }: { progress: ChunkedUploadProgress; onCancel: () => void }) {
+  const t = useT();
+  const { sizeFmt } = useSizeFormat();
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <div
+        style={{
+          height: 6,
+          borderRadius: 999,
+          background: "var(--ds-bg-3)",
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            height: "100%",
+            width: `${Math.round((progress.uploaded / progress.total) * 100)}%`,
+            background: "var(--ds-accent)",
+            transition: "width 120ms",
+          }}
+        />
+      </div>
+      <div
+        className="ds-mono"
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          fontSize: 10.5,
+          color: "var(--ds-fg-subtle)",
+        }}
+      >
+        <span>
+          {sizeFmt.format(progress.uploaded / MB)} MB /{" "}
+          {sizeFmt.format(progress.total / MB)} MB
+        </span>
+        <span>
+          {progress.phase === "import" ? t("adminManage.backup.restoringOnServer") : t("adminManage.backup.uploading")}
+        </span>
+      </div>
+      {progress.phase === "upload" && (
+        <div>
+          <Button variant="secondary" size="sm" onClick={onCancel}>
+            {t("adminManage.common.cancel")}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// A finished restore: its counts, the server's warning, and its first errors.
+function ImportSummaryPanel({ result, summary }: { result: ImportResult; summary: ImportSummary }) {
+  const t = useT();
+  const locale = useLocale();
+  return (
+    <div
+      style={{
+        padding: 14,
+        background: "var(--ds-bg-inset, var(--ds-bg))",
+        border: "1px solid var(--ds-border)",
+        borderRadius: 8,
+      }}
+    >
+      <div
+        className="ds-mono uppercase"
+        style={{
+          fontSize: 10.5,
+          color: "var(--ds-fg-subtle)",
+          letterSpacing: "0.06em",
+          marginBottom: 10,
+        }}
+      >
+        {result.ok ? t("adminManage.backup.resultOk") : t("adminManage.backup.resultErrors")}
+      </div>
+      <div
+        className="grid grid-cols-2 sm:grid-cols-4"
+        style={{ gap: 10 }}
+      >
+        {[
+          { label: t("adminManage.backup.kpi.total"), value: summary.total, color: "var(--ds-fg)" },
+          { label: t("adminManage.backup.kpi.executed"), value: summary.executed, color: "var(--ds-success)" },
+          { label: t("adminManage.backup.kpi.skipped"), value: summary.skipped, color: "var(--ds-warning)" },
+          {
+            label: t("adminManage.backup.kpi.errors"),
+            value: summary.errors,
+            color: summary.errors > 0 ? "var(--ds-danger)" : "var(--ds-fg-subtle)",
+          },
+        ].map((kpi) => (
+          <div key={kpi.label}>
             <div
+              className="ds-mono uppercase"
               style={{
-                marginTop: 12,
-                padding: "8px 10px",
-                borderRadius: 6,
-                background: "color-mix(in oklab, var(--ds-warning) 12%, transparent)",
-                border: "1px solid color-mix(in oklab, var(--ds-warning) 30%, var(--ds-border))",
-                color: "var(--ds-warning)",
-                fontSize: 11.5,
-                lineHeight: 1.5,
+                fontSize: 10,
+                color: "var(--ds-fg-subtle)",
+                letterSpacing: "0.06em",
               }}
             >
-              {result.warning}
+              {kpi.label}
             </div>
-          )}
-          {result.errors && result.errors.length > 0 && (
-            <div style={{ marginTop: 12 }}>
-              <div
-                className="ds-mono uppercase"
-                style={{
-                  fontSize: 10,
-                  color: "var(--ds-fg-subtle)",
-                  letterSpacing: "0.06em",
-                  marginBottom: 6,
-                }}
-              >
-                {t("adminManage.backup.errorsCount", { count: result.errors.length })}
-              </div>
-              <ul
-                className="ds-mono"
-                style={{
-                  margin: 0,
-                  paddingLeft: 18,
-                  fontSize: 11,
-                  color: "var(--ds-fg-muted)",
-                  lineHeight: 1.6,
-                }}
-              >
-                {result.errors.slice(0, 10).map((e, i) => (
-                  <li key={`${i}-${e}`} className="break-all">
-                    {e}
-                  </li>
-                ))}
-                {result.errors.length > 10 && (
-                  <li style={{ color: "var(--ds-fg-subtle)" }}>
-                    {t("adminManage.backup.andMore", { count: result.errors.length - 10 })}
-                  </li>
-                )}
-              </ul>
+            <div
+              className="ds-mono font-semibold"
+              style={{
+                fontSize: 18,
+                color: kpi.color,
+                marginTop: 2,
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {kpi.value.toLocaleString(locale)}
             </div>
-          )}
-        </div>
-      )}
-
-      {result?.error && (
+          </div>
+        ))}
+      </div>
+      {result.warning && (
         <div
-          className="flex items-start gap-2"
           style={{
-            padding: "10px 12px",
+            marginTop: 12,
+            padding: "8px 10px",
             borderRadius: 6,
-            background: "color-mix(in oklab, var(--ds-danger) 12%, transparent)",
-            border: "1px solid color-mix(in oklab, var(--ds-danger) 30%, var(--ds-border))",
-            color: "var(--ds-danger)",
-            fontSize: 12.5,
+            background: "color-mix(in oklab, var(--ds-warning) 12%, transparent)",
+            border: "1px solid color-mix(in oklab, var(--ds-warning) 30%, var(--ds-border))",
+            color: "var(--ds-warning)",
+            fontSize: 11.5,
+            lineHeight: 1.5,
           }}
         >
-          <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
-          <span>{result.error}</span>
+          {result.warning}
         </div>
       )}
+      {result.errors && result.errors.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div
+            className="ds-mono uppercase"
+            style={{
+              fontSize: 10,
+              color: "var(--ds-fg-subtle)",
+              letterSpacing: "0.06em",
+              marginBottom: 6,
+            }}
+          >
+            {t("adminManage.backup.errorsCount", { count: result.errors.length })}
+          </div>
+          <ul
+            className="ds-mono"
+            style={{
+              margin: 0,
+              paddingLeft: 18,
+              fontSize: 11,
+              color: "var(--ds-fg-muted)",
+              lineHeight: 1.6,
+            }}
+          >
+            {result.errors.slice(0, 10).map((e, i) => (
+              <li key={`${i}-${e}`} className="break-all">
+                {e}
+              </li>
+            ))}
+            {result.errors.length > 10 && (
+              <li style={{ color: "var(--ds-fg-subtle)" }}>
+                {t("adminManage.backup.andMore", { count: result.errors.length - 10 })}
+              </li>
+            )}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ImportError({ text }: { text: string }) {
+  return (
+    <div
+      role="alert"
+      className="flex items-start gap-2"
+      style={{
+        padding: "10px 12px",
+        borderRadius: 6,
+        background: "color-mix(in oklab, var(--ds-danger) 12%, transparent)",
+        border: "1px solid color-mix(in oklab, var(--ds-danger) 30%, var(--ds-border))",
+        color: "var(--ds-danger)",
+        fontSize: 12.5,
+      }}
+    >
+      <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
+      <span>{text}</span>
     </div>
   );
 }

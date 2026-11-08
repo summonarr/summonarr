@@ -60,6 +60,10 @@ services:
       - "3001:3000"
     environment:
       PORT: "3000"
+      # The server's local time zone; unset means UTC. The global request quota's
+      # day / week / month windows reset at midnight in this zone. To change it,
+      # uncomment this (or put TZ=… in .env):
+      # TZ: "America/New_York"
       # AUTH_URL (set in .env) pins the app's public base URL so auth flows and
       # redirects don't rely on the incoming Host/X-Forwarded-Host header, eliminating
       # the host-header injection risk behind a reverse proxy.
@@ -102,7 +106,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 30s
+      # Covers the whole boot (database wait, opt-in pre-upgrade dump, db push)
+      # before node starts; the first passing probe ends it early. Matches the
+      # Dockerfile HEALTHCHECK's --start-period.
+      start_period: 300s
 
 volumes:
   postgres-data:

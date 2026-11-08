@@ -23,13 +23,23 @@
 //     part of this: it is reactive (the 401 itself announces it), so clients
 //     handle it at any version.
 //
-// v3 and v4 are ADDITIVE: MIN_API_VERSION stays 1, so nothing is dropped and no
-// client is locked out. They exist so a native client can ASK whether these
-// routes are here before offering them, instead of advertising a screen that
-// 404s (or, for a feature flag a pre-v4 server doesn't know, reads as on). That
-// is the guardrail-25 posture — feature-gate on the reported version, don't
-// raise the floor.
-export const API_VERSION = 4;
+// v5: admin Radarr/Sonarr surfaces a native client offers — the Download Queue
+//     (GET /api/admin/queue, POST /api/admin/queue/{remove,grab,recheck}, the
+//     import routes under /api/admin/queue/import, GET /api/admin/arr-health,
+//     and the queue's nav count in GET /api/admin/arr-watch `navBadges`), the
+//     issue "Fix file" window (GET/POST /api/issues/[id]/files), and request
+//     comments, Why? status and Pick release
+//     (/api/requests/[id]/{comments,arr-status,releases}). All of them shipped
+//     after the v4 bump without one of their own, so no earlier version
+//     guarantees them.
+//
+// v3, v4 and v5 are ADDITIVE: MIN_API_VERSION stays 1, so nothing is dropped
+// and no client is locked out. They exist so a native client can ASK whether
+// these routes are here before offering them, instead of advertising a screen
+// that 404s (or, for a feature flag a pre-v4 server doesn't know, reads as on).
+// That is the guardrail-25 posture — feature-gate on the reported version,
+// don't raise the floor.
+export const API_VERSION = 5;
 
 // Oldest contract version the server still answers. Bump only when you drop
 // backward-compatible support for an old client contract.

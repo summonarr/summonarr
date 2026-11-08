@@ -30,7 +30,8 @@
 //   - deleted outright: Account rows (OAuth tokens), AuthSessions, push subs,
 //     Discord link tokens + merge codes, watchlist / hidden / notifications /
 //     recommendations (the derived taste profile — same class of private per-user
-//     data, and NOT among the "requests/votes/issues" the User model keeps);
+//     data, and NOT among the "requests/votes/issues" the User model keeps),
+//     Trakt data and the watchlist auto-request ledger;
 //   - UNLINKED, never deleted: MediaServerUser rows get userId → null
 //     (guardrail 28 — hard-deleting would restrict on play history);
 //   - NEVER a hard-delete of the User row itself (requests/votes/issues stay
@@ -47,8 +48,20 @@ process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32); // the module's prisma impor
 
 // Dynamic import so the env assignment above genuinely precedes the
 // module-graph load (account-lifecycle imports ./prisma for its TxClient type).
-const { deactivateUserInTx, purgeUserDataInTx, LastAdminError, NotDeactivatedError, isPurgedRow, purgedEmailFor } =
-  await import("../src/lib/account-lifecycle.ts");
+const {
+  deactivateUserInTx,
+  purgeUserDataInTx,
+  LastAdminError,
+  NotDeactivatedError,
+  isPurgedRow,
+  purgedEmailFor,
+  lockTargetInTx,
+  assertTargetNotAdminInTx,
+  isAdminTarget,
+  TargetBecameAdminError,
+  USER_ROLE_LOCK_SQL,
+} = await import("../src/lib/account-lifecycle.ts");
+const { Permission } = await import("../src/lib/permissions.ts");
 type AnyTx = Parameters<typeof deactivateUserInTx>[0];
 
 // ── recording fake tx ───────────────────────────────────────────────────────
@@ -92,6 +105,7 @@ const baseTx = {
   account: { deleteMany: record("account", "deleteMany") },
   authSession: { deleteMany: record("authSession", "deleteMany") },
   pushSubscription: { deleteMany: record("pushSubscription", "deleteMany") },
+  pushSubscriptionRemoval: { deleteMany: record("pushSubscriptionRemoval", "deleteMany") },
   discordLinkToken: { deleteMany: record("discordLinkToken", "deleteMany") },
   discordMergeCode: { deleteMany: record("discordMergeCode", "deleteMany") },
   watchlistItem: { deleteMany: record("watchlistItem", "deleteMany") },
@@ -102,6 +116,7 @@ const baseTx = {
   traktWatchedItem: { deleteMany: record("traktWatchedItem", "deleteMany") },
   traktRating: { deleteMany: record("traktRating", "deleteMany") },
   traktConnection: { deleteMany: record("traktConnection", "deleteMany") },
+  autoRequestLedger: { deleteMany: record("autoRequestLedger", "deleteMany") },
   verificationToken: { deleteMany: record("verificationToken", "deleteMany") },
   userTotp: { deleteMany: record("userTotp", "deleteMany") },
   webAuthnCredential: { deleteMany: record("webAuthnCredential", "deleteMany") },
@@ -196,6 +211,7 @@ const PURGE_OPS = [
   "webAuthnCredential.deleteMany",
   "mfaRecoveryCode.deleteMany",
   "pushSubscription.deleteMany",
+  "pushSubscriptionRemoval.deleteMany",
   "discordLinkToken.deleteMany",
   "discordMergeCode.deleteMany",
   "mediaServerUser.updateMany",
@@ -209,6 +225,9 @@ const PURGE_OPS = [
   "traktWatchedItem.deleteMany",
   "traktRating.deleteMany",
   "traktConnection.deleteMany",
+  // The watchlist auto-request ledger (guardrail 34b): every title from this
+  // person's Summonarr/Plex/Trakt watchlists, with its source.
+  "autoRequestLedger.deleteMany",
   "verificationToken.deleteMany",
   // The audit trail's copies of who this was (audit-scrub.ts): rows ABOUT the
   // account lose the target name/email, rows BY it lose the actor name.
@@ -359,9 +378,11 @@ test("purge is idempotent — an already-purged row is a no-op, not a second scr
 test("purge of a disabled account issues the full scrub set, in order", async () => {
   await purgeUserDataInTx(purgeTx, ID, NOW);
   assert.deepEqual(opNames(), PURGE_OPS);
-  for (const op of PURGE_OPS.slice(1, 9)) {
+  for (const op of PURGE_OPS.slice(1, 10)) {
     assert.deepEqual(opArgs(op), { where: { userId: ID } }, op);
   }
+  // Scoped to THIS account: the ledger rows of everyone else stay.
+  assert.deepEqual(opArgs("autoRequestLedger.deleteMany"), { where: { userId: ID } });
 });
 
 test("purge scrubs the audit trail's copies of who this was — target name/email on rows ABOUT the account, the actor name on rows BY it", async () => {
@@ -509,4 +530,58 @@ test("purge severs the MediaServerUser identity by UNLINKING (userId → null), 
     where: { userId: ID },
     data: { userId: null },
   });
+});
+
+// ── the admin-target gate shared by the admin account routes ────────────────
+
+test("lockTargetInTx: lock 42 FIRST, then the re-read; a non-ADMIN caller is refused for a role-USER row carrying the ADMIN bit", async () => {
+  const lockedState = { role: "USER", permissions: Permission.ADMIN, deactivatedAt: null };
+  const tx = {
+    ...baseTx,
+    user: {
+      ...baseTx.user,
+      findUnique: async (args: unknown) => {
+        ops.push({ op: "user.findUnique", args });
+        return lockedState;
+      },
+    },
+  } as unknown as Parameters<typeof lockTargetInTx>[0];
+  await assert.rejects(() => lockTargetInTx(tx, ID, false), (err: unknown) => err instanceof TargetBecameAdminError);
+  assert.deepEqual(opNames(), ["$executeRawUnsafe", "user.findUnique"]);
+  assert.deepEqual(opArgs("$executeRawUnsafe"), { sql: USER_ROLE_LOCK_SQL, params: [] });
+  assert.equal(USER_ROLE_LOCK_SQL, "SELECT pg_advisory_xact_lock(42)");
+  // The wrapper the session/purge/reactivate routes call applies the same rule.
+  ops.length = 0;
+  await assert.rejects(() => assertTargetNotAdminInTx(tx, ID, false), (err: unknown) => err instanceof TargetBecameAdminError);
+  // A full admin may act on it, and gets the fresh row back.
+  ops.length = 0;
+  assert.deepEqual(await lockTargetInTx(tx, ID, true), lockedState);
+});
+
+test("isAdminTarget: role ADMIN OR the ADMIN bit; ISSUE_ADMIN, management bits and a missing row are not admin targets", () => {
+  assert.equal(isAdminTarget({ role: "ADMIN", permissions: 0n }), true);
+  assert.equal(isAdminTarget({ role: "USER", permissions: Permission.ADMIN }), true);
+  assert.equal(isAdminTarget({ role: "ISSUE_ADMIN", permissions: Permission.MANAGE_ISSUES }), false);
+  assert.equal(isAdminTarget({ role: "USER", permissions: Permission.MANAGE_USERS }), false);
+  assert.equal(isAdminTarget({ role: "USER", permissions: null }), false);
+  assert.equal(isAdminTarget(null), false);
+});
+
+test("lock 42 is spelled once: no source file outside account-lifecycle.ts carries the literal", async () => {
+  const { readdir, readFile } = await import("node:fs/promises");
+  const path = await import("node:path");
+  const root = path.resolve(import.meta.dirname, "../src");
+  const offenders: string[] = [];
+  async function walk(dir: string): Promise<void> {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name !== "generated") await walk(full);
+      } else if (/\.(ts|tsx)$/.test(entry.name) && !full.endsWith(path.join("lib", "account-lifecycle.ts"))) {
+        if ((await readFile(full, "utf8")).includes("pg_advisory_xact_lock(42)")) offenders.push(path.relative(root, full));
+      }
+    }
+  }
+  await walk(root);
+  assert.deepEqual(offenders, [], "take lock 42 through lockUserRolesInTx / lockTargetInTx");
 });

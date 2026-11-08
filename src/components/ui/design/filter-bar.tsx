@@ -1,6 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
+import { SEGMENTED_TRACK_STYLE, segmentedItemStyle } from "./segmented-style";
 
 export type FilterSegment<V extends string = string> = {
   value: V;
@@ -13,12 +14,16 @@ export function FilterBar<V extends string = string>({
   active,
   onChange,
   right,
+  label,
   className,
 }: {
   segments: readonly FilterSegment<V>[];
   active: V;
   onChange: (value: V) => void;
   right?: React.ReactNode;
+  /** What the segments choose (e.g. "Status"), so a screen reader hears it
+   *  with each toggle. */
+  label?: string;
   className?: string;
 }) {
   return (
@@ -29,13 +34,10 @@ export function FilterBar<V extends string = string>({
       )}
     >
       <div
+        role="group"
+        aria-label={label}
         className="ds-no-scrollbar flex overflow-x-auto max-w-full"
-        style={{
-          padding: 2,
-          background: "var(--ds-bg-1)",
-          border: "1px solid var(--ds-border)",
-          borderRadius: 8,
-        }}
+        style={SEGMENTED_TRACK_STYLE}
       >
         {segments.map((s) => {
           const isActive = s.value === active;
@@ -48,24 +50,7 @@ export function FilterBar<V extends string = string>({
               // min-h-9 (36px) on phones, 32px from sm: these are the main
               // filter controls on list pages, packed into a scrolling track.
               className="ds-hover-tint inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 font-medium border-0 min-h-9 sm:min-h-8"
-              style={{
-                padding: "5px 12px",
-                borderRadius: 6,
-                // Raised segmented-control look. A bg-3 fill alone was ~1.07:1
-                // against the bg-1 track in light mode — the selected filter
-                // was nearly invisible — so the active segment also carries a
-                // border-strong edge and a small shadow, visible in both themes.
-                background: isActive ? "var(--ds-bg-2)" : "transparent",
-                // Inactive segments leave box-shadow unset so .ds-hover-tint's
-                // inset tint (a box-shadow) can show on hover; an inline "none"
-                // beat the class rule and the segments had no hover state.
-                boxShadow: isActive
-                  ? "var(--ds-shadow-sm), inset 0 0 0 1px var(--ds-border-strong)"
-                  : undefined,
-                color: isActive ? "var(--ds-fg)" : "var(--ds-fg-muted)",
-                fontSize: 12,
-                transition: "all 120ms var(--ds-ease)",
-              }}
+              style={segmentedItemStyle(isActive)}
             >
               {s.label}
               {typeof s.count === "number" && (

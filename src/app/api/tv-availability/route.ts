@@ -2,7 +2,12 @@ import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { getVisibleServerInstances, visibleEpisodeSourcesFor } from "@/lib/media-visibility";
+import {
+  getVisibleServerInstances,
+  providerEpisodeSources,
+  summarizeEpisodeSources,
+  visibleEpisodeSourcesFor,
+} from "@/lib/media-visibility";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
 
@@ -34,16 +39,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiUser.common.tmdbIdOutOfRange") }, { status: 400 });
   }
 
-  const provider = session.user.provider;
-
-  let providerSources: string[];
-  if (provider === "plex") {
-    providerSources = ["plex"];
-  } else if (provider === "jellyfin" || provider === "jellyfin-quickconnect") {
-    providerSources = ["jellyfin"];
-  } else {
-    providerSources = ["plex", "jellyfin"];
-  }
+  const providerSources = providerEpisodeSources(session.user.provider);
 
   // TVEpisodeCache has no serverInstance column, so `source` alone would report
   // a RESTRICTED server's per-episode holdings to an ungranted caller — and this
@@ -53,8 +49,11 @@ export const GET = withAuth(async (req, _ctx, session) => {
   const sources = await visibleEpisodeSourcesFor(tmdbId, visible, providerSources);
   if (sources.length === 0) return NextResponse.json({ source: null, seasons: [] });
 
+  // Only the three columns read below — a long show's rows otherwise carry
+  // every episode's overview, still path and name for nothing.
   const rows = await prisma.tVEpisodeCache.findMany({
     where: { tmdbId, source: { in: sources } },
+    select: { seasonNumber: true, episodeNumber: true, source: true },
     orderBy: [{ seasonNumber: "asc" }, { episodeNumber: "asc" }],
   });
 
@@ -74,11 +73,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
     .sort(([a], [b]) => a - b)
     .map(([seasonNumber, episodes]) => ({ seasonNumber, episodes: episodes.sort((a, b) => a - b) }));
 
-  const sourcesPresent = new Set(rows.map((r) => r.source));
-  let source: TVAvailabilityResponse["source"] = null;
-  if (sourcesPresent.has("plex") && sourcesPresent.has("jellyfin")) source = "both";
-  else if (sourcesPresent.has("plex")) source = "plex";
-  else if (sourcesPresent.has("jellyfin")) source = "jellyfin";
+  const source: TVAvailabilityResponse["source"] = summarizeEpisodeSources(new Set(rows.map((r) => r.source)));
 
   return NextResponse.json({ source, seasons } satisfies TVAvailabilityResponse);
 });

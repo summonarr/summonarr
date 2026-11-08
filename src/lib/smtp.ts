@@ -57,6 +57,12 @@ export class SmtpError extends Error {
 }
 
 const READ_TIMEOUT_MS = 30_000;
+// A write's callback waits until the bytes leave the local socket buffer. A peer
+// that stops READING (during DATA, once the message outgrows its receive window
+// plus our send buffer) never drains it, emits no error, and would leave
+// sendMail — and the socket, fd and the closure holding the password — pending
+// forever, wedging the settleLimit(…, 3) email queue (see upgradeToTls).
+const WRITE_TIMEOUT_MS = 30_000;
 // READ_TIMEOUT_MS only arms once we are already connected, so a relay that
 // black-holes SYNs (firewall change, host down with no ICMP) leaves the connect
 // promise — and its socket, fd and retained closures — pending for the kernel's
@@ -124,12 +130,54 @@ const MAX_ENCODED_WORD_BYTES = 45;
 // words joined by a folding CRLF + space, instead of one multi-hundred-character
 // word that breaks the 75-character word limit and, past ~900 characters, the
 // 998-octet line limit relays enforce.
+//
+// An all-ASCII subject is folded (RFC 5322 §2.2.3): past ~76 characters a
+// space becomes CRLF + space, so a long title never becomes one header line
+// past the 998-octet limit. A run with no space to fold at that would still
+// leave an over-long line goes out as encoded-words instead.
 function encodeSubject(subject: string): string {
-  if (ASCII_PRINTABLE.test(subject)) return subject;
+  if (!ASCII_PRINTABLE.test(subject)) return encodeWords(subject);
+  const folded = foldAsciiHeader(subject, "Subject: ".length);
+  return folded ?? encodeWords(subject);
+}
+
+// Soft target and hard limit for one physical header line, in characters
+// (ASCII, so characters are octets), not counting the CRLF.
+const FOLD_TARGET = 76;
+const MAX_HEADER_LINE = 998;
+
+// `value` folded at spaces so lines stay near FOLD_TARGET, or null when a
+// space-free run would still leave a line past MAX_HEADER_LINE. `prefix` is
+// the length of the header name before the value on the first line.
+export function foldAsciiHeader(value: string, prefix: number): string | null {
+  if (prefix + value.length <= FOLD_TARGET) return value;
+  const words = value.split(" ");
+  const lines: string[] = [];
+  let line = "";
+  let width = prefix;
+  for (const word of words) {
+    // Never at an empty word (a run of spaces), so unfolding restores every space.
+    if (line && word && width + 1 + word.length > FOLD_TARGET) {
+      lines.push(line);
+      // A continuation line starts with the folding space.
+      line = word;
+      width = 1 + word.length;
+      continue;
+    }
+    width += (line ? 1 : 0) + word.length;
+    line = line ? `${line} ${word}` : word;
+  }
+  lines.push(line);
+  if (lines.some((l, i) => (i === 0 ? prefix : 1) + l.length > MAX_HEADER_LINE)) return null;
+  return lines.join("\r\n ");
+}
+
+// Non-ASCII text as one or more UTF-8 B encoded-words (see encodeSubject).
+function encodeWords(text: string): string {
   const words: string[] = [];
   let chunk = "";
   let chunkBytes = 0;
-  for (const ch of subject) {
+  for (const ch of text) {
     const bytes = Buffer.byteLength(ch, "utf8");
     if (chunkBytes + bytes > MAX_ENCODED_WORD_BYTES) {
       words.push(chunk);
@@ -143,6 +191,33 @@ function encodeSubject(subject: string): string {
   return words
     .map((w) => `=?UTF-8?B?${Buffer.from(w, "utf8").toString("base64")}?=`)
     .join("\r\n ");
+}
+
+// From/To header value. A non-ASCII display name (an admin's smtpFrom such as
+// "Médiathèque <noreply@host>") goes out as RFC 2047 encoded-words: raw 8-bit
+// header bytes need SMTPUTF8, which this client never negotiates, and strict
+// MTAs reject them. Quotes around the name are dropped (an encoded-word may not
+// sit inside a quoted string). The address itself is never encoded — an
+// encoded-word is not allowed in an addr-spec — and an all-ASCII value is
+// returned unchanged, byte for byte.
+//
+// A non-ASCII value that is not `name <address>` — a bare internationalized
+// address, or a name with no address — has nothing that can be encoded, and
+// raw 8-bit header bytes need SMTPUTF8, so it is refused before anything is
+// sent rather than emitted raw. So is a non-ASCII address inside the brackets.
+function encodeAddressHeader(value: string): string {
+  if (ASCII_PRINTABLE.test(value)) return value;
+  const m = /^([^<]*)<([^<>]*)>\s*$/.exec(value);
+  if (!m || !ASCII_PRINTABLE.test(m[2])) {
+    throw new SmtpError("A non-ASCII email address needs SMTPUTF8, which this client does not support");
+  }
+  const rawName = m[1].trim();
+  const addr = `<${m[2].trim()}>`;
+  if (!rawName) return addr;
+  if (ASCII_PRINTABLE.test(rawName)) return `${rawName} ${addr}`;
+  const quoted = rawName.length >= 2 && rawName.startsWith('"') && rawName.endsWith('"');
+  const name = quoted ? rawName.slice(1, -1).replace(/\\(.)/g, "$1") : rawName;
+  return `${encodeWords(name)} ${addr}`;
 }
 
 // RFC 5322 date. `toUTCString()` returns "Tue, 01 Jan 2024 00:00:00 GMT"; SMTP
@@ -380,7 +455,20 @@ class SmtpConnection {
   async send(line: string): Promise<void> {
     if (this.closed) throw new SmtpError("SMTP connection is closed");
     await new Promise<void>((resolve, reject) => {
-      this.socket.write(line, "utf8", (err) => (err ? reject(err) : resolve()));
+      // Armed before the write: the callback may run synchronously.
+      const timer = setTimeout(() => {
+        try {
+          this.socket.destroy(new Error("SMTP write timeout"));
+        } catch {
+          // socket may already be destroyed
+        }
+        reject(new SmtpError(`SMTP write timed out after ${WRITE_TIMEOUT_MS}ms`));
+      }, WRITE_TIMEOUT_MS);
+      this.socket.write(line, "utf8", (err) => {
+        clearTimeout(timer);
+        if (err) reject(err);
+        else resolve();
+      });
     });
   }
 
@@ -557,96 +645,29 @@ async function connectSocket(config: SmtpConfig): Promise<net.Socket | tls.TLSSo
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
+// Every step is bounded on its own (connect, each read and each write have
+// their deadline), so the conversation as a whole cannot hang either.
 export async function sendMail(config: SmtpConfig, msg: SmtpMessage): Promise<void> {
   // Single choke point for the CRLF-injection defense: everything below —
   // extractAddrSpec (envelope), extractDomain (Message-ID), and buildMessage
   // (From:/To: header lines) — reads from this sanitized copy.
   msg = { ...msg, from: sanitizeAddressField(msg.from), to: sanitizeAddressField(msg.to) };
+  // Built before connecting: a message that can't be encoded never opens a socket.
+  const messageBytes = buildMessage(msg);
   const socket = await connectSocket(config);
   const conn = new SmtpConnection(socket);
 
   try {
-    // 1. Greeting
+    // 1. Greeting, 2. EHLO
     expectCode(await conn.readReply(), 220);
-
-    // 2. EHLO
-    await conn.send(`EHLO ${ehloName()}\r\n`);
-    let ehlo = await conn.readReply();
-    expectCode(ehlo, 250);
-
+    const greeted = await ehlo(conn);
     // 3. STARTTLS upgrade if we're on a plaintext channel
-    let channelEncrypted = config.secure;
-    if (!config.secure) {
-      const supportsStartTls = hasCapability(ehlo.capabilities, "STARTTLS");
-      if (config.requireTLS && !supportsStartTls) {
-        throw new SmtpError("Server does not advertise STARTTLS but requireTLS is set");
-      }
-      if (supportsStartTls) {
-        await conn.send("STARTTLS\r\n");
-        expectCode(await conn.readReply(), 220);
-        await conn.upgradeToTls(config.host);
-        channelEncrypted = true;
-        // Re-EHLO over the encrypted channel — server capabilities may differ.
-        await conn.send(`EHLO ${ehloName()}\r\n`);
-        ehlo = await conn.readReply();
-        expectCode(ehlo, 250);
-      }
-    }
-
+    const channel = await negotiateTls(conn, config, greeted);
     // 4. AUTH
-    if (config.auth) {
-      // Never transmit credentials on a plaintext socket (AUTH PLAIN/LOGIN are
-      // base64, not encrypted). requireTLS only covers the port-587 config; a
-      // custom port (25/2525) whose server advertises AUTH but not STARTTLS
-      // would otherwise fall straight through to AUTH in the clear. The
-      // localhost dev-relay carve-out opts out via allowPlaintextAuth.
-      if (!channelEncrypted && !config.allowPlaintextAuth) {
-        throw new SmtpError(
-          "Refusing to send SMTP credentials over an unencrypted connection (server did not offer STARTTLS)",
-        );
-      }
-      const mechs = authMechanisms(ehlo.capabilities);
-      if (mechs.length === 0) {
-        // Some servers advertise AUTH only after STARTTLS. We've already done that.
-        // If still no AUTH, fail explicitly rather than send credentials in the clear.
-        throw new SmtpError("Server does not advertise any AUTH mechanism");
-      }
-      const supportsPlain = mechs.includes("PLAIN");
-      const supportsLogin = mechs.includes("LOGIN");
-      if (supportsPlain) {
-        const token = buildAuthPlainToken(config.auth.user, config.auth.pass);
-        await conn.send(`AUTH PLAIN ${token}\r\n`);
-        expectCode(await conn.readReply(), 235);
-      } else if (supportsLogin) {
-        await conn.send("AUTH LOGIN\r\n");
-        expectCode(await conn.readReply(), 334);
-        await conn.send(`${Buffer.from(config.auth.user, "utf8").toString("base64")}\r\n`);
-        expectCode(await conn.readReply(), 334);
-        await conn.send(`${Buffer.from(config.auth.pass, "utf8").toString("base64")}\r\n`);
-        expectCode(await conn.readReply(), 235);
-      } else {
-        throw new SmtpError(`No supported AUTH mechanism (server offers: ${mechs.join(", ")})`);
-      }
-    }
-
-    // 5. Envelope
-    const fromAddr = extractAddrSpec(msg.from);
-    const toAddr = extractAddrSpec(msg.to);
-    await conn.send(`MAIL FROM:<${fromAddr}>\r\n`);
-    expectCode(await conn.readReply(), 250);
-    await conn.send(`RCPT TO:<${toAddr}>\r\n`);
-    expectCode(await conn.readReply(), 250, 251);
-    await conn.send("DATA\r\n");
-    expectCode(await conn.readReply(), 354);
-
-    // 6. Message
-    const messageBytes = buildMessage(msg);
-    await conn.send(messageBytes);
-    // End-of-data marker. SMTP requires the body to be terminated with a line
-    // containing only `.` — we make sure the body itself ends with CRLF first.
-    await conn.send("\r\n.\r\n");
-    expectCode(await conn.readReply(), 250);
-
+    if (config.auth) await authenticate(conn, config, config.auth, channel);
+    // 5. Envelope, 6. Message
+    await sendEnvelope(conn, msg);
+    await sendData(conn, messageBytes);
     // 7. QUIT — best-effort; some servers close before we can read the reply.
     try {
       await conn.send("QUIT\r\n");
@@ -659,6 +680,87 @@ export async function sendMail(config: SmtpConfig, msg: SmtpMessage): Promise<vo
   }
 }
 
+async function ehlo(conn: SmtpConnection): Promise<SmtpReply> {
+  await conn.send(`EHLO ${ehloName()}\r\n`);
+  const reply = await conn.readReply();
+  expectCode(reply, 250);
+  return reply;
+}
+
+// The channel after the TLS step: its latest EHLO (capabilities may differ
+// once encrypted) and whether it is encrypted.
+async function negotiateTls(
+  conn: SmtpConnection,
+  config: SmtpConfig,
+  greeted: SmtpReply,
+): Promise<{ ehlo: SmtpReply; encrypted: boolean }> {
+  if (config.secure) return { ehlo: greeted, encrypted: true };
+  const supportsStartTls = hasCapability(greeted.capabilities, "STARTTLS");
+  if (config.requireTLS && !supportsStartTls) {
+    throw new SmtpError("Server does not advertise STARTTLS but requireTLS is set");
+  }
+  if (!supportsStartTls) return { ehlo: greeted, encrypted: false };
+  await conn.send("STARTTLS\r\n");
+  expectCode(await conn.readReply(), 220);
+  await conn.upgradeToTls(config.host);
+  // Re-EHLO over the encrypted channel — server capabilities may differ.
+  return { ehlo: await ehlo(conn), encrypted: true };
+}
+
+// Never transmit credentials on a plaintext socket (AUTH PLAIN/LOGIN are
+// base64, not encrypted). requireTLS only covers the port-587 config; a custom
+// port (25/2525) whose server advertises AUTH but not STARTTLS would otherwise
+// fall straight through to AUTH in the clear. The localhost dev-relay carve-out
+// opts out via allowPlaintextAuth.
+async function authenticate(
+  conn: SmtpConnection,
+  config: SmtpConfig,
+  auth: NonNullable<SmtpConfig["auth"]>,
+  channel: { ehlo: SmtpReply; encrypted: boolean },
+): Promise<void> {
+  if (!channel.encrypted && !config.allowPlaintextAuth) {
+    throw new SmtpError(
+      "Refusing to send SMTP credentials over an unencrypted connection (server did not offer STARTTLS)",
+    );
+  }
+  const mechs = authMechanisms(channel.ehlo.capabilities);
+  if (mechs.length === 0) {
+    // Some servers advertise AUTH only after STARTTLS. We've already done that.
+    // If still no AUTH, fail explicitly rather than send credentials in the clear.
+    throw new SmtpError("Server does not advertise any AUTH mechanism");
+  }
+  if (mechs.includes("PLAIN")) {
+    await conn.send(`AUTH PLAIN ${buildAuthPlainToken(auth.user, auth.pass)}\r\n`);
+    expectCode(await conn.readReply(), 235);
+  } else if (mechs.includes("LOGIN")) {
+    await conn.send("AUTH LOGIN\r\n");
+    expectCode(await conn.readReply(), 334);
+    await conn.send(`${Buffer.from(auth.user, "utf8").toString("base64")}\r\n`);
+    expectCode(await conn.readReply(), 334);
+    await conn.send(`${Buffer.from(auth.pass, "utf8").toString("base64")}\r\n`);
+    expectCode(await conn.readReply(), 235);
+  } else {
+    throw new SmtpError(`No supported AUTH mechanism (server offers: ${mechs.join(", ")})`);
+  }
+}
+
+async function sendEnvelope(conn: SmtpConnection, msg: SmtpMessage): Promise<void> {
+  await conn.send(`MAIL FROM:<${extractAddrSpec(msg.from)}>\r\n`);
+  expectCode(await conn.readReply(), 250);
+  await conn.send(`RCPT TO:<${extractAddrSpec(msg.to)}>\r\n`);
+  expectCode(await conn.readReply(), 250, 251);
+  await conn.send("DATA\r\n");
+  expectCode(await conn.readReply(), 354);
+}
+
+async function sendData(conn: SmtpConnection, messageBytes: string): Promise<void> {
+  await conn.send(messageBytes);
+  // End-of-data marker. SMTP requires the body to be terminated with a line
+  // containing only `.` — we make sure the body itself ends with CRLF first.
+  await conn.send("\r\n.\r\n");
+  expectCode(await conn.readReply(), 250);
+}
+
 function buildMessage(msg: SmtpMessage): string {
   const fromDomain = extractDomain(msg.from);
   const messageId = `<${randomBytes(16).toString("hex")}@${fromDomain}>`;
@@ -666,8 +768,8 @@ function buildMessage(msg: SmtpMessage): string {
   const date = rfc5322Date();
 
   const headers = [
-    `From: ${msg.from}`,
-    `To: ${msg.to}`,
+    `From: ${encodeAddressHeader(msg.from)}`,
+    `To: ${encodeAddressHeader(msg.to)}`,
     `Subject: ${subject}`,
     `Date: ${date}`,
     `Message-ID: ${messageId}`,

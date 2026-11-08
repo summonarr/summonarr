@@ -1,43 +1,21 @@
 import type { Metadata } from "next";
-import { cache, Fragment } from "react";
-import { getMovieDetails, tmdbLanguageFor, getMovieCredits, getMovieSuggestions, getMovieCollection, getMovieGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
-import Link from "next/link";
-import { RequestButton } from "@/components/media/request-button";
-import { Request4kButton } from "@/components/media/request-4k-button";
-import { RequestInstanceButton } from "@/components/media/request-instance-button";
-import { WatchlistButton } from "@/components/media/watchlist-button";
-import { HideButton } from "@/components/media/hide-button";
-import { isArrConfigured } from "@/lib/arr";
-import { ReportIssueButton } from "@/components/media/report-issue-button";
-import { RatingsBar } from "@/components/media/ratings-bar";
+import { cache } from "react";
+import { getMovieDetails, isTmdbNotFound, tmdbLanguageFor, getMovieCredits, getMovieSuggestions, getMovieCollection, getMovieGenres } from "@/lib/tmdb";
 import { CastSection } from "@/components/media/cast-section";
 import { SimilarRow } from "@/components/media/similar-row";
 import { CollectionRow } from "@/components/media/collection-row";
-import Image from "next/image";
 import { notFound } from "next/navigation";
-import { TrailerButton } from "@/components/media/trailer-button";
-import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
-import { ArrManageButton } from "@/components/admin/arr-title/title-manager";
-import { ArrAddButton } from "@/components/admin/arr-title/add-dialog";
-import { arrInstancesForTitle, parseManageLink } from "@/lib/arr-links-data";
-import { getAdminTitleNeverWatched } from "@/lib/never-watched-report";
-import { NeverWatchedChip } from "@/components/admin/never-watched-chip";
-import { prisma } from "@/lib/prisma";
+import { parseManageLink } from "@/lib/arr-links-data";
 import { requireAppSession } from "@/lib/require-app-session";
+import { isTmdbIdInRange, parseTmdbIdParam } from "@/lib/tmdb-id";
 import { attachAllAvailability } from "@/lib/attach-all";
-import { getVisibleServerInstances } from "@/lib/media-visibility";
-import { getBadgeVisibility } from "@/lib/badge-visibility";
-import { isFeatureEnabled } from "@/lib/features";
-import { generateRequestToken } from "@/lib/request-token";
-import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
-import { AvailabilityBadges } from "@/components/media/availability-badges";
+import { permanentlyDeclinedKeys } from "@/lib/request-availability";
+import { allNamed, emptyOnFailure, loadDetailPageState } from "@/lib/detail-page-data";
+import { DetailActions } from "@/components/media/detail-actions";
+import { DetailHero } from "@/components/media/detail-hero";
 import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName, localizedProductionCountry } from "@/lib/tmdb-types";
-import { Chip } from "@/components/ui/design";
-import { canRequest, hasPermission, Permission } from "@/lib/permissions";
-import { resolveNamedInstanceTargets } from "@/lib/named-instance-targets";
-import { isBlacklisted } from "@/lib/blacklist";
-import { DetailTitle } from "@/components/layout/detail-title";
+import { canRequest } from "@/lib/permissions";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
 import { localizeMedia, localizedCollectionName } from "@/lib/tmdb-localize";
 import { translateTmdbStatus } from "@/components/media/detail-status";
@@ -59,11 +37,12 @@ const loadMovie = cache(async (id: string) => {
   // failure (TMDB outage, timeout, missing credentials, a ratings error) is
   // rethrown to (app)/error.tsx, which offers a retry — so a brief TMDB outage
   // doesn't claim an existing title was removed. Same shape as person/[id].
-  const tmdbId = Number(id);
-  if (!Number.isFinite(tmdbId) || tmdbId <= 0) notFound();
+  // Canonical digits only (parseTmdbIdParam): Number() let "1e3", "0x3E8" and
+  // " 1000 " render a title at a URL that isn't its own, and sent "1.5" to TMDB.
+  const tmdbId = parseTmdbIdParam(id);
+  if (tmdbId === null || !isTmdbIdInRange(tmdbId)) notFound();
   const englishMedia = await getMovieDetails(tmdbId).catch((err: unknown) => {
-    const message = err instanceof Error ? err.message : String(err);
-    if (/failed: 404\b/.test(message)) notFound();
+    if (isTmdbNotFound(err)) notFound();
     throw err;
   });
   // Title, overview, tagline and genres in the viewer's language (English is a
@@ -104,400 +83,63 @@ export default async function MovieDetailPage({
   const sp = await searchParams;
   const { session, t, locale, media, collectionName } = await loadMovie(id);
 
-  // Which Plex/Jellyfin servers this viewer may see. Everything downstream keys off the two
-  // library rows below — the availability badges, the ratings bar's Jellyfin score, and the
-  // in-library gates on the "report issue" / "vote to delete" actions — so scoping the
-  // QUERIES (not their results) is what keeps a restricted server invisible end to end.
-  const visible = await getVisibleServerInstances(session);
-
-  const [
-    plexItem,
-    jellyfinItem,
-    radarrWanted,
-    userRequest,
-    userDeletionVote,
-    cast,
-    rawSuggestions,
-    rawCollection,
-    genreList,
-    blacklisted,
-    has4k,
-    userRequest4k,
-    request4kAllRow,
-    radarr4kAvailable,
-    radarr4kWanted,
-    votesEnabled,
-    issuesEnabled,
-    plexEnabled,
-    jellyfinEnabled,
-    onWatchlist,
-    onHidden,
-  ] = await Promise.all([
-    prisma.plexLibraryItem.findFirst({
-      where: { tmdbId: media.id, mediaType: "MOVIE", serverInstance: { in: visible.plex } },
-    }),
-    prisma.jellyfinLibraryItem.findFirst({
-      where: { tmdbId: media.id, mediaType: "MOVIE", serverInstance: { in: visible.jellyfin } },
-    }),
-    prisma.radarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "" } } }),
-    prisma.mediaRequest.findFirst({
-      // Any non-4K instance: the main request button owns the default AND named
-      // (auto-routed, e.g. anime) requests; only 4K has its own separate button.
-      where: { tmdbId: media.id, mediaType: "MOVIE", requestedBy: session.user.id, arrInstance: { not: "4k" }, status: { not: "DECLINED" } },
-      select: { id: true },
-    }),
-    prisma.deletionVote.findFirst({
-      where: { tmdbId: media.id, mediaType: "MOVIE", userId: session.user.id },
-      select: { id: true },
-    }),
-    getMovieCredits(media.id).catch(() => []),
-    getMovieSuggestions(media.id).catch(() => []),
-    media.collectionId ? getMovieCollection(media.collectionId).catch(() => []) : Promise.resolve([]),
-    getMovieGenres(tmdbLanguageFor(locale)).catch(() => []),
-    isBlacklisted(media.id, "MOVIE"),
-    // 4K: show the "Request in 4K" action only when a 4K Radarr instance is
-    // configured AND the viewer holds REQUEST_4K.
-    isArrConfigured("radarr", "4k"),
-    prisma.mediaRequest.findFirst({
-      where: { tmdbId: media.id, mediaType: "MOVIE", requestedBy: session.user.id, arrInstance: "4k", status: { not: "DECLINED" } },
-      select: { id: true },
-    }),
-    prisma.setting.findUnique({ where: { key: "request4kAll" } }),
-    prisma.radarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
-    prisma.radarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
-    // Feature flags, same as the TV page. The page flags hide the Report-issue
-    // and Vote-to-delete buttons when those features are off (otherwise they
-    // would only fail with a 403 on submit). The integration flags go to
-    // getBadgeVisibility, which would otherwise assume both servers are on
-    // and show badges (and those buttons) for a disabled Plex or Jellyfin.
-    isFeatureEnabled("feature.page.votes"),
-    isFeatureEnabled("feature.page.issues"),
-    isFeatureEnabled("feature.integration.plex"),
-    isFeatureEnabled("feature.integration.jellyfin"),
-    prisma.watchlistItem
-      .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "MOVIE" } }, select: { id: true } })
-      .then((r) => !!r),
-    prisma.hiddenItem
-      .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "MOVIE" } }, select: { id: true } })
-      .then((r) => !!r),
-  ]);
+  // The viewer-scoped state (shared with the TV page) and this page's TMDB
+  // rows, together. A failed TMDB side read degrades to an empty row and says
+  // so in the log; the page still renders.
+  const warnEmpty = (source: string) => emptyOnFailure("movie-page", source, media.id);
+  const { state, cast, rawSuggestions, rawCollection, genreList } = await allNamed({
+    state: loadDetailPageState(session, media, "MOVIE"),
+    cast: getMovieCredits(media.id).catch(warnEmpty("credits")),
+    rawSuggestions: getMovieSuggestions(media.id).catch(warnEmpty("suggestions")),
+    rawCollection: media.collectionId ? getMovieCollection(media.collectionId).catch(warnEmpty("collection")) : Promise.resolve([]),
+    genreList: getMovieGenres(tmdbLanguageFor(locale)).catch(warnEmpty("genres")),
+  });
   const genreNameToId = new Map(genreList.map((g) => [g.name, g.id]));
-  const plexAvailable     = !!plexItem;
-  const jellyfinAvailable = !!jellyfinItem;
-  const arrPending        = !!radarrWanted;
-  const requested         = !!userRequest;
-  const { showPlex, showJellyfin } = getBadgeVisibility(session, { plex: plexEnabled, jellyfin: jellyfinEnabled });
+  const { showPlex, showJellyfin, show4k } = state;
   const canRequestMovies = canRequest(session.user.permissions, "MOVIE", false);
-  const canOnBehalf = hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF);
-  const canChooseProfile = hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED);
-  const requested4k = !!userRequest4k;
-  const canRequest4k = canRequest(session.user.permissions, "MOVIE", true, request4kAllRow?.value === "true");
-  // Only surface 4K availability to viewers who can request 4K (instance configured + permission).
-  const show4k = has4k && canRequest4k;
-  const arr4kAvailable = show4k && !!radarr4kAvailable;
-  const arr4kPending = show4k && !!radarr4kWanted;
 
-  // Named instances (non-default, non-4K): render an explicit "Request on X"
-  // button for each configured one the viewer may target. Shared with the TV
-  // page and GET /api/requests/instances so the three can't drift — see
-  // resolveNamedInstanceTargets.
-  const [suggestions, collectionItems, namedTargets] = await Promise.all([
-    attachAllAvailability(rawSuggestions, session.user.id, { blockRatings: true, show4k }),
-    attachAllAvailability(rawCollection, session.user.id, { skipRatings: true, show4k }),
-    resolveNamedInstanceTargets({
-      tmdbId: media.id,
-      mediaType: "MOVIE",
-      userId: session.user.id,
-      permissions: session.user.permissions,
-      blacklisted,
-    }),
-  ]);
-  // "Open in Radarr" for an admin, one link per configured instance whose
-  // synced cache holds the title. A cosmetic shortcut (JWT-level session is
-  // fine — guardrail 29); the route behind it is ADMIN-gated itself.
-  const [arrLinks, neverWatched] = await Promise.all([
-    hasPermission(session.user.permissions, Permission.ADMIN)
-      // Nothing while the integration is switched off — every route behind
-      // the links would answer "integration disabled".
-      ? isFeatureEnabled("feature.integration.radarr")
-        .then((on) => (on ? arrInstancesForTitle("radarr", media.id) : []))
-        .catch(() => [])
-      : Promise.resolve([]),
-    // ADMIN-only "never watched" chip (guardrail 14d) — null for anyone else.
-    getAdminTitleNeverWatched(session.user.permissions, media.id, "MOVIE"),
-  ]);
+  const { suggestions, collectionItems, collectionDeclined } = await allNamed({
+    suggestions: attachAllAvailability(rawSuggestions, session.user.id, { blockRatings: true, show4k }),
+    collectionItems: attachAllAvailability(rawCollection, session.user.id, { skipRatings: true, show4k }),
+    // Titles the collection's "Request all" must leave out: permanently
+    // declined for this viewer, so the bulk route would skip them every time.
+    collectionDeclined: permanentlyDeclinedKeys(rawCollection, session.user.id),
+  });
   const manageLink = parseManageLink(sp.manage, sp.tab, "radarr");
-
-  const backdrop = backdropUrl(media.backdropPath, "original");
-  const poster = posterUrl(media.posterPath, "w500");
 
   return (
     <div className="ds-page-enter ds-detail-bleed">
-      {/* Renders nothing — publishes the title so the header breadcrumb
-          reads "Movies › <title>" instead of "Movies › Detail". */}
-      <DetailTitle title={media.title} />
-      <div
-        className="relative w-full overflow-hidden aspect-video max-h-[500px] xl:max-h-[640px] 2xl:max-h-[760px]"
-        style={{ background: "var(--ds-bg-inset)" }}
-      >
-        {backdrop && (
-          <Image src={backdrop} alt="" fill className="object-cover object-top" sizes="100vw" priority />
-        )}
-        <div
-          className="absolute inset-0"
-          style={{
-            background:
-              "linear-gradient(to top, var(--ds-bg) 0%, color-mix(in oklab, var(--ds-bg) 55%, transparent) 55%, transparent 100%)",
-          }}
-        />
-      </div>
-
-      <div className="ds-detail-body">
-        <div className="ds-detail-hero">
-          {poster && (
-            <div
-              className="ds-detail-poster relative shrink-0 overflow-hidden hidden sm:block"
-              style={{
-                width: 160,
-                aspectRatio: "2 / 3",
-                borderRadius: 8,
-                boxShadow: "var(--ds-shadow-lg)",
-                border: "1px solid var(--ds-border)",
-                background: "var(--ds-bg-3)",
-              }}
-            >
-              {/* Decorative: the <h1> beside it carries the title, so a named
-                  poster read the title twice. Same rule as the backdrop. */}
-              <Image src={poster} alt="" fill className="object-cover" sizes="160px" />
-            </div>
-          )}
-
-          <div className="flex flex-col justify-end" style={{ gap: 10 }}>
-            <div className="flex items-center flex-wrap" style={{ gap: 8 }}>
-              <Chip tone="accent">{t("detail.kindMovie")}</Chip>
-              <AvailabilityBadges
-                plexAvailable={plexAvailable}
-                jellyfinAvailable={jellyfinAvailable}
-                arrPending={arrPending}
-                requested={requested}
-                arr4kAvailable={arr4kAvailable}
-                arr4kPending={arr4kPending}
-                showPlex={showPlex}
-                showJellyfin={showJellyfin}
-                show4k={show4k}
-              />
-              <NeverWatchedChip info={neverWatched} t={t} locale={locale} />
-            </div>
-
-            <h1
-              className="font-semibold"
-              style={{
-                fontSize: 32,
-                letterSpacing: "-0.025em",
-                color: "var(--ds-fg)",
-                margin: 0,
-                lineHeight: 1.08,
-              }}
-            >
-              {media.title}
-            </h1>
-
-            <div
-              className="ds-mono flex items-center flex-wrap"
-              style={{ fontSize: 11.5, color: "var(--ds-fg-subtle)", gap: 8 }}
-            >
-              {[
-                media.releaseYear,
-                media.certification,
-                media.runtime ? t("detail.runtime.minutes", { minutes: media.runtime }) : null,
-                // TMDB's English name unless Intl agrees on the country — never
-                // a bare code or ICU's successor-state alias (tmdb-types.ts).
-                localizedProductionCountry(media, locale),
-                // A code Intl has no name for renders as the code, as it always has.
-                languageName(media.originalLanguage, locale) ?? media.originalLanguage,
-                media.status && media.status !== "Released" ? translateTmdbStatus(media.status, t) : null,
-              ]
-                .filter(Boolean)
-                .map((part, i) => (
-                  <span key={i} className="flex items-center" style={{ gap: 8 }}>
-                    {i > 0 && <span style={{ opacity: 0.4 }}>·</span>}
-                    {part}
-                  </span>
-                ))}
-            </div>
-
-            {media.genres && media.genres.length > 0 && (
-              <div className="flex flex-wrap" style={{ gap: 6 }}>
-                {media.genres.slice(0, 5).map((g) => {
-                  const gid = genreNameToId.get(g);
-                  return gid !== undefined ? (
-                    <Link key={g} href={`/movies?genreId=${gid}`} aria-label={t("detail.browseGenreMovies", { genre: g })}>
-                      <Chip className="ds-chip-link">{g}</Chip>
-                    </Link>
-                  ) : (
-                    <Chip key={g}>{g}</Chip>
-                  );
-                })}
-              </div>
-            )}
-
-            {media.originalTitle && (
-              <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
-                {t("detail.originalTitle", { title: media.originalTitle })}
-              </div>
-            )}
-
-            <RatingsBar
-              imdbRating={media.imdbRating}
-              imdbId={media.imdbId}
-              imdbVotes={media.imdbVotes}
-              rottenTomatoes={media.rottenTomatoes}
-              rtAudienceScore={media.rtAudienceScore}
-              metacritic={media.metacritic}
-              traktRating={media.traktRating}
-              letterboxdRating={media.letterboxdRating}
-              mdblistScore={media.mdblistScore}
-              malRating={media.malRating}
-              rogerEbertRating={media.rogerEbertRating}
-              jellyfinRating={
-                showJellyfin && jellyfinItem?.communityRating != null
-                  ? jellyfinItem.communityRating.toFixed(1)
-                  : null
-              }
-              voteAverage={media.voteAverage}
-              size="md"
-            />
-
-            {media.overview && (
-              <p
-                className="max-w-2xl"
-                style={{
-                  fontSize: 14,
-                  color: "var(--ds-fg-muted)",
-                  lineHeight: 1.65,
-                }}
-              >
-                {media.overview}
-              </p>
-            )}
-
-            {/* items-end, not items-center: RequestButton is a flex-col block
-                (availability/queue status line above its CTA), so centering
-                floated the sibling buttons above the CTA whenever a status
-                line rendered. */}
-            <div
-              className="flex items-end flex-wrap"
-              style={{ gap: 10, marginTop: 6 }}
-            >
-              <RequestButton
-                key={media.id}
-                tmdbId={media.id}
-                mediaType="MOVIE"
-                title={media.title}
-                posterPath={media.posterPath}
-                releaseYear={media.releaseYear ?? undefined}
-                plexAvailable={plexAvailable}
-                jellyfinAvailable={jellyfinAvailable}
-                arrPending={arrPending}
-                requested={requested}
-                showPlex={showPlex}
-                showJellyfin={showJellyfin}
-                requestToken={generateRequestToken(media.id, "MOVIE", session.user.id)}
-                canRequestOnBehalf={canOnBehalf}
-                canChooseProfile={canChooseProfile}
-                blacklisted={blacklisted}
-                canRequest={canRequestMovies}
-              />
-              {has4k && canRequest4k && (
-                <Request4kButton
-                  key={`4k-${media.id}`}
-                  tmdbId={media.id}
-                  mediaType="MOVIE"
-                  requestToken={generateRequestToken(media.id, "MOVIE", session.user.id)}
-                  requested={requested4k}
-                  available={arr4kAvailable}
-                  blacklisted={blacklisted}
-                />
-              )}
-              {namedTargets.map((t) => (
-                <RequestInstanceButton
-                  key={`${media.id}:${t.slug}`}
-                  tmdbId={media.id}
-                  mediaType="MOVIE"
-                  instance={t.slug}
-                  instanceName={t.name}
-                  requestToken={generateRequestToken(media.id, "MOVIE", session.user.id)}
-                  requested={t.requested}
-                  available={t.available}
-                  blacklisted={blacklisted}
-                />
-              ))}
-              <WatchlistButton key={`watchlist-${media.id}`} tmdbId={media.id} mediaType="MOVIE" initialOnWatchlist={onWatchlist} />
-              <HideButton
-                key={`hide-${media.id}`}
-                tmdbId={media.id}
-                mediaType="MOVIE"
-                title={media.title}
-                posterPath={media.posterPath}
-                initialHidden={onHidden}
-              />
-              {issuesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
-                <ReportIssueButton
-                  tmdbId={media.id}
-                  mediaType="MOVIE"
-                  title={media.title}
-                  posterPath={media.posterPath}
-                />
-              )}
-              {votesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
-                <VoteDeleteButton
-                  key={`vote-${media.id}`}
-                  tmdbId={media.id}
-                  mediaType="MOVIE"
-                  requestToken={generateRequestToken(media.id, "MOVIE", session.user.id)}
-                  alreadyVoted={!!userDeletionVote}
-                />
-              )}
-              {(media.trailerKey || media.trailerUrl) && (
-                <TrailerButton trailerKey={media.trailerKey} trailerUrl={media.trailerUrl} />
-              )}
-              {arrLinks.map((inst) => {
-                const label = arrInstanceLabel("radarr", inst.name, inst.slug);
-                const deep = manageLink !== null && manageLink.instance === inst.slug;
-                // An instance holding the title: manage it there. Any other
-                // configured one: add it there, with the arr's own choices. A
-                // ?manage= deep link (an external/bookmarked URL — nothing in the
-                // app emits one) opens the manager even on a non-holder: `holds`
-                // is the synced cache, and the manager resolves the title live, so
-                // a title added since the last sync still opens; a true non-holder
-                // gets the dialog's own not-found state.
-                return inst.holds || deep ? (
-                  <Fragment key={inst.slug || "default"}>
-                    <ArrManageButton
-                      service="radarr"
-                      instance={inst.slug}
-                      tmdbId={media.id}
-                      instanceLabel={label}
-                      autoOpen={deep}
-                      initialTab={deep ? manageLink.tab : undefined}
-                    />
-                    {inst.holds && (
-                      <OpenInArrLink
-                        service="radarr"
-                        instance={inst.slug}
-                        target={{ tmdbId: media.id }}
-                        label={t("adminManage.openIn", { name: label })}
-                      />
-                    )}
-                  </Fragment>
-                ) : (
-                  <ArrAddButton key={inst.slug || "default"} service="radarr" instance={inst.slug} tmdbId={media.id} instanceLabel={label} />
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      </div>
+      <DetailHero
+        media={media}
+        state={state}
+        t={t}
+        locale={locale}
+        kindLabel={t("detail.kindMovie")}
+        metaParts={[
+          media.releaseYear,
+          media.certification,
+          media.runtime ? t("detail.runtime.minutes", { minutes: media.runtime }) : null,
+          // TMDB's English name unless Intl agrees on the country — never
+          // a bare code or ICU's successor-state alias (tmdb-types.ts).
+          localizedProductionCountry(media, locale),
+          // A code Intl has no name for renders as the code, as it always has.
+          languageName(media.originalLanguage, locale) ?? media.originalLanguage,
+          media.status && media.status !== "Released" ? translateTmdbStatus(media.status, t) : null,
+        ]}
+        genreNameToId={genreNameToId}
+        genreHref={(gid) => `/movies?genreId=${gid}`}
+        genreAriaLabel={(genre) => t("detail.browseGenreMovies", { genre })}
+        actions={
+          <DetailActions
+            media={media}
+            mediaType="MOVIE"
+            state={state}
+            canRequest={canRequestMovies}
+            manageLink={manageLink}
+            t={t}
+          />
+        }
+      />
 
       <DetailExtras media={media} mediaType="movie" />
 
@@ -507,6 +149,7 @@ export default async function MovieDetailPage({
         <CollectionRow
           collectionName={collectionName}
           items={collectionItems}
+          declinedKeys={collectionDeclined}
           currentId={media.id}
           showPlex={showPlex}
           showJellyfin={showJellyfin}

@@ -168,6 +168,18 @@ interface ActiveRow {
 
 const activeStore = new Map<string, ActiveRow>();
 let playHistoryCreateError: Error | null = null;
+// ActiveSession inserts for these ids throw (a title too long for its column).
+const activeCreateErrorFor = new Set<string>();
+// Another writer (an overlapping tick) gets there first: a create of one of
+// these ids finds the row already inserted; an update of one finds lastSeenAt
+// moved by 1ms — the CAS loses, the row stays as old as it was.
+const activeCreateRaceFor = new Set<string>();
+const activeUpdateRaceFor = new Set<string>();
+// The now-playing snapshot read (the only activeSession.findMany with an orderBy) throws.
+let snapshotReadError: Error | null = null;
+// The retention claim's row count, and a failing purge delete.
+let retentionClaim = 0;
+let playHistoryDeleteError: Error | null = null;
 
 // Settings live in two maps to keep the reconcile-starvation fiction honest:
 //   - `settings`      : play-history enable flags + thresholds (loadSettings
@@ -294,6 +306,7 @@ const fakePrisma = {
   activeSession: {
     findMany: async (args?: FindManyArgs) => {
       rec("activeSession", "findMany", args);
+      if (snapshotReadError && args?.orderBy) throw snapshotReadError;
       return [...activeStore.values()].filter((r) => matchesFindMany(r, args?.where));
     },
     updateMany: async (args: UpdateManyArgs) => {
@@ -303,6 +316,7 @@ const fakePrisma = {
       if (!id) return { count: 0 };
       const row = activeStore.get(id);
       if (!row) return { count: 0 };
+      if (activeUpdateRaceFor.has(id)) row.lastSeenAt = new Date(row.lastSeenAt.getTime() - 1);
       // CAS on lastSeenAt: a stale prefetch loses to a concurrent writer.
       if (args.where.lastSeenAt instanceof Date && row.lastSeenAt.getTime() !== args.where.lastSeenAt.getTime()) {
         return { count: 0 };
@@ -311,11 +325,19 @@ const fakePrisma = {
     },
     createMany: async (args: CreateManyArgs) => {
       rec("activeSession", "createMany", args);
+      if (args.data.some((d) => activeCreateErrorFor.has(String(d.id)))) {
+        throw new Error("value too long for type character varying(500)");
+      }
+      // ON CONFLICT DO NOTHING: the count is the rows actually inserted.
+      let count = 0;
       for (const d of args.data) {
         const row = d as unknown as ActiveRow;
-        if (!activeStore.has(row.id)) activeStore.set(row.id, row);
+        if (activeCreateRaceFor.has(row.id) && !activeStore.has(row.id)) activeStore.set(row.id, { ...row });
+        if (activeStore.has(row.id)) continue;
+        activeStore.set(row.id, row);
+        count++;
       }
-      return { count: args.data.length };
+      return { count };
     },
     deleteMany: async (args: DeleteManyArgs) => {
       rec("activeSession", "deleteMany", args);
@@ -343,8 +365,14 @@ const fakePrisma = {
       rec("playHistory", "findFirst", args);
       return null; // no resume-group chaining in these fixtures
     },
+    // The retention purge reads the ids of one batch before deleting them.
+    findMany: async (args: unknown) => {
+      rec("playHistory", "findMany", args);
+      return [{ id: "old-1" }];
+    },
     deleteMany: async (args: unknown) => {
       rec("playHistory", "deleteMany", args);
+      if (playHistoryDeleteError) throw playHistoryDeleteError;
       return { count: 0 };
     },
   },
@@ -372,6 +400,15 @@ const fakePrisma = {
       const u = usersById.get(args.where.id);
       return u ? { ...u } : null;
     },
+    // The concurrent-stream alert's admin read (stream-limit-data.ts).
+    findMany: async (args: unknown) => { rec("user", "findMany", args); return [{ id: "stream-admin" }]; },
+  },
+  // The concurrent-stream alert's inbox row and agent fan-out (no agents).
+  notification: {
+    create: async (args: { data: Record<string, unknown> }) => { rec("notification", "create", args); return args.data; },
+  },
+  notificationAgent: {
+    findMany: async () => [],
   },
   authSession: {
     findUnique: async (args: { where: { sessionId: string } }) =>
@@ -380,11 +417,11 @@ const fakePrisma = {
         : null,
     update: async () => ({}), // lastSeenAt fire-and-forget touch
   },
-  // Retention CAS: INSERT ... ON CONFLICT ... — return 0 (not claimed) so
+  // Retention CAS: INSERT ... ON CONFLICT ... — 0 (not claimed) by default so
   // purgeOldHistory never runs (retention is unset in these fixtures anyway).
   $executeRaw: async (strings: TemplateStringsArray, ..._v: unknown[]) => {
     rec("$", "executeRaw", strings.join("?"));
-    return 0;
+    return retentionClaim;
   },
   $queryRaw: async () => {
     throw new Error("unexpected prisma.$queryRaw — no poller path uses it in these tests");
@@ -438,14 +475,20 @@ let plexLibRows: Array<Record<string, unknown>> = [];
 let plexSessionsStatus = 200;
 let plexRemoteSessionsStatus = 200;
 let jfSessionsStatus = 200;
+// A slow sibling server: the Jellyfin /Sessions answer is held this long.
+let jfSessionsDelayMs = 0;
 
 const okJson = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+// A plex.tv outage: the owner lookup fails (and, uncached, keeps failing).
+let plexTvDown = false;
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
   fetchLog.push({ url: String(input), method: init?.method ?? "GET" });
   if (url.hostname === "plex.tv" && url.pathname === "/api/v2/user") {
+    if (plexTvDown) return new Response("unavailable", { status: 503 });
     return okJson({ id: 9, email: "owner@plex.tv", username: "owner", thumb: "" });
   }
   if (url.pathname === "/status/sessions") {
@@ -458,6 +501,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return okJson({ MediaContainer: { Metadata: [{}] } }); // no markers → no marker updateMany
   }
   if (url.pathname === "/Sessions") {
+    if (jfSessionsDelayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, jfSessionsDelayMs));
     if (url.origin === JF_REMOTE_URL) return okJson(jfRemoteSnapshot, jfSessionsStatus);
     return okJson(jfSnapshot, jfSessionsStatus);
   }
@@ -467,7 +511,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 // ── dynamic imports (stubs above genuinely precede the module graph) ────────
 const { NextRequest } = await import("next/server");
 const { POST } = await import("../src/app/api/sync/play-history/route.ts");
-const { PLEX_STALL_THRESHOLD_MS, isPlexSessionRecentlyFinalized, pruneRecentlyFinalized } =
+const { PLEX_STALL_THRESHOLD_MS, isPlexSessionRecentlyFinalized, markPlexSessionFinalized, pruneRecentlyFinalized } =
   await import("../src/lib/plex-events.ts");
 const { SESSION_ABSENCE_GRACE_MS } = await import("../src/lib/play-history.ts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
@@ -670,7 +714,14 @@ beforeEach(() => {
   plexSessionsStatus = 200;
   plexRemoteSessionsStatus = 200;
   jfSessionsStatus = 200;
+  jfSessionsDelayMs = 0;
   playHistoryCreateError = null;
+  activeCreateErrorFor.clear();
+  activeCreateRaceFor.clear();
+  activeUpdateRaceFor.clear();
+  snapshotReadError = null;
+  retentionClaim = 0;
+  playHistoryDeleteError = null;
   // Clear the process-global recently-finalized ledger so a mark from a prior
   // test can't filter this test's session out of the poll (plex-events pattern).
   pruneRecentlyFinalized(Number.MAX_SAFE_INTEGER);
@@ -1423,7 +1474,8 @@ test("the poller threads the probed INSTANCE into both reachability reports", ()
   // because no test exercises a named instance polling successfully. That
   // regression would silently report every server's health onto the DEFAULT
   // server's badge — the exact clobbering the per-instance keys exist to stop.
-  const source = readFileSync(new URL("../src/app/api/sync/play-history/route.ts", import.meta.url), "utf8");
+  // The Plex pass lives in session-poll-plex.ts (the route only orchestrates).
+  const source = readFileSync(new URL("../src/lib/session-poll-plex.ts", import.meta.url), "utf8");
   const calls = source.match(/setPlexReachable\([^)]*\)/g) ?? [];
   assert.equal(calls.length, 2, "expected exactly the success and failure reports");
   for (const call of calls) {
@@ -1463,6 +1515,43 @@ test("GUARDRAIL 34: a continuing session whose owner RE-RESOLVED to a different 
     "msu:plex:9",
     "the update must re-bind the row to the identity THIS tick resolved (the plex.tv global id), not leave the create-time phantom",
   );
+});
+
+test("GUARDRAIL 34: during a plex.tv outage (no owner id this tick) a correctly bound owner session is NOT re-bound onto the phantom \"1\" row", async () => {
+  // The re-bind heals a phantom; it must never point the other way. With
+  // plexAdminId null the "1" rewrite can't fire, so this tick resolves the owner
+  // to the phantom (plex, "", "1") row — re-binding there would file the watch
+  // under an identity guardrail 34 can never link, and drop the owner's
+  // isServerAdmin exemption for the whole outage.
+  // A fresh admin token has no owner id cached yet, so the lookup really runs
+  // and fails and there is no last-known id to fall back on.
+  syncSettings.set("plexAdminToken", "plex-admin-token-outage");
+  plexTvDown = true;
+  try {
+    seed(makeRow("own-out", {
+      mediaServerUserId: "msu:plex:9", // bound to the owner's global-id row while plex.tv was up
+      state: "playing", progressMs: 60_000n, progressUpdatedAt: agoReal(10_000), lastSeenAt: agoReal(10_000),
+    }));
+    const snap = plexSnap("own-out", { viewOffset: 70_000 });
+    (snap.User as { id: string }).id = "1";
+    plexSnapshot = [snap];
+
+    const res = await POST(phReq({ headers: AS_CRON }));
+    assert.deepEqual((await bodyOf(res)).plex, { started: 0, updated: 1, ended: 0 });
+    await settle();
+
+    assert.ok(
+      dbCalls.some((c) => c.model === "mediaServerUser" && c.op === "upsert" &&
+        (c.args as { create: { sourceUserId: string } }).create.sourceUserId === "1"),
+      "precondition: with plex.tv down this tick resolved the owner to the phantom \"1\" row",
+    );
+    const upd = activeUpdatesFor("plex:own-out");
+    assert.equal(upd.length, 1);
+    assert.equal("mediaServerUserId" in upd[0].data, false, "no re-bind while the owner id is unknown");
+  } finally {
+    plexTvDown = false;
+    syncSettings.set("plexAdminToken", "plex-admin-token-1");
+  }
 });
 
 test("a continuing session whose owner resolved to the SAME MediaServerUser does not carry mediaServerUserId in the CAS data", async () => {
@@ -1523,6 +1612,334 @@ test("a failed Plex ABSENCE-sweep finalize warns with the [play-history] scope, 
     warns.some((w) => w.includes("[play-history] Failed to finalize plex session plex:abs-fail")),
     `a silently swallowed sweep failure leaves the operator nothing to correlate a late finalize with; warns=${JSON.stringify(warns)}`,
   );
+});
+
+// ═══ Concurrent-stream alert (guardrail 19f): the tick's start is the cut ═══
+// The poller passes the time its tick began; only sessions a server reported
+// THIS tick (stamped at or after it) count. An ended session lingering in its
+// 60s absence grace is not re-stamped, so a fast device switch is one stream.
+
+function streamAlerts(): Array<Record<string, unknown>> {
+  return dbCalls
+    .filter((c) => c.model === "notification" && c.op === "create")
+    .map((c) => (c.args as { data: Record<string, unknown> }).data)
+    .filter((d) => d.type === "STREAM_LIMIT");
+}
+
+test("GUARDRAIL 19f: a device switch is one stream — the old row, absent this tick and inside its grace, is not counted", async () => {
+  settings.set("concurrentStreamLimit", "1");
+  try {
+    // Stopped on the TV 10s ago (still inside the 60s absence grace, so not
+    // finalized), now playing on the phone. Same identity: the phone session
+    // resolves to msu:plex:acct-phone.
+    seed(makeRow("tv", { mediaServerUserId: "msu:plex:acct-phone", lastSeenAt: agoReal(10_000) }));
+    plexSnapshot = [plexSnap("phone", { viewOffset: 60_000 })];
+
+    const res = await POST(phReq({ headers: AS_CRON }));
+    assert.deepEqual((await bodyOf(res)).plex, { started: 1, updated: 0, ended: 0 });
+    await settle();
+    assert.ok(activeStore.has("plex:tv"), "precondition: the old row is still in its grace");
+    assert.equal(streamAlerts().length, 0, "no false accusation on a device switch");
+  } finally {
+    settings.delete("concurrentStreamLimit");
+  }
+});
+
+test("GUARDRAIL 19f: two sessions of one identity both reported this tick ARE two streams — even while a slow sibling server holds the evaluation back", async () => {
+  settings.set("concurrentStreamLimit", "1");
+  // The Jellyfin server answers late, so the evaluation runs well after the Plex
+  // rows were stamped. They were still seen THIS tick and must count.
+  jfSessionsDelayMs = 60;
+  try {
+    // Two players started on one account: both rows are written this tick.
+    const a = plexSnap("two-a", { viewOffset: 60_000 });
+    const b = plexSnap("two-b", { viewOffset: 60_000 });
+    (a.User as { id: string }).id = "acct-two";
+    (b.User as { id: string }).id = "acct-two";
+    plexSnapshot = [a, b];
+
+    const res = await POST(phReq({ headers: AS_CRON }));
+    assert.deepEqual((await bodyOf(res)).plex, { started: 2, updated: 0, ended: 0 });
+    await settle();
+    const alerts = streamAlerts();
+    assert.equal(alerts.length, 1, "both rows were stamped during this tick, so both count");
+    assert.equal(alerts[0].userId, "stream-admin");
+  } finally {
+    settings.delete("concurrentStreamLimit");
+  }
+});
+
+// ═══ A finalized key whose playhead moves again has resumed ═════════════════
+// The ledger holds back a key Plex keeps listing after a finalize (a ghost: its
+// playhead is frozen). A play that resumes under the same sessionKey moves its
+// playhead, and must get a new row instead of going untracked for the 1h TTL.
+
+const AS_CRON_RESUME = { ...AS_CRON, "x-forwarded-for": "10.77.0.10" };
+
+test("GUARDRAIL 20: after a stall finalize a frozen key stays suppressed, and a resumed play on the same key gets a new row", async () => {
+  const past = PLEX_STALL_THRESHOLD_MS + 1_000;
+  seed(makeRow("resume-1", {
+    state: "playing", progressMs: 500_000n, progressUpdatedAt: agoReal(past), lastSeenAt: agoReal(past),
+  }));
+  plexSnapshot = [plexSnap("resume-1", { viewOffset: 500_000 })];
+  await POST(phReq({ headers: AS_CRON_RESUME }));
+  await settle();
+  assert.equal(historyRows().length, 1, "precondition: the frozen playhead stall-finalized");
+  assert.equal(isPlexSessionRecentlyFinalized("plex:resume-1"), true);
+
+  // Still listed, playhead unchanged: a ghost — nothing is re-created.
+  const ghost = await POST(phReq({ headers: AS_CRON_RESUME }));
+  assert.deepEqual((await bodyOf(ghost)).plex, { started: 0, updated: 0, ended: 0 });
+  await settle();
+  assert.equal(activeCreatesFor("plex:resume-1").length, 0, "a ghost must not be re-created");
+  assert.equal(isPlexSessionRecentlyFinalized("plex:resume-1"), true);
+
+  // The playhead moved: the play resumed under the same key.
+  plexSnapshot = [plexSnap("resume-1", { viewOffset: 530_000 })];
+  const resumed = await POST(phReq({ headers: AS_CRON_RESUME }));
+  assert.deepEqual((await bodyOf(resumed)).plex, { started: 1, updated: 0, ended: 0 });
+  await settle();
+  const created = activeCreatesFor("plex:resume-1");
+  assert.equal(created.length, 1, "the resumed play gets a new ActiveSession row");
+  assert.equal(created[0].startProgressMs, 530_000n, "the new row starts where the resumed play is");
+  assert.equal(isPlexSessionRecentlyFinalized("plex:resume-1"), false, "the ledger entry is released");
+});
+
+test("a stall finalize records the frozen playhead, so a play moving again on the very next tick gets its row at once", async () => {
+  const past = PLEX_STALL_THRESHOLD_MS + 1_000;
+  seed(makeRow("resume-3", {
+    state: "playing", progressMs: 200_000n, progressUpdatedAt: agoReal(past), lastSeenAt: agoReal(past),
+  }));
+  plexSnapshot = [plexSnap("resume-3", { viewOffset: 200_000 })];
+  await POST(phReq({ headers: AS_CRON_RESUME }));
+  await settle();
+  assert.equal(isPlexSessionRecentlyFinalized("plex:resume-3"), true, "precondition: stall-finalized");
+
+  plexSnapshot = [plexSnap("resume-3", { viewOffset: 215_000 })];
+  await POST(phReq({ headers: AS_CRON_RESUME }));
+  await settle();
+  assert.equal(activeCreatesFor("plex:resume-3").length, 1, "the stall's own observation is the baseline — no extra tick of blindness");
+});
+
+test("a key ledgered by another writer (no poller baseline) is held on first sight, then released once its playhead moves", async () => {
+  // An SSE stop's offset runs ahead of /status/sessions, so the poller's first
+  // sighting only records where the ghost sits; movement is judged from there.
+  markPlexSessionFinalized("plex:resume-2");
+  plexSnapshot = [plexSnap("resume-2", { viewOffset: 100_000 })];
+  await POST(phReq({ headers: AS_CRON_RESUME }));
+  await settle();
+  assert.equal(activeCreatesFor("plex:resume-2").length, 0, "the first sighting never releases");
+  assert.equal(isPlexSessionRecentlyFinalized("plex:resume-2"), true);
+
+  await POST(phReq({ headers: AS_CRON_RESUME }));
+  await settle();
+  assert.equal(activeCreatesFor("plex:resume-2").length, 0, "an unchanged playhead stays suppressed");
+
+  plexSnapshot = [plexSnap("resume-2", { viewOffset: 104_000 })];
+  await POST(phReq({ headers: AS_CRON_RESUME }));
+  await settle();
+  assert.equal(activeCreatesFor("plex:resume-2").length, 1, "a moved playhead releases the key");
+  assert.equal(isPlexSessionRecentlyFinalized("plex:resume-2"), false);
+});
+
+// ═══ One failed write never takes the tick down ═════════════════════════════
+
+const AS_CRON_WRITES = { ...AS_CRON, "x-forwarded-for": "10.77.0.11" };
+
+test("one session's failed insert is skipped with a warn: the other sessions, the absence sweep and both sources still run", async () => {
+  // A rejected write used to reject the whole instance tick: every result was
+  // lost and the absence sweep after the writes never ran, so ended sessions
+  // stayed "playing" for as long as the bad session kept failing.
+  const gone = seed(makeRow("wf-gone", { lastSeenAt: agoReal(SESSION_ABSENCE_GRACE_MS + 5_000) }));
+  seed(makeRow("wf-live", { progressMs: 100_000n, progressUpdatedAt: agoReal(10_000), lastSeenAt: agoReal(10_000) }));
+  plexSnapshot = [plexSnap("wf-new", { viewOffset: 10_000 }), plexSnap("wf-live", { viewOffset: 110_000 })];
+  const jfGone = seed(makeRow("wf-jf-gone", {
+    id: "jellyfin:wf-jf-gone", source: "jellyfin", sessionKey: "wf-jf-gone",
+    lastSeenAt: agoReal(SESSION_ABSENCE_GRACE_MS + 5_000),
+  }));
+  jfSnapshot = [jfSnap("wf-jf-new", { positionTicks: 100_000_000 })];
+  // One failing insert per source.
+  activeCreateErrorFor.add("plex:wf-new");
+  activeCreateErrorFor.add("jellyfin:wf-jf-new");
+
+  const res = await POST(phReq({ headers: AS_CRON_WRITES }));
+  assert.equal(res.headers.get("X-Cron-Degraded"), null, "one bad session must not degrade its source");
+  const body = await bodyOf(res);
+  assert.deepEqual(body.plex, { started: 0, updated: 1, ended: 1 }, "the live session updates and the absent one is finalized");
+  assert.deepEqual(body.jellyfin, { started: 0, updated: 0, ended: 1 }, "the jellyfin sweep still ran");
+  await settle();
+  assert.ok(
+    historyRows().some((r) => r.sourceSessionId === `wf-gone:${gone.startedAt.toISOString()}`),
+    "the plex absence sweep ran despite the failing write",
+  );
+  assert.ok(historyRows().some((r) => r.sourceSessionId === `wf-jf-gone:${jfGone.startedAt.toISOString()}`));
+  for (const failing of activeCreateErrorFor) {
+    assert.ok(
+      warns.some((w) => w.includes(`[play-history] session write failed for ${failing}`)),
+      `the failure is warned with the session id; warns=${JSON.stringify(warns)}`,
+    );
+  }
+});
+
+test("a failed ratingKey-change finalize is skipped, not counted as started — no insert and no marker fetch for the new item", async () => {
+  seed(makeRow("rk-chg", {
+    sourceItemId: "rk-old", progressMs: 100_000n, progressUpdatedAt: agoReal(10_000), lastSeenAt: agoReal(10_000),
+  }));
+  plexSnapshot = [plexSnap("rk-chg", { viewOffset: 5_000, ratingKey: "rk-next" })];
+  playHistoryCreateError = new Error("db down"); // the old item's finalize fails
+
+  const res = await POST(phReq({ headers: AS_CRON_WRITES }));
+  assert.deepEqual((await bodyOf(res)).plex, { started: 0, updated: 0, ended: 0 });
+  await settle();
+  assert.equal(activeCreatesFor("plex:rk-chg").length, 0, "no insert onto the surviving old row's id");
+  assert.ok(!fetchLog.some((f) => f.url.includes("/library/metadata/rk-next")), "the next item's markers must not be stamped on the old row");
+  assert.ok(activeStore.has("plex:rk-chg"), "the old row survives for the next tick's retry");
+  assert.ok(warns.some((w) => w.includes("[play-history] ratingKey-change finalize failed for plex:rk-chg")));
+});
+
+test("a failed jellyfin itemId-change finalize is skipped, not counted as started — no insert", async () => {
+  seed(makeRow("jf-chg", {
+    id: "jellyfin:jf-chg", source: "jellyfin", sessionKey: "jf-chg", sourceItemId: "jf-item-old",
+    progressMs: 100_000n, progressUpdatedAt: agoReal(10_000), lastSeenAt: agoReal(10_000),
+  }));
+  jfSnapshot = [jfSnap("jf-chg", { itemId: "jf-item-next", positionTicks: 50_000_000 })];
+  playHistoryCreateError = new Error("db down");
+
+  const res = await POST(phReq({ headers: AS_CRON_WRITES }));
+  assert.deepEqual((await bodyOf(res)).jellyfin, { started: 0, updated: 0, ended: 0 });
+  await settle();
+  assert.equal(activeCreatesFor("jellyfin:jf-chg").length, 0);
+  assert.ok(activeStore.has("jellyfin:jf-chg"), "the old row survives for the next tick's retry");
+  assert.ok(warns.some((w) => w.includes("[play-history] itemId-change finalize failed for jellyfin:jf-chg")));
+});
+
+// ═══ Post-sync housekeeping failures degrade, never 500 ═════════════════════
+
+// ═══ Write outcomes: a write another tick won is counted nowhere ═══════════
+
+// Its own client address, so these ticks draw on a fresh per-IP bucket.
+const AS_CRON_OUTCOMES = { ...AS_CRON, "x-forwarded-for": "10.77.0.12" };
+
+test("a create another tick already made is not counted as started, and fetches no markers for it", async () => {
+  activeCreateRaceFor.add("plex:raced-new");
+  plexSnapshot = [plexSnap("raced-new", { viewOffset: 5_000 })];
+  const res = await POST(phReq({ headers: AS_CRON_OUTCOMES }));
+  assert.deepEqual((await bodyOf(res)).plex, { started: 0, updated: 0, ended: 0 });
+  await settle();
+  assert.equal(fetchLog.filter((f) => f.url.includes("/library/metadata/")).length, 0, "the winning tick fetched its own markers");
+});
+
+test("an update whose CAS lost to another writer is not counted as updated", async () => {
+  seed(makeRow("raced-upd", { progressMs: 60_000n, progressUpdatedAt: agoReal(10_000), lastSeenAt: agoReal(10_000) }));
+  activeUpdateRaceFor.add("plex:raced-upd");
+  plexSnapshot = [plexSnap("raced-upd", { viewOffset: 70_000 })];
+  const res = await POST(phReq({ headers: AS_CRON_OUTCOMES }));
+  assert.deepEqual((await bodyOf(res)).plex, { started: 0, updated: 0, ended: 0 });
+});
+
+test("GUARDRAIL 19: a jellyfin row matched to a live session under its OLD key is not absence-finalized when its update is lost", async () => {
+  // The row was created under the session's Id; this tick reports a new
+  // PlaySessionId and finds the row by that Id. Its CAS update loses, so the
+  // row keeps the old sessionKey — which the tick's PlaySessionIds don't hold —
+  // while its lastSeenAt is past the grace. Finalizing it would end a stream
+  // that is still playing, and the poller is Jellyfin's only writer.
+  seed(makeRow("old-psid", {
+    id: "jellyfin:old-psid", source: "jellyfin", sessionKey: "old-psid", sourceItemId: "jf-item-shared",
+    lastSeenAt: agoReal(SESSION_ABSENCE_GRACE_MS + 8_000), state: "playing",
+  }));
+  activeUpdateRaceFor.add("jellyfin:old-psid");
+  jfSnapshot = [{ ...jfSnap("new-psid", { itemId: "jf-item-shared", positionTicks: 600_000_000 }), Id: "old-psid" }];
+  const res = await POST(phReq({ headers: AS_CRON_OUTCOMES }));
+  assert.deepEqual((await bodyOf(res)).jellyfin, { started: 0, updated: 0, ended: 0 });
+  await settle();
+  assert.ok(activeStore.has("jellyfin:old-psid"), "the live session's row survives the sweep");
+  assert.equal(historyRows().filter((r) => r.source === "jellyfin").length, 0);
+});
+
+test("a tick refused by the per-IP rate limit is a 429 that records no cron run — overlapping ticks are not failed syncs", async () => {
+  const headers = { ...AS_CRON, "x-forwarded-for": "10.77.0.13" };
+  for (let i = 0; i < 30; i++) assert.equal((await POST(phReq({ headers }))).status, 200, `tick ${i + 1}`);
+  await settle();
+  settingUpserts.length = 0;
+  const limited = await POST(phReq({ headers }));
+  assert.equal(limited.status, 429);
+  await settle();
+  assert.equal(settingUpserts.filter((u) => u.key.startsWith("cron:lastRun:")).length, 0, "no run ledger row for a refused tick");
+});
+
+test("a failing now-playing snapshot degrades the run but keeps the 200 and every source's result", async () => {
+  snapshotReadError = new Error("snapshot read failed");
+  plexSnapshot = [plexSnap("post-1", { viewOffset: 10_000 })];
+  const res = await POST(phReq({ headers: AS_CRON_WRITES }));
+  assert.equal(res.status, 200, "the sessions were already written; a housekeeping failure must not 500 the tick");
+  assert.equal(res.headers.get("X-Cron-Degraded"), "post-sync:snapshot");
+  const body = await bodyOf(res);
+  assert.deepEqual(body.plex, { started: 1, updated: 0, ended: 0 }, "the source results survive");
+  assert.ok(body.jellyfin, "the other source's result survives too");
+  await settle();
+  assert.ok(warns.some((w) => w.includes("[play-history] post-sync snapshot failed")));
+});
+
+test("a failing retention purge degrades the run but keeps the 200 and every source's result", async () => {
+  settings.set("playHistoryRetentionDays", "30");
+  bustSettingsCache();
+  retentionClaim = 1;
+  playHistoryDeleteError = new Error("purge failed");
+  try {
+    plexSnapshot = [plexSnap("post-2", { viewOffset: 10_000 })];
+    const res = await POST(phReq({ headers: AS_CRON_WRITES }));
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("X-Cron-Degraded"), "post-sync:retention");
+    assert.deepEqual((await bodyOf(res)).plex, { started: 1, updated: 0, ended: 0 });
+    await settle();
+    assert.ok(dbCalls.some((c) => c.model === "playHistory" && c.op === "deleteMany"), "precondition: the claimed purge ran");
+  } finally {
+    settings.delete("playHistoryRetentionDays");
+    bustSettingsCache();
+  }
+});
+
+// ═══ The owner's plex.tv id survives a plex.tv outage ═══════════════════════
+
+test("GUARDRAIL 34: past its TTL, a plex.tv outage keeps serving the owner's last-known id — owner plays are never filed under the phantom \"1\"", async () => {
+  const ownerSnap = (key: string): Record<string, unknown> => {
+    const snap = plexSnap(key, { viewOffset: 60_000 });
+    (snap.User as { id: string }).id = "1";
+    return snap;
+  };
+  syncSettings.set("plexAdminToken", "plex-admin-token-stale");
+  try {
+    plexSnapshot = [ownerSnap("own-st-1")];
+    await POST(phReq({ headers: AS_CRON_WRITES }));
+    await settle();
+    assert.ok(fetchLog.some((f) => f.url.includes("plex.tv")), "precondition: the owner id was learned from plex.tv");
+
+    // An hour on, the id is due a refresh and plex.tv is down.
+    clockOffsetMs += 60 * 60 * 1000 + 1_000;
+    plexTvDown = true;
+    activeStore.clear();
+    dbCalls.length = 0;
+    fetchLog.length = 0;
+    plexSnapshot = [ownerSnap("own-st-2")];
+    await POST(phReq({ headers: AS_CRON_WRITES }));
+    await settle();
+    assert.ok(fetchLog.some((f) => f.url.includes("plex.tv")), "the expired id is refreshed");
+    assert.equal(activeCreatesFor("plex:own-st-2")[0]?.mediaServerUserId, "msu:plex:9", "the owner's play stays on the owner's global id");
+    assert.ok(
+      !dbCalls.some((c) => c.model === "mediaServerUser" && c.op === "upsert" &&
+        (c.args as { create: { sourceUserId: string } }).create.sourceUserId === "1"),
+      "nothing resolves to the phantom local-id row",
+    );
+
+    // The failure is held for a minute: the next tick doesn't wait on plex.tv again.
+    fetchLog.length = 0;
+    await POST(phReq({ headers: AS_CRON_WRITES }));
+    await settle();
+    assert.equal(fetchLog.filter((f) => f.url.includes("plex.tv")).length, 0, "a failed refresh is not retried on every 5s tick");
+  } finally {
+    plexTvDown = false;
+    syncSettings.set("plexAdminToken", "plex-admin-token-1");
+  }
 });
 
 test("the route never console.errors across every path exercised in this file (guardrail 7)", () => {

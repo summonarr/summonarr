@@ -223,23 +223,27 @@ shadowPrismaModel(prisma, "mediaRequest", {
 shadowPrismaModel(prisma, "watchlistItem", { groupBy: async () => [] });
 shadowPrismaModel(prisma, "activeSession", { findMany: async () => [] });
 shadowPrismaModel(prisma, "upstreamWatchEvidence", { findMany: async () => [] });
-let protections: Array<{ tmdbId: number; mediaType: string; title: string | null; reason: string | null; createdAt: Date }> = [];
+let protections: Array<{ tmdbId: number; mediaType: string; title: string | null; reason: string | null; addedBy?: string; createdAt: Date }> = [];
+const protectionUpserts: Array<{ create: Record<string, unknown>; update: Record<string, unknown> }> = [];
 // When set, a protection read answers with what it saw on arrival, but only
 // once the gate opens — a computation parked mid-flight.
 let protectionsGate: Promise<void> | null = null;
 let protectionReads = 0;
 shadowPrismaModel(prisma, "cleanupProtection", {
-  findMany: async (args: { where?: { tmdbId?: { in?: number[] } } }) => {
+  findMany: async (args: { where?: { tmdbId?: { in?: number[] } }; take?: number }) => {
     protectionReads++;
-    const seen = protections.filter((p) => inIds(args.where, p.tmdbId));
+    const seen = protections.filter((p) => inIds(args.where, p.tmdbId)).slice(0, args.take ?? Infinity);
     if (protectionsGate) await protectionsGate;
     return seen;
   },
-  upsert: async (args: { where: { tmdbId_mediaType: { tmdbId: number; mediaType: string } }; create: { title: string | null; reason: string | null } }) => {
+  count: async () => protections.length,
+  upsert: async (args: { where: { tmdbId_mediaType: { tmdbId: number; mediaType: string } }; create: { title: string | null; reason: string | null; addedBy?: string }; update: Record<string, unknown> }) => {
     seq.push("cleanupProtection.upsert");
+    protectionUpserts.push({ create: args.create, update: args.update });
     const { tmdbId, mediaType } = args.where.tmdbId_mediaType;
-    protections = protections.filter((p) => !(p.tmdbId === tmdbId && p.mediaType === mediaType));
-    const row = { tmdbId, mediaType, title: args.create.title, reason: args.create.reason, createdAt: new Date() };
+    const existing = protections.find((p) => p.tmdbId === tmdbId && p.mediaType === mediaType);
+    if (existing) return Object.assign(existing, args.update);
+    const row = { tmdbId, mediaType, title: args.create.title, reason: args.create.reason, addedBy: args.create.addedBy, createdAt: new Date() };
     protections.push(row);
     return row;
   },
@@ -288,6 +292,7 @@ const settingsRoute = await import("../src/app/api/admin/cleanup/settings/route.
 const protectRoute = await import("../src/app/api/admin/cleanup/protect/route.ts");
 const deleteRoute = await import("../src/app/api/admin/cleanup/delete/route.ts");
 const { CLEANUP_MAX_ITEMS } = await import("../src/lib/library-cleanup.ts");
+const { rememberSnapshot, resetArrSnapshotsForTests } = await import("../src/lib/arr-snapshot.ts");
 const neverWatchedRoute = await import("../src/app/api/admin/never-watched/route.ts");
 // The listing's 502/503/504 retry pauses 2 s in production; no test should wait.
 const { _setArrListingRetryDelayForTests, getCachedArrLibraryIndex, invalidateArrLibraryIndexCache } = await import("../src/lib/library-cleanup-arr.ts");
@@ -351,6 +356,7 @@ beforeEach(() => {
   listingHook = null;
   protectionsGate = null;
   protectionReads = 0;
+  protectionUpserts.length = 0;
   tmdbPlays = [];
   firstPlays = [];
   tmdbToTvdb = new Map();
@@ -464,6 +470,13 @@ test("report: candidates first, held-back titles named with their exclusions, si
   assert.deepEqual(requestWrites, []);
 });
 
+test("report: the protected list is capped at 1000, and protectedTotal says how many there are", async () => {
+  protections = Array.from({ length: 1001 }, (_, i) => ({ tmdbId: 10_000 + i, mediaType: "MOVIE", title: null, reason: null, createdAt: new Date() }));
+  const body = await (await call(report.GET as never, await mintSession(), "", "GET")).json() as { protected: unknown[]; protectedTotal: number };
+  assert.equal(body.protected.length, 1000);
+  assert.equal(body.protectedTotal, 1001);
+});
+
 // ── 3: dry run, then a confirmed execute ─────────────────────────────────────
 
 test("dry run: resolves every instance's copy, returns the count, and changes nothing", async () => {
@@ -502,6 +515,49 @@ test("a title that stopped being a candidate since the dry run drops out of the 
   assert.deepEqual(deletes(), []);
 });
 
+// The count alone can't tell a same-sized DIFFERENT set: one copy drops out
+// while another appears on a second instance. The dry run's fingerprint of the
+// exact target set, echoed back, refuses it.
+test("a same-sized but different target set since the dry run fails the fingerprint: 409, nothing deleted", async () => {
+  const token = await mintSession();
+  plexLib.push({ tmdbId: 600, mediaType: "MOVIE", serverInstance: "", title: "Movie 600", year: "2020", addedAt: new Date("2024-01-01T00:00:00.000Z") });
+  votes.push({ tmdbId: 600, mediaType: "MOVIE", n: 2 });
+  radarrMovies[RADARR].push({ id: 16, tmdbId: 600, title: "Movie 600", sizeOnDisk: 600 });
+  const items = [MOVIE_100, { tmdbId: 600, mediaType: "MOVIE" }];
+  const plan = await (await dryRun(token, { items })).json() as { targetCount: number; targetsFingerprint: string };
+  assert.equal(plan.targetCount, 3, "100 on default + 4K, 600 on default");
+  assert.match(plan.targetsFingerprint, /^[0-9a-f]{64}$/);
+  // 100 leaves the 4K instance; 600 appears there. Still three targets.
+  radarrMovies[RADARR_4K] = [{ id: 26, tmdbId: 600, title: "Movie 600", sizeOnDisk: 6_000 }];
+  const res = await execute(token, { items, confirmTargets: plan.targetCount, confirmFingerprint: plan.targetsFingerprint });
+  assert.equal(res.status, 409);
+  const fresh = await res.json() as { targetCount: number; targetsFingerprint: string; reclaimableBytes: number };
+  assert.equal(fresh.targetCount, 3, "the count alone would have passed");
+  assert.notEqual(fresh.targetsFingerprint, plan.targetsFingerprint);
+  // The fresh plan carries its size, exactly as a dry run of the same set answers it.
+  const again = await (await dryRun(token, { items })).json() as { reclaimableBytes: number; targetsFingerprint: string };
+  assert.equal(again.targetsFingerprint, fresh.targetsFingerprint);
+  assert.equal(fresh.reclaimableBytes, again.reclaimableBytes);
+  assert.deepEqual(deletes(), [], "no DELETE for an entry the admin never saw");
+  assert.deepEqual(requestWrites, []);
+  // Confirming the fresh plan deletes exactly its targets.
+  const ok = await execute(token, { items, confirmTargets: fresh.targetCount, confirmFingerprint: fresh.targetsFingerprint });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(deletes().map((c) => `${c.origin}${c.path}`).sort(), [
+    `${RADARR}/api/v3/movie/11`, `${RADARR}/api/v3/movie/16`, `${RADARR_4K}/api/v3/movie/26`,
+  ].sort());
+});
+
+test("the fingerprint is the target SET: unchanged across a re-run, and not a string the count can stand in for", async () => {
+  const token = await mintSession();
+  const a = await (await dryRun(token, { items: [MOVIE_100, SHOW_300] })).json() as { targetsFingerprint: string };
+  const b = await (await dryRun(token, { items: [SHOW_300, MOVIE_100] })).json() as { targetsFingerprint: string };
+  assert.equal(a.targetsFingerprint, b.targetsFingerprint, "order-free");
+  const res = await execute(token, { items: [MOVIE_100, SHOW_300], confirmTargets: 3, confirmFingerprint: 3 });
+  assert.equal(res.status, 409, "a non-string fingerprint never matches");
+  assert.deepEqual(deletes(), []);
+});
+
 // ── 4: the delete calls ──────────────────────────────────────────────────────
 
 test("execute: Radarr and Sonarr get the right DELETE, with files and the import exclusion, on EACH instance", async () => {
@@ -534,6 +590,13 @@ test("a Radarr instance whose listing failed refuses its titles rather than half
   listingStatus = (origin) => (origin === RADARR_4K ? 503 : 200);
   const body = await (await dryRun(await mintSession(), { items: [MOVIE_100, SHOW_300] })).json();
   assert.equal(body.targetCount, 1, "only the show");
+  assert.match(body.skipped.find((s: { tmdbId: number }) => s.tmdbId === 100).reason, /Could not read Radarr/);
+});
+
+test("a Radarr instance answering 200 with something that isn't a listing is unreadable too — never an empty instance", async () => {
+  radarrMovies[RADARR_4K] = { error: "maintenance" } as unknown as unknown[];
+  const body = await (await dryRun(await mintSession(), { items: [MOVIE_100, SHOW_300] })).json();
+  assert.equal(body.targetCount, 1, "only the show — 100's 4K copy may still be there");
   assert.match(body.skipped.find((s: { tmdbId: number }) => s.tmdbId === 100).reason, /Could not read Radarr/);
 });
 
@@ -704,6 +767,89 @@ test("C014: a failed re-assert after a durable delete is reported on the title, 
   }
 });
 
+test("every bookkeeping failure of a deleted title is reported — a later one never masks the re-assert's", async () => {
+  const realUpdateMany = (prisma.mediaRequest as unknown as { updateMany: (a: unknown) => Promise<unknown> }).updateMany;
+  const blacklist = prisma.blacklistItem as unknown as { upsert: (a: unknown) => Promise<unknown> };
+  const realUpsert = blacklist.upsert;
+  (prisma.mediaRequest as unknown as { updateMany: (a: { where: { status?: unknown } }) => Promise<unknown> }).updateMany = async (a) => {
+    if (a.where.status !== undefined) throw new Error("re-assert failed");
+    return realUpdateMany(a);
+  };
+  blacklist.upsert = async () => { throw new Error("blacklist failed"); };
+  try {
+    const res = await execute(await mintSession(), { items: [MOVIE_100], confirmTargets: 2 });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.results[0].status, "deleted");
+    assert.match(body.results[0].bookkeepingError, /re-assert failed/, "the 14b failure survives");
+    assert.match(body.results[0].bookkeepingError, /blacklist failed/, "and so does the later one");
+  } finally {
+    (prisma.mediaRequest as unknown as { updateMany: unknown }).updateMany = realUpdateMany;
+    blacklist.upsert = realUpsert;
+  }
+});
+
+// A DB error on one title's stamp used to reject mapLimit — a 500
+// while the other worker went on deleting, with the cache invalidations and the
+// rescans skipped. Now it is that title's failure: not deleted (14b: no stamp,
+// no delete), reported, and the rest of the batch completes normally.
+for (const failing of ["findMany", "updateMany"] as const) {
+  test(`a stamp ${failing} error fails only its own title — no delete for it, the batch completes, invalidations and rescans run`, async () => {
+    const token = await mintSession();
+    // Warm the shared listing so its invalidation is observable afterwards.
+    await getCachedArrLibraryIndex();
+    const model = prisma.mediaRequest as unknown as Record<string, (a: { where?: ReqWhere; data?: unknown }) => Promise<unknown>>;
+    const real = model[failing];
+    // The up-front stamp: the read keyed `cleanedUpAt: null` + AVAILABLE, the
+    // write keyed `cleanedUpAt: null` by id — for movie 100 only.
+    model[failing] = async (a) => {
+      const w = a.where ?? {};
+      const isStamp = w.cleanedUpAt === null && (failing === "findMany" ? w.status === "AVAILABLE" : w.id?.in.includes("r100a") === true);
+      if (isStamp && JSON.stringify(w).includes("100")) throw new Error("simulated pool timeout");
+      return real(a);
+    };
+    try {
+      const res = await execute(token, { items: [MOVIE_100, SHOW_300], confirmTargets: 3 });
+      assert.equal(res.status, 200, "one title's DB error is never the whole batch's 500");
+      const body = await res.json() as { deletedCount: number; failedCount: number; results: Array<{ tmdbId: number; status: string; deleted: string[]; bookkeepingError?: string }> };
+      const movie = body.results.find((r) => r.tmdbId === 100)!;
+      assert.equal(movie.status, "failed");
+      assert.deepEqual(movie.deleted, []);
+      assert.equal(movie.bookkeepingError, "simulated pool timeout");
+      assert.equal(deletes().filter((c) => c.path.startsWith("/api/v3/movie/")).length, 0, "no stamp ⇒ no delete (guardrail 14b)");
+      assert.equal(body.results.find((r) => r.tmdbId === 300)!.status, "deleted");
+      assert.equal(body.deletedCount, 1);
+      assert.equal(body.failedCount, 1);
+      assert.equal(afterTasks.length, 1, "the show's library rescan is still scheduled");
+      const listingsBefore = calls.filter((c) => c.method === "GET").length;
+      await getCachedArrLibraryIndex();
+      assert.ok(calls.filter((c) => c.method === "GET").length > listingsBefore, "the shared listing was invalidated");
+    } finally {
+      model[failing] = real;
+    }
+  });
+}
+
+test("when every delete is refused, a failed un-stamp is reported on the title, never a 500", async () => {
+  const model = prisma.mediaRequest as unknown as Record<string, (a: { where?: ReqWhere; data?: { cleanedUpAt?: unknown } }) => Promise<unknown>>;
+  const real = model.updateMany;
+  model.updateMany = async (a) => {
+    // The un-stamp: keyed on this call's own time, writing null.
+    if (a.data?.cleanedUpAt === null && a.where?.cleanedUpAt instanceof Date) throw new Error("simulated write failure");
+    return real(a);
+  };
+  try {
+    deleteStatus = () => 503;
+    const res = await execute(await mintSession(), { items: [MOVIE_100], confirmTargets: 2 });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.results[0].status, "failed");
+    assert.equal(body.results[0].bookkeepingError, "simulated write failure");
+  } finally {
+    model.updateMany = real;
+  }
+});
+
 // Audit C057: a failure the page shows carries a translatable kind and names
 // its instance, instead of only the English arrErrorMessage text.
 test("C057: a refused delete reports the instance and a translatable kind beside the English detail", async () => {
@@ -802,6 +948,35 @@ test("protect then unprotect round-trips and is audited", async () => {
   assert.equal((await call(protectRoute.DELETE as never, token, "/protect?tmdbId=100&mediaType=MOVIE", "DELETE")).status, 200);
   assert.ok(!protections.some((p) => p.tmdbId === 100));
   assert.deepEqual(audits.map((a) => a.action), ["LIBRARY_CLEANUP_PROTECT", "LIBRARY_CLEANUP_PROTECT"]);
+});
+
+test("re-protecting a title keeps who protected it and the reason this call didn't send — still 201", async () => {
+  const first = await mintSession();
+  assert.equal((await call(protectRoute.POST as never, first, "/protect", "POST", { ...MOVIE_100, title: "Movie 100", reason: "keep forever" })).status, 201);
+  const firstBy = protections.find((p) => p.tmdbId === 100)?.addedBy;
+  assert.ok(firstBy);
+  // Another admin re-protects from the never-watched page, which sends the title alone.
+  const res = await call(protectRoute.POST as never, await mintSession(), "/protect", "POST", { ...MOVIE_100, title: "Movie 100 (2001)" });
+  assert.equal(res.status, 201);
+  const row = protections.find((p) => p.tmdbId === 100)!;
+  assert.equal(row.title, "Movie 100 (2001)");
+  assert.equal(row.reason, "keep forever", "a reason given earlier survives a call that sent none");
+  assert.equal(row.addedBy, firstBy, "the first admin still owns the protection");
+  assert.deepEqual(Object.keys(protectionUpserts.at(-1)!.update), ["title"], "the update writes only what was sent");
+});
+
+test("a snapshot drop that throws after a delete went through never turns that delete into a failure", async () => {
+  // A malformed kept key makes dropArrTitleSnapshots throw (new URL fails).
+  rememberSnapshot("en|http://[", "{}");
+  try {
+    const body = await (await execute(await mintSession(), { items: [MOVIE_100], confirmTargets: 2 })).json();
+    assert.equal(body.results[0].status, "deleted");
+    assert.deepEqual(body.results[0].failed, []);
+    assert.equal(body.results[0].uncertain, undefined);
+    assert.ok(requests.find((r) => r.id === "r100a")!.cleanedUpAt instanceof Date, "the stamps of a deleted title stay");
+  } finally {
+    resetArrSnapshotsForTests();
+  }
 });
 
 // ── never-watched report (guardrail 14d) ─────────────────────────────────────
@@ -1015,6 +1190,31 @@ test("never-watched report cache: a computation that spans an invalidation is ne
     release();
     assert.equal(movieRow(await parked, 100)?.protected, false, "the parked computation answered from what it read");
     assert.equal(movieRow(await nwRows(token), 100)?.protected, true, "…but was not stored: the next read recomputes");
+  } finally {
+    protectionsGate = null;
+    release();
+  }
+});
+
+test("never-watched report cache: a plain computation that finishes after a ?fresh=1 one never replaces the fresher report", async () => {
+  const token = await mintSession();
+  const sizeOf100 = (rows: Array<NwRow & { sizeOnDisk?: number | null }>) => rows.find((r) => r.kind === "title" && r.mediaType === "MOVIE" && r.tmdbId === 100)?.sizeOnDisk;
+  let release!: () => void;
+  protectionsGate = new Promise<void>((r) => { release = r; });
+  try {
+    // The plain read lists Radarr, then parks inside its facts load.
+    const parked = nwRows(token);
+    assert.ok(await settleUntil(() => protectionReads === 1), "the plain computation parked");
+    // The clock moves past the parked listing, then Radarr changes.
+    const listedBy = Date.now();
+    assert.ok(await settleUntil(() => Date.now() > listedBy, 100_000), "the clock moved");
+    radarrMovies[RADARR] = radarrMovies[RADARR].map((m) => ((m as { tmdbId: number }).tmdbId === 100 ? { ...(m as object), sizeOnDisk: 4_000 } : m));
+    protectionsGate = null;
+    const fresh = await nwRows(token, "state=all&limit=200&fresh=1");
+    assert.equal(sizeOf100(fresh), 13_000, "the refreshed listing");
+    release();
+    assert.equal(sizeOf100(await parked), 10_000, "the parked computation answered from its older listing");
+    assert.equal(sizeOf100(await nwRows(token)), 13_000, "…but did not replace the refreshed report in the cache");
   } finally {
     protectionsGate = null;
     release();

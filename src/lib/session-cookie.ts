@@ -14,7 +14,12 @@
 const COOKIE_NAME_SECURE = "__Host-summonarr-session";
 const COOKIE_NAME_INSECURE = "summonarr-session";
 
-function isSecureContext(): boolean {
+// Whether this deployment's cookies are Secure (and may carry a `__Host-`
+// name): an https AUTH_URL is secure, an http one is not, and an unset or odd
+// one is secure in production. Read per call. The ONE rule for every cookie
+// the app sets — the session, the OIDC flow state, and the Plex / QuickConnect
+// flow cookies — so their names and Secure flags can never disagree.
+export function isSecureCookieContext(): boolean {
   const url = process.env.AUTH_URL ?? "";
   if (url.startsWith("https://")) return true;
   if (url.startsWith("http://")) return false;
@@ -22,7 +27,7 @@ function isSecureContext(): boolean {
 }
 
 export function getSessionCookieName(): string {
-  return isSecureContext() ? COOKIE_NAME_SECURE : COOKIE_NAME_INSECURE;
+  return isSecureCookieContext() ? COOKIE_NAME_SECURE : COOKIE_NAME_INSECURE;
 }
 
 export interface CookieAttrs {
@@ -44,7 +49,7 @@ export function serializeSessionCookie(
   token: string,
   attrs: CookieAttrs,
 ): string {
-  const secure = isSecureContext();
+  const secure = isSecureCookieContext();
   const name = secure ? COOKIE_NAME_SECURE : COOKIE_NAME_INSECURE;
   const parts = [
     `${name}=${token}`,

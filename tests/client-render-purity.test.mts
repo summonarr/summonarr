@@ -38,7 +38,7 @@
 //     falsy branch and the clock is only read post-hydration
 //     (@/hooks/use-has-mounted). backup-ui.tsx is the in-tree example.
 //   - a module-level camelCase HELPER whose every in-file callsite is itself
-//     mounted-gated. `relativeTime`/`formatDateGroup` in audit-log-table.tsx are
+//     mounted-gated. `relativeTime`/`formatDateGroup` in audit-log-rows.tsx are
 //     pure functions of the clock — their safety is decided by their callers, so
 //     the analyzer resolves the callsites instead of judging the body. A single
 //     ungated callsite fails the file and names the count.
@@ -270,9 +270,18 @@ function analyze(fileName: string, text: string): Hit[] {
             ts.forEachChild(n, findCalls);
           };
           findCalls(sf);
-          const ungated = calls.filter((c) => !isMountedGated(c));
+          // A callsite inside an event handler or another deferred function
+          // runs after hydration, exactly like a direct read there.
+          const runsLater = (c: ts.Node): boolean => {
+            for (let n: ts.Node = c; n.parent; n = n.parent) {
+              const fnLike = ts.isArrowFunction(n) || ts.isFunctionExpression(n) || ts.isFunctionDeclaration(n) || ts.isMethodDeclaration(n);
+              if (fnLike && deferredReason(n, n.parent)) return true;
+            }
+            return false;
+          };
+          const ungated = calls.filter((c) => !isMountedGated(c) && !runsLater(c));
           if (calls.length > 0 && ungated.length === 0) {
-            excuse = `helper ${name}() — all ${calls.length} callsite(s) mounted-gated`;
+            excuse = `helper ${name}() — all ${calls.length} callsite(s) mounted-gated or deferred`;
           } else if (ungated.length > 0) {
             what = `${what} (via helper ${name}(), ${ungated.length}/${calls.length} callsite(s) UNGATED)`;
           }

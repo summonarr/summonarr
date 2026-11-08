@@ -1,14 +1,14 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
-import { withBasePath } from "@/lib/base-path";
-import type { SaveStatus } from "./shared";
+import { useSettingsSave } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
+import { MAX_CONFIGURABLE_SESSION_SECONDS } from "@/lib/session-lifetime";
 
 interface SessionFormProps {
   initialDefaultDuration: string;
@@ -16,54 +16,29 @@ interface SessionFormProps {
   initialMaxDuration: string;
 }
 
+// The route refuses anything outside 60 s..90 days with a 400 (the settings
+// registry's bound, which tests/session-transport.test.mts holds equal to this
+// shared constant); the native max lets the browser say so before the request,
+// and the help text names the cap so the limit isn't a surprise.
+const MAX_SESSION_SECONDS = MAX_CONFIGURABLE_SESSION_SECONDS;
+
 export function SessionForm({ initialDefaultDuration, initialMobileDuration, initialMaxDuration }: SessionFormProps) {
   const t = useT();
   const [defaultDuration, setDefaultDuration] = useState(initialDefaultDuration);
   const [mobileDuration,  setMobileDuration]  = useState(initialMobileDuration);
   const [maxDuration,     setMaxDuration]     = useState(initialMaxDuration);
-  const [status, setStatus] = useState<SaveStatus>("idle");
-  // The route's own reason (a 400 for an out-of-range duration, a 429 cooldown)
-  // — shown in place of the bare "Failed to save".
-  const [message, setMessage] = useState("");
-  // An earlier save's idle timer must not fire into a later save (it would
-  // re-enable Save mid-flight or hide the new result early).
-  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => {
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-  }, []);
+  // `message` is the route's own reason (a 400 for an out-of-range duration, a
+  // 429 cooldown), shown in place of the bare "Failed to save".
+  const { status, message, save, edited } = useSettingsSave();
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-    setStatus("saving");
-    setMessage("");
-    try {
-      const res = await fetch(withBasePath("/api/settings"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sessionDefaultDuration: defaultDuration,
-          sessionMobileDuration:  mobileDuration,
-          sessionMaxDuration:     maxDuration,
-        }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      if (res.ok && data.ok !== false) {
-        setStatus("ok");
-      } else {
-        setMessage(data.error ?? t("settings.form.common.saveFailed"));
-        setStatus("error");
-      }
-    } catch {
-      setStatus("error");
-    }
-    idleTimer.current = setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
+    await save({
+      sessionDefaultDuration: defaultDuration,
+      sessionMobileDuration:  mobileDuration,
+      sessionMaxDuration:     maxDuration,
+    });
   }
-
-  // The route refuses anything outside 60..7776000 s (90 days) with a 400; the
-  // native max lets the browser say so before the request, and the help text
-  // names the cap so the limit isn't a surprise.
-  const MAX_SESSION_SECONDS = 7_776_000;
 
   return (
     <form onSubmit={handleSave} className="space-y-4">
@@ -76,7 +51,7 @@ export function SessionForm({ initialDefaultDuration, initialMobileDuration, ini
             min="60"
             max={MAX_SESSION_SECONDS}
             value={defaultDuration}
-            onChange={(e) => { setDefaultDuration(e.target.value); setStatus("idle"); }}
+            onChange={(e) => { setDefaultDuration(e.target.value); edited(); }}
             placeholder="3600"
             className="bg-zinc-800 border-zinc-700"
           />
@@ -89,7 +64,7 @@ export function SessionForm({ initialDefaultDuration, initialMobileDuration, ini
             min="60"
             max={MAX_SESSION_SECONDS}
             value={mobileDuration}
-            onChange={(e) => { setMobileDuration(e.target.value); setStatus("idle"); }}
+            onChange={(e) => { setMobileDuration(e.target.value); edited(); }}
             placeholder="604800"
             className="bg-zinc-800 border-zinc-700"
           />
@@ -102,7 +77,7 @@ export function SessionForm({ initialDefaultDuration, initialMobileDuration, ini
             min="60"
             max={MAX_SESSION_SECONDS}
             value={maxDuration}
-            onChange={(e) => { setMaxDuration(e.target.value); setStatus("idle"); }}
+            onChange={(e) => { setMaxDuration(e.target.value); edited(); }}
             placeholder="2592000"
             className="bg-zinc-800 border-zinc-700"
           />

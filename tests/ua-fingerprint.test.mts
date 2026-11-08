@@ -11,7 +11,10 @@ import {
   extractUaFingerprint,
   serializeFingerprint,
   fingerprintToLabel,
+  localizeDeviceLabel,
 } from "../src/lib/ua-fingerprint.ts";
+import { createTranslator } from "../src/lib/i18n/translate.ts";
+import { CATALOGS } from "../src/lib/i18n/catalogs.ts";
 
 const UA = {
   chromeWin:
@@ -40,6 +43,12 @@ const UA = {
     "Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   chromeIphone:
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/120.0.6099.119 Mobile/15E148 Safari/604.1",
+  firefoxIphone:
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/120.0 Mobile/15E148 Safari/605.1.15",
+  edgeIphone:
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 EdgiOS/120.0.2210.126 Mobile/15E148 Safari/605.1.15",
+  edgeAndroid:
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 EdgA/120.0.2210.115",
 };
 
 test("desktop browser/OS classification", () => {
@@ -110,19 +119,51 @@ test("Chrome OS (CrOS token) classifies as chromeos, not linux/unknown", () => {
   assert.equal(fingerprintToLabel(extractUaFingerprint(UA.chromeOs)), "Chrome on Chrome OS");
 });
 
-test("iOS Chrome (CriOS/) classifies as safari — pins CURRENT behavior", () => {
-  // Chrome on iOS sends CriOS/ instead of Chrome/, so it falls through to the
-  // Safari/ test. Pinned so the device label doesn't change under existing
-  // sessions; since guardrail 6h a reclassification would be cosmetic only.
-  assert.deepEqual(extractUaFingerprint(UA.chromeIphone), {
-    browser: "safari",
-    os: "ios",
-    device: "mobile",
-  });
-  assert.equal(fingerprintToLabel(extractUaFingerprint(UA.chromeIphone)), "Safari on iPhone");
+test("iOS Chrome, Firefox and Edge and Android Edge are named for their browser, not Safari/Chrome", () => {
+  // These UAs carry Safari/ (and Android Edge's Chrome/), so the generic tests
+  // used to label every one of them Safari or Chrome.
+  assert.deepEqual(extractUaFingerprint(UA.chromeIphone), { browser: "chrome", os: "ios", device: "mobile" });
+  assert.equal(fingerprintToLabel(extractUaFingerprint(UA.chromeIphone)), "Chrome on iPhone");
+  assert.equal(extractUaFingerprint(UA.firefoxIphone).browser, "firefox");
+  assert.equal(extractUaFingerprint(UA.edgeIphone).browser, "edge");
+  assert.deepEqual(extractUaFingerprint(UA.edgeAndroid), { browser: "edge", os: "android", device: "mobile" });
+  assert.equal(extractUaFingerprint(UA.safariIphone).browser, "safari");
 });
 
 test("fingerprintToLabel splits Android tablet vs phone", () => {
   assert.equal(fingerprintToLabel(extractUaFingerprint(UA.chromeAndroidTablet)), "Chrome on Android Tablet");
   assert.equal(fingerprintToLabel(extractUaFingerprint(UA.chromeAndroidPhone)), "Chrome on Android");
+});
+
+// The stored label stays English (native clients read /api/sessions as-is); the
+// web translates it at render.
+test("localizeDeviceLabel renders a stored label in the viewer's language", () => {
+  const en = createTranslator("en", CATALOGS.en, CATALOGS.en);
+  const de = createTranslator("de", CATALOGS.de, CATALOGS.en);
+  const zh = createTranslator("zh", CATALOGS.zh, CATALOGS.en);
+  const stored = (ua: string) => fingerprintToLabel(extractUaFingerprint(ua));
+
+  assert.equal(localizeDeviceLabel(stored(UA.chromeWin), en), "Chrome on Windows");
+  assert.equal(localizeDeviceLabel(stored(UA.chromeWin), de), "Chrome auf Windows");
+  assert.equal(localizeDeviceLabel(stored(UA.safariIpad), de), "Safari auf iPad");
+  assert.equal(localizeDeviceLabel(stored(UA.chromeAndroidTablet), de), "Chrome auf Android-Tablet");
+  assert.equal(localizeDeviceLabel(stored(UA.chromeAndroidPhone), de), "Chrome auf Android");
+  assert.equal(localizeDeviceLabel(stored(UA.samsungAndroid), zh), "Android 上的 Samsung Internet");
+  assert.equal(localizeDeviceLabel(stored(""), de), "Unbekannter Browser auf unbekanntem Betriebssystem");
+  assert.equal(localizeDeviceLabel("Machine (API)", de), "Maschine (API)");
+});
+
+test("localizeDeviceLabel covers every label fingerprintToLabel can write, and leaves anything else as stored", () => {
+  const de = createTranslator("de", CATALOGS.de, CATALOGS.en);
+  for (const browser of ["chrome", "firefox", "safari", "edge", "opera", "yandex", "samsung", "ie", "unknown"]) {
+    for (const os of ["windows", "macos", "linux", "chromeos", "ios", "android", "unknown"]) {
+      for (const device of ["desktop", "mobile", "tablet"] as const) {
+        const label = fingerprintToLabel({ browser, os, device });
+        const shown = localizeDeviceLabel(label, de);
+        assert.ok(shown && shown !== label && !shown.includes("profile.sessions"), `${label} → ${shown}`);
+      }
+    }
+  }
+  assert.equal(localizeDeviceLabel("Someone's laptop", de), "Someone's laptop");
+  assert.equal(localizeDeviceLabel(null, de), null);
 });

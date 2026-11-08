@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
-import { safeFetchTrusted } from "@/lib/safe-fetch";
+import { createPlexPin, fetchPlexPin, WEB_PLEX_DEVICE } from "@/lib/plex-pin";
 import { logAudit } from "@/lib/audit";
 import { getClientIp } from "@/lib/rate-limit";
 import { savePlexAdminToken } from "@/lib/plex-admin-connect";
@@ -13,6 +13,7 @@ import {
   verifyPlexConnectCookie,
 } from "@/lib/plex-flow-state";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { isSecureCookieContext } from "@/lib/session-cookie";
 
 // The admin "Connect Plex" flow (Settings → Media → Plex).
 //
@@ -27,55 +28,23 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // for every install, and the poll took any `?id=`, so the pair was guessable by
 // anyone: see plex-flow-state.ts.
 
-function plexPinHeaders(clientId: string): Record<string, string> {
-  return {
-    "X-Plex-Client-Identifier": clientId,
-    "X-Plex-Product": "Summonarr",
-    "X-Plex-Version": "1.0",
-    "X-Plex-Model": "hosted",
-    "X-Plex-Device": "Web",
-    "X-Plex-Device-Name": "Summonarr",
-    "X-Plex-Platform": "Web",
-    Accept: "application/json",
-  };
-}
-
-function isSecureCookieContext(): boolean {
-  const url = process.env.AUTH_URL ?? "";
-  if (url.startsWith("https://")) return true;
-  if (url.startsWith("http://")) return false;
-  return process.env.NODE_ENV === "production";
-}
-
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const clientId = newPlexConnectClientId();
-  const res = await safeFetchTrusted("https://plex.tv/api/v2/pins", {
-    allowedHosts: ["plex.tv"],
-    method: "POST",
-    headers: {
-      ...plexPinHeaders(clientId),
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: "strong=true",
-    timeoutMs: 15_000,
-  });
-
-  if (!res.ok) {
+  const pin = await createPlexPin(clientId, WEB_PLEX_DEVICE, "auth/plex/pin");
+  if (pin.kind === "failed") {
     return NextResponse.json({ error: t("apiAuth.plex.pinCreateFailedLower") }, { status: 502 });
   }
-
-  const data = (await res.json()) as { id?: number; code?: string };
-  if (typeof data.id !== "number" || !Number.isInteger(data.id) || data.id <= 0 || typeof data.code !== "string") {
+  if (pin.kind === "malformed") {
     return NextResponse.json({ error: t("apiAuth.plex.pinMalformedLower") }, { status: 502 });
   }
 
-  const cookie = await signPlexConnectCookie({ pinId: data.id, clientId, uid: session.user.id });
+  const cookie = await signPlexConnectCookie({ pinId: pin.id, clientId, uid: session.user.id });
   // The browser needs clientId for the app.plex.tv approval URL (Plex matches it
   // against the PIN). Giving it to the admin who started the flow is fine — the
   // secret is that NOBODY ELSE can assemble (pinId, clientId).
   const out = NextResponse.json(
-    { id: data.id, code: data.code, clientId },
+    { id: pin.id, code: pin.code, clientId },
     { headers: { "Cache-Control": "no-store" } },
   );
   out.headers.append("Set-Cookie", buildPlexConnectSetCookie(cookie, isSecureCookieContext()));
@@ -94,16 +63,16 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     return res;
   }
 
-  const res = await safeFetchTrusted(`https://plex.tv/api/v2/pins/${state.pinId}`, {
-    allowedHosts: ["plex.tv"],
-    headers: plexPinHeaders(state.clientId),
-    timeoutMs: 15_000,
-  });
-  if (!res.ok) {
+  const res = await fetchPlexPin(state.pinId, state.clientId, "auth/plex/pin");
+  if (!res?.ok) {
     return NextResponse.json({ error: t("apiAuth.plex.pinPollFailed") }, { status: 502 });
   }
 
-  const data = (await res.json()) as { authToken?: string | null };
+  const data = (await res.json().catch(() => undefined)) as { authToken?: unknown } | null | undefined;
+  // Unparseable is a failed poll; valid JSON without a token is still pending.
+  if (data === undefined || data === null || typeof data !== "object") {
+    return NextResponse.json({ error: t("apiAuth.plex.pinPollFailed") }, { status: 502 });
+  }
   if (typeof data.authToken !== "string" || data.authToken.length === 0) {
     return NextResponse.json({ status: "pending" }, { headers: { "Cache-Control": "no-store" } });
   }

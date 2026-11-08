@@ -3,20 +3,13 @@ import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { logAudit, auditContext } from "@/lib/audit";
 import { applySpecs } from "@/lib/trash";
-import { isValidInstanceSlug } from "@/lib/arr-instances";
-import type { ArrVariant } from "@/lib/arr";
+import { parseTrashVariant } from "@/lib/trash-variant";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 import { isFeatureEnabled } from "@/lib/features";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import type { Translator } from "@/lib/i18n/translate";
-
-function busyResponse(t: Translator) {
-  return NextResponse.json(
-    { ok: false, error: t("apiAdmin.trash.alreadyRunning"), retryAfter: 30 },
-    { status: 409, headers: { "Retry-After": "30" } },
-  );
-}
+import { lockBusyResponse } from "@/lib/lock-http";
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
@@ -29,7 +22,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // profiles) at Radarr/Sonarr; 10 per 5-minute window caps a compromised session
   // while leaving headroom for an operator iterating on their profiles.
   if (!checkRateLimit(`admin-trash-apply:${session.user.id}`, 10, 5 * 60 * 1000)) {
-    return NextResponse.json({ error: t("apiAdmin.trash.tooManyApply") }, { status: 429 });
+    return tooManyRequests(5 * 60, t("apiAdmin.trash.tooManyApply"));
   }
   const parsed = await readJsonCapped<{ specIds?: unknown; variant?: unknown }>(req, 32768);
   if (parsed instanceof NextResponse) return parsed;
@@ -39,12 +32,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiAdmin.trash.specIdsArray") }, { status: 400 });
   }
   const ids = body.specIds as string[];
-  // body.variant is an instance slug ("" default, "4k", named); "hd" is the
-  // legacy default spelling. An invalid slug is rejected rather than silently
-  // routed to the default so a UI bug can't rewrite the wrong instance.
-  const rawVariant = typeof body.variant === "string" ? body.variant.trim() : "";
-  const variant: ArrVariant = rawVariant === "hd" ? "" : rawVariant;
-  if (!isValidInstanceSlug(variant)) {
+  const variant = parseTrashVariant(body.variant);
+  if (variant === null) {
     return NextResponse.json({ error: t("apiAdmin.common.invalidInstance") }, { status: 400 });
   }
   if (ids.length === 0) {
@@ -56,9 +45,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
   return withAdvisoryLock(
     TRASH_SYNC_LOCK_ID,
-    async () => {
+    // The lock's signal stops the apply between specs (guardrail 41).
+    async (signal: AbortSignal) => {
       const startTime = Date.now();
-      const results = await applySpecs(ids, variant);
+      const results = await applySpecs(ids, variant, { signal });
       const durationMs = Date.now() - startTime;
 
       const failures = results.filter((r) => !r.ok);
@@ -85,6 +75,6 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         durationMs,
       });
     },
-    () => busyResponse(t),
+    () => lockBusyResponse(t("apiAdmin.trash.alreadyRunning")),
   );
 });

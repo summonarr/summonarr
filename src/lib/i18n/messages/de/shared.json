@@ -2,6 +2,7 @@
   "shared.bell.empty": "Noch keine Benachrichtigungen.",
   "shared.bell.viewAll": "Alle anzeigen",
   "shared.common.dismiss": "Schließen",
+  "shared.common.loading": "Wird geladen…",
   "shared.common.cancel": "Abbrechen",
   "shared.maintenance.active": "Der Wartungsmodus ist aktiv.",
   "shared.maintenance.blocked": "Benutzer ohne Adminrechte sind gesperrt.",
@@ -29,6 +30,9 @@
   "shared.thread.loading": "Nachrichten werden geladen…",
   "shared.thread.loadFailed": "Nachrichten konnten nicht geladen werden.",
   "shared.thread.empty": "Noch keine Nachrichten. Beginnen Sie die Unterhaltung unten.",
+  "shared.thread.loadOlder": "Ältere Nachrichten laden",
+  "shared.thread.loadingOlder": "Ältere Nachrichten werden geladen…",
+  "shared.thread.loadOlderFailed": "Ältere Nachrichten konnten nicht geladen werden.",
   "shared.thread.unknownAuthor": "Unbekannt",
   "shared.thread.admin": "Admin",
   "shared.thread.placeholder": "Nachricht schreiben… (⌘↵ zum Senden)",
@@ -56,5 +60,11 @@
   "shared.common.clearSearch": "Suche löschen",
   "shared.thread.placeholderShortcut": "Nachricht schreiben… ({shortcut} zum Senden)",
   "shared.rateLimited.generic": "Zu viele Anfragen. Bitte versuche es gleich noch einmal.",
-  "shared.rateLimited.seconds": "Zu viele Anfragen. Versuche es in {seconds} s erneut."
+  "shared.rateLimited.seconds": "Zu viele Anfragen. Versuche es in {seconds} s erneut.",
+  "shared.upload.chunkFailed": "Teil {chunk} von {total} konnte nicht hochgeladen werden (HTTP {status}).",
+  "shared.upload.nonJson": "Der Server hat unerwartet geantwortet. Die Anfrage wurde vermutlich umgeleitet, zum Beispiel auf die Anmeldeseite.",
+  "shared.upload.noCompletion": "Der Upload ist abgeschlossen, aber der Server hat die Wiederherstellung nie bestätigt.",
+  "shared.upload.empty": "Die Sicherungsdatei ist leer.",
+  "shared.upload.network": "Der Upload ist fehlgeschlagen. Prüfe deine Verbindung und versuche es erneut.",
+  "shared.upload.cancelled": "Upload abgebrochen."
 }

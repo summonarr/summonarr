@@ -15,9 +15,12 @@
 //     different instance (default vs 4K/named) is NOT a conflict. Keying
 //     without arrInstance deleted the non-default variant (the historical bug
 //     the source comment documents); this suite is the regression pin;
-//   - conflicts are DELETED (web user's copy wins), the remainder migrates via
-//     one updateMany, and `migrated` counts exactly the moved rows; when
-//     everything conflicts the updateMany is skipped entirely;
+//   - conflicts are DELETED (web user's copy wins — unless only the shadow copy
+//     was greenlit), each loser's comment thread moving to the survivor first;
+//     the remainder migrates via one updateMany, and `migrated` counts exactly
+//     the moved rows; when everything conflicts the updateMany is skipped;
+//   - the web row's current link is read with a row lock (FOR UPDATE), so two
+//     links of different Discord ids to one user serialize;
 //   - issues / issue messages / issue grabs always migrate; deletion votes
 //     dedup on tmdbId:mediaType with the web user's vote winning, and the vote
 //     transfer updateMany is unconditional;
@@ -59,14 +62,14 @@ const ops: Op[] = [];
 // asserted separately, so they don't disturb the sequence pins.
 const opNames = () => ops.filter((o) => !o.op.startsWith("top.") && o.op !== "auditLog.create").map((o) => o.op);
 
-type ReqRow = { id: string; tmdbId: number; mediaType: string; arrInstance: string };
+type ReqRow = { id: string; tmdbId: number; mediaType: string; arrInstance: string; status?: string; cleanedUpAt?: Date | null };
 type VoteRow = { id: string; tmdbId: number; mediaType: string };
 
 let existingUser: { id: string; email: string } | null = null;
 // The web user's own row, read inside the tx for its CURRENT discordId (the
 // id a re-link supersedes). Null discordId = not linked yet.
 let webRow: { id: string; discordId: string | null } = { id: WEB, discordId: null };
-let webRequests: Array<Omit<ReqRow, "id">> = [];
+let webRequests: ReqRow[] = [];
 let shadowRequests: ReqRow[] = [];
 let webVotes: Array<Omit<VoteRow, "id">> = [];
 let shadowVotes: VoteRow[] = [];
@@ -78,16 +81,23 @@ function record(model: string, method: string) {
   };
 }
 
+// The SQL text of a Prisma.sql fragment, values as $n placeholders.
+type SqlArg = { strings?: readonly string[]; values?: unknown[] };
+const sqlText = (q: SqlArg) => (q.strings ?? []).join("?");
+
 const fakeTx = {
-  $executeRawUnsafe: async (sql: string, ...params: unknown[]) => {
-    ops.push({ op: "$executeRawUnsafe", args: { sql, params } });
+  $executeRaw: async (strings: readonly string[], ...values: unknown[]) => {
+    ops.push({ op: "$executeRaw", args: { sql: strings.join("?"), values } });
     return 0;
+  },
+  // The web row's current link, read FOR UPDATE.
+  $queryRaw: async (q: SqlArg) => {
+    ops.push({ op: "$queryRaw", args: { sql: sqlText(q), values: q.values } });
+    return (q.values ?? [])[0] === webRow.id ? [{ discordId: webRow.discordId }] : [];
   },
   user: {
     findUnique: async (args: { where: { id?: string; discordId?: string } }) => {
       ops.push({ op: "user.findUnique", args });
-      // By discordId → whoever holds the id; by id → the web user's own row.
-      if (args.where.id !== undefined) return args.where.id === webRow.id ? { ...webRow } : null;
       return existingUser;
     },
     update: record("user", "update"),
@@ -165,7 +175,7 @@ async function settle(turns = 40): Promise<void> {
   for (let i = 0; i < turns; i++) await new Promise((r) => setTimeout(r, 0));
 }
 
-const { mergeDiscordIntoWebAccount, DiscordCodeAlreadyUsedError } = await import("../src/lib/discord-merge.ts");
+const { mergeDiscordIntoWebAccount, DiscordCodeAlreadyUsedError, DiscordAlreadyLinkedError } = await import("../src/lib/discord-merge.ts");
 
 // Every link spends a one-time code (MergeOptions.claimCode). Most tests here
 // are about the merge itself, so their claim always wins and issues no op; the
@@ -199,10 +209,10 @@ beforeEach(async () => {
   shadowVotes = [];
 });
 
-test("no account owns the discordId → plain link: lock, lookup, the web row's current link, ONE user.update, migrated 0", async () => {
+test("no account owns the discordId → plain link: lock, lookup, the web row's current link (locked), ONE user.update, migrated 0", async () => {
   const result = await mergeDiscordIntoWebAccount(WEB, DISCORD_ID, CLAIMED);
   assert.deepEqual(result, { migrated: 0 });
-  assert.deepEqual(opNames(), ["$executeRawUnsafe", "user.findUnique", "user.findUnique", "user.update"]);
+  assert.deepEqual(opNames(), ["$executeRaw", "user.findUnique", "$queryRaw", "user.update"]);
   assert.deepEqual(opArgs("user.update"), {
     where: { id: WEB },
     data: { discordId: DISCORD_ID },
@@ -219,7 +229,7 @@ test("re-linking a discordId the web user already owns is the plain link, not a 
   webRow = { id: WEB, discordId: DISCORD_ID };
   const result = await mergeDiscordIntoWebAccount(WEB, DISCORD_ID, CLAIMED);
   assert.deepEqual(result, { migrated: 0 });
-  assert.deepEqual(opNames(), ["$executeRawUnsafe", "user.findUnique", "user.findUnique", "user.update"]);
+  assert.deepEqual(opNames(), ["$executeRaw", "user.findUnique", "$queryRaw", "user.update"]);
   await settle();
   assert.deepEqual(roleDeletes(), [], "the same member is re-linked — its roles stay");
 });
@@ -251,7 +261,7 @@ test("the superseded member is revoked on the MERGE path too (shadow absorbed in
   assert.deepEqual(roleDeletes(), [`/api/v10/guilds/${GUILD}/members/${OLD}/roles/${LINKED_ROLE}`]);
   // The current link is read inside the tx, after the refusal check and before any write.
   const names = opNames();
-  assert.ok(names.indexOf("user.findUnique", 1) < names.indexOf("mediaRequest.findMany"));
+  assert.ok(names.indexOf("$queryRaw") < names.indexOf("mediaRequest.findMany"));
 });
 
 test("the refusal path never reaches the superseded-member revoke", async () => {
@@ -266,34 +276,26 @@ test("a discordId owned by ANOTHER real web account refuses the merge before any
   existingUser = { id: "other-web-user", email: "someone-else@gmail.com" };
   await assert.rejects(
     () => mergeDiscordIntoWebAccount(WEB, DISCORD_ID, CLAIMED),
-    /This Discord account is already linked to another user\./,
+    (err: unknown) => err instanceof DiscordAlreadyLinkedError && /already linked to another user\./.test(err.message),
+    "the expected refusal is its own error class, told apart from a DB failure",
   );
   // Lock + lookup only — the throw precedes every mutation, so the real
   // transaction rolls back having changed nothing.
-  assert.deepEqual(opNames(), ["$executeRawUnsafe", "user.findUnique"]);
+  assert.deepEqual(opNames(), ["$executeRaw", "user.findUnique"]);
 });
 
-test("the double-click guard: per-discordUserId advisory lock, first 7 id bytes as a bigint, taken FIRST", async () => {
+test("the double-click guard: a per-discordUserId transaction lock, hashed in the two-key space, taken FIRST", async () => {
   await mergeDiscordIntoWebAccount(WEB, DISCORD_ID, CLAIMED);
-  assert.equal(opNames()[0], "$executeRawUnsafe");
-  // "1234567" (the first 7 ASCII bytes of the id) → hex 31323334353637.
-  assert.deepEqual(opArgs("$executeRawUnsafe"), {
-    sql: "SELECT pg_advisory_xact_lock($1::bigint)",
-    params: [0x31323334353637n],
+  assert.equal(opNames()[0], "$executeRaw");
+  assert.deepEqual(opArgs("$executeRaw"), {
+    sql: "SELECT pg_advisory_xact_lock(4631, hashtext(?))",
+    values: [DISCORD_ID],
   });
-
-  // A short id (under 7 bytes) just uses the bytes it has instead of throwing.
-  // 7 bytes = 56 bits, which always fits Postgres's signed 64-bit BIGINT.
-  ops.length = 0;
-  await mergeDiscordIntoWebAccount(WEB, "ab", CLAIMED);
-  const { params } = opArgs("$executeRawUnsafe") as { params: bigint[] };
-  assert.deepEqual(params, [0x6162n]);
-  assert.ok(0x31323334353637n < 2n ** 63n);
 });
 
 test("merge: conflicting requests (same tmdbId+mediaType+arrInstance) die, the rest migrate, migrated counts the moved", async () => {
   seedShadow();
-  webRequests = [{ tmdbId: 100, mediaType: "MOVIE", arrInstance: "" }];
+  webRequests = [{ id: "w-100", tmdbId: 100, mediaType: "MOVIE", arrInstance: "" }];
   shadowRequests = [
     { id: "r-dup", tmdbId: 100, mediaType: "MOVIE", arrInstance: "" }, // conflict — web copy wins
     { id: "r-new", tmdbId: 200, mediaType: "TV", arrInstance: "" },
@@ -307,12 +309,102 @@ test("merge: conflicting requests (same tmdbId+mediaType+arrInstance) die, the r
   });
 });
 
+test("a conflicting shadow request's comment thread moves to the surviving web request BEFORE the delete", async () => {
+  // RequestComment cascades with its request: deleting the duplicate used to
+  // take an admin's notes to the Discord requester with it.
+  seedShadow();
+  webRequests = [
+    { id: "w-100", tmdbId: 100, mediaType: "MOVIE", arrInstance: "" },
+    { id: "w-300", tmdbId: 300, mediaType: "TV", arrInstance: "anime" },
+  ];
+  shadowRequests = [
+    { id: "r-dup", tmdbId: 100, mediaType: "MOVIE", arrInstance: "" },
+    { id: "r-dup-anime", tmdbId: 300, mediaType: "TV", arrInstance: "anime" },
+    { id: "r-new", tmdbId: 200, mediaType: "TV", arrInstance: "" },
+  ];
+  await mergeDiscordIntoWebAccount(WEB, DISCORD_ID, CLAIMED);
+
+  const carries = ops
+    .filter((o) => o.op === "requestComment.updateMany")
+    .map((o) => o.args as { where: Record<string, unknown>; data: Record<string, unknown> })
+    .filter((a) => "requestId" in a.where);
+  assert.deepEqual(carries, [
+    { where: { requestId: "r-dup" }, data: { requestId: "w-100" } },
+    { where: { requestId: "r-dup-anime" }, data: { requestId: "w-300" } },
+  ], "each duplicate's thread lands on the web request for the SAME title and instance");
+
+  const carryAt = ops.flatMap((o, i) =>
+    o.op === "requestComment.updateMany" && "requestId" in (o.args as { where: object }).where ? [i] : [],
+  );
+  const deleteAt = ops.findIndex((o) => o.op === "mediaRequest.deleteMany");
+  assert.ok(carryAt.every((i) => i < deleteAt), "the threads move before the cascade delete");
+  assert.deepEqual(opArgs("mediaRequest.deleteMany"), { where: { id: { in: ["r-dup", "r-dup-anime"] } } });
+});
+
+test("a GREENLIT shadow request survives over the user's PENDING or DECLINED web copy — with the web copy's thread", async () => {
+  // Deleting the shadow copy regardless of status threw away an admin's
+  // approval for a request the same user had left pending (or had declined) on
+  // the web.
+  seedShadow();
+  webRequests = [
+    { id: "w-pend", tmdbId: 1, mediaType: "MOVIE", arrInstance: "", status: "PENDING" },
+    { id: "w-decl", tmdbId: 2, mediaType: "TV", arrInstance: "", status: "DECLINED" },
+    { id: "w-appr", tmdbId: 3, mediaType: "MOVIE", arrInstance: "", status: "APPROVED" },
+  ];
+  shadowRequests = [
+    { id: "r-avail", tmdbId: 1, mediaType: "MOVIE", arrInstance: "", status: "AVAILABLE", cleanedUpAt: null },
+    { id: "r-appr", tmdbId: 2, mediaType: "TV", arrInstance: "", status: "APPROVED", cleanedUpAt: null },
+    { id: "r-avail2", tmdbId: 3, mediaType: "MOVIE", arrInstance: "", status: "AVAILABLE", cleanedUpAt: null }, // both greenlit: web wins
+  ];
+  const result = await mergeDiscordIntoWebAccount(WEB, DISCORD_ID, CLAIMED);
+
+  const carries = ops
+    .filter((o) => o.op === "requestComment.updateMany")
+    .map((o) => o.args as { where: Record<string, unknown>; data: Record<string, unknown> })
+    .filter((a) => "requestId" in a.where);
+  assert.deepEqual(carries, [
+    { where: { requestId: "w-pend" }, data: { requestId: "r-avail" } },
+    { where: { requestId: "w-decl" }, data: { requestId: "r-appr" } },
+    { where: { requestId: "r-avail2" }, data: { requestId: "w-appr" } },
+  ], "every loser's thread lands on the request that survives");
+  assert.deepEqual(opArgs("mediaRequest.deleteMany"), { where: { id: { in: ["w-pend", "w-decl", "r-avail2"] } } });
+  // The surviving shadow rows then move to the web user — after the losing web
+  // rows are gone, or the (tmdbId, mediaType, requestedBy, arrInstance) unique
+  // would refuse the move.
+  const names = opNames();
+  assert.ok(names.indexOf("mediaRequest.deleteMany") < names.indexOf("mediaRequest.updateMany"));
+  assert.deepEqual(result, { migrated: 2 }, "the two greenlit shadow requests moved");
+});
+
+test("a shadow AVAILABLE row stamped by Library cleanup is not a greenlight — the web request survives", async () => {
+  // Guardrail 14b: a stamped row records a deliberate delete, not an approval.
+  seedShadow();
+  webRequests = [{ id: "w-pend", tmdbId: 1, mediaType: "MOVIE", arrInstance: "", status: "PENDING" }];
+  shadowRequests = [{ id: "r-gone", tmdbId: 1, mediaType: "MOVIE", arrInstance: "", status: "AVAILABLE", cleanedUpAt: new Date() }];
+  await mergeDiscordIntoWebAccount(WEB, DISCORD_ID, CLAIMED);
+  assert.deepEqual(opArgs("mediaRequest.deleteMany"), { where: { id: { in: ["r-gone"] } } });
+});
+
+test("the web row's current link is read FOR UPDATE, after the claim and the refusal, before any write", async () => {
+  // A user can hold a /link token and a merge code at once. Two links of
+  // DIFFERENT Discord ids take different advisory locks, so only the web row's
+  // own lock makes the second one see the first link as the one it replaces
+  // (and revoke its roles).
+  await mergeDiscordIntoWebAccount(WEB, DISCORD_ID, {
+    claimCode: async () => { ops.push({ op: "claimCode" }); return true; },
+  });
+  const read = ops.find((o) => o.op === "$queryRaw")?.args as { sql: string; values: unknown[] };
+  assert.match(read.sql, /SELECT "discordId" FROM "User" WHERE "id" = \? FOR UPDATE/);
+  assert.deepEqual(read.values, [WEB]);
+  assert.deepEqual(opNames(), ["$executeRaw", "claimCode", "user.findUnique", "$queryRaw", "user.update"]);
+});
+
 test("REGRESSION PIN: the same title on a DIFFERENT arr instance is not a conflict", async () => {
   // The dedup key is tmdbId:mediaType:arrInstance — the MediaRequest unique
   // includes arrInstance, so a default-instance and a 4K request for the same
   // title are distinct rows. Keying without arrInstance deleted the 4K variant.
   seedShadow();
-  webRequests = [{ tmdbId: 100, mediaType: "MOVIE", arrInstance: "" }];
+  webRequests = [{ id: "w-100", tmdbId: 100, mediaType: "MOVIE", arrInstance: "" }];
   shadowRequests = [{ id: "r-4k", tmdbId: 100, mediaType: "MOVIE", arrInstance: "4k" }];
   const result = await mergeDiscordIntoWebAccount(WEB, DISCORD_ID, CLAIMED);
   assert.deepEqual(result, { migrated: 1 });
@@ -325,7 +417,7 @@ test("REGRESSION PIN: the same title on a DIFFERENT arr instance is not a confli
 
 test("all shadow requests conflict → deleted, updateMany SKIPPED, migrated 0 — the account is still absorbed", async () => {
   seedShadow();
-  webRequests = [{ tmdbId: 100, mediaType: "MOVIE", arrInstance: "" }];
+  webRequests = [{ id: "w-100", tmdbId: 100, mediaType: "MOVIE", arrInstance: "" }];
   shadowRequests = [{ id: "r-dup", tmdbId: 100, mediaType: "MOVIE", arrInstance: "" }];
   const result = await mergeDiscordIntoWebAccount(WEB, DISCORD_ID, CLAIMED);
   assert.deepEqual(result, { migrated: 0 });
@@ -446,7 +538,7 @@ test("PIN: the code claim runs INSIDE the merge transaction, on its tx, right af
     },
   });
   assert.equal(claimTx, fakeTx, "the claim must run on the transaction's own client");
-  assert.deepEqual(opNames().slice(0, 2), ["$executeRawUnsafe", "claimCode"], "lock first, then the claim, then the merge");
+  assert.deepEqual(opNames().slice(0, 2), ["$executeRaw", "claimCode"], "lock first, then the claim, then the merge");
 });
 
 test("PIN: a LOST claim throws DiscordCodeAlreadyUsedError and links, audits and revokes nothing", async () => {
@@ -457,7 +549,7 @@ test("PIN: a LOST claim throws DiscordCodeAlreadyUsedError and links, audits and
     (err: unknown) => err instanceof DiscordCodeAlreadyUsedError,
   );
   await settle();
-  const writes = opNames().filter((op) => !op.endsWith(".findUnique") && !op.endsWith(".findMany") && op !== "$executeRawUnsafe");
+  const writes = opNames().filter((op) => !op.endsWith(".findUnique") && !op.endsWith(".findMany") && op !== "$executeRaw");
   assert.deepEqual(writes, [], "no write may follow a lost claim");
   assert.equal(ops.filter((o) => o.op === "auditLog.create").length, 0, "nothing was linked, so nothing is audited");
   assert.deepEqual(roleDeletes(), [], "and no superseded member is revoked");

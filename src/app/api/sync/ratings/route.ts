@@ -1,22 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
+import { isCronAuthorized } from "@/lib/cron-auth";
+import { CRON_DEGRADED_HEADER, cronSkippedResponse, withCronRunRecording } from "@/lib/cron-history";
 import { getTrending, getPopularMovies, getPopularTV, getTopRatedMovies, getTopRatedTV } from "@/lib/tmdb";
 import { fetchUnifiedRatings, hasAnyMdblistRating, type UnifiedRatingsResult } from "@/lib/omdb-availability";
-import { fetchMdblistBatch, isMdblistQuotaLocked, revalidateMdblistForTmdb, type MdblistRatings } from "@/lib/mdblist";
-import { revalidateOmdbForTmdb, type OmdbRatings } from "@/lib/omdb";
+import { fetchMdblistBatch, isMdblistQuotaLocked, mdblistCacheKey, revalidateMdblistForTmdb, type MdblistRatings } from "@/lib/mdblist";
+import { omdbCacheKey, revalidateOmdbForTmdb, type OmdbRatings } from "@/lib/omdb";
 import { getCacheStaleMany } from "@/lib/tmdb-cache";
-import { withAdvisoryLock } from "@/lib/advisory-lock";
+import { withAdvisoryLock, RATINGS_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { prisma } from "@/lib/prisma";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { warnOnChange, forgetWarnOnChange } from "@/lib/log-dedup";
 
 const BATCH = 5;
 
 // A cron: MDBList stops it at the reserve the plan setting keeps for pages.
 const BACKGROUND = { background: true } as const;
 
-const mdblistKeyFor = (m: TmdbMedia) => `mdblist:tmdb:${m.mediaType}:${m.id}`;
-const omdbKeyFor = (m: TmdbMedia) => `omdb:tmdb:${m.mediaType}:${m.id}`;
+// The one key builder each ratings cache uses, so this cron reads the rows the
+// pages and the batch route write.
+const mdblistKeyFor = (m: TmdbMedia) => mdblistCacheKey(m.mediaType, m.id);
+const omdbKeyFor = (m: TmdbMedia) => omdbCacheKey(m.mediaType, m.id);
 
 type CachedRatingsRow = { value: MdblistRatings | OmdbRatings | { _notFound: true }; isStale: boolean };
 
@@ -117,16 +121,28 @@ export async function POST(request: NextRequest) {
   }
 
   return withCronRunRecording("ratings-sync", () => withAdvisoryLock(
-    2008,
+    RATINGS_SYNC_LOCK_ID,
     async (signal) => {
       const startTime = Date.now();
 
+      // A list that throws still degrades to empty (the warm runs on what
+      // answered), but it is recorded: a TMDB outage used to answer 200
+      // {total: 0} with no log and a green run. The list helpers also absorb a
+      // failed PAGE and return what answered, so an all-empty pool is read as
+      // failed too — every one of these lists is non-empty on a healthy TMDB.
+      const failedLists: string[] = [];
+      const list = (name: string, get: () => Promise<TmdbMedia[]>) =>
+        get().catch((err) => {
+          failedLists.push(name);
+          console.warn(`[sync/ratings] TMDB ${name} list failed:`, err instanceof Error ? err.message : err);
+          return [] as TmdbMedia[];
+        });
       const [trending, popularMovies, popularTV, topMovies, topTV] = await Promise.all([
-        getTrending().catch(() => [] as TmdbMedia[]),
-        getPopularMovies().catch(() => [] as TmdbMedia[]),
-        getPopularTV().catch(() => [] as TmdbMedia[]),
-        getTopRatedMovies().catch(() => [] as TmdbMedia[]),
-        getTopRatedTV().catch(() => [] as TmdbMedia[]),
+        list("trending", getTrending),
+        list("popular-movies", getPopularMovies),
+        list("popular-tv", getPopularTV),
+        list("top-movies", getTopRatedMovies),
+        list("top-tv", getTopRatedTV),
       ]);
 
       const seen = new Set<string>();
@@ -173,8 +189,21 @@ export async function POST(request: NextRequest) {
       const { warmed, skipped, quotaExhausted } = await warmBatch(all, signal);
       const durationMs = Date.now() - startTime;
 
-      return NextResponse.json({ total: all.length, warmed, skipped, quotaExhausted, durationMs });
+      // Still 200 (a warm with no deletes; a partial pool is still worth
+      // warming), but degraded so withCronRunRecording records the run red.
+      const degraded = failedLists.length > 0 ? failedLists.join(",") : all.length === 0 ? "tmdb-lists-empty" : null;
+      if (degraded !== null) {
+        // The same outage restates itself every run: log it once (guardrail 7b).
+        warnOnChange("sync/ratings:tmdb-lists", degraded, `[sync/ratings] warmed a degraded TMDB pool (${degraded}); ${all.length} title(s)`);
+      } else {
+        forgetWarnOnChange("sync/ratings:tmdb-lists");
+      }
+      return NextResponse.json(
+        { total: all.length, warmed, skipped, quotaExhausted, durationMs },
+        degraded !== null ? { headers: { [CRON_DEGRADED_HEADER]: degraded } } : undefined,
+      );
     },
-    () => NextResponse.json({ skipped: true, reason: "already running" }),
+    // A busy lock is not a run: X-Cron-Skipped keeps it out of the ledger.
+    () => cronSkippedResponse(),
   ));
 }

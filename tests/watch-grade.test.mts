@@ -52,6 +52,7 @@ import {
   watchGradeSettingError,
   watchGradeSpread,
   watchGradeVolume,
+  verdictMatchesFilter,
   type GradableRequest,
   type GradeUserInput,
   type OtherViewerWatch,
@@ -703,6 +704,14 @@ test("watchGradeSettingError: the write-side validator agrees with the parser on
   assert.equal(watchGradeSettingError("quotaLimit", "not a number"), null);
 });
 
+test("watchGradeSettingError: the translated key follows what 0 means, not the English wording", () => {
+  const key = (k: string) => k; // a translator that answers with the key it was asked for
+  assert.equal(watchGradeSettingError("watchGradeWindowDays", "1", key), "apiAdmin.watchGrade.rangeOrZeroNoLimit");
+  assert.equal(watchGradeSettingError("watchGradeOtherViewers", "101", key), "apiAdmin.watchGrade.rangeOrZeroOff");
+  assert.equal(watchGradeSettingError("watchGradeGraceDays", "0", key), "apiAdmin.watchGrade.range");
+  assert.equal(watchGradeSettingError("watchGradeBandD", "0", key), "apiAdmin.watchGrade.range");
+});
+
 test("watchGradeCrossFieldError: a window no longer than the grace period is refused; 0 (no limit) never is", () => {
   const at = (over: Partial<typeof WATCH_GRADE_DEFAULTS>) => watchGradeCrossFieldError({ ...WATCH_GRADE_DEFAULTS, ...over });
   assert.match(at({ graceDays: 30, windowDays: 30 })!, /must be longer than the grace period/);
@@ -739,6 +748,31 @@ test("watchGradeSpread: users per letter, the not-yet-graded counted apart, empt
     emptyWatchGradeSummary(), // nothing fulfilled — no chip, not counted
   ]);
   assert.deepEqual(spread, { A: 2, B: 0, C: 1, D: 0, F: 1, notGraded: 2 });
+});
+
+test("the breakdown's filters partition the verdicts exactly as the summary buckets them", () => {
+  const watched = movie(40);
+  const partial = movie(41);
+  const byOthers = movie(42);
+  const unwatched = movie(43);
+  const inGrace = movie(5);
+  const untracked = movie(200);
+  const { summary, verdicts } = grade({
+    requests: [watched, partial, byOthers, unwatched, inGrace, untracked],
+    identity: { kind: "tracked", coverageStart: daysAgo(100) },
+    units: [watchedUnit(watched.id), watchedUnit(partial.id, { anyWatched: false, playSeconds: 2000 }), watchedUnit(inGrace.id)],
+    otherWatches: [by("user:a", byOthers.id), by("user:b", byOthers.id)],
+  });
+  const count = (f: Parameters<typeof verdictMatchesFilter>[1]) => verdicts.filter((v) => verdictMatchesFilter(v, f)).length;
+  assert.deepEqual(
+    { watched: count("watched"), partial: count("partial"), others: count("others"), unwatched: count("unwatched"), grace: count("grace"), untracked: count("untracked") },
+    { watched: summary.watched, partial: summary.partial, others: summary.byOthers, unwatched: summary.unwatched, grace: summary.inGrace, untracked: summary.untracked },
+  );
+  // Each bucket is non-empty here, so the equality above isn't vacuous.
+  assert.deepEqual([summary.watched, summary.partial, summary.byOthers, summary.unwatched, summary.inGrace, summary.untracked], [1, 1, 1, 1, 1, 1]);
+  assert.equal(count("all"), verdicts.length);
+  assert.ok(verdictMatchesFilter(verdicts.find((v) => v.requestId === byOthers.id)!, "others"));
+  assert.ok(!verdictMatchesFilter(verdicts.find((v) => v.requestId === byOthers.id)!, "unwatched"), "watched by others is not also unwatched");
 });
 
 test("watchGradeVolume: full-credit requests over scored ones — own watches plus those others watched", () => {

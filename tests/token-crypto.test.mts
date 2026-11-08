@@ -43,6 +43,14 @@ test("idempotency guard: an already-encrypted value is returned unchanged (guard
   assert.equal(encryptToken(once), once); // no enc:v1:<enc:v1:…> double wrap
 });
 
+test("a secret that only starts with the ciphertext prefix is still encrypted", () => {
+  for (const secret of ["enc:v1:my-real-password", "enc:v1:", "enc:v1:dead:beef:cafe"]) {
+    const enc = encryptToken(secret);
+    assert.notEqual(enc, secret, "stored as plaintext");
+    assert.equal(decryptToken(enc, "test row"), secret);
+  }
+});
+
 test("empty string is a passthrough in both directions", () => {
   assert.equal(encryptToken(""), "");
 });

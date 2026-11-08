@@ -116,10 +116,12 @@ const { NextRequest } = await import("next/server");
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
+const { NEVER_EXPIRES_AT_SEC } = await import("../src/lib/session-lifetime.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { hashPassword, verifyPassword } = await import("../src/lib/password-hash.ts");
 const { normalizeEmail } = await import("../src/lib/email-normalize.ts");
 const { shouldForceDbCheck } = await import("../src/lib/session-revocation.ts");
+const { USER_ROLE_LOCK_SQL } = await import("../src/lib/account-lifecycle.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 const {
   buildVerifyIdentifier,
@@ -129,10 +131,12 @@ const {
 } = await import("../src/lib/notification-email-verify.ts");
 
 // ── recording op log (writes only — reads are noise) ────────────────────────
-type Op = { op: string; args?: unknown };
+// `inTx`: the op ran while a callback-form $transaction was open.
+type Op = { op: string; args?: unknown; inTx?: boolean };
 const ops: Op[] = [];
 let txCalls = 0;
-const rec = (op: string, args?: unknown) => { ops.push({ op, args }); };
+let openTxCallbacks = 0;
+const rec = (op: string, args?: unknown) => { ops.push({ op, args, inTx: openTxCallbacks > 0 }); };
 function opsOf(name: string): Op[] {
   return ops.filter((o) => o.op === name);
 }
@@ -165,6 +169,8 @@ type DbUser = {
 };
 const usersById = new Map<string, DbUser>();
 const sessionRows = new Set<string>();
+// Users whose row holds a calendar feed token hash.
+const calendarHashes = new Set<string>();
 
 function project(row: DbUser, select?: Record<string, unknown>): Record<string, unknown> {
   if (!select) return { ...row };
@@ -185,19 +191,30 @@ const userModel = {
     return {};
   },
   // Honours `where.id` existence: a scoped updateMany on a row that is gone
-  // matches ZERO rows, and the routes must read that count (pinned below).
-  updateMany: async (args: { where?: { id?: unknown } }) => {
+  // matches ZERO rows, and the routes must read that count (pinned below). A
+  // `calendarTokenHash: { not: null }` scope matches only a row holding a feed
+  // token, and a write of that column is kept so a later revoke can see it.
+  updateMany: async (args: { where?: { id?: unknown; calendarTokenHash?: { not?: null } }; data?: Record<string, unknown> }) => {
     rec("user.updateMany", args);
     const id = args.where?.id;
-    return { count: typeof id === "string" && !usersById.has(id) ? 0 : 1 };
+    if (typeof id === "string" && !usersById.has(id)) return { count: 0 };
+    if (typeof id === "string" && args.where?.calendarTokenHash && !calendarHashes.has(id)) return { count: 0 };
+    if (typeof id === "string" && args.data && "calendarTokenHash" in args.data) {
+      if (args.data.calendarTokenHash == null) calendarHashes.delete(id);
+      else calendarHashes.add(id);
+    }
+    return { count: 1 };
   },
 };
 shadowPrismaModel(prisma, "user", userModel);
 
+// When a session's row was created (its sign-in) — the SSO step-up's recency
+// check reads it. Absent ⇒ just now.
+const sessionCreatedAt = new Map<string, Date>();
 const authSessionModel = {
   findUnique: async (args: { where: { sessionId: string } }) =>
     sessionRows.has(args.where.sessionId)
-      ? { id: `row-${args.where.sessionId}`, sessionId: args.where.sessionId, createdAt: new Date() }
+      ? { id: `row-${args.where.sessionId}`, sessionId: args.where.sessionId, createdAt: sessionCreatedAt.get(args.where.sessionId) ?? new Date() }
       : null,
   update: async () => ({}), // lastSeenAt fire-and-forget touch — no-op, unrecorded
   deleteMany: async (args: unknown) => {
@@ -272,7 +289,16 @@ shadowPrismaModel(prisma, "verificationToken", verificationTokenModel);
 // Models the OLD anonymize-on-delete code used to write. Self-delete now only
 // deactivates (guardrail 33), so these are recorded no-ops that let the delete
 // tests prove none of them is touched — above all the MediaServerUser link.
-const accountModel = { deleteMany: async (a: unknown) => { rec("account.deleteMany", a); return { count: 0 }; } };
+// Flip to make the plex Account delete fail (the auto-request opt-out's
+// all-or-nothing pin).
+let accountDeleteThrows = false;
+const accountModel = {
+  deleteMany: async (a: unknown) => {
+    rec("account.deleteMany", a);
+    if (accountDeleteThrows) throw new Error("account delete failed");
+    return { count: 0 };
+  },
+};
 const pushSubscriptionModel = { deleteMany: async (a: unknown) => { rec("pushSubscription.deleteMany", a); return { count: 0 }; } };
 const discordLinkTokenModel = { deleteMany: async (a: unknown) => { rec("discordLinkToken.deleteMany", a); return { count: 0 }; } };
 const discordMergeCodeModel = { deleteMany: async (a: unknown) => { rec("discordMergeCode.deleteMany", a); return { count: 0 }; } };
@@ -290,22 +316,45 @@ shadowPrismaModel(prisma, "mediaServerUser", mediaServerUserModel);
 const txObj = {
   user: userModel,
   authSession: authSessionModel,
+  // The notification-email route's pending-link replace (delete + create) runs
+  // in a transaction behind a row lock on the user (`txRowLocks`).
+  verificationToken: verificationTokenModel,
+  $queryRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    txRowLocks.push({ sql: strings.join("?"), values });
+    return [];
+  },
   account: accountModel,
   pushSubscription: pushSubscriptionModel,
   discordLinkToken: discordLinkTokenModel,
   discordMergeCode: discordMergeCodeModel,
   mediaServerUser: mediaServerUserModel,
-  $executeRawUnsafe: async () => 0,
-  $executeRaw: async () => 1,
+  // The advisory locks the deactivate tx takes, in order; `onTxLock` lands a
+  // concurrent write while this request "waits" for one.
+  $executeRawUnsafe: async (sql: string) => {
+    txLocks.push(sql);
+    onTxLock?.(sql);
+    return 0;
+  },
+  // The last-admin CAS (deactivateUserInTx): rows affected.
+  $executeRaw: async () => txCasRows,
 };
 // Runs at the top of a CALLBACK-form tx, before its first read — lets a test land
 // a concurrent write "inside" the verifyPassword window.
 let beforeTxCallback: (() => void) | null = null;
+const txLocks: string[] = [];
+const txRowLocks: Array<{ sql: string; values: unknown[] }> = [];
+let onTxLock: ((sql: string) => void) | null = null;
+let txCasRows = 1;
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
   txCalls++;
   if (!Array.isArray(arg) && beforeTxCallback) beforeTxCallback();
   if (Array.isArray(arg)) return Promise.all(arg);
-  return (arg as (tx: typeof txObj) => Promise<unknown>)(txObj);
+  openTxCallbacks++;
+  try {
+    return await (arg as (tx: typeof txObj) => Promise<unknown>)(txObj);
+  } finally {
+    openTxCallbacks--;
+  }
 });
 
 // ── the shared current-password fixture: scrypt ONCE, reused everywhere ──────
@@ -321,6 +370,8 @@ async function mintSession(opts: {
   passwordHash?: string | null;
   notificationEmail?: string | null;
   jellyfinUserId?: string | null;
+  // A native (iOS) session: the never-reached deadline (guardrail 6c).
+  native?: boolean;
 } = {}): Promise<{ userId: string; sessionId: string; token: string }> {
   seq++;
   const userId = `user-${seq}`;
@@ -357,7 +408,7 @@ async function mintSession(opts: {
       permissions: "0",
       provider: opts.provider ?? "credentials",
       sessionId,
-      expiresAt: iat + 86_400,
+      expiresAt: opts.native ? NEVER_EXPIRES_AT_SEC : iat + 86_400,
     },
     { expiresInSeconds: 7_200, iat },
   );
@@ -442,12 +493,19 @@ function passwordUpdateData(): Record<string, unknown> {
 beforeEach(() => {
   ops.length = 0;
   txCalls = 0;
+  txLocks.length = 0;
+  txRowLocks.length = 0;
+  onTxLock = null;
+  txCasRows = 1;
   fetchCalls.length = 0;
   warns.length = 0;
   errors.length = 0;
   settings.clear();
   usersById.clear();
   sessionRows.clear();
+  sessionCreatedAt.clear();
+  calendarHashes.clear();
+  accountDeleteThrows = false;
   verifyTokens = [];
   invalidateFeatureFlagCache();
   fetchImpl = () => { throw new Error("unexpected fetch — this test's flow must be satisfied from stubs"); };
@@ -713,6 +771,24 @@ test("notification-email happy path stores a PENDING (unverified) hashed token a
   assert.deepEqual(errors, []);
 });
 
+test("notification-email replaces the pending link in ONE transaction behind a lock on the user's row, so two racing requests leave one live link", async () => {
+  settings.set("enableUserEmails", "true");
+  settings.set("emailBackend", "resend");
+  settings.set("resendApiKey", "re_test_key");
+  settings.set("resendFrom", "Summonarr <noreply@example.com>");
+  fetchImpl = () => new Response(JSON.stringify({ id: "email_123" }), { status: 200 });
+  const { userId, token } = await mintSession({ provider: "jellyfin", passwordHash: null });
+  assert.equal((await postNotifEmail(token, { email: "notify@example.com" })).status, 200);
+  const del = opsOf("verificationToken.deleteMany");
+  const created = opsOf("verificationToken.create");
+  assert.equal(del.length, 1);
+  assert.equal(created.length, 1);
+  assert.ok(del[0].inTx && created[0].inTx, "the clear and the store commit together");
+  assert.equal(txRowLocks.length, 1, "the transaction locks the user's row first");
+  assert.match(txRowLocks[0].sql, /FROM "User" WHERE "id" = \? FOR UPDATE/);
+  assert.deepEqual(txRowLocks[0].values, [userId]);
+});
+
 test("notification-email: the pending token is persisted even when the send fails (502) — store precedes send", async () => {
   settings.set("enableUserEmails", "true");
   settings.set("emailBackend", "resend");
@@ -746,6 +822,33 @@ test("notification-email rate-limits verification sends (4th within the window �
   assert.equal(fourth.status, 429);
   assert.deepEqual(await fourth.json(), { error: "Too many verification emails — try again later." });
   assert.equal(fourth.headers.get("retry-after"), "900");
+});
+
+test("notification-email: a rejected address or an unconfigured server spends none of the three sends", async () => {
+  const { token } = await mintSession({ provider: "jellyfin", passwordHash: null });
+
+  // No transport yet: every refusal is a 400 and costs nothing.
+  for (let i = 0; i < 3; i++) {
+    const r = await postNotifEmail(token, { email: "notify@example.com" });
+    assert.equal(r.status, 400, `unconfigured ${i + 1}`);
+  }
+
+  settings.set("enableUserEmails", "true");
+  settings.set("emailBackend", "resend");
+  settings.set("resendApiKey", "re_test_key");
+  fetchImpl = () => new Response(JSON.stringify({ id: "ok" }), { status: 200 });
+
+  // Typos: 400s that cost nothing either.
+  for (const email of ["not-an-email", "a@b", "two words@example.com"]) {
+    const r = await postNotifEmail(token, { email });
+    assert.equal(r.status, 400, email);
+  }
+  // The whole budget is still there.
+  for (let i = 0; i < 3; i++) {
+    const r = await postNotifEmail(token, { email: "notify@example.com" });
+    assert.equal(r.status, 200, `send ${i + 1} is within budget`);
+  }
+  assert.equal((await postNotifEmail(token, { email: "notify@example.com" })).status, 429);
 });
 
 // ═══ DELETE /api/profile (self-delete) ══════════════════════════════════════
@@ -803,6 +906,39 @@ test("self-delete SKIPS the password step-up for an SSO account (session is the 
   assert.deepEqual(Object.keys(passwordUpdateData()).sort(), ["deactivatedAt", "sessionsRevokedAt"]);
 });
 
+test("self-delete on an SSO account from a WEB session needs a RECENT sign-in: a stale session is refused 401 session-too-old and disables nothing", async () => {
+  const { sessionId, token } = await mintSession({ provider: "jellyfin", passwordHash: null });
+  sessionCreatedAt.set(sessionId, new Date(Date.now() - 10 * 60 * 1000)); // signed in 10 minutes ago
+  const res = await deleteProfile(token);
+  assert.equal(res.status, 401);
+  const body = (await res.json()) as { error: string; message: string };
+  assert.equal(body.error, "session-too-old");
+  assert.match(body.message, /sign in again/);
+  assert.equal(txCalls, 0, "a stale session must never open the deactivation tx");
+  assert.equal(opsOf("user.update").length, 0);
+  assert.equal(opsOf("authSession.deleteMany").length, 0);
+});
+
+test("self-delete on an SSO account from a NATIVE session needs no recent sign-in (the shipped app has no prompt)", async () => {
+  const { sessionId, token } = await mintSession({ provider: "plex", passwordHash: null, native: true });
+  sessionCreatedAt.set(sessionId, new Date(Date.now() - 30 * 24 * 3600 * 1000));
+  // The app's transport: a never-expiring token is a bearer token (guardrail 6h).
+  const req = new NextRequest("http://localhost:3000/api/profile", {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}`, "x-summonarr-client": "ios" },
+  });
+  const res = await inScope(() => profileDELETE(req, undefined));
+  assert.equal(res.status, 200);
+  assert.equal(txCalls, 1);
+});
+
+test("self-delete attempts on an SSO account spend the same per-account budget as a password account's", async () => {
+  const { sessionId, token } = await mintSession({ provider: "jellyfin", passwordHash: null });
+  sessionCreatedAt.set(sessionId, new Date(Date.now() - 10 * 60 * 1000));
+  for (let i = 0; i < 5; i++) assert.equal((await deleteProfile(token)).status, 401, `attempt ${i + 1}`);
+  assert.equal((await deleteProfile(token)).status, 429);
+});
+
 test("self-delete racing an admin removal writes NO self-delete audit row when the in-tx re-read finds the row already disabled", async () => {
   const { userId, token } = await mintSession({ provider: "jellyfin", passwordHash: null });
   // The admin's deactivate commits after the handler's first read but before its tx.
@@ -821,6 +957,19 @@ test("self-delete racing an admin removal writes NO self-delete audit row when t
     0,
     "a self-delete that changed nothing must not be audited as one",
   );
+});
+
+test("self-delete takes lock 42 BEFORE its role re-read, so a promotion committing meanwhile still meets the last-admin check", async () => {
+  const { userId, token } = await mintSession({ provider: "jellyfin", passwordHash: null });
+  // The promotion holds lock 42 while it commits; this request reads only after.
+  onTxLock = (sql) => { if (sql === USER_ROLE_LOCK_SQL) usersById.get(userId)!.role = "ADMIN"; };
+  txCasRows = 0; // no other active admin
+  const res = await deleteProfile(token);
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "You are the last admin. Promote another user to admin before deleting your account." });
+  assert.equal(txLocks[0], USER_ROLE_LOCK_SQL, "the lock is the transaction's first statement");
+  assert.equal(opsOf("user.update").length, 0, "the last admin is not disabled");
+  assert.equal(opsOf("authSession.deleteMany").length, 0);
 });
 
 test("a self-delete that DID disable the row still writes its USER_DEACTIVATE audit", async () => {
@@ -937,6 +1086,21 @@ test("auto-request PATCH false clears the consent stamp to NULL and deletes the 
   assert.ok("plexWatchlistOptInAt" in up.data && up.data.plexWatchlistOptInAt === null);
   const deletes = opsOf("account.deleteMany").map((o) => o.args);
   assert.deepEqual(deletes, [{ where: { userId, provider: "plex" } }], "the plex.tv token does not outlive its purpose");
+  assert.equal(txCalls, 1);
+  assert.ok(
+    opsOf("user.update")[0].inTx && opsOf("account.deleteMany")[0].inTx,
+    "the opt-out and the token delete commit together in one transaction",
+  );
+});
+
+test("auto-request opt-out whose token delete fails answers no success and audits nothing (the opt-out rolls back with it)", async () => {
+  const { token } = await mintSession();
+  accountDeleteThrows = true;
+  await assert.rejects(patchAutoRequest(token, { plexWatchlist: false }), /account delete failed/);
+  assert.equal(txCalls, 1);
+  assert.ok(opsOf("user.update")[0].inTx, "the opt-out write was inside the transaction the failure rolls back");
+  await settleAudits();
+  assert.equal(opsOf("auditLog.create").length, 0, "no trail for a credential delete that did not happen");
 });
 
 test("auto-request PATCH refuses a non-boolean (400) or an unauthenticated caller (401) and writes nothing", async () => {
@@ -1009,8 +1173,26 @@ test("calendar DELETE revokes the feed while the feature is OFF (a leaked URL mu
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { ok: true });
   assert.deepEqual(opsOf("user.updateMany").map((o) => o.args), [
-    { where: { id: userId }, data: { calendarTokenHash: null, calendarTokenCreatedAt: null } },
+    { where: { id: userId, calendarTokenHash: { not: null } }, data: { calendarTokenHash: null, calendarTokenCreatedAt: null } },
   ]);
+});
+
+test("calendar DELETE with no feed is an idempotent 200 that audits nothing; after a mint it audits exactly one revoke", async () => {
+  const { token } = await mintSession();
+  for (let i = 0; i < 3; i++) {
+    const res = await calendar("DELETE", token);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true });
+  }
+  await settleAudits();
+  assert.equal(opsOf("auditLog.create").length, 0, "a revoke that removed nothing leaves no SETTINGS_CHANGE row");
+
+  assert.equal((await calendar("POST", token)).status, 201);
+  assert.equal((await calendar("DELETE", token)).status, 200);
+  assert.equal((await calendar("DELETE", token)).status, 200);
+  await settleAudits();
+  const kinds = opsOf("auditLog.create").map((o) => JSON.parse((o.args as { data: { details: string } }).data.details).kind);
+  assert.deepEqual(kinds, ["calendar-token-minted", "calendar-token-revoked"]);
 });
 
 test("calendar POST mints a feed (201, no-store) and both mint and revoke leave a SETTINGS_CHANGE audit row; the 429 carries Retry-After", async () => {

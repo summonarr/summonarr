@@ -57,14 +57,18 @@ test("parseRateLimit falls back to the default on junk", () => {
 // "0 = no limit" into "5" — a user with 7 devices saw `7 / 5` while
 // registration kept succeeding. Pin the page to the shared parser so the cap
 // can't be re-forked.
-test("profile page derives the push-device cap through parseRateLimit, not a private parseInt", () => {
+test("profile page derives the push-device cap through the shared reader, not a private parseInt", () => {
   const src = readFileSync(
     join(process.cwd(), "src", "app", "(app)", "profile", "page.tsx"),
     "utf-8",
   );
-  assert.match(src, /import \{ parseRateLimit \} from "@\/lib\/rate-limit"/);
-  assert.match(src, /parseRateLimit\(maxPushSetting\?\.value,/);
-  assert.doesNotMatch(src, /parseInt\(maxPushSetting/);
+  // The page reads the cap through the routes' own reader (push-cap.ts),
+  // which parses through parseRateLimit.
+  assert.match(src, /import \{ readPushSubscriptionCap \} from "@\/lib\/push-cap"/);
+  assert.match(src, /readPushSubscriptionCap\(\),/);
+  assert.doesNotMatch(src, /parseInt\(|DEFAULT_MAX_PUSH_SUBSCRIPTIONS = /, "a private copy of the cap parse or default");
+  const cap = readFileSync(join(process.cwd(), "src", "lib", "push-cap.ts"), "utf-8");
+  assert.match(cap, /return parseRateLimit\(row\?\.value, DEFAULT_MAX_PUSH_SUBSCRIPTIONS\);/);
   // 0 must read as "unlimited" (the routes gate eviction on cap > 0) and a
   // negative value must fall back to the routes' default, not leak through.
   assert.equal(parseRateLimit("0", 5), 0);
@@ -307,8 +311,8 @@ test("every per-account guessing bucket is a protected key, at the call site tha
   // The protection is keyed on prefix, so a renamed key would silently fall back
   // to the evictable map. Pin each call site's literal prefix to the list.
   const sites: Array<[string, string]> = [
-    ["src/lib/auth.ts", "login-email:"],
-    ["src/lib/auth.ts", "jellyfin-user:"],
+    ["src/lib/auth-credentials.ts", "login-email:"],
+    ["src/lib/auth-jellyfin.ts", "jellyfin-user:"],
     ["src/app/api/auth/sign-in/mfa/route.ts", "mfa-user:"],
     ["src/lib/mfa/step-up.ts", "mfa-stepup:"],
     ["src/app/api/profile/password/route.ts", "profile-password:"],

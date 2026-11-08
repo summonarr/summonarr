@@ -1,5 +1,5 @@
 // Guardrail 34e, the CREATE half of the Jellyfin first-seen rule
-// (findOrCreateJellyfinUser in src/lib/auth.ts).
+// (findOrCreateJellyfinUser in src/lib/auth-jellyfin.ts, re-exported by auth.ts).
 //
 // The bound-row and pre-34e adoption paths are pinned in tests/auth.test.mts.
 // This file pins the order those don't cover: a twin planted on a LATER server

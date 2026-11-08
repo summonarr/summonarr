@@ -59,85 +59,109 @@ export interface JellyfinIdentityBackfillResult {
 //    instance their id was first seen on. A row with no evidence stays null and
 //    adopts the instance of its next sign-in (findOrCreateJellyfinUser).
 export async function backfillJellyfinIdentities(): Promise<JellyfinIdentityBackfillResult> {
-  const result: JellyfinIdentityBackfillResult = { boundFromEmail: 0, skippedFromEmail: 0, boundInstance: 0 };
+  const fromEmail = await backfillFromSyntheticEmails();
+  return { ...fromEmail, boundInstance: await backfillFirstSeenInstances() };
+}
 
+// Step 1. One conditional write per eligible row, in turn: each row takes its
+// OWN id, and a P2002 (another row already holds it) skips just that row. It
+// runs once ever, behind the marker, so the serial cost is paid one time.
+async function backfillFromSyntheticEmails(): Promise<Omit<JellyfinIdentityBackfillResult, "boundInstance">> {
+  const result = { boundFromEmail: 0, skippedFromEmail: 0 };
   const marker = await prisma.setting.findUnique({ where: { key: JELLYFIN_SYNTHETIC_BACKFILL_KEY } });
-  if (!marker?.value) {
-    const syntheticWhere = { jellyfinUserId: null, email: { endsWith: "@jellyfin.local" } } satisfies Prisma.UserWhereInput;
-    const [eligible, ineligible] = await Promise.all([
-      prisma.user.findMany({
-        where: { ...syntheticWhere, passwordHash: null, plexUserId: null, accounts: { none: { provider: "oidc" } } },
-        select: { id: true, email: true },
-      }),
-      prisma.user.count({
-        where: {
-          ...syntheticWhere,
-          OR: [{ passwordHash: { not: null } }, { plexUserId: { not: null } }, { accounts: { some: { provider: "oidc" } } }],
-        },
-      }),
-    ]);
-    result.skippedFromEmail += ineligible;
-    for (const row of eligible) {
-      const jellyfinUserId = jellyfinIdFromSyntheticEmail(row.email);
-      if (!jellyfinUserId) {
+  if (marker?.value) return result;
+
+  const syntheticWhere = { jellyfinUserId: null, email: { endsWith: "@jellyfin.local" } } satisfies Prisma.UserWhereInput;
+  const [eligible, ineligible] = await Promise.all([
+    prisma.user.findMany({
+      where: { ...syntheticWhere, passwordHash: null, plexUserId: null, accounts: { none: { provider: "oidc" } } },
+      select: { id: true, email: true },
+    }),
+    prisma.user.count({
+      where: {
+        ...syntheticWhere,
+        OR: [{ passwordHash: { not: null } }, { plexUserId: { not: null } }, { accounts: { some: { provider: "oidc" } } }],
+      },
+    }),
+  ]);
+  result.skippedFromEmail += ineligible;
+  for (const row of eligible) {
+    const jellyfinUserId = jellyfinIdFromSyntheticEmail(row.email);
+    if (!jellyfinUserId) {
+      result.skippedFromEmail++;
+      continue;
+    }
+    try {
+      // Conditional on the column still being null, so a sign-in that bound
+      // the row meanwhile is never overwritten.
+      const { count } = await prisma.user.updateMany({
+        where: { id: row.id, jellyfinUserId: null },
+        data: { jellyfinUserId },
+      });
+      result.boundFromEmail += count;
+    } catch (err) {
+      // P2002: another row already holds this id. Leave both for an admin.
+      if (isPrismaErrorCode(err, "P2002")) {
         result.skippedFromEmail++;
         continue;
       }
-      try {
-        // Conditional on the column still being null, so a sign-in that bound
-        // the row meanwhile is never overwritten.
-        const { count } = await prisma.user.updateMany({
-          where: { id: row.id, jellyfinUserId: null },
-          data: { jellyfinUserId },
-        });
-        result.boundFromEmail += count;
-      } catch (err) {
-        // P2002: another row already holds this id. Leave both for an admin.
-        if (isPrismaErrorCode(err, "P2002")) {
-          result.skippedFromEmail++;
-          continue;
-        }
-        throw err;
-      }
+      throw err;
     }
-    if (result.skippedFromEmail > 0) {
-      console.warn(
-        `[jellyfin-identity] ${result.skippedFromEmail} account(s) carry a jellyfin-<id>@jellyfin.local address but were not bound to that Jellyfin id (they also have a password, a Plex id or an OIDC binding, or another account holds the id). That Jellyfin user's sign-in is refused until an admin resolves it.`,
-      );
-    }
-    await prisma.setting.upsert({
-      where: { key: JELLYFIN_SYNTHETIC_BACKFILL_KEY },
-      create: { key: JELLYFIN_SYNTHETIC_BACKFILL_KEY, value: new Date().toISOString() },
-      update: {},
-    });
   }
+  if (result.skippedFromEmail > 0) {
+    console.warn(
+      `[jellyfin-identity] ${result.skippedFromEmail} account(s) carry a jellyfin-<id>@jellyfin.local address but were not bound to that Jellyfin id (they also have a password, a Plex id or an OIDC binding, or another account holds the id). That Jellyfin user's sign-in is refused until an admin resolves it.`,
+    );
+  }
+  await prisma.setting.upsert({
+    where: { key: JELLYFIN_SYNTHETIC_BACKFILL_KEY },
+    create: { key: JELLYFIN_SYNTHETIC_BACKFILL_KEY, value: new Date().toISOString() },
+    update: {},
+  });
+  return result;
+}
 
+// The `in` lists below come from the user table, so they are read and written
+// in chunks under Postgres's bind-parameter limit (guardrail 23c).
+const ID_CHUNK = 5_000;
+
+// Step 2. Every unbound row takes the instance its id was first seen on; one
+// conditional write per instance (per chunk), not one per user.
+async function backfillFirstSeenInstances(): Promise<number> {
   const unbound = await prisma.user.findMany({
     where: { jellyfinUserId: { not: null }, jellyfinInstance: null },
     select: { id: true, jellyfinUserId: true },
   });
-  if (unbound.length === 0) return result;
-  const evidence = await prisma.mediaServerUser.findMany({
-    where: { source: "jellyfin", sourceUserId: { in: unbound.flatMap((u) => (u.jellyfinUserId ? [u.jellyfinUserId] : [])) } },
-    orderBy: [{ createdAt: "asc" }, { serverInstance: "asc" }],
-    select: { sourceUserId: true, serverInstance: true },
-  });
+  if (unbound.length === 0) return 0;
+  const jellyfinIds = unbound.flatMap((u) => (u.jellyfinUserId ? [u.jellyfinUserId] : []));
   const firstSeen = new Map<string, string>();
-  for (const row of evidence) {
-    if (!firstSeen.has(row.sourceUserId)) firstSeen.set(row.sourceUserId, row.serverInstance);
+  for (let i = 0; i < jellyfinIds.length; i += ID_CHUNK) {
+    const evidence = await prisma.mediaServerUser.findMany({
+      where: { source: "jellyfin", sourceUserId: { in: jellyfinIds.slice(i, i + ID_CHUNK) } },
+      orderBy: [{ createdAt: "asc" }, { serverInstance: "asc" }],
+      select: { sourceUserId: true, serverInstance: true },
+    });
+    for (const row of evidence) {
+      if (!firstSeen.has(row.sourceUserId)) firstSeen.set(row.sourceUserId, row.serverInstance);
+    }
   }
   const byInstance = new Map<string, string[]>();
   for (const u of unbound) {
     const instance = u.jellyfinUserId ? firstSeen.get(u.jellyfinUserId) : undefined;
     if (instance === undefined) continue;
-    byInstance.set(instance, [...(byInstance.get(instance) ?? []), u.id]);
+    const ids = byInstance.get(instance);
+    if (ids) ids.push(u.id);
+    else byInstance.set(instance, [u.id]);
   }
+  let bound = 0;
   for (const [instance, ids] of byInstance) {
-    const { count } = await prisma.user.updateMany({
-      where: { id: { in: ids }, jellyfinInstance: null },
-      data: { jellyfinInstance: instance },
-    });
-    result.boundInstance += count;
+    for (let i = 0; i < ids.length; i += ID_CHUNK) {
+      const { count } = await prisma.user.updateMany({
+        where: { id: { in: ids.slice(i, i + ID_CHUNK) }, jellyfinInstance: null },
+        data: { jellyfinInstance: instance },
+      });
+      bound += count;
+    }
   }
-  return result;
+  return bound;
 }

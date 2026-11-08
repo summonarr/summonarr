@@ -179,6 +179,31 @@ const fakePrisma = {
     },
   },
 };
+// The create route counts against the cap and inserts in one serializable
+// transaction. The fake hands the callback its own client, whose count records
+// that it ran in the transaction (the pool's count records false), and records
+// the options.
+const txOptions: unknown[] = [];
+const countsInTx: boolean[] = [];
+const baseCount = fakePrisma.notificationAgent.count;
+fakePrisma.notificationAgent.count = async () => {
+  countsInTx.push(false);
+  return baseCount();
+};
+const txClient = {
+  ...fakePrisma,
+  notificationAgent: {
+    ...fakePrisma.notificationAgent,
+    count: async () => {
+      countsInTx.push(true);
+      return baseCount();
+    },
+  },
+};
+(fakePrisma as Record<string, unknown>).$transaction = async (fn: (tx: unknown) => Promise<unknown>, opts?: unknown) => {
+  txOptions.push(opts);
+  return fn(txClient);
+};
 (globalThis as unknown as { prisma: unknown }).prisma = fakePrisma;
 
 // ── dynamic imports (env + globalThis stubs must precede the module graph) ───
@@ -389,6 +414,38 @@ test("POST: a webhook template audits hasTemplate=true and an ntfy channel audit
   }
 });
 
+test("POST: a credential in the webhook URL (query or Discord-style path token) stays in the config but never reaches the audit row", async () => {
+  const admin = await mintSession("ADMIN");
+  const withQuery = await createAgent(req(BASE, { method: "POST", headers: admin.header, body: { ...WEBHOOK_BODY, config: { url: `${HOOK_URL}?token=abc` } } }), undefined);
+  assert.equal(withQuery.status, 201);
+  const { agent } = (await withQuery.json()) as { agent: PublicAgent };
+  assert.equal(agent.config.url, `${HOOK_URL}?token=abc`, "the stored config is the admin's own, unredacted");
+  const discord = await createAgent(req(BASE, {
+    method: "POST", headers: admin.header,
+    body: { ...WEBHOOK_BODY, config: { url: "http://10.88.0.7/api/webhooks/123456/s3cr3t-path-token#frag" } },
+  }), undefined);
+  assert.equal(discord.status, 201);
+  await flush();
+  assert.equal(auditRows.length, 2);
+  const queryUrl = String(detailsOf(auditRows[0]).url);
+  assert.ok(!queryUrl.includes("token=abc"), `audit kept the query credential: ${queryUrl}`);
+  assert.ok(queryUrl.startsWith(HOOK_URL), `audit no longer names the destination: ${queryUrl}`);
+  const pathUrl = String(detailsOf(auditRows[1]).url);
+  assert.ok(!pathUrl.includes("s3cr3t-path-token") && !pathUrl.includes("frag"), `audit kept the path token or fragment: ${pathUrl}`);
+  assert.match(pathUrl, /^http:\/\/10\.88\.0\.7\/api\/webhooks\/123456\//);
+});
+
+test("GET: a row whose stored config no longer validates is flagged configValid:false (the dispatcher skips it); a valid one is true", async () => {
+  const admin = await mintSession("ADMIN");
+  const good = seedAgent();
+  const bad = seedAgent({ config: { url: HOOK_URL, headerName: "Content-Type", template: null } });
+  const res = await listAgents(req(BASE, { method: "GET", headers: admin.header }), undefined);
+  assert.equal(res.status, 200);
+  const byId = new Map(((await res.json()) as { agents: Array<{ id: string; configValid: boolean }> }).agents.map((x) => [x.id, x]));
+  assert.equal(byId.get(good.id)?.configValid, true);
+  assert.equal(byId.get(bad.id)?.configValid, false);
+});
+
 test("POST: invalid input → 400 with the translated reason and nothing written or audited", async () => {
   const admin = await mintSession("ADMIN");
   const res = await createAgent(req(BASE, { method: "POST", headers: admin.header, body: { ...WEBHOOK_BODY, kind: "slack" } }), undefined);
@@ -415,6 +472,16 @@ test("POST: the channel cap → 400 naming the limit, nothing written", async ()
   assert.deepEqual(await res.json(), { error: `You can configure up to ${MAX_AGENTS} channels.` });
   assert.equal(agentsById.size, MAX_AGENTS);
   assert.equal(opIndex("notificationAgent.create"), -1);
+});
+
+test("POST: the cap is counted inside the serializable transaction that inserts", async () => {
+  const admin = await mintSession("ADMIN");
+  txOptions.length = 0;
+  countsInTx.length = 0;
+  const res = await createAgent(req(BASE, { method: "POST", headers: admin.header, body: WEBHOOK_BODY }), undefined);
+  assert.equal(res.status, 201);
+  assert.deepEqual(countsInTx, [true], "a count outside the transaction lets two creates both pass the cap");
+  assert.equal((txOptions[0] as { isolationLevel?: string } | undefined)?.isolationLevel, "Serializable");
 });
 
 // ════════════════════════════════════════════════════════════════════════════

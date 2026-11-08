@@ -3,8 +3,11 @@
 import { useState } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
+import { readApiError } from "@/lib/client/api-error";
 import { useT } from "@/components/i18n/i18n-provider";
 import { Switch } from "@/components/ui/switch";
+import { timedFetch } from "@/lib/client/fetch-json";
+import { useAsyncAction } from "@/hooks/use-async-action";
 
 // "Auto-request from my Plex watchlist" — the user's own switch for the Plex half
 // of watchlist auto-request (src/lib/auto-request.ts). Rendered only while the
@@ -30,43 +33,51 @@ export function AutoRequestPrefs({
   serverStatus: "ok" | "private" | "error" | null;
 }) {
   const t = useT();
+  const action = useAsyncAction();
   const needsOptIn = serverSource && !plexConnected && !serverOptedIn;
   const [on, setOn] = useState(initialPlexWatchlist && !needsOptIn);
-  const [optedIn, setOptedIn] = useState(serverOptedIn);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function toggle() {
-    if (saving) return;
+    if (action.busy("save")) return;
     const next = !on;
     setOn(next);
     setSaving(true);
     setError(null);
-    try {
-      const res = await fetch(withBasePath("/api/profile/auto-request"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plexWatchlist: next }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setOn(!next);
-        setError(rateLimitMessage(res, t) ?? data?.error ?? t("profile.error.saveFailed"));
-      } else {
-        setOptedIn(next);
-      }
-    } catch {
+    const failure = await action.run(
+      "save",
+      async (signal): Promise<string | null> => {
+        try {
+          const res = await timedFetch(withBasePath("/api/profile/auto-request"), {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ plexWatchlist: next }),
+            signal,
+          });
+          if (res.ok) return null;
+          return rateLimitMessage(res, t) ?? (await readApiError(res, t("profile.error.saveFailed")));
+        } catch {
+          return t("profile.error.network");
+        }
+      },
+      { ifBusy: "skip" },
+    );
+    setSaving(false);
+    if (failure === undefined) return;
+    if (failure !== null) {
       setOn(!next);
-      setError(t("profile.error.network"));
-    } finally {
-      setSaving(false);
+      setError(failure);
     }
   }
 
+  // The server records the opt-in exactly when this switch is on (PATCH
+  // /api/profile/auto-request sets plexWatchlistOptInAt on and clears it off),
+  // so on the server-token path "on" IS "opted in".
   let hint: string;
   if (plexConnected) hint = t("profile.autoRequest.plexConnected");
   else if (!serverSource) hint = t("profile.autoRequest.plexNotConnected");
-  else if (!optedIn || !on) hint = t("profile.autoRequest.plexServerOptIn");
+  else if (!on) hint = t("profile.autoRequest.plexServerOptIn");
   else if (serverStatus === "ok") hint = t("profile.autoRequest.plexServerConnected");
   else if (serverStatus === "private") hint = t("profile.autoRequest.plexServerPrivate");
   else hint = t("profile.autoRequest.plexServerPending");
@@ -81,7 +92,10 @@ export function AutoRequestPrefs({
           <p className="text-sm font-medium text-zinc-200">{t("profile.autoRequest.plexLabel")}</p>
           <p className="text-xs text-zinc-500 mt-0.5">{hint}</p>
         </div>
-        <Switch checked={on} disabled={saving} onCheckedChange={toggle} aria-label={t("profile.autoRequest.plexLabel")} />
+        {/* loading, not disabled: a natively disabled switch drops the focus
+            of the keyboard user who just flipped it; toggle() ignores a flip
+            while saving. */}
+        <Switch checked={on} loading={saving} onCheckedChange={toggle} aria-label={t("profile.autoRequest.plexLabel")} />
       </div>
       {error && (
         <p role="alert" className="text-xs text-red-400">

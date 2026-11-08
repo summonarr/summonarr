@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSyncableMediaInstances } from "@/lib/media-instance-registry";
+import { signInServerOptions } from "@/lib/sign-in-servers";
 import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
@@ -33,7 +34,8 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // authenticate. Jellyfin not configured at all ⇒ an empty list with 200, not a
 // 404 — "no Jellyfin sign-in available" is a normal answer, not an error.
 //
-// The projection to { slug, name } is deliberate and must stay exhaustive: this
+// The projection to { slug, name } (signInServerOptions, shared with the web
+// login page) is deliberate and must stay exhaustive: this
 // is an unauthenticated surface, so it may carry only what the picker needs to
 // label an option and echo the choice back at sign-in. No server URLs, no API
 // keys, no library/user counts, and not the registry's `restricted` flag (a
@@ -47,7 +49,5 @@ export async function GET(req: NextRequest) {
   // of the registry entries and the configured-filter preserves that order, so
   // a client defaulting to servers[0] lands on the default server.
   const instances = await getSyncableMediaInstances("jellyfin");
-  return NextResponse.json({
-    servers: instances.map((i) => ({ slug: i.slug, name: i.name })),
-  });
+  return NextResponse.json({ servers: signInServerOptions(instances) });
 }

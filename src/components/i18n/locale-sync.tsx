@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { useLocale } from "@/components/i18n/i18n-provider";
 import { LOCALE_COOKIE } from "@/lib/i18n/locales";
 import { withBasePath } from "@/lib/base-path";
+import { timedFetch } from "@/lib/client/fetch-json";
 
 // Keeps User.locale (the language emails/push/Discord DMs are written in) in
 // step with the web UI, without a DB write on every render:
@@ -19,7 +20,7 @@ export function LocaleSync({ stored }: { stored: string | null }) {
   useEffect(() => {
     const explicit = document.cookie.split(";").some((c) => c.trim().startsWith(`${LOCALE_COOKIE}=`));
     if (stored === locale || (stored !== null && !explicit)) return;
-    void fetch(withBasePath("/api/profile/locale"), {
+    void timedFetch(withBasePath("/api/profile/locale"), {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       credentials: "include",

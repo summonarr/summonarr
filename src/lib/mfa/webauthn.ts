@@ -20,7 +20,10 @@
 // credential public key always comes from authenticator data, never attStmt.
 
 import { createHash, createPublicKey, timingSafeEqual, verify as cryptoVerify, type KeyObject } from "node:crypto";
-import { decodeCbor, decodeCborFirst, isCborMap, CborError, type CborValue } from "./cbor";
+import { isIP } from "node:net";
+import { parseAuthUrl } from "@/lib/auth-url";
+import { warnOnChange } from "@/lib/log-dedup";
+import { decodeCbor, decodeCborFirst, isCborMap, type CborValue } from "./cbor";
 
 export class WebAuthnError extends Error {
   readonly code: string;
@@ -90,32 +93,26 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 // origin outside it could never produce a valid ceremony, so listing it would
 // only widen the check for nothing). BASE_PATH never affects an origin.
 // Returns null when AUTH_URL is missing/unparseable: passkeys are then
-// unavailable rather than bound to a guessed host.
+// unavailable rather than bound to a guessed host. Also null for an IP-address
+// host (a LAN install reached as http://192.168.1.10:3001): an RP ID must be a
+// domain, so every browser refuses the ceremony, and offering passkeys would
+// only end in an opaque SecurityError.
 export function webAuthnConfigFromEnv(env: Record<string, string | undefined> = process.env): WebAuthnConfig | null {
-  const raw = env.AUTH_URL?.trim();
-  if (!raw) return null;
-  let base: URL;
-  try {
-    base = new URL(raw);
-  } catch {
-    return null;
-  }
-  if (base.protocol !== "https:" && base.protocol !== "http:") return null;
+  const base = parseAuthUrl(env.AUTH_URL);
+  if (!base) return null;
   const rpId = base.hostname.toLowerCase();
   if (!rpId) return null;
+  if (isIP(rpId.replace(/^\[|\]$/g, "")) !== 0) {
+    warnOnChange("webauthn:ip-rp-id", rpId, `[webauthn] AUTH_URL's host ${rpId} is an IP address; passkeys need a domain name, so they are not offered`);
+    return null;
+  }
   const origins = new Set<string>([base.origin]);
   for (const entry of (env.AUTH_TRUSTED_ORIGIN ?? "").split(",")) {
-    const trimmed = entry.trim();
-    if (!trimmed) continue;
-    try {
-      const u = new URL(trimmed);
-      const host = u.hostname.toLowerCase();
-      if ((u.protocol === "https:" || u.protocol === "http:") && (host === rpId || host.endsWith(`.${rpId}`))) {
-        origins.add(u.origin);
-      }
-    } catch {
-      // ignored — instrumentation.ts already warns about an unparseable entry
-    }
+    const u = parseAuthUrl(entry);
+    // An unparseable entry is ignored here; instrumentation.ts already warns.
+    if (!u) continue;
+    const host = u.hostname.toLowerCase();
+    if (host === rpId || host.endsWith(`.${rpId}`)) origins.add(u.origin);
   }
   return { rpId, rpName: "Summonarr", origins: [...origins] };
 }
@@ -127,6 +124,38 @@ export interface ParsedAuthData {
   flags: { up: boolean; uv: boolean; be: boolean; bs: boolean; at: boolean; ed: boolean };
   signCount: number;
   attested?: { aaguid: Buffer; credentialId: Buffer; publicKey: Buffer };
+}
+
+// The byte length of the one CBOR item at `pos`, as a WebAuthnError on bad CBOR.
+function cborItemLength(buf: Buffer, pos: number, what: string): { value: CborValue; length: number } {
+  try {
+    return decodeCborFirst(buf.subarray(pos));
+  } catch (err) {
+    throw new WebAuthnError("authdata", `${what} is not valid CBOR: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+// §6.5.1 attested credential data at `pos`: aaguid, length-prefixed credential
+// id, then the COSE key (its length is the length of one CBOR item).
+function readAttestedCredential(buf: Buffer, pos: number): { attested: NonNullable<ParsedAuthData["attested"]>; end: number } {
+  if (buf.length < pos + 18) throw new WebAuthnError("authdata", "attested credential data is truncated");
+  const aaguid = buf.subarray(pos, pos + 16);
+  const idLen = buf.readUInt16BE(pos + 16);
+  const idStart = pos + 18;
+  if (idLen === 0 || idLen > 1023) throw new WebAuthnError("authdata", "credential id length out of range");
+  if (buf.length < idStart + idLen) throw new WebAuthnError("authdata", "credential id is truncated");
+  const credentialId = buf.subarray(idStart, idStart + idLen);
+  const keyStart = idStart + idLen;
+  const { length: keyLen } = cborItemLength(buf, keyStart, "credential public key");
+  const publicKey = buf.subarray(keyStart, keyStart + keyLen);
+  return { attested: { aaguid, credentialId, publicKey }, end: keyStart + keyLen };
+}
+
+// The extensions map at `pos`; returns where it ends.
+function skipExtensions(buf: Buffer, pos: number): number {
+  const { value, length } = cborItemLength(buf, pos, "extension data");
+  if (!isCborMap(value)) throw new WebAuthnError("authdata", "extension data is not valid CBOR: extensions must be a map");
+  return pos + length;
 }
 
 export function parseAuthenticatorData(data: Uint8Array): ParsedAuthData {
@@ -146,34 +175,11 @@ export function parseAuthenticatorData(data: Uint8Array): ParsedAuthData {
   let pos = 37;
   let attested: ParsedAuthData["attested"];
   if (flags.at) {
-    if (buf.length < pos + 18) throw new WebAuthnError("authdata", "attested credential data is truncated");
-    const aaguid = buf.subarray(pos, pos + 16);
-    pos += 16;
-    const idLen = buf.readUInt16BE(pos);
-    pos += 2;
-    if (idLen === 0 || idLen > 1023) throw new WebAuthnError("authdata", "credential id length out of range");
-    if (buf.length < pos + idLen) throw new WebAuthnError("authdata", "credential id is truncated");
-    const credentialId = buf.subarray(pos, pos + idLen);
-    pos += idLen;
-    let keyLen: number;
-    try {
-      ({ length: keyLen } = decodeCborFirst(buf.subarray(pos)));
-    } catch (err) {
-      throw new WebAuthnError("authdata", `credential public key is not valid CBOR: ${err instanceof Error ? err.message : err}`);
-    }
-    const publicKey = buf.subarray(pos, pos + keyLen);
-    pos += keyLen;
-    attested = { aaguid, credentialId, publicKey };
+    const read = readAttestedCredential(buf, pos);
+    attested = read.attested;
+    pos = read.end;
   }
-  if (flags.ed) {
-    try {
-      const { value, length } = decodeCborFirst(buf.subarray(pos));
-      if (!isCborMap(value)) throw new CborError("extensions must be a map");
-      pos += length;
-    } catch (err) {
-      throw new WebAuthnError("authdata", `extension data is not valid CBOR: ${err instanceof Error ? err.message : err}`);
-    }
-  }
+  if (flags.ed) pos = skipExtensions(buf, pos);
   // Nothing may follow what the flags declared — trailing bytes mean the flags
   // and the payload disagree.
   if (pos !== buf.length) throw new WebAuthnError("authdata", "unexpected trailing bytes in authenticator data");
@@ -287,6 +293,28 @@ function checkUserFlags(auth: ParsedAuthData, requireUserVerification: boolean):
   if (requireUserVerification && !auth.flags.uv) throw new WebAuthnError("user-verification", "user verification required");
 }
 
+// ─── credential shape ───────────────────────────────────────────────────────
+
+// The browser's credential JSON arrives unchecked; this is the one place its
+// outer shape is checked. Every field inside `response` is still read as
+// unknown and decoded by fromBase64Url, which refuses anything but a string.
+function publicKeyCredentialShape(raw: unknown): { id: unknown; rawId: unknown; response: Record<string, unknown> | undefined } {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new WebAuthnError("shape", "not a public-key credential");
+  const r = raw as Record<string, unknown>;
+  if (r.type !== "public-key") throw new WebAuthnError("shape", "not a public-key credential");
+  const response = r.response && typeof r.response === "object" && !Array.isArray(r.response)
+    ? (r.response as Record<string, unknown>)
+    : undefined;
+  return { id: r.id, rawId: r.rawId, response };
+}
+
+// The credential's raw id, checked against `id` (they must be the same string).
+function credentialRawId(c: { id: unknown; rawId: unknown }): Buffer {
+  const rawId = fromBase64Url(c.rawId, "rawId");
+  if (c.id !== c.rawId) throw new WebAuthnError("shape", "id and rawId disagree");
+  return rawId;
+}
+
 // ─── registration (§7.1) ────────────────────────────────────────────────────
 
 export interface RegistrationResponseJSON {
@@ -313,43 +341,52 @@ function formatAaguid(b: Buffer): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
-export function verifyRegistrationResponse(opts: {
-  response: RegistrationResponseJSON;
-  expectedChallenge: string;
-  config: WebAuthnConfig;
-  requireUserVerification?: boolean;
-}): VerifiedRegistration {
-  const { response: r, config } = opts;
-  if (!r || typeof r !== "object" || r.type !== "public-key" || !r.response || typeof r.response !== "object") {
-    throw new WebAuthnError("shape", "not a public-key credential");
-  }
-  const rawId = fromBase64Url(r.rawId, "rawId");
-  if (r.id !== r.rawId) throw new WebAuthnError("shape", "id and rawId disagree");
-  const clientDataJSON = fromBase64Url(r.response.clientDataJSON, "clientDataJSON");
-  const attestationObject = fromBase64Url(r.response.attestationObject, "attestationObject");
-
-  verifyClientData(clientDataJSON, "webauthn.create", opts.expectedChallenge, config);
-
+// The attestation object's three members. "none" must carry an empty
+// statement; any other fmt's statement is ignored by policy (see the header) —
+// never trusted, never parsed further.
+function decodeAttestationObject(bytes: Buffer): { authData: Uint8Array } {
   let att: CborValue;
   try {
-    att = decodeCbor(attestationObject);
+    att = decodeCbor(bytes);
   } catch (err) {
     throw new WebAuthnError("attestation", `attestationObject is not valid CBOR: ${err instanceof Error ? err.message : err}`);
   }
   if (!isCborMap(att)) throw new WebAuthnError("attestation", "attestationObject is not a map");
   const fmt = att.get("fmt");
-  const attStmt = att.get("attStmt");
-  const authDataRaw = att.get("authData");
-  if (typeof fmt !== "string" || !isCborMap(attStmt ?? null) || !(authDataRaw instanceof Uint8Array)) {
+  const attStmt = att.get("attStmt") ?? null;
+  const authData = att.get("authData");
+  if (typeof fmt !== "string" || !isCborMap(attStmt) || !(authData instanceof Uint8Array)) {
     throw new WebAuthnError("attestation", "attestationObject is missing fmt/attStmt/authData");
   }
-  // "none" must carry an empty statement. Any other fmt's statement is
-  // ignored by policy (see the header) — never trusted, never parsed further.
-  if (fmt === "none" && (attStmt as Map<unknown, unknown>).size !== 0) {
-    throw new WebAuthnError("attestation", "fmt none must have an empty attStmt");
-  }
+  if (fmt === "none" && attStmt.size !== 0) throw new WebAuthnError("attestation", "fmt none must have an empty attStmt");
+  return { authData };
+}
 
-  const auth = parseAuthenticatorData(authDataRaw);
+// The transports the browser reported, kept only when they are known values.
+function registrationTransports(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.filter((t): t is string => typeof t === "string" && (ALLOWED_TRANSPORTS as readonly string[]).includes(t)))];
+}
+
+// `response` is the browser's credential JSON as received (unknown until
+// checked here); RegistrationResponseJSON names the expected shape.
+export function verifyRegistrationResponse(opts: {
+  response: unknown;
+  expectedChallenge: string;
+  config: WebAuthnConfig;
+  requireUserVerification?: boolean;
+}): VerifiedRegistration {
+  const { config } = opts;
+  const credential = publicKeyCredentialShape(opts.response);
+  if (!credential.response) throw new WebAuthnError("shape", "not a public-key credential");
+  const rawId = credentialRawId(credential);
+  const clientDataJSON = fromBase64Url(credential.response.clientDataJSON, "clientDataJSON");
+  const attestationObject = fromBase64Url(credential.response.attestationObject, "attestationObject");
+
+  verifyClientData(clientDataJSON, "webauthn.create", opts.expectedChallenge, config);
+  const { authData } = decodeAttestationObject(attestationObject);
+
+  const auth = parseAuthenticatorData(authData);
   checkRpIdHash(auth, config);
   checkUserFlags(auth, opts.requireUserVerification ?? false);
   if (!auth.flags.at || !auth.attested) throw new WebAuthnError("authdata", "registration lacks attested credential data");
@@ -358,16 +395,12 @@ export function verifyRegistrationResponse(opts: {
 
   const { alg } = coseToPublicKey(auth.attested.publicKey);
 
-  const transports = Array.isArray(r.response.transports)
-    ? [...new Set(r.response.transports.filter((t): t is string => typeof t === "string" && (ALLOWED_TRANSPORTS as readonly string[]).includes(t)))]
-    : [];
-
   return {
     credentialId: toBase64Url(auth.attested.credentialId),
     publicKey: toBase64Url(auth.attested.publicKey),
     alg,
     signCount: auth.signCount,
-    transports,
+    transports: registrationTransports(credential.response.transports),
     aaguid: formatAaguid(auth.attested.aaguid),
     backupEligible: auth.flags.be,
     backedUp: auth.flags.bs,
@@ -398,42 +431,53 @@ export interface VerifiedAssertion {
 
 // The credential id an assertion claims, validated — the caller looks the
 // stored credential up by it (scoped to the user) before calling
-// verifyAuthenticationResponse.
-export function assertionCredentialId(response: AuthenticationResponseJSON): string {
-  if (!response || typeof response !== "object" || response.type !== "public-key") {
-    throw new WebAuthnError("shape", "not a public-key credential");
+// verifyAuthenticationResponse. `response` is the browser's JSON as received.
+export function assertionCredentialId(response: unknown): string {
+  return toBase64Url(credentialRawId(publicKeyCredentialShape(response)));
+}
+
+// A returned userHandle that differs from ours means the authenticator thinks
+// this is somebody else's credential.
+function checkUserHandle(handleRaw: unknown, expectedUserHandle: string | undefined): void {
+  if (handleRaw == null || handleRaw === "") return;
+  const handle = fromBase64Url(handleRaw, "userHandle");
+  if (!expectedUserHandle || !bytesEqual(handle, fromBase64Url(expectedUserHandle, "expectedUserHandle"))) {
+    throw new WebAuthnError("credential", "userHandle does not match this account");
   }
-  const rawId = fromBase64Url(response.rawId, "rawId");
-  if (response.id !== response.rawId) throw new WebAuthnError("shape", "id and rawId disagree");
-  return toBase64Url(rawId);
+}
+
+// §7.2 step 21: signature counter. Both zero ⇒ the authenticator doesn't count
+// (synced passkeys) — accept. Otherwise the new value must strictly exceed the
+// stored one; anything else is a possible cloned authenticator and is refused.
+// Deliberately strict: an authenticator whose counter went backwards stays
+// refused (the failure is audited as webauthn:counter) and the owner signs in
+// with another factor and re-adds the key.
+function checkSignCounter(stored: number, received: number): void {
+  if (!(stored === 0 && received === 0) && received <= stored) {
+    throw new WebAuthnError("counter", "signature counter did not increase (possible cloned authenticator)");
+  }
 }
 
 export function verifyAuthenticationResponse(opts: {
-  response: AuthenticationResponseJSON;
+  response: unknown;
   expectedChallenge: string;
   config: WebAuthnConfig;
   credential: StoredCredential;
-  // The user handle we registered for this account; a returned userHandle that
-  // differs means the authenticator thinks this is somebody else's credential.
+  // The user handle we registered for this account.
   expectedUserHandle?: string;
   requireUserVerification?: boolean;
 }): VerifiedAssertion {
-  const { response: r, config, credential } = opts;
-  const credentialId = assertionCredentialId(r);
+  const { config, credential } = opts;
+  const r = publicKeyCredentialShape(opts.response);
+  const credentialId = toBase64Url(credentialRawId(r));
   // §7.2 step 5/6: the credential must be the one we looked up for this user.
   if (credentialId !== credential.credentialId) throw new WebAuthnError("credential", "credential does not belong to this user");
-  if (!r.response || typeof r.response !== "object") throw new WebAuthnError("shape", "missing assertion response");
+  if (!r.response) throw new WebAuthnError("shape", "missing assertion response");
 
   const clientDataJSON = fromBase64Url(r.response.clientDataJSON, "clientDataJSON");
   const authenticatorData = fromBase64Url(r.response.authenticatorData, "authenticatorData");
   const signature = fromBase64Url(r.response.signature, "signature");
-
-  if (r.response.userHandle != null && r.response.userHandle !== "") {
-    const handle = fromBase64Url(r.response.userHandle, "userHandle");
-    if (!opts.expectedUserHandle || !bytesEqual(handle, fromBase64Url(opts.expectedUserHandle, "expectedUserHandle"))) {
-      throw new WebAuthnError("credential", "userHandle does not match this account");
-    }
-  }
+  checkUserHandle(r.response.userHandle, opts.expectedUserHandle);
 
   verifyClientData(clientDataJSON, "webauthn.get", opts.expectedChallenge, config);
   const auth = parseAuthenticatorData(authenticatorData);
@@ -445,14 +489,6 @@ export function verifyAuthenticationResponse(opts: {
   const signedData = Buffer.concat([authenticatorData, sha256(clientDataJSON)]);
   if (!verifySignature(alg, key, signedData, signature)) throw new WebAuthnError("signature", "signature does not verify");
 
-  // §7.2 step 21: signature counter. Both zero ⇒ the authenticator doesn't count
-  // (synced passkeys) — accept. Otherwise the new value must strictly exceed the
-  // stored one; anything else is a possible cloned authenticator and is refused.
-  const stored = credential.signCount;
-  const received = auth.signCount;
-  if (!(stored === 0 && received === 0) && received <= stored) {
-    throw new WebAuthnError("counter", "signature counter did not increase (possible cloned authenticator)");
-  }
-
-  return { newSignCount: received, userVerified: auth.flags.uv, backedUp: auth.flags.bs };
+  checkSignCounter(credential.signCount, auth.signCount);
+  return { newSignCount: auth.signCount, userVerified: auth.flags.uv, backedUp: auth.flags.bs };
 }

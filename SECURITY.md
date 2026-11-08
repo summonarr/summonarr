@@ -59,7 +59,7 @@ A misconfigured deployment fails closed at startup, not silently at runtime.
 
 **SSRF:** All outbound HTTP goes through one of three helpers in `src/lib/safe-fetch.ts`:
 
-- `safeFetch` — user-supplied URLs. Blocks RFC1918, loopback, link-local, CGNAT, multicast, and cloud-metadata addresses; re-resolves the hostname per request and safety-checks every resolved address (the IP can't be pinned at the dispatcher layer) to defeat DNS rebinding.
+- `safeFetch` — user-supplied URLs. Blocks RFC1918, loopback, link-local, CGNAT, multicast, and cloud-metadata addresses; resolves the hostname once per request, safety-checks every resolved address, and connects only to those addresses (the connection is pinned through `node:http(s)`'s `lookup`), so a DNS rebind between the check and the connect is impossible. All three helpers pin the same way.
 - `safeFetchAdminConfigured` — URLs persisted in the `Setting` table (Radarr/Sonarr/Plex/Jellyfin servers). Allows RFC1918/ULA/loopback for LAN deployments; still blocks `0.0.0.0` and link-local.
 - `safeFetchTrusted` — hardcoded hostname allowlist for fixed third-party APIs (TMDB, plex.tv, discord.com, etc).
 
@@ -100,7 +100,7 @@ Reports we want — even if a defense above exists, a working bypass is worth kn
 Beyond the enforced guards above:
 
 - Set `BACKUP_DB_PASSWORD` (≥12 chars) before using the Backup & Restore admin page. Unlike the boot-enforced vars, this one is checked per-request — both export and import endpoints return 503 until it's set, but the app boots without it.
-- Run behind a reverse proxy with TLS. `TRUST_PROXY=true` is required to boot, but you must ensure the proxy strips client-supplied `X-Forwarded-For` from untrusted sources — otherwise per-IP rate limiting can be spoofed. Forwarded client-IP headers are read **only** when `TRUST_PROXY` is exactly `"true"`; otherwise every request falls back to a single shared bucket rather than trusting a forgeable address.
+- Run behind a reverse proxy with TLS. `TRUST_PROXY=true` is required to boot, but you must ensure the proxy strips client-supplied `X-Forwarded-For` from untrusted sources — otherwise per-IP rate limiting can be spoofed. Forwarded client-IP headers are read **only** when `TRUST_PROXY` is exactly `"true"`; otherwise requests fall back to per-User-Agent buckets rather than trusting a forgeable address (a client can change its User-Agent, so this mode is for private hosts only).
 - Do not treat local-only mode (`SUMMONARR_ALLOW_LOCAL_ONLY=true`) as a way to expose an instance without a proxy. It is appropriate only behind network controls or on a genuinely private host; the `Host` check it relies on is chosen by the caller, so anything that can route a packet to the port can pass it.
 - Configure each Plex/Jellyfin/Radarr/Sonarr webhook URL with the `?token=<secret>` query param — Sonarr and Radarr have no header field for it.
 - Rotate `CRON_SECRET` and `TOKEN_ENCRYPTION_KEY` if you suspect either has leaked. Rotating `TOKEN_ENCRYPTION_KEY` invalidates encrypted Setting rows and stored OAuth tokens — re-enter them after rotation.

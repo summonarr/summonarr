@@ -5,7 +5,9 @@
 // arr's own two file actions: delete (from disk, through the arr) and rename
 // to its naming scheme (the arr's preview first, then RenameFiles for the
 // files chosen). The server re-checks every id against the title's files
-// (GET/DELETE /api/admin/arr/title/files, GET/POST …/rename).
+// (GET/DELETE /api/admin/arr/title/files, GET/POST …/rename). The delete runs
+// as a background job (title-file-delete.ts); the rows, the confirm and the
+// rename preview are in files-parts.tsx.
 //
 // "Instant, then live" (src/lib/arr-snapshot.ts): on open the list the server
 // last read is painted while the live read is out. It only ever fills an EMPTY
@@ -14,112 +16,52 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Chip } from "@/components/ui/design";
-import { AlertTriangle, ArrowDown, Check, ChevronDown, ChevronRight, FileText, Loader2, RefreshCw, Trash2 } from "@/components/icons";
+import { AlertTriangle, Check, FileText, Loader2, RefreshCw, Trash2 } from "@/components/icons";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
-import { episodeSummary, queueFormatters } from "@/components/admin/queue-format";
+import { queueFormatters } from "@/components/admin/queue-format";
 import { CommandWatchLine, useArrCommandWatch } from "@/components/admin/arr-command-watch";
 import { ArrSnapshotNote } from "@/components/admin/arr-snapshot-note";
 import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
-import type { RenamePreview, TitleFile, TitleFileMedia } from "@/lib/arr-title";
+import type { RenamePreview, TitleFile } from "@/lib/arr-title";
 import { withBasePath } from "@/lib/base-path";
+import { FILES_ANSWER, RENAME_ANSWER, RENAME_PREVIEW_ANSWER, idsOf } from "@/lib/client/arr-answers";
+import { runTitleFileDelete } from "@/lib/client/title-file-delete";
+import { check } from "@/lib/validate";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { arrApi, titleQuery, useTRef, type TitleRef } from "./shared";
 import { snapshotMayPaint } from "./snapshot-rules";
+import { DeleteConfirm, FileRow, mediaDetails, mediaFormatters, mediaSummary, RenamePanel } from "./files-parts";
 
-type T = ReturnType<typeof useT>;
-
-function mediaSummary(m: TitleFileMedia | null, t: T): string {
-  if (!m) return "";
-  const audio = [m.audioCodec, m.audioChannels !== null ? String(m.audioChannels) : null].filter(Boolean).join(" ");
-  return [
-    m.resolution,
-    m.videoCodec,
-    m.videoDynamicRange,
-    m.videoBitDepth ? t("adminArr.files.bitDepth", { bits: m.videoBitDepth }) : null,
-    audio || null,
-    m.audioLanguages,
-    m.subtitles ? t("adminArr.files.subtitles", { list: m.subtitles }) : null,
-    m.runTime,
-  ].filter((x): x is string => !!x).join(" · ");
-}
-
-// The rest of the media info the arr reports, for a file's details.
-function mediaDetails(m: TitleFileMedia | null, t: T, locale: string): Array<[string, string]> {
-  if (!m) return [];
-  const kbps = new Intl.NumberFormat(locale, { style: "unit", unit: "kilobit-per-second", unitDisplay: "narrow", maximumFractionDigits: 0 });
-  const num = new Intl.NumberFormat(locale, { maximumFractionDigits: 3 });
-  const rows: Array<[string, string | null]> = [
-    [t("adminArr.files.detail.videoBitrate"), m.videoBitrate ? kbps.format(m.videoBitrate / 1000) : null],
-    [t("adminArr.files.detail.fps"), m.videoFps ? num.format(m.videoFps) : null],
-    [t("adminArr.files.detail.scanType"), m.scanType],
-    [t("adminArr.files.detail.audioBitrate"), m.audioBitrate ? kbps.format(m.audioBitrate / 1000) : null],
-    [t("adminArr.files.detail.audioStreams"), m.audioStreamCount !== null ? String(m.audioStreamCount) : null],
-    [t("adminArr.files.detail.runTime"), m.runTime],
-  ];
-  return rows.filter((r): r is [string, string] => r[1] !== null && r[1] !== "");
-}
-
-// A delete runs as a BACKGROUND job on the server — each delete may wait 120 s
-// (a recycle bin on another disk is a copy), past a reverse proxy's hold, and
-// the admin was shown "delete failed" while the arr finished it. Start it, then
-// poll `&job=` for the DELETE's own answer: counted, one poll per answer, never
-// a clock (guardrail 16). A few failed polls in a row (a network blip, a
-// proxy's own 5xx with no JSON) are retried — the delete keeps running there.
-const DELETE_POLL_MS = 1_500;
-const DELETE_MAX_POLLS = 600; // ~15 minutes
-const DELETE_FAILED_POLLS = 5;
-type DeleteAnswer = { ok: true; deleted: number } | { ok: false; error: string } | { ok: false; running: true };
-type PollBody = { deleted?: unknown; error?: unknown };
-
-async function runDelete(path: string, fileIds: number[], fallback: string, alive: () => boolean): Promise<DeleteAnswer | null> {
-  const start = await arrApi<{ deleted?: number; job?: unknown }>(path, { method: "DELETE", body: { fileIds, async: true } }, fallback);
-  if (!start.ok) return start;
-  if (typeof start.data.job !== "string") return { ok: true, deleted: start.data.deleted ?? 0 };
-  const pollUrl = withBasePath(`${path}&job=${encodeURIComponent(start.data.job)}`);
-  let failed = 0;
-  for (let i = 0; i < DELETE_MAX_POLLS; i++) {
-    await new Promise((r) => window.setTimeout(r, DELETE_POLL_MS));
-    if (!alive()) return null;
-    let status = 0;
-    let data: PollBody | null = null;
-    try {
-      const res = await fetch(pollUrl);
-      status = res.status;
-      data = (await res.json().catch(() => null)) as PollBody | null;
-    } catch {
-      // network: retried below
-    }
-    if (!alive()) return null;
-    if (status === 202) {
-      failed = 0;
-      continue;
-    }
-    if (data === null || typeof data !== "object") {
-      if (++failed >= DELETE_FAILED_POLLS) return { ok: false, running: true };
-      continue;
-    }
-    if (status >= 200 && status < 300) return { ok: true, deleted: typeof data.deleted === "number" ? data.deleted : 0 };
-    return { ok: false, error: typeof data.error === "string" ? data.error : fallback };
-  }
-  return { ok: false, running: true };
-}
+// The tab's writes, each its own action key; "load" is the read.
+const WRITES = ["delete", "preview", "rename"] as const;
+type Write = (typeof WRITES)[number];
 
 export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChanged: () => void }) {
   const t = useT();
   const tRef = useTRef();
   const locale = useLocale();
   const fmt = useMemo(() => queueFormatters(locale), [locale]);
+  const mediaFmt = useMemo(() => mediaFormatters(locale), [locale]);
   // null until the first read answers; a failed FIRST read is not "no files".
   const [files, setFiles] = useState<TitleFile[] | null>(null);
-  const [loadFailed, setLoadFailed] = useState(false);
-  const [error, setError] = useState("");
+  // The list's last read failed ("" once one answers) — apart from a delete's
+  // or a rename's refusal, which a re-read must not wipe.
+  const [loadError, setLoadError] = useState("");
+  const [actionError, setActionError] = useState("");
   const [open, setOpen] = useState<ReadonlySet<number>>(new Set());
   const [notice, setNotice] = useState("");
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [busy, setBusy] = useState<"delete" | "preview" | "rename" | null>(null);
   const [renames, setRenames] = useState<RenamePreview[] | null>(null);
   const [renameSelected, setRenameSelected] = useState<ReadonlySet<number>>(new Set());
+  // The read ("load": only the newest lands — Reload, a delete's re-read and a
+  // rename's can overlap, and an older answer arriving last would bring back
+  // the list from before the change) and each write. The manager closing
+  // aborts them all, a delete's polling included.
+  const action = useAsyncAction();
+  const busy: Write | null = WRITES.find((k) => action.busy(k)) ?? null;
+  // Read live (not off a render): a snapshot answering mid-write sees it.
+  const writing = () => WRITES.some((k) => action.busy(k));
   // The RenameFiles command, followed live; the files are re-read once it ends.
   // Unmounting (the manager closing) stops it.
   const { watch, watches } = useArrCommandWatch();
@@ -131,14 +73,6 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
   const cancelDeleteRef = useRef<HTMLButtonElement>(null);
   const deleteRef = useRef<HTMLButtonElement>(null);
   const refocusDelete = useRef(false);
-  // A background delete's polling stops when the manager closes.
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
   useEffect(() => {
     if (confirmDelete) cancelDeleteRef.current?.focus();
     else if (refocusDelete.current) {
@@ -147,44 +81,47 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
     }
   }, [confirmDelete]);
 
-  // The live listing's URL — and its snapshot's (one builder: the server keys on it).
+  // The live listing's URL — and its snapshot's (one builder: the server keys
+  // on it). The delete names the same route and title.
   const readPath = useMemo(() => `/api/admin/arr/title/files?${titleQuery(titleRef)}`, [titleRef]);
-  // Live reads out (the snapshot note's "refreshing").
-  const [reads, setReads] = useState(0);
-  const readsOut = useRef(0);
-  const busyRef = useRef(busy);
-  useEffect(() => {
-    busyRef.current = busy;
-  });
-  const applySnapshot = useCallback((data: { files: TitleFile[] }) => {
-    if (!Array.isArray(data?.files) || busyRef.current !== null) return false;
-    setFiles((prev) => (snapshotMayPaint(prev !== null, busyRef.current !== null) ? data.files : prev));
-  }, []);
-  const snap = useArrSnapshot<{ files: TitleFile[] }>(withBasePath(readPath), applySnapshot);
+  // A checked snapshot paints an EMPTY list only, never under a write; declined, nothing stale is on screen.
+  const applySnapshot = (data: unknown) => {
+    const parsed = check(FILES_ANSWER, data);
+    if (!parsed.ok || !snapshotMayPaint(files !== null, writing())) return false;
+    setFiles(parsed.value.files);
+    return true;
+  };
+  const snap = useArrSnapshot<unknown>(withBasePath(readPath), applySnapshot);
   const markLive = snap.markLive;
 
   const load = useCallback(async () => {
-    readsOut.current++;
-    setReads(readsOut.current);
-    const res = await arrApi<{ files: TitleFile[] }>(readPath, undefined, tRef.current("adminArr.files.loadFailed"));
-    readsOut.current--;
-    setReads(readsOut.current);
+    const res = await action.run("load", (signal) =>
+      arrApi(readPath, { schema: FILES_ANSWER, signal }, tRef.current("adminArr.files.loadFailed")),
+    );
+    // Superseded by a newer read, or the manager closed.
+    if (!res) return;
     if (res.ok) {
+      const ids = new Set(res.data.files.map((f) => f.id));
       setFiles(res.data.files);
-      setLoadFailed(false);
-      setSelected((prev) => new Set([...prev].filter((id) => res.data.files.some((f) => f.id === id))));
-      setError("");
+      setLoadError("");
+      setSelected((prev) => new Set([...prev].filter((id) => ids.has(id))));
       markLive();
     } else {
       // A failed re-read keeps the list it had.
-      setError(res.error);
-      setLoadFailed(true);
+      setLoadError(res.error);
     }
-  }, [readPath, tRef, markLive]);
+  }, [action, readPath, tRef, markLive]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Each file's media lines, worked out once per list — not again on every
+  // checkbox click (a long series lists thousands of files).
+  const fileMedia = useMemo(
+    () => new Map((files ?? []).map((f) => [f.id, { summary: mediaSummary(f.media, t), details: mediaDetails(f.media, t, mediaFmt) }])),
+    [files, t, mediaFmt],
+  );
 
   function toggle(id: number) {
     setSelected((prev) => {
@@ -202,39 +139,40 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
   }
 
   async function remove() {
-    setBusy("delete");
-    setError("");
-    // The ids go in the body: "select all" on a long-running series is more
-    // than a query string holds.
-    const res = await runDelete(`/api/admin/arr/title/files?${titleQuery(titleRef)}`, [...selected], t("adminArr.files.deleteFailed"), () => mounted.current);
-    if (res === null) return;
-    setBusy(null);
+    setActionError("");
+    const res = await action.run(
+      "delete",
+      (signal) => runTitleFileDelete(withBasePath(readPath), [...selected], t("adminArr.files.deleteFailed"), { signal }),
+      { ifBusy: "skip" },
+    );
+    // The manager closed: nothing left to show it on.
+    if (!res) return;
     // Set before the close renders: the button comes back with the selection.
-    refocusDelete.current = !res.ok;
+    refocusDelete.current = res.kind !== "deleted";
     setConfirmDelete(false);
     // A rename preview lists the files as they were — never offer it after a delete.
     setRenames(null);
-    if (!res.ok) {
-      setError("running" in res ? t("adminArr.files.deleteStillRunning") : res.error);
-      // Some files may have gone before it failed: show what's left.
-      await load();
-      onChanged();
-      return;
+    if (res.kind === "deleted") {
+      setNotice(t("adminArr.files.deleted", { count: res.deleted }));
+      setSelected(new Set());
+    } else {
+      // The tab's own line, apart from the list's: the re-read below keeps it.
+      setActionError(res.kind === "running" ? t("adminArr.files.deleteStillRunning") : res.error);
     }
-    setNotice(t("adminArr.files.deleted", { count: res.deleted }));
-    setSelected(new Set());
+    // Some files may have gone before a failure too: show what's left.
     await load();
     onChanged();
   }
 
   async function preview() {
-    setBusy("preview");
-    setError("");
+    setActionError("");
     setNotice("");
-    const res = await arrApi<{ files: RenamePreview[] }>(`/api/admin/arr/title/rename?${titleQuery(titleRef)}`, undefined, t("adminArr.files.renameFailed"));
-    setBusy(null);
+    const res = await action.run("preview", (signal) =>
+      arrApi(`/api/admin/arr/title/rename?${titleQuery(titleRef)}`, { schema: RENAME_PREVIEW_ANSWER, signal }, t("adminArr.files.renameFailed")),
+    );
+    if (!res) return;
     if (!res.ok) {
-      setError(res.error);
+      setActionError(res.error);
       return;
     }
     setRenames(res.data.files);
@@ -242,22 +180,26 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
   }
 
   async function rename() {
-    setBusy("rename");
-    setError("");
-    const res = await arrApi<{ files: number; commandIds?: number[] }>(
-      "/api/admin/arr/title/rename",
-      { method: "POST", body: { service: titleRef.service, instance: titleRef.instance, id: titleRef.arrId, fileIds: [...renameSelected] } },
-      t("adminArr.files.renameFailed"),
+    setActionError("");
+    const res = await action.run(
+      "rename",
+      (signal) =>
+        arrApi(
+          "/api/admin/arr/title/rename",
+          { method: "POST", body: { service: titleRef.service, instance: titleRef.instance, id: titleRef.arrId, fileIds: [...renameSelected] }, schema: RENAME_ANSWER, signal },
+          t("adminArr.files.renameFailed"),
+        ),
+      { ifBusy: "skip" },
     );
-    setBusy(null);
+    if (!res) return;
     if (!res.ok) {
-      setError(res.error);
+      setActionError(res.error);
       return;
     }
     setRenames(null);
     setNotice("");
     const renaming = t("adminArr.files.renaming", { count: res.data.files });
-    const ids = Array.isArray(res.data.commandIds) ? res.data.commandIds : [];
+    const ids = idsOf(res.data.commandIds);
     // The arr renames in the background; read the new names once it says it
     // has. An arr that sent no command id leaves just the notice.
     if (ids.length > 0) watch("rename", titleRef, ids, { pendingText: renaming, onDone: () => void load() });
@@ -265,9 +207,9 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
   }
 
   if (files === null) {
-    return loadFailed ? (
+    return loadError ? (
       <p role="alert" className="m-0 flex flex-wrap items-center gap-2 py-8 text-sm" style={{ color: "var(--ds-danger)" }}>
-        <AlertTriangle className="h-4 w-4 shrink-0" /> {error}
+        <AlertTriangle className="h-4 w-4 shrink-0" /> {loadError}
         <Button variant="ghost" size="sm" onClick={() => void load()}><RefreshCw /> {t("adminArr.common.retry")}</Button>
       </p>
     ) : (
@@ -276,8 +218,7 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
   }
 
   const allSelected = files.length > 0 && files.every((f) => selected.has(f.id));
-  const chosen = files.filter((f) => selected.has(f.id));
-  const chosenSize = chosen.reduce((n, f) => n + f.size, 0);
+  const error = actionError || loadError;
 
   return (
     <div className="grid gap-3">
@@ -288,6 +229,7 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
               type="checkbox"
               checked={allSelected}
               onChange={(e) => selectAll(e.target.checked)}
+              disabled={busy !== null}
               className="accent-[var(--ds-accent)]"
             />
             {t("adminArr.files.selectAll")}
@@ -299,40 +241,27 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
         <Button variant="outline" size="sm" disabled={files.length === 0 || busy !== null} onClick={() => void preview()}>
           {busy === "preview" ? <Loader2 className="animate-spin" /> : <FileText />} {t("adminArr.files.previewRename")}
         </Button>
-        <Button variant="ghost" size="sm" disabled={busy !== null} onClick={() => void load()} className="ml-auto">
+        {/* A Reload is what a still-running delete's line asks for: it clears that line. */}
+        <Button variant="ghost" size="sm" disabled={busy !== null} onClick={() => { setActionError(""); void load(); }} className="ml-auto">
           <RefreshCw /> {t("adminArr.common.reload")}
         </Button>
       </div>
-      <ArrSnapshotNote at={snap.staleAt} refreshing={reads > 0} />
+      <ArrSnapshotNote at={snap.staleAt} refreshing={action.busy("load")} />
 
       {confirmDelete && (
-        <div role="alertdialog" aria-label={t("adminArr.files.confirmTitle")} className="flex flex-wrap items-center gap-3 rounded-lg px-3 py-2.5 text-sm" style={{ background: "color-mix(in oklab, var(--ds-danger) 12%, transparent)", border: "1px solid var(--ds-danger)" }}>
-          <AlertTriangle className="h-4 w-4 shrink-0" style={{ color: "var(--ds-danger)" }} />
-          <span className="min-w-0 flex-1 text-zinc-100">
-            {t("adminArr.files.confirm", { count: selected.size })}
-            <span className="block text-xs text-zinc-400">
-              {t("adminArr.files.confirmSize", { size: fmt.size(chosenSize) })}
-              {" · "}
-              {chosen.slice(0, 4).map((f) => (isSeries && f.episodes.length > 0 ? episodeSummary(f.episodes) : f.relativePath)).join(", ")}
-              {chosen.length > 4 && ` ${t("adminArr.files.andMore", { count: chosen.length - 4 })}`}
-            </span>
-          </span>
-          <Button
-            ref={cancelDeleteRef}
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              refocusDelete.current = true;
-              setConfirmDelete(false);
-            }}
-            disabled={busy !== null}
-          >
-            {t("adminArr.common.cancel")}
-          </Button>
-          <Button size="sm" className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]" onClick={() => void remove()} disabled={busy !== null}>
-            {busy === "delete" && <Loader2 className="animate-spin" />} {t("adminArr.files.confirmDelete")}
-          </Button>
-        </div>
+        <DeleteConfirm
+          files={files.filter((f) => selected.has(f.id))}
+          isSeries={isSeries}
+          busy={busy !== null}
+          deleting={busy === "delete"}
+          cancelRef={cancelDeleteRef}
+          onCancel={() => {
+            refocusDelete.current = true;
+            setConfirmDelete(false);
+          }}
+          onConfirm={() => void remove()}
+          fmt={fmt}
+        />
       )}
 
       {error && (
@@ -346,56 +275,15 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
       {watches.rename && <CommandWatchLine watch={watches.rename} />}
 
       {renames !== null && (
-        <div className="grid gap-2 rounded-lg p-3" style={{ border: "1px solid var(--ds-border)", background: "var(--ds-bg-1)" }}>
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-medium text-zinc-100">{t("adminArr.files.renameTitle")}</span>
-            <span className="text-xs text-zinc-500">{t("adminArr.files.renameHint")}</span>
-            <span className="flex-1" />
-            <Button variant="ghost" size="sm" onClick={() => setRenames(null)} disabled={busy !== null}>{t("adminArr.common.cancel")}</Button>
-            <Button size="sm" onClick={() => void rename()} disabled={renameSelected.size === 0 || busy !== null}>
-              {busy === "rename" && <Loader2 className="animate-spin" />} {t("adminArr.files.renameApply", { count: renameSelected.size })}
-            </Button>
-          </div>
-          {renames.length === 0 ? (
-            <p className="m-0 text-xs text-zinc-500">{t("adminArr.files.renameNone")}</p>
-          ) : (
-            <>
-              {/* Every listed file starts ticked; a long show's preview lists thousands. */}
-              <label className="flex items-center gap-2 text-xs text-zinc-400">
-                <input
-                  type="checkbox"
-                  checked={renames.every((r) => renameSelected.has(r.fileId))}
-                  onChange={(e) => setRenameSelected(e.target.checked ? new Set(renames.map((r) => r.fileId)) : new Set())}
-                  disabled={busy !== null}
-                  className="accent-[var(--ds-accent)]"
-                />
-                {t("adminArr.files.selectAll")}
-              </label>
-              <ul className="m-0 grid list-none gap-2 p-0">
-                {renames.map((r) => (
-                  <li key={r.fileId} className="flex items-start gap-2">
-                    <input
-                      type="checkbox"
-                      checked={renameSelected.has(r.fileId)}
-                      onChange={(e) => setRenameSelected((prev) => {
-                        const next = new Set(prev);
-                        if (e.target.checked) next.add(r.fileId);
-                        else next.delete(r.fileId);
-                        return next;
-                      })}
-                      className="mt-1 accent-[var(--ds-accent)]"
-                      aria-label={r.existingPath}
-                    />
-                    <div className="min-w-0 text-xs">
-                      <div className="break-all text-zinc-500">{r.existingPath}</div>
-                      <div className="flex items-start gap-1 break-all text-zinc-200"><ArrowDown className="mt-0.5 h-3 w-3 shrink-0 text-zinc-500" aria-hidden /> {r.newPath}</div>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-        </div>
+        <RenamePanel
+          renames={renames}
+          selected={renameSelected}
+          onSelectedChange={setRenameSelected}
+          busy={busy !== null}
+          renaming={busy === "rename"}
+          onCancel={() => setRenames(null)}
+          onApply={() => void rename()}
+        />
       )}
 
       {files.length === 0 ? (
@@ -403,78 +291,27 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
       ) : (
         <ul className="m-0 grid list-none gap-0 rounded-lg p-0" style={{ border: "1px solid var(--ds-border)" }}>
           {files.map((f, i) => {
-            const media = mediaSummary(f.media, t);
-            const details = mediaDetails(f.media, t, locale);
-            const expanded = open.has(f.id);
+            const { summary, details } = fileMedia.get(f.id) ?? { summary: "", details: [] };
             return (
-              <li key={f.id} className="flex items-start gap-3 px-3 py-2.5" style={i > 0 ? { borderTop: "1px solid var(--ds-border)" } : undefined}>
-                <input
-                  type="checkbox"
-                  checked={selected.has(f.id)}
-                  onChange={() => toggle(f.id)}
-                  className="mt-1 accent-[var(--ds-accent)]"
-                  aria-label={t("adminArr.files.selectAria", { name: f.relativePath })}
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    {isSeries && f.episodes.length > 0 && <span className="ds-mono text-xs text-zinc-500">{episodeSummary(f.episodes)}</span>}
-                    <span className="min-w-0 break-all text-sm text-zinc-100" title={f.path ?? undefined}>{f.relativePath}</span>
-                  </div>
-                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-zinc-500">
-                    {f.quality && (
-                      <Chip tone={f.qualityCutoffNotMet ? "pending" : "accent"}>
-                        {f.quality}
-                        {f.qualityTags.length > 0 && ` ${f.qualityTags.map((tag) => t(`adminManage.queue.qualityTag.${tag}`)).join(" ")}`}
-                      </Chip>
-                    )}
-                    {f.qualityCutoffNotMet && <Chip tone="pending">{t("adminArr.files.cutoffUnmet")}</Chip>}
-                    <span>{fmt.size(f.size)}</span>
-                    {f.languages.length > 0 && <span>{f.languages.join(", ")}</span>}
-                    {f.releaseGroup && <span>{f.releaseGroup}</span>}
-                    {f.edition && <span>{f.edition}</span>}
-                    {f.customFormats.length > 0 && (
-                      <span title={f.customFormats.join(", ")}>
-                        {t("adminArr.files.customFormats", { count: f.customFormats.length })}
-                        {f.customFormatScore !== null && ` (${fmt.score(f.customFormatScore)})`}
-                      </span>
-                    )}
-                    {f.dateAdded && <span>{t("adminArr.files.added", { date: fmt.dateTime(f.dateAdded) })}</span>}
-                  </div>
-                  {media && <div className="mt-1 text-xs text-zinc-500">{media}</div>}
-                  {f.sceneName && <div className="mt-1 truncate text-xs text-zinc-500" title={f.sceneName}>{f.sceneName}</div>}
-                  {(details.length > 0 || f.path) && (
-                    <button
-                      type="button"
-                      aria-expanded={expanded}
-                      onClick={() => setOpen((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(f.id)) next.delete(f.id);
-                        else next.add(f.id);
-                        return next;
-                      })}
-                      className="mt-1 flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300"
-                    >
-                      {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />} {t("adminArr.files.details")}
-                    </button>
-                  )}
-                  {expanded && (
-                    <dl className="m-0 mt-1 grid gap-x-4 gap-y-0.5 text-xs sm:grid-cols-[auto_1fr]">
-                      {details.map(([k, v]) => (
-                        <div key={k} className="contents">
-                          <dt className="text-zinc-500">{k}</dt>
-                          <dd className="m-0 text-zinc-300">{v}</dd>
-                        </div>
-                      ))}
-                      {f.path && (
-                        <div className="contents">
-                          <dt className="text-zinc-500">{t("adminArr.files.detail.path")}</dt>
-                          <dd className="m-0 break-all text-zinc-300">{f.path}</dd>
-                        </div>
-                      )}
-                    </dl>
-                  )}
-                </div>
-              </li>
+              <FileRow
+                key={f.id}
+                file={f}
+                first={i === 0}
+                isSeries={isSeries}
+                media={summary}
+                details={details}
+                expanded={open.has(f.id)}
+                onToggleExpanded={() => setOpen((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(f.id)) next.delete(f.id);
+                  else next.add(f.id);
+                  return next;
+                })}
+                selected={selected.has(f.id)}
+                onSelect={() => toggle(f.id)}
+                busy={busy !== null}
+                fmt={fmt}
+              />
             );
           })}
         </ul>

@@ -1,20 +1,15 @@
 import "server-only";
 
-import { prisma } from "./prisma";
+import { prisma, type PrismaTxClient } from "./prisma";
 import { verifyIdentifierPrefixFor } from "./notification-email-verify";
 import { deleteAllMfaInTx } from "./mfa/mfa-store";
 import { scrubTargetPiiFromAudit, scrubLegacySessionRevokePii, scrubOwnedRequestPii, scrubRequesterPii } from "./audit-scrub";
 import { REDACTED_USER_NAME } from "./audit";
+import { Permission } from "./permissions";
 import { Prisma } from "@/generated/prisma";
 
-// The encryption extension in ./prisma changes the client's type, so the
-// generated Prisma.TransactionClient is NOT assignable to the interactive-tx
-// callback param — derive the tx client type from the extended client instead
-// (same Omit shape the generated TransactionClient uses).
-type TxClient = Omit<
-  typeof prisma,
-  "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends"
->;
+// The extended client's transaction client (see PrismaTxClient in ./prisma).
+type TxClient = PrismaTxClient;
 
 // Thrown inside the deactivation transaction to roll it back when the target is
 // the last active admin (guardrail 23: propagate out of the tx, don't swallow).
@@ -30,26 +25,75 @@ export class NotDeactivatedError extends Error {}
 // first, unlocked read).
 export class TargetBecameAdminError extends Error {}
 
+// Raised when the target's row is gone by the time the transaction re-reads it
+// (a shadow account hard-deleted by a Discord merge, say). Routes answer 404.
+export class TargetGoneError extends Error {}
+
+// Advisory lock 42: the lock every path that changes who is an active ADMIN, or
+// acts on an account depending on whether it is one, takes FIRST in its
+// transaction (role change, deactivate, reactivate, purge, session revoke, 2FA
+// reset, Jellyfin offboarding). One statement, spelled once: a typo at any one
+// site would silently drop it out of the serialization. Tests match the text.
+export const USER_ROLE_LOCK_SQL = "SELECT pg_advisory_xact_lock(42)";
+
+export async function lockUserRolesInTx(tx: { $executeRawUnsafe: (q: string) => Promise<unknown> }): Promise<void> {
+  await tx.$executeRawUnsafe(USER_ROLE_LOCK_SQL);
+}
+
+// An admin target is one with role ADMIN OR the ADMIN superbit. The users PATCH
+// keeps the two in lockstep, but these gates guard what a MANAGE_USERS delegate
+// may do to an account, so they must not depend on that invariant holding for
+// legacy or hand-edited rows.
+export function isAdminTarget(row: { role: string; permissions?: bigint | null } | null | undefined): boolean {
+  if (!row) return false;
+  if (row.role === "ADMIN") return true;
+  return typeof row.permissions === "bigint" && (row.permissions & Permission.ADMIN) !== 0n;
+}
+
+export interface LockedTarget {
+  role: string;
+  permissions: bigint | null;
+  deactivatedAt: Date | null;
+}
+
 type LockTx = {
   $executeRawUnsafe: (q: string) => Promise<unknown>;
-  user: { findUnique: (a: { where: { id: string }; select: { role: true } }) => Promise<{ role: string } | null> };
+  user: {
+    findUnique: (a: {
+      where: { id: string };
+      select: { role: true; permissions: true; deactivatedAt: true };
+    }) => Promise<LockedTarget | null>;
+  };
 };
 
-// Re-resolve the target's role INSIDE the transaction, under the same advisory
-// lock 42 the role-change / deactivate routes take, and refuse a non-ADMIN caller
-// when it is an ADMIN now. Call it first in the tx that performs the action.
+// Takes lock 42, re-reads the target INSIDE the transaction, and refuses a
+// non-ADMIN caller when it is an admin target now. Returns the fresh row, or null
+// when it is gone. Call it first in the tx that performs the action.
+export async function lockTargetInTx(tx: LockTx, id: string, callerIsAdmin: boolean): Promise<LockedTarget | null> {
+  await lockUserRolesInTx(tx);
+  const fresh = await tx.user.findUnique({
+    where: { id },
+    select: { role: true, permissions: true, deactivatedAt: true },
+  });
+  if (isAdminTarget(fresh) && !callerIsAdmin) throw new TargetBecameAdminError();
+  return fresh;
+}
+
 export async function assertTargetNotAdminInTx(tx: LockTx, id: string, callerIsAdmin: boolean): Promise<void> {
-  await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
-  const fresh = await tx.user.findUnique({ where: { id }, select: { role: true } });
-  if (fresh?.role === "ADMIN" && !callerIsAdmin) throw new TargetBecameAdminError();
+  await lockTargetInTx(tx, id, callerIsAdmin);
 }
 
 // The tombstone address a purge rewrites `email` to. RFC-2606 reserved `.invalid`
 // (never routable) with the row's own id embedded, so it is unique per user AND
 // unforgeable as a real address — which makes it a reliable structural marker
 // that a row has been scrubbed.
+// The two halves around the id, so the set-based SQL in markLegacyPurgedAccounts
+// binds the same pattern instead of spelling it again.
+const PURGED_EMAIL_PREFIX = "deleted-";
+const PURGED_EMAIL_SUFFIX = "@deleted.invalid";
+
 export function purgedEmailFor(id: string): string {
-  return `deleted-${id}@deleted.invalid`;
+  return `${PURGED_EMAIL_PREFIX}${id}${PURGED_EMAIL_SUFFIX}`;
 }
 
 // Has this row been scrubbed? `purgedAt` is the explicit marker, but it did not
@@ -103,7 +147,7 @@ export async function deactivateUserInTx(
     // administration. Advisory lock 42 + an atomic count of non-deactivated
     // admins guards against concurrent deletes/demotions (mirrors the role-change
     // CAS). A 0-row result throws to roll the whole thing back.
-    await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
+    await lockUserRolesInTx(tx);
     const rows = await tx.$executeRaw`
       UPDATE "User" SET "deactivatedAt" = ${now}
       WHERE id = ${id} AND "deactivatedAt" IS NULL
@@ -143,13 +187,16 @@ export async function reactivateUser(
   // The calendar feed URL is cleared too: it is a bearer credential handed out
   // before the account was disabled, and re-enabling must not silently revive a
   // link that may have leaked in the meantime. The user can generate a new one.
+  //
+  // The tombstone is bound as a value from purgedEmailFor, so this guard can't
+  // drift from the address the purge writes.
   const rows = await db.$executeRaw`
     UPDATE "User" SET "deactivatedAt" = NULL,
       "calendarTokenHash" = NULL, "calendarTokenCreatedAt" = NULL
     WHERE id = ${id}
       AND "purgedAt" IS NULL
       AND "deactivatedAt" IS NOT NULL
-      AND email <> 'deleted-' || id || '@deleted.invalid'
+      AND email <> ${purgedEmailFor(id)}
   `;
   return rows === 1;
 }
@@ -160,7 +207,9 @@ export async function reactivateUser(
 // re-disables any that were already re-enabled into a zombie. Matches on the
 // tombstone email, which only a purge can have written.
 //
-// Idempotent, and best-effort: never throws, never blocks boot.
+// Idempotent, and best-effort: never throws, never blocks boot. The match is
+// set-based, so it rebuilds purgedEmailFor's address in SQL from the same two
+// bound halves.
 export async function markLegacyPurgedAccounts(): Promise<void> {
   try {
     const healed = await prisma.$executeRaw`
@@ -168,7 +217,7 @@ export async function markLegacyPurgedAccounts(): Promise<void> {
       SET "purgedAt" = COALESCE("deactivatedAt", NOW()),
           "deactivatedAt" = COALESCE("deactivatedAt", NOW())
       WHERE "purgedAt" IS NULL
-        AND email = 'deleted-' || id || '@deleted.invalid'
+        AND email = ${PURGED_EMAIL_PREFIX} || id || ${PURGED_EMAIL_SUFFIX}
     `;
     if (healed > 0) {
       console.warn(
@@ -205,8 +254,53 @@ export async function purgeUserDataInTx(
   if (row.purgedAt) return; // idempotent — already scrubbed
   if (!row.deactivatedAt) throw new NotDeactivatedError();
 
-  // Remove provider tokens/subject (OAuth) + every device session, then
-  // anonymize the row in place (keeps requests/votes/issues linked).
+  await purgeCredentialsInTx(tx, id);
+  await purgeDeviceLinksInTx(tx, id);
+  await purgePersonalDataInTx(tx, id);
+  await scrubAuditTrailInTx(tx, id, row.email);
+  // Then anonymize the row in place (keeps requests/votes/issues linked).
+  // Re-check deactivation atomically in the same statement that scrubs the row.
+  // The precondition read at the top of this function is several awaited
+  // deletes ago — a concurrent reactivate can clear deactivatedAt in that
+  // window, and an unguarded update below would still go through, producing a
+  // NEW zombie shape: purgedAt set (isPurgedRow reports it scrubbed) but
+  // deactivatedAt NULL (every OTHER last-admin CAS in this codebase — the
+  // role-change route and deactivateUserInTx both count
+  // `role = 'ADMIN' AND deactivatedAt IS NULL` — would miscount it as a second
+  // active admin and let the real last admin be deactivated or demoted).
+  const scrubbed = await tx.user.updateMany({
+    where: { id, deactivatedAt: { not: null } },
+    data: {
+      name: "Deleted user",
+      // isPurgedRow, reactivateUser and markLegacyPurgedAccounts all recognise a
+      // scrubbed row by this exact address (built from the same constants).
+      email: purgedEmailFor(id),
+      image: null,
+      passwordHash: null,
+      discordId: null,
+      notificationEmail: null,
+      plexClientId: null,
+      plexUserId: null,
+      jellyfinUserId: null,
+      jellyfinInstance: null,
+      purgedAt: now,
+      sessionsRevokedAt: now, // pushes every existing JWT's iat below the cutoff
+    },
+  });
+  // Lost the race — the account was reactivated after our read above. Throw so
+  // the caller's $transaction rolls back everything issued so far, rather than
+  // leaving a half-scrubbed row that's no longer deactivated.
+  if (scrubbed.count === 0) throw new NotDeactivatedError();
+}
+
+// ─── The purge's steps, grouped by what they remove ────────────────────────
+// Every per-user table a purge must reach belongs in exactly one of these. Each
+// runs inside the purge's transaction and awaits its queries in turn (guardrail
+// 23c).
+
+// Sign-in material: OAuth rows (provider tokens and subjects), device sessions,
+// two-factor credentials.
+async function purgeCredentialsInTx(tx: TxClient, id: string): Promise<void> {
   await tx.account.deleteMany({ where: { userId: id } });
   await tx.authSession.deleteMany({ where: { userId: id } });
   // Two-factor credentials (guardrail 6d): the encrypted TOTP secret, every
@@ -215,12 +309,24 @@ export async function purgeUserDataInTx(
   // data and an erasure must not leave it behind. Same write set as the admin
   // reset and the self-service disable.
   await deleteAllMfaInTx(tx, id);
+}
+
+// Push devices and pending Discord link/merge codes.
+async function purgeDeviceLinksInTx(tx: TxClient, id: string): Promise<void> {
   // Orphaned device + Discord-link rows would otherwise outlive the anonymized
   // row and keep delivering pushes (to a possibly handed-down device) or leave
   // dangling unique link/merge rows. Remove them in the same transaction.
   await tx.pushSubscription.deleteMany({ where: { userId: id } });
+  // The removed-device markers name this account's endpoints (hashed); with no
+  // account left to sign in, they guard nothing.
+  await tx.pushSubscriptionRemoval.deleteMany({ where: { userId: id } });
   await tx.discordLinkToken.deleteMany({ where: { userId: id } });
   await tx.discordMergeCode.deleteMany({ where: { userId: id } });
+}
+
+// The media-server identity link and the private per-user data the instance has
+// no use for once the identity is gone.
+async function purgePersonalDataInTx(tx: TxClient, id: string): Promise<void> {
   // Sever the play-history identity link: MediaServerUser rows FK this user and
   // are NOT cascade-deleted (guardrail 28). Leaving userId set would let a new
   // account with the same email/sub inherit this user's watch history, IPs, and
@@ -252,12 +358,23 @@ export async function purgeUserDataInTx(
   await tx.traktWatchedItem.deleteMany({ where: { userId: id } });
   await tx.traktRating.deleteMany({ where: { userId: id } });
   await tx.traktConnection.deleteMany({ where: { userId: id } });
+  // The watchlist auto-request ledger (guardrail 34b) keeps one row per title
+  // that was ever on this person's Summonarr, Plex or Trakt watchlist, with
+  // where it came from: the same private data as the watchlist rows above. It
+  // only exists to stop re-requesting in a loop, and a purged account is never
+  // polled again and can't be re-enabled.
+  await tx.autoRequestLedger.deleteMany({ where: { userId: id } });
   // A pending notification-email verification carries the candidate address in its
   // identifier, and the confirm link stays redeemable for its TTL — left behind, a
   // click after the purge would write that address back onto the scrubbed row.
   await tx.verificationToken.deleteMany({
     where: { identifier: { startsWith: verifyIdentifierPrefixFor(id) } },
   });
+}
+
+// The audit trail's names and emails for this account. `email` is the address
+// read before the scrub rewrites it.
+async function scrubAuditTrailInTx(tx: TxClient, id: string, email: string): Promise<void> {
   // The audit trail keeps WHAT happened to this account, not who it was
   // (audit-scrub.ts): admin-action rows ABOUT it lose the target name/email in
   // their details, and rows BY it lose the actor name (often the email) — both
@@ -271,42 +388,9 @@ export async function purgeUserDataInTx(
   // purge keeps every request, so this read sees all of them); the ones since
   // deleted, by requester id or, on older rows, by the email.
   await scrubTargetPiiFromAudit(tx, { target: `user:${id}` });
-  await scrubLegacySessionRevokePii(tx, id, row.email);
+  await scrubLegacySessionRevokePii(tx, id, email);
   const owned = await tx.mediaRequest.findMany({ where: { requestedBy: id }, select: { id: true } });
   await scrubOwnedRequestPii(tx, owned.map((r) => r.id));
-  await scrubRequesterPii(tx, id, row.email);
+  await scrubRequesterPii(tx, id, email);
   await tx.auditLog.updateMany({ where: { userId: id }, data: { userName: REDACTED_USER_NAME } });
-  // Re-check deactivation atomically in the same statement that scrubs the row.
-  // The precondition read at the top of this function is several awaited
-  // deletes ago — a concurrent reactivate can clear deactivatedAt in that
-  // window, and an unguarded update below would still go through, producing a
-  // NEW zombie shape: purgedAt set (isPurgedRow reports it scrubbed) but
-  // deactivatedAt NULL (every OTHER last-admin CAS in this codebase — the
-  // role-change route and deactivateUserInTx both count
-  // `role = 'ADMIN' AND deactivatedAt IS NULL` — would miscount it as a second
-  // active admin and let the real last admin be deactivated or demoted).
-  const scrubbed = await tx.user.updateMany({
-    where: { id, deactivatedAt: { not: null } },
-    data: {
-      name: "Deleted user",
-      // isPurgedRow checks for this exact address, and the raw SQL in
-      // reactivateUser / markLegacyPurgedAccounts spells the same pattern by
-      // hand. Keep them in step, or a scrubbed row stops being recognisable.
-      email: purgedEmailFor(id),
-      image: null,
-      passwordHash: null,
-      discordId: null,
-      notificationEmail: null,
-      plexClientId: null,
-      plexUserId: null,
-      jellyfinUserId: null,
-      jellyfinInstance: null,
-      purgedAt: now,
-      sessionsRevokedAt: now, // pushes every existing JWT's iat below the cutoff
-    },
-  });
-  // Lost the race — the account was reactivated after our read above. Throw so
-  // the caller's $transaction rolls back everything issued so far, rather than
-  // leaving a half-scrubbed row that's no longer deactivated.
-  if (scrubbed.count === 0) throw new NotDeactivatedError();
 }

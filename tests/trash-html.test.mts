@@ -3,8 +3,8 @@
 // React text rendering. The security contract is one-way stripping: output is
 // rendered as escaped text (never dangerouslySetInnerHTML), so the properties
 // that matter are (1) all tags removed — including adversarial reassembly
-// nesting, which is why the strip loops until stable — (2) `&amp;` decoded
-// LAST so `&amp;lt;` can never double-unescape into a live `<`, and
+// nesting, which is why the strip loops until stable — (2) entities decoded in
+// ONE pass so `&amp;lt;` can never double-unescape into a live `<`, and
 // (3) formatting the UI relies on is preserved: <br> → newline, anchor text
 // kept with the href dropped, whitespace collapsed.
 import { test } from "node:test";
@@ -83,17 +83,24 @@ test("HTML entities decode to their literal characters", () => {
   );
 });
 
-test("&amp; decodes LAST — &amp;lt; can never double-unescape into a live <", () => {
-  // If &amp; were decoded first, "&amp;lt;script&amp;gt;" would collapse to
-  // "<script>" via a second-pass &lt; match. Pin the safe ordering.
+test("&amp;lt; can never double-unescape into a live < (one decode pass)", () => {
+  // Decoded one entity after another with &amp; first, "&amp;lt;script&amp;gt;"
+  // would collapse to "<script>" via a second-pass &lt; match.
   assert.equal(stripTrashHtml("&amp;lt;script&amp;gt;"), "&lt;script&gt;");
   assert.equal(stripTrashHtml("&amp;amp;"), "&amp;");
 });
 
-test("only the five listed entities decode — other numeric entities stay literal", () => {
+test("only the listed named entities decode — other numeric entities stay literal", () => {
   // Current behavior pinned: &#60;/&#62; are NOT in the decode table, so they
   // remain inert text and cannot smuggle angle brackets past the strip.
   assert.equal(stripTrashHtml("&#60;script&#62;"), "&#60;script&#62;");
+});
+
+test("&nbsp; reads as a space and &apos; as an apostrophe", () => {
+  assert.equal(stripTrashHtml("1080p&nbsp;&nbsp;WEB&nbsp;only"), "1080p WEB only");
+  assert.equal(stripTrashHtml("TRaSH&apos;s pick"), "TRaSH's pick");
+  // Unknown named entities are left as written.
+  assert.equal(stripTrashHtml("&copy; TRaSH"), "&copy; TRaSH");
 });
 
 test("whitespace collapses: runs of spaces/tabs to one space, trimmed around newlines and ends", () => {

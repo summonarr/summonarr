@@ -70,17 +70,20 @@ test("sanitizeText preserves interior tab/LF/CR", () => {
   assert.equal(sanitizeText("a\x08\x0B\x0C\x0Eb"), "ab");
 });
 
-// Pin CURRENT behavior: despite the "control chars" comment in the source, the
-// strip range ends at \x1F — DEL (\x7F) and the C1 controls (U+0080–U+009F)
-// pass through untouched. Not asserting this is desirable, only that it is
-// what the code does today; tightening it would be a deliberate change.
-test("sanitizeText passes DEL and C1 controls through (current behavior)", () => {
+// DEL (\x7F) and the C1 controls (U+0080–U+009F) are stripped too, as are
+// the invisible zero-width space, word joiner and BOM. The zero-width joiner
+// survives because emoji sequences need it.
+test("sanitizeText strips DEL, C1 controls and invisible characters, keeping ZWJ", () => {
   const del = String.fromCharCode(0x7f);
   const c1Start = String.fromCharCode(0x80);
   const nel = String.fromCharCode(0x85); // U+0085 NEL, a C1 control
   const c1End = String.fromCharCode(0x9f);
-  assert.equal(sanitizeText(`a${del}b`), `a${del}b`);
-  assert.equal(sanitizeText(`a${c1Start}${nel}${c1End}b`), `a${c1Start}${nel}${c1End}b`);
+  assert.equal(sanitizeText(`a${del}b`), "ab");
+  assert.equal(sanitizeText(`a${c1Start}${nel}${c1End}b`), "ab");
+  assert.equal(sanitizeText("a\u200Bb\u2060c\uFEFFd"), "abcd");
+  const family = "\u{1F468}\u200D\u{1F469}";
+  assert.equal(sanitizeText(family), family);
+  assert.equal(sanitizeText("caf\u00E9"), "caf\u00E9", "Latin-1 letters above the C1 range survive");
 });
 
 // sanitizeForLog's scope was deliberately widened past CR/LF: a value that

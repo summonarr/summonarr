@@ -1,11 +1,14 @@
+import { cache } from "react";
 import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import type { ArrVariant } from "@/lib/arr";
 import type { TrashService } from "@/components/admin/trash-guides/types";
+import { first, type PageSearchParams } from "@/lib/search-params";
 
-export type TrashPageSearchParams = Promise<{ service?: string; variant?: string }>;
+// A repeated key arrives as an array at runtime; each is read by its first value.
+export type TrashPageSearchParams = Promise<PageSearchParams>;
 
 // A configured instance the trash pages can target (drives the nav toggle).
 export interface TrashInstanceOption {
@@ -31,6 +34,14 @@ export interface TrashPageContext {
   namedInstancesConfigured: boolean;
 }
 
+// The configured Radarr and Sonarr instances, read once per request: the layout
+// and the page both need them, and React's cache() shares one read between the
+// two within a render. Scoped to these pages on purpose — crons, routes and
+// write paths call getSyncableArrInstances themselves and must see it fresh.
+export const loadTrashInstances = cache(() =>
+  Promise.all([getSyncableArrInstances("radarr"), getSyncableArrInstances("sonarr")]),
+);
+
 // Shared auth + service/instance lookup for every TRaSH sub-page. The layout already checks for
 // ADMIN, but Next can render a page without re-running its layout (e.g. on a prefetch or a
 // client-side navigation), so each page re-checks here too (guardrail 29).
@@ -40,13 +51,12 @@ export async function loadTrashPageContext(
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
-  const { service: rawService, variant: rawVariant } = await searchParams;
+  const sp = await searchParams;
+  const rawService = first(sp.service);
+  const rawVariant = first(sp.variant);
   const service: TrashService = rawService === "sonarr" ? "SONARR" : "RADARR";
 
-  const [radarrInstances, sonarrInstances] = await Promise.all([
-    getSyncableArrInstances("radarr"),
-    getSyncableArrInstances("sonarr"),
-  ]);
+  const [radarrInstances, sonarrInstances] = await loadTrashInstances();
   const serviceInstances = service === "RADARR" ? radarrInstances : sonarrInstances;
 
   // Accept the legacy "hd" spelling for the default instance; otherwise ?variant=

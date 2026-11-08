@@ -12,9 +12,20 @@
 // (guardrail 7c's shape), and a per-owner cooldown keeps a stream that flaps
 // across the limit from re-alerting every few seconds. State is the caller's
 // (a processSingleton in stream-limit-data.ts); these functions are pure.
+//
+// Hysteresis, asymmetric on purpose:
+//   - An owner ENTERS "over" only on sessions SEEN DURING THE CURRENT POLL TICK
+//     (lastSeenAt at or after the tick's start). A session that ended keeps its
+//     row for the 60s absence grace and is never re-stamped, so any age window
+//     counted it: a viewer who stopped on the TV and resumed on the phone a few
+//     seconds later was two streams. An age window also aged a healthy server's
+//     rows while a slow sibling server finished its fetch.
+//   - An owner LEAVES "over" only once the sessions seen within the hold window
+//     (the absence grace, measured back from the tick's start) are at or under
+//     the limit. A one-tick gap — a server fetch failing, a Jellyfin client
+//     briefly clearing NowPlayingItem — must not read as "back under the limit",
+//     or a continuous over-limit stretch re-alerts after every cooldown.
 
-/** A session not seen for this long no longer counts: it is on its way out. */
-export const STREAM_FRESH_MS = 120_000;
 /** One alert per owner per cooldown, however often they flap across the limit. */
 export const STREAM_ALERT_COOLDOWN_MS = 30 * 60_000;
 export const MAX_STREAM_LIMIT = 50;
@@ -37,8 +48,11 @@ export interface OwnerStreams {
   ownerKey: string;
   username: string;
   userId: string | null;
+  /** Sessions a server reported THIS tick: the only count that can put the owner over. */
   count: number;
-  /** Up to MAX_TITLES, for the alert text. */
+  /** Sessions seen within the hold window (this tick's included): what keeps them over. */
+  heldCount: number;
+  /** Up to MAX_TITLES of this tick's sessions, for the alert text. */
   titles: string[];
 }
 
@@ -55,17 +69,29 @@ export function ownerKeyOf(s: Pick<StreamSession, "userId" | "mediaServerUserId"
   return s.userId ? `u:${s.userId}` : `m:${s.mediaServerUserId}`;
 }
 
-export function countStreamsByOwner(sessions: readonly StreamSession[], now: Date): Map<string, OwnerStreams> {
+/**
+ * `seenSince`: the poll tick's start — a row stamped since is live this tick.
+ * `holdSince`: the start of the hold window (the tick's start minus the absence
+ * grace) — a row stamped since still holds an owner who is already over.
+ */
+export function countStreamsByOwner(
+  sessions: readonly StreamSession[],
+  seenSince: Date,
+  holdSince: Date,
+): Map<string, OwnerStreams> {
   const out = new Map<string, OwnerStreams>();
   for (const s of sessions) {
     if (s.isServerAdmin) continue;
-    if (now.getTime() - s.lastSeenAt.getTime() > STREAM_FRESH_MS) continue;
+    const seenAt = s.lastSeenAt.getTime();
+    if (seenAt < holdSince.getTime()) continue;
     const key = ownerKeyOf(s);
     let e = out.get(key);
     if (!e) {
-      e = { ownerKey: key, username: s.username, userId: s.userId, count: 0, titles: [] };
+      e = { ownerKey: key, username: s.username, userId: s.userId, count: 0, heldCount: 0, titles: [] };
       out.set(key, e);
     }
+    e.heldCount++;
+    if (seenAt < seenSince.getTime()) continue;
     e.count++;
     if (e.titles.length < MAX_TITLES) e.titles.push(streamLabel(s));
   }
@@ -95,8 +121,10 @@ export interface StreamEvaluation {
 
 /**
  * Pure transition step. `limit` 0 clears everything (the feature is off).
- * An owner that is over but was already over, or is inside the cooldown, is not
- * re-alerted. An owner who dropped back to the limit leaves `over` (so the next
+ * An owner enters `over` when this tick's `count` exceeds the limit, and stays
+ * while `heldCount` does (see the hysteresis note at the top). An owner that is
+ * over but was already over, or is inside the cooldown, is not re-alerted. An
+ * owner whose held sessions dropped back to the limit leaves `over` (so the next
  * climb alerts again, once the cooldown allows).
  */
 export function evaluateStreams(
@@ -110,9 +138,11 @@ export function evaluateStreams(
   const alertedAt = new Map(prev.alertedAt);
   const alert: OwnerStreams[] = [];
   for (const [key, owner] of counts) {
-    if (owner.count <= limit) continue;
+    const wasOver = prev.over.has(key);
+    const isOver = owner.count > limit || (wasOver && owner.heldCount > limit);
+    if (!isOver) continue;
     over.add(key);
-    if (prev.over.has(key)) continue;
+    if (wasOver) continue;
     const last = alertedAt.get(key);
     if (last !== undefined && nowMs - last < STREAM_ALERT_COOLDOWN_MS) continue;
     alertedAt.set(key, nowMs);

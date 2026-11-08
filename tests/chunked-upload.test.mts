@@ -21,7 +21,9 @@ import {
   clearSession,
 } from "../src/lib/import-session.ts";
 import { MAX_CIPHERTEXT_BYTES } from "../src/lib/backup-import.ts";
-import { DEFAULT_CHUNK_SIZE, uploadInChunks } from "../src/lib/chunked-upload.ts";
+import { DEFAULT_CHUNK_SIZE, chunkedUploadErrorMessage, uploadInChunks } from "../src/lib/chunked-upload.ts";
+import { createTranslator } from "../src/lib/i18n/translate.ts";
+import { CATALOGS } from "../src/lib/i18n/catalogs.ts";
 import type { ChunkedUploadProgress } from "../src/lib/chunked-upload.ts";
 
 // backup-import transitively loads prisma + token-crypto; both read env
@@ -528,14 +530,14 @@ test("an HTTP error surfaces the server's error string and fires the DELETE canc
     endpoint: "/api/x",
     chunkSize: 4,
   });
-  assert.deepEqual(outcome, { kind: "error", status: 413, error: "too big" });
+  assert.deepEqual(outcome, { kind: "error", status: 413, code: "server", error: "too big" });
   assert.deepEqual(events, ["POST:0", "POST:1", "DELETE"]); // chunk 2 never sent
   const cancel = calls[calls.length - 1];
   assert.equal(cancel.method, "DELETE");
   assert.equal(cancel.headers["X-Upload-Id"], calls[0].headers["X-Upload-Id"]);
 });
 
-test("an HTTP error without a server error string falls back to the chunk-position message", async () => {
+test("an HTTP error without a server error string falls back to the chunkFailed code with the chunk position", async () => {
   const events: string[] = [];
   scriptFetch(events, () => jsonResponse(500, {}));
   const outcome = await uploadInChunks({
@@ -543,10 +545,10 @@ test("an HTTP error without a server error string falls back to the chunk-positi
     endpoint: "/api/x",
     chunkSize: 4,
   });
-  assert.deepEqual(outcome, { kind: "error", status: 500, error: "Chunk 1/3 failed" });
+  assert.deepEqual(outcome, { kind: "error", status: 500, code: "chunkFailed", chunk: 1, total: 3 });
 });
 
-test("a non-JSON response (auth-gate HTML, or no content-type) aborts with the redirect explanation", async () => {
+test("a non-JSON response (auth-gate HTML, or no content-type) aborts with the nonJson code", async () => {
   for (const contentType of ["text/html; charset=utf-8", null]) {
     const events: string[] = [];
     scriptFetch(events, () => jsonResponse(200, {}, { contentType }));
@@ -554,8 +556,8 @@ test("a non-JSON response (auth-gate HTML, or no content-type) aborts with the r
     assert.equal(outcome.kind, "error");
     if (outcome.kind === "error") {
       assert.equal(outcome.status, 200); // fetch followed the redirect to a 200 page
-      assert.match(outcome.error, /non-JSON response/);
-      assert.match(outcome.error, /\/api\/x/);
+      assert.equal(outcome.code, "nonJson");
+      assert.equal(outcome.error, undefined, "no English prose: the caller translates the code");
     }
     assert.equal(events[events.length - 1], "DELETE");
   }
@@ -573,27 +575,24 @@ test("all chunks accepted but no complete flag → error with null status, plus 
   const events: string[] = [];
   scriptFetch(events, () => jsonResponse(200, { ok: true, received: 1 }));
   const outcome = await uploadInChunks({ file: new File(["x"], "a"), endpoint: "/api/x" });
-  assert.deepEqual(outcome, {
-    kind: "error",
-    status: null,
-    error: "Upload finished without a server-side completion.",
-  });
+  assert.deepEqual(outcome, { kind: "error", status: null, code: "noCompletion" });
   assert.deepEqual(events, ["POST:0", "DELETE"]);
 });
 
-test("a thrown network error becomes an error outcome with the message, and still cancels", async () => {
+test("a thrown network error becomes a network-coded error outcome (no raw message), and still cancels", async () => {
   const events: string[] = [];
   scriptFetch(events, () => {
     throw new Error("boom: connection reset");
   });
   const outcome = await uploadInChunks({ file: new File(["x"], "a"), endpoint: "/api/x" });
-  assert.deepEqual(outcome, { kind: "error", status: null, error: "boom: connection reset" });
+  assert.deepEqual(outcome, { kind: "error", status: null, code: "network" });
   assert.deepEqual(events, ["POST:0", "DELETE"]);
 });
 
-test("an empty file sends zero chunks and reports no-completion (pins current behavior)", async () => {
-  // ceil(0 / chunkSize) = 0 → the loop never runs, so a 0-byte file can never
-  // complete; the server-side startSession would reject totalSize 0 anyway.
+test("an empty file is refused up front as empty: no request at all, not even the cancel", async () => {
+  // ceil(0 / chunkSize) = 0 chunks, so it could never complete; the server-side
+  // startSession would reject totalSize 0 anyway. Saying "empty" beats "the
+  // server never confirmed the restore".
   const events: string[] = [];
   const calls = scriptFetch(events, () => jsonResponse(200, { complete: true, ok: true }));
   const outcome = await uploadInChunks({
@@ -601,11 +600,262 @@ test("an empty file sends zero chunks and reports no-completion (pins current be
     endpoint: "/api/x",
     onProgress: progressRecorder(events),
   });
-  assert.deepEqual(outcome, {
-    kind: "error",
-    status: null,
-    error: "Upload finished without a server-side completion.",
+  assert.deepEqual(outcome, { kind: "error", status: null, code: "empty" });
+  assert.deepEqual(events, []);
+  assert.equal(calls.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// chunked-upload: retry, timeout and cancellation
+// ---------------------------------------------------------------------------
+
+const NO_WAIT = [0, 0, 0];
+
+test("a non-final chunk whose request throws is retried and the upload completes, with no cancel", async () => {
+  const events: string[] = [];
+  let failedOnce = false;
+  scriptFetch(events, (n, req) => {
+    if (req.headers["X-Chunk-Index"] === "1" && !failedOnce) {
+      failedOnce = true;
+      throw new TypeError("network error");
+    }
+    return req.headers["X-Chunk-Index"] === "2"
+      ? jsonResponse(200, { complete: true, ok: true })
+      : jsonResponse(200, { ok: true });
   });
-  assert.deepEqual(events, ["progress:upload:0/0", "DELETE"]);
-  assert.equal(calls.length, 1); // only the cancel DELETE, no POSTs
+  const outcome = await uploadInChunks({
+    file: new File(["0123456789"], "dump.enc"),
+    endpoint: "/api/x",
+    chunkSize: 4,
+    retryDelaysMs: NO_WAIT,
+  });
+  assert.deepEqual(outcome, { kind: "complete", ok: true, data: { complete: true, ok: true } });
+  assert.deepEqual(events, ["POST:0", "POST:1", "POST:1", "POST:2"]);
+});
+
+test("a proxy's 502 page on a non-final chunk is retried; a JSON error is not", async () => {
+  const events: string[] = [];
+  let gateway = 0;
+  scriptFetch(events, (_n, req) => {
+    if (req.headers["X-Chunk-Index"] === "0" && gateway++ === 0) {
+      return jsonResponse(502, {}, { contentType: "text/html" });
+    }
+    return req.headers["X-Chunk-Index"] === "1"
+      ? jsonResponse(200, { complete: true, ok: true })
+      : jsonResponse(200, { ok: true });
+  });
+  const ok = await uploadInChunks({
+    file: new File(["01234567"], "dump.enc"),
+    endpoint: "/api/x",
+    chunkSize: 4,
+    retryDelaysMs: NO_WAIT,
+  });
+  assert.equal(ok.kind, "complete");
+  assert.deepEqual(events, ["POST:0", "POST:0", "POST:1"]);
+
+  // The server's own refusal is an answer, not a transient failure.
+  const refused: string[] = [];
+  scriptFetch(refused, () => jsonResponse(503, { error: "Backup is not configured." }));
+  const r = await uploadInChunks({
+    file: new File(["01234567"], "dump.enc"),
+    endpoint: "/api/x",
+    chunkSize: 4,
+    retryDelaysMs: NO_WAIT,
+  });
+  assert.deepEqual(r, { kind: "error", status: 503, code: "server", error: "Backup is not configured." });
+  assert.deepEqual(refused, ["POST:0", "DELETE"]);
+});
+
+test("a retry the server answers 409 with expected = index + 1 counts as landed", async () => {
+  // The first attempt reached the server but its answer was lost.
+  const events: string[] = [];
+  let attempts = 0;
+  scriptFetch(events, (_n, req) => {
+    if (req.headers["X-Chunk-Index"] === "0") {
+      if (attempts++ === 0) throw new TypeError("connection reset");
+      return jsonResponse(409, { error: "Out-of-order chunk. Next expected index: 1.", expected: 1 });
+    }
+    return jsonResponse(200, { complete: true, ok: true });
+  });
+  const outcome = await uploadInChunks({
+    file: new File(["01234567"], "dump.enc"),
+    endpoint: "/api/x",
+    chunkSize: 4,
+    retryDelaysMs: NO_WAIT,
+  });
+  assert.equal(outcome.kind, "complete");
+  assert.deepEqual(events, ["POST:0", "POST:0", "POST:1"]);
+});
+
+test("a 409 that is a real ordering error still fails the upload", async () => {
+  const events: string[] = [];
+  let attempts = 0;
+  scriptFetch(events, (_n, req) => {
+    if (req.headers["X-Chunk-Index"] === "0" && attempts++ === 0) throw new TypeError("connection reset");
+    return jsonResponse(409, { error: "Out-of-order chunk. Next expected index: 3.", expected: 3 });
+  });
+  const outcome = await uploadInChunks({
+    file: new File(["01234567"], "dump.enc"),
+    endpoint: "/api/x",
+    chunkSize: 4,
+    retryDelaysMs: NO_WAIT,
+  });
+  assert.deepEqual(outcome, { kind: "error", status: 409, code: "server", error: "Out-of-order chunk. Next expected index: 3." });
+  assert.deepEqual(events, ["POST:0", "POST:0", "DELETE"], "the retry's 409 ends the upload; chunk 1 is never sent");
+});
+
+test("a 409 on a FIRST attempt is never read as landed: only a retry can have landed before", async () => {
+  const events: string[] = [];
+  scriptFetch(events, () => jsonResponse(409, { error: "Out-of-order chunk. Next expected index: 1.", expected: 1 }));
+  const outcome = await uploadInChunks({
+    file: new File(["01234567"], "dump.enc"),
+    endpoint: "/api/x",
+    chunkSize: 4,
+    retryDelaysMs: NO_WAIT,
+  });
+  assert.equal(outcome.kind, "error");
+  assert.deepEqual(events, ["POST:0", "DELETE"]);
+});
+
+test("the FINAL chunk is never retried — it runs the restore", async () => {
+  for (const respond of [
+    () => { throw new TypeError("network error"); },
+    () => jsonResponse(504, {}, { contentType: "text/html" }),
+  ]) {
+    const events: string[] = [];
+    scriptFetch(events, (_n, req) => (req.headers["X-Chunk-Index"] === "1" ? respond() : jsonResponse(200, { ok: true })));
+    const outcome = await uploadInChunks({
+      file: new File(["01234567"], "dump.enc"),
+      endpoint: "/api/x",
+      chunkSize: 4,
+      retryDelaysMs: NO_WAIT,
+    });
+    assert.equal(outcome.kind, "error");
+    assert.deepEqual(events, ["POST:0", "POST:1", "DELETE"]);
+  }
+});
+
+test("retries are bounded: a chunk that keeps failing gives up and cancels", async () => {
+  const events: string[] = [];
+  scriptFetch(events, () => { throw new TypeError("network error"); });
+  const outcome = await uploadInChunks({
+    file: new File(["01234567"], "dump.enc"),
+    endpoint: "/api/x",
+    chunkSize: 4,
+    retryDelaysMs: NO_WAIT,
+  });
+  assert.deepEqual(outcome, { kind: "error", status: null, code: "network" });
+  assert.deepEqual(events, ["POST:0", "POST:0", "POST:0", "POST:0", "DELETE"]);
+});
+
+test("a hung non-final chunk times out and is retried", async () => {
+  const events: string[] = [];
+  let hung = false;
+  fetchImpl = (_input, init) => {
+    const method = init?.method ?? "GET";
+    const headers = { ...(init?.headers as Record<string, string> | undefined) };
+    if (method === "DELETE") {
+      events.push("DELETE");
+      return Promise.resolve(jsonResponse(200, {}) as unknown as Response);
+    }
+    events.push(`POST:${headers["X-Chunk-Index"]}`);
+    if (headers["X-Chunk-Index"] === "0" && !hung) {
+      hung = true;
+      // Never answers; only the per-chunk timeout ends it.
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      });
+    }
+    return Promise.resolve(
+      (headers["X-Chunk-Index"] === "1" ? jsonResponse(200, { complete: true, ok: true }) : jsonResponse(200, { ok: true })) as unknown as Response,
+    );
+  };
+  const outcome = await uploadInChunks({
+    file: new File(["01234567"], "dump.enc"),
+    endpoint: "/api/x",
+    chunkSize: 4,
+    retryDelaysMs: NO_WAIT,
+    chunkTimeoutMs: 20,
+  });
+  assert.equal(outcome.kind, "complete");
+  assert.deepEqual(events, ["POST:0", "POST:0", "POST:1"]);
+});
+
+test("aborting the caller's signal mid-upload stops it, cancels the server session, and reports an error", async () => {
+  const events: string[] = [];
+  const abort = new AbortController();
+  scriptFetch(events, (n) => {
+    if (n === 0) abort.abort(); // the page is left while chunk 0 is in flight
+    return jsonResponse(200, { ok: true });
+  });
+  const outcome = await uploadInChunks({
+    file: new File(["0123456789"], "dump.enc"),
+    endpoint: "/api/x",
+    chunkSize: 4,
+    signal: abort.signal,
+    retryDelaysMs: NO_WAIT,
+  });
+  assert.equal(outcome.kind, "error");
+  if (outcome.kind === "error") assert.equal(outcome.code, "cancelled");
+  assert.deepEqual(events, ["POST:0", "DELETE"], "no further chunk is sent after the abort");
+});
+
+test("the caller's abort reaches the chunk request in flight", async () => {
+  const seen: Array<{ index: string; abortedDuringRequest: boolean }> = [];
+  const abort = new AbortController();
+  fetchImpl = (_input, init) => {
+    const headers = { ...(init?.headers as Record<string, string> | undefined) };
+    if ((init?.method ?? "GET") === "DELETE") return Promise.resolve(jsonResponse(200, {}) as unknown as Response);
+    const signal = init?.signal ?? undefined;
+    if (headers["X-Chunk-Index"] === "1") abort.abort(); // the user leaves mid-request
+    seen.push({ index: headers["X-Chunk-Index"], abortedDuringRequest: signal?.aborted === true });
+    return Promise.resolve(jsonResponse(200, { ok: true }) as unknown as Response);
+  };
+  const outcome = await uploadInChunks({
+    file: new File(["0123456789"], "dump.enc"),
+    endpoint: "/api/x",
+    chunkSize: 4,
+    signal: abort.signal,
+  });
+  assert.equal(outcome.kind, "error");
+  assert.deepEqual(seen, [
+    { index: "0", abortedDuringRequest: false },
+    { index: "1", abortedDuringRequest: true },
+  ]);
+});
+
+// ---------------------------------------------------------------------------
+// chunked-upload: error outcomes are codes the caller translates
+// ---------------------------------------------------------------------------
+
+test("a gateway page still failing after the retries is the chunkFailed code with its position and status", async () => {
+  const events: string[] = [];
+  scriptFetch(events, () => jsonResponse(502, {}, { contentType: "text/html" }));
+  const outcome = await uploadInChunks({
+    file: new File(["01234567"], "dump.enc"),
+    endpoint: "/api/x",
+    chunkSize: 4,
+    retryDelaysMs: NO_WAIT,
+  });
+  assert.deepEqual(outcome, { kind: "error", status: 502, code: "chunkFailed", chunk: 1, total: 2 });
+});
+
+test("chunkedUploadErrorMessage translates each code, and shows the server's own text as-is", () => {
+  const de = createTranslator("de", CATALOGS.de, CATALOGS.en);
+  const en = createTranslator("en", CATALOGS.en, CATALOGS.en);
+  for (const code of ["chunkFailed", "nonJson", "noCompletion", "empty", "network", "cancelled"] as const) {
+    const outcome = { kind: "error" as const, status: 502, code, chunk: 2, total: 5 };
+    const english = chunkedUploadErrorMessage(outcome, en);
+    const german = chunkedUploadErrorMessage(outcome, de);
+    assert.ok(!english.startsWith("shared."), `${code}: the key must resolve, got ${english}`);
+    assert.notEqual(german, english, `${code}: a German admin must not see English`);
+  }
+  assert.match(
+    chunkedUploadErrorMessage({ kind: "error", status: 502, code: "chunkFailed", chunk: 2, total: 5 }, en),
+    /2.*5.*502/,
+  );
+  assert.equal(
+    chunkedUploadErrorMessage({ kind: "error", status: 503, code: "server", error: "Backup ist nicht eingerichtet." }, en),
+    "Backup ist nicht eingerichtet.",
+  );
 });

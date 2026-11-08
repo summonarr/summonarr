@@ -1,13 +1,13 @@
 import Link from "next/link";
 import { requireAppSession } from "@/lib/require-app-session";
-import { getMyPlayStats } from "@/lib/my-watch-history";
-import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
-import { posterUrl } from "@/lib/tmdb-types";
+import { getMyPlayStats, isMediaServerProvider } from "@/lib/my-watch-history";
+import { resolvePosterMap, posterSrcFor } from "@/lib/poster-cache";
 import { BarChart3, ChevronRight, Sparkles } from "@/components/icons";
 import { EmptyState, PageHeader } from "@/components/ui/design";
 import { MyStatsView, type MyStatsData } from "@/components/watch-history/my-stats-view";
 import { TrackingOffState } from "@/components/watch-history/tracking-off-state";
 import { isPlayHistoryEnabled } from "@/lib/play-history";
+import { zonedTodayIso } from "@/lib/stats-time-zone";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getTranslator } from "@/lib/i18n/server";
 
@@ -21,12 +21,12 @@ export const dynamic = "force-dynamic";
 // param exists, so nothing here can widen the scope to another user.
 export default async function MyStatsPage() {
   const session = await requireAppSession();
-  const t = await getTranslator();
+  const [t, trackingOn] = await Promise.all([getTranslator(), isPlayHistoryEnabled()]);
 
   // Tracking off ⇒ nothing is recorded, so the "your stats will appear here"
   // copy below would be false. Say so (the /popular gate) and skip the
   // aggregate read entirely.
-  if (!(await isPlayHistoryEnabled())) {
+  if (!trackingOn) {
     return (
       <div className="ds-page-enter">
         <PageHeader title={t("personal.stats.title")} subtitle={t("personal.stats.subtitle")} />
@@ -44,9 +44,7 @@ export default async function MyStatsPage() {
   // Plex/Jellyfin sign-ins ARE media-server identities — for them an empty
   // result means "nothing recorded yet", not "unlinked account". Only
   // local/OIDC accounts can genuinely need linking (mirrors /watch-history).
-  const provider = session.user.provider ?? "";
-  const serverProvider =
-    provider === "plex" || provider === "jellyfin" || provider === "jellyfin-quickconnect";
+  const serverProvider = isMediaServerProvider(session.user.provider);
 
   let data: MyStatsData | null = null;
   if (stats) {
@@ -63,8 +61,10 @@ export default async function MyStatsPage() {
       lastActiveIso: stats.recentPlays[0]?.startedAt.toISOString() ?? null,
       activityCalendar: stats.activityCalendar,
       // Server-computed reference date passed as a prop — never Date.now() in
-      // the client render path (guardrail 16).
-      todayIso: new Date().toISOString(),
+      // the client render path (guardrail 16). The statistics zone's today, as
+      // the calendar's days are that zone's.
+      todayIso: zonedTodayIso(new Date(), stats.timeZone),
+      timeZone: stats.timeZone,
       playsByDay: stats.playsByDay,
       userHeatmap: stats.userHeatmap,
       platformBreakdown: stats.platformBreakdown,
@@ -74,9 +74,7 @@ export default async function MyStatsPage() {
         tmdbId: m.tmdbId,
         mediaType: m.mediaType,
         count: m.count,
-        posterSrc:
-          (m.tmdbId != null ? posters[posterPathKey(m.tmdbId, m.mediaType)] : undefined) ??
-          (m.posterPath ? posterUrl(m.posterPath, "w342") : null),
+        posterSrc: posterSrcFor(posters, m.tmdbId, m.mediaType, m.posterPath),
       })),
     };
   }

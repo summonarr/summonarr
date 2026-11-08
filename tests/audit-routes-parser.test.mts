@@ -272,6 +272,36 @@ test("the two-statement shared alias form resolves to the aliased handler's guar
   }
 });
 
+test("the real CLI accepts a cron route built on defineCronRoute or withCronActor, and only on cron/sync", () => {
+  // Every /api/cron/* route is `export const POST = defineCronRoute({ … })` (or
+  // a withCronActor alias, cron/trash-diagnostic). The wrapper calls
+  // getCronActor itself (tests/cron-route.test.mts pins that), so the audit
+  // accepts it by name, like withAdmin.
+  const defined = [
+    'export const POST = defineCronRoute({',
+    '  target: "x",',
+    "  lockId: X_LOCK_ID,",
+    "  async run() { return { body: {} }; },",
+    "});",
+  ].join("\n");
+  const aliased = [
+    "const handle = withCronActor(async () => NextResponse.json({}));",
+    "export const GET = handle;",
+    "export const POST = handle;",
+  ].join("\n");
+  const ok = auditFixture({ "cron/defined": defined, "cron/aliased": aliased, "sync/defined": defined });
+  assert.equal(ok.status, 0, ok.output);
+
+  const bare = auditFixture({ "cron/bare": "export async function POST() {\n  return NextResponse.json({});\n}\n" });
+  assert.equal(bare.status, 1, bare.output);
+  assert.match(bare.output, /cron\/sync handler missing/);
+
+  // Not an admin guard: an /api/admin route wrapped in it fails.
+  const admin = auditFixture({ "admin/thing": defined });
+  assert.equal(admin.status, 1, admin.output);
+  assert.match(admin.output, /admin handler missing an ADMIN-capable guard/);
+});
+
 test("PIN: an unguarded handler cannot borrow a sibling HTTP method's guard", () => {
   const src = [
     'export const GET = withAdmin(async (req, ctx, session) => {',
@@ -497,7 +527,7 @@ const WEAKER_SETTINGS_GUARDS: Record<string, string> = {
 test("PIN: the real CLI fails a /api/settings route guarded by anything weaker than withAdmin — on the bare route and in the subtree", () => {
   // The proxy 403s every non-ADMIN role on /api/settings and /api/settings/*
   // (tests/proxy.test.mts). A weaker wrapper would admit a caller the backstop
-  // refuses, on the path the proxy's matcher skips (prefetch-headed requests).
+  // refuses if the proxy were ever bypassed; the two layers must agree.
   for (const [label, source] of Object.entries(WEAKER_SETTINGS_GUARDS)) {
     for (const route of ["settings", "settings/plex"]) {
       const { status, output } = auditFixture({ [route]: source });

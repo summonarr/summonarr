@@ -5,7 +5,9 @@
 //
 //   1. A SUCCESSFUL fetch replaces exactly that server's rows: one transaction, a
 //      deleteMany scoped to (source, serverInstance), then the rows (guardrails
-//      4/13/35). Other servers' rows are untouched.
+//      4/13/35), then the snapshot's status — the rows and the status that
+//      vouches for them commit together or not at all. Other servers' rows are
+//      untouched.
 //   2. A FAILED server keeps its previous rows (a partial or empty snapshot would
 //      drop evidence) and records ok:false with the previous fetchedAt and counts
 //      preserved; the error is short and carries no URL or token.
@@ -41,13 +43,13 @@ const PLEX_REMOTE = "http://10.71.0.2:32400";
 const JF = "http://10.72.0.1:8096";
 type Call = { origin: string; path: string; params: URLSearchParams };
 let calls: Call[] = [];
-let respond: (url: URL) => Response | Promise<Response> = (url) => {
+let respond: (url: URL, init?: RequestInit) => Response | Promise<Response> = (url) => {
   throw new Error(`unexpected fetch ${url}`);
 };
-globalThis.fetch = (async (input: RequestInfo | URL) => {
+globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
   calls.push({ origin: url.origin, path: url.pathname, params: url.searchParams });
-  return respond(url);
+  return respond(url, init);
 }) as typeof fetch;
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -56,7 +58,7 @@ const plexPage = (metadata: unknown[]) => json({ MediaContainer: { Metadata: met
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
-const { BATCH_TX_TIMEOUT } = await import("../src/lib/cron-auth.ts");
+const { BATCH_TX_TIMEOUT } = await import("../src/lib/batch-write.ts");
 
 // ── settings ─────────────────────────────────────────────────────────────────
 const settings = new Map<string, string>();
@@ -88,11 +90,24 @@ type PlexLib = { mediaType: string; serverInstance: string; plexRatingKey: strin
 type JfLib = { mediaType: string; serverInstance: string; jellyfinItemId: string | null; jellyfinItemIds: string[] };
 let plexLib: PlexLib[] = [];
 let jfLib: JfLib[] = [];
+// The match count reads only the rows holding one of the evidence keys, in
+// either key column (guardrails 37/37c); the stub applies that where.
+type KeyWhere<K extends string, A extends string> = { serverInstance: string; OR: [Record<K, { in: string[] }>, Record<A, { hasSome: string[] }>] };
+let libraryReads: number[] = [];
+function keyFilter<R extends { serverInstance: string }>(rows: R[], where: { serverInstance: string; OR: unknown[] }, one: (r: R) => string | null, many: (r: R) => string[]): R[] {
+  const [byOne, byMany] = where.OR as [Record<string, { in: string[] }>, Record<string, { hasSome: string[] }>];
+  const inList = new Set(Object.values(byOne)[0].in);
+  const some = Object.values(byMany)[0].hasSome;
+  libraryReads.push(inList.size);
+  return rows.filter((r) => r.serverInstance === where.serverInstance && ((one(r) !== null && inList.has(one(r)!)) || many(r).some((k) => some.includes(k))));
+}
 shadowPrismaModel(prisma, "plexLibraryItem", {
-  findMany: async (args: { where: { serverInstance: string } }) => plexLib.filter((r) => r.serverInstance === args.where.serverInstance),
+  findMany: async (args: { where: KeyWhere<"plexRatingKey", "plexRatingKeys"> }) =>
+    keyFilter(plexLib, args.where, (r) => r.plexRatingKey, (r) => r.plexRatingKeys),
 });
 shadowPrismaModel(prisma, "jellyfinLibraryItem", {
-  findMany: async (args: { where: { serverInstance: string } }) => jfLib.filter((r) => r.serverInstance === args.where.serverInstance),
+  findMany: async (args: { where: KeyWhere<"jellyfinItemId", "jellyfinItemIds"> }) =>
+    keyFilter(jfLib, args.where, (r) => r.jellyfinItemId, (r) => r.jellyfinItemIds),
 });
 
 // ── play history (read-only for this job) ────────────────────────────────────
@@ -224,6 +239,7 @@ beforeEach(() => {
   warns.length = 0;
   statusWrites = [];
   historyWheres = [];
+  libraryReads = [];
   txLog = [];
   evidence = [];
   forbidden.length = 0;
@@ -247,7 +263,7 @@ beforeEach(() => {
 
 // ── 1: success ───────────────────────────────────────────────────────────────
 
-test("plex success: ONE transaction — a deleteMany scoped to (plex, '') then the rows; movie → own key at -1, episode → show key + season", async () => {
+test("plex success: ONE transaction — a deleteMany scoped to (plex, ''), the rows, then the status; movie → own key at -1, episode → show key + season", async () => {
   configurePlex();
   evidence = [oldRow("plex", ""), oldRow("plex", "remote"), oldRow("jellyfin", "")];
   respond = (url) => {
@@ -260,7 +276,7 @@ test("plex success: ONE transaction — a deleteMany scoped to (plex, '') then t
 
   assert.equal(txLog.length, 1, "one transaction per server");
   assert.deepEqual((txLog[0].opts as { timeout?: number }).timeout, BATCH_TX_TIMEOUT);
-  assert.deepEqual(txLog[0].ops, [`deleteMany ${JSON.stringify({ source: "plex", serverInstance: "" })}`, "createMany 4"]);
+  assert.deepEqual(txLog[0].ops, [`deleteMany ${JSON.stringify({ source: "plex", serverInstance: "" })}`, "createMany 4", "upsert upstreamWatch:status:plex:"]);
 
   const mine = evidence.filter((e) => e.source === "plex" && e.serverInstance === "");
   const byKey = new Map(mine.map((e) => [`${e.itemKey}/${e.seasonNumber}`, e]));
@@ -420,22 +436,34 @@ test("a named server whose read FAILS while it is removed records no failure sta
   assert.equal(settings.get("upstreamWatch:status:plex:remote"), undefined);
 });
 
-test("a removal landing between the evidence replace and the status write leaves no status either (R2-nw#4)", async () => {
+test("the evidence and its status are ONE transaction under ONE registry lock: a removal committing just before it leaves neither", async () => {
   configurePlex("remote", PLEX_REMOTE);
   settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
-  let locks = 0;
-  onRegistryLock = () => {
-    // The 2nd lock is the status write's: the removal committed just before it
-    // (and deleted the evidence the replace had written).
-    if (++locks === 2) removeRemote();
-  };
   respond = (url) => {
     if (url.origin === PLEX_REMOTE) return plexPage([{ type: "movie", ratingKey: "999", viewedAt: secs(ago(2)) }]);
     throw new Error(`unexpected ${url}`);
   };
   await refreshUpstreamWatch();
-  assert.equal(locks, 2);
-  assert.equal(settings.get("upstreamWatch:status:plex:remote"), undefined, "the status write re-checked the registry under its lock");
+  assert.equal(txLog.length, 1);
+  assert.deepEqual(txLog[0].ops, [
+    "lock plexInstances",
+    `deleteMany ${JSON.stringify({ source: "plex", serverInstance: "remote" })}`,
+    "createMany 1",
+    "upsert upstreamWatch:status:plex:remote",
+  ]);
+
+  // The removal commits as the refresh takes the lock: nothing at all is written.
+  evidence = [];
+  settings.delete("upstreamWatch:status:plex:remote");
+  txLog = [];
+  let locks = 0;
+  onRegistryLock = () => {
+    if (++locks === 1) removeRemote();
+  };
+  await refreshUpstreamWatch();
+  assert.equal(locks, 1);
+  assert.deepEqual(evidence.filter((e) => e.serverInstance === "remote"), []);
+  assert.equal(settings.get("upstreamWatch:status:plex:remote"), undefined, "no status for the removed slug");
 });
 
 test("a named server still registered is refreshed exactly as before, status included (R2-nw#4)", async () => {
@@ -501,6 +529,44 @@ test("an abort between Jellyfin users stops the walk and writes nothing", async 
   assert.equal(txLog.length, 0);
   assert.deepEqual(statusWrites, []);
   assert.ok(itemCalls < users.length * 2, `the walk kept going after the abort (${itemCalls} item fetches)`);
+});
+
+test("a Jellyfin user listing that hangs is cut off by the server's budget and recorded 'timed out'", { timeout: 10_000 }, async () => {
+  configureJellyfin();
+  // Answers only when the request's signal aborts, as a real fetch does.
+  respond = (url, init) => {
+    if (url.pathname === "/Users") {
+      return new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+      });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const started = Date.now();
+  const result = await refreshUpstreamWatch({ runBudgetMs: 300 });
+  assert.ok(Date.now() - started < 5_000, "the listing ran past the budget");
+  assert.equal(result.servers[0].ok, false);
+  assert.equal(result.servers[0].error, "timed out");
+});
+
+test("a database failure while storing a snapshot is logged as Summonarr's own, not as an unreadable server", async () => {
+  configurePlex();
+  evidence = [oldRow("plex", "")];
+  createManyFails = true;
+  respond = () => plexPage(plexHistory());
+  const result = await refreshUpstreamWatch();
+  assert.equal(result.servers[0].ok, false);
+  assert.equal(result.servers[0].error, "request failed", "the stored status keeps its closed vocabulary");
+  assert.ok(warns.some((w) => w.includes("storing its snapshot in Summonarr's database failed") && w.includes("simulated insert failure")));
+  assert.ok(!warns.some((w) => w.includes("could not read the server's own watch records")));
+});
+
+test("the match count reads only the library rows holding an evidence key", async () => {
+  configurePlex();
+  respond = () => plexPage(plexHistory());
+  await refreshUpstreamWatch();
+  // Keys 100, 500 and 999 (the track is not evidence): one bounded read.
+  assert.deepEqual(libraryReads, [3]);
 });
 
 test("an already-aborted signal does nothing at all", async () => {
@@ -664,14 +730,23 @@ test("fewer than half of Summonarr's own completed plays found upstream reads as
   assert.equal(warns.filter((w) => w.includes("fewer than half")).length, 1);
 });
 
-test("a failed status write never throws out of the job — the snapshot is still written", async () => {
+test("a failed status write rolls the evidence replace back: the previous rows AND status stay together, the server reads failed, and nothing throws", async () => {
   configurePlex();
+  evidence = [oldRow("plex", "")];
+  const prev = JSON.stringify({
+    fetchedAt: "2025-02-01T00:00:00.000Z", attemptedAt: "2025-02-01T00:00:00.000Z", ok: true, entries: 7, matched: 6, samples: 4, agreed: 4, error: null,
+  });
+  settings.set("upstreamWatch:status:plex:", prev);
   settingUpsertFails = true;
+  // A truncated read: the new rows must never be vouched for by the old "ok",
+  // complete status.
   respond = () => plexPage(plexHistory());
-  const result = await refreshUpstreamWatch();
-  assert.equal(result.servers[0].ok, true);
-  assert.equal(evidence.length, 4);
-  assert.ok(warns.some((w) => w.includes("could not record the refresh status")));
+  const result = await refreshUpstreamWatch({ plexMaxItems: 2 });
+  assert.deepEqual(evidence, [oldRow("plex", "")], "the previous rows are kept");
+  assert.equal(settings.get("upstreamWatch:status:plex:"), prev, "and so is the status that describes them");
+  assert.equal(result.servers[0].ok, false);
+  assert.equal(result.servers[0].health, "failed");
+  assert.ok(warns.some((w) => w.includes("could not record the refresh status")), "the failure status write failed too, and said so");
 });
 
 // ── an empty answer from a server Summonarr saw completed plays on ───────────

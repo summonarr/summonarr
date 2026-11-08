@@ -27,6 +27,13 @@
 //   7. The paged readers (readQueuePages, the calendar's readQueue,
 //      readCutoffPages) keep at most one page's worth per page, appended one by
 //      one, and at most MAX_PAGES × PAGE_SIZE in all, whatever one page holds.
+//   8. The health panel (normalizeHealthChecks reads a bounded prefix;
+//      evaluateWebhook drops a URL's trailing slashes in one scan, never a
+//      backtracking regex), an issue's Replace file (the title's history and
+//      episode list read ONCE per listing, not once per file; nothing read past
+//      MAX_REPLACE_HISTORY), the Why? status's failure fold (a Map, not a scan
+//      of the counted list), and the library match check and fix-match's
+//      candidates, which append whole listings one by one.
 //
 // 6 and 7 run the real readers and loaders over a scripted Radarr/Sonarr on
 // RFC1918 literals (admin SSRF mode, no DNS) and in-memory prisma stubs.
@@ -40,6 +47,9 @@ import * as T from "../src/lib/arr-title.ts";
 import * as Q from "../src/lib/arr-queue.ts";
 import * as C from "../src/lib/arr-calendar.ts";
 import * as M from "../src/lib/arr-missing.ts";
+import * as H from "../src/lib/arr-health.ts";
+import * as R from "../src/lib/issue-replace.ts";
+import { projectHistoryRecords } from "../src/lib/arr-history.ts";
 import { readDisks } from "../src/lib/arr-watch.ts";
 
 // ── harness for 6 and 7 (set up before any test runs) ───────────────────────
@@ -88,6 +98,7 @@ shadowPrismaModel(prisma, "tmdbMediaCore", { findMany: async () => [] });
 const queueData = await import("../src/lib/arr-queue-data.ts");
 const calendarData = await import("../src/lib/arr-calendar-data.ts");
 const missingData = await import("../src/lib/arr-missing-data.ts");
+const { countFailedDownloads } = await import("../src/lib/request-arr-status.ts");
 
 const BIG = 100_000;
 
@@ -462,6 +473,164 @@ test("planSeriesSearch takes a 200k-episode season's missing ids one by one, nev
   assert.deepEqual([plan.episodeIds[0], plan.episodeIds.at(-1)], [1, n]);
 });
 
+// ── Radarr/Sonarr health and the webhook check ──────────────────────────────
+
+test("normalizeHealthChecks keeps at most MAX_CHECKS of 100k checks, errors first, and reads a bounded prefix", () => {
+  const scan = H.MAX_CHECKS * H.PROJECTION_SCAN_FACTOR;
+  const { list, reads } = counted(Array.from({ length: BIG }, (_, i) => ({ source: "IndexerStatusCheck", type: i % 2 ? "warning" : "error", message: `check ${i}` })));
+  const checks = H.normalizeHealthChecks(list);
+  assert.equal(checks.length, H.MAX_CHECKS);
+  assert.ok(checks.every((c) => c.level === "error"), "errors first");
+  assert.ok(reads() <= scan, `read ${reads()} checks`);
+  // Entries that are not a check never reach the cap: the scan stops all the same.
+  const junk = counted(Array.from({ length: BIG }, () => ({ type: "ok", message: "fine" })));
+  assert.deepEqual(H.normalizeHealthChecks(junk.list), []);
+  assert.ok(junk.reads() <= scan, `read ${junk.reads()} junk entries`);
+});
+
+/** How many regular expressions ran over a string at least `minLength` long while `fn` ran. */
+function regexRunsOver(minLength: number, fn: () => void): number {
+  const proto = RegExp.prototype as unknown as { exec: (s: string) => RegExpExecArray | null };
+  const original = proto.exec;
+  let runs = 0;
+  proto.exec = function (this: RegExp, s: string) {
+    if (String(s).length >= minLength) runs++;
+    return original.call(this, s);
+  };
+  try {
+    fn();
+  } finally {
+    proto.exec = original;
+  }
+  return runs;
+}
+
+test("evaluateWebhook drops an arr URL's trailing slashes in one scan: no regex runs over the URL", () => {
+  // A /\/+$/ strip backtracks over every run of slashes, and a URL keeps them:
+  // ~160k slashes froze the event loop for seconds on every health read.
+  const slashes = "/".repeat(10_000);
+  const hook = (url: string) => [{ id: 3, implementation: "Webhook", fields: [{ name: "url", value: url }], onDownload: true }];
+  let states: string[] = [];
+  const runs = regexRunsOver(slashes.length, () => {
+    states = [
+      H.evaluateWebhook(hook(`http://h/${slashes}x`), "radarr", "s").state,
+      H.evaluateWebhook(hook(`http://h/api/webhooks/radarr${slashes}?token=s`), "radarr", "s").state,
+      H.evaluateWebhook(hook(`http://h/base/api/webhooks/sonarr/?token=t`), "sonarr", "s").state,
+    ];
+  });
+  assert.equal(runs, 0, `${runs} regex runs over the arr's URL`);
+  assert.deepEqual(states, ["missing", "ok", "tokenMismatch"], "Summonarr's path is still found through any trailing slashes");
+});
+
+// ── an issue's Replace file ──────────────────────────────────────────────────
+
+// A season of `n` single-episode files, each with its grab and import on record.
+function replaceSeason(n: number) {
+  const raw: unknown[] = [];
+  const files: Parameters<typeof R.replaceableFiles>[2][number][] = [];
+  for (let i = 1; i <= n; i++) {
+    const path = `/tv/Show/Season 01/e${i}.mkv`;
+    const episode = { seasonNumber: 1, episodeNumber: i };
+    raw.push({ id: 2 * i - 1, seriesId: 9, eventType: "grabbed", date: "2026-10-01T00:00:00Z", downloadId: `D${i}`, episode });
+    raw.push({ id: 2 * i, seriesId: 9, eventType: "downloadFolderImported", date: "2026-10-01T00:00:00Z", downloadId: `D${i}`, episode, data: { importedPath: path } });
+    files.push({
+      id: i, relativePath: `Season 01/e${i}.mkv`, path, size: 1, dateAdded: null, quality: null, qualityTags: [], languages: [], customFormats: [],
+      customFormatScore: null, qualityCutoffNotMet: false, releaseGroup: null, sceneName: null, edition: null, seasonNumber: 1, episodes: [episode], media: null,
+    });
+  }
+  const episodes = Array.from({ length: n }, (_, i) => ({ seasonNumber: 1, episodeNumber: i + 1, title: `Episode ${i + 1}` }));
+  return { history: projectHistoryRecords("sonarr", "", raw), files, episodes };
+}
+
+test("replaceableFiles reads the title's history and episode list ONCE per listing, not once per file", () => {
+  const n = 500;
+  const season = replaceSeason(n);
+  const history = counted(season.history);
+  const episodes = counted(season.episodes);
+  const files = R.replaceableFiles("sonarr", { kind: "series" }, season.files, history.list, episodes.list);
+  assert.equal(files.length, n);
+  assert.ok(files.every((f) => f.grab?.event.downloadId === `D${f.id}` && f.grab.event.id === 2 * f.id - 1 && !f.grab.failed), "every file still traced to its own grab");
+  assert.ok(files.every((f) => f.episodes[0].title === `Episode ${f.id}`), "every episode still named by Sonarr's title");
+  assert.ok(history.reads() <= season.history.length, `read ${history.reads()} history records for ${season.history.length}`);
+  assert.ok(episodes.reads() <= season.episodes.length, `read ${episodes.reads()} episodes for ${season.episodes.length}`);
+});
+
+test("a history past MAX_REPLACE_HISTORY is not read at all: every file is searched for, none attributed", () => {
+  const season = replaceSeason(1);
+  const [grab, imported] = season.history;
+  const filler = projectHistoryRecords("sonarr", "", [{ id: 1_000_000, seriesId: 9, eventType: "downloadIgnored" }])[0];
+  const raw: typeof season.history = new Array(R.MAX_REPLACE_HISTORY + 1).fill(filler);
+  raw[0] = imported;
+  raw[1] = grab;
+  const { list, reads } = counted(raw);
+  assert.equal(R.replaceableFiles("sonarr", { kind: "series" }, season.files, list)[0].grab, null);
+  assert.equal(reads(), 0, `read ${reads()} records`);
+  // The same two records in a history within the bound are attributed.
+  assert.equal(R.replaceableFiles("sonarr", { kind: "series" }, season.files, [imported, grab])[0].grab?.event.id, 1);
+});
+
+test("Replace file's episode lists dedupe through a Set and index Sonarr's list once: episodesOf, episodesFor and unmonitoredByDelete search no list", () => {
+  const n = 5_000;
+  const ep = (i: number) => ({ seasonNumber: 1 + (i % 3), episodeNumber: i + 1 });
+  // Every episode named twice: a file and its duplicate.
+  const files = Array.from({ length: 2 * n }, (_, i) => ({ episodes: [ep(i % n)] })) as unknown as Parameters<typeof R.episodesOf>[0];
+  let refs: ReturnType<typeof R.episodesOf> = [];
+  assert.equal(searchVisits(() => { refs = R.episodesOf(files); }), 0, "episodesOf searched a list");
+  assert.equal(refs.length, n, "each episode once");
+  assert.ok(refs.every((r, i) => i === 0 || refs[i - 1].seasonNumber < r.seasonNumber || (refs[i - 1].seasonNumber === r.seasonNumber && refs[i - 1].episodeNumber < r.episodeNumber)), "in S/E order");
+
+  // Sonarr's list, with one S/E listed twice: the first entry is the one kept, as a scan found it.
+  const raw = Array.from({ length: n }, (_, i) => ({ id: i + 1, ...ep(i) }));
+  raw.push({ id: 999_999, ...ep(0) });
+  const list = counted(raw);
+  let hits: Array<{ id: number }> = [];
+  assert.equal(searchVisits(() => { hits = R.episodesFor([...refs, ...refs], list.list); }), 0, "episodesFor searched a list");
+  assert.ok(list.reads() <= raw.length, `read ${list.reads()} entries of ${raw.length}`);
+  assert.equal(hits.length, n, "each S/E once");
+  assert.ok(!hits.some((h) => h.id === 999_999), "the first listing of an S/E wins");
+  assert.deepEqual(R.episodesFor([ep(2), ep(0), ep(2)], raw).map((h) => h.id), [3, 1], "the refs' order, each once");
+
+  const before = Array.from({ length: n }, (_, i) => ({ id: i + 1, monitored: true }));
+  const after = before.map((b) => ({ ...b, monitored: false }));
+  let flipped: number[] = [];
+  assert.equal(searchVisits(() => { flipped = R.unmonitoredByDelete([...before, ...before], after); }), 0, "unmonitoredByDelete searched a list");
+  assert.equal(flipped.length, n, "each id once");
+  assert.deepEqual(R.unmonitoredByDelete([{ id: 2, monitored: true }, { id: 1, monitored: true }, { id: 2, monitored: true }, { id: 3, monitored: false }], [{ id: 1, monitored: false }, { id: 2, monitored: false }, { id: 3, monitored: false }]), [2, 1], "first-seen order; only monitored → unmonitored");
+});
+
+// ── the Why? status's failure fold ───────────────────────────────────────────
+
+test("countFailedDownloads folds a download's records through a Map: no scan of the counted list", () => {
+  const n = 2_000;
+  const failed = projectHistoryRecords("radarr", "", Array.from({ length: n }, (_, i) => ({
+    id: i + 1, movieId: 1, eventType: "downloadFailed", date: new Date(Date.UTC(2026, 9, 1) + i * 1_000).toISOString(), downloadId: `D${i}`,
+  })));
+  let count = 0;
+  const visits = searchVisits(() => {
+    count = countFailedDownloads(failed);
+  });
+  assert.equal(count, n, "every distinct download counted once");
+  assert.equal(visits, 0, `searched ${visits} elements`);
+});
+
+// ── whole listings appended one by one ───────────────────────────────────────
+
+test("the library match check, fix-match's candidates, Replace file and the Why? status append one by one: no spread push", () => {
+  // A spread of an arr's list throws RangeError past ~125k entries; these lists
+  // are whole listings, so only the source can show a spread came back.
+  for (const file of [
+    "src/lib/library-match-data.ts",
+    "src/app/api/admin/fix-match/candidates/route.ts",
+    "src/lib/fix-match-candidates.ts",
+    "src/lib/issue-replace.ts",
+    "src/lib/request-arr-status.ts",
+    "src/lib/arr-health.ts",
+  ]) {
+    const src = readFileSync(new URL(`../${file}`, import.meta.url), "utf8").replace(/^\s*\/\/.*$/gm, "");
+    assert.doesNotMatch(src, /\.push\(\s*\.\.\./, `${file} spread-pushes a list`);
+  }
+});
+
 // ── the per-instance merges, end to end ──────────────────────────────────────
 
 const jsonOf = (rows: unknown[]) => () => rows;
@@ -479,6 +648,30 @@ test("loadCalendar survives the review's 130k-episode Sonarr answer: capped, no 
   assert.deepEqual(report.entries.filter((e) => e.service === "radarr").map((e) => e.title), ["Honest"]);
 });
 
+test("loadCalendar says once when the queue outgrows the calendar's page ceiling, and not when it fits", async () => {
+  answers.clear();
+  answers.set(`${SONARR}/api/v3/calendar`, jsonOf([]));
+  answers.set(`${RADARR}/api/v3/calendar`, jsonOf([]));
+  answers.set(`${RADARR}/api/v3/queue`, emptyQueue);
+  answers.set(`${SONARR}/api/v3/queue`, untotalledPages(10_000, calendarData.QUEUE_PAGE_SIZE));
+  const warned: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (msg: unknown) => { warned.push(String(msg)); };
+  try {
+    await calendarData.loadCalendar(new Date(CAL_START), new Date(CAL_END), false, new Date(CAL_NOW));
+    await calendarData.loadCalendar(new Date(CAL_START), new Date(CAL_END), false, new Date(CAL_NOW));
+    const capped = warned.filter((m) => m.includes("only the first"));
+    assert.equal(capped.length, 1, "one unchanged condition is logged once");
+    assert.match(capped[0], /sonarr instance "" queue holds more records; only the first 1000 mark titles as downloading/);
+    warned.length = 0;
+    answers.set(`${SONARR}/api/v3/queue`, emptyQueue);
+    await calendarData.loadCalendar(new Date(CAL_START), new Date(CAL_END), false, new Date(CAL_NOW));
+    assert.deepEqual(warned.filter((m) => m.includes("only the first")), []);
+  } finally {
+    console.warn = realWarn;
+  }
+});
+
 test("loadMissingMovies and loadMissingSeries survive a 130k-title listing: capped per instance, no RangeError", async () => {
   answers.clear();
   answers.set(`${RADARR}/api/v3/movie`, jsonOf(Array.from({ length: HOSTILE }, (_, i) => ({ id: i + 1, digitalRelease: "2020-01-01T00:00:00Z" }))));
@@ -486,9 +679,17 @@ test("loadMissingMovies and loadMissingSeries survive a 130k-title listing: capp
   const movies = await missingData.loadMissingMovies(new Date(NOW));
   assert.deepEqual(movies.errors, []);
   assert.equal(movies.items.length, M.MAX_MISSING_ITEMS);
+  // The cap stopped the listing short, and the report says so — never a
+  // partial list shown as complete.
+  assert.deepEqual(movies.truncated, [{ instance: "", read: M.MAX_MISSING_ITEMS, total: HOSTILE }]);
   const series = await missingData.loadMissingSeries();
   assert.deepEqual(series.errors, []);
   assert.equal(series.items.length, M.MAX_MISSING_ITEMS);
+  assert.deepEqual(series.truncated, [{ instance: "", read: M.MAX_MISSING_ITEMS, total: HOSTILE }]);
+
+  // A listing judged to its end carries no flag at all.
+  answers.set(`${RADARR}/api/v3/movie`, jsonOf([{ id: 1, digitalRelease: "2020-01-01T00:00:00Z" }, { id: 2, hasFile: true }]));
+  assert.equal((await missingData.loadMissingMovies(new Date(NOW))).truncated, undefined);
 });
 
 test("the Calendar and Missing modules append one by one: no spread push anywhere in them", () => {
@@ -532,9 +733,56 @@ test("readQueuePages keeps at most PAGE_SIZE of each 200k-record page, and at mo
   answers.clear();
   answers.set(`${RADARR}/api/v3/queue`, hostilePage);
   served = [];
-  const records = await queueData.readQueuePages("radarr", "");
-  assertPagedRead(records, queueData.PAGE_SIZE, queueData.MAX_PAGES);
+  const listing = await queueData.readQueuePages("radarr", "");
+  assert.equal(listing.truncated, true, "the listing says the page ceiling cut it");
+  assertPagedRead(listing.records, queueData.PAGE_SIZE, queueData.MAX_PAGES);
   assert.equal(served.length, queueData.MAX_PAGES, "the page ceiling, not the list's end, stopped the read");
+});
+
+test("readQueueListing says when the page ceiling, not the list's end, stopped it — what was read of how many", async () => {
+  answers.clear();
+  answers.set(`${RADARR}/api/v3/queue`, hostilePage);
+  served = [];
+  const listing = await queueData.readQueueListing({ url: RADARR, apiKey: "radarr-key" }, "radarr");
+  assert.deepEqual([listing.records.length, listing.total, listing.truncated, listing.stopped, listing.pages], [queueData.MAX_PAGES * queueData.PAGE_SIZE, HOSTILE_PAGE, true, false, queueData.MAX_PAGES]);
+});
+
+// A PagingResource with no totalRecords (a non-conforming arr): full pages
+// are read on until a short one, never "a total of 0 — done after page 1".
+function untotalledPages(pages: number, pageSize: number) {
+  return (url: URL) => {
+    const page = Number(url.searchParams.get("page"));
+    served.push({ path: url.pathname, page, pageSize: Number(url.searchParams.get("pageSize")) });
+    const n = page < pages ? pageSize : page === pages ? Math.floor(pageSize / 2) : 0;
+    return { page, records: Array.from({ length: n }, (_, i) => page * 1_000_000 + i) };
+  };
+}
+
+test("the paged readers read on through pages with no totalRecords: a short page ends it, the ceiling truncates it", async () => {
+  answers.clear();
+  answers.set(`${RADARR}/api/v3/wanted/cutoff`, untotalledPages(3, missingData.CUTOFF_PAGE_SIZE));
+  served = [];
+  const short = await missingData.readCutoffPages({ url: RADARR, apiKey: "radarr-key" }, "radarr");
+  assert.deepEqual([served.length, short.records.length, short.truncated], [3, 2 * missingData.CUTOFF_PAGE_SIZE + missingData.CUTOFF_PAGE_SIZE / 2, false]);
+  assert.equal(short.total, short.records.length, "no total from the arr: the records read stand in for it");
+
+  answers.set(`${RADARR}/api/v3/wanted/cutoff`, untotalledPages(10_000, missingData.CUTOFF_PAGE_SIZE));
+  served = [];
+  const capped = await missingData.readCutoffPages({ url: RADARR, apiKey: "radarr-key" }, "radarr");
+  assert.deepEqual([served.length, capped.truncated, capped.total], [missingData.CUTOFF_MAX_PAGES, true, missingData.CUTOFF_MAX_PAGES * missingData.CUTOFF_PAGE_SIZE]);
+
+  answers.set(`${RADARR}/api/v3/queue`, untotalledPages(2, queueData.PAGE_SIZE));
+  served = [];
+  const queue = await queueData.readQueueListing({ url: RADARR, apiKey: "radarr-key" }, "radarr");
+  assert.deepEqual([served.length, queue.records.length, queue.truncated], [2, queueData.PAGE_SIZE + queueData.PAGE_SIZE / 2, false]);
+  answers.set(`${RADARR}/api/v3/queue`, untotalledPages(10_000, queueData.PAGE_SIZE));
+  served = [];
+  assert.equal((await queueData.readQueueListing({ url: RADARR, apiKey: "radarr-key" }, "radarr")).truncated, true);
+
+  answers.set(`${SONARR}/api/v3/queue`, untotalledPages(2, calendarData.QUEUE_PAGE_SIZE));
+  served = [];
+  assert.equal((await calendarData.readQueue({ url: SONARR, apiKey: "sonarr-key" })).length, calendarData.QUEUE_PAGE_SIZE + calendarData.QUEUE_PAGE_SIZE / 2);
+  assert.equal(served.length, 2);
 });
 
 test("the calendar's queue read keeps at most QUEUE_PAGE_SIZE of each 200k-record page, and at most MAX_QUEUE_PAGES × QUEUE_PAGE_SIZE in all", async () => {

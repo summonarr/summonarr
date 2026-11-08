@@ -1,18 +1,13 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
-import { Plus, Check, Loader2, Ban } from "@/components/icons";
-import { withBasePath } from "@/lib/base-path";
-import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
-import { DetailActionButton, DetailActionStatus } from "./detail-action-button";
+import { VariantRequestButton } from "./variant-request-button";
 
 // Secondary "Request in 4K" action shown on movie/TV detail pages when a 4K
 // Radarr/Sonarr instance is configured and the viewer holds REQUEST_4K. Posts to
-// the single request route with is4k:true; the server re-checks permission + that
-// a 4K instance exists. Kept separate from RequestButton so the HD and 4K request
-// states don't entangle.
+// the single request route with is4k:true (the API keeps that shorthand,
+// guardrail 32); the server re-checks permission + that a 4K instance exists.
+// The request flow is VariantRequestButton's, shared with RequestInstanceButton.
 export function Request4kButton({
   tmdbId,
   mediaType,
@@ -30,123 +25,22 @@ export function Request4kButton({
   // The title is admin-blacklisted — no 4K request either (the request POST 403s).
   blacklisted?: boolean;
 }) {
-  const { toast } = useToast();
   const t = useT();
-  const router = useRouter();
-  const [state, setState] = useState<"idle" | "loading" | "requested" | "error">(
-    requested ? "requested" : "idle",
-  );
-  const [msg, setMsg] = useState("");
-  // The route answers 200 { alreadyAvailable: true } and creates NOTHING when
-  // this instance's available cache already holds the title (auto-approvers
-  // only) — reading that as "requested" showed "4K Requested" for a request
-  // that does not exist.
-  const [foundAvailable, setFoundAvailable] = useState(false);
-  // Client nav reuses this instance across titles; `requested` is live so a
-  // refresh after a request on this title flips the status without a remount.
-  const [seenTmdbId, setSeenTmdbId] = useState(tmdbId);
-  const titleChanged = seenTmdbId !== tmdbId;
-  if (titleChanged) {
-    setSeenTmdbId(tmdbId);
-    setState(requested ? "requested" : "idle");
-    setMsg("");
-    setFoundAvailable(false);
-  }
-
-  async function submit() {
-    setState("loading");
-    setMsg("");
-    try {
-      const res = await fetch(withBasePath("/api/requests"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tmdbId, mediaType, is4k: true, _token: requestToken }),
-      });
-      if (res.status === 409) {
-        setState("requested");
-        return;
-      }
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setMsg(data.error ?? t("request.somethingWrong"));
-        setState("error");
-        return;
-      }
-      const body = (await res.json().catch(() => null)) as { alreadyAvailable?: boolean } | null;
-      if (body?.alreadyAvailable) {
-        setFoundAvailable(true);
-        setState("idle");
-        router.refresh();
-        return;
-      }
-      setState("requested");
-      toast({ title: t("request.requested4kToast"), variant: "success" });
-      router.refresh();
-    } catch {
-      setMsg(t("request.networkError"));
-      setState("error");
-    }
-  }
-
-  // Availability wins over request state — once the 4K copy is fetched there's nothing to request.
-  if (available || (!titleChanged && foundAvailable)) {
-    return (
-      <DetailActionStatus variant="accent-soft">
-        <Check style={{ width: 14, height: 14 }} />
-        {t("request.availableIn4k")}
-      </DetailActionStatus>
-    );
-  }
-
-  if ((titleChanged ? !!requested : state === "requested" || requested)) {
-    return (
-      <DetailActionStatus variant="accent-soft">
-        <Check style={{ width: 14, height: 14 }} />
-        {t("request.requested4k")}
-      </DetailActionStatus>
-    );
-  }
-
-  // A 4K copy queued by someone else does NOT block the CTA: the server mirrors
-  // the approved 4K request so this user gets the availability notification. The
-  // queue state is communicated by the "4K Queued" chip in the badges row.
-
-  // Blacklisted blocks all requests (per tmdbId+mediaType, both tiers).
-  if (blacklisted) {
-    return (
-      <DetailActionStatus variant="muted">
-        <Ban style={{ width: 14, height: 14 }} />
-        {t("request.notAvailableToRequest")}
-      </DetailActionStatus>
-    );
-  }
-
-  // flex-col: the error renders UNDER the button (as RequestButton's does), never
-  // squeezed beside a 34px control in the wrapping action row.
   return (
-    <div className="flex flex-col items-start gap-2">
-      <DetailActionButton
-        variant="secondary"
-        onClick={submit}
-        disabled={!titleChanged && state === "loading"}
-        busy={!titleChanged && state === "loading"}
-      >
-        {!titleChanged && state === "loading" ? (
-          <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
-        ) : (
-          <Plus style={{ width: 14, height: 14 }} />
-        )}
-        {t("request.requestIn4k")}
-      </DetailActionButton>
-      {!titleChanged && state === "error" && msg && (
-        <p
-          className="ds-mono max-w-sm"
-          role="alert"
-          style={{ fontSize: 11, color: "var(--ds-danger)", margin: 0 }}
-        >
-          {msg}
-        </p>
-      )}
-    </div>
+    <VariantRequestButton
+      tmdbId={tmdbId}
+      mediaType={mediaType}
+      extras={{ is4k: true }}
+      labels={{
+        request: t("request.requestIn4k"),
+        requested: t("request.requested4k"),
+        available: t("request.availableIn4k"),
+        requestedToast: t("request.requested4kToast"),
+      }}
+      requestToken={requestToken}
+      requested={requested}
+      available={available}
+      blacklisted={blacklisted}
+    />
   );
 }

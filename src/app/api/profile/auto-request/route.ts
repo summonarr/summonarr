@@ -72,18 +72,22 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
   if (typeof parsed.plexWatchlist !== "boolean") {
     return NextResponse.json({ error: t("apiAuth.profile.plexWatchlistBoolean") }, { status: 400 });
   }
-  await prisma.user.update({
-    where: { id: session.user.id },
-    data: {
-      plexWatchlistAutoRequest: parsed.plexWatchlist,
-      plexWatchlistOptInAt: parsed.plexWatchlist ? new Date() : null,
-    },
-  });
+  const optIn = parsed.plexWatchlist;
   // Opting out drops the stored plex.tv token: it exists only to read the
   // watchlist, and a full-account credential shouldn't outlive its purpose.
-  // Opting back in needs one Plex sign-in to store a fresh one.
-  if (!parsed.plexWatchlist) {
-    await prisma.account.deleteMany({ where: { userId: session.user.id, provider: "plex" } });
+  // Opting back in needs one Plex sign-in to store a fresh one. One transaction,
+  // so a failed delete never leaves the user opted out with the token still kept.
+  await prisma.$transaction(async (tx) => {
+    await tx.user.update({
+      where: { id: session.user.id },
+      data: {
+        plexWatchlistAutoRequest: optIn,
+        plexWatchlistOptInAt: optIn ? new Date() : null,
+      },
+    });
+    if (!optIn) await tx.account.deleteMany({ where: { userId: session.user.id, provider: "plex" } });
+  });
+  if (!optIn) {
     // A stored credential was deleted — leave a trail beside the password-change
     // audit. After the commit, swallowing (guardrail 26).
     void logAudit({
@@ -95,5 +99,5 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
       ...auditContext(req, session),
     });
   }
-  return NextResponse.json({ plexWatchlist: parsed.plexWatchlist });
+  return NextResponse.json({ plexWatchlist: optIn });
 });

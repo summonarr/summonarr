@@ -95,6 +95,9 @@ shadowPrismaModel(prisma, "tmdbCache", {
 });
 
 const { isSeriesDownloadedInSonarr, isSeriesDownloadingInSonarr, countSonarrQueue } = await import("../src/lib/arr.ts");
+// The queue check reuses a verified lookup for a while (arr-id-map.ts); a case
+// that changes the lookup's answer for the same show starts from a clean cache.
+const { _resetSeriesLookupCacheForTests } = await import("../src/lib/arr-id-map.ts");
 
 let instance = 0;
 beforeEach(() => {
@@ -108,6 +111,7 @@ beforeEach(() => {
   library = () => [];
   queuePages = [];
   queueStatus = 200;
+  _resetSeriesLookupCacheForTests();
 });
 
 const lookupCalls = () => calls.filter((u) => u.pathname === "/api/v3/series/lookup").length;
@@ -133,7 +137,7 @@ test("verify: the library row's own tmdbId settles a genuine event — zero look
   library = onlyTvdb(777, seriesRow(777, 888));
 
   const verdict = await isSeriesDownloadedInSonarr({ tvdbId: 777, tmdbId: 888 });
-  assert.deepEqual(verdict, { downloaded: true, episodeFileCount: 10, episodeCount: 10 });
+  assert.deepEqual(verdict, { downloaded: true, tmdbId: 888, episodeFileCount: 10, episodeCount: 10 });
   assert.equal(lookupCalls(), 0);
   assert.ok(!warns.some((w) => w.includes("isSeriesDownloadedInSonarr failed")), warns.join(" | "));
 });
@@ -172,7 +176,8 @@ test("verify: a row with no USABLE tmdbId falls back to the lookup — absent, 0
     lookupAnswer = [{ tmdbId: 888, tvdbId: 777 }];
     assert.deepEqual(
       await isSeriesDownloadedInSonarr({ tvdbId: 777, tmdbId: 888 }),
-      { downloaded: true, episodeFileCount: 10, episodeCount: 10 },
+      // The verdict reports only a USABLE library tmdbId — never the junk value.
+      { downloaded: true, tmdbId: null, episodeFileCount: 10, episodeCount: 10 },
       `tmdbId=${JSON.stringify(tmdbId)}: an agreeing lookup lets the genuine event through`,
     );
   }
@@ -195,14 +200,15 @@ test("verify: a tvdbId Sonarr doesn't have is absent — no lookup", async () =>
 test("verify: a tvdbId-only payload reads the library and nothing else", async () => {
   lookupAnswer = "down";
   library = onlyTvdb(777, seriesRow(777, 888));
-  assert.deepEqual(await isSeriesDownloadedInSonarr({ tvdbId: 777 }), { downloaded: true, episodeFileCount: 10, episodeCount: 10 });
+  // Sonarr's own tmdbId rides along: the webhook keys a tvdb-only event's cache rows on it.
+  assert.deepEqual(await isSeriesDownloadedInSonarr({ tvdbId: 777 }), { downloaded: true, tmdbId: 888, episodeFileCount: 10, episodeCount: 10 });
   assert.equal(lookupCalls(), 0);
 });
 
 test("verify: a tmdbId-only payload still needs ONE lookup to find the row", async () => {
   lookupAnswer = [{ tmdbId: 888, tvdbId: 777 }];
   library = onlyTvdb(777, seriesRow(777, 888));
-  assert.deepEqual(await isSeriesDownloadedInSonarr({ tmdbId: 888 }), { downloaded: true, episodeFileCount: 10, episodeCount: 10 });
+  assert.deepEqual(await isSeriesDownloadedInSonarr({ tmdbId: 888 }), { downloaded: true, tmdbId: 888, episodeFileCount: 10, episodeCount: 10 });
   assert.equal(lookupCalls(), 1);
 
   calls.length = 0;
@@ -247,9 +253,11 @@ test("queue: a queued series with no usable tmdbId sends the check to the lookup
     assert.equal(await isSeriesDownloadingInSonarr(888), true, `${label}: the lookup maps 888 to the queued tvdbId`);
     assert.equal(lookupCalls(), 1, label);
 
+    _resetSeriesLookupCacheForTests();
     lookupAnswer = [{ tmdbId: 888, tvdbId: 5555 }];
     assert.equal(await isSeriesDownloadingInSonarr(888), false, `${label}: the lookup maps 888 elsewhere`);
 
+    _resetSeriesLookupCacheForTests();
     lookupAnswer = [];
     assert.equal(await isSeriesDownloadingInSonarr(888), null, `${label}: unresolvable is unknown, never 'not in queue'`);
 
@@ -273,6 +281,31 @@ test("queue: tmdbIds are collected across every page", async () => {
   ];
   assert.equal(await isSeriesDownloadingInSonarr(888), true);
   assert.equal(calls.filter((u) => u.pathname === "/api/v3/queue").length, 2);
+});
+
+test("queue: concurrent checks on a cold cache share ONE paged read of the queue", async () => {
+  // The download checks run four at a time and the sync backstop fans out too;
+  // each miss used to page the whole queue on its own.
+  queuePages = [
+    { records: [{ series: { tvdbId: 1, tmdbId: 2 } }], totalRecords: 300 },
+    { records: [{ series: { tvdbId: 777, tmdbId: 888 } }], totalRecords: 300 },
+  ];
+  const [a, b, c] = await Promise.all([
+    isSeriesDownloadingInSonarr(888),
+    isSeriesDownloadingInSonarr(2),
+    countSonarrQueue(),
+  ]);
+  assert.deepEqual([a, b, c], [true, true, 2]);
+  const pages = calls.filter((u) => u.pathname === "/api/v3/queue").map((u) => u.searchParams.get("page"));
+  assert.deepEqual(pages, ["1", "2"], "one walk of the queue, shared by all three");
+
+  // A failed read is shared too, and still reads as unknown for every caller.
+  instance += 1;
+  settings.set("sonarrUrl", `http://10.0.7.${instance}:8989`);
+  calls.length = 0;
+  queueStatus = 500;
+  assert.deepEqual(await Promise.all([isSeriesDownloadingInSonarr(888), countSonarrQueue()]), [null, null]);
+  assert.equal(calls.filter((u) => u.pathname === "/api/v3/queue").length, 1);
 });
 
 test("queue: countSonarrQueue still counts distinct queued series, mapped or not", async () => {

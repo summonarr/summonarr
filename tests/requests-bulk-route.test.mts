@@ -1,4 +1,5 @@
-// Structural pins for POST /api/requests/bulk (src/app/api/requests/bulk/route.ts).
+// Structural pins for POST /api/requests/bulk (src/app/api/requests/bulk/route.ts
+// and its item pipeline, src/lib/request-bulk.ts).
 //
 // The route has no in-memory harness yet (it fans out over user, Setting,
 // mediaRequest, both library tables, both *arr-available tables, the blacklist,
@@ -25,7 +26,10 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "../..");
-const SRC = readFileSync(join(ROOT, "src/app/api/requests/bulk/route.ts"), "utf8");
+// The route (HTTP half) then its item pipeline (src/lib/request-bulk.ts), in
+// run order, so the order pins below read across both.
+const SRC = readFileSync(join(ROOT, "src/app/api/requests/bulk/route.ts"), "utf8") +
+  "\n" + readFileSync(join(ROOT, "src/lib/request-bulk.ts"), "utf8");
 // Code only: comments explain the rules and would otherwise satisfy the scans.
 const CODE = SRC.split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
 
@@ -48,26 +52,28 @@ test("bulk: a peer stamped cleanedUpAt is a removal, never a greenlight to mirro
 });
 
 test("every 'already greenlit' mirror lookup in src/ excludes stamped (cleanedUpAt) rows", () => {
-  // request-create.ts (web + watchlist auto-request), the Discord /request
-  // path and bulk each copy a greenlit peer's status. One copy without the
+  // request-create.ts (web, watchlist auto-request and the Discord /request
+  // pick) and bulk each copy a greenlit peer's status. One copy without the
   // term re-opens the re-download path for a removed title.
-  const files = ["src/lib/request-create.ts", "src/lib/discord-interactions/components/pick.ts", "src/app/api/requests/bulk/route.ts"];
+  const files = ["src/lib/request-create.ts", "src/lib/request-bulk.ts"];
   for (const f of files) {
     const code = readFileSync(join(ROOT, f), "utf8").split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
-    const lookups = code.split("\n").filter((l) => l.includes('status: { in: ["APPROVED", "AVAILABLE"] }'));
+    const lookups = code.split("\n").filter((l) =>
+      l.includes('status: { in: ["APPROVED", "AVAILABLE"] }') || l.includes("status: { in: greenlitPeerStatuses("));
     assert.ok(lookups.length >= 1, `${f}: the mirror lookup moved — update this pin`);
     for (const l of lookups) assert.match(l, /cleanedUpAt: null/, `${f}: ${l.trim()}`);
   }
 });
 
 test("bulk: 'already-available' is produced ONLY by the pre-create gate; a mirrored row reads 'auto-approved'", () => {
-  const verdicts = CODE.match(/result: "already-available"/g) ?? [];
+  const verdicts = CODE.match(/return "already-available"/g) ?? [];
   assert.equal(verdicts.length, 1, "one already-available verdict: the gate before the create tx");
-  assert.match(CODE, /if \(mirroredKeys\.has\(keyOf\(p\.tmdbId, p\.mediaType\)\)\) \{\s*return \{ tmdbId: p\.tmdbId, mediaType: p\.mediaType, result: "auto-approved" \};/);
+  assert.doesNotMatch(CODE, /result: "already-available"/, "no outcome is built as already-available after the gate");
+  assert.match(CODE, /if \(mirroredKeys\.has\(key\)\) \{\s*outcomeByKey\.set\(key, \{ tmdbId: p\.tmdbId, mediaType: p\.mediaType, result: "auto-approved" \}\);/);
 });
 
 test("bulk: a present non-string onBehalfOfUserId is refused with 400 before any target is resolved", () => {
-  const guard = CODE.indexOf('typeof body.onBehalfOfUserId !== "string") {');
+  const guard = CODE.indexOf('typeof onBehalfOfUserId !== "string") {');
   const resolve_ = CODE.indexOf("const onBehalfId =");
   assert.ok(guard > 0 && resolve_ > guard, "the type guard precedes the target resolution");
   assert.match(CODE, /onBehalfIdInvalid"\) \}, \{ status: 400 \}/);
@@ -81,7 +87,7 @@ test("bulk: the per-call limit honours rateLimitRequests and a zero-row batch is
 });
 
 test("bulk: an INT4-overflowing tmdbId is a 400 before any keyed read (no per-item _token to bound it)", () => {
-  const range = CODE.indexOf("isTmdbIdInRange(it.tmdbId as number)");
+  const range = CODE.indexOf("isTmdbIdInRange(tmdbId)");
   const firstKeyedRead = CODE.indexOf("prisma.mediaRequest.findMany");
   assert.ok(range > 0 && firstKeyedRead > range, "the range check precedes the first tmdbId-keyed query");
   assert.match(CODE, /tmdbIdOutOfRange"\) \}, \{ status: 400 \}/);
@@ -108,4 +114,78 @@ test("bulk: an on-behalf non-ADMIN filer must hold the named-instance request/au
   assert.equal((CODE.match(/filerMay\(/g) ?? []).length >= 4, true, "request gate, remap, and both auto-approve sites");
   assert.match(CODE, /canAutoApproveInstance\(session\.user\.permissions, inst, filerGrants/);
   assert.match(CODE, /targetVisible\.plex\.filter\(\(x\) => filerVisible\.plex\.includes\(x\)\)/);
+});
+
+test("bulk: an AVAILABLE peer is a greenlight only with the routed instance's *arr-available row (greenlitPeerStatuses)", () => {
+  // AVAILABLE is not an approval: the library pass flips a PENDING request
+  // AVAILABLE off a restricted server or the HD copy of a 4K request. Mirrored as
+  // APPROVED without the *arr holding it, the sync's re-push downloads it with no
+  // admin decision. The lookup still reads both statuses (the *arr answer differs
+  // per item); the filter decides per key.
+  assert.match(CODE, /import \{ greenlitPeerStatuses \} from "@\/lib\/request-mirror"/);
+  assert.match(
+    CODE,
+    /for \(const g of greenlit\) \{\s*const k = keyOf\(g\.tmdbId, g\.mediaType\);\s*if \(\(greenlitPeerStatuses\(arrAvailSet\.has\(k\)\) as string\[\]\)\.includes\(g\.status\)\) greenlitKeys\.add\(k\);\s*\}/,
+  );
+  assert.doesNotMatch(CODE, /for \(const g of greenlit\) greenlitKeys\.add/, "an unfiltered add is the old mirror-any-peer shape");
+});
+
+test("bulk: a re-requested DECLINED row's comment thread moves to the row created for the same key", () => {
+  // The stale rows are deleted to free the unique key and RequestComment cascades
+  // with them; without the carry the decline conversation is lost. The drop goes
+  // through the shared helper (read the threads, then ONE CAS deleteMany), BEFORE
+  // the insert, and only a row THIS call created takes a thread.
+  assert.match(CODE, /import \{ dropStaleDeclinedMany, restoreThread \} from "@\/lib\/request-comment-carry"/);
+  assert.doesNotMatch(CODE, /tx\.mediaRequest\.deleteMany\(/, "a bare stale-row delete cascades the threads");
+  const drop = CODE.indexOf("const carriedThreads = await dropStaleDeclinedMany(tx, staleDeclinedIds);");
+  const insert = CODE.indexOf("await tx.mediaRequest.createMany(");
+  assert.ok(drop > 0 && insert > drop, "threads are dropped (and read) before the insert");
+  assert.match(
+    CODE,
+    /const created = after\.filter\(\(r\) => !beforeIds\.has\(r\.id\)\);\s*for \(const r of created\) \{\s*const staleId = staleDeclinedIdByKey\.get\(keyOf\(r\.tmdbId, r\.mediaType\)\);\s*if \(staleId\) await restoreThread\(tx, r\.id, carriedThreads\.get\(staleId\)\);\s*\}\s*return \{ created, mirroredKeys \};/,
+  );
+});
+
+test("bulk: an auto-approval whose push failed is marked pushFailed and goes to ONE admin alert after the loop, never one per row", () => {
+  // The row rolls back to PENDING with its backstop cleared, so without an alert
+  // it sits in the queue unnoticed; one per row would flood every admin channel
+  // on a 50-item "Request all" (the header's rule). The result stays "created".
+  // Only a rollback that LANDED counts: the shared state machine reports a
+  // failure whose row moved on as "failed", which is not PENDING.
+  assert.match(CODE, /if \(outcome\.kind === "rolled-back"\) rolledBack\.set\(row\.key, row\.id\);/);
+  assert.match(CODE, /outcome\.kind === "rolled-back"\s*\? \{ tmdbId: row\.tmdbId, mediaType: [^}]*result: "created", pushFailed: true \}/);
+  const alerts = CODE.match(/alertAdminsNewRequest\(/g) ?? [];
+  assert.equal(alerts.length, 1, "one alert call site");
+  const loopEnd = CODE.indexOf('scheduleDownloadChecks(downloadChecksFor(settled), { name: "requests/bulk:90s-download-check" });');
+  const alert = CODE.indexOf("alertAdminsNewRequest(");
+  assert.ok(loopEnd > 0 && alert > loopEnd, "the alert runs once, after the push loop");
+  assert.match(CODE, /const firstRolledBack = prepared\.find\(\(p\) => rolledBack\.has\(keyOf\(p\.tmdbId, p\.mediaType\)\)\);\s*if \(firstRolledBack\) \{\s*alertAdminsNewRequest\(/);
+  assert.doesNotMatch(CODE, /notifyAdminsNewRequest/, "per-channel admin notifiers stay behind the shared alert");
+});
+
+test("bulk: the auto-approve push is the shared state machine's — no push or rollback of its own", () => {
+  // A timeout, a dropped connection or a gateway 502/504 AFTER the add was sent
+  // may have landed: the rollback (and its pushFailed mark) is for a definite
+  // refusal, or a failure before the add went out (AddProgress). That rule is
+  // request-transition.ts's (pinned in tests/request-transition.test.mts); bulk
+  // must not carry a second copy.
+  assert.match(CODE, /const settled = await pushApprovals\(toPush, "Bulk auto-approve"\);/);
+  assert.doesNotMatch(CODE, /addMovieToRadarr|addSeriesToSonarr|arrWriteOutcomeUnknown/, "bulk pushes only through pushApprovals");
+  assert.doesNotMatch(CODE, /data: \{ status: "PENDING"/, "bulk rolls nothing back itself");
+  // Bulk has no profile picker: every pushed row carries none.
+  assert.match(CODE, /requestedBy: targetUserId, qualityProfileId: null,/);
+});
+
+test("bulk: a title whose content rating could not be verified is filed but never auto-approved (ratingCapsVerdict)", () => {
+  // A TMDB outage must neither refuse every item of a capped target nor let a
+  // title past the cap straight into Radarr/Sonarr — the single route's rule.
+  assert.match(CODE, /verdict: await ratingCapsVerdict\(caps, routing\.detailsOf\(it\)\)/);
+  assert.match(CODE, /const unverifiedKeys = new Set\(checked\.filter\(\(c\) => c\.verdict === "unverified"\)/);
+  assert.match(CODE, /autoApprove:\s*!unverifiedKeys\.has\(keyOf\(r\.it\.tmdbId, r\.it\.mediaType\)\) &&/);
+  assert.match(CODE, /prepareItems\(ctx, capped\.toCreate, routing, staleDeclinedIdByKey, capped\.unverifiedKeys\)/);
+});
+
+test("bulk: the on-behalf audit row keeps counts and the filed titles, never the whole per-item result list", () => {
+  assert.match(CODE, /created: createdCount, resultCounts: countResults\(results\), filed: filedTitles\(outcomes\) \}/);
+  assert.doesNotMatch(CODE, /created: createdCount, results \}/, "a 50-row array in every audit row");
 });

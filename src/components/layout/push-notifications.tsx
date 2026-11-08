@@ -1,366 +1,215 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type CSSProperties } from "react";
 import { Bell, BellOff, Send } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useHasMounted } from "@/hooks/use-has-mounted";
-import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
+import { cn } from "@/lib/utils";
+import { usePushNotifications, type PushTestState } from "@/components/layout/use-push-notifications";
 
-type State = "unsupported" | "loading" | "subscribed" | "unsubscribed" | "denied" | "naming";
-type TestState = "idle" | "sending" | "ok" | "error";
-
-const SW_READY_TIMEOUT_MS = 10_000;
-
-// Several copies of this component are on the page at once: the desktop
-// Header and the MobileNav are both always rendered (CSS hides one), and the
-// mobile drawer adds a third while open. So that they all agree, whichever
-// copy subscribes or unsubscribes fires this window event, and every copy
-// re-reads the browser's subscription when it hears it. (A shared state
-// library would also work, but guardrail 9 rules that out.)
-const PUSH_CHANGED_EVENT = "summonarr:push-changed";
-
-// The server can drop this browser's registration without the browser knowing:
-// a password change or "sign out everywhere" deletes every push registration on
-// the account, since a session hijacker may have added their own (guardrail 6g).
-// The bell reads the BROWSER's subscription, so without this the owner's own
-// browser would keep showing "on" while nothing was delivered. Re-send it once
-// per page load; the server upserts by endpoint, so a still-registered browser
-// changes nothing. Failures are ignored: push may be switched off, the site may
-// be in maintenance, or the endpoint may belong to another account here.
-let resyncedThisPageLoad = false;
-function resyncSubscription(sub: PushSubscription): void {
-  if (resyncedThisPageLoad) return;
-  resyncedThisPageLoad = true;
-  const json = sub.toJSON();
-  void fetch(withBasePath("/api/push/subscribe"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ endpoint: json.endpoint, keys: json.keys }),
-  }).catch(() => { });
-}
-
-/** The server's own (translated, safe) reason the VAPID key could not be served. */
-class ServerReasonError extends Error {}
-
-/** Reject a promise that may never settle. `serviceWorker.ready` is one. */
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("timeout")), ms);
-    p.then(
-      (v) => { clearTimeout(timer); resolve(v); },
-      (e) => { clearTimeout(timer); reject(e); },
-    );
-  });
-}
-
+// The header's web-push control: a 32px bell that enables, disables and tests
+// this browser's notifications. The flows live in usePushNotifications; the
+// requests in src/lib/client/push-subscription.ts.
 export function PushNotifications() {
   // Gate first render on `useHasMounted` so SSR and the first client render
   // both emit nothing — otherwise the parent's child count disagrees with the
   // SSR DOM (React #418 on /, /movies, /admin/library etc.).
   const mounted = useHasMounted();
   const t = useT();
-  const [state, setState] = useState<State>("loading");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [testState, setTestState] = useState<TestState>("idle");
+  const push = usePushNotifications();
+  // Kept across a failed enable, so a retry doesn't retype it.
   const [deviceName, setDeviceName] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
+  const errorId = useId();
 
-  useEffect(() => {
-    if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
-      setState("unsupported");
-      return;
-    }
+  if (!mounted || push.state === "loading") return null;
 
-    if (Notification.permission === "denied") {
-      setState("denied");
-      return;
-    }
-
-    navigator.serviceWorker
-      .register(withBasePath("/sw.js"), { scope: withBasePath("/") })
-      .then((reg) => reg.pushManager.getSubscription())
-      .then((sub) => {
-        if (sub) resyncSubscription(sub);
-        setState(sub ? "subscribed" : "unsubscribed");
-      })
-      .catch(() => setState("unsubscribed"));
-
-    const onChanged = () => {
-      navigator.serviceWorker
-        .getRegistration(withBasePath("/"))
-        .then((reg) => reg?.pushManager.getSubscription() ?? null)
-        .then((sub) => {
-          // Another copy changed the subscription, so any error this copy
-          // was showing is out of date.
-          setError(null);
-          setState(sub ? "subscribed" : "unsubscribed");
-        })
-        .catch(() => { });
-    };
-    window.addEventListener(PUSH_CHANGED_EVENT, onChanged);
-    return () => window.removeEventListener(PUSH_CHANGED_EVENT, onChanged);
-  }, []);
-
-  useEffect(() => {
-    if (state === "naming") {
-      // Wait one tick so the input exists before we focus it.
-      const timer = setTimeout(() => inputRef.current?.focus(), 0);
-      return () => clearTimeout(timer);
-    }
-  }, [state]);
-
-  const testResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => { if (testResetRef.current) clearTimeout(testResetRef.current); }, []);
-
-  async function subscribe(label: string) {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(withBasePath("/api/push/vapid-key"));
-      if (!res.ok) {
-        // Surface the server's reason rather than a generic one. The 503 here
-        // means an incomplete VAPID keypair in Settings — an operator problem
-        // the user can report, not a transient fetch failure they should retry.
-        const reason = await res
-          .json()
-          .then((b: { error?: string }) => b?.error)
-          .catch(() => undefined);
-        throw new ServerReasonError(reason || t("shared.push.vapidFailed"));
-      }
-      const { publicKey } = await res.json() as { publicKey: string };
-
-      // `navigator.serviceWorker.ready` never rejects: if the service worker
-      // failed to register it just waits forever. Without a timeout, `finally`
-      // would never run and `busy` would stay true, leaving the bell disabled
-      // for the life of the page with no error shown.
-      const reg = await withTimeout(navigator.serviceWorker.ready, SW_READY_TIMEOUT_MS);
-      const sub = await reg.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: publicKey,
-      });
-
-      const json = sub.toJSON();
-      const subscribeRes = await fetch(withBasePath("/api/push/subscribe"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ endpoint: json.endpoint, keys: json.keys, label: label.trim() || undefined }),
-      });
-      if (!subscribeRes.ok) {
-        // The server refused (commonly a 403 because the push feature flag
-        // is off), so undo the browser-side subscription too. Otherwise the
-        // browser would keep a subscription the server doesn't know about,
-        // and the bell would wrongly show "subscribed" on every later visit.
-        await sub.unsubscribe().catch(() => { });
-        const data = (await subscribeRes.json().catch(() => null)) as { error?: string } | null;
-        setError(data?.error ?? t("shared.push.enableFailedStatus", { status: subscribeRes.status }));
-        setState("unsubscribed");
-        return;
-      }
-
-      setState("subscribed");
-      window.dispatchEvent(new Event(PUSH_CHANGED_EVENT));
-    } catch (err) {
-      // Same reasoning as above: if anything threw after the browser
-      // subscribed, undo that subscription. Unsubscribing one that is already
-      // gone is harmless.
-      await navigator.serviceWorker
-        .getRegistration(withBasePath("/"))
-        .then((r) => r?.pushManager.getSubscription())
-        .then((s) => s?.unsubscribe())
-        .catch(() => { });
-      const denied = Notification.permission === "denied";
-      if (!denied) setError(err instanceof ServerReasonError ? err.message : t("shared.push.enableFailed"));
-      setState(denied ? "denied" : "unsubscribed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function sendTest() {
-    setTestState("sending");
-    try {
-      const res = await fetch(withBasePath("/api/push/test"), { method: "POST" });
-      const data = await res.json() as { results?: { ok: boolean; status?: number; message?: string; body?: string }[]; error?: string };
-      if (!res.ok) {
-        console.error("[push test] failed:", data);
-        setTestState("error");
-      } else {
-        const anyFailed = data.results?.some((r) => !r.ok);
-        if (anyFailed) {
-          console.error("[push test] some sends failed:", data.results);
-          setTestState("error");
-        } else {
-          setTestState("ok");
-        }
-      }
-    } catch (err) {
-      console.error("[push test] fetch error:", err);
-      setTestState("error");
-    } finally {
-      if (testResetRef.current) clearTimeout(testResetRef.current);
-      testResetRef.current = setTimeout(() => setTestState("idle"), 3000);
-    }
-  }
-
-  async function unsubscribe() {
-    setBusy(true);
-    setError(null);
-    try {
-      // Same never-settles guard as subscribe(); a timeout lands in the catch.
-      const reg = await withTimeout(navigator.serviceWorker.ready, SW_READY_TIMEOUT_MS);
-      const sub = await reg.pushManager.getSubscription();
-      if (sub) {
-        const delRes = await fetch(withBasePath("/api/push/subscribe"), {
-          method: "DELETE",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ endpoint: sub.endpoint }),
-        });
-        // A failed DELETE leaves the server still pushing to this endpoint;
-        // dropping the browser subscription anyway would show "off" while the
-        // server disagrees. 404 means the server already forgot it.
-        if (!delRes.ok && delRes.status !== 404) {
-          setError(t("shared.push.disableFailed"));
-          return;
-        }
-        await sub.unsubscribe();
-      }
-      setState("unsubscribed");
-      window.dispatchEvent(new Event(PUSH_CHANGED_EVENT));
-    } catch {
-      setError(t("shared.push.disableFailed"));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (!mounted || state === "loading") return null;
-
-  if (state === "unsupported") {
-    // 32x32 icon button. The aria-label lets screen readers (VoiceOver,
-    // TalkBack) announce it; a `title` alone is unreliable on mobile.
+  if (push.state === "unsupported") {
     return (
-      <button
+      <PushIconButton
         disabled
-        aria-label={t("shared.push.unsupportedAria")}
+        label={t("shared.push.unsupportedAria")}
         title={t("shared.push.unsupportedTitle")}
-        className="ds-tap inline-flex items-center justify-center cursor-not-allowed shrink-0"
+        className="cursor-not-allowed"
         // fg-disabled, not zinc-700: zinc-700 is a background colour in this
         // theme, so the icon would vanish into the header.
-        style={{ width: 32, height: 32, borderRadius: 6, color: "var(--ds-fg-disabled)" }}
+        style={{ color: "var(--ds-fg-disabled)" }}
       >
         <BellOff className="w-4 h-4" />
-      </button>
+      </PushIconButton>
     );
   }
 
-  if (state === "denied") {
+  if (push.state === "denied") {
     return (
-      <button
+      <PushIconButton
         disabled
-        aria-label={t("shared.push.blockedAria")}
+        label={t("shared.push.blockedAria")}
         title={t("shared.push.blockedTitle")}
-        className="ds-tap inline-flex items-center justify-center text-zinc-500 cursor-not-allowed shrink-0"
-        style={{ width: 32, height: 32, borderRadius: 6 }}
+        className="text-zinc-500 cursor-not-allowed"
       >
         <BellOff className="w-4 h-4" />
-      </button>
+      </PushIconButton>
     );
   }
 
-  if (state === "naming") {
+  if (push.state === "naming") {
     return (
-      // min-w-0 + a shrinkable input: in the 375px mobile top bar this form
-      // sits beside the menu/search/notification controls, and a fixed-width
-      // row ran past the right edge. Controls stay h-8 (tap-target floor).
-      <form
-        className="flex min-w-0 items-center gap-1.5"
-        onSubmit={(e) => {
-          e.preventDefault();
-          subscribe(deviceName);
-        }}
-      >
-        <Input
-          ref={inputRef}
-          type="text"
-          value={deviceName}
-          onChange={(e) => setDeviceName(e.target.value)}
-          placeholder={t("shared.push.devicePlaceholder")}
-          maxLength={100}
-          aria-label={t("shared.push.deviceName")}
-          className="w-40 shrink md:text-xs md:text-xs"
-        />
-        <Button
-          type="submit"
-          size="sm"
-          className="h-8 shrink-0"
-          disabled={busy}
-          aria-label={t("shared.push.enableAria")}
-        >
-          {t("shared.push.enable")}
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          className="h-8 shrink-0"
-          onClick={() => { setState("unsubscribed"); setDeviceName(""); }}
-        >
-          {t("shared.common.cancel")}
-        </Button>
-      </form>
-    );
-  }
-
-  if (state === "subscribed") {
-    return (
-      <div className="flex items-center gap-1">
-        <button
-          onClick={unsubscribe}
-          disabled={busy}
-          // A failed unsubscribe keeps this state, so show its error here.
-          aria-label={error ?? t("shared.push.disable")}
-          title={error ?? t("shared.push.disable")}
-          className={`ds-tap inline-flex items-center justify-center transition-colors disabled:opacity-50 shrink-0 ${
-            error ? "text-red-400" : "text-indigo-400 hover:text-indigo-300"
-          }`}
-          style={{ width: 32, height: 32, borderRadius: 6 }}
-        >
-          <Bell className="w-4 h-4" />
-        </button>
-        <button
-          onClick={sendTest}
-          disabled={testState === "sending"}
-          aria-label={t("shared.push.sendTest")}
-          title={t("shared.push.sendTest")}
-          className={`ds-tap inline-flex items-center justify-center transition-colors disabled:opacity-50 shrink-0 ${
-            testState === "ok" ? "text-green-400" : testState === "error" ? "text-red-400" : "text-zinc-500 hover:text-zinc-300"
-          }`}
-          style={{ width: 32, height: 32, borderRadius: 6 }}
-        >
-          <Send className="w-4 h-4" />
-        </button>
-      </div>
+      <DeviceNameForm
+        value={deviceName}
+        onChange={setDeviceName}
+        busy={push.busy}
+        onSubmit={() => void push.subscribe(deviceName)}
+        onCancel={() => { push.cancelNaming(); setDeviceName(""); }}
+      />
     );
   }
 
   // This control is a 32px icon with no room for error text, so a failure
-  // turns the bell red and puts the reason in its tooltip and accessible name
-  // (the same way the Send-test button signals its failures).
+  // turns the bell red, puts the reason in its tooltip and its accessible
+  // description (the name stays the action), and fail() also shows it as a
+  // toast. The Send-test button signals its failures the same way, by colour.
+  const errorNote = push.error ? <span id={errorId} hidden>{push.error}</span> : null;
+
+  if (push.state === "subscribed") {
+    return (
+      <div className="flex items-center gap-1">
+        <PushIconButton
+          onClick={() => void push.unsubscribe()}
+          disabled={push.busy}
+          // A failed unsubscribe keeps this state, so show its error here.
+          label={t("shared.push.disable")}
+          title={push.error ?? t("shared.push.disable")}
+          aria-describedby={push.error ? errorId : undefined}
+          className={cn("transition-colors disabled:opacity-50", push.error ? "text-red-400" : "text-indigo-400 hover:text-indigo-300")}
+        >
+          <Bell className="w-4 h-4" />
+        </PushIconButton>
+        {errorNote}
+        <PushIconButton
+          onClick={() => void push.sendTest()}
+          disabled={push.testState === "sending"}
+          label={t("shared.push.sendTest")}
+          className={cn("transition-colors disabled:opacity-50", TEST_STATE_CLASS[push.testState])}
+        >
+          <Send className="w-4 h-4" />
+        </PushIconButton>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <PushIconButton
+        onClick={push.startNaming}
+        disabled={push.busy}
+        label={t("shared.push.enableDesktop")}
+        title={push.error ?? t("shared.push.enableDesktop")}
+        aria-describedby={push.error ? errorId : undefined}
+        className={cn(
+          "transition-colors disabled:opacity-50",
+          push.error ? "text-red-400 hover:text-[var(--ds-danger-hover)]" : "text-zinc-500 hover:text-zinc-300",
+        )}
+      >
+        <BellOff className="w-4 h-4" />
+      </PushIconButton>
+      {errorNote}
+    </>
+  );
+}
+
+const TEST_STATE_CLASS: Record<PushTestState, string> = {
+  idle: "text-zinc-500 hover:text-zinc-300",
+  sending: "text-zinc-500 hover:text-zinc-300",
+  ok: "text-green-400",
+  error: "text-red-400",
+};
+
+const ICON_BUTTON_STYLE: CSSProperties = { width: 32, height: 32, borderRadius: 6 };
+
+// The 32x32 icon button every state draws. The aria-label lets screen readers
+// (VoiceOver, TalkBack) announce it; a `title` alone is unreliable on mobile.
+function PushIconButton({
+  label,
+  title,
+  className,
+  style,
+  ...rest
+}: Omit<ButtonHTMLAttributes<HTMLButtonElement>, "aria-label" | "type"> & { label: string }) {
   return (
     <button
-      onClick={() => { setError(null); setState("naming"); }}
-      disabled={busy}
-      aria-label={error ?? t("shared.push.enableDesktop")}
-      title={error ?? t("shared.push.enableDesktop")}
-      className={`ds-tap inline-flex items-center justify-center transition-colors disabled:opacity-50 shrink-0 ${
-        error ? "text-red-400 hover:text-[var(--ds-danger-hover)]" : "text-zinc-500 hover:text-zinc-300"
-      }`}
-      style={{ width: 32, height: 32, borderRadius: 6 }}
+      type="button"
+      aria-label={label}
+      title={title ?? label}
+      className={cn("ds-tap inline-flex items-center justify-center shrink-0", className)}
+      style={{ ...ICON_BUTTON_STYLE, ...style }}
+      {...rest}
+    />
+  );
+}
+
+function DeviceNameForm({
+  value,
+  onChange,
+  busy,
+  onSubmit,
+  onCancel,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  busy: boolean;
+  onSubmit: () => void;
+  onCancel: () => void;
+}) {
+  const t = useT();
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    // Wait one tick so the input exists before we focus it.
+    const timer = setTimeout(() => inputRef.current?.focus(), 0);
+    return () => clearTimeout(timer);
+  }, []);
+  return (
+    // min-w-0 + a shrinkable input: in the 375px mobile top bar this form
+    // sits beside the menu/search/notification controls, and a fixed-width
+    // row ran past the right edge. Controls stay h-8 (tap-target floor).
+    <form
+      className="flex min-w-0 items-center gap-1.5"
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSubmit();
+      }}
     >
-      <BellOff className="w-4 h-4" />
-    </button>
+      <Input
+        ref={inputRef}
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={t("shared.push.devicePlaceholder")}
+        maxLength={100}
+        aria-label={t("shared.push.deviceName")}
+        className="w-40 shrink md:text-xs"
+      />
+      <Button
+        type="submit"
+        size="sm"
+        className="h-8 shrink-0"
+        disabled={busy}
+        aria-label={t("shared.push.enableAria")}
+      >
+        {t("shared.push.enable")}
+      </Button>
+      <Button
+        type="button"
+        size="sm"
+        variant="ghost"
+        className="h-8 shrink-0"
+        // An enable in flight would finish after a Cancel and subscribe anyway.
+        disabled={busy}
+        onClick={onCancel}
+      >
+        {t("shared.common.cancel")}
+      </Button>
+    </form>
   );
 }

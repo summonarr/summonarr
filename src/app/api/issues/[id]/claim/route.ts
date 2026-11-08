@@ -101,6 +101,9 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
       claimedUser: { select: { id: true, name: true, email: true } },
     },
   });
+  // Deleted between the swap and this read: nothing is claimed any more, so
+  // there is no claim to answer, announce or audit.
+  if (!updated) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
   emitSSE({ type: "issue:updated", issueId: id, status: issue.status, userId: issue.reportedBy });
 
@@ -109,7 +112,7 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
     userName: session.user.name ?? session.user.email,
     action: action === "claim" ? "ISSUE_CLAIM" : "ISSUE_UNCLAIM",
     target: `issue:${id}`,
-    details: { title: issue.title, before: { claimedBy: existingClaimedBy }, after: { claimedBy: updated?.claimedBy ?? null } },
+    details: { title: issue.title, before: { claimedBy: existingClaimedBy }, after: { claimedBy: updated.claimedBy } },
     ...auditContext(req, session),
   });
 

@@ -4,7 +4,7 @@
 // the 6-cell resp-kpi strip, the 2×2 resp-grid-2 trend cards (SectionHeader +
 // a 120px AreaChart + axis line, ~204px), then the resp-grid-3 leaderboard
 // row. No Now Playing section — that is overview-only.
-import { SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 import {
   ActivityCardSkeleton,
   ActivityTabsSkeleton,
@@ -13,7 +13,7 @@ import {
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle />
       <ActivityTabsSkeleton filters />
       <KpiStripSkeleton />
@@ -33,6 +33,6 @@ export default function Loading() {
           <ActivityCardSkeleton key={i} h={320} />
         ))}
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

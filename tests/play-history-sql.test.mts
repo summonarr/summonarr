@@ -58,6 +58,7 @@ const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const {
   getActivityCalendar,
+  getBusiestDay,
   getHeatmapCellDetail,
   getMediaPlayStats,
   getMostPopularOnServer,
@@ -68,7 +69,11 @@ const {
   getTranscodeOffenders,
   getUserPlayStats,
   getWrappedForServerUsers,
+  clearActivityCache,
+  POPULAR_PER_PAGE,
 } = await import("../src/lib/play-history.ts");
+const { MAX_POPULAR_ROWS } = await import("../src/lib/play-history-popular.ts");
+const { invalidateStatsTimeZone } = await import("../src/lib/stats-time-zone-data.ts");
 
 // ── capture ─────────────────────────────────────────────────────────────────
 
@@ -92,8 +97,18 @@ shadowPrismaClientMethod(prisma, "$queryRaw", async (strings: TemplateStringsArr
 });
 
 // Settings back the threshold getters (completion/arc-gap) that
-// getMostPopularOnServer folds into its params.
-shadowPrismaModel(prisma, "setting", { findMany: async () => [] });
+// getMostPopularOnServer folds into its params, and the statistics time zone
+// (one findUnique). The zone is a test-controlled value, not the host's TZ.
+let statsZone = "UTC";
+shadowPrismaModel(prisma, "setting", {
+  findMany: async () => [],
+  findUnique: async (a: { where: { key: string } }) =>
+    a.where.key === "statsTimeZone" ? { value: statsZone } : null,
+});
+function useStatsZone(zone: string): void {
+  statsZone = zone;
+  invalidateStatsTimeZone();
+}
 // Poster backfill on the rewatch/top-watched leaderboards — never reached with
 // zero rows, stubbed so a shape change can't silently hit a real delegate.
 shadowPrismaModel(prisma, "tmdbMediaCore", { findMany: async () => [] });
@@ -200,7 +215,9 @@ test("getMostPopularOnServer: every mediaType × sort combination keeps $-indice
   assert.equal(combos, 9, "the matrix must stay exhaustive");
 });
 
-test("getMostPopularOnServer: the trending window is an extra BOUND param, and it shifts limit/offset", async () => {
+test("getMostPopularOnServer: the trending window is an extra BOUND param, and the ranking binds only its fixed row cap", async () => {
+  // Rankings are cached per (mediaType, sort): the matrix above filled them.
+  clearActivityCache();
   const [plain] = await capture(() => getMostPopularOnServer({ sort: "plays", page: 1, limit: 7 }));
   const [trending] = await capture(() => getMostPopularOnServer({ sort: "trending", page: 1, limit: 7 }));
 
@@ -213,29 +230,27 @@ test("getMostPopularOnServer: the trending window is an extra BOUND param, and i
   assert.ok(!plain.sql.includes("FILTER (WHERE arc_started_at"), "the non-trending path emits no arc window filter");
   assert.ok(trending.sql.includes("FILTER (WHERE arc_started_at"), "the trending path filters arcs by the window");
 
-  // LIMIT/OFFSET are the LAST two pushes, so they must be the last two indices
-  // in both shapes — this is what a mis-captured index variable breaks.
+  // A page is sliced from the cached ranking, so the statement has no OFFSET and
+  // its LIMIT is the ranking's cap — the LAST push, so the last index in both
+  // shapes (what a mis-captured index variable breaks).
   for (const [label, q] of [["plays", plain], ["trending", trending]] as const) {
     const n = q.params.length;
-    assert.ok(
-      q.sql.includes(`LIMIT $${n - 1} OFFSET $${n}`),
-      `${label}: LIMIT/OFFSET must bind the final two params ($${n - 1}, $${n}) — got ${excerpt(q.sql).slice(-60)}`,
-    );
-    assert.equal(q.params[n - 2], 7, `${label}: the limit value binds where the SQL says LIMIT`);
+    assert.match(q.sql, new RegExp(`LIMIT \\$${n}\\s*$`), `${label}: LIMIT must bind the final param ($${n}) — got ${excerpt(q.sql).slice(-60)}`);
+    assert.doesNotMatch(q.sql, /OFFSET/, `${label}: no per-page OFFSET`);
+    assert.equal(q.params[n - 1], MAX_POPULAR_ROWS, `${label}: the cap binds where the SQL says LIMIT, never the page size`);
   }
 });
 
-test("getMostPopularOnServer: page/limit clamps bind the CLAMPED values, never the caller's", async () => {
-  // MAX_POPULAR_PAGE / POPULAR_PER_PAGE clamp at the source (an unclamped page
-  // would defeat the cache and grow popularCache without bound).
-  const [q] = await capture(() => getMostPopularOnServer({ page: 10_000_000, limit: 10_000 }));
-  const n = q.params.length;
-  const limit = Number(q.params[n - 2]);
-  const offset = Number(q.params[n - 1]);
-
-  assert.ok(limit > 0 && limit < 10_000, `limit was clamped below the caller's 10000 (got ${limit})`);
-  assert.ok(offset >= 0 && Number.isFinite(offset), `offset stays a finite non-negative integer (got ${offset})`);
-  assert.equal(offset % limit, 0, "offset is a whole number of clamped pages");
+test("getMostPopularOnServer: page/limit clamps bound the slice; no caller value reaches the statement", async () => {
+  // MAX_POPULAR_PAGE / POPULAR_PER_PAGE clamp at the source, so a deep page can't
+  // read past the ranking's cap.
+  clearActivityCache();
+  let result: Awaited<ReturnType<typeof getMostPopularOnServer>> | null = null;
+  const [q] = await capture(async () => { result = await getMostPopularOnServer({ page: 10_000_000, limit: 10_000 }); });
+  assert.ok(!q.params.includes(10_000) && !q.params.includes(10_000_000), "the caller's page and limit are never bound");
+  assert.equal(q.params[q.params.length - 1], MAX_POPULAR_ROWS);
+  assert.equal(result!.page, MAX_POPULAR_ROWS / POPULAR_PER_PAGE, "the page is clamped to the last reachable one");
+  assert.deepEqual(result!.items, []);
 });
 
 // ── getHeatmapCellDetail: one params array, five queries ─────────────────────
@@ -322,26 +337,25 @@ test("getHeatmapCellDetail: a hostile userId is BOUND, never interpolated into t
 
 // ── getActivityCalendar: the shipped $1-offset bug ──────────────────────────
 
-test("getActivityCalendar: the filter suffix starts at $1 — the shipped offset bug stays dead", async () => {
-  // The calendar binds NOTHING before its filter suffix (the 365-day window is
-  // literal SQL), so an unfiltered call must bind zero params and reference no
-  // placeholder at all.
+test("getActivityCalendar: the filter suffix starts right after the zone — the shipped offset bug stays dead", async () => {
+  // The calendar binds only the statistics zone ($1) before its filter suffix,
+  // so an unfiltered call binds exactly that one param.
   const bare = await capture(() => getActivityCalendar());
   auditAll("getActivityCalendar()", bare);
-  assert.equal(bare[0].params.length, 0, "no filters ⇒ no params");
-  assert.equal(placeholderSet(bare[0].sql).size, 0, "no params ⇒ no placeholders");
+  assert.deepEqual(bare[0].params, ["UTC"], "no filters ⇒ only the zone");
+  assert.deepEqual([...placeholderSet(bare[0].sql)], [1], "the zone is $1");
 
-  // With one filter the value must be $1. The shipped bug emitted $2 here,
-  // leaving params[0] orphaned — exactly what auditQuery's second assertion catches.
+  // With one filter the value must be $2. The shipped bug emitted the next index
+  // here, leaving a param orphaned — exactly what auditQuery's second assertion catches.
   const oneFilter = await capture(() => getActivityCalendar("plex"));
   auditAll("getActivityCalendar(source)", oneFilter);
-  assert.deepEqual([...placeholderSet(oneFilter[0].sql)], [1], "the first filter param is $1, NOT $2");
-  assert.deepEqual(oneFilter[0].params, ["plex"]);
+  assert.deepEqual([...placeholderSet(oneFilter[0].sql)].sort(), [1, 2], "the first filter param is $2, right after the zone");
+  assert.deepEqual(oneFilter[0].params, ["UTC", "plex"]);
 
   const twoFilters = await capture(() => getActivityCalendar("jellyfin", "MOVIE"));
   auditAll("getActivityCalendar(source, mediaType)", twoFilters);
-  assert.deepEqual([...placeholderSet(twoFilters[0].sql)].sort(), [1, 2], "two filters bind $1 and $2 contiguously");
-  assert.deepEqual(twoFilters[0].params, ["jellyfin", "MOVIE"]);
+  assert.deepEqual([...placeholderSet(twoFilters[0].sql)].sort(), [1, 2, 3], "two filters bind $2 and $3 contiguously");
+  assert.deepEqual(twoFilters[0].params, ["UTC", "jellyfin", "MOVIE"]);
 });
 
 test("getActivityCalendar: an unrecognized filter value is ignored, not bound and not inlined", async () => {
@@ -349,7 +363,7 @@ test("getActivityCalendar: an unrecognized filter value is ignored, not bound an
   // The query must then be unfiltered rather than binding a junk value.
   const queries = await capture(() => getActivityCalendar("MOVIE" /* not a source */));
   auditAll("getActivityCalendar(bad source)", queries);
-  assert.equal(queries[0].params.length, 0, "a whitelist miss binds nothing");
+  assert.deepEqual(queries[0].params, ["UTC"], "a whitelist miss binds nothing beyond the zone");
   assert.ok(!queries[0].sql.includes("MOVIE"), "and is never interpolated as text");
 });
 
@@ -452,6 +466,30 @@ test("the remaining aggregate entry points all keep SQL and params in lockstep",
   }
 });
 
+// Wrapped's "go-to screen" card: some clients report an empty device or
+// platform, and a blank most-common value used to win the top slot and render an
+// empty card. Every statement is scoped to the year IN THE STATISTICS ZONE: its
+// bounds are the zone's midnights, bound as dates plus the zone.
+test("getWrappedForServerUsers: a blank platform/device never wins, and the year is the statistics zone's", async () => {
+  const queries = await capture(() => getWrappedForServerUsers(["msu-1", "msu-2"], 2025, "Asia/Tokyo"));
+  const plat = queries.find((q) => q.sql.includes(`"platform" AS v`));
+  const dev = queries.find((q) => q.sql.includes(`"device" AS v`));
+  assert.ok(plat && dev);
+  assert.match(plat.sql, /NULLIF\(btrim\("platform"\), ''\) IS NOT NULL/, excerpt(plat.sql));
+  assert.match(dev.sql, /NULLIF\(btrim\("device"\), ''\) IS NOT NULL/, excerpt(dev.sql));
+  for (const q of queries) {
+    assert.ok(
+      q.sql.includes(
+        `"mediaServerUserId" IN ($1, $2) AND "startedAt" >= (((($3::date)::timestamp) AT TIME ZONE $5::text) AT TIME ZONE 'UTC') ` +
+          `AND "startedAt" < (((($4::date)::timestamp) AT TIME ZONE $5::text) AT TIME ZONE 'UTC')`,
+      ),
+      excerpt(q.sql),
+    );
+    assert.deepEqual(q.params, ["msu-1", "msu-2", "2025-01-01", "2026-01-01", "Asia/Tokyo"]);
+  }
+  auditAll("getWrappedForServerUsers", queries);
+});
+
 test("no aggregate inlines a caller-supplied id — server-user and tmdb ids are always bound", async () => {
   const hostileId = `msu'); DELETE FROM "PlayHistory"; --`;
   for (const [label, fn] of [
@@ -505,4 +543,107 @@ test("getMediaPlayStats: the per-row completion is clamped with LEAST before ave
     sql.includes(`LEAST("playDuration"::float / "duration", 1.0) * 100`),
     `the ratio is clamped at 1.0 before scaling to a percentage: ${excerpt(sql)}`,
   );
+});
+
+// ── the statistics time zone ────────────────────────────────────────────────
+// PlayHistory.startedAt holds UTC with no zone attached. Every hour,
+// day-of-week, day, month and year bucket reads it on the statistics zone's wall
+// clock — (("startedAt" AT TIME ZONE 'UTC') AT TIME ZONE $n) with the zone a
+// BOUND param — and every day boundary is that zone's midnight. A bare
+// EXTRACT/date_trunc on the column buckets in UTC again.
+
+const BARE_UTC_BUCKET =
+  /EXTRACT\((?:DOW|HOUR|YEAR|MONTH|DAY) FROM (?:\w+\.)?"startedAt"\)|date_trunc\('[a-z]+', (?:\w+\.)?"startedAt"\)|DATE\((?:\w+\.)?"startedAt"\)|to_char\((?:\w+\.)?"startedAt"|"startedAt"\s*[<>]=?\s*\$\d+::date/;
+const ZONED_START = /\(\("startedAt" AT TIME ZONE 'UTC'\) AT TIME ZONE \$(\d+)::text\)/g;
+const ZONED_MIDNIGHT = /\) AT TIME ZONE \$(\d+)::text\) AT TIME ZONE 'UTC'\)/g;
+const BUCKET = /EXTRACT\((?:DOW|HOUR|YEAR)|date_trunc\('(?:day|month)'|to_char\(/;
+
+/** Every zone reference in `q` binds `zone`; returns how many there were. */
+function assertZoneBound(label: string, q: Captured, zone: string): number {
+  let refs = 0;
+  for (const re of [ZONED_START, ZONED_MIDNIGHT]) {
+    for (const m of q.sql.matchAll(re)) {
+      refs++;
+      assert.equal(q.params[Number(m[1]) - 1], zone, `${label}: $${m[1]} must bind the statistics zone\n  ${excerpt(q.sql)}`);
+    }
+  }
+  return refs;
+}
+
+test("every hour/day bucket and day boundary reads startedAt in the statistics zone, bound as a param", async () => {
+  useStatsZone("America/New_York");
+  try {
+    const zone = "America/New_York";
+    const cases: [string, () => Promise<unknown>, number][] = [
+      // [label, call, statements that bucket by hour/day/month/year]
+      ["getPlayHistoryStats", () => getPlayHistoryStats({ days: 45 }), 2],
+      ["getActivityCalendar", () => getActivityCalendar("plex", "TV"), 1],
+      ["getBusiestDay", () => getBusiestDay({ days: 45 }), 1],
+      ["getHeatmapCellDetail(day)", () => getHeatmapCellDetail({ mode: "day", day: "2026-04-01" }), 0],
+      // The hour cell's five statements all filter on EXTRACT in the zone.
+      ["getHeatmapCellDetail(hour)", () => getHeatmapCellDetail({ mode: "hour", dow: 5, hour: 21, days: 45 }), 5],
+      ["getPlayStatsForServerUsers", () => getPlayStatsForServerUsers(["msu-z"]), 3],
+      ["getPlayYearsForServerUsers", () => getPlayYearsForServerUsers(["msu-z"]), 1],
+      ["getWrappedForServerUsers", () => getWrappedForServerUsers(["msu-z"], 2024), 4],
+      ["getMediaPlayStats", () => getMediaPlayStats(4242, "MOVIE"), 1],
+    ];
+    for (const [label, fn, buckets] of cases) {
+      const queries = await capture(fn);
+      auditAll(label, queries);
+      let zoned = 0;
+      for (const q of queries) {
+        assert.ok(!BARE_UTC_BUCKET.test(q.sql), `${label}: a bucket or day bound reads the bare UTC column\n  ${excerpt(q.sql)}`);
+        const refs = assertZoneBound(label, q, zone);
+        if (BUCKET.test(q.sql)) {
+          assert.ok(refs > 0, `${label}: a bucketed statement never names the zone\n  ${excerpt(q.sql)}`);
+          zoned++;
+        }
+      }
+      assert.equal(zoned, buckets, `${label}: bucketed statements`);
+    }
+
+    // The drill-downs' cell definitions: the day is the zone's midnight to the
+    // next, the hour cell matches EXTRACT on the zone's wall clock.
+    const [day] = await capture(() => getHeatmapCellDetail({ mode: "day", day: "2026-04-02" }));
+    assert.ok(
+      day.sql.includes(
+        `"startedAt" >= (((($1::date)::timestamp) AT TIME ZONE $2::text) AT TIME ZONE 'UTC') ` +
+          `AND "startedAt" < (((($1::date + 1)::timestamp) AT TIME ZONE $2::text) AT TIME ZONE 'UTC')`,
+      ),
+      excerpt(day.sql),
+    );
+    assert.deepEqual(day.params.slice(0, 2), ["2026-04-02", zone]);
+    const [hour] = await capture(() => getHeatmapCellDetail({ mode: "hour", dow: 6, hour: 22 }));
+    assert.ok(hour.sql.includes(`EXTRACT(DOW FROM (("startedAt" AT TIME ZONE 'UTC') AT TIME ZONE $1::text))::int = $2`), excerpt(hour.sql));
+    assert.ok(hour.sql.includes(`EXTRACT(HOUR FROM (("startedAt" AT TIME ZONE 'UTC') AT TIME ZONE $1::text))::int = $3`), excerpt(hour.sql));
+    assert.deepEqual(hour.params, [zone, 6, 22]);
+  } finally {
+    useStatsZone("UTC");
+  }
+});
+
+// Guardrail 19b: a memoized aggregate that depends on the zone carries it in its
+// key, so a zone change never serves the old zone's buckets for the rest of a TTL.
+test("the zone-bucketed aggregates are memoized per zone: a new zone recomputes, the same zone is a hit", async () => {
+  const calls: [string, () => Promise<unknown>][] = [
+    ["getPlayHistoryStats", () => getPlayHistoryStats({ days: 46 })],
+    ["getActivityCalendar", () => getActivityCalendar("jellyfin")],
+    ["getBusiestDay", () => getBusiestDay({ days: 46 })],
+    ["getHeatmapCellDetail", () => getHeatmapCellDetail({ mode: "day", day: "2026-04-03" })],
+  ];
+  try {
+    useStatsZone("Europe/Berlin");
+    for (const [label, fn] of calls) {
+      assert.ok((await capture(fn)).length > 0, `${label}: the first read computes`);
+      assert.equal((await capture(fn)).length, 0, `${label}: the same zone is served from the cache`);
+    }
+    useStatsZone("Australia/Sydney");
+    for (const [label, fn] of calls) {
+      const queries = await capture(fn);
+      assert.ok(queries.length > 0, `${label}: a new zone must not be served the old zone's buckets`);
+      assert.ok(queries.some((q) => q.params.includes("Australia/Sydney")), `${label}: and recomputes in the new zone`);
+    }
+  } finally {
+    useStatsZone("UTC");
+  }
 });

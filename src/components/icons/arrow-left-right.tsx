@@ -1,24 +1,13 @@
-import type { IconProps } from "./index";
+import { IconBase } from "./icon-base";
+import type { IconProps } from "./types";
 
-export function ArrowLeftRight({ size, ...props }: IconProps) {
+export function ArrowLeftRight(props: IconProps) {
   return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width={size ?? 24}
-      height={size ?? 24}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden={props["aria-label"] || props["aria-labelledby"] || props.role === "img" ? undefined : true}
-      {...props}
-    >
+    <IconBase {...props}>
       <path d="m8 3-4 4 4 4" />
       <path d="M4 7h16" />
       <path d="m16 21 4-4-4-4" />
       <path d="M20 17H4" />
-    </svg>
+    </IconBase>
   );
 }

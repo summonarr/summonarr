@@ -98,6 +98,8 @@ interface ArrFixture {
   onQueuePage?: (page: number) => void;
   /** This queue page never answers — it waits for the request's signal to abort. */
   queueHangPage?: number;
+  /** Rewrites a fallback /history page's records before they are served. */
+  historyPage?: (page: number, records: Array<Record<string, unknown>>) => Array<Record<string, unknown>>;
 }
 const fixtures = new Map<string, ArrFixture>();
 function fixture(origin: string): ArrFixture {
@@ -126,7 +128,10 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     }
     case "/api/v3/history": {
       const sorted = [...f.history].sort((a, b) => Date.parse(String(b.date)) - Date.parse(String(a.date)));
-      return json({ page: 1, pageSize: 200, totalRecords: sorted.length, records: sorted });
+      const page = Number(url.searchParams.get("page") ?? "1");
+      const pageSize = Number(url.searchParams.get("pageSize") ?? "200");
+      const served = sorted.slice((page - 1) * pageSize, page * pageSize);
+      return json({ page, pageSize, totalRecords: sorted.length, records: f.historyPage ? f.historyPage(page, served) : served });
     }
     case "/api/v3/queue": {
       const page = Number(url.searchParams.get("page") ?? "1");
@@ -148,6 +153,8 @@ const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const settings = new Map<string, string>();
 let failStateWrite = false;
+// A setting.findMany asking for this key throws (an instance's config read failing).
+let failFindManyKey: string | null = null;
 let settingWrites: string[] = [];
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) => {
@@ -156,6 +163,7 @@ shadowPrismaModel(prisma, "setting", {
   },
   findMany: async (args: { where?: { key?: { in?: string[] } } } = {}) => {
     const keys = args.where?.key?.in;
+    if (failFindManyKey && keys?.includes(failFindManyKey)) throw new Error("config read down");
     return [...settings.entries()].filter(([k]) => !keys || keys.includes(k)).map(([key, value]) => ({ key, value }));
   },
   upsert: async (args: { where: { key: string }; create: { value: string }; update: { value: string } }) => {
@@ -236,6 +244,7 @@ beforeEach(() => {
   warns.length = 0;
   settingWrites = [];
   failStateWrite = false;
+  failFindManyKey = null;
   invalidateFeatureFlagCache();
   invalidateAgentCache();
   resetLogDedup();
@@ -789,6 +798,48 @@ test("an arr without /history/since falls back to the newest page of failures, f
   assert.equal(page.query.get("sortDirection"), "descending");
 });
 
+test("the fallback reads back past its newest page to the cursor: a backlog of 260 failures is announced OLDEST first, not from the newest 200", async () => {
+  const f = configureRadarr();
+  f.noSince = true;
+  await runArrWatch({ now: T0 });
+  await settle();
+  calls = [];
+  // Failures 1 (oldest) … 260 (newest), all after the seeded cursor.
+  f.history = Array.from({ length: 260 }, (_, i) => radarrFailure(i + 1, T0 + (i + 1) * 1_000));
+  const r = await runArrWatch({ now: T0 + 15 * MIN });
+  await settle();
+  assert.equal(r.events.downloadFailed, W.MAX_FAILURES_PER_RUN);
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(arrCalls(RADARR, "/api/v3/history").map((c) => c.query.get("page")), ["1", "2"]);
+  const announced = deliveries().filter((d) => d.event === "arr.download_failed").map((d) => Number(String(d.arr?.release).split(".").pop())).sort((a, b) => a - b);
+  assert.deepEqual(announced, Array.from({ length: W.MAX_FAILURES_PER_RUN }, (_, i) => i + 1), "the oldest failures past the cursor, not the oldest of the newest page (61…)");
+});
+
+test("the fallback reads on past a page whose oldest record has no readable date, instead of calling the read complete", async () => {
+  const f = configureRadarr();
+  f.noSince = true;
+  await runArrWatch({ now: T0 });
+  await settle();
+  calls = [];
+  f.history = Array.from({ length: 260 }, (_, i) => radarrFailure(i + 1, T0 + (i + 1) * 1_000));
+  // Page 1's boundary record carries no date: it says nothing about the cursor.
+  f.historyPage = (page, records) => page === 1 ? records.map((r, i) => (i === records.length - 1 ? { ...r, date: "not a date" } : r)) : records;
+  const r = await runArrWatch({ now: T0 + 15 * MIN });
+  assert.deepEqual(arrCalls(RADARR, "/api/v3/history").map((c) => c.query.get("page")), ["1", "2"], "the read stopped at an unreadable boundary");
+  assert.deepEqual(r.errors, []);
+});
+
+test("the fallback's page cap is SAID: past it the older failures can't be reached, and the run reports it", async () => {
+  const f = configureRadarr();
+  f.noSince = true;
+  await runArrWatch({ now: T0 });
+  f.history = Array.from({ length: 1_100 }, (_, i) => radarrFailure(i + 1, T0 + (i + 1) * 500));
+  const r = await runArrWatch({ now: T0 + 15 * MIN });
+  assert.equal(arrCalls(RADARR, "/api/v3/history").length, 5);
+  assert.deepEqual(r.errors.map((e) => e.part), ["history"]);
+  assert.match(r.errors[0].error, /only the newest 1000 failures/);
+});
+
 test("a Sonarr pack failing is ONE event with its episode count; instances are isolated", async () => {
   settings.set("radarrUrl", RADARR);
   settings.set("radarrApiKey", "radarr-key");
@@ -1011,8 +1062,9 @@ test("C101 guardrail 41: readQueuePages RETURNS what it has on an abort — it n
   f.queueTotal = 600;
   const controller = new AbortController();
   f.onQueuePage = (page) => { if (page === 1) controller.abort(new Error("lock timeout")); };
-  const records = await readQueuePages("radarr", "", controller.signal);
-  assert.equal(records.length, 1, "page 1's records, and no page after the abort");
+  const listing = await readQueuePages("radarr", "", controller.signal);
+  assert.equal(listing.records.length, 1, "page 1's records, and no page after the abort");
+  assert.equal(listing.stopped, true, "the walk says the abort stopped it");
   assert.deepEqual(arrCalls(RADARR, "/api/v3/queue").map((c) => c.query.get("page")), ["1"]);
 });
 
@@ -1027,8 +1079,9 @@ test("C101 guardrail 41: a queue page IN FLIGHT when the lock aborts is cancelle
   for (let i = 0; i < 200 && arrCalls(RADARR, "/api/v3/queue").length < 2; i++) await new Promise((r) => setImmediate(r));
   assert.equal(arrCalls(RADARR, "/api/v3/queue").length, 2, "page 2 is in flight");
   controller.abort(new Error("lock timeout"));
-  const records = await walk;
-  assert.equal(records.length, 1, "page 1's records — the cancelled page adds nothing, and nothing is thrown");
+  const listing = await walk;
+  assert.equal(listing.records.length, 1, "page 1's records — the cancelled page adds nothing, and nothing is thrown");
+  assert.equal(listing.stopped, true, "the walk says the abort stopped it");
 });
 
 test("C101: without an abort the monitor's queue walk still reads every page", async () => {
@@ -1044,6 +1097,82 @@ test("C101: without an abort the monitor's queue walk still reads every page", a
     assert.equal(c.query.get("sortKey"), "added");
     assert.equal(c.query.get("sortDirection"), "ascending");
   }
+});
+
+test("one SLOW instance runs out its own read budget, not the run's: the others are saved and announced, and its unfinished queue keeps its state", async () => {
+  settings.set("radarrUrl", RADARR);
+  settings.set("radarrApiKey", "radarr-key");
+  settings.set("sonarrUrl", SONARR);
+  settings.set("sonarrApiKey", "sonarr-key");
+  const radarr = fixture(RADARR);
+  radarrDisk(radarr, 500);
+  radarr.queue = [queueRecord(1, "STUCK", true)];
+  const sonarr = fixture(SONARR);
+  radarrDisk(sonarr, 500);
+  await runArrWatch({ now: T0 });
+  const seeded = JSON.parse(settings.get(ARR_WATCH_STATE_KEY)!).instances;
+  // Radarr's queue now never answers its first page; Sonarr is healthy and has a new stuck download.
+  radarr.queueHangPage = 1;
+  radarr.queue = [queueRecord(1, "STUCK", true), queueRecord(2, "NEW-R", true)];
+  sonarr.queue = [{ ...queueRecord(5, "NEW-S", true), seriesId: 3, series: { title: "Show", tmdbId: 1 } }];
+  settingWrites = [];
+  calls = [];
+  const lock = new AbortController();
+  const r = await runArrWatch({ now: T0 + 15 * MIN, signal: lock.signal, instanceBudgetMs: 50 });
+  await settle();
+  assert.equal(r.aborted, false, "the lock never fired");
+  assert.equal(r.checked, 2);
+  assert.deepEqual(r.errors.map((e) => `${e.service}:${e.part}`), ["radarr:queue"]);
+  assert.match(r.errors[0].error, /read budget/);
+  assert.ok(settingWrites.includes(ARR_WATCH_STATE_KEY), "the run saved");
+  assert.deepEqual(deliveries().filter((d) => d.event === "arr.queue_attention").map((d) => d.arr?.downloadId), ["NEW-S"]);
+  const state = JSON.parse(settings.get(ARR_WATCH_STATE_KEY)!).instances;
+  const key = Object.keys(state).find((k) => k.startsWith("radarr"))!;
+  assert.deepEqual(state[key].attention, seeded[key].attention, "the partial queue was not read as 'nothing stuck'");
+  assert.equal(state[key].attentionReadAt, seeded[key].attentionReadAt, "nor stamped as a successful read");
+});
+
+test("one instance's failed config read is that instance's error: the others are still read, saved and announced", async () => {
+  settings.set("radarrUrl", RADARR);
+  settings.set("radarrApiKey", "radarr-key");
+  settings.set("sonarrUrl", SONARR);
+  settings.set("sonarrApiKey", "sonarr-key");
+  fixture(RADARR);
+  const sonarr = fixture(SONARR);
+  radarrDisk(sonarr, 30);
+  failFindManyKey = "radarrRootFolder";
+  const r = await runArrWatch({ now: T0 });
+  await settle();
+  assert.equal(r.aborted, false);
+  assert.equal(r.checked, 2);
+  assert.deepEqual(r.errors.map((e) => `${e.service}:${e.part}`), ["radarr:disk", "radarr:history", "radarr:queue"]);
+  assert.match(r.errors[0].error, /config read failed/);
+  assert.equal(r.events.diskLow, 1, "Sonarr's low disk was still announced");
+  assert.ok(settingWrites.includes(ARR_WATCH_STATE_KEY), "the run saved");
+});
+
+test("instances are read concurrently: a second instance starts while the first is still waiting on its queue", async () => {
+  settings.set("radarrUrl", RADARR);
+  settings.set("radarrApiKey", "radarr-key");
+  settings.set("sonarrUrl", SONARR);
+  settings.set("sonarrApiKey", "sonarr-key");
+  const radarr = fixture(RADARR);
+  radarrDisk(radarr, 500);
+  radarr.queueHangPage = 1;
+  const sonarr = fixture(SONARR);
+  radarrDisk(sonarr, 500);
+  sonarr.queueHangPage = 1;
+  const lock = new AbortController();
+  const run = runArrWatch({ now: T0, signal: lock.signal });
+  for (let i = 0; i < 500 && (arrCalls(RADARR, "/api/v3/queue").length === 0 || arrCalls(SONARR, "/api/v3/queue").length === 0); i++) {
+    await new Promise((r) => setImmediate(r));
+  }
+  const both = arrCalls(RADARR, "/api/v3/queue").length === 1 && arrCalls(SONARR, "/api/v3/queue").length === 1;
+  lock.abort(new Error("lock timeout"));
+  const r = await run;
+  assert.ok(both, "the second instance waited for the first");
+  assert.equal(r.aborted, true);
+  assert.deepEqual(settingWrites, []);
 });
 
 test("an instance no longer configured is dropped from the state, so coming back re-seeds instead of replaying", async () => {

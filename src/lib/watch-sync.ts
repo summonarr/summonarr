@@ -59,7 +59,7 @@ export function parseWatchSyncDirection(v: unknown): WatchSyncDirection | null {
 // Does a pair stored with `direction` sync toward `target`? An unknown stored
 // value syncs NOTHING (fail closed: a write into someone's account needs an
 // explicit direction).
-export function syncsToward(direction: string, target: "toJellyfin" | "toPlex"): boolean {
+export function syncsToward(direction: string | null, target: "toJellyfin" | "toPlex"): boolean {
   return direction === "both" || direction === target;
 }
 
@@ -96,28 +96,45 @@ export function normalizePlexAccountId(accountId: string | null, ownerAccountId:
   return accountId === "1" && ownerAccountId ? ownerAccountId : accountId;
 }
 
-// Where one Plex server's history must be read back to for this run: undefined
-// (the whole history) when any enabled pair has never been read, otherwise the
-// OLDEST pair's read point minus the overlap.
-export function historyStopBefore(pairs: readonly WatchSyncPairInput[]): Date | undefined {
-  let oldest: number | null = null;
-  for (const p of pairs) {
-    if (p.historyReadTo === null) return undefined;
-    const t = p.historyReadTo.getTime();
-    if (oldest === null || t < oldest) oldest = t;
-  }
-  return oldest === null ? undefined : new Date(oldest - WATCH_SYNC_HISTORY_OVERLAP_MS);
+// Where a pair's read must go back to — its Plex history (historyReadTo) or its
+// Jellyfin played list (jellyfinReadTo): undefined (all of it) on a first run,
+// otherwise the read point minus the overlap.
+export function readBackTo(readTo: Date | null): Date | undefined {
+  return readTo === null ? undefined : new Date(readTo.getTime() - WATCH_SYNC_HISTORY_OVERLAP_MS);
 }
 
 // The newest viewedAt in a read — what every pair on that server has now been
 // read to. null when the read had no dated entry (keep the previous mark).
 export function newestViewedAt(entries: readonly PlexHistoryEntry[]): Date | null {
+  return newestDate(entries, (e) => e.viewedAt);
+}
+
+// The latest valid date among `items`; null when none has one.
+function newestDate<T>(items: readonly T[], dateOf: (item: T) => Date | null): Date | null {
   let best: number | null = null;
-  for (const e of entries) {
-    const t = e.viewedAt?.getTime();
+  for (const item of items) {
+    const t = dateOf(item)?.getTime();
     if (t !== undefined && Number.isFinite(t) && (best === null || t > best)) best = t;
   }
   return best === null ? null : new Date(best);
+}
+
+// One source play → a WatchSyncPlay through its title lookup: a movie by its own
+// key, an episode by its show's, with both episode numbers required. null =
+// unresolved (counted by the caller, never guessed at).
+function resolvePlay(
+  entry: { kind: "movie" | "episode"; itemKey: string; showKey: string | null; seasonNumber: number | null; episodeNumber: number | null },
+  viewedAt: Date | null,
+  titleFor: (key: string) => PlexTitle | null,
+): WatchSyncPlay | null {
+  if (entry.kind === "movie") {
+    const title = titleFor(entry.itemKey);
+    if (!title || title.mediaType !== "MOVIE") return null;
+    return { tmdbId: title.tmdbId, mediaType: "MOVIE", seasonNumber: null, episodeNumber: null, viewedAt };
+  }
+  const title = entry.showKey ? titleFor(entry.showKey) : null;
+  if (!title || title.mediaType !== "TV" || entry.seasonNumber === null || entry.episodeNumber === null) return null;
+  return { tmdbId: title.tmdbId, mediaType: "TV", seasonNumber: entry.seasonNumber, episodeNumber: entry.episodeNumber, viewedAt };
 }
 
 export interface PairPlaysResult {
@@ -150,15 +167,9 @@ export function playsForPair(
     // the first (full) run took it.
     if (since !== null && (e.viewedAt === null || e.viewedAt.getTime() < since)) continue;
     if (skipItemKeys.has(e.itemKey)) continue;
-    if (e.kind === "movie") {
-      const title = plexTitleForKey(e.itemKey);
-      if (!title || title.mediaType !== "MOVIE") { unresolved++; continue; }
-      plays.push({ tmdbId: title.tmdbId, mediaType: "MOVIE", seasonNumber: null, episodeNumber: null, viewedAt: e.viewedAt });
-      continue;
-    }
-    const title = e.showKey ? plexTitleForKey(e.showKey) : null;
-    if (!title || title.mediaType !== "TV" || e.seasonNumber === null || e.episodeNumber === null) { unresolved++; continue; }
-    plays.push({ tmdbId: title.tmdbId, mediaType: "TV", seasonNumber: e.seasonNumber, episodeNumber: e.episodeNumber, viewedAt: e.viewedAt });
+    const play = resolvePlay(e, e.viewedAt, plexTitleForKey);
+    if (play) plays.push(play);
+    else unresolved++;
   }
   return { plays, unresolved };
 }
@@ -175,19 +186,8 @@ export interface JellyfinPlayedInput {
   lastPlayedAt: Date | null;
 }
 
-// Where a pair's Jellyfin played list must be read back to: undefined (all of
-// it) on a first run, otherwise the read point minus the overlap.
-export function jellyfinStopBefore(readTo: Date | null): Date | undefined {
-  return readTo === null ? undefined : new Date(readTo.getTime() - WATCH_SYNC_HISTORY_OVERLAP_MS);
-}
-
 export function newestPlayedAt(items: readonly JellyfinPlayedInput[]): Date | null {
-  let best: number | null = null;
-  for (const it of items) {
-    const t = it.lastPlayedAt?.getTime();
-    if (t !== undefined && Number.isFinite(t) && (best === null || t > best)) best = t;
-  }
-  return best === null ? null : new Date(best);
+  return newestDate(items, (it) => it.lastPlayedAt);
 }
 
 // The Jellyfin user's played items as plays: a movie resolves by its own item
@@ -202,15 +202,9 @@ export function playsFromJellyfin(
   let unresolved = 0;
   for (const it of items) {
     if (skipItemIds.has(it.itemKey)) continue;
-    if (it.kind === "movie") {
-      const title = jellyfinTitleForId(it.itemKey);
-      if (!title || title.mediaType !== "MOVIE") { unresolved++; continue; }
-      plays.push({ tmdbId: title.tmdbId, mediaType: "MOVIE", seasonNumber: null, episodeNumber: null, viewedAt: it.lastPlayedAt });
-      continue;
-    }
-    const title = it.showKey ? jellyfinTitleForId(it.showKey) : null;
-    if (!title || title.mediaType !== "TV" || it.seasonNumber === null || it.episodeNumber === null) { unresolved++; continue; }
-    plays.push({ tmdbId: title.tmdbId, mediaType: "TV", seasonNumber: it.seasonNumber, episodeNumber: it.episodeNumber, viewedAt: it.lastPlayedAt });
+    const play = resolvePlay(it, it.lastPlayedAt, jellyfinTitleForId);
+    if (play) plays.push(play);
+    else unresolved++;
   }
   return { plays, unresolved };
 }
@@ -257,7 +251,6 @@ export interface MarkTargets {
   // TV title absent here is not on that server.
   episodes: ReadonlyMap<number, ReadonlyMap<string, readonly string[]>>;
 }
-export type JellyfinTargets = MarkTargets;
 
 export interface PlannedMark {
   // A Jellyfin item id or a Plex ratingKey, per the direction.
@@ -341,9 +334,34 @@ export function isResumePoint(s: ProgressState | null): boolean {
   return true;
 }
 
+// Watched with no resume point: takes no position (watched beats in-progress).
+// Applied to the title's latest copy AND to every copy written, since copies of
+// one title can differ (one watched, one paused).
+export function isWatchedWithoutResume(s: ProgressState): boolean {
+  return s.played && !isResumePoint(s);
+}
+
 export interface ProgressDecision {
   target: "toJellyfin" | "toPlex";
   positionMs: number;
+}
+
+function activityMs(s: ProgressState): number | null {
+  return s.lastActivity?.getTime() ?? null;
+}
+
+// Which side's resume point is copied: the only side holding one, or — both
+// holding one — the side with the newer activity. null when neither holds one,
+// or when both do and which is newer can't be told.
+function resumeSource(plex: ProgressState, jellyfin: ProgressState): "plex" | "jellyfin" | null {
+  const plexResume = isResumePoint(plex);
+  const jfResume = isResumePoint(jellyfin);
+  if (!plexResume && !jfResume) return null;
+  if (!(plexResume && jfResume)) return plexResume ? "plex" : "jellyfin";
+  const a = activityMs(plex);
+  const b = activityMs(jellyfin);
+  if (a === null || b === null || a === b) return null;
+  return a > b ? "plex" : "jellyfin";
 }
 
 // One title's state on each side → the write to make, if any. `direction` is
@@ -351,32 +369,21 @@ export interface ProgressDecision {
 export function decideProgress(
   plex: ProgressState | null,
   jellyfin: ProgressState | null,
-  direction: string,
+  direction: string | null,
 ): ProgressDecision | null {
-  const plexResume = isResumePoint(plex);
-  const jfResume = isResumePoint(jellyfin);
-  if (!plex || !jellyfin || (!plexResume && !jfResume)) return null;
-  const t = (s: ProgressState) => s.lastActivity?.getTime() ?? null;
-
-  let source: "plex" | "jellyfin";
-  if (plexResume && jfResume) {
-    const a = t(plex);
-    const b = t(jellyfin);
-    if (a === null || b === null || a === b) return null; // can't tell which is newer: leave both
-    source = a > b ? "plex" : "jellyfin";
-  } else {
-    source = plexResume ? "plex" : "jellyfin";
-  }
+  if (!plex || !jellyfin) return null;
+  const source = resumeSource(plex, jellyfin);
+  if (!source) return null;
   const src = source === "plex" ? plex : jellyfin;
   const dst = source === "plex" ? jellyfin : plex;
   const target = source === "plex" ? "toJellyfin" : "toPlex";
   if (!syncsToward(direction, target)) return null;
   if (Math.abs(src.positionMs - dst.positionMs) <= WATCH_SYNC_PROGRESS_TOLERANCE_MS) return null;
   // Watched beats in-progress.
-  if (dst.played && !isResumePoint(dst)) return null;
+  if (isWatchedWithoutResume(dst)) return null;
   // The target saw activity at or after the source's: the user moved on there.
-  const ts = t(src);
-  const td = t(dst);
+  const ts = activityMs(src);
+  const td = activityMs(dst);
   if (td !== null && (ts === null || td >= ts)) return null;
   return { target, positionMs: Math.round(src.positionMs) };
 }
@@ -421,6 +428,11 @@ export function targetIdsFor(p: WatchSyncPlay, targets: MarkTargets): readonly s
 export const WATCH_SYNC_PLAN_CHUNK = 200;
 export const WATCH_SYNC_RUN_BUDGET_MS = 20 * 60 * 1000;
 export const WATCH_SYNC_STOPPED_MESSAGE = "Stopped at the run time limit; continues on the next run";
+// A Plex history read that hit its cap keeps the NEWEST records: what it read is
+// planned and the read point moves past the oldest plays, which were never read.
+// A re-scan reads the same capped window again, so it can't bring them back.
+export const WATCH_SYNC_HISTORY_TRUNCATED_MESSAGE =
+  "Plex history is longer than the read cap: the oldest plays were not read and won't be marked (a re-scan reads the same capped window)";
 
 // Oldest play first; undated plays first of all (they can't be placed after a
 // read point, so a first run takes them before any dated chunk moves it).
@@ -430,12 +442,7 @@ export function oldestFirst<T extends { viewedAt: Date | null }>(plays: readonly
 
 // The newest dated play in a chunk — the read point once it is queued.
 export function chunkReadTo(chunk: ReadonlyArray<{ viewedAt: Date | null }>): Date | null {
-  let best: number | null = null;
-  for (const p of chunk) {
-    const t = p.viewedAt?.getTime();
-    if (t !== undefined && Number.isFinite(t) && (best === null || t > best)) best = t;
-  }
-  return best === null ? null : new Date(best);
+  return newestDate(chunk, (p) => p.viewedAt);
 }
 
 // ── admin page ordering ──────────────────────────────────────────────────────

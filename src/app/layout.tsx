@@ -11,14 +11,16 @@ import { I18nProvider } from "@/components/i18n/i18n-provider";
 import { getLocale } from "@/lib/i18n/server";
 import { clientCatalog } from "@/lib/i18n/catalogs";
 import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
+import { themeInitScript } from "@/lib/theme-constants";
 
 const EMPTY_MESSAGES = {};
 
 // Runs before first paint: applies the user's persisted theme/accent so there
-// is no flash. Mirrors the storage keys + validation in theme-provider.tsx.
-// Kept tiny and dependency-free; carries the CSP nonce so `strict-dynamic`
-// allows it.
-const THEME_INIT_SCRIPT = `(function(){try{var d=document.documentElement,t=localStorage.getItem("summonarr-theme"),a=localStorage.getItem("summonarr-accent");if(t==="light"||t==="dark"){d.setAttribute("data-theme",t);d.classList.toggle("dark",t==="dark");}if(a&&["indigo","amber","emerald","cyan","rose","mono"].indexOf(a)!==-1){d.setAttribute("data-accent",a);}}catch(e){}})();`;
+// is no flash. Built from the same storage keys + accent list ThemeProvider
+// uses (src/lib/theme-constants.ts), once, at module load — still a
+// module-level constant string, which the script tag's suppressHydrationWarning
+// below relies on. Carries the CSP nonce so `strict-dynamic` allows it.
+const THEME_INIT_SCRIPT = themeInitScript();
 
 const geist = Geist({
   variable: "--font-geist-sans",
@@ -72,12 +74,27 @@ export default async function RootLayout({
 }>) {
   // Server-side reads the Summonarr session cookie so SummonarrSessionProvider's
   // initial value matches the cookie state on first paint (no loading flash).
-  const summonarrSessionClaims = await readSummonarrSession();
+  // Reading headers() opts this layout into per-request rendering, which causes
+  // Next.js 16 to read the `x-nonce` request header set by src/proxy.ts and stamp
+  // the matching `nonce` attribute on its emitted inline scripts so they pass CSP.
+  // We reuse it for the anti-FOUC theme script below (strict-dynamic requires it).
+  // The three reads are independent, so they run together.
+  const [summonarrSessionClaims, requestHeaders, locale] = await Promise.all([
+    readSummonarrSession(),
+    headers(),
+    getLocale(),
+  ]);
+  const nonce = requestHeaders.get("x-nonce") ?? undefined;
   const summonarrInitialSession = summonarrSessionClaims
     ? {
         user: {
           id: summonarrSessionClaims.id,
           role: summonarrSessionClaims.role,
+          // The provider fetches /api/auth/me only when this is null, so a field
+          // left out here is missing on every full page load: without it the nav
+          // fell back to the role preset and a role=USER delegate (MANAGE_* bits)
+          // lost the Admin menu on reload.
+          permissions: summonarrSessionClaims.permissions ?? undefined,
           email: summonarrSessionClaims.email ?? null,
           name: summonarrSessionClaims.name ?? null,
           provider: summonarrSessionClaims.provider,
@@ -89,12 +106,6 @@ export default async function RootLayout({
         expiresAt: summonarrSessionClaims.expiresAt,
       }
     : null;
-  // Reading headers() opts this layout into per-request rendering, which causes
-  // Next.js 16 to read the `x-nonce` request header set by src/proxy.ts and stamp
-  // the matching `nonce` attribute on its emitted inline scripts so they pass CSP.
-  // We reuse it for the anti-FOUC theme script below (strict-dynamic requires it).
-  const nonce = (await headers()).get("x-nonce") ?? undefined;
-  const locale = await getLocale();
   // The admin message areas (~240 KB raw) are sent only to a session that could
   // open admin UI — the same gate as the (app)/admin layout. Everyone else, the
   // login page included, gets the smaller catalog. A role change signs the

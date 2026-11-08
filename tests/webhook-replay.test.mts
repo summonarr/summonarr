@@ -167,6 +167,47 @@ test("EXACT-VALUE PIN: digest = sha256(source \\0 secret \\0 canonical-JSON)", a
   assert.equal(lastCreateDigest(), expected);
 });
 
+test("EXACT-VALUE PIN: arrays and nested arrays canonicalize to the same bytes as before the depth cap", async () => {
+  await checkAndRecordWebhookJson("radarr", "k", { x: [[1, [2]], { d: 4, c: 3 }], episodes: [{ b: 1, a: 2 }] });
+  const expected = createHash("sha256")
+    .update("radarr").update("\0").update("k").update("\0")
+    .update('{"episodes":[{"a":2,"b":1}],"x":[[1,[2]],{"c":3,"d":4}]}', "utf8")
+    .digest("hex");
+  assert.equal(lastCreateDigest(), expected);
+});
+
+test("a __proto__ key from the parsed body is part of the digest", async () => {
+  const withProto = JSON.parse('{"eventType":"Download","__proto__":{"x":1}}') as unknown;
+  await checkAndRecordWebhookJson("sonarr", "k", withProto);
+  const expected = createHash("sha256")
+    .update("sonarr").update("\0").update("k").update("\0")
+    .update('{"__proto__":{"x":1},"eventType":"Download"}', "utf8")
+    .digest("hex");
+  assert.equal(lastCreateDigest(), expected);
+  // A body without it is a different delivery, not a replay.
+  assert.equal(await checkAndRecordWebhookJson("sonarr", "k", { eventType: "Download" }), true);
+});
+
+// JSON.parse is iterative, so a body under the routes' 1 MB cap parses ~500k
+// levels deep; the canonicaliser's recursion then overflowed the stack.
+function nested(levels: number): unknown {
+  let v: unknown = 0;
+  for (let i = 0; i < levels; i++) v = [v];
+  return { eventType: "Download", x: v };
+}
+
+test("a payload nested past the depth cap is refused by name — not a stack overflow — and records nothing", async () => {
+  for (const levels of [64, 100_000]) {
+    await assert.rejects(
+      checkAndRecordWebhookJson("sonarr", "s", nested(levels)),
+      (e: unknown) => e instanceof Error && e.name === "WebhookPayloadTooDeep",
+    );
+  }
+  assert.equal(calls.create.length, 0);
+  // 63 arrays under the top-level object (64 containers) is still a delivery.
+  assert.equal(await checkAndRecordWebhookJson("sonarr", "s", nested(63)), true);
+});
+
 test("same JSON with reordered top-level keys is detected as a replay", async () => {
   assert.equal(await checkAndRecordWebhookJson("sonarr", "s", { a: 1, b: 2, c: 3 }), true);
   const first = lastCreateDigest();

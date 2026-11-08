@@ -261,6 +261,13 @@ export interface CalendarQueue {
   episodes: Map<number, CalendarQueued>;
 }
 
+// The larger of two progress readings; an unknown one (null) never wins over a known one.
+function maxNullable(a: number | null, b: number | null): number | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.max(a, b);
+}
+
 /**
  * Raw /api/v3/queue records of ONE instance → what is on its way. A Radarr
  * record names its movie (`movieId`), a Sonarr record its episode
@@ -284,7 +291,7 @@ export function calendarQueue(service: ArrService, records: readonly unknown[]):
     // Two records for one title (a pack and a single, say): the furthest
     // along, flagged when either is.
     map.set(id, {
-      progress: prior === undefined || prior.progress === null ? progress : progress === null ? prior.progress : Math.max(prior.progress, progress),
+      progress: maxNullable(prior?.progress ?? null, progress),
       attention: (prior?.attention ?? false) || needsAttention(r),
     });
   }

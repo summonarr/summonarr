@@ -39,14 +39,22 @@
 // own copy and drifted: the fix that raised the SQL threshold left the two
 // client helpers on the old one.
 
-// Sources whose `bitrate` column is bits-per-second rather than kbps.
-const BPS_SOURCES = new Set(["jellyfin"]);
+// Sources whose `bitrate` column is bits-per-second rather than kbps. The SQL
+// fragment below is generated from this list, so the two can't drift.
+const BPS_SOURCE_LIST = ["jellyfin"] as const;
+const BPS_SOURCES = new Set<string>(BPS_SOURCE_LIST);
+const BPS_SOURCE_SQL = BPS_SOURCE_LIST.map((s) => `"source" = '${s}'`).join(" OR ");
 
 // SQL fragment yielding the row's bitrate in kbps as float8, or NULL when the
 // column is NULL. Unaliased — every call site selects `FROM "PlayHistory"`
 // without an alias. Callers that want Mbps divide this by 1000.
+//
+// A zero or negative bitrate passes through as-is (bitrateToKbps reads it as
+// 0): every aggregate over it filters `"bitrate" > 0` itself
+// (play-history-stats.ts HAS_BITRATE_SQL), and a guard here would be the
+// magnitude test this fragment must never carry (tests/bitrate.test.mts).
 export const BITRATE_KBPS_SQL =
-  `(CASE WHEN "source" = 'jellyfin' THEN "bitrate" / 1000.0 ELSE "bitrate"::float8 END)`;
+  `(CASE WHEN ${BPS_SOURCE_SQL} THEN "bitrate" / 1000.0 ELSE "bitrate"::float8 END)`;
 
 // Estimated bytes-on-the-wire bitrate in kbps — what the stats layer multiplies
 // by playDuration for every Bandwidth figure. NULL exactly when `bitrate` is.

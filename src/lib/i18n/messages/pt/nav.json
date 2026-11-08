@@ -27,6 +27,8 @@
   "nav.adminGroup.system": "Sistema",
   "nav.badge.queueAttention_one": "{count} download precisa de atenção",
   "nav.badge.queueAttention_other": "{count} downloads precisam de atenção",
+  "nav.badge.groupAttention_one": "{count} item precisa de atenção",
+  "nav.badge.groupAttention_other": "{count} itens precisam de atenção",
   "nav.tab.browse": "Navegar",
   "nav.tab.issues": "Problemas",
   "nav.menu": "Menu de navegação",

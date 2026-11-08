@@ -651,12 +651,31 @@ for (const route of ROUTES.filter((r) => ["browse", "popular", "top-rated"].incl
   });
 }
 
-test("popular reports a clamped page and a matching rank offset", async () => {
+test("popular reports the page it SERVED and that page's rank offset — a deep page is the ranking's last, not the number asked for", async () => {
   const { token } = await mintSession();
-  for (const [q, want] of [["?page=0", 1], ["?page=-5", 1], ["?page=abc", 1], ["?page=99999999", 10_000]] as const) {
+  // getMostPopularOnServer serves at most 100 pages of 40; ?page=150 answered
+  // page 100's titles labelled page 150, ranked from 5961.
+  for (const [q, want] of [["?page=0", 1], ["?page=-5", 1], ["?page=abc", 1], ["?page=150", 100], ["?page=99999999", 100]] as const) {
     const body = await (await ROUTES[2].call(token, q)).json();
     assert.equal(body.page, want, `page ${q}`);
-    assert.ok(body.rankOffset >= 0, `${q} produced a negative rank offset`);
+    assert.equal(body.rankOffset, (want - 1) * 40, `${q} rank offset`);
+  }
+});
+
+test("popular: mediaType takes movies, movie (every other route's name) or tv; anything else is a 400, not both types", async () => {
+  const { token } = await mintSession();
+  for (const [q, movies, tv] of [["?mediaType=movies", true, false], ["?mediaType=movie", true, false], ["?mediaType=tv", false, true], ["", true, true], ["?mediaType=", true, true]] as const) {
+    ops.length = 0;
+    const res = await ROUTES[2].call(token, q);
+    assert.equal(res.status, 200, q);
+    const types = ops.filter((o) => o.op === "tmdbMediaCore.findMany").map((o) => (o.args as { where: { mediaType: string } }).where.mediaType);
+    assert.equal(types.includes("MOVIE"), movies, `${q} movies`);
+    assert.equal(types.includes("TV"), tv, `${q} tv`);
+  }
+  for (const q of ["?mediaType=all", "?mediaType=MOVIE", "?mediaType=both"]) {
+    const res = await ROUTES[2].call(token, q);
+    assert.equal(res.status, 400, q);
+    assert.deepEqual(await res.json(), { error: "mediaType must be movies or tv" });
   }
 });
 
@@ -803,3 +822,38 @@ test("no discovery route source contains a console.log call (guardrail 7)", asyn
 });
 
 
+
+// ── browse: a page past the end ──────────────────────────────────────────────
+// TMDB clamps its page number at 500, so a page past the end used to come back
+// filled with the LAST real page's titles under the requested page number — a
+// client paging on saw the same titles again. Past the end the items are
+// empty (and nothing is enriched); the shape and the echoed page are unchanged.
+for (const extra of ["", "&hideAvailable=1"]) {
+  test(`browse: a page past the end answers 200 with no items${extra ? " (hideAvailable window)" : ""}`, async () => {
+    const { token } = await mintSession();
+    const res = await ROUTES[0].call(token, `?type=movie&page=99999999${extra}`);
+    assert.equal(res.status, 200);
+    const body = await res.json() as { items: unknown[]; totalPages: number; page: number };
+    assert.deepEqual(body.items, []);
+    assert.ok(body.totalPages <= 500, `totalPages ${body.totalPages}`);
+    assert.equal(body.page, 10_000, "the clamped requested page is still echoed");
+    assert.deepEqual(enrichedForUserIds, [], "nothing past the end is enriched");
+  });
+}
+
+// ── popular: the TmdbMediaCore lookup ────────────────────────────────────────
+// One `tmdbId IN` list per media type, as the page does — not one OR branch per
+// item (each with its own `new Date()`).
+test("popular: the TmdbMediaCore lookup is one tmdbId IN list per media type", async () => {
+  const { token } = await mintSession();
+  assert.equal((await ROUTES[2].call(token)).status, 200);
+  const reads = ops.filter((o) => o.op === "tmdbMediaCore.findMany");
+  assert.ok(reads.length > 0, "the route never read TmdbMediaCore");
+  for (const r of reads) {
+    const where = (r.args as { where: Record<string, unknown> }).where;
+    assert.equal(where.OR, undefined, "an OR branch per item is back");
+    assert.deepEqual(where.tmdbId, { in: [POPULAR_ROW.tmdbId] });
+    assert.ok(where.mediaType === "MOVIE" || where.mediaType === "TV");
+    assert.ok((where.expiresAt as { gt?: unknown })?.gt instanceof Date);
+  }
+});

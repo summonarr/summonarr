@@ -29,7 +29,7 @@
 // Harness: the sessions-routes idiom — real signed session JWTs (bearer
 // transport, which skips the UA-fingerprint binding per guardrail 6b) against
 // in-memory prisma stubs. The lib's grouped page/count queries are raw SQL
-// ($queryRawUnsafe), so the stub is a JS MIRROR of the query contract: it
+// ($queryRaw), so the stub is a JS MIRROR of the query contract: it
 // parses the bind positions out of the SQL shape (IN list, CAST, ILIKE,
 // cursor, LIMIT) and evaluates scoping/filtering/grouping over the in-memory
 // rows. That keeps these tests behavioral for the wire contract; the SQL
@@ -59,6 +59,7 @@ const { NextRequest } = await import("next/server");
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
+const { clearActivityCache } = await import("../src/lib/play-history.ts");
 
 // ── recording op log ─────────────────────────────────────────────────────────
 type Op = { op: string; args?: unknown };
@@ -187,7 +188,7 @@ function pickSelect(row: HistoryRow, select: Record<string, true>): Record<strin
   return out;
 }
 
-// The list path's grouped ENTRY count rides $queryRawUnsafe (mirrored below);
+// The list path's grouped ENTRY count rides $queryRaw (mirrored below);
 // these delegate methods serve the stats aggregates + the entry-detail queries.
 //
 // `count` serves exactly one caller: the `stats.plays` headline, which counts
@@ -260,11 +261,26 @@ function lean(r: HistoryRow) {
   };
 }
 
+// The search needle bound at `ILIKE $n`, or null when the SQL has no search.
+function searchNeedle(sql: string, binds: unknown[]): string | null {
+  const ilikeMatch = sql.match(/ILIKE \$(\d+) ESCAPE/);
+  if (!ilikeMatch) return null;
+  const pattern = binds[Number(ilikeMatch[1]) - 1] as string; // "%<escaped>%"
+  return pattern.slice(1, -1).replace(/\\([\\%_])/g, "$1").toLowerCase();
+}
+function rowMatchesSearch(r: HistoryRow, needle: string): boolean {
+  return r.title.toLowerCase().includes(needle) || (r.episodeTitle ?? "").toLowerCase().includes(needle);
+}
+
+// The rows a statement's WHERE keeps. A page query that selects groups by search
+// (`AS group_matches`) does NOT filter rows by it — the search is applied to
+// whole groups in the shim below, as the real window column does.
 function filteredRows(sql: string, binds: unknown[]): HistoryRow[] {
   const inMatch = sql.match(/"mediaServerUserId" IN \(([^)]*)\)/);
   assert.ok(inMatch, "page/count SQL must scope by mediaServerUserId IN (…)");
-  const idCount = (inMatch![1]!.match(/\$\d+/g) ?? []).length;
-  const msuIds = binds.slice(0, idCount) as string[];
+  // Each id by its own placeholder number: the page query binds its search
+  // column before the scope, so the ids are not always the first binds.
+  const msuIds = (inMatch![1]!.match(/\$\d+/g) ?? []).map((p) => binds[Number(p.slice(1)) - 1]) as string[];
   let rows = historyRows.filter((r) => msuIds.includes(r.mediaServerUserId));
 
   const castMatch = sql.match(/"mediaType" = CAST\(\$(\d+) AS "MediaType"\)/);
@@ -272,20 +288,14 @@ function filteredRows(sql: string, binds: unknown[]): HistoryRow[] {
     const want = binds[Number(castMatch[1]) - 1];
     rows = rows.filter((r) => r.mediaType === want);
   }
-  const ilikeMatch = sql.match(/ILIKE \$(\d+) ESCAPE/);
-  if (ilikeMatch) {
-    const pattern = binds[Number(ilikeMatch[1]) - 1] as string; // "%<escaped>%"
-    const needle = pattern.slice(1, -1).replace(/\\([\\%_])/g, "$1").toLowerCase();
-    rows = rows.filter(
-      (r) =>
-        r.title.toLowerCase().includes(needle) ||
-        (r.episodeTitle ?? "").toLowerCase().includes(needle),
-    );
+  const needle = searchNeedle(sql, binds);
+  if (needle !== null && !sql.includes("AS group_matches")) {
+    rows = rows.filter((r) => rowMatchesSearch(r, needle));
   }
   return rows;
 }
 
-function groupedReps(rows: HistoryRow[]) {
+function groupedReps(rows: HistoryRow[], groupNeedle: string | null) {
   const groups = new Map<string, HistoryRow[]>();
   for (const r of rows) {
     const k = groupKey(r);
@@ -293,7 +303,9 @@ function groupedReps(rows: HistoryRow[]) {
     if (bucket) bucket.push(r);
     else groups.set(k, [r]);
   }
-  return [...groups.values()].map((g) => {
+  // `WHERE … AND r.group_matches`: a group is listed when ANY of its plays matches.
+  const listed = [...groups.values()].filter((g) => groupNeedle === null || g.some((r) => rowMatchesSearch(r, groupNeedle)));
+  return listed.map((g) => {
     const rep = [...g].sort(repSortDesc)[0]!;
     return {
       ...lean(rep),
@@ -305,17 +317,27 @@ function groupedReps(rows: HistoryRow[]) {
   });
 }
 
-shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async (sql: string, ...binds: unknown[]) => {
-  rec("$queryRawUnsafe", { sql, binds });
+// The lib builds each statement with Prisma.sql and hands it over as ONE value
+// (guardrail 23a): `text` is the Postgres form with $N placeholders, `values`
+// the binds.
+shadowPrismaClientMethod(prisma, "$queryRaw", async (q: { text: string; values: unknown[] }) => {
+  const sql = q.text;
+  const binds = q.values;
+  rec("$queryRaw", { sql, binds });
   if (sql.includes("COUNT(DISTINCT")) {
     const keys = new Set(filteredRows(sql, binds).map(groupKey));
     return [{ total: keys.size }];
   }
-  let reps = groupedReps(filteredRows(sql, binds));
+  let reps = groupedReps(
+    filteredRows(sql, binds),
+    sql.includes("AS group_matches") ? searchNeedle(sql, binds) : null,
+  );
   const cursorMatch = sql.match(/"startedAt" < \$(\d+)/);
+  const cursorIdMatch = sql.match(/r\."id" < \$(\d+)/);
   if (cursorMatch) {
+    assert.ok(cursorIdMatch, "the keyset predicate binds the cursor id");
     const at = binds[Number(cursorMatch[1]) - 1] as Date;
-    const cid = binds[Number(cursorMatch[1])] as string;
+    const cid = binds[Number(cursorIdMatch![1]) - 1] as string;
     reps = reps.filter(
       (r) =>
         r.startedAt.getTime() < at.getTime() ||
@@ -484,6 +506,9 @@ beforeEach(() => {
   errors.length = 0;
   msuRows.length = 0;
   historyRows.length = 0;
+  // Fixture ids repeat across tests; a new activity generation drops the list's
+  // reused scope totals so no test reads another's.
+  clearActivityCache();
 });
 
 // ── tests ────────────────────────────────────────────────────────────────────
@@ -491,7 +516,7 @@ beforeEach(() => {
 test("unauthenticated request is 401 and never touches PlayHistory", async () => {
   const res = await getMine(mineReq(null), undefined);
   assert.equal(res.status, 401);
-  assert.equal(opsOf("$queryRawUnsafe").length, 0);
+  assert.equal(opsOf("$queryRaw").length, 0);
   assert.equal(opsOf("mediaServerUser.findMany").length, 0);
 });
 
@@ -524,7 +549,7 @@ test("returns ONLY the caller's linked history — other users' rows never appea
   // linked-id set (not a caller-supplied value).
   const msuCall = opsOf("mediaServerUser.findMany")[0]!.args as { where: { OR: { userId?: string }[] } };
   assert.deepEqual(msuCall.where.OR, [{ userId: alice.userId }]);
-  const raw = opsOf("$queryRawUnsafe")[0]!.args as { binds: unknown[] };
+  const raw = opsOf("$queryRaw")[0]!.args as { binds: unknown[] };
   assert.deepEqual(new Set(raw.binds.slice(0, 2)), new Set(["msu-a1", "msu-a2"]));
 });
 
@@ -545,7 +570,7 @@ test("userId-shaped query params are ignored — no parameter can widen the scop
   assert.deepEqual(body.items.map((i) => i.id), [mine.id]);
   assert.ok(!body.items.some((i) => i.title === "Bob Secret Movie"));
   // The scope bind is still alice's linked id — nothing from the query string.
-  const raw = opsOf("$queryRawUnsafe")[0]!.args as { binds: unknown[] };
+  const raw = opsOf("$queryRaw")[0]!.args as { binds: unknown[] };
   assert.equal(raw.binds[0], "msu-a1");
 });
 
@@ -559,7 +584,7 @@ test("unlinked account gets linked:false and PlayHistory is never queried", asyn
   assert.deepEqual(body.items, []);
   assert.equal(body.total, 0);
   assert.deepEqual(body.stats, { plays: 0, playSeconds: 0 });
-  assert.equal(opsOf("$queryRawUnsafe").length, 0);
+  assert.equal(opsOf("$queryRaw").length, 0);
   assert.equal(opsOf("playHistory.aggregate").length, 0);
 });
 
@@ -615,7 +640,7 @@ test("payload is the lean self-view: admin forensics columns never serialize; po
   assert.equal(item.posterPath, "/matrix-row.jpg");
   assert.equal(typeof item.startedAt, "string"); // ISO-serialized for the client
   // The page SQL itself must never select the forensics columns.
-  const sql = (opsOf("$queryRawUnsafe")[0]!.args as { sql: string }).sql;
+  const sql = (opsOf("$queryRaw")[0]!.args as { sql: string }).sql;
   for (const col of ["ipAddress", "videoCodec", "bitrate", "location", "bandwidth"]) {
     assert.ok(!sql.includes(`"${col}"`), `page SQL must not select ${col}`);
   }
@@ -727,8 +752,62 @@ test("search matches title/episode case-insensitively; LIKE metacharacters are L
   const percent = await fetchMine(alice.token, { search: "100%" });
   assert.deepEqual(percent.body.items.map((i) => i.id), [literal.id]);
   // The bind itself must be the escaped pattern, ready for ESCAPE '\'.
-  const lastRaw = opsOf("$queryRawUnsafe").at(-2)!.args as { binds: unknown[] };
+  const lastRaw = opsOf("$queryRaw").at(-2)!.args as { binds: unknown[] };
   assert.ok(lastRaw.binds.includes("%100\\%%"), "search bind must be ILIKE-escaped");
+});
+
+test("search selects whole groups: a match on one play lists the entry with every play counted, as the detail does", async () => {
+  const alice = await mintSession();
+  addMsu("msu-a1", alice.userId);
+  // One episode, two spellings: the first play carried the server's placeholder title.
+  addPlay("msu-a1", { tmdbId: 1399, mediaType: "TV", title: "Show", seasonNumber: 1, episodeNumber: 5, episodeTitle: "Episode 5", playDuration: 1000 });
+  addPlay("msu-a1", { tmdbId: 1399, mediaType: "TV", title: "Show", seasonNumber: 1, episodeNumber: 5, episodeTitle: "The Real Title", playDuration: 2000 });
+  addPlay("msu-a1", { title: "Something Else" });
+
+  const { body } = await fetchMine(alice.token, { search: "real title" });
+  assert.equal(body.total, 1);
+  assert.equal(body.items.length, 1);
+  assert.equal(body.items[0].playCount, 2, "the non-matching play still counts toward the entry");
+  assert.equal(body.items[0].totalPlaySeconds, 3000);
+
+  const detail = await fetchEntry(alice.token, body.items[0].id);
+  assert.equal(detail.status, 200);
+  assert.equal(detail.body.item.playCount, body.items[0].playCount);
+  assert.equal(detail.body.item.totalPlaySeconds, body.items[0].totalPlaySeconds);
+
+  // A term matching neither spelling lists nothing.
+  const none = await fetchMine(alice.token, { search: "nowhere" });
+  assert.equal(none.body.total, 0);
+  assert.deepEqual(none.body.items, []);
+});
+
+test("a cursor page reuses page one's total and stats in the same activity generation; a finalize makes it recompute", async () => {
+  const alice = await mintSession();
+  addMsu("msu-a1", alice.userId);
+  for (let i = 0; i < 31; i++) addPlay("msu-a1", { playDuration: 100 });
+
+  const first = await fetchMine(alice.token);
+  assert.equal(first.body.total, 31);
+  const countSql = () => opsOf("$queryRaw").filter((o) => (o.args as { sql: string }).sql.includes("COUNT(DISTINCT")).length;
+  assert.equal(countSql(), 1);
+  assert.equal(opsOf("playHistory.count").length, 1);
+  assert.equal(opsOf("playHistory.aggregate").length, 1);
+
+  const second = await fetchMine(alice.token, { cursor: first.body.nextCursor! });
+  assert.equal(second.body.items.length, 1);
+  assert.equal(second.body.total, first.body.total);
+  assert.deepEqual(second.body.stats, first.body.stats);
+  assert.equal(countSql(), 1, "the cursor page ran no COUNT(DISTINCT)");
+  assert.equal(opsOf("playHistory.count").length, 1, "nor the plays count");
+  assert.equal(opsOf("playHistory.aggregate").length, 1, "nor the play-time sum");
+
+  // A finalized session bumps the generation: the next cursor page recomputes.
+  addPlay("msu-a1", { playDuration: 100, startedAt: new Date(Date.UTC(2020, 0, 1)) });
+  clearActivityCache();
+  const third = await fetchMine(alice.token, { cursor: first.body.nextCursor! });
+  assert.equal(third.body.total, 32);
+  assert.equal(third.body.stats.plays, 32);
+  assert.equal(countSql(), 2);
 });
 
 test("keyset cursor pages the caller's entries without overlap (same-timestamp id tiebreak)", async () => {
@@ -753,6 +832,15 @@ test("keyset cursor pages the caller's entries without overlap (same-timestamp i
     assert.ok(!seen.has(item.id), `row ${item.id} appeared on both pages`);
   }
   assert.equal(seen.size + second.body.items.length, 31);
+});
+
+test("a last page that is exactly full carries no cursor, so the client never fetches an empty page", async () => {
+  const alice = await mintSession();
+  addMsu("msu-a1", alice.userId);
+  for (let i = 0; i < 30; i++) addPlay("msu-a1");
+  const first = await fetchMine(alice.token);
+  assert.equal(first.body.items.length, 30);
+  assert.equal(first.body.nextCursor, null);
 });
 
 test("a malformed cursor fails soft to the first page", async () => {

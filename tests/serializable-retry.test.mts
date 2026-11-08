@@ -7,7 +7,8 @@
 // it must retry ONLY genuine P2034 write-conflicts (a retried unique-violation
 // or app error would re-run non-idempotent work), and it must stop at the
 // attempt cap (an unbounded loop on a persistent conflict would hang the
-// request). The module is fully pure — no timers, no DB, no network — so
+// request). The module has no DB or network and its backoff timer is a short
+// real sleep (or an injected one), so
 // everything here is exercised with in-memory fakes and real
 // Prisma.PrismaClientKnownRequestError instances from the generated client.
 import { test } from "node:test";
@@ -257,4 +258,26 @@ test("resolved undefined is a success, not a retry trigger", async () => {
   });
   assert.equal(result, undefined);
   assert.equal(calls, 1);
+});
+
+test("each P2034 retry waits a jittered backoff that grows with the attempt; success and other errors never wait", async () => {
+  const { serializableRetryDelayMs } = await import("../src/lib/serializable-retry.ts");
+  assert.equal(serializableRetryDelayMs(1, () => 0), 10);
+  assert.equal(serializableRetryDelayMs(1, () => 1), 50);
+  assert.equal(serializableRetryDelayMs(2, () => 0), 20);
+  assert.equal(serializableRetryDelayMs(2, () => 1), 100);
+
+  const waits: number[] = [];
+  const sleep = async (ms: number) => { waits.push(ms); };
+  let calls = 0;
+  await assert.rejects(runWithSerializableRetry(async () => { calls++; throw writeConflict(); }, 3, sleep));
+  assert.equal(calls, 3);
+  assert.equal(waits.length, 2, "no wait after the last attempt");
+  assert.ok(waits[0] >= 10 && waits[0] <= 50);
+  assert.ok(waits[1] >= 20 && waits[1] <= 100);
+
+  waits.length = 0;
+  await runWithSerializableRetry(async () => "ok", 3, sleep);
+  await assert.rejects(runWithSerializableRetry(async () => { throw knownError("P2002"); }, 3, sleep));
+  assert.equal(waits.length, 0);
 });

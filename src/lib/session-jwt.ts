@@ -1,6 +1,7 @@
 import { SignJWT, jwtVerify, decodeProtectedHeader, type JWTPayload } from "jose";
 import { legacyRawSessionKeys, signingKey, verificationKeyForKid } from "@/lib/signing-keys";
 import { MAX_CONFIGURABLE_SESSION_SECONDS } from "@/lib/session-lifetime";
+import { check, v } from "@/lib/validate";
 
 // How a session token reaches the server: the HttpOnly cookie a browser sends,
 // or `Authorization: Bearer` from a native app (guardrail 6b). A token is bound
@@ -126,13 +127,39 @@ export async function verifySessionToken(token: string): Promise<VerifiedSession
       payload = legacy;
       signedWithCurrentKey = false;
     }
-    if (typeof payload.id !== "string" || typeof payload.role !== "string") {
-      return null;
-    }
-    return { claims: payload as SessionClaims, signedWithCurrentKey };
+    if (!hasSessionClaimTypes(payload)) return null;
+    return { claims: payload, signedWithCurrentKey };
   } catch {
     return null;
   }
+}
+
+// The claim types SessionClaims declares. A signed token is ours, so a wrong
+// type means a minting bug or a forged key — either way the claims can't be
+// trusted, and the token is refused like any other unusable one. A null counts
+// as absent (some mints write `name: null`). `transport` is deliberately not
+// here: isTransportAllowed refuses an unknown value on its own.
+const SessionClaimTypes = v.object({
+  id: v.string(),
+  role: v.string(),
+  permissions: v.optional(v.nullable(v.string())),
+  email: v.optional(v.nullable(v.string())),
+  name: v.optional(v.nullable(v.string())),
+  provider: v.optional(v.nullable(v.string())),
+  mediaServer: v.optional(v.nullable(v.string())),
+  sessionId: v.optional(v.nullable(v.string())),
+  uaFingerprint: v.optional(v.nullable(v.string())),
+  isMobile: v.optional(v.nullable(v.boolean())),
+  deviceLabel: v.optional(v.nullable(v.string())),
+  expiresAt: v.optional(v.nullable(v.number())),
+  dbCheckedAt: v.optional(v.nullable(v.number())),
+  machineAllowedIps: v.optional(v.nullable(v.array(v.string()))),
+});
+
+// Checks the types only and keeps the payload as it is (with iat, exp, aud and
+// any claim this list doesn't name), because a re-sign copies the claims on.
+function hasSessionClaimTypes(payload: JWTPayload): payload is SessionClaims {
+  return check(SessionClaimTypes, payload).ok;
 }
 
 async function verifyLegacyRawKey(token: string): Promise<JWTPayload | null> {

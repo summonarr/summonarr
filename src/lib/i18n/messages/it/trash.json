@@ -113,6 +113,7 @@
   "trash.status.error": "errore",
   "trash.status.applied": "applicato",
   "trash.status.ready": "pronto",
+  "trash.status.notConfigured": "non configurato",
   "trash.spec.error.loadDetail": "Impossibile caricare i dettagli ({status})",
   "trash.spec.error.network": "Errore di rete — riprova",
   "trash.spec.error.apply": "Applicazione non riuscita ({status})",
@@ -201,5 +202,15 @@
   "trash.starter.defaultInstanceNote": "Si applica all'istanza Radarr/Sonarr predefinita. Per un'istanza con nome, usa il selettore di istanza nelle schede Formati personalizzati, Profili di qualità o Denominazione e dimensioni.",
   "trash.sync.lastRefreshed": "Ultimo aggiornamento {ago}",
   "trash.sync.neverRefreshed": "Catalogo non ancora aggiornato",
-  "trash.spec.hiddenSelected": "{count} nascosti dal filtro"
+  "trash.spec.hiddenSelected": "{count} nascosti dal filtro",
+  "trash.applyLog.noReason": "nessun dettaglio sull'errore restituito",
+  "trash.token.remove": "Rimuovi",
+  "trash.token.removed": "Rimosso",
+  "trash.spec.selectAria": "Seleziona {name}",
+  "trash.spec.selectAllAria": "Seleziona tutte le specifiche visibili",
+  "trash.banner.applyFailed": "Applicazione non riuscita",
+  "trash.banner.loadFailed": "Impossibile caricare la libreria dei profili",
+  "trash.banner.syncFailed": "«Sincronizza ora» ha riscontrato errori",
+  "trash.banner.stoppedEarly": "interrotto prima della fine — eseguilo di nuovo",
+  "trash.sync.disabledOnServer": "La sincronizzazione TRaSH è disattivata sul server — non è stato eseguito nulla"
 }

@@ -130,9 +130,10 @@ const INLINE_GUARDED_ADMIN_ROUTES: Array<{ route: string; check: string; reason:
  * /api/settings/*). Each handler there must be `withAdmin` — exactly the check
  * the proxy backstop mirrors (hasRole: the role label, never the ADMIN bit) —
  * so a weaker wrapper (withAuth, withPermission, withIssueAdmin, requireAuth) is
- * refused: it would admit a caller the proxy is meant to refuse on the path the
- * proxy's matcher skips (prefetch-headed requests), and the two layers would
- * disagree about who may reach the route. Admitting a delegate here means
+ * refused: it would admit a caller the proxy is meant to refuse if the proxy
+ * were ever bypassed (the matcher runs on every /api request today; its
+ * prefetch skip is pages-only), and the two layers would disagree about who
+ * may reach the route. Admitting a delegate here means
  * changing the proxy's backstop, this list and both tests together, on
  * purpose. Adding or removing an entry is a security decision.
  */
@@ -161,6 +162,14 @@ const ADMIN_TOKENS = ["withAdmin", "withIssueAdmin", "isCronAuthorized", "getCro
 // guard would let a future non-webhook route that imports it for an unrelated
 // string compare pass with no session guard at all.
 const ANY_AUTH_TOKENS = [...ADMIN_TOKENS, "withAuth", "withPermission", "requireAuth"];
+
+/**
+ * Tokens that prove the cron gate on a cron/sync handler. `defineCronRoute` and
+ * `withCronActor` (src/lib/cron-route.ts) call getCronActor before anything
+ * else — tests/cron-route.test.mts pins that, since this audit does not follow
+ * an import. Accepted here only, never as an admin or session guard.
+ */
+export const CRON_GUARD_TOKENS = ["isCronAuthorized", "getCronActor", "defineCronRoute", "withCronActor"];
 
 /** The handler names Next.js recognizes as HTTP method exports on a route file. */
 const HTTP_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
@@ -344,8 +353,8 @@ export function callsToken(text: string, token: string): boolean {
  * references another top-level declaration in the same file whose region does.
  * The transitive hop covers the two legitimate indirection patterns in this
  * codebase: a local helper that performs the check (`getAuthContext` →
- * `isCronAuthorized` in the cron warm routes) and a shared handler alias
- * (`export const GET = handle` in cron/trash-diagnostic). Cross-FILE
+ * `isCronAuthorized`) and a shared handler alias (`export const GET = handle`
+ * in cron/trash-diagnostic). Cross-FILE
  * indirection is intentionally not followed — a guard hidden in an import is
  * exactly the opacity this audit exists to reject.
  */
@@ -469,11 +478,14 @@ function main(): void {
 
     for (const handler of handlers) {
       if (isCronSync) {
-        if (!reachesToken(handler, ["isCronAuthorized", "getCronActor"], byName)) {
-          failures.push({ route, file, reason: `${handler.name}: cron/sync handler missing isCronAuthorized / getCronActor` });
+        if (!reachesToken(handler, CRON_GUARD_TOKENS, byName)) {
+          failures.push({ route, file, reason: `${handler.name}: cron/sync handler missing isCronAuthorized / getCronActor / defineCronRoute / withCronActor` });
         }
       } else if (isWebhook) {
-        if (!reachesToken(handler, ["timingSafeEqual"], byName)) {
+        // safeCompareStrings (src/lib/safe-compare.ts) is the shared SHA-256 +
+        // timingSafeEqual compare; the audit never follows an import, so it is
+        // named here.
+        if (!reachesToken(handler, ["timingSafeEqual", "safeCompareStrings"], byName)) {
           failures.push({ route, file, reason: `${handler.name}: webhook handler missing timingSafeEqual secret compare` });
         }
       } else if (isAdmin) {

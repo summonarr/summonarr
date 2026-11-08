@@ -1,8 +1,10 @@
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
-import { buildResultsPayload, editOriginal } from "../reply";
-import { attachAvailability, cachedSearchTmdb, discordVisibleInstances } from "../search";
-import type { CommandContext, CommandOption, PendingSearch, TmdbResult } from "../types";
+import { escMd } from "@/lib/discord-notify";
+import { buildResultsPayload, editOriginal, mediaTypeOption, optionValue, savePending } from "../reply";
+import { maintenanceRefuses } from "../request-gates";
+import { searchForDiscord } from "../search";
+import type { CommandContext, PendingSearch, TmdbResult } from "../types";
 
 export async function handleRequestCommand(ctx: CommandContext): Promise<void> {
   const { t, appId, token, interactionId, discordUserId, discordUsername, data, requireLinked, isExemptByRole } = ctx;
@@ -14,36 +16,39 @@ export async function handleRequestCommand(ctx: CommandContext): Promise<void> {
     return;
   }
 
-  const maintRow = await prisma.setting.findUnique({ where: { key: "maintenanceEnabled" } });
-  if (maintRow?.value === "true") {
-    const discordAdmin = await prisma.user.findFirst({ where: { discordId: discordUserId, role: "ADMIN" }, select: { id: true } });
-    if (!discordAdmin) {
-      await editOriginal(appId, token, { content: t("notify.bot.maintenance") });
-      return;
-    }
+  // The one Discord maintenance rule (request-gates.ts), shared with the result
+  // pick: the ADMIN bit of an active linked account bypasses it.
+  if (await maintenanceRefuses(discordUserId)) {
+    await editOriginal(appId, token, { content: t("notify.bot.maintenance") });
+    return;
   }
 
-  if (requireLinked && !isExemptByRole) {
-    const linkedUser = await prisma.user.findFirst({
-      where: { discordId: discordUserId, NOT: { email: { endsWith: "@discord.local" } } },
-      select: { id: true },
-    });
-    if (!linkedUser) {
-      await editOriginal(appId, token, { content: t("notify.bot.linkRequiredToRequest") });
-      return;
-    }
+  // A deactivated account is refused outright, as /recent does: its
+  // restricted-server grants are still on the row (guardrail 33), and the result
+  // badges below would read through them.
+  const caller = await prisma.user.findUnique({
+    where: { discordId: discordUserId },
+    select: { email: true, deactivatedAt: true },
+  });
+  if (caller?.deactivatedAt) {
+    await editOriginal(appId, token, { content: t("notify.bot.pick.deactivated") });
+    return;
+  }
+  if (requireLinked && !isExemptByRole && (!caller || caller.email.endsWith("@discord.local"))) {
+    await editOriginal(appId, token, { content: t("notify.bot.linkRequiredToRequest") });
+    return;
   }
 
-  // `options` is always present on a real /request; a payload without it throws
-  // here (and is reported as an unexpected error), exactly as before.
-  const options = data.options as CommandOption[];
-  const type = options.find((o) => o.name === "type")?.value as "movie" | "tv";
-  const query = options.find((o) => o.name === "query")?.value as string;
+  const type = mediaTypeOption(optionValue(data.options, "type"));
+  const query = optionValue(data.options, "query");
+  if (!type || typeof query !== "string" || query.trim().length === 0) {
+    await editOriginal(appId, token, { content: t("notify.bot.searchFailed") });
+    return;
+  }
 
   let results: TmdbResult[];
   try {
-    const raw = await cachedSearchTmdb(query, type, discordUserId);
-    results = await attachAvailability(raw, await discordVisibleInstances(discordUserId));
+    results = await searchForDiscord(query, type, discordUserId);
   } catch (err) {
     console.error("[interactions] TMDB search error:", err);
     await editOriginal(appId, token, { content: t("notify.bot.searchFailed") });
@@ -51,19 +56,18 @@ export async function handleRequestCommand(ctx: CommandContext): Promise<void> {
   }
 
   if (results.length === 0) {
+    // The query is the user's own text inside **"…"**: escaped like every other
+    // query that reaches Discord (buildResultsPayload, /issue).
     await editOriginal(appId, token, {
-      content: type === "movie" ? t("notify.bot.noResults.movie", { query }) : t("notify.bot.noResults.tv", { query }),
+      content: type === "movie" ? t("notify.bot.noResults.movie", { query: escMd(query) }) : t("notify.bot.noResults.tv", { query: escMd(query) }),
     });
     return;
   }
 
+  // Read back by the result buttons (components/pick.ts) under this key.
   const key = `p:${interactionId}:${discordUserId}`;
   const pendingPayload: PendingSearch = { results, discordUserId, discordUsername };
-  await prisma.discordSearchCache.upsert({
-    where:  { queryKey: key },
-    create: { queryKey: key, data: JSON.stringify(pendingPayload), expiresAt: new Date(Date.now() + 5 * 60_000) },
-    update: { data: JSON.stringify(pendingPayload), expiresAt: new Date(Date.now() + 5 * 60_000) },
-  });
+  await savePending(key, pendingPayload);
 
   await editOriginal(appId, token, buildResultsPayload(t, query, results, interactionId, discordUserId));
 }

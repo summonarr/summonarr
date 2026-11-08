@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { AlertTriangle, CheckCircle, Loader2, X } from "@/components/icons";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -9,6 +9,12 @@ import { Textarea } from "@/components/ui/textarea";
 import type { TVAvailabilityResponse, TVSeasonInfo } from "@/app/api/tv-availability/route";
 import { withBasePath } from "@/lib/base-path";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
+import { readApiError } from "@/lib/client/api-error";
+import { fetchJson, timedFetch } from "@/lib/client/fetch-json";
+import { useAsyncAction } from "@/hooks/use-async-action";
+import { v } from "@/lib/validate";
+import { SLOT } from "@/lib/i18n/slot";
+import { SlotText } from "@/components/i18n/slot-text";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
 import { DetailActionButton } from "./detail-action-button";
@@ -69,6 +75,348 @@ function shouldUseManualInputs(
   return formVisible && seasonCount === 0;
 }
 
+// A season/episode pick carried across a change of the lists or the scope:
+// the current season stays when the list still has it (else the first season),
+// and the current episode stays when that season still lists it (else the
+// season's first episode). Never a null episode while the chosen season has
+// episodes — see withScope for why. Module-level and pure so
+// tests/report-issue-manual-inputs.test.mts can pin it.
+function keepSeasonEpisode(
+  seasons: TVSeasonInfo[],
+  season: number | null,
+  episode: number | null,
+): { season: number | null; episode: number | null } {
+  const kept = season != null ? seasons.find((s) => s.seasonNumber === season) : undefined;
+  const chosen = kept ?? seasons[0];
+  if (!chosen) return { season: null, episode: null };
+  const keepEpisode = kept !== undefined && episode != null && chosen.episodes.includes(episode);
+  return { season: chosen.seasonNumber, episode: keepEpisode ? episode : chosen.episodes[0] ?? null };
+}
+
+// The library lists can miss what a watch-history row reports: tv-availability
+// lists only the sign-in provider's sources, and TVEpisodeCache lags live play
+// history. A seeded season/episode is the one the viewer actually played, so it
+// JOINS the options instead of being swapped for the first season's first
+// episode, which the selects (no manual inputs once a list exists) left
+// unreachable. An empty list stays empty: that keeps the manual inputs, already
+// seeded with the same numbers.
+function withSeedOptions(
+  seasons: TVSeasonInfo[],
+  seedSeason: number | null,
+  seedEpisode: number | null,
+): TVSeasonInfo[] {
+  if (seasons.length === 0 || seedSeason == null) return seasons;
+  const existing = seasons.find((s) => s.seasonNumber === seedSeason);
+  if (!existing) {
+    const added = { seasonNumber: seedSeason, episodes: seedEpisode != null ? [seedEpisode] : [] };
+    return [...seasons, added].sort((a, b) => a.seasonNumber - b.seasonNumber);
+  }
+  if (seedEpisode == null || existing.episodes.includes(seedEpisode)) return seasons;
+  return seasons.map((s) =>
+    s === existing ? { ...s, episodes: [...s.episodes, seedEpisode].sort((a, b) => a - b) } : s,
+  );
+}
+
+// Everything the user fills in. One object, so opening the dialog resets the
+// whole form in one place (freshForm) and a new field can't be missed there.
+interface IssueForm {
+  issueType: IssueType;
+  scope: IssueScope;
+  note: string;
+  selectedSeason: number | null;
+  selectedEpisode: number | null;
+  manualSeason: string;
+  manualEpisode: string;
+}
+
+// The form a fresh open starts from. A watch-history row seeds the scope and
+// the episode it represents; movies always report the whole title.
+function freshForm(
+  isTV: boolean,
+  initialScope: IssueScope | undefined,
+  initialSeason: number | null | undefined,
+  initialEpisode: number | null | undefined,
+): IssueForm {
+  const scope: IssueScope = isTV ? initialScope ?? "FULL" : "FULL";
+  const season = isTV && scope !== "FULL" ? initialSeason ?? null : null;
+  const episode = isTV && scope === "EPISODE" ? initialEpisode ?? null : null;
+  return {
+    issueType: "BAD_VIDEO",
+    scope,
+    note: "",
+    selectedSeason: season,
+    selectedEpisode: episode,
+    manualSeason: season != null ? String(season) : "",
+    manualEpisode: episode != null ? String(episode) : "",
+  };
+}
+
+// A scope change re-validates the season/episode pick against the lists. A
+// pick the lists still hold is KEPT — Season 3 chosen under SEASON stays
+// Season 3 under EPISODE — and the manual inputs keep their values
+// (resolveNumbers ignores the episode outside EPISODE scope). The episode is
+// seeded too, never left null while the season has episodes. A null did NOT
+// leave the field blank — a controlled <select> whose value matches no option
+// falls back to displaying the first one, so the dropdown read "Episode 1"
+// while the state was null. The user saw a complete form, submitted, and got
+// the server's raw `episodeNumber is required for EPISODE scope` back about a
+// field they were looking at.
+function withScope(form: IssueForm, seasons: TVSeasonInfo[], scope: IssueScope): IssueForm {
+  if (scope === form.scope) return form;
+  const next = keepSeasonEpisode(seasons, form.selectedSeason, form.selectedEpisode);
+  return { ...form, scope, selectedSeason: next.season, selectedEpisode: next.episode };
+}
+
+// The season/episode numbers to send for the form as shown.
+function resolveNumbers(
+  form: IssueForm,
+  isTV: boolean,
+  useManualInputs: boolean,
+): { season: number | undefined; episode: number | undefined } {
+  if (!isTV || form.scope === "FULL") return { season: undefined, episode: undefined };
+  const { scope, manualSeason, manualEpisode, selectedSeason, selectedEpisode } = form;
+
+  if (useManualInputs) {
+    return {
+      season: manualSeason ? parseInt(manualSeason, 10) : undefined,
+      episode: scope === "EPISODE" && manualEpisode ? parseInt(manualEpisode, 10) : undefined,
+    };
+  }
+
+  // A season with no listed episodes (a seeded one the library doesn't know)
+  // shows the manual episode input instead of an empty select.
+  return {
+    season: selectedSeason ?? undefined,
+    episode: scope === "EPISODE"
+      ? (selectedEpisode ?? (manualEpisode ? parseInt(manualEpisode, 10) : undefined))
+      : undefined,
+  };
+}
+
+// What /api/tv-availability said for this open. `failed`: it didn't answer, so
+// the form falls back to manual inputs and says why.
+interface LibraryLists {
+  seasons: TVSeasonInfo[];
+  source: TVAvailabilityResponse["source"];
+  failed: boolean;
+}
+
+const NO_LISTS: LibraryLists = { seasons: [], source: null, failed: false };
+
+const AvailabilityAnswer = v.object({
+  source: v.nullable(v.literal("plex", "jellyfin", "both")),
+  seasons: v.array(v.object({ seasonNumber: v.int(), episodes: v.array(v.int()) })),
+});
+
+type Translate = ReturnType<typeof useT>;
+
+const LABEL_CLASS = "text-xs font-medium text-zinc-400 uppercase tracking-wide";
+
+function DialogHeader({ title, closeDisabled, t }: { title: string; closeDisabled: boolean; t: Translate }) {
+  return (
+    <div
+      className="flex items-center justify-between"
+      style={{
+        padding: "14px 20px",
+        borderBottom: "1px solid var(--ds-border)",
+      }}
+    >
+      <div>
+        <DialogTitle
+          className="font-semibold"
+          style={{ fontSize: 15, color: "var(--ds-fg)", margin: 0 }}
+        >
+          {t("request.report.dialogTitle")}
+        </DialogTitle>
+        <p
+          className="ds-mono truncate max-w-72"
+          style={{
+            fontSize: 11,
+            color: "var(--ds-fg-subtle)",
+            margin: "2px 0 0",
+          }}
+        >
+          {title}
+        </p>
+      </div>
+      <DialogClose
+        aria-label={t("request.close")}
+        disabled={closeDisabled}
+        className="ds-hover-tint inline-flex items-center justify-center rounded-full disabled:opacity-40"
+        style={{
+          width: 32,
+          height: 32,
+          background: "transparent",
+          border: 0,
+          color: "var(--ds-fg-muted)",
+        }}
+      >
+        <X style={{ width: 14, height: 14 }} />
+      </DialogClose>
+    </div>
+  );
+}
+
+function LoadingBody({ t }: { t: Translate }) {
+  return (
+    <div
+      className="ds-mono flex items-center justify-center"
+      style={{
+        gap: 8,
+        padding: "32px 20px",
+        fontSize: 12,
+        color: "var(--ds-fg-subtle)",
+      }}
+    >
+      <Loader2
+        className="animate-spin"
+        style={{
+          width: 14,
+          height: 14,
+          color: "var(--ds-accent-text)",
+        }}
+      />
+      {t("request.report.loadingLibrary")}
+    </div>
+  );
+}
+
+function SubmittedBody({ onClose, t }: { onClose: () => void; t: Translate }) {
+  return (
+    <div
+      className="text-center"
+      style={{ padding: "32px 20px" }}
+    >
+      <div
+        className="mx-auto flex items-center justify-center rounded-full"
+        style={{
+          width: 40,
+          height: 40,
+          marginBottom: 12,
+          background:
+            "color-mix(in oklab, var(--ds-success) 12%, transparent)",
+        }}
+      >
+        <CheckCircle
+          style={{
+            width: 20,
+            height: 20,
+            color: "var(--ds-success)",
+          }}
+        />
+      </div>
+      <p
+        className="font-medium"
+        style={{ fontSize: 13, color: "var(--ds-fg)", margin: "0 0 4px" }}
+      >
+        {t("request.report.reported")}
+      </p>
+      <p
+        style={{ fontSize: 12, color: "var(--ds-fg-muted)", margin: 0 }}
+      >
+        {t("request.report.adminWillReview")}
+      </p>
+      <DetailActionButton
+        variant="secondary"
+        size="sm"
+        onClick={onClose}
+        style={{ marginTop: 18 }}
+      >
+        {t("request.close")}
+      </DetailActionButton>
+    </div>
+  );
+}
+
+// The season (and, for one episode, episode) pickers: selects over the library
+// lists, or number inputs when there are no lists to pick from.
+function SeasonEpisodeFields({
+  form,
+  update,
+  seasons,
+  useManualInputs,
+  disabled,
+  t,
+}: {
+  form: IssueForm;
+  update: (patch: Partial<IssueForm>) => void;
+  seasons: TVSeasonInfo[];
+  useManualInputs: boolean;
+  disabled: boolean;
+  t: Translate;
+}) {
+  const currentSeason = seasons.find((s) => s.seasonNumber === form.selectedSeason);
+
+  function handleSeasonChange(seasonNum: number) {
+    const season = seasons.find((s) => s.seasonNumber === seasonNum);
+    update({ selectedSeason: seasonNum, selectedEpisode: season?.episodes[0] ?? null });
+  }
+
+  return (
+    <div className="flex gap-3">
+      <div className="flex-1 space-y-1.5">
+        <label htmlFor="report-issue-season" className={LABEL_CLASS}>{t("request.report.season")}</label>
+        {!useManualInputs ? (
+          <StyledSelect
+            id="report-issue-season"
+            value={String(form.selectedSeason ?? "")}
+            onChange={(e) => handleSeasonChange(Number(e.target.value))}
+            disabled={disabled}
+          >
+            {seasons.map((s) => (
+              <option key={s.seasonNumber} value={String(s.seasonNumber)}>
+                {t("request.report.seasonN", { number: s.seasonNumber })}
+              </option>
+            ))}
+          </StyledSelect>
+        ) : (
+          <Input
+            id="report-issue-season"
+            type="number"
+            min={1}
+            value={form.manualSeason}
+            onChange={(e) => update({ manualSeason: e.target.value })}
+            placeholder={t("request.report.examplePlaceholder", { number: 2 })}
+            required
+            disabled={disabled}
+          />
+        )}
+      </div>
+
+      {form.scope === "EPISODE" && (
+        <div className="flex-1 space-y-1.5">
+          <label htmlFor="report-issue-episode" className={LABEL_CLASS}>{t("request.report.episode")}</label>
+          {!useManualInputs && currentSeason && currentSeason.episodes.length > 0 ? (
+            <StyledSelect
+              id="report-issue-episode"
+              value={String(form.selectedEpisode ?? "")}
+              onChange={(e) => update({ selectedEpisode: Number(e.target.value) })}
+              disabled={disabled}
+            >
+              {currentSeason.episodes.map((ep) => (
+                <option key={ep} value={String(ep)}>
+                  {t("request.report.episodeN", { number: ep })}
+                </option>
+              ))}
+            </StyledSelect>
+          ) : (
+            <Input
+              id="report-issue-episode"
+              type="number"
+              min={1}
+              value={form.manualEpisode}
+              onChange={(e) => update({ manualEpisode: e.target.value })}
+              placeholder={t("request.report.examplePlaceholder", { number: 4 })}
+              required
+              disabled={disabled}
+            />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ReportIssueButton({
   tmdbId,
   tvdbId,
@@ -83,189 +431,113 @@ export function ReportIssueButton({
   const [dialogState, setDialogState] = useState<DialogState>("idle");
   const { toast } = useToast();
   const t = useT();
-  const [issueType, setIssueType] = useState<IssueType>("BAD_VIDEO");
-  const [scope, setScope] = useState<IssueScope>("FULL");
-  const [note, setNote] = useState("");
-  const [errorMsg, setErrorMsg] = useState("");
-
-  const [tvSeasons, setTvSeasons] = useState<TVSeasonInfo[]>([]);
-  const [availabilitySource, setAvailabilitySource] = useState<TVAvailabilityResponse["source"]>(null);
-  const [selectedSeason, setSelectedSeason] = useState<number | null>(null);
-  const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null);
-  const [availabilityFailed, setAvailabilityFailed] = useState(false);
-
-  const [manualSeason, setManualSeason] = useState("");
-  const [manualEpisode, setManualEpisode] = useState("");
-
-  // Reset season/episode selections when scope changes (setState-during-render avoids useEffect cascade)
-  const [prevScope, setPrevScope] = useState(scope);
-  if (scope !== prevScope) {
-    setPrevScope(scope);
-    const nextSeason = tvSeasons.length > 0 ? tvSeasons[0].seasonNumber : null;
-    setSelectedSeason(nextSeason);
-    // Seed the episode too, exactly as the season above is seeded. Leaving it
-    // null did NOT leave the field blank — a controlled <select> whose value
-    // matches no option falls back to displaying the first one, so the dropdown
-    // read "Episode 1" while the state was null. The user saw a complete form,
-    // submitted, and got the server's raw `episodeNumber is required for
-    // EPISODE scope` back about a field they were looking at.
-    setSelectedEpisode(
-      tvSeasons.find((s) => s.seasonNumber === nextSeason)?.episodes[0] ?? null,
-    );
-    setManualSeason("");
-    setManualEpisode("");
-  }
-
+  const action = useAsyncAction();
   const isTV = mediaType === "TV";
+  const [form, setForm] = useState<IssueForm>(() => freshForm(isTV, initialScope, initialSeasonNumber, initialEpisodeNumber));
+  const [lists, setLists] = useState<LibraryLists>(NO_LISTS);
+  const [errorMsg, setErrorMsg] = useState("");
+  const update = (patch: Partial<IssueForm>) => setForm((f) => ({ ...f, ...patch }));
+
+  const tvSeasons = lists.seasons;
+  const availabilityFailed = lists.failed;
   const useManualInputs = shouldUseManualInputs(isTV, availabilityFailed, dialogState, tvSeasons.length);
 
-  // Per-open generation, bumped by closeDialog. openDialog awaits a fetch and
-  // must not write back to a run the user already dismissed.
-  const openGen = useRef(0);
-
   async function openDialog() {
-    const myGen = ++openGen.current;
-    // Prefill seeds (watch-history rows pass the entry's episode). prevScope
-    // must be seeded too, or the render-time scope-change reset clobbers the
-    // seeded season/episode on the first render after opening.
-    const seedScope: IssueScope = isTV ? initialScope ?? "FULL" : "FULL";
-    const seedSeason = isTV && seedScope !== "FULL" ? initialSeasonNumber ?? null : null;
-    const seedEpisode = isTV && seedScope === "EPISODE" ? initialEpisodeNumber ?? null : null;
-
+    const seeded = freshForm(isTV, initialScope, initialSeasonNumber, initialEpisodeNumber);
     setDialogState("loading");
-    setIssueType("BAD_VIDEO");
-    setScope(seedScope);
-    setPrevScope(seedScope);
-    setNote("");
+    setForm(seeded);
     setErrorMsg("");
-    setSelectedSeason(seedSeason);
-    setSelectedEpisode(seedEpisode);
-    setManualSeason(seedSeason != null ? String(seedSeason) : "");
-    setManualEpisode(seedEpisode != null ? String(seedEpisode) : "");
-    setAvailabilityFailed(false);
+    // The previous open's lists: left in place, a failed re-load showed its
+    // "Showing from Plex" next to the load-failed warning.
+    setLists(NO_LISTS);
 
     if (isTV) {
-      try {
-        const res = await fetch(withBasePath(`/api/tv-availability?tmdbId=${tmdbId}`));
-        if (res.ok) {
-          const data: TVAvailabilityResponse = await res.json();
-          setTvSeasons(data.seasons);
-          setAvailabilitySource(data.source);
-          if (data.seasons.length > 0) {
-            // Honor the seeded season/episode when the library lists actually
-            // contain them; otherwise fall back to the first available.
-            const seededSeason =
-              seedSeason != null
-                ? data.seasons.find((s) => s.seasonNumber === seedSeason)
-                : undefined;
-            const season = seededSeason ?? data.seasons[0];
-            setSelectedSeason(season.seasonNumber);
-            setSelectedEpisode(
-              seededSeason && seedEpisode != null && seededSeason.episodes.includes(seedEpisode)
-                ? seedEpisode
-                : season.episodes[0] ?? null,
-            );
-          }
-        } else {
-          setAvailabilityFailed(true);
+      // Under the "open" key: closing the dialog aborts it, and a newer open
+      // replaces it, so an answer for an open the user already dismissed never
+      // writes back (run resolves undefined).
+      const res = await action.run("open", (signal) =>
+        fetchJson(withBasePath(`/api/tv-availability?tmdbId=${tmdbId}`), { schema: AvailabilityAnswer, signal }),
+      );
+      if (!res) return;
+      if (!res.ok) {
+        setLists({ ...NO_LISTS, failed: true });
+      } else {
+        const seasons = withSeedOptions(res.data.seasons, seeded.selectedSeason, seeded.selectedEpisode);
+        setLists({ seasons, source: res.data.source, failed: false });
+        if (seasons.length > 0) {
+          // The seed when given (now always in the list), else the first.
+          const pick = keepSeasonEpisode(seasons, seeded.selectedSeason, seeded.selectedEpisode);
+          setForm((f) => ({ ...f, selectedSeason: pick.season, selectedEpisode: pick.episode }));
         }
-      } catch {
-        setAvailabilityFailed(true);
       }
     }
-
-    // Only open if this run is still the current one. The dialog is dismissable
-    // while the availability fetch is in flight — the header X is disabled, but
-    // Escape and an outside click both route through onOpenChange — so without
-    // this the fetch settled after the user had closed it and reopened the
-    // dialog on top of whatever they had moved on to. Same generation-ref shape
-    // as issue-actions' releaseReqRef and watch-history-list's filterGen.
-    if (openGen.current !== myGen) return;
     setDialogState("open");
   }
 
   function closeDialog() {
     if (dialogState === "submitting") return;
-    // Bumping here is what makes an in-flight openDialog give up.
-    openGen.current += 1;
+    // Escape, an outside click and the X all land here, the load included:
+    // aborting it is what keeps a late answer from reopening the dialog.
+    action.abort("open");
     setDialogState("idle");
-  }
-
-  function handleSeasonChange(seasonNum: number) {
-    setSelectedSeason(seasonNum);
-    const season = tvSeasons.find((s) => s.seasonNumber === seasonNum);
-    setSelectedEpisode(season?.episodes[0] ?? null);
-  }
-
-  function resolveNumbers(): { season: number | undefined; episode: number | undefined } {
-    if (!isTV || scope === "FULL") return { season: undefined, episode: undefined };
-
-    if (useManualInputs) {
-      return {
-        season: manualSeason ? parseInt(manualSeason, 10) : undefined,
-        episode: scope === "EPISODE" && manualEpisode ? parseInt(manualEpisode, 10) : undefined,
-      };
-    }
-
-    return {
-      season: selectedSeason ?? undefined,
-      episode: scope === "EPISODE" ? (selectedEpisode ?? undefined) : undefined,
-    };
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (action.busy("submit")) return;
     setDialogState("submitting");
     setErrorMsg("");
 
-    const { season, episode } = resolveNumbers();
+    const { season, episode } = resolveNumbers(form, isTV, useManualInputs);
 
-    try {
-      const res = await fetch(withBasePath("/api/issues"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tmdbId,
-          tvdbId: tvdbId ?? undefined,
-          mediaType,
-          title,
-          posterPath,
-          issueType,
-          scope: mediaType === "MOVIE" ? "FULL" : scope,
-          seasonNumber: season,
-          episodeNumber: episode,
-          note: note.trim() || undefined,
-        }),
-      });
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setErrorMsg(rateLimitMessage(res, t) ?? data.error ?? t("request.somethingWrong"));
-        setDialogState("open");
-        return;
-      }
-
-      setDialogState("submitted");
-      toast({ title: t("request.report.reportedToast"), variant: "success" });
-    } catch {
-      setErrorMsg(t("request.networkError"));
+    const out = await action.run(
+      "submit",
+      async (signal): Promise<{ error: string } | null> => {
+        try {
+          const res = await timedFetch(withBasePath("/api/issues"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              tmdbId,
+              tvdbId: tvdbId ?? undefined,
+              mediaType,
+              title,
+              posterPath,
+              issueType: form.issueType,
+              scope: mediaType === "MOVIE" ? "FULL" : form.scope,
+              seasonNumber: season,
+              episodeNumber: episode,
+              note: form.note.trim() || undefined,
+            }),
+            signal,
+          });
+          if (res.ok) return null;
+          return { error: rateLimitMessage(res, t) ?? (await readApiError(res, t("request.somethingWrong"))) };
+        } catch {
+          return { error: t("request.networkError") };
+        }
+      },
+      { ifBusy: "skip" },
+    );
+    if (out === undefined) return;
+    if (out) {
+      setErrorMsg(out.error);
       setDialogState("open");
+      return;
     }
+    setDialogState("submitted");
+    toast({ title: t("request.report.reportedToast"), variant: "success" });
   }
 
   const isSubmitting = dialogState === "submitting";
-  const currentSeason = tvSeasons.find((s) => s.seasonNumber === selectedSeason);
 
-  const sourceLabel = availabilitySource === "plex"
+  const sourceLabel = lists.source === "plex"
     ? "Plex"
-    : availabilitySource === "jellyfin"
+    : lists.source === "jellyfin"
     ? "Jellyfin"
-    : availabilitySource === "both"
+    : lists.source === "both"
     ? t("request.report.bothSources")
     : null;
-  // Split the sentence around the source so the name keeps its emphasis in
-  // any word order.
-  const showingFrom = t("request.report.showingFrom", { source: "\u0000" }).split("\u0000");
 
   return (
     <>
@@ -314,123 +586,22 @@ export function ReportIssueButton({
                 boxShadow: "var(--ds-shadow-lg)",
               }}
             >
-            <div
-              className="flex items-center justify-between"
-              style={{
-                padding: "14px 20px",
-                borderBottom: "1px solid var(--ds-border)",
-              }}
-            >
-              <div>
-                <DialogTitle
-                  className="font-semibold"
-                  style={{ fontSize: 15, color: "var(--ds-fg)", margin: 0 }}
-                >
-                  {t("request.report.dialogTitle")}
-                </DialogTitle>
-                <p
-                  className="ds-mono truncate max-w-72"
-                  style={{
-                    fontSize: 11,
-                    color: "var(--ds-fg-subtle)",
-                    margin: "2px 0 0",
-                  }}
-                >
-                  {title}
-                </p>
-              </div>
-              <DialogClose
-                aria-label={t("request.close")}
-                disabled={
-                  dialogState === "submitting" || dialogState === "loading"
-                }
-                className="ds-hover-tint inline-flex items-center justify-center rounded-full disabled:opacity-40"
-                style={{
-                  width: 32,
-                  height: 32,
-                  background: "transparent",
-                  border: 0,
-                  color: "var(--ds-fg-muted)",
-                }}
-              >
-                <X style={{ width: 14, height: 14 }} />
-              </DialogClose>
-            </div>
+            {/* The X stays usable while the library loads, like Escape and an
+                outside click: only a submit in flight holds the dialog open. */}
+            <DialogHeader title={title} closeDisabled={isSubmitting} t={t} />
 
-            {dialogState === "loading" && (
-              <div
-                className="ds-mono flex items-center justify-center"
-                style={{
-                  gap: 8,
-                  padding: "32px 20px",
-                  fontSize: 12,
-                  color: "var(--ds-fg-subtle)",
-                }}
-              >
-                <Loader2
-                  className="animate-spin"
-                  style={{
-                    width: 14,
-                    height: 14,
-                    color: "var(--ds-accent-text)",
-                  }}
-                />
-                {t("request.report.loadingLibrary")}
-              </div>
-            )}
+            {dialogState === "loading" && <LoadingBody t={t} />}
 
-            {dialogState === "submitted" && (
-              <div
-                className="text-center"
-                style={{ padding: "32px 20px" }}
-              >
-                <div
-                  className="mx-auto flex items-center justify-center rounded-full"
-                  style={{
-                    width: 40,
-                    height: 40,
-                    marginBottom: 12,
-                    background:
-                      "color-mix(in oklab, var(--ds-success) 12%, transparent)",
-                  }}
-                >
-                  <CheckCircle
-                    style={{
-                      width: 20,
-                      height: 20,
-                      color: "var(--ds-success)",
-                    }}
-                  />
-                </div>
-                <p
-                  className="font-medium"
-                  style={{ fontSize: 13, color: "var(--ds-fg)", margin: "0 0 4px" }}
-                >
-                  {t("request.report.reported")}
-                </p>
-                <p
-                  style={{ fontSize: 12, color: "var(--ds-fg-muted)", margin: 0 }}
-                >
-                  {t("request.report.adminWillReview")}
-                </p>
-                <DetailActionButton
-                  variant="secondary"
-                  size="sm"
-                  onClick={closeDialog}
-                  style={{ marginTop: 18 }}
-                >
-                  {t("request.close")}
-                </DetailActionButton>
-              </div>
-            )}
+            {dialogState === "submitted" && <SubmittedBody onClose={closeDialog} t={t} />}
 
             {(dialogState === "open" || dialogState === "submitting") && (
               <form onSubmit={handleSubmit} className="px-5 py-4 space-y-4">
                 {isTV && sourceLabel && (
                   <p className="text-[11px] text-zinc-500">
-                    {showingFrom[0]}
-                    <span className="text-zinc-400 font-medium">{sourceLabel}</span>
-                    {showingFrom[1]}
+                    {/* Split around the source so the name keeps its emphasis in any word order. */}
+                    <SlotText text={t("request.report.showingFrom", { source: SLOT })}>
+                      <span className="text-zinc-400 font-medium">{sourceLabel}</span>
+                    </SlotText>
                   </p>
                 )}
                 {isTV && availabilityFailed && (
@@ -440,108 +611,55 @@ export function ReportIssueButton({
                 )}
 
                 <div className="space-y-1.5">
-                  <label htmlFor="report-issue-type" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">{t("request.report.issueType")}</label>
+                  <label htmlFor="report-issue-type" className={LABEL_CLASS}>{t("request.report.issueType")}</label>
                   <StyledSelect
                     id="report-issue-type"
-                    value={issueType}
-                    onChange={(e) => setIssueType(e.target.value as IssueType)}
+                    value={form.issueType}
+                    onChange={(e) => update({ issueType: e.target.value as IssueType })}
                     disabled={isSubmitting}
                   >
-                    {Object.entries(ISSUE_TYPE_LABELS).map(([k, v]) => (
-                      <option key={k} value={k}>{t(v)}</option>
+                    {Object.entries(ISSUE_TYPE_LABELS).map(([k, key]) => (
+                      <option key={k} value={k}>{t(key)}</option>
                     ))}
                   </StyledSelect>
                 </div>
 
                 {isTV && (
                   <div className="space-y-1.5">
-                    <label htmlFor="report-issue-scope" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">{t("request.report.affects")}</label>
+                    <label htmlFor="report-issue-scope" className={LABEL_CLASS}>{t("request.report.affects")}</label>
                     <StyledSelect
                       id="report-issue-scope"
-                      value={scope}
-                      onChange={(e) => setScope(e.target.value as IssueScope)}
+                      value={form.scope}
+                      onChange={(e) => setForm((f) => withScope(f, tvSeasons, e.target.value as IssueScope))}
                       disabled={isSubmitting}
                     >
-                      {Object.entries(SCOPE_LABELS).map(([k, v]) => (
-                        <option key={k} value={k}>{t(v)}</option>
+                      {Object.entries(SCOPE_LABELS).map(([k, key]) => (
+                        <option key={k} value={k}>{t(key)}</option>
                       ))}
                     </StyledSelect>
                   </div>
                 )}
 
-                {isTV && scope !== "FULL" && (
-                  <div className="flex gap-3">
-                    <div className="flex-1 space-y-1.5">
-                      <label htmlFor="report-issue-season" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">{t("request.report.season")}</label>
-                      {!useManualInputs ? (
-                        <StyledSelect
-                          id="report-issue-season"
-                          value={String(selectedSeason ?? "")}
-                          onChange={(e) => handleSeasonChange(Number(e.target.value))}
-                          disabled={isSubmitting}
-                        >
-                          {tvSeasons.map((s) => (
-                            <option key={s.seasonNumber} value={String(s.seasonNumber)}>
-                              {t("request.report.seasonN", { number: s.seasonNumber })}
-                            </option>
-                          ))}
-                        </StyledSelect>
-                      ) : (
-                        <Input
-                          id="report-issue-season"
-                          type="number"
-                          min={1}
-                          value={manualSeason}
-                          onChange={(e) => setManualSeason(e.target.value)}
-                          placeholder={t("request.report.examplePlaceholder", { number: 2 })}
-                          required
-                          disabled={isSubmitting}
-                        />
-                      )}
-                    </div>
-
-                    {scope === "EPISODE" && (
-                      <div className="flex-1 space-y-1.5">
-                        <label htmlFor="report-issue-episode" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">{t("request.report.episode")}</label>
-                        {!useManualInputs && currentSeason ? (
-                          <StyledSelect
-                            id="report-issue-episode"
-                            value={String(selectedEpisode ?? "")}
-                            onChange={(e) => setSelectedEpisode(Number(e.target.value))}
-                            disabled={isSubmitting}
-                          >
-                            {currentSeason.episodes.map((ep) => (
-                              <option key={ep} value={String(ep)}>
-                                {t("request.report.episodeN", { number: ep })}
-                              </option>
-                            ))}
-                          </StyledSelect>
-                        ) : (
-                          <Input
-                            id="report-issue-episode"
-                            type="number"
-                            min={1}
-                            value={manualEpisode}
-                            onChange={(e) => setManualEpisode(e.target.value)}
-                            placeholder={t("request.report.examplePlaceholder", { number: 4 })}
-                            required
-                            disabled={isSubmitting}
-                          />
-                        )}
-                      </div>
-                    )}
-                  </div>
+                {isTV && form.scope !== "FULL" && (
+                  <SeasonEpisodeFields
+                    form={form}
+                    update={update}
+                    seasons={tvSeasons}
+                    useManualInputs={useManualInputs}
+                    disabled={isSubmitting}
+                    t={t}
+                  />
                 )}
 
                 <div className="space-y-1.5">
-                  <label htmlFor="report-issue-note" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">
+                  <label htmlFor="report-issue-note" className={LABEL_CLASS}>
                     {t("request.report.details")} <span className="text-zinc-500 normal-case">{t("request.report.optional")}</span>
                   </label>
                   <Textarea
                     id="report-issue-note"
-                    value={note}
-                    onChange={(e) => setNote(e.target.value)}
-                    placeholder={issueType === "WRONG_MATCH" ? t("request.report.wrongMatchPlaceholder") : t("request.report.describePlaceholder")}
+                    value={form.note}
+                    onChange={(e) => update({ note: e.target.value })}
+                    placeholder={form.issueType === "WRONG_MATCH" ? t("request.report.wrongMatchPlaceholder") : t("request.report.describePlaceholder")}
                     maxLength={1000}
                     rows={3}
                     disabled={isSubmitting}
@@ -553,7 +671,7 @@ export function ReportIssueButton({
                     className="ds-mono"
                     style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", margin: 0 }}
                   >
-                    {note.length}/1000
+                    {form.note.length}/1000
                   </p>
                 </div>
 

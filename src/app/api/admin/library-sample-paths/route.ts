@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { DEFAULT_MEDIA_INSTANCE } from "@/lib/media-instances";
+import { tvShowFolderPath } from "@/lib/library-paths";
 
 const SAMPLE_COUNT = 6;
 
@@ -40,14 +41,16 @@ function pickSamples(paths: string[], mountPoint: string): string[] {
   return [...new Set(indices)].map((i) => relative[i]);
 }
 
-// Sample of distinct show folders (first path segment) rather than per-episode
-// paths, so the TV preview lists shows instead of many files from one show.
+// Sample of distinct show folders rather than per-episode paths, so the TV
+// preview lists shows instead of many files from one show. Each sample keeps
+// every folder above the show ("tv/Show A", not "Show A"): the server keys a
+// show on the first segment left AFTER the strip prefix, so a preview of the
+// first segment alone could never show what a "tv/" prefix does.
 function pickTvShowSamples(paths: string[], mountPoint: string): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
   for (const path of paths) {
-    const rel = stripPrefix(path, mountPoint);
-    const showFolder = rel.split("/")[0];
+    const showFolder = tvShowFolderPath(stripPrefix(path, mountPoint));
     if (showFolder && !seen.has(showFolder)) {
       seen.add(showFolder);
       result.push(showFolder);

@@ -144,8 +144,6 @@ const {
   notifyUserIssueResolvedPush,
   notifyUserRequestCommentPush,
   notifyAdminsRequestCommentPush,
-  notifyUserRequestApprovedPush,
-  notifyUserRequestDeclinedPush,
   notifyUsersRequestsAvailablePush,
   notifyUsersRequestsApprovedPush,
   notifyUsersRequestsDeclinedPush,
@@ -155,7 +153,17 @@ const {
   apnsAlertsFor,
 } = await import("../src/lib/push.ts");
 const { translatorFor } = await import("../src/lib/i18n/server-locale.ts");
+const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
 const { LOCALES } = await import("../src/lib/i18n/locales.ts");
+
+// A single approve/decline is the batch notifier with one row
+// (notifyRequestStatusChange → notifyRequestStatusChanges), so these drive
+// exactly what one decision sends.
+type DecisionPush = { userId: string; title: string; mediaType: string; tmdbId?: number };
+const approvedPushFor = (d: DecisionPush) =>
+  notifyUsersRequestsApprovedPush([{ requestedBy: d.userId, title: d.title, mediaType: d.mediaType, tmdbId: d.tmdbId }]);
+const declinedPushFor = (d: DecisionPush) =>
+  notifyUsersRequestsDeclinedPush([{ requestedBy: d.userId, title: d.title, mediaType: d.mediaType, tmdbId: d.tmdbId }]);
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
 // Setting: one map serves the feature-flag read, the VAPID key read, and the
@@ -165,9 +173,12 @@ const settingFindManyKeys: string[][] = [];
 const settingFindUniqueKeys: string[] = [];
 
 type SettingFindManyArgs = { where?: { key?: { in?: string[] } } };
+// Optional per-test hook awaited before a findMany answers (holds a read open).
+let settingFindManyHook: ((keys: string[]) => Promise<void>) | null = null;
 async function settingFindMany(args: SettingFindManyArgs) {
   const keys = args?.where?.key?.in ?? [...settings.keys()];
   settingFindManyKeys.push([...keys]);
+  if (settingFindManyHook) await settingFindManyHook(keys);
   return keys.filter((k) => settings.has(k)).map((k) => ({ key: k, value: settings.get(k)! }));
 }
 shadowPrismaModel(prisma, "setting", {
@@ -270,6 +281,7 @@ type UserRow = {
   pushOnDeclined?: boolean;
   pushOnAvailable?: boolean;
   locale?: string | null;
+  deactivatedAt?: Date | null;
 };
 let userRows: UserRow[] = [];
 const userFindUniqueCalls: Array<{ where: { id: string }; select: Record<string, unknown> }> = [];
@@ -280,13 +292,37 @@ shadowPrismaModel(prisma, "user", {
     const row = userRows.find((u) => u.id === args.where.id);
     return row ? { ...row } : null;
   },
-  findMany: async (args: { where: { id?: { in?: string[] } } & Record<string, unknown>; select: Record<string, unknown> }) => {
+  findMany: async (args: { where: { id?: string | { in?: string[]; not?: string } } & Record<string, unknown>; select: Record<string, unknown> }) => {
     userFindManyCalls.push(args);
-    const ids = args.where?.id?.in ?? [];
+    // The batch request-status helpers' pref query, recognised by its opt-in
+    // (it also carries deactivatedAt: null, honoured against the seeded rows).
     const prefKey = ["pushOnAvailable", "pushOnApproved", "pushOnDeclined"].find((k) => args.where[k] === true);
-    return userRows
-      .filter((u) => ids.includes(u.id) && (prefKey ? u[prefKey as keyof UserRow] === true : true))
-      .map((u) => ({ id: u.id, locale: u.locale ?? null }));
+    if (prefKey) {
+      const ids = (typeof args.where?.id === "object" ? args.where.id.in : undefined) ?? [];
+      return userRows
+        .filter((u) => ids.includes(u.id) && u[prefKey as keyof UserRow] === true)
+        .filter((u) => args.where.deactivatedAt !== null || !u.deactivatedAt)
+        .map((u) => ({ id: u.id, locale: u.locale ?? null }));
+    }
+    // The admin-recipient read (permissionHolderSubscriptions): every active
+    // user, narrowed by the where it carries. Users are the seeded
+    // subscriptions' owners, with their role/permission metadata.
+    if (args.where?.deactivatedAt === null) {
+      const owners = new Map<string, UserMeta>();
+      for (const r of subRows) if (!owners.has(r.userId)) owners.set(r.userId, r.user);
+      const id = args.where.id;
+      return [...owners]
+        .filter(([uid, meta]) => {
+          if (typeof id === "string" && uid !== id) return false;
+          if (id && typeof id === "object" && id.not !== undefined && uid === id.not) return false;
+          if (args.where.notifyOnIssue === true && meta.notifyOnIssue !== true) return false;
+          if (args.where.pushOnComment === true && meta.pushOnComment !== true) return false;
+          return true;
+        })
+        .map(([uid, meta]) => ({ id: uid, role: meta.role, permissions: meta.permissions }));
+    }
+    const ids = (typeof args.where?.id === "object" ? args.where.id.in : undefined) ?? [];
+    return userRows.filter((u) => ids.includes(u.id)).map((u) => ({ id: u.id, locale: u.locale ?? null }));
   },
 });
 
@@ -407,6 +443,7 @@ beforeEach(() => {
   relayRespond = () => jsonResponse({ ok: true });
   webRespond = () => new Response(null, { status: 201 });
   settingFindManyKeys.length = 0;
+  settingFindManyHook = null;
   settingFindUniqueKeys.length = 0;
   advisoryLockSqls.length = 0;
   settingUpserts.length = 0;
@@ -496,6 +533,23 @@ test("a PARTIAL keypair refuses to regenerate: surviving public half returned, m
   assert.equal(settings.get("vapidPrivateKey"), "orphaned-private-half");
 });
 
+test("rows present but a value unreadable: never hands out a generated key that was never stored", async () => {
+  // The Prisma extension reads an undecryptable value as "" (e.g. a backup
+  // restored under another TOKEN_ENCRYPTION_KEY). Both rows exist, so the locked
+  // init writes nothing — the freshly generated public half must not escape.
+  resetLogDedup();
+  settings.set("vapidPublicKey", "stored-public-key");
+  settings.set("vapidPrivateKey", "");
+
+  assert.equal(await getOrCreateVapidPublicKey(), "");
+  assert.equal(settingUpserts.length, 0);
+  assert.equal(settings.get("vapidPublicKey"), "stored-public-key");
+  // Stable across calls (a random key per call broke every subscription), and
+  // logged once, not once per subscribe attempt (guardrail 7b).
+  assert.equal(await getOrCreateVapidPublicKey(), "");
+  assert.equal(warns.filter((w) => w.includes("[push] VAPID key Settings exist")).length, 1);
+});
+
 // ── APNs relay wire ─────────────────────────────────────────────────────────
 
 test("relay wire for a plain iOS device: default relay, decrypted token, generic alert only — rich text never leaves", async () => {
@@ -530,7 +584,7 @@ test("E2E device: mutable-content + encrypted blob carrying the rich text and th
   userRows = [{ id: "u-e2e", pushOnApproved: true, pushOnDeclined: true }];
   subRows = [iosSub("u-e2e", "apns-token-e2e", { e2e: device })];
 
-  await notifyUserRequestApprovedPush({ userId: "u-e2e", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 });
+  await approvedPushFor({ userId: "u-e2e", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 });
 
   assert.equal(relayCalls.length, 1);
   const approved = relayCalls[0].body;
@@ -550,7 +604,7 @@ test("E2E device: mutable-content + encrypted blob carrying the rich text and th
 
   // No tmdbId → the encrypted envelope carries no u key at all (and TV maps to
   // the "TV Show" label).
-  await notifyUserRequestDeclinedPush({ userId: "u-e2e", title: "Andor", mediaType: "TV" });
+  await declinedPushFor({ userId: "u-e2e", title: "Andor", mediaType: "TV" });
   assert.equal(relayCalls.length, 2);
   assert.deepEqual(decryptE2e(device, relayCalls[1].body.payload.e2e!), {
     t: "Request Declined",
@@ -598,7 +652,7 @@ test("an E2E encrypt failure falls back to the generic payload — the send stil
   bad.publicKey = "not-base64!!!"; // fails encryptForDevice's key validation
   subRows = [bad];
 
-  await notifyUserRequestApprovedPush({ userId: "u-bad", title: "Dune", mediaType: "MOVIE" });
+  await approvedPushFor({ userId: "u-bad", title: "Dune", mediaType: "MOVIE" });
 
   assert.equal(relayCalls.length, 1);
   const body = relayCalls[0].body;
@@ -608,13 +662,51 @@ test("an E2E encrypt failure falls back to the generic payload — the send stil
   assert.ok(errors.some((e) => e.includes("[push] e2e encrypt failed:")), errors.join("\n"));
 });
 
+test("a relay-config load that finished after an invalidation does not drop the newer in-flight load", async () => {
+  subRows = [iosSub("u-relay", "token-relay")];
+  // The first two relay-config reads are held open until released; any later
+  // read answers at once (it is the redundant one this pins against).
+  const releases: Array<() => void> = [];
+  let relayReads = 0;
+  let onRead: (() => void) | null = null;
+  settingFindManyHook = async (keys) => {
+    if (!keys.includes("apnsRelayUrl")) return;
+    relayReads++;
+    onRead?.();
+    if (relayReads > 2) return;
+    await new Promise<void>((resolve) => releases.push(resolve));
+  };
+  const nextRead = () => new Promise<void>((resolve) => { onRead = resolve; });
+
+  let read = nextRead();
+  const first = sendApnsTestToUser("u-relay"); // load A
+  await read;
+  invalidateApnsRelayCache();
+  read = nextRead();
+  const second = sendApnsTestToUser("u-relay"); // load B, after the invalidation
+  await read;
+
+  releases[0](); // A settles while B is still pending
+  await first;
+  const queriesBefore = subQueries.length;
+  const third = sendApnsTestToUser("u-relay");
+  // Let the third send reach the relay-config lookup before B settles.
+  while (subQueries.length === queriesBefore) await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  releases[1]();
+  await Promise.all([second, third]);
+
+  assert.equal(relayReads, 2, "the third send must share load B, not start another read");
+  assert.equal(relayCalls.length, 3);
+});
+
 test("a configured apnsRelayUrl/apnsRelayKey routes to the custom relay with Bearer auth", async () => {
   settings.set("apnsRelayUrl", "https://relay.example.com/push");
   settings.set("apnsRelayKey", "relay-secret"); // stub returns the post-extension (decrypted) view
   userRows = [{ id: "u-custom", pushOnApproved: true }];
   subRows = [iosSub("u-custom", "apns-token-custom")];
 
-  await notifyUserRequestApprovedPush({ userId: "u-custom", title: "Dune", mediaType: "MOVIE" });
+  await approvedPushFor({ userId: "u-custom", title: "Dune", mediaType: "MOVIE" });
 
   assert.equal(relayCalls.length, 1);
   assert.equal(relayCalls[0].url, "https://relay.example.com/push");
@@ -633,7 +725,7 @@ test("relay outcomes: 'unregistered' prunes exactly that row; 500 and 401 keep t
     return jsonResponse({ error: "bad key" }, 401);
   };
 
-  await notifyUserRequestApprovedPush({ userId: "u-mix", title: "Dune", mediaType: "MOVIE" });
+  await approvedPushFor({ userId: "u-mix", title: "Dune", mediaType: "MOVIE" });
 
   assert.equal(relayCalls.length, 3); // one device's failure never blocks the others
   // Only the unregistered device is pruned, keyed by ITS endpoint.
@@ -650,7 +742,7 @@ test("a relay 400 logs as a payload-validation rejection with the relay's error 
   subRows = [row];
   relayRespond = () => jsonResponse({ error: "payload.aps.alert.title contains a forbidden character" }, 400);
 
-  await notifyUserRequestApprovedPush({ userId: "u-400", title: "Dune", mediaType: "MOVIE" });
+  await approvedPushFor({ userId: "u-400", title: "Dune", mediaType: "MOVIE" });
 
   assert.equal(relayCalls.length, 1);
   assert.deepEqual(subDeletes, []); // a 400 is our fault, never the device's
@@ -680,7 +772,7 @@ test("a 5xx without the relay's JSON logs as 'relay unreachable' (the proxy answ
     return jsonResponse({ ok: false, reason: "error", apnsReason: "InvalidProviderToken" }, 502);
   };
 
-  await notifyUserRequestApprovedPush({ userId: "u-down", title: "Dune", mediaType: "MOVIE" });
+  await approvedPushFor({ userId: "u-down", title: "Dune", mediaType: "MOVIE" });
 
   assert.equal(relayCalls.length, 3);
   assert.deepEqual(subDeletes, []); // an outage is never the device's fault
@@ -820,7 +912,7 @@ test("a Spanish recipient gets Spanish push text (generic alert AND E2E rich tex
   // Per-user pref read carries the locale; the title is display-localized
   // from the cached TMDB translation (guardrail 40a), one read per send.
   seedTranslation("movie", 438631, { es: "Duna" });
-  await notifyUserRequestApprovedPush({ userId: "u-es", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 });
+  await approvedPushFor({ userId: "u-es", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 });
   assert.deepEqual(translationReads, [["movie:438631:i18n:v2"]], "one translation read, keyed by the title's TMDB identity");
   const approved = relayCalls[0].body;
   assert.deepEqual(approved.payload.aps?.alert, { title: "Solicitud aprobada", body: "Abre Summonarr para ver los detalles" });
@@ -854,7 +946,7 @@ test("an English recipient's title costs no translation read even when a transla
   userRows = [{ id: "u-en", pushOnApproved: true, locale: null }];
   subRows = [iosSub("u-en", "apns-token-en", { e2e: device })];
   seedTranslation("movie", 438631, { es: "Duna" });
-  await notifyUserRequestApprovedPush({ userId: "u-en", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 });
+  await approvedPushFor({ userId: "u-en", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 });
   assert.deepEqual(translationReads, [], "no DB read for an all-English recipient set");
   assert.equal(relayCalls.length, 1);
   assert.ok(decryptE2e(device, relayCalls[0].body.payload.e2e!).b.includes("Dune"), "the stored English title");
@@ -882,8 +974,6 @@ test("every cleartext url a helper sends passes the relay's url rules — every 
   await notifyAdminGrabCompletedPush({ userId: "u-all", title: "Dune", scope: "MOVIE", issueId });
   await notifyAdminsManualInteractionRequiredPush({ service: "Radarr", title: "Dune" });
   await notifyAdminsDeletionVoteThresholdPush({ title: "Dune", mediaType: "MOVIE", voteCount: 5, tmdbId: 438631 });
-  await notifyUserRequestApprovedPush({ userId: "u-all", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 });
-  await notifyUserRequestDeclinedPush({ userId: "u-all", title: "Dune", mediaType: "MOVIE" });
   const batch = [{ requestedBy: "u-all", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 }];
   await notifyUsersRequestsAvailablePush(batch);
   await notifyUsersRequestsApprovedPush(batch);
@@ -916,7 +1006,7 @@ test("web send: stored Setting keys reach the wire (k=) and the decrypted subscr
   userRows = [{ id: "u-web", pushOnApproved: true }];
   subRows = [webSub("u-web", "sub-main")];
 
-  await notifyUserRequestApprovedPush({ userId: "u-web", title: "Dune", mediaType: "MOVIE" });
+  await approvedPushFor({ userId: "u-web", title: "Dune", mediaType: "MOVIE" });
 
   assert.equal(webCalls.length, 1);
   assert.equal(webCalls[0].url, "https://203.0.113.5/push/sub-main");
@@ -939,7 +1029,7 @@ test("web failures: 410 prunes the subscription silently; other statuses log and
   webRespond = (call) =>
     call.url.includes("sub-gone") ? new Response("gone", { status: 410 }) : new Response(null, { status: 201 });
 
-  await notifyUserRequestApprovedPush({ userId: "u-web2", title: "Dune", mediaType: "MOVIE" });
+  await approvedPushFor({ userId: "u-web2", title: "Dune", mediaType: "MOVIE" });
 
   assert.equal(webCalls.length, 2); // the dead subscription didn't stop the healthy one
   assert.deepEqual(subDeletes, [{ where: { endpoint: goneSub.endpoint } }]);
@@ -949,7 +1039,7 @@ test("web failures: 410 prunes the subscription silently; other statuses log and
 
   // A non-410/404 failure is a real error: logged, and the row is KEPT.
   webRespond = () => new Response("upstream sad", { status: 400 });
-  await notifyUserRequestApprovedPush({ userId: "u-web2", title: "Dune", mediaType: "MOVIE" });
+  await approvedPushFor({ userId: "u-web2", title: "Dune", mediaType: "MOVIE" });
   assert.equal(subDeletes.length, 1); // no new prune
   assert.ok(errors.some((e) => e.includes("[push] Send failed:")), errors.join("\n"));
 });
@@ -959,7 +1049,7 @@ test("missing VAPID keys skip the web device but must NOT block a sibling iOS se
   userRows = [{ id: "u-both", pushOnApproved: true }];
   subRows = [webSub("u-both", "sub-nokeys"), iosSub("u-both", "apns-token-both")];
 
-  await notifyUserRequestApprovedPush({ userId: "u-both", title: "Dune", mediaType: "MOVIE" });
+  await approvedPushFor({ userId: "u-both", title: "Dune", mediaType: "MOVIE" });
 
   assert.equal(webCalls.length, 0); // web silently skipped — no keys to sign with
   assert.equal(relayCalls.length, 1); // iOS delivered through the relay regardless
@@ -975,10 +1065,10 @@ test("feature.integration.push=false short-circuits every notify helper: zero su
   userRows = [{ id: "u-x", pushOnApproved: true, pushOnAvailable: true }];
 
   await notifyAdminsNewRequestPush({ title: "Dune", mediaType: "MOVIE", requestedBy: "alice" });
-  await notifyUserRequestApprovedPush({ userId: "u-x", title: "Dune", mediaType: "MOVIE" });
+  await approvedPushFor({ userId: "u-x", title: "Dune", mediaType: "MOVIE" });
   await notifyUsersRequestsAvailablePush([{ requestedBy: "u-x", title: "Dune", mediaType: "MOVIE" }]);
   await notifyAdminsNewIssuePush({ title: "Dune", issueType: "VIDEO", reportedBy: "alice" });
-  assert.equal(await notifyAdminGrabCompletedPush({ userId: "u-x", title: "Dune", scope: "ALL", issueId: "i1" }), "skipped-no-keys");
+  assert.equal(await notifyAdminGrabCompletedPush({ userId: "u-x", title: "Dune", scope: "ALL", issueId: "i1" }), "skipped-disabled", "push switched off is its own outcome, not a key problem");
 
   assert.equal(subQueries.length, 0);
   assert.equal(userFindUniqueCalls.length, 0);
@@ -988,6 +1078,7 @@ test("feature.integration.push=false short-circuits every notify helper: zero su
 });
 
 test("a subscription-query failure is swallowed into the helper's scoped log — the caller never sees a throw", async () => {
+  subRows = [iosSub("u-admin", "token-admin", { user: ADMIN })]; // a holder, so the device read runs
   subFindManyImpl = async () => {
     throw new Error("pool exhausted");
   };
@@ -998,6 +1089,26 @@ test("a subscription-query failure is swallowed into the helper's scoped log —
   assert.ok(errors[0].includes("[push] Failed to notify admins (request):"), errors[0]);
   assert.ok(errors[0].includes("pool exhausted"));
   assert.equal(fetchUrls.length, 0);
+});
+
+test("batch request-status pushes skip a DISABLED requester on every notifier, available included (guardrail 33)", async () => {
+  userRows = [
+    { id: "u-live", pushOnApproved: true, pushOnDeclined: true, pushOnAvailable: true },
+    { id: "u-gone", pushOnApproved: true, pushOnDeclined: true, pushOnAvailable: true, deactivatedAt: new Date("2026-07-01T00:00:00.000Z") },
+  ];
+  subRows = [iosSub("u-live", "token-live"), iosSub("u-gone", "token-gone")];
+  const batch = [
+    { requestedBy: "u-live", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 },
+    { requestedBy: "u-gone", title: "Andor", mediaType: "TV", tmdbId: 83867 },
+  ];
+
+  await notifyUsersRequestsAvailablePush(batch);
+  await notifyUsersRequestsApprovedPush(batch);
+  await notifyUsersRequestsDeclinedPush(batch);
+
+  for (const call of userFindManyCalls) assert.equal(call.where.deactivatedAt, null, "every pref query filters disabled accounts");
+  assert.deepEqual(relayCalls.map((c) => c.body.deviceToken), ["token-live", "token-live", "token-live"]);
+  assert.deepEqual(errors, []);
 });
 
 test("empty batch input is a TOTAL no-op — not even the feature-flag read happens", async () => {
@@ -1029,12 +1140,16 @@ test("admin pushes go to MANAGE_REQUESTS holders only: ADMIN superbit and raw gr
     excludeUserId: "u-requester",
   });
 
-  // Exact query shape: DB-level exclusion + the role/permissions join the
-  // bitmask filter needs.
+  // Exact query shapes: the users are read first (DB-level exclusion, active
+  // only — disabled accounts keep their PushSubscription rows, guardrail 33),
+  // the bitmask is checked in JS, and only the holders' devices are read.
+  assert.deepEqual(userFindManyCalls[0], {
+    where: { deactivatedAt: null, id: { not: "u-requester" } },
+    select: { id: true, role: true, permissions: true },
+  });
   assert.deepEqual(subQueries[0], {
-    // disabled accounts keep their PushSubscription rows (guardrail 33)
-    where: { user: { deactivatedAt: null }, userId: { not: "u-requester" } },
-    include: { user: { select: { role: true, permissions: true, locale: true } } },
+    where: { userId: { in: ["u-admin", "u-operator"] }, user: { deactivatedAt: null } },
+    include: { user: { select: { locale: true } } },
   });
   assert.deepEqual(
     relayCalls.map((c) => c.body.deviceToken).sort(),
@@ -1045,7 +1160,8 @@ test("admin pushes go to MANAGE_REQUESTS holders only: ADMIN superbit and raw gr
   // — so the previously-excluded admin's device is now included as well.
   relayCalls.length = 0;
   await notifyAdminsDeletionVoteThresholdPush({ title: "Dune", mediaType: "MOVIE", voteCount: 5 });
-  assert.deepEqual(subQueries[1].where, { user: { deactivatedAt: null } });
+  assert.deepEqual(userFindManyCalls[1].where, { deactivatedAt: null });
+  assert.deepEqual(subQueries[1].where, { userId: { in: ["u-admin", "u-operator", "u-requester"] }, user: { deactivatedAt: null } });
   assert.deepEqual(
     relayCalls.map((c) => c.body.deviceToken).sort(),
     ["token-raw-grant", "token-role-admin", "token-self"],
@@ -1097,9 +1213,13 @@ test("issue pushes: notifyOnIssue rides the where clause, MANAGE_ISSUES the bitm
 
   await notifyAdminsNewIssuePush({ title: "Dune", issueType: "VIDEO", reportedBy: "alice", excludeUserId: "u-rep" });
 
+  assert.deepEqual(userFindManyCalls[0], {
+    where: { deactivatedAt: null, notifyOnIssue: true, id: { not: "u-rep" } },
+    select: { id: true, role: true, permissions: true },
+  });
   assert.deepEqual(subQueries[0], {
-    where: { userId: { not: "u-rep" }, user: { notifyOnIssue: true, deactivatedAt: null } },
-    include: { user: { select: { role: true, permissions: true, locale: true } } },
+    where: { userId: { in: ["u-ia", "u-adm"] }, user: { deactivatedAt: null } },
+    include: { user: { select: { locale: true } } },
   });
   assert.deepEqual(
     relayCalls.map((c) => c.body.deviceToken).sort(),
@@ -1123,7 +1243,8 @@ test("issue pushes: notifyOnIssue rides the where clause, MANAGE_ISSUES the bitm
 
   // restrictToUserId alone narrows the where to exactly that user.
   await notifyAdminsIssueMessagePush({ title: "Dune", userName: "alice", body: "hi", restrictToUserId: "u-ia" });
-  assert.deepEqual(subQueries.at(-1)?.where, { userId: "u-ia", user: { notifyOnIssue: true, deactivatedAt: null } });
+  assert.deepEqual(userFindManyCalls.at(-1)?.where, { deactivatedAt: null, notifyOnIssue: true, id: "u-ia" });
+  assert.deepEqual(subQueries.at(-1)?.where, { userId: { in: ["u-ia"] }, user: { deactivatedAt: null } });
   assert.deepEqual(relayCalls.map((c) => c.body.deviceToken), ["token-issue-admin-on"]);
 });
 
@@ -1132,14 +1253,18 @@ test("per-user pref gates read exactly their column and stop BEFORE the subscrip
   subRows = [iosSub("u-pref", "token-pref")];
 
   // pushOnApproved=false: the pref read happens, the subscription read doesn't.
-  await notifyUserRequestApprovedPush({ userId: "u-pref", title: "Dune", mediaType: "MOVIE" });
-  assert.deepEqual(userFindUniqueCalls[0], { where: { id: "u-pref" }, select: { pushOnApproved: true, locale: true } });
+  await approvedPushFor({ userId: "u-pref", title: "Dune", mediaType: "MOVIE" });
+  assert.deepEqual(userFindManyCalls[0], {
+    where: { id: { in: ["u-pref"] }, pushOnApproved: true, deactivatedAt: null },
+    select: { id: true, locale: true },
+  });
   assert.equal(subQueries.length, 0);
   assert.equal(fetchUrls.length, 0);
 
   // pushOnDeclined=true: its own column is read and the push goes out.
-  await notifyUserRequestDeclinedPush({ userId: "u-pref", title: "Dune", mediaType: "MOVIE" });
-  assert.deepEqual(userFindUniqueCalls[1].select, { pushOnDeclined: true, locale: true });
+  await declinedPushFor({ userId: "u-pref", title: "Dune", mediaType: "MOVIE" });
+  assert.deepEqual(userFindManyCalls[1].where, { id: { in: ["u-pref"] }, pushOnDeclined: true, deactivatedAt: null });
+  assert.equal(userFindUniqueCalls.length, 0, "no per-user findUnique read is left");
   assert.equal(subQueries.length, 1);
   assert.deepEqual(relayCalls.map((c) => c.body.deviceToken), ["token-pref"]);
   assert.equal(relayCalls[0].body.collapseId, "declined");
@@ -1193,10 +1318,11 @@ test("available batch: deduped pref query, ALL of an eligible user's devices per
     { requestedBy: "u3", title: "Alien", mediaType: "MOVIE" },
   ]);
 
-  // One pref query over the UNIQUE requester ids, selecting only ids.
+  // One pref query over the UNIQUE requester ids, selecting only ids — disabled
+  // accounts filtered like the approved/declined batches (guardrail 33).
   assert.equal(userFindManyCalls.length, 1);
   assert.deepEqual(userFindManyCalls[0], {
-    where: { id: { in: ["u1", "u2", "u3"] }, pushOnAvailable: true },
+    where: { id: { in: ["u1", "u2", "u3"] }, pushOnAvailable: true, deactivatedAt: null },
     select: { id: true, locale: true },
   });
   // One subscription query over the eligible users only.
@@ -1335,4 +1461,30 @@ test("buildVapidContact passes a bare address through and falls back sensibly", 
   assert.equal(buildVapidContact(null, "user@host.tld"), "mailto:user@host.tld", "smtpUser is the second choice");
   assert.equal(buildVapidContact(null, null), "mailto:admin@localhost");
   assert.equal(buildVapidContact("", ""), "mailto:admin@localhost");
+});
+
+test("process-wide relay cache (guardrail 27a): an invalidation in one chunk's copy reaches the copy a sender reads", async () => {
+  subRows = [iosSub("u-chunk", "token-chunk")];
+  let relayReads = 0;
+  settingFindManyHook = async (keys) => {
+    if (keys.includes("apnsRelayUrl")) relayReads++;
+  };
+  const otherSpecifier = "../src/lib/push.ts?chunk=settings-route";
+  const other: typeof import("../src/lib/push.ts") = await import(otherSpecifier);
+  assert.notEqual(other.invalidateApnsRelayCache, invalidateApnsRelayCache, "a distinct module instance");
+  await sendApnsTestToUser("u-chunk"); // warms the cache
+  const warm = relayReads;
+  await sendApnsTestToUser("u-chunk");
+  assert.equal(relayReads, warm, "the cached config is reused");
+  other.invalidateApnsRelayCache(); // the settings route's copy
+  await sendApnsTestToUser("u-chunk");
+  assert.equal(relayReads, warm + 1, "the sender's copy re-read the config after the other copy invalidated it");
+});
+
+test("a relay error body with non-string fields is read as no detail, never printed as [object Object]", async () => {
+  subRows = [iosSub("u-odd", "token-odd")];
+  relayRespond = () => jsonResponse({ error: { nested: true }, reason: 42 }, 400);
+  await sendApnsTestToUser("u-odd");
+  assert.ok(errors.some((e) => e.includes("APNs relay rejected the payload (400: no error given)")), errors.join("\n"));
+  assert.ok(!errors.some((e) => e.includes("[object Object]")));
 });

@@ -31,6 +31,15 @@ const COLOR_LIT = String.raw`(?:#|color:|(?:rgba?|hsla?|hwb|oklch|oklab|lab|lch|
 // literal, a paren only with a `color:` hint. Everything else — a var(), a full
 // shadow — is the shadow itself.
 const SHADOW_ARB = String.raw`\[(?!${COLOR_LIT})|\((?!color:)`;
+// A gradient stop's POSITION (from-/via-/to-): a length, a percentage, a
+// length-valued function, or a `length:`/`percentage:` hint. Any other bracket
+// or paren value — a hex, a var(), a bare number — is the stop's COLOUR.
+const POSITION_ARB = String.raw`\[(?:length:|percentage:|-?(?:calc|clamp|min|max)\(|${LEN}\]|-?\d*\.?\d+%\])|\((?:length|percentage):`;
+// A background IMAGE: an image function, or an `image:`/`url:` hint. Without
+// it an arbitrary url background fell into the bg colour catch-all beside
+// `bg-zinc-900`. (Never spell such a class out in a comment: Tailwind scans
+// this file and emits a url() rule the CSS bundler then tries to resolve.)
+const IMAGE_ARB = String.raw`\[(?:url|image|image-set|cross-fade|element|(?:repeating-)?(?:linear|radial|conic)-gradient)\(|\[(?:image|url):|\((?:image|url):`;
 const rx = (source: string) => new RegExp(source);
 
 const GROUPS: Array<readonly [string, RegExp]> = [
@@ -144,8 +153,13 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["auto-rows", /^auto-rows-/],
   // grid-column, grid-column-start and grid-column-end are three properties; one
   // shared group made a start/end pair annihilate itself. Cross-group conflicts
-  // are not modelled (the shorthand does not evict a preceding start/end) —
-  // that leaves a redundant class, never a dropped one. See the PIN test.
+  // are not modelled anywhere in this table: a shorthand never evicts a longhand
+  // (col-span vs col-start, p vs px, m vs mx, size vs w/h, inset vs top, rounded
+  // vs rounded-t, border vs border-t, overflow vs overflow-x). Both classes stay,
+  // and the surviving LONGHAND is not redundant: Tailwind emits every shorthand
+  // before its longhands, so it wins whatever the class order. A caller
+  // overriding a longhand must use the same longhand (`px-0` over a Button's
+  // `px-2.5`, never `p-0`). See the PIN test.
   ["col-span", /^col-(?:span-|auto$)/],
   ["col-start", /^-?col-start-/],
   ["col-end", /^-?col-end-/],
@@ -219,14 +233,16 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   // Tailwind v4 renamed bg-gradient-* to bg-linear-* and added bg-radial /
   // bg-conic; unrecognised, the new spellings fell into the bg colour catch-all.
   // radial/conic need no trailing dash — both are valid bare utilities.
-  ["bg-image", /^-?bg-(?:none|gradient-|linear-|radial|conic)/],
+  ["bg-image", rx(String.raw`^-?bg-(?:none|gradient-|linear-|radial|conic|${IMAGE_ARB})`)],
   ["bg-blend", /^bg-blend-/],
-  // Gradient stops: each of from/via/to carries a colour AND a position.
-  ["from-pos", /^from-(?:\d+%|\[)/],
+  // Gradient stops: each of from/via/to carries a colour AND a position. An
+  // arbitrary value is a position only when position-shaped (POSITION_ARB):
+  // filing every bracket as a position made `from-[#123] from-10%` drop the colour.
+  ["from-pos", rx(String.raw`^from-(?:\d+%|${POSITION_ARB})`)],
   ["from", /^from-/],
-  ["via-pos", /^via-(?:\d+%|\[)/],
+  ["via-pos", rx(String.raw`^via-(?:\d+%|${POSITION_ARB})`)],
   ["via", /^via-/],
-  ["to-pos", /^to-(?:\d+%|\[)/],
+  ["to-pos", rx(String.raw`^to-(?:\d+%|${POSITION_ARB})`)],
   ["to", /^to-/],
   ["bg-clip", /^bg-clip-/],
   ["bg-origin", /^bg-origin-/],
@@ -395,8 +411,6 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["stroke", /^stroke-/],
 ];
 
-const VARIANT_RE = /^([a-z0-9-]+(?:\/[a-zA-Z0-9_-]+)?|\[[^\]]+\]|aria-\[[^\]]+\]|data-\[[^\]]+\]|group-[a-z0-9-]+(?:\/[a-zA-Z0-9_-]+)?|peer-[a-z0-9-]+(?:\/[a-zA-Z0-9_-]+)?|has-\[[^\]]+\]|not-\[[^\]]+\]|in-[a-z0-9-]+|in-data-\[[^\]]+\]|in-aria-\[[^\]]+\]|in-has-\[[^\]]+\]|supports-\[[^\]]+\]|max-[a-z0-9-]+|min-[a-z0-9-]+):/;
-
 interface Parsed {
   full: string;
   variants: string;
@@ -404,19 +418,39 @@ interface Parsed {
   important: boolean;
 }
 
-function parseToken(raw: string): Parsed {
-  let rest = raw;
-  let variants = "";
-  // Strip off every leading variant prefix (e.g. `dark:hover:`).
-  while (true) {
-    const m = rest.match(VARIANT_RE);
-    if (!m) break;
-    variants += m[0];
-    rest = rest.slice(m[0].length);
+// The variant prefix is everything up to the LAST top-level `:` — one outside
+// `[…]` and `(…)`, so a colon inside an arbitrary value or variant
+// (`supports-[display:grid]:`, or an arbitrary url background) never splits it. That
+// takes every variant shape Tailwind has (has-data-[…]:, not-aria-[…]:,
+// group-data-[…]/name:, *:, **:, @md:) without a whitelist; the old one missed
+// those, so the whole token became its own group and a same-variant override
+// never merged. Variant ORDER is kept as written (see the PIN test).
+function splitVariants(raw: string): { variants: string; rest: string } {
+  let depth = 0;
+  let cut = -1;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (c === "[" || c === "(") depth++;
+    else if ((c === "]" || c === ")") && depth > 0) depth--;
+    else if (c === ":" && depth === 0) cut = i;
   }
-  const important = rest.endsWith("!");
-  const base = important ? rest.slice(0, -1) : rest;
+  return { variants: raw.slice(0, cut + 1), rest: raw.slice(cut + 1) };
+}
+
+function parseToken(raw: string): Parsed {
+  const { variants, rest } = splitVariants(raw);
+  // Important is `!` at either end of the utility: v4's `p-2!` or the
+  // leading `!p-2` form Tailwind still accepts.
+  const important = rest.startsWith("!") || rest.endsWith("!");
+  const base = rest.startsWith("!") ? rest.slice(1) : rest.endsWith("!") ? rest.slice(0, -1) : rest;
   return { full: raw, variants, base, important };
+}
+
+/** The utility a class token names, variants and `!` stripped — the string
+ *  the GROUPS table classifies. Exported so the auditor reads src/ tokens with
+ *  the same parse twMerge uses. */
+export function utilityBase(token: string): string {
+  return parseToken(token).base;
 }
 
 /**
@@ -435,8 +469,23 @@ export function matchGroup(base: string): string | null {
   return null;
 }
 
+// groupOf is on the cn() hot path (every render of every ui primitive) and
+// matchGroup is a linear first-match scan over GROUPS, so the answer is
+// memoised per utility. The set of utilities an app uses is small and fixed,
+// so the bound (cleared wholesale when full) is only a guard against a stream
+// of unique arbitrary values. matchGroup itself stays un-memoised: the auditor
+// relies on its null-vs-group answer, not groupOf's fallback.
+const GROUP_MEMO_MAX = 2_000;
+const groupMemo = new Map<string, string>();
+
 function groupOf(base: string): string {
-  return matchGroup(base) ?? base;
+  let group = groupMemo.get(base);
+  if (group === undefined) {
+    if (groupMemo.size >= GROUP_MEMO_MAX) groupMemo.clear();
+    group = matchGroup(base) ?? base;
+    groupMemo.set(base, group);
+  }
+  return group;
 }
 
 export function twMerge(input: string): string {
@@ -444,12 +493,10 @@ export function twMerge(input: string): string {
   const tokens = input.split(/\s+/).filter(Boolean);
   const lastIdx = new Map<string, number>();
   const parsed: Parsed[] = new Array(tokens.length);
-  // The merge key is computed ONCE per token and kept for the emit pass.
-  // `groupOf` is a linear first-match scan over the whole GROUPS regex table
-  // (an unmatched class pays every entry), and this is the `cn()` hot path on
-  // every render of every ui primitive — recomputing the identical key in the
-  // second loop doubled that work for no output change. tests/tw-merge.test.mts
-  // pins the single-scan-per-token count.
+  // The merge key is computed ONCE per token and kept for the emit pass: even
+  // with groupOf memoised, recomputing the identical key in the second loop
+  // would be wasted work on the `cn()` hot path. tests/tw-merge.test.mts pins
+  // the scan counts.
   const keys: string[] = new Array(tokens.length);
 
   for (let i = 0; i < tokens.length; i++) {

@@ -19,7 +19,8 @@
 //   folder's Radarr/Sonarr title. One shared id is agreement — two TMDB entries
 //   for one film (Plex's conflated guids) are not this check's business.
 // - "yearMismatch" only where no Radarr/Sonarr manages the folder, only from a
-//   "Name (YYYY)" folder, and only beyond TWO years either way: a festival
+//   folder that states its year ("Name (YYYY)", "Name (YYYY) {tmdb-…}"), and
+//   only beyond TWO years either way: a festival
 //   premiere and the wide release routinely sit two years apart, and on a real
 //   9,134-movie library a one-year tolerance flagged 11 such films beside ~30
 //   genuine wrong matches. It has no suggestion, so it is never offered a fix.
@@ -29,6 +30,8 @@
 //   the folder's title would make a bogus second copy.
 // - Two Radarr/Sonarr entries for one folder name that share no id (two
 //   instances that disagree) leave that folder unjudged.
+
+import { isMediaFileName } from "./library-paths";
 
 export type MatchServer = "plex" | "jellyfin";
 export type MatchMediaType = "MOVIE" | "TV";
@@ -120,28 +123,37 @@ function segments(path: string): string[] {
   return path.replace(/\\/g, "/").split("/").filter(Boolean);
 }
 
-const FILE_RE = /\.[A-Za-z0-9]{1,5}$/;
+// A show's path is always a folder (a Jellyfin series, a Plex show's
+// Location); a movie's is a file when it ends in a video extension — a BDMV/DVD
+// movie folder, or a dotted name like "M.A.S.H", is still a folder.
+function isFilePath(last: string, mediaType: MatchMediaType | undefined): boolean {
+  return mediaType !== "TV" && isMediaFileName(last);
+}
 
 /** The item's own folder: a file's parent, or the path itself when it is a folder. */
-export function ownFolder(path: string | null): string | null {
+export function ownFolder(path: string | null, mediaType?: MatchMediaType): string | null {
   if (!path) return null;
   const segs = segments(path);
   const last = segs[segs.length - 1];
   if (last === undefined) return null;
-  if (FILE_RE.test(last)) return segs.length >= 2 ? segs[segs.length - 2] : null;
+  if (isFilePath(last, mediaType)) return segs.length >= 2 ? segs[segs.length - 2] : null;
   return last;
 }
 
 /** The file name when the path is a file, else null. */
-export function fileName(path: string | null): string | null {
+export function fileName(path: string | null, mediaType?: MatchMediaType): string | null {
   const last = path ? segments(path).pop() : undefined;
-  return last !== undefined && FILE_RE.test(last) ? last : null;
+  return last !== undefined && isFilePath(last, mediaType) ? last : null;
 }
 
-/** The year a "Name (YYYY)" folder states, else null. */
+/**
+ * The year one folder name states: a trailing "(YYYY)" first, else a "(YYYY)"
+ * anywhere in it ("Film (2017) {tmdb-123}", Radarr's id-tagged layout). The
+ * library diff reads folder years through this too, so both screens agree.
+ */
 export function folderYear(folder: string | null): number | null {
   if (!folder) return null;
-  const m = /\((\d{4})\)\s*$/.exec(folder);
+  const m = /\((\d{4})\)\s*$/.exec(folder) ?? /\((\d{4})\)/.exec(folder);
   return m ? Number(m[1]) : null;
 }
 
@@ -198,82 +210,113 @@ export const YEAR_TOLERANCE = 2;
 
 const KIND_ORDER: Record<MatchFlagKind, number> = { wrongMatch: 0, noTmdbId: 1, yearMismatch: 2 };
 
-/** Judge every listed item against Radarr/Sonarr's folders. */
+// Within a kind: the ones a fix is offered for, then the ones with no
+// suggestion, then the extras.
+const flagRank = (f: MatchFlag) => (f.sibling ? 2 : f.arr?.tmdbId != null ? 0 : 1);
+
+/**
+ * The order flags are listed and stored in. A Sonarr suggestion resolved from
+ * its TVDB id AFTER judging changes a flag's rank, so the stored list is sorted
+ * again with this same rule.
+ */
+export function compareMatchFlags(x: MatchFlag, y: MatchFlag): number {
+  return KIND_ORDER[x.kind] - KIND_ORDER[y.kind]
+    || flagRank(x) - flagRank(y)
+    || (x.title ?? x.folder ?? "").localeCompare(y.title ?? y.folder ?? "");
+}
+
+/** One item's verdict: the folder it was judged by, its referee, and its flag kind (null = no flag). */
+interface Judged {
+  entry: ServerMatchEntry;
+  folder: string | null;
+  arr: ArrMatchEntry | null;
+  kind: MatchFlagKind | null;
+  /** Radarr/Sonarr manage the folder and agree with this item. */
+  agreed: boolean;
+}
+
+/** Judge one item against the folder index of its media type. */
+function judgeEntry(entry: ServerMatchEntry, index: Map<string, ArrMatchEntry>): Judged {
+  const placed = entry.tmdbIds.length > 0 || entry.legacyPlaced === true;
+  const hit = arrFolderOf(entry.path, index);
+  if (hit) {
+    const base = { entry, folder: hit.folder, arr: hit.arr };
+    if (agreesWithArr(entry, hit.arr)) {
+      // Unplaced: the server knows it (by IMDb/TVDB) but the sync can't place it without a TMDB id.
+      return placed ? { ...base, kind: null, agreed: true } : { ...base, kind: "noTmdbId", agreed: false };
+    }
+    const hasIds = entry.tmdbIds.length > 0 || entry.imdbId !== null || entry.tvdbId !== null;
+    return { ...base, kind: hasIds ? "wrongMatch" : "noTmdbId", agreed: false };
+  }
+  // No Radarr/Sonarr manages the folder: only the year it states can speak.
+  const folder = ownFolder(entry.path, entry.mediaType);
+  if (!placed) return { entry, folder, arr: null, kind: "noTmdbId", agreed: false };
+  const stated = folderYear(folder);
+  const off = stated !== null && entry.year !== null && Math.abs(stated - entry.year) > YEAR_TOLERANCE;
+  return { entry, folder, arr: null, kind: off ? "yearMismatch" : null, agreed: false };
+}
+
+const folderGroup = (e: ServerMatchEntry, folder: string) =>
+  `${e.server}\u0000${e.serverInstance}\u0000${e.mediaType}\u0000${folderKey(folder)}`;
+
+function toFlag(j: Judged & { kind: MatchFlagKind }, agreeingFolders: Set<string>): MatchFlag {
+  const { entry, folder, arr: a, kind } = j;
+  return {
+    kind,
+    server: entry.server,
+    serverInstance: entry.serverInstance,
+    mediaType: entry.mediaType,
+    itemKey: entry.itemKey,
+    title: entry.title,
+    year: entry.year,
+    folder,
+    file: fileName(entry.path, entry.mediaType),
+    path: entry.path,
+    serverTmdbId: entry.tmdbIds[0] ?? null,
+    arr: a ? { service: a.service, instance: a.instance, tmdbId: a.tmdbId, tvdbId: a.tvdbId, title: a.title, year: a.year } : null,
+    sibling: a !== null && folder !== null && agreeingFolders.has(folderGroup(entry, folder)),
+  };
+}
+
+/**
+ * Judge every listed item against Radarr/Sonarr's folders. Two passes: the
+ * second needs every folder where SOME item agrees (an extra beside it is a
+ * sibling, never a fix).
+ */
 export function judgeLibraryMatches(
   entries: ServerMatchEntry[],
   arr: ArrMatchEntry[],
 ): { flags: MatchFlag[]; counts: MatchCounts } {
   const index = indexArrFolders(arr);
   const counts: MatchCounts = { checked: 0, agreed: 0, notManaged: 0, flagged: 0 };
-  type Judged = { entry: ServerMatchEntry; folder: string | null; arr: ArrMatchEntry | null; kind: MatchFlagKind | null };
   const judged: Judged[] = [];
   // Folders where at least one item agrees with Radarr/Sonarr, per server.
   const agreeingFolders = new Set<string>();
-  const groupOf = (e: ServerMatchEntry, folder: string) => `${e.server}\u0000${e.serverInstance}\u0000${e.mediaType}\u0000${folderKey(folder)}`;
-
   for (const entry of entries) {
+    const j = judgeEntry(entry, index.get(entry.mediaType)!);
     counts.checked++;
-    const placed = entry.tmdbIds.length > 0 || entry.legacyPlaced === true;
-    const hit = arrFolderOf(entry.path, index.get(entry.mediaType)!);
-    if (hit) {
-      if (agreesWithArr(entry, hit.arr)) {
-        if (placed) {
-          counts.agreed++;
-          agreeingFolders.add(groupOf(entry, hit.folder));
-          judged.push({ entry, folder: hit.folder, arr: hit.arr, kind: null });
-        } else {
-          // The server knows it (by IMDb/TVDB) but the sync can't place it without a TMDB id.
-          judged.push({ entry, folder: hit.folder, arr: hit.arr, kind: "noTmdbId" });
-        }
-      } else {
-        const hasIds = entry.tmdbIds.length > 0 || entry.imdbId !== null || entry.tvdbId !== null;
-        judged.push({ entry, folder: hit.folder, arr: hit.arr, kind: hasIds ? "wrongMatch" : "noTmdbId" });
-      }
-      continue;
+    if (j.arr === null) counts.notManaged++;
+    if (j.agreed && j.folder !== null) {
+      counts.agreed++;
+      agreeingFolders.add(folderGroup(entry, j.folder));
     }
-    counts.notManaged++;
-    const folder = ownFolder(entry.path);
-    if (!placed) {
-      judged.push({ entry, folder, arr: null, kind: "noTmdbId" });
-      continue;
-    }
-    const stated = folderYear(folder);
-    const off = stated !== null && entry.year !== null && Math.abs(stated - entry.year) > YEAR_TOLERANCE;
-    judged.push({ entry, folder, arr: null, kind: off ? "yearMismatch" : null });
+    judged.push(j);
   }
 
   const flags: MatchFlag[] = [];
-  for (const { entry, folder, arr: a, kind } of judged) {
-    if (kind === null) continue;
-    flags.push({
-      kind,
-      server: entry.server,
-      serverInstance: entry.serverInstance,
-      mediaType: entry.mediaType,
-      itemKey: entry.itemKey,
-      title: entry.title,
-      year: entry.year,
-      folder,
-      file: fileName(entry.path),
-      path: entry.path,
-      serverTmdbId: entry.tmdbIds[0] ?? null,
-      arr: a ? { service: a.service, instance: a.instance, tmdbId: a.tmdbId, tvdbId: a.tvdbId, title: a.title, year: a.year } : null,
-      sibling: a !== null && folder !== null && agreeingFolders.has(groupOf(entry, folder)),
-    });
+  for (const j of judged) {
+    if (j.kind !== null) flags.push(toFlag({ ...j, kind: j.kind }, agreeingFolders));
   }
   counts.flagged = flags.length;
-  // Within a kind: the ones a fix is offered for, then the ones with no
-  // suggestion, then the extras.
-  const rank = (f: MatchFlag) => (f.sibling ? 2 : f.arr?.tmdbId != null ? 0 : 1);
-  flags.sort((x, y) =>
-    KIND_ORDER[x.kind] - KIND_ORDER[y.kind]
-    || rank(x) - rank(y)
-    || (x.title ?? x.folder ?? "").localeCompare(y.title ?? y.folder ?? ""));
+  flags.sort(compareMatchFlags);
   return { flags, counts };
 }
 
-/** A flag the UI may offer to fix: Radarr/Sonarr name a TMDB id, and it is not an extra in a matched folder. */
-export function fixableFlag(flag: MatchFlag): flag is MatchFlag & { arr: MatchFlagArr & { tmdbId: number } } {
+/**
+ * A flag the UI may offer to fix: Radarr/Sonarr name a TMDB id, and it is not an extra in a matched folder.
+ * Generic over the flag, so the page's path-less copy (Omit<MatchFlag, "path">) narrows as itself.
+ */
+export function fixableFlag<F extends Omit<MatchFlag, "path">>(flag: F): flag is F & { arr: MatchFlagArr & { tmdbId: number } } {
   return flag.arr !== null && flag.arr.tmdbId !== null && !flag.sibling && flag.kind !== "yearMismatch"
     && flag.arr.tmdbId !== flag.serverTmdbId;
 }

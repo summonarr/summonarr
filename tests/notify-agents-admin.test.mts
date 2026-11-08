@@ -6,7 +6,6 @@
 // intercepted (the same three angles as tests/mfa-prisma-extension.test.mts).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 
 process.env.TOKEN_ENCRYPTION_KEY = "ef".repeat(32);
 process.env.DATABASE_URL = "postgresql://u:p@127.0.0.1:1/none";
@@ -16,7 +15,6 @@ console.error = (...a: unknown[]) => { errors.push(a.map(String).join(" ")); };
 
 const { prisma, encryptAgentSecretInPlace, decryptAgentSecretInPlace } = await import("../src/lib/prisma.ts");
 const { parseAgentInput, toPublicAgent, AGENT_BODY_CAP } = await import("../src/lib/notify-agents-admin.ts");
-const SOURCE = readFileSync(new URL("../src/lib/prisma.ts", import.meta.url), "utf8");
 
 const WEBHOOK = { kind: "webhook", name: "Hook", events: ["request.created"], config: { url: "https://h.example/x" } };
 
@@ -43,6 +41,14 @@ test("gotify cannot be created, or edited, without an application token", () => 
   // guard above would wave through (every delivery then goes out without X-Gotify-Key).
   assert.deepEqual(parseAgentInput({ ...g, secret: "   " }, null), { ok: false, error: "gotifyToken" });
   assert.deepEqual(parseAgentInput({ secret: "   " }, existing), { ok: false, error: "gotifyToken" });
+});
+
+test("gotify: a stored channel with no token can't be edited while enabled without one, but can be switched off", () => {
+  const tokenless = { kind: "gotify", name: "G", enabled: true, events: [], config: { url: "https://g.example/" }, secret: null };
+  assert.deepEqual(parseAgentInput({ name: "G2" }, tokenless), { ok: false, error: "gotifyToken" });
+  assert.ok(parseAgentInput({ enabled: false }, tokenless).ok, "switching a broken channel off needs no token");
+  assert.ok(parseAgentInput({ secret: "tok" }, tokenless).ok);
+  assert.ok(parseAgentInput({ name: "G2" }, { ...tokenless, secret: "stored" }).ok, "a stored token is kept");
 });
 
 test("edit: the kind is fixed, omitted fields keep their stored value, secret is tri-state", () => {
@@ -83,39 +89,23 @@ test("the wire shape carries hasSecret, never the secret", () => {
 
 // ── guardrail 7a: NotificationAgent.secret ──────────────────────────────────
 
-function segment(): string {
-  const q = SOURCE.slice(SOURCE.indexOf("query: {"));
-  const start = q.indexOf("      notificationAgent: {");
-  assert.ok(start >= 0, "the extension declares no notificationAgent block");
-  return q.slice(start, q.indexOf("\n      },", start));
-}
-const handled = () => [...segment().matchAll(/^\s{8}async (\w+)\(/gm)].map((m) => m[1]);
-function body(op: string): string {
-  const seg = segment();
-  const s = seg.indexOf(`        async ${op}(`);
-  return seg.slice(s, seg.indexOf("\n        },", s));
-}
+const { cryptoQueryExtension } = await import("../src/lib/prisma-crypto.ts");
+const H = await import("./_crypto-handlers.mts");
+const AGENT_HANDLERS = cryptoQueryExtension.notificationAgent;
 
 test("every operation that can surface or write NotificationAgent.secret is intercepted", () => {
   const META = new Set(["fields", "name", "$name", "$parent"]);
   const real = Object.keys(prisma.notificationAgent as object).filter((k) => !META.has(k));
   assert.ok(real.length >= 15, "operation enumeration is broken");
-  const h = new Set(handled());
+  const h = new Set(Object.keys(AGENT_HANDLERS));
   assert.deepEqual([...h].filter((op) => !real.includes(op)), []);
   assert.deepEqual(real.filter((op) => !h.has(op)).sort(), ["aggregate", "aggregateRaw", "count", "deleteMany", "findRaw", "groupBy"].sort());
 });
 
-test("read handlers decrypt; write handlers encrypt", () => {
-  for (const op of ["findUnique", "findFirst", "findUniqueOrThrow", "findFirstOrThrow", "findMany", "delete", "createManyAndReturn", "updateManyAndReturn"]) {
-    assert.ok(body(op).includes("decryptAgentSecretInPlace"), `${op} returns rows without decrypting them`);
-  }
-  for (const op of ["create", "update", "upsert", "updateMany", "createMany", "updateManyAndReturn", "createManyAndReturn"]) {
-    assert.match(body(op), /encryptAgent(SecretInPlace|RowsInPlace)/, `${op} writes the secret in plaintext`);
-  }
-  // upsert carries TWO write payloads. One encrypt call satisfies the loop above
-  // while the other branch stores plaintext — pin each argument by name.
-  assert.match(body("upsert"), /encryptAgentSecretInPlace\(args\.create\b/, "upsert's create branch writes the secret in plaintext");
-  assert.match(body("upsert"), /encryptAgentSecretInPlace\(args\.update\b/, "upsert's update branch writes the secret in plaintext");
+test("read handlers decrypt; write handlers encrypt — both upsert branches included", async () => {
+  await H.assertReadsDecrypt(AGENT_HANDLERS, "secret", (c) => ({ id: "a1", secret: c }));
+  await H.assertSingleWritesEncrypt(AGENT_HANDLERS, "secret", (value) => ({ id: "a1", secret: value }), { id: "a1" });
+  await H.assertBulkWritesEncrypt(AGENT_HANDLERS, "secret");
 });
 
 test("round-trip: a written secret is enc:v1 ciphertext and reads back as the plaintext", () => {

@@ -15,9 +15,10 @@
  * order (decades are listed by decade, not by count) survives. Only when the
  * input was already count-descending is the result re-sorted that way (stably),
  * since a merged item can outgrow the ones above it. No duplicate ⇒ the input
- * array itself is returned; inputs are never mutated.
+ * array itself is returned (typed readonly, so a caller can't sort or push onto
+ * its own input through the result); inputs are never mutated.
  */
-export function foldBarItems<T extends { label: string; count: number }>(items: readonly T[]): T[] {
+export function foldBarItems<T extends { label: string; count: number }>(items: readonly T[]): readonly T[] {
   const index = new Map<string, number>();
   const out: T[] = [];
   let merged = false;
@@ -31,7 +32,7 @@ export function foldBarItems<T extends { label: string; count: number }>(items: 
     merged = true;
     out[at] = { ...out[at], count: out[at].count + it.count };
   }
-  if (!merged) return items as T[];
+  if (!merged) return items;
   const wasDescending = items.every((it, i) => i === 0 || items[i - 1].count >= it.count);
   return wasDescending ? out.sort((a, b) => b.count - a.count) : out;
 }

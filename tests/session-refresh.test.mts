@@ -94,7 +94,7 @@ const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { verifyAndRefreshSession } = await import("../src/lib/session-refresh.ts");
-const { invalidateCachedSessionChecks, markSessionForceRevoked } = await import("../src/lib/session-revocation.ts");
+const { invalidateCachedSessionChecks, markSessionForceRevoked, markUserForceRevalidate } = await import("../src/lib/session-revocation.ts");
 const { NEVER_EXPIRES_AT_SEC } = await import("../src/lib/session-lifetime.ts");
 const { Permission, PRESETS } = await import("../src/lib/permissions.ts");
 
@@ -466,6 +466,58 @@ test("the cache window is deliberately blind to a revocation — and markSession
   const after = await verifyAndRefreshSession(token, COOKIE);
   assert.equal(after, null, "a locally-marked session must be re-checked and rejected");
   assert.ok(dbReads > 0, "the mark must force the DB read despite the fresh dbCheckedAt");
+});
+
+test("a user mark forces every token checked before it, on every presentation, and stops at the token re-signed after it", async () => {
+  // markUserForceRevalidate runs after every role/permission edit, and the user
+  // usually stays active. The mark used to force EVERY request of theirs to the
+  // DB for the life of the process; it now forces only tokens whose last check
+  // is not later than the mark. jose reads `new Date()`, so the whole Date class
+  // is faked to step the clock past the mark's second.
+  const RealDate = Date;
+  let fakeNowMs = RealDate.now();
+  class FakeDate extends RealDate {
+    constructor(...args: unknown[]) {
+      if (args.length === 0) super(fakeNowMs);
+      else super(...(args as [number]));
+    }
+    static now(): number {
+      return fakeNowMs;
+    }
+  }
+  globalThis.Date = FakeDate as unknown as DateConstructor;
+  try {
+    const t0 = Math.floor(fakeNowMs / 1000);
+    const { userId, token } = await mint({ dbCheckedAt: t0 - 5 }); // inside the 60s window
+    markUserForceRevalidate(userId);
+
+    // The pre-mark token is forced to the DB — and stays forced on a replay.
+    const first = await verifyAndRefreshSession(token, COOKIE);
+    assert.ok(first?.refreshed);
+    assert.ok(dbReads > 0, "the mark must force the DB read despite the fresh dbCheckedAt");
+    const readsAfterFirst = dbReads;
+    assert.ok(await verifyAndRefreshSession(token, COOKIE));
+    assert.ok(dbReads > readsAfterFirst, "a mark is never consumed on read: a replayed pre-mark token goes to the DB again");
+
+    // A token re-signed in the mark's own second may have read the row before
+    // the write, so it is still forced (`<=`).
+    const sameSecond = first.refreshed.token;
+    assert.equal(decodePayload(sameSecond).dbCheckedAt, t0);
+    fakeNowMs = (t0 + 2) * 1000;
+    const readsBefore = dbReads;
+    const second = await verifyAndRefreshSession(sameSecond, COOKIE);
+    assert.ok(second?.refreshed);
+    assert.ok(dbReads > readsBefore, "a token checked in the mark's second is still forced");
+
+    // The token re-signed after the mark rides the fast path again.
+    assert.equal(decodePayload(second.refreshed.token).dbCheckedAt, t0 + 2);
+    throwOnDb = true;
+    const fast = await verifyAndRefreshSession(second.refreshed.token, COOKIE);
+    assert.ok(fast, "a check made after the mark must not be forced again");
+    assert.equal(fast.refreshed, undefined, "the fast path does not re-sign");
+  } finally {
+    globalThis.Date = RealDate;
+  }
 });
 
 test("a restore's check floor closes the dbCheckedAt window for every cookie, not one user", async () => {
@@ -1029,4 +1081,30 @@ test("ACCEPTED TRADE-OFF: membership on ANY instance keeps a plex session — ev
     0,
     "no instance fetch may have failed — the survival must come from the union, not a poisoned fail-open",
   );
+});
+
+test("resignLifetimeSeconds: the deadline decides; a legacy token without one keeps its own exp as a hard ceiling", async () => {
+  const { resignLifetimeSeconds } = await import("../src/lib/session-refresh.ts");
+  const now = 1_000_000;
+  assert.equal(resignLifetimeSeconds({ expiresAt: now + 600, exp: now + 30 }, now), 600);
+  assert.equal(resignLifetimeSeconds({ expiresAt: now, exp: now + 30 }, now), null);
+  // No deadline claim: the remaining exp, never extended — a token with 10s
+  // left is re-signed with 10s, not lifted back up to a floor.
+  assert.equal(resignLifetimeSeconds({ exp: now + 10 }, now), 10);
+  assert.equal(resignLifetimeSeconds({ exp: now }, now), null);
+  // Neither claim: an hour, which the next re-sign then treats as its ceiling.
+  assert.equal(resignLifetimeSeconds({}, now), 3600);
+});
+
+test("a legacy token without a deadline claim is re-signed with its remaining exp, never more", async () => {
+  const { userId, sessionId } = await mint();
+  const token = await signSessionJwt(
+    { id: userId, role: "USER", permissions: "0", provider: "credentials", sessionId } as Omit<SessionClaims, "iat" | "exp">,
+    { expiresInSeconds: 20 },
+  );
+  const result = await verifyAndRefreshSession(token, COOKIE);
+  assert.ok(result?.refreshed);
+  assert.ok(result.refreshed.expiresInSeconds <= 20, `got ${result.refreshed.expiresInSeconds}`);
+  const exp = decodePayload(result.refreshed.token).exp as number;
+  assert.ok(exp <= nowSec() + 20);
 });

@@ -185,6 +185,22 @@ test("a root folder is found by the longest prefix, on either separator", () => 
   assert.equal(rootFolderFor("/database/x", ["/data"]), null, "a prefix must end at a separator");
 });
 
+test("a root folder compares as the storage tab's disks do: a Windows drive in any case, either separator; a move needs another folder", async () => {
+  const { rootFolderMoving, parseTagIds } = await import("../src/lib/arr-title.ts");
+  assert.equal(rootFolderFor("c:\\Movies\\Heat (1995)", ["C:\\Movies"]), "C:\\Movies", "a Windows root matched in the other case");
+  assert.equal(rootFolderFor("C:/Movies/Heat", ["C:\\Movies\\"]), "C:\\Movies\\", "and with the other separator");
+  assert.equal(rootFolderFor("/Data/movies/x", ["/data/movies"]), null, "a Linux path stays case-sensitive");
+  assert.equal(rootFolderFor("/anything", ["/"]), null, "a root of / names no path");
+  assert.equal(rootFolderMoving({ rootFolderPath: "c:/movies/" }, { rootFolderPath: "C:\\Movies" }), false);
+  assert.equal(rootFolderMoving({ rootFolderPath: "/tv/" }, { rootFolderPath: "/tv" }), false);
+  assert.equal(rootFolderMoving({ rootFolderPath: "/TV" }, { rootFolderPath: "/tv" }), true);
+  assert.equal(rootFolderMoving({ rootFolderPath: "/tv" }, { rootFolderPath: null }), true);
+  assert.deepEqual(parseTagIds([3, 1, 3], 5), [3, 1]);
+  assert.equal(parseTagIds([1, 0], 5), null);
+  assert.equal(parseTagIds([1, 2, 3], 2), null);
+  assert.equal(parseTagIds("1", 5), null);
+});
+
 test("a series' totals exclude specials; a v3 series without monitorNewItems reads null", () => {
   const t = projectTitle("sonarr", "", {
     id: 5, title: "X", seasons: [
@@ -196,6 +212,21 @@ test("a series' totals exclude specials; a v3 series without monitorNewItems rea
   assert.deepEqual([t.episodeCount, t.episodeFileCount, t.hasFile, t.monitorNewItems], [10, 7, true, null]);
   assert.equal(t.nextAiring, "2026-11-01T00:00:00.000Z");
   assert.equal(projectTitle("radarr", "", { title: "no id" }), null);
+});
+
+test("a series whose only files are specials has a file, while its regular-season counts stay 0", () => {
+  const t = projectTitle("sonarr", "", {
+    id: 6, title: "Y", seasons: [
+      { seasonNumber: 0, monitored: false, statistics: { episodeCount: 0, episodeFileCount: 2 } },
+      { seasonNumber: 1, monitored: true, statistics: { episodeCount: 8, episodeFileCount: 0 } },
+    ],
+  });
+  assert.ok(t);
+  assert.deepEqual([t.hasFile, t.episodeFileCount, t.episodeCount], [true, 0, 8]);
+  const none = projectTitle("sonarr", "", { id: 7, title: "Z", seasons: [{ seasonNumber: 1, statistics: { episodeCount: 3, episodeFileCount: 0 } }] });
+  assert.equal(none?.hasFile, false);
+  // No per-season statistics: the series' own count (which includes specials).
+  assert.equal(projectTitle("sonarr", "", { id: 8, title: "W", statistics: { episodeFileCount: 1 } })?.hasFile, true);
 });
 
 test("calendar statuses: a cinema date never reads as missing; an unmonitored series wins over the episode's flag", () => {

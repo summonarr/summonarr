@@ -82,6 +82,7 @@ const {
   getMdblistListItems,
   getMdblistTopRated,
   isMdblistQuotaLocked,
+  testMdblistConnection,
 } = await import("../src/lib/mdblist.ts");
 type MdblistRatings = import("../src/lib/mdblist.ts").MdblistRatings;
 
@@ -234,6 +235,37 @@ test("single-title fetch (movie): exact wire URL, parseBatchItem row returned AN
   assert.equal(cacheUpserts[0].expiresAt.getTime(), Date.now() + 30 * DAY_MS);
 });
 
+test("a refused key is latched: later lookups with it ask nobody and say it once; a changed key, or the Test passing, clears it", async () => {
+  resetApiKey("key-mdblist-refuses");
+  try {
+    respond = () => jsonResponse({ error: "Invalid API key!" }, 403);
+    const refused = { found: false, keyConfigured: true, transient: true };
+    assert.deepEqual(await fetchAndCacheMdblistForTmdb(650, "movie", "mdblist:tmdb:movie:650"), refused);
+    assert.equal(fetchCalls.length, 1);
+    assert.deepEqual(await fetchAndCacheMdblistForTmdb(651, "movie", "mdblist:tmdb:movie:651"), refused);
+    assert.deepEqual(await fetchMdblistBatch([{ id: 652 }, { id: 653 }], "movie"), new Map());
+    assert.equal(fetchCalls.length, 1, "neither the single lookup nor the batch asks with the refused key");
+    assert.equal(warns.filter((w) => w.includes("[mdblist] MDBList refused the API key")).length, 1, "said once (guardrail 7b)");
+    assert.equal(isMdblistQuotaLocked(), false, "never the pause every other call would wait out");
+    assert.equal(cacheUpserts.length, 0, "never negative-cached");
+
+    // A 200 whose error names the key is the same refusal, on the batch too.
+    resetApiKey("another-refused-key");
+    respond = () => jsonResponse({ error: "Invalid API key!" });
+    assert.deepEqual(await fetchMdblistBatch([{ id: 654 }], "movie"), new Map());
+    assert.deepEqual(await fetchAndCacheMdblistForTmdb(655, "movie", "mdblist:tmdb:movie:655"), refused);
+    assert.equal(fetchCalls.length, 2, "the second refused key costs one request too");
+
+    // The admin's Test ignores the latch, and a pass clears it.
+    respond = () => jsonResponse({ title: "Breaking Bad" });
+    assert.equal(await testMdblistConnection(), "Breaking Bad");
+    respond = () => jsonResponse({ tmdb_id: 656, ratings: [{ source: "imdb", value: 8 }] });
+    assert.equal((await fetchAndCacheMdblistForTmdb(656, "movie", "mdblist:tmdb:movie:656")).found, true);
+  } finally {
+    resetApiKey(DEFAULT_KEY);
+  }
+});
+
 test("404 is the only negative cache: 24h not-found sentinel, no transient flag, and the sentinel then serves without a fetch", async () => {
   respond = () => new Response("not found", { status: 404 });
   const result = await fetchAndCacheMdblistForTmdb(604, "movie", "mdblist:tmdb:movie:604");
@@ -258,12 +290,12 @@ test("5xx and 200-with-error-body are transient: warned, NEVER negative-cached",
   });
   assert.ok(warns.some((w) => w.includes("[mdblist] API returned 500 for movie:605")));
 
-  // 200 with a string error (non-quota).
-  respond = () => jsonResponse({ error: "Invalid API key!" });
+  // 200 with a string error (non-quota; a refused key is the latch test below).
+  respond = () => jsonResponse({ error: "Internal error, try again" });
   assert.deepEqual(await fetchAndCacheMdblistForTmdb(606, "movie", "mdblist:tmdb:movie:606"), {
     found: false, keyConfigured: true, transient: true,
   });
-  assert.ok(warns.some((w) => w.includes("[mdblist] API error for movie:606: Invalid API key!")));
+  assert.ok(warns.some((w) => w.includes("[mdblist] API error for movie:606: Internal error, try again")));
 
   // 200 with { error: true, message } — the message becomes the error string.
   respond = () => jsonResponse({ error: true, message: "backend restarting" });
@@ -459,7 +491,9 @@ test("a SHORT batch response negative-caches the ids MDBList left out — absenc
   // batch CONTENT). The cost of the old reading was unbounded: an id MDBList
   // does not have was re-requested on every page load forever AND pushed into
   // the OMDB fallback each time.
-  respond = () => jsonResponse([{ id: 1, ratings: [{ source: "imdb", value: 8 }] }]);
+  // The row names its TMDB id: an id-less row in a short response can't be
+  // placed (see the positional test below).
+  respond = () => jsonResponse([{ tmdb_id: 1, ratings: [{ source: "imdb", value: 8 }] }]);
   const map = await fetchMdblistBatch([{ id: 1 }, { id: 2 }, { id: 3 }], "movie");
   assert.deepEqual([...map.keys()], [1]);
   assert.equal(cacheRows.has("mdblist:tmdb:movie:2"), true, "the omitted id is negative-cached");
@@ -471,6 +505,43 @@ test("a SHORT batch response negative-caches the ids MDBList left out — absenc
     false,
     "a short response is expected now, not an anomaly to warn about",
   );
+});
+
+test("an id-less row binds by position ONLY when the response lines up one to one with the request", async () => {
+  // A short response: MDBList left out ids it doesn't know, so position 0 may
+  // be any of the three. Binding it to id 1 would cache another title's ratings
+  // under id 1 for the full TTL, and sentinel the real missing ids.
+  respond = () => jsonResponse([{ ratings: [{ source: "imdb", value: 8 }] }]);
+  const map = await fetchMdblistBatch([{ id: 1 }, { id: 2 }, { id: 3 }], "movie");
+  assert.equal(map.size, 0, "nothing is bound by position");
+  for (const id of [1, 2, 3]) {
+    assert.equal(cacheRows.has(`mdblist:tmdb:movie:${id}`), false, `id ${id} is neither cached nor sentinelled`);
+  }
+  assert.ok(warns.some((w) => w.includes("returned 1 unmatched row(s) (1 rows for 3 ids)")), "the unmatched row is warned");
+
+  // Mixed: one row names its id, so the response is not positional at all.
+  warns.length = 0;
+  respond = () => jsonResponse([
+    { tmdb_id: 2, ratings: [{ source: "imdb", value: 5 }] },
+    { ratings: [{ source: "imdb", value: 9 }] },
+  ]);
+  const map2 = await fetchMdblistBatch([{ id: 4 }, { id: 2 }], "movie");
+  assert.deepEqual([...map2.keys()], [2]);
+  assert.equal(cacheRows.has("mdblist:tmdb:movie:4"), false, "the id-less row must not bind to id 4");
+});
+
+test("a malformed row (null, non-object, non-array ratings) is skipped, never thrown on: the page's other ratings are kept and cached", async () => {
+  respond = () => jsonResponse([
+    null,
+    { tmdb_id: 10, ratings: [{ source: "imdb", value: 7 }] },
+    { tmdb_id: 30, ratings: { source: "imdb", value: 1 } },
+  ]);
+  const map = await fetchMdblistBatch([{ id: 10 }, { id: 20 }, { id: 30 }], "movie");
+  assert.equal(map.get(10)?.imdbRating, "7");
+  assert.ok(cacheRows.has("mdblist:tmdb:movie:10"), "id 10 is cached: the page's cache flush still ran");
+  assert.equal(map.get(30)?.imdbRating, null, "a non-array ratings reads as no rating");
+  assert.equal(cacheRows.has("mdblist:tmdb:movie:20"), false, "the null row displaced id 20's answer: no sentinel");
+  assert.equal(errors.some((e) => e.includes("batch error")), false, "the page did not fail");
 });
 
 test("the two AMBIGUOUS response shapes still never negative-cache", async () => {
@@ -532,6 +603,13 @@ test("getMdblistTopLists: wire with the limit param, DISCOVER-TTL caching, cache
   assert.deepEqual(await getMdblistTopLists(10), lists);
   assert.equal(fetchCalls.length, 1);
 
+  // A cached index longer than a caller's limit is cut to that limit.
+  cacheRows.delete("mdblist:top-lists");
+  respond = () => jsonResponse([1, 2, 3].map((id) => ({ id, name: `L${id}`, slug: `l${id}`, items: 1, likes: 1 })));
+  assert.equal((await getMdblistTopLists(3)).length, 3);
+  assert.deepEqual((await getMdblistTopLists(2)).map((l) => l.id), [1, 2], "a smaller limit never gets more lists than it asked for");
+  assert.equal(fetchCalls.length, 2);
+
   // Non-OK (non-429) → [] and nothing cached.
   cacheRows.delete("mdblist:top-lists");
   const upsertsBefore = cacheUpserts.length;
@@ -581,6 +659,15 @@ test("getMdblistListItems: TmdbMedia skeleton with tmdb_id guards, show→tv map
   respond = () => jsonResponse({ error: "no such list" });
   assert.deepEqual(await getMdblistListItems(79), []);
   assert.equal(cacheRows.has("mdblist:list:79"), false);
+});
+
+test("list payloads are read entry by entry: a null entry, a string tmdb_id or a bad list id reaches no TmdbMedia, request path or cache", async () => {
+  respond = (url) => url.pathname === "/lists/top"
+    ? jsonResponse([null, { id: "../x", name: "Bad" }, { id: 9, name: 5 }])
+    : jsonResponse([null, 7, { tmdb_id: "123", title: "String id" }, { tmdb_id: 124, title: 7, mediatype: "show", year: "2020" }]);
+  assert.deepEqual(await getMdblistTopLists(5), [{ id: 9, name: "", slug: "", items: 0, likes: 0 }]);
+  const items = await getMdblistListItems(9);
+  assert.deepEqual(items.map((i) => [i.id, i.mediaType, i.title, i.releaseYear]), [[124, "tv", "", null]]);
 });
 
 test("getMdblistTopRated: fans out over the top lists, dedups across lists in order, caches the merged set, and is cache-first", async () => {

@@ -207,6 +207,36 @@ test("runner: a 429 waits out its Retry-After, then retries that row once", asyn
   assert.deepEqual(summary.failed, []);
 });
 
+test("runner: while one row waits out a 429, the other worker sends nothing either", async () => {
+  const log: string[] = [];
+  let limited = false;
+  const summary = await runBulkSearch(rowsOf(4), {
+    signal: new AbortController().signal,
+    skip: () => false,
+    attempt: async (row) => {
+      log.push(`send:${row}`);
+      if (row === 0 && !limited) {
+        limited = true;
+        return searchAttemptFromResponse(429, "slow down", "30");
+      }
+      await tick();
+      return STARTED;
+    },
+    onSettled: () => {},
+    // A pause long enough for the other worker to finish row 1 and ask for more.
+    sleep: async () => {
+      log.push("pause");
+      for (let i = 0; i < 10; i++) await tick();
+      log.push("resume");
+    },
+  });
+  assert.equal(summary.started, 4);
+  const pause = log.indexOf("pause");
+  const resume = log.indexOf("resume");
+  assert.ok(pause >= 0 && resume > pause, log.join(","));
+  assert.deepEqual(log.slice(pause + 1, resume), [], `sent during the pause: ${log.join(",")}`);
+});
+
 test("runner: a second 429 for the same row is a failure — it is retried once, not again", async () => {
   let calls = 0;
   const settled: Array<[string, string]> = [];
@@ -487,33 +517,60 @@ test("route: its failure log line runs the body's instance through sanitizeForLo
 });
 
 // ── 8: the page's selection ──────────────────────────────────────────────────
+// The view is missing-report.tsx and the pieces around its list,
+// missing-report-parts.tsx (the bulk bar among them); the lists' reads are
+// use-missing-reports.ts; the rows' searches, the run and the selection are
+// use-bulk-search.ts.
 
-const missingPage = () => readFileSync(new URL("../src/components/admin/missing-report.tsx", import.meta.url), "utf8");
+const adminSrc = (file: string) => readFileSync(new URL(`../src/components/admin/${file}`, import.meta.url), "utf8");
+const missingPage = () => adminSrc("missing-report.tsx") + adminSrc("missing-report-parts.tsx");
+const missingReads = () => adminSrc("use-missing-reports.ts");
+const bulkSearch = () => adminSrc("use-bulk-search.ts");
+// The selection's arithmetic, pure (use-bulk-search.ts's useBulkSelection calls it).
+const bulkSelection = () => adminSrc("bulk-selection.ts");
 
 test("page: the cap counts every ticked row of the tab — on another page, hidden by a filter or not — and the button and the run take that same list", () => {
-  const src = missingPage();
+  const src = bulkSearch();
+  const sel = bulkSelection();
   assert.match(
-    src,
-    /const selectedHidden = \(\(report\?\.items \?\? \[\]\) as ReadonlyArray<BulkRow>\)\.filter\(\(r\) => !listedKeys\.has\(selKey\(r\)\) && selected\.has\(selKey\(r\)\) && isOpen\(r\)\);/,
+    sel,
+    /const selectedHidden = reportItems\.filter\(\(r\) => !listedKeys\.has\(selKey\(r\)\) && selected\.has\(selKey\(r\)\) && isOpen\(r\)\);/,
     "the ticks a filter hides come from the UNFILTERED listing",
   );
-  assert.match(src, /const listedKeys = new Set\(currentRows\.map\(selKey\)\);/, "listed = every page of the filtered list");
-  assert.match(src, /const selectedListed = currentRows\.filter\(\(r\) => selected\.has\(selKey\(r\)\) && isOpen\(r\)\);/, "ticks on other pages count");
-  assert.match(src, /const selectedHere = \[\.\.\.selectedListed, \.\.\.selectedHidden\];/);
-  assert.match(src, /const atCap = selectedHere\.length >= BULK_SEARCH_MAX;/, "the cap counts them all");
+  // ...which is the list's whole report, as read: the page hands the selection
+  // the report itself, every filtered row and the page on screen.
+  assert.match(src, /const reportItems: ReadonlyArray<BulkRow> = report\?\.items \?\? NO_ROWS;/);
+  const page = missingPage();
+  assert.match(page, /const report = reports\[current\];/);
+  assert.match(page, /useBulkSelection\(run, \{ current, currentRows, pageRows, report, loadingKeys \}\)/);
+  assert.match(page, /<MissingBulkBar mode=\{mode\} selection=\{selection\}/, "the bar renders from that selection");
+  assert.match(page, /const pageRows = onPage\(currentRows\);/);
+  assert.match(sel, /const listedKeys = new Set\(currentRows\.map\(selKey\)\);/, "listed = every page of the filtered list");
+  assert.match(sel, /const selectedListed = currentRows\.filter\(\(r\) => selected\.has\(selKey\(r\)\) && isOpen\(r\)\);/, "ticks on other pages count");
+  // The whole-list passes run once per change of what they read: memoized on
+  // every input of the open rule, or a stale isOpen would count a row searched
+  // since as still selectable.
+  assert.match(src, /const rules = useMemo<SelectionRules<BulkRow>>\(\(\) => \(\{ selected, selKey, isOpen \}\), \[selected, selKey, isOpen\]\);/);
+  assert.match(src, /const list = useMemo\(\(\) => listSelection\(currentRows, reportItems, rules\), \[currentRows, reportItems, rules\]\);/);
+  assert.match(src, /const isOpen = useCallback\(\(r: BulkRow\) => \{[\s\S]*?\}, \[selKey, searches, bulkPending\]\);/);
+  assert.match(src, /const selKey = useCallback\(\(r: \{ instance: string; arrId: number \}\) => `\$\{current\}\|\$\{rowKey\(r\)\}`, \[current\]\);/);
+  assert.match(sel, /const selectedHere = \[\.\.\.selectedListed, \.\.\.selectedHidden\];/);
+  assert.match(sel, /atCap: selectedHere\.length >= BULK_SEARCH_MAX,/, "the cap counts them all");
   assert.match(src, /else if \(!atCap\) next\.add\(k\);/, "a tick past the cap is refused");
-  assert.match(src, /const toRun = capSelection\(selectedHere\);/);
-  assert.match(src, /t\("adminArr\.missingBulk\.search", \{ count: toRun\.length \}\)/, "the button says what the run takes");
-  assert.match(src, /t\("adminArr\.missingBulk\.searchCutoff", \{ count: toRun\.length \}\)/);
-  assert.doesNotMatch(src, /missingBulk\.search(?:Cutoff)?", \{ count: selectedHere\.length \}/, "never the uncapped count");
+  assert.match(sel, /toRun: capSelection\(selectedHere\),/);
+  assert.match(page, /t\("adminArr\.missingBulk\.search", \{ count: toRun\.length \}\)/, "the button says what the run takes");
+  assert.match(page, /t\("adminArr\.missingBulk\.searchCutoff", \{ count: toRun\.length \}\)/);
+  assert.doesNotMatch(page, /missingBulk\.search(?:Cutoff)?", \{ count: selectedHere\.length \}/, "never the uncapped count");
   assert.match(src, /const rows = capSelection\(selectedHere\);/);
   assert.match(src, /void searchSelected\(current, capSelection\(selectedHere\)\)/);
-  assert.match(src, /const roomOnPage = BULK_SEARCH_MAX - selectedOffPage - selectedHidden\.length;/, "select-all leaves room for every tick elsewhere");
+  assert.match(sel, /const roomOnPage = BULK_SEARCH_MAX - selectedOffPage - list\.selectedHidden\.length;/, "select-all leaves room for every tick elsewhere");
   assert.match(src, /capSelection\(selectable, roomOnPage\)/);
+  // The page renders from the selection hook's own answers, not a second count of its own.
+  assert.doesNotMatch(page, /capSelection|BULK_SEARCH_CONFIRM_OVER|useMemo\(\(\) => currentRows\.filter/);
 });
 
 // The body of `function name(` up to the next line that closes it at the
-// component's indentation.
+// hook's indentation.
 function fnBody(src: string, head: string): string {
   const start = src.indexOf(head);
   assert.ok(start >= 0, `${head} exists`);
@@ -522,41 +579,52 @@ function fnBody(src: string, head: string): string {
 }
 
 test("page: a row's own Search unticks it, so a failed search can't bring a tick back past the cap", () => {
-  const body = fnBody(missingPage(), "async function startSearch(");
+  const body = fnBody(bulkSearch(), "async function startSearch(");
   const untick = body.search(/setSelected\(\(prev\) => \{[\s\S]*?next\.delete\(k\);[\s\S]*?\}\);/);
   assert.ok(untick >= 0, "startSearch removes the row from the selection");
   assert.ok(untick < body.indexOf("requestSearch("), "before the request goes out");
   assert.match(body, /const k = `\$\{key\}\|\$\{rowKey\(row\)\}`;/, "the row's own key");
   // The bulk runner's own requests never untick (it clears the selection itself when it ends).
-  assert.doesNotMatch(fnBody(missingPage(), "async function requestSearch("), /setSelected\(/);
+  assert.doesNotMatch(fnBody(bulkSearch(), "async function requestSearch("), /setSelected\(/);
+  // The row's Search button is this one.
+  assert.match(missingPage(), /onSearch=\{\(\) => void startSearch\(key, r\)\}/);
+  assert.match(missingPage(), /onClick=\{onSearch\}/);
 });
 
 test("page: a list's reload is tracked per key — a bulk run or a second listing never starts while that list's load is out, and only the newest load of a key commits", () => {
   const src = missingPage();
-  assert.doesNotMatch(src, /useState<ReportKey \| null>/, "no single shared loading slot");
-  assert.doesNotMatch(src, /\bloading === current\b|\bloading !== current\b/);
-  assert.match(src, /const \[loadingKeys, setLoadingKeys\] = useState<ReadonlySet<ReportKey>>\(new Set\(\)\);/);
-  assert.match(src, /const loadingHere = loadingKeys\.has\(current\);/);
-  assert.match(src, /const needsLoad = configured\[service\] && !reports\[current\] && !errors\[current\] && !loadingHere;/, "no second listing of a list already loading");
-  assert.match(fnBody(src, "function requestBulk("), /if \(rows\.length === 0 \|\| bulkRunning \|\| loadingHere\) return;/);
-  assert.match(fnBody(src, "function confirmBulk("), /c\.key === current && !loadingKeys\.has\(current\)/);
+  const reads = missingReads();
+  const bulk = bulkSearch();
+  assert.doesNotMatch(src + reads + bulk, /useState<ReportKey \| null>/, "no single shared loading slot");
+  assert.doesNotMatch(src + reads + bulk, /\bloading === current\b|\bloading !== current\b/);
+  assert.match(reads, /const \[loadingKeys, setLoadingKeys\] = useState<ReadonlySet<ReportKey>>\(new Set\(\)\);/);
+  assert.match(reads, /const loadingHere = loadingKeys\.has\(current\);/);
+  assert.match(bulk, /const loadingHere = loadingKeys\.has\(current\);/, "the selection reads the same per-key mark");
+  assert.match(reads, /const needsLoad = configured\[service\] && !reports\[current\] && !errors\[current\] && !loadingHere;/, "no second listing of a list already loading");
+  assert.match(fnBody(bulk, "function requestBulk("), /if \(rows\.length === 0 \|\| bulkRunning \|\| loadingHere\) return;/);
+  assert.match(fnBody(bulk, "function confirmBulk("), /c\.key === current && !loadingKeys\.has\(current\)/);
   assert.match(src, /<Button size="sm" disabled=\{bulkRunning \|\| loadingHere\} onClick=\{requestBulk\}>/, "Search selected is off while this list loads");
   assert.match(src, /onClick=\{\(\) => void load\(service, mode\)\} disabled=\{loadingHere \|\| bulk\?\.key === current\}/, "Refresh too");
 
-  const load = src.slice(src.indexOf("const load = useCallback("), src.indexOf("}, [t, updateSearches]);"));
+  const load = reads.slice(reads.indexOf("const load = useCallback("), reads.indexOf("}, [t, onLiveReplaced]);"));
   assert.match(load, /const seq = \(loadSeq\.current\[k\] \?\? 0\) \+ 1;\s*loadSeq\.current\[k\] = seq;/);
   assert.match(load, /const superseded = \(\) => loadSeq\.current\[k\] !== seq;/);
-  const ok = load.indexOf("const data = await res.json();");
-  assert.ok(ok >= 0 && load.indexOf("if (superseded()) return;", ok) < load.indexOf("setReports(", ok), "a superseded load never writes the listing");
-  const failed = load.indexOf("if (!res.ok) {");
-  assert.ok(load.indexOf("if (superseded()) return;", failed) < load.indexOf("setErrors((e) => ({ ...e, [k]: message }))"), "nor its error");
-  assert.ok(load.indexOf("if (superseded()) return;", load.indexOf("} catch {")) < load.indexOf('t("adminManage.missing.error.loadNetwork")'), "nor its network error");
-  assert.match(load, /finally \{\s*if \(!superseded\(\)\) \{\s*setLoadingKeys\(\(prev\) => \{\s*const next = new Set\(prev\);\s*next\.delete\(k\);/, "only the newest load clears the key, and only its own key");
+  // The load's one await is followed at once by the sequence check, and
+  // nothing is awaited after it: a superseded load writes nothing — not its
+  // listing, its error, its network error nor the loading key.
+  const answered = load.indexOf("const res = await fetchJson(missingListUrl(svc, m), {");
+  const guard = load.indexOf("if (superseded()) return;", answered);
+  assert.ok(answered >= 0 && guard > answered, "the sequence check follows the read");
+  assert.equal((load.match(/\bawait\b/g) ?? []).length, 1, "one await, before the check");
+  for (const write of ["setReports(", "setErrors((e) => ({ ...e, [k]: message }))", 't("adminManage.missing.error.loadNetwork")', "setLoadingKeys((prev) => {\n"]) {
+    assert.ok(load.indexOf(write, guard) > guard, `${write} only after the check`);
+  }
+  assert.match(load, /if \(superseded\(\)\) return;\s*setLoadingKeys\(\(prev\) => \{\s*const next = new Set\(prev\);\s*next\.delete\(k\);/, "only the newest load clears the key, and only its own key");
 });
 
 test("page: a fresh listing keeps the state of a row whose search is still in flight", () => {
   assert.match(
-    missingPage(),
+    bulkSearch(),
     /updateSearches\(\(s\) => Object\.fromEntries\(Object\.entries\(s\)\.filter\(\(\[key, st\]\) => !key\.startsWith\(`\$\{k\}\|`\) \|\| st\.busy\)\)\);/,
   );
 });
@@ -564,27 +632,38 @@ test("page: a fresh listing keeps the state of a row whose search is still in fl
 test("page: the tables render one page of rows; the query is deferred for the filters", () => {
   const src = missingPage();
   assert.match(src, /const PAGE_SIZE = 100;/);
-  for (const list of ["movies", "series", "cutoffMovies", "cutoffSeries"]) {
-    assert.match(src, new RegExp(`onPage\\(${list}\\)\\.map\\(`), `${list} renders its page`);
+  // Every list renders through the one table, which renders only the page on screen.
+  for (const [key, list] of [["radarr:missing", "movies"], ["sonarr:missing", "series"], ["radarr:cutoff", "cutoffMovies"], ["sonarr:cutoff", "cutoffSeries"]]) {
+    assert.match(src, new RegExp(`listTable\\(\\s*"${key}",\\s*${list},`), `${list} renders through the table as ${key}`);
     assert.doesNotMatch(src, new RegExp(`\\{\\s*${list}\\.map\\(|,\\s*${list}\\.map\\(`), `${list} never renders whole`);
   }
+  assert.equal((src.match(/\blistTable\(/g) ?? []).length, 4, "the four lists, and nothing else, call the table");
+  assert.equal((src.match(/\bonPage\(rows\)\.map\(/g) ?? []).length, 1, "the table maps the page alone");
+  assert.equal((src.match(/<ReportTable\b/g) ?? []).length, 1, "one table body is built, by listTable");
   assert.match(src, /return rows\.slice\(pageStart, pageStart \+ PAGE_SIZE\);/);
-  assert.match(src, /const selectable = pageRows\.filter\(isOpen\);/, "select-all works on the page on screen");
+  assert.match(bulkSelection(), /const selectable = pageRows\.filter\(isOpen\);/, "select-all works on the page on screen");
   assert.match(src, /const pageIndex = pageView\.view === viewKey \? Math\.min\(pageView\.page, pageCount - 1\) : 0;/, "a new view starts on its first page");
   assert.match(src, /const deferredQuery = useDeferredValue\(query\);/);
-  assert.equal((src.match(/query: deferredQuery/g) ?? []).length, 4, "every list filters on the deferred query");
+  assert.equal((src.match(/query: deferredQuery/g) ?? []).length, 5, "every list, and the unmonitored count beside them, filters on the deferred query");
 });
 
 test("page: a Sonarr search refused part-way shows a neutral note on its started row", () => {
-  const src = missingPage();
-  assert.match(src, /return d\?\.partial === true \? \{ \.\.\.attempt, message: t\("adminManage\.missing\.searchPartial"\) \} : attempt;/);
-  assert.match(src, /\{\(already \|\| started\) && st\.message && \(/);
+  assert.match(bulkSearch(), /return d\?\.partial === true \? \{ \.\.\.attempt, message: t\("adminManage\.missing\.searchPartial"\) \} : attempt;/);
+  assert.match(missingPage(), /\{\(already \|\| started\) && st\.message && \(/);
 });
 
 test("page: removing a title in the title manager re-reads the list (never mid bulk run)", () => {
   const blocks = [...missingPage().matchAll(/<ManageTitleButton\b[\s\S]*?\/>/g)].map((m) => m[0]);
   assert.equal(blocks.length, 1);
-  assert.match(blocks[0], /onRemoved=\{\(\) => \{\s*(?:\/\/[^\n]*\n\s*)*if \(!bulkAbort\.current\) void load\(svc, mode\);\s*\}\}/);
+  assert.match(blocks[0], /onRemoved=\{onRemoved\}/);
+  // ...handed in by the page, as the title cell's own onRemoved.
+  const cells = [...missingPage().matchAll(/<MissingTitleCell\b[\s\S]*?\/>/g)].map((m) => m[0]);
+  assert.equal(cells.length, 1);
+  assert.match(cells[0], /onRemoved=\{\(\) => \{\s*(?:\/\/[^\n]*\n\s*)*if \(!isBulkRunning\(\)\) void load\(svc, mode\);\s*\}\}/);
+  // ...where isBulkRunning reads the running bulk search's own controller, live.
+  assert.match(missingPage(), /const \{[^}]*\bisBulkRunning\b[^}]*\} = run;/);
+  assert.match(bulkSearch(), /const isBulkRunning = useCallback\(\(\) => bulkAbort\.current !== null, \[\]\);/);
+  assert.match(bulkSearch(), /bulkAbort\.current = controller;/);
 });
 
 // ── 10: a truncated cutoff listing ───────────────────────────────────────────

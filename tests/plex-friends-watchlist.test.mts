@@ -135,6 +135,22 @@ test("parseWatchlistPage: nodes + cursor; a null watchlist is PRIVATE; a server-
   assert.equal(noCursor.status === "ok" && noCursor.hasNextPage, false);
 });
 
+test("parseWatchlistPage: a query that returned no data at all is a FAILURE, never every friend reading as private", () => {
+  // A request-level GraphQL error (a schema or validation change) answers with
+  // no `data`. Reading that as privacy hid a broken query behind "private" for
+  // every friend; it must throw so the user counts as an error and the run degrades.
+  assert.throws(
+    () => mod.parseWatchlistPage({ data: null, errors: [{ message: 'Cannot query field "watchlist" on type "User"' }] }),
+    /Cannot query field/,
+  );
+  assert.throws(() => mod.parseWatchlistPage({ errors: [{ message: "Variable \"$first\" got invalid value" }] }), /invalid value/);
+  assert.throws(() => mod.parseWatchlistPage({}), /no data/);
+  // The friend's own privacy setting stays a status.
+  assert.deepEqual(mod.parseWatchlistPage({ data: { userV2: { watchlist: null } }, errors: [{ message: "You do not have permission" }] }), { status: "private" });
+  assert.deepEqual(mod.parseWatchlistPage({ data: { userV2: null } }), { status: "private" });
+  assert.deepEqual(mod.parseWatchlistPage({ data: { userV2: {} } }), { status: "private" });
+});
+
 test("parseRetryAfterMs: seconds or an HTTP date; junk is null", () => {
   assert.equal(mod.parseRetryAfterMs("3"), 3000);
   assert.equal(mod.parseRetryAfterMs(new Date(10_000).toUTCString(), 4_000), 6_000);
@@ -225,6 +241,49 @@ test("a 429 is retried exactly once after Retry-After; a second 429 fails", asyn
   assert.equal(n, 1, "a Retry-After past the bound is not waited out");
 });
 
+test("a 429's body is released before the retry", async () => {
+  let cancelled = false;
+  let n = 0;
+  respond = () => {
+    if (++n > 1) return json({ data: { allFriendsV2: [] } });
+    const body = new ReadableStream<Uint8Array>({
+      start(c) { c.enqueue(new TextEncoder().encode("{}")); },
+      cancel() { cancelled = true; },
+    });
+    return new Response(body, { status: 429, headers: { "retry-after": "0" } });
+  };
+  assert.deepEqual(await mod.fetchPlexFriends("t"), []);
+  assert.equal(n, 2);
+  assert.equal(cancelled, true, "the rate-limited response's body is cancelled, not left holding the connection");
+});
+
+test("fetchFriendWatchlist: an abort while a page is in flight reaches that request and returns the pages already read", async () => {
+  const ctl = new AbortController();
+  const realFetch = globalThis.fetch;
+  let n = 0;
+  let requestSawAbort = false;
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    n++;
+    if (n === 1) {
+      return json({ data: { userV2: { watchlist: { nodes: [{ id: "a1", title: "A", type: "movie" }], pageInfo: { hasNextPage: true, endCursor: "c1" } } } } });
+    }
+    return new Promise<Response>((_resolve, reject) => {
+      const sig = init?.signal;
+      ctl.abort();
+      requestSawAbort = sig?.aborted === true;
+      reject(sig?.aborted ? sig.reason : new Error("the caller's signal never reached the request"));
+    });
+  }) as typeof fetch;
+  try {
+    const r = await mod.fetchFriendWatchlist("t", "f", { maxItems: 500, signal: ctl.signal });
+    assert.deepEqual(r, { status: "ok", nodes: [{ id: "a1", title: "A", type: "movie" }] });
+    assert.equal(n, 2);
+    assert.equal(requestSawAbort, true, "the in-flight request is aborted with the run (guardrail 41)");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("fetchFriendUuidMap / fetchOwnerAccountId hit plex.tv v2 with the admin token", async () => {
   respond = (c) => {
     assert.equal(c.url.hostname, "plex.tv");
@@ -285,4 +344,16 @@ test("resolvePlexAccountUsers: deactivated/purged accounts are dropped, not fall
   ];
   const r = await mod.resolvePlexAccountUsers(["100", "200", "300"]);
   assert.equal(r.size, 0);
+});
+
+test("pickPlexAccountUser: a manual pin decides alone; then the sign-in subject; then one unambiguous automatic link", () => {
+  const pin = (userId: string | null) => ({ userId, manualUserLink: true });
+  const auto = (userId: string | null) => ({ userId, manualUserLink: false });
+  assert.equal(mod.pickPlexAccountUser([pin("u-pin"), auto("u-auto")], "u-subject"), "u-pin");
+  assert.equal(mod.pickPlexAccountUser([pin(null)], "u-subject"), null, "pinned to nobody skips, even with a subject");
+  assert.equal(mod.pickPlexAccountUser([pin("a"), pin("b")], undefined), null, "conflicting pins skip");
+  assert.equal(mod.pickPlexAccountUser([auto("u-auto")], "u-subject"), "u-subject");
+  assert.equal(mod.pickPlexAccountUser([auto("u-auto"), auto(null)], undefined), "u-auto");
+  assert.equal(mod.pickPlexAccountUser([auto("a"), auto("b")], undefined), null, "ambiguous automatic links skip");
+  assert.equal(mod.pickPlexAccountUser([], undefined), null);
 });

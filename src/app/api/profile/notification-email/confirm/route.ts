@@ -4,6 +4,7 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { hashVerifyToken, parseVerifyIdentifier } from "@/lib/notification-email-verify";
 import { localeForRequest, translatorFor } from "@/lib/i18n/server-locale";
 import type { Locale } from "@/lib/i18n/locales";
+import type { Translator } from "@/lib/i18n/translate";
 
 // PUBLIC (listed in isPublicPath in proxy.ts + ROUTE_EXCEPTIONS in
 // audit-routes.mts): the one-time token in the query IS the credential. The link
@@ -44,31 +45,48 @@ ${BODY_OPEN}
   });
 }
 
-// GET: render the confirmation form. It reads (but never consumes/binds) the
-// token so it can show the pending address. The form re-POSTs the token in its
-// action URL — a deliberate human click is what performs the bind.
-export async function GET(req: Request) {
-  const locale = localeForRequest(req);
-  const t = translatorFor(locale);
+type VerifyRow = { token: string; identifier: string; expires: Date };
+
+// The token parameter and the hash lookup GET and POST share: the raw token and
+// its stored row, or the page that answers a missing token or a link that is
+// unknown or already used.
+async function loadVerifyRow(
+  req: Request,
+  locale: Locale,
+  t: Translator,
+): Promise<{ token: string; row: VerifyRow } | NextResponse> {
   const token = new URL(req.url).searchParams.get("token");
   if (!token) {
     return resultPage(locale, t("apiAuth.emailConfirm.invalidLinkTitle"), t("apiAuth.emailConfirm.missingToken"), false);
   }
-
   const row = await prisma.verificationToken.findUnique({ where: { token: hashVerifyToken(token) } });
   if (!row) {
     return resultPage(locale, t("apiAuth.emailConfirm.usedTitle"), t("apiAuth.emailConfirm.usedBody"), false);
   }
+  return { token, row };
+}
 
+// Expiry, then the identifier: the account and the candidate address, or the
+// page that refuses the link. POST runs this only AFTER its single-use delete,
+// so an expired link is consumed too.
+function verifiedBinding(
+  row: VerifyRow,
+  locale: Locale,
+  t: Translator,
+): { userId: string; email: string } | NextResponse {
   if (row.expires.getTime() < Date.now()) {
     return resultPage(locale, t("apiAuth.emailConfirm.expiredTitle"), t("apiAuth.emailConfirm.expiredBody"), false);
   }
-
   const parsed = parseVerifyIdentifier(row.identifier);
   if (!parsed) {
     return resultPage(locale, t("apiAuth.emailConfirm.invalidLinkTitle"), t("apiAuth.emailConfirm.malformed"), false);
   }
+  return parsed;
+}
 
+// The confirmation form. The form re-POSTs the token in its action URL — a
+// deliberate human click is what performs the bind.
+function confirmFormPage(locale: Locale, t: Translator, token: string, email: string): NextResponse {
   // The token is opaque hex, but escape into the action URL defensively; the
   // email is reflected as text content and MUST be HTML-escaped.
   //
@@ -84,7 +102,7 @@ export async function GET(req: Request) {
   const bindLine = escapeHtml(t("apiAuth.emailConfirm.body", { email: EMAIL_SLOT })).replace(
     EMAIL_SLOT,
     // A function replacer: a string one would expand $-patterns in the address.
-    () => `<strong style="color:#e4e4e7">${escapeHtml(parsed.email)}</strong>`,
+    () => `<strong style="color:#e4e4e7">${escapeHtml(email)}</strong>`,
   );
   const html = `${pageHead(locale)}<title>${escapeHtml(t("apiAuth.emailConfirm.pageTitle"))}</title></head>
 ${BODY_OPEN}
@@ -102,36 +120,35 @@ ${BODY_OPEN}
   });
 }
 
+// GET: render the confirmation form. It reads (but never consumes/binds) the
+// token so it can show the pending address.
+export async function GET(req: Request) {
+  const locale = localeForRequest(req);
+  const t = translatorFor(locale);
+  const loaded = await loadVerifyRow(req, locale, t);
+  if (loaded instanceof NextResponse) return loaded;
+  const parsed = verifiedBinding(loaded.row, locale, t);
+  if (parsed instanceof NextResponse) return parsed;
+  return confirmFormPage(locale, t, loaded.token, parsed.email);
+}
+
 // POST: the actual bind. Only a human form submission reaches here.
 export async function POST(req: Request) {
   const locale = localeForRequest(req);
   const t = translatorFor(locale);
-  const token = new URL(req.url).searchParams.get("token");
-  if (!token) {
-    return resultPage(locale, t("apiAuth.emailConfirm.invalidLinkTitle"), t("apiAuth.emailConfirm.missingToken"), false);
-  }
-
-  const row = await prisma.verificationToken.findUnique({ where: { token: hashVerifyToken(token) } });
-  if (!row) {
-    return resultPage(locale, t("apiAuth.emailConfirm.usedTitle"), t("apiAuth.emailConfirm.usedBody"), false);
-  }
+  const loaded = await loadVerifyRow(req, locale, t);
+  if (loaded instanceof NextResponse) return loaded;
 
   // Single-use: the delete's row count decides. Swallowing a miss used to bind
   // anyway, so a confirm that lost the race to a password change, a sign-out,
   // or a second click still wrote the address (guardrail 6g).
-  const removed = await prisma.verificationToken.deleteMany({ where: { token: row.token } });
+  const removed = await prisma.verificationToken.deleteMany({ where: { token: loaded.row.token } });
   if (removed.count !== 1) {
     return resultPage(locale, t("apiAuth.emailConfirm.usedTitle"), t("apiAuth.emailConfirm.usedBody"), false);
   }
 
-  if (row.expires.getTime() < Date.now()) {
-    return resultPage(locale, t("apiAuth.emailConfirm.expiredTitle"), t("apiAuth.emailConfirm.expiredBody"), false);
-  }
-
-  const parsed = parseVerifyIdentifier(row.identifier);
-  if (!parsed) {
-    return resultPage(locale, t("apiAuth.emailConfirm.invalidLinkTitle"), t("apiAuth.emailConfirm.malformed"), false);
-  }
+  const parsed = verifiedBinding(loaded.row, locale, t);
+  if (parsed instanceof NextResponse) return parsed;
 
   try {
     // updateMany (not update): a since-deleted account no-ops instead of throwing;

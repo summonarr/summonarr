@@ -221,9 +221,10 @@ test("a group header is a real disclosure button, and collapsing never hides the
   const src = readFileSync(resolve(HERE, "../src/components/layout/admin-nav-groups.tsx"), "utf8");
   assert.match(src, /<button[\s\S]*?aria-expanded=\{!isCollapsed\}[\s\S]*?aria-controls=\{listId\}/);
   assert.match(src, /isCollapsed \? g\.items\.filter\(isActive\) : g\.items/);
-  // Collapsed state is read after mount (guardrail 16): the server render has every group open.
-  assert.match(src, /useState<ReadonlySet<AdminNavGroup>>\(\(\) => new Set\(\)\)/);
-  assert.match(src, /useEffect\(\(\) => \{\s*const apply = \(\) => \{\s*const stored = readStoredCollapsed\(\);/);
+  // The first render is the server's collapsed set (the layout's cookie), never storage (guardrail 16).
+  assert.match(src, /useState<ReadonlySet<AdminNavGroup>>\(\(\) => new Set\(serverCollapsed\)\)/);
+  // A layout effect: the stored choice lands before a post-hydration mount (the drawer) paints.
+  assert.match(src, /useLayoutEffect\(\(\) => \{\s*const apply = \(\) => \{\s*const stored = readStoredCollapsed\(\);/);
 });
 
 test("the sidebar and the drawer stay in step on ONE storage key: a toggle re-reads storage, writes, and tells every mounted instance", () => {
@@ -235,9 +236,58 @@ test("the sidebar and the drawer stay in step on ONE storage key: a toggle re-re
   // The write is announced, AFTER it lands.
   assert.match(toggle, /localStorage\.setItem\(STORAGE_KEY,[\s\S]*?\);\s*window\.dispatchEvent\(new Event\(SYNC_EVENT\)\)/);
   // Every instance listens (and stops listening when the drawer unmounts).
-  const effect = /useEffect\(\(\) => \{([\s\S]*?)\n  \}, \[\]\);/.exec(src)?.[1] ?? "";
+  const effect = /useLayoutEffect\(\(\) => \{([\s\S]*?)\n  \}, \[\]\);/.exec(src)?.[1] ?? "";
   assert.match(effect, /window\.addEventListener\(SYNC_EVENT, apply\)/);
   assert.match(effect, /window\.removeEventListener\(SYNC_EVENT, apply\)/);
   assert.match(effect, /window\.addEventListener\("storage", apply\)/);
   assert.match(effect, /window\.removeEventListener\("storage", apply\)/);
+});
+
+const { groupBadgeLabelKey, GROUP_BADGE_LABEL_KEY } = await import("../src/components/layout/admin-nav-rules.ts");
+const { visibleAdminNavItems } = await import("../src/components/layout/nav-visibility.ts");
+const visibleAdminItemsForSession = (s: { user: { role: string; permissions?: string } } | null | undefined) => visibleAdminNavItems(s?.user);
+
+test("the header and drawer read a session's admin pages through nav-visibility: the role preset, or the stored mask when there is one", () => {
+  const forRole = (role: string) => hrefs(getVisibleAdminItems(role));
+  assert.deepEqual(hrefs(visibleAdminItemsForSession(null)), [], "no session, no admin pages");
+  assert.deepEqual(hrefs(visibleAdminItemsForSession(undefined)), []);
+  assert.deepEqual(hrefs(visibleAdminItemsForSession({ user: { role: "ADMIN" } })), forRole("ADMIN"));
+  assert.deepEqual(hrefs(visibleAdminItemsForSession({ user: { role: "ISSUE_ADMIN" } })), forRole("ISSUE_ADMIN"));
+  // An empty mask reads as "never set" (the role preset), the same as none.
+  assert.deepEqual(hrefs(visibleAdminItemsForSession({ user: { role: "ISSUE_ADMIN", permissions: "" } })), forRole("ISSUE_ADMIN"));
+  // A role=USER delegate gets what its MANAGE_* bits open, not the bare role's nothing.
+  const delegate = { user: { role: "USER", permissions: Permission.MANAGE_REQUESTS.toString() } };
+  assert.deepEqual(hrefs(visibleAdminItemsForSession(delegate)), hrefs(getVisibleAdminItems({ role: "USER", permissions: Permission.MANAGE_REQUESTS })));
+  assert.ok(visibleAdminItemsForSession(delegate).length > 0);
+  assert.deepEqual(hrefs(visibleAdminItemsForSession({ user: { role: "USER" } })), []);
+});
+
+test("a collapsed group's summed badge is labelled by its item only when ONE hidden item carries a badge", () => {
+  const [queueHref] = Object.keys(NAV_BADGE_LABEL_KEYS);
+  assert.equal(groupBadgeLabelKey([queueHref]), NAV_BADGE_LABEL_KEYS[queueHref]);
+  assert.equal(groupBadgeLabelKey([queueHref, "/admin/missing"]), GROUP_BADGE_LABEL_KEY, "a sum over two items is not one item's count");
+  assert.equal(groupBadgeLabelKey(["/admin/no-wording"]), undefined, "no wording: the bare number");
+  assert.equal(groupBadgeLabelKey([]), undefined);
+  // The generic wording exists, with plural forms, in every catalog.
+  for (const locale of ["en", "de", "es", "fr", "it", "pt", "zh"]) {
+    const nav = JSON.parse(readFileSync(resolve(HERE, `../src/lib/i18n/messages/${locale}/nav.json`), "utf8")) as Record<string, string>;
+    assert.ok(nav[`${GROUP_BADGE_LABEL_KEY}_one`]?.includes("{count}"), `${locale}: ${GROUP_BADGE_LABEL_KEY}_one`);
+    assert.ok(nav[`${GROUP_BADGE_LABEL_KEY}_other`]?.includes("{count}"), `${locale}: ${GROUP_BADGE_LABEL_KEY}_other`);
+  }
+  const src = readFileSync(resolve(HERE, "../src/components/layout/admin-nav-groups.tsx"), "utf8");
+  assert.match(src, /<NavCountBadge count=\{hiddenBadges\} labelKey=\{groupBadgeLabelKey\(hiddenBadged\.map\(\(item\) => item\.href\)\)\} \/>/);
+});
+
+test("the header and the drawer take their admin items from nav-visibility, not a copy", () => {
+  const header = readFileSync(resolve(HERE, "../src/components/layout/header.tsx"), "utf8");
+  const drawer = readFileSync(resolve(HERE, "../src/components/layout/mobile-nav-drawer.tsx"), "utf8");
+  assert.match(header, /visibleAdminNavItems\(session\?\.user\)\.some\(\(i\) => i\.href === "\/settings"\)/);
+  assert.match(drawer, /const adminItems = visibleAdminNavItems\(session\?\.user, featureFlags\);/);
+  for (const src of [header, drawer]) assert.doesNotMatch(src, /getVisibleAdminItems\(/);
+});
+
+test("the collapsed-groups cookie knows every admin nav group", async () => {
+  const { parseCollapsedGroupsCookie } = await import("../src/lib/admin-nav-collapsed.ts");
+  const ids = ADMIN_NAV_GROUPS.map((g) => g.id);
+  assert.deepEqual(parseCollapsedGroupsCookie(ids.join(".")), ids);
 });

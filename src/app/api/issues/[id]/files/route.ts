@@ -1,7 +1,7 @@
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { tooManyRequests } from "@/lib/http";
-import type { Issue } from "@/generated/prisma";
-import { withAdmin } from "@/lib/api-auth";
+import type { AuditAction, Issue } from "@/generated/prisma";
+import { withAdmin, type SummonarrSession } from "@/lib/api-auth";
 import { arrErrorMessage, arrFetch } from "@/lib/arr";
 import { ARR_SERVICE_LABEL, configuredArrCfg, type ArrService } from "@/lib/arr-admin";
 import { arrFailure, arrGate, parseIdArray, type ArrTarget } from "@/lib/arr-admin-http";
@@ -45,17 +45,20 @@ import {
   unmonitoredByDelete,
   type EpisodeRef,
   type RedownloadSettings,
+  type ReplaceFollowUp,
+  type ReplaceMark,
   type ReplaceScope,
   type ReplaceSearch,
   type ReplaceableFile,
 } from "@/lib/issue-replace";
+import { promoteIssueInProgress } from "@/lib/issue-transitions";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { prisma } from "@/lib/prisma";
 import { processSingleton } from "@/lib/process-singleton";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { answerOf, jobResponse, runningArrJob, startArrJob } from "@/lib/release-search-jobs";
 import { sanitizeForLog } from "@/lib/sanitize";
-import { emitSSE } from "@/lib/sse-emitter";
+import { ISSUE_FILES_MAX_IDS } from "@/lib/api-body-limits";
 
 // An issue's "Replace file" (ADMIN — deleting files is; ISSUE_ADMIN keeps
 // Refetch and Replace-release). Radarr/Sonarr only take an UPGRADE while a
@@ -116,7 +119,7 @@ import { emitSSE } from "@/lib/sse-emitter";
 type RouteContext = { params: Promise<{ id: string }> };
 
 // Fewer than any real title's file count would need; bounds the body.
-const MAX_FILES = 5_000;
+const MAX_FILES = ISSUE_FILES_MAX_IDS;
 // Every call deletes files and spends indexer hits; bounded per admin like the
 // title manager's commands.
 const LIMIT_PER_MIN = 10;
@@ -151,6 +154,16 @@ interface Loaded {
 
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
+/**
+ * The instance a request names: absent ⇒ the default "", a string ⇒ trimmed,
+ * anything else ⇒ null (malformed). One parser for the listing and the job
+ * join, so a retry's join key is built from exactly what the listing used.
+ */
+function parseInstanceParam(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return "";
+  return typeof raw === "string" ? raw.trim() : null;
+}
+
 /** Sonarr's own episodes of a series, read now; rows naming another series are dropped (guardrail 5e). */
 async function readSeriesEpisodes(instance: string, seriesId: number): Promise<TitleEpisode[]> {
   const cfg = await configuredArrCfg("sonarr", instance);
@@ -175,7 +188,7 @@ async function loadIssueFiles(issue: Issue, rawInstance: unknown, t: Translator)
   const scope = replaceScopeOf(issue);
   if (!scope) return NextResponse.json({ error: t("apiUser.issues.invalidScope") }, { status: 422 });
   // Validated, never coerced — a bad slug must not silently retarget the default.
-  const instance = rawInstance === undefined || rawInstance === null ? "" : typeof rawInstance === "string" ? rawInstance.trim() : null;
+  const instance = parseInstanceParam(rawInstance);
   if (instance === null || !isValidInstanceSlug(instance)) {
     return NextResponse.json({ error: t("apiUser.common.invalidInstance") }, { status: 400 });
   }
@@ -339,17 +352,36 @@ async function readRedownloadSettings(service: ArrService, instance: string): Pr
 }
 
 /**
- * The title's history as the arr sends it — only to read each grab's
- * `data.releaseSource`, which the projection doesn't carry. Null when it can't
- * be read: every grab is then taken as interactive (searched for here).
+ * What is known about how each grab was picked, for the marks:
+ *   notNeeded  — the arr redownloads interactive grabs too (or not at all), so
+ *                it was never read;
+ *   unreadable — the read failed: every grab is taken as interactive, so its
+ *                files are searched for here;
+ *   read       — the title's history as the arr sent it.
  */
-async function readRawHistory(service: ArrService, instance: string, arrId: number): Promise<unknown> {
+type GrabHistory = { kind: "notNeeded" } | { kind: "unreadable" } | { kind: "read"; raw: unknown };
+
+/**
+ * The title's history as the arr sends it — only to read each grab's
+ * `data.releaseSource`, which the projection doesn't carry.
+ */
+async function readGrabHistory(service: ArrService, instance: string, arrId: number): Promise<GrabHistory> {
   try {
     const cfg = await configuredArrCfg(service, instance);
     const path = service === "radarr" ? `/api/v3/history/movie?movieId=${arrId}` : `/api/v3/history/series?seriesId=${arrId}`;
-    return await arrFetch<unknown>(cfg, path, { quietErrors: true });
+    const raw = await arrFetch<unknown>(cfg, path, { quietErrors: true });
+    return raw === null ? { kind: "unreadable" } : { kind: "read", raw };
   } catch {
-    return null;
+    return { kind: "unreadable" };
+  }
+}
+
+/** Whether a mark's grab counts as picked by hand (see GrabHistory). */
+function markIsInteractive(history: GrabHistory, service: ArrService, arrId: number, mark: ReplaceMark): boolean {
+  switch (history.kind) {
+    case "notNeeded": return false;
+    case "unreadable": return true;
+    case "read": return isInteractiveGrab(service, arrId, history.raw, mark.grab);
   }
 }
 
@@ -364,60 +396,56 @@ interface RemonitorOutcome {
   stillUnmonitored: (f: TitleFile) => boolean;
 }
 
-/**
- * Undo what the delete unmonitored. With "Unmonitor Deleted Movies/Episodes"
- * on, Radarr/Sonarr unmonitor what a manual delete removed; a SeasonSearch,
- * the Missing plan and the arr's own redownload after a Mark failed then find
- * nothing. Exactly the ids that went monitored → unmonitored are set back
- * (the episodes' or the movie's state before the delete is `loaded`, read at
- * POST time), through the title manager's own writes. A failure is reported,
- * never thrown: the files are already gone, and the caller searches for them
- * by name instead.
- */
-async function undoDeleteUnmonitor(
+type RemonitorAudit = (details: Record<string, unknown>) => void;
+type RemonitorWarn = (what: string, err: unknown) => void;
+
+// Re-reading or re-monitoring failed: what the delete unmonitored may still be.
+const REMONITOR_FAILED: RemonitorOutcome = { remonitored: 0, failed: true, stillUnmonitored: () => true };
+
+// Radarr: the movie's own monitored flag, before (as `loaded` read it) and now.
+async function undoMovieUnmonitor(loaded: Loaded, audit: RemonitorAudit, warn: RemonitorWarn): Promise<RemonitorOutcome> {
+  const { instance } = loaded.target;
+  const arrId = loaded.arrId;
+  const before = loaded.raw?.monitored === true;
+  let after: boolean;
+  try {
+    const raw = await readTitleResource("radarr", instance, arrId);
+    if (typeof raw.monitored !== "boolean") throw new Error("the movie carries no monitored flag");
+    after = raw.monitored;
+  } catch (err) {
+    warn("re-reading the movie", err);
+    return REMONITOR_FAILED;
+  }
+  if (unmonitoredByDelete([{ id: arrId, monitored: before }], [{ id: arrId, monitored: after }]).length === 0) {
+    return { remonitored: 0, failed: false, stillUnmonitored: () => !after };
+  }
+  try {
+    // The movie editor (PUT /api/v3/movie/editor) — only `monitored` is sent.
+    await editTitle("radarr", instance, arrId, { monitored: true });
+  } catch (err) {
+    warn("re-monitoring the movie", err);
+    return REMONITOR_FAILED;
+  }
+  audit({ fields: ["monitored"], monitored: true });
+  return { remonitored: 1, failed: false, stillUnmonitored: () => false };
+}
+
+// Sonarr: the deleted files' episodes, before (`loaded.episodes`) and re-read now.
+async function undoEpisodeUnmonitor(
   loaded: Loaded,
   deleted: readonly ReplaceableFile[],
-  audit: (details: Record<string, unknown>) => void,
+  audit: RemonitorAudit,
+  warn: RemonitorWarn,
 ): Promise<RemonitorOutcome> {
-  const { service, instance } = loaded.target;
+  const { instance } = loaded.target;
   const arrId = loaded.arrId;
-  const failedOutcome: RemonitorOutcome = { remonitored: 0, failed: true, stillUnmonitored: () => true };
-  const warn = (what: string, err: unknown) =>
-    console.warn(`[issues] ${service} instance "${sanitizeForLog(instance)}" ${what} after Replace file failed:`, arrErrorMessage(err));
-  if (deleted.length === 0) return { remonitored: 0, failed: false, stillUnmonitored: () => false };
-
-  if (service === "radarr") {
-    const before = loaded.raw?.monitored === true;
-    let after: boolean;
-    try {
-      const raw = await readTitleResource("radarr", instance, arrId);
-      if (typeof raw.monitored !== "boolean") throw new Error("the movie carries no monitored flag");
-      after = raw.monitored;
-    } catch (err) {
-      warn("re-reading the movie", err);
-      return failedOutcome;
-    }
-    if (unmonitoredByDelete([{ id: arrId, monitored: before }], [{ id: arrId, monitored: after }]).length === 0) {
-      return { remonitored: 0, failed: false, stillUnmonitored: () => !after };
-    }
-    try {
-      // The movie editor (PUT /api/v3/movie/editor) — only `monitored` is sent.
-      await editTitle("radarr", instance, arrId, { monitored: true });
-    } catch (err) {
-      warn("re-monitoring the movie", err);
-      return failedOutcome;
-    }
-    audit({ fields: ["monitored"], monitored: true });
-    return { remonitored: 1, failed: false, stillUnmonitored: () => false };
-  }
-
   const deletedEpisodes = episodesFor(episodesOf(deleted), loaded.episodes);
   let after: TitleEpisode[];
   try {
     after = await readSeriesEpisodes(instance, arrId);
   } catch (err) {
     warn("re-reading the episodes", err);
-    return failedOutcome;
+    return REMONITOR_FAILED;
   }
   const flipped = unmonitoredByDelete(deletedEpisodes, after);
   let failed = false;
@@ -436,14 +464,305 @@ async function undoDeleteUnmonitor(
   // An episode the re-read didn't return counts as unmonitored: it is then
   // searched for by name, which costs nothing if it is in fact monitored.
   const off = new Set(deletedEpisodes.filter((e) => !fixed.has(e.id) && monitoredNow.get(e.id) !== true).map(episodeKey));
+  // A deleted file's episode the list didn't hold counts as unmonitored too.
+  const listed = new Set(deletedEpisodes.map(episodeKey));
   for (const e of episodesOf(deleted)) {
-    if (!deletedEpisodes.some((d) => episodeKey(d) === episodeKey(e))) off.add(episodeKey(e));
+    if (!listed.has(episodeKey(e))) off.add(episodeKey(e));
   }
   return {
     remonitored: failed ? 0 : flipped.length,
     failed,
     stillUnmonitored: (f) => f.episodes.some((e) => off.has(episodeKey(e))),
   };
+}
+
+/**
+ * Undo what the delete unmonitored. With "Unmonitor Deleted Movies/Episodes"
+ * on, Radarr/Sonarr unmonitor what a manual delete removed; a SeasonSearch,
+ * the Missing plan and the arr's own redownload after a Mark failed then find
+ * nothing. Exactly the ids that went monitored → unmonitored are set back
+ * (the episodes' or the movie's state before the delete is `loaded`, read at
+ * POST time), through the title manager's own writes. A failure is reported,
+ * never thrown: the files are already gone, and the caller searches for them
+ * by name instead.
+ */
+async function undoDeleteUnmonitor(
+  loaded: Loaded,
+  deleted: readonly ReplaceableFile[],
+  audit: RemonitorAudit,
+): Promise<RemonitorOutcome> {
+  if (deleted.length === 0) return { remonitored: 0, failed: false, stillUnmonitored: () => false };
+  const { service, instance } = loaded.target;
+  const warn: RemonitorWarn = (what, err) =>
+    console.warn(`[issues] ${service} instance "${sanitizeForLog(instance)}" ${what} after Replace file failed:`, arrErrorMessage(err));
+  return service === "radarr"
+    ? undoMovieUnmonitor(loaded, audit, warn)
+    : undoEpisodeUnmonitor(loaded, deleted, audit, warn);
+}
+
+/** One replace, from the delete on: what the POST resolved before it. */
+interface ReplaceRun {
+  issue: Issue;
+  loaded: Loaded;
+  /** The in-scope files the admin chose, as re-read now (guardrail 5f). */
+  chosen: ReplaceableFile[];
+  then: ReplaceFollowUp;
+  /** Triggering user, for the IssueGrab row. */
+  userId: string;
+  t: Translator;
+  /** Writes one post-commit audit row about the title (the swallowing logAudit — guardrail 26). */
+  audit: (action: AuditAction, details: Record<string, unknown>) => void;
+}
+
+/**
+ * Delete the chosen files through the arr, audited with exactly what it deleted
+ * — even when Radarr stopped part-way (guardrail 26). A delete that sent
+ * nothing answers the arr failure.
+ */
+async function deleteChosen(run: ReplaceRun): Promise<{ deletedIds: number[]; deleteError: unknown } | NextResponse> {
+  const { target, arrId } = run.loaded;
+  const { service, instance } = target;
+  let deletedIds: number[];
+  let deleteError: unknown;
+  try {
+    ({ deleted: deletedIds, error: deleteError } = await deleteTitleFiles(service, instance, arrId, run.chosen.map((f) => f.id)));
+  } catch (err) {
+    return arrFailure(err, target, run.t, "issue file delete");
+  }
+  run.audit("ARR_FILE_DELETE", { service, instance, arrId, fileIds: deletedIds, count: deletedIds.length, issueId: run.issue.id });
+  if (deleteError) {
+    console.warn(`[issues] ${service} instance "${sanitizeForLog(instance)}" file delete stopped part-way:`, arrErrorMessage(deleteError));
+  }
+  return { deletedIds, deleteError };
+}
+
+interface MarkOutcome {
+  monitor: RemonitorOutcome;
+  marks: ReplaceMark[];
+  settings: RedownloadSettings;
+  marked: number;
+  redownloading: number;
+  /** Deleted files a mark's redownload will search for. */
+  covered: Set<number>;
+}
+
+/**
+ * Set back to monitored whatever the delete unmonitored — BEFORE the marks and
+ * the search, which both reach monitored items only — then, for "markFailed",
+ * mark each deleted file's grab failed: ONE mark per download, in sequence
+ * (each re-reads the title's history first, so a pack marked by the first can
+ * never be marked again). Each write is audited after the arr accepted it.
+ */
+async function remonitorAndMark(run: ReplaceRun, deleted: readonly ReplaceableFile[]): Promise<MarkOutcome> {
+  const { target, arrId } = run.loaded;
+  const { service, instance } = target;
+  const monitor = await undoDeleteUnmonitor(run.loaded, deleted, (details) => {
+    run.audit("ARR_TITLE_EDIT", { service, instance, arrId, ...details, trigger: "replaceFile", issueId: run.issue.id });
+  });
+
+  const marks = run.then === "markFailed" ? planMarks(deleted) : [];
+  const settings: RedownloadSettings = marks.length > 0 ? await readRedownloadSettings(service, instance) : { failed: null, interactive: null };
+  // Which grabs were picked by hand matters only when the arr says it won't
+  // redownload those.
+  const history: GrabHistory = settings.failed === true && settings.interactive === false
+    ? await readGrabHistory(service, instance, arrId)
+    : { kind: "notNeeded" };
+  // Radarr's redownload is an automatic search, which honours Minimum
+  // Availability — a movie that isn't "available" yet is searched for here.
+  const available = service !== "radarr" || run.loaded.raw?.isAvailable !== false;
+  const covered = new Set<number>();
+  let marked = 0;
+  let redownloading = 0;
+  for (const mark of marks) {
+    let release: string;
+    try {
+      release = (await markHistoryFailed(service, instance, arrId, mark.grab.id)).sourceTitle;
+    } catch (err) {
+      // History moved since the read (already failed, no longer a grab, gone):
+      // its files are searched for instead, below. Anything else is the arr
+      // failing — logged, and the files are searched for too.
+      if (!(err instanceof AlreadyFailedError || err instanceof NotAGrabError || err instanceof NotOnTitleError)) {
+        console.warn(`[issues] ${service} instance "${sanitizeForLog(instance)}" mark failed failed:`, arrErrorMessage(err));
+      }
+      continue;
+    }
+    marked++;
+    run.audit("ARR_MARK_FAILED", { service, instance, arrId, historyId: mark.grab.id, release, issueId: run.issue.id });
+    // Only a redownload the arr's switches say happens searches for the mark's
+    // files (off, unreadable, or an interactive grab with that switch off ⇒
+    // searched for here) — and only when none of them is still unmonitored:
+    // the arr's redownload searches monitored items only.
+    const interactive = markIsInteractive(history, service, arrId, mark);
+    const markFiles = deleted.filter((f) => mark.fileIds.includes(f.id));
+    if (redownloadCovers(settings, interactive, available) && !markFiles.some(monitor.stillUnmonitored)) {
+      redownloading++;
+      for (const fileId of mark.fileIds) covered.add(fileId);
+    }
+  }
+  return { monitor, marks, settings, marked, redownloading, covered };
+}
+
+/**
+ * Search for what no mark covers, then record the IssueGrab once a mark or a
+ * search was queued. A failed search is reported, never thrown: the files are
+ * already gone.
+ */
+async function runFollowUp(
+  run: ReplaceRun,
+  deleted: readonly ReplaceableFile[],
+  remaining: readonly TitleFile[],
+  marking: MarkOutcome,
+): Promise<{ searched: boolean; nothingMissing: boolean; searchError: unknown }> {
+  const { issue, loaded } = run;
+  const { service, instance } = loaded.target;
+  const uncovered = deleted.filter((f) => !marking.covered.has(f.id));
+  const search = followUpSearch(loaded.scope, uncovered, remaining, {
+    anyCovered: marking.covered.size > 0,
+    unmonitored: uncovered.some(marking.monitor.stillUnmonitored),
+  });
+  let searched = false;
+  let nothingMissing = false;
+  let searchError: unknown = null;
+  if (search) {
+    try {
+      const outcome = await runSearch(search, instance, loaded.arrId, uncovered);
+      searched = outcome === "queued";
+      nothingMissing = outcome === "nothingMissing";
+    } catch (err) {
+      searchError = err;
+      console.warn(`[issues] ${service} instance "${sanitizeForLog(instance)}" replacement search failed:`, arrErrorMessage(err));
+    }
+  }
+
+  // Recorded OUTSIDE the try/catch blocks above, as the release grab does: the
+  // arr has already deleted the files and queued the follow-up, so a failure
+  // here must not read as the replace failing (the usual cause is the issue
+  // being deleted meanwhile — P2003 on the IssueGrab -> Issue link). The row
+  // makes the next import of the issue's scope on this instance notify the
+  // admin like a grab's: the webhooks match IssueGrab by title, instance and
+  // scope, never by release, so a search-based replacement matches the same way.
+  // It supersedes the issue's earlier pending grabs on this instance (one
+  // import, one announcement — recordIssueGrab).
+  if (marking.marked > 0 || searched) {
+    const rawTvdb = loaded.raw?.tvdbId;
+    try {
+      await recordIssueGrab({
+        issueId: issue.id,
+        triggeredById: run.userId,
+        tmdbId: issue.tmdbId,
+        tvdbId: issue.tvdbId ?? (service === "sonarr" && typeof rawTvdb === "number" && Number.isSafeInteger(rawTvdb) && rawTvdb > 0 ? rawTvdb : null),
+        mediaType: issue.mediaType,
+        title: issue.title,
+        scope: issue.scope,
+        seasonNumber: issue.seasonNumber,
+        episodeNumber: issue.episodeNumber,
+        arrInstance: instance,
+      });
+    } catch (err) {
+      console.warn("[issues] Replace file succeeded but recording the grab failed (issue deleted meanwhile?):", err);
+    }
+  }
+  return { searched, nothingMissing, searchError };
+}
+
+/** Everything from the delete on — the part a long series can stretch past a proxy's hold. */
+async function replaceFiles(run: ReplaceRun): Promise<NextResponse> {
+  const del = await deleteChosen(run);
+  if (del instanceof NextResponse) return del;
+  const { deletedIds, deleteError } = del;
+  const gone = new Set(deletedIds);
+  const deleted = run.chosen.filter((f) => gone.has(f.id));
+  const remaining = run.loaded.titleFiles.filter((f) => !gone.has(f.id));
+  const marking = await remonitorAndMark(run, deleted);
+  const { searched, nothingMissing, searchError } = await runFollowUp(run, deleted, remaining, marking);
+
+  const service = run.loaded.target.service;
+  const result = {
+    deleted: deletedIds.length,
+    requested: run.chosen.length,
+    marked: marking.marked,
+    // Marks the arr refused or failed — those files were searched for instead.
+    unmarked: marking.marks.length - marking.marked,
+    searched,
+    // The arr's Redownload Failed switch (null when no mark was planned or it couldn't be read).
+    redownload: marking.settings.failed,
+    // Marks the arr's own redownload searches for (none of ours for their files).
+    redownloading: marking.redownloading,
+    // What the delete unmonitored and was set back; a failure there means the
+    // files were searched for by name, and may stay unmonitored in the arr.
+    remonitored: marking.monitor.remonitored,
+    remonitorFailed: marking.monitor.failed,
+    nothingMissing,
+  };
+  // A search that could not be queued outranks a delete that stopped part-way:
+  // the files that did go have nothing coming to replace them.
+  if (searchError) {
+    return NextResponse.json(
+      { ...result, error: run.t("apiUser.issues.replaceFile.searchFailed", { count: deletedIds.length, service: ARR_SERVICE_LABEL[service] }) },
+      { status: 502 },
+    );
+  }
+  if (deleteError) {
+    return NextResponse.json(
+      { ...result, error: run.t("apiAdmin.arr.partialDelete", { done: deletedIds.length, total: run.chosen.length }) },
+      { status: 502 },
+    );
+  }
+  return NextResponse.json(result);
+}
+
+/** The POST body, validated: the follow-up, the file ids and whether to run it as a background job. */
+function parseReplaceBody(body: Record<string, unknown>): { then: ReplaceFollowUp; fileIds: number[]; background: boolean } | null {
+  const then = parseReplaceFollowUp(body.then);
+  const fileIds = parseIdArray(body.fileIds, MAX_FILES);
+  const background = body.async;
+  if (!then || !fileIds || (background !== undefined && typeof background !== "boolean")) return null;
+  return { then, fileIds, background: background === true };
+}
+
+/**
+ * One replace from the status CAS on, holding the issue's in-flight claim: the
+ * inline replace (or a refusal before it) releases the claim when it ends; a
+ * background job releases it from the job itself.
+ */
+async function runClaimedReplace(
+  issue: Issue,
+  run: ReplaceRun,
+  // The background job's join key; null runs the replace inline.
+  backgroundKey: string | null,
+  session: SummonarrSession,
+  req: NextRequest,
+): Promise<NextResponse> {
+  const id = issue.id;
+  let jobOwnsClaim = false;
+  try {
+    // Move the issue to IN_PROGRESS BEFORE anything is deleted, with the release
+    // grab's compare-and-swap ("only if still not RESOLVED"): the arr calls
+    // can't sit inside a DB transaction, so this check up front is what stops a
+    // file being deleted for an issue someone just closed. If the delete then
+    // fails, leaving IN_PROGRESS is fine — an admin did try. A real change is
+    // announced and audited now, whatever happens below.
+    const claimed = await promoteIssueInProgress({ issue, from: "notResolved", trigger: "replaceFile", details: { scope: issue.scope }, session, req });
+    if (claimed === 0) {
+      return NextResponse.json({ error: run.t("apiUser.issues.replaceFile.resolved") }, { status: 409 });
+    }
+    if (backgroundKey === null) return await replaceFiles(run);
+    const { jobId, joined } = startArrJob(session.user.id, backgroundKey, async () => {
+      try {
+        return await answerOf(await replaceFiles(run));
+      } finally {
+        inFlight.delete(id);
+      }
+    });
+    // A joined job never runs this callback, so the claim would never be
+    // released by it. Unreachable today (the claim above refuses a second
+    // replace of the issue while one runs) — but the release must not depend
+    // on that ordering.
+    jobOwnsClaim = !joined;
+    return NextResponse.json({ job: jobId }, { status: 202 });
+  } finally {
+    if (!jobOwnsClaim) inFlight.delete(id);
+  }
 }
 
 export const POST = withAdmin(async (req, { params }: RouteContext, session) => {
@@ -460,20 +779,18 @@ export const POST = withAdmin(async (req, { params }: RouteContext, session) => 
     return NextResponse.json({ error: t("apiUser.issues.replaceFile.resolved") }, { status: 409 });
   }
 
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, 64 * 1024);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  const then = parseReplaceFollowUp(body.then);
-  const fileIds = parseIdArray(body.fileIds, MAX_FILES);
-  const background = body.async;
-  if (!then || !fileIds || (background !== undefined && typeof background !== "boolean")) {
+  const body = await readJsonCapped<Record<string, unknown>>(req, 64 * 1024);
+  if (body instanceof NextResponse) return body;
+  const parsedBody = parseReplaceBody(body);
+  if (!parsedBody) {
     return NextResponse.json({ error: t("apiUser.issues.replaceFile.bodyInvalid") }, { status: 400 });
   }
+  const { then, fileIds, background } = parsedBody;
   // This admin's identical replace of this issue is already running: join it —
   // nothing is read, deleted or searched again, and no rate token is spent. The
-  // instance is normalized as loadIssueFiles does; a malformed one joins nothing.
-  const joinInstance = body.instance === undefined || body.instance === null ? "" : typeof body.instance === "string" ? body.instance.trim() : null;
-  const running = background === true && joinInstance !== null ? runningArrJob(session.user.id, jobKey(id, joinInstance, then, fileIds)) : null;
+  // instance is parsed as loadIssueFiles parses it; a malformed one joins nothing.
+  const joinInstance = parseInstanceParam(body.instance);
+  const running = background && joinInstance !== null ? runningArrJob(session.user.id, jobKey(id, joinInstance, then, fileIds)) : null;
   if (running) return NextResponse.json({ job: running }, { status: 202 });
   if (!checkRateLimit(`issue-replace-file:${session.user.id}`, LIMIT_PER_MIN, 60_000)) {
     return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
@@ -483,228 +800,36 @@ export const POST = withAdmin(async (req, { params }: RouteContext, session) => 
   // be stale, and only the instance's own answer decides what is deleted.
   const loaded = await loadIssueFiles(issue, body.instance, t);
   if (loaded instanceof NextResponse) return loaded;
-  const { target, arrId, scope } = loaded;
-  const { service, instance } = target;
+  const { service, instance } = loaded.target;
   const chosen = chooseFiles(loaded.files, fileIds);
   if (!chosen) return NextResponse.json({ error: t("apiUser.issues.replaceFile.notInScope") }, { status: 409 });
 
+  const ctx = auditContext(req, session);
+  const run: ReplaceRun = {
+    issue,
+    loaded,
+    chosen,
+    then,
+    userId: session.user.id,
+    t,
+    audit: (action, details) => {
+      void logAudit({
+        userId: session.user.id,
+        userName: session.user.name ?? session.user.email ?? null,
+        action,
+        target: `${service}:${instance}:${loaded.arrId}`,
+        details,
+        ...ctx,
+      });
+    },
+  };
+
   // One replace per issue at a time — claimed synchronously (no await between
   // the check and the add), BEFORE the CAS, so the loser writes nothing.
+  // runClaimedReplace releases the claim.
   if (inFlight.has(id)) {
     return NextResponse.json({ error: t("apiUser.issues.replaceFile.alreadyRunning") }, { status: 409 });
   }
   inFlight.add(id);
-  let jobOwnsClaim = false;
-  try {
-    // Move the issue to IN_PROGRESS BEFORE anything is deleted, with the release
-    // grab's compare-and-swap ("only if still not RESOLVED"): the arr calls
-    // can't sit inside a DB transaction, so this check up front is what stops a
-    // file being deleted for an issue someone just closed. If the delete then
-    // fails, leaving IN_PROGRESS is fine — an admin did try.
-    const claim = await prisma.issue.updateMany({
-      where: { id, status: { not: "RESOLVED" } },
-      data: { status: "IN_PROGRESS" },
-    });
-    if (claim.count === 0) {
-      return NextResponse.json({ error: t("apiUser.issues.replaceFile.resolved") }, { status: 409 });
-    }
-    if (issue.status !== "IN_PROGRESS") {
-      // The row already says IN_PROGRESS whatever happens below, so announce and
-      // audit it now (guardrail 26: the CAS has committed — the swallowing logAudit).
-      emitSSE({ type: "issue:updated", issueId: id, status: "IN_PROGRESS", userId: issue.reportedBy });
-      void logAudit({
-        userId: session.user.id,
-        userName: session.user.name ?? session.user.email ?? null,
-        action: "ISSUE_STATUS_CHANGE",
-        target: `issue:${id}`,
-        details: {
-          trigger: "replaceFile",
-          scope: issue.scope,
-          before: { status: issue.status },
-          after: { status: "IN_PROGRESS" },
-        },
-        ...auditContext(req, session),
-      });
-    }
-
-    // Everything from the delete on — the part a long series can stretch past a
-    // proxy's hold — run inline or as the background job.
-    const replaceFiles = async (): Promise<NextResponse> => {
-      let deletedIds: number[];
-      let deleteError: unknown;
-      try {
-        ({ deleted: deletedIds, error: deleteError } = await deleteTitleFiles(service, instance, arrId, chosen.map((f) => f.id)));
-      } catch (err) {
-        return arrFailure(err, target, t, "issue file delete");
-      }
-      // Exactly what the arr deleted, even when Radarr stopped part-way (guardrail 26).
-      void logAudit({
-        userId: session.user.id,
-        userName: session.user.name ?? session.user.email ?? null,
-        action: "ARR_FILE_DELETE",
-        target: `${service}:${instance}:${arrId}`,
-        details: { service, instance, arrId, fileIds: deletedIds, count: deletedIds.length, issueId: id },
-        ...auditContext(req, session),
-      });
-      if (deleteError) {
-        console.warn(`[issues] ${service} instance "${sanitizeForLog(instance)}" file delete stopped part-way:`, arrErrorMessage(deleteError));
-      }
-
-      const gone = new Set(deletedIds);
-      const deleted = chosen.filter((f) => gone.has(f.id));
-      const remaining = loaded.titleFiles.filter((f) => !gone.has(f.id));
-
-      // Set back to monitored whatever the delete unmonitored — BEFORE the mark and
-      // the search, which both reach monitored items only. Audited after the arr
-      // accepted it (guardrail 26).
-      const monitor = await undoDeleteUnmonitor(loaded, deleted, (details) => {
-        void logAudit({
-          userId: session.user.id,
-          userName: session.user.name ?? session.user.email ?? null,
-          action: "ARR_TITLE_EDIT",
-          target: `${service}:${instance}:${arrId}`,
-          details: { service, instance, arrId, ...details, trigger: "replaceFile", issueId: id },
-          ...auditContext(req, session),
-        });
-      });
-
-      // Mark each deleted file's grab failed — one mark per download. Sequential:
-      // each re-reads the title's history first (markHistoryFailed), so a pack
-      // marked by the first can never be marked again.
-      const marks = then === "markFailed" ? planMarks(deleted) : [];
-      const settings: RedownloadSettings = marks.length > 0 ? await readRedownloadSettings(service, instance) : { failed: null, interactive: null };
-      // Which grabs were picked by hand matters only when the arr says it won't
-      // redownload those; undefined = not needed, null = unreadable (all count as interactive).
-      const rawHistory = settings.failed === true && settings.interactive === false ? await readRawHistory(service, instance, arrId) : undefined;
-      // Radarr's redownload is an automatic search, which honours Minimum
-      // Availability — a movie that isn't "available" yet is searched for here.
-      const available = service !== "radarr" || loaded.raw?.isAvailable !== false;
-      const covered = new Set<number>();
-      let marked = 0;
-      let redownloading = 0;
-      for (const mark of marks) {
-        let release: string;
-        try {
-          release = (await markHistoryFailed(service, instance, arrId, mark.grab.id)).sourceTitle;
-        } catch (err) {
-          // History moved since the read (already failed, no longer a grab, gone):
-          // its files are searched for instead, below. Anything else is the arr
-          // failing — logged, and the files are searched for too.
-          if (!(err instanceof AlreadyFailedError || err instanceof NotAGrabError || err instanceof NotOnTitleError)) {
-            console.warn(`[issues] ${service} instance "${sanitizeForLog(instance)}" mark failed failed:`, arrErrorMessage(err));
-          }
-          continue;
-        }
-        marked++;
-        void logAudit({
-          userId: session.user.id,
-          userName: session.user.name ?? session.user.email ?? null,
-          action: "ARR_MARK_FAILED",
-          target: `${service}:${instance}:${arrId}`,
-          details: { service, instance, arrId, historyId: mark.grab.id, release, issueId: id },
-          ...auditContext(req, session),
-        });
-        // Only a redownload the arr's switches say happens searches for the mark's
-        // files (off, unreadable, or an interactive grab with that switch off ⇒
-        // searched for here) — and only when none of them is still unmonitored:
-        // the arr's redownload searches monitored items only.
-        const interactive = rawHistory === undefined ? false : rawHistory === null || isInteractiveGrab(service, arrId, rawHistory, mark.grab);
-        const markFiles = deleted.filter((f) => mark.fileIds.includes(f.id));
-        if (redownloadCovers(settings, interactive, available) && !markFiles.some(monitor.stillUnmonitored)) {
-          redownloading++;
-          for (const fileId of mark.fileIds) covered.add(fileId);
-        }
-      }
-
-      const uncovered = deleted.filter((f) => !covered.has(f.id));
-      const search = followUpSearch(scope, uncovered, covered.size > 0, remaining, uncovered.some(monitor.stillUnmonitored));
-      let searched = false;
-      let nothingMissing = false;
-      let searchError: unknown = null;
-      if (search) {
-        try {
-          const outcome = await runSearch(search, instance, arrId, uncovered);
-          searched = outcome === "queued";
-          nothingMissing = outcome === "nothingMissing";
-        } catch (err) {
-          searchError = err;
-          console.warn(`[issues] ${service} instance "${sanitizeForLog(instance)}" replacement search failed:`, arrErrorMessage(err));
-        }
-      }
-
-      // Recorded OUTSIDE the try/catch blocks above, as the release grab does: the
-      // arr has already deleted the files and queued the follow-up, so a failure
-      // here must not read as the replace failing (the usual cause is the issue
-      // being deleted meanwhile — P2003 on the IssueGrab -> Issue link). The row
-      // makes the next import of the issue's scope on this instance notify the
-      // admin like a grab's: the webhooks match IssueGrab by title, instance and
-      // scope, never by release, so a search-based replacement matches the same way.
-      // It supersedes the issue's earlier pending grabs on this instance (one
-      // import, one announcement — recordIssueGrab).
-      if (marked > 0 || searched) {
-        const rawTvdb = loaded.raw?.tvdbId;
-        try {
-          await recordIssueGrab({
-            issueId: id,
-            triggeredById: session.user.id,
-            tmdbId: issue.tmdbId,
-            tvdbId: issue.tvdbId ?? (service === "sonarr" && typeof rawTvdb === "number" && Number.isSafeInteger(rawTvdb) && rawTvdb > 0 ? rawTvdb : null),
-            mediaType: issue.mediaType,
-            title: issue.title,
-            scope: issue.scope,
-            seasonNumber: issue.seasonNumber,
-            episodeNumber: issue.episodeNumber,
-            arrInstance: instance,
-          });
-        } catch (err) {
-          console.warn("[issues] Replace file succeeded but recording the grab failed (issue deleted meanwhile?):", err);
-        }
-      }
-
-      const result = {
-        deleted: deletedIds.length,
-        requested: chosen.length,
-        marked,
-        // Marks the arr refused or failed — those files were searched for instead.
-        unmarked: marks.length - marked,
-        searched,
-        // The arr's Redownload Failed switch (null when no mark was planned or it couldn't be read).
-        redownload: settings.failed,
-        // Marks the arr's own redownload searches for (none of ours for their files).
-        redownloading,
-        // What the delete unmonitored and was set back; a failure there means the
-        // files were searched for by name, and may stay unmonitored in the arr.
-        remonitored: monitor.remonitored,
-        remonitorFailed: monitor.failed,
-        nothingMissing,
-      };
-      if (searchError) {
-        return NextResponse.json(
-          { ...result, error: t("apiUser.issues.replaceFile.searchFailed", { count: deletedIds.length, service: ARR_SERVICE_LABEL[service] }) },
-          { status: 502 },
-        );
-      }
-      if (deleteError) {
-        return NextResponse.json(
-          { ...result, error: t("apiAdmin.arr.partialDelete", { done: deletedIds.length, total: chosen.length }) },
-          { status: 502 },
-        );
-      }
-      return NextResponse.json(result);
-    };
-
-    if (background !== true) return await replaceFiles();
-    const { jobId } = startArrJob(session.user.id, jobKey(id, instance, then, fileIds), async () => {
-      try {
-        return await answerOf(await replaceFiles());
-      } finally {
-        inFlight.delete(id);
-      }
-    });
-    jobOwnsClaim = true;
-    return NextResponse.json({ job: jobId }, { status: 202 });
-  } finally {
-    // The inline replace (or a refusal before it) ends here; a job releases its own.
-    if (!jobOwnsClaim) inFlight.delete(id);
-  }
+  return runClaimedReplace(issue, run, background ? jobKey(id, instance, then, fileIds) : null, session, req);
 });

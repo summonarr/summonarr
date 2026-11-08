@@ -3,12 +3,21 @@
 // date, garbage) is treated as "unknown" rather than printing a huge number.
 export const RETRY_AFTER_MAX_SECONDS = 3600;
 
-export function parseRetryAfterSeconds(header: string | null | undefined): number | null {
+// The one Retry-After reader, shared by every browser-side caller (this
+// module's message, the bulk search's retry, the Plex PIN poll); each applies
+// its own bounds. Delta-seconds only, as Summonarr's routes and plex.tv send
+// it: 1–6 digits, 0 included. An HTTP-date, a fraction or garbage is null.
+// Pure and zero-import.
+export function retryAfterDeltaSeconds(header: string | null | undefined): number | null {
   if (!header) return null;
   const trimmed = header.trim();
   if (!/^\d{1,6}$/.test(trimmed)) return null;
-  const n = Number(trimmed);
-  if (!Number.isFinite(n) || n < 1) return null;
+  return Number(trimmed);
+}
+
+export function parseRetryAfterSeconds(header: string | null | undefined): number | null {
+  const n = retryAfterDeltaSeconds(header);
+  if (n === null || n < 1) return null;
   return Math.min(n, RETRY_AFTER_MAX_SECONDS);
 }
 

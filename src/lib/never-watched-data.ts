@@ -247,16 +247,88 @@ interface Working {
   seasonUnknown: Acc;
 }
 
-export async function loadLibraryWatchFacts(
-  arr: ArrLibraryIndex | null,
-  opts: { only?: readonly TitleKey[]; seasons?: boolean; now?: Date } = {},
-): Promise<LibraryWatchFacts> {
-  const now = opts.now ?? new Date();
-  const only = opts.only;
-  const onlyIds = only ? [...new Set(only.map((k) => k.tmdbId))] : null;
-  const onlyKeys = only ? new Set(only.map((k) => cleanupKey(k.tmdbId, k.mediaType))) : null;
-  const idFilter = onlyIds ? { tmdbId: { in: onlyIds } } : {};
+// ── stage 1: index the library rows ─────────────────────────────────────────
 
+type LibraryRow = { tmdbId: number; mediaType: string; serverInstance: string; title: string | null; year: string | null; addedAt: Date | null };
+
+// Everything the evidence stages look a play up by, built once from the
+// library rows.
+interface LibraryIndex {
+  byKey: Map<string, Working>;
+  // (source|instance|itemKey) → EVERY title key answering to it, for movies and
+  // for shows separately (one key can sit on two titles — see the header).
+  movieKeys: Map<string, string[]>;
+  showKeys: Map<string, string[]>;
+  // The bare keys and the movie keys' sources, collected as they are indexed
+  // (the narrowed read's filters), never parsed back out of the composite keys.
+  movieItemKeys: Set<string>;
+  showItemKeys: Set<string>;
+  movieKeySources: Set<NwSource>;
+  // (normalized title|mediaType) → title keys, for soft matching. Deliberately
+  // NOT per server: a play the server couldn't identify — or one from a server
+  // whose library holding the title isn't synced (its `Libraries` selection) —
+  // is stored with no tmdb id and a key no library row answers to, on a server
+  // that holds no such title, while the file it played is the one another
+  // server holds. Soft evidence only ever withholds eligibility, so matching it
+  // anywhere leans the safe way (14d). It is also what keeps the narrowed read
+  // at parity: whether a play matches a title depends on that pair alone, never
+  // on which OTHER titles a server holds (the narrowed read can't see those).
+  titleIndex: Map<string, string[]>;
+}
+
+function newWorking(r: LibraryRow, mediaType: CleanupMediaType): Working {
+  return {
+    t: {
+      tmdbId: r.tmdbId, mediaType, title: r.title ?? "", year: r.year,
+      servers: [], holders: [], addedAt: null, playingNow: false,
+    },
+    titles: new Set(),
+    addedDates: [],
+    show: newAcc(),
+    seasons: new Map(),
+    seasonUnknown: newAcc(),
+  };
+}
+
+function absorbLibraryRow(ix: LibraryIndex, r: LibraryRow, source: NwSource, itemKeys: string[], onlyKeys: ReadonlySet<string> | null): void {
+  if (r.mediaType !== "MOVIE" && r.mediaType !== "TV") return;
+  const key = cleanupKey(r.tmdbId, r.mediaType);
+  if (onlyKeys && !onlyKeys.has(key)) return;
+  let w = ix.byKey.get(key);
+  if (!w) {
+    w = newWorking(r, r.mediaType);
+    ix.byKey.set(key, w);
+  }
+  const server = mediaInstanceLabel(source, r.serverInstance);
+  if (!w.t.servers.includes(server)) {
+    w.t.servers.push(server);
+    w.t.holders.push({ server, source });
+  }
+  if (r.addedAt) {
+    w.addedDates.push(r.addedAt);
+    w.t.addedAt = earliestDate(w.t.addedAt, r.addedAt);
+  }
+  if (!w.t.title && r.title) w.t.title = r.title;
+  const ownTitle = r.title?.trim();
+  if (ownTitle) w.titles.add(ownTitle);
+  if (!w.t.year && r.year) w.t.year = r.year;
+  const isMovie = r.mediaType === "MOVIE";
+  for (const k of itemKeys) {
+    pushUnique(isMovie ? ix.movieKeys : ix.showKeys, keyOf(source, r.serverInstance, k), key);
+    (isMovie ? ix.movieItemKeys : ix.showItemKeys).add(k);
+    if (isMovie) ix.movieKeySources.add(source);
+  }
+  const norm = normalizeTitleKey(r.title);
+  if (norm) pushUnique(ix.titleIndex, `${norm}|${r.mediaType}`, key);
+}
+
+const plexItemKeys = (r: { plexRatingKey: string | null; plexRatingKeys: string[] | null }) =>
+  [r.plexRatingKey, ...(r.plexRatingKeys ?? [])].filter((k): k is string => !!k);
+const jellyfinItemKeys = (r: { jellyfinItemId: string | null; jellyfinItemIds: string[] | null }) =>
+  [r.jellyfinItemId, ...(r.jellyfinItemIds ?? [])].filter((k): k is string => !!k);
+
+async function loadLibraryIndex(onlyIds: number[] | null, onlyKeys: ReadonlySet<string> | null) {
+  const idFilter = onlyIds ? { tmdbId: { in: onlyIds } } : {};
   const [plexRows, jfRows] = await Promise.all([
     prisma.plexLibraryItem.findMany({
       where: idFilter,
@@ -273,119 +345,70 @@ export async function loadLibraryWatchFacts(
       },
     }),
   ]);
-
-  const byKey = new Map<string, Working>();
-  // (source|instance|itemKey) → EVERY title key answering to it, for movies and
-  // for shows separately (one key can sit on two titles — see the header).
-  const movieKeys = new Map<string, string[]>();
-  const showKeys = new Map<string, string[]>();
-  // (normalized title|mediaType) → title keys, for soft matching. Deliberately
-  // NOT per server: a play the server couldn't identify — or one from a server
-  // whose library holding the title isn't synced (its `Libraries` selection) —
-  // is stored with no tmdb id and a key no library row answers to, on a server
-  // that holds no such title, while the file it played is the one another
-  // server holds. Soft evidence only ever withholds eligibility, so matching it
-  // anywhere leans the safe way (14d). It is also what keeps the narrowed read
-  // at parity: whether a play matches a title depends on that pair alone, never
-  // on which OTHER titles a server holds (the narrowed read can't see those).
-  const titleIndex = new Map<string, string[]>();
-  const indexTitle = (title: string | null, mediaType: CleanupMediaType, key: string) => {
-    const norm = normalizeTitleKey(title);
-    if (!norm) return;
-    pushUnique(titleIndex, `${norm}|${mediaType}`, key);
+  const ix: LibraryIndex = {
+    byKey: new Map(), movieKeys: new Map(), showKeys: new Map(),
+    movieItemKeys: new Set(), showItemKeys: new Set(), movieKeySources: new Set(), titleIndex: new Map(),
   };
-
-  const absorb = (
-    r: { tmdbId: number; mediaType: string; serverInstance: string; title: string | null; year: string | null; addedAt: Date | null },
-    source: NwSource,
-    itemKeys: string[],
-  ) => {
-    if (r.mediaType !== "MOVIE" && r.mediaType !== "TV") return;
-    const key = cleanupKey(r.tmdbId, r.mediaType);
-    if (onlyKeys && !onlyKeys.has(key)) return;
-    let w = byKey.get(key);
-    if (!w) {
-      w = {
-        t: {
-          tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title ?? "", year: r.year,
-          servers: [], holders: [], addedAt: null, playingNow: false,
-        },
-        titles: new Set(),
-        addedDates: [],
-        show: newAcc(),
-        seasons: new Map(),
-        seasonUnknown: newAcc(),
-      };
-      byKey.set(key, w);
-    }
-    const server = mediaInstanceLabel(source, r.serverInstance);
-    if (!w.t.servers.includes(server)) {
-      w.t.servers.push(server);
-      w.t.holders.push({ server, source });
-    }
-    if (r.addedAt) {
-      w.addedDates.push(r.addedAt);
-      w.t.addedAt = earliestDate(w.t.addedAt, r.addedAt);
-    }
-    if (!w.t.title && r.title) w.t.title = r.title;
-    const ownTitle = r.title?.trim();
-    if (ownTitle) w.titles.add(ownTitle);
-    if (!w.t.year && r.year) w.t.year = r.year;
-    const target = r.mediaType === "MOVIE" ? movieKeys : showKeys;
-    for (const k of itemKeys) pushUnique(target, keyOf(source, r.serverInstance, k), key);
-    indexTitle(r.title, r.mediaType, key);
-  };
-  for (const r of plexRows) {
-    absorb(r, "plex", [r.plexRatingKey, ...(r.plexRatingKeys ?? [])].filter((k): k is string => !!k));
-  }
-  for (const r of jfRows) {
-    absorb(r, "jellyfin", [r.jellyfinItemId, ...(r.jellyfinItemIds ?? [])].filter((k): k is string => !!k));
-  }
-
+  for (const r of plexRows) absorbLibraryRow(ix, r, "plex", plexItemKeys(r), onlyKeys);
+  for (const r of jfRows) absorbLibraryRow(ix, r, "jellyfin", jellyfinItemKeys(r), onlyKeys);
+  // Every server holding ANY of the rows read (coverage's `holds`).
   const holderServers = new Map<string, { source: NwSource; instance: string }>();
   for (const r of plexRows) holderServers.set(mediaInstanceLabel("plex", r.serverInstance), { source: "plex", instance: r.serverInstance });
   for (const r of jfRows) holderServers.set(mediaInstanceLabel("jellyfin", r.serverInstance), { source: "jellyfin", instance: r.serverInstance });
-  const coverageAndStatus = loadCoverage(now, [...holderServers.values()]);
-  if (byKey.size === 0) {
-    const { ctx, coverage, historyStart } = await coverageAndStatus;
-    return { titles: [], ctx, coverage, unplacedPlays: 0, softPlays: 0, historyStart };
-  }
+  return { ix, holderServers: [...holderServers.values()] };
+}
 
-  // Bound every evidence read to the chosen titles when narrowed — by tmdb id OR
-  // key OR title, never tmdb id alone (see the header).
-  const allMovieKeys = only ? [...new Set([...movieKeys.keys()].map((k) => k.split("|").slice(2).join("|")))] : null;
-  const allShowKeys = only ? [...new Set([...showKeys.keys()].map((k) => k.split("|").slice(2).join("|")))] : null;
-  // The sources those movie keys were read from. Narrowed only, and NOT an
-  // evidence filter: a key-attributed group counts only when (source, instance,
-  // key) is in movieKeys, so a play from any other source could never match.
-  // What it buys is the index — PlayHistory's only sourceItemId index is led by
-  // `source`, and without that predicate (Postgres has no skip scan) the
-  // detail-page chip's movie read scans the whole table.
-  const movieKeySources = only ? [...new Set([...movieKeys.keys()].map((k) => k.split("|")[0]))] : null;
+// ── stage 2: read the evidence ──────────────────────────────────────────────
+
+// The narrowed read's filters (all null on the full read). Bound to the chosen
+// titles by tmdb id OR key OR title, never tmdb id alone (see the header).
+interface EvidenceScope {
+  onlyIds: number[] | null;
+  movieKeys: string[] | null;
+  showKeys: string[] | null;
+  // The sources those movie keys were read from. NOT an evidence filter: a
+  // key-attributed group counts only when (source, instance, key) is in
+  // movieKeys, so a play from any other source could never match. What it buys
+  // is the index — PlayHistory's only sourceItemId index is led by `source`,
+  // and without that predicate (Postgres has no skip scan) the detail-page
+  // chip's movie read scans the whole table.
+  movieKeySources: NwSource[] | null;
+  titles: string[] | null;
+}
+
+function evidenceScope(ix: LibraryIndex, onlyIds: number[] | null): EvidenceScope {
+  if (!onlyIds) return { onlyIds: null, movieKeys: null, showKeys: null, movieKeySources: null, titles: null };
   // Every holder row's own title, not one per title: a Plex "The Office (US)"
   // never ILIKE-contains a Jellyfin play titled "The Office". Trimmed (in
-  // absorb), as normalizeTitleKey trims, so a padded holder title still narrows.
-  const narrowTitles = only ? [...new Set([...byKey.values()].flatMap((w) => [...w.titles]))] : null;
+  // absorbLibraryRow), as normalizeTitleKey trims, so a padded holder title
+  // still narrows.
+  const narrowTitles = [...new Set([...ix.byKey.values()].flatMap((w) => [...w.titles]))];
   // A backslash title gets the full read's unfiltered query instead: Prisma's
   // `contains` binds the term unescaped into an ILIKE with no ESCAPE clause
   // (sanitize.ts), and Postgres reads the backslash as its default LIKE escape,
   // so `%Foo\Bar%` misses "Foo\Bar" itself — the filter would no longer be a
   // superset of the in-memory match. `%` and `_` only widen it, so they stay.
-  const onlyTitles =
-    narrowTitles && narrowTitles.length <= NARROW_TITLE_FILTER_MAX && !narrowTitles.some((t) => t.includes("\\"))
-      ? narrowTitles
-      : null;
-  const tmdbScope = onlyIds ? { in: onlyIds } : { not: null };
+  const titles = narrowTitles.length <= NARROW_TITLE_FILTER_MAX && !narrowTitles.some((t) => t.includes("\\")) ? narrowTitles : null;
+  return {
+    onlyIds,
+    movieKeys: [...ix.movieItemKeys],
+    showKeys: [...ix.showItemKeys],
+    movieKeySources: [...ix.movieKeySources],
+    titles,
+  };
+}
 
-  // The five PlayHistory aggregates are whole-table GROUP BYs on the full read.
-  // At most two hold a pool connection at once (the pool is max 5, and a cleanup
-  // page, the report and the storage stats can each be loading): the cheap
-  // reads beside them still run in parallel (guardrail 31's spirit — never a
-  // $transaction, which would pin them all to one connection anyway).
+// The five PlayHistory aggregates are whole-table GROUP BYs on the full read.
+// At most two hold a pool connection at once (the pool is max 5, and a cleanup
+// page, the report and the storage stats can each be loading): the cheap
+// reads beside them — sessions, upstream records, requests, coverage — still
+// run in parallel (guardrail 31's spirit — never a $transaction, which would
+// pin them all to one connection anyway). The gate bounds the heavy reads only.
+async function readEvidence<C>(scope: EvidenceScope, coverage: Promise<C>) {
   const aggregate = taskGate(EVIDENCE_AGGREGATE_CONCURRENCY);
-  const [
-    byTmdb, byTmdbSeason, byMovieItem, byShow, unattributed, active, upstream, fulfilled, coverageResult,
-  ] = await Promise.all([
+  const tmdbScope = scope.onlyIds ? { in: scope.onlyIds } : { not: null };
+  const idFilter = scope.onlyIds ? { tmdbId: { in: scope.onlyIds } } : {};
+  const [byTmdb, byTmdbSeason, byMovieItem, byShow, unattributed, active, upstream, fulfilled, coverageResult] = await Promise.all([
     aggregate(() => prisma.playHistory.groupBy({
       by: ["tmdbId", "mediaType"],
       where: { tmdbId: tmdbScope },
@@ -398,28 +421,28 @@ export async function loadLibraryWatchFacts(
       _count: { _all: true },
       _max: { startedAt: true },
     })),
-    allMovieKeys && allMovieKeys.length === 0
+    scope.movieKeys && scope.movieKeys.length === 0
       ? Promise.resolve([])
       : aggregate(() => prisma.playHistory.groupBy({
           by: ["source", "serverInstance", "sourceItemId", "tmdbId"],
           where: {
             seasonNumber: null,
-            ...(movieKeySources ? { source: { in: movieKeySources } } : {}),
-            sourceItemId: allMovieKeys ? { in: allMovieKeys } : { not: null },
+            ...(scope.movieKeySources ? { source: { in: scope.movieKeySources } } : {}),
+            sourceItemId: scope.movieKeys ? { in: scope.movieKeys } : { not: null },
           },
           _count: { _all: true },
           _max: { startedAt: true },
         })),
-    allShowKeys && allShowKeys.length === 0
+    scope.showKeys && scope.showKeys.length === 0
       ? Promise.resolve([])
       // Narrowed, this is served by PlayHistory @@index([sourceShowId]).
       : aggregate(() => prisma.playHistory.groupBy({
           by: ["source", "serverInstance", "sourceShowId", "seasonNumber", "tmdbId"],
-          where: { sourceShowId: allShowKeys ? { in: allShowKeys } : { not: null } },
+          where: { sourceShowId: scope.showKeys ? { in: scope.showKeys } : { not: null } },
           _count: { _all: true },
           _max: { startedAt: true },
         })),
-    onlyTitles && onlyTitles.length === 0
+    scope.titles && scope.titles.length === 0
       ? Promise.resolve([])
       : aggregate(() => prisma.playHistory.groupBy({
           by: ["source", "serverInstance", "title", "mediaType", "seasonNumber", "sourceItemId", "sourceShowId"],
@@ -428,8 +451,8 @@ export async function loadLibraryWatchFacts(
             // `contains`, not `equals`: the stored title may carry padding the
             // in-memory normalizeTitleKey trims, and the narrowed read must find
             // every row the full read would (parity, pinned). The exact match is
-            // made below, the same way for both reads.
-            ...(onlyTitles ? { OR: onlyTitles.map((title) => ({ title: { contains: title, mode: "insensitive" as const } })) } : {}),
+            // made in memory, the same way for both reads.
+            ...(scope.titles ? { OR: scope.titles.map((title) => ({ title: { contains: title, mode: "insensitive" as const } })) } : {}),
           },
           _count: { _all: true },
           _max: { startedAt: true },
@@ -441,159 +464,199 @@ export async function loadLibraryWatchFacts(
       },
     }),
     prisma.upstreamWatchEvidence.findMany({
-      where: only ? { itemKey: { in: [...new Set([...(allMovieKeys ?? []), ...(allShowKeys ?? [])])] } } : {},
+      where: scope.onlyIds ? { itemKey: { in: [...new Set([...(scope.movieKeys ?? []), ...(scope.showKeys ?? [])])] } } : {},
       select: { source: true, serverInstance: true, itemKey: true, seasonNumber: true, mediaType: true, playCount: true, lastPlayedAt: true },
     }),
     // Grouped per instance and per cleanup stamp, not just per title: a stamped
     // request's date (and one whose instance re-added the title since) is the
-    // DELETED copy's arrival and is dropped below.
+    // DELETED copy's arrival and is dropped in fulfilledArrivals.
     prisma.mediaRequest.groupBy({
       by: ["tmdbId", "mediaType", "arrInstance", "cleanedUpAt"],
       where: { ...idFilter, status: "AVAILABLE", availableAt: { not: null } },
       _min: { availableAt: true },
     }),
-    coverageAndStatus,
+    coverage,
   ]);
+  return { byTmdb, byTmdbSeason, byMovieItem, byShow, unattributed, active, upstream, fulfilled, coverageResult };
+}
 
-  const get = (tmdbId: number | null, mediaType: string | null) =>
-    tmdbId == null || mediaType == null ? undefined : byKey.get(cleanupKey(tmdbId, mediaType));
-  const seasonAcc = (w: Working, season: number | null): Acc => {
-    if (season == null || season < 0) return w.seasonUnknown;
-    let acc = w.seasons.get(season);
-    if (!acc) {
-      acc = newAcc();
-      w.seasons.set(season, acc);
-    }
-    return acc;
-  };
-  // Hard evidence for a show also lands on its season (or "season unknown").
-  const hardTv = (w: Working, season: number | null, count: number, at: Date | null) => {
-    addHard(w.show, count, at);
-    addHard(seasonAcc(w, season), count, at);
-  };
+type Evidence = Omit<Awaited<ReturnType<typeof readEvidence>>, "coverageResult">;
+type SessionRow = Evidence["active"][number];
 
+// ── stage 3: credit the evidence to titles ──────────────────────────────────
+
+function titleFor(ix: LibraryIndex, tmdbId: number | null, mediaType: string | null): Working | undefined {
+  return tmdbId == null || mediaType == null ? undefined : ix.byKey.get(cleanupKey(tmdbId, mediaType));
+}
+
+function seasonAcc(w: Working, season: number | null): Acc {
+  if (season == null || season < 0) return w.seasonUnknown;
+  let acc = w.seasons.get(season);
+  if (!acc) {
+    acc = newAcc();
+    w.seasons.set(season, acc);
+  }
+  return acc;
+}
+
+// Hard evidence for a show also lands on its season (or "season unknown").
+function addHardTv(w: Working, season: number | null, count: number, at: Date | null): void {
+  addHard(w.show, count, at);
+  addHard(seasonAcc(w, season), count, at);
+}
+
+// A play of the title's own type: a show's also lands on its season.
+function addHardPlay(w: Working, season: number | null, count: number, at: Date | null): void {
+  if (w.t.mediaType === "TV") addHardTv(w, season, count, at);
+  else addHard(w.show, count, at);
+}
+
+function addSoftPlay(w: Working, mediaType: CleanupMediaType, season: number | null, count: number, at: Date | null, server: string): void {
+  addSoft(w.show, count, at, server);
+  if (mediaType === "TV") addSoft(seasonAcc(w, season), count, at, server);
+}
+
+function titlesForKey(ix: LibraryIndex, map: Map<string, string[]>, source: string, instance: string, itemKey: string | null): Working[] {
+  return itemKey ? (map.get(keyOf(source, instance, itemKey)) ?? []).map((k) => ix.byKey.get(k)!) : [];
+}
+
+// Every title a live session is: by tmdb id AND by its item and show keys —
+// the tmdb id the poller stored can name a different library title than the
+// one owning the key (a conflation, a rematch done in Plex), and both are it.
+function sessionTitles(ix: LibraryIndex, a: SessionRow): Set<Working> {
+  const out = new Set<Working>(titlesForKey(ix, ix.movieKeys, a.source, a.serverInstance, a.sourceItemId));
+  for (const w of titlesForKey(ix, ix.showKeys, a.source, a.serverInstance, a.sourceShowId)) out.add(w);
+  const byTmdbId = titleFor(ix, a.tmdbId, a.mediaType);
+  if (byTmdbId) out.add(byTmdbId);
+  return out;
+}
+
+// Any server's same-named title (see titleIndex); the play's own server is
+// still the one recorded in softServers (display only).
+function softTitleKeys(ix: LibraryIndex, source: string, title: string | null, mediaType: CleanupMediaType): string[] {
+  return isSource(source) ? (ix.titleIndex.get(`${normalizeTitleKey(title)}|${mediaType}`) ?? []) : [];
+}
+
+function ownsKey(ix: LibraryIndex, source: string, instance: string, itemKey: string | null, showKey: string | null): boolean {
+  return (!!itemKey && ix.movieKeys.has(keyOf(source, instance, itemKey))) ||
+    (!!showKey && ix.showKeys.has(keyOf(source, instance, showKey)));
+}
+
+type ForeignKeys = { movie: Set<string>; show: Set<string> } | null;
+
+// Placed by a key — the chosen titles' own (already counted as hard), or in the
+// narrowed read another library title's.
+function placedByKey(ix: LibraryIndex, foreign: ForeignKeys, source: string, instance: string, itemKey: string | null, showKey: string | null): boolean {
+  return ownsKey(ix, source, instance, itemKey, showKey) ||
+    (!!foreign && (
+      (!!itemKey && foreign.movie.has(keyOf(source, instance, itemKey))) ||
+      (!!showKey && foreign.show.has(keyOf(source, instance, showKey)))
+    ));
+}
+
+// 1–3: recorded plays by tmdb id, by the movie's own item key and by the show's
+// key. A key-attributed group whose tmdb id IS the title's was already counted
+// by tmdb id — skipped, or the play count doubles.
+function creditRecordedPlays(ix: LibraryIndex, ev: Evidence): void {
   // 1. By tmdb id (show-level; the per-season split comes from byTmdbSeason).
-  for (const p of byTmdb) {
-    const w = get(p.tmdbId, p.mediaType);
+  for (const p of ev.byTmdb) {
+    const w = titleFor(ix, p.tmdbId, p.mediaType);
     if (w) addHard(w.show, p._count._all, p._max.startedAt ?? null);
   }
-  for (const p of byTmdbSeason) {
-    const w = get(p.tmdbId, "TV");
+  for (const p of ev.byTmdbSeason) {
+    const w = titleFor(ix, p.tmdbId, "TV");
     if (w) addHard(seasonAcc(w, p.seasonNumber), p._count._all, p._max.startedAt ?? null);
   }
-  const titlesFor = (map: Map<string, string[]>, source: string, instance: string, itemKey: string | null): Working[] =>
-    itemKey ? (map.get(keyOf(source, instance, itemKey)) ?? []).map((k) => byKey.get(k)!) : [];
-  // 2. By the movie's own item key — every title answering to it. A group whose
-  //    tmdb id IS that title's was already counted in 1 — skip it, or the play
-  //    count doubles.
-  for (const p of byMovieItem) {
-    for (const w of titlesFor(movieKeys, p.source, p.serverInstance, p.sourceItemId)) {
+  // 2. By the movie's own item key — every title answering to it.
+  for (const p of ev.byMovieItem) {
+    for (const w of titlesForKey(ix, ix.movieKeys, p.source, p.serverInstance, p.sourceItemId)) {
       if (p.tmdbId === w.t.tmdbId) continue;
       addHard(w.show, p._count._all, p._max.startedAt ?? null);
     }
   }
   // 3. By the show's key — same double-count rule.
-  for (const p of byShow) {
-    for (const w of titlesFor(showKeys, p.source, p.serverInstance, p.sourceShowId)) {
+  for (const p of ev.byShow) {
+    for (const w of titlesForKey(ix, ix.showKeys, p.source, p.serverInstance, p.sourceShowId)) {
       if (p.tmdbId === w.t.tmdbId) continue;
-      hardTv(w, p.seasonNumber, p._count._all, p._max.startedAt ?? null);
+      addHardTv(w, p.seasonNumber, p._count._all, p._max.startedAt ?? null);
     }
   }
-  // Every title a live session is: by tmdb id AND by its item and show keys —
-  // the tmdb id the poller stored can name a different library title than the
-  // one owning the key (a conflation, a rematch done in Plex), and both are it.
-  const sessionTitles = (a: (typeof active)[number]): Set<Working> => {
-    const out = new Set<Working>(titlesFor(movieKeys, a.source, a.serverInstance, a.sourceItemId));
-    for (const w of titlesFor(showKeys, a.source, a.serverInstance, a.sourceShowId)) out.add(w);
-    const byTmdbId = get(a.tmdbId, a.mediaType);
-    if (byTmdbId) out.add(byTmdbId);
-    return out;
-  };
-  // Any server's same-named title (see titleIndex); the play's own server is
-  // still the one recorded in softServers (display only).
-  const softTitles = (source: string, title: string | null, mediaType: CleanupMediaType): string[] =>
-    isSource(source) ? (titleIndex.get(`${normalizeTitleKey(title)}|${mediaType}`) ?? []) : [];
-  const ownsKey = (source: string, instance: string, itemKey: string | null, showKey: string | null) =>
-    (!!itemKey && movieKeys.has(keyOf(source, instance, itemKey))) ||
-    (!!showKey && showKeys.has(keyOf(source, instance, showKey)));
-  // Narrowed only: the item/show keys of OTHER library titles that a tmdb-less
-  // play or session would otherwise soft-match onto a chosen one by title. The
-  // full read places those by key (hard, on the other title), so this read must
-  // too — only the keys a soft match would actually use are looked up.
-  const foreign = only
-    ? await loadForeignKeys([
-        ...unattributed.map((p) => ({ ...p, mediaType: playMediaType(p.mediaType, p.seasonNumber) })),
-        ...active
-          .filter((a) => a.tmdbId == null && sessionTitles(a).size === 0)
-          .map((a) => ({ ...a, mediaType: playMediaType(a.mediaType, a.seasonNumber) })),
-      ].filter((p) =>
-        !ownsKey(p.source, p.serverInstance, p.sourceItemId, p.sourceShowId) &&
-        softTitles(p.source, p.title, p.mediaType).length > 0,
-      ))
-    : null;
-  // Placed by a key — the chosen titles' own (already counted above, as hard),
-  // or in the narrowed read another library title's.
-  const placedByKey = (source: string, instance: string, itemKey: string | null, showKey: string | null) =>
-    ownsKey(source, instance, itemKey, showKey) ||
-    (!!foreign && (
-      (!!itemKey && foreign.movie.has(keyOf(source, instance, itemKey))) ||
-      (!!showKey && foreign.show.has(keyOf(source, instance, showKey)))
-    ));
-  // Unattributed plays: placed by key or by title (soft), or nowhere.
+}
+
+// Narrowed only: the item/show keys of OTHER library titles that a tmdb-less
+// play or session would otherwise soft-match onto a chosen one by title. The
+// full read places those by key (hard, on the other title), so this read must
+// too — only the keys a soft match would actually use are looked up.
+async function foreignKeysFor(ix: LibraryIndex, ev: Evidence): Promise<ForeignKeys> {
+  return loadForeignKeys([
+    ...ev.unattributed.map((p) => ({ ...p, mediaType: playMediaType(p.mediaType, p.seasonNumber) })),
+    ...ev.active
+      .filter((a) => a.tmdbId == null && sessionTitles(ix, a).size === 0)
+      .map((a) => ({ ...a, mediaType: playMediaType(a.mediaType, a.seasonNumber) })),
+  ].filter((p) =>
+    !ownsKey(ix, p.source, p.serverInstance, p.sourceItemId, p.sourceShowId) &&
+    softTitleKeys(ix, p.source, p.title, p.mediaType).length > 0,
+  ));
+}
+
+// Unattributed plays: placed by key (already credited, or another title's), by
+// title (soft), or nowhere.
+function creditUnattributed(ix: LibraryIndex, foreign: ForeignKeys, ev: Evidence): { unplacedPlays: number; softPlays: number } {
   let unplacedPlays = 0;
   let softPlays = 0;
-  for (const p of unattributed) {
+  for (const p of ev.unattributed) {
     const n = p._count._all;
-    if (placedByKey(p.source, p.serverInstance, p.sourceItemId, p.sourceShowId)) continue;
+    if (placedByKey(ix, foreign, p.source, p.serverInstance, p.sourceItemId, p.sourceShowId)) continue;
     if (!isSource(p.source)) continue;
     const server = mediaInstanceLabel(p.source, p.serverInstance);
     const mediaType = playMediaType(p.mediaType, p.seasonNumber);
-    const keys = softTitles(p.source, p.title, mediaType);
+    const keys = softTitleKeys(ix, p.source, p.title, mediaType);
     if (keys.length === 0) {
       unplacedPlays += n;
       continue;
     }
     softPlays += n;
-    for (const key of keys) {
-      const w = byKey.get(key)!;
-      addSoft(w.show, n, p._max.startedAt ?? null, server);
-      if (mediaType === "TV") addSoft(seasonAcc(w, p.seasonNumber), n, p._max.startedAt ?? null, server);
-    }
+    for (const key of keys) addSoftPlay(ix.byKey.get(key)!, mediaType, p.seasonNumber, n, p._max.startedAt ?? null, server);
   }
-  // 4. Playing now — a session is one (live) play, matched the same ways, and
-  //    credited ONCE to each title it is.
-  for (const a of active) {
-    const credited = sessionTitles(a);
+  return { unplacedPlays, softPlays };
+}
+
+// 4. Playing now — a session is one (live) play, matched the same ways, and
+//    credited ONCE to each title it is.
+function creditSessions(ix: LibraryIndex, foreign: ForeignKeys, ev: Evidence): void {
+  for (const a of ev.active) {
+    const credited = sessionTitles(ix, a);
     for (const w of credited) {
       w.t.playingNow = true;
-      if (w.t.mediaType === "TV") hardTv(w, a.seasonNumber, 1, a.lastSeenAt);
-      else addHard(w.show, 1, a.lastSeenAt);
+      addHardPlay(w, a.seasonNumber, 1, a.lastSeenAt);
     }
     if (credited.size > 0) continue;
-    if (a.tmdbId == null && isSource(a.source) && !placedByKey(a.source, a.serverInstance, a.sourceItemId, a.sourceShowId)) {
+    if (a.tmdbId == null && isSource(a.source) && !placedByKey(ix, foreign, a.source, a.serverInstance, a.sourceItemId, a.sourceShowId)) {
       const server = mediaInstanceLabel(a.source, a.serverInstance);
       const mediaType = playMediaType(a.mediaType, a.seasonNumber);
-      for (const key of softTitles(a.source, a.title, mediaType)) {
-        const sw = byKey.get(key)!;
-        addSoft(sw.show, 1, a.lastSeenAt, server);
-        if (mediaType === "TV") addSoft(seasonAcc(sw, a.seasonNumber), 1, a.lastSeenAt, server);
+      for (const key of softTitleKeys(ix, a.source, a.title, mediaType)) {
+        addSoftPlay(ix.byKey.get(key)!, mediaType, a.seasonNumber, 1, a.lastSeenAt, server);
       }
     }
   }
-  // 5. The media server's own records — keyed by upstream id, joined here,
-  //    crediting every title the key answers to.
-  for (const u of upstream) {
-    for (const w of titlesFor(u.mediaType === "MOVIE" ? movieKeys : showKeys, u.source, u.serverInstance, u.itemKey)) {
-      if (w.t.mediaType === "TV") hardTv(w, u.seasonNumber, Math.max(1, u.playCount), u.lastPlayedAt);
-      else addHard(w.show, Math.max(1, u.playCount), u.lastPlayedAt);
+}
+
+// 5. The media server's own records — keyed by upstream id, joined here,
+//    crediting every title the key answers to.
+function creditUpstream(ix: LibraryIndex, ev: Evidence): void {
+  for (const u of ev.upstream) {
+    for (const w of titlesForKey(ix, u.mediaType === "MOVIE" ? ix.movieKeys : ix.showKeys, u.source, u.serverInstance, u.itemKey)) {
+      addHardPlay(w, u.seasonNumber, Math.max(1, u.playCount), u.lastPlayedAt);
     }
   }
+}
 
-  // A fulfilled request's availableAt is an arrival only for a copy that is
-  // still the one on the shelf: never a request stamped by a deliberate delete
-  // (14b), and never one whose instance has (re-)added the title SINCE — that
-  // entry is a new arrival after the removal, so the old delivery belongs to the
-  // deleted copy. Dropping a date only ever moves the window later (14d).
+// A fulfilled request's availableAt is an arrival only for a copy that is
+// still the one on the shelf: never a request stamped by a deliberate delete
+// (14b), and never one whose instance has (re-)added the title SINCE — that
+// entry is a new arrival after the removal, so the old delivery belongs to the
+// deleted copy. Dropping a date only ever moves the window later (14d).
+function fulfilledArrivals(fulfilled: Evidence["fulfilled"], arr: ArrLibraryIndex | null): Map<string, Date> {
   const availableAt = new Map<string, Date>();
   for (const f of fulfilled) {
     const at = f._min.availableAt;
@@ -605,21 +668,30 @@ export async function loadLibraryWatchFacts(
     const prev = availableAt.get(key);
     if (!prev || at.getTime() < prev.getTime()) availableAt.set(key, at);
   }
+  return availableAt;
+}
 
-  const { ctx, coverage, historyStart } = coverageResult;
+// ── stage 4: judge ──────────────────────────────────────────────────────────
+
+function judgeTitles(
+  ix: LibraryIndex,
+  availableAt: Map<string, Date>,
+  ctx: NwContext,
+  coverage: ServerCoverage[],
+  wantSeasons: boolean,
+): { titles: LibraryWatchTitle[]; watchedShows: Array<{ w: Working; out: LibraryWatchTitle }> } {
   const healthByServer = new Map(coverage.map((c) => [c.server, c.upstreamHealth]));
-
   const titles: LibraryWatchTitle[] = [];
   const watchedShows: Array<{ w: Working; out: LibraryWatchTitle }> = [];
-  for (const [key, w] of byKey) {
+  for (const [key, w] of ix.byKey) {
     // The arrival is the earliest date that can only be AT OR AFTER the file
     // reached the shelf: a holder's own addedAt (it resets on a re-add or an
     // upgrade, so it errs late — a shorter claim) and a fulfilled request's
     // delivery. Radarr/Sonarr's `added` is when the title entered the arr — an
     // approval pushed before release, an import-list add, a long wanted wait —
     // so it would open the window before any file existed and turn a title
-    // downloaded last week into "never watched since March". It is used above
-    // only as a bound on availableAt (a re-add since the delivery).
+    // downloaded last week into "never watched since March". It is used only
+    // as a bound on availableAt (a re-add since the delivery).
     const shelfStart = earliestDate(...w.addedDates, availableAt.get(key) ?? null);
     const evidence = toEvidence(w.show);
     const verdict = judgeTitle(w.t.holders, shelfStart, evidence, ctx);
@@ -632,37 +704,77 @@ export async function loadLibraryWatchFacts(
       upstreamUnchecked: w.t.servers.filter((s) => healthByServer.get(s) !== "ok").sort(),
     };
     titles.push(out);
-    if (opts.seasons && w.t.mediaType === "TV" && verdict.state === "watched") watchedShows.push({ w, out });
+    if (wantSeasons && w.t.mediaType === "TV" && verdict.state === "watched") watchedShows.push({ w, out });
+  }
+  return { titles, watchedShows };
+}
+
+// One season's evidence, with what can only be SOFT evidence for it merged in.
+// A season-less play of the show (an episode with no season recorded) could be
+// ANY season. So can every OTHER season's play when the Plex and Jellyfin copies
+// number the show differently: a play's season is the numbering of the server
+// it was watched on, and can't be placed in the other's.
+function seasonEvidence(w: Working, seasonNumber: number, numberingDiffers: boolean): NwEvidence {
+  const ev = toEvidence(w.seasons.get(seasonNumber));
+  const others: Acc[] = [w.seasonUnknown];
+  if (numberingDiffers) for (const [n, acc] of w.seasons) if (n !== seasonNumber) others.push(acc);
+  const extra = others.reduce((sum, a) => sum + a.plays + a.softPlays, 0);
+  if (extra === 0) return ev;
+  return {
+    ...ev,
+    softPlays: ev.softPlays + extra,
+    softLastPlayedAt: latestDate(ev.softLastPlayedAt, ...others.flatMap((a) => [a.lastPlayedAt, a.softLastPlayedAt])),
+    softServers: [...new Set([...ev.softServers, ...others.flatMap((a) => [...a.softServers])])].sort(),
+  };
+}
+
+// Season facts are read for the watched shows only (the only ones judged per
+// season), a chunk of ids at a time so a large library stays well under the
+// bind-parameter limit.
+const SEASON_FACTS_CHUNK = 5_000;
+
+async function attachSeasonVerdicts(watchedShows: Array<{ w: Working; out: LibraryWatchTitle }>, ctx: NwContext): Promise<void> {
+  const ids = [...new Set(watchedShows.map((s) => s.w.t.tmdbId))];
+  const facts = new Map<number, NwSeasonFacts[]>();
+  const mismatched = new Set<number>();
+  for (let i = 0; i < ids.length; i += SEASON_FACTS_CHUNK) {
+    const chunk = await loadSeasonFacts(ids.slice(i, i + SEASON_FACTS_CHUNK));
+    for (const [id, list] of chunk.facts) facts.set(id, list);
+    for (const id of chunk.mismatched) mismatched.add(id);
+  }
+  for (const { w, out } of watchedShows) {
+    const numberingDiffers = mismatched.has(w.t.tmdbId);
+    out.seasons = (facts.get(w.t.tmdbId) ?? []).map((s) =>
+      judgeSeason(out.holders, s, seasonEvidence(w, s.seasonNumber, numberingDiffers), ctx));
+  }
+}
+
+export async function loadLibraryWatchFacts(
+  arr: ArrLibraryIndex | null,
+  opts: { only?: readonly TitleKey[]; seasons?: boolean; now?: Date } = {},
+): Promise<LibraryWatchFacts> {
+  const now = opts.now ?? new Date();
+  const only = opts.only;
+  const onlyIds = only ? [...new Set(only.map((k) => k.tmdbId))] : null;
+  const onlyKeys = only ? new Set(only.map((k) => cleanupKey(k.tmdbId, k.mediaType))) : null;
+
+  const { ix, holderServers } = await loadLibraryIndex(onlyIds, onlyKeys);
+  const coverageAndStatus = loadCoverage(now, holderServers);
+  if (ix.byKey.size === 0) {
+    const { ctx, coverage, historyStart } = await coverageAndStatus;
+    return { titles: [], ctx, coverage, unplacedPlays: 0, softPlays: 0, historyStart };
   }
 
-  if (watchedShows.length > 0) {
-    const { facts, mismatched } = await loadSeasonFacts(onlyIds ? watchedShows.map((s) => s.w.t.tmdbId) : null);
-    for (const { w, out } of watchedShows) {
-      const seasons = facts.get(w.t.tmdbId) ?? [];
-      const numberingDiffers = mismatched.has(w.t.tmdbId);
-      out.seasons = seasons.map((s) => {
-        const ev = toEvidence(w.seasons.get(s.seasonNumber));
-        // A season-less play of the show (an episode with no season recorded)
-        // could be ANY season, so it can only ever be soft evidence for each.
-        // So can every OTHER season's play when the Plex and Jellyfin copies
-        // number the show differently: a play's season is the numbering of the
-        // server it was watched on, and can't be placed in the other's.
-        const others: Acc[] = [w.seasonUnknown];
-        if (numberingDiffers) for (const [n, acc] of w.seasons) if (n !== s.seasonNumber) others.push(acc);
-        const extra = others.reduce((sum, a) => sum + a.plays + a.softPlays, 0);
-        const merged: NwEvidence = extra > 0
-          ? {
-              ...ev,
-              softPlays: ev.softPlays + extra,
-              softLastPlayedAt: latestDate(ev.softLastPlayedAt, ...others.flatMap((a) => [a.lastPlayedAt, a.softLastPlayedAt])),
-              softServers: [...new Set([...ev.softServers, ...others.flatMap((a) => [...a.softServers])])].sort(),
-            }
-          : ev;
-        return judgeSeason(out.holders, s, merged, ctx);
-      });
-    }
-  }
+  const { coverageResult, ...ev } = await readEvidence(evidenceScope(ix, onlyIds), coverageAndStatus);
+  creditRecordedPlays(ix, ev);
+  const foreign = only ? await foreignKeysFor(ix, ev) : null;
+  const { unplacedPlays, softPlays } = creditUnattributed(ix, foreign, ev);
+  creditSessions(ix, foreign, ev);
+  creditUpstream(ix, ev);
 
+  const { ctx, coverage, historyStart } = coverageResult;
+  const { titles, watchedShows } = judgeTitles(ix, fulfilledArrivals(ev.fulfilled, arr), ctx, coverage, opts.seasons === true);
+  if (watchedShows.length > 0) await attachSeasonVerdicts(watchedShows, ctx);
   return { titles, ctx, coverage, unplacedPlays, softPlays, historyStart };
 }
 
@@ -699,17 +811,41 @@ export function shareLibraryWatchFacts(
   opts: { now: Date; seasons: boolean },
 ): SharedWatchFacts {
   let pending: Promise<LibraryWatchFacts> | null = null;
+  // Stays true after a failed load: `started` must stay conservative, since the
+  // failed attempt (and its retry) may still predate an invalidation.
+  let everStarted = false;
   return {
     arr,
     arrAt,
     now: opts.now,
     seasons: opts.seasons,
     get started() {
-      return pending !== null;
+      return everStarted;
     },
     load() {
-      pending ??= loadLibraryWatchFacts(arr, { seasons: opts.seasons, now: opts.now });
+      if (!pending) {
+        everStarted = true;
+        // A failed load is forgotten so the next consumer retries it, instead of
+        // every computation sharing this object replaying one transient error.
+        const p: Promise<LibraryWatchFacts> = loadLibraryWatchFacts(arr, { seasons: opts.seasons, now: opts.now }).catch((err: unknown) => {
+          if (pending === p) pending = null;
+          throw err;
+        });
+        pending = p;
+      }
       return pending;
+    },
+  };
+}
+
+// When tracking (global, and per source) was last switched back on.
+function trackingStamps(settings: ReadonlyMap<string, string>): { globalSince: Date | null; sourceSince: Record<NwSource, Date | null> } {
+  const stamp = (k: string) => parseStampDate(settings.get(k));
+  return {
+    globalSince: stamp(TRACKING_STAMP_KEYS.playHistoryEnabled),
+    sourceSince: {
+      plex: stamp(TRACKING_STAMP_KEYS.playHistoryPlexEnabled),
+      jellyfin: stamp(TRACKING_STAMP_KEYS.playHistoryJellyfinEnabled),
     },
   };
 }
@@ -736,12 +872,7 @@ async function loadCoverage(
     }),
   ]);
   const settings = new Map(settingRows.map((r) => [r.key, r.value]));
-  const stamp = (k: string) => parseStampDate(settings.get(k));
-  const globalSince = stamp(TRACKING_STAMP_KEYS.playHistoryEnabled);
-  const sourceSince: Record<NwSource, Date | null> = {
-    plex: stamp(TRACKING_STAMP_KEYS.playHistoryPlexEnabled),
-    jellyfin: stamp(TRACKING_STAMP_KEYS.playHistoryJellyfinEnabled),
-  };
+  const { globalSince, sourceSince } = trackingStamps(settings);
   const tracked: Record<NwSource, boolean> = { plex: plexOn, jellyfin: jfOn };
 
   const coverage = new Map<string, ServerCoverage>();
@@ -814,7 +945,7 @@ async function firstPlayPerServer() {
 
 // Narrowed read only: which of these tmdb-less plays' item/show keys belong to a
 // library title (any — the chosen ones are already known). Sourced the way
-// absorb() reads them: an item key against MOVIE rows, a show key against TV
+// absorbLibraryRow reads them: an item key against MOVIE rows, a show key against TV
 // rows, every copy's key (plexRatingKeys / jellyfinItemIds) included.
 async function loadForeignKeys(
   plays: ReadonlyArray<{ source: string; serverInstance: string; sourceItemId: string | null; sourceShowId: string | null }>,
@@ -868,10 +999,9 @@ async function loadForeignKeys(
 // A partial copy is not a disagreement: a server holding fewer seasons, or
 // fewer episodes of a season (one not yet scanned, a Libraries difference, a
 // multi-episode file indexed once), is smaller or equal everywhere.
-async function loadSeasonFacts(onlyShowIds: number[] | null): Promise<{ facts: Map<number, NwSeasonFacts[]>; mismatched: Set<number> }> {
-  const scope = onlyShowIds
-    ? Prisma.sql`AND "tmdbId" IN (${Prisma.join(onlyShowIds)})`
-    : Prisma.empty;
+async function loadSeasonFacts(showIds: number[]): Promise<{ facts: Map<number, NwSeasonFacts[]>; mismatched: Set<number> }> {
+  if (showIds.length === 0) return { facts: new Map(), mismatched: new Set() };
+  const scope = Prisma.sql`AND "tmdbId" IN (${Prisma.join(showIds)})`;
   const rows = await prisma.$queryRaw<Array<{
     tmdbId: number;
     seasonNumber: number;

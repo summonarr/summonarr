@@ -4,7 +4,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { arrFailure, arrTitleGate, parseArrId, parseSeasonNumber, type ArrTitleTarget } from "@/lib/arr-admin-http";
 import type { GrabProgress } from "@/lib/arr";
 import { grabTitleRelease, searchTitleReleases, type ReleaseScope } from "@/lib/arr-title-data";
-import { auditContext, logAudit } from "@/lib/audit";
+import { auditActor, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -14,6 +14,9 @@ import { claimReleaseHandle, forgetReleaseHandle, issueReleaseHandles, releaseRe
 import { answerOf, releaseSearchJobResponse, runningReleaseSearchJob, startReleaseSearchJob } from "@/lib/release-search-jobs";
 
 const SEARCH_LIMIT_PER_MIN = 20;
+// Grabs per admin per minute. One search hands out many handles, so the
+// search budget alone doesn't bound how often the arr is told to grab.
+const GRAB_LIMIT_PER_MIN = 20;
 const HANDLE_RE = /^[0-9a-f]{32}$/;
 
 // Admin title manager, interactive search (ADMIN) — pick a release by hand
@@ -37,7 +40,8 @@ const HANDLE_RE = /^[0-9a-f]{32}$/;
 //       client refused it. The handle is spent on success, and on an
 //       unknown outcome; a failure before the grab is sent hands it back. Audited
 //       ARR_RELEASE_GRAB (with the release name) after the arr accepted it;
-//       the guid is never recorded.
+//       the guid is never recorded. 429 past GRAB_LIMIT_PER_MIN per admin,
+//       before the handle is claimed.
 function scopeOf(target: ArrTitleTarget, rawSeason: unknown, rawEpisode: unknown): ReleaseScope | "invalid" {
   const hasSeason = rawSeason !== undefined && rawSeason !== null && rawSeason !== "";
   const hasEpisode = rawEpisode !== undefined && rawEpisode !== null && rawEpisode !== "";
@@ -69,7 +73,7 @@ export const GET = withAdmin(async (req, _ctx, session) => {
   const running = background ? runningReleaseSearchJob(session.user.id, key) : null;
   if (running) return NextResponse.json({ job: running }, { status: 202 });
   if (!checkRateLimit(`arr-title-releases:${session.user.id}`, SEARCH_LIMIT_PER_MIN, 60_000)) {
-    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
   }
   const search = async (): Promise<NextResponse> => {
     try {
@@ -86,9 +90,8 @@ export const GET = withAdmin(async (req, _ctx, session) => {
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, 16 * 1024);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, 16 * 1024);
+  if (body instanceof NextResponse) return body;
   const target = await arrTitleGate(body.service, body.instance, body.id, t);
   if (target instanceof NextResponse) return target;
   const handle = body.release;
@@ -97,7 +100,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
   const scope = scopeOf(target, body.season, body.episodeId);
   if (scope === "invalid") return NextResponse.json({ error: t("apiAdmin.arr.releaseScopeInvalid") }, { status: 400 });
-  const picked = claimReleaseHandle(handleScope(target, scope), handle);
+  // Before the claim: a refused grab must not spend the admin's handle.
+  if (!checkRateLimit(`arr-title-grab:${session.user.id}`, GRAB_LIMIT_PER_MIN, 60_000)) {
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
+  }
+  const picked = claimReleaseHandle(handleScope(target, scope), handle, Date.now(), session.user.id);
   if (picked === "unknown") return NextResponse.json({ error: t("apiUser.requests.releases.handleExpired") }, { status: 410 });
   if (picked === "busy") return NextResponse.json({ error: t("apiUser.requests.releases.grabInProgress") }, { status: 409 });
   const progress: GrabProgress = { sent: false };
@@ -118,8 +125,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
   forgetReleaseHandle(handle);
   void logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email ?? null,
+    ...auditActor(req, session),
     action: "ARR_RELEASE_GRAB",
     target: `${target.service}:${target.instance}:${target.arrId}`,
     details: {
@@ -132,7 +138,6 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       ...(scope && "seasonNumber" in scope ? { season: scope.seasonNumber } : {}),
       ...(scope && "episodeId" in scope ? { episodeId: scope.episodeId } : {}),
     },
-    ...auditContext(req, session),
   });
   return NextResponse.json({ ok: true });
 });

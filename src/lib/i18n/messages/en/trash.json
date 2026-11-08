@@ -113,6 +113,7 @@
   "trash.status.error": "error",
   "trash.status.applied": "applied",
   "trash.status.ready": "ready",
+  "trash.status.notConfigured": "not configured",
   "trash.spec.error.loadDetail": "Could not load detail ({status})",
   "trash.spec.error.network": "Network error — please try again",
   "trash.spec.error.apply": "Apply failed ({status})",
@@ -201,5 +202,15 @@
   "trash.starter.defaultInstanceNote": "Applies to the default Radarr/Sonarr instance. For a named instance, use the Instance picker on the Custom Formats, Quality Profiles or Naming & Sizes tab.",
   "trash.sync.lastRefreshed": "Last refreshed {ago}",
   "trash.sync.neverRefreshed": "Catalog not refreshed yet",
-  "trash.spec.hiddenSelected": "{count} hidden by filter"
+  "trash.spec.hiddenSelected": "{count} hidden by filter",
+  "trash.applyLog.noReason": "no error details returned",
+  "trash.token.remove": "Remove",
+  "trash.token.removed": "Removed",
+  "trash.spec.selectAria": "Select {name}",
+  "trash.spec.selectAllAria": "Select all visible specs",
+  "trash.banner.applyFailed": "Apply failed",
+  "trash.banner.loadFailed": "Couldn't load the profile library",
+  "trash.banner.syncFailed": "Sync Now ran into errors",
+  "trash.banner.stoppedEarly": "stopped before it finished — run it again",
+  "trash.sync.disabledOnServer": "TRaSH sync is turned off on the server — nothing ran"
 }

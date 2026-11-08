@@ -6,12 +6,12 @@
 // so SSR and hydration agree — no Date.now()/locale drift (guardrail 16). Cards
 // self-navigate to /movie|/tv detail via MediaCard's router push.
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import Image from "next/image";
 import { User } from "@/components/icons";
 import { MediaCard } from "@/components/media/media-card";
 import { EmptyState } from "@/components/ui/design";
-import type { PersonDetails, PersonCredit, TmdbMedia } from "@/lib/tmdb-types";
+import { profileUrl, type PersonDetails, type PersonCredit, type TmdbMedia } from "@/lib/tmdb-types";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 // "YYYY-MM-DD" → "June 9, 1963", pinned to UTC + the active UI locale (the
@@ -41,39 +41,109 @@ const DEPARTMENT_KEYS: Record<string, string> = {
 };
 
 // A filmography credit is a subset of TmdbMedia + `character`; fill the required
-// TmdbMedia fields the credit lacks so MediaCard can render it.
-function toMedia(c: PersonCredit): TmdbMedia {
+// TmdbMedia fields the credit lacks so MediaCard can render it. Every other
+// field — the ratings included — is carried by the spread, so a new rating
+// field on the credit reaches the card without an edit here. The token rides
+// MediaCard's own prop, not the media object.
+function toMedia({ character: _character, requestToken: _requestToken, ...credit }: PersonCredit): TmdbMedia {
   return {
-    id: c.id,
-    mediaType: c.mediaType,
-    title: c.title,
+    ...credit,
     overview: "",
-    posterPath: c.posterPath,
     backdropPath: null,
     releaseDate: null,
-    releaseYear: c.releaseYear || null,
-    voteAverage: c.voteAverage,
-    plexAvailable: c.plexAvailable,
-    jellyfinAvailable: c.jellyfinAvailable,
-    arrPending: c.arrPending,
-    requested: c.requested,
-    requestedByMe: c.requestedByMe,
-    blacklisted: c.blacklisted,
-    imdbId: c.imdbId,
-    imdbRating: c.imdbRating,
-    imdbVotes: c.imdbVotes,
-    rottenTomatoes: c.rottenTomatoes,
-    rtAudienceScore: c.rtAudienceScore,
-    metacritic: c.metacritic,
-    traktRating: c.traktRating,
-    letterboxdRating: c.letterboxdRating,
-    mdblistScore: c.mdblistScore,
-    malRating: c.malRating,
-    rogerEbertRating: c.rogerEbertRating,
+    releaseYear: credit.releaseYear || null,
   };
 }
 
+// The filmography filter pills, in order; a type with no credits is hidden.
+type CreditFilter = "all" | "movie" | "tv";
+const FILTER_LABELS: Record<CreditFilter, string> = {
+  all: "detail.person.filterAll",
+  movie: "detail.person.filterMovies",
+  tv: "detail.person.filterTv",
+};
+
 const BIO_CLAMP = 360;
+
+// Photo, name, department, birth/death and the expandable biography.
+function PersonHeader({ person }: { person: PersonDetails }) {
+  const t = useT();
+  const locale = useLocale();
+  const [bioExpanded, setBioExpanded] = useState(false);
+  const born = fmtDate(person.birthday, locale);
+  const died = fmtDate(person.deathday, locale);
+  const departmentKey = person.knownForDepartment
+    ? DEPARTMENT_KEYS[person.knownForDepartment]
+    : undefined;
+  const bio = person.biography?.trim() ?? "";
+  const bioIsLong = bio.length > BIO_CLAMP;
+  const bioText = bioExpanded || !bioIsLong ? bio : `${bio.slice(0, BIO_CLAMP).trimEnd()}…`;
+  const photo = profileUrl(person.profilePath, "w342");
+
+  // No horizontal padding anywhere on this page: unlike movie/tv it is not
+  // bled to the viewport edge, so <main>'s own padding is the inset.
+  return (
+    <div style={{ display: "flex", gap: 20, padding: "16px 0 24px", flexWrap: "wrap" }}>
+      <div
+        className="relative shrink-0 overflow-hidden"
+        style={{ width: 120, height: 180, borderRadius: 8, background: "var(--ds-bg-3)" }}
+      >
+        {photo ? (
+          <Image
+            src={photo}
+            alt={person.name}
+            fill
+            sizes="120px"
+            className="object-cover"
+          />
+        ) : (
+          <div
+            className="absolute inset-0 flex items-center justify-center"
+            style={{ color: "var(--ds-fg-subtle)" }}
+          >
+            <User style={{ width: 36, height: 36 }} />
+          </div>
+        )}
+      </div>
+
+      <div style={{ flex: 1, minWidth: 260 }}>
+        <h1
+          className="font-semibold"
+          style={{ fontSize: 32, letterSpacing: "-0.025em", lineHeight: 1.08, color: "var(--ds-fg)", margin: "0 0 4px" }}
+        >
+          {person.name}
+        </h1>
+        {person.knownForDepartment && (
+          <div className="ds-mono" style={{ fontSize: 12, color: "var(--ds-fg-subtle)", marginBottom: 10 }}>
+            {departmentKey ? t(departmentKey) : person.knownForDepartment}
+          </div>
+        )}
+        {(born || died || person.placeOfBirth) && (
+          <div style={{ fontSize: 12.5, color: "var(--ds-fg-muted)", marginBottom: 12, lineHeight: 1.7 }}>
+            {born && <div>{t("detail.person.born", { date: born })}</div>}
+            {died && <div>{t("detail.person.died", { date: died })}</div>}
+            {person.placeOfBirth && <div>{person.placeOfBirth}</div>}
+          </div>
+        )}
+        {bio && (
+          <p style={{ fontSize: 13.5, color: "var(--ds-fg-muted)", lineHeight: 1.65, margin: 0, maxWidth: 720 }}>
+            {bioText}{" "}
+            {bioIsLong && (
+              <button
+                type="button"
+                onClick={() => setBioExpanded((v) => !v)}
+                className="hover:underline"
+                style={{ background: "none", border: 0, color: "var(--ds-accent-text)", fontSize: 13, padding: "4px 0" }}
+              >
+                {bioExpanded ? t("detail.person.showLess") : t("detail.person.showMore")}
+              </button>
+            )}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export function PersonView({
   person,
@@ -89,86 +159,27 @@ export function PersonView({
   canRequestTv?: boolean;
 }) {
   const t = useT();
-  const locale = useLocale();
-  const [filter, setFilter] = useState<"all" | "movie" | "tv">("all");
-  const [bioExpanded, setBioExpanded] = useState(false);
+  const [filter, setFilter] = useState<CreditFilter>("all");
 
-  const movieCount = person.credits.filter((c) => c.mediaType === "movie").length;
-  const tvCount = person.credits.filter((c) => c.mediaType === "tv").length;
+  // One media object per credit for as long as `person.credits` is the same
+  // list: a fresh object per render defeated memo(MediaCard), so the bio toggle
+  // or a filter switch re-rendered every card.
+  const { mediaByCredit, movieCount, tvCount } = useMemo(() => {
+    const map = new Map<PersonCredit, TmdbMedia>();
+    let movies = 0;
+    let tv = 0;
+    for (const c of person.credits) {
+      map.set(c, toMedia(c));
+      if (c.mediaType === "movie") movies++;
+      else if (c.mediaType === "tv") tv++;
+    }
+    return { mediaByCredit: map, movieCount: movies, tvCount: tv };
+  }, [person.credits]);
   const shown = filter === "all" ? person.credits : person.credits.filter((c) => c.mediaType === filter);
-
-  const born = fmtDate(person.birthday, locale);
-  const died = fmtDate(person.deathday, locale);
-  const departmentKey = person.knownForDepartment
-    ? DEPARTMENT_KEYS[person.knownForDepartment]
-    : undefined;
-  const bio = person.biography?.trim() ?? "";
-  const bioIsLong = bio.length > BIO_CLAMP;
-  const bioText = bioExpanded || !bioIsLong ? bio : `${bio.slice(0, BIO_CLAMP).trimEnd()}…`;
 
   return (
     <div className="ds-page-enter">
-      {/* No horizontal padding anywhere on this page: unlike movie/tv it is not
-          bled to the viewport edge, so <main>'s own padding is the inset. */}
-      <div style={{ display: "flex", gap: 20, padding: "16px 0 24px", flexWrap: "wrap" }}>
-        <div
-          className="relative shrink-0 overflow-hidden"
-          style={{ width: 120, height: 180, borderRadius: 8, background: "var(--ds-bg-3)" }}
-        >
-          {person.profilePath ? (
-            <Image
-              src={`https://image.tmdb.org/t/p/w342${person.profilePath}`}
-              alt={person.name}
-              fill
-              sizes="120px"
-              className="object-cover"
-            />
-          ) : (
-            <div
-              className="absolute inset-0 flex items-center justify-center"
-              style={{ color: "var(--ds-fg-subtle)" }}
-            >
-              <User style={{ width: 36, height: 36 }} />
-            </div>
-          )}
-        </div>
-
-        <div style={{ flex: 1, minWidth: 260 }}>
-          <h1
-            className="font-semibold"
-            style={{ fontSize: 32, letterSpacing: "-0.025em", lineHeight: 1.08, color: "var(--ds-fg)", margin: "0 0 4px" }}
-          >
-            {person.name}
-          </h1>
-          {person.knownForDepartment && (
-            <div className="ds-mono" style={{ fontSize: 12, color: "var(--ds-fg-subtle)", marginBottom: 10 }}>
-              {departmentKey ? t(departmentKey) : person.knownForDepartment}
-            </div>
-          )}
-          {(born || died || person.placeOfBirth) && (
-            <div style={{ fontSize: 12.5, color: "var(--ds-fg-muted)", marginBottom: 12, lineHeight: 1.7 }}>
-              {born && <div>{t("detail.person.born", { date: born })}</div>}
-              {died && <div>{t("detail.person.died", { date: died })}</div>}
-              {person.placeOfBirth && <div>{person.placeOfBirth}</div>}
-            </div>
-          )}
-          {bio && (
-            <p style={{ fontSize: 13.5, color: "var(--ds-fg-muted)", lineHeight: 1.65, margin: 0, maxWidth: 720 }}>
-              {bioText}{" "}
-              {bioIsLong && (
-                <button
-                  type="button"
-                  onClick={() => setBioExpanded((v) => !v)}
-                  className="hover:underline"
-                  style={{ background: "none", border: 0, color: "var(--ds-accent-text)", fontSize: 13, padding: "4px 0" }}
-                >
-                  {bioExpanded ? t("detail.person.showLess") : t("detail.person.showMore")}
-                </button>
-              )}
-            </p>
-          )}
-        </div>
-      </div>
+      <PersonHeader person={person} />
 
       <section style={{ padding: "0 0 32px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
@@ -176,13 +187,8 @@ export function PersonView({
             {t("detail.person.knownFor")}
           </h2>
           <div style={{ display: "inline-flex", gap: 6 }}>
-            {(
-              [
-                ["all", t("detail.person.filterAll"), person.credits.length],
-                ["movie", t("detail.person.filterMovies"), movieCount],
-                ["tv", t("detail.person.filterTv"), tvCount],
-              ] as const
-            ).map(([val, label, count]) => {
+            {(Object.keys(FILTER_LABELS) as CreditFilter[]).map((val) => {
+              const count = val === "all" ? person.credits.length : val === "movie" ? movieCount : tvCount;
               if (val !== "all" && count === 0) return null;
               const active = filter === val;
               return (
@@ -202,7 +208,7 @@ export function PersonView({
                     color: active ? "var(--ds-accent-fg)" : "var(--ds-fg-muted)",
                   }}
                 >
-                  {label} {count}
+                  {t(FILTER_LABELS[val])} {count}
                 </button>
               );
             })}
@@ -220,7 +226,8 @@ export function PersonView({
                 // just-made request's local state; getPersonDetails dedupes
                 // credits per (mediaType, id) so this can't collide.
                 key={`${c.mediaType}-${c.id}`}
-                media={toMedia(c)}
+                // Built from this same list in the memo above, so always present.
+                media={mediaByCredit.get(c)!}
                 size="md"
                 requestToken={c.requestToken}
                 showPlex={showPlex}

@@ -258,6 +258,14 @@ function titleIdentity(e: CalendarEntry): string {
   return `${series}:${e.seasonNumber}:${e.episodeNumber}`;
 }
 
+// A row's identity: one title, on one local day, in one service.
+const rowKeyOf = (e: CalendarEntry, dayKey: string) => `${e.service}|${titleIdentity(e)}|${dayKey}`;
+
+/** The row `calendarDays` folds an entry into. */
+export function calendarRowKey(e: CalendarEntry): string {
+  return rowKeyOf(e, localDayKey(entryMs(e)));
+}
+
 /**
  * Entries → local days → one row per title. A movie whose digital and physical
  * dates share a day, or a title two instances (HD + 4K) both carry, is ONE row
@@ -267,52 +275,110 @@ function titleIdentity(e: CalendarEntry): string {
 export function calendarDays(entries: readonly CalendarEntry[]): CalendarDay[] {
   const days = new Map<string, CalendarDay>();
   const rows = new Map<string, CalendarRow>();
+  // Every row's cells by `${rowKey}|${cellKey}`: a lookup, never a scan of the row.
+  const cells = new Map<string, CalendarCell>();
   for (const e of entries) {
     const ms = entryMs(e);
     const dayKey = localDayKey(ms);
-    let day = days.get(dayKey);
-    if (!day) {
-      day = { key: dayKey, ms, rows: [] };
-      days.set(dayKey, day);
-    }
-    const rowKey = `${e.service}|${titleIdentity(e)}|${dayKey}`;
-    let row = rows.get(rowKey);
-    if (!row) {
-      row = { key: rowKey, ms, entry: e, tmdbId: e.tmdbId, posterPath: e.posterPath, kinds: [], cells: [] };
-      rows.set(rowKey, row);
-      day.rows.push(row);
-    }
-    row.tmdbId ??= e.tmdbId;
-    row.posterPath ??= e.posterPath;
-    if (!row.kinds.includes(e.kind)) row.kinds.push(e.kind);
-    row.ms = Math.min(row.ms, ms);
-    const cellKey = `${e.service}:${e.instance}:${e.arrId}:${e.episodeId ?? ""}`;
-    const cell = row.cells.find((c) => c.key === cellKey);
-    if (!cell) {
-      row.cells.push({ key: cellKey, service: e.service, instance: e.instance, arrId: e.arrId, episodeId: e.episodeId, status: e.status, progress: e.progress, attention: e.attention });
-    } else {
-      // The flag is the download's, whichever status the cell shows.
-      cell.attention ||= e.attention;
-      if (CELL_RANK[e.status] < CELL_RANK[cell.status]) {
-        cell.status = e.status;
-        cell.progress = e.progress;
-      }
-    }
+    const row = rowFor(rows, days, e, ms, dayKey);
+    foldCell(cells, row, e);
   }
   const out = [...days.values()].sort((a, b) => a.ms - b.ms);
-  for (const day of out) {
-    day.ms = Math.min(...day.rows.map((r) => r.ms));
-    for (const row of day.rows) row.kinds.sort((a, b) => KIND_ORDER[a] - KIND_ORDER[b]);
-    day.rows.sort((a, b) =>
-      a.ms - b.ms ||
-      a.entry.title.localeCompare(b.entry.title) ||
-      (a.entry.seasonNumber ?? 0) - (b.entry.seasonNumber ?? 0) ||
-      (a.entry.episodeNumber ?? 0) - (b.entry.episodeNumber ?? 0));
-  }
+  for (const day of out) finishDay(day);
   return out;
 }
 
-/** How many rows `calendarDays` would draw — what a filter chip's count says. */
+// The row an entry folds into, created (and placed on its day) on first sight.
+function rowFor(rows: Map<string, CalendarRow>, days: Map<string, CalendarDay>, e: CalendarEntry, ms: number, dayKey: string): CalendarRow {
+  let day = days.get(dayKey);
+  if (!day) {
+    day = { key: dayKey, ms, rows: [] };
+    days.set(dayKey, day);
+  }
+  const rowKey = rowKeyOf(e, dayKey);
+  let row = rows.get(rowKey);
+  if (!row) {
+    row = { key: rowKey, ms, entry: e, tmdbId: e.tmdbId, posterPath: e.posterPath, kinds: [], cells: [] };
+    rows.set(rowKey, row);
+    day.rows.push(row);
+  }
+  row.tmdbId ??= e.tmdbId;
+  row.posterPath ??= e.posterPath;
+  if (!row.kinds.includes(e.kind)) row.kinds.push(e.kind);
+  row.ms = Math.min(row.ms, ms);
+  return row;
+}
+
+// The entry's instance cell on the row: added, or merged into the one already
+// there (the most actionable status wins; the attention flag is the download's).
+function foldCell(cells: Map<string, CalendarCell>, row: CalendarRow, e: CalendarEntry): void {
+  const cellKey = `${e.service}:${e.instance}:${e.arrId}:${e.episodeId ?? ""}`;
+  const at = `${row.key}|${cellKey}`;
+  const cell = cells.get(at);
+  if (!cell) {
+    const created: CalendarCell = { key: cellKey, service: e.service, instance: e.instance, arrId: e.arrId, episodeId: e.episodeId, status: e.status, progress: e.progress, attention: e.attention };
+    cells.set(at, created);
+    row.cells.push(created);
+    return;
+  }
+  // The flag is the download's, whichever status the cell shows.
+  cell.attention ||= e.attention;
+  if (CELL_RANK[e.status] < CELL_RANK[cell.status]) {
+    cell.status = e.status;
+    cell.progress = e.progress;
+  }
+}
+
+// A day's final order: its earliest row's time, each row's kinds in display
+// order, then rows by time, title and episode numbers. No spread over the rows
+// (guardrail 5i).
+function finishDay(day: CalendarDay): void {
+  day.ms = day.rows.reduce((min, r) => Math.min(min, r.ms), Infinity);
+  for (const row of day.rows) row.kinds.sort((a, b) => KIND_ORDER[a] - KIND_ORDER[b]);
+  day.rows.sort((a, b) =>
+    a.ms - b.ms ||
+    a.entry.title.localeCompare(b.entry.title) ||
+    (a.entry.seasonNumber ?? 0) - (b.entry.seasonNumber ?? 0) ||
+    (a.entry.episodeNumber ?? 0) - (b.entry.episodeNumber ?? 0));
+}
+
+/**
+ * How many rows `calendarDays` would draw — what a filter chip's count says.
+ * Counted by the same row key, without building the days (the chips count
+ * seven filtered lists on every pass).
+ */
 export function calendarRowCount(entries: readonly CalendarEntry[]): number {
-  return calendarDays(entries).reduce((n, d) => n + d.rows.length, 0);
+  const keys = new Set<string>();
+  for (const e of entries) keys.add(calendarRowKey(e));
+  return keys.size;
+}
+
+/**
+ * What the calendar's body shows, in this precedence:
+ *   no report yet — a spinner, or nothing beside a load error;
+ *   rows — the grid;
+ *   no rows with a load error, or with every instance down — nothing (the
+ *     alerts above say why; "nothing on the calendar" is a claim nobody can make);
+ *   titles in the window the chips hide — "nothing matches the filters";
+ *   an instance the filters include couldn't be read — nothing (its schedule
+ *     is unknown, not empty);
+ *   otherwise — "nothing on the calendar".
+ */
+export type CalendarBodyState = "loading" | "none" | "filteredEmpty" | "empty" | "grid";
+
+export function calendarBodyState(v: {
+  hasReport: boolean;
+  hasError: boolean;
+  allDown: boolean;
+  viewFailed: boolean;
+  /** Rows the filters leave (calendarDays' length, or any count of them). */
+  rows: number;
+  /** Entries in the window before the type/status chips. */
+  inWindow: number;
+}): CalendarBodyState {
+  if (!v.hasReport) return v.hasError ? "none" : "loading";
+  if (v.rows > 0) return "grid";
+  if (v.hasError || v.allDown) return "none";
+  if (v.inWindow > 0) return "filteredEmpty";
+  return v.viewFailed ? "none" : "empty";
 }

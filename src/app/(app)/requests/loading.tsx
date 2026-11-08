@@ -2,11 +2,11 @@
 // Shape: PageHeader with subtitle, the status FilterPills row with the sort
 // pills + 32px SearchBox on the right (mb-5), then rows — 44px poster thumb
 // inside 14px padding (~94px each, 8px apart) with title, meta and chips.
-import { Bar, ControlRow, SKELETON_CARD, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { Bar, ControlRow, SKELETON_CARD, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle />
       <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
         <ControlRow w={340} />
@@ -27,6 +27,6 @@ export default function Loading() {
           </div>
         ))}
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

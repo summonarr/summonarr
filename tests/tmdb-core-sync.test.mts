@@ -42,7 +42,7 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 // Dynamic imports so the env/console stubs precede the module-graph load.
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
-const { BATCH_TX_TIMEOUT } = await import("../src/lib/cron-auth.ts");
+const { BATCH_TX_TIMEOUT } = await import("../src/lib/batch-write.ts");
 const { syncTmdbMediaCore, upsertTmdbMediaCore } = await import("../src/lib/tmdb-core-sync.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
@@ -228,13 +228,10 @@ test("batch: runs as ONE transaction over all items with { timeout: BATCH_TX_TIM
   assert.deepEqual(txCalls[0].opts, { timeout: BATCH_TX_TIMEOUT });
 });
 
-test("batch: a failed transaction logs with the [tmdb-core-sync] scope and re-throws", async () => {
+test("batch: a failed transaction re-throws without logging — the caller logs it once", async () => {
   txRejection = new Error("deadlock detected");
   await assert.rejects(() => syncTmdbMediaCore([media({ id: 1 }), media({ id: 2 })]), /deadlock detected/);
-  assert.ok(
-    errors.some((e) => e.includes("[tmdb-core-sync]") && e.includes("2") && e.includes("items")),
-    "failure must be logged with scope + item count before propagating",
-  );
+  assert.equal(errors.filter((e) => e.includes("[tmdb-core-sync]")).length, 0);
 });
 
 // ── upsertTmdbMediaCore (single) ────────────────────────────────────────────
@@ -294,11 +291,8 @@ test("single: normalisation matches the batch writer — enum key, poster??null,
   assert.ok(!("lastSyncedAt" in c.create));
 });
 
-test("single: a failed upsert logs the tmdbId with the [tmdb-core-sync] scope and re-throws", async () => {
+test("single: a failed upsert re-throws without logging — the caller logs it once", async () => {
   upsertRejection = new Error("column store on fire");
   await assert.rejects(() => upsertTmdbMediaCore(media({ id: 424242 })), /column store on fire/);
-  assert.ok(
-    errors.some((e) => e.includes("[tmdb-core-sync]") && e.includes("424242")),
-    "failure must be logged with scope + tmdbId before propagating",
-  );
+  assert.equal(errors.filter((e) => e.includes("[tmdb-core-sync]")).length, 0);
 });

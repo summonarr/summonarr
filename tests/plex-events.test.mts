@@ -153,8 +153,16 @@ const namedInstanceSettings = new Map<string, string>();
 let bootstrapRows: FakeSessionRow[] = []; // activeSession.findMany({ where: { source: "plex" } })
 const liveRows = new Map<string, FakeSessionRow>(); // activeSession.findUnique by id
 let settingUpsertError: Error | null = null;
+// When set, a setting upsert waits on it before it lands.
+let settingUpsertGate: Promise<void> | null = null;
 let playHistoryCreateError: Error | null = null;
 const settingUpserts: Array<{ key: string; value: string }> = [];
+// Holds the NEXT activeSession.findUnique for one id until `until` settles, so a
+// test can make an earlier notification's read resolve after a later one's.
+let findUniqueHold: { id: string; until: Promise<void> } | null = null;
+// Holds the NEXT connection-keys setting.findMany (a manager's doReconcile read)
+// until it settles, so a test can land a stop inside that await.
+let connReadHold: Promise<void> | null = null;
 
 interface SettingFindManyArgs { where?: { key?: { in?: string[] } } }
 interface SettingUpsertArgs { where: { key: string }; create: { key: string; value: string } }
@@ -167,6 +175,11 @@ const fakePrisma = {
     findMany: async (args?: SettingFindManyArgs) => {
       rec("setting", "findMany", args);
       const keys = args?.where?.key?.in ?? [];
+      if (connReadHold && keys.includes("plexServerUrl")) {
+        const hold = connReadHold;
+        connReadHold = null;
+        await hold;
+      }
       const rows: Array<{ key: string; value: string }> = [];
       for (const k of keys) {
         if (k === "plexServerUrl" && plexServerUrl !== null) rows.push({ key: k, value: plexServerUrl });
@@ -193,6 +206,7 @@ const fakePrisma = {
     upsert: async (args: SettingUpsertArgs) => {
       rec("setting", "upsert", args);
       if (settingUpsertError) throw settingUpsertError;
+      if (settingUpsertGate) await settingUpsertGate;
       settingUpserts.push({ key: args.where.key, value: args.create.value });
       return args.create;
     },
@@ -219,6 +233,11 @@ const fakePrisma = {
     },
     findUnique: async (args: { where: { id: string } }) => {
       rec("activeSession", "findUnique", args);
+      const hold = findUniqueHold;
+      if (hold && hold.id === args.where.id) {
+        findUniqueHold = null;
+        await hold.until;
+      }
       return liveRows.get(args.where.id) ?? null;
     },
     deleteMany: async (args: ActiveWhereArgs) => {
@@ -324,6 +343,7 @@ const {
   clearFinalizedNotInCurrentSnapshot,
   reconcilePlexEventStream,
   setPlexReachable,
+  stopAllPlexEventStreams,
 } = await import("../src/lib/plex-events.ts");
 const { sseEmitter } = await import("../src/lib/sse-emitter.ts");
 
@@ -597,16 +617,16 @@ test("GUARDRAIL 21: the boot re-anchor updateMany runs before any ActiveSession 
   );
 });
 
-test("SSE subscribe wire shape: filters=playing,timeline, URL-encoded token, Plex client headers", () => {
+test("SSE subscribe wire shape: filters=playing,timeline, token in the X-Plex-Token header, Plex client headers", () => {
   const call = sseFetches()[0];
   const url = new URL(call.url);
   assert.equal(url.origin, "http://192.168.77.10:32400");
   assert.equal(url.pathname, "/:/eventsource/notifications");
   assert.equal(url.searchParams.get("filters"), "playing,timeline");
-  assert.equal(url.searchParams.get("X-Plex-Token"), TOKEN1);
-  // The raw URL must carry the encodeURIComponent form — an unencoded token
-  // with spaces/+/slashes corrupts the query string.
-  assert.ok(call.url.includes("X-Plex-Token=sse%20token%2F1%2B2"), `token must be URL-encoded in the wire URL, got: ${call.url}`);
+  // The token is a header, never in the URL (proxy/access logs).
+  assert.equal(url.searchParams.get("X-Plex-Token"), null);
+  assert.ok(!call.url.includes(TOKEN1) && !call.url.includes("sse%20token"), `token must not be in the wire URL, got: ${call.url}`);
+  assert.equal(call.headers.get("x-plex-token"), TOKEN1);
   assert.equal(call.headers.get("accept"), "text/event-stream");
   assert.equal(call.headers.get("x-plex-product"), "Summonarr");
   assert.equal(call.headers.get("x-plex-version"), "1.0");
@@ -735,6 +755,31 @@ test("ledgered and never-tracked sessions are ignored by live-state updates", as
   assert.equal(updatesFor("plex:g20-unknown").length, 0, "no ActiveSession row ⇒ no update write");
 });
 
+test("two notifications for one session commit in arrival order, even when the earlier one's read resolves last", async () => {
+  // Each live-state update is a read-then-write. Unordered, the later "playing"
+  // event's write could land first and the earlier "paused" one overwrite it,
+  // leaving the card on PAUSED while the stream plays.
+  armLiveRow("order-1", { state: "playing", progressMs: 1_000n });
+  let release!: () => void;
+  findUniqueHold = { id: "plex:order-1", until: new Promise<void>((resolve) => { release = resolve; }) };
+  pushFrame(playingFrame([
+    { sessionKey: "order-1", state: "paused", viewOffset: 2_000 },
+    { sessionKey: "order-1", state: "playing", viewOffset: 3_000 },
+  ]));
+  await waitFor(
+    () => dbCalls.some((c) => c.model === "activeSession" && c.op === "findUnique" && (c.args as { where: { id: string } }).where.id === "plex:order-1"),
+    "the paused event's (held) read",
+  );
+  // Unserialized, the playing event's read and write would both complete in here.
+  await drain(25);
+  release();
+  await waitFor(() => updatesFor("plex:order-1").length === 2, "both live-state writes");
+  const [first, last] = updatesFor("plex:order-1");
+  assert.equal(first.data.state, "paused", "the earlier notification commits first");
+  assert.equal(last.data.state, "playing", "the later notification is the one that sticks");
+  assert.ok(last.data.progressUpdatedAt instanceof Date, "guardrail 20: the moved playhead still refreshes the anchor");
+});
+
 // ═══ Phase E — the stopped-event pipeline ═══════════════════════════════════
 
 test("a spurious stop while /status/sessions still lists the session is advisory: no finalize, no ledger, row kept", async () => {
@@ -818,6 +863,18 @@ test("a stop for a session we never tracked cross-checks, then ledgers the key (
   assert.equal(sessionFetches().length, sessBefore + 1, "the no-row branch cross-checks before ledgering");
   assert.equal(historyRows().length, histBefore, "no PlayHistory row for a session we never observed");
   assert.equal(deletesFor("plex:stop-ghost").length, 0);
+});
+
+test("a repeated stop for a key already finalized (row gone) costs no /status/sessions listing", async () => {
+  plexSnapshotSessions = [];
+  pushFrame(playingFrame({ sessionKey: "stop-twice", state: "stopped", viewOffset: 1_000 }));
+  await waitFor(() => isPlexSessionRecentlyFinalized("plex:stop-twice"), "the first stop ledgers the key");
+  await drain(20);
+  const sessBefore = sessionFetches().length;
+  pushFrame(playingFrame({ sessionKey: "stop-twice", state: "stopped", viewOffset: 1_000 }));
+  await waitFor(() => dbCalls.filter((c) => c.model === "activeSession" && c.op === "findUnique" && (c.args as ActiveWhereArgs).where?.id === "plex:stop-twice").length >= 2, "the second stop's row read");
+  await drain(20);
+  assert.equal(sessionFetches().length, sessBefore, "no cross-check for a key the ledger already holds");
 });
 
 test("PIN: a spurious stop for a session Plex STILL reports must not ledger it — that blinds a brand-new play", async () => {
@@ -1228,6 +1285,27 @@ test("a failed reachability write is not latched — the next report retries the
   assert.equal((JSON.parse(settingUpserts[settingUpserts.length - 1].value) as { reachable: boolean }).reachable, true);
 });
 
+test("overlapping reachability reports persist in call order: the last report is what the row and the latch end on", async () => {
+  // Hold the first upsert open so the second report is made while it is in flight.
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  settingUpsertGate = gate;
+  const upsBefore = settingUpserts.length;
+  const current = JSON.parse(settingUpserts[settingUpserts.length - 1].value) as { reachable: boolean };
+  const first = setPlexReachable(!current.reachable);
+  const second = setPlexReachable(current.reachable);
+  await drain(10);
+  assert.equal(settingUpserts.length, upsBefore, "the first write is still in flight; the second waits behind it");
+  settingUpsertGate = null;
+  release();
+  await Promise.all([first, second]);
+  assert.equal(settingUpserts.length, upsBefore + 2, "both flips persisted, one after the other");
+  assert.equal((JSON.parse(settingUpserts[settingUpserts.length - 1].value) as { reachable: boolean }).reachable, current.reachable);
+  // The latch matches the row: repeating the last value is deduped.
+  await setPlexReachable(current.reachable);
+  assert.equal(settingUpserts.length, upsBefore + 2);
+});
+
 // ═══ Phase I — connection lifecycle ═════════════════════════════════════════
 
 test("reconcile with unchanged settings is a no-op: no second connection, no re-bootstrap", async () => {
@@ -1266,8 +1344,7 @@ test("a token change restarts the stream with the new token and never reconnects
   plexAdminToken = TOKEN2;
   await reconcilePlexEventStream();
   await waitFor(() => sseFetches().length === sseBefore + 1, "the restarted SSE subscribe");
-  const fresh = new URL(sseFetches()[sseBefore].url);
-  assert.equal(fresh.searchParams.get("X-Plex-Token"), TOKEN2, "the new connection must carry the rotated token");
+  assert.equal(sseFetches()[sseBefore].headers.get("x-plex-token"), TOKEN2, "the new connection must carry the rotated token");
 
   // Wind down the aborted old connection: its read resolves on stream end, its
   // finally clears the recycle timer, and after one (real) 1s backoff sleep
@@ -1366,7 +1443,7 @@ test("named-instance activation: a second manager connects to ITS origin/token a
   // default manager's live connection is untouched (no restart).
   const remoteSse = new URL(sseFetchesFor(PLEX2_URL)[0].url);
   assert.equal(remoteSse.origin, "http://192.168.77.11:32400");
-  assert.equal(remoteSse.searchParams.get("X-Plex-Token"), TOKEN_R);
+  assert.equal(sseFetchesFor(PLEX2_URL)[0].headers.get("x-plex-token"), TOKEN_R);
   assert.equal(remoteSse.searchParams.get("filters"), "playing,timeline");
 
   // A playing event on the REMOTE stream lands on the 3-segment id.
@@ -1514,4 +1591,53 @@ test("phase J teardown: clearing config + registry stops everything — no stray
   assert.equal(fetchLog.length, trafficAfterStop, "no further traffic once every manager is stopped");
   assert.ok(!warns.some((w) => w.includes("loop crashed")), "no run loop ever crashed, multi-instance phases included");
   assert.deepEqual(errors, [], "plex-events must never console.error across the whole suite");
+});
+
+test("stopping every stream while a reconcile is mid-read leaves no orphaned stream behind", async () => {
+  // stopAllPlexEventStreams drops the managers synchronously, but a manager
+  // whose doReconcile is suspended on its settings read resumes afterwards. It
+  // used to start a stream there: out of the map, so nothing could ever stop it,
+  // and the next reconcile created a second manager for the same server — two
+  // consumers finalizing the same sessions after tracking was switched off.
+  plexServerUrl = PLEX_URL;
+  plexAdminToken = TOKEN1;
+  plexSnapshotSessions = [];
+  bootstrapRows = [];
+  const sseBefore = sseFetches().length;
+  const connReads = () => dbCalls.filter((c) => c.model === "setting" && c.op === "findMany"
+    && ((c.args as SettingFindManyArgs).where?.key?.in ?? []).includes("plexServerUrl")).length;
+  const readsBefore = connReads();
+  let release!: () => void;
+  connReadHold = new Promise<void>((resolve) => { release = resolve; });
+  try {
+    const pass = reconcilePlexEventStream();
+    await waitFor(() => connReads() > readsBefore, "the manager's held connection read");
+    stopAllPlexEventStreams();
+    release();
+    await pass;
+
+    // A later reconcile starts exactly one stream. An orphan from the stopped
+    // pass would have connected first, so it is visible by the time this one is.
+    await reconcilePlexEventStream();
+    await waitFor(() => sseFetches().length > sseBefore, "the fresh manager's subscribe");
+    await drain(40);
+    assert.equal(sseFetches().length, sseBefore + 1, "exactly one stream: the stopped manager must not resume and connect");
+  } finally {
+    connReadHold = null;
+    plexServerUrl = null;
+    plexAdminToken = null;
+    await reconcilePlexEventStream();
+    for (const s of sseStreams) s.end();
+    await drain(60);
+  }
+  assert.deepEqual(errors, [], "plex-events must never console.error");
+});
+
+test("resyncFireAt: debounce clamped between the cooldown floor and the burst deadline; past the cap, the plain cooldown", async () => {
+  const { resyncFireAt } = await import("../src/lib/plex-events.ts");
+  const now = 1_000_000;
+  assert.equal(resyncFireAt(now, 0, now + 120_000, false), now + 30_000, "the debounce");
+  assert.equal(resyncFireAt(now, now + 60_000, now + 120_000, false), now + 60_000, "never before the cooldown floor");
+  assert.equal(resyncFireAt(now, 0, now + 10_000, false), now + 10_000, "never after the burst deadline");
+  assert.equal(resyncFireAt(now, 0, now + 10_000, true), now + TIMELINE_RESYNC_COOLDOWN_MS, "capped: the cooldown, unclamped");
 });

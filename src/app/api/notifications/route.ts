@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
-import { readJsonCappedOr } from "@/lib/body-size";
+import { readOptionalJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
@@ -64,16 +64,17 @@ export const GET = withAuth(async (req, _ctx, session) => {
 });
 
 // POST — mark notifications read. Body { ids?: string[] } marks those; an empty
-// body (no `ids` key) marks ALL of the caller's unread. An `ids` that is present
-// but NOT an array (`"abc"`, `null`, `{}`) is a 400, never coerced to "all": a
-// client bug sending `{ ids: "abc" }` for `{ ids: ["abc"] }` must not clear the
-// whole unread badge. Returns the new unread count.
+// body (or `{}`, no `ids` key) marks ALL of the caller's unread. An `ids` that is
+// present but NOT an array (`"abc"`, `null`, `{}`) is a 400, never coerced to
+// "all": a client bug sending `{ ids: "abc" }` for `{ ids: ["abc"] }` must not
+// clear the whole unread badge. For the same reason a body that is not a JSON
+// object (unparseable, or `["abc"]`) is a 400 too. Returns the new unread count.
 export const POST = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   if (!checkRateLimit(`notifications-read:${session.user.id}`, 60, 60_000)) {
     return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
   }
-  const parsed = await readJsonCappedOr<{ ids?: unknown }>(req, 16384, {});
+  const parsed = await readOptionalJsonCapped<{ ids?: unknown }>(req, 16384, {});
   if (parsed instanceof NextResponse) return parsed;
   if (parsed.ids !== undefined && !Array.isArray(parsed.ids)) {
     return NextResponse.json({ error: t("apiUser.notifications.idsInvalid") }, { status: 400 });

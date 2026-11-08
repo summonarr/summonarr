@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { parsePageParam } from "@/lib/pagination";
-import { type DiscoverFilters } from "@/lib/tmdb";
+import { discoverFiltersOf, parseBrowseFilters } from "@/lib/browse-filters";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { runBrowseQuery } from "@/lib/browse-query";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -13,23 +13,11 @@ export const GET = withAuth(async (request, _ctx, session) => {
   }
 
   const sp = request.nextUrl.searchParams;
-  const mediaType     = sp.get("mediaType") === "tv" ? "tv" : "movie";
-  const page          = parsePageParam(sp);
-  const genreId       = sp.get("genreId") || undefined;
-  const keywordId     = sp.get("keywordId") || undefined;
-  const companyId     = sp.get("companyId") || undefined;
-  const networkId     = sp.get("networkId") || undefined;
-  const certification = sp.get("certification") || undefined;
-  const minRating     = sp.get("minRating") || undefined;
-  const ratingFilter  = sp.get("ratingFilter") || undefined;
-  const minVoteCount  = sp.get("minVoteCount") || undefined;
-  const fromYear      = sp.get("fromYear") || undefined;
-  const toYear        = sp.get("toYear") || undefined;
-  const sortBy        = sp.get("sortBy") || undefined;
-  const watchProvider = sp.get("watchProvider") || undefined;
-  const watchRegion   = sp.get("watchRegion") || undefined;
-  const hideAvailable = sp.get("hideAvailable") === "1";
-  const filters: DiscoverFilters = { genreId, keywordId, companyId, networkId, certification, minRating, minVoteCount, fromYear, toYear, sortBy, watchProvider, watchRegion };
+  const mediaType = sp.get("mediaType") === "tv" ? "tv" : "movie";
+  const page = parsePageParam(sp);
+  // The same filter set the /movies and /tv pages read (browse-filters.ts), so
+  // a filter added there reaches this API too.
+  const browse = parseBrowseFilters((key) => sp.get(key));
 
   try {
     // Shared with /movies and /tv — see src/lib/browse-query.ts. The helper
@@ -39,9 +27,9 @@ export const GET = withAuth(async (request, _ctx, session) => {
     const { items, totalPages } = await runBrowseQuery({
       mediaType,
       page,
-      filters,
-      hideAvailable,
-      ratingFilter,
+      filters: discoverFiltersOf(browse),
+      hideAvailable: browse.hideAvailable,
+      ratingFilter: browse.ratingFilter,
       session,
     });
     return NextResponse.json({ items, totalPages, page });

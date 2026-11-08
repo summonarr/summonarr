@@ -31,9 +31,9 @@
 // debounce, the 2min deadline, and arr.ts's 15s queue-state cache expiry all
 // advance deterministically. Each test starts at a fresh epoch one day later
 // and uses unique backend hostnames so the module-global caches in arr.ts
-// (queueCache) and ssrf.ts (dnsCache) can never serve a previous test's data.
+// (the queue caches) and ssrf.ts (dnsCache) can never serve a previous test's data.
 // Every test drives its scheduled scan to completion — library-scan's
-// module-global pending/inFlight maps must be empty when a test ends or the
+// process-wide pending/inFlight maps must be empty when a test ends or the
 // next test would coalesce into a dead entry.
 import { test } from "node:test";
 import type { TestContext } from "node:test";
@@ -80,9 +80,13 @@ const { scheduleLibraryScan } = await import("../src/lib/library-scan.ts");
 
 // ── prisma stub: one Setting map behind plex/jellyfin/arr config reads ─────
 const settings = new Map<string, string>();
+// How many times the default Radarr instance's config was read: once per queue
+// check (getCfg), so it shows how many checks reached the queue read.
+let radarrConfigReads = 0;
 shadowPrismaModel(prisma, "setting", {
   findMany: async (args: { where?: { key?: { in?: string[] } } }) => {
     const keys = args.where?.key?.in ?? [...settings.keys()];
+    if (keys.includes("radarrUrl")) radarrConfigReads++;
     return keys.filter((k) => settings.has(k)).map((k) => ({ key: k, value: settings.get(k)! }));
   },
   findUnique: async (args: { where: { key: string } }) => {
@@ -104,6 +108,7 @@ function arm(t: TestContext): void {
   sent.length = 0;
   warns.length = 0;
   errors.length = 0;
+  radarrConfigReads = 0;
   respond = (url) => {
     throw new Error(`unexpected fetch ${url} — script a responder for this test`);
   };
@@ -469,13 +474,14 @@ test("PIN: a schedule arriving during the QUEUE CHECK does not produce a second 
   // invocations are now inside the window, both see the pending entry, and both
   // are about to be released — this is what produces two scans without the
   // ownership guard. (The queue cache only populates after a fetch resolves, so
-  // the second invocation issues its own request against the same held promise.)
+  // the second invocation joins the read still in flight rather than a cache.)
   t.mock.timers.tick(DEBOUNCE);
   await flush();
+  assert.equal(radarrConfigReads, 2, "both runScan invocations are inside the queue-check window");
   assert.equal(
     sent.filter((s) => s.url.includes("/api/v3/queue")).length,
-    2,
-    "both runScan invocations are inside the queue-check window",
+    1,
+    "the second check joined the queue read in flight instead of paging the queue again",
   );
 
   openGate();
@@ -494,4 +500,148 @@ test("PIN: a schedule arriving during the QUEUE CHECK does not produce a second 
     1,
     "exactly one library scan for the whole episode, not one per timer",
   );
+});
+
+test("PIN: a schedule arriving during a queue check that finds the title STILL queued costs one retry, not one per timer", async (t) => {
+  // The ownership guard's other half. Both runScan invocations join the same
+  // queue read, so both see the title still downloading; without the guard the
+  // invocation whose timer was superseded ALSO takes the retry branch — two
+  // retries burned per round, and the scan gives up waiting on a busy queue
+  // twice as fast. With it, only the invocation that owns the live timer
+  // retries.
+  arm(t);
+  settings.set("jellyfinUrl", "http://jf.t22.example:8096");
+  settings.set("jellyfinApiKey", "jf-key-22");
+  settings.set("radarrUrl", "http://10.0.0.22:7878");
+  settings.set("radarrApiKey", "radarr-key-22");
+
+  let openGate!: () => void;
+  const gate = new Promise<void>((resolve) => { openGate = resolve; });
+  let queueReads = 0;
+  respond = (url) => {
+    if (url.includes("/api/v3/queue")) {
+      queueReads++;
+      // The first read (held open) still lists the title; later reads are empty.
+      return queueReads === 1
+        ? gate.then(() => okJson({ records: [{ movie: { tmdbId: 78 } }], totalRecords: 1 }))
+        : okJson({ records: [], totalRecords: 0 });
+    }
+    if (url.endsWith("/Library/Refresh")) return new Response(null, { status: 204 });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  const p1 = scheduleLibraryScan("movie", 78);
+  t.mock.timers.tick(DEBOUNCE);
+  await flush();
+  const p2 = scheduleLibraryScan("movie", 78); // re-arms a second live timer mid-check
+  await flush();
+  t.mock.timers.tick(DEBOUNCE); // that timer fires while the first check still waits
+  await flush();
+  assert.equal(radarrConfigReads, 2, "both invocations are inside the queue-check window");
+
+  openGate();
+  await flush();
+  const retries = warns.filter((w) => w.includes("still pending"));
+  assert.deepEqual(
+    retries.map((w) => /retry (\d+)\/4/.exec(w)?.[1]),
+    ["1"],
+    `one retry for the round, taken by the timer's owner: ${retries.join(" | ")}`,
+  );
+
+  // The retry's timer reads the (now empty) queue and scans once.
+  t.mock.timers.tick(DEBOUNCE);
+  await p1;
+  await p2;
+  t.mock.timers.tick(DEBOUNCE);
+  await flush();
+  assert.equal(refreshCalls("/Library/Refresh").length, 1, "one scan for the whole episode");
+});
+
+test("the debounce is process-wide: a schedule from another copy of the module joins the same pending scan (guardrail 27a)", async (t) => {
+  // Turbopack copies this module into each route chunk that imports it (the
+  // Radarr/Sonarr webhooks, the cleanup delete, the title manager's remove).
+  // A per-copy map let a cleanup and an import webhook each scan the backend.
+  arm(t);
+  settings.set("jellyfinUrl", "http://jf.t23.example:8096");
+  settings.set("jellyfinApiKey", "jf-key-23");
+  respond = (url) => {
+    if (url.endsWith("/Library/Refresh")) return new Response(null, { status: 204 });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const specifier = "../src/lib/library-scan.ts?chunk=webhook";
+  const other: typeof import("../src/lib/library-scan.ts") = await import(specifier);
+
+  const p1 = scheduleLibraryScan("movie", 91);
+  t.mock.timers.tick(5_000);
+  const p2 = other.scheduleLibraryScan("movie", 91);
+  assert.equal(p2, p1, "the other copy coalesces onto the same pending scan");
+
+  t.mock.timers.tick(DEBOUNCE); // past both copies' deadlines
+  await p1;
+  await p2;
+  t.mock.timers.tick(DEBOUNCE);
+  await flush();
+  assert.equal(refreshCalls("/Library/Refresh").length, 1, "one scan, not one per copy");
+});
+
+test("a default and a 4K import merged into one window wait on BOTH queues, not only the last one's", async (t) => {
+  arm(t);
+  settings.set("radarrUrl", "http://radarr.t30.example:7878");
+  settings.set("radarrApiKey", "r-key-30");
+  settings.set("radarr4kUrl", "http://radarr4k.t30.example:7878");
+  settings.set("radarr4kApiKey", "r4k-key-30");
+  settings.set("jellyfinUrl", "http://jf.t30.example:8096");
+  settings.set("jellyfinApiKey", "jf-key-30");
+  let defaultReads = 0;
+  respond = (url) => {
+    if (url.startsWith("http://radarr.t30.example:7878/api/v3/queue")) {
+      defaultReads++;
+      // The default instance is still downloading the title on the first check.
+      return okJson(defaultReads === 1 ? { records: [{ movie: { tmdbId: 31 } }], totalRecords: 1 } : { records: [], totalRecords: 0 });
+    }
+    if (url.startsWith("http://radarr4k.t30.example:7878/api/v3/queue")) return okJson({ records: [], totalRecords: 0 });
+    if (url.endsWith("/Library/Refresh")) return new Response(null, { status: 204 });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  const p1 = scheduleLibraryScan("movie", 31, "");
+  const p2 = scheduleLibraryScan("movie", 31, "4k"); // the 4K import lands second
+  assert.equal(p2, p1);
+  t.mock.timers.tick(DEBOUNCE);
+  await flush();
+  assert.equal(refreshCalls("/Library/Refresh").length, 0, "the default queue still holds the title");
+  assert.ok(warns.some((w) => w.includes("retry 1/4")));
+  // The default instance's queue cache lives 15s; the retry fires past it.
+  t.mock.timers.tick(DEBOUNCE + 1);
+  await flush();
+  await p1;
+  assert.equal(refreshCalls("/Library/Refresh").length, 1);
+  assert.ok(sent.some((s) => s.url.startsWith("http://radarr4k.t30.example:7878/api/v3/queue")), "the 4K queue was consulted too");
+});
+
+test("a named Plex and Jellyfin server are refreshed beside the default", async (t) => {
+  arm(t);
+  settings.set("plexServerUrl", "http://plex.t20.example:32400");
+  settings.set("plexAdminToken", "plex-token-20");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  settings.set("plexRemoteServerUrl", "http://plex-remote.t20.example:32400");
+  settings.set("plexRemoteAdminToken", "plex-token-remote");
+  settings.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  settings.set("jellyfinRemoteUrl", "http://jf-remote.t20.example:8096");
+  settings.set("jellyfinRemoteApiKey", "jf-key-remote");
+  respond = (url) => {
+    if (url.endsWith("/library/sections")) return okJson({ MediaContainer: { Directory: [{ key: "1", title: "Movies", type: "movie" }] } });
+    if (url.includes("/refresh")) return new Response("", { status: 200 });
+    if (url.endsWith("/Library/Refresh")) return new Response(null, { status: 204 });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  const p = scheduleLibraryScan("movie", 20);
+  t.mock.timers.tick(DEBOUNCE);
+  await p;
+
+  assert.equal(refreshCalls("http://plex.t20.example:32400/library/sections/1/refresh").length, 1, "default Plex refreshed");
+  assert.equal(refreshCalls("http://plex-remote.t20.example:32400/library/sections/1/refresh").length, 1, "named Plex refreshed");
+  assert.equal(refreshCalls("http://jf-remote.t20.example:8096/Library/Refresh").length, 1, "named Jellyfin refreshed");
+  assert.equal(errors.length, 0);
 });

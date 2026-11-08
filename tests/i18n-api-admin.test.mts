@@ -90,6 +90,31 @@ test("backup messages: known lib messages translate, English round-trips, unknow
   assert.equal(localizeBackupMessage(dynamic, es), dynamic);
 });
 
+test("backup messages: every fixed message the pipeline can answer with has a translation", async () => {
+  // Keyed by the exact English, so a reworded message silently loses its
+  // translation; this scan is what notices. Messages with a size, version or
+  // fingerprint in them are template literals and pass through by design.
+  const { readFileSync } = await import("node:fs");
+  const { SETUP_RESTORE_DISABLED_MESSAGE, SETUP_NOT_FRESH_MESSAGE, RESTORE_ROLLED_BACK_MESSAGE } =
+    await import("../src/lib/backup-import.ts");
+  const literals = new Set<string>([SETUP_RESTORE_DISABLED_MESSAGE, SETUP_NOT_FRESH_MESSAGE, RESTORE_ROLLED_BACK_MESSAGE]);
+  const scan = (file: string, re: RegExp) => {
+    for (const m of readFileSync(file, "utf8").matchAll(re)) literals.add(m[1]);
+  };
+  // `error: "…"` and `const …_MESSAGE = "…"` in the pipeline, the thrown
+  // BackupCryptoError texts in the crypto layer (single literals only: a
+  // concatenated one is covered by its exported constant above).
+  scan("src/lib/backup-import.ts", /(?:error:|_MESSAGE =)\s*"((?:[^"\\]|\\.)*)"(?!\s*\+)/g);
+  scan("src/lib/backup-crypto.ts", /new BackupCryptoError\(\s*"((?:[^"\\]|\\.)*)"/g);
+  // Never sent as `error`: a validation failure answers with its errors list.
+  literals.delete("Backup failed validation");
+  assert.ok(literals.size >= 11, `the scan found only ${literals.size} messages`);
+  for (const message of literals) {
+    assert.equal(localizeBackupMessage(message, en), message, `English must round-trip: ${message}`);
+    assert.notEqual(localizeBackupMessage(message, es), message, `no translation for: ${message}`);
+  }
+});
+
 test("fix-match registry: the full-queue refusal speaks the starter's language, English without a translator", async () => {
   _resetFixMatchJobsForTests();
   const never = () => new Promise<never>(() => {});

@@ -1,22 +1,14 @@
 import { NextResponse } from "next/server";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
-import { withAdvisoryLock, WARM_MDBLIST_LOCK_ID } from "@/lib/advisory-lock";
-import { prisma } from "@/lib/prisma";
+import { WARM_MDBLIST_LOCK_ID } from "@/lib/advisory-lock";
 import { prewarmMdblistCache } from "@/lib/mdblist-prewarm";
 import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import type { Translator } from "@/lib/i18n/translate";
+import { runAdminWarm } from "@/lib/warm-cooldown";
 
 const COOLDOWN_MS = 5 * 60 * 1000;
 const COOLDOWN_KEY = "lastMdblistWarmAt";
-
-function busyResponse(t: Translator) {
-  return NextResponse.json(
-    { ok: false, error: t("apiAdmin.warm.mdblistRunning"), retryAfter: 30 },
-    { status: 409, headers: { "Retry-After": "30" } },
-  );
-}
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
@@ -25,46 +17,20 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const force = body.force === true;
 
   // Same advisory lock as /api/cron/warm-mdblist — an admin click (force
-  // included) while the cron warm is running must not double-burn API quota. The
-  // cooldown stamp lives INSIDE the lock so a lock-busy 409 can't consume the
-  // 5-minute cooldown (or write the force timestamp) for a warm that never ran.
-  return withAdvisoryLock(
-    WARM_MDBLIST_LOCK_ID,
-    async (signal) => {
-      const now = Date.now();
-
-      if (force) {
-        // Force bypasses the cooldown — write timestamp unconditionally so the next
-        // non-force click still gets a fresh 5-minute window.
-        await prisma.setting.upsert({
-          where: { key: COOLDOWN_KEY },
-          create: { key: COOLDOWN_KEY, value: String(now) },
-          update: { value: String(now) },
-        });
-      } else {
-        // Atomic CAS: only succeeds if the cooldown window has elapsed. Matches the
-        // sibling activity-warm / omdb-warm / library-warm pattern — the previous
-        // check-then-update shape let two simultaneous admin clicks both pass the
-        // cooldown read and double the API quota burn.
-        const claimed = await prisma.$executeRaw`
-          INSERT INTO "Setting" (key, value, "updatedAt")
-          VALUES (${COOLDOWN_KEY}, ${String(now)}, NOW())
-          ON CONFLICT (key) DO UPDATE
-            SET value = EXCLUDED.value, "updatedAt" = NOW()
-          WHERE "Setting".value !~ '^[0-9]+$'
-             OR CAST("Setting".value AS BIGINT) + ${COOLDOWN_MS}::bigint <= ${now}::bigint
-        `;
-        if (claimed === 0) {
-          const row = await prisma.setting.findUnique({ where: { key: COOLDOWN_KEY } });
-          const lastMs = row ? parseInt(row.value, 10) || 0 : 0;
-          const remaining = COOLDOWN_MS - (now - lastMs);
-          return NextResponse.json(
-            { error: t("apiAdmin.warm.cooldown", { seconds: Math.ceil(remaining / 1000) }) },
-            { status: 429 }
-          );
-        }
-      }
-
+  // included) while the cron warm is running must not double-burn API quota.
+  // Force skips the cooldown claim but still stamps the slot, so the next
+  // non-force click gets a fresh 5-minute window. The claim, its release on
+  // failure and the 409/429 answers live in runAdminWarm (warm-cooldown.ts).
+  return runAdminWarm({
+    lockId: WARM_MDBLIST_LOCK_ID,
+    cooldownKey: COOLDOWN_KEY,
+    cooldownMs: COOLDOWN_MS,
+    force,
+    busyMessage: t("apiAdmin.warm.mdblistRunning"),
+    cooldownMessage: (seconds) => t("apiAdmin.warm.cooldown", { seconds }),
+    failedMessage: t("apiAdmin.warm.failed"),
+    scope: "[mdblist-warm]",
+    run: async (signal) => {
       const startTime = Date.now();
       const result = await prewarmMdblistCache({ force, signal });
       const durationMs = Date.now() - startTime;
@@ -80,6 +46,5 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
       return NextResponse.json(result);
     },
-    () => busyResponse(t),
-  );
+  });
 });

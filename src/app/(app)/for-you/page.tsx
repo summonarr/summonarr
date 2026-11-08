@@ -31,20 +31,11 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
 import { getTranslator } from "@/lib/i18n/server";
 import type { Translator } from "@/lib/i18n/translate";
 import { canRequest } from "@/lib/permissions";
+import { parsePageNumber } from "@/lib/pagination";
+import { first, type PageSearchParams } from "@/lib/search-params";
+import { buildForYouSubtitle } from "@/lib/for-you-subtitle";
 
 const PER_PAGE = 100;
-
-// "updated 5m ago", localized. Same buckets as formatRelativeTime
-// (src/lib/relative-time.ts), which is English-only. Server-rendered, so the
-// browser receives finished text (guardrail 16 does not apply here).
-function updatedLabel(t: Translator, date: Date): string {
-  const minutes = Math.floor((Date.now() - date.getTime()) / 60_000);
-  if (minutes < 1) return t("browse.forYou.updated.justNow");
-  if (minutes < 60) return t("browse.forYou.updated.minutes", { count: minutes });
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return t("browse.forYou.updated.hours", { count: hours });
-  return t("browse.forYou.updated.days", { count: Math.floor(hours / 24) });
-}
 
 // Tab / bookmark / history title — the nav label, in the viewer's language.
 export async function generateMetadata(): Promise<Metadata> {
@@ -66,7 +57,7 @@ export async function generateMetadata(): Promise<Metadata> {
 export default async function ForYouPage({
   searchParams,
 }: {
-  searchParams: Promise<Record<string, string>>;
+  searchParams: Promise<PageSearchParams>;
 }) {
   await requireFeature("feature.page.forYou");
   const [sp, session, plexEnabled, jellyfinEnabled, t] = await Promise.all([
@@ -76,10 +67,11 @@ export default async function ForYouPage({
     isFeatureEnabled("feature.integration.jellyfin"),
     getTranslator(),
   ]);
-  const availability = parseAvailability(sp.filter);
-  const type = parseRecommendationType(sp.type);
-  const sort = parseRecommendationSort(sp.sort);
-  const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
+  // A repeated key arrives as an array; each parser reads its first value.
+  const availability = parseAvailability(first(sp.filter));
+  const type = parseRecommendationType(first(sp.type));
+  const sort = parseRecommendationSort(first(sp.sort));
+  const page = parsePageNumber(sp.page);
   // Integration flags passed explicitly — they default to TRUE when omitted.
   const { showPlex, showJellyfin } = getBadgeVisibility(session, {
     plex: plexEnabled,
@@ -120,45 +112,13 @@ export default async function ForYouPage({
   // denominator reports — so the sentence describes ONE population throughout.
   // (`filtered` would re-count on every pill click; the shelf's provenance does
   // not change because the reader narrowed to TV.)
-  const seeds = summarizeRecommendationSeeds(enriched);
-  const seedParts: string[] = [];
-  if (seeds.watchHistorySeeds > 0) {
-    seedParts.push(t("browse.forYou.seeds.watched", { count: seeds.watchHistorySeeds }));
-  }
-  if (seeds.watchlistSeeds > 0) {
-    seedParts.push(t("browse.forYou.seeds.watchlist", { count: seeds.watchlistSeeds }));
-  }
-  if (seeds.requestSeeds > 0) {
-    seedParts.push(t("browse.forYou.seeds.requested", { count: seeds.requestSeeds }));
-  }
-  const seedList =
-    seedParts.length > 1
-      ? t("browse.forYou.seeds.join", { rest: seedParts.slice(0, -1).join(", "), last: seedParts[seedParts.length - 1] })
-      : seedParts[0];
-  // An all-fallback shelf (cold start) says so instead of implying these came
-  // from a taste profile that does not exist yet.
-  const allFallback = enriched.length > 0 && enriched.every((m) => m.fromTrendingFallback);
-  const subtitle =
-    enriched.length === 0
-      ? t("browse.forYou.subtitle")
-      : allFallback
-        ? [
-            t("browse.forYou.fallbackPicks", { count: filtered.length }),
-            t("browse.forYou.fallbackHint"),
-            computedAt ? updatedLabel(t, computedAt) : null,
-          ]
-            .filter(Boolean)
-            .join(" · ")
-        : [
-            // "200 of 200 picks" says nothing the plain count doesn't.
-            filtered.length === enriched.length
-              ? t("browse.forYou.picks", { count: enriched.length })
-              : t("browse.forYou.picksOf", { count: filtered.length, total: enriched.length }),
-            seedParts.length > 0 ? t("browse.forYou.builtFrom", { seeds: seedList }) : null,
-            computedAt ? updatedLabel(t, computedAt) : null,
-          ]
-            .filter(Boolean)
-            .join(" · ");
+  const subtitle = buildForYouSubtitle(t, {
+    total: enriched.length,
+    shown: filtered.length,
+    allFallback: enriched.length > 0 && enriched.every((m) => m.fromTrendingFallback),
+    seeds: summarizeRecommendationSeeds(enriched),
+    computedAt,
+  });
 
   // "Back to page 1" keeps the reader's filters — only the page resets.
   const firstPageParams = new URLSearchParams();

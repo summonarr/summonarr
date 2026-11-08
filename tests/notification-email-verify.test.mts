@@ -10,6 +10,7 @@ import {
   verifyIdentifierPrefixFor,
   hashVerifyToken,
   generateVerifyToken,
+  canSetOwnNotificationEmail,
 } from "../src/lib/notification-email-verify.ts";
 
 test("identifier round-trips userId + email", () => {
@@ -65,4 +66,10 @@ test("hashVerifyToken is deterministic; generateVerifyToken hashes its own raw",
   assert.equal(hash, hashVerifyToken(raw));
   assert.equal(/^[0-9a-f]{64}$/.test(raw), true); // 32 random bytes, hex
   assert.equal(/^[0-9a-f]{64}$/.test(hash), true); // sha256, hex
+});
+
+test("only a Jellyfin sign-in sets its own notification address — Plex and OIDC addresses are the provider's", () => {
+  assert.equal(canSetOwnNotificationEmail("jellyfin"), true);
+  assert.equal(canSetOwnNotificationEmail("jellyfin-quickconnect"), true);
+  for (const p of ["plex", "oidc", "credentials", "", null, undefined]) assert.equal(canSetOwnNotificationEmail(p), false, String(p));
 });

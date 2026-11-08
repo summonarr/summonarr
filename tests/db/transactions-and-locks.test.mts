@@ -80,3 +80,38 @@ test("withAdvisoryLock: the lock is released even when the work throws", async (
   );
   assert.equal(await withAdvisoryLock(LOCK, async () => "ok", () => "busy"), "ok");
 });
+
+test("withAdvisoryLock: a timed-out run keeps the lock until its work returns, so no second run starts beside it", async () => {
+  // Guardrail 41: the work cannot be killed, only told to stop, and signal-aware
+  // work still finishes its in-flight batch. Unlocking at the timeout let the
+  // next tick start a second copy while the first was still writing.
+  const LOCK = 987_003;
+  let finishBatch!: () => void;
+  const batchDone = new Promise<void>((r) => (finishBatch = r));
+  let aborted!: () => void;
+  const sawAbort = new Promise<void>((r) => (aborted = r));
+
+  const first = withAdvisoryLock(
+    LOCK,
+    async (signal: AbortSignal) => {
+      await new Promise<void>((r) => signal.addEventListener("abort", () => r(), { once: true }));
+      aborted();
+      await batchDone;
+      return "stopped";
+    },
+    () => "busy",
+    { timeoutMs: 50 },
+  );
+  await assert.rejects(first, (err: unknown) => (err as Error).name === "AdvisoryLockTimeoutError");
+  await sawAbort;
+
+  assert.equal(await withAdvisoryLock(LOCK, async () => "second", () => "busy"), "busy", "still held while the first run winds down");
+
+  finishBatch();
+  const deadline = Date.now() + 10_000;
+  let again = "busy";
+  while (again === "busy" && Date.now() < deadline) {
+    again = await withAdvisoryLock(LOCK, async () => "third", () => "busy");
+  }
+  assert.equal(again, "third", "released once the first run returned");
+});

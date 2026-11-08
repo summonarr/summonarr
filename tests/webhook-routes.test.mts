@@ -1,9 +1,11 @@
 // Route-level unit tests for the Sonarr/Radarr webhook handlers
 // (src/app/api/webhooks/{radarr,sonarr}/route.ts) — the two routes share one
 // code path (secret resolution → auth → body caps → replay digest → event
-// dispatch), so the shared behavior is exercised on radarr and the sonarr file
-// adds only its per-service specifics (tvdb/tmdb series mapping, the tvdb-keyed
-// one-shot marker, its own Test message). What these tests pin:
+// dispatch, src/lib/arr-webhook.ts). The detailed shared-behavior pins run on
+// radarr, and the "(shared prologue)" block re-runs the auth, transport,
+// legacy/equal-secret, size-cap, JSON, rate-limit and rollback pins against
+// BOTH routes; the sonarr tests add its per-service specifics (tvdb/tmdb
+// series mapping, the id-type-tagged one-shot marker). What these tests pin:
 //
 //  - Guardrail 2 (webhook auth): the presented token is compared against every
 //    per-instance secret via the SHA-256 + timingSafeEqual compare, and BOTH
@@ -31,6 +33,10 @@
 //    scheduling the library scan, refuses the forgery shapes (absent /
 //    ids-disagree), and DEFERS an unverifiable verdict (no optimistic flip): the
 //    after() task re-verifies once the scan settles and flips then.
+//    SeriesDelete evicts the cache rows only once Sonarr reports the series
+//    ABSENT — by the payload tvdbId when a request on the instance stores
+//    both ids, else by Sonarr's tmdb lookup (never a TMDB-sourced mapping);
+//    still held or unverifiable → nothing written.
 //    Test short-circuits before the replay digest; Grab/unknown events are
 //    acknowledged-but-skipped (and still replay-recorded); malformed and
 //    non-object JSON → 400; oversized bodies → 413 (header fast-path before
@@ -76,6 +82,8 @@ process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32); // prisma.ts pulls in token-
 // Silence rate-limit's module-load warning AND make getClientIp trust
 // X-Forwarded-For, so each test gets its own rate-limit bucket.
 process.env.TRUST_PROXY = "true";
+// The tvdb→tmdb resolution (SeriesDelete) must never reach TMDB from here.
+delete process.env.TMDB_READ_TOKEN;
 
 // Next's createAsyncLocalStorage() captures globalThis.AsyncLocalStorage at
 // module load; without it after() is backed by a throwing FakeAsyncLocalStorage.
@@ -186,6 +194,9 @@ type SettingDeleteManyArgs = {
 };
 const settingCreateManyCalls: SettingCreateManyArgs[] = [];
 const settingDeleteManyCalls: SettingDeleteManyArgs[] = [];
+// Makes the next setting.createMany throw once (a handler failure on a path
+// both routes share: the manual-interaction claim).
+let settingCreateManyError: Error | null = null;
 
 // Outbound notification channels (notify-agents.ts): none unless a test seeds
 // one with agentRow() — a generic webhook on an RFC1918 literal (admin-mode SSRF,
@@ -224,6 +235,11 @@ shadowPrismaModel(prisma, "setting", {
   },
   createMany: async (args: SettingCreateManyArgs) => {
     settingCreateManyCalls.push(args);
+    if (settingCreateManyError) {
+      const err = settingCreateManyError;
+      settingCreateManyError = null;
+      throw err;
+    }
     let count = 0;
     for (const row of args.data) {
       if (settings.has(row.key)) {
@@ -366,13 +382,28 @@ const sonarrWantedStub = {
   },
 };
 const sonarrAvailableCreates: Record<string, unknown>[] = [];
+const sonarrAvailableDeletes: Record<string, unknown>[] = [];
 const sonarrAvailableStub = {
-  deleteMany: async () => ({ count: 0 }),
+  deleteMany: async (args: { where: Record<string, unknown> }) => {
+    sonarrAvailableDeletes.push(args.where);
+    return { count: 0 };
+  },
   createMany: async (args: { data: Record<string, unknown>[] }) => {
     sonarrAvailableCreates.push(...args.data);
     return { count: args.data.length };
   },
 };
+// TmdbCache: only the tvdb→tmdb resolution reads it (a tvdbId-only
+// SeriesDelete). Keyed by cache key; writes are accepted and dropped.
+const tmdbCacheRows = new Map<string, unknown>();
+shadowPrismaModel(prisma, "tmdbCache", {
+  findMany: async (args: { where: { key: { in: string[] } } }) =>
+    args.where.key.in
+      .filter((k) => tmdbCacheRows.has(k))
+      .map((key) => ({ key, data: JSON.stringify(tmdbCacheRows.get(key)), expiresAt: new Date(Date.now() + 3_600_000) })),
+  upsert: async () => ({}),
+  deleteMany: async () => ({ count: 0 }),
+});
 shadowPrismaModel(prisma, "radarrWantedItem", radarrWantedStub);
 shadowPrismaModel(prisma, "radarrAvailableItem", radarrAvailableStub);
 shadowPrismaModel(prisma, "sonarrWantedItem", sonarrWantedStub);
@@ -408,6 +439,10 @@ shadowPrismaModel(prisma, "issueGrab", {
       count++;
     }
     return { count };
+  },
+  findUnique: async (args: { where: { id: string } }) => {
+    const g = grabs.find((x) => x.id === args.where.id);
+    return g ? { ...g } : null;
   },
   update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
     const g = grabs.find((x) => x.id === args.where.id);
@@ -666,9 +701,12 @@ beforeEach(() => {
   radarrWantedDeletes.length = 0;
   sonarrWantedDeletes.length = 0;
   sonarrAvailableCreates.length = 0;
+  sonarrAvailableDeletes.length = 0;
+  tmdbCacheRows.clear();
   deletionVoteDeletes.length = 0;
   executeRawCalls.length = 0;
   txError = null;
+  settingCreateManyError = null;
   mediaRequestFindManyImpl = async () => [];
   notificationRows.length = 0;
   agentRows.length = 0;
@@ -1280,6 +1318,44 @@ test("radarr issue-grab: a failed web push keeps notifiedAt set and does not re-
   assert.equal(settings.has(`grabPushRetry:${grab.id}`), true, "the retry marker is rewritten when push fails again");
 });
 
+test("a push a failed delivery left behind is retried by a later sweep, not only by a Download for the same title", async () => {
+  const { retryPendingGrabPushes } = await import("../src/lib/arr-webhook.ts");
+  const now = new Date("2026-11-07T12:00:00Z");
+  const old = new Date(now.getTime() - 30 * 60_000).toISOString();
+  const sent = seedGrab({ tmdbId: 1, mediaType: "MOVIE", notifiedAt: now, title: "Sent" });
+  const failsAgain = seedGrab({ tmdbId: 2, mediaType: "MOVIE", notifiedAt: now, title: "Fails" });
+  const stale = seedGrab({ tmdbId: 3, mediaType: "MOVIE", notifiedAt: now, title: "Stale" });
+  const fresh = seedGrab({ tmdbId: 4, mediaType: "MOVIE", notifiedAt: now, title: "Fresh" });
+  settings.set(`grabPushRetry:${sent.id}`, old);
+  settings.set(`grabPushRetry:${failsAgain.id}`, old);
+  settings.set(`grabPushRetry:${stale.id}`, new Date(now.getTime() - 25 * 60 * 60_000).toISOString());
+  settings.set(`grabPushRetry:${fresh.id}`, new Date(now.getTime() - 60_000).toISOString());
+  const pushed: string[] = [];
+  const r = await retryPendingGrabPushes({
+    now,
+    force: true,
+    // Cast: the test and the module see push.ts's outcome type through two import paths.
+    push: (async (data: { title: string }) => {
+      pushed.push(data.title);
+      return data.title === "Fails" ? "failed" : "sent";
+    }) as never,
+  });
+  assert.deepEqual(pushed.sort(), ["Fails", "Sent"], "an expired or brand-new marker is never pushed");
+  assert.deepEqual(r, { retried: 2, expired: 1 });
+  assert.equal(settings.has(`grabPushRetry:${sent.id}`), false, "a delivered push clears its marker");
+  assert.equal(settings.get(`grabPushRetry:${failsAgain.id}`), old, "a push failing again keeps its FIRST failure's time");
+  assert.equal(settings.has(`grabPushRetry:${stale.id}`), false, "a marker past its TTL is dropped");
+  assert.equal(settings.has(`grabPushRetry:${fresh.id}`), true, "a fresh marker is left to the delivery that wrote it");
+  assert.equal(grabUpdateManyCalls.length, 0, "the emit claim is never touched");
+});
+
+test("radarr: one secret on two instances is said once in the log; the default instance still handles the event", async () => {
+  settings.set(arrSettingKey("radarr", "4k", "WebhookSecret"), RADARR_SECRET);
+  const { res } = await post(radarrPOST, webhookReq("radarr", { token: RADARR_SECRET, body: { eventType: "Test" } }));
+  assert.equal(res.status, 200);
+  assert.ok(warns.some((w) => w.includes("one webhook secret matches several instances (default, 4k)")));
+});
+
 // ── body caps, malformed JSON, rate limiting ────────────────────────────────
 
 test("radarr: a declared Content-Length over 1 MB → 413 before auth even runs", async () => {
@@ -1300,7 +1376,7 @@ test("radarr: an oversized actual body without Content-Length → 413 after the 
   );
   assert.equal(res.status, 413);
   assert.deepEqual(body, { error: "Payload too large" });
-  assert.ok(warns.some((w) => w.includes("413 payload too large bytes=1048577")));
+  assert.ok(warns.some((w) => w.includes("413 payload too large")));
 });
 
 test("radarr: malformed and non-object JSON bodies → 400 Invalid JSON (auth runs first)", async () => {
@@ -1315,6 +1391,19 @@ test("radarr: malformed and non-object JSON bodies → 400 Invalid JSON (auth ru
   assert.equal(replayCreates.length, 0, "an unparseable body must never be digest-recorded");
 });
 
+test("both: a payload nested too deeply for the replay digest → 400 Invalid JSON, not a 500", async () => {
+  // JSON.parse is iterative, so this ~200 KB body parses; the replay digest's
+  // canonicaliser recursed once per level and overflowed the stack outside any try.
+  const levels = 100_000;
+  const rawBody = `{"eventType":"Download","x":${"[".repeat(levels)}${"]".repeat(levels)}}`;
+  for (const [handler, svc, token] of [[radarrPOST, "radarr", RADARR_SECRET], [sonarrPOST, "sonarr", SONARR_SECRET]] as const) {
+    const { res, body } = await post(handler, webhookReq(svc, { token, rawBody }));
+    assert.equal(res.status, 400, svc);
+    assert.deepEqual(body, { error: "Invalid JSON" });
+  }
+  assert.equal(replayCreates.length, 0, "nothing may be digest-recorded");
+});
+
 test("radarr: per-IP rate limit — the 601st request inside the window → 429", async () => {
   // 600/min: sized for per-episode Download bursts (a season-pack import fires
   // one event per episode); the bucket still bounds the pre-auth cost per IP.
@@ -1326,6 +1415,130 @@ test("radarr: per-IP rate limit — the 601st request inside the window → 429"
   const { res, body } = await post(radarrPOST, webhookReq("radarr", { ip, body: { eventType: "Test" } }));
   assert.equal(res.status, 429);
   assert.deepEqual(body, { error: "Too Many Requests" });
+});
+
+// ── the shared prologue, on BOTH routes ─────────────────────────────────────
+// Auth, instance resolution, body caps, rate limit and the replay rollback live
+// in one module (arr-webhook.ts); each pin below runs against both routes so
+// neither can drift off it. The firing instance is read back from the
+// manual-interaction marker key, which both routes scope to it.
+
+const SHARED = [
+  {
+    service: "radarr" as const, POST: radarrPOST, secret: RADARR_SECRET, namedSecret: RADARR_ANIME_SECRET,
+    slugs: ["", "4k", "anime"], label: "Radarr",
+    manual: (id: number) => ({ eventType: "ManualInteractionRequired", movie: { tmdbId: id, title: "T" }, downloadClient: "sab" }),
+    markerKey: (inst: string, id: number) => `manualInteractionNotified:radarr:${inst}:${id}`,
+  },
+  {
+    service: "sonarr" as const, POST: sonarrPOST, secret: SONARR_SECRET, namedSecret: SONARR_ANIME_SECRET,
+    slugs: ["", "anime"], label: "Sonarr",
+    manual: (id: number) => ({ eventType: "ManualInteractionRequired", series: { tvdbId: id, title: "T" }, downloadClient: "sab" }),
+    markerKey: (inst: string, id: number) => `manualInteractionNotified:sonarr:${inst}:tvdb:${id}`,
+  },
+];
+
+for (const r of SHARED) {
+  test(`${r.service} (shared prologue): no secret configured anywhere → 401 even with a token`, async () => {
+    for (const slug of r.slugs) settings.delete(arrSettingKey(r.service, slug, "WebhookSecret"));
+    const { res, body } = await post(r.POST, webhookReq(r.service, { token: "anything", body: { eventType: "Test" } }));
+    assert.equal(res.status, 401);
+    assert.deepEqual(body, { error: "Unauthorized" });
+    assert.ok(warns.some((w) => w.includes(`[webhook/${r.service}] secret not configured`)));
+  });
+
+  test(`${r.service} (shared prologue): Bearer and ?token= both authenticate; a non-Bearer header falls through, a wrong Bearer is never rescued`, async () => {
+    for (const opts of [{ bearer: r.secret }, { token: r.secret }, { authorization: "Basic dXNlcjpwYXNz", token: r.secret }]) {
+      const { res, body } = await post(r.POST, webhookReq(r.service, { ...opts, body: { eventType: "Test" } }));
+      assert.equal(res.status, 200, JSON.stringify(opts));
+      assert.deepEqual(body, { ok: true, message: `${r.label} webhook connected` });
+    }
+    const wrongBearer = await post(r.POST, webhookReq(r.service, { bearer: "wrong", token: r.secret, body: { eventType: "Test" } }));
+    assert.equal(wrongBearer.res.status, 401);
+  });
+
+  test(`${r.service} (shared prologue): absent, wrong and empty credentials → 401 with nothing recorded`, async () => {
+    for (const opts of [{}, { token: "not-the-secret" }, { bearer: "not-the-secret" }, { token: "" }]) {
+      const { res } = await post(r.POST, webhookReq(r.service, { ...opts, body: r.manual(11) }));
+      assert.equal(res.status, 401, JSON.stringify(opts));
+    }
+    assert.equal(replayCreates.length, 0);
+    assert.equal(settingCreateManyCalls.length, 0);
+    assert.ok(warns.some((w) => w.includes(`[webhook/${r.service}] 401 unauthorized`)));
+  });
+
+  test(`${r.service} (shared prologue): the legacy shared webhookSecret is the DEFAULT instance's only; an equal-secret collision resolves to the default`, async () => {
+    settings.delete(arrSettingKey(r.service, "", "WebhookSecret"));
+    settings.delete(arrSettingKey(r.service, "anime", "WebhookSecret"));
+    settings.set("webhookSecret", "legacy-shared-secret");
+    const legacy = await post(r.POST, webhookReq(r.service, { token: "legacy-shared-secret", body: r.manual(21) }));
+    assert.equal(legacy.res.status, 200);
+    assert.ok(settings.has(r.markerKey("", 21)), "the legacy secret resolves to the default instance");
+
+    seedBaseSettings();
+    settings.set(arrSettingKey(r.service, "anime", "WebhookSecret"), r.secret);
+    const collided = await post(r.POST, webhookReq(r.service, { token: r.secret, body: r.manual(22) }));
+    assert.equal(collided.res.status, 200);
+    assert.ok(settings.has(r.markerKey("", 22)), "equal secrets resolve to the default");
+    assert.ok(!settings.has(r.markerKey("anime", 22)));
+
+    seedBaseSettings();
+    const named = await post(r.POST, webhookReq(r.service, { token: r.namedSecret, body: r.manual(23) }));
+    assert.equal(named.res.status, 200);
+    assert.ok(settings.has(r.markerKey("anime", 23)), "a named instance's own secret selects it");
+  });
+
+  test(`${r.service} (shared prologue): oversized bodies → 413 (declared before auth, actual after the read); malformed JSON → 400 unrecorded`, async () => {
+    const declared = await post(r.POST, webhookReq(r.service, { body: { eventType: "Test" }, headers: { "content-length": "2000000" } }));
+    assert.equal(declared.res.status, 413);
+    const actual = await post(r.POST, webhookReq(r.service, { token: r.secret, rawBody: "x".repeat(1_048_577) }));
+    assert.equal(actual.res.status, 413);
+    assert.deepEqual(actual.body, { error: "Payload too large" });
+    for (const rawBody of ["{nope", "null", "[1,2]", "42"]) {
+      const { res, body } = await post(r.POST, webhookReq(r.service, { token: r.secret, rawBody }));
+      assert.equal(res.status, 400, rawBody);
+      assert.deepEqual(body, { error: "Invalid JSON" });
+    }
+    assert.equal(replayCreates.length, 0);
+  });
+
+  test(`${r.service} (shared prologue): per-IP rate limit — the 601st request inside the window → 429`, async () => {
+    const ip = r.service === "radarr" ? "198.51.100.88" : "198.51.100.89";
+    for (let i = 0; i < 600; i++) {
+      const { res } = await post(r.POST, webhookReq(r.service, { ip, body: { eventType: "Test" } }));
+      assert.equal(res.status, 401);
+    }
+    const { res, body } = await post(r.POST, webhookReq(r.service, { ip, body: { eventType: "Test" } }));
+    assert.equal(res.status, 429);
+    assert.deepEqual(body, { error: "Too Many Requests" });
+  });
+
+  test(`${r.service} (shared prologue): a handler failure rolls the digest back, and the retry is a first delivery`, async () => {
+    settingCreateManyError = new Error("db down");
+    await assert.rejects(post(r.POST, webhookReq(r.service, { token: r.secret, body: r.manual(31) })), /db down/);
+    assert.equal(replayCreates.length, 1);
+    assert.deepEqual(replayDeletes, [replayCreates[0]], "the rollback clears exactly the digest just recorded");
+
+    const retry = await post(r.POST, webhookReq(r.service, { token: r.secret, body: r.manual(31) }));
+    assert.equal(retry.res.status, 200);
+    assert.deepEqual(retry.body, { ok: true, manualInteraction: true });
+  });
+}
+
+// Every answer a handler RETURNS keeps the digest, early returns included: only
+// a throw may roll it back (a bad payload's retry can't help, and a cleared
+// digest would let a replay of a handled event through).
+test("radarr: early returns keep the replay digest — ManualInteractionRequired, an upgrade MovieFileDelete, an invalid tmdbId", async () => {
+  for (const payload of [
+    { eventType: "ManualInteractionRequired", movie: { tmdbId: 41, title: "T" }, downloadClient: "sab" },
+    { eventType: "MovieFileDelete", movie: { tmdbId: 42, title: "T" }, deleteReason: "upgrade" },
+    { eventType: "Download", movie: { tmdbId: -1, title: "T" } },
+  ]) {
+    const { res } = await post(radarrPOST, webhookReq("radarr", { token: RADARR_SECRET, body: payload }));
+    assert.ok(res.status === 200 || res.status === 400, `${payload.eventType}: ${res.status}`);
+  }
+  assert.equal(replayCreates.length, 3, "each delivery was recorded");
+  assert.deepEqual(replayDeletes, [], "no early return may roll its digest back");
 });
 
 // ── sonarr specifics ────────────────────────────────────────────────────────
@@ -1470,6 +1683,79 @@ test("sonarr Download by tvdbId only: the request is matched via tvdbId and the 
   });
 });
 
+// A tvdbId-only payload (Sonarr v3 omits tmdbId) used to touch the cache ONLY
+// when an APPROVED request carrying that tvdbId flipped; a tmdbId payload always
+// did. The same download then left the cache in two different states until the
+// next sync — the stale wanted row reading "not in Sonarr yet".
+test("sonarr tvdbId-only Download of a complete series with NO request: the cache follows Sonarr's own tmdbId, exactly as a tmdbId payload would", async () => {
+  configureSonarr("anime");
+  scriptSonarr({ series: () => completeSeries(6000, 6001) });
+
+  const { res, body } = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { bearer: SONARR_ANIME_SECRET, body: { eventType: "Download", series: { tvdbId: 6000, title: "No Request" } } }),
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(body, { ok: true, marked: 0 }, "nothing to flip");
+  assert.deepEqual(sonarrWantedDeletes, [{ tmdbId: 6001, arrInstance: "anime" }]);
+  assert.deepEqual(sonarrAvailableCreates, [{ tmdbId: 6001, arrInstance: "anime" }]);
+  assert.ok(executeRawCalls.some((sql) => sql.includes("pg_advisory_xact_lock(1001, 2)")), "under the Sonarr cache lock");
+  assert.equal(fetchCalls.length, 1, "Sonarr's library row named the tmdbId — no lookup, no TMDB call");
+});
+
+test("sonarr tvdbId-only Download, library row WITHOUT a tmdbId and no request: the sync writer's tvdb→tmdb mapping keys the cache rows", async () => {
+  configureSonarr("");
+  scriptSonarr({ series: () => completeSeries(6100) });
+  tmdbCacheRows.set("tvdb-to-tmdb:6100", { tmdbId: 6101 });
+
+  const { res } = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "Download", series: { tvdbId: 6100, title: "Sonarr v3" } } }),
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(sonarrWantedDeletes, [{ tmdbId: 6101, arrInstance: "" }]);
+  assert.deepEqual(sonarrAvailableCreates, [{ tmdbId: 6101, arrInstance: "" }]);
+});
+
+test("sonarr tvdbId-only Download with no tmdbId anywhere writes no cache row and says so", async () => {
+  configureSonarr("");
+  scriptSonarr({ series: () => completeSeries(6200) });
+  const { res } = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "Download", series: { tvdbId: 6200, title: "Unmapped" } } }),
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(sonarrWantedDeletes, []);
+  assert.deepEqual(sonarrAvailableCreates, []);
+  assert.ok(warns.some((w) => w.includes("no tmdbId for tvdbId 6200")), warns.join(" | "));
+});
+
+// The handler reads nested payload fields an authenticated sender controls.
+// A malformed list must not 500 (which also rolled the replay digest back).
+test("sonarr: a malformed `episodes` list is ignored, never a 500 — the digest stays recorded", async () => {
+  const manual = await post(
+    sonarrPOST,
+    webhookReq("sonarr", {
+      token: SONARR_SECRET,
+      body: { eventType: "ManualInteractionRequired", series: { tvdbId: 7100, title: "Odd" }, episodes: [null], downloadClient: "sab" },
+    }),
+  );
+  assert.equal(manual.res.status, 200);
+  assert.deepEqual(manual.body, { ok: true, manualInteraction: true });
+
+  seedRequest({ tmdbId: 7201, tvdbId: 7200, mediaType: "TV" });
+  configureSonarr("");
+  scriptSonarr({ series: () => completeSeries(7200, 7201) });
+  const download = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "Download", series: { tvdbId: 7200, tmdbId: 7201, title: "Odd" }, episodes: "x" } }),
+  );
+  assert.equal(download.res.status, 200);
+  assert.deepEqual(download.body, { ok: true, marked: 1 });
+  assert.equal(replayCreates.length, 2);
+  assert.equal(replayDeletes.length, 0, "a handled event never rolls its digest back");
+});
+
 test("sonarr ManualInteractionRequired: stable key prefers tvdbId, falls back to tmdbId; fresh claim schedules push + marker prune", async () => {
   const first = await post(
     sonarrPOST,
@@ -1485,11 +1771,11 @@ test("sonarr ManualInteractionRequired: stable key prefers tvdbId, falls back to
   );
   assert.equal(first.res.status, 200);
   assert.deepEqual(first.body, { ok: true, manualInteraction: true });
-  assert.equal(first.tasks.length, 2, "fresh claim schedules the push AND the 30-day marker prune");
+  assert.equal(first.tasks.length, 1, "a fresh claim schedules ONE deferred unit: the push chained with the 30-day marker prune (the Radarr twin's shape)");
   assert.deepEqual(
     settingCreateManyCalls[0].data.map((d) => d.key),
-    ["manualInteractionNotified:sonarr::42"],
-    "tvdbId is the preferred stable key (default instance ⇒ empty slug segment)",
+    ["manualInteractionNotified:sonarr::tvdb:42"],
+    "tvdbId is the preferred stable key, tagged with its id type (default instance ⇒ empty slug segment)",
   );
 
   // Executing the tasks is safe in this harness (push short-circuits on zero
@@ -1528,9 +1814,44 @@ test("sonarr ManualInteractionRequired: stable key prefers tvdbId, falls back to
       },
     }),
   );
-  assert.equal(tmdbKeyed.tasks.length, 2);
+  assert.equal(tmdbKeyed.tasks.length, 1);
   const lastClaim = settingCreateManyCalls[settingCreateManyCalls.length - 1];
-  assert.deepEqual(lastClaim.data.map((d) => d.key), ["manualInteractionNotified:sonarr::43"]);
+  assert.deepEqual(lastClaim.data.map((d) => d.key), ["manualInteractionNotified:sonarr::tmdb:43"]);
+});
+
+test("sonarr manual-interaction markers keep tvdb and tmdb ids apart: a Download whose tmdbId equals a parked series' tvdbId never clears that series' marker", async () => {
+  // The two id spaces overlap. Untagged, series B (tmdbId 4242) clearing "its"
+  // markers deleted the key of parked series A (tvdbId 4242), so A's next queue
+  // tick alerted the admins again.
+  const parked = await post(
+    sonarrPOST,
+    webhookReq("sonarr", {
+      token: SONARR_SECRET,
+      body: { eventType: "ManualInteractionRequired", series: { tvdbId: 4242, tmdbId: 9001, title: "Parked" }, downloadClient: "sab" },
+    }),
+  );
+  assert.equal(parked.tasks.length, 1, "precondition: series A's marker was claimed");
+  const parkedKey = "manualInteractionNotified:sonarr::tvdb:4242";
+  assert.ok(settings.has(parkedKey));
+
+  configureSonarr("");
+  scriptSonarr({ series: () => completeSeries(31337, 4242) });
+  const download = await post(
+    sonarrPOST,
+    webhookReq("sonarr", {
+      token: SONARR_SECRET,
+      body: { eventType: "Download", series: { tvdbId: 31337, tmdbId: 4242, title: "Other" } },
+    }),
+  );
+  assert.equal(download.res.status, 200);
+  await new Promise<void>((r) => setImmediate(r)); // the marker clear is fire-and-forget
+  const cleared = settingDeleteManyCalls.flatMap((c) => c.where.key?.in ?? []);
+  assert.deepEqual(
+    cleared.sort(),
+    ["manualInteractionNotified:sonarr::tmdb:4242", "manualInteractionNotified:sonarr::tvdb:31337"],
+    "series B clears only its OWN markers, each tagged with its id type",
+  );
+  assert.ok(settings.has(parkedKey), "series A's marker survived another series' Download");
 });
 
 test("sonarr ManualInteractionRequired: no usable tvdbId/tmdbId ⇒ fail closed, no emit", async () => {
@@ -1672,6 +1993,191 @@ test("sonarr: non-Download events and a Download without series are acknowledged
   assert.equal(requests[0].status, "APPROVED");
   assert.equal(requestUpdateManyCalls.length, 0);
   assert.equal(sonarrWantedDeletes.length, 0);
+});
+
+// ── Sonarr SeriesDelete: the cache follows SONARR, never the payload ────────
+//
+// The eviction is keyed on a tmdbId, and the secret alone doesn't prove the
+// delete happened (the Download path's reasoning). Both rows go only when
+// Sonarr reports the series ABSENT, checked so it covers the tmdbId being
+// evicted: through the payload tvdbId only when a request on this instance
+// stores BOTH ids (Sonarr-sourced — its tvdbId comes from Sonarr's own
+// answers), else through Sonarr's lookup of the tmdbId. The tvdb→tmdb cache
+// and TMDB's cross-reference never vouch: they are user-edited data (14a).
+
+test("sonarr SeriesDelete with no request tying the pair: the payload tmdbId is checked through Sonarr's lookup, and both rows go once it's absent", async () => {
+  configureSonarr("");
+  scriptSonarr({ series: () => [] });
+  const { res, body } = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "SeriesDelete", series: { tvdbId: 777, tmdbId: 888, title: "Frieren" } } }),
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(body, { ok: true, evicted: true });
+  assert.deepEqual(sonarrWantedDeletes, [{ tmdbId: 888, arrInstance: "" }]);
+  assert.deepEqual(sonarrAvailableDeletes, [{ tmdbId: 888, arrInstance: "" }]);
+  assert.ok(executeRawCalls.some((q) => q.includes("pg_advisory_xact_lock(1001, 2)")));
+  assert.deepEqual(
+    fetchCalls.map((c) => c.url),
+    [`${SONARR_DEFAULT_URL}/api/v3/series/lookup?term=tmdb:888`, `${SONARR_DEFAULT_URL}/api/v3/series?tvdbId=777`],
+  );
+});
+
+test("sonarr SeriesDelete forged: an absent tvdbId beside the tmdbId of a series Sonarr still holds evicts nothing — unmapped, or a TMDB-poisoned mapping", async () => {
+  configureSonarr("");
+  // 4242 is in no library; tmdb 888 is series 777, which Sonarr still holds.
+  scriptSonarr({ series: (url) => (url.searchParams.get("tvdbId") === "777" ? completeSeries(777, 888) : []) });
+  const sonarrWarns = () => warns.filter((w) => w.startsWith("[webhook/sonarr]"));
+  const { res, body } = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "SeriesDelete", series: { tvdbId: 4242, tmdbId: 888, title: "Frieren" } } }),
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(body, { ok: true, evicted: false, reason: "unconfirmed" });
+  assert.equal(sonarrWantedDeletes.length, 0);
+  assert.equal(sonarrAvailableDeletes.length, 0);
+  assert.ok(!fetchCalls.some((c) => c.url.includes("tvdbId=4242")), "an untied tvdbId says nothing about tmdb 888");
+  // The lookup may simply have landed on another series: no forgery warning.
+  assert.deepEqual(sonarrWarns(), []);
+
+  // TMDB poisoned: someone edited show 888's TVDB id to 4242, so the
+  // tvdb→tmdb cache (filled from TMDB) maps 4242 → 888. No request ties them,
+  // so the pair still goes through 888's own lookup — which says held.
+  replayRows.clear();
+  fetchCalls.length = 0;
+  tmdbCacheRows.set("tvdb-to-tmdb:4242", { tmdbId: 888 });
+  const poisoned = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "SeriesDelete", series: { tvdbId: 4242, tmdbId: 888, title: "Frieren" } } }),
+  );
+  assert.deepEqual(poisoned.body, { ok: true, evicted: false, reason: "unconfirmed" });
+  assert.ok(!fetchCalls.some((c) => c.url.includes("tvdbId=4242")), "a TMDB-sourced mapping never lets the tvdbId stand in");
+  assert.equal(sonarrWantedDeletes.length + sonarrAvailableDeletes.length, 0);
+  // Same with only the tvdbId: the poisoned mapping names 888, and 888 is confirmed through its own lookup.
+  replayRows.clear();
+  const poisonedTvdbOnly = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "SeriesDelete", series: { tvdbId: 4242, title: "Frieren" } } }),
+  );
+  assert.deepEqual(poisonedTvdbOnly.body, { ok: true, evicted: false, reason: "unconfirmed" });
+  assert.equal(sonarrWantedDeletes.length + sonarrAvailableDeletes.length, 0);
+  assert.deepEqual(sonarrWarns(), []);
+
+  // A request-tied pair whose series Sonarr still holds (incomplete is still
+  // held): checked by tvdbId with no lookup, refused, and THIS one is logged.
+  replayRows.clear();
+  fetchCalls.length = 0;
+  seedRequest({ tmdbId: 888, tvdbId: 777, mediaType: "TV" });
+  scriptSonarr({ series: () => [{ tvdbId: 777, tmdbId: 888, status: "continuing", seasons: [season(1, 3, 10)] }] });
+  const incomplete = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "SeriesDelete", series: { tvdbId: 777, tmdbId: 888, title: "Frieren" } } }),
+  );
+  assert.deepEqual(incomplete.body, { ok: true, evicted: false, reason: "not_deleted" });
+  assert.deepEqual(fetchCalls.map((c) => c.url), [`${SONARR_DEFAULT_URL}/api/v3/series?tvdbId=777`]);
+  assert.equal(sonarrWantedDeletes.length + sonarrAvailableDeletes.length, 0);
+  assert.ok(sonarrWarns().some((w) => w.startsWith("[webhook/sonarr] SeriesDelete for tmdbId=") && w.includes("not confirmed by Sonarr") && w.endsWith(" 888")));
+
+  // That request ties 888 to 777 — not to 4242: the forged pair is still untied.
+  replayRows.clear();
+  fetchCalls.length = 0;
+  const forgedBesideRequest = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "SeriesDelete", series: { tvdbId: 4242, tmdbId: 888, title: "Frieren" } } }),
+  );
+  assert.deepEqual(forgedBesideRequest.body, { ok: true, evicted: false, reason: "unconfirmed" });
+  assert.ok(!fetchCalls.some((c) => c.url.includes("tvdbId=4242")));
+  assert.equal(sonarrWantedDeletes.length + sonarrAvailableDeletes.length, 0);
+});
+
+test("sonarr SeriesDelete genuine v4 (both ids) with Sonarr's tmdb lookup LAGGING: evicted only when a request on THIS instance ties the pair — never by the cache", async () => {
+  configureSonarr("");
+  scriptSonarr({ series: () => [], lookup: () => [] });
+  const deliver = (series: Record<string, unknown>) => {
+    replayRows.clear();
+    fetchCalls.length = 0;
+    return post(sonarrPOST, webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "SeriesDelete", series } }));
+  };
+
+  // Nothing ties the pair: the lookup is the only witness, and it knows nothing yet.
+  assert.deepEqual((await deliver({ tvdbId: 777, tmdbId: 888, title: "Frieren" })).body, { ok: true, evicted: false, reason: "unverified" });
+  // The tvdb→tmdb cache agreeing is not enough — it is filled from TMDB.
+  tmdbCacheRows.set("tvdb-to-tmdb:777", { tmdbId: 888 });
+  assert.deepEqual((await deliver({ tvdbId: 777, tmdbId: 888, title: "Frieren" })).body, { ok: true, evicted: false, reason: "unverified" });
+  // A request storing both ids, but on ANOTHER instance, doesn't tie them here.
+  seedRequest({ tmdbId: 888, tvdbId: 777, mediaType: "TV", arrInstance: "anime" });
+  assert.deepEqual((await deliver({ tvdbId: 777, tmdbId: 888, title: "Frieren" })).body, { ok: true, evicted: false, reason: "unverified" });
+  assert.equal(sonarrWantedDeletes.length + sonarrAvailableDeletes.length, 0);
+
+  // A request on this instance that stored both ids ties them: checked by tvdbId, no lookup.
+  seedRequest({ tmdbId: 999, tvdbId: 5555, mediaType: "TV" });
+  const tied = await deliver({ tvdbId: 5555, tmdbId: 999, title: "Other" });
+  assert.deepEqual(tied.body, { ok: true, evicted: true });
+  assert.deepEqual(fetchCalls.map((c) => c.url), [`${SONARR_DEFAULT_URL}/api/v3/series?tvdbId=5555`], "no lookup on the tied path");
+  assert.deepEqual(sonarrWantedDeletes, [{ tmdbId: 999, arrInstance: "" }]);
+  assert.deepEqual(sonarrAvailableDeletes, [{ tmdbId: 999, arrInstance: "" }]);
+});
+
+test("sonarr SeriesDelete unverifiable (Sonarr 503, or the instance not configured): no optimistic eviction", async () => {
+  configureSonarr("");
+  fetchHandler = () => new Response(JSON.stringify({ message: "Service Unavailable" }), { status: 503, headers: { "content-type": "application/json" } });
+  const down = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "SeriesDelete", series: { tvdbId: 777, tmdbId: 888, title: "Frieren" } } }),
+  );
+  assert.equal(down.res.status, 200);
+  assert.deepEqual(down.body, { ok: true, evicted: false, reason: "unverified" });
+
+  // The anime instance has a secret but no connection: nothing to ask.
+  fetchCalls.length = 0;
+  const unconfigured = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_ANIME_SECRET, body: { eventType: "SeriesDelete", series: { tvdbId: 777, tmdbId: 888, title: "Frieren" } } }),
+  );
+  assert.deepEqual(unconfigured.body, { ok: true, evicted: false, reason: "unverified" });
+  assert.equal(fetchCalls.length, 0);
+  assert.equal(sonarrWantedDeletes.length + sonarrAvailableDeletes.length, 0);
+});
+
+test("sonarr SeriesDelete with only a tvdbId: the mapped tmdbId is a CANDIDATE — confirmed through its own lookup, or by the tvdbId when a request ties them", async () => {
+  configureSonarr("");
+  tmdbCacheRows.set("tvdb-to-tmdb:777", { tmdbId: 888 });
+  scriptSonarr({ series: () => [] });
+  const gone = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "SeriesDelete", series: { tvdbId: 777, title: "Frieren" } } }),
+  );
+  assert.deepEqual(gone.body, { ok: true, evicted: true });
+  assert.deepEqual(sonarrWantedDeletes, [{ tmdbId: 888, arrInstance: "" }]);
+  assert.deepEqual(sonarrAvailableDeletes, [{ tmdbId: 888, arrInstance: "" }]);
+  assert.deepEqual(
+    fetchCalls.map((c) => c.url),
+    [`${SONARR_DEFAULT_URL}/api/v3/series/lookup?term=tmdb:888`, `${SONARR_DEFAULT_URL}/api/v3/series?tvdbId=777`],
+    "no request ties 777 to 888, so 888 is confirmed through its own lookup",
+  );
+
+  sonarrWantedDeletes.length = 0;
+  sonarrAvailableDeletes.length = 0;
+  replayRows.clear();
+  scriptSonarr({ series: () => completeSeries(777, 888) });
+  const held = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "SeriesDelete", series: { tvdbId: 777, title: "Frieren" } } }),
+  );
+  assert.deepEqual(held.body, { ok: true, evicted: false, reason: "unconfirmed" });
+  assert.equal(sonarrWantedDeletes.length + sonarrAvailableDeletes.length, 0);
+
+  // A request ties them: the tvdbId alone answers, no lookup.
+  replayRows.clear();
+  fetchCalls.length = 0;
+  seedRequest({ tmdbId: 888, tvdbId: 777, mediaType: "TV" });
+  scriptSonarr({ series: () => [], lookup: () => [] });
+  const tied = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "SeriesDelete", series: { tvdbId: 777, title: "Frieren" } } }),
+  );
+  assert.deepEqual(tied.body, { ok: true, evicted: true });
+  assert.deepEqual(fetchCalls.map((c) => c.url), [`${SONARR_DEFAULT_URL}/api/v3/series?tvdbId=777`]);
 });
 
 // ── Sonarr: guardrail 14a — "ready" means the series is COMPLETE ────────────

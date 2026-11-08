@@ -83,11 +83,13 @@ const discordEdits: Array<{ content?: string; embeds?: Array<Record<string, unkn
 // emitted event's `request` block — the id the Discord buttons forward — can be
 // read back.
 const AGENT_URL = "http://10.77.0.9:9/hook";
-type AgentPost = { event: string; request: { id: string | null; instance: string } | null };
+type AgentPost = { event: string; request: { id: string | null; instance: string } | null; text?: string | null };
 const agentPosts: AgentPost[] = [];
 // A Radarr the admin_approve button can push to (the requests-mutation harness's
 // responder, trimmed): lookup → root folder → quality profile → add.
 const RADARR_HOST = "10.0.0.2";
+// Answers the add with this status instead of accepting it (e.g. a gateway 504).
+let radarrAddStatus: number | null = null;
 // What TMDB's /search answers (the /watchlist add and /issue searches); empty by default.
 let tmdbSearchResults: Array<Record<string, unknown>> = [];
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -108,7 +110,10 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const tmdbId = Number((url.searchParams.get("term") ?? "").replace(/^tmdb:/, "")) || 0;
       return json([{ tmdbId, title: "The Matrix", year: 1999, titleSlug: "the-matrix", images: [], seasons: [] }]);
     }
-    if (url.pathname.includes("/api/v3/movie")) return json({ id: 1, tvdbId: 4242 });
+    if (url.pathname.includes("/api/v3/movie")) {
+      if (radarrAddStatus !== null) return new Response("upstream timed out", { status: radarrAddStatus });
+      return json({ id: 1, tvdbId: 4242 });
+    }
     throw new Error(`unexpected Radarr fetch ${url.href}`);
   }
   if ((url.hostname === "themoviedb.org" || url.hostname.endsWith(".themoviedb.org"))) {
@@ -237,7 +242,15 @@ shadowPrismaModel(prisma, "discordLinkToken", {
     }
     return hit;
   },
-  delete: async (args: unknown) => { rec("discordLinkToken.delete", args); return {}; },
+  // Like Prisma: a delete of a row that is gone throws P2025.
+  delete: async (args: { where: { token: string } }) => {
+    rec("discordLinkToken.delete", args);
+    if (!linkTokens.some((t) => t.token === args.where.token)) {
+      throw new Prisma.PrismaClientKnownRequestError("record not found", { code: "P2025", clientVersion: "0.0.0-test" });
+    }
+    linkTokens = linkTokens.filter((t) => t.token !== args.where.token);
+    return {};
+  },
   deleteMany: async (args: { where: { token?: string } }) => {
     rec("discordLinkToken.deleteMany", { ...args.where, inTx });
     const before = linkTokens.length;
@@ -307,7 +320,8 @@ for (const m of [
     groupBy: async () => [], aggregate: async () => ({ _count: { _all: 0 }, _sum: {} }),
     create: async (args: unknown) => { rec(`${m}.create`, args); return { id: "x" }; },
     createMany: async () => ({ count: 0 }), update: async (args: unknown) => { rec(`${m}.update`, args); return {}; },
-    updateMany: async () => ({ count: 0 }), upsert: async () => ({}), deleteMany: async () => ({ count: 0 }),
+    updateMany: async () => ({ count: 0 }), upsert: async () => ({}),
+    deleteMany: async (args: unknown) => { rec(`${m}.deleteMany`, args); return { count: 0 }; },
   });
 }
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
@@ -333,10 +347,19 @@ let requestRows: RequestRow[] = [];
 // "already greenlit" mirror lookup, `status: { in: [...] }`). Every other findFirst
 // (the clicker's own `existing` row, `earlierPending`) answers null.
 let greenlitPeer: { status: string } | null = null;
+// Another user's PENDING request for the picked title (the pending branch's
+// first-pending read, `status: "PENDING"`); recorded with whether it ran in a tx.
+let pendingPeer: { id: string } | null = null;
+const pendingPeerReads: Array<{ inTx: boolean }> = [];
+// When set, mediaRequest.create throws it (a duplicate-request race, P2002).
+let requestCreateThrows: Error | null = null;
 shadowPrismaModel(prisma, "mediaRequest", {
-  findUnique: async (args: { where: { id: string } }) => {
+  // Projects through `select` like Prisma does, so a column the handler forgets
+  // to select is missing here too.
+  findUnique: async (args: { where: { id: string }; select?: Record<string, boolean> }) => {
     const r = requestRows.find((x) => x.id === args.where.id);
-    return r ? { ...r } : null;
+    if (!r) return null;
+    return args.select ? Object.fromEntries(Object.entries(r).filter(([k]) => args.select![k] === true)) : { ...r };
   },
   updateMany: async (args: { where: { id: string; status?: string }; data: Record<string, unknown> }) => {
     rec("mediaRequest.updateMany", args);
@@ -350,13 +373,28 @@ shadowPrismaModel(prisma, "mediaRequest", {
     return { count };
   },
   findMany: async (args: unknown) => { rec("mediaRequest.findMany", args); return []; },
-  findFirst: async (args: { where: { status?: { in?: string[] } } }) => {
+  findFirst: async (args: { where: { status?: string | { in?: string[] }; id?: unknown } }) => {
     rec("mediaRequest.findFirst", args.where);
-    return args.where.status?.in?.includes("AVAILABLE") ? greenlitPeer : null;
+    if (args.where.status === "PENDING" && args.where.id === undefined) {
+      pendingPeerReads.push({ inTx });
+      return pendingPeer;
+    }
+    if (typeof args.where.status === "string") return null;
+    // Honour the queried status list, like the real lookup: a peer whose status
+    // the caller did not ask for is not found.
+    return greenlitPeer && args.where.status?.in?.includes(greenlitPeer.status) ? greenlitPeer : null;
   },
   count: async () => 0,
   groupBy: async () => [], aggregate: async () => ({ _count: { _all: 0 }, _sum: {} }),
-  create: async (args: unknown) => { rec("mediaRequest.create", args); return { id: "x", createdAt: new Date() }; },
+  create: async (args: { data: Record<string, unknown> }) => {
+    rec("mediaRequest.create", args);
+    if (requestCreateThrows) throw requestCreateThrows;
+    // Kept, so the chokepoint's status-guarded rollback (an auto-approve whose
+    // push failed) finds the row it created.
+    const row: RequestRow = { status: "PENDING", ...args.data, id: `x${requestRows.length}`, createdAt: new Date() };
+    requestRows.push(row);
+    return { ...row };
+  },
   createMany: async () => ({ count: 0 }), update: async (args: unknown) => { rec("mediaRequest.update", args); return {}; },
   upsert: async () => ({}), deleteMany: async () => ({ count: 0 }),
 });
@@ -393,7 +431,11 @@ let watchlistRows: WatchRow[] = [];
 shadowPrismaModel(prisma, "watchlistItem", {
   findMany: async (args: { where: { userId: string }; take?: number }) =>
     watchlistRows.filter((w) => w.userId === args.where.userId).slice(0, args.take ?? Infinity).map((w) => ({ ...w })),
-  count: async (args: { where: { userId: string } }) => watchlistRows.filter((w) => w.userId === args.where.userId).length,
+  count: async (args: { where: { userId: string; tmdbId?: number; mediaType?: string } }) =>
+    watchlistRows.filter((w) =>
+      w.userId === args.where.userId &&
+      (args.where.tmdbId === undefined || w.tmdbId === args.where.tmdbId) &&
+      (args.where.mediaType === undefined || w.mediaType === args.where.mediaType)).length,
   findFirst: async (args: { where: { userId: string; tmdbId: number; mediaType: string } }) =>
     watchlistRows.find((w) => w.userId === args.where.userId && w.tmdbId === args.where.tmdbId && w.mediaType === args.where.mediaType) ?? null,
   create: async (args: { data: WatchRow & { posterPath: string | null } }) => {
@@ -415,6 +457,7 @@ shadowPrismaModel(prisma, "hiddenItem", {
 const { clearRecentlyAddedCache } = await import("../src/lib/recently-added.ts");
 
 const interactions = await import("../src/app/api/interactions/route.ts");
+const signature = await import("../src/lib/discord-interactions/signature.ts");
 
 // ── invocation ───────────────────────────────────────────────────────────────
 let idSeq = 0;
@@ -493,10 +536,14 @@ beforeEach(async () => {
   settings.set("discordPublicKey", PUBLIC_KEY_HEX);
   settings.set("discordBotToken", "a-bot-token");
   settings.set("discordGuildId", GUILD_ID);
-  interactions.invalidatePublicKeyCache();
+  signature.invalidatePublicKeyCache();
   invalidateFeatureFlagCache();
   requestRows = [];
   greenlitPeer = null;
+  pendingPeer = null;
+  pendingPeerReads.length = 0;
+  requestCreateThrows = null;
+  radarrAddStatus = null;
   pendingRows.clear();
   arrAvailableRows.clear();
   agentRows.length = 0;
@@ -513,9 +560,11 @@ beforeEach(async () => {
 
 // ── 2: unconfigured bot refuses ──────────────────────────────────────────────
 
+const isTmdbHost = (u: URL): boolean => u.hostname === "themoviedb.org" || u.hostname.endsWith(".themoviedb.org");
+
 test("with NO public key configured the endpoint refuses with 503, never falls open", async () => {
   settings.delete("discordPublicKey");
-  interactions.invalidatePublicKeyCache();
+  signature.invalidatePublicKeyCache();
   const res = await post(ping());
   assert.equal(res.status, 503);
   assert.match(await res.text(), /not configured/i);
@@ -573,7 +622,7 @@ for (const [label, sig] of [
 
 test("a malformed public key setting yields 401 rather than throwing", async () => {
   settings.set("discordPublicKey", "not-a-key");
-  interactions.invalidatePublicKeyCache();
+  signature.invalidatePublicKeyCache();
   assert.equal((await post(ping())).status, 401);
 });
 
@@ -609,11 +658,35 @@ test("an oversized Content-Length is rejected before any signature work", async 
 });
 
 test("an oversized BODY is rejected even without a Content-Length header", async () => {
-  // A proxy can strip Content-Length on a chunked upload; the post-read byte
-  // check is the backstop.
+  // A proxy can strip Content-Length on a chunked upload; the capped read is the
+  // backstop, and it runs before the public-key read and the signature check.
   const huge = JSON.stringify({ id: "1", type: 1, pad: "z".repeat(1_100_000) });
   const res = await post(null, { rawBody: huge });
-  assert.ok(res.status === 400 || res.status === 413, `expected a cap rejection, got ${res.status}`);
+  assert.equal(res.status, 413);
+  assert.equal(opsOf("setting.findUnique").length, 0, "the public-key read must not happen for an oversized body");
+});
+
+test("a chunked over-cap body is refused without reading it to the end", async () => {
+  let pulls = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulls++;
+      controller.enqueue(new Uint8Array(64 * 1024).fill(0x7a));
+      if (pulls >= 200) controller.close(); // ~12.5 MB offered
+    },
+  }, { highWaterMark: 0 });
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const req = new NextRequest("http://localhost:3000/api/interactions", {
+    method: "POST",
+    headers: { "x-signature-ed25519": "00".repeat(64), "x-signature-timestamp": timestamp },
+    body: stream,
+    duplex: "half",
+  } as unknown as ConstructorParameters<typeof NextRequest>[1]);
+  assert.equal(req.headers.get("content-length"), null);
+  const res = await interactions.POST(req);
+  assert.equal(res.status, 413);
+  assert.ok(pulls <= 20, `read ${pulls} chunks of 64KB against a 1MB cap`);
+  assert.equal(opsOf("setting.findUnique").length, 0);
 });
 
 // ── 4: the asymmetric timestamp window ───────────────────────────────────────
@@ -924,11 +997,32 @@ test("an unknown token is refused without touching any account", async () => {
   assert.equal(opsOf("user.update").length, 0);
 });
 
-test("an EXPIRED token is deleted rather than left redeemable", async () => {
+test("an EXPIRED token is deleted rather than left redeemable — with deleteMany, never a bare delete", async () => {
   seedLinkToken({ expiresAt: new Date(Date.now() - 1000) });
   await post(command("link", [{ name: "token", value: LINK_CODE }]));
-  await waitFor(() => opsOf("discordLinkToken.delete").length > 0);
-  assert.ok(opsOf("discordLinkToken.delete").length > 0, "an expired token must be cleaned up");
+  await waitFor(() => opsOf("discordLinkToken.deleteMany").length > 0);
+  assert.deepEqual(opsOf("discordLinkToken.deleteMany").map((o) => o.args), [{ token: sha256(LINK_CODE), inTx: false }], "an expired token must be cleaned up");
+  assert.equal(opsOf("discordLinkToken.delete").length, 0, "a bare delete throws P2025 when the purge cron got there first");
+});
+
+test("an expired token the purge already removed still answers 'expired', not 'unexpected error'", async () => {
+  // The row was read, then swept before the cleanup ran: the cleanup finds
+  // nothing to delete, which must not turn into the generic failure.
+  const t = seedLinkToken({ expiresAt: new Date(Date.now() - 1000) });
+  linkReadGate = null;
+  const origFind = (prisma as unknown as { discordLinkToken: { findUnique: (a: unknown) => Promise<unknown> } }).discordLinkToken.findUnique;
+  (prisma as unknown as { discordLinkToken: { findUnique: (a: unknown) => Promise<unknown> } }).discordLinkToken.findUnique = async (a: unknown) => {
+    const row = await origFind(a);
+    linkTokens = []; // the purge cron's sweep lands right after the read
+    return row ?? t;
+  };
+  try {
+    await post(command("link", [{ name: "token", value: LINK_CODE }], "200000000000000009"));
+    await waitFor(() => discordEdits.length > 0);
+  } finally {
+    (prisma as unknown as { discordLinkToken: { findUnique: (a: unknown) => Promise<unknown> } }).discordLinkToken.findUnique = origFind;
+  }
+  assert.equal(discordEdits[0].content, "Could not link account: Token has expired — generate a new one on your Profile page.");
 });
 
 test("a successful redemption consumes the token with deleteMany, never a bare delete", async () => {
@@ -1144,6 +1238,23 @@ test("admin_decline button: the outbound request.declined carries the ROW's id a
   );
 });
 
+// The button writes no note, so the requester is told the note the row already
+// holds — what the web and batch declines send for the same row.
+test("admin_decline button: the decline carries the row's stored note, like the web and batch declines", async () => {
+  seedDecisionFixture("");
+  requestRows[0].adminNote = "already in the library as the extended cut";
+  agentRows.push(agentRow("request.declined"));
+
+  const res = await post(button("admin_decline:req-1"));
+  assert.equal(res.status, 200);
+  await waitFor(() => agentPosts.length >= 1, 400);
+
+  assert.deepEqual(
+    agentPosts.map((p) => [p.event, p.request?.id, p.text]),
+    [["request.declined", "req-1", "already in the library as the extended cut"]],
+  );
+});
+
 test("admin_approve button: the outbound request.approved carries the ROW's id, never null", async () => {
   seedDecisionFixture("");
   settings.set("radarrUrl", `http://${RADARR_HOST}:7878`);
@@ -1159,6 +1270,92 @@ test("admin_approve button: the outbound request.approved carries the ROW's id, 
     agentPosts.map((p) => [p.event, p.request]),
     [["request.approved", { id: "req-1", instance: "" }]],
   );
+});
+
+// A gateway 504 after the add was sent is no answer: Radarr may already hold the
+// title. Like the web PATCH, the approval stands (the sync re-pushes one the arr
+// doesn't hold); a definite failure still rolls back.
+test("admin_approve: a push with no definite answer (gateway 504) stays APPROVED and is announced; a 500 still rolls back", async () => {
+  seedDecisionFixture("");
+  settings.set("radarrUrl", `http://${RADARR_HOST}:7878`);
+  settings.set("radarrApiKey", "radarr-key");
+  agentRows.push(agentRow("request.approved"));
+  radarrAddStatus = 504;
+  await post(button("admin_approve:req-1"));
+  await waitFor(() => agentPosts.length >= 1, 400);
+  assert.ok(fetchCalls.some((u) => u.hostname === RADARR_HOST && u.pathname.endsWith("/api/v3/movie")), "fixture sanity: the add was sent");
+  assert.equal(requestRows[0].status, "APPROVED", "no rollback on an unknown outcome");
+  assert.ok(requestRows[0].pendingNotifyAt instanceof Date, "the backstop stays armed");
+  assert.deepEqual(agentPosts.map((p) => p.event), ["request.approved"], "the approval stands, so it is announced");
+  assert.equal((await finalEmbedEdit()).embeds?.[0]?.title, "✅ Approved — The Matrix");
+  assert.ok(errors.some((e) => e.includes("[arr] Discord approve push outcome unknown")));
+
+  // Control: a definite refusal rolls back exactly as before.
+  seedDecisionFixture("");
+  agentPosts.length = 0;
+  discordEdits.length = 0;
+  radarrAddStatus = 500;
+  await post(button("admin_approve:req-1"));
+  const edit = await finalEmbedEdit();
+  assert.equal(requestRows[0].status, "PENDING");
+  assert.equal(edit.embeds?.[0]?.title, "⚠️ Back to pending (arr failed) — The Matrix");
+  assert.deepEqual(agentPosts, []);
+});
+
+// The card used to read "Approved (arr failed) — please add manually" and drop
+// its buttons while the request sat PENDING in the app: nobody could retry or
+// decline it from Discord, and adding it by hand left the request PENDING.
+test("admin_approve: a push that rolls back to PENDING says so on the card and KEEPS the approve/decline buttons", async () => {
+  seedDecisionFixture("");
+  settings.set("radarrUrl", `http://${RADARR_HOST}:7878`);
+  settings.set("radarrApiKey", "radarr-key");
+  radarrAddStatus = 500;
+  await post(button("admin_approve:req-1"));
+  const edit = await finalEmbedEdit();
+  assert.equal(requestRows[0].status, "PENDING", "fixture sanity: the push failed and rolled back");
+  assert.equal(edit.embeds?.[0]?.title, "⚠️ Back to pending (arr failed) — The Matrix");
+  assert.match(String(edit.embeds?.[0]?.description), /back to pending/);
+  assert.equal(edit.content, "", "the timeout's line is still cleared");
+  assert.equal("components" in edit, false, "no `components` in the edit: Discord keeps the buttons");
+  assert.equal(requestRows[0].pendingNotifyAt, null, "the backstop went with the rollback");
+
+  // The buttons still work: a second approve that lands is an ordinary approval.
+  radarrAddStatus = null;
+  discordEdits.length = 0;
+  await post(button("admin_approve:req-1"));
+  const second = await finalEmbedEdit();
+  assert.equal(requestRows[0].status, "APPROVED");
+  assert.equal(second.embeds?.[0]?.title, "✅ Approved — The Matrix");
+  assert.deepEqual(second.components, []);
+});
+
+// The rollback is the shared state machine's: a write that fails is caught, and
+// the card, the audit and the live lists follow what actually happened.
+test("admin_approve: a rollback write that FAILS is caught — the card says the arr failed and the row stays APPROVED", async () => {
+  seedDecisionFixture("");
+  settings.set("radarrUrl", `http://${RADARR_HOST}:7878`);
+  settings.set("radarrApiKey", "radarr-key");
+  radarrAddStatus = 500;
+  const orig = (prisma as unknown as { mediaRequest: Record<string, unknown> }).mediaRequest;
+  const origUpdateMany = orig.updateMany as (a: { where: { status?: string }; data: Record<string, unknown> }) => Promise<unknown>;
+  shadowPrismaModel(prisma, "mediaRequest", {
+    ...orig,
+    updateMany: async (args: { where: { status?: string }; data: Record<string, unknown> }) => {
+      if (args.data.status === "PENDING") throw new Error("pool timeout");
+      return origUpdateMany(args);
+    },
+  });
+  try {
+    await post(button("admin_approve:req-1"));
+    const edit = await finalEmbedEdit();
+    assert.equal(requestRows[0].status, "APPROVED", "the rollback never landed");
+    assert.equal(edit.embeds?.[0]?.title, "⚠️ Approved (arr failed) — The Matrix");
+    assert.deepEqual(edit.components, []);
+  } finally {
+    shadowPrismaModel(prisma, "mediaRequest", orig);
+  }
+  assert.ok(errors.some((e) => e.includes("[requests] rollback to PENDING failed") && e.includes("pool timeout")));
+  errors.length = 0;
 });
 
 // ── admin buttons: the final edit clears the timeout's `content` ────────────
@@ -1258,7 +1455,10 @@ test("pick: the arr row alone does NOT short-circuit a user who cannot auto-appr
   assert.equal(opsOf("mediaRequest.create").length, 1, "a plain requester still files a (pending) request");
 });
 
-test("pick mirror: an AVAILABLE peer with NO arr row for the instance is copied as APPROVED without availableAt", async () => {
+test("pick mirror: an AVAILABLE peer with NO arr row for the instance is not a greenlight — the pick goes PENDING", async () => {
+  // AVAILABLE is not an approval: the library pass flips a PENDING request
+  // AVAILABLE off a restricted server or the HD copy of a 4K request. Copied as
+  // APPROVED, the sync's re-push would download it with no admin decision.
   const sid = seedPick("USER");
   greenlitPeer = { status: "AVAILABLE" };
   await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
@@ -1266,8 +1466,18 @@ test("pick mirror: an AVAILABLE peer with NO arr row for the instance is copied 
   const creates = opsOf("mediaRequest.create");
   assert.equal(creates.length, 1);
   const data = (creates[0].args as { data: Record<string, unknown> }).data;
-  assert.equal(data.status, "APPROVED", "no visible library copy and no arr row ⇒ the peer's AVAILABLE is not true for THIS requester");
-  assert.ok(!("availableAt" in data), "an APPROVED copy carries no availableAt");
+  assert.ok(!("status" in data), "the pending create: the schema default, never a copied APPROVED");
+  assert.ok(!("availableAt" in data));
+  assert.ok(!("approvedAt" in data));
+});
+
+test("pick mirror: an APPROVED peer is still copied as APPROVED, arr row or not", async () => {
+  const sid = seedPick("USER");
+  greenlitPeer = { status: "APPROVED" };
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  const data = (opsOf("mediaRequest.create")[0].args as { data: Record<string, unknown> }).data;
+  assert.equal(data.status, "APPROVED");
   assert.ok(!("approvedAt" in data), "a copy records no approval of its own (guardrail 34a)");
 });
 
@@ -1300,6 +1510,24 @@ test("pick: the pending search row is consumed only once a pick is actually file
   } finally {
     shadowPrismaModel(prisma, "mediaRequest", { ...(prisma as unknown as { mediaRequest: Record<string, unknown> }).mediaRequest, findFirst: origFindFirst });
   }
+});
+
+// Maintenance on a pick follows the web's rule (maintenance.ts): the ADMIN BIT
+// of the clicker's linked, active account bypasses it — not the role label.
+test("pick: maintenance refuses a plain user, and lets through an account holding the ADMIN bit whatever its role label", async () => {
+  settings.set("maintenanceEnabled", "true");
+  const sid = seedPick("USER");
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(() => discordEdits.length > 0, 400);
+  assert.equal(discordEdits.at(-1)?.content, "The site is currently under maintenance. Please try again later.");
+  assert.equal(opsOf("mediaRequest.create").length, 0);
+
+  // A granular admin: role USER, the ADMIN bit in the mask.
+  appUsers[0].permissions = 1n;
+  discordEdits.length = 0;
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  assert.equal(opsOf("mediaRequest.create").length, 1, "the ADMIN bit bypasses maintenance");
 });
 
 test("pick: a filed pick consumes the pending search row", async () => {
@@ -1560,6 +1788,91 @@ test("pick: auto-approve whose push fails announces the PENDING row to the outbo
   assert.deepEqual(agentPosts.map((p) => p.event), ["request.created"]);
 });
 
+test("pick: a plain pending pick decides its admin alert inside the create tx — the first PENDING request alerts, a later one does not", async () => {
+  // Checked after the commit, two concurrent picks for one title could each miss
+  // the other's row and both alert. Inside the Serializable tx, that pair is a
+  // read/write cycle Postgres aborts, and the retry sees the committed peer.
+  agentRows.push(agentRow("request.created"));
+  const sid = seedPick("USER");
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(() => agentPosts.length >= 1, 400);
+  assert.deepEqual(agentPosts.map((p) => p.event), ["request.created"], "the first pending request alerts");
+  assert.deepEqual(pendingPeerReads, [{ inTx: true }], "the first-pending read runs inside the create tx");
+
+  agentPosts.length = 0;
+  appUsers = [];
+  pendingPeer = { id: "req-other-user" };
+  const sid2 = seedPick("USER");
+  await post(button(`pick:${sid2}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(opsOf("mediaRequest.create").length, 2, "fixture sanity: both picks filed a request");
+  assert.deepEqual(agentPosts, [], "a title already pending review does not alert again");
+});
+
+test("pick: an auto-approve whose push gets no definite answer (gateway 504) stays APPROVED — no rollback, no admin alert", async () => {
+  settings.set("radarrUrl", `http://${RADARR_HOST}:7878`);
+  settings.set("radarrApiKey", "radarr-key");
+  radarrAddStatus = 504;
+  agentRows.push(agentRow("request.created"));
+  const sid = seedPick("ADMIN");
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.ok(fetchCalls.some((u) => u.hostname === RADARR_HOST && u.pathname.endsWith("/api/v3/movie")), "fixture sanity: the add was sent");
+  assert.deepEqual(
+    opsOf("mediaRequest.updateMany").filter((o) => (o.args as { data: { status?: string } }).data.status === "PENDING"),
+    [],
+    "no rollback to PENDING",
+  );
+  assert.deepEqual(agentPosts, [], "nothing for the admins to review");
+  assert.ok(errors.some((e) => e.includes("push outcome unknown, left APPROVED")));
+});
+
+test("pick: files through the request chokepoint — no MediaRequest write, transaction or Radarr/Sonarr push of its own", async () => {
+  const { readFileSync } = await import("node:fs");
+  const code = readFileSync("src/lib/discord-interactions/components/pick.ts", "utf8")
+    .split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
+  assert.match(code, /await createMediaRequest\(/);
+  for (const copy of [/mediaRequest\./, /\$transaction/, /addMovieToRadarr|addSeriesToSonarr/, /scheduleDownloadCheck/, /notifyAdminsNewRequest/]) {
+    assert.doesNotMatch(code, copy, `pick.ts holds its own copy of the pipeline: ${copy}`);
+  }
+});
+
+test("pick: a chokepoint-only rule now holds for Discord — a failed push whose row already moved on is not rolled back, re-announced or reported as failed", async () => {
+  // The chokepoint rolls a failed auto-approve back only while the row is still
+  // APPROVED, and only a row that really went back to PENDING is the admins' to
+  // review. The Discord copy used to report "an admin will review it" and alert
+  // the admins whatever its rollback found.
+  const sid = seedPick("ADMIN"); // no Radarr configured ⇒ the push throws before it is sent
+  agentRows.push(agentRow("request.created"));
+  const orig = (prisma as unknown as { mediaRequest: Record<string, unknown> }).mediaRequest;
+  shadowPrismaModel(prisma, "mediaRequest", {
+    ...orig,
+    // A webhook flipped the fresh row AVAILABLE before the push failed.
+    create: async (args: { data: Record<string, unknown> }) => {
+      rec("mediaRequest.create", args);
+      const row: RequestRow = { ...args.data, id: "moved-on", status: "AVAILABLE", createdAt: new Date() };
+      requestRows.push(row);
+      return { ...row, status: "APPROVED" };
+    },
+  });
+  try {
+    await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+    await waitFor(pickReplied, 400);
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(requestRows.find((r) => r.id === "moved-on")?.status, "AVAILABLE", "the CAS left the moved-on row alone");
+    assert.deepEqual(agentPosts, [], "nothing went back to PENDING, so nothing is announced");
+    const { translatorFor } = await import("../src/lib/i18n/server-locale.ts");
+    const en = translatorFor("en");
+    const description = String(discordEdits.find((e) => Array.isArray(e.embeds) && e.embeds.length > 0)?.embeds?.[0]?.description);
+    assert.ok(!description.includes(en("notify.bot.pick.arrFailed")), description);
+    assert.ok(description.includes(en("notify.bot.pick.autoApproved")), description);
+  } finally {
+    shadowPrismaModel(prisma, "mediaRequest", orig);
+  }
+});
+
 test("pick: an undated TMDB result is stored with releaseYear null, never the display word \"Unknown\"", async () => {
   const sid = seedPick("USER");
   const key = `p:${sid}:${PICKER}`;
@@ -1633,4 +1946,255 @@ test("/status for a DEACTIVATED linked account answers 'no requests' and reads n
   }
   assert.equal(reads, 0, "a disabled account's requests are never read");
   assert.doesNotMatch(String(lastEdit().content), /Dune/);
+});
+
+// ═══ /request and a deactivated account (guardrail 33) ══════════════════════
+// Deactivation leaves role, permissions and mediaServerGrants on the row. /recent,
+// /watchlist, /issue and /status already refuse such an account; /request searched
+// anyway and badged the results through those grants, so a banned user could keep
+// probing what a restricted server holds. It is refused like /recent now, and the
+// visibility resolver gives a deactivated row least privilege on its own too.
+const { discordVisibleInstances } = await import("../src/lib/discord-interactions/search.ts");
+const requestCmd = () => slash("request", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }]);
+
+test("/request: a DEACTIVATED linked account is refused before the search — no TMDB call, no result set", async () => {
+  linkMember({ deactivatedAt: new Date("2026-01-01T00:00:00.000Z") });
+  tmdbSearchResults = [MATRIX];
+  await run(requestCmd());
+  assert.match(String(lastEdit().content), /deactivated/i);
+  assert.equal(lastEdit().embeds, undefined, "no result embeds");
+  assert.equal(fetchCalls.filter((u) => u.pathname.startsWith("/3/search/")).length, 0, "no TMDB search");
+  assert.deepEqual(opsOf("discordSearchCache.upsert"), [], "no result set is saved for a pick");
+
+  // The same account, active again, gets its results: the refusal is the gate.
+  appUsers[0].deactivatedAt = null;
+  await run(requestCmd());
+  assert.equal(lastEdit().embeds?.length, 1);
+  assert.match(String(lastEdit().embeds?.[0]?.title), /The Matrix/);
+});
+
+test("/request: an unlinked caller is still told to link while the bot requires a linked account", async () => {
+  appUsers.push({ id: "shadow", email: `discord_${MEMBER}@discord.local`, name: "s", discordId: MEMBER, role: "USER", permissions: 0n, deactivatedAt: null, locale: null });
+  settings.set("discordRequireLinkedAccount", "true");
+  tmdbSearchResults = [MATRIX];
+  await run(requestCmd());
+  assert.match(String(lastEdit().content), /link/i);
+  assert.equal(fetchCalls.filter((u) => u.pathname.startsWith("/3/search/")).length, 0);
+});
+
+test("discordVisibleInstances: a DEACTIVATED account's grants and ADMIN role open no restricted server", async () => {
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote", restricted: true }]));
+  linkMember({ mediaServerGrants: { plex: { remote: { view: true } } } });
+  assert.deepEqual((await discordVisibleInstances(MEMBER)).plex, ["", "remote"], "an active grant holder sees the restricted server");
+  appUsers[0].deactivatedAt = new Date("2026-01-01T00:00:00.000Z");
+  assert.deepEqual((await discordVisibleInstances(MEMBER)).plex, [""], "a deactivated one does not");
+
+  appUsers = [];
+  linkMember({ role: "ADMIN", deactivatedAt: new Date("2026-01-01T00:00:00.000Z") });
+  assert.deepEqual((await discordVisibleInstances(MEMBER)).plex, [""], "nor does a deactivated former ADMIN");
+  appUsers[0].deactivatedAt = null;
+  assert.deepEqual((await discordVisibleInstances(MEMBER)).plex, ["", "remote"]);
+});
+
+// ── an admin button's failure never wipes the shared admin card ──────────────
+
+test("admin_approve: a handler error leaves the shared card alone and tells only the clicker (ephemeral)", async () => {
+  // Components are deferred with type 6, so an edit rewrites the CLICKED
+  // message: the admin channel's request card. The error path used to clear its
+  // embed and buttons for every admin while the request stayed PENDING.
+  seedDecisionFixture("");
+  const orig = (prisma as unknown as { mediaRequest: Record<string, unknown> }).mediaRequest;
+  shadowPrismaModel(prisma, "mediaRequest", { ...orig, findUnique: async () => { throw new Error("db down"); } });
+  try {
+    await post(button("admin_approve:req-1"));
+    await waitFor(() => discordEdits.length > 0, 400);
+  } finally {
+    shadowPrismaModel(prisma, "mediaRequest", orig);
+  }
+  assert.ok(errors.some((e) => e.includes("handleComponent error") && e.includes("db down")));
+  assert.deepEqual(discordEdits, [{ content: "An unexpected error occurred.", flags: 64 }], "one ephemeral follow-up, no edit of the card");
+  const discord = fetchCalls.filter((u) => u.hostname === "discord.com").map((u) => u.pathname);
+  assert.deepEqual(discord, ["/api/v10/webhooks/app-1/interaction-token"], "a follow-up POST, never a PATCH of @original");
+  assert.equal(requestRows[0].status, "PENDING");
+});
+
+test("a user's own result message is still cleared when its handler fails", async () => {
+  const sid = seedPick("USER");
+  const orig = (prisma as unknown as { setting: Record<string, unknown> }).setting;
+  const origFindMany = orig.findMany as (a: { where?: { key?: { in?: string[] } } }) => Promise<unknown>;
+  shadowPrismaModel(prisma, "setting", {
+    ...orig,
+    // Only the pick's own Discord settings read fails (the route's flag read passes).
+    findMany: async (a: { where?: { key?: { in?: string[] } } }) => {
+      if (a.where?.key?.in?.includes("discordAutoApproveRoles")) throw new Error("db down");
+      return origFindMany(a);
+    },
+  });
+  try {
+    await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+    await waitFor(() => discordEdits.length > 0, 400);
+  } finally {
+    shadowPrismaModel(prisma, "setting", orig);
+  }
+  assert.deepEqual(discordEdits, [{ content: "An unexpected error occurred.", embeds: [], components: [] }]);
+});
+
+// ── the pick clears the requester's deletion vote only once a request exists ─
+
+test("pick: a filed request clears the requester's own deletion vote — scoped to them and the title", async () => {
+  const sid = seedPick("USER");
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+  assert.deepEqual(opsOf("deletionVote.deleteMany").map((o) => o.args), [
+    { where: { userId: "u-pick", tmdbId: 603, mediaType: "MOVIE" } },
+  ]);
+});
+
+test("pick: a pick that files NOTHING leaves the deletion vote — a duplicate race, or a title already here", async () => {
+  // Cleared before the create, a refused pick had already removed the vote
+  // with no request to contradict it.
+  requestCreateThrows = new Prisma.PrismaClientKnownRequestError("unique violation", { code: "P2002", clientVersion: "0.0.0-test" });
+  const sid = seedPick("USER");
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+  assert.match(JSON.stringify(discordEdits), /already been requested|already requested/i);
+  assert.deepEqual(opsOf("deletionVote.deleteMany"), []);
+
+  // Already in the library: no request is filed (parity with the web route).
+  requestCreateThrows = null;
+  discordEdits.length = 0;
+  appUsers = [];
+  libraryTmdbIds = new Set([603]);
+  const sid2 = seedPick("ADMIN");
+  arrAvailableRows.add("603:");
+  await post(button(`pick:${sid2}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(opsOf("mediaRequest.create").length, 1, "fixture sanity: only the first pick reached a create");
+  assert.deepEqual(opsOf("deletionVote.deleteMany"), []);
+});
+
+// ── /request: the query is escaped like every other user text ────────────────
+
+test("/request with no results quotes the query markdown-escaped", async () => {
+  linkMember();
+  tmdbSearchResults = [];
+  await run(slash("request", [{ name: "type", value: "movie" }, { name: "query", value: "a**b_c" }]));
+  assert.equal(lastEdit().content, 'No movies found for **"a\\*\\*b\\_c"**.');
+});
+
+// ── the public-key cache: the lib is the import path, and it is process-wide ──
+
+test("instrumentation prewarms the key through the lib, not the interactions route module", async () => {
+  const { readFileSync } = await import("node:fs");
+  const boot = readFileSync("src/instrumentation.ts", "utf8");
+  assert.ok(!boot.includes('"@/app/api/interactions/route"'), "boot must not pull in the route's whole module graph");
+  assert.match(boot, /import\("@\/lib\/discord-interactions\/signature"\)/);
+  assert.match(readFileSync("src/lib/discord-interactions/signature.ts", "utf8"), /processSingleton\(/);
+});
+
+test("invalidating the key in ANOTHER chunk's copy of the signature module reaches the route's cache", async () => {
+  // A cache-busted import stands in for the settings route's chunk (27a).
+  const specifier = "../src/lib/discord-interactions/signature.ts?chunk=settings";
+  const otherChunk: typeof import("../src/lib/discord-interactions/signature.ts") = await import(specifier);
+  assert.equal((await post(ping())).status, 200, "the route cached the current key");
+  const other = generateKeyPairSync("ed25519");
+  settings.set("discordPublicKey", other.publicKey.export({ format: "der", type: "spki" }).subarray(SPKI_PREFIX_LEN).toString("hex"));
+  otherChunk.invalidatePublicKeyCache();
+  assert.equal((await post(ping())).status, 401, "the rotated key is read again: the old signer is refused");
+});
+
+// ── the Discord command gates shared with the result buttons ─────────────────
+
+test("/request during maintenance: a member is refused; the ADMIN permission bit (not the role) lets an account through", async () => {
+  settings.set("maintenanceEnabled", "true");
+  tmdbSearchResults = [MATRIX];
+  linkMember();
+  await run(slash("request", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }]));
+  assert.match(String(lastEdit().content), /under maintenance/);
+  assert.equal(fetchCalls.filter(isTmdbHost).length, 0, "nothing is searched");
+
+  appUsers[0].permissions = 1n; // the ADMIN bit, on a USER-role account
+  await run(slash("request", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }]));
+  assert.doesNotMatch(String(lastEdit().content), /under maintenance/);
+  assert.equal((lastEdit().components as unknown[]).length, 1, "the admin gets the result buttons");
+});
+
+test("/request with a blank or missing query searches nothing and says the search failed", async () => {
+  linkMember();
+  await run(slash("request", [{ name: "type", value: "movie" }, { name: "query", value: "   " }]));
+  assert.equal(lastEdit().content, "Search failed. Please try again.");
+  await run(slash("request", []));
+  assert.equal(lastEdit().content, "Search failed. Please try again.");
+  assert.equal(fetchCalls.filter(isTmdbHost).length, 0);
+});
+
+test("a TMDB hit without an integer id is dropped, never offered as a button", async () => {
+  linkMember();
+  tmdbSearchResults = [{ id: "604", title: "Not an id" }, { title: "No id at all" }, MATRIX];
+  const cmd = slash("request", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }]);
+  await run(cmd);
+  const buttons = (lastEdit().components as Array<{ components: Array<{ custom_id: string }> }>)[0].components;
+  assert.equal(buttons.length, 1);
+  const stored = JSON.parse(pendingRows.get(`p:${cmd.id}:${MEMBER}`)!.data) as { results: Array<{ id: unknown }> };
+  assert.deepEqual(stored.results.map((r) => r.id), [603]);
+});
+
+test("/watchlist add with no results quotes the query markdown-escaped", async () => {
+  linkMember();
+  tmdbSearchResults = [];
+  await run(slash("watchlist", [sub("add", [{ name: "type", value: "movie" }, { name: "query", value: "a**b_c" }])]));
+  assert.equal(lastEdit().content, 'No movies found for **"a\\*\\*b\\_c"**.');
+});
+
+test("/issue: a filing that THROWS gives the search back — the next pick still works", async () => {
+  linkMember();
+  tmdbSearchResults = [MATRIX];
+  libraryTmdbIds = new Set([603]);
+  const cmd = slash("issue", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }, { name: "problem", value: "BAD_VIDEO" }]);
+  await run(cmd);
+  const orig = (prisma as unknown as { issue: Record<string, unknown> }).issue;
+  shadowPrismaModel(prisma, "issue", { ...orig, create: async () => { throw new Error("db down"); } });
+  try {
+    await run(click(`issuepick:${cmd.id}:${MEMBER}:0`), () => /unexpected/i.test(String(lastEdit().content)));
+  } finally {
+    shadowPrismaModel(prisma, "issue", orig);
+  }
+  assert.ok(pendingRows.has(`pi:${cmd.id}:${MEMBER}`), "the search survives a thrown filing");
+  await run(click(`issuepick:${cmd.id}:${MEMBER}:0`), () => opsOf("issue.create").length > 0);
+  assert.equal(opsOf("issue.create").length, 1);
+});
+
+test("/status reads 'in queue' from the request's OWN instance only", async () => {
+  linkMember();
+  const origReq = (prisma as unknown as { mediaRequest: Record<string, unknown> }).mediaRequest;
+  const origWanted = (prisma as unknown as { radarrWantedItem: Record<string, unknown> }).radarrWantedItem;
+  let instance = "4k";
+  shadowPrismaModel(prisma, "mediaRequest", {
+    ...origReq,
+    findMany: async () => [{ title: "Dune", mediaType: "MOVIE", status: "APPROVED", tmdbId: 438631, arrInstance: instance }],
+  });
+  // Wanted on the default instance only.
+  shadowPrismaModel(prisma, "radarrWantedItem", { ...origWanted, findMany: async () => [{ tmdbId: 438631, arrInstance: "" }] });
+  try {
+    await run(slash("status", []));
+    assert.match(String(lastEdit().content), /APPROVED — Pending/, "a 4K request is not queued by the default instance's copy");
+    instance = "";
+    await run(slash("status", []));
+    assert.match(String(lastEdit().content), /APPROVED — In Queue/);
+  } finally {
+    shadowPrismaModel(prisma, "mediaRequest", origReq);
+    shadowPrismaModel(prisma, "radarrWantedItem", origWanted);
+  }
+});
+
+test("a command or click whose payload names no user is answered with the generic error and touches nothing", async () => {
+  const cmd = { ...slash("request", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }]), member: { roles: [] } };
+  await run(cmd);
+  assert.equal(lastEdit().content, "An unexpected error occurred. Please try again.");
+  assert.equal(opsOf("user.findUnique").length, 0);
+  await run({ ...click("pick:1:2:0"), member: {} });
+  assert.equal(lastEdit().content, "An unexpected error occurred.");
 });

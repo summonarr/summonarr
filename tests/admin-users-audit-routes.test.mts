@@ -216,9 +216,13 @@ function auditMatch(r: AuditRow, where: Record<string, unknown> | undefined): bo
 }
 
 let auditCountOverride: number | null = null;
+let auditCountThrows = false;
+// Fails the login-details pass of the PII scrub (the one that writes `details`).
+let auditUpdateManyThrows = false;
 shadowPrismaModel(prisma, "auditLog", {
   count: async (args: { where?: Record<string, unknown> } = {}) => {
     rec("auditLog.count", args.where);
+    if (auditCountThrows) throw new Error("simulated count failure");
     return auditCountOverride ?? auditRows.filter((r) => auditMatch(r, args.where)).length;
   },
   findMany: async (args: { where?: Record<string, unknown>; take?: number; cursor?: { id: string }; skip?: number }) => {
@@ -238,6 +242,7 @@ shadowPrismaModel(prisma, "auditLog", {
   },
   updateMany: async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
     rec("auditLog.updateMany", args.where);
+    if (auditUpdateManyThrows && "details" in args.data) throw new Error("simulated scrub failure");
     let n = 0;
     for (const r of auditRows) {
       if (!auditMatch(r, args.where)) continue;
@@ -345,6 +350,8 @@ beforeEach(() => {
   nextUserCreateThrows = null;
   findManyThrowsAfter = null;
   findManyCalls = 0;
+  auditCountThrows = false;
+  auditUpdateManyThrows = false;
 });
 
 // ── /api/admin/users — gating ────────────────────────────────────────────────
@@ -633,8 +640,11 @@ test("users: permissions serialize as a decimal string the PATCH can round-trip"
 
 test("users: the list is bounded", async () => {
   const t = await mintSession();
-  await listUsers(t);
-  assert.equal((opsOf("user.findMany")[0].args as { take: number }).take, 1000);
+  const res = await listUsers(t);
+  // One row past the page tells a cut from an exact fit.
+  assert.equal((opsOf("user.findMany")[0].args as { take: number }).take, 1001);
+  assert.equal(res.headers.get("x-truncated"), "false");
+  assert.equal(res.headers.get("x-truncated-cap"), "1000");
 });
 
 test("users: a successful create is audited", async () => {
@@ -752,6 +762,27 @@ test("audit-log: dateTo is inclusive of the requested day, advanced in UTC on bo
   assert.equal(exportWhere.createdAt.lt.toISOString(), "2026-07-02T00:00:00.000Z");
 });
 
+test("audit-log: the list and the export hand Prisma the SAME filter for one query", async () => {
+  // Three copies of this filter (page, list, export) had drifted; one builder
+  // now serves all three, so "Load more" and "Export" of a view match it.
+  const t = await mintSession();
+  const q = "?action=AUTH_LOGIN&group=admin&dateFrom=2026-06-01T07:00:00.000Z&dateTo=2026-06-30T07:00:00.000Z" +
+    "&user=al%25ice&target=user%3A&hideCron=1";
+  await listAudit(t, q);
+  const listWhere = (opsOf("auditLog.findMany")[0].args as { where: unknown }).where;
+  ops = [];
+  await readAll(await exportAudit(t, q));
+  const exportWhere = (opsOf("auditLog.findMany")[0].args as { where: unknown }).where;
+  assert.deepEqual(exportWhere, listWhere);
+  assert.deepEqual(listWhere, {
+    action: "AUTH_LOGIN",
+    createdAt: { gte: new Date("2026-06-01T07:00:00.000Z"), lt: new Date("2026-07-01T07:00:00.000Z") },
+    userName: { contains: "alice", mode: "insensitive" },
+    target: { contains: "user:", mode: "insensitive" },
+    AND: [{ OR: [{ userId: null }, { userId: { not: "system" } }] }],
+  });
+});
+
 test("audit-log: hideCron excludes the system actor but KEEPS null-actor rows", async () => {
   // Asserts on the rows returned, not on the where-shape. The previous version
   // pinned `{ not: "system" }` literally, so it locked the defect in: that
@@ -861,6 +892,29 @@ test("scrub: reports the counts and the cutoff it used", async () => {
   assert.ok(ageDays > 80 && ageDays < 100, `cutoff is ${ageDays.toFixed(0)}d, expected ~90d`);
 });
 
+test("scrub: one that fails part-way is still audited, naming the step that finished, and the error answers 500", async () => {
+  const t = await mintSession();
+  auditRows = [audit({ id: "old", createdAt: new Date(Date.now() - 200 * 86_400_000), action: "AUTH_LOGIN", details: '{"ip":"1.2.3.4"}' })];
+  auditUpdateManyThrows = true;
+  await assert.rejects(scrubAudit(t), /simulated scrub failure/);
+  const row = (opsOf("auditLog.create").map((o) => (o.args as { data: { action: string; target: string; details: string } }).data))
+    .find((d) => d.target === "audit-log:pii-scrub");
+  assert.ok(row, "the half-done scrub is on the record");
+  const details = JSON.parse(row.details) as Record<string, unknown>;
+  assert.equal(details.failed, true);
+  assert.equal(details.scrubbed, 1, "the column pass finished");
+  assert.equal(details.detailsScrubbed, null, "the login-details pass did not");
+});
+
+test("scrub: more than five in ten minutes by one admin is 429 with Retry-After", async () => {
+  const t = await mintSession();
+  for (let i = 0; i < 5; i++) assert.equal((await scrubAudit(t)).status, 200);
+  const over = await scrubAudit(t);
+  assert.equal(over.status, 429);
+  assert.equal(over.headers.get("Retry-After"), "600");
+  assert.equal((await scrubAudit(await mintSession())).status, 200, "the budget is per admin");
+});
+
 // ── /api/admin/audit-log/export ──────────────────────────────────────────────
 
 test("export: anonymous is 401 and a plain USER is 403", async () => {
@@ -881,6 +935,47 @@ test("export: writes its audit row BEFORE the stream opens", async () => {
   const started = JSON.parse((created[0].args as { data: { details: string } }).data.details);
   assert.equal(started.status, "started");
   await readAll(res);
+});
+
+test("export: its paper-trail row goes through the shared row builder — a control character in the user agent is stripped", async () => {
+  const t = await mintSession();
+  auditRows = [audit({ id: "a1" })];
+  const req = new NextRequest("http://localhost:3000/api/admin/audit-log/export", {
+    method: "GET",
+    headers: { cookie: `${COOKIE}=${t}`, "user-agent": "curl/8\x1b[2J\x9bforged" },
+  });
+  const res = await inScope(() => auditExport.GET(req, undefined));
+  const row = (opsOf("auditLog.create")[0].args as { data: Record<string, unknown> }).data;
+  assert.equal(row.action, "AUDIT_LOG_EXPORT");
+  assert.equal(row.userAgent, "curl/8[2Jforged");
+  assert.equal(JSON.parse(row.details as string).status, "started");
+  await readAll(res);
+  assert.ok(opsOf("auditLog.update").some((o) => (o.args as { where: { id: string } }).where.id === auditRows.find((r) => r.action === "AUDIT_LOG_EXPORT")?.id), "the same row is finalized");
+});
+
+test("export: the download carries PII, so no browser or shared cache may keep it (Cache-Control: no-store)", async () => {
+  const t = await mintSession();
+  auditRows = [audit({ id: "a1" })];
+  const res = await exportAudit(t);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  await readAll(res);
+});
+
+test("export: a download nobody reads is cut off, and its paper-trail row says aborted instead of staying \"started\"", async (ctx) => {
+  ctx.mock.timers.enable({ apis: ["setTimeout"] });
+  const t = await mintSession();
+  auditRows = [audit({ id: "a1" })];
+  const res = await exportAudit(t);
+  assert.equal(res.status, 200);
+  // Never read (a HEAD runs GET and reads nothing): the first-read cut-off fires.
+  ctx.mock.timers.tick(60_000);
+  for (let i = 0; i < 50 && opsOf("auditLog.update").length === 0; i++) await new Promise((r) => setImmediate(r));
+  const upd = opsOf("auditLog.update");
+  assert.equal(upd.length, 1, "the row was finalized");
+  const details = JSON.parse((upd[0].args as { data: { details: string } }).data.details);
+  assert.equal(details.status, "aborted");
+  assert.match(details.error, /never read/);
+  await res.body?.cancel().catch(() => {});
 });
 
 test("export: finalizes the audit row with the row count and completed status", async () => {
@@ -920,6 +1015,30 @@ test("export: a mid-stream read failure still finalizes the audit row as aborted
   const details = JSON.parse((upd[upd.length - 1].args as { data: { details: string } }).data.details);
   assert.equal(details.status, "aborted");
   assert.ok(details.error, "the failure reason should be recorded");
+});
+
+test("export: a failed count closes the paper-trail row as failed — it never stays 'started'", async () => {
+  // The count runs after the row is written (the totals include it) and before
+  // the stream that finalizes it; a DB error there used to 500 and leave the
+  // row reading "started" for good.
+  const t = await mintSession();
+  auditRows = [audit({ id: "a1" })];
+  auditCountThrows = true;
+  const res = await exportAudit(t, "?format=csv");
+  assert.equal(res.status, 500);
+  assert.equal(typeof (await res.json()).error, "string");
+  const created = opsOf("auditLog.create");
+  assert.equal(created.length, 1, "the paper trail is still written before anything is read");
+  const upd = opsOf("auditLog.update");
+  assert.equal(upd.length, 1, "the row must be finalized");
+  const args = upd[0].args as { where: { id: string }; data: { details: string } };
+  const row = auditRows.find((r) => r.action === "AUDIT_LOG_EXPORT");
+  assert.equal(args.where.id, row?.id);
+  const details = JSON.parse(args.data.details);
+  assert.equal(details.status, "failed");
+  assert.equal(details.rowCount, 0);
+  assert.match(details.error, /simulated count failure/);
+  assert.equal(opsOf("auditLog.findMany").length, 0, "no row is exported");
 });
 
 test("export: CSV formula-injection characters are neutralized", async () => {

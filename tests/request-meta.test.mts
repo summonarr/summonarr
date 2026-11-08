@@ -201,6 +201,25 @@ test("a parseable cache blob WITHOUT a title falls through to the live tier", as
   assert.deepEqual(result, { title: "Titled Live", posterPath: "/live.jpg", releaseYear: "2010" });
 });
 
+test("a cache blob whose fields have the wrong types falls through to the live tier", async () => {
+  cacheRow = freshCache({ title: 42, posterPath: { bad: true }, releaseYear: 1999 });
+  respond = () => jsonResponse({ title: "Typed Live", poster_path: "/t.jpg", release_date: "1999-01-01" });
+  const result = await resolveMediaMeta(101, "MOVIE");
+  assert.deepEqual(result, { title: "Typed Live", posterPath: "/t.jpg", releaseYear: "1999" });
+  cacheRow = freshCache({ title: "Good Title", posterPath: 7 });
+  respond = () => jsonResponse({ title: "Live Again", poster_path: null, release_date: "2001-01-01" });
+  assert.deepEqual(await resolveMediaMeta(102, "MOVIE"), { title: "Live Again", posterPath: null, releaseYear: "2001" });
+});
+
+test("a failed core or cache read is logged with the request-meta scope", async () => {
+  warns.length = 0;
+  coreThrows = true;
+  cacheThrows = true;
+  respond = () => jsonResponse({ title: "After Outage", poster_path: null, release_date: "2002-01-01" });
+  await resolveMediaMeta(103, "MOVIE");
+  assert.equal(warns.filter((w) => w.startsWith("[request-meta]")).length, 2);
+});
+
 // ── tier 3: live TMDB verification ──────────────────────────────────────────
 
 test("live movie wire shape: GET /3/movie/<id> with the v4 bearer header; date → 4-char year", async () => {

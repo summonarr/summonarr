@@ -146,6 +146,16 @@ function sizeFrom(s: string | undefined): number | null {
 }
 
 
+/** A download id keeps its first DOWNLOAD_ID_MAX characters. */
+export const DOWNLOAD_ID_MAX = 200;
+
+/**
+ * A record's download id as the projection stores it. Anything that matches a
+ * raw record against a projected event's `downloadId` goes through this, so
+ * the two can never disagree on the truncation (issue-replace.ts isInteractiveGrab).
+ */
+export const projectDownloadId = (v: unknown): string | null => textOrNull(v, DOWNLOAD_ID_MAX);
+
 /** One /api/v3/history record → an event, or null when it has no usable id. */
 export function projectHistoryRecord(service: ArrService, instance: string, raw: unknown): ArrHistoryEvent | null {
   const r = obj(raw);
@@ -177,7 +187,7 @@ export function projectHistoryRecord(service: ArrService, instance: string, raw:
     languages: languageNamesOf(r),
     customFormats: namesOf(r.customFormats),
     customFormatScore: int(r.customFormatScore),
-    downloadId: textOrNull(r.downloadId, 200),
+    downloadId: projectDownloadId(r.downloadId),
     indexer: get("indexer", 200),
     downloadClient: get("downloadclientname", 200) ?? get("downloadclient", 200),
     releaseGroup: get("releasegroup", 100),
@@ -276,7 +286,22 @@ export function groupHistoryEvents(
   events: readonly ArrHistoryEvent[],
   edges: { hasPrevious: boolean; hasNext: boolean } | null = null,
 ): HistoryRow[] {
-  // Per Sonarr download: its records by id, cut into runs of one kind and moment.
+  const runOf = foldRuns(events);
+  const ends = { first: events[0], last: events[events.length - 1] };
+  const rows: HistoryRow[] = [];
+  const emitted = new Set<ArrHistoryEvent[]>();
+  for (const e of events) {
+    const run = runOf.get(e) ?? [e];
+    if (emitted.has(run)) continue;
+    emitted.add(run);
+    rows.push(rowOfRun(run, edges, ends));
+  }
+  return rows;
+}
+
+// Per Sonarr download: its records by id, cut into runs of one kind and
+// moment. Every folded record maps to its run (one shared array per run).
+function foldRuns(events: readonly ArrHistoryEvent[]): Map<ArrHistoryEvent, ArrHistoryEvent[]> {
   const byDownload = new Map<string, ArrHistoryEvent[]>();
   for (const e of events) {
     const k = foldKey(e);
@@ -295,46 +320,53 @@ export function groupHistoryEvents(
       runOf.set(e, run);
     }
   }
-  const first = events[0];
-  const last = events[events.length - 1];
-  const rows: HistoryRow[] = [];
-  const emitted = new Set<ArrHistoryEvent[]>();
-  for (const e of events) {
-    const run = runOf.get(e) ?? [e];
-    if (emitted.has(run)) continue;
-    emitted.add(run);
-    const lead = run.reduce((a, b) => (b.id > a.id ? b : a));
-    const sorted = [...run].sort(
-      (a, b) =>
-        (a.episode?.seasonNumber ?? -1) - (b.episode?.seasonNumber ?? -1) ||
-        (a.episode?.episodeNumber ?? -1) - (b.episode?.episodeNumber ?? -1) ||
-        a.id - b.id,
-    );
-    const episodes: HistoryEpisode[] = [];
-    const seen = new Set<string>();
-    const seasons = new Set<number>();
-    for (const x of sorted) {
-      const id = x.episode ? `se:${x.episode.seasonNumber}:${x.episode.episodeNumber}` : x.episodeId !== null ? `ep:${x.episodeId}` : `rec:${x.id}`;
-      if (seen.has(id)) continue;
-      seen.add(id);
-      if (x.episode) {
-        episodes.push(x.episode);
-        seasons.add(x.episode.seasonNumber);
-      }
+  return runOf;
+}
+
+// A run's records in episode order, and its distinct episodes (each counted
+// once however many records name it) and seasons.
+function runEpisodes(run: readonly ArrHistoryEvent[]): { sorted: ArrHistoryEvent[]; episodes: HistoryEpisode[]; distinct: number; seasons: number[] } {
+  const sorted = [...run].sort(
+    (a, b) =>
+      (a.episode?.seasonNumber ?? -1) - (b.episode?.seasonNumber ?? -1) ||
+      (a.episode?.episodeNumber ?? -1) - (b.episode?.episodeNumber ?? -1) ||
+      a.id - b.id,
+  );
+  const episodes: HistoryEpisode[] = [];
+  const seen = new Set<string>();
+  const seasons = new Set<number>();
+  for (const x of sorted) {
+    const id = x.episode ? `se:${x.episode.seasonNumber}:${x.episode.episodeNumber}` : x.episodeId !== null ? `ep:${x.episodeId}` : `rec:${x.id}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    if (x.episode) {
+      episodes.push(x.episode);
+      seasons.add(x.episode.seasonNumber);
     }
-    const pages = run.length > 1 && lead.service === "sonarr" && edges !== null;
-    rows.push({
-      key: `${lead.instance}:${lead.id}`,
-      lead,
-      events: sorted,
-      episodes,
-      episodeCount: lead.service === "sonarr" ? seen.size : 0,
-      seasons: [...seasons].sort((a, b) => a - b),
-      continuesBefore: pages && edges.hasPrevious && run.includes(first),
-      continuesAfter: pages && edges.hasNext && run.includes(last),
-    });
   }
-  return rows;
+  return { sorted, episodes, distinct: seen.size, seasons: [...seasons].sort((a, b) => a - b) };
+}
+
+// One list row for one run; a folded row at either end of a paged list may
+// continue on the neighbouring page.
+function rowOfRun(
+  run: ArrHistoryEvent[],
+  edges: { hasPrevious: boolean; hasNext: boolean } | null,
+  ends: { first: ArrHistoryEvent | undefined; last: ArrHistoryEvent | undefined },
+): HistoryRow {
+  const lead = run.reduce((a, b) => (b.id > a.id ? b : a));
+  const { sorted, episodes, distinct, seasons } = runEpisodes(run);
+  const pages = run.length > 1 && lead.service === "sonarr" && edges !== null;
+  return {
+    key: `${lead.instance}:${lead.id}`,
+    lead,
+    events: sorted,
+    episodes,
+    episodeCount: lead.service === "sonarr" ? distinct : 0,
+    seasons,
+    continuesBefore: pages && edges.hasPrevious && ends.first !== undefined && run.includes(ends.first),
+    continuesAfter: pages && edges.hasNext && ends.last !== undefined && run.includes(ends.last),
+  };
 }
 
 /** What the list's other records say happened to a grab's download since. */
@@ -367,6 +399,10 @@ export function failsIdlessGrab(grab: ArrHistoryEvent, e: ArrHistoryEvent): bool
  * to one kind holds no failures or imports, so it reads as neither — which is
  * why `grabStateKnown` says whether "neither" can be believed. A grab with no
  * downloadId is failed by `failsIdlessGrab`; nothing links an import to it.
+ *
+ * The rule as written, row by row: the list itself uses grabStatesFor (every
+ * row in one pass), and the tests hold the two to the same answer on
+ * generated lists (tests/arr-history-grab-states.test.mts).
  */
 export function grabStateOf(row: HistoryRow, events: readonly ArrHistoryEvent[]): GrabState {
   if (row.lead.kind !== "grabbed") return { failed: false, imported: false };
@@ -380,6 +416,57 @@ export function grabStateOf(row: HistoryRow, events: readonly ArrHistoryEvent[])
     else if (e.kind === "imported") imported = true;
   }
   return { failed, imported };
+}
+
+/**
+ * `grabStateOf` for every row of a list at once, keyed by row key — the list
+ * read ONCE, not once per row (a whole series' history is thousands of
+ * records, and the list re-renders on every expand or confirm; guardrail 5i's
+ * index-once rule). Exactly grabStateOf's answer: a download's newest failure
+ * and import are kept per download, a grab with no downloadId is matched by
+ * failsIdlessGrab's identity (instance, title, release name and — on Sonarr —
+ * episode id).
+ */
+export function grabStatesFor(rows: readonly HistoryRow[], events: readonly ArrHistoryEvent[]): Map<string, GrabState> {
+  const newestFailed = new Map<string, number>();
+  const newestImported = new Map<string, number>();
+  // Failures with no downloadId, by what failsIdlessGrab compares: without and
+  // with the episode id (a Radarr grab matches on the first, a Sonarr one on the second).
+  const idlessFailed = new Map<string, number>();
+  const keep = (m: Map<string, number>, k: string, id: number) => {
+    const cur = m.get(k);
+    if (cur === undefined || id > cur) m.set(k, id);
+  };
+  const idlessKey = (e: ArrHistoryEvent, episodeId?: number) =>
+    JSON.stringify(episodeId === undefined ? [e.instance, e.arrMediaId, e.sourceTitle] : [e.instance, e.arrMediaId, e.sourceTitle, episodeId]);
+  for (const e of events) {
+    if (e.kind !== "failed" && e.kind !== "imported") continue;
+    const k = downloadKey(e);
+    if (k !== null) keep(e.kind === "failed" ? newestFailed : newestImported, k, e.id);
+    else if (e.kind === "failed" && e.arrMediaId !== null) {
+      keep(idlessFailed, idlessKey(e), e.id);
+      if (e.episodeId !== null) keep(idlessFailed, idlessKey(e, e.episodeId), e.id);
+    }
+  }
+  const out = new Map<string, GrabState>();
+  for (const row of rows) {
+    const g = row.lead;
+    if (g.kind !== "grabbed") {
+      out.set(row.key, { failed: false, imported: false });
+      continue;
+    }
+    const k = downloadKey(g);
+    if (k !== null) {
+      out.set(row.key, { failed: (newestFailed.get(k) ?? -Infinity) > g.id, imported: (newestImported.get(k) ?? -Infinity) > g.id });
+      continue;
+    }
+    const idless = g.arrMediaId === null ? undefined
+      : g.service === "radarr" ? idlessFailed.get(idlessKey(g))
+      : g.episodeId !== null ? idlessFailed.get(idlessKey(g, g.episodeId))
+      : undefined;
+    out.set(row.key, { failed: (idless ?? -Infinity) > g.id, imported: false });
+  }
+  return out;
 }
 
 /**

@@ -7,8 +7,7 @@ import { Label } from "@/components/ui/label";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
-import type { SaveStatus } from "./shared";
-import { withBasePath } from "@/lib/base-path";
+import { useSettingsSave } from "./shared";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { LocalDateTime } from "@/components/local-date-time";
 import {
@@ -37,8 +36,7 @@ export function MdblistPlanForm({ initialPlan, usage }: { initialPlan: MdblistPl
   const router = useRouter();
   const [plan, setPlan] = useState<MdblistPlanSetting>(initialPlan);
   const [savedPlan, setSavedPlan] = useState<MdblistPlanSetting>(initialPlan);
-  const [status, setStatus] = useState<SaveStatus>("idle");
-  const [error, setError] = useState("");
+  const { status, message: error, save, edited } = useSettingsSave();
 
   const number = new Intl.NumberFormat(locale);
   const planName = (id: MdblistPlanId) => t(`settings.form.mdblistPlan.name.${id}`);
@@ -47,27 +45,12 @@ export function MdblistPlanForm({ initialPlan, usage }: { initialPlan: MdblistPl
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     if (!dirty) return;
-    setStatus("saving");
-    setError("");
-    try {
-      const res = await fetch(withBasePath("/api/settings"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [MDBLIST_PLAN_SETTING_KEY]: plan }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      if (!res.ok || data.ok === false) {
-        setError(data.error ?? t("settings.form.common.saveFailed"));
-        setStatus("error");
-        return;
-      }
-      setSavedPlan(plan);
-      setStatus("ok");
+    const sent = plan;
+    const result = await save({ [MDBLIST_PLAN_SETTING_KEY]: sent });
+    if (result.ok) {
+      setSavedPlan(sent);
       // The usage line below is rendered by the server from the saved plan.
       router.refresh();
-    } catch {
-      setError(t("settings.form.common.saveFailed"));
-      setStatus("error");
     }
   }
 
@@ -101,7 +84,7 @@ export function MdblistPlanForm({ initialPlan, usage }: { initialPlan: MdblistPl
         <StyledSelect
           id="mdblist-plan"
           value={plan}
-          onChange={(e) => { setPlan(e.target.value as MdblistPlanSetting); setStatus("idle"); }}
+          onChange={(e) => { setPlan(e.target.value as MdblistPlanSetting); edited(); }}
         >
           <option value="auto">{t("settings.form.mdblistPlan.auto")}</option>
           {MDBLIST_PLANS.map((p) => (

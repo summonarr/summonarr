@@ -1,29 +1,38 @@
 import { prisma } from "@/lib/prisma";
 import { getSyncableMediaInstances } from "@/lib/media-instance-registry";
+import { signInServerOptions } from "@/lib/sign-in-servers";
 import { redirect } from "next/navigation";
-import { Film, Smartphone, Wrench } from "@/components/icons";
+import { CheckCircle, Smartphone, Wrench } from "@/components/icons";
+import { AuthBrandHeader } from "@/components/auth/auth-brand-header";
 import { IOS_APP_STORE_URL } from "@/lib/ios-app";
 import { LoginForm } from "./login-form";
 import { getMaintenanceStatus } from "@/lib/maintenance";
 import { getTranslator } from "@/lib/i18n/server";
 import { isOidcConfigured } from "@/lib/oidc";
+import { first, type PageSearchParams } from "@/lib/search-params";
 
 export const dynamic = "force-dynamic";
 
-export default async function LoginPage() {
+// The three plain settings the page reads, in one query.
+const LOGIN_SETTING_KEYS = ["siteTitle", "siteUrl", "disableLocalLogin"] as const;
 
-  const count = await prisma.user.count();
+export default async function LoginPage({ searchParams }: { searchParams: Promise<PageSearchParams> }) {
   // Fresh install: empty user table always lands on /setup. No exceptions for external providers —
   // the admin account is created locally first; Jellyfin/OIDC are wired up from Settings afterwards.
-  if (count === 0) redirect("/setup");
+  // An existence probe, not a count: this public page is hit on every visit.
+  const anyUser = await prisma.user.findFirst({ select: { id: true } });
+  if (!anyUser) redirect("/setup");
 
-  const [plexInstances, jellyfinInstances, siteTitleRow, siteUrlRow, disableLocalRow] = await Promise.all([
+  // Independent reads, one round of them. getMaintenanceStatus keeps its own
+  // fail-closed catch.
+  const [plexInstances, jellyfinInstances, settingRows, maintenance, t] = await Promise.all([
     getSyncableMediaInstances("plex"),
     getSyncableMediaInstances("jellyfin"),
-    prisma.setting.findUnique({ where: { key: "siteTitle" } }),
-    prisma.setting.findUnique({ where: { key: "siteUrl" } }),
-    prisma.setting.findUnique({ where: { key: "disableLocalLogin" } }),
+    prisma.setting.findMany({ where: { key: { in: [...LOGIN_SETTING_KEYS] } }, select: { key: true, value: true } }),
+    getMaintenanceStatus(),
+    getTranslator(),
   ]);
+  const setting = (key: (typeof LOGIN_SETTING_KEYS)[number]) => settingRows.find((row) => row.key === key)?.value;
   // Fully DB-configured, like Jellyfin below: the Plex tab appears once at least
   // one instance has BOTH its ServerUrl and AdminToken stored. Deliberately
   // tighter than the old plexAdminToken-only check — a token-without-URL
@@ -41,17 +50,18 @@ export default async function LoginPage() {
   // so the tab hides instead of failing on every click.
   const oidcEnabled = isOidcConfigured();
   const oidcName = process.env.OIDC_DISPLAY_NAME || "SSO";
-  const localLoginDisabled = disableLocalRow?.value === "true";
-  const siteTitle = siteTitleRow?.value || "Summonarr";
-  const siteUrl = siteUrlRow?.value || process.env.AUTH_URL || "";
-  const maintenance = await getMaintenanceStatus();
-  const t = await getTranslator();
+  const localLoginDisabled = setting("disableLocalLogin") === "true";
+  const siteTitle = setting("siteTitle") || "Summonarr";
+  const siteUrl = setting("siteUrl") || process.env.AUTH_URL || "";
   // The Playfair wordmark above the icon already says "Summonarr"; repeating it
   // as the h1 read as a stutter on every default install. When the title IS the
   // default, the wordmark becomes the page's h1 instead so the heading outline
   // never loses its top level.
   const isDefaultTitle = siteTitle.trim().toLowerCase() === "summonarr";
   const WordmarkTag = isDefaultTitle ? "h1" : "p";
+  // /setup sends the new admin here when its automatic sign-in didn't go
+  // through, so the account it just created doesn't look like a failure.
+  const accountCreated = first((await searchParams).created) === "1";
 
   return (
     <div
@@ -86,35 +96,25 @@ export default async function LoginPage() {
             </div>
           )}
 
-          <div className="flex flex-col items-center" style={{ marginBottom: 24 }}>
-            <WordmarkTag
-              className="m-0"
-              style={{
-                fontFamily: "var(--font-playfair)",
-                fontSize: 28,
-                fontWeight: 400,
-                color: "var(--ds-fg)",
-                letterSpacing: "0.02em",
-                marginBottom: 14,
-              }}
-            >
-              Summonarr
-            </WordmarkTag>
+          {accountCreated && (
             <div
-              className="flex items-center justify-center"
+              role="status"
+              className="flex items-start gap-2.5 mb-5"
               style={{
-                width: 44,
-                height: 44,
-                borderRadius: 10,
-                background: "var(--ds-accent)",
-                color: "var(--ds-accent-fg)",
-                boxShadow:
-                  "0 0 0 1px color-mix(in oklab, var(--ds-accent) 40%, transparent), inset 0 -1px 0 rgba(0,0,0,.15)",
-                marginBottom: 12,
+                background: "color-mix(in oklab, var(--ds-success) 12%, transparent)",
+                border: "1px solid color-mix(in oklab, var(--ds-success) 28%, transparent)",
+                borderRadius: "var(--ds-r-md)",
+                padding: "10px 12px",
               }}
             >
-              <Film style={{ width: 22, height: 22 }} />
+              <CheckCircle style={{ width: 14, height: 14, marginTop: 2, color: "var(--ds-success)", flexShrink: 0 }} />
+              <p className="text-sm" style={{ color: "var(--ds-fg)", margin: 0 }}>
+                {t("auth.setup.error.createdSignIn")}
+              </p>
             </div>
+          )}
+
+          <AuthBrandHeader wordmarkAs={WordmarkTag}>
             {!isDefaultTitle && (
               <h1
                 className="m-0 font-semibold"
@@ -129,9 +129,9 @@ export default async function LoginPage() {
             >
               {t("auth.login.subtitle")}
             </p>
-          </div>
+          </AuthBrandHeader>
 
-          <LoginForm plexEnabled={plexEnabled} jellyfinEnabled={jellyfinEnabled} jellyfinInstances={jellyfinInstances} oidcEnabled={oidcEnabled} oidcName={oidcName} localLoginDisabled={localLoginDisabled} siteUrl={siteUrl} />
+          <LoginForm plexEnabled={plexEnabled} jellyfinEnabled={jellyfinEnabled} jellyfinInstances={signInServerOptions(jellyfinInstances)} oidcEnabled={oidcEnabled} oidcName={oidcName} localLoginDisabled={localLoginDisabled} siteUrl={siteUrl} />
         </div>
 
         <div className="flex flex-col items-center text-center" style={{ marginTop: 18, gap: 4 }}>
