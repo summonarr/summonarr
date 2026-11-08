@@ -7,6 +7,7 @@ import { prisma } from "@/lib/prisma";
 import type { ActiveSession } from "@/generated/prisma";
 import { mapLimit } from "@/lib/concurrency";
 import {
+  applyFinalTick,
   recordCompletedSession,
   resolveMediaServerUser,
   SESSION_ABSENCE_GRACE_MS,
@@ -197,4 +198,69 @@ export async function resolveMediaServerUserCached(
 /** "MOVIE" / "TV" for a media-server item type, else null (a clip, a track). */
 export function mediaTypeOfItem(kind: "movie" | "episode" | string | null | undefined): "MOVIE" | "TV" | null {
   return kind === "episode" ? "TV" : kind === "movie" ? "MOVIE" : null;
+}
+
+/** Played percentage of a duration; 0 when the duration is unknown. */
+export function progressPercentOf(positionMs: number, durationMs: number): number {
+  return durationMs > 0 ? (positionMs / durationMs) * 100 : 0;
+}
+
+/** The poster a tick looked up for a resolved title, else null. */
+export function posterOf(
+  posters: ReadonlyMap<string, string | null>,
+  tmdbId: number | null,
+  mediaType: "MOVIE" | "TV" | null,
+): string | null {
+  return tmdbId != null && mediaType ? posters.get(`${tmdbId}:${mediaType}`) ?? null : null;
+}
+
+/**
+ * Force-finalize a row whose playback has ended under its key (the next item
+ * of an auto-play, a stalled ghost): its final tick is written as of `now`.
+ * False — warned, nothing recorded — when the write fails, so the caller
+ * skips the session and the next tick retries; the caller updates any
+ * in-memory ledger only on true (guardrail 27).
+ */
+export async function forceFinalizeSession(
+  existing: ActiveSession,
+  now: Date,
+  label: string,
+  sessionId: string,
+): Promise<boolean> {
+  try {
+    await recordCompletedSession(applyFinalTick(existing, now), { skipSSE: true, stoppedAt: now });
+    return true;
+  } catch (err) {
+    console.warn(`[play-history] ${label} failed for ${sessionId}:`, err);
+    return false;
+  }
+}
+
+/**
+ * The fields of a continuing session's CAS update that both sources write the
+ * same way: the playtime increment, the one-shot duration backfill (durationMs
+ * is write-once at create, so a first tick that stamped 0 is filled once a
+ * real duration appears), the resolved title and its poster.
+ */
+export function continuingUpdateFields(opts: {
+  existing: Pick<ActiveSession, "durationMs">;
+  increment: bigint;
+  durationMs: number;
+  tmdbId: number | null;
+  mediaType: "MOVIE" | "TV" | null;
+  posterPath: string | null;
+}): {
+  playtimeMs?: { increment: bigint };
+  durationMs?: bigint;
+  tmdbId?: number;
+  mediaType?: "MOVIE" | "TV" | null;
+  posterPath?: string;
+} {
+  const { existing, increment, durationMs, tmdbId, mediaType, posterPath } = opts;
+  return {
+    ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
+    ...(existing.durationMs === BigInt(0) && durationMs > 0 ? { durationMs: BigInt(durationMs) } : {}),
+    ...(tmdbId != null ? { tmdbId, mediaType } : {}),
+    ...(posterPath ? { posterPath } : {}),
+  };
 }

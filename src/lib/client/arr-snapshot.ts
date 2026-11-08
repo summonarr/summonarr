@@ -1,3 +1,4 @@
+import { timedFetch } from "@/lib/client/fetch-json";
 // Client half of "instant, then live" (src/lib/arr-snapshot.ts): read the last
 // answer the server kept for an admin arr read, so a page paints it at once while
 // its own live load is out. Display only — every action re-checks live on the
@@ -31,7 +32,7 @@ export async function readArrSnapshot<T>(
   init: { signal?: AbortSignal; parse?: (data: unknown) => T | null } = {},
 ): Promise<ArrSnapshot<T> | null> {
   try {
-    const res = await fetch(cachedUrl(url), { signal: init.signal, cache: "no-store" });
+    const res = await timedFetch(cachedUrl(url), { signal: init.signal, cache: "no-store" });
     if (res.status !== 200) return null;
     const at = res.headers.get(SNAPSHOT_HEADER);
     if (!at || Number.isNaN(Date.parse(at))) return null;

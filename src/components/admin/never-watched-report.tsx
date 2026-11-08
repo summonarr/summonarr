@@ -35,7 +35,7 @@ import {
   useCleanupDelete,
 } from "@/components/admin/cleanup-delete";
 import { apiErrorText } from "@/lib/client/api-error";
-import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS, jsonInit } from "@/lib/client/fetch-json";
 import { runReplaceFileJob } from "@/lib/client/replace-file-job";
 import { arrFailureText, upstreamFailureText } from "@/lib/cleanup-error-text";
 import { check } from "@/lib/validate";
@@ -191,7 +191,7 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
     // The first build of the report reads the whole library: no client-side timeout.
     const res = await fetchJson(withBasePath(`/api/admin/never-watched?${params}`), {
       schema: NwPageWire,
-      timeoutMs: Infinity,
+      timeoutMs: LONG_RUN_TIMEOUT_MS,
       fallbackError: t("adminManage.neverWatched.error.load"),
     });
     if (seq !== loadSeq.current) return;

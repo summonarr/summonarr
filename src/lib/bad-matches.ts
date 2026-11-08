@@ -347,11 +347,12 @@ async function posterPathMap(
   });
   for (const row of rows) {
     try {
-      const parsed = JSON.parse(row.data) as { posterPath?: string | null };
+      const parsed: unknown = JSON.parse(row.data);
+      const posterPath = (parsed as { posterPath?: unknown } | null)?.posterPath;
       const parts = row.key.split(":");
       const mediaType = parts[0] === "movie" ? "MOVIE" : "TV";
       const tmdbId = parseInt(parts[1], 10);
-      if (!isNaN(tmdbId)) out.set(`${tmdbId}:${mediaType}`, parsed.posterPath ?? null);
+      if (!isNaN(tmdbId)) out.set(`${tmdbId}:${mediaType}`, typeof posterPath === "string" ? posterPath : null);
     } catch {}
   }
   return out;

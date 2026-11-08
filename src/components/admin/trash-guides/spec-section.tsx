@@ -10,7 +10,7 @@ import { useAsyncAction } from "@/hooks/use-async-action";
 import { useFocusReturn } from "@/hooks/use-focus-return";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
-import { fetchJson, jsonInit, type FetchJsonFailure, type FetchJsonOptions } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS, jsonInit, type FetchJsonFailure, type FetchJsonOptions } from "@/lib/client/fetch-json";
 import type { Translator } from "@/lib/i18n/translate";
 import {
   ChevronDown,
@@ -281,7 +281,7 @@ export function SpecSection({
     // Every selected spec is written to the instance in one request: no client
     // timeout, or a slow success would read as a failure.
     const res = await run.request((signal) =>
-      fetchJson(withBasePath(`/api/admin/trash-guides/apply`), { init: jsonInit("POST", { specIds: ids, variant }), timeoutMs: Infinity, signal }),
+      fetchJson(withBasePath(`/api/admin/trash-guides/apply`), { init: jsonInit("POST", { specIds: ids, variant }), timeoutMs: LONG_RUN_TIMEOUT_MS, signal }),
     );
     if (!res) return;
     const answer = answerOf(res);

@@ -9,6 +9,8 @@ import { readApiError } from "@/lib/client/api-error";
 import { DetailActionButton } from "@/components/media/detail-action-button";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
+import { timedFetch } from "@/lib/client/fetch-json";
+import { useAsyncAction } from "@/hooks/use-async-action";
 
 interface Props {
   tmdbId: number;
@@ -26,6 +28,7 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
   const router = useRouter();
   const { toast } = useToast();
   const t = useT();
+  const action = useAsyncAction();
   const [state, setState] = useState<"idle" | "reason" | "loading" | "voted">(alreadyVoted ? "voted" : "idle");
   const [reason, setReason] = useState("");
   // Set by a user-initiated change of control (submit, cancel): the focused
@@ -47,52 +50,70 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
     setRefocus(true);
   }
 
+  type Outcome = { ok: true } | { ok: false; message: string };
+
   async function handleVote() {
+    if (action.busy("vote")) return;
     setState("loading");
     setRefocus(true);
-    try {
-      const res = await fetch(withBasePath("/api/votes"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tmdbId, mediaType, reason: reason.trim() || undefined, _token: requestToken }),
-      });
-      if (res.ok || res.status === 409) {
-        setState("voted");
-        setReason("");
-        router.refresh();
-      } else {
-        setState("idle");
-        // The route's own reason (your own request, not in the library, a
-        // stale page token…) says why a retry won't help; a 429 its wait.
-        toast({
-          title: rateLimitMessage(res, t) ?? (await readApiError(res, t("request.vote.recordFailed"))),
-          variant: "error",
-        });
-      }
-    } catch {
+    const out = await action.run(
+      "vote",
+      async (signal): Promise<Outcome> => {
+        try {
+          const res = await timedFetch(withBasePath("/api/votes"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tmdbId, mediaType, reason: reason.trim() || undefined, _token: requestToken }),
+            signal,
+          });
+          if (res.ok || res.status === 409) return { ok: true };
+          // The route's own reason (your own request, not in the library, a
+          // stale page token…) says why a retry won't help; a 429 its wait.
+          return { ok: false, message: rateLimitMessage(res, t) ?? (await readApiError(res, t("request.vote.recordFailed"))) };
+        } catch {
+          return { ok: false, message: t("request.vote.recordFailed") };
+        }
+      },
+      { ifBusy: "skip" },
+    );
+    if (!out) return;
+    if (out.ok) {
+      setState("voted");
+      setReason("");
+      router.refresh();
+    } else {
       setState("idle");
-      toast({ title: t("request.vote.recordFailed"), variant: "error" });
+      toast({ title: out.message, variant: "error" });
     }
   }
 
   async function handleUnvote() {
+    if (action.busy("vote")) return;
     setState("loading");
-    try {
-      const res = await fetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "DELETE" });
-      // 404: the vote is already gone (removed in another tab, or dismissed by
-      // an admin), which is what was asked for. Treating it as a failure kept
-      // the button on "Voted" and every retry 404'd again.
-      if (res.ok || res.status === 404) {
-        setState("idle");
-        toast({ title: t("request.vote.removed"), variant: "success" });
-        router.refresh();
-      } else {
-        setState("voted");
-        toast({ title: rateLimitMessage(res, t) ?? t("request.vote.removeFailed"), variant: "error" });
-      }
-    } catch {
+    // 404: the vote is already gone (removed in another tab, or dismissed by
+    // an admin), which is what was asked for. Treating it as a failure kept
+    // the button on "Voted" and every retry 404'd again.
+    const out = await action.run(
+      "vote",
+      async (signal): Promise<Outcome> => {
+        try {
+          const res = await timedFetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "DELETE", signal });
+          if (res.ok || res.status === 404) return { ok: true };
+          return { ok: false, message: rateLimitMessage(res, t) ?? t("request.vote.removeFailed") };
+        } catch {
+          return { ok: false, message: t("request.vote.removeFailed") };
+        }
+      },
+      { ifBusy: "skip" },
+    );
+    if (!out) return;
+    if (out.ok) {
+      setState("idle");
+      toast({ title: t("request.vote.removed"), variant: "success" });
+      router.refresh();
+    } else {
       setState("voted");
-      toast({ title: t("request.vote.removeFailed"), variant: "error" });
+      toast({ title: out.message, variant: "error" });
     }
   }
 

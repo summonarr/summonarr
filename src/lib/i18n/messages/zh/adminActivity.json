@@ -265,6 +265,8 @@
   "adminActivity.history.exportCsv": "导出 CSV",
   "adminActivity.history.exportJson": "JSON",
   "adminActivity.history.exportJsonAria": "导出 JSON",
+  "adminActivity.history.exportTruncated": "导出已在 {max} 行处截断——请缩小日期范围后重新导出以获取其余数据。",
+  "adminActivity.history.exportFailed": "导出失败——请重试。",
   "adminActivity.common.yes": "是",
   "adminActivity.common.no": "否",
   "adminActivity.method.direct": "直接",

@@ -279,7 +279,7 @@ export const adminArrPaths: OpenApiPaths = {
       description: "The arr's own ClearBlocklist command. Audited ARR_BLOCKLIST_CHANGE with the `count` the admin confirmed (the list it names is gone afterwards).",
       requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["service"], properties: {
         service: ARR_SERVICE, instance: { type: "string" },
-        count: { type: "integer", minimum: 0, description: "Size of the list the admin confirmed clearing — recorded in the ARR_BLOCKLIST_CHANGE audit; missing or malformed is recorded as null" },
+        count: { type: "integer", minimum: 0, description: "Size of the list the admin confirmed clearing — recorded in the ARR_BLOCKLIST_CHANGE audit; missing or malformed is recorded as null. When sent and the arr's current size is readable and differs, nothing is cleared (409)" },
       } } } } },
       responses: {
         ...ARR_ERRORS,
@@ -288,6 +288,7 @@ export const adminArrPaths: OpenApiPaths = {
           content: { "application/json": { schema: { type: "object", required: ["ok", "commandIds"], properties: { ok: { type: "boolean", enum: [true] }, commandIds: ARR_COMMAND_IDS } } } },
         },
         "403": { description: "Not ADMIN" },
+        "409": { description: "{ error, count } — the `count` sent differs from the blocklist's current size; nothing was cleared. `count` is the current size", content: { "application/json": { schema: { type: "object", required: ["error", "count"], properties: { error: { type: "string" }, count: { type: "integer", minimum: 0 } } } } } },
         "413": tooLargeAnswer(4 * 1024),
         "429": { description: "More than 10 clears a minute by this admin (Retry-After set)", headers: RETRY_AFTER_HEADER },
       },

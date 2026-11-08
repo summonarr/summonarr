@@ -10,7 +10,7 @@ import type { TVAvailabilityResponse, TVSeasonInfo } from "@/app/api/tv-availabi
 import { withBasePath } from "@/lib/base-path";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { readApiError } from "@/lib/client/api-error";
-import { fetchJson } from "@/lib/client/fetch-json";
+import { fetchJson, timedFetch } from "@/lib/client/fetch-json";
 import { useAsyncAction } from "@/hooks/use-async-action";
 import { v } from "@/lib/validate";
 import { SLOT } from "@/lib/i18n/slot";
@@ -484,41 +484,49 @@ export function ReportIssueButton({
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (action.busy("submit")) return;
     setDialogState("submitting");
     setErrorMsg("");
 
     const { season, episode } = resolveNumbers(form, isTV, useManualInputs);
 
-    try {
-      const res = await fetch(withBasePath("/api/issues"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tmdbId,
-          tvdbId: tvdbId ?? undefined,
-          mediaType,
-          title,
-          posterPath,
-          issueType: form.issueType,
-          scope: mediaType === "MOVIE" ? "FULL" : form.scope,
-          seasonNumber: season,
-          episodeNumber: episode,
-          note: form.note.trim() || undefined,
-        }),
-      });
-
-      if (!res.ok) {
-        setErrorMsg(rateLimitMessage(res, t) ?? (await readApiError(res, t("request.somethingWrong"))));
-        setDialogState("open");
-        return;
-      }
-
-      setDialogState("submitted");
-      toast({ title: t("request.report.reportedToast"), variant: "success" });
-    } catch {
-      setErrorMsg(t("request.networkError"));
+    const out = await action.run(
+      "submit",
+      async (signal): Promise<{ error: string } | null> => {
+        try {
+          const res = await timedFetch(withBasePath("/api/issues"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              tmdbId,
+              tvdbId: tvdbId ?? undefined,
+              mediaType,
+              title,
+              posterPath,
+              issueType: form.issueType,
+              scope: mediaType === "MOVIE" ? "FULL" : form.scope,
+              seasonNumber: season,
+              episodeNumber: episode,
+              note: form.note.trim() || undefined,
+            }),
+            signal,
+          });
+          if (res.ok) return null;
+          return { error: rateLimitMessage(res, t) ?? (await readApiError(res, t("request.somethingWrong"))) };
+        } catch {
+          return { error: t("request.networkError") };
+        }
+      },
+      { ifBusy: "skip" },
+    );
+    if (out === undefined) return;
+    if (out) {
+      setErrorMsg(out.error);
       setDialogState("open");
+      return;
     }
+    setDialogState("submitted");
+    toast({ title: t("request.report.reportedToast"), variant: "success" });
   }
 
   const isSubmitting = dialogState === "submitting";

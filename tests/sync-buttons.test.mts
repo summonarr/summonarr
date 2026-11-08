@@ -55,7 +55,7 @@ test("a run's end applies nothing once the button is gone, and reloads with refr
   }
   // The episode rebuild is synchronous: no client timeout, and unmounting drops the answer.
   const tv = read("sync-tv-episodes-button.tsx");
-  assert.match(tv, /timeoutMs: Infinity,/);
+  assert.match(tv, /timeoutMs: LONG_RUN_TIMEOUT_MS,/);
   assert.match(tv, /const res = await action\.run\("sync", \(signal\) =>/);
 });
 

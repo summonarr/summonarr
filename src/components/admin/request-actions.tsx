@@ -23,7 +23,7 @@ import { withBasePath } from "@/lib/base-path";
 import { ADMIN_NOTE_MAX } from "@/lib/request-limits";
 import { useT } from "@/components/i18n/i18n-provider";
 import { useAsyncAction } from "@/hooks/use-async-action";
-import { fetchJson, jsonInit, type FetchJsonFailure } from "@/lib/client/fetch-json";
+import { fetchJson, ARR_WRITE_TIMEOUT_MS, jsonInit, type FetchJsonFailure } from "@/lib/client/fetch-json";
 import type { Translator } from "@/lib/i18n/translate";
 import { REQUEST_STATUS_LABEL_KEY } from "@/lib/status-labels";
 import { BatchAnswer } from "./request-batch";
@@ -110,9 +110,9 @@ function useRequestMutations({ requestId, currentStatus, groupPendingIds }: Pick
       ...(adminNote !== undefined ? { adminNote } : {}),
       ...(permanent !== undefined ? { permanent } : {}),
     };
-    // The approve waits on the Radarr/Sonarr push: no client-side timeout, or
-    // a slow success would read as a failure and drop the optimistic status.
-    const opts = { timeoutMs: Infinity, fallbackError: t("adminQueue.actions.updateFailed") };
+    // The approve waits on the Radarr/Sonarr push, so it gets a long bound: a slow
+    // success must not read as a failure and drop the optimistic status.
+    const opts = { timeoutMs: ARR_WRITE_TIMEOUT_MS, fallbackError: t("adminQueue.actions.updateFailed") };
     const outcome = await action.run(newStatus, async (signal) => {
       if (groupIds) {
         const res = await fetchJson(withBasePath("/api/requests/batch"), { ...opts, signal, schema: BatchAnswer, init: jsonInit("PATCH", { ids: groupIds, ...fields }) });
@@ -153,7 +153,7 @@ function useRequestMutations({ requestId, currentStatus, groupPendingIds }: Pick
         init: jsonInit("PATCH", body),
         schema: ArrActionAnswer,
         signal,
-        timeoutMs: Infinity,
+        timeoutMs: ARR_WRITE_TIMEOUT_MS,
         fallbackError: "",
       }),
       { ifBusy: "skip" },

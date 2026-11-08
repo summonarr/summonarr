@@ -2175,3 +2175,16 @@ test("admin 2FA reset: factors, sessions, footholds and calendar land in ONE tra
     "calendar token cleared in the same tx",
   );
 });
+
+test("field PATCH by a delegate: a target promoted to ADMIN after the unlocked read is refused under lock 42, with nothing written", async () => {
+  const delegate = await mintSession("USER", Permission.MANAGE_USERS);
+  const targetId = seedUser("USER");
+  txOps = [];
+  auditRows.length = 0;
+  onTxLock = (sql) => { if (sql === USER_ROLE_LOCK_SQL) usersById.get(targetId)!.role = "ADMIN"; };
+  const res = await fieldPatch(delegate.header, targetId, { movieQuotaLimit: 5 });
+  assert.equal(res.status, 403);
+  assert.equal(txOps.filter((o) => o.op.startsWith("user.update")).length, 0, "no write");
+  await flush();
+  assert.equal(auditRows.length, 0);
+});

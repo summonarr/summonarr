@@ -432,10 +432,13 @@ export const requestsPaths: OpenApiPaths = {
     get: {
       tags: ["Requests"],
       summary: "List comments on a request",
-      parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+      parameters: [
+        { name: "id", in: "path", required: true, schema: { type: "string" } },
+        { name: "before", in: "query", required: false, schema: { type: "string" }, description: "Keyset cursor `<createdAt ISO-8601>|<id>` of the oldest entry the client holds: answers the page strictly older, same array shape and cap. Absent or malformed reads the newest page; `X-Truncated: true` says older entries remain" }],
       responses: {
         "200": {
           description: "The newest 500 comments, oldest first, each with author { name, role } (+ email for MANAGE_REQUESTS callers) and fromAdmin",
+          headers: { "X-Truncated": { description: "\"true\" when the list was cut at the cap", schema: { type: "string", enum: ["true", "false"] } }, "X-Truncated-Cap": { description: "The cap, as an integer string", schema: { type: "string" } } }, 
           content: { "application/json": { schema: { type: "array", maxItems: 500, items: threadEntry("requestId") } } },
         },
         "403": { description: "Not the requester and no MANAGE_REQUESTS, or request comments are turned off (non-managers)" },

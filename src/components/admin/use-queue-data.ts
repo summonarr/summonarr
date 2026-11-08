@@ -14,6 +14,7 @@ import type { ArrErrorKind } from "@/lib/arr-error-kind";
 import { createLoadGate, type LoadKind } from "@/lib/arr-system";
 import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
 import { readApiError } from "@/lib/client/api-error";
+import { timedFetch } from "@/lib/client/fetch-json";
 
 export type Service = "radarr" | "sonarr";
 
@@ -29,6 +30,16 @@ const POLL_MS = 20_000;
 // The page's one read. The live load and its snapshot must name the SAME url,
 // or the server's snapshot key misses.
 const queueUrl = () => withBasePath("/api/admin/queue");
+
+// A 200 that is not the report (an auth proxy's page, a stale deploy) is a failed
+// load, never an empty queue: the three lists the page folds must be arrays.
+function queueAnswer(body: unknown, error: string): { report: QueueReport } | { error: string } {
+  if (body && typeof body === "object") {
+    const r = body as Record<string, unknown>;
+    if (Array.isArray(r.instances) && Array.isArray(r.errors) && Array.isArray(r.items)) return { report: body as QueueReport };
+  }
+  return { error };
+}
 
 export function useQueueData({
   configured,
@@ -71,8 +82,8 @@ export function useQueueData({
     if (kind !== "poll") setLoading(true);
     let next: { report: QueueReport } | { error: string };
     try {
-      const res = await fetch(queueUrl());
-      next = res.ok ? { report: (await res.json()) as QueueReport } : { error: await readApiError(res, t("adminManage.queue.error.load")) };
+      const res = await timedFetch(queueUrl());
+      next = res.ok ? queueAnswer(await res.json().catch(() => null), t("adminManage.queue.error.load")) : { error: await readApiError(res, t("adminManage.queue.error.load")) };
     } catch {
       next = { error: t("adminManage.queue.error.loadNetwork") };
     }

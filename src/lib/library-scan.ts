@@ -11,6 +11,8 @@ import {
 } from "./arr";
 import { sanitizeForLog } from "./sanitize";
 import { processSingleton } from "./process-singleton";
+import { getSyncableMediaInstances } from "./media-instance-registry";
+import { DEFAULT_MEDIA_INSTANCE } from "./media-instances";
 
 export type ScanMediaType = "movie" | "tv";
 
@@ -213,16 +215,37 @@ async function runScan(mediaType: ScanMediaType): Promise<void> {
   }
 }
 
+// Every configured server of both services is refreshed (guardrail 35): a
+// title imported for a named instance lands on whichever server holds the file,
+// and availability is a union, so a default-only scan left a named server's
+// library stale until the next full sync. The registry read is best-effort: if
+// it fails, the default instance (the pre-multi-server behaviour) is scanned.
+async function configuredInstances(service: "plex" | "jellyfin"): Promise<string[]> {
+  try {
+    return (await getSyncableMediaInstances(service)).map((i) => i.slug);
+  } catch (err) {
+    console.error(`[library-scan] ${service} instance list failed, scanning the default only:`, err instanceof Error ? err.message : String(err));
+    return [DEFAULT_MEDIA_INSTANCE];
+  }
+}
+
+// A named server's log lines carry its slug; the default's stay as before.
+function scanLabel(service: string, mediaType: ScanMediaType, instance: string): string {
+  return instance === DEFAULT_MEDIA_INSTANCE ? `${service} ${mediaType}` : `${service}[${sanitizeForLog(instance)}] ${mediaType}`;
+}
+
 async function triggerLibraryScan(mediaType: ScanMediaType): Promise<void> {
-  const [plexConfig, jellyfinConfig] = await Promise.all([
-    getPlexConfig(),
-    getJellyfinConfig(),
+  const [plexSlugs, jellyfinSlugs] = await Promise.all([
+    configuredInstances("plex"),
+    configuredInstances("jellyfin"),
   ]);
+  const plexConfigs = await Promise.all(plexSlugs.map(async (instance) => ({ instance, config: await getPlexConfig(instance) })));
+  const jellyfinConfigs = await Promise.all(jellyfinSlugs.map(async (instance) => ({ instance, config: await getJellyfinConfig(instance) })));
 
-  const plexConfigured = !!(plexConfig.url && plexConfig.token);
-  const jellyfinConfigured = !!(jellyfinConfig.url && jellyfinConfig.apiKey);
+  const plexTargets = plexConfigs.filter((c) => c.config.url && c.config.token);
+  const jellyfinTargets = jellyfinConfigs.filter((c) => c.config.url && c.config.apiKey);
 
-  if (!plexConfigured && !jellyfinConfigured) {
+  if (plexTargets.length === 0 && jellyfinTargets.length === 0) {
     console.warn(`[library-scan] ${mediaType}: no backends configured, skipping`);
     return;
   }
@@ -231,28 +254,28 @@ async function triggerLibraryScan(mediaType: ScanMediaType): Promise<void> {
 
   const jobs: Promise<void>[] = [];
 
-  if (plexConfigured) {
-    const serverUrl = plexConfig.url!.replace(/\/$/, "");
-    const token = plexConfig.token!;
+  for (const { instance, config } of plexTargets) {
+    const serverUrl = config.url!.replace(/\/$/, "");
+    const token = config.token!;
+    const label = scanLabel("plex", mediaType, instance);
     jobs.push(
       (async () => {
         const sections = await getPlexLibrarySections(serverUrl, token);
         const targets = sections.filter((s) => s.type === plexSectionType);
         if (targets.length === 0) {
-          console.warn(`[library-scan] plex ${mediaType}: no ${plexSectionType} sections found`);
+          console.warn(`[library-scan] ${label}: no ${plexSectionType} sections found`);
           return;
         }
         await Promise.all(targets.map((s) => refreshPlexSection(serverUrl, token, s.key)));
-      })().catch((err) => console.error(`[library-scan] plex ${mediaType}:`, err)),
+      })().catch((err) => console.error(`[library-scan] ${label}:`, err)),
     );
   }
 
-  if (jellyfinConfigured) {
-    const baseUrl = jellyfinConfig.url!;
-    const apiKey = jellyfinConfig.apiKey!;
+  for (const { instance, config } of jellyfinTargets) {
+    const label = scanLabel("jellyfin", mediaType, instance);
     jobs.push(
-      refreshJellyfinLibrary(baseUrl, apiKey).catch((err) =>
-        console.error(`[library-scan] jellyfin ${mediaType}:`, err),
+      refreshJellyfinLibrary(config.url!, config.apiKey!).catch((err) =>
+        console.error(`[library-scan] ${label}:`, err),
       ),
     );
   }

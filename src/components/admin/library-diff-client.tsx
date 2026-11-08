@@ -40,6 +40,8 @@ export interface DiffItem {
   arrMismatch: boolean;
 
   inArr: boolean;
+  // Not found in the arr index, but an instance could not be read: no verdict either way.
+  arrUnknown: boolean;
   requests: RequestSummary;
   // Why the OTHER server lacks this title (mirrored libraries: never random).
   diffSource: DiffSource;
@@ -206,7 +208,7 @@ function ArrStatusLine({ item, server }: { item: DiffItem; server?: Server }) {
       </span>
     );
   }
-  if (item.relPath) {
+  if (item.relPath && !item.arrUnknown) {
     return (
       <span className="ds-mono" style={{ marginTop: 2, fontSize: 10, color: "var(--ds-fg-subtle)" }}>
         {t("adminManage.library.diff.notInArr", { arr: arrName })}
@@ -770,7 +772,7 @@ function applyFilters(items: DiffItem[], q: string, arrFilter: ArrFilter, reques
     );
   }
   if (arrFilter === "mismatch")   result = result.filter((i) => i.arrMismatch);
-  if (arrFilter === "not_in_arr") result = result.filter((i) => !i.inArr);
+  if (arrFilter === "not_in_arr") result = result.filter((i) => !i.inArr && !i.arrUnknown);
   if (arrFilter === "matches")    result = result.filter((i) => i.inArr && !i.arrMismatch);
   if (requestFilter === "has_requests") result = result.filter((i) => i.requests.total > 0);
   return result;

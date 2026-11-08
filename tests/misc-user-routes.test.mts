@@ -13,7 +13,7 @@
 //      and CDNs, so a body-driven selection would silently turn a single-item
 //      delete into a FULL INBOX WIPE. A request with neither ?ids= nor ?all=1 is
 //      a 400, never a wipe.
-//   2. /api/report USES logAuditOrFail, AND THAT IS CORRECT — the inversion of
+//   2. /api/report WRITES ITS AUDIT ROW THROUGH logAuditTx IN A TRANSACTION, AND THAT IS CORRECT — the inversion of
 //      guardrail 26. That guardrail bars the throwing variant only AFTER a
 //      committed mutation; here the audit write IS the operation, so a failed
 //      write must surface as an error rather than a false "reported". Pinned in
@@ -287,6 +287,7 @@ for (const m of ["ratingsCache", "tmdbCache", "tmdbMediaCore", "mediaRequest", "
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) =>
   Array.isArray(arg) ? Promise.all(arg) : (arg as (tx: unknown) => Promise<unknown>)(prisma));
 shadowPrismaClientMethod(prisma, "$queryRaw", async () => []);
+shadowPrismaClientMethod(prisma, "$executeRaw", async (strings: TemplateStringsArray) => { rec("$executeRaw", strings.join("?")); return 0; });
 shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async () => []);
 
 const ratings = await import("../src/app/api/ratings/route.ts");
@@ -578,7 +579,7 @@ test("POST tolerates a malformed body rather than 500ing", async () => {
   assert.notEqual((await postNotifs(me.token, undefined, "{nope")).status, 500);
 });
 
-// ── 2: report — logAuditOrFail is CORRECT here ───────────────────────────────
+// ── 2: report — a failing audit write is CORRECT to surface ───────────────────────────────
 
 test("report requires a whitelisted contentType", async () => {
   const me = await mintSession();
@@ -620,6 +621,7 @@ test("a successful report writes a CONTENT_REPORT audit row", async () => {
   const data = (opsOf("auditLog.create")[0].args as { data: { action: string; target: string } }).data;
   assert.equal(data.action, "CONTENT_REPORT");
   assert.equal(data.target, "issue:i1");
+  assert.match(String(opsOf("$executeRaw")[0]?.args), /pg_advisory_xact_lock\(4640, hashtext/, "the check and the write run under the reporter's lock");
 });
 
 test("a FAILED audit write makes the report FAIL — the audit IS the operation", async () => {

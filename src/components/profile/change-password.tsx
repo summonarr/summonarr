@@ -9,6 +9,8 @@ import { useT } from "@/components/i18n/i18n-provider";
 import { MIN_PASSWORD_LENGTH } from "@/lib/password-policy";
 import { useSecondFactorStepUp, type KnownSecondFactor } from "./use-second-factor-step-up";
 import { SecondFactorCodeField } from "./second-factor-code-field";
+import { timedFetch } from "@/lib/client/fetch-json";
+import { useAsyncAction } from "@/hooks/use-async-action";
 
 // What the page knows about the account's two-factor setup when it rendered.
 export type ChangePasswordSecondFactor = KnownSecondFactor;
@@ -29,6 +31,7 @@ interface ChangePasswordProps {
 // answers `secondFactorRequired` (2FA turned on in another tab, say).
 export function ChangePassword({ hasPassword, secondFactor }: ChangePasswordProps) {
   const t = useT();
+  const action = useAsyncAction();
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword]         = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -47,47 +50,60 @@ export function ChangePassword({ hasPassword, secondFactor }: ChangePasswordProp
       return;
     }
 
+    if (action.busy("save")) return;
     setSaving(true);
-    try {
-      const body: Record<string, unknown> = { newPassword };
-      if (hasPassword) body.currentPassword = currentPassword;
-      if (stepUp.needsSecondFactor) {
-        const r = await stepUp.secondFactorProof();
-        if (!("proof" in r)) {
-          if (r.error) setError(r.error);
-          return;
-        }
-        body.secondFactor = r.proof;
-      }
+    type Outcome =
+      | { kind: "error"; message: string }
+      | { kind: "stopped" }
+      | { kind: "relogin" }
+      | { kind: "saved" };
+    const out = await action.run(
+      "save",
+      async (signal): Promise<Outcome> => {
+        try {
+          const body: Record<string, unknown> = { newPassword };
+          if (hasPassword) body.currentPassword = currentPassword;
+          if (stepUp.needsSecondFactor) {
+            const r = await stepUp.secondFactorProof();
+            if (!("proof" in r)) return r.error ? { kind: "error", message: r.error } : { kind: "stopped" };
+            body.secondFactor = r.proof;
+          }
 
-      const res = await fetch(withBasePath("/api/profile/password"), {
-        method:  "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify(body),
-      });
-      const data: unknown = await res.json().catch(() => null);
-      if (!res.ok) {
-        setError(stepUp.refusalMessage(res, data, !!body.secondFactor, t("profile.password.error.failed")));
-        return;
-      }
-      if (data && typeof data === "object" && (data as { requiresRelogin?: unknown }).requiresRelogin === true) {
-        window.location.href = withBasePath("/login");
-        return;
-      }
+          const res = await timedFetch(withBasePath("/api/profile/password"), {
+            method:  "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body:    JSON.stringify(body),
+            signal,
+          });
+          const data: unknown = await res.json().catch(() => null);
+          if (!res.ok) {
+            return { kind: "error", message: stepUp.refusalMessage(res, data, !!body.secondFactor, t("profile.password.error.failed")) };
+          }
+          if (data && typeof data === "object" && (data as { requiresRelogin?: unknown }).requiresRelogin === true) {
+            return { kind: "relogin" };
+          }
+          return { kind: "saved" };
+        } catch {
+          // A network error. A body that isn't JSON (a proxy's page) is read as
+          // no body above. Without this catch the form would show nothing at all.
+          //
+          // The message mentions sign-out because the server signs out every
+          // session when the password changes. If the change saved but only the
+          // response was lost, the user is already signed out everywhere.
+          return { kind: "error", message: t("profile.password.error.network") };
+        }
+      },
+      { ifBusy: "skip" },
+    );
+    setSaving(false);
+    if (!out) return;
+    if (out.kind === "error") setError(out.message);
+    else if (out.kind === "relogin") window.location.href = withBasePath("/login");
+    else if (out.kind === "saved") {
       setSuccess(true);
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
-    } catch {
-      // A network error. A body that isn't JSON (a proxy's page) is read as
-      // no body above. Without this catch the form would show nothing at all.
-      //
-      // The message mentions sign-out because the server signs out every
-      // session when the password changes. If the change saved but only the
-      // response was lost, the user is already signed out everywhere.
-      setError(t("profile.password.error.network"));
-    } finally {
-      setSaving(false);
     }
   }
 

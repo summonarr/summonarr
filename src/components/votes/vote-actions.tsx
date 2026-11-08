@@ -7,6 +7,8 @@ import { withBasePath } from "@/lib/base-path";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
+import { timedFetch } from "@/lib/client/fetch-json";
+import { useAsyncAction } from "@/hooks/use-async-action";
 
 interface Props {
   tmdbId: number;
@@ -19,6 +21,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
   const router = useRouter();
   const { toast } = useToast();
   const t = useT();
+  const action = useAsyncAction();
   // Which action is in flight: both buttons disable. The dismiss confirm spins
   // until the PATCH answers; an unvote hides its own button at once.
   const [pending, setPending] = useState<"unvote" | "dismiss" | null>(null);
@@ -56,53 +59,56 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
     setRefocusDismiss(true);
   }
 
+  type Outcome = { ok: true } | { ok: false; message: string };
+
+  // Reads everything it needs from the response inside the run, so only a
+  // plain outcome crosses back and a dropped run applies nothing.
+  async function send(method: "DELETE" | "PATCH", okOn404: boolean, failed: string, signal: AbortSignal): Promise<Outcome> {
+    try {
+      const res = await timedFetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method, signal });
+      if (res.ok || (okOn404 && res.status === 404)) return { ok: true };
+      return { ok: false, message: rateLimitMessage(res, t) ?? failed };
+    } catch {
+      return { ok: false, message: failed };
+    }
+  }
+
   async function handleUnvote() {
-    if (loading) return;
+    if (action.busy("vote")) return;
     setPending("unvote");
     setOverride(false);
     setRefocusVoted(false);
-    try {
-      const res = await fetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "DELETE" });
-      // 404: the vote is already gone (another tab, or an admin dismissed it),
-      // which is what was asked. Rolling back to "Voted" left a control whose
-      // every retry 404'd again.
-      if (res.ok || res.status === 404) {
-        setRemovedHere(true);
-        toast({ title: t("personal.votes.removed"), variant: "success" });
-        router.refresh();
-      } else {
-        // Back to the PRE-CLICK state (voted), never the possibly stale prop.
-        setOverride(true);
-        setRefocusVoted(true);
-        toast({ title: rateLimitMessage(res, t) ?? t("personal.votes.removeFailed"), variant: "error" });
-      }
-    } catch {
+    // 404: the vote is already gone (another tab, or an admin dismissed it),
+    // which is what was asked. Rolling back to "Voted" left a control whose
+    // every retry 404'd again.
+    const out = await action.run("vote", (signal) => send("DELETE", true, t("personal.votes.removeFailed"), signal), { ifBusy: "skip" });
+    setPending(null);
+    if (!out) return;
+    if (out.ok) {
+      setRemovedHere(true);
+      toast({ title: t("personal.votes.removed"), variant: "success" });
+      router.refresh();
+    } else {
+      // Back to the PRE-CLICK state (voted), never the possibly stale prop.
       setOverride(true);
       setRefocusVoted(true);
-      toast({ title: t("personal.votes.removeFailed"), variant: "error" });
-    } finally {
-      setPending(null);
+      toast({ title: out.message, variant: "error" });
     }
   }
 
   async function handleDismiss() {
-    if (loading) return;
+    if (action.busy("vote")) return;
     setPending("dismiss");
-    try {
-      const res = await fetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "PATCH" });
-      if (res.ok) {
-        setDismissed(true);
-        toast({ title: t("personal.votes.dismissed"), variant: "success" });
-        router.refresh();
-      } else {
-        setConfirmingDismiss(false);
-        toast({ title: rateLimitMessage(res, t) ?? t("personal.votes.dismissFailed"), variant: "error" });
-      }
-    } catch {
+    const out = await action.run("vote", (signal) => send("PATCH", false, t("personal.votes.dismissFailed"), signal), { ifBusy: "skip" });
+    setPending(null);
+    if (!out) return;
+    if (out.ok) {
+      setDismissed(true);
+      toast({ title: t("personal.votes.dismissed"), variant: "success" });
+      router.refresh();
+    } else {
       setConfirmingDismiss(false);
-      toast({ title: t("personal.votes.dismissFailed"), variant: "error" });
-    } finally {
-      setPending(null);
+      toast({ title: out.message, variant: "error" });
     }
   }
 

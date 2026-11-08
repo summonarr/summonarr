@@ -241,6 +241,7 @@ let reqRows: ReqRow[] = [];
 // Makes ONLY the post-Sonarr tvdbId bookkeeping write fail (the CAS transitions
 // never carry tvdbId), so a test can prove that write is outside the rollback try.
 let failTvdbBookkeeping = false;
+let failDeclineNoticeRead = false;
 
 function matchReq(r: ReqRow, where: Record<string, unknown> | undefined): boolean {
   if (!where) return true;
@@ -278,6 +279,7 @@ shadowPrismaModel(prisma, "mediaRequest", {
   // select is missing here too.
   findMany: async (args: { where?: Record<string, unknown>; select?: Record<string, boolean> } = {}) => {
     rec("mediaRequest.findMany", args.where);
+    if (failDeclineNoticeRead && args.where?.status === "DECLINED") throw new Error("P2024 pool timeout");
     return reqRows
       .filter((r) => matchReq(r, args.where))
       .map((r) => (args.select ? Object.fromEntries(Object.entries(r).filter(([k]) => args.select![k] === true)) : { ...r }));
@@ -462,6 +464,7 @@ beforeEach(() => {
   sonarrSearch = null;
   radarrMovies = null;
   failTvdbBookkeeping = false;
+  failDeclineNoticeRead = false;
   agentRows.length = 0;
   invalidateAgentCache();
 });
@@ -782,6 +785,17 @@ test("batch decline: a DEACTIVATED owner's request produces NO outbound request.
     [["request.declined", "r-live", "not this year"]],
     "exactly one outbound event, for the ACTIVE owner's request",
   );
+});
+
+test("batch decline: a failed read of the decline notices leaves the committed decline a 200", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "r-1", requestedBy: owner.userId })];
+  failDeclineNoticeRead = true;
+
+  const res = await doBatch(token, { ids: ["r-1"], status: "DECLINED" });
+  assert.equal(res.status, 200);
+  assert.equal(reqRows[0].status, "DECLINED");
 });
 
 // The batch decline is the single decline's fan-out for many rows: the same

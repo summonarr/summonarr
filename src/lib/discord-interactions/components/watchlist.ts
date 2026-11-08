@@ -4,15 +4,16 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { addToWatchlist, takeWatchlistAddToken } from "@/lib/watchlist-add";
 import { sessionForUser } from "@/lib/auto-request";
 import { TMDB_POSTER_BASE, editOriginal, loadPending, requireLinkedSiteAccount, truncateText } from "../reply";
+import { PENDING_WATCHLIST_ADD } from "../pending-schemas";
 import { watchlistListPayload } from "../commands/watchlist";
-import type { ComponentContext, PendingWatchlistAdd } from "../types";
+import type { ComponentContext } from "../types";
 
 // `wladd:<interactionId>:<discordUserId>:<index>` — a /watchlist add result button.
 export async function handleWatchlistAdd(ctx: ComponentContext): Promise<void> {
   const { t, appId, token, customId, discordUserId } = ctx;
   const [, pendingInteractionId, ownerId, idxStr] = customId.split(":");
   if (discordUserId !== ownerId) return;
-  const pending = await loadPending<PendingWatchlistAdd>(`pw:${pendingInteractionId}:${discordUserId}`);
+  const pending = await loadPending(`pw:${pendingInteractionId}:${discordUserId}`, PENDING_WATCHLIST_ADD);
   if (!pending) {
     await editOriginal(appId, token, { content: t("notify.bot.watchlist.expired"), embeds: [], components: [] });
     return;

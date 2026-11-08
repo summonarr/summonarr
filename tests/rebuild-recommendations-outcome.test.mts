@@ -68,7 +68,7 @@ test("a malformed 2xx body never reads as a rebuilt shelf with garbage counts", 
 
 test("the button waits with no client timeout and keeps a fixed accessible name", () => {
   const src = readFileSync(new URL("../src/components/media/rebuild-recommendations-button.tsx", import.meta.url), "utf8");
-  assert.match(src, /timeoutMs: Infinity/);
+  assert.match(src, /timeoutMs: LONG_RUN_TIMEOUT_MS/);
   assert.match(src, /aria-label=\{t\("browse\.forYou\.rebuild\.label"\)\}/);
   assert.match(src, /if \(outcome\.refresh\) router\.refresh\(\);/);
 });

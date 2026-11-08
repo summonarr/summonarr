@@ -73,7 +73,7 @@ test("queue: the live fetch and the snapshot read name the same url, built in on
   const src = code(QUEUE_DATA);
   assert.equal(count(src, 'const queueUrl = () => withBasePath("/api/admin/queue");'), 1, "one builder");
   assert.equal(count(src, '"/api/admin/queue"'), 1, "the path appears only in the builder");
-  assert.match(loadBody(src), /await fetch\(queueUrl\(\)\)/, "the live load fetches the builder's url");
+  assert.match(loadBody(src), /await timedFetch\(queueUrl\(\)\)/, "the live load fetches the builder's url");
   assert.match(snapshotCall(src), /^useArrSnapshot<QueueReport>\(configured \? queueUrl\(\) : null,/, "the snapshot reads the builder's url, none while not configured");
   const page = code(QUEUE);
   assert.doesNotMatch(page, /"\/api\/admin\/queue"/, "the page never reads the queue itself");

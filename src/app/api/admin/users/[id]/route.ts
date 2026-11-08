@@ -4,7 +4,7 @@ import { withPermission, type SummonarrSession } from "@/lib/api-auth";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
 import { invalidateUserSession } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { prisma, type PrismaTxClient } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, presetExceeds, parseInstanceGrants, serializeInstanceGrants, parseMediaServerGrants, serializeMediaServerGrants, type InstanceAccess } from "@/lib/permissions";
 import { getArrInstances } from "@/lib/arr-instance-registry";
@@ -159,16 +159,26 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
 // the `{ id, <field> }` answer the native client and OpenAPI pin. Each handler
 // runs its own validation, subset and self/admin gates first.
 async function commitField(
-  { req, t, session, id }: EditContext,
-  write: () => Promise<unknown>,
+  { req, t, session, id, callerIsAdmin }: EditContext,
+  write: (db: Pick<PrismaTxClient, "user">) => Promise<unknown>,
   audit: { action: "SETTINGS_CHANGE" | "USER_PERMISSIONS_CHANGE"; details: Record<string, unknown> },
   response: Record<string, unknown>,
   { invalidate = true }: { invalidate?: boolean } = {},
 ): Promise<NextResponse> {
   try {
-    await write();
+    if (callerIsAdmin) {
+      await write(prisma);
+    } else {
+      // A delegate's write re-reads the target under lock 42 first: a promotion
+      // to ADMIN that landed after the route's unlocked read must not be edited.
+      await prisma.$transaction(async (tx) => {
+        if (!(await lockTargetInTx(tx, id, false))) throw new TargetGoneError();
+        await write(tx);
+      });
+    }
   } catch (err) {
-    if (isPrismaErrorCode(err, "P2025")) return notFound(t);
+    if (err instanceof TargetBecameAdminError) return json({ error: t("apiAdmin.users.onlyAdminModify") }, 403);
+    if (err instanceof TargetGoneError || isPrismaErrorCode(err, "P2025")) return notFound(t);
     throw err;
   }
   void logAudit({
@@ -196,7 +206,7 @@ async function editMediaServer(ctx: EditContext, ms: string | null | undefined):
   if (!prev) return notFound(t);
   return commitField(
     ctx,
-    () => prisma.user.update({ where: { id }, data: { mediaServer: ms } }),
+    (db) => db.user.update({ where: { id }, data: { mediaServer: ms } }),
     { action: "SETTINGS_CHANGE", details: { field: "mediaServer", before: prev.mediaServer, after: ms } },
     { mediaServer: ms },
   );
@@ -213,7 +223,7 @@ async function editContentCap(ctx: EditContext, raw: string | null | undefined):
   if (!prev) return notFound(t);
   return commitField(
     ctx,
-    () => prisma.user.update({ where: { id }, data: { maxContentRating: mcr } }),
+    (db) => db.user.update({ where: { id }, data: { maxContentRating: mcr } }),
     { action: "SETTINGS_CHANGE", details: { field: "maxContentRating", before: prev.maxContentRating, after: mcr } },
     { maxContentRating: mcr },
   );
@@ -273,7 +283,7 @@ async function editPermissions(ctx: EditContext, raw: string | undefined): Promi
 
   return commitField(
     ctx,
-    () => prisma.user.update({ where: { id }, data: { permissions: parsed } }),
+    (db) => db.user.update({ where: { id }, data: { permissions: parsed } }),
     { action: "USER_PERMISSIONS_CHANGE", details: { ...targetDetails(id, targetUser.name), before: targetUser.permissions.toString(), after: parsed.toString() } },
     { permissions: parsed.toString() },
   );
@@ -302,7 +312,7 @@ async function editInstanceGrants(ctx: EditContext, raw: unknown): Promise<NextR
   if (!prev) return notFound(t);
   return commitField(
     ctx,
-    () => prisma.user.update({ where: { id }, data: { instanceGrants: grants } }),
+    (db) => db.user.update({ where: { id }, data: { instanceGrants: grants } }),
     // `before` too, so the trail shows which grants a change removed.
     { action: "USER_PERMISSIONS_CHANGE", details: { field: "instanceGrants", ...targetDetails(id, prev.name), before: prev.instanceGrants, after: grants } },
     { instanceGrants: grants },
@@ -343,7 +353,7 @@ async function editMediaServerGrants(ctx: EditContext, raw: unknown): Promise<Ne
   if (!prev) return notFound(t);
   return commitField(
     ctx,
-    () => prisma.user.update({ where: { id }, data: { mediaServerGrants: grants } }),
+    (db) => db.user.update({ where: { id }, data: { mediaServerGrants: grants } }),
     { action: "USER_PERMISSIONS_CHANGE", details: { field: "mediaServerGrants", ...targetDetails(id, prev.name), before: prev.mediaServerGrants, after: grants } },
     { mediaServerGrants: grants },
   );
@@ -371,7 +381,7 @@ async function editQuota(ctx: EditContext, quotaField: UserQuotaField, val: unkn
   if (!prev) return notFound(t);
   return commitField(
     ctx,
-    () => prisma.user.update({ where: { id }, data: { [quotaField]: nextVal } }),
+    (db) => db.user.update({ where: { id }, data: { [quotaField]: nextVal } }),
     { action: "SETTINGS_CHANGE", details: { field: quotaField, before: prev[quotaField] ?? null, after: nextVal } },
     { [quotaField]: nextVal },
   );
@@ -387,7 +397,7 @@ async function editNotif(ctx: EditContext, notifKey: UserNotifKey, value: unknow
   // Notification preferences don't ride the session token: no re-sign.
   return commitField(
     ctx,
-    () => prisma.user.update({ where: { id }, data: { [notifKey]: value } }),
+    (db) => db.user.update({ where: { id }, data: { [notifKey]: value } }),
     { action: "SETTINGS_CHANGE", details: { field: notifKey, before: prev[notifKey], after: value } },
     { [notifKey]: value },
     { invalidate: false },

@@ -53,7 +53,11 @@ export async function POST(req: NextRequest) {
 
   let interaction: DiscordInteraction;
   try {
-    interaction = JSON.parse(body) as DiscordInteraction;
+    const parsed: unknown = JSON.parse(body);
+    // The handlers read `type` and nested fields off the body: anything but an
+    // object is not an interaction.
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new SyntaxError("not an object");
+    interaction = parsed as DiscordInteraction;
   } catch {
     console.warn("[interactions] Malformed JSON body after signature verification");
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });

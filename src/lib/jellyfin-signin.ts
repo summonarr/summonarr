@@ -41,7 +41,7 @@ export async function authenticateWithJellyfin(
 
   if (!res.ok) {
     console.error(`[jellyfin auth] ${res.status} from ${url}/Users/AuthenticateByName`);
-    throw new Error(`Jellyfin auth failed: ${res.status}`);
+    throw Object.assign(new Error(`Jellyfin auth failed: ${res.status}`), { status: res.status });
   }
   return readSignedInUser(res, "Jellyfin auth response missing User.Id or User.Name");
 }

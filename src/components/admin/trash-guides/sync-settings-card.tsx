@@ -13,7 +13,7 @@ import {
   type TrashSettings,
 } from "./types";
 import { withBasePath } from "@/lib/base-path";
-import { fetchJson } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS } from "@/lib/client/fetch-json";
 import { useSettingsSave } from "@/components/settings/forms/shared";
 import { RefreshErrorBanner } from "./banners";
 import { ApplyLog } from "./apply-log";
@@ -79,7 +79,7 @@ export function SyncSettingsCard({ initialSettings, lastRefreshAt = null, onAfte
     // The run refreshes the catalog and re-applies every managed spec on
     // every instance: no client timeout, or a slow success reads as a failure.
     const res = await sync.request((signal) =>
-      fetchJson(withBasePath(`/api/cron/trash-sync`), { init: { method: "POST" }, timeoutMs: Infinity, signal }),
+      fetchJson(withBasePath(`/api/cron/trash-sync`), { init: { method: "POST" }, timeoutMs: LONG_RUN_TIMEOUT_MS, signal }),
     );
     if (!res) return;
     const answer = answerOf(res);

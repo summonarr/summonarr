@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
-import { fetchJson } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS } from "@/lib/client/fetch-json";
 import { useT } from "@/components/i18n/i18n-provider";
 import { rebuildOutcome, type RebuildOutcome } from "./rebuild-recommendations-outcome";
 
@@ -59,7 +59,7 @@ export function RebuildRecommendationsButton() {
     // giving up early would read as a failure while the job finishes anyway.
     const res = await fetchJson(withBasePath("/api/cron/warm-recommendations"), {
       init: { method: "POST" },
-      timeoutMs: Infinity,
+      timeoutMs: LONG_RUN_TIMEOUT_MS,
     });
     const outcome = rebuildOutcome(res, t);
     setMessage({ text: outcome.text, type: outcome.type, detail: outcome.detail });

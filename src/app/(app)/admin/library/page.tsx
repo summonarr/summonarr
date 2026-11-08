@@ -637,6 +637,9 @@ export default async function LibraryDiffPage({
         ? (matchKey ? (tvArrByName.get(matchKey) ?? null) : null)
         : (item.filePath ? (movieArrByName.get(folderOf(item.filePath).split("/").pop() ?? "") ?? null) : null);
       const inArr = arrTmdbIdsFor(item).has(item.tmdbId);
+      // An instance that could not be read leaves its titles out of the index, so
+      // "not in Radarr/Sonarr" is only a verdict when the whole index was read.
+      const arrUnknown = !inArr && (item.mediaType === "MOVIE" ? movieArrIndex : tvArrIndex).incomplete;
 
       const arrFallbackPath = (!mediaRelPath && item.mediaType === "TV")
         ? (tvArrPathByTmdbId.get(item.tmdbId) ?? null)
@@ -662,6 +665,7 @@ export default async function LibraryDiffPage({
         arrTmdbId,
         arrMismatch:    arrTmdbId !== null && arrTmdbId !== item.tmdbId,
         inArr,
+        arrUnknown,
         requests:       item.requests,
       };
     });

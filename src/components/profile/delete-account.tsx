@@ -8,6 +8,8 @@ import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 import { useSecondFactorStepUp, type KnownSecondFactor } from "./use-second-factor-step-up";
 import { SecondFactorCodeField } from "./second-factor-code-field";
+import { timedFetch } from "@/lib/client/fetch-json";
+import { useAsyncAction } from "@/hooks/use-async-action";
 
 // Self-service "close account" (required by App Store Guideline 5.1.1(v)).
 // It calls DELETE /api/profile, which DISABLES the account: every session is
@@ -28,6 +30,7 @@ export function DeleteAccount({
   secondFactor?: KnownSecondFactor;
 }) {
   const t = useT();
+  const action = useAsyncAction();
   const [confirming, setConfirming] = useState(false);
   const [confirmText, setConfirmText] = useState("");
   const [password, setPassword] = useState("");
@@ -46,43 +49,50 @@ export function DeleteAccount({
   const confirmed = confirmText.trim().toUpperCase() === confirmWord.trim().toUpperCase();
 
   async function handleDelete() {
+    if (action.busy("delete")) return;
     setError(null);
     setDeleting(true);
-    // The success path leaves the page; every other exit re-enables the button.
-    let navigating = false;
-    try {
-      const body: Record<string, unknown> = { password };
-      if (stepUp.needsSecondFactor) {
-        const r = await stepUp.secondFactorProof();
-        if (!("proof" in r)) {
-          if (r.error) setError(r.error);
-          return;
+    type Outcome = { kind: "error"; message: string } | { kind: "stopped" } | { kind: "deleted" };
+    const out = await action.run(
+      "delete",
+      async (signal): Promise<Outcome> => {
+        try {
+          const body: Record<string, unknown> = { password };
+          if (stepUp.needsSecondFactor) {
+            const r = await stepUp.secondFactorProof();
+            if (!("proof" in r)) return r.error ? { kind: "error", message: r.error } : { kind: "stopped" };
+            body.secondFactor = r.proof;
+          }
+          const res = await timedFetch(withBasePath("/api/profile"), {
+            method: "DELETE",
+            signal,
+            ...(requiresPassword
+              ? {
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(body),
+                }
+              : {}),
+          });
+          if (!res.ok) {
+            // A passwordless web session whose sign-in is too old answers 401
+            // { error: "session-too-old", message }: the sentence is what shows.
+            const data: unknown = await res.json().catch(() => null);
+            return { kind: "error", message: stepUp.refusalMessage(res, data, !!body.secondFactor, t("profile.close.error.failed")) };
+          }
+          return { kind: "deleted" };
+        } catch {
+          return { kind: "error", message: t("profile.close.error.retry") };
         }
-        body.secondFactor = r.proof;
-      }
-      const res = await fetch(withBasePath("/api/profile"), {
-        method: "DELETE",
-        ...(requiresPassword
-          ? {
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(body),
-            }
-          : {}),
-      });
-      if (!res.ok) {
-        // A passwordless web session whose sign-in is too old answers 401
-        // { error: "session-too-old", message }: the sentence is what shows.
-        const data: unknown = await res.json().catch(() => null);
-        setError(stepUp.refusalMessage(res, data, !!body.secondFactor, t("profile.close.error.failed")));
-        return;
-      }
-      navigating = true;
+      },
+      { ifBusy: "skip" },
+    );
+    // The success path leaves the page; every other exit re-enables the button.
+    if (out?.kind === "deleted") {
       window.location.href = withBasePath("/login");
-    } catch {
-      setError(t("profile.close.error.retry"));
-    } finally {
-      if (!navigating) setDeleting(false);
+      return;
     }
+    setDeleting(false);
+    if (out?.kind === "error") setError(out.message);
   }
 
   if (!confirming) {

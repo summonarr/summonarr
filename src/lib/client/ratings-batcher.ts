@@ -2,6 +2,7 @@
 import { withBasePath } from "@/lib/base-path";
 import { retryAfterDeltaSeconds } from "@/lib/client/rate-limit";
 import { RATINGS_BATCH_MAX_ITEMS } from "@/lib/api-body-limits";
+import { timedFetch } from "@/lib/client/fetch-json";
 
 export interface RatingsPayload {
   imdbId: string | null;
@@ -89,14 +90,14 @@ async function postBatchOnce(items: QueueEntry[]): Promise<BatchAttempt> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), BATCH_TIMEOUT_MS);
   try {
-    const res = await fetch(withBasePath("/api/ratings/batch"), {
+    const res = await timedFetch(withBasePath("/api/ratings/batch"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         items: items.map((e) => ({ id: e.id, type: e.type, releaseDate: e.releaseDate })),
       }),
       signal: controller.signal,
-    });
+    }, BATCH_TIMEOUT_MS);
     if (res.status === 429) {
       const seconds = retryAfterDeltaSeconds(res.headers?.get("Retry-After"));
       if (seconds === null) return { kind: "retry", delayMs: retryDelayMs };

@@ -398,6 +398,7 @@
   "apiAdmin.arr.providerRssUnsupported": "O {service} informa que este indexador não suporta RSS, por isso o RSS não foi ativado",
   "apiAdmin.arr.providerSearchUnsupported": "O {service} informa que este indexador não suporta buscas, por isso a busca não foi ativada",
   "apiAdmin.arr.providerChangedMeanwhile": "As configurações dele no {service} mudaram enquanto era testado, por isso não foi ativado — recarregue e tente novamente",
+  "apiAdmin.arr.blocklistCountChanged": "A lista de bloqueio tem agora {count} entradas, não o número que você confirmou, então nada foi limpo. Recarregue a lista e confirme novamente.",
   "apiAdmin.neverWatched.refreshJobGone": "Essa verificação dos registros de visualização não está mais sendo acompanhada — o Summonarr pode ter sido reiniciado. Recarregue para ver os resultados mais recentes.",
   "apiAdmin.arr.filesJobGone": "Essa exclusão não está mais disponível — recarregue os arquivos para ver o que foi excluído e não a execute de novo às cegas.",
   "apiAdmin.arr.markInProgress": "Este download ainda está sendo marcado como falha — tente de novo em um minuto",

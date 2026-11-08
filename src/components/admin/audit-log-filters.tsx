@@ -13,7 +13,7 @@ import { useHasMounted } from "@/hooks/use-has-mounted";
 import { ACTION_COLORS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
 import type { AuditAction } from "@/generated/prisma";
 import { withBasePath } from "@/lib/base-path";
-import { fetchJson } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS } from "@/lib/client/fetch-json";
 import { v } from "@/lib/validate";
 import { useT } from "@/components/i18n/i18n-provider";
 import type { AuditViewMode } from "@/lib/audit-log-view";
@@ -460,7 +460,7 @@ function ScrubPiiButton({ onScrubbed }: { onScrubbed: () => void }) {
       init: { method: "DELETE" },
       schema: ScrubAnswer,
       // It rewrites every row past the retention window, in batches: no client deadline.
-      timeoutMs: Infinity,
+      timeoutMs: LONG_RUN_TIMEOUT_MS,
       fallbackError: t("adminManage.audit.scrubFailed"),
     });
     if (res.ok) {

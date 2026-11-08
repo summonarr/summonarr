@@ -398,6 +398,7 @@
   "apiAdmin.arr.providerRssUnsupported": "{service} indica che questo indexer non supporta l'RSS, quindi l'RSS non è stato attivato",
   "apiAdmin.arr.providerSearchUnsupported": "{service} indica che questo indexer non supporta la ricerca, quindi la ricerca non è stata attivata",
   "apiAdmin.arr.providerChangedMeanwhile": "Le sue impostazioni in {service} sono cambiate durante il test, quindi non è stato attivato — ricarica e riprova",
+  "apiAdmin.arr.blocklistCountChanged": "La lista di blocco ora ha {count} voci, non il numero che hai confermato, quindi non è stato svuotato nulla. Ricarica la lista e conferma di nuovo.",
   "apiAdmin.neverWatched.refreshJobGone": "Quella verifica della cronologia visioni non viene più seguita — Summonarr potrebbe essere stato riavviato. Ricarica per vedere i risultati più recenti.",
   "apiAdmin.arr.filesJobGone": "Questa eliminazione non è più disponibile: ricarica i file per vedere cosa è stato eliminato e non rieseguirla alla cieca.",
   "apiAdmin.arr.markInProgress": "Questo download è ancora in fase di segnalazione come non riuscito — riprova tra un minuto",

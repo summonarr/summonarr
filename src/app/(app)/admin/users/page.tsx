@@ -319,6 +319,15 @@ export default async function UsersPage({ searchParams }: { searchParams: Promis
             {t("adminManage.serverUsers.capped", { cap: SERVER_USER_LIST_CAP, total: serverUserCount })}
           </p>
         )}
+        {canLinkServerUsers && linkTargets.length >= LINK_TARGET_CAP && (
+          <p
+            role="status"
+            className="ds-mono"
+            style={{ fontSize: 11, color: "var(--ds-fg-subtle)", marginBottom: 10 }}
+          >
+            {t("adminManage.users.linkTargetsCapped", { cap: LINK_TARGET_CAP })}
+          </p>
+        )}
         <ServerUserTable
           users={serverUsers.map((u) => (u.user ? { ...u, user: { ...u.user, name: displayName(u.user.name) } } : u))}
           hasJellyfin={hasJellyfin}

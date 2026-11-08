@@ -63,7 +63,8 @@ test("HideButton and WatchlistButton roll a failed toggle back to the PRE-CLICK 
   // rolling back to it (setOverride(null)) showed the wrong state.
   const watchlist = src("src/components/media/watchlist-button.tsx");
   assert.doesNotMatch(watchlist, /setOverride\(null\);?\s*\/\/ rollback/);
-  assert.equal((watchlist.match(/setOverride\(!next\)/g) ?? []).length, 2, "both the HTTP-error and network-error paths roll back to !next");
+  assert.equal((watchlist.match(/setOverride\(!next\)/g) ?? []).length, 1, "the one failed branch rolls back to !next");
+  assert.match(watchlist, /return \{ kind: "failed", message: t\("request\.networkError"\) \};/, "a network error folds into that same failed branch");
   // HideButton reads every failure (a refusal, a timeout, no answer) as one
   // result (hidden-items.ts), so its single failure branch is the rollback.
   const hide = src("src/components/media/hide-button.tsx");
@@ -94,9 +95,11 @@ test("VoteActions resyncs `voted` from the live prop and rolls a failed unvote b
   assert.match(body, /if \(userVoted !== seenUserVoted && !loading\) \{\s*setSeenUserVoted\(userVoted\);\s*setOverride\(null\);/);
   assert.doesNotMatch(body, /useState\(userVoted\);\s*const \[dismissed/, "voted must not be a one-time copy of the prop");
   const rollbacks = body.match(/setOverride\(true\)/g) ?? [];
-  assert.equal(rollbacks.length, 2, "both the HTTP-error and network-error paths roll back to the pre-click state");
+  assert.equal(rollbacks.length, 1, "the one failed branch rolls back to the pre-click state");
   // A 404 means the vote is already gone: success, never a rollback to Voted.
-  assert.match(body, /if \(res\.ok \|\| res\.status === 404\) \{\s*setRemovedHere\(true\);/);
+  assert.match(body, /if \(res\.ok \|\| \(okOn404 && res\.status === 404\)\) return \{ ok: true \};/);
+  assert.match(body, /send\("DELETE", true,/, "unvote tolerates a 404");
+  assert.match(body, /if \(out\.ok\) \{\s*setRemovedHere\(true\);/);
 });
 
 test("VoteActions keeps focus on the row: a status note after an unvote, Escape and Cancel back to Dismiss", () => {
@@ -111,11 +114,13 @@ test("VoteActions keeps focus on the row: a status note after an unvote, Escape 
 test("VoteDeleteButton: unvote shows the rate-limit hint, a vote clears its reason, and focus survives the state change", () => {
   const body = src("src/components/votes/vote-delete-button.tsx");
   assert.match(body, /rateLimitMessage\(res, t\) \?\? t\("request\.vote\.removeFailed"\)/);
+  assert.match(body, /ifBusy: "skip"/, "a second submit while one runs does nothing");
   // A refused vote shows the route's own reason (your own request, a stale
   // page token…), and a 404 on unvote means the vote is already gone.
   assert.match(body, /rateLimitMessage\(res, t\) \?\? \(await readApiError\(res, t\("request\.vote\.recordFailed"\)\)\)/);
-  assert.match(body, /if \(res\.ok \|\| res\.status === 404\) \{\s*setState\("idle"\);/);
-  assert.match(body, /setState\("voted"\);\s*setReason\(""\);\s*router\.refresh\(\)/, "a recorded vote clears the reason");
+  assert.match(body, /if \(res\.ok \|\| res\.status === 404\) return \{ ok: true \};/);
+  assert.match(body, /if \(out\.ok\) \{\s*setState\("idle"\);/);
+  assert.match(body, /if \(out\.ok\) \{\s*setState\("voted"\);\s*setReason\(""\);\s*router\.refresh\(\)/, "a recorded vote clears the reason");
   assert.match(body, /if \(e\.key === "Escape"\) closeReason\(\)/);
   // The loading button is the SAME <button> as idle/voted: `disabled` dropped
   // its focus to <body> on every vote and unvote.

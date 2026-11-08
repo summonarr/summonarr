@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { logAuditOrFail, auditContext } from "@/lib/audit";
+import { logAuditTx, auditContext } from "@/lib/audit";
 import { sanitizeText } from "@/lib/sanitize";
 import { prisma } from "@/lib/prisma";
 import { maintenanceGuard } from "@/lib/maintenance";
@@ -74,28 +74,32 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
 
   // One report per reporter per item: a repeat adds nothing for the admin to
-  // review, so it answers ok without a second row.
+  // review, so it answers ok without a second row. The check and the write run
+  // under a per-reporter lock (two-key form, 4640 + hashtext(reporter)), so two
+  // concurrent submits of one item cannot both pass the check.
   const target = `${contentType}:${contentId}`;
-  const already = await prisma.auditLog.findFirst({
-    where: { action: "CONTENT_REPORT", target, userId: session.user.id },
-    select: { id: true },
-  });
-  if (already) return NextResponse.json({ ok: true });
-
   const context = typeof body.context === "string" ? sanitizeText(body.context).slice(0, 200) : undefined;
   const reason = typeof body.reason === "string" ? sanitizeText(body.reason).slice(0, MAX_REASON) : undefined;
 
-  // The audit write IS the operation here (there is no prior mutation), so
-  // logAuditOrFail is correct — a failed write must surface as an error, not a
-  // false "reported" (guardrail 26 only bars logAuditOrFail *after* a committed
-  // mutation, which this is not).
-  await logAuditOrFail({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email,
-    action: "CONTENT_REPORT",
-    target,
-    details: { contentType, contentId, context, reason },
-    ...auditContext(req, session),
+  // The audit write IS the operation here (there is no prior mutation), so a
+  // failed write must surface as an error, not a false "reported" — it rolls
+  // the transaction back and propagates (guardrail 26 bars a swallowed audit
+  // only AFTER a committed mutation, which this is not).
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(4640, hashtext(${session.user.id}))`;
+    const already = await tx.auditLog.findFirst({
+      where: { action: "CONTENT_REPORT", target, userId: session.user.id },
+      select: { id: true },
+    });
+    if (already) return;
+    await logAuditTx(tx, {
+      userId: session.user.id,
+      userName: session.user.name ?? session.user.email,
+      action: "CONTENT_REPORT",
+      target,
+      details: { contentType, contentId, context, reason },
+      ...auditContext(req, session),
+    });
   });
 
   return NextResponse.json({ ok: true });

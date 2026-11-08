@@ -13,6 +13,7 @@ import { apiErrorText } from "@/lib/client/api-error";
 import { useFocusReturn } from "@/hooks/use-focus-return";
 import { useT } from "@/components/i18n/i18n-provider";
 import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
+import { timedFetch } from "@/lib/client/fetch-json";
 
 export function ApiKeySettingForm({
   initialApiKey,
@@ -122,7 +123,7 @@ export function ApiKeySettingForm({
     let ok = false;
     let text: string;
     try {
-      const res = await fetch(withBasePath("/api/settings/test-ratings"), {
+      const res = await timedFetch(withBasePath("/api/settings/test-ratings"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ service: testService }),

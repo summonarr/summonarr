@@ -27,8 +27,8 @@ const {
   stripTargetPii, scrubTargetPiiFromAudit, scrubLegacySessionRevokePii, scrubRequesterPii, requesterAuditDetails, AUDIT_TARGET_PII_KEYS,
 } = await import("../src/lib/audit-scrub.ts");
 
-test("stripTargetPii removes exactly targetUser, targetEmail and requestedBy", () => {
-  assert.deepEqual([...AUDIT_TARGET_PII_KEYS], ["targetUser", "targetEmail", "requestedBy"]);
+test("stripTargetPii removes exactly the identity keys", () => {
+  assert.deepEqual([...AUDIT_TARGET_PII_KEYS], ["targetUser", "targetEmail", "requestedBy", "accountName", "serverUser", "traktUser"]);
   const out = stripTargetPii(JSON.stringify({ targetUser: "Alice", targetEmail: "a@example.com", role: "USER", nested: { targetUser: "kept" } }));
   assert.deepEqual(JSON.parse(out!), { role: "USER", nested: { targetUser: "kept" } }, "top-level keys only — nested values are not target identities");
   assert.deepEqual(JSON.parse(stripTargetPii(JSON.stringify({ targetEmail: "a@example.com" }))!), {});
@@ -325,4 +325,22 @@ test("scrubRequesterPii: the exact match decides, even if an id held a LIKE wild
   assert.equal(await scrubRequesterPii(db, "u_1", email), 1);
   assert.deepEqual(JSON.parse(rows[0].details!), { title: "T", requesterId: "u_1" });
   assert.deepEqual(JSON.parse(rows[1].details!), { title: "T", requesterId: "uX1", requestedBy: email }, "uX1 is another account");
+});
+
+test("the retention scrub strips third-party account names from session-terminate, server-user link and Trakt rows — the purge reaches the user: row", async () => {
+  const aged = new Date("2026-01-01T00:00:00.000Z");
+  const cutoff = new Date("2026-07-01T00:00:00.000Z");
+  const rows: Row[] = [
+    { id: "a", target: "sess1", action: "PLEX_SESSION_TERMINATE", createdAt: aged, details: JSON.stringify({ mediaTitle: "T", accountName: "viewer", plexStatus: 200 }) },
+    { id: "b", target: "mediaServerUser:m1", action: "SERVER_USER_LINK", createdAt: aged, details: JSON.stringify({ serverUser: "bob", source: "jellyfin", mode: "manual-link" }) },
+    { id: "c", target: "user:u1", action: "SETTINGS_CHANGE", createdAt: aged, details: JSON.stringify({ kind: "trakt-connect", traktUser: "bobtrakt" }) },
+  ];
+  assert.equal(await scrubTargetPiiFromAudit(fakeDb(rows).db, { createdAt: { lt: cutoff } }), 3);
+  assert.deepEqual(JSON.parse(rows[0].details!), { mediaTitle: "T", plexStatus: 200 });
+  assert.deepEqual(JSON.parse(rows[1].details!), { source: "jellyfin", mode: "manual-link" });
+  assert.deepEqual(JSON.parse(rows[2].details!), { kind: "trakt-connect" });
+
+  const again: Row[] = [{ id: "d", target: "user:u1", action: "SETTINGS_CHANGE", details: JSON.stringify({ kind: "trakt-connect", traktUser: "bobtrakt" }) }];
+  assert.equal(await scrubTargetPiiFromAudit(fakeDb(again).db, { target: "user:u1" }), 1, "the purge's user: scrub covers it");
+  assert.deepEqual(JSON.parse(again[0].details!), { kind: "trakt-connect" });
 });

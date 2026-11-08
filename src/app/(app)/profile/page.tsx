@@ -82,7 +82,7 @@ export default async function ProfilePage() {
     prisma.authSession.findMany({
       where: { userId: session.user.id, expiresAt: { gt: new Date() } },
       orderBy: { lastSeenAt: "desc" },
-      take: AUTH_SESSIONS_SHOWN,
+      take: AUTH_SESSIONS_SHOWN + 1,
       select: {
         id: true, sessionId: true, deviceType: true, deviceLabel: true,
         ipAddress: true, createdAt: true, lastSeenAt: true, expiresAt: true,
@@ -233,8 +233,13 @@ export default async function ProfilePage() {
             title={t("profile.sessions.title")}
             description={t("profile.sessions.description")}
           >
+            {authSessions.length > AUTH_SESSIONS_SHOWN && (
+              <p role="status" className="mb-3 text-xs" style={{ color: "var(--ds-fg-subtle)" }}>
+                {t("profile.sessions.capped", { cap: AUTH_SESSIONS_SHOWN })}
+              </p>
+            )}
             <AuthSessions
-              sessions={authSessions.map((s) => ({
+              sessions={authSessions.slice(0, AUTH_SESSIONS_SHOWN).map((s) => ({
                 ...s,
                 isCurrent: s.sessionId === currentSessionId,
               }))}

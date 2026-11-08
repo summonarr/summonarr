@@ -335,10 +335,16 @@ export async function GET(request: NextRequest) {
 
   // JSON: one bare array (scripts parse it), at most MAX_EXPORT_ROWS, in the
   // CSV's order.
-  const rows = await fetchExportPage(where, null, MAX_EXPORT_ROWS);
+  // One row past the cap tells a cut from an exact fit; the array stays bare, so
+  // the signal rides a response header.
+  const fetched = await fetchExportPage(where, null, MAX_EXPORT_ROWS + 1);
+  const truncated = fetched.length > MAX_EXPORT_ROWS;
+  const rows = truncated ? fetched.slice(0, MAX_EXPORT_ROWS) : fetched;
   return new NextResponse(JSON.stringify(rows.map(exportJsonRow), null, 2), {
     headers: {
       "Content-Type": "application/json",
+      "X-Export-Truncated": truncated ? "true" : "false",
+      "X-Export-Max-Rows": String(MAX_EXPORT_ROWS),
       "Content-Disposition": `attachment; filename="${filename}.json"`,
     },
   });

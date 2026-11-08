@@ -18,7 +18,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
-import { fetchJson } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS } from "@/lib/client/fetch-json";
 import { check } from "@/lib/validate";
 import { MISSING_REPORT, type CheckedMissingReport } from "@/components/admin/missing-report-shape";
 import type { CutoffMovie, CutoffSeries, MissingMovie, MissingSeries } from "@/lib/arr-missing";
@@ -101,7 +101,7 @@ export function useMissingReports({
     // timeout. A 200 that isn't a report is the load's failure, never a list.
     const res = await fetchJson(missingListUrl(svc, m), {
       schema: MISSING_REPORT,
-      timeoutMs: Infinity,
+      timeoutMs: LONG_RUN_TIMEOUT_MS,
       fallbackError: t("adminManage.missing.error.load"),
     });
     if (superseded()) return;

@@ -8,6 +8,8 @@ export const QUEUE_REMOVE_MAX_IDS = 5_000;
 export const QUEUE_GRAB_MAX_IDS = 500;
 /** POST /api/admin/queue/import (+ /preview): files per manual import. */
 export const QUEUE_IMPORT_MAX_FILES = 2_000;
+/** GET /api/requests/[id]/comments and GET /api/issues/[id]/messages: the newest messages a thread read returns (older ones drop off; `X-Truncated`). */
+export const THREAD_READ_CAP = 500;
 /** POST /api/ratings/batch: titles per call. */
 export const RATINGS_BATCH_MAX_ITEMS = 200;
 /** POST /api/issues/[id]/files: file ids per delete. */

@@ -4,7 +4,7 @@
 // when the handler answers through tooManyRequests), and nullable enums that
 // list null among their values (OpenAPI 3.0 checks `enum` before `nullable`).
 
-import { getSpec, handlerCalls, numericValue, type SchemaNode } from "./_openapi-spec.mts";
+import { getSpec, handlerCalls, handlerStatusLiterals, handlerStatuses, numericValue, type SchemaNode } from "./_openapi-spec.mts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -100,4 +100,55 @@ test("a nullable enum lists null among its values, or a strict client refuses th
   }
   assert.deepEqual(bad, []);
   assert.ok(nullableEnums >= 25, `only ${nullableEnums} nullable enums found`);
+});
+
+// A status the route file names as `{ status: N }` but the document lists on the
+// operation that DELIVERS it: the watch sync run answers 202 and the job's own
+// 409 arrives on the poll (GET), where it is documented.
+const STATUS_DELIVERED_ELSEWHERE = new Set(["POST /admin/watch-sync/run 409"]);
+
+test("every status a handler names as a literal is a documented response of that operation", () => {
+  const missing: string[] = [];
+  let scanned = 0;
+  for (const { path, method, op, key } of operations) {
+    const literals = handlerStatusLiterals(path, method);
+    if (literals.length > 0) scanned++;
+    for (const status of literals) {
+      if (String(status) in op.responses) continue;
+      if (STATUS_DELIVERED_ELSEWHERE.has(`${key} ${status}`)) continue;
+      missing.push(`${key} answers ${status}`);
+    }
+  }
+  assert.deepEqual(missing, [], "statuses the handler sets that the document does not list");
+  assert.ok(scanned >= 150, `only ${scanned} operations name a status literal — is the handler scan still working?`);
+  for (const entry of STATUS_DELIVERED_ELSEWHERE) {
+    const [method, path, status] = entry.split(" ");
+    assert.ok(handlerStatusLiterals(path, method).includes(Number(status)), `stale exception: ${entry}`);
+  }
+});
+
+// Statuses a handler can get from a common helper that the document does not
+// list on purpose: "METHOD /path status" → why.
+const HELPER_STATUS_GAPS: Readonly<Record<string, string>> = {};
+
+test("every status a common helper answers on a handler's behalf is a documented response of that operation", () => {
+  const missing: string[] = [];
+  const used = new Set<string>();
+  let followed = 0;
+  for (const { path, method, op, key } of operations) {
+    for (const { status, via } of handlerStatuses(path, method)) {
+      if (via === "a literal") continue;
+      followed++;
+      if (String(status) in op.responses) continue;
+      const gap = `${key} ${status}`;
+      if (gap in HELPER_STATUS_GAPS) {
+        used.add(gap);
+        continue;
+      }
+      missing.push(`${gap} (via ${via})`);
+    }
+  }
+  assert.deepEqual(missing, [], "statuses a helper sets that the document does not list");
+  assert.ok(followed >= 200, `only ${followed} helper statuses followed — is the helper scan still working?`);
+  for (const gap of Object.keys(HELPER_STATUS_GAPS)) assert.ok(used.has(gap), `stale gap: ${gap}`);
 });

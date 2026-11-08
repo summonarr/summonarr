@@ -6,6 +6,7 @@ import { sessionForUser } from "@/lib/auto-request";
 import { maintenanceGuard } from "@/lib/maintenance";
 import type { Translator } from "@/lib/i18n/translate";
 import { TMDB_POSTER_BASE, editOriginal, loadPending, requireLinkedSiteAccount, savePending } from "../reply";
+import { PENDING_ISSUE } from "../pending-schemas";
 import type { ComponentContext, PendingIssue, TmdbResult } from "../types";
 
 type IssueScope = "FULL" | "SEASON" | "EPISODE";
@@ -46,7 +47,7 @@ export async function handleIssuePick(ctx: ComponentContext): Promise<void> {
   const [, pendingInteractionId, ownerId, idxStr] = customId.split(":");
   if (discordUserId !== ownerId) return;
   const key = `pi:${pendingInteractionId}:${discordUserId}`;
-  const pending = await loadPending<PendingIssue>(key);
+  const pending = await loadPending(key, PENDING_ISSUE);
   if (!pending) return reply(t("notify.bot.issue.expired"));
   const selected = pending.results[parseInt(idxStr, 10)];
   if (!selected) return reply(t("notify.bot.pick.invalid"));

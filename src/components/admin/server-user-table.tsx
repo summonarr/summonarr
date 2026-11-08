@@ -98,7 +98,6 @@ async function sendWrite<S extends Schema<unknown>>(
   const res = await fetchJson(withBasePath(url), {
     init: init.body === undefined ? { method: init.method } : jsonInit(init.method, init.body),
     schema: v.nullable(schema),
-    timeoutMs: Infinity,
   });
   // Checked against v.nullable(schema) above; TypeScript can't see through the generic.
   if (res.ok) return { ok: true, data: res.data as Infer<S> | null };

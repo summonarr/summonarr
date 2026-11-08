@@ -25,7 +25,7 @@ import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { SonarrSeasonSummary } from "@/lib/arr";
 import { apiErrorText } from "@/lib/client/api-error";
-import { fetchJson, jsonInit, type FetchJsonFailure } from "@/lib/client/fetch-json";
+import { fetchJson, ARR_WRITE_TIMEOUT_MS, jsonInit, type FetchJsonFailure } from "@/lib/client/fetch-json";
 import { RELEASE_SEARCH_POLL_MS, runReleaseSearchJob } from "@/lib/client/release-search-job";
 import { check } from "@/lib/validate";
 import { ageFormatter, sizeFormatter } from "@/components/admin/queue-format";
@@ -218,12 +218,12 @@ function useReleaseSearch({
       ? await fetchJson(withBasePath("/api/admin/arr/title/releases"), {
         init: jsonInit("POST", { service: target.service, instance: target.instance, id: target.arrId, release: rel.guid, ...titleScopeParams(target) }),
         // The grab waits on the arr; a slow success must not read as a failure.
-        timeoutMs: Infinity,
+        timeoutMs: ARR_WRITE_TIMEOUT_MS,
         fallbackError: t("adminQueue.releases.grabFailed"),
       })
       : await fetchJson(withBasePath(`/api/requests/${requestId}/releases`), {
         init: jsonInit("POST", { release: rel.guid, ...(isTv && season !== null ? { season } : {}) }),
-        timeoutMs: Infinity,
+        timeoutMs: ARR_WRITE_TIMEOUT_MS,
         fallbackError: t("adminQueue.releases.grabFailed"),
       });
     setLoading(null);

@@ -640,8 +640,11 @@ test("users: permissions serialize as a decimal string the PATCH can round-trip"
 
 test("users: the list is bounded", async () => {
   const t = await mintSession();
-  await listUsers(t);
-  assert.equal((opsOf("user.findMany")[0].args as { take: number }).take, 1000);
+  const res = await listUsers(t);
+  // One row past the page tells a cut from an exact fit.
+  assert.equal((opsOf("user.findMany")[0].args as { take: number }).take, 1001);
+  assert.equal(res.headers.get("x-truncated"), "false");
+  assert.equal(res.headers.get("x-truncated-cap"), "1000");
 });
 
 test("users: a successful create is audited", async () => {

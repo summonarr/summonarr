@@ -199,6 +199,7 @@ const COOKIE = getSessionCookieName();
 
 // ── business-model stubs ────────────────────────────────────────────────────
 const settings = new Map<string, string>();
+let claimThrows = false; // the claim write fails (a transient DB error after the vote committed)
 let claimCount = 1; // setting.createMany({skipDuplicates}) result — 1 ⇒ this caller won the one-shot claim
 const settingModel = {
   findUnique: async (args: { where: { key: string } }) => {
@@ -206,19 +207,32 @@ const settingModel = {
     const v = settings.get(args.where.key);
     return v === undefined ? null : { key: args.where.key, value: v };
   },
-  findMany: async (args: { where: { key: { in: string[] } } }) => {
+  upsert: async (args: { where: { key: string }; create: { key: string; value: string }; update: { value: string } }) => {
+    rec("setting.upsert", args);
+    settings.set(args.where.key, args.create.value);
+    return { key: args.where.key, value: args.create.value };
+  },
+  findMany: async (args: { where: { key: { in?: string[]; startsWith?: string } } }) => {
     rec("setting.findMany", args);
-    return args.where.key.in
+    const k = args.where.key;
+    if (k.startsWith !== undefined) {
+      return [...settings.entries()].filter(([key]) => key.startsWith(k.startsWith!)).map(([key, value]) => ({ key, value }));
+    }
+    return (k.in ?? [])
       .filter((k) => settings.has(k))
       .map((k) => ({ key: k, value: settings.get(k) }));
   },
   createMany: async (args: { data: { key: string; value: string }[]; skipDuplicates?: boolean }) => {
     rec("setting.createMany", args);
+    if (claimThrows) throw new Error("claim write failed");
     return { count: claimCount };
   },
-  deleteMany: async (args: { where: { key: string } }) => {
+  deleteMany: async (args: { where: { key: string | { in: string[] } } }) => {
     rec("setting.deleteMany", args);
-    return { count: 1 };
+    const keys = typeof args.where.key === "string" ? [args.where.key] : args.where.key.in;
+    let count = 0;
+    for (const k of keys) if (k.startsWith("deletionVotePending:")) count += settings.delete(k) ? 1 : 0; else count++;
+    return { count };
   },
 };
 shadowPrismaModel(prisma, "setting", settingModel);
@@ -430,6 +444,7 @@ beforeEach(() => {
   errors.length = 0;
   settings.clear();
   claimCount = 1;
+  claimThrows = false;
   voteCreateImpl = async (args) => ({ id: `vote-${++voteSeq}`, createdAt: new Date(), ...args.data });
   voteCounts = [];
   voteDeleteCount = 1;
@@ -706,6 +721,8 @@ test("threshold WINNER: the gate runs strictly AFTER the create, claims via crea
     "deletionVote.create",
     "setting.findUnique", // deletionVoteThreshold read
     "deletionVote.count",
+    "setting.findUnique", // already-alerted check
+    "setting.upsert", // pending marker, before the claim
     "setting.createMany", // the idempotent one-shot claim
     "deletionVote.count", // the dismiss-race recount, only after winning
   ]);
@@ -727,6 +744,46 @@ test("threshold WINNER: the gate runs strictly AFTER the create, claims via crea
   assert.deepEqual(errors, [], "the notify fan-out must complete without channel errors");
 });
 
+test("a crash between the claim and the send leaves a pending marker that the sweep finishes; a completed send clears it", async () => {
+  const { sweepPendingVoteAlerts, _resetVoteAlertSweepForTests } = await import("../src/lib/deletion-vote-threshold.ts");
+  settings.set("deletionVoteThreshold", "5");
+  voteCounts = [5, 5];
+  claimCount = 1;
+  const { userId, token } = await mintSession();
+  assert.equal((await post(token, voteBody(userId))).status, 201);
+  const pendingKey = "deletionVotePending:603:MOVIE";
+  assert.ok(settings.has(pendingKey), "intent is recorded before the claim");
+  assert.equal(opsOf("setting.upsert").length, 1);
+
+  // The process dies before after() runs: the marker stays. A fresh marker is left alone.
+  _resetVoteAlertSweepForTests();
+  const early = await sweepPendingVoteAlerts({ force: true });
+  assert.deepEqual(early, { delivered: 0, dropped: 0 });
+  assert.ok(settings.has(pendingKey));
+
+  // Once old enough, the sweep re-judges the title and delivers it.
+  settings.set(pendingKey, JSON.stringify({ at: new Date(Date.now() - 3_600_000).toISOString(), title: "The Matrix", posterPath: null }));
+  settings.set("deletionVoteNotified:603:MOVIE", "1");
+  voteCounts = [5];
+  const swept = await sweepPendingVoteAlerts({ force: true });
+  assert.deepEqual(swept, { delivered: 1, dropped: 0 });
+  assert.ok(!settings.has(pendingKey), "the marker is taken");
+
+  // A marker for a title whose votes are gone is dropped, not delivered.
+  settings.set(pendingKey, JSON.stringify({ at: new Date(Date.now() - 3_600_000).toISOString(), title: "The Matrix", posterPath: null }));
+  voteCounts = [2];
+  assert.deepEqual(await sweepPendingVoteAlerts({ force: true }), { delivered: 0, dropped: 1 });
+
+  // The normal path clears its marker after the send.
+  settings.delete("deletionVoteNotified:603:MOVIE");
+  voteCounts = [5, 5];
+  const again = await mintSession();
+  assert.equal((await post(again.token, voteBody(again.userId))).status, 201);
+  assert.ok(settings.has(pendingKey));
+  await afterTasks[afterTasks.length - 1]();
+  assert.ok(!settings.has(pendingKey), "a delivered alert removes its pending marker");
+});
+
 test("threshold LOSER (claim count 0 — another caller won): the vote STILL commits behind 201 and nothing is notified — the exact silent-rollback bug guardrail 23 documents", async () => {
   settings.set("deletionVoteThreshold", "5");
   voteCounts = [5];
@@ -742,6 +799,18 @@ test("threshold LOSER (claim count 0 — another caller won): the vote STILL com
   assert.equal(txCalls, 0, "no tx exists whose abort could discard the vote");
   assert.equal(opsOf("deletionVote.count").length, 1, "losers must not recount");
   assert.equal(afterTasks.length, 0, "only the single claim winner notifies");
+});
+
+test("a failing threshold alert never turns the committed vote into a 500", async () => {
+  settings.set("deletionVoteThreshold", "5");
+  voteCounts = [5];
+  claimThrows = true;
+  const { userId, token } = await mintSession();
+
+  const res = await post(token, voteBody(userId));
+  assert.equal(res.status, 201);
+  assert.equal(opsOf("deletionVote.create").length, 1);
+  assert.ok(errors.some((e) => e.includes("[votes] threshold alert failed")), "the failure is logged, not thrown");
 });
 
 test("the gate stays quiet below the threshold, and the winner's recount suppresses a dismiss-raced alert", async () => {

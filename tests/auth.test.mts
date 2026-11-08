@@ -2726,6 +2726,28 @@ test("jellyfin: the per-username bucket keeps only WRONG passwords — a sign-in
   assert.equal(peekRateLimit(key, 1, WINDOW_MS), false, "a refused password spends the budget");
 });
 
+test("jellyfin: a server that fails (5xx or unreachable) gives the hit back — only a 401 answer is a spent guess", async () => {
+  const key = "jellyfin-user:flaky-owner";
+  const WINDOW_MS = 5 * 60 * 1000;
+  settings.set("jellyfinUrl", "http://10.77.0.9:8096");
+  let mode: "503" | "throw" | "401" = "503";
+  respond = (url) => {
+    if (url.pathname !== "/Users/AuthenticateByName") throw new Error(`unexpected fetch to ${url}`);
+    if (mode === "throw") throw new Error("connect ECONNREFUSED");
+    return new Response("x", { status: mode === "503" ? 503 : 401 });
+  };
+  for (const m of ["503", "throw"] as const) {
+    mode = m;
+    for (let i = 0; i < 12; i++) {
+      assert.equal(await authorizeWithJellyfin({ username: "Flaky-Owner", password: "pw" }, makeReq(chromeUa(`jf-flaky-${m}-${i}`))), null);
+    }
+    assert.equal(peekRateLimit(key, 1, WINDOW_MS), true, `${m}: failures of the server spend no budget`);
+  }
+  mode = "401";
+  assert.equal(await authorizeWithJellyfin({ username: "flaky-owner", password: "bad" }, makeReq(chromeUa("jf-flaky-401"))), null);
+  assert.equal(peekRateLimit(key, 1, WINDOW_MS), false, "a 401 spends the budget");
+});
+
 test("mint: ONE user read serves the disabled check, the permissions claim and mediaServer — and after setup no promotion transaction opens", async () => {
   seedUser({ id: "u-one-read", email: "one-read@example.com", mediaServer: "plex", permissions: PRESETS.USER });
   const user = mintableUser("u-one-read");

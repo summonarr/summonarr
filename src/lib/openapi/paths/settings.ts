@@ -100,6 +100,7 @@ export const settingsPaths: OpenApiPaths = {
         },
         "400": { description: "Invalid service or instance" },
         "422": { description: "That instance has no URL/API key configured" },
+        "502": { description: "The instance could not be reached or refused the request" },
       },
     },
   },

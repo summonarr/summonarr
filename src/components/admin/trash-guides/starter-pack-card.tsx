@@ -29,7 +29,7 @@ import { useCatalogRefresh } from "./use-catalog-refresh";
 import { useTrashRun } from "./use-trash-run";
 import { appliableStarterItems } from "./starter-pack-select";
 import { withBasePath } from "@/lib/base-path";
-import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS, jsonInit } from "@/lib/client/fetch-json";
 import { useAsyncAction } from "@/hooks/use-async-action";
 import { check, v } from "@/lib/validate";
 import { useT } from "@/components/i18n/i18n-provider";
@@ -156,7 +156,7 @@ export function StarterPackCard({
     // Every selected spec is written to its instance in one request: no client
     // timeout, or a slow success would read as a failure.
     const res = await apply.request((signal) =>
-      fetchJson(withBasePath(`/api/admin/trash-guides/apply`), { init: jsonInit("POST", { specIds: toApply }), timeoutMs: Infinity, signal }),
+      fetchJson(withBasePath(`/api/admin/trash-guides/apply`), { init: jsonInit("POST", { specIds: toApply }), timeoutMs: LONG_RUN_TIMEOUT_MS, signal }),
     );
     if (!res) return;
     const answer = answerOf(res);

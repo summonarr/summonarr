@@ -108,6 +108,7 @@
   "profile.mfa.error.requestFailed": "Anfrage fehlgeschlagen ({status})",
   "profile.sessions.title": "Aktive Sitzungen",
   "profile.sessions.description": "Aktuell angemeldete Geräte. Widerrufen Sie jede Sitzung, die Sie nicht wiedererkennen.",
+  "profile.sessions.capped": "Es werden Ihre {cap} zuletzt aktiven Sitzungen angezeigt; ältere sind nicht aufgeführt.",
   "profile.sessions.empty": "Keine aktiven Sitzungen.",
   "profile.sessions.count_one": "{count} aktive Sitzung",
   "profile.sessions.count_other": "{count} aktive Sitzungen",

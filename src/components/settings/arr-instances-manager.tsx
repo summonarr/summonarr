@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { AlertTriangle, CheckCircle, XCircle, Loader2, Trash2, RefreshCw, Copy, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
-import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS, jsonInit } from "@/lib/client/fetch-json";
 import { apiErrorText } from "@/lib/client/api-error";
 import { useCopyFeedback } from "@/hooks/use-copy-feedback";
 import { useT } from "@/components/i18n/i18n-provider";
@@ -187,7 +187,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
     // so it waits as long as the browser does.
     const res = await fetchJson(withBasePath("/api/admin/arr-instances"), {
       init: jsonInit("POST", { service, instances, ...(version !== undefined ? { baseVersion: version } : {}) }),
-      timeoutMs: Infinity,
+      timeoutMs: LONG_RUN_TIMEOUT_MS,
       fallbackError: t("settings.common.failedToSave"),
     });
     const body = res.ok && res.data && typeof res.data === "object" && !Array.isArray(res.data)

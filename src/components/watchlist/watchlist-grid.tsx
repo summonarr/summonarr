@@ -10,6 +10,8 @@ import { X, Film, Tv2, Bookmark } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { EmptyState } from "@/components/ui/design";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { timedFetch } from "@/lib/client/fetch-json";
+import { useAsyncAction } from "@/hooks/use-async-action";
 
 export interface WatchlistGridItem {
   tmdbId: number;
@@ -91,6 +93,7 @@ export function WatchlistGrid({
   // below, or any other in the tree — shows what changed elsewhere while
   // keeping this page's optimistic removes. A failed remove leaves the set
   // and the tile is back at its own place in the server's order.
+  const action = useAsyncAction();
   const [removed, setRemoved] = useState<ReadonlySet<string>>(() => new Set());
   const visible = initialItems.filter((x) => !removed.has(itemKey(x)));
   const capped = cap != null && truncated;
@@ -109,15 +112,22 @@ export function WatchlistGrid({
       });
       setError(t("personal.watchlist.removeError", { title: it.title }));
     };
-    try {
-      const res = await fetch(
-        withBasePath(`/api/watchlist?tmdbId=${it.tmdbId}&mediaType=${it.mediaType}`),
-        { method: "DELETE" },
-      );
-      if (!res.ok) restore();
-    } catch {
-      restore();
-    }
+    const ok = await action.run(
+      `remove:${key}`,
+      async (signal) => {
+        try {
+          const res = await timedFetch(
+            withBasePath(`/api/watchlist?tmdbId=${it.tmdbId}&mediaType=${it.mediaType}`),
+            { method: "DELETE", signal },
+          );
+          return res.ok;
+        } catch {
+          return false;
+        }
+      },
+      { ifBusy: "skip" },
+    );
+    if (ok === false) restore();
   }
 
   const errorLine = error && (

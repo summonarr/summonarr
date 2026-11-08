@@ -25,8 +25,22 @@ export type RawQueryClient = {
 
 type Write = (text: string) => Promise<void>;
 
-export function escapeSQL(value: unknown): string {
+/**
+ * How a column's value must be written, from its Postgres type: a Json/jsonb
+ * column always takes a JSON literal (a JSON string or number included), a
+ * native ARRAY column an array literal, anything else is decided by the value.
+ */
+export type ColumnKind = "json" | "array" | "plain";
+
+export function escapeSQL(value: unknown, kind: ColumnKind = "plain"): string {
   if (value === null || value === undefined) return "NULL";
+  if (kind === "json") {
+    // The column type is known, so the JS shape (array, string, number) never
+    // picks the literal: it is the value's own JSON text.
+    const json = JSON.stringify(value);
+    if (json === undefined) return "NULL";
+    return `'${json.replace(/\0/g, "").replace(/'/g, "''")}'`;
+  }
   if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
   if (typeof value === "number") {
     if (!Number.isFinite(value)) return "NULL";
@@ -46,11 +60,9 @@ export function escapeSQL(value: unknown): string {
   // string, so backup-import's SAFE_LITERAL_RE still accepts it. An ARRAY[...]
   // constructor would be rejected by that validator.
   //
-  // Discriminating on the JS shape is only sound because NO Json column in this
-  // schema holds a top-level array — one that did would arrive as an array too
-  // and get an array literal written into a jsonb column, which is this same
-  // bug in reverse. tests/schema-invariants.test.mts pins that assumption; if
-  // it ever goes red, this needs the real column type rather than the shape.
+  // A Json column is handled above from its real type (dumpTable reads it), so
+  // a top-level array in jsonb is never mistaken for a scalar list. The shape
+  // test below is only the fallback for a column whose type was not read.
   if (Array.isArray(value)) {
     const elements = value.map((el) => {
       if (el === null) return "NULL";
@@ -120,6 +132,21 @@ export async function writeEnumTypes(tx: RawQueryClient, write: Write): Promise<
   await write("\n");
 }
 
+// Each column's kind, from the catalog inside the same snapshot. A column the
+// query does not list falls back to the value's shape in escapeSQL.
+async function columnKinds(tx: RawQueryClient, table: string): Promise<Map<string, ColumnKind>> {
+  const rows = await tx.$queryRawUnsafe<{ attname: string; typname: string; typcategory: string }[]>(
+    `SELECT a.attname, t.typname, t.typcategory FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped`,
+    `"public"."${table}"`,
+  );
+  const kinds = new Map<string, ColumnKind>();
+  for (const r of rows) {
+    if (r.typname === "json" || r.typname === "jsonb") kinds.set(r.attname, "json");
+    else if (r.typcategory === "A") kinds.set(r.attname, "array");
+  }
+  return kinds;
+}
+
 type TableOrder = { orderClause: string; keyCols: string[] | null };
 
 // The table's primary key as the page order and keyset cursor. No primary key
@@ -174,6 +201,7 @@ function readPage(tx: RawQueryClient, table: string, order: TableOrder, cursor: 
  */
 export async function dumpTable(tx: RawQueryClient, table: string, write: Write, onRow: () => void = () => {}): Promise<number> {
   const order = await tableOrder(tx, table);
+  const kinds = await columnKinds(tx, table);
   let total = 0;
   let colList: string | null = null;
   let columns: string[] = [];
@@ -188,7 +216,7 @@ export async function dumpTable(tx: RawQueryClient, table: string, write: Write,
       colList = columns.map((c) => quoteIdent(c, "column name")).join(", ");
     }
     for (const row of rows) {
-      const values = columns.map((c) => escapeSQL(row[c])).join(", ");
+      const values = columns.map((c) => escapeSQL(row[c], kinds.get(c))).join(", ");
       // ON CONFLICT DO NOTHING is defence-in-depth: the snapshot transaction
       // prevents duplicates in fresh dumps, but older dumps (taken before the
       // snapshot fix) may contain them. Skipping a duplicate is strictly better

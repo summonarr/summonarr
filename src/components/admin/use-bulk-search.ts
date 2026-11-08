@@ -34,6 +34,7 @@ import {
   type SearchAttempt,
   type SearchOutcome,
 } from "@/lib/bulk-search-run";
+import { timedFetch } from "@/lib/client/fetch-json";
 
 // `outcome` null while a request is in flight (or before any); `message` is the
 // route's own text — the error for "failed", the 409's reason for "already".
@@ -106,11 +107,11 @@ export function useBulkSearch() {
     const k = `${key}|${rowKey(row)}`;
     updateSearches((s) => ({ ...s, [k]: { busy: true, outcome: null, message: "" } }));
     try {
-      const res = await fetch(withBasePath("/api/admin/missing/search"), {
+      const res = await timedFetch(withBasePath("/api/admin/missing/search"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ service: svc, instance: row.instance, arrId: row.arrId, mode: m }),
-      });
+      }, 120_000);
       if (res.ok) {
         const attempt = searchAttemptFromResponse(res.status, "", null);
         // Sonarr refused a later command after earlier ones were queued: those

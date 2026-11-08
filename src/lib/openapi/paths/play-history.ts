@@ -595,6 +595,7 @@ export const playHistoryPaths: OpenApiPaths = {
       responses: {
         "200": {
           description: "CSV (default) or JSON file download",
+          headers: { "X-Export-Truncated": { description: "format=json: \"true\" when more than the maximum matched and the list was cut", schema: { type: "string", enum: ["true", "false"] } }, "X-Export-Max-Rows": { description: "format=json: the maximum, as an integer string", schema: { type: "string" } } },
           content: {
             "text/csv": {
               schema: {

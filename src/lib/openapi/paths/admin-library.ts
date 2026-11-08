@@ -351,6 +351,33 @@ export const adminLibraryPaths: OpenApiPaths = {
             "that result's `bookkeepingError`.",
           content: { "application/json": { schema: { type: "object", properties: {
             dryRun: { type: "boolean" },
+            targetCount: { type: "integer", description: "Dry run: Radarr/Sonarr entries a confirmed execute would delete" },
+            targetsFingerprint: { type: "string", description: "Dry run: send back as `confirmFingerprint`" },
+            reclaimableBytes: { type: "integer", description: "Dry run: bytes on disk those entries hold" },
+            blacklist: { type: "boolean", description: "Dry run: whether fully removed titles would also be blacklisted" },
+            items: { type: "array", description: "Dry run: the planned titles, each { tmdbId, mediaType, title, matched, targets: [{ service, instance, arrId, title, sizeOnDisk }] }", items: { type: "object", properties: {
+              tmdbId: { type: "integer" },
+              mediaType: { type: "string", enum: ["MOVIE", "TV"] },
+              title: { type: "string" },
+              matched: { type: "array", items: { type: "string" }, description: "The rules the title matched" },
+              targets: { type: "array", items: { type: "object", properties: {
+                service: ARR_SERVICE,
+                instance: { type: "string" },
+                arrId: { type: "integer" },
+                title: { type: "string" },
+                sizeOnDisk: { type: "integer" },
+              } } },
+            } } },
+            skipped: { type: "array", description: "Titles asked about and not planned or deleted: { tmdbId, mediaType, title (nullable), reason }", items: { type: "object", properties: {
+              tmdbId: { type: "integer" },
+              mediaType: { type: "string", enum: ["MOVIE", "TV"] },
+              title: { type: "string", nullable: true },
+              reason: { type: "string" },
+            } } },
+            hint: { type: "string", description: "Dry run: how to confirm the execute (English text, not for display)" },
+            deletedCount: { type: "integer", description: "Execute only" },
+            partialCount: { type: "integer", description: "Execute only" },
+            failedCount: { type: "integer", description: "Execute only" },
             results: { type: "array", description: "Execute only", items: { type: "object", properties: {
               tmdbId: { type: "integer" },
               mediaType: { type: "string", enum: ["MOVIE", "TV"] },

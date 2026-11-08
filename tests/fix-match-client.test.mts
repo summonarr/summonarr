@@ -97,7 +97,7 @@ test("runFixMatch keeps polling past 20 minutes while the job's progress keeps m
   let clock = 1_000_000;
   Date.now = () => clock;
   // Each 3s poll "takes" three seconds of the fake clock; no real waiting.
-  globalThis.setTimeout = ((fn: () => void, ms?: number) => { clock += ms ?? 0; return realSetTimeout(fn, 0); }) as typeof setTimeout;
+  globalThis.setTimeout = ((fn: () => void, ms?: number) => { if ((ms ?? 0) >= 30_000) return realSetTimeout(() => {}, 0); clock += ms ?? 0; return realSetTimeout(fn, 0); }) as typeof setTimeout; // a request's own timeout neither advances the clock nor fires
   let polls = 0;
   let stallAfter = Infinity;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -124,7 +124,7 @@ test("a QUEUED job is never a stall: 30 minutes in line still completes, and the
   const realFetch = globalThis.fetch, realNow = Date.now, realSetTimeout = globalThis.setTimeout;
   let clock = 5_000_000;
   Date.now = () => clock;
-  globalThis.setTimeout = ((fn: () => void, ms?: number) => { clock += ms ?? 0; return realSetTimeout(fn, 0); }) as typeof setTimeout;
+  globalThis.setTimeout = ((fn: () => void, ms?: number) => { if ((ms ?? 0) >= 30_000) return realSetTimeout(() => {}, 0); clock += ms ?? 0; return realSetTimeout(fn, 0); }) as typeof setTimeout; // a request's own timeout neither advances the clock nor fires
   let polls = 0;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
@@ -149,7 +149,7 @@ test("a status poll answered 200 with something that is not the status JSON is a
   const realFetch = globalThis.fetch, realNow = Date.now, realSetTimeout = globalThis.setTimeout;
   let clock = 7_000_000;
   Date.now = () => clock;
-  globalThis.setTimeout = ((fn: () => void, ms?: number) => { clock += ms ?? 0; return realSetTimeout(fn, 0); }) as typeof setTimeout;
+  globalThis.setTimeout = ((fn: () => void, ms?: number) => { if ((ms ?? 0) >= 30_000) return realSetTimeout(() => {}, 0); clock += ms ?? 0; return realSetTimeout(fn, 0); }) as typeof setTimeout; // a request's own timeout neither advances the clock nor fires
   const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
   const pages: Array<() => Response> = [
     () => new Response("<!doctype html><title>Sign in</title>", { status: 200, headers: { "content-type": "text/html" } }),
@@ -186,7 +186,7 @@ test("a job started for an issue reports whether the server closed it — but a 
   const realFetch = globalThis.fetch, realNow = Date.now, realSetTimeout = globalThis.setTimeout;
   let clock = 9_000_000;
   Date.now = () => clock;
-  globalThis.setTimeout = ((fn: () => void, ms?: number) => { clock += ms ?? 0; return realSetTimeout(fn, 0); }) as typeof setTimeout;
+  globalThis.setTimeout = ((fn: () => void, ms?: number) => { if ((ms ?? 0) >= 30_000) return realSetTimeout(() => {}, 0); clock += ms ?? 0; return realSetTimeout(fn, 0); }) as typeof setTimeout; // a request's own timeout neither advances the clock nor fires
   const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
   let joined = false;
   const sent: unknown[] = [];
@@ -212,7 +212,7 @@ test("a finished job's result is built from the fields the UI reads, wrongly typ
   const realFetch = globalThis.fetch, realNow = Date.now, realSetTimeout = globalThis.setTimeout;
   let clock = 9_000_000;
   Date.now = () => clock;
-  globalThis.setTimeout = ((fn: () => void, ms?: number) => { clock += ms ?? 0; return realSetTimeout(fn, 0); }) as typeof setTimeout;
+  globalThis.setTimeout = ((fn: () => void, ms?: number) => { if ((ms ?? 0) >= 30_000) return realSetTimeout(() => {}, 0); clock += ms ?? 0; return realSetTimeout(fn, 0); }) as typeof setTimeout; // a request's own timeout neither advances the clock nor fires
   const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
   let result: unknown = null;
   globalThis.fetch = (async (input: RequestInfo | URL) => {

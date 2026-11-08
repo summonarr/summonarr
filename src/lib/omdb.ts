@@ -1,6 +1,7 @@
 import "server-only";
 import { createHash } from "node:crypto";
 import { prisma } from "./prisma";
+import { check, v } from "./validate";
 import { getCacheStale, setCache, libraryDetailsTtl } from "./tmdb-cache";
 import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
@@ -400,6 +401,13 @@ export async function getOmdbRatings(imdbId: string): Promise<OmdbRatings | null
 // latch (and bypasses the key cache via { fresh: true }) so a recovered or replaced key
 // can be verified immediately instead of waiting out the remainder of a suspension. A
 // pass clears the latch for that key.
+// The test answer's three fields; anything else in the payload is dropped.
+const TEST_ANSWER = v.object({
+  Response: v.string(),
+  Title: v.optional(v.string()),
+  Error: v.optional(v.string()),
+});
+
 export async function testOmdbConnection(): Promise<string> {
   const apiKey = await getApiKey({ fresh: true });
   if (!apiKey) throw new Error("No OMDB API key configured");
@@ -411,7 +419,9 @@ export async function testOmdbConnection(): Promise<string> {
   const res = await safeFetchTrusted(url.toString(), { allowedHosts: ["www.omdbapi.com"], timeoutMs: OMDB_FETCH_TIMEOUT_MS });
   if (!res.ok) throw new Error(`OMDB returned HTTP ${res.status}`);
 
-  const data = await res.json() as { Response: string; Title?: string; Error?: string };
+  const checked = check(TEST_ANSWER, await res.json() as unknown);
+  if (!checked.ok) throw new Error("OMDB returned an unreadable answer");
+  const data = checked.value;
   if (data.Response !== "True") throw new Error(data.Error ?? "OMDB API key invalid");
   noteKeyAccepted(apiKey);
   return data.Title ?? "OK";

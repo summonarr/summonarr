@@ -6,6 +6,8 @@ import { prisma } from "@/lib/prisma";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug, type MediaInstanceKey } from "@/lib/media-instances";
 import { warnOnChange, forgetWarnOnChange } from "@/lib/log-dedup";
+import { logAudit } from "@/lib/audit";
+import type { CronActor } from "@/lib/cron-auth";
 import type { Translator } from "@/lib/i18n/translate";
 
 // A recent-only Resync reads the last 2 hours: wider than the 1h sync interval,
@@ -87,6 +89,55 @@ export async function stampLibrarySyncSuccess(source: "plex" | "jellyfin", logSc
   await prisma.setting
     .upsert({ where: { key }, update: { value }, create: { key, value } })
     .catch((err) => console.error(`[${logScope}] failed to stamp ${key}:`, err));
+}
+
+/**
+ * Whether a finished Resync is the shape the orchestrator's own success stamp
+ * means: a FULL replace of the DEFAULT instance when it is the ONLY registered
+ * server of its type. A named instance's resync says nothing about the default
+ * server the stale fallback waits on (an hourly named-instance call would keep
+ * the stamp fresh while the default stayed down), the default's says nothing
+ * about a named server that is down, and a recentOnly run is not a complete
+ * picture of the library. Pure.
+ */
+export function stampsOrchestratorSuccess(run: {
+  instance: MediaInstanceKey;
+  recentOnly: boolean;
+  registeredServers: number;
+}): boolean {
+  return run.instance === DEFAULT_MEDIA_INSTANCE && !run.recentOnly && run.registeredServers <= 1;
+}
+
+/** Stamps last-success when the run is the shape `stampsOrchestratorSuccess` accepts. */
+export async function stampResyncSuccess(
+  source: "plex" | "jellyfin",
+  run: { instance: MediaInstanceKey; recentOnly: boolean; registeredServers: number },
+): Promise<void> {
+  if (stampsOrchestratorSuccess(run)) await stampLibrarySyncSuccess(source, `sync/${source}`);
+}
+
+/**
+ * The tail both Resync routes share: the LIBRARY_SYNC audit row (admin-driven
+ * runs only — attribution comes from the DB-checked read that authorized the
+ * request, and a CRON_SECRET run has no session to attribute; `full` lets the
+ * audit log tell a full replace from an incremental add) and the answer body.
+ */
+export function finishResync(
+  source: "plex" | "jellyfin",
+  actor: CronActor,
+  result: { movies: number; tv: number; checked: number; marked: number; recentOnly: boolean },
+): Response {
+  const { movies, tv, checked, marked, recentOnly } = result;
+  if (actor.trigger === "admin") {
+    void logAudit({
+      userId: actor.userId,
+      userName: actor.userName,
+      action: "LIBRARY_SYNC",
+      target: `sync:${source}`,
+      details: { movies, tv, marked, full: !recentOnly },
+    });
+  }
+  return NextResponse.json({ scanned: { movies, tv }, checked, marked, full: !recentOnly });
 }
 
 /**

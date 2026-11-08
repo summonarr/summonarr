@@ -33,8 +33,9 @@ export const adminUsersPaths: OpenApiPaths = {
     get: {
       tags: ["Admin – Users"],
       summary: "List users (MANAGE_USERS)",
-      description: "Up to 1000 users, ordered by name then email.",
-      responses: { "200": { description: "User list", content: { "application/json": { schema: { type: "array", items: ADMIN_USER_ITEM } } } } },
+      description: "Up to 1000 users per page, ordered by name then email (id breaks a tie). `X-Truncated: true` means more exist: request the next `page`.",
+      parameters: [{ name: "page", in: "query", schema: { type: "integer", minimum: 1, default: 1 } }],
+      responses: { "200": { description: "User list", headers: { "X-Truncated": { description: "\"true\" when the list was cut at the cap", schema: { type: "string", enum: ["true", "false"] } }, "X-Truncated-Cap": { description: "The cap, as an integer string", schema: { type: "string" } } }, content: { "application/json": { schema: { type: "array", items: ADMIN_USER_ITEM } } } } },
     },
     post: {
       tags: ["Admin – Users"],

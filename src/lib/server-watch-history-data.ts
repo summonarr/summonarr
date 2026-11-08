@@ -347,6 +347,23 @@ function namesOf(titles: Iterable<ResolvedTitle>): Map<string, string> {
   return out;
 }
 
+// The identities one server's import covers; a server with any counts as one
+// server read.
+async function serverIdentities(
+  source: Source,
+  slug: string,
+  everyone: boolean,
+  subjects: ReadonlySet<string>,
+  result: ServerHistoryImportResult,
+): Promise<IdentityRow[]> {
+  const identities: IdentityRow[] = await prisma.mediaServerUser.findMany({
+    where: identityScope(source, slug, everyone, subjects),
+    select: IDENTITY_SELECT,
+  });
+  if (identities.length > 0) result.servers++;
+  return identities;
+}
+
 async function importPlexServer(slug: string, everyone: boolean, signal: AbortSignal, result: ServerHistoryImportResult): Promise<void> {
   const cfg = await getPlexConfig(slug);
   const url = cfg.url?.trim();
@@ -355,12 +372,8 @@ async function importPlexServer(slug: string, everyone: boolean, signal: AbortSi
 
   // Plex reads no favorites, so co-watch ON needs no subjects.
   const subjects = everyone ? new Set<string>() : await accountSubjects("plex");
-  const identities: IdentityRow[] = await prisma.mediaServerUser.findMany({
-    where: identityScope("plex", slug, everyone, subjects),
-    select: IDENTITY_SELECT,
-  });
+  const identities = await serverIdentities("plex", slug, everyone, subjects, result);
   if (identities.length === 0) return;
-  result.servers++;
 
   // The owner's plays are recorded under the local account id "1". When
   // plex.tv can't say who the owner is, the owner's read point HOLDS — reading
@@ -450,12 +463,8 @@ async function importJellyfinServer(slug: string, everyone: boolean, signal: Abo
 
   // Read either way: the favorites gate below uses them too.
   const subjects = await accountSubjects("jellyfin");
-  const identities: IdentityRow[] = await prisma.mediaServerUser.findMany({
-    where: identityScope("jellyfin", slug, everyone, subjects),
-    select: IDENTITY_SELECT,
-  });
+  const identities = await serverIdentities("jellyfin", slug, everyone, subjects, result);
   if (identities.length === 0) return;
-  result.servers++;
 
   // One user at a time: these are small requests and the point is to stay light.
   for (const identity of identities) {

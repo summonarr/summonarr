@@ -4,12 +4,7 @@
 // session-poll-shared.ts.
 import { prisma } from "@/lib/prisma";
 import type { ActiveSession } from "@/generated/prisma";
-import {
-  applyFinalTick,
-  computePlaytimeIncrement,
-  recordCompletedSession,
-  resolveShowTmdbId,
-} from "@/lib/play-history";
+import { computePlaytimeIncrement, resolveShowTmdbId } from "@/lib/play-history";
 import { extractTmdbIdFromGuids, getPlexMarkers, getPlexSessions, getPlexUser } from "@/lib/plex";
 import type { PlexSessionData } from "@/lib/plex-sessions";
 import { indexPlexRowsByKey } from "@/lib/plex-dedupe";
@@ -24,11 +19,15 @@ import {
   setPlexReachable,
 } from "@/lib/plex-events";
 import {
+  continuingUpdateFields,
   finalizeAbsentSessions,
+  forceFinalizeSession,
   isJitterBackstep,
   lookupSessionPosters,
   mediaTypeOfItem,
   playheadMovedFrom,
+  posterOf,
+  progressPercentOf,
   resolveMediaServerUserCached,
   stripShowPrefix,
   tickResult,
@@ -378,15 +377,10 @@ async function writePlexSession(tick: PlexTick, r: ResolvedPlexSession): Promise
     if (plan.kind === "update") return updateContinuing(tick, r, existing, plan);
     // item-changed: force-stop the previous item, then fall through to create
     // the new one (recordCompletedSession deletes the old row).
-    try {
-      await recordCompletedSession(applyFinalTick(existing, tick.now), { skipSSE: true, stoppedAt: tick.now });
-    } catch (err) {
-      console.warn(`[play-history] ratingKey-change finalize failed for ${r.sessionId}:`, err);
-      // The old row survives under this same id, so the create below would be
-      // a no-op counted as "started", and the new item's markers would land on
-      // the old row. The next tick sees the item change again and retries.
-      return "skipped";
-    }
+    // On failure the old row survives under this same id, so the create below
+    // would be a no-op counted as "started", and the new item's markers would
+    // land on the old row. The next tick sees the item change again and retries.
+    if (!(await forceFinalizeSession(existing, tick.now, "ratingKey-change finalize", r.sessionId))) return "skipped";
   }
 
   // DLNA phantom filter: require two consecutive snapshots before creating a
@@ -407,15 +401,10 @@ async function writePlexSession(tick: PlexTick, r: ResolvedPlexSession): Promise
 // faster; this is the fallback when SSE is down or the client never sent a
 // state="stopped" notification.
 async function finalizeStalled(tick: PlexTick, r: ResolvedPlexSession, existing: ActiveSession): Promise<SessionWriteOutcome> {
-  try {
-    await recordCompletedSession(applyFinalTick(existing, tick.now), { skipSSE: true, stoppedAt: tick.now });
-  } catch (err) {
-    console.warn(`[play-history] stall-finalize failed for ${r.sessionId}:`, err);
-    // Not "ended": no history row was written, so the tick must not count it
-    // into the ended total / fire activity:history-updated for a row that
-    // isn't there (mirrors the absence sweep).
-    return "skipped";
-  }
+  // A failure is not "ended": no history row was written, so the tick must not
+  // count it into the ended total / fire activity:history-updated for a row
+  // that isn't there (mirrors the absence sweep).
+  if (!(await forceFinalizeSession(existing, tick.now, "stall-finalize", r.sessionId))) return "skipped";
   // Ledger AFTER the write (guardrail 27): a failed record must not ledger-lock
   // the sessionKey for an hour with no history row — the next poll re-observes
   // the stall and retries the finalize. The frozen playhead is the ghost's
@@ -432,7 +421,7 @@ async function updateContinuing(
 ): Promise<SessionWriteOutcome> {
   const { s, msUserId, tmdbId, mediaType } = r;
   const increment = computePlaytimeIncrement(existing, tick.now);
-  const posterPath = tmdbId != null && mediaType ? tick.posters.get(`${tmdbId}:${mediaType}`) ?? null : null;
+  const posterPath = posterOf(tick.posters, tmdbId, mediaType);
   // CAS on (id, lastSeenAt): if SSE or another path deleted/updated the row
   // between our prefetch and this write, updateMany returns 0 and the session
   // is skipped (not counted as updated) instead of throwing P2025 and aborting
@@ -455,7 +444,7 @@ async function updateContinuing(
       // re-binding would move a correctly bound session onto it for the
       // whole plex.tv outage (and out of the owner's history at finalize).
       ...(tick.plexAdminId !== null && existing.mediaServerUserId !== msUserId ? { mediaServerUserId: msUserId } : {}),
-      progressPercent: s.duration > 0 ? (plan.nextProgressMs / s.duration) * 100 : 0,
+      progressPercent: progressPercentOf(plan.nextProgressMs, s.duration),
       progressMs: BigInt(plan.nextProgressMs),
       ...(plan.refreshAnchor ? { progressUpdatedAt: tick.now } : {}),
       playMethod: s.playMethod,
@@ -466,13 +455,10 @@ async function updateContinuing(
       videoDecision: s.videoDecision,
       audioDecision: s.audioDecision,
       transcodeReason: s.transcodeReason ?? null,
-      ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
-      // One-shot backfill: durationMs is write-once at create, but a first
-      // tick that raced Plex's metadata can stamp 0 — fill it once real
-      // duration appears so completion math isn't off forever.
-      ...(existing.durationMs === BigInt(0) && s.duration > 0 ? { durationMs: BigInt(s.duration) } : {}),
-      ...(tmdbId != null ? { tmdbId, mediaType } : {}),
-      ...(posterPath ? { posterPath } : {}),
+      // Includes the one-shot durationMs backfill: a first tick that raced
+      // Plex's metadata can stamp 0, and it is filled once the real duration
+      // appears so completion math isn't off forever.
+      ...continuingUpdateFields({ existing, increment, durationMs: s.duration, tmdbId, mediaType, posterPath }),
       location: s.location ?? null,
       bandwidth: s.bandwidth ?? null,
       secure: s.secure ?? null,
@@ -516,8 +502,8 @@ async function createPlexSession(tick: PlexTick, r: ResolvedPlexSession): Promis
       // The show's own key, kept so a play recorded before its show reached the
       // library cache (tmdbId null) can still be attributed later (guardrail 14d).
       sourceShowId: s.type === "episode" ? (s.grandparentRatingKey || null) : null,
-      posterPath: tmdbId != null && mediaType ? tick.posters.get(`${tmdbId}:${mediaType}`) ?? null : null,
-      progressPercent: s.duration > 0 ? (s.viewOffset / s.duration) * 100 : 0,
+      posterPath: posterOf(tick.posters, tmdbId, mediaType),
+      progressPercent: progressPercentOf(s.viewOffset, s.duration),
       progressMs: BigInt(s.viewOffset),
       // Where in the file this SESSION began — a resume starts mid-file, so
       // finalize's playDuration fallback must subtract this from the

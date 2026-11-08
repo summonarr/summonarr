@@ -243,6 +243,12 @@ export const components = {
         status: { $ref: "#/components/schemas/IssueStatus" },
         resolution: { type: "string", nullable: true },
         createdAt: { type: "string", format: "date-time" },
+        updatedAt: { type: "string", format: "date-time", description: "Present on the whole-row answers (POST /issues, PATCH /issues/{id})" },
+        reportedBy: { type: "string", description: "The reporter's user id (whole-row answers)" },
+        claimedBy: { type: "string", nullable: true, description: "The admin who claimed the issue (whole-row answers)" },
+        claimedAt: { type: "string", format: "date-time", nullable: true, description: "Whole-row answers" },
+        resolvedAt: { type: "string", format: "date-time", nullable: true, description: "When the issue last moved to RESOLVED (whole-row answers)" },
+        playbackContext: { type: "object", nullable: true, additionalProperties: true, description: "The reporter's last play of the title, snapshotted at filing; never an IP address. Opaque, version-tagged JSON (whole-row answers)" },
       },
     },
     Error: {

@@ -2,6 +2,7 @@
 // and of the second-factor step-up (src/lib/mfa/step-up.ts, guardrail 6d).
 // Client-only: no server imports, so client components can import it directly.
 import { withBasePath } from "@/lib/base-path";
+import { timedFetch } from "@/lib/client/fetch-json";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { getPasskeyAssertion, isWebAuthnCancel, isWebAuthnSupported, type RequestOptionsJSON } from "@/lib/client/webauthn";
 
@@ -60,7 +61,7 @@ async function fetchPasskeyChallenge(t: Translate, failedMessage: (status: numbe
   let res: Response;
   let data: Record<string, unknown>;
   try {
-    res = await fetch(withBasePath("/api/profile/mfa/challenge"), {
+    res = await timedFetch(withBasePath("/api/profile/mfa/challenge"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}",

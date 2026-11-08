@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2, Trash2, RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
-import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS, jsonInit } from "@/lib/client/fetch-json";
 import { librariesPath, parseLibraryItems, type LibraryItem } from "@/lib/client/library-items";
 import { parseLibrarySelection, reconcileLibrarySelection } from "@/lib/client/library-selection";
 import { useAsyncAction } from "@/hooks/use-async-action";
@@ -504,7 +504,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       // was written and the error says to Refresh.
       init: jsonInit("POST", { service, instances, ...(version !== undefined ? { baseVersion: version } : {}) }),
       // Every server is tested in turn before the answer comes back.
-      timeoutMs: Infinity,
+      timeoutMs: LONG_RUN_TIMEOUT_MS,
       fallbackError: t("settings.common.failedToSave"),
     });
     const answer = res.ok ? readSaveAnswer(res.data) : null;

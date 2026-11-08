@@ -89,8 +89,10 @@ test("request thread: a reload that misses the viewer's own new comment keeps it
   assert.deepEqual(mergeReload([a, b], [a, mine], new Set(["mine"])).map((c) => c.id), ["a", "b", "mine"]);
   // Once a list holds it, the list is the answer.
   assert.deepEqual(mergeReload([a, mine], [a, mine], new Set()).map((c) => c.id), ["a", "mine"]);
-  // Only locally appended ids are carried over.
-  assert.deepEqual(mergeReload([b], [a], new Set()).map((c) => c.id), ["b"]);
+  // Only locally appended ids and older loaded comments are carried over: a
+  // comment the list doesn't hold that sorts AFTER its first one is dropped.
+  assert.deepEqual(mergeReload([a], [b], new Set()).map((c) => c.id), ["a"]);
+  assert.deepEqual(mergeReload([b], [a], new Set()).map((c) => c.id), ["a", "b"], "older loaded comments stay");
   assert.deepEqual(readComments([a, { id: "x" }, "junk", { ...b, author: null }]).map((c) => c.id), ["a"]);
   assert.equal(readComment({ ...a, body: 5 }), null);
   assert.deepEqual(readComment({ ...a, extra: 1 }), a);
@@ -111,4 +113,13 @@ test("the issue thread skips the live re-read for a message it already shows, an
   assert.match(thread, /if \(event\.messageId && shownIdsRef\.current\.has\(event\.messageId\)\) return;\s*liveReload\(\);/);
   assert.match(thread, /shownIdsRef\.current = new Set\(messages\.map\(\(m\) => m\.id\)\);/);
   assert.match(read("src/app/api/issues/[id]/messages/route.ts"), /emitSSE\(\{ type: "issuemessage:created", issueId: id, messageId: message\.id, userId: issue\.reportedBy \}\);/);
+});
+
+test("both threads load older messages from the oldest one shown, and read whether more remain from X-Truncated", () => {
+  for (const file of ["src/components/issues/issue-thread.tsx", "src/components/requests/request-thread.tsx"]) {
+    const src = read(file);
+    assert.match(src, /threadCursorOf\(oldest\)/, file);
+    assert.match(src, /res\.headers\.get\(TRUNCATED_HEADER\) === "true"/, file);
+    assert.match(src, /prependOlder\(prev, /, file);
+  }
 });

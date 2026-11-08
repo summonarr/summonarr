@@ -37,6 +37,19 @@ function regularEpisode(ep: JellyfinEpisode): { season: number; episode: number 
   return { season: ep.ParentIndexNumber as number, episode: ep.IndexNumber as number };
 }
 
+// A multi-episode file (S01E01-E02) is ONE Jellyfin item with IndexNumberEnd;
+// the cache stores one row per episode, so every number in the range counts.
+// Bounded so a bogus end can't fan a single item out into thousands of rows.
+const MAX_EPISODES_PER_FILE = 32;
+function episodeNumbersOf(ep: JellyfinEpisode, first: number): number[] {
+  const end = ep.IndexNumberEnd;
+  if (!Number.isInteger(end) || (end as number) <= first) return [first];
+  const last = Math.min(end as number, first + MAX_EPISODES_PER_FILE - 1);
+  const out: number[] = [];
+  for (let n = first; n <= last; n++) out.push(n);
+  return out;
+}
+
 function episodesQuery(baseUrl: string, parent: ItemsParam, fields: string, sortBy: string): string {
   return jellyfinItemsUrl(baseUrl, [
     parent,
@@ -68,18 +81,20 @@ export async function getJellyfinTVEpisodes(
       if (tmdbId == null) continue;
       const numbered = regularEpisode(ep);
       if (!numbered) continue;
-      const key = `${tmdbId}-${numbered.season}-${numbered.episode}`;
       const addedAt = parseJellyfinDate(ep.DateCreated);
-      const prev = episodeMap.get(key);
-      if (!prev) {
-        episodeMap.set(key, { tmdbId, seasonNumber: numbered.season, episodeNumber: numbered.episode, addedAt });
-      } else if (addedAt && (!prev.addedAt || addedAt < prev.addedAt)) {
-        prev.addedAt = addedAt;
+      for (const episodeNumber of episodeNumbersOf(ep, numbered.episode)) {
+        const key = `${tmdbId}-${numbered.season}-${episodeNumber}`;
+        const prev = episodeMap.get(key);
+        if (!prev) {
+          episodeMap.set(key, { tmdbId, seasonNumber: numbered.season, episodeNumber, addedAt });
+        } else if (addedAt && (!prev.addedAt || addedAt < prev.addedAt)) {
+          prev.addedAt = addedAt;
+        }
       }
     }
   };
 
-  const fields = "SeriesId,ParentIndexNumber,IndexNumber,DateCreated";
+  const fields = "SeriesId,ParentIndexNumber,IndexNumber,IndexNumberEnd,DateCreated";
   const parents: ItemsParam[] = libraryIds?.size ? Array.from(libraryIds, (id) => ["ParentId", id] as const) : [null];
   for (const parent of parents) {
     await walkJellyfinSequential(episodesQuery(baseUrl, parent, fields, "DateCreated,SortName"), apiKey, processEpisodes);
@@ -98,13 +113,16 @@ export async function getJellyfinEpisodesForShow(
   // TVEpisodeCache rows from here, and an undated episode makes its season
   // `unobservable` on the never-watched report (14d).
   await walkJellyfinSequential(
-    episodesQuery(baseUrl, ["ParentId", seriesId], "ParentIndexNumber,IndexNumber,DateCreated", "DateCreated,SortName"),
+    episodesQuery(baseUrl, ["ParentId", seriesId], "ParentIndexNumber,IndexNumber,IndexNumberEnd,DateCreated", "DateCreated,SortName"),
     apiKey,
     (raw) => {
       for (const ep of parseEach(JellyfinEpisodeSchema, raw)) {
         const numbered = regularEpisode(ep);
         if (!numbered) continue;
-        episodes.push({ tmdbId, seasonNumber: numbered.season, episodeNumber: numbered.episode, addedAt: parseJellyfinDate(ep.DateCreated) });
+        const addedAt = parseJellyfinDate(ep.DateCreated);
+        for (const episodeNumber of episodeNumbersOf(ep, numbered.episode)) {
+          episodes.push({ tmdbId, seasonNumber: numbered.season, episodeNumber, addedAt });
+        }
       }
     },
   );

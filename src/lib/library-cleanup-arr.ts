@@ -6,6 +6,7 @@
 import { createHash } from "node:crypto";
 import { ArrResponseError, arrErrorKind, arrFetch, arrFetchNoContent, getArrCfg, resolveTmdbToTvdb, type ArrCfg } from "./arr";
 import type { ArrErrorKind } from "./arr-error-kind";
+import { asRecord } from "./arr-client";
 import { getSyncableArrInstances } from "./arr-instance-registry";
 import { coalesce, mapLimit, settleLimit } from "./concurrency";
 import { isFeatureEnabled } from "./features";
@@ -144,10 +145,12 @@ async function listInstance(service: ArrService, instance: string): Promise<ArrL
   const cfg = await getArrCfg(service, instance);
   if (!cfg) throw new Error("instance not configured");
   if (service === "radarr") {
-    const rows = await fetchListing<RadarrMovieRow[]>(cfg, "/api/v3/movie");
+    const rows = await fetchListing<unknown>(cfg, "/api/v3/movie");
     if (!Array.isArray(rows)) throw new Error("unexpected listing body");
     const out: ArrLibraryEntry[] = [];
-    for (const r of rows) {
+    for (const row of rows) {
+      const r: RadarrMovieRow | null = asRecord(row);
+      if (!r) continue;
       const arrId = posInt(r.id);
       if (arrId === null) continue;
       out.push({
@@ -162,10 +165,13 @@ async function listInstance(service: ArrService, instance: string): Promise<ArrL
     }
     return out;
   }
-  const rows = await fetchListing<SonarrSeriesRow[]>(cfg, "/api/v3/series");
+  const rows = await fetchListing<unknown>(cfg, "/api/v3/series");
   if (!Array.isArray(rows)) throw new Error("unexpected listing body");
   const out: ArrLibraryEntry[] = [];
-  for (const r of rows) {
+  for (const row of rows) {
+    // Every field is read through a guard below, so the declared shape is a reading aid.
+    const r = asRecord(row) as SonarrSeriesRow | null;
+    if (!r) continue;
     const arrId = posInt(r.id);
     if (arrId === null) continue;
     out.push({

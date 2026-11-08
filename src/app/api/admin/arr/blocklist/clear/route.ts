@@ -23,13 +23,15 @@ async function blocklistSize(service: ArrTarget["service"], instance: string): P
 
 // Admin → Download History → Blocklist, "Clear blocklist" (ADMIN): empties
 // one instance's whole blocklist (the arr's own ClearBlocklist command).
-//   POST { service, instance, count? } → 202 { ok, commandIds } — `commandIds`
+//   POST { service, instance, count? } → 202 { ok, commandIds } — or 409 when
+//   `count` is sent and the arr's size now differs (nothing is cleared) — `commandIds`
 //   is the arr's id for the command, which the page follows and re-reads the
 //   list once it ends. The ARR_BLOCKLIST_CHANGE audit (written after the arr
 //   accepted the command) records the list's size as the arr reported it just
 //   before (`count`, null when that read failed) and, apart, the size the
 //   admin confirmed (`confirmedCount`, from the body — client-supplied, so
-//   never recorded as the measured one). 429 past LIMIT_PER_MIN.
+//   never recorded as the measured one; a mismatch with a measured size is
+//   the 409 above). 429 past LIMIT_PER_MIN.
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const body = await readJsonCapped<Record<string, unknown>>(req, 4 * 1024);
@@ -43,6 +45,13 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // The list is gone afterwards: measure it now. Best-effort — a failed read
   // never blocks the clear, it leaves the count unknown.
   const count = await blocklistSize(target.service, target.instance);
+  // A count the admin confirmed must match the list as it is now: a different
+  // size means they confirmed a list that has since changed. Enforced only
+  // where a body sends it (the field stays optional), and only against a size
+  // that was actually read.
+  if (confirmedCount !== null && count !== null && confirmedCount !== count) {
+    return NextResponse.json({ error: t("apiAdmin.arr.blocklistCountChanged", { count }), count }, { status: 409 });
+  }
   let commandIds: number[];
   try {
     ({ commandIds } = await clearBlocklist(target.service, target.instance));

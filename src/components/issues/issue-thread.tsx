@@ -7,12 +7,15 @@ import { useHasMounted } from "@/hooks/use-has-mounted";
 import { useLiveEvents } from "@/hooks/use-live-events";
 import { useAsyncAction } from "@/hooks/use-async-action";
 import { withBasePath } from "@/lib/base-path";
-import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
-import { v, type Schema } from "@/lib/validate";
+import { fetchJson, jsonInit, timedFetch } from "@/lib/client/fetch-json";
+import { threadCursorOf } from "@/lib/thread-cursor";
+import { TRUNCATED_HEADER } from "@/lib/truncation";
+import { check, v, type Schema } from "@/lib/validate";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
 import { Permission, effectivePermissions, hasPermission, parsePermissions } from "@/lib/permissions";
-import { failedLoadState, isNearBottom, type ThreadLoadState } from "@/lib/client/thread-view";
+import { THREAD_READ_CAP } from "@/lib/api-body-limits";
+import { failedLoadState, isNearBottom, mergeThreadReload, prependOlder, type ThreadLoadState } from "@/lib/client/thread-view";
 
 interface IssueMessageData {
   id: string;
@@ -49,6 +52,7 @@ interface IssueThreadProps {
 // once a draft is within 200 characters of it so the maxLength stop isn't silent.
 const MESSAGE_MAX = 2000;
 const MESSAGE_COUNTER_AT = 1800;
+const NO_PENDING: ReadonlySet<string> = new Set();
 
 function MessageBubble({ msg, isMine, mounted }: { msg: IssueMessageData; isMine: boolean; mounted: boolean }) {
   const t = useT();
@@ -97,6 +101,11 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
   const [loadError, setLoadError] = useState<string | null>(null);
   const [body, setBody] = useState("");
   const [sendError, setSendError] = useState<string | null>(null);
+  // Whether messages older than the shown ones may exist (see the request thread).
+  const [olderState, setOlderState] = useState<"unknown" | "more" | "none">("unknown");
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [olderFailed, setOlderFailed] = useState(false);
+  const olderCtrlRef = useRef<AbortController | null>(null);
   const sendAction = useAsyncAction();
   const sending = sendAction.busy("send");
   // The message list's own scroll box. Only it is ever scrolled: scrollIntoView
@@ -158,7 +167,8 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
       // Measured before the new list renders: was the reader at the bottom?
       const el = listRef.current;
       stickRef.current = silent && el ? isNearBottom(el) : true;
-      setMessages(res.data);
+      setMessages((prev) => mergeThreadReload(res.data, prev, NO_PENDING));
+      setOlderState((s) => (s === "unknown" ? (res.data.length >= THREAD_READ_CAP ? "more" : "none") : s));
       setLoadError(null);
       setLoadState("ready");
     },
@@ -171,6 +181,34 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
     void loadMessages();
     return () => ctrl.abort();
   }, [loadMessages]);
+
+  useEffect(() => () => olderCtrlRef.current?.abort(), []);
+
+  // The page of messages older than the oldest shown (the route's `before`
+  // cursor); X-Truncated on the answer says whether still older ones remain.
+  async function loadOlder() {
+    const oldest = messages[0];
+    if (!oldest || loadingOlder) return;
+    olderCtrlRef.current?.abort();
+    const ctrl = new AbortController();
+    olderCtrlRef.current = ctrl;
+    setLoadingOlder(true);
+    setOlderFailed(false);
+    try {
+      const url = withBasePath(`/api/issues/${issueId}/messages?before=${encodeURIComponent(threadCursorOf(oldest))}`);
+      const res = await timedFetch(url, { signal: ctrl.signal });
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const parsed = check(ThreadSchema, await res.json());
+      if (!parsed.ok) throw new Error(parsed.error);
+      stickRef.current = false;
+      setMessages((prev) => prependOlder(prev, parsed.value));
+      setOlderState(res.headers.get(TRUNCATED_HEADER) === "true" ? "more" : "none");
+    } catch {
+      if (!ctrl.signal.aborted) setOlderFailed(true);
+    } finally {
+      if (!ctrl.signal.aborted) setLoadingOlder(false);
+    }
+  }
 
   // The SSE stream emits issuemessage:created when the other party replies;
   // re-pull the thread so the new message appears without a manual refresh.
@@ -308,6 +346,14 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
         )}
         {loadState === "ready" && messages.length === 0 && (
           <p className="text-xs text-zinc-500 py-2">{t("shared.thread.empty")}</p>
+        )}
+        {loadState === "ready" && olderState === "more" && (
+          <div className="flex items-center gap-2 py-2">
+            <Button type="button" size="xs" variant="ghost" disabled={loadingOlder} onClick={() => void loadOlder()}>
+              {loadingOlder ? t("shared.thread.loadingOlder") : t("shared.thread.loadOlder")}
+            </Button>
+            {olderFailed && <p role="alert" className="text-xs text-red-400">{t("shared.thread.loadOlderFailed")}</p>}
+          </div>
         )}
         {messages.map((msg) => {
           const isMine = session ? msg.authorId === session.user.id : msg.fromAdmin === viewerIsAdmin;

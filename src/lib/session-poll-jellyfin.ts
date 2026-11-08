@@ -4,18 +4,17 @@
 // session-poll-shared.ts.
 import { prisma } from "@/lib/prisma";
 import type { ActiveSession } from "@/generated/prisma";
-import {
-  applyFinalTick,
-  computePlaytimeIncrement,
-  recordCompletedSession,
-  resolveShowTmdbId,
-} from "@/lib/play-history";
+import { computePlaytimeIncrement, resolveShowTmdbId } from "@/lib/play-history";
 import { getJellyfinSessions, type JellyfinSessionData } from "@/lib/jellyfin";
 import { type MediaInstanceKey, activeSessionId } from "@/lib/media-instances";
 import { mapLimit } from "@/lib/concurrency";
 import {
+  continuingUpdateFields,
   finalizeAbsentSessions,
+  forceFinalizeSession,
   lookupSessionPosters,
+  posterOf,
+  progressPercentOf,
   resolveMediaServerUserCached,
   stripShowPrefix,
   tickResult,
@@ -258,15 +257,10 @@ async function writeJellyfinSession(tick: JellyfinTick, r: ResolvedJellyfinSessi
     // PlayHistory row. Mirrors the Plex ratingKey-change branch: force-finalize
     // the previous item, then fall through to create a fresh row for the new one.
     if (existing.sourceItemId && s.itemId && existing.sourceItemId !== s.itemId) {
-      try {
-        await recordCompletedSession(applyFinalTick(existing, tick.now), { skipSSE: true, stoppedAt: tick.now });
-      } catch (err) {
-        console.warn(`[play-history] itemId-change finalize failed for ${sessionId}:`, err);
-        // The old row survives, so a create here either no-ops onto it (same id)
-        // or opens a second row beside it. The next tick sees the item change
-        // again and retries the finalize.
-        return "skipped";
-      }
+      // On failure the old row survives, so a create here either no-ops onto
+      // it (same id) or opens a second row beside it. The next tick sees the
+      // item change again and retries the finalize.
+      if (!(await forceFinalizeSession(existing, tick.now, "itemId-change finalize", sessionId))) return "skipped";
     } else {
       return updateContinuing(tick, r, existing);
     }
@@ -303,7 +297,7 @@ function matchExistingRow(tick: JellyfinTick, r: ResolvedJellyfinSession, sessio
 const ticksToMs = (ticks: number) => Math.floor(ticks / 10_000);
 
 function posterFor(tick: JellyfinTick, r: ResolvedJellyfinSession): string | null {
-  return r.tmdbId != null && r.mediaType ? tick.posters.get(`${r.tmdbId}:${r.mediaType}`) ?? null : null;
+  return posterOf(tick.posters, r.tmdbId, r.mediaType);
 }
 
 async function updateContinuing(tick: JellyfinTick, r: ResolvedJellyfinSession, existing: ActiveSession): Promise<SessionWriteOutcome> {
@@ -327,7 +321,7 @@ async function updateContinuing(tick: JellyfinTick, r: ResolvedJellyfinSession, 
       sessionKey: s.playSessionId,
       lastSeenAt: tick.now,
       state: s.state,
-      progressPercent: durationMs > 0 ? (positionMs / durationMs) * 100 : 0,
+      progressPercent: progressPercentOf(positionMs, durationMs),
       progressMs: BigInt(positionMs),
       playMethod: s.playMethod,
       resolution: s.resolution ?? null,
@@ -340,11 +334,7 @@ async function updateContinuing(tick: JellyfinTick, r: ResolvedJellyfinSession, 
       // bitrate (10x the bytes that left the server). undefined leaves the
       // stored value alone when the payload carries none.
       bitrate: s.bitrate ?? undefined,
-      ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
-      // One-shot backfill — see the Plex pass's durationMs note.
-      ...(existing.durationMs === BigInt(0) && durationMs > 0 ? { durationMs: BigInt(durationMs) } : {}),
-      ...(tmdbId ? { tmdbId, mediaType } : {}),
-      ...(posterPath ? { posterPath } : {}),
+      ...continuingUpdateFields({ existing, increment, durationMs, tmdbId, mediaType, posterPath }),
     },
   });
   return written.count > 0 ? "updated" : "skipped";
@@ -380,7 +370,7 @@ async function createJellyfinSession(tick: JellyfinTick, r: ResolvedJellyfinSess
       // See the Plex pass's create.
       sourceShowId: s.itemType === "Episode" ? (s.seriesId || null) : null,
       posterPath: posterFor(tick, r),
-      progressPercent: durationMs > 0 ? (positionMs / durationMs) * 100 : 0,
+      progressPercent: progressPercentOf(positionMs, durationMs),
       progressMs: BigInt(positionMs),
       // Resume offset — see the Plex pass's create.
       startProgressMs: BigInt(positionMs),

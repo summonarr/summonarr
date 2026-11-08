@@ -14,6 +14,7 @@ import { useT } from "@/components/i18n/i18n-provider";
 import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
 import { rich } from "./rich";
 import { pendingChanges, type DiscordFormInitial, type DiscordKey, type DiscordValues } from "./discord-bot-keys";
+import { LONG_RUN_TIMEOUT_MS, timedFetch } from "@/lib/client/fetch-json";
 
 // The settings page builds the props with discordFormInitial
 // (discord-bot-keys.ts), which lists the form's keys once.
@@ -320,7 +321,7 @@ function DiscordActionButton({ endpoint, label, busyLabel, help, blocked, succee
     // Plain fetch: a proxy's 502/504 page is not JSON, and its HTTP status is
     // still shown instead of a bare "request failed".
     try {
-      const res = await fetch(withBasePath(endpoint), { method: "POST" });
+      const res = await timedFetch(withBasePath(endpoint), { method: "POST" }, LONG_RUN_TIMEOUT_MS);
       const data = readActionAnswer(await res.json().catch(() => null));
       if (res.ok && succeeded(data)) {
         setStatus("ok");

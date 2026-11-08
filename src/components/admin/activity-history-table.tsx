@@ -23,6 +23,7 @@ import { HistoryPagination } from "./activity-history/pagination";
 import { HistoryTableRow } from "./activity-history/table-row";
 import { HistoryLoadError, HistoryStatusRow, HistoryTableHead } from "./activity-history/table-parts";
 import { DeleteConfirm } from "./activity-history/delete-confirm";
+import { useHistoryJsonExport } from "./activity-history/use-history-export";
 import {
   useHistoryDelete,
   useHistoryOptions,
@@ -80,6 +81,8 @@ export function ActivityHistoryTable({
   });
   const { platforms, users } = useHistoryOptions(loader);
 
+  const jsonExport = useHistoryJsonExport();
+  const exportNotice = jsonExport.notice;
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const del = useHistoryDelete({
     grouped,
@@ -95,7 +98,11 @@ export function ActivityHistoryTable({
   function exportAs(format: "csv" | "json") {
     const params = buildHistoryFilterParams({ globalSource, globalMediaType, startDateIso, filters, sortBy, sortDir, grouped });
     params.set("format", format);
-    window.open(withBasePath(`/api/play-history/export?${params.toString()}`), "_blank");
+    const url = withBasePath(`/api/play-history/export?${params.toString()}`);
+    // The CSV streams as a plain download; the JSON is fetched so the cut-at-cap
+    // header can be shown.
+    if (format === "csv") window.open(url, "_blank");
+    else void jsonExport.exportJson(url);
   }
 
   const setFilter = useCallback((patch: Partial<HistoryFilters>) => dispatch({ type: "filter", patch }), [dispatch]);
@@ -166,6 +173,18 @@ export function ActivityHistoryTable({
           timeZone={timeZone}
           invertedRange={invertedRange}
         />
+
+        {exportNotice && (
+          <p
+            role="status"
+            className="ds-mono"
+            style={{ fontSize: 11, color: exportNotice.kind === "failed" ? "var(--ds-danger)" : "var(--ds-fg-subtle)", margin: "8px 0 0" }}
+          >
+            {exportNotice.kind === "failed"
+              ? exportNotice.message
+              : t("adminActivity.history.exportTruncated", { max: exportNotice.max })}
+          </p>
+        )}
 
         {DIVIDER}
 

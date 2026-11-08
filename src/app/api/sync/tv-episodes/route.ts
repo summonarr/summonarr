@@ -126,6 +126,15 @@ async function rebuildEpisodeSource(
   // count it once, as the cache stores it.
   const rows = earliestAddedPerEpisode(episodes);
   try {
+    // An empty answer from servers that all replied is not proof the library is
+    // empty (a scan in progress, a recreated library): a whole-namespace swap
+    // of nothing would wipe every stored episode. Hold it, as the library sync
+    // does for a short Plex answer; a deliberate removal is the admin Resync.
+    if (rows.length === 0 && (await prisma.tVEpisodeCache.count({ where: { source } })) > 0) {
+      console.warn(`[sync/tv-episodes] ${service} returned no episodes while the cache holds some — left untouched.`);
+      errors.push(`${service}: no episodes returned; cache kept`);
+      return "skipped";
+    }
     // The staged load + one short swap under advisory lock 2002,1 (plex) /
     // 2002,2 (jellyfin), shared with every other writer of the namespace, so
     // two runs can't interleave their delete/insert phases.

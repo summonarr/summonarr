@@ -615,6 +615,21 @@ test("tv-episodes clears ONLY the jellyfin source when only Jellyfin is configur
   assert.deepEqual(deletesOf("tVEpisodeCache").map((w) => w.source), ["jellyfin"]);
 });
 
+test("tv-episodes keeps a populated cache when every server answers with no episodes", async () => {
+  settings.set("plexServerUrl", "http://10.0.0.5:32400");
+  settings.set("plexAdminToken", "plex-token");
+  shadowPrismaModel(prisma, "tVEpisodeCache", { ...cacheModel("tVEpisodeCache"), count: async () => 7 });
+  try {
+    const res = await call(tvEpisodes);
+    assert.equal(res.status, 200);
+    assert.deepEqual(deletesOf("tVEpisodeCache"), [], "an empty answer must not wipe stored episodes");
+    const body = await res.json();
+    assert.ok((body.skipped as string[]).includes("plex"));
+  } finally {
+    shadowPrismaModel(prisma, "tVEpisodeCache", cacheModel("tVEpisodeCache"));
+  }
+});
+
 test("tv-episodes reads each server's OWN library selection", () => {
   // Source-pinned: this harness's Plex responder returns no sections, so a
   // selection filters nothing observable and a revert to the default's key

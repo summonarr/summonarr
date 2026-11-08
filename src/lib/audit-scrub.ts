@@ -12,7 +12,7 @@ import type { prisma } from "./prisma";
 // `requestedBy` (the requester's name, which fell back to the email before
 // 2026-10-20). Those outlived every other trace of the person — a purged
 // account's "Deleted user" row sat next to audit rows still spelling out their
-// name and email. These keys are removed:
+// name and email. These keys are removed (AUDIT_TARGET_PII_KEYS):
 //   - on the retention schedule, from every aged row (both scrub paths), and
 //   - at account purge, inside the purge transaction (purgeUserDataInTx), from
 //     every row ABOUT the purged user (`user:<id>` target), from the admin
@@ -32,7 +32,13 @@ import type { prisma } from "./prisma";
 // the record of whom the erasure removed, so it keeps the name and email until
 // the retention scrub.
 
-export const AUDIT_TARGET_PII_KEYS = ["targetUser", "targetEmail", "requestedBy"] as const;
+// Beyond the target/requester names above: `accountName` (the viewer's
+// media-server account on a session-terminate row), `serverUser` (the media
+// server username on a server-user link row) and `traktUser` (the Trakt handle
+// on a Trakt-connect row). They name a third party's account and the row
+// outlives it, so the retention scrub removes them like the others; the
+// Trakt-connect row sits under `user:<id>`, so a purge reaches it too.
+export const AUDIT_TARGET_PII_KEYS = ["targetUser", "targetEmail", "requestedBy", "accountName", "serverUser", "traktUser"] as const;
 
 const SCRUB_BATCH = 500;
 

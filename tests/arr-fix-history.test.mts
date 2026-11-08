@@ -312,12 +312,29 @@ test("the removal audit names each release and its title; a clear records the si
     { id: 4, release: "x".repeat(500), movieId: 12 },
   ]);
 
-  assert.equal((await call(clearRoute.POST, token, "/admin/arr/blocklist/clear", { method: "POST", body: { service: "radarr", count: 42 } })).status, 202);
+  assert.equal((await call(clearRoute.POST, token, "/admin/arr/blocklist/clear", { method: "POST", body: { service: "radarr", count: 5 } })).status, 202);
   assert.equal((await call(clearRoute.POST, token, "/admin/arr/blocklist/clear", { method: "POST", body: { service: "radarr" } })).status, 202);
   assert.equal((await call(clearRoute.POST, token, "/admin/arr/blocklist/clear", { method: "POST", body: { service: "radarr", count: "lots" } })).status, 202);
   // `count` is the arr's own total, read just before the clear; the body's
-  // `count` is the admin's say-so and is recorded only as `confirmedCount`.
-  assert.deepEqual(audits.slice(1).map(detailsOf).map((d) => [d.cleared, d.count, d.confirmedCount]), [[true, 5, 42], [true, 5, null], [true, 5, null]]);
+  // `count` is what the admin confirmed (recorded as `confirmedCount`, and a
+  // different measured size refuses the clear — see the next test).
+  assert.deepEqual(audits.slice(1).map(detailsOf).map((d) => [d.cleared, d.count, d.confirmedCount]), [[true, 5, 5], [true, 5, null], [true, 5, null]]);
+});
+
+test("a clear whose confirmed count differs from the arr's size now is refused with a 409 and clears nothing", async () => {
+  const token = await mintSession();
+  let commandPosted = false;
+  responder = both(
+    blocklistOf(5, {}),
+    (c) => {
+      if (c.method === "POST" && c.path === "/api/v3/command") { commandPosted = true; return json({ id: 1 }, 201); }
+      return undefined;
+    },
+  );
+  const res = await call(clearRoute.POST, token, "/admin/arr/blocklist/clear", { method: "POST", body: { service: "radarr", count: 42 } });
+  assert.equal(res.status, 409);
+  assert.equal(commandPosted, false, "the arr was never told to clear");
+  assert.equal(audits.length, 0, "no clear, no clear audit");
 });
 
 test("a clear whose size read fails still clears, recording the count as unknown", async () => {

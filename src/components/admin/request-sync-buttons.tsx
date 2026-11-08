@@ -12,7 +12,7 @@ import { RefreshCw, Users } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 import { useAsyncAction } from "@/hooks/use-async-action";
-import { fetchJson, type FetchJsonFailure } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS, type FetchJsonFailure } from "@/lib/client/fetch-json";
 import type { Translator } from "@/lib/i18n/translate";
 import { RoleSyncAnswer, SyncRunAnswer, syncRunNote, type SyncNote } from "@/components/admin/sync-summary";
 
@@ -40,7 +40,7 @@ export function SyncButton() {
     // client-side timeout, or a slow success would read as a failure.
     const res = await action.run(
       "sync",
-      (signal) => fetchJson(withBasePath("/api/sync"), { init: { method: "POST" }, schema: SyncRunAnswer, signal, timeoutMs: Infinity }),
+      (signal) => fetchJson(withBasePath("/api/sync"), { init: { method: "POST" }, schema: SyncRunAnswer, signal, timeoutMs: LONG_RUN_TIMEOUT_MS }),
       { ifBusy: "skip" },
     );
     if (!res) return;
@@ -80,7 +80,7 @@ export function SyncRolesButton() {
     setNote(null);
     const res = await action.run(
       "roles",
-      (signal) => fetchJson(withBasePath("/api/discord/sync-roles"), { init: { method: "POST" }, schema: RoleSyncAnswer, signal, timeoutMs: Infinity }),
+      (signal) => fetchJson(withBasePath("/api/discord/sync-roles"), { init: { method: "POST" }, schema: RoleSyncAnswer, signal, timeoutMs: LONG_RUN_TIMEOUT_MS }),
       { ifBusy: "skip" },
     );
     if (!res) return;

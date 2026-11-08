@@ -27,7 +27,7 @@ import {
   formatBytesIn,
   useCleanupDelete,
 } from "@/components/admin/cleanup-delete";
-import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS, jsonInit } from "@/lib/client/fetch-json";
 import {
   CLEANUP_MAX_ITEMS,
   CLEANUP_NUMERIC_BOUNDS,
@@ -117,7 +117,7 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
     // live, each under its own server-side limit.
     const res = await fetchJson(withBasePath("/api/admin/cleanup"), {
       schema: CleanupReportSchema,
-      timeoutMs: Infinity,
+      timeoutMs: LONG_RUN_TIMEOUT_MS,
       fallbackError: t("adminManage.cleanup.error.load"),
     });
     if (seq !== loadSeq.current) return;

@@ -23,7 +23,7 @@ import { AlertTriangle, Check, FileCheck, Loader2, RefreshCw, Search, Wrench, X 
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { useAsyncAction } from "@/hooks/use-async-action";
-import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS, jsonInit } from "@/lib/client/fetch-json";
 import { episodeCode, episodeSummary, queueFormatters } from "@/components/admin/queue-format";
 import {
   defaultImportSelection,
@@ -112,7 +112,7 @@ function useImportDialog(row: QueueItem | null, onImported: (row: QueueItem, fil
         schema: ImportListAnswer,
         signal: ctl.signal,
         // Listing a download asks the arr to scan it: no client-side timeout.
-        timeoutMs: Infinity,
+        timeoutMs: LONG_RUN_TIMEOUT_MS,
         fallbackError: tRef.current("adminManage.queue.import.loadFailed"),
       });
       if (ctl.signal.aborted) return;
@@ -143,7 +143,7 @@ function useImportDialog(row: QueueItem | null, onImported: (row: QueueItem, fil
       }),
       schema: ImportSubmitAnswer,
       signal,
-      timeoutMs: Infinity,
+      timeoutMs: LONG_RUN_TIMEOUT_MS,
       fallbackError: t("adminManage.queue.import.failed"),
     }), { ifBusy: "skip" });
     if (!res) return;
@@ -171,7 +171,7 @@ function useImportDialog(row: QueueItem | null, onImported: (row: QueueItem, fil
       init: jsonInit("POST", { service: row.service, instance: row.instance, downloadId, files: [{ path: file.path, ...override }] }),
       schema: ImportPreviewAnswer,
       signal,
-      timeoutMs: Infinity,
+      timeoutMs: LONG_RUN_TIMEOUT_MS,
       fallbackError: t("adminManage.queue.import.previewFailed"),
     }));
     // Dropped: the dialog moved on to another download (or closed) meanwhile.

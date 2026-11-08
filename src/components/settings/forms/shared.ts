@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { apiErrorText } from "@/lib/client/api-error";
 import type { Translator } from "@/lib/i18n/translate";
+import { timedFetch } from "@/lib/client/fetch-json";
 
 // Status types shared by the settings form files.
 export type SaveStatus = "idle" | "saving" | "ok" | "error";
@@ -34,7 +35,7 @@ export function settingsPatchSucceeded(res: { ok: boolean }, data: unknown): boo
 export async function patchSettings(body: Record<string, unknown>): Promise<SettingsPatchResult> {
   let res: Response;
   try {
-    res = await fetch(withBasePath("/api/settings"), {
+    res = await timedFetch(withBasePath("/api/settings"), {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),

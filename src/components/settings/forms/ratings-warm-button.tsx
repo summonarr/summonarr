@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { CheckCircle, Loader2, RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
-import { fetchJson, jsonInit, type FetchJsonResult } from "@/lib/client/fetch-json";
+import { fetchJson, jsonInit, LONG_RUN_TIMEOUT_MS, type FetchJsonResult } from "@/lib/client/fetch-json";
 import { v, type Infer } from "@/lib/validate";
 import { useAsyncAction } from "@/hooks/use-async-action";
 import { useT } from "@/components/i18n/i18n-provider";
@@ -19,7 +19,7 @@ const WarmAnswer = v.object({
 
 // Both warms walk every cached title against an upstream API: no client
 // timeout of our own (a slow success must not read as a failure).
-const WARM_TIMEOUT_MS = Infinity;
+const WARM_TIMEOUT_MS = LONG_RUN_TIMEOUT_MS;
 
 export function RatingsWarmButton() {
   const t = useT();

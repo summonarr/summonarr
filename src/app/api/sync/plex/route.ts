@@ -7,7 +7,6 @@ import { resolvePlexLegacyGuids, mergeResolvedLegacyItems } from "@/lib/plex-leg
 import { getPlexConfig } from "@/lib/plex-config";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, plexSettingKey } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
-import { logAudit } from "@/lib/audit";
 import { getCronActor, type CronActor } from "@/lib/cron-auth";
 import { cronSkippedResponse, withCronRunRecording } from "@/lib/cron-history";
 import { BATCH_TX_TIMEOUT, batchCreateMany } from "@/lib/batch-write";
@@ -27,7 +26,8 @@ import {
   resyncTarget,
   resyncWindDownResponse,
   runResyncHoldingLock,
-  stampLibrarySyncSuccess,
+  finishResync,
+  stampResyncSuccess,
   type HoldLock,
 } from "@/lib/library-resync";
 
@@ -177,19 +177,9 @@ async function syncPlex(request: NextRequest, rawBody: Record<string, unknown>, 
     : null);
   if (pathWalk) hold(pathWalk.then((episodes) => patchShowFilePaths(instance, episodes, onlyShows(filePaths, writtenShows), signal)));
 
-  // Stamp last-success so the orchestrator's 24h-stale fallback doesn't fire
-  // falsely on deployments where the admin runs the per-source resync more
-  // recently than the orchestrator. ONLY for the shape whose success the
-  // orchestrator's own stamp means — every registered Plex server synced clean:
-  // a FULL replace of the DEFAULT instance when it is the ONLY one. A named
-  // instance's resync says nothing about the default server the fallback is
-  // waiting on (an hourly `{instance:"remote"}` call would keep the stamp fresh
-  // while the default stayed down, so `plexStale` could never fire); the
-  // default's resync says nothing about a named server that is down; and a
-  // recentOnly insert-only run is not a complete picture of the library.
-  if (instance === DEFAULT_MEDIA_INSTANCE && !recentOnly && plexInstances.length <= 1) {
-    await stampLibrarySyncSuccess("plex", "sync/plex");
-  }
+  // Keeps the orchestrator's 24h-stale fallback from firing falsely when the
+  // admin resyncs more recently than the orchestrator runs.
+  await stampResyncSuccess("plex", { instance, recentOnly, registeredServers: plexInstances.length });
 
   if (signal.aborted) return resyncWindDownResponse(t);
 
@@ -206,28 +196,7 @@ async function syncPlex(request: NextRequest, rawBody: Record<string, unknown>, 
     logScope: "sync/plex",
   });
 
-  // Attribution comes from the SAME DB-checked session read that authorized the
-  // request (getCronActor in POST): a stale/revoked admin JWT can't
-  // mis-attribute the audit row, and the verify isn't paid twice. A CRON_SECRET
-  // run has no session to attribute.
-  if (actor.trigger === "admin") {
-    void logAudit({
-      userId: actor.userId,
-      userName: actor.userName,
-      action: "LIBRARY_SYNC",
-      target: "sync:plex",
-      // `full` mirrors the Jellyfin twin's row, so the audit log can tell a full
-      // replace from an incremental add for BOTH sources.
-      details: { movies: movieIds.size, tv: tvIds.size, marked, full: !recentOnly },
-    });
-  }
-
-  return NextResponse.json({
-    scanned: { movies: movieIds.size, tv: tvIds.size },
-    checked,
-    marked,
-    full: !recentOnly,
-  });
+  return finishResync("plex", actor, { movies: movieIds.size, tv: tvIds.size, checked, marked, recentOnly });
 }
 
 // The movie and show walks plus legacy-agent resolution — the same wiring as the

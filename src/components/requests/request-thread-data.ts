@@ -2,6 +2,7 @@
 // comments route's answers. Pure and React-free so the unit suite runs it
 // directly (tests/issue-thread.test.mts).
 import { check, v, type Infer } from "@/lib/validate";
+import { mergeThreadReload } from "@/lib/client/thread-view";
 
 export const CommentSchema = v.object({
   id: v.string(),
@@ -34,12 +35,11 @@ export function readComments(data: unknown): CommentData[] {
 
 /**
  * A reload's list, plus the viewer's own comments appended since that the
- * list doesn't hold yet: a reload sent before the POST committed answers
- * without them, and must not take a sent comment off the screen. `pending` is
- * the ids appended locally that no server list has held yet.
+ * list doesn't hold yet (a reload sent before the POST committed answers
+ * without them, and must not take a sent comment off the screen) and any older
+ * comments already loaded. `pending` is the ids appended locally that no
+ * server list has held yet.
  */
 export function mergeReload(list: CommentData[], prev: CommentData[], pending: ReadonlySet<string>): CommentData[] {
-  const seen = new Set(list.map((c) => c.id));
-  const kept = prev.filter((c) => pending.has(c.id) && !seen.has(c.id));
-  return kept.length === 0 ? list : [...list, ...kept];
+  return mergeThreadReload(list, prev, pending);
 }

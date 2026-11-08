@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { escMd } from "@/lib/discord-notify";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
+import { check, type Infer, type Schema } from "@/lib/validate";
 import { processSingleton } from "@/lib/process-singleton";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { isLocale, type Locale } from "@/lib/i18n/locales";
@@ -260,14 +261,19 @@ export async function savePending(key: string, payload: unknown): Promise<void> 
   });
 }
 
-export async function loadPending<T>(key: string): Promise<T | null> {
+// A stored row that is expired, unreadable or not the shape `schema` names reads
+// as absent: the caller answers "expired" instead of acting on it.
+export async function loadPending<S extends Schema<unknown>>(key: string, schema: S): Promise<Infer<S> | null> {
   const row = await prisma.discordSearchCache.findUnique({ where: { queryKey: key } }).catch(() => null);
   if (!row || new Date() >= row.expiresAt) return null;
+  let parsed: unknown;
   try {
-    return JSON.parse(row.data) as T;
+    parsed = JSON.parse(row.data);
   } catch {
     return null;
   }
+  const checked = check(schema, parsed);
+  return checked.ok ? checked.value : null;
 }
 
 export function mediaTypeOption(value: unknown): "movie" | "tv" | null {

@@ -59,7 +59,7 @@ export type FetchJsonFailure = Extract<FetchJsonResult<unknown>, { ok: false }>;
 export interface FetchJsonOptions {
   /** Method, headers, body… `jsonInit` builds the usual JSON one. The signal is `signal`, below. */
   init?: Omit<RequestInit, "signal">;
-  /** Gives up with "timeout" after this long. Infinity (or 0) waits for as long as the browser does. */
+  /** Gives up with "timeout" after this long. Infinity (or 0) disables it; client code uses LONG_RUN_TIMEOUT_MS instead. */
   timeoutMs?: number;
   /** The caller's abort (an unmount, a newer request): the result is "aborted". */
   signal?: AbortSignal;
@@ -68,8 +68,79 @@ export interface FetchJsonOptions {
 }
 
 export const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+/** For a route that legitimately runs for minutes (a sync, a resync, an apply): finite, so a hung request still ends. */
+export const LONG_RUN_TIMEOUT_MS = 30 * 60_000;
+/** For a write that waits on Radarr/Sonarr (an approval push, a release grab): longer than a plain write, still finite. */
+export const ARR_WRITE_TIMEOUT_MS = 2 * 60_000;
 // setTimeout fires at once past this (a 32-bit delay).
 const MAX_TIMER_MS = 2_147_483_647;
+
+/**
+ * A plain `fetch` that cannot hang forever: `timeoutMs` bounds the whole
+ * exchange, the wait for the response headers AND the reading of the body
+ * (`.json()`, `.text()`), and `signal` aborts either. For the callers that
+ * need the Response itself (status, headers, a non-JSON body) and so cannot use
+ * `fetchJson`. Rejects like fetch does on a network failure or an abort. The
+ * returned Response carries status, statusText, headers and body; the timer
+ * stops when the body is read to its end, fails or is cancelled.
+ */
+export async function timedFetch(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs: number = DEFAULT_FETCH_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const outer = init.signal ?? null;
+  const onOuter = () => controller.abort();
+  if (outer?.aborted) controller.abort();
+  else outer?.addEventListener("abort", onOuter, { once: true });
+  const timer = Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? setTimeout(() => controller.abort(), Math.min(timeoutMs, MAX_TIMER_MS))
+    : null;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    if (timer !== null) clearTimeout(timer);
+    outer?.removeEventListener("abort", onOuter);
+  };
+  try {
+    const res = await fetch(url, { ...init, signal: controller.signal });
+    const source = res.body;
+    if (!source) {
+      release();
+      return res;
+    }
+    const reader = source.getReader();
+    const bounded = new ReadableStream<Uint8Array>({
+      async pull(c) {
+        try {
+          const chunk = await reader.read();
+          if (chunk.done) {
+            release();
+            c.close();
+          } else c.enqueue(chunk.value);
+        } catch (err) {
+          release();
+          c.error(err);
+        }
+      },
+      cancel(reason) {
+        release();
+        return reader.cancel(reason);
+      },
+    });
+    const wrapped = new Response(bounded, { status: res.status, statusText: res.statusText, headers: res.headers });
+    // A rebuilt Response forgets where it came from: callers that refuse a
+    // redirected answer (a sign-in page behind a gate) read these two.
+    Object.defineProperty(wrapped, "redirected", { value: res.redirected });
+    Object.defineProperty(wrapped, "url", { value: res.url });
+    return wrapped;
+  } catch (err) {
+    release();
+    throw err;
+  }
+}
 
 /** A JSON request: `method`, the Content-Type header and the serialized body. */
 export function jsonInit(method: string, body: unknown): Omit<RequestInit, "signal"> {

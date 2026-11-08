@@ -108,6 +108,7 @@
   "profile.mfa.error.requestFailed": "Request failed ({status})",
   "profile.sessions.title": "Active Sessions",
   "profile.sessions.description": "Devices currently signed in. Revoke any session you don't recognize.",
+  "profile.sessions.capped": "Showing your {cap} most recently active sessions; older ones are not listed.",
   "profile.sessions.empty": "No active sessions.",
   "profile.sessions.count_one": "{count} active session",
   "profile.sessions.count_other": "{count} active sessions",

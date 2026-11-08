@@ -23,7 +23,7 @@ import { withBasePath } from "@/lib/base-path";
 import { arrTitleDiffers, cleanupExecuteBody } from "@/lib/cleanup-delete-plan";
 import { arrFailureText } from "@/lib/cleanup-error-text";
 import { NOT_JSON, planFromAnswer, readExecuteAnswer, type CleanupExecResult, type CleanupPlan, type ExecuteAnswer } from "@/lib/cleanup-plan-answer";
-import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS, jsonInit, timedFetch } from "@/lib/client/fetch-json";
 import { useT } from "@/components/i18n/i18n-provider";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -64,11 +64,11 @@ export function formatBytesIn(n: number | null, locale: string): string {
 // page, which fetchJson folds into one kind.
 async function sendExecute(plan: CleanupPlan, blacklist: boolean): Promise<ExecuteAnswer> {
   try {
-    const res = await fetch(withBasePath("/api/admin/cleanup/delete?execute=true"), {
+    const res = await timedFetch(withBasePath("/api/admin/cleanup/delete?execute=true"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(cleanupExecuteBody(plan, blacklist)),
-    });
+    }, LONG_RUN_TIMEOUT_MS);
     return readExecuteAnswer(res.status, await res.json().catch(() => NOT_JSON));
   } catch {
     // No answer at all: the same unknown outcome as a gateway's.
@@ -128,7 +128,7 @@ export function useCleanupDelete(opts: {
     const res = await fetchJson(withBasePath("/api/admin/cleanup/delete"), {
       init: jsonInit("POST", { items: body, blacklist }),
       // The route lists every Radarr/Sonarr instance live before it answers.
-      timeoutMs: Infinity,
+      timeoutMs: LONG_RUN_TIMEOUT_MS,
       fallbackError: t("adminManage.cleanup.error.dryRun"),
     });
     setPlanning(false);

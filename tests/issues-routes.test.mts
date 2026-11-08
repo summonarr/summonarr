@@ -1832,9 +1832,41 @@ test("messages GET reads the newest 500 and answers them oldest first, as a bare
   const body = (await res.json()) as Array<{ id: string }>;
   assert.deepEqual(body.map((m) => m.id), ["m1", "m2", "m3"], "oldest first");
   const args = opsOf("issueMessage.findMany")[0].args as { take: number; orderBy: unknown; include: { author: { select: Record<string, boolean> } } };
-  assert.equal(args.take, 500, "the read is bounded");
+  assert.equal(args.take, 501, "the read is bounded, one row past the cap to detect a cut");
+  assert.equal(res.headers.get("x-truncated"), "false");
   assert.deepEqual(args.orderBy, [{ createdAt: "desc" }, { id: "desc" }], "the bound keeps the NEWEST messages");
   assert.equal(args.include.author.select.email, undefined, "the reporter is not sent authors' emails");
+});
+
+test("messages GET reports a cut thread in X-Truncated and drops only the oldest row", async () => {
+  const reporter = await mintSession();
+  issueRow = { id: "issue-thread", status: "OPEN", reportedBy: reporter.userId, title: "t", mediaType: "MOVIE", tmdbId: 1, posterPath: null, claimedBy: null };
+  // Newest first, one row more than the cap.
+  messageRows = Array.from({ length: 501 }, (_, i) => ({ id: `m${501 - i}`, body: "b", createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 501 - i)), author: { name: "n", role: "USER" } }));
+
+  const res = await inScope(() => getMessagesRoute(issuesReq(reporter.token, { method: "GET", path: "/issue-thread/messages" }), idCtx("issue-thread")));
+  const body = (await res.json()) as Array<{ id: string }>;
+  assert.equal(body.length, 500);
+  assert.equal(body[0].id, "m2", "the oldest row is the one dropped");
+  assert.equal(res.headers.get("x-truncated"), "true");
+  assert.equal(res.headers.get("x-truncated-cap"), "500");
+});
+
+test("messages GET with ?before= asks for the messages strictly older than that one, under the same cap; a malformed cursor reads the newest page", async () => {
+  const reporter = await mintSession();
+  issueRow = { id: "issue-thread", status: "OPEN", reportedBy: reporter.userId, title: "t", mediaType: "MOVIE", tmdbId: 1, posterPath: null, claimedBy: null };
+  messageRows = [];
+  const at = "2026-10-01T12:00:00.000Z";
+  const get = (query: string) => inScope(() => getMessagesRoute(issuesReq(reporter.token, { method: "GET", path: "/issue-thread/messages", query }), idCtx("issue-thread")));
+  await get(`?before=${encodeURIComponent(`${at}|m-9`)}`);
+  await get("?before=garbage");
+  const finds = opsOf("issueMessage.findMany").map((o) => o.args as { where: Record<string, unknown>; take: number });
+  assert.deepEqual(finds[0].where, {
+    issueId: "issue-thread",
+    OR: [{ createdAt: { lt: new Date(at) } }, { createdAt: new Date(at), id: { lt: "m-9" } }],
+  });
+  assert.equal(finds[0].take, 501);
+  assert.deepEqual(finds[1].where, { issueId: "issue-thread" });
 });
 
 // ═══════════════════ DELETE /api/issues/[id] ═════════════════════════════════

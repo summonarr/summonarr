@@ -3,7 +3,7 @@
 import { Button } from "@/components/ui/button";
 import { Tv2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
-import { fetchJson } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS } from "@/lib/client/fetch-json";
 import { useAsyncAction } from "@/hooks/use-async-action";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { SyncResultText, useSyncButtonState } from "./sync-button-state";
@@ -27,7 +27,7 @@ export function SyncTVEpisodesButton() {
       fetchJson(withBasePath("/api/sync/tv-episodes"), {
         init: { method: "POST", headers: { "Content-Type": "application/json" } },
         schema: TV_EPISODE_SYNC_ANSWER,
-        timeoutMs: Infinity,
+        timeoutMs: LONG_RUN_TIMEOUT_MS,
         signal,
       }), { ifBusy: "skip" });
     if (!res) return;

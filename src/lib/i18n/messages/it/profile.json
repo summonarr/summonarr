@@ -108,6 +108,7 @@
   "profile.mfa.error.requestFailed": "Richiesta non riuscita ({status})",
   "profile.sessions.title": "Sessioni attive",
   "profile.sessions.description": "Dispositivi attualmente connessi. Revoca qualsiasi sessione che non riconosci.",
+  "profile.sessions.capped": "Vengono mostrate le tue {cap} sessioni attive più di recente; quelle più vecchie non sono elencate.",
   "profile.sessions.empty": "Nessuna sessione attiva.",
   "profile.sessions.count_one": "{count} sessione attiva",
   "profile.sessions.count_other": "{count} sessioni attive",

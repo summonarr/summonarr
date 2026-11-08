@@ -8,6 +8,7 @@ import { getArrInstances } from "@/lib/arr-instance-registry";
 import type { ArrInstanceConfig } from "@/lib/arr-instances";
 import { mapLimit } from "@/lib/concurrency";
 import type { TmdbMedia } from "@/lib/tmdb-types";
+import { check, v } from "@/lib/validate";
 
 // Read-only diagnostic. The one write it can cause is indirect and deliberate:
 // the TV live check goes through lookupSeriesByTmdbId, whose TMDB TVDB
@@ -97,6 +98,8 @@ type TvdbInfo = {
   error?: string;
 };
 
+const CACHED_MAPPING = v.object({ tmdbId: v.nullable(v.int()) });
+
 async function tvdbSection(instances: InstanceState[]): Promise<TvdbInfo> {
   const resolved = resolvedTvdb(instances);
   if (!resolved) {
@@ -118,7 +121,12 @@ async function tvdbSection(instances: InstanceState[]): Promise<TvdbInfo> {
   const row = await prisma.tmdbCache.findUnique({ where: { key: `tvdb-to-tmdb:${resolved.tvdbId}` } });
   let cachedMapping: { tmdbId: number | null } | null = null;
   if (row) {
-    try { cachedMapping = JSON.parse(row.data) as { tmdbId: number | null }; } catch { cachedMapping = null; }
+    // A blob that isn't the mapping shape shows as unreadable (null), never as a
+    // genuine negative entry.
+    try {
+      const parsed = check(CACHED_MAPPING, JSON.parse(row.data));
+      cachedMapping = parsed.ok ? parsed.value : null;
+    } catch { cachedMapping = null; }
   }
   return {
     tvdbId: resolved.tvdbId,

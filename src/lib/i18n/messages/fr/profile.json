@@ -108,6 +108,7 @@
   "profile.mfa.error.requestFailed": "Échec de la requête ({status})",
   "profile.sessions.title": "Sessions actives",
   "profile.sessions.description": "Appareils actuellement connectés. Révoquez toute session que vous ne reconnaissez pas.",
+  "profile.sessions.capped": "Affichage de vos {cap} sessions les plus récemment actives ; les plus anciennes ne sont pas listées.",
   "profile.sessions.empty": "Aucune session active.",
   "profile.sessions.count_one": "{count} session active",
   "profile.sessions.count_other": "{count} sessions actives",

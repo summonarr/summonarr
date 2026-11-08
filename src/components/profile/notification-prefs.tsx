@@ -7,7 +7,7 @@ import { IOS_APP_STORE_URL } from "@/lib/ios-app";
 import { withBasePath } from "@/lib/base-path";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { readApiError } from "@/lib/client/api-error";
-import { jsonInit } from "@/lib/client/fetch-json";
+import { jsonInit, timedFetch } from "@/lib/client/fetch-json";
 import { useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
 import { Switch } from "@/components/ui/switch";
@@ -129,7 +129,7 @@ function usePrefsAutosave(initialPrefs: NotificationPrefValues, t: Translator) {
       // leaving the page is still waiting on the timer, so send it now instead
       // of dropping it. `keepalive` lets the request finish after the page is
       // gone. Same as the unmount save in settings/features-form.tsx.
-      void fetch(withBasePath("/api/profile/notifications"), {
+      void timedFetch(withBasePath("/api/profile/notifications"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(pending),
@@ -152,7 +152,7 @@ function usePrefsAutosave(initialPrefs: NotificationPrefValues, t: Translator) {
     // the UI never shows a position the server rejected.
     const rollBack = () => setPrefs((cur) => revertFailed(cur, savedPrefsRef.current, delta, pendingRef.current));
     try {
-      const res = await fetch(withBasePath("/api/profile/notifications"), jsonInit("PATCH", delta));
+      const res = await timedFetch(withBasePath("/api/profile/notifications"), jsonInit("PATCH", delta));
       if (!res.ok) {
         rollBack();
         setSaveError(rateLimitMessage(res, t) ?? (await readApiError(res, t("profile.error.saveFailed"))));
@@ -231,7 +231,7 @@ function JellyfinEmailField({
     setEmailError(null);
     setEmailSavingState("saving");
     try {
-      const res = await fetch(
+      const res = await timedFetch(
         withBasePath("/api/profile/notification-email"),
         jsonInit("POST", withStepUpPassword({ email: trimmed }, confirmPassword)),
       );
@@ -270,7 +270,7 @@ function JellyfinEmailField({
     setEmailError(null);
     setEmailSavingState("saving");
     try {
-      const res = await fetch(withBasePath("/api/profile/notifications"), jsonInit("PATCH", { notificationEmail: null }));
+      const res = await timedFetch(withBasePath("/api/profile/notifications"), jsonInit("PATCH", { notificationEmail: null }));
       if (!res.ok) {
         setEmailError(rateLimitMessage(res, t) ?? (await readApiError(res, t("profile.notifications.error.removeEmail"))));
         setEmailSavingState("error");

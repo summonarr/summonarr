@@ -270,11 +270,13 @@ test("a Plex or Jellyfin resync documents its answer once, and the job poll repl
   for (const path of ["/sync/plex", "/sync/jellyfin"]) {
     assert.deepEqual(await responseSchema(path, "post", "200"), answer, `${path} POST`);
     assert.deepEqual(await responseSchema(path, "get", "200"), answer, `${path} GET`);
-    const sent = bodyWith(routeSource(path), "scanned");
-    assert.deepEqual(keysOf(oneOf(answer)[0]), sent, path);
+    // Both routes answer through the one shared finisher (library-resync.ts).
+    assert.match(routeSource(path), /finishResync\(/, `${path} answers through finishResync`);
     assert.match(handlerSource(path, "get"), /libraryJobResponse\(/, `${path} GET replays the job`);
-    assert.match(routeSource(path), /scanned: \{ movies: movieIds\.size, tv: tvIds\.size \}/, path);
   }
+  const sent = bodyWith(libSource("library-resync.ts"), "scanned");
+  assert.deepEqual(keysOf(oneOf(answer)[0]), sent);
+  assert.match(libSource("library-resync.ts"), /scanned: \{ movies, tv \}/);
   assert.deepEqual(keysOf(sub(oneOf(answer)[0], "scanned")), ["movies", "tv"]);
   // The poll answers the stored run's own status and body.
   assert.match(libSource("library-sync-jobs.ts"), /return \{ status: res\.status, body: await res\.json\(\)/);

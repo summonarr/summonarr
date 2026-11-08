@@ -912,6 +912,7 @@ class PlexEventStreamManager {
       return;
     }
 
+    if (!parsed || typeof parsed !== "object") return;
     const raw = parsed.PlaySessionStateNotification;
     const notifications: PlaySessionStateNotification[] = (
       Array.isArray(raw) ? raw : raw ? [raw] : []
@@ -923,9 +924,13 @@ class PlexEventStreamManager {
     ).slice(0, MAX_NOTIFICATIONS_PER_FRAME);
 
     for (const n of notifications) {
-      const sessionKey = n.sessionKey;
+      // A frame is the server's JSON, not our type: only a string key and a
+      // numeric offset are ever used as such.
+      if (!n || typeof n !== "object") continue;
+      const sessionKey = typeof n.sessionKey === "string" ? n.sessionKey : undefined;
       if (!sessionKey) continue;
-      const { state, viewOffset } = n;
+      const state = typeof n.state === "string" ? n.state : undefined;
+      const viewOffset = typeof n.viewOffset === "number" && Number.isFinite(n.viewOffset) ? n.viewOffset : undefined;
       if (state === "stopped") {
         // viewOffset is the playhead position at stop. Pass it through so the
         // PlayHistory row's progressMs reflects where the user actually left
@@ -949,12 +954,16 @@ class PlexEventStreamManager {
     } catch {
       return;
     }
+    if (!parsed || typeof parsed !== "object") return;
     const raw = parsed.TimelineEntry;
     const entries: PlexTimelineEntry[] = (
       Array.isArray(raw) ? raw : raw ? [raw] : []
     ).slice(0, MAX_NOTIFICATIONS_PER_FRAME);
     let materialChange = false;
     for (const e of entries) {
+      // A frame is the server's JSON: an entry that is not an object (or whose
+      // fields are of another type) never counts as a change.
+      if (!e || typeof e !== "object") continue;
       // Nothing downstream ingests non-video data: the orchestrator this
       // trigger fires walks configured movie/TV sections only, so a music or
       // photo scan (artist=8..track=10, photo=13, playlist=15 — python-plexapi

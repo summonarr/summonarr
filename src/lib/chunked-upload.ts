@@ -180,12 +180,18 @@ async function sendChunkWithRetry(
     // A retried chunk the server already holds: the attempt that "failed"
     // landed before its answer was lost, so the server now expects the next one.
     if (attempt > 0 && res.status === 409 && !res.redirected && isJson(res)) {
-      const parsed = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      const parsed = await jsonObject(res);
       if (parsed.expected === req.index + 1) return { kind: "landed" };
       return { kind: "answer", res, parsed };
     }
     return { kind: "answer", res };
   }
+}
+
+// A JSON object answer, or {} for anything else (null, an array, a scalar, bad JSON).
+async function jsonObject(res: Response): Promise<Record<string, unknown>> {
+  const value: unknown = await res.json().catch(() => null);
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 // One chunk's answer: the upload's outcome when it ends here, null to go on.
@@ -206,7 +212,7 @@ async function chunkAnswerOutcome(
   if (res.redirected || !isJson(res)) {
     return { kind: "error", status: res.status, code: "nonJson" };
   }
-  const data = parsed ?? ((await res.json().catch(() => ({}))) as Record<string, unknown>);
+  const data = parsed ?? (await jsonObject(res));
   if (!res.ok) {
     return typeof data.error === "string" && data.error
       ? { kind: "error", status: res.status, code: "server", error: data.error }

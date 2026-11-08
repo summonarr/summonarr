@@ -15,6 +15,27 @@ export function deletionVoteMarkerKey(tmdbId: number, mediaType: string): string
   return `deletionVoteNotified:${tmdbId}:${mediaType}`;
 }
 
+/** Prefix of the pending-delivery markers (see deletionVotePendingKey). */
+export const DELETION_VOTE_PENDING_PREFIX = "deletionVotePending:";
+
+/**
+ * Written BEFORE the claim and removed once the alert was handed to the
+ * senders, so a crash between the claim and the send leaves a marker a later
+ * vote's sweep can finish. The claim marker's own value ("1") is unchanged.
+ * Value: JSON `{ at, title, posterPath }`.
+ */
+export function deletionVotePendingKey(tmdbId: number, mediaType: string): string {
+  return `${DELETION_VOTE_PENDING_PREFIX}${tmdbId}:${mediaType}`;
+}
+
+/** The title a pending key names, or null when it is malformed. */
+export function parseDeletionVotePendingKey(key: string): { tmdbId: number; mediaType: "MOVIE" | "TV" } | null {
+  if (!key.startsWith(DELETION_VOTE_PENDING_PREFIX)) return null;
+  const [id, type, extra] = key.slice(DELETION_VOTE_PENDING_PREFIX.length).split(":");
+  if (extra !== undefined || (type !== "MOVIE" && type !== "TV") || !/^\d{1,10}$/.test(id ?? "")) return null;
+  return { tmdbId: Number(id), mediaType: type };
+}
+
 /** The stored threshold: a positive whole number, else 0 (off). */
 export function parseDeletionVoteThreshold(raw: string | null | undefined): number {
   const n = parseInt(raw ?? "0", 10);

@@ -4,7 +4,7 @@ import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { AlertTriangle, Loader2, RefreshCw, RefreshCcw, Trash2, Database } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
-import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS, jsonInit } from "@/lib/client/fetch-json";
 import { useDelayed } from "@/hooks/use-delayed";
 import { useFocusReturn } from "@/hooks/use-focus-return";
 import type { Translator } from "@/lib/i18n/translate";
@@ -102,7 +102,7 @@ function readStep(
 async function clearCache(t: Translator, source: CacheSourceId | "all"): Promise<StepOutcome> {
   const res = await fetchJson(withBasePath(`/api/admin/clear-cache?source=${source}`), {
     init: { method: "DELETE" },
-    timeoutMs: Infinity,
+    timeoutMs: LONG_RUN_TIMEOUT_MS,
   });
   return readStep(res, (d) => summarizeClear(t, d));
 }
@@ -110,7 +110,7 @@ async function clearCache(t: Translator, source: CacheSourceId | "all"): Promise
 async function warmSource(t: Translator, source: CacheSourceDef): Promise<StepOutcome> {
   const res = await fetchJson(withBasePath(source.warmUrl), {
     init: jsonInit("POST", source.warmBody ?? {}),
-    timeoutMs: Infinity,
+    timeoutMs: LONG_RUN_TIMEOUT_MS,
   });
   return readStep(res, (d) => summarizeWarm(t, d));
 }

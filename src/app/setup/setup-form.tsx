@@ -14,6 +14,8 @@ import { useT } from "@/components/i18n/i18n-provider";
 // The old minLength 8 + "Min. 8 characters" hint let a 9–11 character password
 // pass the browser check and bounce off the server with "at least 12".
 import { MIN_PASSWORD_LENGTH } from "@/lib/password-policy";
+import { timedFetch } from "@/lib/client/fetch-json";
+import { useAsyncAction } from "@/hooks/use-async-action";
 
 interface SetupFields {
   name: string;
@@ -27,13 +29,15 @@ interface SetupFields {
 async function registerAdmin(
   fields: SetupFields,
   t: Translator,
+  signal: AbortSignal,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   let res: Response;
   try {
-    res = await fetch(withBasePath("/api/auth/register"), {
+    res = await timedFetch(withBasePath("/api/auth/register"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: fields.name, email: fields.email, password: fields.password }),
+      signal,
     });
   } catch {
     return { ok: false, error: t("auth.setup.error.generic") };
@@ -51,6 +55,7 @@ async function registerAdmin(
 // create/restore switch while the account is being created.
 export function SetupForm({ onBusyChange }: { onBusyChange?: (busy: boolean) => void }) {
   const t = useT();
+  const action = useAsyncAction();
   const [form, setForm] = useState<SetupFields>({ name: "", email: "", password: "", confirm: "" });
   const [error, setError] = useState("");
   const [loading, setLoadingState] = useState(false);
@@ -73,8 +78,10 @@ export function SetupForm({ onBusyChange }: { onBusyChange?: (busy: boolean) => 
       return;
     }
 
+    if (action.busy("register")) return;
     setLoading(true);
-    const registered = await registerAdmin(form, t);
+    const registered = await action.run("register", (signal) => registerAdmin(form, t, signal), { ifBusy: "skip" });
+    if (!registered) return;
     if (!registered.ok) {
       setError(registered.error);
       setLoading(false);

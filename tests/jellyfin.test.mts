@@ -835,6 +835,25 @@ test("a non-429 4xx fast-fails on the first attempt (no retries) and the whole c
 
 // ── getJellyfinTVEpisodes / getJellyfinEpisodesForShow ──────────────────────
 
+test("a multi-episode file counts every episode in its range, bounded", async () => {
+  const B = nextBase();
+  respond = () => okJson({
+    Items: [
+      { SeriesId: "ser-1", ParentIndexNumber: 1, IndexNumber: 1, IndexNumberEnd: 3 },
+      { SeriesId: "ser-1", ParentIndexNumber: 1, IndexNumber: 10, IndexNumberEnd: 5 },
+      { SeriesId: "ser-1", ParentIndexNumber: 1, IndexNumber: 20, IndexNumberEnd: 999999 },
+    ],
+    TotalRecordCount: 3,
+  });
+  const episodes = await getJellyfinTVEpisodes(B, "k", undefined, new Map([["ser-1", 100]]));
+  const nums = episodes.map((e) => e.episodeNumber).sort((a, b) => a - b);
+  assert.deepEqual(nums.slice(0, 4), [1, 2, 3, 10]);
+  assert.equal(nums.length, 3 + 1 + 32, "a bogus end is capped, an end below the start is ignored");
+  respond = () => okJson({ Items: [{ ParentIndexNumber: 1, IndexNumber: 4, IndexNumberEnd: 5 }], TotalRecordCount: 1 });
+  const show = await getJellyfinEpisodesForShow(B, "k", "ser-9", 7);
+  assert.deepEqual(show.map((e) => e.episodeNumber), [4, 5]);
+});
+
 test("episodes with a provided series map: exact fields query, SeriesId→tmdbId mapping, specials/invalid indices skipped, duplicates deduped", async () => {
   const B = nextBase();
   respond = () => okJson({
@@ -856,7 +875,7 @@ test("episodes with a provided series map: exact fields query, SeriesId→tmdbId
   const episodes = await getJellyfinTVEpisodes(B, "k", undefined, seriesMap);
   assert.equal(
     sent[0].url,
-    `${B}/Items?IncludeItemTypes=Episode&Recursive=true&Fields=SeriesId,ParentIndexNumber,IndexNumber,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=1000`,
+    `${B}/Items?IncludeItemTypes=Episode&Recursive=true&Fields=SeriesId,ParentIndexNumber,IndexNumber,IndexNumberEnd,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=1000`,
   );
   assert.deepEqual(
     episodes.sort((a, b) => a.tmdbId - b.tmdbId),
@@ -1090,7 +1109,7 @@ test("episodes-for-show scopes to ParentId=<seriesId>, stamps the caller's tmdbI
   // unobservable on the never-watched report — 14d).
   assert.equal(
     sent[0].url,
-    `${B}/Items?ParentId=ser-77&IncludeItemTypes=Episode&Recursive=true&Fields=ParentIndexNumber,IndexNumber,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=1000`,
+    `${B}/Items?ParentId=ser-77&IncludeItemTypes=Episode&Recursive=true&Fields=ParentIndexNumber,IndexNumber,IndexNumberEnd,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=1000`,
   );
   assert.deepEqual(episodes, [
     { tmdbId: 4242, seasonNumber: 1, episodeNumber: 1, addedAt: new Date("2024-03-01T12:00:00Z") },

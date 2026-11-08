@@ -338,6 +338,95 @@ export function handlerCalls(path: string, method: string): HandlerCall[] {
 }
 
 /**
+ * The HTTP statuses one operation's handler names as literals — `{ status: 404 }`
+ * in a response init, directly or in a function or const declared in its own
+ * route file. Statuses a lib helper sets on its behalf are added by handlerStatuses.
+ */
+export function handlerStatusLiterals(path: string, method: string): number[] {
+  const file = `src/app/api${path.replace(/\{(\w+)\}/g, "[$1]")}/route.ts`;
+  const sf = parseRepoFile(file);
+  const { locals, handlers } = topLevel(sf);
+  const handler = handlers.get(method.toUpperCase());
+  assert.ok(handler, `no ${method.toUpperCase()} handler for ${path}`);
+  const found = new Set<number>();
+  const seen = new Set<string>();
+  const walk = (node: ts.Node) => {
+    if (
+      ts.isPropertyAssignment(node) && ts.isIdentifier(node.name) && node.name.text === "status" &&
+      ts.isNumericLiteral(node.initializer)
+    ) {
+      found.add(Number(node.initializer.text));
+    }
+    if (ts.isIdentifier(node) && locals.has(node.text) && !seen.has(node.text)) {
+      seen.add(node.text);
+      walk(locals.get(node.text) as ts.Node);
+    }
+    ts.forEachChild(node, walk);
+  };
+  walk(handler);
+  return [...found].sort((a, b) => a - b);
+}
+
+/**
+ * Statuses the common lib helpers answer on a handler's behalf, by the name a
+ * route calls them with. A handler that calls one must document each status on
+ * its operation (tests/openapi-status-parity.test.mts). Only statuses the helper
+ * always can produce for its caller belong here.
+ */
+export const HELPER_STATUSES: Readonly<Record<string, readonly number[]>> = {
+  // The api-auth.ts wrappers' 401/403 are the document's top-level `security`
+  // requirement (spec.ts), not a per-operation response, so they are not here.
+  // body-size.ts: the capped JSON readers 413 an oversized body and 400 a
+  // malformed one; the tolerant ones never 400.
+  readJsonCapped: [400, 413],
+  readOptionalJsonCapped: [400, 413],
+  readJsonCappedOr: [413],
+  checkBodySize: [413],
+  bodyTooLarge: [413],
+  // http.ts / rate-limit callers: the 429 is held by the limiter test.
+  tooManyRequests: [429],
+  // maintenance.ts: a non-admin write during maintenance.
+  maintenanceGuard: [503],
+  // arr-admin-http.ts / arr-queue-http.ts: unknown or unconfigured instance,
+  // and malformed title ids.
+  arrGate: [400, 404],
+  arrTitleGate: [400],
+  serviceGate: [400],
+  importGate: [400],
+  // lock-http.ts: another run holds the advisory lock.
+  lockBusyResponse: [409],
+  // step-up-auth.ts / mfa/step-up.ts
+  requireStepUp: [401],
+  secondFactorRequiredResponse: [400],
+  mfaReauthStepUp: [400],
+  mfaSecondFactorStepUp: [400, 429],
+  // The cleanup pages' feature gate.
+  cleanupDisabledResponse: [404],
+  jobResponse: [404],
+  disabledAccountResponse: [403],
+  runAdminWarm: [429],
+  grabRefusalResponse: [409, 410],
+  backupPasswordOrResponse: [503],
+  arrNotConfiguredResponse: [422],
+  resyncWindDownResponse: [503],
+  arrCacheSyncResponse: [502],
+  resolveIssueArrInstance: [400, 404],
+  setupRestoreGate: [403],
+  queueActionFailure: [404, 409, 502],
+  importFailure: [400, 404, 409, 502],
+};
+
+/** The statuses a handler can answer: its own literals plus its common helpers'. */
+export function handlerStatuses(path: string, method: string): { status: number; via: string }[] {
+  const out = new Map<number, string>();
+  for (const status of handlerStatusLiterals(path, method)) out.set(status, "a literal");
+  for (const call of handlerCalls(path, method)) {
+    for (const status of HELPER_STATUSES[call.callee] ?? []) if (!out.has(status)) out.set(status, call.callee);
+  }
+  return [...out].map(([status, via]) => ({ status, via })).sort((a, b) => a.status - b.status);
+}
+
+/**
  * The number an expression evaluates to — a literal (`65_536`), a product or sum
  * of them (`16 * 1024`), a top-level const of the same file, or a const imported
  * from `@/lib/…` — or null when it can't be read statically.

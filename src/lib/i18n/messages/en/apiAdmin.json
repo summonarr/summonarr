@@ -398,6 +398,7 @@
   "apiAdmin.arr.providerRssUnsupported": "{service} says this indexer doesn't support RSS, so RSS wasn't switched on",
   "apiAdmin.arr.providerSearchUnsupported": "{service} says this indexer doesn't support searching, so searching wasn't switched on",
   "apiAdmin.arr.providerChangedMeanwhile": "Its settings in {service} were changed while it was being tested, so it wasn't switched on — reload and try again",
+  "apiAdmin.arr.blocklistCountChanged": "The blocklist has {count} entries now, not the number you confirmed, so nothing was cleared. Reload the list and confirm again.",
   "apiAdmin.neverWatched.refreshJobGone": "That watch-record check is no longer being followed — Summonarr may have restarted. Reload to see the latest results.",
   "apiAdmin.arr.filesJobGone": "That delete is no longer available — reload the files to see what was deleted, and don't run it again blindly.",
   "apiAdmin.arr.markInProgress": "A mark for this download is still in progress — try again in a minute",

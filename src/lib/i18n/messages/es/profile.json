@@ -108,6 +108,7 @@
   "profile.mfa.error.requestFailed": "La solicitud ha fallado ({status})",
   "profile.sessions.title": "Sesiones activas",
   "profile.sessions.description": "Dispositivos con la sesión iniciada. Revoca cualquier sesión que no reconozcas.",
+  "profile.sessions.capped": "Se muestran tus {cap} sesiones activas más recientes; las más antiguas no aparecen.",
   "profile.sessions.empty": "No hay sesiones activas.",
   "profile.sessions.count_one": "{count} sesión activa",
   "profile.sessions.count_other": "{count} sesiones activas",

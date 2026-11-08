@@ -8,7 +8,7 @@
 import { useState, useRef } from "react";
 import { useT } from "@/components/i18n/i18n-provider";
 import { withBasePath } from "@/lib/base-path";
-import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { fetchJson, ARR_WRITE_TIMEOUT_MS, jsonInit } from "@/lib/client/fetch-json";
 import { check, v } from "@/lib/validate";
 import { recheckOutcome, type QueueItem, type QueueRemoveAction, type RecheckError } from "@/lib/arr-queue";
 import { rowKey } from "@/components/admin/queue-table";
@@ -107,7 +107,7 @@ export function useQueueActions({ reloadSoon, dropRow }: {
     try {
       const res = await fetchJson(withBasePath("/api/admin/queue/recheck"), {
         init: { method: "POST" },
-        timeoutMs: Infinity,
+        timeoutMs: ARR_WRITE_TIMEOUT_MS,
         fallbackError: t("adminManage.queue.recheck.failed"),
       });
       if (!res.ok && res.kind !== "invalid") {

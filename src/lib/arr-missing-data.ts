@@ -3,6 +3,7 @@
 // judged by the pure rules in arr-missing.ts. Every call goes through
 // arrFetch (guardrail 5). Nothing is cached and nothing is written.
 import { arrErrorMessage, arrFetch, getArrCfg, type ArrCfg } from "./arr";
+import { asRecord } from "./arr-client";
 import { ArrInstanceError, commandIdsOf, configuredArrCfg, postArrCommand } from "./arr-admin";
 import type { ArrErrorKind } from "./arr-error-kind";
 import { settleArrInstances } from "./arr-instance-fanout";
@@ -32,6 +33,20 @@ import {
   type SonarrEpisodeRow,
   type JudgedListing,
 } from "./arr-missing";
+
+// The object rows of an arr list. The pure rules read fields off every row, so a
+// null or scalar entry in a hostile or broken answer is dropped here, once,
+// instead of throwing out of whichever rule meets it first.
+function recordRows<T>(rows: unknown): T[] {
+  const out: T[] = [];
+  if (!Array.isArray(rows)) return out;
+  for (const r of rows) {
+    // Each rule reads its fields through guards, so T is a reading aid.
+    const rec = asRecord(r);
+    if (rec) out.push(rec as T);
+  }
+  return out;
+}
 
 export type MissingService = "radarr" | "sonarr";
 
@@ -228,8 +243,8 @@ export async function loadCutoffMovies(): Promise<MissingReport<CutoffMovie>> {
     const [listing, profiles] = await Promise.all([readCutoffPages(cfg, "radarr"), readProfiles(cfg)]);
     const out: CutoffMovie[] = [];
     const seen = new Set<number>();
-    for (const row of listing.records as RadarrCutoffRow[]) {
-      const m = row && typeof row === "object" ? cutoffMovie(row, instance, profiles) : null;
+    for (const row of recordRows<RadarrCutoffRow>(listing.records)) {
+      const m = cutoffMovie(row, instance, profiles);
       // A page boundary can repeat a record while the list changes under the read.
       if (m && !seen.has(m.arrId)) {
         seen.add(m.arrId);
@@ -248,7 +263,7 @@ export async function loadCutoffSeries(): Promise<MissingReport<CutoffSeries>> {
   const truncated: ListingTruncation = [];
   const report = await loadReport<CutoffSeries>("sonarr", async (cfg, instance) => {
     const [listing, profiles] = await Promise.all([readCutoffPages(cfg, "sonarr"), readProfiles(cfg)]);
-    const out = cutoffSeriesFromEpisodes(listing.records as SonarrCutoffRecord[], instance, profiles);
+    const out = cutoffSeriesFromEpisodes(recordRows<SonarrCutoffRecord>(listing.records), instance, profiles);
     if (listing.truncated) truncated.push({ instance, read: listing.records.length, total: listing.total });
     return out;
   });
@@ -296,7 +311,7 @@ export async function findSeriesIdOnInstance(instance: string, tvdbId: number): 
 export async function loadMissingEpisodes(instance: string, seriesId: number, now: Date): Promise<MissingEpisode[]> {
   const cfg = await configuredCfg("sonarr", instance);
   const rows = await arrFetch<unknown>(cfg, `/api/v3/episode?seriesId=${seriesId}`);
-  return missingEpisodes(Array.isArray(rows) ? (rows as SonarrEpisodeRow[]) : [], now.getTime());
+  return missingEpisodes(recordRows<SonarrEpisodeRow>(rows), now.getTime());
 }
 
 export interface MissingSearchResult {
@@ -341,15 +356,15 @@ export async function searchMissingTracked(
 type TrackedSearch = MissingSearchResult & { commandIds: number[] };
 
 async function searchMissingMovie(cfg: ArrCfg, instance: string, arrId: number, now: Date): Promise<TrackedSearch> {
-  const row = await arrFetch<RadarrMovieRow>(cfg, `/api/v3/movie/${arrId}`);
-  if (!row || typeof row !== "object" || !missingMovie(row, instance, now.getTime())) throw new NothingMissingError();
+  const row: RadarrMovieRow | null = asRecord(await arrFetch<unknown>(cfg, `/api/v3/movie/${arrId}`));
+  if (!row || !missingMovie(row, instance, now.getTime())) throw new NothingMissingError();
   const queued = [await postArrCommand(cfg, { name: "MoviesSearch", movieIds: [arrId] })];
   return { commands: 1, seasons: [], episodes: 0, commandIds: commandIdsOf(queued) };
 }
 
 async function searchMissingSeries(cfg: ArrCfg, instance: string, arrId: number, now: Date): Promise<TrackedSearch> {
   const rows = await arrFetch<unknown>(cfg, `/api/v3/episode?seriesId=${arrId}`);
-  const episodeRows = Array.isArray(rows) ? (rows as SonarrEpisodeRow[]) : [];
+  const episodeRows = recordRows<SonarrEpisodeRow>(rows);
   // Sonarr answers an UNKNOWN seriesId's episode list with 200 [] — not a 404 —
   // so an empty list can't tell "nothing to search" from "this series is gone".
   // The series read can: a 404 there propagates (ArrResponseError), which both
@@ -416,8 +431,8 @@ export async function searchCutoffTracked(service: MissingService, instance: str
     arrFetch<unknown>(cfg, `/api/v3/episodefile?seriesId=${arrId}`),
   ]);
   const ids = planCutoffSearch(
-    Array.isArray(episodes) ? (episodes as Array<SonarrEpisodeRow & { episodeFileId?: unknown }>) : [],
-    Array.isArray(files) ? (files as SonarrEpisodeFileRow[]) : [],
+    recordRows<SonarrEpisodeRow & { episodeFileId?: unknown }>(episodes),
+    recordRows<SonarrEpisodeFileRow>(files),
   );
   if (ids.length === 0) throw new NothingToUpgradeError();
   const queued = [await postArrCommand(cfg, { name: "EpisodeSearch", episodeIds: ids })];

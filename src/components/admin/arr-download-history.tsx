@@ -221,7 +221,9 @@ export function ArrDownloadHistory({
       "clear",
       (signal) => arrCall(withBasePath("/api/admin/arr/blocklist/clear"), {
         method: "POST",
-        body: { service: inst.service, instance: inst.slug, count: blocklist?.totalRecords ?? 0 },
+        // The size the admin confirmed; the route refuses (409) when the list is a
+        // different size now, and an unknown size is simply not sent.
+        body: { service: inst.service, instance: inst.slug, ...(blocklist ? { count: blocklist.totalRecords } : {}) },
         schema: BLOCKLIST_CLEARED,
         signal,
         fallback: t("adminArr.blocklist.clearFailed"),
@@ -231,6 +233,11 @@ export function ArrDownloadHistory({
     if (!res) return;
     if (!res.ok) {
       view.setError(res.error);
+      // 409: the list changed since it was shown — re-read it, the refusal kept.
+      if (res.status === 409) {
+        setConfirmClear(false);
+        await reload({ keepError: true });
+      }
       return;
     }
     refocusClear.current = true;

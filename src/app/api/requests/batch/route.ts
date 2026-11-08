@@ -146,9 +146,13 @@ async function approveClaimed(claimedIds: string[], session: SummonarrSession, t
 // the one this call wrote, else the one already stored — exactly what the single
 // decline sends. Only rows this call moved, and never the acting admin's own.
 async function notifyDeclined(claimedIds: string[], session: SummonarrSession): Promise<void> {
+  // The decline already committed: a failed read here must not turn it into a 500.
   const declined = await prisma.mediaRequest.findMany({
     where: { id: { in: claimedIds }, status: "DECLINED" },
     select: { id: true, requestedBy: true, title: true, mediaType: true, tmdbId: true, posterPath: true, arrInstance: true, adminNote: true },
+  }).catch((err) => {
+    console.error("[requests/batch] decline notice read failed:", err instanceof Error ? err.message : String(err));
+    return [];
   });
   void notifyDecided("DECLINED", declined, session.user.id, "requests/batch");
 }

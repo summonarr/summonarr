@@ -219,6 +219,12 @@ async function jellyfinSignInUrl(instance: MediaInstanceKey, path: JellyfinSignI
 }
 
 // The server refused the credential (or could not be asked).
+// True when Jellyfin itself answered 400/401/403 to the credentials.
+export function jellyfinRejectedCredentials(err: unknown): boolean {
+  const status = (err as { status?: unknown } | null)?.status;
+  return status === 400 || status === 401 || status === 403;
+}
+
 async function refuseJellyfinCredential(err: unknown, ctx: SignInRequestContext, path: JellyfinSignInPath): Promise<null> {
   console.error(`${path.log} authentication failed:`, err);
   return refuseSignIn(ctx, path.provider, "invalid_credentials");
@@ -310,6 +316,11 @@ export async function authorizeWithJellyfin(
   try {
     jfUser = await authenticateWithJellyfin(jellyfinUrl, username, password);
   } catch (err) {
+    // Only a server that answered "wrong credentials" spent a guess. An
+    // unreachable server, a 5xx or a malformed answer proves nothing about the
+    // password, so it must not count against the user's budget (or anyone could
+    // lock a known user out by making the server fail).
+    if (!jellyfinRejectedCredentials(err)) refundHit(userKey, userHitAt);
     return refuseJellyfinCredential(err, ctx, path);
   }
   refundHit(userKey, userHitAt);

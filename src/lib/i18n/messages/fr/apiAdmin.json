@@ -398,6 +398,7 @@
   "apiAdmin.arr.providerRssUnsupported": "D'après {service}, cet indexeur ne prend pas en charge le RSS, le RSS n'a donc pas été activé",
   "apiAdmin.arr.providerSearchUnsupported": "D'après {service}, cet indexeur ne prend pas en charge la recherche, la recherche n'a donc pas été activée",
   "apiAdmin.arr.providerChangedMeanwhile": "Ses réglages dans {service} ont changé pendant le test, il n'a donc pas été activé — rechargez et réessayez",
+  "apiAdmin.arr.blocklistCountChanged": "La liste de blocage compte maintenant {count} entrées, et non le nombre confirmé ; rien n'a été vidé. Rechargez la liste et confirmez à nouveau.",
   "apiAdmin.neverWatched.refreshJobGone": "Cette vérification de l'historique de visionnage n'est plus suivie — Summonarr a peut-être redémarré. Rechargez pour voir les derniers résultats.",
   "apiAdmin.arr.filesJobGone": "Cette suppression n'est plus disponible — rechargez les fichiers pour voir ce qui a été supprimé, et ne la relancez pas à l'aveugle.",
   "apiAdmin.arr.markInProgress": "Ce téléchargement est encore en cours de marquage en échec — réessayez dans une minute",

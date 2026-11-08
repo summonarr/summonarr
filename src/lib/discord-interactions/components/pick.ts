@@ -3,6 +3,7 @@ import { defaultPermissionsForRole } from "@/lib/permissions";
 import { sessionForUser } from "@/lib/auto-request";
 import { createMediaRequest, loadRequestContext, type CreateMediaRequestResult } from "@/lib/request-create";
 import { TMDB_POSTER_BASE, editOriginal, loadPending, quotaWindowLabel, releaseYearOf } from "../reply";
+import { PENDING_SEARCH } from "../pending-schemas";
 import { holdsAutoApproveRole, loadDiscordRequestSettings, maintenanceRefuses } from "../request-gates";
 import type { ComponentContext, PendingSearch, TmdbResult } from "../types";
 
@@ -29,7 +30,7 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
   if (discordUserId !== userId) return;
 
   const key = `p:${interactionId}:${discordUserId}`;
-  const pending = await loadPending<PendingSearch>(key);
+  const pending = await loadPending(key, PENDING_SEARCH);
   if (!pending) {
     prisma.discordSearchCache.delete({ where: { queryKey: key } }).catch(() => {});
     await editOriginal(appId, token, {

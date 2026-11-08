@@ -97,8 +97,8 @@ interface Hit {
 function isFetchCall(node: ts.Node): node is ts.CallExpression {
   if (!ts.isCallExpression(node)) return false;
   const ex = node.expression;
-  if (ts.isIdentifier(ex)) return ex.text === "fetch";
-  if (ts.isPropertyAccessExpression(ex)) return ex.name.text === "fetch";
+  if (ts.isIdentifier(ex)) return ex.text === "fetch" || ex.text === "timedFetch";
+  if (ts.isPropertyAccessExpression(ex)) return ex.name.text === "fetch" || ex.name.text === "timedFetch";
   return false;
 }
 

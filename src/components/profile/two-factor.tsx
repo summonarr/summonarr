@@ -25,6 +25,7 @@ import {
   type TwoFactorPasskey,
   type TwoFactorState,
 } from "./two-factor-data";
+import { timedFetch } from "@/lib/client/fetch-json";
 
 export type { TwoFactorPasskey, TwoFactorState };
 
@@ -51,7 +52,7 @@ async function call(
 ): Promise<ApiResult> {
   let res: Response;
   try {
-    res = await fetch(withBasePath(path), {
+    res = await timedFetch(withBasePath(path), {
       method,
       headers: { "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),

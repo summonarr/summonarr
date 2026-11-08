@@ -371,7 +371,7 @@ async function fillTmdbCachedAiring(titles: CleanupTitle[]): Promise<void> {
       const raw = byKey.get(tmdbDetailsKey("tv", t.tmdbId));
       if (!raw) continue;
       try {
-        const parsed = JSON.parse(raw) as { status?: unknown; inProduction?: unknown };
+        const parsed = (JSON.parse(raw) ?? {}) as { status?: unknown; inProduction?: unknown };
         t.airing = tmdbStatusIsAiring(parsed.status, parsed.inProduction);
       } catch {
         // A corrupt cache row is "unknown", never a verdict.

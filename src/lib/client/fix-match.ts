@@ -1,3 +1,4 @@
+import { timedFetch } from "@/lib/client/fetch-json";
 import { withBasePath } from "@/lib/base-path";
 import type { Translator } from "@/lib/i18n/translate";
 
@@ -215,7 +216,7 @@ const abortError = () => new DOMException("Fix-match polling aborted", "AbortErr
 
 // POST the remap as a background job. Throws a FixMatchClientError on refusal.
 async function startFixMatch(body: FixMatchRequest, signal: AbortSignal | undefined): Promise<StartBody> {
-  const res = await fetch(withBasePath("/api/admin/fix-match"), {
+  const res = await timedFetch(withBasePath("/api/admin/fix-match"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...body, async: true }),
@@ -235,7 +236,7 @@ async function startFixMatch(body: FixMatchRequest, signal: AbortSignal | undefi
 async function readJobStatus(statusUrl: string, signal: AbortSignal | undefined): Promise<StatusBody | { failed: number }> {
   let pollRes: Response;
   try {
-    pollRes = await fetch(statusUrl, { signal });
+    pollRes = await timedFetch(statusUrl, { signal });
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") throw err;
     return { failed: 0 };

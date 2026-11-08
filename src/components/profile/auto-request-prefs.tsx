@@ -6,6 +6,8 @@ import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { readApiError } from "@/lib/client/api-error";
 import { useT } from "@/components/i18n/i18n-provider";
 import { Switch } from "@/components/ui/switch";
+import { timedFetch } from "@/lib/client/fetch-json";
+import { useAsyncAction } from "@/hooks/use-async-action";
 
 // "Auto-request from my Plex watchlist" — the user's own switch for the Plex half
 // of watchlist auto-request (src/lib/auto-request.ts). Rendered only while the
@@ -31,32 +33,41 @@ export function AutoRequestPrefs({
   serverStatus: "ok" | "private" | "error" | null;
 }) {
   const t = useT();
+  const action = useAsyncAction();
   const needsOptIn = serverSource && !plexConnected && !serverOptedIn;
   const [on, setOn] = useState(initialPlexWatchlist && !needsOptIn);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function toggle() {
-    if (saving) return;
+    if (action.busy("save")) return;
     const next = !on;
     setOn(next);
     setSaving(true);
     setError(null);
-    try {
-      const res = await fetch(withBasePath("/api/profile/auto-request"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plexWatchlist: next }),
-      });
-      if (!res.ok) {
-        setOn(!next);
-        setError(rateLimitMessage(res, t) ?? (await readApiError(res, t("profile.error.saveFailed"))));
-      }
-    } catch {
+    const failure = await action.run(
+      "save",
+      async (signal): Promise<string | null> => {
+        try {
+          const res = await timedFetch(withBasePath("/api/profile/auto-request"), {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ plexWatchlist: next }),
+            signal,
+          });
+          if (res.ok) return null;
+          return rateLimitMessage(res, t) ?? (await readApiError(res, t("profile.error.saveFailed")));
+        } catch {
+          return t("profile.error.network");
+        }
+      },
+      { ifBusy: "skip" },
+    );
+    setSaving(false);
+    if (failure === undefined) return;
+    if (failure !== null) {
       setOn(!next);
-      setError(t("profile.error.network"));
-    } finally {
-      setSaving(false);
+      setError(failure);
     }
   }
 

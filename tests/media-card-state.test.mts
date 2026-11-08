@@ -89,8 +89,18 @@ test("the request posts with the page token and carries the caller's abort", asy
   assert.equal(calls[0].url, "/api/requests");
   assert.deepEqual(calls[0].body, { tmdbId: 603, mediaType: "MOVIE", _token: "tok" });
   assert.ok(calls[0].signal, "the POST is abortable");
-  ctrl.abort();
-  assert.equal(calls[0].signal?.aborted, true, "the caller's abort reaches the request");
+
+  // While the request is in flight, the caller's abort reaches it.
+  let release: (r: Response) => void = () => {};
+  answer = () => new Promise<Response>((resolve) => { release = resolve; });
+  const live = new AbortController();
+  const pending = submitCardRequest({ id: 603, mediaType: "movie" }, "tok", live.signal);
+  const sent = calls[calls.length - 1].signal;
+  assert.equal(sent?.aborted, false);
+  live.abort();
+  assert.equal(sent?.aborted, true, "the caller's abort reaches the request");
+  release(json(201, { id: "r" }));
+  await pending;
 });
 
 test("no answer is its own outcome", async () => {

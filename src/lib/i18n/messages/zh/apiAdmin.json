@@ -398,6 +398,7 @@
   "apiAdmin.arr.providerRssUnsupported": "{service} 表示此索引器不支持 RSS，因此未开启 RSS",
   "apiAdmin.arr.providerSearchUnsupported": "{service} 表示此索引器不支持搜索，因此未开启搜索",
   "apiAdmin.arr.providerChangedMeanwhile": "测试期间其在 {service} 中的设置已被更改，因此未开启——请重新加载后重试",
+  "apiAdmin.arr.blocklistCountChanged": "黑名单现在有 {count} 条记录，与您确认的数量不符，因此未清除任何内容。请重新加载列表后再次确认。",
   "apiAdmin.neverWatched.refreshJobGone": "该观看记录检查已不再被跟踪——Summonarr 可能已重启。请刷新查看最新结果。",
   "apiAdmin.arr.filesJobGone": "该删除操作已不可用——请重新加载文件以查看已删除的内容，不要盲目再次执行。",
   "apiAdmin.arr.markInProgress": "该下载仍在标记为失败的过程中——请一分钟后重试",

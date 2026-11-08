@@ -427,6 +427,7 @@ test("plex first import: each identity gets ITS plays, the owner via local id 1,
   plexSetup();
   const result = await importServerWatchHistory();
   assert.equal(result.failedServers, 0);
+  assert.equal(result.servers, 1, "only the configured Plex server with identities counts as read");
   assert.deepEqual(rowsOf("msu-owner"), [[100, "MOVIE", 2, false]]);
   assert.deepEqual(rowsOf("msu-friend"), [[450, "TV", 1, false]]);
   assert.equal(result.unresolved, 1, "the title the library doesn't have");
@@ -436,6 +437,14 @@ test("plex first import: each identity gets ITS plays, the owner via local id 1,
   assert.equal(cursorOf("msu-friend")!.getTime(), newest.getTime());
   assert.equal(rows.find((r) => r.tmdbId === 450)!.title, "Show 450", "named from the library row");
   assert.deepEqual(forbidden, []);
+});
+
+test("a configured server with no identities to import is not counted as read", async () => {
+  plexSetup();
+  identities = [];
+  const result = await importServerWatchHistory();
+  assert.equal(result.servers, 0);
+  assert.equal(result.failedServers, 0);
 });
 
 test("plex re-run over the SAME history counts nothing twice — even when the server ignores the viewedAt filter", async () => {

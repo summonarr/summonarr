@@ -13,6 +13,7 @@ import { Switch } from "@/components/ui/switch";
 import { useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
 import { FLUSH_DELAY_MS, flushOutcome, nextRetryDelay, settleBatch } from "@/lib/feature-toggle-queue";
+import { timedFetch } from "@/lib/client/fetch-json";
 
 type SaveStatus = "idle" | "saving" | "ok" | "error";
 
@@ -265,7 +266,7 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
       // Send flips still waiting on the delay, so leaving the page right after
       // a click doesn't lose them. `keepalive` lets the request finish after the
       // page is gone.
-      void fetch(withBasePath("/api/settings"), {
+      void timedFetch(withBasePath("/api/settings"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(bodyFor(pending)),

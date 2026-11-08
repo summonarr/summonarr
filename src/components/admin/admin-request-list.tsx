@@ -18,7 +18,7 @@ import { manageTabFor } from "@/lib/arr-manage-links";
 import { Chip } from "@/components/ui/design";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { withBasePath } from "@/lib/base-path";
-import { fetchJson, jsonInit, type FetchJsonFailure } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS, jsonInit, type FetchJsonFailure } from "@/lib/client/fetch-json";
 import { REQUEST_STATUS_LABEL_KEY, REQUEST_STATUS_TONE } from "@/lib/status-labels";
 import { createRefreshGate } from "@/lib/refresh-gate";
 import { ADMIN_NOTE_MAX } from "@/lib/request-limits";
@@ -181,7 +181,7 @@ async function sendBatch(
       signal,
       // An approval pushes each title to Radarr/Sonarr before the route
       // answers: a long run is still working, not failed (guardrail 37a).
-      timeoutMs: Infinity,
+      timeoutMs: LONG_RUN_TIMEOUT_MS,
     });
     if (!res.ok) return { progress, stop: res };
     progress = recordChunk(progress, chunk, res.data);

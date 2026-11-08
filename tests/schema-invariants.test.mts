@@ -376,8 +376,10 @@ test("the raw-SQL layer's hardcoded table names all exist as models", () => {
 // column holding an array would be the same failure in the other direction: an
 // array literal written into jsonb.
 //
-// So this pin is the standing condition for that shortcut. If it goes red,
-// escapeSQL must be taught the real column type instead.
+// dumpTable now reads each column's real type and writes a Json column as its
+// own JSON text, so a new array-valued Json column no longer breaks a restore.
+// This pin stays as a cheap review prompt for the fallback path, which still
+// decides by JS shape when a column's type was not read.
 test("no Json column may hold a top-level array — db-export discriminates array columns by JS shape", () => {
   const jsonFields: string[] = [];
   for (const m of models.values()) {

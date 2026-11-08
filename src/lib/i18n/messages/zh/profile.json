@@ -108,6 +108,7 @@
   "profile.mfa.error.requestFailed": "请求失败（{status}）",
   "profile.sessions.title": "活跃会话",
   "profile.sessions.description": "当前已登录的设备。撤销任何你不认识的会话。",
+  "profile.sessions.capped": "仅显示你最近活跃的 {cap} 个会话；更早的会话未列出。",
   "profile.sessions.empty": "没有活跃会话。",
   "profile.sessions.count_one": "{count} 个活跃会话",
   "profile.sessions.count_other": "{count} 个活跃会话",

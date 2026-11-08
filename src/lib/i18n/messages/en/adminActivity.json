@@ -265,6 +265,8 @@
   "adminActivity.history.exportCsv": "Export CSV",
   "adminActivity.history.exportJson": "JSON",
   "adminActivity.history.exportJsonAria": "Export JSON",
+  "adminActivity.history.exportTruncated": "Export cut at {max} rows — narrow the date range and export again to get the rest.",
+  "adminActivity.history.exportFailed": "Export failed — try again.",
   "adminActivity.common.yes": "Yes",
   "adminActivity.common.no": "No",
   "adminActivity.method.direct": "Direct",

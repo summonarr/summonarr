@@ -618,3 +618,30 @@ test("a default and a 4K import merged into one window wait on BOTH queues, not 
   assert.equal(refreshCalls("/Library/Refresh").length, 1);
   assert.ok(sent.some((s) => s.url.startsWith("http://radarr4k.t30.example:7878/api/v3/queue")), "the 4K queue was consulted too");
 });
+
+test("a named Plex and Jellyfin server are refreshed beside the default", async (t) => {
+  arm(t);
+  settings.set("plexServerUrl", "http://plex.t20.example:32400");
+  settings.set("plexAdminToken", "plex-token-20");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  settings.set("plexRemoteServerUrl", "http://plex-remote.t20.example:32400");
+  settings.set("plexRemoteAdminToken", "plex-token-remote");
+  settings.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  settings.set("jellyfinRemoteUrl", "http://jf-remote.t20.example:8096");
+  settings.set("jellyfinRemoteApiKey", "jf-key-remote");
+  respond = (url) => {
+    if (url.endsWith("/library/sections")) return okJson({ MediaContainer: { Directory: [{ key: "1", title: "Movies", type: "movie" }] } });
+    if (url.includes("/refresh")) return new Response("", { status: 200 });
+    if (url.endsWith("/Library/Refresh")) return new Response(null, { status: 204 });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  const p = scheduleLibraryScan("movie", 20);
+  t.mock.timers.tick(DEBOUNCE);
+  await p;
+
+  assert.equal(refreshCalls("http://plex.t20.example:32400/library/sections/1/refresh").length, 1, "default Plex refreshed");
+  assert.equal(refreshCalls("http://plex-remote.t20.example:32400/library/sections/1/refresh").length, 1, "named Plex refreshed");
+  assert.equal(refreshCalls("http://jf-remote.t20.example:8096/Library/Refresh").length, 1, "named Jellyfin refreshed");
+  assert.equal(errors.length, 0);
+});

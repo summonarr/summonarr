@@ -10,6 +10,8 @@ import { check, v } from "@/lib/validate";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
 import { DetailActionButton } from "./detail-action-button";
+import { timedFetch } from "@/lib/client/fetch-json";
+import { useAsyncAction } from "@/hooks/use-async-action";
 
 // "Add to Watchlist" toggle for movie/TV detail pages. Personal save-for-later,
 // independent of availability or request permissions. Optimistic with rollback
@@ -57,7 +59,8 @@ export function WatchlistButton({
   const { toast } = useToast();
   const t = useT();
   const router = useRouter();
-  const [loading, setLoading] = useState(false);
+  const action = useAsyncAction();
+  const loading = action.busy("toggle");
   const [msg, setMsg] = useState("");
   // Local override until the parent catches up (router.refresh after a toggle
   // that also auto-requested). `initialOnWatchlist` is otherwise live — a
@@ -69,45 +72,56 @@ export function WatchlistButton({
   const on = override ?? initialOnWatchlist;
 
   async function toggle() {
-    if (loading) return;
+    if (action.busy("toggle")) return;
     const next = !on;
     setOverride(next); // optimistic
-    setLoading(true);
     setMsg("");
-    try {
-      const res = next
-        ? await fetch(withBasePath("/api/watchlist"), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tmdbId, mediaType }),
-          })
-        : await fetch(withBasePath(`/api/watchlist?tmdbId=${tmdbId}&mediaType=${mediaType}`), { method: "DELETE" });
-      // 409 on add means it's already there — the desired end state is still "on".
-      if (!res.ok && res.status !== 409) {
-        // Roll back to the pre-click state, NOT the prop: after an earlier
-        // successful toggle the prop is stale until something refreshes it.
-        setOverride(!next);
-        setMsg(rateLimitMessage(res, t) ?? (await readApiError(res, t("request.somethingWrong"))));
-        return;
-      }
-      toast({ title: next ? t("detail.watchlist.added") : t("detail.watchlist.removed"), variant: "success" });
-      // Watchlist auto-request: the add may also have filed a request. The
-      // field is present only when auto-request applied; a refusal (quota,
-      // blacklisted, already available…) never fails the add itself.
-      if (next && res.status === 201) {
-        const parsed = check(AddAnswer, await res.json().catch(() => null));
-        const ar = parsed.ok ? parsed.value.autoRequest : undefined;
-        const follow = autoRequestToast(ar, t);
-        if (follow) toast(follow);
-        // The HD RequestButton ORs the live `requested` prop — refresh so
-        // it re-reads and does not stay on "Request" (a second click 409s).
-        if (ar?.requested) router.refresh();
-      }
-    } catch {
-      setOverride(!next); // rollback to the pre-click state
-      setMsg(t("request.networkError"));
-    } finally {
-      setLoading(false);
+    type Outcome =
+      | { kind: "failed"; message: string }
+      | { kind: "done"; added: unknown };
+    const out = await action.run(
+      "toggle",
+      async (signal): Promise<Outcome> => {
+        try {
+          const res = next
+            ? await timedFetch(withBasePath("/api/watchlist"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ tmdbId, mediaType }),
+                signal,
+              })
+            : await timedFetch(withBasePath(`/api/watchlist?tmdbId=${tmdbId}&mediaType=${mediaType}`), { method: "DELETE", signal });
+          // 409 on add means it's already there — the desired end state is still "on".
+          if (!res.ok && res.status !== 409) {
+            return { kind: "failed", message: rateLimitMessage(res, t) ?? (await readApiError(res, t("request.somethingWrong"))) };
+          }
+          return { kind: "done", added: next && res.status === 201 ? await res.json().catch(() => null) : undefined };
+        } catch {
+          return { kind: "failed", message: t("request.networkError") };
+        }
+      },
+      { ifBusy: "skip" },
+    );
+    if (!out) return;
+    if (out.kind === "failed") {
+      // Roll back to the pre-click state, NOT the prop: after an earlier
+      // successful toggle the prop is stale until something refreshes it.
+      setOverride(!next);
+      setMsg(out.message);
+      return;
+    }
+    toast({ title: next ? t("detail.watchlist.added") : t("detail.watchlist.removed"), variant: "success" });
+    // Watchlist auto-request: the add may also have filed a request. The
+    // field is present only when auto-request applied; a refusal (quota,
+    // blacklisted, already available…) never fails the add itself.
+    if (next && out.added !== undefined) {
+      const parsed = check(AddAnswer, out.added);
+      const ar = parsed.ok ? parsed.value.autoRequest : undefined;
+      const follow = autoRequestToast(ar, t);
+      if (follow) toast(follow);
+      // The HD RequestButton ORs the live `requested` prop — refresh so
+      // it re-reads and does not stay on "Request" (a second click 409s).
+      if (ar?.requested) router.refresh();
     }
   }
 

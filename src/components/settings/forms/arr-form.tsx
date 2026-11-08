@@ -8,7 +8,7 @@ import { StyledSelect } from "@/components/ui/styled-select";
 import { CheckCircle, XCircle, Loader2, RefreshCw, Download } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
-import { fetchJson } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS } from "@/lib/client/fetch-json";
 import { useAsyncAction } from "@/hooks/use-async-action";
 import { useSettingsSave, type LoadStatus } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
@@ -399,7 +399,7 @@ function ArrImportSection({ service }: { service: "radarr" | "sonarr" }) {
     // A full import of a large library outlasts any fixed wait.
     const res = await fetchJson(withBasePath(`/api/sync/${service}`), {
       init: { method: "POST" },
-      timeoutMs: Infinity,
+      timeoutMs: LONG_RUN_TIMEOUT_MS,
       fallbackError: t("settings.form.arr.importFailed"),
     });
     if (!res.ok) {

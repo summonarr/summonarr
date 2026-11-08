@@ -12,6 +12,9 @@ import { isFeatureEnabled } from "@/lib/features";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { promoteIssueInProgress } from "@/lib/issue-transitions";
 import { announceIssueReply } from "@/lib/issue-reply-notify";
+import { THREAD_READ_CAP } from "@/lib/api-body-limits";
+import { splitAtCap, truncationHeaders } from "@/lib/truncation";
+import { olderThanWhere, parseThreadCursor } from "@/lib/thread-cursor";
 import type { Issue } from "@/generated/prisma";
 import type { Translator } from "@/lib/i18n/translate";
 
@@ -20,7 +23,7 @@ type RouteContext = { params: Promise<{ id: string }> };
 // The newest messages a thread read returns. A thread only grows (10 posts a
 // minute per user), and every poll and live refresh re-reads it, so the read
 // is bounded; the request-comment thread has the same cap.
-const MAX_THREAD_MESSAGES = 500;
+const MAX_THREAD_MESSAGES = THREAD_READ_CAP;
 const MAX_MESSAGE_LENGTH = 2000;
 
 // The thread is the reporter's and the issue admins'. With issue reporting
@@ -52,15 +55,19 @@ export const GET = withAuth(async (req, { params }: RouteContext, session) => {
   if (refused) return refused;
 
   // The newest MAX_THREAD_MESSAGES, answered oldest first: the response stays the
-  // bare array clients decode (guardrail 25).
+  // bare array clients decode (guardrail 25). `?before=<createdAt>|<id>` reads the
+  // page of messages older than that one (same shape and cap; X-Truncated says
+  // whether still older ones remain).
+  const before = parseThreadCursor(req.nextUrl.searchParams.get("before"));
   const newest = await prisma.issueMessage.findMany({
-    where: { issueId: id },
+    where: { issueId: id, ...olderThanWhere(before) },
     include: { author: { select: { name: true, role: true, ...(isAdmin ? { email: true } : {}) } } },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    take: MAX_THREAD_MESSAGES,
+    take: MAX_THREAD_MESSAGES + 1,
   });
+  const { rows, truncated } = splitAtCap(newest, MAX_THREAD_MESSAGES);
 
-  return NextResponse.json(newest.reverse());
+  return NextResponse.json(rows.reverse(), { headers: truncationHeaders(truncated, MAX_THREAD_MESSAGES) });
 });
 
 export const POST = withAuth(async (req, { params }: RouteContext, session) => {

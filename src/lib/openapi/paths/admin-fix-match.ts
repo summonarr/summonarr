@@ -102,6 +102,7 @@ export const adminFixMatchPaths: OpenApiPaths = {
         "429": { description: "Rate limited (10/min/admin), or too many fix-match operations already queued" },
         "409": { description: "Another fix-match job for the same item (a different target) is still running or queued — wait for it to finish, then send this again" },
         "502": { description: "Remote remap or the follow-up cache write failed; `error` says what the media server reported (locked item, still processing, unreadable, not confirmed, …)" },
+        "503": { description: "Maintenance mode (non-ADMIN callers)" },
       },
     },
   },

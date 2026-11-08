@@ -10,6 +10,7 @@
 //     posted and the token route's own answer is returned, so the caller shows
 //     the real cause instead of the request route's "invalid request token".
 import { withBasePath } from "@/lib/base-path";
+import { timedFetch } from "@/lib/client/fetch-json";
 
 type RequestMediaType = "MOVIE" | "TV";
 
@@ -20,7 +21,7 @@ export async function fetchRequestToken(
   mediaType: RequestMediaType,
   signal?: AbortSignal,
 ): Promise<string | Response> {
-  const res = await fetch(withBasePath(`/api/requests/token?tmdbId=${tmdbId}&mediaType=${mediaType}`), { signal });
+  const res = await timedFetch(withBasePath(`/api/requests/token?tmdbId=${tmdbId}&mediaType=${mediaType}`), { signal });
   if (!res.ok) return res;
   const data = (await res.json().catch(() => null)) as { token?: unknown } | null;
   if (typeof data?.token === "string" && data.token) return data.token;
@@ -28,7 +29,7 @@ export async function fetchRequestToken(
 }
 
 function send(payload: Record<string, unknown>, token: string, signal?: AbortSignal): Promise<Response> {
-  return fetch(withBasePath("/api/requests"), {
+  return timedFetch(withBasePath("/api/requests"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...payload, _token: token }),

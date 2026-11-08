@@ -1,7 +1,7 @@
 "use client";
 
 import { withBasePath } from "@/lib/base-path";
-import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { fetchJson, LONG_RUN_TIMEOUT_MS, jsonInit } from "@/lib/client/fetch-json";
 import { useT } from "@/components/i18n/i18n-provider";
 import { answerOf, refreshOutcome } from "./outcomes";
 import { useTrashRun } from "./use-trash-run";
@@ -26,7 +26,7 @@ export function useCatalogRefresh(onDone: () => void | Promise<void>) {
     // A refresh pulls the whole catalog from GitHub and writes it: no client
     // timeout, or a slow success would read as a failure.
     const res = await run.request((signal) =>
-      fetchJson(withBasePath(`/api/admin/trash-guides/refresh`), { init: jsonInit("POST", {}), timeoutMs: Infinity, signal }),
+      fetchJson(withBasePath(`/api/admin/trash-guides/refresh`), { init: jsonInit("POST", {}), timeoutMs: LONG_RUN_TIMEOUT_MS, signal }),
     );
     if (!res) return;
     const answer = answerOf(res);

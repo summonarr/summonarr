@@ -182,7 +182,9 @@ test("only the newest library load writes state, and an overtaken Save & Test re
   assert.match(load, /inFlight\.current\?\.abort\(\);/);
   // An overtaken Save & Test reports the newest load instead of leaving its spinner up.
   assert.match(src, /latestLoad\.current = load;\s*return load;/);
-  assert.match(src, /let result = await loadLibraries\(\);[\s\S]{0,200}?while \(result\.superseded && latestLoad\.current\) result = await latestLoad\.current;/);
+  // It follows a newer load only while there is one it has not already awaited: after an
+  // unmount the newest load is itself superseded, and re-awaiting it would loop forever.
+  assert.match(src, /let result = await loadLibraries\(\);[\s\S]{0,700}?while \(result\.superseded && latestLoad\.current && latestLoad\.current !== awaited\) \{\s*awaited = latestLoad\.current;\s*result = await awaited;/);
   // An answer that isn't a library list is the load error, never a render crash.
   assert.match(load, /const listed = res\.ok \? parseLibraryItems\(service, res\.data\) : null;/);
   for (const file of ["forms/plex-connect-form.tsx", "forms/jellyfin-sync-form.tsx"]) {

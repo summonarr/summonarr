@@ -108,6 +108,7 @@
   "profile.mfa.error.requestFailed": "A requisição falhou ({status})",
   "profile.sessions.title": "Sessões ativas",
   "profile.sessions.description": "Dispositivos conectados no momento. Revogue qualquer sessão que você não reconheça.",
+  "profile.sessions.capped": "Mostrando suas {cap} sessões ativas mais recentemente; as mais antigas não aparecem.",
   "profile.sessions.empty": "Nenhuma sessão ativa.",
   "profile.sessions.count_one": "{count} sessão ativa",
   "profile.sessions.count_other": "{count} sessões ativas",

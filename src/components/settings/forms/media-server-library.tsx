@@ -76,7 +76,14 @@ export function useLibraryLoader(service: LibraryService, autoLoad: boolean) {
     let result = await loadLibraries();
     // Another load started meanwhile (a later Save & Test, or the mount load
     // re-run): report the newest one, which is what the picker now shows.
-    while (result.superseded && latestLoad.current) result = await latestLoad.current;
+    // Follow a newer load only while there is one we have not already awaited:
+    // after an unmount the newest load is itself superseded, and re-awaiting it
+    // would loop forever.
+    let awaited: Promise<LibrariesLoad> | null = null;
+    while (result.superseded && latestLoad.current && latestLoad.current !== awaited) {
+      awaited = latestLoad.current;
+      result = await awaited;
+    }
     return result;
   }, [loadLibraries]);
 

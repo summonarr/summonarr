@@ -7,7 +7,6 @@ import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { jellyfinLibraryRow } from "@/lib/library-rows";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
-import { logAudit } from "@/lib/audit";
 import { getCronActor, type CronActor } from "@/lib/cron-auth";
 import { cronSkippedResponse, withCronRunRecording } from "@/lib/cron-history";
 import { BATCH_TX_TIMEOUT, batchCreateMany } from "@/lib/batch-write";
@@ -27,7 +26,8 @@ import {
   reidentifiedJellyfinRows,
   resyncWindDownResponse,
   runResyncHoldingLock,
-  stampLibrarySyncSuccess,
+  finishResync,
+  stampResyncSuccess,
   type HoldLock,
 } from "@/lib/library-resync";
 
@@ -171,13 +171,9 @@ async function syncJellyfin(request: NextRequest, rawBody: Record<string, unknow
     await replaceJellyfinLibraryForInstances([{ slug: instance, rows: (movieRows as JellyfinLibraryRow[]).concat(tvRows) }]);
   }
 
-  // Stamp last-success for the orchestrator's 24h-stale fallback ONLY for the
-  // shape whose success the orchestrator's own stamp means — a FULL replace of
-  // the DEFAULT instance when it is the ONLY one (see the Plex twin for the
-  // starvation a named-instance, multi-server or recentOnly stamp causes).
-  if (instance === DEFAULT_MEDIA_INSTANCE && !recentOnly && jellyfinInstances.length <= 1) {
-    await stampLibrarySyncSuccess("jellyfin", "sync/jellyfin");
-  }
+  // Keeps the orchestrator's 24h-stale fallback from firing falsely when the
+  // admin resyncs more recently than the orchestrator runs.
+  await stampResyncSuccess("jellyfin", { instance, recentOnly, registeredServers: jellyfinInstances.length });
 
   if (signal.aborted) return resyncWindDownResponse(t);
 
@@ -189,25 +185,7 @@ async function syncJellyfin(request: NextRequest, rawBody: Record<string, unknow
     logScope: "sync/jellyfin",
   });
 
-  // Attribution comes from the SAME DB-checked session read that authorized the
-  // request (getCronActor in POST), consistent with the orchestrator/plex sync.
-  // A CRON_SECRET run has no session to attribute.
-  if (actor.trigger === "admin") {
-    void logAudit({
-      userId: actor.userId,
-      userName: actor.userName,
-      action: "LIBRARY_SYNC",
-      target: "sync:jellyfin",
-      details: { movies: movieIds.size, tv: tvIds.size, marked, full: !recentOnly },
-    });
-  }
-
-  return NextResponse.json({
-    scanned: { movies: movieIds.size, tv: tvIds.size },
-    checked,
-    marked,
-    full: !recentOnly,
-  });
+  return finishResync("jellyfin", actor, { movies: movieIds.size, tv: tvIds.size, checked, marked, recentOnly });
 }
 
 // recentOnly is INSERT-ONLY (guardrail 13): never a delete of this server's

@@ -71,6 +71,20 @@ function prewarmUrl(tmdbId: number, mediaType: "MOVIE" | "TV"): string {
   return url.toString();
 }
 
+// The parts of a details body buildDetailsMedia dereferences without a guard:
+// an id, and every nested list it filters or maps must be a list when present.
+const results = v.optional(v.object({ results: v.optional(v.array(v.unknown())) }));
+const DETAILS_ENVELOPE = v.object({
+  id: v.int(),
+  seasons: v.optional(v.array(v.unknown())),
+  genres: v.optional(v.array(v.unknown())),
+  production_companies: v.optional(v.array(v.unknown())),
+  production_countries: v.optional(v.array(v.unknown())),
+  release_dates: results,
+  content_ratings: results,
+  videos: results,
+});
+
 // TMDB's details body, "missing" for a 404, or null when there was no usable
 // answer (already warned).
 async function fetchDetailsBody(
@@ -108,7 +122,15 @@ async function fetchDetailsBody(
   // token '', \"\"..."), making the failure mode impossible to diagnose from the log alone.
   const bodyText = await res.text();
   try {
-    return JSON.parse(bodyText) as TmdbDetailsBody;
+    const body: unknown = JSON.parse(bodyText);
+    const parsed = check(DETAILS_ENVELOPE, body);
+    if (!parsed.ok) {
+      console.warn(`[prewarm] TMDB ${label} answered an unusable body: ${parsed.error}`);
+      return null;
+    }
+    // The checked copy keeps only the envelope's keys; the builder reads the
+    // full body, so hand it the original.
+    return body as TmdbDetailsBody;
   } catch (err) {
     const head = bodyText.slice(0, 80);
     const hex = Buffer.from(bodyText.slice(0, 16), "utf-8").toString("hex");

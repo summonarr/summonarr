@@ -9,6 +9,7 @@ import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { withBasePath } from "@/lib/base-path";
 import { manualRunOutcome } from "@/lib/cron-run-outcome";
+import { LONG_RUN_TIMEOUT_MS, timedFetch } from "@/lib/client/fetch-json";
 
 export interface CronJobInfo {
   name: string;
@@ -80,7 +81,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
     const setRunError = (message: string | null) => setRunErrors((prev) => withMessage(prev, name, message));
     const setSkipNote = (message: string | null) => setSkipNotes((prev) => withMessage(prev, name, message));
     try {
-      const res = await fetch(withBasePath(endpoint), { method: "POST" });
+      const res = await timedFetch(withBasePath(endpoint), { method: "POST" }, LONG_RUN_TIMEOUT_MS);
       const parsed: unknown = await res.json().catch(() => null);
       const data = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
       // Real failures come back as a non-2xx status (e.g. upcoming's 502) or

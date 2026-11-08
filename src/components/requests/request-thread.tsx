@@ -9,8 +9,11 @@ import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { COMMENT_MAX_CHARS } from "@/lib/request-comments";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
-import { failedLoadState, isNearBottom, type ThreadLoadState } from "@/lib/client/thread-view";
-import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { failedLoadState, isNearBottom, prependOlder, type ThreadLoadState } from "@/lib/client/thread-view";
+import { THREAD_READ_CAP } from "@/lib/api-body-limits";
+import { fetchJson, jsonInit, timedFetch } from "@/lib/client/fetch-json";
+import { threadCursorOf } from "@/lib/thread-cursor";
+import { TRUNCATED_HEADER } from "@/lib/truncation";
 import { mergeReload, readComment, readComments, type CommentData } from "./request-thread-data";
 
 interface RequestThreadProps {
@@ -48,6 +51,13 @@ export function RequestThread({
   const [body, setBody] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  // Whether comments older than the shown ones may exist. Set by the first read
+  // (a full page may have more behind it) and by each "load older" answer; a live
+  // reload never changes it, since the merge keeps every comment already loaded.
+  const [olderState, setOlderState] = useState<"unknown" | "more" | "none">("unknown");
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [olderFailed, setOlderFailed] = useState(false);
+  const olderCtrlRef = useRef<AbortController | null>(null);
   // The thread's own scroll box — the only thing ever scrolled, so a reload
   // never moves the page (scrollIntoView scrolls every scrollable ancestor).
   const listRef = useRef<HTMLDivElement>(null);
@@ -82,6 +92,7 @@ export function RequestThread({
       // The list is capped by the route (its newest 500), so it never lowers
       // a count known to be higher; comments are never removed.
       setCount((c) => Math.max(c, list.length));
+      setOlderState((s) => (s === "unknown" ? (list.length >= THREAD_READ_CAP ? "more" : "none") : s));
       setLoadState("ready");
     },
     [requestId],
@@ -93,6 +104,33 @@ export function RequestThread({
     void load(ctrl.signal);
     return () => ctrl.abort();
   }, [open, load]);
+
+  useEffect(() => () => olderCtrlRef.current?.abort(), []);
+
+  // The page of comments older than the oldest shown (the route's `before`
+  // cursor). The answer's X-Truncated header says whether still older ones remain.
+  async function loadOlder() {
+    const oldest = comments[0];
+    if (!oldest || loadingOlder) return;
+    olderCtrlRef.current?.abort();
+    const ctrl = new AbortController();
+    olderCtrlRef.current = ctrl;
+    setLoadingOlder(true);
+    setOlderFailed(false);
+    try {
+      const url = withBasePath(`/api/requests/${requestId}/comments?before=${encodeURIComponent(threadCursorOf(oldest))}`);
+      const res = await timedFetch(url, { signal: ctrl.signal });
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      const page = readComments(await res.json());
+      stickRef.current = false;
+      setComments((prev) => prependOlder(prev, page));
+      setOlderState(res.headers.get(TRUNCATED_HEADER) === "true" ? "more" : "none");
+    } catch {
+      if (!ctrl.signal.aborted) setOlderFailed(true);
+    } finally {
+      if (!ctrl.signal.aborted) setLoadingOlder(false);
+    }
+  }
 
   useLiveEvents(
     useCallback(
@@ -212,6 +250,15 @@ export function RequestThread({
             )}
             {loadState === "ready" && comments.length === 0 && (
               <p className="text-xs" style={{ color: "var(--ds-fg-subtle)" }}>{t("shared.thread.empty")}</p>
+            )}
+
+            {loadState === "ready" && olderState === "more" && (
+              <div className="flex items-center gap-2">
+                <Button type="button" size="xs" variant="ghost" disabled={loadingOlder} onClick={() => void loadOlder()}>
+                  {loadingOlder ? t("shared.thread.loadingOlder") : t("shared.thread.loadOlder")}
+                </Button>
+                {olderFailed && <p role="alert" className="text-xs text-red-400">{t("shared.thread.loadOlderFailed")}</p>}
+              </div>
             )}
 
             {comments.map((c) => {

@@ -11,12 +11,13 @@ const { BACKUP_ENUMS } = await import("../src/lib/backup-schema.ts");
 
 type Row = Record<string, unknown>;
 // A raw-query client over one in-memory table, recording each statement.
-function fakeTx(rows: Row[], pk: string[]) {
+function fakeTx(rows: Row[], pk: string[], columnTypes: Row[] = []) {
   const statements: Array<{ sql: string; values: unknown[] }> = [];
   return {
     statements,
     async $queryRawUnsafe<T>(sql: string, ...values: unknown[]): Promise<T> {
       statements.push({ sql, values });
+      if (sql.includes("pg_attribute") && sql.includes("pg_type")) return columnTypes as T;
       if (sql.includes("pg_index")) return pk.map((attname) => ({ attname })) as T;
       if (sql.includes("pg_enum")) return [{ enumlabel: "MOVIE" }, { enumlabel: "TV's" }] as T;
       const limit = Number(/LIMIT (\d+)/.exec(sql)?.[1]);
@@ -87,4 +88,36 @@ test("escapeSQL writes each value as backup-import's literal allowlist reads it"
   assert.equal(escapeSQL(["a", null, `b'"\\`]), `'{"a",NULL,"b''\\"\\\\"}'`);
   assert.equal(escapeSQL({ k: "it's" }), `'{"k":"it''s"}'`);
   assert.equal(escapeSQL("x\u0000y'z"), "'xy''z'");
+});
+
+test("a Json column is written as its own JSON text whatever its JS shape", () => {
+  assert.equal(escapeSQL(["a", "b"], "json"), `'["a","b"]'`);
+  assert.equal(escapeSQL("it's", "json"), `'"it''s"'`);
+  assert.equal(escapeSQL(5, "json"), "'5'");
+  assert.equal(escapeSQL({ k: [1] }, "json"), `'{"k":[1]}'`);
+  assert.equal(escapeSQL(null, "json"), "NULL");
+  // The same array in a native ARRAY column keeps the array literal.
+  assert.equal(escapeSQL(["a", "b"], "array"), `'{"a","b"}'`);
+  for (const sample of [["x", 1], "str", 7, true, { a: null }]) {
+    const literal = escapeSQL(sample, "json");
+    assert.match(literal, /^'(?:[^']|'')*'$/, "backup-import's literal allowlist must still accept it");
+    assert.deepEqual(JSON.parse(literal.slice(1, -1).replace(/''/g, "'")), sample, "the literal parses back to the value");
+  }
+});
+
+test("dumpTable reads each column's type and writes Json and array columns by it", async () => {
+  const tx = fakeTx(
+    [{ id: "a", payload: ["x", "y"], ids: ["1", "2"] }],
+    ["id"],
+    [
+      { attname: "id", typname: "text", typcategory: "S" },
+      { attname: "payload", typname: "jsonb", typcategory: "U" },
+      { attname: "ids", typname: "_text", typcategory: "A" },
+    ],
+  );
+  const out: string[] = [];
+  await dumpTable(tx, "Thing", async (t) => { out.push(t); });
+  const insert = out.find((l) => l.startsWith("INSERT")) ?? "";
+  assert.ok(insert.includes(`'["x","y"]'`), insert);
+  assert.ok(insert.includes(`'{"1","2"}'`), insert);
 });

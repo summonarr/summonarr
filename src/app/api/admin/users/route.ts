@@ -16,6 +16,8 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import { deriveUserSource } from "@/lib/user-source";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
+import { parsePageParam } from "@/lib/pagination";
+import { splitAtCap, truncationHeaders } from "@/lib/truncation";
 
 export const dynamic = "force-dynamic";
 
@@ -91,15 +93,24 @@ function serializeUser(u: UserRow, hasOidcAccount: boolean) {
 // MANAGE_USERS (not withAdmin) so the same capability bit that gates the [id]
 // PATCH/DELETE also gates listing/creating — a MANAGE_USERS holder could
 // otherwise edit and delete users it couldn't list.
-export const GET = withPermission(Permission.MANAGE_USERS)(async (_req, _ctx, _session) => {
-  const users = await prisma.user.findMany({
+// The answer stays the bare array: at most USER_LIST_CAP users per page, and
+// `X-Truncated: true` says more exist — `?page=2` reads the next USER_LIST_CAP.
+const USER_LIST_CAP = 1000;
+
+export const GET = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, _session) => {
+  const page = parsePageParam(req.nextUrl.searchParams);
+  const fetched = await prisma.user.findMany({
     select: USER_SELECT,
-    orderBy: [{ name: "asc" }, { email: "asc" }],
-    take: 1000,
+    orderBy: [{ name: "asc" }, { email: "asc" }, { id: "asc" }],
+    skip: (page - 1) * USER_LIST_CAP,
+    take: USER_LIST_CAP + 1,
   });
+  const { rows: users, truncated } = splitAtCap(fetched, USER_LIST_CAP);
 
   const oidcIds = await oidcAccountHolders(users);
-  return NextResponse.json(users.map((u) => serializeUser(u, oidcIds.has(u.id))));
+  return NextResponse.json(users.map((u) => serializeUser(u, oidcIds.has(u.id))), {
+    headers: truncationHeaders(truncated, USER_LIST_CAP),
+  });
 });
 
 // One Account read for the whole list (like the admin page), and only for the
