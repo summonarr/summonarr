@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.38.0 — stable and running in production. Found a problem? See [Feedback](#feedback).
+> **Status:** v0.39.0 — stable and running in production. Found a problem? See [Feedback](#feedback).
 
 ## Install
 
@@ -171,6 +171,34 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted and the developer collects no data. The one server the developer runs is the push relay for iOS notifications, which can't be self-hosted and never sees media titles or usernames (see [APNs relay trust](./docker-container/README.md#apns-relay-trust-ios-push)). The iOS app itself talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.39.0
+
+**Added**
+
+- Request comments and issue messages page back: "Load older messages" appears once a thread passes 500, and the list routes accept an optional `before` cursor.
+- Lists that stop at a cap now say so: the admin users list pages, and the list routes report `X-Truncated` and `X-Truncated-Cap` headers. The play-history JSON export shows a notice when it was cut.
+- Admin queue and download history: clearing a blocklist refuses a stale count (409) instead of clearing a list that changed.
+- A vote-threshold alert that a restart interrupted is delivered afterwards.
+
+**Changed**
+
+- Every request the web app makes now ends: the wait for the answer and for its body are both bounded, so a stalled server shows an error instead of an endless spinner. Requests that wait on Radarr or Sonarr stop after 2 minutes.
+- Votes, the watchlist button, report-issue, setup and several profile forms ignore a second click while one is running.
+- Library scans after an import refresh every configured Plex and Jellyfin server, not only the default one.
+- Backups write each column by its database type.
+
+**Fixed**
+
+- A library picker in Settings could freeze the tab after it was closed mid-load.
+- An empty answer from every media server no longer wipes the episode cache; the sync is held and reported.
+- Jellyfin files that hold several episodes (S01E01-E02) now count every episode.
+- A failed alert read no longer turns a saved vote or a committed batch decline into a 500.
+- Jellyfin sign-in: an unreachable server or a 5xx no longer counts against a user's attempt budget, so it can't be used to lock someone out.
+- Audit retention now also clears account, media-server user and Trakt names.
+- Non-admin edits to a user are re-checked against the target's role at write time.
+- Several upstream and stored answers (TMDB, Plex events, cleanup listings, Discord pending prompts, upload replies) are checked before use instead of trusted.
+- OpenAPI: added the missing 502, 503 and 409 responses and the `before` parameter, and a test now fails when a handler returns a status the spec doesn't list.
 
 ### v0.38.0
 
