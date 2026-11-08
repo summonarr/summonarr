@@ -200,7 +200,7 @@ test("config writes drop every snapshot: a cached read never runs its route's ow
   assert.ok(settings.indexOf("clearArrSnapshots()") > settings.indexOf("await prisma.$transaction("), "after the commit");
   const instances = src("src/app/api/admin/arr-instances/route.ts");
   // Cleared before the audit write; the 4K visibility memo is dropped beside it.
-  assert.match(instances, /clearArrSnapshots\(\);(?:\s*\/\/[^\n]*)*\s*invalidateShow4kVisibilityCache\(\);\s*void logAudit\(/);
+  assert.match(instances.replace(/\/\/[^\n]*/g, ""), /clearArrSnapshots\(\);\s*invalidateShow4kVisibilityCache\(\);\s*void logAudit\(/);
 });
 
 test("dropArrTitleSnapshots drops every title-manager view of that title on that instance, in every language — nothing else", () => {
