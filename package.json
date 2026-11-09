@@ -54,13 +54,13 @@
     "@humanfs/node": "^0.16.8"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.3.3",
+    "@tailwindcss/postcss": "^4.3.5",
     "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "eslint": "^10.13.0",
-    "eslint-config-next": "16.4.3",
+    "eslint": "^10.14.0",
+    "eslint-config-next": "16.4.5",
     "eslint-plugin-react-hooks": "^7.1.1",
     "playwright": "^1.64.1",
     "tailwindcss": "^4.3.1",
