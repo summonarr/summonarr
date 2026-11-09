@@ -10,6 +10,7 @@ import { readPlexPin } from "@/lib/client/login-answers";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
 import type { Translator } from "@/lib/i18n/translate";
 import { randomUuid } from "@/lib/random-id";
+import { PLEX_CLIENT_VERSION, PLEX_PRODUCT } from "@/lib/plex-client-headers";
 
 export function readPlexClientId(): string | null {
   // Cookie is checked first; falls back to localStorage for older sessions that predate the cookie write
@@ -26,11 +27,11 @@ export function writePlexClientId(id: string): void {
 // randomUuid, never crypto.randomUUID: the latter is undefined on a plain-HTTP
 // LAN origin, and calling it threw before any sign-in could start.
 function getPlexClientId(): string {
-  let id = readPlexClientId();
-  if (!id) {
-    id = randomUuid();
-    writePlexClientId(id);
-  }
+  const id = readPlexClientId() ?? randomUuid();
+  // Written back even when it was read (from localStorage, for a session that
+  // predates the cookie): the cookie is what everything else reads, and this
+  // also renews its lifetime.
+  writePlexClientId(id);
   return id;
 }
 
@@ -43,12 +44,14 @@ function getPlexDeviceMeta(): PlexDeviceMeta {
     return { platform: "Android", device: "Android", model: "Android", layout: "mobile" };
   }
 
-  if (/iPad|iPhone|iPod/.test(ua)) {
-    const isIpad = /iPad/.test(ua);
+  // iPadOS 13+ sends a Macintosh user agent; only a touch screen gives it away.
+  const isIpadOs = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
+  if (/iPad|iPhone|iPod/.test(ua) || isIpadOs) {
+    const isIpad = /iPad/.test(ua) || isIpadOs;
     return { platform: "iOS", device: isIpad ? "iPad" : "iPhone", model: isIpad ? "iPad" : "iPhone", layout: "mobile" };
   }
 
-  let browser = "Chrome";
+  let browser = "Web";
   if (/Edg\//.test(ua)) browser = "Edge";
   else if (/Firefox\//.test(ua)) browser = "Firefox";
   else if (/Chrome\//.test(ua)) browser = "Chrome";
@@ -113,12 +116,12 @@ export async function startPlexSignIn(opts: {
     code: pin.code,
     forwardUrl: plexForwardUrl(base, state),
     device: {
-      product: "Summonarr",
-      version: "1.0",
+      product: PLEX_PRODUCT,
+      version: PLEX_CLIENT_VERSION,
       platform: deviceMeta.platform,
-      platformVersion: "1.0",
+      platformVersion: PLEX_CLIENT_VERSION,
       device: deviceMeta.device,
-      deviceName: "Summonarr",
+      deviceName: PLEX_PRODUCT,
       model: deviceMeta.model,
       layout: deviceMeta.layout,
     },

@@ -1,4 +1,4 @@
-// Audit fixes for Admin → Download History (C036–C039, C085):
+// Audit fixes for Admin → Download History:
 //   - a grab's state on a list that can't hold its newer records is UNKNOWN,
 //     never "neither" (grabStateKnown + the History page's `filtered` prop);
 //   - a blocklist entry deep in the list that shifted by a page since the admin
@@ -73,7 +73,7 @@ beforeEach(() => {
   settings.set("radarrApiKey", "radarr-key");
 });
 
-// ── C039: a grab's state on a list that can't hold its newer records ─────────
+// ── a grab's state on a list that can't hold its newer records ─────────
 
 const ep = (id: number, kind: string, downloadId: string | null): ArrHistoryEvent => {
   const e = projectHistoryRecord("sonarr", "", {
@@ -117,7 +117,7 @@ test("the list believes a grab's state only where it could hold the newer record
   assert.match(view, /setHistory\(data\);\s*setHistoryKind\(view\.kind\);/);
 });
 
-// ── C037: Mark failed pins the view; Clear/Remove wait for the clear ─────────
+// ── Mark failed pins the view; Clear/Remove wait for the clear ─────────
 
 const page = () => readFileSync(new URL("../src/components/admin/arr-download-history.tsx", import.meta.url), "utf8");
 const fnBody = (src: string, name: string) => {
@@ -153,7 +153,7 @@ test("while Clear blocklist's command is followed, Clear and Remove stay disable
   assert.match(src, /clearing=\{clearing\}/);
 });
 
-// ── C036: a clear the arr answered with no command id re-reads once ──────────
+// ── a clear the arr answered with no command id re-reads once ──────────
 
 test("a clear answered with no command id re-reads the list instead of leaving it stale", () => {
   const body = fnBody(page(), "clearAll");
@@ -161,7 +161,7 @@ test("a clear answered with no command id re-reads the list instead of leaving i
   assert.match(noId, /setNotice\(t\("adminArr\.blocklist\.cleared"\)\);\s*void reload\(\);/);
 });
 
-// ── C038: a row's Mark failed error doesn't outlive a successful retry ────────
+// ── a row's Mark failed error doesn't outlive a successful retry ────────
 
 test("a Mark failed retry clears the row's earlier error before it runs", () => {
   const list = readFileSync(new URL("../src/components/admin/arr-history-list.tsx", import.meta.url), "utf8");
@@ -210,7 +210,7 @@ test("the list reads its grab states once per list (memoised), never grabStateOf
   assert.doesNotMatch(list, /grabStateOf\(/);
 });
 
-// ── C085: an entry shifted by a page past the scan's cap ─────────────────────
+// ── an entry shifted by a page past the scan's cap ─────────────────────
 
 /**
  * A blocklist of `total` original entries (ids 1..total, newest first) after

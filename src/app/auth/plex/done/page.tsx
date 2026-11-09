@@ -60,6 +60,33 @@ async function describePlexSignInFailure(res: Response, t: Translator): Promise<
     : t("auth.plexDone.error.status", { status: res.status });
 }
 
+// The final sign-in POST is bounded like the polls: a server that accepts the
+// connection and never answers must end in the retry link, not a lasting spinner.
+const SIGN_IN_REQUEST_TIMEOUT_MS = 30_000;
+
+// What one poll attempt decided: stop the loop, or wait `delayMs` and go again
+// (undefined keeps the default interval).
+type PollAttempt = { stop: true } | { delayMs?: number };
+
+// The wall-clock polling window shared by both flows. A thrown attempt (a
+// network error or a per-request timeout) just polls again. Resolves true when
+// an attempt asked to stop, false when the window ended or the page went away.
+async function pollWindow(signal: AbortSignal, attempt: () => Promise<PollAttempt>): Promise<boolean> {
+  const deadline = pollDeadline(PIN_POLL_WINDOW_MS);
+  while (deadline.remaining() > 0 && !signal.aborted) {
+    let delayMs = PIN_POLL_INTERVAL_MS;
+    try {
+      const next = await attempt();
+      if ("stop" in next) return true;
+      if (next.delayMs !== undefined) delayMs = next.delayMs;
+    } catch {
+      // A network error or a per-request timeout: poll again.
+    }
+    await abortableSleep(Math.min(delayMs, deadline.remaining()), signal);
+  }
+  return false;
+}
+
 // Landing page after the Plex PIN sign-in redirect. It polls until the user has
 // approved the PIN, then finishes either a login or the admin Settings connect.
 export default function PlexDonePage() {
@@ -85,33 +112,35 @@ export default function PlexDonePage() {
     // Poll plex.tv directly until the user approves the PIN in the Plex UI. The
     // window is wall-clock (each request is bounded too), so a stalled
     // connection can't hold the spinner past it.
-    let authToken: string | null = null;
-    const deadline = pollDeadline(PIN_POLL_WINDOW_MS);
-    while (deadline.remaining() > 0 && !signal.aborted) {
-      let delayMs = PIN_POLL_INTERVAL_MS;
-      try {
-        const r = await fetch(`https://plex.tv/api/v2/pins/${auth.pinId}`, {
-          headers: plexClientHeaders(auth.clientId),
-          signal: anySignal(signal, requestTimeoutSignal(PIN_POLL_REQUEST_TIMEOUT_MS)),
-        });
-        const step = plexPinPollStep(r.status, r.headers.get("retry-after"));
-        if (step.kind === "expired") {
-          // An unknown or expired PIN can never be approved: say so now
-          // rather than after the whole window.
-          fail(t("auth.plexDone.error.expired"));
-          return;
-        }
-        if (step.kind === "read") {
-          const d: unknown = await r.json().catch(() => null);
-          const token = typeof d === "object" && d !== null ? (d as { authToken?: unknown }).authToken : undefined;
-          if (typeof token === "string" && token) { authToken = token; break; }
-        } else {
-          delayMs = step.delayMs;
-        }
-      } catch {
-        // A network error or a per-request timeout: poll again.
+    // Assigned inside the poll closure, so typed wide for the reads after it.
+    let authToken = null as string | null;
+    let expired = false as boolean;
+    await pollWindow(signal, async () => {
+      const r = await fetch(`https://plex.tv/api/v2/pins/${auth.pinId}`, {
+        headers: plexClientHeaders(auth.clientId),
+        signal: anySignal(signal, requestTimeoutSignal(PIN_POLL_REQUEST_TIMEOUT_MS)),
+      }).catch(() => null);
+      // A network error or a per-request timeout: poll again.
+      if (!r) return {};
+      const step = plexPinPollStep(r.status, r.headers.get("retry-after"));
+      if (step.kind === "expired") {
+        // An unknown or expired PIN can never be approved: say so now
+        // rather than after the whole window.
+        expired = true;
+        return { stop: true };
       }
-      await abortableSleep(Math.min(delayMs, deadline.remaining()), signal);
+      if (step.kind !== "read") return { delayMs: step.delayMs };
+      const d: unknown = await r.json().catch(() => null);
+      const token = typeof d === "object" && d !== null ? (d as { authToken?: unknown }).authToken : undefined;
+      if (typeof token === "string" && token) {
+        authToken = token;
+        return { stop: true };
+      }
+      return {};
+    });
+    if (expired) {
+      fail(t("auth.plexDone.error.expired"));
+      return;
     }
     if (signal.aborted) return;
 
@@ -127,6 +156,7 @@ export default function PlexDonePage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
+        signal: anySignal(signal, requestTimeoutSignal(SIGN_IN_REQUEST_TIMEOUT_MS)),
         body: JSON.stringify({
           plexToken: authToken,
           plexClientId: auth.clientId,
@@ -157,37 +187,38 @@ export default function PlexDonePage() {
     // once Plex approves it — the token never reaches the browser. Plex only
     // forwards here after approval, so the first poll normally saves it.
     setMessage(t("auth.plexDone.saving"));
-    let connected = false;
+    let connected = false as boolean;
+    let failure = null as "fail" | "serverError" | null;
     let serverErrors = 0;
-    const deadline = pollDeadline(PIN_POLL_WINDOW_MS);
-    while (deadline.remaining() > 0 && !signal.aborted) {
-      let delayMs = PIN_POLL_INTERVAL_MS;
-      try {
-        // Above the route's own 15s plex.tv timeout, so a slow plex.tv answer
-        // still arrives.
-        const r = await fetch(withBasePath("/api/auth/plex/pin"), {
-          method: "PATCH",
-          signal: anySignal(signal, requestTimeoutSignal(SETTINGS_POLL_REQUEST_TIMEOUT_MS)),
-        });
-        serverErrors = r.status >= 500 ? serverErrors + 1 : 0;
-        const step = settingsPollStep(r.status, r.headers.get("retry-after"), r.headers.get("content-type"), serverErrors);
-        if (step.kind === "fail") {
-          fail(t("auth.plexDone.error.saveFailed"), "settings");
-          return;
-        }
-        if (step.kind === "serverError") {
-          fail(t("auth.plexDone.error.saveServer"), "settings");
-          return;
-        }
-        if (step.kind === "read") {
-          if (isConnectedBody(await r.json().catch(() => null))) { connected = true; break; }
-        } else {
-          delayMs = step.delayMs;
-        }
-      } catch {
-        // A network error or a per-request timeout: poll again.
+    await pollWindow(signal, async () => {
+      // Above the route's own 15s plex.tv timeout, so a slow plex.tv answer
+      // still arrives.
+      const r = await fetch(withBasePath("/api/auth/plex/pin"), {
+        method: "PATCH",
+        signal: anySignal(signal, requestTimeoutSignal(SETTINGS_POLL_REQUEST_TIMEOUT_MS)),
+      }).catch(() => null);
+      // No answer (network error or timeout): poll again, not counted as a server error.
+      if (!r) return {};
+      serverErrors = r.status >= 500 ? serverErrors + 1 : 0;
+      const step = settingsPollStep(r.status, r.headers.get("retry-after"), r.headers.get("content-type"), serverErrors);
+      if (step.kind === "fail" || step.kind === "serverError") {
+        failure = step.kind;
+        return { stop: true };
       }
-      await abortableSleep(Math.min(delayMs, deadline.remaining()), signal);
+      if (step.kind !== "read") return { delayMs: step.delayMs };
+      if (isConnectedBody(await r.json().catch(() => null))) {
+        connected = true;
+        return { stop: true };
+      }
+      return {};
+    });
+    if (failure === "fail") {
+      fail(t("auth.plexDone.error.saveFailed"), "settings");
+      return;
+    }
+    if (failure === "serverError") {
+      fail(t("auth.plexDone.error.saveServer"), "settings");
+      return;
     }
     if (signal.aborted) return;
 

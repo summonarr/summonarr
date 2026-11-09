@@ -274,13 +274,8 @@ export function planMarks(plays: readonly WatchSyncPlay[], targets: MarkTargets)
     if (at && (!prev || at > prev)) byItem.set(id, at);
   };
   for (const p of plays) {
-    let ids: readonly string[] | undefined;
-    if (p.mediaType === "MOVIE") {
-      ids = targets.movies.get(p.tmdbId);
-    } else if (p.seasonNumber !== null && p.seasonNumber > 0 && p.episodeNumber !== null) {
-      ids = targets.episodes.get(p.tmdbId)?.get(`${p.seasonNumber}:${p.episodeNumber}`);
-    }
-    if (!ids || ids.length === 0) { unmatched++; continue; }
+    const ids = targetIdsFor(p, targets);
+    if (ids.length === 0) { unmatched++; continue; }
     for (const id of ids) add(id, p.viewedAt);
   }
   return { marks: [...byItem].map(([targetId, datePlayed]) => ({ targetId, datePlayed })), unmatched };

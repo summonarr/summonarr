@@ -84,7 +84,7 @@ export default async function TopRatedPage({
     t("browse.top.sortedBy", { label: t(SORT_LABEL_KEYS[sortBy]) }),
     sourceCount > 1 ? t("browse.top.sources", { count: sourceCount }) : null,
     t("browse.top.titles", { count: totalMovieCount + totalTvCount }),
-  ].filter(Boolean) as string[];
+  ].filter((bit): bit is string => bit !== null);
 
   // When nothing survived in EITHER visible section, one empty state for the
   // page — not the same card once under each section heading.

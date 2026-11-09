@@ -73,23 +73,13 @@ export default async function PopularOnServerPage({
   searchParams: Promise<PageSearchParams>;
 }) {
   await requireFeature("feature.page.popular");
-  const [sp, session, plexEnabled, jellyfinEnabled, t] = await Promise.all([
+  const [sp, session, plexEnabled, jellyfinEnabled, playHistoryEnabled, t] = await Promise.all([
     searchParams,
     requireAppSession(),
     isFeatureEnabled("feature.integration.plex"),
     isFeatureEnabled("feature.integration.jellyfin"),
-    getTranslator(),
-  ]);
-  // Integration flags passed explicitly — they default to TRUE when omitted.
-  const { showPlex, showJellyfin } = getBadgeVisibility(session, {
-    plex: plexEnabled,
-    jellyfin: jellyfinEnabled,
-  });
-  const canRequestMovie = canRequest(session.user.permissions, "MOVIE", false);
-  const canRequestTv = canRequest(session.user.permissions, "TV", false);
-  const [show4k, playHistoryEnabled] = await Promise.all([
-    getShow4kVisibility(session),
     isPlayHistoryEnabled(),
+    getTranslator(),
   ]);
 
   // This page is built entirely from recorded play history. When tracking is
@@ -107,6 +97,15 @@ export default async function PopularOnServerPage({
       </div>
     );
   }
+
+  // Integration flags passed explicitly — they default to TRUE when omitted.
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, {
+    plex: plexEnabled,
+    jellyfin: jellyfinEnabled,
+  });
+  const canRequestMovie = canRequest(session.user.permissions, "MOVIE", false);
+  const canRequestTv = canRequest(session.user.permissions, "TV", false);
+  const show4k = await getShow4kVisibility(session);
 
   // Only the two real types filter; anything else (a hand-edited ?mediaType=)
   // is "all" — otherwise it showed both sections with no tab marked and was

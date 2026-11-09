@@ -114,23 +114,27 @@ export function usePermissionEdits(u: User) {
   // field's save finishing must not hide another's still out.
   const [pending, setPending] = useState(0);
   const saving = pending > 0;
-  const [error, setError] = useState<string | null>(null);
+  // The last refusal and the field it was about: another field's later save
+  // must not hide it; only the same field saving clears it.
+  const [failure, setFailure] = useState<{ field: string; text: string } | null>(null);
+  const error = failure?.text ?? null;
   // Something was saved since the editor opened: the page is re-read on close.
   const savedAny = useRef(false);
 
   // One PATCH of one field. Resolves true when the server took it; a refusal
   // shows the route's own reason (fetchJson's apiErrorText) or its status.
   async function patch(body: Record<string, unknown>): Promise<boolean> {
+    const field = Object.keys(body)[0] ?? "";
     setPending((n) => n + 1);
-    setError(null);
     const res = await fetchJson(withBasePath(`/api/admin/users/${u.id}`), { init: jsonInit("PATCH", body) });
     setPending((n) => n - 1);
     if (res.ok) {
       savedAny.current = true;
+      setFailure((f) => (f?.field === field ? null : f));
       return true;
     }
     const text = requestFailureText(res, t, { status: "adminManage.notif.failed", network: "adminManage.users.error.network" });
-    if (text !== null) setError(text);
+    if (text !== null) setFailure({ field, text });
     return false;
   }
   const patchRef = useRef(patch);
@@ -202,7 +206,7 @@ export function usePermissionEdits(u: User) {
       // value rather than leave unsaved text looking committed (and blocking
       // every close after this one).
       setQuota((q) => ({ ...q, [field]: formatQuota(saver.value) }));
-      setError(t("adminManage.perm.quota.invalid"));
+      setFailure({ field, text: t("adminManage.perm.quota.invalid") });
       return Promise.resolve(false);
     }
     // Show what is saved: "2.7" is sent as 2 and "-3" as 0.

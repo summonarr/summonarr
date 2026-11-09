@@ -74,7 +74,11 @@ async function fetchUsers(base: string, apiKey: string): Promise<{ httpStatus: n
       timeoutMs: 30_000,
     });
     httpStatus = res.status;
-    return { httpStatus, rawBody: await res.json(), fetchError: null };
+    // The body is read apart from the status: a 401/500 page that is not JSON
+    // must report the HTTP status, not a parse error from the next line.
+    const rawBody: unknown = await res.json().catch(() => null);
+    if (!res.ok) return { httpStatus, rawBody, fetchError: `http:${httpStatus}` };
+    return { httpStatus, rawBody, fetchError: rawBody === null ? "invalid-json" : null };
   } catch (err) {
     // A coarse kind, never the message: a SafeFetchError's text names the
     // admin-configured server's scheme, host and port (and on the SSRF-policy

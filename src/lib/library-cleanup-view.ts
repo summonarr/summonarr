@@ -152,7 +152,11 @@ export function filterCleanupRows<T extends CleanupViewRow>(rows: readonly T[], 
   });
 }
 
-const time = (iso: string | null) => (iso ? new Date(iso).getTime() : null);
+// A malformed date is an unknown one: NaN would make the comparator inconsistent.
+const time = (iso: string | null) => {
+  const ms = iso ? new Date(iso).getTime() : NaN;
+  return Number.isFinite(ms) ? ms : null;
+};
 
 export function sortCleanupRows<T extends CleanupViewRow>(rows: readonly T[], sort: CleanupSortKey, dir: "asc" | "desc"): T[] {
   const sign = dir === "asc" ? 1 : -1;

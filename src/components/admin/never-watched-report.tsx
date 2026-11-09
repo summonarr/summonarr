@@ -151,12 +151,15 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
   const [checking, setChecking] = useState(false);
   const [checkNote, setCheckNote] = useState("");
   const loadSeq = useRef(0);
+  // The report read in flight: a newer one (or unmount) cancels it.
+  const loadAbort = useRef<AbortController | null>(null);
   const freshNext = useRef(false);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      loadAbort.current?.abort();
     };
   }, []);
 
@@ -171,6 +174,9 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
 
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
+    loadAbort.current?.abort();
+    const ac = new AbortController();
+    loadAbort.current = ac;
     setLoading(true);
     setLoadError("");
     const params = new URLSearchParams({
@@ -191,10 +197,11 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
     // The first build of the report reads the whole library: no client-side timeout.
     const res = await fetchJson(withBasePath(`/api/admin/never-watched?${params}`), {
       schema: NwPageWire,
+      signal: ac.signal,
       timeoutMs: LONG_RUN_TIMEOUT_MS,
       fallbackError: t("adminManage.neverWatched.error.load"),
     });
-    if (seq !== loadSeq.current) return;
+    if (seq !== loadSeq.current || (!res.ok && res.kind === "aborted")) return;
     setLoading(false);
     if (!res.ok) {
       setLoadError(res.kind === "network" ? t("adminManage.neverWatched.error.loadNetwork") : res.error);
@@ -472,6 +479,7 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
           canSelectAll={selectableOnPage.length > 0}
           onToggleAll={toggleAllOnPage}
           isSelected={(r) => selected.has(cleanupKeyOf(r))}
+          selectionFull={selected.size >= MAX_SELECTION}
           onToggle={toggle}
           isBusy={(r) => busyKeys.has(cleanupKeyOf(r))}
           onProtect={(r, on) => void setProtected(r, on)}
@@ -742,7 +750,7 @@ function SortHead({ k, label, align, sort }: { k: NwSortKey; label: string; alig
 }
 
 function TitleTable({
-  titleRows, cleanupEnabled, sort, allOnPage, canSelectAll, onToggleAll, isSelected, onToggle, isBusy, onProtect, day, formatBytes,
+  titleRows, cleanupEnabled, sort, allOnPage, canSelectAll, onToggleAll, isSelected, selectionFull, onToggle, isBusy, onProtect, day, formatBytes,
 }: {
   titleRows: readonly NwTitleRow[];
   cleanupEnabled: boolean;
@@ -751,6 +759,8 @@ function TitleTable({
   canSelectAll: boolean;
   onToggleAll: () => void;
   isSelected: (r: NwTitleRow) => boolean;
+  /** The selection is at its cap: an unticked row can't be added. */
+  selectionFull: boolean;
   onToggle: (r: NwTitleRow) => void;
   isBusy: (r: NwTitleRow) => boolean;
   onProtect: (r: NwTitleRow, on: boolean) => void;
@@ -790,6 +800,7 @@ function TitleTable({
           r={r}
           cleanupEnabled={cleanupEnabled}
           checked={isSelected(r)}
+          capped={selectionFull && !isSelected(r)}
           onToggle={() => onToggle(r)}
           busy={isBusy(r)}
           onProtect={(on) => onProtect(r, on)}
@@ -882,11 +893,13 @@ function PosterTitleCell({ posterPath, title, href, children }: { posterPath: st
 }
 
 function TitleRow({
-  r, cleanupEnabled, checked, onToggle, busy, onProtect, day, formatBytes,
+  r, cleanupEnabled, checked, capped, onToggle, busy, onProtect, day, formatBytes,
 }: {
   r: NwTitleRow;
   cleanupEnabled: boolean;
   checked: boolean;
+  /** Unticked while the selection is full: nothing more can be added. */
+  capped: boolean;
   onToggle: () => void;
   busy: boolean;
   onProtect: (on: boolean) => void;
@@ -905,8 +918,8 @@ function TitleRow({
             type="checkbox"
             aria-label={t("adminManage.cleanup.select", { title: r.title })}
             checked={checked}
-            disabled={!r.eligible}
-            title={r.eligible ? undefined : t("adminManage.neverWatched.notEligible")}
+            disabled={!r.eligible || capped}
+            title={r.eligible ? (capped ? t("adminManage.cleanup.selectionFull", { max: MAX_SELECTION }) : undefined) : t("adminManage.neverWatched.notEligible")}
             onChange={onToggle}
           />
         </td>

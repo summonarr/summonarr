@@ -1,5 +1,5 @@
 // The admin nav's Download Queue badge stays fresh between full page loads
-// (audit C004). App Router layouts do not re-render on client navigation, so
+//. App Router layouts do not re-render on client navigation, so
 // the count the (app) layout rendered used to freeze for the whole session —
 // a monitor run moved nothing, and a stopped monitor's count never aged out.
 //

@@ -9,6 +9,7 @@ import {
   UPSTREAM_REFRESH_RESULT,
   WATCH_SYNC_PAIR_RESULT,
   LIBRARY_PREWARM_COUNTS,
+  tooLargeAnswer,
 } from "../shared";
 import type { OpenApiSchema, OpenApiPaths } from "../types";
 
@@ -58,7 +59,7 @@ export const cronPaths: OpenApiPaths = {
         "400": { description: "Body is not valid JSON (or is nested deeper than 64 levels), or the payload's tmdbId is invalid" },
         "401": { description: "Invalid token" },
         "409": { description: "Replayed delivery" },
-        "413": { description: "Body over 1 MB" },
+        "413": tooLargeAnswer(1024 * 1024),
         "429": { description: "More than 600 deliveries a minute from one client IP" },
       },
     },
@@ -101,7 +102,7 @@ export const cronPaths: OpenApiPaths = {
         "400": { description: "Body is not valid JSON, or is nested deeper than 64 levels (an unusable tmdbId/tvdbId never 400s here: it is ignored and the delivery is verified by the series' other id)" },
         "401": { description: "Invalid token" },
         "409": { description: "Replayed delivery" },
-        "413": { description: "Body over 1 MB" },
+        "413": tooLargeAnswer(1024 * 1024),
         "429": { description: "More than 600 deliveries a minute from one client IP" },
       },
     },
@@ -216,7 +217,7 @@ export const cronPaths: OpenApiPaths = {
       security: ADMIN_OR_CRON_SECURITY,
       responses: {
         "200": {
-          description: "{ ok, deleted: { authSessions, discordLinkTokens, discordMergeCodes, ... counts per table }, errorCount, aborted, timestamp, error? } — a failed table sweep, or a run stopped on its lock signal, answers ok:false with `error` and X-Cron-Degraded (still 200) — or { skipped: true, reason } when another run holds the lock (X-Cron-Skipped). Only rows past their `expiresAt` are swept (guardrail 6c)",
+          description: "{ ok, deleted: { authSessions, discordLinkTokens, discordMergeCodes, ... counts per table }, errorCount, aborted, timestamp, error? } — a failed table sweep, or a run stopped on its lock signal, answers ok:false with `error` and X-Cron-Degraded (still 200) — or { skipped: true, reason } when another run holds the lock (X-Cron-Skipped). Session rows are swept only past their `expiresAt` (guardrail 6c); ipLookupCache and auditLogs rows are purged by retention age (fetchedAt / createdAt), not by `expiresAt`",
           content: {
             "application/json": {
               schema: cronRunOrSkip({

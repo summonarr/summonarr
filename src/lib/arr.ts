@@ -289,15 +289,30 @@ export async function getMovieReleaseInfo(tmdbId: number): Promise<{
         headers: auth.headers,
         timeoutMs: 10_000,
       });
-      if (!res.ok) return null;
+      const logKey = `arr:release-info:${tmdbId}`;
+      if (!res.ok) {
+        warnOnChange(logKey, String(res.status), `[arr] TMDB release dates for ${tmdbId} answered ${res.status}`);
+        return null;
+      }
       const body = check(TmdbReleaseDates, await res.json());
       // An unusable answer is a failed fetch: nothing is cached.
-      if (!body.ok) return null;
+      if (!body.ok) {
+        warnOnChange(logKey, "unusable", `[arr] TMDB release dates for ${tmdbId} sent an unusable answer`);
+        return null;
+      }
+      forgetWarnOnChange(logKey);
       details = releaseInfoFrom(body.value);
-      await setCache(cacheKey, details, TTL.DETAILS);
+      // The answer is good whether or not it could be kept.
+      await setCache(cacheKey, details, TTL.DETAILS).catch((err: unknown) => {
+        console.warn("[arr] release-info cache write failed for tmdbId %s:", tmdbId, err instanceof Error ? err.message : err);
+      });
     }
     return homeReleaseDates(details);
-  } catch { return null; }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    warnOnChange(`arr:release-info:${tmdbId}`, message, `[arr] TMDB release dates for ${tmdbId} failed: ${message}`);
+    return null;
+  }
 }
 
 // ── Sonarr series by tmdb id ────────────────────────────────────────────────

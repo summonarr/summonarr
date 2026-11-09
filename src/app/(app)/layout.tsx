@@ -149,7 +149,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       <NavigationProgress />
       <Sidebar siteTitle={siteTitle} featureFlags={featureFlags} />
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-        <Header />
+        <Header featureFlags={featureFlags} />
         <MobileNav featureFlags={featureFlags} />
         {maintenanceEnabled && isAdmin && (
           <MaintenanceBanner message={maintenanceMessage} />

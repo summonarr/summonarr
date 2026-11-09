@@ -118,7 +118,13 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
     include: { author: { select: { name: true, role: true, ...(isIssueAdmin ? { email: true } : {}) } } },
   });
 
-  await applyReplyStatusChange(issue, isIssueAdmin, session, req);
+  // The message is stored: a failed status follow-up must not turn the answer
+  // into a 500, or a retry would post the reply a second time.
+  try {
+    await applyReplyStatusChange(issue, isIssueAdmin, session, req);
+  } catch (err) {
+    console.error("[issues] Reply stored but its status change failed:", err instanceof Error ? err.message : err);
+  }
   emitSSE({ type: "issuemessage:created", issueId: id, messageId: message.id, userId: issue.reportedBy });
 
   await announceIssueReply({

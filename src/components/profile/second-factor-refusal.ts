@@ -4,8 +4,7 @@
 // with it is use-second-factor-step-up.ts.
 import { apiErrorText } from "@/lib/client/api-error";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
-
-type Translate = (key: string, vars?: Record<string, string | number>) => string;
+import type { Translator } from "@/lib/i18n/translate";
 
 export interface SecondFactorRefusal {
   // The methods the server listed when it asked for a second factor;
@@ -19,7 +18,7 @@ export function readSecondFactorRefusal(
   res: { status: number; headers: { get(name: string): string | null } },
   body: unknown,
   sentProof: boolean,
-  t: Translate,
+  t: Translator,
   fallback: string,
 ): SecondFactorRefusal {
   const data = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};

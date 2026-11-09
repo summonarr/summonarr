@@ -1550,6 +1550,17 @@ test("candidates with NO serverInstance uses the DEFAULT instance's row + server
   assert.deepEqual(origins(), [new URL(PLEX_DEFAULT).origin]);
 });
 
+test("candidates: a stored ratingKey that is not a positive integer is a 404 and Plex is never queried for item 0", async () => {
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", plexRatingKey: "abc" });
+  const res = await candidates(req(candidatesUrl({
+    server: "plex", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: "222",
+  }), { headers: a.header }), undefined);
+  assert.equal(res.status, 404);
+  assert.equal(fetchCalls.length, 0);
+});
+
 test("candidates GET is rate limited per admin: the 31st call inside a minute → 429 before any validation or read", async () => {
   const a = await admin();
   configureServers();

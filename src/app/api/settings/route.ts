@@ -66,28 +66,30 @@ processSingleton("settings:lastKeyWriteSweep", () =>
 // values over the stored rows) BEFORE anything is written: approvals, crons
 // and webhooks never see an unverified URL or key, and a failure leaves nothing
 // to roll back. A probe runs when either half of its pair is submitted,
-// changed or not — re-pressing "Save & Test" re-tests. The messages stay in
-// English for TEST_RESULT_MESSAGE_KEYS; the result keys are what the forms
-// (arr-form, jellyfin-sync-form) and the iOS app read.
+// changed or not — re-pressing "Save & Test" re-tests. The result keys are what
+// the forms (arr-form, jellyfin-sync-form) and the iOS app read; the error text
+// is translated here, in the requesting admin's language.
 interface ConnectionProbe {
   urlKey: SettingKey;
   keyKey: SettingKey;
   okKey: string;
   errorKey: string;
+  /** English log label; the client text is `messageKey`. */
   message: string;
+  messageKey: string;
   run: (url: string, apiKey: string) => Promise<string | true>;
 }
 
 const CONNECTION_PROBES: readonly ConnectionProbe[] = [
-  { urlKey: "radarrUrl", keyKey: "radarrApiKey", okKey: "radarrVersion", errorKey: "radarrError", message: "Radarr connection failed", run: testRadarrConnection },
-  { urlKey: "sonarrUrl", keyKey: "sonarrApiKey", okKey: "sonarrVersion", errorKey: "sonarrError", message: "Sonarr connection failed", run: testSonarrConnection },
-  { urlKey: "radarr4kUrl", keyKey: "radarr4kApiKey", okKey: "radarr4kVersion", errorKey: "radarr4kError", message: "Radarr 4K connection failed", run: testRadarrConnection },
-  { urlKey: "sonarr4kUrl", keyKey: "sonarr4kApiKey", okKey: "sonarr4kVersion", errorKey: "sonarr4kError", message: "Sonarr 4K connection failed", run: testSonarrConnection },
+  { urlKey: "radarrUrl", keyKey: "radarrApiKey", okKey: "radarrVersion", errorKey: "radarrError", message: "Radarr connection failed", messageKey: "apiAdmin.settings.test.radarr", run: testRadarrConnection },
+  { urlKey: "sonarrUrl", keyKey: "sonarrApiKey", okKey: "sonarrVersion", errorKey: "sonarrError", message: "Sonarr connection failed", messageKey: "apiAdmin.settings.test.sonarr", run: testSonarrConnection },
+  { urlKey: "radarr4kUrl", keyKey: "radarr4kApiKey", okKey: "radarr4kVersion", errorKey: "radarr4kError", message: "Radarr 4K connection failed", messageKey: "apiAdmin.settings.test.radarr4k", run: testRadarrConnection },
+  { urlKey: "sonarr4kUrl", keyKey: "sonarr4kApiKey", okKey: "sonarr4kVersion", errorKey: "sonarr4kError", message: "Sonarr 4K connection failed", messageKey: "apiAdmin.settings.test.sonarr4k", run: testSonarrConnection },
   // The Jellyfin URL feeds the hourly orchestrator, the 5s play-history poller
   // (guardrail 19's sole Jellyfin history writer) and Jellyfin sign-in.
   // getJellyfinMediaFolders routes through safeFetchAdminConfigured (5a).
   {
-    urlKey: "jellyfinUrl", keyKey: "jellyfinApiKey", okKey: "jellyfinTested", errorKey: "jellyfinError", message: "Jellyfin connection failed",
+    urlKey: "jellyfinUrl", keyKey: "jellyfinApiKey", okKey: "jellyfinTested", errorKey: "jellyfinError", message: "Jellyfin connection failed", messageKey: "apiAdmin.common.jellyfinConnectionFailed",
     run: async (url, apiKey) => { await getJellyfinMediaFolders(url, apiKey); return true; },
   },
 ];
@@ -103,27 +105,6 @@ const DISCORD_REGISTRATION_KEYS = ["discordBotToken", "discordClientId", "discor
 // A value a client sent on purpose: not empty, not the echoed mask.
 const isRealValue = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && value !== MASKED_VALUE;
-
-// The connectivity-test messages are kept in English and translated only on the
-// way out. An upstream-supplied message (an SMTP error's own text) has no entry
-// and passes through unchanged.
-const TEST_RESULT_MESSAGE_KEYS: Record<string, string> = {
-  "Radarr connection failed": "apiAdmin.settings.test.radarr",
-  "Sonarr connection failed": "apiAdmin.settings.test.sonarr",
-  "Radarr 4K connection failed": "apiAdmin.settings.test.radarr4k",
-  "Sonarr 4K connection failed": "apiAdmin.settings.test.sonarr4k",
-  "Jellyfin connection failed": "apiAdmin.common.jellyfinConnectionFailed",
-  "Email test failed. Check your email settings.": "apiAdmin.settings.test.email",
-};
-
-function localizeTestResults(results: Record<string, unknown>, t: Translator): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(results)) {
-    const key = typeof v === "string" && k.endsWith("Error") ? TEST_RESULT_MESSAGE_KEYS[v] : undefined;
-    out[k] = key ? t(key) : v;
-  }
-  return out;
-}
 
 // AuditLog.details is VarChar(8000) and the SETTINGS_CHANGE row is written
 // INSIDE the save transaction, so an oversized details string failed the insert
@@ -294,6 +275,7 @@ async function runProbes(
   submitted: ReadonlyMap<SettingKey, string>,
   req: NextRequest,
   adminEmail: string | null | undefined,
+  t: Translator,
 ): Promise<{ testResults: Record<string, unknown>; failed: boolean }> {
   const testResults: Record<string, unknown> = {};
   const runs: Promise<boolean>[] = [];
@@ -308,7 +290,7 @@ async function runProbes(
           // The admin sees the fixed message; the log keeps the cause (TLS, 401,
           // DNS, timeout). arrErrorMessage never prints an upstream body (5e).
           console.warn(`[settings] ${p.message}: ${arrErrorMessage(err)}`);
-          testResults[p.errorKey] = p.message;
+          testResults[p.errorKey] = t(p.messageKey);
           return false;
         },
       ),
@@ -327,7 +309,7 @@ async function runProbes(
         (err: unknown) => {
           testResults.smtpError = err instanceof Error
             ? capAuditValue(err.message, SMTP_ERROR_MAX)
-            : "Email test failed. Check your email settings.";
+            : t("apiAdmin.settings.test.email");
           return false;
         },
       ),
@@ -504,14 +486,15 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     submitted,
     req,
     session.user.email,
+    t,
   );
   if (testFailed) {
     releaseCooldown();
-    return NextResponse.json({ ok: false, ...localizeTestResults(testResults, t), ...extra }, { status: 422 });
+    return NextResponse.json({ ok: false, ...testResults, ...extra }, { status: 422 });
   }
   if (entries.length === 0) {
     releaseCooldown();
-    return NextResponse.json({ ok: true, ...localizeTestResults(testResults, t), ...extra });
+    return NextResponse.json({ ok: true, ...testResults, ...extra });
   }
 
   try {
@@ -527,5 +510,5 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   // on a Channels/Roles-tab save that touched neither.
   if (settingEffects(changedKeys).has("discordCommands")) void reregisterDiscordCommands();
 
-  return NextResponse.json({ ok: true, ...localizeTestResults(testResults, t), ...extra });
+  return NextResponse.json({ ok: true, ...testResults, ...extra });
 });

@@ -8,6 +8,7 @@ import { ENCRYPTED_BACKUP_MAGIC, isEncryptedBackupFile } from "@/lib/client/back
 import { chunkedUploadErrorMessage, uploadInChunks, type ChunkedUploadOutcome, type ChunkedUploadProgress } from "@/lib/chunked-upload";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { rich } from "@/components/settings/forms/rich";
 
 const MB = 1024 * 1024;
 
@@ -16,6 +17,7 @@ function formatFileSize(bytes: number): string {
 }
 
 function percentOf(progress: ChunkedUploadProgress): number {
+  if (progress.total <= 0) return 0;
   return Math.round((progress.uploaded / progress.total) * 100);
 }
 
@@ -39,7 +41,12 @@ function useSetupImport(onBusyChange?: (busy: boolean) => void) {
   // Cancel, or an unmount mid-upload, stops it (before the final chunk; once
   // that is sent the server is already restoring and finishes on its own).
   const uploadAbortRef = useRef<AbortController | null>(null);
-  useEffect(() => () => uploadAbortRef.current?.abort(), []);
+  // The redirect to /login after a successful restore; an unmount cancels it.
+  const redirectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    uploadAbortRef.current?.abort();
+    if (redirectTimerRef.current !== null) clearTimeout(redirectTimerRef.current);
+  }, []);
 
   async function handleFileChange(f: File | null) {
     pickedFileRef.current = f;
@@ -104,7 +111,7 @@ function useSetupImport(onBusyChange?: (busy: boolean) => void) {
     setResult(restored);
     if (restored.ok) {
       // Stays busy: the restore replaced the database, and the redirect follows.
-      setTimeout(() => {
+      redirectTimerRef.current = setTimeout(() => {
         window.location.href = withBasePath("/login");
       }, 1500);
     } else {
@@ -145,11 +152,10 @@ export function SetupImportPanel({ onBusyChange }: { onBusyChange?: (busy: boole
       <div className="space-y-2">
         <p className="text-sm text-zinc-300">{t("auth.restore.title")}</p>
         <p className="text-xs text-zinc-500 leading-relaxed">
-          {t("auth.restore.description").split(/(\{\w+\})/).map((part, i) =>
-            part === "{ext}" ? <code key={i} className="text-zinc-300">.sql.enc</code>
-            : part === "{envVar}" ? <code key={i} className="text-zinc-300">BACKUP_DB_PASSWORD</code>
-            : part,
-          )}
+          {rich(t("auth.restore.description"), {
+            ext: <code className="text-zinc-300">.sql.enc</code>,
+            envVar: <code className="text-zinc-300">BACKUP_DB_PASSWORD</code>,
+          })}
         </p>
       </div>
 

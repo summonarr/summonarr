@@ -77,3 +77,12 @@ test("a connection counts as changed only when its address or key differs from t
   // A new instance: nothing stored yet.
   assert.equal(connectionChanged(connectionWrites({ slug: "a", url: "http://r:7878", apiKey: "k" }), { url: undefined, apiKey: undefined }), true);
 });
+
+test("a root folder that is not text, or is absurdly long, is refused instead of being dropped by the save", () => {
+  const key = "apiAdmin.common.invalidSecret";
+  assert.equal(instancePayloadError({ slug: "anime", rootFolder: 5 }, t), key);
+  assert.equal(instancePayloadError({ slug: "anime", rootFolder: null }, t), key);
+  assert.equal(instancePayloadError({ slug: "anime", rootFolder: "/".padEnd(2_000, "a") }, t), key);
+  assert.equal(instancePayloadError({ slug: "anime", rootFolder: "/movies" }, t), null);
+  assert.equal(instancePayloadError({ slug: "anime" }, t), null);
+});

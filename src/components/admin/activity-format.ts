@@ -204,7 +204,9 @@ export function fmtBitrate(raw: number | null, source: string | null, locale?: s
 export function fmtTimestamp(iso: string | null, mounted: boolean, locale: string, timeZone?: string): string {
   if (!mounted) return "";
   if (!iso) return "—";
-  return new Date(iso).toLocaleString(locale, {
+  const when = new Date(iso);
+  if (Number.isNaN(when.getTime())) return "—";
+  return when.toLocaleString(locale, {
     month: "short",
     day: "numeric",
     hour: "numeric",

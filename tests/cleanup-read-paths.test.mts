@@ -7,7 +7,7 @@
 //   2. The Library cleanup page shows a Protect/Unprotect at once and reloads
 //      the report once per burst of clicks (the GET allows 30 a minute).
 // The execute's uncertain-total-failure re-assert (item 3) is pinned beside the
-// other C014 tests in tests/library-cleanup-routes.test.mts.
+// other tests in tests/library-cleanup-routes.test.mts.
 // No DB, no network: tmdbCache is shadowed in memory, dns.lookup is stubbed and
 // globalThis.fetch answers TMDB's external_ids.
 import { test, beforeEach } from "node:test";

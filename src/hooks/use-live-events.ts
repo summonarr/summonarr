@@ -17,7 +17,12 @@ let retryTimer: ReturnType<typeof setTimeout> | null = null;
 // browser gave up, e.g. a 401 once the session expired mid-stream). One cheap
 // request per interval while the tab stays open; live updates resume within one
 // interval of re-authenticating.
+// The interval doubles per consecutive permanent failure up to the cap, with
+// jitter, so open tabs don't probe a failing endpoint in lockstep; any frame
+// from the stream resets it.
 const PERMANENT_FAILURE_RETRY_MS = 30_000;
+const PERMANENT_FAILURE_RETRY_MAX_MS = 5 * 60_000;
+let failureStreak = 0;
 
 // Every subscriber gets the event even when an earlier one throws: one broken
 // consumer must not starve the others, or the lifecycle code after a dispatch.
@@ -36,6 +41,7 @@ function ensureEventSource() {
   // SSE reconnects automatically on error; do not replace with WebSocket
   const es = new EventSource(withBasePath("/api/events"));
   es.onmessage = (e: MessageEvent) => {
+    failureStreak = 0;
     const event = typeof e.data === "string" ? parseLiveEvent(e.data) : null;
     // A frame this client doesn't know (or a malformed one) is dropped.
     if (event) dispatch(event);
@@ -54,10 +60,12 @@ function ensureEventSource() {
       if (singleton === es) singleton = null;
       if (retryTimer === null && subscribers.size > 0) {
         console.warn("[live-events] SSE connection closed permanently; will re-probe");
+        const base = Math.min(PERMANENT_FAILURE_RETRY_MS * 2 ** failureStreak, PERMANENT_FAILURE_RETRY_MAX_MS);
+        failureStreak += 1;
         retryTimer = setTimeout(() => {
           retryTimer = null;
           if (subscribers.size > 0) ensureEventSource();
-        }, PERMANENT_FAILURE_RETRY_MS);
+        }, base * (0.75 + Math.random() * 0.5));
       }
     } else {
       console.warn("[live-events] SSE connection error, browser will retry");

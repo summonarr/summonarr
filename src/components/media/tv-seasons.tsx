@@ -327,9 +327,10 @@ function SeasonRow({
   const label = seasonLabel(season, t);
   const year = airYear(season.airDate);
   const panelId = `season-${season.seasonNumber}-panel`;
-  const fullyOwned = ownedCount >= season.episodeCount;
+  // An episode count of 0 means TMDB has not filled the season in: never "Complete".
+  const fullyOwned = season.episodeCount > 0 && ownedCount >= season.episodeCount;
   const ownershipLabel =
-    ownedCount === 0
+    ownedCount === 0 || season.episodeCount <= 0
       ? null
       : fullyOwned
       ? t("detail.seasons.complete")

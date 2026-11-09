@@ -25,12 +25,12 @@ import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { SonarrSeasonSummary } from "@/lib/arr";
 import { apiErrorText } from "@/lib/client/api-error";
-import { fetchJson, ARR_WRITE_TIMEOUT_MS, jsonInit, type FetchJsonFailure } from "@/lib/client/fetch-json";
+import { fetchJson, ARR_WRITE_TIMEOUT_MS, jsonInit } from "@/lib/client/fetch-json";
+import { fetchFailureText } from "@/lib/client/fetch-failure-text";
 import { RELEASE_SEARCH_POLL_MS, runReleaseSearchJob } from "@/lib/client/release-search-job";
 import { check } from "@/lib/validate";
 import { ageFormatter, sizeFormatter } from "@/components/admin/queue-format";
 import { ReleasesAnswer, SeasonsAnswer, type ArrReleaseWire } from "@/components/admin/release-search-schema";
-import type { Translator } from "@/lib/i18n/translate";
 
 
 const SLOW_SEARCH_MS = 15_000;
@@ -60,12 +60,6 @@ function titleReleaseQuery(target: TitleReleaseTarget): string {
   const q = new URLSearchParams({ service: target.service, instance: target.instance, id: String(target.arrId) });
   for (const [k, v] of Object.entries(titleScopeParams(target))) q.set(k, String(v));
   return q.toString();
-}
-
-// No answer (the network, or the browser's wait) reads as a network error; a
-// refusal is the route's own reason.
-function failureText(res: FetchJsonFailure, t: Translator): string {
-  return res.kind === "network" || res.kind === "timeout" ? t("shared.thread.networkError") : res.error;
 }
 
 type Phase = "seasons" | "releases" | "grab" | null;
@@ -144,7 +138,7 @@ function useReleaseSearch({
       }
       const list = parsed.value.releases;
       setReleases(list);
-      setSelected((list.find((r) => !r.rejected) ?? list[0])?.guid ?? null);
+      setSelected((list.find((r) => !r.rejected && r.downloadAllowed) ?? list.find((r) => !r.rejected) ?? list[0])?.guid ?? null);
     } catch {
       if (id === seq.current) setError(tRef.current("shared.thread.networkError"));
     } finally {
@@ -176,15 +170,18 @@ function useReleaseSearch({
       return invalidate;
     }
     const id = ++seq.current;
+    // The seasons read stops with the dialog too, not just its result.
+    const reading = new AbortController();
     setLoading("seasons");
     (async () => {
       const res = await fetchJson(withBasePath(`/api/requests/${requestId}/releases`), {
         schema: SeasonsAnswer,
+        signal: reading.signal,
         fallbackError: t("adminQueue.releases.failed"),
       });
       if (id !== seq.current) return;
       if (!res.ok) {
-        setError(failureText(res, t));
+        setError(fetchFailureText(res, t) ?? "");
         setLoading(null);
         return;
       }
@@ -198,7 +195,10 @@ function useReleaseSearch({
       }
       void search(first);
     })();
-    return invalidate;
+    return () => {
+      reading.abort();
+      invalidate();
+    };
   }, [open, isTv, requestId, search]);
 
   function pickSeason(next: number) {
@@ -228,7 +228,7 @@ function useReleaseSearch({
       });
     setLoading(null);
     if (!res.ok) {
-      setError(failureText(res, t));
+      setError(fetchFailureText(res, t) ?? "");
       return;
     }
     setGrabbed(true);
@@ -405,6 +405,8 @@ function ReleaseList({
   const rejectedCount = releases.filter((r) => r.rejected).length;
   // Grab waits for the selection to be visible: the filter never moves it.
   const selectedVisible = visible.some((r) => r.guid === selected);
+  // A release the arr says it will not download is listed but cannot be grabbed.
+  const notDownloadable = releases.find((r) => r.guid === selected)?.downloadAllowed === false;
 
   return (
     <>
@@ -456,7 +458,12 @@ function ReleaseList({
           <button type="button" onClick={onCancel} disabled={grabbing} className="rounded px-2 py-1 text-sm text-zinc-500 hover:text-zinc-300">
             {t("shared.common.cancel")}
           </button>
-          <Button size="sm" onClick={onGrab} disabled={!selected || !selectedVisible || grabbing}>
+          <Button
+            size="sm"
+            onClick={onGrab}
+            disabled={!selected || !selectedVisible || grabbing || notDownloadable}
+            title={notDownloadable ? t("adminQueue.releases.notDownloadable") : undefined}
+          >
             {grabbing ? <Loader2 className="animate-spin" /> : <Download />}
             {t("adminQueue.issueActions.grab")}
           </Button>

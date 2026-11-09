@@ -39,7 +39,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   throw new Error(`unexpected fetch ${method} ${url}`);
 }) as typeof fetch;
 
-const { postMediaRequest, fetchRequestToken } = await import("../src/lib/client/media-request.ts");
+const { postMediaRequest, fetchRequestToken, submitMediaRequest } = await import("../src/lib/client/media-request.ts");
 
 const posts = () => calls.filter((c) => c.method === "POST");
 const tokenFetches = () => calls.filter((c) => c.url.startsWith("/api/requests/token"));
@@ -134,4 +134,26 @@ test("a network failure minting the retry's token returns the 403 — unless the
     (err: unknown) => err instanceof DOMException && err.name === "AbortError",
   );
   assert.equal(posts().length, 2, "nothing is resent after the abort");
+});
+
+test("submitMediaRequest reads the answer into an outcome and an abort still propagates", async () => {
+  const t = (key: string) => key;
+  const payload = { tmdbId: 1, mediaType: "MOVIE" as const };
+  postAnswers = [() => json(409, {})];
+  assert.equal(await submitMediaRequest(payload, "tok", t), "duplicate");
+  postAnswers = [() => json(200, { alreadyAvailable: true })];
+  assert.equal(await submitMediaRequest(payload, "tok", t), "alreadyAvailable");
+  postAnswers = [() => json(201, { id: "x" })];
+  assert.equal(await submitMediaRequest(payload, "tok", t), "created");
+  postAnswers = [() => new Response("not json", { status: 200 })];
+  assert.equal(await submitMediaRequest(payload, "tok", t), "created");
+  postAnswers = [() => json(500, { error: "boom" })];
+  assert.deepEqual(await submitMediaRequest(payload, "tok", t), { error: "boom" });
+
+  const ctrl = new AbortController();
+  postAnswers = [() => {
+    ctrl.abort();
+    throw new DOMException("aborted", "AbortError");
+  }];
+  await assert.rejects(submitMediaRequest(payload, "tok", t, ctrl.signal));
 });

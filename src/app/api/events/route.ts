@@ -130,7 +130,7 @@ function openEventStream(userId: string, initialScope: SseDeliveryScope): Readab
   return new ReadableStream<Uint8Array>({
     start(controller) {
       listener = (event: SSEEvent) => {
-        const evtUserId = (event as { userId?: string }).userId;
+        const evtUserId = "userId" in event ? event.userId : undefined;
         if (!shouldDeliverSseEvent(scope, userId, event.type, evtUserId)) return;
         try {
           // Back-pressure check: stop pushing if the consumer is not reading fast enough
@@ -138,7 +138,7 @@ function openEventStream(userId: string, initialScope: SseDeliveryScope): Readab
             cleanup(controller);
             return;
           }
-          const frame = sseClientFrame(event as SSEEvent & { userId?: string }, userId);
+          const frame = sseClientFrame(event, userId);
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}\n\n`));
         } catch {
           cleanup(controller);

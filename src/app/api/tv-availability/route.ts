@@ -9,7 +9,7 @@ import {
   visibleEpisodeSourcesFor,
 } from "@/lib/media-visibility";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import { isTmdbIdInRange } from "@/lib/tmdb-id";
+import { isTmdbIdInRange, parseTmdbIdParam } from "@/lib/tmdb-id";
 
 export interface TVSeasonInfo {
   seasonNumber: number;
@@ -29,8 +29,8 @@ export const GET = withAuth(async (req, _ctx, session) => {
 
   const raw = req.nextUrl.searchParams.get("tmdbId");
   if (!raw) return NextResponse.json({ error: t("apiUser.common.tmdbIdRequired") }, { status: 400 });
-  const tmdbId = parseInt(raw, 10);
-  if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
+  const tmdbId = parseTmdbIdParam(raw);
+  if (tmdbId === null) {
     return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
   }
   // INT4 ceiling: a larger id clears the check above and throws out of the

@@ -62,3 +62,19 @@ test("the served spec passes the viewer's check and every operation in it is lis
   assert.ok(declared > 100);
   assert.equal(check(m.OpenApiSpecWire, { paths: {} }).ok, false, "no info: refused");
 });
+
+test("panel ids stay distinct for keys that differ only in punctuation", () => {
+  assert.notEqual(m.panelIdFor("get /a-b"), m.panelIdFor("get /a/b"));
+  assert.notEqual(m.panelIdFor("get /x/{id}"), m.panelIdFor("get /x/id"));
+  assert.match(m.panelIdFor("get /a/{b}"), /^op-[A-Za-z0-9_]+$/);
+});
+
+test("an allOf of non-object parts is not spread into index keys", () => {
+  assert.equal(m.exampleValue({ allOf: [{ type: "string" }] }, {}), "string");
+  assert.deepEqual(m.exampleValue({ allOf: [A, B, { type: "string" }] }, {}), { a: 0, b: "string" });
+});
+
+test("a single quote in the sample command is escaped", () => {
+  const cmd = m.curlCommand({ ...base, path: "/it's" , op: op({}) });
+  assert.ok(cmd.includes("'\\''"), cmd);
+});

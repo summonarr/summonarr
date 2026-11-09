@@ -18,7 +18,7 @@ import {
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import { parseUploadChunkHeaders } from "@/lib/upload-chunk-headers";
-import { auditAdminImport, backupPasswordOrResponse, importResultResponse } from "@/lib/backup-routes";
+import { runAuditedAdminImport, backupPasswordOrResponse, importResultResponse } from "@/lib/backup-routes";
 
 // Per-chunk size cap, the same as the sibling /api/setup/import-chunk route.
 // Without it, one huge chunk could run the server out of memory (OOM) while it is
@@ -141,14 +141,13 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
   let result;
   try {
-    result = await processBackupImport(stream, password);
+    // Audited whether or not it succeeded or threw — after the restore, never
+    // inside it (guardrail 26). Every rejection above happened before the
+    // import and is not.
+    result = await runAuditedAdminImport(req, session, "admin-chunked", () => processBackupImport(stream, password));
   } finally {
     await clearSession(uploadId);
   }
-
-  // Audited whether or not it succeeded — after the restore, never inside it
-  // (guardrail 26). Every rejection above happened before the import and is not.
-  auditAdminImport(req, session, result, "admin-chunked");
   return importResultResponse(result, t, { chunked: true });
 });
 

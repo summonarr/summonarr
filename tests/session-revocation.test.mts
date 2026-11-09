@@ -22,6 +22,8 @@ import {
   markUserForceRevalidate,
   markSessionForceRevoked,
   shouldForceDbCheck,
+  cachedSessionCheckIsStale,
+  invalidateCachedSessionChecks,
 } from "../src/lib/session-revocation.ts";
 
 test("unmarked user + session never forces a DB check (baseline)", () => {
@@ -101,6 +103,17 @@ test("re-marking a user moves it to the newest slot, so FIFO eviction takes the 
   assert.equal(shouldForceDbCheck("evict_d:0", "sess_any"), false);
   assert.equal(shouldForceDbCheck("evict_d:remarked", "sess_any"), true);
   assert.equal(shouldForceDbCheck("evict_d:new", "sess_any"), true);
+});
+
+test("evicting a still-fresh mark at capacity raises the cached-check floor so that session cannot skip the DB", () => {
+  invalidateCachedSessionChecks(0);
+  const t0 = 2_100_000_000;
+  for (let i = 0; i < CAP; i++) markSessionForceRevoked(`evict_f:${i}`, t0);
+  assert.equal(cachedSessionCheckIsStale(t0), false, "no eviction yet, no floor");
+  markSessionForceRevoked("evict_f:over", t0 + 1);
+  assert.equal(cachedSessionCheckIsStale(t0), true, "a check cached before the eviction is now stale");
+  assert.equal(cachedSessionCheckIsStale(t0 + 2), false);
+  invalidateCachedSessionChecks(0);
 });
 
 test("session and user marks are independent namespaces for the same string", () => {

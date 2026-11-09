@@ -58,9 +58,7 @@ async function dirGone(dir: string): Promise<boolean> {
   }
 }
 
-// ---------------------------------------------------------------------------
 // import-session: server-side chunk assembly
-// ---------------------------------------------------------------------------
 
 test("startSession fails closed on malformed ids/sizes and the ciphertext cap, claiming no slot", async () => {
   const bad = await startSession({ uploadId: "not-a-uuid", totalSize: 10, totalChunks: 1 });
@@ -368,9 +366,7 @@ test("concurrent startSession races serialize through the mutex: exactly one cla
   }
 });
 
-// ---------------------------------------------------------------------------
 // chunked-upload: client-side uploader (scripted fetch mock, no network)
-// ---------------------------------------------------------------------------
 
 type FetchArgs = Parameters<typeof fetch>;
 type Recorded = { method: string; headers: Record<string, string>; body: Blob | null };
@@ -605,9 +601,7 @@ test("an empty file is refused up front as empty: no request at all, not even th
   assert.equal(calls.length, 0);
 });
 
-// ---------------------------------------------------------------------------
 // chunked-upload: retry, timeout and cancellation
-// ---------------------------------------------------------------------------
 
 const NO_WAIT = [0, 0, 0];
 
@@ -824,9 +818,7 @@ test("the caller's abort reaches the chunk request in flight", async () => {
   ]);
 });
 
-// ---------------------------------------------------------------------------
 // chunked-upload: error outcomes are codes the caller translates
-// ---------------------------------------------------------------------------
 
 test("a gateway page still failing after the retries is the chunkFailed code with its position and status", async () => {
   const events: string[] = [];

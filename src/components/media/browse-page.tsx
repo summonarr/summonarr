@@ -97,11 +97,12 @@ export async function BrowsePage({
   // `items` is ONE TMDB page (~20), not the result set, so a bare count would
   // read "20 results" above a pager offering hundreds of pages. Page-scoped when
   // there is more than one page; a count only when this page is everything.
-  // A failed fetch states no number — the grid's retry banner says what happened.
-  const subtitle = !hasFilters
-    ? t("browse.popularNow")
-    : failed
-      ? t("browse.filteredResults")
+  // A failed fetch states no number — and no "popular now" over an error banner;
+  // the grid's retry banner says what happened.
+  const subtitle = failed
+    ? hasFilters ? t("browse.filteredResults") : undefined
+    : !hasFilters
+      ? t("browse.popularNow")
       : totalPages > 1
         ? t("browse.pageOf", { page, total: totalPages })
         : t("browse.results", { count: items.length });

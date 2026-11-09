@@ -99,6 +99,22 @@ test("nullish userName → 'unknown'; empty string stays empty; null userId (mac
   assert.equal(creates[2].data.userName, ""); // ?? is nullish-only — "" is a real (empty) name
 });
 
+test("userName, address, agent and provider are length-capped in the row", async () => {
+  await logAudit({
+    userId: "u1",
+    userName: "n".repeat(2000),
+    action: "AUTH_LOGIN",
+    target: "auth:login",
+    ipAddress: "1".repeat(2000),
+    userAgent: "a".repeat(2000),
+    provider: "p".repeat(2000),
+  });
+  const d = creates[creates.length - 1].data;
+  for (const k of ["userName", "ipAddress", "userAgent", "provider"] as const) {
+    assert.equal((d[k] as string).length, 512, k);
+  }
+});
+
 test("userName and target are sanitized before storage (angle brackets, bidi overrides, trim)", async () => {
   await logAudit({
     userId: "u1",

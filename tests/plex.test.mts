@@ -1336,7 +1336,7 @@ test("getPlexWatchHistory THROWS on a non-2xx (a 4xx fast-fails) — the caller 
   assert.equal(fetchCalls.length, 1, "a 401 is not retried");
 });
 
-// Audit C159 (part 5): the cap counts WATCH RECORDS, not raw ones — a music-
+// Audit (part 5): the cap counts WATCH RECORDS, not raw ones — a music-
 // heavy history used to hit it on track plays and drop the oldest VIDEO views
 // (the pre-install ones the snapshot exists for). Raw records have their own
 // ceiling below the pager's silent 2M, which ALSO reports truncated. A history

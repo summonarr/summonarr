@@ -59,6 +59,10 @@ test("an unsafe identifier is refused rather than written into the dump", async 
   await assert.rejects(dumpTable(fakeTx([{ "bad col": 1 }], []), "Thing", async () => {}), /refusing unsafe column name/);
 });
 
+test("an unsafe table name is refused before any query", async () => {
+  await assert.rejects(dumpTable(fakeTx(rows(1), []), 'Thing"; DROP', async () => {}), /refusing unsafe table name/);
+});
+
 test("a dump that stops part-way has counted every row it wrote", async () => {
   let counted = 0;
   let writes = 0;

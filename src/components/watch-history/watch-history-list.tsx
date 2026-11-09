@@ -153,7 +153,7 @@ export function WatchHistoryList({
 
       {history.nextCursor && items.length > 0 && (
         <div className="flex flex-col items-center gap-1.5" style={{ marginTop: 12 }}>
-          <Button variant="outline" size="sm" onClick={history.loadMore} disabled={history.loadingMore}>
+          <Button variant="outline" size="sm" onClick={history.loadMore} disabled={history.loadingMore || history.loadMoreBlocked}>
             {history.loadingMore
               ? t("personal.common.loading")
               : t("personal.common.loadMore", { count: Math.max(0, history.total - items.length) })}

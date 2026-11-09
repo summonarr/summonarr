@@ -426,7 +426,7 @@ function RestoreButton({ imp }: { imp: DbImport }) {
           {progress?.phase === "import"
             ? t("adminManage.backup.importing")
             : progress
-              ? t("adminManage.backup.uploadingPct", { pct: Math.round((progress.uploaded / progress.total) * 100) })
+              ? t("adminManage.backup.uploadingPct", { pct: progress.total > 0 ? Math.round((progress.uploaded / progress.total) * 100) : 0 })
               : t("adminManage.backup.starting")}
         </>
       ) : (
@@ -488,7 +488,7 @@ function UploadProgress({ progress, onCancel }: { progress: ChunkedUploadProgres
         <div
           style={{
             height: "100%",
-            width: `${Math.round((progress.uploaded / progress.total) * 100)}%`,
+            width: `${progress.total > 0 ? Math.round((progress.uploaded / progress.total) * 100) : 0}%`,
             background: "var(--ds-accent)",
             transition: "width 120ms",
           }}

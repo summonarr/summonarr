@@ -33,9 +33,7 @@ function src(source: string, value: number | null, extra: Partial<RatingEntry> =
   return { source, value, ...extra };
 }
 
-// ---------------------------------------------------------------------------
 // Source-name aliases resolve to the right field
-// ---------------------------------------------------------------------------
 
 test("plain source names map to their fields (imdb, tomatoes, metacritic, trakt, rogerebert)", () => {
   const out = parse({
@@ -82,9 +80,7 @@ test("an unknown source name maps to nothing", () => {
   }
 });
 
-// ---------------------------------------------------------------------------
 // Formatting rules
-// ---------------------------------------------------------------------------
 
 test("rottenTomatoes rounds to an integer percent string", () => {
   assert.equal(parse({ ratings: [src("tomatoes", 84.6)] }).rottenTomatoes, "85%");
@@ -165,9 +161,7 @@ test("an imdb entry with a null value can still carry votes", () => {
   assert.equal(out.imdbVotes, "1234");
 });
 
-// ---------------------------------------------------------------------------
 // Null / absent handling
-// ---------------------------------------------------------------------------
 
 const ALL_NULL: MdblistRatings = {
   imdbId: null,
@@ -231,9 +225,7 @@ test("trailer: falsy → null; a real URL passes through untouched", () => {
   assert.equal(parse({ trailer: "https://youtube.com/watch?v=abc" }).trailerUrl, "https://youtube.com/watch?v=abc");
 });
 
-// ---------------------------------------------------------------------------
 // Alias priority when multiple alias entries coexist
-// ---------------------------------------------------------------------------
 
 test("alias priority is argument order, not array order (RT audience)", () => {
   // "audience" is the first-declared alias, so it wins even when other
@@ -274,4 +266,11 @@ test("a malformed `ratings` (an object, or non-object entries) reads as no ratin
   assert.equal(fromObject.rottenTomatoes, null);
   const fromJunk = parse({ ratings: [null, 7, "imdb", src("imdb", 6.1)] as unknown as MdblistBatchRaw["ratings"] });
   assert.equal(fromJunk.imdbRating, "6.1", "the junk entries are skipped, the real one still read");
+});
+
+test("a text field that is not a string reads as absent, never stored as-is", () => {
+  const out = parseBatchItem({ imdb_id: 123, trailer: { url: "x" }, released_digital: 20240101 } as unknown as MdblistBatchRaw);
+  assert.equal(out.imdbId, null);
+  assert.equal(out.trailerUrl, null);
+  assert.equal(out.releasedDigital, null);
 });

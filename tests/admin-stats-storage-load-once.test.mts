@@ -1,4 +1,4 @@
-// Audit fix C078 (part 1): one /admin/stats storage computation loads the
+// one /admin/stats storage computation loads the
 // whole-library watch facts ONCE. The storage section computes the Library
 // cleanup report (computeCleanupReport) AND the never-watched report
 // (getNeverWatchedReport), and each ran the whole loadLibraryWatchFacts load —

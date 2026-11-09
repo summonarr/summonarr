@@ -8,7 +8,7 @@ import { CheckCircle, XCircle, Loader2, Unlink, Download } from "@/components/ic
 import { BASE_PATH, withBasePath } from "@/lib/base-path";
 import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
 import { plexApprovalUrl, plexForwardUrl, plexReturnBase } from "@/lib/client/plex-approval-url";
-import { v } from "@/lib/validate";
+import { v, type Infer } from "@/lib/validate";
 import { useT } from "@/components/i18n/i18n-provider";
 import { rich } from "./rich";
 import { randomUuid } from "@/lib/random-id";
@@ -32,7 +32,7 @@ const AccountServer = v.object({
   name: v.string(),
   connections: v.array(v.object({ uri: v.string(), local: v.boolean(), relay: v.boolean() })),
 });
-type PlexAccountServer = { machineId: string; name: string; connections: { uri: string; local: boolean; relay: boolean }[] };
+type PlexAccountServer = Infer<typeof AccountServer>;
 const AccountServers = v.object({ servers: v.array(AccountServer) });
 const PickedServer = v.object({ url: v.string(), relay: v.optional(v.boolean()) });
 

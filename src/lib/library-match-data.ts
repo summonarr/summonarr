@@ -22,6 +22,8 @@ import { listPlexMatchEntries } from "@/lib/plex";
 import { listJellyfinMatchEntries } from "@/lib/jellyfin";
 import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import { arrErrorKind, arrFetch, getArrCfg, resolveTvdbToTmdb } from "@/lib/arr";
+import { parseLibrarySelection } from "@/lib/library-resync";
+import { sanitizeForLog } from "@/lib/sanitize";
 import type { ArrErrorKind } from "@/lib/arr-error-kind";
 import {
   judgeLibraryMatches,
@@ -63,12 +65,6 @@ export interface LibraryMatchReport {
   flags: MatchFlag[];
   /** Flags past MAX_STORED_FLAGS, not stored. */
   truncated: number;
-}
-
-function parseSelection(value: string | undefined): Set<string> | undefined {
-  if (!value) return undefined;
-  const keys = new Set(value.split(",").map((k) => k.trim()).filter(Boolean));
-  return keys.size ? keys : undefined;
 }
 
 const positiveInt = (v: unknown): number | null =>
@@ -147,7 +143,7 @@ async function readMediaServers(sources: LibraryMatchSource[], signal?: AbortSig
   const selectionRows = selectionKeys.length
     ? await prisma.setting.findMany({ where: { key: { in: selectionKeys } }, select: { key: true, value: true } })
     : [];
-  const selection = new Map(selectionRows.map((r) => [r.key, parseSelection(r.value)]));
+  const selection = new Map(selectionRows.map((r) => [r.key, parseLibrarySelection(r.value)]));
 
   // Every listing is appended one by one, never a spread push: a spread throws
   // RangeError past ~125k entries, which would mark a readable source down
@@ -173,7 +169,7 @@ async function readArrs(sources: LibraryMatchSource[], signal?: AbortSignal): Pr
   const out: ArrMatchEntry[] = [];
   const enabled = { radarr: await isFeatureEnabled("feature.integration.radarr"), sonarr: await isFeatureEnabled("feature.integration.sonarr") };
   for (const service of ["radarr", "sonarr"] as const) {
-    if (!enabled[service]) continue;
+    if (!enabled[service] || signal?.aborted) continue;
     for (const instance of await getSyncableArrInstances(service)) {
       if (signal?.aborted) break;
       try {
@@ -183,6 +179,7 @@ async function readArrs(sources: LibraryMatchSource[], signal?: AbortSignal): Pr
         for (const row of rows) out.push(row); // one by one, as above (guardrail 5i)
         sources.push({ service, instance: instance.slug, ok: true, items: rows.length });
       } catch (err) {
+        console.warn(`[library-match] ${service} "${sanitizeForLog(instance.slug)}" could not be listed:`, arrErrorKind(err));
         sources.push({ service, instance: instance.slug, ok: false, kind: arrErrorKind(err), items: 0 });
       }
     }

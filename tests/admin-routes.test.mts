@@ -1321,6 +1321,25 @@ test("role-change: demoting the LAST admin → 400 (CAS matched 0 rows) with no 
   assert.equal(auditAttempts.length, 0, "a refused demotion must not audit a role change that didn't happen");
 });
 
+test("role-change: a purged account is refused 400 and nothing changes; a merely disabled one still can be re-roled", async () => {
+  const admin = await mintSession("ADMIN");
+  const patchRole = (id: string) =>
+    userPatch(req(`http://localhost:3000/api/admin/users/${id}`, { method: "PATCH", headers: { ...admin.header, "content-type": "application/json" }, body: JSON.stringify({ role: "ISSUE_ADMIN" }) }), ctxFor(id));
+  const purged = seedDisabledUser("USER", { purged: true });
+  assert.equal((await patchRole(purged)).status, 400);
+  assert.equal(usersById.get(purged)?.role, "USER");
+  const disabled = seedDisabledUser("USER");
+  assert.equal((await patchRole(disabled)).status, 200);
+});
+
+test("session revoke is rate limited per admin: the 31st call in a minute is 429 and revokes nothing", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedUser("USER");
+  const call = () => sessionsRevoke(req(`http://localhost:3000/api/admin/users/${targetId}/sessions`, { method: "DELETE", headers: { ...admin.header, "content-type": "application/json" }, body: JSON.stringify({}) }), ctxFor(targetId));
+  for (let i = 0; i < 30; i++) assert.equal((await call()).status, 400);
+  assert.equal((await call()).status, 429);
+});
+
 test("user-delete: deleting the LAST admin → 400 (LastAdminError) with no audit", async () => {
   const admin = await mintSession("ADMIN");
   const targetId = seedUser("ADMIN");

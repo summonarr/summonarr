@@ -1,16 +1,16 @@
 // Audit fixes (wave A, unit "release"): interactive release search and grab.
 //
-//   C025 — the issue Replace list (GET/POST /api/issues/[id]/releases) hands
+// the issue Replace list (GET/POST /api/issues/[id]/releases) hands
 //          out OPAQUE handles in the `guid` field, never the raw indexer guid
 //          (some indexers build it from the apikey'd download link, and the
 //          list reaches MANAGE_ISSUES delegates), and the grab claims a handle
 //          ONCE: a raw guid is 410 with nothing sent and no CAS; two racing
 //          grabs send one release.
-//   C026 — a claimed handle is handed back only when the arr DEFINITELY
+// a claimed handle is handed back only when the arr DEFINITELY
 //          refused (a 4xx other than 408, or the title missing); a 408/5xx
 //          (a gateway that gave up while the arr was sending the release to
 //          the client) spends it, like a timeout.
-//   C110 — the allowed/not-allowed split of a release list is by the TITLE's
+// the allowed/not-allowed split of a release list is by the TITLE's
 //          own quality profile (the movie/series row), never the instance's
 //          add default.
 //
@@ -235,9 +235,9 @@ function scriptMovieGrab(grab: (c: Call) => Response | Promise<Response>): void 
   };
 }
 
-// ═══════════════════ C025 — issue Replace: handles + single claim ═══════════
+// ═══════════════════ issue Replace: handles + single claim ═══════════
 
-test("C025: the issue Replace list hands out a handle in `guid` — the raw guid (an apikey carrier) never reaches the delegate", async () => {
+test("the issue Replace list hands out a handle in `guid` — the raw guid (an apikey carrier) never reaches the delegate", async () => {
   issueRow = movieIssue();
   scriptMovieGrab(() => json({}));
   const delegate = await mintSession("ISSUE_ADMIN", Permission.MANAGE_ISSUES);
@@ -251,7 +251,7 @@ test("C025: the issue Replace list hands out a handle in `guid` — the raw guid
   assert.equal(body[0].indexerId, 3);
 });
 
-test("C025: the grab redeems the handle into the real guid + indexer, audits the release NAME (never the guid), and spends the handle", async () => {
+test("the grab redeems the handle into the real guid + indexer, audits the release NAME (never the guid), and spends the handle", async () => {
   issueRow = movieIssue();
   scriptMovieGrab(() => json({}));
   const token = await mintSession();
@@ -274,7 +274,7 @@ test("C025: the grab redeems the handle into the real guid + indexer, audits the
   assert.equal(moviePosts().length, 0);
 });
 
-test("C025: a raw guid (or a handle from another issue / instance) is 410 — no arr call and no IN_PROGRESS flip", async () => {
+test("a raw guid (or a handle from another issue / instance) is 410 — no arr call and no IN_PROGRESS flip", async () => {
   issueRow = movieIssue();
   scriptMovieGrab(() => json({}));
   const token = await mintSession();
@@ -310,7 +310,7 @@ test("a raw guid of any shape — even one no indexer would mint (a space, quote
   assert.equal(issueRow!.status, "OPEN");
 });
 
-test("C025: two grabs racing with one handle send the release ONCE — the second is 409 while the first is inside the arr call", { timeout: 5_000 }, async () => {
+test("two grabs racing with one handle send the release ONCE — the second is 409 while the first is inside the arr call", { timeout: 5_000 }, async () => {
   issueRow = movieIssue();
   let open!: () => void;
   const gate = new Promise<void>((r) => { open = r; });
@@ -339,7 +339,7 @@ test("C025: two grabs racing with one handle send the release ONCE — the secon
   assert.equal(moviePosts().length, 1, "the download client is sent the release once");
 });
 
-test("C025: an issue resolved meanwhile (CAS count 0) hands the handle back without sending anything", async () => {
+test("an issue resolved meanwhile (CAS count 0) hands the handle back without sending anything", async () => {
   issueRow = movieIssue();
   scriptMovieGrab(() => json({}));
   const token = await mintSession();
@@ -372,9 +372,9 @@ test("C025: an issue resolved meanwhile (CAS count 0) hands the handle back with
   assert.equal(moviePosts().length, 1);
 });
 
-// ═══════════════════ C026 — 408/5xx spends the handle ════════════════════════
+// ═══════════════════ 408/5xx spends the handle ════════════════════════
 
-test("C026: grabDefinitelyRefused — a 4xx (not 408) or a missing title is a refusal; 408/5xx, timeouts and network errors are unknown", () => {
+test("grabDefinitelyRefused — a 4xx (not 408) or a missing title is a refusal; 408/5xx, timeouts and network errors are unknown", () => {
   for (const s of [400, 401, 404, 409, 422, 429]) assert.equal(grabDefinitelyRefused(new ArrResponseError(s, "")), true, String(s));
   for (const s of [408, 500, 502, 503, 504]) assert.equal(grabDefinitelyRefused(new ArrResponseError(s, "")), false, String(s));
   assert.equal(grabDefinitelyRefused(new ArrItemNotFoundError("gone")), true);
@@ -385,7 +385,7 @@ test("C026: grabDefinitelyRefused — a 4xx (not 408) or a missing title is a re
 });
 
 for (const status of [502, 504]) {
-  test(`C026: a gateway ${status} on the issue grab spends the handle — a retry is 410 and the release went out once`, async () => {
+  test(`a gateway ${status} on the issue grab spends the handle — a retry is 410 and the release went out once`, async () => {
     issueRow = movieIssue();
     scriptMovieGrab(() => new Response("bad gateway", { status }));
     const token = await mintSession();
@@ -398,7 +398,7 @@ for (const status of [502, 504]) {
     assert.equal(moviePosts().length, 1);
   });
 
-  test(`C026: a gateway ${status} on the request Pick release grab spends the handle too`, async () => {
+  test(`a gateway ${status} on the request Pick release grab spends the handle too`, async () => {
     requests = [{ id: "r1", mediaType: "MOVIE", tmdbId: 603, tvdbId: null, status: "APPROVED", arrInstance: "" }];
     scriptMovieGrab(() => new Response("bad gateway", { status }));
     const token = await mintSession();
@@ -413,7 +413,7 @@ for (const status of [502, 504]) {
   });
 }
 
-test("C026: a definite refusal (409) still hands the issue handle back — the same release may be tried again", async () => {
+test("a definite refusal (409) still hands the issue handle back — the same release may be tried again", async () => {
   issueRow = movieIssue();
   let n = 0;
   scriptMovieGrab(() => (n++ === 0 ? json([{ errorMessage: "Download client refused it" }], 409) : json({})));
@@ -425,7 +425,7 @@ test("C026: a definite refusal (409) still hands the issue handle back — the s
   assert.equal(again.status, 200);
 });
 
-test("C026: every release-grab route decides the hand-back through grabDefinitelyRefused, never a bare `instanceof ArrResponseError`", () => {
+test("every release-grab route decides the hand-back through grabDefinitelyRefused, never a bare `instanceof ArrResponseError`", () => {
   for (const file of [
     "src/app/api/issues/[id]/releases/route.ts",
     "src/app/api/requests/[id]/releases/route.ts",
@@ -440,7 +440,7 @@ test("C026: every release-grab route decides the hand-back through grabDefinitel
   }
 });
 
-// ═══════════════════ C110 — the title's own quality profile ══════════════════
+// ═══════════════════ the title's own quality profile ══════════════════
 
 // Profile 1 (the instance's add default) allows only Bluray-1080p (7);
 // profile 2 (the title's own) allows 1080p AND Remux-2160p (19).
@@ -454,7 +454,7 @@ const RANKED = () => [
   release("g-2160", { quality: { quality: { id: 19, name: "Remux-2160p" }, revision: { version: 1 } }, releaseWeight: 0 }),
 ];
 
-test("C110: a movie's Pick release list is split by the MOVIE's own profile, not the instance's add default — the arr's top pick stays first", async () => {
+test("a movie's Pick release list is split by the MOVIE's own profile, not the instance's add default — the arr's top pick stays first", async () => {
   settings.set("radarrQualityProfileId", "1");
   requests = [{ id: "r1", mediaType: "MOVIE", tmdbId: 603, tvdbId: null, status: "APPROVED", arrInstance: "" }];
   responder = (c) => {
@@ -468,7 +468,7 @@ test("C110: a movie's Pick release list is split by the MOVIE's own profile, not
   assert.deepEqual(body.releases.map((r) => r.quality.quality.id), [19, 7]);
 });
 
-test("C110: the issue Replace list for a season follows the SERIES' own profile too", async () => {
+test("the issue Replace list for a season follows the SERIES' own profile too", async () => {
   settings.set("sonarrQualityProfileId", "1");
   issueRow = { id: "issue-tv", status: "OPEN", reportedBy: "r", title: "Show", mediaType: "TV", tmdbId: 1399, tvdbId: 121361, scope: "SEASON", seasonNumber: 1, episodeNumber: null };
   responder = (c) => {
@@ -482,7 +482,7 @@ test("C110: the issue Replace list for a season follows the SERIES' own profile 
   assert.deepEqual(body.map((r) => r.quality.quality.id), [19, 7]);
 });
 
-test("C110: a title whose own profile rejects a quality still sends that release last; a row with no profile keeps the arr's order", async () => {
+test("a title whose own profile rejects a quality still sends that release last; a row with no profile keeps the arr's order", async () => {
   settings.set("radarrQualityProfileId", "2");
   requests = [{ id: "r1", mediaType: "MOVIE", tmdbId: 603, tvdbId: null, status: "APPROVED", arrInstance: "" }];
   let profileId: number | undefined = 1;
@@ -497,7 +497,7 @@ test("C110: a title whose own profile rejects a quality still sends that release
   assert.deepEqual(own.releases.map((r) => r.quality.quality.id), [7, 19], "profile 1 (the movie's) does not allow 2160p");
   profileId = undefined;
   // The instance's add default now REJECTS 2160p (profile 1): were a row with
-  // no profile to fall back to it (the C110 bug), the split would come out
+  // no profile to fall back to it (the bug), the split would come out
   // [7, 19]. With default 2 both paths agree and the leg could not tell.
   settings.set("radarrQualityProfileId", "1");
   const none =await (await call(requestReleases.GET, token, "/requests/r1/releases", "r1")).json() as { releases: Array<{ quality: { quality: { id: number } } }> };

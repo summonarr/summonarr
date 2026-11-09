@@ -1,4 +1,4 @@
-// The cleanup selection cap (C062). The delete route takes at most
+// The cleanup selection cap. The delete route takes at most
 // CLEANUP_MAX_ITEMS titles, and Library cleanup's select-all used to tick every
 // visible candidate — over 500 the dry run could only answer 400. One constant
 // (src/lib/library-cleanup.ts) now bounds the route's parser and the page's

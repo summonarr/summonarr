@@ -413,7 +413,7 @@ export function IssueActions({
       )}
 
       {error && (
-        <span className="flex items-center gap-1 text-[11px] text-amber-400 max-w-52 text-right">
+        <span role="alert" className="flex items-center gap-1 text-[11px] text-amber-400 max-w-52 text-right">
           <AlertTriangle className="w-3 h-3 shrink-0" />
           {error}
         </span>
@@ -586,6 +586,8 @@ function FixFileDialog({
   }
 
   function close() {
+    // Closing unmounts the dialog and aborts the grab: wait for its answer instead.
+    if (writes.busy("grab")) return;
     stopReleaseSearch();
     onClose();
   }

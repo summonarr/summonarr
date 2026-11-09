@@ -164,18 +164,18 @@ export function PersonView({
   // One media object per credit for as long as `person.credits` is the same
   // list: a fresh object per render defeated memo(MediaCard), so the bio toggle
   // or a filter switch re-rendered every card.
-  const { mediaByCredit, movieCount, tvCount } = useMemo(() => {
-    const map = new Map<PersonCredit, TmdbMedia>();
+  const { entries, movieCount, tvCount } = useMemo(() => {
+    const list: { credit: PersonCredit; media: TmdbMedia }[] = [];
     let movies = 0;
     let tv = 0;
     for (const c of person.credits) {
-      map.set(c, toMedia(c));
+      list.push({ credit: c, media: toMedia(c) });
       if (c.mediaType === "movie") movies++;
       else if (c.mediaType === "tv") tv++;
     }
-    return { mediaByCredit: map, movieCount: movies, tvCount: tv };
+    return { entries: list, movieCount: movies, tvCount: tv };
   }, [person.credits]);
-  const shown = filter === "all" ? person.credits : person.credits.filter((c) => c.mediaType === filter);
+  const shown = filter === "all" ? entries : entries.filter((e) => e.credit.mediaType === filter);
 
   return (
     <div className="ds-page-enter">
@@ -219,15 +219,14 @@ export function PersonView({
           <EmptyState title={t("detail.person.noTitles")} />
         ) : (
           <div className="ds-media-grid">
-            {shown.map((c) => (
+            {shown.map(({ credit: c, media }) => (
               <MediaCard
                 // Same identity key as every other MediaCard grid. An index in the
                 // key remounted every card on a filter toggle and dropped a
                 // just-made request's local state; getPersonDetails dedupes
                 // credits per (mediaType, id) so this can't collide.
                 key={`${c.mediaType}-${c.id}`}
-                // Built from this same list in the memo above, so always present.
-                media={mediaByCredit.get(c)!}
+                media={media}
                 size="md"
                 requestToken={c.requestToken}
                 showPlex={showPlex}

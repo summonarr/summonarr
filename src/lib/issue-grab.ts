@@ -22,7 +22,7 @@
 //    pending after the issue was RESOLVED, and an unrelated RSS import months
 //    later announced it. The webhooks never claim a grab whose issue is
 //    RESOLVED (`CLAIMABLE_GRAB_ISSUE`); a reopened issue's rows count again.
-import type { Prisma } from "@/generated/prisma";
+import type { Issue, Prisma } from "@/generated/prisma";
 import { prisma } from "@/lib/prisma";
 
 /**
@@ -72,4 +72,36 @@ export async function recordIssueGrab(data: Prisma.IssueGrabUncheckedCreateInput
     console.warn("[issues] Recorded the grab but retiring the issue's earlier pending grabs failed:", err);
   }
   return grab;
+}
+
+/**
+ * `recordIssueGrab` for an issue's own action (Refetch, Replace release, Replace
+ * file) that already happened: the row is written for the issue's scope on
+ * `instance`, and a failure (usually P2003 — the issue was deleted meanwhile) is
+ * logged under `failureNote`, never thrown, because the action itself succeeded.
+ * The row's id, or null when it wasn't written.
+ */
+export async function recordGrabForIssue(
+  issue: Pick<Issue, "id" | "tmdbId" | "mediaType" | "title" | "scope" | "seasonNumber" | "episodeNumber">,
+  grab: { userId: string; tvdbId: number | null; instance: string },
+  failureNote: string,
+): Promise<string | null> {
+  try {
+    const row = await recordIssueGrab({
+      issueId: issue.id,
+      triggeredById: grab.userId,
+      tmdbId: issue.tmdbId,
+      tvdbId: grab.tvdbId,
+      mediaType: issue.mediaType,
+      title: issue.title,
+      scope: issue.scope,
+      seasonNumber: issue.seasonNumber,
+      episodeNumber: issue.episodeNumber,
+      arrInstance: grab.instance,
+    });
+    return row.id;
+  } catch (err) {
+    console.warn(failureNote, err);
+    return null;
+  }
 }

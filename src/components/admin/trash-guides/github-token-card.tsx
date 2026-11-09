@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { CheckCircle, Loader2 } from "@/components/icons";
@@ -25,6 +25,10 @@ export function GithubTokenCard({
   // Which write the ok/error label is about.
   const [action, setAction] = useState<"save" | "remove">("save");
   const running = saver.status === "saving";
+  // Removing the token takes a second click: the button is replaced by the
+  // question, focused on the answer that changes nothing.
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const removePromptId = useId();
 
   // An empty value removes the stored token: the settings route lets this key
   // be written empty, and the GitHub client reads "" as no token.
@@ -73,15 +77,38 @@ export function GithubTokenCard({
         >
           {running && action === "save" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("trash.common.save")}
         </Button>
-        {configured && (
+        {configured && !confirmingRemove && (
           <Button
             type="button"
-            onClick={() => void write("")}
+            onClick={() => setConfirmingRemove(true)}
             disabled={running}
             className="bg-zinc-800 hover:bg-zinc-700 text-zinc-100"
           >
             {running && action === "remove" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("trash.token.remove")}
           </Button>
+        )}
+        {configured && confirmingRemove && (
+          <div role="group" aria-labelledby={removePromptId} className="flex flex-wrap items-center gap-2">
+            <span id={removePromptId} className="text-xs text-zinc-300">{t("trash.token.confirmRemove")}</span>
+            <Button
+              type="button"
+              onClick={() => {
+                setConfirmingRemove(false);
+                void write("");
+              }}
+              className="bg-red-600 hover:bg-red-500 text-[var(--ds-on-status)]"
+            >
+              {t("trash.token.remove")}
+            </Button>
+            <Button
+              type="button"
+              autoFocus
+              onClick={() => setConfirmingRemove(false)}
+              className="bg-zinc-800 hover:bg-zinc-700 text-zinc-100"
+            >
+              {t("trash.spec.cancel")}
+            </Button>
+          </div>
         )}
         {configured && !value && (
           <span className="text-xs text-zinc-500 inline-flex items-center gap-1.5">

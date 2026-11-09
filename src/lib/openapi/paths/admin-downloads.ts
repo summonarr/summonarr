@@ -14,6 +14,7 @@ import {
   OK_TRUE,
 } from "../shared";
 import { QUEUE_GRAB_MAX_IDS, QUEUE_IMPORT_MAX_FILES, QUEUE_REMOVE_MAX_IDS } from "@/lib/api-body-limits";
+import { IMPORT_MAX_BODY_BYTES } from "@/lib/arr-queue-http";
 import type { OpenApiSchema, OpenApiPaths } from "../types";
 
 // One file of a download the arr would not import on its own (ImportCandidate,
@@ -479,7 +480,7 @@ export const adminDownloadsPaths: OpenApiPaths = {
         "403": { description: "Not ADMIN" },
         "404": { description: "Integration disabled or unknown instance" },
         "409": { description: "Nothing chosen is importable any more, or the download is gone" },
-        "413": tooLargeAnswer(512 * 1024),
+        "413": tooLargeAnswer(IMPORT_MAX_BODY_BYTES),
         "502": { description: "The arr could not be reached or refused the command" },
       },
     },
@@ -523,7 +524,7 @@ export const adminDownloadsPaths: OpenApiPaths = {
         "403": { description: "Not ADMIN" },
         "404": { description: "Integration disabled or unknown instance" },
         "409": { description: "The download is no longer in the queue" },
-        "413": tooLargeAnswer(512 * 1024),
+        "413": tooLargeAnswer(IMPORT_MAX_BODY_BYTES),
         "429": { description: "More than 30 previews a minute by this admin (each is a manual-import reprocess on the arr; Retry-After set)", headers: RETRY_AFTER_HEADER },
         "502": { description: "The arr could not be reached" },
       },

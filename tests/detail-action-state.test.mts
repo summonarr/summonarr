@@ -33,9 +33,12 @@ test("Request4kButton and RequestInstanceButton share one request flow that trea
   assert.match(shared, /state === "requested" \|\| requested/);
   // A 429 shows the Retry-After hint, as RequestButton's does; any other
   // refusal shows the route's own reason, read as a string.
-  assert.match(shared, /setMsg\(rateLimitMessage\(res, t\) \?\? \(await readApiError\(res, t\("request\.somethingWrong"\)\)\)\)/);
+  // That reading lives once in submitMediaRequest (src/lib/client/media-request.ts).
+  assert.match(shared, /setMsg\(outcome\.error\)/);
+  const client = src("src/lib/client/media-request.ts");
+  assert.match(client, /\{ error: rateLimitMessage\(res, t\) \?\? \(await readApiError\(res, t\("request\.somethingWrong"\)\)\) \}/);
   // The title's own fields go last, so an extra can never replace them.
-  assert.match(shared, /postMediaRequest\(\{ \.\.\.extras, tmdbId, mediaType \}, requestToken\)/);
+  assert.match(shared, /submitMediaRequest\(\{ \.\.\.extras, tmdbId, mediaType \}, requestToken, t, signal\)/);
   assert.match(shared, /export type VariantRequestExtras = \{ is4k: true \} \| \{ arrInstance: string \};/);
 
   const fourK = src("src/components/media/request-4k-button.tsx");
@@ -46,7 +49,7 @@ test("Request4kButton and RequestInstanceButton share one request flow that trea
   assert.match(named, /<VariantRequestButton\b/);
   assert.match(named, /extras=\{\{ arrInstance: instance \}\}/);
   for (const [file, body] of [["request-4k-button", fourK], ["request-instance-button", named]] as const) {
-    assert.doesNotMatch(body, /useState|postMediaRequest/, `${file}: a private copy of the request flow is back`);
+    assert.doesNotMatch(body, /useState|postMediaRequest|submitMediaRequest/, `${file}: a private copy of the request flow is back`);
   }
 });
 
@@ -97,7 +100,8 @@ test("VoteActions resyncs `voted` from the live prop and rolls a failed unvote b
   const rollbacks = body.match(/setOverride\(true\)/g) ?? [];
   assert.equal(rollbacks.length, 1, "the one failed branch rolls back to the pre-click state");
   // A 404 means the vote is already gone: success, never a rollback to Voted.
-  assert.match(body, /if \(res\.ok \|\| \(okOn404 && res\.status === 404\)\) return \{ ok: true \};/);
+  // (the write itself is writeDeletionVote, src/lib/client/vote-write.ts)
+  assert.match(src("src/lib/client/vote-write.ts"), /if \(res\.ok \|\| \(opts\.okOn404 && res\.status === 404\)\) return \{ ok: true \};/);
   assert.match(body, /send\("DELETE", true,/, "unvote tolerates a 404");
   assert.match(body, /if \(out\.ok\) \{\s*setRemovedHere\(true\);/);
 });
@@ -113,12 +117,14 @@ test("VoteActions keeps focus on the row: a status note after an unvote, Escape 
 
 test("VoteDeleteButton: unvote shows the rate-limit hint, a vote clears its reason, and focus survives the state change", () => {
   const body = src("src/components/votes/vote-delete-button.tsx");
-  assert.match(body, /rateLimitMessage\(res, t\) \?\? t\("request\.vote\.removeFailed"\)/);
+  // The unvote is writeDeletionVote, which answers a 429 with the Retry-After hint.
+  assert.match(body, /writeDeletionVote\(\{ method: "DELETE", tmdbId, mediaType, okOn404: true, failed: t\("request\.vote\.removeFailed"\)/);
+  assert.match(src("src/lib/client/vote-write.ts"), /message: rateLimitMessage\(res, opts\.t\) \?\? opts\.failed/);
   assert.match(body, /ifBusy: "skip"/, "a second submit while one runs does nothing");
   // A refused vote shows the route's own reason (your own request, a stale
   // page token…), and a 404 on unvote means the vote is already gone.
   assert.match(body, /rateLimitMessage\(res, t\) \?\? \(await readApiError\(res, t\("request\.vote\.recordFailed"\)\)\)/);
-  assert.match(body, /if \(res\.ok \|\| res\.status === 404\) return \{ ok: true \};/);
+  assert.match(body, /okOn404: true/);
   assert.match(body, /if \(out\.ok\) \{\s*setState\("idle"\);/);
   assert.match(body, /if \(out\.ok\) \{\s*setState\("voted"\);\s*setReason\(""\);\s*router\.refresh\(\)/, "a recorded vote clears the reason");
   assert.match(body, /if \(e\.key === "Escape"\) closeReason\(\)/);
@@ -204,7 +210,7 @@ test("every client request POST goes through postMediaRequest (token fetch failu
     "src/components/admin/issue-fix-match-button.tsx",
   ]) {
     const body = src(file);
-    assert.match(body, /await postMediaRequest\(/, file);
+    assert.match(body, /\b(?:post|submit)MediaRequest\(/, file);
     assert.doesNotMatch(body, /_token:/, `${file}: builds its own request body with a token`);
     assert.doesNotMatch(body, /\/api\/requests\/token/, `${file}: fetches its own token`);
   }

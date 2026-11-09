@@ -56,6 +56,7 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { BATCH_TX_TIMEOUT } = await import("../src/lib/batch-write.ts");
+const { isSchemaError } = await import("../src/lib/trash-schema-error.ts");
 const {
   describeSchemaError,
   refreshCatalog,
@@ -2392,4 +2393,11 @@ test("listSpecs and getSpecDetail map rows per variant with ISO dates, null appl
   assert.deepEqual(detail!.payload, { trash_id: "cf-a", name: "A" });
   assert.equal(detail!.application!.remoteId, 4);
   assert.equal(await getSpecDetail("no-such-id"), null);
+});
+
+test("describeSchemaError recognizes Prisma's missing-table error and isSchemaError mirrors it", () => {
+  const err = Object.assign(new Error("The table `public.TrashSpec` does not exist in the current database."), { code: "P2021" });
+  assert.match(describeSchemaError(err) ?? "", /prisma db push/);
+  assert.equal(isSchemaError(err), true);
+  assert.equal(isSchemaError(new Error("boom")), false);
 });

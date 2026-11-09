@@ -275,7 +275,12 @@ export async function confirmTotpEnrollmentInTx(
     where: { userId, enabledAt: null, updatedAt: row.updatedAt },
     data: { enabledAt: new Date(nowMs), lastUsedStep: verdict.step },
   });
-  return res.count === 1 ? "ok" : "invalid";
+  if (res.count === 1) return "ok";
+  // Lost the race: say which way, so a correct code isn't reported wrong when a
+  // concurrent confirm already enabled the factor or the pending secret is gone.
+  const now = await tx.userTotp.findUnique({ where: { userId }, select: { enabledAt: true } });
+  if (!now) return "no-pending";
+  return now.enabledAt ? "already-enabled" : "invalid";
 }
 
 // Serializes a user's enrollment writes. Under READ COMMITTED two concurrent

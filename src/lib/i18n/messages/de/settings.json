@@ -157,6 +157,7 @@
   "settings.playHistory.howBody": "Der Wiedergabeverlauf wird automatisch erfasst, indem Ihre Plex- und Jellyfin-Server alle paar Sekunden nach aktiven Sitzungen abgefragt werden. In Plex oder Jellyfin ist keine Konfiguration nötig – es wird dieselbe Serververbindung genutzt, die oben bereits eingerichtet ist.",
   "settings.watchGrade.notGraded": "Nicht benotet",
   "settings.watchGrade.previewFailedStatus": "Vorschau fehlgeschlagen ({status})",
+  "settings.watchGrade.previewEmpty": "Die Vorschau kam leer zurück. Versuchen Sie es erneut.",
   "settings.watchGrade.grace": "Schonfrist (Tage)",
   "settings.watchGrade.graceHelp": "Wie lange eine Anfrage nach Eintreten der Verfügbarkeit nicht in die Note eingeht. Anfragen innerhalb dieser Frist werden aufgeführt, aber nie gewertet – ob gesehen oder nicht –, damit neue Anfragende nicht zu früh beurteilt werden. Standard {default}.",
   "settings.watchGrade.window": "Bewertungszeitraum (Tage)",

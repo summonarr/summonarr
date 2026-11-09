@@ -164,6 +164,7 @@ export function useHistoryPage({
         return;
       }
       loads.current = settleLoad(loads.current);
+      setError(null);
       setRows(res.data.items);
       setTotal(res.data.total);
       setTotalPages(res.data.totalPages);

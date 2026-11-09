@@ -6,6 +6,7 @@ import { AlertCircle, Film, Loader2, Tv2, X } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { fetchJson } from "@/lib/client/fetch-json";
 import { WatchGradeDetailSchema } from "./watch-grade-schema";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 import { useModalA11y } from "@/hooks/use-modal-a11y";
 import {
   hasWatchGradeSignal,
@@ -407,6 +408,7 @@ export function WatchGradeModal({
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const titleId = `watch-grade-title-${userId}`;
+  const mounted = useHasMounted();
 
   useModalA11y(dialogRef, onClose, closeBtnRef);
 
@@ -448,6 +450,9 @@ export function WatchGradeModal({
         <VerdictBreakdown detail={data} settings={settings} />
       </>
     );
+  } else {
+    // Enabled but no grade to show: say so rather than leave a bare title.
+    body = <p className="text-xs text-zinc-400">{t("adminQueue.grade.needsHistory")}</p>;
   }
 
   const overlay = (
@@ -486,6 +491,7 @@ export function WatchGradeModal({
   );
 
   // Portaled to <body>: the chip sits inside inline text (the Users page meta
-  // line is a <p>), where a block-level dialog is invalid markup.
-  return createPortal(overlay, document.body);
+  // line is a <p>), where a block-level dialog is invalid markup. Never during
+  // a server render, which has no document.
+  return mounted ? createPortal(overlay, document.body) : null;
 }

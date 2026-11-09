@@ -27,7 +27,7 @@ export function HistoryTableHead({
   return (
     <thead>
       <tr style={{ background: "var(--ds-bg-1)" }}>
-        <Th width={28} />
+        <Th width={28} srLabel={t("adminActivity.field.details")} />
         <Th label={t("adminActivity.field.user")} />
         <Th label={t("adminActivity.field.title")} {...sortable("title")} />
         <Th label={t("adminActivity.field.started")} {...sortable("startedAt")} />

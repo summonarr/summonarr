@@ -48,7 +48,7 @@ test("bulk Fix all asks first, can be stopped, and stops on unmount", () => {
   assert.match(run, /askConfirm: \(\) => setState\("confirm"\),/);
   assert.match(control, /onClick=\{\(\) => \{ refocus\.current = true; onConfirm\(\); \}\}/, "only the confirm's own button starts the run");
   assert.equal(control.match(/onConfirm\(\)/g)?.length, 1);
-  assert.match(run, /stop: \(\) => \{ stopRef\.current = true; \},/);
+  assert.match(run, /stop: \(\) => \{ stopRef\.current = true; abortRef\.current\?\.abort\(\); \},/, "Stop also ends the wait on the title in flight");
   assert.match(loop, /for \(const entry of entries\) \{\s*if \(deps\.stopped\(\)\) break;/, "the loop checks the stop flag between titles");
   assert.match(run, /return \(\) => \{ alive\.current = false; stopRef\.current = true; abortRef\.current\?\.abort\(\); \};/, "unmount aborts the status poll");
   const src = readFileSync(new URL("../src/components/admin/library-diff-client.tsx", import.meta.url), "utf8");

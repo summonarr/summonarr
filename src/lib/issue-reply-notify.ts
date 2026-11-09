@@ -8,6 +8,10 @@ import { notifyUserIssueMessageEmail, notifyAdminsIssueMessageEmail } from "./em
 import { resolveUserNotificationEmail } from "./notification-email";
 import { translatorForUser } from "./i18n/server-locale";
 
+// A channel that fails must not stop the others, but it should leave a line.
+const warnChannel = (channel: string) => (err: unknown) =>
+  console.warn(`[issue-messages] ${channel} notification failed:`, err instanceof Error ? err.message : String(err));
+
 export interface IssueReplyAnnouncement {
   issue: {
     id: string;
@@ -79,9 +83,9 @@ export async function announceIssueReply(a: IssueReplyAnnouncement): Promise<voi
       fromAdmin: a.fromIssueAdmin,
       ...(issue.claimedBy ? { restrictToUserId: issue.claimedBy } : {}),
     };
-    void notifyAdminsIssueMessage(issue.title, a.authorName, text, { ...adminOpts, ...media }).catch(() => {});
-    void notifyAdminsIssueMessagePush({ title: issue.title, ...media, userName: a.authorName, body: text, issueId: issue.id, ...adminOpts }).catch(() => {});
-    void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, ...media, userName: a.authorName, body: text, issueId: issue.id, ...adminOpts }).catch(() => {});
+    void notifyAdminsIssueMessage(issue.title, a.authorName, text, { ...adminOpts, ...media }).catch(warnChannel("admin discord"));
+    void notifyAdminsIssueMessagePush({ title: issue.title, ...media, userName: a.authorName, body: text, issueId: issue.id, ...adminOpts }).catch(warnChannel("admin push"));
+    void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, ...media, userName: a.authorName, body: text, issueId: issue.id, ...adminOpts }).catch(warnChannel("admin email"));
   } catch (err) {
     console.error("[issue-messages] announce failed:", err instanceof Error ? err.message : err);
   }
@@ -101,8 +105,8 @@ async function notifyReporter(a: IssueReplyAnnouncement): Promise<void> {
 
   const author = reporterFacingAuthor(a.authorDisplayName, reporter);
   const media = { tmdbId: issue.tmdbId, mediaType: issue.mediaType };
-  void notifyUserIssueMessage(issue.reportedBy, issue.title, author, text, media).catch(() => {});
-  void notifyUserIssueMessagePush({ userId: issue.reportedBy, title: issue.title, ...media, body: text, issueId: issue.id }).catch(() => {});
+  void notifyUserIssueMessage(issue.reportedBy, issue.title, author, text, media).catch(warnChannel("reporter discord"));
+  void notifyUserIssueMessagePush({ userId: issue.reportedBy, title: issue.title, ...media, body: text, issueId: issue.id }).catch(warnChannel("reporter push"));
   createInAppNotification(issue.reportedBy, {
     type: "ISSUE_REPLY",
     title: issue.title,
@@ -116,7 +120,7 @@ async function notifyReporter(a: IssueReplyAnnouncement): Promise<void> {
   if (reporter.notifyOnIssue) {
     const toEmail = resolveUserNotificationEmail(reporter);
     if (toEmail) {
-      void notifyUserIssueMessageEmail({ toEmail, issueTitle: issue.title, ...media, authorName: author, body: text, locale: reporter.locale }).catch(() => {});
+      void notifyUserIssueMessageEmail({ toEmail, issueTitle: issue.title, ...media, authorName: author, body: text, locale: reporter.locale }).catch(warnChannel("reporter email"));
     }
   }
 }

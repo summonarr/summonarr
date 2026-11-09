@@ -130,6 +130,7 @@ export async function fetchTrashFile(path: string): Promise<string> {
     maxResponseBytes: RAW_FETCH_MAX_BYTES,
   });
   if (!res.ok) {
+    await res.body?.cancel().catch(() => {});
     throw new Error(`raw fetch failed: ${path} ${res.status}`);
   }
   return res.text();

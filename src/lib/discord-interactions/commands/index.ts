@@ -41,6 +41,7 @@ export async function handleCommand(interaction: CommandInteraction): Promise<vo
   const memberRoles: string[] = interaction.member?.roles ?? [];
   const t = await interactionTranslator(interaction, discordUserId);
 
+  // A failed read here propagates: the caller's timeout wrapper reports it to the user.
   const [welcomeRow, requireLinkedRow, autoApproveRow] = await Promise.all([
     prisma.setting.findUnique({ where: { key: "discordWelcomeChannelId" } }),
     prisma.setting.findUnique({ where: { key: "discordRequireLinkedAccount" } }),
@@ -54,12 +55,12 @@ export async function handleCommand(interaction: CommandInteraction): Promise<vo
   if (welcomeChannelId && channelId) {
     const inWelcome = channelId === welcomeChannelId;
     if (commandName === "link" && !inWelcome) {
-      await editOriginal(appId, token, { content: t("notify.bot.linkWelcomeOnly") });
+      await editOriginal(appId, token, { content: t("notify.bot.linkWelcomeOnly") }).catch(() => {});
       return;
     }
     // The welcome channel is for /link alone; every other command is refused there.
     if (commandName !== "link" && inWelcome) {
-      await editOriginal(appId, token, { content: t("notify.bot.commandNotHere", { command: commandName }) });
+      await editOriginal(appId, token, { content: t("notify.bot.commandNotHere", { command: commandName }) }).catch(() => {});
       return;
     }
   }

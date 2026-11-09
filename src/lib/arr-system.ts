@@ -108,6 +108,8 @@ export function taskRisk(taskName: string): TaskRisk | null {
 
 export type CommandStatus = "queued" | "started" | "completed" | "failed" | "aborted" | "cancelled" | "orphaned" | "unknown";
 const COMMAND_STATUSES: readonly CommandStatus[] = ["queued", "started", "completed", "failed", "aborted", "cancelled", "orphaned"];
+// Every status a row can carry, "unknown" (anything the arr sent that isn't listed) included.
+export const COMMAND_STATUS_VALUES: readonly CommandStatus[] = [...COMMAND_STATUSES, "unknown"];
 
 export interface ArrCommandRow {
   id: number;

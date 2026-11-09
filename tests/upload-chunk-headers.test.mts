@@ -37,3 +37,8 @@ test("a negative, fractional, exponent or out-of-range number is refused", () =>
 test("an index past the total is left to the session to judge", () => {
   assert.equal(parseUploadChunkHeaders(headers({ "x-chunk-index": "9" }))?.chunkIndex, 9);
 });
+
+test("parseUploadChunkHeaders refuses an oversized upload id", () => {
+  const h = new Headers({ "x-upload-id": "a".repeat(129), "x-chunk-index": "0", "x-chunk-total": "1", "x-file-size": "10" });
+  assert.equal(parseUploadChunkHeaders(h), null);
+});

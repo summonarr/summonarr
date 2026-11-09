@@ -266,7 +266,8 @@ function PlaysPerDayCard({ s, shortDay }: { s: UserDetailData; shortDay: (isoOrD
 function TopMediaCard({ topMedia }: { topMedia: UserDetailData["topMedia"] }) {
   const t = useT();
   // Floor at 1 so a zero count can't divide by zero (NaN bar widths).
-  const max = Math.max(topMedia[0]?.count ?? 1, 1);
+  let max = 1;
+  for (const m of topMedia) if (m.count > max) max = m.count;
   return (
     <ActivityCard>
       <SectionHeader label={t("adminActivity.user.mostWatched")} sub={t("adminActivity.user.titles", { count: topMedia.length })} />

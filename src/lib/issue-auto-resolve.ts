@@ -3,7 +3,7 @@ import { prisma } from "./prisma";
 import { isFeatureEnabled } from "./features";
 import { logAudit } from "./audit";
 import { emitSSE } from "./sse-emitter";
-import { announceIssueResolved } from "./issue-transitions";
+import { announceIssueResolved, claimResolveFrom } from "./issue-transitions";
 
 // Closing an issue when the replacement the admin asked for has landed.
 //
@@ -68,11 +68,10 @@ export async function autoResolveIssueForGrab(grab: ClaimedGrab, now: Date = new
     });
     if (!issue || issue.status === "RESOLVED") return false;
 
-    const resolved = await prisma.issue.updateMany({
-      where: { id: issue.id, status: { in: ["OPEN", "IN_PROGRESS"] } },
-      data: { status: "RESOLVED", resolvedAt: now },
-    });
-    if (resolved.count === 0) return false;
+    // One status per write, so the audit's `before` is the status this call
+    // actually overwrote even when the row moved after the read.
+    const before = await claimResolveFrom(issue.id, issue.status, { status: "RESOLVED", resolvedAt: now });
+    if (!before) return false;
 
     emitSSE({ type: "issue:updated", issueId: issue.id, status: "RESOLVED", userId: issue.reportedBy });
     void logAudit({
@@ -84,7 +83,7 @@ export async function autoResolveIssueForGrab(grab: ClaimedGrab, now: Date = new
       userName: "system",
       action: "ISSUE_STATUS_CHANGE",
       target: `issue:${issue.id}`,
-      details: { trigger: "auto-resolve-replacement", title: issue.title, before: { status: issue.status }, after: { status: "RESOLVED" } },
+      details: { trigger: "auto-resolve-replacement", title: issue.title, before: { status: before }, after: { status: "RESOLVED" } },
     });
 
     await announceIssueResolved(issue, null, grab.triggeredById);

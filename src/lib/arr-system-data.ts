@@ -38,6 +38,7 @@ import {
   unsupportedIndexerUse,
 } from "./arr-system";
 import { settleArrInstances } from "./arr-instance-fanout";
+import { keyedSerial } from "./keyed-serial";
 import { processSingleton } from "./process-singleton";
 
 const CONCURRENCY = 4;
@@ -319,19 +320,7 @@ export class ProviderUseUnsupportedError extends Error {
 // its own delta on top. Still open, and accepted: a save that timed out on OUR
 // side and that the arr only lands after the read-backs can still be
 // overwritten by the next one.
-const providerSaveLocks = processSingleton("arr-system-data:provider-save-locks", () => new Map<string, Promise<unknown>>());
-
-async function withProviderLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const prev = providerSaveLocks.get(key) ?? Promise.resolve();
-  const run = prev.catch(() => {}).then(fn);
-  const tail = run.catch(() => {});
-  providerSaveLocks.set(key, tail);
-  try {
-    return await run;
-  } finally {
-    if (providerSaveLocks.get(key) === tail) providerSaveLocks.delete(key);
-  }
-}
+const withProviderLock = keyedSerial("arr-system-data:provider-save-locks");
 
 /**
  * Switch an indexer's uses or a download client on/off: the arr's own resource

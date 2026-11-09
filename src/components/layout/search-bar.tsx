@@ -8,6 +8,7 @@ import { useT } from "@/components/i18n/i18n-provider";
 import { posterUrl } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
 import { fetchJson } from "@/lib/client/fetch-json";
+import { isApplePlatform } from "@/lib/client/apple-platform";
 import { searchHits, type SearchHit } from "./search-results";
 
 type MediaFilter = "all" | "movie" | "tv";
@@ -20,12 +21,7 @@ const SEARCH_DEBOUNCE_MS = 350;
 function useIsMac(): boolean {
   const [isMac, setIsMac] = useState(true);
   useEffect(() => {
-    const platform =
-      (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData
-        ?.platform ??
-      navigator.platform ??
-      "";
-    setIsMac(/mac|iphone|ipad|ipod/i.test(platform));
+    setIsMac(isApplePlatform());
   }, []);
   return isMac;
 }
@@ -362,6 +358,9 @@ export function SearchBar({
 
   const fieldHeight = variant === "full" ? 36 : 32;
   const showStatus = Boolean(query.trim()) && results.length === 0 && !loading;
+  // One definition of "the dropdown is showing": the combobox state and the
+  // render guard read the same value.
+  const listOpen = open && (Boolean(query.trim()) || results.length > 0);
 
   return (
     <div
@@ -394,7 +393,7 @@ export function SearchBar({
           type="search"
           aria-label={t("nav.search")}
           role="combobox"
-          aria-expanded={open && (Boolean(query.trim()) || results.length > 0)}
+          aria-expanded={listOpen}
           aria-controls={listboxId}
           aria-autocomplete="list"
           aria-activedescendant={
@@ -429,7 +428,7 @@ export function SearchBar({
         ) : null}
       </div>
 
-      {open && (query.trim() || results.length > 0) && (
+      {listOpen && (
         <div
           style={{
             position: "absolute",

@@ -1,3 +1,4 @@
+import { DISCORD_SYNTHETIC_EMAIL_SUFFIX } from "@/lib/user-source";
 import { prisma } from "@/lib/prisma";
 import { escMd } from "@/lib/discord-notify";
 import { isFeatureEnabled } from "@/lib/features";
@@ -27,7 +28,7 @@ export async function handleRecentCommand(ctx: CommandContext): Promise<void> {
     await editOriginal(appId, token, { content: t("notify.bot.pick.deactivated") });
     return;
   }
-  if (requireLinked && (!viewer || viewer.email.endsWith("@discord.local"))) {
+  if (requireLinked && (!viewer || viewer.email.endsWith(DISCORD_SYNTHETIC_EMAIL_SUFFIX))) {
     await editOriginal(appId, token, { content: t("notify.bot.linkRequired") });
     return;
   }

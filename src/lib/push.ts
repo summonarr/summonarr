@@ -598,7 +598,10 @@ async function sendPush(
     if (status === 410 || status === 404) {
       await prisma.pushSubscription.deleteMany({ where: { endpoint: subscription.endpoint } });
     } else {
-      console.error("[push] Send failed:", err);
+      // Status and error class only: the message of a transport error can quote
+      // the endpoint URL, which is a capability.
+      const kind = err instanceof Error ? err.name : typeof err;
+      console.error("[push] Send failed: status %s, %s", status ?? "none", kind);
     }
     return false;
   }

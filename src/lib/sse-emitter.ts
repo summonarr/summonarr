@@ -49,5 +49,11 @@ export type SSEEvent =
   | { type: "plex:reachability"; reachable: boolean; instance: string };
 
 export function emitSSE(event: SSEEvent) {
-  emitter.emit("event", event);
+  // Listeners run synchronously: one stream's failing listener must not surface
+  // in the route that emitted the event, often after its write has committed.
+  try {
+    emitter.emit("event", event);
+  } catch (err) {
+    console.error(`[sse] listener threw: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }

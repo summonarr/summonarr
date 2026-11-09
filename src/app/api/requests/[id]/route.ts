@@ -209,7 +209,7 @@ async function queueSearch(target: SearchTarget, variant: string, t: Translator)
 
 // A search that threw, as the caller is answered. Most are answers, not
 // failures, and are translated; the rest are logged.
-function searchFailureText(err: unknown, t: Translator): string {
+function searchFailureText(err: unknown, t: Translator, service: "Radarr" | "Sonarr"): string {
   // No aired, monitored episode is missing — every one is on disk, OR none is
   // monitored (a series added with "Monitor: Future"), so the wording claims
   // neither. An upgrade search is the title manager's, never this button's.
@@ -220,7 +220,7 @@ function searchFailureText(err: unknown, t: Translator): string {
   // Removed in Sonarr since the push (or pushed elsewhere): Re-push adds it back.
   if (err instanceof SeriesNotOnInstanceError) return t("apiUser.requests.searchSeriesNotInSonarr");
   // The movie twin: Radarr no longer holds it, and Re-push adds it back.
-  if (err instanceof ArrItemNotFoundError) return t("apiUser.requests.releases.notInArr", { service: "Radarr" });
+  if (err instanceof ArrItemNotFoundError) return t("apiUser.requests.releases.notInArr", { service });
   // The detail to the log; the caller (a MANAGE_REQUESTS delegate, maybe) gets
   // the failure's kind, never the arr's internal URL (guardrail 5g).
   console.error("[arr] Search failed:", arrErrorMessage(err));
@@ -246,9 +246,11 @@ async function searchRequest(pc: PatchContext): Promise<NextResponse> {
   try {
     arrError = await queueSearch(target, existing.arrInstance, t);
   } catch (err) {
-    arrError = searchFailureText(err, t);
+    arrError = searchFailureText(err, t, target.kind === "movie" ? "Radarr" : "Sonarr");
   }
-  return NextResponse.json({ ...existing, adminNote: searchedNote, arrError });
+  // The arr call took a while: answer the row as it is now, not as it was read.
+  const current = (await loadRequest(pc.id)) ?? existing;
+  return NextResponse.json({ ...current, adminNote: searchedNote, arrError });
 }
 
 // Re-push an APPROVED request whose title the arr may have lost, with its
@@ -274,7 +276,8 @@ async function retryRequest(pc: PatchContext): Promise<NextResponse> {
   // Outside the try: Sonarr has already accepted the series, so a DB hiccup
   // here must not be reported as an ARR push failure.
   if (pushedTvdbId !== null) await stampTvdbId(id, pushedTvdbId);
-  return NextResponse.json({ ...existing, adminNote: answeredNote(pc), arrError });
+  const current = (await loadRequest(id)) ?? existing;
+  return NextResponse.json({ ...current, adminNote: answeredNote(pc), arrError });
 }
 
 async function editNote(pc: PatchContext): Promise<NextResponse> {

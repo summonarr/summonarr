@@ -1,3 +1,4 @@
+import { DISCORD_SYNTHETIC_EMAIL_SUFFIX } from "@/lib/user-source";
 import { prisma } from "@/lib/prisma";
 import { assignDiscordRolesForUser, escMd } from "@/lib/discord-notify";
 import { DiscordAlreadyLinkedError, DiscordCodeAlreadyUsedError, mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
@@ -41,7 +42,7 @@ async function redeemableLinkToken(t: Translator, discordUserId: string, tokenHa
   // and Discord is not session-backed, so nothing upstream of this refuses it.
   if (row.user.deactivatedAt) return { refusal: t("notify.bot.link.deactivated") };
   const existing = await prisma.user.findUnique({ where: { discordId: discordUserId }, select: { id: true, email: true } });
-  if (existing && existing.id !== row.userId && !existing.email.endsWith("@discord.local")) {
+  if (existing && existing.id !== row.userId && !existing.email.endsWith(DISCORD_SYNTHETIC_EMAIL_SUFFIX)) {
     return { refusal: t("notify.bot.link.alreadyLinked") };
   }
   return { row };

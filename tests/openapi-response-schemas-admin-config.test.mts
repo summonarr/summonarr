@@ -392,7 +392,7 @@ test("/settings documents its masked map, the save's test results and the option
   // The route answers one field per entry of its SLOTS table.
   const slotFields = [...routeSource("/settings/webhook-urls").matchAll(/\{ field: "(\w+)", service:/g)].map((m) => m[1]).sort();
   assert.deepEqual(keysOf(hooks), slotFields);
-  assert.match(handlerSource("/settings/webhook-urls", "get"), /Object\.fromEntries\(SLOTS\.map\(/);
+  assert.match(handlerSource("/settings/webhook-urls", "get"), /Object\.fromEntries\(shown\.map\(/);
   for (const k of keysOf(hooks)) assert.equal(props(hooks)[k].nullable, true, k);
   assert.match(hooks.description ?? "", /ADMIN only/);
   assert.match(routeSource("/settings/webhook-urls"), /export const GET = withAdmin\(/);

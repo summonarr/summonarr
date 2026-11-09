@@ -318,7 +318,7 @@ export const profilePaths: OpenApiPaths = {
   "/profile/mfa/recovery-codes": {
     post: {
       tags: ["Profile"],
-      summary: "Replace every recovery code with ten new ones",
+      summary: `Replace every recovery code with ${RECOVERY_CODE_COUNT} new ones`,
       requestBody: { required: true, content: { "application/json": { schema: mfaStepUpBody() } } },
       responses: {
         "200": {
@@ -702,7 +702,7 @@ export const profilePaths: OpenApiPaths = {
         },
         "400": { description: "Trakt is not available on this server (no client id/secret, or nothing to use it for)" },
         "401": STEP_UP_401,
-        "413": { description: "Request body over the 16 KB cap" },
+        "413": tooLargeAnswer(16 * 1024),
         "429": { description: "Too many starts, Trakt is rate limiting, or too many wrong step-up passwords" },
         "502": { description: "Trakt could not be reached" },
         "503": { description: "Maintenance mode" },
@@ -833,7 +833,7 @@ export const profilePaths: OpenApiPaths = {
         "200": { description: "Account disabled ({ ok: true }; idempotent)", content: { "application/json": { schema: OK_TRUE } } },
         "400": { description: "Cannot disable the last admin, a missing/incorrect password on a local account, or (web session, active second factor) a missing/invalid second factor ({ error, secondFactorRequired: true, methods? })" },
         "401": { description: "{ error: \"session-too-old\", message } — an account with no local password, from a web session that signed in more than 5 minutes ago; sign in again" },
-        "413": { description: "Request body over the 16 KB cap" },
+        "413": tooLargeAnswer(16 * 1024),
         "404": { description: "Account not found" },
         "429": { description: "Too many attempts — 5 per 15 minutes, every account kind; carries Retry-After", headers: RETRY_AFTER_HEADER },
         "503": { description: "Maintenance mode" },

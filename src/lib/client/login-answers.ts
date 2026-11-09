@@ -22,12 +22,20 @@ export interface MfaChallenge {
   webauthn?: RequestOptionsJSON;
 }
 
+function isRequestOptions(value: unknown): value is RequestOptionsJSON {
+  if (!value || typeof value !== "object") return false;
+  const o = value as Record<string, unknown>;
+  return typeof o.challenge === "string" && typeof o.rpId === "string" && Array.isArray(o.allowCredentials);
+}
+
 export function parseMfaChallenge(body: unknown): MfaChallenge | null {
   if (!body || typeof body !== "object") return null;
   const b = body as Record<string, unknown>;
   if (b.mfaRequired !== true || typeof b.mfaToken !== "string" || !Array.isArray(b.methods)) return null;
   const methods = b.methods.filter((m): m is MfaMethod => m === "totp" || m === "webauthn" || m === "recovery");
-  const webauthn = b.webauthn && typeof b.webauthn === "object" ? (b.webauthn as RequestOptionsJSON) : undefined;
+  // No method this client knows: there is nothing to offer, so it is not a challenge.
+  if (methods.length === 0) return null;
+  const webauthn = isRequestOptions(b.webauthn) ? b.webauthn : undefined;
   return { mfaToken: b.mfaToken, methods, webauthn };
 }
 
@@ -166,7 +174,8 @@ export function readQuickConnectPoll(status: number, body: unknown, retryAfter: 
   if (status === 410) return { kind: "expired", message: reasonOf(body) };
   if (status === 429) {
     const seconds = parseRetryAfterSeconds(retryAfter);
-    return { kind: "rateLimited", waitMs: seconds === null ? QC_RATE_LIMIT_BACKOFF_MS : seconds * 1000 };
+    // Capped at the run's own budget: a huge Retry-After would sleep past the deadline.
+    return { kind: "rateLimited", waitMs: seconds === null ? QC_RATE_LIMIT_BACKOFF_MS : Math.min(seconds * 1000, QC_DEADLINE_MS) };
   }
   if (status === 503 && body && typeof body === "object" && (body as { retry?: unknown }).retry === true) {
     return { kind: "busy", waitMs: QC_FAILURE_BACKOFF_MS };

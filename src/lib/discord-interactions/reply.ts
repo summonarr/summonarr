@@ -1,3 +1,4 @@
+import { DISCORD_SYNTHETIC_EMAIL_SUFFIX } from "@/lib/user-source";
 import { prisma } from "@/lib/prisma";
 import { escMd } from "@/lib/discord-notify";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
@@ -79,16 +80,29 @@ const DISCORD_CONTENT_MAX = 2000;
 // by the interaction token; an entry is dropped when its last edit settles.
 const editChains = processSingleton("discord-interactions:editChains", () => new Map<string, Promise<void>>());
 
+// A 429 is retried once after Discord's Retry-After (capped), so a busy webhook
+// route does not drop the user-visible result.
+const EDIT_RETRY_MAX_WAIT_MS = 5_000;
+
 async function sendEdit(appId: string, token: string, payload: Record<string, unknown>): Promise<void> {
-  const res = await safeFetchTrusted(`${DISCORD_API}/webhooks/${appId}/${token}/messages/@original`, {
-    allowedHosts: DISCORD_HOSTS,
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    timeoutMs: 15_000,
-  });
-  if (!res.ok) {
+  for (let attempt = 0; ; attempt++) {
+    const res = await safeFetchTrusted(`${DISCORD_API}/webhooks/${appId}/${token}/messages/@original`, {
+      allowedHosts: DISCORD_HOSTS,
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      timeoutMs: 15_000,
+    });
+    if (res.ok) return;
+    if (res.status === 429 && attempt === 0) {
+      const seconds = Number(res.headers.get("retry-after"));
+      if (Number.isFinite(seconds) && seconds >= 0 && seconds * 1000 <= EDIT_RETRY_MAX_WAIT_MS) {
+        await new Promise<void>((r) => setTimeout(r, seconds * 1000));
+        continue;
+      }
+    }
     console.error("[interactions] editOriginal failed:", res.status, await res.text());
+    return;
   }
 }
 
@@ -170,7 +184,7 @@ export function buildResultsPayload(
     const desc = [
       [typeLine, ratingLine].filter(Boolean).join("  ·  "),
       statusParts.join("  ·  "),
-      r.overview ? r.overview.substring(0, 200) : "",
+      r.overview ? truncateText(r.overview, 200) : "",
     ].filter(Boolean).join("\n");
 
     if (desc) embed.description = desc;
@@ -217,7 +231,7 @@ export async function linkedSiteAccount(discordUserId: string): Promise<LinkedSi
     where: { discordId: discordUserId },
     select: { id: true, role: true, permissions: true, name: true, email: true, deactivatedAt: true },
   });
-  if (!user || user.email.endsWith("@discord.local")) return { kind: "none" };
+  if (!user || user.email.endsWith(DISCORD_SYNTHETIC_EMAIL_SUFFIX)) return { kind: "none" };
   if (user.deactivatedAt) return { kind: "deactivated" };
   const { deactivatedAt: _deactivatedAt, ...rest } = user;
   return { kind: "ok", user: rest };

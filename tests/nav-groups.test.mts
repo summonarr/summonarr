@@ -281,7 +281,7 @@ test("a collapsed group's summed badge is labelled by its item only when ONE hid
 test("the header and the drawer take their admin items from nav-visibility, not a copy", () => {
   const header = readFileSync(resolve(HERE, "../src/components/layout/header.tsx"), "utf8");
   const drawer = readFileSync(resolve(HERE, "../src/components/layout/mobile-nav-drawer.tsx"), "utf8");
-  assert.match(header, /visibleAdminNavItems\(session\?\.user\)\.some\(\(i\) => i\.href === "\/settings"\)/);
+  assert.match(header, /visibleAdminNavItems\(session\?\.user, featureFlags\)\.some\(\(i\) => i\.href === "\/settings"\)/);
   assert.match(drawer, /const adminItems = visibleAdminNavItems\(session\?\.user, featureFlags\);/);
   for (const src of [header, drawer]) assert.doesNotMatch(src, /getVisibleAdminItems\(/);
 });

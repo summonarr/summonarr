@@ -8,7 +8,7 @@ import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
-import { createSettingsSaver, type SaveStatus, type SettingsPatchResult } from "./shared";
+import { useSettingsSave, type SettingsPatchResult } from "./shared";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 // The last monitor run's counts, as GET /api/admin/arr-watch answers them.
@@ -58,10 +58,7 @@ export function ArrWatchForm({ initialPercent }: { initialPercent: string }) {
   // made while it was in flight.
   const latestPercent = useRef(initialPercent);
   // Only the "Saved" tick fades; a validation error stays until the next edit.
-  const [status, setStatus] = useState<SaveStatus>("idle");
-  const [error, setError] = useState("");
-  const [saver] = useState(() => createSettingsSaver({ setStatus, setMessage: setError, resetMs: 4000, patch: patchArrWatch }));
-  useEffect(() => saver.cancel, [saver]);
+  const { status, message: error, save, edited } = useSettingsSave(4000, patchArrWatch);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -76,7 +73,7 @@ export function ArrWatchForm({ initialPercent }: { initialPercent: string }) {
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     const sent = percent;
-    const result = await saver.save({ diskLowPercent: sent }, () => t("settings.form.common.saveFailed"));
+    const result = await save({ diskLowPercent: sent }, () => t("settings.form.common.saveFailed"));
     const stored = (result.data.settings as { diskLowPercent?: unknown } | undefined)?.diskLowPercent;
     if (result.ok && typeof stored === "number" && latestPercent.current === sent) setPercent(String(stored));
   }
@@ -107,7 +104,7 @@ export function ArrWatchForm({ initialPercent }: { initialPercent: string }) {
           step="1"
           inputMode="numeric"
           value={percent}
-          onChange={(e) => { setPercent(e.target.value); latestPercent.current = e.target.value; saver.edited(); }}
+          onChange={(e) => { setPercent(e.target.value); latestPercent.current = e.target.value; edited(); }}
           placeholder="10"
           className="bg-zinc-800 border-zinc-700 max-w-48"
         />

@@ -1053,6 +1053,17 @@ test("GET on an unrestricted deployment counts the voted titles with one COUNT, 
   assert.equal(opsOf("deletionVote.findMany").filter((o) => (o.args as { take?: number }).take === undefined && (o.args as { distinct?: unknown }).distinct !== undefined && (o.args as { where?: { OR?: unknown } }).where?.OR === undefined).length, 0);
 });
 
+test("GET reads each title's representative row newest-first, so the shown title is deterministic", async () => {
+  groupRows = [{ tmdbId: 603, mediaType: "MOVIE", _count: { id: 2 }, _max: { createdAt: new Date() } }];
+  const { token } = await mintSession();
+  await inScope(() => listVotes(votesReq(token, { method: "GET" }), undefined));
+  const rep = opsOf("deletionVote.findMany").find(
+    (o) => (o.args as { distinct?: unknown; where?: { OR?: unknown } }).distinct !== undefined && (o.args as { where?: { OR?: unknown } }).where?.OR !== undefined,
+  );
+  assert.ok(rep, "the representative read ran");
+  assert.deepEqual((rep.args as { orderBy?: unknown }).orderBy, { createdAt: "desc" });
+});
+
 test("GET scopes ?mine=1 to the caller, filters ?q= by title, and falls back to the votes sort on junk", async () => {
   const { userId, token } = await mintSession();
   const res = await inScope(() =>

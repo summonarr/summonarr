@@ -8,6 +8,7 @@ import {
   getWrappedForServerUsers,
 } from "@/lib/play-history";
 import { processSingleton } from "@/lib/process-singleton";
+import { coalesce } from "@/lib/concurrency";
 import { getStatsTimeZone } from "@/lib/stats-time-zone-data";
 import { Prisma } from "@/generated/prisma";
 
@@ -548,7 +549,14 @@ async function historyScopeCached<T>(key: string, reuse: boolean, compute: () =>
   if (reuse) {
     const hit = historyScopeCache.get(key);
     if (hit && hit.generation === generation && hit.expiresAt > Date.now()) return hit.value as T;
+    // Concurrent misses for one scope share a single computation (a load after
+    // a cache clear carries a new generation, so it never joins an older one).
+    return coalesce(`my-watch-history:scope:${generation}:${key}`, () => computeAndStore(key, generation, compute));
   }
+  return computeAndStore(key, generation, compute);
+}
+
+async function computeAndStore<T>(key: string, generation: number, compute: () => Promise<T>): Promise<T> {
   const value = await compute();
   if (currentActivityGeneration() === generation) {
     historyScopeCache.delete(key);

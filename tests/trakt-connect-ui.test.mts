@@ -59,11 +59,12 @@ test("a poll answer is read by status, then by state", () => {
 test("the start answer's code needs both strings; interval and lifetime fall back", () => {
   assert.equal(readDeviceCode({ userCode: "ABC" }), null);
   assert.equal(readDeviceCode({ userCode: 1, verificationUrl: "https://trakt.tv/activate" }), null);
-  assert.deepEqual(readDeviceCode({ userCode: "ABC", verificationUrl: "u", interval: -1, expiresIn: "x" }), {
-    userCode: "ABC", verificationUrl: "u", interval: 5, expiresIn: 600,
+  assert.equal(readDeviceCode({ userCode: "ABC", verificationUrl: "javascript:alert(1)" }), null);
+  assert.deepEqual(readDeviceCode({ userCode: "ABC", verificationUrl: "https://trakt.tv/activate", interval: -1, expiresIn: "x" }), {
+    userCode: "ABC", verificationUrl: "https://trakt.tv/activate", interval: 5, expiresIn: 600,
   });
-  assert.deepEqual(readDeviceCode({ userCode: "ABC", verificationUrl: "u", interval: 8, expiresIn: 900 }), {
-    userCode: "ABC", verificationUrl: "u", interval: 8, expiresIn: 900,
+  assert.deepEqual(readDeviceCode({ userCode: "ABC", verificationUrl: "https://trakt.tv/activate", interval: 8, expiresIn: 900 }), {
+    userCode: "ABC", verificationUrl: "https://trakt.tv/activate", interval: 8, expiresIn: 900,
   });
 });
 

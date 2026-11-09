@@ -49,7 +49,8 @@ export function DeletePlayButton({ id }: { id: string }) {
       init: { method: "DELETE" },
       fallbackError: t("adminActivity.deletePlay.failed"),
     });
-    if (!res.ok) {
+    // 404: another tab or admin already removed it, which is the goal met.
+    if (!res.ok && !(res.kind === "http" && res.status === 404)) {
       // A route refusal already says why (its rate-limit text, say); anything
       // else (no answer, a proxy page) is for the console.
       if (res.kind !== "http") console.error("[delete-play] delete failed:", res.detail);

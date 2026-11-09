@@ -95,9 +95,11 @@ function instanceLabelOf(side: Side, instance: string | null): string {
 function pathOf(fileInfo: FileInfo | null, side: Side, instance: string | null): string | null {
   if (!fileInfo) return null;
   const rows = side === "plex" ? fileInfo.plexInstances : fileInfo.jellyfinInstances;
-  return rows.find((r) => r.serverInstance === instance)?.filePath
-    ?? (side === "plex" ? fileInfo.plexFilePath : fileInfo.jellyfinFilePath)
-    ?? null;
+  // A row for the selected instance answers for it, even with no path: the
+  // top-level path belongs to the requested instance, which may be another.
+  const row = rows.find((r) => r.serverInstance === instance);
+  if (row) return row.filePath ?? null;
+  return (side === "plex" ? fileInfo.plexFilePath : fileInfo.jellyfinFilePath) ?? null;
 }
 
 // The TMDB search step: debounced, abortable, and remembered — Back from the
@@ -137,6 +139,10 @@ function useFixMatchSearch(active: boolean, query: string, mediaType: "MOVIE" | 
         setResultsFor(q);
         setSearchResults(searchHitsOf(res.data));
       } else if (res.kind !== "aborted") {
+        // The old query's hits must not sit under the new query's error.
+        setSearchResults([]);
+        setResultsFor(null);
+        lastSearched.current = null;
         setSearchError(res.kind === "http"
           ? apiErrorText(res.body, t("adminQueue.common.requestFailed", { status: res.status }))
           : t("adminQueue.fixMatch.searchFailed"));

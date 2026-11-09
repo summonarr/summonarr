@@ -120,6 +120,7 @@ async function writeHeader(
 export async function writeEnumTypes(tx: RawQueryClient, write: Write): Promise<void> {
   await write("-- Enum types\n");
   for (const name of BACKUP_ENUMS) {
+    quoteIdent(name, "enum name");
     const values = await tx.$queryRawUnsafe<{ enumlabel: string }[]>(
       `SELECT enumlabel FROM pg_enum JOIN pg_type ON pg_enum.enumtypid = pg_type.oid WHERE pg_type.typname = $1 ORDER BY enumsortorder`,
       name,
@@ -200,6 +201,7 @@ function readPage(tx: RawQueryClient, table: string, order: TableOrder, cursor: 
  * shape.
  */
 export async function dumpTable(tx: RawQueryClient, table: string, write: Write, onRow: () => void = () => {}): Promise<number> {
+  quoteIdent(table, "table name");
   const order = await tableOrder(tx, table);
   const kinds = await columnKinds(tx, table);
   let total = 0;
@@ -345,7 +347,13 @@ export function buildSqlStream(
     } finally {
       clearTimeout(timeout);
       clearTimeout(firstRead);
-      await hooks.onSettled({ status, rows });
+      // A hook that throws (lock release, audit write) must not become an
+      // unhandled rejection of this detached producer.
+      try {
+        await hooks.onSettled({ status, rows });
+      } catch (settleErr) {
+        console.error("[db-export] settle hook failed:", settleErr);
+      }
     }
   })();
 

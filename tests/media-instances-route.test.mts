@@ -767,6 +767,34 @@ test("POST: an instance name is trimmed on storage and refused past 100 characte
 // Connection-field writes: the mask sentinel, and guardrail 7a
 // ════════════════════════════════════════════════════════════════════════════
 
+test("POST: a kept (mask) secret with a CHANGED server address is refused 400 with ZERO writes; the same address, or a retyped secret, saves", async () => {
+  const admin = await mintSession("ADMIN");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  settings.set("plexRemoteServerUrl", "http://10.0.0.5:32400");
+  settings.set("plexRemoteAdminToken", "original-secret");
+  const post = (inst: Record<string, unknown>) =>
+    POST(postReq({ service: "plex", instances: [{ slug: "remote", name: "Remote", ...inst }] }, admin.header), undefined);
+
+  const moved = await post({ serverUrl: "http://evil.example:32400", adminToken: MASK });
+  assert.equal(moved.status, 400);
+  assert.equal(opsFor("setting", "upsert").length, 0);
+  assert.equal(settings.get("plexRemoteServerUrl"), "http://10.0.0.5:32400");
+
+  assert.equal((await post({ serverUrl: "http://10.0.0.5:32400/", adminToken: MASK })).status, 200);
+  assert.equal((await post({ serverUrl: "http://other.example:32400", adminToken: "typed-again" })).status, 200);
+  assert.equal(settings.get("plexRemoteAdminToken"), "typed-again");
+});
+
+test("POST: free-text fields past their cap are refused 400 before any write", async () => {
+  const admin = await mintSession("ADMIN");
+  const res = await POST(
+    postReq({ service: "plex", instances: [{ slug: "remote", name: "R", libraries: "1,".repeat(2000) }] }, admin.header),
+    undefined,
+  );
+  assert.equal(res.status, 400);
+  assert.equal(opsFor("setting", "upsert").length, 0);
+});
+
 test("an untouched secret sent back as the mask sentinel is SKIPPED, not written; a real value is stored as RAW PLAINTEXT (guardrail 7a)", async () => {
   const admin = await mintSession("ADMIN");
   settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));

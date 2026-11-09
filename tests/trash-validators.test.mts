@@ -21,9 +21,7 @@ import {
 // reachable in practice: upstream JSON.parse can yield any of them at the top level.
 const NON_OBJECTS: unknown[] = [null, undefined, "trash_id", 42, true, false, [], ["x"]];
 
-// ---------------------------------------------------------------------------
 // isCustomFormatPayload
-// ---------------------------------------------------------------------------
 
 test("custom format: minimal {trash_id, name} is accepted", () => {
   assert.equal(isCustomFormatPayload({ trash_id: "cf1", name: "x265" }), true);
@@ -70,9 +68,7 @@ test("custom format: specifications is optional but must be an array when presen
   assert.equal(isCustomFormatPayload({ trash_id: "cf1", name: "n", specifications: "[]" }), false);
 });
 
-// ---------------------------------------------------------------------------
 // isCustomFormatGroupPayload
-// ---------------------------------------------------------------------------
 
 test("group: {trash_id, name, custom_formats: []} is accepted (empty membership ok)", () => {
   assert.equal(
@@ -125,9 +121,7 @@ test("group: non-object payloads and missing id/name are rejected", () => {
   assert.equal(isCustomFormatGroupPayload({ trash_id: "g1", name: "", custom_formats: [] }), false);
 });
 
-// ---------------------------------------------------------------------------
 // isQualityProfilePayload
-// ---------------------------------------------------------------------------
 
 test("quality profile: minimal {trash_id, name} is accepted (items/formatItems optional)", () => {
   assert.equal(isQualityProfilePayload({ trash_id: "qp1", name: "SQP-1" }), true);
@@ -215,9 +209,7 @@ test("quality profile: non-object payloads and missing id/name are rejected", ()
   assert.equal(isQualityProfilePayload({ trash_id: "qp1", name: "" }), false);
 });
 
-// ---------------------------------------------------------------------------
 // isQualitySizePayload
-// ---------------------------------------------------------------------------
 
 test("quality size: {trash_id, qualities: []} is accepted — name is NOT required here", () => {
   // Unlike the other payload kinds, quality-size upstream JSON has no name field to require.
@@ -325,9 +317,7 @@ test("custom format: includeCustomFormatWhenRenaming must be a boolean when pres
   assert.equal(isCustomFormatPayload({ ...base, includeCustomFormatWhenRenaming: "false" }), false);
 });
 
-// ---------------------------------------------------------------------------
 // isNamingPayload
-// ---------------------------------------------------------------------------
 
 test("naming: any plain object is accepted (per-key validation lives in buildNamingPatch)", () => {
   assert.equal(isNamingPayload({}), true);

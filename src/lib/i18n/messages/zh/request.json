@@ -93,6 +93,7 @@
   "request.collection.done": "已请求 {created} / {total}",
   "request.collection.doneUnknown": "已为 {total} 个标题发送请求，正在刷新以显示结果",
   "request.collection.doneSkipped": "已请求 {created} / {total}——{skipped} 个无法请求",
+  "request.collection.someFailed": "已请求 {created} / {total}——{failed} 个失败，请重试",
   "request.collection.networkErrorLower": "网络错误，请重试",
   "request.collection.requested": "已请求",
   "request.collection.requestAll": "全部请求（{count}）"

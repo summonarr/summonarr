@@ -321,6 +321,9 @@ export async function retryPendingGrabPushes(opts: {
   const rows = await prisma.setting.findMany({
     where: { key: { startsWith: GRAB_PUSH_RETRY_PREFIX } },
     select: { key: true, value: true },
+    // Oldest first (ISO times sort in time order): a crowd of fresh markers
+    // that are not yet due must not crowd the eligible old ones out of the take.
+    orderBy: { value: "asc" },
     take: MAX_GRAB_PUSH_RETRIES_PER_SWEEP,
   });
   for (const row of rows) {

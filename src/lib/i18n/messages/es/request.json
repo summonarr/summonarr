@@ -93,6 +93,7 @@
   "request.collection.done": "Solicitadas {created} de {total}",
   "request.collection.doneUnknown": "Solicitud enviada para {total}: actualizando para mostrar el resultado",
   "request.collection.doneSkipped": "Solicitadas {created} de {total}; {skipped} no se pueden solicitar",
+  "request.collection.someFailed": "Solicitadas {created} de {total}; {failed} fallaron, inténtalo de nuevo",
   "request.collection.networkErrorLower": "error de red, inténtalo de nuevo",
   "request.collection.requested": "Solicitadas",
   "request.collection.requestAll": "Solicitar todas ({count})"

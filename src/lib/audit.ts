@@ -28,6 +28,9 @@ export type AuditParams = {
 // and the export load whole. An oversized details is replaced by a marker
 // object, so the column still holds valid JSON for every reader.
 export const MAX_AUDIT_TARGET_LENGTH = 512;
+// Cap for the short identity columns (name, address, agent, provider), so a caller that
+// passes a raw value straight in can never write an unbounded string.
+const MAX_AUDIT_FIELD_LENGTH = 512;
 export const MAX_AUDIT_DETAILS_LENGTH = 16 * 1024;
 
 export function auditDetailsJson(details: Record<string, unknown> | undefined): string | null {
@@ -40,13 +43,13 @@ export function auditDetailsJson(details: Record<string, unknown> | undefined): 
 function auditRowData(params: AuditParams) {
   return {
     userId: params.userId,
-    userName: sanitizeText(params.userName ?? "unknown"),
+    userName: sanitizeText(params.userName ?? "unknown").slice(0, MAX_AUDIT_FIELD_LENGTH),
     action: params.action,
     target: sanitizeText(params.target).slice(0, MAX_AUDIT_TARGET_LENGTH),
     details: auditDetailsJson(params.details),
-    ipAddress: params.ipAddress ? sanitizeForLog(params.ipAddress) : null,
-    userAgent: params.userAgent ? sanitizeForLog(params.userAgent) : null,
-    provider: params.provider ?? null,
+    ipAddress: params.ipAddress ? sanitizeForLog(params.ipAddress).slice(0, MAX_AUDIT_FIELD_LENGTH) : null,
+    userAgent: params.userAgent ? sanitizeForLog(params.userAgent).slice(0, MAX_AUDIT_FIELD_LENGTH) : null,
+    provider: params.provider ? params.provider.slice(0, MAX_AUDIT_FIELD_LENGTH) : null,
     sessionId: params.sessionId ?? null,
   };
 }

@@ -126,7 +126,7 @@ export default async function PlayDetailPage({
 
   if (!play) notFound();
 
-  const isTV = (play.mediaType ?? "").toString() === "TV";
+  const isTV = play.mediaType === "TV";
   const mediaHref = play.tmdbId
     ? `/admin/activity/media/${play.tmdbId}${play.mediaType ? `?type=${play.mediaType}` : ""}`
     : null;

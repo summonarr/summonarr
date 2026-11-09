@@ -417,6 +417,16 @@ test("a repeat POST for the same pair updates rather than duplicating", async ()
   assert.equal(items[0].title, "Second");
 });
 
+test("re-adding a blocked title without a title or reason keeps the stored ones", async () => {
+  const token = await mintSession();
+  await add(token, { tmdbId: 603, mediaType: "MOVIE", title: "The Matrix", reason: "dup" });
+  await add(token, { tmdbId: 603, mediaType: "MOVIE" });
+  assert.equal(items[0].title, "The Matrix");
+  assert.equal(items[0].reason, "dup");
+  await add(token, { tmdbId: 603, mediaType: "MOVIE", reason: "" });
+  assert.equal(items[0].reason, null);
+});
+
 test("the same tmdbId under MOVIE and TV are independent entries", async () => {
   const token = await mintSession();
   await add(token, { tmdbId: 88, mediaType: "MOVIE" });

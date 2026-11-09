@@ -74,9 +74,13 @@ export function useWatchHistory({
   // another request against the same limit.
   const [retryBlocked, setRetryBlocked] = useState(false);
   const cooldownRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The same wait for a rate-limited Load more.
+  const [moreBlocked, setMoreBlocked] = useState(false);
+  const moreCooldownRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(
     () => () => {
       if (cooldownRef.current) clearTimeout(cooldownRef.current);
+      if (moreCooldownRef.current) clearTimeout(moreCooldownRef.current);
     },
     [],
   );
@@ -123,6 +127,11 @@ export function useWatchHistory({
     if (!res || (!res.ok && res.aborted)) return;
     if (!res.ok) {
       setMoreFailure({ key: myKey, rateLimited: res.rateLimited, retryAfterSeconds: res.retryAfterSeconds });
+      if (res.retryAfterSeconds !== null) {
+        setMoreBlocked(true);
+        if (moreCooldownRef.current) clearTimeout(moreCooldownRef.current);
+        moreCooldownRef.current = setTimeout(() => setMoreBlocked(false), res.retryAfterSeconds * 1000);
+      }
       return;
     }
     setPage((cur) =>
@@ -142,6 +151,7 @@ export function useWatchHistory({
     retry: () => setReloadKey((k) => k + 1),
     loadMore,
     loadingMore: more.busy(moreKey),
+    loadMoreBlocked: moreBlocked,
     loadMoreFailed: moreFailure?.key === key ? moreFailure : null,
   };
 }

@@ -1,7 +1,7 @@
 "use client";
 
-import { useId, useState, useTransition } from "react";
-import { useRouter, usePathname, useSearchParams } from "next/navigation";
+import { useId } from "react";
+import { usePendingSearchParam } from "./use-pending-search-param";
 
 // Labelled group of pill buttons backed by one URL search param. Generalized out
 // of the old availability-only filter so /for-you can carry three of these
@@ -28,29 +28,15 @@ export function PillFilter<V extends string>({
   options: readonly PillOption<V>[];
   active: V | undefined;
 }) {
-  const router = useRouter();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
   const labelId = useId();
   // The page behind a pill is force-dynamic and re-enriches its whole set on
-  // every change, so a click can take a moment to land. Show the chosen pill
-  // as selected straight away and mark the group busy until the new render
-  // arrives — otherwise the click reads as ignored.
-  const [isPending, startTransition] = useTransition();
-  const [pendingValue, setPendingValue] = useState<{ v: V | undefined } | null>(null);
-  const shown = isPending && pendingValue ? pendingValue.v : active;
+  // every change, so the chosen pill shows as selected straight away and the
+  // group is marked busy until the new render arrives (usePendingSearchParam).
+  const { shown, set, isPending } = usePendingSearchParam<V>(param, active);
 
   function select(value: V | undefined) {
     if (value === active && !isPending) return;
-    const params = new URLSearchParams(searchParams.toString());
-    if (value === undefined) params.delete(param);
-    else params.set(param, value);
-    params.delete("page");
-    const qs = params.toString();
-    setPendingValue({ v: value });
-    startTransition(() => {
-      router.push(qs ? `${pathname}?${qs}` : pathname);
-    });
+    set(value);
   }
 
   return (

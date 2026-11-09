@@ -61,9 +61,9 @@ shadowPrismaClientMethod(prisma, "$executeRaw", async (strings: TemplateStringsA
   }
   if (sql.startsWith('UPDATE "Setting"')) {
     if (releaseThrows) throw new Error("release write failed");
-    const [key, claimedAt] = values as [string, string];
+    const [restoreTo, key, claimedAt] = values as [string, string, string];
     if (settings.get(key) !== claimedAt) return 0;
-    settings.set(key, "0");
+    settings.set(key, restoreTo);
     return 1;
   }
   throw new Error(`unexpected statement: ${sql}`);
@@ -173,9 +173,19 @@ test("force skips the claim but stamps the slot; a FAILED forced warm gives the 
   assert.ok(Number(settings.get(KEY)) > 0, "the force still stamps, so a plain click right after waits");
   assert.equal((await warm(ok)).status, 429);
 
+  settings.delete(KEY);
   const failedForce = await warm(boom, true);
   assert.equal(failedForce.status, 500);
   assert.equal(settings.get(KEY), "0");
+});
+
+test("a FAILED forced warm restores the cooldown it overwrote, not zero", async () => {
+  const earlier = String(Date.now() - 1000);
+  settings.set(KEY, earlier);
+  const failedForce = await warm(boom, true);
+  assert.equal(failedForce.status, 500);
+  assert.equal(settings.get(KEY), earlier);
+  assert.equal((await warm(ok)).status, 429, "the earlier cooldown is still in force");
 });
 
 test("an unreadable or over-long stored stamp reads as expired; the retry hint never shows NaN or a negative wait", async () => {

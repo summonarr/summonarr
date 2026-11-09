@@ -302,7 +302,7 @@ test("a root folder on a mount /diskspace doesn't list is not filed under \"/\" 
 });
 
 test("nothing to compare never makes the catch-all \"/\" believable — no reading keyed \"/\" with \"/\"'s numbers", () => {
-  // Audit fix C103: an accessible root folder with no free space (a slow statfs
+  // an accessible root folder with no free space (a slow statfs
   // on a network mount) was matched to "/" unchecked and judged as the container root.
   const root = DISK("/", 5 * GB, 100 * GB);
   assert.equal(W.rootDisk(ROOT("/mnt/share/movies", null), [root]), null);
@@ -1039,7 +1039,7 @@ test("guardrail 41: a run whose AbortSignal fired stores nothing and sends nothi
   assert.deepEqual(arrCalls(RADARR), []);
 });
 
-test("C101 guardrail 41: the queue walk observes the lock's signal — no page is read after the abort", async () => {
+test("guardrail 41: the queue walk observes the lock's signal — no page is read after the abort", async () => {
   const f = configureRadarr();
   radarrDisk(f, 30);
   f.queue = [queueRecord(1, "A", true)];
@@ -1055,7 +1055,7 @@ test("C101 guardrail 41: the queue walk observes the lock's signal — no page i
   assert.deepEqual(deliveries(), []);
 });
 
-test("C101 guardrail 41: readQueuePages RETURNS what it has on an abort — it never throws for one", async () => {
+test("guardrail 41: readQueuePages RETURNS what it has on an abort — it never throws for one", async () => {
   const { readQueuePages } = await import("../src/lib/arr-queue-data.ts");
   const f = configureRadarr();
   f.queue = [queueRecord(1, "A", true)];
@@ -1068,7 +1068,7 @@ test("C101 guardrail 41: readQueuePages RETURNS what it has on an abort — it n
   assert.deepEqual(arrCalls(RADARR, "/api/v3/queue").map((c) => c.query.get("page")), ["1"]);
 });
 
-test("C101 guardrail 41: a queue page IN FLIGHT when the lock aborts is cancelled, and the walk returns rather than throws", async () => {
+test("guardrail 41: a queue page IN FLIGHT when the lock aborts is cancelled, and the walk returns rather than throws", async () => {
   const { readQueuePages } = await import("../src/lib/arr-queue-data.ts");
   const f = configureRadarr();
   f.queue = [queueRecord(1, "A", true)];
@@ -1084,7 +1084,7 @@ test("C101 guardrail 41: a queue page IN FLIGHT when the lock aborts is cancelle
   assert.equal(listing.stopped, true, "the walk says the abort stopped it");
 });
 
-test("C101: without an abort the monitor's queue walk still reads every page", async () => {
+test("without an abort the monitor's queue walk still reads every page", async () => {
   const f = configureRadarr();
   radarrDisk(f, 30);
   f.queue = [queueRecord(1, "A", true)];

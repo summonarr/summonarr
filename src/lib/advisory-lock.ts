@@ -56,6 +56,16 @@ export const PURGE_NOTIFICATIONS_LOCK_ID = 2091;
 export const PLEX_RESYNC_LOCK_ID = 2111;
 export const JELLYFIN_RESYNC_LOCK_ID = 2112;
 
+// The (1001, n) two-key transaction locks. The SQL must spell each pair as a
+// literal (a bound integer can resolve to the one-bigint overload, i.e. a
+// different lock), so this table is the registry a new key is checked against:
+// tests/advisory-lock-keys.test.mts requires every literal in src to be listed.
+export const XACT_LOCK_1001_KEYS = {
+  radarrArrCache: 1,
+  sonarrArrCache: 2,
+  vapidKeys: 5,
+} as const;
+
 // 30 minutes — generous enough for legitimate full-library syncs but bounds the worst-case lock hold.
 const DEFAULT_WORK_TIMEOUT_MS = 30 * 60 * 1000;
 

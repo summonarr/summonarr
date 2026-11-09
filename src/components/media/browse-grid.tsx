@@ -36,6 +36,43 @@ interface BrowseGridProps {
   canRequest: boolean;
 }
 
+// Why an empty grid is empty: a filter that matched nothing, a missing TMDB
+// token, or a page past the end / an empty upstream page.
+function BrowseEmptyState({ hasFilters, tokenMissing, currentPage, pathname }: {
+  hasFilters: boolean;
+  tokenMissing?: boolean;
+  currentPage: number;
+  pathname: string;
+}) {
+  const t = useT();
+  if (hasFilters) {
+    return (
+      <EmptyState
+        icon={Filter}
+        title={t("browse.empty.noFilterMatch.title")}
+        description={t("browse.empty.noFilterMatch.description")}
+        cta={{ href: pathname, label: t("browse.clearFilters") }}
+      />
+    );
+  }
+  if (tokenMissing) {
+    return (
+      <EmptyState
+        icon={AlertTriangle}
+        title={t("browse.grid.tokenMissing.title")}
+        description={t("browse.grid.tokenMissing.description")}
+      />
+    );
+  }
+  return (
+    <EmptyState
+      icon={Filter}
+      title={t("browse.grid.noResults.title")}
+      description={currentPage > 1 ? t("browse.grid.noResults.pastEnd") : t("browse.grid.noResults.empty")}
+      cta={currentPage > 1 ? { href: pathname, label: t("browse.empty.backToPage1") } : undefined}
+    />
+  );
+}
 
 export function BrowseGrid({
   initialItems: items,
@@ -127,31 +164,7 @@ export function BrowseGrid({
           </div>
         )}
         {items.length === 0 && !isPending && !failed ? (
-          hasFilters ? (
-            <EmptyState
-              icon={Filter}
-              title={t("browse.empty.noFilterMatch.title")}
-              description={t("browse.empty.noFilterMatch.description")}
-              cta={{ href: pathname, label: t("browse.clearFilters") }}
-            />
-          ) : tokenMissing ? (
-            <EmptyState
-              icon={AlertTriangle}
-              title={t("browse.grid.tokenMissing.title")}
-              description={t("browse.grid.tokenMissing.description")}
-            />
-          ) : (
-            <EmptyState
-              icon={Filter}
-              title={t("browse.grid.noResults.title")}
-              description={
-                currentPage > 1
-                  ? t("browse.grid.noResults.pastEnd")
-                  : t("browse.grid.noResults.empty")
-              }
-              cta={currentPage > 1 ? { href: pathname, label: t("browse.empty.backToPage1") } : undefined}
-            />
-          )
+          <BrowseEmptyState hasFilters={hasFilters} tokenMissing={tokenMissing} currentPage={currentPage} pathname={pathname} />
         ) : (
           <div className="ds-media-grid">
             {items.map((media, i) => (

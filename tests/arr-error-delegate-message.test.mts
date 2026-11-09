@@ -1,6 +1,6 @@
 // Radarr/Sonarr failures shown to a MANAGE_REQUESTS delegate name the failure's
-// KIND, never the arr's internal address (audit 2026-10-20, F029/F025), and an
-// ArrResponseError never prints its upstream body when logged (F024).
+// KIND, never the arr's internal address (audit 2026-10-20), and an
+// ArrResponseError never prints its upstream body when logged.
 //
 // Why: arrErrorMessage generalises only an ArrResponseError. A SafeFetchError
 // (timeout, refused connection) passed through as err.message — "fetch failed

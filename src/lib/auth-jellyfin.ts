@@ -21,6 +21,7 @@ import {
 import {
   auditLoginFailure,
   authorizedSignIn,
+  MAX_SIGN_IN_TOKEN_LENGTH,
   refuseSignIn,
   secretLimiterKey,
   signInRequestContext,
@@ -333,7 +334,7 @@ export async function authorizeWithJellyfinQuickConnect(
   instance: MediaInstanceKey = DEFAULT_MEDIA_INSTANCE,
 ): Promise<AuthorizedSignIn | null> {
   const { secret } = credentials;
-  if (typeof secret !== "string" || !secret) return null;
+  if (typeof secret !== "string" || !secret || secret.length > MAX_SIGN_IN_TOKEN_LENGTH) return null;
   const ctx = signInRequestContext(req);
   const path = JELLYFIN_QUICKCONNECT_PATH;
   // Deliberately NOT scoped by instance — see authorizeWithJellyfin.

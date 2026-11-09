@@ -243,9 +243,7 @@ async function readQueueForPage(service: QueueService, instance: string): Promis
   const budget = AbortSignal.timeout(QUEUE_LISTING_BUDGET_MS);
   const listing = await readQueueListing(cfg, service, budget);
   if (listing.stopped && listing.pages === 0) {
-    const err = new Error(`queue read timed out after ${QUEUE_LISTING_BUDGET_MS / 1000}s`);
-    err.name = "TimeoutError";
-    throw err;
+    throw queueBudgetError();
   }
   return { listing, rows: foldQueueRecords(service, instance, listing.records), cut: listing.truncated || listing.stopped };
 }
@@ -300,13 +298,26 @@ async function configuredCfg(service: QueueService, instance: string): Promise<A
 // a walk of several pages that misses a posted id is read again ONCE before the
 // id is called gone. Every id sent is still named by a fresh read (5c/5e).
 async function liveQueueRows(cfg: ArrCfg, service: QueueService, instance: string, ids: readonly number[]): Promise<QueueItem[]> {
-  const first = await readQueueListing(cfg, service);
+  // One budget covers both reads. A walk the budget cut short is never trusted
+  // as "gone": nothing read means a timeout, and a partial read only matches
+  // what it did see (a posted id it missed is dropped, never sent).
+  const budget = AbortSignal.timeout(QUEUE_LISTING_BUDGET_MS);
+  const first = await readQueueListing(cfg, service, budget);
+  if (first.stopped && first.pages === 0) throw queueBudgetError();
   const rows = foldQueueRecords(service, instance, first.records);
-  if (first.pages <= 1) return rows;
+  if (first.pages <= 1 || first.stopped) return rows;
   const live = new Set<number>();
   for (const row of rows) for (const id of row.ids) live.add(id);
   if (ids.every((id) => live.has(id))) return rows;
-  return foldQueueRecords(service, instance, (await readQueueListing(cfg, service)).records);
+  const second = await readQueueListing(cfg, service, budget);
+  if (second.stopped && second.pages === 0) return rows;
+  return foldQueueRecords(service, instance, second.records);
+}
+
+function queueBudgetError(): Error {
+  const err = new Error(`queue read timed out after ${QUEUE_LISTING_BUDGET_MS / 1000}s`);
+  err.name = "TimeoutError";
+  return err;
 }
 
 /**

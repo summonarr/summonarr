@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useId, useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Download, Ban, ShieldCheck, LinkIcon, Loader2, RefreshCw, Users } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
-import { v, type Infer, type Schema } from "@/lib/validate";
+import { v, type Schema } from "@/lib/validate";
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { Switch } from "@/components/ui/switch";
 import { StyledSelect } from "@/components/ui/styled-select";
@@ -15,6 +15,7 @@ import { EmptyState } from "@/components/ui/design";
 import { useT } from "@/components/i18n/i18n-provider";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useFocusReturn } from "@/hooks/use-focus-return";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import type { Translator } from "@/lib/i18n/translate";
 import { MEDIA_SERVER_SOURCES, serverUserView, type MediaServerSource } from "./server-user-groups";
 
@@ -84,29 +85,58 @@ type WriteResult<T> = { ok: true; data: T | null } | { ok: false; error: string 
 // page, a changed route — is a failure, never a silent success. A non-2xx
 // answer goes through failureMessage — or `genericError` for a route whose own
 // errors are untranslated English — and no answer at all (a network failure, a
-// proxy's own 5xx page) is the translated network error. No client timeout: a
-// policy push or the whole policy sync can take longer than any fixed window,
-// and a timeout would roll back a write the server went on to make. The caller
-// owns refresh and any rollback.
-async function sendWrite<S extends Schema<unknown>>(
+// proxy's own 5xx page) is the translated network error. The default 30 s
+// bound applies; the caller owns refresh and any rollback.
+async function sendWrite<T>(
   url: string,
   init: { method: "PATCH" | "POST"; body?: unknown },
   t: Translator,
-  schema: S,
+  schema: Schema<T>,
+  signal: AbortSignal,
   genericError?: string,
-): Promise<WriteResult<Infer<S>>> {
+): Promise<WriteResult<T>> {
   const res = await fetchJson(withBasePath(url), {
     init: init.body === undefined ? { method: init.method } : jsonInit(init.method, init.body),
     schema: v.nullable(schema),
+    signal,
   });
-  // Checked against v.nullable(schema) above; TypeScript can't see through the generic.
-  if (res.ok) return { ok: true, data: res.data as Infer<S> | null };
+  if (res.ok) return { ok: true, data: res.data };
   if (res.kind === "http") {
     const authFailure = res.status === 401 || res.status === 403;
     return { ok: false, error: genericError && !authFailure ? genericError : failureMessage(res.status, res.error || undefined, t) };
   }
   if (res.kind === "invalid") return { ok: false, error: genericError ?? failureMessage(res.status, undefined, t) };
   return { ok: false, error: t("adminManage.serverUsers.networkError") };
+}
+
+// Every control's write state in one place: per-key busy (a second write on a
+// key that is running is skipped, unmount aborts what is in flight) and the
+// last failure. `send` resolves undefined when the run was dropped, otherwise
+// the write's result; a failure is already in `error`.
+function useServerUserWrite() {
+  const t = useT();
+  const action = useAsyncAction();
+  const [error, setError] = useState<string | null>(null);
+
+  async function send<T>(
+    url: string,
+    init: { method: "PATCH" | "POST"; body?: unknown },
+    schema: Schema<T>,
+    opts?: { key?: string; genericError?: string },
+  ): Promise<WriteResult<T> | undefined> {
+    const result = await action.run(
+      opts?.key ?? "write",
+      (signal) => {
+        setError(null);
+        return sendWrite(url, init, t, schema, signal, opts?.genericError);
+      },
+      { ifBusy: "skip" },
+    );
+    if (result && !result.ok) setError(result.error);
+    return result;
+  }
+
+  return { send, error, busy: action.busy, anyBusy: action.anyBusy };
 }
 
 // What each write's 2xx carries that a control reads.
@@ -147,27 +177,18 @@ function LinkPicker({
 }) {
   const t = useT();
   const router = useRouter();
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const write = useServerUserWrite();
+  const { error } = write;
+  const loading = write.anyBusy;
 
   const value = !row.manualUserLink ? AUTO : (row.userId ?? NONE);
 
   async function change(next: string) {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await sendWrite(`/api/admin/server-users/${row.id}`, {
-        method: "PATCH",
-        body: next === AUTO ? { autoLink: true } : { userId: next === NONE ? null : next },
-      }, t, NO_ANSWER);
-      if (!result.ok) {
-        setError(result.error);
-        return;
-      }
-      router.refresh();
-    } finally {
-      setLoading(false);
-    }
+    const result = await write.send(`/api/admin/server-users/${encodeURIComponent(row.id)}`, {
+      method: "PATCH",
+      body: next === AUTO ? { autoLink: true } : { userId: next === NONE ? null : next },
+    }, NO_ANSWER);
+    if (result?.ok) router.refresh();
   }
 
   return (
@@ -254,51 +275,42 @@ function DownloadToggle({
 }) {
   const t = useT();
   const router = useRouter();
-  const [loading, setLoading] = useState(false);
-  const [optimistic, setOptimistic] = useState(enabled);
-  // A failed write (red) or a write the route saved but could not push to the
-  // media server (amber — `pushed: false`). The hourly reconcile only re-pushes
-  // drift in the DISABLE direction, so a failed enable-push never self-heals;
-  // a green switch over a policy that is not in effect is exactly what the
-  // route's warning exists to prevent.
-  const [error, setError] = useState<string | null>(null);
+  const write = useServerUserWrite();
+  const { error } = write;
+  const loading = write.anyBusy;
+  // The admin's own click, shown until the server value moves: it applies only
+  // while the prop is still the one it was made over, so a bulk "Disable all"
+  // (or another admin's change) arriving through router.refresh() wins, and a
+  // failed write drops it.
+  const [override, setOverride] = useState<{ over: boolean | null; value: boolean } | null>(null);
+  const optimistic = override && override.over === enabled ? override.value : enabled;
+  // A write the route saved but could not push to the media server (amber —
+  // `pushed: false`). The hourly reconcile only re-pushes drift in the DISABLE
+  // direction, so a failed enable-push never self-heals; a green switch over a
+  // policy that is not in effect is exactly what the route's warning exists to
+  // prevent.
   const [warning, setWarning] = useState<string | null>(null);
-
-  // Follow the server value when it changes. useState only reads `enabled`
-  // on first mount, and router.refresh() keeps component state, so without
-  // this a bulk "Disable all" would leave every switch showing its old value.
-  // After the admin's own click the new prop already matches, so it's a no-op.
-  useEffect(() => {
-    setOptimistic(enabled);
-  }, [enabled]);
 
   async function toggle() {
     // null means not-yet-synced — first click enables downloads
     const next = !(optimistic ?? false);
-    setOptimistic(next);
-    setLoading(true);
-    setError(null);
+    setOverride({ over: enabled, value: next });
     setWarning(null);
-    try {
-      const result = await sendWrite(
-        `/api/admin/server-users/${userId}`,
-        { method: "PATCH", body: { downloadsEnabled: next } },
-        t,
-        POLICY_ANSWER,
-      );
-      if (!result.ok) {
-        // Refused or never reached the server — roll back the optimistic state.
-        setOptimistic(optimistic);
-        setError(result.error);
-        return;
-      }
-      if (result.data?.pushed === false) {
-        setWarning(result.data.warning ?? t("adminManage.serverUsers.savedNotPushed"));
-      }
-      router.refresh();
-    } finally {
-      setLoading(false);
+    const result = await write.send(
+      `/api/admin/server-users/${encodeURIComponent(userId)}`,
+      { method: "PATCH", body: { downloadsEnabled: next } },
+      POLICY_ANSWER,
+    );
+    if (!result) return;
+    if (!result.ok) {
+      // Refused or never reached the server — roll back the optimistic state.
+      setOverride(null);
+      return;
     }
+    if (result.data?.pushed === false) {
+      setWarning(result.data.warning ?? t("adminManage.serverUsers.savedNotPushed"));
+    }
+    router.refresh();
   }
 
   if (isDisabled) {
@@ -342,40 +354,31 @@ function DownloadToggle({
 function SyncUsersButton() {
   const t = useT();
   const router = useRouter();
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const write = useServerUserWrite();
+  const { error } = write;
+  const loading = write.anyBusy;
   // A 200 that is not a clean run: the advisory lock was held (`skipped`), or
   // some policies failed (`ok: false` — the route keeps 200 on a partial
   // failure and marks the run degraded). Its English `error` is never shown.
   const [notice, setNotice] = useState<string | null>(null);
 
   async function sync() {
-    setLoading(true);
-    setError(null);
     setNotice(null);
-    try {
-      const result = await sendWrite(
-        "/api/cron/sync-download-policies",
-        { method: "POST" },
-        t,
-        POLICY_SYNC_ANSWER,
-        t("adminManage.serverUsers.syncFailed"),
-      );
-      if (!result.ok) {
-        setError(result.error);
-        return;
-      }
-      if (result.data?.skipped === true) {
-        setNotice(t("adminManage.serverUsers.syncSkipped"));
-        return;
-      }
-      if (result.data?.ok === false) {
-        setNotice(t("adminManage.serverUsers.syncErrors", { count: result.data.errors ?? 0 }));
-      }
-      router.refresh();
-    } finally {
-      setLoading(false);
+    const result = await write.send(
+      "/api/cron/sync-download-policies",
+      { method: "POST" },
+      POLICY_SYNC_ANSWER,
+      { genericError: t("adminManage.serverUsers.syncFailed") },
+    );
+    if (!result?.ok) return;
+    if (result.data?.skipped === true) {
+      setNotice(t("adminManage.serverUsers.syncSkipped"));
+      return;
     }
+    if (result.data?.ok === false) {
+      setNotice(t("adminManage.serverUsers.syncErrors", { count: result.data.errors ?? 0 }));
+    }
+    router.refresh();
   }
 
   return (
@@ -429,8 +432,9 @@ function BulkBar({
 }) {
   const t = useT();
   const router = useRouter();
-  const [loading, setLoading] = useState<BulkKind | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const write = useServerUserWrite();
+  const { error } = write;
+  const loading: BulkKind | null = write.busy("bulk:disable") ? "disable" : write.busy("bulk:enable") ? "enable" : null;
   // The route saves every row and answers 200 even when some users' policy
   // could not be pushed to Jellyfin (`errors`). A failed enable-push never
   // self-heals (the hourly reconcile re-pushes disables only), so say so.
@@ -445,27 +449,18 @@ function BulkBar({
 
   async function bulk(kind: BulkKind) {
     setConfirming(null);
-    setLoading(kind);
-    setError(null);
     setWarning(null);
-    try {
-      const result = await sendWrite(
-        "/api/admin/server-users/bulk",
-        { method: "POST", body: { source, downloadsEnabled: BULK_KINDS[kind].downloadsEnabled } },
-        t,
-        BULK_ANSWER,
-      );
-      if (!result.ok) {
-        setError(result.error);
-        return;
-      }
-      const notPushed = result.data?.errors ?? 0;
-      if (notPushed > 0) setWarning(t("adminManage.serverUsers.bulk.notPushed", { count: notPushed }));
-      router.refresh();
-    } finally {
-      focus.returnToIfLost(kind);
-      setLoading(null);
-    }
+    const result = await write.send(
+      "/api/admin/server-users/bulk",
+      { method: "POST", body: { source, downloadsEnabled: BULK_KINDS[kind].downloadsEnabled } },
+      BULK_ANSWER,
+      { key: `bulk:${kind}` },
+    );
+    focus.returnToIfLost(kind);
+    if (!result?.ok) return;
+    const notPushed = result.data?.errors ?? 0;
+    if (notPushed > 0) setWarning(t("adminManage.serverUsers.bulk.notPushed", { count: notPushed }));
+    router.refresh();
   }
 
   if (confirming) {
@@ -548,34 +543,23 @@ function BulkConfirm({
 function AutoDisableToggle({ initial }: { initial: boolean }) {
   const t = useT();
   const router = useRouter();
-  const [on, setOn] = useState(initial);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // Follow the server value, as DownloadToggle does: useState reads `initial`
-  // once and router.refresh() keeps component state, so another admin's change
-  // (or this one's, re-read) never showed until a full navigation.
-  useEffect(() => {
-    setOn(initial);
-  }, [initial]);
+  const write = useServerUserWrite();
+  const { error } = write;
+  const loading = write.anyBusy;
+  // Follow the server value, as DownloadToggle does: the admin's own click
+  // applies only while the prop is the one it was made over, so another admin's
+  // change (or this one's, re-read) shows without a full navigation.
+  const [override, setOverride] = useState<{ over: boolean; value: boolean } | null>(null);
+  const on = override && override.over === initial ? override.value : initial;
 
   async function toggle() {
     const next = !on;
-    setOn(next);
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await sendWrite("/api/admin/server-users", { method: "PATCH", body: { autoDisableNew: next } }, t, NO_ANSWER);
-      if (!result.ok) {
-        // Refused or never reached the server — roll back the optimistic state.
-        setOn(on);
-        setError(result.error);
-        return;
-      }
-      router.refresh();
-    } finally {
-      setLoading(false);
-    }
+    setOverride({ over: initial, value: next });
+    const result = await write.send("/api/admin/server-users", { method: "PATCH", body: { autoDisableNew: next } }, NO_ANSWER);
+    if (!result) return;
+    // Refused or never reached the server — roll back the optimistic state.
+    if (!result.ok) setOverride(null);
+    else router.refresh();
   }
 
   return (

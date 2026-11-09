@@ -59,8 +59,9 @@ test("every control writes through the one shared path", () => {
   assert.equal((table.match(/\bfetchJson\(/g) ?? []).length, 1, "only sendWrite calls fetchJson");
   assert.equal((table.match(/\bfetch\(/g) ?? []).length, 0, "no bare fetch beside it");
   for (const name of ["LinkPicker", "DownloadToggle", "SyncUsersButton", "BulkBar", "AutoDisableToggle"]) {
-    assert.match(fn(name), /sendWrite\b/, name);
+    assert.match(fn(name), /write\.send\(/, name);
   }
+  assert.match(fn("useServerUserWrite"), /sendWrite\(/);
 });
 
 test("Sync users reads the 200 body: a held lock and a partial failure are not a silent success", () => {

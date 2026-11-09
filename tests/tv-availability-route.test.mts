@@ -272,7 +272,7 @@ for (const [label, raw] of [
   ["negative", "-5"],
   ["whitespace", "%20"],
   ["a bare sign", "%2B"],
-  ["a hex literal", "0x10"], // parseInt(_, 10) stops at the `x` ⇒ 0 ⇒ rejected
+  ["a hex literal", "0x10"],
 ] as const) {
   test(`a ${label} tmdbId is rejected with 400 and never reaches a query`, async () => {
     const res = await get(await mintSession(), `?tmdbId=${raw}`);
@@ -281,24 +281,20 @@ for (const [label, raw] of [
   });
 }
 
-// parseInt is a PREFIX parse, so several malformed-looking inputs are accepted.
-// That is safe here, and pinning it says why: whatever the caller sends is
-// coerced to a single positive integer before it reaches the query, so the
-// leniency can never widen the scope past one tmdbId or reach SQL as text.
-for (const [label, raw, want] of [
-  ["a trailing-garbage id", "12abc", 12],
-  ["a float", "12.5", 12],
-  ["a SQL-ish string", "1%20OR%201%3D1", 1],
-  ["a semicolon-terminated id", "77%3B%20DROP%20TABLE", 77],
+// The id is read through the shared canonical-digits parser, so a prefix such
+// as "12abc" or "12.5" is refused rather than read as a different title.
+for (const [label, raw] of [
+  ["a trailing-garbage id", "12abc"],
+  ["a float", "12.5"],
+  ["a SQL-ish string", "1%20OR%201%3D1"],
+  ["a semicolon-terminated id", "77%3B%20DROP%20TABLE"],
+  ["a leading-zero id", "012"],
+  ["an exponent", "1e3"],
 ] as const) {
-  test(`${label} truncates to a bound positive integer rather than erroring`, async () => {
-    plexHolders = [{ tmdbId: want, serverInstance: "" }];
-    episodes = [{ tmdbId: want, source: "plex", seasonNumber: 1, episodeNumber: 1 }];
+  test(`${label} is rejected with 400 and never reaches a query`, async () => {
     const res = await get(await mintSession(), `?tmdbId=${raw}`);
-    assert.equal(res.status, 200);
-    const where = opsOf("tVEpisodeCache.findMany")[0].args as { tmdbId: number };
-    assert.equal(where.tmdbId, want);
-    assert.equal(typeof where.tmdbId, "number");
+    assert.equal(res.status, 400);
+    assert.equal(opsOf("tVEpisodeCache.findMany").length, 0);
   });
 }
 

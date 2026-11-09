@@ -11,6 +11,7 @@ import { withBasePath } from "@/lib/base-path";
 import { EmptyState } from "@/components/ui/design";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { timedFetch } from "@/lib/client/fetch-json";
+import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { useAsyncAction } from "@/hooks/use-async-action";
 
 export interface WatchlistGridItem {
@@ -104,15 +105,15 @@ export function WatchlistGrid({
     setRemoved((cur) => new Set(cur).add(key)); // optimistic
     // Undo only THIS item, so another item whose concurrent DELETE already
     // succeeded stays gone.
-    const restore = () => {
+    const restore = (limited: string | null) => {
       setRemoved((cur) => {
         const next = new Set(cur);
         next.delete(key);
         return next;
       });
-      setError(t("personal.watchlist.removeError", { title: it.title }));
+      setError(limited ?? t("personal.watchlist.removeError", { title: it.title }));
     };
-    const ok = await action.run(
+    const outcome = await action.run(
       `remove:${key}`,
       async (signal) => {
         try {
@@ -120,14 +121,14 @@ export function WatchlistGrid({
             withBasePath(`/api/watchlist?tmdbId=${it.tmdbId}&mediaType=${it.mediaType}`),
             { method: "DELETE", signal },
           );
-          return res.ok;
+          return res.ok ? { ok: true as const } : { ok: false as const, limited: rateLimitMessage(res, t) };
         } catch {
-          return false;
+          return { ok: false as const, limited: null };
         }
       },
       { ifBusy: "skip" },
     );
-    if (ok === false) restore();
+    if (outcome && !outcome.ok) restore(outcome.limited);
   }
 
   const errorLine = error && (

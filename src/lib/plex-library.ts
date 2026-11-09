@@ -65,6 +65,7 @@ export async function refreshPlexSection(
       `Plex section=${sectionKey} refresh status=${res.status}${body ? ` body=${body.slice(0, 200)}` : ""}`,
     );
   }
+  await res.body?.cancel().catch(() => {});
 }
 
 // One paged listing of a section: /all (the full walk) or /recentlyAdded

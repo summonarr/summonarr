@@ -129,3 +129,10 @@ test("the accent is a stable hash of its seed, spread over the wheel", () => {
   const gap = Math.abs(hue("u1") - hue("u2"));
   assert.ok(Math.min(gap, 360 - gap) > 5, `u1/u2 hues ${hue("u1")}/${hue("u2")}`);
 });
+
+test("the media type filter matches whatever the case of the filter", () => {
+  const incoming = [session({ id: "plex:2", mediaType: "movie" })];
+  assert.equal(mergeLiveSessions([], incoming, { mediaType: "movie" }).length, 1);
+  assert.equal(mergeLiveSessions([], incoming, { mediaType: "MOVIE" }).length, 1);
+  assert.equal(mergeLiveSessions([], incoming, { mediaType: "TV" }).length, 0);
+});

@@ -14,6 +14,14 @@ import { parseAuthUrl } from "@/lib/auth-url";
 import { previousSecretProblem, secretReuseError } from "@/lib/boot-secrets";
 import { bootRefused, type BootRefusal } from "@/lib/boot-refusal";
 
+const MIN_SECRET_LENGTH = 32;
+
+// Present and long enough once trimmed (a trailing newline from a secrets file
+// must not count toward the length).
+function secretLongEnough(value: string | undefined): boolean {
+  return !!value && value.trim().length >= MIN_SECRET_LENGTH;
+}
+
 // The fail-closed environment checks. `refuse` logs the problem and records how
 // it ends; the caller exits once, after every check has had its say, so the
 // operator sees all of them in one boot instead of fixing them one restart at a
@@ -38,7 +46,7 @@ function checkBootEnv(): BootRefusal[] {
     );
   }
 
-  if (!process.env.NEXTAUTH_SECRET || process.env.NEXTAUTH_SECRET.trim().length < 32) {
+  if (!secretLongEnough(process.env.NEXTAUTH_SECRET)) {
     refuse(
       "[startup] NEXTAUTH_SECRET is missing or too short (minimum 32 characters required). " +
         "Generate one with: openssl rand -base64 32",
@@ -104,7 +112,7 @@ function checkBootEnv(): BootRefusal[] {
     console.warn(warning);
   }
 
-  if (!process.env.CRON_SECRET || process.env.CRON_SECRET.trim().length < 32) {
+  if (!secretLongEnough(process.env.CRON_SECRET)) {
     refuse(
       "[startup] CRON_SECRET is not set or is too short (minimum 32 characters). " +
         "Sync and cron endpoints will not be protected by a machine secret. " +
@@ -231,7 +239,10 @@ function warnRiskyFlags(): void {
   if (process.env.SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN === "true") {
     void import("@/lib/prisma")
       .then(({ prisma }) => prisma.setting.findUnique({ where: { key: "setup_completed_at" }, select: { key: true } }))
-      .catch(() => null)
+      .catch((err) => {
+        console.warn("[startup] could not read setup state:", err instanceof Error ? err.message : err);
+        return null;
+      })
       .then((setupDone) => {
         if (setupDone) {
           console.warn(

@@ -85,7 +85,7 @@ async function fetchIpinfo(ip: string, token: string): Promise<Response> {
 
 /** The answer's body, checked; one without the shape throws, naming the field (never its value). */
 async function readIpinfo(res: Response): Promise<IpinfoResponse> {
-  const parsed = check(IpinfoResponse, await res.json());
+  const parsed = check(IpinfoResponse, await res.json().catch(() => null));
   if (!parsed.ok) throw new Error(`malformed response (${parsed.error})`);
   return parsed.value;
 }
@@ -250,7 +250,7 @@ export async function testIpinfoConnection(): Promise<string> {
   if (!token) throw new Error("No ipinfo token configured");
   const res = await fetchIpinfo("8.8.8.8", token);
   if (!res.ok) throw new Error(`ipinfo returned HTTP ${res.status}`);
-  const parsed = check(IpinfoResponse, await res.json());
+  const parsed = check(IpinfoResponse, await res.json().catch(() => null));
   if (!parsed.ok || !parsed.value.ip) throw new Error("ipinfo returned malformed response");
   return parsed.value.org ?? parsed.value.ip;
 }

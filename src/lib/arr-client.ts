@@ -127,6 +127,8 @@ export async function retryTransientRead<T>(
   }
 }
 
+const ERROR_BODY_MAX_CHARS = 64 * 1024;
+
 async function arrRequest(cfg: ArrCfg, path: string, options: ArrFetchOptions): Promise<Response> {
   const { signal, method, body } = options;
   const send = () =>
@@ -143,7 +145,9 @@ async function arrRequest(cfg: ArrCfg, path: string, options: ArrFetchOptions): 
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     if (!options.quietErrors) console.error(`[arr] ${sanitizeForLog(path)} → ${res.status}`);
-    throw new ArrResponseError(res.status, text);
+    // Only the head is ever read (validation messages, error pages): a proxy's
+    // giant error page must not stay alive on the error.
+    throw new ArrResponseError(res.status, text.length > ERROR_BODY_MAX_CHARS ? text.slice(0, ERROR_BODY_MAX_CHARS) : text);
   }
   return res;
 }

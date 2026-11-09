@@ -34,7 +34,9 @@ export default async function ArrHistoryPage({
   const sp = await searchParams;
   const tab = first(sp.tab) === "blocklist" ? "blocklist" : "history";
   const service = first(sp.service);
-  const initialInstance = service === "radarr" || service === "sonarr" ? `${service}:${first(sp.instance) ?? ""}` : null;
+  // Only a key the page can actually select (an instance that is configured).
+  const instanceKey = service === "radarr" || service === "sonarr" ? `${service}:${first(sp.instance) ?? ""}` : null;
+  const initialInstance = instanceKey && instances.some((i) => `${i.service}:${i.slug}` === instanceKey) ? instanceKey : null;
   const initialKind = tab === "history" ? parseHistoryKind(first(sp.kind)) : null;
   const rawPage = first(sp.page);
   const initialPage = rawPage && /^\d{1,6}$/.test(rawPage) && Number(rawPage) > 0 ? Number(rawPage) : 1;

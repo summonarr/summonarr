@@ -2,11 +2,9 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { StyledSelect } from "@/components/ui/styled-select";
-import { Loader2 } from "@/components/icons";
-import { SaveStatusMessage } from "./save-status";
+import { SaveButtonRow } from "./save-status";
 import { useSettingsSave } from "./shared";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { LocalDateTime } from "@/components/local-date-time";
@@ -111,14 +109,7 @@ export function MdblistPlanForm({ initialPlan, usage }: { initialPlan: MdblistPl
           <p className="text-xs text-amber-400">{t("settings.form.mdblistPlan.backgroundStopped")}</p>
         ) : null}
       </div>
-      <div className="flex items-center gap-3">
-        <Button type="submit" disabled={!dirty || status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
-          {status === "saving"
-            ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</>
-            : t("settings.form.common.save")}
-        </Button>
-        <SaveStatusMessage status={status} errorLabel={error || undefined} />
-      </div>
+      <SaveButtonRow status={status} message={error || undefined} disabled={!dirty} />
     </form>
   );
 }

@@ -520,22 +520,31 @@ export async function getTitleNeverWatched(tmdbId: number, mediaType: CleanupMed
   const hit = entries.get(key);
   if (hit && hit.generation === generation && hit.version === version && hit.arr === arr && Date.now() - hit.at < REPORT_TTL_MS) return hit.value;
 
-  const facts = await loadLibraryWatchFacts(arr, { only: [{ tmdbId, mediaType }], seasons: mediaType === "TV" });
-  const t = facts.titles[0];
-  const value: TitleNeverWatched | null = t
-    ? {
-        state: t.verdict.state,
-        windowStart: iso(t.verdict.windowStart),
-        days: t.verdict.days,
-        fullyObserved: t.verdict.fullyObserved,
-        neverWatchedSeasons: (t.seasons ?? []).filter((s) => isNeverWatchedState(s.state)).map((s) => s.seasonNumber),
+  // Concurrent misses for one title share a single read.
+  return coalesce(`never-watched:title-chip:${key}:${generation}:${version}`, async () => {
+    const facts = await loadLibraryWatchFacts(arr, { only: [{ tmdbId, mediaType }], seasons: mediaType === "TV" });
+    const t = facts.titles[0];
+    const value: TitleNeverWatched | null = t
+      ? {
+          state: t.verdict.state,
+          windowStart: iso(t.verdict.windowStart),
+          days: t.verdict.days,
+          fullyObserved: t.verdict.fullyObserved,
+          neverWatchedSeasons: (t.seasons ?? []).filter((s) => isNeverWatchedState(s.state)).map((s) => s.seasonNumber),
+        }
+      : null;
+    if (currentActivityGeneration() === generation && reportCache.version === version) {
+      // A full map sheds its oldest entry (insertion order), not every warm one.
+      entries.delete(key);
+      while (entries.size >= TITLE_CHIP_MAX_ENTRIES) {
+        const oldest = entries.keys().next().value;
+        if (oldest === undefined) break;
+        entries.delete(oldest);
       }
-    : null;
-  if (currentActivityGeneration() === generation && reportCache.version === version) {
-    if (entries.size >= TITLE_CHIP_MAX_ENTRIES && !entries.has(key)) entries.clear();
-    entries.set(key, { value, at: Date.now(), generation, version, arr });
-  }
-  return value;
+      entries.set(key, { value, at: Date.now(), generation, version, arr });
+    }
+    return value;
+  });
 }
 
 // The detail-page chip's read: ADMIN only, the page switched on, and a failure

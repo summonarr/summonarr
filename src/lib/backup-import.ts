@@ -743,7 +743,6 @@ async function parseDump(
           // drained bytes are discarded
         }
       } catch (err) {
-        if (err instanceof BackupCryptoError) return { ok: false, status: err.status, error: err.message };
         return readFailure(err, "drain");
       }
     }

@@ -10,6 +10,7 @@ import { DetailActionButton } from "@/components/media/detail-action-button";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
 import { timedFetch } from "@/lib/client/fetch-json";
+import { writeDeletionVote, type VoteWriteOutcome } from "@/lib/client/vote-write";
 import { useAsyncAction } from "@/hooks/use-async-action";
 
 interface Props {
@@ -50,7 +51,7 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
     setRefocus(true);
   }
 
-  type Outcome = { ok: true } | { ok: false; message: string };
+  type Outcome = VoteWriteOutcome;
 
   async function handleVote() {
     if (action.busy("vote")) return;
@@ -90,20 +91,15 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
   async function handleUnvote() {
     if (action.busy("vote")) return;
     setState("loading");
+    // The "Voted" button unmounts for the spinner: the button that replaces it
+    // takes focus.
+    setRefocus(true);
     // 404: the vote is already gone (removed in another tab, or dismissed by
     // an admin), which is what was asked for. Treating it as a failure kept
     // the button on "Voted" and every retry 404'd again.
     const out = await action.run(
       "vote",
-      async (signal): Promise<Outcome> => {
-        try {
-          const res = await timedFetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "DELETE", signal });
-          if (res.ok || res.status === 404) return { ok: true };
-          return { ok: false, message: rateLimitMessage(res, t) ?? t("request.vote.removeFailed") };
-        } catch {
-          return { ok: false, message: t("request.vote.removeFailed") };
-        }
-      },
+      (signal) => writeDeletionVote({ method: "DELETE", tmdbId, mediaType, okOn404: true, failed: t("request.vote.removeFailed"), signal, t }),
       { ifBusy: "skip" },
     );
     if (!out) return;

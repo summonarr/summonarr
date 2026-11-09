@@ -221,14 +221,14 @@ export function TopFilterBar({
 
         <FilterSelect label={t("media.filter.fromYearLabel")} value={f.fromYear} onChange={(fromYear) => push({ fromYear })}>
           <option value="">{t("media.filter.fromYear")}</option>
-          {years.map((y) => (
+          {years.filter((y) => !f.toYear || Number(y) <= Number(f.toYear)).map((y) => (
             <option key={y} value={y}>{y}</option>
           ))}
         </FilterSelect>
 
         <FilterSelect label={t("media.filter.toYearLabel")} value={f.toYear} onChange={(toYear) => push({ toYear })}>
           <option value="">{t("media.filter.toYear")}</option>
-          {years.map((y) => (
+          {years.filter((y) => !f.fromYear || Number(y) >= Number(f.fromYear)).map((y) => (
             <option key={y} value={y}>{y}</option>
           ))}
         </FilterSelect>

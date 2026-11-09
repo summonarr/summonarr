@@ -59,7 +59,7 @@ test("Permissions: a change made while a save is out is queued (FieldSave), neve
 
 test("Permissions: a quota field shows the value that was saved, and junk is refused out loud", () => {
   assert.match(permEdits, /setQuota\(\(q\) => \(\{ \.\.\.q, \[field\]: formatQuota\(value\) \}\)\);/);
-  assert.match(permEdits, /!Number\.isFinite\(value\)\) \{[\s\S]*?setError\(t\("adminManage\.perm\.quota\.invalid"\)\);/);
+  assert.match(permEdits, /!Number\.isFinite\(value\)\) \{[\s\S]*?setFailure\(\{ field, text: t\("adminManage\.perm\.quota\.invalid"\) \}\);/);
 });
 
 test("Users table: busy and error state are per row, and a finishing action clears only its own row", () => {
@@ -86,4 +86,15 @@ test("Users table: focus returns to the row's actions menu after a cancel or a f
 test("Watch Sync: Run now is off while a run is already going on the server", () => {
   const panel = read("src/components/admin/watch-sync-panel.tsx");
   assert.match(panel, /disabled=\{running \|\| serverRunning \|\| data\.pairs\.length === 0\}/);
+});
+
+test("Users table: demoting an ADMIN asks first, like promoting to ADMIN", () => {
+  assert.match(userTable, /u\.role === "ADMIN" \? onDemote\("USER"\) : onPatch\(\{ role: "USER" \}\)/);
+  assert.match(userTable, /u\.role === "ADMIN" \? onDemote\("ISSUE_ADMIN"\) : onPatch\(\{ role: "ISSUE_ADMIN" \}\)/);
+  assert.match(userTable, /demote:\s+\{ hintKey: "adminManage\.users\.confirm\.demoteHint"/);
+});
+
+test("Permissions: a later save of another field does not clear a refused field's error", () => {
+  assert.match(permEdits, /setFailure\(\(f\) => \(f\?\.field === field \? null : f\)\)/);
+  assert.doesNotMatch(permEdits, /setError\(null\)/);
 });

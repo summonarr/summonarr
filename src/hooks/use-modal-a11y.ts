@@ -101,6 +101,13 @@ function restoreFocus(opener: HTMLElement | null, fallback: HTMLElement | null |
   target?.focus?.();
 }
 
+// A container without a tabindex ignores focus(); give it the programmatic one.
+function focusContainer(container: HTMLElement | null | undefined): void {
+  if (!container) return;
+  if (!container.hasAttribute("tabindex")) container.setAttribute("tabindex", "-1");
+  container.focus?.();
+}
+
 export function useModalA11y(
   containerRef: RefObject<HTMLElement | null>,
   onClose: () => void,
@@ -121,8 +128,9 @@ export function useModalA11y(
     // Move focus in: an explicit target, else the first focusable, else the
     // dialog container itself (needs tabIndex={-1} to be focusable).
     const container = containerRef.current;
-    const initial = initialFocusRef?.current ?? (container ? focusableWithin(container)[0] : null) ?? container;
-    initial?.focus?.();
+    const initial = initialFocusRef?.current ?? (container ? focusableWithin(container)[0] : null);
+    if (initial) initial.focus?.();
+    else focusContainer(container);
 
     function onKey(e: KeyboardEvent) {
       if (!isTopModal(token)) return;
@@ -138,7 +146,7 @@ export function useModalA11y(
       e.preventDefault();
       if (action === "close") onCloseRef.current();
       // Nothing focusable inside — keep focus on the container, don't leak out.
-      else if (action === "focusContainer") container?.focus?.();
+      else if (action === "focusContainer") focusContainer(container);
       else if (action === "focusFirst") focusables[0].focus();
       else focusables[focusables.length - 1].focus();
     }

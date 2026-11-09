@@ -88,7 +88,9 @@ export function bodyFrom(d: Draft): Record<string, unknown> {
     // Blank ⇒ leave the key out so the server applies its default (ntfy 3,
     // Gotify 5). Number("") is 0, which Gotify would store and ntfy would 400 on.
     const priority = d.priority.trim();
-    if (priority !== "") config.priority = Number(priority);
+    // Text that is not a number goes as typed (JSON would turn NaN into null),
+    // so the server refuses it as a priority error.
+    if (priority !== "") config.priority = Number.isFinite(Number(priority)) ? Number(priority) : priority;
     if (d.kind === "ntfy") {
       config.topic = d.topic.trim();
       config.attachPoster = d.attachPoster;

@@ -121,6 +121,7 @@
   "apiUser.push.subscriptionRemoved": "此设备的推送注册已被移除。请重新开启通知以继续使用。",
   "apiUser.push.vapidMissing": "未配置 VAPID 密钥",
   "apiUser.push.webPushNotConfigured": "此服务器未配置 Web 推送",
+  "apiUser.push.webSendFailed": "无法发送测试推送",
   "apiUser.quota.window.day": "天",
   "apiUser.quota.window.days_one": "{count} 天",
   "apiUser.quota.window.days_other": "{count} 天",

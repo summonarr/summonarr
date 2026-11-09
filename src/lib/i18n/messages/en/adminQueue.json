@@ -394,6 +394,7 @@
   "adminQueue.releases.score": "Score {score}",
   "adminQueue.releases.noSeasons": "This series has no seasons in Sonarr yet.",
   "adminQueue.releases.none": "No releases found.",
+  "adminQueue.releases.notDownloadable": "This release can't be downloaded.",
   "adminQueue.releases.season": "Season",
   "adminQueue.releases.seasonComplete": "Season {number}",
   "adminQueue.releases.seasonMissing_one": "Season {number} · {count} missing",

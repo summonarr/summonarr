@@ -14,7 +14,7 @@ import {
   trashSettingsPatch,
   type TrashSettings,
 } from "../src/components/admin/trash-guides/types.ts";
-import { appliableStarterItems } from "../src/components/admin/trash-guides/starter-pack-select.ts";
+import { appliableStarterItems, mergeStarterSelection } from "../src/components/admin/trash-guides/starter-pack-select.ts";
 import { STARTER_PACK } from "../src/lib/trash-recommendations.ts";
 import { check } from "../src/lib/validate.ts";
 
@@ -106,4 +106,16 @@ test("no non-null assertion stands in for a branch the code already took", () =>
   for (const f of ["spec-section.tsx", "starter-pack-card.tsx", "starter-pack-select.ts"]) {
     assert.doesNotMatch(read(f), /\.application!|\.spec!/, f);
   }
+});
+
+test("a changed appliable set keeps the admin's picks and ticks only a newly recommended spec", () => {
+  const set = (...ids: string[]) => new Set(ids);
+  // First arrival: nothing seen yet, so the recommended ones are ticked.
+  assert.deepEqual([...mergeStarterSelection(set(), set(), ["a", "b"], ["a"])], ["a"]);
+  // A newcomer joins; the admin's untick of "a" and tick of "b" survive.
+  assert.deepEqual([...mergeStarterSelection(set("b"), set("a", "b"), ["a", "b", "c"], ["a", "c"])].sort(), ["b", "c"]);
+  // A spec that left is dropped from the ticks.
+  assert.deepEqual([...mergeStarterSelection(set("a", "b"), set("a", "b"), ["a"], ["a"])], ["a"]);
+  const card = read("starter-pack-card.tsx");
+  assert.match(card, /mergeStarterSelection\(prev, seen, resolvedIds, recommendedIds\)/);
 });

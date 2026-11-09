@@ -190,6 +190,7 @@ export function TwoFactorSettings({ initial, required }: Props) {
   async function refresh() {
     const r = await call(t, "/api/profile/mfa", "GET");
     if (r.ok) setState(readTwoFactorState(r.data));
+    else setError(r.error);
     router.refresh();
   }
 
@@ -292,8 +293,10 @@ export function TwoFactorSettings({ initial, required }: Props) {
       if (!isWebAuthnCancel(err)) setError(t("profile.mfa.error.passkeyCreate"));
       return;
     }
+    const registrationToken = opts.data.registrationToken;
+    if (typeof registrationToken !== "string" || !registrationToken) return setError(t("profile.mfa.error.passkeyCreate"));
     const r = await call(t, "/api/profile/mfa/passkeys", "POST", {
-      registrationToken: opts.data.registrationToken,
+      registrationToken,
       name: passkeyName.trim() || t("profile.mfa.passkey.defaultName"),
       credential,
     });
@@ -635,7 +638,11 @@ function PasskeySection({
               ) : renaming?.id === p.id ? (
                 <form
                   className="flex flex-1 items-center gap-2"
-                  onSubmit={(e) => { e.preventDefault(); onRename(p.id, renaming.name); }}
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const name = renaming.name.trim();
+                    if (name) onRename(p.id, name);
+                  }}
                 >
                   <Input
                     aria-label={t("profile.mfa.passkey.nameLabel")}
@@ -643,7 +650,7 @@ function PasskeySection({
                     maxLength={64}
                     onChange={(e) => onRenaming({ id: p.id, name: e.target.value })}
                   />
-                  <Button type="submit" disabled={busy !== null}>{t("profile.common.save")}</Button>
+                  <Button type="submit" disabled={busy !== null || renaming.name.trim() === ""}>{t("profile.common.save")}</Button>
                   <Button type="button" variant="outline" onClick={() => onRenaming(null)}>{t("profile.common.cancel")}</Button>
                 </form>
               ) : (

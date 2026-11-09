@@ -180,9 +180,19 @@ export async function notifyAvailableAfterImport(opts: {
     select: { id: true, tmdbId: true, requestedBy: true, title: true, mediaType: true, posterPath: true, arrInstance: true, user: { select: { mediaServer: true } } },
   });
   if (pending.length === 0) return;
-  const tmdbId = opts.tmdbIdForCheck ?? pending[0].tmdbId;
-  if (!tmdbId) return;
-  const { checkPlex, checkJellyfin } = await visibleAvailabilityChecks(tmdbId, opts.kind);
-  await pollAndNotifyAvailable(pending, checkPlex, checkJellyfin, opts.logScope)
-    .catch((err) => { console.warn(`[${opts.logScope}] notification failed after marking AVAILABLE:`, err); });
+  // Rows matched by tvdbId can disagree on tmdbId (a bad match, a legacy row):
+  // each group is probed for its own title, never for the first row's.
+  const groups = new Map<number, typeof pending>();
+  for (const row of pending) {
+    const tmdbId = opts.tmdbIdForCheck ?? row.tmdbId;
+    if (!tmdbId) continue;
+    const group = groups.get(tmdbId);
+    if (group) group.push(row);
+    else groups.set(tmdbId, [row]);
+  }
+  for (const [tmdbId, rows] of groups) {
+    const { checkPlex, checkJellyfin } = await visibleAvailabilityChecks(tmdbId, opts.kind);
+    await pollAndNotifyAvailable(rows, checkPlex, checkJellyfin, opts.logScope)
+      .catch((err) => { console.warn(`[${opts.logScope}] notification failed after marking AVAILABLE:`, err); });
+  }
 }

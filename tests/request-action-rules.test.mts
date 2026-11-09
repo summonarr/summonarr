@@ -56,8 +56,9 @@ test("the row shows the route's own reason for a refusal, and each call's busy s
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../src/components/admin/request-actions.tsx", import.meta.url), "utf8");
   // fetchJson's error is the route's `message`, then its `error` (a 422 "not configured", a 409, a 429).
-  assert.match(src, /return res\.kind === "http" \|\| res\.kind === "invalid" \? res\.error : t\("shared\.thread\.networkError"\);/);
-  assert.equal(src.match(/setArrError\(failureText\(/g)?.length, 2, "a decision and a delete");
+  const failure = readFileSync(new URL("../src/lib/client/fetch-failure-text.ts", import.meta.url), "utf8");
+  assert.match(failure, /return res\.kind === "http" \|\| res\.kind === "invalid" \? res\.error : t\("shared\.thread\.networkError"\);/);
+  assert.equal(src.match(/setArrError\(fetchFailureText\(/g)?.length, 2, "a decision and a delete");
   // No shared loading slot: a reply finishing never re-enables a decision still out.
   assert.doesNotMatch(src, /useState<LoadingKind \| null>|setLoading\(null\)/);
   for (const kind of ["NOTE", "DELETE", "SEARCH", "RETRY"]) assert.ok(src.includes(`"${kind}"`), kind);

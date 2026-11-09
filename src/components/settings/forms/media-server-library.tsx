@@ -224,7 +224,8 @@ export function useLibraryImport(service: LibraryService) {
       (signal) => runLibraryImport(withBasePath(`/api/sync/${service}`), signal),
       { ifBusy: "skip" },
     );
-    if (outcome) setState(outcome);
+    // A superseded, aborted or skipped run has no outcome: leave "running".
+    setState(outcome ?? { kind: "idle" });
   }
 
   return { state, running: action.busy("import"), runImport };
@@ -294,6 +295,9 @@ export function LibraryPicker({ service, initialSelected, items, loadStatus, err
   // Save locked (the save sent the boxes as they were) and the answer doesn't
   // call it saved.
   const { status: saveStatus, message: saveMessage, save, edited } = useSettingsSave();
+  // Nothing to save while the ticked, still-listed ids equal what is stored
+  // (a stored list holding stale ids differs, so it can still be cleaned).
+  const dirty = effective.join(",") !== initialSelected;
 
   function toggle(id: string) {
     edited();
@@ -362,7 +366,7 @@ export function LibraryPicker({ service, initialSelected, items, loadStatus, err
             <Button
               type="button"
               onClick={handleSave}
-              disabled={saveStatus === "saving"}
+              disabled={saveStatus === "saving" || !dirty}
               className="bg-indigo-600 hover:bg-indigo-500"
             >
               {saveStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.library.saveSelection")}

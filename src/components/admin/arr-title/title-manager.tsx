@@ -213,12 +213,15 @@ export function ArrTitleManager({
   };
 
   // The Seasons tab's searches: that tab holds its own busy state while one is out.
-  const runCommand = useCallback(async (body: Record<string, unknown>, done: string) => {
+  // Its watch has its own key, so it never replaces the top-level Search missing line.
+  const runCommand = useCallback(async (body: Record<string, unknown>, done: string, signal?: AbortSignal) => {
     if (arrId === null) return;
     setNotice("");
     setPartialNote("");
     setError("");
-    followCommand(await sendCommand(body), done);
+    const res = await sendCommand(body, signal);
+    if (signal?.aborted) return;
+    followCommand(res, done, { key: "season" });
   }, [arrId, sendCommand, followCommand]);
 
   async function topCommand(key: "search" | "refresh", body: Record<string, unknown>, done: string, reread = false) {

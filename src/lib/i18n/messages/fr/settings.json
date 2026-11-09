@@ -157,6 +157,7 @@
   "settings.playHistory.howBody": "L'historique de lecture est suivi automatiquement en interrogeant vos serveurs Plex et Jellyfin toutes les quelques secondes pour détecter les sessions actives. Aucune configuration n'est nécessaire dans Plex ou Jellyfin — la connexion au serveur déjà configurée ci-dessus est utilisée.",
   "settings.watchGrade.notGraded": "Non noté",
   "settings.watchGrade.previewFailedStatus": "Échec de l'aperçu ({status})",
+  "settings.watchGrade.previewEmpty": "L'aperçu est revenu vide. Réessayez.",
   "settings.watchGrade.grace": "Période de grâce (jours)",
   "settings.watchGrade.graceHelp": "Délai après la mise à disposition d'une demande avant qu'elle compte dans la note. Les demandes encore dans ce délai sont listées mais jamais notées — vues ou non — afin de ne pas juger trop tôt les demandeurs récents. Par défaut {default}.",
   "settings.watchGrade.window": "Fenêtre de notation (jours)",

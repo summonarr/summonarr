@@ -157,6 +157,7 @@
   "settings.playHistory.howBody": "播放历史通过每隔几秒轮询你的 Plex 和 Jellyfin 服务器上的活跃会话来自动追踪。无需在 Plex 或 Jellyfin 中进行任何配置——它使用上面已配置的服务器连接。",
   "settings.watchGrade.notGraded": "未评级",
   "settings.watchGrade.previewFailedStatus": "预览失败（{status}）",
+  "settings.watchGrade.previewEmpty": "预览结果为空，请重试。",
   "settings.watchGrade.grace": "宽限期（天）",
   "settings.watchGrade.graceHelp": "请求变为可观看后，需经过多长时间才计入评级。仍在宽限期内的请求会被列出但从不评分——无论是否观看——这样最近的请求者就不会被过早评判。默认 {default}。",
   "settings.watchGrade.window": "评级窗口（天）",

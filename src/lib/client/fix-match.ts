@@ -1,5 +1,6 @@
 import { timedFetch } from "@/lib/client/fetch-json";
 import { withBasePath } from "@/lib/base-path";
+import { abortableSleep } from "@/lib/abortable-sleep";
 import type { Translator } from "@/lib/i18n/translate";
 
 // Client half of the background fix-match (guardrail 37a): start the job, then
@@ -198,20 +199,6 @@ export function hasStalled(now: number, lastChangeAt: number, reportsProgress: b
 }
 const MAX_CONSECUTIVE_POLL_FAILURES = 10;
 
-// A wait the caller's abort cuts short.
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise<void>((resolve) => {
-    if (signal?.aborted) return resolve();
-    const done = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", done);
-      resolve();
-    };
-    const timer = setTimeout(done, ms);
-    signal?.addEventListener("abort", done, { once: true });
-  });
-}
-
 const abortError = () => new DOMException("Fix-match polling aborted", "AbortError");
 
 // POST the remap as a background job. Throws a FixMatchClientError on refusal.
@@ -290,7 +277,7 @@ export async function runFixMatch(
   let lastSignature = "";
   let lastChangeAt = Date.now();
   while (Date.now() < deadline) {
-    await sleep(POLL_INTERVAL_MS, opts.signal);
+    await abortableSleep(POLL_INTERVAL_MS, opts.signal);
     // The caller navigated away (component unmount): stop the 3s poll loop —
     // the server-side job keeps running by design. AbortError shape so callers
     // can distinguish it from a real failure.

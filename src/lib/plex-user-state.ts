@@ -161,9 +161,12 @@ export async function getPlexUserStates(serverUrl: string, token: string, keys: 
       return container.items;
     });
     if (items === null) {
-      // One gone key can 404 the whole list: ask for each key on its own, so
-      // only the truly absent ones read as gone.
-      if (chunk.length > 1) for (const k of chunk) queue.push([k]);
+      // One gone key can 404 the whole list: bisect it, so only the truly
+      // absent ones read as gone and a lone gone key costs ~log2(n) reads.
+      if (chunk.length > 1) {
+        const mid = Math.ceil(chunk.length / 2);
+        queue.push(chunk.slice(0, mid), chunk.slice(mid));
+      }
       continue;
     }
     const wanted = new Set(chunk);
@@ -233,11 +236,15 @@ export function parsePlexInProgress(items: ReadonlyArray<unknown>): PlexInProgre
 export async function getPlexInProgress(serverUrl: string, token: string): Promise<PlexInProgressItem[]> {
   const base = trimServerBase(serverUrl);
   for (const path of ["/library/onDeck", "/hubs/continueWatching/items"]) {
-    const res = await plexFetch(`${base}${path}?X-Plex-Container-Start=0&X-Plex-Container-Size=${PLEX_IN_PROGRESS_MAX}`, token);
-    if (res.status === 404) { await res.text().catch(() => ""); continue; }
-    if (!res.ok) throw new Error(`Plex in-progress read failed: ${res.status}`);
-    const container = readPlexContainer(await res.json());
-    if (!container) throw new Error("Plex in-progress read failed: no MediaContainer");
+    const container = await withPlexRetry(`in-progress read (${path})`, async () => {
+      const res = await plexFetch(`${base}${path}?X-Plex-Container-Start=0&X-Plex-Container-Size=${PLEX_IN_PROGRESS_MAX}`, token);
+      if (res.status === 404) { await res.text().catch(() => ""); return null; }
+      if (!res.ok) throw tagNoRetryOn4xx(new Error(`Plex in-progress read failed: ${res.status}`), res.status);
+      const c = readPlexContainer(await res.json());
+      if (!c) throw noRetry(new Error("Plex in-progress read failed: no MediaContainer"));
+      return c;
+    });
+    if (!container) continue;
     return parsePlexInProgress(container.items);
   }
   return [];

@@ -106,6 +106,16 @@ async function readInstanceHealth(inst: HealthInstance): Promise<ArrInstanceHeal
   if (notifications.status === "fulfilled" && secret.status === "fulfilled") {
     const verdict = evaluateWebhook(notifications.value, inst.service, secret.value);
     base.webhook = { state: verdict.state, missingEvents: verdict.missingEvents };
+  } else {
+    // Say why the webhook state stays unknown instead of leaving it looking like
+    // a missing hook; a health error already recorded is the more useful one.
+    if (notifications.status === "rejected" && !base.error) {
+      base.error = arrErrorMessage(notifications.reason);
+      base.errorKind = arrErrorKind(notifications.reason);
+    }
+    if (secret.status === "rejected") {
+      console.warn("[arr-health] webhook secret read failed:", secret.reason instanceof Error ? secret.reason.message : secret.reason);
+    }
   }
   return base;
 }

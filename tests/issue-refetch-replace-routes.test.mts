@@ -1,6 +1,6 @@
 // Two issue routes from the 2026-10-20 audit.
 //
-// F002/F004 — PATCH /api/issues/[id] { refetch: true } is rate-limited per caller.
+// PATCH /api/issues/[id] { refetch: true } is rate-limited per caller.
 // Why: Refetch is reachable by a role=USER MANAGE_ISSUES delegate, queues an
 // automatic search across every indexer (a FULL TV issue sends SeriesSearch), and
 // records an IssueGrab row per call that nothing prunes. Its siblings (Replace
@@ -10,7 +10,7 @@
 // with no Radarr/Sonarr call and no IssueGrab row; another caller keeps their
 // own budget; a refused RESOLVED issue or a malformed instance spends no token.
 //
-// F003 — the Replace file background job JOINS only an identical request.
+// the Replace file background job JOINS only an identical request.
 // Why: the join key was the issue alone and was checked before the body, so a
 // second async POST naming another instance, other files or another follow-up
 // was answered 202 with the FIRST job's id — its client polled that job and
@@ -273,7 +273,7 @@ beforeEach(() => {
   invalidateFeatureFlagCache();
 });
 
-// ── F002: Refetch is rate-limited per caller ────────────────────────────────
+// ── Refetch is rate-limited per caller ────────────────────────────────
 
 test("Refetch: 10 a minute per caller — the 11th is a 429 with Retry-After, reaching no arr and recording no IssueGrab", async () => {
   const token = await issueDelegate();
@@ -326,7 +326,7 @@ test("Refetch: only a boolean starts a search — \"false\" or 1 is a 400 reachi
   assert.equal(grabs.length, 1);
 });
 
-// ── F003: the Replace file job joins only an identical request ──────────────
+// ── the Replace file job joins only an identical request ──────────────
 
 // Parks the DEFAULT Sonarr's file delete until `open()`, so a replace stays running.
 function parkDefaultDelete(): { open: () => void } {

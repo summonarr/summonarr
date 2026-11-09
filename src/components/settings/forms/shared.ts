@@ -122,7 +122,8 @@ export function createSettingsSaver(opts: {
       setStatus("saving");
       setMessage("");
       const sentAt = editSeq;
-      const result = await patch(body);
+      // An injected patch that throws reads as no answer, never a stuck "saving".
+      const result = await patch(body).catch((): SettingsPatchResult => ({ ok: false, status: 0, data: {}, error: "" }));
       // Unmounted meanwhile: nothing left to show the answer, and a fade armed
       // now would outlive the component.
       if (disposed) return result;

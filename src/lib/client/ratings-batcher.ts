@@ -3,19 +3,32 @@ import { withBasePath } from "@/lib/base-path";
 import { retryAfterDeltaSeconds } from "@/lib/client/rate-limit";
 import { RATINGS_BATCH_MAX_ITEMS } from "@/lib/api-body-limits";
 import { timedFetch } from "@/lib/client/fetch-json";
+import { check, v, type Infer } from "@/lib/validate";
 
-export interface RatingsPayload {
-  imdbId: string | null;
-  imdbRating: string | null;
-  imdbVotes: string | null;
-  rottenTomatoes: string | null;
-  rtAudienceScore: string | null;
-  metacritic: string | null;
-  traktRating: string | null;
-  letterboxdRating: string | null;
-  mdblistScore: string | null;
-  malRating: string | null;
-  rogerEbertRating: string | null;
+const ratingsPayloadSchema = v.object({
+  imdbId: v.nullable(v.string()),
+  imdbRating: v.nullable(v.string()),
+  imdbVotes: v.nullable(v.string()),
+  rottenTomatoes: v.nullable(v.string()),
+  rtAudienceScore: v.nullable(v.string()),
+  metacritic: v.nullable(v.string()),
+  traktRating: v.nullable(v.string()),
+  letterboxdRating: v.nullable(v.string()),
+  mdblistScore: v.nullable(v.string()),
+  malRating: v.nullable(v.string()),
+  rogerEbertRating: v.nullable(v.string()),
+});
+
+export type RatingsPayload = Infer<typeof ratingsPayloadSchema>;
+
+// Only well-formed entries are kept: a malformed one reads as absent.
+function validRatings(raw: Record<string, unknown>): Record<string, RatingsPayload> {
+  const out: Record<string, RatingsPayload> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const r = check(ratingsPayloadSchema, value);
+    if (r.ok) out[key] = r.value;
+  }
+  return out;
 }
 
 type MediaType = "movie" | "tv";
@@ -111,7 +124,7 @@ async function postBatchOnce(items: QueueEntry[]): Promise<BatchAttempt> {
     const ratings = data && typeof data === "object" ? (data as { ratings?: unknown }).ratings : undefined;
     return {
       kind: "ok",
-      ratings: ratings && typeof ratings === "object" && !Array.isArray(ratings) ? (ratings as Record<string, RatingsPayload>) : {},
+      ratings: ratings && typeof ratings === "object" && !Array.isArray(ratings) ? validRatings(ratings as Record<string, unknown>) : {},
     };
   } catch {
     // A timeout is final (the server had a minute); a network failure is not.

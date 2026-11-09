@@ -115,11 +115,12 @@ const accountModel = {
   },
   findMany: async (args: { where: { userId: string; provider: string } }) =>
     accounts.filter((r) => r.userId === args.where.userId && r.provider === args.where.provider).map((a) => ({ access_token: a.access_token })),
-  update: async (args: { where: { id: string }; data: Partial<AccountRow> }) => {
+  update: async (args: { where: { id: string; expires_at?: number | null }; data: Partial<AccountRow> }) => {
     rec("account.update", args);
     const failure = accountUpdateFailures.shift();
     if (failure) throw failure;
-    const a = accounts.find((r) => r.id === args.where.id)!;
+    const a = accounts.find((r) => r.id === args.where.id && (args.where.expires_at === undefined || r.expires_at === args.where.expires_at));
+    if (!a) throw prismaError("P2025");
     Object.assign(a, args.data);
     return a;
   },
@@ -135,12 +136,13 @@ const accountModel = {
     else accounts.push({ id: `acct-${accounts.length + 1}`, ...args.create });
     return {};
   },
-  deleteMany: async (args: { where: { id?: string; userId: string; provider: string; NOT?: { providerAccountId: string } } }) => {
+  deleteMany: async (args: { where: { id?: string; userId: string; provider: string; expires_at?: number | null; NOT?: { providerAccountId: string } } }) => {
     rec("account.deleteMany", args.where);
     const before = accounts.length;
     accounts = accounts.filter((r) => !(
       r.userId === args.where.userId && r.provider === args.where.provider &&
       (args.where.id === undefined || r.id === args.where.id) &&
+      (args.where.expires_at === undefined || r.expires_at === args.where.expires_at) &&
       (!args.where.NOT || r.providerAccountId !== args.where.NOT.providerAccountId)
     ));
     return { count: before - accounts.length };
@@ -986,7 +988,7 @@ test("sync: a rotated grant that can't be stored at all is a run error that dele
   assert.ok(errors.some((e) => e.includes("sync failed for user u1") && e.includes("storing it failed")));
 });
 
-test("sync: an account deleted under the refresh (P2025) is not retried", async () => {
+test("sync: an account deleted under the refresh (P2025) is not retried and is not a run error", async () => {
   configure();
   settings.set(FLAG_AUTO, "true");
   settings.set(FLAG_FOR_YOU, "false");
@@ -995,8 +997,52 @@ test("sync: an account deleted under the refresh (P2025) is not retried", async 
   accountUpdateFailures = [prismaError("P2025")];
   respond = refreshScript();
   const result = await trakt.syncTraktUsers();
-  assert.equal(result.errors, 1);
+  assert.equal(result.errors, 0);
   assert.equal(opsOf("account.update").length, 1);
+});
+
+test("sync: rotated tokens never overwrite a grant a reconnect wrote to the same row mid-run", async () => {
+  configure();
+  settings.set(FLAG_AUTO, "true");
+  settings.set(FLAG_FOR_YOU, "false");
+  addUser("u1");
+  connect("u1", { expires_at: 0 });
+  respond = (c) => {
+    if (c.path === "/oauth/token") {
+      // The user reconnects the same Trakt account while the refresh is in flight.
+      const row = accounts.find((a) => a.userId === "u1")!;
+      Object.assign(row, { access_token: "access-new", refresh_token: "refresh-new", expires_at: 9_999_999_999 });
+      return json({ access_token: "access-2", refresh_token: "refresh-2", expires_in: 86_400, created_at: Math.floor(Date.now() / 1000) });
+    }
+    if (c.path.startsWith("/sync/watchlist/")) return json([], 200, { "x-pagination-page-count": "1" });
+    throw new Error(`unexpected ${c.path}`);
+  };
+  const result = await trakt.syncTraktUsers();
+  assert.equal(result.errors, 0);
+  const row = accounts.find((a) => a.userId === "u1")!;
+  assert.equal(row.refresh_token, "refresh-new");
+  assert.equal(row.access_token, "access-new");
+});
+
+test("sync: a refused old grant does not delete the grant a reconnect wrote to the same row mid-run", async () => {
+  configure();
+  settings.set(FLAG_AUTO, "true");
+  settings.set(FLAG_FOR_YOU, "true");
+  addUser("u1");
+  connect("u1", { expires_at: 0 });
+  watched.push({ userId: "u1", tmdbId: 1, mediaType: "MOVIE", title: "x", plays: 1, lastWatchedAt: new Date() });
+  respond = (c) => {
+    if (c.path === "/oauth/token") {
+      const row = accounts.find((a) => a.userId === "u1")!;
+      Object.assign(row, { access_token: "access-new", refresh_token: "refresh-new", expires_at: 9_999_999_999 });
+      return json({ error: "invalid_grant" }, 400);
+    }
+    throw new Error(`unexpected ${c.path}`);
+  };
+  const result = await trakt.syncTraktUsers();
+  assert.equal(result.tokensRevoked, 1);
+  assert.equal(accounts.some((a) => a.userId === "u1" && a.refresh_token === "refresh-new"), true, "the new grant stays");
+  assert.equal(watched.length, 1, "and so does its history");
 });
 
 test("sync: a reconnect to ANOTHER Trakt account mid-read writes none of the old account's history and leaves the new one's stamps unset", async () => {

@@ -92,6 +92,12 @@ function RadioFieldset<V extends string>({ name, legend, options, value, onChang
   );
 }
 
+// A pending row has no "blocklist and search" option, so a caller that opens on
+// it starts from plain blocklist instead of a radio group with nothing checked.
+function startingAction(target: { row: QueueItem; action: QueueRemoveAction }): QueueRemoveAction {
+  return target.row.pending && target.action === "blocklistSearch" ? "blocklist" : target.action;
+}
+
 export function RemoveQueueDialog({
   target,
   arrVersions,
@@ -105,7 +111,7 @@ export function RemoveQueueDialog({
   onRemoved: (row: QueueItem, action: QueueRemoveAction) => void;
 }) {
   const t = useT();
-  const [removeAction, setRemoveAction] = useState<QueueRemoveAction>(target?.action ?? "blocklistSearch");
+  const [removeAction, setRemoveAction] = useState<QueueRemoveAction>(target ? startingAction(target) : "blocklistSearch");
   const [removeMethod, setRemoveMethod] = useState<QueueRemoveMethod>("removeFromClient");
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState("");
@@ -119,7 +125,7 @@ export function RemoveQueueDialog({
     setOpened(target);
     if (target) {
       setShown(target);
-      setRemoveAction(target.action);
+      setRemoveAction(startingAction(target));
       setRemoveMethod("removeFromClient");
       setRemoveError("");
     }

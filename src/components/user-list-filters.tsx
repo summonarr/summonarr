@@ -5,7 +5,8 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Search, X } from "@/components/icons";
 import { useT } from "@/components/i18n/i18n-provider";
 import { buildParamHref, sameListHref, searchEcho, shouldResyncSearch } from "@/lib/list-filter-url";
-import { SEGMENTED_TRACK_STYLE } from "@/components/ui/design/segmented-style";
+import { SEGMENTED_TRACK_STYLE, segmentedItemStyle } from "@/components/ui/design/segmented-style";
+import { SegmentCount } from "@/components/ui/design/segment-count";
 
 export function FilterPills({
   param,
@@ -64,45 +65,12 @@ export function FilterPills({
             aria-pressed={isActive}
             // `ds-hover-tint`: the background is inline, so a :hover background
             // rule can't beat it (guardrail 42). minHeight keeps the tap target
-            // at 32px.
+            // at 32px; the look is the shared segmented one.
             className="ds-hover-tint inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 font-medium"
-            style={{
-              padding: "5px 12px",
-              minHeight: 32,
-              borderRadius: 6,
-              border: 0,
-              fontSize: 12,
-              // FilterBar's raised segment (design/filter-bar.tsx): a bg-3 fill
-              // alone was ~1.07:1 against the bg-1 track in light mode, so the
-              // active pill also gets a border-strong edge and a small shadow.
-              // Inactive pills leave boxShadow unset so .ds-hover-tint's inset
-              // tint (a box-shadow) still shows on hover.
-              background: isActive ? "var(--ds-bg-2)" : "transparent",
-              boxShadow: isActive
-                ? "var(--ds-shadow-sm), inset 0 0 0 1px var(--ds-border-strong)"
-                : undefined,
-              color: isActive ? "var(--ds-fg)" : "var(--ds-fg-muted)",
-            }}
+            style={{ ...segmentedItemStyle(isActive), minHeight: 32, border: 0 }}
           >
             {opt.label}
-            {opt.count !== undefined && (
-              <span
-                className="ds-mono"
-                style={{
-                  fontSize: 10,
-                  padding: "0 5px",
-                  borderRadius: 3,
-                  background: isActive
-                    ? "var(--ds-accent-soft)"
-                    : "var(--ds-bg-3)",
-                  color: isActive
-                    ? "var(--ds-accent-text)"
-                    : "var(--ds-fg-subtle)",
-                }}
-              >
-                {opt.count}
-              </span>
-            )}
+            {opt.count !== undefined && <SegmentCount isActive={isActive}>{opt.count}</SegmentCount>}
           </button>
         );
       })}
@@ -257,7 +225,9 @@ function useUrlSearchInput(param: string, initial: string, preserve: string[] | 
     setValue("");
     setLastPushed("");
     setPending(false);
-    navigate("");
+    // Nothing to write when the URL already has no such param.
+    const href = buildParamHref(pathname, searchParams, param, "", preserve);
+    if (!sameListHref(href, `${pathname}?${searchParams.toString()}`)) navigate("");
   }
 
   return { value, handleChange, handleClear };

@@ -42,7 +42,7 @@ import { sanitizeForLog } from "@/lib/sanitize";
 // approve or a 50-item bulk request never bursts every add at once.
 export const APPROVAL_PUSH_CONCURRENCY = 5;
 
-const DECIDED_STATUSES = ["APPROVED", "DECLINED", "AVAILABLE", "PENDING"] as const satisfies readonly RequestStatus[];
+const ALL_REQUEST_STATUSES = ["APPROVED", "DECLINED", "AVAILABLE", "PENDING"] as const satisfies readonly RequestStatus[];
 
 // The transitions an admin may make by hand. Every target differs from its
 // source, so a transition is never a no-op.
@@ -54,10 +54,10 @@ const ALLOWED_TRANSITIONS: Readonly<Record<RequestStatus, readonly RequestStatus
 };
 
 export function isRequestStatus(value: unknown): value is RequestStatus {
-  return typeof value === "string" && (DECIDED_STATUSES as readonly string[]).includes(value);
+  return typeof value === "string" && (ALL_REQUEST_STATUSES as readonly string[]).includes(value);
 }
 
-export const REQUEST_STATUSES: readonly RequestStatus[] = DECIDED_STATUSES;
+export const REQUEST_STATUSES: readonly RequestStatus[] = ALL_REQUEST_STATUSES;
 
 export function isAllowedTransition(from: RequestStatus, to: RequestStatus): boolean {
   return ALLOWED_TRANSITIONS[from].includes(to);

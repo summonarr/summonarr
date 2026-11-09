@@ -80,17 +80,19 @@ function useWatchSyncOverview(action: AsyncAction) {
   // the last one returned (a failed load leaves `data` as it was).
   const [pollTick, setPollTick] = useState(0);
 
-  const load = useCallback(async () => {
+  // False only when the read failed (a superseded read is not a failure).
+  const load = useCallback(async (): Promise<boolean> => {
     const res = await action.run(LOAD, (signal) =>
       fetchJson(withBasePath("/api/admin/watch-sync"), { schema: OverviewSchema, signal }));
-    if (!res) return;
+    if (!res) return true;
     if (!res.ok) {
       const text = requestFailureText(res, t, { status: "adminManage.watchSync.error.load", network: "adminManage.watchSync.error.loadNetwork" });
       if (text !== null) setError(text);
-      return;
+      return false;
     }
     setData(toOverview(res.data));
     setError("");
+    return true;
   }, [action, t]);
 
   useEffect(() => { void load(); }, [load]);
@@ -384,9 +386,10 @@ export function WatchSyncPanel() {
   async function send(url: string, init: RequestInit): Promise<boolean> {
     setError("");
     setNote("");
+    let reloaded = true;
     const res = await action.run(MUTATE, async (signal) => {
       const answer = await fetchJson(withBasePath(url), { init, signal });
-      if (answer.ok) await load();
+      if (answer.ok) reloaded = await load();
       return answer;
     }, { ifBusy: "skip" });
     if (!res) return false;
@@ -395,7 +398,9 @@ export function WatchSyncPanel() {
       if (text !== null) setError(text);
       return false;
     }
-    return true;
+    // The change went through; a failed re-read leaves its own error line and
+    // no success note over a stale list.
+    return reloaded;
   }
 
   async function addPair(plexUserId: string, jellyfinUserId: string, direction: Direction) {
@@ -441,7 +446,7 @@ export function WatchSyncPanel() {
       : <p className="flex items-center gap-2 text-sm text-[var(--ds-fg-muted)]"><Loader2 className="h-4 w-4 animate-spin" />{t("adminManage.watchSync.loading")}</p>;
   }
 
-  const pairUrl = (id: string) => `/api/admin/watch-sync/${id}`;
+  const pairUrl = (id: string) => `/api/admin/watch-sync/${encodeURIComponent(id)}`;
 
   return (
     <div className="space-y-8">

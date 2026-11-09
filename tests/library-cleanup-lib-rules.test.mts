@@ -1,6 +1,6 @@
 // Audit fixes for the cleanup library unit (wave B3).
 //
-// C014 — the title manager's Remove (removeTitle) re-asserts the cleanup stamp
+// the title manager's Remove (removeTitle) re-asserts the cleanup stamp
 // once the title is gone from the instance. A concurrent removal (or a Library
 // cleanup execute) that stamped first owns those rows by ITS time; if its own
 // delete is then refused it unstamps them, and the next sync re-downloads a
@@ -96,7 +96,7 @@ beforeEach(() => {
   ];
 });
 
-test("C014 removeTitle: a removal that went through takes the stamp over, so the other removal's unstamp misses", async () => {
+test("removeTitle: a removal that went through takes the stamp over, so the other removal's unstamp misses", async () => {
   const res = await removeTitle("radarr", "", 11, opts, ours);
   assert.equal(res?.requestsStamped, 0, "the count is still only what this call stamped first");
   assert.equal(requests[0].cleanedUpAt?.getTime(), ours.getTime(), "re-asserted with this call's time");
@@ -105,7 +105,7 @@ test("C014 removeTitle: a removal that went through takes the stamp over, so the
   assert.equal(requests[1].cleanedUpAt, null, "another instance's request is not this removal's");
 });
 
-test("C014 removeTitle: an unstamp that lands while the DELETE is in flight is written back", async () => {
+test("removeTitle: an unstamp that lands while the DELETE is in flight is written back", async () => {
   deleteAnswer = () => {
     theirUnstamp();
     return new Response("", { status: 200 });
@@ -114,7 +114,7 @@ test("C014 removeTitle: an unstamp that lands while the DELETE is in flight is w
   assert.ok(requests[0].cleanedUpAt instanceof Date);
 });
 
-test("C014 removeTitle: a 404 (already gone) and a refused delete the re-read shows gone both re-assert", async () => {
+test("removeTitle: a 404 (already gone) and a refused delete the re-read shows gone both re-assert", async () => {
   deleteAnswer = () => new Response("gone", { status: 404 });
   const gone = await removeTitle("radarr", "", 11, opts, ours);
   assert.equal(gone?.alreadyGone, true);
@@ -130,13 +130,13 @@ test("C014 removeTitle: a 404 (already gone) and a refused delete the re-read sh
   assert.equal(requests[0].cleanedUpAt?.getTime(), ours.getTime());
 });
 
-test("C014 removeTitle: a refused delete with the title still listed re-asserts nothing", async () => {
+test("removeTitle: a refused delete with the title still listed re-asserts nothing", async () => {
   deleteAnswer = () => new Response("boom", { status: 500 });
   await assert.rejects(removeTitle("radarr", "", 11, opts, ours));
   assert.equal(requests[0].cleanedUpAt?.getTime(), theirs.getTime(), "not this call's: it removed nothing");
 });
 
-// ── C057: upstream failure text the page translates, never prints ────────────
+// ── upstream failure text the page translates, never prints ────────────
 // The cleanup and never-watched pages used to splice English upstream text
 // (arrErrorMessage, safeMessage, safeUpstreamError) into translated sentences.
 // A Radarr/Sonarr failure now carries an arrErrorKind and a watch-record check
@@ -147,7 +147,7 @@ const { arrFailureText, upstreamFailureText, UPSTREAM_ERROR_KEYS } = await impor
 const en = JSON.parse(readFileSync(new URL("../src/lib/i18n/messages/en/adminManage.json", import.meta.url), "utf8")) as Record<string, string>;
 const fakeT = (key: string, vars?: Readonly<Record<string, string | number>>) => `${key}${vars ? JSON.stringify(vars) : ""}`;
 
-test("C057 upstreamErrorCode: every text the refresh can store maps back to its own code", () => {
+test("upstreamErrorCode: every text the refresh can store maps back to its own code", () => {
   const safeFetch = (reason: string) => Object.assign(new Error(`Request to http://10.0.0.1/?X-Plex-Token=secret ${reason}`), { name: "SafeFetchError", reason });
   for (const [err, code] of [
     [safeFetch("timeout"), "timeout"],
@@ -168,14 +168,14 @@ test("C057 upstreamErrorCode: every text the refresh can store maps back to its 
   assert.equal(upstreamErrorCode(null), null);
 });
 
-test("C057 UPSTREAM_ERROR_KEYS: one English message per code", () => {
+test("UPSTREAM_ERROR_KEYS: one English message per code", () => {
   const codes = [...Object.keys(UPSTREAM_ERROR_TEXT), "http"].sort();
   assert.deepEqual(Object.keys(UPSTREAM_ERROR_KEYS).sort(), codes);
   for (const key of Object.values(UPSTREAM_ERROR_KEYS)) assert.ok(typeof en[key] === "string" && en[key].length > 0, `${key} is in en/adminManage.json`);
   assert.match(en[UPSTREAM_ERROR_KEYS.http], /\{status\}/);
 });
 
-test("C057 upstreamFailureText / arrFailureText: translated by code, the stored English only as a fallback", () => {
+test("upstreamFailureText / arrFailureText: translated by code, the stored English only as a fallback", () => {
   assert.equal(upstreamFailureText(fakeT, { error: "timed out", errorCode: "timeout", httpStatus: null }), UPSTREAM_ERROR_KEYS.timeout);
   assert.equal(upstreamFailureText(fakeT, { error: "HTTP 401", errorCode: "http", httpStatus: 401 }), `${UPSTREAM_ERROR_KEYS.http}{"status":401}`);
   assert.equal(upstreamFailureText(fakeT, { error: "timed out" }), "timed out", "a response without a code keeps its text");
@@ -183,7 +183,7 @@ test("C057 upstreamFailureText / arrFailureText: translated by code, the stored 
   assert.equal(arrFailureText(fakeT, "Sonarr", { error: "boom" }), "Sonarr (boom)");
 });
 
-test("C057: the three pages word upstream failures through the shared helpers, never the raw English", () => {
+test("the three pages word upstream failures through the shared helpers, never the raw English", () => {
   const read = (p: string) => readFileSync(new URL(`../${p}`, import.meta.url), "utf8");
   // The page draws its banners in library-cleanup-parts.tsx.
   const cleanup = read("src/components/admin/library-cleanup.tsx") + read("src/components/admin/library-cleanup-parts.tsx");

@@ -127,6 +127,7 @@ let pendingRequests: PendingRequest[] = [];
 let requesterRows: RequesterRow[] = [];
 const sonarrWantedRows: Array<{ tmdbId: number; arrInstance: string }> = [];
 let casCalls = 0;
+const casStatements: string[] = [];
 // Ids the notifiedAvailable CAS should report as winners. Default [] — every
 // existing test keeps the "nothing was claimed, so the notify path stops here"
 // behaviour it was written against.
@@ -340,6 +341,7 @@ const fakePrisma = {
   // reads as "changed", so the episode swaps these suites pin still run.
   $queryRaw: async (query?: { sql?: string }) => {
     if (String(query?.sql ?? "").includes(`FROM "TVEpisodeCache"`)) return [];
+    casStatements.push(String(query?.sql ?? ""));
     if (pendingRequests.length === 0) {
       throw new Error("unexpected prisma.$queryRaw — the notify path must not run in these tests");
     }
@@ -625,6 +627,7 @@ beforeEach(() => {
   requestUpdateManys.length = 0;
   mediaRequestFindManyWheres.length = 0;
   casCalls = 0;
+  casStatements.length = 0;
   casWinnerIds = [];
   deletionVoteDeleteWheres.length = 0;
   settingDeleteManyWheres.length = 0;
@@ -1644,12 +1647,14 @@ test("a DEACTIVATED requester's winner still wipes stale deletion votes and disa
     "and so must the per-item deletionVoteNotified: re-arm key",
   );
 
-  // One post-claim disarm naming BOTH winners.
-  assert.deepEqual(
-    requestUpdateManys,
-    [{ where: { id: { in: ["req-disabled", "req-active"] } }, data: { pendingNotifyAt: null } }],
-    "the 90s still-pending backstop must be disarmed on every row that went AVAILABLE",
+  // The disarm rides the claim statement, which covered BOTH requests.
+  assert.equal(casStatements.length, 1);
+  assert.match(
+    casStatements[0],
+    /"pendingNotifyAt" = NULL/,
+    "the 90s still-pending backstop must be disarmed by the claim on every row that went AVAILABLE",
   );
+  assert.deepEqual(requestUpdateManys, [], "no separate post-claim write: the claim disarms in the same statement");
 
   // …and the half that must NOT happen. The active requester is the inline
   // control: without them this would also pass on a run that notified nobody.

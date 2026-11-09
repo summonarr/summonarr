@@ -85,6 +85,10 @@ test("parseActiveSessionId round-trips both the 2-segment and 3-segment forms", 
   assert.deepEqual(parseActiveSessionId("jellyfin:remote:abc-123"), { source: "jellyfin", serverInstance: "remote", sessionKey: "abc-123" });
 });
 
+test("a default-instance id whose session key holds a colon is not read as a named instance", () => {
+  assert.deepEqual(parseActiveSessionId("plex:Not A Slug:b"), { source: "plex", serverInstance: "", sessionKey: "Not A Slug:b" });
+});
+
 test("activeSessionId/parseActiveSessionId round-trip is lossless for every instance kind", () => {
   for (const [source, instance, key] of [
     ["plex", "", "42"],

@@ -13,6 +13,7 @@ import {
 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { requestFailureText } from "@/components/admin/request-failure-text";
 import { useModalA11y } from "@/hooks/use-modal-a11y";
 import { AdminToggleRow, type User } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
@@ -94,11 +95,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
       // Refused, or no answer: undo the optimistic flip, or the switch would
       // show a preference the server never stored.
       setPrefs(prevPrefs);
-      setError(
-        res.kind === "http" ? res.error || t("adminManage.notif.failed", { status: res.status })
-          : res.kind === "invalid" ? t("adminManage.notif.failed", { status: res.status })
-            : t("adminManage.users.error.network"),
-      );
+      setError(requestFailureText(res, t, { status: "adminManage.notif.failed", network: "adminManage.users.error.network" }));
     } finally {
       inFlight.current.delete(save);
       setSaving(false);

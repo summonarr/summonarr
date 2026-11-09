@@ -226,7 +226,7 @@ export async function replaceEpisodeCacheForSource(
   // failure can never block the rewrite it precedes.
   await prisma.tVEpisodeCacheStaging
     .deleteMany({ where: { createdAt: { lt: new Date(Date.now() - EPISODE_STAGING_SWEEP_MS) } } })
-    .catch(() => {});
+    .catch((err) => warnOnChange("episode-cache:staging-sweep", String(err), `[episode-cache] staging sweep failed: ${String(err)}`));
 
   const toWrite = earliestAddedPerEpisode(rows);
   if (await episodeCacheUnchanged(source, toWrite)) return "unchanged";
@@ -241,7 +241,8 @@ export async function replaceEpisodeCacheForSource(
   } finally {
     // Drop this run's staged rows even when the swap threw, so a failed rewrite
     // does not leave a full copy of the library sitting in staging until the sweep.
-    await prisma.tVEpisodeCacheStaging.deleteMany({ where: { runId } }).catch(() => {});
+    await prisma.tVEpisodeCacheStaging.deleteMany({ where: { runId } }).catch((err) =>
+      warnOnChange("episode-cache:staging-cleanup", String(err), `[episode-cache] staging cleanup failed: ${String(err)}`));
   }
   return "replaced";
 }
@@ -261,6 +262,9 @@ export async function mergeRecentEpisodesForSource(
   episodes: readonly EpisodeCacheRow[],
 ): Promise<void> {
   if (episodes.length === 0) return;
+  // One row per episode with the earliest addedAt, like the replace path, so the
+  // same episode gets the same addedAt whichever sync wrote it.
+  episodes = earliestAddedPerEpisode([...episodes]);
   const bySeason = new Map<string, { tmdbId: number; seasonNumber: number; episodeNumbers: number[] }>();
   for (const e of episodes) {
     const key = `${e.tmdbId}:${e.seasonNumber}`;

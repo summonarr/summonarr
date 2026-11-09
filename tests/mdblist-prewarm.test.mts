@@ -480,9 +480,10 @@ test("an MDBList that keeps failing stops each media type after the breaker's li
   respond = () => new Response("upstream down", { status: 500 });
 
   // Every page that went out and failed counts its ids failed (three per type
-  // before the breaker), so the run reads red; the pages never sent count nothing.
+  // before the breaker), and so do the pages the tripped breaker kept from going
+  // out, so total is fetched + skipped + failed.
   assert.deepEqual(await prewarmMdblistCache(), {
-    total: 2000, fetched: 0, skipped: 0, failed: 1200, purged: 0, quotaExhausted: undefined,
+    total: 2000, fetched: 0, skipped: 0, failed: 2000, purged: 0, quotaExhausted: undefined,
   });
   assert.equal(fetchCalls.filter((c) => c.url.pathname === "/tmdb/movie/").length, 3, "movies stop at the limit");
   assert.equal(fetchCalls.filter((c) => c.url.pathname === "/tmdb/show/").length, 3, "shows stop at the limit");

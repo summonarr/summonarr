@@ -51,7 +51,13 @@ function markBounded(ledger: Map<string, number>, key: string, nowSec: number): 
   }
   if (ledger.size >= FORCE_REVOKE_MAX) {
     const first = ledger.keys().next().value;
-    if (first !== undefined) ledger.delete(first);
+    if (first !== undefined) {
+      // Past the cap the oldest mark is still fresh: dropping it would let that
+      // session skip the DB check, so the floor forces every cached check
+      // from before now onto the slow path instead.
+      if (nowSec - (ledger.get(first) ?? 0) <= MARK_USEFUL_SECONDS) invalidateCachedSessionChecks(nowSec);
+      ledger.delete(first);
+    }
   }
   ledger.set(key, nowSec);
 }

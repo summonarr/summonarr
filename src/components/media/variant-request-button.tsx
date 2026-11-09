@@ -3,9 +3,8 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Plus, Check, Loader2, Ban } from "@/components/icons";
-import { postMediaRequest } from "@/lib/client/media-request";
-import { rateLimitMessage } from "@/lib/client/rate-limit";
-import { readApiError } from "@/lib/client/api-error";
+import { submitMediaRequest } from "@/lib/client/media-request";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
 import { DetailActionButton, DetailActionStatus } from "./detail-action-button";
@@ -58,6 +57,7 @@ export function VariantRequestButton({
   const { toast } = useToast();
   const t = useT();
   const router = useRouter();
+  const action = useAsyncAction();
   const [state, setState] = useState<"idle" | "loading" | "requested" | "error">(
     requested ? "requested" : "idle",
   );
@@ -71,33 +71,25 @@ export function VariantRequestButton({
   async function submit() {
     setState("loading");
     setMsg("");
-    try {
-      // Refreshes the page-minted token once if it expired while the tab sat
-      // open (postMediaRequest).
-      // The title's own fields last, so the extras can never replace them.
-      const res = await postMediaRequest({ ...extras, tmdbId, mediaType }, requestToken);
-      if (res.status === 409) {
-        setState("requested");
-        return;
-      }
-      if (!res.ok) {
-        // A 429 says when to retry (Retry-After), as RequestButton's does.
-        setMsg(rateLimitMessage(res, t) ?? (await readApiError(res, t("request.somethingWrong"))));
-        setState("error");
-        return;
-      }
-      const body = (await res.json().catch(() => null)) as { alreadyAvailable?: boolean } | null;
-      if (body?.alreadyAvailable === true) {
-        setFoundAvailable(true);
-        setState("idle");
-        router.refresh();
-        return;
-      }
+    // Refreshes the page-minted token once if it expired while the tab sat
+    // open (postMediaRequest). The title's own fields last, so the extras can
+    // never replace them. Aborted on unmount.
+    const outcome = await action.run("request", (signal) =>
+      submitMediaRequest({ ...extras, tmdbId, mediaType }, requestToken, t, signal),
+    );
+    if (outcome === undefined) return;
+    if (outcome === "duplicate") {
+      setState("requested");
+    } else if (outcome === "alreadyAvailable") {
+      setFoundAvailable(true);
+      setState("idle");
+      router.refresh();
+    } else if (outcome === "created") {
       setState("requested");
       toast({ title: labels.requestedToast, variant: "success" });
       router.refresh();
-    } catch {
-      setMsg(t("request.networkError"));
+    } else {
+      setMsg(outcome.error);
       setState("error");
     }
   }

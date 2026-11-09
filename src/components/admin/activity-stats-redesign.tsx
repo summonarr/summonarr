@@ -404,7 +404,7 @@ function TopChartsSection({ stats }: { stats: ActivityStatsData }) {
   const locale = useLocale();
   // The page passes the overall top ten. (The query returns each source's top
   // ten; the overall top ten always sits inside that union.)
-  const userMax = stats.topUsers[0]?.count ?? 1;
+  const userMax = Math.max(stats.topUsers[0]?.count ?? 0, 1);
   return (
     <StatsSection>
       <ActivityGrid className="resp-grid-3" columns={THREE_EQUAL}>
@@ -441,12 +441,12 @@ function TopChartsSection({ stats }: { stats: ActivityStatsData }) {
         </ActivityCard>
         <TopTitlesCard
           label={t("adminActivity.stats.topMovies")}
-          items={stats.topWatched.filter((m) => m.mediaType === "MOVIE").slice(0, 8)}
+          items={stats.topWatched.filter((m) => m.mediaType === "MOVIE").slice(0, TOP_N)}
           type="MOVIE"
         />
         <TopTitlesCard
           label={t("adminActivity.stats.topTv")}
-          items={stats.topWatched.filter((m) => m.mediaType === "TV").slice(0, 8)}
+          items={stats.topWatched.filter((m) => m.mediaType === "TV").slice(0, TOP_N)}
           type="TV"
         />
       </ActivityGrid>
@@ -465,7 +465,7 @@ function TopTitlesCard({
   type: ActivityMediaType;
 }) {
   const t = useT();
-  const max = items[0]?.plays ?? 1;
+  const max = Math.max(items[0]?.plays ?? 0, 1);
   return (
     <ActivityCard>
       <SectionHeader label={label} sub={t("adminActivity.stats.ranked", { count: items.length })} />

@@ -48,6 +48,8 @@ test("QuickConnect: cancelling aborts the run's requests, and both requests carr
   assert.match(POLL, /fetch\(url, \{ signal \}\)/);
   assert.match(QC, /cancelQuickConnect\(\);\s*const myRun = qcRunRef\.current;/, "a new run cancels the previous one first");
   assert.match(POLL, /if \(signal\.aborted\) return null;/, "an aborted poll ends the run without the retry pause");
+  // A network that stays down ends the run with its own message, not the generic timeout.
+  assert.match(POLL, /catch \{[\s\S]*?consecutiveFailures \+= 1;\s*if \(consecutiveFailures >= QC_MAX_CONSECUTIVE_FAILURES\) return \{ ok: false, error: t\("auth\.login\.error\.network"\) \};/);
   // The post-sign-in re-check survives.
   assert.match(QC, /signInWithFetch\("jellyfin-quickconnect"[\s\S]*?if \(!isCurrent\(\)\) return;/);
 });

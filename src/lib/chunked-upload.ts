@@ -7,6 +7,7 @@
 import type { Translator } from "./i18n/translate";
 import { randomUuid } from "./random-id";
 import { isGatewayStatus } from "./gateway-status";
+import { abortableSleep } from "./abortable-sleep";
 
 export const DEFAULT_CHUNK_SIZE = 16 * 1024 * 1024;
 
@@ -101,19 +102,6 @@ function attemptSignal(outer: AbortSignal | undefined, timeoutMs: number): { sig
   };
 }
 
-function wait(ms: number, signal: AbortSignal | undefined): Promise<void> {
-  return new Promise((resolve) => {
-    if (ms <= 0 || signal?.aborted) return resolve();
-    const finish = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", finish);
-      resolve();
-    };
-    const timer = setTimeout(finish, ms);
-    signal?.addEventListener("abort", finish, { once: true });
-  });
-}
-
 type ChunkRequest = {
   endpoint: string;
   uploadId: string;
@@ -170,11 +158,11 @@ async function sendChunkWithRetry(
     } catch (err) {
       if (signal?.aborted) return { kind: "aborted" };
       if (!canRetry) throw err;
-      await wait(retryDelaysMs[attempt], signal);
+      await abortableSleep(retryDelaysMs[attempt], signal);
       continue;
     }
     if (canRetry && isGatewayStatus(res.status) && !isJson(res)) {
-      await wait(retryDelaysMs[attempt], signal);
+      await abortableSleep(retryDelaysMs[attempt], signal);
       continue;
     }
     // A retried chunk the server already holds: the attempt that "failed"

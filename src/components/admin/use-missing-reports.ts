@@ -76,6 +76,13 @@ export function useMissingReports({
   // The newest load of each list: only that one may commit (an older listing
   // landing late never overwrites a newer one, nor clears its loading mark).
   const loadSeq = useRef<Partial<Record<ReportKey, number>>>({});
+  const inFlight = useRef(new Set<AbortController>());
+  useEffect(() => {
+    const out = inFlight.current;
+    return () => {
+      for (const ctl of out) ctl.abort();
+    };
+  }, []);
   const [errors, setErrors] = useState<Partial<Record<ReportKey, string>>>({});
 
   const current: ReportKey = `${service}:${mode}`;
@@ -97,14 +104,20 @@ export function useMissingReports({
     const superseded = () => loadSeq.current[k] !== seq;
     setLoadingKeys((prev) => new Set(prev).add(k));
     setErrors((e) => ({ ...e, [k]: "" }));
-    // A listing reads every instance live and pages through it: no client
-    // timeout. A 200 that isn't a report is the load's failure, never a list.
+    // A listing reads every instance live and pages through it, so it gets the
+    // long-run bound. A 200 that isn't a report is the load's failure, never a
+    // list. Leaving the page aborts what is still out.
+    const ctl = new AbortController();
+    inFlight.current.add(ctl);
     const res = await fetchJson(missingListUrl(svc, m), {
       schema: MISSING_REPORT,
       timeoutMs: LONG_RUN_TIMEOUT_MS,
+      signal: ctl.signal,
       fallbackError: t("adminManage.missing.error.load"),
     });
+    inFlight.current.delete(ctl);
     if (superseded()) return;
+    if (!res.ok && res.kind === "aborted") return;
     setLoadingKeys((prev) => {
       const next = new Set(prev);
       next.delete(k);

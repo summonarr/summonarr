@@ -182,16 +182,9 @@ export const GET = withAuth(async (
       ...withAvailability,
       cast,
       similar: similarWithAvailability.map(lite),
-      keywords: extras.keywords,
-      keywordList: extras.keywordList,
-      genreList: extras.genreList,
-      watchProviders: extras.watchProviders,
-      homepage: extras.homepage,
+      ...extras,
       collection,
-      votedByMe: flags.votedByMe,
-      onWatchlist: flags.onWatchlist,
-      onHidden: flags.onHidden,
-      requested4kByMe: flags.requested4kByMe,
+      ...flags,
     });
   } catch (err) {
     console.error("[media] detail fetch failed:", err);

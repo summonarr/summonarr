@@ -73,9 +73,9 @@ test("the overview's live-session item lookup is scoped by source, so the [sourc
   const LOOKUP = readFileSync(new URL("../src/lib/activity-session-tmdb.ts", import.meta.url), "utf8");
   assert.match(LOOKUP, /\("source" = \$\{arm\.src\} AND "sourceItemId" IN \(\$\{Prisma\.join\(arm\.ids\)\}\)\)/);
   assert.match(LOOKUP, /WHERE "tmdbId" IS NOT NULL AND/);
-  // One row per item, not every past play of it, and still per server instance.
-  assert.match(LOOKUP, /SELECT DISTINCT ON \("serverInstance", "sourceItemId"\)/, "still per server instance");
-  assert.match(LOOKUP, /ORDER BY "serverInstance", "sourceItemId", "startedAt" DESC/, "the newest play of each item");
+  // One row per item, not every past play of it, per source and server instance.
+  assert.match(LOOKUP, /SELECT DISTINCT ON \("source", "serverInstance", "sourceItemId"\)/, "still per server instance, and per source");
+  assert.match(LOOKUP, /ORDER BY "source", "serverInstance", "sourceItemId", "startedAt" DESC/, "the newest play of each item");
 });
 
 test("the Activity pages resolve posters through the shared lookup — no hand-parsed TmdbCache rows", () => {

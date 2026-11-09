@@ -35,3 +35,10 @@ test("reporter names fall back to the email for a blank display name", () => {
   assert.equal(displayName(" Al "), "Al");
   assert.equal(nameOrEmail({ name: null, email: "e@x.test" }), "e@x.test");
 });
+
+test("a reporter with several reports in one group is listed once", () => {
+  const dup = (id: string, day: number) => ({ ...issue(id, "OPEN", day, "Bea"), user: { name: "Bea", email: "bea@x.test" } });
+  const [g] = groupIssues([dup("a", 3), dup("b", 2), issue("c", "OPEN", 1, "Cy")]);
+  assert.equal(g.count, 3);
+  assert.deepEqual(g.reporterNames, ["Bea", "Cy"]);
+});

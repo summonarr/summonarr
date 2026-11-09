@@ -18,6 +18,10 @@ import { rowKey } from "@/components/admin/queue-table";
 const HealthEntry = v.object({ service: v.string(), slug: v.string(), version: v.optional(v.nullable(v.string())) });
 const HealthReport = v.object({ instances: v.array(v.unknown()) });
 
+// Declared so fetchJson hands back a record or nothing; recheckOutcome checks
+// each field itself.
+const RecheckAnswer = v.object({ instances: v.optional(v.unknown()), errors: v.optional(v.unknown()) });
+
 // A grab asks one instance: room for a slow one. A re-check asks every
 // instance, a few at a time, so it has no client deadline (as before).
 const GRAB_TIMEOUT_MS = 90_000;
@@ -107,6 +111,7 @@ export function useQueueActions({ reloadSoon, dropRow }: {
     try {
       const res = await fetchJson(withBasePath("/api/admin/queue/recheck"), {
         init: { method: "POST" },
+        schema: RecheckAnswer,
         timeoutMs: ARR_WRITE_TIMEOUT_MS,
         fallbackError: t("adminManage.queue.recheck.failed"),
       });
@@ -116,7 +121,7 @@ export function useQueueActions({ reloadSoon, dropRow }: {
       }
       // An unreadable 202 says nothing about the instances: recheckOutcome reads
       // it as none asked, and checks each field of a readable one itself.
-      const data = res.ok && typeof res.data === "object" && res.data !== null ? (res.data as { instances?: unknown; errors?: unknown }) : null;
+      const data = res.ok ? res.data : null;
       const outcome = recheckOutcome(data);
       if (outcome.failed.length > 0) setRecheckFailed({ all: outcome.allFailed, failed: outcome.failed });
       if (!outcome.allFailed) succeeded(t("adminManage.queue.recheck.done", { count: outcome.asked }));

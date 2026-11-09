@@ -13,10 +13,11 @@ export interface HiddenTitleRef {
 
 export type HiddenWriteResult = { ok: true } | { ok: false; failure: FetchJsonFailure };
 
-// A 2xx is done whatever its body says — the route answers the stored row or
-// { ok: true }, and nothing here reads either.
+// A 2xx with a JSON (or empty) body is done whatever it says — the route answers
+// the stored row or { ok: true }, and nothing here reads either. A 2xx that is
+// not JSON never came from the route (a sign-in page behind a gate): not done.
 function settle(res: Awaited<ReturnType<typeof fetchJson>>, alreadyDone?: number): HiddenWriteResult {
-  if (res.ok || res.kind === "invalid") return { ok: true };
+  if (res.ok) return { ok: true };
   if (res.kind === "http" && res.status === alreadyDone) return { ok: true };
   return { ok: false, failure: res };
 }

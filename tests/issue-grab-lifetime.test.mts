@@ -332,7 +332,7 @@ test("every IssueGrab create in src/ goes through recordIssueGrab — no route w
   walk("src");
   assert.deepEqual(offenders, []);
   for (const route of ["src/app/api/issues/[id]/releases/route.ts", "src/app/api/issues/[id]/files/route.ts"]) {
-    assert.match(readFileSync(route, "utf8"), /await recordIssueGrab\(\{/, route);
+    assert.match(readFileSync(route, "utf8"), /recordGrabForIssue\(/, route);
   }
 });
 

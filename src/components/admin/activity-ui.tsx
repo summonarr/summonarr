@@ -12,7 +12,7 @@
 //   activity-heatmap.tsx HourHeatmap
 //   activity-table.tsx   Th / Td and the table icons
 
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { foldBarItems } from "@/lib/activity-bars";
@@ -99,6 +99,16 @@ export function SourceTag({ source, instance }: { source: string; instance?: str
 
 /* ── Stream method pill ───────────────────────────────────────── */
 
+const METHOD_COLORS: Record<MethodClass, { bg: string; fg: string }> = {
+  // Tints are the status TOKENS at 12–14% (guardrail 42: the text tokens are
+  // tuned against their own 5–20% tints), so a token retune carries here.
+  ok: { bg: "color-mix(in oklab, var(--ds-success) 12%, transparent)", fg: "var(--ds-success)" },
+  info: { bg: "color-mix(in oklab, var(--ds-info) 13%, transparent)", fg: "var(--ds-info)" },
+  warn: { bg: "color-mix(in oklab, var(--ds-warning) 14%, transparent)", fg: "var(--ds-warning)" },
+  err: { bg: "color-mix(in oklab, var(--ds-danger) 14%, transparent)", fg: "var(--ds-danger)" },
+  muted: { bg: "var(--ds-bg-3)", fg: "var(--ds-fg-muted)" },
+};
+
 export function MethodPill({
   method,
   methodClass,
@@ -106,16 +116,7 @@ export function MethodPill({
   method: string;
   methodClass: MethodClass;
 }) {
-  const colors: Record<MethodClass, { bg: string; fg: string }> = {
-    // Tints are the status TOKENS at 12–14% (guardrail 42: the text tokens are
-    // tuned against their own 5–20% tints), so a token retune carries here.
-    ok: { bg: "color-mix(in oklab, var(--ds-success) 12%, transparent)", fg: "var(--ds-success)" },
-    info: { bg: "color-mix(in oklab, var(--ds-info) 13%, transparent)", fg: "var(--ds-info)" },
-    warn: { bg: "color-mix(in oklab, var(--ds-warning) 14%, transparent)", fg: "var(--ds-warning)" },
-    err: { bg: "color-mix(in oklab, var(--ds-danger) 14%, transparent)", fg: "var(--ds-danger)" },
-    muted: { bg: "var(--ds-bg-3)", fg: "var(--ds-fg-muted)" },
-  };
-  const c = colors[methodClass] ?? colors.muted;
+  const c = METHOD_COLORS[methodClass] ?? METHOD_COLORS.muted;
   return (
     <span
       className="ds-mono"
@@ -815,7 +816,7 @@ export function StreamTypeBars({
 }) {
   const locale = useLocale();
   const total = data.reduce((s, r) => s + r.count, 0);
-  const pctFmt = new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 });
+  const pctFmt = useMemo(() => new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }), [locale]);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <div
@@ -828,11 +829,11 @@ export function StreamTypeBars({
         }}
       >
         {data.map(
-          (r) =>
+          (r, i) =>
             total > 0 &&
             r.count > 0 && (
               <div
-                key={r.label}
+                key={`${i}:${r.label}`}
                 title={`${r.label}: ${r.count.toLocaleString(locale)}`}
                 style={{
                   flex: r.count,
@@ -844,11 +845,11 @@ export function StreamTypeBars({
         )}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-        {data.map((r) => {
+        {data.map((r, i) => {
           const share = total > 0 ? r.count / total : 0;
           return (
             <div
-              key={r.label}
+              key={`${i}:${r.label}`}
               style={{
                 display: "flex",
                 justifyContent: "space-between",

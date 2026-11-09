@@ -398,7 +398,8 @@ export async function exchangeOidcCode(
     issuer,
     sub,
     email: typeof c.email === "string" ? c.email : null,
-    emailVerified: c.email_verified === true,
+    // Some IdPs (Cognito, certain ADFS setups) send the claim as the string "true".
+    emailVerified: c.email_verified === true || c.email_verified === "true",
     name: typeof c.name === "string" ? c.name : null,
     preferredUsername: typeof c.preferred_username === "string" ? c.preferred_username : null,
     picture: typeof c.picture === "string" ? c.picture : null,

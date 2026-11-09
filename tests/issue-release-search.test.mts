@@ -1,14 +1,14 @@
 // Audit fixes (unit "release") for an issue's Replace RELEASE search,
 // GET/POST /api/issues/[id]/releases:
 //
-//   C024 — the search runs as a BACKGROUND JOB on `&async=1` (the guardrail-37a
+// the search runs as a BACKGROUND JOB on `&async=1` (the guardrail-37a
 //          pattern the request "Pick release" and the title manager already
 //          use): 202 { job } at once, `?job=` polls answer 202 while it runs,
 //          then the search's own body; polls are the starting admin's only, and
 //          the same admin re-searching joins the running job (one indexer
 //          sweep). Without `async` the answer stays the synchronous bare
 //          `[ArrRelease]` list the iOS app decodes.
-//   C112 — Sonarr searches a season or an episode ONLY: `/api/v3/release` with
+// Sonarr searches a season or an episode ONLY: `/api/v3/release` with
 //          just a `seriesId` is the indexers' RSS feed (other shows' episodes,
 //          grabbable). A whole-series (FULL) TV issue — or a SEASON issue with
 //          no season — gets a 422 with no upstream call, from the search AND
@@ -219,9 +219,9 @@ beforeEach(() => {
   issueRow = tvIssue();
 });
 
-// ── C024: the background search ──────────────────────────────────────────────
+// ── the background search ──────────────────────────────────────────────
 
-test("C024: ?async=1 answers 202 { job }; the owner's poll is 202 while it runs, then the bare release list; another admin's poll is 404", { timeout: 10_000 }, async () => {
+test("?async=1 answers 202 { job }; the owner's poll is 202 while it runs, then the bare release list; another admin's poll is 404", { timeout: 10_000 }, async () => {
   const owner = await mintSession();
   const other = await mintSession("ADMIN");
   let open!: () => void;
@@ -251,7 +251,7 @@ test("C024: ?async=1 answers 202 { job }; the owner's poll is 202 while it runs,
   assert.equal(list[0].title, "Show.S01.1080p.WEB");
 });
 
-test("C024: the same admin searching again while one runs JOINS it — one indexer sweep, not two", { timeout: 10_000 }, async () => {
+test("the same admin searching again while one runs JOINS it — one indexer sweep, not two", { timeout: 10_000 }, async () => {
   const owner = await mintSession();
   let open!: () => void;
   releaseGate = new Promise<void>((r) => { open = r; });
@@ -265,7 +265,7 @@ test("C024: the same admin searching again while one runs JOINS it — one index
   assert.equal(releaseReads().length, 1, "exactly one /api/v3/release read");
 });
 
-test("C024: without async the GET is still the synchronous bare [ArrRelease] list (the iOS contract)", async () => {
+test("without async the GET is still the synchronous bare [ArrRelease] list (the iOS contract)", async () => {
   const res = await getReleases(await mintSession(), "issue-tv", "?instance=");
   assert.equal(res.status, 200);
   const body = await res.json();
@@ -273,7 +273,7 @@ test("C024: without async the GET is still the synchronous bare [ArrRelease] lis
   assert.equal(body.length, 1);
 });
 
-test("C024: a background search's failure is the search's own answer (502 + translated generic), not a hang", async () => {
+test("a background search's failure is the search's own answer (502 + translated generic), not a hang", async () => {
   settings.set("sonarrUrl", "http://10.0.0.9:8989"); // nothing scripted there — every call throws
   const owner = await mintSession();
   const { job } = (await (await getReleases(owner, "issue-tv", "?instance=&async=1")).json()) as { job: string };
@@ -288,9 +288,9 @@ test("C024: a background search's failure is the search's own answer (502 + tran
   assert.deepEqual(await done!.json(), { error: "Arr service request failed" });
 });
 
-// ── C112: never the series-only (RSS) query ──────────────────────────────────
+// ── never the series-only (RSS) query ──────────────────────────────────
 
-test("C112: a whole-series (FULL) TV issue's search is a 422 with NO upstream call — sync and async alike", async () => {
+test("a whole-series (FULL) TV issue's search is a 422 with NO upstream call — sync and async alike", async () => {
   issueRow = tvIssue({ scope: "FULL", seasonNumber: null });
   const token = await mintSession();
   for (const q of ["?instance=", "?instance=&async=1"]) {
@@ -301,7 +301,7 @@ test("C112: a whole-series (FULL) TV issue's search is a 422 with NO upstream ca
   assert.deepEqual(fetchCalls, [], "nothing reached Sonarr — not even the series lookup");
 });
 
-test("C112: a SEASON issue with no season, and an EPISODE issue with no episode, are refused the same way", async () => {
+test("a SEASON issue with no season, and an EPISODE issue with no episode, are refused the same way", async () => {
   const token = await mintSession();
   for (const over of [{ scope: "SEASON", seasonNumber: null }, { scope: "EPISODE", seasonNumber: 1, episodeNumber: null }]) {
     issueRow = tvIssue(over);
@@ -310,7 +310,7 @@ test("C112: a SEASON issue with no season, and an EPISODE issue with no episode,
   assert.deepEqual(releaseReads(), []);
 });
 
-test("C112: the grab of a FULL TV issue is refused 422 BEFORE the handle claim and the IN_PROGRESS CAS — nothing is sent", async () => {
+test("the grab of a FULL TV issue is refused 422 BEFORE the handle claim and the IN_PROGRESS CAS — nothing is sent", async () => {
   issueRow = tvIssue({ scope: "FULL", seasonNumber: null });
   const res = await postRelease(await mintSession(), "issue-tv", { guid: "0".repeat(32), indexerId: 3, instance: "" });
   assert.equal(res.status, 422);
@@ -319,7 +319,7 @@ test("C112: the grab of a FULL TV issue is refused 422 BEFORE the handle claim a
   assert.equal(issueRow!.status, "OPEN");
 });
 
-test("C112: a SEASON issue's search names its season; an EPISODE issue's names its episode", async () => {
+test("a SEASON issue's search names its season; an EPISODE issue's names its episode", async () => {
   const token = await mintSession();
   assert.equal((await getReleases(token, "issue-tv", "?instance=")).status, 200);
   assert.equal(releaseReads()[0].url.searchParams.get("seasonNumber"), "1");
@@ -331,14 +331,14 @@ test("C112: a SEASON issue's search names its season; an EPISODE issue's names i
   assert.equal(releaseReads()[0].url.searchParams.get("episodeId"), "501");
 });
 
-test("C112: a movie issue is unaffected (scope FULL is a movie's normal scope)", async () => {
+test("a movie issue is unaffected (scope FULL is a movie's normal scope)", async () => {
   issueRow = { id: "issue-m", status: "OPEN", reportedBy: "r", title: "The Matrix", mediaType: "MOVIE", tmdbId: 603, tvdbId: null, scope: "FULL", seasonNumber: null, episodeNumber: null };
   const res = await getReleases(await mintSession(), "issue-m", "?instance=");
   assert.equal(res.status, 200);
   assert.equal(((await res.json()) as unknown[]).length, 1);
 });
 
-test("C112: getReleasesForSeries itself refuses a series-only query — it throws before any Sonarr call", async () => {
+test("getReleasesForSeries itself refuses a series-only query — it throws before any Sonarr call", async () => {
   for (const [scope, season, episode] of [["FULL", null, null], ["SEASON", null, null], ["EPISODE", 1, null], ["EPISODE", null, 2]] as const) {
     fetchCalls.length = 0;
     await assert.rejects(getReleasesForSeries(81189, scope, season, episode, ""), (e: unknown) => e instanceof ReleaseSeasonRequiredError, scope);
@@ -346,7 +346,7 @@ test("C112: getReleasesForSeries itself refuses a series-only query — it throw
   }
 });
 
-test("C112: no source builds a series-only /api/v3/release query", () => {
+test("no source builds a series-only /api/v3/release query", () => {
   // Every file under src/, comments stripped. Two shapes reach the endpoint:
   //   1. a literal `/api/v3/release?seriesId=…` — must name a season;
   //   2. the generic `/api/v3/release?${query}` builder, whose query is built
@@ -389,7 +389,7 @@ test("C112: no source builds a series-only /api/v3/release query", () => {
   assert.match(body, /const \{ query, profile \} = await releaseQuery\(cfg, service, arrId, scope\);\s*return searchReleasesByArrId\(cfg, query, profile\);/);
 });
 
-test("C112: seriesReleaseScopeSearchable — a season or an episode with its numbers, never a whole series", () => {
+test("seriesReleaseScopeSearchable — a season or an episode with its numbers, never a whole series", () => {
   assert.equal(seriesReleaseScopeSearchable("FULL", 1, 2), false);
   assert.equal(seriesReleaseScopeSearchable("SEASON", 1, null), true);
   assert.equal(seriesReleaseScopeSearchable("SEASON", 0, null), true, "specials are a season");
@@ -462,7 +462,7 @@ test("client: once isAlive turns false (superseded, or the dialog closed) it sto
 const here = dirname(fileURLToPath(import.meta.url));
 const read = (p: string) => readFileSync(join(here, "..", p), "utf8");
 
-test("structural (C024): the Fix file window's release list searches through the background job, superseded by a newer search, Back or a close", () => {
+test("structural: the Fix file window's release list searches through the background job, superseded by a newer search, Back or a close", () => {
   const src = read("src/components/admin/issue-actions.tsx");
   const load = functionBody(src, "async function loadReleases(");
   assert.match(load, /runReleaseSearchJob\(\s*fetch,\s*withBasePath\(`\/api\/issues\/\$\{issueId\}\/releases\?instance=/);
@@ -488,7 +488,7 @@ test("structural (C024): the Fix file window's release list searches through the
   assert.match(grab, /signal,\s*timeoutMs: GRAB_TIMEOUT_MS,/);
 });
 
-test("structural (C112): the release list is offered only for a searchable TV scope", () => {
+test("structural: the release list is offered only for a searchable TV scope", () => {
   const src = read("src/components/admin/issue-actions.tsx");
   assert.match(src, /const canPickRelease = mediaType === "MOVIE"\s*\|\| \(seriesReleaseScopeSearchable\(scope, seasonNumber, episodeNumber\)/);
   assert.match(src, /<FixFileOptions[^>]*\bcanPickRelease=\{canPickRelease\}/, "the window hands it to the options view");
@@ -496,7 +496,7 @@ test("structural (C112): the release list is offered only for a searchable TV sc
   assert.match(options, /c === "pick" \? canPickRelease/, "the options view drops the choice without it");
 });
 
-test("structural (C024): ReleaseSearchDialog runs the same shared loop", () => {
+test("structural: ReleaseSearchDialog runs the same shared loop", () => {
   const src = read("src/components/admin/release-search-dialog.tsx");
   assert.match(src, /runReleaseSearchJob\(fetch, withBasePath\(url\), \{\s*isAlive: \(\) => id === seq\.current,/);
   assert.doesNotMatch(src, /while \(res\.status === 202\)/, "no private copy of the poll loop");

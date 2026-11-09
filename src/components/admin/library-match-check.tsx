@@ -107,15 +107,24 @@ function FixOneButton({ flag, onFixed, locked }: { flag: FixableMatchFlag; onFix
     }
   }, [state]);
 
+  // A row that unmounts (a filter change, a refresh) stops polling; the job itself runs on (guardrail 37a).
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
+
   const run = useCallback(async () => {
     refocus.current = true;
     setState("running");
     setMessage("");
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
     try {
-      const outcome = await runFixMatch(fixRequestOf(flag), { onProgress: setProgress });
+      const outcome = await runFixMatch(fixRequestOf(flag), { onProgress: setProgress, signal: ac.signal });
+      if (ac.signal.aborted) return;
       const warning = fixMatchWarningMessage(outcome, t);
       onFixed(flag, warning ?? undefined);
     } catch (err) {
+      if (ac.signal.aborted) return;
       setState("error");
       setMessage(fixMatchErrorMessage(err, t));
     }

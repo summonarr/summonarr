@@ -106,7 +106,8 @@ export async function getPlayStatsForServerUsers(ids: string[], timeZone?: strin
       ...year.params,
     ),
     avgSessionDuration: () => prisma.$queryRawUnsafe<{ avg_secs: number | null }[]>(
-      `SELECT AVG("playDuration")::float8 AS avg_secs FROM "PlayHistory" WHERE ${byIds}`,
+      // Zero-length rows are left out, as in the global summary, so the two figures agree.
+      `SELECT AVG(NULLIF("playDuration", 0))::float8 AS avg_secs FROM "PlayHistory" WHERE ${byIds}`,
       ...all.params,
     ),
     transcodeRatio: () => prisma.$queryRawUnsafe<{ method: string | null; count: bigint }[]>(

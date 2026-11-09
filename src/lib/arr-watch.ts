@@ -416,8 +416,7 @@ export function selectNewFailures(
 ): { groups: FailureGroup[]; cursor: HistoryCursor; recent: RecentFailure[]; deferred: number } {
   const c = { ms: Date.parse(cursor.at), id: cursor.lastId };
   const fresh = records
-    .filter((r) => r.kind === "failed" && r.date !== null)
-    .map((r) => ({ r, ms: Date.parse(r.date as string) }))
+    .flatMap((r) => (r.kind === "failed" && r.date !== null ? [{ r, ms: Date.parse(r.date) }] : []))
     .filter((x) => Number.isFinite(x.ms) && x.ms <= nowMs && after(x.ms, x.r.id, c))
     .sort((a, b) => a.ms - b.ms || a.r.id - b.r.id);
 

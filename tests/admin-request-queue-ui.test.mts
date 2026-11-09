@@ -148,7 +148,10 @@ test("a quality-profile read for an instance the row has since left is dropped",
   assert.match(open, /setProfileState\(\(prev\) => \(prev\?\.key === key && prev\.phase === "loading" \? next : prev\)\);/);
   assert.match(open, /new URLSearchParams\(\{ mediaType, instance: arrInstance \}\)/);
   assert.match(open, /schema: QualityProfilesAnswer,/, "the list is checked, not cast");
-  assert.doesNotMatch(src, /useEffect\(/, "no prop is copied into state through an effect");
+  // The only effect is the unmount cleanup that stops the reads still out; no prop is copied into state.
+  assert.equal(src.match(/useEffect\(/g)?.length, 1);
+  assert.match(src, /useEffect\(\(\) => \{\s*const out = reads\.current;\s*return \(\) => \{\s*for \(const ctl of out\) ctl\.abort\(\);/);
+  assert.match(open, /signal: ctl\.signal,/, "the read can be stopped");
 });
 
 test("the profile spinner is announced", () => {

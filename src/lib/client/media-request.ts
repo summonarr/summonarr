@@ -11,6 +11,9 @@
 //     the real cause instead of the request route's "invalid request token".
 import { withBasePath } from "@/lib/base-path";
 import { timedFetch } from "@/lib/client/fetch-json";
+import { readApiError } from "@/lib/client/api-error";
+import { rateLimitMessage } from "@/lib/client/rate-limit";
+import type { Translator } from "@/lib/i18n/translate";
 
 type RequestMediaType = "MOVIE" | "TV";
 
@@ -64,4 +67,32 @@ export async function postMediaRequest(
   });
   if (typeof fresh !== "string") return res;
   return send(payload, fresh, signal);
+}
+
+// What a request attempt came to. `duplicate` is the 409 (this viewer already
+// asked); `alreadyAvailable` is the route's 200 that creates NOTHING because
+// the title is already in a library this viewer can see.
+export type MediaRequestOutcome = "duplicate" | "alreadyAvailable" | "created" | { error: string };
+
+// One request attempt read into an outcome; the failure text is already
+// translated. An abort of `signal` propagates (the caller was unmounted).
+export async function submitMediaRequest(
+  payload: { tmdbId: number; mediaType: RequestMediaType } & Record<string, unknown>,
+  pageToken: string | undefined,
+  t: Translator,
+  signal?: AbortSignal,
+): Promise<MediaRequestOutcome> {
+  try {
+    const res = await postMediaRequest(payload, pageToken, { signal });
+    if (res.status === 409) return "duplicate";
+    if (!res.ok) {
+      return { error: rateLimitMessage(res, t) ?? (await readApiError(res, t("request.somethingWrong"))) };
+    }
+    const body: unknown = await res.json().catch(() => null);
+    const available = typeof body === "object" && body !== null && "alreadyAvailable" in body && body.alreadyAvailable === true;
+    return available ? "alreadyAvailable" : "created";
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    return { error: t("request.networkError") };
+  }
 }

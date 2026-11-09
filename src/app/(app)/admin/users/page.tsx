@@ -118,10 +118,13 @@ export default async function UsersPage({ searchParams }: { searchParams: Promis
   if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_USERS)) redirect("/");
   const sp = await searchParams;
   const requestedPage = parsePageNumber(first(sp.page));
+  // Linking a media-server identity to an account is ADMIN-only (guardrail 34d);
+  // a MANAGE_USERS delegate sees the bindings read-only.
+  const canLinkServerUsers = hasPermission(session.user.permissions, Permission.ADMIN);
 
   const [
     requestedUsers, userCount, serverUsers, serverUserCount, autoDisableRow, radarr4kConfigured, sonarr4kConfigured,
-    sonarrInstances, radarrInstances, plexInstances, jellyfinInstances,
+    sonarrInstances, radarrInstances, plexInstances, jellyfinInstances, linkTargets,
   ] = await Promise.all([
     userPage(requestedPage),
     prisma.user.count(),
@@ -155,6 +158,16 @@ export default async function UsersPage({ searchParams }: { searchParams: Promis
     getArrInstances("radarr"),
     getMediaInstances("plex"),
     getMediaInstances("jellyfin"),
+    // Purged accounts are excluded — they have no identity left to attribute
+    // history to (the route rejects them too).
+    canLinkServerUsers
+      ? prisma.user.findMany({
+          where: { purgedAt: null },
+          select: { id: true, name: true, email: true, purgedAt: true },
+          orderBy: USER_ORDER,
+          take: LINK_TARGET_CAP,
+        })
+      : Promise.resolve([]),
   ]);
   // A page past the end (accounts removed since the link was made) shows the
   // last page instead of an empty table; only that case reads a second time.
@@ -223,22 +236,9 @@ export default async function UsersPage({ searchParams }: { searchParams: Promis
   }
 
   const t = await getTranslator();
-  // Linking a media-server identity to an account is ADMIN-only (guardrail 34d);
-  // a MANAGE_USERS delegate sees the bindings read-only.
-  const canLinkServerUsers = hasPermission(session.user.permissions, Permission.ADMIN);
   // /api/discord/sync-roles is withAdmin, which admits the ADMIN role only; a
   // MANAGE_USERS delegate would get a 403 on every click.
   const canSyncRoles = session.user.role === "ADMIN";
-  // Purged accounts are excluded — they have no identity left to attribute
-  // history to (the route rejects them too).
-  const linkTargets = canLinkServerUsers
-    ? await prisma.user.findMany({
-        where: { purgedAt: null },
-        select: { id: true, name: true, email: true, purgedAt: true },
-        orderBy: USER_ORDER,
-        take: LINK_TARGET_CAP,
-      })
-    : [];
 
   return (
     <div className="ds-page-enter">

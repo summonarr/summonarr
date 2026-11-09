@@ -14,7 +14,8 @@ import {
   notifyManualInteractionOnce,
 } from "@/lib/arr-webhook-events";
 import { readRadarrPayload, type RadarrWebhookView } from "@/lib/arr-webhook-payload";
-import { lockArrCacheInTx } from "@/lib/arr-cache-refresh";
+import { evictArrCacheRows, lockArrCacheInTx } from "@/lib/arr-cache-refresh";
+import { BATCH_TX_TIMEOUT } from "@/lib/batch-write";
 
 // Only the top level is checked before the handler (arr-webhook.ts); every
 // field is read through readRadarrPayload.
@@ -127,17 +128,7 @@ async function handleMovieDelete(event: RadarrWebhookView, fileDelete: boolean, 
     }
     return NextResponse.json({ ok: true, evicted: false, reason: state === null ? "unverified" : "not_deleted" });
   }
-  await prisma.$transaction(async (tx) => {
-    await lockArrCacheInTx(tx, "radarr");
-    if (state === "absent") {
-      await tx.radarrWantedItem.deleteMany({ where: { tmdbId: delId, arrInstance } });
-    }
-    await tx.radarrAvailableItem.deleteMany({ where: { tmdbId: delId, arrInstance } });
-    if (state === "noFile") {
-      // skipDuplicates: a row already there is no error, so nothing aborts this tx (guardrail 23).
-      await tx.radarrWantedItem.createMany({ data: [{ tmdbId: delId, arrInstance }], skipDuplicates: true });
-    }
-  }, { timeout: 30_000 });
+  await evictArrCacheRows("radarr", delId, arrInstance, { requeueWanted: state === "noFile" });
   return NextResponse.json({ ok: true, evicted: true });
 }
 
@@ -184,7 +175,7 @@ async function handleMovieDownload(tmdbId: number, arrInstance: string): Promise
       await tx.radarrAvailableItem.createMany({ data: [{ tmdbId, arrInstance }], skipDuplicates: true });
     }
     return updated.count;
-  }, { timeout: 30_000 });
+  }, { timeout: BATCH_TX_TIMEOUT });
 
   if (marked > 0) {
     void clearDeletionVotesForTmdbs([{ tmdbId, mediaType: "MOVIE" }]);

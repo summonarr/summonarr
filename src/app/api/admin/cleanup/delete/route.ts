@@ -13,6 +13,7 @@ import { cleanupDisabledResponse } from "@/lib/library-cleanup-gate";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
 import { arrServiceName } from "@/lib/arr-service-name";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 // Library cleanup delete (ADMIN) — the ONLY way anything in this feature is
 // removed, and only ever by an admin's explicit, two-step confirmation:
@@ -47,6 +48,9 @@ import { arrServiceName } from "@/lib/arr-service-name";
 // lifting that.
 
 const TITLE_CONCURRENCY = 2;
+// Every call, dry run or execute, lists the Radarr/Sonarr libraries and
+// re-judges the selection; bounded per admin like the report route.
+const PLANS_PER_MIN = 30;
 
 type Body = { items?: unknown; blacklist?: unknown; confirmTargets?: unknown; confirmFingerprint?: unknown };
 
@@ -129,6 +133,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const off = await cleanupDisabledResponse(t);
   if (off) return off;
+  if (!checkRateLimit(`cleanup-delete:${session.user.id}`, PLANS_PER_MIN, 60_000)) {
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsShortly") }, { status: 429 });
+  }
   const execute = req.nextUrl.searchParams.get("execute") === "true";
   const parsed = await readJsonCapped<Body>(req, 65_536);
   if (parsed instanceof NextResponse) return parsed;
@@ -194,7 +201,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // Read-only views cache the Radarr/Sonarr listing and the never-watched
   // report; what was just deleted must not keep showing there.
   // A delete whose outcome is unknown may have removed the title as well.
-  if (results.some((r) => r.deleted.length > 0 || ("uncertain" in r && r.uncertain === true))) {
+  if (results.some((r) => r.deleted.length > 0 || r.uncertain === true)) {
     invalidateArrLibraryIndexCache();
     invalidateNeverWatchedReport();
   }

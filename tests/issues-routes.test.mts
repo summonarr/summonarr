@@ -236,6 +236,7 @@ let issueSeq = 0;
 let issueRow: Record<string, unknown> | null = null; // the row findUnique returns
 let issueListRows: Array<Record<string, unknown>> = [];
 let issueUpdateManyCount = 1; // scriptable CAS result
+let issueUpdateManyThrows = false; // the status write rejects
 // Every row create() returned this test: what createIssue's duplicate check reads.
 let createdIssues: Array<Record<string, unknown>> = [];
 const issueModel = {
@@ -265,6 +266,7 @@ const issueModel = {
   },
   delete: async (args: { where: { id: string } }) => {
     rec("issue.delete", args);
+    if (issueDeleteThrows) throw issueDeleteThrows;
     return issueRow ? { ...issueRow } : {};
   },
   findUnique: async (args: { where: { id: string } }) => {
@@ -277,11 +279,14 @@ const issueModel = {
   },
   updateMany: async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
     rec("issue.updateMany", args);
+    if (issueUpdateManyThrows) throw new Error("stubbed status write failure");
     const count = issueUpdateManyCount;
     if (count > 0 && issueRow) Object.assign(issueRow, args.data);
     return { count };
   },
 };
+// When set, issue.delete rejects with it (a concurrent delete's P2025).
+let issueDeleteThrows: unknown = null;
 shadowPrismaModel(prisma, "issue", issueModel);
 
 // What the thread read returns, in the order the query asked for (newest first).
@@ -883,6 +888,20 @@ test("messages POST (admin reply): creates a fromAdmin IssueMessage, notifies th
   assert.equal(fetchCalls.length, 0, "unconfigured message-notify channels never reach the network");
 });
 
+test("messages POST still answers 201 for the stored message when the status follow-up write fails", async () => {
+  issueRow = { id: "issue-sf", status: "OPEN", reportedBy: "reporter-sf", title: "Prisoners", mediaType: "MOVIE", tmdbId: 146233, posterPath: null, claimedBy: null };
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+  issueUpdateManyThrows = true;
+  try {
+    const res = await postMessage(admin.token, "issue-sf", { body: "on it" });
+    assert.equal(res.status, 201);
+    assert.equal(opsOf("issueMessage.create").length, 1);
+    assert.ok(errors.some((e) => e.includes("Reply stored but its status change failed")), errors.join(" | "));
+  } finally {
+    issueUpdateManyThrows = false;
+  }
+});
+
 test("messages POST writes no inbox row when the reporter is deactivated", async () => {
   usersById.set("reporter-off2", {
     role: "USER", permissions: 0n, mediaServer: null, sessionsRevokedAt: null,
@@ -1320,6 +1339,17 @@ test("PATCH resolution-only edit on a RESOLVED issue leaves resolvedAt alone (th
   await patchIssue(admin.token, "issue-rn2", { status: "RESOLVED", resolution: "same status, new note" });
   const write2 = opsOf("issue.updateMany")[1].args as { data: Record<string, unknown> };
   assert.ok(!("resolvedAt" in write2.data), "an unchanged status must not re-stamp resolvedAt");
+});
+
+test("PATCH resolution-only edit is audited with the note before and after", async () => {
+  issueRow = { id: "issue-ra", status: "RESOLVED", reportedBy: "r", title: "t", mediaType: "MOVIE", tmdbId: 1, resolution: "old", posterPath: null };
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+  const res = await patchIssue(admin.token, "issue-ra", { resolution: "clarified note" });
+  assert.equal(res.status, 200);
+  const audits = opsOf("auditLog.create").map((o) => JSON.parse((o.args as { data: { details: string } }).data.details) as Record<string, unknown>);
+  assert.equal(audits.length, 1);
+  assert.deepEqual(audits[0].before, { status: "RESOLVED", resolution: "old" });
+  assert.deepEqual(audits[0].after, { status: "RESOLVED", resolution: "clarified note" });
 });
 
 test("messages POST: the reporter replying to a RESOLVED issue reopens it AND clears resolvedAt", async () => {
@@ -1870,6 +1900,23 @@ test("messages GET with ?before= asks for the messages strictly older than that 
 });
 
 // ═══════════════════ DELETE /api/issues/[id] ═════════════════════════════════
+
+test("DELETE answers 404, not a 500, when another admin deleted the issue first", async () => {
+  issueRow = { id: "issue-gone", status: "OPEN", reportedBy: "reporter-d", title: "Heat", mediaType: "MOVIE", tmdbId: 949, posterPath: null };
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+  issueDeleteThrows = Object.assign(new Error("Record to delete does not exist."), { name: "PrismaClientKnownRequestError", code: "P2025" });
+  try {
+    const req = new NextRequest("http://localhost:3000/api/issues/issue-gone", {
+      method: "DELETE",
+      headers: { cookie: `${COOKIE}=${admin.token}` },
+    });
+    const res = await inScope(() => deleteIssueRoute(req, idCtx("issue-gone")));
+    assert.equal(res.status, 404);
+    assert.equal(sseEvents.length, 0, "nothing was deleted by this call, so nothing is broadcast");
+  } finally {
+    issueDeleteThrows = null;
+  }
+});
 
 test("DELETE audits inside its transaction through the shared row builder: a control character in the user agent is stripped", async () => {
   issueRow = { id: "issue-del", status: "OPEN", reportedBy: "reporter-d", title: "Heat", mediaType: "MOVIE", tmdbId: 949, posterPath: null };

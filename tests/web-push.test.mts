@@ -259,6 +259,16 @@ test("sendPushNotification: ttl and urgency options override the defaults", asyn
   assert.equal(calls[0].headers.get("urgency"), "high");
 });
 
+test("sendPushNotification: a negative, fractional or NaN ttl reaches the push service as a whole non-negative number", async () => {
+  const ua = makeUa();
+  const sent: string[] = [];
+  for (const ttl of [-5, 12.9, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const { calls } = await withFetchStub(ok201, () => sendPushNotification(ua.subscription, "x", { ...SEND_OPTS, ttl }));
+    sent.push(calls[0].headers.get("ttl")!);
+  }
+  assert.deepEqual(sent, ["0", "12", "86400", "86400"]);
+});
+
 // ---------- VAPID JWT (RFC 8292) ----------
 
 test("VAPID JWT: ES256-signed, audience = endpoint origin, sub = contact, 12h expiry", async () => {
@@ -399,7 +409,7 @@ test("sendPushNotification: malformed subscription keys are rejected before any 
     // unparseable endpoint URL
     await assert.rejects(
       sendPushNotification({ ...ua.subscription, endpoint: "not-a-url" }, "x", SEND_OPTS),
-      TypeError,
+      (err: unknown) => err instanceof WebPushError && err.statusCode === 0,
     );
   });
   assert.equal(calls.length, 0, "no request may leave the process for invalid subscriptions");
@@ -461,6 +471,23 @@ test("VAPID JWT: sends to one push service reuse one token; another origin gets 
   assert.equal(authJwt(calls[0]), authJwt(calls[1]));
   assert.notEqual(authJwt(calls[0]), authJwt(calls[2]));
   assert.equal(parseJwt(authJwt(calls[2])).claims.aud, "https://203.0.113.8");
+});
+
+test("VAPID JWT: a full cache evicts one entry at a time, so recent audiences keep their token", async () => {
+  const origin = (i: number) => `https://${i < 254 ? "203.0.113" : i < 508 ? "198.51.100" : "192.0.2"}.${(i % 254) + 1}`;
+  const tokens: string[] = [];
+  const total = 400;
+  for (let i = 0; i < total; i++) {
+    const ua = makeUa(`${origin(i)}/wp/x`);
+    const { calls } = await withFetchStub(ok201, () => sendPushNotification(ua.subscription, "x", SEND_OPTS));
+    tokens.push(authJwt(calls[0]));
+  }
+  // The 200 newest audiences are all still cached: a wholesale clear at the cap would have dropped most of them.
+  for (let i = total - 200; i < total; i++) {
+    const ua = makeUa(`${origin(i)}/wp/y`);
+    const { calls } = await withFetchStub(ok201, () => sendPushNotification(ua.subscription, "x", SEND_OPTS));
+    assert.equal(authJwt(calls[0]), tokens[i], `audience ${i} was evicted`);
+  }
 });
 
 test("payload encryption: a payload that would not fit one 4096-byte record is refused before any network call", async () => {

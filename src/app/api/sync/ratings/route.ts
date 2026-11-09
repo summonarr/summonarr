@@ -12,7 +12,25 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { warnOnChange, forgetWarnOnChange } from "@/lib/log-dedup";
 
+// Items warmed at once: the cap on upstream work per step (guardrail 31a).
 const BATCH = 5;
+
+// A cached MDBList row counts as fresh while more than this share of its
+// original lifetime is left (the same rule the library prewarms use).
+const MDBLIST_FRESH_REMAINING_TTL_RATIO = 0.25;
+
+function isFreshMdblistRow(row: { cachedAt: Date; expiresAt: Date }, now: number): boolean {
+  const originalTtlMs = row.expiresAt.getTime() - row.cachedAt.getTime();
+  return row.expiresAt.getTime() - now > originalTtlMs * MDBLIST_FRESH_REMAINING_TTL_RATIO;
+}
+
+// A refresh that failed leaves the row stale, which the run counts as skipped —
+// the cause (a bad key, a provider outage) is logged once per distinct message
+// (guardrail 7b), not once per title.
+function noteRefreshFailure(provider: "mdblist" | "omdb", err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err);
+  warnOnChange(`sync/ratings:${provider}-refresh`, message, `[sync/ratings] ${provider} refresh failed: ${message}`);
+}
 
 // A cron: MDBList stops it at the reserve the plan setting keeps for pages.
 const BACKGROUND = { background: true } as const;
@@ -22,7 +40,9 @@ const BACKGROUND = { background: true } as const;
 const mdblistKeyFor = (m: TmdbMedia) => mdblistCacheKey(m.mediaType, m.id);
 const omdbKeyFor = (m: TmdbMedia) => omdbCacheKey(m.mediaType, m.id);
 
-type CachedRatingsRow = { value: MdblistRatings | OmdbRatings | { _notFound: true }; isStale: boolean };
+type NotFoundRow = { _notFound: true };
+type CachedMdblistRow = { value: MdblistRatings | NotFoundRow; isStale: boolean };
+type CachedOmdbRow = { value: OmdbRatings | NotFoundRow; isStale: boolean };
 
 // One item of the per-item pass. The unified helper applies the same MDBList-first /
 // OMDB-on-any-miss policy as the detail pages and the batch route, so this cron warms
@@ -32,30 +52,34 @@ type CachedRatingsRow = { value: MdblistRatings | OmdbRatings | { _notFound: tru
 // OMDB-only instance a pool whose rows expire on one cadence is ~1.7k TMDB
 // external_ids lookups at once — the 429 wall. So stale rows are refreshed FIRST,
 // through the awaited twins, and only then does the policy helper read them warm.
-async function warmItem(item: TmdbMedia, rows: Map<string, CachedRatingsRow>): Promise<UnifiedRatingsResult> {
+async function warmItem(
+  item: TmdbMedia,
+  mdblistRows: ReadonlyMap<string, CachedMdblistRow>,
+  omdbRows: ReadonlyMap<string, CachedOmdbRow>,
+): Promise<UnifiedRatingsResult> {
   const mdbKey = mdblistKeyFor(item);
   const omdbKey = omdbKeyFor(item);
-  const mdb = rows.get(mdbKey);
-  const omdb = rows.get(omdbKey);
+  const mdb = mdblistRows.get(mdbKey);
+  const omdb = omdbRows.get(omdbKey);
   const revalidated: string[] = [];
   if (mdb?.isStale) {
-    await revalidateMdblistForTmdb(item.id, item.mediaType, item.releaseDate, BACKGROUND).catch(() => {});
+    await revalidateMdblistForTmdb(item.id, item.mediaType, item.releaseDate, BACKGROUND).catch((err) => noteRefreshFailure("mdblist", err));
     revalidated.push(mdbKey);
   }
   // The OMDB row is refreshed only when MDBList holds no USABLE value — the gate
   // attachRatingsUnified's stale-OMDB pass applies. Behind a scored MDBList row the
   // helper reads OMDB cache-only (an overlay, never a refresh), so refreshing it here
   // would be OMDB spend no read path ever makes.
-  const mdbUsable = mdb !== undefined && !("_notFound" in mdb.value) && hasAnyMdblistRating(mdb.value as MdblistRatings);
+  const mdbUsable = mdb !== undefined && !("_notFound" in mdb.value) && hasAnyMdblistRating(mdb.value);
   if (omdb?.isStale && !mdbUsable) {
-    await revalidateOmdbForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {});
+    await revalidateOmdbForTmdb(item.id, item.mediaType, item.releaseDate).catch((err) => noteRefreshFailure("omdb", err));
     revalidated.push(omdbKey);
   }
   if (revalidated.length > 0) {
     // A refresh that failed (or that another caller already owns) leaves the row
     // stale, and the getters below would answer it by detaching a RETRY — the very
     // fan-out this bounds. Count it skipped; the next run tries again.
-    const after = await getCacheStaleMany<CachedRatingsRow["value"]>(revalidated);
+    const after = await getCacheStaleMany<unknown>(revalidated);
     if (revalidated.some((k) => after.get(k)?.isStale)) return { found: false, keyConfigured: true, transient: true };
   }
   return fetchUnifiedRatings(item.id, item.mediaType, item.releaseDate, undefined, BACKGROUND);
@@ -80,10 +104,13 @@ async function warmBatch(
     const batch = items.slice(i, i + BATCH);
     // One findMany for the batch's rows, so warmItem's stale decision costs no
     // point reads; the awaited twins bound the upstream work to BATCH (31a).
-    const rows = await getCacheStaleMany<CachedRatingsRow["value"]>(batch.flatMap((m) => [mdblistKeyFor(m), omdbKeyFor(m)]));
+    const [mdblistRows, omdbRows] = await Promise.all([
+      getCacheStaleMany<CachedMdblistRow["value"]>(batch.map(mdblistKeyFor)),
+      getCacheStaleMany<CachedOmdbRow["value"]>(batch.map(omdbKeyFor)),
+    ]);
     const results = await Promise.all(
       batch.map((item) =>
-        warmItem(item, rows)
+        warmItem(item, mdblistRows, omdbRows)
           .catch((): UnifiedRatingsResult => ({ found: false, keyConfigured: true })),
       ),
     );
@@ -157,8 +184,8 @@ export async function POST(request: NextRequest) {
 
       // MDBList pre-warm: ask MDBList for up to 200 titles per POST instead of one
       // GET per title in the per-item pass below. A cold run used to spend ~1,500
-      // GETs where ~8 POSTs do the same job. A row counts as fresh while more than
-      // 25% of its cache lifetime is left (the same rule the library prewarms use).
+      // GETs where ~8 POSTs do the same job. A row counts as fresh per
+      // isFreshMdblistRow.
       // Rows fetched here are fresh, so the per-item pass neither re-fetches them
       // nor starts background "stale" refreshes for them (those ignored the BATCH
       // pacing and burned the most quota). OMDB has no batch endpoint, so it stays
@@ -170,11 +197,8 @@ export async function POST(request: NextRequest) {
           where: { key: { in: all.map(mdblistKeyFor) } },
           select: { key: true, cachedAt: true, expiresAt: true },
         });
-        const freshMdblist = new Set<string>();
-        for (const r of rows) {
-          const originalTtlMs = r.expiresAt.getTime() - r.cachedAt.getTime();
-          if (r.expiresAt.getTime() - Date.now() > originalTtlMs * 0.25) freshMdblist.add(r.key);
-        }
+        const now = Date.now();
+        const freshMdblist = new Set(rows.filter((r) => isFreshMdblistRow(r, now)).map((r) => r.key));
         for (const type of ["movie", "tv"] as const) {
           if (signal.aborted) break;
           const stale = all
@@ -182,7 +206,7 @@ export async function POST(request: NextRequest) {
             .map((m) => ({ id: m.id, releaseDate: m.releaseDate }));
           // Sequential per type on purpose (pacing); the helper pages at 200,
           // checks the quota lockout itself, and never throws past a page.
-          await fetchMdblistBatch(stale, type, BACKGROUND).catch(() => {});
+          await fetchMdblistBatch(stale, type, BACKGROUND).catch((err) => noteRefreshFailure("mdblist", err));
         }
       }
 

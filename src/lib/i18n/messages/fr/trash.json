@@ -205,6 +205,7 @@
   "trash.spec.hiddenSelected": "{count} masqués par le filtre",
   "trash.applyLog.noReason": "aucun détail d'erreur renvoyé",
   "trash.token.remove": "Supprimer",
+  "trash.token.confirmRemove": "Supprimer le jeton GitHub enregistré ?",
   "trash.token.removed": "Supprimé",
   "trash.spec.selectAria": "Sélectionner {name}",
   "trash.spec.selectAllAria": "Sélectionner toutes les spécifications visibles",

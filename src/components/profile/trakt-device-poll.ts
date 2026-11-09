@@ -34,6 +34,8 @@ function positive(value: unknown, fallback: number): number {
 export function readDeviceCode(data: unknown): DeviceCode | null {
   const d = record(data);
   if (typeof d.userCode !== "string" || typeof d.verificationUrl !== "string") return null;
+  // The server already pins this to trakt.tv; the page still never links a non-https address.
+  if (!d.verificationUrl.startsWith("https://")) return null;
   return {
     userCode: d.userCode,
     verificationUrl: d.verificationUrl,

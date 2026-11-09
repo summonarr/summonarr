@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useDelayed } from "@/hooks/use-delayed";
 
 type ClipboardEnv = {
@@ -59,10 +59,19 @@ export function useCopyFeedback(ms = 2000): { copied: boolean; failed: boolean; 
   const [copied, setCopied] = useState(false);
   const [failed, setFailed] = useState(false);
   const later = useDelayed();
+  // Only the latest copy shows feedback, and none after unmount.
+  const latest = useRef(0);
+  useEffect(() => {
+    return () => {
+      latest.current = -1;
+    };
+  }, []);
   const copy = useCallback(
     async (text: string): Promise<boolean> => {
       later.cancel();
+      const call = latest.current >= 0 ? ++latest.current : -1;
       const ok = await writeClipboardText(text);
+      if (call < 0 || call !== latest.current) return ok;
       setCopied(ok);
       setFailed(!ok);
       later(() => {

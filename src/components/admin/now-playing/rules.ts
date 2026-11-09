@@ -88,7 +88,7 @@ export function mergeLiveSessions<S extends LiveSessionIdentity>(
   const out: S[] = [];
   for (const s of incoming) {
     if (filter.source && s.source !== filter.source) continue;
-    if (filter.mediaType && (s.mediaType ?? "").toUpperCase() !== filter.mediaType) continue;
+    if (filter.mediaType && (s.mediaType ?? "").toUpperCase() !== filter.mediaType.toUpperCase()) continue;
     const before = prevById.get(s.id);
     const keepIdentity = s.tmdbId == null && before?.tmdbId != null;
     out.push({

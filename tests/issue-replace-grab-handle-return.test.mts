@@ -1,4 +1,4 @@
-// Audit fixes (cross-unit, C010): the issue Replace grab
+// Audit fixes (cross-unit): the issue Replace grab
 // (POST /api/issues/[id]/releases) hands its claimed release handle back when
 // the grab failed BEFORE POST /api/v3/release was sent — the title lookup that
 // precedes it (a network error, a gateway 503). Nothing reached the arr, so a
@@ -190,7 +190,7 @@ beforeEach(() => {
 
 const grabPosts = () => calls.filter((c) => c.method === "POST" && c.path === "/api/v3/release");
 
-test("C010: issue Replace (movie) — the title lookup before the grab fails (network, then a gateway 503): the handle is handed back and the retry grabs", async () => {
+test("issue Replace (movie) — the title lookup before the grab fails (network, then a gateway 503): the handle is handed back and the retry grabs", async () => {
   issueRow = movieIssue();
   let lookup: "ok" | "network" | "503" = "ok";
   responder = (c) => {
@@ -219,7 +219,7 @@ test("C010: issue Replace (movie) — the title lookup before the grab fails (ne
   assert.equal(grabPosts().length, 1);
 });
 
-test("C010: issue Replace (episode) — the series lookup before the grab fails: the handle is handed back and the retry grabs", async () => {
+test("issue Replace (episode) — the series lookup before the grab fails: the handle is handed back and the retry grabs", async () => {
   issueRow = episodeIssue();
   let lookupFails = false;
   responder = (c) => {
@@ -244,7 +244,7 @@ test("C010: issue Replace (episode) — the series lookup before the grab fails:
   assert.equal(grabPosts().length, 1);
 });
 
-test("C010: issue Replace — a failure DURING the grab (no answer) still spends the handle", async () => {
+test("issue Replace — a failure DURING the grab (no answer) still spends the handle", async () => {
   issueRow = movieIssue();
   responder = (c) => {
     if (c.method === "GET" && c.path === "/api/v3/movie") return json([{ id: 44, tmdbId: 603 }]);
@@ -260,7 +260,7 @@ test("C010: issue Replace — a failure DURING the grab (no answer) still spends
   assert.equal(grabPosts().length, 1);
 });
 
-test("C010: issue Replace (episode) — a failure DURING the grab still spends the handle (the progress reaches the series grab too)", async () => {
+test("issue Replace (episode) — a failure DURING the grab still spends the handle (the progress reaches the series grab too)", async () => {
   issueRow = episodeIssue();
   responder = (c) => {
     if (c.method === "GET" && c.path === "/api/v3/series") return json([{ id: 21, tvdbId: 121361 }]);

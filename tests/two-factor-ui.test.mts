@@ -148,7 +148,7 @@ test("Delete account and Change password build their second factor through one s
 
 test("a typed step-up code: six digits (spaces aside) is an authenticator code, anything else a recovery code", async () => {
   const { codeProof } = await import("../src/lib/client/step-up.ts");
-  assert.deepEqual(codeProof("123 456"), { method: "totp", code: "123 456" });
+  assert.deepEqual(codeProof("123 456"), { method: "totp", code: "123456" });
   assert.deepEqual(codeProof("abcd-efgh"), { method: "recovery", code: "abcd-efgh" });
   assert.deepEqual(codeProof("1234567"), { method: "recovery", code: "1234567" });
 });

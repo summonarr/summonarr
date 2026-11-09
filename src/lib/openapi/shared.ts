@@ -5,6 +5,12 @@
 import { ARR_ERROR_KIND_KEYS } from "@/lib/arr-error-kind";
 import type { OpenApiSchema, OpenApiResponse, OpenApiResponses, OpenApiParameter, OpenApiSecurity } from "./types";
 
+// The 403 of an operation behind a role or permission wrapper (withAdmin,
+// withPermission, withIssueAdmin), so every one words it the same way.
+export function forbiddenAnswer(who: string): OpenApiResponse {
+  return { description: `Forbidden — ${who} required` };
+}
+
 // `cached=1` on the admin Radarr/Sonarr READS that keep their last answer
 // (`snapshotted`, src/lib/arr-snapshot.ts): a page opened again paints that
 // answer at once, then reloads live. Display only — every action re-checks live

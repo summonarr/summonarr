@@ -139,7 +139,9 @@ export async function resolveMediaServerUser(params: {
   serverMachineId?: string | null;
   isServerAdmin?: boolean;
 }): Promise<string> {
-  const { source, serverInstance, sourceUserId, username, thumbUrl, serverMachineId, isServerAdmin } = params;
+  const { serverInstance, sourceUserId, username, thumbUrl, serverMachineId, isServerAdmin } = params;
+  // One casing for the lookup, the lock key and the unique key, so "Plex" and "plex" are one row.
+  const source = params.source.toLowerCase();
   // Normalize once and use the same value for both lookup AND the upserted column,
   // so existing User rows (lowercase-stored) match Plex/Jellyfin server-reported
   // emails that vary in case, and so we don't write mixed-case copies into
@@ -189,9 +191,9 @@ export async function resolveMediaServerUser(params: {
     // unique and written only by the matching provider's sign-in, so unlike an
     // email match there is no cross-provider collision to defend against.
     const bySub =
-      source.toLowerCase() === "plex"
+      source === "plex"
         ? await tx.user.findUnique({ where: { plexUserId: sourceUserId }, select: { id: true } })
-        : source.toLowerCase() === "jellyfin"
+        : source === "jellyfin"
           ? await tx.user.findUnique({ where: { jellyfinUserId: sourceUserId }, select: { id: true } })
           : null;
     if (bySub) userId = bySub.id;
@@ -201,7 +203,7 @@ export async function resolveMediaServerUser(params: {
     // address, or a Plex row awaiting the plexUserId backfill).
     if (!userId && email) {
       const user = await tx.user.findUnique({ where: { email }, select: { id: true, mediaServer: true } });
-      if (user && (!user.mediaServer || user.mediaServer.toLowerCase() === source.toLowerCase())) {
+      if (user && (!user.mediaServer || user.mediaServer.toLowerCase() === source)) {
         userId = user.id;
       }
     }

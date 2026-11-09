@@ -62,6 +62,12 @@ export default async function VotesPage({
 
   const isAdmin = hasPermission(session.user.permissions, Permission.ADMIN);
   const hasFilters = mine || sort !== "votes" || q !== "";
+  // The first page under the active filters (only the page param is dropped).
+  const firstPageParams = new URLSearchParams();
+  if (mine) firstPageParams.set("mine", "1");
+  if (sort !== "votes") firstPageParams.set("sort", sort);
+  if (q) firstPageParams.set("q", q);
+  const firstPageHref = firstPageParams.size > 0 ? `/votes?${firstPageParams.toString()}` : "/votes";
 
   return (
     <div className="ds-page-enter">
@@ -109,7 +115,7 @@ export default async function VotesPage({
           icon={Trash2}
           title={t("personal.common.nothingOnPage")}
           description={t("personal.votes.emptyPageDescription")}
-          cta={{ href: "/votes", label: t("personal.common.backToFirst") }}
+          cta={{ href: firstPageHref, label: t("personal.common.backToFirst") }}
         />
       ) : items.length === 0 ? (
         <EmptyState

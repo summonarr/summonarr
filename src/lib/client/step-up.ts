@@ -41,7 +41,7 @@ export type SecondFactorOutcome = { proof: SecondFactorProof } | { error: string
 /** A typed code as its proof: six digits (spaces aside) is an authenticator code, anything else a recovery code. */
 export function codeProof(code: string): SecondFactorProof {
   const digits = code.replace(/\s/g, "");
-  return { method: /^\d{6}$/.test(digits) ? "totp" : "recovery", code };
+  return /^\d{6}$/.test(digits) ? { method: "totp", code: digits } : { method: "recovery", code };
 }
 
 // The challenge route's options, checked before they reach the browser's

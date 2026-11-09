@@ -1,11 +1,11 @@
 // Audit fixes (unit "release") for the release GRAB, POST /api/v3/release:
 //
-//   C111 — the grab POST carries RELEASE_GRAB_TIMEOUT_MS (120 s), not the 30 s
+// the grab POST carries RELEASE_GRAB_TIMEOUT_MS (120 s), not the 30 s
 //          default: Radarr/Sonarr answer only after fetching the .torrent/.nzb
 //          from the indexer (Prowlarr, FlareSolverr) and handing it to the
 //          download client, so a slow indexer read as "grab failed" — handle
 //          spent, nothing audited — while the arr finished the grab.
-//   C011 — only a refusal of the POST ITSELF is read as the arr's grab answer
+// only a refusal of the POST ITSELF is read as the arr's grab answer
 //          (404 = search cache expired → "search again", 409 = refused): a 404
 //          from a lookup made before it (`/api/v3/movie?tmdbId=`, the series or
 //          episode list) is an ordinary failure, never "search again".
@@ -97,9 +97,9 @@ beforeEach(() => {
 
 const grabPost = () => calls.find((c) => c.method === "POST" && c.url.pathname === "/api/v3/release");
 
-// ── C111: the grab's own timeout ─────────────────────────────────────────────
+// ── the grab's own timeout ─────────────────────────────────────────────
 
-test("C111: every grab POST carries RELEASE_GRAB_TIMEOUT_MS (120 s) — the request/issue grabs and the title manager's", async () => {
+test("every grab POST carries RELEASE_GRAB_TIMEOUT_MS (120 s) — the request/issue grabs and the title manager's", async () => {
   assert.equal(arr.RELEASE_GRAB_TIMEOUT_MS, 120_000);
   const grabs: Array<[string, () => Promise<void>]> = [
     ["grabMovieRelease", () => arr.grabMovieRelease(603, "guid-m", 3, "")],
@@ -118,9 +118,9 @@ test("C111: every grab POST carries RELEASE_GRAB_TIMEOUT_MS (120 s) — the requ
   }
 });
 
-// ── C011: only the POST's own refusal is a grab refusal ──────────────────────
+// ── only the POST's own refusal is a grab refusal ──────────────────────
 
-test("C011: a 404 from the GRAB POST is ArrReleaseGrabError → 'search again'; a 409 is the arr's refusal", async () => {
+test("a 404 from the GRAB POST is ArrReleaseGrabError → 'search again'; a 409 is the arr's refusal", async () => {
   grabStatus = 404;
   const expired = await arr.grabMovieRelease(603, "g", 3, "").then(() => null, (e: unknown) => e);
   assert.ok(expired instanceof arr.ArrReleaseGrabError);
@@ -133,7 +133,7 @@ test("C011: a 404 from the GRAB POST is ArrReleaseGrabError → 'search again'; 
   assert.equal(grabRefusal(refused)?.kind, "refused");
 });
 
-test("C011: a 404 from a LOOKUP before the grab is NOT 'search cache expired' — it is an ordinary failure", async () => {
+test("a 404 from a LOOKUP before the grab is NOT 'search cache expired' — it is an ordinary failure", async () => {
   lookupStatus = 404;
   for (const run of [
     () => arr.grabMovieRelease(603, "g", 3, ""),
@@ -148,13 +148,13 @@ test("C011: a 404 from a LOOKUP before the grab is NOT 'search cache expired' �
   }
 });
 
-test("C011: a grab that times out or loses its connection is not a refusal either", async () => {
+test("a grab that times out or loses its connection is not a refusal either", async () => {
   const timeout = new (await import("../src/lib/safe-fetch.ts")).SafeFetchError("timeout", RADARR, "t");
   assert.equal(grabRefusal(timeout), null);
   assert.equal(grabDefinitelyRefused(timeout), false);
 });
 
-test("C111/C011: no source POSTs /api/v3/release except postReleaseGrab", () => {
+test("no source POSTs /api/v3/release except postReleaseGrab", () => {
   // Every arrFetch* call is read as a whole (its balanced argument list,
   // comments stripped), whatever its config argument is called and however
   // its options are laid out; and the bare grab path — "/api/v3/release" with

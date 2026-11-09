@@ -132,7 +132,7 @@ export const listsPaths: OpenApiPaths = {
         "400": { description: "Malformed JSON, or an invalid tmdbId / mediaType / reason" },
         "403": { description: "Deletion voting disabled, an invalid _token, or the caller has previously requested this title" },
         "409": { description: "Already voted — unique violation on (tmdbId, mediaType, userId)" },
-        "413": { description: "Request body over the 16 KB cap" },
+        "413": tooLargeAnswer(16 * 1024),
         "422": { description: "TMDB could not verify the title, or it is in no library visible to this voter" },
         "429": { description: "Rate limited (rateLimitRequests setting, default 20/min per user)", headers: RETRY_AFTER_HEADER },
         "503": { description: "Maintenance mode (non-ADMIN callers)" },
@@ -233,7 +233,7 @@ export const listsPaths: OpenApiPaths = {
         },
         "400": { description: "tmdbId or mediaType missing or invalid" },
         "409": { description: "Already on watchlist" },
-        "413": { description: "Request body over the 16 KB cap" },
+        "413": tooLargeAnswer(16 * 1024),
         "422": { description: "Could not verify media with TMDB" },
         "429": { description: "Rate limited" },
       },
@@ -316,9 +316,10 @@ export const listsPaths: OpenApiPaths = {
     post: {
       tags: ["Notifications"],
       summary: "Mark notifications read (specific ids, or all unread when omitted)",
+      description: "Non-string entries in `ids` are dropped and only the first 500 ids are used; the rest are ignored.",
       requestBody: {
         required: false,
-        content: { "application/json": { schema: { type: "object", properties: { ids: { type: "array", items: { type: "string" } } } } } },
+        content: { "application/json": { schema: { type: "object", properties: { ids: { type: "array", items: { type: "string" }, description: "Only the first 500 are used" } } } } },
       },
       responses: {
         "200": { description: "{ ok, unreadCount }", content: { "application/json": { schema: NOTIFICATION_UNREAD_ACK } } },

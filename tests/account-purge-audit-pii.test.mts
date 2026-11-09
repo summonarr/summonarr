@@ -1,5 +1,5 @@
 // An account purge must leave no audit row that still names the person
-// (findings F001/F006/F014 of the 2026-10-20 audit, plus the paging bug F015,
+// (findings of the 2026-10-20 audit, plus the paging bug,
 // pinned in tests/audit-scrub.test.mts; and the review's R10–R12).
 //
 // The purge scrubs `targetUser`/`targetEmail` from rows ABOUT the account, found

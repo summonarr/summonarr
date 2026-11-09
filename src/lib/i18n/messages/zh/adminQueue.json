@@ -394,6 +394,7 @@
   "adminQueue.releases.score": "得分 {score}",
   "adminQueue.releases.noSeasons": "该剧集在 Sonarr 中还没有任何季。",
   "adminQueue.releases.none": "未找到发布。",
+  "adminQueue.releases.notDownloadable": "无法下载此发布。",
   "adminQueue.releases.season": "季",
   "adminQueue.releases.seasonComplete": "第 {number} 季",
   "adminQueue.releases.seasonMissing_one": "第 {number} 季 · 缺 {count} 集",

@@ -11,18 +11,23 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const src = readFileSync(new URL("../src/components/media/hide-available-toggle.tsx", import.meta.url), "utf8");
+const hook = readFileSync(new URL("../src/components/media/use-pending-search-param.ts", import.meta.url), "utf8");
+const pill = readFileSync(new URL("../src/components/media/pill-filter.tsx", import.meta.url), "utf8");
 
 test("the toggle's next state is derived from what is shown, not the committed prop", () => {
-  assert.match(src, /const next = !shown;/);
-  assert.match(src, /if \(next\) \{\s*params\.set\("hideAvailable", "1"\);/);
+  assert.match(src, /const pressed = shown === "1";/);
+  assert.match(src, /set\(pressed \? undefined : "1"\);/);
   assert.doesNotMatch(src, /if \(active\)/, "branching on the stale committed prop loses a second click");
 });
 
-test("the shown state tracks the pending target, like PillFilter", () => {
-  assert.match(src, /useState<boolean \| null>\(null\)/);
-  assert.match(src, /const shown = isPending && pendingValue !== null \? pendingValue : active;/);
-  assert.match(src, /setPendingValue\(next\);\s*startTransition\(/);
+test("the shown state tracks the pending target in one hook shared with PillFilter", () => {
+  assert.match(hook, /const shown = isPending && pendingValue \? pendingValue\.v : active;/);
+  assert.match(hook, /setPendingValue\(\{ v: value \}\);\s*startTransition\(/);
+  for (const [name, body] of [["toggle", src], ["pill", pill]] as const) {
+    assert.match(body, /usePendingSearchParam/, name);
+    assert.doesNotMatch(body, /startTransition|router\.push/, `${name}: a private copy of the navigation`);
+  }
   // The page reset and the busy marker stay.
-  assert.match(src, /params\.delete\("page"\)/);
+  assert.match(hook, /params\.delete\("page"\)/);
   assert.match(src, /aria-busy=\{isPending \|\| undefined\}/);
 });

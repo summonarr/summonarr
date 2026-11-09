@@ -643,6 +643,7 @@ class PlexEventStreamManager {
     this.currentToken = token;
     this.running = true;
     this.backoffMs = INITIAL_BACKOFF_MS;
+    const generation = this.loopGeneration;
     void this.runLoop().catch((err) => {
       console.warn(`[plex-events] ${this.label()} loop crashed:`, err);
       // Clear the state doReconcile checks so the next 5s reconcile restarts the
@@ -650,7 +651,7 @@ class PlexEventStreamManager {
       // early-returns, leaving SSE dead until process restart. Guard on the
       // url/token this loop was started with: if the config changed, a newer
       // loop owns the flag and must not be killed by a stale rejection.
-      if (this.currentUrl === url && this.currentToken === token) {
+      if (this.loopGeneration === generation && this.currentUrl === url && this.currentToken === token) {
         this.running = false;
       }
     });
@@ -665,8 +666,8 @@ class PlexEventStreamManager {
     // still fire a full sync after the stream is torn down.
     this.resync.cancel();
     this.snapshots.cancel();
-    // A restarted stream starts fresh chains; ops already running finish on their own.
-    this.sessionQueues.clear();
+    // The session queues are kept: a chain removes itself once settled, and a
+    // restarted stream's ops for the same session must queue behind the old ones.
   }
 
   // Stop for good: called when this manager leaves the map (the map reconcile

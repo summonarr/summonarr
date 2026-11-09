@@ -12,6 +12,7 @@ import { readFileSync } from "node:fs";
 import {
   initialMfaMethod,
   parseMfaChallenge,
+  QC_DEADLINE_MS,
   QC_DISABLED_CODE,
   QC_FAILURE_BACKOFF_MS,
   QC_RATE_LIMIT_BACKOFF_MS,
@@ -108,4 +109,16 @@ test("Plex PIN: only an integer pin and a non-empty code pass", () => {
   assert.equal(readPlexPin({ pinId: 123 }), null);
   assert.equal(readPlexPin({ pinId: 123, code: "" }), null);
   assert.equal(readPlexPin(null), null);
+});
+
+test("a challenge naming no method this client knows is not a challenge; malformed passkey options are dropped", () => {
+  assert.equal(parseMfaChallenge({ mfaRequired: true, mfaToken: "tok", methods: ["sms"] }), null);
+  const c = parseMfaChallenge({ mfaRequired: true, mfaToken: "tok", methods: ["webauthn"], webauthn: { challenge: 5 } });
+  assert.deepEqual(c, { mfaToken: "tok", methods: ["webauthn"], webauthn: undefined });
+  const opts = { challenge: "c", rpId: "x.test", allowCredentials: [] };
+  assert.deepEqual(parseMfaChallenge({ mfaRequired: true, mfaToken: "tok", methods: ["webauthn"], webauthn: opts })?.webauthn, opts);
+});
+
+test("a huge Retry-After on a QuickConnect poll is capped at the run's budget", () => {
+  assert.deepEqual(readQuickConnectPoll(429, null, "86400"), { kind: "rateLimited", waitMs: QC_DEADLINE_MS });
 });

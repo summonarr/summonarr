@@ -29,8 +29,8 @@ import { STATS_TIME_ZONE_KEY, normalizeTimeZone } from "./stats-time-zone";
 export type IntMessage = "intRange" | "intRange10000" | "intRangeMillion" | "positiveInt" | "daysRange";
 
 export type SettingType =
-  /** Free text, held to the length cap only. */
-  | { readonly kind: "text" }
+  /** Free text, held to the length cap only (`noControlChars` also refuses control characters). */
+  | { readonly kind: "text"; readonly noControlChars?: true }
   /** A credential whose name ends in ApiKey/Secret/Token: no control characters. */
   | { readonly kind: "secret" }
   /** A full upstream URL (shared rules with /api/admin/media-instances). */
@@ -106,7 +106,9 @@ const LIBRARY_IDS = { kind: "libraryIds" } as const;
 const int = (min: number, max: number, message: IntMessage = "intRange") => ({ kind: "int", min, max, message }) as const;
 // Radarr/Sonarr profile ids. arr.ts reads anything else as "unset", so a typo
 // silently dropped the profile from every add.
-const PROFILE_ID = int(1, Infinity, "positiveInt");
+// Capped at int32 max: the arrs bind it to a 32-bit integer, so a larger digit
+// string would be stored and only fail upstream.
+const PROFILE_ID = int(1, 2_147_483_647, "positiveInt");
 // A closed enum on Radarr's movie resource: anything else 400s every add.
 const MINIMUM_AVAILABILITY = { kind: "enum", values: ["announced", "inCinemas", "released"], message: "minimumAvailability" } as const;
 
@@ -155,9 +157,14 @@ const DISCORD_REGISTRATION = ["discordPublicKey", "discordCommands"] as const;
 //   the relay URL (back to the publisher default), the recommended build
 //   (retracts the update prompt), audit retention / watch grades / the stats
 //   zone (back to their defaults).
-// NOT clearable on purpose: masked secrets (smtpPassword, discordBotToken, the
-// arr API keys) — a blank submit can't be told from an echo and must never wipe
-// the secret; smtpPort, which email.ts reads "" as an invalid port.
+// - the Discord bot token: its form starts the field EMPTY (blank = keep, never
+//   sent) and offers an explicit Remove; the bare mask is dropped before the
+//   write filter, so only that Remove ever sends a blank. Clearing it stops
+//   command registration and role sync (both skip without a token).
+// NOT clearable on purpose: masked secrets still edited through a mask echo
+// (smtpPassword, the arr API keys) — a blank submit can't be told from an echo
+// and must never wipe the secret; smtpPort, which email.ts reads "" as an
+// invalid port.
 const BASE_SETTINGS = {
   siteTitle: { type: TEXT, clearable: true, sanitize: true },
   siteUrl: { type: SERVER_URL, clearable: true },
@@ -241,13 +248,15 @@ const BASE_SETTINGS = {
   // email.ts throws "Invalid SMTP port" for anything else, on every send.
   smtpPort: { type: int(1, 65_535) },
   smtpUser: { type: TEXT, clearable: true },
-  smtpPassword: { type: TEXT, sensitive: true },
+  // Not "secret" kind (its name isn't secret-shaped), but a pasted newline or tab
+  // would break the SMTP AUTH exchange, so control characters are refused too.
+  smtpPassword: { type: { kind: "text", noControlChars: true }, sensitive: true },
   smtpFrom: { type: TEXT, clearable: true },
   // Readers fall back quietly on anything else (email.ts reads it as SMTP).
   emailBackend: { type: { kind: "enum", values: ["smtp", "resend"], message: "oneOf" } },
   resendApiKey: { type: SECRET, sensitive: true },
   resendFrom: { type: TEXT, clearable: true },
-  discordBotToken: { type: SECRET, sensitive: true, effects: DISCORD_REGISTRATION },
+  discordBotToken: { type: SECRET, sensitive: true, clearable: true, effects: DISCORD_REGISTRATION },
   // Persisted validated so command registration, notifications and the
   // link/merge flows never receive a malformed id.
   discordClientId: { type: SNOWFLAKE, clearable: true, effects: DISCORD_REGISTRATION },
@@ -525,7 +534,7 @@ async function checkType(key: SettingKey, value: string, type: SettingType, deps
   const { t } = deps;
   switch (type.kind) {
     case "text":
-      return accept(value);
+      return type.noControlChars && CONTROL_CHAR_RE.test(value) ? reject(t("apiAdmin.settings.controlChars", { key })) : accept(value);
     case "secret":
       return CONTROL_CHAR_RE.test(value) ? reject(t("apiAdmin.settings.controlChars", { key })) : accept(value);
     case "url": {

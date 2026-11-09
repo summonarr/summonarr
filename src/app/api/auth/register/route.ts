@@ -14,7 +14,7 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import { logAudit, auditContext } from "@/lib/audit";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
-import { lockSetupInTx } from "@/lib/setup-lock";
+import { lockSetupInTx, registrationClosed } from "@/lib/setup-lock";
 import { configuredTrustedOrigins } from "@/lib/trusted-origin";
 
 // A fixed, DB-free per-IP bound taken before the first Setting read: this is an
@@ -148,14 +148,6 @@ function validateRegistration(
   if (password.length < MIN_PASSWORD_LENGTH) return refuse("apiAuth.register.passwordTooShort");
   if (password.length > MAX_PASSWORD_LENGTH) return refuse("apiAuth.register.passwordTooLong", { max: MAX_PASSWORD_LENGTH });
   return { email: normalizedEmail, password, name: sanitizeOptional(typeof name === "string" ? name : null) };
-}
-
-type SetupReader = Pick<typeof prisma, "setting" | "user">;
-
-// Onboarding is one-shot: a completed setup OR any existing user closes it.
-async function registrationClosed(db: SetupReader): Promise<boolean> {
-  if (await db.setting.findUnique({ where: { key: "setup_completed_at" } })) return true;
-  return (await db.user.count()) > 0;
 }
 
 // The first ADMIN, or null when registration closed meanwhile. Advisory lock

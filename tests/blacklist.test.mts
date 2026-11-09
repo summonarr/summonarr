@@ -83,9 +83,7 @@ beforeEach(() => {
   pendingReads.length = 0;
 });
 
-// ---------------------------------------------------------------------------
 // blacklistKey — pure key normalization
-// ---------------------------------------------------------------------------
 
 test("blacklistKey: TMDB-layer casing normalizes to the Prisma enum keyspace (exact pins)", () => {
   assert.equal(blacklistKey(550, "movie"), "550:MOVIE");
@@ -114,9 +112,7 @@ test("blacklistKey PINS CURRENT BEHAVIOR: only exact 'movie'/'tv' are mapped —
   assert.equal(blacklistKey(1, ""), "1:");
 });
 
-// ---------------------------------------------------------------------------
 // getBlacklistSet — cold read, key shape, warm cache, TTL boundary
-// ---------------------------------------------------------------------------
 
 test("cold read queries once and builds keys in the Prisma enum keyspace", async () => {
   nextRows = [
@@ -181,9 +177,7 @@ test("TTL boundary is exact: fresh at 29,999ms, refetches at 30,000ms", async ()
   }
 });
 
-// ---------------------------------------------------------------------------
 // In-flight coalescing
-// ---------------------------------------------------------------------------
 
 test("N concurrent cold readers coalesce into ONE query and share one set instance", async () => {
   deferNextReads = 1;
@@ -205,9 +199,7 @@ test("N concurrent cold readers coalesce into ONE query and share one set instan
   assert.equal(warm, s1);
 });
 
-// ---------------------------------------------------------------------------
 // Invalidation
-// ---------------------------------------------------------------------------
 
 test("invalidateBlacklistCache drops a warm cache: the next read re-queries", async () => {
   nextRows = [{ tmdbId: 550, mediaType: "MOVIE" }];
@@ -273,9 +265,7 @@ test("out-of-order race: a stale read resolving AFTER a post-invalidation read c
   assert.ok(!warm.has("999:MOVIE"));
 });
 
-// ---------------------------------------------------------------------------
 // Failure path
-// ---------------------------------------------------------------------------
 
 test("a failed cold read rejects, poisons nothing, and the next call retries", async () => {
   deferNextReads = 1;
@@ -291,9 +281,7 @@ test("a failed cold read rejects, poisons nothing, and the next call retries", a
   assert.ok(set.has("7:TV"));
 });
 
-// ---------------------------------------------------------------------------
 // isBlacklisted — the request chokepoint
-// ---------------------------------------------------------------------------
 
 test("isBlacklisted matches on exact (tmdbId, MediaType) and shares the cached set", async () => {
   nextRows = [

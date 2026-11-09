@@ -539,7 +539,7 @@ export const discoveryPaths: OpenApiPaths = {
             ratings: { type: "object", additionalProperties: { type: "object", properties: RATING_FIELDS } },
           } } } },
         },
-        "400": { description: "`items` missing / not an array, or over 200 entries" },
+        "400": { description: `\`items\` missing / not an array, or over ${RATINGS_BATCH_MAX_ITEMS} entries` },
         "413": tooLargeAnswer(1024 * 1024),
         "429": { description: "Rate limited (10 req/min per user)" },
       },

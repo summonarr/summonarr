@@ -66,8 +66,9 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
     <div className="space-y-2">
       <p className="text-xs text-zinc-500 mb-3">{t("profile.push.registered", { count: visible.length, label: capLabel })}</p>
       {error && <p role="alert" className="text-xs text-red-400 mb-2">{t("profile.push.error.remove")}</p>}
-      {visible.map((device, i) => {
-        const deviceLabel = device.label || t("profile.push.deviceN", { n: i + 1 });
+      {visible.map((device) => {
+        // Numbered by place in the whole list, so removing one doesn't renumber the rest.
+        const deviceLabel = device.label || t("profile.push.deviceN", { n: devices.indexOf(device) + 1 });
         return (
           <div
             key={device.id}

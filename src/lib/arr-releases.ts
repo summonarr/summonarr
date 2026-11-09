@@ -2,10 +2,11 @@
 // Replace and the admin title manager. Every release list is projected through
 // toArrRelease (guardrail 5e) and every grab goes through postReleaseGrab.
 // Re-exported by arr.ts.
-import { arrFetch, ArrResponseError, asRecord, unusableAnswer, type ArrCfg } from "./arr-client";
+import { arrErrorMessage, arrFetch, ArrResponseError, asRecord, unusableAnswer, type ArrCfg } from "./arr-client";
 import { requireArrCfg, type ArrVariant } from "./arr-config";
 import { findEpisodeId, requireRadarrMovie, requireSonarrSeries } from "./arr-lookup";
-import { int, languageNamesOf, namesOf } from "./arr-parse";
+import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
+import { int, languageNamesOf, namesOf, protocolOf } from "./arr-parse";
 import { seriesReleaseScopeSearchable } from "./release-scope";
 import { check, v } from "./validate";
 
@@ -138,7 +139,7 @@ export function toArrRelease(raw: unknown): ArrRelease | null {
     languages: languageNamesOf(row),
     // The documented wire enum (the iOS app decodes it): anything but a torrent
     // is shown as usenet, which is what every client already did.
-    protocol: row.protocol === "torrent" ? "torrent" : "usenet",
+    protocol: protocolOf(row.protocol) === "torrent" ? "torrent" : "usenet",
     seeders: finiteOrNull(row.seeders),
     leechers: finiteOrNull(row.leechers),
     age: finiteOr(row.age, 0),
@@ -177,12 +178,21 @@ async function getAllowedQualityIds(cfg: ArrCfg, profileId?: number): Promise<Se
   const now = Date.now();
   const cached = qualityProfileCache.get(cacheKey);
   if (cached && cached.expiresAt > now) return cached.ids;
+  const logKey = `releases:qualityprofile:${cfg.url}`;
   try {
     const ids = allowedQualityIdsOf(await arrFetch<unknown>(cfg, "/api/v3/qualityprofile"), profileId);
-    if (ids === "unusable") return null;
+    if (ids === "unusable") {
+      warnOnChange(logKey, "unusable", "[arr] quality profile list was unusable; releases keep the arr's own order");
+      return null;
+    }
+    forgetWarnOnChange(logKey);
     qualityProfileCache.set(cacheKey, { ids, expiresAt: now + QUALITY_PROFILE_TTL_MS });
     return ids;
-  } catch {
+  } catch (err) {
+    // The split only orders the list: a failed read costs the profile-match
+    // ordering, not the search. One line per unchanged condition (guardrail 7b).
+    const error = arrErrorMessage(err);
+    warnOnChange(logKey, error, `[arr] quality profile read failed; releases keep the arr's own order: ${error}`);
     return null;
   }
 }
@@ -210,7 +220,12 @@ function filterAndSortReleases(releases: readonly unknown[], allowedIds: Set<num
     const aMatch = allowedIds ? (allowedIds.has(a.quality.quality.id) ? 1 : 0) : 1;
     const bMatch = allowedIds ? (allowedIds.has(b.quality.quality.id) ? 1 : 0) : 1;
     if (bMatch !== aMatch) return bMatch - aMatch;
-    if (a.releaseWeight !== null && b.releaseWeight !== null && a.releaseWeight !== b.releaseWeight) return a.releaseWeight - b.releaseWeight;
+    // The arr's own order first; a release without one sorts after every release with one.
+    if (a.releaseWeight !== b.releaseWeight) {
+      if (a.releaseWeight === null) return 1;
+      if (b.releaseWeight === null) return -1;
+      return a.releaseWeight - b.releaseWeight;
+    }
     if (b.qualityWeight !== a.qualityWeight) return b.qualityWeight - a.qualityWeight;
     return (b.seeders ?? 0) - (a.seeders ?? 0);
   });

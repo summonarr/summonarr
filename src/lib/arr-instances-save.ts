@@ -17,6 +17,8 @@ export const INSTANCE_NAME_MAX_LEN = 100;
 // An API key is 32 hex characters and a generated webhook secret 48; anything
 // near this is a paste error, not a credential.
 export const SECRET_MAX_LEN = 512;
+// A root folder is a filesystem path on the arr's host.
+export const ROOT_FOLDER_MAX_LEN = 1024;
 
 export interface InstancePayload {
   slug: string;
@@ -65,6 +67,11 @@ export function instancePayloadError(raw: unknown, t: Translator): string | null
     if (value !== undefined && (typeof value !== "string" || value.length > SECRET_MAX_LEN)) {
       return t("apiAdmin.common.invalidSecret", { slug, field, max: SECRET_MAX_LEN });
     }
+  }
+  // A root folder that is not text would be dropped by the save and read
+  // as success.
+  if (inst.rootFolder !== undefined && (typeof inst.rootFolder !== "string" || inst.rootFolder.length > ROOT_FOLDER_MAX_LEN)) {
+    return t("apiAdmin.common.invalidSecret", { slug, field: "rootFolder", max: ROOT_FOLDER_MAX_LEN });
   }
   // Radarr's minimumAvailability is a closed enum — a bad stored value would
   // 400 every future add on the instance.

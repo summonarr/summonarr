@@ -111,9 +111,12 @@ async function testWebSubscriptions(
 // What a failed web send reports. A transport failure's message quotes the
 // subscription's full endpoint URL (and on some paths its resolved address) —
 // the very value every result truncates — so it becomes a fixed phrase. A push
-// service's refusal keeps its status.
+// service's refusal keeps its status; anything else is a fixed phrase.
 function webFailure(err: unknown, t: Translator): { status?: number; message?: string } {
   if (err instanceof SafeFetchError) return { message: t("apiUser.common.couldNotConnect", { service: "Web Push" }) };
   if (err instanceof WebPushError) return { status: err.statusCode, message: err.message };
-  return { message: err instanceof Error ? err.message : String(err) };
+  // Anything else (a key that would not decrypt, a malformed subscription) is
+  // an internal fault: the detail goes to the log, the caller gets a fixed phrase.
+  console.error("[push] web test send failed:", err instanceof Error ? err.message : String(err));
+  return { message: t("apiUser.push.webSendFailed") };
 }

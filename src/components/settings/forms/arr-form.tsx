@@ -166,6 +166,7 @@ function ArrConnectionForm({ service, keys, label, initialUrl, initialExternalUr
     // emptied external URL is sent as "" — the route clears it and the links
     // fall back to the connection URL.
     const sentExternal = externalUrl.trim();
+    const sentKey = apiKey;
     const result = await save(
       {
         [keys.url]: url,
@@ -180,9 +181,10 @@ function ArrConnectionForm({ service, keys, label, initialUrl, initialExternalUr
     );
     if (!result.ok) return;
     setSavedExternalUrl(sentExternal);
-    if (apiKey) {
+    if (sentKey) {
       setKeySaved(true);
-      setApiKey("");
+      // Only the key that was saved: one typed while the save was in flight stays.
+      setApiKey((current) => (current === sentKey ? "" : current));
     }
     const version = result.data[keys.version];
     setOkText(typeof version === "string" && version

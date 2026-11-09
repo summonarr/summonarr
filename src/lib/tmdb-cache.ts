@@ -173,3 +173,8 @@ export async function setCacheUntil<T>(key: string, data: T, expiresAt: Date): P
     create: { key, data: serialised, cachedAt: new Date(), expiresAt },
   });
 }
+
+// Removes one row. Callers decide whether a failure matters.
+export async function deleteCache(key: string): Promise<void> {
+  await prisma.tmdbCache.delete({ where: { key } });
+}

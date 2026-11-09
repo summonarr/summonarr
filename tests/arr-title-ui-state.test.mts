@@ -1,21 +1,21 @@
 // The admin title manager's state discipline and its request-list host: the
-// v0.34.0+ audit's C053 (F075–F078), pinned. The refresh hold is the pure
+// v0.34.0+ audit's, pinned. The refresh hold is the pure
 // src/lib/refresh-gate.ts; the wiring it can't see is pinned structurally
 // (node:test has no client render harness).
 //
 // What is pinned:
-//   F075  The open-time reset (state, edits, tab, the open-time read) runs at
+// The open-time reset (state, edits, tab, the open-time read) runs at
 //         OPEN only — a host re-rendering with another initialTab (the request
 //         list's follows the row's live status) must not re-run it and throw
 //         away unsaved Settings edits without asking.
-//   F076  The discard banner goes once there is nothing to discard (saved,
+// The discard banner goes once there is nothing to discard (saved,
 //         reset); left up, closeVerdict read it as answered and the next close
 //         of a fresh edit skipped the question.
-//   F077  A write's answer (Settings save, season/episode flip) drops every
+// A write's answer (Settings save, season/episode flip) drops every
 //         read still in flight — it may predate the write — and reads again
 //         when one was, instead of letting the older read land over it
 //         (use-title-load.ts).
-//   F078  The request list holds its live refresh while a row's manager is
+// The request list holds its live refresh while a row's manager is
 //         open (a refresh can drop the row and the dialog with it), and runs
 //         it once the last one closes.
 import { test } from "node:test";
@@ -34,16 +34,16 @@ function managerBody(): string {
   return src.slice(src.indexOf("export function ArrTitleManager"), src.indexOf("export function ManageTitleButton"));
 }
 
-// ── F078: the refresh gate ─────────────────────────────────────────────────
+// ── the refresh gate ─────────────────────────────────────────────────
 
-test("F078: with no dialog open a refresh runs at once", () => {
+test("with no dialog open a refresh runs at once", () => {
   const gate = createRefreshGate();
   assert.equal(gate.request(), true);
   assert.equal(gate.request(), true);
   assert.equal(gate.closed(), false, "an unmatched close has nothing deferred to run");
 });
 
-test("F078: a refresh wanted while a dialog is open waits, and runs once when it closes", () => {
+test("a refresh wanted while a dialog is open waits, and runs once when it closes", () => {
   const gate = createRefreshGate();
   gate.opened();
   assert.equal(gate.request(), false, "deferred");
@@ -53,13 +53,13 @@ test("F078: a refresh wanted while a dialog is open waits, and runs once when it
   assert.equal(gate.request(), true, "and the gate is open again");
 });
 
-test("F078: a dialog closing with nothing deferred runs nothing", () => {
+test("a dialog closing with nothing deferred runs nothing", () => {
   const gate = createRefreshGate();
   gate.opened();
   assert.equal(gate.closed(), false);
 });
 
-test("F078: two dialogs — the refresh waits for the LAST close", () => {
+test("two dialogs — the refresh waits for the LAST close", () => {
   const gate = createRefreshGate();
   gate.opened();
   gate.opened();
@@ -69,7 +69,7 @@ test("F078: two dialogs — the refresh waits for the LAST close", () => {
   assert.equal(gate.closed(), true);
 });
 
-test("F078: an unmatched close never makes the next open read as closed", () => {
+test("an unmatched close never makes the next open read as closed", () => {
   const gate = createRefreshGate();
   gate.closed();
   gate.closed();
@@ -78,7 +78,7 @@ test("F078: an unmatched close never makes the next open read as closed", () => 
   assert.equal(gate.closed(), true);
 });
 
-test("F078: the request list refreshes only through the gate, and its rows' managers report to it", () => {
+test("the request list refreshes only through the gate, and its rows' managers report to it", () => {
   const src = list();
   assert.equal(src.match(/router\.refresh\(\)/g)?.length, 1, "one router.refresh() — the gated one");
   assert.match(src, /function refreshList\(\) \{\s*if \(refreshGate\.request\(\)\) router\.refresh\(\);\s*\}/);
@@ -98,7 +98,7 @@ test("F078: the request list refreshes only through the gate, and its rows' mana
   assert.match(button, /onActiveChange=\{onManagerActive\}/);
 });
 
-test("F078: ManageTitleButton reports open, and close — also an unmount while open", () => {
+test("ManageTitleButton reports open, and close — also an unmount while open", () => {
   const src = manager();
   const button = src.slice(src.indexOf("export function ManageTitleButton"), src.indexOf("export function ArrManageButton"));
   assert.match(button, /onActiveChange\?: \(open: boolean\) => void;/);
@@ -112,9 +112,9 @@ test("F078: ManageTitleButton reports open, and close — also an unmount while 
   assert.match(button, /onOpenChange=\{changeOpen\}/);
 });
 
-// ── F075: the tab is chosen at open time only ──────────────────────────────
+// ── the tab is chosen at open time only ──────────────────────────────
 
-test("F075: the open-time reset does not re-run on an initialTab change", () => {
+test("the open-time reset does not re-run on an initialTab change", () => {
   const body = managerBody();
   const start = body.indexOf("useEffect(() => {\n    if (!open) return;");
   assert.ok(start > 0, "the open-time effect");
@@ -155,9 +155,9 @@ test("the discard banner takes focus on 'Keep editing', and gives it back where 
   assert.match(read("components/admin/arr-title/manager-parts.tsx"), /<Button ref=\{keepRef\} variant="ghost" size="sm" onClick=\{onKeep\}>/);
 });
 
-// ── F076: the banner goes with the edits ───────────────────────────────────
+// ── the banner goes with the edits ───────────────────────────────────
 
-test("F076: nothing left unsaved clears the discard banner", () => {
+test("nothing left unsaved clears the discard banner", () => {
   const body = managerBody();
   assert.match(
     body,
@@ -168,7 +168,7 @@ test("F076: nothing left unsaved clears the discard banner", () => {
   assert.doesNotMatch(body, /onDirtyChange=\{setSettingsDirty\}/);
 });
 
-// ── F077: a write's answer outranks a read still in flight ─────────────────
+// ── a write's answer outranks a read still in flight ─────────────────
 
 test("a write's answer drops every read still out — and reads again when one was", () => {
   const load = titleLoad();

@@ -1091,6 +1091,22 @@ test("sequential paging: an exact-multiple-of-pageSize library completes WITHOUT
   );
 });
 
+test("episodes-for-show lists two versions of one episode once, with the earlier arrival", async () => {
+  const B = nextBase();
+  respond = () => okJson({
+    Items: [
+      { ParentIndexNumber: 1, IndexNumber: 1, DateCreated: "2024-05-01T00:00:00.0000000Z" },
+      { ParentIndexNumber: 1, IndexNumber: 1, DateCreated: "2024-03-01T00:00:00.0000000Z" },
+      { ParentIndexNumber: 1, IndexNumber: 2, DateCreated: "2024-04-01T00:00:00.0000000Z" },
+    ],
+    TotalRecordCount: 3,
+  });
+  const episodes = await getJellyfinEpisodesForShow(B, "k", "ser-1", 7);
+  assert.equal(episodes.length, 2);
+  const first = episodes.find((e) => e.episodeNumber === 1)!;
+  assert.equal(first.addedAt?.toISOString(), "2024-03-01T00:00:00.000Z");
+});
+
 test("episodes-for-show scopes to ParentId=<seriesId>, stamps the caller's tmdbId, and drops invalid indices", async () => {
   const B = nextBase();
   respond = () => okJson({

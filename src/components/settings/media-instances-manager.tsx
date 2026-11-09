@@ -21,6 +21,7 @@ import {
   readSaveAnswer,
   toDraft,
   type Draft,
+  type InstanceView,
   type MediaServerService,
   type TestResult,
 } from "./media-instances-data";
@@ -430,6 +431,17 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
   // lock for either.
   const locked = saving || refreshing;
 
+  // What a load's or a save's answer does to the editor: the server's list
+  // replaces every draft and every per-edit flag resets, in one place.
+  const applyServerState = useCallback((named: InstanceView[], nextVersion: string | undefined, testResults: Record<string, TestResult>) => {
+    setDrafts(named.map((v) => toDraft(v, service)));
+    setVersion(nextVersion);
+    setConfirmRemove(null);
+    setDirty(false);
+    setLoadFailed(false);
+    setTests(testResults);
+  }, [service]);
+
   const load = useCallback(async () => {
     const res = await action.run("load", (signal) => fetchJson(withBasePath("/api/admin/media-instances"), { signal }));
     if (res === undefined) return;
@@ -443,16 +455,11 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       setLoadFailed(true);
       return;
     }
-    setDrafts(list.named.map((v) => toDraft(v, service)));
-    setVersion(list.version);
-    setConfirmRemove(null);
-    setDirty(false);
-    setLoadFailed(false);
     // Test results are keyed by slug and describe the config as it was at
     // the last Save & Test — stale once the instances are reloaded.
-    setTests({});
+    applyServerState(list.named, list.version, {});
     setStatus("idle");
-  }, [service, action]);
+  }, [service, action, applyServerState]);
 
   useEffect(() => {
     void load();
@@ -513,11 +520,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       setMessage(res.ok ? t("settings.common.failedToSave") : res.error || t("settings.common.failedToSave"));
       return;
     }
-    setDrafts(answer.named.map((v) => toDraft(v, service)));
-    setVersion(answer.version);
-    setConfirmRemove(null);
-    setDirty(false);
-    setTests(answer.testResults);
+    applyServerState(answer.named, answer.version, answer.testResults);
     setStatus("ok");
     setMessage(t("settings.common.saved"));
   }
@@ -541,9 +544,11 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       {drafts.length === 0 && !loadFailed && <p className="text-sm text-zinc-500">{t("settings.media.none", { label })}</p>}
 
       {/* Disabled while a save or a reload is in flight: its answer replaces
-          every draft, so anything typed meanwhile would be silently discarded. */}
+          every draft, so anything typed meanwhile would be silently discarded.
+          Also after a failed reload: Save is off then, and a later successful
+          refresh would discard what was typed. */}
       {drafts.length > 0 && (
-      <fieldset disabled={locked} className="min-w-0 space-y-4">
+      <fieldset disabled={locked || loadFailed} className="min-w-0 space-y-4">
       {drafts.map((d) => (
         <InstanceCard
           key={d.id}

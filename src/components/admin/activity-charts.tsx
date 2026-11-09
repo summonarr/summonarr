@@ -8,6 +8,7 @@
 // server and passed in as `labels` — never built from Date here (guardrail 16).
 
 import {
+  useEffect,
   useId,
   useLayoutEffect,
   useMemo,
@@ -189,6 +190,20 @@ function useChartHover(
 ) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<Hover | null>(null);
+
+  // The anchor is a viewport snapshot, so a scroll or resize would leave the
+  // fixed tooltip floating away from the chart: drop it instead.
+  const shown = hover !== null;
+  useEffect(() => {
+    if (!shown) return;
+    const clear = () => setHover(null);
+    window.addEventListener("scroll", clear, { passive: true, capture: true });
+    window.addEventListener("resize", clear);
+    return () => {
+      window.removeEventListener("scroll", clear, true);
+      window.removeEventListener("resize", clear);
+    };
+  }, [shown]);
 
   const moveTo = (i: number, keyboard: boolean) => {
     const el = wrapRef.current;

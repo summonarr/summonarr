@@ -122,7 +122,11 @@ function PeriodFilter({ currentDays, setDays }: { currentDays: string; setDays: 
       return;
     }
     setCustomError(null);
-    setDays(String(parsed.days));
+    const next = String(parsed.days);
+    // The URL won't change when the value is already applied, so the
+    // derive-from-URL reset above never runs: settle the highlight here.
+    if (next === currentDays) setShowCustom(!isPreset && next !== defaultDays);
+    setDays(next === defaultDays ? "" : next);
   };
 
   const customField = showCustom && (
@@ -264,7 +268,8 @@ export function ActivityFilterBar() {
       } else {
         params.delete(key);
       }
-      const url = `${pathname}?${params.toString()}`;
+      const query = params.toString();
+      const url = query ? `${pathname}?${query}` : pathname;
       router.push(url);
     },
     [router, pathname, searchParams],

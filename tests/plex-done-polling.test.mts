@@ -87,12 +87,14 @@ test("done page: the stashed state goes through the shape guard, never a bare ca
   assert.match(PAGE, /if \(!auth\) \{\s*window\.location\.replace\(withBasePath\("\/login"\)\);/);
 });
 
-test("done page: both PIN polls carry a per-request timeout and run to a wall-clock deadline", () => {
-  assert.equal((PAGE.match(/signal: anySignal\(signal, requestTimeoutSignal\(/g) ?? []).length, 2);
-  assert.equal((PAGE.match(/const deadline = pollDeadline\(PIN_POLL_WINDOW_MS\);/g) ?? []).length, 2);
-  // Each loop also stops the moment the page goes away.
-  assert.equal((PAGE.match(/while \(deadline\.remaining\(\) > 0 && !signal\.aborted\)/g) ?? []).length, 2);
-  assert.equal((PAGE.match(/await abortableSleep\(Math\.min\(delayMs, deadline\.remaining\(\)\), signal\);/g) ?? []).length, 2);
+test("done page: both PIN polls and the final sign-in carry a timeout, and the polls share one wall-clock window", () => {
+  assert.equal((PAGE.match(/signal: anySignal\(signal, requestTimeoutSignal\(/g) ?? []).length, 3);
+  assert.match(PAGE, /signal: anySignal\(signal, requestTimeoutSignal\(SIGN_IN_REQUEST_TIMEOUT_MS\)\)/);
+  assert.equal((PAGE.match(/await pollWindow\(signal, async \(\) => \{/g) ?? []).length, 2);
+  // The one loop is deadline-bound and stops the moment the page goes away.
+  assert.equal((PAGE.match(/const deadline = pollDeadline\(PIN_POLL_WINDOW_MS\);/g) ?? []).length, 1);
+  assert.equal((PAGE.match(/while \(deadline\.remaining\(\) > 0 && !signal\.aborted\)/g) ?? []).length, 1);
+  assert.equal((PAGE.match(/await abortableSleep\(Math\.min\(delayMs, deadline\.remaining\(\)\), signal\);/g) ?? []).length, 1);
   assert.doesNotMatch(PAGE, /i < 120/, "an iteration count alone does not bound the wait");
 });
 
@@ -101,7 +103,8 @@ test("done page: the login poll checks the status before reading the body, and m
   const stepAt = login.indexOf("plexPinPollStep(r.status");
   const jsonAt = login.indexOf("r.json()");
   assert.ok(stepAt > 0 && jsonAt > stepAt, "the status decides before any body is parsed");
-  assert.match(login, /step\.kind === "expired"\) \{[\s\S]*?fail\(t\("auth\.plexDone\.error\.expired"\)\);\s*return;/);
+  assert.match(login, /step\.kind === "expired"\) \{[\s\S]*?expired = true;\s*return \{ stop: true \};/);
+  assert.match(login, /if \(expired\) \{\s*fail\(t\("auth\.plexDone\.error\.expired"\)\);\s*return;/);
 });
 
 test("done page: a real unmount aborts the running flow, a Strict Mode remount keeps it, and an aborted flow never navigates", () => {

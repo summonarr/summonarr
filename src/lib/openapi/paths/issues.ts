@@ -10,6 +10,7 @@ import {
   ARR_HISTORY_EVENT,
   TITLE_FILE,
   tooLargeAnswer,
+  forbiddenAnswer,
   RETRY_AFTER_HEADER,
   rowOwner,
   OK_TRUE,
@@ -401,6 +402,7 @@ export const issuesPaths: OpenApiPaths = {
         expectedClaimedBy: { type: "string", nullable: true, description: "Who the caller saw as the claimer (null = unclaimed). When present and it no longer matches, the call is refused with 409 instead of silently taking over. Omit to toggle without the check" },
       } } } } },
       responses: {
+        "403": forbiddenAnswer("the ADMIN or ISSUE_ADMIN role"),
         "200": {
           description: "{ id, claimedBy, claimedAt, claimedUser: { id, name, email } | null } after the change",
           content: {

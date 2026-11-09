@@ -156,11 +156,10 @@ async function syncPlex(request: NextRequest, rawBody: Record<string, unknown>, 
   // of the whole library. The crawl starts now, beside the library write below,
   // and is HELD: the lock stays taken until it has written
   // (runResyncHoldingLock). It captures the show file paths on the way.
-  const filePaths = new Map<string, string>();
   const cacheWalk = ownsCache
-    ? walkPlexEpisodes(server, fetched.sections, async () => fetched.ratingKeyToTmdb, { signal, filePathsOut: filePaths })
+    ? walkPlexEpisodes(server, fetched.sections, async () => fetched.ratingKeyToTmdb, signal)
     : null;
-  if (cacheWalk) hold(cacheWalk.then((episodes) => writePlexEpisodeCache(episodes, recentOnly, signal)));
+  if (cacheWalk) hold(cacheWalk.then(({ episodes }) => writePlexEpisodeCache(episodes, recentOnly, signal)));
 
   const { finalMovieRows, finalTvRows, droppedMovieIds, droppedTvIds } = await dedupedPlexRows(fetched, instance);
   const writtenShows = recentOnly
@@ -173,9 +172,9 @@ async function syncPlex(request: NextRequest, rawBody: Record<string, unknown>, 
   // request per show. Registered AFTER the awaited library write above — that
   // ordering is what guarantees the full replace can't delete the patched rows.
   const pathWalk = cacheWalk ?? (writtenShows.size > 0
-    ? walkPlexEpisodes(server, fetched.sections, async () => onlyShows(fetched.ratingKeyToTmdb, writtenShows), { signal, filePathsOut: filePaths })
+    ? walkPlexEpisodes(server, fetched.sections, async () => onlyShows(fetched.ratingKeyToTmdb, writtenShows), signal)
     : null);
-  if (pathWalk) hold(pathWalk.then((episodes) => patchShowFilePaths(instance, episodes, onlyShows(filePaths, writtenShows), signal)));
+  if (pathWalk) hold(pathWalk.then(({ episodes, filePaths }) => patchShowFilePaths(instance, episodes, onlyShows(filePaths, writtenShows), signal)));
 
   // Keeps the orchestrator's 24h-stale fallback from firing falsely when the
   // admin resyncs more recently than the orchestrator runs.
@@ -328,24 +327,31 @@ function onlyShows<V>(map: ReadonlyMap<string, V>, shows: ReadonlySet<string>): 
   return out;
 }
 
-// The type=4 episode walk over `showKeys`, capturing each show's first file
-// path into `filePathsOut`. A failure logs and returns null (the cache and the
-// paths stay as they were); an empty list therefore really means "no
-// episodes". When the lock is lost (guardrail 41) the walk stops — it rejects
-// at its next page — and returns null without logging a failure.
+interface PlexEpisodeWalk {
+  episodes: PlexTVEpisodeData[] | null;
+  filePaths: Map<string, string>;
+}
+
+// The type=4 episode walk over `showKeys`, returning the episodes together with
+// each show's first file path. A failure logs and yields null episodes (the
+// cache and the paths stay as they were); an empty list therefore really means
+// "no episodes". When the lock is lost (guardrail 41) the walk stops — it
+// rejects at its next page — and yields null without logging a failure.
 async function walkPlexEpisodes(
   { serverUrl, token, selectedKeys }: PlexServer,
   sections: PlexSection[],
   showKeys: () => Promise<Map<string, number[]>>,
-  { signal, filePathsOut }: { signal: AbortSignal; filePathsOut: Map<string, string> },
-): Promise<PlexTVEpisodeData[] | null> {
+  signal: AbortSignal,
+): Promise<PlexEpisodeWalk> {
+  const filePaths = new Map<string, string>();
   try {
     const keys = await showKeys();
-    if (signal.aborted) return null;
-    return await getPlexTVEpisodes(serverUrl, token, selectedKeys, sections, keys, filePathsOut, { signal });
+    if (signal.aborted) return { episodes: null, filePaths };
+    const episodes = await getPlexTVEpisodes(serverUrl, token, selectedKeys, sections, keys, filePaths, { signal });
+    return { episodes, filePaths };
   } catch (err) {
     if (!signal.aborted) console.error("[sync/plex] Episode walk failed:", err);
-    return null;
+    return { episodes: null, filePaths };
   }
 }
 

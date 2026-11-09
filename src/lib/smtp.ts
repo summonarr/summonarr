@@ -2,6 +2,7 @@ import net from "node:net";
 import tls from "node:tls";
 import os from "node:os";
 import { randomBytes } from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
 
 // Minimal pure-TypeScript SMTP client used by [src/lib/email.ts](src/lib/email.ts).
 //
@@ -97,6 +98,14 @@ function extractAddrSpec(addr: string): string {
   const m = /<([^>]+)>/.exec(addr);
   if (m) return m[1].trim();
   return addr.trim();
+}
+
+// The address placed in MAIL FROM / RCPT TO. Whitespace or angle brackets would
+// let extra SMTP parameters ride along inside the command, so they are refused.
+function envelopeAddress(addr: string): string {
+  const spec = extractAddrSpec(addr);
+  if (!/^[^\s<>"]+$/.test(spec)) throw new SmtpError("Invalid envelope address");
+  return spec;
 }
 
 function extractDomain(addr: string): string {
@@ -329,6 +338,9 @@ interface SmtpReply {
 class SmtpConnection {
   private socket: net.Socket | tls.TLSSocket;
   private buffer = "";
+  // Decodes across chunk boundaries so a multi-byte character split between two
+  // TCP reads is not corrupted.
+  private readonly decoder = new StringDecoder("utf8");
   private pending: ((value: SmtpReply | Error) => void) | null = null;
   private dataListener: ((chunk: Buffer) => void) | null = null;
   private errorListener: ((err: Error) => void) | null = null;
@@ -342,10 +354,10 @@ class SmtpConnection {
 
   private attachListeners(): void {
     this.dataListener = (chunk: Buffer) => {
-      this.buffer += chunk.toString("utf8");
+      this.buffer += this.decoder.write(chunk);
       // Bound the reply buffer — a hostile relay can't grow it without limit or
       // force an unbounded O(n²) rescan (findCompleteReplyEnd runs per chunk).
-      if (this.buffer.length > MAX_SMTP_REPLY_BYTES) {
+      if (Buffer.byteLength(this.buffer, "utf8") > MAX_SMTP_REPLY_BYTES) {
         this.closed = true;
         const err = new SmtpError("SMTP reply exceeded buffer cap");
         if (this.pending) {
@@ -745,9 +757,9 @@ async function authenticate(
 }
 
 async function sendEnvelope(conn: SmtpConnection, msg: SmtpMessage): Promise<void> {
-  await conn.send(`MAIL FROM:<${extractAddrSpec(msg.from)}>\r\n`);
+  await conn.send(`MAIL FROM:<${envelopeAddress(msg.from)}>\r\n`);
   expectCode(await conn.readReply(), 250);
-  await conn.send(`RCPT TO:<${extractAddrSpec(msg.to)}>\r\n`);
+  await conn.send(`RCPT TO:<${envelopeAddress(msg.to)}>\r\n`);
   expectCode(await conn.readReply(), 250, 251);
   await conn.send("DATA\r\n");
   expectCode(await conn.readReply(), 354);

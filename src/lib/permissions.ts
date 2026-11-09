@@ -103,7 +103,8 @@ export const PRESETS: Record<string, bigint> = {
 };
 
 export function defaultPermissionsForRole(role: string): bigint {
-  return PRESETS[role] ?? PRESETS.USER;
+  // Own keys only: a role named "toString" or "constructor" must not resolve to an inherited member.
+  return Object.hasOwn(PRESETS, role) ? PRESETS[role] : PRESETS.USER;
 }
 
 // `permissions === 0n` means the row was never seeded — a legacy row in the

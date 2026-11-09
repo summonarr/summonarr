@@ -517,7 +517,30 @@ function addSoftPlay(w: Working, mediaType: CleanupMediaType, season: number | n
 }
 
 function titlesForKey(ix: LibraryIndex, map: Map<string, string[]>, source: string, instance: string, itemKey: string | null): Working[] {
-  return itemKey ? (map.get(keyOf(source, instance, itemKey)) ?? []).map((k) => ix.byKey.get(k)!) : [];
+  return itemKey ? workingFor(ix, map.get(keyOf(source, instance, itemKey)) ?? []) : [];
+}
+
+// The titles behind a list of keys; a key the index no longer holds is skipped.
+function workingFor(ix: LibraryIndex, keys: readonly string[]): Working[] {
+  const out: Working[] = [];
+  for (const k of keys) {
+    const w = ix.byKey.get(k);
+    if (w) out.push(w);
+  }
+  return out;
+}
+
+// One run's session → titles answers, so the foreign-key pass and the credit
+// pass don't resolve the same session twice.
+type SessionTitleMemo = Map<SessionRow, Set<Working>>;
+
+function sessionTitlesMemo(memo: SessionTitleMemo, ix: LibraryIndex, a: SessionRow): Set<Working> {
+  let titles = memo.get(a);
+  if (!titles) {
+    titles = sessionTitles(ix, a);
+    memo.set(a, titles);
+  }
+  return titles;
 }
 
 // Every title a live session is: by tmdb id AND by its item and show keys —
@@ -587,11 +610,11 @@ function creditRecordedPlays(ix: LibraryIndex, ev: Evidence): void {
 // play or session would otherwise soft-match onto a chosen one by title. The
 // full read places those by key (hard, on the other title), so this read must
 // too — only the keys a soft match would actually use are looked up.
-async function foreignKeysFor(ix: LibraryIndex, ev: Evidence): Promise<ForeignKeys> {
+async function foreignKeysFor(ix: LibraryIndex, ev: Evidence, sessions: SessionTitleMemo): Promise<ForeignKeys> {
   return loadForeignKeys([
     ...ev.unattributed.map((p) => ({ ...p, mediaType: playMediaType(p.mediaType, p.seasonNumber) })),
     ...ev.active
-      .filter((a) => a.tmdbId == null && sessionTitles(ix, a).size === 0)
+      .filter((a) => a.tmdbId == null && sessionTitlesMemo(sessions, ix, a).size === 0)
       .map((a) => ({ ...a, mediaType: playMediaType(a.mediaType, a.seasonNumber) })),
   ].filter((p) =>
     !ownsKey(ix, p.source, p.serverInstance, p.sourceItemId, p.sourceShowId) &&
@@ -616,16 +639,16 @@ function creditUnattributed(ix: LibraryIndex, foreign: ForeignKeys, ev: Evidence
       continue;
     }
     softPlays += n;
-    for (const key of keys) addSoftPlay(ix.byKey.get(key)!, mediaType, p.seasonNumber, n, p._max.startedAt ?? null, server);
+    for (const w of workingFor(ix, keys)) addSoftPlay(w, mediaType, p.seasonNumber, n, p._max.startedAt ?? null, server);
   }
   return { unplacedPlays, softPlays };
 }
 
 // 4. Playing now — a session is one (live) play, matched the same ways, and
 //    credited ONCE to each title it is.
-function creditSessions(ix: LibraryIndex, foreign: ForeignKeys, ev: Evidence): void {
+function creditSessions(ix: LibraryIndex, foreign: ForeignKeys, ev: Evidence, sessions: SessionTitleMemo): void {
   for (const a of ev.active) {
-    const credited = sessionTitles(ix, a);
+    const credited = sessionTitlesMemo(sessions, ix, a);
     for (const w of credited) {
       w.t.playingNow = true;
       addHardPlay(w, a.seasonNumber, 1, a.lastSeenAt);
@@ -634,8 +657,8 @@ function creditSessions(ix: LibraryIndex, foreign: ForeignKeys, ev: Evidence): v
     if (a.tmdbId == null && isSource(a.source) && !placedByKey(ix, foreign, a.source, a.serverInstance, a.sourceItemId, a.sourceShowId)) {
       const server = mediaInstanceLabel(a.source, a.serverInstance);
       const mediaType = playMediaType(a.mediaType, a.seasonNumber);
-      for (const key of softTitleKeys(ix, a.source, a.title, mediaType)) {
-        addSoftPlay(ix.byKey.get(key)!, mediaType, a.seasonNumber, 1, a.lastSeenAt, server);
+      for (const w of workingFor(ix, softTitleKeys(ix, a.source, a.title, mediaType))) {
+        addSoftPlay(w, mediaType, a.seasonNumber, 1, a.lastSeenAt, server);
       }
     }
   }
@@ -767,9 +790,10 @@ export async function loadLibraryWatchFacts(
 
   const { coverageResult, ...ev } = await readEvidence(evidenceScope(ix, onlyIds), coverageAndStatus);
   creditRecordedPlays(ix, ev);
-  const foreign = only ? await foreignKeysFor(ix, ev) : null;
+  const sessions: SessionTitleMemo = new Map();
+  const foreign = only ? await foreignKeysFor(ix, ev, sessions) : null;
   const { unplacedPlays, softPlays } = creditUnattributed(ix, foreign, ev);
-  creditSessions(ix, foreign, ev);
+  creditSessions(ix, foreign, ev, sessions);
   creditUpstream(ix, ev);
 
   const { ctx, coverage, historyStart } = coverageResult;

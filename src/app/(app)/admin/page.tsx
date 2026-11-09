@@ -372,7 +372,7 @@ export default async function AdminPage({
       : Promise.resolve([]),
     // Watch grade of every requester on this page, in one batch (null when the
     // feature or play history tracking is off).
-    getWatchGradeSummaries(requests.map((r) => r.requestedBy)),
+    getWatchGradeSummaries(pageRequesters),
     // The Open in / Manage icons lead to routes that 404 while the integration
     // is switched off (arrGate).
     isFeatureEnabled("feature.integration.radarr").catch(() => false),

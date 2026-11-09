@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { registrationClosed } from "@/lib/setup-lock";
 
 // Public endpoint by design — the pre-login setup screen needs to know whether
 // any user exists before showing the registration vs sign-in flow. But the raw
@@ -13,6 +14,5 @@ export async function GET(req: NextRequest) {
   if (!checkRateLimit(`setup-status:${getClientIpKey(req.headers)}`, 30, 60_000)) {
     return NextResponse.json({ error: t("apiAuth.common.tooManyRequests") }, { status: 429 });
   }
-  const count = await prisma.user.count();
-  return NextResponse.json({ needsSetup: count === 0 });
+  return NextResponse.json({ needsSetup: !(await registrationClosed(prisma)) });
 }

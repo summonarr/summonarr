@@ -417,6 +417,22 @@ function SeasonEpisodeFields({
   );
 }
 
+// POST /api/issues: null on success, else the text to show. Never throws.
+async function postIssue(body: Record<string, unknown>, signal: AbortSignal, t: Translate): Promise<{ error: string } | null> {
+  try {
+    const res = await timedFetch(withBasePath("/api/issues"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (res.ok) return null;
+    return { error: rateLimitMessage(res, t) ?? (await readApiError(res, t("request.somethingWrong"))) };
+  } catch {
+    return { error: t("request.networkError") };
+  }
+}
+
 export function ReportIssueButton({
   tmdbId,
   tvdbId,
@@ -492,31 +508,23 @@ export function ReportIssueButton({
 
     const out = await action.run(
       "submit",
-      async (signal): Promise<{ error: string } | null> => {
-        try {
-          const res = await timedFetch(withBasePath("/api/issues"), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              tmdbId,
-              tvdbId: tvdbId ?? undefined,
-              mediaType,
-              title,
-              posterPath,
-              issueType: form.issueType,
-              scope: mediaType === "MOVIE" ? "FULL" : form.scope,
-              seasonNumber: season,
-              episodeNumber: episode,
-              note: form.note.trim() || undefined,
-            }),
-            signal,
-          });
-          if (res.ok) return null;
-          return { error: rateLimitMessage(res, t) ?? (await readApiError(res, t("request.somethingWrong"))) };
-        } catch {
-          return { error: t("request.networkError") };
-        }
-      },
+      (signal) =>
+        postIssue(
+          {
+            tmdbId,
+            tvdbId: tvdbId ?? undefined,
+            mediaType,
+            title,
+            posterPath,
+            issueType: form.issueType,
+            scope: mediaType === "MOVIE" ? "FULL" : form.scope,
+            seasonNumber: season,
+            episodeNumber: episode,
+            note: form.note.trim() || undefined,
+          },
+          signal,
+          t,
+        ),
       { ifBusy: "skip" },
     );
     if (out === undefined) return;

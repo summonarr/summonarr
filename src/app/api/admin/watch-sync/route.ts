@@ -137,6 +137,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     if (isPrismaErrorCode(err, "P2002")) {
       return NextResponse.json({ error: t("apiAdmin.watchSync.pairExists") }, { status: 409 });
     }
+    // An identity removed between the check above and this insert.
+    if (isPrismaErrorCode(err, "P2003")) {
+      return NextResponse.json({ error: t("apiAdmin.watchSync.pairInvalid") }, { status: 400 });
+    }
     throw err;
   }
 });

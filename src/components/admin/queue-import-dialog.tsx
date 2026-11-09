@@ -27,6 +27,7 @@ import { fetchJson, LONG_RUN_TIMEOUT_MS, jsonInit } from "@/lib/client/fetch-jso
 import { episodeCode, episodeSummary, queueFormatters } from "@/components/admin/queue-format";
 import {
   defaultImportSelection,
+  isImportMode,
   nextImportSelection,
   SONARR_RELEASE_TYPES,
   type ImportCandidate,
@@ -95,7 +96,12 @@ function useImportDialog(row: QueueItem | null, onImported: (row: QueueItem, fil
 
   useEffect(() => {
     action.abort();
-    if (!service || instance === undefined || downloadId === null) return;
+    if (!service || instance === undefined || downloadId === null) {
+      // Closed: forget whose files these were, so reopening the same download
+      // waits for its load instead of flashing the old list.
+      setLoadedFor(null);
+      return;
+    }
     const key = `${service}:${instance}:${downloadId}`;
     const ctl = new AbortController();
     setFiles(null);
@@ -307,7 +313,7 @@ export function QueueImportDialog({
               <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4 border-t border-zinc-700 bg-zinc-900 flex-shrink-0">
                 <label className="flex items-center gap-2 text-xs text-zinc-400">
                   {t("adminManage.queue.import.mode")}
-                  <StyledSelect compact className="w-auto" value={mode} onChange={(e) => setMode(e.target.value as ImportMode)} disabled={busy}>
+                  <StyledSelect compact className="w-auto" value={mode} onChange={(e) => { if (isImportMode(e.target.value)) setMode(e.target.value); }} disabled={busy}>
                     <option value="auto">{t("adminManage.queue.import.modeAuto")}</option>
                     <option value="move">{t("adminManage.queue.import.modeMove")}</option>
                     <option value="copy">{t("adminManage.queue.import.modeCopy")}</option>

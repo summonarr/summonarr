@@ -71,8 +71,8 @@ const inputStyle: React.CSSProperties = {
   borderRadius: 6,
 };
 
-type NumericField = keyof typeof CLEANUP_NUMERIC_BOUNDS;
-type BooleanField = "unwatchedEnabled" | "neverWatchedEnabled" | "votesEnabled" | "excludeAiring" | "requireUpstreamCheck";
+export type NumericField = keyof typeof CLEANUP_NUMERIC_BOUNDS;
+export type BooleanField = "unwatchedEnabled" | "neverWatchedEnabled" | "votesEnabled" | "excludeAiring" | "requireUpstreamCheck";
 
 export function CleanupStats({ report, formatBytes }: { report: CleanupReportView; formatBytes: (n: number | null) => string }) {
   const t = useT();

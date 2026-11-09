@@ -3,7 +3,7 @@
 // picker, and the connection test. Re-exported by arr.ts.
 import { prisma } from "./prisma";
 import { arrSettingKey, isRadarrMinimumAvailability, type ArrInstanceKey, type ArrService, type RadarrMinimumAvailability } from "./arr-instances";
-import { arrFetch, type ArrCfg } from "./arr-client";
+import { arrFetch, asRecord, type ArrCfg } from "./arr-client";
 import { check, v } from "./validate";
 
 export type ArrCfgFull = ArrCfg & {
@@ -23,6 +23,11 @@ export type ArrCfgFull = ArrCfg & {
 // getCfg accepts the legacy "hd" spelling (mapped to the default "") so existing
 // `is4k ? "4k" : "hd"` callers keep resolving the same Setting keys.
 export type ArrVariant = ArrInstanceKey;
+
+// The instance slug a variant names: the legacy "hd" spelling is the default ("").
+export function normaliseVariant(variant: ArrVariant): ArrVariant {
+  return variant === "hd" ? "" : variant;
+}
 
 // Human label for an error message: "Radarr" for the default/"hd", "Radarr (4k)"
 // for any named instance.
@@ -80,7 +85,7 @@ export async function getCfg(service: ArrService, variant: ArrVariant = ""): Pro
   // Key derivation is centralized in arr-instances.ts (the single place that
   // knows how an instance maps to Setting keys). `variant` is an instance slug;
   // the legacy "hd" spelling maps to the default instance ("").
-  const instance    = variant === "hd" ? "" : variant;
+  const instance    = normaliseVariant(variant);
   const urlKey      = arrSettingKey(service, instance, "Url");
   const keyKey      = arrSettingKey(service, instance, "ApiKey");
   const folderKey   = arrSettingKey(service, instance, "RootFolder");
@@ -134,10 +139,10 @@ export async function listQualityProfiles(
   // upstream list (guardrail 5i).
   const raw = await arrFetch<unknown>(cfg, "/api/v3/qualityprofile");
   const profiles: { id: number; name: string }[] = [];
-  const list = Array.isArray(raw) ? (raw as Array<{ id?: unknown; name?: unknown } | null>) : [];
+  const list: unknown[] = Array.isArray(raw) ? raw : [];
   for (let i = 0; i < list.length && i < MAX_QUALITY_PROFILES * PROFILE_SCAN_FACTOR && profiles.length < MAX_QUALITY_PROFILES; i++) {
-    const p = list[i];
-    if (!p || typeof p !== "object" || typeof p.id !== "number" || !Number.isSafeInteger(p.id)) continue;
+    const p = asRecord(list[i]);
+    if (!p || typeof p.id !== "number" || !Number.isSafeInteger(p.id)) continue;
     profiles.push({ id: p.id, name: typeof p.name === "string" ? p.name : String(p.id) });
   }
   return { profiles, defaultId: cfg.qualityProfileId ?? null };

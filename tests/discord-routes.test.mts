@@ -1091,6 +1091,16 @@ test("unlink clears discordId and reports ok", async () => {
   assert.equal(appUsers.find((u) => u.id === userId)!.discordId, null);
 });
 
+test("unlink drops the caller's pending link token and merge code", async () => {
+  const { token, userId } = await mintSession({ discordId: VALID_SNOWFLAKE });
+  linkTokens.push({ userId, token: "pending-hash", expiresAt: new Date(Date.now() + 60_000), discordId: null });
+  mergeCodes.push({ userId, discordId: VALID_SNOWFLAKE, code: "pending-mac", expiresAt: new Date(Date.now() + 60_000) });
+  const res = await doUnlink(token);
+  assert.equal(res.status, 200);
+  assert.equal(linkTokens.some((t) => t.userId === userId), false, "the pending /link code must not survive an unlink");
+  assert.equal(mergeCodes.some((c) => c.userId === userId), false, "the pending merge code must not survive an unlink");
+});
+
 test("unlink READS the id before clearing it — proven by the revoke actually firing", async () => {
   // Asserted through the CONSEQUENCE rather than op ordering: session resolution
   // also issues a user.findUnique, so an index comparison matches that one and

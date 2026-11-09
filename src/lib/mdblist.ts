@@ -7,6 +7,7 @@ import { mapLimit, coalesce } from "./concurrency";
 import { processSingleton } from "./process-singleton";
 import { createHmac } from "node:crypto";
 import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
+import type { TmdbMedia } from "./tmdb-types";
 import {
   MDBLIST_PLAN_SETTING_KEY,
   budgetAllows,
@@ -464,6 +465,41 @@ function isQuotaErrorMessage(msg: string | null | undefined): boolean {
   return m.includes("api limit") || m.includes("quota") || m.includes("rate limit") || m.includes("too many");
 }
 
+// What an MDBList answer means for the caller, decided in one place so every
+// fetch path reacts alike. A limit answer has already set the pause; a refused
+// key is for the caller to latch (it holds the key); "failed" carries the error
+// text of a 200-with-error body, if there was one, for the caller's own log.
+type MdblistVerdict =
+  | { kind: "ok" }
+  | { kind: "paused" }
+  | { kind: "keyRejected" }
+  | { kind: "failed"; message: string | null };
+
+// The status half, before the body is read: a 429 pauses, a 401/403 refuses the
+// key, any other non-2xx fails. `context` names the call in the pause log.
+async function classifyMdblistStatus(res: Response, context: string): Promise<MdblistVerdict> {
+  if (res.status === 429) {
+    pauseForLimit(res.headers, await errorTextOf(res), `HTTP 429 ${context}`);
+    return { kind: "paused" };
+  }
+  if (res.ok) return { kind: "ok" };
+  if (isKeyRefusal(res.status, null)) return { kind: "keyRejected" };
+  return { kind: "failed", message: null };
+}
+
+// The body half: MDBList signals quota and auth failures as HTTP 200 with an
+// { error } object, so a parsed body is checked the same way on every path.
+function classifyMdblistBody(res: Response, data: unknown, context: string): MdblistVerdict {
+  const errMsg = mdblistErrorMessage(data);
+  if (!errMsg) return { kind: "ok" };
+  if (isQuotaErrorMessage(errMsg)) {
+    pauseForLimit(res.headers, errMsg, context);
+    return { kind: "paused" };
+  }
+  if (isKeyRefusal(res.status, errMsg)) return { kind: "keyRejected" };
+  return { kind: "failed", message: errMsg };
+}
+
 export async function fetchAndCacheMdblistForTmdb(
   tmdbId: number,
   mediaType: "movie" | "tv",
@@ -490,21 +526,21 @@ export async function fetchAndCacheMdblistForTmdb(
 
     const res = await mdblistRequest(url.toString());
 
-    if (res.status === 429) {
-      pauseForLimit(res.headers, await errorTextOf(res), `HTTP 429 for ${mediaType}:${tmdbId}`);
-      return { found: false, keyConfigured: true, quotaExhausted: true, transient: true };
-    }
-
     if (res.status === 404) {
       await setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL);
       return { found: false, keyConfigured: true };
     }
 
-    if (!res.ok) {
-      if (isKeyRefusal(res.status, null)) {
-        noteKeyRejected(apiKey);
-        return transient;
-      }
+    const subject = `for ${mediaType}:${tmdbId}`;
+    const statusVerdict = await classifyMdblistStatus(res, subject);
+    if (statusVerdict.kind === "paused") {
+      return { found: false, keyConfigured: true, quotaExhausted: true, transient: true };
+    }
+    if (statusVerdict.kind === "keyRejected") {
+      noteKeyRejected(apiKey);
+      return transient;
+    }
+    if (statusVerdict.kind === "failed") {
       console.warn(`[mdblist] API returned ${sanitizeForLog(res.status)} for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}`);
       // A transient 5xx must NOT be negative-cached — that would suppress a valid
       // item's ratings for the full 24h TTL. Only a 404 (handled above) is a real
@@ -514,17 +550,16 @@ export async function fetchAndCacheMdblistForTmdb(
 
     const data = await res.json() as unknown;
 
-    const errMsg = mdblistErrorMessage(data);
-    if (errMsg) {
-      if (isQuotaErrorMessage(errMsg)) {
-        pauseForLimit(res.headers, errMsg, `for ${mediaType}:${tmdbId}`);
-        return { found: false, keyConfigured: true, quotaExhausted: true, transient: true };
-      }
-      if (isKeyRefusal(res.status, errMsg)) {
-        noteKeyRejected(apiKey);
-        return transient;
-      }
-      console.warn(`[mdblist] API error for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}: ${sanitizeForLog(errMsg)}`);
+    const bodyVerdict = classifyMdblistBody(res, data, subject);
+    if (bodyVerdict.kind === "paused") {
+      return { found: false, keyConfigured: true, quotaExhausted: true, transient: true };
+    }
+    if (bodyVerdict.kind === "keyRejected") {
+      noteKeyRejected(apiKey);
+      return transient;
+    }
+    if (bodyVerdict.kind === "failed") {
+      console.warn(`[mdblist] API error for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}: ${sanitizeForLog(bodyVerdict.message)}`);
       // A 200-with-error-body (other than 404, handled above as a real not-found) is an
       // app-level error that may be transient — do NOT negative-cache it for 24h, or a
       // valid item's ratings stay suppressed for the full TTL. Matches the 5xx reasoning.
@@ -615,6 +650,9 @@ function isBatchRow(raw: unknown): raw is MdblistBatchRaw {
   return raw !== null && typeof raw === "object" && !Array.isArray(raw);
 }
 
+// A text field of a row read as typed: anything but a non-empty string is absent.
+const textOrNull = (v: unknown): string | null => (typeof v === "string" && v !== "" ? v : null);
+
 // Exported for direct unit coverage (tests/mdblist-parse.test.mts) — pure parser, no I/O.
 export function parseBatchItem(raw: MdblistBatchRaw): MdblistRatings {
   // A `ratings` that is not an array, or a non-object entry in it, is read as
@@ -647,7 +685,7 @@ export function parseBatchItem(raw: MdblistBatchRaw): MdblistRatings {
   const ebertValue      = sourceValue(ebert?.value);
 
   return {
-    imdbId:           raw.imdb_id || null,
+    imdbId:           textOrNull(raw.imdb_id),
     imdbRating:       imdbValue != null       ? String(imdbValue)                     : null,
     imdbVotes:        imdb?.votes             ? String(imdb.votes)                    : null,
     rottenTomatoes:   tomatoesValue != null   ? `${Math.round(tomatoesValue)}%`       : null,
@@ -658,8 +696,8 @@ export function parseBatchItem(raw: MdblistBatchRaw): MdblistRatings {
     mdblistScore:     aggregateScore(raw.score),
     malRating:        malValue != null        ? String(malValue)                      : null,
     rogerEbertRating: ebertValue != null      ? String(ebertValue)                    : null,
-    releasedDigital:  raw.released_digital || null,
-    trailerUrl:       raw.trailer || null,
+    releasedDigital:  textOrNull(raw.released_digital),
+    trailerUrl:       textOrNull(raw.trailer),
   };
 }
 
@@ -776,27 +814,21 @@ async function fetchBatchPage(
 ): Promise<BatchPageResult> {
   try {
     const res = await postBatchWithRetry(url, page.map((item) => item.id));
-    if (res.status === 429) {
-      pauseForLimit(res.headers, await errorTextOf(res), `HTTP 429 on batch ${mediaType}`);
-      return { kind: "paused" };
-    }
-    if (!res.ok) {
-      if (isKeyRefusal(res.status, null)) return { kind: "keyRejected" };
+    const context = `on batch ${mediaType}`;
+    const statusVerdict = await classifyMdblistStatus(res, context);
+    if (statusVerdict.kind === "paused" || statusVerdict.kind === "keyRejected") return { kind: statusVerdict.kind };
+    if (statusVerdict.kind === "failed") {
       console.warn(`[mdblist] batch ${mediaType} returned ${res.status}`);
       return { kind: "failed" };
     }
 
     const data = await res.json() as unknown;
-    const errMsg = mdblistErrorMessage(data);
-    if (errMsg && isQuotaErrorMessage(errMsg)) {
-      pauseForLimit(res.headers, errMsg, `on batch ${mediaType}`);
-      return { kind: "paused" };
-    }
-    if (errMsg && isKeyRefusal(res.status, errMsg)) return { kind: "keyRejected" };
-    if (errMsg) {
+    const bodyVerdict = classifyMdblistBody(res, data, context);
+    if (bodyVerdict.kind === "paused" || bodyVerdict.kind === "keyRejected") return { kind: bodyVerdict.kind };
+    if (bodyVerdict.kind === "failed") {
       // A 200-with-error body (a malformed request, a backend fault) is not a
       // ratings answer. Log the real error and count it toward the breaker.
-      console.warn(`[mdblist] batch ${mediaType} API error: ${sanitizeForLog(errMsg)}`);
+      console.warn(`[mdblist] batch ${mediaType} API error: ${sanitizeForLog(bodyVerdict.message)}`);
       return { kind: "failed" };
     }
     noteKeyAccepted(apiKey);
@@ -1014,8 +1046,6 @@ export async function testMdblistConnection(): Promise<string> {
   return typeof title === "string" ? title : "OK";
 }
 
-import type { TmdbMedia } from "./tmdb-types";
-
 interface MdblistListMeta {
   id: number;
   name: string;
@@ -1124,22 +1154,19 @@ async function fetchMdblistTopListsWithStatus(
     url.searchParams.set("limit", String(limit));
 
     const res = await mdblistRequest(url.toString());
-    if (res.status === 429) {
-      pauseForLimit(res.headers, await errorTextOf(res), "HTTP 429 on top lists");
-      return { lists: [], ok: false };
-    }
-    if (!res.ok) return { lists: [], ok: false };
+    const statusVerdict = await classifyMdblistStatus(res, "on top lists");
+    if (statusVerdict.kind === "keyRejected") noteKeyRejected(apiKey);
+    if (statusVerdict.kind !== "ok") return { lists: [], ok: false };
 
     const data = await res.json() as unknown;
     // MDBList signals quota/auth failures as HTTP 200 with an { error } object
     // body (same shape the single-item path handles). Returning that object as
     // a list crashed getMdblistTopRated on `lists.map` — surface the error,
     // trip the lockout on quota messages, and only ever return an array.
-    const errMsg = mdblistErrorMessage(data);
-    if (errMsg) {
-      if (isQuotaErrorMessage(errMsg)) pauseForLimit(res.headers, errMsg, "on top lists");
-      console.warn(`[mdblist] top lists API error: ${sanitizeForLog(errMsg)}`);
-    }
+    const bodyVerdict = classifyMdblistBody(res, data, "on top lists");
+    if (bodyVerdict.kind === "keyRejected") noteKeyRejected(apiKey);
+    if (bodyVerdict.kind === "failed") console.warn(`[mdblist] top lists API error: ${sanitizeForLog(bodyVerdict.message)}`);
+    if (bodyVerdict.kind !== "ok") return { lists: [], ok: false };
     if (!Array.isArray(data)) return { lists: [], ok: false };
     const lists = projectListMetas(data);
     if (lists.length > 0) await setCache(key, lists, TTL.DISCOVER);
@@ -1178,10 +1205,15 @@ async function fetchMdblistListItemsWithStatus(
     url.searchParams.set("apikey", apiKey);
 
     const res = await mdblistRequest(url.toString());
-    if (res.status === 429) { pauseForLimit(res.headers, await errorTextOf(res), "HTTP 429 on list items"); return { items: [], ok: false }; }
-    if (!res.ok) return { items: [], ok: false };
+    const statusVerdict = await classifyMdblistStatus(res, "on list items");
+    if (statusVerdict.kind === "keyRejected") noteKeyRejected(apiKey);
+    if (statusVerdict.kind !== "ok") return { items: [], ok: false };
 
     const data: unknown = await res.json();
+    const bodyVerdict = classifyMdblistBody(res, data, "on list items");
+    if (bodyVerdict.kind === "keyRejected") noteKeyRejected(apiKey);
+    if (bodyVerdict.kind === "failed") console.warn(`[mdblist] list items API error: ${sanitizeForLog(bodyVerdict.message)}`);
+    if (bodyVerdict.kind !== "ok") return { items: [], ok: false };
     if (!Array.isArray(data)) return { items: [], ok: false };
     const result = projectListItems(data);
 

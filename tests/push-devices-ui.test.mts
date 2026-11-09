@@ -14,7 +14,7 @@ test("a removed device stays hidden while the page refreshes, and each row has i
   const hide = remove.indexOf("setRemoved((prev) => new Set(prev).add(id));");
   assert.ok(hide > 0 && hide < remove.indexOf("router.refresh();"), "hidden before the refresh starts");
   assert.match(src, /const visible = devices\.filter\(\(d\) => !removed\.has\(d\.id\)\);/);
-  assert.match(src, /\{visible\.map\(\(device, i\) =>/);
+  assert.match(src, /\{visible\.map\(\(device\) =>/);
   assert.doesNotMatch(src, /\{devices\.map\(/);
   assert.match(remove, /action\.run\(\s*`remove:\$\{id\}`/);
   assert.match(remove, /\{ ifBusy: "skip" \}/);

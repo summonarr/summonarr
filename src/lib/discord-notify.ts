@@ -913,7 +913,8 @@ async function notifyUsersBatch<R extends BatchRequest>(
     const idMap = new Map(users.map((u) => [u.id, u.discordId!]));
     const userById = new Map(users.map((u) => [u.id, u]));
     const shared = !!cfg.channelId;
-    const resolve = await titleResolver(requests, users.map((u) => recipientLocale(shared, u)));
+    // Titles only for requests that will actually be sent.
+    const resolve = await titleResolver(requests.filter((r) => idMap.has(r.requestedBy)), users.map((u) => recipientLocale(shared, u)));
 
     const tasks = requests.map((r) => () => {
       const discordId = idMap.get(r.requestedBy);

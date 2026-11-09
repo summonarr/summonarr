@@ -18,8 +18,12 @@ import {
   type MfaMethod,
 } from "@/lib/client/login-answers";
 import { getPasskeyAssertion, isWebAuthnCancel, isWebAuthnSupported } from "@/lib/client/webauthn";
+import { check, v } from "@/lib/validate";
 import { useT } from "@/components/i18n/i18n-provider";
 import { ErrorText, Field, SecondaryAction } from "./login-parts";
+
+// The one flag read off a refusal's body: the challenge token has lapsed.
+const mfaRefusalSchema = v.object({ mfaExpired: v.optional(v.boolean()) });
 
 export function MfaStep({
   challenge,
@@ -55,8 +59,8 @@ export function MfaStep({
       setBusy(false);
       return;
     }
-    const answer = res.body && typeof res.body === "object" ? (res.body as { mfaExpired?: unknown }) : null;
-    if (answer?.mfaExpired === true) {
+    const answer = check(mfaRefusalSchema, res.body);
+    if (answer.ok && answer.value.mfaExpired === true) {
       onRestart(apiErrorText(res.body, t("auth.mfa.error.expired")));
       return;
     }

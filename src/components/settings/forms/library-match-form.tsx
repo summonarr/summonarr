@@ -53,12 +53,15 @@ function LibraryMatchMediaBlock({
         <Label htmlFor={inputId} className="text-xs text-zinc-400">{t("settings.form.libraryMatch.prefixLabel")}</Label>
         <Input
           id={inputId}
-          aria-label={ariaLabel}
+          aria-describedby={`${inputId}-context`}
           value={prefix}
           onChange={(e) => onChangePrefix(e.target.value)}
           placeholder={placeholder}
           className="bg-zinc-800 border-zinc-700 font-mono h-8"
         />
+        {/* Which server and media this box is for: a description, so the
+            accessible name stays the visible label. */}
+        <span id={`${inputId}-context`} className="sr-only">{ariaLabel}</span>
       </div>
 
       {data && prefix && (

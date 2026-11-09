@@ -1,4 +1,4 @@
-// Audit fix C017 (nw-upstream): the never-watched page's "Check now" walks every
+// the never-watched page's "Check now" walks every
 // configured server's whole watch history (and every Jellyfin user's played
 // items). Held open as one request, that outlasted a reverse proxy's ~60–100 s
 // and the browser got a 502 while the walk went on to write the snapshot — the
@@ -208,7 +208,7 @@ afterEach(() => {
   gate = null;
 });
 
-test("C017 async: 202 { job } BEFORE the walk finishes; the poll is 202 while it runs, then the walk's own 200 answer — report invalidated", { timeout: 5_000 }, async () => {
+test("async: 202 { job } BEFORE the walk finishes; the poll is 202 while it runs, then the walk's own 200 answer — report invalidated", { timeout: 5_000 }, async () => {
   const token = await mintSession();
   park();
   const versionBefore = reportCache.version;
@@ -237,7 +237,7 @@ test("C017 async: 202 { job } BEFORE the walk finishes; the poll is 202 while it
   assert.ok(reportCache.version > versionBefore, "the job drops the cached report once the walk lands");
 });
 
-test("C017 async: the same admin asking again while theirs runs JOINS it — one walk, and no rate token spent on a join", { timeout: 5_000 }, async () => {
+test("async: the same admin asking again while theirs runs JOINS it — one walk, and no rate token spent on a join", { timeout: 5_000 }, async () => {
   const token = await mintSession();
   park();
   const first = (await (await post(token, { async: true })).json()) as { job: string };
@@ -261,7 +261,7 @@ test("C017 async: the same admin asking again while theirs runs JOINS it — one
   assert.equal((await post(token, { async: true })).status, 202, "a fresh start after the joins is still allowed");
 });
 
-test("C017 no body is still the SYNCHRONOUS walk (the API contract): its result JSON, not a job", { timeout: 5_000 }, async () => {
+test("no body is still the SYNCHRONOUS walk (the API contract): its result JSON, not a job", { timeout: 5_000 }, async () => {
   const token = await mintSession();
   const res = await post(token);
   assert.equal(res.status, 200);
@@ -273,7 +273,7 @@ test("C017 no body is still the SYNCHRONOUS walk (the API contract): its result 
   assert.equal(explicit.status, 200, "async: false is synchronous too");
 });
 
-test("C017 another admin's job id reads 404 with the 'job gone' message — and so does a made-up one", { timeout: 5_000 }, async () => {
+test("another admin's job id reads 404 with the 'job gone' message — and so does a made-up one", { timeout: 5_000 }, async () => {
   const owner = await mintSession();
   const other = await mintSession();
   park();

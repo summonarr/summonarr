@@ -19,6 +19,11 @@ function tally(results: PromiseSettledResult<DiscordRoleSyncOutcome>[]): Record<
   return out;
 }
 
+// Both reads filter on `discordId: { not: null }`; this carries that into the type.
+function withDiscordId<T extends { discordId: string | null }>(rows: T[]): Array<T & { discordId: string }> {
+  return rows.filter((r): r is T & { discordId: string } => r.discordId !== null);
+}
+
 export const POST = withAdmin(async (req, _ctx, session) => {
   // `discordId != null` is necessary but not sufficient. The bot creates SHADOW
   // rows for anyone who runs a slash command — same shape, real snowflake, but
@@ -60,8 +65,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         select: { userId: true },
       })).map((a) => a.userId));
 
-  const assigned = tally(await settleLimit(linked, SYNC_CONCURRENCY, (u) =>
-    assignDiscordRolesOnLink(u.discordId!, {
+  const assigned = tally(await settleLimit(withDiscordId(linked), SYNC_CONCURRENCY, (u) =>
+    assignDiscordRolesOnLink(u.discordId, {
       email: u.email,
       role: u.role,
       plexUserId: u.plexUserId,
@@ -70,8 +75,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       hasOidcAccount: oidcIds.has(u.id),
     })
   ));
-  const revoked = tally(await settleLimit(deactivated, SYNC_CONCURRENCY, (u) =>
-    revokeDiscordRolesOnUnlink(u.discordId!)
+  const revoked = tally(await settleLimit(withDiscordId(deactivated), SYNC_CONCURRENCY, (u) =>
+    revokeDiscordRolesOnUnlink(u.discordId)
   ));
   const failed = assigned.failed + revoked.failed;
   const skipped = assigned.skipped + revoked.skipped;

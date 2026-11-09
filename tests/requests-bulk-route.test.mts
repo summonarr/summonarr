@@ -152,14 +152,15 @@ test("bulk: an auto-approval whose push failed is marked pushFailed and goes to 
   // on a 50-item "Request all" (the header's rule). The result stays "created".
   // Only a rollback that LANDED counts: the shared state machine reports a
   // failure whose row moved on as "failed", which is not PENDING.
-  assert.match(CODE, /if \(outcome\.kind === "rolled-back"\) rolledBack\.set\(row\.key, row\.id\);/);
+  assert.match(CODE, /if \(outcome\.kind === "rolled-back"\) awaitingReview\.set\(row\.key, row\.id\);/);
+  assert.match(CODE, /result: "created" \}\);\s*awaitingReview\.set\(key, row\.id\);/, "a row created PENDING is announced too");
   assert.match(CODE, /outcome\.kind === "rolled-back"\s*\? \{ tmdbId: row\.tmdbId, mediaType: [^}]*result: "created", pushFailed: true \}/);
   const alerts = CODE.match(/alertAdminsNewRequest\(/g) ?? [];
   assert.equal(alerts.length, 1, "one alert call site");
   const loopEnd = CODE.indexOf('scheduleDownloadChecks(downloadChecksFor(settled), { name: "requests/bulk:90s-download-check" });');
   const alert = CODE.indexOf("alertAdminsNewRequest(");
   assert.ok(loopEnd > 0 && alert > loopEnd, "the alert runs once, after the push loop");
-  assert.match(CODE, /const firstRolledBack = prepared\.find\(\(p\) => rolledBack\.has\(keyOf\(p\.tmdbId, p\.mediaType\)\)\);\s*if \(firstRolledBack\) \{\s*alertAdminsNewRequest\(/);
+  assert.match(CODE, /const firstAwaiting = prepared\.find\(\(p\) => awaitingReview\.has\(keyOf\(p\.tmdbId, p\.mediaType\)\)\);\s*if \(firstAwaiting\) \{\s*alertAdminsNewRequest\(/);
   assert.doesNotMatch(CODE, /notifyAdminsNewRequest/, "per-channel admin notifiers stay behind the shared alert");
 });
 

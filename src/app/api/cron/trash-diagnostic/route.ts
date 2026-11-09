@@ -187,9 +187,7 @@ async function buildReport() {
     starterPack,
     recentAudit,
     config,
-    ...(failed(config)
-      ? {}
-      : { encryption: { keySet: Boolean(process.env.TOKEN_ENCRYPTION_KEY && process.env.TOKEN_ENCRYPTION_KEY.length === 64) } }),
+    encryption: { keySet: Boolean(process.env.TOKEN_ENCRYPTION_KEY && process.env.TOKEN_ENCRYPTION_KEY.length === 64) },
     lastRefreshTruncatedAt,
     errorStats,
   };

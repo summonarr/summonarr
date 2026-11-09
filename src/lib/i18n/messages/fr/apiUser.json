@@ -121,6 +121,7 @@
   "apiUser.push.subscriptionRemoved": "L'enregistrement push de cet appareil a été supprimé. Réactivez les notifications pour l'utiliser.",
   "apiUser.push.vapidMissing": "Les clés VAPID ne sont pas configurées",
   "apiUser.push.webPushNotConfigured": "Les notifications push web ne sont pas configurées sur ce serveur",
+  "apiUser.push.webSendFailed": "La notification de test n'a pas pu être envoyée",
   "apiUser.quota.window.day": "jour",
   "apiUser.quota.window.days_one": "{count} jour",
   "apiUser.quota.window.days_other": "{count} jours",

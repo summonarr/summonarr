@@ -127,7 +127,7 @@ function setSettings(rows: Record<string, string>): void {
 type LibArgs = { where: Record<string, unknown>; select?: Record<string, unknown> };
 const plexLibCalls: LibArgs[] = [];
 let plexLibRow: { tmdbId: number | null } | null = null;
-// The Plex branch reads findMany (several rows can hold one key — C138); a test
+// The Plex branch reads findMany (several rows can hold one key —); a test
 // that only needs one answer sets plexLibRow, a multi-row case sets plexLibRows.
 let plexLibRows: Array<{ tmdbId: number; plexRatingKey: string | null }> | null = null;
 shadowPrismaModel(prisma, "plexLibraryItem", {

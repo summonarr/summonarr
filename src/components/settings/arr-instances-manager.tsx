@@ -419,7 +419,7 @@ function InstanceCard({
       <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
-            <Label htmlFor={`${service}-${idx}-folder`}>{t("settings.arr.rootFolder")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
+            <Label htmlFor={ready ? `${service}-${idx}-folder` : undefined}>{t("settings.arr.rootFolder")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
             {ready && (
               <button type="button" onClick={onRefreshOptions} className="flex items-center gap-1 min-h-8 px-2 -my-2 -mr-2 text-xs text-zinc-500 hover:text-zinc-100">
                 <RefreshCw className="w-3 h-3" />{t("settings.common.refresh")}
@@ -440,7 +440,7 @@ function InstanceCard({
           )}
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor={`${service}-${idx}-profile`}>{t("settings.arr.qualityProfile")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
+          <Label htmlFor={ready ? `${service}-${idx}-profile` : undefined}>{t("settings.arr.qualityProfile")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
           {ready ? (
             <ArrProfileSelect
               id={`${service}-${idx}-profile`}

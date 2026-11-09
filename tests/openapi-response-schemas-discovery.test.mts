@@ -165,7 +165,7 @@ test("/popular documents its envelope, its sort set and each title's play counts
   const schema = await responseSchema("/popular", "get", "200");
   assert.deepEqual(keysOf(schema), successKeys("/popular"));
   const src = routeSource("/popular");
-  const sorts = /new Set<PopularSort>\(\[([^\]]*)\]\)/.exec(src)?.[1] ?? "";
+  const sorts = /POPULAR_SORTS: readonly PopularSort\[\] = \[([^\]]*)\]/.exec(src)?.[1] ?? "";
   assert.deepEqual([...(schema.properties?.sort.enum ?? [])].sort(), [...sorts.matchAll(/"(\w+)"/g)].map((m) => m[1]).sort());
   for (const k of ["movies", "tv"]) {
     const item = schema.properties?.[k].items as SchemaNode;
@@ -207,9 +207,23 @@ test("GET /media/{type}/{tmdbId} documents the title plus every field the handle
   const extra = schema.allOf?.[1];
   const body = successKeys("/media/{type}/{tmdbId}");
   assert.ok(body.includes("...withAvailability"), body.join(","));
-  assert.deepEqual(keysOf(extra), body.filter((k) => !k.startsWith("...")));
-
   const src = routeSource("/media/{type}/{tmdbId}");
+  // The handler spreads two helpers' results into the body; their keys are the
+  // top-level keys of each helper's returned object literal.
+  const helperKeys = (fn: string) => {
+    const body = new RegExp(`function ${fn}\\([^]*?\\n  return \\{\\n([^]*?)\\n  \\};`).exec(src)?.[1] ?? "";
+    const keys = [...body.matchAll(/^ {4}(\w+):/gm)].map((m) => m[1]);
+    assert.ok(keys.length > 0, `${fn} keys not found`);
+    return keys;
+  };
+  assert.ok(body.includes("...extras") && body.includes("...flags"), body.join(","));
+  const expected = [
+    ...body.filter((k) => !k.startsWith("...")),
+    ...helperKeys("detailExtras"),
+    ...helperKeys("viewerTitleFlags"),
+  ].sort();
+  assert.deepEqual(keysOf(extra), expected);
+
   const liteKeys = [...(/function lite\(m: TmdbMedia\) \{\s*return \{([^}]*)\};/.exec(src)?.[1] ?? "").matchAll(/(\w+):/g)]
     .map((m) => m[1]).sort();
   assert.ok(liteKeys.length >= 5, liteKeys.join(","));

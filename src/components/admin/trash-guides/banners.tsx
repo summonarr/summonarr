@@ -65,7 +65,9 @@ export function TruncationBanner({ at }: { at: string }) {
           <p className="font-medium text-amber-400">{t("trash.banner.truncatedTitle")}</p>
           <p className="mt-1 text-zinc-100">
             {t("trash.banner.truncatedBody", {
-              at: mounted ? new Date(at).toLocaleString(locale, { timeZone: "UTC", dateStyle: "medium", timeStyle: "short" }) + " UTC" : "",
+              at: mounted && Number.isFinite(Date.parse(at))
+                ? new Date(at).toLocaleString(locale, { timeZone: "UTC", dateStyle: "medium", timeStyle: "short" }) + " UTC"
+                : "",
             })}
           </p>
           <p className="mt-2 text-xs text-zinc-400">

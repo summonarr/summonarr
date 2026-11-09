@@ -758,6 +758,7 @@ test("diagnose reports a non-2xx upstream status", async () => {
   usersFetchMode = "500";
   const body = await (await getDiagnose(t)).json();
   assert.equal(body.httpStatus, 500);
+  assert.equal(body.fetchError, "http:500");
 });
 
 test("diagnose labels an unexpected body shape rather than crashing", async () => {

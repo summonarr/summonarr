@@ -13,7 +13,7 @@ export const dynamic = "force-dynamic";
 
 async function anyConfigured(): Promise<boolean> {
   for (const service of ["radarr", "sonarr"] as const) {
-    if (!(await isFeatureEnabled(`feature.integration.${service}`))) continue;
+    if (!(await isFeatureEnabled(`feature.integration.${service}`).catch(() => false))) continue;
     if ((await getSyncableArrInstances(service)).length > 0) return true;
   }
   return false;

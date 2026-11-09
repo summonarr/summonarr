@@ -86,11 +86,15 @@ function StandaloneRadioGroup<T extends string>({
   value,
   options,
   onChange,
+  commitOnArrow = true,
 }: {
   label: string;
   value: T;
   options: AppearanceOption<T>[];
   onChange: (v: T) => void;
+  /** false: an arrow key only moves focus and Enter/Space commits. For a choice
+   *  whose change is costly (the language reloads the page's data). */
+  commitOnArrow?: boolean;
 }) {
   const selectedIndex = options.findIndex((o) => o.value === value);
   const onKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
@@ -99,7 +103,7 @@ function StandaloneRadioGroup<T extends string>({
     e.preventDefault();
     const buttons = e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]');
     buttons?.[next]?.focus();
-    onChange(options[next].value);
+    if (commitOnArrow) onChange(options[next].value);
   };
   return (
     <div
@@ -230,7 +234,7 @@ export function AppearanceMenu({ standalone = false }: { standalone?: boolean } 
         {header(accent)}
         <StandaloneRadioGroup<Accent> label={accent.label} value={accent.value} onChange={accent.onChange} options={accent.options} />
         {header(language)}
-        <StandaloneRadioGroup<Locale> label={language.label} value={language.value} onChange={language.onChange} options={language.options} />
+        <StandaloneRadioGroup<Locale> label={language.label} value={language.value} onChange={language.onChange} options={language.options} commitOnArrow={false} />
       </>
     );
   }

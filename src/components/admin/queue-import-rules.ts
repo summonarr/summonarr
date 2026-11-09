@@ -87,7 +87,13 @@ export function initialDraft(service: "radarr" | "sonarr", current: ImportCandid
   };
 }
 
-const sameSet = (a: readonly number[], b: readonly number[]) => a.length === b.length && a.every((x) => b.includes(x));
+const sameSet = (a: readonly number[], b: readonly number[]) => {
+  const left = new Set(a);
+  const right = new Set(b);
+  if (left.size !== right.size) return false;
+  for (const x of left) if (!right.has(x)) return false;
+  return true;
+};
 
 /** Only what the admin actually changed goes back as a correction. */
 export function overrideFrom(file: ImportCandidate, d: Draft, service: "radarr" | "sonarr"): ImportOverride {

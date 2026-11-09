@@ -80,9 +80,7 @@ async function rejection(p: Promise<Response>): Promise<SafeFetchError> {
 
 const ok = (_q: http.IncomingMessage, r: http.ServerResponse) => { r.end("ok"); };
 
-// ---------------------------------------------------------------------------
 // The rebinding tests
-// ---------------------------------------------------------------------------
 
 test("REBIND: validated public address is dialled, NOT what the OS resolves later (user mode)", async () => {
   const { port, hits } = await listen(ok);
@@ -141,9 +139,7 @@ test("PIN: admin mode dials the validated address for a name the OS cannot resol
   assert.equal(hits[0].url, "/p?q=1");
 });
 
-// ---------------------------------------------------------------------------
 // Address-set policy
-// ---------------------------------------------------------------------------
 
 test("MULTI: one private record among public ones refuses the request (user)", async () => {
   const { port, hits } = await listen(ok);
@@ -188,9 +184,7 @@ test("IP literals: 169.254.169.254 and 0.0.0.0 stay blocked in admin mode", asyn
   }
 });
 
-// ---------------------------------------------------------------------------
 // The pinned resolver / connection options
-// ---------------------------------------------------------------------------
 
 test("makePinnedLookup answers only with the pinned set, honouring family and all", () => {
   const lookup = makePinnedLookup(["192.0.2.1", "2001:db8::1"]);
@@ -230,9 +224,7 @@ test("TLS: servername, hostname and lookup are the original host / pinned set; a
   assert.equal(lit.servername, undefined, "no SNI for an IP literal");
 });
 
-// ---------------------------------------------------------------------------
 // Behaviour preserved: caps, timeouts, redirects, bodies, encodings
-// ---------------------------------------------------------------------------
 
 test("size cap: declared Content-Length over the cap is refused", async () => {
   const { port } = await listen((_q, r) => { r.setHeader("content-length", "5000"); r.end("x".repeat(5000)); });
@@ -323,10 +315,8 @@ test("caller AbortSignal cancels the request", async () => {
   await rejection(p);
 });
 
-// ---------------------------------------------------------------------------
 // fetch parity: the pinned transport keeps undici's connect and idle timeouts
 // and its lenient decoding, so moving off fetch() changed no failure mode.
-// ---------------------------------------------------------------------------
 
 test("defaults are fetch's: 10s connect, 300s idle, at most 5 content-codings", () => {
   assert.equal(PINNED_CONNECT_TIMEOUT_MS, 10_000);
@@ -567,11 +557,9 @@ test("connection refused maps to a network SafeFetchError", async () => {
   assert.equal(err.reason, "network");
 });
 
-// ---------------------------------------------------------------------------
 // The pinned request always settles. doFetch awaits it with nothing
 // racing it, so any path that neither resolves nor rejects hung the caller
 // forever, whatever timeoutMs said.
-// ---------------------------------------------------------------------------
 
 // Fails the test instead of hanging the runner when `p` never settles.
 async function settlesWithin<T>(p: Promise<T>, ms: number): Promise<T> {

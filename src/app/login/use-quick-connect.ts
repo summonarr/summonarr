@@ -85,7 +85,11 @@ async function pollUntilAuthenticated(
       // Cancelled: the run is over, no pause. (The server answers a poll the
       // browser abandoned with 499, which nobody reads.)
       if (signal.aborted) return null;
-      // Fetch rejected immediately (network down) — pause so the loop can't hot-spin.
+      // Fetch rejected (network down): a few in a row end the run with the
+      // network message instead of waiting out the whole deadline. The pause
+      // keeps the loop from hot-spinning.
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= QC_MAX_CONSECUTIVE_FAILURES) return { ok: false, error: t("auth.login.error.network") };
       await sleep(1000, signal);
       continue;
     }

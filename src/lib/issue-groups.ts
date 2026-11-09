@@ -55,7 +55,7 @@ export function groupIssues<T extends GroupableIssue>(issues: readonly T[]): Iss
         representative: group[0],
         members: group,
         count: group.length,
-        reporterNames: group.map((i) => nameOrEmail(i.user)),
+        reporterNames: [...new Set(group.map((i) => nameOrEmail(i.user)))],
       };
     })
     .sort((a, b) => {

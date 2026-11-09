@@ -30,7 +30,6 @@ import {
 import { fetchJson, LONG_RUN_TIMEOUT_MS, jsonInit } from "@/lib/client/fetch-json";
 import {
   CLEANUP_MAX_ITEMS,
-  CLEANUP_NUMERIC_BOUNDS,
   toggleAllCleanupSelection,
   toggleCleanupSelection,
   type CleanupSettings,
@@ -46,7 +45,7 @@ import {
   type CleanupViewState,
 } from "@/lib/library-cleanup-view";
 import { CleanupReportSchema, parseRuleNumber, selectedOutsideView, type CleanupReportView } from "./library-cleanup-report";
-import { CleanupBanners, CleanupFilterBar, CleanupStats, CleanupTable, ProtectedList, RulesPanel } from "./library-cleanup-parts";
+import { CleanupBanners, CleanupFilterBar, CleanupStats, CleanupTable, ProtectedList, RulesPanel, type BooleanField, type NumericField } from "./library-cleanup-parts";
 
 type Report = CleanupReportView;
 
@@ -294,9 +293,9 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
   }
 
   const anyRuleOn = report.settings.unwatchedEnabled || report.settings.neverWatchedEnabled || report.settings.votesEnabled;
-  const setNum = (field: keyof typeof CLEANUP_NUMERIC_BOUNDS, v: string) =>
+  const setNum = (field: NumericField, v: string) =>
     setDraft((d) => (d ? { ...d, [field]: parseRuleNumber(v) } : d));
-  const setBool = (field: "unwatchedEnabled" | "neverWatchedEnabled" | "votesEnabled" | "excludeAiring" | "requireUpstreamCheck", v: boolean) =>
+  const setBool = (field: BooleanField, v: boolean) =>
     setDraft((d) => (d ? { ...d, [field]: v } : d));
   const shown = visible.slice(0, RENDER_CAP);
   const protectedTotal = Math.max(report.protectedTotal ?? 0, report.protected.length);
@@ -333,8 +332,8 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
         del={del}
       />
 
-      {[loadError, actionError, del.error].filter((m) => m !== "").map((m, i) => (
-        <p key={i} role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{m}</p>
+      {([["load", loadError], ["action", actionError], ["delete", del.error]] as const).filter(([, m]) => m !== "").map(([source, m]) => (
+        <p key={source} role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{m}</p>
       ))}
       {selectionFull && (
         <p style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>{t("adminManage.cleanup.selectionFull", { max: CLEANUP_MAX_ITEMS })}</p>

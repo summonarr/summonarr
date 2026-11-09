@@ -547,7 +547,7 @@ test("a failed read is the `unreachable` verdict with its kind — never a 500, 
   assert.ok(warnLines.some((l) => l.includes("[request-arr-status]") && l.includes("queue read")), warnLines.join("\n"));
 });
 
-test("C152: every read of the check is quiet, carries the status timeout, and shares one budget — a failed title read logs ONCE", async () => {
+test("every read of the check is quiet, carries the status timeout, and shares one budget — a failed title read logs ONCE", async () => {
   // safeFetch builds one AbortSignal.timeout per request from its timeoutMs;
   // the check's budget is one more. Record the durations asked for.
   const realTimeout = AbortSignal.timeout.bind(AbortSignal);
@@ -622,7 +622,7 @@ test("rate limited per caller", async () => {
 
 // ── 3: the 2026-10-12 audit fixes ────────────────────────────────────────────
 
-test("a requester with a media-server preference waits for a LIBRARY, not the sync: the ARR marking pass skips them (C154)", () => {
+test("a requester with a media-server preference waits for a LIBRARY, not the sync: the ARR marking pass skips them", () => {
   const hasIt = ok(movieRow({ hasFile: true }));
   assert.equal(judge({ resource: hasIt, inLibrary: false, requesterPinned: true }), "waitingForLibrary");
   assert.equal(judge({ resource: hasIt, inLibrary: false, requesterPinned: false }), "inArrNotInLibrary");
@@ -632,7 +632,7 @@ test("a requester with a media-server preference waits for a LIBRARY, not the sy
   assert.equal(judgeStatus({ service: "sonarr", resource: ok(seriesRow([8, 8], [10, 10])), requesterPinned: true }).verdict, "waitingForLibrary");
 });
 
-test("route: the requester's mediaServer preference decides waitingForLibrary vs inArrNotInLibrary (C154)", async () => {
+test("route: the requester's mediaServer preference decides waitingForLibrary vs inArrNotInLibrary", async () => {
   requests = [approvedMovie()];
   responder = radarrResponder(movieRow({ hasFile: true }));
   const token = await mintSession();
@@ -642,7 +642,7 @@ test("route: the requester's mediaServer preference decides waitingForLibrary vs
   assert.equal((await (await get(token, "r1")).json() as StatusBody).verdict, "inArrNotInLibrary");
 });
 
-test("a Sonarr series monitored at the series level with NO aired episode monitored is `unmonitored`, not searching (C155)", () => {
+test("a Sonarr series monitored at the series level with NO aired episode monitored is `unmonitored`, not searching", () => {
   // Seasons 1–2 unmonitored: episodeCount (monitored AND aired, or with a file) is 0.
   const season = (n: number, extra: Record<string, unknown> = {}) => ({
     seasonNumber: n, monitored: false, statistics: { episodeFileCount: 0, episodeCount: 0, previousAiring: `202${n}-01-01T00:00:00Z`, ...extra },
@@ -666,7 +666,7 @@ test("a Sonarr series monitored at the series level with NO aired episode monito
   assert.equal(judgeStatus({ service: "sonarr", resource: ok(seriesRow([0, 8], [0, 10])) }).verdict, "waiting");
 });
 
-test("a failure an import FOLLOWED is answered: the title reads incomplete, not 'the last download failed' (C156)", () => {
+test("a failure an import FOLLOWED is answered: the title reads incomplete, not 'the last download failed'", () => {
   const sonarrFail = projectHistoryRecords("sonarr", "", [{ id: 40, seriesId: 30, eventType: "downloadFailed", date: "2026-09-02T00:00:00Z", sourceTitle: "Show.S02", data: { message: "Download failed" } }]);
   const imported = (date: string) => projectHistoryRecords("sonarr", "", [{ id: 41, seriesId: 30, eventType: "downloadFolderImported", date, sourceTitle: "Show.S02E01" }]);
   const run = (imports: Inputs["imports"]) => judgeStatus({ service: "sonarr", resource: ok(seriesRow([8, 8], [2, 10])), failures: ok(sonarrFail), imports });
@@ -696,7 +696,7 @@ test("a 200k-record import history is read one by one: the newest import still a
   assert.equal(run(), "incomplete", "the newest import, wherever it sits, answers it");
 });
 
-test("route: the import read is the title's own (seriesId), beside the DownloadFailed read; a later import answers a failure (C156)", async () => {
+test("route: the import read is the title's own (seriesId), beside the DownloadFailed read; a later import answers a failure", async () => {
   requests = [{ id: "t1", mediaType: "TV", tmdbId: 300, status: "APPROVED", arrInstance: "", requestedBy: REQUESTER, approvedAt: APPROVED_AT, createdAt: APPROVED_AT }];
   let importDate = "2026-09-05T00:00:00Z";
   responder = (c) => {
@@ -724,7 +724,7 @@ test("route: the import read is the title's own (seriesId), beside the DownloadF
   assert.equal((await (await get(token, "t1")).json() as StatusBody).verdict, "downloadFailed");
 });
 
-test("another title's DownloadFailed record (an arr that ignored the id filter) never becomes this request's failure (C150)", async () => {
+test("another title's DownloadFailed record (an arr that ignored the id filter) never becomes this request's failure", async () => {
   requests = [approvedMovie()];
   const token = await mintSession();
   responder = radarrResponder(movieRow(), [], [{
@@ -752,7 +752,7 @@ test("another title's DownloadFailed record (an arr that ignored the id filter) 
   assert.equal(tv.failures.count, 0);
 });
 
-test("a Sonarr series whose tmdbId drifted is found by the request's STORED tvdbId, never read as 'Not in Sonarr — Re-push' (C151)", async () => {
+test("a Sonarr series whose tmdbId drifted is found by the request's STORED tvdbId, never read as 'Not in Sonarr — Re-push'", async () => {
   const tvRequest = (tvdbId: number | null): ReqRow => ({ id: "t1", mediaType: "TV", tmdbId: 300, tvdbId, status: "APPROVED", arrInstance: "", requestedBy: REQUESTER, approvedAt: APPROVED_AT, createdAt: APPROVED_AT });
   // Sonarr's series now names TMDB 301 (a TMDB merge / re-map); its lookup maps tmdb:300 to that same series.
   const drifted = seriesRow([8, 8], [10, 10], { tmdbId: 301 });
@@ -787,7 +787,7 @@ test("a Sonarr series whose tmdbId drifted is found by the request's STORED tvdb
   assert.ok(!arrCalls().some((c) => c.path === "/api/v3/series" && c.query.has("tvdbId")), JSON.stringify(arrCalls()));
 });
 
-test("scrubMessage: a path runs to the end of the message, after a removed value too; magnets, host:port and a lower-cased id go (C153)", () => {
+test("scrubMessage: a path runs to the end of the message, after a removed value too; magnets, host:port and a lower-cased id go", () => {
   const cases: Array<[string, string[], string, string[]]> = [
     // [raw, private values, kept reason prefix, never present]
     ["Unable to import /data/dl/Show.Name.S01/Show Name - S01E01 - Pilot WEBDL-1080p.mkv because it is a sample", ["/data/dl/Show.Name.S01"],
@@ -826,7 +826,7 @@ test("scrubMessage: a SHORT private value inside another word is left alone; as 
   assert.equal(scrubMessage("désabonné", ["SAB"]), "désabonné");
 });
 
-test("COARSE when a failure is the verdict: the failure message's release title, id, client, indexer and paths never reach a delegate (C157)", async () => {
+test("COARSE when a failure is the verdict: the failure message's release title, id, client, indexer and paths never reach a delegate", async () => {
   requests = [approvedMovie()];
   const planted = {
     title: "Planted.Release.Title.2160p-GRP", downloadId: "PLANTEDDOWNLOADID0123456789", downloadClient: "PlantedClientName",
@@ -849,14 +849,14 @@ test("COARSE when a failure is the verdict: the failure message's release title,
   assert.ok(body.failures.message !== null && body.failures.message.includes("not an upgrade"), JSON.stringify(body.failures));
 });
 
-test("the panel never reads without a click, never acts on a stale verdict, and names the instance it checked (C073, C075, C076)", () => {
+test("the panel never reads without a click, never acts on a stale verdict, and names the instance it checked", () => {
   const src = (p: string) => readFileSync(new URL(`../src/components/admin/${p}`, import.meta.url), "utf8");
   const actions = src("request-actions.tsx");
   const panel = src("request-arr-status.tsx");
   // The verdict's words live beside the panel, in its pure view module.
   const view = src("request-arr-status-view.ts");
   const list = src("admin-request-list.tsx");
-  // C073: the delete confirm and a status other than APPROVED unmount the panel, so both close it:
+  // the delete confirm and a status other than APPROVED unmount the panel, so both close it:
   // its open state is ApprovedActions' own, and the confirm renders instead of ApprovedActions.
   const approved = actions.slice(actions.indexOf("function ApprovedActions("), actions.indexOf("function DeclineNoteForm("));
   assert.match(approved, /const \[showStatus, setShowStatus\] = useState\(false\);/);
@@ -865,15 +865,15 @@ test("the panel never reads without a click, never acts on a stale verdict, and 
   assert.match(actions, /if \(showDeleteConfirm\) \{\s*return \(\s*<DeleteConfirm/);
   assert.match(actions, /onAskDelete=\{\(\) => setShowDeleteConfirm\(true\)\}/);
   assert.match(approved, /onClick=\{onAskDelete\}/, "the Delete button asks through that handler");
-  // C075: a new representative request starts from no verdict.
+  // a new representative request starts from no verdict.
   assert.match(actions, /<RequestArrStatusPanel[\s\S]*?key=\{requestId\}[\s\S]*?\/>/);
-  // C075: a verdict that is being re-checked, or failed to re-check, offers no live action…
+  // a verdict that is being re-checked, or failed to re-check, offers no live action…
   assert.match(panel, /const stale = loading \|\| error !== null;/);
   assert.equal((panel.match(/disabled=\{busy \|\| stale\}/g) ?? []).length, 3, "Search, Pick release and Re-push all wait");
   // …and the panel's own Search / Re-push re-read the verdict when they finish.
   assert.match(panel, /onClick=\{\(\) => thenRecheck\(onSearch\)\}/);
   assert.match(panel, /onClick=\{\(\) => thenRecheck\(onRepush\)\}/);
-  assert.match(panel, /const thenRecheck = \(action: \(\) => Promise<void>\) => \{[\s\S]*?void action\(\)\.then\(\(\) => \{[\s\S]*?void load\(\);/);
+  assert.match(panel, /const thenRecheck = \(action: \(\) => Promise<void>\) => \{[\s\S]*?void action\(\)\s*\.catch\([\s\S]*?\.then\(\(\) => \{\s*if \(seq\.current === at\) void load\(\);/);
   // …and a list refresh never re-reads it: router.refresh() hands the provider a new `t`, so the
   // mount read depends on the request alone and reads the translator through a ref.
   const loadDeps = /const load = useCallback\(async \(\) => \{[\s\S]*?\n  \}, \[([^\]]*)\]\);/.exec(panel);
@@ -881,16 +881,16 @@ test("the panel never reads without a click, never acts on a stale verdict, and 
   assert.equal(loadDeps[1], "requestId", "load depends on the request only");
   assert.match(panel, /useEffect\(\(\) => \{\s*void load\(\);[\s\S]*?\}, \[load\]\);/);
   assert.ok(!/[^.]\bt\("adminQueue\.arrStatus\.loadFailed"\)/.test(panel), "load reads the translator through tRef");
-  // C076: the service label is the INSTANCE's, threaded from the row.
+  // the service label is the INSTANCE's, threaded from the row.
   assert.match(panel, /const service = arrInstanceLabel\(status\?\.service \?\? \(mediaType === "MOVIE" \? "radarr" : "sonarr"\), arrInstanceName, arrInstance\);/);
   assert.ok(!panel.includes("SERVICE_LABEL"), "no bare service-name lookup left");
   assert.match(actions, /arrInstance=\{arrInstance\}\s*arrInstanceName=\{arrInstanceName\}/);
   assert.match(list, /arrInstanceName=\{instanceLabel\(representativeInstance\)\}/);
-  // C155: a series monitored at the series level only gets its own wording and no Re-push (Re-push skips a monitored series).
+  // a series monitored at the series level only gets its own wording and no Re-push (Re-push skips a monitored series).
   assert.match(panel, /const actionsFor = \(s: Loaded\): readonly NextAction\[\] => \(unmonitoredEpisodesOnly\(s\) \? \[\] : NEXT_ACTIONS\[s\.verdict\]\);/);
   assert.match(view, /unmonitoredEpisodesOnly\(s\)\s*\? t\("adminQueue\.arrStatus\.why\.unmonitoredEpisodes"/);
   assert.ok(!/NEXT_ACTIONS\[status\.verdict\]/.test(panel), "the buttons go through actionsFor");
-  // C154: the new verdict has its own wording.
+  // the new verdict has its own wording.
   assert.match(view, /case "waitingForLibrary": return t\("adminQueue\.arrStatus\.why\.waitingForLibrary"/);
 });
 

@@ -72,3 +72,21 @@ test("the episodes chosen in every season are named, not only the season on scre
   assert.deepEqual(rules.toggleId([1, 2], 2), [1]);
   assert.deepEqual(rules.toggleId([1], 2), [1, 2]);
 });
+
+test("a repeated id never makes two different selections compare equal", () => {
+  const [file] = importCandidates("sonarr", [sonarrRow]);
+  const d = rules.initialDraft("sonarr", file);
+  const withLanguages = { ...file, languageIds: [1, 2] };
+  assert.deepEqual(rules.overrideFrom(withLanguages, { ...d, languageIds: [1, 1] }, "sonarr"), { languageIds: [1, 1] });
+  assert.deepEqual(rules.overrideFrom(withLanguages, { ...d, languageIds: [2, 1] }, "sonarr"), {});
+});
+
+test("a body naming one file twice is refused, and a huge manual-import list is capped", async () => {
+  const { parseImportSelections } = await import("../src/lib/arr-queue-http.ts");
+  assert.equal(parseImportSelections("radarr", { paths: ["/a.mkv", "/a.mkv"] }), null);
+  assert.equal(parseImportSelections("radarr", { files: [{ path: "/a.mkv" }, { path: "/a.mkv", qualityId: 3 }] }), null);
+  assert.equal(parseImportSelections("radarr", { paths: ["/a.mkv", "/b.mkv"] })?.size, 2);
+  const { QUEUE_IMPORT_MAX_FILES } = await import("../src/lib/api-body-limits.ts");
+  const rows = Array.from({ length: QUEUE_IMPORT_MAX_FILES + 500 }, (_, i) => ({ path: `/d/f${i}.mkv`, size: 1, movie: { id: 3, title: "M" } }));
+  assert.equal(importCandidates("radarr", rows).length, QUEUE_IMPORT_MAX_FILES);
+});

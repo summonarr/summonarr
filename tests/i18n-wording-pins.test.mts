@@ -46,7 +46,7 @@ test("es/pt: a grab still in flight is 'being grabbed', never 'already downloadi
 // "needs attention" string that uses it reads as "to be monitored".
 const needsAttention = Object.keys(catalogs.en).filter((k) => /needs? (your )?attention/i.test(catalogs.en[k]));
 // Keys exempted while their fix was pending. Empty: the settingsForms key
-// (cross-unit request C115) now reads "Téléchargement à traiter" in fr.
+// now reads "Téléchargement à traiter" in fr.
 const LEAD_PENDING = new Set<string>();
 
 test("fr: no 'needs attention' string says 'surveiller'", () => {

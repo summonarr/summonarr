@@ -349,6 +349,12 @@ export const syncPaths: OpenApiPaths = {
       responses: {
         "200": {
           description: "{ plex, jellyfin, skipped, errors, … } — episode counts written per source",
+          headers: {
+            "X-Cron-Degraded": {
+              description: "Comma-separated sources left untouched (`plex`, `jellyfin`). Present only when a source was skipped.",
+              schema: { type: "string" },
+            },
+          },
           content: {
             "application/json": {
               schema: {

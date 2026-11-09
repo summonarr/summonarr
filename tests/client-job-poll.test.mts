@@ -165,3 +165,13 @@ test("onGiveUp tells an unreachable server from a job still running at the poll 
   await pollJob(s.fetchFn, "/x?job=j", opts({ onGiveUp }));
   assert.deepEqual(reasons, ["unreachable", "outOfPolls"]);
 });
+
+test("each status read carries a timeout signal so a hung poll ends on its own", async () => {
+  let signal: AbortSignal | null | undefined;
+  const fetchFn = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+    signal = init?.signal;
+    return json({ done: true });
+  }) as typeof fetch;
+  await pollJob(fetchFn, "/api/x?job=1", opts());
+  assert.ok(signal instanceof AbortSignal);
+});

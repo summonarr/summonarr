@@ -65,10 +65,13 @@ export async function getSessionDurations(): Promise<SessionDurations> {
   // would mint a session already past its deadline and present as an
   // instant-logout loop on every sign-in. Clamp reads the same way as writes.
   const cap = (n: number) => Math.min(Math.max(n, 60), MAX_ALLOWED_SESSION_SECONDS);
+  const desktopDuration = cap(parseInt(map.sessionDefaultDuration ?? "") || DEFAULT_SESSION_SECONDS);
+  const mobileDuration = cap(parseInt(map.sessionMobileDuration ?? "") || DEFAULT_MOBILE_SESSION_SECONDS);
   const value: SessionDurations = {
-    desktopDuration: cap(parseInt(map.sessionDefaultDuration ?? "") || DEFAULT_SESSION_SECONDS),
-    mobileDuration:  cap(parseInt(map.sessionMobileDuration  ?? "") || DEFAULT_MOBILE_SESSION_SECONDS),
-    maxDuration:     cap(parseInt(map.sessionMaxDuration     ?? "") || DEFAULT_MAX_SESSION_SECONDS),
+    desktopDuration,
+    mobileDuration,
+    // "Remember me" must never be shorter than not ticking it.
+    maxDuration: Math.max(cap(parseInt(map.sessionMaxDuration ?? "") || DEFAULT_MAX_SESSION_SECONDS), desktopDuration, mobileDuration),
   };
   if (gen === sessionDurationsState.gen) {
     sessionDurationsState.cache = { value, expiresAt: now + SESSION_DURATIONS_TTL_MS };

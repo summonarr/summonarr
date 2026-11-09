@@ -261,7 +261,7 @@ const settingDeleteManyWheres: Array<Record<string, unknown> | undefined> = [];
 // query the marking/notify passes ALREADY issue (extra columns, not an extra
 // round-trip), so the count of requester-shaped reads is itself a pin.
 const userFindManyCalls: Array<{ where?: Record<string, unknown>; select?: Record<string, unknown> }> = [];
-type CasCall = { mode: "markAvailable" | "requireAvailable" | "plain"; ids: string[]; winners: string[] };
+type CasCall = { mode: "markAvailable" | "requireAvailable" | "plain"; ids: string[]; winners: string[]; disarmsPending: boolean };
 // Seedable ARR-available rows.
 //
 // These two delegates used to return a hardcoded [], which made
@@ -394,6 +394,7 @@ const fakePrisma = {
       : sql.includes(`AND "status" = 'AVAILABLE'`)
       ? "requireAvailable"
       : "plain";
+    const disarmsPending = sql.includes(`"pendingNotifyAt" = NULL`);
     const winners: string[] = [];
     for (const id of ids) {
       const row = requests.get(id);
@@ -402,10 +403,14 @@ const fakePrisma = {
       if (mode === "markAvailable" && !(row.status === "PENDING" || row.status === "APPROVED")) continue;
       if (mode === "requireAvailable" && row.status !== "AVAILABLE") continue;
       row.notifiedAvailable = true;
-      if (mode === "markAvailable") { row.status = "AVAILABLE"; row.availableAt = new Date(); }
+      if (mode === "markAvailable") {
+        row.status = "AVAILABLE";
+        row.availableAt = new Date();
+        if (disarmsPending) row.pendingNotifyAt = null;
+      }
       winners.push(id);
     }
-    casCalls.push({ mode, ids, winners });
+    casCalls.push({ mode, ids, winners, disarmsPending });
     return winners.map((id) => ({ id }));
   },
   // patchPlexShowFilePaths' VALUES-joined UPDATE lands here (top-level, no tx).
@@ -1072,8 +1077,9 @@ test("a DEACTIVATED requester's AVAILABLE transition still wipes stale deletion 
   respond = bothServersRespond([550, 551], []); // both titles land in Plex
   usersById.set("u-disabled", { ...defaultUser("u-disabled"), deactivatedAt: new Date("2026-02-01T00:00:00.000Z") });
   usersById.set("u-active", defaultUser("u-active"));
-  seedRequest({ id: "req-disabled", tmdbId: 550, mediaType: "MOVIE", requestedBy: "u-disabled", status: "PENDING" });
-  seedRequest({ id: "req-active", tmdbId: 551, mediaType: "MOVIE", requestedBy: "u-active", status: "PENDING" });
+  const armed = new Date("2026-02-02T00:00:00.000Z");
+  seedRequest({ id: "req-disabled", tmdbId: 550, mediaType: "MOVIE", requestedBy: "u-disabled", status: "PENDING", pendingNotifyAt: armed });
+  seedRequest({ id: "req-active", tmdbId: 551, mediaType: "MOVIE", requestedBy: "u-active", status: "PENDING", pendingNotifyAt: armed });
 
   await POST(syncReq({ headers: AS_CRON }));
   await settle();
@@ -1103,16 +1109,21 @@ test("a DEACTIVATED requester's AVAILABLE transition still wipes stale deletion 
     "and so must the per-item deletionVoteNotified: re-arm key, for the same reason",
   );
 
-  // Same rule for the pendingNotifyAt disarm: ONE updateMany naming BOTH winners.
-  const disarms = mediaRequestUpdateManyCalls.filter(
-    (c) => Object.keys(c.data ?? {}).length === 1 && c.data.pendingNotifyAt === null,
-  );
-  assert.equal(disarms.length, 1, "exactly one post-claim pendingNotifyAt disarm for this pass");
+  // The pendingNotifyAt disarm rides the claim statement itself, so it covers
+  // every row the claim flipped — the disabled requester's included — and no
+  // follow-up write exists to be keyed off the wrong set.
+  assert.equal(claim.disarmsPending, true, "the markAvailable claim must itself clear pendingNotifyAt");
+  for (const id of ["req-disabled", "req-active"]) {
+    assert.equal(
+      requests.get(id)?.pendingNotifyAt,
+      null,
+      `${id}: the 90s still-pending backstop must be disarmed on every row that went AVAILABLE`,
+    );
+  }
   assert.deepEqual(
-    [...(disarms[0].where?.id?.in ?? [])].sort(),
-    ["req-active", "req-disabled"],
-    "the 90s still-pending backstop must be disarmed on every row that went AVAILABLE — leaving it " +
-      "armed on an AVAILABLE row is exactly what keying this off `deliverable` does",
+    mediaRequestUpdateManyCalls.filter((c) => "pendingNotifyAt" in (c.data ?? {})),
+    [],
+    "the disarm is part of the claim, not a separate write",
   );
 
   // …and the half that must NOT happen. The active requester in the same run is
@@ -3173,7 +3184,7 @@ test("GUARDRAIL 41: every sync arm is gated on the advisory-lock abort, and no c
 
   for (const arm of [
     "Radarr", "Sonarr", "Plex library", "Jellyfin library",
-    "second ARR pass", "download check", "re-push", "de-registered sweep", "revert", "library marking", "pending notify",
+    "second ARR pass", "download check", "re-push", "library read", "de-registered sweep", "revert", "library marking", "pending notify", "cache purge",
   ]) {
     assert.ok(
       src.includes(`windDownBefore("${arm}")`),

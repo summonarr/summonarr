@@ -1,6 +1,5 @@
 import "server-only";
-import { prisma } from "./prisma";
-import { getCache, getCacheEntry, setCache, setCacheUntil, tmdbDetailsKey, TTL } from "./tmdb-cache";
+import { deleteCache, getCache, getCacheEntry, setCache, setCacheUntil, tmdbDetailsKey, TTL } from "./tmdb-cache";
 import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
 // coalesce: concurrent callers for the same list/detail key share one upstream
 // fetch rather than hammering TMDB and writing the same cache row N times.
@@ -1059,11 +1058,15 @@ function loadDetails(type: "movie" | "tv", id: number): Promise<TmdbMedia> {
         // Awaited on purpose: fire-and-forget, this unpredicated delete can land
         // AFTER the setCache upsert in fetchDetails (or one from tmdb-prewarm)
         // and wipe the freshly written row, forcing another full fetch.
-        await prisma.tmdbCache.delete({ where: { key } }).catch(() => {});
+        await deleteCache(key).catch(() => {});
       } else {
         let needsWrite = migrateKeywordShape(cached);
-        if (await upgradeCachedRatings(cached, type, id, key)) needsWrite = true;
-        if (type === "movie" && (await upgradeCachedHomeReleaseDates(cached, id, key))) needsWrite = true;
+        // The two upgrades fill different fields, so their upstream calls overlap.
+        const [ratingsUpgraded, releaseUpgraded] = await Promise.all([
+          upgradeCachedRatings(cached, type, id, key),
+          type === "movie" ? upgradeCachedHomeReleaseDates(cached, id, key) : Promise.resolve(false),
+        ]);
+        if (ratingsUpgraded || releaseUpgraded) needsWrite = true;
         // An in-place upgrade keeps the row's own expiry: rewriting with a fresh
         // TTL.DETAILS let the TMDB fields it carries live up to two TTLs.
         if (needsWrite) await setCacheUntil(key, cached, entry.expiresAt);
@@ -1103,16 +1106,18 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
 
 async function loadCredits(type: "movie" | "tv", id: number): Promise<CastMember[]> {
   const key = creditsKey(type, id);
-  const cached = await getCache<CastMember[]>(key);
-  if (cached) return cached;
+  return coalesce(key, async () => {
+    const cached = await getCache<CastMember[]>(key);
+    if (cached) return cached;
 
-  const r = await tmdbFetch<{ cast?: unknown }>(`/${type}/${id}/credits`);
-  const result = castMembers(r.cast);
-  // Don't cache an empty result — `cast` missing from an otherwise-200 response
-  // would otherwise suppress the real cast for the full DETAILS TTL (mirrors
-  // searchMulti's guard).
-  if (result.length > 0) await setCache(key, result, TTL.DETAILS);
-  return result;
+    const r = await tmdbFetch<{ cast?: unknown }>(`/${type}/${id}/credits`);
+    const result = castMembers(r.cast);
+    // Don't cache an empty result — `cast` missing from an otherwise-200 response
+    // would otherwise suppress the real cast for the full DETAILS TTL (mirrors
+    // searchMulti's guard).
+    if (result.length > 0) await setCache(key, result, TTL.DETAILS);
+    return result;
+  });
 }
 
 export async function getMovieCredits(id: number): Promise<CastMember[]> {
@@ -1162,26 +1167,28 @@ export async function getTVSeasonEpisodes(
   seasonNumber: number,
 ): Promise<TmdbEpisode[]> {
   const key = `tv:${tmdbId}:season:${seasonNumber}`;
-  const cached = await getCache<TmdbEpisode[]>(key);
-  if (cached) return cached;
+  return coalesce(key, async () => {
+    const cached = await getCache<TmdbEpisode[]>(key);
+    if (cached) return cached;
 
-  const r = await tmdbFetch<{ episodes?: RawEpisode[] }>(`/tv/${tmdbId}/season/${seasonNumber}`);
-  const episodes: TmdbEpisode[] = (r.episodes ?? []).map((e) => ({
-    episodeNumber: e.episode_number,
-    seasonNumber: e.season_number,
-    name: e.name ?? `Episode ${e.episode_number}`,
-    overview: e.overview ?? "",
-    airDate: e.air_date ?? null,
-    stillPath: e.still_path ?? null,
-    runtime: e.runtime ?? null,
-    voteAverage: e.vote_average ?? 0,
-  }));
+    const r = await tmdbFetch<{ episodes?: RawEpisode[] }>(`/tv/${tmdbId}/season/${seasonNumber}`);
+    const episodes: TmdbEpisode[] = (r.episodes ?? []).map((e) => ({
+      episodeNumber: e.episode_number,
+      seasonNumber: e.season_number,
+      name: e.name ?? `Episode ${e.episode_number}`,
+      overview: e.overview ?? "",
+      airDate: e.air_date ?? null,
+      stillPath: e.still_path ?? null,
+      runtime: e.runtime ?? null,
+      voteAverage: e.vote_average ?? 0,
+    }));
 
-  // Don't cache an empty result — `episodes` missing from an otherwise-200
-  // response would otherwise suppress the real season for the full DETAILS TTL
-  // (mirrors searchMulti's guard).
-  if (episodes.length > 0) await setCache(key, episodes, TTL.DETAILS);
-  return episodes;
+    // Don't cache an empty result — `episodes` missing from an otherwise-200
+    // response would otherwise suppress the real season for the full DETAILS TTL
+    // (mirrors searchMulti's guard).
+    if (episodes.length > 0) await setCache(key, episodes, TTL.DETAILS);
+    return episodes;
+  });
 }
 
 // Calendar-feed TV data (src/lib/calendar-events.ts): a plain /tv/<id> read,
@@ -1514,7 +1521,8 @@ export async function getWatchProviders(type: "movie" | "tv", region = "US"): Pr
     .filter((p) => p && p.logo_path && typeof p.provider_name === "string")
     .sort((a, b) => a.provider_name.localeCompare(b.provider_name));
 
-  await setCache(key, providers, TTL.GENRES);
+  // An empty list is a degenerate answer, not a region with no providers.
+  if (providers.length > 0) await setCache(key, providers, TTL.GENRES);
   return providers;
 }
 
@@ -1748,14 +1756,19 @@ function discoverSortFor(mediaType: "movie" | "tv", sortBy: string): string {
 // an authenticated user manufacture arbitrary distinct TmdbCache rows). genreId is a
 // digit list joined by , or |; minVoteCount is a non-negative integer; watchRegion is a
 // 2-letter ISO country code.
+// Longest id-list filter kept; a longer one is junk and mints a distinct cache key.
+const MAX_FILTER_ID_LIST_LENGTH = 200;
+
 function sanitizeDiscoverFilters(filters: DiscoverFilters): DiscoverFilters {
-  const genreId = filters.genreId && /^[\d|,]+$/.test(filters.genreId) ? filters.genreId : undefined;
-  const keywordId = filters.keywordId && /^[\d|,]+$/.test(filters.keywordId) ? filters.keywordId : undefined;
-  const companyId = filters.companyId && /^[\d|,]+$/.test(filters.companyId) ? filters.companyId : undefined;
-  const networkId = filters.networkId && /^[\d|,]+$/.test(filters.networkId) ? filters.networkId : undefined;
+  const idList = (v: string | undefined): string | undefined =>
+    v && v.length <= MAX_FILTER_ID_LIST_LENGTH && /^[\d|,]+$/.test(v) ? v : undefined;
+  const genreId = idList(filters.genreId);
+  const keywordId = idList(filters.keywordId);
+  const companyId = idList(filters.companyId);
+  const networkId = idList(filters.networkId);
   const certification = isCertificationCap(filters.certification) ? filters.certification : undefined;
-  const minVoteCount = filters.minVoteCount && /^\d+$/.test(filters.minVoteCount) ? filters.minVoteCount : undefined;
-  const watchProvider = filters.watchProvider && /^[\d|]+$/.test(filters.watchProvider) ? filters.watchProvider : undefined;
+  const minVoteCount = filters.minVoteCount && filters.minVoteCount.length <= 9 && /^\d+$/.test(filters.minVoteCount) ? filters.minVoteCount : undefined;
+  const watchProvider = filters.watchProvider && filters.watchProvider.length <= MAX_FILTER_ID_LIST_LENGTH && /^[\d|]+$/.test(filters.watchProvider) ? filters.watchProvider : undefined;
   // watch_region only reaches TMDB inside the `if (filters.watchProvider)` branch below,
   // so without a provider the region is a pure cache-key input — 676 accepted codes would
   // each mint a distinct TmdbCache row (and an identical upstream call) for the same

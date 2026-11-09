@@ -1109,6 +1109,12 @@ test("POST /api/push/announce-update: the 2-per-hour budget is the SERVER's — 
     const third = await callRoute(announcePost, pushReq("announce-update", { token: second.token }));
     assert.equal(third.status, 429, "the server-wide budget is spent, whichever admin asks");
     assert.equal(relayCalls.length, 0);
+    const { peekRateLimit } = await import("../src/lib/rate-limit.ts");
+    assert.equal(
+      peekRateLimit(`push-announce-update:${second.userId}`, 2, 60 * 60 * 1000),
+      true,
+      "a refusal by the server budget must not also spend the admin's own",
+    );
   } finally {
     drainServerBucket();
   }
@@ -1152,4 +1158,22 @@ test("POST /api/push/test: a web transport failure is a fixed phrase — the Saf
   assert.equal(body.results[0].ok, false);
   assert.equal(body.results[0].message, "Could not connect to Web Push");
   assert.ok(!JSON.stringify(body).includes("unreachable-endpoint-slug-xyz"), JSON.stringify(body));
+});
+
+test("POST /api/push/test: an internal fault on a web row is a fixed phrase and a log line, never the raw error text", async () => {
+  const { generateVapidKeys } = await import("../src/lib/web-push.ts");
+  const keys = generateVapidKeys();
+  settings.set("vapidPublicKey", keys.publicKey);
+  settings.set("vapidPrivateKey", keys.privateKey);
+  const web = await mintSession();
+  // The stored key material is not a valid P-256 point, so the send fails before
+  // any transport with an error whose text is the library's own.
+  seedWebSub(web.userId, "bad-key-slug");
+  errors.length = 0;
+  const res = await callRoute(testPost, pushReq("test", { token: web.token }));
+  assert.equal(res.status, 502);
+  const body = (await res.json()) as { results: Array<{ ok: boolean; message?: string }> };
+  assert.equal(body.results[0].ok, false);
+  assert.equal(body.results[0].message, "The test push could not be sent");
+  assert.ok(errors.some((e) => e.startsWith("[push] web test send failed")), errors.join(" | "));
 });

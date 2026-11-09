@@ -23,9 +23,8 @@ export function resolveUserNotificationEmail(user: {
   email: string;
   notificationEmail: string | null;
 }): string | null {
-  if (user.notificationEmail && user.notificationEmail.trim() !== "") {
-    return user.notificationEmail;
-  }
+  const preferred = user.notificationEmail?.trim();
+  if (preferred) return preferred;
   if (isReservedEmailDomain(user.email)) return null;
   return user.email || null;
 }

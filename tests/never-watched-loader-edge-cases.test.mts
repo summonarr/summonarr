@@ -3,15 +3,15 @@
 // No DB, no network.
 //
 // What these pin:
-//   C119  Radarr/Sonarr's `added` (when the title entered the arr — often long
+// Radarr/Sonarr's `added` (when the title entered the arr — often long
 //         before any file) is never an arrival: the window opens at the media
 //         server's own addedAt / the request's delivery, so a title downloaded
 //         last month is not "never watched since March".
-//   C130  an unattributed play on a server that does NOT hold the title (it
+// an unattributed play on a server that does NOT hold the title (it
 //         never identified the item, or its library isn't synced) is still soft
 //         evidence for a same-named library title held elsewhere — and the
 //         narrowed read reaches the same verdict.
-//   C078  at most EVIDENCE_AGGREGATE_CONCURRENCY (2) of the whole-table
+// at most EVIDENCE_AGGREGATE_CONCURRENCY (2) of the whole-table
 //         PlayHistory aggregates hold a pool connection at once.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -94,7 +94,7 @@ const settings = new Map<string, string>([
 
 shadowPrismaModel(prisma, "plexLibraryItem", { findMany: async (args: { where?: Where }) => plexLib.filter((r) => matchWhere(r, args.where)) });
 shadowPrismaModel(prisma, "jellyfinLibraryItem", { findMany: async (args: { where?: Where }) => jfLib.filter((r) => matchWhere(r, args.where)) });
-// C078: the evidence aggregates' in-flight count (the cached per-server first
+// the evidence aggregates' in-flight count (the cached per-server first
 // play — by source,serverInstance — is not one of them). With `holdAggregates`
 // each one stays open for a few ms, so overlapping ones are seen together.
 let inFlight = 0;
@@ -240,7 +240,7 @@ const arrIndex = (entries: Array<{ tmdbId: number; mediaType: "MOVIE" | "TV"; in
   return { byKey, tvdbOnly: new Map(), errors: [] } as unknown as ArrIndex;
 };
 
-test("C119: a Radarr `added` months before the file is never the arrival — the window opens at the media server's addedAt", async () => {
+test("a Radarr `added` months before the file is never the arrival — the window opens at the media server's addedAt", async () => {
   plexLib.push({ ...plex(1190, "MOVIE", "Sierra", { key: "rk1190" }), addedAt: d("2026-08-01") });
   requests.push({ tmdbId: 1190, mediaType: "MOVIE", status: "AVAILABLE", arrInstance: "", availableAt: d("2026-08-01"), cleanedUpAt: null });
   const arr = arrIndex([{ tmdbId: 1190, mediaType: "MOVIE", instance: "", added: d("2026-03-01") }]);
@@ -251,7 +251,7 @@ test("C119: a Radarr `added` months before the file is never the arrival — the
   await assertParity([1190], arr);
 });
 
-test("C119: a Sonarr `added` is not an arrival either, with no request at all", async () => {
+test("a Sonarr `added` is not an arrival either, with no request at all", async () => {
   plexLib.push({ ...plex(1191, "TV", "Tango", { key: "rk1191" }), addedAt: d("2026-09-01") });
   const arr = arrIndex([{ tmdbId: 1191, mediaType: "TV", instance: "", added: d("2025-06-01") }]);
   const t = (await full(arr)).get(1191)!;
@@ -260,7 +260,7 @@ test("C119: a Sonarr `added` is not an arrival either, with no request at all", 
   assert.equal(t.verdict.days, 30);
 });
 
-test("C130: an unattributed Jellyfin play of a title only Plex holds is SOFT evidence — never unplaced", async () => {
+test("an unattributed Jellyfin play of a title only Plex holds is SOFT evidence — never unplaced", async () => {
   plexLib.push(plex(1000, "MOVIE", "Kilo", { key: "rk1000" }));
   plays.push(play({ source: "jellyfin", sourceItemId: "jf-unidentified", title: "Kilo" }));
   const facts = await loadLibraryWatchFacts(null, { now: NOW, seasons: true });
@@ -272,7 +272,7 @@ test("C130: an unattributed Jellyfin play of a title only Plex holds is SOFT evi
   await assertParity([1000]);
 });
 
-test("C130: an episode from a server whose show library isn't synced is soft evidence for the show another server holds", async () => {
+test("an episode from a server whose show library isn't synced is soft evidence for the show another server holds", async () => {
   plexLib.push(plex(1001, "TV", "Uniform", { key: "rk1001" }));
   plays.push(play({ source: "jellyfin", mediaType: "TV", sourceItemId: "jf-ep-x", sourceShowId: "jf-series-unsynced", seasonNumber: 2, title: "Uniform" }));
   const t = (await full()).get(1001)!;
@@ -281,7 +281,7 @@ test("C130: an episode from a server whose show library isn't synced is soft evi
   await assertParity([1001]);
 });
 
-test("C130: a tmdb-less live session on a non-holding server is soft evidence too", async () => {
+test("a tmdb-less live session on a non-holding server is soft evidence too", async () => {
   plexLib.push(plex(1000, "MOVIE", "Kilo", { key: "rk1000" }));
   sessions.push(session({ source: "jellyfin", sourceItemId: "jf-unknown", title: "Kilo" }));
   const t = (await full()).get(1000)!;
@@ -290,7 +290,7 @@ test("C130: a tmdb-less live session on a non-holding server is soft evidence to
   await assertParity([1000]);
 });
 
-test("C130: parity holds when the playing server ALSO holds a different same-named title — the match is per (play, title), never 'own server first'", async () => {
+test("parity holds when the playing server ALSO holds a different same-named title — the match is per (play, title), never 'own server first'", async () => {
   plexLib.push(plex(1000, "MOVIE", "Kilo", { key: "rk1000" }));
   jfLib.push(jf(1002, "MOVIE", "Kilo", "jf-1002"));
   plays.push(play({ source: "jellyfin", sourceItemId: "jf-unidentified", title: "Kilo" }));
@@ -300,7 +300,7 @@ test("C130: parity holds when the playing server ALSO holds a different same-nam
   await assertParity([1000, 1002]);
 });
 
-test("C078: at most two of the evidence read's PlayHistory aggregates run at once — and the read still answers", async () => {
+test("at most two of the evidence read's PlayHistory aggregates run at once — and the read still answers", async () => {
   holdAggregates = true;
   maxInFlight = 0;
   try {

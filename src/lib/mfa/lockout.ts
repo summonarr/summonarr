@@ -31,6 +31,7 @@ import "server-only";
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 import { verifySecondFactor, type SecondFactorInput } from "./mfa-store";
 import { notifyMfaSecurityEvent } from "./notify";
 import type { WebAuthnConfig } from "./webauthn";
@@ -65,11 +66,19 @@ interface FailureOutcome {
 // transition is a compare-and-swap on "still at or over the threshold", so two
 // concurrent failures can't both impose (or double-escalate) it.
 async function recordMfaCodeFailure(userId: string, nowMs = Date.now()): Promise<FailureOutcome> {
-  const row = await prisma.user.update({
-    where: { id: userId },
-    data: { mfaFailedAttempts: { increment: 1 } },
-    select: { mfaFailedAttempts: true, mfaLockoutCount: true },
-  });
+  let row: { mfaFailedAttempts: number; mfaLockoutCount: number };
+  try {
+    row = await prisma.user.update({
+      where: { id: userId },
+      data: { mfaFailedAttempts: { increment: 1 } },
+      select: { mfaFailedAttempts: true, mfaLockoutCount: true },
+    });
+  } catch (err) {
+    // The account was deleted mid-verification: the guess still fails, there is
+    // nothing left to count against.
+    if (isPrismaErrorCode(err, "P2025")) return { lockedUntil: null, imposed: false };
+    throw err;
+  }
   if (row.mfaFailedAttempts < MFA_LOCKOUT_THRESHOLD) return { lockedUntil: null, imposed: false };
   const until = new Date(nowMs + lockoutDurationMs(row.mfaLockoutCount));
   const res = await prisma.user.updateMany({

@@ -119,9 +119,9 @@ interface StatsScope {
   local: string;
 }
 
-function statsScope(filters: PlayHistoryStatsFilters, timeZone: string): StatsScope {
-  const { where, params, cutoff } = buildStatsFilters(filters);
-  const { where: joinWhere, params: joinParams } = buildStatsFilters(filters, "p");
+function statsScope(filters: PlayHistoryStatsFilters, timeZone: string, now: number): StatsScope {
+  const { where, params, cutoff } = buildStatsFilters(filters, "", now);
+  const { where: joinWhere, params: joinParams } = buildStatsFilters(filters, "p", now);
   // "plays" surfaces use wwhere (filter watched=true); analytics surfaces (completion rate, codecs,
   // bitrate, bandwidth, peak concurrent, stream method, source split, client apps) use the raw
   // `where` so the denominator stays complete. The Statistics page groups its cards the same way,
@@ -142,10 +142,10 @@ function statsScope(filters: PlayHistoryStatsFilters, timeZone: string): StatsSc
 }
 
 // The previous window of the same length, right before the current one.
-function previousWindow(filters: PlayHistoryStatsFilters) {
+function previousWindow(filters: PlayHistoryStatsFilters, now: number) {
   const days = filters.days ?? 30;
-  const prevStart = new Date(Date.now() - days * 2 * DAY_MS);
-  const prevEnd = new Date(Date.now() - days * DAY_MS);
+  const prevStart = new Date(now - days * 2 * DAY_MS);
+  const prevEnd = new Date(now - days * DAY_MS);
   // The previous-period window binds $1/$2 itself; the source/mediaType suffix
   // comes from appendPlayHistoryFilter (the single owner of that clause and its
   // $-index math) rather than a hand copy that could drift from it.
@@ -608,8 +608,10 @@ function rewatchStatement(s: StatsScope) {
 }
 
 async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters, timeZone: string): Promise<PlayHistoryStatsResult> {
-  const scope = statsScope(filters, timeZone);
-  const prev = previousWindow(filters);
+  // One instant for the current and previous windows, so they meet exactly.
+  const now = Date.now();
+  const scope = statsScope(filters, timeZone, now);
+  const prev = previousWindow(filters, now);
   const [completionPct, arcGapDays, settings] = await Promise.all([
     getCompletionThreshold(),
     getArcGapDays(),

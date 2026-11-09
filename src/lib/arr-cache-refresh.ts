@@ -24,7 +24,7 @@ const FETCH_CONCURRENCY = 5;
  * that service's wanted/available cache — the sync refresh, the webhooks'
  * flips and evictions — so none sees a half-rewritten cache. Two LITERAL
  * templates, never an interpolated key: a fragment or bound number in a tagged
- * $executeRaw is guardrail 23a's trap, and a bound integer can resolve to the
+ * $executeRaw is guardrail 23a's trap (the keys are registered in advisory-lock.ts), and a bound integer can resolve to the
  * one-bigint overload, i.e. a different lock.
  */
 export async function lockArrCacheInTx(tx: Pick<ArrCacheTxClient, "$executeRaw">, service: ArrService): Promise<void> {
@@ -33,6 +33,36 @@ export async function lockArrCacheInTx(tx: Pick<ArrCacheTxClient, "$executeRaw">
   } else {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
   }
+}
+
+/**
+ * Evict one title's cached rows on one instance, under the cache lock. Both
+ * rows go by default; with `requeueWanted` the available row goes and a wanted
+ * row takes its place (a movie whose file was deleted stays in Radarr, which
+ * the sync records as wanted). The webhooks call this only after the arr itself
+ * has confirmed the state.
+ */
+export async function evictArrCacheRows(
+  service: ArrService,
+  tmdbId: number,
+  arrInstance: string,
+  { requeueWanted = false }: { requeueWanted?: boolean } = {},
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await lockArrCacheInTx(tx, service);
+    const where = { tmdbId, arrInstance };
+    // Sequential awaits only: one connection runs one query at a time (guardrail 23c).
+    if (service === "radarr") {
+      if (!requeueWanted) await tx.radarrWantedItem.deleteMany({ where });
+      await tx.radarrAvailableItem.deleteMany({ where });
+      // skipDuplicates: a row already there is no error, so nothing aborts this tx (guardrail 23).
+      if (requeueWanted) await tx.radarrWantedItem.createMany({ data: [where], skipDuplicates: true });
+    } else {
+      if (!requeueWanted) await tx.sonarrWantedItem.deleteMany({ where });
+      await tx.sonarrAvailableItem.deleteMany({ where });
+      if (requeueWanted) await tx.sonarrWantedItem.createMany({ data: [where], skipDuplicates: true });
+    }
+  }, { timeout: BATCH_TX_TIMEOUT });
 }
 
 export type ArrCacheRefresh = {

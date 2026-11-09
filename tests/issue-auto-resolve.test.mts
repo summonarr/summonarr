@@ -70,7 +70,7 @@ test("a landed replacement resolves the issue, audits it as system, tells the re
   assert.equal(await autoResolveIssueForGrab(grab(), NOW), true);
   await flush();
   const cas = ops.find((o) => o.op === "issue.updateMany")!.args!;
-  assert.deepEqual(cas.where, { id: "iss-1", status: { in: ["OPEN", "IN_PROGRESS"] } });
+  assert.deepEqual(cas.where, { id: "iss-1", status: "OPEN" });
   assert.equal(cas.data.status, "RESOLVED");
   assert.deepEqual(cas.data.resolvedAt, NOW);
   assert.deepEqual(sse.find((e) => e.type === "issue:updated"), { type: "issue:updated", issueId: "iss-1", status: "RESOLVED", userId: "reporter-1" });
@@ -86,6 +86,27 @@ test("a landed replacement resolves the issue, audits it as system, tells the re
   // one writer, announceIssueResolved, for both.
   assert.equal(note.body, "Your reported issue was resolved.");
   assert.deepEqual(note.data, { v: 1, resolution: null });
+});
+
+test("the audit's before is the status the write actually overwrote, not the one read first", async () => {
+  // Read as OPEN, but a reply moved it to IN_PROGRESS before the write: the OPEN
+  // write matches nothing, the IN_PROGRESS one does.
+  let call = 0;
+  shadowPrismaModel(prisma, "issue", {
+    findUnique: async () => (issueRow ? { ...issueRow } : null),
+    updateMany: async (a: unknown) => { rec("issue.updateMany", a); call++; return { count: call === 1 ? 0 : 1 }; },
+  });
+  try {
+    assert.equal(await autoResolveIssueForGrab(grab(), NOW), true);
+    await flush();
+  } finally {
+    shadowPrismaModel(prisma, "issue", {
+      findUnique: async () => (issueRow ? { ...issueRow } : null),
+      updateMany: async (a: unknown) => { rec("issue.updateMany", a); return { count: casCount }; },
+    });
+  }
+  const audit = ops.find((o) => o.op === "auditLog.create")!.args!.data;
+  assert.deepEqual(JSON.parse(audit.details as string).before, { status: "IN_PROGRESS" });
 });
 
 test("feature switched off ⇒ nothing is written", async () => {

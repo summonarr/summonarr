@@ -79,7 +79,7 @@ function detailEntries(
     [t("adminActivity.field.device"), play.device ?? "—"],
     [t("adminActivity.field.ipAddress"), play.ipAddress ? <IpInfo ip={play.ipAddress} inline /> : "—"],
     [t("adminActivity.field.container"), play.container ?? "—"],
-    [t("adminActivity.field.bitrate"), fmtBitrate(play.bitrate, play.source)],
+    [t("adminActivity.field.bitrate"), fmtBitrate(play.bitrate, play.source, locale)],
     [t("adminActivity.field.videoCodec"), play.videoCodec ?? "—"],
     [t("adminActivity.field.audioCodec"), play.audioCodec ?? "—"],
     [t("adminActivity.field.videoDecision"), play.videoDecision ?? "—"],
@@ -209,7 +209,7 @@ export function DetailRow({
           >
             {t("adminActivity.detail.openPlay")}
           </Link>
-          {play.tmdbId && (
+          {play.tmdbId != null && play.tmdbId > 0 && (
             <Link
               href={`/admin/activity/media/${play.tmdbId}${play.mediaType ? `?type=${play.mediaType}` : ""}`}
               style={linkStyle}

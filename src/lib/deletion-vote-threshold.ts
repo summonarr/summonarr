@@ -105,11 +105,16 @@ export async function alertIfVoteThresholdReached(media: {
 type ThresholdAlertData = { title: string; mediaType: "MOVIE" | "TV"; voteCount: number; posterPath: string | null; tmdbId: number };
 
 async function deliverThresholdAlert(data: ThresholdAlertData): Promise<void> {
-  emitNotificationEvent({
-    event: "vote.threshold",
-    media: { type: data.mediaType, tmdbId: data.tmdbId, title: data.title, posterPath: data.posterPath },
-    votes: data.voteCount,
-  });
+  try {
+    emitNotificationEvent({
+      event: "vote.threshold",
+      media: { type: data.mediaType, tmdbId: data.tmdbId, title: data.title, posterPath: data.posterPath },
+      votes: data.voteCount,
+    });
+  } catch (err) {
+    // An outbound-agent failure must not keep the admins' email and push from going out.
+    console.warn("[votes] threshold agent emit failed:", err);
+  }
   await Promise.allSettled([
     notifyAdminsDeletionVoteThreshold(data),
     notifyAdminsDeletionVoteThresholdPush(data),

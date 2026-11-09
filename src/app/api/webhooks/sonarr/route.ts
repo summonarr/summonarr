@@ -14,7 +14,7 @@ import {
 } from "@/lib/arr-webhook-events";
 import { grabMatchesDelivery, readSonarrPayload, sonarrEpisodeScope, type SonarrWebhookView } from "@/lib/arr-webhook-payload";
 import { flipApprovedSonarrRequests, type SonarrFlipResult } from "@/lib/sonarr-webhook-flip";
-import { lockArrCacheInTx } from "@/lib/arr-cache-refresh";
+import { evictArrCacheRows } from "@/lib/arr-cache-refresh";
 
 // Only the top level is checked before the handler (arr-webhook.ts); every
 // field is read through readSonarrPayload.
@@ -107,19 +107,29 @@ async function handleSeriesDelete(series: NonNullable<SonarrWebhookView["series"
     byTvdb ? { tvdbId: delTvdbId } : { tmdbId: delTmdbId },
     arrInstance,
   );
-  if (verdict === null || verdict.downloaded || verdict.reason !== "absent") {
-    if (verdict !== null && byTvdb) {
+  const refusal = seriesDeleteRefusal(verdict, byTvdb);
+  if (refusal !== null) {
+    // Every non-eviction is logged the same way, except an untied tmdb lookup
+    // that still finds the series: that lags and can land on another show, so it
+    // is no evidence of forgery and stays quiet.
+    if (refusal.reason !== "unconfirmed") {
       console.warn("[webhook/sonarr] SeriesDelete for tmdbId=%s not confirmed by Sonarr; cache left to the next sync.", sanitizeForLog(delTmdbId));
     }
-    const reason = verdict === null ? "unverified" : byTvdb ? "not_deleted" : "unconfirmed";
-    return NextResponse.json({ ok: true, evicted: false, reason });
+    return NextResponse.json({ ok: true, evicted: false, reason: refusal.reason });
   }
-  await prisma.$transaction(async (tx) => {
-    await lockArrCacheInTx(tx, "sonarr");
-    await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: delTmdbId, arrInstance } });
-    await tx.sonarrAvailableItem.deleteMany({ where: { tmdbId: delTmdbId, arrInstance } });
-  }, { timeout: 30_000 });
+  await evictArrCacheRows("sonarr", delTmdbId, arrInstance);
   return NextResponse.json({ ok: true, evicted: true });
+}
+
+// Why a SeriesDelete must NOT evict, or null when Sonarr confirmed the series
+// absent. `byTvdb` says which key the check used: a "still there" under the
+// tvdb key contradicts the event ("not_deleted"), under the tmdb lookup it is
+// merely unconfirmed.
+type SeriesDeleteRefusal = { reason: "unverified" | "not_deleted" | "unconfirmed" };
+function seriesDeleteRefusal(verdict: SeriesDownloadVerdict | null, byTvdb: boolean): SeriesDeleteRefusal | null {
+  if (verdict === null) return { reason: "unverified" };
+  if (!verdict.downloaded && verdict.reason === "absent") return null;
+  return { reason: byTvdb ? "not_deleted" : "unconfirmed" };
 }
 
 async function handleSeriesDownload(event: SonarrWebhookView, arrInstance: string): Promise<NextResponse> {
@@ -170,15 +180,18 @@ async function handleSeriesDownload(event: SonarrWebhookView, arrInstance: strin
 
   const flip: SonarrFlipResult = outcome.kind === "complete"
     ? await flipApprovedSonarrRequests(ids, arrInstance, outcome.libraryTmdbId)
-    : { count: 0, effectiveMdbId: null, effectiveVdbId: null };
+    : { count: 0, effectiveTmdbId: null, effectiveTvdbId: null };
 
   // A completed import ends the "stuck" episode the manual-interaction marker
   // one-shots — clear both candidate keys (tvdb- and tmdb-keyed). The refused
   // paths returned above; an INCOMPLETE series still imported an episode, so
-  // the marker clears on that path too.
+  // the marker clears on that path too. The tmdb key is the same one the set
+  // side builds (tmdbIdKey, any positive integer), so a tmdbId outside the
+  // lookup range clears the marker it set.
+  const tmdbKey = event.series?.tmdbIdKey ?? null;
   clearManualInteractionMarkers([
     ...(ids.tvdbId !== null ? [markerKey(arrInstance, `tvdb:${ids.tvdbId}`)] : []),
-    ...(ids.tmdbId !== null ? [markerKey(arrInstance, `tmdb:${ids.tmdbId}`)] : []),
+    ...(tmdbKey !== null ? [markerKey(arrInstance, `tmdb:${tmdbKey}`)] : []),
   ]);
 
   // Deferred work runs after the response is sent; library scan and notification can be slow
@@ -232,7 +245,7 @@ async function afterSeriesImport(
   // the request stays APPROVED waiting for the rest of the series.
   await scheduleLibraryScan("tv", ids.tmdbId ?? undefined, arrInstance);
 
-  let { effectiveMdbId, effectiveVdbId } = flip;
+  let { effectiveTmdbId, effectiveTvdbId } = flip;
   if (deferVerify) {
     // The scan above already waited for Sonarr's queue to drain (or gave up
     // after its retries), so a transient 503 has had a real window to clear.
@@ -241,23 +254,23 @@ async function afterSeriesImport(
     try {
       const recheck = await isSeriesDownloadedInSonarr(ids, arrInstance);
       if (recheck?.downloaded !== true) return;
-      ({ effectiveMdbId, effectiveVdbId } = await flipApprovedSonarrRequests(ids, arrInstance, recheck.tmdbId));
+      ({ effectiveTmdbId, effectiveTvdbId } = await flipApprovedSonarrRequests(ids, arrInstance, recheck.tmdbId));
     } catch (err) {
-      console.warn("[webhooks/sonarr] deferred verification failed:", err instanceof Error ? err.message : err);
+      console.warn("[webhook/sonarr] deferred verification failed:", err instanceof Error ? err.message : err);
       return;
     }
   }
 
-  const byId = effectiveMdbId !== null
-    ? { tmdbId: effectiveMdbId }
-    : effectiveVdbId !== null
-      ? { tvdbId: effectiveVdbId }
+  const byId = effectiveTmdbId !== null
+    ? { tmdbId: effectiveTmdbId }
+    : effectiveTvdbId !== null
+      ? { tvdbId: effectiveTvdbId }
       : null;
   if (!byId) return;
   await notifyAvailableAfterImport({
     where: { ...byId, mediaType: "TV", arrInstance },
     kind: "tv",
-    tmdbIdForCheck: effectiveMdbId,
+    tmdbIdForCheck: effectiveTmdbId,
     logScope: "webhook/sonarr",
   });
 }

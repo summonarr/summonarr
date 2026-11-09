@@ -204,19 +204,19 @@ test("upstream health: an EMPTY answer next to recorded completed plays is unrel
   assert.equal(upstreamHealth(status({ entries: 100, samples: UPSTREAM_MIN_SAMPLES - 1, agreed: 0 }), NOW), "ok");
 });
 
-test("upstream health: a FIRST attempt that failed is 'failed' (its error is shown), a row with no attempt stays 'never' (audit C070)", () => {
+test("upstream health: a FIRST attempt that failed is 'failed' (its error is shown), a row with no attempt stays 'never' (audit)", () => {
   assert.equal(upstreamHealth(status({ fetchedAt: null, ok: false, error: "HTTP 401" }), NOW), "failed", "the first refresh failed: say so");
   assert.equal(upstreamHealth(status({ fetchedAt: null, attemptedAt: null, ok: false }), NOW), "never", "a malformed / never-run row is not a failure");
   assert.equal(upstreamHealth(status({ fetchedAt: null }), NOW), "never", "ok but never fetched (unchanged)");
 });
 
-test("upstream health: a TRUNCATED read is 'incomplete', never 'ok' (audit C159)", () => {
+test("upstream health: a TRUNCATED read is 'incomplete', never 'ok' (audit)", () => {
   assert.equal(upstreamHealth(status({ truncated: true }), NOW), "incomplete", "otherwise-perfect counts");
   assert.equal(upstreamHealth(status({ truncated: false }), NOW), "ok");
   assert.equal(upstreamHealth(status({ truncated: true, ok: false }), NOW), "failed", "an unread server is reported as unread");
 });
 
-test("upstream health: most episode records with NO show id is a broken parser — 'failed' (audit C160)", () => {
+test("upstream health: most episode records with NO show id is a broken parser — 'failed' (audit)", () => {
   assert.equal(upstreamHealth(status({ episodeRecords: 40, unplacedEpisodes: 30 }), NOW), "failed", "75% of episodes can't be placed on a show");
   assert.equal(upstreamHealth(status({ episodeRecords: 40, unplacedEpisodes: 10 }), NOW), "ok", "a few orphans are not a broken parser");
   assert.equal(upstreamHealth(status({ episodeRecords: 40, unplacedEpisodes: 20 }), NOW), "ok", "exactly half is not MORE than half");
@@ -235,7 +235,7 @@ test("upstreamHealth: an unreadable fetchedAt can't prove the check is recent �
   assert.equal(upstreamHealth(status({ fetchedAt: "not-a-date", ok: false }), NOW), "failed", "the earlier checks keep their order");
 });
 
-test("isUnhealthyUpstreamCheck / upstreamCheckCounts: a READ server the self-check refuses vs an unread one (audit C068)", () => {
+test("isUnhealthyUpstreamCheck / upstreamCheckCounts: a READ server the self-check refuses vs an unread one (audit)", () => {
   assert.equal(isUnhealthyUpstreamCheck({ ok: true, health: "failed" }), true);
   assert.equal(isUnhealthyUpstreamCheck({ ok: true, health: "unreliable" }), true);
   assert.equal(isUnhealthyUpstreamCheck({ ok: true, health: "incomplete" }), true);
@@ -253,7 +253,7 @@ test("isUnhealthyUpstreamCheck / upstreamCheckCounts: a READ server the self-che
   assert.deepEqual(upstreamCheckCounts([]), { unread: 0, unhealthy: 0 });
 });
 
-test("upstreamChipKey: 'ok' below the sample floor prints no agreement it never measured (audit C069)", () => {
+test("upstreamChipKey: 'ok' below the sample floor prints no agreement it never measured (audit)", () => {
   assert.equal(upstreamChipKey({ health: "ok", samples: 0 }), "okUnmeasured", "a fresh install would read '0% agreement'");
   assert.equal(upstreamChipKey({ health: "ok", samples: UPSTREAM_MIN_SAMPLES - 1 }), "okUnmeasured");
   assert.equal(upstreamChipKey({ health: "ok", samples: UPSTREAM_MIN_SAMPLES }), "ok", "measured at the floor");
@@ -298,7 +298,7 @@ test("parseNwQuery whitelists every parameter and clamps the page", () => {
   assert.equal(q(`q=${"x".repeat(300)}`).q.length, 100);
 });
 
-test("parseNwQuery: the Titles-only filters never apply to the Seasons tab, and 'added' sorts a season on Since (audit C065)", () => {
+test("parseNwQuery: the Titles-only filters never apply to the Seasons tab, and 'added' sorts a season on Since (audit)", () => {
   const q = (s: string) => parseNwQuery(new URLSearchParams(s));
   const season = q("level=season&type=movie&eligible=1&sortBy=added");
   assert.equal(season.type, "all", "a season is always TV — type=movie emptied the tab");
@@ -311,7 +311,7 @@ test("parseNwQuery: the Titles-only filters never apply to the Seasons tab, and 
   assert.equal(q("level=season&sortBy=days").sortBy, "days", "other sorts are left alone");
 });
 
-test("lastValidPage: the last page holding a row, 1 when there are none (audit C071)", () => {
+test("lastValidPage: the last page holding a row, 1 when there are none (audit)", () => {
   assert.equal(lastValidPage(50, 50), 1);
   assert.equal(lastValidPage(51, 50), 2, "ceil, not floor");
   assert.equal(lastValidPage(0, 50), 1, "never page 0");

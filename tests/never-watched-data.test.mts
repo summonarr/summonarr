@@ -22,7 +22,7 @@
 //   8. NARROWED-READ PARITY: re-judging one title (what the delete route does)
 //      reaches the same verdict as the full report. A tmdb-id-only narrowed read
 //      used to miss 1–4 entirely. That holds for a title with a backslash too —
-//      the stub's `contains` applies real ILIKE semantics (F019).
+//      the stub's `contains` applies real ILIKE semantics.
 //   9. A fulfilled request's availableAt is an ARRIVAL date (the earliest of
 //      every arrival source opens the window) — AVAILABLE requests only, and the
 //      EARLIEST of them.
@@ -57,7 +57,7 @@ function matchField(v: unknown, cond: unknown): boolean {
 
 // What Prisma's `contains` really runs: `ILIKE ('%' || $1 || '%')` with the term
 // bound unescaped and no ESCAPE clause, so `%`/`_` are wildcards and a backslash
-// is Postgres's default LIKE escape. A plain `includes` would hide F019.
+// is Postgres's default LIKE escape. A plain `includes` would hide.
 function likeContains(value: string, term: string, insensitive: boolean): boolean {
   const pattern = `%${insensitive ? term.toLowerCase() : term}%`;
   const lit = (ch: string) => ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -367,7 +367,7 @@ const unattributedRead = () => {
   return reads[0].where ?? {};
 };
 
-test("F019 8b. a BACKSLASH holder title: the narrowed read drops the title filter and keeps the full read's soft verdict", async () => {
+test("8b. a BACKSLASH holder title: the narrowed read drops the title filter and keeps the full read's soft verdict", async () => {
   // The stub is a real ILIKE: the backslash escapes the B, so the filter would miss.
   assert.equal(matchField("Foo\\Bar", { contains: "Foo\\Bar", mode: "insensitive" }), false, "stub applies LIKE escaping");
   assert.equal(matchField("FooBar", { contains: "Foo\\Bar", mode: "insensitive" }), true, "stub applies LIKE escaping");
@@ -382,7 +382,7 @@ test("F019 8b. a BACKSLASH holder title: the narrowed read drops the title filte
   assert.equal(one.titles[0].evidence.softPlays, full.evidence.softPlays, "narrowed soft plays match the full read");
 });
 
-test("F019 8c. a PADDED holder title still narrows, by its trimmed title, and reaches the full read's verdict", async () => {
+test("8c. a PADDED holder title still narrows, by its trimmed title, and reaches the full read's verdict", async () => {
   plexLib.push(plex(660, "MOVIE", "  Papa  ", { key: "rk660" }));
   plays.push(play({ sourceItemId: "unknown-660", title: "Papa" }));
   const full = byId(await loadLibraryWatchFacts(null, { now: NOW })).get(660)!;
@@ -420,10 +420,10 @@ test("a holder on an untracked source is unobservable, naming the server", async
 });
 
 // ── upstreamUnchecked: the loader's half of the 14d hold-back ───────────────
-// Audit C132: the pure cleanup rule was pinned with a hand-built
+// Audit: the pure cleanup rule was pinned with a hand-built
 // `upstreamUnchecked`, but the LOADER computing it (holders whose upstream
 // health isn't "ok") was not — `!== "ok"` → `=== "failed"`, or `[]`, left every
-// test green. C159: a truncated read is "incomplete" and holds too. C016: a
+// test green.: a truncated read is "incomplete" and holds too.: a
 // server that holds no title is listed for coverage but `holds: false`.
 const STATUS_PLEX = "upstreamWatch:status:plex:";
 const STATUS_JF = "upstreamWatch:status:jellyfin:";
@@ -440,7 +440,7 @@ async function withStatuses<T>(rows: Record<string, string>, fn: () => Promise<T
   }
 }
 
-test("C132 upstreamUnchecked: a STALE holder is named; a fresh ok one is not (Charlie: plex + jellyfin; Alpha: plex only)", async () => {
+test("upstreamUnchecked: a STALE holder is named; a fresh ok one is not (Charlie: plex + jellyfin; Alpha: plex only)", async () => {
   await withStatuses({ [STATUS_PLEX]: upstreamStatus(), [STATUS_JF]: upstreamStatus({ fetchedAt: d("2026-09-01").toISOString() }) }, async () => {
     const t = byId(await loadLibraryWatchFacts(null, { now: NOW }));
     assert.deepEqual(t.get(300)!.upstreamUnchecked, ["jellyfin"], "stale (30 days) is not a check");
@@ -448,7 +448,7 @@ test("C132 upstreamUnchecked: a STALE holder is named; a fresh ok one is not (Ch
   });
 });
 
-test("C132 upstreamUnchecked: a FAILED refresh and a parser that matched nothing both hold", async () => {
+test("upstreamUnchecked: a FAILED refresh and a parser that matched nothing both hold", async () => {
   await withStatuses({ [STATUS_PLEX]: upstreamStatus(), [STATUS_JF]: upstreamStatus({ ok: false, error: "HTTP 401" }) }, async () => {
     assert.deepEqual(byId(await loadLibraryWatchFacts(null, { now: NOW })).get(300)!.upstreamUnchecked, ["jellyfin"], "failed");
   });
@@ -457,13 +457,13 @@ test("C132 upstreamUnchecked: a FAILED refresh and a parser that matched nothing
   });
 });
 
-test("C132 upstreamUnchecked: NO status row at all is 'never' — the holder is named", async () => {
+test("upstreamUnchecked: NO status row at all is 'never' — the holder is named", async () => {
   const t = byId(await loadLibraryWatchFacts(null, { now: NOW }));
   assert.deepEqual(t.get(100)!.upstreamUnchecked, ["plex"]);
   assert.deepEqual(t.get(300)!.upstreamUnchecked, ["jellyfin", "plex"]);
 });
 
-test("C159 a TRUNCATED read parses as truncated and holds its titles back as 'incomplete'; a pre-field row reads complete", async () => {
+test("a TRUNCATED read parses as truncated and holds its titles back as 'incomplete'; a pre-field row reads complete", async () => {
   await withStatuses({ [STATUS_PLEX]: upstreamStatus({ truncated: true }) }, async () => {
     const facts = await loadLibraryWatchFacts(null, { now: NOW });
     const plexCov = facts.coverage.find((c) => c.server === "plex")!;
@@ -478,7 +478,7 @@ test("C159 a TRUNCATED read parses as truncated and holds its titles back as 'in
   });
 });
 
-test("C016 coverage marks which servers HOLD titles: a status-only or history-only server is listed with holds=false", async () => {
+test("coverage marks which servers HOLD titles: a status-only or history-only server is listed with holds=false", async () => {
   plays.push(play({ source: "jellyfin", serverInstance: "gone", tmdbId: 999997, mediaType: "MOVIE", startedAt: d("2025-02-01") }));
   await withStatuses({ "upstreamWatch:status:plex:removed": upstreamStatus({ fetchedAt: d("2026-01-01").toISOString() }) }, async () => {
     const cov = new Map((await loadLibraryWatchFacts(null, { now: NOW })).coverage.map((c) => [c.server, c]));

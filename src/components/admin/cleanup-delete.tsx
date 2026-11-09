@@ -102,6 +102,7 @@ export function useCleanupDelete(opts: {
   // whose generation is no longer current was computed for a selection the
   // admin has since changed, and is dropped instead of shown as the plan.
   const planGen = useRef(0);
+  const executingRef = useRef(false);
 
   const clearPlan = useCallback(() => {
     planGen.current++;
@@ -161,7 +162,8 @@ export function useCleanupDelete(opts: {
   }, [clearPlan, onDeleted]);
 
   const execute = useCallback(async () => {
-    if (!plan) return;
+    if (!plan || executingRef.current) return;
+    executingRef.current = true;
     const gen = planGen.current;
     setExecuting(true);
     setError("");
@@ -189,6 +191,7 @@ export function useCleanupDelete(opts: {
         await reloadAfter();
       }
     } finally {
+      executingRef.current = false;
       setExecuting(false);
     }
   }, [plan, blacklist, reloadAfter, settleUnknownOutcome, t]);

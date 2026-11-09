@@ -4,7 +4,7 @@ import { useEffect, useRef, type CSSProperties, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
-import { LogOut, Bell, GitFork, type IconComponent } from "@/components/icons";
+import { LogOut, Bell, GitFork } from "@/components/icons";
 import { signOutAndRedirect } from "@/components/auth/sign-out";
 import {
   userNavItems,
@@ -284,7 +284,7 @@ function NavLink({
   badge?: number;
   onClick: () => void;
 }) {
-  const Icon = item.icon as IconComponent;
+  const Icon = item.icon;
   const t = useT();
   return (
     <Link

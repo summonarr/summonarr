@@ -298,7 +298,7 @@ type SourceList = { items: TmdbMedia[]; complete: boolean };
 
 async function loadTopRatedSources(wantMovies: boolean, wantTv: boolean): Promise<Pools> {
   const failed = new Set<string>();
-  const provider = (name: string) => name.slice(0, name.indexOf("-"));
+  const provider = (name: string) => name.split("-", 1)[0];
   const fromSource = (name: string, want: boolean, load: () => Promise<SourceList>): Promise<TmdbMedia[]> =>
     want
       ? load().then(

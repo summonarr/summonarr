@@ -3,7 +3,7 @@
 import { prisma } from "./prisma";
 import { BATCH_TX_TIMEOUT } from "./batch-write";
 import { fetchTrashFile, fetchTrashTree, setRefreshTruncated, type GhTreeEntry, type TrashTree } from "./trash-github";
-import { describeSchemaError } from "./trash-schema-error";
+import { isSchemaError } from "./trash-schema-error";
 import {
   isCustomFormatPayload,
   isCustomFormatGroupPayload,
@@ -364,7 +364,7 @@ async function writeBatch<T>(ctx: RefreshContext, def: DirDef<T>, rows: SpecWrit
 // The DB error's text can name the database host or a query: it goes to the
 // log, and the refresh result (shown to admins, audited) gets a plain line.
 function reportWriteFailure(ctx: RefreshContext, label: string, count: number, err: unknown): void {
-  if (describeSchemaError(err)) throw err;
+  if (isSchemaError(err)) throw err;
   console.error(`[trash] ${ctx.service} ${label} write failed:`, err);
   ctx.errors.push(`${label}: could not save ${count} spec(s) to the database (see the server log)`);
 }

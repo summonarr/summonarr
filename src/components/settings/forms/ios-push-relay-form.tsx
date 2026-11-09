@@ -46,10 +46,12 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    const sentKey = relayKey;
+    const sentRemove = removeKey;
     const result = await save({
       // A typed key replaces the saved one; "" deletes it (Remove); nothing
       // sent keeps it.
-      ...relayKeyField(relayKey, removeKey),
+      ...relayKeyField(sentKey, sentRemove),
       // "" deletes the recommendation.
       recommendedIosBuild: recommendedBuild.trim(),
       // "" deletes the custom URL, so push goes back to the default relay
@@ -58,9 +60,11 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
     });
     if (result.ok) {
       // A new key was saved, or the saved one removed, or (neither) kept.
-      setKeyIsSet(relayKey.length > 0 || (keyIsSet && !removeKey));
-      setRelayKey("");
-      setRemoveKey(false);
+      setKeyIsSet(sentKey.length > 0 || (keyIsSet && !sentRemove));
+      // Clear only what was sent: a key typed or a Remove pressed while the
+      // save ran is the admin's next edit.
+      setRelayKey((k) => (k === sentKey ? "" : k));
+      setRemoveKey((r) => (r === sentRemove ? false : r));
     }
   }
 

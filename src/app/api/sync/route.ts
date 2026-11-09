@@ -247,6 +247,7 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   if (windDownBefore("re-push")) return windDownResponse();
   repushed = await repushStranded(approved, flags, arr);
 
+  if (windDownBefore("library read")) return windDownResponse();
   const arrPresence = await arrPresenceOfAvailable(available, flags, arr);
 
   const targets = await readLibraryTargets();
@@ -267,6 +268,7 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   if (windDownBefore("pending notify")) return windDownResponse();
   await notifyPendingAvailable(coverage, plex, jellyfin, vis);
 
+  if (windDownBefore("cache purge")) return windDownResponse();
   await purgeExpiredTmdbCache();
 
   const { radarrWanted, sonarrWanted } = arr;
@@ -415,14 +417,13 @@ async function arrAvailableKeys(
   const movieIds = rows.filter((r) => r.mediaType === "MOVIE" && include(r)).map((r) => r.tmdbId);
   const tvIds    = rows.filter((r) => r.mediaType === "TV"    && include(r)).map((r) => r.tmdbId);
   if (movieIds.length === 0 && tvIds.length === 0) return { movies: new Set(), tv: new Set() };
-  const [movieRows, tvRows] = await Promise.all([
-    movieIds.length > 0 ? prisma.radarrAvailableItem.findMany({ where: { tmdbId: { in: movieIds } } }) : Promise.resolve([]),
-    tvIds.length > 0 ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: tvIds } } }) : Promise.resolve([]),
+  const movies = new Set<string>();
+  const tv = new Set<string>();
+  await Promise.all([
+    arrKeysIn("radarrAvailableItem", movieIds, movies),
+    arrKeysIn("sonarrAvailableItem", tvIds, tv),
   ]);
-  return {
-    movies: new Set(movieRows.map((r) => vkey(r.tmdbId, r.arrInstance))),
-    tv: new Set(tvRows.map((r) => vkey(r.tmdbId, r.arrInstance))),
-  };
+  return { movies, tv };
 }
 
 // ARR-available means "downloaded in Radarr/Sonarr", which is not the same as
@@ -432,11 +433,11 @@ async function arrAvailableKeys(
 // actually appears in their chosen server — no premature "now available" off a
 // library they haven't reached.
 async function withoutPinnedRequesters<R extends { requestedBy: string }>(rows: R[]): Promise<R[]> {
-  const users = await prisma.user.findMany({
-    where: { id: { in: [...new Set(rows.map((r) => r.requestedBy))] } },
-    select: { id: true, mediaServer: true },
-  });
-  const preferred = new Map(users.map((u) => [u.id, u.mediaServer]));
+  const preferred = new Map<string, string | null>();
+  for (const ids of inChunks([...new Set(rows.map((r) => r.requestedBy))])) {
+    const users = await prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, mediaServer: true } });
+    for (const u of users) preferred.set(u.id, u.mediaServer);
+  }
   return rows.filter((r) => !(preferred.get(r.requestedBy) ?? null));
 }
 
@@ -644,14 +645,18 @@ async function repushStranded(approved: ApprovedRow[], flags: SyncFlags, arr: Ar
   // ARR_REPUSH_BACKOFF_MS gates retries to ~daily (lastArrPushAt is stamped on every
   // attempt, success or fail) so a permanently-unresolvable request doesn't churn hourly.
   const repushCutoff = new Date(Date.now() - ARR_REPUSH_BACKOFF_MS);
-  const stillApproved = await prisma.mediaRequest.findMany({
-    where: {
-      id: { in: approved.map((r) => r.id) },
-      status: "APPROVED",
-      OR: [{ lastArrPushAt: null }, { lastArrPushAt: { lte: repushCutoff } }],
-    },
-    select: { id: true, tmdbId: true, mediaType: true, arrInstance: true, qualityProfileId: true, requestedBy: true, createdAt: true },
-  });
+  const stillApproved: Array<{ id: string; tmdbId: number; mediaType: string; arrInstance: string; qualityProfileId: number | null; requestedBy: string; createdAt: Date }> = [];
+  for (const ids of inChunks(approved.map((r) => r.id))) {
+    const rows = await prisma.mediaRequest.findMany({
+      where: {
+        id: { in: ids },
+        status: "APPROVED",
+        OR: [{ lastArrPushAt: null }, { lastArrPushAt: { lte: repushCutoff } }],
+      },
+      select: { id: true, tmdbId: true, mediaType: true, arrInstance: true, qualityProfileId: true, requestedBy: true, createdAt: true },
+    });
+    for (const r of rows) stillApproved.push(r);
+  }
   // Per-slug gate (not the global flag): only re-push a request whose OWN instance's
   // cache was refreshed this run (arrInstanceRefreshed). An unconfigured instance
   // (nothing synced while the flag still reads true) would otherwise put every APPROVED
@@ -751,6 +756,14 @@ function arrInstanceRefreshed(req: { mediaType: string; arrInstance: string }, {
 // chunked: one statement stays far below Postgres's bind-parameter limit
 // (guardrail 23c). Chunks are read one after another.
 const ARR_PRESENCE_CHUNK = 5_000;
+
+// `ids` split into runs that each fit one statement.
+function inChunks<T>(ids: readonly T[]): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < ids.length; i += ARR_PRESENCE_CHUNK) out.push(ids.slice(i, i + ARR_PRESENCE_CHUNK));
+  return out;
+}
+
 async function arrKeysIn(
   table: "radarrAvailableItem" | "radarrWantedItem" | "sonarrAvailableItem" | "sonarrWantedItem",
   tmdbIds: number[],

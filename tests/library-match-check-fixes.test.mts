@@ -115,8 +115,8 @@ test("structural: Fix all can be stopped, stops on unmount, and stays mounted wh
   assert.match(run, /fix: \(request, signal\) => runFixMatch\(request, \{ signal \}\),/, "each poll can be aborted");
   assert.match(run, /onTitleStart: \(ac\) => \{ abortRef\.current = ac; \},/);
   assert.match(run, /return \(\) => \{ alive\.current = false; stopRef\.current = true; abortRef\.current\?\.abort\(\); \};/, "unmount stops the run");
-  assert.match(run, /if \(aborted \|\| !alive\.current\) return;/, "nothing is written, and no refresh asked for, after the page went away");
-  assert.match(run, /stop: \(\) => \{ stopRef\.current = true; \},/);
+  assert.match(run, /if \(!alive\.current \|\| \(aborted && !stopRef\.current\)\) return;/, "nothing is written, and no refresh asked for, after the page went away; a Stop still closes the run");
+  assert.match(run, /stop: \(\) => \{ stopRef\.current = true; abortRef\.current\?\.abort\(\); \},/, "Stop aborts the wait on the title in flight");
   assert.match(run, /\{state === "running" && \(\s*<button ref=\{stopButtonRef\} type="button" onClick=\{run\.stop\}/, "a Stop button while running");
   assert.match(loop, /if \(isAbortError\(err\)\) return \{ results, aborted: true \};/, "an abort is not a failure");
   assert.match(loop, /return err instanceof DOMException && err\.name === "AbortError";/);

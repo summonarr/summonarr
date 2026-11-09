@@ -856,9 +856,9 @@ test("a first server that needs MORE than an even share (but less than budget mi
   assert.equal(upstreamRefreshProblems(result), 0);
 });
 
-// ── a TRUNCATED read and episodes with no show id (audit C159 / C160) ────────
+// ── a TRUNCATED read and episodes with no show id ────────
 
-test("a Plex history cut off at its read cap is stored truncated: health 'incomplete', the run degraded, warned ONCE (C159)", async () => {
+test("a Plex history cut off at its read cap is stored truncated: health 'incomplete', the run degraded, warned ONCE", async () => {
   configurePlex();
   respond = () => plexPage(plexHistory());
   // Cap 3: the 4th watch record (502) exists past it — the oldest records are unread.
@@ -879,7 +879,7 @@ test("a Plex history cut off at its read cap is stored truncated: health 'incomp
   assert.equal(upstreamRefreshProblems(full), 0);
 });
 
-test("a failed refresh carries the previous snapshot's truncated flag — its rows are still the partial ones (C159)", async () => {
+test("a failed refresh carries the previous snapshot's truncated flag — its rows are still the partial ones", async () => {
   configurePlex();
   settings.set("upstreamWatch:status:plex:", JSON.stringify({
     fetchedAt: ago(1).toISOString(), attemptedAt: ago(1).toISOString(), ok: true, entries: 7, matched: 6, samples: 0, agreed: 0, error: null, truncated: true,
@@ -889,7 +889,7 @@ test("a failed refresh carries the previous snapshot's truncated flag — its ro
   assert.equal(status("plex", "").truncated, true);
 });
 
-test("episodes whose show id can't be read are counted: most of them unplaced reads 'failed' on a MIXED server, warned once (C160)", async () => {
+test("episodes whose show id can't be read are counted: most of them unplaced reads 'failed' on a MIXED server, warned once", async () => {
   configurePlex();
   const episodes = Array.from({ length: 25 }, (_, i) => ({
     type: "episode", ratingKey: String(600 + i), grandparentKey: "/not/a/metadata/path", parentIndex: 1, index: i + 1, viewedAt: secs(ago(3)), accountID: 1,
@@ -907,7 +907,7 @@ test("episodes whose show id can't be read are counted: most of them unplaced re
   assert.equal(warns.filter((w) => w.includes("none matched")).length, 0);
 });
 
-test("the default history's episodes all carry a show id: nothing unplaced (C160)", async () => {
+test("the default history's episodes all carry a show id: nothing unplaced", async () => {
   configurePlex();
   respond = () => plexPage(plexHistory());
   await refreshUpstreamWatch();

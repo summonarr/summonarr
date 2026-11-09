@@ -11,5 +11,8 @@ import { useLocale } from "@/components/i18n/i18n-provider";
 export function LocalDateTime({ iso }: { iso: string }) {
   const mounted = useHasMounted();
   const locale = useLocale();
-  return <time dateTime={iso}>{mounted ? new Date(iso).toLocaleString(locale) : ""}</time>;
+  const at = new Date(iso);
+  // An unreadable instant shows a dash, never "Invalid Date".
+  const text = !mounted ? "" : Number.isNaN(at.getTime()) ? "—" : at.toLocaleString(locale);
+  return <time dateTime={iso}>{text}</time>;
 }

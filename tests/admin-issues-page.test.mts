@@ -29,7 +29,7 @@ test("reporter names come from the typed user include", () => {
   assert.match(page, /const groups = groupIssues\(allIssues\);/);
   assert.match(groups, /user: \{ name: string \| null; email: string \};/, "groupIssues' constraint names the include");
   // A blank display name falls back to the email (display-name.ts).
-  assert.match(groups, /reporterNames: group\.map\(\(i\) => nameOrEmail\(i\.user\)\)/);
+  assert.match(groups, /reporterNames: \[\.\.\.new Set\(group\.map\(\(i\) => nameOrEmail\(i\.user\)\)\)\]/);
 });
 
 test("IssueActions and its claim are built in one place each", () => {

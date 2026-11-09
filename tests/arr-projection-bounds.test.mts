@@ -1,4 +1,4 @@
-// Audit fixes F008–F013: every projection over an upstream Radarr/Sonarr list
+// –: every projection over an upstream Radarr/Sonarr list
 // is linear and bounded, whatever the arr sends. arrFetch caps a response only
 // by SIZE (50 MB — hundreds of thousands of entries), and these projections run
 // synchronously on the one event loop: from the arr-watch cron every

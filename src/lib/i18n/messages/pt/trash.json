@@ -205,6 +205,7 @@
   "trash.spec.hiddenSelected": "{count} ocultos pelo filtro",
   "trash.applyLog.noReason": "nenhum detalhe do erro foi retornado",
   "trash.token.remove": "Remover",
+  "trash.token.confirmRemove": "Remover o token do GitHub armazenado?",
   "trash.token.removed": "Removido",
   "trash.spec.selectAria": "Selecionar {name}",
   "trash.spec.selectAllAria": "Selecionar todas as especificações visíveis",

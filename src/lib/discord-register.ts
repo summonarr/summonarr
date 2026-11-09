@@ -267,9 +267,11 @@ export async function recordDiscordSchemaHash(guildId: string | null, clientId?:
     const appId = clientId ?? (await prisma.setting.findUnique({ where: { key: "discordClientId" } }))?.value;
     if (!appId) return;
     const value = discordSchemaHash(appId, guildId);
-    await prisma.setting.upsert({ where: { key: DISCORD_SCHEMA_HASH_KEY }, update: { value }, create: { key: DISCORD_SCHEMA_HASH_KEY, value } });
     const target = guildId ? `${appId}:${guildId}` : "";
+    // Guild record first, hash last: a failure between them leaves the hash stale,
+    // which only re-registers next boot, never a current hash over a stale guild.
     await prisma.setting.upsert({ where: { key: DISCORD_REGISTERED_GUILD_KEY }, update: { value: target }, create: { key: DISCORD_REGISTERED_GUILD_KEY, value: target } });
+    await prisma.setting.upsert({ where: { key: DISCORD_SCHEMA_HASH_KEY }, update: { value }, create: { key: DISCORD_SCHEMA_HASH_KEY, value } });
   } catch (err) {
     console.warn("[discord] failed to persist command schema hash:", err instanceof Error ? err.message : err);
   }

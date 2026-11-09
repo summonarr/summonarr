@@ -71,6 +71,10 @@ export const GET = withAdmin(async (req, _ctx, session) => {
     body = wrapEncryptStream(buildSqlStream(session.user.id, { onCancel: release, onSettled }), password);
   } catch (err) {
     release();
+    // The "started" row must not stay open when the stream never began.
+    void auditId
+      .then((id) => (id ? finalizeAuditRow(id, { ...details, status: "failed", totalRows: 0 }, "[db-export]") : undefined))
+      .catch(() => {});
     if (err instanceof BackupCryptoError) {
       return NextResponse.json({ error: localizeBackupMessage(err.message, t) }, { status: err.status });
     }

@@ -205,6 +205,7 @@
   "trash.spec.hiddenSelected": "{count} 个被筛选隐藏",
   "trash.applyLog.noReason": "未返回错误详情",
   "trash.token.remove": "移除",
+  "trash.token.confirmRemove": "移除已保存的 GitHub 令牌？",
   "trash.token.removed": "已移除",
   "trash.spec.selectAria": "选择 {name}",
   "trash.spec.selectAllAria": "选择所有可见规范",

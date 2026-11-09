@@ -74,7 +74,8 @@ export async function claimAvailableNotifications<T extends { id: string; reques
         UPDATE "MediaRequest"
         SET "notifiedAvailable" = true,
             "status" = 'AVAILABLE',
-            "availableAt" = NOW()
+            "availableAt" = NOW(),
+            "pendingNotifyAt" = NULL
         WHERE id IN (${Prisma.join(ids)})
           AND "notifiedAvailable" = false
           AND "status" IN ('PENDING', 'APPROVED')

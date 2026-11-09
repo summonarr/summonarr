@@ -21,8 +21,8 @@ import type { SummonarrSession } from "./api-auth";
  *
  * The flip is its own CAS on OPEN, so two callers that both read OPEN can't
  * both announce it: the one whose write matched OPEN does. For "notResolved",
- * a row that was not OPEN is then claimed on not-RESOLVED, which changes
- * nothing worth telling anyone.
+ * a row that was not OPEN is then claimed on IN_PROGRESS, which changes
+ * nothing worth telling anyone; a row reopened meanwhile is refused (0), not flipped silently.
  *
  * The audit is the swallowing logAudit, after the CAS committed (guardrail 26),
  * so it never turns the caller's answer into a 500.
@@ -37,7 +37,7 @@ export async function promoteIssueInProgress(opts: {
   req: Request | { headers: Headers };
 }): Promise<number> {
   const { issue, session } = opts;
-  if (opts.from === "open" || issue.status === "OPEN") {
+  const flipOpen = async (): Promise<number> => {
     const flip = await prisma.issue.updateMany({ where: { id: issue.id, status: "OPEN" }, data: { status: "IN_PROGRESS" } });
     if (flip.count > 0) {
       emitSSE({ type: "issue:updated", issueId: issue.id, status: "IN_PROGRESS", userId: issue.reportedBy });
@@ -49,12 +49,19 @@ export async function promoteIssueInProgress(opts: {
         details: { trigger: opts.trigger, ...opts.details, before: { status: "OPEN" }, after: { status: "IN_PROGRESS" } },
         ...auditContext(opts.req, opts.session),
       });
-      return flip.count;
     }
-    if (opts.from === "open") return 0;
+    return flip.count;
+  };
+  if (opts.from === "open" || issue.status === "OPEN") {
+    const flipped = await flipOpen();
+    if (flipped > 0 || opts.from === "open") return flipped;
   }
+  // Already IN_PROGRESS: the claim changes nothing worth telling anyone. It is
+  // deliberately NOT a "not resolved" write — a row reopened since the read
+  // would flip silently, with no event and no audit row; it answers 0 instead
+  // (the guard failed) and the caller sees the issue as it now is.
   const claim = await prisma.issue.updateMany({
-    where: { id: issue.id, status: { not: "RESOLVED" } },
+    where: { id: issue.id, status: "IN_PROGRESS" },
     data: { status: "IN_PROGRESS" },
   });
   return claim.count;
@@ -133,10 +140,10 @@ async function closeIssueForAction(opts: { issueId: string; about: { tmdbId: num
 // caller read first), so the status it returns — the audit's `before` — is
 // the row's real one even when it moved after the read. Still one winner: a
 // row matches at most one of these writes. Null when no write matched.
-async function claimResolveFrom(
+export async function claimResolveFrom(
   id: string,
   readStatus: string,
-  data: { status: "RESOLVED"; resolvedAt: Date; resolution: string },
+  data: { status: "RESOLVED"; resolvedAt: Date; resolution?: string },
 ): Promise<"OPEN" | "IN_PROGRESS" | null> {
   const order: Array<"OPEN" | "IN_PROGRESS"> = readStatus === "IN_PROGRESS" ? ["IN_PROGRESS", "OPEN"] : ["OPEN", "IN_PROGRESS"];
   // Twice round: a reply can move IN_PROGRESS back to OPEN between two tries.
@@ -156,6 +163,9 @@ export interface ResolvedIssue {
   posterPath: string | null;
   issueType: string;
 }
+
+const warnResolved = (channel: string) => (err: unknown) =>
+  console.warn(`[issues] resolved ${channel} notification failed:`, err instanceof Error ? err.message : String(err));
 
 /**
  * Tell everyone an issue was resolved — the admin's resolve (PATCH) and the
@@ -187,7 +197,7 @@ export async function announceIssueResolved(
     .catch(() => null);
   if (!reporter || reporter.deactivatedAt != null) return;
 
-  void notifyUserIssueResolved(issue.reportedBy, issue.title, issue.mediaType, res, issue.tmdbId).catch(() => {});
+  void notifyUserIssueResolved(issue.reportedBy, issue.title, issue.mediaType, res, issue.tmdbId).catch(warnResolved("discord"));
   void notifyUserIssueResolvedPush({
     userId: issue.reportedBy,
     title: issue.title,
@@ -195,7 +205,7 @@ export async function announceIssueResolved(
     mediaType: issue.mediaType,
     resolution: res,
     issueId: issue.id,
-  }).catch(() => {});
+  }).catch(warnResolved("push"));
   createInAppNotification(issue.reportedBy, {
     type: "ISSUE_RESOLVED",
     title: issue.title,

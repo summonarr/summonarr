@@ -1,4 +1,4 @@
-// Audit fix C067 (unit nw-ui): the Protect/Unprotect buttons on the
+// the Protect/Unprotect buttons on the
 // never-watched report and on Library cleanup tracked their in-flight request
 // with ONE busy key. Protecting row A then row B moved the key to B (A's
 // button re-enabled mid-request), and A's `finally` then cleared it (B's
@@ -48,7 +48,7 @@ function finallyBlock(body: string): string {
 for (const file of FILES) {
   const src = read(file);
 
-  test(`C067 ${file}: the busy state is a Set of keys, never a single key`, () => {
+  test(`${file}: the busy state is a Set of keys, never a single key`, () => {
     assert.match(src, /const \[busyKeys, setBusyKeys\] = useState<Set<string>>\(/);
     assert.doesNotMatch(src, /\bsetBusyKey\(/, "the single-key setter is back");
     assert.doesNotMatch(src, /\bbusyKey\b/, "a single busy key is read");
@@ -59,14 +59,14 @@ for (const file of FILES) {
     assert.doesNotMatch(src, /busyKeys\s*[=!]==/);
   });
 
-  test(`C067 ${file}: a request ADDS its key, keeping every other row's`, () => {
+  test(`${file}: a request ADDS its key, keeping every other row's`, () => {
     const body = setProtectedBody(src);
     assert.match(body, /setBusyKeys\(\(prev\) => new Set\(prev\)\.add\(k\)\)/);
     // Replacing the set (`new Set([k])`) would re-enable the first row.
     assert.doesNotMatch(body, /setBusyKeys\(new Set\(/);
   });
 
-  test(`C067 ${file}: the finally removes ONLY its own key`, () => {
+  test(`${file}: the finally removes ONLY its own key`, () => {
     const fin = finallyBlock(setProtectedBody(src));
     assert.match(fin, /setBusyKeys\(\(prev\) => \{\s*const next = new Set\(prev\);\s*next\.delete\(k\);\s*return next;\s*\}\)/);
     assert.doesNotMatch(fin, /new Set\(\)/, "the finally empties every row's busy state");

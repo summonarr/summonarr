@@ -339,10 +339,10 @@ export const adminDebugPaths: OpenApiPaths = {
       tags: ["Admin – Debug"],
       summary: "Dump play-history attribution state for an account (ADMIN)",
       description:
-        "Why a user's watch history is empty: the account's three identity columns, every candidate MediaServerUser row with per-row matchesFk / matchesSubject / visibleToUser verdicts, the resolved id list, and any orphaned server identities holding history the account cannot see. Pass exactly one of userId or email.",
+        "Why a user's watch history is empty: the account's three identity columns, every candidate MediaServerUser row with per-row matchesFk / matchesSubject / visibleToUser verdicts, the resolved id list, and any orphaned server identities holding history the account cannot see. Pass userId or email; when both are sent, userId wins and email is ignored.",
       parameters: [
-        { name: "userId", in: "query", schema: { type: "string" }, description: "Summonarr User id (mutually exclusive with email)" },
-        { name: "email", in: "query", schema: { type: "string" }, description: "Account email (mutually exclusive with userId)" },
+        { name: "userId", in: "query", schema: { type: "string" }, description: "Summonarr User id (takes precedence over email)" },
+        { name: "email", in: "query", schema: { type: "string" }, description: "Account email (ignored when userId is also sent)" },
       ],
       responses: {
         "200": {
@@ -662,7 +662,7 @@ export const adminDebugPaths: OpenApiPaths = {
         "202": jobAnswer("async: true — the check runs in the background: { job }", JOB_STARTED),
         "403": { description: "Not ADMIN" },
         "409": { description: "A check is already running — { ok: false, error, retryAfter: 30 }", headers: { "Retry-After": { schema: { type: "integer" }, description: "Seconds (30)" } } },
-        "413": { description: "Request body over the 1 KB cap" },
+        "413": tooLargeAnswer(1024),
         "429": { description: "Rate limited (3 per 10 minutes per admin)" },
       },
     },

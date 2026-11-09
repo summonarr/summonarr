@@ -25,7 +25,7 @@ export function SyncTVEpisodesButton() {
     // failure while the server still finishes.
     const res = await action.run("sync", (signal) =>
       fetchJson(withBasePath("/api/sync/tv-episodes"), {
-        init: { method: "POST", headers: { "Content-Type": "application/json" } },
+        init: { method: "POST" },
         schema: TV_EPISODE_SYNC_ANSWER,
         timeoutMs: LONG_RUN_TIMEOUT_MS,
         signal,

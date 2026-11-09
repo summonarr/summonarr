@@ -25,6 +25,8 @@ export function useStepUpPost<S extends Schema<unknown>>(
     failed: string;
     /** Shown for a 2xx whose body isn't the expected answer. */
     malformed?: string;
+    /** Shown when the step-up password was refused; default is the profile's wording. */
+    incorrectPassword?: string;
   },
 ) {
   const t = useT();
@@ -51,7 +53,7 @@ export function useStepUpPost<S extends Schema<unknown>>(
       const need = res.kind === "http" ? stepUpNeedOf(res.status, res.body) : null;
       if (need) {
         setStepUp(true);
-        setStepUpError(need === "retry" ? t("profile.sessions.error.incorrectPassword") : null);
+        setStepUpError(need === "retry" ? messages.incorrectPassword ?? t("profile.sessions.error.incorrectPassword") : null);
         return null;
       }
       // The route's `message`, else its `error` (a sign-in that is too old

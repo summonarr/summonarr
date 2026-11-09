@@ -1,11 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Loader2 } from "@/components/icons";
-import { SaveStatusMessage } from "./save-status";
+import { NumberField } from "./number-field";
+import { SaveButtonRow } from "./save-status";
 import { useSettingsSave } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
 import { MAX_CONFIGURABLE_SESSION_SECONDS } from "@/lib/session-lifetime";
@@ -43,55 +40,41 @@ export function SessionForm({ initialDefaultDuration, initialMobileDuration, ini
   return (
     <form onSubmit={handleSave} className="space-y-4">
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="space-y-1.5">
-          <Label htmlFor="session-default">{t("settings.form.session.desktop")} <span className="text-zinc-500 font-normal">{t("settings.form.session.seconds")}</span></Label>
-          <Input
-            id="session-default"
-            type="number"
-            min="60"
-            max={MAX_SESSION_SECONDS}
-            value={defaultDuration}
-            onChange={(e) => { setDefaultDuration(e.target.value); edited(); }}
-            placeholder="3600"
-            className="bg-zinc-800 border-zinc-700"
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="session-mobile">{t("settings.form.session.mobile")} <span className="text-zinc-500 font-normal">{t("settings.form.session.seconds")}</span></Label>
-          <Input
-            id="session-mobile"
-            type="number"
-            min="60"
-            max={MAX_SESSION_SECONDS}
-            value={mobileDuration}
-            onChange={(e) => { setMobileDuration(e.target.value); edited(); }}
-            placeholder="604800"
-            className="bg-zinc-800 border-zinc-700"
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="session-max">{t("settings.form.session.rememberMe")} <span className="text-zinc-500 font-normal">{t("settings.form.session.seconds")}</span></Label>
-          <Input
-            id="session-max"
-            type="number"
-            min="60"
-            max={MAX_SESSION_SECONDS}
-            value={maxDuration}
-            onChange={(e) => { setMaxDuration(e.target.value); edited(); }}
-            placeholder="2592000"
-            className="bg-zinc-800 border-zinc-700"
-          />
-        </div>
+        <NumberField
+          wide
+          id="session-default"
+          label={<>{t("settings.form.session.desktop")} <span className="text-zinc-500 font-normal">{t("settings.form.session.seconds")}</span></>}
+          value={defaultDuration}
+          onChange={(v) => { setDefaultDuration(v); edited(); }}
+          min={60}
+          max={MAX_SESSION_SECONDS}
+          placeholder="3600"
+        />
+        <NumberField
+          wide
+          id="session-mobile"
+          label={<>{t("settings.form.session.mobile")} <span className="text-zinc-500 font-normal">{t("settings.form.session.seconds")}</span></>}
+          value={mobileDuration}
+          onChange={(v) => { setMobileDuration(v); edited(); }}
+          min={60}
+          max={MAX_SESSION_SECONDS}
+          placeholder="604800"
+        />
+        <NumberField
+          wide
+          id="session-max"
+          label={<>{t("settings.form.session.rememberMe")} <span className="text-zinc-500 font-normal">{t("settings.form.session.seconds")}</span></>}
+          value={maxDuration}
+          onChange={(v) => { setMaxDuration(v); edited(); }}
+          min={60}
+          max={MAX_SESSION_SECONDS}
+          placeholder="2592000"
+        />
       </div>
       <p className="text-xs text-zinc-500">
         {t("settings.form.session.help")}
       </p>
-      <div className="flex items-center gap-3">
-        <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
-          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
-        </Button>
-        <SaveStatusMessage status={status} errorLabel={message || t("settings.form.common.saveFailed")} />
-      </div>
+      <SaveButtonRow status={status} message={message} />
     </form>
   );
 }

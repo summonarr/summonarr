@@ -22,7 +22,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
-import type { Mode, ReportKey, Reports, Service } from "@/components/admin/use-missing-reports";
+import type { ReportKey, Reports } from "@/components/admin/use-missing-reports";
 import { readApiError } from "@/lib/client/api-error";
 import { listSelection, pageSelection, type SelectionRules } from "@/components/admin/bulk-selection";
 import {
@@ -35,6 +35,11 @@ import {
   type SearchOutcome,
 } from "@/lib/bulk-search-run";
 import { timedFetch } from "@/lib/client/fetch-json";
+import { modeOf, serviceOf } from "@/components/admin/missing-report-rules";
+import { check, v } from "@/lib/validate";
+
+// The only field of the 202 the runner reads.
+const PARTIAL_ANSWER = v.object({ partial: v.optional(v.boolean()) });
 
 // `outcome` null while a request is in flight (or before any); `message` is the
 // route's own text — the error for "failed", the 409's reason for "already".
@@ -103,7 +108,8 @@ export function useBulkSearch() {
   // One search request; marks the row busy and reports how it went without
   // settling it — the bulk runner may wait out a 429 and ask again first.
   async function requestSearch(key: ReportKey, row: { instance: string; arrId: number }): Promise<SearchAttempt> {
-    const [svc, m] = key.split(":") as [Service, Mode];
+    const svc = serviceOf(key);
+    const m = modeOf(key);
     const k = `${key}|${rowKey(row)}`;
     updateSearches((s) => ({ ...s, [k]: { busy: true, outcome: null, message: "" } }));
     try {
@@ -116,8 +122,8 @@ export function useBulkSearch() {
         const attempt = searchAttemptFromResponse(res.status, "", null);
         // Sonarr refused a later command after earlier ones were queued: those
         // are running, the rest of the title's gap is not being searched.
-        const d = (await res.json().catch(() => null)) as { partial?: unknown } | null;
-        return d?.partial === true ? { ...attempt, message: t("adminManage.missing.searchPartial") } : attempt;
+        const body = check(PARTIAL_ANSWER, await res.json().catch(() => null));
+        return body.ok && body.value.partial === true ? { ...attempt, message: t("adminManage.missing.searchPartial") } : attempt;
       }
       const message = await readApiError(res, t("adminManage.missing.searchError"));
       return searchAttemptFromResponse(res.status, message, res.headers.get("Retry-After"));

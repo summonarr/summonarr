@@ -13,6 +13,8 @@ import { getNeverWatchedReport, selectReportRows } from "@/lib/never-watched-rep
 // cached briefly (see getNeverWatchedReport); `?fresh=1` recomputes it and
 // re-lists Radarr/Sonarr. Read-only: deleting goes through
 // /api/admin/cleanup/delete, whose dry run re-judges every title live.
+const FRESH_PER_MIN = 6;
+
 export const GET = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   if (!(await isFeatureEnabled(NEVER_WATCHED_FEATURE_KEY))) {
@@ -22,8 +24,14 @@ export const GET = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiUser.common.tooManyRequestsShortly") }, { status: 429 });
   }
   const params = req.nextUrl.searchParams;
+  const fresh = params.get("fresh") === "1";
+  // A fresh read rebuilds the whole report and re-lists Radarr/Sonarr, so it is
+  // held to a much lower rate than the cached page loads above.
+  if (fresh && !checkRateLimit(`never-watched-fresh:${session.user.id}`, FRESH_PER_MIN, 60_000)) {
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsShortly") }, { status: 429 });
+  }
   const query = parseNwQuery(params);
-  const report = await getNeverWatchedReport({ fresh: params.get("fresh") === "1" });
+  const report = await getNeverWatchedReport({ fresh });
   const { rows, total } = selectReportRows(report, query);
   const { titles: _titles, seasons: _seasons, ...summary } = report;
   return NextResponse.json({ ...summary, query, rows, total });

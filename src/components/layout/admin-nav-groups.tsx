@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useLayoutEffect, useState, type ReactNode } from "react";
+import { Fragment, createContext, useContext, useEffect, useLayoutEffect, useState, type ReactNode } from "react";
 import { ChevronDown } from "@/components/icons";
 import {
   ADMIN_NAV_GROUPS,
@@ -271,7 +271,7 @@ export function AdminNavGroupList({
               )}
             </button>
             <div id={listId} className="flex flex-col" style={{ gap: drawer ? 0 : 1 }}>
-              {shown.map((item) => renderItem(item))}
+              {shown.map((item) => <Fragment key={item.href}>{renderItem(item)}</Fragment>)}
             </div>
           </div>
         );

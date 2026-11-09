@@ -161,7 +161,8 @@ function fetchAndCache<T extends object>(key: string, fetcher: () => Promise<T>)
         value = {} as T;
         ttl = NOT_FOUND_TTL;
       }
-      await setCache(key, value, ttl);
+      // A failed write must not discard the translation just fetched.
+      await setCache(key, value, ttl).catch((err) => console.warn("[tmdb-localize] cache write failed:", err instanceof Error ? err.message : err));
       return value;
     }),
   );

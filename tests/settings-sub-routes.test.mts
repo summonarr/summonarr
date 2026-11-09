@@ -594,6 +594,19 @@ test("webhook-urls reads an explicit key allowlist and reveals nothing else", as
   for (const k of asked) assert.match(k, /WebhookSecret$|^webhookSecret$/);
 });
 
+test("webhook-urls answers only the asked service and reads only its keys", async () => {
+  settings.set("radarrWebhookSecret", "r-secret");
+  settings.set("sonarrWebhookSecret", "s-secret");
+  settings.set("webhookSecret", "legacy-shared");
+  const t = await mintSession();
+  const res = await inScope(() => webhookUrls.GET(mk("/api/settings/webhook-urls", t, { method: "GET", query: "?service=sonarr" }), undefined));
+  assert.deepEqual(await res.json(), { sonarr: "s-secret" });
+  const asked = opsOf("setting.findMany")[0].args as string[];
+  assert.ok(!asked.includes("radarrWebhookSecret"), "another service's secret is not even read");
+  const unknown = await inScope(() => webhookUrls.GET(mk("/api/settings/webhook-urls", t, { method: "GET", query: "?service=bogus" }), undefined));
+  assert.deepEqual(Object.keys(await unknown.json()).sort(), ["radarr", "radarr4k", "sonarr", "sonarr4k"]);
+});
+
 test("webhook-urls is rate limited per admin, answering 429 with Retry-After", async () => {
   const t = await mintSession();
   for (let i = 0; i < 30; i++) assert.equal((await getWebhookUrls(t)).status, 200, `read ${i + 1} is allowed`);

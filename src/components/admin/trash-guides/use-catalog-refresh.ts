@@ -42,7 +42,13 @@ export function useCatalogRefresh(onDone: () => void | Promise<void>) {
     }
     const failed = outcome.failures.length > 0;
     run.done(failed, failed ? { errors: outcome.failures, schemaDiagnostic: outcome.schemaDiagnostic } : null);
-    await onDone();
+    // The refresh itself is already recorded as done; a card's reload failing
+    // must not escape as an unhandled rejection from the click handler.
+    try {
+      await onDone();
+    } catch (err) {
+      console.warn("[trash] reload after catalog refresh failed:", err instanceof Error ? err.message : err);
+    }
   }
 
   return { state: run.state, skipped: run.skipped !== null, error: run.error, run: start, dismiss: run.dismissError };

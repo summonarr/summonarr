@@ -267,7 +267,8 @@ test("/requests pages in the helper's order and sends a comment link's arrival t
   assert.match(src, /if \(p > 1 \|\| comments\) params\.set\("page", String\(p\)\)/);
   assert.match(src, /if \(comments\) params\.set\("comments", comments\)/);
   // The requester `where` is what keeps the lookup to the viewer's own requests.
-  assert.match(src, /const where: Prisma\.MediaRequestWhereInput = \{\s*requestedBy: session\.user\.id,/);
+  assert.match(src, /const baseWhere: Prisma\.MediaRequestWhereInput = \{\s*requestedBy: session\.user\.id,/);
+  assert.match(src, /const where: Prisma\.MediaRequestWhereInput = \{ \.\.\.baseWhere, /, "the located filter extends the requester-scoped base");
 });
 
 test("/admin sends a comment link's arrival to the page that holds the request's title, with its paging query's where and order", () => {

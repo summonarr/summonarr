@@ -184,6 +184,8 @@ function DayCell({
       ref={clickable ? cellRef : undefined}
       title={t("adminActivity.calendar.cellTitle", { date: day.date, count: day.count })}
       role={clickable ? "button" : undefined}
+      aria-label={clickable ? t("adminActivity.calendar.cellTitle", { date: day.date, count: day.count }) : undefined}
+      aria-haspopup={clickable ? "dialog" : undefined}
       tabIndex={clickable ? (tabbable ? 0 : -1) : undefined}
       // Outline, not a ring: a box-shadow would sit under the next cells,
       // which paint after this one.

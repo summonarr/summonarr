@@ -45,6 +45,10 @@ export interface JobPollOptions {
   onGiveUp?: (reason: "unreachable" | "outOfPolls") => void;
 }
 
+// One status read must end on its own: a half-open socket or a stalled proxy would
+// otherwise hang the loop before it reaches its poll or failure limits.
+export const POLL_REQUEST_TIMEOUT_MS = 30_000;
+
 const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** A poll that never reached the job: no answer at all, or a 5xx that is not JSON. */
@@ -65,9 +69,9 @@ async function pollOnce(
 ): Promise<{ status: number; data: unknown; reachedJob: boolean }> {
   let res: Response;
   try {
-    res = await fetchFn(pollUrl);
+    res = await fetchFn(pollUrl, { signal: AbortSignal.timeout(POLL_REQUEST_TIMEOUT_MS) });
   } catch {
-    // The poll never arrived: status 0, a failure on the way.
+    // The poll never arrived (or timed out): status 0, a failure on the way.
     return { status: 0, data: null, reachedJob: false };
   }
   if (res.status === 202) return { status: 202, data: null, reachedJob: true };

@@ -39,7 +39,7 @@ export function filterSpecs<S extends Pick<SpecStatus, "application" | "name" | 
   filter: SpecFilter,
   search: string,
 ): S[] {
-  const q = search.toLowerCase();
+  const q = search.trim().toLowerCase();
   return specs.filter((s) => {
     if (!specMatches(s, filter)) return false;
     return !q || s.name.toLowerCase().includes(q) || s.trashId.toLowerCase().includes(q);

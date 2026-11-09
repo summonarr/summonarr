@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { useLiveEvents } from "@/hooks/use-live-events";
 import { useAsyncAction } from "@/hooks/use-async-action";
+import { isApplePlatform } from "@/lib/client/apple-platform";
 import { withBasePath } from "@/lib/base-path";
 import { fetchJson, jsonInit, timedFetch } from "@/lib/client/fetch-json";
 import { threadCursorOf } from "@/lib/thread-cursor";
@@ -138,7 +139,7 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
   // navigator is browser-only, so it is read post-mount (guardrail 16) and the
   // SSR placeholder keeps the generic ⌘ wording until then.
   const shortcut = mounted
-    ? /Mac|iPhone|iPad|iPod/i.test(navigator.platform) ? "⌘↵" : "Ctrl+↵"
+    ? isApplePlatform() ? "⌘↵" : "Ctrl+↵"
     : null;
 
   // Every load takes a ticket; only the newest ticket may write state, so a
@@ -151,7 +152,7 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
     async ({ silent = false }: { silent?: boolean } = {}) => {
       const seq = ++loadSeqRef.current;
       if (!silent) setLoadState("loading");
-      const res = await fetchJson(withBasePath(`/api/issues/${issueId}/messages`), {
+      const res = await fetchJson(withBasePath(`/api/issues/${encodeURIComponent(issueId)}/messages`), {
         schema: ThreadSchema,
         signal: lifeRef.current?.signal,
       });
@@ -195,7 +196,7 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
     setLoadingOlder(true);
     setOlderFailed(false);
     try {
-      const url = withBasePath(`/api/issues/${issueId}/messages?before=${encodeURIComponent(threadCursorOf(oldest))}`);
+      const url = withBasePath(`/api/issues/${encodeURIComponent(issueId)}/messages?before=${encodeURIComponent(threadCursorOf(oldest))}`);
       const res = await timedFetch(url, { signal: ctrl.signal });
       if (!res.ok) throw new Error(`status ${res.status}`);
       const parsed = check(ThreadSchema, await res.json());
@@ -262,7 +263,7 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
     setSendError(null);
     const res = await sendAction.run(
       "send",
-      (signal) => fetchJson(withBasePath(`/api/issues/${issueId}/messages`), {
+      (signal) => fetchJson(withBasePath(`/api/issues/${encodeURIComponent(issueId)}/messages`), {
         init: jsonInit("POST", { body: text }),
         schema: MessageSchema,
         signal,

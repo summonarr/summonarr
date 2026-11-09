@@ -1,3 +1,4 @@
+import { DISCORD_SYNTHETIC_EMAIL_SUFFIX } from "@/lib/user-source";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { escMd } from "@/lib/discord-notify";
@@ -34,7 +35,7 @@ export async function handleRequestCommand(ctx: CommandContext): Promise<void> {
     await editOriginal(appId, token, { content: t("notify.bot.pick.deactivated") });
     return;
   }
-  if (requireLinked && !isExemptByRole && (!caller || caller.email.endsWith("@discord.local"))) {
+  if (requireLinked && !isExemptByRole && (!caller || caller.email.endsWith(DISCORD_SYNTHETIC_EMAIL_SUFFIX))) {
     await editOriginal(appId, token, { content: t("notify.bot.linkRequiredToRequest") });
     return;
   }

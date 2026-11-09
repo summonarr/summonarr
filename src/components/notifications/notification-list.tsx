@@ -350,7 +350,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
       {hasMore && (
         <div className="flex flex-col items-center gap-1.5" style={{ marginTop: 12 }}>
           <Button type="button" variant="outline" size="sm" onClick={loadMore} disabled={loading}>
-            {loading ? t("personal.common.loading") : t("personal.common.loadMore", { count: total - items.length })}
+            {loading ? t("personal.common.loading") : t("personal.common.loadMore", { count: Math.max(1, total - items.length) })}
           </Button>
           {error && (
             <span role="alert" aria-live="assertive" className="text-xs text-red-400">{error}</span>

@@ -27,7 +27,7 @@ import { answerOf, applyOutcome } from "./outcomes";
 import { StatusNote } from "./status-note";
 import { useCatalogRefresh } from "./use-catalog-refresh";
 import { useTrashRun } from "./use-trash-run";
-import { appliableStarterItems } from "./starter-pack-select";
+import { appliableStarterItems, mergeStarterSelection } from "./starter-pack-select";
 import { withBasePath } from "@/lib/base-path";
 import { fetchJson, LONG_RUN_TIMEOUT_MS, jsonInit } from "@/lib/client/fetch-json";
 import { useAsyncAction } from "@/hooks/use-async-action";
@@ -103,6 +103,7 @@ export function StarterPackCard({
   // refusal's reason goes to its banner, a run's failures to the log.
   const apply = useTrashRun();
   const lastResolvedKeyRef = useRef<string>("");
+  const seenIdsRef = useRef<ReadonlySet<string>>(new Set());
 
   const refresh = useCatalogRefresh(async () => {
     await load();
@@ -123,12 +124,15 @@ export function StarterPackCard({
   );
   // Pre-select the recommended specs, but only when the set of available specs
   // actually changes. A reload after Apply returns the same set, so the admin's
-  // own picks are kept.
+  // own picks are kept; a spec that appears or disappears leaves the other
+  // picks alone and ticks only the newcomer, if recommended.
   useEffect(() => {
     const key = resolvedIds.slice().sort().join(",");
     if (key !== lastResolvedKeyRef.current) {
       lastResolvedKeyRef.current = key;
-      setSelected(new Set(recommendedIds));
+      const seen = seenIdsRef.current;
+      seenIdsRef.current = new Set(resolvedIds);
+      setSelected((prev) => mergeStarterSelection(prev, seen, resolvedIds, recommendedIds));
     }
   }, [resolvedIds, recommendedIds]);
 
@@ -165,7 +169,7 @@ export function StarterPackCard({
       apply.fail(t("trash.spec.error.network"));
       return;
     }
-    const outcome = applyOutcome(answer.status, answer.body, `HTTP ${answer.status}`);
+    const outcome = applyOutcome(answer.status, answer.body, t("trash.spec.error.apply", { status: answer.status }));
     if (outcome.kind === "skipped") {
       apply.skip("running");
       return;

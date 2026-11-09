@@ -19,7 +19,8 @@ function isLoopbackOrPrivateIPv4(ip: string): boolean {
   const parts = ip.split(".");
   if (parts.length !== 4) return false;
   if (parts.some((p) => p.length === 0 || !/^\d+$/.test(p))) return false;
-  const [a, b] = parts.map((p) => Number(p));
+  const [a, b, c, d] = parts.map((p) => Number(p));
+  if (a > 255 || b > 255 || c > 255 || d > 255) return false;
   if (a === 10) return true;
   if (a === 127) return true;
   if (a === 169 && b === 254) return true; // link-local
@@ -48,7 +49,9 @@ export function isLocalHost(host: string | null | undefined): boolean {
     return isLoopbackOrPrivateIPv6(h.slice(1, close));
   }
 
-  const colon = h.lastIndexOf(":");
+  // A single colon is host:port; several mean a bare IPv6 literal, whose last
+  // group must not be read as a port.
+  const colon = h.indexOf(":") === h.lastIndexOf(":") ? h.lastIndexOf(":") : -1;
   if (colon !== -1 && /^\d+$/.test(h.slice(colon + 1))) {
     h = h.slice(0, colon);
   }

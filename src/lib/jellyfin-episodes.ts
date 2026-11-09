@@ -108,7 +108,9 @@ export async function getJellyfinEpisodesForShow(
   seriesId: string,
   tmdbId: number,
 ): Promise<JellyfinTVEpisodeData[]> {
-  const episodes: JellyfinTVEpisodeData[] = [];
+  // One row per (season, episode): two versions of an episode keep the earlier
+  // arrival, as the library-wide path does.
+  const episodes = new Map<string, JellyfinTVEpisodeData>();
   // DateCreated as in getJellyfinTVEpisodes: fix-match rebuilds the show's
   // TVEpisodeCache rows from here, and an undated episode makes its season
   // `unobservable` on the never-watched report (14d).
@@ -121,12 +123,15 @@ export async function getJellyfinEpisodesForShow(
         if (!numbered) continue;
         const addedAt = parseJellyfinDate(ep.DateCreated);
         for (const episodeNumber of episodeNumbersOf(ep, numbered.episode)) {
-          episodes.push({ tmdbId, seasonNumber: numbered.season, episodeNumber, addedAt });
+          const key = `${numbered.season}-${episodeNumber}`;
+          const prev = episodes.get(key);
+          if (!prev) episodes.set(key, { tmdbId, seasonNumber: numbered.season, episodeNumber, addedAt });
+          else if (addedAt && (!prev.addedAt || addedAt < prev.addedAt)) prev.addedAt = addedAt;
         }
       }
     },
   );
-  return episodes;
+  return Array.from(episodes.values());
 }
 
 // One episode's own item Id, for watch sync (watch-sync.ts) — which marks an

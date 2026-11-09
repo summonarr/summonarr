@@ -88,7 +88,9 @@ export function useFixAllRun(): FixAllRun {
         });
       },
     });
-    if (aborted || !alive.current) return;
+    // A Stop aborts only the wait on the title in flight (its job carries on
+    // server-side); the run then ends as stopped. A page that went away writes nothing.
+    if (!alive.current || (aborted && !stopRef.current)) return;
     setPending(NO_KEYS);
     setState("done");
     if (all.some((r) => r.kind !== "error")) router.refresh();
@@ -102,7 +104,7 @@ export function useFixAllRun(): FixAllRun {
     started,
     askConfirm: () => setState("confirm"),
     cancelConfirm: () => setState("idle"),
-    stop: () => { stopRef.current = true; },
+    stop: () => { stopRef.current = true; abortRef.current?.abort(); },
     start,
   };
 }
@@ -189,7 +191,7 @@ export function FixAllControl({
         </div>
       )}
       {listed.length > 0 && (
-        <ul role="status" className="m-0 list-none p-0 text-right" style={{ fontSize: 11, lineHeight: 1.35, maxHeight: 160, overflowY: "auto" }}>
+        <ul role="log" aria-relevant="additions" className="m-0 list-none p-0 text-right" style={{ fontSize: 11, lineHeight: 1.35, maxHeight: 160, overflowY: "auto" }}>
           {listed.map((o) => (
             <li key={o.key} className={o.kind === "error" ? "text-red-400" : o.kind === "warn" ? "text-amber-400" : ""} style={o.kind === "ok" ? { color: "var(--ds-fg-subtle)" } : undefined}>
               <span aria-hidden>{o.kind === "ok" ? "✓ " : o.kind === "warn" ? "⚠ " : "✕ "}</span>

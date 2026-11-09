@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 const { foldBarItems } = await import("../src/lib/activity-bars.ts");
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
 
-// ═══ foldBarItems (C029) ════════════════════════════════════════════════════
+// ═══ foldBarItems ════════════════════════════════════════════════════
 
 test("foldBarItems merges rows that render with the same label, summing counts, labels unique", () => {
   assert.deepEqual(
@@ -46,7 +46,7 @@ test("HorizontalBars folds its items before computing the max and keying rows", 
   assert.match(body, /const items = foldBarItems\(rawItems\);\s*\n\s*const max = Math\.max\(\.\.\.items\.map/);
 });
 
-// ═══ the activity page's backfill map (C138 / guardrail 37c) ════════════════
+// ═══ the activity page's backfill map ════════════════
 
 test("the Activity backfill resolves each Plex ratingKey to its ONE owner per instance — never last-write-wins", () => {
   // The overview's session lookup lives in activity-session-tmdb.ts.
@@ -56,7 +56,7 @@ test("the Activity backfill resolves each Plex ratingKey to its ONE owner per in
   assert.doesNotMatch(src, /for \(const k of i\.plexRatingKeys\)/, "an array entry overwrote another row's canonical key");
 });
 
-// ═══ arr links follow the integration switch (C001) ═════════════════════════
+// ═══ arr links follow the integration switch ═════════════════════════
 
 test("admin Issues builds its Manage holders only for a switched-on Radarr/Sonarr", () => {
   const src = read("../src/app/(app)/admin/issues/page.tsx");

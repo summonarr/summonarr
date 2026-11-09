@@ -70,6 +70,9 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
 
   let pushed = 0;
   let errors = 0;
+  // Updated in the DB but on a server with nowhere to push (the response keeps its
+  // pinned shape; the audit row records the count).
+  let notConfigured = 0;
 
   for (const [instance, users] of byInstance) {
     const { url: jellyfinUrl, apiKey: jellyfinApiKey } = await getJellyfinConfig(instance);
@@ -80,6 +83,7 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
       // server and its tests pin it. The warning makes it visible that these
       // users' policy never reached a server.
       console.warn(`[server-users/bulk] ${mediaInstanceLabel("jellyfin", instance)} is not configured — ${users.length} user(s) updated in the DB but not pushed.`);
+      notConfigured += users.length;
       continue;
     }
     await settleLimit(users, POLICY_PUSH_CONCURRENCY, async (u) => {
@@ -98,7 +102,7 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
     userName: session.user.name ?? session.user.email,
     action: "SERVER_USERS_BULK",
     target: `server:${source}`,
-    details: { downloadsEnabled, targetCount: updated.count, pushed, errors },
+    details: { downloadsEnabled, targetCount: updated.count, pushed, errors, notConfigured },
     ...auditContext(req, session),
   });
 

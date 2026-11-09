@@ -67,3 +67,7 @@ test("a failure's line stays until the next run; success and pending clear thems
   assert.match(src, /role=\{summary\.phase === "error" \? "alert" : "status"\}/);
   assert.match(src, /summary\.phase === "error" \? "text-red-400"/);
 });
+
+test("phase 1: an empty outcome list is not reported as every server failing", () => {
+  assert.equal(fillLibraryStep([]).allFailed, false);
+});

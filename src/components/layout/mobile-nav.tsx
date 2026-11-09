@@ -14,7 +14,7 @@ import { breadcrumbFor } from "@/components/layout/breadcrumb-label";
 import { useT } from "@/components/i18n/i18n-provider";
 import { useDetailTitle } from "@/components/layout/detail-title";
 import { useNotifications } from "@/components/notifications/notification-store";
-import { SearchBar } from "@/components/layout/header";
+import { SearchBar } from "@/components/layout/search-bar";
 import { useFocusReturn } from "@/hooks/use-focus-return";
 import { buildMobileTabs, type MobileTab } from "@/components/layout/mobile-tabs";
 import { visibleAdminNavItems } from "@/components/layout/nav-visibility";

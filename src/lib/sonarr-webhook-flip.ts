@@ -14,8 +14,8 @@ export interface SonarrFlipResult {
   /** Requests flipped. */
   count: number;
   /** The id the flipped requests were found by — what the notify poll then keys on. */
-  effectiveMdbId: number | null;
-  effectiveVdbId: number | null;
+  effectiveTmdbId: number | null;
+  effectiveTvdbId: number | null;
 }
 
 /**
@@ -33,11 +33,11 @@ export async function flipApprovedSonarrRequests(
     const count = await flipByTmdbId(ids.tmdbId, ids.tvdbId, arrInstance);
     if (count > 0) {
       void clearDeletionVotesForTmdbs([{ tmdbId: ids.tmdbId, mediaType: "TV" }]);
-      return { count, effectiveMdbId: ids.tmdbId, effectiveVdbId: null };
+      return { count, effectiveTmdbId: ids.tmdbId, effectiveTvdbId: null };
     }
   }
   if (ids.tvdbId !== null) return flipByTvdbId(ids.tvdbId, ids.tmdbId === null, arrInstance, libraryTmdbId);
-  return { count: 0, effectiveMdbId: null, effectiveVdbId: null };
+  return { count: 0, effectiveTmdbId: null, effectiveTvdbId: null };
 }
 
 async function flipByTmdbId(tmdbId: number, tvdbId: number | null, arrInstance: string): Promise<number> {
@@ -107,7 +107,7 @@ async function flipByTvdbId(
     }
     return updated.count;
   }, { timeout: 30_000 });
-  if (count === 0) return { count, effectiveMdbId: null, effectiveVdbId: null };
+  if (count === 0) return { count, effectiveTmdbId: null, effectiveTvdbId: null };
   if (tied) void clearDeletionVotesForTmdbs([{ tmdbId: tied.tmdbId, mediaType: "TV" }]);
-  return { count, effectiveMdbId: null, effectiveVdbId: tvdbId };
+  return { count, effectiveTmdbId: null, effectiveTvdbId: tvdbId };
 }

@@ -34,7 +34,10 @@ test("a confirmed save re-derives keyIsSet from the value that was persisted", (
   assert.match(src, /const result = await save\(\{/);
   const okBranch = src.match(/if \(result\.ok\) \{([\s\S]*?)\n {4}\}/);
   assert.ok(okBranch, "handleSave success branch not found");
-  assert.match(okBranch[1], /setKeyIsSet\(relayKey\.length > 0 \|\| \(keyIsSet && !removeKey\)\);/);
+  assert.match(okBranch[1], /setKeyIsSet\(sentKey\.length > 0 \|\| \(keyIsSet && !sentRemove\)\);/);
+  // The key and the Remove mark are snapshotted when Save is pressed, so an edit
+  // made while the save runs is judged (and kept) as the next edit.
+  assert.match(src, /const sentKey = relayKey;\s*const sentRemove = removeKey;/);
   // Exactly one writer: the success branch. No optimistic update on Remove.
   assert.equal(src.match(/setKeyIsSet\(/g)?.length, 1);
 });
@@ -47,5 +50,5 @@ test("the key field starts empty over a saved key; Remove marks it for deletion,
   assert.match(src, /placeholder=\{keyIsSet && !removeKey \? SECRET_MASK_SENTINEL : undefined\}/);
   const field = src.slice(src.indexOf("function relayKeyField("), src.indexOf("export function IosPushRelayForm("));
   assert.match(field, /if \(typed\) return \{ apnsRelayKey: typed \};\s*return remove \? \{ apnsRelayKey: "" \} : \{\};/);
-  assert.match(src, /\.\.\.relayKeyField\(relayKey, removeKey\),/);
+  assert.match(src, /\.\.\.relayKeyField\(sentKey, sentRemove\),/);
 });

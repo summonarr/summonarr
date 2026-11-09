@@ -1,5 +1,6 @@
 "use client";
 
+import { useId } from "react";
 import Link from "next/link";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import type { TrashService } from "./types";
@@ -181,10 +182,11 @@ const toggleTone = (active: boolean) =>
   active ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-zinc-100";
 
 function ToggleGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  const labelId = useId();
   return (
     <div className="flex items-center gap-1">
-      <span className="text-xs text-zinc-500 mr-1">{label}</span>
-      <div className="flex rounded-lg border border-zinc-700 overflow-hidden">{children}</div>
+      <span id={labelId} className="text-xs text-zinc-500 mr-1">{label}</span>
+      <div role="group" aria-labelledby={labelId} className="flex rounded-lg border border-zinc-700 overflow-hidden">{children}</div>
     </div>
   );
 }

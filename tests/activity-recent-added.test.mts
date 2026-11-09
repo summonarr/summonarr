@@ -44,3 +44,13 @@ test("the merge unions sources and keeps the newest addedAt with its title", () 
   ]);
   assert.equal(mergeRecentlyAdded([{ ...row(3, 1), title: null }], [], "Unknown")[0].title, "Unknown");
 });
+
+test("an older titled copy replaces the placeholder of a newer untitled one", () => {
+  const merged = mergeRecentlyAdded(
+    [{ ...row(1, 5), title: null }],
+    [{ ...row(1, 2), title: "Real" }],
+    "Unknown",
+  );
+  assert.equal(merged[0].title, "Real");
+  assert.equal(merged[0].addedAt.getTime(), new Date(Date.UTC(2026, 0, 5)).getTime());
+});

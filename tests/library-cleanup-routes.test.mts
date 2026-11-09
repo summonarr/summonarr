@@ -168,7 +168,7 @@ shadowPrismaModel(prisma, "jellyfinLibraryItem", { findMany: async () => [] });
 // Plays attributed by tmdb id — the never-watched loader's first evidence read.
 let tmdbPlays: Array<{ tmdbId: number; mediaType: string; n: number; at: Date }> = [];
 // Per-server first recorded play (coverage). Empty by default — every holder
-// then reads "no history", so the watch rules never reach a verdict; the C132
+// then reads "no history", so the watch rules never reach a verdict; the
 // test below opts in.
 let firstPlays: Array<{ source: string; serverInstance: string; _min: { startedAt: Date | null } }> = [];
 shadowPrismaModel(prisma, "playHistory", {
@@ -210,7 +210,7 @@ let fulfilledRows: Array<{ tmdbId: number; mediaType: string; arrInstance: strin
 shadowPrismaModel(prisma, "mediaRequest", {
   findMany: async (args: { where?: ReqWhere }) => requests.filter((r) => reqMatch(r, args.where)).map((r) => ({ ...r })),
   // The never-watched loader's "fulfilled since" read (an arrival date). Empty
-  // unless a test opts in (C136).
+  // unless a test opts in.
   groupBy: async () => fulfilledRows,
   updateMany: async (args: { where: ReqWhere; data: Record<string, unknown> }) => {
     requestWrites.push(args);
@@ -370,7 +370,7 @@ beforeEach(() => {
     playHistoryEnabled: "true",
     // Set for every test (play-history caches these settings 15 s, across
     // tests): with no first play recorded (`firstPlays` empty) a holder still
-    // reads "no history", so only the C132 test reaches a watch verdict.
+    // reads "no history", so only the test reaches a watch verdict.
     playHistoryPlexEnabled: "true",
     cleanupVotesEnabled: "true",
     cleanupVotesMin: "1",
@@ -478,6 +478,14 @@ test("report: the protected list is capped at 1000, and protectedTotal says how 
 });
 
 // ── 3: dry run, then a confirmed execute ─────────────────────────────────────
+
+test("the plan route is rate limited per admin: the 31st call in a minute is 429 and reaches no arr", async () => {
+  const token = await mintSession();
+  for (let i = 0; i < 30; i++) assert.equal((await dryRun(token, { items: [MOVIE_100] })).status, 200);
+  calls = [];
+  assert.equal((await dryRun(token, { items: [MOVIE_100] })).status, 429);
+  assert.deepEqual(calls, []);
+});
 
 test("dry run: resolves every instance's copy, returns the count, and changes nothing", async () => {
   const res = await dryRun(await mintSession(), { items: [MOVIE_100, SHOW_300] });
@@ -683,13 +691,13 @@ test("an older stamp survives a later failed attempt — the unstamp only clears
   assert.equal(requests.find((r) => r.id === "r100b")!.cleanedUpAt?.getTime(), older.getTime());
 });
 
-// Audit C014: two executes of one title in flight at once (two tabs, or both
+// Audit: two executes of one title in flight at once (two tabs, or both
 // pages). The first stamps; the second finds every row already stamped and owns
 // none. If the second's DELETE succeeds and the first's is refused, the first
 // unstamps by ITS time — the only stamp on a title that is gone, so the next
 // sync re-downloads it. A delete that went through re-asserts the stamp with its
 // own time, so that unstamp misses (or, if it ran first, is written back).
-test("C014: a delete that went through takes over the stamp, so a concurrent execute's failed-delete unstamp can't clear it", async () => {
+test("a delete that went through takes over the stamp, so a concurrent execute's failed-delete unstamp can't clear it", async () => {
   const otherNow = new Date("2026-10-01T00:00:00.000Z");
   for (const id of ["r100a", "r100b"]) requests.find((r) => r.id === id)!.cleanedUpAt = otherNow;
   const body = await (await execute(await mintSession(), { items: [MOVIE_100], confirmTargets: 2 })).json();
@@ -703,7 +711,7 @@ test("C014: a delete that went through takes over the stamp, so a concurrent exe
   for (const id of ["r100a", "r100b"]) assert.ok(requests.find((r) => r.id === id)!.cleanedUpAt instanceof Date, `${id} stays stamped`);
 });
 
-test("C014: a concurrent unstamp that lands while this call's DELETE is in flight is written back", async () => {
+test("a concurrent unstamp that lands while this call's DELETE is in flight is written back", async () => {
   const otherNow = new Date("2026-10-01T00:00:00.000Z");
   requests.find((r) => r.id === "r300")!.cleanedUpAt = otherNow;
   deleteStatus = () => {
@@ -721,7 +729,7 @@ test("C014: a concurrent unstamp that lands while this call's DELETE is in fligh
 // taken it, so "maybe deleted" must hold the stamp as "deleted" does — this call
 // owned none (the other execute stamped first), and the other's definite
 // refusal unstamps by its own time while this DELETE hangs.
-test("C014: an unknown-outcome delete re-asserts the stamp too, so a concurrent execute's refusal can't unstamp a maybe-deleted title", async () => {
+test("an unknown-outcome delete re-asserts the stamp too, so a concurrent execute's refusal can't unstamp a maybe-deleted title", async () => {
   const otherNow = new Date("2026-10-01T00:00:00.000Z");
   requests.find((r) => r.id === "r300")!.cleanedUpAt = otherNow;
   deleteStatus = () => {
@@ -734,7 +742,7 @@ test("C014: an unknown-outcome delete re-asserts the stamp too, so a concurrent 
   assert.ok(requests.find((r) => r.id === "r300")!.cleanedUpAt instanceof Date, "Sonarr may have removed the show — it must stay stamped");
 });
 
-test("C014 control: a DEFINITE refusal with nothing deleted re-asserts nothing — the older stamp is left as it was, and this call's own stamps go", async () => {
+test("control: a DEFINITE refusal with nothing deleted re-asserts nothing — the older stamp is left as it was, and this call's own stamps go", async () => {
   const otherNow = new Date("2026-10-01T00:00:00.000Z");
   requests.find((r) => r.id === "r300")!.cleanedUpAt = otherNow;
   // A request for the show routed to an instance that holds no copy: this call
@@ -748,7 +756,7 @@ test("C014 control: a DEFINITE refusal with nothing deleted re-asserts nothing �
   assert.equal(requests.find((r) => r.id === "r300x")!.cleanedUpAt, null, "nothing was deleted anywhere — no stamp may stay");
 });
 
-test("C014: a failed re-assert after a durable delete is reported on the title, never a 500", async () => {
+test("a failed re-assert after a durable delete is reported on the title, never a 500", async () => {
   const realUpdateMany = (prisma.mediaRequest as unknown as { updateMany: (a: unknown) => Promise<unknown> }).updateMany;
   let n = 0;
   (prisma.mediaRequest as unknown as { updateMany: (a: { data: { cleanedUpAt: Date | null }; where: { status?: unknown } }) => Promise<unknown> }).updateMany = async (a) => {
@@ -850,9 +858,9 @@ test("when every delete is refused, a failed un-stamp is reported on the title, 
   }
 });
 
-// Audit C057: a failure the page shows carries a translatable kind and names
+// Audit: a failure the page shows carries a translatable kind and names
 // its instance, instead of only the English arrErrorMessage text.
-test("C057: a refused delete reports the instance and a translatable kind beside the English detail", async () => {
+test("a refused delete reports the instance and a translatable kind beside the English detail", async () => {
   deleteStatus = (origin) => (origin === RADARR_4K ? 401 : 200);
   const body = await (await execute(await mintSession(), { items: [MOVIE_100], confirmTargets: 2 })).json();
   assert.deepEqual(body.results[0].failed, [{
@@ -862,7 +870,7 @@ test("C057: a refused delete reports the instance and a translatable kind beside
   assert.deepEqual(audits[0].details.failed, ["radarr:4k"], "the audit still records only the target");
 });
 
-test("C057: the never-watched coverage carries the upstream check's error code, so the page never prints the stored English", async () => {
+test("the never-watched coverage carries the upstream check's error code, so the page never prints the stored English", async () => {
   settings.set("upstreamWatch:status:plex:", JSON.stringify({
     fetchedAt: null, attemptedAt: new Date().toISOString(), ok: false,
     entries: 0, matched: 0, samples: 0, agreed: 0, error: "HTTP 401",
@@ -911,7 +919,7 @@ for (const [label, body] of [
 }
 
 // The route takes exactly CLEANUP_MAX_ITEMS titles — the cap both pages stop
-// their selection at (C062): a full selection is judged, one more is a 400.
+// their selection at: a full selection is judged, one more is a 400.
 test("delete takes exactly CLEANUP_MAX_ITEMS titles: a full selection is judged, one more is a 400 naming the cap that reaches no *arr", async () => {
   const token = await mintSession();
   const filler = (n: number) => Array.from({ length: n }, (_, i) => ({ tmdbId: 10_000 + i, mediaType: "MOVIE" }));
@@ -993,6 +1001,13 @@ const nwCall = (token: string | null, query: string) =>
     ),
   );
 
+test("never-watched report: a fresh=1 rebuild is held to 6 a minute per admin while cached reads keep their wider budget", async () => {
+  const token = await mintSession();
+  for (let i = 0; i < 6; i++) assert.equal((await nwCall(token, "fresh=1")).status, 200);
+  assert.equal((await nwCall(token, "fresh=1")).status, 429);
+  assert.equal((await nwCall(token, "")).status, 200);
+});
+
 test("never-watched report: anonymous 401, non-admin 403, flag off 404", async () => {
   assert.equal((await nwCall(null, "")).status, 401);
   assert.equal((await nwCall(await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS }), "")).status, 403);
@@ -1019,7 +1034,7 @@ test("never-watched report: 'eligible' is exactly the delete dry run's selection
 
 
 // A down instance makes the delete route refuse EVERY title of that service
-// (arrUnreadable), so the report must not call one eligible either (C123).
+// (arrUnreadable), so the report must not call one eligible either.
 test("never-watched report: while a Radarr instance can't be listed, no movie is eligible — still exactly the dry run's selection", async () => {
   const token = await mintSession();
   listingStatus = (origin) => (origin === RADARR_4K ? 503 : 200);
@@ -1056,7 +1071,7 @@ test("never-watched report: a failed Sonarr listing names its reason and clears 
   const token = await mintSession();
   listingStatus = (origin) => (origin === SONARR ? 503 : 200);
   const down = await (await nwCall(token, "state=all&fresh=1")).json() as { arrErrors: Array<{ service: string; instance: string; error: string }> };
-  // `kind` is what the page translates (C057); `error` stays as the fallback.
+  // `kind` is what the page translates; `error` stays as the fallback.
   assert.deepEqual(down.arrErrors, [{ service: "sonarr", instance: "", error: "Arr service returned a non-200 response (503)", kind: "unreachable" }]);
 
   listingStatus = () => 200;
@@ -1259,12 +1274,12 @@ test("a tmdb-less Sonarr series (v3) reached through TMDB's cross-reference: its
   assert.equal(free.targetCount, 1);
 });
 
-// Audit C121: on Sonarr v3 every series is tvdb-only, so the byKey read never
+// Audit: on Sonarr v3 every series is tvdb-only, so the byKey read never
 // sees its status. With TMDB's details row missing (a cleared cache, a failed
 // fetch) the airing exclusion stayed unknown and a continuing series was a
 // candidate — while the delete itself found its Sonarr entry through TMDB's
 // cross-reference. The airing pass reaches it the same way.
-test("C121: a tvdb-only (Sonarr v3) continuing series with no TMDB details row is held back as still airing — dry run and report agree", async () => {
+test("a tvdb-only (Sonarr v3) continuing series with no TMDB details row is held back as still airing — dry run and report agree", async () => {
   sonarrSeries = [{ id: 31, tvdbId: 3000, title: "Show 300", status: "continuing", statistics: { sizeOnDisk: 700 } }];
   tmdbToTvdb.set(300, 3000);
   const token = await mintSession();
@@ -1294,7 +1309,7 @@ test("execute stamps an AVAILABLE request linked to the show only by its tvdb id
   assert.equal(requests.find((r) => r.id === "r-other")!.cleanedUpAt, null);
 });
 
-// Audit C132: the loader-to-rule wiring of the guardrail-14d upstream hold-back,
+// Audit: the loader-to-rule wiring of the guardrail-14d upstream hold-back,
 // end to end through the real dry run. Every fixture above uses the votes rule,
 // which is EXEMPT from the hold-back, so deleting the loader's `upstreamUnchecked`
 // computation left the whole suite green.
@@ -1324,7 +1339,7 @@ test("a never-watched candidate whose holder's own watch records were never chec
   const released = await (await dryRun(token, { items: [MOVIE_100] })).json();
   assert.equal(released.targetCount, 2, `a fresh ok check releases it (Radarr default + 4K): ${JSON.stringify(released.skipped)}`);
 
-  // C159: the same fresh check, but the read stopped at its cap — the oldest
+  // the same fresh check, but the read stopped at its cap — the oldest
   // records (the pre-install views) were never read, so it holds again.
   settings.set("upstreamWatch:status:plex:", JSON.stringify({
     fetchedAt: new Date().toISOString(), attemptedAt: new Date().toISOString(), ok: true,
@@ -1337,12 +1352,12 @@ test("a never-watched candidate whose holder's own watch records were never chec
   firstPlayCache.value = null;
 });
 
-// Audit C136: the detail-page chip judged the title without the Radarr/Sonarr
+// Audit: the detail-page chip judged the title without the Radarr/Sonarr
 // index, while the report passes it — and the index feeds the verdict: a
 // fulfilled request's delivery counts as the arrival only while its instance
 // hasn't re-added the title since. The chip now reads the shared index when it
 // is already in memory, and never lists an arr itself.
-test("C136: the detail chip's window matches the report's once the shared index is warm, and a cold chip lists no arr", async () => {
+test("the detail chip's window matches the report's once the shared index is warm, and a cold chip lists no arr", async () => {
   const { processSingleton } = await import("../src/lib/process-singleton.ts");
   const firstPlayCache = processSingleton("never-watched:first-play", () => ({ value: null as unknown, at: 0, generation: -1 }));
   firstPlayCache.value = null;

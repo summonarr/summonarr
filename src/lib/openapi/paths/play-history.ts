@@ -1,6 +1,6 @@
 // Watch history, statistics and active sessions.
 
-import { tooLargeAnswer, RETRY_AFTER_HEADER, AUTH_SESSION_ROW_FIELDS, OK_TRUE } from "../shared";
+import { STEP_UP_401, tooLargeAnswer, RETRY_AFTER_HEADER, AUTH_SESSION_ROW_FIELDS, OK_TRUE } from "../shared";
 import type { OpenApiSchema, OpenApiParameter, OpenApiPaths } from "../types";
 
 // One PlayHistory row as stored (prisma/schema.prisma), every column. ADMIN reads
@@ -880,7 +880,7 @@ export const playHistoryPaths: OpenApiPaths = {
       responses: {
         "200": { description: "Session revoked — { ok: true }", content: { "application/json": { schema: OK_TRUE } } },
         "400": { description: "sessionId missing or not a string" },
-        "401": { description: "Step-up required or failed: { error: \"password-required\" | \"invalid-password\" | \"session-too-old\", message? } (invalid-password carries a translated message)" },
+        "401": STEP_UP_401,
         "404": { description: "No such session for this user" },
         "413": tooLargeAnswer(16 * 1024),
         "429": { description: "Rate limited (10 revokes/min per user): { error: \"rate_limit\", message }" },
@@ -907,7 +907,7 @@ export const playHistoryPaths: OpenApiPaths = {
       },
       responses: {
         "200": { description: "Sessions revoked", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, count: { type: "integer", description: "AuthSession rows deleted" }, includeCurrent: { type: "boolean" } } } } } },
-        "401": { description: "Step-up authentication required or failed. `error` is a code: password-required, invalid-password (with a translated `message`), or session-too-old (SSO caller whose session is older than 5 minutes)" },
+        "401": STEP_UP_401,
         "413": tooLargeAnswer(16 * 1024),
         "429": { description: "Rate limited — 5/hour per user. Body is { error: \"rate_limit\", message }" },
       },

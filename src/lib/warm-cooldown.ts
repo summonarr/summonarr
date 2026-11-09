@@ -27,9 +27,11 @@ export async function claimCooldownSlot(key: string, cooldownMs: number, now: nu
 
 // Gives back a claim whose run failed. A compare-and-swap on the exact stamp
 // this caller wrote, so a newer claim (or a force stamp) is never undone.
-export async function releaseCooldownSlot(key: string, claimedAt: number): Promise<void> {
+// `restoreTo` is what the slot held before the claim ("0" when it held nothing):
+// a failed FORCED run puts back the cooldown it overwrote instead of erasing it.
+export async function releaseCooldownSlot(key: string, claimedAt: number, restoreTo = "0"): Promise<void> {
   await prisma.$executeRaw`
-    UPDATE "Setting" SET value = '0', "updatedAt" = NOW()
+    UPDATE "Setting" SET value = ${restoreTo}, "updatedAt" = NOW()
     WHERE key = ${key} AND value = ${String(claimedAt)}
   `;
 }
@@ -63,14 +65,17 @@ export interface AdminWarmOptions {
 
 // One admin warm: lock, claim the cooldown, run, answer. The claim lives INSIDE
 // the lock so a lock-busy 409 can't burn the cooldown for a warm that never ran,
-// and a warm that THROWS gives its claim back, so the admin can retry at once
+// and a warm that THROWS gives its claim back (a forced one restores the cooldown it overwrote), so the admin can retry at once
 // instead of waiting out a cooldown for work that never happened.
 export function runAdminWarm(opts: AdminWarmOptions): Promise<NextResponse> {
   return withAdvisoryLock(
     opts.lockId,
     async (signal) => {
       const now = Date.now();
+      let restoreTo = "0";
       if (opts.force) {
+        const prior = await prisma.setting.findUnique({ where: { key: opts.cooldownKey } });
+        if (prior && /^[0-9]{1,15}$/.test(prior.value)) restoreTo = prior.value;
         await prisma.setting.upsert({
           where: { key: opts.cooldownKey },
           create: { key: opts.cooldownKey, value: String(now) },
@@ -86,7 +91,7 @@ export function runAdminWarm(opts: AdminWarmOptions): Promise<NextResponse> {
       } catch (err) {
         console.warn(`${opts.scope} warm failed:`, err);
         try {
-          await releaseCooldownSlot(opts.cooldownKey, now);
+          await releaseCooldownSlot(opts.cooldownKey, now, restoreTo);
         } catch (releaseErr) {
           console.warn(`${opts.scope} could not release the cooldown after the failed warm:`, releaseErr);
         }

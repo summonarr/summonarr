@@ -59,7 +59,7 @@ export function SeasonsTab({
    */
   onTitle: (title: ArrTitle | null) => void;
   /** Queue one title command; resolves once the server answered. */
-  runCommand: (body: Record<string, unknown>, done: string) => Promise<void>;
+  runCommand: (body: Record<string, unknown>, done: string, signal?: AbortSignal) => Promise<void>;
   pickRelease: (scope: ReleaseScope, subtitle: string) => void;
 }) {
   const t = useT();
@@ -158,7 +158,7 @@ export function SeasonsTab({
   }
 
   function command(key: string, body: Record<string, unknown>, done: string) {
-    void action.run(key, () => runCommand(body, done), { ifBusy: "skip" });
+    void action.run(key, (signal) => runCommand(body, done, signal), { ifBusy: "skip" });
   }
 
   if (seasons.length === 0) return <p className="m-0 text-sm text-zinc-500">{t("adminArr.seasons.none")}</p>;

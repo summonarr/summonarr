@@ -12,7 +12,7 @@
 // What a status gets and what an answer leaves on screen are
 // request-action-rules.ts.
 
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
@@ -23,8 +23,8 @@ import { withBasePath } from "@/lib/base-path";
 import { ADMIN_NOTE_MAX } from "@/lib/request-limits";
 import { useT } from "@/components/i18n/i18n-provider";
 import { useAsyncAction } from "@/hooks/use-async-action";
-import { fetchJson, ARR_WRITE_TIMEOUT_MS, jsonInit, type FetchJsonFailure } from "@/lib/client/fetch-json";
-import type { Translator } from "@/lib/i18n/translate";
+import { fetchJson, ARR_WRITE_TIMEOUT_MS, jsonInit } from "@/lib/client/fetch-json";
+import { fetchFailureText } from "@/lib/client/fetch-failure-text";
 import { REQUEST_STATUS_LABEL_KEY } from "@/lib/status-labels";
 import { BatchAnswer } from "./request-batch";
 import {
@@ -55,12 +55,6 @@ interface RequestActionsProps {
 type MutationKind = "APPROVED" | "DECLINED" | "RETRY" | "SEARCH" | "NOTE" | "DELETE";
 type QualityProfile = { id: number; name: string };
 type QualityOverride = { qualityProfileId: number; qualityProfileName: string };
-
-// No answer came (the network, or the browser gave up): the plain network line.
-// A refusal is the route's own reason (`message`, then `error`).
-function failureText(res: FetchJsonFailure, t: Translator): string {
-  return res.kind === "http" || res.kind === "invalid" ? res.error : t("shared.thread.networkError");
-}
 
 // The request's server calls and the state they share: the optimistic status
 // and the last Radarr/Sonarr answer. A handler that closes a form answers
@@ -134,7 +128,7 @@ function useRequestMutations({ requestId, currentStatus, groupPendingIds }: Pick
     if (!outcome) return false;
     if (!outcome.ok) {
       setOptimisticStatus(null);
-      setArrError(failureText(outcome.res, t));
+      setArrError(fetchFailureText(outcome.res, t));
       return false;
     }
     if (outcome.arrError) setArrError(outcome.arrError);
@@ -196,7 +190,7 @@ function useRequestMutations({ requestId, currentStatus, groupPendingIds }: Pick
           continue;
         }
         if (res.kind === "aborted") break;
-        failure = failureText(res, t);
+        failure = fetchFailureText(res, t) ?? "";
         // No answer, or not the route's: the next one would fare no better.
         if (res.kind !== "http") break;
         if (res.status === 429) break;
@@ -226,7 +220,7 @@ function useRequestMutations({ requestId, currentStatus, groupPendingIds }: Pick
     // The caller always closes the confirm dialog, so a failure is shown here —
     // otherwise a network failure would look like the admin just cancelled.
     if (!res.ok) {
-      setArrError(failureText(res, t));
+      setArrError(fetchFailureText(res, t));
       return;
     }
     router.refresh();
@@ -277,6 +271,15 @@ function usePendingForms({ mediaType, arrInstance, m }: { mediaType: RequestMedi
   const [profileState, setProfileState] = useState<ProfileState | null>(null);
   const [approvingProfileId, setApprovingProfileId] = useState<number | null>(null);
   const profiles = profileState?.key === profileKey ? profileState : null;
+  // The profile reads still out; leaving the row stops them (an answer for an
+  // instance the row has left is already ignored by its key).
+  const reads = useRef(new Set<AbortController>());
+  useEffect(() => {
+    const out = reads.current;
+    return () => {
+      for (const ctl of out) ctl.abort();
+    };
+  }, []);
 
   async function openProfilePicker() {
     setPickerFor(profileKey);
@@ -285,10 +288,15 @@ function usePendingForms({ mediaType, arrInstance, m }: { mediaType: RequestMedi
     const key = profileKey;
     setProfileState({ key, phase: "loading" });
     const query = new URLSearchParams({ mediaType, instance: arrInstance });
+    const ctl = new AbortController();
+    reads.current.add(ctl);
     const res = await fetchJson(withBasePath(`/api/requests/quality-profiles?${query.toString()}`), {
       schema: QualityProfilesAnswer,
+      signal: ctl.signal,
       fallbackError: t("adminQueue.actions.profilesFailed"),
     });
+    reads.current.delete(ctl);
+    if (!res.ok && res.kind === "aborted") return;
     const next: ProfileState = res.ok
       ? { key, phase: "ready", profiles: res.data.qualityProfiles, defaultId: res.data.defaultId }
       : { key, phase: "error", error: res.kind === "http" ? res.error : t("adminQueue.actions.profilesFailed") };

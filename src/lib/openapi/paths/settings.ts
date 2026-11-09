@@ -1,6 +1,6 @@
 // Application settings.
 
-import { ARR_SERVICE_PARAM, RETRY_AFTER_HEADER, tooLargeAnswer } from "../shared";
+import { ARR_SERVICE_PARAM, RETRY_AFTER_HEADER, forbiddenAnswer, tooLargeAnswer } from "../shared";
 import type { OpenApiPaths } from "../types";
 
 export const settingsPaths: OpenApiPaths = {
@@ -10,6 +10,7 @@ export const settingsPaths: OpenApiPaths = {
       summary: "Get all settings (ADMIN)",
       description: "Only allow-listed keys that have a stored row appear. Secret values come back masked as \"••••••••\" (or \"\" when unset) and URL values with any userinfo stripped.",
       responses: {
+        "403": forbiddenAnswer("the ADMIN role"),
         "200": {
           description: "Flat { key: string } map",
           content: {
@@ -36,6 +37,7 @@ export const settingsPaths: OpenApiPaths = {
         },
       },
       responses: {
+        "403": forbiddenAnswer("the ADMIN role"),
         "200": {
           description: "{ ok: true, ...connectivity test results, ignored? } — also the answer when nothing changed. `ignored` (additive) lists keys sent blank that can't be cleared and kept their stored value",
           content: {
@@ -74,6 +76,7 @@ export const settingsPaths: OpenApiPaths = {
         { name: "instance", in: "query", schema: { type: "string" }, description: "Instance slug (\"\" = default); the legacy `variant=4k` is still honored when `instance` is absent" },
       ],
       responses: {
+        "403": forbiddenAnswer("the ADMIN role"),
         "200": {
           description: "{ rootFolders, qualityProfiles, languageProfiles? } — languageProfiles only for a Sonarr v3 with usable ones",
           content: {
@@ -110,6 +113,7 @@ export const settingsPaths: OpenApiPaths = {
       summary: "List available Plex libraries (ADMIN)",
       parameters: [{ name: "instance", in: "query", schema: { type: "string" }, description: "Plex instance slug; absent = the default server" }],
       responses: {
+        "403": forbiddenAnswer("the ADMIN role"),
         "200": {
           description: "The server's library sections",
           content: {
@@ -134,6 +138,7 @@ export const settingsPaths: OpenApiPaths = {
       summary: "List available Jellyfin libraries (ADMIN)",
       parameters: [{ name: "instance", in: "query", schema: { type: "string" }, description: "Jellyfin instance slug; absent = the default server" }],
       responses: {
+        "403": forbiddenAnswer("the ADMIN role"),
         "200": {
           description: "The server's media folders",
           content: {
@@ -159,6 +164,7 @@ export const settingsPaths: OpenApiPaths = {
       description: "A live upstream request per call. 10 per minute per admin.",
       requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["service"], properties: { service: { type: "string", enum: ["omdb", "mdblist", "trakt", "ipinfo"] } } } } } },
       responses: {
+        "403": forbiddenAnswer("the ADMIN role"),
         "200": {
           description: "{ ok: true, message }",
           content: {
@@ -183,7 +189,11 @@ export const settingsPaths: OpenApiPaths = {
       tags: ["Settings"],
       summary: "Radarr/Sonarr webhook tokens, fetched on demand for the copy buttons (ADMIN)",
       description: "Kept off the settings page's server-rendered payload so the secrets cross the wire only when an admin asks. radarr/sonarr fall back to the legacy shared secret; the 4K entries do not.",
+      parameters: [
+        { name: "service", in: "query", required: false, description: "One of radarr, sonarr, radarr4k, sonarr4k: answer with only that token. Absent or unknown: every token.", schema: { type: "string", enum: ["radarr", "sonarr", "radarr4k", "sonarr4k"] } },
+      ],
       responses: {
+        "403": forbiddenAnswer("the ADMIN role"),
         "200": {
           description: "{ radarr, sonarr, radarr4k, sonarr4k } — each a token string or null",
           content: {

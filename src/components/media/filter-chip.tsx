@@ -44,6 +44,8 @@ export function RemovableChip({ label, onRemove }: { label: string; onRemove: ()
 // and the client re-evaluates it at page load, so once the year rolls over (or
 // the bundler bakes the build-time year) the SSR and CSR `<option>` lists
 // drift — React #418.
+const FIRST_YEAR = 1900;
+
 export function buildYears(maxYear: number): string[] {
-  return Array.from({ length: maxYear - 1899 }, (_, i) => String(maxYear - i));
+  return Array.from({ length: Math.max(0, maxYear - (FIRST_YEAR - 1)) }, (_, i) => String(maxYear - i));
 }

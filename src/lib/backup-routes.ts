@@ -100,6 +100,27 @@ export function auditAdminImport(
   });
 }
 
+// An import that THREW instead of answering (a bug or a crashed pipeline): the
+// attempt is still audited as a failed restore, then the error is rethrown.
+export async function runAuditedAdminImport(
+  req: Request,
+  session: SummonarrSession,
+  mode: "admin" | "admin-chunked",
+  run: () => Promise<BackupImportResult>,
+): Promise<BackupImportResult> {
+  let result: BackupImportResult;
+  try {
+    result = await run();
+  } catch (err) {
+    auditAdminImport(req, session, { ok: false, status: 500, error: "Import failed unexpectedly." }, mode);
+    throw err;
+  }
+  // Audited whether or not it succeeded — after the restore, never inside it
+  // (guardrail 26).
+  auditAdminImport(req, session, result, mode);
+  return result;
+}
+
 // The first-run audit row, written after the restore committed (outside its
 // transaction, so the TRUNCATE can't take it). No session exists yet: the
 // restored users haven't signed in. A failed write must not fail the restore.

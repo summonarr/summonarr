@@ -10,3 +10,14 @@ export const SETUP_LOCK_SQL = "SELECT pg_advisory_xact_lock(43)";
 export async function lockSetupInTx(tx: { $executeRawUnsafe: (q: string) => Promise<unknown> }): Promise<void> {
   await tx.$executeRawUnsafe(SETUP_LOCK_SQL);
 }
+
+// Onboarding is one-shot: a completed setup OR any existing user closes it.
+// The one rule behind /api/auth/register and /api/auth/setup-status, so the
+// setup screen is never offered where register would refuse.
+export async function registrationClosed(db: {
+  setting: { findUnique: (args: { where: { key: string } }) => Promise<unknown> };
+  user: { count: () => Promise<number> };
+}): Promise<boolean> {
+  if (await db.setting.findUnique({ where: { key: "setup_completed_at" } })) return true;
+  return (await db.user.count()) > 0;
+}

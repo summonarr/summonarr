@@ -9,6 +9,7 @@ import {
   QUEUE_PHASE,
   ARR_SERVICE,
   tooLargeAnswer,
+  forbiddenAnswer,
   RETRY_AFTER_HEADER,
   rowOwner,
   OK_TRUE,
@@ -395,6 +396,7 @@ export const requestsPaths: OpenApiPaths = {
         },
       },
       responses: {
+        "403": forbiddenAnswer("the MANAGE_REQUESTS permission"),
         "200": {
           description:
             "Batch result. On APPROVED, a request whose Radarr/Sonarr add definitely fails is rolled back to PENDING and " +
@@ -421,7 +423,7 @@ export const requestsPaths: OpenApiPaths = {
             },
           },
         },
-        "400": { description: "ids empty/over 100/not strings, invalid status, adminNote over " + ADMIN_NOTE_MAX + " chars, non-boolean permanent, or a permanent batch over 25 ids (`code: \"permanent-batch-too-large\"`)" },
+        "400": { description: `ids empty/over ${REQUEST_BATCH_MAX_IDS}/not strings, invalid status, adminNote over ${ADMIN_NOTE_MAX} chars, non-boolean permanent, or a permanent batch over ${REQUEST_BATCH_MAX_PERMANENT} ids (\`code: "permanent-batch-too-large"\`)` },
         "413": tooLargeAnswer(1024 * 1024),
         "429": { description: "Rate limited (10/min per admin)" },
         "503": { description: "Maintenance mode (non-ADMIN callers)" },
@@ -586,6 +588,7 @@ export const requestsPaths: OpenApiPaths = {
       summary: "Users the caller may request on behalf of (REQUEST_ON_BEHALF)",
       description: "Active accounts only (deactivated ones are left out), at most 1000, by name. A non-ADMIN caller is offered only targets whose permissions are a subset of their own, since the bulk route refuses any other — read on past ineligible accounts until 1000 are found or 50,000 were scanned. A non-ADMIN caller gets every other account's email masked (its first character and the domain).",
       responses: {
+        "403": forbiddenAnswer("the REQUEST_ON_BEHALF permission"),
         "200": {
           description: "{ users: [{ id, name, email }], truncated }",
           content: {

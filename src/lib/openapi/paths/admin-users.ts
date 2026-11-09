@@ -2,6 +2,8 @@
 
 import { NOTIFICATION_PREF_FLAGS, tooLargeAnswer, AUTH_SESSION_ROW_FIELDS, OK_TRUE, RETRY_AFTER_HEADER } from "../shared";
 import type { OpenApiSchema, OpenApiPaths } from "../types";
+import type { UserPatchField } from "@/lib/admin-user-fields";
+import { WATCH_GRADE_SETTING_KEYS } from "@/lib/watch-grade";
 
 // One row of GET /admin/users — and POST /admin/users' 201, which answers the
 // same shape (serializeUser in src/app/api/admin/users/route.ts).
@@ -27,6 +29,55 @@ const ADMIN_USER_ITEM = {
     requestCount: { type: "integer" },
   },
 } satisfies OpenApiSchema;
+
+// Every field PATCH /admin/users/{id} recognises, typed by name: adding one to
+// USER_PATCH_FIELDS fails to compile here until its schema is written.
+const USER_PATCH_PROPERTIES = {
+  role: { $ref: "#/components/schemas/UserRole" },
+  permissions: { type: "string", description: "Decimal-encoded capability bitmask (see src/lib/permissions.ts)" },
+  movieQuotaLimit: { type: "integer", nullable: true },
+  movieQuotaDays: { type: "integer", nullable: true },
+  tvQuotaLimit: { type: "integer", nullable: true },
+  tvQuotaDays: { type: "integer", nullable: true },
+  mediaServer: { type: "string", enum: ["plex", "jellyfin", null], nullable: true },
+  ...NOTIFICATION_PREF_FLAGS,
+  maxContentRating: { type: "string", nullable: true, description: "Content-rating cap; null or empty clears it" },
+  mediaServerGrants: {
+    type: "object",
+    nullable: true,
+    description: "Per-server library visibility for RESTRICTED Plex/Jellyfin instances: { plex: { <slug>: { view } }, jellyfin: { <slug>: { view } } }",
+    additionalProperties: { type: "object", additionalProperties: { type: "object", properties: { view: { type: "boolean" } } } },
+  },
+  instanceGrants: {
+    type: "object",
+    nullable: true,
+    description: "Per-instance grants for NAMED Radarr/Sonarr instances, keyed by slug",
+    additionalProperties: {
+      type: "object",
+      properties: { request: { type: "boolean" }, autoApprove: { type: "boolean" } },
+    },
+  },
+} satisfies Record<UserPatchField, OpenApiSchema>;
+
+// The nine watch-grade settings the preview takes, keyed by the settings' own
+// names. A blank (or whitespace-only) string is allowed and means the default.
+const WATCH_GRADE_BOUNDS: Record<keyof typeof WATCH_GRADE_SETTING_KEYS, string> = {
+  graceDays: "integer string 1–365",
+  windowDays: "integer string 30–3650, or 0 for no limit",
+  tvEpisodePercent: "integer string 1–100",
+  otherViewers: "integer string 1–100, or 0 to turn off",
+  bandA: "integer string 1–100",
+  bandB: "integer string 1–100",
+  bandC: "integer string 1–100",
+  bandD: "integer string 1–100",
+  minGradedRequests: "integer string 1–100",
+};
+const WATCH_GRADE_PREVIEW_PROPERTIES: Record<string, OpenApiSchema> = Object.fromEntries(
+  (Object.keys(WATCH_GRADE_SETTING_KEYS) as Array<keyof typeof WATCH_GRADE_SETTING_KEYS>).map((field) => [
+    WATCH_GRADE_SETTING_KEYS[field],
+    { type: "string", pattern: "^\\s*(\\d+)?\\s*$", description: `${WATCH_GRADE_BOUNDS[field]}; blank = the default` } satisfies OpenApiSchema,
+  ]),
+);
 
 export const adminUsersPaths: OpenApiPaths = {
   "/admin/users": {
@@ -72,39 +123,14 @@ export const adminUsersPaths: OpenApiPaths = {
     patch: {
       tags: ["Admin – Users"],
       summary: "Update user settings (MANAGE_USERS)",
-      description: "Conferring the ADMIN role, or editing an account that is already ADMIN, additionally requires the caller to hold ADMIN. ONE FIELD GROUP PER CALL: the handler applies only the first group present, in this order — mediaServer, maxContentRating, permissions, instanceGrants, mediaServerGrants, then the first quota* field, then the first notification flag, then role — and answers 200 with `{ id, <field>: <new value> }` (permissions as a decimal string). A body with none of them is 400. A non-ADMIN delegate may not edit its own limits/grants, may not touch an ADMIN account, and may only grant what it holds itself (403). Rate-limited 20/min per caller; body capped at 32 KB.",
+      description: "Conferring the ADMIN role, or editing an account that is already ADMIN, additionally requires the caller to hold ADMIN. ONE FIELD PER CALL: the body names exactly one editable field (mediaServer, maxContentRating, permissions, instanceGrants, mediaServerGrants, one quota* field, one notification flag, or role) and the handler answers 200 with `{ id, <field>: <new value> }` (permissions as a decimal string). A body naming more than one field is refused with 400 and nothing is applied; a body with none of them is 400 too. A non-ADMIN delegate may not edit its own limits/grants, may not touch an ADMIN account, and may only grant what it holds itself (403). Rate-limited 20/min per caller; body capped at 32 KB.",
       parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
       requestBody: {
         content: {
           "application/json": {
             schema: {
               type: "object",
-              properties: {
-                role: { $ref: "#/components/schemas/UserRole" },
-                permissions: { type: "string", description: "Decimal-encoded capability bitmask (see src/lib/permissions.ts)" },
-                movieQuotaLimit: { type: "integer", nullable: true },
-                movieQuotaDays: { type: "integer", nullable: true },
-                tvQuotaLimit: { type: "integer", nullable: true },
-                tvQuotaDays: { type: "integer", nullable: true },
-                mediaServer: { type: "string", enum: ["plex", "jellyfin", null], nullable: true },
-                ...NOTIFICATION_PREF_FLAGS,
-                maxContentRating: { type: "string", nullable: true, description: "Content-rating cap; null or empty clears it" },
-                mediaServerGrants: {
-                  type: "object",
-                  nullable: true,
-                  description: "Per-server library visibility for RESTRICTED Plex/Jellyfin instances: { plex: { <slug>: { view } }, jellyfin: { <slug>: { view } } }",
-                  additionalProperties: { type: "object", additionalProperties: { type: "object", properties: { view: { type: "boolean" } } } },
-                },
-                instanceGrants: {
-                  type: "object",
-                  nullable: true,
-                  description: "Per-instance grants for NAMED Radarr/Sonarr instances, keyed by slug",
-                  additionalProperties: {
-                    type: "object",
-                    properties: { request: { type: "boolean" }, autoApprove: { type: "boolean" } },
-                  },
-                },
-              },
+              properties: USER_PATCH_PROPERTIES,
             },
           },
         },
@@ -144,7 +170,7 @@ export const adminUsersPaths: OpenApiPaths = {
             },
           },
         },
-        "400": { description: "Invalid value, no recognized field, own-role change, or a last-admin / promote-first rule" },
+        "400": { description: "Invalid value, no recognized field, more than one field in the body, own-role change, or a last-admin / promote-first rule" },
         "403": { description: "Forbidden (ADMIN-bit rule, own limits, or grant beyond the caller's own)" },
         "404": { description: "User not found" },
         "413": tooLargeAnswer(32 * 1024),
@@ -275,11 +301,12 @@ export const adminUsersPaths: OpenApiPaths = {
     get: {
       tags: ["Admin – Users"],
       summary: "List auth sessions for a user (MANAGE_USERS)",
-      description: "An ADMIN target needs the ADMIN bit.",
+      description: "An ADMIN target needs the ADMIN bit. At most 200 sessions are returned; `X-Truncated: true` says more exist.",
       parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
       responses: {
         "200": {
           description: "Auth session list, most recently seen first",
+          headers: { "X-Truncated": { description: "\"true\" when the list was cut at the cap", schema: { type: "string", enum: ["true", "false"] } }, "X-Truncated-Cap": { description: "The cap, as an integer string", schema: { type: "string" } } },
           content: { "application/json": { schema: { type: "array", items: { type: "object", properties: AUTH_SESSION_ROW_FIELDS } } } },
         },
         "403": { description: "An ADMIN target needs the ADMIN bit" },
@@ -301,6 +328,7 @@ export const adminUsersPaths: OpenApiPaths = {
         "403": { description: "An ADMIN target needs the ADMIN bit" },
         "404": { description: "User not found, or the session does not belong to this user" },
         "413": tooLargeAnswer(16 * 1024),
+        "429": { description: "Rate limited (30 per minute per admin)", headers: RETRY_AFTER_HEADER },
       },
     },
   },
@@ -430,15 +458,7 @@ export const adminUsersPaths: OpenApiPaths = {
             schema: {
               type: "object",
               properties: {
-                watchGradeGraceDays: { type: "string", pattern: "^\\d+$", description: "integer string 1–365; blank = the default" },
-                watchGradeWindowDays: { type: "string", pattern: "^\\d+$", description: "integer string 30–3650, or 0 for no limit; blank = the default" },
-                watchGradeTvPercent: { type: "string", pattern: "^\\d+$", description: "integer string 1–100; blank = the default" },
-                watchGradeOtherViewers: { type: "string", pattern: "^\\d+$", description: "integer string 1–100, or 0 to turn off; blank = the default" },
-                watchGradeBandA: { type: "string", pattern: "^\\d+$", description: "integer string 1–100; blank = the default" },
-                watchGradeBandB: { type: "string", pattern: "^\\d+$", description: "integer string 1–100; blank = the default" },
-                watchGradeBandC: { type: "string", pattern: "^\\d+$", description: "integer string 1–100; blank = the default" },
-                watchGradeBandD: { type: "string", pattern: "^\\d+$", description: "integer string 1–100; blank = the default" },
-                watchGradeMinRequests: { type: "string", pattern: "^\\d+$", description: "integer string 1–100; blank = the default" },
+                ...WATCH_GRADE_PREVIEW_PROPERTIES,
               },
             },
           },

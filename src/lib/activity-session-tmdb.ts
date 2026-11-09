@@ -41,19 +41,20 @@ export type EffectiveSession<T> = T & {
   backfill: { tmdbId: number; mediaType: ActivityMediaType } | null;
 };
 
-// A sourceItemId is server-local: two servers reuse the same ids, so every key
-// carries the instance. Reads and writes go through this one builder.
-export function sessionItemKey(serverInstance: string, sourceItemId: string): string {
-  return `item:${serverInstance}:${sourceItemId}`;
+// A sourceItemId is server-local: two servers reuse the same ids, and a Plex and
+// a Jellyfin server can share an instance slug, so every key carries the source
+// and the instance. Reads and writes go through this one builder.
+export function sessionItemKey(source: string, serverInstance: string, sourceItemId: string): string {
+  return `item:${source}:${serverInstance}:${sourceItemId}`;
 }
 
 function itemFor(s: SessionTmdbFields, items: ItemResolutionMap): ItemResolution | undefined {
-  return s.sourceItemId ? items.get(sessionItemKey(s.serverInstance, s.sourceItemId)) : undefined;
+  return s.sourceItemId ? items.get(sessionItemKey(s.source, s.serverInstance, s.sourceItemId)) : undefined;
 }
 
 // Step 1: the newest mapped play of each session item. Per source, so the
 // [source, sourceItemId, …] index serves it — the id alone matches no index's
-// leading column — and DISTINCT ON per (serverInstance, sourceItemId) returns
+// leading column — and DISTINCT ON per (source, serverInstance, sourceItemId) returns
 // one row per item instead of every past play of it.
 async function historyItemMatches(withItem: readonly (SessionTmdbFields & { sourceItemId: string })[]): Promise<ItemResolutionMap> {
   const out: ItemResolutionMap = new Map();
@@ -62,13 +63,13 @@ async function historyItemMatches(withItem: readonly (SessionTmdbFields & { sour
     .filter((arm) => arm.ids.length > 0)
     .map((arm) => Prisma.sql`("source" = ${arm.src} AND "sourceItemId" IN (${Prisma.join(arm.ids)}))`);
   if (arms.length === 0) return out;
-  const rows = await prisma.$queryRaw<{ serverInstance: string; sourceItemId: string; tmdbId: number; mediaType: string | null }[]>(Prisma.sql`
-    SELECT DISTINCT ON ("serverInstance", "sourceItemId") "serverInstance", "sourceItemId", "tmdbId", "mediaType"::text AS "mediaType"
+  const rows = await prisma.$queryRaw<{ source: string; serverInstance: string; sourceItemId: string; tmdbId: number; mediaType: string | null }[]>(Prisma.sql`
+    SELECT DISTINCT ON ("source", "serverInstance", "sourceItemId") "source", "serverInstance", "sourceItemId", "tmdbId", "mediaType"::text AS "mediaType"
     FROM "PlayHistory"
     WHERE "tmdbId" IS NOT NULL AND (${Prisma.join(arms, " OR ")})
-    ORDER BY "serverInstance", "sourceItemId", "startedAt" DESC
+    ORDER BY "source", "serverInstance", "sourceItemId", "startedAt" DESC
   `);
-  for (const h of rows) out.set(sessionItemKey(h.serverInstance, h.sourceItemId), { tmdbId: h.tmdbId, mediaType: h.mediaType });
+  for (const h of rows) out.set(sessionItemKey(h.source, h.serverInstance, h.sourceItemId), { tmdbId: h.tmdbId, mediaType: h.mediaType });
   return out;
 }
 
@@ -116,13 +117,13 @@ async function libraryItemMatches(stillNeed: readonly (SessionTmdbFields & { sou
   }
   for (const [inst, rows] of plexByInstance) {
     for (const [k, i] of indexPlexRowsByKey(rows)) {
-      out.set(sessionItemKey(inst, k), { tmdbId: i.tmdbId, mediaType: i.mediaType });
+      out.set(sessionItemKey("plex", inst, k), { tmdbId: i.tmdbId, mediaType: i.mediaType });
     }
   }
   for (const i of jellyfinItems) {
     // Every id the row answers to — the session's sourceItemId may be any of them.
     const ids = i.jellyfinItemId ? [i.jellyfinItemId, ...i.jellyfinItemIds] : i.jellyfinItemIds;
-    for (const id of ids) out.set(sessionItemKey(i.serverInstance, id), { tmdbId: i.tmdbId, mediaType: i.mediaType });
+    for (const id of ids) out.set(sessionItemKey("jellyfin", i.serverInstance, id), { tmdbId: i.tmdbId, mediaType: i.mediaType });
   }
   return out;
 }

@@ -26,6 +26,7 @@ import {
 import {
   deactivateUserInTx,
   isAdminTarget,
+  isPurgedRow,
   LastAdminError,
   lockTargetInTx,
   lockUserRolesInTx,
@@ -283,7 +284,11 @@ async function editPermissions(ctx: EditContext, raw: string | undefined): Promi
 
   return commitField(
     ctx,
-    (db) => db.user.update({ where: { id }, data: { permissions: parsed } }),
+    // The role is part of the match: a role change that landed after the read
+    // above would otherwise leave the ADMIN bit out of step with it. A miss
+    // reads as P2025, the same "gone" answer as a deleted row; a retry then
+    // validates against the new role.
+    (db) => db.user.update({ where: { id, role: targetUser.role }, data: { permissions: parsed } }),
     { action: "USER_PERMISSIONS_CHANGE", details: { ...targetDetails(id, targetUser.name), before: targetUser.permissions.toString(), after: parsed.toString() } },
     { permissions: parsed.toString() },
   );
@@ -424,8 +429,11 @@ async function editRole(ctx: EditContext, role: string | undefined): Promise<Nex
   // hand them TV requests (a same-role PATCH is accepted and re-seeds too).
   if (presetExceeds(role, session.user.permissions)) return beyondOwn(t);
 
-  const target = await prisma.user.findUnique({ where: { id }, select: { id: true, role: true, name: true, email: true } });
+  const target = await prisma.user.findUnique({ where: { id }, select: { id: true, role: true, name: true, email: true, purgedAt: true } });
   if (!target) return notFound(t);
+  // A scrubbed account can't sign in; promoting its tombstone would only create
+  // a hidden admin row (the reactivate route refuses it the same way).
+  if (isPurgedRow(target)) return json({ error: t("apiAdmin.users.purgedCannotChange") }, 400);
 
   // Only a full admin may promote a user TO admin or change an account that is
   // already admin (demotion, re-seed). Without this, a MANAGE_USERS holder could

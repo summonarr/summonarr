@@ -5,7 +5,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { auditActor, logAudit } from "@/lib/audit";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { invalidateBlacklistCache } from "@/lib/blacklist";
-import { isTmdbIdInRange } from "@/lib/tmdb-id";
+import { parseTitleKeyBody, parseTitleKeyQuery } from "@/lib/title-key-input";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Admin-managed request blacklist. A blacklisted (tmdbId, mediaType) pair is
@@ -26,28 +26,11 @@ export const GET = withAdmin(async () => {
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<{
-    tmdbId?: number;
-    mediaType?: string;
-    title?: string;
-    reason?: string;
-  }>(req, 16384);
+  const parsed = await readJsonCapped<{ tmdbId?: unknown; mediaType?: unknown; title?: unknown; reason?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
-  const { tmdbId, mediaType, title, reason } = parsed;
-
-  // isTmdbIdInRange also bounds INT4: a larger id would throw out of the upsert as a 500.
-  if (typeof tmdbId !== "number" || !isTmdbIdInRange(tmdbId)) {
-    return NextResponse.json({ error: t("apiAdmin.common.tmdbIdPositive") }, { status: 400 });
-  }
-  if (mediaType !== "MOVIE" && mediaType !== "TV") {
-    return NextResponse.json({ error: t("apiAdmin.common.mediaTypeMovieOrTv") }, { status: 400 });
-  }
-  if (title !== undefined && (typeof title !== "string" || title.length > 500)) {
-    return NextResponse.json({ error: t("apiAdmin.common.titleTooLong") }, { status: 400 });
-  }
-  if (reason !== undefined && (typeof reason !== "string" || reason.length > 500)) {
-    return NextResponse.json({ error: t("apiAdmin.common.reasonTooLong") }, { status: 400 });
-  }
+  const input = parseTitleKeyBody(parsed, t);
+  if (input instanceof NextResponse) return input;
+  const { tmdbId, mediaType, title, reason } = input;
 
   // Whether this POST adds a title or rewrites one already blocked: the manager's
   // count goes up only for a new row (it loads at most 1000 rows, so it can't tell
@@ -60,7 +43,13 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const item = await prisma.blacklistItem.upsert({
     where: { tmdbId_mediaType: { tmdbId, mediaType } },
     create: { tmdbId, mediaType, title: sanitizeOptional(title) ?? null, reason: sanitizeOptional(reason) ?? null, addedBy: session.user.id },
-    update: { title: sanitizeOptional(title) ?? null, reason: sanitizeOptional(reason) ?? null, addedBy: session.user.id },
+    // Only the fields the request carried: re-adding a blocked title without a
+    // reason must not erase the one stored (an explicit "" still clears it).
+    update: {
+      ...(title !== undefined && { title: sanitizeOptional(title) ?? null }),
+      ...(reason !== undefined && { reason: sanitizeOptional(reason) ?? null }),
+      addedBy: session.user.id,
+    },
   });
   invalidateBlacklistCache();
   // Post-commit, non-transactional mutation ⇒ swallowing logAudit (guardrail 26).
@@ -76,12 +65,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
 export const DELETE = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const sp = req.nextUrl.searchParams;
-  const tmdbId = Number(sp.get("tmdbId"));
-  const mediaType = sp.get("mediaType");
-  if (!isTmdbIdInRange(tmdbId) || (mediaType !== "MOVIE" && mediaType !== "TV")) {
-    return NextResponse.json({ error: t("apiAdmin.common.tmdbIdAndMediaTypeRequired") }, { status: 400 });
-  }
+  const key = parseTitleKeyQuery(req.nextUrl.searchParams, t);
+  if (key instanceof NextResponse) return key;
+  const { tmdbId, mediaType } = key;
   const deleted = await prisma.blacklistItem.deleteMany({ where: { tmdbId, mediaType } });
   invalidateBlacklistCache();
   if (deleted.count > 0) {

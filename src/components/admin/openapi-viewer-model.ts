@@ -110,7 +110,9 @@ export function groupByTag(ops: readonly FlatOp[], specTags: ReadonlyArray<{ nam
 
 // aria-controls needs an id; the "<method> <path>" key is unique per operation
 // and stable across filtering, so it is sanitised into one here.
-export const panelIdFor = (key: string) => `op-${key.replace(/[^a-zA-Z0-9]+/g, "-")}`;
+// Each character outside [a-zA-Z0-9] becomes "_<hex>", so two keys never share an id.
+export const panelIdFor = (key: string) =>
+  `op-${key.replace(/[^a-zA-Z0-9]/g, (c) => `_${c.charCodeAt(0).toString(16)}`)}`;
 
 export function stripRef(ref: string): string {
   return ref.replace("#/components/schemas/", "");
@@ -161,7 +163,12 @@ export function exampleValue(schema: unknown, schemas: Schemas, active: Readonly
   const values = asList(s.enum);
   if (values) return values[0];
   const allOf = asList(s.allOf);
-  if (allOf) return Object.assign({}, ...allOf.map((part) => exampleValue(part, schemas, seen)));
+  if (allOf) {
+    const parts = allOf.map((part) => exampleValue(part, schemas, seen));
+    const objects = parts.filter(isRecord);
+    if (objects.length === 0) return parts[0] ?? null;
+    return Object.assign({}, ...objects);
+  }
   const options = asList(s.oneOf) ?? asList(s.anyOf);
   if (options && options.length > 0) return exampleValue(options[0], schemas, seen);
   switch (s.type) {
@@ -210,6 +217,9 @@ function queryPlaceholder(p: Parameter): string {
   return encodeURIComponent(String(value));
 }
 
+// Text placed between single quotes in the sample command: an embedded ' closes, escapes and reopens the quote.
+const shellQuoteBody = (text: string) => text.replace(/'/g, "'\\''");
+
 /**
  * The "Copy as curl" command. `serverUrl` is the spec's own server url, which
  * already carries BASE_PATH (the spec route applies it), so it is used as-is —
@@ -242,12 +252,12 @@ export function curlCommand(args: {
     .map((p) => `${encodeURIComponent(p.name)}=${queryPlaceholder(p)}`)
     .join("&");
   const url = `${origin}${serverUrl}${resolvedPath}${query ? `?${query}` : ""}`;
-  const lines = [`curl -X ${method.toUpperCase()} '${url}'`];
+  const lines = [`curl -X ${method.toUpperCase()} '${shellQuoteBody(url)}'`];
   if (security.length > 0) lines.push(`  --cookie '${cookieName}=YOUR_SESSION_TOKEN'`);
   const body = firstContent(op.requestBody?.content);
   if (body) {
     lines.push(`  -H 'Content-Type: ${body.type}'`);
-    lines.push(body.json ? `  -d '${JSON.stringify(exampleValue(body.schema, schemas))}'` : "  --data-binary @FILE");
+    lines.push(body.json ? `  -d '${shellQuoteBody(JSON.stringify(exampleValue(body.schema, schemas)))}'` : "  --data-binary @FILE");
   }
   return lines.join(" \\\n");
 }

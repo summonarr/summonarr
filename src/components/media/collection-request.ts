@@ -2,6 +2,7 @@
 // the bulk route, and what the outcome line says. No React, so the unit suite
 // drives it with a scripted fetch (tests/collection-request-all.test.mts).
 import type { TmdbMedia } from "@/lib/tmdb-types";
+import type { ItemResult } from "@/lib/request-bulk";
 import type { Translator } from "@/lib/i18n/translate";
 import { withBasePath } from "@/lib/base-path";
 import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
@@ -16,7 +17,8 @@ import { BULK_REQUEST_MAX_ITEMS } from "@/lib/request-limits";
 // Bulk outcomes (bulk/route.ts ItemResult) for a title this user can't request.
 // They are counted in the result line; the already-* outcomes are not failures
 // (there was nothing to do), and created/auto-approved are the `created` count.
-const UNREQUESTABLE = new Set(["skipped-declined", "no-permission", "blacklisted", "rating-blocked"]);
+// A rename in the route's union fails the `satisfies`.
+const UNREQUESTABLE = new Set<string>(["skipped-declined", "no-permission", "blacklisted", "rating-blocked"] satisfies ItemResult[]);
 
 // A chunk looks up and may push up to 50 titles to Radarr/Sonarr before it
 // answers, so its wait is generous; past it the outcome is unknown, not failed.
@@ -49,7 +51,7 @@ export function toBulkItem(m: Pick<TmdbMedia, "id" | "mediaType">): BulkItem {
 }
 
 export type ChunkAnswer =
-  | { kind: "ok"; created: number; unrequestable: number }
+  | { kind: "ok"; created: number; unrequestable: number; failed: number }
   /** A 2xx whose body couldn't be read: the chunk went through, its count is unknown. */
   | { kind: "unreadable" }
   | { kind: "refused"; reason: string }
@@ -73,10 +75,13 @@ export async function postBulkChunk(chunk: BulkItem[], signal: AbortSignal, some
   });
   if (res.ok) {
     let unrequestable = 0;
+    let failed = 0;
     for (const r of res.data.results ?? []) {
-      if (r.result !== undefined && UNREQUESTABLE.has(r.result)) unrequestable++;
+      if (r.result === undefined) continue;
+      if (UNREQUESTABLE.has(r.result)) unrequestable++;
+      else if (r.result === ("error" satisfies ItemResult)) failed++;
     }
-    return { kind: "ok", created: res.data.created, unrequestable };
+    return { kind: "ok", created: res.data.created, unrequestable, failed };
   }
   switch (res.kind) {
     case "invalid":
@@ -96,6 +101,8 @@ export interface CollectionRequestSummary {
   sent: number;
   created: number;
   unrequestable: number;
+  /** Titles the route tried and failed to request (a retry may succeed). */
+  failed: number;
   /** Some answered chunk's body couldn't be read, so `created` is a floor. */
   unreadable: boolean;
   /** Why the run stopped before the last chunk, if it did. */
@@ -112,6 +119,7 @@ export async function requestInChunks(
     sent: 0,
     created: 0,
     unrequestable: 0,
+    failed: 0,
     unreadable: false,
     stopped: null,
   };
@@ -121,6 +129,7 @@ export async function requestInChunks(
     if (answer.kind === "ok") {
       summary.created += answer.created;
       summary.unrequestable += answer.unrequestable;
+      summary.failed += answer.failed;
     } else if (answer.kind === "unreadable") {
       summary.unreadable = true;
     } else {
@@ -145,6 +154,11 @@ export function collectionRequestOutcome(s: CollectionRequestSummary, t: Transla
   if (s.stopped === null) {
     // Say why fewer than all were requested, rather than a bare "2 of 5"; and
     // never "0 of 5" for a chunk whose answer couldn't be read.
+    if (s.failed > 0 && !s.unreadable) {
+      // The button stays usable: the refresh drops what was created and a
+      // second click retries only the rest.
+      return { state: "error", message: t("request.collection.someFailed", { created: s.created, total, failed: s.failed }), refresh: true };
+    }
     const message = s.unreadable
       ? t("request.collection.doneUnknown", { total })
       : s.unrequestable > 0

@@ -11,6 +11,9 @@ import { isFeatureEnabled } from "@/lib/features";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { lockBusyResponse } from "@/lib/lock-http";
 
+// Spec ids are short catalog keys; this bounds a pasted blob stored whole in the audit row.
+const SPEC_ID_MAX_LEN = 200;
+
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   // Kill-switch parity with the nightly cron: a disabled TRaSH integration must not
@@ -28,10 +31,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
-  if (!Array.isArray(body.specIds) || body.specIds.some((v) => typeof v !== "string")) {
+  if (!Array.isArray(body.specIds) || body.specIds.some((v) => typeof v !== "string" || v.length > SPEC_ID_MAX_LEN)) {
     return NextResponse.json({ error: t("apiAdmin.trash.specIdsArray") }, { status: 400 });
   }
-  const ids = body.specIds as string[];
+  // A repeated id would apply (and audit) the same spec twice in one run.
+  const ids = [...new Set(body.specIds as string[])];
   const variant = parseTrashVariant(body.variant);
   if (variant === null) {
     return NextResponse.json({ error: t("apiAdmin.common.invalidInstance") }, { status: 400 });

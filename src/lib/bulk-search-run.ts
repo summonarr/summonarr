@@ -1,5 +1,5 @@
 // Admin → Missing, "Search selected": the runner behind the bulk bar in
-// missing-report.tsx. Pure (its one import is zero-import too) so a client
+// missing-report.tsx. Pure (its imports are dependency-free too) so a client
 // component can use it and the unit suite can pin it — the component supplies the network call and the
 // row-state reads; this decides the order, the pacing, cancellation and the one
 // retry after a 429.
@@ -13,6 +13,7 @@
 // Cancel, and the search route's per-admin rate limit.
 
 import { retryAfterDeltaSeconds } from "./client/rate-limit";
+import { abortableSleep } from "./abortable-sleep";
 
 /** Search requests in flight at once. */
 export const BULK_SEARCH_CONCURRENCY = 2;
@@ -56,22 +57,7 @@ export function capSelection<T>(rows: readonly T[], max: number = BULK_SEARCH_MA
   return rows.slice(0, Math.max(0, max));
 }
 
-/** Resolves after `ms`, or as soon as `signal` aborts. Never rejects. */
-export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal.aborted) {
-      resolve();
-      return;
-    }
-    const finish = () => {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", finish);
-      resolve();
-    };
-    const timer = setTimeout(finish, ms);
-    signal.addEventListener("abort", finish, { once: true });
-  });
-}
+export { abortableSleep };
 
 export interface BulkSearchHooks<R> {
   /** Aborted by Cancel and by the page unmounting; checked before each row is taken. */

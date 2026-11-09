@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { enforceUserDownloadPolicy } from "@/lib/download-policy";
 import { isPurgedRow } from "@/lib/account-lifecycle";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import type { SummonarrSession } from "@/lib/api-auth";
@@ -154,15 +155,21 @@ async function applyLink(
   }
 
   const before = record.userId;
-  await prisma.mediaServerUser.update({
-    where: { id },
-    data: mode.auto
-      // Hand the row back to automatic resolution. `userId` is left as-is —
-      // the next poll/sync re-derives it (and clears a stale value only if it
-      // resolves to someone else; an unresolvable row simply keeps what it has).
-      ? { manualUserLink: false }
-      : { userId: nextUserId, manualUserLink: true },
-  });
+  try {
+    await prisma.mediaServerUser.update({
+      where: { id },
+      data: mode.auto
+        // Hand the row back to automatic resolution. `userId` is left as-is —
+        // the next poll/sync re-derives it (and clears a stale value only if it
+        // resolves to someone else; an unresolvable row simply keeps what it has).
+        ? { manualUserLink: false }
+        : { userId: nextUserId, manualUserLink: true },
+    });
+  } catch (err) {
+    // The row was deleted since the read above.
+    if (isPrismaErrorCode(err, "P2025")) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
+    throw err;
+  }
 
   // Already committed — a failed audit write must not 500 it (guardrail 26).
   void logAudit({
@@ -204,10 +211,15 @@ async function applyDownloadPolicy(
     return NextResponse.json({ error: t("apiAdmin.serverUsers.plexPolicyUnmanaged") }, { status: 400 });
   }
 
-  await prisma.mediaServerUser.update({
-    where: { id },
-    data: { downloadsEnabled },
-  });
+  try {
+    await prisma.mediaServerUser.update({
+      where: { id },
+      data: { downloadsEnabled },
+    });
+  } catch (err) {
+    if (isPrismaErrorCode(err, "P2025")) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
+    throw err;
+  }
 
   // Push the change to the media server immediately; log but don't fail the
   // response. The push OUTCOME is surfaced to the client: the hourly reconcile

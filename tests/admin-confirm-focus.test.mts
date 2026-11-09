@@ -31,13 +31,14 @@ test("server users: a bulk confirm takes focus on Cancel and hands it back to th
   assert.match(confirm, /autoFocus\s*onClick=\{onCancel\}/);
   assert.match(src, /onCancel=\{\(\) => \{\s*focus\.returnTo\(confirming\);\s*setConfirming\(null\);/);
   assert.match(src, /ref=\{focus\.refFor\(kind\)\}/);
-  assert.match(src, /focus\.returnToIfLost\(kind\);\s*setLoading\(null\);/);
+  assert.match(src, /focus\.returnToIfLost\(kind\);\s*if \(!result\?\.ok\) return;/);
 });
 
 test("server users: the auto-disable switch follows the server value, like the per-user switches", () => {
   const src = read("components/admin/server-user-table.tsx");
   const toggle = src.slice(src.indexOf("function AutoDisableToggle("), src.indexOf("export function ServerUserTable("));
-  assert.match(toggle, /useEffect\(\(\) => \{\s*setOn\(initial\);\s*\}, \[initial\]\);/);
+  assert.match(toggle, /const on = override && override\.over === initial \? override\.value : initial;/);
+  assert.ok(!/useEffect/.test(toggle), "no prop-to-state effect");
 });
 
 test("a TRaSH spec's Forget: Cancel returns focus to Forget, a confirmed Forget to the row's expand button", () => {

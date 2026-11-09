@@ -302,9 +302,10 @@ export async function findSeriesIdOnInstance(instance: string, tvdbId: number): 
   const cfg = await configuredCfg("sonarr", instance);
   const rows = await arrFetch<unknown>(cfg, `/api/v3/series?tvdbId=${tvdbId}`);
   const list = Array.isArray(rows) ? (rows as Array<{ id?: unknown; tvdbId?: unknown } | null>) : [];
-  const series = list.find((s) => s?.tvdbId === tvdbId && typeof s.id === "number" && Number.isSafeInteger(s.id) && s.id > 0);
-  if (!series) throw new SeriesNotOnInstanceError();
-  return series.id as number;
+  for (const s of list) {
+    if (s?.tvdbId === tvdbId && typeof s.id === "number" && Number.isSafeInteger(s.id) && s.id > 0) return s.id;
+  }
+  throw new SeriesNotOnInstanceError();
 }
 
 // One series' missing episodes, on demand (the page's row expansion).

@@ -130,6 +130,11 @@ function exportUncompressedPoint(publicKey: ReturnType<typeof createPublicKey>):
   return out;
 }
 
+// The base64url x/y coordinates of a 65-byte uncompressed P-256 point.
+function pointToJwk(point: Uint8Array): { x: string; y: string } {
+  return { x: base64UrlEncode(point.subarray(1, 33)), y: base64UrlEncode(point.subarray(33, 65)) };
+}
+
 // Rebuild a Node KeyObject from raw 32-byte P-256 private scalar + the
 // uncompressed public point (both base64url). Node's JWK importer needs the
 // public coordinates alongside `d`.
@@ -139,10 +144,8 @@ function importVapidPrivateKey(privateKeyB64: string, publicKeyB64: string) {
   if (pub.length !== 65 || pub[0] !== 0x04) {
     throw new Error("VAPID public key must be 65-byte uncompressed P-256 point");
   }
-  const x = base64UrlEncode(pub.subarray(1, 33));
-  const y = base64UrlEncode(pub.subarray(33, 65));
   return createPrivateKey({
-    key: { kty: "EC", crv: "P-256", d, x, y },
+    key: { kty: "EC", crv: "P-256", d, ...pointToJwk(pub) },
     format: "jwk",
   });
 }
@@ -194,7 +197,14 @@ function buildVapidJwt(opts: VapidJwtOptions): string {
   const hit = vapidJwtCache.get(key);
   if (hit && hit.exp - now >= VAPID_JWT_MIN_REMAINING_SECONDS) return hit.jwt;
   const fresh = signVapidJwt(opts);
-  if (!hit && vapidJwtCache.size >= VAPID_JWT_CACHE_MAX) vapidJwtCache.clear();
+  if (!hit && vapidJwtCache.size >= VAPID_JWT_CACHE_MAX) {
+    // Drop what has expired; if nothing has, the oldest insertion.
+    for (const [k, v] of vapidJwtCache) if (v.exp - now < VAPID_JWT_MIN_REMAINING_SECONDS) vapidJwtCache.delete(k);
+    if (vapidJwtCache.size >= VAPID_JWT_CACHE_MAX) {
+      const oldest = vapidJwtCache.keys().next();
+      if (!oldest.done) vapidJwtCache.delete(oldest.value);
+    }
+  }
   vapidJwtCache.set(key, fresh);
   return fresh.jwt;
 }
@@ -264,12 +274,24 @@ function encryptPayload(input: EncryptInput): Uint8Array {
 
 // ---------- Public API ----------
 
+// A TTL header is a non-negative whole number of seconds.
+function clampTtl(ttl: number | undefined): number {
+  if (ttl === undefined || !Number.isFinite(ttl)) return DEFAULT_TTL_SECONDS;
+  return Math.max(0, Math.floor(ttl));
+}
+
 export async function sendPushNotification(
   subscription: PushSubscription,
   payload: string,
   options: SendOptions,
 ): Promise<void> {
-  const endpointUrl = new URL(subscription.endpoint);
+  let endpointUrl: URL;
+  try {
+    endpointUrl = new URL(subscription.endpoint);
+  } catch {
+    // Status 0: no push service answered, and no retry can fix the stored endpoint.
+    throw new WebPushError(0, "", "Invalid subscription endpoint");
+  }
   const audience = endpointUrl.origin;
 
   const jwt = buildVapidJwt({
@@ -294,10 +316,8 @@ export async function sendPushNotification(
   }
 
   // Rebuild a Node KeyObject for the UA public key from its raw coordinates
-  const uaX = base64UrlEncode(uaPublicRaw.subarray(1, 33));
-  const uaY = base64UrlEncode(uaPublicRaw.subarray(33, 65));
   const uaPublicKey = createPublicKey({
-    key: { kty: "EC", crv: "P-256", x: uaX, y: uaY },
+    key: { kty: "EC", crv: "P-256", ...pointToJwk(uaPublicRaw) },
     format: "jwk",
   });
 
@@ -318,7 +338,7 @@ export async function sendPushNotification(
     Authorization: `vapid t=${jwt}, k=${options.vapidPublicKey}`,
     "Content-Type": "application/octet-stream",
     "Content-Encoding": "aes128gcm",
-    TTL: String(options.ttl ?? DEFAULT_TTL_SECONDS),
+    TTL: String(clampTtl(options.ttl)),
   };
   if (options.urgency) headers.Urgency = options.urgency;
 
