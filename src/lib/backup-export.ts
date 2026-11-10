@@ -137,7 +137,7 @@ export async function writeEnumTypes(tx: RawQueryClient, write: Write): Promise<
 // query does not list falls back to the value's shape in escapeSQL.
 async function columnKinds(tx: RawQueryClient, table: string): Promise<Map<string, ColumnKind>> {
   const rows = await tx.$queryRawUnsafe<{ attname: string; typname: string; typcategory: string }[]>(
-    `SELECT a.attname, t.typname, t.typcategory FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped`,
+    `SELECT a.attname::text AS attname, t.typname::text AS typname, t.typcategory::text AS typcategory FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped`,
     `"public"."${table}"`,
   );
   const kinds = new Map<string, ColumnKind>();
