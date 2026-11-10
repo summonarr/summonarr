@@ -36,3 +36,13 @@ export function parseUploadChunkHeaders(headers: Pick<Headers, "get">): UploadCh
   // upload): it names a chunk of SOME upload, just not a next one.
   return { uploadId, chunkIndex, chunkTotal, fileSize };
 }
+
+// The first-run transfer opt-in: X-Restore-Keep-Sessions: true on a SETUP
+// restore keeps the dump's sessions (guardrail 6g). Exactly "true" counts —
+// absent, empty or any other value is the default (sessions wiped). The admin
+// restore routes never read it.
+export const KEEP_SESSIONS_HEADER = "x-restore-keep-sessions";
+
+export function parseKeepSessionsHeader(headers: Pick<Headers, "get">): boolean {
+  return headers.get(KEEP_SESSIONS_HEADER) === "true";
+}

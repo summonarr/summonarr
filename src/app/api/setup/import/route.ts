@@ -6,6 +6,7 @@ import {
   MAX_CIPHERTEXT_BYTES,
 } from "@/lib/backup-import";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { parseKeepSessionsHeader } from "@/lib/upload-chunk-headers";
 import { auditSetupImport, importResultResponse, setupRestoreGate } from "@/lib/backup-routes";
 
 export const dynamic = "force-dynamic";
@@ -39,7 +40,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: t("apiAuth.setup.emptyBody") }, { status: 400 });
   }
 
-  const result = await processBackupImport(req.body, password, "setup");
-  if (result.ok) await auditSetupImport(req, result, "setup");
+  const keepSessions = parseKeepSessionsHeader(req.headers);
+  const result = await processBackupImport(req.body, password, "setup", { keepSessions });
+  if (result.ok) await auditSetupImport(req, result, "setup", keepSessions);
   return importResultResponse(result, t, { chunked: false });
 }

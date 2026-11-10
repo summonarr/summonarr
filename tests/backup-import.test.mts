@@ -131,7 +131,7 @@ const fakePrisma = {
 
 // Dynamic imports so the global pre-seed and env stubs genuinely precede the
 // module-graph load (static imports would hoist above them).
-const { processBackupImport, MAX_PLAINTEXT_BYTES, MAX_CIPHERTEXT_BYTES, restoreTxTimeoutMs } =
+const { processBackupImport, MAX_PLAINTEXT_BYTES, MAX_CIPHERTEXT_BYTES, restoreTxTimeoutMs, keepsSessions } =
   await import("../src/lib/backup-import.ts");
 const { wrapEncryptStream, ENCRYPTED_MAGIC } = await import("../src/lib/backup-crypto.ts");
 const { BACKUP_TABLES, computeSchemaFingerprint } = await import("../src/lib/backup-schema.ts");
@@ -178,9 +178,14 @@ type ImportSuccess = Extract<ImportResult, { ok: true }>;
 
 function runImport(
   chunks: Uint8Array[],
-  opts: { password?: string; mode?: "setup" | "admin"; onCancel?: () => void } = {},
+  opts: { password?: string; mode?: "setup" | "admin"; onCancel?: () => void; keepSessions?: boolean } = {},
 ): Promise<ImportResult> {
-  return processBackupImport(streamFrom(chunks, opts.onCancel), opts.password ?? PASSWORD, opts.mode ?? "admin");
+  return processBackupImport(
+    streamFrom(chunks, opts.onCancel),
+    opts.password ?? PASSWORD,
+    opts.mode ?? "admin",
+    opts.keepSessions === undefined ? undefined : { keepSessions: opts.keepSessions },
+  );
 }
 
 function expectFailure(r: ImportResult): ImportFailure {
@@ -421,6 +426,42 @@ test("setup mode on a genuinely fresh server proceeds to the full restore", asyn
     freshnessReads.map((r) => r.kind),
     ["setting.findUnique", "user.count"],
   );
+});
+
+// ── keep sessions (guardrail 6g exception: first-run transfer only) ─────────
+
+const SESSION_WIPE = ["authSession.deleteMany({})", "user.updateMany(sessionsRevokedAt)"];
+
+test("a setup restore with keepSessions skips BOTH session writes and nothing else", async () => {
+  const kept = expectSuccess(await runImport([new Uint8Array(HAPPY_ENC)], { mode: "setup", keepSessions: true }));
+  const keptOps = [...txOps];
+  for (const w of SESSION_WIPE) assert.ok(!keptOps.includes(w), `${w} must not run`);
+  assert.match(kept.warning ?? "", /^Sessions from the backup were KEPT/);
+
+  // Same restore without it: identical except for the two wipe writes.
+  txOps.length = 0;
+  expectSuccess(await runImport([new Uint8Array(HAPPY_ENC)], { mode: "setup" }));
+  assert.deepEqual(txOps, [...keptOps, ...SESSION_WIPE]);
+});
+
+test("a setup restore WITHOUT the option still wipes sessions (the default)", async () => {
+  const res = expectSuccess(await runImport([new Uint8Array(HAPPY_ENC)], { mode: "setup", keepSessions: false }));
+  for (const w of SESSION_WIPE) assert.ok(txOps.includes(w), `${w} must run`);
+  assert.match(res.warning ?? "", /^Every account was signed out by the restore/);
+});
+
+test("an ADMIN restore ignores keepSessions: the wipe always runs", async () => {
+  const res = expectSuccess(await runImport([new Uint8Array(HAPPY_ENC)], { mode: "admin", keepSessions: true }));
+  for (const w of SESSION_WIPE) assert.ok(txOps.includes(w), `${w} must run`);
+  assert.match(res.warning ?? "", /^Every account was signed out by the restore/);
+});
+
+test("keepsSessions is true only for setup mode with the flag exactly true", () => {
+  assert.equal(keepsSessions("setup", { keepSessions: true }), true);
+  assert.equal(keepsSessions("setup", { keepSessions: false }), false);
+  assert.equal(keepsSessions("setup", {}), false);
+  assert.equal(keepsSessions("setup", undefined), false);
+  assert.equal(keepsSessions("admin", { keepSessions: true }), false);
 });
 
 // ── statement validation ────────────────────────────────────────────────────

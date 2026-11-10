@@ -42,3 +42,13 @@ test("parseUploadChunkHeaders refuses an oversized upload id", () => {
   const h = new Headers({ "x-upload-id": "a".repeat(129), "x-chunk-index": "0", "x-chunk-total": "1", "x-file-size": "10" });
   assert.equal(parseUploadChunkHeaders(h), null);
 });
+
+// The first-run transfer opt-in header: exactly "true" counts.
+test("X-Restore-Keep-Sessions is true only for the exact value 'true'", async () => {
+  const { parseKeepSessionsHeader } = await import("../src/lib/upload-chunk-headers.ts");
+  const h = (v: string | null) => new Headers(v === null ? {} : { "x-restore-keep-sessions": v });
+  assert.equal(parseKeepSessionsHeader(h("true")), true);
+  for (const v of [null, "", "false", "True", "1", "yes", "TRUE"]) {
+    assert.equal(parseKeepSessionsHeader(h(v)), false, String(v));
+  }
+});

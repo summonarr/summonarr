@@ -509,6 +509,18 @@ export type BackupImportResult =
 
 export type BackupImportMode = "setup" | "admin";
 
+// Options of one restore. `keepSessions` is the first-run transfer opt-in
+// (guardrail 6g): the dump's AuthSession rows and revocation cutoffs are left
+// as they came, so sessions from the old server keep working on a new one. It
+// takes effect ONLY in "setup" mode — an admin restore always wipes sessions,
+// whatever a caller passes.
+export type BackupImportOptions = { keepSessions?: boolean };
+
+// The one place the option's scope is decided.
+export function keepsSessions(mode: BackupImportMode, opts: BackupImportOptions | undefined): boolean {
+  return mode === "setup" && opts?.keepSessions === true;
+}
+
 type BackupFailure = Extract<BackupImportResult, { ok: false }>;
 
 // The pre-auth ("setup") restore runs before any admin account exists and
@@ -577,10 +589,11 @@ export async function processBackupImport(
   body: ReadableStream<Uint8Array>,
   password: string,
   mode: BackupImportMode = "admin",
+  opts?: BackupImportOptions,
 ): Promise<BackupImportResult> {
   const spool = new StatementSpool();
   try {
-    return await runBackupImport(body, password, mode, spool);
+    return await runBackupImport(body, password, mode, spool, keepsSessions(mode, opts));
   } finally {
     await spool.dispose();
   }
@@ -822,6 +835,7 @@ async function restoreInTransaction(
   spool: StatementSpool,
   mode: BackupImportMode,
   plaintextBytes: number,
+  keepSessionsOpt: boolean,
 ): Promise<{ rejected: { status: number; error: string } } | RestoreCounts> {
   const counts: RestoreCounts = { executed: 0, conflictSkippedByTable: {}, conflictSkippedTotal: 0 };
   const rejection = await prisma.$transaction(async (tx) => {
@@ -853,8 +867,14 @@ async function restoreInTransaction(
     // week, or every session a password change ended. Native tokens never
     // expire (guardrail 6c), so that resurrection was permanent. Inside the
     // same transaction, so a rolled-back restore leaves sessions untouched.
-    await tx.authSession.deleteMany({});
-    await tx.user.updateMany({ data: { sessionsRevokedAt: new Date() } });
+    //
+    // The one exception is a first-run restore onto a NEW server whose operator
+    // ticked "keep sessions" (keepsSessions): nothing live exists there to
+    // protect, and the point is that the old server's sessions keep working.
+    if (!keepSessionsOpt) {
+      await tx.authSession.deleteMany({});
+      await tx.user.updateMany({ data: { sessionsRevokedAt: new Date() } });
+    }
     return null;
   }, { timeout: restoreTxTimeoutMs(plaintextBytes, spool.count), maxWait: 10_000 });
   return rejection ? { rejected: rejection } : counts;
@@ -885,6 +905,7 @@ async function runBackupImport(
   password: string,
   mode: BackupImportMode,
   spool: StatementSpool,
+  keepSessionsOpt: boolean,
 ): Promise<BackupImportResult> {
   // The authoritative check of the setup routes' internet-facing opt-in.
   if (mode === "setup" && setupRestoreDisabled()) {
@@ -955,7 +976,7 @@ async function runBackupImport(
 
   let restored: Awaited<ReturnType<typeof restoreInTransaction>>;
   try {
-    restored = await restoreInTransaction(spool, mode, parsed.totalPlaintextBytes);
+    restored = await restoreInTransaction(spool, mode, parsed.totalPlaintextBytes, keepSessionsOpt);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Log the underlying DB error server-side; do not echo it to the client.
@@ -970,7 +991,9 @@ async function runBackupImport(
   await afterCommittedRestore();
 
   warnings.push(
-    "Every account was signed out by the restore (sessions in the backup are never brought back). Sign in again.",
+    keepSessionsOpt
+      ? "Sessions from the backup were KEPT. They work only if this server uses the same NEXTAUTH_SECRET as the old one; otherwise every account must sign in again. A session that was signed out or revoked after the backup was taken works again."
+      : "Every account was signed out by the restore (sessions in the backup are never brought back). Sign in again.",
   );
   if (restored.conflictSkippedTotal > 0) {
     warnings.push(

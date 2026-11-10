@@ -17,7 +17,7 @@ import {
 } from "@/lib/import-session";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
-import { parseUploadChunkHeaders } from "@/lib/upload-chunk-headers";
+import { parseKeepSessionsHeader, parseUploadChunkHeaders } from "@/lib/upload-chunk-headers";
 import { auditSetupImport, importResultResponse, setupRestoreGate } from "@/lib/backup-routes";
 
 export const dynamic = "force-dynamic";
@@ -138,14 +138,17 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: t("apiAuth.setup.stateLost") }, { status: 500 });
   }
 
+  // The first-run transfer opt-in (guardrail 6g), read from the final chunk's
+  // request — the one that runs the import.
+  const keepSessions = parseKeepSessionsHeader(req.headers);
   let result;
   try {
-    result = await processBackupImport(stream, password, "setup");
+    result = await processBackupImport(stream, password, "setup", { keepSessions });
   } finally {
     await clearSession(uploadId);
   }
 
-  if (result.ok) await auditSetupImport(req, result, "setup-chunked");
+  if (result.ok) await auditSetupImport(req, result, "setup-chunked", keepSessions);
   return importResultResponse(result, t, { chunked: true });
 }
 

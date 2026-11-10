@@ -58,7 +58,11 @@ export type BackupImportAuditMode = "admin" | "admin-chunked" | "setup" | "setup
 // BACKUP_IMPORT details for a restore that ran. A failed one records its status
 // and counts only, never result.errors or result.error: validation errors quote
 // up to 80 characters of the backup's SQL.
-export function importAuditDetails(result: BackupImportResult, mode: BackupImportAuditMode): Record<string, unknown> {
+export function importAuditDetails(
+  result: BackupImportResult,
+  mode: BackupImportAuditMode,
+  keepSessions = false,
+): Record<string, unknown> {
   const counts = (s: { total: number; executed: number; skipped: number; errors: number }) => ({
     totalStatements: s.total,
     executed: s.executed,
@@ -66,12 +70,13 @@ export function importAuditDetails(result: BackupImportResult, mode: BackupImpor
     errors: s.errors,
   });
   if (result.ok) {
-    return { format: "sql", encrypted: true, mode, outcome: "restored", after: counts(result.summary) };
+    return { format: "sql", encrypted: true, mode, keepSessions, outcome: "restored", after: counts(result.summary) };
   }
   return {
     format: "sql",
     encrypted: true,
     mode,
+    keepSessions,
     outcome: "failed",
     status: result.status,
     errorCount: result.errors?.length ?? 0,
@@ -128,13 +133,14 @@ export async function auditSetupImport(
   req: Request,
   result: BackupImportResult,
   mode: "setup" | "setup-chunked",
+  keepSessions = false,
 ): Promise<void> {
   await logAudit({
     userId: null,
     userName: "system (setup)",
     action: "BACKUP_IMPORT",
     target: "backup:full-db",
-    details: importAuditDetails(result, mode),
+    details: importAuditDetails(result, mode, keepSessions),
     ipAddress: getClientIp(req.headers),
     userAgent: req.headers.get("user-agent")?.slice(0, 512) ?? null,
   });
