@@ -4,6 +4,7 @@ import { attachJellyfinAvailability } from "./jellyfin-availability";
 import { attachArrPending } from "./arr-availability";
 import { attachRequestedStatus } from "./request-availability";
 import { attachRatingsUnified } from "./omdb-availability";
+import { coldLookupAdmitter } from "./ratings-cold-budget";
 import { getBlacklistSet, blacklistKey } from "./blacklist";
 import { getUserHiddenSet, hiddenKeyOf } from "./hidden";
 import { getVisibleServerInstancesForUserId } from "./media-visibility";
@@ -28,6 +29,9 @@ export async function attachAllAvailability<T extends TmdbMedia>(
     // long list and localizes that slice itself (localizeMedia), rather than
     // fetching translations for titles it never renders.
     skipLocalize?: boolean;
+    // With blockRatings: how many OMDb chains the request waits for; the rest
+    // of the cold titles are warmed after the response.
+    maxBlockingRatingMisses?: number;
   },
 ): Promise<T[]> {
   if (items.length === 0) return items;
@@ -71,7 +75,14 @@ export async function attachAllAvailability<T extends TmdbMedia>(
     attachRequestedStatus(work, userId),
     options?.skipRatings
       ? Promise.resolve(work)
-      : attachRatingsUnified(work, { blocking: options?.blockRatings ?? false }),
+      : attachRatingsUnified(work, {
+          blocking: options?.blockRatings ?? false,
+          // A signed-in viewer's cold titles — fetched in the request or warmed
+          // after it — draw on that user's one cold-lookup budget
+          // (ratings-cold-budget.ts). Callers with no user are not limited.
+          ...(userId ? { admitMiss: coldLookupAdmitter(userId) } : {}),
+          ...(options?.maxBlockingRatingMisses !== undefined ? { maxBlockingMisses: options.maxBlockingRatingMisses } : {}),
+        }),
     options?.skipLocalize ? Promise.resolve(work) : getContentLocale().then((locale) => localizeMedia(work, locale)),
   ]);
 

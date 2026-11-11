@@ -25,13 +25,13 @@ import {
 } from "@/lib/admin-user-fields";
 import {
   deactivateUserInTx,
-  isAdminTarget,
   isPurgedRow,
   LastAdminError,
   lockTargetInTx,
-  lockUserRolesInTx,
   TargetBecameAdminError,
   TargetGoneError,
+  TargetOutranksCallerError,
+  targetRefusal,
 } from "@/lib/account-lifecycle";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
@@ -71,6 +71,9 @@ interface EditContext {
 const json = (body: unknown, status: number) => NextResponse.json(body, { status });
 const notFound = (t: Translator) => json({ error: t("apiAdmin.common.notFound") }, 404);
 const beyondOwn = (t: Translator) => json({ error: t("apiAdmin.users.cannotGrantBeyondOwn") }, 403);
+// The target holds management permissions the calling delegate lacks
+// (targetOutranksCaller, account-lifecycle.ts).
+const outranked = (t: Translator) => json({ error: t("apiAdmin.users.cannotManageBeyondOwn") }, 403);
 
 export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   req,
@@ -106,13 +109,16 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   // below enforce this individually (and additionally block *granting* ADMIN);
   // this single up-front gate covers the mediaServer, quota, and notification
   // fields too, so a future field can't silently re-open the hole by forgetting
-  // the per-field check. A missing target falls through to each handler's own
-  // 404. Admins skip the extra read entirely.
+  // the per-field check. The same gate refuses a peer holding management
+  // permissions the caller lacks (targetRefusal): a MANAGE_USERS-only delegate
+  // must not demote or re-permission an ISSUE_ADMIN or a request manager. A
+  // missing target falls through to each handler's own 404. Admins skip the
+  // extra read entirely.
   if (!callerIsAdmin) {
     const targetForAuth = await prisma.user.findUnique({ where: { id }, select: { role: true, permissions: true } });
-    if (isAdminTarget(targetForAuth)) {
-      return json({ error: t("apiAdmin.users.onlyAdminModify") }, 403);
-    }
+    const refusal = targetRefusal(targetForAuth, session.user.permissions);
+    if (refusal === "admin") return json({ error: t("apiAdmin.users.onlyAdminModify") }, 403);
+    if (refusal === "outranks") return outranked(t);
   }
 
   // MANAGE_USERS delegates management of OTHER accounts. The `role` and
@@ -171,14 +177,16 @@ async function commitField(
       await write(prisma);
     } else {
       // A delegate's write re-reads the target under lock 42 first: a promotion
-      // to ADMIN that landed after the route's unlocked read must not be edited.
+      // to ADMIN — or a grant of management permissions the delegate lacks —
+      // that landed after the route's unlocked read must not be edited.
       await prisma.$transaction(async (tx) => {
-        if (!(await lockTargetInTx(tx, id, false))) throw new TargetGoneError();
+        if (!(await lockTargetInTx(tx, id, session.user.permissions))) throw new TargetGoneError();
         await write(tx);
       });
     }
   } catch (err) {
     if (err instanceof TargetBecameAdminError) return json({ error: t("apiAdmin.users.onlyAdminModify") }, 403);
+    if (err instanceof TargetOutranksCallerError) return outranked(t);
     if (err instanceof TargetGoneError || isPrismaErrorCode(err, "P2025")) return notFound(t);
     throw err;
   }
@@ -409,7 +417,7 @@ async function editNotif(ctx: EditContext, notifKey: UserNotifKey, value: unknow
   );
 }
 
-type RoleOutcome = { kind: "ok" } | { kind: "not-found" } | { kind: "forbidden" } | { kind: "last-admin" };
+type RoleOutcome = { kind: "ok" } | { kind: "not-found" } | { kind: "forbidden" } | { kind: "outranked" } | { kind: "last-admin" };
 
 async function editRole(ctx: EditContext, role: string | undefined): Promise<NextResponse> {
   const { req, t, session, id, isSelf, callerIsAdmin } = ctx;
@@ -442,9 +450,10 @@ async function editRole(ctx: EditContext, role: string | undefined): Promise<Nex
     return json({ error: t("apiAdmin.users.onlyAdminGrantAdmin") }, 403);
   }
 
-  const outcome = await changeRoleInTx(id, role, callerIsAdmin);
+  const outcome = await changeRoleInTx(id, role, session.user.permissions);
   if (outcome.kind === "not-found") return notFound(t);
   if (outcome.kind === "forbidden") return json({ error: t("apiAdmin.users.onlyAdminGrantAdmin") }, 403);
+  if (outcome.kind === "outranked") return outranked(t);
   if (outcome.kind === "last-admin") return json({ error: t("apiAdmin.users.cannotDemoteLastAdmin") }, 400);
 
   invalidateUserSession(id);
@@ -469,45 +478,62 @@ async function editRole(ctx: EditContext, role: string | undefined): Promise<Nex
 // promotion landing between the read and the write could let the last admin be
 // demoted without the count check, leaving zero admins. The DELETE handler
 // serializes the same way.
-async function changeRoleInTx(id: string, newRole: "ADMIN" | "ISSUE_ADMIN" | "USER", callerIsAdmin: boolean): Promise<RoleOutcome> {
+async function changeRoleInTx(id: string, newRole: "ADMIN" | "ISSUE_ADMIN" | "USER", callerPerms: bigint): Promise<RoleOutcome> {
   const demoting = newRole === "USER" || newRole === "ISSUE_ADMIN";
   const now = new Date().toISOString();
-  return prisma.$transaction(async (tx) => {
-    await lockUserRolesInTx(tx);
-    const fresh = await tx.user.findUnique({ where: { id }, select: { role: true } });
-    // Gone since the read above (a Discord merge hard-deletes its shadow row):
-    // nothing to change. Falling back to the stale role turned this into an
-    // uncaught P2025 (500) or a false "last admin".
-    if (!fresh) return { kind: "not-found" as const };
-    const freshRole = fresh.role;
-
-    // A target that is ADMIN now (even if it was promoted after our first read)
-    // still needs a full-admin caller.
-    if (!callerIsAdmin && freshRole === "ADMIN") return { kind: "forbidden" as const };
-
-    if (demoting && freshRole === "ADMIN") {
-      // Atomic row count under the lock: never demote the last active admin.
-      // A DISABLED admin is already outside that count, so demoting it can never
-      // reduce the active-admin total — without the first disjunct it was refused
-      // as "the last admin" whenever exactly one OTHER active admin existed.
-      const rowsAffected = await tx.$executeRaw`
-        UPDATE "User" SET role = ${newRole}, permissions = ${defaultPermissionsForRole(newRole)}, "updatedAt" = ${now}
-        WHERE id = ${id}
-        AND role = 'ADMIN'
-        AND ("deactivatedAt" IS NOT NULL
-             OR (SELECT COUNT(*) FROM "User" WHERE role = 'ADMIN' AND "deactivatedAt" IS NULL) > 1)
-      `;
-      return rowsAffected === 0 ? { kind: "last-admin" as const } : { kind: "ok" as const };
-    }
-
-    // Setting a role re-seeds the permission bitmask from the preset (role is a
-    // preset selector); fine-tune afterward via the `permissions` field.
-    await tx.user.update({
-      where: { id },
-      data: { role: newRole, permissions: defaultPermissionsForRole(newRole) },
+  try {
+    return await prisma.$transaction(async (tx) => {
+      // Lock 42, then the target as it is NOW. A target that is ADMIN (even if it
+      // was promoted after our first read) still needs a full-admin caller, and
+      // one holding management permissions the caller lacks is refused the same
+      // way (lockTargetInTx throws; mapped below, outside the transaction —
+      // guardrail 23).
+      const fresh = await lockTargetInTx(tx, id, callerPerms);
+      // Gone since the read above (a Discord merge hard-deletes its shadow row):
+      // nothing to change. Falling back to the stale role turned this into an
+      // uncaught P2025 (500) or a false "last admin".
+      if (!fresh) return { kind: "not-found" as const };
+      return applyRoleInTx(tx, id, newRole, fresh.role, demoting, now);
     });
-    return { kind: "ok" as const };
+  } catch (err) {
+    if (err instanceof TargetBecameAdminError) return { kind: "forbidden" };
+    if (err instanceof TargetOutranksCallerError) return { kind: "outranked" };
+    throw err;
+  }
+}
+
+// The write half of a role change, inside changeRoleInTx's transaction (lock 42
+// already held, the target already re-read and authorized).
+async function applyRoleInTx(
+  tx: PrismaTxClient,
+  id: string,
+  newRole: "ADMIN" | "ISSUE_ADMIN" | "USER",
+  freshRole: string,
+  demoting: boolean,
+  now: string,
+): Promise<RoleOutcome> {
+  if (demoting && freshRole === "ADMIN") {
+    // Atomic row count under the lock: never demote the last active admin.
+    // A DISABLED admin is already outside that count, so demoting it can never
+    // reduce the active-admin total — without the first disjunct it was refused
+    // as "the last admin" whenever exactly one OTHER active admin existed.
+    const rowsAffected = await tx.$executeRaw`
+      UPDATE "User" SET role = ${newRole}, permissions = ${defaultPermissionsForRole(newRole)}, "updatedAt" = ${now}
+      WHERE id = ${id}
+      AND role = 'ADMIN'
+      AND ("deactivatedAt" IS NOT NULL
+           OR (SELECT COUNT(*) FROM "User" WHERE role = 'ADMIN' AND "deactivatedAt" IS NULL) > 1)
+    `;
+    return rowsAffected === 0 ? { kind: "last-admin" } : { kind: "ok" };
+  }
+
+  // Setting a role re-seeds the permission bitmask from the preset (role is a
+  // preset selector); fine-tune afterward via the `permissions` field.
+  await tx.user.update({
+    where: { id },
+    data: { role: newRole, permissions: defaultPermissionsForRole(newRole) },
   });
+  return { kind: "ok" };
 }
 
 // What the disabled account keeps: recorded in its audit row.
@@ -550,19 +576,20 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
 
   // A non-admin MANAGE_USERS holder must not delete/deactivate an admin account.
   // This early answer spares the counts below; the transaction re-decides it.
-  const callerIsAdmin = hasPermission(session.user.permissions, Permission.ADMIN);
-  if (isAdminTarget(target) && !callerIsAdmin) {
-    return json({ error: t("apiAdmin.users.onlyAdminDelete") }, 403);
-  }
+  // Nor a peer holding management permissions it lacks (targetRefusal).
+  const refusal = targetRefusal(target, session.user.permissions);
+  if (refusal === "admin") return json({ error: t("apiAdmin.users.onlyAdminDelete") }, 403);
+  if (refusal === "outranks") return outranked(t);
 
   const historyPreserved = await preservedHistoryCounts(id);
 
   let outcome: "disabled" | "already";
   try {
-    outcome = await deactivateInTx(id, callerIsAdmin);
+    outcome = await deactivateInTx(id, session.user.permissions);
   } catch (err) {
     if (err instanceof LastAdminError) return json({ error: t("apiAdmin.users.cannotDisableLastAdmin") }, 400);
     if (err instanceof TargetBecameAdminError) return json({ error: t("apiAdmin.users.onlyAdminDelete") }, 403);
+    if (err instanceof TargetOutranksCallerError) return outranked(t);
     if (err instanceof TargetGoneError) return notFound(t);
     throw err;
   }
@@ -597,10 +624,10 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
 // non-admin MANAGE_USERS holder deactivate the instance's last admin. So the
 // row is re-resolved inside the tx, under the same lock 42 the role-change CAS
 // takes, and decided on that value.
-function deactivateInTx(id: string, callerIsAdmin: boolean): Promise<"disabled" | "already"> {
+function deactivateInTx(id: string, callerPerms: bigint): Promise<"disabled" | "already"> {
   const now = new Date();
   return prisma.$transaction(async (tx) => {
-    const fresh = await lockTargetInTx(tx, id, callerIsAdmin);
+    const fresh = await lockTargetInTx(tx, id, callerPerms);
     if (!fresh) throw new TargetGoneError();
     // A concurrent disable (a double submit, the user's own self-delete) committed
     // after the first read. Re-running the deactivate would miss its own row in

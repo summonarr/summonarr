@@ -673,3 +673,44 @@ test("an unchanged server user is not re-written; a changed one is", async () =>
   assert.deepEqual(written, ["s2"]);
   assert.equal(msuStore.get("row-renamed")!.username, "new-name");
 });
+
+// The hourly sync's email match follows the poller's rule (emailLinkAllowed,
+// guardrail 34d): an account a MANAGE_USERS delegate created is never bound to
+// an identity by email, because the delegate chose that email and its password.
+test("the Jellyfin user sync never links a delegate-created account by email; an ordinary account still links, and a subject match is unaffected", async () => {
+  settings.clear();
+  msuStore.clear();
+  settings.set("jellyfinUrl", DEFAULT_URL);
+  settings.set("jellyfinApiKey", "key-default");
+  respond = (url) => {
+    if (url === `${DEFAULT_URL}/Users`) {
+      return okJson([
+        { Id: "e1", Name: "puppet-target", Email: "Future-Friend@Example.com", Policy: { IsAdministrator: false, EnableContentDownloading: true } },
+        { Id: "e2", Name: "ordinary", Email: "ordinary@example.com", Policy: { IsAdministrator: false, EnableContentDownloading: true } },
+        { Id: "e3", Name: "by-subject", Policy: { IsAdministrator: false, EnableContentDownloading: true } },
+      ]);
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const delegate = (prisma as unknown as { user: { findMany: (args: { select?: Record<string, boolean> }) => Promise<unknown[]> } }).user;
+  const original = delegate.findMany;
+  let selected: Record<string, boolean> | undefined;
+  delegate.findMany = async (args) => {
+    selected = args.select;
+    return [
+      { id: "u-puppet", email: "future-friend@example.com", mediaServer: null, jellyfinUserId: null, createdByDelegate: true },
+      { id: "u-ordinary", email: "ordinary@example.com", mediaServer: null, jellyfinUserId: null, createdByDelegate: false },
+      { id: "u-subject", email: "delegate-made@example.com", mediaServer: null, jellyfinUserId: "e3", createdByDelegate: true },
+    ];
+  };
+  try {
+    await syncDownloadPolicies();
+  } finally {
+    delegate.findMany = original;
+  }
+  assert.equal(selected?.createdByDelegate, true, "the link candidates are read with the marker");
+  const bySource = (id: string) => [...msuStore.values()].find((r) => r.sourceUserId === id)!;
+  assert.equal(bySource("e1").userId ?? null, null, "delegate-created account: no email link");
+  assert.equal(bySource("e2").userId, "u-ordinary");
+  assert.equal(bySource("e3").userId, "u-subject", "the provider subject still links");
+});

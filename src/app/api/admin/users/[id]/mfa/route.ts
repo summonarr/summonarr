@@ -6,11 +6,11 @@ import { revokeAllUserSessions } from "@/lib/auth";
 import { clearSessionFootholdsInTx } from "@/lib/session-footholds";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { Permission, hasPermission } from "@/lib/permissions";
+import { Permission } from "@/lib/permissions";
 import { clearMfaLockoutInTx, deleteAllMfaInTx, getMfaState } from "@/lib/mfa/mfa-store";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import { isAdminTarget, lockTargetInTx, TargetBecameAdminError, TargetGoneError } from "@/lib/account-lifecycle";
+import { lockTargetInTx, TargetBecameAdminError, TargetGoneError, TargetOutranksCallerError, targetRefusal } from "@/lib/account-lifecycle";
 
 // DELETE /api/admin/users/[id]/mfa — reset a user's two-factor authentication
 // (lost phone / lost security key). Removes their authenticator app, every
@@ -44,8 +44,14 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
     select: { role: true, permissions: true, name: true },
   });
   if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-  if (isAdminTarget(target) && !hasPermission(session.user.permissions, Permission.ADMIN)) {
+  // Nor may a delegate strip the second factor of a peer holding management
+  // permissions it lacks (targetRefusal).
+  const refusal = targetRefusal(target, session.user.permissions);
+  if (refusal === "admin") {
     return NextResponse.json({ error: t("apiAdmin.users.onlyAdminResetMfa") }, { status: 403 });
+  }
+  if (refusal === "outranks") {
+    return NextResponse.json({ error: t("apiAdmin.users.cannotManageBeyondOwn") }, { status: 403 });
   }
 
   const before = await getMfaState(id);
@@ -66,7 +72,7 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
       // the role-change and deactivate paths take (admin/users/[id]/route.ts) —
       // and decide on that value. A row gone since the read above is a 404, not
       // a write against nothing (which would 500 on the update below).
-      const fresh = await lockTargetInTx(tx, id, hasPermission(session.user.permissions, Permission.ADMIN));
+      const fresh = await lockTargetInTx(tx, id, session.user.permissions);
       if (!fresh) throw new TargetGoneError();
       await deleteAllMfaInTx(tx, id);
       // A lost phone is exactly when an owner locks themselves out guessing.
@@ -80,6 +86,9 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   } catch (err) {
     if (err instanceof TargetBecameAdminError) {
       return NextResponse.json({ error: t("apiAdmin.users.onlyAdminResetMfa") }, { status: 403 });
+    }
+    if (err instanceof TargetOutranksCallerError) {
+      return NextResponse.json({ error: t("apiAdmin.users.cannotManageBeyondOwn") }, { status: 403 });
     }
     if (err instanceof TargetGoneError) {
       return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });

@@ -6,6 +6,7 @@ import { type MediaInstanceKey, mediaInstanceLabel } from "./media-instances";
 import { getSyncableMediaInstances } from "./media-instance-registry";
 import { noteJellyfinDepartures, offboardJellyfinIdentities } from "./jellyfin-offboarding";
 import { processSingleton } from "./process-singleton";
+import { emailLinkAllowed } from "./play-history-identity";
 
 interface PolicySyncResult {
   source: string;
@@ -134,7 +135,7 @@ type ExistingJellyfinRow = {
   active: boolean;
   manualUserLink: boolean;
 };
-type LinkCandidate = { id: string; email: string; mediaServer: string | null; jellyfinUserId: string | null };
+type LinkCandidate = { id: string; email: string; mediaServer: string | null; jellyfinUserId: string | null; createdByDelegate: boolean };
 
 // The Summonarr accounts a run's users may be attributed to, looked up by
 // subject id and by email.
@@ -165,7 +166,7 @@ async function loadJellyfinSyncState(instance: MediaInstanceKey, users: readonly
           { email: { in: users.flatMap((u) => (u.email ? [normalizeEmail(u.email)] : [])) } },
         ],
       },
-      select: { id: true, email: true, mediaServer: true, jellyfinUserId: true },
+      select: { id: true, email: true, mediaServer: true, jellyfinUserId: true, createdByDelegate: true },
     }),
   ]);
   return {
@@ -180,14 +181,14 @@ async function loadJellyfinSyncState(instance: MediaInstanceKey, users: readonly
 // Subject id first, email second. A subject match needs no mediaServer guard —
 // jellyfinUserId is unique and only Jellyfin sign-in writes it, so there is no
 // cross-provider collision to defend against (unlike an email match, which
-// could be a Plex-pinned user who happens to share the address).
+// could be a Plex-pinned user who happens to share the address). The email
+// match follows the poller's rule (emailLinkAllowed): never an account a
+// MANAGE_USERS delegate created (guardrail 34d).
 function resolveLinkedAccount(u: JellyfinUser, links: LinkIndex): string | null {
   const linkedBySub = links.bySubject.get(u.id) ?? null;
   if (linkedBySub) return linkedBySub.id;
   const linkedByEmail = u.email ? (links.byEmail.get(normalizeEmail(u.email)) ?? null) : null;
-  return linkedByEmail && (!linkedByEmail.mediaServer || linkedByEmail.mediaServer.toLowerCase() === "jellyfin")
-    ? linkedByEmail.id
-    : null;
+  return linkedByEmail && emailLinkAllowed(linkedByEmail, "jellyfin") ? linkedByEmail.id : null;
 }
 
 // Whether the upsert below would change nothing on an existing row — every

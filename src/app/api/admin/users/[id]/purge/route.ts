@@ -5,8 +5,8 @@ import { tooManyRequests } from "@/lib/http";
 import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { Permission, hasPermission } from "@/lib/permissions";
-import { purgeUserDataInTx, NotDeactivatedError, isAdminTarget, isPurgedRow, assertTargetNotAdminInTx, TargetBecameAdminError } from "@/lib/account-lifecycle";
+import { Permission } from "@/lib/permissions";
+import { purgeUserDataInTx, NotDeactivatedError, isPurgedRow, assertTargetNotAdminInTx, TargetBecameAdminError, TargetOutranksCallerError, targetRefusal } from "@/lib/account-lifecycle";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { BATCH_TX_TIMEOUT } from "@/lib/batch-write";
 
@@ -44,8 +44,13 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (
   if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
 
   // By role or by the ADMIN bit — the rule the in-transaction re-check applies.
-  if (isAdminTarget(target) && !hasPermission(session.user.permissions, Permission.ADMIN)) {
+  // Nor a peer holding management permissions the caller lacks (targetRefusal).
+  const refusal = targetRefusal(target, session.user.permissions);
+  if (refusal === "admin") {
     return NextResponse.json({ error: t("apiAdmin.users.onlyAdminPurge") }, { status: 403 });
+  }
+  if (refusal === "outranks") {
+    return NextResponse.json({ error: t("apiAdmin.users.cannotManageBeyondOwn") }, { status: 403 });
   }
   // isPurgedRow, not a bare `purgedAt` test (guardrail 33): a legacy tombstone
   // (`deleted-<id>@deleted.invalid`, null marker) is already scrubbed and must
@@ -76,12 +81,15 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (
     await prisma.$transaction(async (tx) => {
       // Role re-read under lock 42 (a promotion after the read above must not let a
       // delegate scrub an admin).
-      await assertTargetNotAdminInTx(tx, id, hasPermission(session.user.permissions, Permission.ADMIN));
+      await assertTargetNotAdminInTx(tx, id, session.user.permissions);
       await purgeUserDataInTx(tx, id, now);
     }, { timeout: BATCH_TX_TIMEOUT });
   } catch (err) {
     if (err instanceof TargetBecameAdminError) {
       return NextResponse.json({ error: t("apiAdmin.users.onlyAdminPurge") }, { status: 403 });
+    }
+    if (err instanceof TargetOutranksCallerError) {
+      return NextResponse.json({ error: t("apiAdmin.users.cannotManageBeyondOwn") }, { status: 403 });
     }
     if (err instanceof NotDeactivatedError) {
       // Re-activated between our read and the tx.

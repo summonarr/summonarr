@@ -105,6 +105,7 @@ const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { NEVER_EXPIRES_AT_SEC } = await import("../src/lib/session-lifetime.ts");
 const { hashPassword } = await import("../src/lib/password-hash.ts");
+const { base32Decode, generateTotpSecret, hotp, totpStep } = await import("../src/lib/mfa/totp.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
@@ -198,6 +199,35 @@ shadowPrismaModel(prisma, "user", {
   delete: async (args: unknown) => { rec("user.delete", args); return {}; },
   count: async () => appUsers.length,
 });
+
+// Two-factor rows (guardrail 6d: the factor ROWS decide "has 2FA"). Only an
+// authenticator app is modelled; passkeys and recovery codes read as none.
+type TotpRow = { userId: string; secret: string; enabledAt: Date | null; lastUsedStep: number | null };
+let totps: TotpRow[] = [];
+// When set, the factor read fails: it must surface, never read as "no 2FA".
+let factorReadThrows = false;
+shadowPrismaModel(prisma, "userTotp", {
+  findUnique: async (args: { where: { userId: string } }) => {
+    if (factorReadThrows) throw new Error("simulated factor read failure");
+    const row = totps.find((t) => t.userId === args.where.userId);
+    return row ? { ...row } : null;
+  },
+  // The replay CAS: the step must still be newer than the stored one.
+  updateMany: async (args: { where: { userId: string; OR: unknown }; data: { lastUsedStep: number } }) => {
+    const row = totps.find((t) => t.userId === args.where.userId && t.enabledAt !== null);
+    if (!row || (row.lastUsedStep !== null && row.lastUsedStep >= args.data.lastUsedStep)) return { count: 0 };
+    row.lastUsedStep = args.data.lastUsedStep;
+    return { count: 1 };
+  },
+});
+shadowPrismaModel(prisma, "webAuthnCredential", { findMany: async () => [], findFirst: async () => null });
+shadowPrismaModel(prisma, "mfaRecoveryCode", { count: async () => 0, findMany: async () => [] });
+function seedTotp(userId: string): Buffer {
+  const secret = generateTotpSecret();
+  totps.push({ userId, secret, enabledAt: new Date(), lastUsedStep: null });
+  return base32Decode(secret)!;
+}
+const currentCode = (key: Buffer) => hotp(key, totpStep(Date.now()));
 
 type LinkToken = { userId: string; token: string; expiresAt: Date; discordId: string | null };
 let linkTokens: LinkToken[] = [];
@@ -422,6 +452,8 @@ beforeEach(async () => {
   for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
   ops = [];
   appUsers = [];
+  totps = [];
+  factorReadThrows = false;
   linkTokens = [];
   mergeCodes = [];
   settings.clear();
@@ -517,6 +549,77 @@ test("step-up: a minted link code is audited", async () => {
   assert.equal((await doGenerate(token)).status, 200);
   const rows = opsOf("auditLog.create").map((o) => (o.args as { data: { target: string; details: string } }).data);
   assert.ok(rows.some((d) => d.target.startsWith("discord-link:") && d.details.includes("discord-link-code")));
+});
+
+// A session minted by relaying the password plus ONE code holds exactly the
+// password. On an account with two-factor, the link routes therefore also need
+// a FRESH second factor — after the password, before anything is minted or sent.
+const STEP_UP_PASSWORD = "correct-horse-battery";
+
+test("second factor: generate-link on a 2FA account refuses the password alone, mints on password + a fresh code", async () => {
+  const { userId, token } = await mintSession({ passwordHash: await hashPassword(STEP_UP_PASSWORD) });
+  const key = seedTotp(userId);
+  const alone = await doGenerate(token, { confirmPassword: STEP_UP_PASSWORD });
+  assert.equal(alone.status, 400);
+  const body = await alone.json();
+  assert.equal(body.secondFactorRequired, true);
+  assert.deepEqual(body.methods, ["totp"]);
+  assert.equal(typeof body.error, "string");
+  assert.equal(opsOf("discordLinkToken.upsert").length, 0, "nothing minted on the password alone");
+  const ok = await doGenerate(token, { confirmPassword: STEP_UP_PASSWORD, secondFactor: { method: "totp", code: currentCode(key) } });
+  assert.equal(ok.status, 200);
+  assert.equal(opsOf("discordLinkToken.upsert").length, 1);
+});
+
+test("second factor: a wrong password is refused BEFORE the code is looked at, so the code is not burned", async () => {
+  const { userId, token } = await mintSession({ passwordHash: await hashPassword(STEP_UP_PASSWORD) });
+  const key = seedTotp(userId);
+  const res = await doGenerate(token, { confirmPassword: "nope-nope-nope", secondFactor: { method: "totp", code: currentCode(key) } });
+  assert.equal(res.status, 401);
+  assert.equal((await res.json()).error, "invalid-password");
+  assert.equal(totps[0].lastUsedStep, null, "the code's step was never claimed");
+});
+
+test("second factor: a failed factor lookup surfaces — it never reads as an account without 2FA", async () => {
+  const { userId, token } = await mintSession({ passwordHash: await hashPassword(STEP_UP_PASSWORD) });
+  seedTotp(userId);
+  factorReadThrows = true;
+  await assert.rejects(() => doGenerate(token, { confirmPassword: STEP_UP_PASSWORD }));
+  assert.equal(opsOf("discordLinkToken.upsert").length, 0);
+});
+
+test("second factor: an account WITHOUT 2FA is unchanged — the password suffices and a stray secondFactor is ignored", async () => {
+  for (const extra of [{}, { secondFactor: { method: "totp", code: "123456" } }]) {
+    const { token } = await mintSession({ passwordHash: await hashPassword(STEP_UP_PASSWORD) });
+    const res = await doGenerate(token, { confirmPassword: STEP_UP_PASSWORD, ...extra });
+    assert.equal(res.status, 200);
+    assert.deepEqual(Object.keys(await res.json()).sort(), ["expiresAt", "token"]);
+  }
+});
+
+test("second factor: initiate-merge on a 2FA account stores and DMs nothing on the password alone; a NATIVE session stays exempt", async () => {
+  const web = await mintSession({ passwordHash: await hashPassword(STEP_UP_PASSWORD) });
+  const key = seedTotp(web.userId);
+  const alone = await doInitiate(web.token, { discordId: VALID_SNOWFLAKE, confirmPassword: STEP_UP_PASSWORD });
+  assert.equal(alone.status, 400);
+  assert.equal((await alone.json()).secondFactorRequired, true);
+  assert.equal(opsOf("discordMergeCode.upsert").length, 0);
+  assert.equal(fetchCalls.length, 0, "no DM is sent");
+  const ok = await doInitiate(web.token, {
+    discordId: VALID_SNOWFLAKE, confirmPassword: STEP_UP_PASSWORD, secondFactor: { method: "totp", code: currentCode(key) },
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(opsOf("discordMergeCode.upsert").length, 1);
+  // The shipped app sends neither field and has no prompt for them (guardrail 25).
+  const app = await mintSession({ passwordHash: await hashPassword(STEP_UP_PASSWORD), native: true });
+  seedTotp(app.userId);
+  const native = await inScope(() => initiateMerge.POST(new NextRequest("http://localhost:3000/api/discord/initiate-merge", {
+    method: "POST",
+    headers: { authorization: `Bearer ${app.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ discordId: VALID_SNOWFLAKE }),
+  }), undefined));
+  assert.equal(native.status, 200);
+  assert.deepEqual(await native.json(), { ok: true });
 });
 
 test("step-up: initiate-merge needs it from a WEB session — even one replayed as a bearer token — but not from a NATIVE one", async () => {

@@ -5,7 +5,10 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
 import type { OmdbRatings } from "@/lib/omdb";
 import { getOmdbRatingsForTmdb, omdbCacheKey, revalidateOmdbForTmdb } from "@/lib/omdb";
 import type { MdblistCallOptions, MdblistRatings, MdblistResult } from "@/lib/mdblist";
-import { getMdblistRatingsForTmdb, fetchMdblistBatch, isMdblistQuotaLocked, mdblistCacheKey } from "@/lib/mdblist";
+import {
+  getMdblistRatingsForTmdb, fetchMdblistBatch, isMdblistKeyConfigured, isMdblistKeyRejected, isMdblistQuotaLocked,
+  mdblistCacheKey,
+} from "@/lib/mdblist";
 import { mapLimit } from "@/lib/concurrency";
 import { processSingleton } from "@/lib/process-singleton";
 
@@ -96,14 +99,24 @@ export type UnifiedRatingsResult = {
 //
 // `background: true` marks a cron caller: MDBList then stops at the reserve the
 // plan setting keeps for pages (mdblist-plan.ts).
+//
+// `admitCold` holds a user to their budget of cold lookups
+// (ratings-cold-budget.ts): it is asked once, and only when this call would
+// send something upstream for a title with nothing cached. Refused, the title
+// is answered from the cache alone — no MDBList, TMDB or OMDb call, not even a
+// detached one. A warm or stale title is never asked about.
 export async function fetchUnifiedRatings(
   tmdbId: number,
   mediaType: "movie" | "tv",
   releaseDate?: string | null,
   knownImdbId?: string | null,
-  opts: { background?: boolean } = {},
+  opts: { background?: boolean; admitCold?: () => boolean } = {},
 ): Promise<UnifiedRatingsResult> {
   const mdbOpts = { background: opts.background };
+  if (opts.admitCold) {
+    const cached = await readCachedUnified(tmdbId, mediaType, mdbOpts);
+    if (cached.cold && !opts.admitCold()) return cached.result;
+  }
   const mdb = await getMdblistRatingsForTmdb(tmdbId, mediaType, releaseDate, mdbOpts).catch(
     (): MdblistResult => ({ found: false, keyConfigured: true, transient: true }),
   );
@@ -156,6 +169,44 @@ export async function fetchUnifiedRatings(
   };
 }
 
+// One title's cached rows, and whether answering it live would go upstream for
+// a title with nothing cached. `result` is what the cache alone can say: the
+// same source arbitration as the live path, and `transient` when it has
+// nothing, so a caller never pins that null as an authoritative "no ratings".
+async function readCachedUnified(
+  tmdbId: number,
+  mediaType: "movie" | "tv",
+  mdbOpts: MdblistCallOptions,
+): Promise<{ cold: boolean; result: UnifiedRatingsResult }> {
+  const [mdbRow, omdbRow] = await Promise.all([
+    getCacheStale<MdblistRatings | { _notFound: true }>(mdblistCacheKey(mediaType, tmdbId)),
+    getCacheStale<OmdbRatings | { _notFound: true }>(omdbCacheKey(mediaType, tmdbId)),
+  ]);
+  const mdb = mdbRow.value && !("_notFound" in mdbRow.value) ? mdbRow.value : null;
+  const omdb = omdbRow.value && !("_notFound" in omdbRow.value) ? omdbRow.value : null;
+  const mdbUsable = mdb !== null && hasAnyMdblistRating(mdb);
+  // MDBList's cold path runs when it holds no row of any kind; OMDb's when
+  // MDBList has nothing to show and OMDb holds no row either.
+  const cold =
+    (mdbRow.value === null && (await mdblistWouldBeAsked(mdbOpts))) ||
+    (!mdbUsable && omdbRow.value === null);
+  let result: UnifiedRatingsResult;
+  if (mdb && mdbUsable) result = { found: true, keyConfigured: true, data: omdb ? overlayOmdb(mdb, omdb) : mdb };
+  else if (omdb) result = { found: true, keyConfigured: true, data: overlayOmdb(mdb ?? EMPTY_MDBLIST_RATINGS, omdb) };
+  else result = { found: false, keyConfigured: true, transient: true };
+  return { cold, result };
+}
+
+// Whether a title with no MDBList row would actually be sent to MDBList now:
+// a key is stored, MDBList hasn't refused it, and nothing has paused the calls.
+// With no key (an OMDb-only install) every title lacks an MDBList row forever,
+// and charging a user's cold budget for each of them on every page would spend
+// it on titles that cost nothing upstream.
+async function mdblistWouldBeAsked(mdbOpts: MdblistCallOptions): Promise<boolean> {
+  if (isMdblistQuotaLocked(mdbOpts) || isMdblistKeyRejected()) return false;
+  return isMdblistKeyConfigured();
+}
+
 // Batch ratings merge with serve-stale semantics: a warm-cache entry — fresh OR
 // expired — is always served from the table (mergeWarm); expired entries are
 // revalidated after the response in BOTH modes, never in the request path. Only
@@ -178,9 +229,12 @@ export async function fetchUnifiedRatings(
 // the request; the rest are deferred like the stale refreshes.
 //
 // `admitMiss` is asked once per genuine miss before anything upstream is sent
-// for it; a refused miss is served from the warm cache only (which has nothing
-// for it) this time. It is how a caller holds a user to a budget of cold
-// lookups (the ratings batch route).
+// for it — in BOTH modes, so a refused miss is neither fetched in the request
+// nor warmed after it — and it is served from the warm cache only this time.
+// A miss that would send nothing (an OMDb row is cached and MDBList would not
+// be asked) is never charged. It is how a caller holds a user to a budget of
+// cold lookups (ratings-cold-budget.ts): the ratings batch route and every
+// list attachAllAvailability enriches for a signed-in user.
 export interface AttachRatingsOptions {
   blocking?: boolean;
   deferToAfter?: boolean;
@@ -199,7 +253,10 @@ interface RatingsPlan {
   staleOmdb: TmdbMedia[];
 }
 
-function planRatings(items: TmdbMedia[], warm: WarmCache, admit?: () => boolean): RatingsPlan {
+// `admit` is the caller's cold-lookup budget; `mdblistAsked` says whether a
+// title with no MDBList row would be sent to MDBList in this call (it only
+// matters with `admit`).
+function planRatings(items: TmdbMedia[], warm: WarmCache, admit?: () => boolean, mdblistAsked = true): RatingsPlan {
   // Stale routing (both modes): an item whose MDBList entry is stale revalidates via
   // the MDBList batch — the primary source — even when its OMDB entry is stale too.
   // The OMDB path is only for items whose warm data came from OMDB, i.e. with no
@@ -231,8 +288,10 @@ function planRatings(items: TmdbMedia[], warm: WarmCache, admit?: () => boolean)
   // likewise serve from the warm maps and revalidate post-response.
   const misses: TmdbMedia[] = [];
   for (const item of items) {
-    if (warm.byMdblist.has(mdblistKey(item)) || warm.negativeKeys.has(mdblistKey(item))) continue;
-    if (admit && !admit()) continue;
+    if (!isMdblistMiss(item, warm)) continue;
+    // Charged only when something goes upstream for it: the MDBList batch, or
+    // the OMDb chain for a title with no OMDb row.
+    if (admit && (mdblistAsked || lacksOmdbRow(item, warm)) && !admit()) continue;
     misses.push(item);
   }
   return { misses, staleMdblist, staleOmdb };
@@ -250,7 +309,10 @@ export async function attachRatingsUnified(
   };
 
   const warm = await readCachedRatings(items);
-  const plan = planRatings(items, warm, opts.admitMiss);
+  // Only a budgeted call with at least one MDBList miss needs to know whether
+  // MDBList would be asked (a settings read, memoized in mdblist.ts).
+  const budgeted = opts.admitMiss !== undefined && items.some((item) => isMdblistMiss(item, warm));
+  const plan = planRatings(items, warm, opts.admitMiss, budgeted ? await mdblistWouldBeAsked(mdbOpts) : true);
 
   if (!opts.blocking) {
     if (plan.misses.length > 0 || plan.staleMdblist.length > 0 || plan.staleOmdb.length > 0) {
@@ -490,6 +552,12 @@ function fetchedKey(item: TmdbMedia): string { return `${item.mediaType}:${item.
 function lacksOmdbRow(item: TmdbMedia, warm: WarmCache): boolean {
   const key = omdbKey(item);
   return !warm.byOmdb.has(key) && !warm.negativeKeys.has(key);
+}
+
+// No MDBList state at all for this title: neither a row nor a not-found marker.
+function isMdblistMiss(item: TmdbMedia, warm: WarmCache): boolean {
+  const key = mdblistKey(item);
+  return !warm.byMdblist.has(key) && !warm.negativeKeys.has(key);
 }
 
 type WarmCache = {

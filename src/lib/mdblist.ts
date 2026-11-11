@@ -111,6 +111,14 @@ async function readApiKey(): Promise<{ ok: true; key: string | null } | { ok: fa
   }
 }
 
+// Whether a key is stored at all. A failed settings read answers true: the
+// caller (the per-user cold-lookup budget) must then assume MDBList would be
+// asked rather than wave the title through unbudgeted.
+export async function isMdblistKeyConfigured(): Promise<boolean> {
+  const read = await readApiKey();
+  return !read.ok || read.key !== null;
+}
+
 // ── Rejected key ───────────────────────────────────────────────────────────
 // MDBList refusing the key (HTTP 401/403, or an error body naming the key) is
 // no limit — it must not pause every call for an hour, or an admin fixing their

@@ -6,6 +6,7 @@ import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { isNativeSessionForStepUp, requireStepUp } from "@/lib/step-up-auth";
+import { requireStepUpSecondFactor } from "@/lib/step-up-second-factor";
 import { generateDiscordMergeCode } from "@/lib/discord-merge-code";
 import { isFeatureEnabled } from "@/lib/features";
 import { check, v } from "@/lib/validate";
@@ -25,7 +26,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (!(await isFeatureEnabled("feature.integration.discord"))) {
     return NextResponse.json({ error: t("apiUser.discord.disabled") }, { status: 403 });
   }
-  const parsed = await readJsonCapped<{ discordId?: unknown; confirmPassword?: unknown }>(req, 16384);
+  const parsed = await readJsonCapped<{ discordId?: unknown; confirmPassword?: unknown; secondFactor?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const discordId = String(parsed.discordId ?? "").trim();
 
@@ -85,6 +86,12 @@ export const POST = withAuth(async (req, _ctx, session) => {
       t,
     });
     if (denied) return denied;
+    // An account with an active second factor also presents a fresh one, after
+    // the password and before a code is stored or DMed
+    // (step-up-second-factor.ts). Inside the web-only branch: the native
+    // exemption above covers both halves, for the same reason.
+    const factorDenied = await requireStepUpSecondFactor({ req, session, secondFactor: parsed.secondFactor, context: "discord-merge" });
+    if (factorDenied) return factorDenied;
   }
 
   const botTokenRow = await prisma.setting.findUnique({ where: { key: "discordBotToken" } });

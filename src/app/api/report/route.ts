@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { withAuth } from "@/lib/api-auth";
+import { withAuth, type SummonarrSession } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAuditTx, auditContext } from "@/lib/audit";
@@ -8,6 +8,8 @@ import { prisma } from "@/lib/prisma";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { hasPermission, Permission } from "@/lib/permissions";
+import { isFeatureEnabled } from "@/lib/features";
+import { titlesHiddenFromViewer } from "@/lib/media-visibility";
 
 // POST /api/report — a signed-in user flags user-generated content (an issue
 // message, a vote reason) for the instance admin to review. The report lands in
@@ -20,18 +22,36 @@ type ContentType = (typeof CONTENT_TYPES)[number];
 
 const MAX_REASON = 500;
 
-type Viewer = { userId: string; managesIssues: boolean };
+type Viewer = { userId: string; managesIssues: boolean; session: SummonarrSession };
 
 // Whether the reported item exists and the reporter can see it, per content
 // type. Issues and their messages are private to the reporter and the issue
-// managers (the issues routes' rule); vote reasons are on the shared votes list.
+// managers (the issues routes' rule); a vote reason follows the shared votes
+// list's own rules (voteReasonVisible below).
 const REPORTABLE: Record<ContentType, (id: string, viewer: Viewer) => Promise<boolean>> = {
   issue: async (id, viewer) =>
     (await prisma.issue.count({ where: { id, ...(viewer.managesIssues ? {} : { reportedBy: viewer.userId }) } })) > 0,
   issue_message: async (id, viewer) =>
     (await prisma.issueMessage.count({ where: { id, ...(viewer.managesIssues ? {} : { issue: { reportedBy: viewer.userId } }) } })) > 0,
-  vote_reason: async (id) => (await prisma.deletionVote.count({ where: { id } })) > 0,
+  vote_reason: (id, viewer) => voteReasonVisible(id, viewer),
 };
+
+// A vote reason is reportable only when the shared votes list would show it to
+// this viewer: the votes feature is on (the gate of every /api/votes route),
+// the vote carries a non-blank reason, it is another voter's (the list shows a
+// viewer only OTHER voters' reasons), and its title is not held only on servers
+// the viewer has no grant for (guardrail 35a). Anything else answers as missing,
+// so the route tells nobody that a vote on a title they cannot see exists.
+async function voteReasonVisible(id: string, viewer: Viewer): Promise<boolean> {
+  if (!(await isFeatureEnabled("feature.page.votes"))) return false;
+  const vote = await prisma.deletionVote.findFirst({
+    where: { id, userId: { not: viewer.userId }, reason: { not: null } },
+    select: { tmdbId: true, mediaType: true, reason: true },
+  });
+  if (!vote || !vote.reason?.trim()) return false;
+  const hidden = await titlesHiddenFromViewer(viewer.session, [{ tmdbId: vote.tmdbId, mediaType: vote.mediaType }]);
+  return hidden.length === 0;
+}
 
 export const POST = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
@@ -65,7 +85,8 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // writing the audit row: otherwise an arbitrary contentId pollutes the admin
   // Audit Log, and the 404-vs-ok answer tells anyone whether an issue they can't
   // see exists.
-  const viewer = {
+  const viewer: Viewer = {
+    session,
     userId: session.user.id,
     managesIssues: hasPermission(session.user.permissions, Permission.MANAGE_ISSUES),
   };

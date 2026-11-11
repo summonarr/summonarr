@@ -2,13 +2,14 @@
 
 import { STEP_UP_401, tooLargeAnswer, OK_TRUE } from "../shared";
 import type { OpenApiPaths } from "../types";
+import { LINK_SECOND_FACTOR_400, LINK_SECOND_FACTOR_FIELD } from "./profile";
 
 export const discordPaths: OpenApiPaths = {
   "/discord/generate-link": {
     post: {
       tags: ["Discord"],
       summary: "Issue a short-lived token to link a Discord account to the current user",
-      description: "The token lives 10 minutes and replaces any earlier one for the caller. With `discordId` only that Discord account can redeem it; without, any Discord account that sees it can. 5 per 10 minutes per user. Requires a step-up: a password account sends `confirmPassword`; an SSO account must have signed in within the last 5 minutes. Audited.",
+      description: "The token lives 10 minutes and replaces any earlier one for the caller. With `discordId` only that Discord account can redeem it; without, any Discord account that sees it can. 5 per 10 minutes per user. Requires a step-up: a password account sends `confirmPassword`; an SSO account must have signed in within the last 5 minutes. An account with an active second factor also sends `secondFactor`. Audited.",
       requestBody: {
         content: {
           "application/json": {
@@ -17,6 +18,7 @@ export const discordPaths: OpenApiPaths = {
               properties: {
                 discordId: { type: "string", description: "Discord snowflake (17–20 digits); present but malformed is a 400" },
                 confirmPassword: { type: "string", description: "The current password (password accounts)" },
+                secondFactor: LINK_SECOND_FACTOR_FIELD,
               },
             },
           },
@@ -37,11 +39,11 @@ export const discordPaths: OpenApiPaths = {
             },
           },
         },
-        "400": { description: "`discordId` is present but not a valid snowflake" },
+        "400": { description: `\`discordId\` is present but not a valid snowflake, or ${LINK_SECOND_FACTOR_400}` },
         "401": STEP_UP_401,
         "403": { description: "The Discord integration is switched off (feature.integration.discord)" },
         "413": tooLargeAnswer(16 * 1024),
-        "429": { description: "Rate limited" },
+        "429": { description: "Rate limited, or a two-factor code lockout" },
       },
     },
   },
@@ -49,18 +51,18 @@ export const discordPaths: OpenApiPaths = {
     post: {
       tags: ["Discord"],
       summary: "Start Discord account merge flow",
-      description: "DMs a 12-character code (valid 10 minutes) to the given Discord account through the bot. Deliberately does not say whether that Discord id is already linked; that surfaces at confirm-merge. A WEB session needs a step-up (a password account sends `confirmPassword`; an SSO account must have signed in within the last 5 minutes); a native-app session is exempt.",
+      description: "DMs a 12-character code (valid 10 minutes) to the given Discord account through the bot. Deliberately does not say whether that Discord id is already linked; that surfaces at confirm-merge. A WEB session needs a step-up (a password account sends `confirmPassword`; an SSO account must have signed in within the last 5 minutes), and on an account with an active second factor `secondFactor` too; a native-app session is exempt from both.",
       requestBody: {
         required: true,
-        content: { "application/json": { schema: { type: "object", required: ["discordId"], properties: { discordId: { type: "string", description: "Discord snowflake (17–20 digits)" }, confirmPassword: { type: "string", description: "The current password (web sessions of password accounts)" } } } } },
+        content: { "application/json": { schema: { type: "object", required: ["discordId"], properties: { discordId: { type: "string", description: "Discord snowflake (17–20 digits)" }, confirmPassword: { type: "string", description: "The current password (web sessions of password accounts)" }, secondFactor: LINK_SECOND_FACTOR_FIELD } } } },
       },
       responses: {
         "200": { description: "{ ok: true } — the code was DMed (it is never returned)", content: { "application/json": { schema: OK_TRUE } } },
-        "400": { description: "Invalid Discord user id" },
+        "400": { description: `Invalid Discord user id, or (web session) ${LINK_SECOND_FACTOR_400}` },
         "401": STEP_UP_401,
         "403": { description: "The Discord integration is switched off (feature.integration.discord)" },
         "413": tooLargeAnswer(16 * 1024),
-        "429": { description: "More than 10 initiations an hour, or 3 per target Discord id per 15 minutes" },
+        "429": { description: "More than 10 initiations an hour, 3 per target Discord id per 15 minutes, or a two-factor code lockout" },
         "502": { description: "The bot could not open or send the DM" },
         "503": { description: "No Discord bot token configured" },
       },

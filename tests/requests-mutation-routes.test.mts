@@ -1471,6 +1471,31 @@ test("a MANAGE_REQUESTS holder may delete any request, in any status", async () 
   assert.equal(reqRows.length, 0);
 });
 
+test("an owner's self-cancels are rate limited per user; a manager's deletes are not", async () => {
+  // Cancelling a PENDING request frees its quota slot, so without a limit
+  // create → cancel loops as fast as the create limit allows.
+  const owner = await mintSession();
+  for (let i = 0; i < 10; i++) {
+    reqRows = [reqRow({ id: `c${i}`, requestedBy: owner.userId })];
+    assert.equal((await doDelete(owner.token, `c${i}`)).status, 200);
+  }
+  reqRows = [reqRow({ id: "c10", requestedBy: owner.userId })];
+  const refused = await doDelete(owner.token, "c10");
+  assert.equal(refused.status, 429);
+  assert.equal(refused.headers.get("retry-after"), "60");
+  assert.equal(reqRows.length, 1, "the row is still there");
+
+  // Another owner has their own allowance, and moderation is never limited.
+  const other = await mintSession();
+  reqRows = [reqRow({ id: "o1", requestedBy: other.userId })];
+  assert.equal((await doDelete(other.token, "o1")).status, 200);
+  const { token } = await manager();
+  for (let i = 0; i < 15; i++) {
+    reqRows = [reqRow({ id: `m${i}`, requestedBy: owner.userId })];
+    assert.equal((await doDelete(token, `m${i}`)).status, 200);
+  }
+});
+
 test("both DELETE branches use a GUARDED deleteMany, never a bare delete", async () => {
   // A concurrent removal between the stale read and the write would make a bare
   // delete throw P2025 → 500; deleteMany reports count 0 → 404.

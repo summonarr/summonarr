@@ -5,6 +5,7 @@ import { MediaCard } from "@/components/media/media-card";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { loadUpcomingTitles } from "@/lib/upcoming-list";
 import { attachRatingsUnified } from "@/lib/omdb-availability";
+import { coldLookupAdmitter } from "@/lib/ratings-cold-budget";
 import { localizeMedia } from "@/lib/tmdb-localize";
 import { Suspense } from "react";
 import { HideAvailableToggle } from "@/components/media/hide-available-toggle";
@@ -88,7 +89,9 @@ export default async function UpcomingPage({
   // on Hide Available) lands on the last real page instead of an empty grid.
   const page = Math.min(totalPages, parsePageNumber(sp.page));
   const [rated, contentLocale] = await Promise.all([
-    attachRatingsUnified(items.slice((page - 1) * UPCOMING_PER_PAGE, page * UPCOMING_PER_PAGE)),
+    attachRatingsUnified(items.slice((page - 1) * UPCOMING_PER_PAGE, page * UPCOMING_PER_PAGE), {
+      admitMiss: coldLookupAdmitter(session.user.id),
+    }),
     getContentLocale(),
   ]);
   const pageItems = await localizeMedia(rated, contentLocale);

@@ -44,6 +44,7 @@ import { revokeAllUserSessions } from "./auth";
 import { logAudit } from "./audit";
 import { isAdminTarget, lockTargetInTx } from "./account-lifecycle";
 import { processSingleton } from "./process-singleton";
+import { Permission } from "./permissions";
 import type { MediaInstanceKey } from "./media-instances";
 
 export const OFFBOARD_PENDING_KEY = "jellyfin-offboarding:pending";
@@ -128,7 +129,7 @@ async function offboardOne(jellyfinUserId: string): Promise<OffboardOutcome> {
     await revokeAllUserSessions(user.id, async (tx) => {
       // The system acts here, not a delegate: nothing to refuse, only an
       // exemption to decide (the same admin-target rule the admin routes use).
-      const fresh = await lockTargetInTx(tx, user.id, true);
+      const fresh = await lockTargetInTx(tx, user.id, Permission.ADMIN);
       if (!fresh || isAdminTarget(fresh)) throw new OffboardExemptError();
     });
   } catch (err) {

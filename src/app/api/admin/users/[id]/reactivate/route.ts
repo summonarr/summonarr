@@ -5,8 +5,8 @@ import { tooManyRequests } from "@/lib/http";
 import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { Permission, hasPermission } from "@/lib/permissions";
-import { reactivateUser, isAdminTarget, isPurgedRow, assertTargetNotAdminInTx, TargetBecameAdminError } from "@/lib/account-lifecycle";
+import { Permission } from "@/lib/permissions";
+import { reactivateUser, isPurgedRow, assertTargetNotAdminInTx, TargetBecameAdminError, TargetOutranksCallerError, targetRefusal } from "@/lib/account-lifecycle";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // POST /api/admin/users/[id]/reactivate — re-enable a disabled account.
@@ -37,9 +37,14 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (
   // Same authority gate as the disable path: a non-admin MANAGE_USERS holder must
   // not be able to switch an admin account back on (restoring an admin is at
   // least as privileged as disabling one). By role or by the ADMIN bit — the
-  // rule the in-transaction re-check applies.
-  if (isAdminTarget(target) && !hasPermission(session.user.permissions, Permission.ADMIN)) {
+  // rule the in-transaction re-check applies. Nor a peer holding management
+  // permissions the caller lacks (targetRefusal).
+  const refusal = targetRefusal(target, session.user.permissions);
+  if (refusal === "admin") {
     return NextResponse.json({ error: t("apiAdmin.users.onlyAdminReenable") }, { status: 403 });
+  }
+  if (refusal === "outranks") {
+    return NextResponse.json({ error: t("apiAdmin.users.cannotManageBeyondOwn") }, { status: 403 });
   }
 
   // isPurgedRow, not a bare `purgedAt` test: accounts scrubbed before that column
@@ -59,12 +64,15 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (
     restored = await prisma.$transaction(async (tx) => {
       // Role re-read under lock 42: a promotion after the read above must not let a
       // delegate switch an admin back on.
-      await assertTargetNotAdminInTx(tx, id, hasPermission(session.user.permissions, Permission.ADMIN));
+      await assertTargetNotAdminInTx(tx, id, session.user.permissions);
       return reactivateUser(id, tx);
     });
   } catch (err) {
     if (err instanceof TargetBecameAdminError) {
       return NextResponse.json({ error: t("apiAdmin.users.onlyAdminReenable") }, { status: 403 });
+    }
+    if (err instanceof TargetOutranksCallerError) {
+      return NextResponse.json({ error: t("apiAdmin.users.cannotManageBeyondOwn") }, { status: 403 });
     }
     throw err;
   }

@@ -113,10 +113,19 @@ function openEventStream(userId: string, initialScope: SseDeliveryScope): Readab
       // Re-run the DB-checked auth against the original request's cookie/bearer.
       // A revoked/expired session yields a NextResponse → tear down; a still-valid
       // session refreshes the delivery scope so a demotion takes effect.
+      // Maintenance is re-checked on the refreshed session too: it is switched
+      // on while streams are open, and the connect-time check alone would let
+      // a non-admin keep receiving events for the rest of the hour.
       void requireAuth()
-        .then((fresh) => {
+        .then(async (fresh) => {
           if (cleaned) return;
           if (fresh instanceof NextResponse || fresh.user.id !== userId) {
+            cleanup(controller);
+            return;
+          }
+          const refused = await maintenanceGuard(fresh);
+          if (cleaned) return;
+          if (refused) {
             cleanup(controller);
             return;
           }

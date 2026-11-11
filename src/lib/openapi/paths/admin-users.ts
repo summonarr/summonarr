@@ -123,7 +123,7 @@ export const adminUsersPaths: OpenApiPaths = {
     patch: {
       tags: ["Admin – Users"],
       summary: "Update user settings (MANAGE_USERS)",
-      description: "Conferring the ADMIN role, or editing an account that is already ADMIN, additionally requires the caller to hold ADMIN. ONE FIELD PER CALL: the body names exactly one editable field (mediaServer, maxContentRating, permissions, instanceGrants, mediaServerGrants, one quota* field, one notification flag, or role) and the handler answers 200 with `{ id, <field>: <new value> }` (permissions as a decimal string). A body naming more than one field is refused with 400 and nothing is applied; a body with none of them is 400 too. A non-ADMIN delegate may not edit its own limits/grants, may not touch an ADMIN account, and may only grant what it holds itself (403). Rate-limited 20/min per caller; body capped at 32 KB.",
+      description: "Conferring the ADMIN role, or editing an account that is already ADMIN, additionally requires the caller to hold ADMIN. ONE FIELD PER CALL: the body names exactly one editable field (mediaServer, maxContentRating, permissions, instanceGrants, mediaServerGrants, one quota* field, one notification flag, or role) and the handler answers 200 with `{ id, <field>: <new value> }` (permissions as a decimal string). A body naming more than one field is refused with 400 and nothing is applied; a body with none of them is 400 too. A non-ADMIN delegate may not edit its own limits/grants, may not touch an ADMIN account or one holding management permissions (MANAGE_USERS / MANAGE_REQUESTS / MANAGE_ISSUES) it lacks itself, and may only grant what it holds itself (403). Rate-limited 20/min per caller; body capped at 32 KB.",
       parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
       requestBody: {
         content: {
@@ -171,7 +171,7 @@ export const adminUsersPaths: OpenApiPaths = {
           },
         },
         "400": { description: "Invalid value, no recognized field, more than one field in the body, own-role change, or a last-admin / promote-first rule" },
-        "403": { description: "Forbidden (ADMIN-bit rule, own limits, or grant beyond the caller's own)" },
+        "403": { description: "Forbidden (ADMIN-bit rule, own limits, grant beyond the caller's own, or a target holding management permissions the caller lacks)" },
         "404": { description: "User not found" },
         "413": tooLargeAnswer(32 * 1024),
         "429": { description: "Rate limited (Retry-After set)", headers: RETRY_AFTER_HEADER },
@@ -186,7 +186,7 @@ export const adminUsersPaths: OpenApiPaths = {
       responses: {
         "200": { description: "User disabled ({ ok: true }; idempotent)", content: { "application/json": { schema: OK_TRUE } } },
         "400": { description: "Cannot disable the last admin, or the caller's own account" },
-        "403": { description: "Forbidden (an ADMIN target needs the ADMIN bit)" },
+        "403": { description: "Forbidden (an ADMIN target needs the ADMIN bit; a target holding management permissions the caller lacks needs a caller holding them)" },
         "404": { description: "User not found" },
         "429": { description: "Rate limited (Retry-After set)", headers: RETRY_AFTER_HEADER },
       },
@@ -219,7 +219,7 @@ export const adminUsersPaths: OpenApiPaths = {
       responses: {
         "200": { description: "Personal data purged (idempotent)", content: { "application/json": { schema: OK_TRUE } } },
         "400": { description: "Account must be disabled before it can be purged" },
-        "403": { description: "Forbidden (an ADMIN target needs the ADMIN bit)" },
+        "403": { description: "Forbidden (an ADMIN target needs the ADMIN bit; a target holding management permissions the caller lacks needs a caller holding them)" },
         "404": { description: "User not found" },
         "429": { description: "Rate limited (Retry-After set)", headers: RETRY_AFTER_HEADER },
       },
@@ -309,7 +309,7 @@ export const adminUsersPaths: OpenApiPaths = {
           headers: { "X-Truncated": { description: "\"true\" when the list was cut at the cap", schema: { type: "string", enum: ["true", "false"] } }, "X-Truncated-Cap": { description: "The cap, as an integer string", schema: { type: "string" } } },
           content: { "application/json": { schema: { type: "array", items: { type: "object", properties: AUTH_SESSION_ROW_FIELDS } } } },
         },
-        "403": { description: "An ADMIN target needs the ADMIN bit" },
+        "403": { description: "An ADMIN target needs the ADMIN bit; a target holding management permissions the caller lacks needs a caller holding them" },
         "404": { description: "User not found" },
       },
     },
@@ -325,7 +325,7 @@ export const adminUsersPaths: OpenApiPaths = {
       responses: {
         "200": { description: "Revoked", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, revoked: { type: "string", description: "\"all\" or the revoked sessionId" } } } } } },
         "400": { description: "Neither `all` nor a `sessionId` supplied" },
-        "403": { description: "An ADMIN target needs the ADMIN bit" },
+        "403": { description: "An ADMIN target needs the ADMIN bit; a target holding management permissions the caller lacks needs a caller holding them" },
         "404": { description: "User not found, or the session does not belong to this user" },
         "413": tooLargeAnswer(16 * 1024),
         "429": { description: "Rate limited (30 per minute per admin)", headers: RETRY_AFTER_HEADER },
@@ -438,6 +438,7 @@ export const adminUsersPaths: OpenApiPaths = {
         },
         "403": { description: "Caller holds neither MANAGE_USERS nor MANAGE_REQUESTS" },
         "404": { description: "No such user" },
+        "429": { description: "Rate limited — 30/min per caller (Retry-After set)", headers: RETRY_AFTER_HEADER },
       },
     },
   },

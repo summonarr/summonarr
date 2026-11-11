@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import { Permission } from "@/lib/permissions";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
@@ -9,8 +11,13 @@ import { jellyfinAdminHeaders } from "@/lib/jellyfin";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { diagnoseJellyfinUser, readUsersBody } from "@/lib/jellyfin-user-diagnosis";
 
-export const GET = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, _session) => {
+export const GET = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
+  // Every call is a live /Users fetch against the Jellyfin server, and a
+  // MANAGE_USERS delegate can make it.
+  if (!checkRateLimit(`admin-server-users-diagnose:${session.user.id}`, 30, 60 * 1000)) {
+    return tooManyRequests(60, t("apiAdmin.common.tooManyAttempts"));
+  }
   // Which server to diagnose. The live /Users fetch and the DB count below must
   // describe the SAME server, or `gap` compares one server's users against
   // every server's rows. Defaults to "" (the default server), so a

@@ -31,7 +31,7 @@
 //
 // Harness: real handlers, in-memory prisma stubs, a synthetic Next request scope
 // for the routes that read cookies()/headers(). No DB, no network.
-import { test, beforeEach } from "node:test";
+import { test, beforeEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -610,6 +610,50 @@ test("events: an inbox event (request:updated) says whether it is about the view
     { type: "request:updated", requestId: "r-mine", status: "APPROVED", own: true },
     { type: "request:new", requestId: "r-new" }, // not an inbox event: unchanged
   ]);
+});
+
+// Opens a stream, lets `during` change state, fires the 60-second re-auth tick
+// inside the request scope (mocked timers run the callback in the caller's
+// async context), and answers whether the stream is still open afterwards.
+async function streamSurvivesReauth(token: string, during: () => void): Promise<boolean> {
+  mock.timers.enable({ apis: ["setInterval"] });
+  try {
+    const cookie = `${COOKIE}=${token}`;
+    const res = await inScope(() => events.GET(), cookie);
+    assert.equal(res.status, 200);
+    during();
+    await inScope(async () => {
+      mock.timers.tick(60_000);
+      await new Promise((r) => setTimeout(r, 50));
+    }, cookie);
+    const reader = res.body!.getReader();
+    let open = true;
+    const deadline = Date.now() + 300;
+    while (Date.now() < deadline) {
+      const chunk = await Promise.race([
+        reader.read(),
+        new Promise<null>((r) => setTimeout(() => r(null), 100)),
+      ]);
+      if (chunk === null) break;
+      if (chunk.done) { open = false; break; }
+    }
+    await reader.cancel().catch(() => {});
+    return open;
+  } finally {
+    mock.timers.reset();
+  }
+}
+
+test("events: maintenance switched on mid-stream closes a non-admin's stream at the next re-auth tick", async () => {
+  const token = await mintSession();
+  const open = await streamSurvivesReauth(token, () => { settings.set("maintenanceEnabled", "true"); });
+  assert.equal(open, false, "the re-auth tick must re-run the maintenance check");
+});
+
+test("events: the re-auth tick keeps a stream open with maintenance off, and an ADMIN's with it on", async () => {
+  assert.equal(await streamSurvivesReauth(await mintSession(), () => {}), true);
+  const admin = await mintSession({ permissions: Permission.ADMIN, role: "ADMIN" });
+  assert.equal(await streamSurvivesReauth(admin, () => { settings.set("maintenanceEnabled", "true"); }), true);
 });
 
 test("events caps concurrent connections per user with 429", async () => {

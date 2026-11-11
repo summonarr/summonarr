@@ -11,6 +11,7 @@ import { sanitizeOptional } from "@/lib/sanitize";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 import { readJsonCapped } from "@/lib/body-size";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -462,6 +463,10 @@ async function reopenRequest(pc: PatchContext): Promise<NextResponse> {
   return NextResponse.json(updated);
 }
 
+// Owner self-cancels per user per minute: plenty for clearing a few mistaken
+// requests, far short of a create → cancel loop.
+const OWNER_CANCEL_LIMIT = 10;
+
 // Two callers share this handler:
 //   - An admin (MANAGE_REQUESTS) can delete any request (existing behavior;
 //     consumed by the admin request-actions UI). Audited as REQUEST_DELETE.
@@ -499,6 +504,13 @@ export const DELETE = withAuth(async (
       return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
     }
   } else {
+    // A cancelled PENDING request frees its quota slot, so create → cancel can
+    // loop, and every create may alert the admins. The alert has its own budget
+    // (alertAdminsNewRequest); this bounds the loop itself. A manager's delete
+    // above is moderation and is not limited.
+    if (!checkRateLimit(`request-cancel:${session.user.id}`, OWNER_CANCEL_LIMIT, 60_000)) {
+      return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
+    }
     // Owner self-cancel: delete only if STILL pending. An admin may have approved
     // (and pushed to ARR) between the read above and here — a guarded deleteMany
     // makes the status check atomic so we never orphan an approved/grabbed request

@@ -1,13 +1,14 @@
 import { ADMIN_SESSION_LIST_CAP } from "@/lib/api-body-limits";
 import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
-import { withPermission, type SummonarrSession } from "@/lib/api-auth";
+import { withPermission } from "@/lib/api-auth";
 import { revokeSessionById, revokeAllUserSessions } from "@/lib/auth";
 import { clearSessionFootholdsInTx } from "@/lib/session-footholds";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { Permission, hasPermission } from "@/lib/permissions";
-import { assertTargetNotAdminInTx, isAdminTarget, TargetBecameAdminError } from "@/lib/account-lifecycle";
+import { Permission } from "@/lib/permissions";
+import { assertTargetNotAdminInTx, TargetBecameAdminError, TargetOutranksCallerError, targetRefusal } from "@/lib/account-lifecycle";
+import type { Translator } from "@/lib/i18n/translate";
 import { isIndefiniteDeadline } from "@/lib/session-lifetime";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -22,7 +23,15 @@ type RouteParams = { params: Promise<{ id: string }> };
 // An ADMIN target (by role or by the ADMIN bit — isAdminTarget, the rule the
 // in-transaction re-checks apply) additionally needs the ADMIN bit: a delegated
 // user manager must not be able to read an admin's device list or sign an
-// admin out.
+// admin out. Nor those of a peer holding management permissions the caller lacks
+// (targetRefusal, account-lifecycle.ts).
+function refusalResponse(refusal: "admin" | "outranks", t: Translator): NextResponse {
+  return NextResponse.json(
+    { error: t(refusal === "admin" ? "apiAdmin.users.onlyAdminModify" : "apiAdmin.users.cannotManageBeyondOwn") },
+    { status: 403 },
+  );
+}
+
 async function readTarget(id: string) {
   return prisma.user.findUnique({ where: { id }, select: { id: true, role: true, permissions: true, name: true } });
 }
@@ -31,8 +40,6 @@ async function readTarget(id: string) {
 // SESSION_LIST_CAP are returned and `X-Truncated: true` says more exist.
 const SESSION_LIST_CAP = ADMIN_SESSION_LIST_CAP;
 const REVOKES_PER_MIN = 30;
-
-const callerIsAdmin = (session: SummonarrSession) => hasPermission(session.user.permissions, Permission.ADMIN);
 
 export const GET = withPermission(Permission.MANAGE_USERS)(async (
   req,
@@ -44,9 +51,8 @@ export const GET = withPermission(Permission.MANAGE_USERS)(async (
 
   const target = await readTarget(id);
   if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-  if (isAdminTarget(target) && !callerIsAdmin(session)) {
-    return NextResponse.json({ error: t("apiAdmin.users.onlyAdminModify") }, { status: 403 });
-  }
+  const refusal = targetRefusal(target, session.user.permissions);
+  if (refusal) return refusalResponse(refusal, t);
 
   const sessions = await prisma.authSession.findMany({
     where: { userId: id },
@@ -87,9 +93,8 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
 
   const target = await readTarget(id);
   if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-  if (isAdminTarget(target) && !callerIsAdmin(session)) {
-    return NextResponse.json({ error: t("apiAdmin.users.onlyAdminModify") }, { status: 403 });
-  }
+  const refusal = targetRefusal(target, session.user.permissions);
+  if (refusal) return refusalResponse(refusal, t);
 
   const parsed = await readJsonCapped<{ sessionId?: string; all?: boolean }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
@@ -114,12 +119,11 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   }
 
   try {
-    if ("all" in revoked) await revokeEverySession(id, callerIsAdmin(session));
-    else await revokeSessionById(revoked.sessionId, (tx) => assertTargetNotAdminInTx(tx, id, callerIsAdmin(session)));
+    if ("all" in revoked) await revokeEverySession(id, session.user.permissions);
+    else await revokeSessionById(revoked.sessionId, (tx) => assertTargetNotAdminInTx(tx, id, session.user.permissions));
   } catch (err) {
-    if (err instanceof TargetBecameAdminError) {
-      return NextResponse.json({ error: t("apiAdmin.users.onlyAdminModify") }, { status: 403 });
-    }
+    if (err instanceof TargetBecameAdminError) return refusalResponse("admin", t);
+    if (err instanceof TargetOutranksCallerError) return refusalResponse("outranks", t);
     throw err;
   }
 
@@ -151,9 +155,9 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
 // POST /api/sessions/revoke-all (guardrail 6g), in revokeAllUserSessions' own
 // transaction. Not folded into revokeAllUserSessions — Jellyfin offboarding uses
 // that helper without wanting to drop push / pending Discord / the calendar URL.
-async function revokeEverySession(id: string, callerIsAdminBit: boolean): Promise<void> {
+async function revokeEverySession(id: string, callerPerms: bigint): Promise<void> {
   await revokeAllUserSessions(id, async (tx) => {
-    await assertTargetNotAdminInTx(tx, id, callerIsAdminBit);
+    await assertTargetNotAdminInTx(tx, id, callerPerms);
     await clearSessionFootholdsInTx(tx, id);
     await tx.user.update({
       where: { id },

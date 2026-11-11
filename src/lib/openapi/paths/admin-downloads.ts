@@ -437,7 +437,7 @@ export const adminDownloadsPaths: OpenApiPaths = {
           } } } },
         },
         "400": { description: "Invalid parameters" },
-        "403": { description: "Not ADMIN" },
+        "403": { description: "Not ADMIN, or the browser marked the request cross-site (`Sec-Fetch-Site: cross-site`) — the scan is never started by a navigation from another site" },
         "404": { description: "Integration disabled or unknown instance" },
         "409": { description: "The download is no longer in the queue" },
         "502": { description: "The arr could not be reached" },

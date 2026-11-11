@@ -217,6 +217,33 @@ beforeEach(() => {
   invalidateFeatureFlagCache();
 });
 
+// ═══════════════════ never started from another site ══════════════════
+
+test("a search GET the browser marks cross-site is refused before anything reaches the arr; every other origin passes", async () => {
+  // The session cookie is SameSite=Lax, so a signed-in admin's navigation from
+  // another site carries it; nothing is readable there, but the indexers
+  // would still be searched.
+  const token = await mintSession();
+  const get = (site: string | null, query: string) =>
+    inScope(() => (releasesRoute.GET as unknown as Handler)(
+      new NextRequest(`http://localhost:3000/api/admin/arr/title/releases?${query}`, {
+        headers: { cookie: `${COOKIE}=${token}`, ...(site !== null ? { "sec-fetch-site": site } : {}) },
+      }),
+      undefined,
+    ));
+  for (const query of ["service=radarr&id=11", "service=radarr&id=11&async=1"]) {
+    const refused = await get("cross-site", query);
+    assert.equal(refused.status, 403);
+    assert.equal(((await refused.json()) as { error: string }).error, "Forbidden — cross-site request");
+  }
+  assert.equal(calls.length, 0, "no title read, no release search, no job");
+  // The app's own fetch, a same-site page, a typed address, and a client that
+  // sends no header (the native app, curl, an older browser).
+  for (const site of ["same-origin", "same-site", "none", null]) {
+    assert.equal((await get(site, "service=radarr&id=11")).status, 200, `Sec-Fetch-Site: ${site}`);
+  }
+});
+
 // ═══════════════════ a season or an episode, never the series ═════════
 
 test("a season search sends ONE /api/v3/release read naming the series AND the season", async () => {

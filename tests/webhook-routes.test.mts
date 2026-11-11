@@ -412,6 +412,7 @@ shadowPrismaModel(prisma, "sonarrAvailableItem", sonarrAvailableStub);
 // IssueGrab table.
 type GrabRow = {
   id: string;
+  createdAt: Date;
   tmdbId: number | null;
   tvdbId: number | null;
   mediaType: "MOVIE" | "TV";
@@ -596,9 +597,34 @@ function seedRequest(overrides: Partial<RequestRow> & { tmdbId: number; mediaTyp
   return row;
 }
 
+// A grab is claimed only once the firing instance reports a file in its scope
+// added AFTER the grab (arr-grab-confirm.ts). Seeded grabs share one creation
+// time; a scripted file is dated on one side of it or the other.
+const GRAB_CREATED = new Date("2026-06-01T00:00:00Z");
+const FILE_AFTER_GRAB = "2026-06-01T06:00:00Z";
+const FILE_BEFORE_GRAB = "2026-05-01T00:00:00Z";
+
+// The default Radarr instance, configured and answering for one movie: the
+// library row (hasFile from whether a file is scripted) and its file rows.
+const RADARR_DEFAULT_URL = "http://127.0.0.1:7879";
+function scriptRadarr(tmdbId: number, fileAdded: string | null, opts: { files?: unknown } = {}): void {
+  settings.set(arrSettingKey("radarr", "", "Url"), RADARR_DEFAULT_URL);
+  settings.set(arrSettingKey("radarr", "", "ApiKey"), "radarr-default-key");
+  fetchHandler = (raw) => {
+    const url = new URL(raw);
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    if (url.pathname === "/api/v3/movie") return json(url.searchParams.get("tmdbId") === String(tmdbId) ? [{ id: 31, tmdbId, hasFile: fileAdded !== null }] : []);
+    if (url.pathname === "/api/v3/moviefile" && url.searchParams.get("movieId") === "31") {
+      return json(opts.files ?? (fileAdded === null ? [] : [{ id: 310, movieId: 31, dateAdded: fileAdded }]));
+    }
+    throw new Error(`unexpected Radarr fetch ${raw}`);
+  };
+}
+
 function seedGrab(overrides: Partial<GrabRow> & { mediaType: "MOVIE" | "TV" }): GrabRow {
   const row: GrabRow = {
     id: `grab-${++rowSeq}`,
+    createdAt: GRAB_CREATED,
     tmdbId: null,
     tvdbId: null,
     arrInstance: "",
@@ -1253,9 +1279,39 @@ test("radarr ManualInteractionRequired: admins alerted once per stuck item, keye
   assert.equal(agentPosts().length, 0, "fail-closed: no arr.manual_interaction emit without a stable id");
 });
 
+test("ManualInteractionRequired: the payload's title reaches the channels bounded and stripped of control characters, on both routes", async () => {
+  const { MAX_MANUAL_INTERACTION_TITLE } = await import("../src/lib/arr-webhook-events.ts");
+  agentRows.push(agentRow("arr.manual_interaction"));
+  honourAgentUrl();
+  const hostile = `Bad\u0000\r\nTitle\t\u007f ${"x".repeat(50_000)}`;
+
+  const radarr = await post(radarrPOST, webhookReq("radarr", {
+    token: RADARR_SECRET,
+    body: { eventType: "ManualInteractionRequired", movie: { tmdbId: 603, title: hostile } },
+  }));
+  await runTasks(radarr.tasks);
+  // A lone episode's season/episode numbers are payload values too.
+  const sonarr = await post(sonarrPOST, webhookReq("sonarr", {
+    token: SONARR_SECRET,
+    body: { eventType: "ManualInteractionRequired", series: { tvdbId: 777, title: "Show" }, episodes: [{ seasonNumber: "9".repeat(50_000), episodeNumber: 1 }] },
+  }));
+  await runTasks(sonarr.tasks);
+  await waitForAgentPosts(2);
+
+  const texts = agentPosts().map((p) => String((p as unknown as { message?: unknown }).message ?? JSON.stringify(p)));
+  assert.equal(texts.length, 2);
+  for (const text of texts) {
+    assert.ok(text.length <= MAX_MANUAL_INTERACTION_TITLE + 200, `bounded: got ${text.length} characters`);
+    assert.ok(!/[\u0000-\u001f\u007f]/.test(text), "no control characters");
+  }
+  assert.ok(texts[0].includes("Bad Title x"), texts[0].slice(0, 80));
+  assert.ok(texts[1].includes("Show S999"), texts[1].slice(0, 80));
+});
+
 test("radarr issue-grab completion: CAS-claimed, scoped to the firing instance; a skipped push stays claimed", async () => {
   const defaultGrab = seedGrab({ tmdbId: 603, mediaType: "MOVIE", arrInstance: "" });
   const fourKGrab = seedGrab({ tmdbId: 603, mediaType: "MOVIE", arrInstance: "4k" });
+  scriptRadarr(603, FILE_AFTER_GRAB);
 
   const { res } = await post(
     radarrPOST,
@@ -1284,6 +1340,7 @@ test("radarr issue-grab: a failed web push keeps notifiedAt set and does not re-
   const grab = seedGrab({ tmdbId: 603, mediaType: "MOVIE", arrInstance: "" });
   agentRows.push(agentRow("arr.grab_completed"));
   seedFailedIosPush(grab.triggeredById);
+  scriptRadarr(603, FILE_AFTER_GRAB);
   honourAgentUrl();
 
   const first = await post(
@@ -1316,6 +1373,106 @@ test("radarr issue-grab: a failed web push keeps notifiedAt set and does not re-
   assert.ok(grab.notifiedAt instanceof Date);
   assert.equal(grabUpdateManyCalls.length, 1, "the second delivery must not re-CAS notifiedAt");
   assert.equal(settings.has(`grabPushRetry:${grab.id}`), true, "the retry marker is rewritten when push fails again");
+  assert.equal(
+    fetchCalls.filter((c) => c.url.includes("/api/v3/moviefile")).length, 1,
+    "an already-claimed grab's push retry asks Radarr for nothing more: only the first claim is confirmed",
+  );
+});
+
+// ── the grab claim waits for the instance (guardrail 5j) ────────────────────
+
+test("radarr issue-grab: a Download Radarr can't be asked about claims nothing — no claim, no arr.grab_completed, no push marker", async () => {
+  // The default instance's connection is not configured here and every fetch
+  // refuses: the verdict is unverifiable, the request flip still goes ahead
+  // (the sync reconciles that), but the one-shot grab claim must not.
+  const grab = seedGrab({ tmdbId: 603, mediaType: "MOVIE", arrInstance: "" });
+  agentRows.push(agentRow("arr.grab_completed"));
+  honourAgentUrl();
+
+  const unconfigured = await post(radarrPOST, webhookReq("radarr", { token: RADARR_SECRET, body: { eventType: "Download", movie: { tmdbId: 603 }, downloadId: "a" } }));
+  assert.equal(unconfigured.res.status, 200);
+  // Configured, but unreachable.
+  settings.set(arrSettingKey("radarr", "", "Url"), RADARR_DEFAULT_URL);
+  settings.set(arrSettingKey("radarr", "", "ApiKey"), "radarr-default-key");
+  const unreachable = await post(radarrPOST, webhookReq("radarr", { token: RADARR_SECRET, body: { eventType: "Download", movie: { tmdbId: 603 }, downloadId: "b" } }));
+  assert.equal(unreachable.res.status, 200);
+  await drainMicrotasks();
+
+  assert.equal(grab.notifiedAt, null, "an unconfirmed delivery must leave the grab pending");
+  assert.equal(grabUpdateManyCalls.length, 0, "the CAS is never reached");
+  assert.equal(agentPosts().length, 0);
+  assert.equal(settings.has(`grabPushRetry:${grab.id}`), false);
+  assert.equal(unreachable.tasks.length, 1, "the after() work, which retries the unverified grab once, is scheduled");
+});
+
+test("radarr issue-grab: only a file added AFTER the grab confirms it — the old file, no file, a file row naming another movie, or an undated one do not", async () => {
+  const grab = seedGrab({ tmdbId: 603, mediaType: "MOVIE", arrInstance: "" });
+  const deliver = async (id: string) => {
+    const { res } = await post(radarrPOST, webhookReq("radarr", { token: RADARR_SECRET, body: { eventType: "Download", movie: { tmdbId: 603 }, downloadId: id } }));
+    assert.equal(res.status, 200);
+  };
+
+  // The file the issue was filed about is still the one on disk.
+  scriptRadarr(603, FILE_BEFORE_GRAB);
+  await deliver("old-file");
+  assert.equal(grab.notifiedAt, null, "a file older than the grab is not its replacement");
+
+  scriptRadarr(603, FILE_AFTER_GRAB, { files: [{ id: 999, movieId: 77, dateAdded: FILE_AFTER_GRAB }] });
+  await deliver("other-movie");
+  assert.equal(grab.notifiedAt, null, "another movie's file row confirms nothing");
+
+  scriptRadarr(603, FILE_AFTER_GRAB, { files: [{ id: 310, movieId: 31 }, { id: 311, movieId: 31, dateAdded: "soon" }, null] });
+  await deliver("undated");
+  assert.equal(grab.notifiedAt, null, "a row without a usable dateAdded confirms nothing");
+
+  scriptRadarr(603, FILE_AFTER_GRAB, { files: { records: [] } });
+  await deliver("not-a-list");
+  assert.equal(grab.notifiedAt, null, "an answer that is not a list is no answer");
+  assert.equal(grabUpdateManyCalls.length, 0);
+
+  scriptRadarr(603, FILE_AFTER_GRAB);
+  await deliver("new-file");
+  assert.ok((grabs[0].notifiedAt as Date | null) instanceof Date, "the replacement's own import claims it");
+  assert.equal(grabUpdateManyCalls.length, 1);
+});
+
+test("an unverified grab is returned for ONE later attempt, which claims it once the instance answers — and stays quiet when it still can't", async () => {
+  const { claimCompletedGrabs, retryUnverifiedGrabs } = await import("../src/lib/arr-webhook.ts");
+  const grab = { ...seedGrab({ tmdbId: 603, mediaType: "MOVIE", arrInstance: "" }), tmdbId: 603 };
+  settings.set(arrSettingKey("radarr", "", "Url"), RADARR_DEFAULT_URL);
+  settings.set(arrSettingKey("radarr", "", "ApiKey"), "radarr-default-key");
+
+  // Radarr down: nothing claimed, the grab handed back.
+  const unverified = await claimCompletedGrabs([grab as never], "radarr", { arrInstance: "" });
+  assert.deepEqual(unverified.map((g) => g.id), [grab.id]);
+  await retryUnverifiedGrabs(unverified, "radarr", { arrInstance: "" });
+  assert.equal(grabs[0].notifiedAt, null, "still unreachable: still pending");
+
+  // A refuted grab (Radarr answered: no newer file) is NOT handed back.
+  scriptRadarr(603, FILE_BEFORE_GRAB);
+  assert.deepEqual(await claimCompletedGrabs([grab as never], "radarr", { arrInstance: "" }), []);
+
+  scriptRadarr(603, FILE_AFTER_GRAB);
+  await retryUnverifiedGrabs(unverified, "radarr", { arrInstance: "" });
+  assert.ok((grabs[0].notifiedAt as Date | null) instanceof Date, "the later attempt claims it");
+  assert.equal(grabUpdateManyCalls.length, 1);
+});
+
+test("grab confirmation is bounded and instance-scoped: a file row past the read cap confirms nothing, and a sibling instance's grab is refuted without a call", async () => {
+  const { confirmDeliveredGrabs, MAX_CONFIRM_ROWS } = await import("../src/lib/arr-grab-confirm.ts");
+  const grab = { ...seedGrab({ tmdbId: 603, mediaType: "MOVIE", arrInstance: "" }), tmdbId: 603 };
+  const filler = Array.from({ length: MAX_CONFIRM_ROWS }, (_, i) => ({ id: i + 1, movieId: 31, dateAdded: FILE_BEFORE_GRAB }));
+  scriptRadarr(603, FILE_AFTER_GRAB, { files: [...filler, { id: 999_999, movieId: 31, dateAdded: FILE_AFTER_GRAB }] });
+  const capped = await confirmDeliveredGrabs("radarr", "", [grab as never]);
+  assert.deepEqual([[...capped.confirmed], [...capped.unverified]], [[], []], "the row past the cap is never read");
+
+  scriptRadarr(603, FILE_AFTER_GRAB, { files: [...filler.slice(1), { id: 999_999, movieId: 31, dateAdded: FILE_AFTER_GRAB }] });
+  assert.deepEqual([...(await confirmDeliveredGrabs("radarr", "", [grab as never])).confirmed], [grab.id], "the last row inside the cap is");
+
+  fetchCalls.length = 0;
+  const sibling = await confirmDeliveredGrabs("radarr", "4k", [grab as never]);
+  assert.deepEqual([[...sibling.confirmed], [...sibling.unverified]], [[], []]);
+  assert.equal(fetchCalls.length, 0, "the firing instance is never asked about another instance's grab");
 });
 
 test("a push a failed delivery left behind is retried by a later sweep, not only by a Download for the same title", async () => {
@@ -1389,6 +1546,19 @@ test("radarr: malformed and non-object JSON bodies → 400 Invalid JSON (auth ru
     assert.deepEqual(body, { error: "Invalid JSON" });
   }
   assert.equal(replayCreates.length, 0, "an unparseable body must never be digest-recorded");
+});
+
+test("an unparseable body's 400 log line names the error, never a slice of the body", async () => {
+  // V8's SyntaxError message quotes the text around the failure.
+  const rawBody = '{"token":"s3cr3t-in-the-body", nope';
+  for (const [handler, service] of [[radarrPOST, "radarr"], [sonarrPOST, "sonarr"]] as const) {
+    warns.length = 0;
+    const { res } = await post(handler, webhookReq(service, { token: service === "radarr" ? RADARR_SECRET : SONARR_SECRET, rawBody }));
+    assert.equal(res.status, 400);
+    const line = warns.find((w) => w.includes("400 invalid JSON"));
+    assert.equal(line, `[webhook/${service}] 400 invalid JSON (SyntaxError)`);
+    assert.ok(!warns.some((w) => w.includes("s3cr3t") || w.includes("nope")), warns.join(" | "));
+  }
 });
 
 test("both: a payload nested too deeply for the replay digest → 400 Invalid JSON, not a 500", async () => {
@@ -1584,6 +1754,10 @@ type SonarrScript = {
   series: (url: URL) => unknown;
   lookup?: (url: URL) => unknown;
   queue?: unknown;
+  /** /api/v3/episodefile?seriesId= rows — read only when a grab is waiting to be claimed. */
+  episodeFiles?: unknown;
+  /** /api/v3/episode?seriesId=&seasonNumber= rows — read only for an EPISODE grab. */
+  episodeRows?: (url: URL) => unknown;
 };
 function scriptSonarr(script: SonarrScript): void {
   fetchHandler = (raw) => {
@@ -1598,6 +1772,8 @@ function scriptSonarr(script: SonarrScript): void {
     }
     if (url.pathname === "/api/v3/series") return json(script.series(url));
     if (url.pathname === "/api/v3/queue") return json(script.queue ?? { records: [], totalRecords: 0 });
+    if (url.pathname === "/api/v3/episodefile" && script.episodeFiles !== undefined) return json(script.episodeFiles);
+    if (url.pathname === "/api/v3/episode" && script.episodeRows) return json(script.episodeRows(url));
     throw new Error(`unexpected Sonarr fetch ${raw}`);
   };
 }
@@ -1610,6 +1786,7 @@ const completeSeries = (tvdbId: number, tmdbId?: number) => [
 
 test("sonarr Download by tmdbId: instance-scoped flip + wanted eviction + tvdbId backfill, verified against the FIRING instance's Sonarr", async () => {
   const animeRow = seedRequest({ tmdbId: 888, mediaType: "TV", arrInstance: "anime", tvdbId: null });
+  const animePending = seedRequest({ tmdbId: 888, mediaType: "TV", arrInstance: "anime", tvdbId: null, status: "PENDING" });
   const defaultRow = seedRequest({ tmdbId: 888, mediaType: "TV", arrInstance: "", tvdbId: null });
   configureSonarr("anime");
   scriptSonarr({ series: () => completeSeries(777, 888) });
@@ -1634,11 +1811,14 @@ test("sonarr Download by tmdbId: instance-scoped flip + wanted eviction + tvdbId
   assert.deepEqual(sonarrAvailableCreates, [{ tmdbId: 888, arrInstance: "anime" }], "a complete Download must write the available cache like Radarr");
   assert.ok(executeRawCalls.some((sql) => sql.includes("pg_advisory_xact_lock(1001, 2)")));
 
-  // tvdbId is per-TITLE metadata (identical for the same series on every
-  // instance), so the backfill deliberately covers all rows missing it — a
-  // later tvdbId-only Download for either instance can then find its request.
+  // The backfill covers the FIRING instance's rows for the title (whatever
+  // their status), so a later tvdbId-only Download finds them. Never a
+  // sibling's: a stored tvdbId is read as "this instance's Sonarr tied the two
+  // ids" (the SeriesDelete check, the tvdbId flip), and the anime Sonarr's
+  // answer says nothing about the default instance's library.
   assert.equal(animeRow.tvdbId, 777);
-  assert.equal(defaultRow.tvdbId, 777);
+  assert.equal(animePending.tvdbId, 777);
+  assert.equal(defaultRow.tvdbId, null, "one instance's webhook must not stamp a tvdbId on another instance's request");
 
   // The verify hit the ANIME instance's URL with its own key — never the
   // default's. Sonarr's library row carries tmdbId 888, which settles the
@@ -1887,7 +2067,17 @@ test("sonarr grab completion is scoped to WHAT the Download delivered: an S03E02
   // Still-incomplete series: the request flip is skipped (guardrail 14a) but the
   // grab block runs — exactly the mid-import state where per-episode events
   // for OTHER episodes arrive before the grabbed release does.
-  scriptSonarr({ series: () => [{ tvdbId: 777, tmdbId: 888, status: "continuing", seasons: [season(1, 3, 10), season(3, 2, 10)] }] });
+  // Sonarr's files: S03E02 and S01E05 both landed after the grabs were fired.
+  scriptSonarr({
+    series: () => [{ id: 41, tvdbId: 777, tmdbId: 888, status: "continuing", seasons: [season(1, 3, 10), season(3, 2, 10)] }],
+    episodeFiles: [
+      { id: 410, seriesId: 41, seasonNumber: 3, dateAdded: FILE_AFTER_GRAB },
+      { id: 411, seriesId: 41, seasonNumber: 1, dateAdded: FILE_AFTER_GRAB },
+    ],
+    episodeRows: (url) => (url.searchParams.get("seasonNumber") === "1"
+      ? [{ id: 1, seriesId: 41, seasonNumber: 1, episodeNumber: 5, episodeFileId: 411 }]
+      : []),
+  });
   const episodeGrab = seedGrab({ tmdbId: 888, tvdbId: 777, mediaType: "TV", scope: "EPISODE", seasonNumber: 1, episodeNumber: 5 });
   const seasonGrab = seedGrab({ tmdbId: 888, tvdbId: 777, mediaType: "TV", scope: "SEASON", seasonNumber: 1 });
   const fullGrab = seedGrab({ tmdbId: 888, tvdbId: 777, mediaType: "TV", scope: "FULL" });
@@ -1925,7 +2115,8 @@ test("sonarr grab completion is scoped to WHAT the Download delivered: an S03E02
 test("sonarr issue-grab: a failed web push keeps notifiedAt set and does not re-emit arr.grab_completed", async () => {
   configureSonarr("");
   scriptSonarr({
-    series: () => [{ tvdbId: 777, tmdbId: 888, status: "continuing", seasons: [season(1, 3, 10)] }],
+    series: () => [{ id: 41, tvdbId: 777, tmdbId: 888, status: "continuing", seasons: [season(1, 3, 10)] }],
+    episodeFiles: [{ id: 410, seriesId: 41, seasonNumber: 1, dateAdded: FILE_AFTER_GRAB }],
   });
   honourAgentUrl();
   const grab = seedGrab({ tmdbId: 888, tvdbId: 777, mediaType: "TV", scope: "FULL" });
@@ -1970,6 +2161,123 @@ test("sonarr issue-grab: a failed web push keeps notifiedAt set and does not re-
   assert.ok(grab.notifiedAt instanceof Date);
   assert.equal(grabUpdateManyCalls.length, 1, "the second delivery must not re-CAS notifiedAt");
   assert.equal(settings.has(`grabPushRetry:${grab.id}`), true);
+});
+
+test("sonarr issue-grab: the claim needs Sonarr's own file in the grab's scope, newer than the grab — per episode, per season, per series", async () => {
+  configureSonarr("");
+  const episodeGrab = seedGrab({ tmdbId: 888, tvdbId: 777, mediaType: "TV", scope: "EPISODE", seasonNumber: 1, episodeNumber: 5 });
+  const seasonGrab = seedGrab({ tmdbId: 888, tvdbId: 777, mediaType: "TV", scope: "SEASON", seasonNumber: 2 });
+  const fullGrab = seedGrab({ tmdbId: 888, tvdbId: 777, mediaType: "TV", scope: "FULL" });
+  const script = (files: unknown, s1e5FileId: number | null) => scriptSonarr({
+    series: () => [{ id: 41, tvdbId: 777, tmdbId: 888, status: "continuing", seasons: [season(1, 3, 10), season(2, 1, 10)] }],
+    episodeFiles: files,
+    episodeRows: () => [
+      { id: 1, seriesId: 41, seasonNumber: 1, episodeNumber: 4, episodeFileId: 412 },
+      { id: 2, seriesId: 41, seasonNumber: 1, episodeNumber: 5, episodeFileId: s1e5FileId },
+    ],
+  });
+  // A delivery naming every scope, so only Sonarr's files decide.
+  let n = 0;
+  const deliver = async () => {
+    const { res } = await post(sonarrPOST, webhookReq("sonarr", {
+      token: SONARR_SECRET,
+      body: { eventType: "Download", series: { tvdbId: 777, tmdbId: 888 }, episodes: [{ seasonNumber: 1, episodeNumber: 5 }, { seasonNumber: 2, episodeNumber: 1 }], downloadId: `d${n++}` },
+    }));
+    assert.equal(res.status, 200);
+  };
+  const claimed = () => grabs.filter((g) => g.notifiedAt !== null).map((g) => g.id);
+
+  // Every file predates the grabs: a forged or premature Download claims nothing.
+  script([
+    { id: 411, seriesId: 41, seasonNumber: 1, dateAdded: FILE_BEFORE_GRAB },
+    { id: 412, seriesId: 41, seasonNumber: 1, dateAdded: FILE_BEFORE_GRAB },
+    { id: 420, seriesId: 41, seasonNumber: 2, dateAdded: FILE_BEFORE_GRAB },
+  ], 411);
+  await deliver();
+  assert.deepEqual(claimed(), []);
+  assert.equal(grabUpdateManyCalls.length, 0);
+
+  // A NEIGHBOUR episode of season 1 (S01E04) was replaced: the series has a new
+  // file (FULL), but S01E05's file is still the old one and season 2 has none new.
+  script([
+    { id: 411, seriesId: 41, seasonNumber: 1, dateAdded: FILE_BEFORE_GRAB },
+    { id: 412, seriesId: 41, seasonNumber: 1, dateAdded: FILE_AFTER_GRAB },
+    { id: 420, seriesId: 41, seasonNumber: 2, dateAdded: FILE_BEFORE_GRAB },
+    { id: 999, seriesId: 55, seasonNumber: 2, dateAdded: FILE_AFTER_GRAB },
+  ], 411);
+  await deliver();
+  assert.deepEqual(claimed(), [fullGrab.id], "another episode's new file, or another series' row, confirms neither the EPISODE nor the SEASON grab");
+
+  // S01E05 has no file at all (deleted, replacement still downloading).
+  script([{ id: 420, seriesId: 41, seasonNumber: 2, dateAdded: FILE_BEFORE_GRAB }], null);
+  await deliver();
+  assert.deepEqual(claimed(), [fullGrab.id]);
+
+  // The replacements landed.
+  script([
+    { id: 413, seriesId: 41, seasonNumber: 1, dateAdded: FILE_AFTER_GRAB },
+    { id: 421, seriesId: 41, seasonNumber: 2, dateAdded: FILE_AFTER_GRAB },
+  ], 413);
+  await deliver();
+  assert.deepEqual(claimed().sort(), [episodeGrab.id, seasonGrab.id, fullGrab.id].sort());
+});
+
+test("sonarr issue-grab: Sonarr unreachable claims nothing; a grab with no stored tvdbId is tied to the delivery's series only by Sonarr's own tmdbId", async () => {
+  // Unreachable (the base harness refuses every fetch): the verdict defers, and so does the claim.
+  configureSonarr("");
+  const grab = seedGrab({ tmdbId: 888, tvdbId: 777, mediaType: "TV", scope: "FULL" });
+  const down = await post(sonarrPOST, webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "Download", series: { tvdbId: 777, tmdbId: 888 }, downloadId: "x" } }));
+  assert.deepEqual(down.body, { ok: true, deferred: true, reason: "unverified" });
+  assert.equal(grab.notifiedAt, null);
+  assert.equal(grabUpdateManyCalls.length, 0);
+
+  // A grab for ANOTHER title (tmdb 999, no stored tvdbId), reached by a payload
+  // that pairs its tmdbId with a series Sonarr really holds and just imported
+  // (tvdb 777). The library row names no tmdbId and the lookup resolves
+  // nothing, so nothing ties 999 to 777: that series' fresh file is not this
+  // grab's replacement.
+  grabs.length = 0;
+  const untied = seedGrab({ tmdbId: 999, tvdbId: null, mediaType: "TV", scope: "FULL" });
+  const row = (tmdbId?: number) => [{ id: 41, tvdbId: 777, tmdbId, status: "continuing", seasons: [season(1, 10, 10)] }];
+  scriptSonarr({ series: () => row(), lookup: () => [], episodeFiles: [{ id: 410, seriesId: 41, seasonNumber: 1, dateAdded: FILE_AFTER_GRAB }] });
+  await post(sonarrPOST, webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "Download", series: { tvdbId: 777, tmdbId: 999 }, downloadId: "y" } }));
+  assert.equal(untied.notifiedAt, null);
+
+  // Sonarr's own row naming the grab's tmdbId is the tie.
+  scriptSonarr({ series: () => row(999), episodeFiles: [{ id: 410, seriesId: 41, seasonNumber: 1, dateAdded: FILE_AFTER_GRAB }] });
+  await post(sonarrPOST, webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "Download", series: { tvdbId: 777, tmdbId: 999 }, downloadId: "z" } }));
+  assert.ok((grabs[0].notifiedAt as Date | null) instanceof Date);
+});
+
+test("sonarr Download whose tmdbId NOTHING vouched for (library row without a tmdbId, lookup resolving nothing): the flip goes by the tvdbId only — a request found by that tmdbId alone is left to the sync", async () => {
+  // The forgery this closes: a series Sonarr really completed (tvdb 777)
+  // paired with any other title's tmdbId (999).
+  const otherTitle = seedRequest({ tmdbId: 999, tvdbId: null, mediaType: "TV", arrInstance: "" });
+  const tied = seedRequest({ tmdbId: 888, tvdbId: 777, mediaType: "TV", arrInstance: "" });
+  configureSonarr("");
+  scriptSonarr({ series: (url) => (url.searchParams.get("tvdbId") === "777" ? completeSeries(777) : []), lookup: () => [] });
+
+  const { body } = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "Download", series: { tvdbId: 777, tmdbId: 999, title: "Paired" } } }),
+  );
+  assert.deepEqual(body, { ok: true, marked: 1 });
+  assert.equal(otherTitle.status, "APPROVED", "an unconfirmed payload tmdbId must never find a request");
+  assert.equal(otherTitle.tvdbId, null, "and never stamps its tvdbId on one");
+  assert.equal(tied.status, "AVAILABLE", "the request this instance's Sonarr tied to the tvdbId still flips");
+  assert.ok(!sonarrWantedDeletes.some((d) => d.tmdbId === 999), "no cache row is keyed on the unconfirmed tmdbId");
+  assert.ok(!sonarrAvailableCreates.some((d) => d.tmdbId === 999));
+
+  // The lookup resolving the tmdbId to this tvdbId is the confirmation: then it flips by tmdbId.
+  const lagging = seedRequest({ tmdbId: 4242, tvdbId: null, mediaType: "TV", arrInstance: "" });
+  scriptSonarr({ series: (url) => (url.searchParams.get("tvdbId") === "778" ? completeSeries(778) : []), lookup: () => [{ tmdbId: 4242, tvdbId: 778 }] });
+  const confirmed = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "Download", series: { tvdbId: 778, tmdbId: 4242, title: "Confirmed" } } }),
+  );
+  assert.deepEqual(confirmed.body, { ok: true, marked: 1 });
+  assert.equal(lagging.status, "AVAILABLE");
+  assert.equal(lagging.tvdbId, 778);
 });
 
 test("sonarr: non-Download events and a Download without series are acknowledged skips with no writes", async () => {

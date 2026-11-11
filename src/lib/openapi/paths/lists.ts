@@ -116,7 +116,7 @@ export const listsPaths: OpenApiPaths = {
                 type: "object",
                 required: ["id", "createdAt", "tmdbId", "mediaType", "title", "posterPath", "userId", "reason"],
                 properties: {
-                  id: { type: "string", description: "The DeletionVote id — what POST /report `vote_reason` takes" },
+                  id: { type: "string", description: "The DeletionVote id (the caller's own vote; POST /report `vote_reason` takes only ANOTHER voter's id, from `reasonEntries`)" },
                   createdAt: { type: "string", format: "date-time" },
                   tmdbId: { type: "integer" },
                   mediaType: { $ref: "#/components/schemas/MediaType" },

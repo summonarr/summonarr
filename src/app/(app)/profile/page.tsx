@@ -165,7 +165,8 @@ export default async function ProfilePage() {
     adminMfaPolicyApplies({ role: session.user.role, provider: session.user.provider, settingValue: requireMfaRow?.value });
   const currentSessionId = session.sessionId;
   const webauthnAvailable = webAuthnConfigFromEnv() !== null;
-  // The step-up the password change and the account deletion both ask for.
+  // The step-up the password change, the account deletion and the Discord and
+  // Trakt link flows ask for.
   const secondFactor = mfaState
     ? { enabled: mfaState.enabled, hasPasskeys: mfaState.passkeys.length > 0, webauthnAvailable }
     : undefined;
@@ -188,6 +189,7 @@ export default async function ProfilePage() {
             <DiscordLinkSection
               linkedDiscordId={user.discordId}
               discordInviteUrl={discordInviteUrl}
+              secondFactor={secondFactor}
             />
           </ProfileCard>
 
@@ -309,6 +311,7 @@ export default async function ProfilePage() {
                 syncedAt={trakt.syncedAt}
                 uses={trakt.uses}
                 isJellyfin={isJellyfinUser || user.mediaServer === "jellyfin"}
+                secondFactor={secondFactor}
               />
             </ProfileCard>
           )}

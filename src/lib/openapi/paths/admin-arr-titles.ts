@@ -653,7 +653,7 @@ export const adminArrTitlePaths: OpenApiPaths = {
         },
         "202": jobAnswer("{ job } — searching in the background (or, polling `?job=`, { job, running: true } while it runs)", SEARCH_JOB),
         "400": { description: "Invalid scope" },
-        "403": { description: "Not ADMIN" },
+        "403": { description: "Not ADMIN, or the browser marked the request cross-site (`Sec-Fetch-Site: cross-site`) — a search is never started by a navigation from another site" },
         "404": { description: "Integration disabled, unknown instance or title, or (with `?job=`) the job is gone — expired, another admin's, or a restart; search again" },
         "429": { description: "Too many searches", headers: RETRY_AFTER_HEADER },
       },

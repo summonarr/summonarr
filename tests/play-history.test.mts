@@ -239,7 +239,7 @@ shadowPrismaModel(prisma, "tmdbCache", {
 });
 
 // $transaction: run the callback against an in-memory tx facade.
-type UserRow = { id: string; mediaServer: string | null; deactivatedAt: Date | null };
+type UserRow = { id: string; mediaServer: string | null; deactivatedAt: Date | null; createdByDelegate?: boolean };
 type MsuUpsertArgs = {
   where: { source_serverInstance_sourceUserId: { source: string; serverInstance: string; sourceUserId: string } };
   create: Record<string, unknown>;
@@ -887,6 +887,36 @@ test("resolveMediaServerUser: a DISABLED account still gets linked — its watch
   await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-3", username: "carol", email: "carol@example.com" });
   assert.equal(msuUpserts[0].create.userId, "user-8");
   assert.equal(msuUpserts[0].update.userId, "user-8");
+});
+
+// A MANAGE_USERS delegate chooses the email and password of an account it
+// creates, so an email match would hand it the watch history of whoever later
+// joins the media server under that address (guardrail 34d).
+test("resolveMediaServerUser: an account a delegate created is NEVER linked by email — on a new identity or an existing one", async () => {
+  userRow = { id: "user-puppet", mediaServer: null, deactivatedAt: null, createdByDelegate: true };
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-new", username: "friend", email: "future-friend@example.com" });
+  // The email lookup asks for the marker, and the identity stays unlinked.
+  assert.deepEqual(userFindCalls[1].where, { email: "future-friend@example.com" });
+  assert.deepEqual((userFindCalls[1] as { select?: unknown }).select, { id: true, mediaServer: true, createdByDelegate: true });
+  assert.equal(msuUpserts[0].create.userId, null);
+  assert.equal("userId" in msuUpserts[0].update, false, "an existing row is not re-bound either");
+
+  // Jellyfin, with the account pinned to that provider: still refused.
+  userRow = { id: "user-puppet", mediaServer: "jellyfin", deactivatedAt: null, createdByDelegate: true };
+  await resolveMediaServerUser({ source: "jellyfin", serverInstance: "", sourceUserId: "jf-new", username: "friend", email: "future-friend@example.com" });
+  assert.equal(msuUpserts[1].create.userId, null);
+
+  // The same account created by an ADMIN (no marker) links as before.
+  userRow = { id: "user-real", mediaServer: null, deactivatedAt: null, createdByDelegate: false };
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-new-2", username: "friend", email: "future-friend@example.com" });
+  assert.equal(msuUpserts[2].create.userId, "user-real");
+});
+
+test("resolveMediaServerUser: the provider subject still links a delegate-created account — only the email match is closed", async () => {
+  userBySub = { id: "user-puppet" };
+  userRow = { id: "user-puppet", mediaServer: null, deactivatedAt: null, createdByDelegate: true };
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-own", username: "owner", email: "owner@example.com" });
+  assert.equal(msuUpserts[0].create.userId, "user-puppet");
 });
 
 test("resolveMediaServerUser: the provider SUBJECT id links a user with no email on either side", async () => {

@@ -52,9 +52,14 @@ const { shadowPrismaModel } = await import("./_helpers.mts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 
-// Mirrors src/app/api/ratings/batch/route.ts.
+// The one per-user budget (src/lib/ratings-cold-budget.ts), spelled out here so
+// a changed number is a deliberate edit in two places.
 const ROUTE_MAX_BLOCKING_MISSES = 40;
 const COLD_LOOKUP_BUDGET = 600;
+const budget = await import("../src/lib/ratings-cold-budget.ts");
+if (budget.COLD_LOOKUP_BUDGET !== COLD_LOOKUP_BUDGET || budget.USER_MAX_BLOCKING_MISSES !== ROUTE_MAX_BLOCKING_MISSES) {
+  throw new Error("ratings-cold-budget.ts numbers changed: update this file's copies on purpose");
+}
 
 // ── auth fixture ─────────────────────────────────────────────────────────────
 const usersById = new Map<string, Record<string, unknown>>();
@@ -98,6 +103,8 @@ shadowPrismaModel(prisma, "setting", {
     return null;
   },
 });
+// GET /api/ratings reads the title's release year for its cache TTL bucket.
+shadowPrismaModel(prisma, "tmdbMediaCore", { findUnique: async () => null });
 type CacheRow = { key: string; data: string; cachedAt: Date; expiresAt: Date };
 const cacheRows = new Map<string, CacheRow>();
 shadowPrismaModel(prisma, "tmdbCache", {
@@ -186,6 +193,14 @@ function postBatch(token: string, ids: number[]): Promise<Response> {
   return inScope(() => ratingsBatch.POST(req, undefined));
 }
 
+const ratingsSingle = await import("../src/app/api/ratings/route.ts");
+function getRating(token: string, id: number): Promise<Response> {
+  const req = new NextRequest(`http://localhost:3000/api/ratings?id=${id}&type=movie`, {
+    headers: { cookie: `${COOKIE}=${token}` },
+  });
+  return inScope(() => ratingsSingle.GET(req, undefined));
+}
+
 function movie(id: number): TmdbMedia {
   return {
     id, mediaType: "movie", title: "", overview: "", posterPath: null, backdropPath: null,
@@ -238,6 +253,57 @@ test("past the hourly cold-lookup budget the route answers from the cache only: 
   const other = await mintSession();
   await postBatch(other, range(40_000, 10));
   assert.ok(omdbCalls() > 0, "a fresh user's cold titles still go upstream");
+});
+
+// ── one budget, every surface ───────────────────────────────────────────────
+
+test("GET /api/ratings spends the same budget: once the batch route has used it up, a cold title is answered from the cache only", async () => {
+  const token = await mintSession();
+  for (let i = 0; i < COLD_LOOKUP_BUDGET / 200; i++) {
+    assert.equal((await postBatch(token, range(80_000 + i * 200, 200))).status, 200);
+  }
+  calls.length = 0;
+  afterTasks.length = 0;
+
+  const cold = await getRating(token, 81_000);
+  assert.equal(cold.status, 200);
+  assert.equal(await cold.json(), null, "nothing is cached for it yet");
+  assert.equal(calls.length, 0, "no MDBList, TMDB or OMDb call for the cold title");
+
+  // A title the cache already rates is still answered (80_000 got its OMDb row
+  // from the first batch call), again with no upstream call.
+  const cached = await getRating(token, 80_000);
+  assert.equal(((await cached.json()) as { imdbRating: string | null }).imdbRating, "7.0");
+  assert.equal(calls.length, 0, "served from the cache");
+
+  // Another user's budget is their own.
+  const other = await mintSession();
+  const fresh = await getRating(other, 81_001);
+  assert.equal(((await fresh.json()) as { imdbRating: string | null }).imdbRating, "7.0");
+  assert.equal(omdbCalls(), 1, "a fresh user's cold title still goes upstream");
+});
+
+test("GET /api/ratings charges the budget only for cold titles: 600 cold lookups, then the 601st is cache-only", async () => {
+  const token = await mintSession();
+  // The route's own 60-a-minute limit would stop a real client long before
+  // this; spend the hour's budget directly.
+  const user = `viewer-${seq}`; // mintSession's newest user
+  for (let i = 0; i < COLD_LOOKUP_BUDGET - 1; i++) assert.equal(budget.admitColdLookup(user), true);
+
+  assert.equal(((await (await getRating(token, 82_000)).json()) as { imdbRating: string }).imdbRating, "7.0", "the 600th cold lookup is admitted");
+  const before = calls.length;
+  assert.equal(await (await getRating(token, 82_001)).json(), null);
+  assert.equal(calls.length, before, "the 601st cold title sends nothing");
+});
+
+test("a person's filmography waits for at most the per-request share of cold lookups", async () => {
+  // getEnrichedPerson needs a live TMDB person; the wiring is pinned at the
+  // source, the behaviour of the option by the batch-route test above.
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../src/lib/person.ts", import.meta.url), "utf8");
+  assert.match(src, /blockRatings:\s*true,\s*maxBlockingRatingMisses:\s*USER_MAX_BLOCKING_MISSES/);
+  const attachAll = readFileSync(new URL("../src/lib/attach-all.ts", import.meta.url), "utf8");
+  assert.match(attachAll, /maxBlockingMisses:\s*options\.maxBlockingRatingMisses/);
 });
 
 // ── concurrent deferred passes ──────────────────────────────────────────────

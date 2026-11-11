@@ -550,6 +550,25 @@ test("import listing: the instance's own manualimport for that download id, shap
   assert.equal(listing.query.get("downloadId"), "SABnzbd_nzo_1+2");
 });
 
+test("import listing: a GET the browser marks cross-site is refused before the arr is asked to scan; other origins pass", async () => {
+  responder = (c) => (c.path === "/api/v3/manualimport" ? json(manualRows) : undefined);
+  const token = await mintSession();
+  const get = (site: string | null) =>
+    inScope(() => (importRoute.GET as unknown as Handler)(
+      new NextRequest("http://localhost:3000/api/admin/queue/import?service=radarr&downloadId=SAB_1", {
+        headers: { cookie: `${COOKIE}=${token}`, ...(site !== null ? { "sec-fetch-site": site } : {}) },
+      }),
+      undefined,
+    ));
+  const refused = await get("cross-site");
+  assert.equal(refused.status, 403);
+  assert.equal(((await refused.json()) as { error: string }).error, "Forbidden — cross-site request");
+  assert.equal(arrCalls().length, 0, "no manual-import scan");
+  for (const site of ["same-origin", "same-site", "none", null]) {
+    assert.equal((await get(site)).status, 200, `Sec-Fetch-Site: ${site}`);
+  }
+});
+
 test("import listing: qualities/languages are conveniences — failing to read them still lists the files", async () => {
   responder = (c) => (c.path === "/api/v3/manualimport" ? json(manualRows) : c.path === "/api/v3/qualitydefinition" ? new Response("x", { status: 500 }) : undefined);
   const res = await call(importRoute.GET, await mintSession(), "/admin/queue/import?service=radarr&downloadId=SAB_1");

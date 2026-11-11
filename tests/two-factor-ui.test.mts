@@ -152,3 +152,39 @@ test("a typed step-up code: six digits (spaces aside) is an authenticator code, 
   assert.deepEqual(codeProof("abcd-efgh"), { method: "recovery", code: "abcd-efgh" });
   assert.deepEqual(codeProof("1234567"), { method: "recovery", code: "1234567" });
 });
+
+// The link flows behind the step-up (Discord link, Discord merge, Trakt
+// connect): the route asks a two-factor account for a fresh second factor once
+// the password passed (guardrail 6g).
+test("a link route's second-factor ask is the 400 secondFactorRequired answer, and nothing else", async () => {
+  const { asksSecondFactor, withSecondFactor } = await import("../src/lib/client/step-up.ts");
+  assert.equal(asksSecondFactor(400, { error: "…", secondFactorRequired: true, methods: ["totp"] }), true);
+  assert.equal(asksSecondFactor(400, { error: "…", secondFactorRequired: true }), true, "a refused code keeps the prompt open");
+  assert.equal(asksSecondFactor(400, { error: "Invalid Discord user id" }), false);
+  assert.equal(asksSecondFactor(401, { error: "password-required", secondFactorRequired: true }), false);
+  assert.equal(asksSecondFactor(400, null), false);
+  assert.equal(asksSecondFactor(400, { secondFactorRequired: "yes" }), false);
+  const body = { discordId: "1" };
+  assert.equal(withSecondFactor(body, undefined), body, "no proof, no field");
+  assert.deepEqual(withSecondFactor(body, { method: "totp", code: "123456" }), { discordId: "1", secondFactor: { method: "totp", code: "123456" } });
+});
+
+test("the Discord and Trakt link flows answer a second-factor ask with the shared prompt, and send the proof only with the password", () => {
+  const post = readFileSync(new URL("../src/components/use-step-up-post.ts", import.meta.url), "utf8");
+  const trakt = readFileSync(new URL("../src/components/profile/trakt-connect.tsx", import.meta.url), "utf8");
+  const discord = readFileSync(new URL("../src/components/discord-link-ui.tsx", import.meta.url), "utf8");
+  for (const [name, body] of [["use-step-up-post", post], ["trakt-connect", trakt]] as const) {
+    assert.match(body, /useSecondFactorStepUp\(\{ known: /, `${name}: the one shared second-factor hook`);
+    assert.match(body, /if \(confirmPassword && factor\.needsSecondFactor\) \{\s*const r = await factor\.secondFactorProof\(\);/, `${name}: the proof rides with the password`);
+    assert.match(body, /withSecondFactor\(withStepUpPassword\(/, `${name}: one request carries both`);
+    assert.match(body, /asksSecondFactor\(res\.status, [\s\S]{0,40}\)\) \{\s*setStepUp\(true\);\s*setStepUpError\(factor\.refusalMessage\(/, `${name}: an ask opens the prompt with the shared refusal text`);
+    assert.doesNotMatch(body, /\/api\/profile\/mfa\/challenge|buildSecondFactor\(/, `${name}: no private copy of the step-up flow`);
+  }
+  // Both Discord flows pass the page's knowledge on and render the shared field.
+  assert.equal(discord.match(/\}, secondFactor\);/g)?.length, 2);
+  assert.equal(discord.match(/<SecondFactorCodeField/g)?.length, 2);
+  assert.equal(trakt.match(/<SecondFactorCodeField/g)?.length, 1);
+  const page = readFileSync(new URL("../src/app/(app)/profile/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /<DiscordLinkSection[\s\S]{0,200}secondFactor=\{secondFactor\}/);
+  assert.match(page, /<TraktConnect[\s\S]{0,600}secondFactor=\{secondFactor\}/);
+});

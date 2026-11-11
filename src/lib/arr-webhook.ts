@@ -16,6 +16,7 @@ import { forwardArrHealthEvent } from "./arr-health-notify";
 import { emitNotificationEvent } from "./notify-agents";
 import { notifyAdminGrabCompletedPush } from "./push";
 import { autoResolveIssueForGrab } from "./issue-auto-resolve";
+import { confirmDeliveredGrabs } from "./arr-grab-confirm";
 import { warnOnChange, forgetWarnOnChange } from "./log-dedup";
 import { processSingleton } from "./process-singleton";
 
@@ -148,7 +149,8 @@ export async function handleArrWebhook<P extends { eventType?: unknown }>(
     // reads through its payload view (arr-webhook-payload.ts), never `P` itself.
     payload = parsed;
   } catch (err) {
-    console.warn(`${scope} 400 invalid JSON:`, err);
+    // The error's NAME only: a SyntaxError's message quotes a slice of the body.
+    console.warn(`${scope} 400 invalid JSON (${err instanceof Error ? err.name : "error"})`);
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
@@ -223,11 +225,29 @@ export async function handleArrWebhook<P extends { eventType?: unknown }>(
  * re-opening the emit (unclaiming notifiedAt used to re-fire the agents).
  * Callers pass only grabs this delivery completed, already scoped to the
  * firing instance.
+ *
+ * The delivery itself proves nothing (the secret is the only auth), and the
+ * first claim is one-shot: it tells the admin the replacement landed and can
+ * close the issue (guardrail 5j). So an UNCLAIMED grab is claimed only once
+ * the firing instance confirms a file in the grab's scope added after the grab
+ * (arr-grab-confirm.ts) — asked only when there is one to claim, so the
+ * common delivery pays no extra call. A refuted grab stays pending for a later
+ * delivery. Returned: the grabs the instance gave no usable answer for; the
+ * routes try those once more after the library scan. An already-claimed
+ * grab's push retry needs no confirmation: its emit was confirmed then.
  */
-export async function claimCompletedGrabs(grabs: IssueGrab[], service: ArrService): Promise<void> {
-  if (grabs.length === 0) return;
+export async function claimCompletedGrabs(
+  grabs: IssueGrab[],
+  service: ArrService,
+  delivery: { arrInstance: string; tvdbId?: number | null },
+): Promise<IssueGrab[]> {
+  if (grabs.length === 0) return [];
   const scope = `[webhook/${service}]`;
   const now = new Date();
+  const unclaimed = grabs.filter((grab) => grab.notifiedAt === null);
+  const confirmation = unclaimed.length > 0
+    ? await confirmDeliveredGrabs(service, delivery.arrInstance, unclaimed, { tvdbId: delivery.tvdbId })
+    : null;
   await Promise.all(
     grabs.map(async (grab) => {
       const retryKey = grabPushRetryKey(grab.id);
@@ -237,6 +257,8 @@ export async function claimCompletedGrabs(grabs: IssueGrab[], service: ArrServic
         const taken = await prisma.setting.deleteMany({ where: { key: { in: [retryKey] } } });
         if (taken.count === 0) return;
       } else {
+        // Not confirmed by the instance: no claim, no emit, no auto-resolve.
+        if (confirmation?.confirmed.has(grab.id) !== true) return;
         // CAS: ensure only one concurrent webhook fires the notification for this grab
         const claimed = await prisma.issueGrab.updateMany({
           where: { id: grab.id, notifiedAt: null },
@@ -271,6 +293,26 @@ export async function claimCompletedGrabs(grabs: IssueGrab[], service: ArrServic
       }
     }),
   );
+  return unclaimed.filter((grab) => confirmation?.unverified.has(grab.id) === true);
+}
+
+/**
+ * The one later attempt at the grabs a delivery could not verify (the instance
+ * gave no usable answer). Runs from the routes' after() work, once the library
+ * scan has waited out the instance's queue. Never throws; still unverifiable
+ * leaves them pending for a later delivery.
+ */
+export async function retryUnverifiedGrabs(
+  grabs: IssueGrab[],
+  service: ArrService,
+  delivery: { arrInstance: string; tvdbId?: number | null },
+): Promise<void> {
+  if (grabs.length === 0) return;
+  try {
+    await claimCompletedGrabs(grabs, service, delivery);
+  } catch (err) {
+    console.warn(`[webhook/${service}] deferred grab claim failed:`, err instanceof Error ? err.message : err);
+  }
 }
 
 const GRAB_PUSH_RETRY_PREFIX = "grabPushRetry:";

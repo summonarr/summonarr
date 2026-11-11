@@ -11,15 +11,19 @@
 //                          a fresh WebAuthn challenge so a PASSKEY can confirm an
 //                          enrollment change (step-up.ts), bound to the session.
 //
-// NONE of these can ever be a session. The session JWT is HS256 over its own
-// "session" subkey with a kid (or, for a pre-6h legacy token, the raw
-// NEXTAUTH_SECRET with typ "JWT"); these are HS256 over a different HKDF subkey
-// (domain-separated by purpose) with their own typ and no kid, so
-// verifySessionJwt rejects them on the header and the signature — and they
+// NONE of these can ever be a session. Each purpose is a signing purpose of its
+// own in signing-keys.ts (guardrail 6h): an HKDF subkey of NEXTAUTH_SECRET
+// domain-separated by purpose, signed with the current secret's kid, and
+// verified under the key that kid names — so NEXTAUTH_SECRET_PREVIOUS keeps a
+// challenge in flight alive across a planned rotation, like every other flow
+// token. A session JWT uses the "session" subkey with its own typ and audience
+// (or, for a pre-6h legacy token, the raw secret with typ "JWT"), so
+// verifySessionJwt rejects these on the signature and the header — and they
 // carry no `id`/`role` claims either, which verifySessionJwt also requires.
-// Symmetrically, a session JWT (or the other purpose's token) fails here on the
-// signature, the `typ` header and the audience. tests/mfa-token.test.mts pins
-// every direction.
+// Symmetrically, a session JWT (or another purpose's token) fails here on the
+// signature, the `typ` header and the audience. There is no fallback to the
+// keys these tokens were signed with before they moved into signing-keys.ts:
+// they live five minutes. tests/mfa-token.test.mts pins every direction.
 //
 // Single use: each token's jti is registered in an in-process ledger when it is
 // signed. A successful redemption CONSUMES it; a failed attempt counts against
@@ -28,9 +32,10 @@
 // long-lived Node server (guardrail 17) — so a restart simply kills every
 // in-flight token, which the 5-minute expiry makes harmless.
 
-import { hkdfSync, randomBytes } from "node:crypto";
-import { SignJWT, jwtVerify, type JWTPayload } from "jose";
+import { randomBytes } from "node:crypto";
+import { decodeJwt, type JWTPayload } from "jose";
 import { processSingleton } from "@/lib/process-singleton";
+import { signPurposeJwt, verifyPurposeJwt } from "@/lib/signing-keys";
 
 export const MFA_TOKEN_TTL_SECONDS = 5 * 60;
 export const MAX_TOKEN_FAILURES = 5;
@@ -47,12 +52,6 @@ const TYP: Record<Purpose, string> = {
   "passkey-register": "summonarr-passkey-reg+jwt",
   "mfa-stepup": "summonarr-mfa-stepup+jwt",
 };
-
-function keyFor(purpose: Purpose): Uint8Array {
-  const secret = process.env.NEXTAUTH_SECRET;
-  if (!secret) throw new Error("[mfa-token] NEXTAUTH_SECRET must be set");
-  return new Uint8Array(hkdfSync("sha256", secret, "summonarr-mfa-token", `summonarr:${purpose}:v1`, 32));
-}
 
 // ─── nonce ledger ───────────────────────────────────────────────────────────
 //
@@ -270,41 +269,31 @@ async function signPurposeToken(
   sub: string,
   claims: JWTPayload,
 ): Promise<{ token: string; jti: string; exp: number }> {
-  const now = Math.floor(Date.now() / 1000);
-  const exp = now + MFA_TOKEN_TTL_SECONDS;
   const jti = randomBytes(16).toString("base64url");
-  const token = await new SignJWT(claims)
-    .setProtectedHeader({ alg: "HS256", typ: TYP[purpose] })
-    .setSubject(sub)
-    .setAudience(AUDIENCE[purpose])
-    .setJti(jti)
-    .setIssuedAt(now)
-    .setExpirationTime(exp)
-    .sign(keyFor(purpose));
+  // signPurposeJwt stamps iat/exp itself; the ledger and the caller take the
+  // expiry the token actually carries.
+  const token = await signPurposeJwt(
+    purpose,
+    { ...claims, sub, jti },
+    { typ: TYP[purpose], audience: AUDIENCE[purpose], ttlSeconds: MFA_TOKEN_TTL_SECONDS },
+  );
+  const exp = decodeJwt(token).exp ?? Math.floor(Date.now() / 1000) + MFA_TOKEN_TTL_SECONDS;
   registerToken(jti, purpose, sub, exp);
   return { token, jti, exp };
 }
 
 type VerifiedPurposePayload = JWTPayload & { sub: string; jti: string; exp: number };
 
-// The payload of a valid `purpose` token, or null: wrong key, audience or typ
-// (the header's typ is compared exactly too), expired, oversized, or missing
-// its sub/jti/exp. Never throws — an unset NEXTAUTH_SECRET is a null here.
+// The payload of a valid `purpose` token, or null: wrong key, no or unknown
+// kid, wrong audience or typ, expired, oversized, or missing its sub/jti/exp.
+// Never throws — an unset NEXTAUTH_SECRET is a null here.
 async function verifyPurposeToken(purpose: Purpose, token: unknown): Promise<VerifiedPurposePayload | null> {
   if (typeof token !== "string" || token.length === 0 || token.length > MAX_TOKEN_LENGTH) return null;
-  try {
-    const { payload, protectedHeader } = await jwtVerify(token, keyFor(purpose), {
-      algorithms: ["HS256"],
-      audience: AUDIENCE[purpose],
-      typ: TYP[purpose],
-    });
-    if (protectedHeader.typ !== TYP[purpose]) return null;
-    const { sub, jti, exp } = payload;
-    if (typeof sub !== "string" || typeof jti !== "string" || typeof exp !== "number") return null;
-    return { ...payload, sub, jti, exp };
-  } catch {
-    return null;
-  }
+  const payload = await verifyPurposeJwt(purpose, token, { typ: TYP[purpose], audience: AUDIENCE[purpose] });
+  if (!payload) return null;
+  const { sub, jti, exp } = payload;
+  if (typeof sub !== "string" || typeof jti !== "string" || typeof exp !== "number") return null;
+  return { ...payload, sub, jti, exp };
 }
 
 // ─── sign-in challenge token ────────────────────────────────────────────────

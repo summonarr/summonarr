@@ -27,6 +27,21 @@ export function withStepUpPassword<T extends object>(body: T, confirmPassword: s
   return confirmPassword ? { ...body, confirmPassword } : body;
 }
 
+// A link route behind the step-up (Discord link, Discord merge, Trakt connect)
+// asks an account with an active second factor for a fresh one AFTER the
+// password passed: 400 { error, secondFactorRequired: true, methods? } — the
+// enrollment routes' refusal (guardrail 6d). True for the first ask and for a
+// refused code alike; the prompt stays open either way.
+export function asksSecondFactor(status: number, body: unknown): boolean {
+  if (status !== 400 || typeof body !== "object" || body === null) return false;
+  return (body as { secondFactorRequired?: unknown }).secondFactorRequired === true;
+}
+
+// The request body with the second-factor proof, when there is one to send.
+export function withSecondFactor<T extends object>(body: T, proof: SecondFactorProof | undefined): T & { secondFactor?: SecondFactorProof } {
+  return proof ? { ...body, secondFactor: proof } : body;
+}
+
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
 
 // The `secondFactor` body field a change behind the second-factor step-up sends.

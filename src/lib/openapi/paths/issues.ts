@@ -385,7 +385,7 @@ export const issuesPaths: OpenApiPaths = {
       responses: {
         "200": { description: "{ ok: true } — report received (a repeat report of the same item by the same caller answers ok without a second record)", content: { "application/json": { schema: OK_TRUE } } },
         "400": { description: "Unknown contentType or missing/oversized contentId" },
-        "404": { description: "The content does not exist, or it is an issue or issue message the caller can't see (only the reporter's own, or any with MANAGE_ISSUES)" },
+        "404": { description: "The content does not exist, or it is an issue or issue message the caller can't see (only the reporter's own, or any with MANAGE_ISSUES), or a vote reason the votes list would not show the caller: a vote with no reason, the caller's own vote, a title held only on a server the caller has no grant for, or the votes feature switched off" },
         "413": tooLargeAnswer(32 * 1024),
         "429": { description: "Rate limited (10/hour)" },
         "503": { description: "Maintenance mode" },

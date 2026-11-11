@@ -401,6 +401,24 @@ test("users: an ADMIN may still create an account under a media-server user's em
   assert.equal((await createUser(t, { email: "friend@example.com", password: "password12345" })).status, 201);
 });
 
+// The refusal above only sees identities that exist today. For someone who
+// joins the media server LATER, the account a delegate created is marked, and
+// automatic linking never binds a marked account by email (guardrail 34d).
+test("users: an account a delegate creates is marked createdByDelegate; an ADMIN's is not, and the marker never reaches the wire", async () => {
+  const delegate = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS | Permission.REQUEST | Permission.REQUEST_MOVIE | Permission.REQUEST_TV });
+  const made = await createUser(delegate, { email: "future-friend@example.com", password: "password12345" });
+  assert.equal(made.status, 201);
+  assert.equal((opsOf("user.create")[0].args as { createdByDelegate?: boolean }).createdByDelegate, true);
+  // The list and the create answer share one select (USER_SELECT): the marker is not in it.
+  await listUsers(delegate);
+  assert.equal("createdByDelegate" in (opsOf("user.findMany")[0].args as { select: object }).select, false);
+
+  ops.length = 0;
+  const admin = await mintSession({ role: "ADMIN" });
+  assert.equal((await createUser(admin, { email: "someone@example.com", password: "password12345" })).status, 201);
+  assert.equal("createdByDelegate" in (opsOf("user.create")[0].args as object), false, "the default (false) stands for an ADMIN's account");
+});
+
 // ── reserved domains (guardrail 34e) ─────────────────────────────────────────
 //
 // A local account holding `jellyfin-<id>@jellyfin.local` squats that Jellyfin

@@ -11,6 +11,7 @@ import { isFeatureEnabled } from "@/lib/features";
 import { apnsEndpointFor, legacyApnsEndpointFor } from "@/lib/apns-endpoint";
 import { evictOldestForCapInTx, lockUserPushRegistrationsInTx } from "@/lib/push-registration";
 import { readPushSubscriptionCap } from "@/lib/push-cap";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 import { parseApnsDeviceToken, parseApnsPublicKey, parsePushLabel } from "@/lib/push-body";
 
 // POST /api/push/apns — registers (or updates) an iOS device's APNs token as a
@@ -69,15 +70,18 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // the per-user lock (push-registration.ts, shared with /api/push/subscribe),
   // so concurrent registrations can't push the user one over the cap.
   const userId = session.user.id;
+  // True once the transaction has reached its final insert, so the unique
+  // violation mapped below is that insert's and no other statement's.
+  let inserting = false;
   const outcome = await prisma.$transaction(async (tx) => {
     await lockUserPushRegistrationsInTx(tx, userId);
     // Ownership again, under the lock: the per-user lock doesn't serialize two
     // ACCOUNTS, so another account may have registered this device since the
-    // check above, and the upsert's update branch would rewrite its row.
+    // check above.
     const owner = await tx.pushSubscription.findUnique({ where: { endpoint }, select: { userId: true } });
     if (owner && owner.userId !== userId) return "taken" as const;
     // The caller's own legacy-handle row: rename it onto the hashed handle (so
-    // the upsert below updates it, keeping its createdAt for the cap's
+    // the update below reaches it, keeping its createdAt for the cap's
     // oldest-first eviction), or drop it if the hashed row already exists. A
     // concurrent rename's P2002 propagates (guardrail 23) — the device simply
     // re-registers on its next launch.
@@ -89,24 +93,37 @@ export const POST = withAuth(async (req, _ctx, session) => {
     const current = legacyRow ? await tx.pushSubscription.findUnique({ where: { endpoint }, select: { userId: true } }) : owner;
     if (current?.userId !== userId) await evictOldestForCapInTx(tx, userId, cap);
 
-    await tx.pushSubscription.upsert({
-      where: { endpoint },
-      update: {
+    // Never an upsert by endpoint: another account can still insert this device
+    // after the read above, and an upsert's update branch would then rewrite
+    // THAT account's token and key. The update is owner-scoped, and the insert
+    // is the transaction's last statement, so its unique violation propagates
+    // (guardrail 23) and is answered as "taken" below.
+    const updated = await tx.pushSubscription.updateMany({
+      where: { endpoint, userId },
+      data: {
         platform: "ios",
         deviceToken: encryptToken(deviceToken),
         ...(publicKey.kind !== "keep" && { publicKey: publicKey.value }),
         ...(label !== undefined && { label }),
       },
-      create: {
-        endpoint,
-        platform: "ios",
-        deviceToken: encryptToken(deviceToken),
-        publicKey: publicKey.kind === "set" ? publicKey.value : null,
-        userId,
-        label,
-      },
     });
+    if (updated.count === 0) {
+      inserting = true;
+      await tx.pushSubscription.create({
+        data: {
+          endpoint,
+          platform: "ios",
+          deviceToken: encryptToken(deviceToken),
+          publicKey: publicKey.kind === "set" ? publicKey.value : null,
+          userId,
+          label,
+        },
+      });
+    }
     return "ok" as const;
+  }).catch((err: unknown) => {
+    if (inserting && isPrismaErrorCode(err, "P2002")) return "taken" as const;
+    throw err;
   });
 
   if (outcome === "taken") return deviceTaken(t);

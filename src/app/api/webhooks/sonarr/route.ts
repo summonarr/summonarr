@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import { safeCompareStrings } from "@/lib/safe-compare";
 import { prisma } from "@/lib/prisma";
+import type { IssueGrab } from "@/generated/prisma";
 import { CLAIMABLE_GRAB_ISSUE } from "@/lib/issue-grab";
 import { scheduleLibraryScan } from "@/lib/library-scan";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { isSeriesDownloadedInSonarr, resolveSingleTvdbToTmdb, type SeriesDownloadVerdict } from "@/lib/arr";
-import { claimCompletedGrabs, handleArrWebhook, type ArrWebhookContext } from "@/lib/arr-webhook";
+import { claimCompletedGrabs, handleArrWebhook, retryUnverifiedGrabs, type ArrWebhookContext } from "@/lib/arr-webhook";
 import {
   clearManualInteractionMarkers,
   manualInteractionMarkerKey,
@@ -13,7 +14,7 @@ import {
   notifyManualInteractionOnce,
 } from "@/lib/arr-webhook-events";
 import { grabMatchesDelivery, readSonarrPayload, sonarrEpisodeScope, type SonarrWebhookView } from "@/lib/arr-webhook-payload";
-import { flipApprovedSonarrRequests, type SonarrFlipResult } from "@/lib/sonarr-webhook-flip";
+import { confirmedFlipIds, flipApprovedSonarrRequests, type SonarrFlipResult } from "@/lib/sonarr-webhook-flip";
 import { evictArrCacheRows } from "@/lib/arr-cache-refresh";
 
 // Only the top level is checked before the handler (arr-webhook.ts); every
@@ -167,10 +168,12 @@ async function handleSeriesDownload(event: SonarrWebhookView, arrInstance: strin
   //                         breaking the operator's own Sonarr connectivity, and
   //                         a null now produces no REQUEST transition here.
   //                         The issue-grab claim below still runs on null
-  //                         (only the refused shapes return first), so it can
-  //                         auto-resolve an issue: that asks whether the
-  //                         grabbed release was imported, not whether the
-  //                         series is complete.
+  //                         (only the refused shapes return first): that asks
+  //                         whether the grabbed release was imported, not
+  //                         whether the series is complete — and it asks
+  //                         Sonarr itself (a file in the grab's scope newer
+  //                         than the grab) before it claims, so an unanswered
+  //                         check claims nothing here either.
   const verdict = await isSeriesDownloadedInSonarr(ids, arrInstance);
   const outcome = downloadOutcome(verdict);
   if (outcome.kind === "refused") {
@@ -179,7 +182,9 @@ async function handleSeriesDownload(event: SonarrWebhookView, arrInstance: strin
   }
 
   const flip: SonarrFlipResult = outcome.kind === "complete"
-    ? await flipApprovedSonarrRequests(ids, arrInstance, outcome.libraryTmdbId)
+    // Keyed on the payload's tmdbId only when Sonarr confirmed it for this
+    // series; otherwise by the tvdbId alone (confirmedFlipIds).
+    ? await flipApprovedSonarrRequests(confirmedFlipIds(ids, outcome.tmdbIdConfirmed), arrInstance, outcome.libraryTmdbId)
     : { count: 0, effectiveTmdbId: null, effectiveTvdbId: null };
 
   // A completed import ends the "stuck" episode the manual-interaction marker
@@ -194,10 +199,10 @@ async function handleSeriesDownload(event: SonarrWebhookView, arrInstance: strin
     ...(tmdbKey !== null ? [markerKey(arrInstance, `tmdb:${tmdbKey}`)] : []),
   ]);
 
-  // Deferred work runs after the response is sent; library scan and notification can be slow
-  after(() => afterSeriesImport(ids, arrInstance, flip, outcome.kind === "unverified"));
+  const unverifiedGrabs = await claimDeliveredGrabs(ids, event.episodes, arrInstance);
 
-  await claimDeliveredGrabs(ids, event.episodes, arrInstance);
+  // Deferred work runs after the response is sent; library scan and notification can be slow
+  after(() => afterSeriesImport(ids, arrInstance, flip, outcome.kind === "unverified", unverifiedGrabs));
 
   if (outcome.kind === "complete") return NextResponse.json({ ok: true, marked: flip.count });
   if (outcome.kind === "unverified") return NextResponse.json({ ok: true, deferred: true, reason: "unverified" });
@@ -216,7 +221,7 @@ async function handleSeriesDownload(event: SonarrWebhookView, arrInstance: strin
 }
 
 type DownloadOutcome =
-  | { kind: "complete"; libraryTmdbId: number | null }
+  | { kind: "complete"; libraryTmdbId: number | null; tmdbIdConfirmed: boolean }
   | { kind: "incomplete"; episodeFileCount: number; episodeCount: number }
   | { kind: "unverified" }
   // A forgery shape the guard refuses (its own field name: `reason` is the wire's).
@@ -225,7 +230,7 @@ type DownloadOutcome =
 // What a Download's verdict means for this event (see the table above).
 function downloadOutcome(verdict: SeriesDownloadVerdict | null): DownloadOutcome {
   if (verdict === null) return { kind: "unverified" };
-  if (verdict.downloaded) return { kind: "complete", libraryTmdbId: verdict.tmdbId };
+  if (verdict.downloaded) return { kind: "complete", libraryTmdbId: verdict.tmdbId, tmdbIdConfirmed: verdict.tmdbIdConfirmed };
   if (verdict.reason === "incomplete") {
     return { kind: "incomplete", episodeFileCount: verdict.episodeFileCount, episodeCount: verdict.episodeCount };
   }
@@ -239,11 +244,15 @@ async function afterSeriesImport(
   arrInstance: string,
   flip: SonarrFlipResult,
   deferVerify: boolean,
+  unverifiedGrabs: IssueGrab[],
 ): Promise<void> {
   // Scheduled on every confirmed, incomplete, or unverifiable import — an
   // episode landed either way, and the library should show it even while
   // the request stays APPROVED waiting for the rest of the series.
   await scheduleLibraryScan("tv", ids.tmdbId ?? undefined, arrInstance);
+  // The grabs Sonarr gave no answer for, once more now the scan has waited
+  // out its queue.
+  await retryUnverifiedGrabs(unverifiedGrabs, "sonarr", { arrInstance, tvdbId: ids.tvdbId });
 
   let { effectiveTmdbId, effectiveTvdbId } = flip;
   if (deferVerify) {
@@ -254,7 +263,7 @@ async function afterSeriesImport(
     try {
       const recheck = await isSeriesDownloadedInSonarr(ids, arrInstance);
       if (recheck?.downloaded !== true) return;
-      ({ effectiveTmdbId, effectiveTvdbId } = await flipApprovedSonarrRequests(ids, arrInstance, recheck.tmdbId));
+      ({ effectiveTmdbId, effectiveTvdbId } = await flipApprovedSonarrRequests(confirmedFlipIds(ids, recheck.tmdbIdConfirmed), arrInstance, recheck.tmdbId));
     } catch (err) {
       console.warn("[webhook/sonarr] deferred verification failed:", err instanceof Error ? err.message : err);
       return;
@@ -286,19 +295,26 @@ async function afterSeriesImport(
 // claimed an EPISODE grab fired for S01E05, and when that file finally landed
 // there was no notification left to send (notifiedAt is the emit claim and is
 // never reset). The Radarr twin needs none of this — one file per movie.
+// The payload's ids and episodes only pick CANDIDATES: the claim itself waits
+// for Sonarr to report a file in the grab's scope newer than the grab
+// (claimCompletedGrabs). Returns the grabs Sonarr gave no answer for.
 async function claimDeliveredGrabs(
   ids: { tvdbId: number | null; tmdbId: number | null },
   episodes: SonarrWebhookView["episodes"],
   arrInstance: string,
-): Promise<void> {
+): Promise<IssueGrab[]> {
   const idFilters = [
     ...(ids.tmdbId !== null ? [{ tmdbId: ids.tmdbId }] : []),
     ...(ids.tvdbId !== null ? [{ tvdbId: ids.tvdbId }] : []),
   ];
-  if (idFilters.length === 0) return;
+  if (idFilters.length === 0) return [];
   const candidateGrabs = await prisma.issueGrab.findMany({
     where: { OR: idFilters, mediaType: "TV", arrInstance, issue: CLAIMABLE_GRAB_ISSUE },
   });
   // The claim itself (and its push retry) is shared with the Radarr twin.
-  await claimCompletedGrabs(candidateGrabs.filter((grab) => grabMatchesDelivery(grab, episodes)), "sonarr");
+  return claimCompletedGrabs(
+    candidateGrabs.filter((grab) => grabMatchesDelivery(grab, episodes)),
+    "sonarr",
+    { arrInstance, tvdbId: ids.tvdbId },
+  );
 }

@@ -722,8 +722,8 @@ test("body handling: oversized → 413 (64 KB cap), malformed → 400, missing i
 
 // ── instance resolution (guardrail 32) ──────────────────────────────────────
 
-test("an unknown instance slug → 400, and a registered-but-unconfigured named instance → 400", async () => {
-  const a = await mintSession();
+test("an unknown instance slug → 400 for a request manager, and a registered-but-unconfigured named instance → 400 for a granted requester", async () => {
+  const a = await mintSession({ permissions: String(Permission.REQUEST | Permission.MANAGE_REQUESTS) });
   const unknown = await post(a.token, requestBody(a.userId, { arrInstance: "plex9000" }));
   assert.equal(unknown.status, 400);
   assert.deepEqual(await unknown.json(), { error: "That instance isn't available for requests" });
@@ -735,6 +735,25 @@ test("an unknown instance slug → 400, and a registered-but-unconfigured named 
   assert.deepEqual(await unconfigured.json(), {
     error: 'Requests to "Anime" aren\'t available — that instance isn\'t configured',
   });
+  assert.equal(opsOf("mediaRequest.create").length, 0);
+});
+
+test("a plain requester can't tell an unknown slug from a restricted or unconfigured instance they hold no grant for: the same 403, no name", async () => {
+  // 400 for "exists but unavailable" against 403 for "not granted" let any
+  // signed-in user map the restricted instances and read an unconfigured one's
+  // display name.
+  seedAnimeInstance({ configured: false });
+  const u = await mintSession();
+  const answers = [];
+  for (const arrInstance of ["plex9000", "anime"]) {
+    const res = await post(u.token, requestBody(u.userId, { arrInstance }));
+    answers.push([res.status, await res.json()]);
+  }
+  seedAnimeInstance();
+  const configured = await post(u.token, requestBody(u.userId, { arrInstance: "anime" }));
+  answers.push([configured.status, await configured.json()]);
+  const forbidden = [403, { error: "You don't have permission to request this" }];
+  assert.deepEqual(answers, [forbidden, forbidden, forbidden]);
   assert.equal(opsOf("mediaRequest.create").length, 0);
 });
 

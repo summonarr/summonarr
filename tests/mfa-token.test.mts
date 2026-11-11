@@ -6,6 +6,7 @@
 import { test, beforeEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import { SignJWT } from "jose";
+import { hkdfSync } from "node:crypto";
 
 process.env.NEXTAUTH_SECRET = "mfa-token-test-secret-0123456789abcdef";
 
@@ -29,8 +30,14 @@ const {
   MFA_TOKEN_TTL_SECONDS,
 } = await import("../src/lib/mfa/mfa-token.ts");
 const { signSessionJwt, verifySessionJwt } = await import("../src/lib/session-jwt.ts");
+const { signingKey, keyIdFor } = await import("../src/lib/signing-keys.ts");
 
-beforeEach(() => resetMfaTokenLedgerForTests());
+const SECRET = process.env.NEXTAUTH_SECRET!;
+beforeEach(() => {
+  resetMfaTokenLedgerForTests();
+  process.env.NEXTAUTH_SECRET = SECRET;
+  delete process.env.NEXTAUTH_SECRET_PREVIOUS;
+});
 
 const INPUT = { userId: "user-1", native: false, pwv: "pwv-abc", rememberMe: "true", webauthnChallenge: "Y2hhbGxlbmdl" };
 
@@ -75,6 +82,79 @@ test("a token signed with the RAW session secret (right claims, wrong key) is re
     .setExpirationTime(now + 60)
     .sign(new TextEncoder().encode(process.env.NEXTAUTH_SECRET));
   assert.equal(await verifyMfaSigninToken(forged), null);
+});
+
+// One token of each purpose, and the verifier of each purpose.
+async function oneOfEach(): Promise<Record<"mfa-signin" | "passkey-register" | "mfa-stepup", string>> {
+  return {
+    "mfa-signin": (await signMfaSigninToken(INPUT)).token,
+    "passkey-register": (await signPasskeyRegisterToken({ userId: "user-1", sessionId: "s1", challenge: "abc", factorVerified: true })).token,
+    "mfa-stepup": (await signMfaStepUpToken({ userId: "user-1", sessionId: "s1", challenge: "abc" })).token,
+  };
+}
+const VERIFIERS = {
+  "mfa-signin": (t: unknown) => verifyMfaSigninToken(t),
+  "passkey-register": (t: unknown) => verifyPasskeyRegisterToken(t),
+  "mfa-stepup": (t: unknown) => verifyMfaStepUpToken(t),
+} as const;
+type MfaPurpose = keyof typeof VERIFIERS;
+const MFA_PURPOSES = Object.keys(VERIFIERS) as MfaPurpose[];
+const headerOf = (token: string): Record<string, unknown> =>
+  JSON.parse(Buffer.from(token.split(".")[0], "base64url").toString("utf8"));
+
+test("guardrail 6h: each two-factor token verifies under its own purpose only, is never a session, and carries the current secret's kid", async () => {
+  const tokens = await oneOfEach();
+  for (const minted of MFA_PURPOSES) {
+    assert.equal(headerOf(tokens[minted]).kid, keyIdFor(SECRET), `${minted} names its signing secret`);
+    assert.equal(headerOf(tokens[minted]).alg, "HS256");
+    assert.equal(await verifySessionJwt(tokens[minted]), null, `${minted} is not a session`);
+    for (const verifier of MFA_PURPOSES) {
+      const ok = (await VERIFIERS[verifier](tokens[minted])) !== null;
+      assert.equal(ok, minted === verifier, `${minted} token under the ${verifier} verifier`);
+    }
+  }
+  // Three distinct typ headers: no two purposes share one.
+  assert.equal(new Set(MFA_PURPOSES.map((p) => headerOf(tokens[p]).typ)).size, 3);
+});
+
+// A sign-in challenge shaped exactly right, signed by hand under `key`.
+async function handSigned(key: Uint8Array, header: Record<string, unknown>): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  return new SignJWT({ native: false, pwv: "pwv-abc" })
+    .setProtectedHeader({ alg: "HS256", typ: "summonarr-mfa+jwt", ...header })
+    .setSubject("user-1")
+    .setAudience("summonarr:mfa-signin")
+    .setJti("x")
+    .setIssuedAt(now)
+    .setExpirationTime(now + 60)
+    .sign(key);
+}
+
+test("guardrail 6h: the purpose's key alone is not enough — another purpose's key, a missing kid and the pre-move derivation are all refused", async () => {
+  const kid = keyIdFor(SECRET);
+  assert.ok(await verifyMfaSigninToken(await handSigned(signingKey("mfa-signin").key, { kid })), "the control: right key, right kid");
+  assert.equal(await verifyMfaSigninToken(await handSigned(signingKey("mfa-stepup").key, { kid })), null, "the step-up purpose's key");
+  assert.equal(await verifyMfaSigninToken(await handSigned(signingKey("session").key, { kid })), null, "the session purpose's key");
+  assert.equal(await verifyMfaSigninToken(await handSigned(signingKey("mfa-signin").key, {})), null, "no kid");
+  // How these tokens were keyed before they moved into signing-keys.ts: no
+  // fallback, so a challenge in flight at that deploy fails once.
+  const before = new Uint8Array(hkdfSync("sha256", SECRET, "summonarr-mfa-token", "summonarr:mfa-signin:v1", 32));
+  assert.equal(await verifyMfaSigninToken(await handSigned(before, {})), null, "the old derivation, as it was signed");
+  assert.equal(await verifyMfaSigninToken(await handSigned(before, { kid })), null, "the old derivation with a kid");
+});
+
+test("guardrail 6h rotation: a challenge signed under the old secret verifies only while NEXTAUTH_SECRET_PREVIOUS holds it, and nothing is signed with the previous secret", async () => {
+  const OLD = "mfa-token-old-secret-fedcba9876543210";
+  process.env.NEXTAUTH_SECRET = OLD;
+  const tokens = await oneOfEach();
+  process.env.NEXTAUTH_SECRET = SECRET;
+  for (const p of MFA_PURPOSES) assert.equal(await VERIFIERS[p](tokens[p]), null, `${p}: rotated with no PREVIOUS ⇒ gone`);
+  process.env.NEXTAUTH_SECRET_PREVIOUS = OLD;
+  for (const p of MFA_PURPOSES) assert.ok(await VERIFIERS[p](tokens[p]), `${p}: PREVIOUS keeps it alive`);
+  // Still cross-purpose-proof under the previous key.
+  assert.equal(await verifyMfaStepUpToken(tokens["mfa-signin"]), null);
+  const fresh = (await signMfaSigninToken(INPUT)).token;
+  assert.equal(headerOf(fresh).kid, keyIdFor(SECRET), "new tokens are signed with the current secret");
 });
 
 test("an expired or tampered challenge token is refused", async () => {

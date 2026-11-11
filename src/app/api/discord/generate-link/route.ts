@@ -5,6 +5,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { requireStepUp } from "@/lib/step-up-auth";
+import { requireStepUpSecondFactor } from "@/lib/step-up-second-factor";
 import { logAudit, auditContext } from "@/lib/audit";
 import { generateDiscordLinkToken } from "@/lib/discord-link-token";
 import { isFeatureEnabled } from "@/lib/features";
@@ -24,7 +25,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
 
   let discordId: string | null = null;
-  const body = await readJsonCappedOr<{ discordId?: unknown; confirmPassword?: unknown }>(req, 16 * 1024, {});
+  const body = await readJsonCappedOr<{ discordId?: unknown; confirmPassword?: unknown; secondFactor?: unknown }>(req, 16 * 1024, {});
   if (body instanceof NextResponse) return body;
   // Reject a discordId that is present but not a valid Discord id (a
   // "snowflake"), instead of quietly ignoring it. The /link command in
@@ -57,6 +58,10 @@ export const POST = withAuth(async (req, _ctx, session) => {
     t,
   });
   if (denied) return denied;
+  // An account with an active second factor also presents a fresh one, after
+  // the password and before any code is minted (step-up-second-factor.ts).
+  const factorDenied = await requireStepUpSecondFactor({ req, session, secondFactor: body.secondFactor, context: "discord-link" });
+  if (factorDenied) return factorDenied;
 
   // 16 random bytes = 128 bits (32 hex characters), far too many to guess.
   // Only its SHA-256 is stored: the code itself exists only in this response

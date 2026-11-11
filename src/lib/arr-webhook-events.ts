@@ -23,6 +23,20 @@ const SERVICE_NAME: Record<ArrService, "Radarr" | "Sonarr"> = { radarr: "Radarr"
 const MANUAL_MARKER_PREFIX = "manualInteractionNotified:";
 const MANUAL_MARKER_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
+/** The longest title a ManualInteractionRequired alert carries. */
+export const MAX_MANUAL_INTERACTION_TITLE = 200;
+
+/**
+ * The alert's title as it is sent on. The text is the payload's (remote,
+ * vouched for only by the webhook secret) and goes to every admin's devices and
+ * the outbound agents: control characters out, whitespace collapsed, bounded —
+ * the same treatment a Health message gets (arr-health-notify.ts).
+ */
+export function manualInteractionTitle(raw: string): string {
+  const cleaned = raw.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  return cleaned.length > MAX_MANUAL_INTERACTION_TITLE ? `${cleaned.slice(0, MAX_MANUAL_INTERACTION_TITLE - 1)}…` : cleaned;
+}
+
 /**
  * The ManualInteractionRequired marker of one stuck item, keyed on its STABLE
  * id on the firing instance — never the volatile queue id or progress. Radarr
@@ -45,7 +59,7 @@ export function manualInteractionMarkerKey(service: ArrService, arrInstance: str
  * The push and outbound event run after the response, chained with the prune
  * that bounds the marker table: one deferred unit of work per fresh claim.
  * The title is remote-controlled text: it reaches the admins through the
- * structured push, never a log line.
+ * structured push, never a log line, and only as manualInteractionTitle leaves it.
  */
 export async function notifyManualInteractionOnce(opts: {
   service: ArrService;
@@ -63,9 +77,10 @@ export async function notifyManualInteractionOnce(opts: {
   });
   if (claim.count !== 1) return;
   const instanceName = opts.instances.find((i) => i.slug === opts.arrInstance)?.name;
+  const title = manualInteractionTitle(opts.title) || "An import";
   after(async () => {
-    emitNotificationEvent({ event: "arr.manual_interaction", text: `${SERVICE_NAME[opts.service]}: ${opts.title}`, request: { instance: opts.arrInstance } });
-    await notifyAdminsManualInteractionRequiredPush({ service: SERVICE_NAME[opts.service], title: opts.title, instanceName })
+    emitNotificationEvent({ event: "arr.manual_interaction", text: `${SERVICE_NAME[opts.service]}: ${title}`, request: { instance: opts.arrInstance } });
+    await notifyAdminsManualInteractionRequiredPush({ service: SERVICE_NAME[opts.service], title, instanceName })
       .catch((err) => console.warn(`${scope} manual-interaction alert failed:`, err));
     // A marker row is inserted per distinct stuck item and never removed, so
     // prune those older than 30 days — ISO-8601 values sort lexically =

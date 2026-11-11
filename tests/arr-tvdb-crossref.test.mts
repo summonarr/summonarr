@@ -309,7 +309,8 @@ test("webhook verify: stays Sonarr-sourced — a WRONG TMDB cross-reference can'
       : [];
 
   const verdict = await isSeriesDownloadedInSonarr({ tvdbId: TVDB, tmdbId: TMDB });
-  assert.deepEqual(verdict, { downloaded: true, tmdbId: null, episodeFileCount: 8, episodeCount: 8 });
+  // Complete on its tvdbId; the payload's tmdbId stays unconfirmed (nothing Sonarr-sourced tied it).
+  assert.deepEqual(verdict, { downloaded: true, tmdbId: null, tmdbIdConfirmed: false, episodeFileCount: 8, episodeCount: 8 });
   assert.equal(lookups("tvdb:").length, 0, "the verify never consults the cross-reference");
   assert.ok(!warns.some((w) => w.includes("payload ids disagree")));
 });

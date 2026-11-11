@@ -11,7 +11,9 @@ import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { StepUpPasswordForm } from "@/components/profile/step-up-password-form";
-import { stepUpNeedOf, withStepUpPassword } from "@/lib/client/step-up";
+import { asksSecondFactor, stepUpNeedOf, withSecondFactor, withStepUpPassword, type SecondFactorProof } from "@/lib/client/step-up";
+import { useSecondFactorStepUp, type KnownSecondFactor } from "./use-second-factor-step-up";
+import { SecondFactorCodeField } from "./second-factor-code-field";
 import { readDeviceCode, type DeviceCode } from "./trakt-device-poll";
 import { useTraktDevicePoll, type PollEnd } from "./use-trakt-device-poll";
 
@@ -32,7 +34,12 @@ export interface TraktConnectProps {
   uses: { watchlist: boolean; history: boolean };
   // A Jellyfin user gets a line on why Trakt is their watchlist.
   isJellyfin: boolean;
+  // What the page knew about the account's two-factor setup when it rendered.
+  secondFactor?: KnownSecondFactor;
 }
+
+// fetchJson exposes no headers, and a second-factor refusal needs none.
+const NO_HEADERS = { get: () => null };
 
 type TraktStatus = TraktConnectProps["status"];
 
@@ -73,6 +80,10 @@ export function TraktConnect(props: TraktConnectProps) {
   // "password-required" and this asks for the password inline.
   const [stepUp, setStepUp] = useState(false);
   const [stepUpError, setStepUpError] = useState<string | null>(null);
+  // An account with two-factor confirms with a fresh one too: the code field
+  // shows inside the password prompt (from the start when the page knew, else
+  // once the server answers `secondFactorRequired`).
+  const factor = useSecondFactorStepUp({ known: props.secondFactor, failedMessage: t("profile.trakt.error.connect") });
   const poller = useTraktDevicePoll(endPoll);
 
   // A poll run's outcome: the code is done with either way.
@@ -121,8 +132,22 @@ export function TraktConnect(props: TraktConnectProps) {
   async function start(confirmPassword?: string) {
     setBusy("start");
     setError(null);
+    // The proof rides with the password only, never the first password-less click.
+    let proof: SecondFactorProof | undefined;
+    if (confirmPassword && factor.needsSecondFactor) {
+      const r = await factor.secondFactorProof();
+      if (!poller.alive()) return;
+      if (!("proof" in r)) {
+        // No code and no passkey to use, or the passkey prompt failed or was
+        // cancelled (null): nothing is sent.
+        setBusy(null);
+        setStepUpError(r.error);
+        return;
+      }
+      proof = r.proof;
+    }
     const res = await fetchJson(withBasePath("/api/profile/trakt/device"), {
-      init: jsonInit("POST", withStepUpPassword({}, confirmPassword)),
+      init: jsonInit("POST", withSecondFactor(withStepUpPassword({}, confirmPassword), proof)),
       fallbackError: t("profile.trakt.error.connect"),
     });
     // The page went while the code was being made: start no poll for it.
@@ -137,6 +162,13 @@ export function TraktConnect(props: TraktConnectProps) {
     if (need) {
       setStepUp(true);
       setStepUpError(need === "retry" ? t("profile.sessions.error.incorrectPassword") : null);
+      return;
+    }
+    // The password passed and the account has two-factor: keep the prompt open,
+    // now with the code field, and say what to enter (or that the code was refused).
+    if (!res.ok && asksSecondFactor(res.status, data)) {
+      setStepUp(true);
+      setStepUpError(factor.refusalMessage({ status: res.status, headers: NO_HEADERS }, data, proof !== undefined, t("profile.trakt.error.connect")));
       return;
     }
     const code = res.ok ? readDeviceCode(data) : null;
@@ -278,7 +310,16 @@ export function TraktConnect(props: TraktConnectProps) {
               error={stepUpError}
               onSubmit={(password) => void start(password)}
               onCancel={() => { setStepUp(false); setStepUpError(null); }}
-            />
+            >
+              {factor.needsSecondFactor && (
+                <SecondFactorCodeField
+                  id="trakt-stepup-code"
+                  value={factor.stepUpCode}
+                  onChange={factor.setStepUpCode}
+                  passkeyPossible={factor.passkeyPossible}
+                />
+              )}
+            </StepUpPasswordForm>
           ) : (
             <Button type="button" disabled={busy !== null} onClick={() => void start()} className="w-full sm:w-auto gap-1.5">
               {busy === "start" ? <Loader2 className="w-4 h-4 animate-spin" /> : <LinkIcon className="w-4 h-4" />}

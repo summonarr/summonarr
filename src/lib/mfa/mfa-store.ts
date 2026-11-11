@@ -112,7 +112,8 @@ export function webAuthnUserHandle(userId: string): string {
 // nothing about the hash itself. A changed password ⇒ a different value ⇒ the
 // pending challenge is dead.
 //
-// The key is an HKDF subkey of NEXTAUTH_SECRET (like mfa-token.ts keyFor), never
+// The key is an HKDF subkey of NEXTAUTH_SECRET derived here (it is an HMAC
+// fingerprint, not a signer, so it is not a signing-keys.ts purpose), never
 // the raw secret: that one signs session JWTs, and every use of a key outside
 // its purpose is a cross-protocol risk. Changing the derivation changes every
 // pwv value, so challenge tokens in flight at a deploy (5-minute TTL) die.

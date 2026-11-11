@@ -198,6 +198,26 @@ const pushModel = {
     for (const r of hit) Object.assign(r, args.data);
     return { count: hit.length };
   },
+  // `endpoint` is UNIQUE here too: inserting a taken one is P2002.
+  create: async (args: { data: Partial<SubRow> & { endpoint: string } }) => {
+    if (subRows.some((r) => r.endpoint === args.data.endpoint)) {
+      throw new Prisma.PrismaClientKnownRequestError("Unique constraint failed on endpoint", { code: "P2002", clientVersion: "0.0.0-test" });
+    }
+    const row: SubRow = {
+      id: `stored-${++subSeq}`,
+      createdAt: new Date(),
+      platform: "web", // schema default; apns create overrides to "ios"
+      p256dh: null,
+      auth: null,
+      deviceToken: null,
+      publicKey: null,
+      label: null,
+      userId: null,
+      ...args.data,
+    };
+    subRows.push(row);
+    return { ...row };
+  },
   upsert: async (args: {
     where: { endpoint: string };
     create: Partial<SubRow> & { endpoint: string };
@@ -890,6 +910,68 @@ test("POST /api/push/apns re-checks ownership under the lock: a device another a
   assert.equal(subRows.length, 1);
   assert.equal(subRows[0].userId, "racing-account");
   assert.equal(subRows[0].label, "Their phone", "the other account's row was not updated");
+});
+
+// Another account's registration of the same endpoint commits AFTER the
+// transaction's ownership read and BEFORE its write: the per-user lock
+// serializes one account, not two. `seed` runs right after that read answers.
+async function withInsertAfterOwnershipRead<T>(seed: () => void, fn: () => Promise<T>): Promise<T> {
+  const tx = txObj.pushSubscription as { findUnique: typeof pushModel.findUnique };
+  const realFind = tx.findUnique;
+  tx.findUnique = async (args) => {
+    const found = await realFind(args);
+    tx.findUnique = realFind;
+    seed();
+    return found;
+  };
+  try {
+    return await fn();
+  } finally {
+    tx.findUnique = realFind;
+  }
+}
+
+test("POST /api/push/subscribe: an endpoint another account inserts after the ownership read is a 409, and that account's keys are not rewritten", async () => {
+  const { token } = await mintSession();
+  let before: SubRow | undefined;
+  const res = await withInsertAfterOwnershipRead(
+    () => { before = { ...seedWebSub("racing-account", "raced-endpoint") }; },
+    () => callRoute(subscribePost, pushReq("subscribe", { token, body: webBody("raced-endpoint", { label: "Mine now" }) })),
+  );
+  assert.ok(before, "the racing insert ran");
+  assert.equal(res.status, 409);
+  assert.deepEqual(await res.json(), { error: "Endpoint already registered to another user" });
+  assert.equal(subRows.length, 1);
+  assert.deepEqual(subRows[0], before, "the other account's row (keys, label, owner) is untouched");
+});
+
+test("POST /api/push/apns: a device another account inserts after the in-transaction ownership read is a 409, and its token and key are not rewritten", async () => {
+  const RACED = "1f2e3d4c".repeat(8);
+  const { token } = await mintSession();
+  let before: SubRow | undefined;
+  const res = await withInsertAfterOwnershipRead(
+    () => { before = { ...seedIosSub("racing-account", RACED, { label: "Their phone" }) }; },
+    () => callRoute(apnsPost, pushReq("apns", { token, body: { deviceToken: RACED, label: "Mine now" } })),
+  );
+  assert.ok(before, "the racing insert ran");
+  assert.equal(res.status, 409);
+  assert.deepEqual(await res.json(), { error: "Device already registered to another account" });
+  assert.equal(subRows.length, 1);
+  assert.deepEqual(subRows[0], before, "the other account's row is untouched");
+});
+
+test("a unique violation on any statement but the final insert is NOT answered as taken (the legacy-handle rename's still propagates)", async () => {
+  const RACED = "5a6b7c8d".repeat(8);
+  const { userId, token } = await mintSession();
+  seedIosSub(userId, RACED, { endpoint: `apns:${RACED}` });
+  // The hashed handle appears after the ownership read, so the rename collides.
+  await assert.rejects(
+    withInsertAfterOwnershipRead(
+      () => { seedIosSub("racing-account", RACED); },
+      () => callRoute(apnsPost, pushReq("apns", { token, body: { deviceToken: RACED } })),
+    ),
+    (err: unknown) => (err as { code?: string }).code === "P2002",
+  );
 });
 
 // ── /api/push/apns — the endpoint handle is a hash, never the raw token ──────

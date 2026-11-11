@@ -10,16 +10,22 @@ import { useT } from "@/components/i18n/i18n-provider";
 // (src/lib/client/step-up.ts, guardrail 6g). The parent owns the request: it
 // calls `onSubmit(password)` and passes back `busy` and any `error` (e.g.
 // "Incorrect password.") to show beside the field that produced it.
+//
+// `children` is the second-factor code field, for an account that confirms with
+// one too (use-step-up-post.ts): it sits on its own line between the password
+// and the buttons, so the tab order is password, code, Continue.
 export function StepUpPasswordForm({
   busy,
   error,
   onSubmit,
   onCancel,
+  children,
 }: {
   busy: boolean;
   error: string | null;
   onSubmit: (password: string) => void;
   onCancel: () => void;
+  children?: React.ReactNode;
 }) {
   const t = useT();
   const id = useId();
@@ -47,6 +53,7 @@ export function StepUpPasswordForm({
           aria-invalid={error ? true : undefined}
           className="flex-1 min-w-0 sm:flex-none sm:w-56"
         />
+        {children && <div className="basis-full">{children}</div>}
         <Button type="submit" disabled={!password || busy}>
           {busy && <Loader2 className="w-4 h-4 animate-spin" />}
           {t("profile.stepUp.continue")}

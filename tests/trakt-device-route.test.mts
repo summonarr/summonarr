@@ -41,6 +41,7 @@ const { shadowPrismaModel } = await import("./_helpers.mts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { hashPassword } = await import("../src/lib/password-hash.ts");
+const { base32Decode, generateTotpSecret, hotp, totpStep } = await import("../src/lib/mfa/totp.ts");
 
 const users = new Map<string, Record<string, unknown>>();
 const sessions = new Map<string, Date>();
@@ -49,7 +50,40 @@ shadowPrismaModel(prisma, "user", {
     const u = users.get(args.where.id);
     return u ? { ...u } : null;
   },
+  // The second-factor lockout counter (mfa/lockout.ts): one atomic increment
+  // per wrong code, cleared by a correct one.
+  update: async (args: { where: { id: string }; data: { mfaFailedAttempts?: { increment: number } } }) => {
+    const u = users.get(args.where.id)!;
+    if (args.data.mfaFailedAttempts) u.mfaFailedAttempts = (u.mfaFailedAttempts as number) + args.data.mfaFailedAttempts.increment;
+    return { ...u };
+  },
+  updateMany: async () => ({ count: 0 }),
 });
+// Two-factor rows (guardrail 6d: the factor ROWS decide "has 2FA"). Only an
+// authenticator app is modelled.
+type TotpRow = { userId: string; secret: string; enabledAt: Date | null; lastUsedStep: number | null };
+const totps: TotpRow[] = [];
+shadowPrismaModel(prisma, "userTotp", {
+  findUnique: async (args: { where: { userId: string } }) => {
+    const row = totps.find((t) => t.userId === args.where.userId);
+    return row ? { ...row } : null;
+  },
+  updateMany: async (args: { where: { userId: string }; data: { lastUsedStep: number } }) => {
+    const row = totps.find((t) => t.userId === args.where.userId && t.enabledAt !== null);
+    if (!row || (row.lastUsedStep !== null && row.lastUsedStep >= args.data.lastUsedStep)) return { count: 0 };
+    row.lastUsedStep = args.data.lastUsedStep;
+    return { count: 1 };
+  },
+});
+shadowPrismaModel(prisma, "webAuthnCredential", { findMany: async () => [], findFirst: async () => null });
+shadowPrismaModel(prisma, "mfaRecoveryCode", { count: async () => 0, findMany: async () => [] });
+function seedTotp(userId: string): Buffer {
+  const secret = generateTotpSecret();
+  totps.push({ userId, secret, enabledAt: new Date(), lastUsedStep: null });
+  return base32Decode(secret)!;
+}
+const currentCode = (key: Buffer) => hotp(key, totpStep(Date.now()));
+const wrongCode = (key: Buffer) => (currentCode(key) === "000000" ? "111111" : "000000");
 shadowPrismaModel(prisma, "authSession", {
   findUnique: async (args: { where: { sessionId: string } }) => {
     const createdAt = sessions.get(args.where.sessionId);
@@ -82,6 +116,7 @@ async function mint(opts: { passwordHash?: string | null; sessionAgeMs?: number 
   users.set(id, {
     id, role: "USER", permissions: 0n, mediaServer: null, sessionsRevokedAt: null, passwordChangedAt: null,
     deactivatedAt: null, email: `${id}@example.com`, notificationEmail: null, passwordHash: opts.passwordHash ?? null,
+    mfaFailedAttempts: 0, mfaLockoutCount: 0, mfaLockedUntil: null,
   });
   sessions.set(sessionId, new Date(Date.now() - (opts.sessionAgeMs ?? 0)));
   const iat = Math.floor(Date.now() / 1000);
@@ -124,4 +159,44 @@ test("an SSO account must have signed in within 5 minutes", async () => {
   assert.equal(traktCalls, 0);
   const fresh = await post(await mint());
   assert.equal(fresh.status, 200);
+});
+
+// A session minted by relaying the password plus ONE code holds exactly the
+// password, and a Trakt connection survives the owner's password change. So an
+// account with two-factor also presents a FRESH second factor — after the
+// password, before Trakt is contacted.
+test("a 2FA account needs a fresh second factor too: the password alone, or a wrong code, never reaches Trakt", async () => {
+  const token = await mint({ passwordHash: HASH });
+  const userId = `user-${seq}`;
+  const key = seedTotp(userId);
+  const alone = await post(token, { confirmPassword: PASSWORD });
+  assert.equal(alone.status, 400);
+  const asked = await alone.json();
+  assert.equal(asked.secondFactorRequired, true);
+  assert.deepEqual(asked.methods, ["totp"]);
+  const wrong = await post(token, { confirmPassword: PASSWORD, secondFactor: { method: "totp", code: wrongCode(key) } });
+  assert.equal(wrong.status, 400);
+  assert.equal((await wrong.json()).secondFactorRequired, true);
+  assert.equal(users.get(userId)!.mfaFailedAttempts, 1, "the same persistent budget as sign-in");
+  assert.equal(traktCalls, 0, "no device code is requested without the second factor");
+  const ok = await post(token, { confirmPassword: PASSWORD, secondFactor: { method: "totp", code: currentCode(key) } });
+  assert.equal(ok.status, 200);
+  assert.equal(traktCalls, 1);
+});
+
+test("a wrong password is refused before the code is looked at, so the code is not burned", async () => {
+  const token = await mint({ passwordHash: HASH });
+  const userId = `user-${seq}`;
+  const key = seedTotp(userId);
+  const res = await post(token, { confirmPassword: "nope-nope-nope", secondFactor: { method: "totp", code: currentCode(key) } });
+  assert.equal(res.status, 401);
+  assert.equal((await res.json()).error, "invalid-password");
+  assert.equal(totps.find((t) => t.userId === userId)!.lastUsedStep, null);
+  assert.equal(traktCalls, 0);
+});
+
+test("an account WITHOUT 2FA is unchanged: a stray secondFactor is ignored", async () => {
+  const res = await post(await mint({ passwordHash: HASH }), { confirmPassword: PASSWORD, secondFactor: { method: "totp", code: "123456" } });
+  assert.equal(res.status, 200);
+  assert.deepEqual(Object.keys(await res.json()).sort(), ["expiresIn", "interval", "userCode", "verificationUrl"]);
 });

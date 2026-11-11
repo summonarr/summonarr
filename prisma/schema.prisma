@@ -40,6 +40,16 @@ model User {
   // row can never be re-enabled into a usable account: there is no identity left
   // to sign in with. Always accompanied by a non-null deactivatedAt.
   purgedAt      DateTime?
+  // True when the account was created through POST /api/admin/users by a
+  // MANAGE_USERS delegate (a caller without the ADMIN bit), who chose its email
+  // and password. Automatic media-server identity linking never binds such an
+  // account by EMAIL (resolveMediaServerUser, the hourly Jellyfin user sync —
+  // guardrail 34d): otherwise a delegate could pre-create an account under the
+  // address of someone about to join the server and read their watch history
+  // once the identity appeared. A provider-subject match and an ADMIN's manual
+  // link are unaffected. Never cleared — an ADMIN who wants the identity
+  // attributed to this account links it by hand.
+  createdByDelegate Boolean @default(false)
   role          Role      @default(USER)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt

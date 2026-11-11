@@ -23,6 +23,11 @@ export interface SonarrFlipResult {
  * cache rows as available. `libraryTmdbId` is the confirming verdict's: Sonarr's
  * own tmdbId for the series. Never touches notifiedAvailable: the CAS
  * elsewhere is the sole authority (guardrail 14).
+ *
+ * `ids.tmdbId` must be one Sonarr CONFIRMED for this series (the verdict's
+ * `tmdbIdConfirmed`): requests are found by it. A caller holding only an
+ * unconfirmed payload tmdbId passes null (`confirmedFlipIds`), and the flip
+ * goes by the tvdbId, exactly as for a payload that carried none.
  */
 export async function flipApprovedSonarrRequests(
   ids: { tmdbId: number | null; tvdbId: number | null },
@@ -60,9 +65,12 @@ async function flipByTmdbId(tmdbId: number, tvdbId: number | null, arrInstance: 
     await tx.sonarrAvailableItem.createMany({ data: [{ tmdbId, arrInstance }], skipDuplicates: true });
     // Backfill tvdbId on the matched request(s): a later Download for the same
     // series may carry only the tvdbId, and that path finds the request by it.
+    // The firing instance's rows only: a stored tvdbId is read as "this
+    // instance's Sonarr tied the two ids" (the SeriesDelete check, the tvdbId
+    // flip), and one instance's answer says nothing about another's library.
     if (tvdbId !== null) {
       await tx.mediaRequest.updateMany({
-        where: { tmdbId, mediaType: "TV", tvdbId: null },
+        where: { tmdbId, mediaType: "TV", arrInstance, tvdbId: null },
         data: { tvdbId },
       });
     }
@@ -110,4 +118,19 @@ async function flipByTvdbId(
   if (count === 0) return { count, effectiveTmdbId: null, effectiveTvdbId: null };
   if (tied) void clearDeletionVotesForTmdbs([{ tmdbId: tied.tmdbId, mediaType: "TV" }]);
   return { count, effectiveTmdbId: null, effectiveTvdbId: tvdbId };
+}
+
+/**
+ * The ids a Download's flip may key on. Sonarr verified the payload's tvdbId
+ * (the library row was found by it), but the payload's tmdbId only when the
+ * verdict says so: a pair nothing vouched for (a library row with no tmdbId and
+ * a lookup that resolved nothing) must never find requests by that tmdbId, or a
+ * caller holding the secret could pair a series Sonarr really completed with
+ * any other title's tmdbId (guardrail 14a).
+ */
+export function confirmedFlipIds(
+  ids: { tmdbId: number | null; tvdbId: number | null },
+  tmdbIdConfirmed: boolean,
+): { tmdbId: number | null; tvdbId: number | null } {
+  return tmdbIdConfirmed ? ids : { tmdbId: null, tvdbId: ids.tvdbId };
 }

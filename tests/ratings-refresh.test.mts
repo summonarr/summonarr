@@ -231,6 +231,25 @@ test("deferToAfter:false on an MDBList-less instance: a stale OMDB row on a miss
   );
 });
 
+test("on an MDBList-less instance a title that already holds an OMDB row is never charged to a cold-lookup budget", async () => {
+  // With no MDBList key every title lacks an MDBList row forever. Charging the
+  // caller's budget for each of them on every call would spend it on titles
+  // that send nothing upstream as cold lookups (their stale rows refresh
+  // unbudgeted, like any stale row).
+  const items = staleOmdbTitles(700);
+  let asked = 0;
+  await attachRatingsUnified(items, { blocking: true, deferToAfter: false, admitMiss: () => { asked++; return false; } });
+  assert.equal(asked, 0, "no title here is cold");
+  assertBoundedRefresh("budgeted call");
+
+  // A title with no row at all IS charged, and a refusal sends nothing for it.
+  fetchHosts.length = 0;
+  const out = await attachRatingsUnified([movie(799)], { blocking: true, deferToAfter: false, admitMiss: () => { asked++; return false; } });
+  assert.equal(asked, 1);
+  assert.equal(fetchHosts.filter((h) => UPSTREAM_HOSTS.has(h)).length, 0);
+  assert.equal(out[0].imdbRating ?? null, null);
+});
+
 test("deferToAfter:false when MDBList answered not-found: the stale-OMDB pass alone is bounded and awaited", async () => {
   // A fresh MDBList sentinel keeps these titles out of the miss path, so the
   // stale-OMDB pass is the only thing that refreshes them.

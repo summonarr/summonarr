@@ -28,9 +28,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: t("apiAuth.quickConnect.secretRequired") }, { status: 400 });
   }
 
-  // Verify the QC secret was issued by THIS server to THIS browser. Without
-  // this, an attacker who phishes a secret can redeem it from their own
-  // browser and end up with a Summonarr session as the approving user.
+  // Verify the QC secret was issued by THIS server to whoever presents the
+  // flow token. That stops one thing: redeeming a secret this server never
+  // issued to the presenter (one obtained elsewhere, or issued to another
+  // browser). It does NOT stop an attacker who starts the flow here
+  // themselves, holds its valid flow token, and gets a Jellyfin user to
+  // approve that code: approving a device flow someone else started is
+  // inherent to Quick Connect.
   // Native clients have no cookie jar — fall back to the flowState the QC
   // initiation route returns in the body for them (CORS-sound: a cross-origin
   // page can't read that body). Web keeps using the HttpOnly cookie.

@@ -14,6 +14,8 @@ const {
   ratingCapsVerdict,
   autoApprovesOn,
   enforcedQuota,
+  alertAdminsNewRequest,
+  ADMIN_ALERT_BUDGET,
 } = await import("../src/lib/request-policy.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
 
@@ -57,6 +59,27 @@ test("an explicit slug wins and is validated against the registry; an unknown on
 test("a registered but unconfigured non-default instance is unavailable, by name", async () => {
   const r = await resolve({ arrInstance: "anime", configured: new Set([""]), perms: Permission.ADMIN });
   assert.deepEqual(r, { ok: false, reason: "instance-unavailable", instanceName: "Anime" });
+});
+
+test("to a plain requester an explicit slug that is unknown, ungranted or unconfigured-and-ungranted is the same refusal", async () => {
+  // 400 "unavailable" (with the instance's name) for a registered slug and 403
+  // for an ungranted one would let any signed-in user map the restricted
+  // instances. All three read as forbidden, and no name is carried.
+  const forbidden = { ok: false, reason: "forbidden" };
+  assert.deepEqual(await resolve({ arrInstance: "nope" }), forbidden, "unknown slug");
+  assert.deepEqual(await resolve({ arrInstance: "anime" }), forbidden, "registered, configured, not granted");
+  assert.deepEqual(await resolve({ arrInstance: "anime", configured: new Set([""]) }), forbidden, "registered, unconfigured, not granted");
+  assert.deepEqual(await resolve({ is4k: true, configured: new Set([""]) }), forbidden, "the 4K shorthand follows the same rule");
+});
+
+test("a requester GRANTED the instance, and a request manager, still get the specific unavailable answers", async () => {
+  const granted = await resolve({ arrInstance: "anime", configured: new Set([""]), grants: { anime: { request: true } } });
+  assert.deepEqual(granted, { ok: false, reason: "instance-unavailable", instanceName: "Anime" });
+  const managerPerms = REQUESTER | Permission.MANAGE_REQUESTS;
+  assert.deepEqual(await resolve({ arrInstance: "nope", perms: managerPerms }), { ok: false, reason: "instance-unavailable" });
+  // The explicit default is never part of the probe rule.
+  const def = await resolve({ arrInstance: "" });
+  assert.equal(def.ok && def.instance.slug, "");
 });
 
 test("is4k is shorthand for the 4k instance, and an explicit target the requester can't use is refused", async () => {
@@ -146,4 +169,29 @@ test("autoApprovesOn: a role grant is the global auto-approve bit — never 4K o
   assert.equal(autoApprovesOn(REQUESTER, ANIME, { anime: { request: true, autoApprove: true } }, "TV", true), true);
   assert.equal(autoApprovesOn(REQUESTER | Permission.AUTO_APPROVE_4K, FOURK, {}, "MOVIE", true), true);
   assert.equal(autoApprovesOn(Permission.ADMIN, ANIME, {}, "MOVIE"), true);
+});
+
+// ── the admin "new request" alert budget ────────────────────────────────────
+
+function alertFor(actor: string, scheduled: Array<() => Promise<void>>): boolean {
+  return alertAdminsNewRequest(
+    {
+      requestId: "r1", tmdbId: 603, mediaType: "MOVIE", instance: "", title: "The Matrix", posterPath: null,
+      releaseYear: "1999", requestedBy: "Someone", note: null, excludeUserId: actor,
+    },
+    // Recorded, never run: the task would reach the mailer and push senders.
+    (task) => { scheduled.push(task); },
+  );
+}
+
+test("one account raises at most ADMIN_ALERT_BUDGET admin alerts an hour; past it only the fan-out is dropped", () => {
+  const scheduled: Array<() => Promise<void>> = [];
+  for (let i = 0; i < ADMIN_ALERT_BUDGET; i++) assert.equal(alertFor("looper", scheduled), true);
+  assert.equal(scheduled.length, ADMIN_ALERT_BUDGET);
+  // A create → cancel loop keeps calling; nothing more is scheduled.
+  for (let i = 0; i < 50; i++) assert.equal(alertFor("looper", scheduled), false);
+  assert.equal(scheduled.length, ADMIN_ALERT_BUDGET, "no email, push, Discord or agent event past the budget");
+  // The budget is per acting account.
+  assert.equal(alertFor("someone-else", scheduled), true);
+  assert.equal(scheduled.length, ADMIN_ALERT_BUDGET + 1);
 });

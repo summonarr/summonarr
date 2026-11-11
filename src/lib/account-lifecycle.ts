@@ -5,7 +5,7 @@ import { verifyIdentifierPrefixFor } from "./notification-email-verify";
 import { deleteAllMfaInTx } from "./mfa/mfa-store";
 import { scrubTargetPiiFromAudit, scrubLegacySessionRevokePii, scrubOwnedRequestPii, scrubRequesterPii } from "./audit-scrub";
 import { REDACTED_USER_NAME } from "./audit";
-import { Permission } from "./permissions";
+import { MANAGEMENT_MASK, Permission, effectivePermissions } from "./permissions";
 import { Prisma } from "@/generated/prisma";
 
 // The extended client's transaction client (see PrismaTxClient in ./prisma).
@@ -24,6 +24,11 @@ export class NotDeactivatedError extends Error {}
 // the acting delegate lacks the ADMIN bit (a promotion landed after the route's
 // first, unlocked read).
 export class TargetBecameAdminError extends Error {}
+
+// Raised when the target, re-read under lock 42, holds management permissions
+// the acting delegate does not (see targetOutranksCaller) — it was granted them
+// after the route's first, unlocked read.
+export class TargetOutranksCallerError extends Error {}
 
 // Raised when the target's row is gone by the time the transaction re-reads it
 // (a shadow account hard-deleted by a Discord merge, say). Routes answer 404.
@@ -50,6 +55,40 @@ export function isAdminTarget(row: { role: string; permissions?: bigint | null }
   return typeof row.permissions === "bigint" && (row.permissions & Permission.ADMIN) !== 0n;
 }
 
+// A MANAGE_USERS delegate manages accounts at or below its own level: it may not
+// act on a peer holding a management permission (MANAGEMENT_MASK) it lacks
+// itself — an ISSUE_ADMIN, or a MANAGE_REQUESTS holder, seen by a caller with
+// MANAGE_USERS alone. Otherwise a delegate could demote, disable, purge, strip
+// the second factor of, or sign out a colleague whose authority an ADMIN granted
+// and the delegate could never grant back. A target with the same or fewer
+// management bits stays manageable — that is the delegated job. The target's
+// mask is the EFFECTIVE one (an unseeded ISSUE_ADMIN row still holds
+// MANAGE_ISSUES); `callerPerms` is the session's effective mask. An ADMIN caller
+// is never outranked; an ADMIN target is isAdminTarget's business, answered
+// first by every gate.
+export function targetOutranksCaller(
+  row: { role: string; permissions?: bigint | null } | null | undefined,
+  callerPerms: bigint,
+): boolean {
+  if (!row) return false;
+  if ((callerPerms & Permission.ADMIN) !== 0n) return false;
+  const held = effectivePermissions(row.role, typeof row.permissions === "bigint" ? row.permissions : 0n);
+  return (held & MANAGEMENT_MASK & ~callerPerms) !== 0n;
+}
+
+// Why a caller may not act on a target, or null when it may: "admin" — an admin
+// target and a caller without the ADMIN bit; "outranks" — targetOutranksCaller.
+// The one decision every delegate-reachable users/[id] handler makes, before
+// its transaction and again inside it (lockTargetInTx).
+export function targetRefusal(
+  row: { role: string; permissions?: bigint | null } | null | undefined,
+  callerPerms: bigint,
+): "admin" | "outranks" | null {
+  if ((callerPerms & Permission.ADMIN) !== 0n) return null;
+  if (isAdminTarget(row)) return "admin";
+  return targetOutranksCaller(row, callerPerms) ? "outranks" : null;
+}
+
 export interface LockedTarget {
   role: string;
   permissions: bigint | null;
@@ -67,20 +106,24 @@ type LockTx = {
 };
 
 // Takes lock 42, re-reads the target INSIDE the transaction, and refuses a
-// non-ADMIN caller when it is an admin target now. Returns the fresh row, or null
-// when it is gone. Call it first in the tx that performs the action.
-export async function lockTargetInTx(tx: LockTx, id: string, callerIsAdmin: boolean): Promise<LockedTarget | null> {
+// non-ADMIN caller when it is an admin target now, or holds management
+// permissions the caller lacks (targetRefusal). `callerPerms` is the caller's
+// effective mask; a system caller passes Permission.ADMIN. Returns the fresh
+// row, or null when it is gone. Call it first in the tx that performs the action.
+export async function lockTargetInTx(tx: LockTx, id: string, callerPerms: bigint): Promise<LockedTarget | null> {
   await lockUserRolesInTx(tx);
   const fresh = await tx.user.findUnique({
     where: { id },
     select: { role: true, permissions: true, deactivatedAt: true },
   });
-  if (isAdminTarget(fresh) && !callerIsAdmin) throw new TargetBecameAdminError();
+  const refusal = targetRefusal(fresh, callerPerms);
+  if (refusal === "admin") throw new TargetBecameAdminError();
+  if (refusal === "outranks") throw new TargetOutranksCallerError();
   return fresh;
 }
 
-export async function assertTargetNotAdminInTx(tx: LockTx, id: string, callerIsAdmin: boolean): Promise<void> {
-  await lockTargetInTx(tx, id, callerIsAdmin);
+export async function assertTargetNotAdminInTx(tx: LockTx, id: string, callerPerms: bigint): Promise<void> {
+  await lockTargetInTx(tx, id, callerPerms);
 }
 
 // The tombstone address a purge rewrites `email` to. RFC-2606 reserved `.invalid`

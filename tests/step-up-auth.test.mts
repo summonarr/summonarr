@@ -283,6 +283,23 @@ test("every isNativeSessionForStepUp call is awaited, and both native-exempt rou
   for (const [file, { calls, awaited }] of callers) assert.equal(awaited, calls, `${file}: every call is awaited`);
 });
 
+test("every route that plants a link asks for a fresh second factor right after the password step-up, before anything else", () => {
+  // A redeemed Discord link and a Trakt connection survive a password change
+  // (guardrail 6g), and the password is all a relayed sign-in holds.
+  for (const route of [
+    "src/app/api/discord/generate-link/route.ts",
+    "src/app/api/discord/initiate-merge/route.ts",
+    "src/app/api/profile/trakt/device/route.ts",
+  ]) {
+    const src = readFileSync(route, "utf-8");
+    assert.match(
+      src,
+      /if \(denied\) return denied;\n(?:\s*\/\/[^\n]*\n)*\s*const factorDenied = await requireStepUpSecondFactor\(\{ req, session, secondFactor: \w+\.secondFactor, context: "[a-z-]+" \}\);\n\s*if \(factorDenied\) return factorDenied;/,
+      `${route}: the second factor follows the password with nothing between`,
+    );
+  }
+});
+
 test("the security notice lists what is still connected — for a password change or sign-out, never for the link itself", () => {
   const linked = { discordId: "123456789012345678", traktUsername: "alice" };
   assert.equal(

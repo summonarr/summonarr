@@ -58,7 +58,10 @@ const {
   lockTargetInTx,
   assertTargetNotAdminInTx,
   isAdminTarget,
+  targetOutranksCaller,
+  targetRefusal,
   TargetBecameAdminError,
+  TargetOutranksCallerError,
   USER_ROLE_LOCK_SQL,
 } = await import("../src/lib/account-lifecycle.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
@@ -546,16 +549,16 @@ test("lockTargetInTx: lock 42 FIRST, then the re-read; a non-ADMIN caller is ref
       },
     },
   } as unknown as Parameters<typeof lockTargetInTx>[0];
-  await assert.rejects(() => lockTargetInTx(tx, ID, false), (err: unknown) => err instanceof TargetBecameAdminError);
+  await assert.rejects(() => lockTargetInTx(tx, ID, Permission.MANAGE_USERS), (err: unknown) => err instanceof TargetBecameAdminError);
   assert.deepEqual(opNames(), ["$executeRawUnsafe", "user.findUnique"]);
   assert.deepEqual(opArgs("$executeRawUnsafe"), { sql: USER_ROLE_LOCK_SQL, params: [] });
   assert.equal(USER_ROLE_LOCK_SQL, "SELECT pg_advisory_xact_lock(42)");
   // The wrapper the session/purge/reactivate routes call applies the same rule.
   ops.length = 0;
-  await assert.rejects(() => assertTargetNotAdminInTx(tx, ID, false), (err: unknown) => err instanceof TargetBecameAdminError);
+  await assert.rejects(() => assertTargetNotAdminInTx(tx, ID, Permission.MANAGE_USERS), (err: unknown) => err instanceof TargetBecameAdminError);
   // A full admin may act on it, and gets the fresh row back.
   ops.length = 0;
-  assert.deepEqual(await lockTargetInTx(tx, ID, true), lockedState);
+  assert.deepEqual(await lockTargetInTx(tx, ID, Permission.ADMIN), lockedState);
 });
 
 test("isAdminTarget: role ADMIN OR the ADMIN bit; ISSUE_ADMIN, management bits and a missing row are not admin targets", () => {
@@ -565,6 +568,52 @@ test("isAdminTarget: role ADMIN OR the ADMIN bit; ISSUE_ADMIN, management bits a
   assert.equal(isAdminTarget({ role: "USER", permissions: Permission.MANAGE_USERS }), false);
   assert.equal(isAdminTarget({ role: "USER", permissions: null }), false);
   assert.equal(isAdminTarget(null), false);
+});
+
+// A delegate manages accounts at or below its own level: a peer holding a
+// management permission the caller lacks is off limits, by the same gate.
+test("targetOutranksCaller: a management bit the caller lacks outranks it; the same or fewer bits, baseline bits and an ADMIN caller do not", () => {
+  const usersOnly = Permission.MANAGE_USERS | Permission.REQUEST;
+  // Effective mask: an unseeded ISSUE_ADMIN row (permissions 0) still holds MANAGE_ISSUES.
+  assert.equal(targetOutranksCaller({ role: "ISSUE_ADMIN", permissions: 0n }, usersOnly), true);
+  assert.equal(targetOutranksCaller({ role: "USER", permissions: Permission.MANAGE_USERS | Permission.MANAGE_REQUESTS }, usersOnly), true);
+  assert.equal(targetOutranksCaller({ role: "USER", permissions: Permission.MANAGE_ISSUES }, usersOnly), true);
+  // The same or fewer management bits stay manageable — the delegated job.
+  assert.equal(targetOutranksCaller({ role: "USER", permissions: Permission.MANAGE_USERS }, usersOnly), false);
+  assert.equal(targetOutranksCaller({ role: "USER", permissions: 0n }, usersOnly), false);
+  assert.equal(targetOutranksCaller({ role: "USER", permissions: null }, usersOnly), false);
+  assert.equal(targetOutranksCaller({ role: "ISSUE_ADMIN", permissions: 0n }, usersOnly | Permission.MANAGE_ISSUES), false);
+  // Non-management bits the caller lacks are the subset rule's business, not this one's.
+  assert.equal(targetOutranksCaller({ role: "USER", permissions: Permission.AUTO_APPROVE | Permission.QUOTA_UNLIMITED }, usersOnly), false);
+  // An ADMIN caller is never outranked; a missing row is the 404's business.
+  assert.equal(targetOutranksCaller({ role: "ISSUE_ADMIN", permissions: Permission.MANAGE_ISSUES | Permission.MANAGE_REQUESTS }, Permission.ADMIN), false);
+  assert.equal(targetOutranksCaller(null, usersOnly), false);
+});
+
+test("targetRefusal: admin target first, then the peer rule; null for an ADMIN caller and a manageable target", () => {
+  const usersOnly = Permission.MANAGE_USERS;
+  assert.equal(targetRefusal({ role: "ADMIN", permissions: 0n }, usersOnly), "admin");
+  assert.equal(targetRefusal({ role: "USER", permissions: Permission.ADMIN }, usersOnly), "admin");
+  assert.equal(targetRefusal({ role: "ISSUE_ADMIN", permissions: 0n }, usersOnly), "outranks");
+  assert.equal(targetRefusal({ role: "USER", permissions: Permission.MANAGE_USERS }, usersOnly), null);
+  assert.equal(targetRefusal({ role: "ADMIN", permissions: Permission.ADMIN }, Permission.ADMIN), null);
+  assert.equal(targetRefusal(null, usersOnly), null);
+});
+
+test("lockTargetInTx: a delegate is refused, under lock 42, for a target holding management permissions it lacks; a same-level peer comes back", async () => {
+  let lockedState = { role: "ISSUE_ADMIN", permissions: 0n, deactivatedAt: null as Date | null };
+  const tx = {
+    ...baseTx,
+    user: { ...baseTx.user, findUnique: async (args: unknown) => { ops.push({ op: "user.findUnique", args }); return lockedState; } },
+  } as unknown as Parameters<typeof lockTargetInTx>[0];
+  await assert.rejects(() => lockTargetInTx(tx, ID, Permission.MANAGE_USERS), (err: unknown) => err instanceof TargetOutranksCallerError);
+  assert.deepEqual(opNames(), ["$executeRawUnsafe", "user.findUnique"]);
+  await assert.rejects(() => assertTargetNotAdminInTx(tx, ID, Permission.MANAGE_USERS), (err: unknown) => err instanceof TargetOutranksCallerError);
+  // The same target is manageable by a delegate that holds its bits, and by an ADMIN.
+  assert.deepEqual(await lockTargetInTx(tx, ID, Permission.MANAGE_USERS | Permission.MANAGE_ISSUES), lockedState);
+  assert.deepEqual(await lockTargetInTx(tx, ID, Permission.ADMIN), lockedState);
+  lockedState = { role: "USER", permissions: Permission.MANAGE_USERS, deactivatedAt: null };
+  assert.deepEqual(await lockTargetInTx(tx, ID, Permission.MANAGE_USERS), lockedState);
 });
 
 test("lock 42 is spelled once: no source file outside account-lifecycle.ts carries the literal", async () => {

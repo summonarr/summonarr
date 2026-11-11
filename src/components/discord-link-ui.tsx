@@ -15,13 +15,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StepUpPasswordForm } from "@/components/profile/step-up-password-form";
 import { useStepUpPost } from "@/components/use-step-up-post";
+import { SecondFactorCodeField } from "@/components/profile/second-factor-code-field";
+import type { KnownSecondFactor } from "@/components/profile/use-second-factor-step-up";
 
 // POST /api/discord/generate-link: a 12-character code that lives 10 minutes.
 const LinkToken = v.object({ token: v.string(), expiresAt: v.string() });
 // POST /api/discord/confirm-merge: how many requests moved to this account.
 const MergeDone = v.object({ migrated: v.optional(v.number()) });
 
-function TokenLinkFlow() {
+function TokenLinkFlow({ secondFactor }: { secondFactor?: KnownSecondFactor }) {
   const t = useT();
   const locale = useLocale();
   const [token, setToken] = useState<string | null>(null);
@@ -30,11 +32,12 @@ function TokenLinkFlow() {
   // it stops being offered for copying.
   const [expired, setExpired] = useState(false);
   // Minting a link code needs a step-up (guardrail 6g): the server answers
-  // "password-required" and this flow asks for the password inline.
+  // "password-required" and this flow asks for the password inline — and, on
+  // an account with two-factor, for a fresh code or passkey with it.
   const generate = useStepUpPost("/api/discord/generate-link", LinkToken, {
     failed: t("profile.discord.error.generate"),
     malformed: t("profile.discord.error.malformed"),
-  });
+  }, secondFactor);
   const { copied, copy } = useCopyFeedback();
   // The clipboard refused (an insecure origin, a denied permission): the code
   // is selected for copying by hand, and the line below says so.
@@ -81,7 +84,16 @@ function TokenLinkFlow() {
           error={generate.stepUpError}
           onSubmit={(password) => void generateToken(password)}
           onCancel={generate.cancelStepUp}
-        />
+        >
+          {generate.secondFactor.show && (
+            <SecondFactorCodeField
+              id="discord-link-stepup-code"
+              value={generate.secondFactor.code}
+              onChange={generate.secondFactor.setCode}
+              passkeyPossible={generate.secondFactor.passkeyPossible}
+            />
+          )}
+        </StepUpPasswordForm>
       ) : (
         <Button type="button" onClick={() => void generateToken()} disabled={generate.loading}>
           {generate.loading && <Loader2 className="w-4 h-4 animate-spin" />}
@@ -133,15 +145,16 @@ function TokenLinkFlow() {
 
 type MergeStep = "idle" | "code-sent" | "done";
 
-function WebMergeFlow() {
+function WebMergeFlow({ secondFactor }: { secondFactor?: KnownSecondFactor }) {
   const t = useT();
   const router = useRouter();
   const [step, setStep] = useState<MergeStep>("idle");
   const [discordId, setDiscordId] = useState("");
   const [code, setCode] = useState("");
   const [migrated, setMigrated] = useState(0);
-  // Sending a merge code from the web needs a step-up (guardrail 6g).
-  const send = useStepUpPost("/api/discord/initiate-merge", v.unknown(), { failed: t("profile.discord.error.sendCode") });
+  // Sending a merge code from the web needs a step-up (guardrail 6g), with a
+  // fresh second factor on an account that has one.
+  const send = useStepUpPost("/api/discord/initiate-merge", v.unknown(), { failed: t("profile.discord.error.sendCode") }, secondFactor);
   const confirm = useAsyncAction();
   const [confirmError, setConfirmError] = useState<string | null>(null);
   const loading = send.loading || confirm.busy("confirm");
@@ -234,7 +247,16 @@ function WebMergeFlow() {
               error={send.stepUpError}
               onSubmit={(password) => void sendCode(password)}
               onCancel={send.cancelStepUp}
-            />
+            >
+              {send.secondFactor.show && (
+                <SecondFactorCodeField
+                  id="discord-merge-stepup-code"
+                  value={send.secondFactor.code}
+                  onChange={send.secondFactor.setCode}
+                  passkeyPossible={send.secondFactor.passkeyPossible}
+                />
+              )}
+            </StepUpPasswordForm>
           )}
         </>
       )}
@@ -278,7 +300,12 @@ function WebMergeFlow() {
   );
 }
 
-export function DiscordLinkSection({ linkedDiscordId, discordInviteUrl }: { linkedDiscordId: string | null; discordInviteUrl?: string | null }) {
+export function DiscordLinkSection({ linkedDiscordId, discordInviteUrl, secondFactor }: {
+  linkedDiscordId: string | null;
+  discordInviteUrl?: string | null;
+  // What the page knew about the account's two-factor setup when it rendered.
+  secondFactor?: KnownSecondFactor;
+}) {
   const t = useT();
   if (linkedDiscordId) {
     return (
@@ -318,9 +345,9 @@ export function DiscordLinkSection({ linkedDiscordId, discordInviteUrl }: { link
         </div>
       )}
       {!inviteHref && <p className="text-sm text-zinc-400">{t("profile.discord.notLinked")}</p>}
-      <TokenLinkFlow />
+      <TokenLinkFlow secondFactor={secondFactor} />
       <div className="border-t border-zinc-800 pt-4">
-        <WebMergeFlow />
+        <WebMergeFlow secondFactor={secondFactor} />
       </div>
     </div>
   );

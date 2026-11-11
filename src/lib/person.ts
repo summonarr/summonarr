@@ -7,6 +7,7 @@ import { generateRequestToken } from "@/lib/request-token";
 import type { SummonarrSession } from "@/lib/api-auth";
 import { localizedBiography } from "@/lib/tmdb-localize";
 import { getContentLocale } from "@/lib/i18n/server";
+import { USER_MAX_BLOCKING_MISSES } from "@/lib/ratings-cold-budget";
 
 // What the ratings pass needs to know about a credit. A credit carries a year,
 // not a date; the ratings caches key their TTLs off the date (a new release
@@ -65,7 +66,10 @@ export async function getEnrichedPerson(
     attachAllAvailability(
       englishPerson.credits.map((credit) => ({ ...ratingsInputFor(credit), credit })),
       session.user.id,
-      { blockRatings: true },
+      // A filmography can run to hundreds of credits: wait for at most the
+      // per-request share of cold lookups (the rest are warmed after the
+      // response), all of them drawn from the viewer's cold-lookup budget.
+      { blockRatings: true, maxBlockingRatingMisses: USER_MAX_BLOCKING_MISSES },
     ),
   ]);
 

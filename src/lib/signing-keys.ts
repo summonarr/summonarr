@@ -10,8 +10,10 @@ import { SignJWT, jwtVerify, decodeProtectedHeader, type JWTPayload } from "jose
 // key, so a value minted for one purpose was a valid MAC for every other one
 // and only the payload shape kept them apart. A subkey per purpose makes each
 // token fail the other purposes on the signature alone, and the typ/aud claims
-// make that explicit. mfa-token.ts, mfa-store.ts and the Plex connect cookie
-// already derived their own subkeys; this module is the same idea for the rest.
+// make that explicit. Every signed token goes through here, the two-factor
+// flow tokens (mfa/mfa-token.ts) included; mfa-store.ts still derives the key
+// of its password-version fingerprint itself (an HMAC value inside a token,
+// never a token signer).
 //
 // Why kid: NEXTAUTH_SECRET_PREVIOUS lets an operator rotate the secret without
 // a global sign-out. Every JWT carries a `kid` naming the secret that signed it
@@ -37,7 +39,12 @@ export type SigningPurpose =
   | "audit-email"
   // discord-merge-code.ts: the at-rest MAC of a pending confirm-merge code. An
   // HMAC key, never a JWT signer.
-  | "discord-merge-code";
+  | "discord-merge-code"
+  // mfa/mfa-token.ts: the five-minute two-factor flow tokens (guardrail 6d) —
+  // the sign-in challenge, the passkey registration and the enrollment step-up.
+  | "mfa-signin"
+  | "passkey-register"
+  | "mfa-stepup";
 
 export interface SigningKey {
   kid: string;

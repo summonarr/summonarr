@@ -113,9 +113,16 @@ export interface GuardContext {
   webauthnChallenge?: string;
   webauthnConfig: WebAuthnConfig | null;
   // Where the guess happened, for the lockout audit row: a sign-in, an
-  // enrollment change, or a step-up guarding a password change or the account's
-  // own deactivation.
-  context: "sign-in" | "enrollment" | "password-change" | "account-delete";
+  // enrollment change, or a step-up guarding a password change, the account's
+  // own deactivation, or linking a Discord or Trakt account.
+  context:
+    | "sign-in"
+    | "enrollment"
+    | "password-change"
+    | "account-delete"
+    | "discord-link"
+    | "discord-merge"
+    | "trakt-connect";
   ipAddress?: string | null;
   userAgent?: string | null;
 }
