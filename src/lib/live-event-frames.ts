@@ -68,7 +68,9 @@ export type LiveEvent =
   | { type: "issuemessage:created"; issueId: string; messageId?: string; own?: boolean }
   | { type: "activity:sessions"; sessions: ActiveSessionLive[] }
   | { type: "activity:history-updated" }
-  | { type: "plex:reachability"; reachable: boolean; instance: string };
+  | { type: "plex:reachability"; reachable: boolean; instance: string }
+  // The admin nav's arr badges; the consumer runs them through parseNavBadges.
+  | { type: "nav:badges"; badges: Record<string, unknown> };
 
 type ServerFrameType = Exclude<LiveEvent["type"], "disconnected">;
 
@@ -89,6 +91,7 @@ const FRAME_SCHEMAS: { [K in ServerFrameType]: Schema<unknown> } = {
   "activity:sessions": v.object({ type: v.literal("activity:sessions"), sessions: v.array(v.record(v.unknown())) }),
   "activity:history-updated": v.object({ type: v.literal("activity:history-updated") }),
   "plex:reachability": v.object({ type: v.literal("plex:reachability"), reachable: v.boolean(), instance: v.string() }),
+  "nav:badges": v.object({ type: v.literal("nav:badges"), badges: v.record(v.unknown()) }),
 };
 
 function isServerFrameType(type: unknown): type is ServerFrameType {

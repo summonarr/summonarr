@@ -337,6 +337,13 @@ function startBackgroundJobs(): void {
     .then(({ warmPasswordHashing }) => warmPasswordHashing())
     .catch((err) => console.error("[auth] Password hashing warm-up error:", err));
 
+  // From here on a Radarr/Sonarr webhook may schedule a monitor run, so the
+  // admin nav's queue count follows the queue (arr-watch-trigger.ts). Armed at
+  // boot only: a build or a test that drives a webhook starts nothing.
+  import("@/lib/arr-watch-trigger")
+    .then(({ armArrWatchRecount }) => armArrWatchRecount())
+    .catch((err) => console.error("[arr-watch] could not arm the webhook-triggered run:", err));
+
   // Under the warm-library cron's advisory lock (and observing its abort
   // signal, guardrail 41): on a large, cold library this walk can still be
   // running when the entrypoint's first warm-library cron fires, and without

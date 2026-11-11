@@ -47,6 +47,8 @@ const {
   ADMIN_NAV_GROUPS,
   NAV_ITEM_ANY_FEATURE_KEYS,
   NAV_BADGE_LABEL_KEYS,
+  NAV_BADGE_INFO_HREFS,
+  navItemHref,
   filterNavByFeatures,
   getVisibleAdminItems,
   groupAdminNavItems,
@@ -275,7 +277,22 @@ test("a collapsed group's summed badge is labelled by its item only when ONE hid
     assert.ok(nav[`${GROUP_BADGE_LABEL_KEY}_other`]?.includes("{count}"), `${locale}: ${GROUP_BADGE_LABEL_KEY}_other`);
   }
   const src = readFileSync(resolve(HERE, "../src/components/layout/admin-nav-groups.tsx"), "utf8");
-  assert.match(src, /<NavCountBadge count=\{hiddenBadges\} labelKey=\{groupBadgeLabelKey\(hiddenBadged\.map\(\(item\) => item\.href\)\)\} \/>/);
+  assert.match(src, /<NavCountBadge\s+count=\{hiddenBadges\}\s+labelKey=\{groupBadgeLabelKey\(hiddenBadged\.map\(\(item\) => item\.href\)\)\}/);
+  // The summed badge is calm only when every hidden badged item is a plain count.
+  assert.match(src, /info=\{hiddenBadged\.every\(\(item\) => NAV_BADGE_INFO_HREFS\.has\(item\.href\)\)\}/);
+});
+
+test("Activity carries a labelled, calm badge in every catalog and keeps its own link", () => {
+  const href = "/admin/activity";
+  assert.equal(NAV_BADGE_LABEL_KEYS[href], "nav.badge.activityStreams");
+  assert.ok(NAV_BADGE_INFO_HREFS.has(href));
+  assert.ok(!NAV_BADGE_INFO_HREFS.has("/admin/queue"), "the queue badge is a warning");
+  assert.equal(navItemHref({ href }, 4), href);
+  for (const locale of ["en", "de", "es", "fr", "it", "pt", "zh"]) {
+    const nav = JSON.parse(readFileSync(resolve(HERE, `../src/lib/i18n/messages/${locale}/nav.json`), "utf8")) as Record<string, string>;
+    assert.ok(nav["nav.badge.activityStreams_one"]?.includes("{count}"), locale);
+    assert.ok(nav["nav.badge.activityStreams_other"]?.includes("{count}"), locale);
+  }
 });
 
 test("the header and the drawer take their admin items from nav-visibility, not a copy", () => {

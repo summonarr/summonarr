@@ -149,7 +149,7 @@ Detail: [docs/architecture/missing.md](docs/architecture/missing.md).
 
 Detail: [docs/architecture/download-queue-radarr-sonarr-health.md](docs/architecture/download-queue-radarr-sonarr-health.md).
 
-**Radarr/Sonarr monitor** — [arr-watch.ts](src/lib/arr-watch.ts) (pure) + [arr-watch-data.ts](src/lib/arr-watch-data.ts), cron `/api/cron/arr-watch` (lock 2051, `ARR_WATCH_INTERVAL`), setting `arrWatchDiskLowPercent` (Settings → Notifications → Radarr/Sonarr alerts, `PATCH /api/admin/arr-watch`).
+**Radarr/Sonarr monitor** — [arr-watch.ts](src/lib/arr-watch.ts) (pure) + [arr-watch-data.ts](src/lib/arr-watch-data.ts), cron `/api/cron/arr-watch` (lock 2051, `ARR_WATCH_INTERVAL`), setting `arrWatchDiskLowPercent` (Settings → Notifications → Radarr/Sonarr alerts, `PATCH /api/admin/arr-watch`). The job is ONE config, `ARR_WATCH_CRON` ([arr-watch-cron.ts](src/lib/arr-watch-cron.ts)), run by the cron route AND by a first, authenticated Radarr/Sonarr webhook delivery ([arr-watch-trigger.ts](src/lib/arr-watch-trigger.ts): in-process, coalesced, runs at least 30 s apart, armed only at boot) — never a second monitor entry point. Each run pushes the admin nav's queue count as a `nav:badges` SSE frame; the Activity count rides `activity:sessions` ([nav-badges.ts](src/lib/nav-badges.ts)).
 
 Detail: [docs/architecture/radarr-sonarr-monitor.md](docs/architecture/radarr-sonarr-monitor.md).
 

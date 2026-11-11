@@ -16,6 +16,7 @@ import { LocaleSync } from "@/components/i18n/locale-sync";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getFeatureFlags } from "@/lib/features";
 import { readArrWatchNavBadges } from "@/lib/arr-watch-data";
+import { readActivityNavBadge } from "@/lib/play-history-snapshot";
 import { DONATION_SETTING_KEYS } from "@/lib/donations";
 import { appLayoutStateFrom } from "@/lib/app-layout-state";
 import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
@@ -84,19 +85,24 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   // Settled one by one: a failed user or flags read must not discard the
   // settings that WERE read (maintenance mode among them). A failed read keeps
   // its defaults, so a DB hiccup here never takes down every page in the app.
-  const [rowsRes, flagsRes, userRes, badgesRes] = await Promise.allSettled([
+  const [rowsRes, flagsRes, userRes, badgesRes, activityBadgeRes] = await Promise.allSettled([
     readLayoutSettings(),
     getFeatureFlags(),
     prisma.user.findUnique({ where: { id: session.user.id }, select: { discordId: true, locale: true } }),
     // The Download Queue's "needs attention" count (the Radarr/Sonarr
     // monitor's last run) — one row read, admins only; never throws.
     isAdmin ? readArrWatchNavBadges() : Promise.resolve(undefined),
+    // The streams playing now, for the Activity item — one count, admins only;
+    // never throws. The browser keeps it live from the session stream.
+    isAdmin ? readActivityNavBadge() : Promise.resolve(undefined),
   ]);
   const failures: ReadFailure[] = [];
   const rows = readValue("settings", rowsRes, failures) ?? [];
   const flags = readValue("feature flags", flagsRes, failures);
   const user = readValue("user", userRes, failures);
-  const navBadges = readValue("nav badges", badgesRes, failures);
+  const arrBadges = readValue("nav badges", badgesRes, failures);
+  const activityBadge = readValue("activity badge", activityBadgeRes, failures);
+  const navBadges = arrBadges || activityBadge ? { ...arrBadges, ...activityBadge } : undefined;
   if (failures.length) {
     warnLayoutReads(
       failures.map((f) => f.name).join(","),

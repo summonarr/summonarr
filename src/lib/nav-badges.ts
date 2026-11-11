@@ -8,7 +8,8 @@
 // last full page load, and the "stale snapshot ⇒ no badge" rule never fired in
 // a long session. The provider re-reads GET /api/admin/arr-watch (its
 // `navBadges` field, computed server-side by the same rule as the layout) on
-// this interval and when the tab comes back.
+// this interval and when the tab comes back — and the server pushes the same
+// field as a `nav:badges` SSE frame the moment a monitor run stores a new count.
 
 /** How often an open tab re-reads the badges. The monitor itself runs every 15 minutes by default. */
 export const NAV_BADGE_POLL_MS = 5 * 60_000;
@@ -16,6 +17,36 @@ export const NAV_BADGE_POLL_MS = 5 * 60_000;
 export const NAV_BADGE_MIN_REFETCH_MS = 60_000;
 
 const MAX_BADGES = 50;
+
+/**
+ * The Activity item's badge: the streams playing right now. It is NOT part of
+ * the arr-watch answer — the layout renders the first count and the
+ * `activity:sessions` SSE frame (every play-history poll, ~5 s) keeps it live.
+ */
+export const ACTIVITY_BADGE_HREF = "/admin/activity";
+
+/** `badges` with the Activity count set to `count` (0 removes it). Undefined ⇒ no badges at all. */
+export function withActivityCount(
+  badges: Readonly<Record<string, number>> | undefined,
+  count: number,
+): Record<string, number> | undefined {
+  const { [ACTIVITY_BADGE_HREF]: _old, ...rest } = badges ?? {};
+  const out: Record<string, number> = Number.isSafeInteger(count) && count > 0 ? { ...rest, [ACTIVITY_BADGE_HREF]: count } : rest;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * A new arr-watch answer (the poll, or a `nav:badges` push) over what is
+ * shown: it replaces every badge EXCEPT the Activity count, which that answer
+ * never carries and the session stream owns.
+ */
+export function withArrBadges(
+  shown: Readonly<Record<string, number>> | undefined,
+  next: Readonly<Record<string, number>>,
+): Record<string, number> | undefined {
+  const { [ACTIVITY_BADGE_HREF]: _stale, ...arr } = next;
+  return withActivityCount(arr, shown?.[ACTIVITY_BADGE_HREF] ?? 0);
+}
 
 /**
  * The `navBadges` field of a GET /api/admin/arr-watch answer, or null when it

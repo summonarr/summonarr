@@ -46,6 +46,7 @@ import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
 import { emitNotificationEvents } from "./notify-agents";
 import type { NotifyEvent } from "./notify-events";
 import { prisma } from "./prisma";
+import { emitSSE } from "./sse-emitter";
 
 export const ARR_WATCH_STATE_KEY = "arrWatch:state";
 export const ARR_WATCH_SUMMARY_KEY = "arrWatch:summary";
@@ -409,7 +410,11 @@ export async function runArrWatch(opts: { signal?: AbortSignal; now?: number; in
   // State first, events second: a write that fails sends nothing, and the next
   // run — reading the old state — finds the same events again. The reverse
   // order would announce them twice.
-  await saveArrWatchState(next, { at: new Date(nowMs).toISOString(), ...result.summary });
+  const summary: ArrWatchSummary = { at: new Date(nowMs).toISOString(), ...result.summary };
+  await saveArrWatchState(next, summary);
+  // After the write (guardrail 27): open admin tabs take the new badge now
+  // instead of on their next poll. emitSSE never throws.
+  emitSSE({ type: "nav:badges", badges: arrWatchNavBadgesFor(summary, nowMs) ?? {} });
   countEvents(events, result);
   // Fire-and-forget; never throws (guardrail 14c).
   emitNotificationEvents(events);

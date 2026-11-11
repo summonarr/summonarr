@@ -220,3 +220,42 @@ test("the provider reads inside an effect, on an interval, skipped in a hidden t
   assert.match(effect, /if \(!res\.ok\) return;/);
   assert.match(effect, /if \(!cancelled && next !== null\) setBadges\(/);
 });
+
+// ── 4: live counts ───────────────────────────────────────────────────────────
+
+const { ACTIVITY_BADGE_HREF, withActivityCount, withArrBadges } = await import("../src/lib/nav-badges.ts");
+const { parseLiveEvent } = await import("../src/lib/live-event-frames.ts");
+
+test("the Activity count and the arr badges are owned by different sources and never overwrite each other", () => {
+  // The session stream sets only the Activity count; 0 removes it.
+  assert.deepEqual(withActivityCount({ "/admin/queue": 3 }, 2), { "/admin/queue": 3, [ACTIVITY_BADGE_HREF]: 2 });
+  assert.deepEqual(withActivityCount({ "/admin/queue": 3, [ACTIVITY_BADGE_HREF]: 2 }, 0), { "/admin/queue": 3 });
+  assert.equal(withActivityCount({ [ACTIVITY_BADGE_HREF]: 2 }, 0), undefined, "no badges at all is undefined");
+  assert.equal(withActivityCount(undefined, 0), undefined);
+  assert.deepEqual(withActivityCount(undefined, 1), { [ACTIVITY_BADGE_HREF]: 1 });
+  // An arr-watch answer replaces the arr badges and keeps the streams count —
+  // `{}` clears the queue badge, not Activity's.
+  assert.deepEqual(withArrBadges({ "/admin/queue": 3, [ACTIVITY_BADGE_HREF]: 2 }, {}), { [ACTIVITY_BADGE_HREF]: 2 });
+  assert.deepEqual(withArrBadges({ [ACTIVITY_BADGE_HREF]: 2 }, { "/admin/queue": 5 }), { "/admin/queue": 5, [ACTIVITY_BADGE_HREF]: 2 });
+  assert.equal(withArrBadges({ "/admin/queue": 3 }, {}), undefined);
+  // An answer that names Activity anyway cannot set it.
+  assert.deepEqual(withArrBadges({ [ACTIVITY_BADGE_HREF]: 2 }, { [ACTIVITY_BADGE_HREF]: 9 }), { [ACTIVITY_BADGE_HREF]: 2 });
+});
+
+test("the nav:badges frame parses, and the provider takes both live frames between polls", () => {
+  assert.deepEqual(parseLiveEvent('{"type":"nav:badges","badges":{"/admin/queue":2}}'), { type: "nav:badges", badges: { "/admin/queue": 2 } });
+  assert.equal(parseLiveEvent('{"type":"nav:badges","badges":[1]}'), null);
+  const code = stripComments(src("../src/components/layout/admin-nav-groups.tsx"));
+  const provider = /export function NavBadgesProvider\(([\s\S]*?)\n\}\n/.exec(code)?.[1] ?? "";
+  const live = /useLiveEvents\(\(event\) => \{([\s\S]*?)\n  \}\);/.exec(provider)?.[1] ?? "";
+  assert.ok(live, "the provider does not subscribe to the live stream");
+  assert.match(live, /if \(!enabled\) return;/);
+  assert.match(live, /event\.type === "activity:sessions"[\s\S]*?withActivityCount\(shown, playing\)/);
+  assert.match(live, /event\.type === "nav:badges"[\s\S]*?parseNavBadges\(event\.badges\)[\s\S]*?if \(next !== null\) setBadges\(\(shown\) => withArrBadges\(shown, next\)\)/);
+  // The poll must not wipe the streams count either.
+  assert.match(provider, /if \(!cancelled && next !== null\) setBadges\(\(shown\) => withArrBadges\(shown, next\)\)/);
+  // The monitor pushes after its write, and the layout renders the first count.
+  const watch = stripComments(src("../src/lib/arr-watch-data.ts"));
+  assert.match(watch, /await saveArrWatchState\(next, summary\);\s*emitSSE\(\{ type: "nav:badges", badges: arrWatchNavBadgesFor\(summary, nowMs\) \?\? \{\} \}\);/);
+  assert.match(stripComments(src("../src/app/(app)/layout.tsx")), /isAdmin \? readActivityNavBadge\(\) : Promise\.resolve\(undefined\)/);
+});

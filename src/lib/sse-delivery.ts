@@ -30,11 +30,11 @@ export function sseDeliveryScope(permissions: bigint): SseDeliveryScope {
 }
 
 // Server-wide activity: admins only, whoever the frame is about.
-const ADMIN_ONLY_EVENT_TYPES = new Set(["activity:sessions", "activity:history-updated", "plex:reachability"]);
+const ADMIN_ONLY_EVENT_TYPES = new Set(["activity:sessions", "activity:history-updated", "plex:reachability", "nav:badges"]);
 
 /**
  * Per-event-type delivery rules:
- *   activity:sessions, activity:history-updated, plex:reachability — system admin only
+ *   activity:sessions, activity:history-updated, plex:reachability, nav:badges — system admin only
  *   issue:* / issuemessage:* — system admin OR MANAGE_ISSUES bypasses the per-user filter
  *   request:* — system admin OR MANAGE_REQUESTS bypasses the per-user filter
  *   everything else (votes:*, push:*, settings:*) — only a system admin bypasses;

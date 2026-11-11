@@ -46,7 +46,11 @@ export type SSEEvent =
   // updates without polling. `instance` is the server's slug — "" for the
   // default, so a single-server deployment sees the same event shape it always
   // did plus one additive field.
-  | { type: "plex:reachability"; reachable: boolean; instance: string };
+  | { type: "plex:reachability"; reachable: boolean; instance: string }
+  // The admin nav's arr badges (href → count, `{}` for none), pushed when a
+  // Radarr/Sonarr monitor run stores a new summary — the same value GET
+  // /api/admin/arr-watch answers in `navBadges`. Admins only.
+  | { type: "nav:badges"; badges: Record<string, number> };
 
 export function emitSSE(event: SSEEvent) {
   // Listeners run synchronously: one stream's failing listener must not surface

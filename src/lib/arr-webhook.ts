@@ -19,6 +19,7 @@ import { autoResolveIssueForGrab } from "./issue-auto-resolve";
 import { confirmDeliveredGrabs } from "./arr-grab-confirm";
 import { warnOnChange, forgetWarnOnChange } from "./log-dedup";
 import { processSingleton } from "./process-singleton";
+import { requestArrWatchRecount } from "./arr-watch-trigger";
 
 const MAX_WEBHOOK_BYTES = 1_048_576;
 const SERVICE_NAME: Record<ArrService, string> = { radarr: "Radarr", sonarr: "Sonarr" };
@@ -198,6 +199,12 @@ export async function handleArrWebhook<P extends { eventType?: unknown }>(
   if (!firstDelivery) {
     return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
   }
+
+  // A first, authenticated delivery means the download queue just changed:
+  // ask for a monitor run so the admin nav's queue count follows it now, not
+  // at the next scheduled tick. Coalesced and spaced (arr-watch-trigger.ts);
+  // synchronous, never throws, never awaited.
+  requestArrWatchRecount();
 
   // Pushes a failed delivery left for a later webhook, retried in the
   // background (throttled, never awaited, never failing this delivery).

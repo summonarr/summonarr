@@ -4,6 +4,7 @@ import { Fragment, createContext, useContext, useEffect, useLayoutEffect, useSta
 import { ChevronDown } from "@/components/icons";
 import {
   ADMIN_NAV_GROUPS,
+  NAV_BADGE_INFO_HREFS,
   NAV_BADGE_LABEL_KEYS,
   groupAdminNavItems,
   type AdminNavGroup,
@@ -12,7 +13,8 @@ import {
 import { withBasePath } from "@/lib/base-path";
 import { fetchJson } from "@/lib/client/fetch-json";
 import { v } from "@/lib/validate";
-import { NAV_BADGE_MIN_REFETCH_MS, NAV_BADGE_POLL_MS, parseNavBadges } from "@/lib/nav-badges";
+import { NAV_BADGE_MIN_REFETCH_MS, NAV_BADGE_POLL_MS, parseNavBadges, withActivityCount, withArrBadges } from "@/lib/nav-badges";
+import { useLiveEvents } from "@/hooks/use-live-events";
 import { useT } from "@/components/i18n/i18n-provider";
 import { groupBadgeLabelKey } from "./admin-nav-rules";
 import { collapsedGroupsCookie } from "@/lib/admin-nav-collapsed";
@@ -20,7 +22,8 @@ import { collapsedGroupsCookie } from "@/lib/admin-nav-collapsed";
 // The admin nav's groups (Requests, Downloads, Library, Insights, System) for
 // both the desktop sidebar and the mobile drawer: a collapsible header per
 // group, and the count badge a nav item can carry (the Download Queue's
-// downloads needing attention). Collapsed groups are remembered per browser.
+// downloads needing attention, Activity's streams playing now). Collapsed
+// groups are remembered per browser.
 // The badges come from ONE NavBadgesProvider in the (app) layout.
 
 const STORAGE_KEY = "summonarr:nav:collapsedAdminGroups";
@@ -58,6 +61,11 @@ export function useNavBadges(): NavBadges | undefined {
  * NAV_BADGE_POLL_MS, skipped in a hidden tab, and when the tab comes back. A
  * failed read keeps what is shown (fails open). Nothing is read during render
  * (guardrail 16) and the first render is the server's value.
+ *
+ * Between polls the shared SSE stream keeps both counts live: every
+ * `activity:sessions` frame (each play-history poll, ~5 s) sets the Activity
+ * count to the streams it lists, and a `nav:badges` frame carries the queue
+ * count the moment a monitor run stores one. Both frames reach admins only.
  */
 export function NavBadgesProvider({
   initial,
@@ -103,7 +111,7 @@ export function NavBadgesProvider({
       // Best-effort: a failed read keeps the badge already shown.
       if (!res.ok) return;
       const next = parseNavBadges(res.data.navBadges);
-      if (!cancelled && next !== null) setBadges(Object.keys(next).length > 0 ? next : undefined);
+      if (!cancelled && next !== null) setBadges((shown) => withArrBadges(shown, next));
     }
     const timer = setInterval(() => {
       if (document.visibilityState === "hidden") return;
@@ -120,6 +128,17 @@ export function NavBadgesProvider({
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [enabled]);
+
+  useLiveEvents((event) => {
+    if (!enabled) return;
+    if (event.type === "activity:sessions") {
+      const playing = event.sessions.length;
+      setBadges((shown) => withActivityCount(shown, playing));
+    } else if (event.type === "nav:badges") {
+      const next = parseNavBadges(event.badges);
+      if (next !== null) setBadges((shown) => withArrBadges(shown, next));
+    }
+  });
 
   return (
     <ServerCollapsedContext.Provider value={collapsedGroups}>
@@ -192,19 +211,32 @@ function useCollapsedAdminGroups(): { collapsed: ReadonlySet<AdminNavGroup>; tog
 /**
  * A count pill beside a nav item (or a collapsed group's header). Nothing for
  * zero. Labelled by the item's own wording (`href`), or by `labelKey` when the
- * caller knows better (a group's summed count).
+ * caller knows better (a group's summed count). `info` draws the calm tone of
+ * a plain live count; by default an item's own tone (NAV_BADGE_INFO_HREFS).
  */
-export function NavCountBadge({ count, href, labelKey: labelKeyProp }: { count: number | undefined; href?: string; labelKey?: string }) {
+export function NavCountBadge({
+  count,
+  href,
+  labelKey: labelKeyProp,
+  info: infoProp,
+}: {
+  count: number | undefined;
+  href?: string;
+  labelKey?: string;
+  info?: boolean;
+}) {
   const t = useT();
   if (!count || count <= 0) return null;
   const labelKey = labelKeyProp ?? (href ? NAV_BADGE_LABEL_KEYS[href] : undefined);
   const label = labelKey ? t(labelKey, { count }) : String(count);
+  const info = infoProp ?? (href ? NAV_BADGE_INFO_HREFS.has(href) : false);
   return (
     <span
       title={label}
-      // A tinted warning chip (guardrail 42): the 500 tint under the remapped
-      // 400 text, which is tuned to read on it in both themes.
-      className="ds-mono ml-auto shrink-0 rounded-full bg-amber-500/20 text-amber-400 text-center"
+      // A tinted chip (guardrail 42): the 500 tint under the remapped 400 text,
+      // which is tuned to read on it in both themes. Amber warns; emerald is a
+      // live count that needs nothing.
+      className={`ds-mono ml-auto shrink-0 rounded-full text-center ${info ? "bg-emerald-500/20 text-emerald-400" : "bg-amber-500/20 text-amber-400"}`}
       style={{ fontSize: 10, fontWeight: 600, lineHeight: "16px", minWidth: 18, padding: "0 5px" }}
     >
       <span aria-hidden>{count > 99 ? "99+" : count}</span>
@@ -267,7 +299,12 @@ export function AdminNavGroupList({
               />
               <span>{t(g.i18nKey)}</span>
               {hiddenBadges > 0 && (
-                <NavCountBadge count={hiddenBadges} labelKey={groupBadgeLabelKey(hiddenBadged.map((item) => item.href))} />
+                <NavCountBadge
+                  count={hiddenBadges}
+                  labelKey={groupBadgeLabelKey(hiddenBadged.map((item) => item.href))}
+                  // Calm only when nothing hidden needs attention.
+                  info={hiddenBadged.every((item) => NAV_BADGE_INFO_HREFS.has(item.href))}
+                />
               )}
             </button>
             <div id={listId} className="flex flex-col" style={{ gap: drawer ? 0 : 1 }}>
