@@ -398,7 +398,9 @@ export function WatchSyncPanel() {
 
   // One change at a time; the page is re-read before the controls come back,
   // so the next change starts from what the server now holds.
-  async function send(url: string, init: RequestInit): Promise<boolean> {
+  // Returns whether to show a success note. `onSaved` runs whenever the write
+  // itself went through, re-read or not: the change is committed either way.
+  async function send(url: string, init: RequestInit, onSaved?: () => void): Promise<boolean> {
     setError("");
     setNote("");
     let reloaded = true;
@@ -413,14 +415,17 @@ export function WatchSyncPanel() {
       if (text !== null) setError(text);
       return false;
     }
+    onSaved?.();
     // The change went through; a failed re-read leaves its own error line and
     // no success note over a stale list.
     return reloaded;
   }
 
   async function addPair(plexUserId: string, jellyfinUserId: string, direction: Direction) {
-    if (!(await send("/api/admin/watch-sync", jsonInit("POST", { plexUserId, jellyfinUserId, direction })))) return;
-    setAdded((n) => n + 1);
+    // The form empties once the pair exists, even when the re-read failed —
+    // kept filled in, it invites a second submit of a pair that is already there.
+    const saved = () => setAdded((n) => n + 1);
+    if (!(await send("/api/admin/watch-sync", jsonInit("POST", { plexUserId, jellyfinUserId, direction }), saved))) return;
     setNote(t("adminManage.watchSync.added"));
   }
 

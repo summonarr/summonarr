@@ -62,6 +62,9 @@ export function useCopyFeedback(ms = 2000): { copied: boolean; failed: boolean; 
   // Only the latest copy shows feedback, and none after unmount.
   const latest = useRef(0);
   useEffect(() => {
+    // Re-armed on every mount: an effect re-run (StrictMode) must not leave the
+    // cleanup's -1 behind.
+    latest.current = 0;
     return () => {
       latest.current = -1;
     };

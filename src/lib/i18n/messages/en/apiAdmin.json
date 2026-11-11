@@ -414,5 +414,6 @@
   "apiAdmin.watchSync.jobGone": "That sync run is no longer being followed. Summonarr may have restarted. Reload to see the latest results.",
   "apiAdmin.watchSync.pairInvalid": "Choose a Plex account and a Jellyfin user that is still on its server",
   "apiAdmin.watchSync.pairExists": "That pair already exists",
-  "apiAdmin.watchSync.pairNotFound": "Pair not found"
+  "apiAdmin.watchSync.pairNotFound": "Pair not found",
+  "apiAdmin.watchSync.pairPaused": "That pair is paused. Resume it before running a full sync."
 }

@@ -297,21 +297,31 @@ async function configuredCfg(service: QueueService, instance: string): Promise<A
 // page shifts the next page's first record back onto the page already read. So
 // a walk of several pages that misses a posted id is read again ONCE before the
 // id is called gone. Every id sent is still named by a fresh read (5c/5e).
-async function liveQueueRows(cfg: ArrCfg, service: QueueService, instance: string, ids: readonly number[]): Promise<QueueItem[]> {
+async function liveQueueRows(
+  cfg: ArrCfg,
+  service: QueueService,
+  instance: string,
+  ids: readonly number[],
+): Promise<{ rows: QueueItem[]; cut: boolean }> {
   // One budget covers both reads. A walk the budget cut short is never trusted
   // as "gone": nothing read means a timeout, and a partial read only matches
-  // what it did see (a posted id it missed is dropped, never sent).
+  // what it did see (a posted id it missed is dropped, never sent). `cut` tells
+  // the caller the answer is partial, so "nothing matched" is a timeout there,
+  // never "gone".
   const budget = AbortSignal.timeout(QUEUE_LISTING_BUDGET_MS);
   const first = await readQueueListing(cfg, service, budget);
   if (first.stopped && first.pages === 0) throw queueBudgetError();
   const rows = foldQueueRecords(service, instance, first.records);
-  if (first.pages <= 1 || first.stopped) return rows;
+  if (first.stopped) return { rows, cut: true };
+  if (first.pages <= 1) return { rows, cut: false };
   const live = new Set<number>();
   for (const row of rows) for (const id of row.ids) live.add(id);
-  if (ids.every((id) => live.has(id))) return rows;
+  if (ids.every((id) => live.has(id))) return { rows, cut: false };
   const second = await readQueueListing(cfg, service, budget);
-  if (second.stopped && second.pages === 0) return rows;
-  return foldQueueRecords(service, instance, second.records);
+  // A cut second read never replaces the complete first one: what the first
+  // read named is still sent, and an id it missed is not called gone.
+  if (second.stopped) return { rows, cut: true };
+  return { rows: foldQueueRecords(service, instance, second.records), cut: false };
 }
 
 function queueBudgetError(): Error {
@@ -337,8 +347,9 @@ export async function removeFromQueue(
   method: QueueRemoveMethod,
 ): Promise<number[]> {
   const cfg = await configuredCfg(service, instance);
-  const idsToSend = liveRemovalIds(await liveQueueRows(cfg, service, instance, ids), ids);
-  if (idsToSend.length === 0) throw new QueueGoneError();
+  const live = await liveQueueRows(cfg, service, instance, ids);
+  const idsToSend = liveRemovalIds(live.rows, ids);
+  if (idsToSend.length === 0) throw live.cut ? queueBudgetError() : new QueueGoneError();
   await arrFetchNoContent(cfg, `/api/v3/queue/bulk?${queueRemoveQuery(action, method)}`, {
     method: "DELETE",
     body: JSON.stringify({ ids: idsToSend }),
@@ -356,8 +367,9 @@ export async function removeFromQueue(
  */
 export async function grabPending(service: QueueService, instance: string, ids: readonly number[]): Promise<number[]> {
   const cfg = await configuredCfg(service, instance);
-  const idsToSend = liveGrabIds(await liveQueueRows(cfg, service, instance, ids), ids);
-  if (idsToSend.length === 0) throw new QueueGoneError();
+  const live = await liveQueueRows(cfg, service, instance, ids);
+  const idsToSend = liveGrabIds(live.rows, ids);
+  if (idsToSend.length === 0) throw live.cut ? queueBudgetError() : new QueueGoneError();
   await arrFetchNoContent(cfg, "/api/v3/queue/grab/bulk", { method: "POST", body: JSON.stringify({ ids: idsToSend }) });
   return idsToSend;
 }

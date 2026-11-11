@@ -178,6 +178,24 @@ function answeredNote(pc: PatchContext): string | null {
   return pc.adminNote !== undefined ? pc.sanitizedAdminNote : pc.existing.adminNote;
 }
 
+// The row as it is now, after a Radarr/Sonarr call that already happened. A
+// failed re-read answers the row as it was read: a 500 here would report a
+// search or re-push that DID go through as failed, and the retry would repeat it.
+async function rereadAfterArr(pc: PatchContext): Promise<ExistingRequest> {
+  try {
+    return (await loadRequest(pc.id)) ?? pc.existing;
+  } catch (err) {
+    console.warn("[requests] re-read after arr action failed:", err instanceof Error ? err.message : String(err));
+    return pc.existing;
+  }
+}
+
+// The note that answer carries: the one this request wrote, else the row's own
+// as just re-read (another admin may have saved one during the arr call).
+function noteAfterArr(pc: PatchContext, current: ExistingRequest): string | null {
+  return pc.adminNote !== undefined ? pc.sanitizedAdminNote : current.adminNote;
+}
+
 // What a Search queues: the movie, or the series by the tvdbId the push
 // stored. A TV request with none was never pushed (or predates the bookkeeping
 // write) and has nothing to search.
@@ -249,8 +267,8 @@ async function searchRequest(pc: PatchContext): Promise<NextResponse> {
     arrError = searchFailureText(err, t, target.kind === "movie" ? "Radarr" : "Sonarr");
   }
   // The arr call took a while: answer the row as it is now, not as it was read.
-  const current = (await loadRequest(pc.id)) ?? existing;
-  return NextResponse.json({ ...current, adminNote: searchedNote, arrError });
+  const current = await rereadAfterArr(pc);
+  return NextResponse.json({ ...current, adminNote: noteAfterArr(pc, current), arrError });
 }
 
 // Re-push an APPROVED request whose title the arr may have lost, with its
@@ -276,8 +294,8 @@ async function retryRequest(pc: PatchContext): Promise<NextResponse> {
   // Outside the try: Sonarr has already accepted the series, so a DB hiccup
   // here must not be reported as an ARR push failure.
   if (pushedTvdbId !== null) await stampTvdbId(id, pushedTvdbId);
-  const current = (await loadRequest(id)) ?? existing;
-  return NextResponse.json({ ...current, adminNote: answeredNote(pc), arrError });
+  const current = await rereadAfterArr(pc);
+  return NextResponse.json({ ...current, adminNote: noteAfterArr(pc, current), arrError });
 }
 
 async function editNote(pc: PatchContext): Promise<NextResponse> {

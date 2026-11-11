@@ -160,7 +160,10 @@ test("bulk: an auto-approval whose push failed is marked pushFailed and goes to 
   const loopEnd = CODE.indexOf('scheduleDownloadChecks(downloadChecksFor(settled), { name: "requests/bulk:90s-download-check" });');
   const alert = CODE.indexOf("alertAdminsNewRequest(");
   assert.ok(loopEnd > 0 && alert > loopEnd, "the alert runs once, after the push loop");
-  assert.match(CODE, /const firstAwaiting = prepared\.find\(\(p\) => awaitingReview\.has\(keyOf\(p\.tmdbId, p\.mediaType\)\)\);\s*if \(firstAwaiting\) \{\s*alertAdminsNewRequest\(/);
+  // The first awaiting row admins have NOT already heard about: a title someone
+  // else already has pending was announced when theirs was filed.
+  assert.match(CODE, /const firstAwaiting = await firstUnannounced\(prepared\.filter\(\(p\) => awaitingReview\.has\(keyOf\(p\.tmdbId, p\.mediaType\)\)\), awaitingReview\);\s*if \(firstAwaiting\) \{\s*alertAdminsNewRequest\(/);
+  assert.match(CODE, /o\.createdAt < createdAt \|\| \(o\.createdAt\.getTime\(\) === createdAt\.getTime\(\) && o\.id < id\)/, "earlier by (createdAt, id), as hasEarlierPending orders it");
   assert.doesNotMatch(CODE, /notifyAdminsNewRequest/, "per-channel admin notifiers stay behind the shared alert");
 });
 

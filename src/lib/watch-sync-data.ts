@@ -273,7 +273,11 @@ type StepKey = "toJellyfin" | "toPlex" | "progress";
 async function drain(full: boolean, signal: AbortSignal, applyOnce: (pendingOnly: boolean) => Promise<number>): Promise<void> {
   for (let n = 0; n < WATCH_SYNC_FULL_MAX_BATCHES; n++) {
     const finished = await applyOnce(n > 0);
-    if (!full || finished === 0 || signal.aborted) return;
+    if (!full || signal.aborted) return;
+    // The first batch may be nothing but earlier failures failing again; that
+    // says nothing about the new pending items behind them, so only a
+    // pending-only batch that finishes nothing ends the drain.
+    if (finished === 0 && n > 0) return;
   }
 }
 

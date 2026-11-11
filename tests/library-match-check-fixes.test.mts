@@ -118,7 +118,8 @@ test("structural: Fix all can be stopped, stops on unmount, and stays mounted wh
   assert.match(run, /if \(!alive\.current \|\| \(aborted && !stopRef\.current\)\) return;/, "nothing is written, and no refresh asked for, after the page went away; a Stop still closes the run");
   assert.match(run, /stop: \(\) => \{ stopRef\.current = true; abortRef\.current\?\.abort\(\); \},/, "Stop aborts the wait on the title in flight");
   assert.match(run, /\{state === "running" && \(\s*<button ref=\{stopButtonRef\} type="button" onClick=\{run\.stop\}/, "a Stop button while running");
-  assert.match(loop, /if \(isAbortError\(err\)\) return \{ results, aborted: true \};/, "an abort is not a failure");
+  assert.match(loop, /if \(isAbortError\(err\)\) return \{ results, aborted: true, abortedEntry: entry \};/, "an abort is not a failure, and names the title left in flight");
+  assert.match(run, /if \(aborted && abortedEntry\) setUnfinished\(abortedEntry\.title\);/, "a Stop says which title it left running on the server");
   assert.match(loop, /return err instanceof DOMException && err\.name === "AbortError";/);
   assert.doesNotMatch(src, /function FixAllButton|for \(const flag of flags\)/, "no private copy of the loop");
   // A run that fixed every flag empties the list; inside `flags.length > 0`

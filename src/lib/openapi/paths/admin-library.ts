@@ -718,6 +718,7 @@ export const adminLibraryPaths: OpenApiPaths = {
         "400": { description: "Invalid body (full needs a pairId)" },
         "403": { description: "Not ADMIN" },
         "404": { description: "The Watch Sync page is disabled, or the pair was not found" },
+        "409": { description: "The pair is paused (a full sync needs a running pair)" },
         "413": tooLargeAnswer(1024),
         "429": { description: "Rate limited (6 per 10 minutes per admin)", headers: RETRY_AFTER_HEADER },
       },

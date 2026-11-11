@@ -1,5 +1,6 @@
 "use client";
 
+import { ADMIN_SESSION_LIST_CAP } from "@/lib/api-body-limits";
 import { useCallback, useState, useEffect, useRef } from "react";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { useAsyncAction } from "@/hooks/use-async-action";
@@ -75,6 +76,9 @@ function useAccountSessions(userId: string) {
   // The list read itself failed (a revoke's refusal leaves the list alone), and
   // the attempt counter that re-runs the read.
   const [loadFailed, setLoadFailed] = useState(false);
+  // The read came back full: the route lists only the newest
+  // ADMIN_SESSION_LIST_CAP, so older sessions may exist that this list can't show.
+  const [atCap, setAtCap] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const tRef = useRef(t);
   useEffect(() => {
@@ -88,6 +92,7 @@ function useAccountSessions(userId: string) {
       setLoading(false);
       if (res.ok) {
         setSessions(res.data);
+        setAtCap(res.data.length >= ADMIN_SESSION_LIST_CAP);
         setLoadFailed(false);
         return;
       }
@@ -108,7 +113,7 @@ function useAccountSessions(userId: string) {
     setAttempt((n) => n + 1);
   }, []);
 
-  return { sessions, setSessions, loading, error, setError, loadFailed, reload };
+  return { sessions, setSessions, loading, error, setError, loadFailed, atCap, reload };
 }
 
 function SessionRow({
@@ -268,7 +273,7 @@ const revokeKey = (sessionId: string) => `revoke:${sessionId}`;
 
 export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
   const t = useT();
-  const { sessions, setSessions, loading, error, setError, loadFailed, reload } = useAccountSessions(u.id);
+  const { sessions, setSessions, loading, error, setError, loadFailed, atCap, reload } = useAccountSessions(u.id);
   // Each revoke is busy under its own key, so two in flight never clear each
   // other's spinner; revoke-all waits for every single one.
   const action = useAsyncAction();
@@ -400,6 +405,9 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
           })}
         </div>
 
+        {!loading && atCap && !loadFailed && (
+          <p className="text-[11px] text-zinc-500">{t("adminManage.sessions.capped", { count: ADMIN_SESSION_LIST_CAP })}</p>
+        )}
         {!loading && sessions.length > 0 && (
           <RevokeAllBar
             accountName={displayName}

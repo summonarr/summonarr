@@ -283,6 +283,9 @@ function DownloadToggle({
   // (or another admin's change) arriving through router.refresh() wins, and a
   // failed write drops it.
   const [override, setOverride] = useState<{ over: boolean | null; value: boolean } | null>(null);
+  // Dropped the moment the prop moves, so it can't re-apply when a later change
+  // brings the prop back to the value it was made over.
+  if (override && override.over !== enabled) setOverride(null);
   const optimistic = override && override.over === enabled ? override.value : enabled;
   // A write the route saved but could not push to the media server (amber —
   // `pushed: false`). The hourly reconcile only re-pushes drift in the DISABLE
@@ -550,6 +553,7 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
   // applies only while the prop is the one it was made over, so another admin's
   // change (or this one's, re-read) shows without a full navigation.
   const [override, setOverride] = useState<{ over: boolean; value: boolean } | null>(null);
+  if (override && override.over !== initial) setOverride(null);
   const on = override && override.over === initial ? override.value : initial;
 
   async function toggle() {

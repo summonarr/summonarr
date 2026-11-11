@@ -414,5 +414,6 @@
   "apiAdmin.watchSync.jobGone": "Dieser Sync-Lauf wird nicht mehr verfolgt. Summonarr wurde möglicherweise neu gestartet. Lade neu, um die neuesten Ergebnisse zu sehen.",
   "apiAdmin.watchSync.pairInvalid": "Wähle ein Plex-Konto und einen Jellyfin-Benutzer, der noch auf seinem Server ist",
   "apiAdmin.watchSync.pairExists": "Diese Verknüpfung gibt es bereits",
-  "apiAdmin.watchSync.pairNotFound": "Verknüpfung nicht gefunden"
+  "apiAdmin.watchSync.pairNotFound": "Verknüpfung nicht gefunden",
+  "apiAdmin.watchSync.pairPaused": "Diese Verknüpfung ist pausiert. Setze sie fort, bevor du einen vollständigen Abgleich startest."
 }

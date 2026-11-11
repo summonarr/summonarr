@@ -24,3 +24,8 @@ export const REQUEST_BATCH_MAX_IDS = 100;
 export const REQUEST_BATCH_MAX_PERMANENT = 25;
 /** POST /api/admin/notification-agents: outbound channels in all. */
 export const NOTIFICATION_AGENTS_MAX = 25;
+
+// GET /api/admin/users/[id]/sessions lists at most this many sessions (newest
+// activity first). The body is a bare array (an iOS wire contract), so the web
+// modal reads "listed exactly the cap" as "older ones may exist".
+export const ADMIN_SESSION_LIST_CAP = 200;

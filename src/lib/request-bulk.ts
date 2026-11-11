@@ -514,6 +514,44 @@ export async function prepareItems(
   return { prepared, metaFailed };
 }
 
+/**
+ * The first of `awaiting` (caller's order) with no EARLIER pending request for
+ * the same title and instance — the single route's dedupe (hasEarlierPending),
+ * in two reads for the whole batch. A title someone else already has pending was
+ * announced when theirs was filed. A failed read alerts for the first anyway: a
+ * duplicate alert is cheaper than a lost one.
+ */
+async function firstUnannounced<P extends { tmdbId: number; mediaType: MediaType; arrInstance: string }>(
+  awaiting: P[],
+  idByKey: ReadonlyMap<string, string>,
+): Promise<P | undefined> {
+  if (awaiting.length === 0) return undefined;
+  try {
+    const ownIds = awaiting.map((p) => idByKey.get(keyOf(p.tmdbId, p.mediaType))!);
+    const own = await prisma.mediaRequest.findMany({ where: { id: { in: ownIds } }, select: { id: true, createdAt: true } });
+    const others = await prisma.mediaRequest.findMany({
+      where: {
+        status: "PENDING",
+        id: { notIn: ownIds },
+        OR: awaiting.map((p) => ({ tmdbId: p.tmdbId, mediaType: p.mediaType, arrInstance: p.arrInstance })),
+      },
+      select: { id: true, createdAt: true, tmdbId: true, mediaType: true, arrInstance: true },
+    });
+    const createdAtById = new Map(own.map((r) => [r.id, r.createdAt]));
+    return awaiting.find((p) => {
+      const id = idByKey.get(keyOf(p.tmdbId, p.mediaType))!;
+      const createdAt = createdAtById.get(id);
+      if (!createdAt) return true;
+      return !others.some((o) =>
+        o.tmdbId === p.tmdbId && o.mediaType === p.mediaType && o.arrInstance === p.arrInstance &&
+        (o.createdAt < createdAt || (o.createdAt.getTime() === createdAt.getTime() && o.id < id)));
+    });
+  } catch (err) {
+    console.error(`[requests/bulk] earlier-pending check failed, alerting anyway: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
+    return awaiting[0];
+  }
+}
+
 export interface CreatedRows {
   createdRows: { id: string; tmdbId: number; mediaType: MediaType; status: string }[];
   // Keys (tmdbId:mediaType) whose status was mirrored from another user's already
@@ -777,9 +815,10 @@ export async function pushAutoApproved(
 
   // Rows left PENDING (created for review, or a rolled-back auto-approval with
   // its backstop cleared) sit in the admin queue, and nothing else will tell an
-  // admin. One alert for the whole batch, naming the first in the caller's order;
-  // the queue lists them all.
-  const firstAwaiting = prepared.find((p) => awaitingReview.has(keyOf(p.tmdbId, p.mediaType)));
+  // admin. One alert for the whole batch, naming the first in the caller's order
+  // that admins have not already been told about (the single route's
+  // first-PENDING-per-title rule); the queue lists them all.
+  const firstAwaiting = await firstUnannounced(prepared.filter((p) => awaitingReview.has(keyOf(p.tmdbId, p.mediaType))), awaitingReview);
   if (firstAwaiting) {
     alertAdminsNewRequest({
       requestId: awaitingReview.get(keyOf(firstAwaiting.tmdbId, firstAwaiting.mediaType))!,

@@ -51,23 +51,32 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return tooManyRequests(RATE_WINDOW_MS / 1000, t("apiAdmin.common.tooManyRequestsLater"));
   }
   if (full && pairId) {
-    const updated = await prisma.watchSyncPair.updateMany({
-      where: { id: pairId },
-      data: { syncProgress: true, historyReadTo: null, jellyfinReadTo: null },
-    });
-    if (updated.count === 0) return NextResponse.json({ error: t("apiAdmin.watchSync.pairNotFound") }, { status: 404 });
-    void logAudit({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email,
-      ...auditContext(req, session),
-      action: "SETTINGS_CHANGE",
-      target: `watch-sync:${pairId}`,
-      details: { change: "pair-full-sync", rescan: true, syncProgress: true },
-    });
+    // Checked before a job is started; the pair itself is changed only under the
+    // lock (below), so a click that loses the lock to a running sync changes nothing.
+    const pair = await prisma.watchSyncPair.findUnique({ where: { id: pairId }, select: { enabled: true } });
+    if (!pair) return NextResponse.json({ error: t("apiAdmin.watchSync.pairNotFound") }, { status: 404 });
+    if (!pair.enabled) return NextResponse.json({ error: t("apiAdmin.watchSync.pairPaused") }, { status: 409 });
   }
+  const actor = { userId: session.user.id, userName: session.user.name ?? session.user.email, ...auditContext(req, session) };
   const run = () => withAdvisoryLock(
     WATCH_SYNC_LOCK_ID,
-    async (signal: AbortSignal) => NextResponse.json(await runWatchSync({ signal, ...(full && pairId ? { pairIds: [pairId], full: true } : {}) })),
+    async (signal: AbortSignal) => {
+      if (!(full && pairId)) return NextResponse.json(await runWatchSync({ signal }));
+      // Under the lock: no run is mid-pair, so nothing writes a newer read point
+      // over the reset, and a refused click (409 below) leaves the pair as it was.
+      const updated = await prisma.watchSyncPair.updateMany({
+        where: { id: pairId, enabled: true },
+        data: { syncProgress: true, historyReadTo: null, jellyfinReadTo: null },
+      });
+      if (updated.count === 0) return NextResponse.json({ error: t("apiAdmin.watchSync.pairNotFound") }, { status: 404 });
+      void logAudit({
+        ...actor,
+        action: "SETTINGS_CHANGE",
+        target: `watch-sync:${pairId}`,
+        details: { change: "pair-full-sync", rescan: true, syncProgress: true },
+      });
+      return NextResponse.json(await runWatchSync({ signal, pairIds: [pairId], full: true }));
+    },
     () => NextResponse.json(
       { ok: false, error: t("apiAdmin.watchSync.running"), retryAfter: 30 },
       { status: 409, headers: { "Retry-After": "30" } },

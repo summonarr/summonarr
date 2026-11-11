@@ -1,3 +1,4 @@
+import { ADMIN_SESSION_LIST_CAP } from "@/lib/api-body-limits";
 import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
 import { withPermission, type SummonarrSession } from "@/lib/api-auth";
@@ -28,7 +29,7 @@ async function readTarget(id: string) {
 
 // Native sessions never expire, so the list can only grow: the newest
 // SESSION_LIST_CAP are returned and `X-Truncated: true` says more exist.
-const SESSION_LIST_CAP = 200;
+const SESSION_LIST_CAP = ADMIN_SESSION_LIST_CAP;
 const REVOKES_PER_MIN = 30;
 
 const callerIsAdmin = (session: SummonarrSession) => hasPermission(session.user.permissions, Permission.ADMIN);

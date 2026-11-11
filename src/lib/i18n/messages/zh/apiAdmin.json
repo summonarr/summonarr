@@ -414,5 +414,6 @@
   "apiAdmin.watchSync.jobGone": "已不再跟踪该同步运行。Summonarr 可能已重启。请重新加载查看最新结果。",
   "apiAdmin.watchSync.pairInvalid": "请选择一个 Plex 账户和一个仍在其服务器上的 Jellyfin 用户",
   "apiAdmin.watchSync.pairExists": "该配对已存在",
-  "apiAdmin.watchSync.pairNotFound": "未找到配对"
+  "apiAdmin.watchSync.pairNotFound": "未找到配对",
+  "apiAdmin.watchSync.pairPaused": "该配对已暂停。请先恢复它，再运行完整同步。"
 }

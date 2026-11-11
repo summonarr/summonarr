@@ -3,8 +3,9 @@
 // one remap at a time, each finishing on the server before the next starts
 // (guardrail 37a's background job + status poll, runFixMatch).
 //
-// - Stoppable between titles: the title already running finishes on the
-//   server (its job is not cancelled), but no further one starts.
+// - Stoppable: no further title starts, and the caller may abort the wait on
+//   the one in flight. Its job is not cancelled and finishes on the server; the
+//   loop names it (`abortedEntry`) so the caller can say its result is unknown.
 // - An abort (the page went away) ends the loop quietly — the job itself
 //   carries on — and is never counted as a failure.
 // - Every title's outcome is kept, in order: a partial remap's warning
@@ -77,7 +78,7 @@ export function isAbortError(err: unknown): boolean {
 export async function runFixAllSequence<E extends FixAllEntry>(
   entries: readonly E[],
   deps: FixAllDeps<E>,
-): Promise<{ results: FixAllResult[]; aborted: boolean }> {
+): Promise<{ results: FixAllResult[]; aborted: boolean; abortedEntry?: E }> {
   const results: FixAllResult[] = [];
   for (const entry of entries) {
     if (deps.stopped()) break;
@@ -92,7 +93,7 @@ export async function runFixAllSequence<E extends FixAllEntry>(
         : { key: entry.key, title: entry.title, kind: "ok" };
     } catch (err) {
       // Unmounted mid-run: stop quietly — the job itself carries on.
-      if (isAbortError(err)) return { results, aborted: true };
+      if (isAbortError(err)) return { results, aborted: true, abortedEntry: entry };
       result = { key: entry.key, title: entry.title, kind: "error", text: deps.errorOf(err) };
     }
     results.push(result);
