@@ -1340,6 +1340,8 @@
   "adminManage.watchSync.rescan": "Verlauf neu lesen",
   "adminManage.watchSync.rescanConfirm": "Beim nächsten Lauf den gesamten Verlauf dieser Verknüpfung auf beiden Servern neu lesen? Titel, die seitdem auf dem anderen Server angekommen sind, werden markiert; bereits Markiertes wird nicht wiederholt.",
   "adminManage.watchSync.rescanQueued": "Der nächste Lauf liest den gesamten Verlauf dieser Verknüpfung auf beiden Servern neu.",
+  "adminManage.watchSync.fullSync": "Vollständiger Abgleich",
+  "adminManage.watchSync.fullSyncConfirm": "Jetzt einen vollständigen Abgleich für dieses Paar starten? Er liest den gesamten Verlauf UND jeden teilweise gesehenen Titel auf beiden Servern neu ein (nicht nur „Weiterschauen“), aktiviert den Abgleich der Wiedergabepositionen für dieses Paar und läuft, bis alles kopiert ist oder das Zeitlimit des Laufs erreicht wird; danach laufen die normalen Durchläufe weiter. Nur hinzufügend: nichts wird je zurückgesetzt.",
   "adminManage.watchSync.remove": "Verknüpfung entfernen",
   "adminManage.watchSync.removeConfirm": "Diese Verknüpfung entfernen? Auf keinem der Server wird bereits Markiertes zurückgesetzt.",
   "adminManage.watchSync.count.marked": "Markiert: {count}",

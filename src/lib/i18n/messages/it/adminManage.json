@@ -1340,6 +1340,8 @@
   "adminManage.watchSync.rescan": "Rileggi la cronologia",
   "adminManage.watchSync.rescanConfirm": "Rileggere tutta la cronologia di questa associazione su entrambi i server alla prossima esecuzione? I titoli arrivati sull'altro server nel frattempo vengono segnati; nulla di già segnato viene ripetuto.",
   "adminManage.watchSync.rescanQueued": "La prossima esecuzione rilegge tutta la cronologia di questa associazione su entrambi i server.",
+  "adminManage.watchSync.fullSync": "Sincronizzazione completa",
+  "adminManage.watchSync.fullSyncConfirm": "Eseguire ora una sincronizzazione completa per questa coppia? Rilegge tutta la cronologia E ogni titolo guardato parzialmente su entrambi i server (non solo Continua a guardare), attiva la sincronizzazione dei punti di ripresa per questa coppia e prosegue finché tutto è copiato o scade il limite di tempo; poi riprendono le esecuzioni normali. Solo aggiunta: nulla viene mai deselezionato.",
   "adminManage.watchSync.remove": "Rimuovi associazione",
   "adminManage.watchSync.removeConfirm": "Rimuovere questa associazione? Nulla di ciò che è già segnato su uno dei due server viene annullato.",
   "adminManage.watchSync.count.marked": "Segnati: {count}",

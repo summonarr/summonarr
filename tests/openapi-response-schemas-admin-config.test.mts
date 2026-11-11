@@ -254,7 +254,7 @@ test("watch sync documents the page's pairs, accounts, suggestions and run state
 
   // A run answers runWatchSync's result; a pair stores the same per-pair shape.
   const run = await responseSchema("/admin/watch-sync/run", "get", "200");
-  assert.match(routeSource("/admin/watch-sync/run"), /NextResponse\.json\(await runWatchSync\(\{ signal \}\)\)/);
+  assert.match(routeSource("/admin/watch-sync/run"), /NextResponse\.json\(await runWatchSync\(\{ signal, \.\.\.\(full && pairId \? \{ pairIds: \[pairId\], full: true \} : \{\}\) \}\)\)/);
   // The stored result is a plain JSON copy of the pair's run result.
   assert.match(data, /lastResult: toJsonValue\(r\)/);
   assert.match(data, /function toJsonValue\(r: WatchSyncPairResult\)[^{]*\{\s*return JSON\.parse\(JSON\.stringify\(r\)\)/);

@@ -39,6 +39,8 @@ import {
   getPlexMachineId,
   getPlexSharedServerTokens,
   getPlexInProgress,
+  getPlexAllInProgress,
+  getPlexLibrarySections,
   getPlexUser,
   getPlexUserStates,
   getPlexViewCounts,
@@ -60,6 +62,7 @@ import { processSingleton } from "./process-singleton";
 import type { JellyfinPlayedItem, PlexHistoryEntry } from "./upstream-watch";
 import {
   WATCH_SYNC_BATCH,
+  WATCH_SYNC_FULL_MAX_BATCHES,
   WATCH_SYNC_HISTORY_TRUNCATED_MESSAGE,
   WATCH_SYNC_MAX_ATTEMPTS,
   WATCH_SYNC_PLAN_CHUNK,
@@ -68,6 +71,7 @@ import {
   chunkReadTo,
   oldestFirst,
   WATCH_SYNC_PROGRESS_MAX_UNITS,
+  WATCH_SYNC_FULL_PROGRESS_MAX_UNITS,
   decideProgress,
   isWatchedWithoutResume,
   latestState,
@@ -201,15 +205,15 @@ export function watchSyncRunState(): WatchSyncRunState {
 // `budgetMs` and `plexHistoryMaxItems` are test seams; production always runs
 // on WATCH_SYNC_RUN_BUDGET_MS and getPlexWatchHistory's own read cap.
 export async function runWatchSync(
-  { signal: lockSignal, pairIds, budgetMs = WATCH_SYNC_RUN_BUDGET_MS, plexHistoryMaxItems }:
-    { signal?: AbortSignal; pairIds?: readonly string[]; budgetMs?: number; plexHistoryMaxItems?: number } = {},
+  { signal: lockSignal, pairIds, budgetMs = WATCH_SYNC_RUN_BUDGET_MS, plexHistoryMaxItems, full = false }:
+    { signal?: AbortSignal; pairIds?: readonly string[]; budgetMs?: number; plexHistoryMaxItems?: number; full?: boolean } = {},
 ): Promise<WatchSyncRunResult> {
   if (lockSignal?.aborted) return { pairs: [], aborted: true };
   runState.running = true;
   runState.startedAt = Date.now();
   runState.pairId = null;
   try {
-    return await runWatchSyncInner(lockSignal, pairIds, budgetMs, plexHistoryMaxItems);
+    return await runWatchSyncInner(lockSignal, pairIds, budgetMs, plexHistoryMaxItems, full);
   } finally {
     runState.running = false;
     runState.startedAt = null;
@@ -260,6 +264,19 @@ function pairProblem(p: PairRow): string | null {
 
 type StepKey = "toJellyfin" | "toPlex" | "progress";
 
+// A normal run applies one batch (WATCH_SYNC_BATCH) per direction and the next
+// run continues. A FULL sync (moving a user between platforms) keeps applying
+// until the queue stops yielding finished items — a failed item is retried
+// across runs, never spun on here — or the run's budget ends.
+// Only the first batch may retry earlier failures; later ones take new pending
+// items alone, so a transient error can't burn an item's five attempts in one run.
+async function drain(full: boolean, signal: AbortSignal, applyOnce: (pendingOnly: boolean) => Promise<number>): Promise<void> {
+  for (let n = 0; n < WATCH_SYNC_FULL_MAX_BATCHES; n++) {
+    const finished = await applyOnce(n > 0);
+    if (!full || finished === 0 || signal.aborted) return;
+  }
+}
+
 // One pair's steps: plan and apply each direction, then resume points. A step
 // that throws (a database error, say) is that step's error: the pair's other
 // steps still run. Returns the steps that ran to the end.
@@ -270,6 +287,7 @@ async function runPair(
   jellyfin: JellyfinLookups,
   signal: AbortSignal,
   plexHistoryMaxItems: number | undefined,
+  full: boolean,
 ): Promise<Set<StepKey>> {
   const completed = new Set<StepKey>();
   const step = async (key: StepKey, target: { error?: string }, work: () => Promise<void>) => {
@@ -285,7 +303,7 @@ async function runPair(
     const run: DirectionRun = { pair: p, plex, jellyfin, r: toJellyfin, fail: (e) => noteError(toJellyfin, e), signal };
     await step("toJellyfin", toJellyfin, async () => {
       await planToJellyfin(run, plexHistoryMaxItems);
-      if (!signal.aborted) await applyToJellyfin(run);
+      if (!signal.aborted) await drain(full, signal, (pendingOnly) => applyToJellyfin(run, pendingOnly));
     });
   }
   const toPlex = r.toPlex;
@@ -293,13 +311,13 @@ async function runPair(
     const run: DirectionRun = { pair: p, plex, jellyfin, r: toPlex, fail: (e) => noteError(toPlex, e), signal };
     await step("toPlex", toPlex, async () => {
       await planToPlex(run);
-      if (!signal.aborted) await applyToPlex(run);
+      if (!signal.aborted) await drain(full, signal, (pendingOnly) => applyToPlex(run, pendingOnly));
     });
   }
   // After the played-state apply, so a title just marked watched reads as
   // watched here (watched beats in-progress).
   const progress = r.progress;
-  if (progress && !signal.aborted) await step("progress", progress, () => syncProgress(p, plex, jellyfin, progress, signal));
+  if (progress && !signal.aborted) await step("progress", progress, () => syncProgress(p, plex, jellyfin, progress, signal, full));
   return completed;
 }
 
@@ -338,6 +356,7 @@ async function runWatchSyncInner(
   pairIds: readonly string[] | undefined,
   budgetMs: number,
   plexHistoryMaxItems: number | undefined,
+  full: boolean,
 ): Promise<WatchSyncRunResult> {
   // The run's own budget, below the lock's timeout: on it the run stops between
   // steps, records what it did and says it will continue (never a silent stop).
@@ -369,7 +388,7 @@ async function runWatchSyncInner(
   for (const p of valid) {
     if (signal.aborted) break;
     runState.pairId = p.id;
-    completed.set(p.id, await runPair(p, results.get(p.id)!, plexServer(p.plexUser.serverInstance), jellyfin, signal, plexHistoryMaxItems));
+    completed.set(p.id, await runPair(p, results.get(p.id)!, plexServer(p.plexUser.serverInstance), jellyfin, signal, plexHistoryMaxItems, full));
   }
   if (signal.aborted) markUnfinished(results.values(), completed);
 
@@ -420,7 +439,7 @@ interface MarkLedger {
   // Which of `ids` this sync has already marked on the target: its echo.
   markedAmong(pairId: string, ids: readonly string[]): Promise<Set<string>>;
   // The next batch to apply: pending, or failed and still retryable.
-  nextBatch(pairId: string): Promise<Array<{ id: string; datePlayed: Date | null }>>;
+  nextBatch(pairId: string, pendingOnly?: boolean): Promise<Array<{ id: string; datePlayed: Date | null }>>;
   setStatus(pairId: string, ids: string[], status: AppliedStatus): Promise<unknown>;
   // updateMany throughout: a pair removed mid-run took its marks with it.
   setFailed(pairId: string, ids: string[], error: string): Promise<unknown>;
@@ -437,8 +456,8 @@ const JELLYFIN_LEDGER: MarkLedger = {
     where: { pairId, status: "marked", jellyfinItemId: { in: chunk } },
     select: { jellyfinItemId: true },
   }))).map((m) => m.jellyfinItemId)),
-  nextBatch: async (pairId) => (await prisma.watchSyncMark.findMany({
-    where: { pairId, OR: RETRYABLE },
+  nextBatch: async (pairId, pendingOnly) => (await prisma.watchSyncMark.findMany({
+    where: { pairId, ...(pendingOnly ? { status: "pending" } : { OR: RETRYABLE }) },
     select: { jellyfinItemId: true, datePlayed: true },
     orderBy: { createdAt: "asc" },
     take: WATCH_SYNC_BATCH,
@@ -460,8 +479,8 @@ const PLEX_LEDGER: MarkLedger = {
     where: { pairId, status: "marked", plexRatingKey: { in: chunk } },
     select: { plexRatingKey: true },
   }))).map((m) => m.plexRatingKey)),
-  nextBatch: async (pairId) => (await prisma.watchSyncPlexMark.findMany({
-    where: { pairId, OR: RETRYABLE },
+  nextBatch: async (pairId, pendingOnly) => (await prisma.watchSyncPlexMark.findMany({
+    where: { pairId, ...(pendingOnly ? { status: "pending" } : { OR: RETRYABLE }) },
     select: { plexRatingKey: true, datePlayed: true },
     orderBy: { createdAt: "asc" },
     take: WATCH_SYNC_BATCH,
@@ -587,17 +606,17 @@ async function advance(pair: PairRow, column: "historyReadTo" | "jellyfinReadTo"
   pair[column] = readTo;
 }
 
-async function applyToJellyfin(run: DirectionRun): Promise<void> {
+async function applyToJellyfin(run: DirectionRun, pendingOnly = false): Promise<number> {
   const { pair, jellyfin, r, fail, signal } = run;
-  const batch = await JELLYFIN_LEDGER.nextBatch(pair.id);
-  if (batch.length === 0) return;
+  const batch = await JELLYFIN_LEDGER.nextBatch(pair.id, pendingOnly);
+  if (batch.length === 0) return 0;
 
   const userId = pair.jellyfinUser.sourceUserId;
   let cfg: { url: string; apiKey: string };
   let played: Set<string>;
   try {
     cfg = await jellyfin.config(pair.jellyfinUser.serverInstance);
-    if (signal.aborted) return;
+    if (signal.aborted) return 0;
     // The user's OWN played state for exactly this batch's items. Without it a
     // mark could double a PlayCount; try next run. An item Jellyfin doesn't
     // return is left to the mark, whose 404 records it "missing".
@@ -606,14 +625,15 @@ async function applyToJellyfin(run: DirectionRun): Promise<void> {
     for (const [id, s] of states) if (s.played) played.add(id);
   } catch (err) {
     fail(err);
-    return;
+    return 0;
   }
-  if (signal.aborted) return;
+  if (signal.aborted) return 0;
   const { url, apiKey } = cfg;
 
   const outcome = await applyBatch(batch, signal, (id) => played.has(id),
     (m) => markJellyfinPlayed(url, apiKey, userId, m.id, m.datePlayed));
   await recordOutcome(outcome, r, JELLYFIN_LEDGER, pair.id);
+  return outcome.marked.length + outcome.already.length + outcome.missing.length;
 }
 
 // ── Jellyfin → Plex ──────────────────────────────────────────────────────────
@@ -642,25 +662,25 @@ async function planToPlex(run: DirectionRun): Promise<void> {
   await advance(pair, "jellyfinReadTo", newestPlayedAt(items));
 }
 
-async function applyToPlex(run: DirectionRun): Promise<void> {
+async function applyToPlex(run: DirectionRun, pendingOnly = false): Promise<number> {
   const { pair, plex, r, fail, signal } = run;
-  const batch = await PLEX_LEDGER.nextBatch(pair.id);
-  if (batch.length === 0) return;
+  const batch = await PLEX_LEDGER.nextBatch(pair.id, pendingOnly);
+  if (batch.length === 0) return 0;
 
   const cfg = await plex.config();
-  if (!cfg) { fail(PLEX_NOT_CONFIGURED); return; }
+  if (!cfg) { fail(PLEX_NOT_CONFIGURED); return 0; }
   let token: string | null;
   let viewCounts: Map<string, number>;
   try {
     token = await plex.userToken(pair.plexUser.sourceUserId, pair.plexUser.isServerAdmin);
-    if (!token) { fail(NO_PLEX_ACCESS); return; }
+    if (!token) { fail(NO_PLEX_ACCESS); return 0; }
     // The account's OWN played state: already watched → "already", no scrobble.
     viewCounts = await getPlexViewCounts(cfg.url, token, batch.map((m) => m.id));
   } catch (err) {
     fail(err);
-    return;
+    return 0;
   }
-  if (signal.aborted) return;
+  if (signal.aborted) return 0;
   const userToken = token;
   const outcome = await applyBatch(
     batch,
@@ -669,6 +689,7 @@ async function applyToPlex(run: DirectionRun): Promise<void> {
     (m) => (viewCounts.has(m.id) ? scrobblePlexItem(cfg.url, userToken, m.id) : Promise.resolve("missing" as const)),
   );
   await recordOutcome(outcome, r, PLEX_LEDGER, pair.id);
+  return outcome.marked.length + outcome.already.length + outcome.missing.length;
 }
 
 // ── Resume positions ─────────────────────────────────────────────────────────
@@ -685,8 +706,10 @@ async function syncProgress(
   jellyfin: JellyfinLookups,
   r: WatchSyncProgressResult,
   signal: AbortSignal | undefined,
+  full: boolean,
 ): Promise<void> {
   const fail = (err: unknown) => noteError(r, err);
+  const maxUnits = full ? WATCH_SYNC_FULL_PROGRESS_MAX_UNITS : WATCH_SYNC_PROGRESS_MAX_UNITS;
   const jfSlug = pair.jellyfinUser.serverInstance;
   const jfUser = pair.jellyfinUser.sourceUserId;
   let jfCfg: { url: string; apiKey: string };
@@ -707,9 +730,14 @@ async function syncProgress(
   const userToken = token;
 
   try {
+    // A full sync reads EVERY partial watch on each side (Plex: each section's
+    // inProgress filter, since On Deck is one episode per show and a short
+    // window); a normal run stays on the cheap resume lists.
     const [jfItems, plexItems] = await Promise.all([
-      getJellyfinInProgress(jfCfg.url, jfCfg.apiKey, jfUser),
-      getPlexInProgress(plexUrl, userToken),
+      getJellyfinInProgress(jfCfg.url, jfCfg.apiKey, jfUser, { full }),
+      full
+        ? getPlexLibrarySections(plexUrl, userToken, signal).then((sections) => getPlexAllInProgress(plexUrl, userToken, sections, signal))
+        : getPlexInProgress(plexUrl, userToken),
     ]);
     if (signal?.aborted) return;
 
@@ -721,14 +749,14 @@ async function syncProgress(
     // one side can't fill the cap and starve the other side's titles.
     const units = new Map<string, WatchSyncPlay>();
     const add = (title: PlexTitle | null, kind: "movie" | "episode", season: number | null, episode: number | null) => {
-      if (!title || units.size >= WATCH_SYNC_PROGRESS_MAX_UNITS) return;
+      if (!title || units.size >= maxUnits) return;
       if ((kind === "movie") !== (title.mediaType === "MOVIE")) return;
       const play: WatchSyncPlay = { tmdbId: title.tmdbId, mediaType: title.mediaType, seasonNumber: season, episodeNumber: episode, viewedAt: null };
       const key = progressUnitKey(play);
       if (key && !units.has(key)) units.set(key, play);
     };
     const longest = Math.max(jfItems.length, plexItems.length);
-    for (let n = 0; n < longest && units.size < WATCH_SYNC_PROGRESS_MAX_UNITS; n++) {
+    for (let n = 0; n < longest && units.size < maxUnits; n++) {
       const j = jfItems[n];
       if (j) add(jfTitle(j.kind === "movie" ? j.itemId : j.showKey ?? ""), j.kind, j.seasonNumber, j.episodeNumber);
       const x = plexItems[n];

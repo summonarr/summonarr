@@ -16,9 +16,10 @@
 // parsers are defensive and an unparseable answer reads as "no token".
 import { safeFetchTrusted } from "./safe-fetch";
 import { trimServerBase } from "./server-url";
-import { asRecord } from "./media-server-payload";
+import { asRecord, STOP_PAGING } from "./media-server-payload";
 import {
   noRetry,
+  plexFetchAllPages,
   PLEX_TV_HOSTS,
   plexFetch,
   plexTvXmlHeaders,
@@ -203,10 +204,10 @@ function nonNegativeIndex(v: unknown): number | null {
   return typeof v === "string" && /^\d+$/.test(v) ? Number(v) : null;
 }
 
-export function parsePlexInProgress(items: ReadonlyArray<unknown>): PlexInProgressItem[] {
+export function parsePlexInProgress(items: ReadonlyArray<unknown>, max: number = PLEX_IN_PROGRESS_MAX): PlexInProgressItem[] {
   const out: PlexInProgressItem[] = [];
   for (const raw of items) {
-    if (out.length >= PLEX_IN_PROGRESS_MAX) break;
+    if (out.length >= max) break;
     const m = asRecord(raw);
     if (!m) continue;
     const kind = m.type === "movie" ? "movie" : m.type === "episode" ? "episode" : null;
@@ -248,6 +249,49 @@ export async function getPlexInProgress(serverUrl: string, token: string): Promi
     return parsePlexInProgress(container.items);
   }
   return [];
+}
+
+/** Ceiling on a full (migration) read of one account's partial watches. */
+export const PLEX_FULL_IN_PROGRESS_MAX = 5_000;
+
+/**
+ * EVERY partially watched movie and episode the account can see, not just what
+ * On Deck / Continue Watching surface (On Deck is one episode per show and a
+ * short window; a user being moved between platforms has partial watches far
+ * older than that). Walks each section with Plex's `inProgress=1` filter
+ * (episodes as type=4) AS THE USER. UNVERIFIED against a live server — the
+ * filter is the one python-plexapi sends. A section that answers an error
+ * throws: a partial listing is never "nothing in progress".
+ */
+export async function getPlexAllInProgress(
+  serverUrl: string,
+  token: string,
+  sections: ReadonlyArray<{ key: string; type: "movie" | "show" }>,
+  signal?: AbortSignal,
+): Promise<PlexInProgressItem[]> {
+  const base = trimServerBase(serverUrl);
+  const out: PlexInProgressItem[] = [];
+  const seen = new Set<string>();
+  for (const section of sections) {
+    if (!/^\d{1,20}$/.test(section.key)) continue;
+    const type = section.type === "movie" ? 1 : 4;
+    await plexFetchAllPages(
+      `${base}/library/sections/${section.key}/all?type=${type}&inProgress=1`,
+      token,
+      (items) => {
+        for (const item of parsePlexInProgress(items, PLEX_FULL_IN_PROGRESS_MAX)) {
+          if (seen.has(item.ratingKey)) continue;
+          seen.add(item.ratingKey);
+          out.push(item);
+          if (out.length >= PLEX_FULL_IN_PROGRESS_MAX) return STOP_PAGING;
+        }
+        return undefined;
+      },
+      signal,
+    );
+    if (out.length >= PLEX_FULL_IN_PROGRESS_MAX) break;
+  }
+  return out;
 }
 
 /**

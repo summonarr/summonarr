@@ -314,6 +314,11 @@ export const WATCH_SYNC_PROGRESS_TOLERANCE_MS = 30_000;
 export const WATCH_SYNC_PROGRESS_MAX_FRACTION = 0.95;
 // Titles considered per pair per run.
 export const WATCH_SYNC_PROGRESS_MAX_UNITS = 200;
+// A FULL sync (a user moving between platforms) considers every partial watch.
+export const WATCH_SYNC_FULL_PROGRESS_MAX_UNITS = 5_000;
+// Batches a full sync applies per direction in one run (each is WATCH_SYNC_BATCH
+// items); the run's own time budget ends it sooner on a slow server.
+export const WATCH_SYNC_FULL_MAX_BATCHES = 200;
 
 export interface ProgressState {
   positionMs: number;

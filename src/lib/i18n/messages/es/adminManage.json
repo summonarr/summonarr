@@ -1340,6 +1340,8 @@
   "adminManage.watchSync.rescan": "Volver a leer el historial",
   "adminManage.watchSync.rescanConfirm": "¿Volver a leer todo el historial de este par en ambos servidores en la próxima ejecución? Se marcan los títulos que han llegado al otro servidor desde entonces; no se repite nada ya marcado.",
   "adminManage.watchSync.rescanQueued": "La próxima ejecución vuelve a leer todo el historial de este par en ambos servidores.",
+  "adminManage.watchSync.fullSync": "Sincronización completa",
+  "adminManage.watchSync.fullSyncConfirm": "¿Ejecutar ahora una sincronización completa de este par? Vuelve a leer todo el historial Y cada título visto parcialmente en ambos servidores (no solo Continuar viendo), activa la sincronización de puntos de reanudación de este par y continúa hasta copiar todo o agotar el límite de tiempo; luego siguen las ejecuciones normales. Solo añade: nunca se desmarca nada.",
   "adminManage.watchSync.remove": "Eliminar par",
   "adminManage.watchSync.removeConfirm": "¿Eliminar este par? No se desmarca nada de lo ya marcado en ningún servidor.",
   "adminManage.watchSync.count.marked": "Marcados: {count}",

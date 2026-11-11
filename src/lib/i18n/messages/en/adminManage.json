@@ -1340,6 +1340,8 @@
   "adminManage.watchSync.rescan": "Re-scan history",
   "adminManage.watchSync.rescanConfirm": "Re-read this pair's whole history on both servers on the next run? Titles that have reached the other server since are marked; nothing already marked is repeated.",
   "adminManage.watchSync.rescanQueued": "The next run re-reads the whole history on both servers for this pair.",
+  "adminManage.watchSync.fullSync": "Full sync",
+  "adminManage.watchSync.fullSyncConfirm": "Run a full sync for this pair now? It re-reads the whole watch history AND every partially watched title on both servers (not just Continue Watching), turns on resume-point sync for this pair, and keeps going until everything is copied or the run's time limit ends — then the regular runs continue. Add-only: nothing is ever unmarked.",
   "adminManage.watchSync.remove": "Remove pair",
   "adminManage.watchSync.removeConfirm": "Remove this pair? Nothing already marked on either server is unmarked.",
   "adminManage.watchSync.count.marked": "Marked: {count}",

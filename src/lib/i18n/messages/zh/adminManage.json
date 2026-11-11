@@ -1340,6 +1340,8 @@
   "adminManage.watchSync.rescan": "重新扫描历史",
   "adminManage.watchSync.rescanConfirm": "下次运行时重新读取此配对在两台服务器上的完整历史记录？此后已加入另一台服务器的影片会被标记；已标记的内容不会重复。",
   "adminManage.watchSync.rescanQueued": "下次运行将重新读取此配对在两台服务器上的完整历史记录。",
+  "adminManage.watchSync.fullSync": "完整同步",
+  "adminManage.watchSync.fullSyncConfirm": "现在为此配对运行完整同步吗？它会重新读取两台服务器上的全部观看历史以及每个部分观看的标题（不仅是“继续观看”），为此配对开启播放进度同步，并持续运行直到全部复制完成或达到本次运行的时间限制，之后恢复常规运行。只增不减：绝不会取消任何已标记项。",
   "adminManage.watchSync.remove": "移除配对",
   "adminManage.watchSync.removeConfirm": "移除此配对？两台服务器上已标记的内容都不会被取消标记。",
   "adminManage.watchSync.count.marked": "已标记：{count}",

@@ -1340,6 +1340,8 @@
   "adminManage.watchSync.rescan": "Relire l'historique",
   "adminManage.watchSync.rescanConfirm": "Relire tout l'historique de cette association sur les deux serveurs à la prochaine exécution ? Les titres arrivés sur l'autre serveur depuis sont marqués ; rien de déjà marqué n'est répété.",
   "adminManage.watchSync.rescanQueued": "La prochaine exécution relit tout l'historique de cette association sur les deux serveurs.",
+  "adminManage.watchSync.fullSync": "Synchronisation complète",
+  "adminManage.watchSync.fullSyncConfirm": "Lancer maintenant une synchronisation complète pour cette paire ? Elle relit tout l'historique ET chaque titre partiellement regardé sur les deux serveurs (pas seulement « Reprendre la lecture »), active la synchronisation des points de reprise pour cette paire et continue jusqu'à tout copier ou jusqu'à la limite de temps ; les exécutions normales prennent ensuite le relais. Ajout uniquement : rien n'est jamais décoché.",
   "adminManage.watchSync.remove": "Supprimer l'association",
   "adminManage.watchSync.removeConfirm": "Supprimer cette association ? Rien de ce qui est déjà marqué sur l'un ou l'autre serveur n'est démarqué.",
   "adminManage.watchSync.count.marked": "Marqués : {count}",
