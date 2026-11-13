@@ -824,6 +824,19 @@ export async function getUpcomingTV(): Promise<TmdbMedia[]> {
   return (await loadUpcomingTV()).items;
 }
 
+/**
+ * The upcoming movies and whether every TMDB page answered. For a reader that
+ * must tell "nothing is upcoming" from an outage (the /upcoming live fallback).
+ */
+export function getUpcomingMoviesChecked(): Promise<{ items: TmdbMedia[]; complete: boolean }> {
+  return loadUpcomingMovies();
+}
+
+/** getUpcomingMoviesChecked's TV twin. */
+export function getUpcomingTVChecked(): Promise<{ items: TmdbMedia[]; complete: boolean }> {
+  return loadUpcomingTV();
+}
+
 /** getUpcomingMoviesForRefresh's TV twin. */
 export async function getUpcomingTVForRefresh(): Promise<TmdbMedia[]> {
   const { items, complete } = await loadUpcomingTV();

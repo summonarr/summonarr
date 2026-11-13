@@ -363,3 +363,53 @@ test("structural: an add-as-request still in flight when the dialog closes never
   assert.match(add, /if \(gen === addGen\.current\) setAddWrongState\(next\);/);
   assert.equal(add.match(/setAddWrongState\(/g)?.length, 2, "\"adding\", then the guarded outcome — no unguarded write");
 });
+
+test("a request's own timeout is a failed poll or a failed start, never the caller's abort", async () => {
+  // timedFetch's timer rejects with the same AbortError an unmount does. Read as
+  // the caller's abort, the buttons returned silently and stayed on "Applying…".
+  const realFetch = globalThis.fetch, realNow = Date.now, realSetTimeout = globalThis.setTimeout;
+  let clock = 9_000_000;
+  Date.now = () => clock;
+  globalThis.setTimeout = ((fn: () => void, ms?: number) => { if ((ms ?? 0) >= 30_000) return realSetTimeout(() => {}, 0); clock += ms ?? 0; return realSetTimeout(fn, 0); }) as typeof setTimeout;
+  const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+  const timedOut = () => { throw new DOMException("The operation was aborted.", "AbortError"); };
+  try {
+    // The start POST timed out: a real failure the caller shows.
+    globalThis.fetch = (async () => timedOut()) as typeof fetch;
+    await assert.rejects(
+      runFixMatch({ server: "plex", mediaType: "MOVIE", correctTmdbId: 5, tmdbId: 4 }),
+      (e: unknown) => e instanceof FixMatchClientError && e.code === "http" && e.status === 0,
+    );
+    // One poll timed out: counted, and the next poll's answer is used.
+    let polls = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/api/admin/fix-match")) return json({ ok: true, jobId: "00000000-0000-0000-0000-000000000000" }, 202);
+      if (++polls === 1) return timedOut();
+      return json({ status: "done", result: { ok: true } });
+    }) as typeof fetch;
+    assert.deepEqual(await runFixMatch({ server: "plex", mediaType: "MOVIE", correctTmdbId: 5, tmdbId: 4 }), { ok: true });
+    assert.equal(polls, 2);
+    // Every poll timing out ends as pollLost, not a silent AbortError.
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/api/admin/fix-match")) return json({ ok: true, jobId: "00000000-0000-0000-0000-000000000000" }, 202);
+      return timedOut();
+    }) as typeof fetch;
+    await assert.rejects(
+      runFixMatch({ server: "plex", mediaType: "MOVIE", correctTmdbId: 5, tmdbId: 4 }),
+      (e: unknown) => e instanceof FixMatchClientError && e.code === "pollLost",
+    );
+    // The caller's own abort still leaves as an AbortError.
+    const ctrl = new AbortController();
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/api/admin/fix-match")) return json({ ok: true, jobId: "00000000-0000-0000-0000-000000000000" }, 202);
+      ctrl.abort();
+      return timedOut();
+    }) as typeof fetch;
+    await assert.rejects(
+      runFixMatch({ server: "plex", mediaType: "MOVIE", correctTmdbId: 5, tmdbId: 4 }, { signal: ctrl.signal }),
+      (e: unknown) => e instanceof DOMException && e.name === "AbortError",
+    );
+  } finally {
+    globalThis.fetch = realFetch; Date.now = realNow; globalThis.setTimeout = realSetTimeout;
+  }
+});

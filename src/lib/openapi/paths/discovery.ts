@@ -217,6 +217,7 @@ export const discoveryPaths: OpenApiPaths = {
         },
         "403": { description: "feature.page.upcoming is disabled" },
         "429": { description: "Rate limited (30 req/min per user)" },
+        "500": { description: "{ error }" },
         "502": { description: "{ error } — nothing to show because a read failed (a failed live fallback beside cached titles still answers 200 with what was cached)" },
       },
     },
@@ -237,12 +238,12 @@ export const discoveryPaths: OpenApiPaths = {
       ],
       responses: {
         "200": {
-          description: "{ movies, tv, totalMovies, totalTv, totalPages, page, sortBy } with availability enrichment",
+          description: "{ movies, tv, totalMovies, totalTv, totalPages, page, sortBy, failedSources } with availability enrichment",
           content: {
             "application/json": {
               schema: {
                 type: "object",
-                required: ["movies", "tv", "totalMovies", "totalTv", "totalPages", "page", "sortBy"],
+                required: ["movies", "tv", "totalMovies", "totalTv", "totalPages", "page", "sortBy", "failedSources"],
                 properties: {
                   movies: TMDB_MEDIA_LIST,
                   tv: TMDB_MEDIA_LIST,
@@ -251,6 +252,11 @@ export const discoveryPaths: OpenApiPaths = {
                   totalPages: { type: "integer" },
                   page: { type: "integer" },
                   sortBy: { type: "string", enum: ["imdb", "letterboxd", "rt", "trakt", "mdblist"], description: "The sort actually applied" },
+                  failedSources: {
+                    type: "array",
+                    items: { type: "string", enum: ["tmdb", "trakt", "mdblist"] },
+                    description: "Additive: the rating sources that failed or answered incompletely, so the lists are missing their titles (an empty list with a failed source is an outage, not an empty ranking). Empty when every source answered.",
+                  },
                 },
               },
             },

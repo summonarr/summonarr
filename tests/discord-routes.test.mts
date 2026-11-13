@@ -647,6 +647,22 @@ test("step-up: initiate-merge needs it from a WEB session — even one replayed 
   assert.equal(opsOf("discordMergeCode.upsert").length, 1, "the native session reaches the merge code");
 });
 
+test("initiate-merge: the password prompt's first round trip spends no code; three codes per target still fit", async () => {
+  // The web client's first request never carries the password. Counted, each
+  // code cost two of the three hits and the second code was refused.
+  const web = await mintSession({ passwordHash: await hashPassword(STEP_UP_PASSWORD) });
+  for (let i = 0; i < 3; i++) {
+    const prompt = await doInitiate(web.token, { discordId: VALID_SNOWFLAKE });
+    assert.equal(prompt.status, 401, `prompt ${i + 1}`);
+    const sent = await doInitiate(web.token, { discordId: VALID_SNOWFLAKE, confirmPassword: STEP_UP_PASSWORD });
+    assert.equal(sent.status, 200, `code ${i + 1}`);
+  }
+  assert.equal(opsOf("discordMergeCode.upsert").length, 3);
+  // The fourth is refused before the password is even asked for.
+  const fourth = await doInitiate(web.token, { discordId: VALID_SNOWFLAKE });
+  assert.equal(fourth.status, 429);
+});
+
 // ── 1: generate-link fails CLOSED on a malformed snowflake ───────────────────
 
 test("generate-link with NO body mints an unbound token — the web UI flow", async () => {

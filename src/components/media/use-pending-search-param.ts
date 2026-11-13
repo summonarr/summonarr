@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
+import { nextPendingQuery, settlePendingQuery } from "@/lib/client/pending-query";
 
 // One URL search param as client state for a pill / toggle whose page
 // re-enriches its whole set on every change, so a click can take a moment to
@@ -11,6 +12,15 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 // first is pending reads the stale committed prop and would push the same URL.
 // Every change drops `page`: the page it indexed into means nothing for the
 // new set.
+//
+// A page can hold several of these (the three /for-you pill groups), each its
+// own hook instance, and `searchParams` is the COMMITTED url. So the changes
+// still in flight are shared between them: a second group clicked before the
+// first navigation lands builds on the first group's change instead of the
+// stale URL, which dropped it (use-pending-filters.ts solves the same thing
+// for the filter bars). The carried changes apply only to the committed query
+// they were made against, and are dropped as soon as the URL moves
+// (src/lib/client/pending-query.ts).
 export function usePendingSearchParam<V extends string>(param: string, active: V | undefined) {
   const router = useRouter();
   const pathname = usePathname();
@@ -18,14 +28,15 @@ export function usePendingSearchParam<V extends string>(param: string, active: V
   const [isPending, startTransition] = useTransition();
   const [pendingValue, setPendingValue] = useState<{ v: V | undefined } | null>(null);
   const shown = isPending && pendingValue ? pendingValue.v : active;
+  const committed = searchParams.toString();
+
+  useEffect(() => {
+    settlePendingQuery(pathname, committed);
+  }, [pathname, committed]);
 
   /** undefined clears the param. */
   function set(value: V | undefined) {
-    const params = new URLSearchParams(searchParams.toString());
-    if (value === undefined) params.delete(param);
-    else params.set(param, value);
-    params.delete("page");
-    const qs = params.toString();
+    const qs = nextPendingQuery(pathname, committed, param, value);
     setPendingValue({ v: value });
     startTransition(() => {
       router.push(qs ? `${pathname}?${qs}` : pathname);

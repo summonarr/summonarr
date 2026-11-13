@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -41,19 +42,23 @@ export const GET = withAuth(async (request, _ctx, session) => {
   const sort = parseRecommendationSort(params.get("sort"));
 
   try {
-    const [recommendations, show4k] = await Promise.all([
+    const [recommendations, show4k, plexEnabled, jellyfinEnabled] = await Promise.all([
       // includeSeeds: the wire shape of this route is the /for-you page's, seed
       // list included (additive — `recommendedBecause.seeds`). The /api/home
       // rail takes the default and carries only seedCount.
       getUserRecommendations(session.user.id, { includeSeeds: true }),
       getShow4kVisibility(session),
+      isFeatureEnabled("feature.integration.plex"),
+      isFeatureEnabled("feature.integration.jellyfin"),
     ]);
+    // Integration flags passed explicitly — they default to TRUE when omitted.
+    const { showPlex, showJellyfin } = getBadgeVisibility(session, { plex: plexEnabled, jellyfin: jellyfinEnabled });
 
     // Enrich the whole ranked set (rank order is preserved through the attach
     // chokepoint; hidden titles drop; availability is per-user
     // visibility-scoped) — the view below reads post-enrichment fields.
     const enriched = await attachAllAvailability(recommendations, session.user.id, { show4k });
-    const items = applyRecommendationView(enriched, { availability, type, sort });
+    const items = applyRecommendationView(enriched, { availability, type, sort, showPlex, showJellyfin });
 
     // `total` is the filtered count (what the caller received), `available` the
     // unfiltered size — a client showing "12 of 200" needs both.

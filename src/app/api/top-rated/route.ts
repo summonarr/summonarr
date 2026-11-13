@@ -24,7 +24,12 @@ export const GET = withAuth(async (request, _ctx, session) => {
   const page = parsePageParam(sp);
 
   try {
-    const { movies, tv, totalMovies, totalTv, totalPages } = await runTopRatedQuery({ query, page, session });
+    const { movies, tv, totalMovies, totalTv, totalPages, failedSources } =
+      await runTopRatedQuery({ query, page, session });
+    // This route degrades on a source failure (it still answers 200 with what
+    // the other sources gave). `failedSources` is what lets a client tell a
+    // short or empty list caused by an outage from "nothing is top rated", as
+    // the web page does. Additive (guardrail 25).
     return NextResponse.json({
       movies,
       tv,
@@ -33,6 +38,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
       totalPages,
       page,
       sortBy: query.sortBy,
+      failedSources,
     });
   } catch (err) {
     console.error("[top-rated] Failed:", err);

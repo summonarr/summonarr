@@ -66,6 +66,15 @@ function useCardRequest(media: TmdbMedia, requestToken: string | undefined) {
   const t = useT();
   const action = useAsyncAction();
   const [state, setState] = useState<CardRequestState>("idle");
+  // The viewer's request going away (declined or deleted, then a live refresh
+  // re-rendered this card) must clear a "Requested" this card set itself —
+  // cardView ORs the local state in. RequestButton does the same.
+  const mine = !!media.requestedByMe;
+  const [prevMine, setPrevMine] = useState(mine);
+  if (prevMine !== mine) {
+    setPrevMine(mine);
+    if (!mine && state === "requested") setState("idle");
+  }
 
   async function submit() {
     if (state !== "idle" && state !== "confirm") return;

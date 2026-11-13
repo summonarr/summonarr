@@ -31,6 +31,14 @@ export interface RecommendationView {
   availability?: RecommendationAvailability;
   type?: RecommendationType;
   sort?: RecommendationSort;
+  /**
+   * Which servers' availability counts for this viewer (getBadgeVisibility: the
+   * pinned server and the integration flags). Omitted means both. Without it a
+   * Plex-pinned viewer's "missing" filter dropped Jellyfin-only titles they
+   * cannot watch, and a switched-off integration's leftover rows drove the filter.
+   */
+  showPlex?: boolean;
+  showJellyfin?: boolean;
 }
 
 // What "Highest rated" ranks on: IMDb's rating when the ratings attach
@@ -46,14 +54,17 @@ export function ratingSortValue(m: TmdbMedia): number {
 // Sorts are applied to a COPY: the caller's array is the enriched set that other
 // code (counts, the untouched "match" order) may still be reading.
 export function applyRecommendationView(items: TmdbMedia[], view: RecommendationView): TmdbMedia[] {
-  const { availability, type, sort = DEFAULT_RECOMMENDATION_SORT } = view;
+  const { availability, type, sort = DEFAULT_RECOMMENDATION_SORT, showPlex = true, showJellyfin = true } = view;
+  // The home rails' rule (availableToViewer, home-rails.ts), restated here to
+  // keep this module import-free.
+  const onServer = (m: TmdbMedia) => (showPlex && !!m.plexAvailable) || (showJellyfin && !!m.jellyfinAvailable);
 
   let out = items;
   if (type) out = out.filter((m) => m.mediaType === type);
   if (availability === "available") {
-    out = out.filter((m) => m.plexAvailable || m.jellyfinAvailable);
+    out = out.filter(onServer);
   } else if (availability === "missing") {
-    out = out.filter((m) => !(m.plexAvailable || m.jellyfinAvailable));
+    out = out.filter((m) => !onServer(m));
   }
 
   // "match" is the engine's own ranking, which the input already carries (the

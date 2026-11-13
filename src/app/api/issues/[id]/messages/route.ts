@@ -105,6 +105,12 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
     return NextResponse.json({ error: t("apiUser.issues.messageBodyTooLong") }, { status: 400 });
   }
   const text = sanitizeText(rawText);
+  // Checked again AFTER sanitizing: "<>" or only zero-width characters passes
+  // the check above and sanitizes to nothing — an empty bubble that still
+  // reopened a resolved issue and notified the other side.
+  if (!text) {
+    return NextResponse.json({ error: t("apiUser.issues.messageBodyRequired") }, { status: 400 });
+  }
 
   const message = await prisma.issueMessage.create({
     data: {

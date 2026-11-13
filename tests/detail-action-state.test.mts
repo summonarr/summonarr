@@ -101,7 +101,7 @@ test("VoteActions resyncs `voted` from the live prop and rolls a failed unvote b
   assert.equal(rollbacks.length, 1, "the one failed branch rolls back to the pre-click state");
   // A 404 means the vote is already gone: success, never a rollback to Voted.
   // (the write itself is writeDeletionVote, src/lib/client/vote-write.ts)
-  assert.match(src("src/lib/client/vote-write.ts"), /if \(res\.ok \|\| \(opts\.okOn404 && res\.status === 404\)\) return \{ ok: true \};/);
+  assert.match(src("src/lib/client/vote-write.ts"), /if \(opts\.okOn404 && res\.status === 404\) return \{ ok: true \};/);
   assert.match(body, /send\("DELETE", true,/, "unvote tolerates a 404");
   assert.match(body, /if \(out\.ok\) \{\s*setRemovedHere\(true\);/);
 });

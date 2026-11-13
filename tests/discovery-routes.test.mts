@@ -439,6 +439,31 @@ test("home: DOES read recommendations when feature.page.forYou is on", async () 
   );
 });
 
+test("home: a page an admin switched off loses its rails in the native feed, as on the web home page", async () => {
+  const { token } = await mintSession();
+  const idsOf = async () => {
+    const res = await inScope(() => home.GET(mk("/api/home", token, ""), undefined));
+    assert.equal(res.status, 200);
+    return (await res.json() as { carousels: { id: string }[] }).carousels.map((c) => c.id);
+  };
+  const on = await idsOf();
+  assert.ok(on.includes("on-the-air-tv") && on.includes("top-rated-movies"), `both on by default: ${on.join(", ")}`);
+  settings.set("feature.page.upcoming", "false");
+  settings.set("feature.page.top", "false");
+  invalidateFeatureFlagCache();
+  try {
+    const off = await idsOf();
+    for (const id of ["upcoming-movies", "on-the-air-tv", "top-rated-movies", "top-rated-tv"]) {
+      assert.ok(!off.includes(id), `${id} must be gone`);
+    }
+    assert.ok(off.includes("popular-movies"), "the ungated rails stay");
+  } finally {
+    settings.delete("feature.page.upcoming");
+    settings.delete("feature.page.top");
+    invalidateFeatureFlagCache();
+  }
+});
+
 // ── home: the Recently Added carousel ────────────────────────────────────────
 // Additive to the native wire contract: a new carousel id, existing ones
 // untouched. Its source is the library tables (never TMDB), scoped to the
@@ -635,6 +660,16 @@ for (const route of ROUTES.filter((r) => !SURFACES_FAILURE.has(r.name))) {
     assert.ok(!text.includes("TMDB SECRET DETAIL"), `${route.name} leaked the upstream body`);
   });
 }
+
+test("top-rated: a failed source is NAMED in the degraded answer, so an empty list is not read as 'nothing is top rated'", async () => {
+  const { token } = await mintSession();
+  const fine = await (await inScope(() => topRated.GET(mk("/api/top-rated", token, ""), undefined))).json();
+  assert.ok(Array.isArray(fine.failedSources), "always present");
+  tmdbOk = false;
+  const down = await inScope(() => topRated.GET(mk("/api/top-rated", token, ""), undefined));
+  assert.equal(down.status, 200);
+  assert.ok((await down.json()).failedSources.includes("tmdb"));
+});
 
 // ── 5: page clamping ─────────────────────────────────────────────────────────
 

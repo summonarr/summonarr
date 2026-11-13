@@ -36,7 +36,8 @@ export const GET = withAuth(async (req, _ctx, session) => {
     prisma.watchlistItem.findMany({
       where,
       select: SELECT,
-      orderBy: { createdAt: "desc" },
+      // The id breaks createdAt ties, so a page boundary is stable.
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,
     }),

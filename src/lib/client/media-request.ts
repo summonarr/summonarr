@@ -88,6 +88,11 @@ export async function submitMediaRequest(
     if (!res.ok) {
       return { error: rateLimitMessage(res, t) ?? (await readApiError(res, t("request.somethingWrong"))) };
     }
+    // The route never redirects. A 2xx that arrived through one came from
+    // something in front of the app (an auth proxy's sign-in page after the
+    // proxy session lapsed): nothing was requested. A 2xx with an unreadable
+    // body that was NOT redirected is still the route's own answer: created.
+    if (res.redirected) return { error: t("request.networkError") };
     const body: unknown = await res.json().catch(() => null);
     const available = typeof body === "object" && body !== null && "alreadyAvailable" in body && body.alreadyAvailable === true;
     return available ? "alreadyAvailable" : "created";

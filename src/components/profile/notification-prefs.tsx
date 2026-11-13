@@ -244,6 +244,9 @@ function JellyfinEmailField({
         return;
       }
       if (!res.ok) {
+        // Not a password refusal: an earlier "Incorrect password." must not
+        // stay in the prompt beside this error.
+        setStepUpError(null);
         // `message` first: a step-up refusal ("session-too-old", "rate_limit")
         // carries its sentence there and a machine code in `error`.
         setEmailError(
@@ -261,6 +264,7 @@ function JellyfinEmailField({
       // The page re-reads the pending address so the "pending" line follows it.
       router.refresh();
     } catch {
+      setStepUpError(null);
       setEmailError(t("profile.notifications.error.network"));
       setEmailSavingState("error");
     }

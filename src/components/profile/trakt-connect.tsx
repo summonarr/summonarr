@@ -154,6 +154,8 @@ export function TraktConnect(props: TraktConnectProps) {
     if (!poller.alive()) return;
     setBusy(null);
     if (!res.ok && res.status === 0) {
+      // An "Incorrect password." left from an earlier try says nothing about this one.
+      setStepUpError(null);
       setError(t("profile.error.network"));
       return;
     }
@@ -173,6 +175,9 @@ export function TraktConnect(props: TraktConnectProps) {
     }
     const code = res.ok ? readDeviceCode(data) : null;
     if (!code) {
+      // Not a step-up refusal, so the password was not what failed: an earlier
+      // "Incorrect password." must not stay beside this error.
+      setStepUpError(null);
       setError(res.ok ? t("profile.trakt.error.connect") : res.error);
       return;
     }
@@ -270,7 +275,7 @@ export function TraktConnect(props: TraktConnectProps) {
           {confirming ? (
             <div className="flex flex-wrap items-center gap-2">
               <p className="text-sm text-zinc-300 w-full">{t("profile.trakt.confirmDisconnect")}</p>
-              <Button type="button" variant="destructive" onClick={disconnect} className="w-full sm:w-auto" autoFocus>
+              <Button type="button" variant="destructive" disabled={busy !== null} onClick={disconnect} className="w-full sm:w-auto" autoFocus>
                 {t("profile.trakt.disconnect")}
               </Button>
               <Button type="button" variant="ghost" onClick={() => setConfirming(false)} className="w-full sm:w-auto">

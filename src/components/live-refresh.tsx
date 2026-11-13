@@ -35,6 +35,10 @@ export function LiveRefresh({
     // Deferred while a dialog holds the page: the refresh would drop an issue
     // the dialog is still showing the result for.
     requestPageRefresh(() => router.refresh());
+  }, {
+    // The stream has no replay: an event emitted while it was down (the server
+    // recycles it hourly) never arrives, so re-read the page once it is back.
+    onReconnect: () => requestPageRefresh(() => router.refresh()),
   });
 
   // LiveRefresh is rendered once per page, so its unmount means the page is

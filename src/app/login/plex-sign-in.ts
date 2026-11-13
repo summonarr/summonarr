@@ -6,6 +6,7 @@
 import { BASE_PATH, withBasePath } from "@/lib/base-path";
 import { plexApprovalUrl, plexForwardUrl, plexReturnBase } from "@/lib/client/plex-approval-url";
 import type { LoginAuth } from "@/lib/client/plex-redirect-auth";
+import { timedFetch } from "@/lib/client/fetch-json";
 import { readPlexPin } from "@/lib/client/login-answers";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
 import type { Translator } from "@/lib/i18n/translate";
@@ -71,13 +72,19 @@ function getPlexDeviceMeta(): PlexDeviceMeta {
 // attacker's PIN gets approved by a victim and the resulting token is submitted
 // from the attacker's browser.
 async function createPin(clientId: string, meta: PlexDeviceMeta, t: Translator): Promise<{ pinId: number; code: string } | { error: string }> {
-  const res = await fetch(withBasePath("/api/auth/plex/start"), {
+  // Bounded (the default 30s): a stalled start rejects into startPlexSignIn's
+  // catch instead of leaving the button on "Waiting for Plex…".
+  const res = await timedFetch(withBasePath("/api/auth/plex/start"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify({ clientId, platform: meta.platform, device: meta.device, model: meta.model }),
   });
-  if (!res.ok) return { error: rateLimitMessage(res, t) ?? t("auth.login.error.plexStart") };
+  if (!res.ok) {
+    // The body is not read: release it so the timeout timer stops.
+    void res.body?.cancel().catch(() => {});
+    return { error: rateLimitMessage(res, t) ?? t("auth.login.error.plexStart") };
+  }
   return readPlexPin(await res.json().catch(() => null)) ?? { error: t("auth.login.error.plexStart") };
 }
 

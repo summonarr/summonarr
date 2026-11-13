@@ -7,9 +7,10 @@
 //
 // COUNTED, one poll at a time from each answer — never setInterval, never a
 // clock (guardrail 16's lesson in arr-command-status.ts). A 202 is "still
-// running". A poll that failed on the WAY — the fetch threw, a 5xx whose
-// body is not JSON (a reverse proxy's own error page: nginx's 502/504, a
-// Cloudflare 520–524), or a 2xx that is not JSON or came through a redirect
+// running". A poll that failed on the WAY — the fetch threw, a 4xx or 5xx
+// whose body is not JSON (a reverse proxy's own page: nginx's 502/504, a
+// Cloudflare 520–524, its 403 challenge or 429 page, a proxy's HTML 401), or
+// a 2xx that is not JSON or came through a redirect
 // (a forward-auth proxy's login page, once its session ran out) — is not the
 // job's answer (guardrail 37a): it is
 // retried, and `failLimit` of them in a row end the wait as "no answer"
@@ -18,6 +19,7 @@
 // of the job itself is JSON — the route's 404 "gone", its own 502/504, the
 // JSON `null` 500 a thrown job answers with — and is returned as it came.
 import { JOB_MAX_FAILED_POLLS } from "../arr-system";
+import { requestTimeoutSignal } from "./plex-redirect-auth";
 
 export interface JobPollAnswer {
   /** The job's own answer's status; 0 when none came (out of polls, or too many failed polls in a row). */
@@ -51,9 +53,13 @@ export const POLL_REQUEST_TIMEOUT_MS = 30_000;
 
 const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** A poll that never reached the job: no answer at all, or a 5xx that is not JSON. */
+/**
+ * A poll that never reached the job: no answer at all, or a 4xx/5xx that is
+ * not JSON. Every refusal of the job routes is JSON, so an HTML 401, 403 or
+ * 429 came from something in front of them.
+ */
 export function failedOnTheWay(status: number, isJson: boolean): boolean {
-  return status === 0 || (status >= 500 && !isJson);
+  return status === 0 || (status >= 400 && !isJson);
 }
 
 /** The job id a 202 names, or null. */
@@ -69,7 +75,9 @@ async function pollOnce(
 ): Promise<{ status: number; data: unknown; reachedJob: boolean }> {
   let res: Response;
   try {
-    res = await fetchFn(pollUrl, { signal: AbortSignal.timeout(POLL_REQUEST_TIMEOUT_MS) });
+    // requestTimeoutSignal, not a bare AbortSignal.timeout: a browser without
+    // it (Safari before 16) threw here, and every poll read as "never arrived".
+    res = await fetchFn(pollUrl, { signal: requestTimeoutSignal(POLL_REQUEST_TIMEOUT_MS) });
   } catch {
     // The poll never arrived (or timed out): status 0, a failure on the way.
     return { status: 0, data: null, reachedJob: false };

@@ -141,7 +141,14 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
           // takes focus (same rule as Input and StyledSelect).
           className="h-[34px] w-48 rounded-md border border-zinc-700 bg-zinc-800 px-3 text-base md:text-[13px] text-zinc-100 focus:outline-none focus:ring-2 focus:ring-red-500"
           autoFocus
-          onKeyDown={(e) => { if (e.key === "Enter") handleVote(); if (e.key === "Escape") closeReason(); }}
+          onKeyDown={(e) => {
+            // An Enter (or Escape) that commits or cancels an IME composition
+            // belongs to the composition: voting on it posted a partial reason.
+            // keyCode 229 is Safari, which reports isComposing false on that key.
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+            if (e.key === "Enter") handleVote();
+            if (e.key === "Escape") closeReason();
+          }}
         />
         {reason.length > REASON_COUNTER_AT && (
           <span className="ds-mono text-[10px] tabular-nums text-zinc-500" aria-live="polite">

@@ -27,7 +27,6 @@ function walk(dir: string, out: string[] = []): string[] {
 const RAW_FETCH_ALLOWED: Record<string, string> = {
   "src/lib/client/fetch-json.ts": "the two wrappers themselves",
   "src/app/auth/plex/done/page.tsx": "each call carries its own anySignal + request timeout",
-  "src/app/login/use-quick-connect.ts": "a long-poll bound by the hook's abort signal",
   "src/components/admin/arr-command-watch.tsx": "AbortSignal.timeout on the call",
 };
 const INFINITY_ALLOWED: Record<string, string> = {

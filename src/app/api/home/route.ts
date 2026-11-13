@@ -43,6 +43,11 @@ export const GET = withAuth(async (request, _ctx, session) => {
       jellyfin: flags["feature.integration.jellyfin"],
     });
     const recentEnabled = flags["feature.page.recentlyAdded"] && !hideAvailable;
+    // The web home page gates these rails on their pages' flags; a page an
+    // admin switched off must not keep its rails in the native feed.
+    const upcomingEnabled = flags["feature.page.upcoming"];
+    const topEnabled = flags["feature.page.top"];
+    const none = () => Promise.resolve([] as TmdbMedia[]);
 
     // A rail whose source rejected degrades to an omitted rail (better than
     // 500ing the whole feed); settleSources logs each rejection by name. The
@@ -52,10 +57,10 @@ export const GET = withAuth(async (request, _ctx, session) => {
         trending: getTrending(),
         "popular-movies": getPopularMovies(),
         "popular-tv": getPopularTV(),
-        "upcoming-movies": getUpcomingMovies(),
-        "on-the-air-tv": getOnTheAirTV(),
-        "top-rated-movies": getTopRatedMovies(),
-        "top-rated-tv": getTopRatedTV(),
+        "upcoming-movies": upcomingEnabled ? getUpcomingMovies() : none(),
+        "on-the-air-tv": upcomingEnabled ? getOnTheAirTV() : none(),
+        "top-rated-movies": topEnabled ? getTopRatedMovies() : none(),
+        "top-rated-tv": topEnabled ? getTopRatedTV() : none(),
         // The For You rail is gated at emit time below, so don't pay the
         // recommendation read (~8 queries) plus the enrichment of its 20 extra
         // titles for a rail the default (flag-off) configuration then discards.

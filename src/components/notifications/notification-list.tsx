@@ -150,6 +150,22 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
   // never brought back from a store that has not re-fetched yet.
   const seen = useRef({ ids: new Set(initialItems.map((n) => n.id)), newest: initialItems[0]?.createdAt ?? "" });
   const readAllGenSeen = useRef(readAllGen);
+  // How many "mark all read" writes the server has confirmed. A single
+  // mark-read that fails notes it, so its rollback never un-reads a row a
+  // mark-all confirmed while it was in flight.
+  const readAllConfirmed = useRef(0);
+  // The latest `total`, for loadMore to compare the server's count against.
+  const totalRef = useRef(initialTotal);
+  useEffect(() => {
+    totalRef.current = total;
+  }, [total]);
+  // Rows a Load more answer's `total` already counted that the store has not
+  // delivered yet. They arrive later as new rows and must not be counted twice.
+  const countedAhead = useRef(0);
+  // Rows this page removed: a delete in flight, or one the server took. A Load
+  // more page read before the delete committed still lists such a row, and
+  // appending it left a ghost. A failed delete takes its id back out.
+  const gone = useRef(new Set<string>());
 
   // The other direction (store → this page). The bell marks everything read
   // and live events re-fetch the store; without this, this page kept showing
@@ -158,6 +174,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
   useEffect(() => {
     if (readAllGen === readAllGenSeen.current) return;
     readAllGenSeen.current = readAllGen;
+    readAllConfirmed.current += 1;
     // The server marked EVERY row read, including the older pages loaded here
     // that the store (one page) doesn't hold.
     setItems((cur) => {
@@ -183,7 +200,10 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
       // The store is newest-first, as this list is.
       return fresh.length > 0 ? [...fresh, ...marked] : marked;
     });
-    if (fresh.length > 0) setTotal((n) => n + fresh.length);
+    // A Load more answer may have counted some of these already.
+    const uncounted = Math.max(0, fresh.length - countedAhead.current);
+    countedAhead.current = Math.max(0, countedAhead.current - fresh.length);
+    if (uncounted > 0) setTotal((n) => n + uncounted);
   }, [storeItems]);
 
   const anyUnread = items.some((n) => !n.readAt);
@@ -198,13 +218,19 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
     setItems((cur) => withReadAt(cur, flipped, new Date().toISOString()));
     // Roll back on a clean 4xx/5xx too (not just a network error) so the list
     // can't show read locally while the server still has them unread.
-    if (!(await markAllReadInStore())) setItems((cur) => withReadAt(cur, flipped, null));
+    if (!(await markAllReadInStore())) {
+      setItems((cur) => withReadAt(cur, flipped, null));
+      return;
+    }
+    readAllConfirmed.current += 1;
   }
   async function markOneRead(id: string) {
     const flipped = new Set(items.some((n) => n.id === id && !n.readAt) ? [id] : []);
+    const readAllBefore = readAllConfirmed.current;
     setItems((cur) => withReadAt(cur, flipped, new Date().toISOString()));
     if (!(await sent("/api/notifications", jsonInit("POST", { ids: [id] })))) {
-      setItems((cur) => withReadAt(cur, flipped, null));
+      // A "mark all read" confirmed meanwhile read this row on the server too.
+      if (readAllConfirmed.current === readAllBefore) setItems((cur) => withReadAt(cur, flipped, null));
       return;
     }
     void reloadStore();
@@ -217,6 +243,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
     const index = items.findIndex((n) => n.id === id);
     if (index === -1) return;
     const removed = items[index];
+    gone.current.add(id);
     setItems((cur) => cur.filter((n) => n.id !== id));
     setTotal((n) => Math.max(0, n - 1));
     // Selection via query param — DELETE bodies are stripped by some proxies.
@@ -225,6 +252,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
       void reloadStore();
       return;
     }
+    gone.current.delete(id);
     if (gen === listGen.current) {
       setItems((cur) => {
         if (cur.some((n) => n.id === id)) return cur;
@@ -243,6 +271,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
     setItems([]);
     setTotal(0);
     setHasMore(false);
+    countedAhead.current = 0;
     // Ask for "delete all" explicitly with ?all=1 (an empty request never means "all").
     if (!(await sent("/api/notifications?all=1", { method: "DELETE" }))) {
       // Merge, never replace: a notification the store delivered while the
@@ -276,13 +305,24 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
     }
     const data = res.data;
     for (const n of data.items) seen.current.ids.add(n.id);
+    // A row this page removed (its delete still in flight, or committed after
+    // this page was read) is not appended again.
+    const page = data.items.filter((n) => !gone.current.has(n.id));
     // De-dup by id — a row could have shifted into an already-loaded page as
     // new notifications arrived since the last fetch.
     setItems((cur) => {
       const have = new Set(cur.map((n) => n.id));
-      return [...cur, ...data.items.filter((n) => !have.has(n.id))];
+      return [...cur, ...page.filter((n) => !have.has(n.id))];
     });
-    if (data.total !== undefined) setTotal(data.total);
+    if (data.total !== undefined) {
+      // The removed rows the page still listed were counted by the server but
+      // are already off this list's count.
+      const serverTotal = Math.max(0, data.total - (data.items.length - page.length));
+      // Anything the server counts beyond what this list knows of is a new row
+      // the store has not delivered yet: remember it, so its arrival adds nothing.
+      countedAhead.current += Math.max(0, serverTotal - totalRef.current);
+      setTotal(serverTotal);
+    }
     setHasMore(data.nextCursor != null);
   }
 

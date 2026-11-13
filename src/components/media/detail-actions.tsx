@@ -27,7 +27,6 @@ export function DetailActions({
   mediaType,
   state,
   canRequest,
-  tvdbId,
   manageLink,
   t,
 }: {
@@ -42,8 +41,6 @@ export function DetailActions({
   state: DetailPageState;
   // The viewer can request this media type on the default instance.
   canRequest: boolean;
-  // TV only: the series' TVDB id for the issue report.
-  tvdbId?: number | null;
   manageLink: ReturnType<typeof parseManageLink>;
   t: Translator;
 }) {
@@ -72,7 +69,6 @@ export function DetailActions({
       {state.issuesEnabled && inVisibleLibrary && (
         <ReportIssueButton
           tmdbId={media.id}
-          tvdbId={tvdbId}
           mediaType={mediaType}
           title={media.title}
           posterPath={media.posterPath}

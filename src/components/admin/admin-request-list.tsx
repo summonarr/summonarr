@@ -262,6 +262,10 @@ function useListRefresh() {
     if (event.type === "request:new" || event.type === "request:updated" || event.type === "request:deleted") {
       scheduleRefresh();
     }
+  }, {
+    // The stream has no replay: a request event emitted while it was down (the
+    // server recycles it hourly) never arrives, so re-read once it is back.
+    onReconnect: scheduleRefresh,
   });
   useEffect(() => {
     unmountedRef.current = false;

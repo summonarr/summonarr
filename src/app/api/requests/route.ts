@@ -1,3 +1,4 @@
+import { ownRequestsOrderBy } from "@/lib/request-comment-deep-link";
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { parsePageParam } from "@/lib/pagination";
@@ -53,9 +54,11 @@ export const GET = withAuth(async (req, _ctx, session) => {
     ? { title: { contains: q, mode: "insensitive" } }
     : {};
   const where: Prisma.MediaRequestWhereInput = { ...scope, ...qWhere, ...(status ? { status } : {}) };
-  const orderBy: Prisma.MediaRequestOrderByWithRelationInput = {
-    createdAt: sort === "oldest" ? "asc" : "desc",
-  };
+  // createdAt alone is not a total order: a collection "Request all" inserts
+  // its rows in one statement, so they tie, and Postgres may order ties
+  // differently per OFFSET — a row seen twice and another never. The web page's
+  // rule (ownRequestsOrderBy).
+  const orderBy = ownRequestsOrderBy(sort === "oldest" ? "asc" : "desc");
 
   const [requests, total, statusCountsRaw] = await Promise.all([
     canManage

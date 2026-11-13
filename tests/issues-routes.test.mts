@@ -851,6 +851,10 @@ test("messages POST is ownership-gated: a non-reporter USER is 403; the reporter
   );
   const asReporter = await postMessage(ownerToken, "issue-m", { body: "still broken" });
   assert.equal(asReporter.status, 201, "the reporter can always post on their own thread");
+  // Text that sanitizes to nothing is refused like an empty one: it stored an
+  // empty bubble and still ran the reply's status change and notifications.
+  const hollow = await postMessage(ownerToken, "issue-m", { body: "<>" });
+  assert.equal(hollow.status, 400, "a message that is empty once sanitized");
   await flushMicrotasks();
 });
 

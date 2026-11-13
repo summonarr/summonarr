@@ -200,15 +200,25 @@ export function hasStalled(now: number, lastChangeAt: number, reportsProgress: b
 const MAX_CONSECUTIVE_POLL_FAILURES = 10;
 
 const abortError = () => new DOMException("Fix-match polling aborted", "AbortError");
+const isAbortError = (err: unknown) => err instanceof DOMException && err.name === "AbortError";
 
 // POST the remap as a background job. Throws a FixMatchClientError on refusal.
 async function startFixMatch(body: FixMatchRequest, signal: AbortSignal | undefined): Promise<StartBody> {
-  const res = await timedFetch(withBasePath("/api/admin/fix-match"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...body, async: true }),
-    signal,
-  });
+  let res: Response;
+  try {
+    res = await timedFetch(withBasePath("/api/admin/fix-match"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...body, async: true }),
+      signal,
+    });
+  } catch (err) {
+    // timedFetch's own timeout rejects with an AbortError too. Only the
+    // caller's abort may leave as one: callers read it as "unmounted" and show
+    // nothing, which left a mounted button busy for good.
+    if (isAbortError(err) && !signal?.aborted) throw new FixMatchClientError("http", { status: 0 });
+    throw err;
+  }
   const started = startBodyOf(await res.json().catch(() => null));
   if (!res.ok || !started.ok) {
     throw started.error
@@ -219,13 +229,16 @@ async function startFixMatch(body: FixMatchRequest, signal: AbortSignal | undefi
 }
 
 // One status read: the job's status, or the HTTP status of a read that never
-// reached it (0 = the fetch failed). Throws jobLost on a 404 and rethrows an abort.
+// reached it (0 = the fetch failed or timed out). Throws jobLost on a 404 and
+// rethrows the caller's abort.
 async function readJobStatus(statusUrl: string, signal: AbortSignal | undefined): Promise<StatusBody | { failed: number }> {
   let pollRes: Response;
   try {
     pollRes = await timedFetch(statusUrl, { signal });
   } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    // The caller's abort only: a poll that hit timedFetch's own timeout is a
+    // failed poll like any other, counted toward the limit.
+    if (isAbortError(err) && signal?.aborted) throw err;
     return { failed: 0 };
   }
   if (pollRes.status === 404) throw new FixMatchClientError("jobLost", { status: 404 });

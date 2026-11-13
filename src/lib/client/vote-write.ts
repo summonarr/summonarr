@@ -24,7 +24,11 @@ export async function writeDeletionVote(opts: {
       method: opts.method,
       signal: opts.signal,
     });
-    if (res.ok || (opts.okOn404 && res.status === 404)) return { ok: true };
+    if (opts.okOn404 && res.status === 404) return { ok: true };
+    // The route never redirects: a 2xx that came through one is a page in
+    // front of the app (an auth proxy's sign-in), and the vote was not written.
+    if (res.ok && !res.redirected) return { ok: true };
+    if (res.ok) return { ok: false, message: opts.failed };
     return { ok: false, message: rateLimitMessage(res, opts.t) ?? opts.failed };
   } catch {
     return { ok: false, message: opts.failed };

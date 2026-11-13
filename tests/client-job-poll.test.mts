@@ -47,6 +47,41 @@ test("a poll that failed on the way (a throw, a proxy's non-JSON 5xx page, Cloud
   assert.deepEqual(await pollJob(s.fetchFn, "/x?job=j", opts({ failLimit: 10 })), { status: 200, data: { deleted: 1 } });
 });
 
+test("a non-JSON 4xx (a proxy's HTML 401, a Cloudflare 403 challenge or 429 page) is a failed poll, never the job's answer", async () => {
+  let s = scripted([page(401), page(403), page(429), json({ deleted: 1 })]);
+  assert.deepEqual(await pollJob(s.fetchFn, "/x?job=j", opts({ failLimit: 10 })), { status: 200, data: { deleted: 1 } });
+  // Nothing but such pages: "no answer", like any other unreachable job.
+  s = scripted([page(403), page(403)]);
+  assert.deepEqual(await pollJob(s.fetchFn, "/x?job=j", opts({ failLimit: 2 })), { status: 0, data: null });
+  // The job routes' own JSON refusals stay terminal.
+  for (const status of [401, 403, 429]) {
+    s = scripted([json({ error: "refused" }, status)]);
+    assert.deepEqual(await pollJob(s.fetchFn, "/x?job=j", opts()), { status, data: { error: "refused" } });
+  }
+});
+
+test("a browser without AbortSignal.timeout still polls, with a timer-backed signal", async (t) => {
+  // The fallback's 30 s timer must not hold the test process open.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const original = AbortSignal.timeout;
+  // @ts-expect-error -- simulating a browser that lacks the static method
+  AbortSignal.timeout = undefined;
+  try {
+    let signal: AbortSignal | null | undefined;
+    let calls = 0;
+    const fetchFn = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+      calls++;
+      signal = init?.signal;
+      return json({ done: true });
+    }) as typeof fetch;
+    assert.deepEqual(await pollJob(fetchFn, "/api/x?job=1", opts({ failLimit: 1 })), { status: 200, data: { done: true } });
+    assert.equal(calls, 1);
+    assert.ok(signal instanceof AbortSignal);
+  } finally {
+    AbortSignal.timeout = original;
+  }
+});
+
 test("the job's own 5xx is terminal: a JSON 502 and a thrown job's JSON-null 500", async () => {
   let s = scripted([json({ error: "Sonarr refused" }, 502)]);
   assert.deepEqual(await pollJob(s.fetchFn, "/x?job=j", opts()), { status: 502, data: { error: "Sonarr refused" } });

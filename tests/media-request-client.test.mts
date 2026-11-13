@@ -147,6 +147,10 @@ test("submitMediaRequest reads the answer into an outcome and an abort still pro
   assert.equal(await submitMediaRequest(payload, "tok", t), "created");
   postAnswers = [() => new Response("not json", { status: 200 })];
   assert.equal(await submitMediaRequest(payload, "tok", t), "created");
+  // A 2xx reached through a redirect is a page in front of the app (an auth
+  // proxy's sign-in), not the route: nothing was requested.
+  postAnswers = [() => Object.defineProperty(new Response("<html>Sign in</html>", { status: 200 }), "redirected", { value: true })];
+  assert.deepEqual(await submitMediaRequest(payload, "tok", t), { error: "request.networkError" });
   postAnswers = [() => json(500, { error: "boom" })];
   assert.deepEqual(await submitMediaRequest(payload, "tok", t), { error: "boom" });
 

@@ -124,3 +124,17 @@ test("a failed copy says so, in the Trakt code panel, both two-factor copy butto
     assert.ok(cat["profile.common.copyFailed"], l);
   }
 });
+
+// The confirm button was the one control a save in flight did not lock, so a
+// switch's PATCH and the DELETE could race.
+test("the confirm-Disconnect button is locked while anything is in flight", () => {
+  assert.match(src, /<Button type="button" variant="destructive" disabled=\{busy !== null\} onClick=\{disconnect\}/);
+});
+
+// "Incorrect password." stayed in the prompt after a later try whose password
+// was accepted and which failed for another reason.
+test("a failure that is not a step-up refusal clears the prompt's password error", () => {
+  const start = src.slice(src.indexOf("async function start("), src.indexOf("function cancel()"));
+  assert.match(start, /if \(!code\) \{[^}]*?setStepUpError\(null\);\s*setError\(/);
+  assert.match(start, /res\.status === 0\) \{[^}]*?setStepUpError\(null\);\s*setError\(/);
+});

@@ -154,3 +154,17 @@ test("an empty input stays empty for every combination", () => {
     assert.deepEqual(applyRecommendationView([], { sort, type: "movie", availability: "available" }), []);
   }
 });
+
+test("the availability filter counts only the servers this viewer is shown", () => {
+  // A Plex-pinned viewer: a Jellyfin-only title is not something they can watch.
+  const items = [
+    { id: 1, mediaType: "movie", title: "plex", plexAvailable: true },
+    { id: 2, mediaType: "movie", title: "jellyfin only", jellyfinAvailable: true },
+    { id: 3, mediaType: "movie", title: "neither" },
+  ] as unknown as Parameters<typeof applyRecommendationView>[0];
+  const plexOnly = { showPlex: true, showJellyfin: false };
+  assert.deepEqual(applyRecommendationView(items, { availability: "available", ...plexOnly }).map((m) => m.id), [1]);
+  assert.deepEqual(applyRecommendationView(items, { availability: "missing", ...plexOnly }).map((m) => m.id), [2, 3]);
+  // Omitted: both servers count, as before.
+  assert.deepEqual(applyRecommendationView(items, { availability: "available" }).map((m) => m.id), [1, 2]);
+});

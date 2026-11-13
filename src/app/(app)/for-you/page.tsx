@@ -97,7 +97,7 @@ export default async function ForYouPage({
   // availability answer is already per-user visibility-scoped (a restricted
   // server the viewer holds no grant for reads as unavailable).
   const enriched = await attachAllAvailability(recommendations, session.user.id, { show4k });
-  const filtered = applyRecommendationView(enriched, { availability, type, sort });
+  const filtered = applyRecommendationView(enriched, { availability, type, sort, showPlex, showJellyfin });
 
   const offset = (page - 1) * PER_PAGE;
   const visible = filtered.slice(offset, offset + PER_PAGE);

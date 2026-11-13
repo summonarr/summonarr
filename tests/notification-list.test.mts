@@ -51,3 +51,36 @@ test("Mark all read goes through the store's request, rolling back only its own 
 test("relative times keep moving on a page left open", () => {
   assert.match(list, /useMinuteTick\(\);/);
 });
+
+test("Load more never re-appends a row this page removed, and a failed delete lets it back", () => {
+  const remove = handler("removeOne");
+  assert.match(remove, /gone\.current\.add\(id\);\s*setItems\(\(cur\) => cur\.filter\(\(n\) => n\.id !== id\)\);/);
+  // Taken back out only once the delete has failed (after the success return).
+  assert.match(remove, /void reloadStore\(\);\s*return;\s*\}\s*gone\.current\.delete\(id\);/);
+  const more = handler("loadMore");
+  assert.match(more, /const page = data\.items\.filter\(\(n\) => !gone\.current\.has\(n\.id\)\);/);
+  assert.match(more, /return \[\.\.\.cur, \.\.\.page\.filter\(\(n\) => !have\.has\(n\.id\)\)\];/);
+  assert.doesNotMatch(more, /\.\.\.data\.items\.filter/);
+});
+
+test("a row the Load more total already counted is not counted again when the store delivers it", () => {
+  const more = handler("loadMore");
+  assert.match(more, /countedAhead\.current \+= Math\.max\(0, serverTotal - totalRef\.current\);\s*setTotal\(serverTotal\);/);
+  assert.doesNotMatch(more, /setTotal\(data\.total\)/);
+  assert.match(list, /const uncounted = Math\.max\(0, fresh\.length - countedAhead\.current\);\s*countedAhead\.current = Math\.max\(0, countedAhead\.current - fresh\.length\);\s*if \(uncounted > 0\) setTotal\(\(n\) => n \+ uncounted\);/);
+  assert.doesNotMatch(list, /setTotal\(\(n\) => n \+ fresh\.length\)/);
+  assert.match(list, /totalRef\.current = total;/);
+});
+
+test("a failed single mark-read does not un-read a row a mark-all confirmed meanwhile", () => {
+  const one = handler("markOneRead");
+  assert.match(one, /const readAllBefore = readAllConfirmed\.current;/);
+  assert.match(one, /if \(readAllConfirmed\.current === readAllBefore\) setItems\(\(cur\) => withReadAt\(cur, flipped, null\)\);/);
+  assert.match(list, /readAllGenSeen\.current = readAllGen;\s*readAllConfirmed\.current \+= 1;/);
+});
+
+test("Mark all read before the store's first load still takes the bell off Loading", () => {
+  // The write drops every GET in flight; a store that never loaded asks again.
+  assert.match(store, /loaded\.current = true;\s*setStatus\("ready"\);/);
+  assert.match(store, /if \(\(count !== undefined && count > 0\) \|\| !loaded\.current\) void reload\(\);/);
+});

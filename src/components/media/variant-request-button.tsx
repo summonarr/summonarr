@@ -61,6 +61,13 @@ export function VariantRequestButton({
   const [state, setState] = useState<"idle" | "loading" | "requested" | "error">(
     requested ? "requested" : "idle",
   );
+  // `requested` going true → false (declined or deleted, then a refresh) must
+  // clear a "Requested" this button set itself — the render below ORs it in.
+  const [prevRequested, setPrevRequested] = useState(!!requested);
+  if (prevRequested !== !!requested) {
+    setPrevRequested(!!requested);
+    if (!requested && state === "requested") setState("idle");
+  }
   const [msg, setMsg] = useState("");
   // The route answers 200 { alreadyAvailable: true } and creates NOTHING when
   // the target's available cache already holds the title (auto-approvers

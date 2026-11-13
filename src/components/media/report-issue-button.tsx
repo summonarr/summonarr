@@ -39,7 +39,6 @@ const SCOPE_LABELS: Record<IssueScope, string> = {
 
 interface ReportIssueButtonProps {
   tmdbId: number;
-  tvdbId?: number | null;
   mediaType: "MOVIE" | "TV";
   title: string;
   posterPath?: string | null;
@@ -129,6 +128,32 @@ interface IssueForm {
   manualEpisode: string;
 }
 
+// The scope a seeded open starts on. The server files a season or an episode
+// only by a number of 1 or more (issue-create.ts numberField), so a special
+// (season 0) can only be reported against the whole show: a seed below 1 opens
+// on "Whole show" instead of a "Season 0" pick the server answers 400 for.
+// Module-level and pure so tests/report-issue-manual-inputs.test.mts can pin it.
+function seededScope(
+  isTV: boolean,
+  initialScope: IssueScope | undefined,
+  initialSeason: number | null | undefined,
+  initialEpisode: number | null | undefined,
+): IssueScope {
+  if (!isTV) return "FULL";
+  const scope = initialScope ?? "FULL";
+  if (scope !== "FULL" && initialSeason != null && initialSeason < 1) return "FULL";
+  if (scope === "EPISODE" && initialEpisode != null && initialEpisode < 1) return "SEASON";
+  return scope;
+}
+
+// Only what the server accepts is offered: specials (season 0) and an
+// episode 0 are dropped from the library lists.
+function reportableSeasons(seasons: TVSeasonInfo[]): TVSeasonInfo[] {
+  return seasons
+    .filter((s) => s.seasonNumber >= 1)
+    .map((s) => (s.episodes.some((e) => e < 1) ? { ...s, episodes: s.episodes.filter((e) => e >= 1) } : s));
+}
+
 // The form a fresh open starts from. A watch-history row seeds the scope and
 // the episode it represents; movies always report the whole title.
 function freshForm(
@@ -137,7 +162,7 @@ function freshForm(
   initialSeason: number | null | undefined,
   initialEpisode: number | null | undefined,
 ): IssueForm {
-  const scope: IssueScope = isTV ? initialScope ?? "FULL" : "FULL";
+  const scope = seededScope(isTV, initialScope, initialSeason, initialEpisode);
   const season = isTV && scope !== "FULL" ? initialSeason ?? null : null;
   const episode = isTV && scope === "EPISODE" ? initialEpisode ?? null : null;
   return {
@@ -435,7 +460,6 @@ async function postIssue(body: Record<string, unknown>, signal: AbortSignal, t: 
 
 export function ReportIssueButton({
   tmdbId,
-  tvdbId,
   mediaType,
   title,
   posterPath,
@@ -478,7 +502,7 @@ export function ReportIssueButton({
       if (!res.ok) {
         setLists({ ...NO_LISTS, failed: true });
       } else {
-        const seasons = withSeedOptions(res.data.seasons, seeded.selectedSeason, seeded.selectedEpisode);
+        const seasons = withSeedOptions(reportableSeasons(res.data.seasons), seeded.selectedSeason, seeded.selectedEpisode);
         setLists({ seasons, source: res.data.source, failed: false });
         if (seasons.length > 0) {
           // The seed when given (now always in the list), else the first.
@@ -512,7 +536,6 @@ export function ReportIssueButton({
         postIssue(
           {
             tmdbId,
-            tvdbId: tvdbId ?? undefined,
             mediaType,
             title,
             posterPath,

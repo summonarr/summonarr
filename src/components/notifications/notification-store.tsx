@@ -120,6 +120,9 @@ export function NotificationStoreProvider({ children }: { children: ReactNode })
   // bumps it too, so a GET served before its write committed can't put the
   // rows back to unread.
   const seq = useRef(0);
+  // Whether any GET has ever answered. markAllRead reads it: the first load it
+  // dropped has to be asked for again.
+  const loaded = useRef(false);
 
   const reload = useCallback(async () => {
     const id = ++seq.current;
@@ -140,6 +143,7 @@ export function NotificationStoreProvider({ children }: { children: ReactNode })
     if (id !== seq.current) return;
     setItems(res.data.items);
     setUnread(res.data.unreadCount ?? 0);
+    loaded.current = true;
     setStatus("ready");
   }, []);
 
@@ -228,10 +232,11 @@ export function NotificationStoreProvider({ children }: { children: ReactNode })
     // between the last poll and this write stays counted — and is fetched). An
     // unreadable body leaves the optimistic 0 until the next poll.
     const count = res.ok ? res.data.unreadCount : undefined;
-    if (count !== undefined) {
-      setUnread(count);
-      if (count > 0) void reload();
-    }
+    if (count !== undefined) setUnread(count);
+    // A store that has never loaded re-reads too: the bumps above dropped its
+    // first GET, and nothing else would take the bell off "Loading…" before
+    // the next poll.
+    if ((count !== undefined && count > 0) || !loaded.current) void reload();
     return true;
   }, [items, unread, reload]);
 

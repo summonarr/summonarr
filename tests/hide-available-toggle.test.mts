@@ -28,6 +28,7 @@ test("the shown state tracks the pending target in one hook shared with PillFilt
     assert.doesNotMatch(body, /startTransition|router\.push/, `${name}: a private copy of the navigation`);
   }
   // The page reset and the busy marker stay.
-  assert.match(hook, /params\.delete\("page"\)/);
+  assert.match(hook, /nextPendingQuery\(pathname, committed, param, value\)/);
+  assert.match(readFileSync(new URL("../src/lib/client/pending-query.ts", import.meta.url), "utf8"), /page: undefined/);
   assert.match(src, /aria-busy=\{isPending \|\| undefined\}/);
 });

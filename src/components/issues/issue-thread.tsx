@@ -53,7 +53,6 @@ interface IssueThreadProps {
 // once a draft is within 200 characters of it so the maxLength stop isn't silent.
 const MESSAGE_MAX = 2000;
 const MESSAGE_COUNTER_AT = 1800;
-const NO_PENDING: ReadonlySet<string> = new Set();
 
 function MessageBubble({ msg, isMine, mounted }: { msg: IssueMessageData; isMine: boolean; mounted: boolean }) {
   const t = useT();
@@ -147,6 +146,10 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
   const loadSeqRef = useRef(0);
   // Aborted on unmount: no load writes into a thread that is gone.
   const lifeRef = useRef<AbortController | null>(null);
+  // The viewer's own messages appended here that no reload has returned yet. A
+  // reload read before the POST committed can land after the append; without
+  // this the merge would take the just-sent message off the screen.
+  const pendingRef = useRef(new Set<string>());
 
   const loadMessages = useCallback(
     async ({ silent = false }: { silent?: boolean } = {}) => {
@@ -168,7 +171,9 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
       // Measured before the new list renders: was the reader at the bottom?
       const el = listRef.current;
       stickRef.current = silent && el ? isNearBottom(el) : true;
-      setMessages((prev) => mergeThreadReload(res.data, prev, NO_PENDING));
+      for (const m of res.data) pendingRef.current.delete(m.id);
+      const pending = new Set(pendingRef.current);
+      setMessages((prev) => mergeThreadReload(res.data, prev, pending));
       setOlderState((s) => (s === "unknown" ? (res.data.length >= THREAD_READ_CAP ? "more" : "none") : s));
       setLoadError(null);
       setLoadState("ready");
@@ -288,6 +293,7 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
     stickRef.current = true;
     // The server also sends an SSE event for this message, and the silent
     // reload it triggers can land first — skip the append if it's already here.
+    pendingRef.current.add(msg.id);
     setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
     setBody("");
     // The textarea is only read-only while sending, never disabled, so it
@@ -402,7 +408,7 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
         </Button>
       </form>
       {sendError && (
-        <p className="text-xs text-red-400 px-4 pb-2">{sendError}</p>
+        <p role="alert" className="text-xs text-red-400 px-4 pb-2">{sendError}</p>
       )}
     </div>
   );

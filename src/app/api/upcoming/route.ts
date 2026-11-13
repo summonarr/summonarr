@@ -39,11 +39,17 @@ export const GET = withAuth(async (request, _ctx, session) => {
     return NextResponse.json({ error: t("apiUser.browse.upcomingFailed") }, { status: 502 });
   }
 
-  const show4k = await getShow4kVisibility(session);
-  let items = await attachAllAvailability(raw, session.user.id, { show4k });
-  if (hideAvailable) {
-    items = items.filter((m) => !((showPlex && m.plexAvailable) || (showJellyfin && m.jellyfinAvailable)));
+  // A throw while enriching answers the JSON { error } every sibling list
+  // route does, not a bare 500 with no body.
+  try {
+    const show4k = await getShow4kVisibility(session);
+    let items = await attachAllAvailability(raw, session.user.id, { show4k });
+    if (hideAvailable) {
+      items = items.filter((m) => !((showPlex && m.plexAvailable) || (showJellyfin && m.jellyfinAvailable)));
+    }
+    return NextResponse.json({ items });
+  } catch (err) {
+    console.error("[upcoming] Failed:", err);
+    return NextResponse.json({ error: t("apiUser.common.fetchFailed") }, { status: 500 });
   }
-
-  return NextResponse.json({ items });
 });

@@ -98,7 +98,9 @@ export function useStepUpPost<S extends Schema<unknown>>(
         return null;
       }
       // The route's `message`, else its `error` (a sign-in that is too old
-      // says so here); a proxy page or no answer gets `failed`.
+      // says so here); a proxy page or no answer gets `failed`. Not a password
+      // refusal, so an earlier "Incorrect password." is cleared from the prompt.
+      setStepUpError(null);
       setError(res.kind === "invalid" ? messages.malformed ?? messages.failed : res.error);
       return null;
     }

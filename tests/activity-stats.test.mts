@@ -473,6 +473,24 @@ test("/popular pages are slices of ONE cached ranking: one statement serves ever
   }
 });
 
+test("/popular's page count is the pages the held ranking can serve, not the count of every played title", async () => {
+  clearActivityCache();
+  // The statement keeps a capped number of rows but counts every title: here
+  // 95 rows held out of 5,000. The pager must stop at the last held page.
+  const rows = Array.from({ length: 95 }, (_, i) => ({
+    tmdbId: i + 1, mediaType: "TV", title: `Show ${i + 1}`, year: null,
+    plays: BigInt(200 - i), allTimePlays: 1n, viewers: 1n, episodes: 0n, totalHours: 1, total_items: 5000n,
+  }));
+  canned = [{ marker: "completed_arcs", rows }];
+  try {
+    const first = await getMostPopularOnServer({ mediaType: "TV", sort: "viewers" });
+    assert.deepEqual([first.totalItems, first.totalPages], [5000, 3]);
+  } finally {
+    canned = [];
+    clearActivityCache();
+  }
+});
+
 test("the all-users aggregate is computed once per key and recomputed after a clear", async () => {
   clearActivityCache();
   const marker = `FROM "MediaServerUser" m`;

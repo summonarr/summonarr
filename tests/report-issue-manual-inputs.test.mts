@@ -218,3 +218,25 @@ test("openDialog clears the previous open's lists and source label", () => {
   assert.ok(body.indexOf("setLists(NO_LISTS)") < body.indexOf("await action.run("), "cleared before the reload");
   assert.match(source, /const NO_LISTS: LibraryLists = \{ seasons: \[\], source: null, failed: false \};/);
 });
+
+// The server files a season or episode only by a number of 1 or more, so a
+// watched special (S0E3) must not open on a "Season 0" pick it answers 400 for.
+const seededScope = loadHelper<(isTV: boolean, scope: string | undefined, season: number | null | undefined, episode: number | null | undefined) => string>("seededScope");
+const reportableSeasons = loadHelper<(s: SeasonInfo[]) => SeasonInfo[]>("reportableSeasons");
+
+test("a seeded special opens on the whole show; ordinary seeds keep their scope", () => {
+  assert.equal(seededScope(true, "EPISODE", 0, 3), "FULL");
+  assert.equal(seededScope(true, "SEASON", 0, null), "FULL");
+  assert.equal(seededScope(true, "EPISODE", 2, 0), "SEASON");
+  assert.equal(seededScope(true, "EPISODE", 2, 5), "EPISODE");
+  assert.equal(seededScope(true, "SEASON", 2, undefined), "SEASON");
+  assert.equal(seededScope(true, undefined, null, null), "FULL");
+  assert.equal(seededScope(false, "EPISODE", 2, 5), "FULL", "a movie is always the whole title");
+});
+
+test("the season lists offer only what the server accepts", () => {
+  assert.deepEqual(
+    reportableSeasons([{ seasonNumber: 0, episodes: [1, 2] }, { seasonNumber: 1, episodes: [0, 1, 2] }, { seasonNumber: 2, episodes: [1] }]),
+    [{ seasonNumber: 1, episodes: [1, 2] }, { seasonNumber: 2, episodes: [1] }],
+  );
+});

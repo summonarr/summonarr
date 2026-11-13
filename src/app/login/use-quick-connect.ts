@@ -6,7 +6,7 @@
 // click — the panel is keyed) cancels the run.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
-import { fetchJson } from "@/lib/client/fetch-json";
+import { fetchJson, timedFetch } from "@/lib/client/fetch-json";
 import {
   QC_DEADLINE_MS,
   QC_FAILURE_BACKOFF_MS,
@@ -18,6 +18,10 @@ import {
 import { useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
 import { signInWithFetch } from "./sign-in-request";
+
+// The server holds a long poll for up to 25s. Past this the request has
+// stalled, and without a bound one stalled poll outlasted the run's deadline.
+const QC_POLL_TIMEOUT_MS = 35_000;
 
 // A pause the run's abort cuts short, so a cancelled run never lingers asleep.
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -80,12 +84,13 @@ async function pollUntilAuthenticated(
     if (!isCurrent()) return null;
     let poll: Response;
     try {
-      poll = await fetch(url, { signal });
+      // Never past the run's own deadline either.
+      poll = await timedFetch(url, { signal }, Math.max(1, Math.min(QC_POLL_TIMEOUT_MS, deadline - Date.now())));
     } catch {
       // Cancelled: the run is over, no pause. (The server answers a poll the
       // browser abandoned with 499, which nobody reads.)
       if (signal.aborted) return null;
-      // Fetch rejected (network down): a few in a row end the run with the
+      // Fetch rejected (network down, or a poll that stalled): a few in a row end the run with the
       // network message instead of waiting out the whole deadline. The pause
       // keeps the loop from hot-spinning.
       consecutiveFailures += 1;
@@ -155,6 +160,12 @@ export function useQuickConnect({
   // alone left the abandoned request running, so a few cancel-and-retry rounds
   // hit "too many polls".
   const qcAbortRef = useRef<AbortController | null>(null);
+  // "Remember me" stays live while the code is on screen, so the sign-in reads
+  // the box as it is when the code is approved, not as it was at the click.
+  const rememberMeRef = useRef(rememberMe);
+  useEffect(() => {
+    rememberMeRef.current = rememberMe;
+  }, [rememberMe]);
   const cancelQuickConnect = useCallback(() => {
     qcRunRef.current += 1;
     qcAbortRef.current?.abort();
@@ -196,7 +207,7 @@ export function useQuickConnect({
     if (polled === null || !isCurrent()) return;
     if (!polled.ok) return fail(polled.error);
 
-    const result = await signInWithFetch("jellyfin-quickconnect", { secret: started.secret, rememberMe: String(rememberMe) });
+    const result = await signInWithFetch("jellyfin-quickconnect", { secret: started.secret, rememberMe: String(rememberMeRef.current) });
     // Re-check AFTER the await, not just before it: the QuickConnect card (with
     // its "Use password instead" button) and the provider tabs are all still on
     // screen for the whole request. Without this, backing out still navigated

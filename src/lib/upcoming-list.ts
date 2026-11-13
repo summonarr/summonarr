@@ -3,7 +3,7 @@
 // cron), live TMDB for whichever side the cache is missing, interleaved by
 // release date. One definition, so the page and the route return one list.
 import { prisma } from "./prisma";
-import { getUpcomingMovies, getUpcomingTV } from "./tmdb";
+import { getUpcomingMoviesChecked, getUpcomingTVChecked } from "./tmdb";
 import type { TmdbMedia } from "./tmdb-types";
 import { upcomingCutoffDate } from "./format-release-date";
 
@@ -55,10 +55,20 @@ export interface UpcomingSources {
   liveTv: () => Promise<TmdbMedia[]>;
 }
 
+// The TMDB page helpers absorb a failed page, so an outage on a cold cache
+// answers an empty list without rejecting. An incomplete answer with NO titles
+// is that outage: reject, so it is counted as a failed read. An incomplete
+// answer that still has titles is a usable partial list.
+export async function liveOrThrow(read: Promise<{ items: TmdbMedia[]; complete: boolean }>): Promise<TmdbMedia[]> {
+  const { items, complete } = await read;
+  if (!complete && items.length === 0) throw new Error("TMDB did not answer");
+  return items;
+}
+
 const DEFAULT_SOURCES: UpcomingSources = {
   readCache: readUpcomingCache,
-  liveMovies: getUpcomingMovies,
-  liveTv: getUpcomingTV,
+  liveMovies: () => liveOrThrow(getUpcomingMoviesChecked()),
+  liveTv: () => liveOrThrow(getUpcomingTVChecked()),
 };
 
 /**

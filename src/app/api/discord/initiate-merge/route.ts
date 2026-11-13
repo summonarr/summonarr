@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { checkRateLimit } from "@/lib/rate-limit";
+import { checkRateLimit, peekRateLimit } from "@/lib/rate-limit";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -40,7 +40,12 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // Global per-user cap: the per-target bucket alone lets one account DM
   // hundreds of distinct snowflakes (each unique target gets its own bucket).
   // This caps total merge-init DMs across ALL targets for one user.
-  if (!checkRateLimit(`discord-merge-init-global:${session.user.id}`, 10, 60 * 60_000)) {
+  // Both limits are PEEKED here and spent only once the step-up has passed,
+  // below: the web client's first request never carries the password, so
+  // spending here used two hits per code and refused the second code.
+  const globalKey = `discord-merge-init-global:${session.user.id}`;
+  const targetKey = `discord-merge-init:${session.user.id}:${discordId}`;
+  if (!peekRateLimit(globalKey, 10, 60 * 60_000)) {
     return NextResponse.json(
       { error: t("apiUser.discord.merge.tooManyAttempts") },
       { status: 429 }
@@ -49,7 +54,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   // A second, tighter limit per (user, target Discord id): at most 3 codes for
   // the same Discord account every 15 minutes.
-  if (!checkRateLimit(`discord-merge-init:${session.user.id}:${discordId}`, 3, 15 * 60 * 1000)) {
+  if (!peekRateLimit(targetKey, 3, 15 * 60 * 1000)) {
     return NextResponse.json(
       { error: t("apiUser.discord.merge.waitFifteen") },
       { status: 429 }
@@ -92,6 +97,15 @@ export const POST = withAuth(async (req, _ctx, session) => {
     // exemption above covers both halves, for the same reason.
     const factorDenied = await requireStepUpSecondFactor({ req, session, secondFactor: parsed.secondFactor, context: "discord-merge" });
     if (factorDenied) return factorDenied;
+  }
+
+  // Spend both, now that this request will mint and DM a code. A concurrent
+  // request may have taken the last slot since the peek.
+  if (!checkRateLimit(globalKey, 10, 60 * 60_000)) {
+    return NextResponse.json({ error: t("apiUser.discord.merge.tooManyAttempts") }, { status: 429 });
+  }
+  if (!checkRateLimit(targetKey, 3, 15 * 60 * 1000)) {
+    return NextResponse.json({ error: t("apiUser.discord.merge.waitFifteen") }, { status: 429 });
   }
 
   const botTokenRow = await prisma.setting.findUnique({ where: { key: "discordBotToken" } });

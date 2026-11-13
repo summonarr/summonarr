@@ -97,6 +97,10 @@ export function useWatchHistory({
       (res) => {
         if (res.ok) {
           setPage(shownFrom(key, res.page));
+          // This query answered: an earlier failure of the same query (the
+          // filter was left and picked again) no longer describes it. Left
+          // set, it hid the loaded rows behind the error until Retry.
+          setFailure((cur) => (cur?.key === key ? null : cur));
           return;
         }
         if (res.aborted) return;
