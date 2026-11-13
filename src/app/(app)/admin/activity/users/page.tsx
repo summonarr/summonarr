@@ -7,6 +7,7 @@ import { Card } from "@/components/ui/card";
 import { getAllUsersStats } from "@/lib/play-history";
 import { getCachedPlexMembersByInstance } from "@/lib/plex-membership";
 import { getCachedLiveJellyfinUsers } from "@/lib/jellyfin-live-members-cache";
+import { isOnServer } from "@/lib/server-user-presence";
 import { getStatsTimeZone } from "@/lib/stats-time-zone-data";
 import { parsePageNumber } from "@/lib/pagination";
 import { PaginationBar } from "@/components/media/pagination-bar";
@@ -128,31 +129,6 @@ function SortHeader({
   );
 }
 
-// A Plex row is one person on ONE server (rows are per serverInstance), so it is
-// checked against that server's own share list — never the union across every
-// Plex server, which kept a friend unshared from B "Active" there while A still
-// shared with them. A server whose list can't be read (or a removed server,
-// whose rows were soft-deleted) falls back to `active`, as Jellyfin does.
-function plexOnServer(
-  u: { active: boolean; isServerAdmin: boolean; serverInstance: string; sourceUserId: string },
-  byInstance: Awaited<ReturnType<typeof getCachedPlexMembersByInstance>>,
-): boolean {
-  if (u.isServerAdmin) return true;
-  const members = byInstance?.get(u.serverInstance);
-  if (!members) return u.active;
-  return members.ids.has(u.sourceUserId);
-}
-
-function jellyfinOnServer(
-  u: { active: boolean; serverInstance: string; sourceUserId: string },
-  live: Awaited<ReturnType<typeof getCachedLiveJellyfinUsers>> | null,
-): boolean {
-  const users = live?.get(u.serverInstance);
-  if (!users) return u.active;
-  const disabled = users.get(u.sourceUserId);
-  return disabled !== undefined && !disabled;
-}
-
 export default async function UsersActivityPage({
   searchParams,
 }: {
@@ -183,18 +159,14 @@ export default async function UsersActivityPage({
 
   const [allStats, timeZone] = await Promise.all([getAllUsersStats(), getStatsTimeZone()]);
 
-  // "Still on the server" is read live from each server, not from the stored
-  // `active` flag alone: nothing marks a Plex user inactive, and the hourly
-  // Jellyfin sync can lag or refuse a shrink. Each row is checked against ITS
-  // OWN server: Plex rows against that server's plex.tv share list (the
-  // per-instance sets the sign-in gate unions), Jellyfin rows against that
-  // server's current /Users — both falling back to `active` for a server that
-  // couldn't be read.
+  // "Still on the server" is read live from each server — the rule lives in
+  // server-user-presence.ts, shared with GET /api/play-history/users. Only
+  // read when a status filter needs it.
   const [plexMembers, jellyfinLive] =
     status === "all" ? [null, null] : await Promise.all([getCachedPlexMembersByInstance(), getCachedLiveJellyfinUsers()]);
   let users = allStats.map((u) => ({
     ...u,
-    onServer: u.source === "plex" ? plexOnServer(u, plexMembers) : jellyfinOnServer(u, jellyfinLive),
+    onServer: isOnServer(u, plexMembers, jellyfinLive),
   }));
 
   if (status !== "all") users = users.filter((u) => u.onServer === (status === "active"));

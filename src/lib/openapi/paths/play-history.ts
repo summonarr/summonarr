@@ -764,6 +764,52 @@ export const playHistoryPaths: OpenApiPaths = {
       },
     },
   },
+  "/play-history/users": {
+    get: {
+      tags: ["Play History"],
+      summary: "Every media-server user's activity, with whether they are still on the server (ADMIN)",
+      description: "The admin Activity users list for a native client (API v6): one row per media-server user, most plays first, unpaged — the client filters, searches and sorts. `onServer` is read live per server (a Plex server's share list, a Jellyfin server's users) and falls back to the stored flag for a server that can't be read.",
+      responses: {
+        "200": {
+          description: "{ users: [...], truncated }",
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["users", "truncated"],
+                properties: {
+                  users: {
+                    type: "array",
+                    maxItems: 10000,
+                    items: {
+                      type: "object",
+                      required: ["id", "username", "source", "serverInstance", "thumbUrl", "plays", "hours", "lastActive", "favPlatform", "directPct", "transcodePct", "onServer"],
+                      properties: {
+                        id: { type: "string", description: "The MediaServerUser id — usernames are not unique" },
+                        username: { type: "string" },
+                        source: { type: "string", description: "plex | jellyfin" },
+                        serverInstance: { type: "string", description: "The server's instance slug; \"\" is the default server" },
+                        thumbUrl: { type: "string", nullable: true },
+                        plays: { type: "integer", description: "Watched plays" },
+                        hours: { type: "number", description: "Watch time in hours, one decimal" },
+                        lastActive: { type: "string", format: "date-time", nullable: true, description: "Start of the latest play; null for a user with none" },
+                        favPlatform: { type: "string", nullable: true },
+                        directPct: { type: "integer", nullable: true, description: "Share of plays that were direct plays; null with no play method recorded" },
+                        transcodePct: { type: "integer", nullable: true },
+                        onServer: { type: "boolean", description: "Still on their server (the page's Active filter); false = removed" },
+                      },
+                    },
+                  },
+                  truncated: { type: "boolean", description: "The list was cut at 10,000 rows" },
+                },
+              },
+            },
+          },
+        },
+        "403": { description: "Forbidden — ADMIN only" },
+      },
+    },
+  },
   "/play-history/sessions": {
     get: {
       tags: ["Sessions"],

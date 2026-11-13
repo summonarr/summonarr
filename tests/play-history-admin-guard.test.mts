@@ -183,6 +183,7 @@ const stats = (await import("../src/app/api/play-history/stats/route.ts")).GET;
 const calendar = (await import("../src/app/api/play-history/calendar/route.ts")).GET;
 const sessions = (await import("../src/app/api/play-history/sessions/route.ts")).GET;
 const offenders = (await import("../src/app/api/play-history/transcode-offenders/route.ts")).GET;
+const usersRoute = (await import("../src/app/api/play-history/users/route.ts")).GET;
 const exportRoute = (await import("../src/app/api/play-history/export/route.ts")).GET;
 const mine = (await import("../src/app/api/play-history/mine/route.ts")).GET;
 
@@ -198,6 +199,7 @@ const ADMIN_ROUTES: { name: string; invoke: (token: string | null) => Promise<Re
   { name: "GET /api/play-history/calendar", invoke: (t) => calendar(req("/api/play-history/calendar", t), undefined) },
   { name: "GET /api/play-history/sessions", invoke: (t) => sessions(req("/api/play-history/sessions", t), undefined) },
   { name: "GET /api/play-history/transcode-offenders", invoke: (t) => offenders(req("/api/play-history/transcode-offenders", t), undefined) },
+  { name: "GET /api/play-history/users", invoke: (t) => usersRoute(req("/api/play-history/users", t), undefined) },
   // export authenticates via requireAuth() → next/headers, so its bearer must
   // live in the request scope, not (only) on the passed NextRequest.
   { name: "GET /api/play-history/export", invoke: (t) => runInScope(t, () => exportRoute(req("/api/play-history/export", t))) },
