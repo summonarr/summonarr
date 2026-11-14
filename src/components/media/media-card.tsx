@@ -24,7 +24,7 @@ import { useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
 import { useAsyncAction } from "@/hooks/use-async-action";
 import { useFocusReturn } from "@/hooks/use-focus-return";
-import { cardView, submitCardRequest, type CardRequestState, type CardView } from "./media-card-state";
+import { cardView, requestStateAfterRefresh, submitCardRequest, type CardRequestState, type CardView } from "./media-card-state";
 import { mediaDetailPath } from "./media-links";
 import { useLiveRatings } from "./use-live-ratings";
 
@@ -68,12 +68,17 @@ function useCardRequest(media: TmdbMedia, requestToken: string | undefined) {
   const [state, setState] = useState<CardRequestState>("idle");
   // The viewer's request going away (declined or deleted, then a live refresh
   // re-rendered this card) must clear a "Requested" this card set itself —
-  // cardView ORs the local state in. RequestButton does the same.
-  const mine = !!media.requestedByMe;
-  const [prevMine, setPrevMine] = useState(mine);
-  if (prevMine !== mine) {
-    setPrevMine(mine);
-    if (!mine && state === "requested") setState("idle");
+  // cardView ORs the local state in. Judged on each NEW `media` object (a new
+  // server render; every caller passes the server's object through), not on a
+  // requestedByMe true→false flip: /for-you does not refresh on the viewer's
+  // own request:new, so the flag never went true there and a declined title
+  // kept its Requested chip until a reload. A render that arrives while the
+  // request is still in flight is ignored — the state is not "requested" yet.
+  const [seenMedia, setSeenMedia] = useState(media);
+  if (seenMedia !== media) {
+    setSeenMedia(media);
+    const next = requestStateAfterRefresh(state, !!media.requestedByMe);
+    if (next !== state) setState(next);
   }
 
   async function submit() {

@@ -123,11 +123,26 @@ async function readMediaFolders(baseUrl: string, apiKey: string) {
   return parseEach(MediaFolderSchema, body.value.Items ?? []);
 }
 
-/** The server's movie and show libraries, for the library pickers. */
+// A library the sync can read titles from: the movie and show libraries AND
+// the mixed or untyped ones (no CollectionType, or "mixed"), which hold either
+// and which a library with no selection reads too.
+function holdsTitles(f: { CollectionType?: string | null }): boolean {
+  return f.CollectionType === "movies" || f.CollectionType === "tvshows" || !f.CollectionType || f.CollectionType === "mixed";
+}
+
+/**
+ * The libraries the pickers offer: every one the sync reads titles from, so
+ * ticking some never drops a mixed library with no way to tick it back in.
+ * A mixed or untyped library is listed as `collectionType: "mixed"`.
+ */
 export async function getJellyfinMediaFolders(baseUrl: string, apiKey: string): Promise<JellyfinMediaFolder[]> {
   return (await readMediaFolders(baseUrl, apiKey))
-    .filter((f) => f.CollectionType === "movies" || f.CollectionType === "tvshows")
-    .map((f) => ({ id: f.Id, name: f.Name ?? "", collectionType: f.CollectionType! }));
+    .filter(holdsTitles)
+    .map((f) => ({
+      id: f.Id,
+      name: f.Name ?? "",
+      collectionType: f.CollectionType === "movies" || f.CollectionType === "tvshows" ? f.CollectionType : "mixed",
+    }));
 }
 
 /**
@@ -139,7 +154,7 @@ export async function getJellyfinMediaFolders(baseUrl: string, apiKey: string): 
  */
 export async function getJellyfinSyncFolders(baseUrl: string, apiKey: string): Promise<Array<{ id: string; collectionType: string }>> {
   return (await readMediaFolders(baseUrl, apiKey))
-    .filter((f) => f.CollectionType === "movies" || f.CollectionType === "tvshows" || !f.CollectionType || f.CollectionType === "mixed")
+    .filter(holdsTitles)
     .map((f) => ({ id: f.Id, collectionType: f.CollectionType ?? "" }));
 }
 

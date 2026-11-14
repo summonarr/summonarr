@@ -74,7 +74,9 @@ export function DetailActions({
           posterPath={media.posterPath}
         />
       )}
-      {state.votesEnabled && inVisibleLibrary && (
+      {/* The vote route refuses anyone who requested or filed this title, so the
+          button is not offered to them; a vote already cast can still be taken back. */}
+      {state.votesEnabled && inVisibleLibrary && (!state.ownRequest || state.alreadyVoted) && (
         <VoteDeleteButton
           key={`vote-${media.id}`}
           tmdbId={media.id}
@@ -121,6 +123,7 @@ function RequestActions({
       canRequestOnBehalf={state.canOnBehalf}
       canChooseProfile={state.canChooseProfile}
       blacklisted={state.blacklisted}
+      permanentlyDeclined={state.permanentlyDeclined.main}
       canRequest={canRequest}
     />
     {state.show4k && (
@@ -132,6 +135,7 @@ function RequestActions({
         requested={state.requested4k}
         available={state.arr4kAvailable}
         blacklisted={state.blacklisted}
+        permanentlyDeclined={state.permanentlyDeclined.fourK}
       />
     )}
     {state.namedTargets.map((target) => (
@@ -145,6 +149,7 @@ function RequestActions({
         requested={target.requested}
         available={target.available}
         blacklisted={state.blacklisted}
+        permanentlyDeclined={state.permanentlyDeclined.named.includes(target.slug)}
       />
     ))}
     </>

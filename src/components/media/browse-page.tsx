@@ -40,7 +40,7 @@ export async function BrowsePage({
   const [sp, t, locale] = await Promise.all([searchParams, getTranslator(), getLocale()]);
   // One parser for every surface (browse-filters.ts); a repeated key counts
   // its first value, as /api/browse's URLSearchParams.get does.
-  const browseFilters = parseBrowseFilters(searchParamGetter(sp));
+  const browseFilters = parseBrowseFilters(searchParamGetter(sp), mediaType);
   const { ratingFilter, watchRegion, hideAvailable } = browseFilters;
   const requestedPage  = parsePageNumber(sp.page);
 

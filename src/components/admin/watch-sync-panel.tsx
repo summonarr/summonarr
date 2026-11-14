@@ -18,6 +18,7 @@ import { Switch } from "@/components/ui/switch";
 import { Chip, EmptyState, SectionHeader } from "@/components/ui/design";
 import { ArrowLeftRight, ArrowRight, Loader2, RefreshCw, Trash2 } from "@/components/icons";
 import { runReplaceFileJob } from "@/lib/client/replace-file-job";
+import { jobRunCutShort } from "@/lib/client/library-sync";
 import type { Translator } from "@/lib/i18n/translate";
 import { requestFailureText } from "./request-failure-text";
 import {
@@ -453,6 +454,12 @@ export function WatchSyncPanel() {
       setError(apiErrorText(answer.data, t("adminManage.watchSync.error.run")));
       return;
     }
+    // A run that lost its lock answers 200 with no pairs: not a finished sync.
+    if (jobRunCutShort(answer.data)) {
+      setError(t("adminManage.watchSync.runStopped"));
+      await load();
+      return;
+    }
     const { marked, problems } = runSummary(answer.data);
     setNote(problems > 0
       ? t("adminManage.watchSync.ranWithProblems", { marked, problems })
@@ -461,8 +468,18 @@ export function WatchSyncPanel() {
   }
 
   if (!data) {
+    // A failed FIRST load hides every control that would reload, so this
+    // one is the way back without a page reload.
     return error
-      ? <p className="text-sm text-[var(--ds-danger)]">{error}</p>
+      ? (
+        <div className="flex flex-col items-start gap-2">
+          <p role="alert" className="m-0 text-sm text-[var(--ds-danger)]">{error}</p>
+          <Button size="xs" variant="outline" onClick={() => void load()} disabled={action.busy(LOAD)}>
+            {action.busy(LOAD) ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+            {t("adminManage.common.retry")}
+          </Button>
+        </div>
+      )
       : <p className="flex items-center gap-2 text-sm text-[var(--ds-fg-muted)]"><Loader2 className="h-4 w-4 animate-spin" />{t("adminManage.watchSync.loading")}</p>;
   }
 

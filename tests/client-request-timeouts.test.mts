@@ -27,7 +27,7 @@ function walk(dir: string, out: string[] = []): string[] {
 const RAW_FETCH_ALLOWED: Record<string, string> = {
   "src/lib/client/fetch-json.ts": "the two wrappers themselves",
   "src/app/auth/plex/done/page.tsx": "each call carries its own anySignal + request timeout",
-  "src/components/admin/arr-command-watch.tsx": "AbortSignal.timeout on the call",
+  "src/components/admin/arr-command-watch.tsx": "requestTimeoutSignal on the call",
 };
 const INFINITY_ALLOWED: Record<string, string> = {
   "src/lib/client/fetch-json.ts": "documents the option",
@@ -92,7 +92,11 @@ test("client modules never call a bare fetch or switch a timeout off", () => {
 
 test("short admin writes keep a finite, modest bound", () => {
   const server = readFileSync(join(ROOT, "src/components/admin/server-user-table.tsx"), "utf8");
-  assert.ok(!/LONG_RUN_TIMEOUT_MS/.test(server), "a one-user write uses the default timeout");
+  // A one-user write uses the default timeout. Only the two writes that walk
+  // every user (the policy sync, the Jellyfin bulk push) name the long-run bound.
+  const longRuns = server.split("\n").filter((l) => /timeoutMs: LONG_RUN_TIMEOUT_MS/.test(l));
+  assert.equal(longRuns.length, 2, "the user sync and the bulk push only");
+  assert.ok(longRuns.some((l) => l.includes("syncFailed")) && longRuns.some((l) => l.includes("bulk:")), longRuns.join(" | "));
   for (const rel of ["request-actions.tsx", "release-search-dialog.tsx", "use-queue-actions.ts"]) {
     const text = readFileSync(join(ROOT, "src/components/admin", rel), "utf8");
     assert.ok(!/LONG_RUN_TIMEOUT_MS/.test(text), `${rel} waits on an arr push: ARR_WRITE_TIMEOUT_MS, not the long-run bound`);

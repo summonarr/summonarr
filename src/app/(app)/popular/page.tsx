@@ -351,8 +351,9 @@ function MediaGrid({
   );
 }
 
-// Page overflow first: a past-the-end ?page= on the trending sort is not
-// "nothing was played in 30 days"; then a TMDB failure, which is not "no plays".
+// A TMDB failure first (it is not "no plays" on any page); then page overflow:
+// a past-the-end ?page= on the trending sort is not "nothing was played in 30
+// days".
 function PopularEmptyState({
   page,
   sort,
@@ -368,6 +369,17 @@ function PopularEmptyState({
   allTimeHref: string;
   t: Translator;
 }) {
+  // Before the past-the-end case: resolveFailed is only true when the page HAD
+  // ranked titles, so on page 2+ it is a load failure, not the end of the list.
+  if (resolveFailed) {
+    return (
+      <EmptyState
+        icon={AlertTriangle}
+        title={t("browse.popular.loadFailed.title")}
+        description={t("browse.popular.loadFailed.description")}
+      />
+    );
+  }
   if (page > 1) {
     return (
       <EmptyState
@@ -375,15 +387,6 @@ function PopularEmptyState({
         title={t("browse.empty.noMoreResults.title")}
         description={t("browse.empty.noMoreResults.description")}
         cta={{ href: backToFirstHref, label: t("browse.empty.backToPage1") }}
-      />
-    );
-  }
-  if (resolveFailed) {
-    return (
-      <EmptyState
-        icon={AlertTriangle}
-        title={t("browse.popular.loadFailed.title")}
-        description={t("browse.popular.loadFailed.description")}
       />
     );
   }

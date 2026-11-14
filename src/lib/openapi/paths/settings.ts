@@ -145,8 +145,8 @@ export const settingsPaths: OpenApiPaths = {
             "application/json": {
               schema: {
                 type: "array",
-                description: "Movie and TV folders only",
-                items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" }, collectionType: { type: "string", enum: ["movies", "tvshows"] } } },
+                description: "The folders the sync reads titles from: movie, TV, and mixed or untyped ones (listed as \"mixed\")",
+                items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" }, collectionType: { type: "string", enum: ["movies", "tvshows", "mixed"] } } },
               },
             },
           },

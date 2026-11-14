@@ -161,3 +161,21 @@ test("submitMediaRequest reads the answer into an outcome and an abort still pro
   }];
   await assert.rejects(submitMediaRequest(payload, "tok", t, ctrl.signal));
 });
+
+test("a spent quota (429 with no Retry-After) shows the route's own sentence, not the rate-limit wording", async () => {
+  const t = (key: string, vars?: Record<string, string | number>) => (vars ? `${key}:${JSON.stringify(vars)}` : key);
+  postAnswers = [() => json(429, { error: "You have reached your request quota of 5 per week" })];
+  assert.deepEqual(await submitMediaRequest({ tmdbId: 603, mediaType: "MOVIE" }, "tok", t), {
+    error: "You have reached your request quota of 5 per week",
+  });
+});
+
+test("the rate limiter's 429 (with Retry-After) still names the wait; a bodyless 429 falls back to the generic line", async () => {
+  const t = (key: string, vars?: Record<string, string | number>) => (vars ? `${key}:${JSON.stringify(vars)}` : key);
+  postAnswers = [
+    () => new Response(JSON.stringify({ error: "Too many requests" }), { status: 429, headers: { "Retry-After": "60" } }),
+    () => new Response("<html>", { status: 429 }),
+  ];
+  assert.deepEqual(await submitMediaRequest({ tmdbId: 1, mediaType: "TV" }, "tok", t), { error: 'shared.rateLimited.seconds:{"seconds":60}' });
+  assert.deepEqual(await submitMediaRequest({ tmdbId: 1, mediaType: "TV" }, "tok", t), { error: "shared.rateLimited.generic" });
+});

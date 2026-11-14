@@ -10,7 +10,8 @@ import Image from "next/image";
 import { AlertTriangle, Film, Tv2, Loader2, Check, X, ExternalLink } from "@/components/icons";
 import Link from "next/link";
 import { RequestActions } from "./request-actions";
-import type { RequestMediaType } from "./request-action-rules";
+import { actionTargets, chosenActionTarget, type RequestMediaType } from "./request-action-rules";
+import { StyledSelect } from "@/components/ui/styled-select";
 import { RequestThread } from "@/components/requests/request-thread";
 import { OpenInArrLink, arrInstanceLabel } from "./open-in-arr";
 import { ManageTitleButton } from "./arr-title/title-manager";
@@ -274,7 +275,8 @@ function useListRefresh() {
       if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
     };
   }, []);
-  // ManageTitleButton's onActiveChange. Its close arrives from an effect
+  // ManageTitleButton's onActiveChange, and the row's Pick release dialog's
+  // (RequestActions' onDialogActive). Its close arrives from an effect
   // cleanup, also when the list itself is unmounting: nothing is scheduled then.
   function onManagerActive(open: boolean) {
     if (open) return refreshGate.opened();
@@ -296,8 +298,14 @@ function useListRefresh() {
 
 // The batch selection: request ids, kept across pages (the bar names those on
 // other pages), checked live while a batch runs.
-function useSelection(requests: GroupedRequestRow[], filterKey: string) {
+function useSelection(requests: GroupedRequestRow[], filterKey: string, batchRunning: boolean) {
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  // Read by the prune below. Declared (and so run) before it, so a list that
+  // arrives in the same commit a run starts is already judged as mid-run.
+  const batchRunningRef = useRef(batchRunning);
+  useEffect(() => {
+    batchRunningRef.current = batchRunning;
+  });
 
   // A new status or type filter starts a new selection: what was picked under
   // the old one may not be shown at all now, and a batch would act on it
@@ -320,7 +328,15 @@ function useSelection(requests: GroupedRequestRow[], filterKey: string) {
   // We can only judge ids for rows on THIS page. An id missing from `requests`
   // may just be on another page (selecting across pages is allowed), so a
   // missing id is kept.
+  //
+  // Not while a batch runs: the route claims every row APPROVED before it
+  // pushes, and the list refresh that claim triggers lands mid-run. Pruning
+  // then would drop the rows whose push goes on to fail (they roll back to
+  // PENDING and must stay selected for another try) and, with the selection
+  // emptied, hide the bar that shows why. The run's own refresh re-reads the
+  // list when it ends, and that one prunes.
   useEffect(() => {
+    if (batchRunningRef.current) return;
     setSelected((prev) => pruneSelection(prev, requests));
   }, [requests]);
 
@@ -366,13 +382,13 @@ function useSelection(requests: GroupedRequestRow[], filterKey: string) {
 // approve/decline, and paginates. Live-refreshes on request:* SSE events.
 export function AdminRequestList({ requests, page, total, pageSize, statusFilter, typeFilter, sort, instanceNames, canOpenArr = false, arrServices, initialOpenThread }: AdminRequestListProps) {
   const t = useT();
+  const batchRun = useAsyncAction();
+  const batchLoading = batchRun.busy("batch");
   const { selected, setSelected, allPendingIds, allPendingSelected, toggleAll, toggleGroup, dropSettled } =
-    useSelection(requests, `${statusFilter ?? ""}|${typeFilter ?? ""}`);
+    useSelection(requests, `${statusFilter ?? ""}|${typeFilter ?? ""}`, batchLoading);
   const instanceLabel = (slug: string) =>
     instanceNames?.[slug] ?? (slug === "4k" ? "4K" : slug);
   const { refreshNow, onManagerActive } = useListRefresh();
-  const batchRun = useAsyncAction();
-  const batchLoading = batchRun.busy("batch");
   const [batchNote, setBatchNote] = useState("");
   const [showBatchNote, setShowBatchNote] = useState<"APPROVED" | "DECLINED" | null>(null);
   const [batchError, setBatchError] = useState<string | null>(null);
@@ -467,6 +483,36 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
             type="button"
             className="ds-hover-tint"
             onClick={() => setBatchNotice(null)}
+            aria-label={t("shared.common.dismiss")}
+            style={{ border: 0, background: "transparent", color: "var(--ds-fg-subtle)", padding: 2, borderRadius: 4 }}
+          >
+            <X aria-hidden style={ICON_12} />
+          </button>
+        </div>
+      )}
+
+      {/* The bar shows a run's error; with nothing selected there is no bar,
+          and the reason must not wait for the next tick of a checkbox. */}
+      {selected.size === 0 && batchError && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 whitespace-pre-line"
+          style={{
+            marginBottom: 12,
+            padding: "8px 12px",
+            fontSize: 12,
+            borderRadius: 8,
+            color: "var(--ds-danger)",
+            background: "color-mix(in oklab, var(--ds-danger) 8%, transparent)",
+            border: "1px solid color-mix(in oklab, var(--ds-danger) 30%, transparent)",
+          }}
+        >
+          <AlertTriangle aria-hidden style={{ ...ICON_12, flexShrink: 0, marginTop: 2 }} />
+          <span className="flex-1 min-w-0">{batchError}</span>
+          <button
+            type="button"
+            className="ds-hover-tint"
+            onClick={() => setBatchError(null)}
             aria-label={t("shared.common.dismiss")}
             style={{ border: 0, background: "transparent", color: "var(--ds-fg-subtle)", padding: 2, borderRadius: 4 }}
           >
@@ -795,6 +841,10 @@ function RequestGroupRow({
   initialOpenThread?: string;
 }) {
   const t = useT();
+  // Which request the row's actions are aimed at, when the admin picked one
+  // other than the representative (actionTargets). By id, so it survives a
+  // refresh only while the group still offers that request.
+  const [chosenTargetId, setChosenTargetId] = useState<string | null>(null);
   const pendingIds = pendingIdsFor(group);
   const primaryRequester = group.requesters[0];
   // A group always carries its requests; one that came through empty has
@@ -804,11 +854,12 @@ function RequestGroupRow({
   // Each field falls back to the primary on its own — a representative with no
   // note still shows the primary's note.
   const rep = group.requesters.find((r) => r.status === group.aggregateStatus);
-  const representativeId = rep?.requestId ?? primaryRequester.requestId;
   const representativeAdminNote = rep?.adminNote ?? primaryRequester.adminNote;
-  // Which Radarr/Sonarr instance the approve picker should read profiles
-  // from — follows the same representative request as the rest of the row.
-  const representativeInstance = rep?.arrInstance ?? primaryRequester.arrInstance;
+  // The request the actions act on: the representative unless the admin aimed
+  // them at another of the group's (status, instance) pairs.
+  const targets = actionTargets(group.requesters, group.aggregateStatus);
+  const target = chosenActionTarget(targets, chosenTargetId) ?? primaryRequester;
+  const targetIsRepresentative = target.requestId === targets[0]?.requestId;
   // Open in / Manage for THIS row's service only while its integration is on.
   const showArrLinks =
     canOpenArr && (arrServices?.[group.mediaType === "MOVIE" ? "radarr" : "sonarr"] ?? true);
@@ -933,15 +984,37 @@ function RequestGroupRow({
           208–224px approve/decline and Why? panels left the title column
           36px wide at a 1024px viewport — the title disappeared. */}
       <div className="flex justify-end basis-full xl:basis-auto xl:shrink-0">
-        <RequestActions
-          requestId={representativeId}
-          currentStatus={group.aggregateStatus}
-          mediaType={group.mediaType}
-          arrInstance={representativeInstance}
-          arrInstanceName={instanceLabel(representativeInstance)}
-          existingAdminNote={representativeAdminNote}
-          groupPendingIds={pendingIds.length > 1 ? pendingIds : undefined}
-        />
+        <div className="flex flex-col items-end" style={{ gap: 6 }}>
+          {targets.length > 1 && (
+            <StyledSelect
+              compact
+              value={target.requestId}
+              onChange={(e) => setChosenTargetId(e.target.value)}
+              aria-label={t("adminQueue.list.actOn")}
+              title={t("adminQueue.list.actOn")}
+              className="w-auto md:text-xs"
+            >
+              {targets.map((r) => (
+                <option key={r.requestId} value={r.requestId}>
+                  {statusLabel(r.status, t)} · {r.arrInstance === "" ? t("adminQueue.list.defaultInstance") : instanceLabel(r.arrInstance)}
+                </option>
+              ))}
+            </StyledSelect>
+          )}
+          <RequestActions
+            // A picked target starts from clean state: the representative's
+            // open panel or half-typed note must not act on another request.
+            key={targetIsRepresentative ? "representative" : target.requestId}
+            requestId={target.requestId}
+            currentStatus={target.status}
+            mediaType={group.mediaType}
+            arrInstance={target.arrInstance}
+            arrInstanceName={instanceLabel(target.arrInstance)}
+            existingAdminNote={targetIsRepresentative ? representativeAdminNote : target.adminNote}
+            groupPendingIds={pendingIds.length > 1 ? pendingIds : undefined}
+            onDialogActive={onManagerActive}
+          />
+        </div>
       </div>
 
       </div>

@@ -256,7 +256,12 @@ export default function PlexDonePage() {
     const stored = sessionStorage.getItem("plex-redirect-auth");
 
     if (!stored) {
-      window.location.replace(withBasePath("/login"));
+      // Nothing was stashed on THIS address. Plex always returns to the
+      // configured site URL, and the stash lives on the address the sign-in
+      // was started from, so a sign-in begun on another address (a LAN host,
+      // a second domain) lands here with nothing to finish. Say so, with the
+      // link back to sign in from here, instead of a silent bounce to /login.
+      fail(t("auth.plexDone.error.noFlow"));
       return;
     }
 

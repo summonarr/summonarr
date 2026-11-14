@@ -133,20 +133,29 @@ export type ApplyOutcome =
       results: ApplyResult[];
       /** A refusal with no per-spec results (403 off, 429, 400): the route's reason, else `fallback`. */
       errors: string[];
+      /**
+       * Sent ids a completed run returned no result for: a spec a catalog
+       * refresh deleted meanwhile, or one a stopped run never reached. They
+       * were NOT applied, so the run failed.
+       */
+      unanswered: string[];
     };
 
 // POST /api/admin/trash-guides/apply. 409 = the trash lock is held and nothing
 // ran: a skip, as for the other two routes. A refusal (TRaSH off, the rate
 // limit, a bad body) answers a bare { error } with no per-spec results, so its
 // reason goes to the banner; a run's own failures are in `results`.
-export function applyOutcome(status: number, body: unknown, fallback: string): ApplyOutcome {
+export function applyOutcome(status: number, body: unknown, fallback: string, sent: readonly string[] = []): ApplyOutcome {
   if (status === 409) return { kind: "skipped" };
   const b = isRecord(body) ? body : null;
   const results = applyResults(b?.results);
   const httpOk = status >= 200 && status < 300;
-  const failed = !httpOk || b?.ok !== true || results.some((r) => !r.ok);
-  const errors = failed && results.length === 0
+  // Only a run that ran can leave an id unanswered; a refusal answered none.
+  const answered = new Set(results.map((r) => r.specId));
+  const unanswered = httpOk && b !== null && Array.isArray(b.results) ? sent.filter((id) => !answered.has(id)) : [];
+  const failed = !httpOk || b?.ok !== true || results.some((r) => !r.ok) || unanswered.length > 0;
+  const errors = failed && results.length === 0 && unanswered.length === 0
     ? [typeof b?.error === "string" && b.error ? b.error : fallback]
     : [];
-  return { kind: "done", failed, results, errors };
+  return { kind: "done", failed, results, errors, unanswered };
 }

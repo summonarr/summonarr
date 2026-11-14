@@ -43,8 +43,8 @@ export async function attachAllAvailability<T extends TmdbMedia>(
   // Per-user "not interested" (HiddenItem) titles, by contrast, are REMOVED from the
   // returned list. Because this is the shared chokepoint, hiding takes effect across
   // every discovery surface at once. Opt out with includeHidden for the few callers
-  // that must still show a hidden title: the item the user is actively viewing and
-  // their own requests list. Anonymous callers (no userId) are never filtered.
+  // that must still show a hidden title: the item the user is actively viewing,
+  // their own requests list and a search by name. Anonymous callers (no userId) are never filtered.
   //
   // Per-user media-server visibility is resolved HERE for the same reason: a Plex/Jellyfin
   // server marked `restricted` contributes availability only to users granted `view` on it,

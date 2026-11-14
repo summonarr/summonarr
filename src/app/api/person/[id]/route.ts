@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
-import { getEnrichedPerson } from "@/lib/person";
+import { getEnrichedPerson, withNullRatings } from "@/lib/person";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { isTmdbIdInRange, parseTmdbIdParam } from "@/lib/tmdb-id";
@@ -29,7 +29,9 @@ export const GET = withAuth(async (
 
   try {
     const person = await getEnrichedPerson(personId, session);
-    return NextResponse.json(person);
+    // The page leaves a not-yet-looked-up credit's ratings unset so its card
+    // fetches them; the wire keeps every rating field, null when unset.
+    return NextResponse.json({ ...person, credits: person.credits.map(withNullRatings) });
   } catch (err) {
     console.error("[person] lookup failed:", err instanceof Error ? err.message : err);
     // Only an actual TMDB 404 (unknown person id) is a true Not Found. A TMDB

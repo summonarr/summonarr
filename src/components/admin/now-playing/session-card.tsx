@@ -12,6 +12,7 @@ import { formatSeasonEpisode } from "@/lib/episode-label";
 import { IpInfo } from "@/components/admin/ip-info";
 import { accentFor } from "@/components/admin/activity-accent";
 import { useT } from "@/components/i18n/i18n-provider";
+import { mediaTypeLabel } from "@/components/admin/activity-history/helpers";
 import {
   Avatar,
   KeyVal,
@@ -160,7 +161,9 @@ function SessionSubtitle({ s, isTV }: { s: ActiveSessionLive; isTV: boolean }) {
         </>
       ) : (
         <>
-          {s.year ? `${s.year} · ` : ""}{t("adminActivity.common.movie")}
+          {/* A session with no media type (an item the poller could not
+              type) is not called a movie: the year alone, like History. */}
+          {[s.year, mediaTypeLabel(t, s.mediaType?.toUpperCase())].filter(Boolean).join(" · ")}
         </>
       )}
     </div>

@@ -49,10 +49,12 @@ export default async function MediaActivityPage({
   }
 
   const stats = await getMediaPlayStats(tmdbId, mediaType);
-  // No plays at all (an unknown id, a negative one, or a title whose plays were
-  // all deleted) is a 404, not a dashboard headed "TMDB 999999999" with three
-  // empty charts and an "Open in library" button to a page that may not exist.
-  if (stats.totalPlays === 0 && stats.recentPlays.length === 0) notFound();
+  // No plays at all AND not in any library (an unknown id, a negative one) is
+  // a 404, not a dashboard headed "TMDB 999999999" with three empty charts and
+  // an "Open in library" button to a page that may not exist. A library title
+  // with no plays yet still renders, empty: the now-playing card and the user
+  // page link here for a title whose first play has not been recorded.
+  if (stats.totalPlays === 0 && stats.recentPlays.length === 0 && !stats.inLibrary) notFound();
 
   // Real TMDB poster art from the cache (same source the overview uses).
   // Pass the mediaType we already know: TMDB numbers movies and TV separately,

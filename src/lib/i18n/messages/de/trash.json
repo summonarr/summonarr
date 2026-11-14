@@ -117,6 +117,7 @@
   "trash.spec.error.loadDetail": "Details konnten nicht geladen werden ({status})",
   "trash.spec.error.network": "Netzwerkfehler – bitte versuchen Sie es erneut",
   "trash.spec.error.apply": "Anwenden fehlgeschlagen ({status})",
+  "trash.spec.error.unanswered": "{count} ausgewählte(s) Element(e) wurde(n) nicht angewendet: Der Lauf lieferte dafür kein Ergebnis. Möglicherweise sind sie nicht mehr im Katalog – aktualisiere ihn und versuche es erneut.",
   "trash.spec.error.resume": "Verwaltung konnte nicht fortgesetzt werden ({status})",
   "trash.spec.error.pause": "Verwaltung konnte nicht pausiert werden ({status})",
   "trash.spec.error.forget": "Dieses Format konnte nicht vergessen werden ({status})",

@@ -33,6 +33,7 @@ import {
   DETAIL_ACTION_CLASS,
   detailActionStyle,
 } from "./detail-action-button";
+import { mainRequestView } from "./request-button-rules";
 
 type State =
   | "idle"
@@ -69,6 +70,12 @@ interface RequestButtonProps {
   // When true, the title is admin-blacklisted: show an "unavailable to request"
   // state instead of the request CTA. The request POST 403s regardless.
   blacklisted?: boolean;
+
+  // When true, the viewer's own request on the instance this button posts to
+  // was permanently declined: the same "unavailable to request" state (the
+  // request POST 403s on every attempt). Unlike a blacklist it does not stop
+  // an on-behalf request for someone else.
+  permanentlyDeclined?: boolean;
 
   // When false, hide the HD request CTA (the viewer cannot request this media
   // type on the default instance). Availability / queued / already-requested
@@ -569,6 +576,7 @@ export function RequestButton({
   canRequestOnBehalf = false,
   canChooseProfile = false,
   blacklisted = false,
+  permanentlyDeclined = false,
   canRequest = true,
 }: RequestButtonProps) {
   const { toast } = useToast();
@@ -582,6 +590,10 @@ export function RequestButton({
   const [profileId, setProfileId] = useState<number | "">("");
   const { profiles, profilesState, loadProfiles } = useQualityProfiles(canChooseProfile, mediaType);
   const { obUsers, obUsersState, openOnBehalf } = useOnBehalfUsers();
+  // The on-behalf panel when it stands alone (mainRequestView's onBehalfOnly).
+  // Its own flag, not `state`: that may be holding a "requested" the page has
+  // not refreshed into the `requested` prop yet.
+  const [soloOnBehalfOpen, setSoloOnBehalfOpen] = useState(false);
   // The route answers 200 { alreadyAvailable: true } and creates NOTHING when
   // the title is already in a library this viewer can see (or, for
   // auto-approvers, already downloaded by Radarr/Sonarr). Same handling as
@@ -645,6 +657,14 @@ export function RequestButton({
   // approved status so this user is tracked for the "now available"
   // notification. The queue state is still shown by the "Queued" indicator.
   const showViewRequest = state === "requested" || state === "duplicate" || !!requested;
+  const view = mainRequestView({
+    isAvailable: !!isAvailable,
+    showViewRequest,
+    blacklisted,
+    permanentlyDeclined,
+    canRequest,
+    canRequestOnBehalf,
+  });
   const requestLabel = mediaType === "MOVIE" ? t("request.requestMovie") : t("request.requestTv");
 
   const profileSelect = (
@@ -679,14 +699,39 @@ export function RequestButton({
         </Link>
       )}
 
-      {!isAvailable && !showViewRequest && blacklisted && (
+      {view.blocked && (
         <DetailActionStatus variant="muted" style={{ width: "fit-content" }}>
           <Ban style={ICON} />
           {t("request.notAvailableToRequest")}
         </DetailActionStatus>
       )}
 
-      {!isAvailable && !showViewRequest && !blacklisted && canRequest && (
+      {view.onBehalfOnly &&
+        (soloOnBehalfOpen ? (
+          <OnBehalfPanel
+            tmdbId={tmdbId}
+            mediaType={mediaType}
+            obUsers={obUsers}
+            obUsersState={obUsersState}
+            onClose={() => setSoloOnBehalfOpen(false)}
+            t={t}
+          />
+        ) : (
+          <DetailActionButton
+            variant="ghost"
+            onClick={() => {
+              setSoloOnBehalfOpen(true);
+              void openOnBehalf();
+            }}
+            title={t("request.requestForAnotherUser")}
+            style={{ width: "fit-content" }}
+          >
+            <Plus style={ICON} />
+            {t("request.requestForUserEllipsis")}
+          </DetailActionButton>
+        ))}
+
+      {view.cta && (
         <>
           {state === "confirm" && (
             <ConfirmPanel

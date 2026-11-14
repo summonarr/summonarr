@@ -25,8 +25,8 @@ import {
 // overlays on its committed value.
 //
 // `navigate` is the transition the push runs in, so the caller's isPending
-// covers the whole navigation.
-export function usePendingFilters(navigate: (cb: () => void) => void) {
+// covers the whole navigation; `navigating` is that isPending.
+export function usePendingFilters(navigate: (cb: () => void) => void, navigating: boolean) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -49,6 +49,17 @@ export function usePendingFilters(navigate: (cb: () => void) => void) {
     pushedRef.current = next.pushed;
     if (next.pending !== pendingRef.current) setPending(next.pending);
   }, [committed, setPending]);
+
+  // The transition ended. A delta the URL caught up with was dropped above; one
+  // still here belongs to a navigation that never committed (the viewer
+  // clicked a link to this same URL before it landed), so the committed query
+  // never changed and nothing else would clear it: the bar kept showing the
+  // filter over an unfiltered grid and re-applied it on the next change.
+  useEffect(() => {
+    if (navigating) return;
+    pushedRef.current = new Set();
+    if (Object.keys(pendingRef.current).length > 0) setPending({});
+  }, [navigating, setPending]);
 
   // Back/forward replaces the query string wholesale, so any delta is void —
   // without this it would be reapplied on the next filter change and silently

@@ -279,3 +279,59 @@ test("webhook URLs: the copy timers are tracked and a blocked clipboard shows th
   assert.match(src, /typeof tok === "string" && tok \? \{ kind: "url"/);
   assert.match(src, /result = await resolveCopyUrl\(\);\s*\} catch \{[\s\S]{0,120}?result = \{ kind: "error" \};/);
 });
+
+// ── what a save leaves on screen ─────────────────────────────────────────────
+
+test("play history: a blanked number the route left unchanged is named, not just 'Saved'", () => {
+  const src = read("play-history-settings.tsx");
+  assert.match(src, /if \(result\.ok\) setIgnored\(ignoredKeys\(result\.data\)\);/);
+  assert.match(src, /\{ignored\.length > 0 && \(\s*<p role="status"/);
+  // Every number field the route can ignore has a label to name it by.
+  for (const key of ["playHistoryWatchedThreshold", "playHistoryCompletionThreshold", "playHistoryArcGapDays", "playHistoryPollingInterval", "playHistoryRetentionDays", "concurrentStreamLimit"]) {
+    assert.match(src, new RegExp(`\\n  ${key}: "settings\\.playHistory\\.\\w+",`), key);
+    assert.match(src, new RegExp(`\\n      ${key}: \\w+,`), `${key} is sent by the save`);
+  }
+});
+
+test("webhook secrets: the field starts empty, the mask is only a placeholder, and removal is a confirmed action", () => {
+  const src = read("forms/webhook-secret-form.tsx");
+  assert.match(src, /const \[secret, setSecret\] = useState\(""\);/);
+  assert.doesNotMatch(src, /useState\(initialSecret\)/, "the mask is never the field's value");
+  assert.match(src, /placeholder=\{secretIsSet \? SECRET_MASK_SENTINEL : /);
+  // A blank or mask-only field is not a change: Save is locked, so a blank never reaches the route by Save.
+  assert.match(src, /const dirty = secret\.length > 0 && secret !== SECRET_MASK_SENTINEL;/);
+  assert.match(src, /<Button type="submit" disabled=\{busy \|\| !dirty\}/);
+  assert.match(src, /if \(!dirty \|\| busy\) return;\s*await patchSecret\(secret\);/);
+  // The only blank sent is the confirmed Remove.
+  assert.equal(count(src, /patchSecret\(""\)/), 1);
+  assert.match(src, /async function handleRemove\(\) \{[\s\S]{0,120}?await patchSecret\(""\);/);
+  assert.match(src, /\{secretIsSet && confirmingRemove && \([\s\S]{0,400}?onClick=\{\(\) => void handleRemove\(\)\}/);
+});
+
+test("ratings visibility: ticks are coalesced into one trailing save, and saves never overlap", () => {
+  const src = read("forms/ratings-visibility-form.tsx");
+  assert.match(src, /function toggleSource\(key: string\) \{[\s\S]{0,300}?edited\(\);\s*schedule\(\);\s*\}/);
+  assert.doesNotMatch(src, /function toggleSource[\s\S]{0,300}?await save\(/, "a tick does not save by itself");
+  assert.match(src, /async function flush\(\) \{\s*if \(saving\.current\) return;/);
+  // A refusal reverts only when nothing was ticked since; a tick made meanwhile goes out next.
+  assert.match(src, /\} else if \(latest\.current === sent\) \{/);
+  assert.match(src, /if \(latest\.current !== sent\) schedule\(\);/);
+  // Leaving inside the delay still sends the waiting ticks.
+  assert.match(src, /if \(!timerRef\.current\) return;[\s\S]{0,160}?void patchSettings\(\{ ratingsHiddenSources: JSON\.stringify\(latestRef\.current\) \}\);/);
+});
+
+test("features: a remount clears the unmounted flag, so flips are still sent", () => {
+  const src = read("features-form.tsx");
+  assert.match(src, /unmounted\.current = false;\s*return \(\) => \{\s*unmounted\.current = true;/);
+});
+
+test("library path matching: the prefix boxes render without the examples", () => {
+  const src = read("forms/library-match-form.tsx");
+  assert.doesNotMatch(src, /\{data && \(\s*<div className="space-y-5">/);
+  assert.equal(count(src, /data=\{data\?\.(movie|tv) \?\? null\}/), 2);
+});
+
+test("Plex disconnect re-renders the server-drawn badge", () => {
+  const src = read("forms/plex-connect-form.tsx");
+  assert.match(src, /onDisconnected\(\);\s*setStatus\("idle"\);[\s\S]{0,200}?router\.refresh\(\);/);
+});

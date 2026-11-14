@@ -170,3 +170,17 @@ test("a send that throws at once counts as refused, and the next change is still
   assert.equal(await field.set(3), true, "a run that ended at once must not leave a stale run behind");
   assert.deepEqual(sent, [2, 3]);
 });
+
+test("`saved` is what the server holds: the initial value, then each save it took, never a refused one", async () => {
+  const answers = [true, false];
+  const field = createFieldSave<number>({
+    initial: 1,
+    send: () => Promise.resolve(answers.shift() ?? true),
+    revert: () => {},
+  });
+  assert.equal(field.saved, 1);
+  assert.equal(await field.set(2), true);
+  assert.equal(field.saved, 2);
+  assert.equal(await field.set(3), false);
+  assert.equal(field.saved, 2, "a refusal leaves the server's value");
+});

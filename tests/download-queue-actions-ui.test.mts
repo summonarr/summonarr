@@ -120,3 +120,10 @@ test("a finished action's success line replaces the last one's failure line — 
     assert.doesNotMatch(actions.slice(at, actions.indexOf("\n  }\n", at)), /setNotice\(/, `${name} never sets the notice alone`);
   }
 });
+
+test("a removal re-reads the queue, so a load that began before it cannot put the row back for long", () => {
+  const at = actions.indexOf("function removed(");
+  const body = actions.slice(at, actions.indexOf("\n  }\n", at));
+  // The row goes at once; the re-read is a manual load, which supersedes one still out.
+  assert.match(body, /dropRow\(row\);\s*reloadSoon\(2_000\);/);
+});

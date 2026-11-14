@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useT } from "@/components/i18n/i18n-provider";
-import { fixMatchErrorMessage, fixMatchWarningMessage, runFixMatch } from "@/lib/client/fix-match";
+import { fixMatchErrorMessage, fixMatchRetryAfterMs, fixMatchWarningMessage, runFixMatch } from "@/lib/client/fix-match";
 import {
   fixAllProgress,
   runFixAllSequence,
@@ -83,6 +83,7 @@ export function useFixAllRun(): FixAllRun {
       fix: (request, signal) => runFixMatch(request, { signal }),
       warningOf: (outcome) => fixMatchWarningMessage(outcome, t),
       errorOf: (err) => fixMatchErrorMessage(err, t),
+      retryAfterMs: fixMatchRetryAfterMs,
       stopped: () => stopRef.current,
       onTitleStart: (ac) => { abortRef.current = ac; },
       onResult: (result, entry, sofar) => {

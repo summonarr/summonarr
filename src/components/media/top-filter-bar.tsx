@@ -8,6 +8,7 @@ import { useT } from "@/components/i18n/i18n-provider";
 import { pendingFlag, pendingValue } from "@/lib/browse-filters";
 import type { Translator } from "@/lib/i18n/translate";
 import { voteCountLabel } from "./filter-bar";
+import { optionsWithActive } from "./filter-bar-options";
 import { RemovableChip, buildYears } from "./filter-chip";
 import { usePendingFilters } from "./use-pending-filters";
 
@@ -165,7 +166,7 @@ export function TopFilterBar({
   // The props are the server's normalised COMMITTED values; each control shows
   // them overlaid with the change still in flight, so a pick doesn't snap back
   // and the hide-available button toggles from what it shows.
-  const { pending, push, clearAll } = usePendingFilters(startTransition);
+  const { pending, push, clearAll } = usePendingFilters(startTransition, isPending);
   const f: TopFilters = {
     mediaType: pendingValue(pending, "mediaType", committedMediaType),
     sortBy: pendingValue(pending, "sortBy", committedSortBy),
@@ -208,13 +209,13 @@ export function TopFilterBar({
           (h-8, 8px radius) beside minHeight-32 / radius-8 pills. */}
       <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2 items-center">
         <FilterSelect label={t("media.filter.minImdbLabel")} value={f.minImdb} onChange={(minImdb) => push({ minImdb })}>
-          {IMDB_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>{o.label ?? t("media.filter.anyImdb")}</option>
+          {optionsWithActive(IMDB_OPTIONS.map((o) => o.value), f.minImdb).map((value) => (
+            <option key={value} value={value}>{value ? `IMDb ${value}+` : t("media.filter.anyImdb")}</option>
           ))}
         </FilterSelect>
 
         <FilterSelect label={t("media.filter.minVotesLabel")} value={f.minVotes} onChange={(minVotes) => push({ minVotes })}>
-          {VOTE_OPTIONS.map((votes) => (
+          {optionsWithActive(VOTE_OPTIONS, f.minVotes).map((votes) => (
             <option key={votes} value={votes}>{voteCountLabel(t, votes)}</option>
           ))}
         </FilterSelect>

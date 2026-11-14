@@ -44,6 +44,17 @@ export function jobAnswerError(answer: JobAnswer): string | null {
 }
 
 /**
+ * Whether a 2xx answer says the run was cut short: a locked run whose lock
+ * was lost returns before finishing and answers 200 `{ aborted: true }` (or
+ * `{ ok: false }`), which is not a finished run.
+ */
+export function jobRunCutShort(data: unknown): boolean {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+  const d = data as { aborted?: unknown; ok?: unknown };
+  return d.aborted === true || d.ok === false;
+}
+
+/**
  * Whether no answer of the run's own came: none at all (status 0), or a
  * gateway's 502/503/504 standing in for the app with no error of the route's.
  */

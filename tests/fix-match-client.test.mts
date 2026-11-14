@@ -413,3 +413,15 @@ test("a request's own timeout is a failed poll or a failed start, never the call
     globalThis.fetch = realFetch; Date.now = realNow; globalThis.setTimeout = realSetTimeout;
   }
 });
+
+const { fixMatchRetryAfterMs } = await import("../src/lib/client/fix-match.ts");
+
+test("only a rate-limited start asks a bulk run to wait: Retry-After when sent, bounded, else a default", () => {
+  assert.equal(fixMatchRetryAfterMs(new FixMatchClientError("failed", { status: 429, message: "too many" })), 15_000);
+  assert.equal(fixMatchRetryAfterMs(new FixMatchClientError("http", { status: 429, retryAfter: 7 })), 7_000);
+  assert.equal(fixMatchRetryAfterMs(new FixMatchClientError("http", { status: 429, retryAfter: 3600 })), 60_000);
+  assert.equal(fixMatchRetryAfterMs(new FixMatchClientError("http", { status: 429, retryAfter: 0 })), 15_000);
+  assert.equal(fixMatchRetryAfterMs(new FixMatchClientError("failed", { status: 409, message: "busy" })), null);
+  assert.equal(fixMatchRetryAfterMs(new FixMatchClientError("failed", { status: 404 })), null);
+  assert.equal(fixMatchRetryAfterMs(new Error("429")), null);
+});

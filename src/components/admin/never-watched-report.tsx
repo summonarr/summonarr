@@ -37,6 +37,7 @@ import {
 import { apiErrorText } from "@/lib/client/api-error";
 import { fetchJson, LONG_RUN_TIMEOUT_MS, jsonInit } from "@/lib/client/fetch-json";
 import { runReplaceFileJob } from "@/lib/client/replace-file-job";
+import { jobRunCutShort } from "@/lib/client/library-sync";
 import { arrFailureText, upstreamFailureText } from "@/lib/cleanup-error-text";
 import { check } from "@/lib/validate";
 import {
@@ -355,6 +356,11 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
       }
       if (answer.status < 200 || answer.status >= 300) {
         setActionError(apiErrorText(answer.data, t("adminManage.neverWatched.error.check")));
+        return;
+      }
+      // A walk that lost its lock answers 200 with whatever it had read.
+      if (jobRunCutShort(answer.data)) {
+        setActionError(t("adminManage.neverWatched.checkStopped"));
         return;
       }
       const result = check(NwCheckResultWire, answer.data);

@@ -348,7 +348,8 @@ export const discoveryPaths: OpenApiPaths = {
         "200": {
           description:
             "Search results (TmdbMedia) enriched with library availability and request/ARR state. Ratings are not attached: " +
-            "a search runs on every keystroke, so it skips the MDBList/OMDB fan-out.",
+            "a search runs on every keystroke, so it skips the MDBList/OMDB fan-out. Titles the caller marked not interested " +
+            "are included: a search asks for a title by name.",
           content: { "application/json": { schema: TMDB_MEDIA_LIST } },
         },
         "400": { description: "Query longer than 200 characters", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },

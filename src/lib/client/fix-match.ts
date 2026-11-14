@@ -1,6 +1,7 @@
 import { timedFetch } from "@/lib/client/fetch-json";
 import { withBasePath } from "@/lib/base-path";
 import { abortableSleep } from "@/lib/abortable-sleep";
+import { retryAfterDeltaSeconds } from "@/lib/client/rate-limit";
 import type { Translator } from "@/lib/i18n/translate";
 
 // Client half of the background fix-match (guardrail 37a): start the job, then
@@ -74,12 +75,32 @@ export type FixMatchErrorCode =
 export class FixMatchClientError extends Error {
   code: FixMatchErrorCode;
   status: number | undefined;
-  constructor(code: FixMatchErrorCode, opts: { status?: number; message?: string } = {}) {
+  /** A refused start's Retry-After, in seconds, when the route sent one. */
+  retryAfter: number | undefined;
+  constructor(code: FixMatchErrorCode, opts: { status?: number; message?: string; retryAfter?: number } = {}) {
     super(opts.message ?? code);
     this.name = "FixMatchClientError";
     this.code = code;
     this.status = opts.status;
+    this.retryAfter = opts.retryAfter;
   }
+}
+
+// The route allows 10 starts a minute per admin and sends no Retry-After, so a
+// rate-limited start waits this long before it is tried again.
+const RATE_LIMIT_WAIT_MS = 15_000;
+const RATE_LIMIT_MAX_WAIT_MS = 60_000;
+
+/**
+ * How long a bulk run waits before retrying a title whose START was
+ * rate-limited (429), or null when the failure is not one. A 429 means the
+ * remap never began, so trying it again cannot run one twice.
+ */
+export function fixMatchRetryAfterMs(err: unknown): number | null {
+  if (!(err instanceof FixMatchClientError) || err.status !== 429) return null;
+  const sent = err.retryAfter;
+  if (sent === undefined || !Number.isFinite(sent) || sent <= 0) return RATE_LIMIT_WAIT_MS;
+  return Math.min(sent * 1000, RATE_LIMIT_MAX_WAIT_MS);
 }
 
 // Maps a runFixMatch rejection to a translated line. Shared by every consumer so
@@ -221,9 +242,10 @@ async function startFixMatch(body: FixMatchRequest, signal: AbortSignal | undefi
   }
   const started = startBodyOf(await res.json().catch(() => null));
   if (!res.ok || !started.ok) {
+    const retryAfter = res.status === 429 ? retryAfterDeltaSeconds(res.headers.get("Retry-After")) ?? undefined : undefined;
     throw started.error
-      ? new FixMatchClientError("failed", { status: res.status, message: started.error })
-      : new FixMatchClientError("http", { status: res.status });
+      ? new FixMatchClientError("failed", { status: res.status, message: started.error, retryAfter })
+      : new FixMatchClientError("http", { status: res.status, retryAfter });
   }
   return started;
 }

@@ -9,6 +9,7 @@ import {
   applyHistoryUrlEntries,
   beginLoad,
   buildHistoryFilterParams,
+  dayEndsBefore,
   dateRangeInverted,
   deleteOutcome,
   EMPTY_HISTORY_FILTERS,
@@ -147,6 +148,20 @@ test("the request carries the filters under the API's names, the day range as fr
   const fromDay = buildHistoryFilterParams({ startDateIso: "x", filters: { ...EMPTY_HISTORY_FILTERS, fromDate: "2026-10-01" }, sortBy: "startedAt", sortDir: "desc", grouped: true });
   assert.equal(fromDay.get("fromDay"), "2026-10-01");
   assert.equal(fromDay.has("startDate"), false, "a From day replaces the period's lower bound");
+});
+
+test("a To day that ends before the period begins drops the period's lower bound", () => {
+  const base = { filters: { ...EMPTY_HISTORY_FILTERS }, sortBy: "startedAt", sortDir: "desc", grouped: true } as const;
+  const build = (toDate: string) =>
+    buildHistoryFilterParams({ ...base, startDateIso: "2026-10-10T00:30:00.000Z", filters: { ...EMPTY_HISTORY_FILTERS, toDate } });
+  const before = build("2026-07-01");
+  assert.equal(before.has("startDate"), false, "the 30-day period can't overlap a day three months back");
+  assert.equal(before.get("toDay"), "2026-07-01");
+  assert.equal(build("2026-10-20").get("startDate"), "2026-10-10T00:30:00.000Z", "a To day inside the period keeps it");
+  // The day before the bound may still overlap it in a zone west of UTC.
+  assert.equal(build("2026-10-09").has("startDate"), true);
+  assert.equal(build("2026-10-08").has("startDate"), false);
+  assert.equal(dayEndsBefore("2026-02-31x", "2026-10-10T00:00:00Z"), false, "an unreadable day keeps the bound");
 });
 
 test("a live refresh re-reads in the background; a load the admin asked for, or one still owed an answer, is foreground", () => {

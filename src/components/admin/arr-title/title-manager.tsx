@@ -300,7 +300,18 @@ export function ArrTitleManager({
               />
               {/* Until a live title answer lands, the open-time read is out — or it failed (loadError). */}
               <ArrSnapshotNote at={staleAt} refreshing={loadError === ""} />
-              <StatusLine error={error || loadError} watch={watchKey ? watches[watchKey] : undefined} notice={notice} partialNote={partialNote} />
+              {/* Its own line, with its own Retry: a failed re-read must not hide a
+                  later command's feedback, and over a painted snapshot Retry is the
+                  only way to the live title Save waits for. */}
+              {loadError && (
+                <p role="alert" className="m-0 flex flex-wrap items-center gap-1.5 text-xs" style={{ color: "var(--ds-danger)" }}>
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {loadError}
+                  <Button variant="ghost" size="sm" onClick={retry}>
+                    <RefreshCw /> {t("adminArr.common.retry")}
+                  </Button>
+                </p>
+              )}
+              <StatusLine error={error} watch={watchKey ? watches[watchKey] : undefined} notice={notice} partialNote={partialNote} />
 
               {confirmDiscard && (
                 <DiscardBanner saving={settingsSaving} keepRef={keepEditingRef} onKeep={() => setConfirmDiscard(false)} onDiscard={() => onOpenChange(false)} />

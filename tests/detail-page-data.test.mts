@@ -32,7 +32,10 @@ type Session = import("../src/lib/api-auth.ts").SummonarrSession;
 // ── fixtures ────────────────────────────────────────────────────────────────
 type Where = Record<string, unknown>;
 let settings: Record<string, string> = {};
-let requests: Array<{ tmdbId: number; mediaType: string; requestedBy: string; arrInstance: string; status: string }> = [];
+let requests: Array<{
+  tmdbId: number; mediaType: string; requestedBy: string; arrInstance: string; status: string;
+  permanentlyDeclined?: boolean; filedBy?: string | null;
+}> = [];
 let plexRows: Array<{ tmdbId: number; mediaType: string; serverInstance: string }> = [];
 let jellyfinRows: Array<{ tmdbId: number; mediaType: string; serverInstance: string; communityRating: number | null }> = [];
 let wanted: Array<{ service: "radarr" | "sonarr"; tmdbId: number; arrInstance: string }> = [];
@@ -86,6 +89,12 @@ shadowPrismaModel(prisma, "user", { findUnique: async () => ({ role: "USER", per
 shadowPrismaModel(prisma, "mediaRequest", {
   findMany: async ({ where, select }: { where: Where; select?: Record<string, boolean> }) =>
     requests.filter((r) => whereMatches(r, where)).map((r) => project(r, select)),
+  // The own-request read: `OR` over requestedBy / filedBy.
+  findFirst: async ({ where }: { where: Where & { OR?: Where[] } }) => {
+    const { OR, ...rest } = where;
+    const row = requests.find((r) => whereMatches(r, rest) && (!OR || OR.some((alt) => whereMatches(r, alt))));
+    return row ? { id: "r" } : null;
+  },
 });
 shadowPrismaModel(prisma, "deletionVote", { findFirst: async () => null });
 shadowPrismaModel(prisma, "watchlistItem", { findUnique: async () => null });
@@ -151,6 +160,27 @@ test("a DECLINED request counts for nothing, and another viewer's request is not
 });
 
 // ── the 4K gate ─────────────────────────────────────────────────────────────
+test("a permanent decline is reported for the button that posts to that instance only", async () => {
+  const declined = (arrInstance: string) => ({ ...request(arrInstance, "DECLINED"), permanentlyDeclined: true });
+  requests = [declined("")];
+  assert.deepEqual((await loadDetailPageState(USER, MOVIE, "MOVIE")).permanentlyDeclined, { main: true, fourK: false, named: [] });
+  requests = [declined("4k"), declined("anime")];
+  assert.deepEqual((await loadDetailPageState(USER, MOVIE, "MOVIE")).permanentlyDeclined, { main: false, fourK: true, named: ["anime"] });
+  // An ordinary decline can be requested again, and another viewer's is theirs.
+  requests = [request("", "DECLINED"), { ...declined(""), requestedBy: "u_2" }];
+  assert.deepEqual((await loadDetailPageState(USER, MOVIE, "MOVIE")).permanentlyDeclined, { main: false, fourK: false, named: [] });
+});
+
+test("ownRequest follows the vote route: ever requested at any status, or filed for someone else", async () => {
+  assert.equal((await loadDetailPageState(USER, MOVIE, "MOVIE")).ownRequest, false);
+  requests = [request("4k", "DECLINED")];
+  assert.equal((await loadDetailPageState(USER, MOVIE, "MOVIE")).ownRequest, true);
+  requests = [{ ...request(""), requestedBy: "u_2", filedBy: "u_1" }];
+  assert.equal((await loadDetailPageState(USER, MOVIE, "MOVIE")).ownRequest, true);
+  requests = [{ ...request(""), requestedBy: "u_2" }, { ...request(""), tmdbId: 551 }];
+  assert.equal((await loadDetailPageState(USER, MOVIE, "MOVIE")).ownRequest, false);
+});
+
 test("4K queue and availability are withheld until a 4K instance is configured and the viewer may request 4K", async () => {
   wanted = [{ service: "radarr", tmdbId: 550, arrInstance: "" }, { service: "radarr", tmdbId: 550, arrInstance: "4k" }];
   available = [{ service: "radarr", tmdbId: 550, arrInstance: "4k" }];

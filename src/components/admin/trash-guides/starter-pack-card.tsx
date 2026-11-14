@@ -69,7 +69,10 @@ function useStarterPack() {
     setLoaded(true);
     if (res.ok) {
       setItems(res.data.items ?? []);
-      setLoadError(null);
+      // A 200 can carry the db-push hint (the TRaSH tables are missing): the
+      // curated list comes back with no specs, and the hint says why.
+      const hint = res.data.schemaDiagnostic;
+      setLoadError(hint ? { errors: [], schemaDiagnostic: hint } : null);
       return;
     }
     // A failed load (500 from resolveStarterPack, 401/403 from withAdmin) must
@@ -169,15 +172,19 @@ export function StarterPackCard({
       apply.fail(t("trash.spec.error.network"));
       return;
     }
-    const outcome = applyOutcome(answer.status, answer.body, t("trash.spec.error.apply", { status: answer.status }));
+    const outcome = applyOutcome(answer.status, answer.body, t("trash.spec.error.apply", { status: answer.status }), toApply);
     if (outcome.kind === "skipped") {
       apply.skip("running");
       return;
     }
     // 403 (integration disabled), 429 (rate limit) and 400 (bad body) answer
     // a bare `{ error }` with no per-spec results: the reason goes to the
-    // banner instead of an error badge pointing at nothing.
-    apply.done(outcome.failed, outcome.errors.length > 0 ? { errors: outcome.errors } : null, outcome.results);
+    // banner instead of an error badge pointing at nothing. So does a sent
+    // spec the run returned no result for: it was not applied.
+    const errors = outcome.unanswered.length > 0
+      ? [...outcome.errors, t("trash.spec.error.unanswered", { count: outcome.unanswered.length })]
+      : outcome.errors;
+    apply.done(outcome.failed, errors.length > 0 ? { errors } : null, outcome.results);
     if (outcome.results.length > 0 || !outcome.failed) {
       await load();
       onChanged?.();

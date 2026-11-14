@@ -304,7 +304,7 @@ function RequestsEmptyState({
 
 type RequestListItem = Pick<
   Prisma.MediaRequestGetPayload<{ select: typeof REQUEST_LIST_SELECT }>,
-  "id" | "mediaType" | "tmdbId" | "title" | "posterPath" | "releaseYear" | "status" | "note" | "createdAt"
+  "id" | "mediaType" | "tmdbId" | "title" | "posterPath" | "releaseYear" | "status" | "note" | "adminNote" | "createdAt"
 >;
 
 // One of the viewer's requests: poster, title, meta line, availability, the
@@ -427,6 +427,26 @@ function RequestRow({
               }}
             >
               {r.note}
+            </p>
+          )}
+          {/* On the row itself, not only inside the comment thread: the thread
+              is collapsed by default and absent when request comments are off,
+              which left a declined request with no reason anywhere. */}
+          {r.status === "DECLINED" && r.adminNote && (
+            <p
+              className="line-clamp-3 whitespace-pre-wrap break-words"
+              style={{
+                marginTop: 8,
+                padding: "6px 10px",
+                borderRadius: 4,
+                background: "var(--ds-bg-1)",
+                borderLeft: "2px solid var(--ds-danger)",
+                fontSize: 11.5,
+                color: "var(--ds-fg-muted)",
+              }}
+            >
+              <span style={{ color: "var(--ds-fg-subtle)" }}>{t("requests.thread.declineReason")}: </span>
+              {r.adminNote}
             </p>
           )}
         </div>

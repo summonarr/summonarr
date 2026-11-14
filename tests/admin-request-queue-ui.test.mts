@@ -69,7 +69,7 @@ test("adds that got no answer are named above the list, outside the bar their ro
 
 test("a new status or type filter clears the selection; the bar names what is selected on other pages", () => {
   const src = list();
-  assert.match(src, /useSelection\(requests, `\$\{statusFilter \?\? ""\}\|\$\{typeFilter \?\? ""\}`\)/);
+  assert.match(src, /useSelection\(requests, `\$\{statusFilter \?\? ""\}\|\$\{typeFilter \?\? ""\}`, batchLoading\)/);
   assert.match(src, /if \(filterKey !== prevFilterKey\) \{\s*setPrevFilterKey\(filterKey\);\s*if \(selected\.size > 0\) setSelected\(new Set\(\)\);/);
   assert.match(src, /offPage=\{offPageCount\(selected, requests\)\}/);
   assert.match(src, /\{offPage > 0 && \(/);
@@ -148,8 +148,11 @@ test("a quality-profile read for an instance the row has since left is dropped",
   assert.match(open, /setProfileState\(\(prev\) => \(prev\?\.key === key && prev\.phase === "loading" \? next : prev\)\);/);
   assert.match(open, /new URLSearchParams\(\{ mediaType, instance: arrInstance \}\)/);
   assert.match(open, /schema: QualityProfilesAnswer,/, "the list is checked, not cast");
-  // The only effect is the unmount cleanup that stops the reads still out; no prop is copied into state.
-  assert.equal(src.match(/useEffect\(/g)?.length, 1);
+  // No prop is copied into state: the effects are the unmount cleanup that
+  // stops the reads still out, and the two that tell the list while the Pick
+  // release dialog is open (the callback's latest copy, then the open/close).
+  assert.equal(src.match(/useEffect\(/g)?.length, 3);
+  assert.match(src, /useEffect\(\(\) => \{\s*dialogActiveRef\.current = onDialogActive;\s*\}\);/);
   assert.match(src, /useEffect\(\(\) => \{\s*const out = reads\.current;\s*return \(\) => \{\s*for \(const ctl of out\) ctl\.abort\(\);/);
   assert.match(open, /signal: ctl\.signal,/, "the read can be stopped");
 });
@@ -202,4 +205,40 @@ test("/requests clamps ?page= and takes its total from the status counts", () =>
   assert.match(src, /const page = parsePageNumber\(pageParam\);/);
   assert.doesNotMatch(src, /mediaRequest\.count\(/);
   assert.match(src, /const total = status \? \(statusCounts\[status\] \?\? 0\) : totalAllStatuses;/);
+});
+
+// ── a batch whose push fails ────────────────────────────────────────────────
+
+test("the selection is not pruned while a batch runs, and a run's error shows with nothing selected", () => {
+  const src = list();
+  // The route claims rows APPROVED before pushing; the refresh that triggers
+  // lands mid-run and must not drop the rows whose push then fails.
+  const hook = between(src, "function useSelection(", "function toggleAll()");
+  assert.match(hook, /useEffect\(\(\) => \{\s*if \(batchRunningRef\.current\) return;\s*setSelected\(\(prev\) => pruneSelection\(prev, requests\)\);\s*\}, \[requests\]\);/);
+  assert.ok(hook.indexOf("batchRunningRef.current = batchRunning;") < hook.indexOf("if (batchRunningRef.current) return;"), "the flag is synced before the prune reads it");
+  assert.match(src, /useSelection\(requests, `\$\{statusFilter \?\? ""\}\|\$\{typeFilter \?\? ""\}`, batchLoading\);/);
+  // The bar is the error's usual home, but it only exists while something is selected.
+  assert.match(src, /\{selected\.size === 0 && batchError && \(\s*<div\s*role="alert"/);
+});
+
+test("the row's actions can be aimed at any request of the group, and a picked one starts clean", () => {
+  const src = list();
+  const row = between(src, "function RequestGroupRow(", "function GroupRatings(");
+  assert.match(row, /const targets = actionTargets\(group\.requesters, group\.aggregateStatus\);/);
+  assert.match(row, /const target = chosenActionTarget\(targets, chosenTargetId\) \?\? primaryRequester;/);
+  assert.match(row, /\{targets\.length > 1 && \(\s*<StyledSelect/, "the picker only where there is a choice");
+  assert.match(row, /key=\{targetIsRepresentative \? "representative" : target\.requestId\}/);
+  assert.match(row, /requestId=\{target\.requestId\}\s*currentStatus=\{target\.status\}/);
+  assert.match(row, /arrInstance=\{target\.arrInstance\}/);
+});
+
+test("Pick release holds the list's live refresh like the title manager, and an empty queue still refreshes", () => {
+  const src = list();
+  assert.match(src, /onDialogActive=\{onManagerActive\}/);
+  const approved = between(actions(), "function ApprovedActions(", "function DeclineNoteForm(");
+  assert.match(approved, /useEffect\(\(\) => \{\s*if \(!showReleases\) return;\s*dialogActiveRef\.current\?\.\(true\);\s*const active = dialogActiveRef;\s*return \(\) => active\.current\?\.\(false\);\s*\}, \[showReleases\]\);/);
+  // The list carries the live listener; with no rows there is no list.
+  const page = read("src/app/(app)/admin/page.tsx");
+  const empty = between(page, "{rows.length === 0 ? (", "<AdminRequestList");
+  assert.match(empty, /<LiveRefresh on=\{\["request:new", "request:updated", "request:deleted"\]\} \/>/);
 });

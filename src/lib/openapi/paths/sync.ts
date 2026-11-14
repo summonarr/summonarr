@@ -14,6 +14,22 @@ import type { OpenApiSchema, OpenApiPaths } from "../types";
 // One server's library resync (/sync/plex, /sync/jellyfin), or the skip while
 // that service's resync already runs. A GET ?job= poll replays the POST's
 // answer, so all four operations share it.
+// POST /sync/tv-episodes' answer, also what a finished background run hands back.
+const TV_EPISODES_ANSWER = {
+  type: "object",
+  required: ["plex", "jellyfin", "errors", "skipped"],
+  properties: {
+    plex: { type: "integer", description: "Episodes written for Plex (0 when skipped or not configured)" },
+    jellyfin: { type: "integer", description: "Episodes written for Jellyfin (0 when skipped or not configured)" },
+    errors: { type: "array", items: { type: "string" }, description: "One per failed server, prefixed with the server" },
+    skipped: {
+      type: "array",
+      items: { type: "string", enum: ["plex", "jellyfin"] },
+      description: "Types left untouched because one of their servers failed",
+    },
+  },
+} satisfies OpenApiSchema;
+
 const LIBRARY_RESYNC_ANSWER = cronRunOrSkip({
   type: "object",
   required: ["scanned", "checked", "marked", "full"],
@@ -341,11 +357,31 @@ export const syncPaths: OpenApiPaths = {
     },
   },
   "/sync/tv-episodes": {
+    get: {
+      tags: ["Admin – Sync"],
+      summary: "Poll a background episode-cache rebuild (ADMIN)",
+      description: "The answer of a rebuild started with `async: true`, for the admin who started it. A CRON_SECRET caller has no jobs.",
+      parameters: [
+        { name: "job", in: "query", required: true, schema: { type: "string", pattern: "^[0-9a-f]{32}$" }, description: "The job id from the POST's 202" },
+      ],
+      responses: {
+        "200": {
+          description: "The finished rebuild's own answer",
+          content: { "application/json": { schema: TV_EPISODES_ANSWER } },
+        },
+        "202": jobAnswer("Still running: { job, running: true }", JOB_RUNNING),
+        "403": { description: "Not an admin session" },
+        "404": { description: "{ error } — the job is unknown: expired, another admin's, or dropped by a restart" },
+      },
+    },
     post: {
       tags: ["Admin – Sync"],
       summary: "Sync TV episode cache from TMDB",
       security: ADMIN_OR_CRON_SECURITY,
       description: "Rebuilds the shared TVEpisodeCache from the UNION of every configured server of each type, all-or-nothing: a type with any failed server is left untouched and named in `skipped`.",
+      requestBody: { required: false, content: { "application/json": { schema: { type: "object", properties: {
+        async: { type: "boolean", description: "Admin session only: run as a background job — 202 { job } at once, poll GET ?job=. Default (and always for CRON_SECRET): synchronous" },
+      } } } } },
       responses: {
         "200": {
           description: "{ plex, jellyfin, skipped, errors, … } — episode counts written per source",
@@ -355,26 +391,11 @@ export const syncPaths: OpenApiPaths = {
               schema: { type: "string" },
             },
           },
-          content: {
-            "application/json": {
-              schema: {
-                type: "object",
-                required: ["plex", "jellyfin", "errors", "skipped"],
-                properties: {
-                  plex: { type: "integer", description: "Episodes written for Plex (0 when skipped or not configured)" },
-                  jellyfin: { type: "integer", description: "Episodes written for Jellyfin (0 when skipped or not configured)" },
-                  errors: { type: "array", items: { type: "string" }, description: "One per failed server, prefixed with the server" },
-                  skipped: {
-                    type: "array",
-                    items: { type: "string", enum: ["plex", "jellyfin"] },
-                    description: "Types left untouched because one of their servers failed",
-                  },
-                },
-              },
-            },
-          },
+          content: { "application/json": { schema: TV_EPISODES_ANSWER } },
         },
+        "202": jobAnswer("{ job } — `async: true` from an admin: the rebuild runs in the background", JOB_STARTED),
         "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
+        "413": tooLargeAnswer(8 * 1024),
       },
     },
   },

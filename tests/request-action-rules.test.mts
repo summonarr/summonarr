@@ -68,3 +68,27 @@ test("the row shows the route's own reason for a refusal, and each call's busy s
     assert.match(src.slice(at, at + 400), /if \(!begin\(\)\) return/, `${head} clears the last failure first`);
   }
 });
+
+test("a row can aim its actions at every (status, instance) of its group, the representative first", () => {
+  const r = (requestId: string, status: string, arrInstance: string) => ({ requestId, status, arrInstance, adminNote: null });
+  // HD and 4K both approved, by three people: two targets, one per instance.
+  const approved = [r("hd1", "APPROVED", ""), r("hd2", "APPROVED", ""), r("uhd", "APPROVED", "4k")];
+  assert.deepEqual(rules.actionTargets(approved, "APPROVED").map((x) => x.requestId), ["hd1", "uhd"]);
+  // The representative is the first request at the aggregate status, wherever it sits.
+  const mixed = [r("d", "DECLINED", ""), r("a", "APPROVED", ""), r("a4", "APPROVED", "4k")];
+  assert.deepEqual(rules.actionTargets(mixed, "APPROVED").map((x) => x.requestId), ["a", "d", "a4"]);
+  // One target: nothing to choose between.
+  assert.equal(rules.actionTargets([r("x", "PENDING", ""), r("y", "PENDING", "")], "PENDING").length, 1);
+  assert.deepEqual(rules.actionTargets([], "PENDING"), []);
+  // An aggregate no member carries falls back to the first request.
+  assert.equal(rules.actionTargets([r("x", "PENDING", "")], "APPROVED")[0]?.requestId, "x");
+});
+
+test("a picked target holds only while the group still offers it", () => {
+  const r = (requestId: string, status: string, arrInstance: string) => ({ requestId, status, arrInstance, adminNote: null });
+  const targets = rules.actionTargets([r("hd", "APPROVED", ""), r("uhd", "APPROVED", "4k")], "APPROVED");
+  assert.equal(rules.chosenActionTarget(targets, null)?.requestId, "hd");
+  assert.equal(rules.chosenActionTarget(targets, "uhd")?.requestId, "uhd");
+  assert.equal(rules.chosenActionTarget(targets, "gone")?.requestId, "hd", "a request that left the group is not acted on");
+  assert.equal(rules.chosenActionTarget([], "x"), undefined);
+});

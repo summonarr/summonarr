@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Download, Ban, ShieldCheck, LinkIcon, Loader2, RefreshCw, Users } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
-import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
+import { fetchJson, jsonInit, LONG_RUN_TIMEOUT_MS } from "@/lib/client/fetch-json";
 import { v, type Schema } from "@/lib/validate";
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { Switch } from "@/components/ui/switch";
@@ -60,6 +60,9 @@ interface ServerUserTableProps {
   // ADMIN-only (guardrail 34d — the route refuses a MANAGE_USERS delegate). A
   // delegate sees the binding read-only and keeps the download controls.
   canLink: boolean;
+  // The "Sync users" button posts to a cron route, which admits the ADMIN role
+  // only (getCronActor): a delegate is never offered a button that always fails.
+  canSync: boolean;
 }
 
 // Sentinels for the picker's two non-account options. Prefixed so they can
@@ -86,7 +89,9 @@ type WriteResult<T> = { ok: true; data: T | null } | { ok: false; error: string 
 // answer goes through failureMessage — or `genericError` for a route whose own
 // errors are untranslated English — and no answer at all (a network failure, a
 // proxy's own 5xx page) is the translated network error. The default 30 s
-// bound applies; the caller owns refresh and any rollback.
+// bound applies unless the caller names a longer one (`timeoutMs`: a route
+// that walks every user of every server); the caller owns refresh and any
+// rollback.
 async function sendWrite<T>(
   url: string,
   init: { method: "PATCH" | "POST"; body?: unknown },
@@ -94,11 +99,13 @@ async function sendWrite<T>(
   schema: Schema<T>,
   signal: AbortSignal,
   genericError?: string,
+  timeoutMs?: number,
 ): Promise<WriteResult<T>> {
   const res = await fetchJson(withBasePath(url), {
     init: init.body === undefined ? { method: init.method } : jsonInit(init.method, init.body),
     schema: v.nullable(schema),
     signal,
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
   });
   if (res.ok) return { ok: true, data: res.data };
   if (res.kind === "http") {
@@ -122,13 +129,13 @@ function useServerUserWrite() {
     url: string,
     init: { method: "PATCH" | "POST"; body?: unknown },
     schema: Schema<T>,
-    opts?: { key?: string; genericError?: string },
+    opts?: { key?: string; genericError?: string; timeoutMs?: number },
   ): Promise<WriteResult<T> | undefined> {
     const result = await action.run(
       opts?.key ?? "write",
       (signal) => {
         setError(null);
-        return sendWrite(url, init, t, schema, signal, opts?.genericError);
+        return sendWrite(url, init, t, schema, signal, opts?.genericError, opts?.timeoutMs);
       },
       { ifBusy: "skip" },
     );
@@ -371,7 +378,8 @@ function SyncUsersButton() {
       "/api/cron/sync-download-policies",
       { method: "POST" },
       POLICY_SYNC_ANSWER,
-      { genericError: t("adminManage.serverUsers.syncFailed") },
+      // The run reads every user of every configured server, one by one.
+      { genericError: t("adminManage.serverUsers.syncFailed"), timeoutMs: LONG_RUN_TIMEOUT_MS },
     );
     if (!result?.ok) return;
     if (result.data?.skipped === true) {
@@ -457,7 +465,8 @@ function BulkBar({
       "/api/admin/server-users/bulk",
       { method: "POST", body: { source, downloadsEnabled: BULK_KINDS[kind].downloadsEnabled } },
       BULK_ANSWER,
-      { key: `bulk:${kind}` },
+      // One policy push per Jellyfin user: minutes on a large server.
+      { key: `bulk:${kind}`, timeoutMs: LONG_RUN_TIMEOUT_MS },
     );
     focus.returnToIfLost(kind);
     if (!result?.ok) return;
@@ -586,7 +595,7 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
   );
 }
 
-export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts, canLink }: ServerUserTableProps) {
+export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts, canLink, canSync }: ServerUserTableProps) {
   const t = useT();
   const [search, setSearch] = useState("");
   // The account control renders in ONE place per row: the mobile stack below
@@ -603,7 +612,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts, 
         <EmptyState
           icon={Users}
           title={t("adminManage.serverUsers.empty")}
-          action={<SyncUsersButton />}
+          action={canSync ? <SyncUsersButton /> : undefined}
         />
       </div>
     );
@@ -618,7 +627,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts, 
         <div className="flex flex-wrap items-center gap-4">
           {hasJellyfin && <BulkBar source="jellyfin" label="Jellyfin" />}
         </div>
-        <SyncUsersButton />
+        {canSync && <SyncUsersButton />}
       </div>
 
       {/* Search */}

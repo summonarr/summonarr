@@ -153,7 +153,12 @@ const SPEC_STATUS_FIELDS = {
 export const SPEC_STATUS: Schema<SpecStatus> = v.object(SPEC_STATUS_FIELDS);
 
 /** GET /api/admin/trash-guides/status. */
-export const SPEC_STATUS_ANSWER = v.object({ specs: v.optional(v.array(SPEC_STATUS)) });
+export const SPEC_STATUS_ANSWER = v.object({
+  specs: v.optional(v.array(SPEC_STATUS)),
+  // Sent WITH a 200 and an empty list when the TRaSH tables are missing (the
+  // schema was never pushed): the list is unreadable, not empty.
+  schemaDiagnostic: v.optional(v.string()),
+});
 
 /** GET /api/admin/trash-guides/spec/{id}. The payload is TRaSH's own JSON, read field by field by the detail views. */
 export const SPEC_DETAIL_ANSWER: Schema<SpecDetail> = v.object({

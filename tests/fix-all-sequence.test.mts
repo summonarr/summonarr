@@ -77,3 +77,70 @@ test("each title gets its own controller, handed over before its remap starts", 
   assert.equal(controllers.length, 2);
   assert.deepEqual(signals, controllers.map((c) => c.signal), "the poll an unmount aborts is the one running");
 });
+
+const { MAX_START_RETRIES } = await import("../src/lib/client/fix-all-sequence.ts");
+
+function limited(failuresBeforeOk: Record<string, number>) {
+  const calls: string[] = [];
+  const waits: number[] = [];
+  const left = { ...failuresBeforeOk };
+  const rateLimited = new Error("too many");
+  return {
+    calls,
+    waits,
+    rateLimited,
+    deps: {
+      fix: async (request: { tmdbId?: number }) => {
+        const key = String(request.tmdbId);
+        calls.push(key);
+        if ((left[key] ?? 0) > 0) { left[key]--; throw rateLimited; }
+        if (key === "9") throw new Error("server down");
+        return { ok: true as const };
+      },
+      warningOf: () => null,
+      errorOf: (err: unknown) => (err as Error).message,
+      stopped: () => false,
+      retryAfterMs: (err: unknown) => (err === rateLimited ? 15_000 : null),
+      sleep: async (ms: number) => { waits.push(ms); },
+    },
+  };
+}
+
+test("a rate-limited start is waited out and tried again; the titles after it still run", async () => {
+  const d = limited({ "2": 2 });
+  const { results, aborted } = await runFixAllSequence([entry("1"), entry("2"), entry("3")], d.deps);
+  assert.equal(aborted, false);
+  assert.deepEqual(d.calls, ["1", "2", "2", "2", "3"]);
+  assert.deepEqual(d.waits, [15_000, 15_000]);
+  assert.deepEqual(results.map((r) => r.kind), ["ok", "ok", "ok"]);
+});
+
+test("only a rate-limited start is retried, and only a bounded number of times", async () => {
+  const other = limited({});
+  const failed = await runFixAllSequence([entry("9")], other.deps);
+  assert.deepEqual(other.calls, ["9"], "a real failure is kept at once");
+  assert.deepEqual(failed.results.map((r) => `${r.kind}:${r.text}`), ["error:server down"]);
+
+  const stuck = limited({ "1": 1000 });
+  const { results } = await runFixAllSequence([entry("1"), entry("2")], stuck.deps);
+  assert.equal(stuck.calls.filter((k) => k === "1").length, MAX_START_RETRIES + 1);
+  assert.deepEqual(results.map((r) => `${r.key}:${r.kind}`), ["1:error", "2:ok"]);
+});
+
+test("a Stop or an unmount during the wait ends the run without naming a title as in flight", async () => {
+  for (const stop of [true, false]) {
+    const d = limited({ "1": 5 });
+    let controller: AbortController | undefined;
+    let stopped = false;
+    const out = await runFixAllSequence([entry("1"), entry("2")], {
+      ...d.deps,
+      stopped: () => stopped,
+      onTitleStart: (ac: AbortController) => { controller = ac; },
+      sleep: async () => { stopped = stop; controller?.abort(); },
+    });
+    assert.deepEqual(d.calls, ["1"], "nothing more starts");
+    assert.equal(out.abortedEntry, undefined, "its remap never began");
+    assert.equal(out.aborted, !stop, "a Stop ends the run as stopped; an unmount ends it quietly");
+    assert.deepEqual(out.results, []);
+  }
+});

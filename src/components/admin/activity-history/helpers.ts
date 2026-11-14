@@ -93,6 +93,19 @@ export interface HistoryFilterInput {
   grouped: boolean;
 }
 
+// Whether the calendar day `day` is over before `iso`, whatever zone the day
+// is counted in: a day ends at most 36 hours after its UTC midnight (UTC-12).
+// A To day that ends before the period begins can match nothing while the
+// period's lower bound is sent with it, and the table would answer "no plays
+// match" without saying the period is why — so that bound is dropped and To
+// alone means "up to that day".
+export function dayEndsBefore(day: string, iso: string): boolean {
+  const dayStart = Date.parse(`${day}T00:00:00Z`);
+  const bound = Date.parse(iso);
+  if (Number.isNaN(dayStart) || Number.isNaN(bound)) return false;
+  return dayStart + 36 * 60 * 60 * 1000 <= bound;
+}
+
 export function buildHistoryFilterParams({
   globalSource,
   globalMediaType,
@@ -109,7 +122,7 @@ export function buildHistoryFilterParams({
   const to = filters.toDate ? validDay(filters.toDate) : null;
   if (from) {
     params.set("fromDay", from);
-  } else if (startDateIso) {
+  } else if (startDateIso && !(to && dayEndsBefore(to, startDateIso))) {
     params.set("startDate", startDateIso);
   }
   if (to) params.set("toDay", to);

@@ -29,6 +29,8 @@ export interface FieldSaveOptions<T> {
 export interface FieldSave<T> {
   /** The value the admin chose last (what the field shows). */
   readonly value: T;
+  /** The value the server holds: the initial one, then each save it took. */
+  readonly saved: T;
   /**
    * The admin's new value, already shown. Saved after any save of this field
    * in flight. Resolves true once the server holds the latest value (or there
@@ -80,6 +82,9 @@ export function createFieldSave<T>(opts: FieldSaveOptions<T>): FieldSave<T> {
   return {
     get value() {
       return latest;
+    },
+    get saved() {
+      return saved;
     },
     set(value: T): Promise<boolean> {
       latest = value;

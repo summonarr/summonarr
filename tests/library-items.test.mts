@@ -20,6 +20,13 @@ test("Jellyfin folders become items, the kind from the collection type", () => {
   );
 });
 
+test("a mixed Jellyfin library is its own kind, never labelled TV", () => {
+  assert.deepEqual(
+    parseLibraryItems("jellyfin", [{ id: "c3", name: "Anime", collectionType: "mixed" }]),
+    [{ id: "c3", title: "Anime", kind: "mixed" }],
+  );
+});
+
 test("an answer that isn't the list is null, never thrown or kept", () => {
   for (const data of [null, {}, { error: "Bad gateway" }, "x", [{ key: 1, title: "x", type: "movie" }]]) {
     assert.equal(parseLibraryItems("plex", data), null, JSON.stringify(data));

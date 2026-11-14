@@ -117,6 +117,7 @@
   "trash.spec.error.loadDetail": "Impossibile caricare i dettagli ({status})",
   "trash.spec.error.network": "Errore di rete — riprova",
   "trash.spec.error.apply": "Applicazione non riuscita ({status})",
+  "trash.spec.error.unanswered": "{count} elemento/i selezionato/i non sono stati applicati: l'esecuzione non ha restituito alcun risultato per essi. Potrebbero non essere più nel catalogo: aggiornalo e riprova.",
   "trash.spec.error.resume": "Impossibile riprendere la gestione ({status})",
   "trash.spec.error.pause": "Impossibile sospendere la gestione ({status})",
   "trash.spec.error.forget": "Impossibile dimenticare questo formato ({status})",

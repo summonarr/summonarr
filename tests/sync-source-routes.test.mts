@@ -781,6 +781,26 @@ test("tv-episodes reports per-source counts", async () => {
   assert.deepEqual(body.errors, []);
 });
 
+test("tv-episodes: a CRON_SECRET caller always gets the synchronous answer, and has no jobs to poll", async () => {
+  const asyncBody = new NextRequest("http://localhost:3000/api/sync/tv-episodes", {
+    method: "POST",
+    headers: { authorization: `Bearer ${CRON_SECRET}`, "content-type": "application/json" },
+    body: JSON.stringify({ async: true }),
+  });
+  const res = await syncTvEpisodes.POST(asyncBody);
+  assert.equal(res.status, 200, "never a 202: the background mode is an admin session's");
+  assert.deepEqual(Object.keys(await res.json()).sort(), ["errors", "jellyfin", "plex", "skipped"]);
+
+  const poll = new NextRequest("http://localhost:3000/api/sync/tv-episodes?job=0123456789abcdef0123456789abcdef", {
+    headers: { authorization: `Bearer ${CRON_SECRET}` },
+  });
+  assert.equal((await syncTvEpisodes.GET(poll)).status, 403);
+
+  const source = readFileSync(new URL("../src/app/api/sync/tv-episodes/route.ts", import.meta.url), "utf8");
+  assert.match(source, /if \(actor\.trigger === "admin" && wantsBackgroundRun\(rawBody\)\) \{\s*return startLibraryJob\(actor\.userId, "tv-episodes", run\);/);
+  assert.match(source, /if \(!actor \|\| actor\.trigger !== "admin"\) \{/);
+});
+
 // ── upcoming: per-media-type replace, and its deliberate empty-case divergence ─
 
 const upcoming = ROUTES[3];

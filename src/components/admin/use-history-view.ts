@@ -177,10 +177,8 @@ export function useHistoryView({ instances, initialTab, initialInstance, initial
   useEffect(() => {
     tabRef.current = tab;
   }, [tab]);
-  useEffect(() => {
+  const readCount = useCallback(() => {
     if (!inst || !countUrl) return;
-    // On the Blocklist tab its own page read carries the total: no second read.
-    if (tabRef.current === "blocklist") return;
     const key = arrInstanceKey(inst);
     void reads.run("count", (signal) => arrCall(countUrl, { schema: BLOCKLIST_PAGE, signal, fallback: "" })).then((res) => {
       if (res?.ok) {
@@ -188,8 +186,13 @@ export function useHistoryView({ instances, initialTab, initialInstance, initial
         markCountLive();
       }
     });
-    return () => reads.abort("count");
   }, [inst, countUrl, reads, markCountLive]);
+  useEffect(() => {
+    // On the Blocklist tab its own page read carries the total: no second read.
+    if (tabRef.current === "blocklist") return;
+    readCount();
+    return () => reads.abort("count");
+  }, [readCount, reads]);
 
   return {
     tab,
@@ -197,11 +200,16 @@ export function useHistoryView({ instances, initialTab, initialInstance, initial
     inst,
     kind,
     page,
-    setPage,
+    /** Another page. The ticks belong to the page they were made on: none carries to rows no longer on screen. */
+    setPage(next: number) {
+      setPage(next);
+      setSelected(new Map());
+    },
     /** Another tab, from its first page. */
     showTab(next: Tab) {
       setTab(next);
       setPage(1);
+      setSelected(new Map());
     },
     /** Another instance, from the first page, with nothing of the last one's on screen. */
     showInstance(next: string) {
@@ -219,7 +227,11 @@ export function useHistoryView({ instances, initialTab, initialInstance, initial
     history,
     historyKind,
     blocklist,
-    blocklistTotal: blocklist?.totalRecords ?? (blocklistCount?.inst === current ? blocklistCount.total : undefined),
+    // The count is the newest total read for this instance (every live blocklist
+    // page sets it too); a page kept from an earlier visit never outranks it.
+    blocklistTotal: blocklistCount?.inst === current ? blocklistCount.total : blocklist?.totalRecords,
+    /** Reads the Blocklist tab's count again (a Mark failed just added an entry). */
+    recount: readCount,
     selected, setSelected,
     error, setError,
     loading,

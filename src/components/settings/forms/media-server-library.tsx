@@ -353,7 +353,7 @@ export function LibraryPicker({ service, initialSelected, items, loadStatus, err
                     {item.title}
                   </span>
                   <Chip tone="neutral">
-                    {item.kind === "movie" ? t("search.filter.movies") : t("search.filter.tv")}
+                    {item.kind === "movie" ? t("search.filter.movies") : item.kind === "tv" ? t("search.filter.tv") : t("settings.form.library.mixed")}
                   </Chip>
                 </label>
               ))}

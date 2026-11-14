@@ -103,3 +103,17 @@ test("a blank display name falls back to the email on every surface the page fee
 test("the grant editor's named instances go through the shared both-twins-open merge", () => {
   assert.match(page, /mergeNamedInstanceAccess\(\s*\[\.\.\.sonarrInstances, \.\.\.radarrInstances\]/);
 });
+
+test("Sync users is offered to the ADMIN role only, like the page's other sync buttons", () => {
+  // The cron route admits the ADMIN role only (getCronActor): a delegate would be refused on every click.
+  assert.match(page, /<ServerUserTable[\s\S]*?canSync=\{session\.user\.role === "ADMIN"\}[\s\S]*?\/>/);
+  assert.match(table, /action=\{canSync \? <SyncUsersButton \/> : undefined\}/, "not the empty state's one action either");
+  assert.match(table, /\{canSync && <SyncUsersButton \/>\}/);
+  assert.equal(table.match(/<SyncUsersButton \/>/g)?.length, 2, "no ungated mount");
+});
+
+test("the two writes that walk every user get the long-run bound, not the 30 s default", () => {
+  assert.match(table, /genericError: t\("adminManage\.serverUsers\.syncFailed"\), timeoutMs: LONG_RUN_TIMEOUT_MS \}/);
+  assert.match(table, /\{ key: `bulk:\$\{kind\}`, timeoutMs: LONG_RUN_TIMEOUT_MS \}/);
+  assert.match(table, /\.\.\.\(timeoutMs === undefined \? \{\} : \{ timeoutMs \}\),/);
+});

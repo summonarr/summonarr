@@ -47,8 +47,10 @@ export function OverviewKpis({ service, refreshKey = 0 }: OverviewKpisProps) {
     // overwrite the newer one's KPIs or flip loading off early.
     if (signal.aborted) return;
     // A failed or unreadable status shows "—", never zeros (KpiStrip `failed`).
-    setSpecs(res.ok ? (res.data.specs ?? []) : []);
-    setFailed(!res.ok);
+    // So does a 200 carrying the db-push hint: its empty list is not a count.
+    const unreadable = !res.ok || res.data.schemaDiagnostic !== undefined;
+    setSpecs(res.ok && !unreadable ? (res.data.specs ?? []) : []);
+    setFailed(unreadable);
     setLoading(false);
   }, [service]);
 

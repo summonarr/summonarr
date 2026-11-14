@@ -88,7 +88,12 @@ export function useSpecStatus(service: TrashService, variant: string, enabled = 
     // A superseded request (service/variant switched) must not overwrite
     // the newer selection's specs.
     if (signal?.aborted || (!res.ok && res.kind === "aborted")) return;
-    if (res.ok) {
+    if (res.ok && res.data.schemaDiagnostic) {
+      // A 200 that carries the db-push hint has no catalog to show: the hint is
+      // the load error, never "no specs pulled yet".
+      setSpecs([]);
+      setLoadError(res.data.schemaDiagnostic);
+    } else if (res.ok) {
       setSpecs(res.data.specs ?? []);
       setLoadError(null);
     } else {
@@ -293,16 +298,24 @@ export function SpecSection({
     // 409 (the trash lock is held) ran nothing: "already running", as on the
     // other cards. A refusal (403 off, 429, 400) keeps the selection for a
     // retry and shows the route's reason.
-    const outcome = applyOutcome(answer.status, answer.body, t("trash.spec.error.apply", { status: answer.status }));
+    const outcome = applyOutcome(answer.status, answer.body, t("trash.spec.error.apply", { status: answer.status }), ids);
     if (outcome.kind === "skipped") {
       run.skip("running");
       return;
     }
-    run.done(outcome.failed, outcome.errors.length > 0 ? { errors: outcome.errors } : null, outcome.results);
+    // A sent spec with no result was not applied: said so, never "Applied".
+    const errors = outcome.unanswered.length > 0
+      ? [...outcome.errors, t("trash.spec.error.unanswered", { count: outcome.unanswered.length })]
+      : outcome.errors;
+    run.done(outcome.failed, errors.length > 0 ? { errors } : null, outcome.results);
     if (outcome.results.length > 0 || !outcome.failed) {
+      // Only the specs the run answered leave the selection; one it never
+      // reached stays ticked for another try (one that left the catalog is no
+      // longer listed, so its tick is inert).
+      const unanswered = new Set(outcome.unanswered);
       setSelected((prev) => {
         const next = new Set(prev);
-        for (const id of ids) next.delete(id);
+        for (const id of ids) if (!unanswered.has(id)) next.delete(id);
         return next;
       });
       await load();
@@ -739,6 +752,10 @@ function SpecActions({
         onClick={() => void onSetManaged(app.id, !app.enabled)}
         className="text-xs py-1.5 px-2 -my-1.5 text-zinc-400 hover:text-zinc-100 inline-flex items-center gap-1"
         title={app.enabled ? t("trash.spec.pauseTitle") : t("trash.spec.resumeTitle")}
+        // The visible text is the STATE; the name also says what pressing does.
+        aria-label={app.enabled
+          ? `${t("trash.spec.status.managed")} — ${t("trash.spec.pauseTitle")}`
+          : `${t("trash.spec.status.paused")} — ${t("trash.spec.resumeTitle")}`}
       >
         {app.enabled
           ? <><Shield className="w-3.5 h-3.5" />{t("trash.spec.status.managed")}</>

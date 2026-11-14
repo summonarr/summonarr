@@ -885,7 +885,7 @@ test("the panel never reads without a click, never acts on a stale verdict, and 
   assert.match(panel, /const service = arrInstanceLabel\(status\?\.service \?\? \(mediaType === "MOVIE" \? "radarr" : "sonarr"\), arrInstanceName, arrInstance\);/);
   assert.ok(!panel.includes("SERVICE_LABEL"), "no bare service-name lookup left");
   assert.match(actions, /arrInstance=\{arrInstance\}\s*arrInstanceName=\{arrInstanceName\}/);
-  assert.match(list, /arrInstanceName=\{instanceLabel\(representativeInstance\)\}/);
+  assert.match(list, /arrInstance=\{target\.arrInstance\}\s*arrInstanceName=\{instanceLabel\(target\.arrInstance\)\}/);
   // a series monitored at the series level only gets its own wording and no Re-push (Re-push skips a monitored series).
   assert.match(panel, /const actionsFor = \(s: Loaded\): readonly NextAction\[\] => \(unmonitoredEpisodesOnly\(s\) \? \[\] : NEXT_ACTIONS\[s\.verdict\]\);/);
   assert.match(view, /unmonitoredEpisodesOnly\(s\)\s*\? t\("adminQueue\.arrStatus\.why\.unmonitoredEpisodes"/);

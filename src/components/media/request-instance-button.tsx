@@ -18,6 +18,7 @@ export function RequestInstanceButton({
   requested,
   available,
   blacklisted,
+  permanentlyDeclined,
 }: {
   tmdbId: number;
   mediaType: "MOVIE" | "TV";
@@ -31,6 +32,8 @@ export function RequestInstanceButton({
   available?: boolean;
   // The title is admin-blacklisted — no request either (the request POST 403s).
   blacklisted?: boolean;
+  // The viewer's request here was permanently declined (the POST 403s every time).
+  permanentlyDeclined?: boolean;
 }) {
   const t = useT();
   return (
@@ -48,6 +51,7 @@ export function RequestInstanceButton({
       requested={requested}
       available={available}
       blacklisted={blacklisted}
+      permanentlyDeclined={permanentlyDeclined}
     />
   );
 }

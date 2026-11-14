@@ -117,6 +117,7 @@
   "trash.spec.error.loadDetail": "无法加载详情（{status}）",
   "trash.spec.error.network": "网络错误——请重试",
   "trash.spec.error.apply": "应用失败（{status}）",
+  "trash.spec.error.unanswered": "有 {count} 个所选项目未应用：本次运行没有返回它们的结果。它们可能已不在目录中，请刷新目录后重试。",
   "trash.spec.error.resume": "无法恢复托管（{status}）",
   "trash.spec.error.pause": "无法暂停托管（{status}）",
   "trash.spec.error.forget": "无法遗忘此格式（{status}）",

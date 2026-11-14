@@ -157,7 +157,7 @@ test("GET /search documents its results as TmdbMedia, the chokepoint's output, w
   assert.equal(schema.type, "array");
   assert.equal(schema.items?.$ref, TMDB_REF);
   const src = handlerSource("/search", "get");
-  assert.match(src, /const enriched = await attachAllAvailability\(results, session\.user\.id, \{ skipRatings: true, show4k \}\);/);
+  assert.match(src, /const enriched = await attachAllAvailability\(results, session\.user\.id, \{ skipRatings: true, show4k, includeHidden: true \}\);/);
   assert.match(src, /return NextResponse\.json\(enriched\);/);
 });
 

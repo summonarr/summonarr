@@ -9,7 +9,9 @@ import { getJellyfinTVEpisodes } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { earliestAddedPerEpisode, replaceEpisodeCacheForSource, type EpisodeCacheRow } from "@/lib/episode-cache";
 import { parseLibrarySelection } from "@/lib/library-resync";
-import { isCronAuthorized } from "@/lib/cron-auth";
+import { getCronActor } from "@/lib/cron-auth";
+import { readJsonCappedOr } from "@/lib/body-size";
+import { libraryJobResponse, startLibraryJob, wantsBackgroundRun } from "@/lib/library-sync-jobs";
 import { CRON_DEGRADED_HEADER, withCronRunRecording } from "@/lib/cron-history";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
@@ -18,10 +20,34 @@ export const maxDuration = 300;
 
 export async function POST(request: NextRequest) {
   const t = translatorForRequest(request);
-  if (!(await isCronAuthorized(request))) {
+  const actor = await getCronActor(request);
+  if (!actor) {
     return NextResponse.json({ error: t("apiAdmin.common.forbidden") }, { status: 403 });
   }
-  return withCronRunRecording("tv-episodes-sync", () => syncTvEpisodes());
+  // Read only for the background flag; no body is the request every caller
+  // has always sent.
+  const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
+  if (rawBody instanceof NextResponse) return rawBody;
+
+  const run = () => withCronRunRecording("tv-episodes-sync", () => syncTvEpisodes());
+  // An admin's { async: true } runs in the background and is polled with GET
+  // ?job= (library-sync-jobs.ts): the rebuild walks every episode of every
+  // server and outlasts a reverse proxy's hold. A second click joins the job
+  // already running. Every other caller keeps the synchronous answer.
+  if (actor.trigger === "admin" && wantsBackgroundRun(rawBody)) {
+    return startLibraryJob(actor.userId, "tv-episodes", run);
+  }
+  return run();
+}
+
+// The background rebuild's answer, for the admin who started it.
+export async function GET(request: NextRequest) {
+  const t = translatorForRequest(request);
+  const actor = await getCronActor(request);
+  if (!actor || actor.trigger !== "admin") {
+    return NextResponse.json({ error: t("apiAdmin.common.forbidden") }, { status: 403 });
+  }
+  return libraryJobResponse(actor.userId, request.nextUrl.searchParams.get("job") ?? "", t);
 }
 
 type EpisodeSource = "plex" | "jellyfin";

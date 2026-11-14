@@ -34,7 +34,7 @@ import { check } from "@/lib/validate";
 import { useAsyncAction } from "@/hooks/use-async-action";
 import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
 import { ArrSnapshotNote } from "@/components/admin/arr-snapshot-note";
-import { arrInstanceKey, SERVICE_LABEL } from "@/components/admin/arr-title/shared";
+import { arrInstanceKey, SERVICE_LABEL, useTRef } from "@/components/admin/arr-title/shared";
 
 /** What the last setup of an instance said. Its in-flight state is the `setup:<key>` action. */
 type SetupState = { message: string; error: string; detail: string | null };
@@ -57,6 +57,9 @@ export function ArrHealthPanel({ variant }: { variant: "full" | "webhooks" }) {
   const t = useT();
   const [report, setReport] = useState<HealthReport | null>(null);
   const [loadError, setLoadError] = useState("");
+  // Read through a ref: a page refresh hands the provider a new `t`, and as a
+  // dependency of `load` it would re-read every instance with nobody clicking.
+  const tRef = useTRef();
   const [openSetup, setOpenSetup] = useState<string | null>(null);
   const [base, setBase] = useState("");
   const [setup, setSetup] = useState<Record<string, SetupState>>({});
@@ -78,7 +81,7 @@ export function ArrHealthPanel({ variant }: { variant: "full" | "webhooks" }) {
   const load = useCallback(async () => {
     setLoadError("");
     const res = await action.run("load", (signal) =>
-      arrCall(healthUrl(), { schema: HEALTH_REPORT, signal, fallback: t("adminManage.arrHealth.loadError") }),
+      arrCall(healthUrl(), { schema: HEALTH_REPORT, signal, fallback: tRef.current("adminManage.arrHealth.loadError") }),
     );
     // Superseded by a newer load, or unmounted: that one writes.
     if (!res) return;
@@ -89,7 +92,7 @@ export function ArrHealthPanel({ variant }: { variant: "full" | "webhooks" }) {
     setReport(res.data);
     setBase((cur) => cur || res.data.webhookBase || "");
     markLive();
-  }, [action, t, markLive]);
+  }, [action, tRef, markLive]);
 
   useEffect(() => {
     void load();

@@ -90,3 +90,17 @@ test("the client filter: title, reason, or the exact id", () => {
   assert.deepEqual(filterRows(rows, "tmdb #3").map((r) => r.tmdbId), [3]);
   assert.deepEqual(filterRows(rows, "1").map((r) => r.tmdbId), [], "an id matches exactly, never as a substring");
 });
+
+test("the one-shot reason is taken at the Block click and given back only when nothing was blocked", () => {
+  const add = fn("async function add(", "async function remove(");
+  // Taken before the request goes out: a second Block while this one is in
+  // flight reads an empty field, and a reason typed meanwhile is not wiped.
+  const take = add.indexOf('setReason("");');
+  assert.ok(take >= 0 && take < add.indexOf("await actions.run("), "cleared before the await");
+  assert.match(add, /const trimmedReason = reasonRef\.current\.trim\(\);/);
+  assert.doesNotMatch(add.slice(add.indexOf("await actions.run(")), /setReason\(""\)/, "never cleared after the answer");
+  // A skipped or failed block hands it back, unless another was typed since.
+  assert.match(add, /if \(trimmedReason && reasonRef\.current === ""\) setReason\(trimmedReason\);/);
+  assert.match(add, /if \(!res\) return giveReasonBack\(\);/);
+  assert.match(add, /giveReasonBack\(\);\s*setError\(failureText\(res\)\);/);
+});

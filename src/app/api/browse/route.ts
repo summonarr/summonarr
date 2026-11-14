@@ -17,7 +17,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
   const page = parsePageParam(sp);
   // The same filter set the /movies and /tv pages read (browse-filters.ts), so
   // a filter added there reaches this API too.
-  const browse = parseBrowseFilters((key) => sp.get(key));
+  const browse = parseBrowseFilters((key) => sp.get(key), mediaType);
 
   try {
     // Shared with /movies and /tv — see src/lib/browse-query.ts. The helper

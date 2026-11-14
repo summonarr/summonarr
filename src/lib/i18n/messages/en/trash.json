@@ -117,6 +117,7 @@
   "trash.spec.error.loadDetail": "Could not load detail ({status})",
   "trash.spec.error.network": "Network error — please try again",
   "trash.spec.error.apply": "Apply failed ({status})",
+  "trash.spec.error.unanswered": "{count} selected item(s) were not applied: the run returned no result for them. They may have left the catalog — refresh it and try again.",
   "trash.spec.error.resume": "Could not resume management ({status})",
   "trash.spec.error.pause": "Could not pause management ({status})",
   "trash.spec.error.forget": "Could not forget this format ({status})",

@@ -91,7 +91,7 @@ test("Search missing refused part-way says only part of the search started — c
   assert.match(top, /clearLines\(\);[\s\S]*?sendCommand\(body, signal\)/);
   assert.match(src, /const clearLines = \(\) => \{\s*setNotice\(""\);\s*setPartialNote\(""\);/);
   assert.match(src, /if \(res\.data\.partial === true\) setPartialNote\(t\("adminArr\.notice\.searchMissingPartial"\)\);/);
-  assert.match(src, /<StatusLine error=\{error \|\| loadError\} [^>]*partialNote=\{partialNote\} \/>/);
+  assert.match(src, /<StatusLine error=\{error\} [^>]*partialNote=\{partialNote\} \/>/);
   const parts = read("src/components/admin/arr-title/manager-parts.tsx");
   assert.match(parts, /\{partialNote && !error && \(\s*<p role="status" className="m-0 text-xs text-zinc-400">\{partialNote\}<\/p>/);
   assert.ok(en("adminArr")["adminArr.notice.searchMissingPartial"]);

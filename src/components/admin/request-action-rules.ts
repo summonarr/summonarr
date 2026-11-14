@@ -64,3 +64,48 @@ export function arrErrorOf(body: unknown): string | null {
   const value = (body as { arrError?: unknown }).arrError;
   return typeof value === "string" && value ? value : null;
 }
+
+/** The fields of a group's request that the row's actions are aimed with. */
+export interface ActionTarget {
+  requestId: string;
+  status: string;
+  /** "" = the default instance. */
+  arrInstance: string;
+  adminNote: string | null;
+}
+
+/**
+ * The requests a title's row can aim its actions at: one per distinct
+ * (status, instance) among the group's requests, the representative first.
+ *
+ * The row shows ONE set of controls. They used to act only on the
+ * representative — the first request whose status is the group's aggregate —
+ * so a second APPROVED request on another instance (HD and 4K both approved,
+ * the 4K push failed) could not be re-pushed or inspected, and a DECLINED one
+ * beside an APPROVED one could only be reached through the status filter.
+ * Requests that share status AND instance are one target: Why?, Search,
+ * Re-push and Pick release act on the title on that instance, whoever asked.
+ */
+export function actionTargets<T extends ActionTarget>(requesters: readonly T[], aggregateStatus: string): T[] {
+  const representative = requesters.find((r) => r.status === aggregateStatus) ?? requesters[0];
+  if (!representative) return [];
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const r of [representative, ...requesters]) {
+    const key = `${r.status}|${r.arrInstance}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+  }
+  return out;
+}
+
+/**
+ * The target the admin picked, while the group still offers it; otherwise the
+ * representative (the first). A pick outlives a list refresh only by its
+ * request id — once that request left the group or stopped being a distinct
+ * target, the row is back on its default. Undefined only for an empty list.
+ */
+export function chosenActionTarget<T extends ActionTarget>(targets: readonly T[], chosenId: string | null): T | undefined {
+  return targets.find((r) => r.requestId === chosenId) ?? targets[0];
+}

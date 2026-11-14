@@ -2,7 +2,7 @@
 // (src/lib/client/pending-query.ts, used by usePendingSearchParam).
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { nextPendingQuery, settlePendingQuery } from "../src/lib/client/pending-query.ts";
+import { holdPendingQuery, nextPendingQuery, settlePendingQuery } from "../src/lib/client/pending-query.ts";
 
 const PATH = "/for-you";
 // A URL nothing was made against: drops whatever an earlier test left.
@@ -35,4 +35,25 @@ test("settling on the URL the changes were made against keeps them", () => {
   nextPendingQuery(PATH, "", "type", "tv");
   settlePendingQuery(PATH, "");
   assert.equal(nextPendingQuery(PATH, "", "sort", "newest"), "type=tv&sort=newest");
+});
+
+test("a change whose navigation never commits is dropped when the last pending one ends", () => {
+  // The pill was clicked, then another link won: the URL stays as it was.
+  const release = holdPendingQuery();
+  nextPendingQuery(PATH, "", "type", "tv");
+  release();
+  release(); // an effect cleanup running twice releases once
+  assert.equal(nextPendingQuery(PATH, "", "sort", "newest"), "sort=newest", "the abandoned type=tv is not re-applied");
+});
+
+test("changes stay carried while any group's navigation is still pending", () => {
+  const first = holdPendingQuery();
+  nextPendingQuery(PATH, "", "type", "movie");
+  const second = holdPendingQuery();
+  nextPendingQuery(PATH, "", "sort", "newest");
+  // The first group's navigation was superseded by the second's.
+  first();
+  assert.equal(nextPendingQuery(PATH, "", "filter", "missing"), "type=movie&sort=newest&filter=missing");
+  second();
+  assert.equal(nextPendingQuery(PATH, "", "filter", "missing"), "filter=missing");
 });

@@ -333,6 +333,8 @@ export default async function UsersPage({ searchParams }: { searchParams: Promis
           hasJellyfin={hasJellyfin}
           autoDisableNew={autoDisableNew}
           canLink={canLinkServerUsers}
+          // /api/cron/sync-download-policies admits the ADMIN role only.
+          canSync={session.user.role === "ADMIN"}
           // Link targets for the manual account picker (admins only).
           accounts={canLinkServerUsers
             ? linkTargets

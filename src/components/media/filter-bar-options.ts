@@ -49,6 +49,19 @@ export const RATING_OPTIONS: RatingOption[] = [
 
 export const VOTE_COUNT_OPTIONS = ["", "100", "250", "500", "1000", "5000", "10000"];
 
+/**
+ * A select's fixed option values plus the active one when the list lacks it
+ * (a shared or hand-edited link), placed in numeric order after the "any"
+ * entry. Without it a controlled select falls back to its first option and
+ * reads "Any" while the chip and the server apply the filter.
+ */
+export function optionsWithActive(values: readonly string[], active: string | undefined): string[] {
+  if (!active || values.includes(active)) return values.slice();
+  const n = Number(active);
+  const at = values.findIndex((v) => v !== "" && Number(v) > n);
+  return at === -1 ? [...values, active] : [...values.slice(0, at), active, ...values.slice(at)];
+}
+
 export function ratingOptionLabel(t: Translator, o: RatingOption): string {
   return o.labelKey ? t(o.labelKey, o.pct !== undefined ? { pct: o.pct } : undefined) : (o.label ?? o.value);
 }

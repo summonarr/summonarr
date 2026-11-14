@@ -37,6 +37,7 @@ import { SLOT_MARK, splitAtSlot } from "@/components/admin/activity-format";
 import { foldStreamMethods } from "@/lib/activity-stream-mix";
 import { zoneShortLabel } from "@/lib/stats-time-zone";
 import { hourCounts, peakBucket, streamShares, weekdayCounts } from "@/lib/activity-stats-view";
+import { kpiDelta } from "@/lib/activity-overview";
 import { KpiStrip, type Kpi } from "@/components/admin/activity-sections";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
@@ -138,21 +139,16 @@ function axisLabels(labels: string[]): string[] {
   );
 }
 
-// `complete` is false when play history doesn't cover the previous window
-// (tracking began, or retention purged, inside it): a delta would then compare
-// against a gap, so none is shown.
+// The shared rule (kpiDelta), so this tab and the Overview show one number for
+// the same filters. Pass UNROUNDED values: rounding hours first read a 0.4h
+// previous period as "new".
 function delta(
   t: Translator,
   current: number,
   previous: number,
   complete: boolean,
 ): Kpi["delta"] {
-  if (!complete) return null;
-  if (previous === 0 && current === 0) return null;
-  if (previous === 0) return { text: t("adminActivity.kpi.new"), dir: "up" };
-  const pct = Math.round(((current - previous) / previous) * 100);
-  if (pct === 0) return { text: "0%", dir: "flat" };
-  return { text: `${Math.abs(pct)}%`, dir: pct > 0 ? "up" : "down" };
+  return kpiDelta(t("adminActivity.kpi.new"), current, previous, complete);
 }
 
 // The page's day labels, built once: every daily series is padded over the
@@ -243,7 +239,7 @@ function StatsKpis({ stats, labelsFor }: { stats: ActivityStatsData; labelsFor: 
     {
       label: t("adminActivity.stats.watchHours"),
       value: `${watchHours.toLocaleString(locale)}${hoursSuffix}`,
-      delta: delta(t, watchHours, Math.round(stats.prevPeriod.totalWatchTimeHours), prevComplete),
+      delta: delta(t, stats.totalWatchTimeHours, stats.prevPeriod.totalWatchTimeHours, prevComplete),
       spark: stats.watchTimeByDay.map((d) => d.hours),
       sparkLabels: labelsFor(stats.watchTimeByDay),
       sparkSuffix: hoursSuffix,

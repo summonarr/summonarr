@@ -117,6 +117,7 @@
   "trash.spec.error.loadDetail": "Não foi possível carregar os detalhes ({status})",
   "trash.spec.error.network": "Erro de rede — tente novamente",
   "trash.spec.error.apply": "Falha ao aplicar ({status})",
+  "trash.spec.error.unanswered": "{count} item(ns) selecionado(s) não foram aplicados: a execução não devolveu nenhum resultado para eles. Podem ter saído do catálogo; atualize-o e tente novamente.",
   "trash.spec.error.resume": "Não foi possível retomar o gerenciamento ({status})",
   "trash.spec.error.pause": "Não foi possível pausar o gerenciamento ({status})",
   "trash.spec.error.forget": "Não foi possível esquecer este formato ({status})",

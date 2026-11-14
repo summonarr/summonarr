@@ -481,7 +481,11 @@ test("structural: the Fix file window's release list searches through the backgr
   const closeTag = dialog.slice(dialog.indexOf("<DialogClose"), dialog.indexOf("</DialogClose>"));
   assert.doesNotMatch(closeTag, /disabled=/, "the X is never dead");
   assert.match(closeTag, /aria-label=\{closeLabel\}/);
-  assert.match(dialog, /const closeLabel = working \? t\("adminQueue\.issueActions\.closeWhileWorking"\) : t\("adminQueue\.common\.close"\);/, "and says the write keeps running");
+  assert.match(dialog, /: working \? t\("adminQueue\.issueActions\.closeWhileWorking"\) : t\("adminQueue\.common\.close"\);/, "and says the write keeps running");
+  // Except during a grab, the one write close() waits out: the label must not
+  // say closing is safe while the close does nothing.
+  assert.match(functionBody(src, "function close("), /if \(writes\.busy\("grab"\)\) return;/);
+  assert.match(dialog, /const grabbing = action === "grab";\s*const closeLabel = grabbing\s*\? t\("adminQueue\.issueActions\.closeWaitingGrab"\)/);
   // The grab's wait is bounded and dropped with the window.
   const grab = functionBody(src, "async function grabRelease(");
   assert.match(grab, /await writes\.run\("grab", \(signal\) =>/);

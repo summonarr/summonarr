@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useTransition } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { nextPendingQuery, settlePendingQuery } from "@/lib/client/pending-query";
+import { holdPendingQuery, nextPendingQuery, settlePendingQuery } from "@/lib/client/pending-query";
 
 // One URL search param as client state for a pill / toggle whose page
 // re-enriches its whole set on every change, so a click can take a moment to
@@ -19,8 +19,8 @@ import { nextPendingQuery, settlePendingQuery } from "@/lib/client/pending-query
 // first navigation lands builds on the first group's change instead of the
 // stale URL, which dropped it (use-pending-filters.ts solves the same thing
 // for the filter bars). The carried changes apply only to the committed query
-// they were made against, and are dropped as soon as the URL moves
-// (src/lib/client/pending-query.ts).
+// they were made against, and are dropped as soon as the URL moves or the last
+// pending navigation ends without moving it (src/lib/client/pending-query.ts).
 export function usePendingSearchParam<V extends string>(param: string, active: V | undefined) {
   const router = useRouter();
   const pathname = usePathname();
@@ -33,6 +33,13 @@ export function usePendingSearchParam<V extends string>(param: string, active: V
   useEffect(() => {
     settlePendingQuery(pathname, committed);
   }, [pathname, committed]);
+
+  // While this hook's navigation is pending the carried changes are held;
+  // they go when the last pending one ends or unmounts (holdPendingQuery).
+  useEffect(() => {
+    if (!isPending) return;
+    return holdPendingQuery();
+  }, [isPending]);
 
   /** undefined clears the param. */
   function set(value: V | undefined) {

@@ -117,6 +117,7 @@
   "trash.spec.error.loadDetail": "No se pudo cargar el detalle ({status})",
   "trash.spec.error.network": "Error de red. Inténtalo de nuevo",
   "trash.spec.error.apply": "No se pudo aplicar ({status})",
+  "trash.spec.error.unanswered": "{count} elemento(s) seleccionado(s) no se aplicaron: la ejecución no devolvió ningún resultado para ellos. Puede que ya no estén en el catálogo; actualízalo e inténtalo de nuevo.",
   "trash.spec.error.resume": "No se pudo reanudar la gestión ({status})",
   "trash.spec.error.pause": "No se pudo pausar la gestión ({status})",
   "trash.spec.error.forget": "No se pudo olvidar este formato ({status})",

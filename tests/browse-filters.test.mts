@@ -153,7 +153,7 @@ const src = (rel: string) => readFileSync(new URL(`../${rel}`, import.meta.url),
 
 test("FilterBar reads the shared overlay and toggles hide-available from what it SHOWS", () => {
   const bar = src("src/components/media/filter-bar.tsx");
-  assert.match(bar, /usePendingFilters\(navigate\)/);
+  assert.match(bar, /usePendingFilters\(navigate, navigating\)/);
   assert.match(bar, /overlayBrowseFilters\(filters, pending\)/);
   assert.match(bar, /push\(\{ hideAvailable: f\.hideAvailable \? undefined : "1" \}\)/);
   assert.doesNotMatch(bar, /activeHideAvailable/, "the stale committed prop must not drive the toggle");
@@ -167,7 +167,7 @@ test("FilterBar reads the shared overlay and toggles hide-available from what it
 
 test("TopFilterBar overlays the pending delta on its committed props", () => {
   const bar = src("src/components/media/top-filter-bar.tsx");
-  assert.match(bar, /usePendingFilters\(startTransition\)/);
+  assert.match(bar, /usePendingFilters\(startTransition, isPending\)/);
   assert.match(bar, /pendingFlag\(pending, "hideAvailable", committedHideAvailable\)/);
   assert.doesNotMatch(bar, /useRef|pendingRef/, "the delta lives in the shared hook, not a private ref");
 });
@@ -192,4 +192,21 @@ test("every locale names an unlabelled streaming-service chip", () => {
     const catalog = JSON.parse(src(`src/lib/i18n/messages/${locale}/media.json`)) as Record<string, string>;
     assert.match(catalog["media.filter.serviceChip"] ?? "", /\{id\}/, `${locale} lacks media.filter.serviceChip`);
   }
+});
+
+test("a param the other list owns is not a filter: certification on TV, a network on movies", () => {
+  const read = (qs: string, mediaType: "movie" | "tv") => {
+    const p = new URLSearchParams(qs);
+    return parseBrowseFilters((k) => p.get(k), mediaType);
+  };
+  // TMDB's TV discover takes no certification and the TV bar shows no control
+  // or chip for it, so it must not flip the page to "filtered".
+  assert.equal(read("certification=PG-13", "tv").certification, undefined);
+  assert.equal(hasActiveFilters(read("certification=PG-13", "tv")), false);
+  assert.equal(hasActiveFilters(read("certification=PG-13", "movie")), true);
+  // The mirror: a network means nothing for movies.
+  assert.equal(hasActiveFilters(read("networkId=49&networkName=HBO", "movie")), false);
+  assert.equal(read("networkId=49&networkName=HBO", "tv").networkId, "49");
+  // Everything else is untouched.
+  assert.equal(read("certification=PG-13&genreId=18", "tv").genreId, "18");
 });

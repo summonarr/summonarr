@@ -38,7 +38,7 @@ test("Permissions: closing saves typed quota text, waits on EVERY field's saves,
   assert.match(flush, /Promise\.all\(\[\.\.\.started, \.\.\.others\.map\(\(f\) => f\.settled\(\)\)\]\)/);
   assert.match(flush, /if \(!results\.every\(Boolean\)\) return false;/);
   // The page is re-read once, on a close after something was saved — never per switch.
-  assert.match(flush, /if \(savedAny\.current\) \{\s*savedAny\.current = false;\s*router\.refresh\(\);/);
+  assert.match(flush, /if \(savedAny\.current\) \{\s*savedAny\.current = false;[\s\S]*?savedByUser\.remember\([^\n]*\);\s*router\.refresh\(\);/);
   assert.equal(permEdits.split("router.refresh()").length - 1, 1, "router.refresh only in flush");
 });
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -106,6 +107,7 @@ async function startPlexConnect(siteUrl: string, t: ReturnType<typeof useT>): Pr
 
 function PlexAccount({ connectedEmail, siteUrl, onDisconnected }: { connectedEmail: string; siteUrl: string; onDisconnected: () => void }) {
   const t = useT();
+  const router = useRouter();
   const [status, setStatus] = useState<"idle" | "waiting" | "saving" | "error">("idle");
   const [error, setError] = useState("");
   // Disconnect is a two-step inline confirm: one accidental tap used to remove
@@ -134,6 +136,9 @@ function PlexAccount({ connectedEmail, siteUrl, onDisconnected }: { connectedEma
     if (res.ok || res.kind === "invalid") {
       onDisconnected();
       setStatus("idle");
+      // The card's "Connected" badge and the watchlist status line are
+      // rendered by the server page from the stored token.
+      router.refresh();
       return;
     }
     setError(t("settings.form.plex.disconnectFailed"));

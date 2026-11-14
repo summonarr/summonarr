@@ -195,5 +195,19 @@ test("a failed open-time read offers Retry, which reads again as the open did", 
   const failed = body.slice(body.indexOf("loadError ? ("), body.indexOf(") : (", body.indexOf("loadError ? (")));
   assert.match(failed, /onClick=\{retry\}/);
   assert.match(failed, /\{t\("adminArr\.common\.retry"\)\}/);
-  assert.match(titleLoad(), /retry: \(\) => \{\s*setLoadError\(""\);\s*void load\(target, true\);\s*\},/);
+  assert.match(
+    titleLoad(),
+    /retry: \(\) => \{\s*setLoadError\(""\);\s*if \(arrId !== null\) void load\(\{ arrId \}\);\s*else void load\(target, true\);\s*\},/,
+    "with nothing shown it is the open-time read; with a title shown it rebases",
+  );
+});
+
+test("a failed read over a title already shown has its own line and Retry, and never hides command feedback", () => {
+  const body = managerBody();
+  const shown = body.slice(body.indexOf("<ArrSnapshotNote at={staleAt}"));
+  assert.match(shown, /\{loadError && \(\s*<p role="alert"[\s\S]*?\{loadError\}\s*<Button variant="ghost" size="sm" onClick=\{retry\}>/);
+  assert.match(shown, /<StatusLine error=\{error\} /, "the command line shows the command's own error only");
+  // Save still waits for a live base: only an accepted live answer marks it.
+  assert.match(titleLoad(), /setLoadError\(""\);\s*markLive\(\);/);
+  assert.match(body, /baseIsSnapshot=\{staleAt !== null\}/);
 });

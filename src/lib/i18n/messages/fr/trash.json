@@ -117,6 +117,7 @@
   "trash.spec.error.loadDetail": "Impossible de charger le détail ({status})",
   "trash.spec.error.network": "Erreur réseau — veuillez réessayer",
   "trash.spec.error.apply": "Échec de l'application ({status})",
+  "trash.spec.error.unanswered": "{count} élément(s) sélectionné(s) n'ont pas été appliqués : l'exécution n'a renvoyé aucun résultat pour eux. Ils ont peut-être quitté le catalogue ; actualisez-le et réessayez.",
   "trash.spec.error.resume": "Impossible de reprendre la gestion ({status})",
   "trash.spec.error.pause": "Impossible de suspendre la gestion ({status})",
   "trash.spec.error.forget": "Impossible d'oublier ce format ({status})",

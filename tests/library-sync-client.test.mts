@@ -10,7 +10,7 @@
 // that gets no answer is "no answer"; unmounting stops it.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { librarySyncLabel, librarySyncOutcome, runLibrarySyncs, type LibrarySyncServer } from "../src/lib/client/library-sync.ts";
+import { jobRunCutShort, librarySyncLabel, librarySyncOutcome, runLibrarySyncs, type LibrarySyncServer } from "../src/lib/client/library-sync.ts";
 
 test("outcomes: no answer is never a failure; the route's own refusal is", () => {
   assert.deepEqual(librarySyncOutcome({ status: 0, data: null }), { kind: "noAnswer" });
@@ -90,4 +90,58 @@ test("a start request that gets no answer is 'no answer' for that server only; u
   let alive = true;
   const gone = (async () => { alive = false; return json({ job: "x" }, 202); }) as unknown as typeof fetch;
   assert.equal(await runLibrarySyncs([JF], { url, fetchFn: gone, isAlive: () => alive, sleep: async () => {} }), null);
+});
+
+test("a 200 that says the run was cut short is not a finished run", () => {
+  assert.equal(jobRunCutShort({ ok: false, aborted: true }), true, "the match check");
+  assert.equal(jobRunCutShort({ servers: [], aborted: true }), true, "the watch-record check");
+  assert.equal(jobRunCutShort({ pairs: [], aborted: true }), true, "watch sync");
+  assert.equal(jobRunCutShort({ pairs: [], aborted: false }), false);
+  assert.equal(jobRunCutShort({ ok: true, checkedAt: "x" }), false);
+  assert.equal(jobRunCutShort({ servers: [] }), false);
+  for (const junk of [null, undefined, "aborted", 1, [], [{ aborted: true }]]) assert.equal(jobRunCutShort(junk), false);
+});
+
+test("structural: each run-now client reads a cut-short answer before it reports success", async () => {
+  const { readFileSync } = await import("node:fs");
+  const read = (f: string) => readFileSync(new URL(`../src/components/admin/${f}`, import.meta.url), "utf8");
+  const before = (src: string, first: string, then: string) => {
+    const a = src.indexOf(first);
+    assert.ok(a >= 0, `missing: ${first}`);
+    assert.ok(a < src.indexOf(then, a), `${first} must come before ${then}`);
+  };
+  before(read("library-match-check.tsx"), "if (jobRunCutShort(answer.data))", "router.refresh();");
+  before(read("never-watched-report.tsx"), "if (jobRunCutShort(answer.data))", 't("adminManage.neverWatched.checked")');
+  before(read("watch-sync-panel.tsx"), "if (jobRunCutShort(answer.data))", 't("adminManage.watchSync.ran"');
+});
+
+test("structural: the match check's empty states and the watch sync page's first-load Retry", async () => {
+  const { readFileSync } = await import("node:fs");
+  const read = (f: string) => readFileSync(new URL(`../src/components/admin/${f}`, import.meta.url), "utf8");
+  const match = read("library-match-check.tsx");
+  // "Nothing flagged" is the whole report's verdict, not an empty type tab's.
+  assert.match(match, /report && flags\.length === 0 && \(view\.flags\.length === 0 \?/);
+  assert.match(match, /adminManage\.library\.match\.noneOfType/);
+  // A kind with no flags left reads as "all": no empty list under the chips.
+  assert.match(match, /const activeKind = kind !== "all" && byKind\[kind\] === 0 \? "all" : kind;/);
+  assert.match(match, /aria-pressed=\{activeKind === value\}/);
+  const sync = read("watch-sync-panel.tsx");
+  const firstLoad = sync.slice(sync.indexOf("if (!data) {"), sync.indexOf("const pairUrl"));
+  assert.match(firstLoad, /onClick=\{\(\) => void load\(\)\}/);
+  assert.match(firstLoad, /adminManage\.common\.retry/);
+});
+
+test("the new library-tools strings exist in every locale", async () => {
+  const { readFileSync } = await import("node:fs");
+  const keys = [
+    "adminManage.library.btn.episodesNoAnswer",
+    "adminManage.library.match.checkStopped",
+    "adminManage.library.match.noneOfType",
+    "adminManage.neverWatched.checkStopped",
+    "adminManage.watchSync.runStopped",
+  ];
+  for (const locale of ["en", "es", "fr", "de", "pt", "it", "zh"]) {
+    const catalog = JSON.parse(readFileSync(new URL(`../src/lib/i18n/messages/${locale}/adminManage.json`, import.meta.url), "utf8")) as Record<string, string>;
+    for (const key of keys) assert.ok(catalog[key]?.trim(), `${locale}: ${key}`);
+  }
 });

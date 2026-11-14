@@ -138,9 +138,12 @@ export function useQueueActions({ reloadSoon, dropRow }: {
     reloadSoon(3_000);
   }
 
-  // The arr accepted the removal: the row goes at once (the next poll agrees).
+  // The arr accepted the removal: the row goes at once. A load that began
+  // BEFORE the removal may still land and put the row back, so the queue is
+  // read once more — a manual load, which supersedes one in flight.
   function removed(row: QueueItem, action: QueueRemoveAction) {
     dropRow(row);
+    reloadSoon(2_000);
     succeeded(
       action === "blocklistSearch"
         ? t("adminManage.queue.remove.doneSearch", { title: row.mediaTitle || row.title })

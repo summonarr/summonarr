@@ -330,6 +330,7 @@
   "adminActivity.play.backToHistory": "Volver al historial",
   "adminActivity.play.notWatched": "No visto",
   "adminActivity.play.pctComplete": "{pct}% completado",
+  "adminActivity.play.zoneTimesTitle": "Las horas se muestran en la zona horaria {zone}",
   "adminActivity.play.playback": "Reproducción",
   "adminActivity.play.streamQuality": "Calidad de la reproducción",
   "adminActivity.play.playMethod": "Método de reproducción",

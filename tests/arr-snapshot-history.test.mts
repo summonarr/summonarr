@@ -167,9 +167,11 @@ test("markLive: only for an accepted live answer of the current view, through th
 test("the Blocklist tab's count: no second read while the tab is on screen; its own page read keeps the count", () => {
   // The count effect skips its pageSize=1 read on the Blocklist tab, read through
   // a ref so the effect still re-runs only per instance (deps pinned above).
-  const effect = HOOK.slice(HOOK.indexOf("if (!inst || !countUrl) return;"), HOOK.indexOf("}, [inst, countUrl, reads, markCountLive]);"));
-  assert.match(effect, /^if \(!inst \|\| !countUrl\) return;\s*(?:\/\/[^\n]*\n\s*)?if \(tabRef\.current === "blocklist"\) return;\s*const key = arrInstanceKey\(inst\);/);
-  assert.ok(effect.indexOf('tabRef.current === "blocklist"') < effect.indexOf('reads.run("count"'), "before the read");
+  // The read itself is one callback (a Mark failed runs it again, on any tab).
+  const readCount = HOOK.slice(HOOK.indexOf("const readCount = useCallback("), HOOK.indexOf("}, [inst, countUrl, reads, markCountLive]);"));
+  assert.match(readCount, /if \(!inst \|\| !countUrl\) return;\s*const key = arrInstanceKey\(inst\);\s*void reads\.run\("count",/);
+  const effect = HOOK.slice(HOOK.indexOf("}, [inst, countUrl, reads, markCountLive]);"), HOOK.indexOf("}, [readCount, reads]);"));
+  assert.match(effect, /useEffect\(\(\) => \{\s*(?:\/\/[^\n]*\n\s*)?if \(tabRef\.current === "blocklist"\) return;\s*readCount\(\);/);
   assert.match(effect, /return \(\) => reads\.abort\("count"\);/, "another instance's count read is dropped");
   assert.match(HOOK, /const tabRef = useRef<Tab>\(tab\);\s*useEffect\(\(\) => \{\s*tabRef\.current = tab;\s*\}, \[tab\]\);/);
   // The ref is kept current BEFORE the count effect runs (effects run in order).

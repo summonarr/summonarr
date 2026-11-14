@@ -35,3 +35,40 @@ test("sampleDistributions buckets completion and ranks platforms", () => {
   assert.deepEqual(d.completionHist.map((b) => b.count), [2, 0, 0, 0, 1]);
   assert.deepEqual(d.platforms, [{ label: "iOS", count: 2 }, { label: "Web", count: 1 }]);
 });
+
+test("a library title with no plays renders; only an id in neither plays nor a library is a 404", () => {
+  const page = readFileSync(new URL("../src/app/(app)/admin/activity/media/[tmdbId]/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /stats\.totalPlays === 0 && stats\.recentPlays\.length === 0 && !stats\.inLibrary\) notFound\(\)/);
+  const lib = readFileSync(new URL("../src/lib/play-history-media-stats.ts", import.meta.url), "utf8");
+  assert.match(lib, /inLibrary: r\.mediaInfo === null && resolvedMedia !== null,/, "named from the library cache, not from a play row");
+});
+
+test("the play page shows its times in the statistics zone the history table uses", () => {
+  const page = readFileSync(new URL("../src/app/(app)/admin/activity/play/[id]/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /const timeZone = await getStatsTimeZone\(\);/);
+  assert.equal(page.match(/<PlayTimestamp [^>]*timeZone=\{timeZone\}/g)?.length, 2);
+  const cell = readFileSync(new URL("../src/app/(app)/admin/activity/play/[id]/play-timestamp.tsx", import.meta.url), "utf8");
+  assert.match(cell, /fmtTimestamp\(iso, mounted, locale, timeZone\)/);
+});
+
+test("a session or play with no media type is not labelled a movie", () => {
+  const card = readFileSync(new URL("../src/components/admin/now-playing/session-card.tsx", import.meta.url), "utf8");
+  const row = readFileSync(new URL("../src/components/admin/recent-plays/row.tsx", import.meta.url), "utf8");
+  assert.match(card, /mediaTypeLabel\(t, s\.mediaType\?\.toUpperCase\(\)\)/);
+  assert.match(row, /: mediaTypeLabel\(t, p\.mediaType\);/);
+});
+
+test("the Users list and the user page compute Direct % over all of the user's plays", () => {
+  const list = readFileSync(new URL("../src/lib/play-history-leaderboards.ts", import.meta.url), "utf8");
+  assert.match(list, /COUNT\(p\."id"\)::bigint AS "allPlays"/);
+  assert.match(list, /directPct: allPlays > 0 \? sharePct\(direct, allPlays\) : null,/);
+  assert.match(list, /transcodePct: allPlays > 0 \? sharePct\(transcodes, allPlays\) : null,/);
+  const page = readFileSync(new URL("../src/app/(app)/admin/activity/user/[id]/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /return total > 0 \? sharePct\(direct, total\) : null;/);
+});
+
+test("the Statistics tab's deltas go through kpiDelta on unrounded hours", () => {
+  const ui = readFileSync(new URL("../src/components/admin/activity-stats-redesign.tsx", import.meta.url), "utf8");
+  assert.match(ui, /return kpiDelta\(t\("adminActivity\.kpi\.new"\), current, previous, complete\);/);
+  assert.match(ui, /delta\(t, stats\.totalWatchTimeHours, stats\.prevPeriod\.totalWatchTimeHours, prevComplete\)/);
+});

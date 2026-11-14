@@ -382,8 +382,8 @@ test("/settings documents its masked map, the save's test results and the option
   assert.match(libSource("plex-library.ts"), /\.filter\(\(d\) => d\.type === "movie" \|\| d\.type === "show"\)/);
   const jfLib = await responseSchema("/settings/jellyfin/libraries", "get", "200");
   assert.deepEqual(keysOf(itemsOf(jfLib)), interfaceFields(libSource("jellyfin-library.ts"), "JellyfinMediaFolder"));
-  assert.match(libSource("jellyfin-library.ts"), /\.filter\(\(f\) => f\.CollectionType === "movies" \|\| f\.CollectionType === "tvshows"\)/);
-  assert.deepEqual(props(itemsOf(jfLib)).collectionType?.enum, ["movies", "tvshows"]);
+  assert.match(libSource("jellyfin-library.ts"), /collectionType: f\.CollectionType === "movies" \|\| f\.CollectionType === "tvshows" \? f\.CollectionType : "mixed",/);
+  assert.deepEqual(props(itemsOf(jfLib)).collectionType?.enum, ["movies", "tvshows", "mixed"]);
 
   const ratingBodies = successBodies(handlerSource("/settings/test-ratings", "post")).filter((k) => !k.includes("error"));
   for (const keys of ratingBodies) assert.deepEqual(keys, keysOf(await responseSchema("/settings/test-ratings", "post", "200")));

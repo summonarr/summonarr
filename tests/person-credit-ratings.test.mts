@@ -80,7 +80,7 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
   throw new Error(`unexpected fetch ${url}`);
 }) as typeof fetch;
 
-const { getEnrichedPerson } = await import("../src/lib/person.ts");
+const { getEnrichedPerson, creditRatingFields, withNullRatings } = await import("../src/lib/person.ts");
 type SummonarrSession = import("../src/lib/api-auth.ts").SummonarrSession;
 
 test("a credit's release year reaches the ratings lookups as a date, so a new release gets the fresh-title TTL", async () => {
@@ -97,4 +97,26 @@ test("a credit's release year reaches the ratings lookups as a date, so a new re
   // after a day; anything else (including an unknown date) after a week.
   assert.ok(ttlDays(`omdb:tmdb:movie:${NEW_MOVIE}`) <= 1, "this year's film is retried within a day");
   assert.ok(ttlDays(`omdb:tmdb:tv:${OLD_SHOW}`) > 6, "the 2001 show keeps the back-catalog TTL");
+});
+
+test("a credit the ratings pass did not look up keeps its rating fields unset; a looked-up one carries nulls", () => {
+  // Untouched by the pass: no rating field at all, so the card fetches them.
+  assert.deepEqual(creditRatingFields({}), {});
+  // Looked up, nothing found: explicit nulls, so the card does not ask again.
+  const none = creditRatingFields({ imdbRating: null, rottenTomatoes: null });
+  assert.equal(none.imdbRating, null);
+  assert.equal(none.rottenTomatoes, null);
+  assert.equal(none.metacritic, null, "the other fields are filled in as null");
+  // Looked up with one source only.
+  assert.equal(creditRatingFields({ rottenTomatoes: "91%" }).imdbRating, null);
+  assert.equal(creditRatingFields({ rottenTomatoes: "91%" }).rottenTomatoes, "91%");
+});
+
+test("the API answer keeps every rating field, null when unset", () => {
+  const bare: { id: number; imdbRating?: string | null } = { id: 1 };
+  const wire = withNullRatings(bare);
+  assert.equal("imdbRating" in wire && wire.imdbRating, null);
+  assert.equal(wire.rogerEbertRating, null);
+  assert.equal(wire.id, 1);
+  assert.equal(withNullRatings({ imdbRating: "7.1" }).imdbRating, "7.1");
 });

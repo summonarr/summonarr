@@ -353,3 +353,15 @@ test("the page's URL sync sets only its own keys, keeping other params and the #
   assert.match(src, /window\.history\.replaceState\(null, "", withQuery\(window\.location, \{\s*tab,\s*service,\s*instance: rest\.join\(":"\),\s*kind: tab === "history" && kind !== "all" \? kind : null,\s*page: page > 1 \? String\(page\) : null,\s*\}\)\);/);
   assert.doesNotMatch(src, /`\?\$\{q\.toString\(\)\}`/);
 });
+
+test("blocklist ticks never outlive the page they were made on, and Mark failed re-reads the Blocklist count", () => {
+  const view = readFileSync(new URL("../src/components/admin/use-history-view.ts", import.meta.url), "utf8");
+  // A page turn and a tab switch drop the selection: "Remove N" can only name rows on screen.
+  assert.match(view, /setPage\(next: number\) \{\s*setPage\(next\);\s*setSelected\(new Map\(\)\);\s*\},/);
+  assert.match(view, /showTab\(next: Tab\) \{\s*setTab\(next\);\s*setPage\(1\);\s*setSelected\(new Map\(\)\);\s*\},/);
+  // The newest count read for the instance outranks a page kept from an earlier visit.
+  assert.match(view, /blocklistTotal: blocklistCount\?\.inst === current \? blocklistCount\.total : blocklist\?\.totalRecords,/);
+  assert.match(view, /recount: readCount,/);
+  const mark = fnBody(page(), "markFailed");
+  assert.match(mark, /void reload\(\);\s*view\.recount\(\);\s*return null;/);
+});

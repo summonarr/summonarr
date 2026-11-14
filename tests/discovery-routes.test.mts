@@ -167,11 +167,12 @@ shadowPrismaModel(prisma, "setting", {
 });
 
 // hiddenItem / mediaRequest carry the caller's id on every enrichment read.
+let hiddenRows: { tmdbId: number; mediaType: string }[] = [];
 shadowPrismaModel(prisma, "hiddenItem", {
   findMany: async (args: { where?: { userId?: string } } = {}) => {
     rec("hiddenItem.findMany", args.where);
     if (args.where?.userId) enrichedForUserIds.push(args.where.userId);
-    return [];
+    return hiddenRows;
   },
   // The media route also reads findFirst (the "Not interested" toggle state);
   // an unstubbed method throws into its catch and 502s every detail request.
@@ -783,6 +784,17 @@ test("search whitelists the type filter", async () => {
   assert.deepEqual(tv.map((r: { mediaType: string }) => r.mediaType), ["tv"]);
   const bogus = await (await searchRoute.call(token, "?q=matrix&type=anime")).json();
   assert.equal(bogus.length, 2, "an unknown type falls back to unfiltered");
+});
+
+test("search still finds a title the caller marked not interested", async () => {
+  const { token } = await mintSession();
+  hiddenRows = [{ tmdbId: MOVIE.id, mediaType: "MOVIE" }];
+  try {
+    const found = await (await searchRoute.call(token, "?q=matrix")).json();
+    assert.deepEqual(found.map((r: { id: number }) => r.id), [MOVIE.id, TV.id], "a search by name is not a discovery shelf");
+  } finally {
+    hiddenRows = [];
+  }
 });
 
 test("search is maintenance-gated", async () => {

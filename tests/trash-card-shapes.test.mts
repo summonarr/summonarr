@@ -119,3 +119,20 @@ test("a changed appliable set keeps the admin's picks and ticks only a newly rec
   const card = read("starter-pack-card.tsx");
   assert.match(card, /mergeStarterSelection\(prev, seen, resolvedIds, recommendedIds\)/);
 });
+
+test("a 200 that carries the db-push hint is a failed load on every card, never an empty catalog", () => {
+  // The check keeps the hint (v.object drops undeclared keys).
+  const status = check(SPEC_STATUS_ANSWER, { specs: [], schemaDiagnostic: "run prisma db push" });
+  assert.ok(status.ok && status.value.schemaDiagnostic === "run prisma db push");
+  // The spec tabs show it as the load error instead of "No specs pulled yet".
+  assert.match(read("spec-section.tsx"), /if \(res\.ok && res\.data\.schemaDiagnostic\) \{[\s\S]*?setSpecs\(\[\]\);\s*setLoadError\(res\.data\.schemaDiagnostic\);/);
+  // The Overview KPIs show "—", not zeros.
+  assert.match(read("overview-kpis.tsx"), /const unreadable = !res\.ok \|\| res\.data\.schemaDiagnostic !== undefined;[\s\S]*?setFailed\(unreadable\);/);
+  // The starter pack keeps its curated list and raises the banner with the hint.
+  assert.match(read("starter-pack-card.tsx"), /const hint = res\.data\.schemaDiagnostic;\s*setLoadError\(hint \? \{ errors: \[\], schemaDiagnostic: hint \} : null\);/);
+});
+
+test("the pause/resume button's accessible name says what pressing it does, not only the current state", () => {
+  const spec = read("spec-section.tsx");
+  assert.match(spec, /aria-label=\{app\.enabled\s*\? `\$\{t\("trash\.spec\.status\.managed"\)\} — \$\{t\("trash\.spec\.pauseTitle"\)\}`\s*: `\$\{t\("trash\.spec\.status\.paused"\)\} — \$\{t\("trash\.spec\.resumeTitle"\)\}`\}/);
+});

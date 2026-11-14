@@ -41,6 +41,7 @@ export function VariantRequestButton({
   requested,
   available,
   blacklisted,
+  permanentlyDeclined,
 }: {
   tmdbId: number;
   mediaType: "MOVIE" | "TV";
@@ -53,6 +54,9 @@ export function VariantRequestButton({
   available?: boolean;
   // The title is admin-blacklisted — no request either (the request POST 403s).
   blacklisted?: boolean;
+  // The viewer's own request on this target was permanently declined: the POST
+  // 403s on every attempt, so no CTA either.
+  permanentlyDeclined?: boolean;
 }) {
   const { toast } = useToast();
   const t = useT();
@@ -126,8 +130,9 @@ export function VariantRequestButton({
   // the approved request so this user gets the availability notification. The
   // queue state is communicated by the badges row.
 
-  // Blacklisted blocks all requests (per tmdbId+mediaType, every instance).
-  if (blacklisted) {
+  // Blacklisted blocks all requests (per tmdbId+mediaType, every instance); a
+  // permanent decline blocks this viewer on this target.
+  if (blacklisted || permanentlyDeclined) {
     return (
       <DetailActionStatus variant="muted">
         <Ban style={{ width: 14, height: 14 }} />

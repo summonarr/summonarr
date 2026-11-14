@@ -138,6 +138,10 @@ export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {
       hours: round1(Number(v.hours)),
     })),
     recentPlays: r.recentPlays,
+    // The title has no play row and was named from the library cache: a real
+    // title nobody has finished a session of yet (the page shows it empty
+    // instead of a 404 — a live session links here before its first row exists).
+    inLibrary: r.mediaInfo === null && resolvedMedia !== null,
     title: resolvedMedia?.title ?? `TMDB ${tmdbId}`,
     mediaType: resolvedMedia?.mediaType ?? null,
     year: resolvedMedia?.year ?? null,
@@ -153,8 +157,9 @@ export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {
   };
 }
 
-// A title nobody has played yet (its plays were all deleted, say): name it from
-// the library cache instead of "TMDB <id>". Plex first, then Jellyfin.
+// A title nobody has played yet (a first play still in progress, or its plays
+// were all deleted): name it from the library cache instead of "TMDB <id>".
+// Plex first, then Jellyfin.
 async function libraryTitle(
   tmdbId: number,
   mediaType: MediaType | undefined,

@@ -355,20 +355,26 @@ test("availability probe honors the lowercase tmdb fallback and degrades to fals
 
 // ── getJellyfinMediaFolders / refreshJellyfinLibrary ────────────────────────
 
-test("media folders keeps only movies/tvshows collections and maps {id, name, collectionType}; non-2xx throws", async () => {
+test("media folders keeps the libraries that hold titles (movies, tvshows, mixed or untyped) and maps {id, name, collectionType}; non-2xx throws", async () => {
   const B = nextBase();
   respond = () => okJson({
     Items: [
       { Id: "lib1", Name: "Movies", CollectionType: "movies" },
       { Id: "lib2", Name: "Shows", CollectionType: "tvshows" },
       { Id: "lib3", Name: "Music", CollectionType: "music" },
-      { Id: "lib4", Name: "Mixed" }, // no CollectionType
+      { Id: "lib4", Name: "Anime" }, // no CollectionType
+      { Id: "lib5", Name: "Kids", CollectionType: "mixed" },
+      { Id: "lib6", Name: "Books", CollectionType: "books" },
     ],
   });
   const folders = await getJellyfinMediaFolders(B, "key-3");
+  // The sync reads a mixed or untyped library when nothing is ticked, so the
+  // picker must list it or ticking the others drops it for good.
   assert.deepEqual(folders, [
     { id: "lib1", name: "Movies", collectionType: "movies" },
     { id: "lib2", name: "Shows", collectionType: "tvshows" },
+    { id: "lib4", name: "Anime", collectionType: "mixed" },
+    { id: "lib5", name: "Kids", collectionType: "mixed" },
   ]);
   assert.equal(sent[0].url, `${B}/Library/MediaFolders`);
 

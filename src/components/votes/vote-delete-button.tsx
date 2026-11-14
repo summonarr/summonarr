@@ -3,14 +3,10 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Trash2, Loader2, Check } from "@/components/icons";
-import { withBasePath } from "@/lib/base-path";
-import { rateLimitMessage } from "@/lib/client/rate-limit";
-import { readApiError } from "@/lib/client/api-error";
 import { DetailActionButton } from "@/components/media/detail-action-button";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
-import { timedFetch } from "@/lib/client/fetch-json";
-import { writeDeletionVote, type VoteWriteOutcome } from "@/lib/client/vote-write";
+import { castDeletionVote, writeDeletionVote, type VoteWriteOutcome } from "@/lib/client/vote-write";
 import { useAsyncAction } from "@/hooks/use-async-action";
 
 interface Props {
@@ -59,22 +55,11 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
     setRefocus(true);
     const out = await action.run(
       "vote",
-      async (signal): Promise<Outcome> => {
-        try {
-          const res = await timedFetch(withBasePath("/api/votes"), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tmdbId, mediaType, reason: reason.trim() || undefined, _token: requestToken }),
-            signal,
-          });
-          if (res.ok || res.status === 409) return { ok: true };
-          // The route's own reason (your own request, not in the library, a
-          // stale page token…) says why a retry won't help; a 429 its wait.
-          return { ok: false, message: rateLimitMessage(res, t) ?? (await readApiError(res, t("request.vote.recordFailed"))) };
-        } catch {
-          return { ok: false, message: t("request.vote.recordFailed") };
-        }
-      },
+      (signal): Promise<Outcome> =>
+        castDeletionVote({
+          tmdbId, mediaType, reason: reason.trim() || undefined, pageToken: requestToken,
+          failed: t("request.vote.recordFailed"), signal, t,
+        }),
       { ifBusy: "skip" },
     );
     if (!out) return;

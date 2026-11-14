@@ -57,7 +57,11 @@ function selectedCellFor(el: HTMLDivElement, date: string, detailBase: DetailBas
     // watched=true: the cell count and the popover count only watched plays,
     // so the history table must open on the same filter or it lists more rows
     // than the number that was clicked.
-    const hp = new URLSearchParams({ from: date, to: date, watched: "true" });
+    // ungrouped=true: the cell counts watched SEGMENTS started that day. The
+    // table's default grouped mode lists whole viewings with any segment on
+    // the day, so a film paused one day and finished the next would be listed
+    // under a day whose cell did not count it.
+    const hp = new URLSearchParams({ from: date, to: date, watched: "true", ungrouped: "true" });
     if (detailBase.source) hp.set("source", detailBase.source);
     if (detailBase.mediaType) hp.set("mediaType", detailBase.mediaType);
     viewPlaysHref = `${detailBase.historyPath}?${hp.toString()}`;

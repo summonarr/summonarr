@@ -330,6 +330,7 @@
   "adminActivity.play.backToHistory": "Retour à l’historique",
   "adminActivity.play.notWatched": "Non regardé",
   "adminActivity.play.pctComplete": "{pct} % terminé",
+  "adminActivity.play.zoneTimesTitle": "Les heures sont affichées dans le fuseau horaire {zone}",
   "adminActivity.play.playback": "Lecture",
   "adminActivity.play.streamQuality": "Qualité du flux",
   "adminActivity.play.playMethod": "Méthode de lecture",

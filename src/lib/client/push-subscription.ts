@@ -30,9 +30,18 @@ export function announcePushChange(): void {
 // A resync never undoes a removal made on purpose — the profile's "Remove
 // device", or the per-user cap evicting this browser for a newer one — and never
 // evicts another device. The server answers those with 410, and this browser
-// then drops its own subscription so the bell shows "off". Other failures are
-// ignored: push may be switched off, the site may be in maintenance, or the
-// endpoint may belong to another account here.
+// then drops its own subscription so the bell shows "off".
+//
+// A 409 means the endpoint is registered to ANOTHER account: someone else
+// enabled push in this browser and signed out, which removes neither the
+// browser's subscription nor their row. The bell would show "on" for an account
+// the server sends nothing to, while the other account's notifications kept
+// arriving on this screen. So the browser's subscription is dropped there too:
+// the push service retires the endpoint, and enabling the bell again registers
+// a fresh one for this account.
+//
+// Other failures are ignored: push may be switched off, or the site may be in
+// maintenance.
 let resyncedThisPageLoad = false;
 export function resyncSubscription(sub: PushSubscription): Promise<void> {
   if (resyncedThisPageLoad) return Promise.resolve();
@@ -42,7 +51,7 @@ export function resyncSubscription(sub: PushSubscription): Promise<void> {
     init: jsonInit("POST", { endpoint: json.endpoint, keys: json.keys, resync: true }),
   })
     .then(async (res) => {
-      if (res.ok || res.kind !== "http" || res.status !== 410) return;
+      if (res.ok || res.kind !== "http" || (res.status !== 410 && res.status !== 409)) return;
       await sub.unsubscribe().catch(() => false);
       announcePushChange();
     })

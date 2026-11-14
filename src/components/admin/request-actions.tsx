@@ -50,6 +50,12 @@ interface RequestActionsProps {
   existingAdminNote?: string | null;
   /** When set, approve/decline apply to all of these PENDING request IDs via the batch endpoint. */
   groupPendingIds?: string[];
+  /**
+   * Told when the Pick release dialog opens and closes, so the list can hold
+   * its live refresh meanwhile: a new request pushing this row to the next
+   * page would unmount it, and a search that runs for minutes with it.
+   */
+  onDialogActive?: (open: boolean) => void;
 }
 
 type MutationKind = "APPROVED" | "DECLINED" | "RETRY" | "SEARCH" | "NOTE" | "DELETE";
@@ -331,7 +337,7 @@ function usePendingForms({ mediaType, arrInstance, m }: { mediaType: RequestMedi
   };
 }
 
-export function RequestActions({ requestId, currentStatus, mediaType, arrInstance, arrInstanceName, existingAdminNote, groupPendingIds }: RequestActionsProps) {
+export function RequestActions({ requestId, currentStatus, mediaType, arrInstance, arrInstanceName, existingAdminNote, groupPendingIds, onDialogActive }: RequestActionsProps) {
   const t = useT();
   const m = useRequestMutations({ requestId, currentStatus, groupPendingIds });
   const forms = usePendingForms({ mediaType, arrInstance, m });
@@ -392,6 +398,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           m={m}
           onAskDelete={() => setShowDeleteConfirm(true)}
           reply={reply}
+          onDialogActive={onDialogActive}
         />
       );
 
@@ -661,6 +668,7 @@ function ApprovedActions({
   m,
   onAskDelete,
   reply,
+  onDialogActive,
 }: {
   requestId: string;
   mediaType: RequestMediaType;
@@ -669,6 +677,7 @@ function ApprovedActions({
   m: RequestMutations;
   onAskDelete: () => void;
   reply: ReactNode;
+  onDialogActive?: (open: boolean) => void;
 }) {
   const t = useT();
   // "Why?" — the inline Radarr/Sonarr status panel, loaded on click only.
@@ -676,6 +685,18 @@ function ApprovedActions({
   const statusPanelId = useId();
   // Interactive search ("Pick release") on the request's own instance.
   const [showReleases, setShowReleases] = useState(false);
+  // The latest callback, so a parent's new function each render never reads as
+  // a close and a re-open (the title manager reports itself the same way).
+  const dialogActiveRef = useRef(onDialogActive);
+  useEffect(() => {
+    dialogActiveRef.current = onDialogActive;
+  });
+  useEffect(() => {
+    if (!showReleases) return;
+    dialogActiveRef.current?.(true);
+    const active = dialogActiveRef;
+    return () => active.current?.(false);
+  }, [showReleases]);
   const onPickRelease = () => {
     m.clearArrError();
     setShowReleases(true);

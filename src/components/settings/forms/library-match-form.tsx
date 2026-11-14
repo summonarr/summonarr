@@ -104,29 +104,30 @@ function LibraryMatchServerBlock({
         <p className="text-xs text-zinc-500 italic">{t("settings.form.libraryMatch.loadHint")}</p>
       )}
 
-      {data && (
-        <div className="space-y-5">
-          <LibraryMatchMediaBlock
-            mediaType="MOVIE"
-            mediaLabel={t("nav.movies")}
-            ariaLabel={t("settings.form.libraryMatch.prefixAriaMovie", { server: label })}
-            data={data.movie}
-            prefix={moviePrefix}
-            onChangePrefix={onChangeMoviePrefix}
-            placeholder={t("settings.form.libraryMatch.placeholder", { example: "movies/" })}
-          />
-          <div className="border-t border-zinc-800" />
-          <LibraryMatchMediaBlock
-            mediaType="TV"
-            mediaLabel={t("nav.tvShows")}
-            ariaLabel={t("settings.form.libraryMatch.prefixAriaTv", { server: label })}
-            data={data.tv}
-            prefix={tvPrefix}
-            onChangePrefix={onChangeTvPrefix}
-            placeholder={t("settings.form.libraryMatch.placeholder", { example: "tv/" })}
-          />
-        </div>
-      )}
+      {/* The prefix boxes always render: the saved values must be visible and
+          editable even when the examples were never loaded or failed to load.
+          Only the samples and the preview wait on `data`. */}
+      <div className="space-y-5">
+        <LibraryMatchMediaBlock
+          mediaType="MOVIE"
+          mediaLabel={t("nav.movies")}
+          ariaLabel={t("settings.form.libraryMatch.prefixAriaMovie", { server: label })}
+          data={data?.movie ?? null}
+          prefix={moviePrefix}
+          onChangePrefix={onChangeMoviePrefix}
+          placeholder={t("settings.form.libraryMatch.placeholder", { example: "movies/" })}
+        />
+        <div className="border-t border-zinc-800" />
+        <LibraryMatchMediaBlock
+          mediaType="TV"
+          mediaLabel={t("nav.tvShows")}
+          ariaLabel={t("settings.form.libraryMatch.prefixAriaTv", { server: label })}
+          data={data?.tv ?? null}
+          prefix={tvPrefix}
+          onChangePrefix={onChangeTvPrefix}
+          placeholder={t("settings.form.libraryMatch.placeholder", { example: "tv/" })}
+        />
+      </div>
     </div>
   );
 }

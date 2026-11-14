@@ -128,8 +128,9 @@ const DISCORD_REGISTRATION = ["discordPublicKey", "discordCommands"] as const;
 // - third-party API keys and the TRaSH token: the forms offer Remove, and a
 //   dropped blank reported Saved while the old key kept working. Readers treat
 //   "" as unset (trash.ts's 30s token cache lets the removal through).
-// - webhook secrets: the form offers a blank field to remove one; a skipped
-//   blank said Saved while the OLD secret stayed valid. A cleared instance is
+// - webhook secrets: the form offers an explicit Remove (blank = keep, never
+//   sent by Save); a skipped blank said Saved while the OLD secret stayed
+//   valid. A cleared instance is
 //   secretless, and the handlers reject a webhook when every secret is empty
 //   (401) — the end state is "this webhook is off", not "open".
 // - optional add-payload fields (minimum availability, language profile):

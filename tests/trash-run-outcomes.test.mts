@@ -182,20 +182,35 @@ test("apply: 409 (the trash lock is held) is a skip on every card, never a hard 
 
 test("apply: a refusal with no per-spec results shows the route's own reason", () => {
   assert.deepEqual(applyOutcome(403, { error: "TRaSH Guides is disabled" }, "fallback"), {
-    kind: "done", failed: true, results: [], errors: ["TRaSH Guides is disabled"],
+    kind: "done", failed: true, results: [], errors: ["TRaSH Guides is disabled"], unanswered: [],
   });
   assert.deepEqual(applyOutcome(429, { error: "Too many applies" }, "fallback"), {
-    kind: "done", failed: true, results: [], errors: ["Too many applies"],
+    kind: "done", failed: true, results: [], errors: ["Too many applies"], unanswered: [],
   });
-  assert.deepEqual(applyOutcome(200, null, "fallback"), { kind: "done", failed: true, results: [], errors: ["fallback"] });
+  assert.deepEqual(applyOutcome(200, null, "fallback"), { kind: "done", failed: true, results: [], errors: ["fallback"], unanswered: [] });
 });
 
 test("apply: a run's own failures are its results (the log), not a banner line", () => {
   const out = applyOutcome(200, { ok: false, results: [okApply, failedApply], durationMs: 5 }, "fallback");
-  assert.deepEqual(out, { kind: "done", failed: true, results: [okApply, failedApply], errors: [] });
+  assert.deepEqual(out, { kind: "done", failed: true, results: [okApply, failedApply], errors: [], unanswered: [] });
   assert.deepEqual(applyOutcome(200, { ok: true, results: [okApply] }, "fallback"), {
-    kind: "done", failed: false, results: [okApply], errors: [],
+    kind: "done", failed: false, results: [okApply], errors: [], unanswered: [],
   });
+});
+
+test("apply: a sent spec the run returned no result for was not applied — the run failed, and it is named", () => {
+  // The spec left the catalog (a refresh in another tab) between the tick and the click.
+  const out = applyOutcome(200, { ok: true, results: [okApply] }, "fallback", [okApply.specId, "gone-spec"]);
+  assert.deepEqual(out, { kind: "done", failed: true, results: [okApply], errors: [], unanswered: ["gone-spec"] });
+  // Every sent id answered: nothing unanswered, whatever else the run returned.
+  const full = applyOutcome(200, { ok: true, results: [okApply] }, "fallback", [okApply.specId]);
+  assert.deepEqual(full, { kind: "done", failed: false, results: [okApply], errors: [], unanswered: [] });
+  // A run that answered nobody still failed, with no generic banner line over the count.
+  const none = applyOutcome(200, { ok: true, results: [] }, "fallback", ["a", "b"]);
+  assert.deepEqual(none, { kind: "done", failed: true, results: [], errors: [], unanswered: ["a", "b"] });
+  // A refusal ran nothing: its reason is the error, not a list of unanswered ids.
+  const refused = applyOutcome(403, { error: "off" }, "fallback", ["a"]);
+  assert.deepEqual(refused, { kind: "done", failed: true, results: [], errors: ["off"], unanswered: [] });
 });
 
 test("answerOf: no answer is null, a dropped request undefined, anything the route said is its status and body", () => {

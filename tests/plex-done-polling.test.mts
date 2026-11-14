@@ -127,3 +127,11 @@ test("done page: the settings poll reads its answer through settingsPollStep, ne
   assert.match(PAGE, /headers: plexClientHeaders\(auth\.clientId\),/);
   assert.doesNotMatch(PAGE, /"X-Plex-Product"/);
 });
+
+test("a return with no stashed sign-in on this address shows an error with a way back, not a silent bounce", () => {
+  // Plex returns to the configured site URL while the stash lives on the
+  // address the sign-in started from, so this is what a sign-in begun on
+  // another address lands on.
+  assert.match(PAGE, /if \(!stored\) \{[^}]*fail\(t\("auth\.plexDone\.error\.noFlow"\)\);\s*return;\s*\}/);
+  assert.doesNotMatch(PAGE, /if \(!stored\) \{[^}]*location\.replace/);
+});

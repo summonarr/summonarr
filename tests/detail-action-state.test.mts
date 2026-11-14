@@ -22,7 +22,9 @@ test("RequestButton treats `requested` as live and relies on the caller's key ac
   const body = src("src/components/media/request-button.tsx");
   assert.doesNotMatch(body, NO_TITLE_RESET);
   assert.match(body, /state === "requested" \|\| state === "duplicate" \|\| !!requested/);
-  assert.match(body, /canRequest && \(/);
+  // The canRequest gate is mainRequestView's (tests/request-button-rules.test.mts).
+  assert.match(body, /canRequest,\n\s*canRequestOnBehalf,\n\s*\}\);/);
+  assert.match(body, /\{view\.cta && \(/);
 });
 
 test("Request4kButton and RequestInstanceButton share one request flow that treats `requested` as live", () => {
@@ -36,7 +38,8 @@ test("Request4kButton and RequestInstanceButton share one request flow that trea
   // That reading lives once in submitMediaRequest (src/lib/client/media-request.ts).
   assert.match(shared, /setMsg\(outcome\.error\)/);
   const client = src("src/lib/client/media-request.ts");
-  assert.match(client, /\{ error: rateLimitMessage\(res, t\) \?\? \(await readApiError\(res, t\("request\.somethingWrong"\)\)\) \}/);
+  assert.match(client, /if \(!res\.ok\) return \{ error: await requestRefusalText\(res, t\) \};/);
+  assert.match(client, /return rateLimitMessage\(res, t\) \?\? \(await readApiError\(res, t\("request\.somethingWrong"\)\)\);/);
   // The title's own fields go last, so an extra can never replace them.
   assert.match(shared, /submitMediaRequest\(\{ \.\.\.extras, tmdbId, mediaType \}, requestToken, t, signal\)/);
   assert.match(shared, /export type VariantRequestExtras = \{ is4k: true \} \| \{ arrInstance: string \};/);
@@ -123,7 +126,9 @@ test("VoteDeleteButton: unvote shows the rate-limit hint, a vote clears its reas
   assert.match(body, /ifBusy: "skip"/, "a second submit while one runs does nothing");
   // A refused vote shows the route's own reason (your own request, a stale
   // page token…), and a 404 on unvote means the vote is already gone.
-  assert.match(body, /rateLimitMessage\(res, t\) \?\? \(await readApiError\(res, t\("request\.vote\.recordFailed"\)\)\)/);
+  // (the vote itself is castDeletionVote, src/lib/client/vote-write.ts)
+  assert.match(body, /castDeletionVote\(\{[\s\S]*?failed: t\("request\.vote\.recordFailed"\), signal, t,/);
+  assert.match(src("src/lib/client/vote-write.ts"), /rateLimitMessage\(res, opts\.t\) \?\? \(await readApiError\(res, opts\.failed\)\)/);
   assert.match(body, /okOn404: true/);
   assert.match(body, /if \(out\.ok\) \{\s*setState\("idle"\);/);
   assert.match(body, /if \(out\.ok\) \{\s*setState\("voted"\);\s*setReason\(""\);\s*router\.refresh\(\)/, "a recorded vote clears the reason");

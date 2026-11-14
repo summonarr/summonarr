@@ -38,13 +38,28 @@ interface BrowseGridProps {
 
 // Why an empty grid is empty: a filter that matched nothing, a missing TMDB
 // token, or a page past the end / an empty upstream page.
-function BrowseEmptyState({ hasFilters, tokenMissing, currentPage, pathname }: {
+function BrowseEmptyState({ hasFilters, tokenMissing, currentPage, pathname, nextPageHref }: {
   hasFilters: boolean;
   tokenMissing?: boolean;
   currentPage: number;
   pathname: string;
+  /** Set when a filtered page is empty but later pages exist. */
+  nextPageHref?: string;
 }) {
   const t = useT();
+  // A rating-source filter and Hide Available are applied to each page's
+  // window of titles after TMDB answered, so an empty page is not "nothing
+  // matches" while the pager still offers later pages.
+  if (hasFilters && nextPageHref) {
+    return (
+      <EmptyState
+        icon={Filter}
+        title={t("browse.empty.nothingOnPage.title")}
+        description={t("browse.empty.nothingOnPage.description")}
+        cta={{ href: nextPageHref, label: t("browse.empty.nothingOnPage.next") }}
+      />
+    );
+  }
   if (hasFilters) {
     return (
       <EmptyState
@@ -92,7 +107,7 @@ export function BrowseGrid({
   const t = useT();
 
   // The committed filters, parsed the one shared way (browse-filters.ts).
-  const filters = parseBrowseFilters((key) => searchParams.get(key));
+  const filters = parseBrowseFilters((key) => searchParams.get(key), pathname.startsWith("/tv") ? "tv" : "movie");
 
   // The SERVER owns every filter and page change: the page reads the URL's
   // search params and renders `initialItems`, so this component does no
@@ -109,6 +124,10 @@ export function BrowseGrid({
   // The "N results" / "Popular right now" line lives in the page's PageHeader
   // subtitle (movies/page.tsx, tv/page.tsx), not here.
   const hasFilters = hasActiveFilters(filters);
+  // The pager's own link shape (pagination-bar.tsx): the query with `page` set.
+  const nextPageParams = new URLSearchParams(searchParams.toString());
+  nextPageParams.set("page", String(currentPage + 1));
+  const nextPageHref = currentPage < totalPages ? `${pathname}?${nextPageParams.toString()}` : undefined;
 
   return (
     <>
@@ -119,6 +138,7 @@ export function BrowseGrid({
         showCertification={!pathname.startsWith("/tv")}
         maxYear={maxYear}
         navigate={startTransition}
+        navigating={isPending}
       />
 
       {failed && !isPending && (
@@ -164,7 +184,13 @@ export function BrowseGrid({
           </div>
         )}
         {items.length === 0 && !isPending && !failed ? (
-          <BrowseEmptyState hasFilters={hasFilters} tokenMissing={tokenMissing} currentPage={currentPage} pathname={pathname} />
+          <BrowseEmptyState
+            hasFilters={hasFilters}
+            tokenMissing={tokenMissing}
+            currentPage={currentPage}
+            pathname={pathname}
+            nextPageHref={nextPageHref}
+          />
         ) : (
           <div className="ds-media-grid">
             {items.map((media, i) => (
