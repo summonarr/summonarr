@@ -272,7 +272,7 @@ export const adminDownloadsPaths: OpenApiPaths = {
                   commands: { type: "integer" },
                   seasons: { type: "array", items: { type: "integer" }, description: "Sonarr: seasons searched whole" },
                   episodes: { type: "integer", description: "Sonarr: episodes searched individually" },
-                  partial: { type: "boolean", enum: [true], description: "Present only when a Sonarr search was refused part-way: the counts are what WAS queued, and those searches are running" },
+                  partial: { type: "boolean", enum: [true], description: "Present only when a Sonarr search was refused part-way, or a series with more missing seasons than one search covers was searched in part: the counts are what WAS queued, and those searches are running" },
                 },
               },
             },

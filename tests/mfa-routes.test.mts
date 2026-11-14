@@ -63,7 +63,7 @@ const { hashRecoveryCode, normalizeRecoveryCode } = await import("../src/lib/mfa
 const { webAuthnUserHandle, passwordVersion, ensureRecoveryCodesInTx, MFA_USER_LOCK_NAMESPACE, mfaUserLockKey } = await import("../src/lib/mfa/mfa-store.ts");
 const { resetMfaTokenLedgerForTests, MAX_TOKEN_FAILURES } = await import("../src/lib/mfa/mfa-token.ts");
 const { MFA_LOCKOUT_THRESHOLD, MFA_LOCKED_MESSAGE, lockoutDurationMs } = await import("../src/lib/mfa/lockout.ts");
-const { refundHit } = await import("../src/lib/rate-limit.ts");
+const { refundHit, peekRateLimit } = await import("../src/lib/rate-limit.ts");
 const { shouldForceDbCheck } = await import("../src/lib/session-revocation.ts");
 const { assertionResponse, makeAuthenticator, registrationResponse } = await import("./_webauthn-fixtures.mts");
 
@@ -132,6 +132,8 @@ function applyData(row: Row, data: Row): void {
 
 // A test can land a concurrent write "between" two reads of a user row.
 let onUserRead: ((where: Where) => void | Promise<void>) | null = null;
+// Fails the failed-code counter's write (the only user.update on the MFA step).
+let userUpdateBoom = false;
 shadowPrismaModel(prisma, "user", {
   // A snapshot, like a real read: a later write must not show through an
   // object the route already holds (the L2 re-read test depends on it).
@@ -142,6 +144,7 @@ shadowPrismaModel(prisma, "user", {
   },
   findFirst: async ({ where }: { where?: Where } = {}) => users.find((u) => matches(u, where)) ?? null,
   update: async ({ where, data }: { where: Where; data: Row }) => {
+    if (userUpdateBoom) throw new Error("user.update exploded (unit test)");
     const u = users.find((x) => matches(x, where));
     if (!u) throw Object.assign(new Error("Record not found"), { name: "PrismaClientKnownRequestError", code: "P2025" });
     applyData(u, data);
@@ -433,6 +436,7 @@ const bearer = (jwt: string) => ({ authorization: `Bearer ${jwt}` });
 
 beforeEach(() => {
   users = []; totps = []; codes = []; passkeys = []; sessions = []; audit = []; rawSql = []; onRaw = null; onUserRead = null;
+  userUpdateBoom = false;
   footholdOps = [];
   callbackTxCount = 0;
   sessionDeleteBoom = false;
@@ -753,6 +757,96 @@ test("rate limit per ACCOUNT (in-memory): the 11th second-factor attempt in 15 m
   const res = await mfa({ mfaToken: ch.mfaToken, method: "totp", code: currentCode(key) });
   assert.equal(res.status, 429, "the account bucket is exhausted — even the right code waits");
   assert.equal(sessionWrites, 0);
+});
+
+// The per-account bucket holds a hit only for a code that was checked and found
+// wrong. True while the bucket is empty.
+const accountBucketEmpty = (u: Row) => peekRateLimit(`mfa-user:${u.id}`, 1, 15 * 60 * 1000);
+
+test("the account bucket keeps a hit ONLY for a wrong code: expired, locked, switched-off and double-submit exits give it back", async () => {
+  const u = await seedUser();
+  const key = seedTotp(u.id as string);
+  seedRecoveryCodes(u.id as string, ["ABCD-EFGH-JKLM-NPQR", "STUV-WXYZ-2345-6789"]);
+  const wrong = currentCode(key) === "000000" ? "111111" : "000000";
+
+  // Local login switched off after the password step.
+  let ch = await challengeFor(u);
+  settings.set("disableLocalLogin", "true");
+  assert.equal((await mfa({ mfaToken: ch.mfaToken, method: "totp", code: wrong })).status, 401);
+  settings.delete("disableLocalLogin");
+  assert.equal(accountBucketEmpty(u), true, "local login off: no code was judged");
+
+  // The password changed since the challenge.
+  const hash = u.passwordHash;
+  u.passwordHash = await hashPassword("a-brand-new-password");
+  assert.equal((await mfa({ mfaToken: ch.mfaToken, method: "totp", code: wrong })).status, 401);
+  u.passwordHash = hash;
+  assert.equal(accountBucketEmpty(u), true, "expired challenge: no code was judged");
+
+  // Persistent lockout: the code is refused unchecked.
+  u.mfaLockedUntil = new Date(Date.now() + 60_000);
+  assert.equal((await mfa({ mfaToken: ch.mfaToken, method: "totp", code: wrong })).status, 429);
+  u.mfaLockedUntil = null;
+  assert.equal(accountBucketEmpty(u), true, "locked: no code was judged");
+
+  // The 409 loser of a double-submit, and the winner's success.
+  ch = await challengeFor(u);
+  let open!: () => void;
+  codeGate = new Promise((r) => { open = r; });
+  let pair: Response[];
+  try {
+    const pa = mfa({ mfaToken: ch.mfaToken, method: "recovery", code: "ABCD-EFGH-JKLM-NPQR" });
+    const pb = mfa({ mfaToken: ch.mfaToken, method: "recovery", code: "STUV-WXYZ-2345-6789" });
+    await new Promise((r) => setTimeout(r, 50));
+    open();
+    pair = await Promise.all([pa, pb]);
+  } finally {
+    codeGate = null;
+  }
+  assert.deepEqual(pair.map((r) => r.status).sort(), [200, 409]);
+  assert.equal(accountBucketEmpty(u), true, "a double-submit judged no wrong code");
+
+  // A wrong code is the one exit that keeps its hit.
+  ch = await challengeFor(u);
+  assert.equal((await mfa({ mfaToken: ch.mfaToken, method: "totp", code: wrong })).status, 401);
+  assert.equal(accountBucketEmpty(u), false, "a wrong code stays charged");
+});
+
+test("a database fault BEFORE the code is checked gives the account hit back; one while COUNTING a wrong code keeps it", async () => {
+  const u = await seedUser();
+  const key = seedTotp(u.id as string);
+  const wrong = currentCode(key) === "000000" ? "111111" : "000000";
+
+  // The lockout read (the second user read of the step) throws: nothing judged.
+  let ch = await challengeFor(u);
+  let reads = 0;
+  onUserRead = () => {
+    if (++reads === 2) throw new Error("db down (unit test)");
+  };
+  await assert.rejects(mfa({ mfaToken: ch.mfaToken, method: "totp", code: currentCode(key) }), /db down/);
+  onUserRead = null;
+  assert.equal(accountBucketEmpty(u), true, "no code was judged");
+  // The challenge was released unburned: the same token still signs in.
+  assert.equal((await mfa({ mfaToken: ch.mfaToken, method: "totp", code: currentCode(key) })).status, 200);
+  assert.equal(accountBucketEmpty(u), true);
+
+  // The code WAS checked and was wrong; only the failure counter's write threw.
+  ch = await challengeFor(u);
+  userUpdateBoom = true;
+  await assert.rejects(mfa({ mfaToken: ch.mfaToken, method: "totp", code: wrong }), /user\.update exploded/);
+  userUpdateBoom = false;
+  assert.equal(accountBucketEmpty(u), false, "a wrong code is never refunded");
+});
+
+test("the wrong code that IMPOSES the lockout keeps its account hit", async () => {
+  const u = await seedUser();
+  const key = seedTotp(u.id as string);
+  const wrong = currentCode(key) === "000000" ? "111111" : "000000";
+  u.mfaFailedAttempts = MFA_LOCKOUT_THRESHOLD - 1;
+  const ch = await challengeFor(u);
+  assert.equal((await mfa({ mfaToken: ch.mfaToken, method: "totp", code: wrong })).status, 429);
+  assert.ok(u.mfaLockedUntil instanceof Date);
+  assert.equal(accountBucketEmpty(u), false);
 });
 
 test("rate limit per IP: the 31st attempt from one address in 5 minutes is 429 before any token work", async () => {

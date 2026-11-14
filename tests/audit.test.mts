@@ -110,8 +110,10 @@ test("userName, address, agent and provider are length-capped in the row", async
     provider: "p".repeat(2000),
   });
   const d = creates[creates.length - 1].data;
+  // Each field is cut to its own column's width (pinned to the schema below).
+  const widths = { userName: 256, ipAddress: 64, userAgent: 512, provider: 32 } as const;
   for (const k of ["userName", "ipAddress", "userAgent", "provider"] as const) {
-    assert.equal((d[k] as string).length, 512, k);
+    assert.equal((d[k] as string).length, widths[k], k);
   }
 });
 
@@ -374,4 +376,34 @@ test("a failed retention read scrubs with the LONGEST window, never the shorter 
   assert.ok(warns.some((w) => w.includes("[audit] couldn't read the PII retention setting")));
   shadowPrismaModel(prisma, "setting", { findUnique: async () => null });
   assert.equal(await getAuditPiiRetentionDays(), 90, "no row is the documented default");
+});
+
+test("no audit row field can exceed its AuditLog column, whatever the caller passes", async () => {
+  const { readFileSync } = await import("node:fs");
+  const schema = readFileSync(new URL("../prisma/schema.prisma", import.meta.url), "utf8");
+  const model = /model AuditLog \{([\s\S]*?)\n\}/.exec(schema)?.[1] ?? "";
+  const width = (column: string): number => {
+    const m = new RegExp(`\\n\\s+${column}\\s+String\\??\\s+@db\\.VarChar\\((\\d+)\\)`).exec(model);
+    assert.ok(m, `AuditLog.${column} has no VarChar width`);
+    return Number(m[1]);
+  };
+
+  const rows: CreateArgs[] = [];
+  shadowPrismaModel(prisma, "auditLog", { create: async (args: CreateArgs) => { rows.push(args); return { id: "r" }; } });
+  const long = "x".repeat(20_000);
+  // Details just over the column but under the old 16 KB cap, then far over it
+  // with long keys: both must come out within the column.
+  const detailsCases: Record<string, unknown>[] = [
+    { value: "v".repeat(width("details") + 1) },
+    Object.fromEntries(Array.from({ length: 80 }, (_, i) => [`${i}-${"k".repeat(400)}`, long])),
+  ];
+  for (const details of detailsCases) {
+    rows.length = 0;
+    await logAudit({ userId: long, userName: long, action: "SETTINGS_CHANGE", target: long, details, ipAddress: long, userAgent: long, provider: long, sessionId: long });
+    const row = rows[0].data as Record<string, string>;
+    for (const column of ["userId", "userName", "target", "details", "ipAddress", "userAgent", "provider", "sessionId"]) {
+      assert.ok(row[column].length <= width(column), `${column}: ${row[column].length} > ${width(column)}`);
+    }
+    assert.equal((JSON.parse(row.details) as { truncated?: boolean }).truncated, true);
+  }
 });

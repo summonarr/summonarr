@@ -15,6 +15,7 @@ import { announceIssueReply } from "@/lib/issue-reply-notify";
 import { THREAD_READ_CAP } from "@/lib/api-body-limits";
 import { splitAtCap, truncationHeaders } from "@/lib/truncation";
 import { olderThanWhere, parseThreadCursor } from "@/lib/thread-cursor";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 import type { Issue } from "@/generated/prisma";
 import type { Translator } from "@/lib/i18n/translate";
 
@@ -112,17 +113,26 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
     return NextResponse.json({ error: t("apiUser.issues.messageBodyRequired") }, { status: 400 });
   }
 
-  const message = await prisma.issueMessage.create({
-    data: {
-      issueId: id,
-      authorId: session.user.id,
-      body: text,
-      fromAdmin: isIssueAdmin,
-    },
-    // Mirror GET's author select (email for admins only) so a null-named author
-    // renders identically whether the thread was fetched or just posted to.
-    include: { author: { select: { name: true, role: true, ...(isIssueAdmin ? { email: true } : {}) } } },
-  });
+  // The issue was read above, outside any transaction: one deleted since then
+  // fails the message's foreign key (P2003), which is this route's 404, not a 500.
+  // A bare create with no transaction around it, so catching is safe (guardrail 23).
+  let message;
+  try {
+    message = await prisma.issueMessage.create({
+      data: {
+        issueId: id,
+        authorId: session.user.id,
+        body: text,
+        fromAdmin: isIssueAdmin,
+      },
+      // Mirror GET's author select (email for admins only) so a null-named author
+      // renders identically whether the thread was fetched or just posted to.
+      include: { author: { select: { name: true, role: true, ...(isIssueAdmin ? { email: true } : {}) } } },
+    });
+  } catch (err) {
+    if (!isPrismaErrorCode(err, "P2003")) throw err;
+    return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
+  }
 
   // The message is stored: a failed status follow-up must not turn the answer
   // into a 500, or a retry would post the reply a second time.

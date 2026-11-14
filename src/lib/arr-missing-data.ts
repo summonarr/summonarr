@@ -12,6 +12,7 @@ import { pagedReadEnded } from "./arr-parse";
 import { isFeatureEnabled } from "./features";
 import { prisma } from "./prisma";
 import {
+  MAX_EPISODE_ROWS_READ,
   cutoffMovie,
   cutoffSeriesFromEpisodes,
   missingEpisodes,
@@ -37,12 +38,13 @@ import {
 // The object rows of an arr list. The pure rules read fields off every row, so a
 // null or scalar entry in a hostile or broken answer is dropped here, once,
 // instead of throwing out of whichever rule meets it first.
-function recordRows<T>(rows: unknown): T[] {
+function recordRows<T>(rows: unknown, maxRead = Infinity): T[] {
   const out: T[] = [];
   if (!Array.isArray(rows)) return out;
-  for (const r of rows) {
+  // `maxRead` bounds how much of an upstream-sized list is read at all (guardrail 5i).
+  for (let i = 0, n = Math.min(rows.length, maxRead); i < n; i++) {
     // Each rule reads its fields through guards, so T is a reading aid.
-    const rec = asRecord(r);
+    const rec = asRecord(rows[i]);
     if (rec) out.push(rec as T);
   }
   return out;
@@ -312,7 +314,7 @@ export async function findSeriesIdOnInstance(instance: string, tvdbId: number): 
 export async function loadMissingEpisodes(instance: string, seriesId: number, now: Date): Promise<MissingEpisode[]> {
   const cfg = await configuredCfg("sonarr", instance);
   const rows = await arrFetch<unknown>(cfg, `/api/v3/episode?seriesId=${seriesId}`);
-  return missingEpisodes(recordRows<SonarrEpisodeRow>(rows), now.getTime());
+  return missingEpisodes(recordRows<SonarrEpisodeRow>(rows, MAX_EPISODE_ROWS_READ), now.getTime());
 }
 
 export interface MissingSearchResult {
@@ -322,8 +324,9 @@ export interface MissingSearchResult {
   seasons: number[];
   episodes: number;
   /**
-   * Present (true) only when a Sonarr search stopped part-way: a later command
-   * was refused after earlier ones were queued. `commands`/`seasons`/`episodes`
+   * Present (true) only when a Sonarr search covers part of what is missing: a
+   * later command was refused after earlier ones were queued, or a cap cut the
+   * plan (planSeriesSearch's `truncated`). `commands`/`seasons`/`episodes`
    * then count only what WAS queued — those searches are running.
    */
   partial?: true;
@@ -365,7 +368,7 @@ async function searchMissingMovie(cfg: ArrCfg, instance: string, arrId: number, 
 
 async function searchMissingSeries(cfg: ArrCfg, instance: string, arrId: number, now: Date): Promise<TrackedSearch> {
   const rows = await arrFetch<unknown>(cfg, `/api/v3/episode?seriesId=${arrId}`);
-  const episodeRows = recordRows<SonarrEpisodeRow>(rows);
+  const episodeRows = recordRows<SonarrEpisodeRow>(rows, MAX_EPISODE_ROWS_READ);
   // Sonarr answers an UNKNOWN seriesId's episode list with 200 [] — not a 404 —
   // so an empty list can't tell "nothing to search" from "this series is gone".
   // The series read can: a 404 there propagates (ArrResponseError), which both
@@ -374,8 +377,8 @@ async function searchMissingSeries(cfg: ArrCfg, instance: string, arrId: number,
   if (episodeRows.length === 0) await arrFetch<unknown>(cfg, `/api/v3/series/${arrId}`);
   const plan = planSeriesSearch(episodeRows, now.getTime());
   if (plan.seasons.length === 0 && plan.episodeIds.length === 0) throw new NothingMissingError();
-  // Sequential and per series: a handful of commands at most, one per fully
-  // missing season plus one for the rest. A refusal part-way leaves the ones
+  // Sequential and per series: a handful of commands, one per fully missing
+  // season (at most MAX_SEARCH_SEASONS — the plan's cap) plus one for the rest. A refusal part-way leaves the ones
   // already queued RUNNING on Sonarr: answering a failure would drop their ids
   // (nothing followed, nothing re-read) and invite a retry that queues them
   // again, so once anything is queued the answer is what was, marked partial.
@@ -397,6 +400,8 @@ async function searchMissingSeries(cfg: ArrCfg, instance: string, arrId: number,
     console.warn(`[missing] sonarr instance "${instance}" search for series ${arrId} stopped after ${queued.length} command(s):`, arrErrorMessage(err));
     return { commands: queued.length, seasons, episodes, partial: true, commandIds: commandIdsOf(queued) };
   }
+  // A plan a cap cut short is a search that started only in part, too.
+  if (plan.truncated) return { commands: queued.length, seasons, episodes, partial: true, commandIds: commandIdsOf(queued) };
   return { commands: queued.length, seasons, episodes, commandIds: commandIdsOf(queued) };
 }
 

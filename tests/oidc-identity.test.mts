@@ -216,12 +216,15 @@ shadowPrismaModel(prisma, "user", {
   updateMany: async () => ({ count: 0 }),
   count: async () => users.length,
 });
+// Fails the identity lookup (a database fault during the sign-in).
+let accountReadThrows = false;
 shadowPrismaModel(prisma, "account", {
   findUnique: async (args: {
     where: { id?: string; provider_providerAccountId?: { provider: string; providerAccountId: string } };
     include?: { user?: boolean };
     select?: Record<string, boolean>;
   }) => {
+    if (accountReadThrows) throw new Error("account read failed (unit test)");
     const w = args.where.provider_providerAccountId;
     const row = w
       ? accounts.find((a) => a.provider === w.provider && a.providerAccountId === w.providerAccountId)
@@ -571,6 +574,31 @@ test("start ends the flow when the allowlist read FAILS, rather than starting it
   } finally {
     settingReadThrows = null;
   }
+});
+
+test("the web callback answers a database FAULT with oidc_unavailable (retry), never the oidc_user_rejected of a real refusal", async () => {
+  const errorOf = (res: Response) => new URL(res.headers.get("location")!).searchParams.get("error");
+  const before = sessionRows.size;
+
+  settingReadThrows = OIDC_ALLOWLIST_SETTING_KEY;
+  try {
+    assert.equal(errorOf(await webSignIn({ sub: "fault-1", ...VERIFIED })), "oidc_unavailable");
+    assert.ok(errors.some((e) => e.includes("[oidc/callback] allowlist read failed")), "the fault is logged");
+  } finally {
+    settingReadThrows = null;
+  }
+
+  accountReadThrows = true;
+  try {
+    assert.equal(errorOf(await webSignIn({ sub: "fault-2", ...VERIFIED })), "oidc_unavailable");
+    assert.ok(errors.some((e) => e.includes("[oidc/callback] user lookup failed")), "the fault is logged");
+  } finally {
+    accountReadThrows = false;
+  }
+  assert.equal(sessionRows.size, before, "a fault mints nothing");
+
+  // A real verdict keeps its own code.
+  assert.equal(errorOf(await webSignIn({ sub: "refused-1", email_verified: true })), "oidc_user_rejected");
 });
 
 // ── the admin route ──────────────────────────────────────────────────────────

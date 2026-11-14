@@ -671,6 +671,38 @@ test("top-rated: a failed source is NAMED in the degraded answer, so an empty li
   assert.ok((await down.json()).failedSources.includes("tmdb"));
 });
 
+test("home: the TMDB rails that could not be loaded are NAMED, so an empty feed is not read as an empty catalog", async () => {
+  const { __resetTmdbBackoffsForTests } = await import("../src/lib/tmdb.ts");
+  __resetTmdbBackoffsForTests();
+  try {
+    const { token } = await mintSession();
+    const fine = await (await inScope(() => home.GET(mk("/api/home", token, ""), undefined))).json();
+    assert.deepEqual(fine.failedSources, [], "always present, empty when every rail answered");
+    assert.ok(fine.featured.length > 0);
+
+    tmdbOk = false;
+    const res = await inScope(() => home.GET(mk("/api/home", token, ""), undefined));
+    assert.equal(res.status, 200, "the status is unchanged — the field is additive");
+    const down = await res.json();
+    assert.deepEqual(down.featured, []);
+    assert.deepEqual(down.carousels, []);
+    assert.deepEqual(down.failedSources, [
+      "trending", "popular-movies", "popular-tv", "upcoming-movies", "on-the-air-tv", "top-rated-movies", "top-rated-tv",
+    ]);
+
+    // A rail whose page an admin switched off was never asked, so it did not fail.
+    settings.set("feature.page.top", "false");
+    invalidateFeatureFlagCache();
+    const gated = await (await inScope(() => home.GET(mk("/api/home", token, ""), undefined))).json();
+    assert.ok(!gated.failedSources.some((id: string) => id.startsWith("top-rated")), gated.failedSources.join(","));
+    assert.ok(gated.failedSources.includes("trending"), "still named inside the failure backoff");
+  } finally {
+    settings.delete("feature.page.top");
+    invalidateFeatureFlagCache();
+    __resetTmdbBackoffsForTests();
+  }
+});
+
 // ── 5: page clamping ─────────────────────────────────────────────────────────
 
 for (const route of ROUTES.filter((r) => ["browse", "popular", "top-rated"].includes(r.name))) {

@@ -440,6 +440,14 @@ test("protect POST/DELETE reject a tmdbId past INT4 with 400 and write nothing",
   assert.equal(protections.length, before);
 });
 
+test("the delete route rejects a tmdbId past INT4 with 400, dry run and execute alike, and deletes nothing", async () => {
+  const token = await mintSession();
+  const big = { tmdbId: 2_147_483_648, mediaType: "MOVIE" };
+  assert.equal((await dryRun(token, { items: [big] })).status, 400);
+  assert.equal((await execute(token, { items: [MOVIE_100, big], confirmTargets: 2 })).status, 400);
+  assert.deepEqual(deletes(), []);
+});
+
 test("with feature.admin.cleanup off every route 404s and nothing is deleted", async () => {
   settings.set("feature.admin.cleanup", "false");
   invalidateFeatureFlagCache();

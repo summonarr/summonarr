@@ -46,17 +46,20 @@ export async function POST(request: NextRequest) {
   // of walking the whole Plex library again beside the first. The lock is held
   // until the episode-cache refresh has finished too, though the caller is
   // answered as soon as the library half is done (runResyncHoldingLock).
-  const run = () => withCronRunRecording("plex-sync", () => runResyncHoldingLock(
+  const run = (answer: "early" | "onRelease" = "early") => withCronRunRecording("plex-sync", () => runResyncHoldingLock(
     PLEX_RESYNC_LOCK_ID,
     (signal, hold) => syncPlex(request, rawBody, actor, signal, hold),
     // X-Cron-Skipped keeps a busy answer out of the ledger (no run happened).
     () => cronSkippedResponse("plex sync already running"),
+    answer,
   ));
   // An admin's { async: true } runs in the background and is polled with GET
   // ?job= (library-sync-jobs.ts): a full walk outlasts a reverse proxy's hold.
   // Every other caller keeps the synchronous answer.
   if (actor.trigger === "admin" && wantsBackgroundRun(rawBody)) {
-    return startLibraryJob(actor.userId, resyncJobKey("plex", rawBody), run);
+    // The job reports done only once the lock is free: the button posts the
+    // service's next server as soon as it does, and that request needs the lock.
+    return startLibraryJob(actor.userId, resyncJobKey("plex", rawBody), () => run("onRelease"));
   }
   return run();
 }

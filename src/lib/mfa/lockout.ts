@@ -125,6 +125,11 @@ export interface GuardContext {
     | "trakt-connect";
   ipAddress?: string | null;
   userAgent?: string | null;
+  // Called the moment a CODE was checked and found wrong, before the failure is
+  // counted — so a caller holding a reserved rate-limit hit can tell a judged
+  // wrong code (the hit stays) from an exit that never judged one, even when
+  // the count write then throws.
+  onWrongCode?: () => void;
 }
 
 // The guessable methods. A passkey assertion is a signature over a fresh
@@ -190,6 +195,7 @@ export async function verifySecondFactorGuarded(
   }
   if (!isCode) return { ok: false, reason: verdict.reason, locked: false };
 
+  ctx.onWrongCode?.();
   const outcome = await recordMfaCodeFailure(userId);
   if (outcome.imposed && outcome.lockedUntil) void reportLockout(userId, ctx, outcome.lockedUntil);
   return { ok: false, reason: verdict.reason, locked: outcome.lockedUntil !== null };

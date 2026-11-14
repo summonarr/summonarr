@@ -291,9 +291,12 @@ shadowPrismaModel(prisma, "issue", issueModel);
 
 // What the thread read returns, in the order the query asked for (newest first).
 let messageRows: Array<Record<string, unknown>> = [];
+// When set, issueMessage.create rejects with it (the issue deleted since the read).
+let messageCreateThrows: unknown = null;
 shadowPrismaModel(prisma, "issueMessage", {
   create: async (args: { data: Record<string, unknown> }) => {
     rec("issueMessage.create", args);
+    if (messageCreateThrows) throw messageCreateThrows;
     return { id: `msg-${Date.now()}`, createdAt: new Date(), author: { name: "n", role: "USER" }, ...args.data };
   },
   findMany: async (args: unknown) => {
@@ -903,6 +906,25 @@ test("messages POST still answers 201 for the stored message when the status fol
     assert.ok(errors.some((e) => e.includes("Reply stored but its status change failed")), errors.join(" | "));
   } finally {
     issueUpdateManyThrows = false;
+  }
+});
+
+test("messages POST: an issue deleted between the read and the insert is the 404, with no status change or SSE; any other write error still throws", async () => {
+  issueRow = { id: "issue-gone", status: "OPEN", reportedBy: "reporter-gone", title: "Prisoners", mediaType: "MOVIE", tmdbId: 146233, posterPath: null, claimedBy: null };
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+  const known = (code: string) => Object.assign(new Error(code), { name: "PrismaClientKnownRequestError", code });
+  try {
+    messageCreateThrows = known("P2003");
+    const res = await postMessage(admin.token, "issue-gone", { body: "too late" });
+    assert.equal(res.status, 404);
+    assert.deepEqual(await res.json(), { error: "Not found" });
+    assert.equal(opsOf("issue.updateMany").length, 0);
+    assert.equal(sseEvents.length, 0);
+
+    messageCreateThrows = known("P2002");
+    await assert.rejects(postMessage(admin.token, "issue-gone", { body: "something else" }), /P2002/);
+  } finally {
+    messageCreateThrows = null;
   }
 });
 

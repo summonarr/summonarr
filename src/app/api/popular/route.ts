@@ -45,8 +45,9 @@ export const GET = withAuth(async (request, _ctx, session) => {
       mediaTypeFilter === "tv" ? SKIPPED : getMostPopularOnServer({ mediaType: "MOVIE", sort, page: requestedPage }),
       mediaTypeFilter === "movies" ? SKIPPED : getMostPopularOnServer({ mediaType: "TV", sort, page: requestedPage }),
     ]);
-    // getMostPopularOnServer clamps a deep ?page= to the last page a ranking
-    // holds; the page and rank offset answered are the page it SERVED.
+    // getMostPopularOnServer clamps a deep ?page= to page 100 only: a page past
+    // the ranking's own last page is served as asked, with no items. The page
+    // and rank offset answered are the page it SERVED.
     const page = Math.max(moviesResult.page, tvResult.page);
 
     const [movieTitles, tvTitles] = await Promise.all([

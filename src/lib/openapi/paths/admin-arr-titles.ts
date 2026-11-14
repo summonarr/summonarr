@@ -612,7 +612,7 @@ export const adminArrTitlePaths: OpenApiPaths = {
                   commandIds: ARR_COMMAND_IDS,
                   seasons: { type: "array", items: { type: "integer" }, description: "searchMissing only: the seasons searched whole" },
                   episodes: { type: "integer", description: "searchMissing only: the episodes searched one by one" },
-                  partial: { type: "boolean", enum: [true], description: "searchMissing only, present when a later command was refused part-way" },
+                  partial: { type: "boolean", enum: [true], description: "searchMissing only, present when a later command was refused part-way, or a series with more missing seasons than one search covers was searched in part" },
                 },
               },
             },

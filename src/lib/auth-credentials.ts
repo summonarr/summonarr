@@ -121,11 +121,21 @@ function noticeAccountLockout(user: CredentialsUser | null, accountKey: string, 
 // one when the compare-and-swap landed, else the verified one (a concurrent
 // password change won, or the write failed). The two-factor challenge
 // fingerprints THIS value, so it must match what the MFA step will re-read.
+// A lost compare-and-swap is not always a password change: a concurrent sign-in
+// with the SAME password rehashes too. So the stored hash is re-read and used
+// only when this plaintext verifies against it — a hash this request has itself
+// proven (guardrail 6d), never one a real password change wrote. Without it the
+// loser's challenge carried a fingerprint the row no longer held and its
+// correct code was answered "expired".
 async function rehashPassword(userId: string, verifiedHash: string, password: string): Promise<string> {
   try {
     const passwordHash = await hashPassword(password);
     const { count } = await prisma.user.updateMany({ where: { id: userId, passwordHash: verifiedHash }, data: { passwordHash } });
-    return count === 1 ? passwordHash : verifiedHash;
+    if (count === 1) return passwordHash;
+    const row = await prisma.user.findUnique({ where: { id: userId }, select: { passwordHash: true } });
+    const stored = row?.passwordHash;
+    if (stored && stored !== verifiedHash && (await verifyPassword(password, stored))) return stored;
+    return verifiedHash;
   } catch (err) {
     console.error("[auth] password rehash failed:", err instanceof Error ? err.message : err);
     return verifiedHash;

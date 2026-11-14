@@ -1823,6 +1823,28 @@ test("thumb with NO serverInstance proxies off the DEFAULT Plex", async () => {
   assert.ok(!settingReads.some((k) => k.startsWith("plexRemote")));
 });
 
+test("thumb: a body that fails mid-read answers the 502, not a 500", async () => {
+  const a = await admin();
+  configureServers();
+  // Headers arrive fine; the stream then errors (a dropped connection, or a
+  // chunked body running past the byte cap).
+  respond = () => new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([0x89, 0x50]));
+        controller.error(new Error("socket hang up"));
+      },
+    }),
+    { status: 200, headers: { "content-type": "image/png" } },
+  );
+
+  const res = await inScope(a.header, () =>
+    thumb(req(thumbUrl({ path: "/library/metadata/1001/thumb/17" }), { headers: a.header })));
+
+  assert.equal(res.status, 502);
+  assert.equal(await res.text(), "Thumb fetch failed");
+});
+
 test("thumb: a relative path that is not an item's artwork is refused before any Plex read — no token'd GET for a delegate", async () => {
   // The fetch carries the admin X-Plex-Token and the caller needs only
   // MANAGE_ISSUES; the image content-type check runs after the request, so it

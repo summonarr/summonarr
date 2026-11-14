@@ -473,6 +473,57 @@ test("planSeriesSearch takes a 200k-episode season's missing ids one by one, nev
   assert.deepEqual([plan.episodeIds[0], plan.episodeIds.at(-1)], [1, n]);
 });
 
+const AIRED = "2020-01-01T00:00:00Z";
+const missingEp = (id: number, seasonNumber: number, episodeNumber: number) => ({ id, seasonNumber, episodeNumber, hasFile: false, monitored: true, airDateUtc: AIRED });
+
+test("missingEpisodes keeps at most MAX_TITLE_EPISODES of 100k missing episodes, and reads a bounded prefix of ones that are not", () => {
+  const all = M.missingEpisodes(Array.from({ length: BIG }, (_, i) => missingEp(i + 1, 1, i + 1)), NOW);
+  assert.equal(all.length, T.MAX_TITLE_EPISODES);
+  assert.deepEqual([all[0].episodeNumber, all.at(-1)!.episodeNumber], [1, T.MAX_TITLE_EPISODES]);
+  assert.equal(M.MAX_EPISODE_ROWS_READ, T.MAX_TITLE_EPISODES * T.PROJECTION_SCAN_FACTOR);
+  // Nothing missing, so the output cap never stops the read: the scan bound must.
+  const onDisk = counted(Array.from({ length: M.MAX_EPISODE_ROWS_READ + BIG }, (_, i) => ({ ...missingEp(i + 1, 1, i + 1), hasFile: true })));
+  assert.deepEqual(M.missingEpisodes(onDisk.list, NOW), []);
+  assert.ok(onDisk.reads() <= M.MAX_EPISODE_ROWS_READ, `read ${onDisk.reads()} rows`);
+});
+
+test("planSeriesSearch reads a bounded prefix of a series' episode list, and says the plan was cut", () => {
+  const rows = counted(Array.from({ length: M.MAX_EPISODE_ROWS_READ + BIG }, (_, i) => ({ ...missingEp(i + 1, 1, i + 1), hasFile: true })));
+  // The one missing episode sits past the scan bound: never read, never planned.
+  rows.list[rows.list.length - 1] = missingEp(1, 2, 1);
+  const before = rows.reads();
+  const plan = M.planSeriesSearch(rows.list, NOW);
+  assert.ok(rows.reads() - before <= M.MAX_EPISODE_ROWS_READ, `read ${rows.reads() - before} rows`);
+  assert.deepEqual(plan, { seasons: [], episodeIds: [], truncated: true });
+});
+
+test("planSeriesSearch plans at most MAX_SEARCH_SEASONS whole-season searches, the lowest first, and says the rest were left out", () => {
+  // Every row names its own season pair: 5,000 fully missing seasons.
+  const seasons = 5_000;
+  const rows = Array.from({ length: seasons * 2 }, (_, i) => missingEp(i + 1, Math.floor(i / 2) + 1, (i % 2) + 1));
+  const plan = M.planSeriesSearch(rows, NOW);
+  assert.equal(plan.seasons.length, M.MAX_SEARCH_SEASONS);
+  assert.deepEqual([plan.seasons[0], plan.seasons.at(-1)], [1, M.MAX_SEARCH_SEASONS]);
+  // A dropped season is not searched episode by episode instead.
+  assert.deepEqual(plan.episodeIds, []);
+  assert.equal(plan.truncated, true);
+
+  // A plan the caps never touched carries no flag at all.
+  const honest = M.planSeriesSearch(rows.slice(0, M.MAX_SEARCH_SEASONS * 2), NOW);
+  assert.equal(honest.seasons.length, M.MAX_SEARCH_SEASONS);
+  assert.ok(!("truncated" in honest));
+});
+
+test("the manual import episode picker keeps at most MAX_TITLE_EPISODES of 100k episodes, and reads a bounded prefix of junk", () => {
+  const all = queueData.projectImportEpisodes(Array.from({ length: BIG }, (_, i) => ({ id: i + 1, seasonNumber: 1, episodeNumber: i + 1 })));
+  assert.equal(all.length, T.MAX_TITLE_EPISODES);
+  assert.deepEqual([all[0].id, all.at(-1)!.id], [1, T.MAX_TITLE_EPISODES]);
+  const junk = counted(Array.from({ length: T.MAX_TITLE_EPISODES * T.PROJECTION_SCAN_FACTOR + BIG }, () => ({ id: "x" })));
+  assert.deepEqual(queueData.projectImportEpisodes(junk.list), []);
+  assert.ok(junk.reads() <= T.MAX_TITLE_EPISODES * T.PROJECTION_SCAN_FACTOR, `read ${junk.reads()} rows`);
+  assert.deepEqual(queueData.projectImportEpisodes({ not: "a list" }), []);
+});
+
 // ── Radarr/Sonarr health and the webhook check ──────────────────────────────
 
 test("normalizeHealthChecks keeps at most MAX_CHECKS of 100k checks, errors first, and reads a bounded prefix", () => {
@@ -690,6 +741,24 @@ test("loadMissingMovies and loadMissingSeries survive a 130k-title listing: capp
   // A listing judged to its end carries no flag at all.
   answers.set(`${RADARR}/api/v3/movie`, jsonOf([{ id: 1, digitalRelease: "2020-01-01T00:00:00Z" }, { id: 2, hasFile: true }]));
   assert.equal((await missingData.loadMissingMovies(new Date(NOW))).truncated, undefined);
+});
+
+test("searchMissing queues at most MAX_SEARCH_SEASONS season searches for a series of 5,000 missing seasons, and answers partial", async () => {
+  answers.clear();
+  const seasons = 5_000;
+  answers.set(`${SONARR}/api/v3/episode`, jsonOf(Array.from({ length: seasons * 2 }, (_, i) => missingEp(i + 1, Math.floor(i / 2) + 1, (i % 2) + 1))));
+  let commands = 0;
+  answers.set(`${SONARR}/api/v3/command`, () => ({ id: ++commands }));
+  const result = await missingData.searchMissing("sonarr", "", 7, new Date(NOW));
+  assert.equal(commands, M.MAX_SEARCH_SEASONS, "one awaited POST per planned season, and the plan is capped");
+  assert.equal(result.commands, M.MAX_SEARCH_SEASONS);
+  assert.equal(result.seasons.length, M.MAX_SEARCH_SEASONS);
+  assert.equal(result.partial, true);
+
+  // A series the cap never touched answers without the flag.
+  commands = 0;
+  answers.set(`${SONARR}/api/v3/episode`, jsonOf([missingEp(1, 1, 1), missingEp(2, 1, 2)]));
+  assert.deepEqual(await missingData.searchMissing("sonarr", "", 7, new Date(NOW)), { commands: 1, seasons: [1], episodes: 0 });
 });
 
 test("the Calendar and Missing modules append one by one: no spread push anywhere in them", () => {

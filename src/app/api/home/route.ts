@@ -2,13 +2,13 @@ import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import {
-  getTrending,
-  getPopularMovies,
-  getPopularTV,
-  getUpcomingMovies,
-  getOnTheAirTV,
-  getTopRatedMovies,
-  getTopRatedTV,
+  getTrendingChecked,
+  getPopularMoviesChecked,
+  getPopularTVChecked,
+  getUpcomingMoviesChecked,
+  getOnTheAirTVChecked,
+  getTopRatedWithStatus,
+  type PagedList,
   type TmdbMedia,
 } from "@/lib/tmdb";
 import { attachAllAvailability } from "@/lib/attach-all";
@@ -49,18 +49,35 @@ export const GET = withAuth(async (request, _ctx, session) => {
     const topEnabled = flags["feature.page.top"];
     const none = () => Promise.resolve([] as TmdbMedia[]);
 
+    // The TMDB list getters absorb a failed page, so an outage on a cold cache
+    // reads as an empty list. Read each with its `complete` flag and name the
+    // rails that came back with nothing AND incomplete (or threw), so a client
+    // can tell an outage from an empty feed. A partly-answered rail still shows.
+    const failed = new Set<string>();
+    const tmdbRail = (id: string, list: Promise<PagedList>) =>
+      list.then(
+        ({ items, complete }) => {
+          if (!complete && items.length === 0) failed.add(id);
+          return items;
+        },
+        (err: unknown) => {
+          failed.add(id);
+          throw err;
+        },
+      );
+
     // A rail whose source rejected degrades to an omitted rail (better than
     // 500ing the whole feed); settleSources logs each rejection by name. The
     // 4K-visibility read runs alongside, and a failure there still 500s.
     const [lists, show4k] = await Promise.all([
       settleSources("home", {
-        trending: getTrending(),
-        "popular-movies": getPopularMovies(),
-        "popular-tv": getPopularTV(),
-        "upcoming-movies": upcomingEnabled ? getUpcomingMovies() : none(),
-        "on-the-air-tv": upcomingEnabled ? getOnTheAirTV() : none(),
-        "top-rated-movies": topEnabled ? getTopRatedMovies() : none(),
-        "top-rated-tv": topEnabled ? getTopRatedTV() : none(),
+        trending: tmdbRail("trending", getTrendingChecked()),
+        "popular-movies": tmdbRail("popular-movies", getPopularMoviesChecked()),
+        "popular-tv": tmdbRail("popular-tv", getPopularTVChecked()),
+        "upcoming-movies": upcomingEnabled ? tmdbRail("upcoming-movies", getUpcomingMoviesChecked()) : none(),
+        "on-the-air-tv": upcomingEnabled ? tmdbRail("on-the-air-tv", getOnTheAirTVChecked()) : none(),
+        "top-rated-movies": topEnabled ? tmdbRail("top-rated-movies", getTopRatedWithStatus("movie")) : none(),
+        "top-rated-tv": topEnabled ? tmdbRail("top-rated-tv", getTopRatedWithStatus("tv")) : none(),
         // The For You rail is gated at emit time below, so don't pay the
         // recommendation read (~8 queries) plus the enrichment of its 20 extra
         // titles for a rail the default (flag-off) configuration then discards.
@@ -122,7 +139,9 @@ export const GET = withAuth(async (request, _ctx, session) => {
       ...tmdbRails.map((r) => ({ id: r.id, title: t(r.titleKey), items: pick(r.raw) })),
     ].filter((c) => c.items.length > 0);
 
-    return NextResponse.json({ featured, carousels });
+    // Additive, always present (as on /api/top-rated), in rail order.
+    const failedSources = ["trending", ...tmdbRails.map((r) => r.id)].filter((id) => failed.has(id));
+    return NextResponse.json({ featured, carousels, failedSources });
   } catch (err) {
     console.error("[home] Failed:", err);
     return NextResponse.json({ error: t("apiUser.common.fetchFailed") }, { status: 500 });

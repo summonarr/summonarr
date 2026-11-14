@@ -16,6 +16,7 @@ import { announceRequestComment } from "@/lib/request-comment-notify";
 import { THREAD_READ_CAP } from "@/lib/api-body-limits";
 import { splitAtCap, truncationHeaders } from "@/lib/truncation";
 import { olderThanWhere, parseThreadCursor } from "@/lib/thread-cursor";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -107,10 +108,19 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   // sanitizeText can strip a body made only of markup characters down to nothing.
   if (!text) return NextResponse.json({ error: t("apiUser.comments.bodyRequired") }, { status: 400 });
 
-  const comment = await prisma.requestComment.create({
-    data: { requestId: id, authorId: session.user.id, body: text, fromAdmin: isManager },
-    include: { author: { select: { name: true, role: true, ...(isManager ? { email: true } : {}) } } },
-  });
+  // The request was read above, outside any transaction: one deleted since then
+  // fails the comment's foreign key (P2003), which is this route's 404, not a 500.
+  // A bare create with no transaction around it, so catching is safe (guardrail 23).
+  let comment;
+  try {
+    comment = await prisma.requestComment.create({
+      data: { requestId: id, authorId: session.user.id, body: text, fromAdmin: isManager },
+      include: { author: { select: { name: true, role: true, ...(isManager ? { email: true } : {}) } } },
+    });
+  } catch (err) {
+    if (!isPrismaErrorCode(err, "P2003")) throw err;
+    return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
+  }
 
   emitSSE({ type: "request:comment", requestId: id, userId: request.requestedBy });
 

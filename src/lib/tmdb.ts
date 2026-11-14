@@ -709,8 +709,16 @@ function loadPagedList<R extends { id: number }>(spec: PagedListSpec<R>): Promis
 type RawTrending = RawMovie & RawTV & { media_type: string };
 
 export async function getTrending(): Promise<TmdbMedia[]> {
+  return (await getTrendingChecked()).items;
+}
+
+// The *Checked twins of the list getters: the same list (same cache key, same
+// coalesced load) with whether every TMDB page answered. For a reader that must
+// tell an empty list from an outage — the getters above return `.items` only,
+// so a TMDB failure reads as "nothing there" (the home feed, the cache warm).
+export function getTrendingChecked(): Promise<PagedList> {
   const key = "trending:week";
-  return (await loadPagedList<RawTrending>({
+  return loadPagedList<RawTrending>({
     key,
     path: "/trending/all/week",
     pages: PAGES,
@@ -721,21 +729,29 @@ export async function getTrending(): Promise<TmdbMedia[]> {
     // composite identity, as every other dedupe in the tree does.
     identity: (r) => `${r.media_type}:${r.id}`,
     normalize: (r) => (r.media_type === "movie" ? normalizeMovie(r) : normalizeTV(r)),
-  })).items;
+  });
 }
 
 export async function getPopularMovies(): Promise<TmdbMedia[]> {
+  return (await getPopularMoviesChecked()).items;
+}
+
+export function getPopularMoviesChecked(): Promise<PagedList> {
   const key = "movies:popular";
-  return (await loadPagedList<RawMovie>({
+  return loadPagedList<RawMovie>({
     key, path: "/movie/popular", pages: BROWSE_PAGES, normalize: normalizeMovie,
-  })).items;
+  });
 }
 
 export async function getPopularTV(): Promise<TmdbMedia[]> {
+  return (await getPopularTVChecked()).items;
+}
+
+export function getPopularTVChecked(): Promise<PagedList> {
   const key = "tv:popular";
-  return (await loadPagedList<RawTV>({
+  return loadPagedList<RawTV>({
     key, path: "/tv/popular", pages: BROWSE_PAGES, normalize: normalizeTV,
-  })).items;
+  });
 }
 
 export async function searchMulti(query: string): Promise<TmdbMedia[]> {
@@ -814,10 +830,15 @@ function loadUpcomingMovies(): Promise<UpcomingList> {
 }
 
 export async function getOnTheAirTV(): Promise<TmdbMedia[]> {
+  return (await getOnTheAirTVChecked()).items;
+}
+
+/** getOnTheAirTV with whether every TMDB page answered (see getTrendingChecked). */
+export function getOnTheAirTVChecked(): Promise<PagedList> {
   const key = "tv:on_the_air";
-  return (await loadPagedList<RawTV>({
+  return loadPagedList<RawTV>({
     key, path: "/tv/on_the_air", pages: UPCOMING_PAGES, normalize: normalizeTV,
-  })).items;
+  });
 }
 
 export async function getUpcomingTV(): Promise<TmdbMedia[]> {

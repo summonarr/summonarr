@@ -785,6 +785,29 @@ test("POST: a kept (mask) secret with a CHANGED server address is refused 400 wi
   assert.equal(settings.get("plexRemoteAdminToken"), "typed-again");
 });
 
+test("POST: an OMITTED secret keeps the stored one too, so a changed address is refused 400 with ZERO writes; with no secret stored, or an explicit clear, it saves", async () => {
+  const admin = await mintSession("ADMIN");
+  settings.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  settings.set("jellyfinRemoteUrl", "http://10.0.0.5:8096");
+  settings.set("jellyfinRemoteApiKey", "original-secret");
+  const post = (inst: Record<string, unknown>) =>
+    POST(postReq({ service: "jellyfin", instances: [{ slug: "remote", name: "Remote", ...inst }] }, admin.header), undefined);
+
+  const moved = await post({ url: "http://evil.example:8096" });
+  assert.equal(moved.status, 400);
+  assert.equal(opsFor("setting", "upsert").length, 0);
+  assert.equal(settings.get("jellyfinRemoteUrl"), "http://10.0.0.5:8096");
+
+  // The same address with the field left out is an ordinary save.
+  assert.equal((await post({ url: "http://10.0.0.5:8096/" })).status, 200);
+  // An explicit "" clears the secret, so nothing follows the new address.
+  assert.equal((await post({ url: "http://other.example:8096", apiKey: "" })).status, 200);
+  assert.equal(settings.get("jellyfinRemoteApiKey"), "");
+  // No secret stored: an omitted field keeps nothing.
+  assert.equal((await post({ url: "http://third.example:8096" })).status, 200);
+  assert.equal(settings.get("jellyfinRemoteUrl"), "http://third.example:8096");
+});
+
 test("POST: free-text fields past their cap are refused 400 before any write", async () => {
   const admin = await mintSession("ADMIN");
   const res = await POST(

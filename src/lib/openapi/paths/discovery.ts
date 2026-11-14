@@ -103,12 +103,12 @@ export const discoveryPaths: OpenApiPaths = {
       ],
       responses: {
         "200": {
-          description: "{ featured, carousels } — grouped discovery rails with availability enrichment",
+          description: "{ featured, carousels, failedSources } — grouped discovery rails with availability enrichment",
           content: {
             "application/json": {
               schema: {
                 type: "object",
-                required: ["featured", "carousels"],
+                required: ["featured", "carousels", "failedSources"],
                 properties: {
                   featured: { ...TMDB_MEDIA_LIST, description: "The first trending movie and the first trending TV title (0–2 items)" },
                   carousels: {
@@ -122,6 +122,16 @@ export const discoveryPaths: OpenApiPaths = {
                       required: ["id", "title", "items"],
                       properties: { id: { type: "string" }, title: { type: "string" }, items: TMDB_MEDIA_LIST },
                     },
+                  },
+                  failedSources: {
+                    type: "array",
+                    items: {
+                      type: "string",
+                      enum: ["trending", "popular-movies", "popular-tv", "upcoming-movies", "on-the-air-tv", "top-rated-movies", "top-rated-tv"],
+                    },
+                    description:
+                      "Additive: the TMDB rails (by carousel id) that could not be loaded and so came back with no titles — an empty feed with " +
+                      "failed sources is an outage, not an empty catalog. Always sent, empty when every rail answered; a server older than this field omits it.",
                   },
                 },
               },
@@ -171,7 +181,7 @@ export const discoveryPaths: OpenApiPaths = {
       summary: "Most-played movies and TV on the connected media servers",
       parameters: [
         { name: "mediaType", in: "query", schema: { type: "string", enum: ["movies", "movie", "tv"] }, description: "Restrict to one type (\"movie\" is accepted for \"movies\"); omitted returns both; any other value is 400" },
-        { name: "page", in: "query", schema: { type: "integer", default: 1 }, description: "Clamped to the ranking's last page (100)" },
+        { name: "page", in: "query", schema: { type: "integer", default: 1 }, description: "Clamped to 100. A page past the ranking's own last page is served as asked, with empty lists" },
         { name: "sort", in: "query", schema: { type: "string", enum: ["trending", "plays", "viewers"], default: "trending" } },
       ],
       responses: {
@@ -188,7 +198,7 @@ export const discoveryPaths: OpenApiPaths = {
                   totalMovies: { type: "integer" },
                   totalTv: { type: "integer" },
                   totalPages: { type: "integer" },
-                  page: { type: "integer", description: "The page served (a request past the ranking's last page gets its last page, at most 100)" },
+                  page: { type: "integer", description: "The page served: the requested page, at most 100. Past the ranking's own last page (`totalPages`) the lists are empty" },
                   sort: { type: "string", enum: ["plays", "viewers", "trending"] },
                   rankOffset: { type: "integer", description: "The rank before this page's first title: (served page − 1) × the page size" },
                 },
@@ -390,6 +400,7 @@ export const discoveryPaths: OpenApiPaths = {
           },
         },
         "400": { description: "Invalid TV id or season number" },
+        "404": { description: "TMDB has no such show or season" },
         "429": { description: "Rate limited" },
         "502": { description: "TMDB season fetch failed" },
       },

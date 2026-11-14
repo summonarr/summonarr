@@ -33,3 +33,64 @@ test("both Resync routes finish through the shared helpers, not their own copies
     assert.doesNotMatch(text, /LIBRARY_SYNC/, `${src} writes no audit row of its own`);
   }
 });
+
+// ── runResyncHoldingLock: when the caller is answered ────────────────────────
+{
+  const { Client } = await import("pg");
+  const { runResyncHoldingLock } = await import("../src/lib/library-resync.ts");
+  const calls: string[] = [];
+  const pgProto = Client.prototype as unknown as {
+    connect: () => Promise<void>;
+    query: (t: string) => Promise<{ rows: unknown[] }>;
+    end: () => Promise<void>;
+  };
+  pgProto.connect = async () => {};
+  pgProto.query = async (text) => {
+    if (text.includes("pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
+    if (text.includes("pg_advisory_unlock")) calls.push("unlock");
+    return { rows: [] };
+  };
+  pgProto.end = async () => {};
+
+  // A run whose held work finishes only when `finish` is called.
+  const runWith = (answer?: "early" | "onRelease") => {
+    let finish!: () => void;
+    const heldWork = new Promise<void>((r) => { finish = r; });
+    const answered = runResyncHoldingLock(
+      4242,
+      async (_signal, hold) => { hold(heldWork); return Response.json({ ok: true }); },
+      () => Response.json({ skipped: true }),
+      answer,
+    ).then((res) => { calls.push("answered"); return res; });
+    return { answered, finish };
+  };
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+
+  test("by default the caller is answered while the held work still keeps the lock", async () => {
+    calls.length = 0;
+    const { answered, finish } = runWith();
+    await answered;
+    assert.deepEqual(calls, ["answered"]);
+    finish();
+    await settle();
+    assert.deepEqual(calls, ["answered", "unlock"]);
+  });
+
+  test("a background job is answered only once the lock is released, so the next server's request can take it", async () => {
+    calls.length = 0;
+    const { answered, finish } = runWith("onRelease");
+    await settle();
+    assert.deepEqual(calls, [], "answered while the held work still had the lock");
+    finish();
+    const res = await answered;
+    assert.deepEqual(calls, ["unlock", "answered"]);
+    assert.deepEqual(await res.json(), { ok: true });
+  });
+
+  test("both Resync routes run their background job to the lock's release", () => {
+    for (const svc of ["plex", "jellyfin"]) {
+      const src = readFileSync(new URL(`../src/app/api/sync/${svc}/route.ts`, import.meta.url), "utf8");
+      assert.match(src, /startLibraryJob\([^\n]*\(\) => run\("onRelease"\)\)/, `${svc} job answers early`);
+    }
+  });
+}

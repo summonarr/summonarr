@@ -27,30 +27,41 @@ export type AuditParams = {
 // keys, instance lists, error arrays) would otherwise write a row the viewer
 // and the export load whole. An oversized details is replaced by a marker
 // object, so the column still holds valid JSON for every reader.
-export const MAX_AUDIT_TARGET_LENGTH = 512;
-// Cap for the short identity columns (name, address, agent, provider), so a caller that
-// passes a raw value straight in can never write an unbounded string.
-const MAX_AUDIT_FIELD_LENGTH = 512;
-export const MAX_AUDIT_DETAILS_LENGTH = 16 * 1024;
+// Every cap is the AuditLog COLUMN's width (prisma/schema.prisma). A cap above
+// the column let a value in between through to Postgres, which refuses an
+// over-length varchar — and logAudit swallows that, so the row was silently
+// lost. JS length counts UTF-16 units, never fewer than the characters
+// Postgres counts. tests/audit.test.mts pins each cap to the schema.
+export const MAX_AUDIT_TARGET_LENGTH = 500;
+export const MAX_AUDIT_DETAILS_LENGTH = 8000;
+const MAX_AUDIT_USER_NAME_LENGTH = 256;
+const MAX_AUDIT_IP_LENGTH = 64;
+const MAX_AUDIT_USER_AGENT_LENGTH = 512;
+const MAX_AUDIT_PROVIDER_LENGTH = 32;
+const MAX_AUDIT_ID_LENGTH = 64;
+// The marker's own key list is bounded so the marker always fits the column.
+const MAX_AUDIT_MARKER_KEYS = 50;
+const MAX_AUDIT_MARKER_KEY_LENGTH = 100;
 
 export function auditDetailsJson(details: Record<string, unknown> | undefined): string | null {
   if (!details) return null;
   const json = JSON.stringify(details);
   if (json.length <= MAX_AUDIT_DETAILS_LENGTH) return json;
-  return JSON.stringify({ truncated: true, originalLength: json.length, keys: Object.keys(details).slice(0, 50) });
+  const keys = Object.keys(details).slice(0, MAX_AUDIT_MARKER_KEYS).map((k) => k.slice(0, MAX_AUDIT_MARKER_KEY_LENGTH));
+  return JSON.stringify({ truncated: true, originalLength: json.length, keys });
 }
 
 function auditRowData(params: AuditParams) {
   return {
-    userId: params.userId,
-    userName: sanitizeText(params.userName ?? "unknown").slice(0, MAX_AUDIT_FIELD_LENGTH),
+    userId: params.userId === null ? null : params.userId.slice(0, MAX_AUDIT_ID_LENGTH),
+    userName: sanitizeText(params.userName ?? "unknown").slice(0, MAX_AUDIT_USER_NAME_LENGTH),
     action: params.action,
     target: sanitizeText(params.target).slice(0, MAX_AUDIT_TARGET_LENGTH),
     details: auditDetailsJson(params.details),
-    ipAddress: params.ipAddress ? sanitizeForLog(params.ipAddress).slice(0, MAX_AUDIT_FIELD_LENGTH) : null,
-    userAgent: params.userAgent ? sanitizeForLog(params.userAgent).slice(0, MAX_AUDIT_FIELD_LENGTH) : null,
-    provider: params.provider ? params.provider.slice(0, MAX_AUDIT_FIELD_LENGTH) : null,
-    sessionId: params.sessionId ?? null,
+    ipAddress: params.ipAddress ? sanitizeForLog(params.ipAddress).slice(0, MAX_AUDIT_IP_LENGTH) : null,
+    userAgent: params.userAgent ? sanitizeForLog(params.userAgent).slice(0, MAX_AUDIT_USER_AGENT_LENGTH) : null,
+    provider: params.provider ? params.provider.slice(0, MAX_AUDIT_PROVIDER_LENGTH) : null,
+    sessionId: params.sessionId ? params.sessionId.slice(0, MAX_AUDIT_ID_LENGTH) : null,
   };
 }
 

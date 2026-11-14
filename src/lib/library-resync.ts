@@ -168,29 +168,39 @@ export type HoldLock = (work: Promise<unknown>) => void;
  * older one could land after a newer one. Now a second Resync during the crawl
  * skips (onBusy), and the crawl sees the lock's abort signal (guardrail 41).
  * Held work logs its own failures; holding the lock is all it is awaited for.
+ *
+ * `answer: "onRelease"` is for a caller that reads "answered" as "the lock is
+ * free": the admin button's background job, which starts the next server of the
+ * same service (same lock) the moment the job reports done. Answered early, that
+ * next request found the lock still held by this run's held work and was
+ * skipped as "already running", so the second server was never resynced.
  */
 export function runResyncHoldingLock(
   lockId: number,
   work: (signal: AbortSignal, hold: HoldLock) => Promise<Response>,
   onBusy: () => Response,
+  answer: "early" | "onRelease" = "early",
 ): Promise<Response> {
-  return new Promise<Response>((resolve, reject) => {
+  const locked = (onAnswer?: (res: Response) => void, onError?: (err: unknown) => void) =>
     withAdvisoryLock(
       lockId,
       async (signal: AbortSignal) => {
         const held: Promise<unknown>[] = [];
         try {
-          const answer = await work(signal, (p) => { held.push(p.catch(() => {})); });
-          resolve(answer);
-          return answer;
+          const res = await work(signal, (p) => { held.push(p.catch(() => {})); });
+          onAnswer?.(res);
+          return res;
         } catch (err) {
-          reject(err);
+          onError?.(err);
           throw err;
         } finally {
           await Promise.all(held);
         }
       },
       onBusy,
-    ).then(resolve, reject);
+    );
+  if (answer === "onRelease") return locked();
+  return new Promise<Response>((resolve, reject) => {
+    locked(resolve, reject).then(resolve, reject);
   });
 }

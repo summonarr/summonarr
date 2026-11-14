@@ -10,7 +10,8 @@ import { ArrResponseError, arrErrorMessage, arrFetch, arrFetchNoContent, getArrC
 import { ArrInstanceError, configuredArrCfg, enabledArrInstances, postArrCommand } from "./arr-admin";
 import { settleArrInstances } from "./arr-instance-fanout";
 import type { ArrErrorKind } from "./arr-error-kind";
-import { pagedReadEnded } from "./arr-parse";
+import { pagedReadEnded, PROJECTION_SCAN_FACTOR } from "./arr-parse";
+import { MAX_TITLE_EPISODES } from "./arr-title";
 import { mapLimit } from "./concurrency";
 import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
 import { prisma } from "./prisma";
@@ -635,13 +636,17 @@ export async function searchImportTargets(service: QueueService, instance: strin
 
 export interface ImportEpisodeChoice extends QueueEpisode { id: number; title: string; hasFile: boolean }
 
-/** One Sonarr series' episodes, for picking what a file holds. */
-export async function loadSeriesEpisodes(instance: string, seriesId: number): Promise<ImportEpisodeChoice[]> {
-  const cfg = await configuredCfg("sonarr", instance);
-  const rows = await arrFetch<unknown>(cfg, `/api/v3/episode?seriesId=${seriesId}`);
+/**
+ * A series' /api/v3/episode list as the picker's choices. arrFetch caps the
+ * answer only by size, and this is projected and sorted synchronously, so it
+ * keeps at most the title manager's MAX_TITLE_EPISODES and reads at most
+ * PROJECTION_SCAN_FACTOR times that of the raw list (guardrail 5i).
+ */
+export function projectImportEpisodes(rows: unknown): ImportEpisodeChoice[] {
   if (!Array.isArray(rows)) return [];
   const out: ImportEpisodeChoice[] = [];
-  for (const e of rows as Array<{ id?: unknown; seasonNumber?: unknown; episodeNumber?: unknown; title?: unknown; hasFile?: unknown } | null>) {
+  for (let i = 0, n = Math.min(rows.length, MAX_TITLE_EPISODES * PROJECTION_SCAN_FACTOR); i < n && out.length < MAX_TITLE_EPISODES; i++) {
+    const e = rows[i] as { id?: unknown; seasonNumber?: unknown; episodeNumber?: unknown; title?: unknown; hasFile?: unknown } | null;
     if (typeof e?.id !== "number" || typeof e.seasonNumber !== "number" || typeof e.episodeNumber !== "number") continue;
     out.push({
       id: e.id,
@@ -652,4 +657,10 @@ export async function loadSeriesEpisodes(instance: string, seriesId: number): Pr
     });
   }
   return out.sort((a, b) => a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber);
+}
+
+/** One Sonarr series' episodes, for picking what a file holds. */
+export async function loadSeriesEpisodes(instance: string, seriesId: number): Promise<ImportEpisodeChoice[]> {
+  const cfg = await configuredCfg("sonarr", instance);
+  return projectImportEpisodes(await arrFetch<unknown>(cfg, `/api/v3/episode?seriesId=${seriesId}`));
 }

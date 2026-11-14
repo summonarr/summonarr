@@ -1281,6 +1281,46 @@ test("a single user's download-policy change is audited with its before and afte
   assert.equal(details.targetCount, 1);
 });
 
+test("a policy change on a Jellyfin server with no URL or API key answers pushed: false with the warning, and audits no push", async () => {
+  const admin = await mintSession("ADMIN");
+  const msuId = seedServerUser({ source: "jellyfin" });
+  Object.assign(serverUsersById.get(msuId)!, { downloadsEnabled: true, serverInstance: "", sourceUserId: "jf-u1" });
+  // No jellyfinUrl/jellyfinApiKey settings seeded: nothing can be sent.
+  const res = await serverUserPatch(linkReq(msuId, { downloadsEnabled: false }, admin.header), ctxFor(msuId));
+  assert.equal(res.status, 200);
+  const body = await res.json() as { ok: boolean; pushed: boolean; warning?: string };
+  assert.equal(body.ok, true);
+  assert.equal(body.pushed, false, "nothing reached a server, so the answer must not say it was pushed");
+  assert.equal(typeof body.warning, "string");
+  assert.deepEqual(fetchCalls, []);
+  // The stored value is still saved.
+  assert.equal((serverUsersById.get(msuId) as ServerUserRow & { downloadsEnabled?: boolean }).downloadsEnabled, false);
+  await flush();
+  const row = auditRows.find((r) => r.target === `mediaServerUser:${msuId}`);
+  assert.ok(row);
+  assert.equal((JSON.parse(row.details as string) as Record<string, unknown>).pushed, 0);
+});
+
+test("a policy change on a configured Jellyfin server answers pushed: true once the policy POST went out", async () => {
+  const admin = await mintSession("ADMIN");
+  settings.set("jellyfinUrl", JF_BASE);
+  settings.set("jellyfinApiKey", "jf-key-1");
+  const msuId = seedServerUser({ source: "jellyfin" });
+  Object.assign(serverUsersById.get(msuId)!, { downloadsEnabled: true, serverInstance: "", sourceUserId: "jf-u1" });
+  respond = (url) => {
+    if (url.pathname === "/Users/jf-u1") return okJson({ Id: "jf-u1", Policy: { IsAdministrator: false, EnableContentDownloading: true } });
+    if (url.pathname === "/Users/jf-u1/Policy") return new Response(null, { status: 204 });
+    throw new Error(`unexpected Jellyfin fetch ${url}`);
+  };
+  const res = await serverUserPatch(linkReq(msuId, { downloadsEnabled: false }, admin.header), ctxFor(msuId));
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true, pushed: true });
+  assert.ok(fetchCalls.some((c) => c.method === "POST" && c.url.pathname === "/Users/jf-u1/Policy"));
+  await flush();
+  const row = auditRows.find((r) => r.target === `mediaServerUser:${msuId}`);
+  assert.equal((JSON.parse(row!.details as string) as Record<string, unknown>).pushed, 1);
+});
+
 test("an ADMIN may still link anything, including to themselves and the server owner's identity", async () => {
   const admin = await mintSession("ADMIN");
   const owner = seedServerUser({ source: "plex", isServerAdmin: true });

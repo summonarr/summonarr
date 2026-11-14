@@ -120,9 +120,13 @@ let threadRows: ThreadRow[] = [];
 shadowPrismaModel(prisma, "mediaRequest", {
   findUnique: async (args: unknown) => { rec("mediaRequest.findUnique", args); return requestRow ? { ...requestRow } : null; },
 });
+// When set, requestComment.create rejects with it (the request deleted since the read).
+let commentCreateThrows: unknown = null;
+const prismaKnownError = (code: string) => Object.assign(new Error(code), { name: "PrismaClientKnownRequestError", code });
 shadowPrismaModel(prisma, "requestComment", {
   create: async (args: { data: Record<string, unknown>; include?: unknown }) => {
     rec("requestComment.create", args);
+    if (commentCreateThrows) throw commentCreateThrows;
     return { id: `c-${Date.now()}-${Math.random()}`, createdAt: new Date(), author: { name: "n", role: "USER" }, ...args.data };
   },
   // Honours orderBy (createdAt, then id) and take over `threadRows`, like the real query.
@@ -379,6 +383,26 @@ test("a comment is audited as REQUEST_COMMENT under request:<id> with ids and ti
   assert.ok(typeof details.commentId === "string");
   const raw = JSON.stringify(row.details);
   assert.ok(!raw.includes("secret text") && !raw.includes("@example.com"), raw);
+});
+
+test("a request deleted between the read and the insert is the 404 — no SSE, audit or inbox row; any other write error still throws", async () => {
+  const owner = await mintSession();
+  requestOwnedBy(owner.userId);
+  try {
+    commentCreateThrows = prismaKnownError("P2003");
+    const res = await post(owner.token, "req-1", { body: "too late" });
+    assert.equal(res.status, 404);
+    assert.deepEqual(await res.json(), { error: "Not found" });
+    await flush();
+    assert.equal(sseEvents.length, 0);
+    assert.equal(opsOf("auditLog.create").length, 0);
+    assert.equal(opsOf("notification.create").length, 0);
+
+    commentCreateThrows = prismaKnownError("P2002");
+    await assert.rejects(post(owner.token, "req-1", { body: "something else" }), /P2002/);
+  } finally {
+    commentCreateThrows = null;
+  }
 });
 
 test("a failed audit write never breaks a committed comment (guardrail 26)", async () => {

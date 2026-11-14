@@ -176,12 +176,12 @@ shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) =>
 const media = await import("../src/app/api/media/[type]/[tmdbId]/route.ts");
 
 // ── scope ────────────────────────────────────────────────────────────────────
-function inScope<T>(fn: () => Promise<T>): Promise<T> {
+function inScope<T>(fn: () => Promise<T>, scopeHeaders: Record<string, string> = {}): Promise<T> {
   const workStore = {
     route: "/review-p21.test", forceStatic: false, dynamicShouldError: false,
     afterContext: { after: () => {} },
   };
-  const reqHeaders = new Headers();
+  const reqHeaders = new Headers(scopeHeaders);
   const requestStore = {
     type: "request", phase: "render",
     headers: HeadersAdapter.seal(reqHeaders),
@@ -190,11 +190,13 @@ function inScope<T>(fn: () => Promise<T>): Promise<T> {
   };
   return workAsyncStorage.run(workStore, () => workUnitAsyncStorage.run(requestStore, fn));
 }
-const mediaGet = (token: string, type: string, tmdbId: string) =>
+// `extra` headers ride on the request AND on the scope's headers() bag (the
+// content-language overlay reads the latter).
+const mediaGet = (token: string, type: string, tmdbId: string, extra: Record<string, string> = {}) =>
   inScope(() => media.GET(
-    new NextRequest(`http://localhost:3000/api/media/${type}/${tmdbId}`, { method: "GET", headers: { cookie: `${COOKIE}=${token}` } }),
+    new NextRequest(`http://localhost:3000/api/media/${type}/${tmdbId}`, { method: "GET", headers: { cookie: `${COOKIE}=${token}`, ...extra } }),
     { params: Promise.resolve({ type, tmdbId }) },
-  ));
+  ), extra);
 
 beforeEach(() => {
   ops = [];
@@ -265,6 +267,47 @@ test("an id TMDB doesn't know is a 404, told apart from an outage's 502", async 
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+// ── genres: the id+name list is in the same language as the names ────────────
+
+// A fresh id with genres; TMDB's fr genre list renames 18 and leaves 878 out, so
+// the overlay keeps that one's English name.
+const MOVIE_WITH_GENRES = {
+  id: 550, title: "Fight Club", overview: "o", poster_path: "/f.jpg", backdrop_path: "/b.jpg",
+  release_date: "1999-10-15", vote_average: 8.4, vote_count: 28000, runtime: 139,
+  genres: [{ id: 18, name: "Drama" }, { id: 878, name: "Science Fiction" }],
+};
+async function withGenreMovie<T>(fn: () => Promise<T>): Promise<T> {
+  const realFetch = globalThis.fetch;
+  const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json" } });
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = new URL(String(input));
+    if (/\/movie\/550$/.test(url.pathname)) return json(MOVIE_WITH_GENRES);
+    if (/\/genre\/movie\/list$/.test(url.pathname)) {
+      return json({ genres: url.searchParams.get("language")?.startsWith("fr") ? [{ id: 18, name: "Drame" }] : MOVIE_WITH_GENRES.genres });
+    }
+    return realFetch(input);
+  }) as unknown as typeof fetch;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+test("media: a French viewer's genreList carries the same translated names as genres", async () => {
+  const { token } = await mintSession();
+  const body = await withGenreMovie(async () => (await mediaGet(token, "movie", "550", { "accept-language": "fr" })).json());
+  assert.deepEqual(body.genres, ["Drame", "Science Fiction"]);
+  assert.deepEqual(body.genreList, [{ id: 18, name: "Drame" }, { id: 878, name: "Science Fiction" }]);
+});
+
+test("media: an English viewer's genres and genreList are TMDB's own", async () => {
+  const { token } = await mintSession();
+  const body = await withGenreMovie(async () => (await mediaGet(token, "movie", "550")).json());
+  assert.deepEqual(body.genres, ["Drama", "Science Fiction"]);
+  assert.deepEqual(body.genreList, MOVIE_WITH_GENRES.genres);
 });
 
 // ── f48: collection runs in the suggestions wave, best-effort preserved ──────

@@ -412,18 +412,26 @@ function withoutTrailingSlashes(url: string): string {
 }
 const sameServerUrl = (a: string, b: string) => withoutTrailingSlashes(a) === withoutTrailingSlashes(b);
 
-// The first instance saved with the mask sentinel for its secret AND a server
-// address different from the stored one, read one query at a time (guardrail
-// 23c). Null when every kept secret still points at the same server.
+// The first instance saved with its stored secret KEPT — the mask sentinel, or
+// the field left out (writeInstanceSettings skips both) — AND a server address
+// different from the stored one, read one query at a time (guardrail 23c).
+// Null when every kept secret still points at the same server.
 async function findSecretRebind(tx: TxClient, service: MediaServerService, instances: InstancePayload[]): Promise<string | null> {
   for (const inst of instances) {
     const secret = service === "plex" ? inst.adminToken : inst.apiKey;
     const nextUrl = trimmedString(service === "plex" ? inst.serverUrl : inst.url);
-    if (secret !== SECRET_MASK_SENTINEL || !nextUrl) continue;
+    if ((secret !== SECRET_MASK_SENTINEL && secret !== undefined) || !nextUrl) continue;
     const urlKey = service === "plex" ? plexSettingKey(inst.slug, "ServerUrl") : jellyfinSettingKey(inst.slug, "Url");
     const stored = await tx.setting.findUnique({ where: { key: urlKey }, select: { value: true } });
     // No stored address means the kept secret was never pointed anywhere yet.
-    if (stored && !sameServerUrl(stored.value, nextUrl)) return inst.slug;
+    if (!stored || sameServerUrl(stored.value, nextUrl)) continue;
+    if (secret === undefined) {
+      // An omitted field names no secret: refuse only when one is stored to follow the address.
+      const secretKey = service === "plex" ? plexSettingKey(inst.slug, "AdminToken") : jellyfinSettingKey(inst.slug, "ApiKey");
+      const storedSecret = await tx.setting.findUnique({ where: { key: secretKey }, select: { value: true } });
+      if (!storedSecret || storedSecret.value === "") continue;
+    }
+    return inst.slug;
   }
   return null;
 }

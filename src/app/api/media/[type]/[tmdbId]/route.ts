@@ -70,14 +70,17 @@ async function viewerTitleFlags(userId: string, tmdbId: number, mediaType: "MOVI
 
 // Additive native-client enrichment derived from the detail payload (which
 // already carries keywords / watchProviders / homepage / collection ids via
-// append_to_response).
-function detailExtras(detail: TmdbMedia) {
+// append_to_response). `detail` is the ENGLISH cached payload; the availability
+// pass localizes `genres` and `genreList` together, so the id+name list is taken
+// from its copy (`localizedGenreList`) — otherwise a non-English caller gets
+// translated names beside English ones. Keywords are never localized.
+function detailExtras(detail: TmdbMedia, localizedGenreList: TmdbMedia["genreList"]) {
   return {
     // normalize emits `keywords`/`genres` (names, back-compat) alongside
     // `keywordList`/`genreList` (id+name for deep-linking) directly, so ship as-is.
     keywords: detail.keywords ?? [],
     keywordList: detail.keywordList ?? [],
-    genreList: detail.genreList ?? [],
+    genreList: localizedGenreList ?? detail.genreList ?? [],
     // All US-region provider types (stream / rent / buy), each tagged with its
     // `type` so native clients can group them like the web detail page. The
     // detail payload's watchProviders are already US-scoped (extractWatchProviders).
@@ -177,7 +180,7 @@ export const GET = withAuth(async (
         ? { id: detail.collectionId, name: detail.collectionName ?? "", items: collectionParts.map(lite) }
         : null;
 
-    const extras = detailExtras(detail);
+    const extras = detailExtras(detail, withAvailability.genreList);
     return NextResponse.json({
       ...withAvailability,
       cast,

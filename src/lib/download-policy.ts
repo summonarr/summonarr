@@ -377,21 +377,31 @@ async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string,
 }
 
 /**
+ * What a single-user push did. "nothing-to-push" is a row with no policy to
+ * send (a Plex row, a server admin, no stored policy, a row that is gone);
+ * "not-configured" is a Jellyfin row whose own server has no URL or API key —
+ * the stored policy never reached a server, so the caller must not report it
+ * as applied.
+ */
+export type UserPolicyPush = "pushed" | "nothing-to-push" | "not-configured";
+
+/**
  * Push a single user's download policy to their media server immediately.
  * Called by the per-user toggle API route. Jellyfin only — Plex is unsupported.
  */
-export async function enforceUserDownloadPolicy(mediaServerUserId: string): Promise<void> {
+export async function enforceUserDownloadPolicy(mediaServerUserId: string): Promise<UserPolicyPush> {
   const record = await prisma.mediaServerUser.findUnique({
     where: { id: mediaServerUserId },
     select: { source: true, serverInstance: true, sourceUserId: true, downloadsEnabled: true, isServerAdmin: true, username: true },
   });
 
-  if (!record || record.isServerAdmin || record.downloadsEnabled === null) return;
-  if (record.source !== "jellyfin") return;
+  if (!record || record.isServerAdmin || record.downloadsEnabled === null) return "nothing-to-push";
+  if (record.source !== "jellyfin") return "nothing-to-push";
 
   // Resolve THIS row's own server, not always the default — a toggle on a
   // named-instance user must push to that instance, never instance "".
   const { url, apiKey } = await getJellyfinConfig(record.serverInstance);
-  if (!url || !apiKey) return;
+  if (!url || !apiKey) return "not-configured";
   await setJellyfinDownloadPolicy(url, apiKey, record.sourceUserId, record.downloadsEnabled);
+  return "pushed";
 }

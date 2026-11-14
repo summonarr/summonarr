@@ -1,11 +1,12 @@
 import { WARM_LIST_CACHE_LOCK_ID } from "@/lib/advisory-lock";
 import { defineCronRoute } from "@/lib/cron-route";
 import {
-  getTrending, getPopularMovies, getPopularTV,
-  getUpcomingMovies, getUpcomingTV, getOnTheAirTV,
-  getTopRatedMovies, getTopRatedTV,
+  getTrendingChecked, getPopularMoviesChecked, getPopularTVChecked,
+  getUpcomingMoviesChecked, getUpcomingTVChecked, getOnTheAirTVChecked,
+  getTopRatedWithStatus,
   getPopularMoviesPage, getPopularTVPage,
   getMovieGenres, getTVGenres, getWatchProviders,
+  type PagedList,
 } from "@/lib/tmdb";
 import { getTraktPopularMovies, getTraktPopularTV } from "@/lib/trakt";
 import { getMdblistTopRated } from "@/lib/mdblist";
@@ -18,15 +19,27 @@ const BACKGROUND_MDBLIST = { background: true } as const;
 // There is no try/catch on purpose: a failed fetch must reject, so the
 // Promise.allSettled below counts it as an error and the run is recorded as
 // not ok.
+//
+// The paged TMDB lists absorb a failed page and answer with what they got (an
+// empty list on an outage, and during the 60 s backoff after one), so they are
+// read with their `complete` flag and an incomplete list rejects here. Partial
+// counts too: only a complete list is written to the cache, so a list with
+// items but a failed page was served, not warmed.
+const warmed = (load: () => Promise<PagedList>) => async (): Promise<readonly unknown[]> => {
+  const { items, complete } = await load();
+  if (!complete) throw new Error(`TMDB did not answer every page (${items.length} item(s), not cached)`);
+  return items;
+};
+
 const WARM_TASKS: ReadonlyArray<{ name: string; fn: () => Promise<readonly unknown[]> }> = [
-  { name: "trending", fn: getTrending },
-  { name: "popularMovies", fn: getPopularMovies },
-  { name: "popularTV", fn: getPopularTV },
-  { name: "upcomingMovies", fn: getUpcomingMovies },
-  { name: "upcomingTV", fn: getUpcomingTV },
-  { name: "onAirTV", fn: getOnTheAirTV },
-  { name: "topRatedMovies", fn: getTopRatedMovies },
-  { name: "topRatedTV", fn: getTopRatedTV },
+  { name: "trending", fn: warmed(getTrendingChecked) },
+  { name: "popularMovies", fn: warmed(getPopularMoviesChecked) },
+  { name: "popularTV", fn: warmed(getPopularTVChecked) },
+  { name: "upcomingMovies", fn: warmed(getUpcomingMoviesChecked) },
+  { name: "upcomingTV", fn: warmed(getUpcomingTVChecked) },
+  { name: "onAirTV", fn: warmed(getOnTheAirTVChecked) },
+  { name: "topRatedMovies", fn: warmed(() => getTopRatedWithStatus("movie")) },
+  { name: "topRatedTV", fn: warmed(() => getTopRatedWithStatus("tv")) },
   { name: "popularMoviesPage1", fn: () => getPopularMoviesPage(1).then((r) => r.items) },
   { name: "popularTVPage1", fn: () => getPopularTVPage(1).then((r) => r.items) },
   { name: "movieGenres", fn: getMovieGenres },

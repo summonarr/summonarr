@@ -670,7 +670,7 @@ export const adminLibraryPaths: OpenApiPaths = {
           enabled: { type: "boolean" },
           direction: { type: "string", enum: ["both", "toJellyfin", "toPlex"] },
           syncProgress: { type: "boolean", description: "Copy resume positions too" },
-          rescan: { type: "boolean", enum: [true], description: "Forget both read points; items already in a ledger are not re-queued" },
+          rescan: { type: "boolean", enum: [true], description: "Forget both read points; items already in a ledger are not re-queued. Refused 409 while a run is in progress" },
         } } } },
       },
       responses: {
@@ -678,6 +678,7 @@ export const adminLibraryPaths: OpenApiPaths = {
         "400": { description: "None of enabled / direction / syncProgress / rescan, or a wrong value" },
         "403": { description: "Not ADMIN" },
         "404": { description: "Pair not found, or the page is disabled" },
+        "409": { description: "rescan while a watch sync run is in progress — { ok: false, error, retryAfter }; nothing was changed (Retry-After: 30)" },
         "413": tooLargeAnswer(1024),
       },
     },

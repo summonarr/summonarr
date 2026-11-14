@@ -456,6 +456,7 @@ function bodyOr(value: unknown, raw?: string): string | undefined {
 }
 
 // Routes under test (imported AFTER every stub is in place).
+const { peekRateLimit } = await import("../src/lib/rate-limit.ts");
 const { PATCH: passwordPATCH } = await import("../src/app/api/profile/password/route.ts");
 const { GET: notificationsGET, PATCH: notificationsPATCH } = await import("../src/app/api/profile/notifications/route.ts");
 const { PATCH: localePATCH } = await import("../src/app/api/profile/locale/route.ts");
@@ -522,10 +523,10 @@ test("password step-up is MANDATORY: a wrong, absent, or non-string current pass
   assert.deepEqual(await wrongRes.json(), { error: "Invalid password" });
 
   const absent = await mintSession();
-  // No currentPassword key at all → verifyPassword("" , hash) → false.
+  // No currentPassword key at all (or an empty one) → refused before the verify.
   const absentRes = await changePassword(absent.token, { newPassword: NEW_PW });
   assert.equal(absentRes.status, 400);
-  assert.deepEqual(await absentRes.json(), { error: "Invalid password" });
+  assert.deepEqual(await absentRes.json(), { error: "Your current password is required" });
 
   const wrongType = await mintSession();
   const typeRes = await changePassword(wrongType.token, { currentPassword: 12345, newPassword: NEW_PW });
@@ -536,6 +537,26 @@ test("password step-up is MANDATORY: a wrong, absent, or non-string current pass
   assert.equal(opsOf("user.update").length, 0, "a failed step-up must never write the new hash");
   assert.equal(opsOf("authSession.deleteMany").length, 0, "a failed step-up must never revoke sessions");
   assert.equal(txCalls, 0, "a failed step-up must never open the write transaction");
+});
+
+test("a missing or empty current password judges nothing: no guess spent, no failed-login audit row", async () => {
+  const { userId, token } = await mintSession();
+  for (const body of [{ newPassword: NEW_PW }, { currentPassword: "", newPassword: NEW_PW }]) {
+    const res = await changePassword(token, body);
+    assert.equal(res.status, 400);
+    assert.deepEqual(await res.json(), { error: "Your current password is required" });
+  }
+  await new Promise((r) => setImmediate(r));
+  assert.equal(peekRateLimit(`step-up-pw:${userId}`, 1, 15 * 60 * 1000), true, "the shared step-up guess budget is untouched");
+  assert.equal(opsOf("auditLog.create").length, 0, "nothing was guessed, so nothing is audited");
+  assert.equal(opsOf("user.update").length, 0);
+
+  // A WRONG password is still a guess: charged and audited.
+  const wrong = await changePassword(token, { currentPassword: "not-the-password", newPassword: NEW_PW });
+  assert.equal(wrong.status, 400);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(peekRateLimit(`step-up-pw:${userId}`, 1, 15 * 60 * 1000), false);
+  assert.equal(opsOf("auditLog.create").length, 1);
 });
 
 test("password change with the CORRECT current password re-hashes, stamps the invalidation cutoffs, revokes every session, and force-revalidates the user", async () => {

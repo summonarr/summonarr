@@ -226,9 +226,10 @@ async function applyDownloadPolicy(
   // only re-pushes drift in the DISABLE direction, so a failed enable-push
   // never self-heals — the UI must be able to tell the admin the server wasn't
   // actually updated rather than showing a bare success.
+  // A server with no URL or API key is the same outcome: saved, nothing sent.
   let pushed = true;
   try {
-    await enforceUserDownloadPolicy(id);
+    pushed = (await enforceUserDownloadPolicy(id)) !== "not-configured";
   } catch (err) {
     pushed = false;
     console.warn(`[server-users] Failed to push policy for ${id}:`, err instanceof Error ? err.message : String(err));

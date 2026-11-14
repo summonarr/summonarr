@@ -27,6 +27,7 @@ export type CleanupMediaType = "MOVIE" | "TV";
 
 export { CLEANUP_EXCLUSIONS, CLEANUP_RULES, type CleanupExclusion, type CleanupRule } from "./library-cleanup-keys";
 import type { CleanupExclusion, CleanupRule } from "./library-cleanup-keys";
+import { isTmdbIdInRange } from "./tmdb-id";
 
 export interface CleanupSettings {
   unwatchedEnabled: boolean;
@@ -274,7 +275,8 @@ export function parseCleanupItems(raw: unknown): Array<{ tmdbId: number; mediaTy
   for (const it of raw) {
     if (!it || typeof it !== "object") return null;
     const { tmdbId, mediaType } = it as { tmdbId?: unknown; mediaType?: unknown };
-    if (typeof tmdbId !== "number" || !Number.isInteger(tmdbId) || tmdbId <= 0) return null;
+    // isTmdbIdInRange also bounds INT4: a larger id would throw out of the first keyed read as a 500.
+    if (typeof tmdbId !== "number" || !isTmdbIdInRange(tmdbId)) return null;
     if (mediaType !== "MOVIE" && mediaType !== "TV") return null;
     const key = cleanupKey(tmdbId, mediaType);
     if (seen.has(key)) continue;
