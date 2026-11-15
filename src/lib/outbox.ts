@@ -24,6 +24,11 @@
 // (their own in-memory retries) report nothing: for them a channel that
 // returned is settled.
 //
+// Two more sends ride it the same way, each queued in the transaction that
+// makes its once-only claim: the push for an issue's landed replacement
+// (IssueGrab.notifiedAt — issue-grab-notify.ts) and the admins' deletion-vote
+// threshold alert (deletion-vote-threshold.ts).
+//
 // Delivery is at-least-once: a death between a send and its delete repeats that
 // one channel for that one request.
 //
@@ -43,6 +48,17 @@ export const OUTBOX_COMMENT_KIND = "request.comment";
 export const OUTBOX_ISSUE_REPLY_KIND = "issue.reply";
 export type AnnouncementKind = typeof OUTBOX_COMMENT_KIND | typeof OUTBOX_ISSUE_REPLY_KIND;
 export const OUTBOX_ALL_CHANNELS = "all";
+
+// The push that tells an admin their issue's replacement landed (channel
+// "push", subject = the IssueGrab id), queued with the grab's once-only claim.
+export const OUTBOX_GRAB_KIND = "issue.grab";
+export const OUTBOX_GRAB_CHANNEL = "push";
+// The admins' "deletion-vote threshold reached" alert (a whole announcement,
+// subject = voteAlertSubject), queued with the title's one-shot claim marker.
+export const OUTBOX_VOTE_THRESHOLD_KIND = "vote.threshold";
+export function voteAlertSubject(tmdbId: number, mediaType: string): string {
+  return `${tmdbId}:${mediaType}`;
+}
 
 // The channels a request notice goes out on. "Now available" and the
 // approve/decline notices use the same five.
@@ -174,7 +190,6 @@ export async function queueAnnouncement(
   authorId: string,
   payload: Prisma.InputJsonObject,
 ): Promise<void> {
-  const now = Date.now();
   await tx.outbox.create({
     data: {
       kind,
@@ -182,10 +197,62 @@ export async function queueAnnouncement(
       dedupeKey: outboxKey(kind, subjectId, OUTBOX_ALL_CHANNELS),
       userId: authorId,
       payload,
-      lockedUntil: new Date(now + OUTBOX_LOCK_MINUTES * 60_000),
-      expiresAt: new Date(now + OUTBOX_TTL_HOURS * 3_600_000),
+      ...freshRowTimes(),
     },
   });
+}
+
+// A freshly queued row's lifetime: owned by its writer for OUTBOX_LOCK_MINUTES,
+// dropped unsent OUTBOX_TTL_HOURS after it was written.
+function freshRowTimes(): { lockedUntil: Date; expiresAt: Date } {
+  const now = Date.now();
+  return { lockedUntil: new Date(now + OUTBOX_LOCK_MINUTES * 60_000), expiresAt: new Date(now + OUTBOX_TTL_HOURS * 3_600_000) };
+}
+
+/**
+ * Queue the completion push a grab's claim owes, INSIDE the transaction that
+ * stamps IssueGrab.notifiedAt, as its LAST statement. `userId` is the admin who
+ * started the replacement (the push's only recipient).
+ */
+export async function queueGrabPush(tx: PrismaTxClient, grabId: string, userId: string, payload: Prisma.InputJsonObject): Promise<void> {
+  await tx.outbox.create({
+    data: {
+      kind: OUTBOX_GRAB_KIND,
+      channel: OUTBOX_GRAB_CHANNEL,
+      dedupeKey: outboxKey(OUTBOX_GRAB_KIND, grabId, OUTBOX_GRAB_CHANNEL),
+      userId,
+      payload,
+      ...freshRowTimes(),
+    },
+  });
+}
+
+/**
+ * Queue the admins' threshold alert INSIDE the transaction that wins the
+ * title's one-shot claim marker. An upsert, never a create: a title can cross
+ * the threshold again while an earlier cycle's row is still here, and a
+ * duplicate-key error inside the transaction would roll the claim back
+ * (guardrail 23). The row belongs to no account.
+ */
+export async function queueVoteAlert(tx: PrismaTxClient, subjectId: string, payload: Prisma.InputJsonObject): Promise<void> {
+  const dedupeKey = outboxKey(OUTBOX_VOTE_THRESHOLD_KIND, subjectId, OUTBOX_ALL_CHANNELS);
+  const times = freshRowTimes();
+  await tx.outbox.upsert({
+    where: { dedupeKey },
+    create: { kind: OUTBOX_VOTE_THRESHOLD_KIND, channel: OUTBOX_ALL_CHANNELS, dedupeKey, userId: null, payload, ...times },
+    update: { payload, attempts: 0, ...times },
+  });
+}
+
+// Setting rows of the two retry schemes the outbox replaced: a failed grab
+// push (`grabPushRetry:<grabId>`) and an interrupted vote alert
+// (`deletionVotePending:<tmdbId>:<type>`). Nothing reads them any more.
+const LEGACY_RETRY_PREFIXES = ["grabPushRetry:", "deletionVotePending:"] as const;
+
+/** Delete the retired retry markers. Run once per boot; a no-op once none are left. */
+export async function dropLegacyRetryMarkers(): Promise<number> {
+  const gone = await prisma.setting.deleteMany({ where: { OR: LEGACY_RETRY_PREFIXES.map((p) => ({ key: { startsWith: p } })) } });
+  return gone.count;
 }
 
 /**

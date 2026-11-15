@@ -7,6 +7,8 @@ import { prisma, resetDb, makeUser, makeRequests, closeDb } from "./_harness.mts
 import { claimAvailableNotifications } from "@/lib/notify-available.ts";
 import { AVAILABLE_CHANNELS, OUTBOX_AVAILABLE_KIND, OUTBOX_MAX_ATTEMPTS, outboxKey, settleOutbox } from "@/lib/outbox.ts";
 import { drainOutbox } from "@/lib/outbox-drain.ts";
+import { OUTBOX_GRAB_KIND, OUTBOX_VOTE_THRESHOLD_KIND, dropLegacyRetryMarkers, queueVoteAlert, voteAlertSubject } from "@/lib/outbox.ts";
+import { claimGrabAndQueuePush } from "@/lib/issue-grab-notify.ts";
 
 async function reset(): Promise<void> {
   await resetDb();
@@ -453,4 +455,125 @@ test("a channel whose send FAILED keeps its row; the drain retries it after the 
   assert.deepEqual(await drainOutbox("test"), { delivered: 1, dropped: 0 });
   assert.equal(await prisma.notification.count(), 1);
   assert.equal(await prisma.outbox.count(), 0);
+});
+
+
+// ═══ The grab push and the vote-threshold alert ═════════════════════════════
+// Two sends that used to keep their own retry state in Setting rows. Each is
+// now queued in the transaction that makes its once-only claim.
+
+async function makeGrab(): Promise<{ grab: Awaited<ReturnType<typeof prisma.issueGrab.create>>; adminId: string }> {
+  const reporter = await makeUser();
+  const admin = await makeUser();
+  const issue = await prisma.issue.create({
+    data: { reportedBy: reporter.id, mediaType: "MOVIE", tmdbId: 603, title: "The Matrix", issueType: "BAD_VIDEO" },
+  });
+  const grab = await prisma.issueGrab.create({
+    data: { issueId: issue.id, triggeredById: admin.id, tmdbId: 603, mediaType: "MOVIE", title: "The Matrix", scope: "FULL" },
+  });
+  return { grab, adminId: admin.id };
+}
+
+test("a grab's claim and its push commit together: one winner, one locked row carrying the push", async () => {
+  const { grab, adminId } = await makeGrab();
+  const now = new Date();
+
+  const wins = await Promise.all([0, 1, 2].map(() => claimGrabAndQueuePush(grab, now).catch(() => false)));
+  assert.equal(wins.filter(Boolean).length, 1, "the claim is once-only");
+
+  const rows = await prisma.outbox.findMany();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].dedupeKey, outboxKey(OUTBOX_GRAB_KIND, grab.id, "push"));
+  assert.equal(rows[0].userId, adminId);
+  assert.ok(rows[0].lockedUntil.getTime() > Date.now() + 60_000, "locked for the claimer");
+  assert.deepEqual(rows[0].payload, {
+    userId: adminId, title: "The Matrix", tmdbId: 603, mediaType: "MOVIE", scope: "FULL", seasonNumber: null, episodeNumber: null, issueId: grab.issueId,
+  });
+  assert.ok((await prisma.issueGrab.findUniqueOrThrow({ where: { id: grab.id } })).notifiedAt);
+});
+
+test("ONE transaction: a grab whose push cannot be queued is not claimed", async () => {
+  const { grab, adminId } = await makeGrab();
+  // A row already holding the key makes the queue insert fail.
+  await prisma.outbox.create({
+    data: { kind: OUTBOX_GRAB_KIND, channel: "push", dedupeKey: outboxKey(OUTBOX_GRAB_KIND, grab.id, "push"), userId: adminId, payload: {}, lockedUntil: new Date(), expiresAt: new Date() },
+  });
+
+  await assert.rejects(() => claimGrabAndQueuePush(grab, new Date()));
+  assert.equal((await prisma.issueGrab.findUniqueOrThrow({ where: { id: grab.id } })).notifiedAt, null, "the claim rolled back: a later delivery can still make it");
+});
+
+test("after a restart the drain sends a queued grab push and settles it; a grab deleted since is dropped", async () => {
+  const kept = await makeGrab();
+  const gone = await makeGrab();
+  assert.equal(await claimGrabAndQueuePush(kept.grab, new Date()), true);
+  assert.equal(await claimGrabAndQueuePush(gone.grab, new Date()), true);
+
+  assert.deepEqual(await drainOutbox("test"), { delivered: 0, dropped: 0 }, "a live claimer's row is left alone");
+
+  await prisma.issue.delete({ where: { id: gone.grab.issueId } }); // cascades to the grab
+  await lapseLocks();
+  assert.deepEqual(await drainOutbox("test"), { delivered: 1, dropped: 1 });
+  assert.equal(await prisma.outbox.count(), 0, "the sent push (no device to reach here) is settled, the orphan deleted");
+});
+
+async function castVotes(n: number): Promise<void> {
+  for (let i = 0; i < n; i++) {
+    const voter = await makeUser();
+    await prisma.deletionVote.create({ data: { tmdbId: 603, mediaType: "MOVIE", title: "The Matrix", userId: voter.id } });
+  }
+}
+const voteAlert = { title: "The Matrix", mediaType: "MOVIE", voteCount: 2, posterPath: null, tmdbId: 603 };
+const queueAlert = () => prisma.$transaction((tx) => queueVoteAlert(tx, voteAlertSubject(603, "MOVIE"), voteAlert));
+
+test("a vote alert queued again (the title re-crossed the threshold) replaces the earlier row instead of failing", async () => {
+  await queueAlert();
+  await prisma.$executeRawUnsafe(`UPDATE "Outbox" SET attempts = 4, "lockedUntil" = NOW() - interval '1 hour'`);
+
+  await queueAlert();
+
+  const rows = await prisma.outbox.findMany();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].kind, OUTBOX_VOTE_THRESHOLD_KIND);
+  assert.equal(rows[0].channel, "all");
+  assert.equal(rows[0].userId, null);
+  assert.equal(rows[0].attempts, 0, "a new cycle starts its attempts again");
+  assert.ok(rows[0].lockedUntil.getTime() > Date.now() + 60_000, "and is locked for its claimer again");
+});
+
+test("after a restart the drain sends a vote alert that is STILL owed, and drops one that is not", async () => {
+  await prisma.setting.create({ data: { key: "deletionVoteThreshold", value: "2" } });
+  await prisma.setting.create({ data: { key: "deletionVoteNotified:603:MOVIE", value: "1" } });
+  await castVotes(2);
+
+  await queueAlert();
+  await lapseLocks();
+  assert.deepEqual(await drainOutbox("test"), { delivered: 1, dropped: 0 });
+  assert.equal(await prisma.outbox.count(), 0);
+
+  // The claim was given back since (a dismiss wipes the marker with the votes).
+  await queueAlert();
+  await prisma.setting.delete({ where: { key: "deletionVoteNotified:603:MOVIE" } });
+  await lapseLocks();
+  assert.deepEqual(await drainOutbox("test"), { delivered: 0, dropped: 1 });
+  assert.equal(await prisma.outbox.count(), 0);
+  assert.equal(await prisma.setting.count({ where: { key: "deletionVoteNotified:603:MOVIE" } }), 0, "the drain never re-wins a claim");
+});
+
+test("the boot cleanup deletes the two retired retry schemes' Setting rows and nothing else", async () => {
+  await prisma.setting.createMany({
+    data: [
+      { key: "grabPushRetry:abc", value: new Date().toISOString() },
+      { key: "deletionVotePending:603:MOVIE", value: "{}" },
+      { key: "deletionVoteNotified:603:MOVIE", value: "1" },
+      { key: "deletionVoteThreshold", value: "5" },
+    ],
+  });
+
+  assert.equal(await dropLegacyRetryMarkers(), 2);
+  assert.deepEqual(
+    (await prisma.setting.findMany({ where: { key: { in: ["deletionVoteNotified:603:MOVIE", "deletionVoteThreshold"] } } })).map((r) => r.key).sort(),
+    ["deletionVoteNotified:603:MOVIE", "deletionVoteThreshold"],
+  );
+  assert.equal(await dropLegacyRetryMarkers(), 0);
 });

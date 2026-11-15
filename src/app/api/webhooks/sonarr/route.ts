@@ -311,7 +311,7 @@ async function claimDeliveredGrabs(
   const candidateGrabs = await prisma.issueGrab.findMany({
     where: { OR: idFilters, mediaType: "TV", arrInstance, issue: CLAIMABLE_GRAB_ISSUE },
   });
-  // The claim itself (and its push retry) is shared with the Radarr twin.
+  // The claim itself (and the push it queues) is shared with the Radarr twin.
   return claimCompletedGrabs(
     candidateGrabs.filter((grab) => grabMatchesDelivery(grab, episodes)),
     "sonarr",

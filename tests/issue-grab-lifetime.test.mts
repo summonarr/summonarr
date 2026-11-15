@@ -103,8 +103,14 @@ const txDelegates = {
   sonarrWantedItem: cacheStub,
   sonarrAvailableItem: cacheStub,
 };
+// A grab's claim queues its completion push in the same transaction
+// (issue-grab-notify.ts), so the transaction client carries the grab table and
+// the outbox too — read off `prisma` when called, once every stub is in place.
+shadowPrismaModel(prisma, "outbox", { create: async () => ({}), deleteMany: async () => ({ count: 0 }) });
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) =>
-  typeof arg === "function" ? (arg as (tx: typeof txDelegates) => Promise<unknown>)(txDelegates) : Promise.all(arg as Promise<unknown>[]),
+  typeof arg === "function"
+    ? (arg as (tx: unknown) => Promise<unknown>)({ ...txDelegates, issueGrab: prisma.issueGrab, outbox: prisma.outbox })
+    : Promise.all(arg as Promise<unknown>[]),
 );
 
 // ── IssueGrab table, with the Issue relation filter the webhooks send ────────

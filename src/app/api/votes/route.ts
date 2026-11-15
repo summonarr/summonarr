@@ -9,7 +9,7 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { resolveMediaMeta } from "@/lib/request-meta";
 import { sanitizeOptional, sanitizeContainsSearch } from "@/lib/sanitize";
 import { verifyRequestToken } from "@/lib/request-token";
-import { alertIfVoteThresholdReached, sweepPendingVoteAlerts } from "@/lib/deletion-vote-threshold";
+import { alertIfVoteThresholdReached } from "@/lib/deletion-vote-threshold";
 import { isFeatureEnabled } from "@/lib/features";
 import { getVisibleServerInstances } from "@/lib/media-visibility";
 import { loadVotesList, VOTES_PAGE_SIZE } from "@/lib/votes-list-data";
@@ -169,10 +169,6 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // The vote is saved: a failed alert read or claim must never turn it into a 500.
   await alertIfVoteThresholdReached({ tmdbId, mediaType, title: verified.title, posterPath: verified.posterPath ?? null })
     .catch((err) => console.error("[votes] threshold alert failed:", err instanceof Error ? err.message : String(err)));
-
-  // Finish any alert a crash interrupted; throttled, never blocks or fails the vote.
-  void sweepPendingVoteAlerts().catch((err) =>
-    console.error("[votes] pending alert sweep failed:", err instanceof Error ? err.message : String(err)));
 
   return NextResponse.json(vote, { status: 201 });
 });

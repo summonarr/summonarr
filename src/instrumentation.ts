@@ -325,6 +325,13 @@ async function runStartupMigrations(): Promise<void> {
   await import("@/lib/apns-endpoint")
     .then(({ migrateLegacyApnsEndpoints }) => migrateLegacyApnsEndpoints())
     .catch((err) => console.error("[push] APNs endpoint migration error:", err));
+
+  // Two retry schemes kept their state in Setting rows until the notification
+  // outbox replaced them (outbox.ts). Delete what they left — a no-op once
+  // none remain; a failure only leaves unread rows until the next boot.
+  await import("@/lib/outbox")
+    .then(({ dropLegacyRetryMarkers }) => dropLegacyRetryMarkers())
+    .catch((err) => console.error("[outbox] legacy retry-marker cleanup error:", err));
 }
 
 // Long-running or network-bound startup work. Fire-and-forget: none of it may

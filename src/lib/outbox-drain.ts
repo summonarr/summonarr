@@ -15,6 +15,9 @@ import {
   OUTBOX_ISSUE_REPLY_KIND,
   OUTBOX_AVAILABLE_KIND,
   OUTBOX_DECLINED_KIND,
+  OUTBOX_GRAB_CHANNEL,
+  OUTBOX_GRAB_KIND,
+  OUTBOX_VOTE_THRESHOLD_KIND,
   OUTBOX_LOCK_MINUTES,
   OUTBOX_MAX_ATTEMPTS,
   type NoticeChannel,
@@ -28,6 +31,8 @@ import {
 
 import { announceRequestComment, type RequestCommentAnnouncement } from "./request-comment-notify";
 import { announceIssueReply, type IssueReplyAnnouncement } from "./issue-reply-notify";
+import { deliverGrabPush, type GrabPush } from "./issue-grab-notify";
+import { deliverQueuedVoteAlert, type ThresholdAlertData } from "./deletion-vote-threshold";
 
 /** Rows taken per pass. A backlog larger than this drains over later passes. */
 export const OUTBOX_DRAIN_BATCH = 500;
@@ -36,6 +41,7 @@ const rowSchema = v.object({
   id: v.string(),
   kind: v.string(),
   channel: v.string(),
+  dedupeKey: v.string(),
   userId: v.nullable(v.string()),
   payload: v.unknown(),
   attempts: v.number(),
@@ -100,11 +106,39 @@ const issueReplyPayload = v.object({
   text: v.string(),
 });
 
+// The push for a landed replacement (issue-grab-notify.ts) and the admins'
+// vote-threshold alert (deletion-vote-threshold.ts), as their claims queued them.
+const grabPayload = v.object({
+  userId: v.string(),
+  title: v.string(),
+  tmdbId: v.number(),
+  mediaType: v.string(),
+  scope: v.string(),
+  seasonNumber: v.nullable(v.number()),
+  episodeNumber: v.nullable(v.number()),
+  issueId: v.string(),
+});
+const voteAlertPayload = v.object({
+  title: v.string(),
+  mediaType: v.string(),
+  voteCount: v.number(),
+  posterPath: v.nullable(v.string()),
+  tmdbId: v.number(),
+});
+
 export interface OutboxDrainResult {
   /** Rows handed to a sender. */
   delivered: number;
   /** Rows deleted unsent: expired, out of attempts, unreadable, or for a disabled account. */
   dropped: number;
+}
+
+// The IssueGrab id a grab row's key carries: `<kind>:<grabId>:<channel>`.
+function grabIdOf(dedupeKey: string): string | null {
+  const prefix = `${OUTBOX_GRAB_KIND}:`;
+  const suffix = `:${OUTBOX_GRAB_CHANNEL}`;
+  if (!dedupeKey.startsWith(prefix) || !dedupeKey.endsWith(suffix)) return null;
+  return dedupeKey.slice(prefix.length, dedupeKey.length - suffix.length) || null;
 }
 
 const isNoticeChannel = (c: string): c is NoticeChannel => (NOTICE_CHANNELS as readonly string[]).includes(c);
@@ -129,7 +163,7 @@ export async function drainOutbox(logScope = "outbox"): Promise<OutboxDrainResul
         LIMIT ${OUTBOX_DRAIN_BATCH}
         FOR UPDATE SKIP LOCKED
       )
-      RETURNING id, kind, channel, "userId", payload, attempts, ("expiresAt" < NOW()) AS expired
+      RETURNING id, kind, channel, "dedupeKey", "userId", payload, attempts, ("expiresAt" < NOW()) AS expired
     `);
     if (!Array.isArray(raw) || raw.length === 0) return result;
 
@@ -152,8 +186,25 @@ export async function drainOutbox(logScope = "outbox"): Promise<OutboxDrainResul
     const owed: Owed[] = [];
     const comments: Array<{ rowId: string; a: RequestCommentAnnouncement & { commentId: string } }> = [];
     const replies: Array<{ rowId: string; a: IssueReplyAnnouncement & { messageId: string } }> = [];
+    const grabs: Array<{ rowId: string; grabId: string; push: GrabPush }> = [];
+    const voteAlerts: ThresholdAlertData[] = [];
     for (const row of rows) {
       const stale = row.expired || row.attempts > OUTBOX_MAX_ATTEMPTS || (row.userId !== null && disabledIds.has(row.userId));
+      if (row.kind === OUTBOX_GRAB_KIND && row.channel === OUTBOX_GRAB_CHANNEL && !stale) {
+        const g = check(grabPayload, row.payload);
+        const grabId = grabIdOf(row.dedupeKey);
+        if (g.ok && grabId) {
+          grabs.push({ rowId: row.id, grabId, push: g.value });
+          continue;
+        }
+      }
+      if (row.kind === OUTBOX_VOTE_THRESHOLD_KIND && row.channel === OUTBOX_ALL_CHANNELS && !stale) {
+        const a = check(voteAlertPayload, row.payload);
+        if (a.ok && (a.value.mediaType === "MOVIE" || a.value.mediaType === "TV")) {
+          voteAlerts.push({ ...a.value, mediaType: a.value.mediaType });
+          continue;
+        }
+      }
       if (row.channel === OUTBOX_ALL_CHANNELS && !stale) {
         if (row.kind === OUTBOX_COMMENT_KIND) {
           const c = check(commentPayload, row.payload);
@@ -212,10 +263,16 @@ export async function drainOutbox(logScope = "outbox"): Promise<OutboxDrainResul
     );
     for (const c of comments) if (!liveComments.has(c.a.commentId)) drop.push(c.rowId);
     for (const r of replies) if (!liveReplies.has(r.a.messageId)) drop.push(r.rowId);
+    // A grab deleted since its claim (with its issue or its admin, which
+    // cascade) has nobody left to tell.
+    const liveGrabs = grabs.length === 0 ? new Set<string>() : new Set(
+      (await prisma.issueGrab.findMany({ where: { id: { in: grabs.map((g) => g.grabId) } }, select: { id: true } })).map((r) => r.id),
+    );
+    for (const g of grabs) if (!liveGrabs.has(g.grabId)) drop.push(g.rowId);
 
     if (drop.length > 0) {
       await prisma.outbox.deleteMany({ where: { id: { in: drop } } });
-      result.dropped = drop.length;
+      result.dropped += drop.length;
     }
     // The announcers settle their own row once their channels have returned.
     for (const c of comments) {
@@ -227,6 +284,23 @@ export async function drainOutbox(logScope = "outbox"): Promise<OutboxDrainResul
       if (!liveReplies.has(r.a.messageId)) continue;
       await announceIssueReply(r.a);
       result.delivered++;
+    }
+    // A grab push settles its own row unless it failed again (then it waits for
+    // its lock to lapse once more).
+    for (const g of grabs) {
+      if (!liveGrabs.has(g.grabId)) continue;
+      await deliverGrabPush(g.grabId, g.push, `[${logScope}]`);
+      result.delivered++;
+    }
+    // A vote alert is re-judged before it is sent; one that is no longer owed
+    // is deleted unsent. A failed read leaves its row for the next pass.
+    for (const alert of voteAlerts) {
+      try {
+        if (await deliverQueuedVoteAlert(alert)) result.delivered++;
+        else result.dropped++;
+      } catch (err) {
+        console.warn(`[${logScope}] outbox: vote alert left queued:`, err instanceof Error ? err.message : String(err));
+      }
     }
     // One channel after another: a redelivery pass is rare and never urgent.
     // The deliver functions settle (delete) what they sent and never throw.

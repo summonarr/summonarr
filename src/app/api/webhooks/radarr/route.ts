@@ -189,7 +189,7 @@ async function handleMovieDownload(tmdbId: number, arrInstance: string): Promise
   // a grab that was fired at a sibling instance. A RESOLVED issue's grab is never
   // claimed: a replacement that found nothing would otherwise be announced by an
   // unrelated import months later (CLAIMABLE_GRAB_ISSUE). The claim itself (and
-  // its push retry) is shared with the Sonarr twin, and it asks Radarr for a
+  // the push it queues) is shared with the Sonarr twin, and it asks Radarr for a
   // file newer than the grab first — on the unverifiable verdict too, where
   // the flip above went ahead: an unanswered check claims nothing, and those
   // grabs are tried once more after the library scan.

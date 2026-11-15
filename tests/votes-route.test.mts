@@ -9,11 +9,13 @@
 // $transaction, and swallowed the error. Once the key existed, every later vote
 // hit a unique-key error. In Postgres that error aborts the whole transaction
 // (there is no SAVEPOINT at the top level), so the vote was silently ROLLED
-// BACK while the route still answered 201. The fix moved the gate OUT of any
-// transaction and made it an idempotent createMany({skipDuplicates:true}).
+// BACK while the route still answered 201. The fix moved the gate OUT of the
+// vote's write and made it an idempotent createMany({skipDuplicates:true}).
 // This file pins that fix:
-//   - the vote insert is one standalone create — prisma.$transaction is NEVER
-//     called on the POST path, so there is no transaction to abort;
+//   - the vote insert is one standalone create, never inside a transaction.
+//     The only transaction on the POST path is the claim's own, AFTER the vote
+//     committed: the claim and the outbox row that owes the alert (outbox.ts),
+//     neither of which can raise a duplicate-key error;
 //   - the threshold gate runs only AFTER the vote create and cannot undo it:
 //     when createMany reports count 0 (someone else already claimed the key)
 //     the response is STILL 201 with the created vote row;
@@ -230,12 +232,30 @@ const settingModel = {
   deleteMany: async (args: { where: { key: string | { in: string[] } } }) => {
     rec("setting.deleteMany", args);
     const keys = typeof args.where.key === "string" ? [args.where.key] : args.where.key.in;
-    let count = 0;
-    for (const k of keys) if (k.startsWith("deletionVotePending:")) count += settings.delete(k) ? 1 : 0; else count++;
-    return { count };
+    for (const k of keys) settings.delete(k);
+    return { count: keys.length };
   },
 };
 shadowPrismaModel(prisma, "setting", settingModel);
+
+// The notification outbox (outbox.ts): the claim's transaction queues the
+// alert here; it is deleted once the alert was handed to the senders.
+const outboxRows = new Map<string, { kind: string; channel: string; userId: string | null; payload: unknown }>();
+const outboxModel = {
+  upsert: async (args: { where: { dedupeKey: string }; create: { kind: string; channel: string; userId: string | null; payload: unknown } }) => {
+    rec("outbox.upsert", args);
+    outboxRows.set(args.where.dedupeKey, args.create);
+    return args.create;
+  },
+  deleteMany: async (args: { where: { dedupeKey: { in: string[] } } }) => {
+    rec("outbox.deleteMany", args);
+    let count = 0;
+    for (const key of args.where.dedupeKey.in) count += outboxRows.delete(key) ? 1 : 0;
+    return { count };
+  },
+};
+shadowPrismaModel(prisma, "outbox", outboxModel);
+const VOTE_ALERT_KEY = "vote.threshold:603:MOVIE:all";
 
 let voteSeq = 0;
 let voteCreateImpl: (args: { data: Record<string, unknown> }) => Promise<Record<string, unknown>> = async (args) => ({
@@ -340,7 +360,7 @@ shadowPrismaModel(prisma, "pushSubscription", {
 
 // $transaction recording stub. Callback form: ops inside it are marked inTx.
 // Array form (what PATCH dismiss uses): just awaits the already-started calls.
-const txObj = { deletionVote: deletionVoteModel, setting: settingModel };
+const txObj = { deletionVote: deletionVoteModel, setting: settingModel, outbox: outboxModel };
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
   txCalls++;
   if (Array.isArray(arg)) return Promise.all(arg);
@@ -439,6 +459,7 @@ beforeEach(() => {
   txCalls = 0;
   txDepth = 0;
   afterTasks.length = 0;
+  outboxRows.clear();
   fetchCalls.length = 0;
   warns.length = 0;
   errors.length = 0;
@@ -660,7 +681,7 @@ test("a user who ever requested the title cannot vote to delete it (403)", async
 
 // ── the vote insert itself + guardrail 23 ───────────────────────────────────
 
-test("a valid vote commits as ONE bare create — no $transaction anywhere on the POST path — and 201s the row", async () => {
+test("a valid vote commits as ONE bare create — no $transaction around it — and 201s the row", async () => {
   const { userId, token } = await mintSession();
   const res = await post(token, voteBody(userId, { reason: "Low quality rip" }));
   assert.equal(res.status, 201);
@@ -715,18 +736,27 @@ test("threshold WINNER: the gate runs strictly AFTER the create, claims via crea
   assert.equal(res.status, 201);
 
   // Structural pin (guardrail 23): everything gate-shaped happens after the
-  // committed insert, outside any transaction.
+  // committed insert, and the vote is in no transaction.
   const fromCreate = opNames().slice(opNames().indexOf("deletionVote.create"));
   assert.deepEqual(fromCreate, [
     "deletionVote.create",
     "setting.findUnique", // deletionVoteThreshold read
     "deletionVote.count",
     "setting.findUnique", // already-alerted check
-    "setting.upsert", // pending marker, before the claim
-    "setting.createMany", // the idempotent one-shot claim
+    "setting.createMany", // the idempotent one-shot claim…
+    "outbox.upsert", // …and the alert it owes, in the claim's transaction
     "deletionVote.count", // the dismiss-race recount, only after winning
   ]);
-  assert.ok(ops.every((o) => !o.inTx), "no op on the POST path may run inside a tx");
+  // The claim's transaction holds exactly the claim and its queued alert: two
+  // statements that cannot raise a duplicate-key error (skipDuplicates, upsert).
+  assert.deepEqual(ops.filter((o) => o.inTx).map((o) => o.op), ["setting.createMany", "outbox.upsert"]);
+  assert.equal(txCalls, 1);
+  const queued = outboxRows.get(VOTE_ALERT_KEY);
+  assert.deepEqual(
+    queued && { kind: queued.kind, channel: queued.channel, userId: queued.userId, payload: queued.payload },
+    { kind: "vote.threshold", channel: "all", userId: null, payload: { title: "The Matrix", mediaType: "MOVIE", voteCount: 5, posterPath: "/matrix.jpg", tmdbId: 603 } },
+    "the alert is owed from the moment the claim commits",
+  );
 
   const claim = opsOf("setting.createMany")[0].args as {
     data: { key: string; value: string }[];
@@ -742,46 +772,49 @@ test("threshold WINNER: the gate runs strictly AFTER the create, claims via crea
   await afterTasks[0]();
   assert.equal(fetchCalls.length, wireBefore, "unconfigured notify channels must never reach the network");
   assert.deepEqual(errors, [], "the notify fan-out must complete without channel errors");
+  assert.equal(outboxRows.has(VOTE_ALERT_KEY), false, "a delivered alert is no longer owed");
 });
 
-test("a crash between the claim and the send leaves a pending marker that the sweep finishes; a completed send clears it", async () => {
-  const { sweepPendingVoteAlerts, _resetVoteAlertSweepForTests } = await import("../src/lib/deletion-vote-threshold.ts");
+test("a crash between the claim and the send leaves the alert queued; the drain's half sends it only while it is still owed", async () => {
+  const { deliverQueuedVoteAlert } = await import("../src/lib/deletion-vote-threshold.ts");
   settings.set("deletionVoteThreshold", "5");
   voteCounts = [5, 5];
   claimCount = 1;
   const { userId, token } = await mintSession();
   assert.equal((await post(token, voteBody(userId))).status, 201);
-  const pendingKey = "deletionVotePending:603:MOVIE";
-  assert.ok(settings.has(pendingKey), "intent is recorded before the claim");
-  assert.equal(opsOf("setting.upsert").length, 1);
+  // The process dies before after() runs: the row stays.
+  assert.ok(outboxRows.has(VOTE_ALERT_KEY));
+  const queued = outboxRows.get(VOTE_ALERT_KEY)!.payload as Parameters<typeof deliverQueuedVoteAlert>[0];
+  const requeue = () => outboxRows.set(VOTE_ALERT_KEY, { kind: "vote.threshold", channel: "all", userId: null, payload: queued });
 
-  // The process dies before after() runs: the marker stays. A fresh marker is left alone.
-  _resetVoteAlertSweepForTests();
-  const early = await sweepPendingVoteAlerts({ force: true });
-  assert.deepEqual(early, { delivered: 0, dropped: 0 });
-  assert.ok(settings.has(pendingKey));
-
-  // Once old enough, the sweep re-judges the title and delivers it.
-  settings.set(pendingKey, JSON.stringify({ at: new Date(Date.now() - 3_600_000).toISOString(), title: "The Matrix", posterPath: null }));
+  // Still claimed and still over the threshold: sent, and the row goes.
   settings.set("deletionVoteNotified:603:MOVIE", "1");
-  voteCounts = [5];
-  const swept = await sweepPendingVoteAlerts({ force: true });
-  assert.deepEqual(swept, { delivered: 1, dropped: 0 });
-  assert.ok(!settings.has(pendingKey), "the marker is taken");
+  voteCounts = [6];
+  assert.equal(await deliverQueuedVoteAlert(queued), true);
+  assert.equal(outboxRows.has(VOTE_ALERT_KEY), false);
 
-  // A marker for a title whose votes are gone is dropped, not delivered.
-  settings.set(pendingKey, JSON.stringify({ at: new Date(Date.now() - 3_600_000).toISOString(), title: "The Matrix", posterPath: null }));
+  // The votes are gone: dropped unsent.
+  requeue();
   voteCounts = [2];
-  assert.deepEqual(await sweepPendingVoteAlerts({ force: true }), { delivered: 0, dropped: 1 });
+  assert.equal(await deliverQueuedVoteAlert(queued), false);
+  assert.equal(outboxRows.has(VOTE_ALERT_KEY), false);
 
-  // The normal path clears its marker after the send.
+  // The claim was given back (a dismiss, or the title became available): dropped
+  // without even counting, and the claim is NOT re-won.
+  requeue();
   settings.delete("deletionVoteNotified:603:MOVIE");
-  voteCounts = [5, 5];
-  const again = await mintSession();
-  assert.equal((await post(again.token, voteBody(again.userId))).status, 201);
-  assert.ok(settings.has(pendingKey));
-  await afterTasks[afterTasks.length - 1]();
-  assert.ok(!settings.has(pendingKey), "a delivered alert removes its pending marker");
+  ops.length = 0;
+  voteCounts = [9];
+  assert.equal(await deliverQueuedVoteAlert(queued), false);
+  assert.equal(opsOf("deletionVote.count").length, 0);
+  assert.equal(opsOf("setting.createMany").length, 0);
+  assert.equal(outboxRows.has(VOTE_ALERT_KEY), false);
+
+  // The threshold was switched off since.
+  requeue();
+  settings.set("deletionVoteNotified:603:MOVIE", "1");
+  settings.delete("deletionVoteThreshold");
+  assert.equal(await deliverQueuedVoteAlert(queued), false);
 });
 
 test("threshold LOSER (claim count 0 — another caller won): the vote STILL commits behind 201 and nothing is notified — the exact silent-rollback bug guardrail 23 documents", async () => {
@@ -796,7 +829,8 @@ test("threshold LOSER (claim count 0 — another caller won): the vote STILL com
   assert.equal(body.userId, userId, "the committed vote row is still returned");
 
   assert.equal(opsOf("deletionVote.create").length, 1, "the vote insert happened and nothing rolled it back");
-  assert.equal(txCalls, 0, "no tx exists whose abort could discard the vote");
+  assert.equal(opsOf("deletionVote.create")[0].inTx, false, "the vote is in no tx whose abort could discard it");
+  assert.equal(opsOf("outbox.upsert").length, 0, "a loser queues nothing");
   assert.equal(opsOf("deletionVote.count").length, 1, "losers must not recount");
   assert.equal(afterTasks.length, 0, "only the single claim winner notifies");
 });
@@ -834,6 +868,12 @@ test("the gate stays quiet below the threshold, and the winner's recount suppres
   assert.equal(opsOf("setting.createMany").length, 1, "the claim itself was won");
   assert.equal(opsOf("deletionVote.count").length, 2, "the recount ran");
   assert.equal(afterTasks.length, 0, "a recount below threshold must not alert");
+  assert.equal(outboxRows.has(VOTE_ALERT_KEY), false, "the alert the claim queued is taken back with the claim");
+  assert.deepEqual(
+    opsOf("setting.deleteMany").map((o) => (o.args as { where: { key: { in: string[] } } }).where.key.in),
+    [["deletionVoteNotified:603:MOVIE"]],
+    "the claim is given back so a real re-crossing alerts",
+  );
 });
 
 // ── DELETE /api/votes/[tmdbId] (un-vote) ────────────────────────────────────

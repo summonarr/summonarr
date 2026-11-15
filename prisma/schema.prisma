@@ -2028,7 +2028,7 @@ model Outbox {
   // The request-notice inserts are raw SQL and supply gen_random_uuid(); the
   // default serves the Prisma creates (queueAnnouncement).
   id          String   @id @default(cuid(2))
-  kind        String   @db.VarChar(40) // "request.available" | "request.approved" | "request.declined" | "request.comment" | "issue.reply"
+  kind        String   @db.VarChar(40) // "request.available" | "request.approved" | "request.declined" | "request.comment" | "issue.reply" | "issue.grab" | "vote.threshold"
   channel     String   @db.VarChar(16) // "discord" | "push" | "inbox" | "agents" | "email", or "all" for a whole announcement
   dedupeKey   String   @unique @db.VarChar(200) // <kind>:<subject id>:<channel>
   userId      String? // whose row this is — the recipient of a request notice, the AUTHOR of a comment/reply: the purge deletes by it, the drain re-checks deactivation

@@ -428,7 +428,7 @@ type GrabRow = {
 };
 const grabs: GrabRow[] = [];
 const grabUpdateManyCalls: UpdateManyCall[] = [];
-shadowPrismaModel(prisma, "issueGrab", {
+const issueGrabStub = {
   findMany: async (args: { where: Record<string, unknown> }) =>
     grabs.filter((g) => rowMatches(g as unknown as Record<string, unknown>, args.where)).map((g) => ({ ...g })),
   updateMany: async (args: UpdateManyCall) => {
@@ -451,7 +451,25 @@ shadowPrismaModel(prisma, "issueGrab", {
     Object.assign(g, args.data);
     return { ...g };
   },
-});
+};
+shadowPrismaModel(prisma, "issueGrab", issueGrabStub);
+
+// The notification outbox (outbox.ts): a grab's claim queues its push here, in
+// the claim's transaction, and the row goes once the push service answered.
+const outboxRows = new Map<string, { kind: string; channel: string; userId: string | null; payload: unknown }>();
+const outboxStub = {
+  create: async (args: { data: { dedupeKey: string; kind: string; channel: string; userId: string | null; payload: unknown } }) => {
+    outboxRows.set(args.data.dedupeKey, args.data);
+    return args.data;
+  },
+  deleteMany: async (args: { where: { dedupeKey: { in: string[] } } }) => {
+    let count = 0;
+    for (const key of args.where.dedupeKey.in) count += outboxRows.delete(key) ? 1 : 0;
+    return { count };
+  },
+};
+shadowPrismaModel(prisma, "outbox", outboxStub);
+const grabPushKey = (grabId: string) => `issue.grab:${grabId}:push`;
 
 // Deletion votes (clearDeletionVotesForTmdbs is void-fired post-flip).
 const deletionVoteDeletes: Record<string, unknown>[] = [];
@@ -533,6 +551,8 @@ const txDelegates = {
     return 0;
   },
   mediaRequest: mediaRequestStub,
+  issueGrab: issueGrabStub,
+  outbox: outboxStub,
   radarrWantedItem: radarrWantedStub,
   radarrAvailableItem: radarrAvailableStub,
   sonarrWantedItem: sonarrWantedStub,
@@ -724,6 +744,7 @@ beforeEach(() => {
   settingDeleteManyCalls.length = 0;
   requestUpdateManyCalls.length = 0;
   grabUpdateManyCalls.length = 0;
+  outboxRows.clear();
   radarrWantedDeletes.length = 0;
   sonarrWantedDeletes.length = 0;
   sonarrAvailableCreates.length = 0;
@@ -1330,13 +1351,13 @@ test("radarr issue-grab completion: CAS-claimed, scoped to the firing instance; 
   assert.deepEqual(grabUpdateManyCalls[0].where, { id: defaultGrab.id, notifiedAt: null });
 
   // Push has no subscriptions in this harness → "skipped-no-subs": logged, and
-  // notifiedAt stays SET (retrying wouldn't help; a failed push also leaves it
-  // set and records a grabPushRetry Setting instead of unclaiming).
+  // notifiedAt stays SET. Retrying wouldn't help, so the queued push is settled.
   assert.ok(warns.some((w) => w.includes("grab push skipped (skipped-no-subs)")));
   assert.ok(defaultGrab.notifiedAt instanceof Date);
+  assert.deepEqual([...outboxRows.keys()], [], "a push no retry would change is not left queued");
 });
 
-test("radarr issue-grab: a failed web push keeps notifiedAt set and does not re-emit arr.grab_completed", async () => {
+test("radarr issue-grab: a failed web push stays QUEUED for the outbox drain, keeps notifiedAt set and does not re-emit arr.grab_completed", async () => {
   const grab = seedGrab({ tmdbId: 603, mediaType: "MOVIE", arrInstance: "" });
   agentRows.push(agentRow("arr.grab_completed"));
   seedFailedIosPush(grab.triggeredById);
@@ -1354,12 +1375,18 @@ test("radarr issue-grab: a failed web push keeps notifiedAt set and does not re-
   await waitForAgentPosts(1);
   assert.deepEqual(agentPosts().map((p) => p.event), ["arr.grab_completed"]);
   assert.ok(grab.notifiedAt instanceof Date, "the emit claim stays set after a failed push");
-  assert.equal(settings.has(`grabPushRetry:${grab.id}`), true, "a push-only retry marker is recorded");
+  assert.deepEqual([...outboxRows.keys()], [grabPushKey(grab.id)], "the push the claim queued is still owed");
+  assert.deepEqual(outboxRows.get(grabPushKey(grab.id))?.payload, {
+    userId: grab.triggeredById, title: grab.title, tmdbId: 603, mediaType: "MOVIE",
+    scope: grab.scope, seasonNumber: grab.seasonNumber, episodeNumber: grab.episodeNumber, issueId: grab.issueId,
+  }, "the row carries everything the drain needs to send it");
+  assert.equal(outboxRows.get(grabPushKey(grab.id))?.userId, grab.triggeredById);
   assert.ok(warns.some((w) => w.includes("grab notification failed, will retry push")));
   assert.equal(grabUpdateManyCalls.length, 1, "exactly one CAS — failed push must not unclaim");
 
   // A later Download for the same title (volatile downloadId ⇒ new replay digest)
-  // retries the web push but must not emit again.
+  // does nothing for a claimed grab: the retry is the outbox drain's.
+  const warnsBefore = warns.length;
   const second = await post(
     radarrPOST,
     webhookReq("radarr", {
@@ -1372,10 +1399,11 @@ test("radarr issue-grab: a failed web push keeps notifiedAt set and does not re-
   assert.equal(agentPosts().length, 1, "ntfy/Gotify/NotificationAgent fire once per grab, not once per push retry");
   assert.ok(grab.notifiedAt instanceof Date);
   assert.equal(grabUpdateManyCalls.length, 1, "the second delivery must not re-CAS notifiedAt");
-  assert.equal(settings.has(`grabPushRetry:${grab.id}`), true, "the retry marker is rewritten when push fails again");
+  assert.deepEqual([...outboxRows.keys()], [grabPushKey(grab.id)], "the queued push is untouched");
+  assert.ok(!warns.slice(warnsBefore).some((w) => w.includes("grab notification")), "the delivery does not push a claimed grab again");
   assert.equal(
     fetchCalls.filter((c) => c.url.includes("/api/v3/moviefile")).length, 1,
-    "an already-claimed grab's push retry asks Radarr for nothing more: only the first claim is confirmed",
+    "an already-claimed grab asks Radarr for nothing more: only the claim is confirmed",
   );
 });
 
@@ -1401,7 +1429,7 @@ test("radarr issue-grab: a Download Radarr can't be asked about claims nothing �
   assert.equal(grab.notifiedAt, null, "an unconfirmed delivery must leave the grab pending");
   assert.equal(grabUpdateManyCalls.length, 0, "the CAS is never reached");
   assert.equal(agentPosts().length, 0);
-  assert.equal(settings.has(`grabPushRetry:${grab.id}`), false);
+  assert.equal(outboxRows.size, 0, "nothing is owed for a grab that was not claimed");
   assert.equal(unreachable.tasks.length, 1, "the after() work, which retries the unverified grab once, is scheduled");
 });
 
@@ -1475,35 +1503,21 @@ test("grab confirmation is bounded and instance-scoped: a file row past the read
   assert.equal(fetchCalls.length, 0, "the firing instance is never asked about another instance's grab");
 });
 
-test("a push a failed delivery left behind is retried by a later sweep, not only by a Download for the same title", async () => {
-  const { retryPendingGrabPushes } = await import("../src/lib/arr-webhook.ts");
-  const now = new Date("2026-11-07T12:00:00Z");
-  const old = new Date(now.getTime() - 30 * 60_000).toISOString();
-  const sent = seedGrab({ tmdbId: 1, mediaType: "MOVIE", notifiedAt: now, title: "Sent" });
-  const failsAgain = seedGrab({ tmdbId: 2, mediaType: "MOVIE", notifiedAt: now, title: "Fails" });
-  const stale = seedGrab({ tmdbId: 3, mediaType: "MOVIE", notifiedAt: now, title: "Stale" });
-  const fresh = seedGrab({ tmdbId: 4, mediaType: "MOVIE", notifiedAt: now, title: "Fresh" });
-  settings.set(`grabPushRetry:${sent.id}`, old);
-  settings.set(`grabPushRetry:${failsAgain.id}`, old);
-  settings.set(`grabPushRetry:${stale.id}`, new Date(now.getTime() - 25 * 60 * 60_000).toISOString());
-  settings.set(`grabPushRetry:${fresh.id}`, new Date(now.getTime() - 60_000).toISOString());
-  const pushed: string[] = [];
-  const r = await retryPendingGrabPushes({
-    now,
-    force: true,
-    // Cast: the test and the module see push.ts's outcome type through two import paths.
-    push: (async (data: { title: string }) => {
-      pushed.push(data.title);
-      return data.title === "Fails" ? "failed" : "sent";
-    }) as never,
-  });
-  assert.deepEqual(pushed.sort(), ["Fails", "Sent"], "an expired or brand-new marker is never pushed");
-  assert.deepEqual(r, { retried: 2, expired: 1 });
-  assert.equal(settings.has(`grabPushRetry:${sent.id}`), false, "a delivered push clears its marker");
-  assert.equal(settings.get(`grabPushRetry:${failsAgain.id}`), old, "a push failing again keeps its FIRST failure's time");
-  assert.equal(settings.has(`grabPushRetry:${stale.id}`), false, "a marker past its TTL is dropped");
-  assert.equal(settings.has(`grabPushRetry:${fresh.id}`), true, "a fresh marker is left to the delivery that wrote it");
-  assert.equal(grabUpdateManyCalls.length, 0, "the emit claim is never touched");
+test("a queued grab push is settled by any answer a retry would not change, and left queued when the send failed or threw", async () => {
+  const { deliverGrabPush, grabPushOf } = await import("../src/lib/issue-grab-notify.ts");
+  const grab = seedGrab({ tmdbId: 603, mediaType: "MOVIE", notifiedAt: new Date() });
+  const key = grabPushKey(grab.id);
+  const queue = () => outboxRows.set(key, { kind: "issue.grab", channel: "push", userId: grab.triggeredById, payload: {} });
+
+  queue();
+  assert.equal(await deliverGrabPush(grab.id, grabPushOf(grab as never), "[test]"), "skipped-no-subs");
+  assert.equal(outboxRows.has(key), false, "no subscription: settled");
+
+  queue();
+  seedFailedIosPush(grab.triggeredById);
+  assert.equal(await deliverGrabPush(grab.id, grabPushOf(grab as never), "[test]"), "failed");
+  assert.equal(outboxRows.has(key), true, "a failed push stays owed");
+  assert.equal(grabUpdateManyCalls.length, 0, "the claim is never touched");
 });
 
 test("radarr: one secret on two instances is said once in the log; the default instance still handles the event", async () => {
@@ -2139,7 +2153,7 @@ test("sonarr issue-grab: a failed web push keeps notifiedAt set and does not re-
   await waitForAgentPosts(1);
   assert.deepEqual(agentPosts().map((p) => p.event), ["arr.grab_completed"]);
   assert.ok(grab.notifiedAt instanceof Date, "the emit claim stays set after a failed push");
-  assert.equal(settings.has(`grabPushRetry:${grab.id}`), true);
+  assert.deepEqual([...outboxRows.keys()], [grabPushKey(grab.id)], "the push the claim queued is still owed");
   assert.ok(warns.some((w) => w.includes("grab notification failed, will retry push")));
   assert.equal(grabUpdateManyCalls.length, 1, "exactly one CAS — failed push must not unclaim");
 
@@ -2160,7 +2174,7 @@ test("sonarr issue-grab: a failed web push keeps notifiedAt set and does not re-
   assert.equal(agentPosts().length, 1, "ntfy/Gotify/NotificationAgent fire once per grab, not once per push retry");
   assert.ok(grab.notifiedAt instanceof Date);
   assert.equal(grabUpdateManyCalls.length, 1, "the second delivery must not re-CAS notifiedAt");
-  assert.equal(settings.has(`grabPushRetry:${grab.id}`), true);
+  assert.deepEqual([...outboxRows.keys()], [grabPushKey(grab.id)], "the queued push is untouched");
 });
 
 test("sonarr issue-grab: the claim needs Sonarr's own file in the grab's scope, newer than the grab — per episode, per season, per series", async () => {

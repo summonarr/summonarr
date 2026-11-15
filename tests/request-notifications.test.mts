@@ -995,6 +995,7 @@ const owed = (id: string, channel: string, over: Record<string, unknown> = {}) =
   id: `ob-${id}-${channel}`,
   kind: "request.available",
   channel,
+  dedupeKey: `request.available:${id}:${channel}`,
   userId: `user-${id}`,
   payload: { id, requestedBy: `user-${id}`, title: `Title ${id}`, mediaType: "MOVIE", tmdbId: 1, posterPath: null, arrInstance: "" },
   attempts: 1,
