@@ -403,3 +403,23 @@ test("an issue reply: queued with the message, announced to the reporter by the 
   assert.deepEqual(await drainOutbox("test"), { delivered: 0, dropped: 1 });
   assert.equal(await prisma.notification.count(), 1, "no second inbox row");
 });
+
+
+// ═══ The admin's manual "mark available" ════════════════════════════════════
+
+test("actorId: the actor's OWN request is claimed but queues no notice; another requester's queues all five; a row not AVAILABLE is not claimed", async () => {
+  const admin = await makeUser();
+  const other = await makeUser();
+  const [mine] = await makeRequests(admin.id, 1, "AVAILABLE");
+  const [theirs] = await makeRequests(other.id, 1, "AVAILABLE");
+  const [pending] = await makeRequests(other.id, 1, "APPROVED");
+
+  const res = await claimAvailableNotifications([mine, theirs, pending], { requireStatusAvailable: true, actorId: admin.id });
+  assert.deepEqual(res.claimed.map((c) => c.id).sort(), [mine.id, theirs.id].sort());
+
+  const rows = await prisma.outbox.findMany();
+  assert.equal(rows.length, AVAILABLE_CHANNELS.length);
+  assert.ok(rows.every((r) => r.userId === other.id && r.dedupeKey.includes(`:${theirs.id}:`)));
+  const after = await prisma.mediaRequest.findUniqueOrThrow({ where: { id: pending.id } });
+  assert.equal(after.notifiedAvailable, false);
+});

@@ -27,6 +27,10 @@ export type AvailableNotificationClaim<T> = {
  * by the time their WHERE clause re-evaluates), so the row appears only in
  * the genuine winner's RETURNING set.
  *
+ * `opts.actorId` is the account acting by hand (the admin's manual "mark
+ * available"): a request that account filed itself is claimed like any other
+ * but queues no notice, and the caller sends none.
+ *
  * When `opts.markAvailable=true` (used by sync paths that also need to flip
  * status), the same UPDATE additionally writes `status='AVAILABLE'` and
  * `availableAt=NOW()`. Without it, only `notifiedAvailable` flips (used by
@@ -53,7 +57,7 @@ export type AvailableNotificationClaim<T> = {
  */
 export async function claimAvailableNotifications<T extends { id: string; requestedBy: string }>(
   candidates: readonly T[],
-  opts: { markAvailable?: boolean; requireStatusAvailable?: boolean } = {},
+  opts: { markAvailable?: boolean; requireStatusAvailable?: boolean; actorId?: string } = {},
 ): Promise<AvailableNotificationClaim<T>> {
   if (candidates.length === 0) return { claimed: [], deliverable: [] };
   const ids = candidates.map((r) => r.id);
@@ -97,7 +101,7 @@ export async function claimAvailableNotifications<T extends { id: string; reques
       `;
   const updated = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
     WITH claimed AS (${claim}),
-    queued AS (${availableOutboxInsert(Prisma.sql`claimed`)})
+    queued AS (${availableOutboxInsert(Prisma.sql`claimed`, { exceptRequester: opts.actorId })})
     SELECT id FROM claimed
   `);
   if (updated.length === 0) return { claimed: [], deliverable: [] };
@@ -121,7 +125,7 @@ export async function claimAvailableNotifications<T extends { id: string; reques
  */
 export async function claimAvailableNotificationWinners<T extends { id: string; requestedBy: string }>(
   candidates: readonly T[],
-  opts: { markAvailable?: boolean; requireStatusAvailable?: boolean } = {},
+  opts: { markAvailable?: boolean; requireStatusAvailable?: boolean; actorId?: string } = {},
 ): Promise<T[]> {
   return (await claimAvailableNotifications(candidates, opts)).deliverable;
 }

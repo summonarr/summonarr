@@ -9,7 +9,7 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { requesterAuditDetails } from "@/lib/audit-scrub";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
-import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
+import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
 import { readJsonCapped } from "@/lib/body-size";
@@ -422,16 +422,18 @@ async function declineRequest(pc: PatchContext, permanent: boolean): Promise<Nex
   return NextResponse.json(updated);
 }
 
-// The manual "mark available". Its "now available" fan-out is a once-only
-// claim like every other path's (guardrail 14): a sync or webhook may have
-// announced the title already. A failed claim write announces nothing.
-async function claimAvailableNotice(id: string): Promise<boolean> {
+// The manual "mark available". Its "now available" fan-out goes through THE
+// claim every other path uses (guardrails 14, 14f): once-only — a sync or
+// webhook may have announced the title already — and the notice is queued in
+// the claim's own statement, so a restart after it cannot lose it. A request
+// the marking admin filed themself is claimed but owes no notice. A failed
+// claim announces nothing.
+async function claimAvailableNotice(row: { id: string; requestedBy: string }, actorId: string) {
   try {
-    const cas = await prisma.mediaRequest.updateMany({ where: { id, notifiedAvailable: false }, data: { notifiedAvailable: true } });
-    return cas.count === 1;
+    return await claimAvailableNotifications([row], { requireStatusAvailable: true, actorId });
   } catch (err) {
-    console.error("[requests] Failed to CAS notifiedAvailable:", err);
-    return false;
+    console.error("[requests] Failed to claim the available notice:", err);
+    return { claimed: [], deliverable: [] };
   }
 }
 
@@ -444,10 +446,12 @@ async function markAvailable(pc: PatchContext): Promise<NextResponse> {
   if (!updated) return notFound(t);
   announceStatus(updated, updated.status);
 
-  if (await claimAvailableNotice(id)) {
+  const { claimed, deliverable } = await claimAvailableNotice({ id: updated.id, requestedBy: updated.requestedBy }, session.user.id);
+  if (claimed.length > 0) {
     void clearDeletionVotesForTmdbs([{ tmdbId: updated.tmdbId, mediaType: updated.mediaType }]);
-    // An admin marking their own request needs no "your request is available".
-    if (updated.requestedBy !== session.user.id) {
+    // An admin marking their own request needs no "your request is available";
+    // `deliverable` already leaves out a disabled requester (guardrail 33).
+    if (deliverable.length > 0 && updated.requestedBy !== session.user.id) {
       notifyRequestStatusChange("AVAILABLE", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId, requestId: updated.id, arrInstance: updated.arrInstance });
     }
   }

@@ -67,7 +67,10 @@ export function outboxKey(kind: string, subjectId: string, channel: string): str
  * name of the CTE holding the claim's RETURNING rows, which must carry id,
  * requestedBy, title, mediaType, tmdbId, posterPath and arrInstance.
  */
-export function availableOutboxInsert(claimed: Prisma.Sql): Prisma.Sql {
+export function availableOutboxInsert(claimed: Prisma.Sql, opts: { exceptRequester?: string } = {}): Prisma.Sql {
+  // The admin's manual "mark available": a request the marking admin filed
+  // themself owes no notice. The one bind parameter this insert can add.
+  const notSelf = opts.exceptRequester !== undefined ? Prisma.sql`WHERE c."requestedBy" <> ${opts.exceptRequester}` : Prisma.empty;
   // Every value below is a constant of this module, written into the statement
   // as a literal (integers and fixed lowercase words — nothing from a caller),
   // so the claim's bind parameters stay exactly its candidate ids.
@@ -98,6 +101,7 @@ export function availableOutboxInsert(claimed: Prisma.Sql): Prisma.Sql {
     FROM ${claimed} c
     JOIN "User" u ON u.id = c."requestedBy" AND u."deactivatedAt" IS NULL
     CROSS JOIN unnest(ARRAY[${channels}]) AS ch
+    ${notSelf}
     ON CONFLICT ("dedupeKey") DO NOTHING
   `;
 }

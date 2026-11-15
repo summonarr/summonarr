@@ -165,3 +165,21 @@ test("the disabled-recipient lookup runs once, deduped, and only when there are 
     select: { id: true },
   });
 });
+
+// The admin's manual "mark available" names the marking account: a request that
+// account filed is still claimed, but its notice is not queued (outbox.ts).
+test("actorId: the outbox insert skips the actor's own request, as the ONE extra bind parameter; absent, nothing changes", async () => {
+  queries.length = 0;
+  nextRows = [{ id: "a" }];
+  await claimAvailableNotificationWinners([cand("a")], { requireStatusAvailable: true, actorId: "admin-1" });
+  const withActor = norm(queries[0].sql);
+  assert.match(withActor, /CROSS JOIN unnest\(ARRAY\[[^\]]+\]\) AS ch WHERE c\."requestedBy" <> \? ON CONFLICT/);
+  assert.deepEqual(queries[0].values, ["a", "admin-1"]);
+  // The claim itself is untouched: the actor's own row is still won.
+  assert.doesNotMatch(claimOf(withActor), /requestedBy" <>/);
+
+  queries.length = 0;
+  await claimAvailableNotificationWinners([cand("a")], { requireStatusAvailable: true });
+  assert.doesNotMatch(norm(queries[0].sql), /requestedBy" <>/);
+  assert.deepEqual(queries[0].values, ["a"]);
+});

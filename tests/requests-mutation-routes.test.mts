@@ -359,7 +359,15 @@ for (const m of ["pushSubscription", "issue", "deletionVote", "plexLibraryItem",
 }
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) =>
   Array.isArray(arg) ? Promise.all(arg) : (arg as (tx: unknown) => Promise<unknown>)(prisma));
-shadowPrismaClientMethod(prisma, "$queryRaw", async () => []);
+// Raw reads answer nothing unless a test scripts them. The manual "mark
+// available" claims its notice through $queryRaw (notify-available.ts).
+type RawQuery = { sql: string; values: unknown[] };
+const rawQueries: RawQuery[] = [];
+let rawQueryImpl: (q: RawQuery) => Promise<unknown[]> = async () => [];
+shadowPrismaClientMethod(prisma, "$queryRaw", async (q: RawQuery) => {
+  if (q && typeof q.sql === "string") rawQueries.push(q);
+  return rawQueryImpl(q);
+});
 shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async () => []);
 shadowPrismaClientMethod(prisma, "$executeRaw", async () => 1);
 shadowPrismaClientMethod(prisma, "$executeRawUnsafe", async () => 1);
@@ -1775,3 +1783,75 @@ test("a FAILED ARR push does NOT queue the download check for the rolled-back ro
   assert.equal(queued, 0, "a rolled-back row has nothing for the job to consume");
 });
 
+
+// ═══ The manual "mark available" takes THE claim (guardrails 14, 14f) ══════
+// It used its own updateMany on notifiedAvailable, so its notice was never
+// queued: a restart after the mark lost it. It now claims through
+// claimAvailableNotifications, which queues the notice in the same statement.
+
+const claimStatements = () => rawQueries.filter((q) => q.sql.includes(`"notifiedAvailable" = true`));
+const settleAll = async () => { for (let i = 0; i < 40; i++) await new Promise<void>((r) => setImmediate(r)); };
+
+test("marking AVAILABLE claims the notice through the shared claim — already-AVAILABLE rows only, naming the marking admin", async () => {
+  rawQueries.length = 0;
+  rawQueryImpl = async (q) => (q.sql.includes(`"notifiedAvailable" = true`) ? [{ id: "r1" }] : []);
+  try {
+    const admin = await manager();
+    const owner = await mintSession();
+    reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, status: "APPROVED", title: "Dune" })];
+    ops.length = 0;
+    assert.equal((await doPatch(admin.token, "r1", { status: "AVAILABLE" })).status, 200);
+    await settleAll();
+
+    const [claim] = claimStatements();
+    assert.ok(claim, "the notice was claimed");
+    const sql = claim.sql.replace(/\s+/g, " ");
+    assert.match(sql, /AND "status" = 'AVAILABLE'/, "claims only a row that IS available — it never flips status itself");
+    assert.match(sql, /INSERT INTO "Outbox"/, "the notice is queued in the claim's own statement");
+    assert.match(sql, /WHERE c\."requestedBy" <> \?/, "a request the marking admin filed queues no notice");
+    assert.deepEqual(claim.values, ["r1", admin.userId]);
+    // No private compare-and-swap is left beside it.
+    assert.ok(!opsOf("mediaRequest.updateMany").some((o) => "notifiedAvailable" in ((o.args as { data: Record<string, unknown> }).data)));
+    // The requester was told: the fan-out wrote their inbox row.
+    const inbox = opsOf("notification.createMany").flatMap((o) => (o.args as { data: Array<{ userId: string; type: string }> }).data);
+    assert.deepEqual(inbox.map((n) => [n.userId, n.type]), [[owner.userId, "REQUEST_AVAILABLE"]]);
+  } finally {
+    rawQueryImpl = async () => [];
+  }
+});
+
+test("marking your OWN request AVAILABLE, a lost claim, and a claim that throws all send nothing and still answer 200", async () => {
+  try {
+    const admin = await manager();
+    const owner = await mintSession();
+
+    // Own request: claimed (the votes are still cleared), nobody is told.
+    rawQueryImpl = async (q) => (q.sql.includes(`"notifiedAvailable" = true`) ? [{ id: "r1" }] : []);
+    reqRows = [reqRow({ id: "r1", requestedBy: admin.userId, status: "APPROVED" })];
+    ops.length = 0;
+    assert.equal((await doPatch(admin.token, "r1", { status: "AVAILABLE" })).status, 200);
+    await settleAll();
+    assert.equal(opsOf("notification.createMany").length, 0, "own request");
+
+    // A sync or webhook already announced it: the claim answers no row.
+    rawQueryImpl = async () => [];
+    reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, status: "APPROVED" })];
+    ops.length = 0;
+    assert.equal((await doPatch(admin.token, "r1", { status: "AVAILABLE" })).status, 200);
+    await settleAll();
+    assert.equal(opsOf("notification.createMany").length, 0, "lost claim");
+
+    rawQueryImpl = async (q) => {
+      if (q.sql.includes(`"notifiedAvailable" = true`)) throw new Error("db down (unit test)");
+      return [];
+    };
+    reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, status: "APPROVED" })];
+    ops.length = 0;
+    assert.equal((await doPatch(admin.token, "r1", { status: "AVAILABLE" })).status, 200);
+    await settleAll();
+    assert.equal(opsOf("notification.createMany").length, 0, "failed claim");
+    assert.equal(reqRows[0].status, "AVAILABLE", "the mark itself stands");
+  } finally {
+    rawQueryImpl = async () => [];
+  }
+});
