@@ -410,8 +410,21 @@ async function handleRelayFailure(res: Response, relayUrl: string, subscription:
   }
 }
 
+/**
+ * How one device send ended. "failed" is worth repeating (no answer, 429, 5xx);
+ * "rejected" is the device's or the service's decision and repeats forever (a
+ * revoked subscription, a refused payload, missing key material).
+ */
+export type PushOutcome = "sent" | "rejected" | "failed";
+
+const transientStatus = (status: number): boolean => status === 429 || status >= 500;
+
 async function sendApns(subscription: PushRow, payload: PushPayload): Promise<boolean> {
-  if (!subscription.deviceToken) return false;
+  return (await sendApnsOutcome(subscription, payload)) === "sent";
+}
+
+async function sendApnsOutcome(subscription: PushRow, payload: PushPayload): Promise<PushOutcome> {
+  if (!subscription.deviceToken) return "rejected";
   const apnsPayload = buildApnsPayload(subscription, payload);
   try {
     const token = decryptToken(subscription.deviceToken, "PushSubscription.deviceToken");
@@ -430,17 +443,17 @@ async function sendApns(subscription: PushRow, payload: PushPayload): Promise<bo
     });
     if (!res.ok) {
       await handleRelayFailure(res, relay.url, subscription, payload.category);
-      return false;
+      return transientStatus(res.status) ? "failed" : "rejected";
     }
     const data = await readRelayBody(res, RelayOkBody);
     if (data?.reason === "unregistered") {
       await prisma.pushSubscription.deleteMany({ where: { endpoint: subscription.endpoint } });
-      return false;
+      return "rejected";
     }
-    return data?.ok === true;
+    return data?.ok === true ? "sent" : "rejected";
   } catch (err) {
     console.error("[push] APNs relay send failed:", err instanceof Error ? err.message : err);
-    return false;
+    return "failed";
   }
 }
 
@@ -568,12 +581,20 @@ async function sendPush(
   subscription: PushRow,
   payload: PushPayload,
 ): Promise<boolean> {
+  return (await sendPushOutcome(keys, subscription, payload)) === "sent";
+}
+
+async function sendPushOutcome(
+  keys: VapidKeys | null,
+  subscription: PushRow,
+  payload: PushPayload,
+): Promise<PushOutcome> {
   if (subscription.platform === "ios") {
-    return sendApns(subscription, payload);
+    return sendApnsOutcome(subscription, payload);
   }
 
   // web (VAPID) — needs both the configured keys and the subscription's crypto material
-  if (!keys || !subscription.p256dh || !subscription.auth) return false;
+  if (!keys || !subscription.p256dh || !subscription.auth) return "rejected";
   try {
     await sendPushNotification(
       {
@@ -586,7 +607,7 @@ async function sendPush(
       JSON.stringify({ title: payload.title, body: payload.body, url: payload.url }),
       { contact: keys.contact, vapidPublicKey: keys.publicKey, vapidPrivateKey: keys.privateKey },
     );
-    return true;
+    return "sent";
   } catch (err: unknown) {
     // Read by shape, not instanceof: a thrown value may be anything (even null).
     const status =
@@ -603,7 +624,8 @@ async function sendPush(
       const kind = err instanceof Error ? err.name : typeof err;
       console.error("[push] Send failed: status %s, %s", status ?? "none", kind);
     }
-    return false;
+    // No status is no answer at all (the network, a timeout): worth repeating.
+    return status === undefined || transientStatus(status) ? "failed" : "rejected";
   }
 }
 
@@ -946,11 +968,15 @@ async function notifyRequestersPush(
   flag: RequestStatusPushFlag,
   payloads: RequestPayloads,
   logLabel: string,
-): Promise<void> {
-  if (requests.length === 0) return;
+): Promise<number[]> {
+  // The answer is the indexes of `requests` still owed (guardrail 14f): no
+  // device of that requester got the push AND at least one send is worth
+  // repeating. One delivered device settles the request — repeating it would
+  // push that device twice. A read that fails before any send is every index.
+  if (requests.length === 0) return [];
   try {
     const ctx = await pushContext();
-    if (!ctx) return;
+    if (!ctx) return [];
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
@@ -960,15 +986,15 @@ async function notifyRequestersPush(
     const eligibleIds = new Set(users.map((u) => u.id));
     const userById = new Map(users.map((u) => [u.id, u]));
 
-    const eligible = requests.filter((r) => eligibleIds.has(r.requestedBy));
-    if (!eligible.length) return;
+    const eligible = requests.flatMap((r, index) => (eligibleIds.has(r.requestedBy) ? [{ r, index }] : []));
+    if (!eligible.length) return [];
 
     const subs = await prisma.pushSubscription.findMany({
       where: { userId: { in: [...eligibleIds] } },
     });
-    if (!subs.length) return;
+    if (!subs.length) return [];
 
-    const resolve = await titleResolver(eligible, recipientLocales(users));
+    const resolve = await titleResolver(eligible.map((e) => e.r), recipientLocales(users));
     const subsByUser = new Map<string, typeof subs>();
     for (const s of subs) {
       const arr = subsByUser.get(s.userId) ?? [];
@@ -976,14 +1002,23 @@ async function notifyRequestersPush(
       subsByUser.set(s.userId, arr);
     }
 
-    const jobs = eligible.flatMap((r) => {
+    const jobs = eligible.flatMap(({ r, index }) => {
       const userSubs = subsByUser.get(r.requestedBy) ?? [];
       const payload = payloads(r, resolve)(userById.get(r.requestedBy));
-      return userSubs.map((s) => ({ sub: s, payload }));
+      return userSubs.map((s) => ({ sub: s, payload, index }));
     });
-    await settleLimit(jobs, PUSH_FANOUT_CONCURRENCY, (j) => sendPush(ctx.keys, j.sub, j.payload));
+    const settled = await settleLimit(jobs, PUSH_FANOUT_CONCURRENCY, (j) => sendPushOutcome(ctx.keys, j.sub, j.payload));
+    const delivered = new Set<number>();
+    const repeatable = new Set<number>();
+    settled.forEach((result, i) => {
+      const outcome: PushOutcome = result.status === "fulfilled" ? result.value : "failed";
+      if (outcome === "sent") delivered.add(jobs[i].index);
+      else if (outcome === "failed") repeatable.add(jobs[i].index);
+    });
+    return [...repeatable].filter((index) => !delivered.has(index)).sort((a, b) => a - b);
   } catch (err) {
     console.error(`[push] Failed to notify users (${logLabel}):`, err);
+    return requests.map((_, index) => index);
   }
 }
 
@@ -992,19 +1027,19 @@ async function notifyRequestersPush(
 export async function notifyUsersRequestsAvailablePush(
   requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number | null }>
 ) {
-  await notifyRequestersPush(requests, "pushOnAvailable", availablePayloads, "available");
+  return notifyRequestersPush(requests, "pushOnAvailable", availablePayloads, "available");
 }
 
 export async function notifyUsersRequestsApprovedPush(
   requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number | null }>
 ) {
-  await notifyRequestersPush(requests, "pushOnApproved", approvedPayloads, "approved");
+  return notifyRequestersPush(requests, "pushOnApproved", approvedPayloads, "approved");
 }
 
 export async function notifyUsersRequestsDeclinedPush(
   requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number | null }>
 ) {
-  await notifyRequestersPush(requests, "pushOnDeclined", declinedPayloads, "declined");
+  return notifyRequestersPush(requests, "pushOnDeclined", declinedPayloads, "declined");
 }
 
 export async function notifyAdminsNewIssuePush(data: {

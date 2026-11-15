@@ -17,10 +17,12 @@
 //     died, or the delete failed). The drain (outbox-drain.ts) re-locks it,
 //     sends it from the stored payload and deletes it.
 //
-// What this is NOT: a retry for a send the channel itself gave up on. Every
-// sender swallows its own failures (Discord, push, email log and move on), so a
-// channel that "returned" is settled whether or not the message landed. Rows
-// are per channel so that can change one sender at a time.
+// A request-notice sender reports the sends that failed in a way worth
+// repeating (no answer, 429, 5xx); those rows are left here and the drain sends
+// them again. A send the service refused for good is settled like a delivered
+// one. Comment and reply announcements (one row each) and the outbound agents
+// (their own in-memory retries) report nothing: for them a channel that
+// returned is settled.
 //
 // Delivery is at-least-once: a death between a send and its delete repeats that
 // one channel for that one request.

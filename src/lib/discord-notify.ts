@@ -482,9 +482,35 @@ export async function notifyAdminsNewIssueDiscord(data: {
   }
 }
 
+/**
+ * A Discord send that did not land. `status` is Discord's answer; null when the
+ * request never got one (a timeout, a dropped connection).
+ */
+export class DiscordSendError extends Error {
+  readonly status: number | null;
+  constructor(message: string, status: number | null) {
+    super(message);
+    this.name = "DiscordSendError";
+    this.status = status;
+  }
+}
+
+/**
+ * Whether sending again later could work: Discord was unreachable, rate-limited
+ * past the wait, or answered 5xx. A 4xx is Discord's decision about THIS
+ * message or recipient (DMs closed, unknown user, a bad id) and repeats forever.
+ */
+export function isTransientDiscordFailure(err: unknown): boolean {
+  if (err instanceof Error && err.name === "DiscordSendError") {
+    const status = (err as DiscordSendError).status;
+    return status === null || status === 429 || status >= 500;
+  }
+  return true; // no answer at all: the network, a timeout
+}
+
 async function postToChannel(botToken: string, channelId: string, discordId: string, embed: Embed): Promise<void> {
   if (!isValidSnowflake(channelId) || !isValidSnowflake(discordId)) {
-    throw new Error(`Invalid snowflake: channelId=${channelId} discordId=${discordId}`);
+    throw new DiscordSendError(`Invalid snowflake: channelId=${channelId} discordId=${discordId}`, 400);
   }
   const res = await discordRequest(`${DISCORD_API}/channels/${channelId}/messages`, {
     method: "POST",
@@ -498,7 +524,7 @@ async function postToChannel(botToken: string, channelId: string, discordId: str
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Failed to post to channel (${res.status}): ${text}`);
+    throw new DiscordSendError(`Failed to post to channel (${res.status}): ${text}`, res.status);
   }
 }
 
@@ -583,7 +609,7 @@ async function openDmChannel(botToken: string, discordId: string): Promise<strin
 
 async function sendDm(botToken: string, discordId: string, embed: Embed): Promise<void> {
   if (!isValidSnowflake(discordId)) {
-    throw new Error(`Invalid Discord snowflake for DM: ${discordId}`);
+    throw new DiscordSendError(`Invalid Discord snowflake for DM: ${discordId}`, 400);
   }
   const channelId = await openDmChannel(botToken, discordId);
   const msgRes = await discordRequest(`${DISCORD_API}/channels/${channelId}/messages`, {
@@ -595,7 +621,7 @@ async function sendDm(botToken: string, discordId: string, embed: Embed): Promis
     // A remembered channel the post failed on is opened afresh next time.
     dmChannels.delete(discordId);
     const text = await msgRes.text();
-    throw new Error(`Failed to send DM (${msgRes.status}): ${text}`);
+    throw new DiscordSendError(`Failed to send DM (${msgRes.status}): ${text}`, msgRes.status);
   }
 }
 
@@ -899,11 +925,15 @@ async function notifyUsersBatch<R extends BatchRequest>(
   prefKey: keyof typeof BATCH_PREF_WHERE,
   build: (t: Translator, title: string, r: R, shared: boolean) => Embed,
   logLabel: string,
-): Promise<void> {
-  if (requests.length === 0) return;
+): Promise<number[]> {
+  // The answer is the indexes of `requests` whose send failed in a way worth
+  // repeating (isTransientDiscordFailure) — the outbox keeps exactly those owed
+  // (guardrail 14f). A read that fails before any send is every index.
+  if (requests.length === 0) return [];
+  const retry: number[] = [];
   try {
     const cfg = await getConfig();
-    if (!cfg) return;
+    if (!cfg) return [];
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
@@ -916,7 +946,7 @@ async function notifyUsersBatch<R extends BatchRequest>(
     // Titles only for requests that will actually be sent.
     const resolve = await titleResolver(requests.filter((r) => idMap.has(r.requestedBy)), users.map((u) => recipientLocale(shared, u)));
 
-    const tasks = requests.map((r) => () => {
+    const tasks = requests.map((r, index) => () => {
       const discordId = idMap.get(r.requestedBy);
       if (!discordId) return Promise.resolve();
       const locale = recipientLocale(shared, userById.get(r.requestedBy));
@@ -924,7 +954,10 @@ async function notifyUsersBatch<R extends BatchRequest>(
       const send = cfg.channelId
         ? postToChannel(cfg.botToken, cfg.channelId, discordId, embed)
         : enqueueDm(() => sendDm(cfg.botToken, discordId, embed));
-      return send.catch((err) => console.error("[discord-notify] Failed to send notification:", err));
+      return send.catch((err) => {
+        if (isTransientDiscordFailure(err)) retry.push(index);
+        console.error("[discord-notify] Failed to send notification:", err);
+      });
     });
     if (cfg.channelId) {
       await chunkSequential(tasks, CHANNEL_CHUNK_SIZE, CHANNEL_CHUNK_DELAY_MS);
@@ -933,17 +966,19 @@ async function notifyUsersBatch<R extends BatchRequest>(
     }
   } catch (err) {
     console.error(`[discord-notify] Failed to send ${logLabel} notifications:`, err);
+    return requests.map((_, index) => index);
   }
+  return retry.sort((a, b) => a - b);
 }
 
-export async function notifyUsersRequestsApproved(requests: BatchRequest[]): Promise<void> {
-  await notifyUsersBatch(requests, "notifyOnApproved", (t, title, r) => approvedEmbed(t, title, r.mediaType), "APPROVED");
+export async function notifyUsersRequestsApproved(requests: BatchRequest[]): Promise<number[]> {
+  return notifyUsersBatch(requests, "notifyOnApproved", (t, title, r) => approvedEmbed(t, title, r.mediaType), "APPROVED");
 }
 
 // Callers pass only claimed, deliverable rows (request-notifications.ts), so the
 // shared deactivatedAt filter changes nothing here; it keeps the three alike.
-export async function notifyUsersRequestsAvailable(requests: BatchRequest[]): Promise<void> {
-  await notifyUsersBatch(requests, "notifyOnAvailable", (t, title, r) => availableEmbed(t, title, r.mediaType), "AVAILABLE");
+export async function notifyUsersRequestsAvailable(requests: BatchRequest[]): Promise<number[]> {
+  return notifyUsersBatch(requests, "notifyOnAvailable", (t, title, r) => availableEmbed(t, title, r.mediaType), "AVAILABLE");
 }
 
 // A row's own `adminNote` (when set, null included) wins over the batch-wide
@@ -951,8 +986,8 @@ export async function notifyUsersRequestsAvailable(requests: BatchRequest[]): Pr
 export async function notifyUsersRequestsDeclined(
   requests: Array<BatchRequest & { adminNote?: string | null }>,
   adminNote?: string | null,
-): Promise<void> {
-  await notifyUsersBatch(
+): Promise<number[]> {
+  return notifyUsersBatch(
     requests,
     "notifyOnDeclined",
     (t, title, r, shared) => declinedEmbed(t, title, r.mediaType, r.adminNote !== undefined ? r.adminNote : adminNote, shared),

@@ -423,3 +423,34 @@ test("actorId: the actor's OWN request is claimed but queues no notice; another 
   const after = await prisma.mediaRequest.findUniqueOrThrow({ where: { id: pending.id } });
   assert.equal(after.notifiedAvailable, false);
 });
+
+// ═══ A send that failed stays owed and is retried ═══════════════════════════
+
+test("a channel whose send FAILED keeps its row; the drain retries it after the lock lapses and settles it once it lands", async () => {
+  const { fanOutAvailableWinners } = await import("@/lib/request-notifications.ts");
+  const user = await makeUser();
+  const [a] = await makeRequests(user.id, 1, "APPROVED");
+  const { deliverable } = await claimAvailableNotifications([a], { markAvailable: true });
+  const row = await prisma.mediaRequest.findUniqueOrThrow({ where: { id: a.id } });
+  const winner = { ...deliverable[0], title: row.title, mediaType: row.mediaType, tmdbId: row.tmdbId, posterPath: row.posterPath, arrInstance: row.arrInstance };
+
+  // The inbox write fails once (a busy pool); every other channel returns.
+  const notification = prisma.notification as unknown as { createMany: unknown };
+  const realCreateMany = notification.createMany;
+  notification.createMany = async () => { throw new Error("pool exhausted (db test)"); };
+  try {
+    await fanOutAvailableWinners([winner], "test");
+    for (let i = 0; i < 200 && (await prisma.outbox.count()) > 1; i++) await new Promise((r) => setTimeout(r, 10));
+  } finally {
+    notification.createMany = realCreateMany;
+  }
+  const left = await prisma.outbox.findMany();
+  assert.deepEqual(left.map((r) => r.channel), ["inbox"], "only the failed channel is still owed");
+  assert.equal(await prisma.notification.count(), 0);
+
+  assert.deepEqual(await drainOutbox("test"), { delivered: 0, dropped: 0 }, "not before its lock lapses");
+  await lapseLocks();
+  assert.deepEqual(await drainOutbox("test"), { delivered: 1, dropped: 0 });
+  assert.equal(await prisma.notification.count(), 1);
+  assert.equal(await prisma.outbox.count(), 0);
+});

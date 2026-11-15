@@ -71,6 +71,7 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 // ── scripted fetch: only the Resend hop and the outbound agent are real ──────
 type ResendPost = { auth: string | null; body: { from: string; to: string; subject: string; html: string } };
 const resendPosts: ResendPost[] = [];
+let resendStatus = 200; // what the scripted Resend answers
 const fetchUrls: string[] = [];
 
 // One outbound notification agent (notify-agents.ts) — a generic webhook on an
@@ -86,6 +87,12 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input);
   fetchUrls.push(url);
   if (url === "https://api.resend.com/emails") {
+    if (resendStatus !== 200) {
+      return new Response(JSON.stringify({ message: `resend ${resendStatus} (unit test)` }), {
+        status: resendStatus,
+        headers: { "content-type": "application/json" },
+      });
+    }
     resendPosts.push({
       auth: new Headers(init?.headers).get("authorization"),
       body: JSON.parse(String(init?.body)) as ResendPost["body"],
@@ -333,6 +340,7 @@ async function quiesce(): Promise<void> {
 
 beforeEach(() => {
   settings.clear();
+  resendStatus = 200;
   outboxDeletes.length = 0;
   outboxDeleteImpl = async () => ({ count: 0 });
   invalidateFeatureFlagCache(); // the 10s flag cache must not leak across tests
@@ -1097,4 +1105,91 @@ test("outbox drain: an 'approved' notice is sent only while the request is still
   assert.equal(createManyCalls.length, 1);
   assert.deepEqual(createManyCalls[0].data.map((d) => [d.userId, d.type]), [["user-still", "REQUEST_APPROVED"]]);
   assert.deepEqual(settledKeys(), ["request.approved:still:inbox"]);
+});
+
+// ═══ Failure reporting: a send that failed stays owed (guardrail 14f) ═══════
+// The senders used to swallow their failures, so a channel that "returned" was
+// settled whether or not anything was delivered. Each now reports the sends
+// that failed in a way worth repeating; only those rows stay in the outbox.
+
+const { isTransientEmailFailure } = await import("../src/lib/email.ts");
+
+test("isTransientEmailFailure: no connection, a provider 5xx/429 and an SMTP 4xx can pass; a verdict on the message or this server's own configuration cannot", () => {
+  assert.equal(isTransientEmailFailure(new Error("connect ETIMEDOUT")), true);
+  assert.equal(isTransientEmailFailure(Object.assign(new Error("x"), { httpStatus: 500 })), true);
+  assert.equal(isTransientEmailFailure(Object.assign(new Error("x"), { httpStatus: 429 })), true);
+  assert.equal(isTransientEmailFailure(Object.assign(new Error("x"), { responseCode: 451 })), true);
+  assert.equal(isTransientEmailFailure(Object.assign(new Error("x"), { httpStatus: 422 })), false);
+  assert.equal(isTransientEmailFailure(Object.assign(new Error("x"), { responseCode: 550 })), false);
+  assert.equal(isTransientEmailFailure(new Error("SMTP host not configured")), false);
+  assert.equal(isTransientEmailFailure(new Error("Refusing SMTP host mail.example — address is not allowed")), false);
+  assert.equal(isTransientEmailFailure(new Error("Invalid SMTP port: 0")), false);
+});
+
+const mailable = (id: string) => ({ id: `user-${id}`, email: `${id}@example.com`, notificationEmail: null, emailOnAvailable: true, locale: null });
+
+test("a mail the provider could not take (5xx) stays owed — the other four channels are settled, and it is said once", async () => {
+  configureChannels();
+  emailPrefRows = [mailable("w1")];
+  resendStatus = 503;
+  claimImpl = async () => [{ id: "w1" }];
+  await notifyAvailablePerServer([reqRow("w1", null)], true, true, true, true, "test");
+  await waitFor(() => settledKeys().length === AVAILABLE_CHANNELS.length - 1, "the delivered channels settled");
+  await quiesce();
+
+  assert.deepEqual(settledKeys(), AVAILABLE_CHANNELS.filter((c) => c !== "email").map((c) => `request.available:w1:${c}`).sort());
+  assert.equal(warns.filter((w) => w.includes("email: 1 notification(s) failed to send and stay queued for a retry")).length, 1);
+});
+
+test("a mail the provider REFUSED (4xx) is settled: repeating it could never work", async () => {
+  configureChannels();
+  emailPrefRows = [mailable("w1")];
+  resendStatus = 422;
+  claimImpl = async () => [{ id: "w1" }];
+  await notifyAvailablePerServer([reqRow("w1", null)], true, true, true, true, "test");
+  await waitFor(() => settledKeys().length === AVAILABLE_CHANNELS.length, "every channel settled");
+  await quiesce();
+  assert.ok(settledKeys().includes("request.available:w1:email"));
+});
+
+test("in one batch only the FAILED winner's mail stays owed", async () => {
+  configureChannels();
+  emailPrefRows = [mailable("good"), mailable("bad")];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) === "https://api.resend.com/emails" && String(init?.body).includes("bad@example.com")) {
+      return new Response(JSON.stringify({ message: "down" }), { status: 500, headers: { "content-type": "application/json" } });
+    }
+    return realFetch(input, init);
+  }) as typeof fetch;
+  try {
+    claimImpl = async () => [{ id: "good" }, { id: "bad" }];
+    await notifyAvailablePerServer([reqRow("good", null), reqRow("bad", null)], true, true, true, true, "test");
+    await waitFor(() => settledKeys().length === 2 * AVAILABLE_CHANNELS.length - 1, "all but one row settled");
+    await quiesce();
+    assert.ok(settledKeys().includes("request.available:good:email"));
+    assert.ok(!settledKeys().includes("request.available:bad:email"));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("an inbox write that fails leaves every inbox row owed; an email-preference read that fails leaves every mail owed", async () => {
+  createManyImpl = async () => { throw new Error("pool exhausted (unit test)"); };
+  emailPrefImpl = async () => { throw new Error("pool exhausted (unit test)"); };
+  claimImpl = async () => [{ id: "w1" }];
+  await notifyAvailablePerServer([reqRow("w1", null)], true, true, true, true, "test");
+  await waitFor(() => settledKeys().length === AVAILABLE_CHANNELS.length - 2, "the other channels settled");
+  await quiesce();
+  assert.deepEqual(settledKeys(), ["agents", "discord", "push"].map((c) => `request.available:w1:${c}`).sort());
+});
+
+test("approve/decline: a mail that failed stays owed under its own kind", async () => {
+  configureChannels();
+  emailUserRow = { email: "d1@example.com", notificationEmail: null, emailOnApproved: true, emailOnDeclined: true, locale: null };
+  resendStatus = 500;
+  await notifyRequestStatusChanges("APPROVED", [decided("d1")], "test");
+  await waitFor(() => settledKeys().length === AVAILABLE_CHANNELS.length - 1, "the delivered channels settled");
+  await quiesce();
+  assert.deepEqual(settledKeys(), AVAILABLE_CHANNELS.filter((c) => c !== "email").map((c) => `request.approved:d1:${c}`).sort());
 });

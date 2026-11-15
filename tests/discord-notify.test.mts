@@ -98,6 +98,7 @@ const {
   notifyUserDownloadPending,
   notifyUserRequestAvailable,
   notifyUsersRequestsApproved,
+  notifyUsersRequestsAvailable,
   notifyAdminsRequestComment,
   notifyUserRequestComment,
   notifyUserIssueMessage,
@@ -126,6 +127,7 @@ shadowPrismaModel(prisma, "setting", {
 type UserRow = Record<string, unknown>;
 let userFindUniqueRow: UserRow | null = null;
 let userFindManyRows: UserRow[] = [];
+let userFindManyThrows = false; // user.findMany rejects (a busy pool)
 const userFindUniqueCalls: unknown[] = [];
 const userFindManyWheres: Array<Record<string, unknown>> = [];
 const userFindManySelects: Array<Record<string, unknown> | undefined> = [];
@@ -134,6 +136,7 @@ shadowPrismaModel(prisma, "user", {
   findMany: async (args: { where: Record<string, unknown>; select?: Record<string, unknown> }) => {
     userFindManyWheres.push(args.where);
     userFindManySelects.push(args.select);
+    if (userFindManyThrows) throw new Error("pool exhausted (unit test)");
     return userFindManyRows;
   },
 });
@@ -980,4 +983,68 @@ test("the admin fan-out posts to the channel at most five at a time", async () =
   await notifyAdminsIssueMessage("Dune", "bob", "hello");
   assert.equal(sent.length, 7);
   assert.ok(peak <= 5, `peak in flight was ${peak}`);
+});
+
+// ═══ Failure reporting (guardrail 14f) ══════════════════════════════════════
+// The batch notifiers answer the indexes of the requests whose send failed in a
+// way worth repeating, so the outbox keeps exactly those owed.
+
+const { DiscordSendError, isTransientDiscordFailure } = await import("../src/lib/discord-notify.ts");
+
+test("isTransientDiscordFailure: no answer, 429 and 5xx are worth repeating; a 4xx is Discord's decision", () => {
+  assert.equal(isTransientDiscordFailure(new Error("socket hang up")), true);
+  assert.equal(isTransientDiscordFailure(new DiscordSendError("x", null)), true);
+  assert.equal(isTransientDiscordFailure(new DiscordSendError("x", 429)), true);
+  assert.equal(isTransientDiscordFailure(new DiscordSendError("x", 500)), true);
+  assert.equal(isTransientDiscordFailure(new DiscordSendError("x", 503)), true);
+  assert.equal(isTransientDiscordFailure(new DiscordSendError("x", 400)), false);
+  assert.equal(isTransientDiscordFailure(new DiscordSendError("x", 403)), false);
+  assert.equal(isTransientDiscordFailure(new DiscordSendError("x", 404)), false);
+});
+
+test("batch notify answers the indexes that FAILED and can be repeated: a 500 and a dropped connection, never a 403 or a delivered post", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindManyRows = [
+    { id: "u-ok", discordId: "111111111111111111" },
+    { id: "u-500", discordId: "222222222222222222" },
+    { id: "u-403", discordId: "333333333333333333" },
+    { id: "u-net", discordId: "444444444444444444" },
+  ];
+  const before = respond;
+  respond = (_url, init) => {
+    const body = String(init?.body ?? "");
+    if (body.includes("222222222222222222")) return new Response("upstream down", { status: 500 });
+    if (body.includes("333333333333333333")) return new Response(JSON.stringify({ message: "Missing Access" }), { status: 403 });
+    if (body.includes("444444444444444444")) throw new Error("socket hang up");
+    return okJson({ id: "999999999999999999" });
+  };
+  try {
+    const failed = await notifyUsersRequestsAvailable([
+      { requestedBy: "u-ok", title: "A", mediaType: "MOVIE" },
+      { requestedBy: "u-500", title: "B", mediaType: "MOVIE" },
+      { requestedBy: "u-403", title: "C", mediaType: "MOVIE" },
+      { requestedBy: "u-net", title: "D", mediaType: "MOVIE" },
+      { requestedBy: "u-unlinked", title: "E", mediaType: "MOVIE" },
+    ]);
+    assert.deepEqual(failed, [1, 3]);
+  } finally {
+    respond = before;
+  }
+});
+
+test("batch notify: nothing configured owes nothing; a read that fails before any send owes EVERY request", async () => {
+  // Not configured: no bot token.
+  assert.deepEqual(await notifyUsersRequestsAvailable([{ requestedBy: "u1", title: "A", mediaType: "MOVIE" }]), []);
+
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindManyThrows = true;
+  try {
+    const failed = await notifyUsersRequestsApproved([
+      { requestedBy: "u1", title: "A", mediaType: "MOVIE" },
+      { requestedBy: "u2", title: "B", mediaType: "MOVIE" },
+    ]);
+    assert.deepEqual(failed, [0, 1]);
+  } finally {
+    userFindManyThrows = false;
+  }
 });

@@ -1488,3 +1488,50 @@ test("a relay error body with non-string fields is read as no detail, never prin
   assert.ok(errors.some((e) => e.includes("APNs relay rejected the payload (400: no error given)")), errors.join("\n"));
   assert.ok(!errors.some((e) => e.includes("[object Object]")));
 });
+
+// ═══ Failure reporting (guardrail 14f) ══════════════════════════════════════
+// The batch notifiers answer the indexes of the requests still OWED: no device
+// of that requester got the push, and at least one send is worth repeating.
+
+test("batch push answers the requests still owed: every device failed transiently — never one a device received, one the relay refused, or a requester with no device", async () => {
+  userRows = [
+    { id: "u-ok", pushOnAvailable: true },
+    { id: "u-down", pushOnAvailable: true },
+    { id: "u-mixed", pushOnAvailable: true },
+    { id: "u-refused", pushOnAvailable: true },
+    { id: "u-nodevice", pushOnAvailable: true },
+  ];
+  subRows = [
+    iosSub("u-ok", "tok-ok"),
+    iosSub("u-down", "tok-down-1"),
+    iosSub("u-down", "tok-down-2"),
+    iosSub("u-mixed", "tok-mixed-ok"),
+    iosSub("u-mixed", "tok-mixed-down"),
+    iosSub("u-refused", "tok-refused"),
+  ];
+  const before = relayRespond;
+  relayRespond = (call) => {
+    const token = call.body.deviceToken;
+    if (token.includes("down")) return new Response(JSON.stringify({ error: "upstream" }), { status: 503, headers: { "content-type": "application/json" } });
+    if (token.includes("refused")) return new Response(JSON.stringify({ error: "bad payload" }), { status: 422, headers: { "content-type": "application/json" } });
+    return jsonResponse({ ok: true });
+  };
+  try {
+    const failed = await notifyUsersRequestsAvailablePush([
+      { requestedBy: "u-ok", title: "A", mediaType: "MOVIE" },
+      { requestedBy: "u-down", title: "B", mediaType: "MOVIE" },
+      { requestedBy: "u-mixed", title: "C", mediaType: "MOVIE" },
+      { requestedBy: "u-refused", title: "D", mediaType: "MOVIE" },
+      { requestedBy: "u-nodevice", title: "E", mediaType: "MOVIE" },
+    ]);
+    assert.deepEqual(failed, [1], "only the requester none of whose devices was reached, by a failure that can pass");
+  } finally {
+    relayRespond = before;
+  }
+});
+
+test("batch push: an empty batch and a requester who is not eligible owe nothing", async () => {
+  assert.deepEqual(await notifyUsersRequestsAvailablePush([]), []);
+  userRows = [];
+  assert.deepEqual(await notifyUsersRequestsAvailablePush([{ requestedBy: "u-x", title: "A", mediaType: "MOVIE" }]), []);
+});
