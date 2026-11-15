@@ -9,7 +9,10 @@ import { prisma } from "./prisma";
 import { check, v } from "./validate";
 import {
   NOTICE_CHANNELS,
+  OUTBOX_ALL_CHANNELS,
   OUTBOX_APPROVED_KIND,
+  OUTBOX_COMMENT_KIND,
+  OUTBOX_ISSUE_REPLY_KIND,
   OUTBOX_AVAILABLE_KIND,
   OUTBOX_DECLINED_KIND,
   OUTBOX_LOCK_MINUTES,
@@ -22,6 +25,9 @@ import {
   type AvailableWinner,
   type StatusChangeTarget,
 } from "./request-notifications";
+
+import { announceRequestComment, type RequestCommentAnnouncement } from "./request-comment-notify";
+import { announceIssueReply, type IssueReplyAnnouncement } from "./issue-reply-notify";
 
 /** Rows taken per pass. A backlog larger than this drains over later passes. */
 export const OUTBOX_DRAIN_BATCH = 500;
@@ -55,6 +61,44 @@ const noticePayload = v.object({
 const DECISION_STATUS = { [OUTBOX_APPROVED_KIND]: "APPROVED", [OUTBOX_DECLINED_KIND]: "DECLINED" } as const;
 type DecisionKindKey = keyof typeof DECISION_STATUS;
 const isDecisionKind = (k: string): k is DecisionKindKey => k in DECISION_STATUS;
+
+// A whole announcement (channel "all"): what announceRequestComment /
+// announceIssueReply were handed when the comment or message was written.
+const commentPayload = v.object({
+  commentId: v.string(),
+  request: v.object({
+    id: v.string(),
+    title: v.string(),
+    mediaType: v.string(),
+    tmdbId: v.number(),
+    posterPath: v.nullable(v.string()),
+    requestedBy: v.string(),
+    arrInstance: v.string(),
+  }),
+  authorId: v.string(),
+  authorName: v.string(),
+  authorDisplayName: v.nullable(v.string()),
+  text: v.string(),
+  authorIsManager: v.boolean(),
+});
+const issueReplyPayload = v.object({
+  messageId: v.string(),
+  issue: v.object({
+    id: v.string(),
+    title: v.string(),
+    mediaType: v.string(),
+    tmdbId: v.number(),
+    posterPath: v.nullable(v.string()),
+    issueType: v.string(),
+    reportedBy: v.string(),
+    claimedBy: v.nullable(v.string()),
+  }),
+  authorId: v.string(),
+  authorDisplayName: v.nullable(v.string()),
+  authorName: v.string(),
+  fromIssueAdmin: v.boolean(),
+  text: v.string(),
+});
 
 export interface OutboxDrainResult {
   /** Rows handed to a sender. */
@@ -106,7 +150,25 @@ export async function drainOutbox(logScope = "outbox"): Promise<OutboxDrainResul
     const drop: string[] = [];
     type Owed = { rowId: string; kind: string; channel: NoticeChannel; payload: AvailableWinner & { adminNote?: string | null } };
     const owed: Owed[] = [];
+    const comments: Array<{ rowId: string; a: RequestCommentAnnouncement & { commentId: string } }> = [];
+    const replies: Array<{ rowId: string; a: IssueReplyAnnouncement & { messageId: string } }> = [];
     for (const row of rows) {
+      const stale = row.expired || row.attempts > OUTBOX_MAX_ATTEMPTS || (row.userId !== null && disabledIds.has(row.userId));
+      if (row.channel === OUTBOX_ALL_CHANNELS && !stale) {
+        if (row.kind === OUTBOX_COMMENT_KIND) {
+          const c = check(commentPayload, row.payload);
+          if (c.ok) {
+            comments.push({ rowId: row.id, a: { ...c.value, request: { ...c.value.request, mediaType: c.value.request.mediaType === "MOVIE" ? "MOVIE" : "TV" } } });
+            continue;
+          }
+        } else if (row.kind === OUTBOX_ISSUE_REPLY_KIND) {
+          const m = check(issueReplyPayload, row.payload);
+          if (m.ok) {
+            replies.push({ rowId: row.id, a: m.value });
+            continue;
+          }
+        }
+      }
       const known = (row.kind === OUTBOX_AVAILABLE_KIND || isDecisionKind(row.kind)) && isNoticeChannel(row.channel);
       const payload = known ? check(noticePayload, row.payload) : null;
       if (
@@ -140,9 +202,31 @@ export async function drainOutbox(logScope = "outbox"): Promise<OutboxDrainResul
       byGroup.set(key, group);
     }
 
+    // A comment or reply deleted since it was written (with its request or
+    // issue, which cascade) is announced to nobody.
+    const liveComments = comments.length === 0 ? new Set<string>() : new Set(
+      (await prisma.requestComment.findMany({ where: { id: { in: comments.map((c) => c.a.commentId) } }, select: { id: true } })).map((r) => r.id),
+    );
+    const liveReplies = replies.length === 0 ? new Set<string>() : new Set(
+      (await prisma.issueMessage.findMany({ where: { id: { in: replies.map((r) => r.a.messageId) } }, select: { id: true } })).map((r) => r.id),
+    );
+    for (const c of comments) if (!liveComments.has(c.a.commentId)) drop.push(c.rowId);
+    for (const r of replies) if (!liveReplies.has(r.a.messageId)) drop.push(r.rowId);
+
     if (drop.length > 0) {
       await prisma.outbox.deleteMany({ where: { id: { in: drop } } });
       result.dropped = drop.length;
+    }
+    // The announcers settle their own row once their channels have returned.
+    for (const c of comments) {
+      if (!liveComments.has(c.a.commentId)) continue;
+      await announceRequestComment(c.a);
+      result.delivered++;
+    }
+    for (const r of replies) {
+      if (!liveReplies.has(r.a.messageId)) continue;
+      await announceIssueReply(r.a);
+      result.delivered++;
     }
     // One channel after another: a redelivery pass is rare and never urgent.
     // The deliver functions settle (delete) what they sent and never throw.

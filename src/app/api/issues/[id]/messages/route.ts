@@ -11,7 +11,8 @@ import { hasPermission, Permission } from "@/lib/permissions";
 import { isFeatureEnabled } from "@/lib/features";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { promoteIssueInProgress } from "@/lib/issue-transitions";
-import { announceIssueReply } from "@/lib/issue-reply-notify";
+import { announceIssueReply, type IssueReplyAnnouncement } from "@/lib/issue-reply-notify";
+import { OUTBOX_ISSUE_REPLY_KIND, queueAnnouncement } from "@/lib/outbox";
 import { THREAD_READ_CAP } from "@/lib/api-body-limits";
 import { splitAtCap, truncationHeaders } from "@/lib/truncation";
 import { olderThanWhere, parseThreadCursor } from "@/lib/thread-cursor";
@@ -115,19 +116,41 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
 
   // The issue was read above, outside any transaction: one deleted since then
   // fails the message's foreign key (P2003), which is this route's 404, not a 500.
-  // A bare create with no transaction around it, so catching is safe (guardrail 23).
+  //
+  // The message and the announcement it owes commit together (guardrail 14f):
+  // the outbox row is the transaction's last statement, and the P2003 is caught
+  // out here, never inside it. The payload is a projection of the issue — plain
+  // JSON, only what the announcer reads.
+  const announcement: IssueReplyAnnouncement = {
+    issue: {
+      id: issue.id, title: issue.title, mediaType: issue.mediaType, tmdbId: issue.tmdbId, posterPath: issue.posterPath,
+      issueType: issue.issueType, reportedBy: issue.reportedBy, claimedBy: issue.claimedBy,
+    },
+    authorId: session.user.id,
+    authorDisplayName: session.user.name ?? null,
+    // Managers (the admin fan-out and the agents) see emails throughout the
+    // issue surface, so the email fallback stays for them; the reporter never
+    // gets it (issue-reply-notify.ts).
+    authorName: session.user.name ?? session.user.email ?? "Someone",
+    fromIssueAdmin: isIssueAdmin,
+    text,
+  };
   let message;
   try {
-    message = await prisma.issueMessage.create({
-      data: {
-        issueId: id,
-        authorId: session.user.id,
-        body: text,
-        fromAdmin: isIssueAdmin,
-      },
-      // Mirror GET's author select (email for admins only) so a null-named author
-      // renders identically whether the thread was fetched or just posted to.
-      include: { author: { select: { name: true, role: true, ...(isIssueAdmin ? { email: true } : {}) } } },
+    message = await prisma.$transaction(async (tx) => {
+      const created = await tx.issueMessage.create({
+        data: {
+          issueId: id,
+          authorId: session.user.id,
+          body: text,
+          fromAdmin: isIssueAdmin,
+        },
+        // Mirror GET's author select (email for admins only) so a null-named author
+        // renders identically whether the thread was fetched or just posted to.
+        include: { author: { select: { name: true, role: true, ...(isIssueAdmin ? { email: true } : {}) } } },
+      });
+      await queueAnnouncement(tx, OUTBOX_ISSUE_REPLY_KIND, created.id, session.user.id, { ...announcement, issue: { ...announcement.issue }, messageId: created.id });
+      return created;
     });
   } catch (err) {
     if (!isPrismaErrorCode(err, "P2003")) throw err;
@@ -143,17 +166,7 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   }
   emitSSE({ type: "issuemessage:created", issueId: id, messageId: message.id, userId: issue.reportedBy });
 
-  await announceIssueReply({
-    issue,
-    authorId: session.user.id,
-    authorDisplayName: session.user.name ?? null,
-    // Managers (the admin fan-out and the agents) see emails throughout the
-    // issue surface, so the email fallback stays for them; the reporter never
-    // gets it (issue-reply-notify.ts).
-    authorName: session.user.name ?? session.user.email ?? "Someone",
-    fromIssueAdmin: isIssueAdmin,
-    text,
-  });
+  await announceIssueReply({ ...announcement, messageId: message.id });
 
   return NextResponse.json(message, { status: 201 });
 });

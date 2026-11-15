@@ -289,3 +289,117 @@ test("cancelOutbox takes back every channel of one kind for the given requests o
   assert.equal(left.length, AVAILABLE_CHANNELS.length);
   assert.ok(left.every((x) => x.dedupeKey.includes(`:${b.id}:`)));
 });
+
+// ═══ Comment / issue-reply announcements ════════════════════════════════════
+// One outbox row per comment or message, written in ITS transaction
+// (outbox.ts queueAnnouncement) and announced whole by the drain.
+
+const { queueAnnouncement, OUTBOX_COMMENT_KIND, OUTBOX_ISSUE_REPLY_KIND } = await import("@/lib/outbox.ts");
+
+async function resetThreads(): Promise<void> {
+  await prisma.$executeRawUnsafe(`TRUNCATE "RequestComment", "IssueMessage" CASCADE`);
+}
+beforeEach(resetThreads);
+
+async function inboxOf(userId: string, tries = 200): Promise<string[]> {
+  for (let i = 0; i < tries; i++) {
+    const rows = await prisma.notification.findMany({ where: { userId } });
+    if (rows.length > 0) return rows.map((n) => n.type);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return [];
+}
+
+async function writeComment(requestId: string, requesterId: string, authorId: string): Promise<string> {
+  return prisma.$transaction(async (tx) => {
+    const c = await tx.requestComment.create({ data: { requestId, authorId, body: "which version?", fromAdmin: true } });
+    await queueAnnouncement(tx, OUTBOX_COMMENT_KIND, c.id, authorId, {
+      commentId: c.id,
+      request: { id: requestId, title: "Dune", mediaType: "MOVIE", tmdbId: 438631, posterPath: null, requestedBy: requesterId, arrInstance: "" },
+      authorId,
+      authorName: "Manager",
+      authorDisplayName: "Manager",
+      text: "which version?",
+      authorIsManager: true,
+    });
+    return c.id;
+  });
+}
+
+test("a comment and its announcement commit together: one locked row; a failed insert leaves neither", async () => {
+  const requester = await makeUser();
+  const manager = await makeUser();
+  const [r] = await makeRequests(requester.id, 1, "PENDING");
+
+  const commentId = await writeComment(r.id, requester.id, manager.id);
+  const rows = await prisma.outbox.findMany();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].dedupeKey, `request.comment:${commentId}:all`);
+  assert.equal(rows[0].userId, manager.id);
+  assert.ok(rows[0].lockedUntil.getTime() > Date.now() + 60_000);
+
+  // The request is gone: the comment's foreign key fails, and nothing is queued.
+  await assert.rejects(writeComment("no-such-request", requester.id, manager.id));
+  assert.equal(await prisma.outbox.count(), 1);
+  assert.equal(await prisma.requestComment.count(), 1);
+});
+
+test("after a restart the drain announces the comment to the requester and the row is settled", async () => {
+  const requester = await makeUser();
+  const manager = await makeUser();
+  const [r] = await makeRequests(requester.id, 1, "PENDING");
+  await writeComment(r.id, requester.id, manager.id);
+
+  assert.deepEqual(await drainOutbox("test"), { delivered: 0, dropped: 0 }, "still locked by the writer");
+  await lapseLocks();
+  assert.deepEqual(await drainOutbox("test"), { delivered: 1, dropped: 0 });
+
+  assert.deepEqual(await inboxOf(requester.id), ["REQUEST_COMMENT"]);
+  await waitForEmptyOutbox();
+});
+
+test("the drain drops the announcement of a comment deleted since (its request was removed)", async () => {
+  const requester = await makeUser();
+  const manager = await makeUser();
+  const [r] = await makeRequests(requester.id, 1, "PENDING");
+  await writeComment(r.id, requester.id, manager.id);
+  await prisma.mediaRequest.delete({ where: { id: r.id } }); // cascades to the comment
+  await lapseLocks();
+
+  assert.deepEqual(await drainOutbox("test"), { delivered: 0, dropped: 1 });
+  assert.equal(await prisma.notification.count(), 0);
+  assert.equal(await prisma.outbox.count(), 0);
+});
+
+test("an issue reply: queued with the message, announced to the reporter by the drain, dropped once the message is gone", async () => {
+  const reporter = await makeUser();
+  const admin = await makeUser();
+  const issue = await prisma.issue.create({
+    data: { reportedBy: reporter.id, mediaType: "MOVIE", tmdbId: 146233, title: "Prisoners", issueType: "BAD_VIDEO" },
+  });
+  const write = () => prisma.$transaction(async (tx) => {
+    const m = await tx.issueMessage.create({ data: { issueId: issue.id, authorId: admin.id, body: "fixed", fromAdmin: true } });
+    await queueAnnouncement(tx, OUTBOX_ISSUE_REPLY_KIND, m.id, admin.id, {
+      messageId: m.id,
+      issue: { id: issue.id, title: issue.title, mediaType: "MOVIE", tmdbId: issue.tmdbId, posterPath: null, issueType: "BAD_VIDEO", reportedBy: reporter.id, claimedBy: null },
+      authorId: admin.id,
+      authorDisplayName: "Admin A",
+      authorName: "Admin A",
+      fromIssueAdmin: true,
+      text: "fixed",
+    });
+    return m.id;
+  });
+
+  const first = await write();
+  await lapseLocks();
+  assert.deepEqual(await drainOutbox("test"), { delivered: 1, dropped: 0 });
+  assert.deepEqual(await inboxOf(reporter.id), ["ISSUE_REPLY"]);
+  await waitForEmptyOutbox();
+
+  await write();
+  await prisma.issueMessage.deleteMany({ where: { id: { not: first } } });
+  await lapseLocks();
+  assert.deepEqual(await drainOutbox("test"), { delivered: 0, dropped: 1 });
+  assert.equal(await prisma.notification.count(), 1, "no second inbox row");
+});

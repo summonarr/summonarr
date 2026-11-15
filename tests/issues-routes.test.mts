@@ -305,7 +305,13 @@ shadowPrismaModel(prisma, "issueMessage", {
   },
 });
 
-// The issue DELETE's transaction: its callback runs against the shadowed client.
+// A reply's owed announcement (outbox.ts queueAnnouncement), written in the
+// message's own transaction and deleted once its channels have returned.
+shadowPrismaModel(prisma, "outbox", {
+  create: async (args: unknown) => { rec("outbox.create", args); return {}; },
+  deleteMany: async (args: unknown) => { rec("outbox.deleteMany", args); return { count: 1 }; },
+});
+// The issue DELETE's transaction (and the reply's): its callback runs against the shadowed client.
 shadowPrismaClientMethod(prisma, "$transaction", async (fn: (tx: unknown) => Promise<unknown>) => {
   rec("$transaction");
   return fn(prisma);
@@ -1965,4 +1971,34 @@ test("DELETE audits inside its transaction through the shared row builder: a con
   assert.deepEqual(JSON.parse(row.details as string), { action: "delete", title: "Heat", mediaType: "MOVIE" });
   assert.equal(row.userAgent, "curl/8[2Jforged", "ESC and the C1 control are stripped");
   assert.deepEqual(sseEvents.map((e) => e.type), ["issue:deleted"]);
+});
+
+// ═══ A reply's announcement is queued WITH the message (guardrail 14f) ═════
+
+test("messages POST queues ONE outbox row right after the message insert and settles it once the channels returned", async () => {
+  usersById.set("reporter-ob", {
+    role: "USER", permissions: 0n, mediaServer: null, sessionsRevokedAt: null,
+    passwordChangedAt: null, deactivatedAt: null, email: null, notificationEmail: null,
+  });
+  issueRow = { id: "issue-ob", status: "IN_PROGRESS", reportedBy: "reporter-ob", title: "Prisoners", mediaType: "MOVIE", tmdbId: 146233, posterPath: "/p.jpg", issueType: "BAD_VIDEO", claimedBy: null };
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+
+  const res = await postMessage(admin.token, "issue-ob", { body: "fixed, try again" });
+  assert.equal(res.status, 201);
+  const messageId = ((await res.json()) as { id: string }).id;
+
+  const order = ops.map((o) => o.op).filter((op) => op === "issueMessage.create" || op === "outbox.create");
+  assert.deepEqual(order, ["issueMessage.create", "outbox.create"]);
+  const row = (opsOf("outbox.create")[0].args as { data: Record<string, unknown> }).data;
+  assert.equal(row.kind, "issue.reply");
+  assert.equal(row.dedupeKey, `issue.reply:${messageId}:all`);
+  assert.equal(row.userId, admin.userId);
+  const payload = row.payload as { issue: Record<string, unknown>; messageId: string };
+  assert.equal(payload.messageId, messageId);
+  // A projection of the issue — plain JSON, only what the announcer reads.
+  assert.deepEqual(Object.keys(payload.issue).sort(), ["claimedBy", "id", "issueType", "mediaType", "posterPath", "reportedBy", "title", "tmdbId"]);
+
+  for (let i = 0; i < 30; i++) await flushMicrotasks();
+  const settled = opsOf("outbox.deleteMany").map((o) => (o.args as { where: { dedupeKey: { in: string[] } } }).where.dedupeKey.in);
+  assert.deepEqual(settled, [[`issue.reply:${messageId}:all`]]);
 });

@@ -42,7 +42,7 @@ const { HeadersAdapter } = cjsRequire("next/dist/server/web/spec-extension/adapt
 
 const { NextRequest } = await import("next/server");
 const { prisma } = await import("../src/lib/prisma.ts");
-const { shadowPrismaModel } = await import("./_helpers.mts");
+const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
@@ -75,12 +75,16 @@ shadowPrismaModel(prisma, "authSession", {
 shadowPrismaModel(prisma, "user", {
   findUnique: async (args: { where: { id: string } }) => {
     rec("user.findUnique", args);
+    if (userReadThrows.has(args.where.id)) throw new Error("user read failed (unit test)");
     const u = usersById.get(args.where.id);
     return u ? { ...u } : null;
   },
   findMany: async () => [],
   update: async () => ({}),
 });
+
+// user.findUnique rejects for these ids (the announcer's recipient read).
+const userReadThrows = new Set<string>();
 
 let seq = 0;
 async function mintSession(opts: { role?: string; permissions?: string } = {}): Promise<{ userId: string; token: string }> {
@@ -119,6 +123,14 @@ type ThreadRow = { id: string; createdAt: Date; body: string };
 let threadRows: ThreadRow[] = [];
 shadowPrismaModel(prisma, "mediaRequest", {
   findUnique: async (args: unknown) => { rec("mediaRequest.findUnique", args); return requestRow ? { ...requestRow } : null; },
+});
+// The comment and its owed announcement are one transaction (outbox.ts
+// queueAnnouncement); the callback runs against the shadowed client. The
+// announcer deletes the row once its channels have returned.
+shadowPrismaClientMethod(prisma, "$transaction", async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma));
+shadowPrismaModel(prisma, "outbox", {
+  create: async (args: unknown) => { rec("outbox.create", args); return {}; },
+  deleteMany: async (args: unknown) => { rec("outbox.deleteMany", args); return { count: 1 }; },
 });
 // When set, requestComment.create rejects with it (the request deleted since the read).
 let commentCreateThrows: unknown = null;
@@ -206,6 +218,7 @@ beforeEach(() => {
   requestRow = null;
   threadRows = [];
   auditThrows = false;
+  userReadThrows.clear();
   invalidateFeatureFlagCache();
 });
 
@@ -413,4 +426,72 @@ test("a failed audit write never breaks a committed comment (guardrail 26)", asy
   assert.equal(res.status, 201);
   await flush();
   assert.equal(opsOf("requestComment.create").length, 1);
+});
+
+// ═══ The announcement is queued WITH the comment (guardrail 14f) ═══════════
+// A restart after the comment commits used to lose its notifications for good.
+// The outbox row is written in the comment's own transaction and deleted once
+// the channels have returned; the drain announces what a dead process left.
+
+const settle = async () => { for (let i = 0; i < 30; i++) await flush(); };
+const outboxKeyOf = (o: { args?: unknown }) => (o.args as { where: { dedupeKey: { in: string[] } } }).where.dedupeKey.in;
+
+test("a comment queues ONE outbox row right after its insert, and the announcer settles it once the channels returned", async () => {
+  const owner = await mintSession();
+  const manager = await mintSession(MANAGER);
+  requestOwnedBy(owner.userId);
+  const res = await post(manager.token, "req-1", { body: "Which version?" });
+  assert.equal(res.status, 201);
+  const commentId = ((await res.json()) as { id: string }).id;
+
+  const order = ops.map((o) => o.op).filter((op) => op === "requestComment.create" || op === "outbox.create");
+  assert.deepEqual(order, ["requestComment.create", "outbox.create"], "the outbox row is the write after the comment, in the same transaction callback");
+  const row = (opsOf("outbox.create")[0].args as { data: Record<string, unknown> }).data;
+  assert.equal(row.kind, "request.comment");
+  assert.equal(row.channel, "all");
+  assert.equal(row.dedupeKey, `request.comment:${commentId}:all`);
+  assert.equal(row.userId, manager.userId, "keyed to the AUTHOR, for the purge");
+  assert.ok((row.lockedUntil as Date).getTime() > Date.now() + 60_000, "locked for this process: the drain must not race it");
+  const payload = row.payload as Record<string, unknown>;
+  assert.deepEqual(Object.keys(payload).sort(), ["authorDisplayName", "authorId", "authorIsManager", "authorName", "commentId", "request", "text"]);
+  assert.equal(payload.commentId, commentId);
+  assert.equal(payload.text, "Which version?");
+
+  await settle();
+  assert.deepEqual(opsOf("outbox.deleteMany").map(outboxKeyOf), [[`request.comment:${commentId}:all`]]);
+});
+
+test("a DISABLED requester's announcement is settled (dropped); a recipient read that FAILS leaves it owed for the drain", async () => {
+  const owner = await mintSession();
+  const manager = await mintSession(MANAGER);
+  requestOwnedBy(owner.userId);
+
+  usersById.get(owner.userId)!.deactivatedAt = new Date();
+  assert.equal((await post(manager.token, "req-1", { body: "hello" })).status, 201);
+  await settle();
+  assert.equal(opsOf("notification.create").length, 0);
+  assert.equal(opsOf("outbox.deleteMany").length, 1, "nobody to tell: not kept owed");
+
+  ops.length = 0;
+  usersById.get(owner.userId)!.deactivatedAt = null;
+  userReadThrows.add(owner.userId);
+  assert.equal((await post(manager.token, "req-1", { body: "hello again" })).status, 201);
+  await settle();
+  assert.equal(opsOf("outbox.create").length, 1);
+  assert.equal(opsOf("notification.create").length, 0);
+  assert.equal(opsOf("outbox.deleteMany").length, 0, "the read failed: the row stays for the drain");
+});
+
+test("a comment whose insert fails queues nothing", async () => {
+  const owner = await mintSession();
+  requestOwnedBy(owner.userId);
+  commentCreateThrows = prismaKnownError("P2003");
+  try {
+    assert.equal((await post(owner.token, "req-1", { body: "hi" })).status, 404);
+  } finally {
+    commentCreateThrows = null;
+  }
+  await settle();
+  assert.equal(opsOf("outbox.create").length, 0);
+  assert.equal(opsOf("outbox.deleteMany").length, 0);
 });

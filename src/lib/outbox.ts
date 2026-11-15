@@ -35,6 +35,13 @@ export const OUTBOX_APPROVED_KIND = "request.approved";
 export const OUTBOX_DECLINED_KIND = "request.declined";
 export type DecisionKind = typeof OUTBOX_APPROVED_KIND | typeof OUTBOX_DECLINED_KIND;
 
+// A comment or an issue reply is announced as a WHOLE (one row, channel "all"):
+// its audience and channels are decided when it is sent, not when it is written.
+export const OUTBOX_COMMENT_KIND = "request.comment";
+export const OUTBOX_ISSUE_REPLY_KIND = "issue.reply";
+export type AnnouncementKind = typeof OUTBOX_COMMENT_KIND | typeof OUTBOX_ISSUE_REPLY_KIND;
+export const OUTBOX_ALL_CHANNELS = "all";
+
 // The channels a request notice goes out on. "Now available" and the
 // approve/decline notices use the same five.
 export const NOTICE_CHANNELS = ["discord", "push", "inbox", "agents", "email"] as const;
@@ -144,6 +151,35 @@ export async function queueDecisionNotices(
       AND m."requestedBy" <> ${actorId}
     ON CONFLICT ("dedupeKey") DO NOTHING
   `);
+}
+
+/**
+ * Queue the announcement a new comment or issue reply owes, INSIDE the
+ * transaction that writes it. `subjectId` is the comment/message id, `authorId`
+ * its writer (the purge deletes by it), `payload` everything the announcer
+ * needs — a plain JSON object. One row; the announcer deletes it once every
+ * channel has returned (settleOutbox with OUTBOX_ALL_CHANNELS). Await it as the
+ * transaction's LAST statement.
+ */
+export async function queueAnnouncement(
+  tx: PrismaTxClient,
+  kind: AnnouncementKind,
+  subjectId: string,
+  authorId: string,
+  payload: Prisma.InputJsonObject,
+): Promise<void> {
+  const now = Date.now();
+  await tx.outbox.create({
+    data: {
+      kind,
+      channel: OUTBOX_ALL_CHANNELS,
+      dedupeKey: outboxKey(kind, subjectId, OUTBOX_ALL_CHANNELS),
+      userId: authorId,
+      payload,
+      lockedUntil: new Date(now + OUTBOX_LOCK_MINUTES * 60_000),
+      expiresAt: new Date(now + OUTBOX_TTL_HOURS * 3_600_000),
+    },
+  });
 }
 
 /**

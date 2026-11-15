@@ -14,8 +14,11 @@ export type { InAppNotificationInput } from "./notification-data";
 // | ISSUE_REPLY | ISSUE_RESOLVED | …); the client routes ISSUE_* to /issues and
 // media-typed rows to the title page. Field shaping lives in buildNotificationData
 // (notification-data.ts) so the batch path in request-notifications stays in sync.
-export function createInAppNotification(userId: string, n: InAppNotificationInput): void {
-  void prisma.notification
+export function createInAppNotification(userId: string, n: InAppNotificationInput): Promise<void> {
+  // Never rejects. Returned so a caller that tracks when its channels are done
+  // (the outbox settle) can wait on it; everyone else ignores it.
+  return prisma.notification
     .create({ data: buildNotificationData(userId, n) })
+    .then(() => undefined)
     .catch((err) => console.error("[notify] in-app write failed:", err instanceof Error ? err.message : err));
 }
