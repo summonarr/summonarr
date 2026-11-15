@@ -73,8 +73,8 @@ const { getMovieDetails, getTVDetails } = await import("../src/lib/tmdb.ts");
 // No MDBList/OMDb key: the details path's ratings tiers stay off the wire.
 shadowPrismaModel(prisma, "setting", { findUnique: async () => null });
 
-// ── in-memory library delegates (cursor-aware findMany) ─────────────────────
-// Minimal faithful model of the where/orderBy/cursor/skip/take subset the
+// ── in-memory library delegates (key-bound findMany) ────────────────────────
+// Minimal faithful model of the where/orderBy/take subset the
 // iterator uses — its paging contracts are owned by library-iterator.test.mts.
 type MediaType = "MOVIE" | "TV";
 // serverInstance is optional here (unlike library-iterator.test.mts's own
@@ -84,10 +84,9 @@ type MediaType = "MOVIE" | "TV";
 // literal row across this file to spell it out.
 type Row = { tmdbId: number; mediaType: MediaType; serverInstance?: string };
 type LibFindManyArgs = {
-  where: { mediaType: MediaType };
+  // A follow-up page is bounded strictly after the last key read.
+  where: { mediaType: MediaType; OR?: [{ tmdbId: { gt: number } }, { tmdbId: number; serverInstance: { gt: string } }] };
   take: number;
-  skip?: number;
-  cursor?: { tmdbId_mediaType_serverInstance: { tmdbId: number; mediaType: MediaType; serverInstance: string } };
 };
 
 const libCalls: { source: "plex" | "jellyfin" }[] = [];
@@ -100,14 +99,13 @@ function libraryDelegate(source: "plex" | "jellyfin") {
       const all = tables[source]
         .filter((r) => r.mediaType === args.where.mediaType)
         .sort((a, b) => a.tmdbId - b.tmdbId || (a.serverInstance ?? "").localeCompare(b.serverInstance ?? ""));
-      let start = 0;
-      if (args.cursor) {
-        const { tmdbId, mediaType, serverInstance } = args.cursor.tmdbId_mediaType_serverInstance;
-        const idx = all.findIndex((r) => r.tmdbId === tmdbId && r.mediaType === mediaType && (r.serverInstance ?? "") === serverInstance);
-        if (idx === -1) throw new Error(`cursor row ${tmdbId}:${mediaType}:${serverInstance} not found`);
-        start = idx + (args.skip ?? 0);
-      }
-      return all.slice(start, start + args.take).map((r) => ({ ...r, serverInstance: r.serverInstance ?? "" }));
+      const bound = args.where.OR;
+      const rows = bound
+        ? all.filter((r) =>
+            r.tmdbId > bound[0].tmdbId.gt
+            || (r.tmdbId === bound[1].tmdbId && (r.serverInstance ?? "").localeCompare(bound[1].serverInstance.gt) > 0))
+        : all;
+      return rows.slice(0, args.take).map((r) => ({ ...r, serverInstance: r.serverInstance ?? "" }));
     },
   };
 }

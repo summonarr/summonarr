@@ -78,6 +78,7 @@ const {
   fetchAndCacheMdblistForTmdb,
   getMdblistRatingsForTmdb,
   fetchMdblistBatch,
+  fetchMdblistBatchOutcome,
   getMdblistTopLists,
   getMdblistListItems,
   getMdblistTopRated,
@@ -109,9 +110,12 @@ function resetApiKey(value: string | null): void {
 type CacheRow = { key: string; data: string; cachedAt: Date; expiresAt: Date };
 const cacheRows = new Map<string, CacheRow>();
 const cacheUpserts: CacheRow[] = [];
+// Which cache keys' writes reject, for the best-effort pins. Reset per test.
+let failCacheWrite: (key: string) => boolean = () => false;
 shadowPrismaModel(prisma, "tmdbCache", {
   findUnique: async (args: { where: { key: string } }) => cacheRows.get(args.where.key) ?? null,
   upsert: async (args: { where: { key: string }; create: CacheRow }) => {
+    if (failCacheWrite(args.where.key)) throw new Error("pool timeout");
     cacheUpserts.push(args.create);
     cacheRows.set(args.where.key, args.create);
     return args.create;
@@ -187,6 +191,7 @@ beforeEach(() => {
   fetchCalls.length = 0;
   cacheRows.clear();
   cacheUpserts.length = 0;
+  failCacheWrite = () => false;
   warns.length = 0;
   errors.length = 0;
   respond = () => {
@@ -407,6 +412,34 @@ test("chunking: 201 ids split into a 200-page and a 1-page; a failed page warns 
   assert.equal(fetchCalls.length, 2); // the second page was still attempted
   assert.deepEqual([...map2.keys()], [201]);
   assert.ok(warns.some((w) => w.includes("[mdblist] batch movie returned 500")));
+});
+
+test("a cache write that fails keeps the fetched ratings: the batch page still answers, MDBList is not counted as failing, and it is warned about once", async () => {
+  failCacheWrite = (key) => key.endsWith(":10");
+  respond = (_url, call) =>
+    jsonResponse(bodyIds(call).map((id) => ({ tmdb_id: id, ratings: [{ source: "imdb", value: 6 }] })));
+  const outcome = await fetchMdblistBatchOutcome([{ id: 10 }, { id: 20 }], "movie");
+  assert.deepEqual([...outcome.ratings.keys()].sort((a, b) => a - b), [10, 20]);
+  assert.equal(outcome.failedIds, 0);
+  assert.deepEqual(cacheUpserts.map((r) => r.key), ["mdblist:tmdb:movie:20"], "the other row was still cached");
+  assert.equal(warns.filter((w) => w.includes("[mdblist] cache write failed for 1 row(s) on batch movie")).length, 1);
+  assert.deepEqual(errors, []);
+});
+
+test("a cache write that fails keeps the single-title answer: found ratings stay found, a 404 stays a plain not-found", async () => {
+  failCacheWrite = () => true;
+  respond = () => jsonResponse({ id: 1, type: "movie", year: 1999, ratings: [{ source: "imdb", value: 8.7 }] });
+  const hit = await fetchAndCacheMdblistForTmdb(603, "movie", "mdblist:tmdb:movie:603", "1999-03-31");
+  assert.equal(hit.found, true);
+  assert.equal(hit.found && hit.data.imdbRating, "8.7");
+
+  respond = () => new Response("nope", { status: 404 });
+  assert.deepEqual(
+    await fetchAndCacheMdblistForTmdb(604, "movie", "mdblist:tmdb:movie:604"),
+    { found: false, keyConfigured: true },
+  );
+  assert.equal(warns.filter((w) => w.includes("[mdblist] cache write failed")).length, 2);
+  assert.deepEqual(errors, []);
 });
 
 test("response rows are matched by tmdb_id (out-of-order); rows beyond the page length with unknown ids are dropped; tmdb_id-less rows fall back positionally", async () => {

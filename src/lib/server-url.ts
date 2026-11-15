@@ -64,3 +64,13 @@ export function stripUrlUserinfo(value: string): string {
   }
   return value;
 }
+
+/**
+ * Whether two server addresses are the same one: equal once trimmed and with
+ * trailing slashes dropped. Anything else is a different server, so a stored
+ * secret must not follow it (the instance saves' "kept secret, new address"
+ * refusal).
+ */
+export function sameServerUrl(a: string, b: string): boolean {
+  return trimServerBase(a.trim()) === trimServerBase(b.trim());
+}

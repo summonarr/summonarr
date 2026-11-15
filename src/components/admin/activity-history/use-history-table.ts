@@ -20,6 +20,7 @@ import {
   buildHistoryFilterParams,
   dateRangeInverted,
   deleteOutcome,
+  historyDeletePath,
   historyQueryReducer,
   historyUrlEntries,
   initialHistoryQuery,
@@ -73,6 +74,9 @@ export function useHistoryQuery(seed: { fromDate?: string; toDate?: string; watc
 
 export interface HistoryPageState {
   rows: HistoryRow[];
+  // The Group resumes mode `rows` were loaded in. It trails the switch while
+  // a mode change is loading, and is what a delete of one of them goes by.
+  rowsGrouped: boolean;
   total: number;
   totalPages: number;
   // A load the admin is waiting on (first load, a filter, sort or page change):
@@ -102,6 +106,7 @@ export function useHistoryPage({
   loader: AsyncAction;
 }): HistoryPageState {
   const [rows, setRows] = useState<HistoryRow[]>([]);
+  const [rowsGrouped, setRowsGrouped] = useState(query.grouped);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(true);
@@ -166,16 +171,17 @@ export function useHistoryPage({
       loads.current = settleLoad(loads.current);
       setError(null);
       setRows(res.data.items);
+      setRowsGrouped(grouped);
       setTotal(res.data.total);
       setTotalPages(res.data.totalPages);
       setLoading(false);
     })();
     // `startDateIso` on its own: with a From day set it isn't in the request,
     // and a live refresh still re-reads (a finished play may fall in range).
-  }, [requestQuery, foregroundKey, invertedRange, startDateIso, page, loader, dispatch]);
+  }, [requestQuery, foregroundKey, invertedRange, startDateIso, page, grouped, loader, dispatch]);
 
   const reload = useCallback(() => setReloadToken((n) => n + 1), []);
-  return { rows, total, totalPages, loading, error, invertedRange, reload };
+  return { rows, rowsGrouped, total, totalPages, loading, error, invertedRange, reload };
 }
 
 // The options for the User and Platform dropdowns. A failed lookup leaves the
@@ -218,27 +224,34 @@ export interface HistoryDeleteState {
 }
 
 export function useHistoryDelete({
-  grouped,
+  rowsGrouped,
   loader,
   failedText,
   onDeleted,
 }: {
-  grouped: boolean;
+  // The mode the rows on screen were loaded in (useHistoryPage), not the
+  // switch: see historyDeletePath.
+  rowsGrouped: boolean;
   loader: AsyncAction;
   // Shown when the route gave no reason of its own (or none came back).
   failedText: string;
   onDeleted: () => void;
 }): HistoryDeleteState {
-  const [row, setRow] = useState<HistoryRow | null>(null);
+  // The row and the mode it was loaded in, taken together when the dialog
+  // opens: a reload behind the open dialog must not change what Confirm deletes.
+  const [target, setTarget] = useState<{ row: HistoryRow; grouped: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const row = target?.row ?? null;
 
+  const open = useCallback((picked: HistoryRow) => setTarget({ row: picked, grouped: rowsGrouped }), [rowsGrouped]);
   const cancel = useCallback(() => {
-    setRow(null);
+    setTarget(null);
     setError(null);
   }, []);
 
   async function confirm() {
-    if (!row) return;
+    if (!target) return;
+    const { row, grouped } = target;
     setError(null);
     // In grouped mode a row IS the whole viewing — one film paused and
     // resumed across several sittings — so the delete has to take the chain.
@@ -247,7 +260,7 @@ export function useHistoryDelete({
     const res = await loader.run(
       "delete",
       (signal) =>
-        fetchJson(withBasePath(`/api/play-history/${encodeURIComponent(row.id)}${grouped ? "?chain=true" : ""}`), {
+        fetchJson(withBasePath(historyDeletePath(row.id, grouped)), {
           init: { method: "DELETE" },
           signal,
           fallbackError: failedText,
@@ -257,7 +270,7 @@ export function useHistoryDelete({
     if (!res) return;
     const outcome = deleteOutcome(res);
     if (outcome.kind === "done") {
-      setRow(null);
+      setTarget(null);
       // Re-read rather than splice the row out and decrement the total. Both
       // were guesses about what the server did, and both were wrong for a
       // chain: the row vanished while its other segments survived, and the
@@ -268,5 +281,5 @@ export function useHistoryDelete({
     }
   }
 
-  return { row, open: setRow, cancel, confirm, deleting: loader.busy("delete"), error };
+  return { row, open, cancel, confirm, deleting: loader.busy("delete"), error };
 }

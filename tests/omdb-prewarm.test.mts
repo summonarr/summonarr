@@ -78,16 +78,15 @@ const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers
 const { isOmdbQuotaLocked } = await import("../src/lib/omdb.ts");
 const { prewarmOmdbCache } = await import("../src/lib/omdb-prewarm.ts");
 
-// ── in-memory library delegates (cursor-aware findMany) ─────────────────────
+// ── in-memory library delegates (key-bound findMany) ────────────────────────
 // Paging contracts are owned by tests/library-iterator.test.mts — this is only
-// the faithful where/orderBy/cursor/skip/take subset the iterator uses.
+// the faithful where/orderBy/take subset the iterator uses.
 type MediaType = "MOVIE" | "TV";
 type Row = { tmdbId: number; mediaType: MediaType };
 type LibFindManyArgs = {
-  where: { mediaType: MediaType };
+  // A follow-up page is bounded strictly after the last key read.
+  where: { mediaType: MediaType; OR?: [{ tmdbId: { gt: number } }, { tmdbId: number; serverInstance: { gt: string } }] };
   take: number;
-  skip?: number;
-  cursor?: { tmdbId_mediaType: { tmdbId: number; mediaType: MediaType } };
 };
 
 const libCalls: { source: "plex" | "jellyfin" }[] = [];
@@ -100,14 +99,13 @@ function libraryDelegate(source: "plex" | "jellyfin") {
       const all = tables[source]
         .filter((r) => r.mediaType === args.where.mediaType)
         .sort((a, b) => a.tmdbId - b.tmdbId);
-      let start = 0;
-      if (args.cursor) {
-        const { tmdbId, mediaType } = args.cursor.tmdbId_mediaType;
-        const idx = all.findIndex((r) => r.tmdbId === tmdbId && r.mediaType === mediaType);
-        if (idx === -1) throw new Error(`cursor row ${tmdbId}:${mediaType} not found`);
-        start = idx + (args.skip ?? 0);
-      }
-      return all.slice(start, start + args.take).map((r) => ({ ...r }));
+      const bound = args.where.OR;
+      const rows = bound
+        ? all.filter((r) =>
+            r.tmdbId > bound[0].tmdbId.gt
+            || (r.tmdbId === bound[1].tmdbId && "".localeCompare(bound[1].serverInstance.gt) > 0))
+        : all;
+      return rows.slice(0, args.take).map((r) => ({ ...r }));
     },
   };
 }

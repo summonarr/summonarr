@@ -6,7 +6,7 @@ import { DELIVERED_KBPS_SQL } from "./bitrate";
 import { getStatsTimeZone } from "./stats-time-zone-data";
 import { zonedMidnightSql } from "./stats-time-zone";
 import { CALENDAR_TTL, getCacheKey, memoizeActivity, STATS_TTL } from "./play-history-cache";
-import { count, round1 } from "./play-history-aggregate";
+import { count, round1, runCapped } from "./play-history-aggregate";
 import {
   DIRECT_PLAY_SQL,
   DIRECT_STREAM_SQL,
@@ -187,8 +187,10 @@ async function getHeatmapCellDetailUncached(q: HeatmapCellQuery, timeZone: strin
   // total_gb query in the Statistics summary.
   const normBitrate = DELIVERED_KBPS_SQL;
 
-  const [agg, reasons, resolutions, titles, topUserRows] = await Promise.all([
-    prisma.$queryRawUnsafe<HeatmapAggRow[]>(
+  // Named and capped (guardrail 19b): five statements at once would hold every
+  // pool connection until the slowest returned.
+  const { agg, reasons, resolutions, titles, topUserRows } = await runCapped({
+    agg: () => prisma.$queryRawUnsafe<HeatmapAggRow[]>(
       `SELECT
          COUNT(*)::bigint AS total,
          ${PLAY_HOURS_SQL} AS watch_hours,
@@ -213,7 +215,7 @@ async function getHeatmapCellDetailUncached(q: HeatmapCellQuery, timeZone: strin
     ),
     // Same reason read as the Statistics page (legacy Plex labels normalized), so a
     // cell's reasons and the page's chart name one cause the same way.
-    prisma.$queryRawUnsafe<{ reason: string; count: bigint }[]>(
+    reasons: () => prisma.$queryRawUnsafe<{ reason: string; count: bigint }[]>(
       `SELECT ${TRANSCODE_REASON_SQL} AS reason, COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where} AND "transcodeReason" IS NOT NULL AND "transcodeReason" <> ''
        GROUP BY 1 ORDER BY count DESC LIMIT 4`,
@@ -222,7 +224,7 @@ async function getHeatmapCellDetailUncached(q: HeatmapCellQuery, timeZone: strin
     // Bucket via the canonical CASE so "720"/"720p" and "1080"/"1080p" collapse
     // into one row each (raw GROUP BY split them — the formatting bug). Exclude
     // the 'Unknown' bucket so an absent resolution doesn't show as a fake row.
-    prisma.$queryRawUnsafe<{ resolution: string; count: bigint }[]>(
+    resolutions: () => prisma.$queryRawUnsafe<{ resolution: string; count: bigint }[]>(
       `SELECT ${RESOLUTION_BUCKET_SQL} AS resolution, COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where} AND "resolution" IS NOT NULL AND "resolution" <> ''
        GROUP BY 1 ORDER BY count DESC LIMIT 4`,
@@ -230,7 +232,7 @@ async function getHeatmapCellDetailUncached(q: HeatmapCellQuery, timeZone: strin
     ),
     // Most-played titles in the bucket — same tmdbId/title dedup as the stats
     // topMedia query (null tmdbId falls back to lowercased title).
-    prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; count: bigint }[]>(
+    titles: () => prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; count: bigint }[]>(
       `SELECT MAX("title") AS title, "tmdbId", "mediaType"::text AS "mediaType", COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where} AND "title" IS NOT NULL AND "title" <> ''
        ${TITLE_GROUP_BY_SQL}
@@ -241,7 +243,7 @@ async function getHeatmapCellDetailUncached(q: HeatmapCellQuery, timeZone: strin
     // Filter inside a CTE (bare column names, no alias collisions) then join
     // MediaServerUser outside; PlayHistory and MediaServerUser both have a
     // "source" column so a direct join on the filtered set would be ambiguous.
-    q.userId
+    topUserRows: () => q.userId
       ? Promise.resolve([] as { id: string; username: string; count: bigint }[])
       : prisma.$queryRawUnsafe<{ id: string; username: string; count: bigint }[]>(
           `WITH f AS (
@@ -254,7 +256,7 @@ async function getHeatmapCellDetailUncached(q: HeatmapCellQuery, timeZone: strin
            ORDER BY f."count" DESC LIMIT 3`,
           ...params,
         ),
-  ]);
+  });
 
   return toHeatmapCellDetail(agg[0], { reasons, resolutions, titles, topUserRows });
 }

@@ -535,7 +535,8 @@ export async function fetchAndCacheMdblistForTmdb(
     const res = await mdblistRequest(url.toString());
 
     if (res.status === 404) {
-      await setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL);
+      const unwritten = await cacheRatingsBestEffort(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL);
+      if (unwritten !== null) warnCacheWriteFailed(`for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}`, 1, unwritten);
       return { found: false, keyConfigured: true };
     }
 
@@ -587,13 +588,31 @@ export async function fetchAndCacheMdblistForTmdb(
     // response's own year — a dateless caller (the prewarm's detail-less
     // items) otherwise pins a brand-new release into the 30-day back-catalog
     // bucket instead of the fresh-title one.
-    await setCache(cacheKey, ratings, libraryDetailsTtl(releaseDate ?? yearDate(data.year)));
+    const unwritten = await cacheRatingsBestEffort(cacheKey, ratings, libraryDetailsTtl(releaseDate ?? yearDate(data.year)));
+    if (unwritten !== null) warnCacheWriteFailed(`for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}`, 1, unwritten);
     return { found: true, data: ratings };
   } catch (err) {
     const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
     console.error(`[mdblist] Error fetching for ${sanitizeForLog(mediaType)}:${tmdbId}: ${sanitizeForLog(reason)}`);
     return transient;
   }
+}
+
+// Caching a ratings answer is best-effort: a write that fails (a busy pool, a
+// transient Postgres error) costs a later re-fetch, never the answer in hand,
+// and is no upstream failure. Answers null when the row was written, else why
+// it was not; never throws.
+async function cacheRatingsBestEffort<T>(key: string, value: T, ttl: number): Promise<string | null> {
+  try {
+    await setCache(key, value, ttl);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+function warnCacheWriteFailed(subject: string, failed: number, reason: string): void {
+  console.warn(`[mdblist] cache write failed for ${failed} row(s) ${subject} — the fetched ratings are still used: ${sanitizeForLog(reason)}`);
 }
 
 // A response row's year as a date for the TTL bucket, or null.
@@ -856,9 +875,13 @@ async function fetchBatchPage(
       console.warn(`[mdblist] batch ${mediaType} returned ${bound.unmatchedRows} unmatched row(s) (${rows.length} rows for ${page.length} ids) — skipping NOT_FOUND caching for omitted ids`);
     }
     // Flush a few writes at a time: a full page has up to 200, and all at once
-    // would swamp the small Prisma pool. A failed write lands in the catch below
-    // — caching is best-effort.
-    await mapLimit(bound.writes, MDBLIST_CACHE_WRITE_CONCURRENCY, (w) => setCache(w.key, w.value, w.ttl));
+    // would swamp the small Prisma pool. Caching is best-effort: a failed write
+    // is warned about once per page and never costs the page its ratings or
+    // counts as MDBList failing.
+    const written = await mapLimit(bound.writes, MDBLIST_CACHE_WRITE_CONCURRENCY, (w) =>
+      cacheRatingsBestEffort(w.key, w.value, w.ttl));
+    const unwritten = written.filter((reason) => reason !== null);
+    if (unwritten.length > 0) warnCacheWriteFailed(`on batch ${mediaType}`, unwritten.length, unwritten[0]);
     return { kind: "answered", ratings: bound.ratings, empty: rows.length === 0 };
   } catch (err) {
     const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));

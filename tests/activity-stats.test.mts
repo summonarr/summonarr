@@ -304,6 +304,25 @@ test("an uncached stats load keeps at most three statements in flight, leaving p
   assert.ok(captured.length > 20, `every statement still ran (${captured.length})`);
 });
 
+test("an uncached heatmap-cell load keeps at most three statements in flight", async () => {
+  captured = [];
+  inFlight = 0;
+  peakInFlight = 0;
+  const release = holdStatements();
+  const load = getHeatmapCellDetail({ mode: "hour", days: freshDays(), dow: 3, hour: 19 });
+  let parked: number;
+  try {
+    await settleMany();
+    parked = inFlight;
+  } finally {
+    release();
+  }
+  await load;
+  assert.equal(parked, 3, "parked at the cap, not with all five statements started");
+  assert.equal(peakInFlight, 3, "never more than three statements at once (the pool holds five)");
+  assert.equal(captured.length, 5, "every statement still ran");
+});
+
 test("the arc chain runs ONCE per stats load: completion rate and histogram come from one statement", async () => {
   const queries = await capture(() => getPlayHistoryStats({ days: freshDays(), source: "plex" }));
   const arcs = one(queries, "arc_flags");

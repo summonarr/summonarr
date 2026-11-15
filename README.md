@@ -73,10 +73,12 @@ cd summonarr
 cp .env.example .env.local
 ${EDITOR:-vi} .env.local
 
-docker compose build
-docker compose up -d
+docker compose --env-file .env.local build
+docker compose --env-file .env.local up -d
 docker compose logs -f summonarr
 ```
+
+`--env-file .env.local` is what hands `POSTGRES_PASSWORD` to the Postgres container: that container is given the database password only, never the rest of `.env.local` (the encryption key and signing secrets stay out of its environment). Without the flag, Compose stops with "POSTGRES_PASSWORD is not set".
 
 The Dockerfile is a five-stage build (deps → prisma-gen → builder → migrate-deps → runner), produces a Next.js standalone bundle, runs as non-root `nextjs:nodejs` (UID 1001), and strips `npm`/`npx` from the final image to eliminate npm-bundled CVEs.
 

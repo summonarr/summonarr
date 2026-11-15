@@ -270,7 +270,9 @@ async function writeRowChangesInTx(
 // One identity's fold, holding its read point below a play whose item the
 // library doesn't know yet (UNRESOLVED_HOLD_MS): the read point stops just
 // before it and only plays up to there are counted, so that play — and the
-// ones after it — are read again, and counted once, next run.
+// ones after it — are read again, and counted once, next run. A FIRST read
+// that is held still takes what no later read can: undated plays, and a
+// Jellyfin item's plays before its latest one (see the folds).
 function foldHeld(
   fold: (bounds: FoldBounds) => FoldResult,
   readTo: Date | null,

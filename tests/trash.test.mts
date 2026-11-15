@@ -1883,6 +1883,46 @@ test("group rollup: a required member failure fails the group; an optional membe
   assert.equal(findApp(g2.id, "")!.errorCount, 1);
 });
 
+test("a group never pushes a member whose application is paused on that instance, and the paused member does not fail the group", async () => {
+  configureRadarr();
+  const managed = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-managed", name: "Managed", payload: { trash_id: "cf-managed", name: "Managed" } });
+  const paused = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-paused", name: "Paused", payload: { trash_id: "cf-paused", name: "Paused" } });
+  const pausedElsewhere = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-other", name: "Other", payload: { trash_id: "cf-other", name: "Other" } });
+  // Paused here (and since deleted in Radarr by hand); the third is paused on another instance only.
+  const pausedApp = seedApp(paused.id, "", { enabled: false, remoteId: 7 });
+  const stampedAt = pausedApp.appliedAt;
+  seedApp(pausedElsewhere.id, "4k", { enabled: false, remoteId: 9 });
+  const group = seedSpec({
+    service: "RADARR", kind: "CUSTOM_FORMAT_GROUP", trashId: "grp-paused", name: "G",
+    payload: {
+      trash_id: "grp-paused", name: "G",
+      custom_formats: [
+        { name: "Managed", trash_id: "cf-managed", required: true },
+        { name: "Paused", trash_id: "cf-paused", required: true },
+        { name: "Other", trash_id: "cf-other", required: false },
+      ],
+    },
+  });
+  let nextId = 200;
+  respond = router({
+    [`GET ${RADARR}/api/v3/customformat`]: () => json([]),
+    [`POST ${RADARR}/api/v3/customformat`]: () => json({ id: ++nextId }),
+    [`PUT ${RADARR}/api/v3/customformat/7`]: () => json({ id: 7 }),
+  });
+
+  const results = await applyCustomFormatGroups("RADARR", [group.id]);
+  assert.deepEqual(results.map((r) => [r.trashId, r.ok, r.error]), [["grp-paused", true, undefined]]);
+  const written = fetchCalls
+    .filter((c) => c.method !== "GET")
+    .map((c) => (JSON.parse(c.body!) as { name: string }).name);
+  assert.deepEqual(written.sort(), ["Managed", "Other"]);
+  assert.ok(findApp(managed.id, "")!.remoteId);
+  const after = findApp(paused.id, "")!;
+  assert.equal(after.enabled, false);
+  assert.equal(after.remoteId, 7);
+  assert.equal(after.appliedAt, stampedAt, "a paused member is not stamped as applied");
+});
+
 test("a group whose members are entirely absent from the catalog fails with the refresh hint and no arr traffic", async () => {
   // Deliberately NO radarr configuration: the missing-members path never
   // resolves an arr config, so it must work (and fail cleanly) regardless.

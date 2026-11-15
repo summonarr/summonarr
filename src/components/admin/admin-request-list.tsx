@@ -1011,7 +1011,8 @@ function RequestGroupRow({
             arrInstance={target.arrInstance}
             arrInstanceName={instanceLabel(target.arrInstance)}
             existingAdminNote={targetIsRepresentative ? representativeAdminNote : target.adminNote}
-            groupPendingIds={pendingIds.length > 1 ? pendingIds : undefined}
+            // Only a PENDING target stands for the group (groupDecisionIds).
+            groupPendingIds={target.status === "PENDING" && pendingIds.length > 1 ? pendingIds : undefined}
             onDialogActive={onManagerActive}
           />
         </div>

@@ -28,7 +28,17 @@ test("a GET's list is shape-checked whole, the default server left out, the vers
   assert.equal(readInstancesGet({ plex: [plexView, { slug: 3 }] }, "plex"), null);
   assert.equal(readInstancesGet({ plex: "nope" }, "plex"), null);
   assert.equal(readInstancesGet(null, "plex"), null);
-  assert.deepEqual(readInstancesGet({}, "jellyfin")?.named, [], "an absent list is an empty one");
+  assert.deepEqual(readInstancesGet({ plex: [], jellyfin: [] }, "jellyfin")?.named, []);
+});
+
+// The routes always send the list. An answer without it is someone else's (a
+// gateway's 200), and read as "none configured" the next save would replace
+// every stored instance and its secrets.
+test("an answer missing the list is a failed read, never an empty list", () => {
+  assert.equal(readInstancesGet({}, "jellyfin"), null);
+  assert.equal(readInstancesGet({ plex: [plexView] }, "jellyfin"), null);
+  assert.equal(readInstancesGet({ jellyfin: null, versions: { jellyfin: "v1" } }, "jellyfin"), null);
+  assert.equal(readSaveAnswer({ ok: true, testResults: {}, version: "v2" }), null);
 });
 
 test("a POST's answer counts only with ok: true and a well-formed list", () => {

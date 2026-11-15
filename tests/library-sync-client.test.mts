@@ -123,8 +123,9 @@ test("structural: the match check's empty states and the watch sync page's first
   assert.match(match, /report && flags\.length === 0 && \(view\.flags\.length === 0 \?/);
   assert.match(match, /adminManage\.library\.match\.noneOfType/);
   // A kind with no flags left reads as "all": no empty list under the chips.
-  assert.match(match, /const activeKind = kind !== "all" && byKind\[kind\] === 0 \? "all" : kind;/);
-  assert.match(match, /aria-pressed=\{activeKind === value\}/);
+  assert.match(match, /const activeKind = activeMatchKind\(kind, byKind\);/);
+  assert.match(match, /const pressed = activeKind === value;/);
+  assert.match(match, /aria-pressed=\{pressed\}/);
   const sync = read("watch-sync-panel.tsx");
   const firstLoad = sync.slice(sync.indexOf("if (!data) {"), sync.indexOf("const pairUrl"));
   assert.match(firstLoad, /onClick=\{\(\) => void load\(\)\}/);

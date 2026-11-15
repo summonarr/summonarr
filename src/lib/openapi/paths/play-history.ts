@@ -396,7 +396,7 @@ export const playHistoryPaths: OpenApiPaths = {
           in: "query",
           schema: { type: "integer" },
           description:
-            "Calendar year (UTC). Honored only if it appears in the returned years list; anything else falls back to the most recent year on record",
+            "Calendar year in the statistics time zone (the statsTimeZone setting, else the server's own zone), like every bucket in the answer. Honored only if it appears in the returned years list; anything else falls back to the most recent year on record",
         },
       ],
       responses: {
@@ -702,7 +702,7 @@ export const playHistoryPaths: OpenApiPaths = {
     get: {
       tags: ["Play History"],
       summary: "365-day activity heatmap data (ADMIN)",
-      description: "One row per UTC day with a watched-session count. Unrecognized `source` / `mediaType` values are ignored (the heatmap is then unfiltered).",
+      description: "One row per day with a watched-session count. Days are counted in the statistics time zone (the statsTimeZone setting, else the server's own zone), never UTC and never the viewer's zone; each `day` is that zone's calendar date and needs no conversion. Unrecognized `source` / `mediaType` values are ignored (the heatmap is then unfiltered).",
       parameters: [
         { name: "source", in: "query", schema: { type: "string", enum: ["plex", "jellyfin"] } },
         { name: "mediaType", in: "query", schema: { type: "string", enum: ["MOVIE", "TV"] } },

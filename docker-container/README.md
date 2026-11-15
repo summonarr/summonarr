@@ -219,7 +219,7 @@ Running Summonarr at `https://example.com/request` instead of a dedicated hostna
    ```
 
    Then set `image: summonarr:subpath` (or a `build:` block passing the same `--build-arg`) for the `summonarr` service.
-2. Set `AUTH_URL=https://example.com/request`.
+2. Set `AUTH_URL=https://example.com/request`, and make sure `.env` has **no** `BASE_PATH` line — not even an empty `BASE_PATH=` (templates before this change shipped one; delete it or comment it out). An empty value overrides the prefix baked into your image.
 3. Configure the proxy to forward requests under `/request/` **without stripping the prefix** — Summonarr's router expects to see the full path. Example for Nginx:
 
    ```nginx
@@ -238,7 +238,7 @@ Running Summonarr at `https://example.com/request` instead of a dedicated hostna
 
 4. `docker compose up -d --force-recreate summonarr`.
 
-The internal cron loop and the container health probe read `BASE_PATH` from the image env (baked in at build), so they target the prefixed paths automatically. **Caveat:** web-push service-worker registration is not sub-path-aware, so push notifications may not work under a sub-path.
+The internal cron loop and the container health probe read `BASE_PATH` from the image env (baked in at build), so they target the prefixed paths automatically — as long as `.env` does not set `BASE_PATH` itself (step 2). **Caveat:** web-push service-worker registration is not sub-path-aware, so push notifications may not work under a sub-path.
 
 ## Internal cron schedule
 

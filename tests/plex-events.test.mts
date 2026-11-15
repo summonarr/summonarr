@@ -156,6 +156,11 @@ let settingUpsertError: Error | null = null;
 // When set, a setting upsert waits on it before it lands.
 let settingUpsertGate: Promise<void> | null = null;
 let playHistoryCreateError: Error | null = null;
+// When set, every playHistory.createMany waits on it; the counters track how
+// many are waiting at once.
+let playHistoryCreateGate: Promise<void> | null = null;
+let historyWritesInFlight = 0;
+let historyWritesPeak = 0;
 const settingUpserts: Array<{ key: string; value: string }> = [];
 // Holds the NEXT activeSession.findUnique for one id until `until` settles, so a
 // test can make an earlier notification's read resolve after a later one's.
@@ -249,6 +254,15 @@ const fakePrisma = {
     createMany: async (args: CreateManyArgs) => {
       rec("playHistory", "createMany", args);
       if (playHistoryCreateError) throw playHistoryCreateError;
+      if (playHistoryCreateGate) {
+        historyWritesInFlight++;
+        historyWritesPeak = Math.max(historyWritesPeak, historyWritesInFlight);
+        try {
+          await playHistoryCreateGate;
+        } finally {
+          historyWritesInFlight--;
+        }
+      }
       return { count: args.data.length };
     },
     findFirst: async (args: unknown) => {
@@ -1640,4 +1654,45 @@ test("resyncFireAt: debounce clamped between the cooldown floor and the burst de
   assert.equal(resyncFireAt(now, now + 60_000, now + 120_000, false), now + 60_000, "never before the cooldown floor");
   assert.equal(resyncFireAt(now, 0, now + 10_000, false), now + 10_000, "never after the burst deadline");
   assert.equal(resyncFireAt(now, 0, now + 10_000, true), now + TIMELINE_RESYNC_COOLDOWN_MS, "capped: the cooldown, unclamped");
+});
+
+test("the bootstrap absence sweep finalizes at most three sessions at once and announces the whole pass once", async () => {
+  const { finalizeBootstrapAbsentSessions } = await import("../src/lib/plex-events.ts");
+  const stale = Array.from({ length: 8 }, (_, i) => activeRow(`sweep-${i}`, { lastSeenAt: new Date(Date.now() - 120_000) }));
+  let release!: () => void;
+  playHistoryCreateGate = new Promise<void>((resolve) => { release = resolve; });
+  historyWritesInFlight = 0;
+  historyWritesPeak = 0;
+  const evBefore = sseEvents.length;
+  const histBefore = historyRows().length;
+  let parked: number;
+  const sweep = finalizeBootstrapAbsentSessions(stale as never, Date.now());
+  try {
+    await drain(40);
+    parked = historyWritesInFlight;
+  } finally {
+    release();
+    playHistoryCreateGate = null;
+  }
+  await sweep;
+  assert.equal(parked, 3, "parked at the cap, not with every finalize started");
+  assert.equal(historyWritesPeak, 3, "never more than three finalizes in flight (the pool holds five)");
+  assert.equal(historyRows().length - histBefore, 8, "every stale session is still finalized");
+  for (let i = 0; i < 8; i++) assert.equal(isPlexSessionRecentlyFinalized(`plex:sweep-${i}`), true, "each is ledgered after its write");
+  const after = sseEvents.slice(evBefore);
+  assert.equal(after.filter((e) => e.type === "activity:history-updated").length, 1, "one history-updated for the pass, not one per session");
+  assert.equal(after.filter((e) => e.type === "activity:sessions").length, 1, "one sessions snapshot for the pass");
+});
+
+test("a bootstrap absence sweep whose every finalize failed announces nothing and ledgers nothing", async () => {
+  const { finalizeBootstrapAbsentSessions } = await import("../src/lib/plex-events.ts");
+  const evBefore = sseEvents.length;
+  playHistoryCreateError = new Error("db down");
+  try {
+    await finalizeBootstrapAbsentSessions([activeRow("sweep-fail", { lastSeenAt: new Date(Date.now() - 120_000) })] as never, Date.now());
+  } finally {
+    playHistoryCreateError = null;
+  }
+  assert.equal(isPlexSessionRecentlyFinalized("plex:sweep-fail"), false, "no ledger entry without a history row");
+  assert.equal(sseEvents.slice(evBefore).filter((e) => e.type === "activity:history-updated" || e.type === "activity:sessions").length, 0);
 });

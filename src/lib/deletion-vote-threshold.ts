@@ -18,6 +18,31 @@ export async function readDeletionVoteThreshold(db: Pick<typeof prisma, "setting
 }
 
 /**
+ * Re-arm the one-shot threshold alert of every listed title whose tally is now
+ * below the threshold, inside the transaction that removed votes from them: a
+ * marker left behind would silently block the alert the next time the title
+ * crosses the threshold. The un-vote route's rule, for a caller that drops
+ * votes on several titles at once. One statement at a time (guardrail 23c);
+ * deleteMany raises nothing when the marker is absent (guardrail 23).
+ */
+export async function rearmVoteAlertsBelowThreshold(
+  tx: Pick<typeof prisma, "setting" | "deletionVote">,
+  titles: ReadonlyArray<{ tmdbId: number; mediaType: "MOVIE" | "TV" }>,
+): Promise<void> {
+  if (titles.length === 0) return;
+  const threshold = await readDeletionVoteThreshold(tx);
+  if (threshold <= 0) return;
+  const seen = new Set<string>();
+  for (const { tmdbId, mediaType } of titles) {
+    const key = deletionVoteMarkerKey(tmdbId, mediaType);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const remaining = await tx.deletionVote.count({ where: { tmdbId, mediaType } });
+    if (remaining < threshold) await tx.setting.deleteMany({ where: { key } });
+  }
+}
+
+/**
  * The title a /api/votes/[tmdbId] call names: the canonical path id within
  * INT4 and the `mediaType` query parameter. The un-vote (DELETE) and the admin
  * dismiss (PATCH) parse it the same way.

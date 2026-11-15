@@ -539,7 +539,7 @@ export const discoveryPaths: OpenApiPaths = {
                     properties: {
                       id: { type: "integer" },
                       type: { type: "string", enum: ["movie", "tv"] },
-                      releaseDate: { type: "string", nullable: true, description: "Optional; picks the ratings-cache TTL bucket" },
+                      releaseDate: { type: "string", nullable: true, description: "Optional YYYY-MM-DD. Only refines the ratings-cache TTL bucket within the release year the server already holds for the title; otherwise ignored" },
                     },
                   },
                   maxItems: RATINGS_BATCH_MAX_ITEMS,

@@ -73,3 +73,13 @@ export function matchCheckView<F extends MatchFlagIdentity>(
     fixed,
   };
 }
+
+/**
+ * The kind filter in effect: the picked kind while it still has flags, else
+ * "all". A kind whose last flag left (fixed, or a tab change) has no chip any
+ * more, so the list, the chips' pressed state AND their pressed look all go by
+ * this value, never by the pick itself.
+ */
+export function activeMatchKind<K extends string>(picked: K | "all", byKind: Readonly<Record<K, number>>): K | "all" {
+  return picked !== "all" && byKind[picked] === 0 ? "all" : picked;
+}

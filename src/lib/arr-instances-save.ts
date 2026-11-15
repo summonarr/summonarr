@@ -9,7 +9,7 @@ import {
 } from "@/lib/arr-instances";
 import type { Translator } from "@/lib/i18n/translate";
 import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
-import { validateServerUrl } from "@/lib/server-url";
+import { sameServerUrl, validateServerUrl } from "@/lib/server-url";
 
 // The display name renders on every "Request on <instance>" button, request-queue
 // chip and admin badge; bounded like the notification-agent sibling.
@@ -158,4 +158,22 @@ export function connectionChanged(
     if (w.field === "ApiKey" && w.value !== (stored.apiKey ?? "")) return true;
   }
   return false;
+}
+
+/**
+ * Whether a save would leave the STORED API key pointing at a different
+ * address: the key is kept (the mask sentinel, or the field left out), one is
+ * stored, and the posted url is not the stored one. The key would go to the
+ * new host on the save's own connection test and every later call, so the
+ * route refuses it — a changed address needs the key typed again. An explicit
+ * "" clears the key and a cleared url sends nothing, so neither is a rebind.
+ */
+export function keptApiKeyRebind(
+  inst: Pick<InstancePayload, "url" | "apiKey">,
+  stored: { url: string | undefined; apiKey: string | undefined },
+): boolean {
+  if (inst.apiKey !== undefined && inst.apiKey !== SECRET_MASK_SENTINEL) return false;
+  const nextUrl = typeof inst.url === "string" ? inst.url.trim() : "";
+  if (!nextUrl || !stored.url || !stored.apiKey) return false;
+  return !sameServerUrl(stored.url, nextUrl);
 }

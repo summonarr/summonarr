@@ -92,13 +92,15 @@ function addDelta(out: Map<string, PlayDelta>, title: WatchTitle, plays: number,
   }
 }
 
-// Whether a dated play falls in the unread window. With a read point, an
-// undated play can't be placed and is skipped (the full first read took it);
-// a play AT the read point was already counted (strictly after, never at).
+// Whether a play falls in the unread window. An undated play can't be placed,
+// so only the first read (no read point) takes it — HELD or not: every later
+// read is incremental and skips it, so a first read that left it out because
+// of `readUntil` would drop it for good. A play AT the read point was already
+// counted (strictly after, never at).
 function inWindow(at: Date | null, readTo: Date | null, readUntil: Date | null = null): boolean {
-  if (readUntil !== null && (at === null || at.getTime() > readUntil.getTime())) return false;
-  if (readTo === null) return true;
-  return at !== null && at.getTime() > readTo.getTime();
+  if (at === null) return readTo === null;
+  if (readUntil !== null && at.getTime() > readUntil.getTime()) return false;
+  return readTo === null || at.getTime() > readTo.getTime();
 }
 
 function noteUnresolved(acc: { unresolved: number; heldAt: Date | null }, at: Date | null, holdSince: Date | null): void {
@@ -191,6 +193,11 @@ export interface JellyfinPlayedRecord {
 // item's own PlayCount — Jellyfin's lifetime tally. An incremental read counts
 // ONE play per item played since the read point: PlayCount is a lifetime total,
 // so adding it again would recount every earlier play of a rewatched item.
+//
+// A full read HELD below an item's latest play (`readUntil`) leaves that one
+// play to the next, incremental read, which adds exactly one for the item. The
+// item's EARLIER plays (PlayCount − 1) are counted now, undated, or the lifetime
+// tally would shrink to that single play. Each play is still counted once.
 export function foldJellyfinPlayed(
   items: Iterable<JellyfinPlayedRecord>,
   readTo: Date | null,
@@ -200,16 +207,20 @@ export function foldJellyfinPlayed(
   const deltas = new Map<string, PlayDelta>();
   const acc = { unresolved: 0, heldAt: null as Date | null };
   for (const it of items) {
-    if (!inWindow(it.lastPlayedAt, readTo, bounds.readUntil ?? null)) continue;
+    const lifetime = Math.max(1, Math.floor(it.playCount));
+    const inside = inWindow(it.lastPlayedAt, readTo, bounds.readUntil ?? null);
+    // Only a first read's item past the hold has earlier plays to count now.
+    const earlier = !inside && readTo === null && it.lastPlayedAt !== null ? lifetime - 1 : 0;
+    if (!inside && earlier === 0) continue;
     const key = it.kind === "movie" ? it.itemKey : it.showKey;
     const title = key ? titleFor(key) : null;
     const want: MediaType = it.kind === "movie" ? "MOVIE" : "TV";
     if (!title || title.mediaType !== want) {
-      noteUnresolved(acc, it.lastPlayedAt, bounds.holdUnresolvedSince ?? null);
+      if (inside) noteUnresolved(acc, it.lastPlayedAt, bounds.holdUnresolvedSince ?? null);
       continue;
     }
-    const plays = readTo === null ? Math.max(1, Math.floor(it.playCount)) : 1;
-    addDelta(deltas, title, plays, it.lastPlayedAt);
+    if (inside) addDelta(deltas, title, readTo === null ? lifetime : 1, it.lastPlayedAt);
+    else addDelta(deltas, title, earlier, null);
   }
   return { deltas, ...acc };
 }

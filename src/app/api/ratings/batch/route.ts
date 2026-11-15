@@ -8,6 +8,7 @@ import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { RATINGS_BATCH_MAX_ITEMS } from "@/lib/api-body-limits";
 import { coldLookupAdmitter, USER_MAX_BLOCKING_MISSES } from "@/lib/ratings-cold-budget";
+import { prisma } from "@/lib/prisma";
 
 // The client batcher (src/lib/client/ratings-batcher.ts) reads the same constant.
 const MAX_BATCH = RATINGS_BATCH_MAX_ITEMS;
@@ -19,6 +20,38 @@ const MAX_BATCH = RATINGS_BATCH_MAX_ITEMS;
 // answered from the cache only. Warm and stale titles are never limited.
 
 type ReqItem = { id: number; type: MediaType; releaseDate: string | null };
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+// The release date each title's ratings are cached under. It picks the TTL of
+// a cache row every user shares, so the body's date never decides it alone:
+// the year comes from the stored TMDB core row (as GET /api/ratings reads it),
+// and the client's date is used only for its day within that same year. A
+// title with no core row, or a failed read, gets today's date — the shortest
+// bucket — so an unverified date can only make a row refresh sooner.
+async function verifiedReleaseDates(items: ReqItem[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (items.length === 0) return out;
+  const rows = await prisma.tmdbMediaCore
+    .findMany({
+      where: { tmdbId: { in: [...new Set(items.map((i) => i.id))] } },
+      select: { tmdbId: true, mediaType: true, releaseYear: true },
+    })
+    .catch((err: unknown) => {
+      console.warn("[ratings] release year read failed:", err instanceof Error ? err.message : err);
+      return [];
+    });
+  const yearOf = new Map(rows.map((r) => [`${r.mediaType === "MOVIE" ? "movie" : "tv"}:${r.tmdbId}`, r.releaseYear]));
+  const today = new Date().toISOString().slice(0, 10);
+  for (const i of items) {
+    const key = `${i.type}:${i.id}`;
+    const year = yearOf.get(key);
+    if (!year || !/^\d{4}$/.test(year)) out.set(key, today);
+    else if (i.releaseDate && ISO_DATE.test(i.releaseDate) && i.releaseDate.startsWith(`${year}-`)) out.set(key, i.releaseDate);
+    else out.set(key, `${year}-01-01`);
+  }
+  return out;
+}
 
 // Every rating field the batch answers, in wire order (the spec's batch item
 // mirrors this list). A new ratings source is added here once.
@@ -88,6 +121,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     items.push({ id, type, releaseDate: typeof releaseDate === "string" ? releaseDate : null });
   }
 
+  const releaseDates = await verifiedReleaseDates(items);
   const stubs: TmdbMedia[] = items.map((i) => ({
     id: i.id,
     mediaType: i.type,
@@ -95,7 +129,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     overview: "",
     posterPath: null,
     backdropPath: null,
-    releaseDate: i.releaseDate,
+    releaseDate: releaseDates.get(`${i.type}:${i.id}`) ?? null,
     releaseYear: "",
     voteAverage: 0,
   }));

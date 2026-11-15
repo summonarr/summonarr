@@ -104,7 +104,13 @@ shadowPrismaModel(prisma, "setting", {
   },
 });
 // GET /api/ratings reads the title's release year for its cache TTL bucket.
-shadowPrismaModel(prisma, "tmdbMediaCore", { findUnique: async () => null });
+// The batch route reads it for every title in one query; `coreYears` is what TMDB data is stored.
+const coreYears = new Map<number, string>();
+shadowPrismaModel(prisma, "tmdbMediaCore", {
+  findUnique: async () => null,
+  findMany: async (args: { where: { tmdbId: { in: number[] } } }) =>
+    args.where.tmdbId.in.flatMap((id) => (coreYears.has(id) ? [{ tmdbId: id, mediaType: "MOVIE", releaseYear: coreYears.get(id)! }] : [])),
+});
 type CacheRow = { key: string; data: string; cachedAt: Date; expiresAt: Date };
 const cacheRows = new Map<string, CacheRow>();
 shadowPrismaModel(prisma, "tmdbCache", {
@@ -256,6 +262,33 @@ test("past the hourly cold-lookup budget the route answers from the cache only: 
 });
 
 // ── one budget, every surface ───────────────────────────────────────────────
+
+test("the body's releaseDate never picks a shared ratings row's lifetime: the stored release year does, and a title with none gets the shortest", async () => {
+  const token = await mintSession();
+  const DAY = 24 * 60 * 60 * 1000;
+  const thisYear = new Date().getFullYear();
+  coreYears.set(41_001, String(thisYear)); // a new release the server knows
+  coreYears.set(41_002, "1990"); // a back-catalog title the server knows
+  // 41_003 has no stored TMDB row.
+  const req = new NextRequest("http://localhost:3000/api/ratings/batch", {
+    method: "POST",
+    headers: { cookie: `${COOKIE}=${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ items: [
+      { id: 41_001, type: "movie", releaseDate: "1990-01-01" },
+      { id: 41_002, type: "movie", releaseDate: `${thisYear}-01-01` },
+      { id: 41_003, type: "movie", releaseDate: "1990-01-01" },
+    ] }),
+  });
+  assert.equal((await inScope(() => ratingsBatch.POST(req, undefined))).status, 200);
+  const days = (id: number) => {
+    const row = [...cacheRows.values()].find((r) => r.key.startsWith("omdb:") && r.key.includes(String(id)));
+    assert.ok(row, `an OMDb row was cached for ${id}`);
+    return Math.round((row.expiresAt.getTime() - row.cachedAt.getTime()) / DAY);
+  };
+  assert.equal(days(41_001), 3, "a claimed 1990 date does not move a new release into the 30-day bucket");
+  assert.equal(days(41_002), 30, "the stored year decides for a known title");
+  assert.equal(days(41_003), 3, "an unverified date gets the shortest bucket");
+});
 
 test("GET /api/ratings spends the same budget: once the batch route has used it up, a cold title is answered from the cache only", async () => {
   const token = await mintSession();

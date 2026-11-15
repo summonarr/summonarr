@@ -9,7 +9,7 @@ import { withBasePath } from "@/lib/base-path";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { runReplaceFileJob } from "@/lib/client/replace-file-job";
 import { isNoAnswer, jobAnswerError, jobRunCutShort } from "@/lib/client/library-sync";
-import { matchCheckView, matchFlagKey as flagKey, noMatchFixes, recordMatchFix, type MatchFixes } from "@/lib/client/match-check-fixes";
+import { activeMatchKind, matchCheckView, matchFlagKey as flagKey, noMatchFixes, recordMatchFix, type MatchFixes } from "@/lib/client/match-check-fixes";
 import { fixMatchErrorMessage, fixMatchWarningMessage, runFixMatch, type FixMatchProgressView, type FixMatchRequest } from "@/lib/client/fix-match";
 import type { FixAllEntry } from "@/lib/client/fix-all-sequence";
 import { folderYear, fixableFlag, type MatchCounts, type MatchFlag, type MatchFlagArr, type MatchFlagKind } from "@/lib/library-match";
@@ -287,7 +287,7 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
   }, [flags]);
   // A kind whose last flag left (fixed, or a tab change) has no chip to
   // unpress, so it reads as "all" rather than an empty list under the chips.
-  const activeKind = kind !== "all" && byKind[kind] === 0 ? "all" : kind;
+  const activeKind = activeMatchKind(kind, byKind);
   const shown = useMemo(() => (activeKind === "all" ? flags : flags.filter((f) => f.kind === activeKind)), [flags, activeKind]);
   const fixable = useMemo(
     () => shown.filter((f): f is FixableMatchFlag => !fixed.has(flagKey(f)) && fixableFlag(f)),
@@ -350,22 +350,26 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
     }
   }
 
-  const chip = (value: MatchFlagKind | "all", label: string) => (
+  // One value for aria-pressed and the pressed look: the kind in effect.
+  const chip = (value: MatchFlagKind | "all", label: string) => {
+    const pressed = activeKind === value;
+    return (
     <button
       key={value}
       type="button"
       onClick={() => setKind(value)}
-      aria-pressed={activeKind === value}
+      aria-pressed={pressed}
       className="ds-hover-tint inline-flex items-center whitespace-nowrap font-medium transition-colors"
       style={{
         padding: "4px 10px", borderRadius: 6, fontSize: 12,
-        background: kind === value ? "var(--ds-bg-3)" : "transparent",
-        color: kind === value ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+        background: pressed ? "var(--ds-bg-3)" : "transparent",
+        color: pressed ? "var(--ds-fg)" : "var(--ds-fg-muted)",
       }}
     >
       {label}
     </button>
-  );
+    );
+  };
 
   return (
     <section

@@ -6,27 +6,36 @@ export const LIBRARY_PAGE_SIZE = 500;
 
 export type LibraryItem = { tmdbId: number; mediaType: "MOVIE" | "TV" };
 
-// Cursor-based pagination avoids loading the entire library into memory; callers should not assume
+// Paged reads avoid loading the entire library into memory; callers should not assume
 // a consistent snapshot — a concurrent full sync may repopulate rows mid-iteration.
 //
 // Rows are keyed (tmdbId, mediaType, serverInstance), so two servers can hold
-// rows with the same tmdbId, and a page can end between them. The cursor
+// rows with the same tmdbId, and a page can end between them. The bound
 // therefore carries serverInstance too, or the next page could skip or repeat
 // one of them. collectAllLibraryItems dedups on tmdbId:mediaType, so the
 // per-server duplicates collapse there.
+//
+// Each page is bounded strictly AFTER the last key read, never positioned on
+// that row (Prisma `cursor` + `skip: 1`): a walk spans minutes, and a sync or
+// fix-match that removes the row the walk stopped on must not end it early.
 export async function* iterateLibrary(
   source: "plex" | "jellyfin",
   mediaType: "MOVIE" | "TV",
 ): AsyncGenerator<LibraryItem> {
-  let cursor: { tmdbId: number; serverInstance: string } | undefined;
+  let after: { tmdbId: number; serverInstance: string } | undefined;
   for (;;) {
     // One query shape for both tables; only the model differs.
     const args = {
-      where: { mediaType },
+      where: after === undefined
+        ? { mediaType }
+        : {
+            mediaType,
+            OR: [
+              { tmdbId: { gt: after.tmdbId } },
+              { tmdbId: after.tmdbId, serverInstance: { gt: after.serverInstance } },
+            ],
+          },
       take: LIBRARY_PAGE_SIZE,
-      ...(cursor !== undefined
-        ? { skip: 1, cursor: { tmdbId_mediaType_serverInstance: { tmdbId: cursor.tmdbId, mediaType, serverInstance: cursor.serverInstance } } }
-        : {}),
       orderBy: [{ tmdbId: "asc" as const }, { serverInstance: "asc" as const }],
       select: { tmdbId: true, mediaType: true, serverInstance: true },
     };
@@ -39,7 +48,7 @@ export async function* iterateLibrary(
     }
     if (page.length < LIBRARY_PAGE_SIZE) break;
     const last = page[page.length - 1];
-    cursor = { tmdbId: last.tmdbId, serverInstance: last.serverInstance };
+    after = { tmdbId: last.tmdbId, serverInstance: last.serverInstance };
   }
 }
 

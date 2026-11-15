@@ -136,3 +136,12 @@ test("the list keeps typing, rows and the URL apart", () => {
   assert.match(page, /get\("q"\)/);
   assert.match(page, /initialType=\{initialType\}/);
 });
+
+// A failed query's record outlived a filter switch: picking that filter again
+// showed the old error (and a Retry that aborted the request already on its
+// way) instead of the refreshing state.
+test("a failure is dropped when the query changes, so a refetch never shows the last visit's error", () => {
+  const hook = readFileSync("src/components/watch-history/use-watch-history.ts", "utf8");
+  assert.match(hook, /const \[failureQuery, setFailureQuery\] = useState\(key\);\s*if \(failureQuery !== key\) \{\s*setFailureQuery\(key\);\s*setFailure\(null\);\s*\}/);
+  assert.ok(hook.indexOf("setFailureQuery(key);") < hook.indexOf("const loadFailed ="), "dropped before the failure is read");
+});

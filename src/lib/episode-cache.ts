@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { warnOnChange, forgetWarnOnChange } from "@/lib/log-dedup";
-import { BATCH_TX_TIMEOUT, batchCreateMany, type LibraryTxClient } from "@/lib/batch-write";
+import { BATCH_TX_TIMEOUT, CREATE_MANY_BATCH, batchCreateMany, type LibraryTxClient } from "@/lib/batch-write";
 
 /** One episode row as the sync arms build it — the source column is added here. */
 export interface EpisodeCacheRow {
@@ -247,6 +247,53 @@ export async function replaceEpisodeCacheForSource(
   return "replaced";
 }
 
+/** One season's slice of a recent-only delete: exact episodes, never the whole show. */
+export interface RecentEpisodeScope {
+  tmdbId: number;
+  seasonNumber: number;
+  episodeNumber: { in: number[] };
+}
+
+/**
+ * The recent-only delete as statements of at most `maxParams` bind parameters
+ * each (two per season scope plus one per episode number; the caller's `source`
+ * is one more). A season too long for what is left of a statement continues in
+ * the next. Every (tmdbId, season, episode) appears in exactly one statement.
+ */
+export function recentEpisodeDeleteBatches(
+  episodes: readonly EpisodeCacheRow[],
+  maxParams: number = CREATE_MANY_BATCH,
+): RecentEpisodeScope[][] {
+  const bySeason = new Map<string, { tmdbId: number; seasonNumber: number; episodeNumbers: number[] }>();
+  for (const e of episodes) {
+    const key = `${e.tmdbId}:${e.seasonNumber}`;
+    const group = bySeason.get(key);
+    if (group) group.episodeNumbers.push(e.episodeNumber);
+    else bySeason.set(key, { tmdbId: e.tmdbId, seasonNumber: e.seasonNumber, episodeNumbers: [e.episodeNumber] });
+  }
+  // A scope costs its two keys plus at least one episode number.
+  const budget = Math.max(3, maxParams);
+  const batches: RecentEpisodeScope[][] = [];
+  let current: RecentEpisodeScope[] = [];
+  let used = 0;
+  for (const g of bySeason.values()) {
+    let from = 0;
+    while (from < g.episodeNumbers.length) {
+      if (budget - used < 3) {
+        batches.push(current);
+        current = [];
+        used = 0;
+      }
+      const take = Math.min(g.episodeNumbers.length - from, budget - used - 2);
+      current.push({ tmdbId: g.tmdbId, seasonNumber: g.seasonNumber, episodeNumber: { in: g.episodeNumbers.slice(from, from + take) } });
+      used += 2 + take;
+      from += take;
+    }
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
 /**
  * The recent-only episode write (guardrail 13): insert-only within the window,
  * so an empty list writes nothing. Otherwise the delete is scoped to the exact
@@ -254,8 +301,11 @@ export async function replaceEpisodeCacheForSource(
  * tmdbId: a recent window returns only the copies of a show added lately, so a
  * copy in another library or section (guardrails 37 / 37c) contributes no
  * episodes here, and a tmdbId-wide delete would wipe its seasons until the next
- * full rebuild. Removed episodes are the full path's job. Bounded by the window,
- * so it fits one transaction, under the source's episode-cache lock.
+ * full rebuild. Removed episodes are the full path's job. One transaction, under
+ * the source's episode-cache lock. The window can still be a whole library (a
+ * metadata refresh re-saves every series), so the delete runs as several
+ * statements, one after another (guardrail 23c), each well under Postgres's
+ * bind-parameter limit.
  */
 export async function mergeRecentEpisodesForSource(
   source: "plex" | "jellyfin",
@@ -265,21 +315,12 @@ export async function mergeRecentEpisodesForSource(
   // One row per episode with the earliest addedAt, like the replace path, so the
   // same episode gets the same addedAt whichever sync wrote it.
   episodes = earliestAddedPerEpisode([...episodes]);
-  const bySeason = new Map<string, { tmdbId: number; seasonNumber: number; episodeNumbers: number[] }>();
-  for (const e of episodes) {
-    const key = `${e.tmdbId}:${e.seasonNumber}`;
-    const group = bySeason.get(key);
-    if (group) group.episodeNumbers.push(e.episodeNumber);
-    else bySeason.set(key, { tmdbId: e.tmdbId, seasonNumber: e.seasonNumber, episodeNumbers: [e.episodeNumber] });
-  }
-  const seasonScopes = Array.from(bySeason.values()).map((g) => ({
-    tmdbId: g.tmdbId,
-    seasonNumber: g.seasonNumber,
-    episodeNumber: { in: g.episodeNumbers },
-  }));
+  const deleteBatches = recentEpisodeDeleteBatches(episodes);
   await prisma.$transaction(async (tx) => {
     await lockEpisodeCacheInTx(tx, source);
-    await tx.tVEpisodeCache.deleteMany({ where: { source, OR: seasonScopes } });
+    for (const scopes of deleteBatches) {
+      await tx.tVEpisodeCache.deleteMany({ where: { source, OR: scopes } });
+    }
     await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source, ...e })));
   }, { timeout: BATCH_TX_TIMEOUT });
 }

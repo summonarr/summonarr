@@ -109,3 +109,18 @@ export function actionTargets<T extends ActionTarget>(requesters: readonly T[], 
 export function chosenActionTarget<T extends ActionTarget>(targets: readonly T[], chosenId: string | null): T | undefined {
   return targets.find((r) => r.requestId === chosenId) ?? targets[0];
 }
+
+/**
+ * The requests a decision or reply on the row goes to as a GROUP, or null when
+ * it goes to the aimed request alone.
+ *
+ * The group is the title's PENDING requests, and it is only the row's subject
+ * while the aimed target is itself PENDING. A picked DECLINED or APPROVED
+ * target acts on that one request: Re-approve must not approve (and push) the
+ * other requesters' pending requests while the declined one stays declined,
+ * and a reply typed for it must not overwrite theirs.
+ */
+export function groupDecisionIds(targetStatus: string, groupPendingIds: readonly string[] | undefined): readonly string[] | null {
+  if (targetStatus !== "PENDING") return null;
+  return groupPendingIds && groupPendingIds.length > 1 ? groupPendingIds : null;
+}

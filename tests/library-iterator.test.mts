@@ -1,15 +1,15 @@
-// Unit tests for src/lib/library-iterator.ts — the cursor-paged reader the
+// Unit tests for src/lib/library-iterator.ts — the key-paged reader the
 // ratings warm / library-wide jobs use to walk Plex+Jellyfin library tables
 // without loading them whole. Contracts pinned:
 //
 //  - iterateLibrary pages by LIBRARY_PAGE_SIZE with keyset pagination: the
-//    first query carries NO cursor/skip; every follow-up carries skip:1 plus a
-//    compound tmdbId_mediaType_serverInstance cursor equal to the LAST row of
-//    the previous page — the skip:1 is what stops the cursor row from being
-//    yielded twice. The cursor carries serverInstance (multi-server support:
-//    the compound id widened to tmdbId+mediaType+serverInstance) so a page
-//    boundary landing between two same-tmdbId rows from different servers
-//    can't skip or repeat one;
+//    first query is bounded by mediaType alone; every follow-up adds a strict
+//    "after the LAST row of the previous page" bound on (tmdbId,
+//    serverInstance) — never a Prisma cursor + skip, which positions on a row
+//    a concurrent sync can delete and then ends the walk early. The bound
+//    carries serverInstance (multi-server support: the compound id is
+//    tmdbId+mediaType+serverInstance) so a page boundary landing between two
+//    same-tmdbId rows from different servers can't skip or repeat one;
 //  - a short page (< LIBRARY_PAGE_SIZE) ends iteration WITHOUT another
 //    round-trip; a table of exactly one full page costs a second (empty)
 //    query — the two loop exits;
@@ -30,7 +30,7 @@
 //    behaviour.
 //
 // No DB: both library delegates are shadowed with an in-memory findMany that
-// faithfully models the where/orderBy/cursor/skip/take subset the iterator
+// faithfully models the where/orderBy/take subset the iterator
 // uses, and $queryRaw is shadowed for the count (tests/_helpers.mts).
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -43,14 +43,15 @@ const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers
 const { LIBRARY_PAGE_SIZE, iterateLibrary, countUniqueLibraryItems, collectAllLibraryItems } =
   await import("../src/lib/library-iterator.ts");
 
-// ── in-memory library delegates (cursor-aware findMany) ─────────────────────
+// ── in-memory library delegates (key-bound findMany) ────────────────────────
 type MediaType = "MOVIE" | "TV";
 type Row = { tmdbId: number; mediaType: MediaType; serverInstance: string };
+type AfterBound = [{ tmdbId: { gt: number } }, { tmdbId: number; serverInstance: { gt: string } }];
 type FindManyArgs = {
-  where: { mediaType: MediaType };
+  where: { mediaType: MediaType; OR?: AfterBound };
   take: number;
   skip?: number;
-  cursor?: { tmdbId_mediaType_serverInstance: { tmdbId: number; mediaType: MediaType; serverInstance: string } };
+  cursor?: unknown;
   orderBy: [{ tmdbId: "asc" }, { serverInstance: "asc" }];
   select: { tmdbId: true; mediaType: true; serverInstance: true };
 };
@@ -58,6 +59,8 @@ type Call = { source: "plex" | "jellyfin"; args: FindManyArgs };
 
 const calls: Call[] = [];
 const tables: Record<"plex" | "jellyfin", Row[]> = { plex: [], jellyfin: [] };
+// Runs after each page is read, before it is returned: a concurrent writer.
+let afterPage: ((source: "plex" | "jellyfin", page: Row[]) => void) | null = null;
 
 function delegate(source: "plex" | "jellyfin") {
   return {
@@ -66,16 +69,18 @@ function delegate(source: "plex" | "jellyfin") {
       const all = tables[source]
         .filter((r) => r.mediaType === args.where.mediaType)
         .sort((a, b) => a.tmdbId - b.tmdbId || a.serverInstance.localeCompare(b.serverInstance));
-      let start = 0;
-      if (args.cursor) {
-        const { tmdbId, mediaType, serverInstance } = args.cursor.tmdbId_mediaType_serverInstance;
-        const idx = all.findIndex((r) => r.tmdbId === tmdbId && r.mediaType === mediaType && r.serverInstance === serverInstance);
-        // Prisma errors on a missing cursor row; a bogus cursor means the
-        // iterator advanced with an id it never received — fail loudly.
-        if (idx === -1) throw new Error(`cursor row ${tmdbId}:${mediaType}:${serverInstance} not found`);
-        start = idx + (args.skip ?? 0);
-      }
-      return all.slice(start, start + args.take).map((r) => ({ ...r }));
+      // The iterator must never position on a row (it may be gone by then):
+      // a cursor here is the regression, answered as an empty page.
+      if (args.cursor !== undefined) return [];
+      const bound = args.where.OR;
+      const rows = bound
+        ? all.filter((r) =>
+            r.tmdbId > bound[0].tmdbId.gt
+            || (r.tmdbId === bound[1].tmdbId && r.serverInstance.localeCompare(bound[1].serverInstance.gt) > 0))
+        : all;
+      const page = rows.slice(0, args.take).map((r) => ({ ...r }));
+      afterPage?.(source, page);
+      return page;
     },
   };
 }
@@ -93,6 +98,7 @@ shadowPrismaClientMethod(prisma, "$queryRaw", async (q: SqlLike) => {
 
 beforeEach(() => {
   calls.length = 0;
+  afterPage = null;
   tables.plex = [];
   tables.jellyfin = [];
   rawQueries.length = 0;
@@ -114,14 +120,20 @@ const norm = (sql: string) => sql.replace(/\s+/g, " ").trim();
 
 // ── iterateLibrary ──────────────────────────────────────────────────────────
 
-test("empty table: one page query with the full arg shape and NO cursor, nothing yielded", async () => {
+// The "strictly after (tmdbId, serverInstance)" bound a follow-up page carries.
+const afterKey = (tmdbId: number, serverInstance: string): AfterBound => [
+  { tmdbId: { gt: tmdbId } },
+  { tmdbId, serverInstance: { gt: serverInstance } },
+];
+
+test("empty table: one page query with the full arg shape and no key bound, nothing yielded", async () => {
   assert.deepEqual(await drain(iterateLibrary("plex", "MOVIE")), []);
   assert.equal(calls.length, 1);
   const args = calls[0].args;
   assert.equal(calls[0].source, "plex");
   assert.deepEqual(args.where, { mediaType: "MOVIE" });
   assert.equal(args.take, LIBRARY_PAGE_SIZE);
-  assert.equal(args.cursor, undefined); // first page is cursor-free
+  assert.equal(args.cursor, undefined);
   assert.equal(args.skip, undefined);
   assert.deepEqual(args.orderBy, [{ tmdbId: "asc" }, { serverInstance: "asc" }]);
   assert.deepEqual(args.select, { tmdbId: true, mediaType: true, serverInstance: true });
@@ -138,7 +150,7 @@ test("a short page ends iteration after exactly one round-trip", async () => {
   assert.equal(calls.length, 1); // page.length < LIBRARY_PAGE_SIZE ⇒ no second query
 });
 
-test("exactly one full page: a second query with skip:1 and the last row as compound cursor, then stop on empty", async () => {
+test("exactly one full page: a second query bounded strictly after the last row, then stop on empty", async () => {
   tables.plex = range(LIBRARY_PAGE_SIZE, "MOVIE"); // ids 1..500
   const items = await drain(iterateLibrary("plex", "MOVIE"));
 
@@ -147,13 +159,13 @@ test("exactly one full page: a second query with skip:1 and the last row as comp
 
   assert.equal(calls.length, 2);
   const second = calls[1].args;
-  assert.equal(second.skip, 1); // skip the cursor row itself — the double-yield guard
-  assert.deepEqual(second.cursor, {
-    tmdbId_mediaType_serverInstance: { tmdbId: LIBRARY_PAGE_SIZE, mediaType: "MOVIE", serverInstance: "" },
-  });
+  // A strict bound, not a position on the row: no cursor, no skip.
+  assert.equal(second.cursor, undefined);
+  assert.equal(second.skip, undefined);
+  assert.deepEqual(second.where, { mediaType: "MOVIE", OR: afterKey(LIBRARY_PAGE_SIZE, "") });
 });
 
-test("multi-page walk: cursors chain page tails, every row yielded exactly once in order", async () => {
+test("multi-page walk: bounds chain page tails, every row yielded exactly once in order", async () => {
   const total = 2 * LIBRARY_PAGE_SIZE + 203;
   tables.jellyfin = range(total, "TV");
   const items = await drain(iterateLibrary("jellyfin", "TV"));
@@ -163,13 +175,13 @@ test("multi-page walk: cursors chain page tails, every row yielded exactly once 
 
   // 500 + 500 + 203: the short third page terminates without a fourth query.
   assert.equal(calls.length, 3);
-  assert.equal(calls[1].args.cursor?.tmdbId_mediaType_serverInstance.tmdbId, LIBRARY_PAGE_SIZE);
-  assert.equal(calls[2].args.cursor?.tmdbId_mediaType_serverInstance.tmdbId, 2 * LIBRARY_PAGE_SIZE);
+  assert.deepEqual(calls[1].args.where.OR, afterKey(LIBRARY_PAGE_SIZE, ""));
+  assert.deepEqual(calls[2].args.where.OR, afterKey(2 * LIBRARY_PAGE_SIZE, ""));
   assert.ok(calls.every((c) => c.source === "jellyfin"));
 });
 
 test("a page boundary between two servers' rows sharing a tmdbId doesn't skip or repeat either", async () => {
-  // id 500 exists on BOTH the default and "remote" servers; the cursor after a
+  // id 500 exists on BOTH the default and "remote" servers; the bound after a
   // full first page must carry serverInstance so the second query resumes at
   // (500, "remote"), not re-fetching or skipping past (500, "").
   tables.plex = [
@@ -180,11 +192,24 @@ test("a page boundary between two servers' rows sharing a tmdbId doesn't skip or
   const items = await drain(iterateLibrary("plex", "MOVIE"));
   assert.equal(items.length, LIBRARY_PAGE_SIZE + 1);
   assert.equal(calls.length, 2);
-  assert.deepEqual(calls[1].args.cursor, {
-    tmdbId_mediaType_serverInstance: { tmdbId: LIBRARY_PAGE_SIZE, mediaType: "MOVIE", serverInstance: "" },
-  });
-  // Both same-tmdbId rows survive — the cursor didn't skip the "remote" one.
+  assert.deepEqual(calls[1].args.where.OR, afterKey(LIBRARY_PAGE_SIZE, ""));
+  // Both same-tmdbId rows survive — the bound didn't skip the "remote" one.
   assert.equal(items.filter((i) => i.tmdbId === LIBRARY_PAGE_SIZE).length, 2);
+});
+
+test("the last row of a page being deleted mid-walk does not end the walk", async () => {
+  const total = LIBRARY_PAGE_SIZE + 40;
+  tables.plex = range(total, "MOVIE");
+  // A sync removes the title the first page ended on before the next page is read.
+  afterPage = (source, page) => {
+    if (page.length !== LIBRARY_PAGE_SIZE) return;
+    const last = page[page.length - 1];
+    tables[source] = tables[source].filter((r) => r.tmdbId !== last.tmdbId);
+  };
+  const items = await drain(iterateLibrary("plex", "MOVIE"));
+  assert.equal(items.length, total, "every title is still read, the removed one included (it was read before it left)");
+  assert.deepEqual(items.map((i) => i.tmdbId), range(total, "MOVIE").map((r) => r.tmdbId));
+  assert.equal(calls.length, 2);
 });
 
 test("source and mediaType routing: each walk touches only its own delegate and type", async () => {

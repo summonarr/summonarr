@@ -592,7 +592,9 @@ async function openDmChannel(botToken: string, discordId: string): Promise<strin
   });
   if (!dmRes.ok) {
     const text = await dmRes.text();
-    throw new Error(`Failed to open DM channel (${dmRes.status}): ${text}`);
+    // The status rides the error so a 4xx (unknown recipient, a revoked bot
+    // token) is settled like the message post's, not retried (guardrail 14f).
+    throw new DiscordSendError(`Failed to open DM channel (${dmRes.status}): ${text}`, dmRes.status);
   }
   const body: unknown = await dmRes.json().catch(() => null);
   const channelId = body && typeof body === "object" ? (body as { id?: unknown }).id : undefined;

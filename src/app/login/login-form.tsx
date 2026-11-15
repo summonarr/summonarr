@@ -261,7 +261,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
 
       {provider === "oidc" && <OidcPanel panel={panel} oidcName={oidcName} callbackUrl={callbackUrl} />}
 
-      {provider === "plex" && <PlexPanel panel={panel} callbackUrl={callbackUrl} siteUrl={siteUrl} />}
+      {provider === "plex" && <PlexPanel key={panelGeneration} panel={panel} callbackUrl={callbackUrl} siteUrl={siteUrl} />}
 
       {provider === "jellyfin" && (
         <JellyfinPanel
@@ -390,12 +390,25 @@ function PlexPanel({ panel, callbackUrl, siteUrl }: { panel: PanelState; callbac
   const t = useT();
   const { rememberMe, setRememberMe, loading, setLoading, error, setError } = panel;
 
+  // The panel is unmounted by a tab switch. The start request can't be un-sent,
+  // but its answer is dropped once the user has left this tab, as the password
+  // and QuickConnect answers are: a late Plex error printed under another
+  // provider's form, and a late success sent the browser to plex.tv.
+  const shownRef = useRef(true);
+  useEffect(() => {
+    shownRef.current = true;
+    return () => {
+      shownRef.current = false;
+    };
+  }, []);
+
   // startPlexSignIn never throws, so every failure ends with its message and
   // the button back; only a success leaves `loading` set for the navigation.
   async function handlePlexSignIn() {
     setLoading(true);
     setError("");
     const started = await startPlexSignIn({ rememberMe, callbackUrl, siteUrl, t });
+    if (!shownRef.current) return;
     if (!started.ok) {
       setError(started.error);
       setLoading(false);

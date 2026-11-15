@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { buildSecondFactor, type SecondFactorProof } from "@/lib/client/step-up";
 import { useT } from "@/components/i18n/i18n-provider";
-import { readSecondFactorRefusal } from "./second-factor-refusal";
+import { nextServerAsk, readSecondFactorRefusal, standingServerMethods, type ServerSecondFactorAsk } from "./second-factor-refusal";
 
 // What the page knew about the account's two-factor setup when it rendered.
 export interface KnownSecondFactor {
@@ -33,10 +33,14 @@ export function useSecondFactorStepUp({
 }) {
   const t = useT();
   const [stepUpCode, setStepUpCode] = useState("");
-  // The methods the server listed when it asked for a second factor.
-  const [serverMethods, setServerMethods] = useState<string[] | null>(null);
+  // The methods the server listed when it asked for a second factor. The ask
+  // stands only while the account's known two-factor state is the one it was
+  // made under (see standingServerMethods).
+  const knownEnabled = !!known?.enabled;
+  const [serverAsk, setServerAsk] = useState<ServerSecondFactorAsk | null>(null);
+  const serverMethods = standingServerMethods(serverAsk, knownEnabled);
 
-  const needsSecondFactor = applies && (!!known?.enabled || serverMethods !== null);
+  const needsSecondFactor = applies && (knownEnabled || serverMethods !== null);
   const passkeyPossible =
     (!!known?.hasPasskeys && !!known.webauthnAvailable) || !!serverMethods?.includes("webauthn");
 
@@ -63,8 +67,7 @@ export function useSecondFactorStepUp({
     fallback: string,
   ): string {
     const refusal = readSecondFactorRefusal(res, body, sentProof, t, fallback);
-    if (refusal.methods === "unlisted") setServerMethods((m) => m ?? []);
-    else if (refusal.methods) setServerMethods(refusal.methods);
+    setServerAsk((ask) => nextServerAsk(ask, refusal.methods, knownEnabled));
     return refusal.message;
   }
 

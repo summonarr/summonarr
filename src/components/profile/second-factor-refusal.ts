@@ -39,3 +39,31 @@ export function readSecondFactorRefusal(
   // SSO account whose sign-in is too old): the sentence wins.
   return { methods, message: rateLimitMessage(res, t) ?? apiErrorText(data, fallback) };
 }
+
+// What the server last asked for, with what the page knew about the account's
+// two-factor state when it asked.
+export interface ServerSecondFactorAsk {
+  methods: string[];
+  whenEnabled: boolean;
+}
+
+/**
+ * The methods of the server's ask that still stands, or null. An ask is dropped
+ * once the account's known two-factor state has changed since: after two-factor
+ * is turned off (or its last factor removed) there is nothing to produce a code
+ * from, and an ask kept from before would demand one for every later change.
+ */
+export function standingServerMethods(ask: ServerSecondFactorAsk | null, knownEnabled: boolean): string[] | null {
+  return ask && ask.whenEnabled === knownEnabled ? ask.methods : null;
+}
+
+/** The ask to keep after a refusal. An ask without a list keeps a standing one's methods. */
+export function nextServerAsk(
+  ask: ServerSecondFactorAsk | null,
+  methods: SecondFactorRefusal["methods"],
+  knownEnabled: boolean,
+): ServerSecondFactorAsk | null {
+  if (methods === null) return ask;
+  if (methods === "unlisted") return { methods: standingServerMethods(ask, knownEnabled) ?? [], whenEnabled: knownEnabled };
+  return { methods, whenEnabled: knownEnabled };
+}

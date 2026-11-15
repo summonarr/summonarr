@@ -4,6 +4,7 @@
 // decisions they make.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 const rules = await import("../src/components/admin/request-action-rules.ts");
 const { syncRunNote, SyncRunAnswer } = await import("../src/components/admin/sync-summary.ts");
@@ -91,4 +92,22 @@ test("a picked target holds only while the group still offers it", () => {
   assert.equal(rules.chosenActionTarget(targets, "uhd")?.requestId, "uhd");
   assert.equal(rules.chosenActionTarget(targets, "gone")?.requestId, "hd", "a request that left the group is not acted on");
   assert.equal(rules.chosenActionTarget([], "x"), undefined);
+});
+
+test("the group's pending ids are used only while the aimed request is the PENDING one", () => {
+  const pending = ["p1", "p2"];
+  assert.deepEqual(rules.groupDecisionIds("PENDING", pending), pending);
+  // A picked non-pending target acts on that one request.
+  for (const status of ["DECLINED", "APPROVED", "AVAILABLE", "SOMETHING_ELSE"]) {
+    assert.equal(rules.groupDecisionIds(status, pending), null, status);
+  }
+  // One pending request is not a group.
+  assert.equal(rules.groupDecisionIds("PENDING", ["p1"]), null);
+  assert.equal(rules.groupDecisionIds("PENDING", undefined), null);
+
+  const src = (name: string) => readFileSync(new URL(`../src/components/admin/${name}`, import.meta.url), "utf8");
+  const actions = src("request-actions.tsx");
+  assert.match(actions, /const groupIds = groupDecisionIds\(currentStatus, groupPendingIds\);/);
+  assert.doesNotMatch(actions, /groupPendingIds(\?)?\.length/, "no second rule for what a group is");
+  assert.match(src("admin-request-list.tsx"), /groupPendingIds=\{target\.status === "PENDING" && pendingIds\.length > 1 \? pendingIds : undefined\}/);
 });

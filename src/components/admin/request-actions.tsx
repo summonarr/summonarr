@@ -33,6 +33,7 @@ import {
   QualityProfilesAnswer,
   arrErrorOf,
   decisionOutcome,
+  groupDecisionIds,
   parseRequestStatus,
   type RequestMediaType,
 } from "./request-action-rules";
@@ -86,7 +87,9 @@ function useRequestMutations({ requestId, currentStatus, groupPendingIds }: Pick
   const status = optimisticStatus ?? currentStatus;
   const [arrError, setArrError] = useState<string | null>(null);
   const [retryOk, setRetryOk] = useState(false);
-  const groupIds = groupPendingIds && groupPendingIds.length > 1 ? groupPendingIds : null;
+  // The STORED status of the aimed request, not the optimistic one: a group
+  // mid-approve is still the group.
+  const groupIds = groupDecisionIds(currentStatus, groupPendingIds);
 
   // Every call starts from a clean line: no earlier failure stays beside a
   // later success.
@@ -437,7 +440,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
       );
 
     case "PENDING":
-      return <PendingActions m={m} forms={forms} allowProfilePick={(groupPendingIds?.length ?? 0) <= 1} reply={reply} />;
+      return <PendingActions m={m} forms={forms} allowProfilePick={groupDecisionIds(currentStatus, groupPendingIds) === null} reply={reply} />;
 
     case null:
       // A status this row doesn't know: no decision controls, only the reply.

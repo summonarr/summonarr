@@ -73,6 +73,10 @@ let webRequests: ReqRow[] = [];
 let shadowRequests: ReqRow[] = [];
 let webVotes: Array<Omit<VoteRow, "id">> = [];
 let shadowVotes: VoteRow[] = [];
+// The stored deletionVoteThreshold (null = unset) and each title's tally AFTER
+// the merge dropped its duplicate vote, keyed `tmdbId:mediaType`.
+let voteThreshold: string | null = null;
+const voteTallies = new Map<string, number>();
 
 function record(model: string, method: string) {
   return async (args: unknown) => {
@@ -122,6 +126,18 @@ const fakeTx = {
     },
     deleteMany: record("deletionVote", "deleteMany"),
     updateMany: record("deletionVote", "updateMany"),
+    count: async (args: { where: { tmdbId: number; mediaType: string } }) => {
+      ops.push({ op: "deletionVote.count", args });
+      return voteTallies.get(`${args.where.tmdbId}:${args.where.mediaType}`) ?? 0;
+    },
+  },
+  // The threshold read and the alert marker's delete, inside the transaction.
+  setting: {
+    findUnique: async (args: { where: { key: string } }) => {
+      ops.push({ op: "setting.findUnique", args });
+      return voteThreshold === null ? null : { key: args.where.key, value: voteThreshold };
+    },
+    deleteMany: record("setting", "deleteMany"),
   },
 };
 
@@ -198,6 +214,8 @@ beforeEach(async () => {
   ops.length = 0;
   errors.length = 0;
   existingUser = null;
+  voteThreshold = null;
+  voteTallies.clear();
   webRow = { id: WEB, discordId: null };
   settings.clear();
   settings.set("discordBotToken", "a-bot-token");
@@ -467,6 +485,39 @@ test("deletion votes dedup on tmdbId:mediaType — the web user's existing vote 
   assert.ok(
     opNames().indexOf("deletionVote.deleteMany") < opNames().indexOf("deletionVote.updateMany"),
   );
+});
+
+test("a dropped duplicate vote that takes a title below the threshold clears its alert marker; a title still at the threshold keeps it", async () => {
+  seedShadow();
+  voteThreshold = "3";
+  webVotes = [{ tmdbId: 55, mediaType: "MOVIE" }, { tmdbId: 56, mediaType: "TV" }];
+  shadowVotes = [
+    { id: "v-drop", tmdbId: 55, mediaType: "MOVIE" },
+    { id: "v-stay", tmdbId: 56, mediaType: "TV" },
+  ];
+  voteTallies.set("55:MOVIE", 2); // was 3 with the duplicate
+  voteTallies.set("56:TV", 3); // was 4
+  await mergeDiscordIntoWebAccount(WEB, DISCORD_ID, CLAIMED);
+  const markerDeletes = ops.filter((o) => o.op === "setting.deleteMany").map((o) => o.args);
+  assert.deepEqual(markerDeletes, [{ where: { key: "deletionVoteNotified:55:MOVIE" } }]);
+  // The tally is read after the duplicate is gone.
+  assert.ok(opNames().indexOf("deletionVote.deleteMany") < opNames().indexOf("deletionVote.count"));
+});
+
+test("with the threshold off, or no duplicate vote, the merge reads no tally and touches no marker", async () => {
+  seedShadow();
+  webVotes = [{ tmdbId: 55, mediaType: "MOVIE" }];
+  shadowVotes = [{ id: "v-drop", tmdbId: 55, mediaType: "MOVIE" }];
+  await mergeDiscordIntoWebAccount(WEB, DISCORD_ID, CLAIMED); // threshold unset
+  assert.ok(!opNames().includes("deletionVote.count"));
+  assert.ok(!opNames().includes("setting.deleteMany"));
+
+  ops.length = 0;
+  voteThreshold = "3";
+  shadowVotes = [{ id: "v-solo", tmdbId: 77, mediaType: "MOVIE" }];
+  await mergeDiscordIntoWebAccount(WEB, DISCORD_ID, CLAIMED);
+  assert.ok(!opNames().includes("setting.findUnique"));
+  assert.ok(!opNames().includes("setting.deleteMany"));
 });
 
 test("no vote conflicts → no deleteMany, but the vote-transfer updateMany is still issued (unconditional)", async () => {

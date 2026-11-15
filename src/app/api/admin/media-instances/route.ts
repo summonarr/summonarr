@@ -11,7 +11,7 @@ import { settleLimit } from "@/lib/concurrency";
 import { type MediaInstanceConfig, getMediaInstances, buildMediaInstanceRegistryWrite, readMediaInstanceRegistryForSave } from "@/lib/media-instance-registry";
 import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
 import { BATCH_TX_TIMEOUT } from "@/lib/batch-write";
-import { validateServerUrl, stripUrlUserinfo } from "@/lib/server-url";
+import { validateServerUrl, stripUrlUserinfo, sameServerUrl } from "@/lib/server-url";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import { upstreamStatusKey } from "@/lib/never-watched-data";
@@ -403,14 +403,6 @@ function validateSave(
   }
   return { service, instances, baseVersion: body.baseVersion };
 }
-
-function withoutTrailingSlashes(url: string): string {
-  const v = url.trim();
-  let end = v.length;
-  while (end > 0 && v.charCodeAt(end - 1) === 47) end--;
-  return v.slice(0, end);
-}
-const sameServerUrl = (a: string, b: string) => withoutTrailingSlashes(a) === withoutTrailingSlashes(b);
 
 // The first instance saved with its stored secret KEPT — the mask sentinel, or
 // the field left out (writeInstanceSettings skips both) — AND a server address

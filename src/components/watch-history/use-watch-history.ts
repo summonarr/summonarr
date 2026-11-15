@@ -69,6 +69,15 @@ export function useWatchHistory({
   }
 
   const [failure, setFailure] = useState<(HistoryFailure & { key: string }) | null>(null);
+  // A failure describes the visit it happened in. Once the query changes it is
+  // dropped: picking the failed filter again starts a new request, and the old
+  // failure shown over it hid the refreshing state behind an error and a Retry
+  // that only aborted the request already on its way.
+  const [failureQuery, setFailureQuery] = useState(key);
+  if (failureQuery !== key) {
+    setFailureQuery(key);
+    setFailure(null);
+  }
   const [moreFailure, setMoreFailure] = useState<(HistoryFailure & { key: string }) | null>(null);
   // Retry stays disabled for a 429's named wait: an earlier click only spends
   // another request against the same limit.

@@ -585,6 +585,37 @@ test("the runner stage's app tree is root-owned; only /data and the Next cache a
   assert.ok(runner.indexOf("\nUSER nextjs\n") > chownAt);
 });
 
+test("the env templates never set BASE_PATH, so the image's build value reaches the cron loop and the health probe", () => {
+  // Both compose files load the env file into the app container, and a value
+  // there — an empty `BASE_PATH=` included — outranks the image's own ENV.
+  assert.match(DOCKERFILE, /\nARG BASE_PATH=""\nENV BASE_PATH=\$BASE_PATH\n/);
+  for (const f of [".env.example", "docker-container/.env.example"]) {
+    const env = read(f);
+    assert.doesNotMatch(env, /^\s*(export\s+)?BASE_PATH\s*=/m, `${f} must not set BASE_PATH`);
+    assert.match(env, /^# BASE_PATH=$/m, `${f} keeps the commented-out line`);
+  }
+});
+
+test("the Postgres container gets its password and nothing else from the env file", () => {
+  for (const f of COMPOSES) {
+    const c = read(f);
+    const start = c.indexOf("\n  postgres:\n");
+    const end = c.indexOf("\n  summonarr:\n");
+    assert.ok(start >= 0 && end > start, `${f}: the postgres service`);
+    const svc = c.slice(start, end);
+    assert.doesNotMatch(svc, /^\s*env_file:/m, `${f}: no env_file on postgres (it would carry the app's secrets)`);
+    assert.match(svc, /^      POSTGRES_PASSWORD: "\$\{POSTGRES_PASSWORD:\?[^}]+\}"$/m, `${f}: the password is interpolated, and required`);
+    const env = svc.slice(svc.indexOf("\n    environment:\n"), svc.indexOf("\n    volumes:\n"));
+    const keys = [...env.matchAll(/^      ([A-Z_]+):/gm)].map((m) => m[1]);
+    assert.deepEqual(keys, ["POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD"], `${f}: the whole environment`);
+  }
+  // The source build keeps its settings in .env.local, which Compose reads for
+  // interpolation only when it is named.
+  const readme = read("README.md");
+  assert.ok(readme.includes("docker compose --env-file .env.local up -d"));
+  assert.ok(read("docker-compose.yml").includes("--env-file .env.local"));
+});
+
 test("the image healthcheck probes with busybox wget, not a node process per probe", () => {
   const m = DOCKERFILE.match(/HEALTHCHECK [^\n]*\\\n\s+CMD ([^\n]*)\n/);
   assert.ok(m, "Dockerfile HEALTHCHECK command");

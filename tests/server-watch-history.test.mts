@@ -732,6 +732,55 @@ test("plex: a RECENT play the library doesn't know yet holds the read point, so 
   assert.deepEqual(rowsOf("msu-friend"), [[100, "MOVIE", 2, false], [4041, "MOVIE", 1, false]], "nothing counted twice");
 });
 
+test("jellyfin: a FIRST read that is held still takes undated plays and the earlier plays of items past the hold; nothing counts twice", async () => {
+  configureJellyfin();
+  identities = [{ id: "msu-jf", source: "jellyfin", serverInstance: "", sourceUserId: "jf-user", isServerAdmin: false, userId: "u1", active: true }];
+  const unknownAt = ago(1);
+  const undated = { Type: "Movie", Id: "jf-movie-900", UserData: { Played: true, PlayCount: 1 } };
+  jfPlayed.set("jf-user", [
+    jfItem({ type: "Movie", id: "jf-movie-700", played: ago(0.5), count: 3 }), // past the hold, watched three times in all
+    jfItem({ type: "Movie", id: "jf-new", played: unknownAt, count: 1 }), // not in the library yet
+    jfItem({ type: "Episode", id: "ep-1", series: "jf-series-800", played: ago(3), count: 2 }),
+    undated,
+  ]);
+  await importServerWatchHistory();
+  assert.deepEqual(
+    rowsOf("msu-jf"),
+    [[700, "MOVIE", 2, false], [800, "TV", 2, false], [900, "MOVIE", 1, false]],
+    "the undated film is stored now (no later read takes it), and the held film's two earlier plays are not lost",
+  );
+  assert.ok(cursorOf("msu-jf")!.getTime() < unknownAt.getTime(), "the read point stops before the unknown play");
+
+  // The library sync catches up: the held play and the latest play of the film after it count once each.
+  jfLib.push({ tmdbId: 950, mediaType: "MOVIE", serverInstance: "", jellyfinItemId: "jf-new", jellyfinItemIds: [], title: "New Film" });
+  await importServerWatchHistory();
+  const settled = [[700, "MOVIE", 3, false], [800, "TV", 2, false], [900, "MOVIE", 1, false], [950, "MOVIE", 1, false]];
+  assert.deepEqual(rowsOf("msu-jf"), settled, "the lifetime PlayCount of 3, not 1 and not 4");
+  await importServerWatchHistory();
+  assert.deepEqual(rowsOf("msu-jf"), settled, "nothing counted twice");
+});
+
+test("a held fold takes an undated play only on a first read, and never the play past the hold", () => {
+  const recs = [
+    { kind: "movie" as const, itemKey: "100", showKey: null, viewedAt: null, accountId: "2" },
+    { kind: "movie" as const, itemKey: "100", showKey: null, viewedAt: ago(3), accountId: "2" },
+    { kind: "movie" as const, itemKey: "100", showKey: null, viewedAt: ago(0.5), accountId: "2" },
+  ];
+  const first = pure.foldPlexHistory(recs, "2", null, null, titleFor, { readUntil: ago(1) });
+  assert.deepEqual([...first.deltas.values()].map((d) => d.plays), [2], "the undated play and the one before the hold");
+  const later = pure.foldPlexHistory(recs, "2", null, ago(5), titleFor, { readUntil: ago(1) });
+  assert.deepEqual([...later.deltas.values()].map((d) => d.plays), [1], "with a read point an undated play is never placed");
+
+  const jfTitle = (id: string) => (id === "m" ? { tmdbId: 1, mediaType: "MOVIE" as const } : null);
+  const items = [{ kind: "movie" as const, itemKey: "m", showKey: null, lastPlayedAt: ago(0.5), playCount: 4 }];
+  const held = pure.foldJellyfinPlayed(items, null, jfTitle, { readUntil: ago(1) });
+  assert.deepEqual([...held.deltas.values()].map((d) => [d.plays, d.lastWatchedAt]), [[3, null]], "earlier plays now, undated; the latest is left to the next read");
+  const once = pure.foldJellyfinPlayed([{ ...items[0], playCount: 1 }], null, jfTitle, { readUntil: ago(1) });
+  assert.equal(once.deltas.size, 0, "a single play past the hold is wholly the next read's");
+  const inc = pure.foldJellyfinPlayed(items, ago(5), jfTitle, { readUntil: ago(1) });
+  assert.equal(inc.deltas.size, 0, "an incremental read held below a play adds nothing for it");
+});
+
 test("an unknown play older than the hold never stalls the read point", () => {
   const recs = [
     { kind: "movie" as const, itemKey: "nope", showKey: null, viewedAt: ago(5), accountId: "2" },

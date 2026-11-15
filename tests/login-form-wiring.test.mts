@@ -144,6 +144,21 @@ test("Plex sign-in: the client id, device read and PIN request are inside the ca
   assert.match(topLevel("PlexPanel"), /if \(!started\.ok\) \{\s*setError\(started\.error\);\s*setLoading\(false\);/);
 });
 
+// The start request can't be un-sent, but a tab switch must drop its answer as
+// it does the password and QuickConnect ones: a late Plex error landed under
+// another provider's form, and a late success navigated to plex.tv.
+test("Plex sign-in: an answer that arrives after the tab was left is dropped", () => {
+  const panel = topLevel("PlexPanel");
+  assert.match(panel, /useEffect\(\(\) => \{\s*shownRef\.current = true;\s*return \(\) => \{\s*shownRef\.current = false;\s*\};\s*\}, \[\]\);/);
+  assert.match(
+    panel,
+    /const started = await startPlexSignIn\(\{[^}]*\}\);\s*if \(!shownRef\.current\) return;\s*if \(!started\.ok\)/,
+    "checked before the error, the button reset and the navigation",
+  );
+  // A click on the Plex tab itself is a fresh panel too, as for Jellyfin.
+  assert.match(SRC, /provider === "plex" && <PlexPanel key=\{panelGeneration\} /);
+});
+
 test("Second factor: the passkey button is busy for the whole ceremony, and missing options say so", () => {
   const passkey = MFA_SRC.slice(MFA_SRC.indexOf("async function handlePasskey"), MFA_SRC.indexOf("const noMethods"));
   assert.match(passkey, /if \(busy\) return;/);

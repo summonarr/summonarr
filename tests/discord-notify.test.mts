@@ -1032,6 +1032,26 @@ test("batch notify answers the indexes that FAILED and can be repeated: a 500 an
   }
 });
 
+test("batch notify in DM mode: a 4xx while OPENING the DM channel is settled like a refused post; a 5xx there is still owed", async () => {
+  setSettings({ discordBotToken: BOT }); // no notify channel: DMs
+  userFindManyRows = [
+    { id: "u-403", discordId: "333333333333333333" },
+    { id: "u-500", discordId: "222222222222222222" },
+  ];
+  respond = (url, init) => {
+    if (!url.endsWith("/users/@me/channels")) return okJson({});
+    const body = String(init?.body ?? "");
+    if (body.includes("333333333333333333")) return new Response(JSON.stringify({ message: "Unknown User" }), { status: 404 });
+    return new Response("upstream down", { status: 500 });
+  };
+  const failed = await notifyUsersRequestsAvailable([
+    { requestedBy: "u-403", title: "A", mediaType: "MOVIE" },
+    { requestedBy: "u-500", title: "B", mediaType: "MOVIE" },
+  ]);
+  assert.deepEqual(failed, [1]);
+  assert.ok(sent.every((r) => r.url.endsWith("/users/@me/channels")), "nothing was posted without a channel");
+});
+
 test("batch notify: nothing configured owes nothing; a read that fails before any send owes EVERY request", async () => {
   // Not configured: no bot token.
   assert.deepEqual(await notifyUsersRequestsAvailable([{ requestedBy: "u1", title: "A", mediaType: "MOVIE" }]), []);

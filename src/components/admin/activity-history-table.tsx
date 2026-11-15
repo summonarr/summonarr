@@ -17,7 +17,7 @@ import { useAsyncAction } from "@/hooks/use-async-action";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 import { ActivityCard } from "@/components/admin/activity-ui";
-import { buildHistoryFilterParams, hasActiveFilter } from "./activity-history/helpers";
+import { buildHistoryFilterParams, hasActiveFilter, rowsAreStale } from "./activity-history/helpers";
 import { HistoryFilterBar } from "./activity-history/filter-bar";
 import { HistoryPagination } from "./activity-history/pagination";
 import { HistoryTableRow } from "./activity-history/table-row";
@@ -71,7 +71,7 @@ export function ActivityHistoryTable({
     watched: initialWatched,
   });
   const { filters, grouped, sortBy, sortDir, limit, page } = query;
-  const { rows, total, totalPages, loading, error, invertedRange, reload } = useHistoryPage({
+  const { rows, rowsGrouped, total, totalPages, loading, error, invertedRange, reload } = useHistoryPage({
     query,
     dispatch,
     globalSource,
@@ -85,7 +85,7 @@ export function ActivityHistoryTable({
   const exportNotice = jsonExport.notice;
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const del = useHistoryDelete({
-    grouped,
+    rowsGrouped,
     loader,
     failedText: t("adminActivity.history.deleteError"),
     onDeleted: () => {
@@ -140,6 +140,7 @@ export function ActivityHistoryTable({
     [rows, expandedId, mounted, timeZone, toggleExpanded, openDelete],
   );
 
+  const stale = rowsAreStale(loading, rows.length);
   let body: React.ReactNode;
   if (invertedRange) {
     body = <HistoryStatusRow colSpan={COL_SPAN} fontSize={13}>{t("adminActivity.history.dateOrderError")}</HistoryStatusRow>;
@@ -205,7 +206,10 @@ export function ActivityHistoryTable({
                 to keep. A live refresh's background re-read doesn't dim. */}
             <tbody
               aria-busy={loading || undefined}
-              className={loading && rows.length > 0 ? "opacity-50 pointer-events-none" : undefined}
+              // `inert`, not just pointer-events: Tab + Enter must not reach a
+              // stale row's buttons either.
+              inert={stale}
+              className={stale ? "opacity-50 pointer-events-none" : undefined}
               style={{ transition: "opacity 120ms var(--ds-ease)" }}
             >
               {body}

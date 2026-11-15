@@ -886,11 +886,12 @@ shadowPrismaModel(prisma, "recommendationTitle", {
 // collectAllLibraryItems walks both library tables; one shared row set is enough
 // here (the helper dedupes across sources anyway).
 let libraryThrows = false;
-const libraryFindMany = async (args: { where: { mediaType: MT }; take: number; cursor?: unknown }) => {
+const libraryFindMany = async (args: { where: { mediaType: MT; OR?: unknown }; take: number }) => {
   // The cheapest way to make refreshRecommendationGraph throw outright:
   // collectGraphSources walks the library, and nothing above it catches.
   if (libraryThrows) throw new Error("library read failed");
-  return args.cursor !== undefined ? [] : libraryRows.filter((r) => r.mediaType === args.where.mediaType).slice(0, args.take);
+  // A follow-up page (bounded after the last key) is always empty here.
+  return args.where.OR !== undefined ? [] : libraryRows.filter((r) => r.mediaType === args.where.mediaType).slice(0, args.take);
 };
 shadowPrismaModel(prisma, "plexLibraryItem", { findMany: libraryFindMany });
 shadowPrismaModel(prisma, "jellyfinLibraryItem", { findMany: async () => [] });

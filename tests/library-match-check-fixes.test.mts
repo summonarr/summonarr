@@ -18,7 +18,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const { matchCheckView, matchFlagKey, noMatchFixes, recordMatchFix } = await import("../src/lib/client/match-check-fixes.ts");
+const { activeMatchKind, matchCheckView, matchFlagKey, noMatchFixes, recordMatchFix } = await import("../src/lib/client/match-check-fixes.ts");
 
 type Flag = { server: string; serverInstance: string; itemKey: string; kind: string };
 const flag = (i: number, kind = "wrongMatch"): Flag => ({ server: i % 2 ? "plex" : "jellyfin", serverInstance: "", itemKey: `item-${i}`, kind });
@@ -166,4 +166,19 @@ test("structural: each confirm moves focus to its Cancel and back to the button 
   const run = read("../src/components/admin/fix-all-run.tsx");
   assert.match(run, /else if \(state === "running"\) stopButtonRef\.current\?\.focus\(\);/, "Stop takes focus while running");
   assert.match(run, /onClick=\{\(\) => \{ refocus\.current = true; onConfirm\(\); \}\}/, "a run's end hands focus back to the button too");
+});
+
+test("the kind filter in effect falls back to all once the picked kind has no flags, and the chips' look follows it", () => {
+  const counts = { wrongMatch: 2, noTmdbId: 0, yearMismatch: 0 };
+  assert.equal(activeMatchKind("wrongMatch", counts), "wrongMatch");
+  assert.equal(activeMatchKind("yearMismatch", counts), "all");
+  assert.equal(activeMatchKind<keyof typeof counts>("all", counts), "all");
+
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../src/components/admin/library-match-check.tsx"), "utf8");
+  const chip = src.slice(src.indexOf("const chip = "), src.indexOf("<section", src.indexOf("const chip = ")));
+  assert.match(chip, /const pressed = activeKind === value;/);
+  assert.match(chip, /aria-pressed=\{pressed\}/);
+  assert.match(chip, /background: pressed \?/);
+  assert.match(chip, /color: pressed \?/);
+  assert.doesNotMatch(chip, /\bkind === value/, "the raw pick never decides a chip's state");
 });

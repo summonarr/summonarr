@@ -4,6 +4,7 @@
 // filter change, the URL copy of the table's state that lets its filters
 // survive a period change, the inverted-range guard, and the delete outcome.
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import {
   applyHistoryUrlEntries,
@@ -14,12 +15,14 @@ import {
   deleteOutcome,
   EMPTY_HISTORY_FILTERS,
   hasActiveFilter,
+  historyDeletePath,
   historyQueryReducer,
   historyUrlEntries,
   initialHistoryQuery,
   mediaTypeLabel,
   NEW_LOAD_TRACKER,
   playProgressPct,
+  rowsAreStale,
   settleLoad,
 } from "../src/components/admin/activity-history/helpers.ts";
 import { historyPageSchema, userOptionsSchema } from "../src/components/admin/activity-history/schema.ts";
@@ -251,4 +254,33 @@ test("a malformed page is refused with the path that broke, not trusted", () => 
   assert.match(bad.ok ? "" : bad.error, /^items\[0\]\.id: expected string/);
   assert.equal(check(historyPageSchema, { error: "Too many requests" }).ok, false);
   assert.equal(check(userOptionsSchema, [{ id: "u", username: "a", source: "plex" }]).ok, true, "serverInstance is optional");
+});
+
+test("a delete takes the chain only for a row that was loaded grouped", () => {
+  assert.equal(historyDeletePath("abc", true), "/api/play-history/abc?chain=true");
+  assert.equal(historyDeletePath("abc", false), "/api/play-history/abc");
+  assert.equal(historyDeletePath("a/b", false), "/api/play-history/a%2Fb");
+});
+
+test("the delete goes by the mode its row was loaded in, captured when the dialog opens", () => {
+  const hooks = readFileSync(new URL("../src/components/admin/activity-history/use-history-table.ts", import.meta.url), "utf8");
+  const page = hooks.slice(hooks.indexOf("export function useHistoryPage"), hooks.indexOf("export function useHistoryOptions"));
+  // The loaded mode is stored with the rows it describes, in the same update.
+  assert.match(page, /setRows\(res\.data\.items\);\s*setRowsGrouped\(grouped\);/);
+  const del = hooks.slice(hooks.indexOf("export function useHistoryDelete"));
+  assert.match(del, /setTarget\(\{ row: picked, grouped: rowsGrouped \}\)/);
+  assert.match(del, /const \{ row, grouped \} = target;/);
+  assert.match(del, /historyDeletePath\(row\.id, grouped\)/);
+  assert.doesNotMatch(del, /chain=true/, "the path has one builder");
+  const table = readFileSync(new URL("../src/components/admin/activity-history-table.tsx", import.meta.url), "utf8");
+  assert.match(table, /useHistoryDelete\(\{\s*rowsGrouped,/);
+});
+
+test("rows kept on screen during a load take no input, keyboard included", () => {
+  assert.equal(rowsAreStale(true, 3), true);
+  assert.equal(rowsAreStale(true, 0), false, "the first load has nothing to keep");
+  assert.equal(rowsAreStale(false, 3), false);
+  const table = readFileSync(new URL("../src/components/admin/activity-history-table.tsx", import.meta.url), "utf8");
+  assert.match(table, /const stale = rowsAreStale\(loading, rows\.length\);/);
+  assert.match(table, /<tbody[^>]*\binert=\{stale\}/s);
 });

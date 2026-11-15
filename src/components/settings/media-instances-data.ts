@@ -116,10 +116,13 @@ export interface InstanceList {
 /**
  * The service's named instances from a GET or POST answer, or null when the
  * list isn't one. The whole list is refused, never filtered: saving a list
- * with an instance silently dropped would delete it and its secrets.
+ * with an instance silently dropped would delete it and its secrets. A MISSING
+ * list is refused for the same reason: the routes always send one, so an answer
+ * without it is not theirs, and read as "none configured" the next save would
+ * replace every stored instance.
  */
 export function readInstanceList(list: unknown, version: unknown): InstanceList | null {
-  const r = check(v.array(InstanceViewSchema), list ?? []);
+  const r = check(v.array(InstanceViewSchema), list);
   if (!r.ok) return null;
   return { named: r.value.filter((i) => isNamed(i.slug)), version: typeof version === "string" ? version : undefined };
 }
