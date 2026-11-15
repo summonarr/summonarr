@@ -1,4 +1,5 @@
-// Route-level unit tests for the SYNC ORCHESTRATOR — src/app/api/sync/route.ts,
+// Route-level unit tests for the SYNC ORCHESTRATOR — src/app/api/sync/route.ts
+// and the src/lib/sync-orchestrator*.ts modules it runs,
 // the external-cron / admin-"Sync" entry point. It is the single POST that takes
 // advisory lock 2000, runs the whole availability pipeline under
 // withCronRunRecording, and writes the LIBRARY_SYNC audit row.
@@ -55,7 +56,6 @@
 // Erasable-TS only; node:assert/strict; guardrail 7 console capture (warn/error).
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { Client } from "pg";
 
 // ── env FIRST (prisma.ts pulls token-crypto; session reads NEXTAUTH_SECRET) ──
@@ -641,6 +641,7 @@ const fakePrisma = {
 // ── dynamic imports (env/global stubs must precede the module graph) ─────────
 const { NextRequest } = await import("next/server");
 const { POST } = await import("../src/app/api/sync/route.ts");
+const { syncOrchestratorSource } = await import("./_sync-orchestrator-source.mts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
@@ -1366,7 +1367,7 @@ test("every library-selection lookup in the orchestrator is keyed by an INSTANCE
   // Rather than leave half the fix unpinned, require all four to pass a slug —
   // a literal "" would re-apply one server's selection to every server, which is
   // the exact bug.
-  const source = readFileSync(new URL("../src/app/api/sync/route.ts", import.meta.url), "utf8");
+  const source = syncOrchestratorSource();
   const lookups = source.match(/librarySelections\.get\([^)]*\)/g) ?? [];
   assert.equal(lookups.length, 4, "expected exactly the four selection lookups");
   for (const l of lookups) {
@@ -3148,7 +3149,7 @@ test("backstop: an overdue row with nothing on disk goes through runDownloadChec
 });
 
 test("backstop: it sits AFTER the Radarr/Sonarr refresh and the second ARR marking pass", () => {
-  const src = readFileSync("src/app/api/sync/route.ts", "utf-8");
+  const src = syncOrchestratorSource();
   const backstop = src.indexOf("await runConcurrent(overdue,");
   assert.ok(backstop > 0, "the overdue sweep must still exist");
   assert.ok(src.indexOf('windDownBefore("Sonarr")') < backstop, "the backstop must follow the arr cache refresh");
@@ -3164,8 +3165,7 @@ test("backstop: it sits AFTER the Radarr/Sonarr refresh and the second ARR marki
 // stops a >30min run continuing lock-free while the next trigger starts a second
 // concurrent full library sync.
 test("GUARDRAIL 41: every sync arm is gated on the advisory-lock abort, and no check sits inside a transaction", async () => {
-  const { readFileSync } = await import("node:fs");
-  const src = readFileSync("src/app/api/sync/route.ts", "utf-8");
+  const src = syncOrchestratorSource();
 
   assert.match(
     src,

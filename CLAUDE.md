@@ -60,7 +60,7 @@ The unit suite (`npm test`, Node's built-in `node:test`, files in [tests/](tests
 
 ## Core architecture
 
-**Sync orchestrator** — [src/app/api/sync/route.ts](src/app/api/sync/route.ts)
+**Sync orchestrator** — [src/lib/sync-orchestrator.ts](src/lib/sync-orchestrator.ts) (`runSyncOrchestrator`, the sequencer; its phases are the `sync-orchestrator-{shared,arr,libraries,marking,tmdb-purge}.ts` siblings), run by the thin route [src/app/api/sync/route.ts](src/app/api/sync/route.ts) (auth, lock 2000, run recording). Structural pins read all of them through [tests/_sync-orchestrator-source.mts](tests/_sync-orchestrator-source.mts), never one file.
 - External-cron entry point, Bearer-authed via `CRON_SECRET` (or admin session).
 - Runs the download-policy sync + the Plex and Jellyfin library fetch+write arms *concurrently* via `Promise.allSettled` — and each of those two arms is itself a fan-out over every configured server instance (`getSyncableMediaInstances`, guardrail 35). The Radarr and Sonarr wanted/available refreshes run earlier and are **sequential to each other** (HD+4K fetches parallelize *within* each); there is no separate TMDB "job" here beyond an expired-`TmdbCache` purge near the end.
 - One shared `stillPending` snapshot is reused across both sources' marking passes. The "now available" notification fire-exactly-once guarantee is an atomic claim (`claimAvailableNotificationWinners`, an `UPDATE … RETURNING` compare-and-swap on `notifiedAvailable`) — not a plain update — so an item appearing in both libraries in the same run notifies once.

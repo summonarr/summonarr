@@ -80,7 +80,7 @@ function satisfiedFor(
 //
 // A restricted named instance can only enter the picture through the sync
 // orchestrator, which does carry per-instance presence and applies the
-// per-requester gate itself (presentForRequester in /api/sync/route.ts).
+// per-requester gate itself (presentForRequester in sync-orchestrator-marking.ts).
 //
 // If a caller ever probes a RESTRICTED instance, this contract breaks and the
 // two booleans must become per-instance (an optional slug-set parameter) plus
