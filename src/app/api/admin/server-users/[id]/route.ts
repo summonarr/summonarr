@@ -227,7 +227,7 @@ async function applyDownloadPolicy(
   // never self-heals — the UI must be able to tell the admin the server wasn't
   // actually updated rather than showing a bare success.
   // A server with no URL or API key is the same outcome: saved, nothing sent.
-  let pushed = true;
+  let pushed: boolean;
   try {
     pushed = (await enforceUserDownloadPolicy(id)) !== "not-configured";
   } catch (err) {
