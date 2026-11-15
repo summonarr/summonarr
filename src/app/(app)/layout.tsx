@@ -163,7 +163,11 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         {discordInviteUrl && !userDiscordId && (
           <DiscordJoinModal inviteUrl={discordInviteUrl} />
         )}
-        <main id="main-content" tabIndex={-1} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 pb-safe-bottom-20 lg:px-7 lg:py-6 lg:pb-10">
+        {/* `relative` is load-bearing: it makes this scroller the containing
+            block for the `sr-only` (position: absolute) labels inside it.
+            Without it they are placed against the page, far below the fold of
+            a long list, and the document itself scrolls into empty space. */}
+        <main id="main-content" tabIndex={-1} className="relative flex-1 min-h-0 overflow-y-auto px-4 py-4 pb-safe-bottom-20 lg:px-7 lg:py-6 lg:pb-10">
           {children}
         </main>
       </div>
