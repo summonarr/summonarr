@@ -27,6 +27,8 @@
   "nav.adminGroup.system": "Système",
   "nav.badge.queueAttention_one": "{count} téléchargement requiert votre attention",
   "nav.badge.queueAttention_other": "{count} téléchargements requièrent votre attention",
+  "nav.badge.activityStreams_one": "{count} lecture en cours",
+  "nav.badge.activityStreams_other": "{count} lectures en cours",
   "nav.badge.groupAttention_one": "{count} élément requiert votre attention",
   "nav.badge.groupAttention_other": "{count} éléments requièrent votre attention",
   "nav.tab.browse": "Parcourir",

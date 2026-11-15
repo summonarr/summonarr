@@ -663,26 +663,21 @@ test("CRLF in From/To is stripped before the header lines AND the envelope (inje
       to: "user@dest.example\r\nX-Injected: yes",
     },
   });
-  assert.equal(r.error, undefined);
-
-  // Envelope: exactly one MAIL FROM and one RCPT TO, each a single command
-  // carrying the newline-stripped value — no second command smuggled in.
+  // The newline-stripped recipient still holds whitespace, so the envelope check
+  // refuses it before any RCPT TO is written: nothing is smuggled into a command.
+  asSmtpError(r.error);
+  assert.equal(r.writes.some((w) => w.startsWith("RCPT TO:")), false);
   assert.deepEqual(
     r.writes.filter((w) => w.startsWith("MAIL FROM:")),
     ["MAIL FROM:<evil@example.com>\r\n"], // addr-spec from the FIRST <> pair of the stripped value
   );
-  assert.deepEqual(
-    r.writes.filter((w) => w.startsWith("RCPT TO:")),
-    ["RCPT TO:<user@dest.exampleX-Injected: yes>\r\n"], // mangled-but-single command, server rejects at worst
-  );
+  assert.equal(r.writes.some((w) => w.includes("X-Injected") || w.includes("Bcc")), false);
+});
 
-  // Headers: the payload stays inside one From:/To: line; no Bcc:/X-Injected:
-  // header line exists anywhere in the message.
-  const { headers } = extractMessage(r.writes);
-  assert.equal(header(headers, "From"), '"Evil" <evil@example.com>Bcc: hidden@dest.example');
-  assert.equal(header(headers, "To"), "user@dest.exampleX-Injected: yes");
-  assert.equal(headers.some((h) => h.startsWith("Bcc:")), false);
-  assert.equal(headers.some((h) => h.startsWith("X-Injected:")), false);
+test("an envelope address with extra SMTP parameters is refused before any command carries it", async () => {
+  const r = await runSendMail({ msg: { to: "a@b.example NOTIFY=NEVER" } });
+  asSmtpError(r.error);
+  assert.equal(r.writes.some((w) => w.startsWith("RCPT TO:")), false);
 });
 
 test("NUL bytes in From/To are stripped alongside CR/LF", async () => {

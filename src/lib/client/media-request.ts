@@ -11,6 +11,9 @@
 //     the real cause instead of the request route's "invalid request token".
 import { withBasePath } from "@/lib/base-path";
 import { timedFetch } from "@/lib/client/fetch-json";
+import { readApiError } from "@/lib/client/api-error";
+import { parseRetryAfterSeconds, rateLimitMessage } from "@/lib/client/rate-limit";
+import type { Translator } from "@/lib/i18n/translate";
 
 type RequestMediaType = "MOVIE" | "TV";
 
@@ -64,4 +67,47 @@ export async function postMediaRequest(
   });
   if (typeof fresh !== "string") return res;
   return send(payload, fresh, signal);
+}
+
+// Why a request was refused, already translated. The route answers 429 for two
+// different things: its rate limiter (always with Retry-After) and a spent
+// request quota (never with one, and waiting a minute does not help). So a 429
+// with no usable Retry-After shows the route's own sentence, which names the
+// quota; only a body with no reason falls back to the rate-limit wording.
+export async function requestRefusalText(res: Response, t: Translator): Promise<string> {
+  if (res.status === 429 && parseRetryAfterSeconds(res.headers.get("Retry-After")) === null) {
+    return readApiError(res, t("shared.rateLimited.generic"));
+  }
+  return rateLimitMessage(res, t) ?? (await readApiError(res, t("request.somethingWrong")));
+}
+
+// What a request attempt came to. `duplicate` is the 409 (this viewer already
+// asked); `alreadyAvailable` is the route's 200 that creates NOTHING because
+// the title is already in a library this viewer can see.
+export type MediaRequestOutcome = "duplicate" | "alreadyAvailable" | "created" | { error: string };
+
+// One request attempt read into an outcome; the failure text is already
+// translated. An abort of `signal` propagates (the caller was unmounted).
+export async function submitMediaRequest(
+  payload: { tmdbId: number; mediaType: RequestMediaType } & Record<string, unknown>,
+  pageToken: string | undefined,
+  t: Translator,
+  signal?: AbortSignal,
+): Promise<MediaRequestOutcome> {
+  try {
+    const res = await postMediaRequest(payload, pageToken, { signal });
+    if (res.status === 409) return "duplicate";
+    if (!res.ok) return { error: await requestRefusalText(res, t) };
+    // The route never redirects. A 2xx that arrived through one came from
+    // something in front of the app (an auth proxy's sign-in page after the
+    // proxy session lapsed): nothing was requested. A 2xx with an unreadable
+    // body that was NOT redirected is still the route's own answer: created.
+    if (res.redirected) return { error: t("request.networkError") };
+    const body: unknown = await res.json().catch(() => null);
+    const available = typeof body === "object" && body !== null && "alreadyAvailable" in body && body.alreadyAvailable === true;
+    return available ? "alreadyAvailable" : "created";
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    return { error: t("request.networkError") };
+  }
 }

@@ -225,13 +225,6 @@ export async function claimAndAnnounce<R extends MarkRow>(
   if (rows.length === 0) return { claimed: [], deliverable: [] };
   const { claimed, deliverable } = await claimAvailableNotifications(rows, { markAvailable: true });
   if (claimed.length > 0) {
-    // The claim sets status/availableAt/notifiedAvailable but not
-    // pendingNotifyAt: disarm the 90s "still pending" backstop on the same
-    // transition.
-    await prisma.mediaRequest.updateMany({
-      where: { id: { in: claimed.map((w) => w.id) } },
-      data: { pendingNotifyAt: null },
-    });
     void clearDeletionVotesForTmdbs(claimed.map((w) => ({ tmdbId: w.tmdbId, mediaType: w.mediaType as "MOVIE" | "TV" })));
   }
   if (deliverable.length > 0) void fanOutAvailableWinners(deliverable, logScope);

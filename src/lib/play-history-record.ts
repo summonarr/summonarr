@@ -485,14 +485,17 @@ export async function reanchorActiveSessionsOnBoot(): Promise<boolean> {
 // Finalizes in flight at once for a batch of ended sessions — below the max:5
 // pool, which the poller's other per-session work shares (guardrail 31).
 export const STALE_FINALIZE_CONCURRENCY = 3;
+export const STALE_BATCH_MAX = 500;
 
 // Safety net beneath the absence grace: finalize any ActiveSession whose
 // lastSeenAt is older than maxAgeMinutes (no final tick — a stale row has no
 // signal it was still playing).
 export async function cleanupStaleSessions(maxAgeMinutes: number): Promise<void> {
   const cutoff = new Date(Date.now() - maxAgeMinutes * 60 * 1000);
+  // At most STALE_BATCH_MAX a call: a backlog finishes on the next run (finalized rows leave the set).
   const stale = await prisma.activeSession.findMany({
     where: { lastSeenAt: { lt: cutoff } },
+    take: STALE_BATCH_MAX,
   });
 
   // No final tick: a stale session has no signal it was still playing — capping wall-clock from

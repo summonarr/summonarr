@@ -60,7 +60,7 @@ for (const [label, path] of [["arr", ARR_UI], ["media", MEDIA_UI]] as const) {
     // replaces every draft too): `locked` is saving or refreshing.
     const lock = label === "media" ? "locked" : "saving";
     if (label === "media") assert.match(src, /const locked = saving \|\| refreshing;/);
-    assert.match(src, new RegExp(`<fieldset disabled=\\{${lock}\\} className="min-w-0 space-y-4">\\s*\\{drafts\\.map\\(`), "the draft cards sit in a disabled fieldset");
+    assert.match(src, new RegExp(`<fieldset disabled=\\{${lock}( \\|\\| loadFailed)?\\} className="min-w-0 space-y-4">\\s*\\{drafts\\.map\\(`), "the draft cards sit in a disabled fieldset");
     assert.match(src, new RegExp(`onClick=\\{addInstance\\} disabled=\\{${lock}( \\|\\| loadFailed)?\\}`));
     assert.match(src, new RegExp(`onClick=\\{\\(\\) => \\(dirty \\? setConfirmRefresh\\(true\\) : load\\(\\)\\)\\} disabled=\\{${lock}\\}`));
     assert.match(src, /const clearStatus = \(\) => setStatus\(\(s\) => \(s === "saving" \? s : "idle"\)\);/);
@@ -79,9 +79,11 @@ for (const [label, path] of [["arr", ARR_UI], ["media", MEDIA_UI]] as const) {
       assert.match(src, /readSaveAnswer\(body\)/, "and from the POST's answer");
       return;
     }
-    assert.match(src, /setVersion\(list\.version\);/);
+    // One applier replaces the version (and every draft) from either answer.
+    assert.match(src, /setVersion\(nextVersion\);/);
+    assert.match(src, /applyServerState\(list\.named, list\.version, \{\}\);/);
     assert.match(src, /readSaveAnswer\(res\.data\)/, "and from the POST's answer");
-    assert.match(src, /setVersion\(answer\.version\);/);
+    assert.match(src, /applyServerState\(answer\.named, answer\.version, answer\.testResults\);/);
   });
 }
 
@@ -120,7 +122,9 @@ test("media manager: a reload clears the last save's connection badges", () => {
   const start = src.indexOf("const load = useCallback(");
   const load = src.slice(start, src.indexOf("useEffect(() => {", start));
   assert.ok(load.length > 0);
-  assert.match(load, /setTests\(\{\}\);/);
+  // The applier resets the badges to the answer's; a load passes none.
+  assert.match(load, /applyServerState\(list\.named, list\.version, \{\}\);/);
+  assert.match(src, /setTests\(testResults\);/);
   assert.match(load, /setStatus\("idle"\);/);
 });
 

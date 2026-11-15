@@ -520,7 +520,8 @@ export function followUpSearch(
   if ((opts.anyCovered || opts.unmonitored === true) && episodes.length > 0) return { kind: "episodes", episodes };
   if (scope.kind === "season") {
     const seasonLeft = remaining.some((f) => fileInScope(f, scope));
-    return episodes.length === 0 || seasonPackFits(episodes.length, seasonLeft)
+    // Specials are never a season pack here either; they are named.
+    return episodes.length === 0 || (scope.seasonNumber > 0 && seasonPackFits(episodes.length, seasonLeft))
       ? { kind: "season", seasonNumber: scope.seasonNumber }
       : { kind: "episodes", episodes };
   }

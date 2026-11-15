@@ -251,6 +251,9 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
     const timers = statusTimers;
     const pendingRef = pendingTarget;
     const inFlightRef = inFlightKeys;
+    // Mounted (again, under StrictMode's simulated unmount and remount, after
+    // which the flag would otherwise stay set and no flip would ever be sent).
+    unmounted.current = false;
     return () => {
       unmounted.current = true;
       if (flushTimer.current) clearTimeout(flushTimer.current);

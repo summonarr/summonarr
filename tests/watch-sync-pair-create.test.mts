@@ -16,3 +16,7 @@ test("pair create refuses an inactive identity on either side", () => {
   const guard = /if \(!plex \|\| plex\.source !== "plex" \|\| !plex\.active \|\| !jellyfin \|\| jellyfin\.source !== "jellyfin" \|\| !jellyfin\.active\) \{\s*return NextResponse\.json\(\{ error: t\("apiAdmin\.watchSync\.pairInvalid"\) \}, \{ status: 400 \}\);/;
   assert.match(CODE, guard);
 });
+
+test("pair create answers an identity removed mid-request (foreign key violation) as an invalid pair, not a 500", () => {
+  assert.match(CODE, /isPrismaErrorCode\(err, "P2003"\)\) \{\s*return NextResponse\.json\(\{ error: t\("apiAdmin\.watchSync\.pairInvalid"\) \}, \{ status: 400 \}\);/);
+});

@@ -134,10 +134,15 @@ export function useTitleLoad({ open, service, instance, target }: {
     /** When the title shown was read, while it is the painted snapshot. */
     staleAt: snap.staleAt,
     arrId,
-    /** The open-time read again (the failed first read's Retry): the spinner comes back. */
+    /**
+     * The failed read again. With nothing shown it is the open-time read (the
+     * spinner comes back); with a title shown — a painted snapshot, or a title
+     * whose re-read failed — it REBASES on the live answer, edits kept.
+     */
     retry: () => {
       setLoadError("");
-      void load(target, true);
+      if (arrId !== null) void load({ arrId });
+      else void load(target, true);
     },
     reload,
     applyWrite,

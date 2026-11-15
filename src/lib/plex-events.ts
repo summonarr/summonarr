@@ -20,7 +20,9 @@
 
 import { prisma } from "./prisma";
 import { safeFetchAdminConfigured } from "./safe-fetch";
-import { applyFinalTick, recordCompletedSession, isPlayHistoryEnabled, isSourceEnabled, emitActiveSessionsSnapshot, reanchorActiveSessionsOnBoot, SESSION_ABSENCE_GRACE_MS } from "./play-history";
+import { applyFinalTick, recordCompletedSession, isPlayHistoryEnabled, isSourceEnabled, emitActiveSessionsSnapshot, reanchorActiveSessionsOnBoot, SESSION_ABSENCE_GRACE_MS, STALE_FINALIZE_CONCURRENCY } from "./play-history";
+import { mapLimit } from "./concurrency";
+import { emitSSE } from "./sse-emitter";
 import { getPlexSessions } from "./plex";
 import { PLEX_CLIENT_VERSION, PLEX_PRODUCT } from "./plex-client-headers";
 import { triggerFullSync } from "./internal-trigger";
@@ -307,18 +309,30 @@ export async function readSseFrames(
 // PlayHistory write commits (guardrail 27): a failed record must not
 // ledger-lock the sessionKey for an hour with no history row — it stays
 // un-finalized so the next poll re-creates the row and retries.
-async function finalizeAbsentSessions(stale: Array<Parameters<typeof recordCompletedSession>[0]>, nowMs: number): Promise<void> {
+//
+// Bounded like the poller's sweep (guardrail 31): a reconnect after an outage
+// ages every active session into this one pass, and each finalize is several
+// queries on the five-connection pool. skipSSE per finalize, then ONE
+// history-updated and ONE sessions snapshot for the whole pass.
+export async function finalizeBootstrapAbsentSessions(stale: Array<Parameters<typeof recordCompletedSession>[0]>, nowMs: number): Promise<void> {
   if (stale.length === 0) return;
-  await Promise.all(
-    stale.map(async (session) => {
-      try {
-        await recordCompletedSession(session);
-        markPlexSessionFinalized(session.id, nowMs);
-      } catch (err) {
-        console.warn(`[plex-events] bootstrap finalize failed for ${session.id}:`, err);
-      }
-    }),
-  );
+  const finalized = await mapLimit(stale, STALE_FINALIZE_CONCURRENCY, async (session) => {
+    try {
+      await recordCompletedSession(session, { skipSSE: true });
+      markPlexSessionFinalized(session.id, nowMs);
+      return true;
+    } catch (err) {
+      console.warn(`[plex-events] bootstrap finalize failed for ${session.id}:`, err);
+      return false;
+    }
+  });
+  if (!finalized.some(Boolean)) return;
+  emitSSE({ type: "activity:history-updated" });
+  // The plays are recorded by now; a failed snapshot read must not reject the
+  // bootstrap. The next poll pushes a fresh snapshot anyway.
+  await emitActiveSessionsSnapshot().catch((err: unknown) => {
+    console.warn("[plex-events] sessions snapshot after the bootstrap sweep failed:", err instanceof Error ? err.message : err);
+  });
 }
 
 // Debounce + dispatch for the scanner-triggered library re-sync, one per
@@ -643,6 +657,7 @@ class PlexEventStreamManager {
     this.currentToken = token;
     this.running = true;
     this.backoffMs = INITIAL_BACKOFF_MS;
+    const generation = this.loopGeneration;
     void this.runLoop().catch((err) => {
       console.warn(`[plex-events] ${this.label()} loop crashed:`, err);
       // Clear the state doReconcile checks so the next 5s reconcile restarts the
@@ -650,7 +665,7 @@ class PlexEventStreamManager {
       // early-returns, leaving SSE dead until process restart. Guard on the
       // url/token this loop was started with: if the config changed, a newer
       // loop owns the flag and must not be killed by a stale rejection.
-      if (this.currentUrl === url && this.currentToken === token) {
+      if (this.loopGeneration === generation && this.currentUrl === url && this.currentToken === token) {
         this.running = false;
       }
     });
@@ -665,8 +680,8 @@ class PlexEventStreamManager {
     // still fire a full sync after the stream is torn down.
     this.resync.cancel();
     this.snapshots.cancel();
-    // A restarted stream starts fresh chains; ops already running finish on their own.
-    this.sessionQueues.clear();
+    // The session queues are kept: a chain removes itself once settled, and a
+    // restarted stream's ops for the same session must queue behind the old ones.
   }
 
   // Stop for good: called when this manager leaves the map (the map reconcile
@@ -874,7 +889,7 @@ class PlexEventStreamManager {
       !seenKeys.has(r.sessionKey)
       && nowMs - r.lastSeenAt.getTime() >= SESSION_ABSENCE_GRACE_MS,
     );
-    await finalizeAbsentSessions(stale, nowMs);
+    await finalizeBootstrapAbsentSessions(stale, nowMs);
   }
 
   private handleFrame(frame: string): void {

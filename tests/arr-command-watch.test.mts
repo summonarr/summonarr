@@ -730,7 +730,7 @@ test("a watch reads its ids COMMAND_READ_MAX_IDS at a time, one request after an
   // Each read is bounded in time: the watcher counts reads, so one that never
   // settled would freeze the line (an abort lands in the catch as a failed read).
   const readChunkSrc = src.slice(src.indexOf("async function readChunk("), src.indexOf("\n}\n", src.indexOf("async function readChunk(")));
-  assert.match(readChunkSrc, /await fetch\(withBasePath\(`\/api\/admin\/arr\/commands\?\$\{q\.toString\(\)\}`\), \{ cache: "no-store", signal: AbortSignal\.timeout\(READ_TIMEOUT_MS\) \}\);/);
+  assert.match(readChunkSrc, /await fetch\(withBasePath\(`\/api\/admin\/arr\/commands\?\$\{q\.toString\(\)\}`\), \{\s*cache: "no-store",[\s\S]*?signal: requestTimeoutSignal\(READ_TIMEOUT_MS\),\s*\}\);/);
   assert.match(readChunkSrc, /\} catch \{\s*return \{ kind: "failed", error: fallback \};\s*\}$/);
   const timeout = Number(/const READ_TIMEOUT_MS = ([\d_]+);/.exec(src)?.[1].replace(/_/g, ""));
   assert.ok(timeout >= 30_000 && timeout <= 120_000, "above the route's arr timeouts, bounded");
@@ -1011,4 +1011,11 @@ test("the four pages no longer guess completion with a fixed timer — they foll
     assert.doesNotMatch(code, /setTimeout\([^)]*\)?[^;]*\b(1_500|2_000|3_000|4_000)\b/, `${file} has no fixed re-read timer`);
   }
   assert.doesNotMatch(src("arr-command-watch.tsx"), /setInterval/, "polls are a setTimeout chain, never overlapping");
+});
+
+test("the status read's timeout works where AbortSignal.timeout is missing", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../src/components/admin/arr-command-watch.tsx", import.meta.url), "utf8");
+  assert.match(src, /signal: requestTimeoutSignal\(READ_TIMEOUT_MS\)/);
+  assert.doesNotMatch(src, /AbortSignal\.timeout\(/);
 });

@@ -514,6 +514,44 @@ export async function prepareItems(
   return { prepared, metaFailed };
 }
 
+/**
+ * The first of `awaiting` (caller's order) with no EARLIER pending request for
+ * the same title and instance — the single route's dedupe (hasEarlierPending),
+ * in two reads for the whole batch. A title someone else already has pending was
+ * announced when theirs was filed. A failed read alerts for the first anyway: a
+ * duplicate alert is cheaper than a lost one.
+ */
+async function firstUnannounced<P extends { tmdbId: number; mediaType: MediaType; arrInstance: string }>(
+  awaiting: P[],
+  idByKey: ReadonlyMap<string, string>,
+): Promise<P | undefined> {
+  if (awaiting.length === 0) return undefined;
+  try {
+    const ownIds = awaiting.map((p) => idByKey.get(keyOf(p.tmdbId, p.mediaType))!);
+    const own = await prisma.mediaRequest.findMany({ where: { id: { in: ownIds } }, select: { id: true, createdAt: true } });
+    const others = await prisma.mediaRequest.findMany({
+      where: {
+        status: "PENDING",
+        id: { notIn: ownIds },
+        OR: awaiting.map((p) => ({ tmdbId: p.tmdbId, mediaType: p.mediaType, arrInstance: p.arrInstance })),
+      },
+      select: { id: true, createdAt: true, tmdbId: true, mediaType: true, arrInstance: true },
+    });
+    const createdAtById = new Map(own.map((r) => [r.id, r.createdAt]));
+    return awaiting.find((p) => {
+      const id = idByKey.get(keyOf(p.tmdbId, p.mediaType))!;
+      const createdAt = createdAtById.get(id);
+      if (!createdAt) return true;
+      return !others.some((o) =>
+        o.tmdbId === p.tmdbId && o.mediaType === p.mediaType && o.arrInstance === p.arrInstance &&
+        (o.createdAt < createdAt || (o.createdAt.getTime() === createdAt.getTime() && o.id < id)));
+    });
+  } catch (err) {
+    console.error(`[requests/bulk] earlier-pending check failed, alerting anyway: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
+    return awaiting[0];
+  }
+}
+
 export interface CreatedRows {
   createdRows: { id: string; tmdbId: number; mediaType: MediaType; status: string }[];
   // Keys (tmdbId:mediaType) whose status was mirrored from another user's already
@@ -719,7 +757,7 @@ export function clearRequestedDeletionVotes(ctx: BulkContext, prepared: Prepared
  * state machine (request-transition.ts): a definite failure rolls the row back
  * to PENDING, an unknown outcome stays APPROVED. Every created row emits
  * request:new. Then ONE batched download check, and ONE admin alert for the
- * rolled-back rows (never one per row — a failing arr would otherwise flood every
+ * rows left PENDING (never one per row — a failing arr would otherwise flood every
  * admin channel on a 50-item "Request all").
  */
 export async function pushAutoApproved(
@@ -731,6 +769,8 @@ export async function pushAutoApproved(
   const { createdRows, mirroredKeys } = created;
   const rowByKey = new Map(createdRows.map((r) => [keyOf(r.tmdbId, r.mediaType), r]));
   const outcomeByKey = new Map<string, CreateOutcome>();
+  // Rows that end up PENDING, row id by key (created pending, or rolled back below).
+  const awaitingReview = new Map<string, string>();
   const toPush: Array<FollowUpRow & { key: string }> = [];
   for (const p of prepared) {
     const key = keyOf(p.tmdbId, p.mediaType);
@@ -748,6 +788,8 @@ export async function pushAutoApproved(
       outcomeByKey.set(key, { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "auto-approved" });
     } else if (row.status !== "APPROVED") {
       outcomeByKey.set(key, { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "created" });
+      // Created for review: admins hear about it like a single request's.
+      awaitingReview.set(key, row.id);
     } else {
       // No profile: bulk has no picker, so the instance default applies.
       toPush.push({ key, id: row.id, tmdbId: p.tmdbId, mediaType: p.mediaType, arrInstance: p.arrInstance, requestedBy: targetUserId, qualityProfileId: null, title: p.title, posterPath: p.posterPath });
@@ -755,11 +797,8 @@ export async function pushAutoApproved(
   }
 
   const settled = await pushApprovals(toPush, "Bulk auto-approve");
-  // Auto-approvals that rolled back to PENDING, row id by (tmdbId:mediaType) —
-  // for the one admin alert below.
-  const rolledBack = new Map<string, string>();
   for (const { row, outcome } of settled) {
-    if (outcome.kind === "rolled-back") rolledBack.set(row.key, row.id);
+    if (outcome.kind === "rolled-back") awaitingReview.set(row.key, row.id);
     // A rollback is reported as a request created for review; any other outcome
     // left the approval in place (an unknown push, or a rollback that did not
     // land because the row moved on), as the single route answers it.
@@ -774,24 +813,28 @@ export async function pushAutoApproved(
   // half the delayed-job run queue on its own.
   scheduleDownloadChecks(downloadChecksFor(settled), { name: "requests/bulk:90s-download-check" });
 
-  // The rolled-back auto-approvals sit in the admin queue with their backstop
-  // cleared, and nothing else will tell an admin (the single route announces its
-  // one). It names the first in the caller's order; the queue lists them all.
-  const firstRolledBack = prepared.find((p) => rolledBack.has(keyOf(p.tmdbId, p.mediaType)));
-  if (firstRolledBack) {
+  // Rows left PENDING (created for review, or a rolled-back auto-approval with
+  // its backstop cleared) sit in the admin queue, and nothing else will tell an
+  // admin. One alert for the whole batch, naming the first in the caller's order
+  // that admins have not already been told about (the single route's
+  // first-PENDING-per-title rule); the queue lists them all.
+  const firstAwaiting = await firstUnannounced(prepared.filter((p) => awaitingReview.has(keyOf(p.tmdbId, p.mediaType))), awaitingReview);
+  if (firstAwaiting) {
     alertAdminsNewRequest({
-      requestId: rolledBack.get(keyOf(firstRolledBack.tmdbId, firstRolledBack.mediaType))!,
-      tmdbId: firstRolledBack.tmdbId,
-      mediaType: firstRolledBack.mediaType,
-      instance: firstRolledBack.arrInstance,
-      title: firstRolledBack.title,
-      posterPath: firstRolledBack.posterPath ?? null,
-      releaseYear: firstRolledBack.releaseYear ?? null,
+      requestId: awaitingReview.get(keyOf(firstAwaiting.tmdbId, firstAwaiting.mediaType))!,
+      tmdbId: firstAwaiting.tmdbId,
+      mediaType: firstAwaiting.mediaType,
+      instance: firstAwaiting.arrInstance,
+      title: firstAwaiting.title,
+      posterPath: firstAwaiting.posterPath ?? null,
+      releaseYear: firstAwaiting.releaseYear ?? null,
       requestedBy: target.name ?? target.email ?? targetUserId,
       note: null,
       excludeUserId: session.user.id,
     });
   }
   // In the caller's order.
-  return prepared.map((p) => outcomeByKey.get(keyOf(p.tmdbId, p.mediaType))!);
+  return prepared.map(
+    (p) => outcomeByKey.get(keyOf(p.tmdbId, p.mediaType)) ?? { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "error" as const },
+  );
 }

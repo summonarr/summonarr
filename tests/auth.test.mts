@@ -2805,3 +2805,23 @@ test("sessionDeadline: the header alone selects the never-expiring native deadli
   assert.equal(at(false, false, true), nowSec + 604_800);
   assert.equal(at(false, false, false), nowSec + 3_600);
 });
+
+test("getSessionDurations: remember-me is never shorter than the desktop or mobile window", async () => {
+  invalidateSessionDurationsCache();
+  settings.set("sessionDefaultDuration", "7200");
+  settings.set("sessionMobileDuration", "86400");
+  settings.set("sessionMaxDuration", "600");
+  const d = await getSessionDurations();
+  assert.equal(d.maxDuration, 86_400);
+  settings.delete("sessionDefaultDuration");
+  settings.delete("sessionMobileDuration");
+  settings.delete("sessionMaxDuration");
+  invalidateSessionDurationsCache();
+});
+
+test("plex and QuickConnect sign-ins refuse an over-long credential before any read", async () => {
+  const before = dbCalls.length;
+  assert.equal(await authorizeWithPlex({ plexToken: "p".repeat(513) }, makeReq(chromeUa("long-plex"))), null);
+  assert.equal(await authorizeWithJellyfinQuickConnect({ secret: "s".repeat(513) }, makeReq(chromeUa("long-qc"))), null);
+  assert.equal(dbCalls.length, before);
+});

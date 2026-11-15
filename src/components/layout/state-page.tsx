@@ -173,7 +173,7 @@ export function StatePage({
         >
           {isAction(primary) ? <ActionLink action={primary} kind="primary" /> : primary}
           {secondary?.map((action) => (
-            <ActionLink key={action.href || action.label} action={action} kind="secondary" />
+            <ActionLink key={`${action.href}:${action.label}`} action={action} kind="secondary" />
           ))}
         </div>
       )}

@@ -21,7 +21,7 @@ test("the vote reason input is 16px below md", () => {
 });
 
 test("the header search input is 16px below md in the mobile sheet and sets no inline font size", () => {
-  // The header's SearchBar lives in search-bar.tsx (header.tsx re-exports it).
+  // The header's SearchBar lives in search-bar.tsx.
   const src = readFileSync("src/components/layout/search-bar.tsx", "utf8");
   const at = src.indexOf('role="combobox"');
   const input = src.slice(src.lastIndexOf("<input", at), src.indexOf("/>", at));

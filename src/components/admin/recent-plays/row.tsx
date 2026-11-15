@@ -20,7 +20,7 @@ import { formatDurationHM } from "@/lib/format-duration";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { Avatar, MethodPill, ProgressTrack, SourceDot, fmtBitrate, methodLabel } from "@/components/admin/activity-ui";
 import { IpInfo } from "@/components/admin/ip-info";
-import { playProgressPct } from "@/components/admin/activity-history/helpers";
+import { mediaTypeLabel, playProgressPct } from "@/components/admin/activity-history/helpers";
 import type { RecentPlay } from "./map";
 
 export const RECENT_COL_SPAN = 8;
@@ -174,7 +174,7 @@ function TitleCell({ p }: { p: RecentPlay }) {
   // An unknown season/episode is dropped, never "S00 · E00".
   const sub = p.mediaType === "TV"
     ? [formatSeasonEpisode(p.seasonNumber, p.episodeNumber), p.episodeTitle].filter(Boolean).join(" · ")
-    : t("adminActivity.common.movie");
+    : mediaTypeLabel(t, p.mediaType);
   return (
     <td style={{ ...TD, maxWidth: 320 }}>
       <div style={{ color: "var(--ds-fg)", ...ELLIPSIS }}>

@@ -7,7 +7,7 @@ import {
   MAX_CIPHERTEXT_BYTES,
 } from "@/lib/backup-import";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import { auditAdminImport, backupPasswordOrResponse, importResultResponse } from "@/lib/backup-routes";
+import { runAuditedAdminImport, backupPasswordOrResponse, importResultResponse } from "@/lib/backup-routes";
 
 export const dynamic = "force-dynamic";
 
@@ -32,10 +32,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiAdmin.backup.emptyBody") }, { status: 400 });
   }
 
-  const result = await processBackupImport(req.body, password);
-  // Audited whether or not it succeeded — after the restore, never inside it
-  // (guardrail 26: the destructive replace already happened, and a retry would
-  // re-run it).
-  auditAdminImport(req, session, result, "admin");
+  const body = req.body;
+  // Audited whether or not it succeeded or threw — after the restore, never
+  // inside it (guardrail 26: the destructive replace already happened, and a
+  // retry would re-run it).
+  const result = await runAuditedAdminImport(req, session, "admin", () => processBackupImport(body, password));
   return importResultResponse(result, t, { chunked: false });
 });

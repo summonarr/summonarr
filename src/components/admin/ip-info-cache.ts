@@ -58,7 +58,18 @@ export type IpError = { kind: "missing" } | { kind: "failed"; message: string | 
 //   never cached, so the next open asks again.
 export type LookupOutcome = { kind: "found"; lookup: Lookup } | { kind: "missing" } | { kind: "failed"; message: string | null };
 
-export async function lookupIp(ip: string): Promise<LookupOutcome> {
+// Rows showing the same IP share one request while it is in flight.
+const inFlightLookups = new Map<string, Promise<LookupOutcome>>();
+
+export function lookupIp(ip: string): Promise<LookupOutcome> {
+  const pending = inFlightLookups.get(ip);
+  if (pending) return pending;
+  const run = readLookup(ip).finally(() => inFlightLookups.delete(ip));
+  inFlightLookups.set(ip, run);
+  return run;
+}
+
+async function readLookup(ip: string): Promise<LookupOutcome> {
   const res = await fetchJson(withBasePath(`/api/admin/ip-lookup?ip=${encodeURIComponent(ip)}`), { schema: LookupSchema });
   if (res.ok) return { kind: "found", lookup: res.data };
   if (res.kind === "http" && res.status === 404) return { kind: "missing" };

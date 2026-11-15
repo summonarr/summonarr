@@ -175,8 +175,8 @@ export const adminLibraryPaths: OpenApiPaths = {
                         idleDays: { type: "integer", nullable: true },
                         arr: { type: "array", items: ARR_COPY_SIZE },
                         sizeOnDisk: { type: "number", nullable: true },
-                        matched: { type: "array", items: { type: "string", enum: ["unwatched", "neverWatched", "votes"] } },
-                        excludedBy: { type: "array", items: { type: "string", enum: ["recentlyAdded", "activeRequest", "recentlyFulfilled", "watchlisted", "playingNow", "airing", "protected", "upstreamUnchecked"] } },
+                        matched: { type: "array", items: { type: "string", enum: [...CLEANUP_RULES] } },
+                        excludedBy: { type: "array", items: { type: "string", enum: [...CLEANUP_EXCLUSIONS] } },
                         candidate: { type: "boolean" },
                       },
                     },
@@ -397,6 +397,7 @@ export const adminLibraryPaths: OpenApiPaths = {
             } } },
           } } } },
         },
+        "429": { description: "Rate limited (30 per minute per admin, dry run and execute alike)" },
         "400": { description: "Invalid body" },
         "403": { description: "Not ADMIN" },
         "404": { description: "Library cleanup is disabled" },
@@ -669,7 +670,7 @@ export const adminLibraryPaths: OpenApiPaths = {
           enabled: { type: "boolean" },
           direction: { type: "string", enum: ["both", "toJellyfin", "toPlex"] },
           syncProgress: { type: "boolean", description: "Copy resume positions too" },
-          rescan: { type: "boolean", enum: [true], description: "Forget both read points; items already in a ledger are not re-queued" },
+          rescan: { type: "boolean", enum: [true], description: "Forget both read points; items already in a ledger are not re-queued. Refused 409 while a run is in progress" },
         } } } },
       },
       responses: {
@@ -677,6 +678,7 @@ export const adminLibraryPaths: OpenApiPaths = {
         "400": { description: "None of enabled / direction / syncProgress / rescan, or a wrong value" },
         "403": { description: "Not ADMIN" },
         "404": { description: "Pair not found, or the page is disabled" },
+        "409": { description: "rescan while a watch sync run is in progress — { ok: false, error, retryAfter }; nothing was changed (Retry-After: 30)" },
         "413": tooLargeAnswer(1024),
       },
     },
@@ -697,11 +699,28 @@ export const adminLibraryPaths: OpenApiPaths = {
       summary: "Run watch sync now, in the background (ADMIN)",
       description:
         "Always a background job on the cron's advisory lock: 202 { job } at once, poll GET ?job=. The same admin asking again " +
-        "while theirs runs joins it. 6 runs per 10 minutes per admin.",
+        "while theirs runs joins it. 6 runs per 10 minutes per admin. The body is optional; { pairId, full: true } runs a FULL sync of " +
+        "that one pair (moving a user between platforms): it forgets both read points, switches the pair's resume-point sync on, reads " +
+        "the whole history and every partially watched title on both servers, and applies until the queue is drained or the run's time " +
+        "budget ends. Add-only, like every run.",
+      requestBody: {
+        required: false,
+        content: {
+          "application/json": {
+            schema: {
+              type: "object",
+              properties: { pairId: { type: "string", maxLength: 64 }, full: { type: "boolean" } },
+            },
+          },
+        },
+      },
       responses: {
         "202": jobAnswer("{ job }", JOB_STARTED),
+        "400": { description: "Invalid body (full needs a pairId)" },
         "403": { description: "Not ADMIN" },
-        "404": { description: "The Watch Sync page is disabled" },
+        "404": { description: "The Watch Sync page is disabled, or the pair was not found" },
+        "409": { description: "The pair is paused (a full sync needs a running pair)" },
+        "413": tooLargeAnswer(1024),
         "429": { description: "Rate limited (6 per 10 minutes per admin)", headers: RETRY_AFTER_HEADER },
       },
     },

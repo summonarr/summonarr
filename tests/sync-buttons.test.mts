@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { tvEpisodeSyncOutcome } from "../src/components/admin/tv-episode-sync-text.ts";
+import { tvEpisodeJobOutcome, tvEpisodeSyncOutcome } from "../src/components/admin/tv-episode-sync-text.ts";
 import type { FetchJsonResult } from "../src/lib/client/fetch-json.ts";
 import type { TvEpisodeSyncAnswer } from "../src/components/admin/tv-episode-sync-text.ts";
 
@@ -53,14 +53,39 @@ test("a run's end applies nothing once the button is gone, and reloads with refr
     assert.match(read(f), /<SyncResultText status=\{status\} result=\{result\} \/>/, `${f} shares the result line`);
     assert.doesNotMatch(read(f), /setTimeout\(|role=\{/, `${f} keeps no timer or result markup of its own`);
   }
-  // The episode rebuild is synchronous: no client timeout, and unmounting drops the answer.
+  // The episode rebuild is a background job: polled, never one held-open
+  // request, and unmounting stops the polls and drops the answer.
   const tv = read("sync-tv-episodes-button.tsx");
-  assert.match(tv, /timeoutMs: LONG_RUN_TIMEOUT_MS,/);
-  assert.match(tv, /const res = await action\.run\("sync", \(signal\) =>/);
+  assert.match(tv, /runReplaceFileJob\(fetch, withBasePath\("\/api\/sync\/tv-episodes"\), \{\}, \{/);
+  assert.match(tv, /isAlive: \(\) => !signal\.aborted,/);
+  assert.match(tv, /answer = await action\.run\("sync", \(signal\) =>/);
+  assert.doesNotMatch(tv, /fetchJson\(/, "no held-open request");
 });
 
 test("opening the Resync confirm drops the last run's line, so Cancel never brings it back untimed", () => {
   const state = read("sync-button-state.tsx");
   const confirm = state.slice(state.indexOf("const confirm = useCallback("), state.indexOf("}, [later]);"));
   assert.match(confirm, /later\.cancel\(\);\s*setResult\(null\);\s*setStatus\("confirm"\);/);
+});
+
+test("episodes: a background run with no answer may still be running — never a failed sync", () => {
+  const noAnswer = { status: "done", text: "adminManage.library.btn.episodesNoAnswer", refresh: false };
+  assert.deepEqual(tvEpisodeJobOutcome({ status: 0, data: null }, t, "en"), noAnswer, "the polls failed or ran out");
+  assert.deepEqual(tvEpisodeJobOutcome({ status: 504, data: {} }, t, "en"), noAnswer, "a proxy's own 504");
+  assert.deepEqual(tvEpisodeJobOutcome({ status: 502, data: null }, t, "en"), noAnswer);
+});
+
+test("episodes: a background run's own answer reads exactly as the synchronous one did", () => {
+  assert.deepEqual(tvEpisodeJobOutcome({ status: 200, data: { plex: 0, jellyfin: 0, errors: [], skipped: [] } }, t, "en"),
+    { status: "done", text: 'adminManage.library.btn.episodes {"count":0,"formatted":"0"}', refresh: true });
+  const partial = tvEpisodeJobOutcome({ status: 200, data: { plex: 12345, jellyfin: 0, errors: ["Jellyfin: down"], skipped: ["jellyfin"] } }, t, "en");
+  assert.equal(partial.status, "error");
+  assert.equal(partial.refresh, true);
+  // The job is gone (a restart, or expired): the route's own words, in red.
+  assert.deepEqual(tvEpisodeJobOutcome({ status: 404, data: { error: "That run is gone" } }, t, "en"),
+    { status: "error", text: "That run is gone", refresh: false });
+  assert.equal(tvEpisodeJobOutcome({ status: 500, data: null }, t, "en").text, 'adminManage.users.error.requestFailed {"status":500}');
+  // A 2xx that is not the route's answer is a failed sync, never "0 episodes".
+  assert.deepEqual(tvEpisodeJobOutcome({ status: 200, data: { plex: "many" } }, t, "en"),
+    { status: "error", text: "adminManage.library.btn.syncFailed", refresh: false });
 });

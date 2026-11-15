@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { ADMIN_SESSION_LIST_CAP } from "@/lib/api-body-limits";
+import { useCallback, useState, useEffect, useRef } from "react";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { useAsyncAction } from "@/hooks/use-async-action";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
@@ -72,6 +73,13 @@ function useAccountSessions(userId: string) {
   const [sessions, setSessions] = useState<AdminAuthSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // The list read itself failed (a revoke's refusal leaves the list alone), and
+  // the attempt counter that re-runs the read.
+  const [loadFailed, setLoadFailed] = useState(false);
+  // The read came back full: the route lists only the newest
+  // ADMIN_SESSION_LIST_CAP, so older sessions may exist that this list can't show.
+  const [atCap, setAtCap] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const tRef = useRef(t);
   useEffect(() => {
     tRef.current = t;
@@ -84,8 +92,11 @@ function useAccountSessions(userId: string) {
       setLoading(false);
       if (res.ok) {
         setSessions(res.data);
+        setAtCap(res.data.length >= ADMIN_SESSION_LIST_CAP);
+        setLoadFailed(false);
         return;
       }
+      setLoadFailed(true);
       // The route's own sentence when it has one: it admits MANAGE_USERS but
       // refuses an ADMIN target to a caller without the ADMIN bit (403), and
       // a generic "could not load" there read as a broken page rather than a
@@ -94,9 +105,15 @@ function useAccountSessions(userId: string) {
       setError(res.kind === "http" && res.error ? res.error : tRef.current("adminManage.sessions.loadError"));
     });
     return () => ctrl.abort();
-  }, [userId]);
+  }, [userId, attempt]);
 
-  return { sessions, setSessions, loading, error, setError };
+  const reload = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    setAttempt((n) => n + 1);
+  }, []);
+
+  return { sessions, setSessions, loading, error, setError, loadFailed, atCap, reload };
 }
 
 function SessionRow({
@@ -256,7 +273,7 @@ const revokeKey = (sessionId: string) => `revoke:${sessionId}`;
 
 export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
   const t = useT();
-  const { sessions, setSessions, loading, error, setError } = useAccountSessions(u.id);
+  const { sessions, setSessions, loading, error, setError, loadFailed, atCap, reload } = useAccountSessions(u.id);
   // Each revoke is busy under its own key, so two in flight never clear each
   // other's spinner; revoke-all waits for every single one.
   const action = useAsyncAction();
@@ -351,6 +368,11 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
         {error && (
           <p role="alert" aria-live="assertive" className="text-xs text-red-400 mb-2">
             {error}
+            {loadFailed && !loading && (
+              <button type="button" onClick={reload} className="ml-2 underline text-zinc-300 hover:text-zinc-100">
+                {t("adminManage.common.retry")}
+              </button>
+            )}
           </p>
         )}
         <div className="flex-1 overflow-y-auto space-y-2 min-h-0">
@@ -383,6 +405,9 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
           })}
         </div>
 
+        {!loading && atCap && !loadFailed && (
+          <p className="text-[11px] text-zinc-500">{t("adminManage.sessions.capped", { count: ADMIN_SESSION_LIST_CAP })}</p>
+        )}
         {!loading && sessions.length > 0 && (
           <RevokeAllBar
             accountName={displayName}

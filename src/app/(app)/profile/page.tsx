@@ -165,7 +165,8 @@ export default async function ProfilePage() {
     adminMfaPolicyApplies({ role: session.user.role, provider: session.user.provider, settingValue: requireMfaRow?.value });
   const currentSessionId = session.sessionId;
   const webauthnAvailable = webAuthnConfigFromEnv() !== null;
-  // The step-up the password change and the account deletion both ask for.
+  // The step-up the password change, the account deletion and the Discord and
+  // Trakt link flows ask for.
   const secondFactor = mfaState
     ? { enabled: mfaState.enabled, hasPasskeys: mfaState.passkeys.length > 0, webauthnAvailable }
     : undefined;
@@ -188,6 +189,7 @@ export default async function ProfilePage() {
             <DiscordLinkSection
               linkedDiscordId={user.discordId}
               discordInviteUrl={discordInviteUrl}
+              secondFactor={secondFactor}
             />
           </ProfileCard>
 
@@ -268,7 +270,12 @@ export default async function ProfilePage() {
             <NotificationPrefs
               emailEnabled={emailEnabled}
               discordLinked={!!user.discordId}
-              isAdminRole={user.role === "ADMIN" || user.role === "ISSUE_ADMIN"}
+              // New-issue alerts go out by PERMISSION, so a role=USER delegate
+              // holding MANAGE_ISSUES gets the manager wording too.
+              managesIssues={
+                user.role === "ADMIN" || user.role === "ISSUE_ADMIN" ||
+                hasPermission(session.user.permissions, Permission.MANAGE_ISSUES)
+              }
               isJellyfin={isJellyfinUser}
               pendingEmail={pendingEmail}
               notificationEmail={resolveUserNotificationEmail({
@@ -309,6 +316,7 @@ export default async function ProfilePage() {
                 syncedAt={trakt.syncedAt}
                 uses={trakt.uses}
                 isJellyfin={isJellyfinUser || user.mediaServer === "jellyfin"}
+                secondFactor={secondFactor}
               />
             </ProfileCard>
           )}
@@ -320,7 +328,10 @@ export default async function ProfilePage() {
             <PushDevices devices={pushDevices} cap={pushCap} />
           </ProfileCard>
 
-          {calendarEnabled && (
+          {/* With the feature off the card still shows while a link is stored,
+              revoke only: the hash survives the switch, and the link would
+              serve again the moment the feature came back on. */}
+          {(calendarEnabled || !!user.calendarTokenHash) && (
             <ProfileCard
               id="calendar-feed"
               title={t("profile.calendar.title")}
@@ -330,6 +341,7 @@ export default async function ProfilePage() {
                 enabled={!!user.calendarTokenHash}
                 createdAt={user.calendarTokenHash ? (user.calendarTokenCreatedAt?.toISOString() ?? null) : null}
                 canSubscribeAll={hasPermission(session.user.permissions, Permission.MANAGE_REQUESTS)}
+                revokeOnly={!calendarEnabled}
               />
             </ProfileCard>
           )}

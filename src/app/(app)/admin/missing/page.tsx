@@ -12,7 +12,8 @@ import { MissingReport } from "@/components/admin/missing-report";
 export const dynamic = "force-dynamic";
 
 async function serviceConfigured(service: "radarr" | "sonarr"): Promise<boolean> {
-  if (!(await isFeatureEnabled(`feature.integration.${service}`))) return false;
+  // A flag that can't be read counts as off, as on the issues page.
+  if (!(await isFeatureEnabled(`feature.integration.${service}`).catch(() => false))) return false;
   return (await getSyncableArrInstances(service)).length > 0;
 }
 

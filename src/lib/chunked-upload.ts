@@ -7,6 +7,7 @@
 import type { Translator } from "./i18n/translate";
 import { randomUuid } from "./random-id";
 import { isGatewayStatus } from "./gateway-status";
+import { abortableSleep } from "./abortable-sleep";
 
 export const DEFAULT_CHUNK_SIZE = 16 * 1024 * 1024;
 
@@ -101,19 +102,6 @@ function attemptSignal(outer: AbortSignal | undefined, timeoutMs: number): { sig
   };
 }
 
-function wait(ms: number, signal: AbortSignal | undefined): Promise<void> {
-  return new Promise((resolve) => {
-    if (ms <= 0 || signal?.aborted) return resolve();
-    const finish = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", finish);
-      resolve();
-    };
-    const timer = setTimeout(finish, ms);
-    signal?.addEventListener("abort", finish, { once: true });
-  });
-}
-
 type ChunkRequest = {
   endpoint: string;
   uploadId: string;
@@ -121,12 +109,16 @@ type ChunkRequest = {
   totalChunks: number;
   fileSize: number;
   body: Blob;
+  // Extra request headers sent with every chunk (the setup restore's
+  // X-Restore-Keep-Sessions).
+  extraHeaders?: Record<string, string>;
 };
 
 function sendChunk(req: ChunkRequest, signal: AbortSignal | undefined): Promise<Response> {
   return fetch(req.endpoint, {
     method: "POST",
     headers: {
+      ...req.extraHeaders,
       "Content-Type": "application/octet-stream",
       "X-Upload-Id": req.uploadId,
       "X-Chunk-Index": String(req.index),
@@ -170,11 +162,11 @@ async function sendChunkWithRetry(
     } catch (err) {
       if (signal?.aborted) return { kind: "aborted" };
       if (!canRetry) throw err;
-      await wait(retryDelaysMs[attempt], signal);
+      await abortableSleep(retryDelaysMs[attempt], signal);
       continue;
     }
     if (canRetry && isGatewayStatus(res.status) && !isJson(res)) {
-      await wait(retryDelaysMs[attempt], signal);
+      await abortableSleep(retryDelaysMs[attempt], signal);
       continue;
     }
     // A retried chunk the server already holds: the attempt that "failed"
@@ -231,6 +223,8 @@ export async function uploadInChunks(opts: {
   // chunk is in flight the server is already restoring; aborting then only
   // stops waiting for the answer.
   signal?: AbortSignal;
+  // Headers added to every chunk's request.
+  extraHeaders?: Record<string, string>;
   // Tuning seams (tests): the waits before each retry, and the per-chunk timeout.
   retryDelaysMs?: readonly number[];
   chunkTimeoutMs?: number;
@@ -241,6 +235,7 @@ export async function uploadInChunks(opts: {
     chunkSize = DEFAULT_CHUNK_SIZE,
     onProgress,
     signal,
+    extraHeaders,
     retryDelaysMs = RETRY_DELAYS_MS,
     chunkTimeoutMs = CHUNK_TIMEOUT_MS,
   } = opts;
@@ -269,7 +264,7 @@ export async function uploadInChunks(opts: {
       // moment it is sent.
       if (isLast) onProgress?.({ uploaded: file.size, total: file.size, phase: "import" });
 
-      const req: ChunkRequest = { endpoint, uploadId, index, totalChunks, fileSize: file.size, body: file.slice(start, end) };
+      const req: ChunkRequest = { endpoint, uploadId, index, totalChunks, fileSize: file.size, body: file.slice(start, end), extraHeaders };
       const sent = await sendChunkWithRetry(req, { isLast, signal, retryDelaysMs, chunkTimeoutMs });
       if (sent.kind === "aborted") return aborted();
       if (sent.kind === "answer") {

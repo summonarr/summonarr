@@ -8,6 +8,7 @@ import { ENCRYPTED_BACKUP_MAGIC, isEncryptedBackupFile } from "@/lib/client/back
 import { chunkedUploadErrorMessage, uploadInChunks, type ChunkedUploadOutcome, type ChunkedUploadProgress } from "@/lib/chunked-upload";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { rich } from "@/components/settings/forms/rich";
 
 const MB = 1024 * 1024;
 
@@ -16,6 +17,7 @@ function formatFileSize(bytes: number): string {
 }
 
 function percentOf(progress: ChunkedUploadProgress): number {
+  if (progress.total <= 0) return 0;
   return Math.round((progress.uploaded / progress.total) * 100);
 }
 
@@ -31,6 +33,10 @@ function useSetupImport(onBusyChange?: (busy: boolean) => void) {
   const [importing, setImporting] = useState(false);
   const [progress, setProgress] = useState<ChunkedUploadProgress | null>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
+  // The transfer opt-in (guardrail 6g): off by default, per restore, never stored.
+  // It counts only with its acknowledgement, and both reset with the file.
+  const [keepSessions, setKeepSessionsState] = useState(false);
+  const [keepAck, setKeepAck] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // The header check below is async. If the user picks a second file before the
   // first check finishes, this ref lets the stale check see it is out of date
@@ -39,11 +45,22 @@ function useSetupImport(onBusyChange?: (busy: boolean) => void) {
   // Cancel, or an unmount mid-upload, stops it (before the final chunk; once
   // that is sent the server is already restoring and finishes on its own).
   const uploadAbortRef = useRef<AbortController | null>(null);
-  useEffect(() => () => uploadAbortRef.current?.abort(), []);
+  // The redirect to /login after a successful restore; an unmount cancels it.
+  const redirectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    uploadAbortRef.current?.abort();
+    if (redirectTimerRef.current !== null) clearTimeout(redirectTimerRef.current);
+  }, []);
+
+  function setKeepSessions(on: boolean) {
+    setKeepSessionsState(on);
+    setKeepAck(false);
+  }
 
   async function handleFileChange(f: File | null) {
     pickedFileRef.current = f;
     setFile(f);
+    setKeepSessions(false);
     setResult(null);
     setProgress(null);
     setSize(null);
@@ -66,6 +83,8 @@ function useSetupImport(onBusyChange?: (busy: boolean) => void) {
       setResult({ ok: false, error: t("auth.restore.error.notEncrypted") });
       return;
     }
+    // Sent only when ticked AND acknowledged.
+    const keep = keepSessions && keepAck;
     setImporting(true);
     onBusyChange?.(true);
     setResult(null);
@@ -80,6 +99,7 @@ function useSetupImport(onBusyChange?: (busy: boolean) => void) {
         endpoint: withBasePath("/api/setup/import-chunk"),
         onProgress: setProgress,
         signal: abort.signal,
+        extraHeaders: keep ? { "X-Restore-Keep-Sessions": "true" } : undefined,
       });
     } catch {
       // Thrown before the uploader's own try. The exception's own text (a
@@ -104,7 +124,7 @@ function useSetupImport(onBusyChange?: (busy: boolean) => void) {
     setResult(restored);
     if (restored.ok) {
       // Stays busy: the restore replaced the database, and the redirect follows.
-      setTimeout(() => {
+      redirectTimerRef.current = setTimeout(() => {
         window.location.href = withBasePath("/login");
       }, 1500);
     } else {
@@ -125,11 +145,16 @@ function useSetupImport(onBusyChange?: (busy: boolean) => void) {
     setSize(null);
     setResult(null);
     setProgress(null);
+    setKeepSessions(false);
     // Reset the native input too, or re-choosing the same file fires no change event.
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  return { file, encrypted, size, importing, progress, result, fileInputRef, handleFileChange, handleImport, cancelUpload, clearFile };
+  return {
+    file, encrypted, size, importing, progress, result, fileInputRef,
+    keepSessions, setKeepSessions, keepAck, setKeepAck,
+    handleFileChange, handleImport, cancelUpload, clearFile,
+  };
 }
 
 type SetupImport = ReturnType<typeof useSetupImport>;
@@ -145,11 +170,10 @@ export function SetupImportPanel({ onBusyChange }: { onBusyChange?: (busy: boole
       <div className="space-y-2">
         <p className="text-sm text-zinc-300">{t("auth.restore.title")}</p>
         <p className="text-xs text-zinc-500 leading-relaxed">
-          {t("auth.restore.description").split(/(\{\w+\})/).map((part, i) =>
-            part === "{ext}" ? <code key={i} className="text-zinc-300">.sql.enc</code>
-            : part === "{envVar}" ? <code key={i} className="text-zinc-300">BACKUP_DB_PASSWORD</code>
-            : part,
-          )}
+          {rich(t("auth.restore.description"), {
+            ext: <code className="text-zinc-300">.sql.enc</code>,
+            envVar: <code className="text-zinc-300">BACKUP_DB_PASSWORD</code>,
+          })}
         </p>
       </div>
 
@@ -182,6 +206,8 @@ export function SetupImportPanel({ onBusyChange }: { onBusyChange?: (busy: boole
           </Button>
         )}
       </div>
+
+      {!result?.summary && file && <KeepSessionsOption imp={imp} />}
 
       {!result?.summary && <RestoreButton imp={imp} />}
 
@@ -260,14 +286,60 @@ function RestoreDropZone({ imp }: { imp: SetupImport }) {
   );
 }
 
+// The server-transfer opt-in: off by default, and when ticked it shows what it
+// costs and needs a second, explicit acknowledgement before the restore button
+// enables. Nothing is stored; it resets with the file.
+function KeepSessionsOption({ imp }: { imp: SetupImport }) {
+  const t = useT();
+  const { importing, keepSessions, setKeepSessions, keepAck, setKeepAck } = imp;
+  return (
+    <div className="space-y-2">
+      <label className="flex items-start gap-2 text-xs text-zinc-300 cursor-pointer">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={keepSessions}
+          disabled={importing}
+          onChange={(e) => setKeepSessions(e.target.checked)}
+        />
+        <span>
+          {t("auth.restore.keep.label")}
+          <span className="block text-[11px] text-zinc-500">{t("auth.restore.keep.hint")}</span>
+        </span>
+      </label>
+      {keepSessions && (
+        <div role="alert" className="space-y-2 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-[11px] leading-relaxed text-red-300">
+          <p className="font-semibold uppercase tracking-wider">{t("auth.restore.keep.warnTitle")}</p>
+          <ul className="list-disc space-y-1 pl-4">
+            <li>{t("auth.restore.keep.warnRevoked")}</li>
+            <li>{t("auth.restore.keep.warnSecret")}</li>
+            <li>{t("auth.restore.keep.warnUrl")}</li>
+            <li>{t("auth.restore.keep.warnCompromised")}</li>
+          </ul>
+          <label className="flex items-start gap-2 font-medium text-red-200 cursor-pointer">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={keepAck}
+              disabled={importing}
+              onChange={(e) => setKeepAck(e.target.checked)}
+            />
+            <span>{t("auth.restore.keep.ack")}</span>
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RestoreButton({ imp }: { imp: SetupImport }) {
   const t = useT();
-  const { file, encrypted, importing, progress, handleImport } = imp;
+  const { file, encrypted, importing, progress, handleImport, keepSessions, keepAck } = imp;
   return (
     <Button
       type="button"
       onClick={handleImport}
-      disabled={!file || !encrypted || importing}
+      disabled={!file || !encrypted || importing || (keepSessions && !keepAck)}
       className="w-full min-h-11"
     >
       {importing ? (

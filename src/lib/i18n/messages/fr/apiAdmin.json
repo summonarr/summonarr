@@ -58,6 +58,7 @@
   "apiAdmin.cleanup.unknownSetting": "Paramètre inconnu : {field}",
   "apiAdmin.common.downloadsEnabledBoolean": "downloadsEnabled doit être un booléen",
   "apiAdmin.common.forbidden": "Accès interdit",
+  "apiAdmin.common.crossSiteRefused": "Accès interdit — requête intersite",
   "apiAdmin.common.instanceNameTooLong": "Le nom pour « {slug} » doit comporter {max} caractères ou moins",
   "apiAdmin.common.instancesArray": "instances doit être un tableau",
   "apiAdmin.common.instancesChanged": "Les instances {service} ont été modifiées ailleurs depuis le chargement de cette page ; rien n'a été enregistré. Actualisez pour charger la liste actuelle, puis refaites vos modifications.",
@@ -128,6 +129,8 @@
   "apiAdmin.mediaInstances.plexUnreachable": "Serveur Plex injoignable",
   "apiAdmin.mediaInstances.servicePlexOrJellyfin": "service doit être plex ou jellyfin",
   "apiAdmin.mediaInstances.slugReserved": "Le slug « {slug} » ne peut pas servir pour un nouveau serveur : ses réglages écraseraient ceux du serveur principal. Choisissez un autre slug.",
+  "apiAdmin.mediaInstances.secretNeededForNewUrl": "Le secret enregistré pour « {slug} » ne peut pas être conservé avec une nouvelle adresse de serveur. Saisissez à nouveau le jeton ou la clé.",
+  "apiAdmin.mediaInstances.fieldTooLong": "{field} pour « {slug} » doit comporter {max} caractères au maximum",
   "apiAdmin.plexServers.connectFirst": "Connectez d'abord votre compte Plex",
   "apiAdmin.plexServers.loadFailed": "Impossible de charger les serveurs depuis plex.tv",
   "apiAdmin.plexServers.machineIdRequired": "machineId est obligatoire",
@@ -260,6 +263,7 @@
   "apiAdmin.users.promoteBeforeGrantingAdmin": "Promouvez le rôle de cet utilisateur au rang d’administrateur avant d’accorder l’autorisation ADMIN.",
   "apiAdmin.users.provideSessionId": "Fournissez sessionId ou all: true",
   "apiAdmin.users.purgedCannotReenable": "Les données de ce compte ont été purgées ; il ne peut plus être réactivé.",
+  "apiAdmin.users.purgedCannotChange": "Un compte supprimé (purgé) ne peut pas être modifié.",
   "apiAdmin.users.quotaInvalid": "{field} doit être un entier non négatif ou null",
   "apiAdmin.users.quotaZero": "Une valeur de 0 pour {field} signifierait « illimité », et non « bloqué ». Laissez le champ vide pour utiliser le quota global, indiquez 1 ou plus pour fixer une limite, ou retirez l’autorisation de demande de l’utilisateur pour l’empêcher de faire des demandes.",
   "apiAdmin.users.roleInvalid": "role doit être ADMIN, ISSUE_ADMIN ou USER",
@@ -295,6 +299,7 @@
   "apiAdmin.agents.error.invalidStored": "Les paramètres enregistrés de ce canal ne sont plus valides. Modifiez-le et enregistrez-le à nouveau.",
   "apiAdmin.backfillPlaytime.confirmationRequired": "Confirmation requise",
   "apiAdmin.users.cannotGrantBeyondOwn": "Impossible d'accorder des autorisations, accès aux instances, visibilité des serveurs ou limite de classification au-delà des vôtres",
+  "apiAdmin.users.cannotManageBeyondOwn": "Vous ne pouvez pas gérer un compte qui détient des autorisations de gestion que vous n'avez pas",
   "apiAdmin.fixMatch.plexUnmatched": "Plex n'a pas pu confirmer la correspondance avec TMDB #{tmdbId} et l'élément est désormais NON ASSOCIÉ dans Plex — réassociez-le directement dans Plex ou choisissez un autre candidat.",
   "apiAdmin.common.bodyTooLarge": "Corps de la requête trop volumineux (max {max})",
   "apiAdmin.warm.activityRunning": "Le préchauffage de l'activité est déjà en cours",
@@ -411,5 +416,6 @@
   "apiAdmin.watchSync.jobGone": "Cette synchro n'est plus suivie. Summonarr a peut-être redémarré. Rechargez pour voir les derniers résultats.",
   "apiAdmin.watchSync.pairInvalid": "Choisissez un compte Plex et un utilisateur Jellyfin toujours présent sur son serveur",
   "apiAdmin.watchSync.pairExists": "Cette association existe déjà",
-  "apiAdmin.watchSync.pairNotFound": "Association introuvable"
+  "apiAdmin.watchSync.pairNotFound": "Association introuvable",
+  "apiAdmin.watchSync.pairPaused": "Cette association est en pause. Reprenez-la avant de lancer une synchronisation complète."
 }

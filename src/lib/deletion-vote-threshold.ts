@@ -4,13 +4,10 @@ import { emitNotificationEvent } from "@/lib/notify-agents";
 import { notifyAdminsDeletionVoteThreshold } from "@/lib/email";
 import { notifyAdminsDeletionVoteThresholdPush } from "@/lib/push";
 import { isTmdbIdInRange, parseTmdbIdParam } from "@/lib/tmdb-id";
-import { processSingleton } from "@/lib/process-singleton";
+import { OUTBOX_ALL_CHANNELS, OUTBOX_VOTE_THRESHOLD_KIND, queueVoteAlert, settleOutbox, voteAlertSubject } from "@/lib/outbox";
 import {
-  DELETION_VOTE_PENDING_PREFIX,
   DELETION_VOTE_THRESHOLD_KEY,
   deletionVoteMarkerKey,
-  deletionVotePendingKey,
-  parseDeletionVotePendingKey,
   parseDeletionVoteThreshold,
 } from "@/lib/deletion-vote-keys";
 
@@ -18,6 +15,31 @@ import {
 export async function readDeletionVoteThreshold(db: Pick<typeof prisma, "setting"> = prisma): Promise<number> {
   const row = await db.setting.findUnique({ where: { key: DELETION_VOTE_THRESHOLD_KEY } });
   return parseDeletionVoteThreshold(row?.value);
+}
+
+/**
+ * Re-arm the one-shot threshold alert of every listed title whose tally is now
+ * below the threshold, inside the transaction that removed votes from them: a
+ * marker left behind would silently block the alert the next time the title
+ * crosses the threshold. The un-vote route's rule, for a caller that drops
+ * votes on several titles at once. One statement at a time (guardrail 23c);
+ * deleteMany raises nothing when the marker is absent (guardrail 23).
+ */
+export async function rearmVoteAlertsBelowThreshold(
+  tx: Pick<typeof prisma, "setting" | "deletionVote">,
+  titles: ReadonlyArray<{ tmdbId: number; mediaType: "MOVIE" | "TV" }>,
+): Promise<void> {
+  if (titles.length === 0) return;
+  const threshold = await readDeletionVoteThreshold(tx);
+  if (threshold <= 0) return;
+  const seen = new Set<string>();
+  for (const { tmdbId, mediaType } of titles) {
+    const key = deletionVoteMarkerKey(tmdbId, mediaType);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const remaining = await tx.deletionVote.count({ where: { tmdbId, mediaType } });
+    if (remaining < threshold) await tx.setting.deleteMany({ where: { key } });
+  }
 }
 
 /**
@@ -40,14 +62,17 @@ export function parseVoteTitleParams(
  * Fire the "deletion threshold reached" admin alert exactly once per title,
  * after a vote on it COMMITTED. The marker row is an idempotent one-shot gate:
  * createMany(skipDuplicates) reports count === 1 for the single caller that
- * wins the insert and 0 for everyone after.
+ * wins the insert and 0 for everyone after. The winner queues the alert in the
+ * SAME transaction (outbox.ts), so a process that dies after the claim leaves
+ * the alert for the outbox drain instead of losing it — no later vote can win
+ * that claim again.
  *
- * Runs OUTSIDE any transaction, after the vote insert (guardrail 23): a bare
- * create() whose duplicate-key error is caught-and-ignored inside a
- * single-level interactive tx leaves Postgres in the aborted state, so the
- * trailing COMMIT becomes a ROLLBACK and silently discards the vote too. Running
- * it afterwards is also self-healing: if the process dies before the claim, the
- * next vote re-evaluates the threshold and fires the alert.
+ * Runs OUTSIDE the vote's own write, after it (guardrail 23): a bare create()
+ * whose duplicate-key error is caught-and-ignored inside a single-level
+ * interactive tx leaves Postgres in the aborted state, so the trailing COMMIT
+ * becomes a ROLLBACK and silently discards the vote too. Neither statement of
+ * the claim's transaction can raise a duplicate (skipDuplicates, then an
+ * upsert).
  */
 export async function alertIfVoteThresholdReached(media: {
   tmdbId: number;
@@ -61,23 +86,17 @@ export async function alertIfVoteThresholdReached(media: {
   const voteCount = await prisma.deletionVote.count({ where: { tmdbId, mediaType } });
   if (voteCount < threshold) return;
   const claimKey = deletionVoteMarkerKey(tmdbId, mediaType);
-  // Later votes on an already-alerted title stop here, without writing a marker.
+  // Later votes on an already-alerted title stop here, without writing anything.
   if (await prisma.setting.findUnique({ where: { key: claimKey } })) return;
-  // Intent first: a crash after the claim but before the send leaves this
-  // marker for the sweep to finish. Overwrites a stale one from an earlier cycle.
-  const pendingKey = deletionVotePendingKey(tmdbId, mediaType);
-  const pendingValue = JSON.stringify({ at: new Date().toISOString(), title: media.title, posterPath: media.posterPath });
-  await prisma.setting.upsert({
-    where: { key: pendingKey },
-    create: { key: pendingKey, value: pendingValue },
-    update: { value: pendingValue },
+  const subject = voteAlertSubject(tmdbId, mediaType);
+  const queued: ThresholdAlertData = { title: media.title, mediaType, voteCount, posterPath: media.posterPath, tmdbId };
+  const won = await prisma.$transaction(async (tx) => {
+    const claim = await tx.setting.createMany({ data: [{ key: claimKey, value: "1" }], skipDuplicates: true });
+    if (claim.count !== 1) return false;
+    await queueVoteAlert(tx, subject, { ...queued });
+    return true;
   });
-  const claim = await prisma.setting.createMany({
-    data: [{ key: claimKey, value: "1" }],
-    skipDuplicates: true,
-  });
-  // A loser leaves the pending marker to the winner (its send removes it).
-  if (claim.count !== 1) return;
+  if (!won) return;
   // Re-count after winning the claim: an admin "dismiss" deletes all votes AND
   // this claim key in one tx, so a dismiss racing between the count above and
   // the claim insert would re-create the key and fire a false threshold alert
@@ -86,104 +105,57 @@ export async function alertIfVoteThresholdReached(media: {
   if (recount < threshold) {
     // The race wiped the votes, so give the claim back. Left in place, the key
     // would block the alert when the title genuinely reaches the threshold
-    // again. Best-effort: the vote is already saved.
+    // again. Best-effort: the vote is already saved, and the drain drops a
+    // queued alert whose title is no longer over the threshold.
     await prisma.setting
-      .deleteMany({ where: { key: { in: [claimKey, pendingKey] } } })
+      .deleteMany({ where: { key: { in: [claimKey] } } })
       .catch((err) => console.warn("[votes] releasing threshold claim failed:", err));
+    await settleOutbox(OUTBOX_VOTE_THRESHOLD_KIND, OUTBOX_ALL_CHANNELS, [subject]);
     return;
   }
-  const data = { title: media.title, mediaType, voteCount: recount, posterPath: media.posterPath, tmdbId };
+  const data = { ...queued, voteCount: recount };
   after(async () => {
     await deliverThresholdAlert(data);
-    // Best-effort: a marker left behind only costs one repeat from the sweep.
-    await prisma.setting
-      .deleteMany({ where: { key: pendingKey } })
-      .catch((err) => console.warn("[votes] clearing pending threshold alert failed:", err));
+    // A row a failed delete leaves only costs one repeat from the drain.
+    await settleOutbox(OUTBOX_VOTE_THRESHOLD_KIND, OUTBOX_ALL_CHANNELS, [subject]);
   });
 }
 
-type ThresholdAlertData = { title: string; mediaType: "MOVIE" | "TV"; voteCount: number; posterPath: string | null; tmdbId: number };
+export type ThresholdAlertData = { title: string; mediaType: "MOVIE" | "TV"; voteCount: number; posterPath: string | null; tmdbId: number };
 
 async function deliverThresholdAlert(data: ThresholdAlertData): Promise<void> {
-  emitNotificationEvent({
-    event: "vote.threshold",
-    media: { type: data.mediaType, tmdbId: data.tmdbId, title: data.title, posterPath: data.posterPath },
-    votes: data.voteCount,
-  });
+  try {
+    emitNotificationEvent({
+      event: "vote.threshold",
+      media: { type: data.mediaType, tmdbId: data.tmdbId, title: data.title, posterPath: data.posterPath },
+      votes: data.voteCount,
+    });
+  } catch (err) {
+    // An outbound-agent failure must not keep the admins' email and push from going out.
+    console.warn("[votes] threshold agent emit failed:", err);
+  }
   await Promise.allSettled([
     notifyAdminsDeletionVoteThreshold(data),
     notifyAdminsDeletionVoteThresholdPush(data),
   ]);
 }
 
-/** A pending marker is finished only once it is this old: a fresh one belongs to the vote that wrote it. */
-export const VOTE_ALERT_RETRY_MIN_AGE_MS = 10 * 60_000;
-/** Past this the alert is old news and the marker is dropped unsent. */
-export const VOTE_ALERT_RETRY_TTL_MS = 24 * 60 * 60_000;
-/** The sweep runs at most this often per process. */
-export const VOTE_ALERT_SWEEP_INTERVAL_MS = 5 * 60_000;
-const MAX_VOTE_ALERTS_PER_SWEEP = 20;
-
-const voteAlertSweep = processSingleton("deletion-vote-threshold:sweep", () => ({ lastAt: Number.NEGATIVE_INFINITY }));
-
 /**
- * Finish alerts a crash interrupted (a pending marker older than a few
- * minutes). Each marker is taken by deleting it (count 0 = another caller took
- * it), the title is re-judged (still over the threshold, claim re-won or still
- * held), and the alert is delivered once more. At-least-once across a crash;
- * a marker whose removal failed after a delivered alert repeats it once.
+ * The outbox drain's half: an alert whose claimer never finished it. The title
+ * is re-judged first — the alert is owed only while the claim marker still
+ * stands (a dismiss or a "now available" wipe deletes it) and the title is
+ * still at or over the threshold — then delivered with the current count.
+ * The row is deleted either way; returns whether the alert was sent. Throws
+ * only when a read fails, which leaves the row for the next pass.
  */
-export async function sweepPendingVoteAlerts(opts: { now?: Date; force?: boolean } = {}): Promise<{ delivered: number; dropped: number }> {
-  const nowMs = (opts.now ?? new Date()).getTime();
-  const out = { delivered: 0, dropped: 0 };
-  if (!opts.force && nowMs - voteAlertSweep.lastAt < VOTE_ALERT_SWEEP_INTERVAL_MS) return out;
-  voteAlertSweep.lastAt = nowMs;
-  const rows = await prisma.setting.findMany({
-    where: { key: { startsWith: DELETION_VOTE_PENDING_PREFIX } },
-    select: { key: true, value: true },
-    take: MAX_VOTE_ALERTS_PER_SWEEP,
-  });
-  for (const row of rows) {
-    const title = parseDeletionVotePendingKey(row.key);
-    let stored: { at?: unknown; title?: unknown; posterPath?: unknown } = {};
-    try {
-      const parsed: unknown = JSON.parse(row.value ?? "");
-      if (parsed && typeof parsed === "object") stored = parsed as typeof stored;
-    } catch { /* unreadable: dropped below */ }
-    const at = typeof stored.at === "string" ? Date.parse(stored.at) : NaN;
-    const age = Number.isFinite(at) ? nowMs - at : Number.POSITIVE_INFINITY;
-    if (title && age < VOTE_ALERT_RETRY_MIN_AGE_MS) continue;
-    const taken = await prisma.setting.deleteMany({ where: { key: { in: [row.key] } } });
-    if (taken.count === 0) continue;
-    if (!title || typeof stored.title !== "string" || age > VOTE_ALERT_RETRY_TTL_MS) {
-      out.dropped++;
-      continue;
-    }
-    const { tmdbId, mediaType } = title;
-    const threshold = await readDeletionVoteThreshold();
-    const voteCount = threshold > 0 ? await prisma.deletionVote.count({ where: { tmdbId, mediaType } }) : 0;
-    if (threshold <= 0 || voteCount < threshold) {
-      out.dropped++;
-      continue;
-    }
-    const claimKey = deletionVoteMarkerKey(tmdbId, mediaType);
-    if (!(await prisma.setting.findUnique({ where: { key: claimKey } }))) {
-      const claim = await prisma.setting.createMany({ data: [{ key: claimKey, value: "1" }], skipDuplicates: true });
-      if (claim.count !== 1) continue;
-    }
-    await deliverThresholdAlert({
-      title: stored.title,
-      mediaType,
-      voteCount,
-      posterPath: typeof stored.posterPath === "string" ? stored.posterPath : null,
-      tmdbId,
-    });
-    out.delivered++;
-  }
-  return out;
-}
-
-/** Test seam: let the next sweep run at once. */
-export function _resetVoteAlertSweepForTests(): void {
-  voteAlertSweep.lastAt = Number.NEGATIVE_INFINITY;
+export async function deliverQueuedVoteAlert(queued: ThresholdAlertData): Promise<boolean> {
+  const { tmdbId, mediaType } = queued;
+  const subject = voteAlertSubject(tmdbId, mediaType);
+  const threshold = await readDeletionVoteThreshold();
+  const claimed = threshold > 0 && (await prisma.setting.findUnique({ where: { key: deletionVoteMarkerKey(tmdbId, mediaType) } })) !== null;
+  const voteCount = claimed ? await prisma.deletionVote.count({ where: { tmdbId, mediaType } }) : 0;
+  const owed = claimed && voteCount >= threshold;
+  if (owed) await deliverThresholdAlert({ ...queued, voteCount });
+  await settleOutbox(OUTBOX_VOTE_THRESHOLD_KIND, OUTBOX_ALL_CHANNELS, [subject]);
+  return owed;
 }

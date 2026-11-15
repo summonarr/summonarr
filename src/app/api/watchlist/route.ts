@@ -36,7 +36,8 @@ export const GET = withAuth(async (req, _ctx, session) => {
     prisma.watchlistItem.findMany({
       where,
       select: SELECT,
-      orderBy: { createdAt: "desc" },
+      // The id breaks createdAt ties, so a page boundary is stable.
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,
     }),
@@ -64,14 +65,14 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }
 
-  const parsed = await readJsonCapped<{ tmdbId?: number; mediaType?: string }>(req, 16384);
+  const parsed = await readJsonCapped<{ tmdbId?: unknown; mediaType?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const { tmdbId, mediaType } = parsed;
 
   if (!tmdbId || !mediaType) {
     return NextResponse.json({ error: t("apiUser.common.tmdbIdMediaTypeRequired") }, { status: 400 });
   }
-  if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
+  if (typeof tmdbId !== "number" || !Number.isInteger(tmdbId) || tmdbId <= 0) {
     return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
   }
   if (!isTmdbIdInRange(tmdbId)) {

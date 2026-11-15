@@ -23,7 +23,7 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
-import { recordIssueGrab } from "@/lib/issue-grab";
+import { recordGrabForIssue } from "@/lib/issue-grab";
 import { promoteIssueInProgress } from "@/lib/issue-transitions";
 import type { Issue } from "@/generated/prisma";
 
@@ -219,25 +219,12 @@ async function grabPickedRelease(
 // which breaks the IssueGrab -> Issue link (Prisma error P2003). The row
 // supersedes the issue's earlier pending grabs on this instance (one import, one
 // announcement — recordIssueGrab). The row's id, or null when it wasn't written.
-async function recordGrab(issue: Issue, userId: string, tvdbId: number | null, instance: string): Promise<string | null> {
-  try {
-    const grab = await recordIssueGrab({
-      issueId: issue.id,
-      triggeredById: userId,
-      tmdbId: issue.tmdbId,
-      tvdbId,
-      mediaType: issue.mediaType,
-      title: issue.title,
-      scope: issue.scope,
-      seasonNumber: issue.seasonNumber,
-      episodeNumber: issue.episodeNumber,
-      arrInstance: instance,
-    });
-    return grab.id;
-  } catch (err) {
-    console.warn("[releases] Grab succeeded but recording it failed (issue deleted mid-grab?):", err);
-    return null;
-  }
+function recordGrab(issue: Issue, userId: string, tvdbId: number | null, instance: string): Promise<string | null> {
+  return recordGrabForIssue(
+    issue,
+    { userId, tvdbId, instance },
+    "[releases] Grab succeeded but recording it failed (issue deleted mid-grab?):",
+  );
 }
 
 export const POST = withIssueAdmin(async (req, { params }: RouteContext, session) => {

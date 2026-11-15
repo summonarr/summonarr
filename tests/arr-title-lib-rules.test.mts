@@ -1,11 +1,11 @@
 // Audit fixes (wave B2, unit "title-lib"):
 //
-//   C010 — a release grab that failed BEFORE POST /api/v3/release was sent
+// a release grab that failed BEFORE POST /api/v3/release was sent
 //          (no config, the title lookup, the tvdb resolution) hands the claimed
 //          handle back: nothing reached the arr, so the retry must not cost a
 //          whole new indexer search. A failure DURING the grab still spends it
 //          (the outcome is unknown — never send it twice).
-//   C095 — grabStateOf reads a grab with no downloadId (Blackhole clients) as
+// grabStateOf reads a grab with no downloadId (Blackhole clients) as
 //          already failed once a newer failure names the same release (and,
 //          for Sonarr, the same episode), so the list stops offering Mark
 //          failed on it again.
@@ -170,9 +170,9 @@ beforeEach(() => {
 
 const grabPosts = () => calls.filter((c) => c.method === "POST" && c.path === "/api/v3/release");
 
-// ═══════════════════ C010 — a failure before the grab hands the handle back ═
+// ═══════════════════ a failure before the grab hands the handle back ═
 
-test("C010: request Pick release — the movie lookup before the grab fails (network, then a gateway 503): the handle is handed back and the retry grabs", async () => {
+test("request Pick release — the movie lookup before the grab fails (network, then a gateway 503): the handle is handed back and the retry grabs", async () => {
   let lookup: "ok" | "network" | "503" = "ok";
   responder = (c) => {
     if (c.method === "GET" && c.path === "/api/v3/movie") {
@@ -200,7 +200,7 @@ test("C010: request Pick release — the movie lookup before the grab fails (net
   assert.equal((await grab()).status, 410, "spent once the grab was accepted");
 });
 
-test("C010: request Pick release — a failure DURING the grab (no answer) still spends the handle", async () => {
+test("request Pick release — a failure DURING the grab (no answer) still spends the handle", async () => {
   responder = (c) => {
     if (c.method === "GET" && c.path === "/api/v3/movie") return json([{ id: 44, tmdbId: 603 }]);
     if (c.method === "GET" && c.path === "/api/v3/release") return json([RELEASE]);
@@ -216,11 +216,11 @@ test("C010: request Pick release — a failure DURING the grab (no answer) still
   assert.equal(grabPosts().length, 1);
 });
 
-// ═══════════════════ C095 — the list reads an id-less grab's failure ═════════
+// ═══════════════════ the list reads an id-less grab's failure ═════════
 
 const { groupHistoryEvents, grabStateOf, projectHistoryRecords } = await import("../src/lib/arr-history.ts");
 
-test("C095: grabStateOf — a grab with no downloadId is failed by a newer failure naming the same release and episode, never another's", () => {
+test("grabStateOf — a grab with no downloadId is failed by a newer failure naming the same release and episode, never another's", () => {
   const events = projectHistoryRecords("sonarr", "", [
     { id: 80, seriesId: 21, eventType: "grabbed", date: "2026-10-01T10:00:00Z", sourceTitle: "Show.S02.1080p", episodeId: 201 },
     { id: 81, seriesId: 21, eventType: "grabbed", date: "2026-10-01T10:00:00Z", sourceTitle: "Show.S02.1080p", episodeId: 202 },
@@ -284,9 +284,9 @@ test("g-sonarr#4: languageNamesOf — list first, the single object only when th
   assert.deepEqual(languageNamesOf({}), []);
 });
 
-// ═══════════════════ C048 — the rename preview's select all ══════════════════
+// ═══════════════════ the rename preview's select all ══════════════════
 
-test("C048: the rename preview has a select-all toggle over the files it lists (a long show pre-ticks thousands)", async () => {
+test("the rename preview has a select-all toggle over the files it lists (a long show pre-ticks thousands)", async () => {
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../src/components/admin/arr-title/files-parts.tsx", import.meta.url), "utf8");
   const panel = src.slice(src.indexOf("adminArr.files.renameNone"), src.indexOf("{renames.map("));

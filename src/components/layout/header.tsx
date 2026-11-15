@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter, usePathname } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { ChevronRight } from "@/components/icons";
 import {
   DropdownMenu,
@@ -24,19 +24,15 @@ import { getClientBadgeVisibility } from "@/lib/badge-visibility";
 import { SearchBar } from "./search-bar";
 import { visibleAdminNavItems } from "./nav-visibility";
 
-// The search lives in search-bar.tsx; re-exported for the mobile nav's sheet.
-export { SearchBar };
-
 // Desktop top bar: breadcrumb, search, push toggle, and the account dropdown.
-export function Header() {
+export function Header({ featureFlags }: { featureFlags?: Record<string, boolean> } = {}) {
   const t = useT();
   const pathname = usePathname();
-  const router = useRouter();
   const { session } = useSummonarrSession();
   // Show "Settings" only to users who can actually open /settings (anyone else
   // is redirected away). We ask the shared nav resolver instead of checking
   // for ADMIN here, so this stays in step with the page's own gate.
-  const canOpenSettings = visibleAdminNavItems(session?.user).some((i) => i.href === "/settings");
+  const canOpenSettings = visibleAdminNavItems(session?.user, featureFlags).some((i) => i.href === "/settings");
   // Same Plex/Jellyfin badge rule as MobileNav and the server pages. It keys
   // on the user's `mediaServer`, not the sign-in `provider` — the two differ
   // for a local-password or OIDC account.
@@ -162,11 +158,11 @@ export function Header() {
               {session?.user?.name ?? session?.user?.email}
             </div>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => router.push("/profile")}>
+            <DropdownMenuItem render={<Link href="/profile" />}>
               {t("nav.profile")}
             </DropdownMenuItem>
             {canOpenSettings && (
-              <DropdownMenuItem onClick={() => router.push("/settings")}>
+              <DropdownMenuItem render={<Link href="/settings" />}>
                 {t("nav.settings")}
               </DropdownMenuItem>
             )}

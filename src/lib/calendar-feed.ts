@@ -65,6 +65,8 @@ async function loadTitleSources(opts: {
   requestWhere: Prisma.MediaRequestWhereInput;
   watchlistWhere: Prisma.WatchlistItemWhereInput | null;
   take: number;
+  /** Alternate request, watchlist, request, … instead of every request first. */
+  interleave?: boolean;
 }): Promise<CalendarTitle[]> {
   const [requests, watchlist] = await Promise.all([
     prisma.mediaRequest.findMany({
@@ -82,7 +84,15 @@ async function loadTitleSources(opts: {
         })
       : Promise.resolve([]),
   ]);
-  return [...requests, ...watchlist].map((r) => ({
+  let rows = [...requests, ...watchlist];
+  if (opts.interleave) {
+    rows = [];
+    for (let i = 0; i < Math.max(requests.length, watchlist.length); i++) {
+      if (i < requests.length) rows.push(requests[i]);
+      if (i < watchlist.length) rows.push(watchlist[i]);
+    }
+  }
+  return rows.map((r) => ({
     tmdbId: r.tmdbId,
     mediaType: toMediaType(r.mediaType),
     title: r.title,
@@ -302,6 +312,9 @@ async function loadWarmTitles(): Promise<CalendarTitle[]> {
     requestWhere: { status: { not: "DECLINED" } },
     watchlistWhere: { user: { deactivatedAt: null } },
     take: MAX_CALENDAR_WARM_TITLES,
+    // Requests first filled the whole cap on an install with that many, so a
+    // watchlist-only title was never warmed and never got a feed event.
+    interleave: true,
   });
   return dedupeCalendarTitles(rows).slice(0, MAX_CALENDAR_WARM_TITLES);
 }

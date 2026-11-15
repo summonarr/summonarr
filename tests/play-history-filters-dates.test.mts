@@ -14,3 +14,13 @@ test("valid dates still bind in order", () => {
   assert.equal(binds.length, 2);
   assert.ok(binds.every((b) => b instanceof Date && !isNaN(b.getTime())));
 });
+
+test("tmdbId filter accepts only a canonical in-range integer", async () => {
+  const { normalizePlayHistoryFilters } = await import("../src/lib/play-history-filters.ts");
+  const at = (v: string) => normalizePlayHistoryFilters(new URLSearchParams({ tmdbId: v }), "UTC").tmdbId;
+  assert.equal(at("550"), 550);
+  assert.equal(at("12abc"), null);
+  assert.equal(at("1.5"), null);
+  assert.equal(at("99999999999"), null);
+  assert.equal(at("0"), null);
+});

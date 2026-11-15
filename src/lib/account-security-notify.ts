@@ -34,6 +34,23 @@ export type AccountSecurityEvent =
   | "step-up-locked"
   | "app-signed-in";
 
+// How each event reads in the email. A lockout changed nothing on the account
+// and the owner can still sign in once it lifts, so its advice is the password
+// + two-factor one, not "contact your administrator". A new app sign-in is
+// ended from the Sessions list, so the advice is to sign that device out. A
+// paused step-up means someone holding a signed-in session is guessing, and the
+// owner can't sign it out themselves until the pause lifts, so it points at the
+// Sessions list and says to contact an administrator.
+const EMAIL_PRESENTATION = {
+  "password-changed": { subjectKey: "notify.account.subject", headingKey: "notify.account.heading", ctaPath: "/profile", advice: "account" },
+  "signed-out-all": { subjectKey: "notify.account.subject", headingKey: "notify.account.heading", ctaPath: "/profile", advice: "account" },
+  "signed-out-others": { subjectKey: "notify.account.subject", headingKey: "notify.account.heading", ctaPath: "/profile", advice: "account" },
+  "discord-linked": { subjectKey: "notify.account.subject", headingKey: "notify.account.heading", ctaPath: "/profile", advice: "account" },
+  "sign-in-locked": { subjectKey: "notify.account.subject", headingKey: "notify.account.lockedHeading", ctaPath: "/profile", advice: "mfa" },
+  "step-up-locked": { subjectKey: "notify.account.subject", headingKey: "notify.account.stepUpLockedHeading", ctaPath: "/profile#sessions", advice: "account" },
+  "app-signed-in": { subjectKey: "notify.account.subject.app-signed-in", headingKey: "notify.account.heading.app-signed-in", ctaPath: "/profile#sessions", advice: "sign-in" },
+} as const satisfies Record<AccountSecurityEvent, { subjectKey: string; headingKey: string; ctaPath: string; advice: "account" | "mfa" | "sign-in" }>;
+
 // Per-event extras for the sentence. Only the events that use them read them.
 export interface AccountSecurityDetail {
   /** app-signed-in: the new session's device label (UA-derived — untrusted text). */
@@ -86,24 +103,11 @@ export async function notifyAccountSecurityEvent(
     const to = resolveUserNotificationEmail(user);
     if (!to) return;
     const t = translatorForUser(user);
-    // A lockout changed nothing on the account and the owner can still sign in
-    // once it lifts, so its advice is the password + two-factor one, not "contact
-    // your administrator". A new app sign-in is ended from the Sessions list; the
-    // owner can still sign in, so the advice is to sign that device out. A paused
-    // step-up means someone holding a signed-in session is guessing, and the owner
-    // can't sign it out themselves until the pause lifts, so it says to contact
-    // an administrator.
-    const locked = event === "sign-in-locked";
-    const stepUpLocked = event === "step-up-locked";
-    const signIn = event === "app-signed-in";
+    const present = EMAIL_PRESENTATION[event];
     await notifyUserSecurityEventEmail({
       toEmail: to,
-      subject: signIn ? t("notify.account.subject.app-signed-in") : t("notify.account.subject"),
-      heading: signIn
-        ? t("notify.account.heading.app-signed-in")
-        : stepUpLocked
-          ? t("notify.account.stepUpLockedHeading")
-          : t(locked ? "notify.account.lockedHeading" : "notify.account.heading"),
+      subject: t(present.subjectKey),
+      heading: t(present.headingKey),
       message: accountSecurityMessage(
         t,
         event,
@@ -114,8 +118,8 @@ export async function notifyAccountSecurityEvent(
         detail,
       ),
       locale: user.locale ?? null,
-      ctaPath: signIn || stepUpLocked ? "/profile#sessions" : "/profile",
-      advice: signIn ? "sign-in" : locked ? "mfa" : "account",
+      ctaPath: present.ctaPath,
+      advice: present.advice,
     });
   } catch (err) {
     console.error("[account] security notification failed:", err instanceof Error ? err.message : err);

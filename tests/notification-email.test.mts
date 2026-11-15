@@ -122,16 +122,13 @@ test("suffix match requires the exact synthetic domain, not a lookalike", () => 
   );
 });
 
-test("notificationEmail is returned verbatim — no trimming or normalization", () => {
-  // Pins current behavior: trim() is only used for the emptiness check; the
-  // stored value (including any padding the profile form let through) is
-  // returned untouched.
+test("notificationEmail is returned trimmed", () => {
   assert.equal(
     resolveUserNotificationEmail({
       email: "login@example.com",
       notificationEmail: "  padded@example.com  ",
     }),
-    "  padded@example.com  ",
+    "padded@example.com",
   );
 });
 

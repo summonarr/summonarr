@@ -5,6 +5,7 @@ import { hasPermission, Permission } from "@/lib/permissions";
 import { requireFeature } from "@/lib/features";
 import { getUserPlayStats } from "@/lib/play-history";
 import { zonedTodayIso } from "@/lib/stats-time-zone";
+import { sharePct } from "@/lib/activity-stats-view";
 import { resolvePosterMap, posterSrcFor } from "@/lib/poster-cache";
 import { getTranslator } from "@/lib/i18n/server";
 import { collectUnmappedPairs, resolveUnmappedEntry } from "@/lib/activity-title-resolve";
@@ -34,11 +35,12 @@ function knownIpRows(
     );
 }
 
-// The share of plays with a known method that played direct, or null with none.
+// The share of ALL the user's plays that played direct, or null with no plays —
+// the same rule as the Users list's Direct % (getAllUsersStats).
 function directPlayPercent(ratio: readonly { method: string; count: number }[]): number | null {
   const direct = ratio.find((r) => r.method === "DirectPlay")?.count ?? 0;
   const total = ratio.reduce((n, r) => n + r.count, 0);
-  return total > 0 ? Math.round((direct / total) * 100) : null;
+  return total > 0 ? sharePct(direct, total) : null;
 }
 
 export default async function UserActivityPage({

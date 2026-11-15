@@ -3,11 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ThumbsUp, Trash2, Loader2 } from "@/components/icons";
-import { withBasePath } from "@/lib/base-path";
-import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
-import { timedFetch } from "@/lib/client/fetch-json";
+import { writeDeletionVote } from "@/lib/client/vote-write";
 import { useAsyncAction } from "@/hooks/use-async-action";
 
 interface Props {
@@ -59,19 +57,8 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
     setRefocusDismiss(true);
   }
 
-  type Outcome = { ok: true } | { ok: false; message: string };
-
-  // Reads everything it needs from the response inside the run, so only a
-  // plain outcome crosses back and a dropped run applies nothing.
-  async function send(method: "DELETE" | "PATCH", okOn404: boolean, failed: string, signal: AbortSignal): Promise<Outcome> {
-    try {
-      const res = await timedFetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method, signal });
-      if (res.ok || (okOn404 && res.status === 404)) return { ok: true };
-      return { ok: false, message: rateLimitMessage(res, t) ?? failed };
-    } catch {
-      return { ok: false, message: failed };
-    }
-  }
+  const send = (method: "DELETE" | "PATCH", okOn404: boolean, failed: string, signal: AbortSignal) =>
+    writeDeletionVote({ method, tmdbId, mediaType, okOn404, failed, signal, t });
 
   async function handleUnvote() {
     if (action.busy("vote")) return;
@@ -107,7 +94,8 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
       toast({ title: t("personal.votes.dismissed"), variant: "success" });
       router.refresh();
     } else {
-      setConfirmingDismiss(false);
+      // The confirm button that had focus unmounts: hand focus to Dismiss.
+      cancelDismiss();
       toast({ title: out.message, variant: "error" });
     }
   }

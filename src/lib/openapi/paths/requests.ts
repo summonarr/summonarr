@@ -9,6 +9,7 @@ import {
   QUEUE_PHASE,
   ARR_SERVICE,
   tooLargeAnswer,
+  forbiddenAnswer,
   RETRY_AFTER_HEADER,
   rowOwner,
   OK_TRUE,
@@ -117,8 +118,8 @@ export const requestsPaths: OpenApiPaths = {
             },
           },
         },
-        "400": { description: "Validation error (missing tmdbId/mediaType, non-positive tmdbId, bad mediaType, note over 500 chars, unavailable/unconfigured instance, invalid qualityProfileId)" },
-        "403": { description: "Missing/invalid `_token`, no permission for the media type/instance/profile, Discord link required, blacklisted title, content-rating cap, or permanently declined" },
+        "400": { description: "Validation error (missing tmdbId/mediaType, non-positive tmdbId, bad mediaType, note over 500 chars, unavailable/unconfigured instance — answered only to a caller granted that instance or holding MANAGE_REQUESTS — invalid qualityProfileId)" },
+        "403": { description: "Missing/invalid `_token`, no permission for the media type/instance/profile (an explicit instance that is unknown, ungranted or unconfigured reads the same to a caller with no grant for it), Discord link required, blacklisted title, content-rating cap, or permanently declined" },
         "409": { description: "Duplicate request" },
         "413": tooLargeAnswer(64 * 1024),
         "422": { description: "TMDB could not verify the title" },
@@ -193,6 +194,7 @@ export const requestsPaths: OpenApiPaths = {
         "403": { description: "Forbidden — caller lacks MANAGE_REQUESTS and is not the owner of a still-PENDING request" },
         "404": { description: "Not found" },
         "409": { description: "Self-cancel only — the request left PENDING between the read and the delete" },
+        "429": { description: "Self-cancel only — rate limited (10 per minute per user). A MANAGE_REQUESTS delete is not limited", headers: RETRY_AFTER_HEADER },
         "503": { description: "Maintenance mode (non-ADMIN callers)" },
       },
     },
@@ -395,6 +397,7 @@ export const requestsPaths: OpenApiPaths = {
         },
       },
       responses: {
+        "403": forbiddenAnswer("the MANAGE_REQUESTS permission"),
         "200": {
           description:
             "Batch result. On APPROVED, a request whose Radarr/Sonarr add definitely fails is rolled back to PENDING and " +
@@ -421,7 +424,7 @@ export const requestsPaths: OpenApiPaths = {
             },
           },
         },
-        "400": { description: "ids empty/over 100/not strings, invalid status, adminNote over " + ADMIN_NOTE_MAX + " chars, non-boolean permanent, or a permanent batch over 25 ids (`code: \"permanent-batch-too-large\"`)" },
+        "400": { description: `ids empty/over ${REQUEST_BATCH_MAX_IDS}/not strings, invalid status, adminNote over ${ADMIN_NOTE_MAX} chars, non-boolean permanent, or a permanent batch over ${REQUEST_BATCH_MAX_PERMANENT} ids (\`code: "permanent-batch-too-large"\`)` },
         "413": tooLargeAnswer(1024 * 1024),
         "429": { description: "Rate limited (10/min per admin)" },
         "503": { description: "Maintenance mode (non-ADMIN callers)" },
@@ -586,6 +589,7 @@ export const requestsPaths: OpenApiPaths = {
       summary: "Users the caller may request on behalf of (REQUEST_ON_BEHALF)",
       description: "Active accounts only (deactivated ones are left out), at most 1000, by name. A non-ADMIN caller is offered only targets whose permissions are a subset of their own, since the bulk route refuses any other — read on past ineligible accounts until 1000 are found or 50,000 were scanned. A non-ADMIN caller gets every other account's email masked (its first character and the domain).",
       responses: {
+        "403": forbiddenAnswer("the REQUEST_ON_BEHALF permission"),
         "200": {
           description: "{ users: [{ id, name, email }], truncated }",
           content: {

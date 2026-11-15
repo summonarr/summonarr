@@ -150,7 +150,12 @@ export function filterNavByFeatures<T extends { href: string }>(
 // attention). Literal keys, pluralized on `count`.
 export const NAV_BADGE_LABEL_KEYS: Record<string, string> = {
   "/admin/queue": "nav.badge.queueAttention",
+  "/admin/activity": "nav.badge.activityStreams",
 };
+
+// Badges that are a plain live count, not something needing attention (the
+// streams playing now): drawn in the calm tone instead of the warning one.
+export const NAV_BADGE_INFO_HREFS: ReadonlySet<string> = new Set(["/admin/activity"]);
 
 // href → where that item links WHILE it carries a badge: the badge counts the
 // downloads needing attention, so a click lands on the queue's attention tab

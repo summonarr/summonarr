@@ -409,6 +409,17 @@ test("the admin play-history reads document their rows: active sessions, statist
   assert.match(lib, /export async function getTranscodeOffenders\(\n\s+filters: PlayHistoryStatsFilters = \{\},\n\s+limit = 6,/);
   for (const k of ["topUsers", "topTitles"]) assert.equal(prop(offenders, k).maxItems, 6, k);
 
+  // The users list: the spec's row is the route's own row builder, key for key,
+  // and its cap is the route's bound.
+  const usersSrc = routeSource("/play-history/users");
+  const usersAnswer = await responseSchema("/play-history/users", "get", "200");
+  assert.deepEqual(keysOf(usersAnswer), ["truncated", "users"].sort());
+  assert.deepEqual(keysOf(prop(usersAnswer, "users").items), keysOfObject(returnedObject(usersSrc, "userActivityRow")));
+  assert.equal(
+    prop(usersAnswer, "users").maxItems,
+    Number(/const MAX_LISTED_USERS = ([\d_]+);/.exec(usersSrc)?.[1].replace(/_/g, "")),
+  );
+
   const exportOp = (await getSpec()).paths["/play-history/export"].get.responses["200"];
   assert.ok(exportOp.content?.["text/csv"], "the CSV body");
   const rows = exportOp.content?.["application/json"]?.schema;

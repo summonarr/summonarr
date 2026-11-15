@@ -99,7 +99,11 @@ function makeFormatters(t: Translator, locale: string, now: Date): Fmt {
           ? t("adminManage.stats.hours", vars)
           : t("adminManage.stats.days", vars);
     },
-    ageDays: (iso) => (iso ? Math.max(0, Math.floor((now.getTime() - new Date(iso).getTime()) / DAY_MS)) : null),
+    ageDays: (iso) => {
+      if (!iso) return null;
+      const days = Math.floor((now.getTime() - new Date(iso).getTime()) / DAY_MS);
+      return Number.isFinite(days) ? Math.max(0, days) : null;
+    },
   };
 }
 
@@ -816,19 +820,22 @@ async function StorageSection({ f }: { f: Fmt }) {
       <div className="grid grid-cols-1 lg:grid-cols-2" style={{ gap: 24 }}>
         <div>
           <SubHeading>{t("adminManage.stats.diskSpace")}</SubHeading>
-          {storage.disks.map((d) => (
-            <Meter
-              key={`${d.path}:${d.totalSpace}`}
-              label={d.label}
-              pct={d.usedPct}
-              detail={t("adminManage.stats.diskUsed", {
-                used: f.bytes(d.totalSpace - d.freeSpace),
-                total: f.bytes(d.totalSpace),
-              })}
-              valueText={t("adminManage.stats.diskFree", { free: f.bytes(d.freeSpace) })}
-              sub={`${t("adminManage.stats.diskFree", { free: f.bytes(d.freeSpace) })} · ${d.reportedBy.join(", ")}`}
-            />
-          ))}
+          {storage.disks.map((d) => {
+            const freeText = t("adminManage.stats.diskFree", { free: f.bytes(d.freeSpace) });
+            return (
+              <Meter
+                key={`${d.path}:${d.totalSpace}`}
+                label={d.label}
+                pct={d.usedPct}
+                detail={t("adminManage.stats.diskUsed", {
+                  used: f.bytes(d.totalSpace - d.freeSpace),
+                  total: f.bytes(d.totalSpace),
+                })}
+                valueText={freeText}
+                sub={`${freeText} · ${d.reportedBy.join(", ")}`}
+              />
+            );
+          })}
           {storage.unreachable.map((u) => (
             <StatsNote key={`${u.service}:${u.slug}`} tone="warning">
               {t("adminManage.stats.unreachable", { name: u.label })}

@@ -2,6 +2,7 @@ import "server-only";
 import { Prisma } from "@/generated/prisma";
 import { prisma } from "./prisma";
 import { deletionVoteMarkerKey } from "./deletion-vote-keys";
+import { availableOutboxInsert } from "./outbox";
 
 type MediaType = "MOVIE" | "TV";
 
@@ -25,6 +26,10 @@ export type AvailableNotificationClaim<T> = {
  * the race for a row sees zero rows affected (notifiedAvailable already true
  * by the time their WHERE clause re-evaluates), so the row appears only in
  * the genuine winner's RETURNING set.
+ *
+ * `opts.actorId` is the account acting by hand (the admin's manual "mark
+ * available"): a request that account filed itself is claimed like any other
+ * but queues no notice, and the caller sends none.
  *
  * When `opts.markAvailable=true` (used by sync paths that also need to flip
  * status), the same UPDATE additionally writes `status='AVAILABLE'` and
@@ -52,7 +57,7 @@ export type AvailableNotificationClaim<T> = {
  */
 export async function claimAvailableNotifications<T extends { id: string; requestedBy: string }>(
   candidates: readonly T[],
-  opts: { markAvailable?: boolean; requireStatusAvailable?: boolean } = {},
+  opts: { markAvailable?: boolean; requireStatusAvailable?: boolean; actorId?: string } = {},
 ): Promise<AvailableNotificationClaim<T>> {
   if (candidates.length === 0) return { claimed: [], deliverable: [] };
   const ids = candidates.map((r) => r.id);
@@ -69,25 +74,36 @@ export async function claimAvailableNotifications<T extends { id: string; reques
   // requester of content the admin just declined. A row that turned AVAILABLE
   // mid-run (webhook flip) is intentionally skipped here; the webhook's own
   // poller and the orchestrator's requireStatusAvailable fallback pick it up.
-  const updated = opts.markAvailable
-    ? await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+  // The claim and the notifications it owes are ONE statement: the RETURNING
+  // rows feed the outbox insert in the same data-modifying CTE (outbox.ts), so
+  // there is no instant at which notifiedAvailable is burned and nothing
+  // records that a send is due. Still one atomic UPDATE for the CAS itself.
+  const returning = Prisma.sql`RETURNING id, "requestedBy", title, "mediaType", "tmdbId", "posterPath", "arrInstance"`;
+  const claim = opts.markAvailable
+    ? Prisma.sql`
         UPDATE "MediaRequest"
         SET "notifiedAvailable" = true,
             "status" = 'AVAILABLE',
-            "availableAt" = NOW()
+            "availableAt" = NOW(),
+            "pendingNotifyAt" = NULL
         WHERE id IN (${Prisma.join(ids)})
           AND "notifiedAvailable" = false
           AND "status" IN ('PENDING', 'APPROVED')
-        RETURNING id
-      `)
-    : await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+        ${returning}
+      `
+    : Prisma.sql`
         UPDATE "MediaRequest"
         SET "notifiedAvailable" = true
         WHERE id IN (${Prisma.join(ids)})
           AND "notifiedAvailable" = false
           ${statusGuard}
-        RETURNING id
-      `);
+        ${returning}
+      `;
+  const updated = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+    WITH claimed AS (${claim}),
+    queued AS (${availableOutboxInsert(Prisma.sql`claimed`, { exceptRequester: opts.actorId })})
+    SELECT id FROM claimed
+  `);
   if (updated.length === 0) return { claimed: [], deliverable: [] };
   const winnerIds = new Set(updated.map((r) => r.id));
   const claimed = candidates.filter((r) => winnerIds.has(r.id));
@@ -109,7 +125,7 @@ export async function claimAvailableNotifications<T extends { id: string; reques
  */
 export async function claimAvailableNotificationWinners<T extends { id: string; requestedBy: string }>(
   candidates: readonly T[],
-  opts: { markAvailable?: boolean; requireStatusAvailable?: boolean } = {},
+  opts: { markAvailable?: boolean; requireStatusAvailable?: boolean; actorId?: string } = {},
 ): Promise<T[]> {
   return (await claimAvailableNotifications(candidates, opts)).deliverable;
 }

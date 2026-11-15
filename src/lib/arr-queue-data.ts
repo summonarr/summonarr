@@ -10,7 +10,8 @@ import { ArrResponseError, arrErrorMessage, arrFetch, arrFetchNoContent, getArrC
 import { ArrInstanceError, configuredArrCfg, enabledArrInstances, postArrCommand } from "./arr-admin";
 import { settleArrInstances } from "./arr-instance-fanout";
 import type { ArrErrorKind } from "./arr-error-kind";
-import { pagedReadEnded } from "./arr-parse";
+import { pagedReadEnded, PROJECTION_SCAN_FACTOR } from "./arr-parse";
+import { MAX_TITLE_EPISODES } from "./arr-title";
 import { mapLimit } from "./concurrency";
 import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
 import { prisma } from "./prisma";
@@ -243,9 +244,7 @@ async function readQueueForPage(service: QueueService, instance: string): Promis
   const budget = AbortSignal.timeout(QUEUE_LISTING_BUDGET_MS);
   const listing = await readQueueListing(cfg, service, budget);
   if (listing.stopped && listing.pages === 0) {
-    const err = new Error(`queue read timed out after ${QUEUE_LISTING_BUDGET_MS / 1000}s`);
-    err.name = "TimeoutError";
-    throw err;
+    throw queueBudgetError();
   }
   return { listing, rows: foldQueueRecords(service, instance, listing.records), cut: listing.truncated || listing.stopped };
 }
@@ -299,14 +298,37 @@ async function configuredCfg(service: QueueService, instance: string): Promise<A
 // page shifts the next page's first record back onto the page already read. So
 // a walk of several pages that misses a posted id is read again ONCE before the
 // id is called gone. Every id sent is still named by a fresh read (5c/5e).
-async function liveQueueRows(cfg: ArrCfg, service: QueueService, instance: string, ids: readonly number[]): Promise<QueueItem[]> {
-  const first = await readQueueListing(cfg, service);
+async function liveQueueRows(
+  cfg: ArrCfg,
+  service: QueueService,
+  instance: string,
+  ids: readonly number[],
+): Promise<{ rows: QueueItem[]; cut: boolean }> {
+  // One budget covers both reads. A walk the budget cut short is never trusted
+  // as "gone": nothing read means a timeout, and a partial read only matches
+  // what it did see (a posted id it missed is dropped, never sent). `cut` tells
+  // the caller the answer is partial, so "nothing matched" is a timeout there,
+  // never "gone".
+  const budget = AbortSignal.timeout(QUEUE_LISTING_BUDGET_MS);
+  const first = await readQueueListing(cfg, service, budget);
+  if (first.stopped && first.pages === 0) throw queueBudgetError();
   const rows = foldQueueRecords(service, instance, first.records);
-  if (first.pages <= 1) return rows;
+  if (first.stopped) return { rows, cut: true };
+  if (first.pages <= 1) return { rows, cut: false };
   const live = new Set<number>();
   for (const row of rows) for (const id of row.ids) live.add(id);
-  if (ids.every((id) => live.has(id))) return rows;
-  return foldQueueRecords(service, instance, (await readQueueListing(cfg, service)).records);
+  if (ids.every((id) => live.has(id))) return { rows, cut: false };
+  const second = await readQueueListing(cfg, service, budget);
+  // A cut second read never replaces the complete first one: what the first
+  // read named is still sent, and an id it missed is not called gone.
+  if (second.stopped) return { rows, cut: true };
+  return { rows: foldQueueRecords(service, instance, second.records), cut: false };
+}
+
+function queueBudgetError(): Error {
+  const err = new Error(`queue read timed out after ${QUEUE_LISTING_BUDGET_MS / 1000}s`);
+  err.name = "TimeoutError";
+  return err;
 }
 
 /**
@@ -326,8 +348,9 @@ export async function removeFromQueue(
   method: QueueRemoveMethod,
 ): Promise<number[]> {
   const cfg = await configuredCfg(service, instance);
-  const idsToSend = liveRemovalIds(await liveQueueRows(cfg, service, instance, ids), ids);
-  if (idsToSend.length === 0) throw new QueueGoneError();
+  const live = await liveQueueRows(cfg, service, instance, ids);
+  const idsToSend = liveRemovalIds(live.rows, ids);
+  if (idsToSend.length === 0) throw live.cut ? queueBudgetError() : new QueueGoneError();
   await arrFetchNoContent(cfg, `/api/v3/queue/bulk?${queueRemoveQuery(action, method)}`, {
     method: "DELETE",
     body: JSON.stringify({ ids: idsToSend }),
@@ -345,8 +368,9 @@ export async function removeFromQueue(
  */
 export async function grabPending(service: QueueService, instance: string, ids: readonly number[]): Promise<number[]> {
   const cfg = await configuredCfg(service, instance);
-  const idsToSend = liveGrabIds(await liveQueueRows(cfg, service, instance, ids), ids);
-  if (idsToSend.length === 0) throw new QueueGoneError();
+  const live = await liveQueueRows(cfg, service, instance, ids);
+  const idsToSend = liveGrabIds(live.rows, ids);
+  if (idsToSend.length === 0) throw live.cut ? queueBudgetError() : new QueueGoneError();
   await arrFetchNoContent(cfg, "/api/v3/queue/grab/bulk", { method: "POST", body: JSON.stringify({ ids: idsToSend }) });
   return idsToSend;
 }
@@ -612,13 +636,17 @@ export async function searchImportTargets(service: QueueService, instance: strin
 
 export interface ImportEpisodeChoice extends QueueEpisode { id: number; title: string; hasFile: boolean }
 
-/** One Sonarr series' episodes, for picking what a file holds. */
-export async function loadSeriesEpisodes(instance: string, seriesId: number): Promise<ImportEpisodeChoice[]> {
-  const cfg = await configuredCfg("sonarr", instance);
-  const rows = await arrFetch<unknown>(cfg, `/api/v3/episode?seriesId=${seriesId}`);
+/**
+ * A series' /api/v3/episode list as the picker's choices. arrFetch caps the
+ * answer only by size, and this is projected and sorted synchronously, so it
+ * keeps at most the title manager's MAX_TITLE_EPISODES and reads at most
+ * PROJECTION_SCAN_FACTOR times that of the raw list (guardrail 5i).
+ */
+export function projectImportEpisodes(rows: unknown): ImportEpisodeChoice[] {
   if (!Array.isArray(rows)) return [];
   const out: ImportEpisodeChoice[] = [];
-  for (const e of rows as Array<{ id?: unknown; seasonNumber?: unknown; episodeNumber?: unknown; title?: unknown; hasFile?: unknown } | null>) {
+  for (let i = 0, n = Math.min(rows.length, MAX_TITLE_EPISODES * PROJECTION_SCAN_FACTOR); i < n && out.length < MAX_TITLE_EPISODES; i++) {
+    const e = rows[i] as { id?: unknown; seasonNumber?: unknown; episodeNumber?: unknown; title?: unknown; hasFile?: unknown } | null;
     if (typeof e?.id !== "number" || typeof e.seasonNumber !== "number" || typeof e.episodeNumber !== "number") continue;
     out.push({
       id: e.id,
@@ -629,4 +657,10 @@ export async function loadSeriesEpisodes(instance: string, seriesId: number): Pr
     });
   }
   return out.sort((a, b) => a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber);
+}
+
+/** One Sonarr series' episodes, for picking what a file holds. */
+export async function loadSeriesEpisodes(instance: string, seriesId: number): Promise<ImportEpisodeChoice[]> {
+  const cfg = await configuredCfg("sonarr", instance);
+  return projectImportEpisodes(await arrFetch<unknown>(cfg, `/api/v3/episode?seriesId=${seriesId}`));
 }

@@ -715,13 +715,11 @@ test("PATCH: letter cutoffs must stay strictly descending against the STORED val
   }
 });
 
-// ---------------------------------------------------------------------------
 // The machine-session guard. POST /api/auth/machine-session mints a fully
 // privileged ADMIN session for any caller holding CRON_SECRET, and its own IP
 // check only applies when the allowlist is non-empty — so "feature on + empty
 // allowlist" means any IP can mint an admin session. This guard exists to make
 // that state unreachable.
-// ---------------------------------------------------------------------------
 
 test("machine-session: enabling with an empty allowlist is refused", async () => {
   const admin = await mintSession("ADMIN");
@@ -1060,6 +1058,27 @@ test("PATCH: an empty discordGuildId / discordClientId / discordPublicKey / site
   }
 });
 
+test("PATCH: a blank discordBotToken (the form's explicit Remove) is written, while the bare mask is never stored", async () => {
+  const { MASKED_VALUE } = await import("../src/lib/settings-registry.ts");
+  settings.set("discordBotToken", "live-bot-token-to-remove");
+  const admin = await mintSession("ADMIN");
+  const realNow = Date.now;
+  Date.now = () => realNow() + 120_000;
+  try {
+    const mask = await PATCH(patchReq(JSON.stringify({ discordBotToken: MASKED_VALUE }), admin.header), undefined);
+    assert.equal(mask.status, 200);
+    assert.equal(upsertFor("discordBotToken").length, 0, "an echoed mask must never overwrite the token");
+    Date.now = () => realNow() + 240_000;
+    const res = await PATCH(patchReq(JSON.stringify({ discordBotToken: "" }), admin.header), undefined);
+    assert.equal(res.status, 200);
+  } finally {
+    Date.now = realNow;
+  }
+  const write = upsertFor("discordBotToken")[0];
+  assert.ok(write, "removing the bot token must reach the database");
+  assert.equal(write.create.value, "");
+});
+
 // ════════════════════════════════════════════════════════════════════════════
 // PATCH — the MDBList plan (mdblist-plan.ts)
 // ════════════════════════════════════════════════════════════════════════════
@@ -1292,16 +1311,16 @@ test("PATCH: an empty body, an all-masked body and an all-unchanged body answer 
 });
 
 test("PATCH: a blank for a key that can't be cleared is reported in `ignored` (when it would have replaced a stored value) and writes nothing", async () => {
-  // The Discord bot token is masked on GET, so a blank submit can't be told
-  // from an echo; it must never wipe the token — but the answer must not
-  // pretend it was saved either.
-  settings.set("discordBotToken", "live-bot-token");
+  // The SMTP password is masked on GET and edited through the mask echo, so a
+  // blank submit can't be told from an echo; it must never wipe the secret —
+  // but the answer must not pretend it was saved either.
+  settings.set("smtpPassword", "live-smtp-password");
   settings.set("smtpPort", "587");
   const admin = await mintSession("ADMIN");
-  const res = await patchLater({ discordBotToken: "", smtpPort: "", smtpPassword: "", siteTitle: "Blanks" }, admin.header);
+  const res = await patchLater({ smtpPort: "", smtpPassword: "", siteTitle: "Blanks" }, admin.header);
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { ok: true, ignored: ["discordBotToken", "smtpPort"] }, "smtpPassword holds nothing, so its blank changed nothing");
-  assert.equal(settings.get("discordBotToken"), "live-bot-token");
+  assert.deepEqual(await res.json(), { ok: true, ignored: ["smtpPort", "smtpPassword"] });
+  assert.equal(settings.get("smtpPassword"), "live-smtp-password");
   assert.equal(settings.get("smtpPort"), "587", "email.ts reads a blank port as invalid, so it stays non-clearable");
   assert.deepEqual(upsertCalls.map((u) => u.where.key), ["siteTitle"]);
 });

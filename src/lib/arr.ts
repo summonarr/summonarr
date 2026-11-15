@@ -289,15 +289,30 @@ export async function getMovieReleaseInfo(tmdbId: number): Promise<{
         headers: auth.headers,
         timeoutMs: 10_000,
       });
-      if (!res.ok) return null;
+      const logKey = `arr:release-info:${tmdbId}`;
+      if (!res.ok) {
+        warnOnChange(logKey, String(res.status), `[arr] TMDB release dates for ${tmdbId} answered ${res.status}`);
+        return null;
+      }
       const body = check(TmdbReleaseDates, await res.json());
       // An unusable answer is a failed fetch: nothing is cached.
-      if (!body.ok) return null;
+      if (!body.ok) {
+        warnOnChange(logKey, "unusable", `[arr] TMDB release dates for ${tmdbId} sent an unusable answer`);
+        return null;
+      }
+      forgetWarnOnChange(logKey);
       details = releaseInfoFrom(body.value);
-      await setCache(cacheKey, details, TTL.DETAILS);
+      // The answer is good whether or not it could be kept.
+      await setCache(cacheKey, details, TTL.DETAILS).catch((err: unknown) => {
+        console.warn("[arr] release-info cache write failed for tmdbId %s:", tmdbId, err instanceof Error ? err.message : err);
+      });
     }
     return homeReleaseDates(details);
-  } catch { return null; }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    warnOnChange(`arr:release-info:${tmdbId}`, message, `[arr] TMDB release dates for ${tmdbId} failed: ${message}`);
+    return null;
+  }
 }
 
 // ── Sonarr series by tmdb id ────────────────────────────────────────────────
@@ -360,7 +375,12 @@ export type SeriesDownloadVerdict =
   // tmdbId: the one Sonarr's own library row carries (null when it has none —
   // Sonarr v3, or a series it never mapped). The webhook keys a tvdb-only
   // event's cache rows on it, as the sync writer does.
-  | { downloaded: true; tmdbId: number | null; episodeFileCount: number; episodeCount: number }
+  // tmdbIdConfirmed: Sonarr itself tied the PAYLOAD's tmdbId to this series —
+  // the library row names it, or the tmdb lookup resolved it to this tvdbId.
+  // False when the payload carried none, or carried one nothing vouched for (a
+  // row with no tmdbId and a lookup that resolved nothing): the webhook then
+  // never finds requests by it, only by the tvdbId.
+  | { downloaded: true; tmdbId: number | null; tmdbIdConfirmed: boolean; episodeFileCount: number; episodeCount: number }
   | { downloaded: false; reason: "incomplete"; episodeFileCount: number; episodeCount: number }
   | { downloaded: false; reason: "absent" | "ids-disagree" };
 
@@ -442,8 +462,15 @@ export async function isSeriesDownloadedInSonarr(
       );
       return { downloaded: false, reason: "ids-disagree" };
     }
+    // Whether Sonarr vouched for the payload's tmdbId. With no payload tvdbId
+    // the row was FOUND through the lookup of that tmdbId, which is the tie.
+    let tmdbIdConfirmed = claimedTmdbId !== null && (payloadTvdbId === null || libraryTmdbId === claimedTmdbId);
     if (bothIds && libraryTmdbId === null) {
       const resolved = await lookupTvdbId(claimedTmdbId);
+      // Resolved to this series: confirmed. Unresolved: the pair is neither
+      // refused nor confirmed — the series' completeness still stands on the
+      // tvdbId, but nothing may be keyed on the payload's tmdbId.
+      tmdbIdConfirmed = resolved === tvdbId;
       if (resolved !== null && resolved !== tvdbId) {
         console.warn(
           "[arr] Sonarr download check: payload ids disagree (tvdbId=%s resolves tmdbId=%s to tvdbId=%s); treating as not downloaded.",
@@ -455,7 +482,7 @@ export async function isSeriesDownloadedInSonarr(
 
     const { complete, episodeFileCount, episodeCount } = sonarrSeriesCompletion(match as SonarrSeriesStatsRow);
     return complete
-      ? { downloaded: true, tmdbId: libraryTmdbId, episodeFileCount, episodeCount }
+      ? { downloaded: true, tmdbId: libraryTmdbId, tmdbIdConfirmed, episodeFileCount, episodeCount }
       : { downloaded: false, reason: "incomplete", episodeFileCount, episodeCount };
   } catch (err) {
     console.warn("[arr] isSeriesDownloadedInSonarr failed:", arrErrorMessage(err));

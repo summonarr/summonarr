@@ -1,4 +1,4 @@
-// Audit fix C090: the Arr System Storage tab lends a root folder a disk's size
+// the Arr System Storage tab lends a root folder a disk's size
 // only when rootDisk believes the match (free space agrees within
 // max(1 GB, 1%)) — the same rule the Radarr/Sonarr monitor judges disks by
 // (guardrail 7c). A root on a mount /diskspace doesn't list (mergerfs, Unraid

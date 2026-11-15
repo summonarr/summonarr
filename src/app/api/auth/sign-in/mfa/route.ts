@@ -27,7 +27,8 @@ import type { Translator } from "@/lib/i18n/translate";
 // disabled-account refusal (33) are the shared ones, not a parallel copy.
 //
 // Throttles: per IP (every attempt), per account for CODE methods (reserved,
-// refunded on success — the credentials-route pattern), per challenge token (burns after
+// kept only for a code checked and found wrong, refunded on every other exit —
+// the credentials-route pattern), per challenge token (burns after
 // MAX_TOKEN_FAILURES wrong answers, consumed on success, and RESERVED for the
 // duration of one verification so parallel requests can't both spend a
 // factor), and the PERSISTENT per-account code lockout in src/lib/mfa/lockout.ts
@@ -115,25 +116,50 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: t("apiAuth.common.tooManyAttempts15") }, { status: 429 });
   }
 
-  // Local login switched off after the password step ⇒ no completion either.
-  const disableRow = await prisma.setting.findUnique({ where: { key: "disableLocalLogin" } });
-  if (disableRow?.value === "true") return expired(t);
+  // The hit counts WRONG CODES only. Every exit that never judged a code gives
+  // it back — otherwise a double-submit, an expired challenge or a database
+  // fault spent the owner's ten attempts without one guess being made. A
+  // passkey attempt reserved nothing (userHitAt 0 removes nothing).
+  const refund = () => {
+    if (isCode) refundHit(userKey, userHitAt);
+  };
 
-  const user = await prisma.user.findUnique({
-    where: { id: claims.userId },
-    select: { id: true, email: true, name: true, role: true, passwordHash: true },
-  });
+  // Local login switched off after the password step ⇒ no completion either.
+  let disableRow;
+  let user;
+  try {
+    disableRow = await prisma.setting.findUnique({ where: { key: "disableLocalLogin" } });
+    user =
+      disableRow?.value === "true"
+        ? null
+        : await prisma.user.findUnique({
+            where: { id: claims.userId },
+            select: { id: true, email: true, name: true, role: true, passwordHash: true },
+          });
+  } catch (err) {
+    refund();
+    throw err;
+  }
+  if (disableRow?.value === "true") {
+    refund();
+    return expired(t);
+  }
+
   // A password change (or a purge, which nulls the hash) since the password
   // step kills the challenge.
-  if (!user?.passwordHash || !safeCompareStrings(passwordVersion(user.passwordHash), claims.pwv)) return expired(t);
+  if (!user?.passwordHash || !safeCompareStrings(passwordVersion(user.passwordHash), claims.pwv)) {
+    refund();
+    return expired(t);
+  }
 
-  const refused = await verifyClaimedFactor(t, claims, user.id, input, ip, ua, fail);
+  const refused = await verifyClaimedFactor(t, claims, user.id, input, ip, ua, fail, refund);
   if (refused) return refused;
 
+  // The code was correct: the hit goes back whether or not the commit lands.
+  refund();
   // One challenge, one session. Only the reservation holder gets here; this
   // fails only if the entry was evicted meanwhile.
   if (!commitToken(claims.jti)) return expired(t);
-  refundHit(userKey, userHitAt);
 
   const device = buildDeviceMeta(req.headers);
   let result;
@@ -162,7 +188,8 @@ type MfaClaims = NonNullable<Awaited<ReturnType<typeof verifyMfaSigninToken>>>;
 
 // Claim the challenge, verify the factor, settle the claim. Answers the
 // refusal, or null once the factor verified (the claim is still reserved for
-// the caller to commit).
+// the caller to commit). `refund` gives back the caller's reserved per-account
+// hit; it is called on every refusal that did not judge a code wrong.
 async function verifyClaimedFactor(
   t: Translator,
   claims: MfaClaims,
@@ -171,6 +198,7 @@ async function verifyClaimedFactor(
   ip: string,
   ua: string | null,
   fail: AuditFailure,
+  refund: () => void,
 ): Promise<NextResponse | null> {
   // Claim the challenge BEFORE touching the factor. The factor verifiers burn
   // single-use state in the DB (a recovery code, a TOTP step, a passkey
@@ -179,10 +207,15 @@ async function verifyClaimedFactor(
   // codes. reserveToken is a synchronous check-and-set: the loser is refused
   // here without verifying anything.
   if (!reserveToken(claims.jti)) {
+    refund();
     if (!isTokenUsable(claims.jti)) return expired(t);
     return NextResponse.json({ error: t("apiAuth.mfa.alreadyVerifying") }, { status: 409 });
   }
 
+  // Set by the guard the moment a code is checked and found wrong. Only then
+  // is the account hit kept — including when counting that failure throws, or
+  // when it is the failure that imposes the lockout.
+  let judgedWrong = false;
   let verdict;
   try {
     verdict = await verifySecondFactorGuarded(userId, input, {
@@ -191,9 +224,13 @@ async function verifyClaimedFactor(
       context: "sign-in",
       ipAddress: ip,
       userAgent: ua,
+      onWrongCode: () => {
+        judgedWrong = true;
+      },
     });
   } catch (err) {
     releaseToken(claims.jti, { failed: false });
+    if (!judgedWrong) refund();
     throw err;
   }
   if (!verdict.ok) {
@@ -201,6 +238,7 @@ async function verifyClaimedFactor(
       // Persistent lockout (lockout.ts): no code was checked against this
       // account, so the token is released without a failure.
       releaseToken(claims.jti, { failed: false });
+      if (!judgedWrong) refund();
       fail("mfa_locked", userId, { method: input.method });
       return NextResponse.json({ error: t("apiAuth.mfa.locked") }, { status: 429 });
     }

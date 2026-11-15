@@ -163,6 +163,7 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
   // Next pin the week the admin chose. Both are refs so `load` keeps its deps.
   const followToday = useRef(initialView.week === null);
   const firstDayRef = useRef(1);
+  const loadAbort = useRef<AbortController | null>(null);
 
   // "Today" follows the newest report's clock, so a page left open overnight
   // still knows which day it is.
@@ -199,6 +200,9 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
 
   const load = useCallback(async (from: number, withUnmonitored: boolean) => {
     const id = ++seq.current;
+    loadAbort.current?.abort();
+    const controller = new AbortController();
+    loadAbort.current = controller;
     setLoading(true);
     setError("");
     try {
@@ -207,9 +211,11 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
       const res = await fetchJson(calendarReadUrl(from, withUnmonitored), {
         schema: CalendarReportSchema,
         timeoutMs: LOAD_TIMEOUT_MS,
+        signal: controller.signal,
         fallbackError: t("adminArr.calendar.loadFailed"),
       });
       if (id !== seq.current) return;
+      if (!res.ok && res.kind === "aborted") return;
       if (!res.ok) {
         setError(res.error || t("adminArr.calendar.loadFailed"));
         return;
@@ -237,6 +243,8 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
   useEffect(() => {
     if (start !== null && instances.length > 0) void load(start, unmonitored);
   }, [start, unmonitored, instances.length, load]);
+
+  useEffect(() => () => loadAbort.current?.abort(), []);
 
   // Keep the view in the URL so a reload or a shared link lands on it. The
   // current week is left out, so a bookmark keeps meaning "this week".

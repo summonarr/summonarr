@@ -304,6 +304,25 @@ test("an uncached stats load keeps at most three statements in flight, leaving p
   assert.ok(captured.length > 20, `every statement still ran (${captured.length})`);
 });
 
+test("an uncached heatmap-cell load keeps at most three statements in flight", async () => {
+  captured = [];
+  inFlight = 0;
+  peakInFlight = 0;
+  const release = holdStatements();
+  const load = getHeatmapCellDetail({ mode: "hour", days: freshDays(), dow: 3, hour: 19 });
+  let parked: number;
+  try {
+    await settleMany();
+    parked = inFlight;
+  } finally {
+    release();
+  }
+  await load;
+  assert.equal(parked, 3, "parked at the cap, not with all five statements started");
+  assert.equal(peakInFlight, 3, "never more than three statements at once (the pool holds five)");
+  assert.equal(captured.length, 5, "every statement still ran");
+});
+
 test("the arc chain runs ONCE per stats load: completion rate and histogram come from one statement", async () => {
   const queries = await capture(() => getPlayHistoryStats({ days: freshDays(), source: "plex" }));
   const arcs = one(queries, "arc_flags");
@@ -470,6 +489,24 @@ test("/popular pages are slices of ONE cached ranking: one statement serves ever
     assert.equal(queries.filter((q) => q.sql.includes("completed_arcs")).length, 1, "every page came from one ranking statement");
   } finally {
     canned = [];
+  }
+});
+
+test("/popular's page count is the pages the held ranking can serve, not the count of every played title", async () => {
+  clearActivityCache();
+  // The statement keeps a capped number of rows but counts every title: here
+  // 95 rows held out of 5,000. The pager must stop at the last held page.
+  const rows = Array.from({ length: 95 }, (_, i) => ({
+    tmdbId: i + 1, mediaType: "TV", title: `Show ${i + 1}`, year: null,
+    plays: BigInt(200 - i), allTimePlays: 1n, viewers: 1n, episodes: 0n, totalHours: 1, total_items: 5000n,
+  }));
+  canned = [{ marker: "completed_arcs", rows }];
+  try {
+    const first = await getMostPopularOnServer({ mediaType: "TV", sort: "viewers" });
+    assert.deepEqual([first.totalItems, first.totalPages], [5000, 3]);
+  } finally {
+    canned = [];
+    clearActivityCache();
   }
 });
 

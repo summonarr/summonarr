@@ -6,6 +6,7 @@ import { SimilarRow } from "@/components/media/similar-row";
 import { TVSeasons } from "@/components/media/tv-seasons";
 import { notFound } from "next/navigation";
 import { parseManageLink } from "@/lib/arr-links-data";
+import { formatReleaseDate } from "@/lib/format-release-date";
 import { prisma } from "@/lib/prisma";
 import { requireAppSession } from "@/lib/require-app-session";
 import { isTmdbIdInRange, parseTmdbIdParam } from "@/lib/tmdb-id";
@@ -86,12 +87,8 @@ export default async function TVDetailPage({
   // The viewer-scoped state (shared with the movie page) and this page's own
   // reads, together.
   const warnEmpty = (source: string) => emptyOnFailure("tv-page", source, media.id);
-  const { state, tvdbRequest, cast, rawSuggestions, ownedEpisodes, genreList } = await allNamed({
+  const { state, cast, rawSuggestions, ownedEpisodes, genreList } = await allNamed({
     state: loadDetailPageState(session, media, "TV"),
-    tvdbRequest: prisma.mediaRequest.findFirst({
-      where: { tmdbId: media.id, mediaType: "TV", tvdbId: { not: null } },
-      select: { tvdbId: true },
-    }),
     cast: getTVCredits(media.id).catch(warnEmpty("credits")),
     rawSuggestions: getTVSuggestions(media.id).catch(warnEmpty("suggestions")),
     // Fetched for every source the viewer's PROVIDER allows, then filtered
@@ -123,8 +120,8 @@ export default async function TVDetailPage({
     seen.add(key);
     (ownedBySeason[row.seasonNumber] ??= []).push(row.episodeNumber);
   }
-  const tvdbId = tvdbRequest?.tvdbId ?? null;
   const { showPlex, showJellyfin, show4k } = state;
+  const nextEpisodeDate = formatReleaseDate(media.nextEpisodeAirDate, locale);
   const canRequestTv = canRequest(session.user.permissions, "TV", false);
 
   const suggestions = await attachAllAvailability(rawSuggestions, session.user.id, { blockRatings: true, show4k });
@@ -156,18 +153,12 @@ export default async function TVDetailPage({
         genreHref={(gid) => `/tv?genreId=${gid}`}
         genreAriaLabel={(genre) => t("detail.browseGenreTv", { genre })}
         extraLines={
-          media.nextEpisodeAirDate && (
+          // formatReleaseDate prints the date-only value in UTC and answers
+          // null for one it cannot parse, so a malformed date shows nothing
+          // instead of "Invalid Date".
+          nextEpisodeDate && (
             <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
-              {t("detail.nextEpisode")}{" "}
-              {/* TMDB air dates are date-only ("YYYY-MM-DD"), which Date parses
-                  as UTC midnight — format in UTC too, or a server running west
-                  of UTC renders the day before (same fix as formatReleaseDate). */}
-              {new Date(media.nextEpisodeAirDate).toLocaleDateString(locale, {
-                month: "short",
-                day: "numeric",
-                year: "numeric",
-                timeZone: "UTC",
-              })}
+              {t("detail.nextEpisode")} {nextEpisodeDate}
             </div>
           )
         }
@@ -177,7 +168,6 @@ export default async function TVDetailPage({
             mediaType="TV"
             state={state}
             canRequest={canRequestTv}
-            tvdbId={tvdbId}
             manageLink={manageLink}
             t={t}
           />

@@ -15,7 +15,7 @@
 // No DB, no network: prisma.setting/tmdbCache are shadowed, dns.lookup is
 // stubbed, every arr is an RFC1918 IP literal, and globalThis.fetch is scripted.
 // The queue is cached per URL for 15s, so every test uses its own URL.
-import { test, beforeEach } from "node:test";
+import { test, beforeEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import dns from "node:dns/promises";
 
@@ -71,7 +71,8 @@ shadowPrismaModel(prisma, "tmdbCache", {
 });
 
 const { isMovieDownloadingInRadarr, countRadarrQueue, isSeriesDownloadingInSonarr, countSonarrQueue } = await import("../src/lib/arr.ts");
-const { QUEUE_MAX_PAGES, foldQueueRecord } = await import("../src/lib/arr-queue-cache.ts");
+const { QUEUE_MAX_PAGES, QUEUE_STALE_MAX_AGE_MS, foldQueueRecord } = await import("../src/lib/arr-queue-cache.ts");
+const { DOWNLOAD_CHECK_DELAY_MS } = await import("../src/lib/download-check.ts");
 
 let instance = 0;
 beforeEach(() => {
@@ -153,6 +154,28 @@ test("an answer that isn't a queue page is a failed read: unknown, not an empty 
   pageOf = () => ({ totalRecords: 3 });
   assert.equal(await isMovieDownloadingInRadarr(1), null);
   assert.equal(await countRadarrQueue(), null);
+});
+
+test("a failed read falls back on the last queue state only while it is recent; an older one is unknown, never 'not downloading'", async () => {
+  assert.ok(QUEUE_STALE_MAX_AGE_MS < DOWNLOAD_CHECK_DELAY_MS, "a state the download check falls back on was read after the approval");
+  mock.timers.enable({ apis: ["Date"], now: 1_700_000_000_000 });
+  try {
+    pageOf = movieQueue(3);
+    assert.equal(await isMovieDownloadingInRadarr(99_999), false, "a complete read: confirmed absent");
+    pageOf = () => "<html>busy</html>";
+
+    // Past the 15s cache, inside the stale window: the last state still answers.
+    mock.timers.setTime(1_700_000_000_000 + QUEUE_STALE_MAX_AGE_MS);
+    assert.equal(await isMovieDownloadingInRadarr(99_999), false);
+    assert.equal(await isMovieDownloadingInRadarr(2), true);
+
+    // Older than that, the state may predate a grab: unknown for an unseen title, and no count.
+    mock.timers.setTime(1_700_000_000_000 + QUEUE_STALE_MAX_AGE_MS + 1);
+    assert.equal(await isMovieDownloadingInRadarr(99_999), null);
+    assert.equal(await countRadarrQueue(), null);
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test("foldQueueRecord: positive integer ids only; a series without a tmdbId marks the queue unmapped", () => {

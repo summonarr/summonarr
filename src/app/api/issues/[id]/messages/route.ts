@@ -11,10 +11,12 @@ import { hasPermission, Permission } from "@/lib/permissions";
 import { isFeatureEnabled } from "@/lib/features";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { promoteIssueInProgress } from "@/lib/issue-transitions";
-import { announceIssueReply } from "@/lib/issue-reply-notify";
+import { announceIssueReply, type IssueReplyAnnouncement } from "@/lib/issue-reply-notify";
+import { OUTBOX_ISSUE_REPLY_KIND, queueAnnouncement } from "@/lib/outbox";
 import { THREAD_READ_CAP } from "@/lib/api-body-limits";
 import { splitAtCap, truncationHeaders } from "@/lib/truncation";
 import { olderThanWhere, parseThreadCursor } from "@/lib/thread-cursor";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 import type { Issue } from "@/generated/prisma";
 import type { Translator } from "@/lib/i18n/translate";
 
@@ -105,24 +107,25 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
     return NextResponse.json({ error: t("apiUser.issues.messageBodyTooLong") }, { status: 400 });
   }
   const text = sanitizeText(rawText);
+  // Checked again AFTER sanitizing: "<>" or only zero-width characters passes
+  // the check above and sanitizes to nothing — an empty bubble that still
+  // reopened a resolved issue and notified the other side.
+  if (!text) {
+    return NextResponse.json({ error: t("apiUser.issues.messageBodyRequired") }, { status: 400 });
+  }
 
-  const message = await prisma.issueMessage.create({
-    data: {
-      issueId: id,
-      authorId: session.user.id,
-      body: text,
-      fromAdmin: isIssueAdmin,
+  // The issue was read above, outside any transaction: one deleted since then
+  // fails the message's foreign key (P2003), which is this route's 404, not a 500.
+  //
+  // The message and the announcement it owes commit together (guardrail 14f):
+  // the outbox row is the transaction's last statement, and the P2003 is caught
+  // out here, never inside it. The payload is a projection of the issue — plain
+  // JSON, only what the announcer reads.
+  const announcement: IssueReplyAnnouncement = {
+    issue: {
+      id: issue.id, title: issue.title, mediaType: issue.mediaType, tmdbId: issue.tmdbId, posterPath: issue.posterPath,
+      issueType: issue.issueType, reportedBy: issue.reportedBy, claimedBy: issue.claimedBy,
     },
-    // Mirror GET's author select (email for admins only) so a null-named author
-    // renders identically whether the thread was fetched or just posted to.
-    include: { author: { select: { name: true, role: true, ...(isIssueAdmin ? { email: true } : {}) } } },
-  });
-
-  await applyReplyStatusChange(issue, isIssueAdmin, session, req);
-  emitSSE({ type: "issuemessage:created", issueId: id, messageId: message.id, userId: issue.reportedBy });
-
-  await announceIssueReply({
-    issue,
     authorId: session.user.id,
     authorDisplayName: session.user.name ?? null,
     // Managers (the admin fan-out and the agents) see emails throughout the
@@ -131,7 +134,39 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
     authorName: session.user.name ?? session.user.email ?? "Someone",
     fromIssueAdmin: isIssueAdmin,
     text,
-  });
+  };
+  let message;
+  try {
+    message = await prisma.$transaction(async (tx) => {
+      const created = await tx.issueMessage.create({
+        data: {
+          issueId: id,
+          authorId: session.user.id,
+          body: text,
+          fromAdmin: isIssueAdmin,
+        },
+        // Mirror GET's author select (email for admins only) so a null-named author
+        // renders identically whether the thread was fetched or just posted to.
+        include: { author: { select: { name: true, role: true, ...(isIssueAdmin ? { email: true } : {}) } } },
+      });
+      await queueAnnouncement(tx, OUTBOX_ISSUE_REPLY_KIND, created.id, session.user.id, { ...announcement, issue: { ...announcement.issue }, messageId: created.id });
+      return created;
+    });
+  } catch (err) {
+    if (!isPrismaErrorCode(err, "P2003")) throw err;
+    return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
+  }
+
+  // The message is stored: a failed status follow-up must not turn the answer
+  // into a 500, or a retry would post the reply a second time.
+  try {
+    await applyReplyStatusChange(issue, isIssueAdmin, session, req);
+  } catch (err) {
+    console.error("[issues] Reply stored but its status change failed:", err instanceof Error ? err.message : err);
+  }
+  emitSSE({ type: "issuemessage:created", issueId: id, messageId: message.id, userId: issue.reportedBy });
+
+  await announceIssueReply({ ...announcement, messageId: message.id });
 
   return NextResponse.json(message, { status: 201 });
 });

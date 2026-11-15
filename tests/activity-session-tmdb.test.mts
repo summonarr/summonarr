@@ -43,17 +43,23 @@ const session = (over: Partial<{ source: string; serverInstance: string; sourceI
 });
 
 test("an item match by the session's own server item is backfillable; one row per item comes back from SQL", async () => {
-  itemRows = [{ serverInstance: "", sourceItemId: "k1", tmdbId: 60622, mediaType: "TV" }];
+  itemRows = [{ source: "plex", serverInstance: "", sourceItemId: "k1", tmdbId: 60622, mediaType: "TV" }];
   const [s] = await resolveActiveSessionTmdb([session({})]);
   assert.equal(s.effectiveTmdbId, 60622);
   assert.deepEqual(s.backfill, { tmdbId: 60622, mediaType: "TV" });
-  assert.match(raw[0].sql, /SELECT DISTINCT ON \("serverInstance", "sourceItemId"\)/);
+  assert.match(raw[0].sql, /SELECT DISTINCT ON \("source", "serverInstance", "sourceItemId"\)/);
   assert.match(raw[0].sql, /\("source" = \? AND "sourceItemId" IN \(\?\)\)/, "scoped by source");
   assert.deepEqual(raw[0].values, ["plex", "k1"]);
 });
 
 test("an id another server issued never resolves this server's session", async () => {
-  itemRows = [{ serverInstance: "other", sourceItemId: "k1", tmdbId: 1, mediaType: "TV" }];
+  itemRows = [{ source: "plex", serverInstance: "other", sourceItemId: "k1", tmdbId: 1, mediaType: "TV" }];
+  const [s] = await resolveActiveSessionTmdb([session({})]);
+  assert.equal(s.effectiveTmdbId, null);
+});
+
+test("a Jellyfin item with the same id and slug never resolves a Plex session", async () => {
+  itemRows = [{ source: "jellyfin", serverInstance: "", sourceItemId: "k1", tmdbId: 9, mediaType: "MOVIE" }];
   const [s] = await resolveActiveSessionTmdb([session({})]);
   assert.equal(s.effectiveTmdbId, null);
 });
@@ -79,7 +85,7 @@ test("a session that already has a tmdbId runs no lookup", async () => {
 });
 
 test("applySessionResolution reads the instance-scoped key", () => {
-  const items = new Map([[sessionItemKey("a", "k1"), { tmdbId: 3, mediaType: "TV" }]]);
+  const items = new Map([[sessionItemKey("plex", "a", "k1"), { tmdbId: 3, mediaType: "TV" }]]);
   assert.equal(applySessionResolution(session({ serverInstance: "a" }), items, {}).effectiveTmdbId, 3);
   assert.equal(applySessionResolution(session({ serverInstance: "b" }), items, {}).effectiveTmdbId, null);
 });

@@ -50,9 +50,10 @@ export const authPaths: OpenApiPaths = {
   "/auth/plex/client-id": {
     get: {
       tags: ["Auth"],
-      summary: "Get the Plex client ID for OAuth",
+      summary: "Get the signed-in user's stored Plex client ID",
+      description: "Not an app-wide id: it is the caller's own stored Plex client identifier. An anonymous caller, or a user with none stored, gets `{ clientId: null }` with status 200 (never a 401).",
       security: [],
-      responses: { "200": { description: "Plex client ID", content: { "application/json": { schema: { type: "object", properties: { clientId: { type: "string" } } } } } } },
+      responses: { "200": { description: "The caller's Plex client ID, or null", content: { "application/json": { schema: { type: "object", required: ["clientId"], properties: { clientId: { type: "string", nullable: true } } } } } } },
     },
   },
   "/auth/jellyfin/servers": {

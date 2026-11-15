@@ -4,21 +4,21 @@
 // client render harness).
 //
 // What is pinned:
-//   C052  Closing during a Settings save WAITS: its PATCH is already sent, so
+// Closing during a Settings save WAITS: its PATCH is already sent, so
 //         "discard your changes" would describe the opposite of what happens.
 //         SettingsTab reports the save; the banner's Discard is off meanwhile.
-//   C050  The History tab's Download Queue link goes through the same close
+// The History tab's Download Queue link goes through the same close
 //         rules: unsaved Settings edits ask first and the navigation is
 //         cancelled; a save in flight cancels it too.
-//   C058  Following that link closes the manager itself — on the Download
+// Following that link closes the manager itself — on the Download
 //         Queue a link to the URL already open re-renders nothing that would.
 //         A new-tab click leaves the page and the manager alone.
-//   C051  Seasons tab: a flip whose re-read failed (`title: null`) has the
+// Seasons tab: a flip whose re-read failed (`title: null`) has the
 //         manager read the title again; a season flip holds the switches until
 //         its list re-read answered; an episode flip re-reads a list whose
 //         older read is still in flight; every expand re-reads; and a title
 //         re-read with a season's header changed re-reads that open list.
-//   C049  Files tab: the delete confirm (an alertdialog) takes focus on open,
+// Files tab: the delete confirm (an alertdialog) takes focus on open,
 //         and gives it back to Delete (n) when it closes unconfirmed.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -37,9 +37,9 @@ function body(text: string, start: string): string {
   return end < 0 ? rest : rest.slice(0, end);
 }
 
-// ── C052 / C050: the close rules ───────────────────────────────────────────
+// ── the close rules ───────────────────────────────────────────
 
-test("C052: a close during a Settings save waits — whatever else is true", () => {
+test("a close during a Settings save waits — whatever else is true", () => {
   for (const dirty of [true, false]) {
     for (const confirming of [true, false]) {
       assert.equal(closeVerdict({ removed: false, saving: true, dirty, confirming }), "wait", `dirty=${dirty} confirming=${confirming}`);
@@ -47,7 +47,7 @@ test("C052: a close during a Settings save waits — whatever else is true", () 
   }
 });
 
-test("C050: unsaved edits ask first; the second ask (banner showing) closes; nothing to lose closes", () => {
+test("unsaved edits ask first; the second ask (banner showing) closes; nothing to lose closes", () => {
   assert.equal(closeVerdict({ removed: false, saving: false, dirty: true, confirming: false }), "confirm");
   assert.equal(closeVerdict({ removed: false, saving: false, dirty: true, confirming: true }), "close");
   assert.equal(closeVerdict({ removed: false, saving: false, dirty: false, confirming: false }), "close");
@@ -59,7 +59,7 @@ test("a removed title closes — its form is gone with it", () => {
   assert.equal(closeVerdict({ removed: true, saving: true, dirty: true, confirming: false }), "close");
 });
 
-test("C052: SettingsTab reports a save in flight, and stops on its answer or its unmount", () => {
+test("SettingsTab reports a save in flight, and stops on its answer or its unmount", () => {
   const tab = src("settings-tab.tsx");
   assert.match(tab, /onSavingChange\?: \(saving: boolean\) => void;/);
   assert.match(
@@ -69,7 +69,7 @@ test("C052: SettingsTab reports a save in flight, and stops on its answer or its
   );
 });
 
-test("C052/C050: the manager closes only through closeVerdict, fed the in-flight save", () => {
+test("the manager closes only through closeVerdict, fed the in-flight save", () => {
   const mgr = src("title-manager.tsx");
   const leave = body(mgr, "function leave(): boolean {");
   assert.match(leave, /closeVerdict\(\{ removed, saving: settingsSaving, dirty: settingsDirty, confirming: confirmDiscard \}\)/);
@@ -85,9 +85,9 @@ test("C052/C050: the manager closes only through closeVerdict, fed the in-flight
   assert.match(mgr, /setSettingsDirty\(false\);\s*setSettingsSaving\(false\);/, "the open-time reset clears it");
 });
 
-// ── C058 / C050: the History tab's queue link ──────────────────────────────
+// ── the History tab's queue link ──────────────────────────────
 
-test("C058/C050: the queue link asks the manager to leave, and cancels the navigation when it won't", () => {
+test("the queue link asks the manager to leave, and cancels the navigation when it won't", () => {
   const tab = src("history-tab.tsx");
   assert.match(tab, /onLeave\?: \(\) => boolean;/);
   const link = tab.slice(tab.indexOf("<Link"), tab.indexOf("</Link>"));
@@ -96,14 +96,14 @@ test("C058/C050: the queue link asks the manager to leave, and cancels the navig
   assert.match(src("title-manager.tsx"), /<HistoryTab titleRef=\{ref\} onLeave=\{leave\} \/>/, "the manager hands it its own close");
 });
 
-test("C058: a new-tab click is left to the browser; a plain click is the manager's", () => {
+test("a new-tab click is left to the browser; a plain click is the manager's", () => {
   const plain = { button: 0, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false };
   assert.equal(opensElsewhere(plain), false);
   for (const k of ["metaKey", "ctrlKey", "shiftKey", "altKey"] as const) assert.equal(opensElsewhere({ ...plain, [k]: true }), true, k);
   assert.equal(opensElsewhere({ ...plain, button: 1 }), true, "middle click");
 });
 
-// ── C051: the Seasons tab ──────────────────────────────────────────────────
+// ── the Seasons tab ──────────────────────────────────────────────────
 
 const season = (over: Partial<TitleSeason> = {}): TitleSeason => ({
   seasonNumber: 1,
@@ -117,14 +117,14 @@ const season = (over: Partial<TitleSeason> = {}): TitleSeason => ({
   ...over,
 });
 
-test("C051: a season seen for the first time is recorded, never reported", () => {
+test("a season seen for the first time is recorded, never reported", () => {
   const seen = new Map<number, string>();
   assert.deepEqual(staleSeasons(seen, [season(), season({ seasonNumber: 2 })]), []);
   assert.equal(seen.get(1), seasonSignature(season()));
   assert.deepEqual(staleSeasons(seen, [season(), season({ seasonNumber: 2 })]), [], "unchanged is not stale");
 });
 
-test("C051: every header field an episode row can disagree with makes the season stale", () => {
+test("every header field an episode row can disagree with makes the season stale", () => {
   const changes: Array<Partial<TitleSeason>> = [
     { monitored: false },
     { episodeCount: 9 },
@@ -140,7 +140,7 @@ test("C051: every header field an episode row can disagree with makes the season
   }
 });
 
-test("C051: a flip whose re-read failed is handed to the manager, which reads the title again", () => {
+test("a flip whose re-read failed is handed to the manager, which reads the title again", () => {
   const tab = src("seasons-tab.tsx");
   assert.match(tab, /onTitle: \(title: ArrTitle \| null\) => void;/);
   assert.doesNotMatch(tab, /if \(res\.data\.title\) onTitle/, "a null re-read is not swallowed");
@@ -152,7 +152,7 @@ test("C051: a flip whose re-read failed is handed to the manager, which reads th
   assert.match(handler, /mergeTitle\(s\.title, next\)/);
 });
 
-test("C051 (F073): a season flip holds the switches until its list re-read answered", () => {
+test(": a season flip holds the switches until its list re-read answered", () => {
   const fn = src("seasons-tab.tsx").split("async function setSeasonMonitored")[1].split("async function setEpisodeMonitored")[0];
   // Every switch waits while any of the tab's actions is out; the re-read runs under the flip's own key.
   assert.match(fn, /const key = `season:\$\{n\}`;/);
@@ -163,7 +163,7 @@ test("C051 (F073): a season flip holds the switches until its list re-read answe
   assert.match(src("seasons-tab.tsx"), /busy=\{action\.anyBusy\}/);
 });
 
-test("C051 (F073): an episode flip re-reads a season whose older read is still in flight", () => {
+test(": an episode flip re-reads a season whose older read is still in flight", () => {
   const tab = src("seasons-tab.tsx");
   const fn = tab.split("async function setEpisodeMonitored")[1].split("function command")[0];
   assert.match(fn, /if \(readInFlight\(season\)\) void loadEpisodes\(season\);/);
@@ -184,9 +184,9 @@ test("every expand re-reads, and a changed header re-reads an open list — once
   );
 });
 
-// ── C049: the Files tab's delete confirm ───────────────────────────────────
+// ── the Files tab's delete confirm ───────────────────────────────────
 
-test("C049: the delete confirm takes focus, and gives it back to Delete (n) when it closes unconfirmed", () => {
+test("the delete confirm takes focus, and gives it back to Delete (n) when it closes unconfirmed", () => {
   const tab = src("files-tab.tsx");
   assert.match(
     tab,

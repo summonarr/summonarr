@@ -62,6 +62,9 @@ test("empty candidate set returns [] without issuing a statement", async () => {
   assert.equal(queries.length, 0);
 });
 
+// The claim UPDATE alone: the text of the first CTE.
+const claimOf = (sql: string) => sql.slice(0, sql.indexOf("queued AS"));
+
 test("default path: single CAS statement, no status predicate, ids as bind params", async () => {
   queries.length = 0;
   nextRows = [{ id: "a" }];
@@ -71,11 +74,15 @@ test("default path: single CAS statement, no status predicate, ids as bind param
   // One statement — the TOCTOU fix means there is no snapshot query first.
   assert.equal(queries.length, 1);
   const sql = norm(queries[0].sql);
-  assert.match(sql, /^UPDATE "MediaRequest" SET "notifiedAvailable" = true WHERE id IN \(/);
+  // The claim is the first CTE; its rows feed the outbox insert in the SAME
+  // statement (outbox.ts), and the statement answers the claimed ids.
+  assert.match(sql, /^WITH claimed AS \( UPDATE "MediaRequest" SET "notifiedAvailable" = true WHERE id IN \(/);
   assert.match(sql, /AND "notifiedAvailable" = false/);
-  assert.match(sql, /RETURNING id$/);
+  assert.match(sql, /queued AS \( INSERT INTO "Outbox" /);
+  assert.match(sql, /FROM claimed c JOIN "User" u ON u\.id = c\."requestedBy" AND u\."deactivatedAt" IS NULL/);
+  assert.match(sql, /ON CONFLICT \("dedupeKey"\) DO NOTHING \) SELECT id FROM claimed$/);
   // No status guard of any kind on the default path.
-  assert.doesNotMatch(sql, /"status"/);
+  assert.doesNotMatch(claimOf(sql), /"status"/);
   // Ids travel as bind params (never interpolated into the SQL text).
   assert.deepEqual(queries[0].values, ["a", "b"]);
 
@@ -93,7 +100,9 @@ test("markAvailable: same statement also flips status, guarded to PENDING/APPROV
   assert.match(sql, /AND "notifiedAvailable" = false/);
   // The DECLINED-resurrection guard: only PENDING/APPROVED rows may be claimed.
   assert.match(sql, /AND "status" IN \('PENDING', 'APPROVED'\)/);
-  assert.match(sql, /RETURNING id$/);
+  assert.match(sql, /SELECT id FROM claimed$/);
+  // The outbox rows ride the same statement on this path too.
+  assert.match(sql, /queued AS \( INSERT INTO "Outbox" /);
 });
 
 test("requireStatusAvailable: notify-fallback path claims only rows ALREADY AVAILABLE", async () => {
@@ -155,4 +164,22 @@ test("the disabled-recipient lookup runs once, deduped, and only when there are 
     where: { id: { in: ["same"] }, deactivatedAt: { not: null } },
     select: { id: true },
   });
+});
+
+// The admin's manual "mark available" names the marking account: a request that
+// account filed is still claimed, but its notice is not queued (outbox.ts).
+test("actorId: the outbox insert skips the actor's own request, as the ONE extra bind parameter; absent, nothing changes", async () => {
+  queries.length = 0;
+  nextRows = [{ id: "a" }];
+  await claimAvailableNotificationWinners([cand("a")], { requireStatusAvailable: true, actorId: "admin-1" });
+  const withActor = norm(queries[0].sql);
+  assert.match(withActor, /CROSS JOIN unnest\(ARRAY\[[^\]]+\]\) AS ch WHERE c\."requestedBy" <> \? ON CONFLICT/);
+  assert.deepEqual(queries[0].values, ["a", "admin-1"]);
+  // The claim itself is untouched: the actor's own row is still won.
+  assert.doesNotMatch(claimOf(withActor), /requestedBy" <>/);
+
+  queries.length = 0;
+  await claimAvailableNotificationWinners([cand("a")], { requireStatusAvailable: true });
+  assert.doesNotMatch(norm(queries[0].sql), /requestedBy" <>/);
+  assert.deepEqual(queries[0].values, ["a"]);
 });

@@ -11,7 +11,8 @@ export interface LibraryItem {
   /** The section key (Plex) or folder id (Jellyfin): what the selection stores. */
   id: string;
   title: string;
-  kind: "movie" | "tv";
+  /** "mixed": a Jellyfin library with no single type (it holds either). */
+  kind: "movie" | "tv" | "mixed";
 }
 
 const PlexSections = v.array(v.object({ key: v.string(), title: v.string(), type: v.string() }));
@@ -34,7 +35,7 @@ export function parseLibraryItems(service: LibraryService, data: unknown): Libra
   if (!parsed.ok) return null;
   return parsed.value
     .filter((f) => f.id !== "")
-    .map((f) => ({ id: f.id, title: f.name, kind: f.collectionType === "movies" ? "movie" : "tv" }));
+    .map((f) => ({ id: f.id, title: f.name, kind: f.collectionType === "movies" ? "movie" : f.collectionType === "tvshows" ? "tv" : "mixed" }));
 }
 
 /** The libraries route for one server; `instance` "" is the default server. */

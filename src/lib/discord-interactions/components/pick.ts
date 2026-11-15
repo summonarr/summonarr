@@ -1,3 +1,4 @@
+import { DISCORD_SYNTHETIC_EMAIL_SUFFIX } from "@/lib/user-source";
 import { prisma } from "@/lib/prisma";
 import { defaultPermissionsForRole } from "@/lib/permissions";
 import { sessionForUser } from "@/lib/auto-request";
@@ -19,7 +20,7 @@ import type { ComponentContext, PendingSearch, TmdbResult } from "../types";
 // The admin alerts run once the response is sent; Discord was answered before
 // this handler started, so they run now.
 function runNow(task: () => Promise<void>): void {
-  void task().catch((err) => console.error("[interactions] admin alert failed:", err));
+  void task().catch((err) => console.error("[interactions] deferred request task failed:", err));
 }
 
 // `pick:<interactionId>:<discordUserId>:<index>` — a /request result button.
@@ -142,7 +143,7 @@ async function resolveRequester(ctx: ComponentContext, pending: PendingSearch, m
   const { discordUser, discordUserId } = ctx;
   if (mustBeLinked) {
     return prisma.user.findFirst({
-      where: { discordId: discordUserId, NOT: { email: { endsWith: "@discord.local" } } },
+      where: { discordId: discordUserId, NOT: { email: { endsWith: DISCORD_SYNTHETIC_EMAIL_SUFFIX } } },
     });
   }
   // The LIVE username from the component interaction rather than the cached
@@ -158,7 +159,7 @@ async function resolveRequester(ctx: ComponentContext, pending: PendingSearch, m
     create: {
       discordId: discordUserId,
       name: liveUsername,
-      email: `discord_${discordUserId}@discord.local`,
+      email: `discord_${discordUserId}${DISCORD_SYNTHETIC_EMAIL_SUFFIX}`,
       permissions: defaultPermissionsForRole("USER"),
     },
   });
@@ -166,7 +167,7 @@ async function resolveRequester(ctx: ComponentContext, pending: PendingSearch, m
   // the user's REAL row (mergeDiscordIntoWebAccount), so an unconditional
   // `update: { name }` rewrote a provider-provisioned name (Plex/OIDC/registration)
   // with the Discord handle on every result click — and nothing in the UI sets it back.
-  if (dbUser.email.endsWith("@discord.local") && dbUser.name !== liveUsername) {
+  if (dbUser.email.endsWith(DISCORD_SYNTHETIC_EMAIL_SUFFIX) && dbUser.name !== liveUsername) {
     return prisma.user.update({ where: { id: dbUser.id }, data: { name: liveUsername } });
   }
   return dbUser;

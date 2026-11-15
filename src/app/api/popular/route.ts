@@ -14,7 +14,7 @@ import type { PopularResult } from "@/lib/play-history-popular";
 // dozens of concurrent /movie & /tv lookups. Matches the TMDB list-page discipline.
 const DETAIL_CONCURRENCY = 5;
 
-const VALID_SORTS = new Set<PopularSort>(["plays", "viewers", "trending"]);
+const POPULAR_SORTS: readonly PopularSort[] = ["plays", "viewers", "trending"];
 // The type a filter leaves out: no query, nothing on the page.
 const SKIPPED: PopularResult = { items: [], totalItems: 0, totalPages: 1, page: 1 };
 
@@ -36,7 +36,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
     return NextResponse.json({ error: t("apiUser.browse.popularMediaTypeInvalid") }, { status: 400 });
   }
   const sortParam = sp.get("sort");
-  const sort: PopularSort = VALID_SORTS.has(sortParam as PopularSort) ? (sortParam as PopularSort) : "trending";
+  const sort: PopularSort = POPULAR_SORTS.find((s) => s === sortParam) ?? "trending";
   const requestedPage = parsePageParam(sp);
 
   try {
@@ -45,8 +45,9 @@ export const GET = withAuth(async (request, _ctx, session) => {
       mediaTypeFilter === "tv" ? SKIPPED : getMostPopularOnServer({ mediaType: "MOVIE", sort, page: requestedPage }),
       mediaTypeFilter === "movies" ? SKIPPED : getMostPopularOnServer({ mediaType: "TV", sort, page: requestedPage }),
     ]);
-    // getMostPopularOnServer clamps a deep ?page= to the last page a ranking
-    // holds; the page and rank offset answered are the page it SERVED.
+    // getMostPopularOnServer clamps a deep ?page= to page 100 only: a page past
+    // the ranking's own last page is served as asked, with no items. The page
+    // and rank offset answered are the page it SERVED.
     const page = Math.max(moviesResult.page, tvResult.page);
 
     const [movieTitles, tvTitles] = await Promise.all([

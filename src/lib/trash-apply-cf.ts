@@ -141,11 +141,13 @@ export function groupMemberTrashIds(payload: TrashCustomFormatGroup | null): str
   return payload ? payload.custom_formats.map((m) => m.trash_id) : [];
 }
 
-// A group is "ok" when every required member resolved and applied.
+// A group is "ok" when every required member resolved and applied. A paused
+// member was left alone on purpose, so it never fails its group.
 function groupOutcome(
   payload: TrashCustomFormatGroup | null,
   cfSpecIdByTrashId: Map<string, string>,
   memberResultByTrashId: Map<string, ApplyResult>,
+  pausedTrashIds: ReadonlySet<string>,
 ): ApplyOutcome {
   if (!payload) return { ok: false, error: STORED_PAYLOAD_INVALID };
   const memberIds = groupMemberTrashIds(payload);
@@ -157,7 +159,7 @@ function groupOutcome(
     };
   }
   const failedRequired = payload.custom_formats.filter(
-    (m) => m.required && memberResultByTrashId.get(m.trash_id)?.ok !== true,
+    (m) => m.required && !pausedTrashIds.has(m.trash_id) && memberResultByTrashId.get(m.trash_id)?.ok !== true,
   );
   if (failedRequired.length > 0) {
     const names = failedRequired.slice(0, 3).map((m) => m.name || m.trash_id).join(", ");
@@ -196,12 +198,17 @@ export async function applyCustomFormatGroupsWithMembers(
   }
   const memberSpecs = await prisma.trashSpec.findMany({
     where: { service, kind: "CUSTOM_FORMAT", trashId: { in: [...memberTrashIds] } },
-    select: { id: true, trashId: true, name: true },
+    select: { id: true, trashId: true, name: true, applications: { where: { arrInstance }, select: { enabled: true } } },
   });
   const cfSpecIdByTrashId = new Map(memberSpecs.map((s) => [s.trashId, s.id]));
+  // A DISABLED application is the admin's "stop managing this" on this
+  // instance: a group never pushes that member, the same rule as the profile
+  // cascade (resolveCfMapping in trash-apply-profile.ts).
+  const paused = memberSpecs.filter((s) => s.applications.some((a) => !a.enabled));
+  const pausedTrashIds = new Set(paused.map((s) => s.trashId));
 
-  // Apply every member CF in one batch. The Set means a CF shared by several groups is applied once.
-  const allCfSpecIds = [...new Set(memberSpecs.map((s) => s.id))];
+  // Apply every managed member CF in one batch. The Set means a CF shared by several groups is applied once.
+  const allCfSpecIds = [...new Set(memberSpecs.filter((s) => !pausedTrashIds.has(s.trashId)).map((s) => s.id))];
   const members = allCfSpecIds.length > 0 ? await applyCustomFormats(service, allCfSpecIds, variant, opts) : [];
   // A member pass the lock cut short would read as failed required members.
   if (opts.signal?.aborted) return { groups: [], members };
@@ -209,7 +216,7 @@ export async function applyCustomFormatGroupsWithMembers(
 
   const outcomes = groups.map((g) => ({
     spec: g,
-    outcome: groupOutcome(payloadById.get(g.id) ?? null, cfSpecIdByTrashId, memberResultByTrashId),
+    outcome: groupOutcome(payloadById.get(g.id) ?? null, cfSpecIdByTrashId, memberResultByTrashId, pausedTrashIds),
   }));
   return { groups: await recordApplies(outcomes, arrInstance), members };
 }

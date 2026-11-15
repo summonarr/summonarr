@@ -4,8 +4,7 @@
 // with it is use-second-factor-step-up.ts.
 import { apiErrorText } from "@/lib/client/api-error";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
-
-type Translate = (key: string, vars?: Record<string, string | number>) => string;
+import type { Translator } from "@/lib/i18n/translate";
 
 export interface SecondFactorRefusal {
   // The methods the server listed when it asked for a second factor;
@@ -19,7 +18,7 @@ export function readSecondFactorRefusal(
   res: { status: number; headers: { get(name: string): string | null } },
   body: unknown,
   sentProof: boolean,
-  t: Translate,
+  t: Translator,
   fallback: string,
 ): SecondFactorRefusal {
   const data = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
@@ -39,4 +38,32 @@ export function readSecondFactorRefusal(
   // A step-up refusal answers { error: "<slug>", message: "<sentence>" } (an
   // SSO account whose sign-in is too old): the sentence wins.
   return { methods, message: rateLimitMessage(res, t) ?? apiErrorText(data, fallback) };
+}
+
+// What the server last asked for, with what the page knew about the account's
+// two-factor state when it asked.
+export interface ServerSecondFactorAsk {
+  methods: string[];
+  whenEnabled: boolean;
+}
+
+/**
+ * The methods of the server's ask that still stands, or null. An ask is dropped
+ * once the account's known two-factor state has changed since: after two-factor
+ * is turned off (or its last factor removed) there is nothing to produce a code
+ * from, and an ask kept from before would demand one for every later change.
+ */
+export function standingServerMethods(ask: ServerSecondFactorAsk | null, knownEnabled: boolean): string[] | null {
+  return ask && ask.whenEnabled === knownEnabled ? ask.methods : null;
+}
+
+/** The ask to keep after a refusal. An ask without a list keeps a standing one's methods. */
+export function nextServerAsk(
+  ask: ServerSecondFactorAsk | null,
+  methods: SecondFactorRefusal["methods"],
+  knownEnabled: boolean,
+): ServerSecondFactorAsk | null {
+  if (methods === null) return ask;
+  if (methods === "unlisted") return { methods: standingServerMethods(ask, knownEnabled) ?? [], whenEnabled: knownEnabled };
+  return { methods, whenEnabled: knownEnabled };
 }

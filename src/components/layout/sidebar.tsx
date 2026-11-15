@@ -57,9 +57,10 @@ export function Sidebar({
     >
       <SidebarBrand siteTitle={siteTitle} />
 
-      {/* Nav */}
+      {/* Nav. `relative` keeps the badges' `sr-only` labels inside this
+          scroller; see <main> in the (app) layout. */}
       <nav
-        className="flex-1 overflow-y-auto"
+        className="relative flex-1 overflow-y-auto"
         style={{ padding: "10px 8px" }}
       >
         <NavSection label={t("nav.section.browse")}>

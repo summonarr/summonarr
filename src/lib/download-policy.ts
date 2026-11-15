@@ -4,8 +4,9 @@ import { getJellyfinConfig } from "./jellyfin-config";
 import { normalizeEmail } from "./email-normalize";
 import { type MediaInstanceKey, mediaInstanceLabel } from "./media-instances";
 import { getSyncableMediaInstances } from "./media-instance-registry";
-import { noteJellyfinDepartures, offboardJellyfinIdentities } from "./jellyfin-offboarding";
+import { offboardJellyfinIdentities } from "./jellyfin-offboarding";
 import { processSingleton } from "./process-singleton";
+import { emailLinkAllowed } from "./play-history-identity";
 
 interface PolicySyncResult {
   source: string;
@@ -16,9 +17,9 @@ interface PolicySyncResult {
 
 // One instance's sync, plus what the offboarding pass (jellyfin-offboarding.ts)
 // needs from it: whether the server gave an opinion at all (a failed or empty
-// /Users fetch gives none). The identities it turned inactive go straight onto
-// the offboarding ledger as each write commits (noteJellyfinDepartures), so a
-// throw later in the run can't lose one.
+// /Users fetch gives none). The identities it turned inactive are marked
+// offboardPending by the same write that turns them inactive, so a throw later
+// in the run (or a restart) can't lose one.
 interface InstanceSyncOutcome {
   result: PolicySyncResult;
   noOpinion: boolean;
@@ -134,7 +135,7 @@ type ExistingJellyfinRow = {
   active: boolean;
   manualUserLink: boolean;
 };
-type LinkCandidate = { id: string; email: string; mediaServer: string | null; jellyfinUserId: string | null };
+type LinkCandidate = { id: string; email: string; mediaServer: string | null; jellyfinUserId: string | null; createdByDelegate: boolean };
 
 // The Summonarr accounts a run's users may be attributed to, looked up by
 // subject id and by email.
@@ -165,7 +166,7 @@ async function loadJellyfinSyncState(instance: MediaInstanceKey, users: readonly
           { email: { in: users.flatMap((u) => (u.email ? [normalizeEmail(u.email)] : [])) } },
         ],
       },
-      select: { id: true, email: true, mediaServer: true, jellyfinUserId: true },
+      select: { id: true, email: true, mediaServer: true, jellyfinUserId: true, createdByDelegate: true },
     }),
   ]);
   return {
@@ -180,14 +181,14 @@ async function loadJellyfinSyncState(instance: MediaInstanceKey, users: readonly
 // Subject id first, email second. A subject match needs no mediaServer guard —
 // jellyfinUserId is unique and only Jellyfin sign-in writes it, so there is no
 // cross-provider collision to defend against (unlike an email match, which
-// could be a Plex-pinned user who happens to share the address).
+// could be a Plex-pinned user who happens to share the address). The email
+// match follows the poller's rule (emailLinkAllowed): never an account a
+// MANAGE_USERS delegate created (guardrail 34d).
 function resolveLinkedAccount(u: JellyfinUser, links: LinkIndex): string | null {
   const linkedBySub = links.bySubject.get(u.id) ?? null;
   if (linkedBySub) return linkedBySub.id;
   const linkedByEmail = u.email ? (links.byEmail.get(normalizeEmail(u.email)) ?? null) : null;
-  return linkedByEmail && (!linkedByEmail.mediaServer || linkedByEmail.mediaServer.toLowerCase() === "jellyfin")
-    ? linkedByEmail.id
-    : null;
+  return linkedByEmail && emailLinkAllowed(linkedByEmail, "jellyfin") ? linkedByEmail.id : null;
 }
 
 // Whether the upsert below would change nothing on an existing row — every
@@ -206,7 +207,7 @@ function jellyfinRowCurrent(
 }
 
 // One server user: upsert its row (attribution, admin flag, active, the seeded
-// download policy), put a new departure on the offboarding ledger, and push a
+// download policy), mark a new departure as pending offboarding, and push a
 // disabled download policy the server has drifted from.
 async function syncJellyfinUser(
   ctx: { instance: MediaInstanceKey; baseUrl: string; apiKey: string; autoDisableNew: boolean; links: LinkIndex; result: PolicySyncResult },
@@ -245,6 +246,10 @@ async function syncJellyfinUser(
         isServerAdmin: u.isAdmin,
         downloadsEnabled,
         active,
+        // Pending in the SAME write as the inactive flag (guardrail 6j): the
+        // next run reads this row as already inactive and would never report
+        // the departure again, so the mark must not be a separate step.
+        offboardPending: newlyInactive,
         ...(userId ? { userId } : {}),
       },
       update: {
@@ -252,6 +257,10 @@ async function syncJellyfinUser(
         ...(u.email ? { email: u.email } : {}),
         isServerAdmin: u.isAdmin,
         active, // re-activate a returning (or re-enabled) user
+        // A new departure is pending. Nothing else touches the mark here: a
+        // returning user is decided "still a member" by the offboarding pass,
+        // which clears it.
+        ...(newlyInactive ? { offboardPending: true } : {}),
         ...(userId ? { userId } : {}),
         // Write server value only when we have no admin-set value yet (null).
         ...(existing === null || existing.downloadsEnabled === null ? { downloadsEnabled } : {}),
@@ -259,9 +268,6 @@ async function syncJellyfinUser(
     });
   }
   result.upserted++;
-  // On the ledger now, not at the end of the run: the next run reads this row
-  // as already inactive and would never report the departure again.
-  if (newlyInactive) noteJellyfinDepartures([u.id]);
 
   // Push only on DRIFT — u.downloadsEnabled is the server's CURRENT value
   // from the same /Users fetch this run already made (absent Policy coerces
@@ -325,24 +331,21 @@ async function reconcileDepartedJellyfinUsers(
   const priorActiveCount = existingRows.filter((r) => r.active).length;
   if (!reconcileAllowed(instance, users, priorActiveCount)) return;
   const currentIds = users.map((u) => u.id);
-  const currentIdSet = new Set(currentIds);
-  const absent = existingRows
-    .filter((r) => r.active && !currentIdSet.has(r.sourceUserId))
-    .map((r) => r.sourceUserId);
   // Scoped by serverInstance — load-bearing (guardrail 28). Without this, a
   // user who exists only on a DIFFERENT Jellyfin server would look "absent"
   // from THIS instance's fetch and get incorrectly soft-deleted, destroying
   // their attribution to play history that survives on the other server.
   await prisma.mediaServerUser.updateMany({
     where: { source: "jellyfin", serverInstance: instance, sourceUserId: { notIn: currentIds }, active: true },
-    data: { active: false },
+    // offboardPending rides the same statement (guardrail 6j): the departure is
+    // durable the moment the row turns inactive, whatever happens to this run.
+    data: { active: false, offboardPending: true },
   });
   // Only now is the confirmed-shrink observation consumed: a failed write
   // above keeps the counter, so the next hourly run reconciles immediately
   // instead of restarting the 3-run countdown behind a log line that already
   // claimed "reconciling".
   refusedReconciles.delete(instance);
-  noteJellyfinDepartures(absent);
 }
 
 async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string, apiKey: string, autoDisableNew: boolean): Promise<InstanceSyncOutcome> {
@@ -376,21 +379,31 @@ async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string,
 }
 
 /**
+ * What a single-user push did. "nothing-to-push" is a row with no policy to
+ * send (a Plex row, a server admin, no stored policy, a row that is gone);
+ * "not-configured" is a Jellyfin row whose own server has no URL or API key —
+ * the stored policy never reached a server, so the caller must not report it
+ * as applied.
+ */
+export type UserPolicyPush = "pushed" | "nothing-to-push" | "not-configured";
+
+/**
  * Push a single user's download policy to their media server immediately.
  * Called by the per-user toggle API route. Jellyfin only — Plex is unsupported.
  */
-export async function enforceUserDownloadPolicy(mediaServerUserId: string): Promise<void> {
+export async function enforceUserDownloadPolicy(mediaServerUserId: string): Promise<UserPolicyPush> {
   const record = await prisma.mediaServerUser.findUnique({
     where: { id: mediaServerUserId },
     select: { source: true, serverInstance: true, sourceUserId: true, downloadsEnabled: true, isServerAdmin: true, username: true },
   });
 
-  if (!record || record.isServerAdmin || record.downloadsEnabled === null) return;
-  if (record.source !== "jellyfin") return;
+  if (!record || record.isServerAdmin || record.downloadsEnabled === null) return "nothing-to-push";
+  if (record.source !== "jellyfin") return "nothing-to-push";
 
   // Resolve THIS row's own server, not always the default — a toggle on a
   // named-instance user must push to that instance, never instance "".
   const { url, apiKey } = await getJellyfinConfig(record.serverInstance);
-  if (!url || !apiKey) return;
+  if (!url || !apiKey) return "not-configured";
   await setJellyfinDownloadPolicy(url, apiKey, record.sourceUserId, record.downloadsEnabled);
+  return "pushed";
 }

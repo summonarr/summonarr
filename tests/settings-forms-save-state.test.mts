@@ -30,6 +30,8 @@ test("DiscordBotForm: a blank bot token is never sent (the route can't clear it)
   assert.match(save, /const result = await save\(changed\);/);
   // The hint shows while the field is blank over a saved token.
   assert.match(src, /\{values\.discordBotToken === "" && tokenSaved && \(\s*<p[^>]*>\{t\("settings\.form\.discord\.botTokenKept"\)\}<\/p>/);
+  // Removal is its own explicit action: a confirmed button sends the one blank.
+  assert.match(src, /async function handleRemoveToken\(\) \{[\s\S]*?await save\(\{ discordBotToken: "" \}\);/);
   const { discordFormInitial, pendingChanges, DISCORD_KEYS } = await import("../src/components/settings/forms/discord-bot-keys.ts");
   const initial = discordFormInitial({ discordBotToken: "real-token", discordClientId: "1", discordRequireLinkedAccount: "true" });
   // The token never reaches the browser, not even as the mask: only whether one is saved.

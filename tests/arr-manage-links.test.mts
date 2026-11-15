@@ -173,7 +173,7 @@ test("the detail pages' ?manage= deep link names a service, a slug and a known t
   assert.deepEqual(parseManageLink("sonarr:anime", "seasons", "sonarr"), { instance: "anime", tab: "seasons" });
   assert.deepEqual(parseManageLink("radarr:4k", "nonsense", "radarr"), { instance: "4k", tab: undefined }, "an unknown tab opens the default one");
   assert.equal(parseManageLink("sonarr:", "files", "radarr"), null, "the other service's link on a movie page");
-  for (const bad of ["radarr", "radarr:../x", "radarr:Anime", `radarr:${"a".repeat(41)}`, "radarr:a b", ["radarr:"], undefined]) {
+  for (const bad of ["radarr", "radarr:hd", "radarr:-", "radarr:../x", "radarr:Anime", `radarr:${"a".repeat(41)}`, "radarr:a b", ["radarr:"], undefined]) {
     assert.equal(parseManageLink(bad, undefined, "radarr"), null, String(bad));
   }
 });

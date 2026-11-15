@@ -5,6 +5,7 @@ import { importFromQueue, loadImportCandidates } from "@/lib/arr-queue-data";
 import { IMPORT_MAX_BODY_BYTES, importFailure, importGate, parseImportSelections } from "@/lib/arr-queue-http";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
+import { crossSiteRefusal } from "@/lib/cross-site";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Admin → Download Queue, "Import" on a download Radarr/Sonarr would not
@@ -28,6 +29,10 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const GET = withAdmin(async (req) => {
   const t = translatorForRequest(req);
+  // The listing makes the arr scan the download's files: never on a
+  // navigation from another site (cross-site.ts).
+  const crossSite = crossSiteRefusal(req, t);
+  if (crossSite) return crossSite;
   const params = req.nextUrl.searchParams;
   const target = await importGate(params.get("service"), params.get("instance"), params.get("downloadId"), t);
   if (target instanceof NextResponse) return target;

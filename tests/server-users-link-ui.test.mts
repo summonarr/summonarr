@@ -59,8 +59,9 @@ test("every control writes through the one shared path", () => {
   assert.equal((table.match(/\bfetchJson\(/g) ?? []).length, 1, "only sendWrite calls fetchJson");
   assert.equal((table.match(/\bfetch\(/g) ?? []).length, 0, "no bare fetch beside it");
   for (const name of ["LinkPicker", "DownloadToggle", "SyncUsersButton", "BulkBar", "AutoDisableToggle"]) {
-    assert.match(fn(name), /sendWrite\b/, name);
+    assert.match(fn(name), /write\.send\(/, name);
   }
+  assert.match(fn("useServerUserWrite"), /sendWrite\(/);
 });
 
 test("Sync users reads the 200 body: a held lock and a partial failure are not a silent success", () => {
@@ -101,4 +102,18 @@ test("a blank display name falls back to the email on every surface the page fee
 
 test("the grant editor's named instances go through the shared both-twins-open merge", () => {
   assert.match(page, /mergeNamedInstanceAccess\(\s*\[\.\.\.sonarrInstances, \.\.\.radarrInstances\]/);
+});
+
+test("Sync users is offered to the ADMIN role only, like the page's other sync buttons", () => {
+  // The cron route admits the ADMIN role only (getCronActor): a delegate would be refused on every click.
+  assert.match(page, /<ServerUserTable[\s\S]*?canSync=\{session\.user\.role === "ADMIN"\}[\s\S]*?\/>/);
+  assert.match(table, /action=\{canSync \? <SyncUsersButton \/> : undefined\}/, "not the empty state's one action either");
+  assert.match(table, /\{canSync && <SyncUsersButton \/>\}/);
+  assert.equal(table.match(/<SyncUsersButton \/>/g)?.length, 2, "no ungated mount");
+});
+
+test("the two writes that walk every user get the long-run bound, not the 30 s default", () => {
+  assert.match(table, /genericError: t\("adminManage\.serverUsers\.syncFailed"\), timeoutMs: LONG_RUN_TIMEOUT_MS \}/);
+  assert.match(table, /\{ key: `bulk:\$\{kind\}`, timeoutMs: LONG_RUN_TIMEOUT_MS \}/);
+  assert.match(table, /\.\.\.\(timeoutMs === undefined \? \{\} : \{ timeoutMs \}\),/);
 });

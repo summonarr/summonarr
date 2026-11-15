@@ -1,4 +1,4 @@
-// An execute whose outcome is unknown (C055). The Library cleanup execute is one
+// An execute whose outcome is unknown. The Library cleanup execute is one
 // synchronous request; behind a reverse proxy the browser can get the PROXY's
 // 502/504 after ~60 s while the route keeps deleting (guardrail 37a). Read as
 // "the delete failed", the plan stayed on screen and "Delete N now" started a

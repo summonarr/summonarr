@@ -99,7 +99,15 @@ export function toRecentPlay(p: RecentPlaySource, unknownUser = ""): RecentPlay 
 
 // The server's own order: startedAt desc, then id desc.
 function newestFirst(a: RecentPlay, b: RecentPlay): number {
-  if (a.startedAt !== b.startedAt) return a.startedAt < b.startedAt ? 1 : -1;
+  // By instant, not by text: a string with an offset or without milliseconds
+  // would otherwise sort wrong. Unparseable text falls back to the text order.
+  const ta = Date.parse(a.startedAt);
+  const tb = Date.parse(b.startedAt);
+  if (Number.isFinite(ta) && Number.isFinite(tb)) {
+    if (ta !== tb) return ta < tb ? 1 : -1;
+  } else if (a.startedAt !== b.startedAt) {
+    return a.startedAt < b.startedAt ? 1 : -1;
+  }
   return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
 }
 

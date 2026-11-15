@@ -4,6 +4,7 @@
 // decisions they make.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 const rules = await import("../src/components/admin/request-action-rules.ts");
 const { syncRunNote, SyncRunAnswer } = await import("../src/components/admin/sync-summary.ts");
@@ -56,8 +57,9 @@ test("the row shows the route's own reason for a refusal, and each call's busy s
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../src/components/admin/request-actions.tsx", import.meta.url), "utf8");
   // fetchJson's error is the route's `message`, then its `error` (a 422 "not configured", a 409, a 429).
-  assert.match(src, /return res\.kind === "http" \|\| res\.kind === "invalid" \? res\.error : t\("shared\.thread\.networkError"\);/);
-  assert.equal(src.match(/setArrError\(failureText\(/g)?.length, 2, "a decision and a delete");
+  const failure = readFileSync(new URL("../src/lib/client/fetch-failure-text.ts", import.meta.url), "utf8");
+  assert.match(failure, /return res\.kind === "http" \|\| res\.kind === "invalid" \? res\.error : t\("shared\.thread\.networkError"\);/);
+  assert.equal(src.match(/setArrError\(fetchFailureText\(/g)?.length, 2, "a decision and a delete");
   // No shared loading slot: a reply finishing never re-enables a decision still out.
   assert.doesNotMatch(src, /useState<LoadingKind \| null>|setLoading\(null\)/);
   for (const kind of ["NOTE", "DELETE", "SEARCH", "RETRY"]) assert.ok(src.includes(`"${kind}"`), kind);
@@ -66,4 +68,46 @@ test("the row shows the route's own reason for a refusal, and each call's busy s
     const at = src.indexOf(head);
     assert.match(src.slice(at, at + 400), /if \(!begin\(\)\) return/, `${head} clears the last failure first`);
   }
+});
+
+test("a row can aim its actions at every (status, instance) of its group, the representative first", () => {
+  const r = (requestId: string, status: string, arrInstance: string) => ({ requestId, status, arrInstance, adminNote: null });
+  // HD and 4K both approved, by three people: two targets, one per instance.
+  const approved = [r("hd1", "APPROVED", ""), r("hd2", "APPROVED", ""), r("uhd", "APPROVED", "4k")];
+  assert.deepEqual(rules.actionTargets(approved, "APPROVED").map((x) => x.requestId), ["hd1", "uhd"]);
+  // The representative is the first request at the aggregate status, wherever it sits.
+  const mixed = [r("d", "DECLINED", ""), r("a", "APPROVED", ""), r("a4", "APPROVED", "4k")];
+  assert.deepEqual(rules.actionTargets(mixed, "APPROVED").map((x) => x.requestId), ["a", "d", "a4"]);
+  // One target: nothing to choose between.
+  assert.equal(rules.actionTargets([r("x", "PENDING", ""), r("y", "PENDING", "")], "PENDING").length, 1);
+  assert.deepEqual(rules.actionTargets([], "PENDING"), []);
+  // An aggregate no member carries falls back to the first request.
+  assert.equal(rules.actionTargets([r("x", "PENDING", "")], "APPROVED")[0]?.requestId, "x");
+});
+
+test("a picked target holds only while the group still offers it", () => {
+  const r = (requestId: string, status: string, arrInstance: string) => ({ requestId, status, arrInstance, adminNote: null });
+  const targets = rules.actionTargets([r("hd", "APPROVED", ""), r("uhd", "APPROVED", "4k")], "APPROVED");
+  assert.equal(rules.chosenActionTarget(targets, null)?.requestId, "hd");
+  assert.equal(rules.chosenActionTarget(targets, "uhd")?.requestId, "uhd");
+  assert.equal(rules.chosenActionTarget(targets, "gone")?.requestId, "hd", "a request that left the group is not acted on");
+  assert.equal(rules.chosenActionTarget([], "x"), undefined);
+});
+
+test("the group's pending ids are used only while the aimed request is the PENDING one", () => {
+  const pending = ["p1", "p2"];
+  assert.deepEqual(rules.groupDecisionIds("PENDING", pending), pending);
+  // A picked non-pending target acts on that one request.
+  for (const status of ["DECLINED", "APPROVED", "AVAILABLE", "SOMETHING_ELSE"]) {
+    assert.equal(rules.groupDecisionIds(status, pending), null, status);
+  }
+  // One pending request is not a group.
+  assert.equal(rules.groupDecisionIds("PENDING", ["p1"]), null);
+  assert.equal(rules.groupDecisionIds("PENDING", undefined), null);
+
+  const src = (name: string) => readFileSync(new URL(`../src/components/admin/${name}`, import.meta.url), "utf8");
+  const actions = src("request-actions.tsx");
+  assert.match(actions, /const groupIds = groupDecisionIds\(currentStatus, groupPendingIds\);/);
+  assert.doesNotMatch(actions, /groupPendingIds(\?)?\.length/, "no second rule for what a group is");
+  assert.match(src("admin-request-list.tsx"), /groupPendingIds=\{target\.status === "PENDING" && pendingIds\.length > 1 \? pendingIds : undefined\}/);
 });

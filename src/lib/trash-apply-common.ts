@@ -3,6 +3,7 @@
 // error text an admin sees.
 import { prisma } from "./prisma";
 import { arrFetch, ArrResponseError, getArrCfg, type ArrCfg, type ArrVariant } from "./arr";
+import { getSyncableArrInstances } from "./arr-instance-registry";
 import { safeMessage } from "./arr-parse";
 import { mapLimit } from "./concurrency";
 import { isPrismaErrorCode } from "./prisma-errors";
@@ -35,11 +36,17 @@ class ArrNotConfiguredError extends Error {
   }
 }
 
+// The registry decides first (guardrail 32): a slug is never turned into Setting
+// reads unless the registry lists it as a configured instance. A variant from
+// the apply route is checked for slug SHAPE only, so without this a
+// de-registered instance's leftover radarr<Slug>Url/ApiKey rows would still be
+// read and pushed to. An unlisted slug is "not configured", like a blank one.
 export async function resolveCfg(service: TrashService, variant: ArrVariant = "hd"): Promise<ArrCfg> {
   const key = service === "RADARR" ? "radarr" : "sonarr";
-  const cfg = await getArrCfg(key, variant);
+  const instance = toArrInstance(variant);
+  const listed = (await getSyncableArrInstances(key)).some((i) => i.slug === instance);
+  const cfg = listed ? await getArrCfg(key, variant) : null;
   if (!cfg) {
-    const instance = toArrInstance(variant);
     throw new ArrNotConfiguredError(`${service}${instance ? ` (${instance})` : ""} is not configured`);
   }
   return cfg;

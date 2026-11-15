@@ -45,6 +45,22 @@ export function mediaTypeLabel(t: Translator, mediaType: string | null | undefin
   return mediaType ?? "";
 }
 
+// The DELETE for one row of the table. `loadedGrouped` is the mode the ROW was
+// loaded in, never the Group resumes switch as it stands now: a grouped row is
+// a whole viewing and takes its chain, an ungrouped row is one sitting and
+// takes only itself. While a mode change is still loading, the rows on screen
+// are the old mode's, and the dialog counted sittings from that row.
+export function historyDeletePath(id: string, loadedGrouped: boolean): string {
+  return `/api/play-history/${encodeURIComponent(id)}${loadedGrouped ? "?chain=true" : ""}`;
+}
+
+// The rows on screen answer an older request than the one in flight (a sort,
+// page, filter or mode change the admin is waiting on): they are kept, dimmed,
+// and must take no input at all — pointer or keyboard.
+export function rowsAreStale(loading: boolean, rowCount: number): boolean {
+  return loading && rowCount > 0;
+}
+
 // A YYYY-MM-DD day filter means a whole calendar day in the statistics time zone,
 // the zone every per-day count is bucketed in — including the activity heatmap,
 // whose cells link here as ?from=&to=. The day is sent as is (fromDay/toDay) and
@@ -93,6 +109,19 @@ export interface HistoryFilterInput {
   grouped: boolean;
 }
 
+// Whether the calendar day `day` is over before `iso`, whatever zone the day
+// is counted in: a day ends at most 36 hours after its UTC midnight (UTC-12).
+// A To day that ends before the period begins can match nothing while the
+// period's lower bound is sent with it, and the table would answer "no plays
+// match" without saying the period is why — so that bound is dropped and To
+// alone means "up to that day".
+export function dayEndsBefore(day: string, iso: string): boolean {
+  const dayStart = Date.parse(`${day}T00:00:00Z`);
+  const bound = Date.parse(iso);
+  if (Number.isNaN(dayStart) || Number.isNaN(bound)) return false;
+  return dayStart + 36 * 60 * 60 * 1000 <= bound;
+}
+
 export function buildHistoryFilterParams({
   globalSource,
   globalMediaType,
@@ -109,7 +138,7 @@ export function buildHistoryFilterParams({
   const to = filters.toDate ? validDay(filters.toDate) : null;
   if (from) {
     params.set("fromDay", from);
-  } else if (startDateIso) {
+  } else if (startDateIso && !(to && dayEndsBefore(to, startDateIso))) {
     params.set("startDate", startDateIso);
   }
   if (to) params.set("toDay", to);

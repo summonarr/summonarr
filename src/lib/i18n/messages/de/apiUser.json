@@ -121,6 +121,7 @@
   "apiUser.push.subscriptionRemoved": "Die Push-Registrierung dieses Geräts wurde entfernt. Aktiviere die Benachrichtigungen erneut, um sie zu nutzen.",
   "apiUser.push.vapidMissing": "VAPID-Schlüssel nicht konfiguriert",
   "apiUser.push.webPushNotConfigured": "Web-Push ist auf diesem Server nicht konfiguriert",
+  "apiUser.push.webSendFailed": "Die Test-Benachrichtigung konnte nicht gesendet werden",
   "apiUser.quota.window.day": "Tag",
   "apiUser.quota.window.days_one": "{count} Tag",
   "apiUser.quota.window.days_other": "{count} Tage",

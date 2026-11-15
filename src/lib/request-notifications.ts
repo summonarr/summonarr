@@ -9,6 +9,7 @@ import { claimAvailableNotificationWinners } from "./notify-available";
 import { buildNotificationData } from "./notification-data";
 import { emitNotificationEvents } from "./notify-agents";
 import type { NotifyEvent } from "./notify-events";
+import { OUTBOX_APPROVED_KIND, OUTBOX_AVAILABLE_KIND, OUTBOX_DECLINED_KIND, settleOutbox, type AvailableChannel, type NoticeChannel } from "./outbox";
 
 interface RequestInfo {
   requestedBy: string;
@@ -79,7 +80,7 @@ function satisfiedFor(
 //
 // A restricted named instance can only enter the picture through the sync
 // orchestrator, which does carry per-instance presence and applies the
-// per-requester gate itself (presentForRequester in /api/sync/route.ts).
+// per-requester gate itself (presentForRequester in sync-orchestrator-marking.ts).
 //
 // If a caller ever probes a RESTRICTED instance, this contract breaks and the
 // two booleans must become per-instance (an optional slug-set parameter) plus
@@ -110,7 +111,10 @@ export async function notifyAvailablePerServer(
 }
 
 export interface AvailableWinner {
-  id?: string;
+  // REQUIRED: the request's id is how each channel's outbox rows are settled
+  // once sent (outbox.ts). A winner without one could never be settled, and the
+  // drain would send it a second time.
+  id: string;
   requestedBy: string;
   title: string;
   mediaType: string;
@@ -136,29 +140,87 @@ export interface AvailableWinner {
 // the sites used to repeat this list six times, and the manual path kept a
 // seventh, differently-shaped copy (guardrail 14c).
 //
+// Every claimed winner already has one outbox row per channel, written by the
+// claim itself (notify-available.ts + outbox.ts). Each channel deletes its rows
+// when it returns; rows a dead process left behind are sent by the drain
+// (outbox-drain.ts) through deliverAvailableChannel, the same per-channel senders.
+//
 // Returns the email send (bounded, awaited inside); the sync callers `void` it,
 // the webhook path awaits it.
 export async function fanOutAvailableWinners(winners: AvailableWinner[], logScope: string): Promise<void> {
   if (winners.length === 0) return;
-  const payload = winners.map((r) => ({ requestedBy: r.requestedBy, title: r.title, mediaType: r.mediaType, tmdbId: r.tmdbId ?? undefined }));
-  notifyUsersRequestsAvailable(payload).catch((err) => console.error(`[${logScope}] Discord available notify failed:`, err instanceof Error ? err.message : err));
-  notifyUsersRequestsAvailablePush(payload).catch((err) => console.error(`[${logScope}] push available notify failed:`, err instanceof Error ? err.message : err));
-  // In-app inbox for the batch winners (one createMany, same CAS-once guarantee).
-  void writeAvailableInAppNotifications(winners, logScope);
+  // Discord, push, the inbox and the outbound channels are not waited on, as
+  // before; email is (SMTP connections are bounded — see EMAIL_SEND_CONCURRENCY).
+  void deliverAvailableChannel("discord", winners, logScope);
+  void deliverAvailableChannel("push", winners, logScope);
+  void deliverAvailableChannel("inbox", winners, logScope);
+  void deliverAvailableChannel("agents", winners, logScope);
+  await deliverAvailableChannel("email", winners, logScope);
+}
+
+type ChannelPayload = { requestedBy: string; title: string; mediaType: string; tmdbId: number | undefined };
+const channelPayload = (winners: AvailableWinner[]): ChannelPayload[] =>
+  winners.map((r) => ({ requestedBy: r.requestedBy, title: r.title, mediaType: r.mediaType, tmdbId: r.tmdbId ?? undefined }));
+
+// One sender per "now available" channel. Adding a channel means adding it
+// HERE and to AVAILABLE_CHANNELS in outbox.ts (the type makes the two agree).
+//
+// A sender answers the indexes of `winners` whose send FAILED in a way worth
+// repeating (or nothing when it cannot fail that way): those rows stay owed and
+// the drain sends them again; every other winner's row is settled.
+type FailedIndexes = number[] | void;
+const AVAILABLE_SENDERS: Record<AvailableChannel, (winners: AvailableWinner[], logScope: string) => Promise<FailedIndexes>> = {
+  discord: (winners) => notifyUsersRequestsAvailable(channelPayload(winners)),
+  push: (winners) => notifyUsersRequestsAvailablePush(channelPayload(winners)),
+  // In-app inbox for the batch winners (one createMany).
+  inbox: (winners, logScope) => writeAvailableInAppNotifications(winners, logScope),
   // Outbound channels: one event per claimed request. This is the ONLY
   // `request.available` emit — notifyRequestStatusChange routes here rather
   // than emitting its own, or the manual path would fire the event twice.
-  emitNotificationEvents(winners.map((w) => availableEvent(w)));
-  // Email channel, so the user's `emailOnAvailable` preference is honoured on
-  // the webhook/sync paths too.
-  await notifyUsersRequestsAvailableEmail(winners, logScope);
+  // The emit hands off to notify-agents' own in-memory retries and returns.
+  agents: async (winners) => emitNotificationEvents(winners.map((w) => availableEvent(w))),
+  // So the user's `emailOnAvailable` preference is honoured on the
+  // webhook/sync paths too.
+  email: (winners, logScope) => notifyUsersRequestsAvailableEmail(winners, logScope),
+};
+
+/**
+ * Send ONE channel for these winners, then settle the outbox rows of every
+ * winner whose send did not fail. Never throws. A sender that throws leaves
+ * all its rows for the drain; the winners it reports as failed stay owed too.
+ */
+export async function deliverAvailableChannel(channel: AvailableChannel, winners: AvailableWinner[], logScope: string): Promise<void> {
+  if (winners.length === 0) return;
+  let failed: FailedIndexes;
+  try {
+    failed = await AVAILABLE_SENDERS[channel](winners, logScope);
+  } catch (err) {
+    console.error(`[${logScope}] ${channel} available notify failed:`, err instanceof Error ? err.message : err);
+    return;
+  }
+  const owed = owedIds(winners, failed, channel, logScope);
+  await settleOutbox(OUTBOX_AVAILABLE_KIND, channel, winners.filter((w) => !owed.has(w.id)).map((w) => w.id));
+}
+
+// The ids that STAY OWED: the sends the channel reported as failed. They stay
+// queued for the drain (it retries after the row's lock lapses,
+// OUTBOX_MAX_ATTEMPTS times at most, and drops the row a day after it was
+// written); every other row is settled.
+function owedIds(sent: ReadonlyArray<{ id: string }>, failed: FailedIndexes, channel: NoticeChannel, logScope: string): Set<string> {
+  const owed = new Set<string>();
+  for (const index of failed ?? []) {
+    const target = sent[index];
+    if (target) owed.add(target.id);
+  }
+  if (owed.size > 0) console.warn(`[${logScope}] ${channel}: ${owed.size} notification(s) failed to send and stay queued for a retry`);
+  return owed;
 }
 
 function availableEvent(w: AvailableWinner): NotifyEvent {
   return {
     event: "request.available",
     media: { type: w.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: w.tmdbId ?? null, title: w.title, posterPath: w.posterPath ?? null },
-    request: { id: w.id ?? null, instance: w.arrInstance },
+    request: { id: w.id, instance: w.arrInstance },
   };
 }
 
@@ -182,14 +244,15 @@ type InboxRow = {
 // Best-effort: swallows its own errors so an inbox-write blip never aborts the
 // sync run or the triggering action. Call fire-and-forget:
 // `void writeAvailableInAppNotifications(...)`.
-export async function writeAvailableInAppNotifications(winners: InboxRow[], logScope = "notify"): Promise<void> {
-  await writeInboxRows(winners, "REQUEST_AVAILABLE", logScope);
+export async function writeAvailableInAppNotifications(winners: InboxRow[], logScope = "notify"): Promise<number[]> {
+  return writeInboxRows(winners, "REQUEST_AVAILABLE", logScope);
 }
 
 // One createMany of inbox rows of one type, the body copy from inAppBodyFor.
-// Never throws.
-async function writeInboxRows(rows: InboxRow[], type: InAppNotificationType, logScope: string): Promise<void> {
-  if (rows.length === 0) return;
+// Never throws. Answers the indexes still owed: none, or — when the one write
+// failed, so no row exists — all of them.
+async function writeInboxRows(rows: InboxRow[], type: InAppNotificationType, logScope: string): Promise<number[]> {
+  if (rows.length === 0) return [];
   try {
     await prisma.notification.createMany({
       data: rows.map((r) =>
@@ -209,7 +272,9 @@ async function writeInboxRows(rows: InboxRow[], type: InAppNotificationType, log
   } catch (err) {
     const what = type === "REQUEST_AVAILABLE" ? "available" : type === "REQUEST_APPROVED" ? "approved" : "declined";
     console.error(`[${logScope}] in-app ${what} write failed:`, err instanceof Error ? err.message : err);
+    return rows.map((_, index) => index);
   }
+  return [];
 }
 
 // Email-on-available fan-out for the sync/webhook AVAILABLE paths. Batch-fetch
@@ -227,15 +292,20 @@ export async function notifyUsersRequestsAvailableEmail(
     posterPath?: string | null;
   }>,
   logScope = "notify",
-): Promise<void> {
-  if (winners.length === 0) return;
+): Promise<number[]> {
+  // Answers the indexes of `winners` whose mail failed in a way worth repeating.
+  if (winners.length === 0) return [];
+  let prefsFailed = false;
   const userPrefs = await prisma.user.findMany({
     where: { id: { in: [...new Set(winners.map((w) => w.requestedBy))] } },
     select: { id: true, email: true, notificationEmail: true, emailOnAvailable: true, locale: true },
   }).catch((err) => {
     console.error(`[${logScope}] email-pref fetch failed:`, err instanceof Error ? err.message : err);
+    prefsFailed = true;
     return [];
   });
+  // Nobody's preference could be read: nothing was sent, everything stays owed.
+  if (prefsFailed) return winners.map((_, index) => index);
   const prefByUserId = new Map(userPrefs.map((u) => [u.id, u]));
   // BOUNDED (guardrail 31), and awaited. Each send opens its own SMTP connection, and
   // firing the whole winner set at once blew past the relay's per-client connection
@@ -243,22 +313,28 @@ export async function notifyUsersRequestsAvailableEmail(
   // fans out widest, had most of its mail rejected. The
   // "now available" claim is a once-only CAS that has ALREADY been burned by the time
   // this runs, so a dropped send is never retried: that mail is simply lost.
-  const recipients = winners.flatMap((w) => {
+  const recipients = winners.flatMap((w, index) => {
     const u = prefByUserId.get(w.requestedBy);
     if (!u || !u.emailOnAvailable) return [];
     const to = resolveUserNotificationEmail(u);
-    return to ? [{ w, to, locale: u.locale ?? null }] : [];
+    return to ? [{ w, to, locale: u.locale ?? null, index }] : [];
   });
-  await settleLimit(recipients, EMAIL_SEND_CONCURRENCY, async ({ w, to, locale }) => {
-    await notifyUserRequestAvailableEmail({
+  const failed: number[] = [];
+  await settleLimit(recipients, EMAIL_SEND_CONCURRENCY, async ({ w, to, locale, index }) => {
+    const retry = await notifyUserRequestAvailableEmail({
       toEmail: to,
       title: w.title,
       mediaType: w.mediaType,
       posterPath: w.posterPath ?? null,
       tmdbId: w.tmdbId ?? undefined,
       locale,
-    }).catch((err) => console.error(`[${logScope}] email error:`, err instanceof Error ? err.message : err));
+    }).catch((err) => {
+      console.error(`[${logScope}] email error:`, err instanceof Error ? err.message : err);
+      return true;
+    });
+    if (retry) failed.push(index);
   });
+  return failed.sort((a, b) => a - b);
 }
 
 // SMTP connections are the scarce resource, not CPU: every real relay caps concurrent
@@ -439,42 +515,111 @@ export async function notifyRequestStatusChanges(
   logScope = "notify",
 ): Promise<void> {
   if (targets.length === 0) return;
-  let owners: Array<{ id: string } & StatusChangeRecipient>;
+  // A failed lookup sends nothing and settles nothing: the queued notices stay
+  // for the drain.
+  const owners = await loadActiveOwners(targets, logScope);
+  if (!owners) return;
+  // Discord, push, the inbox and the outbound channels are not waited on;
+  // email is (SMTP connections are bounded — see EMAIL_SEND_CONCURRENCY).
+  void deliverStatusChannel(status, "discord", targets, owners, logScope);
+  void deliverStatusChannel(status, "push", targets, owners, logScope);
+  void deliverStatusChannel(status, "inbox", targets, owners, logScope);
+  void deliverStatusChannel(status, "agents", targets, owners, logScope);
+  await deliverStatusChannel(status, "email", targets, owners, logScope);
+}
+
+/**
+ * ONE channel of an approve/decline notice, for the outbox drain: the same
+ * owner read (disabled accounts dropped) and the same sender as the fan-out.
+ * Never throws.
+ */
+export async function deliverDecisionChannel(
+  status: "APPROVED" | "DECLINED",
+  channel: NoticeChannel,
+  targets: StatusChangeTarget[],
+  logScope: string,
+): Promise<void> {
+  if (targets.length === 0) return;
+  const owners = await loadActiveOwners(targets, logScope);
+  if (!owners) return;
+  await deliverStatusChannel(status, channel, targets, owners, logScope);
+}
+
+type OwnerMap = Map<string, { id: string } & StatusChangeRecipient>;
+
+// The targets' owners that are NOT disabled (guardrail 33), with the email
+// address and opt-ins. null when the read failed.
+async function loadActiveOwners(targets: StatusChangeTarget[], logScope: string): Promise<OwnerMap | null> {
   try {
-    owners = await prisma.user.findMany({
+    const owners = await prisma.user.findMany({
       where: { id: { in: [...new Set(targets.map((t) => t.requestedBy))] }, deactivatedAt: null },
       select: { id: true, email: true, notificationEmail: true, emailOnApproved: true, emailOnDeclined: true, locale: true },
     });
+    return new Map(owners.map((u) => [u.id, u]));
   } catch (err) {
     console.error(`[${logScope}] active-owner lookup failed; skipping notifications:`, err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+const CHANNEL_LOG_LABEL: Record<NoticeChannel, string> = { discord: "Discord", push: "push", inbox: "in-app", agents: "outbound", email: "email" };
+
+// One sender per approve/decline channel, over the live (not disabled) targets.
+const STATUS_SENDERS: Record<
+  NoticeChannel,
+  (status: "APPROVED" | "DECLINED", live: StatusChangeTarget[], owners: OwnerMap, logScope: string) => Promise<FailedIndexes>
+> = {
+  discord: (status, live) => (status === "APPROVED" ? notifyUsersRequestsApproved(live) : notifyUsersRequestsDeclined(live)),
+  push: (status, live) => (status === "APPROVED" ? notifyUsersRequestsApprovedPush(live) : notifyUsersRequestsDeclinedPush(live)),
+  inbox: (status, live, _owners, logScope) => writeInboxRows(live, status === "APPROVED" ? "REQUEST_APPROVED" : "REQUEST_DECLINED", logScope),
+  // Hands off to notify-agents' own in-memory retries and returns.
+  agents: async (status, live) => emitNotificationEvents(live.map((t) => statusEvent(status, t))),
+  email: async (status, live, owners, logScope) => {
+    const recipients = live.flatMap((t, index) => {
+      const u = owners.get(t.requestedBy)!;
+      if (!(status === "APPROVED" ? u.emailOnApproved : u.emailOnDeclined)) return [];
+      const to = resolveUserNotificationEmail(u);
+      return to ? [{ t, to, locale: u.locale ?? null, index }] : [];
+    });
+    const failed: number[] = [];
+    await settleLimit(recipients, EMAIL_SEND_CONCURRENCY, async ({ t, to, locale, index }) => {
+      const send = status === "APPROVED"
+        ? notifyUserRequestApprovedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, posterPath: t.posterPath, tmdbId: t.tmdbId ?? undefined, locale })
+        : notifyUserRequestDeclinedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, tmdbId: t.tmdbId ?? undefined, adminNote: t.adminNote ?? null, posterPath: t.posterPath, locale });
+      const retry = await send.catch((err: unknown) => {
+        console.error(`[${logScope}] email notify failed:`, err instanceof Error ? err.message : err);
+        return true;
+      });
+      if (retry) failed.push(index);
+    });
+    return failed.sort((a, b) => a - b);
+  },
+};
+
+// Send one channel to the live targets, then settle that channel's outbox rows
+// for EVERY target — a disabled requester's notice is dropped, not kept owed.
+// A sender that throws leaves its rows for the drain. Never throws.
+async function deliverStatusChannel(
+  status: "APPROVED" | "DECLINED",
+  channel: NoticeChannel,
+  targets: StatusChangeTarget[],
+  owners: OwnerMap,
+  logScope: string,
+): Promise<void> {
+  const live = targets.filter((t) => owners.has(t.requestedBy));
+  let failed: FailedIndexes = undefined;
+  try {
+    if (live.length > 0) failed = await STATUS_SENDERS[channel](status, live, owners, logScope);
+  } catch (err) {
+    console.error(`[${logScope}] ${CHANNEL_LOG_LABEL[channel]} notify failed:`, err instanceof Error ? err.message : err);
     return;
   }
-  const ownerById = new Map(owners.map((u) => [u.id, u]));
-  const live = targets.filter((t) => ownerById.has(t.requestedBy));
-  if (live.length === 0) return;
-
-  const logFailure = (channel: string) => (err: unknown) =>
-    console.error(`[${logScope}] ${channel} notify failed:`, err instanceof Error ? err.message : err);
-  if (status === "APPROVED") {
-    notifyUsersRequestsApproved(live).catch(logFailure("Discord"));
-    notifyUsersRequestsApprovedPush(live).catch(logFailure("push"));
-  } else {
-    notifyUsersRequestsDeclined(live).catch(logFailure("Discord"));
-    notifyUsersRequestsDeclinedPush(live).catch(logFailure("push"));
-  }
-  void writeInboxRows(live, status === "APPROVED" ? "REQUEST_APPROVED" : "REQUEST_DECLINED", logScope);
-  emitNotificationEvents(live.map((t) => statusEvent(status, t)));
-
-  const recipients = live.flatMap((t) => {
-    const u = ownerById.get(t.requestedBy)!;
-    if (!(status === "APPROVED" ? u.emailOnApproved : u.emailOnDeclined)) return [];
-    const to = resolveUserNotificationEmail(u);
-    return to ? [{ t, to, locale: u.locale ?? null }] : [];
-  });
-  await settleLimit(recipients, EMAIL_SEND_CONCURRENCY, async ({ t, to, locale }) => {
-    const send = status === "APPROVED"
-      ? notifyUserRequestApprovedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, posterPath: t.posterPath, tmdbId: t.tmdbId ?? undefined, locale })
-      : notifyUserRequestDeclinedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, tmdbId: t.tmdbId ?? undefined, adminNote: t.adminNote ?? null, posterPath: t.posterPath, locale });
-    await send.catch(logFailure("email"));
-  });
+  // The senders' indexes are into `live`: the failed ones stay owed; every
+  // other target — a disabled requester's included — is settled.
+  const owed = owedIds(live, failed, channel, logScope);
+  await settleOutbox(
+    status === "APPROVED" ? OUTBOX_APPROVED_KIND : OUTBOX_DECLINED_KIND,
+    channel,
+    targets.filter((t) => !owed.has(t.id)).map((t) => t.id),
+  );
 }

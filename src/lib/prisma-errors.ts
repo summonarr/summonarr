@@ -17,6 +17,7 @@
 
 export type PrismaErrorCode =
   | "P2002" // unique constraint violation
+  | "P2003" // foreign key constraint violation
   | "P2025" // record required for the operation not found
   | "P2028" // transaction API error: expired, or no connection in time
   | "P2034"; // transaction write conflict / deadlock — retry it

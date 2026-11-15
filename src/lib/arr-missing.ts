@@ -17,6 +17,7 @@
 // for a different reason (nothing is searching for it), and the page decides
 // whether to show it.
 import { nonNegInt, posInt, PROJECTION_SCAN_FACTOR, text } from "./arr-parse";
+import { MAX_TITLE_EPISODES } from "./arr-title";
 import { sonarrSeriesCompletion, type SonarrSeriesStatsRow } from "./sonarr-completion";
 
 // Ids are safe integers and every string the page shows is bounded (arr-parse).
@@ -276,9 +277,16 @@ function missingEpisodeParts(r: SonarrEpisodeRow, nowMs: number): { seasonNumber
   return { seasonNumber, episodeNumber, aired };
 }
 
+// One series' /api/v3/episode list is capped by arrFetch only by SIZE, and it
+// is judged (and sorted) synchronously. So a series' episode rules read at most
+// this many rows of it — PROJECTION_SCAN_FACTOR times the title manager's
+// MAX_TITLE_EPISODES, which no real series reaches (guardrail 5i).
+export const MAX_EPISODE_ROWS_READ = MAX_TITLE_EPISODES * PROJECTION_SCAN_FACTOR;
+
 export function missingEpisodes(rows: readonly SonarrEpisodeRow[], nowMs: number): MissingEpisode[] {
   const out: MissingEpisode[] = [];
-  for (const r of rows) {
+  for (let i = 0, n = Math.min(rows.length, MAX_EPISODE_ROWS_READ); i < n && out.length < MAX_TITLE_EPISODES; i++) {
+    const r = rows[i];
     const m = missingEpisodeParts(r, nowMs);
     if (m) out.push({ seasonNumber: m.seasonNumber, episodeNumber: m.episodeNumber, title: text(r.title), airDateUtc: new Date(m.aired).toISOString() });
   }
@@ -292,7 +300,18 @@ export interface SeriesSearchPlan {
   seasons: number[];
   /** Every other missing episode, searched individually (Sonarr `EpisodeSearch`). */
   episodeIds: number[];
+  /**
+   * Present (true) only when a cap cut the plan: rows past MAX_EPISODE_ROWS_READ
+   * were never judged, or more than MAX_SEARCH_SEASONS seasons qualified and
+   * the rest were left out. What is planned is still right; it is not everything.
+   */
+  truncated?: true;
 }
+
+// Each planned season is one awaited SeasonSearch POST, so the plan keeps at
+// most this many (the lowest-numbered). A real series has a few dozen seasons;
+// a hostile episode list could name a different one on every row.
+export const MAX_SEARCH_SEASONS = 200;
 
 // What the Missing page's Search button asks Sonarr for: exactly the missing
 // episodes, never the rest. A season with no file at all is searched as a season
@@ -304,7 +323,9 @@ export interface SeriesSearchPlan {
 export function planSeriesSearch(rows: readonly SonarrEpisodeRow[], nowMs: number): SeriesSearchPlan {
   const missingBySeason = new Map<number, number[]>();
   const seasonsWithFile = new Set<number>();
-  for (const r of rows) {
+  const scan = Math.min(rows.length, MAX_EPISODE_ROWS_READ);
+  for (let i = 0; i < scan; i++) {
+    const r = rows[i];
     const season = posInt(r?.seasonNumber);
     if (season !== null && r.hasFile === true) seasonsWithFile.add(season);
     const m = missingEpisodeParts(r, nowMs);
@@ -315,12 +336,19 @@ export function planSeriesSearch(rows: readonly SonarrEpisodeRow[], nowMs: numbe
     else missingBySeason.set(m.seasonNumber, [id]);
   }
   const plan: SeriesSearchPlan = { seasons: [], episodeIds: [] };
+  let cut = scan < rows.length;
   for (const season of [...missingBySeason.keys()].sort((a, b) => a - b)) {
     const ids = missingBySeason.get(season)!;
-    if (ids.length > 1 && !seasonsWithFile.has(season)) plan.seasons.push(season);
+    if (ids.length > 1 && !seasonsWithFile.has(season)) {
+      // Past the cap a whole-season search is dropped, never turned into
+      // per-episode ids: with nothing of the season on disk that is the wrong search.
+      if (plan.seasons.length < MAX_SEARCH_SEASONS) plan.seasons.push(season);
+      else cut = true;
+    }
     // One by one: a spread of an upstream-sized season throws RangeError (guardrail 5i).
     else for (const id of ids) plan.episodeIds.push(id);
   }
+  if (cut) plan.truncated = true;
   return plan;
 }
 

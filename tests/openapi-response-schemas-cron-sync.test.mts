@@ -200,7 +200,9 @@ test("the monitor crons document exactly what their handler sends, the spread re
     ["/cron/watch-sync", "watch-sync-data.ts", "WatchSyncRunResult"],
   ];
   for (const [path, lib, iface] of cases) {
-    const sent = expand(cronRunBody(handlerSource(path, "post")), { result: interfaceFields(libSource(lib), iface) });
+    // arr-watch's run lives in its shared job config (the route only names it).
+    const run = path === "/cron/arr-watch" ? libSource("arr-watch-cron.ts") : handlerSource(path, "post");
+    const sent = expand(cronRunBody(run), { result: interfaceFields(libSource(lib), iface) });
     assert.deepEqual(keysOf(await runBranch(path)), sent, path);
   }
 

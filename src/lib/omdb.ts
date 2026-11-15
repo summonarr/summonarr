@@ -225,7 +225,10 @@ const API_KEY_TTL_MS = 30_000;
 const apiKeyMemo = processSingleton<{
   cache: { value: string | null; at: number } | null;
   inflight: Promise<string | null> | null;
-}>("omdb:api-key", () => ({ cache: null, inflight: null }));
+  // Bumped by every fresh read: an older read that finishes later must not
+  // overwrite what the fresh one stored.
+  generation: number;
+}>("omdb:api-key", () => ({ cache: null, inflight: null, generation: 0 }));
 
 async function getApiKey(opts: { fresh?: boolean } = {}): Promise<string | null> {
   const memo = apiKeyMemo.cache;
@@ -233,10 +236,12 @@ async function getApiKey(opts: { fresh?: boolean } = {}): Promise<string | null>
     return memo.value;
   }
   if (!opts.fresh && apiKeyMemo.inflight) return apiKeyMemo.inflight;
+  if (opts.fresh) apiKeyMemo.generation += 1;
+  const generation = apiKeyMemo.generation;
   const p = (async () => {
     const row = await prisma.setting.findUnique({ where: { key: "omdbApiKey" } });
     const value = row?.value.trim() || null;
-    apiKeyMemo.cache = { value, at: Date.now() };
+    if (generation === apiKeyMemo.generation) apiKeyMemo.cache = { value, at: Date.now() };
     return value;
   })();
   if (!opts.fresh) {

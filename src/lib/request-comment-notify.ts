@@ -8,6 +8,7 @@ import { notifyUserRequestComment, notifyAdminsRequestComment } from "./discord-
 import { notifyUserRequestCommentPush, notifyAdminsRequestCommentPush } from "./push";
 import { notifyUserRequestCommentEmail, notifyAdminsRequestCommentEmail } from "./email";
 import { translatorForUser } from "./i18n/server-locale";
+import { OUTBOX_ALL_CHANNELS, OUTBOX_COMMENT_KIND, settleOutbox } from "./outbox";
 
 export interface RequestCommentAnnouncement {
   request: {
@@ -26,6 +27,12 @@ export interface RequestCommentAnnouncement {
   authorDisplayName: string | null;
   text: string;
   authorIsManager: boolean;
+  /**
+   * The comment's id, when its announcement was queued with the write
+   * (outbox.ts queueAnnouncement): the row is settled once every channel has
+   * returned. Absent ⇒ nothing was queued and nothing is settled.
+   */
+  commentId?: string;
 }
 
 /**
@@ -60,8 +67,31 @@ function logFailure(channel: string) {
 // preferences (notifyOnComment / emailOnComment / pushOnComment) live in the
 // senders so the manager fan-out, which selects its audience in SQL, uses the
 // same columns.
+//
+// The announcement was queued in the comment's own transaction (guardrail 14f).
+// The channels still go out without being waited on; once all of them have
+// returned the outbox row is deleted. A failed recipient read settles nothing,
+// so the drain announces it again; a disabled recipient is settled (dropped).
 export async function announceRequestComment(a: RequestCommentAnnouncement): Promise<void> {
+  const sends: Array<Promise<unknown>> = [];
+  let owed = false;
   try {
+    owed = await announceComment(a, sends);
+  } catch (err) {
+    owed = true;
+    console.error("[request-comments] announce failed:", err instanceof Error ? err.message : err);
+  }
+  if (a.commentId && !owed) {
+    const id = a.commentId;
+    void Promise.allSettled(sends).then(() => settleOutbox(OUTBOX_COMMENT_KIND, OUTBOX_ALL_CHANNELS, [id]));
+  }
+}
+
+// Starts every channel (pushed onto `sends`, each already swallowing its own
+// failure). Answers true when the announcement is STILL OWED: the recipient
+// could not be read.
+async function announceComment(a: RequestCommentAnnouncement, sends: Array<Promise<unknown>>): Promise<boolean> {
+  {
     const { request } = a;
     const text = a.text.slice(0, 1_000);
     const media = { tmdbId: request.tmdbId, mediaType: request.mediaType };
@@ -88,15 +118,19 @@ export async function announceRequestComment(a: RequestCommentAnnouncement): Pro
           where: { id: request.requestedBy },
           select: { deactivatedAt: true, email: true, notificationEmail: true, emailOnComment: true, locale: true },
         })
-        .catch(logFailure("requester lookup"));
-      if (!requester || requester.deactivatedAt != null) return;
-      const author = requesterFacingAuthor(a.authorDisplayName, requester);
+        .then((row) => ({ row }))
+        .catch((err: unknown) => { logFailure("requester lookup")(err); return null; });
+      // The read failed: nobody is told now, and the announcement stays owed.
+      if (!requester) return true;
+      if (!requester.row || requester.row.deactivatedAt != null) return false;
+      const who = requester.row;
+      const author = requesterFacingAuthor(a.authorDisplayName, who);
 
-      void notifyUserRequestComment(request.requestedBy, request.title, author, text, media).catch(logFailure("requester discord"));
-      void notifyUserRequestCommentPush({
+      sends.push(notifyUserRequestComment(request.requestedBy, request.title, author, text, media).catch(logFailure("requester discord")));
+      sends.push(notifyUserRequestCommentPush({
         userId: request.requestedBy, title: request.title, tmdbId: request.tmdbId, mediaType: request.mediaType, body: text, requestId: request.id,
-      }).catch(logFailure("requester push"));
-      createInAppNotification(request.requestedBy, {
+      }).catch(logFailure("requester push")));
+      sends.push(createInAppNotification(request.requestedBy, {
         type: "REQUEST_COMMENT",
         title: request.title,
         body: `${author} commented: ${text.slice(0, 400)}`,
@@ -105,29 +139,28 @@ export async function announceRequestComment(a: RequestCommentAnnouncement): Pro
         posterPath: request.posterPath,
         // Re-rendered in the reader's language at read time (notification-render.ts).
         data: { v: 1, author, text: text.slice(0, 400) },
-      });
-      if (requester.emailOnComment) {
-        const toEmail = resolveUserNotificationEmail(requester);
+      }));
+      if (who.emailOnComment) {
+        const toEmail = resolveUserNotificationEmail(who);
         if (toEmail) {
-          void notifyUserRequestCommentEmail({
+          sends.push(notifyUserRequestCommentEmail({
             toEmail, title: request.title, tmdbId: request.tmdbId, mediaType: request.mediaType,
-            authorName: author, body: text, requestId: request.id, locale: requester.locale,
-          }).catch(logFailure("requester email"));
+            authorName: author, body: text, requestId: request.id, locale: who.locale,
+          }).catch(logFailure("requester email")));
         }
       }
-      return;
+      return false;
     }
 
     if (audience.to === "managers") {
-      void notifyAdminsRequestComment(request.title, a.authorName, text, { excludeUserId: a.authorId, ...media }).catch(logFailure("manager discord"));
-      void notifyAdminsRequestCommentPush({
+      sends.push(notifyAdminsRequestComment(request.title, a.authorName, text, { excludeUserId: a.authorId, ...media }).catch(logFailure("manager discord")));
+      sends.push(notifyAdminsRequestCommentPush({
         title: request.title, tmdbId: request.tmdbId, mediaType: request.mediaType, userName: a.authorName, body: text, requestId: request.id, excludeUserId: a.authorId,
-      }).catch(logFailure("manager push"));
-      void notifyAdminsRequestCommentEmail({
+      }).catch(logFailure("manager push")));
+      sends.push(notifyAdminsRequestCommentEmail({
         title: request.title, tmdbId: request.tmdbId, mediaType: request.mediaType, userName: a.authorName, body: text, requestId: request.id, excludeUserId: a.authorId,
-      }).catch(logFailure("manager email"));
+      }).catch(logFailure("manager email")));
     }
-  } catch (err) {
-    console.error("[request-comments] announce failed:", err instanceof Error ? err.message : err);
+    return false;
   }
 }

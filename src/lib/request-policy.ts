@@ -10,6 +10,7 @@ import { routeMediaToSlug, type ArrInstanceConfig, type RoutableMedia } from "@/
 import { exceedsCap } from "@/lib/content-rating";
 import { canAutoApproveInstance, canRequestInstance, hasPermission, Permission, type InstanceAccess, type InstanceGrants } from "@/lib/permissions";
 import { resolveUserQuota, parseQuotaLimit, quotaUsageWhere, type ResolvedQuota } from "@/lib/quota";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 // The policy steps every request-creation path shares — the web/auto-request
 // chokepoint (request-create.ts), the bulk route (request-bulk.ts) and, through
@@ -131,12 +132,22 @@ export async function resolveTargetInstance(opts: {
         : await autoRouteSlug(instances.filter((i) => configured.has(i.slug)), opts.loadDetails);
 
   const instance = instances.find((i) => i.slug === slug);
+  const may = (inst: ArrInstanceConfig) => canRequestInstance(opts.perms, inst, opts.grants, opts.mediaType, opts.request4kAll);
+  // An explicit non-default slug is checked against the requester's grant
+  // BEFORE anything says whether it exists or is configured: an unknown slug
+  // and an ungranted one get the same answer. Otherwise any signed-in user
+  // could probe which restricted instances are registered (400 vs 403) and read
+  // an unconfigured one's display name. The same rule as
+  // /api/requests/quality-profiles; a request manager (ADMIN included) already
+  // sees the whole registry and keeps the specific answers.
+  if (explicit && slug !== "" && !hasPermission(opts.perms, Permission.MANAGE_REQUESTS) && (!instance || !may(instance))) {
+    return { ok: false, reason: "forbidden" };
+  }
   if (!instance) return { ok: false, reason: "instance-unavailable" };
   // A non-default instance must have a configured connection (url + apiKey). The
   // default ("") is always allowed — with no arr configured the request stays pending.
   if (slug !== "" && !configured.has(slug)) return { ok: false, reason: "instance-unavailable", instanceName: instance.name };
 
-  const may = (inst: ArrInstanceConfig) => canRequestInstance(opts.perms, inst, opts.grants, opts.mediaType, opts.request4kAll);
   if (may(instance)) return { ok: true, instance, explicit };
   if (explicit) return { ok: false, reason: "forbidden" };
   const defaultInstance = instances.find((i) => i.slug === "");
@@ -258,12 +269,29 @@ export async function assertQuotaInTx(
 // response to wait for — the Discord handler, already answered — passes its own.
 export type AfterResponse = (task: () => Promise<void>) => void;
 
+// How many admin "new request" alerts one account can raise in an hour. Every
+// alert is an email, a push and a Discord message to each admin plus the
+// outbound agents, and a requester can make a PENDING row as often as the
+// create limit allows (cancelling their own frees the quota slot again), so
+// without a budget one account could page every admin hundreds of times an
+// hour. 30 is far past a real evening of requesting — and by then the admins
+// have been told thirty times that this person's requests are waiting; the
+// queue lists the rest.
+export const ADMIN_ALERT_BUDGET = 30;
+export const ADMIN_ALERT_WINDOW_MS = 60 * 60 * 1000;
+
 /**
  * The admin "new request" alert for one PENDING request: the outbound channels
  * (through emitNotificationEvent, guardrail 14c) plus the admin email, push and
  * Discord notifiers, after the response. `excludeUserId` is the account that
  * acted, which needs no alert about it. `schedule` defaults to after(), which
  * needs a request scope.
+ *
+ * Held to ADMIN_ALERT_BUDGET per acting account (`excludeUserId`: the
+ * requester, or whoever filed on their behalf — the account whose actions
+ * raise the alerts). Past it ONLY this fan-out is dropped: the request, its
+ * SSE event and its place in the admin queue are untouched. Returns whether
+ * the alert was scheduled.
  */
 export function alertAdminsNewRequest(
   r: {
@@ -279,7 +307,8 @@ export function alertAdminsNewRequest(
     excludeUserId: string;
   },
   schedule: AfterResponse = after,
-): void {
+): boolean {
+  if (!checkRateLimit(`request-alert:${r.excludeUserId}`, ADMIN_ALERT_BUDGET, ADMIN_ALERT_WINDOW_MS)) return false;
   schedule(async () => {
     emitNotificationEvent({
       event: "request.created",
@@ -294,6 +323,7 @@ export function alertAdminsNewRequest(
       notifyAdminsNewRequestDiscord({ requestId: r.requestId, title: r.title, mediaType: r.mediaType, tmdbId: r.tmdbId, requestedBy: r.requestedBy, note: r.note, posterPath: r.posterPath }),
     ]);
   });
+  return true;
 }
 
 /**

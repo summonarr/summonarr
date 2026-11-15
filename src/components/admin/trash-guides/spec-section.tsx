@@ -30,6 +30,7 @@ import {
 } from "./types";
 import { ApplyLog } from "./apply-log";
 import { answerOf, applyOutcome } from "./outcomes";
+import { customFormatDetailView } from "./spec-detail-view";
 import { countSpecs, filterSpecs, specMatches, SPEC_FILTERS, SPEC_FILTER_LABEL_KEYS, type SpecFilter } from "./spec-filters";
 import { StatusNote } from "./status-note";
 import { useTrashRun, type TrashRun } from "./use-trash-run";
@@ -88,7 +89,12 @@ export function useSpecStatus(service: TrashService, variant: string, enabled = 
     // A superseded request (service/variant switched) must not overwrite
     // the newer selection's specs.
     if (signal?.aborted || (!res.ok && res.kind === "aborted")) return;
-    if (res.ok) {
+    if (res.ok && res.data.schemaDiagnostic) {
+      // A 200 that carries the db-push hint has no catalog to show: the hint is
+      // the load error, never "no specs pulled yet".
+      setSpecs([]);
+      setLoadError(res.data.schemaDiagnostic);
+    } else if (res.ok) {
       setSpecs(res.data.specs ?? []);
       setLoadError(null);
     } else {
@@ -293,16 +299,24 @@ export function SpecSection({
     // 409 (the trash lock is held) ran nothing: "already running", as on the
     // other cards. A refusal (403 off, 429, 400) keeps the selection for a
     // retry and shows the route's reason.
-    const outcome = applyOutcome(answer.status, answer.body, t("trash.spec.error.apply", { status: answer.status }));
+    const outcome = applyOutcome(answer.status, answer.body, t("trash.spec.error.apply", { status: answer.status }), ids);
     if (outcome.kind === "skipped") {
       run.skip("running");
       return;
     }
-    run.done(outcome.failed, outcome.errors.length > 0 ? { errors: outcome.errors } : null, outcome.results);
+    // A sent spec with no result was not applied: said so, never "Applied".
+    const errors = outcome.unanswered.length > 0
+      ? [...outcome.errors, t("trash.spec.error.unanswered", { count: outcome.unanswered.length })]
+      : outcome.errors;
+    run.done(outcome.failed, errors.length > 0 ? { errors } : null, outcome.results);
     if (outcome.results.length > 0 || !outcome.failed) {
+      // Only the specs the run answered leave the selection; one it never
+      // reached stays ticked for another try (one that left the catalog is no
+      // longer listed, so its tick is inert).
+      const unanswered = new Set(outcome.unanswered);
       setSelected((prev) => {
         const next = new Set(prev);
-        for (const id of ids) next.delete(id);
+        for (const id of ids) if (!unanswered.has(id)) next.delete(id);
         return next;
       });
       await load();
@@ -739,6 +753,10 @@ function SpecActions({
         onClick={() => void onSetManaged(app.id, !app.enabled)}
         className="text-xs py-1.5 px-2 -my-1.5 text-zinc-400 hover:text-zinc-100 inline-flex items-center gap-1"
         title={app.enabled ? t("trash.spec.pauseTitle") : t("trash.spec.resumeTitle")}
+        // The visible text is the STATE; the name also says what pressing does.
+        aria-label={app.enabled
+          ? `${t("trash.spec.status.managed")} — ${t("trash.spec.pauseTitle")}`
+          : `${t("trash.spec.status.paused")} — ${t("trash.spec.resumeTitle")}`}
       >
         {app.enabled
           ? <><Shield className="w-3.5 h-3.5" />{t("trash.spec.status.managed")}</>
@@ -912,41 +930,26 @@ function QualitySizeDetail({ detail }: { detail: SpecDetail }) {
   );
 }
 
-function readSpecValue(fields: unknown): unknown {
-  if (Array.isArray(fields)) {
-    return (fields as Array<{ name?: string; value?: unknown }>)
-      .find((f) => f.name === "value")?.value;
-  }
-  if (fields && typeof fields === "object") {
-    return (fields as Record<string, unknown>).value;
-  }
-  return undefined;
-}
-
 function CustomFormatDetail({ detail }: { detail: SpecDetail }) {
   const t = useT();
-  const payload = detail.payload as {
-    trash_id?: string;
-    trash_scores?: Record<string, number>;
-    includeCustomFormatWhenRenaming?: boolean;
-    specifications?: Array<{ name?: string; implementation?: string; negate?: boolean; required?: boolean; fields?: Array<{ name?: string; value?: unknown }> | Record<string, unknown> }>;
-  };
-  const scores = payload.trash_scores ?? {};
-  const specs = payload.specifications ?? [];
+  // Checked field by field (spec-detail-view.ts), never cast: the payload is
+  // TRaSH's own JSON and nothing upstream vouches for these shapes.
+  const view = customFormatDetailView(detail.payload);
+  const { scores, specs } = view;
   return (
     <div className="space-y-3 text-xs text-zinc-300">
       <div className="grid grid-cols-2 gap-x-6 gap-y-1">
-        <div><span className="text-zinc-500">trash_id:</span> <span className="font-mono">{payload.trash_id}</span></div>
-        <div><span className="text-zinc-500">includeCustomFormatWhenRenaming:</span> {String(payload.includeCustomFormatWhenRenaming ?? false)}</div>
+        <div><span className="text-zinc-500">trash_id:</span> <span className="font-mono">{view.trashId}</span></div>
+        <div><span className="text-zinc-500">includeCustomFormatWhenRenaming:</span> {String(view.includeWhenRenaming)}</div>
         <div><span className="text-zinc-500">{t("trash.spec.detail.upstreamPath")}</span> <span className="font-mono">{detail.upstreamPath}</span></div>
         <div><span className="text-zinc-500">sha:</span> <span className="font-mono">{detail.upstreamSha?.slice(0, 12) ?? "—"}</span></div>
       </div>
 
-      {Object.keys(scores).length > 0 && (
+      {scores.length > 0 && (
         <div>
           <p className="text-zinc-400 font-medium mb-1">{t("trash.spec.detail.trashScores")}</p>
           <div className="flex flex-wrap gap-1.5">
-            {Object.entries(scores).map(([set, score]) => (
+            {scores.map(([set, score]) => (
               <span key={set} className="px-2 py-0.5 bg-zinc-800 rounded">
                 <span className="text-zinc-500">{set}:</span> <span className="font-mono">{score > 0 ? "+" : ""}{score}</span>
               </span>
@@ -959,20 +962,17 @@ function CustomFormatDetail({ detail }: { detail: SpecDetail }) {
         <div>
           <p className="text-zinc-400 font-medium mb-1">{t("trash.spec.detail.specifications", { count: specs.length })}</p>
           <div className="space-y-1">
-            {specs.map((s, i) => {
-              const value = readSpecValue(s.fields);
-              return (
-                <div key={i} className="flex items-center gap-2 py-0.5">
-                  <span className="font-medium text-zinc-200 min-w-0 truncate">{s.name}</span>
-                  <span className="text-zinc-500">({s.implementation})</span>
-                  {s.negate && <span className="text-amber-400 text-[10px] uppercase">{t("trash.spec.detail.negated")}</span>}
-                  {s.required && <span className="text-sky-400 text-[10px] uppercase">{t("trash.spec.detail.required")}</span>}
-                  {value != null && (
-                    <span className="font-mono text-zinc-400 truncate text-[11px]">{String(value).slice(0, 60)}</span>
-                  )}
-                </div>
-              );
-            })}
+            {specs.map((s, i) => (
+              <div key={i} className="flex items-center gap-2 py-0.5">
+                <span className="font-medium text-zinc-200 min-w-0 truncate">{s.name}</span>
+                <span className="text-zinc-500">({s.implementation})</span>
+                {s.negate && <span className="text-amber-400 text-[10px] uppercase">{t("trash.spec.detail.negated")}</span>}
+                {s.required && <span className="text-sky-400 text-[10px] uppercase">{t("trash.spec.detail.required")}</span>}
+                {s.value !== null && (
+                  <span className="font-mono text-zinc-400 truncate text-[11px]">{s.value}</span>
+                )}
+              </div>
+            ))}
           </div>
         </div>
       )}

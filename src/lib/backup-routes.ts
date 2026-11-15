@@ -58,7 +58,11 @@ export type BackupImportAuditMode = "admin" | "admin-chunked" | "setup" | "setup
 // BACKUP_IMPORT details for a restore that ran. A failed one records its status
 // and counts only, never result.errors or result.error: validation errors quote
 // up to 80 characters of the backup's SQL.
-export function importAuditDetails(result: BackupImportResult, mode: BackupImportAuditMode): Record<string, unknown> {
+export function importAuditDetails(
+  result: BackupImportResult,
+  mode: BackupImportAuditMode,
+  keepSessions = false,
+): Record<string, unknown> {
   const counts = (s: { total: number; executed: number; skipped: number; errors: number }) => ({
     totalStatements: s.total,
     executed: s.executed,
@@ -66,12 +70,13 @@ export function importAuditDetails(result: BackupImportResult, mode: BackupImpor
     errors: s.errors,
   });
   if (result.ok) {
-    return { format: "sql", encrypted: true, mode, outcome: "restored", after: counts(result.summary) };
+    return { format: "sql", encrypted: true, mode, keepSessions, outcome: "restored", after: counts(result.summary) };
   }
   return {
     format: "sql",
     encrypted: true,
     mode,
+    keepSessions,
     outcome: "failed",
     status: result.status,
     errorCount: result.errors?.length ?? 0,
@@ -100,6 +105,27 @@ export function auditAdminImport(
   });
 }
 
+// An import that THREW instead of answering (a bug or a crashed pipeline): the
+// attempt is still audited as a failed restore, then the error is rethrown.
+export async function runAuditedAdminImport(
+  req: Request,
+  session: SummonarrSession,
+  mode: "admin" | "admin-chunked",
+  run: () => Promise<BackupImportResult>,
+): Promise<BackupImportResult> {
+  let result: BackupImportResult;
+  try {
+    result = await run();
+  } catch (err) {
+    auditAdminImport(req, session, { ok: false, status: 500, error: "Import failed unexpectedly." }, mode);
+    throw err;
+  }
+  // Audited whether or not it succeeded — after the restore, never inside it
+  // (guardrail 26).
+  auditAdminImport(req, session, result, mode);
+  return result;
+}
+
 // The first-run audit row, written after the restore committed (outside its
 // transaction, so the TRUNCATE can't take it). No session exists yet: the
 // restored users haven't signed in. A failed write must not fail the restore.
@@ -107,13 +133,14 @@ export async function auditSetupImport(
   req: Request,
   result: BackupImportResult,
   mode: "setup" | "setup-chunked",
+  keepSessions = false,
 ): Promise<void> {
   await logAudit({
     userId: null,
     userName: "system (setup)",
     action: "BACKUP_IMPORT",
     target: "backup:full-db",
-    details: importAuditDetails(result, mode),
+    details: importAuditDetails(result, mode, keepSessions),
     ipAddress: getClientIp(req.headers),
     userAgent: req.headers.get("user-agent")?.slice(0, 512) ?? null,
   });

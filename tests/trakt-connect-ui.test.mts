@@ -59,11 +59,12 @@ test("a poll answer is read by status, then by state", () => {
 test("the start answer's code needs both strings; interval and lifetime fall back", () => {
   assert.equal(readDeviceCode({ userCode: "ABC" }), null);
   assert.equal(readDeviceCode({ userCode: 1, verificationUrl: "https://trakt.tv/activate" }), null);
-  assert.deepEqual(readDeviceCode({ userCode: "ABC", verificationUrl: "u", interval: -1, expiresIn: "x" }), {
-    userCode: "ABC", verificationUrl: "u", interval: 5, expiresIn: 600,
+  assert.equal(readDeviceCode({ userCode: "ABC", verificationUrl: "javascript:alert(1)" }), null);
+  assert.deepEqual(readDeviceCode({ userCode: "ABC", verificationUrl: "https://trakt.tv/activate", interval: -1, expiresIn: "x" }), {
+    userCode: "ABC", verificationUrl: "https://trakt.tv/activate", interval: 5, expiresIn: 600,
   });
-  assert.deepEqual(readDeviceCode({ userCode: "ABC", verificationUrl: "u", interval: 8, expiresIn: 900 }), {
-    userCode: "ABC", verificationUrl: "u", interval: 8, expiresIn: 900,
+  assert.deepEqual(readDeviceCode({ userCode: "ABC", verificationUrl: "https://trakt.tv/activate", interval: 8, expiresIn: 900 }), {
+    userCode: "ABC", verificationUrl: "https://trakt.tv/activate", interval: 8, expiresIn: 900,
   });
 });
 
@@ -122,4 +123,18 @@ test("a failed copy says so, in the Trakt code panel, both two-factor copy butto
     const cat = JSON.parse(readFileSync(new URL(`../src/lib/i18n/messages/${l}/profile.json`, import.meta.url), "utf8")) as Record<string, string>;
     assert.ok(cat["profile.common.copyFailed"], l);
   }
+});
+
+// The confirm button was the one control a save in flight did not lock, so a
+// switch's PATCH and the DELETE could race.
+test("the confirm-Disconnect button is locked while anything is in flight", () => {
+  assert.match(src, /<Button type="button" variant="destructive" disabled=\{busy !== null\} onClick=\{disconnect\}/);
+});
+
+// "Incorrect password." stayed in the prompt after a later try whose password
+// was accepted and which failed for another reason.
+test("a failure that is not a step-up refusal clears the prompt's password error", () => {
+  const start = src.slice(src.indexOf("async function start("), src.indexOf("function cancel()"));
+  assert.match(start, /if \(!code\) \{[^}]*?setStepUpError\(null\);\s*setError\(/);
+  assert.match(start, /res\.status === 0\) \{[^}]*?setStepUpError\(null\);\s*setError\(/);
 });

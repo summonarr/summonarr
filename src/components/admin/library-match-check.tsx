@@ -8,8 +8,8 @@ import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { withBasePath } from "@/lib/base-path";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { runReplaceFileJob } from "@/lib/client/replace-file-job";
-import { isNoAnswer, jobAnswerError } from "@/lib/client/library-sync";
-import { matchCheckView, matchFlagKey as flagKey, noMatchFixes, recordMatchFix, type MatchFixes } from "@/lib/client/match-check-fixes";
+import { isNoAnswer, jobAnswerError, jobRunCutShort } from "@/lib/client/library-sync";
+import { activeMatchKind, matchCheckView, matchFlagKey as flagKey, noMatchFixes, recordMatchFix, type MatchFixes } from "@/lib/client/match-check-fixes";
 import { fixMatchErrorMessage, fixMatchWarningMessage, runFixMatch, type FixMatchProgressView, type FixMatchRequest } from "@/lib/client/fix-match";
 import type { FixAllEntry } from "@/lib/client/fix-all-sequence";
 import { folderYear, fixableFlag, type MatchCounts, type MatchFlag, type MatchFlagArr, type MatchFlagKind } from "@/lib/library-match";
@@ -107,15 +107,24 @@ function FixOneButton({ flag, onFixed, locked }: { flag: FixableMatchFlag; onFix
     }
   }, [state]);
 
+  // A row that unmounts (a filter change, a refresh) stops polling; the job itself runs on (guardrail 37a).
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
+
   const run = useCallback(async () => {
     refocus.current = true;
     setState("running");
     setMessage("");
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
     try {
-      const outcome = await runFixMatch(fixRequestOf(flag), { onProgress: setProgress });
+      const outcome = await runFixMatch(fixRequestOf(flag), { onProgress: setProgress, signal: ac.signal });
+      if (ac.signal.aborted) return;
       const warning = fixMatchWarningMessage(outcome, t);
       onFixed(flag, warning ?? undefined);
     } catch (err) {
+      if (ac.signal.aborted) return;
       setState("error");
       setMessage(fixMatchErrorMessage(err, t));
     }
@@ -276,7 +285,10 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
     for (const f of flags) out[f.kind]++;
     return out;
   }, [flags]);
-  const shown = useMemo(() => (kind === "all" ? flags : flags.filter((f) => f.kind === kind)), [flags, kind]);
+  // A kind whose last flag left (fixed, or a tab change) has no chip to
+  // unpress, so it reads as "all" rather than an empty list under the chips.
+  const activeKind = activeMatchKind(kind, byKind);
+  const shown = useMemo(() => (activeKind === "all" ? flags : flags.filter((f) => f.kind === activeKind)), [flags, activeKind]);
   const fixable = useMemo(
     () => shown.filter((f): f is FixableMatchFlag => !fixed.has(flagKey(f)) && fixableFlag(f)),
     [shown, fixed],
@@ -322,6 +334,11 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
         setError(jobAnswerError(answer) ?? t("adminManage.library.match.checkFailed"));
         return;
       }
+      // A run that lost its lock answers 200 without a new report.
+      if (jobRunCutShort(answer.data)) {
+        setError(t("adminManage.library.match.checkStopped"));
+        return;
+      }
       // No reset of `fixes` here: the refreshed report carries a new checkedAt,
       // which voids them (matchCheckView). Clearing first brought every row
       // fixed this session back, with a live Fix button, until it arrived.
@@ -333,22 +350,26 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
     }
   }
 
-  const chip = (value: MatchFlagKind | "all", label: string) => (
+  // One value for aria-pressed and the pressed look: the kind in effect.
+  const chip = (value: MatchFlagKind | "all", label: string) => {
+    const pressed = activeKind === value;
+    return (
     <button
       key={value}
       type="button"
       onClick={() => setKind(value)}
-      aria-pressed={kind === value}
+      aria-pressed={pressed}
       className="ds-hover-tint inline-flex items-center whitespace-nowrap font-medium transition-colors"
       style={{
         padding: "4px 10px", borderRadius: 6, fontSize: 12,
-        background: kind === value ? "var(--ds-bg-3)" : "transparent",
-        color: kind === value ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+        background: pressed ? "var(--ds-bg-3)" : "transparent",
+        color: pressed ? "var(--ds-fg)" : "var(--ds-fg-muted)",
       }}
     >
       {label}
     </button>
-  );
+    );
+  };
 
   return (
     <section
@@ -424,9 +445,13 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
           )}
         </>
       )}
-      {report && flags.length === 0 && (
+      {/* "Nothing flagged" is the whole report's verdict; an empty type tab
+          over flags of the other type says only that. */}
+      {report && flags.length === 0 && (view.flags.length === 0 ? (
         <p style={{ fontSize: 12.5, margin: 0, padding: "0 16px 14px", color: "var(--ds-success)" }}>{t("adminManage.library.match.clean")}</p>
-      )}
+      ) : (
+        <p style={{ fontSize: 12.5, margin: 0, padding: "0 16px 14px", color: "var(--ds-fg-muted)" }}>{t("adminManage.library.match.noneOfType")}</p>
+      ))}
     </section>
   );
 }

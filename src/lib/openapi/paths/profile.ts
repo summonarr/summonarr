@@ -15,7 +15,7 @@ import type { OpenApiSchema, OpenApiPaths } from "../types";
 
 // Body of every two-factor ENROLLMENT change (guardrail 6d): the current
 // password, plus — once the account has an active factor — a fresh second factor.
-const MFA_SECOND_FACTOR_SCHEMA = {
+export const MFA_SECOND_FACTOR_SCHEMA = {
   type: "object",
   description:
     "Required once the account has an active second factor (omit for the first factor). { method: \"totp\" | \"recovery\", code } or { method: \"webauthn\", credential, challengeToken } with the challenge from POST /profile/mfa/challenge. A recovery code used here is spent.",
@@ -27,6 +27,16 @@ const MFA_SECOND_FACTOR_SCHEMA = {
     challengeToken: { type: "string" },
   },
 } satisfies OpenApiSchema;
+
+// The `secondFactor` field and its 400 on the link routes behind the step-up
+// (Discord link, Discord merge, Trakt connect — guardrail 6g).
+export const LINK_SECOND_FACTOR_FIELD = {
+  ...MFA_SECOND_FACTOR_SCHEMA,
+  description:
+    "Account with an active second factor: a fresh second factor, checked after the password (same shape as the enrollment step-up; a recovery code used here is spent). Ignored on an account without one.",
+} satisfies OpenApiSchema;
+export const LINK_SECOND_FACTOR_400 =
+  "an account with an active second factor sent no `secondFactor` or an invalid one ({ error, secondFactorRequired: true, methods? })";
 
 const MFA_STEP_UP_400 =
   "Missing or wrong password, or a missing/invalid second factor ({ error, secondFactorRequired: true, methods? })";
@@ -318,7 +328,7 @@ export const profilePaths: OpenApiPaths = {
   "/profile/mfa/recovery-codes": {
     post: {
       tags: ["Profile"],
-      summary: "Replace every recovery code with ten new ones",
+      summary: `Replace every recovery code with ${RECOVERY_CODE_COUNT} new ones`,
       requestBody: { required: true, content: { "application/json": { schema: mfaStepUpBody() } } },
       responses: {
         "200": {
@@ -672,13 +682,16 @@ export const profilePaths: OpenApiPaths = {
     post: {
       tags: ["Profile"],
       summary: "Start connecting Trakt (device-code flow)",
-      description: "Answers the short code the user enters at the verification URL. The device code itself stays on the server. Poll POST /profile/trakt/device/poll every `interval` seconds until it answers connected, expired, denied or conflict. Requires a step-up: a password account sends `confirmPassword`; an SSO account must have signed in within the last 5 minutes.",
+      description: "Answers the short code the user enters at the verification URL. The device code itself stays on the server. Poll POST /profile/trakt/device/poll every `interval` seconds until it answers connected, expired, denied or conflict. Requires a step-up: a password account sends `confirmPassword`; an SSO account must have signed in within the last 5 minutes. An account with an active second factor also sends `secondFactor`.",
       requestBody: {
         content: {
           "application/json": {
             schema: {
               type: "object",
-              properties: { confirmPassword: { type: "string", description: "The current password (password accounts)" } },
+              properties: {
+                confirmPassword: { type: "string", description: "The current password (password accounts)" },
+                secondFactor: LINK_SECOND_FACTOR_FIELD,
+              },
             },
           },
         },
@@ -700,10 +713,10 @@ export const profilePaths: OpenApiPaths = {
             },
           },
         },
-        "400": { description: "Trakt is not available on this server (no client id/secret, or nothing to use it for)" },
+        "400": { description: `Trakt is not available on this server (no client id/secret, or nothing to use it for), or ${LINK_SECOND_FACTOR_400}` },
         "401": STEP_UP_401,
-        "413": { description: "Request body over the 16 KB cap" },
-        "429": { description: "Too many starts, Trakt is rate limiting, or too many wrong step-up passwords" },
+        "413": tooLargeAnswer(16 * 1024),
+        "429": { description: "Too many starts, Trakt is rate limiting, too many wrong step-up passwords, or a two-factor code lockout" },
         "502": { description: "Trakt could not be reached" },
         "503": { description: "Maintenance mode" },
       },
@@ -833,7 +846,7 @@ export const profilePaths: OpenApiPaths = {
         "200": { description: "Account disabled ({ ok: true }; idempotent)", content: { "application/json": { schema: OK_TRUE } } },
         "400": { description: "Cannot disable the last admin, a missing/incorrect password on a local account, or (web session, active second factor) a missing/invalid second factor ({ error, secondFactorRequired: true, methods? })" },
         "401": { description: "{ error: \"session-too-old\", message } — an account with no local password, from a web session that signed in more than 5 minutes ago; sign in again" },
-        "413": { description: "Request body over the 16 KB cap" },
+        "413": tooLargeAnswer(16 * 1024),
         "404": { description: "Account not found" },
         "429": { description: "Too many attempts — 5 per 15 minutes, every account kind; carries Retry-After", headers: RETRY_AFTER_HEADER },
         "503": { description: "Maintenance mode" },

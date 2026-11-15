@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { readOptionalJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@/generated/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
 import { localeForRequest, translatorForRequest } from "@/lib/i18n/server-locale";
@@ -26,7 +27,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
   // Parse an opaque `<createdAt-iso>|<id>` cursor into a keyset predicate. An
   // absent/malformed cursor fails soft to the first page.
   const cursorRaw = req.nextUrl.searchParams.get("cursor");
-  let cursorWhere: object = {};
+  let cursorWhere: Prisma.NotificationWhereInput = {};
   if (cursorRaw) {
     const sep = cursorRaw.indexOf("|");
     if (sep > 0) {

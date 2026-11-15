@@ -83,8 +83,11 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
 
   const playsByDay = s.playsByDay.map((d) => d.count);
 
-  // Linked, but nothing recorded yet — a media-server user with no plays.
-  if (s.totalPlays === 0 && s.topMedia.length === 0) {
+  // Linked, but nothing recorded yet — a media-server user with no plays at
+  // all. totalPlays and topMedia count WATCHED plays only, so on their own they
+  // hid the watch time, last active, calendar and devices of someone whose
+  // plays all stopped short of the watched threshold.
+  if (s.totalPlays === 0 && s.topMedia.length === 0 && s.totalWatchTimeHours === 0 && !s.lastActiveIso) {
     return (
       <EmptyState
         icon={BarChart3}

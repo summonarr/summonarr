@@ -8,6 +8,7 @@ import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
 import { useT } from "@/components/i18n/i18n-provider";
 import { requestFailureText } from "../request-failure-text";
 import { createFieldSave, type FieldSave } from "./field-save";
+import { createSavedFields } from "./saved-fields";
 import type { InstanceGrantMap, MediaServerGrants, User } from "./shared";
 
 // The permissions editor's state and saves. Every change works the same way:
@@ -40,6 +41,43 @@ export function parseQuotaText(raw: string): number | null {
   return trimmed === "" ? null : Math.max(0, Math.floor(Number(trimmed)));
 }
 
+// The fields this editor writes, as the row carries them.
+type EditedFields = Pick<
+  User,
+  "permissions" | "instanceGrants" | "mediaServerGrants" | "maxContentRating" | QuotaField
+>;
+
+function editedFields(u: EditedFields): EditedFields {
+  return {
+    permissions: u.permissions,
+    instanceGrants: u.instanceGrants,
+    mediaServerGrants: u.mediaServerGrants,
+    maxContentRating: u.maxContentRating ?? null,
+    movieQuotaLimit: u.movieQuotaLimit ?? null,
+    movieQuotaDays: u.movieQuotaDays ?? null,
+    tvQuotaLimit: u.tvQuotaLimit ?? null,
+    tvQuotaDays: u.tvQuotaDays ?? null,
+  };
+}
+
+// What the editor saved per user, until the page's re-read shows it: a reopen
+// before then starts from these, not from the row's older copy (saved-fields.ts).
+const savedByUser = createSavedFields<EditedFields>();
+
+/** What the server holds for every edited field, in the row's own shapes. */
+function savedFields(s: Savers): EditedFields {
+  return {
+    permissions: s.permissions.saved.toString(),
+    instanceGrants: s.instanceGrants.saved,
+    mediaServerGrants: s.mediaServerGrants.saved,
+    maxContentRating: s.maxContentRating.saved === "" ? null : s.maxContentRating.saved,
+    movieQuotaLimit: s.quota.movieQuotaLimit.saved,
+    movieQuotaDays: s.quota.movieQuotaDays.saved,
+    tvQuotaLimit: s.quota.tvQuotaLimit.saved,
+    tvQuotaDays: s.quota.tvQuotaDays.saved,
+  };
+}
+
 interface Savers {
   permissions: FieldSave<bigint>;
   instanceGrants: FieldSave<InstanceGrantMap>;
@@ -59,7 +97,7 @@ interface SaverSetters {
 // One FieldSave per editable field, starting from what the server holds. A
 // refusal puts the shown value back (`revert`); a quota field's text only
 // while it still shows the refused value, so newer typing is kept.
-function createSavers(u: User, send: (body: Record<string, unknown>) => Promise<boolean>, set: SaverSetters): Savers {
+function createSavers(u: EditedFields, send: (body: Record<string, unknown>) => Promise<boolean>, set: SaverSetters): Savers {
   const quotaSave = (field: QuotaField, initial: number | null) =>
     createFieldSave<number | null>({
       initial,
@@ -100,37 +138,45 @@ function createSavers(u: User, send: (body: Record<string, unknown>) => Promise<
 export function usePermissionEdits(u: User) {
   const t = useT();
   const router = useRouter();
-  const [perms, setPerms] = useState<bigint>(() => parsePermissions(u.permissions));
-  const [grants, setGrants] = useState<InstanceGrantMap>(u.instanceGrants);
-  const [mediaGrants, setMediaGrants] = useState<MediaServerGrants>(u.mediaServerGrants);
-  const [maxRating, setMaxRating] = useState<string>(u.maxContentRating ?? "");
+  // What the server holds for this user: the row, or what this editor saved a
+  // moment ago while the row is still the copy from before that save. Every
+  // field below starts from it, and so does each FieldSave — never from `u`.
+  const [start] = useState<EditedFields>(() => savedByUser.seed(u.id, editedFields(u)));
+  const [perms, setPerms] = useState<bigint>(() => parsePermissions(start.permissions));
+  const [grants, setGrants] = useState<InstanceGrantMap>(start.instanceGrants);
+  const [mediaGrants, setMediaGrants] = useState<MediaServerGrants>(start.mediaServerGrants);
+  const [maxRating, setMaxRating] = useState<string>(start.maxContentRating ?? "");
   const [quota, setQuota] = useState<QuotaText>({
-    movieQuotaLimit: formatQuota(u.movieQuotaLimit),
-    movieQuotaDays: formatQuota(u.movieQuotaDays),
-    tvQuotaLimit: formatQuota(u.tvQuotaLimit),
-    tvQuotaDays: formatQuota(u.tvQuotaDays),
+    movieQuotaLimit: formatQuota(start.movieQuotaLimit),
+    movieQuotaDays: formatQuota(start.movieQuotaDays),
+    tvQuotaLimit: formatQuota(start.tvQuotaLimit),
+    tvQuotaDays: formatQuota(start.tvQuotaDays),
   });
   // PATCHes in flight, for the "Saving…" line. A counter, not a boolean: one
   // field's save finishing must not hide another's still out.
   const [pending, setPending] = useState(0);
   const saving = pending > 0;
-  const [error, setError] = useState<string | null>(null);
+  // The last refusal and the field it was about: another field's later save
+  // must not hide it; only the same field saving clears it.
+  const [failure, setFailure] = useState<{ field: string; text: string } | null>(null);
+  const error = failure?.text ?? null;
   // Something was saved since the editor opened: the page is re-read on close.
   const savedAny = useRef(false);
 
   // One PATCH of one field. Resolves true when the server took it; a refusal
   // shows the route's own reason (fetchJson's apiErrorText) or its status.
   async function patch(body: Record<string, unknown>): Promise<boolean> {
+    const field = Object.keys(body)[0] ?? "";
     setPending((n) => n + 1);
-    setError(null);
     const res = await fetchJson(withBasePath(`/api/admin/users/${u.id}`), { init: jsonInit("PATCH", body) });
     setPending((n) => n - 1);
     if (res.ok) {
       savedAny.current = true;
+      setFailure((f) => (f?.field === field ? null : f));
       return true;
     }
     const text = requestFailureText(res, t, { status: "adminManage.notif.failed", network: "adminManage.users.error.network" });
-    if (text !== null) setError(text);
+    if (text !== null) setFailure({ field, text });
     return false;
   }
   const patchRef = useRef(patch);
@@ -143,7 +189,7 @@ export function usePermissionEdits(u: User) {
   // through patchRef.
   const saversRef = useRef<Savers | null>(null);
   function savers(): Savers {
-    saversRef.current ??= createSavers(u, (body) => patchRef.current(body), { setPerms, setGrants, setMediaGrants, setMaxRating, setQuota });
+    saversRef.current ??= createSavers(start, (body) => patchRef.current(body), { setPerms, setGrants, setMediaGrants, setMaxRating, setQuota });
     return saversRef.current;
   }
 
@@ -202,7 +248,7 @@ export function usePermissionEdits(u: User) {
       // value rather than leave unsaved text looking committed (and blocking
       // every close after this one).
       setQuota((q) => ({ ...q, [field]: formatQuota(saver.value) }));
-      setError(t("adminManage.perm.quota.invalid"));
+      setFailure({ field, text: t("adminManage.perm.quota.invalid") });
       return Promise.resolve(false);
     }
     // Show what is saved: "2.7" is sent as 2 and "-3" as 0.
@@ -227,6 +273,9 @@ export function usePermissionEdits(u: User) {
     if (!results.every(Boolean)) return false;
     if (savedAny.current) {
       savedAny.current = false;
+      // The row keeps its old copy until the re-read lands; a reopen before
+      // then must start from what was just saved.
+      savedByUser.remember(u.id, editedFields(u), savedFields(savers()));
       router.refresh();
     }
     return true;

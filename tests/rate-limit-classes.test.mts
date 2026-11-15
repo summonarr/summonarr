@@ -1,5 +1,5 @@
 // The protected rate-limit buckets (guardrail 6e) are split by KEY CLASS, and a
-// full class refuses only its own new keys (F020).
+// full class refuses only its own new keys.
 //
 // A full protected map refuses a NEW key rather than evict a live one. With all
 // nine prefixes in one map, an anonymous flood of made-up emails or Jellyfin

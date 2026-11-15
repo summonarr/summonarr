@@ -21,6 +21,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, Check, CircleDashed, Loader2 } from "@/components/icons";
 import { useT } from "@/components/i18n/i18n-provider";
 import { withBasePath } from "@/lib/base-path";
+import { requestTimeoutSignal } from "@/lib/client/plex-redirect-auth";
 import { cn } from "@/lib/utils";
 import {
   commandLine,
@@ -82,7 +83,12 @@ async function readChunk(target: CommandTarget, ids: readonly number[]): Promise
   const fallback = "";
   try {
     const q = new URLSearchParams({ service: target.service, instance: target.instance, ids: ids.join(",") });
-    const res = await fetch(withBasePath(`/api/admin/arr/commands?${q.toString()}`), { cache: "no-store", signal: AbortSignal.timeout(READ_TIMEOUT_MS) });
+    const res = await fetch(withBasePath(`/api/admin/arr/commands?${q.toString()}`), {
+      cache: "no-store",
+      // Not a bare AbortSignal.timeout: a browser without it (Safari before 16)
+      // threw here, every read counted as failed, and onDone never fired.
+      signal: requestTimeoutSignal(READ_TIMEOUT_MS),
+    });
     const data = (await res.json().catch(() => null)) as unknown;
     if (res.status === 429) return { kind: "rateLimited" };
     if (!res.ok) {

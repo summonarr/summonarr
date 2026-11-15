@@ -104,3 +104,38 @@ export function cachedArrList(
 export function _clearArrListCacheForTests(): void {
   arrLists.clear();
 }
+
+/** The one TMDB host fix-match reads (details and external ids). */
+export const TMDB_HOSTS = ["api.themoviedb.org"];
+
+/** The `Guid[].id` strings of a Plex metadata item or search result. */
+export function plexGuidIds(item: unknown): string[] {
+  if (typeof item !== "object" || item === null || Array.isArray(item)) return [];
+  const guids = (item as { Guid?: unknown }).Guid;
+  if (!Array.isArray(guids)) return [];
+  const ids: string[] = [];
+  for (const g of guids) {
+    if (typeof g === "object" && g !== null && !Array.isArray(g) && typeof (g as { id?: unknown }).id === "string") {
+      ids.push((g as { id: string }).id);
+    }
+  }
+  return ids;
+}
+
+// The parameter sets of Plex's /library/metadata/<key>/matches searches. The
+// candidate picker and the remap run the same five searches, so a changed
+// agent or parameter is changed once, here.
+const PLEX_MATCH_BASE = { manual: "1", includeGuids: "1" } as const;
+
+export const plexImdbGuidSearch = (imdbId: string): Record<string, string> =>
+  ({ ...PLEX_MATCH_BASE, guid: `imdb://${imdbId}` });
+export const plexImdbAgentSearch = (imdbId: string): Record<string, string> =>
+  ({ ...PLEX_MATCH_BASE, q: imdbId, agent: "com.plexapp.agents.imdb", language: "en" });
+export const plexTmdbAgentSearch = (tmdbId: number): Record<string, string> =>
+  ({ ...PLEX_MATCH_BASE, q: String(tmdbId), agent: "com.plexapp.agents.themoviedb", language: "en" });
+export function plexTitleYearSearch(title: string, year: string): Record<string, string> {
+  const params: Record<string, string> = { ...PLEX_MATCH_BASE };
+  if (title) params.title = title;
+  if (year) params.year = year;
+  return params;
+}

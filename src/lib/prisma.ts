@@ -14,7 +14,7 @@ export {
 } from "@/lib/prisma-crypto";
 
 type ExtendedPrismaClient = ReturnType<typeof createPrismaClient>;
-// Unset until the first load stores it (dev only, below).
+// Unset until the first load stores it (below).
 const globalForPrisma = globalThis as unknown as { prisma?: ExtendedPrismaClient };
 
 // Small pool: this is a single-tenant app, and a low cap avoids exhausting
@@ -47,12 +47,16 @@ function createPrismaClient() {
   });
 }
 
-export const prisma = globalForPrisma.prisma ?? createPrismaClient();
+// ONE client, and so one pg pool, per process in every environment. Turbopack
+// compiles this module into several server chunks (process-singleton.ts) and
+// dev hot-reload creates new module instances; a client per copy would make the
+// real connection ceiling DATABASE_POOL_MAX times the number of copies.
+// globalThis is the one binding they all share. (The slot stays the plain
+// `globalThis.prisma` rather than a processSingleton key: the unit suites seed
+// it with a fake before this module loads.)
+export const prisma = (globalForPrisma.prisma ??= createPrismaClient());
 
 // The interactive-transaction client of the EXTENDED client: the generated
 // Prisma.TransactionClient is not assignable to it (the encryption extension
 // changes the client's type), so derive it from `prisma`.
 export type PrismaTxClient = Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
-
-// In dev, Next.js hot-reloads create new module instances; caching on globalThis prevents connection pool exhaustion
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;

@@ -159,10 +159,19 @@ export async function prewarmMdblistCache(opts: { force?: boolean; signal?: Abor
       break;
     }
 
-    const moviePage = breakers.movie.tripped ? [] : movieItems.slice(page * BATCH_SIZE, (page + 1) * BATCH_SIZE);
-    const tvPage    = breakers.tv.tripped    ? [] : tvItems.slice(page    * BATCH_SIZE, (page + 1) * BATCH_SIZE);
+    const movieSlice = movieItems.slice(page * BATCH_SIZE, (page + 1) * BATCH_SIZE);
+    const tvSlice    = tvItems.slice(page    * BATCH_SIZE, (page + 1) * BATCH_SIZE);
+    // Titles a tripped breaker keeps from being asked are failures of the run,
+    // so total stays fetched + skipped + failed.
+    if (breakers.movie.tripped) failed += movieSlice.length;
+    if (breakers.tv.tripped) failed += tvSlice.length;
+    const moviePage = breakers.movie.tripped ? [] : movieSlice;
+    const tvPage    = breakers.tv.tripped    ? [] : tvSlice;
     if (moviePage.length === 0 && tvPage.length === 0) {
       // Only a tripped breaker can empty both before the last page.
+      const after = (page + 1) * BATCH_SIZE;
+      if (breakers.movie.tripped) failed += Math.max(0, movieItems.length - after);
+      if (breakers.tv.tripped) failed += Math.max(0, tvItems.length - after);
       console.warn(`[mdblist-prewarm] MDBList kept failing — stopping after ${fetched} fetches`);
       break;
     }

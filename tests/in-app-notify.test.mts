@@ -56,7 +56,7 @@ beforeEach(() => {
   createImpl = async (args) => args.data;
 });
 
-test("returns void synchronously and issues exactly one create with the fully shaped row", async () => {
+test("starts the write on invocation — one create with the fully shaped row — and hands back a promise that never rejects", async () => {
   const result = createInAppNotification("user-1", {
     type: "REQUEST_AVAILABLE",
     title: "Dune",
@@ -65,7 +65,9 @@ test("returns void synchronously and issues exactly one create with the fully sh
     mediaType: "MOVIE",
     posterPath: "/dune.jpg",
   });
-  assert.equal(result, undefined); // void, not a promise handed back to the caller
+  // A promise the outbox settle can wait on; callers that ignore it lose nothing.
+  assert.ok(result instanceof Promise);
+  assert.equal(await result, undefined);
   assert.equal(creates.length, 1); // the write fires on invocation, not deferred
   assert.deepEqual(creates[0].data, {
     userId: "user-1",

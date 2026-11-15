@@ -2,6 +2,7 @@
 // the monitor, commands, tasks, indexers, download clients and storage.
 
 import { COMMAND_READ_MAX_IDS } from "@/lib/arr-command-status";
+import { COMMAND_STATUS_VALUES } from "@/lib/arr-system";
 import {
   ARR_SNAPSHOT_PARAM,
   ARR_SNAPSHOT_204,
@@ -62,7 +63,7 @@ const BLOCKLIST_ENTRY = {
 } satisfies OpenApiSchema;
 
 // A command's status (CommandStatus, src/lib/arr-system.ts).
-const ARR_COMMAND_STATUSES = ["queued", "started", "completed", "failed", "aborted", "cancelled", "orphaned", "unknown"];
+const ARR_COMMAND_STATUSES = [...COMMAND_STATUS_VALUES];
 
 // One Radarr/Sonarr command (ArrCommandRow, src/lib/arr-system.ts): Arr
 // System's explicit field list, the message masked — never the command body
@@ -306,7 +307,7 @@ export const adminArrPaths: OpenApiPaths = {
         "upcoming; or released (a passed cinema date). Radarr's window is read a day wider each side, since its release " +
         "dates are calendar dates at midnight UTC — place each on its date — and Sonarr's 14 h wider each side (a host-local " +
         "date parse on v3), so entries may fall just outside [start, end); keep only those inside your own days. A failed instance is named in `errors`, each " +
-        "with `kind`: auth, timeout, unreachable, server, notFound or other. `now` is the server's time the page judges " +
+        `with \`kind\`: ${ARR_ERROR_KINDS.join(", ")}. \`now\` is the server's time the page judges ` +
         "against.",
       parameters: [
         ARR_SNAPSHOT_PARAM,

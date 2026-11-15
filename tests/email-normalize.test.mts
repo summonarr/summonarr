@@ -31,11 +31,9 @@ test("idempotent — normalizing twice is a no-op", () => {
   assert.equal(normalizeEmail(once), once);
 });
 
-// ---------------------------------------------------------------------------
 // Boundary pins: what the NFKC control does NOT cover. These document (not
 // endorse) current behavior so a future "fix" or regression is a deliberate,
 // visible change rather than an accident.
-// ---------------------------------------------------------------------------
 
 test("BOUNDARY PIN: NFKC does not fold cross-script homoglyphs", () => {
   // Cyrillic "а" (U+0430) renders identically to Latin "a" (U+0061) in most

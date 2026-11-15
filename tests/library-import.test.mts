@@ -58,3 +58,21 @@ test("a start request that never answered is no answer; an aborted run resolves 
   }) as unknown as typeof fetch;
   assert.equal(await runLibraryImport("/api/sync/jellyfin", ctrl.signal, { fetchFn, sleep: async () => {} }), null);
 });
+
+// job-poll bounds each status read with its own timeout signal. The run's
+// signal is added to it, not put in its place: a stalled poll must still end.
+test("a status poll keeps its own timeout signal beside the run's", async () => {
+  const seen: AbortSignal[] = [];
+  const run = new AbortController();
+  const answers = [json({ job: "j1" }, 202), json({ marked: 0, scanned: { movies: 0, tv: 0 } })];
+  const fetchFn = (async (_url: string, init?: RequestInit) => {
+    seen.push(init!.signal as AbortSignal);
+    return answers.shift()!;
+  }) as unknown as typeof fetch;
+  await runLibraryImport("/api/sync/plex", run.signal, { fetchFn, sleep: async () => {} });
+  assert.equal(seen.length, 2);
+  assert.notEqual(seen[1], run.signal, "the poll's signal combines its timeout with the run's");
+  assert.equal(seen[1].aborted, false);
+  run.abort();
+  assert.ok(seen.every((sig) => sig.aborted), "the run's abort still reaches every request");
+});

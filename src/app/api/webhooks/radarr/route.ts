@@ -6,7 +6,7 @@ import { scheduleLibraryScan } from "@/lib/library-scan";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { arrErrorMessage, arrFetch, getArrCfg, isMovieDownloadedInRadarr } from "@/lib/arr";
 import { sanitizeForLog } from "@/lib/sanitize";
-import { claimCompletedGrabs, handleArrWebhook, type ArrWebhookContext } from "@/lib/arr-webhook";
+import { claimCompletedGrabs, handleArrWebhook, retryUnverifiedGrabs, type ArrWebhookContext } from "@/lib/arr-webhook";
 import {
   clearManualInteractionMarkers,
   manualInteractionMarkerKey,
@@ -14,7 +14,8 @@ import {
   notifyManualInteractionOnce,
 } from "@/lib/arr-webhook-events";
 import { readRadarrPayload, type RadarrWebhookView } from "@/lib/arr-webhook-payload";
-import { lockArrCacheInTx } from "@/lib/arr-cache-refresh";
+import { evictArrCacheRows, lockArrCacheInTx } from "@/lib/arr-cache-refresh";
+import { BATCH_TX_TIMEOUT } from "@/lib/batch-write";
 
 // Only the top level is checked before the handler (arr-webhook.ts); every
 // field is read through readRadarrPayload.
@@ -127,17 +128,7 @@ async function handleMovieDelete(event: RadarrWebhookView, fileDelete: boolean, 
     }
     return NextResponse.json({ ok: true, evicted: false, reason: state === null ? "unverified" : "not_deleted" });
   }
-  await prisma.$transaction(async (tx) => {
-    await lockArrCacheInTx(tx, "radarr");
-    if (state === "absent") {
-      await tx.radarrWantedItem.deleteMany({ where: { tmdbId: delId, arrInstance } });
-    }
-    await tx.radarrAvailableItem.deleteMany({ where: { tmdbId: delId, arrInstance } });
-    if (state === "noFile") {
-      // skipDuplicates: a row already there is no error, so nothing aborts this tx (guardrail 23).
-      await tx.radarrWantedItem.createMany({ data: [{ tmdbId: delId, arrInstance }], skipDuplicates: true });
-    }
-  }, { timeout: 30_000 });
+  await evictArrCacheRows("radarr", delId, arrInstance, { requeueWanted: state === "noFile" });
   return NextResponse.json({ ok: true, evicted: true });
 }
 
@@ -184,7 +175,7 @@ async function handleMovieDownload(tmdbId: number, arrInstance: string): Promise
       await tx.radarrAvailableItem.createMany({ data: [{ tmdbId, arrInstance }], skipDuplicates: true });
     }
     return updated.count;
-  }, { timeout: 30_000 });
+  }, { timeout: BATCH_TX_TIMEOUT });
 
   if (marked > 0) {
     void clearDeletionVotesForTmdbs([{ tmdbId, mediaType: "MOVIE" }]);
@@ -194,9 +185,23 @@ async function handleMovieDownload(tmdbId: number, arrInstance: string): Promise
   // clears the manual-interaction marker.
   clearManualInteractionMarkers([manualInteractionMarkerKey("radarr", arrInstance, tmdbId)]);
 
+  // arrInstance-scoped: one instance's Download must not claim (and notify off)
+  // a grab that was fired at a sibling instance. A RESOLVED issue's grab is never
+  // claimed: a replacement that found nothing would otherwise be announced by an
+  // unrelated import months later (CLAIMABLE_GRAB_ISSUE). The claim itself (and
+  // the push it queues) is shared with the Sonarr twin, and it asks Radarr for a
+  // file newer than the grab first — on the unverifiable verdict too, where
+  // the flip above went ahead: an unanswered check claims nothing, and those
+  // grabs are tried once more after the library scan.
+  const candidateGrabs = await prisma.issueGrab.findMany({
+    where: { tmdbId, mediaType: "MOVIE", arrInstance, issue: CLAIMABLE_GRAB_ISSUE },
+  });
+  const unverifiedGrabs = await claimCompletedGrabs(candidateGrabs, "radarr", { arrInstance });
+
   // Deferred work runs after the response is sent; library scan and notification can be slow
   after(async () => {
     await scheduleLibraryScan("movie", tmdbId, arrInstance);
+    await retryUnverifiedGrabs(unverifiedGrabs, "radarr", { arrInstance });
     await notifyAvailableAfterImport({
       where: { tmdbId, mediaType: "MOVIE", arrInstance },
       kind: "movie",
@@ -204,16 +209,6 @@ async function handleMovieDownload(tmdbId: number, arrInstance: string): Promise
       logScope: "webhook/radarr",
     });
   });
-
-  // arrInstance-scoped: one instance's Download must not claim (and notify off)
-  // a grab that was fired at a sibling instance. A RESOLVED issue's grab is never
-  // claimed: a replacement that found nothing would otherwise be announced by an
-  // unrelated import months later (CLAIMABLE_GRAB_ISSUE). The claim itself (and
-  // its push retry) is shared with the Sonarr twin.
-  const candidateGrabs = await prisma.issueGrab.findMany({
-    where: { tmdbId, mediaType: "MOVIE", arrInstance, issue: CLAIMABLE_GRAB_ISSUE },
-  });
-  await claimCompletedGrabs(candidateGrabs, "radarr");
 
   return NextResponse.json({ ok: true, marked });
 }

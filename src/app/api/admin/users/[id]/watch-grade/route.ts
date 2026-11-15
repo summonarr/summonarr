@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import { Permission } from "@/lib/permissions";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { getUserWatchGradeDetail } from "@/lib/watch-grade-data";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -17,9 +19,14 @@ type RouteParams = { params: Promise<{ id: string }> };
 export const GET = withPermission([Permission.MANAGE_USERS, Permission.MANAGE_REQUESTS])(async (
   req,
   { params }: RouteParams,
-  _session,
+  session,
 ) => {
   const t = translatorForRequest(req);
+  // Each call grades the requester from scratch (computeWatchGrades), and a
+  // delegate can make it.
+  if (!checkRateLimit(`admin-user-watch-grade:${session.user.id}`, 30, 60 * 1000)) {
+    return tooManyRequests(60, t("apiAdmin.common.tooManyAttempts"));
+  }
   const { id } = await params;
   const target = await prisma.user.findUnique({ where: { id }, select: { id: true } });
   if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });

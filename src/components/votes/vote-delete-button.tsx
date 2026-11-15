@@ -3,13 +3,10 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Trash2, Loader2, Check } from "@/components/icons";
-import { withBasePath } from "@/lib/base-path";
-import { rateLimitMessage } from "@/lib/client/rate-limit";
-import { readApiError } from "@/lib/client/api-error";
 import { DetailActionButton } from "@/components/media/detail-action-button";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
-import { timedFetch } from "@/lib/client/fetch-json";
+import { castDeletionVote, writeDeletionVote, type VoteWriteOutcome } from "@/lib/client/vote-write";
 import { useAsyncAction } from "@/hooks/use-async-action";
 
 interface Props {
@@ -50,7 +47,7 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
     setRefocus(true);
   }
 
-  type Outcome = { ok: true } | { ok: false; message: string };
+  type Outcome = VoteWriteOutcome;
 
   async function handleVote() {
     if (action.busy("vote")) return;
@@ -58,22 +55,11 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
     setRefocus(true);
     const out = await action.run(
       "vote",
-      async (signal): Promise<Outcome> => {
-        try {
-          const res = await timedFetch(withBasePath("/api/votes"), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tmdbId, mediaType, reason: reason.trim() || undefined, _token: requestToken }),
-            signal,
-          });
-          if (res.ok || res.status === 409) return { ok: true };
-          // The route's own reason (your own request, not in the library, a
-          // stale page token…) says why a retry won't help; a 429 its wait.
-          return { ok: false, message: rateLimitMessage(res, t) ?? (await readApiError(res, t("request.vote.recordFailed"))) };
-        } catch {
-          return { ok: false, message: t("request.vote.recordFailed") };
-        }
-      },
+      (signal): Promise<Outcome> =>
+        castDeletionVote({
+          tmdbId, mediaType, reason: reason.trim() || undefined, pageToken: requestToken,
+          failed: t("request.vote.recordFailed"), signal, t,
+        }),
       { ifBusy: "skip" },
     );
     if (!out) return;
@@ -90,20 +76,15 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
   async function handleUnvote() {
     if (action.busy("vote")) return;
     setState("loading");
+    // The "Voted" button unmounts for the spinner: the button that replaces it
+    // takes focus.
+    setRefocus(true);
     // 404: the vote is already gone (removed in another tab, or dismissed by
     // an admin), which is what was asked for. Treating it as a failure kept
     // the button on "Voted" and every retry 404'd again.
     const out = await action.run(
       "vote",
-      async (signal): Promise<Outcome> => {
-        try {
-          const res = await timedFetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "DELETE", signal });
-          if (res.ok || res.status === 404) return { ok: true };
-          return { ok: false, message: rateLimitMessage(res, t) ?? t("request.vote.removeFailed") };
-        } catch {
-          return { ok: false, message: t("request.vote.removeFailed") };
-        }
-      },
+      (signal) => writeDeletionVote({ method: "DELETE", tmdbId, mediaType, okOn404: true, failed: t("request.vote.removeFailed"), signal, t }),
       { ifBusy: "skip" },
     );
     if (!out) return;
@@ -145,7 +126,14 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
           // takes focus (same rule as Input and StyledSelect).
           className="h-[34px] w-48 rounded-md border border-zinc-700 bg-zinc-800 px-3 text-base md:text-[13px] text-zinc-100 focus:outline-none focus:ring-2 focus:ring-red-500"
           autoFocus
-          onKeyDown={(e) => { if (e.key === "Enter") handleVote(); if (e.key === "Escape") closeReason(); }}
+          onKeyDown={(e) => {
+            // An Enter (or Escape) that commits or cancels an IME composition
+            // belongs to the composition: voting on it posted a partial reason.
+            // keyCode 229 is Safari, which reports isComposing false on that key.
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+            if (e.key === "Enter") handleVote();
+            if (e.key === "Escape") closeReason();
+          }}
         />
         {reason.length > REASON_COUNTER_AT && (
           <span className="ds-mono text-[10px] tabular-nums text-zinc-500" aria-live="polite">

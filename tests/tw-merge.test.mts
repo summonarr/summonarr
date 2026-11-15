@@ -538,11 +538,9 @@ test("negative forms share their positive group (regression: several families la
   assert.equal(twMerge("-bg-linear-90 bg-red-500"), "-bg-linear-90 bg-red-500");
 });
 
-// ---------------------------------------------------------------------------
 // Families that had NO group at all until the full-table audit. Each is used in
 // src/, so two of them could meet through cn(base, className) and the winner
 // would fall to stylesheet order instead of last-write.
-// ---------------------------------------------------------------------------
 
 test("layout families that had no group at all now collapse", () => {
   assert.equal(twMerge("aspect-square aspect-video"), "aspect-video");
@@ -659,12 +657,10 @@ test("transform, transform-style and transform-box are three properties", () => 
   assert.equal(twMerge("transform-gpu translate-x-2"), "transform-gpu translate-x-2");
 });
 
-// ---------------------------------------------------------------------------
 // Pinning tests: documented divergences from the real `tailwind-merge` package.
 // These assert CURRENT behavior so a regression (or a well-meaning "fix" that
 // silently changes merge semantics for existing callsites) is caught. If you
 // intentionally change one of these, update the test AND audit src/ usages.
-// ---------------------------------------------------------------------------
 
 test("shadow size and shadow color are separate groups (regression: color entry was unreachable)", () => {
   // groupOf() returns the FIRST matching group, so shadow-color's negative-

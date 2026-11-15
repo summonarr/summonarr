@@ -125,8 +125,21 @@ function persistHidden(next: ReadonlySet<ColumnId>) {
 // Which rows' details are open, and the table frame's visible width. Called by
 // the page rather than the table, so both outlive the table while a filter
 // leaves nothing to show.
-export function useQueueTableView() {
+//
+// `liveKeys` is every row the queue holds right now (undefined while there is no
+// answer yet): an open row that left the queue is forgotten, so a later download
+// that reuses its key does not appear already open.
+export function useQueueTableView(liveKeys?: readonly string[]) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const liveSig = liveKeys ? liveKeys.join("\n") : null;
+  useEffect(() => {
+    if (liveSig === null) return;
+    const live = new Set(liveSig === "" ? [] : liveSig.split("\n"));
+    setExpanded((prev) => {
+      const kept = [...prev].filter((k) => live.has(k));
+      return kept.length === prev.size ? prev : new Set(kept);
+    });
+  }, [liveSig]);
   // The table scrolls sideways inside its frame; an expanded row's details are
   // sized to the frame's VISIBLE width and stick to its left edge, so a phone
   // (or a table with every column on) never cuts them off.

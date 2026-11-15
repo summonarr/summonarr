@@ -1,4 +1,4 @@
-// Audit fix C089: Arr System → "Test all" showed a provider whose test only
+// Arr System → "Test all" showed a provider whose test only
 // WARNED as failed. Settled from the arrs' own source (2026-10-13), not a live
 // check — every body below is shaped exactly as the cited source serializes it.
 //

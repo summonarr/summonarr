@@ -137,7 +137,7 @@ export interface ParsedActiveSessionId {
 
 export function parseActiveSessionId(id: string): ParsedActiveSessionId {
   const parts = id.split(":");
-  if (parts.length >= 3) {
+  if (parts.length >= 3 && isValidMediaInstanceSlug(parts[1])) {
     return { source: parts[0], serverInstance: parts[1], sessionKey: parts.slice(2).join(":") };
   }
   return { source: parts[0] ?? "", serverInstance: DEFAULT_MEDIA_INSTANCE, sessionKey: parts.slice(1).join(":") };

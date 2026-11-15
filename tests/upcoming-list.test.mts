@@ -4,7 +4,7 @@
 // reads returned, and "failed" means an EMPTY list caused by a failure.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { interleaveUpcoming, loadUpcomingTitles } from "../src/lib/upcoming-list.ts";
+import { interleaveUpcoming, liveOrThrow, loadUpcomingTitles } from "../src/lib/upcoming-list.ts";
 type Media = import("../src/lib/tmdb-types.ts").TmdbMedia;
 
 const NOW = Date.parse("2026-11-07T18:00:00Z");
@@ -65,4 +65,17 @@ test("failed is reported only for an empty list caused by a failure", async () =
   assert.deepEqual(outage, { titles: [], failed: true });
   const nothing = await loadUpcomingTitles(NOW, { readCache: async () => [], liveMovies: async () => [], liveTv: async () => [] });
   assert.deepEqual(nothing, { titles: [], failed: false });
+});
+
+test("a live read that TMDB did not fully answer and that holds nothing is a failure, not an empty list", async () => {
+  // The TMDB page helpers absorb a failed page: an outage on a cold cache came
+  // back as [] and the list read as "nothing is upcoming".
+  await assert.rejects(liveOrThrow(Promise.resolve({ items: [], complete: false })));
+  assert.deepEqual(await liveOrThrow(Promise.resolve({ items: [], complete: true })), [], "genuinely nothing upcoming");
+  const partial = [media(1, "movie", "2026-11-08")];
+  assert.deepEqual(await liveOrThrow(Promise.resolve({ items: partial, complete: false })), partial, "a partial list is still shown");
+
+  const outage = () => liveOrThrow(Promise.resolve({ items: [], complete: false }));
+  const cold = await quietly(() => loadUpcomingTitles(NOW, { readCache: async () => [], liveMovies: outage, liveTv: outage }));
+  assert.deepEqual(cold, { titles: [], failed: true });
 });

@@ -207,6 +207,7 @@ async function writeTitleNodes(
 const EDGE_TITLE_MAX = 500;
 const EDGE_PATH_MAX = 500;
 const EDGE_SHORT_MAX = 16;
+const EDGE_OVERVIEW_MAX = 4000;
 
 // Cut by code points (Postgres counts characters, not UTF-16 units), so a
 // clamp never splits a surrogate pair.
@@ -223,7 +224,7 @@ function fitOrNull(s: string | null | undefined, max: number): string | null {
 function edgeDisplayColumns(item: Omit<TmdbMedia, "id" | "mediaType">) {
   return {
     title: clampText(item.title, EDGE_TITLE_MAX),
-    overview: item.overview || null,
+    overview: item.overview ? clampText(item.overview, EDGE_OVERVIEW_MAX) : null,
     posterPath: fitOrNull(item.posterPath, EDGE_PATH_MAX),
     backdropPath: fitOrNull(item.backdropPath, EDGE_PATH_MAX),
     releaseDate: fitOrNull(item.releaseDate, EDGE_SHORT_MAX),
@@ -419,18 +420,25 @@ async function collectGraphSources(): Promise<SourceSet> {
   // …then the rest of the library. collectAllLibraryItems already dedupes
   // across Plex/Jellyfin and across server instances (guardrail 35): a title on
   // two servers is ONE title as far as TMDB is concerned.
-  if (out.length < MAX_GRAPH_SOURCES) {
-    for (const item of await collectAllLibraryItems(MAX_GRAPH_SOURCES)) {
+  // One more than the cap is read, so a library of exactly the cap reads as
+  // fully walked and only a longer one counts as clipped. A pool that already
+  // fills the cap leaves the library unread: that is clipped too.
+  let libraryClipped = out.length >= MAX_GRAPH_SOURCES;
+  if (!libraryClipped) {
+    const items = await collectAllLibraryItems(MAX_GRAPH_SOURCES + 1);
+    libraryClipped = items.length > MAX_GRAPH_SOURCES;
+    for (const item of items) {
       push(item.tmdbId, item.mediaType);
-      if (out.length >= MAX_GRAPH_SOURCES) break;
+      if (out.length > MAX_GRAPH_SOURCES) break;
     }
   }
 
   const clipped =
+    libraryClipped ||
     watched.length >= MAX_SEED_POOL_TITLES ||
     watchlist.length >= MAX_SEED_POOL_TITLES ||
     requests.length >= MAX_SEED_POOL_TITLES ||
-    out.length >= MAX_GRAPH_SOURCES;
+    out.length > MAX_GRAPH_SOURCES;
   return { sources: out.slice(0, MAX_GRAPH_SOURCES), complete: !clipped };
 }
 
@@ -1076,6 +1084,9 @@ async function refreshCoWatchEdges(stats: GraphRefreshResult, signal?: AbortSign
     }
     await prisma.$transaction(
       async (tx) => {
+        // Postgres-side timeouts, as on every source page: a stuck statement is
+        // cancelled before Prisma's deadline instead of holding the table's locks.
+        await setBatchTxTimeouts(tx);
         await tx.coWatchSuggestion.deleteMany({});
         if (edges.length > 0) await batchCreateMany(tx.coWatchSuggestion, edges);
         // Targets become graph nodes so the ratings pass can give them a

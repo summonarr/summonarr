@@ -42,7 +42,7 @@ test("the events route marks exactly the inbox event types `own`, from the same 
   // route sends every delivered event through.
   const route = readFileSync(new URL("../src/app/api/events/route.ts", import.meta.url), "utf-8");
   assert.match(route, /from "@\/lib\/sse-delivery"/);
-  assert.match(route, /const frame = sseClientFrame\(event as SSEEvent & \{ userId\?: string \}, userId\);/);
+  assert.match(route, /const frame = sseClientFrame\(event, userId\);/);
   const delivery = readFileSync(new URL("../src/lib/sse-delivery.ts", import.meta.url), "utf-8");
   assert.match(delivery, /from "\.\/inbox-live-event-types"/);
   assert.match(delivery, /isInboxLiveEventType\(event\.type\) \? \{ \.\.\.clientEvent, own: evtUserId === viewerId \}/);

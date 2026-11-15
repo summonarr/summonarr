@@ -115,7 +115,7 @@ test("the shared browse body: genre names follow the viewer's language and failu
   assert.match(src, /console\.warn\(`\[browse\] \$\{config\.listLabel\} genre list failed:`/);
   assert.match(src, /console\.warn\(`\[browse\] \$\{config\.listLabel\} watch-provider list failed:`/);
   // One filter parser and one "any filter?" predicate (browse-filters.ts).
-  assert.match(src, /parseBrowseFilters\(searchParamGetter\(sp\)\)/);
+  assert.match(src, /parseBrowseFilters\(searchParamGetter\(sp\), mediaType\)/);
   assert.match(src, /hasActiveFilters\(browseFilters\)/);
 });
 

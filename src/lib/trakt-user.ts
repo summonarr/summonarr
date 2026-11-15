@@ -265,7 +265,7 @@ async function refreshTraktToken(cfg: TraktOAuthConfig, account: TraktAccountRow
   }
   const tokens = parseTraktTokenResponse(await res.json());
   if (!tokens) throw new Error("Trakt token refresh returned an unusable body");
-  await storeRotatedTokens(account.id, tokens);
+  await storeRotatedTokens(account.id, account.expires_at, tokens);
   account.access_token = tokens.accessToken;
   account.refresh_token = tokens.refreshToken;
   account.expires_at = tokens.expiresAt;
@@ -281,13 +281,21 @@ export const TOKEN_WRITE_RETRY_DELAYS_MS = [250, 1_000] as const;
 // deleted (guardrail 34c) for what was a passing database fault. So the write
 // is retried. Not on P2025: the account row is gone (a disconnect or a
 // reconnect replaced it), and there is nothing left to store the tokens on.
-async function storeRotatedTokens(accountId: string, tokens: TraktTokenSet): Promise<void> {
+//
+// The write is conditional on the expiry this run read with the grant. A
+// reconnect of the same Trakt account rewrites the SAME row with a new grant
+// (and a new expiry); tokens rotated from the grant it replaced must not
+// overwrite it. A refresh token cannot be the condition (it is encrypted at
+// rest), the expiry is a plain column that every grant write moves. No match
+// (P2025) therefore means the row is gone or now holds a newer grant: nothing
+// to store, not an error.
+async function storeRotatedTokens(accountId: string, readExpiresAt: number | null, tokens: TraktTokenSet): Promise<void> {
   for (let attempt = 0; ; attempt++) {
     try {
       // Raw tokens — the Prisma extension encrypts both on update (guardrail 7a).
       // Written together: Trakt rotates the refresh token, so the old one is dead.
       await prisma.account.update({
-        where: { id: accountId },
+        where: { id: accountId, expires_at: readExpiresAt },
         data: {
           access_token: tokens.accessToken,
           refresh_token: tokens.refreshToken,
@@ -298,7 +306,7 @@ async function storeRotatedTokens(accountId: string, tokens: TraktTokenSet): Pro
       });
       return;
     } catch (err) {
-      if (isPrismaErrorCode(err, "P2025")) throw err;
+      if (isPrismaErrorCode(err, "P2025")) return;
       if (attempt >= TOKEN_WRITE_RETRY_DELAYS_MS.length) {
         // The run's per-user error line names the user; this names the stakes.
         const reason = err instanceof Error ? err.message : String(err);
@@ -899,10 +907,14 @@ async function importHistoryIfChanged(client: TraktUserClient, row: TraktConnect
 // A revoked grant, with the account row it was read from.
 class TraktGrantRevoked extends Error {
   accountId: string;
-  constructor(accountId: string) {
+  // The expiry of the grant this run held, so the cleanup can tell it from a
+  // newer grant written to the same row by a reconnect.
+  expiresAt: number | null;
+  constructor(accountId: string, expiresAt: number | null) {
     super("Trakt rejected the stored grant");
     this.name = "TraktGrantRevoked";
     this.accountId = accountId;
+    this.expiresAt = expiresAt;
   }
 }
 
@@ -930,7 +942,7 @@ async function syncOneTraktUser(
     }
   } catch (err) {
     // Which grant failed travels with the error: a revocation ends only it.
-    if (err instanceof TraktTokenRevokedError) throw new TraktGrantRevoked(account.id);
+    if (err instanceof TraktTokenRevokedError) throw new TraktGrantRevoked(account.id, account.expires_at);
     throw err;
   }
   // updateMany: a user who disconnected mid-run has no row left, and that is
@@ -951,7 +963,7 @@ async function handleUserSyncError(err: unknown, userId: string, result: TraktSy
   if (err instanceof TraktGrantRevoked) {
     result.tokensRevoked++;
     console.warn(`[trakt] Trakt refused the stored grant for user ${userId} — removed; they must reconnect Trakt`);
-    await endRevokedConnection(userId, err.accountId);
+    await endRevokedConnection(userId, err.accountId, err.expiresAt);
     return "next";
   }
   result.errors++;
@@ -1036,10 +1048,12 @@ async function markConnection(userId: string, status: "error" | "reauth"): Promi
 // every trakt account ended the connection they had just made. With another
 // trakt account still theirs, the history and the status belong to it and are
 // left alone.
-async function endRevokedConnection(userId: string, accountId: string): Promise<void> {
+async function endRevokedConnection(userId: string, accountId: string, expiresAt: number | null): Promise<void> {
   try {
     await prisma.$transaction(async (tx) => {
-      await tx.account.deleteMany({ where: { id: accountId, userId, provider: "trakt" } });
+      // Only the grant this run held: a reconnect of the same Trakt account
+      // rewrote the row with a new expiry, and that grant is not the refused one.
+      await tx.account.deleteMany({ where: { id: accountId, userId, provider: "trakt", expires_at: expiresAt } });
       if ((await tx.account.count({ where: { userId, provider: "trakt" } })) > 0) return;
       await tx.traktWatchedItem.deleteMany({ where: { userId } });
       await tx.traktRating.deleteMany({ where: { userId } });

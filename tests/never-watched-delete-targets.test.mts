@@ -1,4 +1,4 @@
-// Audit fixes C122 + C078 (wave B2, nw-data): the never-watched report's "eligible",
+// the never-watched report's "eligible",
 // sizes and season sizes — and the cleanup page's rows — use the delete route's
 // OWN targets (resolveArrTargets: a Sonarr series listed only by tvdb id is
 // reached through TMDB's cross-reference) and its own failed-instance rule
@@ -143,7 +143,7 @@ shadowPrismaModel(prisma, "jellyfinLibraryItem", { findMany: async () => [] });
 // Plays attributed by tmdb id — the never-watched loader's first evidence read.
 let tmdbPlays: Array<{ tmdbId: number; mediaType: string; n: number; at: Date }> = [];
 // Per-server first recorded play (coverage). Empty by default — every holder
-// then reads "no history", so the watch rules never reach a verdict; the C132
+// then reads "no history", so the watch rules never reach a verdict; the
 // test below opts in.
 let firstPlays: Array<{ source: string; serverInstance: string; _min: { startedAt: Date | null } }> = [];
 shadowPrismaModel(prisma, "playHistory", {
@@ -311,7 +311,7 @@ beforeEach(() => {
     playHistoryEnabled: "true",
     // Set for every test (play-history caches these settings 15 s, across
     // tests): with no first play recorded (`firstPlays` empty) a holder still
-    // reads "no history", so only the C132 test reaches a watch verdict.
+    // reads "no history", so only the test reaches a watch verdict.
     playHistoryPlexEnabled: "true",
     cleanupVotesEnabled: "true",
     cleanupVotesMin: "1",
@@ -384,7 +384,7 @@ function addTvdbOnlyShow(tmdbId: number, tvdbId: number, size: number) {
   tmdbToTvdb.set(tmdbId, tvdbId);
 }
 
-test("C122: a Sonarr series listed only by tvdb id is sized and ELIGIBLE on the report, exactly as the dry run plans it", async () => {
+test("a Sonarr series listed only by tvdb id is sized and ELIGIBLE on the report, exactly as the dry run plans it", async () => {
   addTvdbOnlyShow(320, 3200, 650);
   const token = await mintSession();
   const rows = await assertEligibleIsDryRun(token);
@@ -400,7 +400,7 @@ test("C122: a Sonarr series listed only by tvdb id is sized and ELIGIBLE on the 
   assert.deepEqual(deletes(), []);
 });
 
-test("C122: a tvdb-only show whose request is linked ONLY by that tvdb id is held back on the report AND the cleanup page, as in the dry run", async () => {
+test("a tvdb-only show whose request is linked ONLY by that tvdb id is held back on the report AND the cleanup page, as in the dry run", async () => {
   addTvdbOnlyShow(330, 3300, 640);
   requests.push({ id: "r335", tmdbId: 335, tvdbId: 3300, mediaType: "TV", status: "PENDING", arrInstance: "", availableAt: null, cleanedUpAt: null, approvedAt: null });
   const token = await mintSession();
@@ -416,7 +416,7 @@ test("C122: a tvdb-only show whose request is linked ONLY by that tvdb id is hel
   assert.equal(pageRow.sizeOnDisk, 640);
 });
 
-test("C122: a second Sonarr instance that can't be listed makes NO show eligible on the report, and the dry run refuses naming it", async () => {
+test("a second Sonarr instance that can't be listed makes NO show eligible on the report, and the dry run refuses naming it", async () => {
   settings.set("sonarr4kUrl", SONARR_4K);
   settings.set("sonarr4kApiKey", "sonarr4k-key");
   listingStatus = (origin) => (origin === SONARR_4K ? 503 : 200);
@@ -431,7 +431,7 @@ test("C122: a second Sonarr instance that can't be listed makes NO show eligible
   assert.match(plan.skipped[0].reason, /4k/);
 });
 
-test("C122: failedArrInstances names each failed instance of the title's own service, the unnamed one as 'default'", () => {
+test("failedArrInstances names each failed instance of the title's own service, the unnamed one as 'default'", () => {
   const errors = [
     { service: "sonarr" as const, instance: "", error: "x" },
     { service: "sonarr" as const, instance: "anime", error: "y" },
@@ -442,7 +442,7 @@ test("C122: failedArrInstances names each failed instance of the title's own ser
   assert.deepEqual(failedArrInstances({ errors: [] }, "MOVIE"), []);
 });
 
-test("C078: the uncached cleanup report GET is rate-limited per admin (30 a minute), then 429", async () => {
+test("the uncached cleanup report GET is rate-limited per admin (30 a minute), then 429", async () => {
   const token = await mintSession();
   for (let i = 0; i < 30; i++) assert.equal((await call(report.GET as never, token, "", "GET")).status, 200, `load ${i + 1}`);
   assert.equal((await call(report.GET as never, token, "", "GET")).status, 429);

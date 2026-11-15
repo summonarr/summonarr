@@ -23,7 +23,7 @@ function callbackBody(src: string, name: string): string {
   return src.slice(start, end);
 }
 
-// ── C054: what the admin confirmed is what is sent ──────────────────────────
+// ── what the admin confirmed is what is sent ──────────────────────────
 
 test("the execute body is exactly the plan's titles and count — never a skipped title, never anything else", () => {
   const plan = {
@@ -65,7 +65,7 @@ test("a dry-run answer is installed only while its generation is current, and ev
   assert.match(exec, /if \(answer\.plan && gen === planGen\.current\) setPlan\(answer\.plan\);/, "a 409's fresh plan for a changed selection is dropped");
 });
 
-// ── C056: a target the instance holds under another title is named ──────────
+// ── a target the instance holds under another title is named ──────────
 
 test("arrTitleDiffers ignores case, accents, punctuation and a trailing year; a different title is a difference", () => {
   assert.equal(arrTitleDiffers("Doctor Who", "Doctor Who (2005)"), false);
@@ -81,7 +81,7 @@ test("the plan panel names a target's own title when it differs", () => {
   assert.match(deleteSrc, /arrTitleDiffers\(it\.title, tg\.title\)\s*\?\s*t\("adminManage\.cleanup\.plan\.targetAs", \{ instance, title: tg\.title, size \}\)/);
 });
 
-// ── C061: overlapping reloads and unsaved rule edits ────────────────────────
+// ── overlapping reloads and unsaved rule edits ────────────────────────
 
 test("nextCleanupDraft keeps unsaved edits across a reload, follows fresh settings otherwise, and resets after a save", () => {
   const base = { days: 90, on: true };
@@ -160,7 +160,7 @@ test("a load clears only its own error — never the one a protect, unprotect or
     assert.match(body, /setActionError\(""\);/, `${name} clears the action error when the admin starts it`);
     assert.doesNotMatch(body, /setLoadError|setError\(/, `${name} writes only the action error`);
   }
-  assert.match(pageSrc, /\[loadError, actionError, del\.error\]\.filter\(/, "every error is shown");
+  assert.match(pageSrc, /\[\["load", loadError\], \["action", actionError\], \["delete", del\.error\]\] as const\)\.filter\(/, "every error is shown");
 });
 
 test("a rules save installs the saved draft as the report's settings and the draft base BEFORE its reload", () => {

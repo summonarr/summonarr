@@ -275,8 +275,14 @@ const txDelegates = {
   sonarrWantedItem: cacheStub,
   sonarrAvailableItem: cacheStub,
 };
+// A grab's claim queues its completion push in the same transaction
+// (issue-grab-notify.ts), so the transaction client carries the grab table and
+// the outbox too — read off `prisma` when called, once every stub is in place.
+shadowPrismaModel(prisma, "outbox", { create: async () => ({}), deleteMany: async () => ({ count: 0 }) });
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) =>
-  typeof arg === "function" ? (arg as (tx: typeof txDelegates) => Promise<unknown>)(txDelegates) : Promise.all(arg as Promise<unknown>[]),
+  typeof arg === "function"
+    ? (arg as (tx: unknown) => Promise<unknown>)({ ...txDelegates, issueGrab: prisma.issueGrab, outbox: prisma.outbox })
+    : Promise.all(arg as Promise<unknown>[]),
 );
 
 const { PATCH: patchIssueRoute } = await import("../src/app/api/issues/[id]/route.ts");
@@ -318,8 +324,24 @@ const SECRETS = {
   sonarr: { "": "sonarr-default-secret", "4k": "sonarr-4k-secret" },
 } as const;
 let ip = 0;
+// What the firing instance answers when a Download is delivered: it holds the
+// title, with a file added long after any grab here. The webhook claims a grab
+// only once the instance confirms such a file (a season grab: in that season).
+function arrHoldsNewFile(url: URL): Response {
+  const added = "2099-01-01T00:00:00Z";
+  if (url.pathname === "/api/v3/movie") return jsonResponse([{ id: 42, tmdbId: Number(url.searchParams.get("tmdbId")), hasFile: true }]);
+  if (url.pathname === "/api/v3/moviefile") return jsonResponse([{ id: 420, movieId: 42, dateAdded: added }]);
+  if (url.pathname === "/api/v3/series") {
+    return jsonResponse([{ id: 9, tvdbId: Number(url.searchParams.get("tvdbId")), tmdbId: 1399, seasons: [{ seasonNumber: 1, monitored: true, statistics: { episodeFileCount: 1, episodeCount: 5 } }] }]);
+  }
+  if (url.pathname === "/api/v3/episodefile") {
+    return jsonResponse([{ id: 91, seriesId: 9, seasonNumber: 1, dateAdded: added }, { id: 92, seriesId: 9, seasonNumber: 2, dateAdded: added }]);
+  }
+  throw new Error(`unexpected arr fetch on delivery: ${url.href}`);
+}
+
 async function deliver(service: "radarr" | "sonarr", instance: "" | "4k", body: Record<string, unknown>): Promise<number> {
-  fetchImpl = refuse;
+  fetchImpl = arrHoldsNewFile;
   const req = new NextRequest(`http://localhost:3000/api/webhooks/${service}?token=${SECRETS[service][instance]}`, {
     method: "POST",
     headers: { "x-forwarded-for": `203.0.113.${(ip++ % 200) + 1}` },

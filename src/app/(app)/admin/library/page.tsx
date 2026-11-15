@@ -90,6 +90,15 @@ function posterAndRating(data: string): { posterPath: string | null | undefined;
   };
 }
 
+// One `tmdbId IN [...]` condition per media type, so each can use the
+// (tmdbId, mediaType) index (one OR clause per item would be far too large).
+function titleIdFilters(movieIds: number[], tvIds: number[]) {
+  return [
+    ...(movieIds.length ? [{ mediaType: "MOVIE" as const, tmdbId: { in: movieIds } }] : []),
+    ...(tvIds.length ? [{ mediaType: "TV" as const, tmdbId: { in: tvIds } }] : []),
+  ];
+}
+
 async function enrichItems(
   items: {
     tmdbId: number; mediaType: "MOVIE" | "TV"; filePath?: string | null;
@@ -105,19 +114,16 @@ async function enrichItems(
   const movieIds = items.filter((i) => i.mediaType === "MOVIE").map((i) => i.tmdbId);
   const tvIds = items.filter((i) => i.mediaType === "TV").map((i) => i.tmdbId);
   const allRequests = await prisma.mediaRequest.findMany({
-    where: {
-      OR: [
-        ...(movieIds.length ? [{ mediaType: "MOVIE" as const, tmdbId: { in: movieIds } }] : []),
-        ...(tvIds.length ? [{ mediaType: "TV" as const, tmdbId: { in: tvIds } }] : []),
-      ],
-    },
+    where: { OR: titleIdFilters(movieIds, tvIds) },
     select: { tmdbId: true, mediaType: true, status: true },
     orderBy: { createdAt: "desc" },
   });
   const requestsMap = new Map<string, string[]>();
   for (const r of allRequests) {
     const key = `${r.tmdbId}:${r.mediaType}`;
-    (requestsMap.get(key) ?? requestsMap.set(key, []).get(key)!).push(r.status);
+    const list = requestsMap.get(key);
+    if (list) list.push(r.status);
+    else requestsMap.set(key, [r.status]);
   }
 
   // TmdbMediaCore first: poster/rating as plain columns instead of pulling and
@@ -127,12 +133,7 @@ async function enrichItems(
   // back to the TmdbCache blob. Same mediaType split as the requests query.
   const cacheMap = new Map<string, { posterPath?: string | null; voteAverage?: number }>();
   const coreRows = await prisma.tmdbMediaCore.findMany({
-    where: {
-      OR: [
-        ...(movieIds.length ? [{ mediaType: "MOVIE" as const, tmdbId: { in: movieIds } }] : []),
-        ...(tvIds.length ? [{ mediaType: "TV" as const, tmdbId: { in: tvIds } }] : []),
-      ],
-    },
+    where: { OR: titleIdFilters(movieIds, tvIds) },
     select: { tmdbId: true, mediaType: true, posterPath: true, voteAverage: true },
   });
   for (const r of coreRows) {
@@ -204,12 +205,7 @@ async function fetchOverviews(
 
   const movieIds = rows.filter((r) => r.mediaType === "MOVIE").map((r) => r.tmdbId);
   const tvIds    = rows.filter((r) => r.mediaType === "TV").map((r) => r.tmdbId);
-  const where = {
-    OR: [
-      ...(movieIds.length ? [{ mediaType: "MOVIE" as const, tmdbId: { in: movieIds } }] : []),
-      ...(tvIds.length    ? [{ mediaType: "TV"    as const, tmdbId: { in: tvIds } }]    : []),
-    ],
-  };
+  const where = { OR: titleIdFilters(movieIds, tvIds) };
   if (where.OR.length === 0) return map;
 
   const found = source === "plex"

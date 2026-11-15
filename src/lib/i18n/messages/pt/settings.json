@@ -157,6 +157,7 @@
   "settings.playHistory.howBody": "O histórico de reprodução é registrado automaticamente consultando seus servidores Plex e Jellyfin a cada poucos segundos em busca de sessões ativas. Nenhuma configuração é necessária no Plex ou no Jellyfin — ele usa a mesma conexão de servidor já configurada acima.",
   "settings.watchGrade.notGraded": "Sem nota",
   "settings.watchGrade.previewFailedStatus": "Falha na prévia ({status})",
+  "settings.watchGrade.previewEmpty": "A prévia voltou vazia. Tente novamente.",
   "settings.watchGrade.grace": "Período de carência (dias)",
   "settings.watchGrade.graceHelp": "Quanto tempo depois de uma solicitação ficar disponível até ela contar para a nota. Solicitações ainda dentro desse prazo são listadas, mas nunca pontuadas — assistidas ou não — para que solicitantes recentes não sejam julgados cedo demais. Padrão {default}.",
   "settings.watchGrade.window": "Janela da nota (dias)",

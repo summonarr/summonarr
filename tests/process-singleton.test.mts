@@ -89,3 +89,20 @@ test("the reset seam drops only its own key", () => {
   assert.equal(r1.size, 0, "the reset key is rebuilt fresh");
   assert.ok(r2.has("b"), "its neighbour is untouched");
 });
+
+test("keyedSerial runs one key's work in arrival order, survives a failure and leaves keys independent", async () => {
+  const { keyedSerial } = await import("../src/lib/keyed-serial.ts");
+  const run = keyedSerial("test:keyed-serial");
+  const order: string[] = [];
+  const gate = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+  const a = run("k", async () => { await gate(20); order.push("a"); });
+  const b = run("k", async () => { order.push("b"); throw new Error("boom"); });
+  const c = run("k", async () => { order.push("c"); return 7; });
+  const other = run("other", async () => { order.push("o"); });
+  await other;
+  assert.deepEqual(order, ["o"], "another key does not wait");
+  await a;
+  await assert.rejects(b, /boom/);
+  assert.equal(await c, 7);
+  assert.deepEqual(order, ["o", "a", "b", "c"]);
+});

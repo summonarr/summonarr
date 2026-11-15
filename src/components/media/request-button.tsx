@@ -18,15 +18,13 @@ import {
 } from "@/components/icons";
 import Link from "next/link";
 import { withBasePath } from "@/lib/base-path";
-import { rateLimitMessage } from "@/lib/client/rate-limit";
-import { readApiError } from "@/lib/client/api-error";
 import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
 import { useAsyncAction } from "@/hooks/use-async-action";
 import { v } from "@/lib/validate";
 import { REQUEST_NOTE_MAX } from "@/lib/request-limits";
 import { SLOT } from "@/lib/i18n/slot";
 import { SlotText } from "@/components/i18n/slot-text";
-import { postMediaRequest } from "@/lib/client/media-request";
+import { submitMediaRequest } from "@/lib/client/media-request";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -35,6 +33,7 @@ import {
   DETAIL_ACTION_CLASS,
   detailActionStyle,
 } from "./detail-action-button";
+import { mainRequestView } from "./request-button-rules";
 
 type State =
   | "idle"
@@ -71,6 +70,12 @@ interface RequestButtonProps {
   // When true, the title is admin-blacklisted: show an "unavailable to request"
   // state instead of the request CTA. The request POST 403s regardless.
   blacklisted?: boolean;
+
+  // When true, the viewer's own request on the instance this button posts to
+  // was permanently declined: the same "unavailable to request" state (the
+  // request POST 403s on every attempt). Unlike a blacklist it does not stop
+  // an on-behalf request for someone else.
+  permanentlyDeclined?: boolean;
 
   // When false, hide the HD request CTA (the viewer cannot request this media
   // type on the default instance). Availability / queued / already-requested
@@ -478,7 +483,7 @@ function OnBehalfPanel({
     }
     const data = res.data;
     const result = data.results?.[0]?.result;
-    setObMsg(t(onBehalfMessage(data.results?.[0]?.result, data.created)));
+    setObMsg(t(onBehalfMessage(result, data.created)));
     const failed = result !== undefined && ON_BEHALF_FAILURES.has(result);
     setObMsgError(failed);
     if (!failed) {
@@ -552,39 +557,6 @@ function OnBehalfPanel({
   );
 }
 
-type RequestFailure = { error: string };
-
-// POST /api/requests for the default instance. `duplicate` is the 409 (this
-// viewer already asked); `alreadyAvailable` is the route's 200 that creates
-// NOTHING because the title is already in a library this viewer can see.
-async function sendRequest(
-  payload: { tmdbId: number; mediaType: MediaType; note: string; profileId: number | "" },
-  requestToken: string | undefined,
-  t: Translate,
-): Promise<"duplicate" | "alreadyAvailable" | "created" | RequestFailure> {
-  try {
-    // The page-minted token is refreshed once if it expired while the tab
-    // sat open (postMediaRequest).
-    const res = await postMediaRequest(
-      {
-        tmdbId: payload.tmdbId,
-        mediaType: payload.mediaType,
-        ...(payload.note.trim() ? { note: payload.note.trim() } : {}),
-        ...(payload.profileId ? { qualityProfileId: payload.profileId } : {}),
-      },
-      requestToken,
-    );
-    if (res.status === 409) return "duplicate";
-    if (!res.ok) {
-      return { error: rateLimitMessage(res, t) ?? (await readApiError(res, t("request.somethingWrong"))) };
-    }
-    const body = (await res.json().catch(() => null)) as { alreadyAvailable?: unknown } | null;
-    return body?.alreadyAvailable === true ? "alreadyAvailable" : "created";
-  } catch {
-    return { error: t("request.networkError") };
-  }
-}
-
 // Primary HD request CTA on movie/TV detail + cards: handles the confirm/note/
 // on-behalf flows and reflects availability, pending, and already-requested states.
 //
@@ -604,11 +576,13 @@ export function RequestButton({
   canRequestOnBehalf = false,
   canChooseProfile = false,
   blacklisted = false,
+  permanentlyDeclined = false,
   canRequest = true,
 }: RequestButtonProps) {
   const { toast } = useToast();
   const t = useT();
   const router = useRouter();
+  const action = useAsyncAction();
   const [state, setState] = useState<State>(requested ? "duplicate" : "idle");
   const [note, setNote] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
@@ -616,6 +590,10 @@ export function RequestButton({
   const [profileId, setProfileId] = useState<number | "">("");
   const { profiles, profilesState, loadProfiles } = useQualityProfiles(canChooseProfile, mediaType);
   const { obUsers, obUsersState, openOnBehalf } = useOnBehalfUsers();
+  // The on-behalf panel when it stands alone (mainRequestView's onBehalfOnly).
+  // Its own flag, not `state`: that may be holding a "requested" the page has
+  // not refreshed into the `requested` prop yet.
+  const [soloOnBehalfOpen, setSoloOnBehalfOpen] = useState(false);
   // The route answers 200 { alreadyAvailable: true } and creates NOTHING when
   // the title is already in a library this viewer can see (or, for
   // auto-approvers, already downloaded by Radarr/Sonarr). Same handling as
@@ -633,7 +611,22 @@ export function RequestButton({
   async function submitRequest() {
     setState("loading");
     setErrorMsg("");
-    const outcome = await sendRequest({ tmdbId, mediaType, note, profileId }, requestToken, t);
+    const note_ = note.trim();
+    // Aborted on unmount; a superseded run resolves undefined and applies nothing.
+    const outcome = await action.run("request", (signal) =>
+      submitMediaRequest(
+        {
+          tmdbId,
+          mediaType,
+          ...(note_ ? { note: note_ } : {}),
+          ...(profileId ? { qualityProfileId: profileId } : {}),
+        },
+        requestToken,
+        t,
+        signal,
+      ),
+    );
+    if (outcome === undefined) return;
     if (outcome === "duplicate") {
       setState("duplicate");
     } else if (outcome === "alreadyAvailable") {
@@ -664,6 +657,14 @@ export function RequestButton({
   // approved status so this user is tracked for the "now available"
   // notification. The queue state is still shown by the "Queued" indicator.
   const showViewRequest = state === "requested" || state === "duplicate" || !!requested;
+  const view = mainRequestView({
+    isAvailable: !!isAvailable,
+    showViewRequest,
+    blacklisted,
+    permanentlyDeclined,
+    canRequest,
+    canRequestOnBehalf,
+  });
   const requestLabel = mediaType === "MOVIE" ? t("request.requestMovie") : t("request.requestTv");
 
   const profileSelect = (
@@ -698,14 +699,39 @@ export function RequestButton({
         </Link>
       )}
 
-      {!isAvailable && !showViewRequest && blacklisted && (
+      {view.blocked && (
         <DetailActionStatus variant="muted" style={{ width: "fit-content" }}>
           <Ban style={ICON} />
           {t("request.notAvailableToRequest")}
         </DetailActionStatus>
       )}
 
-      {!isAvailable && !showViewRequest && !blacklisted && canRequest && (
+      {view.onBehalfOnly &&
+        (soloOnBehalfOpen ? (
+          <OnBehalfPanel
+            tmdbId={tmdbId}
+            mediaType={mediaType}
+            obUsers={obUsers}
+            obUsersState={obUsersState}
+            onClose={() => setSoloOnBehalfOpen(false)}
+            t={t}
+          />
+        ) : (
+          <DetailActionButton
+            variant="ghost"
+            onClick={() => {
+              setSoloOnBehalfOpen(true);
+              void openOnBehalf();
+            }}
+            title={t("request.requestForAnotherUser")}
+            style={{ width: "fit-content" }}
+          >
+            <Plus style={ICON} />
+            {t("request.requestForUserEllipsis")}
+          </DetailActionButton>
+        ))}
+
+      {view.cta && (
         <>
           {state === "confirm" && (
             <ConfirmPanel

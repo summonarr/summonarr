@@ -82,3 +82,16 @@ test("the popover re-asks a stale 404 on open and releases its fetch guard for a
   assert.match(src, /useState<IpError \| null>/);
   assert.doesNotMatch(handler, /setError\(t\(/);
 });
+
+test("two lookups of one IP while the first is in flight share one request", async () => {
+  let calls = 0;
+  const impl = (async () => {
+    calls++;
+    return new Response(JSON.stringify(LOOKUP), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  const [a, b] = await withFetch(impl, () => Promise.all([lookupIp("9.9.9.9"), lookupIp("9.9.9.9")]));
+  assert.equal(calls, 1);
+  assert.deepEqual(a, b);
+  await withFetch(impl, () => lookupIp("9.9.9.9"));
+  assert.equal(calls, 2, "a settled lookup is asked again");
+});

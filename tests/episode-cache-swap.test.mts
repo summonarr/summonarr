@@ -77,6 +77,10 @@ const txClient = {
       rec("tx.tVEpisodeCache.deleteMany", { args });
       return { count: 0 };
     },
+    createMany: async (args: CreateManyArgs) => {
+      rec("tx.tVEpisodeCache.createMany", { args });
+      return { count: args.data.length };
+    },
   },
   $executeRaw: async (strings: TemplateStringsArray, ...params: unknown[]) => {
     rec("tx.$executeRaw", { sql: flatten(strings), params });
@@ -117,6 +121,8 @@ const {
   replaceEpisodeCacheForSource,
   episodeCacheDigest,
   earliestAddedPerEpisode,
+  mergeRecentEpisodesForSource,
+  recentEpisodeDeleteBatches,
 } = await import("../src/lib/episode-cache.ts");
 const { BATCH_TX_TIMEOUT, POSTGRES_MAX_BIND_PARAMS } = await import("../src/lib/batch-write.ts");
 const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
@@ -461,4 +467,82 @@ test("the digest covers exactly the columns the swap writes, in JS and in SQL", 
   assert.deepEqual(sorted(sqlCols), sorted(insertCols), "the SQL digest reads every column the swap writes");
   assert.deepEqual(sorted(jsCols), sorted(insertCols), "the JS digest reads every column the swap writes");
   assert.deepEqual(sorted(modelCols), sorted(insertCols), "the swap writes every column of the model");
+});
+
+// ── The recent-only merge ───────────────────────────────────────────────────
+
+type Scope = { tmdbId: number; seasonNumber: number; episodeNumber: { in: number[] } };
+const scopeParams = (scopes: Scope[]) => scopes.reduce((n, sc) => n + 2 + sc.episodeNumber.in.length, 0);
+const tuplesOf = (scopes: Scope[]) =>
+  scopes.flatMap((sc) => sc.episodeNumber.in.map((e) => `${sc.tmdbId}:${sc.seasonNumber}:${e}`));
+
+// 400 shows × 4 seasons × 25 episodes = 40,000 episodes: one delete over them
+// would bind 43,201 parameters, past Postgres's limit.
+const wholeLibraryWindow = () => {
+  const rows: Row[] = [];
+  for (let show = 1; show <= 400; show++) {
+    for (let season = 1; season <= 4; season++) {
+      for (let ep = 1; ep <= 25; ep++) rows.push({ tmdbId: show, seasonNumber: season, episodeNumber: ep });
+    }
+  }
+  return rows;
+};
+
+test("a recent window the size of a library deletes in several statements, each under the bind limit, in turn", async () => {
+  reset();
+  const rows = wholeLibraryWindow();
+  await mergeRecentEpisodesForSource("jellyfin", rows);
+
+  const deletes = opsOf("tx.tVEpisodeCache.deleteMany");
+  assert.ok(deletes.length > 1, "the delete is chunked");
+  const seen: string[] = [];
+  for (const d of deletes) {
+    assert.equal(d.inTransaction, true);
+    const where = (d.args as DeleteManyArgs).where as { source: string; OR: Scope[] };
+    assert.equal(where.source, "jellyfin", "every statement stays scoped to the source");
+    assert.ok(1 + scopeParams(where.OR) <= POSTGRES_MAX_BIND_PARAMS, `${1 + scopeParams(where.OR)} parameters in one delete`);
+    seen.push(...tuplesOf(where.OR));
+  }
+  // Exactly the tuples about to be re-inserted, each once: never a whole show.
+  assert.equal(seen.length, rows.length);
+  assert.deepEqual(new Set(seen), new Set(rows.map((r) => `${r.tmdbId}:${r.seasonNumber}:${r.episodeNumber}`)));
+
+  // Lock, every delete, then the inserts — one after another in one transaction.
+  const order = calls.filter((c) => c.inTransaction).map((c) => c.op);
+  assert.equal(order[0], "tx.$executeRaw");
+  const firstInsert = order.indexOf("tx.tVEpisodeCache.createMany");
+  assert.ok(firstInsert > 0 && order.slice(1, firstInsert).every((op) => op === "tx.tVEpisodeCache.deleteMany"));
+  const inserted = opsOf("tx.tVEpisodeCache.createMany").flatMap((c) => (c.args as CreateManyArgs).data);
+  assert.equal(inserted.length, rows.length);
+  assert.deepEqual(txOptions, { timeout: BATCH_TX_TIMEOUT });
+});
+
+test("a small recent window is still one delete of the exact tuples, and an empty one writes nothing", async () => {
+  reset();
+  await mergeRecentEpisodesForSource("plex", []);
+  assert.equal(calls.length, 0);
+
+  await mergeRecentEpisodesForSource("plex", [
+    { tmdbId: 7, seasonNumber: 1, episodeNumber: 1 },
+    { tmdbId: 7, seasonNumber: 1, episodeNumber: 2 },
+    { tmdbId: 9, seasonNumber: 3, episodeNumber: 4 },
+  ]);
+  const deletes = opsOf("tx.tVEpisodeCache.deleteMany");
+  assert.equal(deletes.length, 1);
+  assert.deepEqual((deletes[0].args as DeleteManyArgs).where, {
+    source: "plex",
+    OR: [
+      { tmdbId: 7, seasonNumber: 1, episodeNumber: { in: [1, 2] } },
+      { tmdbId: 9, seasonNumber: 3, episodeNumber: { in: [4] } },
+    ],
+  });
+});
+
+test("a season longer than one statement's budget continues in the next, no episode lost or repeated", () => {
+  const rows = Array.from({ length: 23 }, (_, i) => ({ tmdbId: 1, seasonNumber: 1, episodeNumber: i + 1 }));
+  rows.push({ tmdbId: 2, seasonNumber: 1, episodeNumber: 1 });
+  const batches = recentEpisodeDeleteBatches(rows, 10);
+  for (const b of batches) assert.ok(scopeParams(b) <= 10, `${scopeParams(b)} parameters against a budget of 10`);
+  assert.deepEqual(batches.flatMap(tuplesOf).sort(), rows.map((r) => `${r.tmdbId}:${r.seasonNumber}:${r.episodeNumber}`).sort());
+  assert.ok(batches.every((b) => b.every((sc) => sc.episodeNumber.in.length > 0)));
 });

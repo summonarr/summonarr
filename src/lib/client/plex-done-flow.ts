@@ -51,29 +51,28 @@ export function anySignal(...signals: AbortSignal[]): AbortSignal {
   const native = (AbortSignal as { any?: (s: AbortSignal[]) => AbortSignal }).any;
   if (typeof native === "function") return native(signals);
   const ctrl = new AbortController();
+  const listeners: Array<[AbortSignal, () => void]> = [];
+  const cleanup = () => {
+    for (const [sig, fn] of listeners) sig.removeEventListener("abort", fn);
+    listeners.length = 0;
+  };
   for (const s of signals) {
     if (s.aborted) {
+      cleanup();
       ctrl.abort(s.reason);
-      break;
+      return ctrl.signal;
     }
-    s.addEventListener("abort", () => ctrl.abort(s.reason), { once: true });
+    const onAbort = () => {
+      cleanup();
+      ctrl.abort(s.reason);
+    };
+    s.addEventListener("abort", onAbort, { once: true });
+    listeners.push([s, onAbort]);
   }
   return ctrl.signal;
 }
 
-/** Waits `ms`, or less when `signal` aborts first. Never rejects. */
-export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal.aborted) return resolve();
-    const done = () => {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", done);
-      resolve();
-    };
-    const timer = setTimeout(done, Math.max(0, ms));
-    signal.addEventListener("abort", done, { once: true });
-  });
-}
+export { abortableSleep } from "../abortable-sleep";
 
 /** `candidate` as an absolute URL when it is http(s) on `origin`, else null. */
 export function sameOriginHref(candidate: string | null | undefined, origin: string): string | null {

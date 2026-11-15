@@ -55,6 +55,16 @@ export default async function RecentlyAddedPage() {
   // title in its own media type's namespace.
   const posters = merged.length > 0 ? await resolvePosterMap(merged) : {};
   const items = merged.map((i) => ({ ...i, posterPath: posters[posterPathKey(i.tmdbId, i.mediaType)] ?? null }));
+  // The media-activity page 404s for a title nobody has played, so an unplayed
+  // tile links to the title page instead.
+  const playedRows = items.length > 0
+    ? await prisma.playHistory.findMany({
+        where: { tmdbId: { in: items.map((i) => i.tmdbId) } },
+        distinct: ["tmdbId", "mediaType"],
+        select: { tmdbId: true, mediaType: true },
+      })
+    : [];
+  const played = new Set(playedRows.map((r) => `${r.mediaType}:${r.tmdbId}`));
 
   return (
     <div className="ds-page-enter">
@@ -80,7 +90,9 @@ export default async function RecentlyAddedPage() {
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
           {items.map((item, i) => {
-            const activityHref = `/admin/activity/media/${item.tmdbId}?type=${item.mediaType}`;
+            const activityHref = played.has(`${item.mediaType}:${item.tmdbId}`)
+              ? `/admin/activity/media/${item.tmdbId}?type=${item.mediaType}`
+              : `/${item.mediaType === "TV" ? "tv" : "movie"}/${item.tmdbId}`;
 
             return (
               <div key={`${item.mediaType}-${item.tmdbId}-${i}`} className="group">

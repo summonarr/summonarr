@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import { fetchJson } from "@/lib/client/fetch-json";
 import { v } from "@/lib/validate";
 import { Copy, Check, Loader2, X } from "@/components/icons";
@@ -181,16 +181,14 @@ export function WebhookUrls({
   // after a save so the flags here follow it, but a rotation from another tab
   // or admin never reaches this component, and a cached token would survive it
   // — the copied URL would carry a value the webhook handler now rejects.
-  const resolver = useCallback(
-    (key: string, base: string) => async (): Promise<CopyResolution> => {
-      const res = await fetchJson(withBasePath("/api/settings/webhook-urls"), { schema: WEBHOOK_TOKENS });
-      if (!res.ok) return { kind: "error" };
-      const tok = res.data[key];
-      // null: no secret saved for this row (removed since the page rendered).
-      return typeof tok === "string" && tok ? { kind: "url", url: `${base}?token=${encodeURIComponent(tok)}` } : { kind: "none" };
-    },
-    [],
-  );
+  // Only the clicked row's token is asked for (?service=).
+  const resolver = (key: string, base: string) => async (): Promise<CopyResolution> => {
+    const res = await fetchJson(withBasePath(`/api/settings/webhook-urls?service=${encodeURIComponent(key)}`), { schema: WEBHOOK_TOKENS });
+    if (!res.ok) return { kind: "error" };
+    const tok = res.data[key];
+    // null: no secret saved for this row (removed since the page rendered).
+    return typeof tok === "string" && tok ? { kind: "url", url: `${base}?token=${encodeURIComponent(tok)}` } : { kind: "none" };
+  };
 
   const masked = (base: string) => `${base}?token=••••••••`;
   const radarrTokenSet = radarrHasSecret || legacyHasSecret;

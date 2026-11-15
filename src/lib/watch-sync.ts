@@ -274,13 +274,8 @@ export function planMarks(plays: readonly WatchSyncPlay[], targets: MarkTargets)
     if (at && (!prev || at > prev)) byItem.set(id, at);
   };
   for (const p of plays) {
-    let ids: readonly string[] | undefined;
-    if (p.mediaType === "MOVIE") {
-      ids = targets.movies.get(p.tmdbId);
-    } else if (p.seasonNumber !== null && p.seasonNumber > 0 && p.episodeNumber !== null) {
-      ids = targets.episodes.get(p.tmdbId)?.get(`${p.seasonNumber}:${p.episodeNumber}`);
-    }
-    if (!ids || ids.length === 0) { unmatched++; continue; }
+    const ids = targetIdsFor(p, targets);
+    if (ids.length === 0) { unmatched++; continue; }
     for (const id of ids) add(id, p.viewedAt);
   }
   return { marks: [...byItem].map(([targetId, datePlayed]) => ({ targetId, datePlayed })), unmatched };
@@ -319,6 +314,11 @@ export const WATCH_SYNC_PROGRESS_TOLERANCE_MS = 30_000;
 export const WATCH_SYNC_PROGRESS_MAX_FRACTION = 0.95;
 // Titles considered per pair per run.
 export const WATCH_SYNC_PROGRESS_MAX_UNITS = 200;
+// A FULL sync (a user moving between platforms) considers every partial watch.
+export const WATCH_SYNC_FULL_PROGRESS_MAX_UNITS = 5_000;
+// Batches a full sync applies per direction in one run (each is WATCH_SYNC_BATCH
+// items); the run's own time budget ends it sooner on a slow server.
+export const WATCH_SYNC_FULL_MAX_BATCHES = 200;
 
 export interface ProgressState {
   positionMs: number;

@@ -59,7 +59,9 @@ test("errors are announced assertively, the rest politely, and no timer is touch
 test("the theme follows another tab's change and reads <html> as its store", () => {
   const provider = src("src/components/theme/theme-provider.tsx");
   assert.match(provider, /window\.addEventListener\("storage", onStorage\)/);
-  assert.match(provider, /useSyncExternalStore\(subscribeAppearance, readTheme, \(\) => DEFAULT_THEME\)/);
+  // One subscription serves both values: a second would apply each storage event twice.
+  assert.match(provider, /useSyncExternalStore\(subscribeAppearance, readAppearance, \(\) => SERVER_APPEARANCE\)/);
+  assert.equal(provider.match(/useSyncExternalStore\(/g)?.length, 1);
   assert.doesNotMatch(provider, /setThemeState|setAccentState/);
 });
 

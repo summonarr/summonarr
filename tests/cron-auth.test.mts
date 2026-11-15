@@ -161,9 +161,7 @@ function lastLedgerHistory(): ReturnType<typeof parseCronRunHistory> {
   return parseCronRunHistory(call.create.value);
 }
 
-// ---------------------------------------------------------------------------
 // parseCronLastRun — JSON validation + defaulting
-// ---------------------------------------------------------------------------
 
 test("parseCronLastRun: null / undefined / empty string → null", () => {
   assert.equal(parseCronLastRun(null), null);
@@ -231,9 +229,7 @@ test("parseCronLastRun: non-object JSON payloads → null", () => {
   assert.equal(parseCronLastRun("[]"), null);
 });
 
-// ---------------------------------------------------------------------------
 // batchCreateMany + BATCH_TX_TIMEOUT — guardrail 4
-// ---------------------------------------------------------------------------
 
 test("BATCH_TX_TIMEOUT is pinned at 30_000ms", () => {
   assert.equal(BATCH_TX_TIMEOUT, 30_000);
@@ -362,9 +358,7 @@ test("createManyBatchSize: narrow rows keep the 5,000 cap; an absurdly wide row 
   assert.equal(createManyBatchSize([huge]), 1);
 });
 
-// ---------------------------------------------------------------------------
 // isCronAuthorized — CRON_SECRET Bearer path (guardrail 6)
-// ---------------------------------------------------------------------------
 
 // ≥32 chars, matching the boot-time minimum. cron-auth.ts relies on that length
 // to skip throttling failed Bearer attempts (see its "no failure throttle" note).
@@ -457,9 +451,7 @@ test("isCronAuthorized: webhook-style ?token= query param is NOT accepted here",
   assert.equal(ok, false);
 });
 
-// ---------------------------------------------------------------------------
 // isCronAuthorized — admin-session path, per transport (guardrail 6b)
-// ---------------------------------------------------------------------------
 
 // With neither env set, the trusted-origin check falls back to the request's
 // own origin (http://localhost:3000) — deterministic for these tests.
@@ -614,9 +606,7 @@ test("isCronAuthorized: unset or empty CRON_SECRET fails closed", async () => {
   process.env.CRON_SECRET = CRON_SECRET;
 });
 
-// ---------------------------------------------------------------------------
 // getCronActor — one session read for BOTH the gate and the attribution
-// ---------------------------------------------------------------------------
 
 test("getCronActor: Bearer CRON_SECRET → the system/cron actor (no session to attribute)", async () => {
   process.env.CRON_SECRET = CRON_SECRET;
@@ -688,9 +678,7 @@ test("getCronActor and isCronAuthorized agree on every transport — the gate IS
   }
 });
 
-// ---------------------------------------------------------------------------
 // recordCronRun — the Setting-table ledger write
-// ---------------------------------------------------------------------------
 
 test("recordCronRun: upserts cron:lastRun:<target> with a parseable ledger value", async () => {
   resetLedger();
@@ -725,9 +713,7 @@ test("recordCronRun: a failed upsert is swallowed — observability never fails 
   assert.equal(upsertCalls.length, 1);
 });
 
-// ---------------------------------------------------------------------------
 // withCronRunRecording — ok derivation (throw / status>=400 / X-Cron-Degraded)
-// ---------------------------------------------------------------------------
 
 test("withCronRunRecording: 2xx response → ok:true, response returned unchanged", async () => {
   resetLedger();
@@ -834,7 +820,6 @@ test("withCronRunRecording: records exactly one ledger write per run, keyed by t
   );
 });
 
-// ---------------------------------------------------------------------------
 // parseCronRunHistory / countCronRunsSince / the recordCronRun run history
 //
 // Why this exists at all: the ledger used to keep only the newest run, so it
@@ -842,7 +827,6 @@ test("withCronRunRecording: records exactly one ledger write per run, keyed by t
 // times" — which is exactly the question an operator has when a job misbehaves,
 // and exactly what the `[internal-trigger] … see the sync:full entry` warning
 // points them at. These pin the history that makes that answerable.
-// ---------------------------------------------------------------------------
 
 test("parseCronRunHistory: null / empty / malformed / non-object → [] and never throws", () => {
   assert.deepEqual(parseCronRunHistory(null), []);

@@ -159,6 +159,7 @@ function makeTx() {
     watchlistItem: { deleteMany: rec("watchlistItem.deleteMany") },
     hiddenItem: { deleteMany: rec("hiddenItem.deleteMany") },
     notification: { deleteMany: rec("notification.deleteMany") },
+    outbox: { deleteMany: rec("outbox.deleteMany") },
     issue: { updateMany: rec("issue.updateMany") },
     userRecommendation: { deleteMany: rec("userRecommendation.deleteMany") },
     traktWatchedItem: { deleteMany: rec("traktWatchedItem.deleteMany") },
@@ -1281,6 +1282,46 @@ test("a single user's download-policy change is audited with its before and afte
   assert.equal(details.targetCount, 1);
 });
 
+test("a policy change on a Jellyfin server with no URL or API key answers pushed: false with the warning, and audits no push", async () => {
+  const admin = await mintSession("ADMIN");
+  const msuId = seedServerUser({ source: "jellyfin" });
+  Object.assign(serverUsersById.get(msuId)!, { downloadsEnabled: true, serverInstance: "", sourceUserId: "jf-u1" });
+  // No jellyfinUrl/jellyfinApiKey settings seeded: nothing can be sent.
+  const res = await serverUserPatch(linkReq(msuId, { downloadsEnabled: false }, admin.header), ctxFor(msuId));
+  assert.equal(res.status, 200);
+  const body = await res.json() as { ok: boolean; pushed: boolean; warning?: string };
+  assert.equal(body.ok, true);
+  assert.equal(body.pushed, false, "nothing reached a server, so the answer must not say it was pushed");
+  assert.equal(typeof body.warning, "string");
+  assert.deepEqual(fetchCalls, []);
+  // The stored value is still saved.
+  assert.equal((serverUsersById.get(msuId) as ServerUserRow & { downloadsEnabled?: boolean }).downloadsEnabled, false);
+  await flush();
+  const row = auditRows.find((r) => r.target === `mediaServerUser:${msuId}`);
+  assert.ok(row);
+  assert.equal((JSON.parse(row.details as string) as Record<string, unknown>).pushed, 0);
+});
+
+test("a policy change on a configured Jellyfin server answers pushed: true once the policy POST went out", async () => {
+  const admin = await mintSession("ADMIN");
+  settings.set("jellyfinUrl", JF_BASE);
+  settings.set("jellyfinApiKey", "jf-key-1");
+  const msuId = seedServerUser({ source: "jellyfin" });
+  Object.assign(serverUsersById.get(msuId)!, { downloadsEnabled: true, serverInstance: "", sourceUserId: "jf-u1" });
+  respond = (url) => {
+    if (url.pathname === "/Users/jf-u1") return okJson({ Id: "jf-u1", Policy: { IsAdministrator: false, EnableContentDownloading: true } });
+    if (url.pathname === "/Users/jf-u1/Policy") return new Response(null, { status: 204 });
+    throw new Error(`unexpected Jellyfin fetch ${url}`);
+  };
+  const res = await serverUserPatch(linkReq(msuId, { downloadsEnabled: false }, admin.header), ctxFor(msuId));
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true, pushed: true });
+  assert.ok(fetchCalls.some((c) => c.method === "POST" && c.url.pathname === "/Users/jf-u1/Policy"));
+  await flush();
+  const row = auditRows.find((r) => r.target === `mediaServerUser:${msuId}`);
+  assert.equal((JSON.parse(row!.details as string) as Record<string, unknown>).pushed, 1);
+});
+
 test("an ADMIN may still link anything, including to themselves and the server owner's identity", async () => {
   const admin = await mintSession("ADMIN");
   const owner = seedServerUser({ source: "plex", isServerAdmin: true });
@@ -1319,6 +1360,25 @@ test("role-change: demoting the LAST admin → 400 (CAS matched 0 rows) with no 
   assert.deepEqual(await res.json(), { error: "Cannot demote the last admin" });
   await flush();
   assert.equal(auditAttempts.length, 0, "a refused demotion must not audit a role change that didn't happen");
+});
+
+test("role-change: a purged account is refused 400 and nothing changes; a merely disabled one still can be re-roled", async () => {
+  const admin = await mintSession("ADMIN");
+  const patchRole = (id: string) =>
+    userPatch(req(`http://localhost:3000/api/admin/users/${id}`, { method: "PATCH", headers: { ...admin.header, "content-type": "application/json" }, body: JSON.stringify({ role: "ISSUE_ADMIN" }) }), ctxFor(id));
+  const purged = seedDisabledUser("USER", { purged: true });
+  assert.equal((await patchRole(purged)).status, 400);
+  assert.equal(usersById.get(purged)?.role, "USER");
+  const disabled = seedDisabledUser("USER");
+  assert.equal((await patchRole(disabled)).status, 200);
+});
+
+test("session revoke is rate limited per admin: the 31st call in a minute is 429 and revokes nothing", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedUser("USER");
+  const call = () => sessionsRevoke(req(`http://localhost:3000/api/admin/users/${targetId}/sessions`, { method: "DELETE", headers: { ...admin.header, "content-type": "application/json" }, body: JSON.stringify({}) }), ctxFor(targetId));
+  for (let i = 0; i < 30; i++) assert.equal((await call()).status, 400);
+  assert.equal((await call()).status, 429);
 });
 
 test("user-delete: deleting the LAST admin → 400 (LastAdminError) with no audit", async () => {
@@ -2187,4 +2247,117 @@ test("field PATCH by a delegate: a target promoted to ADMIN after the unlocked r
   assert.equal(txOps.filter((o) => o.op.startsWith("user.update")).length, 0, "no write");
   await flush();
   assert.equal(auditRows.length, 0);
+});
+
+// ── a delegate may not act on a peer holding management permissions it lacks ──
+//
+// MANAGE_USERS delegates the management of accounts at or below the delegate's
+// own level. Only ADMIN targets used to be protected, so a MANAGE_USERS-only
+// delegate could demote, disable, purge, strip the second factor of, or sign out
+// an ISSUE_ADMIN or a request manager (targetOutranksCaller, account-lifecycle.ts).
+
+const USERS_DELEGATE = Permission.MANAGE_USERS | Permission.REQUEST | Permission.REQUEST_MOVIE | Permission.REQUEST_TV;
+const BEYOND_OWN = "You cannot manage an account that holds management permissions you do not have";
+const jsonHeaders = (h: Record<string, string>) => ({ ...h, "content-type": "application/json" });
+const usersUrl = (id: string, tail = "") => `http://localhost:3000/api/admin/users/${id}${tail}`;
+
+async function refusedBeyondOwn(res: Response, what: string): Promise<void> {
+  assert.equal(res.status, 403, what);
+  assert.deepEqual(await res.json(), { error: BEYOND_OWN }, what);
+}
+
+test("peer rule: a MANAGE_USERS-only delegate can't re-role, edit, disable, re-enable, purge, 2FA-reset, list or revoke the sessions of an ISSUE_ADMIN or a request manager", async () => {
+  const delegate = await mintSession("USER", USERS_DELEGATE);
+  const seedPeers = (disabled: boolean) => {
+    const issueAdmin = disabled ? seedDisabledUser("ISSUE_ADMIN") : seedUser("ISSUE_ADMIN"); // unseeded mask ⇒ MANAGE_ISSUES by preset
+    const requestManager = disabled ? seedDisabledUser("USER") : seedUser("USER");
+    usersById.get(requestManager)!.permissions = USERS_DELEGATE | Permission.MANAGE_REQUESTS;
+    return [issueAdmin, requestManager];
+  };
+  txOps = [];
+  for (const id of seedPeers(false)) {
+    await refusedBeyondOwn(await userPatch(req(usersUrl(id), { method: "PATCH", headers: jsonHeaders(delegate.header), body: JSON.stringify({ role: "USER" }) }), ctxFor(id)), "role");
+    await refusedBeyondOwn(await userPatch(req(usersUrl(id), { method: "PATCH", headers: jsonHeaders(delegate.header), body: JSON.stringify({ permissions: Permission.REQUEST.toString() }) }), ctxFor(id)), "permissions");
+    await refusedBeyondOwn(await userPatch(req(usersUrl(id), { method: "PATCH", headers: jsonHeaders(delegate.header), body: JSON.stringify({ movieQuotaLimit: 1 }) }), ctxFor(id)), "quota");
+    await refusedBeyondOwn(await userDelete(req(usersUrl(id), { method: "DELETE", headers: delegate.header }), ctxFor(id)), "disable");
+    await refusedBeyondOwn(await userMfaReset(req(usersUrl(id, "/mfa"), { method: "DELETE", headers: delegate.header }), ctxFor(id)), "2FA reset");
+    await refusedBeyondOwn(await sessionsList(req(usersUrl(id, "/sessions"), { method: "GET", headers: delegate.header }), ctxFor(id)), "session list");
+    await refusedBeyondOwn(await sessionsRevoke(req(usersUrl(id, "/sessions"), { method: "DELETE", headers: jsonHeaders(delegate.header), body: JSON.stringify({ all: true }) }), ctxFor(id)), "session revoke");
+    assert.equal(usersById.get(id)!.deactivatedAt, null);
+  }
+  for (const id of seedPeers(true)) {
+    await refusedBeyondOwn(await userReactivate(req(usersUrl(id, "/reactivate"), { method: "POST", headers: delegate.header }), ctxFor(id)), "re-enable");
+    await refusedBeyondOwn(await userPurge(req(usersUrl(id, "/purge"), { method: "POST", headers: delegate.header }), ctxFor(id)), "purge");
+    assert.notEqual(usersById.get(id)!.deactivatedAt, null);
+    assert.equal(usersById.get(id)!.purgedAt, null);
+  }
+  assert.deepEqual(txOps, [], "nothing is written, and no transaction is even opened");
+  await flush();
+  assert.equal(auditRows.length, 0);
+});
+
+test("peer rule: a peer with the SAME or fewer management bits stays manageable, and an ADMIN manages anyone", async () => {
+  const delegate = await mintSession("USER", USERS_DELEGATE);
+  const sameLevel = seedUser("USER");
+  usersById.get(sameLevel)!.permissions = USERS_DELEGATE;
+  const plain = seedUser("USER");
+  for (const id of [sameLevel, plain]) {
+    assert.equal((await sessionsList(req(usersUrl(id, "/sessions"), { method: "GET", headers: delegate.header }), ctxFor(id))).status, 200);
+    assert.equal((await userPatch(req(usersUrl(id), { method: "PATCH", headers: jsonHeaders(delegate.header), body: JSON.stringify({ role: "USER" }) }), ctxFor(id))).status, 200);
+    assert.equal((await userDelete(req(usersUrl(id), { method: "DELETE", headers: delegate.header }), ctxFor(id))).status, 200);
+  }
+  // A delegate that also holds MANAGE_ISSUES manages an ISSUE_ADMIN.
+  const issuesToo = await mintSession("USER", USERS_DELEGATE | Permission.MANAGE_ISSUES);
+  const issueAdmin = seedUser("ISSUE_ADMIN");
+  assert.equal((await userDelete(req(usersUrl(issueAdmin), { method: "DELETE", headers: issuesToo.header }), ctxFor(issueAdmin))).status, 200);
+  const admin = await mintSession("ADMIN");
+  const manager = seedUser("ISSUE_ADMIN");
+  usersById.get(manager)!.permissions = Permission.MANAGE_ISSUES | Permission.MANAGE_REQUESTS | Permission.MANAGE_USERS;
+  assert.equal((await userDelete(req(usersUrl(manager), { method: "DELETE", headers: admin.header }), ctxFor(manager))).status, 200);
+});
+
+test("peer rule under lock 42: a target granted management permissions after the unlocked read is refused by every delegate action, with nothing written", async () => {
+  const delegate = await mintSession("USER", USERS_DELEGATE);
+  const grantUnderLock = (id: string) => {
+    onTxLock = (sql) => { if (sql === USER_ROLE_LOCK_SQL) usersById.get(id)!.permissions = USERS_DELEGATE | Permission.MANAGE_REQUESTS; };
+  };
+  const writes = () => txOps.filter((o) => o.op.startsWith("user.update") || o.op === "$executeRaw" || o.op.endsWith(".deleteMany")).map((o) => o.op);
+  const fresh = (disabled = false) => { const id = disabled ? seedDisabledUser("USER") : seedUser("USER"); grantUnderLock(id); return id; };
+  txOps = [];
+
+  let id = fresh();
+  await refusedBeyondOwn(await userPatch(req(usersUrl(id), { method: "PATCH", headers: jsonHeaders(delegate.header), body: JSON.stringify({ role: "USER" }) }), ctxFor(id)), "role");
+  id = fresh();
+  await refusedBeyondOwn(await userPatch(req(usersUrl(id), { method: "PATCH", headers: jsonHeaders(delegate.header), body: JSON.stringify({ movieQuotaLimit: 1 }) }), ctxFor(id)), "field");
+  id = fresh();
+  await refusedBeyondOwn(await userDelete(req(usersUrl(id), { method: "DELETE", headers: delegate.header }), ctxFor(id)), "disable");
+  assert.equal(usersById.get(id)!.deactivatedAt, null);
+  id = fresh();
+  await refusedBeyondOwn(await userMfaReset(req(usersUrl(id, "/mfa"), { method: "DELETE", headers: delegate.header }), ctxFor(id)), "2FA reset");
+  id = fresh();
+  await refusedBeyondOwn(await sessionsRevoke(req(usersUrl(id, "/sessions"), { method: "DELETE", headers: jsonHeaders(delegate.header), body: JSON.stringify({ all: true }) }), ctxFor(id)), "session revoke");
+  id = fresh(true);
+  await refusedBeyondOwn(await userReactivate(req(usersUrl(id, "/reactivate"), { method: "POST", headers: delegate.header }), ctxFor(id)), "re-enable");
+  assert.notEqual(usersById.get(id)!.deactivatedAt, null);
+  id = fresh(true);
+  await refusedBeyondOwn(await userPurge(req(usersUrl(id, "/purge"), { method: "POST", headers: delegate.header }), ctxFor(id)), "purge");
+  assert.equal(usersById.get(id)!.purgedAt, null);
+
+  assert.deepEqual(writes(), [], "no write under the lock");
+  await flush();
+  assert.equal(auditRows.length, 0);
+});
+
+// Each watch-grade read grades the requester from scratch, and a delegate can
+// make it. The limit sits ahead of the target lookup.
+test("watch-grade detail is rate-limited to 30 per minute per caller", async () => {
+  const { GET: watchGrade } = await import("../src/app/api/admin/users/[id]/watch-grade/route.ts");
+  const delegate = await mintSession("USER", Permission.MANAGE_REQUESTS);
+  const call = (h: Record<string, string>) => watchGrade(req(usersUrl("no-such-user", "/watch-grade"), { method: "GET", headers: h }), ctxFor("no-such-user"));
+  for (let i = 0; i < 30; i++) assert.equal((await call(delegate.header)).status, 404, `call ${i + 1}`);
+  const limited = await call(delegate.header);
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get("retry-after"), "60");
+  const other = await mintSession("USER", Permission.MANAGE_USERS);
+  assert.equal((await call(other.header)).status, 404, "per caller");
 });

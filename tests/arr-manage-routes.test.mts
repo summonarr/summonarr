@@ -563,7 +563,7 @@ test("a rename only renames files the arr's preview, re-read now, still lists", 
   assert.equal(audits[0].action, "ARR_FILE_RENAME");
 });
 
-test("C048: a long show's rename preview (every file pre-ticked) is renamed in ONE command — the cap is the delete's, not 2,000", async () => {
+test("a long show's rename preview (every file pre-ticked) is renamed in ONE command — the cap is the delete's, not 2,000", async () => {
   const token = await mintSession();
   // 9,000 seven-digit ids: past the old 2,000-id cap AND the old 64 KB body cap.
   const ids = Array.from({ length: 9_000 }, (_, i) => 1_000_000 + i);
@@ -980,7 +980,7 @@ test("mark failed falls back to the body forms older v3 builds use (form field, 
   calls = [];
   formAccepted = false;
   // The same grab again, as a fresh arr would see it: the first mark's claim
-  // (C095) would otherwise refuse it.
+  // would otherwise refuse it.
   _resetMarkClaimsForTests();
   assert.equal((await mark()).status, 200);
   assert.deepEqual(writes().map((c) => [c.path, c.body]), [["/api/v3/history/failed/900", undefined], ["/api/v3/history/failed", "id=900"], ["/api/v3/history/failed", 900]]);
@@ -1004,7 +1004,7 @@ test("a season pack is marked failed ONCE — another episode's grab of the same
   assert.equal(audits.length, 0);
 });
 
-// C095: two marks of one download at once (two tabs, two admins, the History
+// two marks of one download at once (two tabs, two admins, the History
 // page beside an issue's Replace file) both read a history with no failure yet.
 const PACK_GRABS = [
   { id: 70, seriesId: 21, eventType: "grabbed", date: "2026-10-01T10:00:00Z", sourceTitle: "Breaking.Bad.S02.1080p", downloadId: "PACK", episodeId: 201 },
@@ -1014,7 +1014,7 @@ const markSonarr = (token: string, historyId: number) =>
   call(failedRoute.POST, token, "/admin/arr/history/failed", { method: "POST", body: { service: "sonarr", arrId: 21, historyId } });
 const markPosts = () => writes().filter((c) => c.path.startsWith("/api/v3/history/failed"));
 
-test("C095: two marks of one pack racing each other send ONE mark — the second is 409 with nothing sent", async () => {
+test("two marks of one pack racing each other send ONE mark — the second is 409 with nothing sent", async () => {
   const token = await mintSession();
   let open: (() => void) | null = null;
   const gate = new Promise<void>((r) => { open = r; });
@@ -1038,7 +1038,7 @@ test("C095: two marks of one pack racing each other send ONE mark — the second
   assert.equal(audits.filter((a) => a.action === "ARR_MARK_FAILED").length, 1);
 });
 
-test("C095: a definite refusal hands the mark's claim back; no answer keeps it; a re-grab of the same download after the failure is a new mark", async () => {
+test("a definite refusal hands the mark's claim back; no answer keeps it; a re-grab of the same download after the failure is a new mark", async () => {
   const token = await mintSession();
   let history: unknown[] = PACK_GRABS;
   let markStatus: number | "network" = 400;
@@ -1134,7 +1134,7 @@ test("a mark whose outcome is unknown holds its claim only briefly — after it,
   }
 });
 
-test("C095: a grab with no downloadId (a Blackhole client) is already failed by a newer failure naming the same release and episode", async () => {
+test("a grab with no downloadId (a Blackhole client) is already failed by a newer failure naming the same release and episode", async () => {
   const token = await mintSession();
   const grabs = [
     // One pack, recorded per episode with no download id: each record is its own download to the arr.
@@ -1458,7 +1458,7 @@ test("a handle grabs ONCE: a second grab racing the first is 409 with nothing se
   assert.equal(posts, 1);
 });
 
-test("C010: a grab that failed BEFORE the release was sent (the title read) hands the handle back; the retry reaches the arr", async () => {
+test("a grab that failed BEFORE the release was sent (the title read) hands the handle back; the retry reaches the arr", async () => {
   const token = await mintSession();
   // The title read before the grab: no answer at all, then a gateway 503 —
   // neither is a definite refusal of the GRAB, but nothing was sent.

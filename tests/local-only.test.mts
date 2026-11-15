@@ -98,17 +98,17 @@ test("public hostname with an embedded private-IP prefix is NOT local", () => {
   assert.equal(isLocalHost("192.168.1.1.evil.net:3000"), false);
 });
 
-test("unbracketed IPv6 Host values (pin current behavior)", () => {
-  // These pin surprising-but-harmless behavior of the port-strip heuristic
-  // (everything after the LAST colon is treated as a port when numeric):
-  //
-  // "::1" — the strip eats the trailing "1", leaving ":", which fails every
-  // check → NOT local. Fail-closed, but a future port-strip change could
-  // silently flip this; the bracketed form "[::1]" is the supported spelling.
-  assert.equal(isLocalHost("::1"), false);
-  // "fe80::1" — the strip leaves "fe80:", which still satisfies
-  // startsWith("fe80:") → local only by luck of the truncation.
+test("an unbracketed IPv6 literal is read whole, never as host:port", () => {
+  assert.equal(isLocalHost("::1"), true);
   assert.equal(isLocalHost("fe80::1"), true);
+  assert.equal(isLocalHost("fd00::1234"), true);
+  assert.equal(isLocalHost("2001:db8::1"), false);
+});
+
+test("IPv4 octets above 255 are not an address", () => {
+  assert.equal(isLocalHost("10.999.1.1"), false);
+  assert.equal(isLocalHost("127.300.0.1"), false);
+  assert.equal(isLocalHost("10.0.0.255"), true);
 });
 
 test("leading-zero IPv4 octets parse as decimal (pin current behavior)", () => {

@@ -1,11 +1,11 @@
 // Audit fixes (unit "release") for the release GRAB, POST /api/v3/release:
 //
-//   C111 — the grab POST carries RELEASE_GRAB_TIMEOUT_MS (120 s), not the 30 s
+// the grab POST carries RELEASE_GRAB_TIMEOUT_MS (120 s), not the 30 s
 //          default: Radarr/Sonarr answer only after fetching the .torrent/.nzb
 //          from the indexer (Prowlarr, FlareSolverr) and handing it to the
 //          download client, so a slow indexer read as "grab failed" — handle
 //          spent, nothing audited — while the arr finished the grab.
-//   C011 — only a refusal of the POST ITSELF is read as the arr's grab answer
+// only a refusal of the POST ITSELF is read as the arr's grab answer
 //          (404 = search cache expired → "search again", 409 = refused): a 404
 //          from a lookup made before it (`/api/v3/movie?tmdbId=`, the series or
 //          episode list) is an ordinary failure, never "search again".
@@ -55,6 +55,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   pendingTimeout = null;
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   if (method === "POST" && url.pathname === "/api/v3/release") {
+    if (grabStatus >= 500) return json({ message: "Download client is down", description: "   at Stack.Trace()" }, grabStatus);
     return grabStatus === 200 ? json({}) : json([{ errorMessage: "indexer said no" }], grabStatus);
   }
   if (lookupStatus !== 200) return json({ message: "nope" }, lookupStatus);
@@ -97,9 +98,9 @@ beforeEach(() => {
 
 const grabPost = () => calls.find((c) => c.method === "POST" && c.url.pathname === "/api/v3/release");
 
-// ── C111: the grab's own timeout ─────────────────────────────────────────────
+// ── the grab's own timeout ─────────────────────────────────────────────
 
-test("C111: every grab POST carries RELEASE_GRAB_TIMEOUT_MS (120 s) — the request/issue grabs and the title manager's", async () => {
+test("every grab POST carries RELEASE_GRAB_TIMEOUT_MS (120 s) — the request/issue grabs and the title manager's", async () => {
   assert.equal(arr.RELEASE_GRAB_TIMEOUT_MS, 120_000);
   const grabs: Array<[string, () => Promise<void>]> = [
     ["grabMovieRelease", () => arr.grabMovieRelease(603, "guid-m", 3, "")],
@@ -118,9 +119,9 @@ test("C111: every grab POST carries RELEASE_GRAB_TIMEOUT_MS (120 s) — the requ
   }
 });
 
-// ── C011: only the POST's own refusal is a grab refusal ──────────────────────
+// ── only the POST's own refusal is a grab refusal ──────────────────────
 
-test("C011: a 404 from the GRAB POST is ArrReleaseGrabError → 'search again'; a 409 is the arr's refusal", async () => {
+test("a 404 from the GRAB POST is ArrReleaseGrabError → 'search again'; a 409 is the arr's refusal", async () => {
   grabStatus = 404;
   const expired = await arr.grabMovieRelease(603, "g", 3, "").then(() => null, (e: unknown) => e);
   assert.ok(expired instanceof arr.ArrReleaseGrabError);
@@ -133,7 +134,7 @@ test("C011: a 404 from the GRAB POST is ArrReleaseGrabError → 'search again'; 
   assert.equal(grabRefusal(refused)?.kind, "refused");
 });
 
-test("C011: a 404 from a LOOKUP before the grab is NOT 'search cache expired' — it is an ordinary failure", async () => {
+test("a 404 from a LOOKUP before the grab is NOT 'search cache expired' — it is an ordinary failure", async () => {
   lookupStatus = 404;
   for (const run of [
     () => arr.grabMovieRelease(603, "g", 3, ""),
@@ -148,13 +149,13 @@ test("C011: a 404 from a LOOKUP before the grab is NOT 'search cache expired' �
   }
 });
 
-test("C011: a grab that times out or loses its connection is not a refusal either", async () => {
+test("a grab that times out or loses its connection is not a refusal either", async () => {
   const timeout = new (await import("../src/lib/safe-fetch.ts")).SafeFetchError("timeout", RADARR, "t");
   assert.equal(grabRefusal(timeout), null);
   assert.equal(grabDefinitelyRefused(timeout), false);
 });
 
-test("C111/C011: no source POSTs /api/v3/release except postReleaseGrab", () => {
+test("no source POSTs /api/v3/release except postReleaseGrab", () => {
   // Every arrFetch* call is read as a whole (its balanced argument list,
   // comments stripped), whatever its config argument is called and however
   // its options are laid out; and the bare grab path — "/api/v3/release" with
@@ -189,4 +190,38 @@ test("C111/C011: no source POSTs /api/v3/release except postReleaseGrab", () => 
   assert.deepEqual(offenders, [], "a grab POST outside postReleaseGrab loses the grab timeout and the typed refusal");
   assert.equal(allowedCalls, 1, "the scan found postReleaseGrab's own POST — it can't pass by matching nothing");
   assert.equal(allowedPaths, 1);
+});
+
+test("a 5xx grab body's own message is logged: one line, credentials masked, never the stack trace", async () => {
+  const { arrServerErrorDetail } = await import("../src/lib/arr-releases.ts");
+  assert.equal(
+    arrServerErrorDetail(JSON.stringify({ message: "Download client isn't configured yet", description: "   at NzbDrone.Core.Download.DownloadService…" })),
+    "Download client isn't configured yet",
+  );
+  const masked = arrServerErrorDetail(JSON.stringify({ message: "GET http://indexer.test/dl?apikey=0123456789abcdef0123456789abcdef failed\nsecond line\u001b[31m" }));
+  assert.ok(masked !== null);
+  assert.ok(!masked.includes("0123456789abcdef0123456789abcdef"), "the apikey is masked");
+  assert.ok(!/[\n\u001b]/.test(masked), "one line, no control characters");
+  assert.ok((arrServerErrorDetail(JSON.stringify({ message: "x".repeat(5_000) })) ?? "").length <= 300);
+  // A proxy's HTML page, a list body, or no message: nothing is logged.
+  assert.equal(arrServerErrorDetail("<html><body>502 Bad Gateway</body></html>"), null);
+  assert.equal(arrServerErrorDetail(JSON.stringify([{ errorMessage: "indexer said no" }])), null);
+  assert.equal(arrServerErrorDetail(JSON.stringify({ description: "stack only" })), null);
+  assert.equal(arrServerErrorDetail(JSON.stringify({ message: 42 })), null);
+});
+
+test("the grab logs the arr's reason for a 5xx only", async () => {
+  const lines: string[] = [];
+  const quiet = console.error;
+  console.error = (...args: unknown[]) => { lines.push(args.join(" ")); };
+  try {
+    for (const status of [500, 409]) {
+      grabStatus = status;
+      await assert.rejects(arr.grabMovieRelease(603, "guid", 1));
+    }
+  } finally {
+    console.error = quiet;
+    grabStatus = 200;
+  }
+  assert.deepEqual(lines.filter((l) => l.includes("grab failed")), ["[arr] grab failed (500): Download client is down"]);
 });

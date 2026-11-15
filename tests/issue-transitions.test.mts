@@ -73,6 +73,16 @@ test("a resolved issue is never claimed; an admin's first reply on an issue no l
   assert.equal(audits.length, 0);
 });
 
+test("an issue reopened after the caller read it IN_PROGRESS is refused, not flipped without an event or audit row", async () => {
+  row = { id: "iss-1", status: "OPEN" };
+  const seen = { id: "iss-1", status: "IN_PROGRESS", reportedBy: "reporter-1" };
+  assert.equal(await promoteIssueInProgress({ issue: seen, from: "notResolved", trigger: "grab", session, req }), 0);
+  await flush();
+  assert.equal(row.status, "OPEN");
+  assert.equal(sse.length, 0);
+  assert.equal(audits.length, 0);
+});
+
 test("a close that committed answers true even when its announcement throws", async () => {
   const boom = () => { throw new Error("listener down"); };
   sseEmitter.on("event", boom);

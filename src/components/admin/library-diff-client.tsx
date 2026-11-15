@@ -651,6 +651,14 @@ function ArrFilterButton({
 // server is still on its first sync.
 const RENDER_CAP = 500;
 
+// The matching items first, then the rest, each group in its own order, in one pass.
+function floatMatching<T>(items: readonly T[], matches: (item: T) => boolean): T[] {
+  const first: T[] = [];
+  const rest: T[] = [];
+  for (const item of items) (matches(item) ? first : rest).push(item);
+  return first.concat(rest);
+}
+
 function DiffColumn({
   label,
   items,
@@ -681,7 +689,7 @@ function DiffColumn({
   // A ?tmdbId= deep link lands on a row; float it to the top so it is on screen
   // instead of buried under the render cap. Stable: the rest keep their order.
   const ordered = highlightServer === server && highlightKey
-    ? [...items.filter((i) => `${i.tmdbId}:${i.mediaType}` === highlightKey), ...items.filter((i) => `${i.tmdbId}:${i.mediaType}` !== highlightKey)]
+    ? floatMatching(items, (i) => `${i.tmdbId}:${i.mediaType}` === highlightKey)
     : items;
   const emptyMsg = !configured
     ? t("adminManage.library.diff.notSynced", { server: server === "plex" ? "Plex" : "Jellyfin" })

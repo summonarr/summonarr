@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const src = readFileSync(new URL("../src/components/discord-link-ui.tsx", import.meta.url), "utf8");
-const flow = src.slice(src.indexOf("function TokenLinkFlow()"), src.indexOf("function WebMergeFlow()"));
+const flow = src.slice(src.indexOf("function TokenLinkFlow("), src.indexOf("function WebMergeFlow("));
 
 test("the token's expiry is a timer in an effect keyed on expiresAt, cleared on change and unmount", () => {
   assert.match(

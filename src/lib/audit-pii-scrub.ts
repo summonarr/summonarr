@@ -50,8 +50,11 @@ async function updateInBatches(where: Prisma.AuditLogWhereInput, data: Prisma.Au
   for (let batch = 0; batch < MAX_BATCHES; batch++) {
     const { count } = await prisma.auditLog.updateMany({ where, data, limit: AUDIT_SCRUB_BATCH });
     total += count;
-    if (count < AUDIT_SCRUB_BATCH) break;
+    if (count < AUDIT_SCRUB_BATCH) return total;
   }
+  // The ceiling, not the end of the matching rows, stopped the loop: the next
+  // run carries on, so say so rather than let this one read as complete.
+  console.warn("[audit-scrub] batch ceiling reached after %d rows; the next run continues", total);
   return total;
 }
 

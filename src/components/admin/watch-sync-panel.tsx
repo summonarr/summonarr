@@ -18,6 +18,7 @@ import { Switch } from "@/components/ui/switch";
 import { Chip, EmptyState, SectionHeader } from "@/components/ui/design";
 import { ArrowLeftRight, ArrowRight, Loader2, RefreshCw, Trash2 } from "@/components/icons";
 import { runReplaceFileJob } from "@/lib/client/replace-file-job";
+import { jobRunCutShort } from "@/lib/client/library-sync";
 import type { Translator } from "@/lib/i18n/translate";
 import { requestFailureText } from "./request-failure-text";
 import {
@@ -80,17 +81,19 @@ function useWatchSyncOverview(action: AsyncAction) {
   // the last one returned (a failed load leaves `data` as it was).
   const [pollTick, setPollTick] = useState(0);
 
-  const load = useCallback(async () => {
+  // False only when the read failed (a superseded read is not a failure).
+  const load = useCallback(async (): Promise<boolean> => {
     const res = await action.run(LOAD, (signal) =>
       fetchJson(withBasePath("/api/admin/watch-sync"), { schema: OverviewSchema, signal }));
-    if (!res) return;
+    if (!res) return true;
     if (!res.ok) {
       const text = requestFailureText(res, t, { status: "adminManage.watchSync.error.load", network: "adminManage.watchSync.error.loadNetwork" });
       if (text !== null) setError(text);
-      return;
+      return false;
     }
     setData(toOverview(res.data));
     setError("");
+    return true;
   }, [action, t]);
 
   useEffect(() => { void load(); }, [load]);
@@ -140,7 +143,7 @@ function DirectionStats({ pair, dir }: { pair: Pair; dir: SyncTarget }) {
 }
 
 type PairChange = { direction: Direction } | { syncProgress: boolean } | { enabled: boolean };
-type ConfirmKind = "remove" | "rescan";
+type ConfirmKind = "remove" | "rescan" | "full";
 
 function PairCard({
   p,
@@ -150,6 +153,8 @@ function PairCard({
   setConfirming,
   onChange,
   onRescan,
+  onFullSync,
+  runBusy,
   onRemove,
 }: {
   p: Pair;
@@ -161,6 +166,9 @@ function PairCard({
   setConfirming: (kind: ConfirmKind | null) => void;
   onChange: (change: PairChange) => void;
   onRescan: () => void;
+  onFullSync: () => void;
+  // A run is going (any pair): a full sync would only answer "already running".
+  runBusy: boolean;
   onRemove: () => void;
 }) {
   const t = useT();
@@ -230,6 +238,15 @@ function PairCard({
           </Button>
           <Button
             variant="ghost"
+            size="sm"
+            disabled={busy || runBusy || !p.enabled}
+            aria-expanded={confirming === "full"}
+            onClick={() => toggleConfirm("full")}
+          >
+            {t("adminManage.watchSync.fullSync")}
+          </Button>
+          <Button
+            variant="ghost"
             size="icon-sm"
             disabled={busy}
             aria-label={t("adminManage.watchSync.remove")}
@@ -246,7 +263,7 @@ function PairCard({
       {confirming && (
         <div className="mt-3 space-y-2 rounded-md border border-red-500/40 bg-red-500/10 p-3">
           <p className="text-xs text-[var(--ds-danger)]">
-            {t(confirming === "remove" ? "adminManage.watchSync.removeConfirm" : "adminManage.watchSync.rescanConfirm")}
+            {t(confirming === "remove" ? "adminManage.watchSync.removeConfirm" : confirming === "full" ? "adminManage.watchSync.fullSyncConfirm" : "adminManage.watchSync.rescanConfirm")}
           </p>
           <div className="flex items-center gap-2">
             <Button
@@ -258,11 +275,12 @@ function PairCard({
                 const kind = confirming;
                 setConfirming(null);
                 if (kind === "remove") onRemove();
+                else if (kind === "full") onFullSync();
                 else onRescan();
               }}
             >
               {confirming === "remove" ? <Trash2 className="h-3.5 w-3.5" /> : <RefreshCw className="h-3.5 w-3.5" />}
-              {t(confirming === "remove" ? "adminManage.watchSync.remove" : "adminManage.watchSync.rescan")}
+              {t(confirming === "remove" ? "adminManage.watchSync.remove" : confirming === "full" ? "adminManage.watchSync.fullSync" : "adminManage.watchSync.rescan")}
             </Button>
             <Button variant="ghost" size="xs" onClick={() => setConfirming(null)}>
               {t("adminManage.common.cancel")}
@@ -381,12 +399,15 @@ export function WatchSyncPanel() {
 
   // One change at a time; the page is re-read before the controls come back,
   // so the next change starts from what the server now holds.
-  async function send(url: string, init: RequestInit): Promise<boolean> {
+  // Returns whether to show a success note. `onSaved` runs whenever the write
+  // itself went through, re-read or not: the change is committed either way.
+  async function send(url: string, init: RequestInit, onSaved?: () => void): Promise<boolean> {
     setError("");
     setNote("");
+    let reloaded = true;
     const res = await action.run(MUTATE, async (signal) => {
       const answer = await fetchJson(withBasePath(url), { init, signal });
-      if (answer.ok) await load();
+      if (answer.ok) reloaded = await load();
       return answer;
     }, { ifBusy: "skip" });
     if (!res) return false;
@@ -395,16 +416,21 @@ export function WatchSyncPanel() {
       if (text !== null) setError(text);
       return false;
     }
-    return true;
+    onSaved?.();
+    // The change went through; a failed re-read leaves its own error line and
+    // no success note over a stale list.
+    return reloaded;
   }
 
   async function addPair(plexUserId: string, jellyfinUserId: string, direction: Direction) {
-    if (!(await send("/api/admin/watch-sync", jsonInit("POST", { plexUserId, jellyfinUserId, direction })))) return;
-    setAdded((n) => n + 1);
+    // The form empties once the pair exists, even when the re-read failed —
+    // kept filled in, it invites a second submit of a pair that is already there.
+    const saved = () => setAdded((n) => n + 1);
+    if (!(await send("/api/admin/watch-sync", jsonInit("POST", { plexUserId, jellyfinUserId, direction }), saved))) return;
     setNote(t("adminManage.watchSync.added"));
   }
 
-  async function runNow() {
+  async function runNow(body: { pairId: string; full: true } | Record<string, never> = {}) {
     setError("");
     setNote("");
     let answer: Awaited<ReturnType<typeof runReplaceFileJob>> | undefined;
@@ -412,7 +438,7 @@ export function WatchSyncPanel() {
       answer = await action.run(RUN, async (signal) => {
         // A background job (the 37a pattern): polled until it answers, and
         // the polls stop when the page goes away.
-        return await runReplaceFileJob(fetch, withBasePath("/api/admin/watch-sync/run"), {}, {
+        return await runReplaceFileJob(fetch, withBasePath("/api/admin/watch-sync/run"), body, {
           intervalMs: RUN_POLL_MS,
           maxPolls: RUN_MAX_POLLS,
           isAlive: () => !signal.aborted,
@@ -428,6 +454,12 @@ export function WatchSyncPanel() {
       setError(apiErrorText(answer.data, t("adminManage.watchSync.error.run")));
       return;
     }
+    // A run that lost its lock answers 200 with no pairs: not a finished sync.
+    if (jobRunCutShort(answer.data)) {
+      setError(t("adminManage.watchSync.runStopped"));
+      await load();
+      return;
+    }
     const { marked, problems } = runSummary(answer.data);
     setNote(problems > 0
       ? t("adminManage.watchSync.ranWithProblems", { marked, problems })
@@ -436,12 +468,22 @@ export function WatchSyncPanel() {
   }
 
   if (!data) {
+    // A failed FIRST load hides every control that would reload, so this
+    // one is the way back without a page reload.
     return error
-      ? <p className="text-sm text-[var(--ds-danger)]">{error}</p>
+      ? (
+        <div className="flex flex-col items-start gap-2">
+          <p role="alert" className="m-0 text-sm text-[var(--ds-danger)]">{error}</p>
+          <Button size="xs" variant="outline" onClick={() => void load()} disabled={action.busy(LOAD)}>
+            {action.busy(LOAD) ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+            {t("adminManage.common.retry")}
+          </Button>
+        </div>
+      )
       : <p className="flex items-center gap-2 text-sm text-[var(--ds-fg-muted)]"><Loader2 className="h-4 w-4 animate-spin" />{t("adminManage.watchSync.loading")}</p>;
   }
 
-  const pairUrl = (id: string) => `/api/admin/watch-sync/${id}`;
+  const pairUrl = (id: string) => `/api/admin/watch-sync/${encodeURIComponent(id)}`;
 
   return (
     <div className="space-y-8">
@@ -468,7 +510,7 @@ export function WatchSyncPanel() {
           right={
             // Off while a run is already going (the cron's or another
             // admin's): a second one would only answer "already running".
-            <Button variant="outline" size="sm" onClick={() => void runNow()} disabled={running || serverRunning || data.pairs.length === 0}>
+            <Button variant="outline" size="sm" onClick={() => void runNow({})} disabled={running || serverRunning || data.pairs.length === 0}>
               {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
               {running ? t("adminManage.watchSync.running") : t("adminManage.watchSync.runNow")}
             </Button>
@@ -490,6 +532,8 @@ export function WatchSyncPanel() {
                 onRescan={() => void send(pairUrl(p.id), jsonInit("PATCH", { rescan: true })).then((ok) => {
                   if (ok) setNote(t("adminManage.watchSync.rescanQueued"));
                 })}
+                onFullSync={() => void runNow({ pairId: p.id, full: true })}
+                runBusy={running || serverRunning}
                 onRemove={() => void send(pairUrl(p.id), { method: "DELETE" })}
               />
             ))}

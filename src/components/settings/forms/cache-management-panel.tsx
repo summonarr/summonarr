@@ -89,9 +89,11 @@ function readStep(
   res: Awaited<ReturnType<typeof fetchJson>>,
   summarize: (d: ClearResult) => string,
 ): StepOutcome {
-  // A 2xx that still names an error (a warm that refused part-way) is a failure.
+  // A 2xx that still names an error (a warm that refused part-way) is a failure;
+  // a null or empty `error` is not naming one.
   const errorField = res.ok && res.data && typeof res.data === "object" ? (res.data as { error?: unknown }).error : undefined;
-  if (res.ok && errorField === undefined) return { ok: true, text: summarize(readCounts(res.data)) };
+  const namesError = typeof errorField === "string" ? errorField !== "" : errorField != null && errorField !== false;
+  if (res.ok && !namesError) return { ok: true, text: summarize(readCounts(res.data)) };
   if (res.ok) return { ok: false, reason: typeof errorField === "string" ? errorField : "", reached: true, status: res.status };
   return { ok: false, reason: res.error, reached: res.kind === "http" || res.kind === "invalid", status: res.status };
 }

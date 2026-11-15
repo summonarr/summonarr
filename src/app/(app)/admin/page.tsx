@@ -11,6 +11,7 @@ import { isFeatureEnabled } from "@/lib/features";
 import { SyncButton } from "@/components/admin/request-sync-buttons";
 import { AdminRequestList, type GroupedRequestRow, type Requester, type MediaRatings } from "@/components/admin/admin-request-list";
 import { AdminFilterBar } from "@/components/admin/admin-filter-bar";
+import { LiveRefresh } from "@/components/live-refresh";
 import { EmptyState, PageHeader, StatCard } from "@/components/ui/design";
 import { ClipboardList } from "@/components/icons";
 import { getWatchGradeSummaries } from "@/lib/watch-grade-data";
@@ -372,7 +373,7 @@ export default async function AdminPage({
       : Promise.resolve([]),
     // Watch grade of every requester on this page, in one batch (null when the
     // feature or play history tracking is off).
-    getWatchGradeSummaries(requests.map((r) => r.requestedBy)),
+    getWatchGradeSummaries(pageRequesters),
     // The Open in / Manage icons lead to routes that 404 while the integration
     // is switched off (arrGate).
     isFeatureEnabled("feature.integration.radarr").catch(() => false),
@@ -413,14 +414,19 @@ export default async function AdminPage({
           reads, so a request landing or leaving between them can still hand
           this render a non-zero total with nothing to show. */}
       {rows.length === 0 ? (
-        <EmptyState
-          icon={ClipboardList}
-          title={
-            statusFilter
-              ? t(`adminQueue.page.emptyStatus.${statusFilter.toLowerCase()}`)
-              : t("adminQueue.page.empty")
-          }
-        />
+        <>
+          {/* The list carries its own live refresh; with no list mounted the
+              empty page would otherwise sit on "nothing here" until a reload. */}
+          <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
+          <EmptyState
+            icon={ClipboardList}
+            title={
+              statusFilter
+                ? t(`adminQueue.page.emptyStatus.${statusFilter.toLowerCase()}`)
+                : t("adminQueue.page.empty")
+            }
+          />
+        </>
       ) : (
         <AdminRequestList
           requests={rows}

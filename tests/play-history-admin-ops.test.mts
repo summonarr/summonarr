@@ -310,13 +310,13 @@ test("the export audit records the filters the query applied — an unrecognised
   }
 
   const real = await runInScope(token, () =>
-    exportRoute(req("/api/play-history/export?format=json&source=jellyfin&mediaType=TV&watched=false&tmdbId=603abc", token)));
+    exportRoute(req("/api/play-history/export?format=json&source=jellyfin&mediaType=TV&watched=false&tmdbId=603", token)));
   assert.equal(real.status, 200);
   const g = auditFilters();
   assert.equal(g.source, "jellyfin");
   assert.equal(g.mediaType, "TV");
   assert.equal(g.watched, "false");
-  assert.equal(g.tmdbId, 603, "the query binds parseInt('603abc'), so the trail records 603");
+  assert.equal(g.tmdbId, 603);
 });
 
 test("the CSV export reads pages only as fast as the client downloads, and a cancelled download stops paging", async () => {

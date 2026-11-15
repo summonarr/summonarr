@@ -101,7 +101,7 @@ test("every integer setting is digits only, inside its bounds, with its own 400 
   const cases: Array<[key: string, ok: string, bad: string[], message: string]> = [
     ["rateLimitRequests", "10000", ["0", "10001", "1e3", "-1", "5 "], 'apiAdmin.settings.intRange10000 {"key":"rateLimitRequests"}'],
     ["recommendedIosBuild", "1000000", ["0", "1000001", "1.5"], 'apiAdmin.settings.intRangeMillion {"key":"recommendedIosBuild"}'],
-    ["radarrQualityProfileId", "99999999999999999999", ["0", "x", "9".repeat(400)], 'apiAdmin.settings.positiveInt {"key":"radarrQualityProfileId"}'],
+    ["radarrQualityProfileId", "2147483647", ["0", "x", "2147483648", "99999999999999999999", "9".repeat(400)], 'apiAdmin.settings.positiveInt {"key":"radarrQualityProfileId"}'],
     ["auditPiiRetentionDays", "7", ["6", "3651"], 'apiAdmin.settings.daysRange {"key":"auditPiiRetentionDays"}'],
     ["smtpPort", "65535", ["0", "65536", "25a"], 'apiAdmin.settings.intRange {"key":"smtpPort","min":1,"max":65535}'],
     ["sessionMaxDuration", "7776000", ["59", "7776001"], 'apiAdmin.settings.intRange {"key":"sessionMaxDuration","min":60,"max":7776000}'],
@@ -142,6 +142,8 @@ test("the type checks: booleans, enums, URLs, donations, library ids, relay key,
   assert.equal(R.DISCORD_SNOWFLAKE_RE.test("123456789012345678901"), false, "21 digits");
   assert.equal(await refused("radarrApiKey", "abc\ndef"), true, "a control character in a credential");
   assert.equal(await refused("traktClientId", "abc\ndef"), false, "not a secret-shaped name");
+  assert.equal(await refused("smtpPassword", "pass\tword"), true, "a control character in the SMTP password");
+  assert.equal(await refused("smtpPassword", "p@ss w0rd!\u00e9"), false, "printable characters, spaces and accents stay valid");
 });
 
 test("Connect-only keys and a mask-prefixed secret are refused before the type check", async () => {

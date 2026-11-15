@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { getTVSeasonEpisodesLocalized, tmdbLanguageFor } from "@/lib/tmdb";
+import { getTVSeasonEpisodesLocalized, isTmdbNotFound, tmdbLanguageFor } from "@/lib/tmdb";
 import type { TmdbEpisode } from "@/lib/tmdb-types";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { episodeMetadataUpdates, warmEpisodeMetadata } from "@/lib/tv-season-warm";
@@ -55,6 +55,11 @@ export const GET = withAuth(async (
   try {
     ({ episodes, english } = await getTVSeasonEpisodesLocalized(tmdbId, seasonNumber, tmdbLanguageFor(localeForRequest(req))));
   } catch (err) {
+    // TMDB doesn't know the show or the season: Not Found, told apart from an
+    // upstream outage (as media/[type]/[tmdbId] and person/[id] do).
+    if (isTmdbNotFound(err)) {
+      return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
+    }
     // tmdbFetch throws without logging, so without this a run of TMDB failures
     // here left no trace at all.
     console.warn("[tv-season] TMDB season fetch failed:", tmdbId, seasonNumber, err instanceof Error ? err.message : err);

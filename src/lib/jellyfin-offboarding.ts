@@ -6,8 +6,8 @@
 // Summonarr session it already holds stays valid: a browser's until its
 // configured deadline, the iOS app's forever (guardrail 6c). The hourly Jellyfin
 // user sync (download-policy.ts) is the one place that learns of the departure,
-// so it puts every identity it marks inactive on this module's pending ledger
-// the moment that write commits (noteJellyfinDepartures). Once every server has
+// so the write that marks an identity inactive also sets
+// MediaServerUser.offboardPending, in the same statement. Once every server has
 // synced, the account whose SIGN-IN identity it is — User.jellyfinUserId, which
 // only the Jellyfin and QuickConnect sign-ins write — is signed out everywhere
 // through revokeAllUserSessions, with an audit row.
@@ -29,25 +29,24 @@
 //     42 (the role-change lock) inside the revoke's own transaction.
 //   - Never a hard delete (guardrail 28). The sessions go; the account and every
 //     MediaServerUser row stay.
-//   - An identity enters the pending ledger as soon as its inactive write
-//     commits (guardrail 27: the mark follows the write), not when the run ends.
-//     Offboarding acts on the active→inactive transition, which the sync sees
-//     once: a run that then threw before handing the id over lost it for good.
-//   - An identity leaves the pending ledger only once DECIDED (revoked, exempt,
-//     still a member, or no account), and only after the revoke committed
-//     (guardrail 27), so a failed revoke or a poisoned run retries next hour.
-//     The ledger is process-wide (guardrail 27a) and in memory, like the
-//     reconcile confirmation counter in download-policy.ts: a restart forgets it.
+//   - Pending is a COLUMN, never memory. Offboarding acts on the
+//     active→inactive transition, which the sync sees once; offboardPending is
+//     set by that same write, so neither a run that throws afterwards nor a
+//     restart can lose the departure (an in-memory ledger lost both the restart
+//     case and every identity a cold server was holding back).
+//   - An identity stops being pending only once DECIDED (revoked, exempt, still
+//     a member, or no account), and only after the revoke committed (guardrail
+//     27), so a failed revoke or a poisoned run retries next hour. A failed
+//     clear after a revoke repeats the revoke next run, which is harmless.
+//   - Rows that were already inactive when the column was added are not pending
+//     (default false): the upgrade signs nobody out.
 
 import { prisma } from "./prisma";
 import { revokeAllUserSessions } from "./auth";
 import { logAudit } from "./audit";
 import { isAdminTarget, lockTargetInTx } from "./account-lifecycle";
-import { processSingleton } from "./process-singleton";
+import { Permission } from "./permissions";
 import type { MediaInstanceKey } from "./media-instances";
-
-export const OFFBOARD_PENDING_KEY = "jellyfin-offboarding:pending";
-const pendingIds = () => processSingleton(OFFBOARD_PENDING_KEY, () => new Set<string>());
 
 class OffboardExemptError extends Error {}
 
@@ -60,23 +59,31 @@ export interface OffboardRunResult {
   deferred: boolean;
 }
 
-/**
- * Jellyfin user ids the sync just wrote inactive (removed or disabled). Call it
- * right after that write commits, never before (guardrail 27), and never defer it
- * to the end of the run: a throw in between would drop the departure for good.
- */
-export function noteJellyfinDepartures(ids: readonly string[]): void {
-  const pending = pendingIds();
-  for (const id of ids) pending.add(id);
+// The Jellyfin user ids still to decide: every identity some server's row marks
+// pending, once each (one id can be pending on several servers).
+async function pendingJellyfinUserIds(): Promise<string[]> {
+  const rows = await prisma.mediaServerUser.findMany({
+    where: { source: "jellyfin", offboardPending: true },
+    select: { sourceUserId: true },
+  });
+  return [...new Set(rows.map((r) => r.sourceUserId))];
+}
+
+// Decided: the identity is no longer pending on any server.
+async function clearPending(jellyfinUserId: string): Promise<void> {
+  await prisma.mediaServerUser.updateMany({
+    where: { source: "jellyfin", sourceUserId: jellyfinUserId, offboardPending: true },
+    data: { offboardPending: false },
+  });
 }
 
 export async function offboardJellyfinIdentities(input: {
   /** Configured servers whose user fetch failed or came back empty this run. */
   noOpinion: MediaInstanceKey[];
 }): Promise<OffboardRunResult> {
-  const pending = pendingIds();
   const result: OffboardRunResult = { revoked: 0, errors: 0, deferred: false };
-  if (pending.size === 0) return result;
+  const pending = await pendingJellyfinUserIds();
+  if (pending.length === 0) return result;
 
   for (const slug of input.noOpinion) {
     const known = await prisma.mediaServerUser.findFirst({
@@ -89,10 +96,11 @@ export async function offboardJellyfinIdentities(input: {
     }
   }
 
-  for (const jellyfinUserId of [...pending]) {
+  for (const jellyfinUserId of pending) {
     try {
       const outcome = await offboardOne(jellyfinUserId);
-      pending.delete(jellyfinUserId);
+      // After the decision (and, for a revoke, after it committed — guardrail 27).
+      await clearPending(jellyfinUserId);
       if (outcome === "revoked") result.revoked++;
     } catch (err) {
       result.errors++;
@@ -128,7 +136,7 @@ async function offboardOne(jellyfinUserId: string): Promise<OffboardOutcome> {
     await revokeAllUserSessions(user.id, async (tx) => {
       // The system acts here, not a delegate: nothing to refuse, only an
       // exemption to decide (the same admin-target rule the admin routes use).
-      const fresh = await lockTargetInTx(tx, user.id, true);
+      const fresh = await lockTargetInTx(tx, user.id, Permission.ADMIN);
       if (!fresh || isAdminTarget(fresh)) throw new OffboardExemptError();
     });
   } catch (err) {

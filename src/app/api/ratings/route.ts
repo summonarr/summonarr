@@ -6,6 +6,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { coldLookupAdmitter } from "@/lib/ratings-cold-budget";
 
 // GET /api/ratings?id=&type= — external ratings for a single title. MDBList is
 // tried first (richer field set); OMDB is the fallback whenever MDBList can't
@@ -49,7 +50,11 @@ export const GET = withAuth(async (req, _ctx, session) => {
     });
   const releaseDate = core?.releaseYear ? `${core.releaseYear}-01-01` : null;
 
-  const result = await fetchUnifiedRatings(numericId, type, releaseDate);
+  // A cold title draws on the user's cold-lookup budget (shared with the batch
+  // route and the page lists); past it the answer is whatever is cached.
+  const result = await fetchUnifiedRatings(numericId, type, releaseDate, undefined, {
+    admitCold: coldLookupAdmitter(session.user.id),
+  });
   if (result.found && result.data) return NextResponse.json(result.data);
 
   return NextResponse.json(null);

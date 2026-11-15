@@ -55,6 +55,8 @@ export function cellBg(count: number, max: number): string {
 function windowDays(todayIso: string): { date: string; dow: number }[] {
   const today = new Date(todayIso);
   const days: { date: string; dow: number }[] = [];
+  // An unreadable `today` yields an empty calendar, never a thrown RangeError.
+  if (Number.isNaN(today.getTime())) return days;
   for (let i = 364; i >= 0; i--) {
     const d = new Date(today);
     d.setUTCDate(d.getUTCDate() - i);

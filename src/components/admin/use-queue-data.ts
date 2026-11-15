@@ -33,12 +33,14 @@ const queueUrl = () => withBasePath("/api/admin/queue");
 
 // A 200 that is not the report (an auth proxy's page, a stale deploy) is a failed
 // load, never an empty queue: the three lists the page folds must be arrays.
+function isQueueReport(body: unknown): body is QueueReport {
+  if (!body || typeof body !== "object") return false;
+  const r = body as Record<string, unknown>;
+  return Array.isArray(r.instances) && Array.isArray(r.errors) && Array.isArray(r.items);
+}
+
 function queueAnswer(body: unknown, error: string): { report: QueueReport } | { error: string } {
-  if (body && typeof body === "object") {
-    const r = body as Record<string, unknown>;
-    if (Array.isArray(r.instances) && Array.isArray(r.errors) && Array.isArray(r.items)) return { report: body as QueueReport };
-  }
-  return { error };
+  return isQueueReport(body) ? { report: body } : { error };
 }
 
 export function useQueueData({
@@ -65,9 +67,11 @@ export function useQueueData({
   // The snapshot only paints an EMPTY page: it never replaces rows already on
   // screen (a live answer, or a removal's optimistic drop), and leaves the
   // error, filters, selections and dialogs alone.
-  const { staleAt: snapshotAt, markLive } = useArrSnapshot<QueueReport>(configured ? queueUrl() : null, (data) =>
-    setReport((cur) => cur ?? data),
-  );
+  // A kept snapshot that isn't a report (a stale deploy's shape) paints nothing.
+  const { staleAt: snapshotAt, markLive } = useArrSnapshot<unknown>(configured ? queueUrl() : null, (data) => {
+    if (!isQueueReport(data)) return false;
+    setReport((cur) => cur ?? data);
+  });
 
   // Background polls that failed in a row. One is a blip beside a queue that
   // is still on screen — the next tick usually answers — so only the second in

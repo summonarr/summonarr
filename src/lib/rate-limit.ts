@@ -190,9 +190,15 @@ function openBucket(key: string, windowMs: number): OpenBucket {
 // Records one hit at `bucket.now`. A key with no live hits is NEW to its map and
 // needs room first; returns false, recording nothing, when its full protected
 // class can't take it.
+// Most hits kept per key; far above any configured limit.
+const MAX_HITS_PER_KEY = 10_000;
+
 function recordHit(key: string, bucket: OpenBucket, windowMs: number): boolean {
   if (bucket.hits.length === 0 && !makeRoom(bucket.store, bucket.now)) return false;
   bucket.hits.push(bucket.now);
+  // recordFailure has no limit check, so a key hammered with failures would
+  // otherwise grow (and be re-filtered on every open) without bound.
+  if (bucket.hits.length > MAX_HITS_PER_KEY) bucket.hits.splice(0, bucket.hits.length - MAX_HITS_PER_KEY);
   // Delete then re-insert to move the key to the end of the Map's order: the
   // shared map evicts from the front, so this marks it recently used.
   bucket.map.delete(key);

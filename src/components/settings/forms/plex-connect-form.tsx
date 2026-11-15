@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -8,7 +9,7 @@ import { CheckCircle, XCircle, Loader2, Unlink, Download } from "@/components/ic
 import { BASE_PATH, withBasePath } from "@/lib/base-path";
 import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
 import { plexApprovalUrl, plexForwardUrl, plexReturnBase } from "@/lib/client/plex-approval-url";
-import { v } from "@/lib/validate";
+import { v, type Infer } from "@/lib/validate";
 import { useT } from "@/components/i18n/i18n-provider";
 import { rich } from "./rich";
 import { randomUuid } from "@/lib/random-id";
@@ -32,7 +33,7 @@ const AccountServer = v.object({
   name: v.string(),
   connections: v.array(v.object({ uri: v.string(), local: v.boolean(), relay: v.boolean() })),
 });
-type PlexAccountServer = { machineId: string; name: string; connections: { uri: string; local: boolean; relay: boolean }[] };
+type PlexAccountServer = Infer<typeof AccountServer>;
 const AccountServers = v.object({ servers: v.array(AccountServer) });
 const PickedServer = v.object({ url: v.string(), relay: v.optional(v.boolean()) });
 
@@ -106,6 +107,7 @@ async function startPlexConnect(siteUrl: string, t: ReturnType<typeof useT>): Pr
 
 function PlexAccount({ connectedEmail, siteUrl, onDisconnected }: { connectedEmail: string; siteUrl: string; onDisconnected: () => void }) {
   const t = useT();
+  const router = useRouter();
   const [status, setStatus] = useState<"idle" | "waiting" | "saving" | "error">("idle");
   const [error, setError] = useState("");
   // Disconnect is a two-step inline confirm: one accidental tap used to remove
@@ -134,6 +136,9 @@ function PlexAccount({ connectedEmail, siteUrl, onDisconnected }: { connectedEma
     if (res.ok || res.kind === "invalid") {
       onDisconnected();
       setStatus("idle");
+      // The card's "Connected" badge and the watchlist status line are
+      // rendered by the server page from the stored token.
+      router.refresh();
       return;
     }
     setError(t("settings.form.plex.disconnectFailed"));

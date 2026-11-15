@@ -2,6 +2,7 @@
 
 import { cn } from "@/lib/utils";
 import { SEGMENTED_TRACK_STYLE, segmentedItemStyle } from "./segmented-style";
+import { SegmentCount } from "./segment-count";
 
 export type FilterSegment<V extends string = string> = {
   value: V;
@@ -53,24 +54,7 @@ export function FilterBar<V extends string = string>({
               style={segmentedItemStyle(isActive)}
             >
               {s.label}
-              {typeof s.count === "number" && (
-                <span
-                  className="ds-mono"
-                  style={{
-                    fontSize: 10,
-                    padding: "0 5px",
-                    borderRadius: 3,
-                    background: isActive
-                      ? "var(--ds-accent-soft)"
-                      : "var(--ds-bg-3)",
-                    color: isActive
-                      ? "var(--ds-accent-text)"
-                      : "var(--ds-fg-subtle)",
-                  }}
-                >
-                  {s.count}
-                </span>
-              )}
+              {typeof s.count === "number" && <SegmentCount isActive={isActive}>{s.count}</SegmentCount>}
             </button>
           );
         })}

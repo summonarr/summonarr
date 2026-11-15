@@ -12,6 +12,8 @@ export type UploadChunkHeaders = {
   fileSize: number;
 };
 
+const MAX_UPLOAD_ID_LENGTH = 128;
+
 // A whole number of at least `min`, written in plain digits. An absent or
 // empty header is missing — never 0, which `Number("")` made it, so a request
 // without X-Chunk-Index read as chunk 0 and restarted the upload.
@@ -24,6 +26,8 @@ function wholeNumber(raw: string | null, min: number): number | null {
 /** The chunk's headers, or null when any is absent or malformed (a 400, before any upload work). */
 export function parseUploadChunkHeaders(headers: Pick<Headers, "get">): UploadChunkHeaders | null {
   const uploadId = headers.get("x-upload-id") ?? "";
+  // It keys an in-memory session: bounded, so a header can't mint a huge key.
+  if (uploadId.length > MAX_UPLOAD_ID_LENGTH) return null;
   const chunkIndex = wholeNumber(headers.get("x-chunk-index"), 0);
   const chunkTotal = wholeNumber(headers.get("x-chunk-total"), 1);
   const fileSize = wholeNumber(headers.get("x-file-size"), 1);
@@ -31,4 +35,14 @@ export function parseUploadChunkHeaders(headers: Pick<Headers, "get">): UploadCh
   // An index past the total is left to the session (out of order / no
   // upload): it names a chunk of SOME upload, just not a next one.
   return { uploadId, chunkIndex, chunkTotal, fileSize };
+}
+
+// The first-run transfer opt-in: X-Restore-Keep-Sessions: true on a SETUP
+// restore keeps the dump's sessions (guardrail 6g). Exactly "true" counts —
+// absent, empty or any other value is the default (sessions wiped). The admin
+// restore routes never read it.
+export const KEEP_SESSIONS_HEADER = "x-restore-keep-sessions";
+
+export function parseKeepSessionsHeader(headers: Pick<Headers, "get">): boolean {
+  return headers.get(KEEP_SESSIONS_HEADER) === "true";
 }

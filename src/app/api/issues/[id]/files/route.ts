@@ -29,7 +29,7 @@ import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
-import { recordIssueGrab } from "@/lib/issue-grab";
+import { recordGrabForIssue } from "@/lib/issue-grab";
 import {
   chooseFiles,
   episodesFor,
@@ -645,22 +645,15 @@ async function runFollowUp(
   // import, one announcement — recordIssueGrab).
   if (marking.marked > 0 || searched) {
     const rawTvdb = loaded.raw?.tvdbId;
-    try {
-      await recordIssueGrab({
-        issueId: issue.id,
-        triggeredById: run.userId,
-        tmdbId: issue.tmdbId,
+    await recordGrabForIssue(
+      issue,
+      {
+        userId: run.userId,
         tvdbId: issue.tvdbId ?? (service === "sonarr" && typeof rawTvdb === "number" && Number.isSafeInteger(rawTvdb) && rawTvdb > 0 ? rawTvdb : null),
-        mediaType: issue.mediaType,
-        title: issue.title,
-        scope: issue.scope,
-        seasonNumber: issue.seasonNumber,
-        episodeNumber: issue.episodeNumber,
-        arrInstance: instance,
-      });
-    } catch (err) {
-      console.warn("[issues] Replace file succeeded but recording the grab failed (issue deleted meanwhile?):", err);
-    }
+        instance,
+      },
+      "[issues] Replace file succeeded but recording the grab failed (issue deleted meanwhile?):",
+    );
   }
   return { searched, nothingMissing, searchError };
 }

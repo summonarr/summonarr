@@ -2,12 +2,18 @@
 // (sync-tv-episodes-button.tsx). Pure and directive-free, so the unit suite
 // loads it (tests/sync-buttons.test.mts).
 //
+// The button runs the rebuild as a background job (POST { async: true }, then
+// GET ?job= — guardrail 37a): the walk outlasts a reverse proxy's hold, and a
+// held-open request showed the proxy's 504 as a failed sync while the server
+// finished. `tvEpisodeJobOutcome` reads the job's answer.
+//
 // The route rebuilds Plex and Jellyfin independently and answers 200 with both
 // counts and any per-source errors: one source failing leaves its cache as it
 // was while the other's is rewritten, so the counts are shown beside the errors.
 import type { FetchJsonResult } from "@/lib/client/fetch-json";
 import type { Translator } from "@/lib/i18n/translate";
-import { v, type Infer } from "@/lib/validate";
+import { isNoAnswer, jobAnswerError } from "@/lib/client/library-sync";
+import { check, v, type Infer } from "@/lib/validate";
 
 export const TV_EPISODE_SYNC_ANSWER = v.object({
   plex: v.optional(v.number()),
@@ -64,4 +70,30 @@ export function tvEpisodeSyncOutcome(
     text: total > 0 ? `${counts} · ${errors.join("; ")}` : errors.join("; "),
     refresh: total > 0,
   };
+}
+
+/**
+ * The result line for a background run's answer (status 0 = none came).
+ * No answer — the polls failed or ran out, or a gateway's own 502/503/504
+ * stood in for the app — is never a failure: the rebuild may still be running.
+ */
+export function tvEpisodeJobOutcome(
+  answer: { status: number; data: unknown },
+  t: Translator,
+  locale: string,
+): TvEpisodeSyncOutcome {
+  if (isNoAnswer(answer)) {
+    return { status: "done", text: t("adminManage.library.btn.episodesNoAnswer"), refresh: false };
+  }
+  const failed = (kind: "http" | "invalid"): FetchJsonResult<TvEpisodeSyncAnswer> =>
+    ({ ok: false, kind, status: answer.status, error: jobAnswerError(answer) ?? "", body: null, detail: "" });
+  let res: FetchJsonResult<TvEpisodeSyncAnswer>;
+  if (answer.status < 200 || answer.status >= 300) {
+    res = failed("http");
+  } else {
+    const read = check(TV_EPISODE_SYNC_ANSWER, answer.data);
+    res = read.ok ? { ok: true, status: answer.status, data: read.value } : failed("invalid");
+  }
+  // Never null: only an aborted read is dropped, and a job answer is not one.
+  return tvEpisodeSyncOutcome(res, t, locale) ?? { status: "error", text: t("adminManage.library.btn.syncFailed"), refresh: false };
 }

@@ -2,6 +2,7 @@
 // owner's servers, the friends list (/api/users), and which accounts may use
 // one of THIS deployment's servers — the membership allowlist (guardrail 35:
 // the caller unions it across servers and fails open on an indeterminate one).
+import { mapLimit } from "./concurrency";
 import { safeFetchTrusted } from "./safe-fetch";
 import { check, v } from "./validate";
 import { asRecord, looseString } from "./media-server-payload";
@@ -343,11 +344,10 @@ export async function countPlexServerMembers(adminToken: string, serverUrl: stri
  * doesn't answer — never a guess.
  */
 export async function getPlexServerFriendIds(adminToken: string, serverUrls: readonly string[]): Promise<Set<string> | null> {
+  // In parallel, bounded: each probe has its own timeout, and a row of dead servers would otherwise add them up.
+  const probed = await mapLimit(serverUrls, 4, (url) => getPlexMachineId(url, adminToken, PLEX_IDENTITY_TIMEOUT_MS));
   const machineIds = new Set<string>();
-  for (const url of serverUrls) {
-    const machineId = await getPlexMachineId(url, adminToken, PLEX_IDENTITY_TIMEOUT_MS);
-    if (machineId) machineIds.add(machineId);
-  }
+  for (const machineId of probed) if (machineId) machineIds.add(machineId);
   if (machineIds.size === 0) return null;
   try {
     const answer = await fetchPlexTvUsers(adminToken);

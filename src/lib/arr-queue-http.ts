@@ -70,7 +70,7 @@ export function parseImportSelections(service: "radarr" | "sonarr", body: Record
   const out = new Map<string, ImportOverride>();
   for (const item of list) {
     const parsed = parseImportSelection(service, typeof item === "string" ? { path: item } : item);
-    if (!parsed) return null;
+    if (!parsed || out.has(parsed.path)) return null;
     out.set(parsed.path, parsed.override);
   }
   return out;

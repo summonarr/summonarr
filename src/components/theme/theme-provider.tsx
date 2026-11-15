@@ -81,6 +81,14 @@ function readAccent(): Accent {
   return isAccent(a) ? a : DEFAULT_ACCENT;
 }
 
+// One snapshot for both values, so the provider holds a single subscription (a
+// second would double the observers and apply each storage event twice).
+const APPEARANCE_SEPARATOR = "|";
+function readAppearance(): string {
+  return `${readTheme()}${APPEARANCE_SEPARATOR}${readAccent()}`;
+}
+const SERVER_APPEARANCE = `${DEFAULT_THEME}${APPEARANCE_SEPARATOR}${DEFAULT_ACCENT}`;
+
 function subscribeAppearance(onChange: () => void): () => void {
   const observer = new MutationObserver(onChange);
   observer.observe(document.documentElement, {
@@ -99,8 +107,10 @@ function subscribeAppearance(onChange: () => void): () => void {
 }
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const theme = useSyncExternalStore(subscribeAppearance, readTheme, () => DEFAULT_THEME);
-  const accent = useSyncExternalStore(subscribeAppearance, readAccent, () => DEFAULT_ACCENT);
+  const appearance = useSyncExternalStore(subscribeAppearance, readAppearance, () => SERVER_APPEARANCE);
+  const [themeText, accentText] = appearance.split(APPEARANCE_SEPARATOR);
+  const theme = isTheme(themeText) ? themeText : DEFAULT_THEME;
+  const accent = isAccent(accentText) ? accentText : DEFAULT_ACCENT;
 
   // The browser-chrome colour follows whatever theme is current, the one the
   // pre-paint script applied included.

@@ -72,6 +72,8 @@ export function checkWebPushEndpoint(endpoint: string): WebPushEndpointVerdict {
     return "invalid-url";
   }
   if (url.protocol !== "https:") return "not-https";
+  // The known services listen on the default port only.
+  if (url.port !== "") return "unrecognized";
   const host = url.hostname.toLowerCase();
   const known = PUSH_HOSTS.includes(host) || PUSH_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix));
   return known ? "ok" : "unrecognized";

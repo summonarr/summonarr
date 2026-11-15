@@ -682,7 +682,7 @@ test("remove: stamps a concurrent removal wrote first are not this call's — no
   const details = audits[0].details;
   assert.equal(((typeof details === "string" ? JSON.parse(details) : details) as { requestsStamped: number }).requestsStamped, 0, "nor audited as ours");
   // The removal went through, so it re-asserts the stamp with its OWN time: the
-  // other removal's unstamp (keyed on ITS time) can then never clear it (C014).
+  // other removal's unstamp (keyed on ITS time) can then never clear it.
   assert.ok(requests[0].cleanedUpAt instanceof Date, "still stamped — the removal that went through re-asserts it as its own");
   assert.notEqual(requests[0].cleanedUpAt.getTime(), theirs.getTime(), "re-asserted with this call's time, not the other removal's");
 

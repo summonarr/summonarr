@@ -1,12 +1,10 @@
 "use client";
 
 import { useId, useState } from "react";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Loader2 } from "@/components/icons";
-import { SaveStatusMessage } from "./save-status";
+import { SaveButtonRow } from "./save-status";
 import { useSettingsSave } from "./shared";
 import { Switch } from "@/components/ui/switch";
 import { useT } from "@/components/i18n/i18n-provider";
@@ -71,12 +69,7 @@ export function MotdForm({ initialEnabled, initialTitle, initialBody }: MotdForm
           className="resize-none"
         />
       </div>
-      <div className="flex items-center gap-3">
-        <Button type="submit" disabled={motdStatus === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
-          {motdStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
-        </Button>
-        <SaveStatusMessage status={motdStatus} errorLabel={errorMessage || t("settings.form.common.saveFailed")} />
-      </div>
+      <SaveButtonRow status={motdStatus} message={errorMessage} />
     </form>
   );
 }

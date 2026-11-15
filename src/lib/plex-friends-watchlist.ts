@@ -182,7 +182,7 @@ export function parseWatchlistPage(
   const watchlist = user && typeof user === "object" ? (user as { watchlist?: unknown }).watchlist : undefined;
   if (!watchlist || typeof watchlist !== "object") {
     const errs = graphqlErrorMessages(body);
-    if (errs.some((m) => /internal|timeout|timed out|unavailable|rate limit|too many/i.test(m))) {
+    if (errs.some((m) => /internal|timeout|timed out|unavailable|rate limit|too many|service error|bad gateway|gateway|server error|temporar/i.test(m))) {
       throw new Error(`plex.tv watchlist query failed: ${errs.join("; ")}`);
     }
     return { status: "private" };

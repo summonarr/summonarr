@@ -31,6 +31,7 @@ import "server-only";
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 import { verifySecondFactor, type SecondFactorInput } from "./mfa-store";
 import { notifyMfaSecurityEvent } from "./notify";
 import type { WebAuthnConfig } from "./webauthn";
@@ -65,11 +66,19 @@ interface FailureOutcome {
 // transition is a compare-and-swap on "still at or over the threshold", so two
 // concurrent failures can't both impose (or double-escalate) it.
 async function recordMfaCodeFailure(userId: string, nowMs = Date.now()): Promise<FailureOutcome> {
-  const row = await prisma.user.update({
-    where: { id: userId },
-    data: { mfaFailedAttempts: { increment: 1 } },
-    select: { mfaFailedAttempts: true, mfaLockoutCount: true },
-  });
+  let row: { mfaFailedAttempts: number; mfaLockoutCount: number };
+  try {
+    row = await prisma.user.update({
+      where: { id: userId },
+      data: { mfaFailedAttempts: { increment: 1 } },
+      select: { mfaFailedAttempts: true, mfaLockoutCount: true },
+    });
+  } catch (err) {
+    // The account was deleted mid-verification: the guess still fails, there is
+    // nothing left to count against.
+    if (isPrismaErrorCode(err, "P2025")) return { lockedUntil: null, imposed: false };
+    throw err;
+  }
   if (row.mfaFailedAttempts < MFA_LOCKOUT_THRESHOLD) return { lockedUntil: null, imposed: false };
   const until = new Date(nowMs + lockoutDurationMs(row.mfaLockoutCount));
   const res = await prisma.user.updateMany({
@@ -104,11 +113,23 @@ export interface GuardContext {
   webauthnChallenge?: string;
   webauthnConfig: WebAuthnConfig | null;
   // Where the guess happened, for the lockout audit row: a sign-in, an
-  // enrollment change, or a step-up guarding a password change or the account's
-  // own deactivation.
-  context: "sign-in" | "enrollment" | "password-change" | "account-delete";
+  // enrollment change, or a step-up guarding a password change, the account's
+  // own deactivation, or linking a Discord or Trakt account.
+  context:
+    | "sign-in"
+    | "enrollment"
+    | "password-change"
+    | "account-delete"
+    | "discord-link"
+    | "discord-merge"
+    | "trakt-connect";
   ipAddress?: string | null;
   userAgent?: string | null;
+  // Called the moment a CODE was checked and found wrong, before the failure is
+  // counted — so a caller holding a reserved rate-limit hit can tell a judged
+  // wrong code (the hit stays) from an exit that never judged one, even when
+  // the count write then throws.
+  onWrongCode?: () => void;
 }
 
 // The guessable methods. A passkey assertion is a signature over a fresh
@@ -174,6 +195,7 @@ export async function verifySecondFactorGuarded(
   }
   if (!isCode) return { ok: false, reason: verdict.reason, locked: false };
 
+  ctx.onWrongCode?.();
   const outcome = await recordMfaCodeFailure(userId);
   if (outcome.imposed && outcome.lockedUntil) void reportLockout(userId, ctx, outcome.lockedUntil);
   return { ok: false, reason: verdict.reason, locked: outcome.lockedUntil !== null };

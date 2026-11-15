@@ -58,6 +58,7 @@
   "apiAdmin.cleanup.unknownSetting": "未知设置：{field}",
   "apiAdmin.common.downloadsEnabledBoolean": "downloadsEnabled 必须是布尔值",
   "apiAdmin.common.forbidden": "禁止访问",
+  "apiAdmin.common.crossSiteRefused": "禁止访问 — 跨站请求",
   "apiAdmin.common.instanceNameTooLong": "“{slug}”的名称不能超过 {max} 个字符",
   "apiAdmin.common.instancesArray": "instances 必须是数组",
   "apiAdmin.common.instancesChanged": "自此页面加载以来，{service} 实例已在别处被更改，因此未保存任何内容。请刷新以加载当前列表，然后重新进行修改。",
@@ -128,6 +129,8 @@
   "apiAdmin.mediaInstances.plexUnreachable": "无法访问 Plex 服务器",
   "apiAdmin.mediaInstances.servicePlexOrJellyfin": "service 必须是 plex 或 jellyfin",
   "apiAdmin.mediaInstances.slugReserved": "无法将“{slug}”用作新服务器的标识：其设置会覆盖主服务器的设置。请换一个标识。",
+  "apiAdmin.mediaInstances.secretNeededForNewUrl": "“{slug}”已保存的密钥不能用于新的服务器地址。请重新输入令牌或密钥。",
+  "apiAdmin.mediaInstances.fieldTooLong": "“{slug}”的 {field} 不能超过 {max} 个字符",
   "apiAdmin.plexServers.connectFirst": "请先连接你的 Plex 账户",
   "apiAdmin.plexServers.loadFailed": "无法从 plex.tv 加载服务器",
   "apiAdmin.plexServers.machineIdRequired": "必须提供 machineId",
@@ -260,6 +263,7 @@
   "apiAdmin.users.promoteBeforeGrantingAdmin": "请先将此用户的角色提升为管理员，再授予 ADMIN 权限。",
   "apiAdmin.users.provideSessionId": "请提供 sessionId 或 all: true",
   "apiAdmin.users.purgedCannotReenable": "此账户的数据已被清除，无法再重新启用。",
+  "apiAdmin.users.purgedCannotChange": "已清除的账户无法修改。",
   "apiAdmin.users.quotaInvalid": "{field} 必须是非负整数或 null",
   "apiAdmin.users.quotaZero": "{field} 为 0 表示“无限制”，而不是“禁止”。留空则使用全局配额，设为 1 或以上表示限制，或移除该用户的请求权限以阻止其请求。",
   "apiAdmin.users.roleInvalid": "role 必须是 ADMIN、ISSUE_ADMIN 或 USER",
@@ -295,6 +299,7 @@
   "apiAdmin.agents.error.invalidStored": "此通道保存的设置已失效，请编辑后重新保存。",
   "apiAdmin.backfillPlaytime.confirmationRequired": "需要确认",
   "apiAdmin.users.cannotGrantBeyondOwn": "不能授予超出你自身的权限、实例访问权限、服务器可见性或内容分级上限",
+  "apiAdmin.users.cannotManageBeyondOwn": "你不能管理拥有你所没有的管理权限的账户",
   "apiAdmin.fixMatch.plexUnmatched": "Plex 无法确认与 TMDB #{tmdbId} 的匹配，该项目现已在 Plex 中处于未匹配状态——请直接在 Plex 中重新匹配，或选择其他候选项。",
   "apiAdmin.common.bodyTooLarge": "请求体过大（最大 {max}）",
   "apiAdmin.warm.activityRunning": "活动缓存预热已在运行",
@@ -411,5 +416,6 @@
   "apiAdmin.watchSync.jobGone": "已不再跟踪该同步运行。Summonarr 可能已重启。请重新加载查看最新结果。",
   "apiAdmin.watchSync.pairInvalid": "请选择一个 Plex 账户和一个仍在其服务器上的 Jellyfin 用户",
   "apiAdmin.watchSync.pairExists": "该配对已存在",
-  "apiAdmin.watchSync.pairNotFound": "未找到配对"
+  "apiAdmin.watchSync.pairNotFound": "未找到配对",
+  "apiAdmin.watchSync.pairPaused": "该配对已暂停。请先恢复它，再运行完整同步。"
 }

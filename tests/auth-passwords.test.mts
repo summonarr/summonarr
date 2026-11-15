@@ -427,6 +427,48 @@ test("the rehash is a CAS on the verified hash: a password change landing in bet
   assert.equal(row(u).passwordHash, changedMeanwhile);
 });
 
+test("2FA + legacy hash: a CONCURRENT sign-in's rehash of the same password wins the swap — this challenge follows the stored hash and its code still works", async () => {
+  const u = await seedUser({ passwordHash: await legacyHash(PASSWORD) });
+  const key = seedTotp(u.id);
+  // The other sign-in's rehash: the same password, another salt.
+  const rehashedByTheOther = await hashPassword(PASSWORD);
+  beforeUserUpdateMany = (where, data) => {
+    if (typeof data.passwordHash === "string" && where.id === u.id) {
+      row(u).passwordHash = rehashedByTheOther;
+      beforeUserUpdateMany = null;
+    }
+  };
+  const step1 = await signIn(u);
+  assert.equal(step1.status, 401);
+  const challenge = await step1.json();
+  assert.equal(row(u).passwordHash, rehashedByTheOther, "the lost swap wrote nothing");
+  assert.equal(row(u).passwordChangedAt, null);
+
+  const step2 = await call(mfaRoute.POST as never, "/api/auth/sign-in/mfa", {
+    body: { mfaToken: challenge.mfaToken, method: "totp", code: currentCode(key) },
+  });
+  assert.equal(step2.status, 200, await step2.clone().text());
+});
+
+test("2FA + legacy hash: a password CHANGE that wins the swap still kills the old password's challenge", async () => {
+  const u = await seedUser({ passwordHash: await legacyHash(PASSWORD) });
+  const key = seedTotp(u.id);
+  const changedMeanwhile = await hashPassword("set-by-a-concurrent-change");
+  beforeUserUpdateMany = (where, data) => {
+    if (typeof data.passwordHash === "string" && where.id === u.id) {
+      row(u).passwordHash = changedMeanwhile;
+      beforeUserUpdateMany = null;
+    }
+  };
+  const challenge = await (await signIn(u)).json();
+  assert.equal(row(u).passwordHash, changedMeanwhile);
+  const step2 = await call(mfaRoute.POST as never, "/api/auth/sign-in/mfa", {
+    body: { mfaToken: challenge.mfaToken, method: "totp", code: currentCode(key) },
+  });
+  assert.equal(step2.status, 401);
+  assert.equal((await step2.json()).mfaExpired, true);
+});
+
 test("a failed rehash write is logged and the sign-in still succeeds on the old hash", async () => {
   const legacy = await legacyHash(PASSWORD);
   const u = await seedUser({ passwordHash: legacy });

@@ -1,5 +1,6 @@
 import { escapeIlike, SEARCH_TERM_MAX_LEN } from "@/lib/sanitize";
 import { zonedMidnightSql } from "@/lib/stats-time-zone";
+import { isTmdbIdInRange, parseTmdbIdParam } from "@/lib/tmdb-id";
 
 // Shared query-string → SQL translation for the admin play-history surfaces:
 // the list route's grouped and ungrouped paths (src/app/api/play-history/
@@ -79,13 +80,15 @@ function parseDayParam(raw: string | null): string | null {
 export function normalizePlayHistoryFilters(params: URLSearchParams, timeZone: string): PlayHistoryFilterValues {
   const source = params.get("source");
   const tmdbIdRaw = params.get("tmdbId");
-  const tmdbId = tmdbIdRaw ? parseInt(tmdbIdRaw, 10) : NaN;
+  // Canonical digits within int4 only: "12abc" is not 12, and a huge value would fail the query instead of filtering.
+  const parsedTmdbId = tmdbIdRaw ? parseTmdbIdParam(tmdbIdRaw) : null;
+  const tmdbId = parsedTmdbId !== null && isTmdbIdInRange(parsedTmdbId) ? parsedTmdbId : null;
   const mediaType = params.get("mediaType");
   const watched = params.get("watched");
   const playMethod = params.get("playMethod");
   return {
     source: source === "plex" || source === "jellyfin" ? source : null,
-    tmdbId: isNaN(tmdbId) ? null : tmdbId,
+    tmdbId,
     mediaType: mediaType === "MOVIE" || mediaType === "TV" ? mediaType : null,
     watched: watched === "true" || watched === "false" ? watched : null,
     userId: params.get("userId") || null,

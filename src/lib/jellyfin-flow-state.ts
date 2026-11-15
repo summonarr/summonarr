@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { type JWTPayload } from "jose";
-import { type MediaInstanceKey } from "@/lib/media-instances";
+import { isValidMediaInstanceSlug, type MediaInstanceKey } from "@/lib/media-instances";
 import { signPurposeJwt, verifyPurposeJwt } from "@/lib/signing-keys";
 
 // Server-side state binding for the Jellyfin QuickConnect sign-in flow.
@@ -52,6 +52,9 @@ export async function verifyQcFlowCookie(token: string): Promise<QcFlowState | n
   if (!payload || typeof payload.secretHash !== "string" || typeof payload.instance !== "string") {
     return null;
   }
+  // The token is signed by us, but the type should still hold: the default
+  // server's key ("") or a well-formed slug, nothing else.
+  if (!isValidMediaInstanceSlug(payload.instance)) return null;
   return { secretHash: payload.secretHash, instance: payload.instance };
 }
 

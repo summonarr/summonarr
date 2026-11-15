@@ -5,11 +5,24 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { NumberField } from "./forms/number-field";
-import { Loader2 } from "@/components/icons";
+import { AlertTriangle, Loader2 } from "@/components/icons";
 import { Switch } from "@/components/ui/switch";
 import { useT } from "@/components/i18n/i18n-provider";
 import { SaveStatusMessage } from "./forms/save-status";
 import { saveFailureText, useSettingsSave } from "./forms/shared";
+import { ignoredKeys } from "./forms/email-form-body";
+
+// The field labels for the keys the route can answer `ignored` with: a blank
+// number is not a value and none of these can be cleared, so the route keeps
+// the stored one.
+const FIELD_LABEL_KEYS: Record<string, string> = {
+  playHistoryWatchedThreshold: "settings.playHistory.watchedThreshold",
+  playHistoryCompletionThreshold: "settings.playHistory.completionThreshold",
+  playHistoryArcGapDays: "settings.playHistory.arcGap",
+  playHistoryPollingInterval: "settings.playHistory.pollingInterval",
+  playHistoryRetentionDays: "settings.playHistory.retention",
+  concurrentStreamLimit: "settings.playHistory.concurrentLimit",
+};
 
 // Admin settings form for play-history tracking: toggles, thresholds,
 // retention and the statistics time zone, PATCHed to /api/settings on submit.
@@ -59,10 +72,14 @@ export function PlayHistorySettingsForm({
   // next edit or save.
   const { status, message, save, edited } = useSettingsSave();
   const failureText = saveFailureText(t);
+  // Keys the last save sent that the route left as they were.
+  const [ignored, setIgnored] = useState<string[]>([]);
+  const clearIgnored = () => setIgnored([]);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    await save({
+    setIgnored([]);
+    const result = await save({
       playHistoryEnabled: enabled ? "true" : "false",
       playHistoryPlexEnabled: plexEnabled ? "true" : "false",
       playHistoryJellyfinEnabled: jellyfinEnabled ? "true" : "false",
@@ -76,7 +93,9 @@ export function PlayHistorySettingsForm({
       // and validates the name and answers a bad one with a 400.
       statsTimeZone: statsTimeZone.trim(),
     }, failureText);
+    if (result.ok) setIgnored(ignoredKeys(result.data));
   }
+  const ignoredText = ignored.map((k) => (FIELD_LABEL_KEYS[k] ? t(FIELD_LABEL_KEYS[k]) : k)).join(", ");
 
   return (
     <form onSubmit={handleSave} className="space-y-5">
@@ -106,7 +125,7 @@ export function PlayHistorySettingsForm({
             min={0}
             max={100}
             value={watchedThreshold}
-            onChange={(v) => { setWatchedThreshold(v); edited(); }}
+            onChange={(v) => { setWatchedThreshold(v); clearIgnored(); edited(); }}
             help={t("settings.playHistory.watchedThresholdHelp")}
           />
 
@@ -116,7 +135,7 @@ export function PlayHistorySettingsForm({
             min={0}
             max={100}
             value={completionThreshold}
-            onChange={(v) => { setCompletionThreshold(v); edited(); }}
+            onChange={(v) => { setCompletionThreshold(v); clearIgnored(); edited(); }}
             help={t("settings.playHistory.completionThresholdHelp")}
           />
 
@@ -126,7 +145,7 @@ export function PlayHistorySettingsForm({
             min={1}
             max={365}
             value={arcGapDays}
-            onChange={(v) => { setArcGapDays(v); edited(); }}
+            onChange={(v) => { setArcGapDays(v); clearIgnored(); edited(); }}
             help={t("settings.playHistory.arcGapHelp")}
           />
 
@@ -139,7 +158,7 @@ export function PlayHistorySettingsForm({
             min={5}
             max={600}
             value={pollingInterval}
-            onChange={(v) => { setPollingInterval(v); edited(); }}
+            onChange={(v) => { setPollingInterval(v); clearIgnored(); edited(); }}
             help={t("settings.playHistory.pollingIntervalHelp")}
           />
 
@@ -148,7 +167,7 @@ export function PlayHistorySettingsForm({
             label={t("settings.playHistory.retention")}
             min={0}
             value={retentionDays}
-            onChange={(v) => { setRetentionDays(v); edited(); }}
+            onChange={(v) => { setRetentionDays(v); clearIgnored(); edited(); }}
             help={t("settings.playHistory.retentionHelp")}
           />
 
@@ -158,7 +177,7 @@ export function PlayHistorySettingsForm({
             min={0}
             max={50}
             value={concurrentLimit}
-            onChange={(v) => { setConcurrentLimit(v); edited(); }}
+            onChange={(v) => { setConcurrentLimit(v); clearIgnored(); edited(); }}
             help={t("settings.playHistory.concurrentLimitHelp")}
           />
 
@@ -198,6 +217,12 @@ export function PlayHistorySettingsForm({
             in an assertive one. */}
         <SaveStatusMessage status={status} errorLabel={message || undefined} />
       </div>
+      {ignored.length > 0 && (
+        <p role="status" className="flex items-start gap-1.5 text-sm text-amber-400">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          {t("settings.form.email.ignored", { fields: ignoredText })}
+        </p>
+      )}
     </form>
   );
 }

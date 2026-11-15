@@ -5,19 +5,19 @@
 // / per-stamp request groups, and per-source episode counts. No DB, no network.
 //
 // What these pin:
-//   C125  the narrowed read's title filter carries EVERY holder's own title.
-//   C126  past NARROW_TITLE_FILTER_MAX titles the unattributed read is the full
+// the narrowed read's title filter carries EVERY holder's own title.
+// past NARROW_TITLE_FILTER_MAX titles the unattributed read is the full
 //         read's own (no OR of ILIKEs), and still reaches parity.
-//   C129  an unattributed play / live session keeps its STORED media type.
+// an unattributed play / live session keeps its STORED media type.
 //   #1/#4 a key on two titles credits both (plays, upstream, sessions), in
 //         either library row order; a session credits its tmdb title AND its
 //         key's title, once each.
 //   #2    the narrowed read places a tmdb-less play keyed to an UNCHOSEN title
 //         there, never as soft evidence for a same-named chosen one.
 //   #3    a stamped or re-added-since request's availableAt is not an arrival.
-//   C134  a show the two servers number differently gets other seasons' plays
+// a show the two servers number differently gets other seasons' plays
 //         as soft evidence; a partial copy does not.
-//   C123  the report never calls a title eligible while its service is unreadable.
+// the report never calls a title eligible while its service is unreadable.
 //   And the original never-watched-data fixtures still reach full/narrowed parity.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -227,7 +227,7 @@ test("the original fixtures reach full/narrowed parity over the extended harness
   await assertParity([...(await full()).keys()]);
 });
 
-test("C125: the narrowed title filter carries every holder's own title — 'The Office (US)' on Plex, 'The Office' on Jellyfin", async () => {
+test("the narrowed title filter carries every holder's own title — 'The Office (US)' on Plex, 'The Office' on Jellyfin", async () => {
   plexLib.push(plex(650, "TV", "The Office (US)", { key: "rk650" }));
   jfLib.push(jf(650, "TV", "The Office", "jf-650"));
   plays.push(play({ source: "jellyfin", mediaType: "TV", sourceItemId: "jf-ep", sourceShowId: "jf-gone", seasonNumber: 1, title: "The Office" }));
@@ -238,7 +238,7 @@ test("C125: the narrowed title filter carries every holder's own title — 'The 
   await assertParity([650]);
 });
 
-test("C126: past NARROW_TITLE_FILTER_MAX titles the unattributed read is unfiltered — and still reaches parity; one title keeps its filter", async () => {
+test("past NARROW_TITLE_FILTER_MAX titles the unattributed read is unfiltered — and still reaches parity; one title keeps its filter", async () => {
   const many: Array<[number, "MOVIE" | "TV"]> = [];
   for (let i = 0; i <= NARROW_TITLE_FILTER_MAX; i++) {
     plexLib.push(plex(10_000 + i, "MOVIE", `Bulk ${i}`, { key: `rk-bulk-${i}` }));
@@ -259,7 +259,7 @@ test("C126: past NARROW_TITLE_FILTER_MAX titles the unattributed read is unfilte
   assert.ok(unattributedWhere() && "OR" in unattributedWhere()!, "a one-title read keeps its title filter");
 });
 
-test("C129: an unattributed episode with no season keeps its stored TV type — soft on the show, never on a same-named film", async () => {
+test("an unattributed episode with no season keeps its stored TV type — soft on the show, never on a same-named film", async () => {
   plexLib.push(plex(620, "TV", "Lima", { key: "rk620" }), plex(621, "MOVIE", "Lima", { key: "rk621" }));
   plays.push(play({ mediaType: "TV", title: "Lima", sourceItemId: "ep-lima", sourceShowId: "rk-lima-old", seasonNumber: null }));
   const t = await full();
@@ -270,7 +270,7 @@ test("C129: an unattributed episode with no season keeps its stored TV type — 
   await assertParity([620, 621]);
 });
 
-test("C129: a tmdb-less live session with no season keeps its stored TV type too", async () => {
+test("a tmdb-less live session with no season keeps its stored TV type too", async () => {
   plexLib.push(plex(620, "TV", "Lima", { key: "rk620" }), plex(621, "MOVIE", "Lima", { key: "rk621" }));
   sessions.push(session({ mediaType: "TV", title: "Lima", sourceItemId: "ep-lima", sourceShowId: "rk-lima-old", seasonNumber: null }));
   const t = await full();
@@ -382,7 +382,7 @@ test("#3: a fulfilment older than the instance's own re-add is the deleted copy'
   await assertParity([690], readded);
   // Control: an arr entry from BEFORE the fulfilment — a continuous presence,
   // so the delivery still lengthens the claim past a reset media-server date.
-  // The arr's own earlier add is never an arrival (audit C119): the delivery is.
+  // The arr's own earlier add is never an arrival: the delivery is.
   const continuous = arrIndex([{ tmdbId: 690, instance: "", added: d("2022-12-01") }]);
   assert.equal((await full(continuous)).get(690)!.shelfStart?.toISOString(), d("2023-01-01").toISOString());
   // Another instance's re-add says nothing about this request's copy.
@@ -401,7 +401,7 @@ test("#3: a request stamped by a deliberate delete (cleanedUpAt) is never an arr
   await assertParity([691]);
 });
 
-test("C134: a show the two servers number differently gets other seasons' plays as SOFT evidence; a partial copy does not", async () => {
+test("a show the two servers number differently gets other seasons' plays as SOFT evidence; a partial copy does not", async () => {
   // Oscar: Plex S1 = 4 episodes, Jellyfin S1 = 2 + S2 = 2 (TVDB vs TMDB order).
   plexLib.push(plex(670, "TV", "Oscar", { key: "rk670" }));
   jfLib.push(jf(670, "TV", "Oscar", "jf-670"));
@@ -448,7 +448,7 @@ test("R2-nw#3: a season one server holds PARTIALLY is not a renumbering; counts 
   await assertParity([710, 720]);
 });
 
-test("C123: the report never calls a title eligible while an instance of its service could not be listed", () => {
+test("the report never calls a title eligible while an instance of its service could not be listed", () => {
   const down = [{ service: "radarr" as const, instance: "4k", error: "HTTP 503" }];
   assert.equal(arrServiceReadable(down, "MOVIE"), false);
   assert.equal(arrServiceReadable(down, "TV"), true);

@@ -1,4 +1,4 @@
-// The cleanup selection cap (C062). The delete route takes at most
+// The cleanup selection cap. The delete route takes at most
 // CLEANUP_MAX_ITEMS titles, and Library cleanup's select-all used to tick every
 // visible candidate — over 500 the dry run could only answer 400. One constant
 // (src/lib/library-cleanup.ts) now bounds the route's parser and the page's
@@ -33,6 +33,8 @@ test("the parser keeps the old item rules: positive integer ids, MOVIE|TV, dupli
   ]);
   assert.equal(parseCleanupItems([{ tmdbId: 0, mediaType: "TV" }]), null);
   assert.equal(parseCleanupItems([{ tmdbId: 1.5, mediaType: "TV" }]), null);
+  assert.equal(parseCleanupItems([{ tmdbId: 2_147_483_648, mediaType: "TV" }]), null, "past INT4");
+  assert.equal(parseCleanupItems([{ tmdbId: 2_147_483_647, mediaType: "TV" }])?.length, 1);
   assert.equal(parseCleanupItems([{ tmdbId: 1, mediaType: "tv" }]), null);
   assert.equal(parseCleanupItems([null]), null);
   assert.deepEqual(parseCleanupItems([{ tmdbId: 7, mediaType: "MOVIE", extra: true }]), [{ tmdbId: 7, mediaType: "MOVIE" }], "only the keys go through");

@@ -79,6 +79,9 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
   const [draftOpenSeq, setDraftOpenSeq] = useState(0);
   const formRef = useRef<HTMLFormElement>(null);
   const [saving, setSaving] = useState(false);
+  // The channel a Delete is in flight for: its open form can't save meanwhile
+  // (the PATCH would 404 on a channel that is going away).
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [formError, setFormError] = useState("");
   // List-level actions (delete) have no form to report into.
   const [actionError, setActionError] = useState("");
@@ -131,7 +134,7 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
-    if (!draft || saving) return;
+    if (!draft || saving || (draft.id !== null && draft.id === deletingId)) return;
     setSaving(true);
     setFormError("");
     setSaved(false);
@@ -210,12 +213,16 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
   // button just opens that panel.
   async function remove(a: AgentView) {
     setConfirmDelete(null);
+    // Not while this channel's own form is saving: the delete would race the PATCH.
+    if (saving && draft?.id === a.id) return;
+    setDeletingId(a.id);
     setActionError("");
     setSaved(false);
     const res = await fetchJson(withBasePath(`/api/admin/notification-agents/${a.id}`), {
       init: { method: "DELETE" },
       fallbackError: t("settings.form.common.requestFailed"),
     });
+    setDeletingId(null);
     if (res.ok || res.kind === "invalid") {
       if (draft?.id === a.id) closeDraft();
       setPendingDraft((d) => (d && d.id === a.id ? null : d));
@@ -316,7 +323,7 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
           {formError && <p role="alert" className="text-sm text-red-400">{formError}</p>}
 
           <div className="flex items-center gap-2">
-            <Button type="submit" disabled={saving}>
+            <Button type="submit" disabled={saving || (draft.id !== null && draft.id === deletingId)}>
               {saving ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
             </Button>
             <Button type="button" variant="outline" className="border-zinc-700" onClick={closeDraft}>

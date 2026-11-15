@@ -3,7 +3,8 @@
 // click, through arrFetch (guardrail 5); nothing cached, nothing written.
 import { arrFetch, getArrCfg, lookupSeriesByTmdbId, type ArrCfg } from "./arr";
 import { posInt } from "./arr-parse";
-import { arrSettingKey } from "./arr-instances";
+import { arrSettingKey, isValidInstanceSlug } from "./arr-instances";
+import { sanitizeForLog } from "./sanitize";
 import { getSyncableArrInstances } from "./arr-instance-registry";
 import { arrAddUrl, arrBrowserBase, arrTitleUrl, titleSlugOf, type ArrLinkService } from "./arr-links";
 import { prisma } from "./prisma";
@@ -40,7 +41,7 @@ async function heldSlugByTmdbId(cfg: ArrCfg, service: ArrLinkService, tmdbId: nu
   // already has with a positive `id`, which is the cheap way to tell. The
   // client's one lookup and wrong-series guard, Sonarr-sourced only: a TMDB
   // cross-reference could name a series by TVDB id, never one in the library.
-  const row = await lookupSeriesByTmdbId<{ tmdbId?: unknown; id?: unknown; titleSlug?: unknown }>(cfg, tmdbId, { tvdbCrossRef: false });
+  const row = await lookupSeriesByTmdbId(cfg, tmdbId, { tvdbCrossRef: false });
   return posInt(row?.id) !== null ? titleSlugOf(row?.titleSlug) : null;
 }
 
@@ -62,7 +63,7 @@ export async function resolveArrOpenUrl(service: ArrLinkService, instance: strin
     const slug = await heldSlugByTmdbId(cfg, service, target.tmdbId);
     return slug ? arrTitleUrl(base, service, slug) : arrAddUrl(base, target.tmdbId);
   } catch (err) {
-    console.warn(`[arr-links] ${service} instance "${instance}" lookup failed:`, err instanceof Error ? err.message : err);
+    console.warn("[arr-links] %s instance %s lookup failed:", service, sanitizeForLog(instance), sanitizeForLog(err instanceof Error ? err.message : err));
     return base;
   }
 }
@@ -99,7 +100,7 @@ export function parseManageLink(
 ): { instance: string; tab: "settings" | "seasons" | "files" | "history" | undefined } | null {
   if (typeof manage !== "string") return null;
   const m = /^(radarr|sonarr):([a-z0-9_-]{0,40})$/.exec(manage);
-  if (!m || m[1] !== service) return null;
+  if (!m || m[1] !== service || !isValidInstanceSlug(m[2])) return null;
   const tabs = ["settings", "seasons", "files", "history"] as const;
   return { instance: m[2], tab: typeof tab === "string" && (tabs as readonly string[]).includes(tab) ? (tab as (typeof tabs)[number]) : undefined };
 }

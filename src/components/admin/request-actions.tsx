@@ -12,7 +12,7 @@
 // What a status gets and what an answer leaves on screen are
 // request-action-rules.ts.
 
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
@@ -23,8 +23,8 @@ import { withBasePath } from "@/lib/base-path";
 import { ADMIN_NOTE_MAX } from "@/lib/request-limits";
 import { useT } from "@/components/i18n/i18n-provider";
 import { useAsyncAction } from "@/hooks/use-async-action";
-import { fetchJson, ARR_WRITE_TIMEOUT_MS, jsonInit, type FetchJsonFailure } from "@/lib/client/fetch-json";
-import type { Translator } from "@/lib/i18n/translate";
+import { fetchJson, ARR_WRITE_TIMEOUT_MS, jsonInit } from "@/lib/client/fetch-json";
+import { fetchFailureText } from "@/lib/client/fetch-failure-text";
 import { REQUEST_STATUS_LABEL_KEY } from "@/lib/status-labels";
 import { BatchAnswer } from "./request-batch";
 import {
@@ -33,6 +33,7 @@ import {
   QualityProfilesAnswer,
   arrErrorOf,
   decisionOutcome,
+  groupDecisionIds,
   parseRequestStatus,
   type RequestMediaType,
 } from "./request-action-rules";
@@ -50,17 +51,17 @@ interface RequestActionsProps {
   existingAdminNote?: string | null;
   /** When set, approve/decline apply to all of these PENDING request IDs via the batch endpoint. */
   groupPendingIds?: string[];
+  /**
+   * Told when the Pick release dialog opens and closes, so the list can hold
+   * its live refresh meanwhile: a new request pushing this row to the next
+   * page would unmount it, and a search that runs for minutes with it.
+   */
+  onDialogActive?: (open: boolean) => void;
 }
 
 type MutationKind = "APPROVED" | "DECLINED" | "RETRY" | "SEARCH" | "NOTE" | "DELETE";
 type QualityProfile = { id: number; name: string };
 type QualityOverride = { qualityProfileId: number; qualityProfileName: string };
-
-// No answer came (the network, or the browser gave up): the plain network line.
-// A refusal is the route's own reason (`message`, then `error`).
-function failureText(res: FetchJsonFailure, t: Translator): string {
-  return res.kind === "http" || res.kind === "invalid" ? res.error : t("shared.thread.networkError");
-}
 
 // The request's server calls and the state they share: the optimistic status
 // and the last Radarr/Sonarr answer. A handler that closes a form answers
@@ -86,7 +87,9 @@ function useRequestMutations({ requestId, currentStatus, groupPendingIds }: Pick
   const status = optimisticStatus ?? currentStatus;
   const [arrError, setArrError] = useState<string | null>(null);
   const [retryOk, setRetryOk] = useState(false);
-  const groupIds = groupPendingIds && groupPendingIds.length > 1 ? groupPendingIds : null;
+  // The STORED status of the aimed request, not the optimistic one: a group
+  // mid-approve is still the group.
+  const groupIds = groupDecisionIds(currentStatus, groupPendingIds);
 
   // Every call starts from a clean line: no earlier failure stays beside a
   // later success.
@@ -134,7 +137,7 @@ function useRequestMutations({ requestId, currentStatus, groupPendingIds }: Pick
     if (!outcome) return false;
     if (!outcome.ok) {
       setOptimisticStatus(null);
-      setArrError(failureText(outcome.res, t));
+      setArrError(fetchFailureText(outcome.res, t));
       return false;
     }
     if (outcome.arrError) setArrError(outcome.arrError);
@@ -196,7 +199,7 @@ function useRequestMutations({ requestId, currentStatus, groupPendingIds }: Pick
           continue;
         }
         if (res.kind === "aborted") break;
-        failure = failureText(res, t);
+        failure = fetchFailureText(res, t) ?? "";
         // No answer, or not the route's: the next one would fare no better.
         if (res.kind !== "http") break;
         if (res.status === 429) break;
@@ -226,7 +229,7 @@ function useRequestMutations({ requestId, currentStatus, groupPendingIds }: Pick
     // The caller always closes the confirm dialog, so a failure is shown here —
     // otherwise a network failure would look like the admin just cancelled.
     if (!res.ok) {
-      setArrError(failureText(res, t));
+      setArrError(fetchFailureText(res, t));
       return;
     }
     router.refresh();
@@ -277,6 +280,15 @@ function usePendingForms({ mediaType, arrInstance, m }: { mediaType: RequestMedi
   const [profileState, setProfileState] = useState<ProfileState | null>(null);
   const [approvingProfileId, setApprovingProfileId] = useState<number | null>(null);
   const profiles = profileState?.key === profileKey ? profileState : null;
+  // The profile reads still out; leaving the row stops them (an answer for an
+  // instance the row has left is already ignored by its key).
+  const reads = useRef(new Set<AbortController>());
+  useEffect(() => {
+    const out = reads.current;
+    return () => {
+      for (const ctl of out) ctl.abort();
+    };
+  }, []);
 
   async function openProfilePicker() {
     setPickerFor(profileKey);
@@ -285,10 +297,15 @@ function usePendingForms({ mediaType, arrInstance, m }: { mediaType: RequestMedi
     const key = profileKey;
     setProfileState({ key, phase: "loading" });
     const query = new URLSearchParams({ mediaType, instance: arrInstance });
+    const ctl = new AbortController();
+    reads.current.add(ctl);
     const res = await fetchJson(withBasePath(`/api/requests/quality-profiles?${query.toString()}`), {
       schema: QualityProfilesAnswer,
+      signal: ctl.signal,
       fallbackError: t("adminQueue.actions.profilesFailed"),
     });
+    reads.current.delete(ctl);
+    if (!res.ok && res.kind === "aborted") return;
     const next: ProfileState = res.ok
       ? { key, phase: "ready", profiles: res.data.qualityProfiles, defaultId: res.data.defaultId }
       : { key, phase: "error", error: res.kind === "http" ? res.error : t("adminQueue.actions.profilesFailed") };
@@ -323,7 +340,7 @@ function usePendingForms({ mediaType, arrInstance, m }: { mediaType: RequestMedi
   };
 }
 
-export function RequestActions({ requestId, currentStatus, mediaType, arrInstance, arrInstanceName, existingAdminNote, groupPendingIds }: RequestActionsProps) {
+export function RequestActions({ requestId, currentStatus, mediaType, arrInstance, arrInstanceName, existingAdminNote, groupPendingIds, onDialogActive }: RequestActionsProps) {
   const t = useT();
   const m = useRequestMutations({ requestId, currentStatus, groupPendingIds });
   const forms = usePendingForms({ mediaType, arrInstance, m });
@@ -384,6 +401,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           m={m}
           onAskDelete={() => setShowDeleteConfirm(true)}
           reply={reply}
+          onDialogActive={onDialogActive}
         />
       );
 
@@ -422,7 +440,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
       );
 
     case "PENDING":
-      return <PendingActions m={m} forms={forms} allowProfilePick={(groupPendingIds?.length ?? 0) <= 1} reply={reply} />;
+      return <PendingActions m={m} forms={forms} allowProfilePick={groupDecisionIds(currentStatus, groupPendingIds) === null} reply={reply} />;
 
     case null:
       // A status this row doesn't know: no decision controls, only the reply.
@@ -653,6 +671,7 @@ function ApprovedActions({
   m,
   onAskDelete,
   reply,
+  onDialogActive,
 }: {
   requestId: string;
   mediaType: RequestMediaType;
@@ -661,6 +680,7 @@ function ApprovedActions({
   m: RequestMutations;
   onAskDelete: () => void;
   reply: ReactNode;
+  onDialogActive?: (open: boolean) => void;
 }) {
   const t = useT();
   // "Why?" — the inline Radarr/Sonarr status panel, loaded on click only.
@@ -668,6 +688,18 @@ function ApprovedActions({
   const statusPanelId = useId();
   // Interactive search ("Pick release") on the request's own instance.
   const [showReleases, setShowReleases] = useState(false);
+  // The latest callback, so a parent's new function each render never reads as
+  // a close and a re-open (the title manager reports itself the same way).
+  const dialogActiveRef = useRef(onDialogActive);
+  useEffect(() => {
+    dialogActiveRef.current = onDialogActive;
+  });
+  useEffect(() => {
+    if (!showReleases) return;
+    dialogActiveRef.current?.(true);
+    const active = dialogActiveRef;
+    return () => active.current?.(false);
+  }, [showReleases]);
   const onPickRelease = () => {
     m.clearArrError();
     setShowReleases(true);

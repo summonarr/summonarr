@@ -413,7 +413,7 @@ export function IssueActions({
       )}
 
       {error && (
-        <span className="flex items-center gap-1 text-[11px] text-amber-400 max-w-52 text-right">
+        <span role="alert" className="flex items-center gap-1 text-[11px] text-amber-400 max-w-52 text-right">
           <AlertTriangle className="w-3 h-3 shrink-0" />
           {error}
         </span>
@@ -586,6 +586,8 @@ function FixFileDialog({
   }
 
   function close() {
+    // Closing unmounts the dialog and aborts the grab: wait for its answer instead.
+    if (writes.busy("grab")) return;
     stopReleaseSearch();
     onClose();
   }
@@ -628,7 +630,12 @@ function FixFileDialog({
   }
 
   const working = action !== null;
-  const closeLabel = working ? t("adminQueue.issueActions.closeWhileWorking") : t("adminQueue.common.close");
+  // A grab is the one write the window waits out (close() above), so its close
+  // control must not promise that closing is safe: it says what it waits for.
+  const grabbing = action === "grab";
+  const closeLabel = grabbing
+    ? t("adminQueue.issueActions.closeWaitingGrab")
+    : working ? t("adminQueue.issueActions.closeWhileWorking") : t("adminQueue.common.close");
 
   const instancePicker = instances.length > 1 && (
     <StyledSelect

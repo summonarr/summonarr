@@ -2,13 +2,13 @@
 // GET/POST /api/admin/arr/title/releases — pinned BEHAVIOURALLY where the
 // earlier pins were source scans that could pass without looking:
 //
-//   C112 — a Sonarr search names a season or an episode, never a series alone
+// a Sonarr search names a season or an episode, never a series alone
 //          (`/api/v3/release?seriesId=` by itself is the indexers' RSS feed —
 //          other shows' episodes, grabbable). The title manager builds that
 //          query apart from the path (arr-title-data.ts `releaseQuery` →
 //          arr.ts `searchReleasesByArrId`'s `/api/v3/release?${query}`), out
 //          of reach of a scan for the path literal.
-//   C026 — a grab answered 502/504 (a gateway that gave up while the arr was
+// a grab answered 502/504 (a gateway that gave up while the arr was
 //          still handing the release to the download client) SPENDS the
 //          handle: a retry is 410 and the release went out once. Only a
 //          definite refusal hands it back. The other two grab routes have
@@ -217,9 +217,36 @@ beforeEach(() => {
   invalidateFeatureFlagCache();
 });
 
-// ═══════════════════ C112 — a season or an episode, never the series ═════════
+// ═══════════════════ never started from another site ══════════════════
 
-test("C112: a season search sends ONE /api/v3/release read naming the series AND the season", async () => {
+test("a search GET the browser marks cross-site is refused before anything reaches the arr; every other origin passes", async () => {
+  // The session cookie is SameSite=Lax, so a signed-in admin's navigation from
+  // another site carries it; nothing is readable there, but the indexers
+  // would still be searched.
+  const token = await mintSession();
+  const get = (site: string | null, query: string) =>
+    inScope(() => (releasesRoute.GET as unknown as Handler)(
+      new NextRequest(`http://localhost:3000/api/admin/arr/title/releases?${query}`, {
+        headers: { cookie: `${COOKIE}=${token}`, ...(site !== null ? { "sec-fetch-site": site } : {}) },
+      }),
+      undefined,
+    ));
+  for (const query of ["service=radarr&id=11", "service=radarr&id=11&async=1"]) {
+    const refused = await get("cross-site", query);
+    assert.equal(refused.status, 403);
+    assert.equal(((await refused.json()) as { error: string }).error, "Forbidden — cross-site request");
+  }
+  assert.equal(calls.length, 0, "no title read, no release search, no job");
+  // The app's own fetch, a same-site page, a typed address, and a client that
+  // sends no header (the native app, curl, an older browser).
+  for (const site of ["same-origin", "same-site", "none", null]) {
+    assert.equal((await get(site, "service=radarr&id=11")).status, 200, `Sec-Fetch-Site: ${site}`);
+  }
+});
+
+// ═══════════════════ a season or an episode, never the series ═════════
+
+test("a season search sends ONE /api/v3/release read naming the series AND the season", async () => {
   const res = await call(releasesRoute.GET, await mintSession(), "/admin/arr/title/releases?service=sonarr&id=21&season=2");
   assert.equal(res.status, 200);
   assert.equal(releaseReads().length, 1);
@@ -228,7 +255,7 @@ test("C112: a season search sends ONE /api/v3/release read naming the series AND
   assert.equal(q.get("seasonNumber"), "2", "a series-only query is the indexers' RSS feed");
 });
 
-test("C112: an episode search names the episode and no series", async () => {
+test("an episode search names the episode and no series", async () => {
   const res = await call(releasesRoute.GET, await mintSession(), "/admin/arr/title/releases?service=sonarr&id=21&episodeId=101");
   assert.equal(res.status, 200);
   assert.equal(releaseReads().length, 1);
@@ -237,7 +264,7 @@ test("C112: an episode search names the episode and no series", async () => {
   assert.equal(q.get("seriesId"), null);
 });
 
-test("C112: a season the series doesn't have, another series' episode, or no scope at all reaches no release search", async () => {
+test("a season the series doesn't have, another series' episode, or no scope at all reaches no release search", async () => {
   const token = await mintSession();
   for (const scope of ["&season=7", "&episodeId=901", ""]) {
     calls = [];
@@ -247,7 +274,7 @@ test("C112: a season the series doesn't have, another series' episode, or no sco
   }
 });
 
-test("C112: searchTitleReleases itself refuses a series with no scope — NotOnTitleError, no release search", async () => {
+test("searchTitleReleases itself refuses a series with no scope — NotOnTitleError, no release search", async () => {
   await assert.rejects(searchTitleReleases("sonarr", "", 21, null), (e: unknown) => e instanceof NotOnTitleError);
   assert.deepEqual(releaseReads(), []);
   // A movie needs no scope: its search is the movie's own.
@@ -255,7 +282,7 @@ test("C112: searchTitleReleases itself refuses a series with no scope — NotOnT
   assert.equal(releaseReads()[0]?.query.get("movieId"), "11");
 });
 
-// ═══════════════════ C026 — a gateway 5xx spends the handle ══════════════════
+// ═══════════════════ a gateway 5xx spends the handle ══════════════════
 
 const search = async (token: string) =>
   ((await (await call(releasesRoute.GET, token, "/admin/arr/title/releases?service=radarr&id=11")).json()) as { releases: Array<{ guid: string }> }).releases[0].guid;
@@ -263,7 +290,7 @@ const grab = (token: string, release: string) =>
   call(releasesRoute.POST, token, "/admin/arr/title/releases", { service: "radarr", id: 11, release });
 
 for (const status of [502, 504]) {
-  test(`C026: a gateway ${status} on the title manager's grab spends the handle — a retry is 410 and the release went out once`, async () => {
+  test(`a gateway ${status} on the title manager's grab spends the handle — a retry is 410 and the release went out once`, async () => {
     const token = await mintSession();
     const handle = await search(token);
     grabStatus = status;
@@ -277,7 +304,7 @@ for (const status of [502, 504]) {
   });
 }
 
-test("C026: a definite refusal (409) still hands the title manager's handle back", async () => {
+test("a definite refusal (409) still hands the title manager's handle back", async () => {
   const token = await mintSession();
   const handle = await search(token);
   grabStatus = 409;

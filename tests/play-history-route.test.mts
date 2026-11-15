@@ -1858,7 +1858,9 @@ test("GUARDRAIL 19: a jellyfin row matched to a live session under its OLD key i
 
 test("a tick refused by the per-IP rate limit is a 429 that records no cron run — overlapping ticks are not failed syncs", async () => {
   const headers = { ...AS_CRON, "x-forwarded-for": "10.77.0.13" };
-  for (let i = 0; i < 30; i++) assert.equal((await POST(phReq({ headers }))).status, 200, `tick ${i + 1}`);
+  // The entrypoint's poller at its fastest supported interval (1s) sends at
+  // most 60 ticks a minute; the limit is twice that, so none is ever refused.
+  for (let i = 0; i < 120; i++) assert.equal((await POST(phReq({ headers }))).status, 200, `tick ${i + 1}`);
   await settle();
   settingUpserts.length = 0;
   const limited = await POST(phReq({ headers }));

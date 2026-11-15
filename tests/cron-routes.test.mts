@@ -994,6 +994,58 @@ test("warm-list-cache: with upstream list fetches failing, the 200 body says ok:
   assert.equal(failedTasks.length, body.errors, `one named log line per failed task: ${errors.join(" | ")}`);
 });
 
+// The paged TMDB lists settle their own pages and answer [] on an outage (and
+// during the backoff after one), so nothing rejected and the run could be
+// recorded ok with TMDB down. Each is read with its `complete` flag instead.
+const PAGED_TMDB_TASKS = ["trending", "popularMovies", "popularTV", "upcomingMovies", "upcomingTV", "onAirTV", "topRatedMovies", "topRatedTV"];
+
+test("warm-list-cache: every paged TMDB list that came back incomplete is counted and logged as a failed task", async () => {
+  const { __resetTmdbBackoffsForTests } = await import("../src/lib/tmdb.ts");
+  __resetTmdbBackoffsForTests();
+  const route = ROUTES.find((r) => r.name === "warm-list-cache")!;
+  const res = await route.POST(authed(route));
+  const body = await res.json() as Record<string, unknown> & { errors: number };
+  for (const name of PAGED_TMDB_TASKS) {
+    assert.ok(
+      errors.some((e) => e.startsWith(`[warm-list-cache] ${name} failed:`)),
+      `${name} answered empty with TMDB down and was not counted: ${errors.join(" | ")}`,
+    );
+    assert.equal(body[name], 0);
+  }
+  assert.ok(body.errors >= PAGED_TMDB_TASKS.length);
+  // Same answer inside the all-pages-failed backoff, which serves [] without a fetch.
+  errors.length = 0;
+  const again = await (await route.POST(authed(route))).json() as { errors: number };
+  assert.ok(again.errors >= PAGED_TMDB_TASKS.length, "a run inside the backoff window must not read as warmed");
+  __resetTmdbBackoffsForTests();
+});
+
+test("warm-list-cache: a list with titles but a failed page is a failed task too — it was served, not cached", async () => {
+  const { __resetTmdbBackoffsForTests } = await import("../src/lib/tmdb.ts");
+  __resetTmdbBackoffsForTests();
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/movie/popular") && url.searchParams.get("page") === "1") {
+      return new Response(JSON.stringify({ page: 1, total_pages: 9, results: [{ id: 603, title: "The Matrix" }] }), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    }
+    return realFetch(input);
+  }) as unknown as typeof fetch;
+  try {
+    const route = ROUTES.find((r) => r.name === "warm-list-cache")!;
+    const res = await route.POST(authed(route));
+    await res.json();
+    const line = errors.find((e) => e.startsWith("[warm-list-cache] popularMovies failed:"));
+    assert.ok(line, `a partly-fetched list was reported as warmed: ${errors.join(" | ")}`);
+    assert.match(line, /1 item\(s\), not cached/);
+  } finally {
+    globalThis.fetch = realFetch;
+    __resetTmdbBackoffsForTests();
+  }
+});
+
 test("warm-library: an all-clean run is ok:true with NO error key and no degraded header", async () => {
   const route = ROUTES.find((r) => r.name === "warm-library")!;
   const res = await route.POST(authed(route));

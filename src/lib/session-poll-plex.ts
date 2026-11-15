@@ -331,8 +331,8 @@ async function resolvePlexSessions(
   });
 
   // Resolve TMDB ids per session (TV episodes hit DB, movies are mostly in-memory).
-  return Promise.all(
-    valid.map(async (s, i): Promise<ResolvedPlexSession> => {
+  return mapLimit(
+    valid, 4, async (s, i): Promise<ResolvedPlexSession> => {
       const sessionId = activeSessionId("plex", instance, s.sessionKey);
       let tmdbId: number | null = null;
       let mediaType = mediaTypeOfItem(s.type);
@@ -350,7 +350,7 @@ async function resolvePlexSessions(
         }
       }
       return { s, sessionId, msUserId: userIds[i], tmdbId, mediaType };
-    }),
+    },
   );
 }
 

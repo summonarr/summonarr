@@ -7,13 +7,18 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { WATCH_SYNC_FEATURE_KEY } from "@/lib/watch-sync-data";
 import { parseWatchSyncDirection } from "@/lib/watch-sync";
+import { withAdvisoryLock, WATCH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
+
+// The rescan's one write is all the lock covers.
+const RESCAN_LOCK_TIMEOUT_MS = 30_000;
 
 // One watch sync pair (ADMIN).
 //   PATCH { enabled?: boolean, direction?: "both"|"toJellyfin"|"toPlex", syncProgress?: boolean, rescan?: true }
 //     — pause/resume, change direction, switch resume-point sync; `rescan` forgets BOTH read points so the
 //     next run re-reads the whole Plex history and the whole Jellyfin played
 //     list (titles that reached the other server since are then marked; items
-//     already in a ledger are not re-queued).
+//     already in a ledger are not re-queued). A rescan is written under the
+//     watch-sync lock and answers 409 while a run is going (nothing is changed).
 //   DELETE — removes the pair and its ledgers. Nothing on either server is
 //     unmarked (guardrail 19e: add-only).
 
@@ -37,7 +42,7 @@ export const PATCH = withAdmin(async (req, ctx: { params: Promise<{ id: string }
     return NextResponse.json({ error: t("apiAdmin.common.invalidBody") }, { status: 400 });
   }
   // updateMany: a concurrent delete answers 404 rather than throwing P2025.
-  const updated = await prisma.watchSyncPair.updateMany({
+  const write = () => prisma.watchSyncPair.updateMany({
     where: { id },
     data: {
       ...(enabled !== undefined ? { enabled } : {}),
@@ -46,6 +51,19 @@ export const PATCH = withAdmin(async (req, ctx: { params: Promise<{ id: string }
       ...(rescan ? { historyReadTo: null, jellyfinReadTo: null } : {}),
     },
   });
+  // A rescan resets the read points under the run's own lock: a run in flight
+  // writes its newer read point back as it advances, which would silently undo
+  // the reset. Busy answers as "Run now" does and changes nothing. Edits without
+  // a rescan stay lock-free.
+  const updated = rescan
+    ? await withAdvisoryLock(WATCH_SYNC_LOCK_ID, write, () => null, { timeoutMs: RESCAN_LOCK_TIMEOUT_MS })
+    : await write();
+  if (updated === null) {
+    return NextResponse.json(
+      { ok: false, error: t("apiAdmin.watchSync.running"), retryAfter: 30 },
+      { status: 409, headers: { "Retry-After": "30" } },
+    );
+  }
   if (updated.count === 0) return NextResponse.json({ error: t("apiAdmin.watchSync.pairNotFound") }, { status: 404 });
   void logAudit({
     userId: session.user.id,

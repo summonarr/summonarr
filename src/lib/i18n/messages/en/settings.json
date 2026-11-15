@@ -157,6 +157,7 @@
   "settings.playHistory.howBody": "Play history is tracked automatically by polling your Plex and Jellyfin servers every few seconds for active sessions. No configuration is needed in Plex or Jellyfin — it uses the same server connection already configured above.",
   "settings.watchGrade.notGraded": "Not graded",
   "settings.watchGrade.previewFailedStatus": "Preview failed ({status})",
+  "settings.watchGrade.previewEmpty": "The preview came back empty. Try again.",
   "settings.watchGrade.grace": "Grace period (days)",
   "settings.watchGrade.graceHelp": "How long after a request becomes available before it counts toward the grade. Requests still inside it are listed but never scored — watched or not — so recent requesters aren't judged early. Default {default}.",
   "settings.watchGrade.window": "Grade window (days)",

@@ -255,6 +255,7 @@ test("watch sync documents the page's pairs, accounts, suggestions and run state
   // A run answers runWatchSync's result; a pair stores the same per-pair shape.
   const run = await responseSchema("/admin/watch-sync/run", "get", "200");
   assert.match(routeSource("/admin/watch-sync/run"), /NextResponse\.json\(await runWatchSync\(\{ signal \}\)\)/);
+  assert.match(routeSource("/admin/watch-sync/run"), /NextResponse\.json\(await runWatchSync\(\{ signal, pairIds: \[pairId\], full: true \}\)\)/);
   // The stored result is a plain JSON copy of the pair's run result.
   assert.match(data, /lastResult: toJsonValue\(r\)/);
   assert.match(data, /function toJsonValue\(r: WatchSyncPairResult\)[^{]*\{\s*return JSON\.parse\(JSON\.stringify\(r\)\)/);
@@ -381,8 +382,8 @@ test("/settings documents its masked map, the save's test results and the option
   assert.match(libSource("plex-library.ts"), /\.filter\(\(d\) => d\.type === "movie" \|\| d\.type === "show"\)/);
   const jfLib = await responseSchema("/settings/jellyfin/libraries", "get", "200");
   assert.deepEqual(keysOf(itemsOf(jfLib)), interfaceFields(libSource("jellyfin-library.ts"), "JellyfinMediaFolder"));
-  assert.match(libSource("jellyfin-library.ts"), /\.filter\(\(f\) => f\.CollectionType === "movies" \|\| f\.CollectionType === "tvshows"\)/);
-  assert.deepEqual(props(itemsOf(jfLib)).collectionType?.enum, ["movies", "tvshows"]);
+  assert.match(libSource("jellyfin-library.ts"), /collectionType: f\.CollectionType === "movies" \|\| f\.CollectionType === "tvshows" \? f\.CollectionType : "mixed",/);
+  assert.deepEqual(props(itemsOf(jfLib)).collectionType?.enum, ["movies", "tvshows", "mixed"]);
 
   const ratingBodies = successBodies(handlerSource("/settings/test-ratings", "post")).filter((k) => !k.includes("error"));
   for (const keys of ratingBodies) assert.deepEqual(keys, keysOf(await responseSchema("/settings/test-ratings", "post", "200")));
@@ -392,7 +393,7 @@ test("/settings documents its masked map, the save's test results and the option
   // The route answers one field per entry of its SLOTS table.
   const slotFields = [...routeSource("/settings/webhook-urls").matchAll(/\{ field: "(\w+)", service:/g)].map((m) => m[1]).sort();
   assert.deepEqual(keysOf(hooks), slotFields);
-  assert.match(handlerSource("/settings/webhook-urls", "get"), /Object\.fromEntries\(SLOTS\.map\(/);
+  assert.match(handlerSource("/settings/webhook-urls", "get"), /Object\.fromEntries\(shown\.map\(/);
   for (const k of keysOf(hooks)) assert.equal(props(hooks)[k].nullable, true, k);
   assert.match(hooks.description ?? "", /ADMIN only/);
   assert.match(routeSource("/settings/webhook-urls"), /export const GET = withAdmin\(/);

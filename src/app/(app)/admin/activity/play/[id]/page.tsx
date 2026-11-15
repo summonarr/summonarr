@@ -29,6 +29,7 @@ import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { getTranslator } from "@/lib/i18n/server";
 import type { Translator } from "@/lib/i18n/translate";
 import { PlayTimestamp } from "./play-timestamp";
+import { getStatsTimeZone } from "@/lib/stats-time-zone-data";
 
 export const dynamic = "force-dynamic";
 
@@ -125,8 +126,10 @@ export default async function PlayDetailPage({
   });
 
   if (!play) notFound();
+  // The zone the history table shows this play's times in (guardrail 19g).
+  const timeZone = await getStatsTimeZone();
 
-  const isTV = (play.mediaType ?? "").toString() === "TV";
+  const isTV = play.mediaType === "TV";
   const mediaHref = play.tmdbId
     ? `/admin/activity/media/${play.tmdbId}${play.mediaType ? `?type=${play.mediaType}` : ""}`
     : null;
@@ -214,11 +217,11 @@ export default async function PlayDetailPage({
           <div className="space-y-3">
             <LabeledValue
               label={t("adminActivity.field.started")}
-              value={<PlayTimestamp iso={play.startedAt.toISOString()} />}
+              value={<PlayTimestamp iso={play.startedAt.toISOString()} timeZone={timeZone} />}
             />
             <LabeledValue
               label={t("adminActivity.field.stopped")}
-              value={<PlayTimestamp iso={play.stoppedAt?.toISOString() ?? null} />}
+              value={<PlayTimestamp iso={play.stoppedAt?.toISOString() ?? null} timeZone={timeZone} />}
             />
             <Field label={t("adminActivity.field.progress")} gap="mb-1">
               <div className="flex items-center gap-2">

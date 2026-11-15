@@ -8,6 +8,7 @@ import { useT } from "@/components/i18n/i18n-provider";
 import { posterUrl } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
 import { fetchJson } from "@/lib/client/fetch-json";
+import { isApplePlatform } from "@/lib/client/apple-platform";
 import { searchHits, type SearchHit } from "./search-results";
 
 type MediaFilter = "all" | "movie" | "tv";
@@ -20,12 +21,7 @@ const SEARCH_DEBOUNCE_MS = 350;
 function useIsMac(): boolean {
   const [isMac, setIsMac] = useState(true);
   useEffect(() => {
-    const platform =
-      (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData
-        ?.platform ??
-      navigator.platform ??
-      "";
-    setIsMac(/mac|iphone|ipad|ipod/i.test(platform));
+    setIsMac(isApplePlatform());
   }, []);
   return isMac;
 }
@@ -72,6 +68,10 @@ function useSearchResults(query: string, filter: MediaFilter, onSettled: () => v
   // True when the last search failed (non-OK response or network error), so
   // the dropdown says so instead of claiming the title doesn't exist.
   const [searchFailed, setSearchFailed] = useState(false);
+  // The query and filter the shown results answer. The previous results stay
+  // on screen while a new search is pending, so the caller needs to know when
+  // they belong to something other than what is typed now.
+  const [answered, setAnswered] = useState<{ query: string; filter: MediaFilter } | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -83,6 +83,7 @@ function useSearchResults(query: string, filter: MediaFilter, onSettled: () => v
     abortRef.current = null;
     if (!query.trim()) {
       setResults([]);
+      setAnswered(null);
       setSearchFailed(false);
       setLoading(false);
       onCleared();
@@ -106,6 +107,7 @@ function useSearchResults(query: string, filter: MediaFilter, onSettled: () => v
       // /api/search answers { error } on a 4xx/5xx: only a list is results.
       const hits = res.ok ? searchHits(res.data) : null;
       setResults(hits ?? []);
+      setAnswered({ query, filter });
       setSearchFailed(hits === null);
       onSettled();
       // Only the newest request may clear the spinner. An aborted older
@@ -120,7 +122,8 @@ function useSearchResults(query: string, filter: MediaFilter, onSettled: () => v
     };
   }, [query, filter, onSettled, onCleared]);
 
-  return { results, loading, searchFailed };
+  const current = answered !== null && answered.query === query && answered.filter === filter;
+  return { results, loading, searchFailed, current };
 }
 
 function FilterChips({ filter, onFilter, full }: { filter: MediaFilter; onFilter: (f: MediaFilter) => void; full: boolean }) {
@@ -326,7 +329,11 @@ export function SearchBar({
     setActiveIndex(-1);
     setOpen(false);
   }, []);
-  const { results, loading, searchFailed } = useSearchResults(query, filter, onSettled, onCleared);
+  const { results, loading, searchFailed, current } = useSearchResults(query, filter, onSettled, onCleared);
+  // A highlight belongs to the results it was made on. While a newer query is
+  // still pending those are the PREVIOUS query's rows, and Enter must not open
+  // one of them: no row is highlighted until the typed query's own answer lands.
+  const liveIndex = current ? activeIndex : -1;
 
   function handleSelect(media: SearchHit) {
     setOpen(false);
@@ -354,14 +361,17 @@ export function SearchBar({
             ? results.length - 1
             : i - 1,
       );
-    } else if (e.key === "Enter" && open && activeIndex >= 0 && activeIndex < results.length) {
+    } else if (e.key === "Enter" && open && liveIndex >= 0 && liveIndex < results.length) {
       e.preventDefault();
-      handleSelect(results[activeIndex]);
+      handleSelect(results[liveIndex]);
     }
   }
 
   const fieldHeight = variant === "full" ? 36 : 32;
   const showStatus = Boolean(query.trim()) && results.length === 0 && !loading;
+  // One definition of "the dropdown is showing": the combobox state and the
+  // render guard read the same value.
+  const listOpen = open && (Boolean(query.trim()) || results.length > 0);
 
   return (
     <div
@@ -394,12 +404,12 @@ export function SearchBar({
           type="search"
           aria-label={t("nav.search")}
           role="combobox"
-          aria-expanded={open && (Boolean(query.trim()) || results.length > 0)}
+          aria-expanded={listOpen}
           aria-controls={listboxId}
           aria-autocomplete="list"
           aria-activedescendant={
-            open && activeIndex >= 0 && activeIndex < results.length
-              ? `${optionIdBase}-option-${activeIndex}`
+            open && liveIndex >= 0 && liveIndex < results.length
+              ? `${optionIdBase}-option-${liveIndex}`
               : undefined
           }
           placeholder={t("search.placeholder")}
@@ -429,7 +439,7 @@ export function SearchBar({
         ) : null}
       </div>
 
-      {open && (query.trim() || results.length > 0) && (
+      {listOpen && (
         <div
           style={{
             position: "absolute",
@@ -473,11 +483,11 @@ export function SearchBar({
                   key={`${media.mediaType}-${media.id}`}
                   media={media}
                   id={`${optionIdBase}-option-${i}`}
-                  active={activeIndex === i}
+                  active={liveIndex === i}
                   showPlex={showPlex}
                   showJellyfin={showJellyfin}
                   onSelect={() => handleSelect(media)}
-                  onHover={() => { if (activeIndex !== i) setActiveIndex(i); }}
+                  onHover={() => { if (current && activeIndex !== i) setActiveIndex(i); }}
                 />
               ))}
             </div>

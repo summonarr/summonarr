@@ -208,8 +208,8 @@ async function resolveJellyfinSessions(
     for (const id of r.jellyfinItemIds) libMap.set(id, r);
   }
 
-  return Promise.all(
-    valid.map(async (s, i): Promise<ResolvedJellyfinSession> => {
+  return mapLimit(
+    valid, 4, async (s, i): Promise<ResolvedJellyfinSession> => {
       let tmdbId: number | null = null;
       let mediaType: "MOVIE" | "TV" | null = s.itemType === "Episode" ? "TV" : s.itemType === "Movie" ? "MOVIE" : null;
       if (s.itemType === "Episode") {
@@ -226,7 +226,7 @@ async function resolveJellyfinSessions(
       }
       // A 0 or NaN id is no id.
       return { s, msUserId: userIds[i], tmdbId: tmdbId && !Number.isNaN(tmdbId) ? tmdbId : null, mediaType };
-    }),
+    },
   );
 }
 

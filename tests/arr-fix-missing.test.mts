@@ -619,7 +619,8 @@ test("page: a list's reload is tracked per key — a bulk run or a second listin
   for (const write of ["setReports(", "setErrors((e) => ({ ...e, [k]: message }))", 't("adminManage.missing.error.loadNetwork")', "setLoadingKeys((prev) => {\n"]) {
     assert.ok(load.indexOf(write, guard) > guard, `${write} only after the check`);
   }
-  assert.match(load, /if \(superseded\(\)\) return;\s*setLoadingKeys\(\(prev\) => \{\s*const next = new Set\(prev\);\s*next\.delete\(k\);/, "only the newest load clears the key, and only its own key");
+  // An aborted read (leaving the page) settles nothing either.
+  assert.match(load, /if \(superseded\(\)\) return;\s*if \(!res\.ok && res\.kind === "aborted"\) return;\s*setLoadingKeys\(\(prev\) => \{\s*const next = new Set\(prev\);\s*next\.delete\(k\);/, "only the newest load clears the key, and only its own key");
 });
 
 test("page: a fresh listing keeps the state of a row whose search is still in flight", () => {
@@ -648,7 +649,7 @@ test("page: the tables render one page of rows; the query is deferred for the fi
 });
 
 test("page: a Sonarr search refused part-way shows a neutral note on its started row", () => {
-  assert.match(bulkSearch(), /return d\?\.partial === true \? \{ \.\.\.attempt, message: t\("adminManage\.missing\.searchPartial"\) \} : attempt;/);
+  assert.match(bulkSearch(), /return body\.ok && body\.value\.partial === true \? \{ \.\.\.attempt, message: t\("adminManage\.missing\.searchPartial"\) \} : attempt;/);
   assert.match(missingPage(), /\{\(already \|\| started\) && st\.message && \(/);
 });
 

@@ -112,6 +112,10 @@ test("defaultPermissionsForRole: known roles map to their preset; unknown falls 
   // An unrecognized role string (future enum drift, corrupted row) must fall
   // back to the least-privileged USER preset, never throw or return 0n.
   assert.equal(defaultPermissionsForRole("BOGUS"), PRESETS.USER);
+  // A role named like an inherited Object member is still unknown.
+  for (const role of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+    assert.equal(defaultPermissionsForRole(role), PRESETS.USER, role);
+  }
 });
 
 test("presetExceeds: a delegate may name only a role whose WHOLE preset it holds", () => {

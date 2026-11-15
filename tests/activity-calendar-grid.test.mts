@@ -25,6 +25,13 @@ test("the window is the 365 days ending on the server's today, in Sunday-first c
   assert.equal(m.peak, 0);
 });
 
+test("an unreadable today gives an empty calendar instead of throwing", () => {
+  const m = buildCalendarModel([{ day: "2026-11-07", count: 3 }], "not-a-date", "en", true);
+  assert.equal(m.days.length, 0);
+  assert.equal(m.weeks.length, 0);
+  assert.deepEqual(m.monthLabels, []);
+});
+
 test("counts, totals and the clickable days come from the data", () => {
   const data = [
     { day: "2026-11-07", count: 4 },

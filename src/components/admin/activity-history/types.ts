@@ -31,7 +31,7 @@ export const DEFAULT_PAGE_SIZE = 25;
 export interface HistoryFilters {
   search: string;
   watched: WatchedFilter;
-  method: string;
+  method: "" | (typeof PLAY_METHODS)[number];
   platform: string;
   userId: string;
   // YYYY-MM-DD, whole days in the statistics zone (the API reads them there).

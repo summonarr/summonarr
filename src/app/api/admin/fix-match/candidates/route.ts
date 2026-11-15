@@ -125,8 +125,13 @@ async function plexCandidates(q: CandidatesQuery, perms: bigint, t: Translate): 
   const cached = getCachedCandidates<CandidatesResponse>(cacheKey);
   if (cached) return NextResponse.json(viewOf(cached));
   // Coerce to break taint from the DB-read string before interpolating into the
-  // Plex admin-token URL below (rating keys are always integers).
-  const safeRatingKey = String(parseInt(item.plexRatingKey, 10) || 0);
+  // Plex admin-token URL below (rating keys are always integers). One that is
+  // not is a bad row, answered as not found rather than queried as item 0.
+  const ratingKeyNumber = parseInt(item.plexRatingKey, 10);
+  if (!Number.isSafeInteger(ratingKeyNumber) || ratingKeyNumber <= 0) {
+    return NextResponse.json({ error: t("apiAdmin.fixMatch.plexRatingKeyNotFound") }, { status: 404 });
+  }
+  const safeRatingKey = String(ratingKeyNumber);
 
   const plexConfig = await getPlexConfig(q.serverInstance);
   if (!plexConfig.url || !plexConfig.token) {
@@ -148,9 +153,15 @@ async function plexCandidates(q: CandidatesQuery, perms: bigint, t: Translate): 
       q.arrTmdbIdHint,
     ),
   ]);
-  const { candidates, failed: enrichFailed } = await enrichCandidates(
-    plex.raw, q.mediaType, q.correctTmdbId, target, arr.arrConfirmedTmdbId, q.arrTmdbIdHint, tmdbAuth(),
-  );
+  const { candidates, failed: enrichFailed } = await enrichCandidates({
+    raw: plex.raw,
+    mediaType: q.mediaType,
+    correctTmdbId: q.correctTmdbId,
+    target,
+    arrConfirmedTmdbId: arr.arrConfirmedTmdbId,
+    arrTmdbIdHint: q.arrTmdbIdHint,
+    auth: tmdbAuth(),
+  });
   const suggestedGuid = pickSuggestedGuid(candidates, plex.firstImdbGuid);
   for (const c of candidates) {
     c.suggested = c.guid === suggestedGuid;

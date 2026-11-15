@@ -116,6 +116,19 @@ export class MediaServerMismatchError extends Error {
   }
 }
 
+// May automatic resolution bind a media-server identity to this account on an
+// EMAIL match alone? Not when the account is pinned to the other provider, and
+// never when a MANAGE_USERS delegate created it (guardrail 34d). The one rule
+// for every automatic email linker: resolveMediaServerUser below and the hourly
+// Jellyfin user sync (download-policy.ts).
+export function emailLinkAllowed(
+  user: { mediaServer: string | null; createdByDelegate: boolean },
+  source: string,
+): boolean {
+  if (user.createdByDelegate) return false;
+  return !user.mediaServer || user.mediaServer.toLowerCase() === source;
+}
+
 // FNV-1a 32-bit hash. Stable across runs; used to derive a Postgres advisory
 // lock id from a string key.
 function fnv1a32(s: string): number {
@@ -139,7 +152,9 @@ export async function resolveMediaServerUser(params: {
   serverMachineId?: string | null;
   isServerAdmin?: boolean;
 }): Promise<string> {
-  const { source, serverInstance, sourceUserId, username, thumbUrl, serverMachineId, isServerAdmin } = params;
+  const { serverInstance, sourceUserId, username, thumbUrl, serverMachineId, isServerAdmin } = params;
+  // One casing for the lookup, the lock key and the unique key, so "Plex" and "plex" are one row.
+  const source = params.source.toLowerCase();
   // Normalize once and use the same value for both lookup AND the upserted column,
   // so existing User rows (lowercase-stored) match Plex/Jellyfin server-reported
   // emails that vary in case, and so we don't write mixed-case copies into
@@ -189,9 +204,9 @@ export async function resolveMediaServerUser(params: {
     // unique and written only by the matching provider's sign-in, so unlike an
     // email match there is no cross-provider collision to defend against.
     const bySub =
-      source.toLowerCase() === "plex"
+      source === "plex"
         ? await tx.user.findUnique({ where: { plexUserId: sourceUserId }, select: { id: true } })
-        : source.toLowerCase() === "jellyfin"
+        : source === "jellyfin"
           ? await tx.user.findUnique({ where: { jellyfinUserId: sourceUserId }, select: { id: true } })
           : null;
     if (bySub) userId = bySub.id;
@@ -199,9 +214,15 @@ export async function resolveMediaServerUser(params: {
     // 2. Email fallback — covers accounts provisioned before the subject id was
     // bound (e.g. a local/OIDC user who watches on the server under the same
     // address, or a Plex row awaiting the plexUserId backfill).
+    //
+    // Never an account a MANAGE_USERS delegate created (`createdByDelegate`,
+    // guardrail 34d): the delegate chose its email and password, so an email
+    // match would hand them the watch history of whoever later shows up on the
+    // server under that address. Such an account is linked only by its provider
+    // subject (above) or by an ADMIN, by hand.
     if (!userId && email) {
-      const user = await tx.user.findUnique({ where: { email }, select: { id: true, mediaServer: true } });
-      if (user && (!user.mediaServer || user.mediaServer.toLowerCase() === source.toLowerCase())) {
+      const user = await tx.user.findUnique({ where: { email }, select: { id: true, mediaServer: true, createdByDelegate: true } });
+      if (user && emailLinkAllowed(user, source)) {
         userId = user.id;
       }
     }

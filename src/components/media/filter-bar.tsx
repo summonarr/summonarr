@@ -18,6 +18,7 @@ import { FilterToggleButton } from "./filter-toggle-button";
 import {
   SORT_OPTIONS,
   VOTE_COUNT_OPTIONS,
+  optionsWithActive,
   activeRatingValue,
   filterChips,
   ratingDelta,
@@ -45,6 +46,8 @@ interface FilterBarProps {
   // the server answers, so the grid needs to know one is in flight — owning the
   // transition here would keep isPending out of reach of the spinner.
   navigate: (cb: () => void) => void;
+  /** That transition's isPending: when it ends, no filter change is in flight. */
+  navigating: boolean;
 }
 
 export function FilterBar({
@@ -54,6 +57,7 @@ export function FilterBar({
   showCertification = false,
   maxYear,
   navigate,
+  navigating,
 }: FilterBarProps) {
   const t = useT();
   // `maxYear` arrives from the server so SSR and hydration share one list
@@ -64,7 +68,7 @@ export function FilterBar({
   // usePendingFilters (shared with TopFilterBar). Every control reads `f`, the
   // committed filters with that delta applied, so a pick shows at once instead
   // of snapping back until the server render lands.
-  const { pending, push, clearAll } = usePendingFilters(navigate);
+  const { pending, push, clearAll } = usePendingFilters(navigate, navigating);
   const f = overlayBrowseFilters(filters, pending);
 
   const hasFilters = hasActiveFilters(f);
@@ -130,7 +134,7 @@ export function FilterBar({
           label={t("media.filter.minVotesLabel")}
           value={f.minVoteCount ?? ""}
           onChange={(v) => push({ minVoteCount: v || undefined })}
-          options={VOTE_COUNT_OPTIONS.map((v) => ({ value: v, label: voteCountLabel(t, v) }))}
+          options={optionsWithActive(VOTE_COUNT_OPTIONS, f.minVoteCount).map((v) => ({ value: v, label: voteCountLabel(t, v) }))}
         />
 
         <FilterSelect

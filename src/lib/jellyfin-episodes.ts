@@ -68,8 +68,10 @@ export async function getJellyfinTVEpisodes(
   apiKey: string,
   libraryIds?: Set<string>,
   seriesItemIdToTmdbId?: Map<string, number>,
+  // A sync's lock (guardrail 41): the walk rejects at its next page.
+  signal?: AbortSignal,
 ): Promise<JellyfinTVEpisodeData[]> {
-  const seriesMap = seriesItemIdToTmdbId ?? await getJellyfinSeriesItemIndex(baseUrl, apiKey, libraryIds);
+  const seriesMap = seriesItemIdToTmdbId ?? await getJellyfinSeriesItemIndex(baseUrl, apiKey, libraryIds, signal);
   if (seriesMap.size === 0) return [];
 
   // One row per (tmdb id, season, episode); a show in two libraries keeps the
@@ -97,7 +99,7 @@ export async function getJellyfinTVEpisodes(
   const fields = "SeriesId,ParentIndexNumber,IndexNumber,IndexNumberEnd,DateCreated";
   const parents: ItemsParam[] = libraryIds?.size ? Array.from(libraryIds, (id) => ["ParentId", id] as const) : [null];
   for (const parent of parents) {
-    await walkJellyfinSequential(episodesQuery(baseUrl, parent, fields, "DateCreated,SortName"), apiKey, processEpisodes);
+    await walkJellyfinSequential(episodesQuery(baseUrl, parent, fields, "DateCreated,SortName"), apiKey, processEpisodes, undefined, signal);
   }
   return Array.from(episodeMap.values());
 }
@@ -107,8 +109,11 @@ export async function getJellyfinEpisodesForShow(
   apiKey: string,
   seriesId: string,
   tmdbId: number,
+  signal?: AbortSignal,
 ): Promise<JellyfinTVEpisodeData[]> {
-  const episodes: JellyfinTVEpisodeData[] = [];
+  // One row per (season, episode): two versions of an episode keep the earlier
+  // arrival, as the library-wide path does.
+  const episodes = new Map<string, JellyfinTVEpisodeData>();
   // DateCreated as in getJellyfinTVEpisodes: fix-match rebuilds the show's
   // TVEpisodeCache rows from here, and an undated episode makes its season
   // `unobservable` on the never-watched report (14d).
@@ -121,12 +126,17 @@ export async function getJellyfinEpisodesForShow(
         if (!numbered) continue;
         const addedAt = parseJellyfinDate(ep.DateCreated);
         for (const episodeNumber of episodeNumbersOf(ep, numbered.episode)) {
-          episodes.push({ tmdbId, seasonNumber: numbered.season, episodeNumber, addedAt });
+          const key = `${numbered.season}-${episodeNumber}`;
+          const prev = episodes.get(key);
+          if (!prev) episodes.set(key, { tmdbId, seasonNumber: numbered.season, episodeNumber, addedAt });
+          else if (addedAt && (!prev.addedAt || addedAt < prev.addedAt)) prev.addedAt = addedAt;
         }
       }
     },
+    undefined,
+    signal,
   );
-  return episodes;
+  return Array.from(episodes.values());
 }
 
 // One episode's own item Id, for watch sync (watch-sync.ts) — which marks an

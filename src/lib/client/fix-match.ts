@@ -1,5 +1,7 @@
 import { timedFetch } from "@/lib/client/fetch-json";
 import { withBasePath } from "@/lib/base-path";
+import { abortableSleep } from "@/lib/abortable-sleep";
+import { retryAfterDeltaSeconds } from "@/lib/client/rate-limit";
 import type { Translator } from "@/lib/i18n/translate";
 
 // Client half of the background fix-match (guardrail 37a): start the job, then
@@ -73,12 +75,32 @@ export type FixMatchErrorCode =
 export class FixMatchClientError extends Error {
   code: FixMatchErrorCode;
   status: number | undefined;
-  constructor(code: FixMatchErrorCode, opts: { status?: number; message?: string } = {}) {
+  /** A refused start's Retry-After, in seconds, when the route sent one. */
+  retryAfter: number | undefined;
+  constructor(code: FixMatchErrorCode, opts: { status?: number; message?: string; retryAfter?: number } = {}) {
     super(opts.message ?? code);
     this.name = "FixMatchClientError";
     this.code = code;
     this.status = opts.status;
+    this.retryAfter = opts.retryAfter;
   }
+}
+
+// The route allows 10 starts a minute per admin and sends no Retry-After, so a
+// rate-limited start waits this long before it is tried again.
+const RATE_LIMIT_WAIT_MS = 15_000;
+const RATE_LIMIT_MAX_WAIT_MS = 60_000;
+
+/**
+ * How long a bulk run waits before retrying a title whose START was
+ * rate-limited (429), or null when the failure is not one. A 429 means the
+ * remap never began, so trying it again cannot run one twice.
+ */
+export function fixMatchRetryAfterMs(err: unknown): number | null {
+  if (!(err instanceof FixMatchClientError) || err.status !== 429) return null;
+  const sent = err.retryAfter;
+  if (sent === undefined || !Number.isFinite(sent) || sent <= 0) return RATE_LIMIT_WAIT_MS;
+  return Math.min(sent * 1000, RATE_LIMIT_MAX_WAIT_MS);
 }
 
 // Maps a runFixMatch rejection to a translated line. Shared by every consumer so
@@ -198,47 +220,47 @@ export function hasStalled(now: number, lastChangeAt: number, reportsProgress: b
 }
 const MAX_CONSECUTIVE_POLL_FAILURES = 10;
 
-// A wait the caller's abort cuts short.
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise<void>((resolve) => {
-    if (signal?.aborted) return resolve();
-    const done = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", done);
-      resolve();
-    };
-    const timer = setTimeout(done, ms);
-    signal?.addEventListener("abort", done, { once: true });
-  });
-}
-
 const abortError = () => new DOMException("Fix-match polling aborted", "AbortError");
+const isAbortError = (err: unknown) => err instanceof DOMException && err.name === "AbortError";
 
 // POST the remap as a background job. Throws a FixMatchClientError on refusal.
 async function startFixMatch(body: FixMatchRequest, signal: AbortSignal | undefined): Promise<StartBody> {
-  const res = await timedFetch(withBasePath("/api/admin/fix-match"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...body, async: true }),
-    signal,
-  });
+  let res: Response;
+  try {
+    res = await timedFetch(withBasePath("/api/admin/fix-match"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...body, async: true }),
+      signal,
+    });
+  } catch (err) {
+    // timedFetch's own timeout rejects with an AbortError too. Only the
+    // caller's abort may leave as one: callers read it as "unmounted" and show
+    // nothing, which left a mounted button busy for good.
+    if (isAbortError(err) && !signal?.aborted) throw new FixMatchClientError("http", { status: 0 });
+    throw err;
+  }
   const started = startBodyOf(await res.json().catch(() => null));
   if (!res.ok || !started.ok) {
+    const retryAfter = res.status === 429 ? retryAfterDeltaSeconds(res.headers.get("Retry-After")) ?? undefined : undefined;
     throw started.error
-      ? new FixMatchClientError("failed", { status: res.status, message: started.error })
-      : new FixMatchClientError("http", { status: res.status });
+      ? new FixMatchClientError("failed", { status: res.status, message: started.error, retryAfter })
+      : new FixMatchClientError("http", { status: res.status, retryAfter });
   }
   return started;
 }
 
 // One status read: the job's status, or the HTTP status of a read that never
-// reached it (0 = the fetch failed). Throws jobLost on a 404 and rethrows an abort.
+// reached it (0 = the fetch failed or timed out). Throws jobLost on a 404 and
+// rethrows the caller's abort.
 async function readJobStatus(statusUrl: string, signal: AbortSignal | undefined): Promise<StatusBody | { failed: number }> {
   let pollRes: Response;
   try {
     pollRes = await timedFetch(statusUrl, { signal });
   } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    // The caller's abort only: a poll that hit timedFetch's own timeout is a
+    // failed poll like any other, counted toward the limit.
+    if (isAbortError(err) && signal?.aborted) throw err;
     return { failed: 0 };
   }
   if (pollRes.status === 404) throw new FixMatchClientError("jobLost", { status: 404 });
@@ -290,7 +312,7 @@ export async function runFixMatch(
   let lastSignature = "";
   let lastChangeAt = Date.now();
   while (Date.now() < deadline) {
-    await sleep(POLL_INTERVAL_MS, opts.signal);
+    await abortableSleep(POLL_INTERVAL_MS, opts.signal);
     // The caller navigated away (component unmount): stop the 3s poll loop —
     // the server-side job keeps running by design. AbortError shape so callers
     // can distinguish it from a real failure.

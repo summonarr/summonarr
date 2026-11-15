@@ -7,7 +7,7 @@
 import { prisma } from "./prisma";
 import { arrRequesterTagLabel } from "./arr-tags";
 import { arrFetch, arrErrorMessage, ArrResponseError, asRecord, singleFlight, type ArrRecord } from "./arr-client";
-import { getCfg, instanceLabel, type ArrCfgFull, type ArrVariant } from "./arr-config";
+import { getCfg, instanceLabel, normaliseVariant, type ArrCfgFull, type ArrVariant } from "./arr-config";
 import { pickSeriesByTmdbId, resolveSonarrSeries } from "./arr-id-map";
 import { findRadarrMovie, findSonarrSeries } from "./arr-lookup";
 import { posInt } from "./arr-parse";
@@ -460,7 +460,7 @@ async function remediateExistingSeries(cfg: ArrCfgFull, variant: ArrVariant, tvd
       // upgrades for every episode already on disk. Dynamic import: arr-missing-data
       // imports arr.ts, which re-exports this module. Nothing missing is fine.
       const { searchMissing, NothingMissingError } = await import("./arr-missing-data");
-      await searchMissing("sonarr", variant === "hd" ? "" : variant, id, new Date()).catch((e) => {
+      await searchMissing("sonarr", normaliseVariant(variant), id, new Date()).catch((e) => {
         if (!(e instanceof NothingMissingError)) throw e;
       });
     }

@@ -33,13 +33,22 @@
 //     after the v4 bump without one of their own, so no earlier version
 //     guarantees them.
 //
-// v3, v4 and v5 are ADDITIVE: MIN_API_VERSION stays 1, so nothing is dropped
+// v6: the admin Activity users list for a native client — GET
+//     /api/play-history/users (every media-server user's plays, watch time and
+//     last activity, with the live "still on the server" answer the web page's
+//     Active / Removed filter uses), and the per-pair FULL watch sync — POST
+//     /api/admin/watch-sync/run { pairId, full: true }.
+//     The rest of watch sync (/api/admin/watch-sync/**) shipped before v5, but
+//     a v5 server's run route read no body: sent the full-sync body it runs an
+//     ordinary sync, so a client offers "Full sync" only from v6.
+//
+// v3 through v6 are ADDITIVE: MIN_API_VERSION stays 1, so nothing is dropped
 // and no client is locked out. They exist so a native client can ASK whether
 // these routes are here before offering them, instead of advertising a screen
 // that 404s (or, for a feature flag a pre-v4 server doesn't know, reads as on).
 // That is the guardrail-25 posture — feature-gate on the reported version,
 // don't raise the floor.
-export const API_VERSION = 5;
+export const API_VERSION = 6;
 
 // Oldest contract version the server still answers. Bump only when you drop
 // backward-compatible support for an old client contract.

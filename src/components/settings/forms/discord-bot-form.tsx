@@ -32,9 +32,11 @@ export function DiscordBotForm(props: DiscordBotFormProps) {
   // route's 10s per-key cooldown, a 429), and changing a field back to its
   // page-load value would look like "no change" and never be saved.
   const [saved, setSaved] = useState<DiscordValues>(props.values);
-  // Whether a token is saved. The token is masked on GET, so the route can't
-  // tell a blank field from an echo and never clears it: a blank is not sent.
+  // Whether a token is saved. The field starts empty over a saved token, so a
+  // blank never means "remove": Save sends none, and only the Remove button
+  // (after its confirm) sends one.
   const [tokenSaved, setTokenSaved] = useState(props.tokenSaved);
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
   // Only a success fades (after 5 s); an error (a bad snowflake, the 10s write
   // cooldown) stays until the next edit or attempt, and an edit during a save
   // keeps Save locked until the answer arrives (useSettingsSave).
@@ -74,6 +76,16 @@ export function DiscordBotForm(props: DiscordBotFormProps) {
       setValues((prev) => (prev.discordBotToken === changed.discordBotToken ? { ...prev, discordBotToken: "" } : prev));
       setSaved((prev) => ({ ...prev, discordBotToken: "" }));
     }
+  }
+
+  async function handleRemoveToken() {
+    setConfirmingRemove(false);
+    setNoChanges(false);
+    const result = await save({ discordBotToken: "" });
+    if (!result.ok) return;
+    setTokenSaved(false);
+    setValues((prev) => ({ ...prev, discordBotToken: "" }));
+    setSaved((prev) => ({ ...prev, discordBotToken: "" }));
   }
 
   // A labelled text input bound to one setting key.
@@ -182,6 +194,29 @@ export function DiscordBotForm(props: DiscordBotFormProps) {
               <p className="text-xs text-zinc-500">{t("settings.form.discord.botTokenHelp")}</p>
               {values.discordBotToken === "" && tokenSaved && (
                 <p className="text-xs text-zinc-500">{t("settings.form.discord.botTokenKept")}</p>
+              )}
+              {tokenSaved && !confirmingRemove && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={status === "saving"}
+                  onClick={() => setConfirmingRemove(true)}
+                  className="border-zinc-700 text-zinc-400 hover:text-zinc-100"
+                >
+                  {t("settings.form.apiKey.removeKey")}
+                </Button>
+              )}
+              {tokenSaved && confirmingRemove && (
+                <div role="group" aria-label={t("settings.form.apiKey.removeKey")} className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-zinc-400">{t("settings.form.discord.botTokenConfirmRemove")}</span>
+                  <Button type="button" variant="destructive" size="sm" autoFocus disabled={status === "saving"} onClick={() => void handleRemoveToken()}>
+                    {t("settings.form.common.remove")}
+                  </Button>
+                  <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmingRemove(false)}>
+                    {t("settings.form.common.cancel")}
+                  </Button>
+                </div>
               )}
             </div>
             {pair(

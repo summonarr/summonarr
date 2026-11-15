@@ -112,7 +112,8 @@ export function webAuthnUserHandle(userId: string): string {
 // nothing about the hash itself. A changed password ⇒ a different value ⇒ the
 // pending challenge is dead.
 //
-// The key is an HKDF subkey of NEXTAUTH_SECRET (like mfa-token.ts keyFor), never
+// The key is an HKDF subkey of NEXTAUTH_SECRET derived here (it is an HMAC
+// fingerprint, not a signer, so it is not a signing-keys.ts purpose), never
 // the raw secret: that one signs session JWTs, and every use of a key outside
 // its purpose is a cross-protocol risk. Changing the derivation changes every
 // pwv value, so challenge tokens in flight at a deploy (5-minute TTL) die.
@@ -275,7 +276,12 @@ export async function confirmTotpEnrollmentInTx(
     where: { userId, enabledAt: null, updatedAt: row.updatedAt },
     data: { enabledAt: new Date(nowMs), lastUsedStep: verdict.step },
   });
-  return res.count === 1 ? "ok" : "invalid";
+  if (res.count === 1) return "ok";
+  // Lost the race: say which way, so a correct code isn't reported wrong when a
+  // concurrent confirm already enabled the factor or the pending secret is gone.
+  const now = await tx.userTotp.findUnique({ where: { userId }, select: { enabledAt: true } });
+  if (!now) return "no-pending";
+  return now.enabledAt ? "already-enabled" : "invalid";
 }
 
 // Serializes a user's enrollment writes. Under READ COMMITTED two concurrent

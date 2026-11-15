@@ -50,3 +50,11 @@ test("the manager sequences reloads, locks the form while saving and announces i
   assert.match(src, /\{actionError && <p role="alert"/);
   assert.match(src, /<p role="status" className=\{`mt-1 flex items-center gap-1 text-xs/);
 });
+
+test("a priority that is not a number is sent as typed, never as a null from NaN", () => {
+  const d = { ...emptyDraft(), kind: "gotify" as const, url: "https://gotify.example", priority: "e" };
+  const config = bodyFrom(d).config as Record<string, unknown>;
+  assert.equal(config.priority, "e");
+  assert.equal(JSON.parse(JSON.stringify(bodyFrom(d))).config.priority, "e");
+  assert.equal((bodyFrom({ ...d, priority: "7" }).config as Record<string, unknown>).priority, 7);
+});

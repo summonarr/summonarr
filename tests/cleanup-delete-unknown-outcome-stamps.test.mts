@@ -1,4 +1,4 @@
-// C015 (audit fix, unit "release"): a Library cleanup delete whose OUTCOME IS
+// (audit fix, unit "release"): a Library cleanup delete whose OUTCOME IS
 // UNKNOWN — a timeout, a dropped connection, a gateway's 502/504 — keeps the
 // guardrail-14b `cleanedUpAt` stamps. The arr may have taken the delete (its
 // handlers take no abort token), and an unstamp on a deleted title lets the
@@ -343,7 +343,7 @@ const MOVIE_100 = { tmdbId: 100, mediaType: "MOVIE" };
 const timeoutError = () => Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
 const r100 = (id: "r100a" | "r100b") => requests.find((r) => r.id === id)!;
 
-test("C015: every DELETE times out ⇒ failed + uncertain, and the stamps STAY — the arr may have deleted it (14b)", async () => {
+test("every DELETE times out ⇒ failed + uncertain, and the stamps STAY — the arr may have deleted it (14b)", async () => {
   deleteThrows = () => timeoutError();
   const res = await execute(await mintSession(), { items: [MOVIE_100], confirmTargets: 2 });
   assert.equal(res.status, 200);
@@ -363,7 +363,7 @@ test("C015: every DELETE times out ⇒ failed + uncertain, and the stamps STAY �
   assert.deepEqual(audits[0].details.failed, ["radarr:default", "radarr:4k"]);
 });
 
-test("C015: a gateway's 504 on every DELETE is an unknown outcome too — the stamps stay", async () => {
+test("a gateway's 504 on every DELETE is an unknown outcome too — the stamps stay", async () => {
   deleteStatus = () => 504;
   const body = await (await execute(await mintSession(), { items: [MOVIE_100], confirmTargets: 2 })).json();
   assert.equal(body.results[0].status, "failed");
@@ -372,7 +372,7 @@ test("C015: a gateway's 504 on every DELETE is an unknown outcome too — the st
   assert.ok(r100("r100b").cleanedUpAt instanceof Date);
 });
 
-test("C015: a dropped connection on one instance of a partial delete keeps THAT instance's stamp (only a refusal unstamps)", async () => {
+test("a dropped connection on one instance of a partial delete keeps THAT instance's stamp (only a refusal unstamps)", async () => {
   deleteThrows = (origin) => (origin === RADARR_4K ? new TypeError("fetch failed") : null);
   const body = await (await execute(await mintSession(), { items: [MOVIE_100], confirmTargets: 2 })).json();
   assert.equal(body.results[0].status, "partial");
@@ -383,7 +383,7 @@ test("C015: a dropped connection on one instance of a partial delete keeps THAT 
   assert.equal(audits[0].details.requestsStamped, 2);
 });
 
-test("C015: one instance refuses (503) and the other times out — only the refusing instance's requests are unstamped", async () => {
+test("one instance refuses (503) and the other times out — only the refusing instance's requests are unstamped", async () => {
   deleteStatus = (origin) => (origin === RADARR ? 503 : 200);
   deleteThrows = (origin) => (origin === RADARR_4K ? timeoutError() : null);
   const body = await (await execute(await mintSession(), { items: [MOVIE_100], confirmTargets: 2 })).json();
@@ -393,7 +393,7 @@ test("C015: one instance refuses (503) and the other times out — only the refu
   assert.ok(r100("r100b").cleanedUpAt instanceof Date, "4K's outcome is unknown — keep its stamp");
 });
 
-test("C015 control: a definite refusal everywhere (503) still removes the stamps this call wrote, with no `uncertain`", async () => {
+test("control: a definite refusal everywhere (503) still removes the stamps this call wrote, with no `uncertain`", async () => {
   deleteStatus = () => 503;
   const body = await (await execute(await mintSession(), { items: [MOVIE_100], confirmTargets: 2 })).json();
   assert.equal(body.results[0].status, "failed");
@@ -402,7 +402,7 @@ test("C015 control: a definite refusal everywhere (503) still removes the stamps
   assert.equal(r100("r100b").cleanedUpAt, null);
 });
 
-test("C015: a definite 500 on one instance still unstamps that instance's requests (the partial rule is unchanged)", async () => {
+test("a definite 500 on one instance still unstamps that instance's requests (the partial rule is unchanged)", async () => {
   deleteStatus = (origin) => (origin === RADARR_4K ? 500 : 200);
   const body = await (await execute(await mintSession(), { items: [MOVIE_100], confirmTargets: 2 })).json();
   assert.equal(body.results[0].status, "partial");
@@ -410,7 +410,7 @@ test("C015: a definite 500 on one instance still unstamps that instance's reques
   assert.equal(r100("r100b").cleanedUpAt, null);
 });
 
-test("C015: an uncertain-only run still drops the cached Radarr/Sonarr listing — the title may be gone", async () => {
+test("an uncertain-only run still drops the cached Radarr/Sonarr listing — the title may be gone", async () => {
   const listings = () => calls.filter((c) => c.method === "GET" && c.origin === RADARR && c.path === "/api/v3/movie").length;
   await getCachedArrLibraryIndex(); // warm the read-only views' cache
   deleteThrows = () => timeoutError();

@@ -18,6 +18,7 @@ import {
   tombstoneRemovedPushRowsInTx,
 } from "@/lib/push-registration";
 import { readPushSubscriptionCap } from "@/lib/push-cap";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 import { canonicalizePushEndpoint, checkWebPushEndpoint, parsePushLabel, type WebPushEndpointVerdict } from "@/lib/push-body";
 
 // The 400 for each way a Web Push endpoint fails the known-services check.
@@ -80,6 +81,10 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // count and leave the user one over the cap. Statements run one at a time and
   // nothing inside is caught (guardrails 23, 23c).
   const userId = session.user.id;
+  const keys = { p256dh: encryptToken(p256dh), auth: encryptToken(auth) };
+  // True once the transaction has reached its final insert, so the unique
+  // violation mapped below is that insert's and no other statement's.
+  let inserting = false;
   const outcome = await prisma.$transaction(async (tx) => {
     await lockUserPushRegistrationsInTx(tx, userId);
     const existing = await tx.pushSubscription.findUnique({ where: { endpoint: safeEndpoint } });
@@ -98,12 +103,23 @@ export const POST = withAuth(async (req, _ctx, session) => {
       if (!alreadyOwns) await evictOldestForCapInTx(tx, userId, cap);
     }
 
-    await tx.pushSubscription.upsert({
-      where: { endpoint: safeEndpoint },
-      update: { p256dh: encryptToken(p256dh), auth: encryptToken(auth), ...(sanitizedLabel !== undefined && { label: sanitizedLabel }) },
-      create: { endpoint: safeEndpoint, p256dh: encryptToken(p256dh), auth: encryptToken(auth), userId, label: sanitizedLabel },
+    // Never an upsert by endpoint: the lock is per USER, so another account can
+    // insert this endpoint after the read above, and an upsert's update branch
+    // would then rewrite THAT account's keys. The update is owner-scoped, and
+    // the insert is the transaction's last statement, so its unique violation
+    // propagates (guardrail 23) and is answered as "taken" below.
+    const updated = await tx.pushSubscription.updateMany({
+      where: { endpoint: safeEndpoint, userId },
+      data: { ...keys, ...(sanitizedLabel !== undefined && { label: sanitizedLabel }) },
     });
+    if (updated.count === 0) {
+      inserting = true;
+      await tx.pushSubscription.create({ data: { endpoint: safeEndpoint, ...keys, userId, label: sanitizedLabel } });
+    }
     return "ok" as const;
+  }).catch((err: unknown) => {
+    if (inserting && isPrismaErrorCode(err, "P2002")) return "taken" as const;
+    throw err;
   });
 
   if (outcome === "taken") {

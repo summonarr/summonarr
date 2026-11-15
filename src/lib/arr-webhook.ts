@@ -14,10 +14,11 @@ import { arrSettingKey, DEFAULT_ARR_INSTANCE, effectiveWebhookSecretFrom, LEGACY
 import { checkAndRecordWebhookJson, clearWebhookReplayDigestJson } from "./webhook-replay";
 import { forwardArrHealthEvent } from "./arr-health-notify";
 import { emitNotificationEvent } from "./notify-agents";
-import { notifyAdminGrabCompletedPush } from "./push";
+import { claimGrabAndQueuePush, deliverGrabPush, grabPushOf } from "./issue-grab-notify";
 import { autoResolveIssueForGrab } from "./issue-auto-resolve";
+import { confirmDeliveredGrabs } from "./arr-grab-confirm";
 import { warnOnChange, forgetWarnOnChange } from "./log-dedup";
-import { processSingleton } from "./process-singleton";
+import { requestArrWatchRecount } from "./arr-watch-trigger";
 
 const MAX_WEBHOOK_BYTES = 1_048_576;
 const SERVICE_NAME: Record<ArrService, string> = { radarr: "Radarr", sonarr: "Sonarr" };
@@ -148,7 +149,8 @@ export async function handleArrWebhook<P extends { eventType?: unknown }>(
     // reads through its payload view (arr-webhook-payload.ts), never `P` itself.
     payload = parsed;
   } catch (err) {
-    console.warn(`${scope} 400 invalid JSON:`, err);
+    // The error's NAME only: a SyntaxError's message quotes a slice of the body.
+    console.warn(`${scope} 400 invalid JSON (${err instanceof Error ? err.name : "error"})`);
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
@@ -197,11 +199,11 @@ export async function handleArrWebhook<P extends { eventType?: unknown }>(
     return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
   }
 
-  // Pushes a failed delivery left for a later webhook, retried in the
-  // background (throttled, never awaited, never failing this delivery).
-  void retryPendingGrabPushes().catch((err: unknown) => {
-    console.warn(`${scope} grab push retry sweep failed:`, err instanceof Error ? err.message : err);
-  });
+  // A first, authenticated delivery means the download queue just changed:
+  // ask for a monitor run so the admin nav's queue count follows it now, not
+  // at the next scheduled tick. Coalesced and spaced (arr-watch-trigger.ts);
+  // synchronous, never throws, never awaited.
+  requestArrWatchRecount();
 
   try {
     return await dispatch({ payload, arrInstance, instances });
@@ -217,134 +219,72 @@ export async function handleArrWebhook<P extends { eventType?: unknown }>(
 /**
  * Claim the issue grabs a Download completed and tell the admin who fired them.
  *
- * notifiedAt is the outbound-emit claim and is NEVER reset: ntfy/Gotify/
- * NotificationAgent fire once per grab. Web push may still fail after that; a
- * Setting `grabPushRetry:<id>` lets the next Download retry the push without
- * re-opening the emit (unclaiming notifiedAt used to re-fire the agents).
+ * notifiedAt is the claim and is NEVER reset: the outbound agents
+ * (ntfy/Gotify/webhook) fire once per grab, and the issue is auto-resolved
+ * once. The admin's push is queued in the claim's own transaction
+ * (issue-grab-notify.ts) and stays queued until the push service has answered,
+ * so a push that failed — or a restart right after the claim — is sent by the
+ * outbox drain instead of being lost. An already-claimed grab is ignored here:
+ * whatever it still owes is the drain's.
  * Callers pass only grabs this delivery completed, already scoped to the
  * firing instance.
+ *
+ * The delivery itself proves nothing (the secret is the only auth), and the
+ * claim is one-shot: it tells the admin the replacement landed and can close
+ * the issue (guardrail 5j). So a grab is claimed only once the firing instance
+ * confirms a file in the grab's scope added after the grab
+ * (arr-grab-confirm.ts) — asked only when there is one to claim, so the
+ * common delivery pays no extra call. A refuted grab stays pending for a later
+ * delivery. Returned: the grabs the instance gave no usable answer for; the
+ * routes try those once more after the library scan.
  */
-export async function claimCompletedGrabs(grabs: IssueGrab[], service: ArrService): Promise<void> {
-  if (grabs.length === 0) return;
+export async function claimCompletedGrabs(
+  grabs: IssueGrab[],
+  service: ArrService,
+  delivery: { arrInstance: string; tvdbId?: number | null },
+): Promise<IssueGrab[]> {
+  const unclaimed = grabs.filter((grab) => grab.notifiedAt === null);
+  if (unclaimed.length === 0) return [];
   const scope = `[webhook/${service}]`;
   const now = new Date();
+  const confirmation = await confirmDeliveredGrabs(service, delivery.arrInstance, unclaimed, { tvdbId: delivery.tvdbId });
   await Promise.all(
-    grabs.map(async (grab) => {
-      const retryKey = grabPushRetryKey(grab.id);
-      if (grab.notifiedAt !== null) {
-        // Already emitted. Consume the push-retry marker (CAS): a 0 count
-        // means no pending retry, or another delivery already took it.
-        const taken = await prisma.setting.deleteMany({ where: { key: { in: [retryKey] } } });
-        if (taken.count === 0) return;
-      } else {
-        // CAS: ensure only one concurrent webhook fires the notification for this grab
-        const claimed = await prisma.issueGrab.updateMany({
-          where: { id: grab.id, notifiedAt: null },
-          data: { notifiedAt: now },
-        });
-        if (claimed.count === 0) return;
+    unclaimed.map(async (grab) => {
+      // Not confirmed by the instance: no claim, no emit, no auto-resolve.
+      if (!confirmation.confirmed.has(grab.id)) return;
+      // CAS: only one concurrent webhook claims the grab, and the claim queues
+      // the push it owes in the same transaction.
+      if (!(await claimGrabAndQueuePush(grab, now))) return;
 
-        emitNotificationEvent({
-          event: "arr.grab_completed",
-          media: { type: grab.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: grab.tmdbId, title: grab.title },
-          request: { instance: grab.arrInstance },
-        });
-        // First claim only: the replacement landed, so close the issue (when enabled).
-        void autoResolveIssueForGrab(grab, now);
-      }
+      emitNotificationEvent({
+        event: "arr.grab_completed",
+        media: { type: grab.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: grab.tmdbId, title: grab.title },
+        request: { instance: grab.arrInstance },
+      });
+      // The replacement landed, so close the issue (when enabled).
+      void autoResolveIssueForGrab(grab, now);
 
-      const outcome = await notifyAdminGrabCompletedPush(grabPushOf(grab));
-      // "failed" → keep notifiedAt (emit stays claimed) and record a push-only
-      // retry. "skipped-no-subs" / "skipped-no-keys" → leave notifiedAt set
-      // (retrying won't help: the admin has no push subscription or keys set
-      // up), but log so an operator can wire up an email/Discord backstop.
-      // "skipped-disabled" → push is switched off for the deployment: nothing
-      // to retry and nothing to log. "delivered" → done.
-      if (outcome === "failed") {
-        await prisma.setting.createMany({
-          data: [{ key: retryKey, value: now.toISOString() }],
-          skipDuplicates: true,
-        });
-        console.warn(`${scope} grab notification failed, will retry push`);
-      } else if (outcome === "skipped-no-subs" || outcome === "skipped-no-keys") {
-        console.warn(`${scope} grab push skipped (${outcome}) for user=${grab.triggeredById} issue=${grab.issueId}`);
-      }
+      await deliverGrabPush(grab.id, grabPushOf(grab), scope);
     }),
   );
+  return unclaimed.filter((grab) => confirmation.unverified.has(grab.id));
 }
-
-const GRAB_PUSH_RETRY_PREFIX = "grabPushRetry:";
-const grabPushRetryKey = (grabId: string) => `${GRAB_PUSH_RETRY_PREFIX}${grabId}`;
-
-type GrabPushFields = Pick<IssueGrab, "triggeredById" | "title" | "tmdbId" | "mediaType" | "scope" | "seasonNumber" | "episodeNumber" | "issueId">;
-const grabPushOf = (grab: GrabPushFields): Parameters<typeof notifyAdminGrabCompletedPush>[0] => ({
-  userId: grab.triggeredById,
-  title: grab.title,
-  tmdbId: grab.tmdbId,
-  mediaType: grab.mediaType,
-  scope: grab.scope,
-  seasonNumber: grab.seasonNumber,
-  episodeNumber: grab.episodeNumber,
-  issueId: grab.issueId,
-});
-
-/** A retry marker is retried only once it is this old: a fresh one belongs to the delivery that wrote it. */
-export const GRAB_PUSH_RETRY_MIN_AGE_MS = 10 * 60_000;
-/** Past this a push no longer helps (the grab is old news): the marker is dropped unsent. */
-export const GRAB_PUSH_RETRY_TTL_MS = 24 * 60 * 60_000;
-/** The sweep runs at most this often per process. */
-export const GRAB_PUSH_RETRY_SWEEP_INTERVAL_MS = 5 * 60_000;
-const MAX_GRAB_PUSH_RETRIES_PER_SWEEP = 20;
-
-const grabPushSweep = processSingleton("arr-webhook:grabPushSweep", () => ({ lastAt: Number.NEGATIVE_INFINITY }));
 
 /**
- * Retry the web pushes a failed delivery left as `grabPushRetry:<grabId>`.
- * Before this only a later Download for the SAME title retried one, and the
- * first claim usually resolved the issue, so the marker stayed forever. Each
- * marker is claimed by deleting it (a count of 0 means another delivery took
- * it), the push is retried once, and a push that fails again writes the marker
- * back with its ORIGINAL time, so the TTL counts from the first failure. The
- * emit (notifiedAt) is never touched. Throttled per process unless `force`.
+ * The one later attempt at the grabs a delivery could not verify (the instance
+ * gave no usable answer). Runs from the routes' after() work, once the library
+ * scan has waited out the instance's queue. Never throws; still unverifiable
+ * leaves them pending for a later delivery.
  */
-export async function retryPendingGrabPushes(opts: {
-  now?: Date;
-  force?: boolean;
-  push?: typeof notifyAdminGrabCompletedPush;
-} = {}): Promise<{ retried: number; expired: number }> {
-  const now = opts.now ?? new Date();
-  const nowMs = now.getTime();
-  const out = { retried: 0, expired: 0 };
-  if (!opts.force && nowMs - grabPushSweep.lastAt < GRAB_PUSH_RETRY_SWEEP_INTERVAL_MS) return out;
-  grabPushSweep.lastAt = nowMs;
-  const push = opts.push ?? notifyAdminGrabCompletedPush;
-  const rows = await prisma.setting.findMany({
-    where: { key: { startsWith: GRAB_PUSH_RETRY_PREFIX } },
-    select: { key: true, value: true },
-    take: MAX_GRAB_PUSH_RETRIES_PER_SWEEP,
-  });
-  for (const row of rows) {
-    if (!row.key.startsWith(GRAB_PUSH_RETRY_PREFIX)) continue;
-    const at = Date.parse(row.value ?? "");
-    const age = Number.isFinite(at) ? nowMs - at : Number.POSITIVE_INFINITY;
-    if (age < GRAB_PUSH_RETRY_MIN_AGE_MS) continue;
-    const taken = await prisma.setting.deleteMany({ where: { key: { in: [row.key] } } });
-    if (taken.count === 0) continue;
-    if (age > GRAB_PUSH_RETRY_TTL_MS) {
-      out.expired++;
-      continue;
-    }
-    const grab = await prisma.issueGrab.findUnique({ where: { id: row.key.slice(GRAB_PUSH_RETRY_PREFIX.length) } });
-    if (!grab) continue;
-    out.retried++;
-    if ((await push(grabPushOf(grab))) === "failed") {
-      await prisma.setting.createMany({ data: [{ key: row.key, value: row.value ?? now.toISOString() }], skipDuplicates: true });
-    }
+export async function retryUnverifiedGrabs(
+  grabs: IssueGrab[],
+  service: ArrService,
+  delivery: { arrInstance: string; tvdbId?: number | null },
+): Promise<void> {
+  if (grabs.length === 0) return;
+  try {
+    await claimCompletedGrabs(grabs, service, delivery);
+  } catch (err) {
+    console.warn(`[webhook/${service}] deferred grab claim failed:`, err instanceof Error ? err.message : err);
   }
-  return out;
-}
-
-/** Test seam: let the next sweep run at once. */
-export function _resetGrabPushSweepForTests(): void {
-  grabPushSweep.lastAt = Number.NEGATIVE_INFINITY;
 }

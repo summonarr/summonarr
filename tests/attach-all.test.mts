@@ -452,6 +452,20 @@ test("warm ratings are the merge base: rating fields survive with flags overlaid
   ]);
 });
 
+test("a signed-in viewer's cold titles draw on their cold-lookup budget: once it is spent, nothing is fetched or deferred for them", async () => {
+  const { admitColdLookup, COLD_LOOKUP_BUDGET } = await import("../src/lib/ratings-cold-budget.ts");
+  // Nothing is cached for this title, so the ratings pass would defer a fetch
+  // through after() — which throws here, outside a request scope. That is what
+  // an unspent budget does:
+  await assert.rejects(attachAllAvailability([media(9001, "movie")], "u_cold_fresh"));
+  // With the viewer's budget spent the title is served bare and nothing is
+  // deferred, so the call returns.
+  for (let i = 0; i < COLD_LOOKUP_BUDGET; i++) admitColdLookup("u_cold_spent");
+  const out = await attachAllAvailability([media(9001, "movie")], "u_cold_spent");
+  assert.equal(out.length, 1);
+  assert.equal("imdbRating" in out[0], false);
+});
+
 test("skipRatings bypasses the ratings pass — the ratings cache is never queried", async () => {
   ratingsCache.rows = [
     { key: "mdblist:tmdb:movie:603", data: JSON.stringify(MDBLIST_603), cachedAt: new Date(), expiresAt: FRESH() },

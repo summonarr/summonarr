@@ -967,6 +967,17 @@ test("setup-status is public and returns only needsSetup, tracking whether any u
   assert.deepEqual(await bodyOf(seeded), { needsSetup: false });
 });
 
+test("setup-status agrees with register: a completed setup closes it even with no users left", async () => {
+  settings.set("setup_completed_at", "2026-01-01T00:00:00.000Z");
+  try {
+    const res = await setupStatusGet(setupReq());
+    assert.equal(res.status, 200);
+    assert.deepEqual(await bodyOf(res), { needsSetup: false });
+  } finally {
+    settings.delete("setup_completed_at");
+  }
+});
+
 test("setup-status caps the per-IP probe rate (429)", async () => {
   const ip = freshIp();
   for (let i = 0; i < 30; i++) checkRateLimit(`setup-status:${ip}`, 30, 60_000);

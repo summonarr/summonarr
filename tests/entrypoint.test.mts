@@ -585,6 +585,40 @@ test("the runner stage's app tree is root-owned; only /data and the Next cache a
   assert.ok(runner.indexOf("\nUSER nextjs\n") > chownAt);
 });
 
+test("the env templates never set BASE_PATH, so the image's build value reaches the cron loop and the health probe", () => {
+  // Both compose files load the env file into the app container, and a value
+  // there — an empty `BASE_PATH=` included — outranks the image's own ENV.
+  assert.match(DOCKERFILE, /\nARG BASE_PATH=""\nENV BASE_PATH=\$BASE_PATH\n/);
+  for (const f of [".env.example", "docker-container/.env.example"]) {
+    const env = read(f);
+    assert.doesNotMatch(env, /^\s*(export\s+)?BASE_PATH\s*=/m, `${f} must not set BASE_PATH`);
+    assert.match(env, /^# BASE_PATH=$/m, `${f} keeps the commented-out line`);
+  }
+});
+
+test("the GHCR compose gives Postgres its password and nothing else from the env file", () => {
+  const f = "docker-container/docker-compose.yml";
+  const c = read(f);
+  const start = c.indexOf("\n  postgres:\n");
+  const end = c.indexOf("\n  summonarr:\n");
+  assert.ok(start >= 0 && end > start, `${f}: the postgres service`);
+  const svc = c.slice(start, end);
+  assert.doesNotMatch(svc, /^\s*env_file:/m, `${f}: no env_file on postgres (it would carry the app's secrets)`);
+  assert.match(svc, /^      POSTGRES_PASSWORD: "\$\{POSTGRES_PASSWORD:\?[^}]+\}"$/m, `${f}: the password is interpolated, and required`);
+  const env = svc.slice(svc.indexOf("\n    environment:\n"), svc.indexOf("\n    volumes:\n"));
+  const keys = [...env.matchAll(/^      ([A-Z_]+):/gm)].map((m) => m[1]);
+  assert.deepEqual(keys, ["POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD"], `${f}: the whole environment`);
+});
+
+test("the source-build compose reads .env.local for Postgres through env_file, so no --env-file flag is needed", () => {
+  const c = read("docker-compose.yml");
+  const start = c.indexOf("\n  postgres:\n");
+  const end = c.indexOf("\n  summonarr:\n");
+  const svc = c.slice(start, end);
+  assert.match(svc, /^    env_file:\n      - \.env\.local$/m);
+  assert.doesNotMatch(read("README.md"), /--env-file \.env\.local/);
+});
+
 test("the image healthcheck probes with busybox wget, not a node process per probe", () => {
   const m = DOCKERFILE.match(/HEALTHCHECK [^\n]*\\\n\s+CMD ([^\n]*)\n/);
   assert.ok(m, "Dockerfile HEALTHCHECK command");

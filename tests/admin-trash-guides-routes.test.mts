@@ -646,6 +646,15 @@ test("apply rejects a malformed body with 400, and an oversized one with a cap (
   assert.ok(res.status === 400 || res.status === 413);
 });
 
+test("apply de-duplicates repeated spec ids and refuses an id past the length bound", async () => {
+  const t = await mintSession();
+  specs = [spec({ id: "curated-0" })];
+  assert.equal((await postApply(t, { specIds: ["curated-0", "curated-0", "curated-0"] })).status, 200);
+  assert.deepEqual(appliedSpecIds()[0], ["curated-0"]);
+  const long = await postApply(t, { specIds: ["z".repeat(201)] });
+  assert.equal(long.status, 400);
+});
+
 test("apply audits the spec ids and the target instance", async () => {
   const t = await mintSession();
   specs = [spec({ id: "curated-0" })];

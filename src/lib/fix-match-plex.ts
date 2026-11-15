@@ -4,7 +4,16 @@ import { tmdbAuth } from "@/lib/tmdb-auth";
 import { getPlexConfig } from "@/lib/plex-config";
 import { mediaInstanceLabel, type MediaInstanceKey } from "@/lib/media-instances";
 import type { FixMatchReport } from "@/lib/fix-match-jobs";
-import { plexAdminHeaders, tmdbDetailsCacheKey } from "@/lib/fix-match-shared";
+import {
+  TMDB_HOSTS,
+  plexAdminHeaders,
+  plexGuidIds,
+  plexImdbAgentSearch,
+  plexImdbGuidSearch,
+  plexTitleYearSearch,
+  plexTmdbAgentSearch,
+  tmdbDetailsCacheKey,
+} from "@/lib/fix-match-shared";
 import {
   FixMatchDiagnosticError,
   isRecord,
@@ -19,8 +28,6 @@ import {
 // The Plex half of a fix-match remap: unmatch the item, re-match it to the
 // correct TMDB id, and poll until Plex confirms. The route's modes
 // (fix-match-apply.ts) call fixPlexMatch once per copy of a title.
-
-const TMDB_HOSTS = ["api.themoviedb.org"];
 
 // Fallback candidates applied live after the first match did not confirm. Each
 // costs an apply, a refresh and a 30 s poll on the item, and holds a job slot
@@ -44,13 +51,7 @@ export class PlexUnmatchedError extends Error {
 /** One /matches search result, as far as fix-match reads it. */
 export type PlexSearchResult = { guid: string; name?: string; year?: number; guidIds: string[] };
 
-/** The `Guid[].id` strings of a Plex metadata item or search result. */
-export function plexGuidIds(item: unknown): string[] {
-  if (!isRecord(item) || !Array.isArray(item.Guid)) return [];
-  const ids: string[] = [];
-  for (const g of item.Guid) if (isRecord(g) && typeof g.id === "string") ids.push(g.id);
-  return ids;
-}
+export { plexGuidIds };
 
 function plexYear(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isInteger(value) && value > 0) return value;
@@ -175,9 +176,11 @@ const refreshItem = (s: PlexSession) => refreshBestEffort(itemUrl(s, "/refresh?f
 // The item's own title and year, when the TMDB cache had none. Null leaves the
 // cached values alone (the read failed).
 async function plexItemTitle(s: PlexSession): Promise<{ title: string; year: string } | null> {
-  const res = await safeFetchAdminConfigured(itemUrl(s), { headers: s.headers, timeoutMs: 15_000 });
-  if (!res.ok) {
-    console.warn("[fix-match]", `${s.tag} Plex metadata fetch failed: ${res.status}`);
+  // Optional input: a timeout or DNS failure reads as "no title", like the
+  // other best-effort reads here, and never fails the whole remap.
+  const res = await safeFetchAdminConfigured(itemUrl(s), { headers: s.headers, timeoutMs: 15_000 }).catch(() => null);
+  if (!res?.ok) {
+    console.warn("[fix-match]", `${s.tag} Plex metadata fetch failed: ${res ? res.status : "no answer"}`);
     return null;
   }
   const json = await readJsonOrNull(res);
@@ -229,11 +232,6 @@ async function plexMatchSearch(s: PlexSession, params: Record<string, string>): 
   return Array.isArray(list) ? list : [];
 }
 
-const imdbAgentSearch = (imdbId: string) =>
-  ({ manual: "1", includeGuids: "1", q: imdbId, agent: "com.plexapp.agents.imdb", language: "en" });
-const tmdbAgentSearch = (tmdbId: number) =>
-  ({ manual: "1", includeGuids: "1", q: String(tmdbId), agent: "com.plexapp.agents.themoviedb", language: "en" });
-
 type ChosenMatch = { guid: string; name: string; year: string };
 
 // A GUID search across the imdb and tmdb agents, then by title. The first
@@ -241,14 +239,8 @@ type ChosenMatch = { guid: string; name: string; year: string };
 // leaves the apply to the raw tmdb:// guid.
 async function findCanonicalMatch(s: PlexSession, target: PlexTarget, correctTmdbId: number): Promise<ChosenMatch | null> {
   const searches: Array<Record<string, string>> = [];
-  if (target.imdbId) {
-    searches.push({ manual: "1", includeGuids: "1", guid: `imdb://${target.imdbId}` }, imdbAgentSearch(target.imdbId));
-  }
-  searches.push(tmdbAgentSearch(correctTmdbId));
-  const byText: Record<string, string> = { manual: "1", includeGuids: "1" };
-  if (target.title) byText.title = target.title;
-  if (target.year) byText.year = target.year;
-  searches.push(byText);
+  if (target.imdbId) searches.push(plexImdbGuidSearch(target.imdbId), plexImdbAgentSearch(target.imdbId));
+  searches.push(plexTmdbAgentSearch(correctTmdbId), plexTitleYearSearch(target.title, target.year));
   for (const params of searches) {
     const hit = asPlexSearchResult((await plexMatchSearch(s, params))[0]);
     if (hit) return { guid: hit.guid, name: hit.name ?? target.title, year: hit.year ? String(hit.year) : target.year };
@@ -366,8 +358,8 @@ async function applyAndPoll(run: PlexRun, guid: string, name: string, year: stri
 async function retryWithFallbacks(run: PlexRun, firstGuid: string | null, first: PlexPoll): Promise<PlexPoll> {
   const { correctTmdbId, target } = run;
   const searches = [
-    ...(target.imdbId ? [imdbAgentSearch(target.imdbId)] : []),
-    tmdbAgentSearch(correctTmdbId),
+    ...(target.imdbId ? [plexImdbAgentSearch(target.imdbId)] : []),
+    plexTmdbAgentSearch(correctTmdbId),
   ];
   const tried = new Set<string>(firstGuid ? [firstGuid] : []);
   let last = first;

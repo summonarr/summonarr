@@ -51,7 +51,6 @@ export async function DetailExtras({ media, mediaType }: { media: TmdbMedia; med
   const digitalRaw = (mediaType === "movie" ? media.digitalReleaseDate : null) ?? media.releasedDigital ?? null;
   const physicalRaw = mediaType === "movie" ? (media.physicalReleaseDate ?? null) : null;
 
-  if (!hasProviders && !hasKeywords && !hasStudios && !homepage && !digitalRaw && !physicalRaw) return null;
   const t = await getTranslator();
   const locale = await getLocale();
   // Only the dates that format: an unparseable one shows nothing.
@@ -59,8 +58,8 @@ export async function DetailExtras({ media, mediaType }: { media: TmdbMedia; med
     { label: t("detail.release.digital"), date: formatReleaseDate(digitalRaw, locale) },
     { label: t("detail.release.physical"), date: formatReleaseDate(physicalRaw, locale) },
   ].filter((r): r is { label: string; date: string } => r.date !== null);
-  // Gated again on what actually renders: dates that didn't format, with
-  // nothing else to show, would leave an empty section (its padding and divider).
+  // Gated on what actually renders: dates that didn't format, with nothing
+  // else to show, would leave an empty section (its padding and divider).
   if (!hasProviders && !hasKeywords && !hasStudios && !homepage && releases.length === 0) return null;
 
   // Group providers by offering type, preserving the stream → rent → buy order.

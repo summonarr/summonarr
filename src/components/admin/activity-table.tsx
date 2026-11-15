@@ -12,6 +12,7 @@ export function ChevIcon({ open }: { open: boolean }) {
       width="10"
       height="10"
       viewBox="0 0 12 12"
+      aria-hidden="true"
       style={{
         transform: open ? "rotate(90deg)" : "none",
         transition: "transform 150ms var(--ds-ease)",
@@ -43,6 +44,7 @@ export function SortIcon({
         width="10"
         height="10"
         viewBox="0 0 12 12"
+        aria-hidden="true"
         style={{ opacity: 0.3, color: "currentColor" }}
       >
         <path
@@ -60,6 +62,7 @@ export function SortIcon({
       width="10"
       height="10"
       viewBox="0 0 12 12"
+      aria-hidden="true"
       style={{ color: "var(--ds-accent-text)" }}
     >
       {dir === "asc" ? (
@@ -87,6 +90,7 @@ export function SortIcon({
 
 export function Th({
   label,
+  srLabel,
   onSort,
   active,
   dir,
@@ -94,6 +98,8 @@ export function Th({
   align = "left",
 }: {
   label?: string;
+  /** Screen-reader-only name for a column with no visible heading. */
+  srLabel?: string;
   onSort?: () => void;
   active?: boolean;
   dir?: "asc" | "desc";
@@ -142,7 +148,7 @@ export function Th({
           <SortIcon active={!!active} dir={dir} />
         </button>
       ) : (
-        label
+        (label ?? (srLabel ? <span className="sr-only">{srLabel}</span> : null))
       )}
     </th>
   );

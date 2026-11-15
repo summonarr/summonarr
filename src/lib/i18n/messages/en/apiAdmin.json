@@ -58,6 +58,7 @@
   "apiAdmin.cleanup.unknownSetting": "Unknown setting: {field}",
   "apiAdmin.common.downloadsEnabledBoolean": "downloadsEnabled must be a boolean",
   "apiAdmin.common.forbidden": "Forbidden",
+  "apiAdmin.common.crossSiteRefused": "Forbidden — cross-site request",
   "apiAdmin.common.instanceNameTooLong": "Name for \"{slug}\" must be {max} characters or fewer",
   "apiAdmin.common.instancesArray": "instances must be an array",
   "apiAdmin.common.instancesChanged": "The {service} instances were changed elsewhere since this page loaded, so nothing was saved. Refresh to load the current list, then make your changes again.",
@@ -128,6 +129,8 @@
   "apiAdmin.mediaInstances.plexUnreachable": "Plex server unreachable",
   "apiAdmin.mediaInstances.servicePlexOrJellyfin": "service must be plex or jellyfin",
   "apiAdmin.mediaInstances.slugReserved": "Slug \"{slug}\" can't be used for a new server: its settings would overwrite the main server's. Pick another slug.",
+  "apiAdmin.mediaInstances.secretNeededForNewUrl": "Saved secret for \"{slug}\" can't be kept with a new server address. Enter the token or key again.",
+  "apiAdmin.mediaInstances.fieldTooLong": "{field} for \"{slug}\" must be {max} characters or fewer",
   "apiAdmin.plexServers.connectFirst": "Connect your Plex account first",
   "apiAdmin.plexServers.loadFailed": "Could not load servers from plex.tv",
   "apiAdmin.plexServers.machineIdRequired": "machineId is required",
@@ -260,6 +263,7 @@
   "apiAdmin.users.promoteBeforeGrantingAdmin": "Promote this user's role to Admin before granting the ADMIN permission.",
   "apiAdmin.users.provideSessionId": "Provide sessionId or all: true",
   "apiAdmin.users.purgedCannotReenable": "This account's data was purged and it can no longer be re-enabled.",
+  "apiAdmin.users.purgedCannotChange": "A removed (purged) account can't be changed.",
   "apiAdmin.users.quotaInvalid": "{field} must be a non-negative integer or null",
   "apiAdmin.users.quotaZero": "{field} of 0 would mean \"unlimited\", not \"blocked\". Leave it empty to use the global quota, set 1 or more for a limit, or clear the user's request permission to stop them requesting.",
   "apiAdmin.users.roleInvalid": "role must be ADMIN, ISSUE_ADMIN, or USER",
@@ -295,6 +299,7 @@
   "apiAdmin.agents.error.invalidStored": "This channel's saved settings are no longer valid. Edit and save it again.",
   "apiAdmin.backfillPlaytime.confirmationRequired": "Confirmation required",
   "apiAdmin.users.cannotGrantBeyondOwn": "Cannot grant permissions, instance access, server visibility, or a content rating cap beyond your own",
+  "apiAdmin.users.cannotManageBeyondOwn": "You cannot manage an account that holds management permissions you do not have",
   "apiAdmin.fixMatch.plexUnmatched": "Plex could not confirm a match to TMDB #{tmdbId}, and the item is now UNMATCHED in Plex — re-match it in Plex directly, or pick another candidate.",
   "apiAdmin.common.bodyTooLarge": "Request body too large (max {max})",
   "apiAdmin.warm.activityRunning": "Activity warm already running",
@@ -411,5 +416,6 @@
   "apiAdmin.watchSync.jobGone": "That sync run is no longer being followed. Summonarr may have restarted. Reload to see the latest results.",
   "apiAdmin.watchSync.pairInvalid": "Choose a Plex account and a Jellyfin user that is still on its server",
   "apiAdmin.watchSync.pairExists": "That pair already exists",
-  "apiAdmin.watchSync.pairNotFound": "Pair not found"
+  "apiAdmin.watchSync.pairNotFound": "Pair not found",
+  "apiAdmin.watchSync.pairPaused": "That pair is paused. Resume it before running a full sync."
 }

@@ -140,7 +140,7 @@ function declText(name: string): string {
 
 test("submitOnBehalf actually reads results[0].result off the bulk response", () => {
   const fn = declText("submitOnBehalf");
-  assert.match(fn, /onBehalfMessage\(data\.results\?\.\[0\]\?\.result, data\.created\)/);
+  assert.match(fn, /const result = data\.results\?\.\[0\]\?\.result;[\s\S]*onBehalfMessage\(result, data\.created\)/);
   assert.doesNotMatch(fn, /data\.created \? "Requested for user/);
 });
 

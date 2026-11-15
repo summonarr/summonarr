@@ -58,9 +58,15 @@ export async function watchlistListPayload(t: Translator, userId: string, discor
   };
 }
 
+// The first option as a sub-command record, or undefined when it isn't an object.
+function subCommandOf(options: unknown): { name?: unknown; options?: unknown } | undefined {
+  const first: unknown = Array.isArray(options) ? options[0] : undefined;
+  return first !== null && typeof first === "object" ? (first as { name?: unknown; options?: unknown }) : undefined;
+}
+
 export async function handleWatchlistCommand(ctx: CommandContext): Promise<void> {
   const { t, appId, token, interactionId, discordUserId, data } = ctx;
-  const sub = Array.isArray(data.options) ? (data.options[0] as { name?: unknown; options?: unknown } | undefined) : undefined;
+  const sub = subCommandOf(data.options);
   const linked = await requireLinkedSiteAccount(t, discordUserId);
   if ("refusal" in linked) {
     await editOriginal(appId, token, { content: linked.refusal });

@@ -58,6 +58,7 @@
   "apiAdmin.cleanup.unknownSetting": "Configuração desconhecida: {field}",
   "apiAdmin.common.downloadsEnabledBoolean": "downloadsEnabled deve ser um booleano",
   "apiAdmin.common.forbidden": "Proibido",
+  "apiAdmin.common.crossSiteRefused": "Proibido — solicitação entre sites",
   "apiAdmin.common.instanceNameTooLong": "O nome para \"{slug}\" deve ter {max} caracteres ou menos",
   "apiAdmin.common.instancesArray": "instances deve ser um array",
   "apiAdmin.common.instancesChanged": "As instâncias do {service} foram alteradas em outro lugar desde que esta página foi carregada, então nada foi salvo. Atualize para carregar a lista atual e refaça suas alterações.",
@@ -128,6 +129,8 @@
   "apiAdmin.mediaInstances.plexUnreachable": "Servidor Plex inacessível",
   "apiAdmin.mediaInstances.servicePlexOrJellyfin": "service deve ser plex ou jellyfin",
   "apiAdmin.mediaInstances.slugReserved": "O slug \"{slug}\" não pode ser usado para um servidor novo: as configurações dele substituiriam as do servidor principal. Escolha outro slug.",
+  "apiAdmin.mediaInstances.secretNeededForNewUrl": "O segredo salvo de \"{slug}\" não pode ser mantido com um novo endereço de servidor. Digite o token ou a chave novamente.",
+  "apiAdmin.mediaInstances.fieldTooLong": "{field} de \"{slug}\" deve ter no máximo {max} caracteres",
   "apiAdmin.plexServers.connectFirst": "Conecte primeiro sua conta do Plex",
   "apiAdmin.plexServers.loadFailed": "Não foi possível carregar os servidores do plex.tv",
   "apiAdmin.plexServers.machineIdRequired": "machineId é obrigatório",
@@ -260,6 +263,7 @@
   "apiAdmin.users.promoteBeforeGrantingAdmin": "Promova a função deste usuário para Admin antes de conceder a permissão ADMIN.",
   "apiAdmin.users.provideSessionId": "Informe sessionId ou all: true",
   "apiAdmin.users.purgedCannotReenable": "Os dados desta conta foram apagados e ela não pode mais ser reativada.",
+  "apiAdmin.users.purgedCannotChange": "Uma conta removida (apagada) não pode ser alterada.",
   "apiAdmin.users.quotaInvalid": "{field} deve ser um número inteiro não negativo ou null",
   "apiAdmin.users.quotaZero": "{field} igual a 0 significaria \"ilimitado\", não \"bloqueado\". Deixe vazio para usar a cota global, defina 1 ou mais para um limite ou remova a permissão de solicitação do usuário para impedi-lo de solicitar.",
   "apiAdmin.users.roleInvalid": "role deve ser ADMIN, ISSUE_ADMIN ou USER",
@@ -295,6 +299,7 @@
   "apiAdmin.agents.error.invalidStored": "As configurações salvas deste canal não são mais válidas. Edite e salve novamente.",
   "apiAdmin.backfillPlaytime.confirmationRequired": "Confirmação necessária",
   "apiAdmin.users.cannotGrantBeyondOwn": "Você não pode conceder permissões, acesso a instâncias, visibilidade de servidores ou limite de classificação além dos seus",
+  "apiAdmin.users.cannotManageBeyondOwn": "Você não pode gerenciar uma conta que possui permissões de gerenciamento que você não tem",
   "apiAdmin.fixMatch.plexUnmatched": "O Plex não conseguiu confirmar a correspondência com TMDB #{tmdbId} e o item está agora SEM CORRESPONDÊNCIA no Plex — faça a correspondência diretamente no Plex ou escolha outro candidato.",
   "apiAdmin.common.bodyTooLarge": "Corpo da solicitação muito grande (máx. {max})",
   "apiAdmin.warm.activityRunning": "O pré-aquecimento de atividade já está em execução",
@@ -411,5 +416,6 @@
   "apiAdmin.watchSync.jobGone": "Essa sincronização não está mais sendo acompanhada. O Summonarr pode ter reiniciado. Recarregue para ver os resultados mais recentes.",
   "apiAdmin.watchSync.pairInvalid": "Escolha uma conta do Plex e um usuário do Jellyfin que ainda esteja no servidor",
   "apiAdmin.watchSync.pairExists": "Essa associação já existe",
-  "apiAdmin.watchSync.pairNotFound": "Associação não encontrada"
+  "apiAdmin.watchSync.pairNotFound": "Associação não encontrada",
+  "apiAdmin.watchSync.pairPaused": "Essa associação está pausada. Retome-a antes de executar uma sincronização completa."
 }

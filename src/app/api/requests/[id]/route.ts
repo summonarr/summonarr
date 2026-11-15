@@ -9,8 +9,9 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { requesterAuditDetails } from "@/lib/audit-scrub";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
-import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
+import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 import { readJsonCapped } from "@/lib/body-size";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -178,6 +179,24 @@ function answeredNote(pc: PatchContext): string | null {
   return pc.adminNote !== undefined ? pc.sanitizedAdminNote : pc.existing.adminNote;
 }
 
+// The row as it is now, after a Radarr/Sonarr call that already happened. A
+// failed re-read answers the row as it was read: a 500 here would report a
+// search or re-push that DID go through as failed, and the retry would repeat it.
+async function rereadAfterArr(pc: PatchContext): Promise<ExistingRequest> {
+  try {
+    return (await loadRequest(pc.id)) ?? pc.existing;
+  } catch (err) {
+    console.warn("[requests] re-read after arr action failed:", err instanceof Error ? err.message : String(err));
+    return pc.existing;
+  }
+}
+
+// The note that answer carries: the one this request wrote, else the row's own
+// as just re-read (another admin may have saved one during the arr call).
+function noteAfterArr(pc: PatchContext, current: ExistingRequest): string | null {
+  return pc.adminNote !== undefined ? pc.sanitizedAdminNote : current.adminNote;
+}
+
 // What a Search queues: the movie, or the series by the tvdbId the push
 // stored. A TV request with none was never pushed (or predates the bookkeeping
 // write) and has nothing to search.
@@ -209,7 +228,7 @@ async function queueSearch(target: SearchTarget, variant: string, t: Translator)
 
 // A search that threw, as the caller is answered. Most are answers, not
 // failures, and are translated; the rest are logged.
-function searchFailureText(err: unknown, t: Translator): string {
+function searchFailureText(err: unknown, t: Translator, service: "Radarr" | "Sonarr"): string {
   // No aired, monitored episode is missing — every one is on disk, OR none is
   // monitored (a series added with "Monitor: Future"), so the wording claims
   // neither. An upgrade search is the title manager's, never this button's.
@@ -220,7 +239,7 @@ function searchFailureText(err: unknown, t: Translator): string {
   // Removed in Sonarr since the push (or pushed elsewhere): Re-push adds it back.
   if (err instanceof SeriesNotOnInstanceError) return t("apiUser.requests.searchSeriesNotInSonarr");
   // The movie twin: Radarr no longer holds it, and Re-push adds it back.
-  if (err instanceof ArrItemNotFoundError) return t("apiUser.requests.releases.notInArr", { service: "Radarr" });
+  if (err instanceof ArrItemNotFoundError) return t("apiUser.requests.releases.notInArr", { service });
   // The detail to the log; the caller (a MANAGE_REQUESTS delegate, maybe) gets
   // the failure's kind, never the arr's internal URL (guardrail 5g).
   console.error("[arr] Search failed:", arrErrorMessage(err));
@@ -246,9 +265,11 @@ async function searchRequest(pc: PatchContext): Promise<NextResponse> {
   try {
     arrError = await queueSearch(target, existing.arrInstance, t);
   } catch (err) {
-    arrError = searchFailureText(err, t);
+    arrError = searchFailureText(err, t, target.kind === "movie" ? "Radarr" : "Sonarr");
   }
-  return NextResponse.json({ ...existing, adminNote: searchedNote, arrError });
+  // The arr call took a while: answer the row as it is now, not as it was read.
+  const current = await rereadAfterArr(pc);
+  return NextResponse.json({ ...current, adminNote: noteAfterArr(pc, current), arrError });
 }
 
 // Re-push an APPROVED request whose title the arr may have lost, with its
@@ -274,7 +295,8 @@ async function retryRequest(pc: PatchContext): Promise<NextResponse> {
   // Outside the try: Sonarr has already accepted the series, so a DB hiccup
   // here must not be reported as an ARR push failure.
   if (pushedTvdbId !== null) await stampTvdbId(id, pushedTvdbId);
-  return NextResponse.json({ ...existing, adminNote: answeredNote(pc), arrError });
+  const current = await rereadAfterArr(pc);
+  return NextResponse.json({ ...current, adminNote: noteAfterArr(pc, current), arrError });
 }
 
 async function editNote(pc: PatchContext): Promise<NextResponse> {
@@ -341,7 +363,7 @@ async function approveRequest(pc: PatchContext, body: PatchBody): Promise<NextRe
   // The admin's picker choice is stored on the row, so the push below, a later
   // Re-push and the sync's re-push all use it; without one the row keeps the
   // requester's choice, else the instance default.
-  if (!(await claimApproval(id, existing.status, { adminNote: noteWrite(pc), qualityProfileId }))) return conflict(t);
+  if (!(await claimApproval(id, existing.status, { adminNote: noteWrite(pc), qualityProfileId, actorId: session.user.id }))) return conflict(t);
 
   const updated = await loadRequest(id);
   if (!updated) return notFound(t);
@@ -382,7 +404,7 @@ async function approveRequest(pc: PatchContext, body: PatchBody): Promise<NextRe
 
 async function declineRequest(pc: PatchContext, permanent: boolean): Promise<NextResponse> {
   const { req, session, t, id, existing } = pc;
-  if (!(await claimDecline(id, existing.status, { permanent, adminNote: noteWrite(pc) }))) return conflict(t);
+  if (!(await claimDecline(id, existing.status, { permanent, adminNote: noteWrite(pc), actorId: session.user.id }))) return conflict(t);
 
   const updated = await loadRequest(id);
   if (!updated) return notFound(t);
@@ -400,16 +422,18 @@ async function declineRequest(pc: PatchContext, permanent: boolean): Promise<Nex
   return NextResponse.json(updated);
 }
 
-// The manual "mark available". Its "now available" fan-out is a once-only
-// claim like every other path's (guardrail 14): a sync or webhook may have
-// announced the title already. A failed claim write announces nothing.
-async function claimAvailableNotice(id: string): Promise<boolean> {
+// The manual "mark available". Its "now available" fan-out goes through THE
+// claim every other path uses (guardrails 14, 14f): once-only — a sync or
+// webhook may have announced the title already — and the notice is queued in
+// the claim's own statement, so a restart after it cannot lose it. A request
+// the marking admin filed themself is claimed but owes no notice. A failed
+// claim announces nothing.
+async function claimAvailableNotice(row: { id: string; requestedBy: string }, actorId: string) {
   try {
-    const cas = await prisma.mediaRequest.updateMany({ where: { id, notifiedAvailable: false }, data: { notifiedAvailable: true } });
-    return cas.count === 1;
+    return await claimAvailableNotifications([row], { requireStatusAvailable: true, actorId });
   } catch (err) {
-    console.error("[requests] Failed to CAS notifiedAvailable:", err);
-    return false;
+    console.error("[requests] Failed to claim the available notice:", err);
+    return { claimed: [], deliverable: [] };
   }
 }
 
@@ -422,10 +446,12 @@ async function markAvailable(pc: PatchContext): Promise<NextResponse> {
   if (!updated) return notFound(t);
   announceStatus(updated, updated.status);
 
-  if (await claimAvailableNotice(id)) {
+  const { claimed, deliverable } = await claimAvailableNotice({ id: updated.id, requestedBy: updated.requestedBy }, session.user.id);
+  if (claimed.length > 0) {
     void clearDeletionVotesForTmdbs([{ tmdbId: updated.tmdbId, mediaType: updated.mediaType }]);
-    // An admin marking their own request needs no "your request is available".
-    if (updated.requestedBy !== session.user.id) {
+    // An admin marking their own request needs no "your request is available";
+    // `deliverable` already leaves out a disabled requester (guardrail 33).
+    if (deliverable.length > 0 && updated.requestedBy !== session.user.id) {
       notifyRequestStatusChange("AVAILABLE", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId, requestId: updated.id, arrInstance: updated.arrInstance });
     }
   }
@@ -440,6 +466,10 @@ async function reopenRequest(pc: PatchContext): Promise<NextResponse> {
   announceStatus(updated, updated.status);
   return NextResponse.json(updated);
 }
+
+// Owner self-cancels per user per minute: plenty for clearing a few mistaken
+// requests, far short of a create → cancel loop.
+const OWNER_CANCEL_LIMIT = 10;
 
 // Two callers share this handler:
 //   - An admin (MANAGE_REQUESTS) can delete any request (existing behavior;
@@ -478,6 +508,13 @@ export const DELETE = withAuth(async (
       return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
     }
   } else {
+    // A cancelled PENDING request frees its quota slot, so create → cancel can
+    // loop, and every create may alert the admins. The alert has its own budget
+    // (alertAdminsNewRequest); this bounds the loop itself. A manager's delete
+    // above is moderation and is not limited.
+    if (!checkRateLimit(`request-cancel:${session.user.id}`, OWNER_CANCEL_LIMIT, 60_000)) {
+      return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
+    }
     // Owner self-cancel: delete only if STILL pending. An admin may have approved
     // (and pushed to ARR) between the read above and here — a guarded deleteMany
     // makes the status check atomic so we never orphan an approved/grabbed request

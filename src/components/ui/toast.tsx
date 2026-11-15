@@ -197,8 +197,12 @@ function ToastCard({ item: t, queue, dismissLabel }: { item: ToastItem; queue: T
         <button
           type="button"
           onClick={() => {
-            t.action?.onClick();
-            queue.dismiss(t.id);
+            // Dismiss even when the handler throws.
+            try {
+              t.action?.onClick();
+            } finally {
+              queue.dismiss(t.id);
+            }
           }}
           className="ds-hover-tint shrink-0 font-semibold rounded-md"
           // Same negative-margin trick as the dismiss button: a 28px-tall

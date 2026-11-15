@@ -2,7 +2,9 @@
 // scripted fetch and a fake service worker — no browser, no network.
 //
 //   - The once-per-page-load resync is flagged `resync: true` (guardrail 6g);
-//     only a 410 drops this browser's own subscription, and it never repeats.
+//     only a 410 (removed on purpose) or a 409 (the endpoint belongs to
+//     another account) drops this browser's own subscription, and it never
+//     repeats.
 //   - The VAPID key is checked: an empty or missing key is reported as the
 //     server's problem, a refusal carries the server's own reason, and a
 //     network failure is not mistaken for either.
@@ -75,6 +77,14 @@ test("the resync is one flagged POST per page load; a 410 drops this browser's s
   assert.equal(changes, 1);
   await lib.resyncSubscription(sub as unknown as PushSubscription);
   assert.equal(calls.length, 1, "once per page load");
+});
+
+test("a resync refused because the endpoint belongs to another account drops this browser's subscription", async () => {
+  const sub = fakeSub("https://push.example/shared");
+  answers = [() => json(409, { error: "taken" })];
+  await lib.resyncSubscription(sub as unknown as PushSubscription);
+  assert.equal(sub.unsubscribed, 1, "the bell must not show on for an account the server sends nothing to");
+  assert.equal(changes, 1, "the other bells re-read the browser");
 });
 
 test("any other resync answer leaves the browser's subscription alone", async () => {

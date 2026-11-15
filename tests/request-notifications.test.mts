@@ -71,6 +71,7 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 // ── scripted fetch: only the Resend hop and the outbound agent are real ──────
 type ResendPost = { auth: string | null; body: { from: string; to: string; subject: string; html: string } };
 const resendPosts: ResendPost[] = [];
+let resendStatus = 200; // what the scripted Resend answers
 const fetchUrls: string[] = [];
 
 // One outbound notification agent (notify-agents.ts) — a generic webhook on an
@@ -86,6 +87,12 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input);
   fetchUrls.push(url);
   if (url === "https://api.resend.com/emails") {
+    if (resendStatus !== 200) {
+      return new Response(JSON.stringify({ message: `resend ${resendStatus} (unit test)` }), {
+        status: resendStatus,
+        headers: { "content-type": "application/json" },
+      });
+    }
     resendPosts.push({
       auth: new Headers(init?.headers).get("authorization"),
       body: JSON.parse(String(init?.body)) as ResendPost["body"],
@@ -114,6 +121,9 @@ const {
   notifyRequestStatusChange,
 } = await import("../src/lib/request-notifications.ts");
 const { invalidateAgentCache } = await import("../src/lib/notify-agents.ts");
+const { drainOutbox } = await import("../src/lib/outbox-drain.ts");
+const { notifyRequestStatusChanges } = await import("../src/lib/request-notifications.ts");
+const { AVAILABLE_CHANNELS, OUTBOX_MAX_ATTEMPTS } = await import("../src/lib/outbox.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
 // One Setting map serves the feature-flag read AND every channel's config read
@@ -236,6 +246,19 @@ shadowPrismaModel(prisma, "notification", {
 });
 
 shadowPrismaModel(prisma, "pushSubscription", { findMany: async () => [] });
+// The outbox (outbox.ts): the fan-out settles each channel's rows by key, the
+// drain drops rows by id. Both are deleteMany; the where shape tells them apart.
+type OutboxDelete = { where: { dedupeKey?: { in: string[] }; id?: { in: string[] } } };
+const outboxDeletes: OutboxDelete[] = [];
+let outboxDeleteImpl: (args: OutboxDelete) => Promise<unknown> = async () => ({ count: 0 });
+shadowPrismaModel(prisma, "outbox", {
+  deleteMany: async (args: OutboxDelete) => {
+    outboxDeletes.push(args);
+    return outboxDeleteImpl(args);
+  },
+});
+const settledKeys = () => outboxDeletes.flatMap((d) => d.where.dedupeKey?.in ?? []).sort();
+const droppedIds = () => outboxDeletes.flatMap((d) => d.where.id?.in ?? []).sort();
 // Outbound notification channels (notify-agents.ts): none unless a test seeds
 // one with agentRow(). The feature flag defaults ON, so the agent list IS the
 // gate — and notify-agents caches it for 30s, hence the invalidate in beforeEach.
@@ -317,6 +340,9 @@ async function quiesce(): Promise<void> {
 
 beforeEach(() => {
   settings.clear();
+  resendStatus = 200;
+  outboxDeletes.length = 0;
+  outboxDeleteImpl = async () => ({ count: 0 });
   invalidateFeatureFlagCache(); // the 10s flag cache must not leak across tests
   warns.length = 0;
   errors.length = 0;
@@ -935,4 +961,236 @@ test("a DISABLED requester reaches NO channel — one gate read and nothing else
     assert.equal(agentPosts.length, 0, `the outbound channels follow the gate too (${status})`);
   }
   assert.deepEqual(errors, []);
+});
+
+// ═══ The outbox: a claimed "now available" send survives a restart ══════════
+//
+// The claim writes one outbox row per channel in its own statement (pinned in
+// notify-available.test.mts and, against Postgres, tests/db/outbox.test.mts).
+// Here: the fan-out settles each channel once it has been sent, and the drain
+// sends what an earlier process left behind.
+
+test("outbox: the fan-out settles EVERY channel's rows for exactly the claimed winners", async () => {
+  claimImpl = async () => [{ id: "w1" }]; // w2 lost the claim
+  await notifyAvailablePerServer([reqRow("w1", null), reqRow("w2", null)], true, true, true, true, "test");
+  await waitFor(() => settledKeys().length === AVAILABLE_CHANNELS.length, "every channel settled");
+  await quiesce();
+
+  assert.deepEqual(settledKeys(), AVAILABLE_CHANNELS.map((c) => `request.available:w1:${c}`).sort());
+  assert.ok(!settledKeys().some((k) => k.includes(":w2:")), "a row that lost the claim owns no outbox rows to settle");
+});
+
+test("outbox: a failed settle never fails the send — it warns and leaves the rows for the drain", async () => {
+  outboxDeleteImpl = async () => { throw new Error("pool exhausted (unit test)"); };
+  claimImpl = async () => [{ id: "w1" }];
+  await notifyAvailablePerServer([reqRow("w1", null)], true, true, true, true, "test");
+  await waitFor(() => warns.filter((w) => w.includes("[outbox] could not settle")).length === AVAILABLE_CHANNELS.length, "one warning per channel");
+  await quiesce();
+
+  assert.equal(createManyCalls.length, 1, "the inbox row was still written");
+  assert.deepEqual(errors, []);
+});
+
+const owed = (id: string, channel: string, over: Record<string, unknown> = {}) => ({
+  id: `ob-${id}-${channel}`,
+  kind: "request.available",
+  channel,
+  dedupeKey: `request.available:${id}:${channel}`,
+  userId: `user-${id}`,
+  payload: { id, requestedBy: `user-${id}`, title: `Title ${id}`, mediaType: "MOVIE", tmdbId: 1, posterPath: null, arrInstance: "" },
+  attempts: 1,
+  expired: false,
+  ...over,
+});
+
+test("outbox drain: a row left by an earlier run is sent through its own channel, then settled", async () => {
+  claimImpl = async () => [owed("a", "inbox"), owed("b", "inbox")] as never;
+  const res = await drainOutbox("test");
+  await quiesce();
+
+  assert.deepEqual(res, { delivered: 2, dropped: 0 });
+  assert.match(norm(claims[0].sql), /^UPDATE "Outbox" SET attempts = attempts \+ 1, "lockedUntil" = NOW\(\) \+ make_interval/);
+  assert.match(norm(claims[0].sql), /WHERE "lockedUntil" < NOW\(\) ORDER BY "createdAt" LIMIT \? FOR UPDATE SKIP LOCKED/, "only rows whose lock lapsed, never a live claimer's");
+  assert.equal(createManyCalls.length, 1, "ONE inbox write for the channel's rows");
+  assert.deepEqual(createManyCalls[0].data.map((d) => d.userId), ["user-a", "user-b"]);
+  assert.deepEqual(settledKeys(), ["request.available:a:inbox", "request.available:b:inbox"]);
+  // Only the owed channel ran: no other channel resolved a recipient.
+  assert.equal(discordAvailableQueries.length + pushAvailableQueries.length + emailPrefQueries.length, 0);
+});
+
+test("outbox drain: expired, out-of-attempts, unreadable and unknown rows are deleted UNSENT", async () => {
+  claimImpl = async () => [
+    owed("old", "inbox", { expired: true }),
+    owed("tired", "inbox", { attempts: OUTBOX_MAX_ATTEMPTS + 1 }),
+    owed("junk", "inbox", { payload: { id: "junk" } }),
+    owed("odd", "carrier-pigeon"),
+    owed("alien", "inbox", { kind: "something.else" }),
+  ] as never;
+  const res = await drainOutbox("test");
+  await quiesce();
+
+  assert.deepEqual(res, { delivered: 0, dropped: 5 });
+  assert.deepEqual(droppedIds(), ["ob-alien-inbox", "ob-junk-inbox", "ob-odd-carrier-pigeon", "ob-old-inbox", "ob-tired-inbox"]);
+  assert.equal(createManyCalls.length, 0);
+});
+
+test("outbox drain (guardrail 33): a requester disabled since the claim gets nothing — the row is dropped", async () => {
+  disabledRequesterIds = ["user-gone"];
+  try {
+    claimImpl = async () => [owed("gone", "inbox"), owed("here", "inbox")] as never;
+    const res = await drainOutbox("test");
+    await quiesce();
+
+    assert.deepEqual(res, { delivered: 1, dropped: 1 });
+    assert.deepEqual(droppedIds(), ["ob-gone-inbox"]);
+    assert.deepEqual(createManyCalls[0].data.map((d) => d.userId), ["user-here"]);
+  } finally {
+    disabledRequesterIds = [];
+  }
+});
+
+test("outbox drain: nothing owed is one statement and no other work; a failing read never throws", async () => {
+  claimImpl = async () => [];
+  assert.deepEqual(await drainOutbox("test"), { delivered: 0, dropped: 0 });
+  assert.equal(claims.length, 1);
+  assert.equal(outboxDeletes.length, 0);
+
+  claimImpl = async () => { throw new Error("db down (unit test)"); };
+  assert.deepEqual(await drainOutbox("test"), { delivered: 0, dropped: 0 });
+  assert.ok(warns.some((w) => w.includes("outbox drain failed")));
+});
+
+// ── approve / decline notices on the outbox ─────────────────────────────────
+
+const decided = (id: string) => ({
+  id, requestedBy: `user-${id}`, title: `Title ${id}`, mediaType: "MOVIE", tmdbId: 7, posterPath: null, arrInstance: "", adminNote: null,
+});
+
+test("outbox: an approve/decline fan-out settles every channel under its OWN kind — a disabled requester's rows included", async () => {
+  for (const [status, kind] of [["APPROVED", "request.approved"], ["DECLINED", "request.declined"]] as const) {
+    outboxDeletes.length = 0;
+    await notifyRequestStatusChanges(status, [decided("d1")], "test");
+    await waitFor(() => settledKeys().length === AVAILABLE_CHANNELS.length, `every ${status} channel settled`);
+    await quiesce();
+    assert.deepEqual(settledKeys(), AVAILABLE_CHANNELS.map((c) => `${kind}:d1:${c}`).sort());
+  }
+
+  // Disabled: nothing is sent, and nothing stays owed either.
+  requesterDisabled = true;
+  outboxDeletes.length = 0;
+  createManyCalls.length = 0;
+  await notifyRequestStatusChanges("APPROVED", [decided("d2")], "test");
+  await waitFor(() => settledKeys().length === AVAILABLE_CHANNELS.length, "the disabled requester's rows settled");
+  await quiesce();
+  assert.equal(createManyCalls.length, 0);
+});
+
+test("outbox drain: an 'approved' notice is sent only while the request is still APPROVED; a stale one is dropped", async () => {
+  const requestStatus: Record<string, string> = { still: "APPROVED", back: "PENDING" };
+  shadowPrismaModel(prisma, "mediaRequest", {
+    findMany: async (args: { where: { id: { in: string[] } } }) =>
+      args.where.id.in.flatMap((id) => (requestStatus[id] ? [{ id, status: requestStatus[id] }] : [])),
+  });
+  claimImpl = async () => [
+    owed("still", "inbox", { kind: "request.approved" }),
+    owed("back", "inbox", { kind: "request.approved" }),
+    owed("deleted", "inbox", { kind: "request.approved" }),
+    owed("still", "inbox", { kind: "request.declined", id: "ob-still-declined" }),
+  ] as never;
+
+  const res = await drainOutbox("test");
+  await quiesce();
+
+  assert.deepEqual(res, { delivered: 1, dropped: 3 });
+  assert.deepEqual(droppedIds(), ["ob-back-inbox", "ob-deleted-inbox", "ob-still-declined"]);
+  assert.equal(createManyCalls.length, 1);
+  assert.deepEqual(createManyCalls[0].data.map((d) => [d.userId, d.type]), [["user-still", "REQUEST_APPROVED"]]);
+  assert.deepEqual(settledKeys(), ["request.approved:still:inbox"]);
+});
+
+// ═══ Failure reporting: a send that failed stays owed (guardrail 14f) ═══════
+// The senders used to swallow their failures, so a channel that "returned" was
+// settled whether or not anything was delivered. Each now reports the sends
+// that failed in a way worth repeating; only those rows stay in the outbox.
+
+const { isTransientEmailFailure } = await import("../src/lib/email.ts");
+
+test("isTransientEmailFailure: no connection, a provider 5xx/429 and an SMTP 4xx can pass; a verdict on the message or this server's own configuration cannot", () => {
+  assert.equal(isTransientEmailFailure(new Error("connect ETIMEDOUT")), true);
+  assert.equal(isTransientEmailFailure(Object.assign(new Error("x"), { httpStatus: 500 })), true);
+  assert.equal(isTransientEmailFailure(Object.assign(new Error("x"), { httpStatus: 429 })), true);
+  assert.equal(isTransientEmailFailure(Object.assign(new Error("x"), { responseCode: 451 })), true);
+  assert.equal(isTransientEmailFailure(Object.assign(new Error("x"), { httpStatus: 422 })), false);
+  assert.equal(isTransientEmailFailure(Object.assign(new Error("x"), { responseCode: 550 })), false);
+  assert.equal(isTransientEmailFailure(new Error("SMTP host not configured")), false);
+  assert.equal(isTransientEmailFailure(new Error("Refusing SMTP host mail.example — address is not allowed")), false);
+  assert.equal(isTransientEmailFailure(new Error("Invalid SMTP port: 0")), false);
+});
+
+const mailable = (id: string) => ({ id: `user-${id}`, email: `${id}@example.com`, notificationEmail: null, emailOnAvailable: true, locale: null });
+
+test("a mail the provider could not take (5xx) stays owed — the other four channels are settled, and it is said once", async () => {
+  configureChannels();
+  emailPrefRows = [mailable("w1")];
+  resendStatus = 503;
+  claimImpl = async () => [{ id: "w1" }];
+  await notifyAvailablePerServer([reqRow("w1", null)], true, true, true, true, "test");
+  await waitFor(() => settledKeys().length === AVAILABLE_CHANNELS.length - 1, "the delivered channels settled");
+  await quiesce();
+
+  assert.deepEqual(settledKeys(), AVAILABLE_CHANNELS.filter((c) => c !== "email").map((c) => `request.available:w1:${c}`).sort());
+  assert.equal(warns.filter((w) => w.includes("email: 1 notification(s) failed to send and stay queued for a retry")).length, 1);
+});
+
+test("a mail the provider REFUSED (4xx) is settled: repeating it could never work", async () => {
+  configureChannels();
+  emailPrefRows = [mailable("w1")];
+  resendStatus = 422;
+  claimImpl = async () => [{ id: "w1" }];
+  await notifyAvailablePerServer([reqRow("w1", null)], true, true, true, true, "test");
+  await waitFor(() => settledKeys().length === AVAILABLE_CHANNELS.length, "every channel settled");
+  await quiesce();
+  assert.ok(settledKeys().includes("request.available:w1:email"));
+});
+
+test("in one batch only the FAILED winner's mail stays owed", async () => {
+  configureChannels();
+  emailPrefRows = [mailable("good"), mailable("bad")];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) === "https://api.resend.com/emails" && String(init?.body).includes("bad@example.com")) {
+      return new Response(JSON.stringify({ message: "down" }), { status: 500, headers: { "content-type": "application/json" } });
+    }
+    return realFetch(input, init);
+  }) as typeof fetch;
+  try {
+    claimImpl = async () => [{ id: "good" }, { id: "bad" }];
+    await notifyAvailablePerServer([reqRow("good", null), reqRow("bad", null)], true, true, true, true, "test");
+    await waitFor(() => settledKeys().length === 2 * AVAILABLE_CHANNELS.length - 1, "all but one row settled");
+    await quiesce();
+    assert.ok(settledKeys().includes("request.available:good:email"));
+    assert.ok(!settledKeys().includes("request.available:bad:email"));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("an inbox write that fails leaves every inbox row owed; an email-preference read that fails leaves every mail owed", async () => {
+  createManyImpl = async () => { throw new Error("pool exhausted (unit test)"); };
+  emailPrefImpl = async () => { throw new Error("pool exhausted (unit test)"); };
+  claimImpl = async () => [{ id: "w1" }];
+  await notifyAvailablePerServer([reqRow("w1", null)], true, true, true, true, "test");
+  await waitFor(() => settledKeys().length === AVAILABLE_CHANNELS.length - 2, "the other channels settled");
+  await quiesce();
+  assert.deepEqual(settledKeys(), ["agents", "discord", "push"].map((c) => `request.available:w1:${c}`).sort());
+});
+
+test("approve/decline: a mail that failed stays owed under its own kind", async () => {
+  configureChannels();
+  emailUserRow = { email: "d1@example.com", notificationEmail: null, emailOnApproved: true, emailOnDeclined: true, locale: null };
+  resendStatus = 500;
+  await notifyRequestStatusChanges("APPROVED", [decided("d1")], "test");
+  await waitFor(() => settledKeys().length === AVAILABLE_CHANNELS.length - 1, "the delivered channels settled");
+  await quiesce();
+  assert.deepEqual(settledKeys(), AVAILABLE_CHANNELS.filter((c) => c !== "email").map((c) => `request.approved:d1:${c}`).sort());
 });

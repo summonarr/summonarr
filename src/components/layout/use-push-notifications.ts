@@ -68,7 +68,28 @@ export function usePushNotifications() {
         .catch(() => { });
     };
     window.addEventListener(PUSH_CHANGED_EVENT, onChanged);
-    return () => window.removeEventListener(PUSH_CHANGED_EVENT, onChanged);
+
+    // A permission changed in the browser's own settings: follow it without a
+    // reload. Only the denied state is touched, so a name form or an enable in
+    // progress is left alone.
+    let permission: PermissionStatus | null = null;
+    let disposed = false;
+    const onPermissionChange = () => {
+      setState((s) => (Notification.permission === "denied" ? "denied" : s === "denied" ? "unsubscribed" : s));
+    };
+    navigator.permissions
+      ?.query({ name: "notifications" })
+      .then((status) => {
+        if (disposed) return;
+        permission = status;
+        status.addEventListener("change", onPermissionChange);
+      })
+      .catch(() => { });
+    return () => {
+      disposed = true;
+      permission?.removeEventListener("change", onPermissionChange);
+      window.removeEventListener(PUSH_CHANGED_EVENT, onChanged);
+    };
   }, []);
 
   useEffect(() => () => { if (testResetRef.current) clearTimeout(testResetRef.current); }, []);
@@ -100,19 +121,22 @@ export function usePushNotifications() {
     setError(null);
     const ready = prepared.current ?? preparePush(t("shared.push.vapidFailed"));
     prepared.current = null;
-    const outcome = await enablePush(ready, label);
-    if (outcome.kind === "subscribed") {
-      setState("subscribed");
-      announcePushChange();
-    } else if (outcome.kind === "refused") {
-      fail(outcome.error || t("shared.push.enableFailedStatus", { status: outcome.status }));
-      setState("unsubscribed");
-    } else {
-      const denied = Notification.permission === "denied";
-      if (!denied) fail(outcome.reason ?? t("shared.push.enableFailed"));
-      setState(denied ? "denied" : "unsubscribed");
+    try {
+      const outcome = await enablePush(ready, label);
+      if (outcome.kind === "subscribed") {
+        setState("subscribed");
+        announcePushChange();
+      } else if (outcome.kind === "refused") {
+        fail(outcome.error || t("shared.push.enableFailedStatus", { status: outcome.status }));
+        setState("unsubscribed");
+      } else {
+        const denied = Notification.permission === "denied";
+        if (!denied) fail(outcome.reason ?? t("shared.push.enableFailed"));
+        setState(denied ? "denied" : "unsubscribed");
+      }
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
   }
 
   async function sendTest() {
@@ -126,13 +150,16 @@ export function usePushNotifications() {
   async function unsubscribe() {
     setBusy(true);
     setError(null);
-    if (await disablePush()) {
-      setState("unsubscribed");
-      announcePushChange();
-    } else {
-      fail(t("shared.push.disableFailed"));
+    try {
+      if (await disablePush()) {
+        setState("unsubscribed");
+        announcePushChange();
+      } else {
+        fail(t("shared.push.disableFailed"));
+      }
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
   }
 
   return { state, busy, error, testState, startNaming, cancelNaming, subscribe, unsubscribe, sendTest };

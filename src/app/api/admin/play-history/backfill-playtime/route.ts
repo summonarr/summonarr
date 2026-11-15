@@ -83,7 +83,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 const WALL_CLOCK = `EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int`;
 // The clamped playDuration — what the UPDATE writes and what the dry run previews.
 const CLAMPED_PLAY = `LEAST("playDuration", ${WALL_CLOCK})`;
-// The clamped play as a percentage of the runtime (callers guard duration > 0).
+// The clamped play as a percentage of the runtime. Callers guard duration > 0
+// with a CASE: AND operands have no guaranteed evaluation order in Postgres, so
+// an AND guard would not stop a float division by zero.
 const CLAMPED_PCT = `(${CLAMPED_PLAY}::float / duration::float * 100)`;
 // The rows that need clamping. ONE definition for the dry-run count, its sample
 // and the UPDATE: the confirm gate compares the operator's echoed count with the
@@ -97,8 +99,7 @@ const COUNT_SQL = `SELECT
        COUNT(*)::bigint AS candidate_rows,
        COUNT(*) FILTER (
          WHERE watched = true
-           AND duration > 0
-           AND ${CLAMPED_PCT} < $1
+           AND CASE WHEN duration > 0 THEN ${CLAMPED_PCT} < $1 ELSE false END
        )::bigint AS watched_flips
      FROM "PlayHistory"
      WHERE ${CANDIDATE_WHERE}`;

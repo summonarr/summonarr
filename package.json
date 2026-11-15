@@ -1,6 +1,6 @@
 {
   "name": "summonarr",
-  "version": "0.39.0",
+  "version": "0.40.0",
   "private": true,
   "license": "AGPL-3.0-only",
   "engines": {
@@ -30,9 +30,9 @@
     "@base-ui/react": "^1.9.0",
     "@prisma/adapter-pg": "^7.10.1",
     "@prisma/client": "^7.10.1",
-    "jose": "^6.2.14",
-    "next": "16.4.3",
-    "openid-client": "^6.8.8",
+    "jose": "^6.2.15",
+    "next": "16.4.5",
+    "openid-client": "^6.8.9",
     "pg": "^8.23.1",
     "prisma": "^7.10.1",
     "react": "^19.3.1",
@@ -54,13 +54,13 @@
     "@humanfs/node": "^0.16.8"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.3.3",
+    "@tailwindcss/postcss": "^4.3.5",
     "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "eslint": "^10.13.0",
-    "eslint-config-next": "16.4.3",
+    "eslint": "^10.14.0",
+    "eslint-config-next": "16.4.5",
     "eslint-plugin-react-hooks": "^7.1.1",
     "playwright": "^1.64.1",
     "tailwindcss": "^4.3.1",

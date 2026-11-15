@@ -11,13 +11,25 @@ export type { ActiveSessionLive, LiveEvent } from "@/lib/live-event-frames";
 type Subscriber = (event: LiveEvent) => void;
 // Module-level singleton: a single SSE connection is shared across all useLiveEvents consumers
 const subscribers = new Set<Subscriber>();
+// Called when the stream is back after a drop. The stream carries no event
+// ids, so whatever was emitted during the gap is gone for good (the server
+// also recycles the stream on a schedule): a consumer that shows server data
+// re-reads it here. Never called for the first connect.
+const reconnectSubscribers = new Set<() => void>();
+// True from a connection error until the server's next "connected" frame.
+let dropped = false;
 let singleton: EventSource | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 // Probe cadence after a PERMANENT EventSource failure (readyState CLOSED — the
 // browser gave up, e.g. a 401 once the session expired mid-stream). One cheap
 // request per interval while the tab stays open; live updates resume within one
 // interval of re-authenticating.
+// The interval doubles per consecutive permanent failure up to the cap, with
+// jitter, so open tabs don't probe a failing endpoint in lockstep; any frame
+// from the stream resets it.
 const PERMANENT_FAILURE_RETRY_MS = 30_000;
+const PERMANENT_FAILURE_RETRY_MAX_MS = 5 * 60_000;
+let failureStreak = 0;
 
 // Every subscriber gets the event even when an earlier one throws: one broken
 // consumer must not starve the others, or the lifecycle code after a dispatch.
@@ -36,9 +48,21 @@ function ensureEventSource() {
   // SSE reconnects automatically on error; do not replace with WebSocket
   const es = new EventSource(withBasePath("/api/events"));
   es.onmessage = (e: MessageEvent) => {
+    failureStreak = 0;
     const event = typeof e.data === "string" ? parseLiveEvent(e.data) : null;
     // A frame this client doesn't know (or a malformed one) is dropped.
-    if (event) dispatch(event);
+    if (!event) return;
+    dispatch(event);
+    if (event.type === "connected" && dropped) {
+      dropped = false;
+      for (const sub of reconnectSubscribers) {
+        try {
+          sub();
+        } catch (err) {
+          console.error("[live-events] reconnect subscriber failed:", err);
+        }
+      }
+    }
   };
   es.onerror = () => {
     // CONNECTING → the browser is auto-retrying a transient drop; nothing to do.
@@ -54,14 +78,17 @@ function ensureEventSource() {
       if (singleton === es) singleton = null;
       if (retryTimer === null && subscribers.size > 0) {
         console.warn("[live-events] SSE connection closed permanently; will re-probe");
+        const base = Math.min(PERMANENT_FAILURE_RETRY_MS * 2 ** failureStreak, PERMANENT_FAILURE_RETRY_MAX_MS);
+        failureStreak += 1;
         retryTimer = setTimeout(() => {
           retryTimer = null;
           if (subscribers.size > 0) ensureEventSource();
-        }, PERMANENT_FAILURE_RETRY_MS);
+        }, base * (0.75 + Math.random() * 0.5));
       }
     } else {
       console.warn("[live-events] SSE connection error, browser will retry");
     }
+    dropped = true;
     dispatch({ type: "disconnected" });
   };
   singleton = es;
@@ -72,22 +99,38 @@ function teardownEventSource() {
     clearTimeout(retryTimer);
     retryTimer = null;
   }
+  // The next subscriber opens a fresh stream: its first frame is a first connect.
+  dropped = false;
   if (!singleton) return;
   singleton.close();
   singleton = null;
 }
 
+export interface LiveEventsOptions {
+  /**
+   * Runs once each time the stream comes back after a drop — never on the
+   * first connect. Events emitted during the gap were lost, so re-read here.
+   */
+  onReconnect?: () => void;
+}
+
 // Subscribes onEvent to the shared SSE stream, opening the single connection on
 // first subscriber and tearing it down when the last one unmounts.
-export function useLiveEvents(onEvent: (event: LiveEvent) => void) {
+export function useLiveEvents(onEvent: (event: LiveEvent) => void, options?: LiveEventsOptions) {
   // Ref keeps the callback stable so the effect doesn't re-run when the parent re-renders
   const onEventRef = useRef(onEvent);
+  const onReconnectRef = useRef(options?.onReconnect);
   // Update ref after each render so the subscriber always calls the latest onEvent
-  useEffect(() => { onEventRef.current = onEvent; });
+  useEffect(() => {
+    onEventRef.current = onEvent;
+    onReconnectRef.current = options?.onReconnect;
+  });
 
   useEffect(() => {
     const sub: Subscriber = (event) => onEventRef.current(event);
+    const reconnectSub = () => onReconnectRef.current?.();
     subscribers.add(sub);
+    reconnectSubscribers.add(reconnectSub);
     ensureEventSource();
     // The server sends its one-shot {type:"connected"} only at stream open, so a
     // subscriber joining an already-open singleton (opened long ago by an
@@ -99,6 +142,7 @@ export function useLiveEvents(onEvent: (event: LiveEvent) => void) {
     }
     return () => {
       subscribers.delete(sub);
+      reconnectSubscribers.delete(reconnectSub);
       if (subscribers.size === 0) teardownEventSource();
     };
   }, []);

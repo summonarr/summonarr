@@ -36,9 +36,24 @@ export type BrowseFilters = { [K in BrowseFilterKey]?: string } & { hideAvailabl
 
 // `get` is URLSearchParams.get or a page's searchParamGetter. An empty value
 // is "not set", exactly as each caller's `|| undefined` treated it.
-export function parseBrowseFilters(get: (key: string) => string | null | undefined): BrowseFilters {
+//
+// `mediaType` drops the params the other list owns: TMDB's TV discover takes
+// no certification and its movie discover no network, and neither bar shows a
+// control or chip for them. Left in, a hand-edited or cross-pasted link
+// (/tv?certification=PG-13) counted as "filtered" with nothing on screen to
+// say why or to remove.
+const NOT_APPLICABLE: Record<"movie" | "tv", readonly BrowseFilterKey[]> = {
+  movie: ["networkId", "networkName"],
+  tv: ["certification"],
+};
+
+export function parseBrowseFilters(
+  get: (key: string) => string | null | undefined,
+  mediaType?: "movie" | "tv",
+): BrowseFilters {
   const out: BrowseFilters = { hideAvailable: get("hideAvailable") === "1" };
   for (const key of BROWSE_FILTER_KEYS) out[key] = get(key) || undefined;
+  if (mediaType) for (const key of NOT_APPLICABLE[mediaType]) out[key] = undefined;
   return out;
 }
 

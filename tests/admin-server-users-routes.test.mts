@@ -758,6 +758,7 @@ test("diagnose reports a non-2xx upstream status", async () => {
   usersFetchMode = "500";
   const body = await (await getDiagnose(t)).json();
   assert.equal(body.httpStatus, 500);
+  assert.equal(body.fetchError, "http:500");
 });
 
 test("diagnose labels an unexpected body shape rather than crashing", async () => {
@@ -773,4 +774,19 @@ test("diagnose never echoes the Jellyfin API key", async () => {
   jellyfinUsersPayload = [{ Id: "1", Name: "a", Policy: {} }];
   const text = await (await getDiagnose(t)).text();
   assert.ok(!text.includes("jf-admin-key"));
+});
+
+// Every diagnose call is a live /Users fetch against the Jellyfin server, and a
+// MANAGE_USERS delegate can make it.
+test("diagnose is rate-limited to 30 per minute per caller, and a limited call never reaches Jellyfin", async () => {
+  const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS });
+  jellyfinUsersPayload = [{ Id: "1", Name: "a", Policy: {} }];
+  for (let i = 0; i < 30; i++) assert.equal((await getDiagnose(t)).status, 200, `call ${i + 1}`);
+  const fetched = fetchCalls.length;
+  const limited = await getDiagnose(t);
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get("retry-after"), "60");
+  assert.equal(fetchCalls.length, fetched, "no upstream call for the refused request");
+  // Per caller: someone else still has their own budget.
+  assert.equal((await getDiagnose(await mintSession())).status, 200);
 });

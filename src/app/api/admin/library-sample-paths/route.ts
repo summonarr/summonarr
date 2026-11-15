@@ -68,12 +68,14 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
   // inferred mount to "" — the admin would then be shown full absolute paths
   // as if that were the default server's mount while typing a prefix against
   // it. A per-instance selector for this preview is a later, additive change.
+  // Ordered, so the same library previews the same mount point and samples on
+  // every call (an unordered take returns an arbitrary 500).
   const scope = { serverInstance: DEFAULT_MEDIA_INSTANCE, filePath: { not: null } } as const;
   const [plexMovieRows, plexTvRows, jellyfinMovieRows, jellyfinTvRows] = await Promise.all([
-    prisma.plexLibraryItem.findMany({ where: { ...scope, mediaType: "MOVIE" }, select: { filePath: true }, take: 500 }),
-    prisma.plexLibraryItem.findMany({ where: { ...scope, mediaType: "TV" },    select: { filePath: true }, take: 500 }),
-    prisma.jellyfinLibraryItem.findMany({ where: { ...scope, mediaType: "MOVIE" }, select: { filePath: true }, take: 500 }),
-    prisma.jellyfinLibraryItem.findMany({ where: { ...scope, mediaType: "TV" },    select: { filePath: true }, take: 500 }),
+    prisma.plexLibraryItem.findMany({ where: { ...scope, mediaType: "MOVIE" }, select: { filePath: true }, orderBy: { tmdbId: "asc" }, take: 500 }),
+    prisma.plexLibraryItem.findMany({ where: { ...scope, mediaType: "TV" },    select: { filePath: true }, orderBy: { tmdbId: "asc" }, take: 500 }),
+    prisma.jellyfinLibraryItem.findMany({ where: { ...scope, mediaType: "MOVIE" }, select: { filePath: true }, orderBy: { tmdbId: "asc" }, take: 500 }),
+    prisma.jellyfinLibraryItem.findMany({ where: { ...scope, mediaType: "TV" },    select: { filePath: true }, orderBy: { tmdbId: "asc" }, take: 500 }),
   ]);
 
   const plexMoviePaths    = plexMovieRows.map((r) => r.filePath!);

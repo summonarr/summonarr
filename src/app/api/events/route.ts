@@ -113,10 +113,19 @@ function openEventStream(userId: string, initialScope: SseDeliveryScope): Readab
       // Re-run the DB-checked auth against the original request's cookie/bearer.
       // A revoked/expired session yields a NextResponse → tear down; a still-valid
       // session refreshes the delivery scope so a demotion takes effect.
+      // Maintenance is re-checked on the refreshed session too: it is switched
+      // on while streams are open, and the connect-time check alone would let
+      // a non-admin keep receiving events for the rest of the hour.
       void requireAuth()
-        .then((fresh) => {
+        .then(async (fresh) => {
           if (cleaned) return;
           if (fresh instanceof NextResponse || fresh.user.id !== userId) {
+            cleanup(controller);
+            return;
+          }
+          const refused = await maintenanceGuard(fresh);
+          if (cleaned) return;
+          if (refused) {
             cleanup(controller);
             return;
           }
@@ -130,7 +139,7 @@ function openEventStream(userId: string, initialScope: SseDeliveryScope): Readab
   return new ReadableStream<Uint8Array>({
     start(controller) {
       listener = (event: SSEEvent) => {
-        const evtUserId = (event as { userId?: string }).userId;
+        const evtUserId = "userId" in event ? event.userId : undefined;
         if (!shouldDeliverSseEvent(scope, userId, event.type, evtUserId)) return;
         try {
           // Back-pressure check: stop pushing if the consumer is not reading fast enough
@@ -138,7 +147,7 @@ function openEventStream(userId: string, initialScope: SseDeliveryScope): Readab
             cleanup(controller);
             return;
           }
-          const frame = sseClientFrame(event as SSEEvent & { userId?: string }, userId);
+          const frame = sseClientFrame(event, userId);
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}\n\n`));
         } catch {
           cleanup(controller);

@@ -146,10 +146,16 @@ export async function runDownloadCheck(target: DownloadCheckTarget, opts: Downlo
   // the orchestrator's disabledRequesters short-circuit in /api/sync.
   if (requester?.deactivatedAt) return;
 
-  if (!release.released) {
-    await notifyUserAwaitingRelease(requestedBy, title, mediaType, release.soonestReleaseDate, tmdbId);
-  } else {
-    await notifyUserDownloadPending(requestedBy, title, mediaType, tmdbId);
+  // At-most-once on purpose: the backstop is consumed above, so a retry could
+  // send a duplicate DM. A failed send is logged with the request id instead.
+  try {
+    if (!release.released) {
+      await notifyUserAwaitingRelease(requestedBy, title, mediaType, release.soonestReleaseDate, tmdbId);
+    } else {
+      await notifyUserDownloadPending(requestedBy, title, mediaType, tmdbId);
+    }
+  } catch (err) {
+    console.error(`[download-check] notification for request ${requestId} was not sent:`, err);
   }
 }
 

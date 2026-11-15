@@ -153,6 +153,15 @@ export function HiddenGrid({
   // keeping this page's optimistic un-hides. A failed un-hide leaves the set
   // and the tile is back at its own place in the server's order.
   const [removed, setRemoved] = useState<ReadonlySet<string>>(() => new Set());
+  // A refreshed list is the new truth: drop the keys it no longer holds, so a
+  // title hidden again elsewhere is not kept invisible by an old un-hide.
+  const [seenItems, setSeenItems] = useState(initialItems);
+  if (seenItems !== initialItems) {
+    setSeenItems(initialItems);
+    const present = new Set(initialItems.map(itemKey));
+    const kept = [...removed].filter((k) => present.has(k));
+    if (kept.length !== removed.size) setRemoved(new Set(kept));
+  }
   const visible = initialItems.filter((x) => !removed.has(itemKey(x)));
   const capped = cap != null && truncated;
 

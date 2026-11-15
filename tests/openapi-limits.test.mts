@@ -88,3 +88,16 @@ for (const { what, text, shared, bound, pattern } of PROSE) {
     assertBound(bound, shared);
   });
 }
+
+test("play-history days and years are documented in the statistics time zone, never as UTC", () => {
+  // Guardrail 19g: every play bucket is counted in the statistics zone. The
+  // calendar answer carries no `timeZone` field, so its description is the only
+  // place a client learns which zone a `day` is in.
+  const calendar = spec.paths["/play-history/calendar"].get.description ?? "";
+  assert.match(calendar, /statistics time zone/);
+  assert.doesNotMatch(calendar, /per UTC day/);
+  const year = (spec.paths["/play-history/mine/wrapped"].get.parameters as { name: string; description?: string }[] | undefined)
+    ?.find((p) => p.name === "year")?.description ?? "";
+  assert.match(year, /statistics time zone/);
+  assert.doesNotMatch(year, /\(UTC\)/);
+});

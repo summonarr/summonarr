@@ -122,13 +122,11 @@ test("getClientIp falls back to a stable non-IP bucket when proxy is untrusted",
   }
 });
 
-// ---------------------------------------------------------------------------
 // peekRateLimit / recordFailure — the login-failure pairing: peek gates entry
 // to the flow without consuming quota; recordFailure charges the bucket only
 // when the password verify actually fails. All three functions share one Map,
 // so a peek that accidentally recorded a hit would lock accounts out of login
 // after `limit` ATTEMPTS instead of `limit` FAILURES.
-// ---------------------------------------------------------------------------
 
 test("peekRateLimit never records a hit — repeated peeks stay true", () => {
   const key = `peek:${Math.random()}`;
@@ -167,9 +165,7 @@ test("recordFailure charges the shared bucket peek/check read", () => {
   assert.equal(checkRateLimit(key, 3, 60_000), false);
 });
 
-// ---------------------------------------------------------------------------
 // checkRateLimit edge cases
-// ---------------------------------------------------------------------------
 
 test("checkRateLimit treats a negative limit as disabled", () => {
   const key = `neglimit:${Math.random()}`;
@@ -192,11 +188,9 @@ test("parseRateLimit tolerates a numeric prefix (parseInt semantics)", () => {
   assert.equal(parseRateLimit("5abc", 20), 5);
 });
 
-// ---------------------------------------------------------------------------
 // getClientIp — TRUSTED_PROXY_HOPS selection, clamping, and IP validation.
 // The hop clamp is a security property: an oversized hop count would select an
 // entry further LEFT in X-Forwarded-For, i.e. a client-forgeable address.
-// ---------------------------------------------------------------------------
 
 test("TRUSTED_PROXY_HOPS=2 selects the second-from-right XFF entry", () => {
   withEnv({ TRUST_PROXY: "true", TRUSTED_PROXY_HOPS: "2" }, () => {
@@ -269,10 +263,8 @@ test("distinct User-Agents land in distinct untrusted buckets", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // LRU eviction — the MAX_KEYS=100_000 memory-DoS bound. Kept near the end: it
 // churns the shared Map with 100k filler keys.
-// ---------------------------------------------------------------------------
 
 test("LRU eviction at MAX_KEYS gives the evicted (oldest) key a fresh bucket", () => {
   const windowMs = 3_600_000;
@@ -353,7 +345,7 @@ test("a full login-email class refuses a NEW account rather than evicting a live
 test("a typed-email flood that fills login-email: refuses no other class", () => {
   // Runs after the fill above. `login-email:` is minted from whatever email was
   // typed, so an anonymous flood fills it; it must not spill into Jellyfin
-  // sign-in or the signed-in compromise-response actions (F020).
+  // sign-in or the signed-in compromise-response actions.
   const windowMs = 3_600_000;
   assert.equal(reserveRateLimit(`login-email:still-full-${Math.random()}`, 50, windowMs), null, "the class is full");
   const others = [

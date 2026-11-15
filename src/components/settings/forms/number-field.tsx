@@ -15,6 +15,7 @@ export function NumberField({
   max,
   placeholder,
   help,
+  wide,
 }: {
   id: string;
   label: React.ReactNode;
@@ -23,7 +24,9 @@ export function NumberField({
   min?: number;
   max?: number;
   placeholder?: string;
-  help: React.ReactNode;
+  help?: React.ReactNode;
+  // Fill the column instead of the fixed short box (forms laid out in a grid).
+  wide?: boolean;
 }) {
   return (
     <div className="space-y-1.5">
@@ -36,9 +39,9 @@ export function NumberField({
         placeholder={placeholder}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="bg-zinc-800 border-zinc-700 w-32"
+        className={wide ? "bg-zinc-800 border-zinc-700" : "bg-zinc-800 border-zinc-700 w-32"}
       />
-      <p className="text-xs text-zinc-500">{help}</p>
+      {help != null && <p className="text-xs text-zinc-500">{help}</p>}
     </div>
   );
 }

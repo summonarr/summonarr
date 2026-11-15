@@ -36,6 +36,11 @@ export function AutoRequestPrefs({
   const action = useAsyncAction();
   const needsOptIn = serverSource && !plexConnected && !serverOptedIn;
   const [on, setOn] = useState(initialPlexWatchlist && !needsOptIn);
+  // Switching off DELETES the stored Plex token (PATCH /api/profile/auto-request),
+  // so "connected" stops being true the moment that save lands. Kept as state:
+  // the prop is the render-time answer and nothing refreshes it, which left
+  // the hint promising periodic requests that no longer had a token to run on.
+  const [connected, setConnected] = useState(plexConnected);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -68,14 +73,16 @@ export function AutoRequestPrefs({
     if (failure !== null) {
       setOn(!next);
       setError(failure);
+      return;
     }
+    if (!next) setConnected(false);
   }
 
   // The server records the opt-in exactly when this switch is on (PATCH
   // /api/profile/auto-request sets plexWatchlistOptInAt on and clears it off),
   // so on the server-token path "on" IS "opted in".
   let hint: string;
-  if (plexConnected) hint = t("profile.autoRequest.plexConnected");
+  if (connected) hint = t("profile.autoRequest.plexConnected");
   else if (!serverSource) hint = t("profile.autoRequest.plexNotConnected");
   else if (!on) hint = t("profile.autoRequest.plexServerOptIn");
   else if (serverStatus === "ok") hint = t("profile.autoRequest.plexServerConnected");

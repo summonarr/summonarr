@@ -3,9 +3,8 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Plus, Check, Loader2, Ban } from "@/components/icons";
-import { postMediaRequest } from "@/lib/client/media-request";
-import { rateLimitMessage } from "@/lib/client/rate-limit";
-import { readApiError } from "@/lib/client/api-error";
+import { submitMediaRequest } from "@/lib/client/media-request";
+import { useAsyncAction } from "@/hooks/use-async-action";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
 import { DetailActionButton, DetailActionStatus } from "./detail-action-button";
@@ -42,6 +41,7 @@ export function VariantRequestButton({
   requested,
   available,
   blacklisted,
+  permanentlyDeclined,
 }: {
   tmdbId: number;
   mediaType: "MOVIE" | "TV";
@@ -54,13 +54,24 @@ export function VariantRequestButton({
   available?: boolean;
   // The title is admin-blacklisted — no request either (the request POST 403s).
   blacklisted?: boolean;
+  // The viewer's own request on this target was permanently declined: the POST
+  // 403s on every attempt, so no CTA either.
+  permanentlyDeclined?: boolean;
 }) {
   const { toast } = useToast();
   const t = useT();
   const router = useRouter();
+  const action = useAsyncAction();
   const [state, setState] = useState<"idle" | "loading" | "requested" | "error">(
     requested ? "requested" : "idle",
   );
+  // `requested` going true → false (declined or deleted, then a refresh) must
+  // clear a "Requested" this button set itself — the render below ORs it in.
+  const [prevRequested, setPrevRequested] = useState(!!requested);
+  if (prevRequested !== !!requested) {
+    setPrevRequested(!!requested);
+    if (!requested && state === "requested") setState("idle");
+  }
   const [msg, setMsg] = useState("");
   // The route answers 200 { alreadyAvailable: true } and creates NOTHING when
   // the target's available cache already holds the title (auto-approvers
@@ -71,33 +82,25 @@ export function VariantRequestButton({
   async function submit() {
     setState("loading");
     setMsg("");
-    try {
-      // Refreshes the page-minted token once if it expired while the tab sat
-      // open (postMediaRequest).
-      // The title's own fields last, so the extras can never replace them.
-      const res = await postMediaRequest({ ...extras, tmdbId, mediaType }, requestToken);
-      if (res.status === 409) {
-        setState("requested");
-        return;
-      }
-      if (!res.ok) {
-        // A 429 says when to retry (Retry-After), as RequestButton's does.
-        setMsg(rateLimitMessage(res, t) ?? (await readApiError(res, t("request.somethingWrong"))));
-        setState("error");
-        return;
-      }
-      const body = (await res.json().catch(() => null)) as { alreadyAvailable?: boolean } | null;
-      if (body?.alreadyAvailable === true) {
-        setFoundAvailable(true);
-        setState("idle");
-        router.refresh();
-        return;
-      }
+    // Refreshes the page-minted token once if it expired while the tab sat
+    // open (postMediaRequest). The title's own fields last, so the extras can
+    // never replace them. Aborted on unmount.
+    const outcome = await action.run("request", (signal) =>
+      submitMediaRequest({ ...extras, tmdbId, mediaType }, requestToken, t, signal),
+    );
+    if (outcome === undefined) return;
+    if (outcome === "duplicate") {
+      setState("requested");
+    } else if (outcome === "alreadyAvailable") {
+      setFoundAvailable(true);
+      setState("idle");
+      router.refresh();
+    } else if (outcome === "created") {
       setState("requested");
       toast({ title: labels.requestedToast, variant: "success" });
       router.refresh();
-    } catch {
-      setMsg(t("request.networkError"));
+    } else {
+      setMsg(outcome.error);
       setState("error");
     }
   }
@@ -127,8 +130,9 @@ export function VariantRequestButton({
   // the approved request so this user gets the availability notification. The
   // queue state is communicated by the badges row.
 
-  // Blacklisted blocks all requests (per tmdbId+mediaType, every instance).
-  if (blacklisted) {
+  // Blacklisted blocks all requests (per tmdbId+mediaType, every instance); a
+  // permanent decline blocks this viewer on this target.
+  if (blacklisted || permanentlyDeclined) {
     return (
       <DetailActionStatus variant="muted">
         <Ban style={{ width: 14, height: 14 }} />

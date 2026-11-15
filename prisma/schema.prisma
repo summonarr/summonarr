@@ -40,6 +40,16 @@ model User {
   // row can never be re-enabled into a usable account: there is no identity left
   // to sign in with. Always accompanied by a non-null deactivatedAt.
   purgedAt      DateTime?
+  // True when the account was created through POST /api/admin/users by a
+  // MANAGE_USERS delegate (a caller without the ADMIN bit), who chose its email
+  // and password. Automatic media-server identity linking never binds such an
+  // account by EMAIL (resolveMediaServerUser, the hourly Jellyfin user sync —
+  // guardrail 34d): otherwise a delegate could pre-create an account under the
+  // address of someone about to join the server and read their watch history
+  // once the identity appeared. A provider-subject match and an ADMIN's manual
+  // link are unaffected. Never cleared — an ADMIN who wants the identity
+  // attributed to this account links it by hand.
+  createdByDelegate Boolean @default(false)
   role          Role      @default(USER)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -1306,6 +1316,13 @@ model MediaServerUser {
   // and play history must survive a user's removal. The Jellyfin prune sets this
   // false instead of deleting; the next sync re-activates a returning user.
   active           Boolean  @default(true)
+  // Jellyfin only (guardrail 6j): set true by the SAME write that turns `active`
+  // false, cleared once the offboarding pass has decided the identity (or the
+  // user returns). The pending set is read from this column, never from memory,
+  // so a restart between the inactive write and the session revoke loses nothing.
+  // Default false: rows already inactive before this column existed stay as they
+  // were — the upgrade signs nobody out.
+  offboardPending  Boolean  @default(false)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -1997,6 +2014,32 @@ model CoWatchSuggestion {
   originalLanguage String? @db.VarChar(16)
 
   @@id([sourceTmdbId, sourceMediaType, tmdbId, mediaType])
+}
+
+// Notifications that are OWED: written in the same statement as the claim that
+// makes them due (the "now available" compare-and-swap burns notifiedAvailable,
+// so nothing else could ever re-send), deleted once the channel has been sent.
+// One row per (event, channel). The process that made the claim delivers and
+// deletes its own rows; `lockedUntil` keeps the drain (outbox-drain.ts) away
+// until then, so a row is only redelivered when that process died or the delete
+// failed. Rows past `expiresAt` are dropped unsent — a day-old "now available"
+// is noise. `payload` is always a JSON object. See outbox.ts.
+model Outbox {
+  // The request-notice inserts are raw SQL and supply gen_random_uuid(); the
+  // default serves the Prisma creates (queueAnnouncement).
+  id          String   @id @default(cuid(2))
+  kind        String   @db.VarChar(40) // "request.available" | "request.approved" | "request.declined" | "request.comment" | "issue.reply" | "issue.grab" | "vote.threshold"
+  channel     String   @db.VarChar(16) // "discord" | "push" | "inbox" | "agents" | "email", or "all" for a whole announcement
+  dedupeKey   String   @unique @db.VarChar(200) // <kind>:<subject id>:<channel>
+  userId      String? // whose row this is — the recipient of a request notice, the AUTHOR of a comment/reply: the purge deletes by it, the drain re-checks deactivation
+  payload     Json
+  attempts    Int      @default(0) // redelivery attempts by the drain (the claimer's own send is not counted)
+  lockedUntil DateTime
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+
+  @@index([lockedUntil])
+  @@index([userId])
 }
 
 // In-app notification inbox (the header bell). One row per user-facing event

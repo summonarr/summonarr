@@ -56,6 +56,7 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { BATCH_TX_TIMEOUT } = await import("../src/lib/batch-write.ts");
+const { isSchemaError } = await import("../src/lib/trash-schema-error.ts");
 const {
   describeSchemaError,
   refreshCatalog,
@@ -82,13 +83,19 @@ const { resolveLanguage } = await import("../src/lib/trash-apply-profile.ts");
 const settings = new Map<string, string>();
 const settingUpserts: Array<{ key: string; value: string }> = [];
 const settingDeletes: string[] = [];
+// Every Setting key a read asked for, so a test can prove a key was never read.
+const settingReads: string[] = [];
 shadowPrismaModel(prisma, "setting", {
-  findUnique: async (args: { where: { key: string } }) =>
-    settings.has(args.where.key) ? { key: args.where.key, value: settings.get(args.where.key)! } : null,
-  findMany: async (args: { where: { key: { in: string[] } } }) =>
-    args.where.key.in
+  findUnique: async (args: { where: { key: string } }) => {
+    settingReads.push(args.where.key);
+    return settings.has(args.where.key) ? { key: args.where.key, value: settings.get(args.where.key)! } : null;
+  },
+  findMany: async (args: { where: { key: { in: string[] } } }) => {
+    settingReads.push(...args.where.key.in);
+    return args.where.key.in
       .filter((k) => settings.has(k))
-      .map((k) => ({ key: k, value: settings.get(k)! })),
+      .map((k) => ({ key: k, value: settings.get(k)! }));
+  },
   upsert: async (args: { where: { key: string }; create: { key: string; value: string } }) => {
     settingUpserts.push({ key: args.where.key, value: args.create.value });
     settings.set(args.where.key, args.create.value);
@@ -1168,6 +1175,7 @@ test("the variant slug scopes settings, wire target, and application rows; uncon
 
   // The "anime" slug resolves the radarrAnime* Setting keys and stamps its own arrInstance.
   configureRadarrAnime();
+  settings.set("arrRadarrInstances", JSON.stringify([{ slug: "anime", name: "Anime" }]));
   const spec = seedSpec({
     service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-anime", name: "Anime CF",
     payload: { trash_id: "cf-anime", name: "Anime CF" },
@@ -1184,6 +1192,25 @@ test("the variant slug scopes settings, wire target, and application rows; uncon
   }
   assert.equal(findApp(spec.id, "anime")!.remoteId, 3);
   assert.equal(findApp(spec.id, ""), undefined); // never touches the default instance's rows
+});
+
+test("a slug the registry no longer lists is not configured: its leftover Url/ApiKey settings are never read, nothing is sent, nothing is recorded (guardrail 32)", async () => {
+  configureRadarr();
+  configureRadarrAnime(); // the rows a de-registered instance can leave behind
+  const spec = seedSpec({
+    service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-gone", name: "Gone CF",
+    payload: { trash_id: "cf-gone", name: "Gone CF" },
+  });
+  settingReads.length = 0;
+
+  await assert.rejects(() => applyCustomFormats("RADARR", [spec.id], "anime"), /RADARR \(anime\) is not configured/);
+  // applySpecs (the route's and the cron's entry) answers it without a row.
+  const results = await applySpecs([spec.id], "anime");
+  assert.deepEqual(results.map((r) => [r.ok, r.error]), [[false, "RADARR (anime) is not configured"]]);
+
+  assert.equal(fetchCalls.length, 0, "nothing was sent to the de-registered instance");
+  assert.deepEqual(settingReads.filter((k) => k.startsWith("radarrAnime")), [], "its Setting keys were never read");
+  assert.equal(findApp(spec.id, "anime"), undefined, "no application row for an instance that is not there");
 });
 
 test("recordApply failure bookkeeping survives the update-P2025 → create-P2002 race and still counts this attempt", async () => {
@@ -1856,6 +1883,46 @@ test("group rollup: a required member failure fails the group; an optional membe
   assert.equal(findApp(g2.id, "")!.errorCount, 1);
 });
 
+test("a group never pushes a member whose application is paused on that instance, and the paused member does not fail the group", async () => {
+  configureRadarr();
+  const managed = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-managed", name: "Managed", payload: { trash_id: "cf-managed", name: "Managed" } });
+  const paused = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-paused", name: "Paused", payload: { trash_id: "cf-paused", name: "Paused" } });
+  const pausedElsewhere = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-other", name: "Other", payload: { trash_id: "cf-other", name: "Other" } });
+  // Paused here (and since deleted in Radarr by hand); the third is paused on another instance only.
+  const pausedApp = seedApp(paused.id, "", { enabled: false, remoteId: 7 });
+  const stampedAt = pausedApp.appliedAt;
+  seedApp(pausedElsewhere.id, "4k", { enabled: false, remoteId: 9 });
+  const group = seedSpec({
+    service: "RADARR", kind: "CUSTOM_FORMAT_GROUP", trashId: "grp-paused", name: "G",
+    payload: {
+      trash_id: "grp-paused", name: "G",
+      custom_formats: [
+        { name: "Managed", trash_id: "cf-managed", required: true },
+        { name: "Paused", trash_id: "cf-paused", required: true },
+        { name: "Other", trash_id: "cf-other", required: false },
+      ],
+    },
+  });
+  let nextId = 200;
+  respond = router({
+    [`GET ${RADARR}/api/v3/customformat`]: () => json([]),
+    [`POST ${RADARR}/api/v3/customformat`]: () => json({ id: ++nextId }),
+    [`PUT ${RADARR}/api/v3/customformat/7`]: () => json({ id: 7 }),
+  });
+
+  const results = await applyCustomFormatGroups("RADARR", [group.id]);
+  assert.deepEqual(results.map((r) => [r.trashId, r.ok, r.error]), [["grp-paused", true, undefined]]);
+  const written = fetchCalls
+    .filter((c) => c.method !== "GET")
+    .map((c) => (JSON.parse(c.body!) as { name: string }).name);
+  assert.deepEqual(written.sort(), ["Managed", "Other"]);
+  assert.ok(findApp(managed.id, "")!.remoteId);
+  const after = findApp(paused.id, "")!;
+  assert.equal(after.enabled, false);
+  assert.equal(after.remoteId, 7);
+  assert.equal(after.appliedAt, stampedAt, "a paused member is not stamped as applied");
+});
+
 test("a group whose members are entirely absent from the catalog fails with the refresh hint and no arr traffic", async () => {
   // Deliberately NO radarr configuration: the missing-members path never
   // resolves an arr config, so it must work (and fail cleanly) regardless.
@@ -2392,4 +2459,11 @@ test("listSpecs and getSpecDetail map rows per variant with ISO dates, null appl
   assert.deepEqual(detail!.payload, { trash_id: "cf-a", name: "A" });
   assert.equal(detail!.application!.remoteId, 4);
   assert.equal(await getSpecDetail("no-such-id"), null);
+});
+
+test("describeSchemaError recognizes Prisma's missing-table error and isSchemaError mirrors it", () => {
+  const err = Object.assign(new Error("The table `public.TrashSpec` does not exist in the current database."), { code: "P2021" });
+  assert.match(describeSchemaError(err) ?? "", /prisma db push/);
+  assert.equal(isSchemaError(err), true);
+  assert.equal(isSchemaError(new Error("boom")), false);
 });

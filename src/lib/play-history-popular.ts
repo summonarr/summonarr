@@ -59,7 +59,10 @@ export async function getMostPopularOnServer(
   return {
     items: ranking.items.slice(start, start + limit),
     totalItems: ranking.totalItems,
-    totalPages: Math.max(1, Math.ceil(ranking.totalItems / limit)),
+    // The pages that can be SERVED: the ranking holds at most MAX_POPULAR_ROWS
+    // rows, while totalItems counts every title. Derived from the count, the
+    // pager offered pages past the last one and reloaded it for each.
+    totalPages: Math.max(1, Math.ceil(ranking.items.length / limit)),
     page,
   };
 }

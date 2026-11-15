@@ -518,10 +518,14 @@ export interface TitleEpisode {
   finaleType: string | null;
 }
 
+// No real series has more; the cap keeps the projection (and its sort) bounded
+// whatever the arr sends.
+export const MAX_TITLE_EPISODES = 50_000;
+
 export function projectEpisodes(raw: unknown): TitleEpisode[] {
   if (!Array.isArray(raw)) return [];
   const out: TitleEpisode[] = [];
-  for (const x of raw) {
+  for (const x of raw.slice(0, MAX_TITLE_EPISODES)) {
     const e = obj(x);
     const id = posInt(e?.id);
     const season = nonNegInt(e?.seasonNumber);
@@ -624,7 +628,7 @@ export function projectFiles(service: ArrService, raw: unknown, episodes: readon
     byFile.set(e.episodeFileId, list);
   }
   const out: TitleFile[] = [];
-  for (const x of raw) {
+  for (const x of raw.slice(0, MAX_TITLE_FILE_IDS * PROJECTION_SCAN_FACTOR)) {
     const f = obj(x);
     const id = posInt(f?.id);
     if (!f || id === null) continue;
@@ -682,7 +686,7 @@ export function projectRenames(service: ArrService, raw: unknown): RenamePreview
   if (!Array.isArray(raw)) return [];
   const out: RenamePreview[] = [];
   const seen = new Set<number>();
-  for (const x of raw) {
+  for (const x of raw.slice(0, MAX_TITLE_FILE_IDS * PROJECTION_SCAN_FACTOR)) {
     const r = obj(x);
     const fileId = posInt(service === "radarr" ? r?.movieFileId : r?.episodeFileId);
     if (!r || fileId === null || seen.has(fileId)) continue;

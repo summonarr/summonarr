@@ -155,7 +155,13 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
   // friend's identity to it, then sign in as that account and read the friend's
   // watch history (and the friend's own later Plex/OIDC sign-in would be refused
   // as an email collision). An admin may still do this deliberately.
-  if (!hasPermission(session.user.permissions, Permission.ADMIN)) {
+  //
+  // That check only sees identities that exist TODAY. For one that appears
+  // later (someone about to join the server), the account is marked
+  // `createdByDelegate` below, and automatic linking never binds a marked
+  // account by email (guardrail 34d).
+  const createdByDelegate = !hasPermission(session.user.permissions, Permission.ADMIN);
+  if (createdByDelegate) {
     const serverUser = await prisma.mediaServerUser.findFirst({
       where: { email: { equals: email, mode: "insensitive" } },
       select: { id: true },
@@ -170,7 +176,15 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
   let user: UserRow;
   try {
     user = await prisma.user.create({
-      data: { name, email, passwordHash, role, permissions: defaultPermissionsForRole(role) },
+      data: {
+        name,
+        email,
+        passwordHash,
+        role,
+        permissions: defaultPermissionsForRole(role),
+        // Set on the delegate path only; an ADMIN's account stays email-linkable.
+        ...(createdByDelegate ? { createdByDelegate: true } : {}),
+      },
       select: USER_SELECT,
     });
   } catch (err) {

@@ -31,9 +31,7 @@ function instrumented<T, R>(fn: (item: T, index: number) => R, ticks = 2) {
   return { task, max: () => maxInFlight, live: () => inFlight };
 }
 
-// ---------------------------------------------------------------------------
 // mapLimit
-// ---------------------------------------------------------------------------
 
 test("mapLimit: results preserve input order even when completion order is reversed", async () => {
   const items = [0, 1, 2, 3, 4, 5];
@@ -166,9 +164,7 @@ test("mapLimit: garbage limits (0, negative, NaN, fractional) clamp to a sane wo
   assert.equal(max(), 2);
 });
 
-// ---------------------------------------------------------------------------
 // settleLimit
-// ---------------------------------------------------------------------------
 
 test("settleLimit: mixed outcomes return settled shapes in input order, promise never rejects", async () => {
   const err1 = new Error("fail-1");

@@ -37,9 +37,7 @@ process.env.NEXTAUTH_SECRET ??= "unit-test-session-secret-0123456789abcdef";
 process.env.TOKEN_ENCRYPTION_KEY ??= "ab".repeat(32);
 process.env.DATABASE_URL ??= "postgresql://unit:unit@127.0.0.1:9/never_connects";
 
-// ---------------------------------------------------------------------------
 // ArrResponseError
-// ---------------------------------------------------------------------------
 
 test("ArrResponseError exposes status, body, and the exact message", () => {
   const err = new ArrResponseError(503, '{"message":"Service Unavailable"}');
@@ -66,9 +64,7 @@ test("ArrResponseError preserves an empty body verbatim", () => {
   assert.equal(err.message, "Arr service returned a non-200 response (500)");
 });
 
-// ---------------------------------------------------------------------------
 // arrErrorMessage — the admin-facing mapping of upstream failures
-// ---------------------------------------------------------------------------
 
 test("arrErrorMessage: 401/403 map to the API-key hint", () => {
   assert.equal(
@@ -142,9 +138,7 @@ test("arrErrorMessage: non-Error values get the generic fallback", () => {
   assert.equal(arrErrorMessage(42), "Arr request failed");
 });
 
-// ---------------------------------------------------------------------------
 // resolveSingleTvdbToTmdb — the invalid-id fast path
-// ---------------------------------------------------------------------------
 
 test("resolveSingleTvdbToTmdb returns null for invalid ids without touching cache/DB", async () => {
   // Only the pure guard is exercised — a *valid* id proceeds to the tmdb-cache
@@ -160,9 +154,7 @@ test("resolveSingleTvdbToTmdb returns null for invalid ids without touching cach
   assert.equal(await resolveSingleTvdbToTmdb(-Infinity), null);
 });
 
-// ---------------------------------------------------------------------------
 // isSeriesDownloadedInSonarr — the webhook's anti-forgery gate (source pins)
-// ---------------------------------------------------------------------------
 
 test("the Sonarr download check cross-verifies the payload's tvdbId and tmdbId against each other", () => {
   // isSeriesDownloadedInSonarr is the webhook's anti-forgery gate, but it does DB
@@ -185,7 +177,6 @@ test("the Sonarr download check cross-verifies the payload's tvdbId and tmdbId a
   assert.doesNotMatch(body, /return false;|return true;|return null;\s*\/\/ disagree/, "the verdict is a discriminated object now — a bare boolean would lose the reason the webhook branches on");
 });
 
-// ---------------------------------------------------------------------------
 // Guardrail 14a — ONE completeness rule, shared by the cache writer and the
 // webhook gate. Both are DB/network-bound, so pin the source: each must call
 // sonarrSeriesCompletion (tests/sonarr-completion.test.mts owns the rule
@@ -194,7 +185,6 @@ test("the Sonarr download check cross-verifies the payload's tvdbId and tmdbId a
 // (`status !== "ended"`), so a requester was told "ready to watch" off episode
 // 1 of a season pack; a private copy in either function would reintroduce
 // that on one path and have the other path revert it every tick.
-// ---------------------------------------------------------------------------
 
 test("guardrail 14a: the Sonarr cache writer and the webhook gate share sonarrSeriesCompletion and carry no private threshold", () => {
   const source = readFileSync(new URL("../src/lib/arr.ts", import.meta.url), "utf8");
@@ -340,7 +330,6 @@ test("getCfg normalizes an EMPTY rootFolder to undefined so the `??` fallback ac
   }
 });
 
-// ---------------------------------------------------------------------------
 // pickSeriesByTmdbId — the wrong-series guard shared by every Sonarr lookup.
 //
 // Sonarr degrades an unrecognized `term=tmdb:<id>` into a fuzzy SkyHook title
@@ -349,7 +338,6 @@ test("getCfg normalizes an EMPTY rootFolder to undefined so the `??` fallback ac
 // their failures are quieter — a wrong tvdbId reaches queue/library membership
 // checks, gates the webhook's AVAILABLE transition, and via resolveTvdbIdFromTmdbId
 // is PERSISTED onto Issue.tvdbId, where nothing ever re-resolves it.
-// ---------------------------------------------------------------------------
 
 test("pickSeriesByTmdbId prefers the row whose tmdbId matches, whatever its position", () => {
   const results = [
@@ -400,9 +388,7 @@ test("every Sonarr series/lookup caller routes through the shared picker", () =>
   assert.doesNotMatch(source, /results\[0\]\?\.(tvdbId|firstAired)/, "no direct results[0] field access may remain");
 });
 
-// ---------------------------------------------------------------------------
 // retryTransientRead — a reset/refused READ is retried, nothing else is
-// ---------------------------------------------------------------------------
 
 const noSleep = async () => {};
 const netErr = () => new SafeFetchError("network", "http://arr.test/x", "fetch failed (read ECONNRESET)");

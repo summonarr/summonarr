@@ -167,11 +167,12 @@ shadowPrismaModel(prisma, "setting", {
 });
 
 // hiddenItem / mediaRequest carry the caller's id on every enrichment read.
+let hiddenRows: { tmdbId: number; mediaType: string }[] = [];
 shadowPrismaModel(prisma, "hiddenItem", {
   findMany: async (args: { where?: { userId?: string } } = {}) => {
     rec("hiddenItem.findMany", args.where);
     if (args.where?.userId) enrichedForUserIds.push(args.where.userId);
-    return [];
+    return hiddenRows;
   },
   // The media route also reads findFirst (the "Not interested" toggle state);
   // an unstubbed method throws into its catch and 502s every detail request.
@@ -439,6 +440,31 @@ test("home: DOES read recommendations when feature.page.forYou is on", async () 
   );
 });
 
+test("home: a page an admin switched off loses its rails in the native feed, as on the web home page", async () => {
+  const { token } = await mintSession();
+  const idsOf = async () => {
+    const res = await inScope(() => home.GET(mk("/api/home", token, ""), undefined));
+    assert.equal(res.status, 200);
+    return (await res.json() as { carousels: { id: string }[] }).carousels.map((c) => c.id);
+  };
+  const on = await idsOf();
+  assert.ok(on.includes("on-the-air-tv") && on.includes("top-rated-movies"), `both on by default: ${on.join(", ")}`);
+  settings.set("feature.page.upcoming", "false");
+  settings.set("feature.page.top", "false");
+  invalidateFeatureFlagCache();
+  try {
+    const off = await idsOf();
+    for (const id of ["upcoming-movies", "on-the-air-tv", "top-rated-movies", "top-rated-tv"]) {
+      assert.ok(!off.includes(id), `${id} must be gone`);
+    }
+    assert.ok(off.includes("popular-movies"), "the ungated rails stay");
+  } finally {
+    settings.delete("feature.page.upcoming");
+    settings.delete("feature.page.top");
+    invalidateFeatureFlagCache();
+  }
+});
+
 // ── home: the Recently Added carousel ────────────────────────────────────────
 // Additive to the native wire contract: a new carousel id, existing ones
 // untouched. Its source is the library tables (never TMDB), scoped to the
@@ -636,6 +662,48 @@ for (const route of ROUTES.filter((r) => !SURFACES_FAILURE.has(r.name))) {
   });
 }
 
+test("top-rated: a failed source is NAMED in the degraded answer, so an empty list is not read as 'nothing is top rated'", async () => {
+  const { token } = await mintSession();
+  const fine = await (await inScope(() => topRated.GET(mk("/api/top-rated", token, ""), undefined))).json();
+  assert.ok(Array.isArray(fine.failedSources), "always present");
+  tmdbOk = false;
+  const down = await inScope(() => topRated.GET(mk("/api/top-rated", token, ""), undefined));
+  assert.equal(down.status, 200);
+  assert.ok((await down.json()).failedSources.includes("tmdb"));
+});
+
+test("home: the TMDB rails that could not be loaded are NAMED, so an empty feed is not read as an empty catalog", async () => {
+  const { __resetTmdbBackoffsForTests } = await import("../src/lib/tmdb.ts");
+  __resetTmdbBackoffsForTests();
+  try {
+    const { token } = await mintSession();
+    const fine = await (await inScope(() => home.GET(mk("/api/home", token, ""), undefined))).json();
+    assert.deepEqual(fine.failedSources, [], "always present, empty when every rail answered");
+    assert.ok(fine.featured.length > 0);
+
+    tmdbOk = false;
+    const res = await inScope(() => home.GET(mk("/api/home", token, ""), undefined));
+    assert.equal(res.status, 200, "the status is unchanged — the field is additive");
+    const down = await res.json();
+    assert.deepEqual(down.featured, []);
+    assert.deepEqual(down.carousels, []);
+    assert.deepEqual(down.failedSources, [
+      "trending", "popular-movies", "popular-tv", "upcoming-movies", "on-the-air-tv", "top-rated-movies", "top-rated-tv",
+    ]);
+
+    // A rail whose page an admin switched off was never asked, so it did not fail.
+    settings.set("feature.page.top", "false");
+    invalidateFeatureFlagCache();
+    const gated = await (await inScope(() => home.GET(mk("/api/home", token, ""), undefined))).json();
+    assert.ok(!gated.failedSources.some((id: string) => id.startsWith("top-rated")), gated.failedSources.join(","));
+    assert.ok(gated.failedSources.includes("trending"), "still named inside the failure backoff");
+  } finally {
+    settings.delete("feature.page.top");
+    invalidateFeatureFlagCache();
+    __resetTmdbBackoffsForTests();
+  }
+});
+
 // ── 5: page clamping ─────────────────────────────────────────────────────────
 
 for (const route of ROUTES.filter((r) => ["browse", "popular", "top-rated"].includes(r.name))) {
@@ -716,6 +784,17 @@ test("search whitelists the type filter", async () => {
   assert.deepEqual(tv.map((r: { mediaType: string }) => r.mediaType), ["tv"]);
   const bogus = await (await searchRoute.call(token, "?q=matrix&type=anime")).json();
   assert.equal(bogus.length, 2, "an unknown type falls back to unfiltered");
+});
+
+test("search still finds a title the caller marked not interested", async () => {
+  const { token } = await mintSession();
+  hiddenRows = [{ tmdbId: MOVIE.id, mediaType: "MOVIE" }];
+  try {
+    const found = await (await searchRoute.call(token, "?q=matrix")).json();
+    assert.deepEqual(found.map((r: { id: number }) => r.id), [MOVIE.id, TV.id], "a search by name is not a discovery shelf");
+  } finally {
+    hiddenRows = [];
+  }
 });
 
 test("search is maintenance-gated", async () => {

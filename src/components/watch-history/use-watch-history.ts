@@ -69,14 +69,27 @@ export function useWatchHistory({
   }
 
   const [failure, setFailure] = useState<(HistoryFailure & { key: string }) | null>(null);
+  // A failure describes the visit it happened in. Once the query changes it is
+  // dropped: picking the failed filter again starts a new request, and the old
+  // failure shown over it hid the refreshing state behind an error and a Retry
+  // that only aborted the request already on its way.
+  const [failureQuery, setFailureQuery] = useState(key);
+  if (failureQuery !== key) {
+    setFailureQuery(key);
+    setFailure(null);
+  }
   const [moreFailure, setMoreFailure] = useState<(HistoryFailure & { key: string }) | null>(null);
   // Retry stays disabled for a 429's named wait: an earlier click only spends
   // another request against the same limit.
   const [retryBlocked, setRetryBlocked] = useState(false);
   const cooldownRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The same wait for a rate-limited Load more.
+  const [moreBlocked, setMoreBlocked] = useState(false);
+  const moreCooldownRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(
     () => () => {
       if (cooldownRef.current) clearTimeout(cooldownRef.current);
+      if (moreCooldownRef.current) clearTimeout(moreCooldownRef.current);
     },
     [],
   );
@@ -93,6 +106,10 @@ export function useWatchHistory({
       (res) => {
         if (res.ok) {
           setPage(shownFrom(key, res.page));
+          // This query answered: an earlier failure of the same query (the
+          // filter was left and picked again) no longer describes it. Left
+          // set, it hid the loaded rows behind the error until Retry.
+          setFailure((cur) => (cur?.key === key ? null : cur));
           return;
         }
         if (res.aborted) return;
@@ -123,6 +140,11 @@ export function useWatchHistory({
     if (!res || (!res.ok && res.aborted)) return;
     if (!res.ok) {
       setMoreFailure({ key: myKey, rateLimited: res.rateLimited, retryAfterSeconds: res.retryAfterSeconds });
+      if (res.retryAfterSeconds !== null) {
+        setMoreBlocked(true);
+        if (moreCooldownRef.current) clearTimeout(moreCooldownRef.current);
+        moreCooldownRef.current = setTimeout(() => setMoreBlocked(false), res.retryAfterSeconds * 1000);
+      }
       return;
     }
     setPage((cur) =>
@@ -142,6 +164,7 @@ export function useWatchHistory({
     retry: () => setReloadKey((k) => k + 1),
     loadMore,
     loadingMore: more.busy(moreKey),
+    loadMoreBlocked: moreBlocked,
     loadMoreFailed: moreFailure?.key === key ? moreFailure : null,
   };
 }

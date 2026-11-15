@@ -43,6 +43,7 @@ export function TerminateButton({ session, target }: { session: ActiveSessionLiv
   function openDialog() {
     setReason(defaultReason);
     setError(null);
+    setRequested(false);
     setOpen(true);
   }
 

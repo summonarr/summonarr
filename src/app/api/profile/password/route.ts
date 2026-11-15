@@ -76,13 +76,19 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     // TypeError; reject it explicitly (mirrors the newPassword guard above).
     return NextResponse.json({ error: t("apiAuth.profile.invalidRequest") }, { status: 400 });
   }
+  // No password was offered, so there is nothing to judge: refused before the
+  // verify, which would spend a guess, audit a failed login and could mail the
+  // lockout notice for a request that guessed nothing (as the other step-ups do).
+  if (currentPassword === undefined || currentPassword.length === 0) {
+    return NextResponse.json({ error: t("apiAuth.mfa.currentPasswordRequired") }, { status: 400 });
+  }
   // The current password is a step-up proof like any other: it draws on the
   // shared per-account guess budget and a miss is audited (step-up-auth.ts).
   const verdict = await verifyStepUpPassword({
     userId: session.user.id,
     userName: user.name ?? user.email,
     passwordHash: user.passwordHash,
-    password: currentPassword ?? "",
+    password: currentPassword,
     context: "password-change",
     req,
   });

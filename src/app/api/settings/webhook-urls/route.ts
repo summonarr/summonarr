@@ -43,12 +43,17 @@ export const GET = withAdmin(async (req, _ctx, session) => {
     return tooManyRequests(WEBHOOK_URLS_WINDOW_MS / 1000, translatorForRequest(req)("apiAdmin.common.tooManyRequestsLater"));
   }
   const ownKey = (s: (typeof SLOTS)[number]) => arrSettingKey(s.service, s.instance, "WebhookSecret");
+  // ?service=<field> narrows the answer to that one token, so a copy click
+  // reveals only the secret it needs. Absent or unknown: every token, as before.
+  const wanted = req.nextUrl.searchParams.get("service");
+  const slots = SLOTS.filter((s) => wanted === null || s.field === wanted);
+  const shown = slots.length > 0 ? slots : SLOTS;
   const rows = await prisma.setting.findMany({
-    where: { key: { in: [LEGACY_WEBHOOK_SECRET_KEY, ...SLOTS.map(ownKey)] } },
+    where: { key: { in: [LEGACY_WEBHOOK_SECRET_KEY, ...shown.map(ownKey)] } },
   });
   const value = new Map(rows.map((r) => [r.key, r.value]));
   const legacy = value.get(LEGACY_WEBHOOK_SECRET_KEY);
   return NextResponse.json(
-    Object.fromEntries(SLOTS.map((s) => [s.field, effectiveWebhookSecretFrom(s.instance, value.get(ownKey(s)), legacy) || null])),
+    Object.fromEntries(shown.map((s) => [s.field, effectiveWebhookSecretFrom(s.instance, value.get(ownKey(s)), legacy) || null])),
   );
 });

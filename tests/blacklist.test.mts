@@ -73,7 +73,7 @@ function takePendingRead(): Deferred {
 }
 
 beforeEach(() => {
-  // The cache/inflight/token state is module-level; reset it so every test
+  // The cache/inflight/token state is process-wide; reset it so every test
   // starts from a cold cache regardless of what the previous test did.
   invalidateBlacklistCache();
   nextRows = [];
@@ -83,9 +83,7 @@ beforeEach(() => {
   pendingReads.length = 0;
 });
 
-// ---------------------------------------------------------------------------
 // blacklistKey — pure key normalization
-// ---------------------------------------------------------------------------
 
 test("blacklistKey: TMDB-layer casing normalizes to the Prisma enum keyspace (exact pins)", () => {
   assert.equal(blacklistKey(550, "movie"), "550:MOVIE");
@@ -114,9 +112,7 @@ test("blacklistKey PINS CURRENT BEHAVIOR: only exact 'movie'/'tv' are mapped —
   assert.equal(blacklistKey(1, ""), "1:");
 });
 
-// ---------------------------------------------------------------------------
 // getBlacklistSet — cold read, key shape, warm cache, TTL boundary
-// ---------------------------------------------------------------------------
 
 test("cold read queries once and builds keys in the Prisma enum keyspace", async () => {
   nextRows = [
@@ -181,9 +177,7 @@ test("TTL boundary is exact: fresh at 29,999ms, refetches at 30,000ms", async ()
   }
 });
 
-// ---------------------------------------------------------------------------
 // In-flight coalescing
-// ---------------------------------------------------------------------------
 
 test("N concurrent cold readers coalesce into ONE query and share one set instance", async () => {
   deferNextReads = 1;
@@ -205,9 +199,7 @@ test("N concurrent cold readers coalesce into ONE query and share one set instan
   assert.equal(warm, s1);
 });
 
-// ---------------------------------------------------------------------------
 // Invalidation
-// ---------------------------------------------------------------------------
 
 test("invalidateBlacklistCache drops a warm cache: the next read re-queries", async () => {
   nextRows = [{ tmdbId: 550, mediaType: "MOVIE" }];
@@ -273,9 +265,7 @@ test("out-of-order race: a stale read resolving AFTER a post-invalidation read c
   assert.ok(!warm.has("999:MOVIE"));
 });
 
-// ---------------------------------------------------------------------------
 // Failure path
-// ---------------------------------------------------------------------------
 
 test("a failed cold read rejects, poisons nothing, and the next call retries", async () => {
   deferNextReads = 1;
@@ -291,9 +281,7 @@ test("a failed cold read rejects, poisons nothing, and the next call retries", a
   assert.ok(set.has("7:TV"));
 });
 
-// ---------------------------------------------------------------------------
 // isBlacklisted — the request chokepoint
-// ---------------------------------------------------------------------------
 
 test("isBlacklisted matches on exact (tmdbId, MediaType) and shares the cached set", async () => {
   nextRows = [
@@ -316,4 +304,31 @@ test("chokepoint and discovery agree end-to-end: blacklistKey(tmdb casing) hits 
   assert.equal(set.has(blacklistKey(603, "tv")), await isBlacklisted(603, "TV" as MediaType));
   assert.equal(await isBlacklisted(603, "MOVIE" as MediaType), true);
   assert.equal(await isBlacklisted(603, "TV" as MediaType), false);
+});
+
+// Process-wide state (guardrail 27a)
+
+test("an invalidation through one copy of the module (the admin route's chunk) reaches another copy (the request path's)", async () => {
+  // A specifier in a variable, as tests/session-revocation.test.mts does: a
+  // literal "?chunk=" path is not a module TypeScript can resolve.
+  const specifier = "../src/lib/blacklist.ts?chunk=requests";
+  const requestCopy: typeof import("../src/lib/blacklist.ts") = await import(specifier);
+  assert.notEqual(requestCopy.isBlacklisted, isBlacklisted, "the two imports must be distinct module instances");
+
+  // The request path's copy warms the cache: the title is not blacklisted yet.
+  nextRows = [];
+  assert.equal(await requestCopy.isBlacklisted(550, "MOVIE" as MediaType), false);
+  assert.equal(findManyCalls, 1);
+
+  // An admin blacklists it; the admin route invalidates through ITS copy.
+  nextRows = [{ tmdbId: 550, mediaType: "MOVIE" }];
+  invalidateBlacklistCache();
+
+  // The request path must refuse at once, not after its own 30s TTL.
+  assert.equal(await requestCopy.isBlacklisted(550, "MOVIE" as MediaType), true);
+  assert.equal(findManyCalls, 2);
+
+  // And the two copies share one warm cache: no third query from the other.
+  assert.equal(await isBlacklisted(550, "MOVIE" as MediaType), true);
+  assert.equal(findManyCalls, 2);
 });

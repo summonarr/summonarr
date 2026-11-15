@@ -65,8 +65,8 @@ export function HourHeatmap({
 
   function onCellKey(e: KeyboardEvent<HTMLDivElement>, r: number, c: number, v: number) {
     if (e.key === "Enter" || e.key === " ") {
-      if (!detailBase || v === 0) return;
       e.preventDefault();
+      if (!detailBase || v === 0) return;
       openCell(e.currentTarget, r, c, v);
       return;
     }

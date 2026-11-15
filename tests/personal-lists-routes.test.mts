@@ -282,6 +282,7 @@ const requestsToken = await import("../src/app/api/requests/token/route.ts");
 const requestsUsers = await import("../src/app/api/requests/users/route.ts");
 const requestsInstances = await import("../src/app/api/requests/instances/route.ts");
 const health = await import("../src/app/api/health/route.ts");
+const { __resetHealthProbeForTests } = await import("../src/lib/health-probe.ts");
 
 // ── synthetic request scope ──────────────────────────────────────────────────
 function inScope<T>(fn: () => Promise<T>): Promise<T> {
@@ -319,6 +320,8 @@ const LISTS = [
 ] as const;
 
 beforeEach(() => {
+  // /api/health remembers its last DB answer for a moment (health-probe.ts).
+  __resetHealthProbeForTests();
   ops = [];
   hiddenRows = [];
   watchlistRows = [];

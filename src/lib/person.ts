@@ -7,11 +7,38 @@ import { generateRequestToken } from "@/lib/request-token";
 import type { SummonarrSession } from "@/lib/api-auth";
 import { localizedBiography } from "@/lib/tmdb-localize";
 import { getContentLocale } from "@/lib/i18n/server";
+import { USER_MAX_BLOCKING_MISSES } from "@/lib/ratings-cold-budget";
 
 // What the ratings pass needs to know about a credit. A credit carries a year,
 // not a date; the ratings caches key their TTLs off the date (a new release
 // refreshes sooner, and a not-found answer for one is retried within a day), so
 // the year stands in as its first day, as mdblist.ts does for an undated answer.
+const RATING_FIELDS = [
+  "imdbId", "imdbRating", "imdbVotes", "rottenTomatoes", "rtAudienceScore", "metacritic",
+  "traktRating", "letterboxdRating", "mdblistScore", "malRating", "rogerEbertRating",
+] as const;
+type RatingFields = { [K in (typeof RATING_FIELDS)[number]]?: string | null };
+
+/**
+ * A credit's rating fields. The ratings pass leaves a title it did NOT look up
+ * (past the per-request share of cold lookups) untouched, so its fields are
+ * undefined, while a looked-up title with no rating carries nulls. That
+ * difference is kept: a card fetches ratings itself only for a title that
+ * arrived without them (useLiveRatings), and a null there reads as "looked up,
+ * nothing found" — the credit then showed only its TMDB score until a reload.
+ */
+export function creditRatingFields(e: RatingFields): RatingFields {
+  if (e.imdbRating === undefined && e.rottenTomatoes === undefined) return {};
+  return withNullRatings(e);
+}
+
+/** Every rating field present, null when unset: the shape GET /api/person/[id] has always answered. */
+export function withNullRatings<T extends RatingFields>(e: T): T & Required<RatingFields> {
+  const out: RatingFields = {};
+  for (const field of RATING_FIELDS) out[field] = e[field] ?? null;
+  return { ...e, ...out } as T & Required<RatingFields>;
+}
+
 function ratingsInputFor(c: PersonCredit): TmdbMedia {
   const releaseDate = /^\d{4}$/.test(c.releaseYear) ? `${c.releaseYear}-01-01` : null;
   return {
@@ -65,7 +92,10 @@ export async function getEnrichedPerson(
     attachAllAvailability(
       englishPerson.credits.map((credit) => ({ ...ratingsInputFor(credit), credit })),
       session.user.id,
-      { blockRatings: true },
+      // A filmography can run to hundreds of credits: wait for at most the
+      // per-request share of cold lookups (the rest are warmed after the
+      // response), all of them drawn from the viewer's cold-lookup budget.
+      { blockRatings: true, maxBlockingRatingMisses: USER_MAX_BLOCKING_MISSES },
     ),
   ]);
 
@@ -82,17 +112,7 @@ export async function getEnrichedPerson(
       requestedByMe: e.requestedByMe === true,
       arrPending: e.arrPending === true,
       blacklisted: e.blacklisted === true,
-      imdbId: e.imdbId ?? null,
-      imdbRating: e.imdbRating ?? null,
-      imdbVotes: e.imdbVotes ?? null,
-      rottenTomatoes: e.rottenTomatoes ?? null,
-      rtAudienceScore: e.rtAudienceScore ?? null,
-      metacritic: e.metacritic ?? null,
-      traktRating: e.traktRating ?? null,
-      letterboxdRating: e.letterboxdRating ?? null,
-      mdblistScore: e.mdblistScore ?? null,
-      malRating: e.malRating ?? null,
-      rogerEbertRating: e.rogerEbertRating ?? null,
+      ...creditRatingFields(e),
       requestToken: generateRequestToken(c.id, dbType, session.user.id),
     };
   });

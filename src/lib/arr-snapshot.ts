@@ -453,10 +453,11 @@ async function refreshOne(
     // — also when an admin's own read has kept the view again since.
     if (store.generation !== generation || !store.entries.has(d.key)) return "dropped";
     if (await keepIfJson(d.key, res, { url: d.url, locale: d.locale, viewed: false }, now())) return "refreshed";
-    noteFailedRefresh(current, now());
+    noteFailedRefresh(store.entries.get(d.key) ?? current, now());
     return "failed";
   } catch (err) {
-    noteFailedRefresh(current, now());
+    // A foreground read may have replaced the entry meanwhile: back off the live one.
+    noteFailedRefresh(store.entries.get(d.key) ?? current, now());
     // A route that throws every pass is a condition, not an event (guardrail 7b).
     const path = routePathOf(new URL(d.url).pathname);
     const message = err instanceof Error ? err.message : String(err);

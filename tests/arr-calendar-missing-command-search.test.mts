@@ -1,7 +1,7 @@
 // Audit fixes, unit cal-missing-cmd (Arr Calendar Search, the Missing search,
 // the title-command route and the live command watch):
 //
-//   C035 — a command watch started AFTER the hook's owner unmounted (a
+// a command watch started AFTER the hook's owner unmounted (a
 //          command POST still in flight at unmount / tab switch / close)
 //          follows nothing: the hook disposes the watcher on unmount, a
 //          disposed watcher's start() is false with nothing scheduled, read or
@@ -9,7 +9,7 @@
 //          same watcher across its simulated remount). The release dialog's
 //          movie / title-target branch invalidating on close is pinned in
 //          tests/arr-queue-release-dialog.test.mts.
-//   C032 — only the routes' NOTHING-MISSING 409 carries `nothingMissing: true`
+// only the routes' NOTHING-MISSING 409 carries `nothingMissing: true`
 //          (additive); an episode id no longer on the series and the arr's own
 //          409 do not, and the calendar shows "nothing left" only for the flag
 //          — every other 409 is a failure with the route's message.
@@ -202,9 +202,9 @@ beforeEach(() => {
 
 const src = (p: string) => readFileSync(new URL(`../src/${p}`, import.meta.url), "utf8");
 
-// ── C032: the nothing-missing 409 is flagged, the other 409s are not ─────────
+// ── the nothing-missing 409 is flagged, the other 409s are not ─────────
 
-test("C032: the calendar's Sonarr search — nothing left is 409 { nothingMissing: true }; a stale episode id and the arr's own 409 carry no flag", async () => {
+test("the calendar's Sonarr search — nothing left is 409 { nothingMissing: true }; a stale episode id and the arr's own 409 carry no flag", async () => {
   const token = await mintSession();
   const search = (episodeIds: number[]) => post(commandRoute.POST, token, "/admin/arr/title/command", { service: "sonarr", id: 21, action: "searchEpisodes", episodeIds, missingOnly: true });
 
@@ -229,7 +229,7 @@ test("C032: the calendar's Sonarr search — nothing left is 409 { nothingMissin
   assert.equal(((await refused.json()) as { nothingMissing?: unknown }).nothingMissing, undefined);
 });
 
-test("C032: the Missing search (the calendar's Radarr path) flags its nothing-missing 409; a search that queues answers 202 as before", async () => {
+test("the Missing search (the calendar's Radarr path) flags its nothing-missing 409; a search that queues answers 202 as before", async () => {
   const token = await mintSession();
   const nothing = await post(missingSearchRoute.POST, token, "/admin/missing/search", { service: "radarr", instance: "", arrId: 3, mode: "missing" });
   assert.equal(nothing.status, 409);
@@ -243,7 +243,7 @@ test("C032: the Missing search (the calendar's Radarr path) flags its nothing-mi
   assert.deepEqual(writes().map((c) => c.body), [{ name: "MoviesSearch", movieIds: [1] }]);
 });
 
-test("C032: the calendar shows 'nothing left' only for a 409 carrying nothingMissing — any other 409 is a failure with the route's message", async () => {
+test("the calendar shows 'nothing left' only for a 409 carrying nothingMissing — any other 409 is a failure with the route's message", async () => {
   const { searchOutcome } = await import("../src/components/admin/arr-calendar-state.ts");
   const fail = (status: number, body: unknown, error = "") =>
     ({ ok: false, kind: "http", status, error, body, detail: "" }) as const;
@@ -269,7 +269,7 @@ test("C032: the calendar shows 'nothing left' only for a 409 carrying nothingMis
   assert.doesNotMatch(code, /phase: "nothing" \}/, "no other path reaches the nothing phase");
 });
 
-// ── C035: a disposed watcher follows nothing ─────────────────────────────────
+// ── a disposed watcher follows nothing ─────────────────────────────────
 
 function harness() {
   type Timer = { fn: () => void; ms: number; cancelled: boolean; fired: boolean };
@@ -310,7 +310,7 @@ const target = { service: "sonarr" as const, instance: "" };
 const done = (id: number): ArrCommandState =>
   ({ id, status: "completed", name: "EpisodeSearch", commandName: "EpisodeSearch", queued: null, started: null, ended: null, durationSeconds: null, message: null });
 
-test("C035: a watch started after dispose() (a POST that resolved after unmount) follows nothing — no poll, no read, no update, no onDone", async () => {
+test("a watch started after dispose() (a POST that resolved after unmount) follows nothing — no poll, no read, no update, no onDone", async () => {
   const h = harness();
   let calledBack = 0;
   h.watcher.dispose();
@@ -322,7 +322,7 @@ test("C035: a watch started after dispose() (a POST that resolved after unmount)
   assert.equal(calledBack, 0);
 });
 
-test("C035: dispose() also ends the watches already running — an answer in flight is dropped", async () => {
+test("dispose() also ends the watches already running — an answer in flight is dropped", async () => {
   const h = harness();
   let calledBack = 0;
   h.watcher.start("a", target, [1], () => calledBack++);
@@ -338,7 +338,7 @@ test("C035: dispose() also ends the watches already running — an answer in fli
   assert.equal(calledBack, 0);
 });
 
-test("C035: resume() (StrictMode's remount of the same watcher) makes start() follow again; a plain stop() never disposes", async () => {
+test("resume() (StrictMode's remount of the same watcher) makes start() follow again; a plain stop() never disposes", async () => {
   const h = harness();
   h.watcher.dispose();
   h.watcher.resume();
@@ -354,7 +354,7 @@ test("C035: resume() (StrictMode's remount of the same watcher) makes start() fo
   assert.equal(h.pending().length, 1);
 });
 
-test("C035: the hook resumes the watcher in its effect body and disposes it on unmount — never a bare stop()", () => {
+test("the hook resumes the watcher in its effect body and disposes it on unmount — never a bare stop()", () => {
   const code = src("components/admin/arr-command-watch.tsx");
   assert.match(code, /useEffect\(\(\) => \{\s*watcher\.resume\(\);\s*return \(\) => watcher\.dispose\(\);\s*\}, \[watcher\]\);/);
   assert.doesNotMatch(code, /useEffect\(\(\) => \(\) => watcher\.stop\(\)/, "stop() alone lets a late watch() start an orphan poll");

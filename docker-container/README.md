@@ -194,7 +194,7 @@ Each job also has a URL override (`SYNC_URL`, `UPCOMING_SYNC_URL`, `RATINGS_SYNC
 | ------------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BASE_PATH`                    | **build-time only**; starts with `/`, no trailing `/` | Serve under a subpath, e.g. `/request`. Baked into the client bundle at build, so a runtime env var can't move the app. Don't set a runtime value that differs from the build value: the server-side redirects, the OIDC callback, the email-confirm link, the cron loop and the health probe read it at runtime and would then point at the wrong prefix. See [Sub-path deployment](#sub-path-deployment-base_path). |
 | `TRUSTED_PROXY_HOPS`           | integer; default `1`             | Number of trusted reverse proxies in front of the app. Selects which `X-Forwarded-For` entry (Nth from the right) is the real client IP for per-IP rate limiting. Only relevant when `TRUST_PROXY=true`; raise it if you chain proxies (e.g. Cloudflare → Nginx). Capped at `5`; a value that isn't a whole number from 1 to 5 falls back (a typo to `1`), and the boot log says which value is used. |
-| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=0.39.0` (no `v` — the published tags are bare semver).                                                                                                   |
+| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=0.40.0` (no `v` — the published tags are bare semver).                                                                                                   |
 | `SUMMONARR_PRE_UPGRADE_DUMP_DIR` | writable dir in the container; default unset (off) | Take a `pg_dump` here before a schema-changing upgrade. Mount a volume at it. See [Pre-upgrade safety dump](#pre-upgrade-safety-dump-opt-in). `SUMMONARR_PRE_UPGRADE_DUMP_KEEP` (default `3`) and `SUMMONARR_PRE_UPGRADE_DUMP_TIMEOUT` (seconds, default `900`) tune it. |
 | `SUMMONARR_ACCEPT_DATA_LOSS`   | `true` to enable; default unset  | Apply schema changes with `--accept-data-loss`. Applies on **every** boot while set (a warning is logged each time) — unset it after the boot that needs it. |
 | `DELAYED_JOBS_MAX_PENDING`     | integer; default `500`           | Upper bound on queued+running jobs. Raise only if you see delayed-job drops in the logs.                                                                        |
@@ -219,7 +219,7 @@ Running Summonarr at `https://example.com/request` instead of a dedicated hostna
    ```
 
    Then set `image: summonarr:subpath` (or a `build:` block passing the same `--build-arg`) for the `summonarr` service.
-2. Set `AUTH_URL=https://example.com/request`.
+2. Set `AUTH_URL=https://example.com/request`, and make sure `.env` has **no** `BASE_PATH` line — not even an empty `BASE_PATH=` (templates before this change shipped one; delete it or comment it out). An empty value overrides the prefix baked into your image.
 3. Configure the proxy to forward requests under `/request/` **without stripping the prefix** — Summonarr's router expects to see the full path. Example for Nginx:
 
    ```nginx
@@ -238,7 +238,7 @@ Running Summonarr at `https://example.com/request` instead of a dedicated hostna
 
 4. `docker compose up -d --force-recreate summonarr`.
 
-The internal cron loop and the container health probe read `BASE_PATH` from the image env (baked in at build), so they target the prefixed paths automatically. **Caveat:** web-push service-worker registration is not sub-path-aware, so push notifications may not work under a sub-path.
+The internal cron loop and the container health probe read `BASE_PATH` from the image env (baked in at build), so they target the prefixed paths automatically — as long as `.env` does not set `BASE_PATH` itself (step 2). **Caveat:** web-push service-worker registration is not sub-path-aware, so push notifications may not work under a sub-path.
 
 ## Internal cron schedule
 
@@ -730,7 +730,7 @@ Before upgrading across a minor version, skim the commit history for `feat`/`per
 Pin to a specific version instead of `latest` by setting `SUMMONARR_VERSION` in `.env`:
 
 ```dotenv
-SUMMONARR_VERSION=0.39.0
+SUMMONARR_VERSION=0.40.0
 ```
 
 To pick up new variables added to `.env.example` between releases, re-fetch it side-by-side and diff:

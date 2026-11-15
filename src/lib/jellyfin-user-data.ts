@@ -280,20 +280,28 @@ function parseJellyfinItemProgress(raw: unknown): JellyfinItemProgress | null {
 }
 
 const JELLYFIN_PROGRESS_MAX = 500;
+/** Ceiling on a full (migration) read of one user's partial watches. */
+export const JELLYFIN_FULL_PROGRESS_MAX = 5_000;
 
 /** One user's resumable (in-progress) movies and episodes, newest play first. */
-export async function getJellyfinInProgress(baseUrl: string, apiKey: string, userId: string): Promise<JellyfinItemProgress[]> {
+export async function getJellyfinInProgress(
+  baseUrl: string,
+  apiKey: string,
+  userId: string,
+  opts: { full?: boolean } = {},
+): Promise<JellyfinItemProgress[]> {
+  const max = opts.full ? JELLYFIN_FULL_PROGRESS_MAX : JELLYFIN_PROGRESS_MAX;
   const out: JellyfinItemProgress[] = [];
   await walkJellyfinSequential(
     userItemsQuery(baseUrl, userId, "Movie,Episode", "IsResumable", NEWEST_PLAY_FIRST),
     apiKey,
     (batch) => {
       for (const raw of batch) {
-        if (out.length >= JELLYFIN_PROGRESS_MAX) return STOP_PAGING;
+        if (out.length >= max) return STOP_PAGING;
         const p = parseJellyfinItemProgress(raw);
         if (p) out.push(p);
       }
-      return out.length >= JELLYFIN_PROGRESS_MAX ? STOP_PAGING : undefined;
+      return out.length >= max ? STOP_PAGING : undefined;
     },
   );
   return out;

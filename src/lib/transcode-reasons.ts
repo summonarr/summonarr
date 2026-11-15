@@ -80,7 +80,7 @@ export function translateTranscodeReason(reason: string, t: (key: string) => str
   return reason
     .split(REASON_SEPARATOR)
     .map((part) => {
-      const key = TRANSCODE_REASON_KEYS[part];
+      const key = Object.hasOwn(TRANSCODE_REASON_KEYS, part) ? TRANSCODE_REASON_KEYS[part] : undefined;
       return key ? t(key) : part;
     })
     .join(REASON_SEPARATOR);

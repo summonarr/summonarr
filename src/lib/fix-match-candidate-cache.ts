@@ -60,7 +60,8 @@ export function getCachedCandidates<T>(key: string, now: number = Date.now()): T
   // its age: the TTL still counts from when the list was built.
   entries.delete(key);
   entries.set(key, hit);
-  return hit.body as T;
+  // A copy: a caller that edits its answer must not change the next hit's.
+  return structuredClone(hit.body) as T;
 }
 
 export function setCachedCandidates(key: string, body: unknown, now: number = Date.now()): void {

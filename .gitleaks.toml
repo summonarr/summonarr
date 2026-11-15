@@ -83,6 +83,11 @@
 #    self-describing placeholder "SECRET1234567890" to prove the
 #    key is masked before it reaches a response. None is a real value;
 #    each is allowlisted (not edited) because gitleaks scans history.
+#
+# 8. tests/webhook-routes.test.mts posts a deliberately malformed JSON
+#    body whose token value is the self-describing placeholder
+#    "s3cr3t-in-the-body", to prove a bad body is a 400 and the body is
+#    never echoed. Allowlisted (not edited) because gitleaks scans history.
 
 [extend]
 useDefault = true
@@ -110,4 +115,5 @@ regexes = [
   '''999888777666555444''',
   '''555444333000111222''',
   '''SECRET1234567890''',
+  '''s3cr3t-in-the-body''',
 ]

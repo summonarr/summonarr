@@ -27,7 +27,6 @@ export function DetailActions({
   mediaType,
   state,
   canRequest,
-  tvdbId,
   manageLink,
   t,
 }: {
@@ -42,8 +41,6 @@ export function DetailActions({
   state: DetailPageState;
   // The viewer can request this media type on the default instance.
   canRequest: boolean;
-  // TV only: the series' TVDB id for the issue report.
-  tvdbId?: number | null;
   manageLink: ReturnType<typeof parseManageLink>;
   t: Translator;
 }) {
@@ -72,13 +69,14 @@ export function DetailActions({
       {state.issuesEnabled && inVisibleLibrary && (
         <ReportIssueButton
           tmdbId={media.id}
-          tvdbId={tvdbId}
           mediaType={mediaType}
           title={media.title}
           posterPath={media.posterPath}
         />
       )}
-      {state.votesEnabled && inVisibleLibrary && (
+      {/* The vote route refuses anyone who requested or filed this title, so the
+          button is not offered to them; a vote already cast can still be taken back. */}
+      {state.votesEnabled && inVisibleLibrary && (!state.ownRequest || state.alreadyVoted) && (
         <VoteDeleteButton
           key={`vote-${media.id}`}
           tmdbId={media.id}
@@ -125,6 +123,7 @@ function RequestActions({
       canRequestOnBehalf={state.canOnBehalf}
       canChooseProfile={state.canChooseProfile}
       blacklisted={state.blacklisted}
+      permanentlyDeclined={state.permanentlyDeclined.main}
       canRequest={canRequest}
     />
     {state.show4k && (
@@ -136,6 +135,7 @@ function RequestActions({
         requested={state.requested4k}
         available={state.arr4kAvailable}
         blacklisted={state.blacklisted}
+        permanentlyDeclined={state.permanentlyDeclined.fourK}
       />
     )}
     {state.namedTargets.map((target) => (
@@ -149,6 +149,7 @@ function RequestActions({
         requested={target.requested}
         available={target.available}
         blacklisted={state.blacklisted}
+        permanentlyDeclined={state.permanentlyDeclined.named.includes(target.slug)}
       />
     ))}
     </>

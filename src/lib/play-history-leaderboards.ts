@@ -7,6 +7,7 @@ import { resolvePosterPathMap, posterPathKey } from "./poster-cache";
 import { getStatsTimeZone } from "./stats-time-zone-data";
 import { getCacheKey, memoizeActivity, REWATCHED_TTL, STATS_TTL } from "./play-history-cache";
 import { count, round1 } from "./play-history-aggregate";
+import { sharePct } from "./activity-stats-view";
 import { hoursOf, localStartedAt, TITLE_GROUP_BY_SQL, TRANSCODE_SQL } from "./play-history-sql-fragments";
 import { buildStatsFilters, type PlayHistoryStatsFilters } from "./play-history-stats-filters";
 
@@ -149,6 +150,7 @@ async function getAllUsersStatsUncached() {
       favPlatform: string | null;
       direct: bigint;
       transcodes: bigint;
+      allPlays: bigint;
     }[]
   >`
     SELECT
@@ -171,7 +173,8 @@ async function getAllUsersStatsUncached() {
        ORDER BY COUNT(*) DESC
        LIMIT 1) AS "favPlatform",
       COUNT(p."id") FILTER (WHERE p."playMethod" = 'DirectPlay')::bigint AS direct,
-      COUNT(p."id") FILTER (WHERE p."playMethod" = 'Transcode')::bigint AS transcodes
+      COUNT(p."id") FILTER (WHERE p."playMethod" = 'Transcode')::bigint AS transcodes,
+      COUNT(p."id")::bigint AS "allPlays"
     FROM "MediaServerUser" m
     LEFT JOIN "PlayHistory" p ON p."mediaServerUserId" = m."id"
     GROUP BY m."id", m."username", m."source", m."thumbUrl", m."active", m."sourceUserId", m."serverInstance", m."isServerAdmin", m."createdAt"
@@ -182,7 +185,10 @@ async function getAllUsersStatsUncached() {
     const plays = Number(r.plays);
     const direct = Number(r.direct);
     const transcodes = Number(r.transcodes);
-    const totalWithMethod = direct + transcodes;
+    // Shares of ALL the user's plays, the denominator the user's own page and
+    // the Statistics tab use: a user who only direct-streams is 0% direct play
+    // here too, not 100% of a direct-vs-transcode split.
+    const allPlays = Number(r.allPlays);
     return {
       id: r.id,
       username: r.username,
@@ -197,8 +203,8 @@ async function getAllUsersStatsUncached() {
       hours: round1(Number(r.hours ?? 0)),
       lastActive: r.lastActive,
       favPlatform: r.favPlatform,
-      directPct: totalWithMethod > 0 ? Math.round((direct / totalWithMethod) * 100) : null,
-      transcodePct: totalWithMethod > 0 ? Math.round((transcodes / totalWithMethod) * 100) : null,
+      directPct: allPlays > 0 ? sharePct(direct, allPlays) : null,
+      transcodePct: allPlays > 0 ? sharePct(transcodes, allPlays) : null,
     };
   });
 }

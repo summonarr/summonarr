@@ -32,6 +32,16 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const cleared = await clearDiscordLink(session.user.id);
   if (cleared === null) return NextResponse.json({ ok: true });
 
+  // A code still pending from before the unlink would re-link the account
+  // within its window; the user just chose the opposite. Best-effort: the
+  // unlink has committed, and both rows expire on their own.
+  try {
+    await prisma.discordLinkToken.deleteMany({ where: { userId: session.user.id } });
+    await prisma.discordMergeCode.deleteMany({ where: { userId: session.user.id } });
+  } catch (err) {
+    console.error("[discord] Unlinked, but clearing the pending link codes failed:", err instanceof Error ? err.message : err);
+  }
+
   // Remove the Discord roles Summonarr gave this user, but only AFTER the
   // unlink is saved (guardrail 27: DB write first, side effects second). It is
   // not awaited and handles its own errors: the account is already unlinked,

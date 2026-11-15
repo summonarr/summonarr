@@ -87,7 +87,10 @@ async function checkAndRecordDigest(key: string): Promise<boolean> {
 
   // 1-in-100 chance of cleaning expired rows to keep the table small without a dedicated cron
   if (Math.random() < 0.01) {
-    prisma.webhookReplay.deleteMany({ where: { expiresAt: { lt: now } } }).catch(() => {});
+    prisma.webhookReplay.deleteMany({ where: { expiresAt: { lt: now } } }).catch((err: unknown) => {
+      // Best-effort cleanup, but a persistent failure must not be invisible.
+      console.warn("[webhook-replay] expired-row cleanup failed:", err instanceof Error ? err.name : typeof err);
+    });
   }
 
   return true;

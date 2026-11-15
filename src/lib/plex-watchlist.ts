@@ -278,8 +278,11 @@ export async function resolveMissingTmdbIds(
     else unresolved.push(item);
   }
   if (unresolved.length === 0 || signal?.aborted) return stats;
+  // Set by the first revoked answer so the other workers stop sending the
+  // dead token to plex.tv.
+  let revoked = false;
   await mapLimit(unresolved, METADATA_CONCURRENCY, async (item) => {
-    if (signal?.aborted) return;
+    if (signal?.aborted || revoked) return;
     stats.attempted++;
     try {
       const data = (await plexJson(`${METADATA_URL}${encodeURIComponent(item.ratingKey)}`, token, signal)) as {
@@ -288,7 +291,10 @@ export async function resolveMissingTmdbIds(
       item.tmdbId = tmdbIdFromPlexGuids(data?.MediaContainer?.Metadata?.[0]?.Guid);
       rememberMetadata(item.ratingKey, item.tmdbId, Date.now());
     } catch (err) {
-      if (err instanceof PlexTokenRevokedError) throw err;
+      if (err instanceof PlexTokenRevokedError) {
+        revoked = true;
+        throw err;
+      }
       // An abort is the run ending, not a failed lookup.
       if (!signal?.aborted) stats.failed++;
     }
@@ -629,7 +635,7 @@ async function syncServerUser(user: CronUser, target: ServerTarget, run: ServerU
       console.error(`[plex-watchlist] server-path sync for user ${user.id}: ${read.lookups.failed} of ${read.lookups.attempted} metadata lookup(s) failed and nothing on the watchlist could be resolved`);
       return true;
     }
-    await fileWatchlistTitles(user, read.items, result, signal);
+    await fileAutoRequestTitles(user, read.items, WATCHLIST_SOURCE, result, signal);
     statuses[user.id] = "ok";
     return true;
   } catch (err) {
@@ -713,15 +719,17 @@ async function syncServerPath(
   // userId → the first target that resolved to them.
   const targetByUser = new Map<string, ServerTarget>();
   for (const [accountId, userId] of resolved) {
-    if (tokenUserIds.has(userId) || targetByUser.has(userId)) continue;
-    targetByUser.set(userId, targets.get(accountId)!);
+    const target = targets.get(accountId);
+    if (!target || tokenUserIds.has(userId) || targetByUser.has(userId)) continue;
+    targetByUser.set(userId, target);
   }
 
   if (targetByUser.size > 0 && !signal?.aborted) {
     const run: ServerUserRun = { server, result, statuses, rejectToken, signal };
     for (const user of await consentingServerUsers([...targetByUser.keys()])) {
       if (signal?.aborted) break; // guardrail 41
-      const target = targetByUser.get(user.id)!;
+      const target = targetByUser.get(user.id);
+      if (!target) continue;
       if (rejectedTokens.has(target.token)) {
         statuses[user.id] = "error";
         continue;
@@ -747,17 +755,9 @@ async function syncOneUser(user: CronUser, result: PlexWatchlistSyncResult, sign
   if (metadataLookupsDefeatedRead(items, lookups)) {
     throw new Error(`${lookups.failed} of ${lookups.attempted} metadata lookup(s) failed and nothing on the watchlist could be resolved`);
   }
-  await fileWatchlistTitles(user, items, result, signal);
+  await fileAutoRequestTitles(user, items, WATCHLIST_SOURCE, result, signal);
 }
 
-// Shared by both paths: same ledger, same source string, same per-run cap — so
-// switching a user between paths never re-files a title. The body is the one
-// every polled source uses (auto-request.ts).
-async function fileWatchlistTitles(
-  user: CronUser,
-  watchlist: PlexWatchlistItem[],
-  result: PlexWatchlistSyncResult,
-  signal: AbortSignal | undefined,
-): Promise<void> {
-  await fileAutoRequestTitles(user, watchlist, "plex-watchlist", result, signal);
-}
+// Both paths file under one source string, so switching a user between them
+// never re-files a title (the ledger is keyed on it).
+const WATCHLIST_SOURCE = "plex-watchlist";

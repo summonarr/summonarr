@@ -653,6 +653,15 @@ test("season: a TMDB failure is 502 and no episode rows are read", async () => {
   assert.match(scoped[0], /1399/);
 });
 
+test("season: a season TMDB doesn't have is 404, told apart from an outage's 502", async () => {
+  seasonMode = "404";
+  const me = await mintSession();
+  const res = await getSeason(me.token, "1399", "99");
+  assert.equal(res.status, 404);
+  assert.deepEqual(await res.json(), { error: "Not found" });
+  assert.equal(opsOf("tVEpisodeCache.findMany").length, 0);
+});
+
 test("season: the 31st request in the window is 429", async () => {
   const me = await mintSession();
   for (let i = 0; i < 30; i++) assert.equal((await getSeason(me.token, "1399", "1")).status, 200);

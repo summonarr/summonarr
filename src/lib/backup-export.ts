@@ -120,6 +120,7 @@ async function writeHeader(
 export async function writeEnumTypes(tx: RawQueryClient, write: Write): Promise<void> {
   await write("-- Enum types\n");
   for (const name of BACKUP_ENUMS) {
+    quoteIdent(name, "enum name");
     const values = await tx.$queryRawUnsafe<{ enumlabel: string }[]>(
       `SELECT enumlabel FROM pg_enum JOIN pg_type ON pg_enum.enumtypid = pg_type.oid WHERE pg_type.typname = $1 ORDER BY enumsortorder`,
       name,
@@ -136,7 +137,7 @@ export async function writeEnumTypes(tx: RawQueryClient, write: Write): Promise<
 // query does not list falls back to the value's shape in escapeSQL.
 async function columnKinds(tx: RawQueryClient, table: string): Promise<Map<string, ColumnKind>> {
   const rows = await tx.$queryRawUnsafe<{ attname: string; typname: string; typcategory: string }[]>(
-    `SELECT a.attname, t.typname, t.typcategory FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped`,
+    `SELECT a.attname::text AS attname, t.typname::text AS typname, t.typcategory::text AS typcategory FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped`,
     `"public"."${table}"`,
   );
   const kinds = new Map<string, ColumnKind>();
@@ -200,6 +201,7 @@ function readPage(tx: RawQueryClient, table: string, order: TableOrder, cursor: 
  * shape.
  */
 export async function dumpTable(tx: RawQueryClient, table: string, write: Write, onRow: () => void = () => {}): Promise<number> {
+  quoteIdent(table, "table name");
   const order = await tableOrder(tx, table);
   const kinds = await columnKinds(tx, table);
   let total = 0;
@@ -345,7 +347,13 @@ export function buildSqlStream(
     } finally {
       clearTimeout(timeout);
       clearTimeout(firstRead);
-      await hooks.onSettled({ status, rows });
+      // A hook that throws (lock release, audit write) must not become an
+      // unhandled rejection of this detached producer.
+      try {
+        await hooks.onSettled({ status, rows });
+      } catch (settleErr) {
+        console.error("[db-export] settle hook failed:", settleErr);
+      }
     }
   })();
 

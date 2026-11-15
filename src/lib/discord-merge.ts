@@ -5,6 +5,7 @@ import { DISCORD_SYNTHETIC_EMAIL_SUFFIX } from "@/lib/user-source";
 import { logAudit } from "@/lib/audit";
 import { notifyAccountSecurityEvent } from "@/lib/account-security-notify";
 import { BATCH_TX_TIMEOUT } from "@/lib/batch-write";
+import { rearmVoteAlertsBelowThreshold } from "@/lib/deletion-vote-threshold";
 
 export interface MergeResult {
   migrated: number;
@@ -139,25 +140,25 @@ async function migrateShadowAuthorship(tx: MergeTx, shadowId: string, webUserId:
   await tx.issueGrab.updateMany({ where: { triggeredById: shadowId }, data: { triggeredById: webUserId } });
 }
 
-// No deletion-vote threshold re-evaluation is needed after this transfer: for
-// any (tmdbId, mediaType) the merge either moves a vote from the shadow user to
-// the web user (distinct-voter count unchanged) or deletes it as a conflict
-// because the web user already voted (count decreases by one). The count can
-// never INCREASE, so the threshold alert in /api/votes (the
-// `deletionVoteNotified:` one-shot gate) can neither newly fire nor need
-// re-arming here.
+// For any (tmdbId, mediaType) the merge either moves a vote from the shadow user
+// to the web user (tally unchanged) or deletes it as a conflict because the web
+// user already voted (tally down by one). The tally never INCREASES, so the
+// threshold alert can't newly fire here — but a dropped duplicate can take a
+// title back below the threshold, and its `deletionVoteNotified:` marker must
+// go with it, as on an un-vote, or the next crossing alerts nobody.
 async function migrateShadowVotes(tx: MergeTx, shadowId: string, webUserId: string): Promise<void> {
   const webVotes = await tx.deletionVote.findMany({
     where: { userId: webUserId },
     select: { tmdbId: true, mediaType: true },
   });
   const webVoteKeys = new Set(webVotes.map((v) => `${v.tmdbId}:${v.mediaType}`));
-  const conflictVoteIds = (await tx.deletionVote.findMany({
+  const conflicts = (await tx.deletionVote.findMany({
     where: { userId: shadowId },
     select: { id: true, tmdbId: true, mediaType: true },
-  })).filter((v) => webVoteKeys.has(`${v.tmdbId}:${v.mediaType}`)).map((v) => v.id);
-  if (conflictVoteIds.length > 0) {
-    await tx.deletionVote.deleteMany({ where: { id: { in: conflictVoteIds } } });
+  })).filter((v) => webVoteKeys.has(`${v.tmdbId}:${v.mediaType}`));
+  if (conflicts.length > 0) {
+    await tx.deletionVote.deleteMany({ where: { id: { in: conflicts.map((v) => v.id) } } });
+    await rearmVoteAlertsBelowThreshold(tx, conflicts);
   }
   await tx.deletionVote.updateMany({
     where: { userId: shadowId },

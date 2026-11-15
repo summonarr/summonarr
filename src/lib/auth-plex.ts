@@ -25,6 +25,7 @@ import {
 import {
   auditLoginFailure,
   authorizedSignIn,
+  MAX_SIGN_IN_TOKEN_LENGTH,
   refuseSignIn,
   secretLimiterKey,
   signInRequestContext,
@@ -370,7 +371,7 @@ export async function authorizeWithPlex(
   req: Request,
 ): Promise<AuthorizedSignIn | null> {
   const { plexToken } = credentials;
-  if (typeof plexToken !== "string" || !plexToken) return null;
+  if (typeof plexToken !== "string" || !plexToken || plexToken.length > MAX_SIGN_IN_TOKEN_LENGTH) return null;
   const ctx = signInRequestContext(req);
   if (!passesPlexRateLimits(ctx, plexToken)) return null;
 

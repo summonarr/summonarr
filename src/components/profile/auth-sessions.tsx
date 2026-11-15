@@ -127,6 +127,10 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
   const [prompt, setPrompt] = useState(0);
   // The last revoke's failure and the session it was for.
   const [revokeError, setRevokeError] = useState<{ sessionId: string; text: string } | null>(null);
+  // Sessions this page revoked. They stay hidden while router.refresh() is in
+  // flight, so a revoked row never comes back with a live button (a second
+  // click answered "Not found").
+  const [removed, setRemoved] = useState<ReadonlySet<string>>(() => new Set());
   // `formatRelativeTime` and `toLocaleDateString` give different text on the
   // server and in the browser (the clock moves on, and the locale can differ),
   // so they only render once mounted. See CLAUDE.md guardrail 16. The tick
@@ -163,6 +167,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
     if (!res) return;
     if (res.ok) {
       setPasswordFor((p) => (p === sessionId ? null : p));
+      setRemoved((prev) => new Set(prev).add(sessionId));
       router.refresh();
       return;
     }
@@ -179,17 +184,19 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
     setRevokeError({ sessionId, text: res.error });
   }
 
-  if (sessions.length === 0) {
+  const visible = sessions.filter((s) => !removed.has(s.sessionId));
+
+  if (visible.length === 0) {
     return <p className="text-sm text-zinc-500">{t("profile.sessions.empty")}</p>;
   }
 
   return (
     <div className="space-y-2">
       <p className="text-xs text-zinc-500 mb-3">
-        {t("profile.sessions.count", { count: sessions.length })}
+        {t("profile.sessions.count", { count: visible.length })}
       </p>
 
-      {sessions.map((s) => {
+      {visible.map((s) => {
         const revoking = action.busy(`revoke:${s.sessionId}`);
         return (
           <div

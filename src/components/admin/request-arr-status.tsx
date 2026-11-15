@@ -156,9 +156,13 @@ export function RequestArrStatusPanel({ requestId, mediaType, arrInstance, arrIn
   // happened meanwhile.
   const thenRecheck = (action: () => Promise<void>) => {
     const at = seq.current;
-    void action().then(() => {
-      if (seq.current === at) void load();
-    });
+    void action()
+      .catch((err: unknown) => {
+        console.warn("[request-arr-status] action failed:", err instanceof Error ? err.message : err);
+      })
+      .then(() => {
+        if (seq.current === at) void load();
+      });
   };
 
   // Named per instance: the route judges the request's own instance, and a
@@ -213,7 +217,7 @@ export function RequestArrStatusPanel({ requestId, mediaType, arrInstance, arrIn
 
             {detailLines.length > 0 && (
               <ul className="mt-1.5 space-y-0.5 text-[11px] text-zinc-400">
-                {detailLines.map((line) => <li key={line}>{line}</li>)}
+                {detailLines.map((line, i) => <li key={`${i}:${line}`}>{line}</li>)}
               </ul>
             )}
 

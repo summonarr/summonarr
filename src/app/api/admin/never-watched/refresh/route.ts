@@ -1,14 +1,14 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { isFeatureEnabled } from "@/lib/features";
-import { checkRateLimit } from "@/lib/rate-limit";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { withAdvisoryLock, UPSTREAM_WATCH_LOCK_ID } from "@/lib/advisory-lock";
 import { NEVER_WATCHED_FEATURE_KEY } from "@/lib/never-watched-data";
 import { refreshUpstreamWatch } from "@/lib/upstream-watch-data";
 import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
-import { answerOf, jobResponse, runningArrJob, startArrJob } from "@/lib/release-search-jobs";
+import { jobResponse } from "@/lib/release-search-jobs";
+import { runLockedAdminJob, wantsBackgroundJob } from "@/lib/admin-locked-job";
 
 // Re-read the media servers' own watch records now (ADMIN) — the never-watched
 // page's "Refresh" for the evidence the daily refresh-upstream-watch cron
@@ -46,18 +46,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // No body (the original contract) is the synchronous walk.
   const parsed = await readJsonCappedOr<unknown>(req, 1024, {});
   if (parsed instanceof NextResponse) return parsed;
-  const background = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-    ? (parsed as { async?: unknown }).async === true
-    : false;
   const owner = session.user.id;
-  // Joining the admin's own running walk reaches no media server: no token.
-  const running = background ? runningArrJob(owner, JOB_KEY) : null;
-  if (running) return NextResponse.json({ job: running }, { status: 202 });
   // Each refresh walks every configured server's whole watch history (and every
   // Jellyfin user's played items) — a tight loop would hammer the media servers.
-  if (!checkRateLimit(`never-watched-refresh:${owner}`, RATE_LIMIT, RATE_WINDOW_MS)) {
-    return NextResponse.json({ error: t("apiAdmin.common.tooManyRequestsLater") }, { status: 429 });
-  }
   const run = () => withAdvisoryLock(
     UPSTREAM_WATCH_LOCK_ID,
     async (signal: AbortSignal) => {
@@ -71,9 +62,14 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       { status: 409, headers: { "Retry-After": "30" } },
     ),
   );
-  if (!background) return run();
-  // Outlives the request — safe only because Summonarr is one long-lived Node
-  // server (the guardrail 17/37a assumption); a restart drops it and the poll 404s.
-  const { jobId } = startArrJob(owner, JOB_KEY, async () => answerOf(await run()));
-  return NextResponse.json({ job: jobId }, { status: 202 });
+  return runLockedAdminJob({
+    owner,
+    jobKey: JOB_KEY,
+    rateKey: `never-watched-refresh:${owner}`,
+    limit: RATE_LIMIT,
+    windowMs: RATE_WINDOW_MS,
+    background: wantsBackgroundJob(parsed),
+    tooManyMessage: t("apiAdmin.common.tooManyRequestsLater"),
+    run,
+  });
 });

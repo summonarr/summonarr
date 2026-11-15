@@ -204,7 +204,10 @@ async function sendOne(cfg: EmailConfig, to: string, subject: string, html: stri
     if (!res.ok) {
       const body: unknown = await res.json().catch(() => null);
       const message = body && typeof body === "object" ? (body as { message?: unknown }).message : undefined;
-      throw new Error(typeof message === "string" && message.length > 0 ? message : `Resend send failed (${res.status})`);
+      throw Object.assign(
+        new Error(typeof message === "string" && message.length > 0 ? message : `Resend send failed (${res.status})`),
+        { httpStatus: res.status },
+      );
     }
     return;
   }
@@ -578,21 +581,42 @@ function noteBlockHtml(note: string | null | undefined, label: string): SafeHtml
 // gate, the recipient's language, the named media title in that language
 // (guardrail 40a), one send, and the never-throw contract — a failure is logged
 // once under `logLabel`, never with the address.
+/**
+ * Whether sending this mail again later could work. Not worth repeating: the
+ * provider's verdict on THIS message (Resend 4xx other than 429, an SMTP 5xx
+ * reply) and this server's own configuration (no host, a refused host, a bad
+ * port). Everything else — no connection, a timeout, an SMTP 4xx, a provider
+ * 5xx — is.
+ */
+export function isTransientEmailFailure(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return true;
+  const { httpStatus, responseCode, message } = err as { httpStatus?: unknown; responseCode?: unknown; message?: unknown };
+  if (typeof httpStatus === "number") return httpStatus === 429 || httpStatus >= 500;
+  if (typeof responseCode === "number") return responseCode < 500;
+  if (typeof message === "string" && /not configured|^Refusing SMTP host|^Invalid SMTP port/.test(message)) return false;
+  return true;
+}
+
+// Answers true when the send FAILED in a way worth repeating
+// (isTransientEmailFailure) — the request notices keep that mail owed
+// (guardrail 14f). False: sent, switched off, or refused for good. Never throws.
 async function sendUserTemplate(
   to: { toEmail: string; locale?: string | null },
   titleRef: TitleRef | null,
   build: (lang: Lang, title: string, cfg: EmailConfig) => { subject: string; html: string },
   logLabel: string,
-): Promise<void> {
+): Promise<boolean> {
   try {
     const cfg = await getEmailConfig();
-    if (!cfg || !isBackendConfigured(cfg)) return;
+    if (!cfg || !isBackendConfigured(cfg)) return false;
     const lang = langFor(to.locale);
     const title = titleRef ? await localizedTitleFor(titleRef, to.locale) : "";
     const { subject, html } = build(lang, title, cfg);
     await sendOne(cfg, to.toEmail, subject, html);
+    return false;
   } catch (err) {
     console.error(`[email] Failed to send ${logLabel} notification:`, err instanceof Error ? err.message : err);
+    return isTransientEmailFailure(err);
   }
 }
 
@@ -845,8 +869,8 @@ export async function notifyUserRequestApprovedEmail(data: {
   tmdbId?: number;
   /** The recipient's stored User.locale (null → the instance default). */
   locale?: string | null;
-}): Promise<void> {
-  await sendUserTemplate(data, { title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType }, (lang, title, cfg) => {
+}): Promise<boolean> {
+  return sendUserTemplate(data, { title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType }, (lang, title, cfg) => {
     const { t } = lang;
     const mediaLabel = mediaLabelT(t, data.mediaType);
     const html = richEmailHtml({
@@ -874,8 +898,8 @@ export async function notifyUserRequestDeclinedEmail(data: {
   posterPath?: string | null;
   /** The recipient's stored User.locale (null → the instance default). */
   locale?: string | null;
-}): Promise<void> {
-  await sendUserTemplate(data, { title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType }, (lang, title, cfg) => {
+}): Promise<boolean> {
+  return sendUserTemplate(data, { title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType }, (lang, title, cfg) => {
     const { t } = lang;
     const mediaLabel = mediaLabelT(t, data.mediaType);
     const html = richEmailHtml({
@@ -903,10 +927,10 @@ export async function notifyUserRequestAvailableEmail(data: {
   tmdbId?: number;
   /** The recipient's stored User.locale (null → the instance default). */
   locale?: string | null;
-}): Promise<void> {
+}): Promise<boolean> {
   const mediaSlug = data.mediaType === "MOVIE" ? "movie" : "tv";
   const deepLink = data.tmdbId ? `/${mediaSlug}/${data.tmdbId}` : "/requests";
-  await sendUserTemplate(data, { title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType }, (lang, title, cfg) => {
+  return sendUserTemplate(data, { title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType }, (lang, title, cfg) => {
     const { t } = lang;
     const mediaLabel = mediaLabelT(t, data.mediaType);
     const html = richEmailHtml({

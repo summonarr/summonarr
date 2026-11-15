@@ -140,6 +140,7 @@ function KpiCell({ k, last }: { k: Kpi; last: boolean }) {
 }
 
 export function KpiStrip({ kpis }: { kpis: Kpi[] }) {
+  if (kpis.length === 0) return null;
   return (
     <section style={{ marginBottom: 22 }}>
       <div
@@ -155,7 +156,7 @@ export function KpiStrip({ kpis }: { kpis: Kpi[] }) {
         }}
       >
         {kpis.map((k, i) => (
-          <KpiCell key={k.label} k={k} last={i === kpis.length - 1} />
+          <KpiCell key={`${i}:${k.label}`} k={k} last={i === kpis.length - 1} />
         ))}
       </div>
     </section>

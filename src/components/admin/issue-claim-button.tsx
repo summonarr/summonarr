@@ -141,7 +141,7 @@ export function IssueClaimButton({ issueId, claimedBy, claimerName, currentUserI
           </Button>
         </div>
       )}
-      {error && <p className="text-[10px] text-red-400">{error}</p>}
+      {error && <p role="alert" className="text-[10px] text-red-400">{error}</p>}
     </div>
   );
 }

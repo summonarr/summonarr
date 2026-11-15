@@ -51,6 +51,14 @@ function parseSort(value: string | undefined): RequestSort {
   return VALID_SORTS.find((s) => s === value) ?? "newest";
 }
 
+const REQUEST_LIST_SELECT = {
+  id: true, mediaType: true, tmdbId: true, title: true,
+  posterPath: true, releaseYear: true, status: true, note: true,
+  adminNote: true, permanentlyDeclined: true,
+  createdAt: true, updatedAt: true,
+  _count: { select: { comments: true } },
+} as const satisfies Prisma.MediaRequestSelect;
+
 export default async function RequestsPage({
   searchParams,
 }: {
@@ -85,11 +93,12 @@ export default async function RequestsPage({
   // search can't make the query slow (same as /api/votes).
   const q = sanitizeContainsSearch((qParam ?? "").trim());
 
-  const where: Prisma.MediaRequestWhereInput = {
+  // The list and the pills' counts share this, so they cannot disagree.
+  const baseWhere: Prisma.MediaRequestWhereInput = {
     requestedBy: session.user.id,
-    ...(status ? { status } : {}),
     ...(q ? { title: { contains: q, mode: "insensitive" } } : {}),
   };
+  const where: Prisma.MediaRequestWhereInput = { ...baseWhere, ...(status ? { status } : {}) };
 
   // A comment link names a request, not a page. On arrival from one (see
   // commentLinkToLocate), go to the page that holds the viewer's own request
@@ -104,14 +113,7 @@ export default async function RequestsPage({
   const [requests, statusCountsRaw] = await Promise.all([
     prisma.mediaRequest.findMany({
       where,
-
-      select: {
-        id: true, mediaType: true, tmdbId: true, title: true,
-        posterPath: true, releaseYear: true, status: true, note: true,
-        adminNote: true, permanentlyDeclined: true,
-        createdAt: true, updatedAt: true,
-        _count: { select: { comments: true } },
-      },
+      select: REQUEST_LIST_SELECT,
       orderBy: ownRequestsOrderBy(sort === "oldest" ? "asc" : "desc"),
       skip,
       take: PAGE_SIZE,
@@ -120,10 +122,7 @@ export default async function RequestsPage({
     // the list's total comes from these too (below) — no separate count query.
     prisma.mediaRequest.groupBy({
       by: ["status"],
-      where: {
-        requestedBy: session.user.id,
-        ...(q ? { title: { contains: q, mode: "insensitive" } } : {}),
-      },
+      where: baseWhere,
       _count: { status: true },
     }),
   ]);
@@ -303,17 +302,10 @@ function RequestsEmptyState({
   );
 }
 
-type RequestListItem = {
-  id: string;
-  mediaType: "MOVIE" | "TV";
-  tmdbId: number;
-  title: string;
-  posterPath: string | null;
-  releaseYear: string | null;
-  status: RequestStatus;
-  note: string | null;
-  createdAt: Date;
-};
+type RequestListItem = Pick<
+  Prisma.MediaRequestGetPayload<{ select: typeof REQUEST_LIST_SELECT }>,
+  "id" | "mediaType" | "tmdbId" | "title" | "posterPath" | "releaseYear" | "status" | "note" | "adminNote" | "createdAt"
+>;
 
 // One of the viewer's requests: poster, title, meta line, availability, the
 // note and the status chip. The title links to the detail page.
@@ -435,6 +427,26 @@ function RequestRow({
               }}
             >
               {r.note}
+            </p>
+          )}
+          {/* On the row itself, not only inside the comment thread: the thread
+              is collapsed by default and absent when request comments are off,
+              which left a declined request with no reason anywhere. */}
+          {r.status === "DECLINED" && r.adminNote && (
+            <p
+              className="line-clamp-3 whitespace-pre-wrap break-words"
+              style={{
+                marginTop: 8,
+                padding: "6px 10px",
+                borderRadius: 4,
+                background: "var(--ds-bg-1)",
+                borderLeft: "2px solid var(--ds-danger)",
+                fontSize: 11.5,
+                color: "var(--ds-fg-muted)",
+              }}
+            >
+              <span style={{ color: "var(--ds-fg-subtle)" }}>{t("requests.thread.declineReason")}: </span>
+              {r.adminNote}
             </p>
           )}
         </div>

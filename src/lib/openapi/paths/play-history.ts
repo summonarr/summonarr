@@ -1,6 +1,6 @@
 // Watch history, statistics and active sessions.
 
-import { tooLargeAnswer, RETRY_AFTER_HEADER, AUTH_SESSION_ROW_FIELDS, OK_TRUE } from "../shared";
+import { STEP_UP_401, tooLargeAnswer, RETRY_AFTER_HEADER, AUTH_SESSION_ROW_FIELDS, OK_TRUE } from "../shared";
 import type { OpenApiSchema, OpenApiParameter, OpenApiPaths } from "../types";
 
 // One PlayHistory row as stored (prisma/schema.prisma), every column. ADMIN reads
@@ -396,7 +396,7 @@ export const playHistoryPaths: OpenApiPaths = {
           in: "query",
           schema: { type: "integer" },
           description:
-            "Calendar year (UTC). Honored only if it appears in the returned years list; anything else falls back to the most recent year on record",
+            "Calendar year in the statistics time zone (the statsTimeZone setting, else the server's own zone), like every bucket in the answer. Honored only if it appears in the returned years list; anything else falls back to the most recent year on record",
         },
       ],
       responses: {
@@ -702,7 +702,7 @@ export const playHistoryPaths: OpenApiPaths = {
     get: {
       tags: ["Play History"],
       summary: "365-day activity heatmap data (ADMIN)",
-      description: "One row per UTC day with a watched-session count. Unrecognized `source` / `mediaType` values are ignored (the heatmap is then unfiltered).",
+      description: "One row per day with a watched-session count. Days are counted in the statistics time zone (the statsTimeZone setting, else the server's own zone), never UTC and never the viewer's zone; each `day` is that zone's calendar date and needs no conversion. Unrecognized `source` / `mediaType` values are ignored (the heatmap is then unfiltered).",
       parameters: [
         { name: "source", in: "query", schema: { type: "string", enum: ["plex", "jellyfin"] } },
         { name: "mediaType", in: "query", schema: { type: "string", enum: ["MOVIE", "TV"] } },
@@ -755,6 +755,52 @@ export const playHistoryPaths: OpenApiPaths = {
                       properties: { title: { type: "string" }, tmdbId: { type: "integer", nullable: true }, mediaType: { type: "string", nullable: true }, count: { type: "integer" } },
                     },
                   },
+                },
+              },
+            },
+          },
+        },
+        "403": { description: "Forbidden — ADMIN only" },
+      },
+    },
+  },
+  "/play-history/users": {
+    get: {
+      tags: ["Play History"],
+      summary: "Every media-server user's activity, with whether they are still on the server (ADMIN)",
+      description: "The admin Activity users list for a native client (API v6): one row per media-server user, most plays first, unpaged — the client filters, searches and sorts. `onServer` is read live per server (a Plex server's share list, a Jellyfin server's users) and falls back to the stored flag for a server that can't be read.",
+      responses: {
+        "200": {
+          description: "{ users: [...], truncated }",
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["users", "truncated"],
+                properties: {
+                  users: {
+                    type: "array",
+                    maxItems: 10000,
+                    items: {
+                      type: "object",
+                      required: ["id", "username", "source", "serverInstance", "thumbUrl", "plays", "hours", "lastActive", "favPlatform", "directPct", "transcodePct", "onServer"],
+                      properties: {
+                        id: { type: "string", description: "The MediaServerUser id — usernames are not unique" },
+                        username: { type: "string" },
+                        source: { type: "string", description: "plex | jellyfin" },
+                        serverInstance: { type: "string", description: "The server's instance slug; \"\" is the default server" },
+                        thumbUrl: { type: "string", nullable: true },
+                        plays: { type: "integer", description: "Watched plays" },
+                        hours: { type: "number", description: "Watch time in hours, one decimal" },
+                        lastActive: { type: "string", format: "date-time", nullable: true, description: "Start of the latest play; null for a user with none" },
+                        favPlatform: { type: "string", nullable: true },
+                        directPct: { type: "integer", nullable: true, description: "Share of all the user's plays that were direct plays; null for a user with no plays" },
+                        transcodePct: { type: "integer", nullable: true, description: "Share of all the user's plays that were transcoded; null for a user with no plays" },
+                        onServer: { type: "boolean", description: "Still on their server (the page's Active filter); false = removed" },
+                      },
+                    },
+                  },
+                  truncated: { type: "boolean", description: "The list was cut at 10,000 rows" },
                 },
               },
             },
@@ -880,7 +926,7 @@ export const playHistoryPaths: OpenApiPaths = {
       responses: {
         "200": { description: "Session revoked — { ok: true }", content: { "application/json": { schema: OK_TRUE } } },
         "400": { description: "sessionId missing or not a string" },
-        "401": { description: "Step-up required or failed: { error: \"password-required\" | \"invalid-password\" | \"session-too-old\", message? } (invalid-password carries a translated message)" },
+        "401": STEP_UP_401,
         "404": { description: "No such session for this user" },
         "413": tooLargeAnswer(16 * 1024),
         "429": { description: "Rate limited (10 revokes/min per user): { error: \"rate_limit\", message }" },
@@ -907,7 +953,7 @@ export const playHistoryPaths: OpenApiPaths = {
       },
       responses: {
         "200": { description: "Sessions revoked", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, count: { type: "integer", description: "AuthSession rows deleted" }, includeCurrent: { type: "boolean" } } } } } },
-        "401": { description: "Step-up authentication required or failed. `error` is a code: password-required, invalid-password (with a translated `message`), or session-too-old (SSO caller whose session is older than 5 minutes)" },
+        "401": STEP_UP_401,
         "413": tooLargeAnswer(16 * 1024),
         "429": { description: "Rate limited — 5/hour per user. Body is { error: \"rate_limit\", message }" },
       },

@@ -7,6 +7,11 @@ import { notifyUserIssueMessagePush, notifyAdminsIssueMessagePush } from "./push
 import { notifyUserIssueMessageEmail, notifyAdminsIssueMessageEmail } from "./email";
 import { resolveUserNotificationEmail } from "./notification-email";
 import { translatorForUser } from "./i18n/server-locale";
+import { OUTBOX_ALL_CHANNELS, OUTBOX_ISSUE_REPLY_KIND, settleOutbox } from "./outbox";
+
+// A channel that fails must not stop the others, but it should leave a line.
+const warnChannel = (channel: string) => (err: unknown) =>
+  console.warn(`[issue-messages] ${channel} notification failed:`, err instanceof Error ? err.message : String(err));
 
 export interface IssueReplyAnnouncement {
   issue: {
@@ -28,6 +33,12 @@ export interface IssueReplyAnnouncement {
   fromIssueAdmin: boolean;
   /** The message as stored (trimmed and sanitized). */
   text: string;
+  /**
+   * The message's id, when its announcement was queued with the write
+   * (outbox.ts queueAnnouncement): the row is settled once every channel has
+   * returned. Absent ⇒ nothing was queued and nothing is settled.
+   */
+  messageId?: string;
 }
 
 /**
@@ -55,7 +66,28 @@ export function reporterFacingAuthor(authorDisplayName: string | null, reporter:
  * a thread they reported) reads nothing and notifies no reporter.
  */
 export async function announceIssueReply(a: IssueReplyAnnouncement): Promise<void> {
+  // The announcement was queued in the message's own transaction (guardrail
+  // 14f). The channels go out without being waited on; once all have returned
+  // the outbox row is deleted. A failed reporter read settles nothing, so the
+  // drain announces it again.
+  const sends: Array<Promise<unknown>> = [];
+  let owed = false;
   try {
+    owed = await announceReply(a, sends);
+  } catch (err) {
+    owed = true;
+    console.error("[issue-messages] announce failed:", err instanceof Error ? err.message : err);
+  }
+  if (a.messageId && !owed) {
+    const id = a.messageId;
+    void Promise.allSettled(sends).then(() => settleOutbox(OUTBOX_ISSUE_REPLY_KIND, OUTBOX_ALL_CHANNELS, [id]));
+  }
+}
+
+// Starts every channel (pushed onto `sends`). True ⇒ still owed: the reporter
+// could not be read.
+async function announceReply(a: IssueReplyAnnouncement, sends: Array<Promise<unknown>>): Promise<boolean> {
+  {
     const { issue, text } = a;
     const media = { tmdbId: issue.tmdbId, mediaType: issue.mediaType };
 
@@ -67,8 +99,9 @@ export async function announceIssueReply(a: IssueReplyAnnouncement): Promise<voi
       text: text.slice(0, 1_000),
     });
 
+    let owed = false;
     if (a.fromIssueAdmin && issue.reportedBy !== a.authorId) {
-      await notifyReporter(a);
+      owed = !(await notifyReporter(a, sends));
     }
 
     // The admin side, whoever wrote: every issue admin but the author — or only
@@ -79,31 +112,35 @@ export async function announceIssueReply(a: IssueReplyAnnouncement): Promise<voi
       fromAdmin: a.fromIssueAdmin,
       ...(issue.claimedBy ? { restrictToUserId: issue.claimedBy } : {}),
     };
-    void notifyAdminsIssueMessage(issue.title, a.authorName, text, { ...adminOpts, ...media }).catch(() => {});
-    void notifyAdminsIssueMessagePush({ title: issue.title, ...media, userName: a.authorName, body: text, issueId: issue.id, ...adminOpts }).catch(() => {});
-    void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, ...media, userName: a.authorName, body: text, issueId: issue.id, ...adminOpts }).catch(() => {});
-  } catch (err) {
-    console.error("[issue-messages] announce failed:", err instanceof Error ? err.message : err);
+    sends.push(notifyAdminsIssueMessage(issue.title, a.authorName, text, { ...adminOpts, ...media }).catch(warnChannel("admin discord")));
+    sends.push(notifyAdminsIssueMessagePush({ title: issue.title, ...media, userName: a.authorName, body: text, issueId: issue.id, ...adminOpts }).catch(warnChannel("admin push")));
+    sends.push(notifyAdminsIssueMessageEmail({ issueTitle: issue.title, ...media, userName: a.authorName, body: text, issueId: issue.id, ...adminOpts }).catch(warnChannel("admin email")));
+    return owed;
   }
 }
 
-async function notifyReporter(a: IssueReplyAnnouncement): Promise<void> {
+// False ⇒ the reporter could not be READ (the announcement stays owed). A
+// missing or deactivated reporter is a decision — nobody is told — and is true.
+async function notifyReporter(a: IssueReplyAnnouncement, sends: Array<Promise<unknown>>): Promise<boolean> {
   const { issue, text } = a;
   // The same read gives the deactivatedAt check, the email preferences and the
   // language the reply is labelled in.
-  const reporter = await prisma.user
+  const read = await prisma.user
     .findUnique({
       where: { id: issue.reportedBy },
       select: { deactivatedAt: true, email: true, notificationEmail: true, notifyOnIssue: true, locale: true },
     })
+    .then((row) => ({ row }))
     .catch(() => null);
-  if (!reporter || reporter.deactivatedAt != null) return;
+  if (!read) return false;
+  const reporter = read.row;
+  if (!reporter || reporter.deactivatedAt != null) return true;
 
   const author = reporterFacingAuthor(a.authorDisplayName, reporter);
   const media = { tmdbId: issue.tmdbId, mediaType: issue.mediaType };
-  void notifyUserIssueMessage(issue.reportedBy, issue.title, author, text, media).catch(() => {});
-  void notifyUserIssueMessagePush({ userId: issue.reportedBy, title: issue.title, ...media, body: text, issueId: issue.id }).catch(() => {});
-  createInAppNotification(issue.reportedBy, {
+  sends.push(notifyUserIssueMessage(issue.reportedBy, issue.title, author, text, media).catch(warnChannel("reporter discord")));
+  sends.push(notifyUserIssueMessagePush({ userId: issue.reportedBy, title: issue.title, ...media, body: text, issueId: issue.id }).catch(warnChannel("reporter push")));
+  sends.push(createInAppNotification(issue.reportedBy, {
     type: "ISSUE_REPLY",
     title: issue.title,
     body: `${author} replied: ${text.slice(0, 400)}`,
@@ -112,11 +149,12 @@ async function notifyReporter(a: IssueReplyAnnouncement): Promise<void> {
     posterPath: issue.posterPath,
     // Re-rendered in the reader's language at read time (notification-render.ts).
     data: { v: 1, author, text: text.slice(0, 400) },
-  });
+  }));
   if (reporter.notifyOnIssue) {
     const toEmail = resolveUserNotificationEmail(reporter);
     if (toEmail) {
-      void notifyUserIssueMessageEmail({ toEmail, issueTitle: issue.title, ...media, authorName: author, body: text, locale: reporter.locale }).catch(() => {});
+      sends.push(notifyUserIssueMessageEmail({ toEmail, issueTitle: issue.title, ...media, authorName: author, body: text, locale: reporter.locale }).catch(warnChannel("reporter email")));
     }
   }
+  return true;
 }

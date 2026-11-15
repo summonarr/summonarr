@@ -173,8 +173,10 @@ export function ArrDownloadHistory({
     );
     if (!res) return fallback;
     if (!res.ok) return res.error;
-    // The arr records the failure as it accepts it; the reload shows it.
+    // The arr records the failure as it accepts it; the reload shows it, and
+    // the release it blocklisted moves the Blocklist tab's count.
     void reload();
+    view.recount();
     return null;
   }
 

@@ -93,7 +93,7 @@ export async function getWrappedForServerUsers(ids: string[], year: number, time
               COUNT(*)::int AS cnt, ${PLAY_HOURS_SQL} AS hours
        FROM "PlayHistory" WHERE ${scope} AND watched
        ${TITLE_GROUP_BY_SQL}
-       ORDER BY cnt DESC, hours DESC LIMIT 5`,
+       ORDER BY cnt DESC, hours DESC, "mediaType" ASC, "tmdbId" ASC NULLS LAST, MAX("title") ASC LIMIT 5`,
       ...binds,
     ),
     day: () => prisma.$queryRawUnsafe<{ day: string; plays: number; hours: number }[]>(
@@ -101,15 +101,16 @@ export async function getWrappedForServerUsers(ids: string[], year: number, time
               COUNT(*) FILTER (WHERE watched)::int AS plays,
               ${watchedHours()} AS hours
        FROM "PlayHistory" WHERE ${scope}
-       GROUP BY day ORDER BY plays DESC, hours DESC LIMIT 1`,
+       GROUP BY day ORDER BY plays DESC, hours DESC, day ASC LIMIT 1`,
       ...binds,
     ),
     month: () => prisma.$queryRawUnsafe<{ month: string; plays: number }[]>(
       `SELECT to_char(date_trunc('month', ${local}), 'YYYY-MM') AS month, COUNT(*) FILTER (WHERE watched)::int AS plays
-       FROM "PlayHistory" WHERE ${scope} GROUP BY month ORDER BY plays DESC LIMIT 1`,
+       FROM "PlayHistory" WHERE ${scope} GROUP BY month ORDER BY plays DESC, month ASC LIMIT 1`,
       ...binds,
     ),
-    // Ties go to the earliest day / hour, so the answer is the same on every read.
+    // Every pick here breaks its ties (the earliest day, month, hour or play;
+    // the lowest title key), so the answer is the same on every read.
     dow: () => prisma.$queryRawUnsafe<{ dow: number; c: number }[]>(
       `SELECT EXTRACT(DOW FROM ${local})::int AS dow, COUNT(*)::int AS c
        FROM "PlayHistory" WHERE ${scope} AND watched GROUP BY dow ORDER BY c DESC, dow ASC LIMIT 1`,
@@ -122,7 +123,7 @@ export async function getWrappedForServerUsers(ids: string[], year: number, time
     ),
     longest: () => prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; posterPath: string | null; secs: number; startedAt: Date }[]>(
       `SELECT "title", "tmdbId", "mediaType"::text AS "mediaType", "posterPath", "playDuration" AS secs, "startedAt"
-       FROM "PlayHistory" WHERE ${scope} AND watched ORDER BY "playDuration" DESC LIMIT 1`,
+       FROM "PlayHistory" WHERE ${scope} AND watched ORDER BY "playDuration" DESC, "startedAt" ASC, "id" ASC LIMIT 1`,
       ...binds,
     ),
     completion: () => prisma.$queryRawUnsafe<{ watched: number; total: number }[]>(

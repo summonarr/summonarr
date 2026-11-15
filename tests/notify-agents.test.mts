@@ -610,12 +610,12 @@ test("every 'now available' sync path goes through fanOutAvailableWinners — no
   for (const m of CHANNEL_MODULES) {
     assert.match(hub, new RegExp(`from "\\./${m}"`), `the hub no longer imports ./${m} — the channel list above has rotted`);
   }
-  const channelImport = new RegExp(`\\blib/(${[...CHANNEL_MODULES, "in-app-notify"].join("|")})(\\.ts)?["']`);
+  const channelImport = new RegExp(`(\\blib/|"\\./)(${[...CHANNEL_MODULES, "in-app-notify"].join("|")})(\\.ts)?["']`);
   // The marking passes live in src/lib/available-marking.ts, shared by the
   // orchestrator and the per-source Resync routes; the orchestrator's notify
-  // fallback calls the fan-out itself.
-  const fansOut = new Set(["src/app/api/sync/route.ts", "src/lib/available-marking.ts"]);
-  for (const p of ["src/app/api/sync/route.ts", "src/lib/available-marking.ts", "src/app/api/sync/plex/route.ts", "src/app/api/sync/jellyfin/route.ts"]) {
+  // fallback (sync-orchestrator-marking.ts) calls the fan-out itself.
+  const fansOut = new Set(["src/lib/sync-orchestrator-marking.ts", "src/lib/available-marking.ts"]);
+  for (const p of ["src/lib/sync-orchestrator-marking.ts", "src/lib/available-marking.ts", "src/app/api/sync/plex/route.ts", "src/app/api/sync/jellyfin/route.ts"]) {
     const src = read(p);
     if (fansOut.has(p)) assert.match(src, /fanOutAvailableWinners\(/, p);
     else assert.match(src, /markResyncedLibrary\(/, `${p} must mark through the shared pass`);
@@ -627,6 +627,10 @@ test("every 'now available' sync path goes through fanOutAvailableWinners — no
       `${p} names a channel helper (an aliased import still has to spell it once)`,
     );
   }
+  // The fan-out sends every channel through deliverAvailableChannel, whose
+  // sender table is where the outbound emit lives.
   const fan = hub.slice(hub.indexOf("export async function fanOutAvailableWinners"));
-  assert.match(fan.slice(0, fan.indexOf("\n}\n")), /emitNotificationEvents\(/, "the shared fan-out feeds the outbound channels");
+  assert.match(fan.slice(0, fan.indexOf("\n}\n")), /deliverAvailableChannel\("agents"/, "the shared fan-out feeds the outbound channels");
+  const senders = hub.slice(hub.indexOf("const AVAILABLE_SENDERS"));
+  assert.match(senders.slice(0, senders.indexOf("\n};\n")), /agents: .*emitNotificationEvents\(/, "the agents sender emits to the outbound channels");
 });

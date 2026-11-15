@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Loader2, Check } from "@/components/icons";
+import { Loader2 } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { withBasePath } from "@/lib/base-path";
@@ -16,34 +16,35 @@ import { useAsyncAction } from "@/hooks/use-async-action";
 export type ChangePasswordSecondFactor = KnownSecondFactor;
 
 interface ChangePasswordProps {
-  hasPassword: boolean;
+  // Accepted for the profile page, which still passes it; nothing here reads
+  // it. The route refuses (403) any account with no local password, so there
+  // is no "set a password" form to show: the current password is always asked.
+  hasPassword?: boolean;
   secondFactor?: ChangePasswordSecondFactor;
 }
 
-// Form to set or change the password. If the account already has one
-// (hasPassword), the current password is required too. When the server answers
-// `requiresRelogin`, we send the user to /login.
+// Form to change the password. A successful change signs every session out
+// (the route always answers `requiresRelogin`), so it ends on /login and there
+// is no "saved" state to show here.
 //
 // An account with two-factor also confirms the change with a fresh second factor
 // (the server enforces it — src/app/api/profile/password/route.ts): a code typed
 // here, or a passkey when the field is left empty. The field shows from the
 // start when the page knew 2FA was on, and otherwise as soon as the server
 // answers `secondFactorRequired` (2FA turned on in another tab, say).
-export function ChangePassword({ hasPassword, secondFactor }: ChangePasswordProps) {
+export function ChangePassword({ secondFactor }: ChangePasswordProps) {
   const t = useT();
   const action = useAsyncAction();
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword]         = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [saving, setSaving]   = useState(false);
-  const [success, setSuccess] = useState(false);
   const [error, setError]     = useState<string | null>(null);
   const stepUp = useSecondFactorStepUp({ known: secondFactor, failedMessage: t("profile.password.error.failed") });
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    setSuccess(false);
 
     if (newPassword !== confirmPassword) {
       setError(t("profile.password.error.mismatch"));
@@ -55,14 +56,12 @@ export function ChangePassword({ hasPassword, secondFactor }: ChangePasswordProp
     type Outcome =
       | { kind: "error"; message: string }
       | { kind: "stopped" }
-      | { kind: "relogin" }
-      | { kind: "saved" };
+      | { kind: "relogin" };
     const out = await action.run(
       "save",
       async (signal): Promise<Outcome> => {
         try {
-          const body: Record<string, unknown> = { newPassword };
-          if (hasPassword) body.currentPassword = currentPassword;
+          const body: Record<string, unknown> = { currentPassword, newPassword };
           if (stepUp.needsSecondFactor) {
             const r = await stepUp.secondFactorProof();
             if (!("proof" in r)) return r.error ? { kind: "error", message: r.error } : { kind: "stopped" };
@@ -79,10 +78,8 @@ export function ChangePassword({ hasPassword, secondFactor }: ChangePasswordProp
           if (!res.ok) {
             return { kind: "error", message: stepUp.refusalMessage(res, data, !!body.secondFactor, t("profile.password.error.failed")) };
           }
-          if (data && typeof data === "object" && (data as { requiresRelogin?: unknown }).requiresRelogin === true) {
-            return { kind: "relogin" };
-          }
-          return { kind: "saved" };
+          // Every 2xx carries `requiresRelogin`: the change revoked this session too.
+          return { kind: "relogin" };
         } catch {
           // A network error. A body that isn't JSON (a proxy's page) is read as
           // no body above. Without this catch the form would show nothing at all.
@@ -99,31 +96,23 @@ export function ChangePassword({ hasPassword, secondFactor }: ChangePasswordProp
     if (!out) return;
     if (out.kind === "error") setError(out.message);
     else if (out.kind === "relogin") window.location.href = withBasePath("/login");
-    else if (out.kind === "saved") {
-      setSuccess(true);
-      setCurrentPassword("");
-      setNewPassword("");
-      setConfirmPassword("");
-    }
   }
 
   return (
     <form onSubmit={handleSubmit} className="space-y-3">
-      {hasPassword && (
-        <div>
-          <label className="block text-sm text-zinc-400 mb-1" htmlFor="current-password">
-            {t("profile.password.current")}
-          </label>
-          <Input
-            id="current-password"
-            type="password"
-            autoComplete="current-password"
-            value={currentPassword}
-            onChange={(e) => setCurrentPassword(e.target.value)}
-            required
-          />
-        </div>
-      )}
+      <div>
+        <label className="block text-sm text-zinc-400 mb-1" htmlFor="current-password">
+          {t("profile.password.current")}
+        </label>
+        <Input
+          id="current-password"
+          type="password"
+          autoComplete="current-password"
+          value={currentPassword}
+          onChange={(e) => setCurrentPassword(e.target.value)}
+          required
+        />
+      </div>
 
       <div>
         <label className="block text-sm text-zinc-400 mb-1" htmlFor="new-password">
@@ -167,19 +156,13 @@ export function ChangePassword({ hasPassword, secondFactor }: ChangePasswordProp
 
       {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
 
-      {success && (
-        <p role="status" className="flex items-center gap-1.5 text-sm text-emerald-400">
-          <Check className="w-4 h-4" /> {hasPassword ? t("profile.password.updated") : t("profile.password.setDone")}
-        </p>
-      )}
-
       <Button
         type="submit"
         disabled={saving}
         className="w-full sm:w-auto"
       >
         {saving ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-        {saving ? t("profile.common.saving") : hasPassword ? t("profile.password.update") : t("profile.password.set")}
+        {saving ? t("profile.common.saving") : t("profile.password.update")}
       </Button>
     </form>
   );

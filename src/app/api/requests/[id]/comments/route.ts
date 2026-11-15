@@ -12,10 +12,12 @@ import { requesterAuditDetails } from "@/lib/audit-scrub";
 import { emitSSE } from "@/lib/sse-emitter";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { canPostComment, canReadThread, parseCommentBody } from "@/lib/request-comments";
-import { announceRequestComment } from "@/lib/request-comment-notify";
+import { announceRequestComment, type RequestCommentAnnouncement } from "@/lib/request-comment-notify";
+import { OUTBOX_COMMENT_KIND, queueAnnouncement } from "@/lib/outbox";
 import { THREAD_READ_CAP } from "@/lib/api-body-limits";
 import { splitAtCap, truncationHeaders } from "@/lib/truncation";
 import { olderThanWhere, parseThreadCursor } from "@/lib/thread-cursor";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -107,10 +109,38 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   // sanitizeText can strip a body made only of markup characters down to nothing.
   if (!text) return NextResponse.json({ error: t("apiUser.comments.bodyRequired") }, { status: 400 });
 
-  const comment = await prisma.requestComment.create({
-    data: { requestId: id, authorId: session.user.id, body: text, fromAdmin: isManager },
-    include: { author: { select: { name: true, role: true, ...(isManager ? { email: true } : {}) } } },
-  });
+  // The request was read above, outside any transaction: one deleted since then
+  // fails the comment's foreign key (P2003), which is this route's 404, not a 500.
+  //
+  // The comment and the announcement it owes commit together (guardrail 14f):
+  // the outbox row is the transaction's last statement, and the P2003 is caught
+  // out here, never inside it.
+  const announcement: RequestCommentAnnouncement = {
+    request: {
+      id, title: request.title, mediaType: request.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: request.tmdbId,
+      posterPath: request.posterPath, requestedBy: request.requestedBy, arrInstance: request.arrInstance,
+    },
+    authorId: session.user.id,
+    authorName: session.user.name ?? session.user.email ?? "Someone",
+    // The requester's label is resolved in THEIR language (requesterFacingAuthor).
+    authorDisplayName: session.user.name ?? null,
+    text,
+    authorIsManager: isManager,
+  };
+  let comment;
+  try {
+    comment = await prisma.$transaction(async (tx) => {
+      const created = await tx.requestComment.create({
+        data: { requestId: id, authorId: session.user.id, body: text, fromAdmin: isManager },
+        include: { author: { select: { name: true, role: true, ...(isManager ? { email: true } : {}) } } },
+      });
+      await queueAnnouncement(tx, OUTBOX_COMMENT_KIND, created.id, session.user.id, { ...announcement, commentId: created.id });
+      return created;
+    });
+  } catch (err) {
+    if (!isPrismaErrorCode(err, "P2003")) throw err;
+    return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
+  }
 
   emitSSE({ type: "request:comment", requestId: id, userId: request.requestedBy });
 
@@ -133,18 +163,7 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
     ...auditContext(req, session),
   });
 
-  void announceRequestComment({
-    request: {
-      id, title: request.title, mediaType: request.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: request.tmdbId,
-      posterPath: request.posterPath, requestedBy: request.requestedBy, arrInstance: request.arrInstance,
-    },
-    authorId: session.user.id,
-    authorName: session.user.name ?? session.user.email ?? "Someone",
-    // The requester's label is resolved in THEIR language (requesterFacingAuthor).
-    authorDisplayName: session.user.name ?? null,
-    text,
-    authorIsManager: isManager,
-  });
+  void announceRequestComment({ ...announcement, commentId: comment.id });
 
   return NextResponse.json(comment, { status: 201 });
 });

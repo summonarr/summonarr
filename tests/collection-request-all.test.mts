@@ -51,7 +51,7 @@ test("the per-item results are read and the unrequestable ones reported", () => 
   assert.match(LOGIC, /request\.collection\.doneSkipped/);
   // Only outcomes that mean "this title can't be requested" — not the
   // already-* ones (nothing to do) and not created/auto-approved.
-  const set = /const UNREQUESTABLE = new Set\(\[([^\]]*)\]\)/.exec(LOGIC);
+  const set = /const UNREQUESTABLE = new Set<string>\(\[([^\]]*)\] satisfies/.exec(LOGIC);
   assert.ok(set);
   const members = set[1].split(",").map((m) => m.trim().replace(/"/g, ""));
   assert.deepEqual(members.sort(), ["blacklisted", "no-permission", "rating-blocked", "skipped-declined"]);
@@ -100,6 +100,17 @@ test("chunks of the shared cap, summed, with the unrequestable ones counted", as
   assert.deepEqual(lib.collectionRequestOutcome(s, t), {
     state: "done",
     message: 'request.collection.doneSkipped{"created":59,"total":62,"skipped":2}',
+    refresh: true,
+  });
+});
+
+test("titles the route failed on are reported as an error, not a done line", async () => {
+  answers = [() => json(201, { created: 3, results: [{ result: "error" }, { result: "error" }, { result: "created" }] })];
+  const s = await run(5);
+  assert.equal(s.failed, 2);
+  assert.deepEqual(lib.collectionRequestOutcome(s, t), {
+    state: "error",
+    message: 'request.collection.someFailed{"created":3,"total":5,"failed":2}',
     refresh: true,
   });
 });

@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useT } from "@/components/i18n/i18n-provider";
-import { fixMatchErrorMessage, fixMatchWarningMessage, runFixMatch } from "@/lib/client/fix-match";
+import { fixMatchErrorMessage, fixMatchRetryAfterMs, fixMatchWarningMessage, runFixMatch } from "@/lib/client/fix-match";
 import {
   fixAllProgress,
   runFixAllSequence,
@@ -37,6 +37,11 @@ export interface FixAllRun {
    * with its warning — the row keeps it (a bulk run that dropped it read
    * "N/N fixed" over a remap that was only partial).
    */
+  /**
+   * The title a Stop left in flight: its remap finishes on the server, but this
+   * run stopped waiting, so its result is not in `results`.
+   */
+  unfinished: string | null;
   start: <E extends FixAllEntry>(entries: readonly E[], onFixed?: (entry: E, warning: string | undefined) => void) => Promise<void>;
 }
 
@@ -50,6 +55,7 @@ export function useFixAllRun(): FixAllRun {
   const [total, setTotal] = useState(0);
   const [pending, setPending] = useState<ReadonlySet<string>>(NO_KEYS);
   const [started, setStarted] = useState(false);
+  const [unfinished, setUnfinished] = useState<string | null>(null);
 
   // Stop request + unmount guard: the remap already running finishes on the
   // server (its job is not cancelled), but no further one is started — and
@@ -68,14 +74,16 @@ export function useFixAllRun(): FixAllRun {
   ) => {
     stopRef.current = false;
     setStarted(true);
+    setUnfinished(null);
     setState("running");
     setTotal(entries.length);
     setResults([]);
     setPending(new Set(entries.map((e) => e.key)));
-    const { results: all, aborted } = await runFixAllSequence(entries, {
+    const { results: all, aborted, abortedEntry } = await runFixAllSequence(entries, {
       fix: (request, signal) => runFixMatch(request, { signal }),
       warningOf: (outcome) => fixMatchWarningMessage(outcome, t),
       errorOf: (err) => fixMatchErrorMessage(err, t),
+      retryAfterMs: fixMatchRetryAfterMs,
       stopped: () => stopRef.current,
       onTitleStart: (ac) => { abortRef.current = ac; },
       onResult: (result, entry, sofar) => {
@@ -88,7 +96,12 @@ export function useFixAllRun(): FixAllRun {
         });
       },
     });
-    if (aborted || !alive.current) return;
+    // A Stop aborts only the wait on the title in flight (its job carries on
+    // server-side); the run then ends as stopped. A page that went away writes nothing.
+    if (!alive.current || (aborted && !stopRef.current)) return;
+    // The stopped title has no result here: say so rather than let its row
+    // unlock looking untouched while its remap still finishes on the server.
+    if (aborted && abortedEntry) setUnfinished(abortedEntry.title);
     setPending(NO_KEYS);
     setState("done");
     if (all.some((r) => r.kind !== "error")) router.refresh();
@@ -100,9 +113,10 @@ export function useFixAllRun(): FixAllRun {
     results,
     pending,
     started,
+    unfinished,
     askConfirm: () => setState("confirm"),
     cancelConfirm: () => setState("idle"),
-    stop: () => { stopRef.current = true; },
+    stop: () => { stopRef.current = true; abortRef.current?.abort(); },
     start,
   };
 }
@@ -188,8 +202,13 @@ export function FixAllControl({
           )}
         </div>
       )}
+      {run.unfinished !== null && (
+        <p role="status" className="m-0 text-right text-amber-400" style={{ fontSize: 11, lineHeight: 1.35 }}>
+          {t("adminManage.library.match.stoppedInFlight", { title: run.unfinished })}
+        </p>
+      )}
       {listed.length > 0 && (
-        <ul role="status" className="m-0 list-none p-0 text-right" style={{ fontSize: 11, lineHeight: 1.35, maxHeight: 160, overflowY: "auto" }}>
+        <ul role="log" aria-relevant="additions" className="m-0 list-none p-0 text-right" style={{ fontSize: 11, lineHeight: 1.35, maxHeight: 160, overflowY: "auto" }}>
           {listed.map((o) => (
             <li key={o.key} className={o.kind === "error" ? "text-red-400" : o.kind === "warn" ? "text-amber-400" : ""} style={o.kind === "ok" ? { color: "var(--ds-fg-subtle)" } : undefined}>
               <span aria-hidden>{o.kind === "ok" ? "✓ " : o.kind === "warn" ? "⚠ " : "✕ "}</span>

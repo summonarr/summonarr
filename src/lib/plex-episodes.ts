@@ -1,6 +1,7 @@
 // Plex episodes: the TVEpisodeCache walk (every show section's type=4
 // listing), one show's episodes for fix-match, and one show's episode keys
 // for watch sync.
+import { mapLimit } from "./concurrency";
 import { v, type Infer } from "./validate";
 import { idKey, loose, looseList, looseString, numberish, parseEach } from "./media-server-payload";
 import { plexFetchAllPages, plexUrl } from "./plex-http";
@@ -34,9 +35,15 @@ type PlexEpisode = Infer<typeof PlexEpisodeSchema>;
 // A regular episode (season ≥ 1, episode ≥ 1): specials and unnumbered
 // entries don't map to TMDB episode numbers.
 function regularEpisode(ep: PlexEpisode): { season: number; episode: number } | null {
-  if (!Number.isInteger(ep.parentIndex) || (ep.parentIndex as number) < 1) return null;
-  if (!Number.isInteger(ep.index) || (ep.index as number) < 1) return null;
-  return { season: ep.parentIndex as number, episode: ep.index as number };
+  const { parentIndex, index } = ep;
+  if (!isWholeNumber(parentIndex) || parentIndex < 1) return null;
+  if (!isWholeNumber(index) || index < 1) return null;
+  return { season: parentIndex, episode: index };
+}
+
+// Number.isInteger as a type guard, so the checked value needs no cast.
+function isWholeNumber(n: unknown): n is number {
+  return Number.isInteger(n);
 }
 
 function episodeAddedAt(ep: PlexEpisode): Date | null {
@@ -72,11 +79,12 @@ export async function getPlexTVEpisodes(
     (s) => s.type === "show" && (!selectedKeys?.size || selectedKeys.has(s.key))
   );
 
-  const sectionResults = await Promise.all(showSections.map(async (section) => {
+  // A few sections at a time: each is a paginated walk (two when the show map is not precomputed) on the Plex server.
+  const sectionResults = await mapLimit(showSections, 3, async (section) => {
     const ratingKeyToTmdb = precomputedRatingKeyToTmdb ?? await walkShowTmdbIds(serverUrl, token, section.key, signal);
     if (ratingKeyToTmdb.size === 0) return [] as PlexTVEpisodeData[];
     return walkSectionEpisodes(serverUrl, token, section.key, ratingKeyToTmdb, episodeFilePathsOut, signal);
-  }));
+  });
 
   return mergeEpisodeCopies(sectionResults.flat());
 }
@@ -187,9 +195,10 @@ export async function getPlexEpisodeKeys(serverUrl: string, token: string, showK
       for (const ep of parseEach(PlexEpisodeSchema, raw)) {
         const key = ep.ratingKey ?? "";
         if (!/^\d{1,20}$/.test(key)) continue;
-        if (!Number.isInteger(ep.parentIndex) || (ep.parentIndex as number) < 0) continue;
-        if (!Number.isInteger(ep.index) || (ep.index as number) < 0) continue;
-        out.push({ seasonNumber: ep.parentIndex as number, episodeNumber: ep.index as number, episodeNumberEnd: null, itemId: key });
+        const { parentIndex, index } = ep;
+        if (!isWholeNumber(parentIndex) || parentIndex < 0) continue;
+        if (!isWholeNumber(index) || index < 0) continue;
+        out.push({ seasonNumber: parentIndex, episodeNumber: index, episodeNumberEnd: null, itemId: key });
       }
     },
   );

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
 import { useAsyncAction } from "@/hooks/use-async-action";
@@ -24,7 +24,14 @@ function useBlacklist(initial: BlacklistRow[], total: number) {
   // Real blocked count (may exceed the page's slice). Adjusted locally on add/remove.
   const [blockedTotal, setBlockedTotal] = useState(total);
   const [query, setQuery] = useState("");
-  const [reason, setReason] = useState("");
+  const [reason, setReasonState] = useState("");
+  // The field's value as of the last keystroke or Block click: two clicks in
+  // one render must not both read the same reason out of a stale closure.
+  const reasonRef = useRef("");
+  const setReason = (next: string) => {
+    reasonRef.current = next;
+    setReasonState(next);
+  };
   const [results, setResults] = useState<SearchResult[]>([]);
   // True once a search has come back successfully, so an empty result list can
   // say "no matches" instead of rendering nothing at all.
@@ -70,7 +77,16 @@ function useBlacklist(initial: BlacklistRow[], total: number) {
     const mediaType = rowMediaType(r);
     const k = rowKey(r.id, mediaType);
     if (isBlocked(r, k)) return;
-    const trimmedReason = reason.trim();
+    // The placeholder promises the reason is "saved with the NEXT title you
+    // block" — one-shot — so it is TAKEN at the click: a second Block while
+    // this one is out carries none, and a reason typed meanwhile for the next
+    // title is left alone.
+    const trimmedReason = reasonRef.current.trim();
+    setReason("");
+    // Nothing was blocked: the reason goes back, unless another was typed since.
+    const giveReasonBack = () => {
+      if (trimmedReason && reasonRef.current === "") setReason(trimmedReason);
+    };
     setError("");
     const res = await actions.run(k, (signal) =>
       fetchJson(withBasePath("/api/admin/blacklist"), {
@@ -83,9 +99,10 @@ function useBlacklist(initial: BlacklistRow[], total: number) {
         signal,
         fallbackError: t("adminQueue.blacklist.blockFailed"),
       }), { ifBusy: "skip" });
-    if (!res) return;
+    if (!res) return giveReasonBack();
     // A 2xx whose body won't parse still blocked the title: kept with local values.
     if (!res.ok && res.kind !== "invalid") {
+      giveReasonBack();
       setError(failureText(res));
       return;
     }
@@ -112,10 +129,6 @@ function useBlacklist(initial: BlacklistRow[], total: number) {
     // so neither can tell a new title from a rewritten one. An unreadable body
     // leaves the count as it is until the next load.
     if (d.created) setBlockedTotal((n) => n + 1);
-    // The placeholder promises the reason is "saved with the NEXT title you
-    // block" — one-shot — so it must not silently ride along onto a second,
-    // unrelated title from the same result list.
-    setReason("");
   }
 
   // Unblocks a loaded row, or a search hit: a title past the 1000 rows the page

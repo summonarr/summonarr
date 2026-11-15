@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2, RefreshCcw } from "@/components/icons";
 import { useT } from "@/components/i18n/i18n-provider";
+import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
 import {
   LibraryImportResult,
   LibraryPicker,
@@ -25,7 +26,10 @@ interface JellyfinSyncFormProps {
 export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLibraries }: JellyfinSyncFormProps) {
   const t = useT();
   const [url,    setUrl]    = useState(initialUrl);
-  const [apiKey, setApiKey] = useState(initialApiKey);
+  // Write-only: the field starts EMPTY (the mask is only its placeholder, so a
+  // typed edit can never be the mask plus text); blank means "keep the saved key".
+  const [apiKey, setApiKey] = useState("");
+  const [keySaved, setKeySaved] = useState(initialApiKey.length > 0);
   // Whether the server holds a SAVED Jellyfin URL + key. /api/sync/jellyfin
   // syncs the stored config, not what is typed in the fields, so the Sync
   // button must follow this and not the inputs: on a fresh install the typed,
@@ -46,13 +50,18 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    const stored = await server.saveAndTest({ jellyfinUrl: url, jellyfinApiKey: apiKey }, (r) =>
+    const sentKey = apiKey;
+    const stored = await server.saveAndTest({ jellyfinUrl: url, jellyfinApiKey: apiKey || SECRET_MASK_SENTINEL }, (r) =>
       // A 422 with `jellyfinError` means the server tested the new URL/key
       // before writing and the test failed — nothing was saved.
       (typeof r.data.jellyfinError === "string" && r.data.jellyfinError) || r.error || t("settings.form.common.saveFailed"));
     // The route only answers ok after its own connection test passed and the
     // values were written, so the stored config is now usable by Sync.
-    if (stored) setConfigured(true);
+    if (stored) {
+      setConfigured(true);
+      setKeySaved(true);
+      setApiKey((k) => (k === sentKey ? "" : k));
+    }
   }
 
   return (
@@ -80,7 +89,7 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
               data-lpignore="true"
               value={apiKey}
               onChange={(e) => { setApiKey(e.target.value); server.edited(); }}
-              placeholder={t("settings.form.jellyfin.apiKeyPlaceholder")}
+              placeholder={keySaved ? SECRET_MASK_SENTINEL : t("settings.form.jellyfin.apiKeyPlaceholder")}
               className="bg-zinc-800 border-zinc-700 font-mono"
             />
             <p className="text-xs text-zinc-500">
@@ -91,7 +100,7 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
         <div className="flex items-center gap-3 flex-wrap">
           <Button
             type="submit"
-            disabled={server.status === "saving" || server.status === "testing" || !url || !apiKey}
+            disabled={server.status === "saving" || server.status === "testing" || !url || (!apiKey && !keySaved)}
             className="bg-indigo-600 hover:bg-indigo-500"
           >
             <SaveAndTestLabel status={server.status} />

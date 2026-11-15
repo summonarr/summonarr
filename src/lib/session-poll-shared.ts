@@ -6,6 +6,7 @@
 import { prisma } from "@/lib/prisma";
 import type { ActiveSession } from "@/generated/prisma";
 import { mapLimit } from "@/lib/concurrency";
+import { processSingleton } from "@/lib/process-singleton";
 import {
   applyFinalTick,
   recordCompletedSession,
@@ -181,7 +182,8 @@ export async function finalizeAbsentSessions(opts: {
 // attribution goes through MediaServerUser.userId anyway. Failures are not
 // cached — the next tick retries.
 const RESOLVE_TTL_MS = 5 * 60 * 1000;
-const resolveCache = new Map<string, { id: string; inputsKey: string; expiresAt: number }>();
+const RESOLVE_CACHE_PRUNE_AT = 1024;
+const resolveCache = processSingleton("session-poll:resolve-cache", () => new Map<string, { id: string; inputsKey: string; expiresAt: number }>());
 export async function resolveMediaServerUserCached(
   params: Parameters<typeof resolveMediaServerUser>[0],
 ): Promise<string> {
@@ -191,6 +193,9 @@ export async function resolveMediaServerUserCached(
   const hit = resolveCache.get(key);
   if (hit && hit.expiresAt > now && hit.inputsKey === inputsKey) return hit.id;
   const id = await resolveMediaServerUser(params);
+  if (resolveCache.size >= RESOLVE_CACHE_PRUNE_AT) {
+    for (const [k, v] of resolveCache) if (v.expiresAt <= now) resolveCache.delete(k);
+  }
   resolveCache.set(key, { id, inputsKey, expiresAt: now + RESOLVE_TTL_MS });
   return id;
 }

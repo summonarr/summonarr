@@ -47,12 +47,22 @@ const TYPED_FILTER_DEBOUNCE_MS = 500;
 export function useAuditNav() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const lastPushed = useRef<{ from: string; query: string } | null>(null);
+  const renderedQuery = searchParams.toString();
+  // A landed navigation re-renders with the new query: the pending merge base is spent.
+  useEffect(() => { lastPushed.current = null; }, [renderedQuery]);
   return useCallback(function navigate(params: Record<string, string>, opts?: { replace?: boolean }) {
-    const sp = new URLSearchParams(searchParams.toString());
+    // Two typed filters can commit before the first navigation has re-rendered
+    // this hook: merge into the query last pushed from this render's snapshot,
+    // so back-to-back commits compose instead of the later one dropping the earlier.
+    const rendered = searchParams.toString();
+    const base = lastPushed.current && lastPushed.current.from === rendered ? lastPushed.current.query : rendered;
+    const sp = new URLSearchParams(base);
     for (const [k, v] of Object.entries(params)) {
       if (v) sp.set(k, v);
       else sp.delete(k);
     }
+    lastPushed.current = { from: rendered, query: sp.toString() };
     const href = `/admin/audit-log?${sp.toString()}`;
     if (opts?.replace) router.replace(href);
     else router.push(href);

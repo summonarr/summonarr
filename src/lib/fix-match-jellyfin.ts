@@ -279,6 +279,15 @@ type FoundItem = { id: string | null; path: string | null; tmdbId: string | null
 // this title (one already remapped reports the correct id) nor a stored copy of
 // the target title. Returns the id that CONFIRMS the match, the item's id at its
 // own path (unconfirmed — read it there next time), or null.
+// Separators and a trailing slash differ between how Jellyfin and the library cache
+// store a path; the comparison ignores both.
+function normalisePath(path: string): string {
+  const slashed = path.replace(/\\/g, "/");
+  let end = slashed.length;
+  while (end > 0 && slashed[end - 1] === "/") end--;
+  return slashed.slice(0, end);
+}
+
 async function locateByPath(run: ConfirmRun, filePath: string): Promise<{ id: string; confirmed: boolean } | null> {
   const { s, correctTmdbId } = run;
   const searchTerm = fallbackSearchTerm(filePath, run.mediaType);
@@ -300,7 +309,8 @@ async function locateByPath(run: ConfirmRun, filePath: string): Promise<{ id: st
     if (id !== null && run.siblingItemIds.has(sanitizeJellyfinId(id))) continue;
     items.push({ id, path: typeof raw.Path === "string" ? raw.Path : null, tmdbId: providerTmdbId(raw) });
   }
-  const byPath = items.find((i) => i.path === filePath);
+  const wantPath = normalisePath(filePath);
+  const byPath = items.find((i) => i.path !== null && normalisePath(i.path) === wantPath);
   const others = byPath ? null : await run.targetCopies();
   const byTmdb = others
     ? items.find((i) => !(i.id !== null && others.has(sanitizeJellyfinId(i.id))) && i.tmdbId === String(correctTmdbId))
@@ -331,7 +341,10 @@ async function confirmJellyfinMatch(run: ConfirmRun, attempts: number): Promise<
         console.warn("[fix-match]", s.tag, `confirmation read failed (${progress.readFailures} so far) — Jellyfin is usually busy refreshing; still polling`);
       }
       push();
-      const hit = run.filePath ? await locateByPath(run, run.filePath) : null;
+      // The path search is a library query on a server that is already busy: run
+      // it on the first failure and then every third, not on every poll.
+      const searchNow = progress.readFailures === 1 || progress.readFailures % 3 === 0;
+      const hit = run.filePath && searchNow ? await locateByPath(run, run.filePath) : null;
       if (hit) {
         state.resolvedItemId = hit.id;
         if (hit.confirmed) {

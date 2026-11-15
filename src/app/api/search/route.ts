@@ -31,8 +31,14 @@ export const GET = withAuth(async (req, _ctx, session) => {
     // do, so clients that render search results as request-able cards (the iOS app)
     // don't show a "Request" CTA for a title that's already requested/available.
     // skipRatings avoids an OMDB/MDBList fan-out on every (debounced) keystroke.
+    //
+    // includeHidden: a search is the viewer asking for a title by name, not a
+    // discovery shelf. Dropping their "not interested" titles answered the
+    // exact name with "No matches", and left an admin unable to find a title
+    // they had hidden for themselves in the blacklist manager and the
+    // fix-match search, which read this route too.
     const show4k = await getShow4kVisibility(session);
-    const enriched = await attachAllAvailability(results, session.user.id, { skipRatings: true, show4k });
+    const enriched = await attachAllAvailability(results, session.user.id, { skipRatings: true, show4k, includeHidden: true });
 
     return NextResponse.json(enriched);
   } catch (err) {

@@ -40,6 +40,11 @@ export interface DetailPageState {
   // The main Request button's own request (resolveMainButtonRequested).
   requested: boolean;
   requested4k: boolean;
+  // The viewer's request was PERMANENTLY declined on the instance that button
+  // posts to: the request route refuses every further attempt (403), so the
+  // button shows the "not available to request" status instead of a CTA.
+  // `named` lists the named-instance slugs.
+  permanentlyDeclined: { main: boolean; fourK: boolean; named: string[] };
   // 4K state is shown only to a viewer who can request 4K (getShow4kVisibility).
   show4k: boolean;
   arr4kAvailable: boolean;
@@ -47,6 +52,9 @@ export interface DetailPageState {
   blacklisted: boolean;
   namedTargets: NamedInstanceTarget[];
   alreadyVoted: boolean;
+  // The viewer requested this title at some point (any status, any instance)
+  // or filed it for someone: POST /api/votes refuses their deletion vote.
+  ownRequest: boolean;
   onWatchlist: boolean;
   onHidden: boolean;
   votesEnabled: boolean;
@@ -139,12 +147,23 @@ function viewerRequestReads(media: DetailMedia, mediaType: DetailMediaType, user
     select: { arrInstance: true },
   });
   const userRequestsP = requests.then((rows) => rows.filter((r) => r.arrInstance !== FOURK_ARR_INSTANCE));
+  // Permanent declines, per instance. The main button's is decided like its
+  // `requested`: the default instance or the slug this title auto-routes to,
+  // which is the instance the request route would check (priorRequestGate).
+  const declinedSlugs = prisma.mediaRequest
+    .findMany({
+      where: { tmdbId: media.id, mediaType, requestedBy: userId, permanentlyDeclined: true },
+      select: { arrInstance: true },
+    })
+    .then((rows) => rows.map((r) => r.arrInstance));
   return {
     requests,
     userRequests: userRequestsP,
     requested: userRequestsP.then((userRequests) =>
       resolveMainButtonRequested(mediaType, userRequests.map((r) => r.arrInstance), routableMedia(media)),
     ),
+    declinedSlugs,
+    declinedMain: declinedSlugs.then((slugs) => resolveMainButtonRequested(mediaType, slugs, routableMedia(media))),
   };
 }
 
@@ -156,6 +175,14 @@ function viewerMarkReads(tmdbId: number, mediaType: DetailMediaType, userId: str
       where: { tmdbId, mediaType, userId },
       select: { id: true },
     }),
+    // Same rule as the vote route's own-request refusal: ever requested, at
+    // any status, or filed on someone's behalf.
+    ownRequest: prisma.mediaRequest
+      .findFirst({
+        where: { tmdbId, mediaType, OR: [{ requestedBy: userId }, { filedBy: userId }] },
+        select: { id: true },
+      })
+      .then((row) => !!row),
     onWatchlist: prisma.watchlistItem.findUnique({ where: viewerKey, select: { id: true } }).then((row) => !!row),
     onHidden: prisma.hiddenItem.findUnique({ where: viewerKey, select: { id: true } }).then((row) => !!row),
   };
@@ -235,12 +262,18 @@ export async function loadDetailPageState(
     requestedAny: reads.userRequests.length > 0,
     requested: reads.requested,
     requested4k: reads.requests.some((row) => row.arrInstance === FOURK_ARR_INSTANCE),
+    permanentlyDeclined: {
+      main: reads.declinedMain,
+      fourK: reads.declinedSlugs.includes(FOURK_ARR_INSTANCE),
+      named: reads.declinedSlugs.filter((slug) => slug !== DEFAULT_ARR_INSTANCE && slug !== FOURK_ARR_INSTANCE),
+    },
     show4k: reads.show4k,
     arr4kAvailable: reads.show4k && !!reads.available4k,
     arr4kPending: reads.show4k && wantedSlugs.has(FOURK_ARR_INSTANCE),
     blacklisted: reads.blacklisted,
     namedTargets: reads.namedTargets,
     alreadyVoted: !!reads.deletionVote,
+    ownRequest: reads.ownRequest,
     onWatchlist: reads.onWatchlist,
     onHidden: reads.onHidden,
     votesEnabled: flagOn(reads.flags, "feature.page.votes"),

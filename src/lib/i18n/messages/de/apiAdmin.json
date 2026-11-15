@@ -58,6 +58,7 @@
   "apiAdmin.cleanup.unknownSetting": "Unbekannte Einstellung: {field}",
   "apiAdmin.common.downloadsEnabledBoolean": "downloadsEnabled muss ein boolescher Wert sein",
   "apiAdmin.common.forbidden": "Zugriff verweigert",
+  "apiAdmin.common.crossSiteRefused": "Zugriff verweigert – websiteübergreifende Anfrage",
   "apiAdmin.common.instanceNameTooLong": "Der Name für „{slug}“ darf höchstens {max} Zeichen lang sein",
   "apiAdmin.common.instancesArray": "instances muss ein Array sein",
   "apiAdmin.common.instancesChanged": "Die {service}-Instanzen wurden seit dem Laden dieser Seite an anderer Stelle geändert, daher wurde nichts gespeichert. Aktualisieren Sie, um die aktuelle Liste zu laden, und nehmen Sie Ihre Änderungen erneut vor.",
@@ -128,6 +129,8 @@
   "apiAdmin.mediaInstances.plexUnreachable": "Plex-Server nicht erreichbar",
   "apiAdmin.mediaInstances.servicePlexOrJellyfin": "service muss plex oder jellyfin sein",
   "apiAdmin.mediaInstances.slugReserved": "Der Slug „{slug}“ kann für einen neuen Server nicht verwendet werden: Seine Einstellungen würden die des Hauptservers überschreiben. Wähle einen anderen Slug.",
+  "apiAdmin.mediaInstances.secretNeededForNewUrl": "Das gespeicherte Geheimnis für „{slug}“ kann bei einer neuen Serveradresse nicht beibehalten werden. Gib Token oder Schlüssel erneut ein.",
+  "apiAdmin.mediaInstances.fieldTooLong": "{field} für „{slug}“ darf höchstens {max} Zeichen lang sein",
   "apiAdmin.plexServers.connectFirst": "Verbinden Sie zuerst Ihr Plex-Konto",
   "apiAdmin.plexServers.loadFailed": "Server konnten nicht von plex.tv geladen werden",
   "apiAdmin.plexServers.machineIdRequired": "machineId ist erforderlich",
@@ -260,6 +263,7 @@
   "apiAdmin.users.promoteBeforeGrantingAdmin": "Stufen Sie die Rolle dieses Benutzers zu Admin hoch, bevor Sie die ADMIN-Berechtigung gewähren.",
   "apiAdmin.users.provideSessionId": "Geben Sie sessionId oder all: true an",
   "apiAdmin.users.purgedCannotReenable": "Die Daten dieses Kontos wurden gelöscht; es kann nicht mehr reaktiviert werden.",
+  "apiAdmin.users.purgedCannotChange": "Ein entferntes (bereinigtes) Konto kann nicht geändert werden.",
   "apiAdmin.users.quotaInvalid": "{field} muss eine nicht negative ganze Zahl oder null sein",
   "apiAdmin.users.quotaZero": "{field} mit 0 würde „unbegrenzt“ bedeuten, nicht „gesperrt“. Leer lassen, um das globale Kontingent zu verwenden, 1 oder mehr für ein Limit setzen, oder die Anfrageberechtigung des Benutzers entziehen, damit er nichts mehr anfragen kann.",
   "apiAdmin.users.roleInvalid": "role muss ADMIN, ISSUE_ADMIN oder USER sein",
@@ -295,6 +299,7 @@
   "apiAdmin.agents.error.invalidStored": "Die gespeicherten Einstellungen dieses Kanals sind nicht mehr gültig. Bearbeiten und speichern Sie ihn erneut.",
   "apiAdmin.backfillPlaytime.confirmationRequired": "Bestätigung erforderlich",
   "apiAdmin.users.cannotGrantBeyondOwn": "Sie können keine Berechtigungen, Instanzzugriffe, Server-Sichtbarkeit oder Altersfreigabe-Grenzen über Ihre eigenen hinaus vergeben",
+  "apiAdmin.users.cannotManageBeyondOwn": "Sie können kein Konto verwalten, das Verwaltungsberechtigungen besitzt, die Sie selbst nicht haben",
   "apiAdmin.fixMatch.plexUnmatched": "Plex konnte die Zuordnung zu TMDB #{tmdbId} nicht bestätigen; das Element ist in Plex jetzt NICHT ZUGEORDNET – ordnen Sie es direkt in Plex neu zu oder wählen Sie einen anderen Kandidaten.",
   "apiAdmin.common.bodyTooLarge": "Anfragetext zu groß (max. {max})",
   "apiAdmin.warm.activityRunning": "Aktivitäts-Warmup läuft bereits",
@@ -411,5 +416,6 @@
   "apiAdmin.watchSync.jobGone": "Dieser Sync-Lauf wird nicht mehr verfolgt. Summonarr wurde möglicherweise neu gestartet. Lade neu, um die neuesten Ergebnisse zu sehen.",
   "apiAdmin.watchSync.pairInvalid": "Wähle ein Plex-Konto und einen Jellyfin-Benutzer, der noch auf seinem Server ist",
   "apiAdmin.watchSync.pairExists": "Diese Verknüpfung gibt es bereits",
-  "apiAdmin.watchSync.pairNotFound": "Verknüpfung nicht gefunden"
+  "apiAdmin.watchSync.pairNotFound": "Verknüpfung nicht gefunden",
+  "apiAdmin.watchSync.pairPaused": "Diese Verknüpfung ist pausiert. Setze sie fort, bevor du einen vollständigen Abgleich startest."
 }

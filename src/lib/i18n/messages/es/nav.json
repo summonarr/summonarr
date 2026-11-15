@@ -27,6 +27,8 @@
   "nav.adminGroup.system": "Sistema",
   "nav.badge.queueAttention_one": "{count} descarga requiere atención",
   "nav.badge.queueAttention_other": "{count} descargas requieren atención",
+  "nav.badge.activityStreams_one": "{count} reproducción en curso",
+  "nav.badge.activityStreams_other": "{count} reproducciones en curso",
   "nav.badge.groupAttention_one": "{count} elemento requiere atención",
   "nav.badge.groupAttention_other": "{count} elementos requieren atención",
   "nav.tab.browse": "Explorar",

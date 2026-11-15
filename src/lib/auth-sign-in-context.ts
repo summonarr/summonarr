@@ -60,6 +60,9 @@ export function signInRequestContext(req: Request): SignInRequestContext {
 
 export type SignInProvider = "credentials" | "plex" | "jellyfin" | "jellyfin-quickconnect";
 
+// Longest plex.tv token or QuickConnect secret a sign-in accepts. Real ones are a few
+// dozen characters; longer values are refused before they are hashed or forwarded upstream.
+export const MAX_SIGN_IN_TOKEN_LENGTH = 512;
 // The limiter-key form of a sign-in secret (a Plex token, a QuickConnect
 // secret): a truncated SHA-256, so no raw secret material — not even a prefix,
 // which was most of a live Plex token — lands in a limiter key.

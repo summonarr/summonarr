@@ -81,3 +81,9 @@ test("an aborted write shows nothing", async () => {
   assert.equal(text(r), "");
   assert.equal(calls.length, 0, "an already-aborted write sends nothing");
 });
+
+test("a 2xx that is not JSON (a gate's sign-in page) is not a successful write", async () => {
+  answer = () => new Response("<html>sign in</html>", { status: 200, headers: { "Content-Type": "text/html" } });
+  assert.equal((await hideTitle({ tmdbId: 1, mediaType: "MOVIE", title: "x" })).ok, false);
+  assert.equal((await unhideTitle({ tmdbId: 1, mediaType: "MOVIE" })).ok, false);
+});

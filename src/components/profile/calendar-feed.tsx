@@ -17,6 +17,12 @@ interface CalendarFeedProps {
   enabled: boolean;
   createdAt: string | null;
   canSubscribeAll: boolean;
+  /**
+   * The calendar feature is switched off but a link is still stored: the card
+   * offers only the revoke. The route keeps DELETE open for exactly this, so a
+   * leaked link can be removed before the feature comes back on.
+   */
+  revokeOnly?: boolean;
 }
 
 interface Generated {
@@ -37,7 +43,7 @@ const CreatedAnswer = v.object({
 // Personal iCal feed controls. The subscribe URL is shown ONLY in the response
 // that generates it: the server stores a hash, never the token, so a lost URL is
 // replaced (which revokes the old one) rather than re-displayed.
-export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFeedProps) {
+export function CalendarFeed({ enabled, createdAt, canSubscribeAll, revokeOnly = false }: CalendarFeedProps) {
   const t = useT();
   const locale = useLocale();
   const mounted = useHasMounted();
@@ -98,7 +104,9 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
   return (
     <div className="space-y-3">
       <p className="text-sm text-zinc-400">
-        {t("profile.calendar.intro")}
+        {revokeOnly
+          ? t(active ? "profile.calendar.featureOff" : "profile.calendar.featureOffRemoved")
+          : t("profile.calendar.intro")}
       </p>
 
       {generated && (
@@ -123,7 +131,7 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
         </div>
       )}
 
-      {!generated && active && (
+      {!revokeOnly && !generated && active && (
         <p className="text-sm text-zinc-300">
           {mounted && since
             ? t("profile.calendar.activeSince", { date: new Date(since).toLocaleDateString(locale) })
@@ -156,15 +164,17 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
         </div>
       ) : (
         <div className="flex flex-wrap gap-2">
-          <Button
-            type="button"
-            disabled={busy}
-            onClick={() => (active ? setConfirming("regenerate") : generate())}
-            className="w-full sm:w-auto gap-1.5"
-          >
-            {action.busy("generate") ? <Loader2 className="w-4 h-4 animate-spin" /> : active ? <RefreshCw className="w-4 h-4" /> : <Calendar className="w-4 h-4" />}
-            {active ? t("profile.calendar.generateNew") : t("profile.calendar.create")}
-          </Button>
+          {!revokeOnly && (
+            <Button
+              type="button"
+              disabled={busy}
+              onClick={() => (active ? setConfirming("regenerate") : generate())}
+              className="w-full sm:w-auto gap-1.5"
+            >
+              {action.busy("generate") ? <Loader2 className="w-4 h-4 animate-spin" /> : active ? <RefreshCw className="w-4 h-4" /> : <Calendar className="w-4 h-4" />}
+              {active ? t("profile.calendar.generateNew") : t("profile.calendar.create")}
+            </Button>
+          )}
           {active && (
             <Button
               type="button"
@@ -179,7 +189,7 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
           )}
         </div>
       )}
-      {canSubscribeAll && !generated && (
+      {canSubscribeAll && !generated && !revokeOnly && (
         <p className="text-xs text-zinc-500">
           {t("profile.calendar.allFeedHint")}
         </p>

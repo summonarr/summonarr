@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
-import { fetchJson } from "@/lib/client/fetch-json";
+import { fetchJson, jsonInit } from "@/lib/client/fetch-json";
 import { v, type Infer } from "@/lib/validate";
 import { useAsyncAction } from "@/hooks/use-async-action";
 import { NumberField } from "./forms/number-field";
@@ -93,9 +93,10 @@ export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, str
 
   async function handlePreview() {
     const sent = body;
+    const sentFields = fields;
     setPreviewError(null);
     const res = await action.run("preview", (signal) => fetchJson(withBasePath("/api/admin/watch-grade/preview"), {
-      init: { method: "POST", headers: { "Content-Type": "application/json" }, body: sent },
+      init: jsonInit("POST", sentFields),
       schema: PreviewAnswer,
       signal,
     }));
@@ -207,6 +208,9 @@ export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, str
           {t("settings.watchGrade.previewHelp")}
         </p>
         {previewError && <p role="alert" className="text-xs text-red-400">{previewError}</p>}
+        {preview && preview.result.enabled && !spreads && (
+          <p role="status" className="text-xs text-zinc-500">{t("settings.watchGrade.previewEmpty")}</p>
+        )}
         {preview && !preview.result.enabled && (
           <p className="text-xs text-zinc-400">
             {preview.result.reason === "feature-off"

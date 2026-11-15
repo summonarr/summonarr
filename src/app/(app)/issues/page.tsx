@@ -61,6 +61,29 @@ function scopeLabelFor(
   return null;
 }
 
+function toDrawerPayload(issue: {
+  id: string; title: string; posterPath: string | null; mediaType: IssueDrawerPayload["mediaType"];
+  status: IssueDrawerPayload["status"]; issueType: IssueDrawerPayload["issueType"]; scope: IssueDrawerPayload["scope"];
+  seasonNumber: number | null; episodeNumber: number | null; note: string | null; resolution: string | null;
+  createdAt: Date; _count: { messages: number };
+}): IssueDrawerPayload {
+  return {
+    id: issue.id,
+    title: issue.title,
+    posterUrl: posterUrl(issue.posterPath, "w342"),
+    mediaType: issue.mediaType,
+    status: issue.status,
+    issueType: issue.issueType,
+    scope: issue.scope,
+    seasonNumber: issue.seasonNumber,
+    episodeNumber: issue.episodeNumber,
+    note: issue.note,
+    resolution: issue.resolution,
+    createdAt: issue.createdAt.toISOString(),
+    messageCount: issue._count.messages,
+  };
+}
+
 export default async function IssuesPage({
   searchParams,
 }: {
@@ -94,12 +117,13 @@ export default async function IssuesPage({
   // search can't make the query slow (same as /api/votes).
   const q = sanitizeContainsSearch((qParam ?? "").trim());
 
-  const where: Prisma.IssueWhereInput = {
+  // The list and the pills' counts share this, so they cannot disagree.
+  const baseWhere: Prisma.IssueWhereInput = {
     reportedBy: session.user.id,
-    ...(status ? { status } : {}),
     ...(issueType ? { issueType } : {}),
     ...(q ? { title: { contains: q, mode: "insensitive" } } : {}),
   };
+  const where: Prisma.IssueWhereInput = { ...baseWhere, ...(status ? { status } : {}) };
 
   const [issues, statusCountsRaw, totalForUser] = await Promise.all([
     prisma.issue.findMany({
@@ -113,11 +137,7 @@ export default async function IssuesPage({
     // the list's total comes from these too (below) — no separate count query.
     prisma.issue.groupBy({
       by: ["status"],
-      where: {
-        reportedBy: session.user.id,
-        ...(issueType ? { issueType } : {}),
-        ...(q ? { title: { contains: q, mode: "insensitive" } } : {}),
-      },
+      where: baseWhere,
       _count: { status: true },
     }),
     // UNFILTERED per-user count — gates the filter bar below and is the "of N"
@@ -309,23 +329,7 @@ export default async function IssuesPage({
 
       <IssueDetailMobileDrawer
         selectedIssue={
-          selectedIssue
-            ? ({
-                id: selectedIssue.id,
-                title: selectedIssue.title,
-                posterUrl: posterUrl(selectedIssue.posterPath, "w342"),
-                mediaType: selectedIssue.mediaType,
-                status: selectedIssue.status,
-                issueType: selectedIssue.issueType,
-                scope: selectedIssue.scope,
-                seasonNumber: selectedIssue.seasonNumber,
-                episodeNumber: selectedIssue.episodeNumber,
-                note: selectedIssue.note,
-                resolution: selectedIssue.resolution,
-                createdAt: selectedIssue.createdAt.toISOString(),
-                messageCount: selectedIssue._count.messages,
-              } satisfies IssueDrawerPayload)
-            : null
+          selectedIssue ? toDrawerPayload(selectedIssue) : null
         }
         closeHref={buildHref({ selected: "" })}
       />

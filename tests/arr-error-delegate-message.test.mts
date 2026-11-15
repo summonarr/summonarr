@@ -1,6 +1,6 @@
 // Radarr/Sonarr failures shown to a MANAGE_REQUESTS delegate name the failure's
-// KIND, never the arr's internal address (audit 2026-10-20, F029/F025), and an
-// ArrResponseError never prints its upstream body when logged (F024).
+// KIND, never the arr's internal address (audit 2026-10-20), and an
+// ArrResponseError never prints its upstream body when logged.
 //
 // Why: arrErrorMessage generalises only an ArrResponseError. A SafeFetchError
 // (timeout, refused connection) passed through as err.message — "fetch failed
@@ -176,6 +176,10 @@ for (const m of ["auditLog", "notification", "notificationAgent", "pushSubscript
 }
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) =>
   Array.isArray(arg) ? Promise.all(arg) : (arg as (tx: unknown) => Promise<unknown>)(prisma));
+// The decision claim queues its requester notices in the same transaction
+// (outbox.ts queueDecisionNotices); nothing here reads them back.
+shadowPrismaClientMethod(prisma, "$executeRaw", async () => 0);
+shadowPrismaModel(prisma, "outbox", { deleteMany: async () => ({ count: 0 }) });
 
 const idRoute = await import("../src/app/api/requests/[id]/route.ts");
 const batchRoute = await import("../src/app/api/requests/batch/route.ts");

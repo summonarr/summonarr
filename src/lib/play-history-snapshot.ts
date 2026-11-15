@@ -2,6 +2,7 @@
 // current ActiveSession rows.
 import { prisma } from "./prisma";
 import { emitSSE } from "./sse-emitter";
+import { ACTIVITY_BADGE_HREF } from "./nav-badges";
 import { posterPathKey, resolvePosterMap } from "./poster-cache";
 import type { Prisma } from "@/generated/prisma";
 
@@ -59,6 +60,20 @@ export function serializeActiveSession(row: ActiveSessionSnapshotRow, posterUrl:
     startedAt: startedAt.toISOString(),
     posterUrl,
   };
+}
+
+/**
+ * The admin nav's Activity badge at first render: the streams playing now, the
+ * same rows the `activity:sessions` frame lists (its length is the live
+ * count). Fails OPEN — any error is no badge, never a broken page.
+ */
+export async function readActivityNavBadge(): Promise<Record<string, number> | undefined> {
+  try {
+    const n = await prisma.activeSession.count();
+    return n > 0 ? { [ACTIVITY_BADGE_HREF]: n } : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // Build an activity:sessions SSE payload from current ActiveSession rows and emit it.

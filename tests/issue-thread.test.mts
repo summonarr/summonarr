@@ -15,7 +15,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { failedLoadState, isNearBottom, NEAR_BOTTOM_PX } from "@/lib/client/thread-view.ts";
+import { failedLoadState, isNearBottom, mergeThreadReload, NEAR_BOTTOM_PX } from "@/lib/client/thread-view.ts";
 import { mergeReload, readComment, readComments } from "../src/components/requests/request-thread-data.ts";
 
 const read = (rel: string) => readFileSync(new URL(`../${rel}`, import.meta.url), "utf8");
@@ -122,4 +122,43 @@ test("both threads load older messages from the oldest one shown, and read wheth
     assert.match(src, /res\.headers\.get\(TRUNCATED_HEADER\) === "true"/, file);
     assert.match(src, /prependOlder\(prev, /, file);
   }
+});
+
+test("request thread: the reply box stays focusable while sending (read-only, never disabled by a send), and focus returns after it", () => {
+  const src = read("src/components/requests/request-thread.tsx");
+  assert.match(src, /readOnly=\{sending\}/);
+  assert.match(src, /disabled=\{loadState !== "ready"\}\s*className="flex-1 resize-none/, "only an unloaded thread disables it");
+  assert.doesNotMatch(src, /disabled=\{sending \|\|[^}]*\}\s*className="flex-1 resize-none/);
+  assert.match(src, /pendingRef\.current\.add\(created\.id\);[\s\S]{0,500}textareaRef\.current\?\.focus\(\);/);
+});
+
+test("request thread: a 2xx that isn't the comment clears the draft and re-reads, never inviting a second send", () => {
+  const src = read("src/components/requests/request-thread.tsx");
+  const start = src.indexOf("async function send(");
+  const body = src.slice(start, src.indexOf("function onKeyDown(", start));
+  const invalid = body.slice(body.indexOf("if (!created) {"), body.indexOf("stickRef.current = true;"));
+  // The refused / unanswered branch keeps the text and shows why.
+  assert.match(invalid, /if \(!res\.ok && res\.kind !== "invalid"\) \{\s*setSendError\([^;]*;\s*return;\s*\}/);
+  // The saved-but-unreadable branch: draft gone, thread re-read, no error.
+  const saved = invalid.slice(invalid.indexOf("return;") + 7);
+  assert.match(saved, /setBody\(""\);\s*void load\(undefined, \{ silent: true \}\);\s*return;/);
+  assert.doesNotMatch(saved, /setSendError/);
+});
+
+test("both threads announce a failed send to a screen reader", () => {
+  for (const file of THREADS) {
+    assert.match(read(file), /\{sendError && \(?\s*<p role="alert"/, file);
+  }
+});
+
+test("issue thread: a reload that misses the viewer's own new message keeps it", () => {
+  const src = read("src/components/issues/issue-thread.tsx");
+  assert.match(src, /pendingRef\.current\.add\(msg\.id\);\s*setMessages\(\(prev\) => \(prev\.some/);
+  assert.match(src, /for \(const m of res\.data\) pendingRef\.current\.delete\(m\.id\);\s*const pending = new Set\(pendingRef\.current\);\s*setMessages\(\(prev\) => mergeThreadReload\(res\.data, prev, pending\)\);/);
+  assert.doesNotMatch(src, /NO_PENDING/);
+  // The shared rule the two threads now both feed.
+  const mk = (id: string, createdAt: string) => ({ id, createdAt });
+  const a = mk("a", "2026-01-01T00:00:00Z"), mine = mk("mine", "2026-01-01T00:00:05Z");
+  assert.deepEqual(mergeThreadReload([a], [a, mine], new Set(["mine"])).map((m) => m.id), ["a", "mine"]);
+  assert.deepEqual(mergeThreadReload([a], [a, mine], new Set()).map((m) => m.id), ["a"], "without the pending id the message is lost");
 });

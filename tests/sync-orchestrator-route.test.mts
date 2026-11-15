@@ -1,4 +1,5 @@
-// Route-level unit tests for the SYNC ORCHESTRATOR — src/app/api/sync/route.ts,
+// Route-level unit tests for the SYNC ORCHESTRATOR — src/app/api/sync/route.ts
+// and the src/lib/sync-orchestrator*.ts modules it runs,
 // the external-cron / admin-"Sync" entry point. It is the single POST that takes
 // advisory lock 2000, runs the whole availability pipeline under
 // withCronRunRecording, and writes the LIBRARY_SYNC audit row.
@@ -55,7 +56,6 @@
 // Erasable-TS only; node:assert/strict; guardrail 7 console capture (warn/error).
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { Client } from "pg";
 
 // ── env FIRST (prisma.ts pulls token-crypto; session reads NEXTAUTH_SECRET) ──
@@ -261,7 +261,7 @@ const settingDeleteManyWheres: Array<Record<string, unknown> | undefined> = [];
 // query the marking/notify passes ALREADY issue (extra columns, not an extra
 // round-trip), so the count of requester-shaped reads is itself a pin.
 const userFindManyCalls: Array<{ where?: Record<string, unknown>; select?: Record<string, unknown> }> = [];
-type CasCall = { mode: "markAvailable" | "requireAvailable" | "plain"; ids: string[]; winners: string[] };
+type CasCall = { mode: "markAvailable" | "requireAvailable" | "plain"; ids: string[]; winners: string[]; disarmsPending: boolean };
 // Seedable ARR-available rows.
 //
 // These two delegates used to return a hardcoded [], which made
@@ -388,12 +388,16 @@ const fakePrisma = {
   $queryRaw: async (query: { sql: string; values: unknown[] }) => {
     const sql = query.sql;
     if (sql.includes(`FROM "TVEpisodeCache"`)) return [];
+    // The outbox drain's take-and-relock (outbox-drain.ts) is not a claim
+    // either: nothing is owed in this harness.
+    if (sql.includes(`UPDATE "Outbox"`)) return [];
     const ids = (query.values ?? []).map(String);
     const mode: CasCall["mode"] = sql.includes("IN ('PENDING', 'APPROVED')")
       ? "markAvailable"
       : sql.includes(`AND "status" = 'AVAILABLE'`)
       ? "requireAvailable"
       : "plain";
+    const disarmsPending = sql.includes(`"pendingNotifyAt" = NULL`);
     const winners: string[] = [];
     for (const id of ids) {
       const row = requests.get(id);
@@ -402,10 +406,14 @@ const fakePrisma = {
       if (mode === "markAvailable" && !(row.status === "PENDING" || row.status === "APPROVED")) continue;
       if (mode === "requireAvailable" && row.status !== "AVAILABLE") continue;
       row.notifiedAvailable = true;
-      if (mode === "markAvailable") { row.status = "AVAILABLE"; row.availableAt = new Date(); }
+      if (mode === "markAvailable") {
+        row.status = "AVAILABLE";
+        row.availableAt = new Date();
+        if (disarmsPending) row.pendingNotifyAt = null;
+      }
       winners.push(id);
     }
-    casCalls.push({ mode, ids, winners });
+    casCalls.push({ mode, ids, winners, disarmsPending });
     return winners.map((id) => ({ id }));
   },
   // patchPlexShowFilePaths' VALUES-joined UPDATE lands here (top-level, no tx).
@@ -633,6 +641,7 @@ const fakePrisma = {
 // ── dynamic imports (env/global stubs must precede the module graph) ─────────
 const { NextRequest } = await import("next/server");
 const { POST } = await import("../src/app/api/sync/route.ts");
+const { syncOrchestratorSource } = await import("./_sync-orchestrator-source.mts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
@@ -1072,8 +1081,9 @@ test("a DEACTIVATED requester's AVAILABLE transition still wipes stale deletion 
   respond = bothServersRespond([550, 551], []); // both titles land in Plex
   usersById.set("u-disabled", { ...defaultUser("u-disabled"), deactivatedAt: new Date("2026-02-01T00:00:00.000Z") });
   usersById.set("u-active", defaultUser("u-active"));
-  seedRequest({ id: "req-disabled", tmdbId: 550, mediaType: "MOVIE", requestedBy: "u-disabled", status: "PENDING" });
-  seedRequest({ id: "req-active", tmdbId: 551, mediaType: "MOVIE", requestedBy: "u-active", status: "PENDING" });
+  const armed = new Date("2026-02-02T00:00:00.000Z");
+  seedRequest({ id: "req-disabled", tmdbId: 550, mediaType: "MOVIE", requestedBy: "u-disabled", status: "PENDING", pendingNotifyAt: armed });
+  seedRequest({ id: "req-active", tmdbId: 551, mediaType: "MOVIE", requestedBy: "u-active", status: "PENDING", pendingNotifyAt: armed });
 
   await POST(syncReq({ headers: AS_CRON }));
   await settle();
@@ -1103,16 +1113,21 @@ test("a DEACTIVATED requester's AVAILABLE transition still wipes stale deletion 
     "and so must the per-item deletionVoteNotified: re-arm key, for the same reason",
   );
 
-  // Same rule for the pendingNotifyAt disarm: ONE updateMany naming BOTH winners.
-  const disarms = mediaRequestUpdateManyCalls.filter(
-    (c) => Object.keys(c.data ?? {}).length === 1 && c.data.pendingNotifyAt === null,
-  );
-  assert.equal(disarms.length, 1, "exactly one post-claim pendingNotifyAt disarm for this pass");
+  // The pendingNotifyAt disarm rides the claim statement itself, so it covers
+  // every row the claim flipped — the disabled requester's included — and no
+  // follow-up write exists to be keyed off the wrong set.
+  assert.equal(claim.disarmsPending, true, "the markAvailable claim must itself clear pendingNotifyAt");
+  for (const id of ["req-disabled", "req-active"]) {
+    assert.equal(
+      requests.get(id)?.pendingNotifyAt,
+      null,
+      `${id}: the 90s still-pending backstop must be disarmed on every row that went AVAILABLE`,
+    );
+  }
   assert.deepEqual(
-    [...(disarms[0].where?.id?.in ?? [])].sort(),
-    ["req-active", "req-disabled"],
-    "the 90s still-pending backstop must be disarmed on every row that went AVAILABLE — leaving it " +
-      "armed on an AVAILABLE row is exactly what keying this off `deliverable` does",
+    mediaRequestUpdateManyCalls.filter((c) => "pendingNotifyAt" in (c.data ?? {})),
+    [],
+    "the disarm is part of the claim, not a separate write",
   );
 
   // …and the half that must NOT happen. The active requester in the same run is
@@ -1352,7 +1367,7 @@ test("every library-selection lookup in the orchestrator is keyed by an INSTANCE
   // Rather than leave half the fix unpinned, require all four to pass a slug —
   // a literal "" would re-apply one server's selection to every server, which is
   // the exact bug.
-  const source = readFileSync(new URL("../src/app/api/sync/route.ts", import.meta.url), "utf8");
+  const source = syncOrchestratorSource();
   const lookups = source.match(/librarySelections\.get\([^)]*\)/g) ?? [];
   assert.equal(lookups.length, 4, "expected exactly the four selection lookups");
   for (const l of lookups) {
@@ -3134,7 +3149,7 @@ test("backstop: an overdue row with nothing on disk goes through runDownloadChec
 });
 
 test("backstop: it sits AFTER the Radarr/Sonarr refresh and the second ARR marking pass", () => {
-  const src = readFileSync("src/app/api/sync/route.ts", "utf-8");
+  const src = syncOrchestratorSource();
   const backstop = src.indexOf("await runConcurrent(overdue,");
   assert.ok(backstop > 0, "the overdue sweep must still exist");
   assert.ok(src.indexOf('windDownBefore("Sonarr")') < backstop, "the backstop must follow the arr cache refresh");
@@ -3150,8 +3165,7 @@ test("backstop: it sits AFTER the Radarr/Sonarr refresh and the second ARR marki
 // stops a >30min run continuing lock-free while the next trigger starts a second
 // concurrent full library sync.
 test("GUARDRAIL 41: every sync arm is gated on the advisory-lock abort, and no check sits inside a transaction", async () => {
-  const { readFileSync } = await import("node:fs");
-  const src = readFileSync("src/app/api/sync/route.ts", "utf-8");
+  const src = syncOrchestratorSource();
 
   assert.match(
     src,
@@ -3173,7 +3187,7 @@ test("GUARDRAIL 41: every sync arm is gated on the advisory-lock abort, and no c
 
   for (const arm of [
     "Radarr", "Sonarr", "Plex library", "Jellyfin library",
-    "second ARR pass", "download check", "re-push", "de-registered sweep", "revert", "library marking", "pending notify",
+    "second ARR pass", "download check", "re-push", "library read", "de-registered sweep", "revert", "library marking", "pending notify", "cache purge",
   ]) {
     assert.ok(
       src.includes(`windDownBefore("${arm}")`),
@@ -3623,4 +3637,136 @@ test("GUARDRAIL 41: a lock lost MID episode walk stops it, and neither the episo
   assert.equal(rawStatements.filter((r) => r.sql.includes('UPDATE "PlexLibraryItem"')).length, 0, "nor patch file paths");
   assert.equal((await bodyOf(res)).windDown, true);
   assert.ok(!errors.some((e) => e.includes("Plex TV episode fetch failed")), `a lost lock is not a failed fetch: ${errors.join(" | ")}`);
+});
+
+// ── guardrail 41 inside the Jellyfin arm: the twin of the Plex block above ───
+// The Jellyfin walks take the lock's signal too and reject mid-listing, so a
+// lost lock leaves every Jellyfin server's stored rows and the episode cache
+// exactly as they were.
+
+const JF_ORIGIN = new URL(JF_BASE).origin;
+const jellyfinPagesAfter = (index: number, type: string) =>
+  fetchCalls.slice(index).filter((c) => c.url.origin === JF_ORIGIN && c.url.searchParams.get("IncludeItemTypes") === type);
+const jellyfinWrites = () => ({
+  tx: txTouching("jellyfinLibraryItem").length,
+  staged: stagedLibraryRows("jellyfinLibraryItemStaging").length,
+});
+function configureJellyfinOnly(): void {
+  settings.set("jellyfinUrl", JF_BASE);
+  settings.set("jellyfinApiKey", "jf-api-key-1");
+}
+const startIndexOf = (url: URL) => Number(url.searchParams.get("StartIndex"));
+
+// A Movie listing that counts more than one page (LIBRARY_PAGE_SIZE is 5,000),
+// so the walk asks for StartIndex=5000 next; no shows. `onMoviePage` runs as
+// each page is served.
+function twoPageJellyfinMovies(onMoviePage: (start: number) => void): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname !== "/Items") throw new Error(`unexpected Jellyfin fetch ${url.pathname}`);
+    if (url.searchParams.get("IncludeItemTypes") === "Series") return okJson({ Items: [], TotalRecordCount: 0 });
+    const start = startIndexOf(url);
+    onMoviePage(start);
+    const ids = start === 0 ? Array.from({ length: 5000 }, (_, i) => 100_000 + i) : [900_000];
+    return okJson({ Items: ids.map((id) => ({ Id: `jf-${id}`, Name: `M${id}`, ProviderIds: { Tmdb: String(id) } })), TotalRecordCount: 5001 });
+  };
+}
+
+test("GUARDRAIL 41: a lock lost MID Jellyfin walk sends no further page, writes nothing, and winds the run down", async () => {
+  episodeStagingLoads.length = 0;
+  configureJellyfinOnly();
+  let dropAt = -1;
+  respond = twoPageJellyfinMovies((start) => {
+    if (start !== 0) return;
+    dropAt = fetchCalls.length;
+    dropLock();
+  });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.ok(dropAt > 0, "precondition: the lock dropped while the first page was served");
+  assert.deepEqual(jellyfinPagesAfter(dropAt, "Movie").map((c) => c.url.href), [], "the walk must not ask for another page once the lock is gone");
+  assert.deepEqual(jellyfinWrites(), { tx: 0, staged: 0 }, "the server's stored rows stay — no partial replace");
+  assert.deepEqual(episodeCacheWrites(), { tx: 0, staged: 0 });
+  assert.equal(res.status, 200, "a wind-down returns, it never throws");
+  assert.equal((await bodyOf(res)).windDown, true);
+  assert.ok(!errors.some((e) => e.includes("Jellyfin check failed")), `a lost lock is not a Jellyfin failure: ${errors.join(" | ")}`);
+});
+
+test("GUARDRAIL 41: a lock lost after the Jellyfin walk FINISHED but before its write writes nothing — the arm's fetch → write boundary", async () => {
+  configureJellyfinOnly();
+  let dropped = false;
+  respond = twoPageJellyfinMovies((start) => {
+    if (start !== 5000) return; // the last page: the walk itself completes
+    dropped = true;
+    dropLock();
+  });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.ok(dropped, "precondition: the lock dropped while the last page was served");
+  assert.deepEqual(jellyfinWrites(), { tx: 0, staged: 0 }, "a complete walk is still not written once the lock is gone");
+  assert.equal((await bodyOf(res)).windDown, true);
+  assert.ok(!errors.some((e) => e.includes("Jellyfin check failed")), errors.join(" | "));
+});
+
+// One show; its Episode listing is `pages` full pages (EPISODE_PAGE_SIZE is
+// 1,000) and `onEpisodePage` runs as each is served.
+function jellyfinShowWithEpisodes(pages: number, onEpisodePage: (start: number) => void): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname !== "/Items") throw new Error(`unexpected Jellyfin fetch ${url.pathname}`);
+    switch (url.searchParams.get("IncludeItemTypes")) {
+      case "Movie":
+        return okJson({ Items: [], TotalRecordCount: 0 });
+      case "Series":
+        return okJson({ Items: [{ Id: "jf-show-1", Name: "Show", ProviderIds: { Tmdb: "1399" } }], TotalRecordCount: 1 });
+      case "Episode": {
+        const start = startIndexOf(url);
+        onEpisodePage(start);
+        const items = Array.from({ length: 1000 }, (_, i) => ({ SeriesId: "jf-show-1", ParentIndexNumber: 1, IndexNumber: start + i + 1 }));
+        return okJson({ Items: items, TotalRecordCount: pages * 1000 });
+      }
+      default:
+        throw new Error(`unexpected Jellyfin fetch ${url}`);
+    }
+  };
+}
+
+test("GUARDRAIL 41: a lock lost MID Jellyfin episode walk stops it, and the episode cache is not rewritten", async () => {
+  episodeStagingLoads.length = 0;
+  configureJellyfinOnly();
+  let dropAt = -1;
+  respond = jellyfinShowWithEpisodes(2, (start) => {
+    if (start !== 0) return;
+    dropAt = fetchCalls.length;
+    dropLock();
+  });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.ok(dropAt > 0, "precondition: the lock dropped during the episode walk");
+  assert.equal(txTouching("jellyfinLibraryItem").length, 1, "control: the library write ran before the lock was lost");
+  assert.deepEqual(jellyfinPagesAfter(dropAt, "Episode").map((c) => c.url.href), [], "the episode walk must not ask for another page once the lock is gone");
+  assert.deepEqual(episodeCacheWrites(), { tx: 0, staged: 0 }, "a walk that lost its lock must not rewrite the episode cache");
+  assert.equal((await bodyOf(res)).windDown, true);
+  assert.ok(!errors.some((e) => e.includes("Jellyfin TV episode fetch failed")), `a lost lock is not a failed fetch: ${errors.join(" | ")}`);
+});
+
+test("GUARDRAIL 41: a lock lost as the Jellyfin episode walk FINISHES still does not rewrite the episode cache", async () => {
+  episodeStagingLoads.length = 0;
+  configureJellyfinOnly();
+  let dropped = false;
+  respond = jellyfinShowWithEpisodes(1, () => {
+    dropped = true; // the only page: the walk itself completes
+    dropLock();
+  });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.ok(dropped, "precondition: the lock dropped while the last episode page was served");
+  assert.deepEqual(episodeCacheWrites(), { tx: 0, staged: 0 }, "a complete walk is still not written once the lock is gone");
+  assert.equal((await bodyOf(res)).windDown, true);
 });

@@ -31,7 +31,7 @@ export interface FillLibraryStep {
 export function fillLibraryStep(outcomes: readonly { outcome: LibrarySyncOutcome; text: string }[]): FillLibraryStep {
   return {
     texts: outcomes.map((o) => o.text),
-    allFailed: outcomes.every((o) => o.outcome.kind === "failed"),
+    allFailed: outcomes.length > 0 && outcomes.every((o) => o.outcome.kind === "failed"),
     degraded: outcomes.some((o) => o.outcome.kind === "failed"),
     pending: outcomes.some((o) => o.outcome.kind === "noAnswer"),
   };

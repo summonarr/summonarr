@@ -74,6 +74,9 @@ export function mergeRecentlyAdded(
     ...jellyfin.map((i) => ({ ...i, src: "jellyfin" as const })),
   ];
   const merged = new Map<string, RecentItem>();
+  // Keys whose stored title is still the placeholder: a titled row fills it
+  // whatever its addedAt.
+  const untitled = new Set<string>();
   for (const item of rows) {
     const key = keyOf(item);
     const existing = merged.get(key);
@@ -83,9 +86,15 @@ export function mergeRecentlyAdded(
         existing.addedAt = item.addedAt;
         existing.title = item.title ?? existing.title;
         existing.year = item.year ?? existing.year;
+        if (item.title != null) untitled.delete(key);
+      } else if (item.title != null && untitled.has(key)) {
+        existing.title = item.title;
+        existing.year = item.year ?? existing.year;
+        untitled.delete(key);
       }
       continue;
     }
+    if (item.title == null) untitled.add(key);
     merged.set(key, {
       tmdbId: item.tmdbId,
       title: item.title ?? unknownTitle,

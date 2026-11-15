@@ -87,6 +87,16 @@ async function resolveFromRequests(uncached: readonly number[], into: Map<number
   return stillUnknown;
 }
 
+// A cache write is an optimisation: a failed one must not discard the answer
+// TMDB just gave.
+async function rememberLookup(key: string, value: unknown, ttlSeconds: number): Promise<void> {
+  try {
+    await setCache(key, value, ttlSeconds);
+  } catch (err) {
+    console.warn("[arr] id-map cache write failed for %s:", sanitizeForLog(key), sanitizeForLog(err instanceof Error ? err.message : err));
+  }
+}
+
 // One TMDB /find lookup: the tmdbId, null for "TMDB has no such show" (cached as
 // unresolved), or LOOKUP_FAILED when no usable answer came back (nothing cached).
 async function findTmdbIdForTvdb(tvdbId: number, auth: TmdbAuth): Promise<number | null | typeof LOOKUP_FAILED> {
@@ -109,7 +119,7 @@ async function findTmdbIdForTvdb(tvdbId: number, auth: TmdbAuth): Promise<number
       return LOOKUP_FAILED;
     }
     const tmdbId = first?.id ?? null;
-    await setCache(
+    await rememberLookup(
       tvdbToTmdbKey(tvdbId),
       { tmdbId } satisfies TvdbToTmdbCache,
       tmdbId !== null ? TVDB_TO_TMDB_TTL_RESOLVED : TVDB_TO_TMDB_TTL_UNRESOLVED,
@@ -208,7 +218,7 @@ export async function resolveTmdbToTvdb(tmdbId: number): Promise<number | null> 
       }
       tvdbId = posInt(answer.value.tvdb_id);
     }
-    await setCache(key, { tvdbId } satisfies TmdbToTvdbCache, tvdbId !== null ? TMDB_TO_TVDB_TTL_RESOLVED : TMDB_TO_TVDB_TTL_UNRESOLVED);
+    await rememberLookup(key, { tvdbId } satisfies TmdbToTvdbCache, tvdbId !== null ? TMDB_TO_TVDB_TTL_RESOLVED : TMDB_TO_TVDB_TTL_UNRESOLVED);
     return tvdbId;
   } catch (err) {
     console.warn("[arr] tmdb-to-tvdb lookup failed for tmdbId %s:", sanitizeForLog(tmdbId), sanitizeForLog(err instanceof Error ? err.message : err));
@@ -314,13 +324,13 @@ export async function resolveSonarrSeries(
   return { series: crossRef.series, candidates: rows.length, crossRefTvdbId: crossRef.tvdbId };
 }
 
-// `T` is the caller's claim about the row's fields; read them defensively.
-export async function lookupSeriesByTmdbId<T extends { tmdbId?: unknown; tvdbId?: unknown } = ArrRecord>(
+// The row's fields are Sonarr's: read them defensively (posInt, titleSlugOf).
+export async function lookupSeriesByTmdbId(
   cfg: ArrCfg,
   tmdbId: number,
   opts: { tvdbCrossRef?: boolean } = {},
-): Promise<T | null> {
-  return (await resolveSonarrSeries(cfg, tmdbId, opts)).series as T | null;
+): Promise<ArrRecord | null> {
+  return (await resolveSonarrSeries(cfg, tmdbId, opts)).series;
 }
 
 // ── the lookup's ids, cached ─────────────────────────────────────────────────

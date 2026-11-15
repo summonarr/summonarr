@@ -67,3 +67,10 @@ test("the overview page seeds Recent plays through the card's own mapping and na
   const card = page.slice(page.indexOf("<ActivityRecentPlays"));
   assert.match(card.slice(0, card.indexOf("/>")), /timeZone=\{stats\.timeZone\}/);
 });
+
+test("a refresh merge orders plays by instant even when the text formats differ", () => {
+  const prev = [play("a", "2026-11-01T20:00:00.000Z")];
+  // 21:00 at +02:00 is 19:00Z, so it is older than "a" although its text sorts later.
+  const merged = mergeRefreshedPlays(prev, [play("b", "2026-11-01T21:00:00+02:00")]);
+  assert.deepEqual(merged.map((p) => p.id), ["a", "b"]);
+});

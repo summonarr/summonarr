@@ -14,6 +14,14 @@ import { parseAuthUrl } from "@/lib/auth-url";
 import { previousSecretProblem, secretReuseError } from "@/lib/boot-secrets";
 import { bootRefused, type BootRefusal } from "@/lib/boot-refusal";
 
+const MIN_SECRET_LENGTH = 32;
+
+// Present and long enough once trimmed (a trailing newline from a secrets file
+// must not count toward the length).
+function secretLongEnough(value: string | undefined): boolean {
+  return !!value && value.trim().length >= MIN_SECRET_LENGTH;
+}
+
 // The fail-closed environment checks. `refuse` logs the problem and records how
 // it ends; the caller exits once, after every check has had its say, so the
 // operator sees all of them in one boot instead of fixing them one restart at a
@@ -38,7 +46,7 @@ function checkBootEnv(): BootRefusal[] {
     );
   }
 
-  if (!process.env.NEXTAUTH_SECRET || process.env.NEXTAUTH_SECRET.trim().length < 32) {
+  if (!secretLongEnough(process.env.NEXTAUTH_SECRET)) {
     refuse(
       "[startup] NEXTAUTH_SECRET is missing or too short (minimum 32 characters required). " +
         "Generate one with: openssl rand -base64 32",
@@ -104,7 +112,7 @@ function checkBootEnv(): BootRefusal[] {
     console.warn(warning);
   }
 
-  if (!process.env.CRON_SECRET || process.env.CRON_SECRET.trim().length < 32) {
+  if (!secretLongEnough(process.env.CRON_SECRET)) {
     refuse(
       "[startup] CRON_SECRET is not set or is too short (minimum 32 characters). " +
         "Sync and cron endpoints will not be protected by a machine secret. " +
@@ -231,7 +239,10 @@ function warnRiskyFlags(): void {
   if (process.env.SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN === "true") {
     void import("@/lib/prisma")
       .then(({ prisma }) => prisma.setting.findUnique({ where: { key: "setup_completed_at" }, select: { key: true } }))
-      .catch(() => null)
+      .catch((err) => {
+        console.warn("[startup] could not read setup state:", err instanceof Error ? err.message : err);
+        return null;
+      })
       .then((setupDone) => {
         if (setupDone) {
           console.warn(
@@ -314,6 +325,13 @@ async function runStartupMigrations(): Promise<void> {
   await import("@/lib/apns-endpoint")
     .then(({ migrateLegacyApnsEndpoints }) => migrateLegacyApnsEndpoints())
     .catch((err) => console.error("[push] APNs endpoint migration error:", err));
+
+  // Two retry schemes kept their state in Setting rows until the notification
+  // outbox replaced them (outbox.ts). Delete what they left — a no-op once
+  // none remain; a failure only leaves unread rows until the next boot.
+  await import("@/lib/outbox")
+    .then(({ dropLegacyRetryMarkers }) => dropLegacyRetryMarkers())
+    .catch((err) => console.error("[outbox] legacy retry-marker cleanup error:", err));
 }
 
 // Long-running or network-bound startup work. Fire-and-forget: none of it may
@@ -325,6 +343,13 @@ function startBackgroundJobs(): void {
   import("@/lib/password-hash")
     .then(({ warmPasswordHashing }) => warmPasswordHashing())
     .catch((err) => console.error("[auth] Password hashing warm-up error:", err));
+
+  // From here on a Radarr/Sonarr webhook may schedule a monitor run, so the
+  // admin nav's queue count follows the queue (arr-watch-trigger.ts). Armed at
+  // boot only: a build or a test that drives a webhook starts nothing.
+  import("@/lib/arr-watch-trigger")
+    .then(({ armArrWatchRecount }) => armArrWatchRecount())
+    .catch((err) => console.error("[arr-watch] could not arm the webhook-triggered run:", err));
 
   // Under the warm-library cron's advisory lock (and observing its abort
   // signal, guardrail 41): on a large, cold library this walk can still be

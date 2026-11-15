@@ -9,14 +9,24 @@ import { safeFetchAdminConfigured, safeFetchTrusted } from "./safe-fetch";
 import { arrFetch } from "./arr";
 import { configuredArrCfg, enabledArrInstances } from "./arr-admin";
 import { assessCandidate, compareCandidates, type CandidateMatch } from "./fix-match-scoring";
-import { cachedArrList, cachedTmdbTitle, normaliseLibraryPath, pathWithin, tmdbDetailsCacheKey } from "./fix-match-shared";
+import {
+  TMDB_HOSTS,
+  cachedArrList,
+  cachedTmdbTitle,
+  normaliseLibraryPath,
+  pathWithin,
+  plexGuidIds,
+  plexImdbAgentSearch,
+  plexImdbGuidSearch,
+  plexTitleYearSearch,
+  plexTmdbAgentSearch,
+  tmdbDetailsCacheKey,
+} from "./fix-match-shared";
 import { getCache } from "./tmdb-cache";
 import { tmdbAuth, type TmdbAuth } from "./tmdb-auth";
 import { settleLimit } from "./concurrency";
 import { v, type Infer } from "./validate";
 import { upstreamChecked, upstreamFailed, upstreamMissing, type UpstreamResult } from "./upstream-result";
-
-const TMDB_HOSTS = ["api.themoviedb.org"];
 
 export type { CandidateMatch };
 
@@ -162,8 +172,8 @@ export async function resolveTargetDetails(correctTmdbId: number, mediaType: "MO
       targetImdbId: d && !cache.imdbId ? d.external_ids?.imdb_id ?? "" : cache.imdbId,
       targetPosterPath: d && !cache.posterPath ? d.poster_path ?? null : cache.posterPath,
       targetOverview: d && !cache.overview ? d.overview ?? "" : cache.overview,
-      targetReleaseDate: cache.releaseDate,
-      targetVoteAverage: d && !cache.voteAverage && d.vote_average ? d.vote_average : cache.voteAverage,
+      targetReleaseDate: cache.releaseDate ?? (d ? d.release_date || d.first_air_date || null : null),
+      targetVoteAverage: cache.voteAverage ?? (typeof d?.vote_average === "number" ? d.vote_average : null),
       targetRuntime: d ? d.runtime ?? d.episode_run_time?.[0] ?? null : null,
       targetGenres: d ? d.genres?.map((g) => g.name) ?? [] : [],
     },
@@ -353,12 +363,8 @@ function plexResult(raw: unknown): RawResult | null {
 }
 
 function providerGuid(r: RawResult, prefix: "imdb://" | "tmdb://"): string | null {
-  if (!Array.isArray(r.Guid)) return null;
-  for (const g of r.Guid as unknown[]) {
-    const id = (g as { id?: unknown } | null)?.id;
-    if (typeof id === "string" && id.startsWith(prefix)) return id.slice(prefix.length);
-  }
-  return null;
+  const id = plexGuidIds(r).find((guid) => guid.startsWith(prefix));
+  return id === undefined ? null : id.slice(prefix.length);
 }
 
 function extractProviderIds(r: RawResult): { imdbId: string | null; tmdbId: string | null } {
@@ -402,17 +408,12 @@ export async function searchPlexCandidates(
   };
 
   const { correctTmdbId, imdbId, title, year } = target;
-  const titleYear: Record<string, string> = { manual: "1", includeGuids: "1" };
-  if (title) titleYear.title = title;
-  if (year) titleYear.year = year;
   const [imdbGuidResults, imdbAgentResults, tmdbAgentResults, titleYearResults, arrHintResults] = await Promise.all([
-    imdbId ? plexSearch({ manual: "1", includeGuids: "1", guid: `imdb://${imdbId}` }) : Promise.resolve([]),
-    imdbId ? plexSearch({ manual: "1", includeGuids: "1", q: imdbId, agent: "com.plexapp.agents.imdb", language: "en" }) : Promise.resolve([]),
-    plexSearch({ manual: "1", includeGuids: "1", q: String(correctTmdbId), agent: "com.plexapp.agents.themoviedb", language: "en" }),
-    plexSearch(titleYear),
-    arrTmdbIdHint && arrTmdbIdHint !== correctTmdbId
-      ? plexSearch({ manual: "1", includeGuids: "1", q: String(arrTmdbIdHint), agent: "com.plexapp.agents.themoviedb", language: "en" })
-      : Promise.resolve([]),
+    imdbId ? plexSearch(plexImdbGuidSearch(imdbId)) : Promise.resolve([]),
+    imdbId ? plexSearch(plexImdbAgentSearch(imdbId)) : Promise.resolve([]),
+    plexSearch(plexTmdbAgentSearch(correctTmdbId)),
+    plexSearch(plexTitleYearSearch(title, year)),
+    arrTmdbIdHint && arrTmdbIdHint !== correctTmdbId ? plexSearch(plexTmdbAgentSearch(arrTmdbIdHint)) : Promise.resolve([]),
   ]);
 
   const candidateMap = new Map<string, RawCandidate>();
@@ -434,15 +435,16 @@ export async function searchPlexCandidates(
  * 31: five searches can return dozens), then each one scored against the
  * target, best first. `failed` = some details read failed.
  */
-export async function enrichCandidates(
-  raw: RawCandidate[],
-  mediaType: "MOVIE" | "TV",
-  correctTmdbId: number,
-  target: TargetDetails,
-  arrConfirmedTmdbId: number | null,
-  arrTmdbIdHint: number | null,
-  auth: TmdbAuth | null,
-): Promise<{ candidates: PlexCandidate[]; failed: boolean }> {
+export async function enrichCandidates(opts: {
+  raw: RawCandidate[];
+  mediaType: "MOVIE" | "TV";
+  correctTmdbId: number;
+  target: TargetDetails;
+  arrConfirmedTmdbId: number | null;
+  arrTmdbIdHint: number | null;
+  auth: TmdbAuth | null;
+}): Promise<{ candidates: PlexCandidate[]; failed: boolean }> {
+  const { raw, mediaType, correctTmdbId, target, arrConfirmedTmdbId, arrTmdbIdHint, auth } = opts;
   const ids = [...new Set(raw.map((c) => c.tmdbId).filter((id): id is string => !!id && id !== String(correctTmdbId)))];
   const detailsById = new Map<string, TmdbDetails>();
   let failed = false;

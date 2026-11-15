@@ -35,7 +35,7 @@ import { dedupeUnion, emptiedByHideAvailable, mediaKey, projectRail, splitFeatur
 const RAIL_SIZE = 14;
 const RAIL_OVERFETCH = 20;
 
-type HomeRail = { title: string; subtitle: string; href?: string; raw: TmdbMedia[]; items: TmdbMedia[] };
+type HomeRail = { id: string; title: string; subtitle: string; href?: string; raw: TmdbMedia[]; items: TmdbMedia[] };
 
 // The rails under the trending row, in display order, each gated on its page's
 // feature flag. `project` turns a raw list into its enriched, filtered rail.
@@ -50,7 +50,8 @@ function homeRails({
   lists: Record<"recent" | "forYou" | "popMovies" | "popTV" | "upMovies" | "upTV" | "topMovies" | "topTV", TmdbMedia[]>;
   project: (raw: TmdbMedia[], limit: number) => TmdbMedia[];
 }): HomeRail[] {
-  const rail = (title: string, subtitle: string, raw: TmdbMedia[], href?: string, limit = RAIL_SIZE): HomeRail => ({
+  const rail = (id: string, title: string, subtitle: string, raw: TmdbMedia[], href?: string, limit = RAIL_SIZE): HomeRail => ({
+    id,
     title,
     subtitle,
     ...(href ? { href } : {}),
@@ -60,21 +61,21 @@ function homeRails({
   return [
     // No "See all": the only full list (/admin/activity/recent) is admin-only.
     ...(recentEnabled
-      ? [rail(t("home.rail.recent.title"), t("home.rail.recent.subtitle"), lists.recent, undefined, RECENTLY_ADDED_SIZE)]
+      ? [rail("recent", t("home.rail.recent.title"), t("home.rail.recent.subtitle"), lists.recent, undefined, RECENTLY_ADDED_SIZE)]
       : []),
-    ...(forYouEnabled ? [rail(t("home.rail.forYou.title"), t("home.rail.forYou.subtitle"), lists.forYou, "/for-you")] : []),
-    rail(t("home.rail.popularMovies.title"), t("home.rail.popularMovies.subtitle"), lists.popMovies, "/movies"),
-    rail(t("home.rail.popularTv.title"), t("home.rail.popularTv.subtitle"), lists.popTV, "/tv"),
+    ...(forYouEnabled ? [rail("forYou", t("home.rail.forYou.title"), t("home.rail.forYou.subtitle"), lists.forYou, "/for-you")] : []),
+    rail("popularMovies", t("home.rail.popularMovies.title"), t("home.rail.popularMovies.subtitle"), lists.popMovies, "/movies"),
+    rail("popularTv", t("home.rail.popularTv.title"), t("home.rail.popularTv.subtitle"), lists.popTV, "/tv"),
     ...(upcomingEnabled
       ? [
-          rail(t("home.rail.upcomingMovies.title"), t("home.rail.upcomingMovies.subtitle"), lists.upMovies, "/upcoming"),
-          rail(t("home.rail.onTheAir.title"), t("home.rail.onTheAir.subtitle"), lists.upTV, "/upcoming"),
+          rail("upcomingMovies", t("home.rail.upcomingMovies.title"), t("home.rail.upcomingMovies.subtitle"), lists.upMovies, "/upcoming"),
+          rail("onTheAir", t("home.rail.onTheAir.title"), t("home.rail.onTheAir.subtitle"), lists.upTV, "/upcoming"),
         ]
       : []),
     ...(topEnabled
       ? [
-          rail(t("home.rail.topMovies.title"), t("home.rail.topMovies.subtitle"), lists.topMovies, "/top"),
-          rail(t("home.rail.topTv.title"), t("home.rail.topTv.subtitle"), lists.topTV, "/top"),
+          rail("topMovies", t("home.rail.topMovies.title"), t("home.rail.topMovies.subtitle"), lists.topMovies, "/top"),
+          rail("topTv", t("home.rail.topTv.title"), t("home.rail.topTv.subtitle"), lists.topTV, "/top"),
         ]
       : []),
   ];
@@ -258,7 +259,7 @@ export default async function DiscoverPage({
 
       {rails.map((rail) => (
         <DiscoverRow
-          key={rail.title}
+          key={rail.id}
           title={rail.title}
           subtitle={rail.subtitle}
           seeAllHref={rail.href}

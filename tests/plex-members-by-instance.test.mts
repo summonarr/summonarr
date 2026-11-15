@@ -9,9 +9,9 @@
 // Pinned: getCachedPlexMembersByInstance (src/lib/plex-membership.ts) hands back
 // each instance's own set from the SAME caches (no extra plex.tv call), leaves
 // out an instance it can't read without poisoning the others (the union's
-// poison rule is unchanged); the page's plexOnServer (cut from page.tsx, types
-// stripped) answers per row from its own server; and the page reads the
-// per-instance sets, never the union.
+// poison rule is unchanged); plexOnServer (src/lib/server-user-presence.ts, the
+// rule the page and GET /api/play-history/users share) answers per row from its
+// own server; and both callers read the per-instance sets, never the union.
 //
 // No DB, network or DNS: prisma is a findUnique-only fake on globalThis, fetch
 // is scripted per URL (the server's /identity, then plex.tv/api/users keyed on
@@ -22,7 +22,6 @@ import dns from "node:dns/promises";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { stripTypeScriptTypes } from "node:module";
 
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32);
 
@@ -88,14 +87,9 @@ const { getCachedPlexAllowlist, getCachedPlexMembersByInstance } = await import(
 
 const here = dirname(fileURLToPath(import.meta.url));
 const PAGE = readFileSync(join(here, "../src/app/(app)/admin/activity/users/page.tsx"), "utf8");
-type Members = Map<string, { ids: Set<string>; emails: Set<string> }> | null;
 type Row = { active: boolean; isServerAdmin: boolean; serverInstance: string; sourceUserId: string };
-const plexOnServer = (() => {
-  const start = PAGE.indexOf("function plexOnServer(");
-  assert.ok(start >= 0, "plexOnServer is in the users page");
-  const end = PAGE.indexOf("\n}\n", start);
-  return new Function(`${stripTypeScriptTypes(PAGE.slice(start, end + 2))}\nreturn plexOnServer;`)() as (u: Row, m: Members) => boolean;
-})();
+const { plexOnServer } = await import("../src/lib/server-user-presence.ts");
+const ROUTE = readFileSync(join(here, "../src/app/api/play-history/users/route.ts"), "utf8");
 const row = (serverInstance: string, sourceUserId: string, extra: Partial<Row> = {}): Row => ({ active: true, isServerAdmin: false, serverInstance, sourceUserId, ...extra });
 
 test("each instance's OWN members, from the same caches the union is built from — no extra plex.tv call", async () => {
@@ -137,5 +131,11 @@ test("a cold instance that can't be read is left out WITHOUT poisoning the other
 test("structural: the Users page reads the per-instance sets, never the union", () => {
   assert.doesNotMatch(PAGE, /getCachedPlexAllowlist/);
   assert.match(PAGE, /await Promise\.all\(\[getCachedPlexMembersByInstance\(\), getCachedLiveJellyfinUsers\(\)\]\)/);
-  assert.match(PAGE, /onServer: u\.source === "plex" \? plexOnServer\(u, plexMembers\) : jellyfinOnServer\(u, jellyfinLive\),/);
+  assert.match(PAGE, /onServer: isOnServer\(u, plexMembers, jellyfinLive\),/);
+});
+
+test("structural: the native users route answers from the same rule and the same per-instance sets", () => {
+  assert.doesNotMatch(ROUTE, /getCachedPlexAllowlist/);
+  assert.match(ROUTE, /getCachedPlexMembersByInstance\(\)/);
+  assert.match(ROUTE, /isOnServer\(u, plexMembers, jellyfinLive\)/);
 });

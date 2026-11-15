@@ -319,7 +319,9 @@ export function forgetShortfall(key: string): void {
 /**
  * Pages a listing in sequence until a short page, `onPage` seeing each page's
  * raw entries as it lands (STOP_PAGING ends the walk — the upstream-watch walk
- * stops on its AbortSignal, guardrail 41). Used where per-page memory matters
+ * stops on its AbortSignal, guardrail 41). `signal` instead REJECTS the walk at
+ * its next page, for a caller that must never read a cut listing as whole (the
+ * library sync's episode walk). Used where per-page memory matters
  * more than speed: episode counts per series are unpredictable and concurrent
  * large episode requests can stall slow Jellyfin servers.
  *
@@ -333,6 +335,7 @@ export async function walkJellyfinSequential(
   apiKey: string,
   onPage: (items: unknown[]) => PageControl,
   pageSize: number = EPISODE_PAGE_SIZE,
+  signal?: AbortSignal,
 ): Promise<number | null> {
   // Absent TotalRecordCount ⇒ walk until a short page ends the results. The
   // starting bound is the CAP, not Infinity: a server that ignores StartIndex
@@ -349,7 +352,7 @@ export async function walkJellyfinSequential(
   let endedOnShortPage = false;
 
   while (startIndex < total && pageNum < maxPages) {
-    const page = await fetchPage(baseQuery, apiKey, startIndex, pageSize);
+    const page = await fetchPage(baseQuery, apiKey, startIndex, pageSize, signal);
     if (pageNum === 0 && page.total !== null) {
       total = Math.min(page.total, MAX_LIBRARY_ITEMS);
       reportedTotal = total;

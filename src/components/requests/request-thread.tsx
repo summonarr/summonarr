@@ -64,6 +64,7 @@ export function RequestThread({
   // Follow the newest comment on open and after the viewer's own send; a live
   // reload follows only a reader who was already at the bottom.
   const stickRef = useRef(true);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { session } = useSummonarrSession();
   // Guardrail 16: dates differ between server and browser locale/timezone.
   const mounted = useHasMounted();
@@ -166,9 +167,10 @@ export function RequestThread({
         setSendError(res.status === 0 ? t("shared.thread.networkError") : res.error);
         return;
       }
-      // A 2xx that isn't a comment (a proxy page, a changed shape): the text
-      // stays, and a reload shows whether it was saved.
-      setSendError(t("shared.thread.sendFailed"));
+      // Posted (a 2xx), but the answer isn't the comment (a proxy page, a
+      // changed shape): clear the draft and re-read the thread rather than
+      // invite a second send of a comment that was already saved.
+      setBody("");
       void load(undefined, { silent: true });
       return;
     }
@@ -177,6 +179,10 @@ export function RequestThread({
     // The live event for this comment can reload the thread first.
     pendingRef.current.add(created.id);
     setComments((prev) => (prev.some((c) => c.id === created.id) ? prev : [...prev, created]));
+    // The textarea is only read-only while sending, never disabled, so it
+    // kept focus through a ⌘↵ send; after a click on Send this brings the
+    // keyboard back to it.
+    textareaRef.current?.focus();
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -276,6 +282,7 @@ export function RequestThread({
           ) : (
             <form onSubmit={send} className="flex items-end gap-2" style={{ padding: "0 14px 12px" }}>
               <textarea
+                ref={textareaRef}
                 value={body}
                 onChange={(e) => setBody(e.target.value)}
                 onKeyDown={onKeyDown}
@@ -283,8 +290,12 @@ export function RequestThread({
                 aria-label={t("shared.thread.message")}
                 maxLength={COMMENT_MAX_CHARS}
                 rows={2}
-                disabled={sending || loadState !== "ready"}
-                className="flex-1 resize-none rounded-lg border px-3 py-2 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                // Read-only (not disabled) while sending: a disabled textarea drops
+                // focus, so a keyboard user lost their place after every comment.
+                readOnly={sending}
+                aria-busy={sending || undefined}
+                disabled={loadState !== "ready"}
+                className="flex-1 resize-none rounded-lg border px-3 py-2 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 read-only:opacity-50"
                 style={{ background: "var(--ds-bg-2)", borderColor: "var(--ds-border)", color: "var(--ds-fg)" }}
               />
               {body.length > COUNTER_AT && (

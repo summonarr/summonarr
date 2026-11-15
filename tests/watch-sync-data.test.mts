@@ -116,7 +116,8 @@ function ledger(col: "jellyfinItemId" | "plexRatingKey") {
         inLists.push({ model: col, size: ids.length });
         return rows.filter((m) => m.pairId === w.pairId && m.status === "marked" && ids.includes(m.key)).map((m) => ({ [col]: m.key }));
       }
-      return rows.filter((m) => m.pairId === w.pairId && (m.status === "pending" || (m.status === "failed" && m.attempts < 5)))
+      const pendingOnly = w.status === "pending";
+      return rows.filter((m) => m.pairId === w.pairId && (m.status === "pending" || (!pendingOnly && m.status === "failed" && m.attempts < 5)))
         .sort((x, y) => x.createdAt - y.createdAt).slice(0, a.take).map((m) => ({ [col]: m.key, datePlayed: m.datePlayed }));
     },
     updateMany: async (a: { where: Record<string, unknown>; data: { status: string; attempts?: { increment: number }; lastError?: string | null } }) => {
@@ -189,6 +190,8 @@ type JfState = { pos?: number; played?: boolean; last?: string; run?: number };
 let plexState = new Map<string, PlexState>();
 let jfState = new Map<string, JfState>();
 let plexDeck: string[] = [];
+// Partially watched items the library sections' inProgress filter lists (a FULL sync only).
+let plexInProgressAll: string[] = [];
 let jfResumable: string[] = [];
 let progressWrites: Array<{ side: "plex" | "jellyfin"; id: string; ms: number; token?: string | null }> = [];
 const JF_EP: Record<string, { SeriesId: string; ParentIndexNumber: number; IndexNumber: number }> = {
@@ -232,6 +235,11 @@ function defaultRespond(url: URL, method: string, token: string | null): Respons
     if (url.pathname === "/library/metadata/19/allLeaves") {
       const eps = [{ ratingKey: "191", parentIndex: 1, index: 1 }, { ratingKey: "192", parentIndex: 1, index: 2 }];
       return json({ MediaContainer: { Metadata: eps, totalSize: 2, size: 2 } });
+    }
+    if (url.pathname === "/library/sections") return json({ MediaContainer: { Directory: [{ key: "1", title: "Movies", type: "movie" }] } });
+    if (url.pathname === "/library/sections/1/all") {
+      const first = url.searchParams.get("X-Plex-Container-Start") === "0";
+      return json({ MediaContainer: { Metadata: first && url.searchParams.get("inProgress") === "1" ? plexInProgressAll.map(plexMeta) : [] } });
     }
     if (url.pathname === "/library/onDeck") return json({ MediaContainer: { Metadata: plexDeck.map(plexMeta) } });
     if (url.pathname === "/:/progress") {
@@ -307,6 +315,7 @@ beforeEach(() => {
   plexState = new Map();
   jfState = new Map();
   plexDeck = [];
+  plexInProgressAll = [];
   jfResumable = [];
   progressWrites = [];
   jfLibCalls = 0;
@@ -960,4 +969,50 @@ test("a series' copies have their episode lists read concurrently, each once", a
   } finally {
     lib.jellyfinItemIds = saved;
   }
+});
+
+// ── full sync (moving a user between platforms) ──────────────────────────────
+
+test("full sync: a partial watch On Deck never lists is found through each section's inProgress filter, as the user; a normal run does not look", async () => {
+  pairs = [progressPair("both")];
+  plexUser = { source: "plex", serverInstance: "", sourceUserId: "777", isServerAdmin: false };
+  plexInProgressAll = ["12"]; // not On Deck
+  plexState.set("12", { viewOffset: 720_000, lastViewedAt: NOW_S - 60 });
+  jfState.set("jm2", { pos: 0, last: isoAgo(86_400) });
+
+  const normal = await runWatchSync();
+  assert.equal(normal.pairs[0].progress?.toJellyfin, 0, "On Deck alone misses it");
+  assert.deepEqual(progressWrites, []);
+  assert.ok(!calls.some((c) => c.url.pathname === "/library/sections/1/all"));
+
+  const full = await runWatchSync({ full: true });
+  assert.equal(full.pairs[0].progress?.error, undefined);
+  assert.equal(full.pairs[0].progress?.toJellyfin, 1);
+  assert.deepEqual(progressWrites, [{ side: "jellyfin", id: "jm2", ms: 720_000 }]);
+  const walks = calls.filter((c) => c.url.pathname === "/library/sections/1/all");
+  assert.ok(walks.length > 0 && walks.every((c) => c.token === FRIEND_TOKEN && c.url.searchParams.get("inProgress") === "1"), "as the user, filtered");
+});
+
+test("full sync drains the queue past one batch; a normal run applies one batch and leaves the rest", async () => {
+  const seed = () => {
+    for (let n = 0; n < 501; n++) jfLedger.rows.push({ pairId: "p1", key: `bulk${n}`, datePlayed: null, status: "pending", attempts: 0, lastError: null, createdAt: seq++ });
+  };
+  history = [];
+  seed();
+  await runWatchSync();
+  assert.equal(jfLedger.rows.filter((m) => m.status === "pending").length, 1, "one batch of 500, then the next run");
+
+  jfLedger = ledger("jellyfinItemId");
+  seed();
+  await runWatchSync({ full: true });
+  assert.equal(jfLedger.rows.filter((m) => m.status === "pending").length, 0, "drained in one run");
+});
+
+test("full sync never re-tries an earlier failure inside the same run (an outage can't burn its five attempts)", async () => {
+  history = [];
+  jfLedger.rows.push({ pairId: "p1", key: "flaky", datePlayed: null, status: "failed", attempts: 1, lastError: "x", createdAt: seq++ });
+  for (let n = 0; n < 501; n++) jfLedger.rows.push({ pairId: "p1", key: `bulk${n}`, datePlayed: null, status: "pending", attempts: 0, lastError: null, createdAt: seq++ });
+  await runWatchSync({ full: true });
+  const flaky = jfLedger.rows.find((m) => m.key === "flaky")!;
+  assert.ok(flaky.attempts <= 2, `retried at most once, got ${flaky.attempts}`);
 });

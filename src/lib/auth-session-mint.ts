@@ -241,7 +241,9 @@ function auditSignIn(
 ): void {
   void logAudit({
     userId: user.id,
-    userName: user.name ?? user.email,
+    // The id, not the address, for an account with no display name: the row
+    // carries only a hash of the email on purpose.
+    userName: user.name ?? user.id,
     action: "AUTH_LOGIN",
     target: "auth:login",
     ipAddress: user._auditIp,

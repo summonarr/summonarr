@@ -74,8 +74,10 @@ export function EmailForm({
     if (!result.ok) return;
     setOkText(result.data.smtpTested === true ? t("settings.form.email.savedTested") : t("settings.form.common.saved"));
     setIgnored(ignoredKeys(result.data));
-    if (body.smtpPassword) { setPasswordSaved(true); setPassword(""); }
-    if (body.resendApiKey) { setResendKeySaved(true); setResendApiKey(""); }
+    // Clear a field only if it still holds what was sent: one retyped while
+    // the test email ran is the admin's next edit.
+    if (body.smtpPassword) { setPasswordSaved(true); setPassword((p) => (p === body.smtpPassword ? "" : p)); }
+    if (body.resendApiKey) { setResendKeySaved(true); setResendApiKey((k) => (k === body.resendApiKey ? "" : k)); }
   }
 
   // Every field edit: clears the last result, never a save in flight.

@@ -25,6 +25,7 @@ import {
 } from "./arr";
 import { commandIdsOf, configuredArrCfg, postArrCommand, type ArrService } from "./arr-admin";
 import { NothingMissingError } from "./arr-missing-data";
+import { keyedSerial } from "./keyed-serial";
 import { processSingleton } from "./process-singleton";
 import { failsIdlessGrab, projectHistoryRecords, sortHistoryEvents, type ArrHistoryEvent } from "./arr-history";
 import {
@@ -329,20 +330,7 @@ export async function loadTitle(service: ArrService, instance: string, arrId: nu
 // tags that save had just applied (and audited). Writes made outside
 // Summonarr between the read and the PUT are still overwritten (accepted: a
 // resource PUT has no compare-and-swap). processSingleton: route chunks share it.
-const titleEdits = processSingleton("arr-title-data:titleEdits", () => new Map<string, Promise<void>>());
-
-async function oneEditAtATime<T>(key: string, run: () => Promise<T>): Promise<T> {
-  // A failed edit must not poison the chain: the next one waits for it to
-  // SETTLE, never for it to succeed.
-  const result = (titleEdits.get(key) ?? Promise.resolve()).then(run);
-  const settled = result.then(() => undefined, () => undefined);
-  titleEdits.set(key, settled);
-  try {
-    return await result;
-  } finally {
-    if (titleEdits.get(key) === settled) titleEdits.delete(key);
-  }
-}
+const oneEditAtATime = keyedSerial("arr-title-data:titleEdits");
 
 /**
  * Apply an edit, checked first against the instance's own profiles, root

@@ -90,6 +90,9 @@ export async function loadVotesList(
     prisma.deletionVote.findMany({
       where: { OR: pairs },
       select: { tmdbId: true, mediaType: true, title: true, posterPath: true },
+      // Newest row first, so the title shown is the latest metadata rather than
+      // whichever row the database returns first.
+      orderBy: { createdAt: "desc" },
       distinct: ["tmdbId", "mediaType"],
     }),
     prisma.deletionVote.findMany({

@@ -17,3 +17,22 @@ export function appliableStarterItems(
 ): ResolvedStarterItem[] {
   return items.filter((i): i is ResolvedStarterItem => i.spec !== null && serviceConfigured(i.item.service));
 }
+
+/**
+ * The ticks after the appliable set changed. An admin's own picks that are
+ * still appliable stay as they are; only a spec that was not in the set before
+ * (`seen`) arrives pre-ticked when it is recommended. A reload that returns the
+ * same set therefore changes nothing, and neither does losing a spec.
+ */
+export function mergeStarterSelection(
+  previous: ReadonlySet<string>,
+  seen: ReadonlySet<string>,
+  appliableIds: readonly string[],
+  recommendedIds: readonly string[],
+): Set<string> {
+  const appliable = new Set(appliableIds);
+  const next = new Set<string>();
+  for (const id of previous) if (appliable.has(id)) next.add(id);
+  for (const id of recommendedIds) if (appliable.has(id) && !seen.has(id)) next.add(id);
+  return next;
+}

@@ -74,7 +74,8 @@ test("queue: the live fetch and the snapshot read name the same url, built in on
   assert.equal(count(src, 'const queueUrl = () => withBasePath("/api/admin/queue");'), 1, "one builder");
   assert.equal(count(src, '"/api/admin/queue"'), 1, "the path appears only in the builder");
   assert.match(loadBody(src), /await timedFetch\(queueUrl\(\)\)/, "the live load fetches the builder's url");
-  assert.match(snapshotCall(src), /^useArrSnapshot<QueueReport>\(configured \? queueUrl\(\) : null,/, "the snapshot reads the builder's url, none while not configured");
+  assert.match(snapshotCall(src), /^useArrSnapshot<unknown>\(configured \? queueUrl\(\) : null,/, "the snapshot reads the builder's url, none while not configured");
+  assert.match(snapshotCall(src), /if \(!isQueueReport\(data\)\) return false;/, "a painted snapshot is shape-checked before it is shown");
   const page = code(QUEUE);
   assert.doesNotMatch(page, /"\/api\/admin\/queue"/, "the page never reads the queue itself");
   assert.doesNotMatch(page, /useArrSnapshot/, "nor keeps a second snapshot");
@@ -151,7 +152,7 @@ test("health panel: markLive runs only after a live report was accepted, never f
   const accepted = body.indexOf("setReport(res.data);");
   assert.ok(accepted > body.indexOf("{", refused) + refusedBlock.length - 1, "the report is set after the refusal check");
   assert.ok(body.indexOf("markLive()") > accepted, "markLive follows the accepted report");
-  assert.match(code(HEALTH), /\}, \[action, t, markLive\]\);/, "load's deps carry markLive");
+  assert.match(code(HEALTH), /\}, \[action, tRef, markLive\]\);/, "load's deps carry markLive");
 });
 
 test("health panel: overlapping loads — only the newest writes the report or the error, and only it is `loading`", () => {
@@ -189,4 +190,10 @@ test("health panel: a setup is bounded and keyed per instance; its answer closes
   assert.match(run, /setOpenSetup\(\(cur\) => \(cur === k \? null : cur\)\);/, "another instance's form opened meanwhile stays open");
   assert.doesNotMatch(run, /setOpenSetup\(null\)/);
   assert.match(src, /setupBusy=\{action\.busy\(`setup:\$\{k\}`\)\}/);
+});
+
+test("the health panel's load does not re-run when only the translator's identity changes", () => {
+  const src = readFileSync(new URL(`../${HEALTH}`, import.meta.url), "utf8");
+  assert.match(src, /fallback: tRef\.current\("adminManage\.arrHealth\.loadError"\)/);
+  assert.match(src, /\}, \[action, tRef, markLive\]\);/);
 });

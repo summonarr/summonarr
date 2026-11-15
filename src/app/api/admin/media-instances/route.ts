@@ -11,7 +11,7 @@ import { settleLimit } from "@/lib/concurrency";
 import { type MediaInstanceConfig, getMediaInstances, buildMediaInstanceRegistryWrite, readMediaInstanceRegistryForSave } from "@/lib/media-instance-registry";
 import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
 import { BATCH_TX_TIMEOUT } from "@/lib/batch-write";
-import { validateServerUrl, stripUrlUserinfo } from "@/lib/server-url";
+import { validateServerUrl, stripUrlUserinfo, sameServerUrl } from "@/lib/server-url";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import { upstreamStatusKey } from "@/lib/never-watched-data";
@@ -57,6 +57,9 @@ const INSTANCE_NAME_MAX_LEN = MEDIA_INSTANCE_NAME_MAX_LEN;
 // A Plex token or Jellyfin API key is a few dozen characters (a plex.tv JWT a
 // few hundred); this bounds a paste error, not a real credential.
 const SECRET_MAX_LEN = 4096;
+// The free-text fields (address, library ids, path prefixes, e-mail) are short
+// by nature; the cap bounds a paste error stored verbatim in a Setting row.
+const FREE_TEXT_MAX_LEN = 2048;
 
 // EVERY per-instance Setting field a service owns. Removing an instance must
 // delete ALL of them: the cleanup used to drop only the connection pair, so
@@ -258,6 +261,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // against unchanged state. Every query is awaited in turn (23c).
   let removed: string[] = [];
   let reservedSlug: string | null = null;
+  let secretRebindSlug: string | null = null;
   const removedCounts: Record<string, RemovedCounts> = {};
   const outcome = await prisma.$transaction(async (tx) => {
     // Which named slugs existed before — so removing one from the list cleans
@@ -287,6 +291,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     // plexMoviePathStripPrefix) would read and overwrite the main server's
     // settings. One already registered stays accepted, so a list saved before
     // this check can still be edited.
+    // A kept secret must not follow a CHANGED address: the connection test below
+    // would send the stored token to the new host. A changed URL needs the
+    // secret typed again.
+    secretRebindSlug = await findSecretRebind(tx, service, instances);
+    if (secretRebindSlug !== null) return "secretRebind" as const;
     reservedSlug = instances.find((i) => isNamedSlug(i.slug) && !registered.has(i.slug) && mediaInstanceSlugCollidesWithDefault(i.slug))?.slug ?? null;
     if (reservedSlug !== null) return "reserved" as const;
     removed = before.map((i) => i.slug).filter((slug) => !nextNamed.has(slug));
@@ -307,6 +316,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }, { timeout: BATCH_TX_TIMEOUT });
   if (outcome === "reserved") {
     return NextResponse.json({ error: t("apiAdmin.mediaInstances.slugReserved", { slug: reservedSlug ?? "" }) }, { status: 400 });
+  }
+  if (outcome === "secretRebind") {
+    return NextResponse.json({ error: t("apiAdmin.mediaInstances.secretNeededForNewUrl", { slug: secretRebindSlug ?? "" }) }, { status: 400 });
   }
   if (outcome === "stale") {
     return NextResponse.json({ error: t("apiAdmin.common.instancesChanged", { service: service === "plex" ? "Plex" : "Jellyfin" }) }, { status: 409 });
@@ -380,11 +392,40 @@ function validateSave(
       const err = validateServerUrl(rawUrl.trim(), {}, t);
       if (err) return bad(t("apiAdmin.mediaInstances.invalidServerUrl", { slug: inst.slug, reason: err }));
     }
+    for (const [field, value] of [["adminEmail", inst.adminEmail], ["libraries", inst.libraries], ["moviePathStripPrefix", inst.moviePathStripPrefix], ["tvPathStripPrefix", inst.tvPathStripPrefix], ["address", rawUrl]] as const) {
+      if (typeof value === "string" && value.length > FREE_TEXT_MAX_LEN) {
+        return bad(t("apiAdmin.mediaInstances.fieldTooLong", { slug: inst.slug, field, max: FREE_TEXT_MAX_LEN }));
+      }
+    }
     if (typeof inst.name === "string" && inst.name.trim().length > INSTANCE_NAME_MAX_LEN) {
       return bad(t("apiAdmin.common.instanceNameTooLong", { slug: inst.slug, max: INSTANCE_NAME_MAX_LEN }));
     }
   }
   return { service, instances, baseVersion: body.baseVersion };
+}
+
+// The first instance saved with its stored secret KEPT — the mask sentinel, or
+// the field left out (writeInstanceSettings skips both) — AND a server address
+// different from the stored one, read one query at a time (guardrail 23c).
+// Null when every kept secret still points at the same server.
+async function findSecretRebind(tx: TxClient, service: MediaServerService, instances: InstancePayload[]): Promise<string | null> {
+  for (const inst of instances) {
+    const secret = service === "plex" ? inst.adminToken : inst.apiKey;
+    const nextUrl = trimmedString(service === "plex" ? inst.serverUrl : inst.url);
+    if ((secret !== SECRET_MASK_SENTINEL && secret !== undefined) || !nextUrl) continue;
+    const urlKey = service === "plex" ? plexSettingKey(inst.slug, "ServerUrl") : jellyfinSettingKey(inst.slug, "Url");
+    const stored = await tx.setting.findUnique({ where: { key: urlKey }, select: { value: true } });
+    // No stored address means the kept secret was never pointed anywhere yet.
+    if (!stored || sameServerUrl(stored.value, nextUrl)) continue;
+    if (secret === undefined) {
+      // An omitted field names no secret: refuse only when one is stored to follow the address.
+      const secretKey = service === "plex" ? plexSettingKey(inst.slug, "AdminToken") : jellyfinSettingKey(inst.slug, "ApiKey");
+      const storedSecret = await tx.setting.findUnique({ where: { key: secretKey }, select: { value: true } });
+      if (!storedSecret || storedSecret.value === "") continue;
+    }
+    return inst.slug;
+  }
+  return null;
 }
 
 const trimmedString = (v: unknown): string | undefined => (typeof v === "string" ? v.trim() : undefined);

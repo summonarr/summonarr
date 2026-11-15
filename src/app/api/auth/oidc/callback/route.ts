@@ -179,7 +179,9 @@ async function resolveUser(req: NextRequest, flowState: OidcFlowState): Promise<
     policy = await loadOidcAllowlist();
   } catch (err) {
     console.error("[oidc/callback] allowlist read failed:", err instanceof Error ? err.message : err);
-    return loginErrorRedirect(req, "oidc_user_rejected");
+    // A fault, not a verdict: "try again", as /start answers the same read
+    // failing — never "your account is not allowed".
+    return loginErrorRedirect(req, "oidc_unavailable");
   }
 
   let claims;
@@ -202,7 +204,8 @@ async function resolveUser(req: NextRequest, flowState: OidcFlowState): Promise<
     outcome = await resolveOidcSignIn(claims, policy, req.headers);
   } catch (err) {
     console.error("[oidc/callback] user lookup failed:", err instanceof Error ? err.message : err);
-    return loginErrorRedirect(req, "oidc_user_rejected");
+    // Thrown = a fault (a refusal is `!outcome.ok` below and keeps its code).
+    return loginErrorRedirect(req, "oidc_unavailable");
   }
   if (!outcome.ok) {
     return loginErrorRedirect(req, oidcWebErrorCode(outcome.reason));

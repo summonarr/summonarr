@@ -355,20 +355,26 @@ test("availability probe honors the lowercase tmdb fallback and degrades to fals
 
 // ── getJellyfinMediaFolders / refreshJellyfinLibrary ────────────────────────
 
-test("media folders keeps only movies/tvshows collections and maps {id, name, collectionType}; non-2xx throws", async () => {
+test("media folders keeps the libraries that hold titles (movies, tvshows, mixed or untyped) and maps {id, name, collectionType}; non-2xx throws", async () => {
   const B = nextBase();
   respond = () => okJson({
     Items: [
       { Id: "lib1", Name: "Movies", CollectionType: "movies" },
       { Id: "lib2", Name: "Shows", CollectionType: "tvshows" },
       { Id: "lib3", Name: "Music", CollectionType: "music" },
-      { Id: "lib4", Name: "Mixed" }, // no CollectionType
+      { Id: "lib4", Name: "Anime" }, // no CollectionType
+      { Id: "lib5", Name: "Kids", CollectionType: "mixed" },
+      { Id: "lib6", Name: "Books", CollectionType: "books" },
     ],
   });
   const folders = await getJellyfinMediaFolders(B, "key-3");
+  // The sync reads a mixed or untyped library when nothing is ticked, so the
+  // picker must list it or ticking the others drops it for good.
   assert.deepEqual(folders, [
     { id: "lib1", name: "Movies", collectionType: "movies" },
     { id: "lib2", name: "Shows", collectionType: "tvshows" },
+    { id: "lib4", name: "Anime", collectionType: "mixed" },
+    { id: "lib5", name: "Kids", collectionType: "mixed" },
   ]);
   assert.equal(sent[0].url, `${B}/Library/MediaFolders`);
 
@@ -1091,6 +1097,22 @@ test("sequential paging: an exact-multiple-of-pageSize library completes WITHOUT
   );
 });
 
+test("episodes-for-show lists two versions of one episode once, with the earlier arrival", async () => {
+  const B = nextBase();
+  respond = () => okJson({
+    Items: [
+      { ParentIndexNumber: 1, IndexNumber: 1, DateCreated: "2024-05-01T00:00:00.0000000Z" },
+      { ParentIndexNumber: 1, IndexNumber: 1, DateCreated: "2024-03-01T00:00:00.0000000Z" },
+      { ParentIndexNumber: 1, IndexNumber: 2, DateCreated: "2024-04-01T00:00:00.0000000Z" },
+    ],
+    TotalRecordCount: 3,
+  });
+  const episodes = await getJellyfinEpisodesForShow(B, "k", "ser-1", 7);
+  assert.equal(episodes.length, 2);
+  const first = episodes.find((e) => e.episodeNumber === 1)!;
+  assert.equal(first.addedAt?.toISOString(), "2024-03-01T00:00:00.000Z");
+});
+
 test("episodes-for-show scopes to ParentId=<seriesId>, stamps the caller's tmdbId, and drops invalid indices", async () => {
   const B = nextBase();
   respond = () => okJson({
@@ -1695,6 +1717,47 @@ test("getJellyfinUserPlayedItems stops paging when its AbortSignal fires and doe
   const res = await getJellyfinUserPlayedItems(B, "k", "u", "IsPlayed", { signal: controller.signal });
   assert.equal(sent.length, 0);
   assert.deepEqual(res, { items: [], records: 0 });
+});
+
+// The library sync's own walks take the sync's lock (guardrail 41). Unlike the
+// played-items walk they REJECT: a listing cut short must never be read as the
+// whole library, because a full sync replaces the stored rows with it.
+test("getJellyfinTmdbIds rejects at its next page once its AbortSignal fires, in one listing or one per library (guardrail 41)", async () => {
+  for (const libraryIds of [undefined, new Set(["lib-a", "lib-b"])]) {
+    const B = nextBase();
+    const controller = new AbortController();
+    sent.length = 0;
+    respond = () => {
+      controller.abort(new Error("lock lost"));
+      return okJson({ Items: [{ Id: "m1", ProviderIds: { Tmdb: "11" } }], TotalRecordCount: 9000 });
+    };
+    await assert.rejects(() => getJellyfinTmdbIds(B, "k", "MOVIE", libraryIds, undefined, controller.signal), /lock lost/);
+    assert.ok(sent.length >= 1, "precondition: the walk started");
+    assert.ok(sent.every((r) => new URL(r.url).searchParams.get("StartIndex") === "0"), "no later page after the abort");
+
+    sent.length = 0;
+    await assert.rejects(() => getJellyfinTmdbIds(B, "k", "MOVIE", libraryIds, undefined, controller.signal), /lock lost/);
+    assert.equal(sent.length, 0, "an already aborted walk asks for nothing");
+  }
+});
+
+test("getJellyfinTVEpisodes and getJellyfinEpisodesForShow reject at the next page once their AbortSignal fires (guardrail 41)", async () => {
+  const page = Array.from({ length: 1000 }, (_, i) => ({ SeriesId: "s1", ParentIndexNumber: 1, IndexNumber: i + 1 }));
+  const walks: Array<(base: string, signal: AbortSignal) => Promise<unknown>> = [
+    (base, signal) => getJellyfinTVEpisodes(base, "k", undefined, new Map([["s1", 1399]]), signal),
+    (base, signal) => getJellyfinEpisodesForShow(base, "k", "s1", 1399, signal),
+  ];
+  for (const walk of walks) {
+    const B = nextBase();
+    const controller = new AbortController();
+    sent.length = 0;
+    respond = () => {
+      controller.abort(new Error("lock lost"));
+      return okJson({ Items: page, TotalRecordCount: 5000 });
+    };
+    await assert.rejects(() => walk(B, controller.signal), /lock lost/);
+    assert.equal(sent.length, 1, "no second page after the abort");
+  }
 });
 
 test("getJellyfinUserPlayedItems THROWS on a 4xx (no retry) — never an empty list the snapshot would trust", async () => {

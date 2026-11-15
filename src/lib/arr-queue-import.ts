@@ -5,7 +5,8 @@
 // (guardrail 5d). No I/O; the data half is arr-queue-data.ts. Re-exported by
 // arr-queue.ts. Its only runtime imports are the zero-import arr-parse
 // readers and arr-queue-types.
-import { bytes, nonNegInt, posInt, safeMessage, text, textOrNull } from "./arr-parse";
+import { QUEUE_IMPORT_MAX_FILES } from "./api-body-limits";
+import { bytes, nonNegInt, posInt, PROJECTION_SCAN_FACTOR, safeMessage, text, textOrNull } from "./arr-parse";
 import { MAX_MESSAGE_LEN, MAX_MESSAGES, type QueueEpisode, type QueueService } from "./arr-queue-types";
 
 // ── importing a blocked download ("Manual Import") ─────────────────────────
@@ -161,11 +162,16 @@ function importQuality(r: ManualImportRow): { quality: string | null; qualityId:
   };
 }
 
-/** /api/v3/manualimport → what the import dialog shows. Rows without a path are dropped. */
+/**
+ * /api/v3/manualimport → what the import dialog shows. Rows without a path are
+ * dropped; at most the files one import may name are kept, from a bounded scan.
+ */
 export function importCandidates(service: QueueService, raw: unknown): ImportCandidate[] {
   if (!Array.isArray(raw)) return [];
   const out: ImportCandidate[] = [];
-  for (const r of raw as ManualImportRow[]) {
+  const scanned = Math.min(raw.length, QUEUE_IMPORT_MAX_FILES * PROJECTION_SCAN_FACTOR);
+  for (let i = 0; i < scanned && out.length < QUEUE_IMPORT_MAX_FILES; i++) {
+    const r = raw[i] as ManualImportRow;
     if (!r || typeof r !== "object") continue;
     const path = validPath(r.path);
     if (path === null) continue;
@@ -397,7 +403,9 @@ export function effectiveImportRows(
 ): Array<{ path: string; row: ManualImportRow }> {
   if (!Array.isArray(raw)) return [];
   const out: Array<{ path: string; row: ManualImportRow }> = [];
-  for (const r of raw as ManualImportRow[]) {
+  const scanned = Math.min(raw.length, QUEUE_IMPORT_MAX_FILES * PROJECTION_SCAN_FACTOR);
+  for (let i = 0; i < scanned && out.length < QUEUE_IMPORT_MAX_FILES; i++) {
+    const r = raw[i] as ManualImportRow;
     if (!r || typeof r !== "object") continue;
     const path = validPath(r.path);
     if (path === null) continue;

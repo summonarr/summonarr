@@ -65,3 +65,15 @@ test("vote labels group by the catalog's separator", () => {
   assert.equal(o.voteCountLabel(t, ""), "media.filter.anyVotes");
   assert.equal(o.voteCountLabel(((k: string, v?: Record<string, string | number>) => (k === "media.filter.thousandsSeparator" ? "," : `${v?.n}+`)) as never, "10000"), "10,000+");
 });
+
+test("a fixed option list gains the active value it lacks, in numeric order", () => {
+  const votes = ["", "100", "500", "1000"];
+  assert.deepEqual(o.optionsWithActive(votes, "500"), votes, "a listed value adds nothing");
+  assert.deepEqual(o.optionsWithActive(votes, undefined), votes);
+  assert.deepEqual(o.optionsWithActive(votes, ""), votes);
+  assert.deepEqual(o.optionsWithActive(votes, "250"), ["", "100", "250", "500", "1000"]);
+  assert.deepEqual(o.optionsWithActive(votes, "2000"), ["", "100", "500", "1000", "2000"]);
+  assert.deepEqual(o.optionsWithActive(votes, "50"), ["", "50", "100", "500", "1000"], "the any entry stays first");
+  assert.deepEqual(o.optionsWithActive(["", "7", "7.5"], "7.2"), ["", "7", "7.2", "7.5"]);
+  assert.notEqual(o.optionsWithActive(votes, "500"), votes, "never the caller's own array");
+});

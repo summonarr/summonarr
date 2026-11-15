@@ -28,10 +28,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: t("apiAuth.plex.pinIdRequired") }, { status: 400 });
   }
 
-  // Verify the PIN was issued by THIS server for THIS browser. Without this
-  // an attacker who phishes a Plex user into approving an attacker-created
-  // PIN can submit the resulting token directly from their own browser and
-  // end up with a Summonarr session as that user.
+  // Verify the PIN was issued by THIS server to whoever presents the flow
+  // token. That stops one thing: redeeming a PIN this server never issued to
+  // the presenter (one created elsewhere, or issued to another browser). It
+  // does NOT stop an attacker who starts the flow here themselves, holds its
+  // valid flow token, and gets a Plex user to approve that PIN: approving a
+  // device flow someone else started is inherent to Plex PIN sign-in.
   // Cookie for browsers; native clients submit the flow-state token in the body
   // (they can't carry the HttpOnly cookie set at /start).
   const cookieToken =

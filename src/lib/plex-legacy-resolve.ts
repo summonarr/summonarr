@@ -86,6 +86,7 @@ async function findImdbId(imdbId: string, auth: NonNullable<ReturnType<typeof tm
     });
     if (!res.ok) {
       console.warn("[plex-legacy] imdb-to-tmdb lookup returned %s for %s", sanitizeForLog(res.status), sanitizeForLog(imdbId));
+      await res.body?.cancel().catch(() => {});
       return false;
     }
     const parsed = check(FindResultSchema, await res.json().catch(() => undefined));

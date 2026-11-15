@@ -9,7 +9,7 @@ import {
 } from "@/lib/arr-instances";
 import type { Translator } from "@/lib/i18n/translate";
 import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
-import { validateServerUrl } from "@/lib/server-url";
+import { sameServerUrl, validateServerUrl } from "@/lib/server-url";
 
 // The display name renders on every "Request on <instance>" button, request-queue
 // chip and admin badge; bounded like the notification-agent sibling.
@@ -17,6 +17,8 @@ export const INSTANCE_NAME_MAX_LEN = 100;
 // An API key is 32 hex characters and a generated webhook secret 48; anything
 // near this is a paste error, not a credential.
 export const SECRET_MAX_LEN = 512;
+// A root folder is a filesystem path on the arr's host.
+export const ROOT_FOLDER_MAX_LEN = 1024;
 
 export interface InstancePayload {
   slug: string;
@@ -65,6 +67,11 @@ export function instancePayloadError(raw: unknown, t: Translator): string | null
     if (value !== undefined && (typeof value !== "string" || value.length > SECRET_MAX_LEN)) {
       return t("apiAdmin.common.invalidSecret", { slug, field, max: SECRET_MAX_LEN });
     }
+  }
+  // A root folder that is not text would be dropped by the save and read
+  // as success.
+  if (inst.rootFolder !== undefined && (typeof inst.rootFolder !== "string" || inst.rootFolder.length > ROOT_FOLDER_MAX_LEN)) {
+    return t("apiAdmin.common.invalidSecret", { slug, field: "rootFolder", max: ROOT_FOLDER_MAX_LEN });
   }
   // Radarr's minimumAvailability is a closed enum — a bad stored value would
   // 400 every future add on the instance.
@@ -151,4 +158,22 @@ export function connectionChanged(
     if (w.field === "ApiKey" && w.value !== (stored.apiKey ?? "")) return true;
   }
   return false;
+}
+
+/**
+ * Whether a save would leave the STORED API key pointing at a different
+ * address: the key is kept (the mask sentinel, or the field left out), one is
+ * stored, and the posted url is not the stored one. The key would go to the
+ * new host on the save's own connection test and every later call, so the
+ * route refuses it — a changed address needs the key typed again. An explicit
+ * "" clears the key and a cleared url sends nothing, so neither is a rebind.
+ */
+export function keptApiKeyRebind(
+  inst: Pick<InstancePayload, "url" | "apiKey">,
+  stored: { url: string | undefined; apiKey: string | undefined },
+): boolean {
+  if (inst.apiKey !== undefined && inst.apiKey !== SECRET_MASK_SENTINEL) return false;
+  const nextUrl = typeof inst.url === "string" ? inst.url.trim() : "";
+  if (!nextUrl || !stored.url || !stored.apiKey) return false;
+  return !sameServerUrl(stored.url, nextUrl);
 }

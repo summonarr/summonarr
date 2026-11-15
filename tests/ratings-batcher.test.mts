@@ -26,9 +26,7 @@ const { requestRatings, __resetRatingsBatcherForTests } = await import("../src/l
 // Every test starts with nothing remembered and an immediate retry wait.
 beforeEach(() => __resetRatingsBatcherForTests({ retryDelayMs: 0 }));
 
-// ---------------------------------------------------------------------------
 // Scripted fetch mock (pattern: tests/chunked-upload.test.mts)
-// ---------------------------------------------------------------------------
 
 type FetchArgs = Parameters<typeof fetch>;
 
@@ -122,9 +120,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// ---------------------------------------------------------------------------
 // Wire shape + debounce
-// ---------------------------------------------------------------------------
 
 test("a single request fires one debounced POST to /api/ratings/batch with the exact wire shape", async () => {
   await withFetch(
@@ -170,9 +166,7 @@ test("requests spread across microtasks in one debounce window coalesce into a s
   );
 });
 
-// ---------------------------------------------------------------------------
 // Duplicate-key resolver sharing + response keying
-// ---------------------------------------------------------------------------
 
 test("duplicate keys share one queue entry: one body item, first releaseDate wins, identical resolution", async () => {
   await withFetch(
@@ -211,9 +205,7 @@ test("the same id under different media types are distinct entries; a key absent
   );
 });
 
-// ---------------------------------------------------------------------------
 // MAX_BATCH drain + remainder re-schedule
-// ---------------------------------------------------------------------------
 
 test("an oversize queue drains MAX_BATCH=200 first, then re-schedules the remainder in insertion order", async () => {
   await withFetch(echoResponder, async (calls) => {
@@ -266,9 +258,7 @@ test("a failed oversize first batch still re-schedules and resolves the remainde
   );
 });
 
-// ---------------------------------------------------------------------------
 // Error paths: always resolve(null), never reject, never hang
-// ---------------------------------------------------------------------------
 
 // [name, answer, POSTs sent]: a network failure and a 5xx are retried once.
 const failureModes: Array<[string, () => Response | Promise<Response>, number]> = [
@@ -309,9 +299,7 @@ test("an ok response without a ratings map resolves null (the `?? {}` / `?? null
   );
 });
 
-// ---------------------------------------------------------------------------
 // Batches in flight
-// ---------------------------------------------------------------------------
 
 test("a request enqueued while a batch is in flight forms its own debounced batch", async () => {
   let releaseFirst: () => void = () => {};

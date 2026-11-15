@@ -1,12 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { NumberField } from "./number-field";
 import { Label } from "@/components/ui/label";
 import { StyledSelect } from "@/components/ui/styled-select";
-import { Loader2 } from "@/components/icons";
-import { SaveStatusMessage } from "./save-status";
+import { SaveButtonRow } from "./save-status";
 import { useSettingsSave } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
 
@@ -31,19 +29,16 @@ export function QuotaForm({ initialLimit, initialPeriod }: QuotaFormProps) {
   return (
     <form onSubmit={handleSave} className="space-y-4">
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div className="space-y-1.5">
-          <Label htmlFor="quota-limit">{t("settings.form.quota.limitLabel")}</Label>
-          <Input
-            id="quota-limit"
-            type="number"
-            min="0"
-            value={limit}
-            onChange={(e) => { setLimit(e.target.value); edited(); }}
-            placeholder="0"
-            className="bg-zinc-800 border-zinc-700"
-          />
-          <p className="text-xs text-zinc-500">{t("settings.form.quota.limitHelp")}</p>
-        </div>
+        <NumberField
+          wide
+          id="quota-limit"
+          label={t("settings.form.quota.limitLabel")}
+          value={limit}
+          onChange={(v) => { setLimit(v); edited(); }}
+          min={0}
+          placeholder="0"
+          help={t("settings.form.quota.limitHelp")}
+        />
         <div className="space-y-1.5">
           <Label htmlFor="quota-period">{t("settings.form.quota.periodLabel")}</Label>
           <StyledSelect
@@ -58,12 +53,7 @@ export function QuotaForm({ initialLimit, initialPeriod }: QuotaFormProps) {
           </StyledSelect>
         </div>
       </div>
-      <div className="flex items-center gap-3">
-        <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
-          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
-        </Button>
-        <SaveStatusMessage status={status} errorLabel={message || t("settings.form.common.saveFailed")} />
-      </div>
+      <SaveButtonRow status={status} message={message} />
     </form>
   );
 }

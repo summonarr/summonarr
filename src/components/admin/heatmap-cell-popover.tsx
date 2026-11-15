@@ -118,6 +118,10 @@ function useDismiss(ref: RefObject<HTMLDivElement | null>, onClose: () => void) 
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") close();
     }
+    // Tabbing out of the dialog dismisses it, so it never floats beside the page's own focus.
+    function onFocusIn(e: FocusEvent) {
+      if (ref.current && e.target instanceof Node && !ref.current.contains(e.target)) close();
+    }
     function onScroll(e: Event) {
       if (e.target instanceof Node && ref.current?.contains(e.target)) return;
       close();
@@ -125,11 +129,13 @@ function useDismiss(ref: RefObject<HTMLDivElement | null>, onClose: () => void) 
     const scrollOpts: AddEventListenerOptions = { passive: true, capture: true };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
+    document.addEventListener("focusin", onFocusIn);
     window.addEventListener("scroll", onScroll, scrollOpts);
     window.addEventListener("resize", close);
     return () => {
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
+      document.removeEventListener("focusin", onFocusIn);
       window.removeEventListener("scroll", onScroll, scrollOpts);
       window.removeEventListener("resize", close);
     };
@@ -301,7 +307,7 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
               v={`${tt.count}`}
               href={
                 tt.tmdbId
-                  ? `/admin/activity/media/${tt.tmdbId}${tt.mediaType ? `?type=${tt.mediaType}` : ""}`
+                  ? `/admin/activity/media/${tt.tmdbId}${tt.mediaType ? `?type=${encodeURIComponent(tt.mediaType)}` : ""}`
                   : undefined
               }
             />
@@ -316,7 +322,7 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
               key={u.id}
               k={u.username}
               v={`${u.count}`}
-              href={`/admin/activity/user/${u.id}`}
+              href={`/admin/activity/user/${encodeURIComponent(String(u.id))}`}
             />
           ))}
         </Section>

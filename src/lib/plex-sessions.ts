@@ -231,7 +231,10 @@ function toSessionData(s: PlexSessionRaw): PlexSessionData {
 
 export async function getPlexSessions(serverUrl: string, token: string): Promise<PlexSessionData[]> {
   const res = await plexFetch(plexUrl(serverUrl, "/status/sessions?includeGuids=1"), token);
-  if (!res.ok) throw new Error(`Plex sessions: ${res.status}`);
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => {});
+    throw new Error(`Plex sessions: ${res.status}`);
+  }
   // No container is a failed read, never "nothing is playing": an empty answer
   // would let the poller's absence sweep finalize live sessions.
   const container = readPlexContainer(await res.json());
@@ -309,5 +312,6 @@ export async function terminatePlexSession(
   // short key. Same identifier Tautulli's pmsconnect uses (pmsconnect.py:108).
   const url = plexUrl(serverUrl, `/status/sessions/terminate?sessionId=${encodeURIComponent(sessionId)}&reason=${encodeURIComponent(reason)}`);
   const res = await plexFetch(url, token);
+  await res.body?.cancel().catch(() => {});
   return { ok: res.ok, status: res.status };
 }

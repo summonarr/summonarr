@@ -49,7 +49,7 @@ test("the dialog shows the route's own reason for a refusal and checks every ans
   assert.match(src, /if \(answer\.status < 200 \|\| answer\.status >= 300\) \{\s*setError\(apiErrorText\(answer\.data, failed\)\);/);
   assert.match(src, /const parsed = check\(ReleasesAnswer, answer\.data\);/);
   assert.match(src, /schema: SeasonsAnswer,/);
-  assert.match(src, /setError\(failureText\(res, t\)\);/, "the seasons read and the grab say the route's reason too");
+  assert.match(src, /setError\(fetchFailureText\(res, t\) \?\? ""\);/, "the seasons read and the grab say the route's reason too");
   assert.doesNotMatch(src, /as \{ (releases|seasons|error)\?/, "no cast of an answer");
   assert.doesNotMatch(src, /JSON\.parse\(targetKey\)/, "the target is never round-tripped through JSON");
 });

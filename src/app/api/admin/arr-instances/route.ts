@@ -13,7 +13,7 @@ import {
   DEFAULT_ARR_INSTANCE,
   FOURK_ARR_INSTANCE,
 } from "@/lib/arr-instances";
-import { connectionChanged, connectionWrites, instancePayloadError, type InstancePayload } from "@/lib/arr-instances-save";
+import { connectionChanged, connectionWrites, instancePayloadError, keptApiKeyRebind, type InstancePayload } from "@/lib/arr-instances-save";
 import { settleLimit } from "@/lib/concurrency";
 import { buildArrInstanceRegistryWrite, getArrInstances, readArrInstanceRegistryForSave } from "@/lib/arr-instance-registry";
 import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
@@ -104,6 +104,7 @@ type RemovedInfo = { slug: string; openRequests: number };
 type RemovedCounts = Record<string, { wantedItems: number; availableItems: number; trashApplications: number }>;
 type SaveOutcome =
   | { kind: "stale" }
+  | { kind: "secretRebind"; slug: string }
   | { kind: "saved"; removed: RemovedInfo[]; removedCounts: RemovedCounts; retest: Set<string> };
 
 // The body's service and instance list, checked whole before anything is
@@ -171,20 +172,27 @@ async function strandedRequests(tx: TxClient, service: ArrService, removed: stri
   return out;
 }
 
-// Writes each posted instance's connection Setting rows (connectionWrites:
-// a secret left at the mask is untouched, "" clears a row) and answers the
-// slugs whose address or key this save changed — the ones worth a connection
-// test. The stored Url/ApiKey are read first, in one query.
-async function writeConnections(tx: TxClient, service: ArrService, instances: InstancePayload[]): Promise<Set<string>> {
+// Each posted instance's stored address and key, from one query, read before
+// the save writes anything.
+type StoredConnections = Map<string, { url: string | undefined; apiKey: string | undefined }>;
+async function readStoredConnections(tx: TxClient, service: ArrService, instances: InstancePayload[]): Promise<StoredConnections> {
   const keyOf = (slug: string, field: "Url" | "ApiKey") => arrSettingKey(service, slug, field);
   const before = await tx.setting.findMany({
     where: { key: { in: instances.flatMap((i) => [keyOf(i.slug, "Url"), keyOf(i.slug, "ApiKey")]) } },
   });
-  const stored = new Map(before.map((r) => [r.key, r.value]));
+  const rows = new Map(before.map((r) => [r.key, r.value]));
+  return new Map(instances.map((i) => [i.slug, { url: rows.get(keyOf(i.slug, "Url")), apiKey: rows.get(keyOf(i.slug, "ApiKey")) }]));
+}
+
+// Writes each posted instance's connection Setting rows (connectionWrites:
+// a secret left at the mask is untouched, "" clears a row) and answers the
+// slugs whose address or key this save changed — the ones worth a connection
+// test.
+async function writeConnections(tx: TxClient, service: ArrService, instances: InstancePayload[], stored: StoredConnections): Promise<Set<string>> {
   const retest = new Set<string>();
   for (const inst of instances) {
     const writes = connectionWrites(inst);
-    if (connectionChanged(writes, { url: stored.get(keyOf(inst.slug, "Url")), apiKey: stored.get(keyOf(inst.slug, "ApiKey")) })) {
+    if (connectionChanged(writes, stored.get(inst.slug) ?? { url: undefined, apiKey: undefined })) {
       retest.add(inst.slug);
     }
     for (const { field, value } of writes) {
@@ -282,6 +290,13 @@ function saveInstanceList(service: ArrService, instances: InstancePayload[], bas
     if (instances.some((i) => isNamedSlug(i.slug) && !registered.has(i.slug) && (i.apiKey === SECRET_MASK_SENTINEL || i.webhookSecret === SECRET_MASK_SENTINEL))) {
       return { kind: "stale" };
     }
+    // A kept API key must not follow a CHANGED address: the connection test
+    // after the save, and every later call, would send the stored key to the
+    // new host. A changed URL needs the key typed again (the media-instances
+    // rule). Decided before any write.
+    const stored = await readStoredConnections(tx, service, instances);
+    const rebind = instances.find((i) => keptApiKeyRebind(i, stored.get(i.slug) ?? { url: undefined, apiKey: undefined }));
+    if (rebind) return { kind: "secretRebind", slug: rebind.slug };
     const removedSlugs = before.map((i) => i.slug).filter((slug) => !nextNamed.has(slug));
     const removed = await strandedRequests(tx, service, removedSlugs);
     await tx.setting.upsert({
@@ -289,7 +304,7 @@ function saveInstanceList(service: ArrService, instances: InstancePayload[], bas
       create: registryWrite,
       update: { value: registryWrite.value },
     });
-    const retest = await writeConnections(tx, service, instances);
+    const retest = await writeConnections(tx, service, instances, stored);
     const removedCounts = await removeInstanceRows(tx, service, removedSlugs);
     return { kind: "saved", removed, removedCounts, retest };
   }, { timeout: BATCH_TX_TIMEOUT });
@@ -341,6 +356,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const outcome = await saveInstanceList(service, instances, baseVersion);
   if (outcome.kind === "stale") {
     return NextResponse.json({ error: t("apiAdmin.common.instancesChanged", { service: service === "radarr" ? "Radarr" : "Sonarr" }) }, { status: 409 });
+  }
+
+  if (outcome.kind === "secretRebind") {
+    return NextResponse.json({ error: t("apiAdmin.mediaInstances.secretNeededForNewUrl", { slug: outcome.slug }) }, { status: 400 });
   }
 
   // Connection tests for the instances whose address or key this save changed

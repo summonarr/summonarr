@@ -69,6 +69,7 @@ const { HeadersAdapter } = cjsRequire("next/dist/server/web/spec-extension/adapt
 const { NextRequest } = await import("next/server");
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
+const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
@@ -194,8 +195,21 @@ shadowPrismaModel(prisma, "issueMessage", {
   },
   findMany: async () => [], findUnique: async () => null,
 });
+// Votes the report route can be asked about. `voteIds` is the short form: a
+// reasoned vote by somebody else on title 1.
+type VoteRow = { userId: string; reason: string | null; tmdbId: number; mediaType: "MOVIE" | "TV" };
+let voteRows = new Map<string, VoteRow>();
+const voteRowOf = (id: string): VoteRow | undefined =>
+  voteRows.get(id) ?? (voteIds.has(id) ? { userId: "another-voter", reason: "bad", tmdbId: 1, mediaType: "MOVIE" } : undefined);
 shadowPrismaModel(prisma, "deletionVote", {
-  count: async (args: { where: { id: string } }) => { rec("deletionVote.count", args.where); return voteIds.has(args.where.id) ? 1 : 0; },
+  findFirst: async (args: { where: { id: string; userId?: { not?: string }; reason?: { not?: null } } }) => {
+    rec("deletionVote.findFirst", args.where);
+    const row = voteRowOf(args.where.id);
+    if (!row) return null;
+    if (args.where.userId?.not !== undefined && row.userId === args.where.userId.not) return null;
+    if (args.where.reason && row.reason === null) return null;
+    return row;
+  },
   findMany: async () => [], findUnique: async () => null,
 });
 
@@ -284,6 +298,18 @@ for (const m of ["ratingsCache", "tmdbCache", "tmdbMediaCore", "mediaRequest", "
     updateMany: async () => ({ count: 0 }), upsert: async () => ({}), deleteMany: async () => ({ count: 0 }),
   });
 }
+// The Plex library, for the votes-visibility read: rows are matched on the
+// title keys and the serverInstance in/notIn the hidden-titles helper sends.
+type LibRow = { tmdbId: number; mediaType: "MOVIE" | "TV"; serverInstance: string };
+let plexRows: LibRow[] = [];
+shadowPrismaModel(prisma, "plexLibraryItem", {
+  findMany: async (args: { where: { OR?: Array<{ mediaType: string; tmdbId: { in: number[] } }>; serverInstance?: { in?: string[]; notIn?: string[] } } }) =>
+    plexRows.filter((r) =>
+      (args.where.OR ?? []).some((o) => o.mediaType === r.mediaType && o.tmdbId.in.includes(r.tmdbId)) &&
+      (args.where.serverInstance?.in ? args.where.serverInstance.in.includes(r.serverInstance) : true) &&
+      (args.where.serverInstance?.notIn ? !args.where.serverInstance.notIn.includes(r.serverInstance) : true)),
+  findFirst: async () => null, count: async () => 0,
+});
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) =>
   Array.isArray(arg) ? Promise.all(arg) : (arg as (tx: unknown) => Promise<unknown>)(prisma));
 shadowPrismaClientMethod(prisma, "$queryRaw", async () => []);
@@ -350,6 +376,9 @@ beforeEach(() => {
   issueMessageIds = new Set();
   issueIds = new Set();
   voteIds = new Set();
+  voteRows = new Map();
+  plexRows = [];
+  invalidateFeatureFlagCache();
   reportedByOf = new Map();
   auditRows = [];
   verifyTokens = [];
@@ -612,6 +641,52 @@ test("report checks the RIGHT table for each content type", async () => {
   assert.equal((await postReport(me.token, { contentType: "vote_reason", contentId: "v1" })).status, 200);
   // …and an id from the wrong table is not accepted.
   assert.equal((await postReport(me.token, { contentType: "issue", contentId: "m1" })).status, 404);
+});
+
+// A vote reason is reportable only where the shared votes list would show it to
+// this viewer. Every refusal is the 404 of a missing vote, with no audit row.
+test("report 404s a vote reason the votes list would not show the reporter: no reason, their own vote, the votes feature off", async () => {
+  const me = await mintSession();
+  voteRows = new Map<string, VoteRow>([
+    ["v-bare", { userId: "another-voter", reason: null, tmdbId: 1, mediaType: "MOVIE" }],
+    ["v-blank", { userId: "another-voter", reason: "   ", tmdbId: 1, mediaType: "MOVIE" }],
+    ["v-own", { userId: me.userId, reason: "mine", tmdbId: 1, mediaType: "MOVIE" }],
+    ["v-ok", { userId: "another-voter", reason: "bad", tmdbId: 1, mediaType: "MOVIE" }],
+  ]);
+  for (const id of ["v-bare", "v-blank", "v-own"]) {
+    assert.equal((await postReport(me.token, { contentType: "vote_reason", contentId: id })).status, 404, id);
+  }
+  assert.equal(opsOf("auditLog.create").length, 0);
+  assert.equal((await postReport(me.token, { contentType: "vote_reason", contentId: "v-ok" })).status, 200);
+
+  settings.set("feature.page.votes", "false");
+  invalidateFeatureFlagCache();
+  const other = await mintSession();
+  assert.equal((await postReport(other.token, { contentType: "vote_reason", contentId: "v-ok" })).status, 404, "votes switched off");
+  // The feature gates vote reasons only: an issue stays reportable.
+  issueIds = new Set(["i1"]);
+  assert.equal((await postReport(other.token, { contentType: "issue", contentId: "i1" })).status, 200);
+});
+
+test("report 404s a vote reason on a title held only on a server the reporter has no grant for; an ADMIN can report it (guardrail 35a)", async () => {
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Friend's", restricted: true }]));
+  plexRows = [
+    { tmdbId: 500, mediaType: "MOVIE", serverInstance: "remote" },
+    { tmdbId: 800, mediaType: "MOVIE", serverInstance: "remote" },
+    { tmdbId: 800, mediaType: "MOVIE", serverInstance: "" },
+  ];
+  voteRows = new Map<string, VoteRow>([
+    ["v-hidden", { userId: "another-voter", reason: "bad", tmdbId: 500, mediaType: "MOVIE" }],
+    ["v-both", { userId: "another-voter", reason: "bad", tmdbId: 800, mediaType: "MOVIE" }],
+    ["v-nowhere", { userId: "another-voter", reason: "bad", tmdbId: 700, mediaType: "MOVIE" }],
+  ]);
+  const me = await mintSession();
+  assert.equal((await postReport(me.token, { contentType: "vote_reason", contentId: "v-hidden" })).status, 404);
+  assert.equal(opsOf("auditLog.create").length, 0);
+  assert.equal((await postReport(me.token, { contentType: "vote_reason", contentId: "v-both" })).status, 200);
+  assert.equal((await postReport(me.token, { contentType: "vote_reason", contentId: "v-nowhere" })).status, 200);
+  const boss = await mintSession({ permissions: Permission.ADMIN, role: "ADMIN" });
+  assert.equal((await postReport(boss.token, { contentType: "vote_reason", contentId: "v-hidden" })).status, 200);
 });
 
 test("a successful report writes a CONTENT_REPORT audit row", async () => {

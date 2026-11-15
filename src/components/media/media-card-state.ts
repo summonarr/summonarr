@@ -48,6 +48,16 @@ export function cardView(
   };
 }
 
+/**
+ * The card's own request state once a fresh server render of the title
+ * arrives: a "Requested" the card set itself holds only while the server still
+ * reports the viewer's request. Without one the request was declined or
+ * deleted, and the card offers Request again.
+ */
+export function requestStateAfterRefresh(state: CardRequestState, requestedByMe: boolean): CardRequestState {
+  return state === "requested" && !requestedByMe ? "idle" : state;
+}
+
 export type CardRequestOutcome =
   /** Created, or this viewer had already requested it (409). */
   | { kind: "requested" }

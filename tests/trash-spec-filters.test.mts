@@ -32,6 +32,7 @@ test("a paused spec is not managed: the filter, the count and the quick-select a
 test("the search reads the name and trashId, case-insensitively, inside the filter", () => {
   assert.deepEqual(filterSpecs(specs, "all", "FRESH-ID").map((s) => s.name), ["Fresh"]);
   assert.deepEqual(filterSpecs(specs, "managed", "pau").map((s) => s.name), []);
+  assert.deepEqual(filterSpecs(specs, "all", "  fresh ").map((s) => s.name), ["Fresh"], "surrounding spaces are not part of the search");
 });
 
 test("the spec tab and the Overview KPIs use the shared predicates, never their own", () => {

@@ -140,7 +140,14 @@ export async function GET(request: NextRequest) {
     return new NextResponse("Response is not an image", { status: 502 });
   }
 
-  const body = await res.arrayBuffer();
+  // The body read fails too: a chunked answer past MAX_THUMB_BYTES, or a
+  // connection dropped mid-image. That is the same failed fetch, not a 500.
+  let body: ArrayBuffer;
+  try {
+    body = await res.arrayBuffer();
+  } catch {
+    return new NextResponse("Thumb fetch failed", { status: 502 });
+  }
   return new NextResponse(body, {
     headers: {
       "Content-Type": contentType,

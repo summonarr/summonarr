@@ -36,6 +36,58 @@ interface BrowseGridProps {
   canRequest: boolean;
 }
 
+// Why an empty grid is empty: a filter that matched nothing, a missing TMDB
+// token, or a page past the end / an empty upstream page.
+function BrowseEmptyState({ hasFilters, tokenMissing, currentPage, pathname, nextPageHref }: {
+  hasFilters: boolean;
+  tokenMissing?: boolean;
+  currentPage: number;
+  pathname: string;
+  /** Set when a filtered page is empty but later pages exist. */
+  nextPageHref?: string;
+}) {
+  const t = useT();
+  // A rating-source filter and Hide Available are applied to each page's
+  // window of titles after TMDB answered, so an empty page is not "nothing
+  // matches" while the pager still offers later pages.
+  if (hasFilters && nextPageHref) {
+    return (
+      <EmptyState
+        icon={Filter}
+        title={t("browse.empty.nothingOnPage.title")}
+        description={t("browse.empty.nothingOnPage.description")}
+        cta={{ href: nextPageHref, label: t("browse.empty.nothingOnPage.next") }}
+      />
+    );
+  }
+  if (hasFilters) {
+    return (
+      <EmptyState
+        icon={Filter}
+        title={t("browse.empty.noFilterMatch.title")}
+        description={t("browse.empty.noFilterMatch.description")}
+        cta={{ href: pathname, label: t("browse.clearFilters") }}
+      />
+    );
+  }
+  if (tokenMissing) {
+    return (
+      <EmptyState
+        icon={AlertTriangle}
+        title={t("browse.grid.tokenMissing.title")}
+        description={t("browse.grid.tokenMissing.description")}
+      />
+    );
+  }
+  return (
+    <EmptyState
+      icon={Filter}
+      title={t("browse.grid.noResults.title")}
+      description={currentPage > 1 ? t("browse.grid.noResults.pastEnd") : t("browse.grid.noResults.empty")}
+      cta={currentPage > 1 ? { href: pathname, label: t("browse.empty.backToPage1") } : undefined}
+    />
+  );
+}
 
 export function BrowseGrid({
   initialItems: items,
@@ -55,7 +107,7 @@ export function BrowseGrid({
   const t = useT();
 
   // The committed filters, parsed the one shared way (browse-filters.ts).
-  const filters = parseBrowseFilters((key) => searchParams.get(key));
+  const filters = parseBrowseFilters((key) => searchParams.get(key), pathname.startsWith("/tv") ? "tv" : "movie");
 
   // The SERVER owns every filter and page change: the page reads the URL's
   // search params and renders `initialItems`, so this component does no
@@ -72,6 +124,10 @@ export function BrowseGrid({
   // The "N results" / "Popular right now" line lives in the page's PageHeader
   // subtitle (movies/page.tsx, tv/page.tsx), not here.
   const hasFilters = hasActiveFilters(filters);
+  // The pager's own link shape (pagination-bar.tsx): the query with `page` set.
+  const nextPageParams = new URLSearchParams(searchParams.toString());
+  nextPageParams.set("page", String(currentPage + 1));
+  const nextPageHref = currentPage < totalPages ? `${pathname}?${nextPageParams.toString()}` : undefined;
 
   return (
     <>
@@ -82,6 +138,7 @@ export function BrowseGrid({
         showCertification={!pathname.startsWith("/tv")}
         maxYear={maxYear}
         navigate={startTransition}
+        navigating={isPending}
       />
 
       {failed && !isPending && (
@@ -127,31 +184,13 @@ export function BrowseGrid({
           </div>
         )}
         {items.length === 0 && !isPending && !failed ? (
-          hasFilters ? (
-            <EmptyState
-              icon={Filter}
-              title={t("browse.empty.noFilterMatch.title")}
-              description={t("browse.empty.noFilterMatch.description")}
-              cta={{ href: pathname, label: t("browse.clearFilters") }}
-            />
-          ) : tokenMissing ? (
-            <EmptyState
-              icon={AlertTriangle}
-              title={t("browse.grid.tokenMissing.title")}
-              description={t("browse.grid.tokenMissing.description")}
-            />
-          ) : (
-            <EmptyState
-              icon={Filter}
-              title={t("browse.grid.noResults.title")}
-              description={
-                currentPage > 1
-                  ? t("browse.grid.noResults.pastEnd")
-                  : t("browse.grid.noResults.empty")
-              }
-              cta={currentPage > 1 ? { href: pathname, label: t("browse.empty.backToPage1") } : undefined}
-            />
-          )
+          <BrowseEmptyState
+            hasFilters={hasFilters}
+            tokenMissing={tokenMissing}
+            currentPage={currentPage}
+            pathname={pathname}
+            nextPageHref={nextPageHref}
+          />
         ) : (
           <div className="ds-media-grid">
             {items.map((media, i) => (

@@ -354,7 +354,13 @@ function scheduleCrossRefFill(tmdbIds: readonly number[]): void {
           if (batch.length >= CROSS_REF_FILL_BATCH) break;
         }
         await mapLimit(batch, CROSS_REF_CONCURRENCY, async (id) => {
-          await resolveTmdbToTvdb(id);
+          // One id's throw costs that id (a later load re-queues it), never the
+          // rest of the queue.
+          try {
+            await resolveTmdbToTvdb(id);
+          } catch (err) {
+            console.warn("[cleanup] tvdb cross-reference lookup failed:", err instanceof Error ? err.message : err);
+          }
         });
         for (const id of batch) crossRefFill.queued.delete(id);
       }

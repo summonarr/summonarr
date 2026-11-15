@@ -32,6 +32,11 @@ import { syncJellyfinSessions } from "@/lib/session-poll-jellyfin";
 // or the error that degraded it.
 type SourceOutcome = SyncResult | { error: string };
 
+// The container's own poller waits at least one second between ticks
+// (PLAY_HISTORY_SYNC_INTERVAL=1), so it sends at most 60 a minute from one
+// address. Twice that, so the limit never refuses the supported interval.
+const PLAY_HISTORY_POLL_LIMIT_PER_MINUTE = 120;
+
 const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 export async function POST(request: NextRequest) {
@@ -40,7 +45,7 @@ export async function POST(request: NextRequest) {
   }
   // Before the run ledger: a burst of overlapping ticks refused here is not a
   // failed run, and withCronRunRecording records any 4xx as one.
-  if (!checkRateLimit(`sync-ph:${getClientIpKey(request.headers)}`, 30, 60_000)) {
+  if (!checkRateLimit(`sync-ph:${getClientIpKey(request.headers)}`, PLAY_HISTORY_POLL_LIMIT_PER_MINUTE, 60_000)) {
     return NextResponse.json({ error: "Too many requests" }, { status: 429 });
   }
   return withCronRunRecording("play-history-sync", () => syncPlayHistory());

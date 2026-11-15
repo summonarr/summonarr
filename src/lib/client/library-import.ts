@@ -10,6 +10,7 @@
 // never a failure: the sync may still be running on the server.
 import { check, v } from "../validate";
 import { isNoAnswer, jobAnswerError } from "./library-sync";
+import { anySignal } from "./plex-done-flow";
 import { runReplaceFileJob } from "./replace-file-job";
 
 export type LibraryImportOutcome =
@@ -53,7 +54,11 @@ export async function runLibraryImport(
   opts: { fetchFn?: typeof fetch; sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<LibraryImportOutcome | null> {
   const base = opts.fetchFn ?? fetch;
-  const fetchFn = ((input: RequestInfo | URL, init?: RequestInit) => base(input, { ...init, signal })) as typeof fetch;
+  // The run's signal is ADDED to a request's own (the status poll's per-read
+  // timeout), never put in its place: without that timeout one stalled poll
+  // hangs the loop before it can count a failure.
+  const fetchFn = ((input: RequestInfo | URL, init?: RequestInit) =>
+    base(input, { ...init, signal: init?.signal ? anySignal(signal, init.signal) : signal })) as typeof fetch;
   let answer;
   try {
     answer = await runReplaceFileJob(fetchFn, url, { full: true }, {

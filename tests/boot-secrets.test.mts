@@ -46,7 +46,7 @@ test("a missing NEXTAUTH_SECRET is reported once, by the length check, which sti
   assert.match(required[1], /"DATABASE_URL"/);
   assert.match(
     src,
-    /if \(!process\.env\.NEXTAUTH_SECRET \|\| process\.env\.NEXTAUTH_SECRET\.trim\(\)\.length < 32\) \{\s*refuse\([\s\S]*?"production",\s*\);/,
+    /if \(!secretLongEnough\(process\.env\.NEXTAUTH_SECRET\)\) \{\s*refuse\([\s\S]*?"production",\s*\);/,
   );
 });
 

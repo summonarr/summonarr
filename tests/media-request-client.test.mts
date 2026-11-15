@@ -39,7 +39,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   throw new Error(`unexpected fetch ${method} ${url}`);
 }) as typeof fetch;
 
-const { postMediaRequest, fetchRequestToken } = await import("../src/lib/client/media-request.ts");
+const { postMediaRequest, fetchRequestToken, submitMediaRequest } = await import("../src/lib/client/media-request.ts");
 
 const posts = () => calls.filter((c) => c.method === "POST");
 const tokenFetches = () => calls.filter((c) => c.url.startsWith("/api/requests/token"));
@@ -134,4 +134,48 @@ test("a network failure minting the retry's token returns the 403 — unless the
     (err: unknown) => err instanceof DOMException && err.name === "AbortError",
   );
   assert.equal(posts().length, 2, "nothing is resent after the abort");
+});
+
+test("submitMediaRequest reads the answer into an outcome and an abort still propagates", async () => {
+  const t = (key: string) => key;
+  const payload = { tmdbId: 1, mediaType: "MOVIE" as const };
+  postAnswers = [() => json(409, {})];
+  assert.equal(await submitMediaRequest(payload, "tok", t), "duplicate");
+  postAnswers = [() => json(200, { alreadyAvailable: true })];
+  assert.equal(await submitMediaRequest(payload, "tok", t), "alreadyAvailable");
+  postAnswers = [() => json(201, { id: "x" })];
+  assert.equal(await submitMediaRequest(payload, "tok", t), "created");
+  postAnswers = [() => new Response("not json", { status: 200 })];
+  assert.equal(await submitMediaRequest(payload, "tok", t), "created");
+  // A 2xx reached through a redirect is a page in front of the app (an auth
+  // proxy's sign-in), not the route: nothing was requested.
+  postAnswers = [() => Object.defineProperty(new Response("<html>Sign in</html>", { status: 200 }), "redirected", { value: true })];
+  assert.deepEqual(await submitMediaRequest(payload, "tok", t), { error: "request.networkError" });
+  postAnswers = [() => json(500, { error: "boom" })];
+  assert.deepEqual(await submitMediaRequest(payload, "tok", t), { error: "boom" });
+
+  const ctrl = new AbortController();
+  postAnswers = [() => {
+    ctrl.abort();
+    throw new DOMException("aborted", "AbortError");
+  }];
+  await assert.rejects(submitMediaRequest(payload, "tok", t, ctrl.signal));
+});
+
+test("a spent quota (429 with no Retry-After) shows the route's own sentence, not the rate-limit wording", async () => {
+  const t = (key: string, vars?: Record<string, string | number>) => (vars ? `${key}:${JSON.stringify(vars)}` : key);
+  postAnswers = [() => json(429, { error: "You have reached your request quota of 5 per week" })];
+  assert.deepEqual(await submitMediaRequest({ tmdbId: 603, mediaType: "MOVIE" }, "tok", t), {
+    error: "You have reached your request quota of 5 per week",
+  });
+});
+
+test("the rate limiter's 429 (with Retry-After) still names the wait; a bodyless 429 falls back to the generic line", async () => {
+  const t = (key: string, vars?: Record<string, string | number>) => (vars ? `${key}:${JSON.stringify(vars)}` : key);
+  postAnswers = [
+    () => new Response(JSON.stringify({ error: "Too many requests" }), { status: 429, headers: { "Retry-After": "60" } }),
+    () => new Response("<html>", { status: 429 }),
+  ];
+  assert.deepEqual(await submitMediaRequest({ tmdbId: 1, mediaType: "TV" }, "tok", t), { error: 'shared.rateLimited.seconds:{"seconds":60}' });
+  assert.deepEqual(await submitMediaRequest({ tmdbId: 1, mediaType: "TV" }, "tok", t), { error: "shared.rateLimited.generic" });
 });

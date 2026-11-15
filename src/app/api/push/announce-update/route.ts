@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
-import { checkRateLimit } from "@/lib/rate-limit";
+import { refundHit, reserveRateLimit } from "@/lib/rate-limit";
 import { sendAppUpdateNoticeToAllIos } from "@/lib/push";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { auditActor, logAudit } from "@/lib/audit";
@@ -16,10 +16,15 @@ import { auditActor, logAudit } from "@/lib/audit";
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const HOUR = 60 * 60 * 1000;
-  if (
-    !checkRateLimit(`push-announce-update:${session.user.id}`, 2, HOUR) ||
-    !checkRateLimit("push-announce-update:server", 2, HOUR)
-  ) {
+  // Reserve the admin's hit, then the server's; a server refusal gives the
+  // admin's hit back, so a send that never happens costs them nothing.
+  const adminKey = `push-announce-update:${session.user.id}`;
+  const adminHit = reserveRateLimit(adminKey, 2, HOUR);
+  if (adminHit === null) {
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
+  }
+  if (reserveRateLimit("push-announce-update:server", 2, HOUR) === null) {
+    refundHit(adminKey, adminHit);
     return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }
 

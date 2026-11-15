@@ -49,9 +49,10 @@ export function appendPlayHistoryFilter(
 
 // The window (`days`, default 30) plus the shared suffix: `startedAt >= $1`,
 // then the filters from $2.
-export function buildStatsFilters(filters: PlayHistoryStatsFilters, tableAlias = "") {
+// `now` lets one caller cut every window of a load from the same instant.
+export function buildStatsFilters(filters: PlayHistoryStatsFilters, tableAlias = "", now = Date.now()) {
   const prefix = tableAlias ? `${tableAlias}.` : "";
-  const cutoff = new Date(Date.now() - (filters.days ?? 30) * 24 * 60 * 60 * 1000);
+  const cutoff = new Date(now - (filters.days ?? 30) * 24 * 60 * 60 * 1000);
   const { sql, params } = appendPlayHistoryFilter([cutoff], {
     source: filters.source,
     mediaType: filters.mediaType,

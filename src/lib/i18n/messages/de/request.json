@@ -93,6 +93,7 @@
   "request.collection.done": "{created} von {total} angefragt",
   "request.collection.doneUnknown": "Anfrage für {total} gesendet – wird aktualisiert, um das Ergebnis zu zeigen",
   "request.collection.doneSkipped": "{created} von {total} angefragt – {skipped} können nicht angefragt werden",
+  "request.collection.someFailed": "{created} von {total} angefragt – {failed} fehlgeschlagen, bitte erneut versuchen",
   "request.collection.networkErrorLower": "Netzwerkfehler, bitte erneut versuchen",
   "request.collection.requested": "Angefragt",
   "request.collection.requestAll": "Alle anfragen ({count})"

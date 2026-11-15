@@ -17,7 +17,8 @@ import { sanitizeOptional } from "@/lib/sanitize";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
-import { recordIssueGrab } from "@/lib/issue-grab";
+import { recordGrabForIssue } from "@/lib/issue-grab";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 import { announceIssueResolved, promoteIssueInProgress } from "@/lib/issue-transitions";
 import { issueArrService, resolveIssueArrInstance } from "@/lib/issue-arr-instance";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -122,22 +123,11 @@ async function handleRefetch(
   // deleted meanwhile) must not read as the refetch failing, or the admin would
   // queue a second search. It supersedes this admin's earlier pending grabs of
   // the issue on this instance (one import, one announcement — recordIssueGrab).
-  try {
-    await recordIssueGrab({
-      issueId: issue.id,
-      triggeredById: session.user.id,
-      tmdbId: issue.tmdbId,
-      tvdbId,
-      mediaType: issue.mediaType,
-      title: issue.title,
-      scope: issue.scope,
-      seasonNumber: issue.seasonNumber,
-      episodeNumber: issue.episodeNumber,
-      arrInstance: instance,
-    });
-  } catch (err) {
-    console.warn("[issues] Refetch search queued but recording the grab failed (issue deleted meanwhile?):", err);
-  }
+  await recordGrabForIssue(
+    issue,
+    { userId: session.user.id, tvdbId, instance },
+    "[issues] Refetch search queued but recording the grab failed (issue deleted meanwhile?):",
+  );
 
   try {
     // CAS on status: don't clobber a RESOLVED issue if another admin closed it
@@ -265,6 +255,10 @@ export const PATCH = withIssueAdmin(async (
   const resolutionAfter = edit.updateData.resolution !== undefined ? edit.updateData.resolution : issue.resolution;
   if (edit.isStatusChange) {
     void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "ISSUE_STATUS_CHANGE", target: `issue:${id}`, details: { title: issue.title, before: { status: issue.status }, after: { status: edit.updateData.status, resolution: resolutionAfter } }, ...auditContext(req, session) });
+  } else if (edit.updateData.resolution !== undefined && edit.updateData.resolution !== issue.resolution) {
+    // A note rewritten without a status move is still an admin's edit of what
+    // the reporter is told.
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "ISSUE_STATUS_CHANGE", target: `issue:${id}`, details: { title: issue.title, before: { status: issue.status, resolution: issue.resolution }, after: { status: issue.status, resolution: resolutionAfter } }, ...auditContext(req, session) });
   }
 
   if (edit.updateData.status === "RESOLVED") {
@@ -300,17 +294,23 @@ export const DELETE = withIssueAdmin(async (
   // The audit row is written in the delete's own transaction, after it, so a
   // failed audit write rolls the delete back (guardrail 26) — through the shared
   // row builder, which sanitizes the client-supplied user agent.
-  await prisma.$transaction(async (tx) => {
-    await tx.issue.delete({ where: { id } });
-    await logAuditTx(tx, {
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email ?? null,
-      action: "ISSUE_DELETE",
-      target: `issue:${id}`,
-      details: { action: "delete", title: issue.title, mediaType: issue.mediaType },
-      ...ctx,
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.issue.delete({ where: { id } });
+      await logAuditTx(tx, {
+        userId: session.user.id,
+        userName: session.user.name ?? session.user.email ?? null,
+        action: "ISSUE_DELETE",
+        target: `issue:${id}`,
+        details: { action: "delete", title: issue.title, mediaType: issue.mediaType },
+        ...ctx,
+      });
     });
-  });
+  } catch (err) {
+    // Another admin deleted it between the read and the delete: gone either way.
+    if (isPrismaErrorCode(err, "P2025")) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
+    throw err;
+  }
 
   emitSSE({ type: "issue:deleted", issueId: id, userId: issue.reportedBy });
 

@@ -36,9 +36,7 @@ async function captureError(p: Promise<Response>): Promise<SafeFetchError> {
   assert.fail("expected rejection before any network I/O, but the promise resolved");
 }
 
-// ---------------------------------------------------------------------------
 // redactUrlForLog
-// ---------------------------------------------------------------------------
 
 test("redactUrlForLog strips the query string (where upstream secrets live)", () => {
   assert.equal(
@@ -104,9 +102,7 @@ test("SafeFetchError scrubs a path-borne Discord token from message and url", ()
   assert.ok(!err.url.includes("tOkEnVaLuE123"), "token must not survive in .url");
 });
 
-// ---------------------------------------------------------------------------
 // SafeFetchError — every instance must be safe to log verbatim
-// ---------------------------------------------------------------------------
 
 test("SafeFetchError shape: name, reason, redacted url, Error inheritance", () => {
   const err = new SafeFetchError("timeout", "https://api.example.com/v1?apikey=TOPSECRET", "boom");
@@ -149,9 +145,7 @@ test("SafeFetchError leaves an already-clean URL and message unchanged", () => {
   assert.equal(err.message, `Response body exceeded cap for ${raw}`);
 });
 
-// ---------------------------------------------------------------------------
 // URL pre-checks — reject before any DNS/network, on all three entry points
-// ---------------------------------------------------------------------------
 
 test("all three entry points reject an unparseable URL as ssrf-blocked", async () => {
   for (const p of [
@@ -192,9 +186,7 @@ test("protocol check runs before the allowedHosts check in trusted mode", async 
   assert.equal(err.message, "Protocol not allowed: gopher:");
 });
 
-// ---------------------------------------------------------------------------
 // safeFetchTrusted — allowedHosts matching / validation (fail-closed)
-// ---------------------------------------------------------------------------
 
 test("safeFetchTrusted rejects an empty allowedHosts list (fail-closed)", async () => {
   const err = await captureError(
@@ -279,9 +271,7 @@ test("trusted mode enforces allowPrivate=false even for allowlisted hosts", asyn
   }
 });
 
-// ---------------------------------------------------------------------------
 // safeFetch (user mode, allowPrivate=false) — full SSRF policy
-// ---------------------------------------------------------------------------
 
 test("safeFetch blocks private/special IPv4 literals", async () => {
   const blocked = [
@@ -344,9 +334,7 @@ test("blocked-request errors never leak query-string or userinfo secrets", async
   assert.ok(!err.message.includes("hunter2"));
 });
 
-// ---------------------------------------------------------------------------
 // safeFetchAdminConfigured (allowPrivate=true) — link-local/unspecified stay blocked
-// ---------------------------------------------------------------------------
 
 test("admin mode still blocks link-local, unspecified, and site-local addresses", async () => {
   const blocked = [

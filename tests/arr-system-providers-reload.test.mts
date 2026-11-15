@@ -1,20 +1,20 @@
-// Admin → Arr System, the audit fixes that had no pin (C006, C040, C041,
-// C043, C044, C045, C046, C088, C089) plus the Reload "held prompt" rule:
+// Admin → Arr System, the fixes that had no pin, plus the Reload "held prompt"
+// rule:
 //
-//   C006  Saves to ONE provider run one at a time (withProviderLock): the
+//   Saves to ONE provider run one at a time (withProviderLock): the
 //         second reads the arr's resource only after the first PUT settled,
 //         so it carries the first's flag; a failed save releases the lock;
 //         the lock map is left empty when idle.
-//   C046  An indexer use the fresh read says it can't do (supportsRss /
+//   An indexer use the fresh read says it can't do (supportsRss /
 //         supportsSearch false) is never switched ON — 400, nothing sent, not
 //         audited. Switching it OFF still saves. Projected from booleans only.
-//   C040  A `?job=` poll that failed on the way is retried — now pinned with
+//   A `?job=` poll that failed on the way is retried — now pinned with
 //         the job call itself in tests/arr-call.test.mts (arrCallJob).
-//   C088  A BACKGROUND Test All waits 270 s; a synchronous Test All and every
+//   A BACKGROUND Test All waits 270 s; a synchronous Test All and every
 //         single test keep 120 s.
-//   C089  A failure's `customState.isWarning` decides when `isWarning` is
+//   A failure's `customState.isWarning` decides when `isWarning` is
 //         absent, over `severity`; an explicit `isWarning` still wins.
-//   C041/C043/C044/C045 + the Reload held-prompt rule: source pins over
+//   The Reload held-prompt rule: source pins over
 //         the arr-system-*.tsx tabs (components — no render harness here).
 //
 // Harness: the same as tests/arr-fix-system.test.mts (in-memory prisma,
@@ -218,7 +218,7 @@ beforeEach(() => {
   _resetReleaseSearchJobsForTests();
 });
 
-// ── C006: one save per provider at a time ────────────────────────────────────
+// ── one save per provider at a time ────────────────────────────────────
 
 test("two overlapping saves to one provider run in turn: the second reads after the first PUT and carries its flag", async () => {
   const token = await mintSession();
@@ -284,7 +284,7 @@ test("a save that fails releases the lock: the next save to that provider still 
   assert.equal(saveLocks().size, 0);
 });
 
-// ── C046: a use the indexer can't do is never switched on ────────────────────
+// ── a use the indexer can't do is never switched on ────────────────────
 
 test("switching ON a use the indexer reports it can't do is 400 with nothing sent and nothing audited; switching it OFF saves", async () => {
   const token = await mintSession();
@@ -331,7 +331,7 @@ test("unsupportedIndexerUse refuses only an ON the fresh read says false to; sup
   assert.deepEqual([unknown.supportsRss, unknown.supportsSearch], [null, null]);
 });
 
-// ── C088: a background Test All waits longer ─────────────────────────────────
+// ── a background Test All waits longer ─────────────────────────────────
 
 test("a BACKGROUND Test All waits 270 s; a synchronous Test All and a single test, background or not, wait 120 s", async () => {
   const token = await mintSession();
@@ -364,7 +364,7 @@ test("a BACKGROUND Test All waits 270 s; a synchronous Test All and a single tes
   ]);
 });
 
-// ── C089: customState.isWarning ──────────────────────────────────────────────
+// ── customState.isWarning ──────────────────────────────────────────────
 
 test("a failure's customState.isWarning decides when isWarning is absent — over severity; an explicit isWarning still wins", () => {
   assert.equal(projectFailures([{ errorMessage: "slow", customState: { isWarning: true }, severity: "error" }]).warningsOnly, true);
@@ -375,12 +375,12 @@ test("a failure's customState.isWarning decides when isWarning is absent — ove
   assert.equal(projectFailures([{ errorMessage: "bad", customState: null, severity: "error" }]).warningsOnly, false);
 });
 
-// ── C040: a poll that failed on the way is not the job's answer ──────────────
+// ── a poll that failed on the way is not the job's answer ──────────────
 // The job call moved out of the component into src/lib/client/arr-call.ts
 // (arrCallJob); its pins — the shared loop, retried failures, still running,
 // the job's own JSON answers, a gone tab — are in tests/arr-call.test.mts.
 
-// ── C041 / C043 / C044 / C045 / Reload: source pins ──────────────────────────
+// ── the Reload held-prompt rule: source pins ──────────
 
 const read = (f: string) => readFileSync(new URL(`../src/components/admin/${f}`, import.meta.url), "utf8");
 const PROVIDERS = read("arr-system-providers.tsx");

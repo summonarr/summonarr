@@ -127,6 +127,7 @@ let pendingRequests: PendingRequest[] = [];
 let requesterRows: RequesterRow[] = [];
 const sonarrWantedRows: Array<{ tmdbId: number; arrInstance: string }> = [];
 let casCalls = 0;
+const casStatements: string[] = [];
 // Ids the notifiedAvailable CAS should report as winners. Default [] — every
 // existing test keeps the "nothing was claimed, so the notify path stops here"
 // behaviour it was written against.
@@ -340,6 +341,7 @@ const fakePrisma = {
   // reads as "changed", so the episode swaps these suites pin still run.
   $queryRaw: async (query?: { sql?: string }) => {
     if (String(query?.sql ?? "").includes(`FROM "TVEpisodeCache"`)) return [];
+    casStatements.push(String(query?.sql ?? ""));
     if (pendingRequests.length === 0) {
       throw new Error("unexpected prisma.$queryRaw — the notify path must not run in these tests");
     }
@@ -625,6 +627,7 @@ beforeEach(() => {
   requestUpdateManys.length = 0;
   mediaRequestFindManyWheres.length = 0;
   casCalls = 0;
+  casStatements.length = 0;
   casWinnerIds = [];
   deletionVoteDeleteWheres.length = 0;
   settingDeleteManyWheres.length = 0;
@@ -1644,12 +1647,14 @@ test("a DEACTIVATED requester's winner still wipes stale deletion votes and disa
     "and so must the per-item deletionVoteNotified: re-arm key",
   );
 
-  // One post-claim disarm naming BOTH winners.
-  assert.deepEqual(
-    requestUpdateManys,
-    [{ where: { id: { in: ["req-disabled", "req-active"] } }, data: { pendingNotifyAt: null } }],
-    "the 90s still-pending backstop must be disarmed on every row that went AVAILABLE",
+  // The disarm rides the claim statement, which covered BOTH requests.
+  assert.equal(casStatements.length, 1);
+  assert.match(
+    casStatements[0],
+    /"pendingNotifyAt" = NULL/,
+    "the 90s still-pending backstop must be disarmed by the claim on every row that went AVAILABLE",
   );
+  assert.deepEqual(requestUpdateManys, [], "no separate post-claim write: the claim disarms in the same statement");
 
   // …and the half that must NOT happen. The active requester is the inline
   // control: without them this would also pass on a run that notified nobody.
@@ -1839,6 +1844,68 @@ test("a held episode refresh whose lock was LOST does not write (guardrail 41)",
   await untilUnlocked(2112);
   assert.equal(episodeFetches().length, 1, "precondition: the refresh did fetch");
   assert.deepEqual(episodeCacheOps(), [], "a refresh that lost its lock must not write beside the next one");
+});
+
+// The lock's signal reaches the Jellyfin walks themselves (guardrail 41): an
+// abort mid-listing rejects, so no further page is asked for and no partial
+// library reaches a write.
+const jellyfinPagesAfter = (index: number, type: string) =>
+  fetchCalls.slice(index).filter((c) => c.url.searchParams.get("IncludeItemTypes") === type);
+
+test("guardrail 41: a Jellyfin Resync whose lock is lost mid-walk sends no further page, writes nothing, and answers the wind-down — not 'unreachable'", async () => {
+  configureJellyfin();
+  let dropAt = -1;
+  respond = (url) => {
+    if (url.searchParams.get("IncludeItemTypes") === "Series") return okJson({ Items: [], TotalRecordCount: 0 });
+    if (url.searchParams.get("StartIndex") === "0") {
+      dropAt = fetchCalls.length;
+      lockClients.get(2112)?.emit("end");
+    }
+    // Counts more than the 5,000-item page, so the walk wants StartIndex=5000.
+    return okJson({ Items: [{ Id: "jf-m1", Name: "M", ProviderIds: { Tmdb: "603" } }], TotalRecordCount: 9000 });
+  };
+
+  const res = await postJellyfinSync(jfReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  await untilUnlocked(2112);
+
+  assert.ok(dropAt > 0, "precondition: the lock dropped while the first page was served");
+  assert.deepEqual(jellyfinPagesAfter(dropAt, "Movie").map((c) => c.url.href), [], "the walk must not ask for another page once the lock is gone");
+  assert.equal(res.status, 503, "a lost lock is a wind-down, never 'Jellyfin unreachable' (502)");
+  assert.equal(transactions.length, 0, "the stored rows stay: no write transaction ran");
+  assert.deepEqual(libraryStagingLoads, [], "no partial library was staged");
+  assert.ok(!errors.some((e) => e.includes("[sync/jellyfin] Failed to fetch library:")), errors.join(" | "));
+});
+
+test("guardrail 41: a held Jellyfin episode walk whose lock is lost stops paging, writes no episode cache, and is not logged as a failure", async () => {
+  configureJellyfin();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const base = jellyfinSeriesResponder();
+  let dropAt = -1;
+  respond = async (url) => {
+    if (url.searchParams.get("IncludeItemTypes") !== "Episode") return base(url);
+    await gate; // held until the caller has its answer
+    if (dropAt < 0) {
+      dropAt = fetchCalls.length;
+      lockClients.get(2112)?.emit("end");
+    }
+    // A full 1,000-episode page of 2,000: the walk wants StartIndex=1000 next.
+    const items = Array.from({ length: 1000 }, (_, i) => ({ SeriesId: "jf-show-1", ParentIndexNumber: 1, IndexNumber: i + 1 }));
+    return okJson({ Items: items, TotalRecordCount: 2000 });
+  };
+
+  const res = await postJellyfinSync(jfReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(res.status, 200, "the caller is answered while the episode walk is still running");
+  release();
+  await untilUnlocked(2112);
+  // A dropped connection frees the lock at once; give a walk that ignored the
+  // signal the turns it would need to ask for its next page.
+  for (let i = 0; i < 50; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.ok(dropAt > 0, "precondition: the lock dropped during the episode walk");
+  assert.deepEqual(jellyfinPagesAfter(dropAt, "Episode").map((c) => c.url.href), [], "the episode walk must not ask for another page once the lock is gone");
+  assert.deepEqual(episodeCacheOps(), [], "a walk that lost its lock must not rewrite the episode cache");
+  assert.ok(!errors.some((e) => e.includes("[sync/jellyfin] Episode cache failed")), "a lost lock is not logged as a failed refresh");
 });
 
 // ── background resync (the admin buttons — guardrail 37a) ───────────────────

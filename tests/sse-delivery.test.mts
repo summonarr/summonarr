@@ -15,7 +15,7 @@ test("server-wide activity frames reach system admins only, whoever they are abo
   const admin = sseDeliveryScope(Permission.ADMIN);
   const issueAdmin = sseDeliveryScope(Permission.MANAGE_ISSUES);
   const user = sseDeliveryScope(0n);
-  for (const type of ["activity:sessions", "activity:history-updated", "plex:reachability"]) {
+  for (const type of ["activity:sessions", "activity:history-updated", "plex:reachability", "nav:badges"]) {
     assert.equal(shouldDeliverSseEvent(admin, ME, type, undefined), true, type);
     assert.equal(shouldDeliverSseEvent(issueAdmin, ME, type, undefined), false, type);
     // Not even when the frame names the viewer.

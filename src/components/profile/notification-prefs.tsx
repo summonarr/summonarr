@@ -44,7 +44,7 @@ interface NotificationPrefsProps {
   // When false the whole Email section is hidden, since no email would be sent.
   emailEnabled: boolean;
   discordLinked: boolean;
-  isAdminRole: boolean;
+  managesIssues: boolean;
   isJellyfin: boolean;
   notificationEmail: string | null;
   // Jellyfin only: an address with a verification link outstanding (the page
@@ -244,6 +244,9 @@ function JellyfinEmailField({
         return;
       }
       if (!res.ok) {
+        // Not a password refusal: an earlier "Incorrect password." must not
+        // stay in the prompt beside this error.
+        setStepUpError(null);
         // `message` first: a step-up refusal ("session-too-old", "rate_limit")
         // carries its sentence there and a machine code in `error`.
         setEmailError(
@@ -261,6 +264,7 @@ function JellyfinEmailField({
       // The page re-reads the pending address so the "pending" line follows it.
       router.refresh();
     } catch {
+      setStepUpError(null);
       setEmailError(t("profile.notifications.error.network"));
       setEmailSavingState("error");
     }
@@ -377,7 +381,7 @@ function JellyfinEmailField({
 export function NotificationPrefs({
   emailEnabled,
   discordLinked,
-  isAdminRole,
+  managesIssues,
   isJellyfin,
   notificationEmail,
   pendingEmail = null,
@@ -405,8 +409,14 @@ export function NotificationPrefs({
     { key: "pushOnDeclined", label: t("profile.notifications.declined"), hint: t("profile.notifications.push.declined") },
     { key: "pushOnComment", label: t("profile.notifications.comments"), hint: t("profile.notifications.push.comments") },
   ];
+  // One stored preference, two audiences: issue managers get every new issue
+  // and reply; everyone else gets the replies to issues they reported, which
+  // the server gates on this same switch. So the row shows for every account,
+  // worded for what it does for this one.
   const issueRows: PrefRow[] = [
-    { key: "notifyOnIssue", label: t("profile.notifications.issues"), hint: t("profile.notifications.issuesHint") },
+    managesIssues
+      ? { key: "notifyOnIssue", label: t("profile.notifications.issues"), hint: t("profile.notifications.issuesHint") }
+      : { key: "notifyOnIssue", label: t("profile.notifications.issueReplies"), hint: t("profile.notifications.issueRepliesHint") },
   ];
   const toggleRows = (rows: PrefRow[]) =>
     rows.map((r) => (
@@ -476,15 +486,13 @@ export function NotificationPrefs({
         </p>
       </div>
 
-      {isAdminRole && (
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <AlertTriangle className="w-4 h-4 text-yellow-400" />
-            <p className="text-sm font-semibold text-yellow-400">{t("profile.notifications.channel.issues")}</p>
-          </div>
-          {toggleRows(issueRows)}
+      <div>
+        <div className="flex items-center gap-2 mb-1">
+          <AlertTriangle className="w-4 h-4 text-yellow-400" />
+          <p className="text-sm font-semibold text-yellow-400">{t("profile.notifications.channel.issues")}</p>
         </div>
-      )}
+        {toggleRows(issueRows)}
+      </div>
 
       {saveError ? (
         <p role="alert" className="text-xs text-red-400 flex items-center gap-1">

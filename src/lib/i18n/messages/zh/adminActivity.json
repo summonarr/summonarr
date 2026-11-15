@@ -330,6 +330,7 @@
   "adminActivity.play.backToHistory": "返回历史",
   "adminActivity.play.notWatched": "未观看",
   "adminActivity.play.pctComplete": "已完成 {pct}%",
+  "adminActivity.play.zoneTimesTitle": "时间以 {zone} 时区显示",
   "adminActivity.play.playback": "播放",
   "adminActivity.play.streamQuality": "串流质量",
   "adminActivity.play.playMethod": "播放方式",

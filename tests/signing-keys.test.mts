@@ -65,6 +65,9 @@ const PURPOSES: SigningPurpose[] = [
   "plex-token-cache",
   "audit-email",
   "discord-merge-code",
+  "mfa-signin",
+  "passkey-register",
+  "mfa-stepup",
 ];
 
 function header(token: string): Record<string, unknown> {
@@ -264,16 +267,17 @@ test("the PlexTokenCache key is its own subkey, not the raw secret (auth-plex.ts
   assert.doesNotMatch(src, /createHmac\(/, "auth-plex.ts HMACs nothing with a raw secret");
 });
 
-test("no module outside signing-keys.ts derives a key from NEXTAUTH_SECRET by hand, except the pre-existing MFA subkeys", () => {
-  // mfa-token.ts and mfa-store.ts predate this module
-  // and already derive their own HKDF subkeys; everything else goes through it.
+test("no module outside signing-keys.ts derives a key from NEXTAUTH_SECRET by hand, except the password-version fingerprint in mfa-store.ts", () => {
+  // mfa-store.ts predates this module and derives the HMAC key of its
+  // password-version fingerprint itself; every token signer goes through it,
+  // the two-factor flow tokens (mfa-token.ts) included.
   const allowed = new Set([
     "src/lib/signing-keys.ts",
-    "src/lib/mfa/mfa-token.ts",
     "src/lib/mfa/mfa-store.ts",
     "src/instrumentation.ts",
   ]);
   const files = [
+    "src/lib/mfa/mfa-token.ts",
     "src/lib/session-jwt.ts",
     "src/lib/jellyfin-flow-state.ts",
     "src/lib/oidc.ts",
@@ -295,6 +299,11 @@ test("no module outside signing-keys.ts derives a key from NEXTAUTH_SECRET by ha
     if (allowed.has(f)) continue;
     assert.equal(reads, 0, `${f} reads NEXTAUTH_SECRET directly`);
   }
+  // mfa-token.ts signs and verifies through the purpose helpers, and derives nothing itself.
+  const mfa = readFileSync(new URL("../src/lib/mfa/mfa-token.ts", import.meta.url), "utf8");
+  assert.match(mfa, /signPurposeJwt\(/);
+  assert.match(mfa, /verifyPurposeJwt\(/);
+  assert.doesNotMatch(mfa, /hkdfSync|jwtVerify|new SignJWT/, "mfa-token.ts derives or verifies a key by hand");
   // plex-flow-state.ts: both Plex cookies sign through their own purposes.
   const plex = readFileSync(new URL("../src/lib/plex-flow-state.ts", import.meta.url), "utf8");
   assert.match(plex, /signPurposeJwt\("plex-connect"/);

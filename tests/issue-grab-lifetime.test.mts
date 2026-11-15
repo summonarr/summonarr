@@ -33,7 +33,21 @@ process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32);
 process.env.TRUST_PROXY = "true";
 (globalThis as { AsyncLocalStorage?: typeof AsyncLocalStorage }).AsyncLocalStorage = AsyncLocalStorage;
 
-globalThis.fetch = (async () => { throw new Error("scripted network refusal"); }) as typeof fetch;
+// The firing instance confirms a delivery before a grab is claimed (a file in
+// the grab's scope newer than the grab): both arrs answer here with a held
+// title whose file was added long after any grab these tests seed.
+const FILE_ADDED = "2099-01-01T00:00:00Z";
+globalThis.fetch = (async (input: unknown) => {
+  const url = new URL(String(input));
+  const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  if (url.pathname === "/api/v3/movie") return json([{ id: 5, tmdbId: Number(url.searchParams.get("tmdbId")), hasFile: true }]);
+  if (url.pathname === "/api/v3/moviefile") return json([{ id: 50, movieId: 5, dateAdded: FILE_ADDED }]);
+  if (url.pathname === "/api/v3/series") {
+    return json([{ id: 7, tvdbId: Number(url.searchParams.get("tvdbId")), tmdbId: 888, seasons: [{ seasonNumber: 1, monitored: true, statistics: { episodeFileCount: 1, episodeCount: 2 } }] }]);
+  }
+  if (url.pathname === "/api/v3/episodefile") return json([{ id: 70, seriesId: 7, seasonNumber: 1, dateAdded: FILE_ADDED }]);
+  throw new Error("scripted network refusal");
+}) as typeof fetch;
 const warns: string[] = [];
 console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" ")); };
 console.error = () => {};
@@ -89,8 +103,14 @@ const txDelegates = {
   sonarrWantedItem: cacheStub,
   sonarrAvailableItem: cacheStub,
 };
+// A grab's claim queues its completion push in the same transaction
+// (issue-grab-notify.ts), so the transaction client carries the grab table and
+// the outbox too — read off `prisma` when called, once every stub is in place.
+shadowPrismaModel(prisma, "outbox", { create: async () => ({}), deleteMany: async () => ({ count: 0 }) });
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) =>
-  typeof arg === "function" ? (arg as (tx: typeof txDelegates) => Promise<unknown>)(txDelegates) : Promise.all(arg as Promise<unknown>[]),
+  typeof arg === "function"
+    ? (arg as (tx: unknown) => Promise<unknown>)({ ...txDelegates, issueGrab: prisma.issueGrab, outbox: prisma.outbox })
+    : Promise.all(arg as Promise<unknown>[]),
 );
 
 // ── IssueGrab table, with the Issue relation filter the webhooks send ────────
@@ -243,6 +263,11 @@ beforeEach(() => {
   settings.clear();
   settings.set(arrSettingKey("radarr", "", "WebhookSecret"), RADARR_SECRET);
   settings.set(arrSettingKey("sonarr", "", "WebhookSecret"), SONARR_SECRET);
+  // Loopback literals: safeFetchAdminConfigured never resolves a name.
+  settings.set(arrSettingKey("radarr", "", "Url"), "http://127.0.0.1:7878");
+  settings.set(arrSettingKey("radarr", "", "ApiKey"), "radarr-key");
+  settings.set(arrSettingKey("sonarr", "", "Url"), "http://127.0.0.1:8989");
+  settings.set(arrSettingKey("sonarr", "", "ApiKey"), "sonarr-key");
   replay.clear();
   grabs.length = 0;
   issueStatus.clear();
@@ -332,7 +357,7 @@ test("every IssueGrab create in src/ goes through recordIssueGrab — no route w
   walk("src");
   assert.deepEqual(offenders, []);
   for (const route of ["src/app/api/issues/[id]/releases/route.ts", "src/app/api/issues/[id]/files/route.ts"]) {
-    assert.match(readFileSync(route, "utf8"), /await recordIssueGrab\(\{/, route);
+    assert.match(readFileSync(route, "utf8"), /recordGrabForIssue\(/, route);
   }
 });
 

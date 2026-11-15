@@ -45,9 +45,13 @@ test("QuickConnect: cancelling aborts the run's requests, and both requests carr
   assert.match(QC, /startQuickConnect\(jellyfinInstance, abort\.signal, t\)/, "the initiate POST carries the run's signal");
   assert.match(topLevel("startQuickConnect", QC_SRC), /fetchJson\([\s\S]*?\bsignal,/);
   assert.match(QC, /pollUntilAuthenticated\(started\.secret, jellyfinInstance, abort\.signal, isCurrent, t\)/, "so does the long poll");
-  assert.match(POLL, /fetch\(url, \{ signal \}\)/);
+  // Bounded as well: one stalled poll must not outlast the run's deadline.
+  assert.match(POLL, /timedFetch\(url, \{ signal \}, Math\.max\(1, Math\.min\(QC_POLL_TIMEOUT_MS, deadline - Date\.now\(\)\)\)\)/);
+  assert.doesNotMatch(QC_SRC, /[^a-zA-Z]fetch\(url/, "no unbounded poll");
   assert.match(QC, /cancelQuickConnect\(\);\s*const myRun = qcRunRef\.current;/, "a new run cancels the previous one first");
   assert.match(POLL, /if \(signal\.aborted\) return null;/, "an aborted poll ends the run without the retry pause");
+  // A network that stays down ends the run with its own message, not the generic timeout.
+  assert.match(POLL, /catch \{[\s\S]*?consecutiveFailures \+= 1;\s*if \(consecutiveFailures >= QC_MAX_CONSECUTIVE_FAILURES\) return \{ ok: false, error: t\("auth\.login\.error\.network"\) \};/);
   // The post-sign-in re-check survives.
   assert.match(QC, /signInWithFetch\("jellyfin-quickconnect"[\s\S]*?if \(!isCurrent\(\)\) return;/);
 });
@@ -71,6 +75,27 @@ test("QuickConnect: every tab click remounts the Jellyfin panel, so a click (the
   assert.match(form, /setPanelGeneration\(\(g\) => g \+ 1\);/);
   assert.match(form, /<JellyfinPanel\s+key=\{panelGeneration\}/);
   assert.match(topLevel("JellyfinPanel"), /useQuickConnect\(/, "the run lives in the panel the key remounts");
+});
+
+// The checkbox and the server select stay on screen while the code is shown.
+// What they show must be what the run uses.
+test("QuickConnect: the sign-in reads the live remember-me box, and the server select is locked for the run", () => {
+  assert.match(QC, /const rememberMeRef = useRef\(rememberMe\);\s*useEffect\(\(\) => \{\s*rememberMeRef\.current = rememberMe;\s*\}, \[rememberMe\]\);/);
+  assert.match(QC, /signInWithFetch\("jellyfin-quickconnect", \{ secret: started\.secret, rememberMe: String\(rememberMeRef\.current\) \}\)/);
+  assert.match(topLevel("JellyfinPanel"), /<StyledSelect[\s\S]*?disabled=\{jellyfinMode === "quickconnect" && loading\}/);
+});
+
+// A password sign-in's answer used to land whatever tab was open by then.
+test("Password sign-in: a tab click drops the answer of a sign-in still in flight", () => {
+  const form = topLevel("LoginForm");
+  const signIn = form.slice(form.indexOf("const signInWithPassword"), form.indexOf("function switchProvider"));
+  assert.match(signIn, /signInRunRef\.current \+= 1;\s*const myRun = signInRunRef\.current;/);
+  const guard = signIn.indexOf("if (signInRunRef.current !== myRun) return;");
+  assert.ok(guard > signIn.indexOf("await signInWithFetch("), "checked after the request");
+  for (const effect of ["setMfaChallenge(res.mfa)", "setError(signInFailureMessage(", "await completeSignIn()"]) {
+    assert.ok(guard < signIn.indexOf(effect), `${effect} sits behind the check`);
+  }
+  assert.match(form, /function switchProvider\(next: Provider\) \{\s*signInRunRef\.current \+= 1;/);
 });
 
 test("OIDC: the remember-me choice is sent to /api/auth/oidc/start", () => {
@@ -113,7 +138,25 @@ test("Plex sign-in: the client id, device read and PIN request are inside the ca
   assert.match(plex, /const url = plexApprovalUrl\(\{/);
   assert.doesNotMatch(PLEX_SRC, /app\.plex\.tv/, "no hand-built approval URL");
   assert.match(topLevel("createPin", PLEX_SRC), /rateLimitMessage\(res, t\)/, "a 429 names its wait");
+  // A stalled start must reject into the catch, so the request is bounded.
+  assert.match(topLevel("createPin", PLEX_SRC), /await timedFetch\(withBasePath\("\/api\/auth\/plex\/start"\)/);
+  assert.doesNotMatch(PLEX_SRC, /[^a-zA-Z]fetch\(/, "no unbounded request");
   assert.match(topLevel("PlexPanel"), /if \(!started\.ok\) \{\s*setError\(started\.error\);\s*setLoading\(false\);/);
+});
+
+// The start request can't be un-sent, but a tab switch must drop its answer as
+// it does the password and QuickConnect ones: a late Plex error landed under
+// another provider's form, and a late success navigated to plex.tv.
+test("Plex sign-in: an answer that arrives after the tab was left is dropped", () => {
+  const panel = topLevel("PlexPanel");
+  assert.match(panel, /useEffect\(\(\) => \{\s*shownRef\.current = true;\s*return \(\) => \{\s*shownRef\.current = false;\s*\};\s*\}, \[\]\);/);
+  assert.match(
+    panel,
+    /const started = await startPlexSignIn\(\{[^}]*\}\);\s*if \(!shownRef\.current\) return;\s*if \(!started\.ok\)/,
+    "checked before the error, the button reset and the navigation",
+  );
+  // A click on the Plex tab itself is a fresh panel too, as for Jellyfin.
+  assert.match(SRC, /provider === "plex" && <PlexPanel key=\{panelGeneration\} /);
 });
 
 test("Second factor: the passkey button is busy for the whole ceremony, and missing options say so", () => {

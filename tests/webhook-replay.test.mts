@@ -136,9 +136,7 @@ function lastCreateDigest(): string {
   return last.data.digest;
 }
 
-// ---------------------------------------------------------------------------
 // Digest identity (observable through create/replay behavior + captured keys)
-// ---------------------------------------------------------------------------
 
 test("first delivery records a 64-char lowercase hex sha256 digest and returns true", async () => {
   assert.equal(await checkAndRecordWebhookJson("sonarr", "secret", { eventType: "Download" }), true);
@@ -279,9 +277,7 @@ test("non-object JSON payloads (null, numbers) pass through canonicalization and
   assert.equal(await checkAndRecordWebhookJson("sonarr", "s", 42), false);
 });
 
-// ---------------------------------------------------------------------------
 // Record path: TTL, the guarded CAS refresh, error propagation
-// ---------------------------------------------------------------------------
 
 test("TTL PIN: a fresh row expires exactly 24h from now", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: T0 });
@@ -351,9 +347,7 @@ test("FAIL-CLOSED PIN: a duck-typed { code: 'P2002' } plain Error propagates (na
   assert.equal(calls.updateMany.length, 0);
 });
 
-// ---------------------------------------------------------------------------
 // The 1-in-100 cleanup lottery
-// ---------------------------------------------------------------------------
 
 test("cleanup lottery boundary: fires strictly below 0.01, pruning rows expired before now", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: T0 });
@@ -386,9 +380,7 @@ test("cleanup is fire-and-forget — a rejecting deleteMany never fails the deli
   await new Promise((resolve) => setImmediate(resolve));
 });
 
-// ---------------------------------------------------------------------------
 // clearWebhookReplayDigestJson — the post-failure rollback
-// ---------------------------------------------------------------------------
 
 test("record → clear → record: rollback reopens the source-side retry window", async () => {
   assert.equal(await checkAndRecordWebhookJson("sonarr", "s", { a: 1 }), true);

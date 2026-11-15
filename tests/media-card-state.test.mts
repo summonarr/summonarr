@@ -20,7 +20,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   return answer();
 }) as typeof fetch;
 
-const { cardView, readCardRequestAnswer, submitCardRequest } = await import("../src/components/media/media-card-state.ts");
+const { cardView, readCardRequestAnswer, requestStateAfterRefresh, submitCardRequest } = await import("../src/components/media/media-card-state.ts");
 
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -107,4 +107,15 @@ test("no answer is its own outcome", async () => {
   answer = () => { throw new TypeError("offline"); };
   assert.deepEqual(await submitCardRequest({ id: 1399, mediaType: "tv" }, "tok", new AbortController().signal), { kind: "no-answer" });
   assert.equal(calls[0].body?.mediaType, "TV");
+});
+
+test("a fresh server render without the viewer's request clears the card's own Requested", () => {
+  // Declined or deleted since: the card offers Request again.
+  assert.equal(requestStateAfterRefresh("requested", false), "idle");
+  // The server still reports the request: nothing changes.
+  assert.equal(requestStateAfterRefresh("requested", true), "requested");
+  // Every other state is left alone, an in-flight request included.
+  for (const state of ["idle", "confirm", "loading", "available", "error"] as const) {
+    assert.equal(requestStateAfterRefresh(state, false), state);
+  }
 });

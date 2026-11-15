@@ -147,15 +147,15 @@ export function ShareBar({
         className="flex overflow-hidden"
         style={{ height: 10, borderRadius: 999, background: "var(--ds-bg-3)" }}
       >
-        {parts.map((p) =>
+        {parts.map((p, i) =>
           p.value > 0 ? (
-            <div key={p.label} style={{ width: `${pct(p.value)}%`, background: p.color }} title={`${p.label}: ${formatNumber(p.value)}`} />
+            <div key={`${i}:${p.label}`} style={{ width: `${pct(p.value)}%`, background: p.color }} title={`${p.label}: ${formatNumber(p.value)}`} />
           ) : null,
         )}
       </div>
       <ul className="flex flex-wrap" style={{ gap: "6px 16px", margin: "10px 0 0", padding: 0, listStyle: "none" }}>
-        {parts.map((p) => (
-          <li key={p.label} className="flex items-center" style={{ gap: 6, fontSize: 12, color: "var(--ds-fg-muted)" }}>
+        {parts.map((p, i) => (
+          <li key={`${i}:${p.label}`} className="flex items-center" style={{ gap: 6, fontSize: 12, color: "var(--ds-fg-muted)" }}>
             <span aria-hidden style={{ width: 8, height: 8, borderRadius: 2, background: p.color, flexShrink: 0 }} />
             <span style={{ color: "var(--ds-fg)" }}>{p.label}</span>
             <span className="ds-mono" style={{ fontVariantNumeric: "tabular-nums" }}>
@@ -216,7 +216,8 @@ export function RankList({
   );
 }
 
-// Usage meter (disk space). `pct` is 0–100 and already clamped by the caller.
+// Usage meter (disk space). `pct` is clamped to 0–100 here, so an over-quota or
+// non-numeric value never leaves the progressbar's declared range.
 export function Meter({
   label,
   detail,
@@ -230,7 +231,8 @@ export function Meter({
   valueText: string;
   sub?: React.ReactNode;
 }) {
-  const color = pct > 90 ? "var(--ds-danger)" : pct > 75 ? "var(--ds-warning)" : "var(--ds-accent)";
+  const clamped = Math.min(100, Math.max(0, Number.isFinite(pct) ? pct : 0));
+  const color = clamped > 90 ? "var(--ds-danger)" : clamped > 75 ? "var(--ds-warning)" : "var(--ds-accent)";
   return (
     <div style={{ marginBottom: 12 }}>
       <div className="flex justify-between" style={{ fontSize: 12, marginBottom: 4, gap: 12 }}>
@@ -242,12 +244,12 @@ export function Meter({
         aria-label={label}
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-valuenow={Math.round(pct)}
+        aria-valuenow={Math.round(clamped)}
         aria-valuetext={valueText}
         className="overflow-hidden"
         style={{ height: 6, background: "var(--ds-bg-3)", borderRadius: 999 }}
       >
-        <div className="h-full" style={{ width: `${pct}%`, background: color, borderRadius: 999 }} />
+        <div className="h-full" style={{ width: `${clamped}%`, background: color, borderRadius: 999 }} />
       </div>
       {sub && (
         <div className="ds-mono" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", marginTop: 4 }}>{sub}</div>
@@ -333,7 +335,18 @@ export function MonthChart({
 }
 
 // The month labels, in the viewer's language and always UTC (the months are UTC).
+// Built once per locale (there are only a handful) rather than per render.
+const monthFormatsByLocale = new Map<string, ReturnType<typeof buildMonthFormats>>();
 function monthFormats(locale: string) {
+  let formats = monthFormatsByLocale.get(locale);
+  if (!formats) {
+    formats = buildMonthFormats(locale);
+    monthFormatsByLocale.set(locale, formats);
+  }
+  return formats;
+}
+
+function buildMonthFormats(locale: string) {
   const short = new Intl.DateTimeFormat(locale, { month: "short", timeZone: "UTC" });
   // Twelve columns on a phone leave ~25px each — "Sep" no longer fits.
   const narrow = new Intl.DateTimeFormat(locale, { month: "narrow", timeZone: "UTC" });

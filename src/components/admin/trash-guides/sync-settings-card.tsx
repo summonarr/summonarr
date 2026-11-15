@@ -217,7 +217,7 @@ function ToggleRow({
 }) {
   return (
     <label
-      className={`flex items-start gap-3 cursor-pointer group ${indent ? "ml-6" : ""} ${disabled ? "opacity-50 cursor-not-allowed" : ""}`}
+      className={`flex items-start gap-3 cursor-pointer group ${indent ? "ml-6" : ""} ${disabled ? "opacity-50 cursor-not-allowed" : busy ? "opacity-70 cursor-progress" : ""}`}
     >
       <input
         type="checkbox"

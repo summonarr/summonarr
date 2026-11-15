@@ -1,5 +1,5 @@
 // The title manager's Settings tags are edited as a DELTA (snapshot-rules.ts
-// TagDelta), never an absolute list (audit F005).
+// TagDelta), never an absolute list.
 //
 // Why: the form can paint a snapshot up to a day old, and the live read that
 // follows REBASES it without a remount, keeping the admin's edits. An absolute
@@ -26,7 +26,7 @@ import {
 const SETTINGS = readFileSync(new URL("../src/components/admin/arr-title/settings-tab.tsx", import.meta.url), "utf8");
 const DRAFT = readFileSync(new URL("../src/components/admin/arr-title/settings-draft.ts", import.meta.url), "utf8");
 
-test("F005: a tag added over a snapshot survives the rebase onto a live list that gained a tag", () => {
+test("a tag added over a snapshot survives the rebase onto a live list that gained a tag", () => {
   const snapshot = [1];
   const delta = toggleTagDelta(NO_TAG_DELTA, snapshot, 2);
   assert.deepEqual(applyTagDelta(snapshot, delta), [1, 2], "the form shows the added tag over the snapshot");
@@ -36,7 +36,7 @@ test("F005: a tag added over a snapshot survives the rebase onto a live list tha
   assert.deepEqual(tagDeltaChange(live, delta), [1, 2, 3], "the PATCH keeps tag 3");
 });
 
-test("F005: a tag removed over a snapshot is removed from the live list, the arr's new tag kept", () => {
+test("a tag removed over a snapshot is removed from the live list, the arr's new tag kept", () => {
   const delta = toggleTagDelta(NO_TAG_DELTA, [1, 2], 2);
   assert.deepEqual(delta, { add: [], remove: [2] });
   assert.deepEqual(tagDeltaChange([1, 2, 3], delta), [1, 3]);

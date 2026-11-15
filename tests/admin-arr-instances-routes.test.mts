@@ -682,7 +682,7 @@ test("connection tests run only for instances whose address or key the save chan
   const body = await (await saveInstances(t, {
     service: "radarr",
     instances: [
-      { slug: "anime", name: "Anime", url: "http://10.0.0.18:7878" },
+      { slug: "anime", name: "Anime", url: "http://10.0.0.18:7878", apiKey: "k" }, // a new address needs the key again
       { slug: "half", name: "Half", url: "http://10.0.0.7:7878" }, // a new address, but no key
       { slug: "same", name: "Renamed", url: "http://10.0.0.9:7878" }, // the address it already had
     ],
@@ -691,6 +691,36 @@ test("connection tests run only for instances whose address or key the save chan
   assert.ok(!body.testResults.half, "an instance with no api key should not be probed");
   assert.ok(!body.testResults.same, "an unchanged connection is not probed");
   assert.deepEqual(fetchCalls.filter((u) => u.pathname.includes("/system/status")).map((u) => u.host), ["10.0.0.18:7878"]);
+});
+
+test("a kept API key (mask or omitted) with a CHANGED address is refused 400 with no write and no connection test; the same address, a retyped key or a cleared key saves", async () => {
+  const t = await mintSession();
+  registry("radarr", [{ slug: "anime", name: "Anime" }]);
+  settings.set(arrSettingKey("radarr", "anime", "Url"), "http://10.0.0.8:7878");
+  settings.set(arrSettingKey("radarr", "anime", "ApiKey"), "stored-key");
+  const post = (inst: Record<string, unknown>) =>
+    saveInstances(t, { service: "radarr", instances: [{ slug: "anime", name: "Anime", ...inst }] });
+
+  for (const kept of [{ apiKey: SECRET_MASK_SENTINEL }, {}]) {
+    ops = [];
+    const moved = await post({ url: "http://10.0.0.66:7878", ...kept });
+    assert.equal(moved.status, 400);
+    assert.match(((await moved.json()) as { error: string }).error, /can't be kept with a new server address/);
+    assert.equal(ops.filter((o) => /upsert|deleteMany|update|create/.test(o.op)).length, 0, "a refused save writes nothing");
+  }
+  assert.equal(settings.get(arrSettingKey("radarr", "anime", "Url")), "http://10.0.0.8:7878");
+  assert.equal(fetchCalls.length, 0, "the stored key is never sent to the new host");
+
+  // The address it already had (a trailing slash is the same server).
+  assert.equal((await post({ url: "http://10.0.0.8:7878/", apiKey: SECRET_MASK_SENTINEL })).status, 200);
+  // The key typed again travels with the new address.
+  assert.equal((await post({ url: "http://10.0.0.67:7878", apiKey: "typed-again" })).status, 200);
+  assert.equal(settings.get(arrSettingKey("radarr", "anime", "ApiKey")), "typed-again");
+  // An explicit clear leaves nothing to follow the address.
+  assert.equal((await post({ url: "http://10.0.0.68:7878", apiKey: "" })).status, 200);
+  // No key stored: nothing is kept.
+  assert.equal((await post({ url: "http://10.0.0.69:7878" })).status, 200);
+  assert.ok(!fetchCalls.some((u) => u.host === "10.0.0.66:7878"));
 });
 
 test("a save that changes no address or key waits on no connection test", async () => {

@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Check } from "@/components/icons";
 import { posterUrl } from "@/lib/tmdb-types";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
-import type { PlexCandidate, CandidateMatch, CandidatesResponse } from "@/app/api/admin/fix-match/candidates/route";
+import type { PlexCandidate, CandidateMatch, CandidatesResponse } from "@/lib/fix-match-candidates";
 import { withBasePath } from "@/lib/base-path";
 import { runFixMatch, fixMatchErrorMessage, fixMatchWarningMessage, type FixMatchProgressView } from "@/lib/client/fix-match";
 import { candidatesErrorText, fetchFixMatchCandidates } from "@/lib/client/fix-match-candidates";
@@ -577,6 +577,11 @@ export function FixMatchButton({
   const reset = useCallback(() => setState({ phase: "idle" }), []);
 
   async function handleClick() {
+    // A run whose window was hidden comes back instead of starting another.
+    if (state.phase === "applying") {
+      setState((s) => (s.phase === "applying" ? { ...s, hidden: false } : s));
+      return;
+    }
     // Both servers fetch first and open the modal: Plex gets the candidate
     // picker, Jellyfin gets a confirmation card (its target is already exact, so
     // there is nothing to pick — but the admin sees WHAT will be applied before
@@ -674,7 +679,7 @@ export function FixMatchButton({
       <div className="flex flex-col gap-0.5">
         <button
           onClick={handleClick}
-          disabled={phase === "fetching" || phase === "applying"}
+          disabled={state.phase === "fetching" || (state.phase === "applying" && !state.hidden)}
           className="text-[10px] px-2 py-1 rounded border font-medium transition-colors
             bg-orange-500/10 border-orange-600/30 text-orange-400
             hover:bg-orange-500/20 hover:border-orange-500/50

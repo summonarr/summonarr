@@ -6,6 +6,7 @@ import type { GrabProgress } from "@/lib/arr";
 import { grabTitleRelease, searchTitleReleases, type ReleaseScope } from "@/lib/arr-title-data";
 import { auditActor, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
+import { crossSiteRefusal } from "@/lib/cross-site";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { ARR_SERVICE_LABEL } from "@/lib/arr-admin";
@@ -26,6 +27,8 @@ const HANDLE_RE = /^[0-9a-f]{32}$/;
 //   GET ?service=sonarr&instance&id&episodeId=E — one episode. Sonarr has no
 //       whole-series release search (a series-only query answers with the
 //       indexers' RSS feed), so a series needs one of the two.
+//       Refused 403 when the browser marks the request cross-site
+//       (cross-site.ts): a GET that starts an indexer search.
 //       → { releases }: the same projected list as the request "Pick release"
 //       (no indexer download URL), each `guid` replaced by an opaque handle
 //       bound to this title, instance and scope (release-handles.ts).
@@ -60,6 +63,9 @@ const handleScope = (target: ArrTitleTarget, scope: ReleaseScope) =>
 
 export const GET = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
+  // The search hits every indexer: never on a navigation from another site.
+  const crossSite = crossSiteRefusal(req, t);
+  if (crossSite) return crossSite;
   const q = req.nextUrl.searchParams;
   const job = q.get("job");
   if (job !== null) return releaseSearchJobResponse(session.user.id, job, t);

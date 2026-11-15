@@ -157,6 +157,7 @@
   "settings.playHistory.howBody": "La cronologia riproduzioni viene tracciata automaticamente interrogando i tuoi server Plex e Jellyfin ogni pochi secondi alla ricerca di sessioni attive. Non serve alcuna configurazione in Plex o Jellyfin — usa la stessa connessione al server già configurata qui sopra.",
   "settings.watchGrade.notGraded": "Non valutato",
   "settings.watchGrade.previewFailedStatus": "Anteprima non riuscita ({status})",
+  "settings.watchGrade.previewEmpty": "L'anteprima è tornata vuota. Riprova.",
   "settings.watchGrade.grace": "Periodo di tolleranza (giorni)",
   "settings.watchGrade.graceHelp": "Quanto tempo dopo che una richiesta diventa disponibile prima che conti ai fini del voto. Le richieste ancora al suo interno vengono elencate ma mai conteggiate — guardate o no — così i richiedenti recenti non vengono giudicati troppo presto. Predefinito {default}.",
   "settings.watchGrade.window": "Finestra di valutazione (giorni)",

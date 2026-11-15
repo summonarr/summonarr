@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -166,6 +166,12 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
   // keyed on it, so a click remounts it fresh — password mode, the first
   // server, and its QuickConnect run cancelled by the unmount.
   const [panelGeneration, setPanelGeneration] = useState(0);
+  // One id per password sign-in, bumped again by every tab click. The request
+  // can't be un-sent, but its answer is dropped once the user has left the tab
+  // it was for: otherwise a late "Invalid email or password" printed under the
+  // Plex button, a late two-factor answer swapped the card, and a late success
+  // navigated away from a tab the user had moved on from.
+  const signInRunRef = useRef(0);
 
   useBfcacheLoadingReset(setLoading);
   usePlexClientIdAdoption(plexEnabled);
@@ -189,9 +195,12 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
   }
 
   const signInWithPassword: PasswordSignIn = async (fetchProvider, payload, invalidMessage) => {
+    signInRunRef.current += 1;
+    const myRun = signInRunRef.current;
     setLoading(true);
     setError("");
     const res = await signInWithFetch(fetchProvider, payload);
+    if (signInRunRef.current !== myRun) return;
 
     if (res.mfa) {
       setMfaChallenge(res.mfa);
@@ -209,6 +218,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
   };
 
   function switchProvider(next: Provider) {
+    signInRunRef.current += 1;
     setPanelGeneration((g) => g + 1);
     setMfaChallenge(null);
     setProvider(next);
@@ -251,7 +261,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
 
       {provider === "oidc" && <OidcPanel panel={panel} oidcName={oidcName} callbackUrl={callbackUrl} />}
 
-      {provider === "plex" && <PlexPanel panel={panel} callbackUrl={callbackUrl} siteUrl={siteUrl} />}
+      {provider === "plex" && <PlexPanel key={panelGeneration} panel={panel} callbackUrl={callbackUrl} siteUrl={siteUrl} />}
 
       {provider === "jellyfin" && (
         <JellyfinPanel
@@ -380,12 +390,25 @@ function PlexPanel({ panel, callbackUrl, siteUrl }: { panel: PanelState; callbac
   const t = useT();
   const { rememberMe, setRememberMe, loading, setLoading, error, setError } = panel;
 
+  // The panel is unmounted by a tab switch. The start request can't be un-sent,
+  // but its answer is dropped once the user has left this tab, as the password
+  // and QuickConnect answers are: a late Plex error printed under another
+  // provider's form, and a late success sent the browser to plex.tv.
+  const shownRef = useRef(true);
+  useEffect(() => {
+    shownRef.current = true;
+    return () => {
+      shownRef.current = false;
+    };
+  }, []);
+
   // startPlexSignIn never throws, so every failure ends with its message and
   // the button back; only a success leaves `loading` set for the navigation.
   async function handlePlexSignIn() {
     setLoading(true);
     setError("");
     const started = await startPlexSignIn({ rememberMe, callbackUrl, siteUrl, t });
+    if (!shownRef.current) return;
     if (!started.ok) {
       setError(started.error);
       setLoading(false);
@@ -482,7 +505,7 @@ function JellyfinPanel({
   onSignedIn: () => Promise<void>;
 }) {
   const t = useT();
-  const { rememberMe, setLoading, setError } = panel;
+  const { rememberMe, loading, setLoading, setError } = panel;
   const [jellyfinMode, setJellyfinMode] = useState<JellyfinMode>("password");
   // Defaults to the FIRST syncable instance, not a bare "" — an admin can
   // configure only a named instance (e.g. via the separate "Additional media
@@ -511,6 +534,9 @@ function JellyfinPanel({
             id="jf-instance"
             value={jellyfinInstance}
             onChange={(e) => setJellyfinInstance(e.target.value)}
+            // A QuickConnect run asked THIS server for its code and polls it
+            // until it ends; the select must not show another one meanwhile.
+            disabled={jellyfinMode === "quickconnect" && loading}
             className="w-full"
           >
             {instances.map((i) => (

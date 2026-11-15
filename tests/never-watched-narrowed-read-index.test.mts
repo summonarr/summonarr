@@ -1,4 +1,4 @@
-// Audit C005 — the never-watched NARROWED read (the ADMIN detail-page chip, the
+// Audit — the never-watched NARROWED read (the ADMIN detail-page chip, the
 // cleanup delete's re-judgement) must stay index-served:
 //   - a show's plays are looked up by `sourceShowId IN (…)` → PlayHistory needs
 //     @@index([sourceShowId]) (there was none: a sequential scan per TV view);
@@ -19,7 +19,7 @@ console.warn = () => {};
 
 // ── schema ──────────────────────────────────────────────────────────────────
 
-test("C005 PlayHistory declares @@index([sourceShowId]) — the narrowed show read's only index", () => {
+test("PlayHistory declares @@index([sourceShowId]) — the narrowed show read's only index", () => {
   const schema = readFileSync(new URL("../prisma/schema.prisma", import.meta.url), "utf8");
   const model = /^model PlayHistory \{([\s\S]*?)^\}/m.exec(schema);
   assert.ok(model, "PlayHistory model did not parse");
@@ -190,7 +190,7 @@ const sourcesOf = (where: Where) => {
   return s?.in ? [...s.in].sort() : null;
 };
 
-test("C005 a narrowed movie read names the holders' sources — plex+jellyfin for Charlie, plex alone for Alpha", async () => {
+test("a narrowed movie read names the holders' sources — plex+jellyfin for Charlie, plex alone for Alpha", async () => {
   await loadLibraryWatchFacts(null, { now: NOW, only: [{ tmdbId: 300, mediaType: "MOVIE" }] });
   assert.deepEqual(sourcesOf(movieKeyRead()), ["jellyfin", "plex"], "both servers hold Charlie");
   groupByCalls.length = 0;
@@ -198,12 +198,12 @@ test("C005 a narrowed movie read names the holders' sources — plex+jellyfin fo
   assert.deepEqual(sourcesOf(movieKeyRead()), ["plex"], "only Plex holds Alpha — the index's leading column narrows to it");
 });
 
-test("C005 the FULL movie read carries no source predicate (14d: evidence is never filtered by source)", async () => {
+test("the FULL movie read carries no source predicate (14d: evidence is never filtered by source)", async () => {
   await loadLibraryWatchFacts(null, { now: NOW });
   assert.ok(!("source" in movieKeyRead()), JSON.stringify(movieKeyRead()));
 });
 
-test("C005 the source scope is lossless: a title whose only hard evidence is a Jellyfin key reaches the full read's verdict", async () => {
+test("the source scope is lossless: a title whose only hard evidence is a Jellyfin key reaches the full read's verdict", async () => {
   const full = (await loadLibraryWatchFacts(null, { now: NOW })).titles.find((t) => t.tmdbId === 300)!;
   assert.equal(full.verdict.state, "watched", "the full read sees Charlie's Jellyfin key play");
   assert.equal(full.evidence.plays, 1, "the Plex row under the same key string is another server's item");
@@ -212,7 +212,7 @@ test("C005 the source scope is lossless: a title whose only hard evidence is a J
   assert.equal(one.evidence.plays, full.evidence.plays);
 });
 
-test("C005 a narrowed show read still asks by show key (served by @@index([sourceShowId]))", async () => {
+test("a narrowed show read still asks by show key (served by @@index([sourceShowId]))", async () => {
   plays.push(play({ sourceItemId: "ep-601", sourceShowId: "rk600", seasonNumber: 1, title: "Foxtrot" }));
   const one = (await loadLibraryWatchFacts(null, { now: NOW, only: [{ tmdbId: 600, mediaType: "TV" }] })).titles[0];
   assert.equal(one.verdict.state, "watched");

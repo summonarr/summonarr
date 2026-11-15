@@ -3,16 +3,21 @@
 // one remap at a time, each finishing on the server before the next starts
 // (guardrail 37a's background job + status poll, runFixMatch).
 //
-// - Stoppable between titles: the title already running finishes on the
-//   server (its job is not cancelled), but no further one starts.
+// - Stoppable: no further title starts, and the caller may abort the wait on
+//   the one in flight. Its job is not cancelled and finishes on the server; the
+//   loop names it (`abortedEntry`) so the caller can say its result is unknown.
 // - An abort (the page went away) ends the loop quietly — the job itself
 //   carries on — and is never counted as a failure.
+// - A title whose START was rate-limited is waited out and tried again, a
+//   bounded number of times, instead of failing every remaining title at once
+//   and hiding the real reasons behind "too many".
 // - Every title's outcome is kept, in order: a partial remap's warning
 //   (guardrail 37) or the reason one failed is shown beside its name, never
 //   folded into an "N/N fixed" total.
 //
 // React-free so the unit suite drives it with a fake remap
 // (tests/fix-all-sequence.test.mts).
+import { abortableSleep } from "../abortable-sleep";
 import type { FixMatchOutcome, FixMatchRequest } from "./fix-match";
 
 /** One title of a bulk run: its key (the row it fixes), its name and its remap. */
@@ -63,6 +68,13 @@ export interface FixAllDeps<E extends FixAllEntry = FixAllEntry> {
   errorOf: (err: unknown) => string;
   /** True once a stop was asked for (checked before each title). */
   stopped: () => boolean;
+  /**
+   * How long to wait before trying a failed title again, or null to keep the
+   * failure. Only for a refusal that started nothing (a rate-limited start).
+   */
+  retryAfterMs?: (err: unknown) => number | null;
+  /** The wait before a retry; resolves early when `signal` fires. A test passes an immediate one. */
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /** Each title's controller, so an unmount can abort the poll in flight. */
   onTitleStart?: (controller: AbortController) => void;
   /** After each title: its result, and every result so far. */
@@ -73,27 +85,41 @@ export function isAbortError(err: unknown): boolean {
   return err instanceof DOMException && err.name === "AbortError";
 }
 
+/** Retries of one title's rate-limited start before its failure is kept. */
+export const MAX_START_RETRIES = 8;
+
 /** Runs `entries` in order. `aborted`: an abort ended it (stop quietly, write nothing more). */
 export async function runFixAllSequence<E extends FixAllEntry>(
   entries: readonly E[],
   deps: FixAllDeps<E>,
-): Promise<{ results: FixAllResult[]; aborted: boolean }> {
+): Promise<{ results: FixAllResult[]; aborted: boolean; abortedEntry?: E }> {
   const results: FixAllResult[] = [];
   for (const entry of entries) {
     if (deps.stopped()) break;
     const ac = new AbortController();
     deps.onTitleStart?.(ac);
-    let result: FixAllResult;
-    try {
-      const outcome = await deps.fix(entry.request, ac.signal);
-      const warning = deps.warningOf(outcome);
-      result = warning
-        ? { key: entry.key, title: entry.title, kind: "warn", text: warning }
-        : { key: entry.key, title: entry.title, kind: "ok" };
-    } catch (err) {
-      // Unmounted mid-run: stop quietly — the job itself carries on.
-      if (isAbortError(err)) return { results, aborted: true };
-      result = { key: entry.key, title: entry.title, kind: "error", text: deps.errorOf(err) };
+    let result: FixAllResult | null = null;
+    for (let retries = 0; result === null; retries++) {
+      try {
+        const outcome = await deps.fix(entry.request, ac.signal);
+        const warning = deps.warningOf(outcome);
+        result = warning
+          ? { key: entry.key, title: entry.title, kind: "warn", text: warning }
+          : { key: entry.key, title: entry.title, kind: "ok" };
+      } catch (err) {
+        // Unmounted mid-run: stop quietly — the job itself carries on.
+        if (isAbortError(err)) return { results, aborted: true, abortedEntry: entry };
+        const wait = retries < MAX_START_RETRIES ? deps.retryAfterMs?.(err) ?? null : null;
+        if (wait === null) {
+          result = { key: entry.key, title: entry.title, kind: "error", text: deps.errorOf(err) };
+          break;
+        }
+        await (deps.sleep ?? abortableSleep)(wait, ac.signal);
+        // Aborted while waiting: nothing of this title is running, so it is
+        // not named as in flight. A Stop ends the run; an unmount ends it quietly.
+        if (ac.signal.aborted) return { results, aborted: !deps.stopped() };
+        if (deps.stopped()) return { results, aborted: false };
+      }
     }
     results.push(result);
     deps.onResult?.(result, entry, results);

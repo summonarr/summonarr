@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.39.0 — stable and running in production. Found a problem? See [Feedback](#feedback).
+> **Status:** v0.40.0 — stable and running in production. Found a problem? See [Feedback](#feedback).
 
 ## Install
 
@@ -77,6 +77,8 @@ docker compose build
 docker compose up -d
 docker compose logs -f summonarr
 ```
+
+Compose reads `POSTGRES_PASSWORD` for the Postgres container from `.env.local` through its `env_file`, so no `--env-file` flag is needed.
 
 The Dockerfile is a five-stage build (deps → prisma-gen → builder → migrate-deps → runner), produces a Next.js standalone bundle, runs as non-root `nextjs:nodejs` (UID 1001), and strips `npm`/`npx` from the final image to eliminate npm-bundled CVEs.
 
@@ -171,6 +173,29 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted and the developer collects no data. The one server the developer runs is the push relay for iOS notifications, which can't be self-hosted and never sees media titles or usernames (see [APNs relay trust](./docker-container/README.md#apns-relay-trust-ios-push)). The iOS app itself talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.40.0
+
+**Added**
+
+- Notices are no longer lost to a restart: "now available", approve/decline, request comments, issue replies, grab-complete pushes and vote-threshold alerts are queued with the change that causes them, and failed sends are retried.
+- Watch sync covers every partial watch per pair.
+- A "keep sessions" option on the first-run setup restore, for moving to a new server.
+- Live Activity count on the admin nav, and a queue count that follows Radarr/Sonarr webhooks.
+- A native-client activity users list (API contract v6).
+- Radarr/Sonarr's own reason is logged when a release grab fails with a 5xx.
+
+**Changed**
+
+- The sync orchestrator moved out of its route file; Jellyfin library and episode walks stop when the sync loses its lock.
+
+**Fixed**
+
+- A pending Jellyfin offboarding survives a restart.
+- The page no longer scrolls into an empty area below the app shell.
+- Backup export column-kind query casts `pg_type` columns to text.
+- Auth, API route and UI page gaps found in the endpoint, route and page scans, plus 27 defects from the full-tree review.
+- The source-build Postgres service reads `.env.local` through `env_file`.
 
 ### v0.39.0
 

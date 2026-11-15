@@ -1,4 +1,4 @@
-// C015 (audit fix, unit "release"): the title manager's Remove keeps the
+// (audit fix, unit "release"): the title manager's Remove keeps the
 // guardrail-14b `cleanedUpAt` stamps when the DELETE's outcome is UNKNOWN — a
 // timeout, a dropped connection, a gateway's 502/504 — even when a re-read
 // still lists the title: the arr may be holding the DELETE behind its database
@@ -296,7 +296,7 @@ for (const [label, fail] of [
   ["a gateway 504", () => json({ message: "gateway timeout" }, 504)],
   ["a gateway 502", () => json({ message: "bad gateway" }, 502)],
 ] as const) {
-  test(`C015 remove: ${label} with the title STILL listed keeps the stamp — the arr may finish the delete later`, async () => {
+  test(`remove: ${label} with the title STILL listed keeps the stamp — the arr may finish the delete later`, async () => {
     const token = await mintSession();
     requests = [AVAILABLE()];
     responder = both((c) => (c.origin === RADARR && c.method === "DELETE" ? fail() : undefined), radarrBase);
@@ -308,7 +308,7 @@ for (const [label, fail] of [
   });
 }
 
-test("C015 remove control: a definite refusal (500, 503) with the title still listed removes the stamp", async () => {
+test("remove control: a definite refusal (500, 503) with the title still listed removes the stamp", async () => {
   for (const status of [500, 503]) {
     const token = await mintSession();
     requests = [AVAILABLE()];
@@ -319,7 +319,7 @@ test("C015 remove control: a definite refusal (500, 503) with the title still li
   }
 });
 
-test("C015 arrWriteOutcomeUnknown: timeouts, network failures and 502/504 are unknown; the arr's own answers and a 503 are definite", async () => {
+test("arrWriteOutcomeUnknown: timeouts, network failures and 502/504 are unknown; the arr's own answers and a 503 are definite", async () => {
   const { arrWriteOutcomeUnknown, ArrResponseError } = await import("../src/lib/arr.ts");
   const { SafeFetchError } = await import("../src/lib/safe-fetch.ts");
   assert.equal(arrWriteOutcomeUnknown(new SafeFetchError("timeout", "http://x", "t")), true);

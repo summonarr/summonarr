@@ -10,6 +10,12 @@ import { pagedReadEnded, posInt } from "./arr-parse";
 import { check, v } from "./validate";
 
 const QUEUE_STATE_TTL_MS = 15 * 1000;
+// How old a queue state may be and still stand in for a read that failed. Past
+// it the answer is unknown (null): a snapshot from before a title was grabbed
+// would read "not downloading". Kept under the download check's 90s delay
+// (DOWNLOAD_CHECK_DELAY_MS), so a state that check falls back on was read after
+// the approval it is checking.
+export const QUEUE_STALE_MAX_AGE_MS = 60 * 1000;
 const QUEUE_PAGE_SIZE = 250;
 // A safety limit on the walk: 40 pages of 250 is 10,000 records. A queue longer
 // than that is read as INCOMPLETE, never as all of it: a title past the cap would
@@ -87,7 +93,8 @@ async function readQueueState(cfg: ArrCfg, service: QueueService): Promise<Queue
   return state;
 }
 
-// Returns null when the queue could not be read AND no stale state exists, so
+// Returns null when the queue could not be read AND no state read within
+// QUEUE_STALE_MAX_AGE_MS exists, so
 // callers don't mistake a fetch failure for an empty queue (which would yield
 // false "not downloading" → spurious notifies / premature scans). A successful
 // read (even empty) returns a state.
@@ -103,11 +110,12 @@ async function getQueueState(cfg: ArrCfg, service: QueueService): Promise<QueueS
       return state;
     } catch (err) {
       const stale = queueCache.get(cacheKey);
-      if (stale) {
+      // expiresAt is the read time plus the TTL, so this is the state's age.
+      if (stale && Date.now() - (stale.expiresAt - QUEUE_STATE_TTL_MS) <= QUEUE_STALE_MAX_AGE_MS) {
         console.warn(`[arr] ${QUEUE_LABEL[service]} queue read failed, serving stale queue data:`, err instanceof Error ? err.message : err);
         return stale.state;
       }
-      console.error(`[arr] ${QUEUE_LABEL[service]} queue read failed, no cache:`, err instanceof Error ? err.message : err);
+      console.error(`[arr] ${QUEUE_LABEL[service]} queue read failed, no recent cache:`, err instanceof Error ? err.message : err);
       return null;
     }
   });

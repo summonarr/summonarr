@@ -115,7 +115,6 @@ export function DownloadQueue({
   const [removing, setRemoving] = useState<{ row: QueueItem; action: QueueRemoveAction } | null>(null);
   const [importing, setImporting] = useState<QueueItem | null>(null);
   const { hidden, saveHidden, toggleColumn } = useHiddenColumns();
-  const { expanded, toggleExpanded, frameWidth, frameRef } = useQueueTableView();
   // Any open dialog pauses the poll (a refresh would reshuffle the row being
   // confirmed); it resumes when the dialog closes.
   const { report, setReport, loading, error, snapshotAt, load, reloadSoon } = useQueueData({
@@ -123,6 +122,7 @@ export function DownloadQueue({
     live,
     paused: removing !== null || importing !== null || managing !== null,
   });
+  const { expanded, toggleExpanded, frameWidth, frameRef } = useQueueTableView(report?.items.map(rowKey));
   // A new link closes the title manager it was clicked in.
   const filters = useQueueFilters(initialFilters, report, () => setManaging(null));
   const { acting, notice, actionError, recheckFailed, arrVersions, loadVersions, grabNow, recheck, imported, removed } = useQueueActions({

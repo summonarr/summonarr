@@ -117,6 +117,8 @@ interface ActionsMenuProps {
   // short-circuits every permission check, so a mis-click on the first menu
   // item must not grant it outright while the reversible Disable asks first.
   onPromote: () => void;
+  // Demoting an ADMIN asks first too: it strips every permission at once.
+  onDemote: (role: "USER" | "ISSUE_ADMIN") => void;
   onDisable: () => void;
   onReactivate: () => void;
   onPurge: () => void;
@@ -141,7 +143,7 @@ function useRowModals() {
   return { open, setOpen, close };
 }
 
-function ActionsMenu({ u, onPatch, onPromote, onDisable, onReactivate, onPurge, onResetMfa, has4k, namedInstances, mediaInstances, refocus, onRefocused }: ActionsMenuProps) {
+function ActionsMenu({ u, onPatch, onPromote, onDemote, onDisable, onReactivate, onPurge, onResetMfa, has4k, namedInstances, mediaInstances, refocus, onRefocused }: ActionsMenuProps) {
   const t = useT();
   const modals = useRowModals();
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -199,12 +201,12 @@ function ActionsMenu({ u, onPatch, onPromote, onDisable, onReactivate, onPurge, 
               t(roleLabelKey.ADMIN),
             )}
             {u.role !== "ISSUE_ADMIN" && item(
-              () => onPatch({ role: "ISSUE_ADMIN" }),
+              () => (u.role === "ADMIN" ? onDemote("ISSUE_ADMIN") : onPatch({ role: "ISSUE_ADMIN" })),
               <ShieldAlert className="w-3.5 h-3.5 text-amber-400 shrink-0" />,
               t(roleLabelKey.ISSUE_ADMIN),
             )}
             {u.role !== "USER" && item(
-              () => onPatch({ role: "USER" }),
+              () => (u.role === "ADMIN" ? onDemote("USER") : onPatch({ role: "USER" })),
               <ShieldOff className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
               t(roleLabelKey.USER),
             )}
@@ -291,7 +293,7 @@ function ActionsMenu({ u, onPatch, onPromote, onDisable, onReactivate, onPurge, 
   );
 }
 
-type ConfirmKind = "disable" | "purge" | "resetMfa" | "promote";
+type ConfirmKind = "disable" | "purge" | "resetMfa" | "promote" | "demote";
 type LifecycleAction = "disable" | "reactivate" | "purge" | "resetMfa";
 
 // Everything the inline confirm shows for each kind, in one place, so a new
@@ -302,6 +304,7 @@ const CONFIRM_UI: Record<ConfirmKind, { hintKey: string; ariaKey: string; labelK
   resetMfa: { hintKey: "adminManage.users.confirm.resetMfaHint", ariaKey: "adminManage.users.confirm.resetMfaAria", labelKey: "adminManage.users.confirm.resetMfa", Icon: ShieldOff,   tone: "danger" },
   // Granting, not destroying: the accent, not danger.
   promote:  { hintKey: "adminManage.users.confirm.promoteHint",  ariaKey: "adminManage.users.confirm.promoteAria",  labelKey: "adminManage.users.confirm.promote",  Icon: ShieldCheck, tone: "accent" },
+  demote:   { hintKey: "adminManage.users.confirm.demoteHint",   ariaKey: "adminManage.users.confirm.demoteAria",   labelKey: "adminManage.users.confirm.demote",   Icon: ShieldOff,   tone: "danger" },
 };
 const CONFIRM_TONE_CLASS: Record<"accent" | "danger", string> = {
   accent: "bg-[var(--ds-accent)] text-[var(--ds-accent-fg)] hover:bg-[var(--ds-accent-hover)]",
@@ -475,7 +478,7 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
   // is not, so they confirm separately and never share a button. "promote"
   // (→ ADMIN) is the one role change that asks: the bit bypasses every
   // permission check, so it must not be a single mis-click away.
-  const [confirming, setConfirming] = useState<{ id: string; kind: ConfirmKind } | null>(null);
+  const [confirming, setConfirming] = useState<{ id: string; kind: ConfirmKind; role?: "USER" | "ISSUE_ADMIN" } | null>(null);
   const t = useT();
 
   // One request on a user's row: the row shows a spinner while it runs and its
@@ -507,6 +510,10 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
     if (kind === "promote") {
       setConfirming(null);
       void patch(id, { role: "ADMIN" });
+    } else if (kind === "demote") {
+      const role = confirming?.role ?? "USER";
+      setConfirming(null);
+      void patch(id, { role });
     } else {
       lifecycle(id, kind);
     }
@@ -557,6 +564,7 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                 u={u}
                 onPatch={(body) => void patch(u.id, body)}
                 onPromote={() => setConfirming({ id: u.id, kind: "promote" })}
+                onDemote={(role) => setConfirming({ id: u.id, kind: "demote", role })}
                 onDisable={() => setConfirming({ id: u.id, kind: "disable" })}
                 onReactivate={() => lifecycle(u.id, "reactivate")}
                 onPurge={() => setConfirming({ id: u.id, kind: "purge" })}
