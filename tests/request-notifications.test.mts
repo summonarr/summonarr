@@ -115,6 +115,7 @@ const {
 } = await import("../src/lib/request-notifications.ts");
 const { invalidateAgentCache } = await import("../src/lib/notify-agents.ts");
 const { drainOutbox } = await import("../src/lib/outbox-drain.ts");
+const { notifyRequestStatusChanges } = await import("../src/lib/request-notifications.ts");
 const { AVAILABLE_CHANNELS, OUTBOX_MAX_ATTEMPTS } = await import("../src/lib/outbox.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
@@ -1048,4 +1049,52 @@ test("outbox drain: nothing owed is one statement and no other work; a failing r
   claimImpl = async () => { throw new Error("db down (unit test)"); };
   assert.deepEqual(await drainOutbox("test"), { delivered: 0, dropped: 0 });
   assert.ok(warns.some((w) => w.includes("outbox drain failed")));
+});
+
+// ── approve / decline notices on the outbox ─────────────────────────────────
+
+const decided = (id: string) => ({
+  id, requestedBy: `user-${id}`, title: `Title ${id}`, mediaType: "MOVIE", tmdbId: 7, posterPath: null, arrInstance: "", adminNote: null,
+});
+
+test("outbox: an approve/decline fan-out settles every channel under its OWN kind — a disabled requester's rows included", async () => {
+  for (const [status, kind] of [["APPROVED", "request.approved"], ["DECLINED", "request.declined"]] as const) {
+    outboxDeletes.length = 0;
+    await notifyRequestStatusChanges(status, [decided("d1")], "test");
+    await waitFor(() => settledKeys().length === AVAILABLE_CHANNELS.length, `every ${status} channel settled`);
+    await quiesce();
+    assert.deepEqual(settledKeys(), AVAILABLE_CHANNELS.map((c) => `${kind}:d1:${c}`).sort());
+  }
+
+  // Disabled: nothing is sent, and nothing stays owed either.
+  requesterDisabled = true;
+  outboxDeletes.length = 0;
+  createManyCalls.length = 0;
+  await notifyRequestStatusChanges("APPROVED", [decided("d2")], "test");
+  await waitFor(() => settledKeys().length === AVAILABLE_CHANNELS.length, "the disabled requester's rows settled");
+  await quiesce();
+  assert.equal(createManyCalls.length, 0);
+});
+
+test("outbox drain: an 'approved' notice is sent only while the request is still APPROVED; a stale one is dropped", async () => {
+  const requestStatus: Record<string, string> = { still: "APPROVED", back: "PENDING" };
+  shadowPrismaModel(prisma, "mediaRequest", {
+    findMany: async (args: { where: { id: { in: string[] } } }) =>
+      args.where.id.in.flatMap((id) => (requestStatus[id] ? [{ id, status: requestStatus[id] }] : [])),
+  });
+  claimImpl = async () => [
+    owed("still", "inbox", { kind: "request.approved" }),
+    owed("back", "inbox", { kind: "request.approved" }),
+    owed("deleted", "inbox", { kind: "request.approved" }),
+    owed("still", "inbox", { kind: "request.declined", id: "ob-still-declined" }),
+  ] as never;
+
+  const res = await drainOutbox("test");
+  await quiesce();
+
+  assert.deepEqual(res, { delivered: 1, dropped: 3 });
+  assert.deepEqual(droppedIds(), ["ob-back-inbox", "ob-deleted-inbox", "ob-still-declined"]);
+  assert.equal(createManyCalls.length, 1);
+  assert.deepEqual(createManyCalls[0].data.map((d) => [d.userId, d.type]), [["user-still", "REQUEST_APPROVED"]]);
+  assert.deepEqual(settledKeys(), ["request.approved:still:inbox"]);
 });

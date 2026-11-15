@@ -266,6 +266,36 @@ test("'approved' goes only to requesters whose approval stands, never to the adm
   assert.deepEqual(ownerReads, [["u-pushed", "u-unknown"]]);
 });
 
+// The claim queued each approval's "approved" notice before the push
+// (guardrail 14f). One that did not stand must be taken back, or the drain
+// would later tell the requester of an approval that was rolled back.
+test("an approval that did not stand has its queued 'approved' notice cancelled on every channel; one that stands does not", async () => {
+  const cancelled: string[] = [];
+  shadowPrismaModel(prisma, "outbox", {
+    deleteMany: async (args: { where: { dedupeKey: { in: string[] } } }) => {
+      // The fan-out settles per channel (5 keys at most per call per request);
+      // a cancel names every channel of a request in one call.
+      const keys = args.where.dedupeKey.in;
+      if (keys.some((k) => k.endsWith(":discord")) && keys.some((k) => k.endsWith(":email"))) cancelled.push(...keys);
+      return { count: keys.length };
+    },
+  });
+  const settled = [
+    { row: followRow("pushed", "u-pushed"), outcome: { kind: "pushed" as const } },
+    { row: followRow("unknown", "u-unknown"), outcome: { kind: "unknown" as const, error: null } },
+    { row: followRow("failed", "u-failed"), outcome: { kind: "failed" as const, error: null } },
+    { row: followRow("rolled", "u-rolled"), outcome: { kind: "rolled-back" as const, error: null } },
+  ];
+  followUpDecidedApprovals(settled, { actorId: "admin-1", checkName: "test:download-check", logScope: "test" });
+  for (let i = 0; i < 50 && cancelled.length === 0; i++) await new Promise((r) => setImmediate(r));
+
+  const channels = ["discord", "push", "inbox", "agents", "email"];
+  assert.deepEqual(
+    cancelled.sort(),
+    ["failed", "rolled"].flatMap((id) => channels.map((c) => `request.approved:${id}:${c}`)).sort(),
+  );
+});
+
 test("the transition table: every target differs from its source, and AVAILABLE is terminal", () => {
   assert.equal(isAllowedTransition("PENDING", "APPROVED"), true);
   assert.equal(isAllowedTransition("DECLINED", "APPROVED"), true);

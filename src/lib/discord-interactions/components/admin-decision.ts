@@ -120,7 +120,7 @@ function loadDecisionRequest(id: string) {
 type DecisionRequest = NonNullable<Awaited<ReturnType<typeof loadDecisionRequest>>>;
 
 async function approveFromDiscord(channelT: Translator, decider: Decider, request: DecisionRequest, title: string): Promise<CardEdit> {
-  if (!(await claimApproval(request.id, "PENDING"))) return handledCard(channelT, title);
+  if (!(await claimApproval(request.id, "PENDING", { actorId: decider.id }))) return handledCard(channelT, title);
   announceStatus(request, "APPROVED");
   // With the requester's stored quality profile, like the web approve.
   const outcome = await pushApproval(request, "Discord approve");
@@ -170,7 +170,7 @@ function approvalCard(channelT: Translator, decider: Decider, posterPath: string
 }
 
 async function declineFromDiscord(channelT: Translator, decider: Decider, request: DecisionRequest, title: string): Promise<CardEdit> {
-  if (!(await claimDecline(request.id, "PENDING"))) return handledCard(channelT, title);
+  if (!(await claimDecline(request.id, "PENDING", { actorId: decider.id }))) return handledCard(channelT, title);
   announceStatus(request, "DECLINED");
   void logAudit({
     userId: decider.id,

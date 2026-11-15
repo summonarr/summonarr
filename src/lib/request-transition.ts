@@ -1,5 +1,6 @@
 import type { RequestStatus } from "@/generated/prisma";
-import { prisma } from "@/lib/prisma";
+import { prisma, type PrismaTxClient } from "@/lib/prisma";
+import { OUTBOX_APPROVED_KIND, OUTBOX_DECLINED_KIND, cancelOutbox, queueDecisionNotices, type DecisionKind } from "@/lib/outbox";
 import { addMovieToRadarr, addSeriesToSonarr, arrErrorMessage, arrWriteOutcomeUnknown, type AddProgress } from "@/lib/arr";
 import { emitSSE } from "@/lib/sse-emitter";
 import { DOWNLOAD_CHECK_DELAY_MS, scheduleDownloadChecks, type DownloadCheckTarget } from "@/lib/download-check";
@@ -20,6 +21,8 @@ import { sanitizeForLog } from "@/lib/sanitize";
 //   claim  a compare-and-swap on the status the caller read, so two admins
 //          deciding at once can't both win. Approval stamps approvedAt and arms
 //          the 90s backstop; decline clears approvedAt (guardrail 34a).
+//          The requester's notice is queued in the claim's own transaction
+//          (guardrail 14f), so a restart after the commit cannot lose it.
 //   push   to the request's OWN instance (guardrail 32), then settled as one of:
 //            pushed       the approval stands
 //            unknown      the add was sent and got no definite answer (a timeout,
@@ -66,9 +69,26 @@ export function isAllowedTransition(from: RequestStatus, to: RequestStatus): boo
 // ── claims ───────────────────────────────────────────────────────────────────
 
 // What a decision writes besides the status. `adminNote` undefined means the
-// decision sent no note and the stored one stays; null clears it.
+// decision sent no note and the stored one stays; null clears it. `actorId` is
+// who decides: the requester's notice is queued in the claim's own transaction
+// (guardrail 14f), except for a request the actor filed themself.
 export interface DecisionWrite {
   adminNote?: string | null;
+}
+export interface Decider {
+  actorId: string;
+}
+
+// The claim and the notices it owes, in ONE transaction: `claim` runs the
+// compare-and-swap and answers the ids it moved; their outbox rows are written
+// before the commit, so a restart after it can never leave a decided request
+// whose requester was not told and nothing recording that.
+async function claimAndQueue(kind: DecisionKind, actorId: string, claim: (tx: PrismaTxClient) => Promise<string[]>): Promise<string[]> {
+  return prisma.$transaction(async (tx) => {
+    const ids = await claim(tx);
+    await queueDecisionNotices(tx, kind, ids, actorId);
+    return ids;
+  });
 }
 
 function noteData(adminNote: string | null | undefined): { adminNote?: string | null } {
@@ -90,20 +110,23 @@ function backstopDeadline(): Date {
 export async function claimApproval(
   id: string,
   from: RequestStatus,
-  opts: DecisionWrite & { qualityProfileId?: number } = {},
+  opts: DecisionWrite & Decider & { qualityProfileId?: number },
 ): Promise<boolean> {
-  const claimed = await prisma.mediaRequest.updateMany({
-    where: { id, status: from },
-    data: {
-      status: "APPROVED",
-      approvedAt: new Date(),
-      permanentlyDeclined: false,
-      ...noteData(opts.adminNote),
-      ...(opts.qualityProfileId !== undefined ? { qualityProfileId: opts.qualityProfileId } : {}),
-      pendingNotifyAt: backstopDeadline(),
-    },
+  const ids = await claimAndQueue(OUTBOX_APPROVED_KIND, opts.actorId, async (tx) => {
+    const claimed = await tx.mediaRequest.updateMany({
+      where: { id, status: from },
+      data: {
+        status: "APPROVED",
+        approvedAt: new Date(),
+        permanentlyDeclined: false,
+        ...noteData(opts.adminNote),
+        ...(opts.qualityProfileId !== undefined ? { qualityProfileId: opts.qualityProfileId } : {}),
+        pendingNotifyAt: backstopDeadline(),
+      },
+    });
+    return claimed.count > 0 ? [id] : [];
   });
-  return claimed.count > 0;
+  return ids.length > 0;
 }
 
 /**
@@ -113,19 +136,22 @@ export async function claimApproval(
 export async function claimDecline(
   id: string,
   from: RequestStatus,
-  opts: DecisionWrite & { permanent?: boolean } = {},
+  opts: DecisionWrite & Decider & { permanent?: boolean },
 ): Promise<boolean> {
-  const claimed = await prisma.mediaRequest.updateMany({
-    where: { id, status: from },
-    data: {
-      status: "DECLINED",
-      approvedAt: null,
-      permanentlyDeclined: opts.permanent === true,
-      ...noteData(opts.adminNote),
-      pendingNotifyAt: null,
-    },
+  const ids = await claimAndQueue(OUTBOX_DECLINED_KIND, opts.actorId, async (tx) => {
+    const claimed = await tx.mediaRequest.updateMany({
+      where: { id, status: from },
+      data: {
+        status: "DECLINED",
+        approvedAt: null,
+        permanentlyDeclined: opts.permanent === true,
+        ...noteData(opts.adminNote),
+        pendingNotifyAt: null,
+      },
+    });
+    return claimed.count > 0 ? [id] : [];
   });
-  return claimed.count > 0;
+  return ids.length > 0;
 }
 
 /**
@@ -136,37 +162,41 @@ export async function claimDecline(
  * gets them back in its result set, never both. Every side effect keys off the
  * returned rows, and `requestedBy` comes back with them for the announcement.
  */
-export function claimPendingBatch(
+export async function claimPendingBatch(
   ids: string[],
   decision: "APPROVED" | "DECLINED",
-  opts: DecisionWrite & { permanent?: boolean } = {},
+  opts: DecisionWrite & Decider & { permanent?: boolean },
 ): Promise<Array<{ id: string; requestedBy: string }>> {
   const where = { id: { in: ids }, status: "PENDING" as const };
   const select = { id: true, requestedBy: true } as const;
-  if (decision === "APPROVED") {
-    return prisma.mediaRequest.updateManyAndReturn({
-      where,
-      select,
-      data: {
-        status: "APPROVED",
-        approvedAt: new Date(),
-        permanentlyDeclined: false,
-        ...noteData(opts.adminNote),
-        pendingNotifyAt: backstopDeadline(),
-      },
-    });
-  }
-  return prisma.mediaRequest.updateManyAndReturn({
-    where,
-    select,
-    data: {
-      status: "DECLINED",
-      approvedAt: null,
-      permanentlyDeclined: opts.permanent === true,
-      ...noteData(opts.adminNote),
-      pendingNotifyAt: null,
-    },
+  let rows: Array<{ id: string; requestedBy: string }> = [];
+  await claimAndQueue(decision === "APPROVED" ? OUTBOX_APPROVED_KIND : OUTBOX_DECLINED_KIND, opts.actorId, async (tx) => {
+    rows = decision === "APPROVED"
+      ? await tx.mediaRequest.updateManyAndReturn({
+          where,
+          select,
+          data: {
+            status: "APPROVED",
+            approvedAt: new Date(),
+            permanentlyDeclined: false,
+            ...noteData(opts.adminNote),
+            pendingNotifyAt: backstopDeadline(),
+          },
+        })
+      : await tx.mediaRequest.updateManyAndReturn({
+          where,
+          select,
+          data: {
+            status: "DECLINED",
+            approvedAt: null,
+            permanentlyDeclined: opts.permanent === true,
+            ...noteData(opts.adminNote),
+            pendingNotifyAt: null,
+          },
+        });
+    return rows.map((r) => r.id);
   });
+  return rows;
 }
 
 /**
@@ -401,6 +431,9 @@ export function followUpDecidedApprovals(
   opts: { actorId: string; checkName: string; logScope: string },
 ): void {
   scheduleDownloadChecks(downloadChecksFor(settled), { name: opts.checkName });
+  // An approval that did not stand owes no "approved": take its queued notice
+  // back (the claim queued it before the push — guardrail 14f).
+  void cancelOutbox(OUTBOX_APPROVED_KIND, settled.filter((s) => !approvalStands(s.outcome)).map((s) => s.row.id));
   void notifyDecided("APPROVED", settled.filter((s) => approvalStands(s.outcome)).map((s) => s.row), opts.actorId, opts.logScope);
 }
 

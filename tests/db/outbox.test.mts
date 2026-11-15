@@ -162,3 +162,130 @@ test("a drain pass RE-LOCKS what it takes: a row it could not settle is not sent
   assert.deepEqual(await drainOutbox("test"), { delivered: 0, dropped: 0 });
   assert.equal(await prisma.notification.count(), 1, "not sent a second time while the new lock holds");
 });
+
+// ═══ Approve / decline notices ══════════════════════════════════════════════
+// The decision claim and the notices it owes commit in ONE transaction
+// (request-transition.ts claimAndQueue + outbox.ts queueDecisionNotices).
+
+const { claimApproval, claimDecline, claimPendingBatch, notifyDecided } = await import("@/lib/request-transition.ts");
+const { OUTBOX_APPROVED_KIND, OUTBOX_DECLINED_KIND, cancelOutbox } = await import("@/lib/outbox.ts");
+
+const rowsOfKind = (kind: string) => prisma.outbox.findMany({ where: { kind } });
+async function waitForEmptyOutbox(): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if ((await prisma.outbox.count()) === 0) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.fail("the outbox never emptied");
+}
+
+test("an approval by ANOTHER account queues one locked 'approved' row per channel; a lost claim queues nothing", async () => {
+  const requester = await makeUser();
+  const admin = await makeUser();
+  const [r] = await makeRequests(requester.id, 1, "PENDING");
+
+  assert.equal(await claimApproval(r.id, "DECLINED", { actorId: admin.id }), false, "the row is not DECLINED: the claim loses");
+  assert.equal(await prisma.outbox.count(), 0);
+
+  assert.equal(await claimApproval(r.id, "PENDING", { actorId: admin.id, adminNote: "enjoy" }), true);
+  const rows = await rowsOfKind(OUTBOX_APPROVED_KIND);
+  assert.deepEqual(rows.map((x) => x.channel).sort(), [...AVAILABLE_CHANNELS].sort());
+  for (const x of rows) {
+    assert.equal(x.userId, requester.id);
+    assert.ok(x.lockedUntil.getTime() > Date.now() + 60_000);
+    const p = x.payload as Record<string, unknown>;
+    assert.equal(p.id, r.id);
+    assert.equal(p.adminNote, "enjoy", "the note as the claim left it");
+  }
+  assert.equal(await prisma.outbox.count(), AVAILABLE_CHANNELS.length);
+});
+
+test("deciding your OWN request, or a disabled requester's, owes no notice", async () => {
+  const self = await makeUser();
+  const gone = await makeUser({ deactivated: true });
+  const admin = await makeUser();
+  const [mine] = await makeRequests(self.id, 1, "PENDING");
+  const [theirs] = await makeRequests(gone.id, 1, "PENDING");
+
+  assert.equal(await claimApproval(mine.id, "PENDING", { actorId: self.id }), true);
+  assert.equal(await claimDecline(theirs.id, "PENDING", { actorId: admin.id }), true);
+  assert.equal(await prisma.outbox.count(), 0);
+});
+
+test("the batch claim queues notices for exactly the rows IT moved", async () => {
+  const requester = await makeUser();
+  const admin = await makeUser();
+  const [a, b] = await makeRequests(requester.id, 2, "PENDING");
+  const [already] = await makeRequests(requester.id, 1, "APPROVED");
+
+  const claimed = await claimPendingBatch([a.id, b.id, already.id], "DECLINED", { actorId: admin.id, adminNote: "not this one" });
+  assert.deepEqual(claimed.map((c) => c.id).sort(), [a.id, b.id].sort());
+
+  const rows = await rowsOfKind(OUTBOX_DECLINED_KIND);
+  assert.equal(rows.length, 2 * AVAILABLE_CHANNELS.length);
+  assert.ok(rows.every((x) => (x.payload as { adminNote?: string }).adminNote === "not this one"));
+  assert.ok(!rows.some((x) => x.dedupeKey.includes(`:${already.id}:`)));
+  assert.equal(await prisma.outbox.count(), rows.length, "no 'approved' rows from a decline");
+});
+
+test("ONE transaction: when the notices cannot be queued the decision does not commit", async () => {
+  const requester = await makeUser();
+  const admin = await makeUser();
+  const [r] = await makeRequests(requester.id, 1, "PENDING");
+
+  await prisma.$executeRawUnsafe(`ALTER TABLE "Outbox" RENAME TO "Outbox_away"`);
+  try {
+    await assert.rejects(claimApproval(r.id, "PENDING", { actorId: admin.id }));
+  } finally {
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Outbox_away" RENAME TO "Outbox"`);
+  }
+  const after = await prisma.mediaRequest.findUniqueOrThrow({ where: { id: r.id } });
+  assert.equal(after.status, "PENDING", "the claim rolled back with the failed insert");
+  assert.equal(after.approvedAt, null);
+});
+
+test("the in-process send settles every channel of a decision", async () => {
+  const requester = await makeUser();
+  const admin = await makeUser();
+  const [r] = await makeRequests(requester.id, 1, "PENDING");
+  await claimDecline(r.id, "PENDING", { actorId: admin.id });
+  const row = await prisma.mediaRequest.findUniqueOrThrow({ where: { id: r.id } });
+
+  await notifyDecided("DECLINED", [row], admin.id, "test");
+  await waitForEmptyOutbox();
+  const inbox = await prisma.notification.findMany({ where: { userId: requester.id } });
+  assert.deepEqual(inbox.map((n) => n.type), ["REQUEST_DECLINED"]);
+});
+
+test("after a restart the drain sends a decision that is STILL TRUE, and drops one that is not", async () => {
+  const requester = await makeUser();
+  const admin = await makeUser();
+  const [stands, rolledBack, reopened] = await makeRequests(requester.id, 3, "PENDING");
+  await claimApproval(stands.id, "PENDING", { actorId: admin.id });
+  await claimApproval(rolledBack.id, "PENDING", { actorId: admin.id });
+  await claimDecline(reopened.id, "PENDING", { actorId: admin.id });
+  // The push failed and the row went back to PENDING; the decline was reopened.
+  await prisma.mediaRequest.update({ where: { id: rolledBack.id }, data: { status: "PENDING" } });
+  await prisma.mediaRequest.update({ where: { id: reopened.id }, data: { status: "PENDING" } });
+  await lapseLocks();
+
+  const res = await drainOutbox("test");
+  assert.deepEqual(res, { delivered: AVAILABLE_CHANNELS.length, dropped: 2 * AVAILABLE_CHANNELS.length });
+  const inbox = await prisma.notification.findMany();
+  assert.deepEqual(inbox.map((n) => `${n.type}:${n.userId}`), [`REQUEST_APPROVED:${requester.id}`]);
+  assert.equal(await prisma.outbox.count(), 0);
+});
+
+test("cancelOutbox takes back every channel of one kind for the given requests only", async () => {
+  const requester = await makeUser();
+  const admin = await makeUser();
+  const [a, b] = await makeRequests(requester.id, 2, "PENDING");
+  await claimApproval(a.id, "PENDING", { actorId: admin.id });
+  await claimApproval(b.id, "PENDING", { actorId: admin.id });
+
+  await cancelOutbox(OUTBOX_APPROVED_KIND, [a.id]);
+
+  const left = await prisma.outbox.findMany();
+  assert.equal(left.length, AVAILABLE_CHANNELS.length);
+  assert.ok(left.every((x) => x.dedupeKey.includes(`:${b.id}:`)));
+});

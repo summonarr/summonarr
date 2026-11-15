@@ -363,7 +363,7 @@ async function approveRequest(pc: PatchContext, body: PatchBody): Promise<NextRe
   // The admin's picker choice is stored on the row, so the push below, a later
   // Re-push and the sync's re-push all use it; without one the row keeps the
   // requester's choice, else the instance default.
-  if (!(await claimApproval(id, existing.status, { adminNote: noteWrite(pc), qualityProfileId }))) return conflict(t);
+  if (!(await claimApproval(id, existing.status, { adminNote: noteWrite(pc), qualityProfileId, actorId: session.user.id }))) return conflict(t);
 
   const updated = await loadRequest(id);
   if (!updated) return notFound(t);
@@ -404,7 +404,7 @@ async function approveRequest(pc: PatchContext, body: PatchBody): Promise<NextRe
 
 async function declineRequest(pc: PatchContext, permanent: boolean): Promise<NextResponse> {
   const { req, session, t, id, existing } = pc;
-  if (!(await claimDecline(id, existing.status, { permanent, adminNote: noteWrite(pc) }))) return conflict(t);
+  if (!(await claimDecline(id, existing.status, { permanent, adminNote: noteWrite(pc), actorId: session.user.id }))) return conflict(t);
 
   const updated = await loadRequest(id);
   if (!updated) return notFound(t);

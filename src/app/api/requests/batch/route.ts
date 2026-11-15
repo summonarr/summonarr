@@ -67,7 +67,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
   // Claims only the rows still PENDING, in one statement (claimPendingBatch):
   // every side effect below keys off what THIS call moved — never an id that
   // was already decided, or claimed by a concurrent batch.
-  const claimed = await claimPendingBatch(decision.ids, decision.status, { adminNote: decision.adminNote, permanent: decision.permanent });
+  const claimed = await claimPendingBatch(decision.ids, decision.status, { adminNote: decision.adminNote, permanent: decision.permanent, actorId: session.user.id });
   for (const row of claimed) announceStatus(row, decision.status);
   const claimedIds = claimed.map((r) => r.id);
 

@@ -9,7 +9,7 @@ import { claimAvailableNotificationWinners } from "./notify-available";
 import { buildNotificationData } from "./notification-data";
 import { emitNotificationEvents } from "./notify-agents";
 import type { NotifyEvent } from "./notify-events";
-import { OUTBOX_AVAILABLE_KIND, settleOutbox, type AvailableChannel } from "./outbox";
+import { OUTBOX_APPROVED_KIND, OUTBOX_AVAILABLE_KIND, OUTBOX_DECLINED_KIND, settleOutbox, type AvailableChannel, type NoticeChannel } from "./outbox";
 
 interface RequestInfo {
   requestedBy: string;
@@ -480,42 +480,97 @@ export async function notifyRequestStatusChanges(
   logScope = "notify",
 ): Promise<void> {
   if (targets.length === 0) return;
-  let owners: Array<{ id: string } & StatusChangeRecipient>;
+  // A failed lookup sends nothing and settles nothing: the queued notices stay
+  // for the drain.
+  const owners = await loadActiveOwners(targets, logScope);
+  if (!owners) return;
+  // Discord, push, the inbox and the outbound channels are not waited on;
+  // email is (SMTP connections are bounded — see EMAIL_SEND_CONCURRENCY).
+  void deliverStatusChannel(status, "discord", targets, owners, logScope);
+  void deliverStatusChannel(status, "push", targets, owners, logScope);
+  void deliverStatusChannel(status, "inbox", targets, owners, logScope);
+  void deliverStatusChannel(status, "agents", targets, owners, logScope);
+  await deliverStatusChannel(status, "email", targets, owners, logScope);
+}
+
+/**
+ * ONE channel of an approve/decline notice, for the outbox drain: the same
+ * owner read (disabled accounts dropped) and the same sender as the fan-out.
+ * Never throws.
+ */
+export async function deliverDecisionChannel(
+  status: "APPROVED" | "DECLINED",
+  channel: NoticeChannel,
+  targets: StatusChangeTarget[],
+  logScope: string,
+): Promise<void> {
+  if (targets.length === 0) return;
+  const owners = await loadActiveOwners(targets, logScope);
+  if (!owners) return;
+  await deliverStatusChannel(status, channel, targets, owners, logScope);
+}
+
+type OwnerMap = Map<string, { id: string } & StatusChangeRecipient>;
+
+// The targets' owners that are NOT disabled (guardrail 33), with the email
+// address and opt-ins. null when the read failed.
+async function loadActiveOwners(targets: StatusChangeTarget[], logScope: string): Promise<OwnerMap | null> {
   try {
-    owners = await prisma.user.findMany({
+    const owners = await prisma.user.findMany({
       where: { id: { in: [...new Set(targets.map((t) => t.requestedBy))] }, deactivatedAt: null },
       select: { id: true, email: true, notificationEmail: true, emailOnApproved: true, emailOnDeclined: true, locale: true },
     });
+    return new Map(owners.map((u) => [u.id, u]));
   } catch (err) {
     console.error(`[${logScope}] active-owner lookup failed; skipping notifications:`, err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+const CHANNEL_LOG_LABEL: Record<NoticeChannel, string> = { discord: "Discord", push: "push", inbox: "in-app", agents: "outbound", email: "email" };
+
+// One sender per approve/decline channel, over the live (not disabled) targets.
+const STATUS_SENDERS: Record<
+  NoticeChannel,
+  (status: "APPROVED" | "DECLINED", live: StatusChangeTarget[], owners: OwnerMap, logScope: string) => Promise<void>
+> = {
+  discord: (status, live) => (status === "APPROVED" ? notifyUsersRequestsApproved(live) : notifyUsersRequestsDeclined(live)),
+  push: (status, live) => (status === "APPROVED" ? notifyUsersRequestsApprovedPush(live) : notifyUsersRequestsDeclinedPush(live)),
+  inbox: (status, live, _owners, logScope) => writeInboxRows(live, status === "APPROVED" ? "REQUEST_APPROVED" : "REQUEST_DECLINED", logScope),
+  // Hands off to notify-agents' own in-memory retries and returns.
+  agents: async (status, live) => emitNotificationEvents(live.map((t) => statusEvent(status, t))),
+  email: async (status, live, owners, logScope) => {
+    const recipients = live.flatMap((t) => {
+      const u = owners.get(t.requestedBy)!;
+      if (!(status === "APPROVED" ? u.emailOnApproved : u.emailOnDeclined)) return [];
+      const to = resolveUserNotificationEmail(u);
+      return to ? [{ t, to, locale: u.locale ?? null }] : [];
+    });
+    await settleLimit(recipients, EMAIL_SEND_CONCURRENCY, async ({ t, to, locale }) => {
+      const send = status === "APPROVED"
+        ? notifyUserRequestApprovedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, posterPath: t.posterPath, tmdbId: t.tmdbId ?? undefined, locale })
+        : notifyUserRequestDeclinedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, tmdbId: t.tmdbId ?? undefined, adminNote: t.adminNote ?? null, posterPath: t.posterPath, locale });
+      await send.catch((err: unknown) => console.error(`[${logScope}] email notify failed:`, err instanceof Error ? err.message : err));
+    });
+  },
+};
+
+// Send one channel to the live targets, then settle that channel's outbox rows
+// for EVERY target — a disabled requester's notice is dropped, not kept owed.
+// A sender that throws leaves its rows for the drain. Never throws.
+async function deliverStatusChannel(
+  status: "APPROVED" | "DECLINED",
+  channel: NoticeChannel,
+  targets: StatusChangeTarget[],
+  owners: OwnerMap,
+  logScope: string,
+): Promise<void> {
+  const live = targets.filter((t) => owners.has(t.requestedBy));
+  try {
+    if (live.length > 0) await STATUS_SENDERS[channel](status, live, owners, logScope);
+  } catch (err) {
+    console.error(`[${logScope}] ${CHANNEL_LOG_LABEL[channel]} notify failed:`, err instanceof Error ? err.message : err);
     return;
   }
-  const ownerById = new Map(owners.map((u) => [u.id, u]));
-  const live = targets.filter((t) => ownerById.has(t.requestedBy));
-  if (live.length === 0) return;
-
-  const logFailure = (channel: string) => (err: unknown) =>
-    console.error(`[${logScope}] ${channel} notify failed:`, err instanceof Error ? err.message : err);
-  if (status === "APPROVED") {
-    notifyUsersRequestsApproved(live).catch(logFailure("Discord"));
-    notifyUsersRequestsApprovedPush(live).catch(logFailure("push"));
-  } else {
-    notifyUsersRequestsDeclined(live).catch(logFailure("Discord"));
-    notifyUsersRequestsDeclinedPush(live).catch(logFailure("push"));
-  }
-  void writeInboxRows(live, status === "APPROVED" ? "REQUEST_APPROVED" : "REQUEST_DECLINED", logScope);
-  emitNotificationEvents(live.map((t) => statusEvent(status, t)));
-
-  const recipients = live.flatMap((t) => {
-    const u = ownerById.get(t.requestedBy)!;
-    if (!(status === "APPROVED" ? u.emailOnApproved : u.emailOnDeclined)) return [];
-    const to = resolveUserNotificationEmail(u);
-    return to ? [{ t, to, locale: u.locale ?? null }] : [];
-  });
-  await settleLimit(recipients, EMAIL_SEND_CONCURRENCY, async ({ t, to, locale }) => {
-    const send = status === "APPROVED"
-      ? notifyUserRequestApprovedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, posterPath: t.posterPath, tmdbId: t.tmdbId ?? undefined, locale })
-      : notifyUserRequestDeclinedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, tmdbId: t.tmdbId ?? undefined, adminNote: t.adminNote ?? null, posterPath: t.posterPath, locale });
-    await send.catch(logFailure("email"));
-  });
+  await settleOutbox(status === "APPROVED" ? OUTBOX_APPROVED_KIND : OUTBOX_DECLINED_KIND, channel, targets.map((t) => t.id));
 }

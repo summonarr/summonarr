@@ -608,7 +608,7 @@ test("the Discord admin-approve button schedules the check, not just the pending
   const start = text.indexOf("async function approveFromDiscord(");
   assert.ok(start > 0, "the approve path moved — update this pin");
   const branch = text.slice(start, text.indexOf("\n}\n", start));
-  assert.match(branch, /claimApproval\(request\.id, "PENDING"\)/, "the approve claims through the shared claim, which arms the backstop");
+  assert.match(branch, /claimApproval\(request\.id, "PENDING", \{ actorId: decider\.id \}\)/, "the approve claims through the shared claim, which arms the backstop");
   assert.match(
     branch,
     /followUpDecidedApprovals\(/,
