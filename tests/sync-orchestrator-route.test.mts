@@ -388,6 +388,9 @@ const fakePrisma = {
   $queryRaw: async (query: { sql: string; values: unknown[] }) => {
     const sql = query.sql;
     if (sql.includes(`FROM "TVEpisodeCache"`)) return [];
+    // The outbox drain's take-and-relock (outbox-drain.ts) is not a claim
+    // either: nothing is owed in this harness.
+    if (sql.includes(`UPDATE "Outbox"`)) return [];
     const ids = (query.values ?? []).map(String);
     const mode: CasCall["mode"] = sql.includes("IN ('PENDING', 'APPROVED')")
       ? "markAvailable"

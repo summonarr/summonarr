@@ -407,6 +407,8 @@ test("no Json column may hold a top-level array — db-export discriminates arra
     "WatchSyncPair.lastResult",
     // Always a PlaybackContext object ({ v: 1, … } — issue-playback-context.ts).
     "Issue.playbackContext",
+    // Always the object the claim builds with jsonb_build_object (outbox.ts).
+    "Outbox.payload",
   ]);
   for (const field of jsonFields) {
     assert.ok(

@@ -159,6 +159,7 @@ function makeTx() {
     watchlistItem: { deleteMany: rec("watchlistItem.deleteMany") },
     hiddenItem: { deleteMany: rec("hiddenItem.deleteMany") },
     notification: { deleteMany: rec("notification.deleteMany") },
+    outbox: { deleteMany: rec("outbox.deleteMany") },
     issue: { updateMany: rec("issue.updateMany") },
     userRecommendation: { deleteMany: rec("userRecommendation.deleteMany") },
     traktWatchedItem: { deleteMany: rec("traktWatchedItem.deleteMany") },

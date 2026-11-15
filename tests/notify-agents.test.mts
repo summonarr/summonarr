@@ -627,6 +627,10 @@ test("every 'now available' sync path goes through fanOutAvailableWinners — no
       `${p} names a channel helper (an aliased import still has to spell it once)`,
     );
   }
+  // The fan-out sends every channel through deliverAvailableChannel, whose
+  // sender table is where the outbound emit lives.
   const fan = hub.slice(hub.indexOf("export async function fanOutAvailableWinners"));
-  assert.match(fan.slice(0, fan.indexOf("\n}\n")), /emitNotificationEvents\(/, "the shared fan-out feeds the outbound channels");
+  assert.match(fan.slice(0, fan.indexOf("\n}\n")), /deliverAvailableChannel\("agents"/, "the shared fan-out feeds the outbound channels");
+  const senders = hub.slice(hub.indexOf("const AVAILABLE_SENDERS"));
+  assert.match(senders.slice(0, senders.indexOf("\n};\n")), /agents: .*emitNotificationEvents\(/, "the agents sender emits to the outbound channels");
 });

@@ -114,6 +114,8 @@ const {
   notifyRequestStatusChange,
 } = await import("../src/lib/request-notifications.ts");
 const { invalidateAgentCache } = await import("../src/lib/notify-agents.ts");
+const { drainOutbox } = await import("../src/lib/outbox-drain.ts");
+const { AVAILABLE_CHANNELS, OUTBOX_MAX_ATTEMPTS } = await import("../src/lib/outbox.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
 // One Setting map serves the feature-flag read AND every channel's config read
@@ -236,6 +238,19 @@ shadowPrismaModel(prisma, "notification", {
 });
 
 shadowPrismaModel(prisma, "pushSubscription", { findMany: async () => [] });
+// The outbox (outbox.ts): the fan-out settles each channel's rows by key, the
+// drain drops rows by id. Both are deleteMany; the where shape tells them apart.
+type OutboxDelete = { where: { dedupeKey?: { in: string[] }; id?: { in: string[] } } };
+const outboxDeletes: OutboxDelete[] = [];
+let outboxDeleteImpl: (args: OutboxDelete) => Promise<unknown> = async () => ({ count: 0 });
+shadowPrismaModel(prisma, "outbox", {
+  deleteMany: async (args: OutboxDelete) => {
+    outboxDeletes.push(args);
+    return outboxDeleteImpl(args);
+  },
+});
+const settledKeys = () => outboxDeletes.flatMap((d) => d.where.dedupeKey?.in ?? []).sort();
+const droppedIds = () => outboxDeletes.flatMap((d) => d.where.id?.in ?? []).sort();
 // Outbound notification channels (notify-agents.ts): none unless a test seeds
 // one with agentRow(). The feature flag defaults ON, so the agent list IS the
 // gate — and notify-agents caches it for 30s, hence the invalidate in beforeEach.
@@ -317,6 +332,8 @@ async function quiesce(): Promise<void> {
 
 beforeEach(() => {
   settings.clear();
+  outboxDeletes.length = 0;
+  outboxDeleteImpl = async () => ({ count: 0 });
   invalidateFeatureFlagCache(); // the 10s flag cache must not leak across tests
   warns.length = 0;
   errors.length = 0;
@@ -935,4 +952,100 @@ test("a DISABLED requester reaches NO channel — one gate read and nothing else
     assert.equal(agentPosts.length, 0, `the outbound channels follow the gate too (${status})`);
   }
   assert.deepEqual(errors, []);
+});
+
+// ═══ The outbox: a claimed "now available" send survives a restart ══════════
+//
+// The claim writes one outbox row per channel in its own statement (pinned in
+// notify-available.test.mts and, against Postgres, tests/db/outbox.test.mts).
+// Here: the fan-out settles each channel once it has been sent, and the drain
+// sends what an earlier process left behind.
+
+test("outbox: the fan-out settles EVERY channel's rows for exactly the claimed winners", async () => {
+  claimImpl = async () => [{ id: "w1" }]; // w2 lost the claim
+  await notifyAvailablePerServer([reqRow("w1", null), reqRow("w2", null)], true, true, true, true, "test");
+  await waitFor(() => settledKeys().length === AVAILABLE_CHANNELS.length, "every channel settled");
+  await quiesce();
+
+  assert.deepEqual(settledKeys(), AVAILABLE_CHANNELS.map((c) => `request.available:w1:${c}`).sort());
+  assert.ok(!settledKeys().some((k) => k.includes(":w2:")), "a row that lost the claim owns no outbox rows to settle");
+});
+
+test("outbox: a failed settle never fails the send — it warns and leaves the rows for the drain", async () => {
+  outboxDeleteImpl = async () => { throw new Error("pool exhausted (unit test)"); };
+  claimImpl = async () => [{ id: "w1" }];
+  await notifyAvailablePerServer([reqRow("w1", null)], true, true, true, true, "test");
+  await waitFor(() => warns.filter((w) => w.includes("[outbox] could not settle")).length === AVAILABLE_CHANNELS.length, "one warning per channel");
+  await quiesce();
+
+  assert.equal(createManyCalls.length, 1, "the inbox row was still written");
+  assert.deepEqual(errors, []);
+});
+
+const owed = (id: string, channel: string, over: Record<string, unknown> = {}) => ({
+  id: `ob-${id}-${channel}`,
+  kind: "request.available",
+  channel,
+  userId: `user-${id}`,
+  payload: { id, requestedBy: `user-${id}`, title: `Title ${id}`, mediaType: "MOVIE", tmdbId: 1, posterPath: null, arrInstance: "" },
+  attempts: 1,
+  expired: false,
+  ...over,
+});
+
+test("outbox drain: a row left by an earlier run is sent through its own channel, then settled", async () => {
+  claimImpl = async () => [owed("a", "inbox"), owed("b", "inbox")] as never;
+  const res = await drainOutbox("test");
+  await quiesce();
+
+  assert.deepEqual(res, { delivered: 2, dropped: 0 });
+  assert.match(norm(claims[0].sql), /^UPDATE "Outbox" SET attempts = attempts \+ 1, "lockedUntil" = NOW\(\) \+ make_interval/);
+  assert.match(norm(claims[0].sql), /WHERE "lockedUntil" < NOW\(\) ORDER BY "createdAt" LIMIT \? FOR UPDATE SKIP LOCKED/, "only rows whose lock lapsed, never a live claimer's");
+  assert.equal(createManyCalls.length, 1, "ONE inbox write for the channel's rows");
+  assert.deepEqual(createManyCalls[0].data.map((d) => d.userId), ["user-a", "user-b"]);
+  assert.deepEqual(settledKeys(), ["request.available:a:inbox", "request.available:b:inbox"]);
+  // Only the owed channel ran: no other channel resolved a recipient.
+  assert.equal(discordAvailableQueries.length + pushAvailableQueries.length + emailPrefQueries.length, 0);
+});
+
+test("outbox drain: expired, out-of-attempts, unreadable and unknown rows are deleted UNSENT", async () => {
+  claimImpl = async () => [
+    owed("old", "inbox", { expired: true }),
+    owed("tired", "inbox", { attempts: OUTBOX_MAX_ATTEMPTS + 1 }),
+    owed("junk", "inbox", { payload: { id: "junk" } }),
+    owed("odd", "carrier-pigeon"),
+    owed("alien", "inbox", { kind: "something.else" }),
+  ] as never;
+  const res = await drainOutbox("test");
+  await quiesce();
+
+  assert.deepEqual(res, { delivered: 0, dropped: 5 });
+  assert.deepEqual(droppedIds(), ["ob-alien-inbox", "ob-junk-inbox", "ob-odd-carrier-pigeon", "ob-old-inbox", "ob-tired-inbox"]);
+  assert.equal(createManyCalls.length, 0);
+});
+
+test("outbox drain (guardrail 33): a requester disabled since the claim gets nothing — the row is dropped", async () => {
+  disabledRequesterIds = ["user-gone"];
+  try {
+    claimImpl = async () => [owed("gone", "inbox"), owed("here", "inbox")] as never;
+    const res = await drainOutbox("test");
+    await quiesce();
+
+    assert.deepEqual(res, { delivered: 1, dropped: 1 });
+    assert.deepEqual(droppedIds(), ["ob-gone-inbox"]);
+    assert.deepEqual(createManyCalls[0].data.map((d) => d.userId), ["user-here"]);
+  } finally {
+    disabledRequesterIds = [];
+  }
+});
+
+test("outbox drain: nothing owed is one statement and no other work; a failing read never throws", async () => {
+  claimImpl = async () => [];
+  assert.deepEqual(await drainOutbox("test"), { delivered: 0, dropped: 0 });
+  assert.equal(claims.length, 1);
+  assert.equal(outboxDeletes.length, 0);
+
+  claimImpl = async () => { throw new Error("db down (unit test)"); };
+  assert.deepEqual(await drainOutbox("test"), { delivered: 0, dropped: 0 });
+  assert.ok(warns.some((w) => w.includes("outbox drain failed")));
 });

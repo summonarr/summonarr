@@ -2,6 +2,7 @@ import "server-only";
 import { Prisma } from "@/generated/prisma";
 import { prisma } from "./prisma";
 import { deletionVoteMarkerKey } from "./deletion-vote-keys";
+import { availableOutboxInsert } from "./outbox";
 
 type MediaType = "MOVIE" | "TV";
 
@@ -69,8 +70,13 @@ export async function claimAvailableNotifications<T extends { id: string; reques
   // requester of content the admin just declined. A row that turned AVAILABLE
   // mid-run (webhook flip) is intentionally skipped here; the webhook's own
   // poller and the orchestrator's requireStatusAvailable fallback pick it up.
-  const updated = opts.markAvailable
-    ? await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+  // The claim and the notifications it owes are ONE statement: the RETURNING
+  // rows feed the outbox insert in the same data-modifying CTE (outbox.ts), so
+  // there is no instant at which notifiedAvailable is burned and nothing
+  // records that a send is due. Still one atomic UPDATE for the CAS itself.
+  const returning = Prisma.sql`RETURNING id, "requestedBy", title, "mediaType", "tmdbId", "posterPath", "arrInstance"`;
+  const claim = opts.markAvailable
+    ? Prisma.sql`
         UPDATE "MediaRequest"
         SET "notifiedAvailable" = true,
             "status" = 'AVAILABLE',
@@ -79,16 +85,21 @@ export async function claimAvailableNotifications<T extends { id: string; reques
         WHERE id IN (${Prisma.join(ids)})
           AND "notifiedAvailable" = false
           AND "status" IN ('PENDING', 'APPROVED')
-        RETURNING id
-      `)
-    : await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+        ${returning}
+      `
+    : Prisma.sql`
         UPDATE "MediaRequest"
         SET "notifiedAvailable" = true
         WHERE id IN (${Prisma.join(ids)})
           AND "notifiedAvailable" = false
           ${statusGuard}
-        RETURNING id
-      `);
+        ${returning}
+      `;
+  const updated = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+    WITH claimed AS (${claim}),
+    queued AS (${availableOutboxInsert(Prisma.sql`claimed`)})
+    SELECT id FROM claimed
+  `);
   if (updated.length === 0) return { claimed: [], deliverable: [] };
   const winnerIds = new Set(updated.map((r) => r.id));
   const claimed = candidates.filter((r) => winnerIds.has(r.id));

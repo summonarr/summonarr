@@ -2016,6 +2016,30 @@ model CoWatchSuggestion {
   @@id([sourceTmdbId, sourceMediaType, tmdbId, mediaType])
 }
 
+// Notifications that are OWED: written in the same statement as the claim that
+// makes them due (the "now available" compare-and-swap burns notifiedAvailable,
+// so nothing else could ever re-send), deleted once the channel has been sent.
+// One row per (event, channel). The process that made the claim delivers and
+// deletes its own rows; `lockedUntil` keeps the drain (outbox-drain.ts) away
+// until then, so a row is only redelivered when that process died or the delete
+// failed. Rows past `expiresAt` are dropped unsent — a day-old "now available"
+// is noise. `payload` is always a JSON object. See outbox.ts.
+model Outbox {
+  id          String   @id
+  kind        String   @db.VarChar(40) // "request.available"
+  channel     String   @db.VarChar(16) // "discord" | "push" | "inbox" | "agents" | "email"
+  dedupeKey   String   @unique @db.VarChar(200) // <kind>:<subject id>:<channel>
+  userId      String? // the recipient: the purge deletes by it, the drain re-checks deactivation
+  payload     Json
+  attempts    Int      @default(0) // redelivery attempts by the drain (the claimer's own send is not counted)
+  lockedUntil DateTime
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+
+  @@index([lockedUntil])
+  @@index([userId])
+}
+
 // In-app notification inbox (the header bell). One row per user-facing event
 // (request approved / available / declined). Written alongside the email/push/
 // Discord fan-out in request-notifications.ts — UNCONDITIONALLY (unlike the

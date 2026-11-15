@@ -24,6 +24,7 @@ import { isFeatureEnabled } from "@/lib/features";
 import { withAdvisoryLock, SYNC_ORCHESTRATOR_LOCK_ID, DOWNLOAD_POLICIES_LOCK_ID } from "@/lib/advisory-lock";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { fanOutAvailableWinners } from "@/lib/request-notifications";
+import { drainOutbox } from "@/lib/outbox-drain";
 import {
   PENDING_REQUEST_SELECT,
   claimAndAnnounce,
@@ -267,6 +268,9 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
 
   if (windDownBefore("pending notify")) return windDownResponse();
   await notifyPendingAvailable(coverage, plex, jellyfin, vis);
+  // Notifications an earlier run claimed and never sent (a restart mid-send).
+  // Only rows whose lock has lapsed, so never this run's own claims. Never throws.
+  await drainOutbox("sync");
 
   if (windDownBefore("cache purge")) return windDownResponse();
   await purgeExpiredTmdbCache();

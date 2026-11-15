@@ -107,6 +107,10 @@ export const BACKUP_TABLES = [
   // MediaServerUser, which is listed earlier.
   "ServerWatchedTitle",
   "ServerWatchCursor",
+  // Notifications owed but not yet sent (outbox.ts). Listed because
+  // BACKUP_TABLES must cover every model; rows expire a day after they were
+  // written, so a restore can replay at most that day's unsent ones.
+  "Outbox",
 ] as const;
 
 export const BACKUP_ENUMS = [

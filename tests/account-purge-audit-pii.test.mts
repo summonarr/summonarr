@@ -309,6 +309,7 @@ const purgeTx = {
   watchlistItem: { deleteMany: record("watchlistItem.deleteMany") },
   hiddenItem: { deleteMany: record("hiddenItem.deleteMany") },
   notification: { deleteMany: record("notification.deleteMany") },
+  outbox: { deleteMany: record("outbox.deleteMany") },
   issue: { updateMany: record("issue.updateMany") },
   userRecommendation: { deleteMany: record("userRecommendation.deleteMany") },
   traktWatchedItem: { deleteMany: record("traktWatchedItem.deleteMany") },

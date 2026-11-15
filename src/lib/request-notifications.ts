@@ -9,6 +9,7 @@ import { claimAvailableNotificationWinners } from "./notify-available";
 import { buildNotificationData } from "./notification-data";
 import { emitNotificationEvents } from "./notify-agents";
 import type { NotifyEvent } from "./notify-events";
+import { OUTBOX_AVAILABLE_KIND, settleOutbox, type AvailableChannel } from "./outbox";
 
 interface RequestInfo {
   requestedBy: string;
@@ -110,7 +111,10 @@ export async function notifyAvailablePerServer(
 }
 
 export interface AvailableWinner {
-  id?: string;
+  // REQUIRED: the request's id is how each channel's outbox rows are settled
+  // once sent (outbox.ts). A winner without one could never be settled, and the
+  // drain would send it a second time.
+  id: string;
   requestedBy: string;
   title: string;
   mediaType: string;
@@ -136,29 +140,66 @@ export interface AvailableWinner {
 // the sites used to repeat this list six times, and the manual path kept a
 // seventh, differently-shaped copy (guardrail 14c).
 //
+// Every claimed winner already has one outbox row per channel, written by the
+// claim itself (notify-available.ts + outbox.ts). Each channel deletes its rows
+// when it returns; rows a dead process left behind are sent by the drain
+// (outbox-drain.ts) through deliverAvailableChannel, the same per-channel senders.
+//
 // Returns the email send (bounded, awaited inside); the sync callers `void` it,
 // the webhook path awaits it.
 export async function fanOutAvailableWinners(winners: AvailableWinner[], logScope: string): Promise<void> {
   if (winners.length === 0) return;
-  const payload = winners.map((r) => ({ requestedBy: r.requestedBy, title: r.title, mediaType: r.mediaType, tmdbId: r.tmdbId ?? undefined }));
-  notifyUsersRequestsAvailable(payload).catch((err) => console.error(`[${logScope}] Discord available notify failed:`, err instanceof Error ? err.message : err));
-  notifyUsersRequestsAvailablePush(payload).catch((err) => console.error(`[${logScope}] push available notify failed:`, err instanceof Error ? err.message : err));
-  // In-app inbox for the batch winners (one createMany, same CAS-once guarantee).
-  void writeAvailableInAppNotifications(winners, logScope);
+  // Discord, push, the inbox and the outbound channels are not waited on, as
+  // before; email is (SMTP connections are bounded — see EMAIL_SEND_CONCURRENCY).
+  void deliverAvailableChannel("discord", winners, logScope);
+  void deliverAvailableChannel("push", winners, logScope);
+  void deliverAvailableChannel("inbox", winners, logScope);
+  void deliverAvailableChannel("agents", winners, logScope);
+  await deliverAvailableChannel("email", winners, logScope);
+}
+
+type ChannelPayload = { requestedBy: string; title: string; mediaType: string; tmdbId: number | undefined };
+const channelPayload = (winners: AvailableWinner[]): ChannelPayload[] =>
+  winners.map((r) => ({ requestedBy: r.requestedBy, title: r.title, mediaType: r.mediaType, tmdbId: r.tmdbId ?? undefined }));
+
+// One sender per "now available" channel. Adding a channel means adding it
+// HERE and to AVAILABLE_CHANNELS in outbox.ts (the type makes the two agree).
+const AVAILABLE_SENDERS: Record<AvailableChannel, (winners: AvailableWinner[], logScope: string) => Promise<void>> = {
+  discord: (winners) => notifyUsersRequestsAvailable(channelPayload(winners)),
+  push: (winners) => notifyUsersRequestsAvailablePush(channelPayload(winners)),
+  // In-app inbox for the batch winners (one createMany).
+  inbox: (winners, logScope) => writeAvailableInAppNotifications(winners, logScope),
   // Outbound channels: one event per claimed request. This is the ONLY
   // `request.available` emit — notifyRequestStatusChange routes here rather
   // than emitting its own, or the manual path would fire the event twice.
-  emitNotificationEvents(winners.map((w) => availableEvent(w)));
-  // Email channel, so the user's `emailOnAvailable` preference is honoured on
-  // the webhook/sync paths too.
-  await notifyUsersRequestsAvailableEmail(winners, logScope);
+  // The emit hands off to notify-agents' own in-memory retries and returns.
+  agents: async (winners) => emitNotificationEvents(winners.map((w) => availableEvent(w))),
+  // So the user's `emailOnAvailable` preference is honoured on the
+  // webhook/sync paths too.
+  email: (winners, logScope) => notifyUsersRequestsAvailableEmail(winners, logScope),
+};
+
+/**
+ * Send ONE channel for these winners, then settle its outbox rows. Never
+ * throws. A sender that throws leaves its rows for the drain; one that returns
+ * is settled (the senders swallow their own per-recipient failures).
+ */
+export async function deliverAvailableChannel(channel: AvailableChannel, winners: AvailableWinner[], logScope: string): Promise<void> {
+  if (winners.length === 0) return;
+  try {
+    await AVAILABLE_SENDERS[channel](winners, logScope);
+  } catch (err) {
+    console.error(`[${logScope}] ${channel} available notify failed:`, err instanceof Error ? err.message : err);
+    return;
+  }
+  await settleOutbox(OUTBOX_AVAILABLE_KIND, channel, winners.map((w) => w.id));
 }
 
 function availableEvent(w: AvailableWinner): NotifyEvent {
   return {
     event: "request.available",
     media: { type: w.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: w.tmdbId ?? null, title: w.title, posterPath: w.posterPath ?? null },
-    request: { id: w.id ?? null, instance: w.arrInstance },
+    request: { id: w.id, instance: w.arrInstance },
   };
 }
 

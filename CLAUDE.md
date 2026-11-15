@@ -567,6 +567,20 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - A re-request that replaces a DECLINED row moves its thread through [request-comment-carry.ts](src/lib/request-comment-carry.ts) (`dropStaleDeclined`/`dropStaleDeclinedMany`, then `restoreThread`) — NEVER a bare stale-row delete, which cascades the thread away.
     - `tests/request-comments.test.mts` and `tests/request-comments-route.test.mts` pin it; five mutations (deactivated gate, email select, closed rule, `fromAdmin`, feature gate) each fail a named test.
     - The issue twin: an issue message fans out ONLY through `announceIssueReply` ([issue-reply-notify.ts](src/lib/issue-reply-notify.ts)) — one fail-closed reporter read (33), and the reporter-facing author label in the REPORTER's language, never the replying admin's.
+14f. **A "now available" claim writes the notifications it owes in the SAME statement — the outbox ([outbox.ts](src/lib/outbox.ts)) — and each channel deletes its rows only after it has been sent. NEVER burn `notifiedAvailable` in a statement that does not also queue the send.**
+
+    Why:
+    - The claim is once-only and the fan-out runs detached. A restart between the two (every upgrade is one: the app has no SIGTERM drain) lost the notification for good, because no later run can win that claim again.
+
+    Rules:
+    - `claimAvailableNotifications` is one data-modifying CTE: the UPDATE's RETURNING rows feed `availableOutboxInsert`, one `Outbox` row per channel (`AVAILABLE_CHANNELS`), only for requesters whose account is not disabled (33), already locked for `OUTBOX_LOCK_MINUTES`. Its bind parameters stay exactly the candidate ids.
+    - The claimer sends as before through `fanOutAvailableWinners`; each channel goes through `deliverAvailableChannel`, which settles (deletes) that channel's rows when the sender returns. A sender that throws, or a failed delete, leaves the rows.
+    - `drainOutbox` ([outbox-drain.ts](src/lib/outbox-drain.ts)) runs once per `/api/sync` run and takes ONLY rows whose lock has lapsed (`FOR UPDATE SKIP LOCKED`, re-locking and counting the attempt in the same statement), so it never races a live claimer. It drops, unsent, a row past `expiresAt` (24 h), past `OUTBOX_MAX_ATTEMPTS`, unreadable, or for a requester disabled since the claim. It never throws into the sync.
+    - Delivery is at-least-once per channel: a death between a send and its delete repeats that one channel for that one request.
+    - This is NOT a retry for a send the channel gave up on: every sender swallows its own failures, so a channel that returned is settled. Rows are per channel so a sender can start reporting failure without changing the table.
+    - Not on the outbox yet: the admin's manual "mark available" (its own `updateMany` CAS in `requests/[id]`), approve/decline notices, issue and comment replies. A new kind adds its own insert beside its claim and its senders beside `AVAILABLE_SENDERS`.
+    - The account purge deletes the account's `Outbox` rows. `Outbox` is in `BACKUP_TABLES` only because every model must be.
+    - `tests/db/outbox.test.mts` (real Postgres), `tests/request-notifications.test.mts` and `tests/notify-available.test.mts` pin it; eleven mutations each fail a named test.
 15. **The `stillPending` snapshot is taken once per sync run.** If you add a third source to the orchestrator, remember that changes made by the Plex pass won't be visible to the Jellyfin pass within the same run — that's intentional. Within a source the marking likewise runs once, over the already-unioned map, so no instance can shadow another's rows.
 16. **NEVER call `Date.now()` or `new Date()` inside the render path of a `"use client"` component.** Module-level constants and direct calls in JSX are both render-time evaluations.
 

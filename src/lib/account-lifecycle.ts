@@ -384,6 +384,9 @@ async function purgePersonalDataInTx(tx: TxClient, id: string): Promise<void> {
   await tx.watchlistItem.deleteMany({ where: { userId: id } });
   await tx.hiddenItem.deleteMany({ where: { userId: id } });
   await tx.notification.deleteMany({ where: { userId: id } });
+  // Notifications still owed to this account (outbox.ts): their payload names
+  // the request title, and nothing should be sent after a purge.
+  await tx.outbox.deleteMany({ where: { userId: id } });
   // The issues stay (other people read them), but the snapshot of what THIS person
   // was playing — client, device, when — is their viewing data, not the issue's.
   await tx.issue.updateMany({ where: { reportedBy: id, playbackContext: { not: Prisma.DbNull } }, data: { playbackContext: Prisma.DbNull } });
