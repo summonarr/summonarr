@@ -14,17 +14,11 @@ services:
       - SETGID
       - DAC_OVERRIDE
       - FOWNER
-    # Deliberately NOT `env_file: .env.local` — Postgres needs POSTGRES_PASSWORD
-    # and nothing else, and loading the shared file would put
-    # TOKEN_ENCRYPTION_KEY, NEXTAUTH_SECRET and CRON_SECRET into this container's
-    # env (see docker-container/docker-compose.yml). Compose interpolates
-    # `${...}` from the file named by `--env-file` (else ./.env), never from a
-    # service's env_file, so run this file as
-    # `docker compose --env-file .env.local up -d`.
     environment:
       POSTGRES_DB: summonarr
       POSTGRES_USER: summonarr
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set - run compose with --env-file .env.local}"
+    env_file:
+      - .env.local
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:

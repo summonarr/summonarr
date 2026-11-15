@@ -596,24 +596,27 @@ test("the env templates never set BASE_PATH, so the image's build value reaches 
   }
 });
 
-test("the Postgres container gets its password and nothing else from the env file", () => {
-  for (const f of COMPOSES) {
-    const c = read(f);
-    const start = c.indexOf("\n  postgres:\n");
-    const end = c.indexOf("\n  summonarr:\n");
-    assert.ok(start >= 0 && end > start, `${f}: the postgres service`);
-    const svc = c.slice(start, end);
-    assert.doesNotMatch(svc, /^\s*env_file:/m, `${f}: no env_file on postgres (it would carry the app's secrets)`);
-    assert.match(svc, /^      POSTGRES_PASSWORD: "\$\{POSTGRES_PASSWORD:\?[^}]+\}"$/m, `${f}: the password is interpolated, and required`);
-    const env = svc.slice(svc.indexOf("\n    environment:\n"), svc.indexOf("\n    volumes:\n"));
-    const keys = [...env.matchAll(/^      ([A-Z_]+):/gm)].map((m) => m[1]);
-    assert.deepEqual(keys, ["POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD"], `${f}: the whole environment`);
-  }
-  // The source build keeps its settings in .env.local, which Compose reads for
-  // interpolation only when it is named.
-  const readme = read("README.md");
-  assert.ok(readme.includes("docker compose --env-file .env.local up -d"));
-  assert.ok(read("docker-compose.yml").includes("--env-file .env.local"));
+test("the GHCR compose gives Postgres its password and nothing else from the env file", () => {
+  const f = "docker-container/docker-compose.yml";
+  const c = read(f);
+  const start = c.indexOf("\n  postgres:\n");
+  const end = c.indexOf("\n  summonarr:\n");
+  assert.ok(start >= 0 && end > start, `${f}: the postgres service`);
+  const svc = c.slice(start, end);
+  assert.doesNotMatch(svc, /^\s*env_file:/m, `${f}: no env_file on postgres (it would carry the app's secrets)`);
+  assert.match(svc, /^      POSTGRES_PASSWORD: "\$\{POSTGRES_PASSWORD:\?[^}]+\}"$/m, `${f}: the password is interpolated, and required`);
+  const env = svc.slice(svc.indexOf("\n    environment:\n"), svc.indexOf("\n    volumes:\n"));
+  const keys = [...env.matchAll(/^      ([A-Z_]+):/gm)].map((m) => m[1]);
+  assert.deepEqual(keys, ["POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD"], `${f}: the whole environment`);
+});
+
+test("the source-build compose reads .env.local for Postgres through env_file, so no --env-file flag is needed", () => {
+  const c = read("docker-compose.yml");
+  const start = c.indexOf("\n  postgres:\n");
+  const end = c.indexOf("\n  summonarr:\n");
+  const svc = c.slice(start, end);
+  assert.match(svc, /^    env_file:\n      - \.env\.local$/m);
+  assert.doesNotMatch(read("README.md"), /--env-file \.env\.local/);
 });
 
 test("the image healthcheck probes with busybox wget, not a node process per probe", () => {
