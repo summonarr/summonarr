@@ -54,6 +54,7 @@
 //   - Admin sessions are REAL jose JWTs against in-memory AuthSession/User rows.
 //
 // Erasable-TS only; node:assert/strict; guardrail 7 console capture (warn/error).
+import { readFileSync } from "node:fs";
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { Client } from "pg";
@@ -2232,15 +2233,19 @@ test("the post-write registry read is issued ONCE per service and shared by the 
   assert.equal(res.status, 200);
   await settle();
 
-  // Two reads per service: the arms' pre-walk getSyncableMediaInstances (which
-  // must stay separate — it captures the instance list BEFORE the library walk)
-  // and ONE post-write getMediaInstances shared by the sweep and the demote
-  // guard. The two used to re-issue the post-write pair back-to-back.
-  for (const key of ["plexInstances", "jellyfinInstances"]) {
+  // Plex (configured here): the arm's pre-walk getSyncableMediaInstances (which
+  // must stay separate — it captures the instance list BEFORE the library walk),
+  // the episode-cache hold's getMediaInstances (it runs inside the arm, before
+  // the sweep exists, and must see whether a registered named server is
+  // unconfigured), and ONE post-write getMediaInstances shared by the sweep and
+  // the demote guard. Jellyfin (not configured) never reaches its episode write,
+  // so it has no hold read. The sweep and the guard used to re-issue theirs
+  // back-to-back.
+  for (const [key, expected] of [["plexInstances", 3], ["jellyfinInstances", 2]] as const) {
     assert.equal(
       settingFindUniqueKeys.filter((k) => k === key).length,
-      2,
-      `${key}: one pre-walk read + one shared post-write read — saw ${settingFindUniqueKeys.filter((k) => k === key).length}`,
+      expected,
+      `${key}: expected ${expected} reads — saw ${settingFindUniqueKeys.filter((k) => k === key).length}`,
     );
   }
 });
@@ -3769,4 +3774,28 @@ test("GUARDRAIL 41: a lock lost as the Jellyfin episode walk FINISHES still does
   assert.ok(dropped, "precondition: the lock dropped while the last episode page was served");
   assert.deepEqual(episodeCacheWrites(), { tx: 0, staged: 0 }, "a complete walk is still not written once the lock is gone");
   assert.equal((await bodyOf(res)).windDown, true);
+});
+
+// ── guardrail 14f / 41: notices owed by an earlier run are redelivered even when this run stops early ──
+// Structural, like the guardrail-41 pin above: a run that winds down at a phase
+// boundary (or throws) returns before any later step, so the drain must sit in a
+// `finally` around the whole sequence, never between two phases.
+test("GUARDRAIL 14f: the outbox drain runs in a finally around every phase, not between two of them", async () => {
+  const src = readFileSync(new URL("../src/lib/sync-orchestrator.ts", import.meta.url), "utf8");
+  assert.match(
+    src,
+    /try \{\s*return await runSyncPhases\(actor, t, signal\);\s*\} finally \{[\s\S]*?await drainOutbox\("sync"\);\s*\}/,
+    "drainOutbox must run in the finally of the wrapper around runSyncPhases",
+  );
+  const phases = src.slice(src.indexOf("async function runSyncPhases"));
+  assert.ok(!phases.includes("drainOutbox("), "the phases themselves must not call the drain (an early return would skip it)");
+});
+
+test("GUARDRAIL 41: the download-policy pass observes the run's lock and the episode-cache rewrite holds for an unconfigured named server", async () => {
+  const libs = readFileSync(new URL("../src/lib/sync-orchestrator-libraries.ts", import.meta.url), "utf8");
+  assert.match(libs, /syncDownloadPolicies\(signal \? AbortSignal\.any\(\[lockSignal, signal\]\) : lockSignal\)/);
+  assert.equal((libs.match(/unconfiguredNamedServerHoldsRows\(/g) ?? []).length, 3, "the helper plus one call per source");
+  const policy = readFileSync(new URL("../src/lib/download-policy.ts", import.meta.url), "utf8");
+  assert.match(policy, /if \(signal\?\.aborted\) return results;\s*\n\s*const cfg = await getJellyfinConfig/);
+  assert.match(policy, /if \(signal\?\.aborted\) return results;\s*\n\s*\n?\s*\/\/ After EVERY instance/);
 });

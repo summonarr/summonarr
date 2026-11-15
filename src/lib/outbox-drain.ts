@@ -66,7 +66,14 @@ const noticePayload = v.object({
 // decline that was reopened, a deleted request all owe nothing.
 const DECISION_STATUS = { [OUTBOX_APPROVED_KIND]: "APPROVED", [OUTBOX_DECLINED_KIND]: "DECLINED" } as const;
 type DecisionKindKey = keyof typeof DECISION_STATUS;
-const isDecisionKind = (k: string): k is DecisionKindKey => k in DECISION_STATUS;
+const isDecisionKind = (k: string): k is DecisionKindKey => Object.hasOwn(DECISION_STATUS, k);
+// An approval that STOOD and has since moved on (the file was already there, so
+// Radarr/Sonarr/the sync flipped it to AVAILABLE within seconds) still owes its
+// "approved" notice: only a rolled-back or reopened approval does not.
+const DECISION_STILL_TRUE: Record<DecisionKindKey, readonly string[]> = {
+  [OUTBOX_APPROVED_KIND]: ["APPROVED", "AVAILABLE"],
+  [OUTBOX_DECLINED_KIND]: ["DECLINED"],
+};
 
 // A whole announcement (channel "all"): what announceRequestComment /
 // announceIssueReply were handed when the comment or message was written.
@@ -167,11 +174,24 @@ export async function drainOutbox(logScope = "outbox"): Promise<OutboxDrainResul
     `);
     if (!Array.isArray(raw) || raw.length === 0) return result;
 
+    // A row that cannot be read (column-type drift) can never be sent, and the
+    // statement above already re-locked it: delete it now, or it is re-taken
+    // every lock period and eats the batch.
+    const drop: string[] = [];
     const rows = raw.flatMap((r) => {
       const checked = check(rowSchema, r);
-      return checked.ok ? [checked.value] : [];
+      if (checked.ok) return [checked.value];
+      const id = typeof r === "object" && r !== null ? (r as { id?: unknown }).id : undefined;
+      if (typeof id === "string") drop.push(id);
+      return [];
     });
-    if (rows.length === 0) return result;
+    if (rows.length === 0) {
+      if (drop.length > 0) {
+        await prisma.outbox.deleteMany({ where: { id: { in: drop } } });
+        result.dropped += drop.length;
+      }
+      return result;
+    }
 
     // Disabled since the claim (guardrail 33): delivery is dropped, not deferred.
     const userIds = [...new Set(rows.flatMap((r) => (r.userId ? [r.userId] : [])))];
@@ -181,7 +201,6 @@ export async function drainOutbox(logScope = "outbox"): Promise<OutboxDrainResul
     });
     const disabledIds = new Set(disabled.map((u) => u.id));
 
-    const drop: string[] = [];
     type Owed = { rowId: string; kind: string; channel: NoticeChannel; payload: AvailableWinner & { adminNote?: string | null } };
     const owed: Owed[] = [];
     const comments: Array<{ rowId: string; a: RequestCommentAnnouncement & { commentId: string } }> = [];
@@ -189,7 +208,12 @@ export async function drainOutbox(logScope = "outbox"): Promise<OutboxDrainResul
     const grabs: Array<{ rowId: string; grabId: string; push: GrabPush }> = [];
     const voteAlerts: ThresholdAlertData[] = [];
     for (const row of rows) {
-      const stale = row.expired || row.attempts > OUTBOX_MAX_ATTEMPTS || (row.userId !== null && disabledIds.has(row.userId));
+      // A comment or reply row's userId is its AUTHOR, not its recipient: the
+      // author being disabled since says nothing about the person to tell (the
+      // announcer re-checks the recipient itself, guardrail 33).
+      const authorRow = row.kind === OUTBOX_COMMENT_KIND || row.kind === OUTBOX_ISSUE_REPLY_KIND;
+      const stale = row.expired || row.attempts > OUTBOX_MAX_ATTEMPTS
+        || (!authorRow && row.userId !== null && disabledIds.has(row.userId));
       if (row.kind === OUTBOX_GRAB_KIND && row.channel === OUTBOX_GRAB_CHANNEL && !stale) {
         const g = check(grabPayload, row.payload);
         const grabId = grabIdOf(row.dedupeKey);
@@ -243,7 +267,7 @@ export async function drainOutbox(logScope = "outbox"): Promise<OutboxDrainResul
     }
     const byGroup = new Map<string, { kind: string; channel: NoticeChannel; payloads: Owed["payload"][] }>();
     for (const o of owed) {
-      if (isDecisionKind(o.kind) && statusById.get(o.payload.id) !== DECISION_STATUS[o.kind]) {
+      if (isDecisionKind(o.kind) && !DECISION_STILL_TRUE[o.kind].includes(statusById.get(o.payload.id) ?? "")) {
         drop.push(o.rowId);
         continue;
       }

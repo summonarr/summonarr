@@ -73,7 +73,10 @@ const refusedReconciles = processSingleton(
  *   once that identity is gone from every configured server the Summonarr
  *   account it signs in as is signed out (jellyfin-offboarding.ts).
  */
-export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
+// `signal` is the caller's lock (guardrail 41): a lost lock stops the pass
+// between instances and skips the offboarding pass, which would otherwise sign
+// accounts out on a run no lock covers any more. Never checked mid-instance.
+export async function syncDownloadPolicies(signal?: AbortSignal): Promise<PolicySyncResult[]> {
   const results: PolicySyncResult[] = [];
 
   const [instances, autoDisableRow] = await Promise.all([
@@ -92,6 +95,7 @@ export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
   // instances' full user-syncs interleaving their own internal work.
   const noOpinion: MediaInstanceKey[] = [];
   for (const instance of instances) {
+    if (signal?.aborted) return results;
     const cfg = await getJellyfinConfig(instance.slug);
     if (!cfg.url || !cfg.apiKey) continue; // defensive; getSyncableMediaInstances already filters to configured ones
     try {
@@ -108,6 +112,8 @@ export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
       noOpinion.push(instance.slug);
     }
   }
+
+  if (signal?.aborted) return results;
 
   // After EVERY instance has synced, so "gone from every configured server" is
   // judged on this run's rows (guardrail 35). Never throws out of the sync.

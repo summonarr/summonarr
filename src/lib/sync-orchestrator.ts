@@ -33,6 +33,19 @@ import { purgeExpiredTmdbCache } from "./sync-orchestrator-tmdb-purge";
 //     Plex and the Jellyfin pass share (guardrail 15);
 //   - the AVAILABLE+unnotified fallback runs last.
 export async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: AbortSignal): Promise<NextResponse> {
+  try {
+    return await runSyncPhases(actor, t, signal);
+  } finally {
+    // Notifications an earlier run claimed and never sent (a restart mid-send).
+    // In a `finally` so a run that winds down at a phase boundary or throws still
+    // redelivers: a row expires after 24 h and only this drain deletes it, so a
+    // sync that kept stopping early would lose the notice for good (guardrail 14f).
+    // Only rows whose lock has lapsed, so never this run's own claims. Never throws.
+    await drainOutbox("sync");
+  }
+}
+
+async function runSyncPhases(actor: CronActor, t: Translator, signal?: AbortSignal): Promise<NextResponse> {
   // withAdvisoryLock aborts the signal at DEFAULT_WORK_TIMEOUT_MS (30 min) and
   // answers its caller at once; it keeps the lock only for a bounded grace while
   // this function winds down, and a dropped lock connection frees the lock in
@@ -130,10 +143,6 @@ export async function runSyncOrchestrator(actor: CronActor, t: Translator, signa
 
   if (windDownBefore("pending notify")) return windDownResponse();
   await notifyPendingAvailable(coverage, plex, jellyfin, vis);
-  // Notifications an earlier run claimed and never sent (a restart mid-send).
-  // Only rows whose lock has lapsed, so never this run's own claims. Never throws.
-  await drainOutbox("sync");
-
   if (windDownBefore("cache purge")) return windDownResponse();
   await purgeExpiredTmdbCache();
 
