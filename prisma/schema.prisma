@@ -1316,6 +1316,13 @@ model MediaServerUser {
   // and play history must survive a user's removal. The Jellyfin prune sets this
   // false instead of deleting; the next sync re-activates a returning user.
   active           Boolean  @default(true)
+  // Jellyfin only (guardrail 6j): set true by the SAME write that turns `active`
+  // false, cleared once the offboarding pass has decided the identity (or the
+  // user returns). The pending set is read from this column, never from memory,
+  // so a restart between the inactive write and the session revoke loses nothing.
+  // Default false: rows already inactive before this column existed stay as they
+  // were — the upgrade signs nobody out.
+  offboardPending  Boolean  @default(false)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 

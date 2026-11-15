@@ -65,7 +65,6 @@ test("small servers: shrink-to-one passes only within tolerance", () => {
 // like someone who also syncs a friend's second server.
 import { prisma } from "../src/lib/prisma.ts";
 import { shadowPrismaModel, shadowPrismaClientMethod } from "./_helpers.mts";
-import { __resetProcessSingletonForTests } from "../src/lib/process-singleton.ts";
 
 const DEFAULT_URL = "http://10.77.0.1:8096";
 const REMOTE_URL = "http://10.77.0.2:8096";
@@ -81,6 +80,7 @@ interface MsuRow {
   downloadsEnabled: boolean | null;
   active: boolean;
   manualUserLink: boolean;
+  offboardPending?: boolean;
   userId?: string | null;
 }
 
@@ -105,6 +105,7 @@ const sessionStore = new Map<string, { sessionId: string; userId: string }>();
 const auditRows: Array<{ action: string; target: string; userId: string | null; details: string | null }> = [];
 let txThrows = 0; // fail the next N revoke transactions
 let reconcileThrows = 0; // fail the next N reconcile updateManys (a busy pool)
+let clearThrows = 0; // fail the next N offboardPending clears
 const settingThrowKeys = new Set<string>(); // setting.findUnique keys that throw
 
 function seedUser(row: Partial<UserRow> & { id: string }, sessions = 2): void {
@@ -214,11 +215,12 @@ shadowPrismaModel(prisma, "mediaServerUser", {
     const row = [...msuStore.values()].find((r) => msuMatches(r, args.where));
     return row ? { id: row.id } : null;
   },
-  findMany: async (args?: { where?: { source?: string; serverInstance?: string }; select?: unknown }) => {
+  findMany: async (args?: { where?: { source?: string; serverInstance?: string; offboardPending?: boolean }; select?: unknown }) => {
     const where = args?.where ?? {};
     return [...msuStore.values()].filter(
       (r) => (where.source === undefined || r.source === where.source)
-        && (where.serverInstance === undefined || r.serverInstance === where.serverInstance),
+        && (where.serverInstance === undefined || r.serverInstance === where.serverInstance)
+        && (where.offboardPending === undefined || (r.offboardPending ?? false) === where.offboardPending),
     );
   },
   upsert: async (args: {
@@ -241,7 +243,27 @@ shadowPrismaModel(prisma, "mediaServerUser", {
     msuStore.set(created.id, created);
     return created;
   },
-  updateMany: async (args: { where: { source: string; serverInstance?: string; sourceUserId: { notIn: string[] }; active: boolean }; data: { active: boolean } }) => {
+  updateMany: async (args: {
+    where: { source: string; serverInstance?: string; sourceUserId: { notIn: string[] } | string; active?: boolean; offboardPending?: boolean };
+    data: { active?: boolean; offboardPending?: boolean };
+  }) => {
+    // The offboarding pass clearing a decided identity (by exact id, every server).
+    if (typeof args.where.sourceUserId === "string") {
+      if (clearThrows > 0) {
+        clearThrows--;
+        throw new Error("pending clear failed (unit test)");
+      }
+      let cleared = 0;
+      for (const r of msuStore.values()) {
+        if (r.source === args.where.source && r.sourceUserId === args.where.sourceUserId
+          && (r.offboardPending ?? false) === args.where.offboardPending) {
+          Object.assign(r, args.data);
+          cleared++;
+        }
+      }
+      return { count: cleared };
+    }
+    const notIn = args.where.sourceUserId.notIn;
     // serverInstance is OPTIONAL here on purpose: an absent key must behave
     // like real Prisma (no filter on that field, matching every instance) so a
     // test that deliberately reverts the guardrail-28 scoping exercises the
@@ -256,9 +278,9 @@ shadowPrismaModel(prisma, "mediaServerUser", {
         r.source === args.where.source
         && (args.where.serverInstance === undefined || r.serverInstance === args.where.serverInstance)
         && r.active === args.where.active
-        && !args.where.sourceUserId.notIn.includes(r.sourceUserId)
+        && !notIn.includes(r.sourceUserId)
       ) {
-        r.active = args.data.active;
+        Object.assign(r, args.data);
         count++;
       }
     }
@@ -277,7 +299,6 @@ const okJson = (data: unknown) =>
 // Dynamic import so the prisma-shadow/fetch stubs above precede the module
 // graph (the established pattern — see jellyfin.test.mts).
 const { syncDownloadPolicies, RECONCILE_CONFIRM_RUNS } = await import("../src/lib/download-policy.ts");
-const { OFFBOARD_PENDING_KEY } = await import("../src/lib/jellyfin-offboarding.ts");
 
 test("guardrail 28: a user existing ONLY on a second Jellyfin instance survives the FIRST instance's prune untouched, while a genuine same-instance departure is still pruned", async () => {
   settings.clear();
@@ -377,8 +398,8 @@ function resetOffboarding(): void {
   auditRows.length = 0;
   txThrows = 0;
   reconcileThrows = 0;
+  clearThrows = 0;
   settingThrowKeys.clear();
-  __resetProcessSingletonForTests(OFFBOARD_PENDING_KEY);
   settings.set("jellyfinUrl", DEFAULT_URL);
   settings.set("jellyfinApiKey", "key-default");
 }
@@ -587,8 +608,7 @@ test("offboarding: a failed revoke is reported and retried on the next run", asy
 });
 
 // Offboarding learns of a departure only on the active→inactive TRANSITION, which
-// the sync sees once. The id must reach the pending ledger the moment its
-// inactive write commits: a run that throws AFTER that write (and before the
+// the sync sees once. The row must be marked pending by the inactive write itself: a run that throws AFTER that write (and before the
 // offboarding pass) used to drop it, and every later run read the row as already
 // inactive — the member's sessions (the iOS app's never expire) lived on.
 test("offboarding: a DISABLED member's departure survives a run that throws after the inactive write (the reconcile updateMany fails)", async () => {
@@ -639,6 +659,119 @@ test("offboarding: an earlier server's departure survives a run that throws read
   assert.equal(sessionsOf("u-gone"), 0, "the departure was kept and is decided on the next run");
   await flush();
   assert.equal(offboardAudits().length, 1);
+});
+
+// The pending set is a column, not process memory. A restart is modelled as what
+// it leaves behind: the row already inactive and marked pending, with no
+// active→inactive transition left for the sync to see.
+test("offboarding: a departure still pending after a RESTART is signed out by the next run (no transition to observe)", async () => {
+  resetOffboarding();
+  seedRow("row-gone", "j-gone", { userId: "u-gone", active: false, offboardPending: true });
+  seedRow("row-keep", "j-keep");
+  seedUser({ id: "u-gone", jellyfinUserId: "j-gone" });
+  respond = (url) => {
+    if (url === `${DEFAULT_URL}/Users`) return okJson([user("j-keep")]);
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  const results = await syncDownloadPolicies();
+  assert.ok(results.every((r) => r.errors === 0), JSON.stringify(results));
+  assert.equal(sessionsOf("u-gone"), 0);
+  assert.equal(msuStore.get("row-gone")!.offboardPending, false, "decided, so no longer pending");
+  await flush();
+  assert.equal(offboardAudits().length, 1);
+});
+
+test("offboarding: a row that was inactive before the pending column existed signs nobody out", async () => {
+  resetOffboarding();
+  seedRow("row-old", "j-old", { userId: "u-old", active: false });
+  seedRow("row-keep", "j-keep");
+  seedUser({ id: "u-old", jellyfinUserId: "j-old" });
+  respond = (url) => {
+    if (url === `${DEFAULT_URL}/Users`) return okJson([user("j-keep")]);
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  await syncDownloadPolicies();
+  await flush();
+  assert.equal(sessionsOf("u-old"), 2);
+  assert.equal(offboardAudits().length, 0);
+});
+
+test("offboarding: the inactive write and the pending mark are ONE write, for a removed and for a disabled member", async () => {
+  resetOffboarding();
+  // A cold second server holds every decision back, so the marks stay visible.
+  settings.set("jellyfinRemoteUrl", REMOTE_URL);
+  settings.set("jellyfinRemoteApiKey", "key-remote");
+  settings.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  seedRow("row-gone", "j-gone");
+  seedRow("row-dis", "j-dis");
+  seedRow("row-keep", "j-keep");
+  respond = (url) => {
+    if (url === `${DEFAULT_URL}/Users`) return okJson([user("j-dis", { IsDisabled: true }), user("j-keep")]);
+    if (url === `${REMOTE_URL}/Users`) return new Response("down", { status: 500 });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  await syncDownloadPolicies();
+  assert.equal(msuStore.get("row-gone")!.active, false);
+  assert.equal(msuStore.get("row-gone")!.offboardPending, true, "removed: pending rides the reconcile write");
+  assert.equal(msuStore.get("row-dis")!.active, false);
+  assert.equal(msuStore.get("row-dis")!.offboardPending, true, "disabled: pending rides the upsert");
+  assert.ok(!msuStore.get("row-keep")!.offboardPending);
+});
+
+test("offboarding: a member first seen ALREADY disabled is signed out (the create carries the pending mark)", async () => {
+  resetOffboarding();
+  seedRow("row-keep", "j-keep");
+  seedUser({ id: "u-new", jellyfinUserId: "j-new" });
+  respond = (url) => {
+    if (url === `${DEFAULT_URL}/Users`) return okJson([user("j-new", { IsDisabled: true }), user("j-keep")]);
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  await syncDownloadPolicies();
+  await flush();
+  assert.equal(sessionsOf("u-new"), 0);
+  assert.equal(offboardAudits().length, 1);
+});
+
+test("offboarding: a member re-enabled while their departure was held back is no longer pending", async () => {
+  resetOffboarding();
+  seedRow("row-back", "j-back", { userId: "u-back", active: false, offboardPending: true });
+  seedUser({ id: "u-back", jellyfinUserId: "j-back" });
+  respond = (url) => {
+    if (url === `${DEFAULT_URL}/Users`) return okJson([user("j-back")]);
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  await syncDownloadPolicies();
+  await flush();
+  assert.equal(msuStore.get("row-back")!.active, true);
+  assert.equal(msuStore.get("row-back")!.offboardPending, false);
+  assert.equal(sessionsOf("u-back"), 2);
+  assert.equal(offboardAudits().length, 0);
+});
+
+test("offboarding: a failed pending clear is reported and the identity is decided again next run", async () => {
+  resetOffboarding();
+  seedRow("row-gone", "j-gone", { userId: "u-gone" });
+  seedRow("row-keep", "j-keep");
+  seedUser({ id: "u-gone", jellyfinUserId: "j-gone" });
+  respond = (url) => {
+    if (url === `${DEFAULT_URL}/Users`) return okJson([user("j-keep")]);
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  clearThrows = 1;
+  const first = await syncDownloadPolicies();
+  assert.equal(sessionsOf("u-gone"), 0, "the revoke itself committed");
+  assert.ok(first.some((r) => r.source === "jellyfin-offboarding" && r.errors === 1));
+  assert.equal(msuStore.get("row-gone")!.offboardPending, true);
+
+  const second = await syncDownloadPolicies();
+  assert.ok(second.every((r) => r.errors === 0), JSON.stringify(second));
+  assert.equal(msuStore.get("row-gone")!.offboardPending, false);
 });
 
 test("an unchanged server user is not re-written; a changed one is", async () => {

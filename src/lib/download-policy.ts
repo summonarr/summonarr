@@ -4,7 +4,7 @@ import { getJellyfinConfig } from "./jellyfin-config";
 import { normalizeEmail } from "./email-normalize";
 import { type MediaInstanceKey, mediaInstanceLabel } from "./media-instances";
 import { getSyncableMediaInstances } from "./media-instance-registry";
-import { noteJellyfinDepartures, offboardJellyfinIdentities } from "./jellyfin-offboarding";
+import { offboardJellyfinIdentities } from "./jellyfin-offboarding";
 import { processSingleton } from "./process-singleton";
 import { emailLinkAllowed } from "./play-history-identity";
 
@@ -17,9 +17,9 @@ interface PolicySyncResult {
 
 // One instance's sync, plus what the offboarding pass (jellyfin-offboarding.ts)
 // needs from it: whether the server gave an opinion at all (a failed or empty
-// /Users fetch gives none). The identities it turned inactive go straight onto
-// the offboarding ledger as each write commits (noteJellyfinDepartures), so a
-// throw later in the run can't lose one.
+// /Users fetch gives none). The identities it turned inactive are marked
+// offboardPending by the same write that turns them inactive, so a throw later
+// in the run (or a restart) can't lose one.
 interface InstanceSyncOutcome {
   result: PolicySyncResult;
   noOpinion: boolean;
@@ -207,7 +207,7 @@ function jellyfinRowCurrent(
 }
 
 // One server user: upsert its row (attribution, admin flag, active, the seeded
-// download policy), put a new departure on the offboarding ledger, and push a
+// download policy), mark a new departure as pending offboarding, and push a
 // disabled download policy the server has drifted from.
 async function syncJellyfinUser(
   ctx: { instance: MediaInstanceKey; baseUrl: string; apiKey: string; autoDisableNew: boolean; links: LinkIndex; result: PolicySyncResult },
@@ -246,6 +246,10 @@ async function syncJellyfinUser(
         isServerAdmin: u.isAdmin,
         downloadsEnabled,
         active,
+        // Pending in the SAME write as the inactive flag (guardrail 6j): the
+        // next run reads this row as already inactive and would never report
+        // the departure again, so the mark must not be a separate step.
+        offboardPending: newlyInactive,
         ...(userId ? { userId } : {}),
       },
       update: {
@@ -253,6 +257,10 @@ async function syncJellyfinUser(
         ...(u.email ? { email: u.email } : {}),
         isServerAdmin: u.isAdmin,
         active, // re-activate a returning (or re-enabled) user
+        // A new departure is pending. Nothing else touches the mark here: a
+        // returning user is decided "still a member" by the offboarding pass,
+        // which clears it.
+        ...(newlyInactive ? { offboardPending: true } : {}),
         ...(userId ? { userId } : {}),
         // Write server value only when we have no admin-set value yet (null).
         ...(existing === null || existing.downloadsEnabled === null ? { downloadsEnabled } : {}),
@@ -260,9 +268,6 @@ async function syncJellyfinUser(
     });
   }
   result.upserted++;
-  // On the ledger now, not at the end of the run: the next run reads this row
-  // as already inactive and would never report the departure again.
-  if (newlyInactive) noteJellyfinDepartures([u.id]);
 
   // Push only on DRIFT — u.downloadsEnabled is the server's CURRENT value
   // from the same /Users fetch this run already made (absent Policy coerces
@@ -326,24 +331,21 @@ async function reconcileDepartedJellyfinUsers(
   const priorActiveCount = existingRows.filter((r) => r.active).length;
   if (!reconcileAllowed(instance, users, priorActiveCount)) return;
   const currentIds = users.map((u) => u.id);
-  const currentIdSet = new Set(currentIds);
-  const absent = existingRows
-    .filter((r) => r.active && !currentIdSet.has(r.sourceUserId))
-    .map((r) => r.sourceUserId);
   // Scoped by serverInstance — load-bearing (guardrail 28). Without this, a
   // user who exists only on a DIFFERENT Jellyfin server would look "absent"
   // from THIS instance's fetch and get incorrectly soft-deleted, destroying
   // their attribution to play history that survives on the other server.
   await prisma.mediaServerUser.updateMany({
     where: { source: "jellyfin", serverInstance: instance, sourceUserId: { notIn: currentIds }, active: true },
-    data: { active: false },
+    // offboardPending rides the same statement (guardrail 6j): the departure is
+    // durable the moment the row turns inactive, whatever happens to this run.
+    data: { active: false, offboardPending: true },
   });
   // Only now is the confirmed-shrink observation consumed: a failed write
   // above keeps the counter, so the next hourly run reconciles immediately
   // instead of restarting the 3-run countdown behind a log line that already
   // claimed "reconciling".
   refusedReconciles.delete(instance);
-  noteJellyfinDepartures(absent);
 }
 
 async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string, apiKey: string, autoDisableNew: boolean): Promise<InstanceSyncOutcome> {
