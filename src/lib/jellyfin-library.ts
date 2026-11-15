@@ -378,19 +378,23 @@ const LIBRARY_CONCURRENCY = 3;
  * and returns each accepted walk's result, in library order. The libraries
  * share one page budget, and the first to fail aborts the others: their
  * requests and retry sleeps stop instead of filling a result nobody reads.
+ * `signal` is the caller giving up (a sync's lost lock, guardrail 41): every
+ * walk rejects at its next page, never returning a partial library.
  */
 async function readPerLibrary<R>(
   libraryIds: Set<string> | undefined,
   query: (parent: ItemsParam) => string,
   apiKey: string,
   collect: () => ListingCollector<R>,
+  signal?: AbortSignal,
 ): Promise<R[]> {
   const slots = pageSlots(MAX_PARALLEL_PAGES);
-  if (!libraryIds?.size) return [await readJellyfinListing(query(null), apiKey, collect, { slots })];
+  if (!libraryIds?.size) return [await readJellyfinListing(query(null), apiKey, collect, { slots, signal })];
   const controller = new AbortController();
+  const walkSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
   return mapLimit(Array.from(libraryIds), LIBRARY_CONCURRENCY, async (parentId) => {
     try {
-      return await readJellyfinListing(query(["ParentId", parentId]), apiKey, collect, { slots, signal: controller.signal });
+      return await readJellyfinListing(query(["ParentId", parentId]), apiKey, collect, { slots, signal: walkSignal });
     } catch (err) {
       controller.abort(err);
       throw err;
@@ -404,6 +408,7 @@ async function getJellyfinItemsByType(
   itemType: "Movie" | "Series",
   libraryIds?: Set<string>,
   minDateLastSaved?: Date,
+  signal?: AbortSignal,
 ): Promise<Map<number, JellyfinLibraryItemData>> {
   // ONE query, scoped or not, so the two can never drift apart (guardrail 37d's
   // CollapseBoxSetItems=false above all, which jellyfinItemsUrl adds).
@@ -423,25 +428,27 @@ async function getJellyfinItemsByType(
     ["SortOrder", "Ascending"],
     minDateLastSaved && ["MinDateLastSaved", minDateLastSaved.toISOString()],
   ]);
-  const perLibrary = await readPerLibrary(libraryIds, query, apiKey, titleCollector);
+  const perLibrary = await readPerLibrary(libraryIds, query, apiKey, titleCollector, signal);
   const union = perLibrary.length === 1 ? perLibrary[0] : newTitleAccumulator();
   if (perLibrary.length > 1) for (const acc of perLibrary) mergeTitles(union, acc);
   return finishTitles(union, itemType, baseUrl);
 }
 
+// `signal` (a sync's lock, guardrail 41) rejects the walk at its next page.
 export async function getJellyfinTmdbIds(
   baseUrl: string,
   apiKey: string,
   mediaType: "MOVIE" | "TV",
   libraryIds?: Set<string>,
   minDateLastSaved?: Date,
+  signal?: AbortSignal,
 ): Promise<Map<number, JellyfinLibraryItemData>> {
-  return getJellyfinItemsByType(baseUrl, apiKey, mediaType === "MOVIE" ? "Movie" : "Series", libraryIds, minDateLastSaved);
+  return getJellyfinItemsByType(baseUrl, apiKey, mediaType === "MOVIE" ? "Movie" : "Series", libraryIds, minDateLastSaved, signal);
 }
 
 /** The Series listing the episode walk maps SeriesIds through (every copy's id). */
-export async function getJellyfinSeriesItemIndex(baseUrl: string, apiKey: string, libraryIds?: Set<string>): Promise<Map<string, number>> {
-  return buildSeriesItemIdIndex(await getJellyfinItemsByType(baseUrl, apiKey, "Series", libraryIds));
+export async function getJellyfinSeriesItemIndex(baseUrl: string, apiKey: string, libraryIds?: Set<string>, signal?: AbortSignal): Promise<Map<string, number>> {
+  return buildSeriesItemIdIndex(await getJellyfinItemsByType(baseUrl, apiKey, "Series", libraryIds, undefined, signal));
 }
 
 // ── the library match check ─────────────────────────────────────────────────

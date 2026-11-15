@@ -893,8 +893,8 @@ function clearArm(arm: LibraryArm<unknown>): void {
 // Plex and Jellyfin library writes + download-policy enforcement run
 // concurrently. Each arm never throws for a server failure (that server simply
 // contributes nothing); a rejection here is a bug, logged and otherwise read as
-// that arm contributing nothing. `signal` is the run's lock: the Plex walks
-// take it, so a lost lock stops them mid-listing (guardrail 41).
+// that arm contributing nothing. `signal` is the run's lock: the Plex and
+// Jellyfin walks take it, so a lost lock stops them mid-listing (guardrail 41).
 async function syncLibraries(flags: SyncFlags, targets: LibraryTargets, windDownBefore: WindDown, signal: AbortSignal | undefined) {
   const plex = emptyLibraryArm<PlexLibraryItemData>();
   const jellyfin = emptyLibraryArm<JellyfinLibraryItemData>();
@@ -908,7 +908,7 @@ async function syncLibraries(flags: SyncFlags, targets: LibraryTargets, windDown
       () => [],
     ),
     syncPlexLibraries(flags, targets, plex, windDownBefore, signal),
-    syncJellyfinLibraries(flags, targets, jellyfin, windDownBefore),
+    syncJellyfinLibraries(flags, targets, jellyfin, windDownBefore, signal),
   ]);
   for (const result of results) {
     if (result.status === "rejected") {
@@ -1221,10 +1221,12 @@ function jellyfinHoldWarning(slug: string, hold: NonNullable<ReturnType<typeof j
 }
 
 // One Jellyfin server's fetch, then the short-answer hold — the twin of
-// fetchPlexInstance. Never throws.
+// fetchPlexInstance, the lock's abort included: a walk it ended rejects (never
+// a partial library) and lands in the catch. Never throws.
 async function fetchJellyfinInstance(
   instance: MediaInstanceConfig,
   librarySelections: LibraryTargets["librarySelections"],
+  signal: AbortSignal | undefined,
 ): Promise<JellyfinFetched> {
   try {
     const cfg = await getJellyfinConfig(instance.slug);
@@ -1235,8 +1237,8 @@ async function fetchJellyfinInstance(
     // ingests every library and marks excluded media as owned.
     const selectedJellyfinIds = librarySelections.get(jellyfinSettingKey(instance.slug, "Libraries"));
     const [movieIds, tvIds] = await Promise.all([
-      getJellyfinTmdbIds(baseUrl, apiKey, "MOVIE", selectedJellyfinIds),
-      getJellyfinTmdbIds(baseUrl, apiKey, "TV", selectedJellyfinIds),
+      getJellyfinTmdbIds(baseUrl, apiKey, "MOVIE", selectedJellyfinIds, undefined, signal),
+      getJellyfinTmdbIds(baseUrl, apiKey, "TV", selectedJellyfinIds, undefined, signal),
     ]);
     // A SHORT answer for a server we already hold rows for is not a complete
     // picture (a library recreated under a new id, a server mid-scan): treated
@@ -1264,7 +1266,8 @@ async function fetchJellyfinInstance(
     forgetWarnOnChange(warnKey);
     return { slug: instance.slug, result: { baseUrl, apiKey, movieIds, tvIds } };
   } catch (err) {
-    console.error(`[sync] Jellyfin check failed for instance "${instance.slug}":`, err);
+    // A lost lock is not a Jellyfin failure: the run's wind-down notice says why.
+    if (!signal?.aborted) console.error(`[sync] Jellyfin check failed for instance "${instance.slug}":`, err);
     return { slug: instance.slug, result: null };
   }
 }
@@ -1275,11 +1278,16 @@ async function syncJellyfinLibraries(
   { jellyfinInstances, librarySelections }: LibraryTargets,
   arm: LibraryArm<JellyfinLibraryItemData>,
   windDownBefore: WindDown,
+  signal: AbortSignal | undefined,
 ): Promise<void> {
   if (windDownBefore("Jellyfin library")) return;
   if (!flags.jellyfinEnabled || jellyfinInstances.length === 0) return;
 
-  const fetched = await Promise.all(jellyfinInstances.map((instance) => fetchJellyfinInstance(instance, librarySelections)));
+  const fetched = await Promise.all(jellyfinInstances.map((instance) => fetchJellyfinInstance(instance, librarySelections, signal)));
+  // Guardrail 41, at the arm's fetch → write boundary, as in the Plex arm: a
+  // lock lost while the walks ran writes nothing and the arm contributes
+  // nothing, so every server's stored rows stay.
+  if (signal?.aborted) return;
   const writable = fetched.flatMap((f) => (f.result ? [{ slug: f.slug, ...f.result }] : []));
   unionIntoArm(arm, writable);
 
@@ -1309,7 +1317,7 @@ async function syncJellyfinLibraries(
   arm.succeeded = libraryWriteSucceeded && fetched.every((f) => f.result !== null);
   if (arm.succeeded) await stampLibrarySyncSuccess("jellyfin", "sync");
 
-  await writeJellyfinEpisodeCache(writable, fetched.length, librarySelections);
+  await writeJellyfinEpisodeCache(writable, fetched.length, librarySelections, signal);
 }
 
 // The Jellyfin twin of writePlexEpisodeCache: the same all-or-nothing whole-table
@@ -1318,10 +1326,14 @@ async function writeJellyfinEpisodeCache(
   writable: readonly { slug: string; baseUrl: string; apiKey: string; tvIds: Map<number, JellyfinLibraryItemData> }[],
   fetchedCount: number,
   librarySelections: LibraryTargets["librarySelections"],
+  signal: AbortSignal | undefined,
 ): Promise<void> {
   let allEpisodesFetched = true;
   const allEpisodeRows: Array<{ source: "jellyfin" } & JellyfinTVEpisodeData> = [];
   for (const { slug, baseUrl, apiKey, tvIds } of writable) {
+    // Guardrail 41: a lost lock stops the episode phase between instances (a
+    // walk already running rejects at its next page). Nothing below is written.
+    if (signal?.aborted) return;
     // Built from THIS instance's own TV map, never the cross-instance union: Jellyfin
     // item ids are server-local and can collide across independently-administered
     // servers, so a global series map could resolve episodes onto the wrong show.
@@ -1329,15 +1341,15 @@ async function writeJellyfinEpisodeCache(
     // files its episodes under two SeriesIds, and only one id survives into the row.
     const jfSeriesMap = buildSeriesItemIdIndex(tvIds);
     try {
-      const episodes = await getJellyfinTVEpisodes(baseUrl, apiKey, librarySelections.get(jellyfinSettingKey(slug, "Libraries")), jfSeriesMap);
+      const episodes = await getJellyfinTVEpisodes(baseUrl, apiKey, librarySelections.get(jellyfinSettingKey(slug, "Libraries")), jfSeriesMap, signal);
       // Element-wise — see writePlexEpisodeCache.
       for (const e of episodes) allEpisodeRows.push({ source: "jellyfin" as const, ...e });
     } catch (err) {
-      console.error(`[sync] Jellyfin TV episode fetch failed for instance "${slug}":`, err);
+      if (!signal?.aborted) console.error(`[sync] Jellyfin TV episode fetch failed for instance "${slug}":`, err);
       allEpisodesFetched = false;
     }
   }
-  if (!episodesCoverEveryServer(allEpisodesFetched, writable.length, fetchedCount)) return;
+  if (!episodesCoverEveryServer(allEpisodesFetched, writable.length, fetchedCount) || signal?.aborted) return;
   try {
     await replaceEpisodeCacheForSource("jellyfin", allEpisodeRows);
   } catch (err) {

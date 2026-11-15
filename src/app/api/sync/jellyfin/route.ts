@@ -135,10 +135,13 @@ async function syncJellyfin(request: NextRequest, rawBody: Record<string, unknow
   let tvIds:    Awaited<ReturnType<typeof getJellyfinTmdbIds>>;
   try {
     [movieIds, tvIds] = await Promise.all([
-      getJellyfinTmdbIds(server.baseUrl, server.apiKey, "MOVIE", server.selectedIds, minDateLastSaved),
-      getJellyfinTmdbIds(server.baseUrl, server.apiKey, "TV", server.selectedIds, minDateLastSaved),
+      getJellyfinTmdbIds(server.baseUrl, server.apiKey, "MOVIE", server.selectedIds, minDateLastSaved, signal),
+      getJellyfinTmdbIds(server.baseUrl, server.apiKey, "TV", server.selectedIds, minDateLastSaved, signal),
     ]);
   } catch (err) {
+    // The lock ended the walk (guardrail 41): the wind-down answer, never the
+    // 502 of an unreachable server.
+    if (signal.aborted) return resyncWindDownResponse(t);
     console.error("[sync/jellyfin] Failed to fetch library:", err instanceof Error ? err.message : String(err));
     return NextResponse.json({ error: t("apiAdmin.sync.jellyfinUnreachable") }, { status: 502 });
   }
@@ -259,9 +262,9 @@ async function refreshJellyfinEpisodes(
       // the full walk would after filtering by SeriesId. size === 0 falls
       // through to getJellyfinTVEpisodes, which returns [] without fetching.
       ? (await mapLimit(Array.from(seriesIndex.entries()), 3, ([itemId, tmdbId]) =>
-          getJellyfinEpisodesForShow(baseUrl, apiKey, itemId, tmdbId),
+          getJellyfinEpisodesForShow(baseUrl, apiKey, itemId, tmdbId, signal),
         )).flat()
-      : await getJellyfinTVEpisodes(baseUrl, apiKey, selectedIds, seriesIndex);
+      : await getJellyfinTVEpisodes(baseUrl, apiKey, selectedIds, seriesIndex, signal);
     if (signal.aborted) return;
     if (recentOnly) {
       // Insert-only, scoped to the re-inserted tuples (guardrail 13).
@@ -274,7 +277,8 @@ async function refreshJellyfinEpisodes(
       await replaceEpisodeCacheForSource("jellyfin", episodes);
     }
   } catch (err) {
-    console.error("[sync/jellyfin] Episode cache failed:", err);
+    // A walk the lock ended is not a failure: the resync's answer says why.
+    if (!signal.aborted) console.error("[sync/jellyfin] Episode cache failed:", err);
   }
 }
 

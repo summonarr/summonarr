@@ -68,8 +68,10 @@ export async function getJellyfinTVEpisodes(
   apiKey: string,
   libraryIds?: Set<string>,
   seriesItemIdToTmdbId?: Map<string, number>,
+  // A sync's lock (guardrail 41): the walk rejects at its next page.
+  signal?: AbortSignal,
 ): Promise<JellyfinTVEpisodeData[]> {
-  const seriesMap = seriesItemIdToTmdbId ?? await getJellyfinSeriesItemIndex(baseUrl, apiKey, libraryIds);
+  const seriesMap = seriesItemIdToTmdbId ?? await getJellyfinSeriesItemIndex(baseUrl, apiKey, libraryIds, signal);
   if (seriesMap.size === 0) return [];
 
   // One row per (tmdb id, season, episode); a show in two libraries keeps the
@@ -97,7 +99,7 @@ export async function getJellyfinTVEpisodes(
   const fields = "SeriesId,ParentIndexNumber,IndexNumber,IndexNumberEnd,DateCreated";
   const parents: ItemsParam[] = libraryIds?.size ? Array.from(libraryIds, (id) => ["ParentId", id] as const) : [null];
   for (const parent of parents) {
-    await walkJellyfinSequential(episodesQuery(baseUrl, parent, fields, "DateCreated,SortName"), apiKey, processEpisodes);
+    await walkJellyfinSequential(episodesQuery(baseUrl, parent, fields, "DateCreated,SortName"), apiKey, processEpisodes, undefined, signal);
   }
   return Array.from(episodeMap.values());
 }
@@ -107,6 +109,7 @@ export async function getJellyfinEpisodesForShow(
   apiKey: string,
   seriesId: string,
   tmdbId: number,
+  signal?: AbortSignal,
 ): Promise<JellyfinTVEpisodeData[]> {
   // One row per (season, episode): two versions of an episode keep the earlier
   // arrival, as the library-wide path does.
@@ -130,6 +133,8 @@ export async function getJellyfinEpisodesForShow(
         }
       }
     },
+    undefined,
+    signal,
   );
   return Array.from(episodes.values());
 }

@@ -1719,6 +1719,47 @@ test("getJellyfinUserPlayedItems stops paging when its AbortSignal fires and doe
   assert.deepEqual(res, { items: [], records: 0 });
 });
 
+// The library sync's own walks take the sync's lock (guardrail 41). Unlike the
+// played-items walk they REJECT: a listing cut short must never be read as the
+// whole library, because a full sync replaces the stored rows with it.
+test("getJellyfinTmdbIds rejects at its next page once its AbortSignal fires, in one listing or one per library (guardrail 41)", async () => {
+  for (const libraryIds of [undefined, new Set(["lib-a", "lib-b"])]) {
+    const B = nextBase();
+    const controller = new AbortController();
+    sent.length = 0;
+    respond = () => {
+      controller.abort(new Error("lock lost"));
+      return okJson({ Items: [{ Id: "m1", ProviderIds: { Tmdb: "11" } }], TotalRecordCount: 9000 });
+    };
+    await assert.rejects(() => getJellyfinTmdbIds(B, "k", "MOVIE", libraryIds, undefined, controller.signal), /lock lost/);
+    assert.ok(sent.length >= 1, "precondition: the walk started");
+    assert.ok(sent.every((r) => new URL(r.url).searchParams.get("StartIndex") === "0"), "no later page after the abort");
+
+    sent.length = 0;
+    await assert.rejects(() => getJellyfinTmdbIds(B, "k", "MOVIE", libraryIds, undefined, controller.signal), /lock lost/);
+    assert.equal(sent.length, 0, "an already aborted walk asks for nothing");
+  }
+});
+
+test("getJellyfinTVEpisodes and getJellyfinEpisodesForShow reject at the next page once their AbortSignal fires (guardrail 41)", async () => {
+  const page = Array.from({ length: 1000 }, (_, i) => ({ SeriesId: "s1", ParentIndexNumber: 1, IndexNumber: i + 1 }));
+  const walks: Array<(base: string, signal: AbortSignal) => Promise<unknown>> = [
+    (base, signal) => getJellyfinTVEpisodes(base, "k", undefined, new Map([["s1", 1399]]), signal),
+    (base, signal) => getJellyfinEpisodesForShow(base, "k", "s1", 1399, signal),
+  ];
+  for (const walk of walks) {
+    const B = nextBase();
+    const controller = new AbortController();
+    sent.length = 0;
+    respond = () => {
+      controller.abort(new Error("lock lost"));
+      return okJson({ Items: page, TotalRecordCount: 5000 });
+    };
+    await assert.rejects(() => walk(B, controller.signal), /lock lost/);
+    assert.equal(sent.length, 1, "no second page after the abort");
+  }
+});
+
 test("getJellyfinUserPlayedItems THROWS on a 4xx (no retry) — never an empty list the snapshot would trust", async () => {
   const B = nextBase();
   respond = () => okJson({}, 401);

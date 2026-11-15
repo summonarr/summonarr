@@ -3638,3 +3638,135 @@ test("GUARDRAIL 41: a lock lost MID episode walk stops it, and neither the episo
   assert.equal((await bodyOf(res)).windDown, true);
   assert.ok(!errors.some((e) => e.includes("Plex TV episode fetch failed")), `a lost lock is not a failed fetch: ${errors.join(" | ")}`);
 });
+
+// ── guardrail 41 inside the Jellyfin arm: the twin of the Plex block above ───
+// The Jellyfin walks take the lock's signal too and reject mid-listing, so a
+// lost lock leaves every Jellyfin server's stored rows and the episode cache
+// exactly as they were.
+
+const JF_ORIGIN = new URL(JF_BASE).origin;
+const jellyfinPagesAfter = (index: number, type: string) =>
+  fetchCalls.slice(index).filter((c) => c.url.origin === JF_ORIGIN && c.url.searchParams.get("IncludeItemTypes") === type);
+const jellyfinWrites = () => ({
+  tx: txTouching("jellyfinLibraryItem").length,
+  staged: stagedLibraryRows("jellyfinLibraryItemStaging").length,
+});
+function configureJellyfinOnly(): void {
+  settings.set("jellyfinUrl", JF_BASE);
+  settings.set("jellyfinApiKey", "jf-api-key-1");
+}
+const startIndexOf = (url: URL) => Number(url.searchParams.get("StartIndex"));
+
+// A Movie listing that counts more than one page (LIBRARY_PAGE_SIZE is 5,000),
+// so the walk asks for StartIndex=5000 next; no shows. `onMoviePage` runs as
+// each page is served.
+function twoPageJellyfinMovies(onMoviePage: (start: number) => void): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname !== "/Items") throw new Error(`unexpected Jellyfin fetch ${url.pathname}`);
+    if (url.searchParams.get("IncludeItemTypes") === "Series") return okJson({ Items: [], TotalRecordCount: 0 });
+    const start = startIndexOf(url);
+    onMoviePage(start);
+    const ids = start === 0 ? Array.from({ length: 5000 }, (_, i) => 100_000 + i) : [900_000];
+    return okJson({ Items: ids.map((id) => ({ Id: `jf-${id}`, Name: `M${id}`, ProviderIds: { Tmdb: String(id) } })), TotalRecordCount: 5001 });
+  };
+}
+
+test("GUARDRAIL 41: a lock lost MID Jellyfin walk sends no further page, writes nothing, and winds the run down", async () => {
+  episodeStagingLoads.length = 0;
+  configureJellyfinOnly();
+  let dropAt = -1;
+  respond = twoPageJellyfinMovies((start) => {
+    if (start !== 0) return;
+    dropAt = fetchCalls.length;
+    dropLock();
+  });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.ok(dropAt > 0, "precondition: the lock dropped while the first page was served");
+  assert.deepEqual(jellyfinPagesAfter(dropAt, "Movie").map((c) => c.url.href), [], "the walk must not ask for another page once the lock is gone");
+  assert.deepEqual(jellyfinWrites(), { tx: 0, staged: 0 }, "the server's stored rows stay — no partial replace");
+  assert.deepEqual(episodeCacheWrites(), { tx: 0, staged: 0 });
+  assert.equal(res.status, 200, "a wind-down returns, it never throws");
+  assert.equal((await bodyOf(res)).windDown, true);
+  assert.ok(!errors.some((e) => e.includes("Jellyfin check failed")), `a lost lock is not a Jellyfin failure: ${errors.join(" | ")}`);
+});
+
+test("GUARDRAIL 41: a lock lost after the Jellyfin walk FINISHED but before its write writes nothing — the arm's fetch → write boundary", async () => {
+  configureJellyfinOnly();
+  let dropped = false;
+  respond = twoPageJellyfinMovies((start) => {
+    if (start !== 5000) return; // the last page: the walk itself completes
+    dropped = true;
+    dropLock();
+  });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.ok(dropped, "precondition: the lock dropped while the last page was served");
+  assert.deepEqual(jellyfinWrites(), { tx: 0, staged: 0 }, "a complete walk is still not written once the lock is gone");
+  assert.equal((await bodyOf(res)).windDown, true);
+  assert.ok(!errors.some((e) => e.includes("Jellyfin check failed")), errors.join(" | "));
+});
+
+// One show; its Episode listing is `pages` full pages (EPISODE_PAGE_SIZE is
+// 1,000) and `onEpisodePage` runs as each is served.
+function jellyfinShowWithEpisodes(pages: number, onEpisodePage: (start: number) => void): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname !== "/Items") throw new Error(`unexpected Jellyfin fetch ${url.pathname}`);
+    switch (url.searchParams.get("IncludeItemTypes")) {
+      case "Movie":
+        return okJson({ Items: [], TotalRecordCount: 0 });
+      case "Series":
+        return okJson({ Items: [{ Id: "jf-show-1", Name: "Show", ProviderIds: { Tmdb: "1399" } }], TotalRecordCount: 1 });
+      case "Episode": {
+        const start = startIndexOf(url);
+        onEpisodePage(start);
+        const items = Array.from({ length: 1000 }, (_, i) => ({ SeriesId: "jf-show-1", ParentIndexNumber: 1, IndexNumber: start + i + 1 }));
+        return okJson({ Items: items, TotalRecordCount: pages * 1000 });
+      }
+      default:
+        throw new Error(`unexpected Jellyfin fetch ${url}`);
+    }
+  };
+}
+
+test("GUARDRAIL 41: a lock lost MID Jellyfin episode walk stops it, and the episode cache is not rewritten", async () => {
+  episodeStagingLoads.length = 0;
+  configureJellyfinOnly();
+  let dropAt = -1;
+  respond = jellyfinShowWithEpisodes(2, (start) => {
+    if (start !== 0) return;
+    dropAt = fetchCalls.length;
+    dropLock();
+  });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.ok(dropAt > 0, "precondition: the lock dropped during the episode walk");
+  assert.equal(txTouching("jellyfinLibraryItem").length, 1, "control: the library write ran before the lock was lost");
+  assert.deepEqual(jellyfinPagesAfter(dropAt, "Episode").map((c) => c.url.href), [], "the episode walk must not ask for another page once the lock is gone");
+  assert.deepEqual(episodeCacheWrites(), { tx: 0, staged: 0 }, "a walk that lost its lock must not rewrite the episode cache");
+  assert.equal((await bodyOf(res)).windDown, true);
+  assert.ok(!errors.some((e) => e.includes("Jellyfin TV episode fetch failed")), `a lost lock is not a failed fetch: ${errors.join(" | ")}`);
+});
+
+test("GUARDRAIL 41: a lock lost as the Jellyfin episode walk FINISHES still does not rewrite the episode cache", async () => {
+  episodeStagingLoads.length = 0;
+  configureJellyfinOnly();
+  let dropped = false;
+  respond = jellyfinShowWithEpisodes(1, () => {
+    dropped = true; // the only page: the walk itself completes
+    dropLock();
+  });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.ok(dropped, "precondition: the lock dropped while the last episode page was served");
+  assert.deepEqual(episodeCacheWrites(), { tx: 0, staged: 0 }, "a complete walk is still not written once the lock is gone");
+  assert.equal((await bodyOf(res)).windDown, true);
+});
