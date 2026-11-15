@@ -6,7 +6,8 @@ import { arrErrorMessage, arrFetch, ArrResponseError, asRecord, unusableAnswer, 
 import { requireArrCfg, type ArrVariant } from "./arr-config";
 import { findEpisodeId, requireRadarrMovie, requireSonarrSeries } from "./arr-lookup";
 import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
-import { int, languageNamesOf, namesOf, protocolOf } from "./arr-parse";
+import { int, languageNamesOf, namesOf, protocolOf, safeMessage } from "./arr-parse";
+import { sanitizeForLog } from "./sanitize";
 import { seriesReleaseScopeSearchable } from "./release-scope";
 import { check, v } from "./validate";
 
@@ -52,9 +53,37 @@ export async function postReleaseGrab(cfg: ArrCfg, body: Record<string, unknown>
   try {
     await arrFetch<unknown>(cfg, "/api/v3/release", { method: "POST", body: JSON.stringify(body), timeoutMs: RELEASE_GRAB_TIMEOUT_MS });
   } catch (err) {
-    if (err instanceof ArrResponseError) throw new ArrReleaseGrabError(err.status, err.body);
+    if (err instanceof ArrResponseError) {
+      // A 5xx is the arr failing after it took the request (usually the
+      // download client); its one-line reason goes to the server log only.
+      const detail = err.status >= 500 ? arrServerErrorDetail(err.body) : null;
+      if (detail) console.error(`[arr] grab failed (${err.status}): ${detail}`);
+      throw new ArrReleaseGrabError(err.status, err.body);
+    }
     throw err;
   }
+}
+
+const SERVER_ERROR_DETAIL_MAX = 300;
+
+/**
+ * The arr's own one-line reason from a 5xx error body (`{ message, description }`
+ * — `description` is a stack trace and is never read), for the SERVER LOG only:
+ * credentials masked, control characters removed, bounded. Null for anything
+ * else — a proxy's HTML error page, a body with no message. Never sent to a
+ * client (guardrails 5e, 5g).
+ */
+export function arrServerErrorDetail(body: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  const message = safeMessage(asRecord(parsed)?.message, SERVER_ERROR_DETAIL_MAX);
+  if (message === null) return null;
+  const line = sanitizeForLog(message).trim();
+  return line === "" ? null : line;
 }
 
 export interface ArrRelease {

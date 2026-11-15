@@ -55,6 +55,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   pendingTimeout = null;
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   if (method === "POST" && url.pathname === "/api/v3/release") {
+    if (grabStatus >= 500) return json({ message: "Download client is down", description: "   at Stack.Trace()" }, grabStatus);
     return grabStatus === 200 ? json({}) : json([{ errorMessage: "indexer said no" }], grabStatus);
   }
   if (lookupStatus !== 200) return json({ message: "nope" }, lookupStatus);
@@ -189,4 +190,38 @@ test("no source POSTs /api/v3/release except postReleaseGrab", () => {
   assert.deepEqual(offenders, [], "a grab POST outside postReleaseGrab loses the grab timeout and the typed refusal");
   assert.equal(allowedCalls, 1, "the scan found postReleaseGrab's own POST — it can't pass by matching nothing");
   assert.equal(allowedPaths, 1);
+});
+
+test("a 5xx grab body's own message is logged: one line, credentials masked, never the stack trace", async () => {
+  const { arrServerErrorDetail } = await import("../src/lib/arr-releases.ts");
+  assert.equal(
+    arrServerErrorDetail(JSON.stringify({ message: "Download client isn't configured yet", description: "   at NzbDrone.Core.Download.DownloadService…" })),
+    "Download client isn't configured yet",
+  );
+  const masked = arrServerErrorDetail(JSON.stringify({ message: "GET http://indexer.test/dl?apikey=0123456789abcdef0123456789abcdef failed\nsecond line\u001b[31m" }));
+  assert.ok(masked !== null);
+  assert.ok(!masked.includes("0123456789abcdef0123456789abcdef"), "the apikey is masked");
+  assert.ok(!/[\n\u001b]/.test(masked), "one line, no control characters");
+  assert.ok((arrServerErrorDetail(JSON.stringify({ message: "x".repeat(5_000) })) ?? "").length <= 300);
+  // A proxy's HTML page, a list body, or no message: nothing is logged.
+  assert.equal(arrServerErrorDetail("<html><body>502 Bad Gateway</body></html>"), null);
+  assert.equal(arrServerErrorDetail(JSON.stringify([{ errorMessage: "indexer said no" }])), null);
+  assert.equal(arrServerErrorDetail(JSON.stringify({ description: "stack only" })), null);
+  assert.equal(arrServerErrorDetail(JSON.stringify({ message: 42 })), null);
+});
+
+test("the grab logs the arr's reason for a 5xx only", async () => {
+  const lines: string[] = [];
+  const quiet = console.error;
+  console.error = (...args: unknown[]) => { lines.push(args.join(" ")); };
+  try {
+    for (const status of [500, 409]) {
+      grabStatus = status;
+      await assert.rejects(arr.grabMovieRelease(603, "guid", 1));
+    }
+  } finally {
+    console.error = quiet;
+    grabStatus = 200;
+  }
+  assert.deepEqual(lines.filter((l) => l.includes("grab failed")), ["[arr] grab failed (500): Download client is down"]);
 });
