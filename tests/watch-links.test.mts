@@ -2,24 +2,45 @@
 // guardrail 35b). Pure: no DB, no network.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { plexWatchUrls, jellyfinWatchUrl, watchItemId, isWatchLinkId } from "../src/lib/watch-links.ts";
+import { plexWatchUrls, jellyfinWatchUrl, swiftfinWatchUrl, watchItemId, isWatchLinkId } from "../src/lib/watch-links.ts";
 
 const MACHINE = "0123456789abcdef0123456789abcdef01234567";
 const JF_SERVER = "f0e1d2c3b4a5968778695a4b3c2d1e0f";
 const JF_ITEM = "aabbccddeeff00112233445566778899";
 
-test("a Plex link addresses the item through app.plex.tv and the app by machine id", () => {
-  assert.deepEqual(plexWatchUrls(MACHINE, "12345"), {
+test("a Plex link addresses the item through app.plex.tv, and the app by its libraries route", () => {
+  assert.deepEqual(plexWatchUrls(MACHINE, "12345", "MOVIE"), {
     webUrl: `https://app.plex.tv/desktop/#!/server/${MACHINE}/details?key=%2Flibrary%2Fmetadata%2F12345`,
-    appUrl: `plex://preplay/?metadataKey=%2Flibrary%2Fmetadata%2F12345&server=${MACHINE}`,
+    appUrl: `plex://libraries/${MACHINE}/unmatched/%2Flibrary%2Fmetadata%2F12345`,
   });
 });
 
+test("a Plex show's app link carries the tv segment; its web link is the same shape", () => {
+  const show = plexWatchUrls(MACHINE, "777", "TV");
+  assert.equal(show?.appUrl, `plex://libraries/${MACHINE}/unmatched/tv/%2Flibrary%2Fmetadata%2F777`);
+  assert.equal(show?.webUrl, `https://app.plex.tv/desktop/#!/server/${MACHINE}/details?key=%2Flibrary%2Fmetadata%2F777`);
+});
+
 test("a Plex link is refused for a missing or malformed machine id or rating key", () => {
-  assert.equal(plexWatchUrls("", "12345"), null);
-  assert.equal(plexWatchUrls(MACHINE, ""), null);
-  assert.equal(plexWatchUrls(MACHINE, "12/../3"), null);
-  assert.equal(plexWatchUrls("abc&server=evil", "1"), null);
+  assert.equal(plexWatchUrls("", "12345", "MOVIE"), null);
+  assert.equal(plexWatchUrls(MACHINE, "", "MOVIE"), null);
+  assert.equal(plexWatchUrls(MACHINE, "12/../3", "MOVIE"), null);
+  assert.equal(plexWatchUrls("abc&server=evil", "1", "MOVIE"), null);
+});
+
+test("a Swiftfin link names the server, the viewer's Jellyfin user and the item, ids undashed", () => {
+  assert.equal(
+    swiftfinWatchUrl(JF_SERVER, "11112222-3333-4444-5555-666677778888", JF_ITEM.toUpperCase()),
+    `swiftfin://${JF_SERVER}/11112222333344445555666677778888/item/${JF_ITEM}`,
+  );
+});
+
+test("there is no Swiftfin link without the viewer's Jellyfin user, or with a malformed id", () => {
+  assert.equal(swiftfinWatchUrl(JF_SERVER, null, JF_ITEM), null);
+  assert.equal(swiftfinWatchUrl(JF_SERVER, undefined, JF_ITEM), null);
+  assert.equal(swiftfinWatchUrl("", "u1", JF_ITEM), null);
+  assert.equal(swiftfinWatchUrl(JF_SERVER, "u/1", JF_ITEM), null);
+  assert.equal(swiftfinWatchUrl(JF_SERVER, "u1", "a/b"), null);
 });
 
 test("a Jellyfin link uses the browser address first, then the connection URL", () => {

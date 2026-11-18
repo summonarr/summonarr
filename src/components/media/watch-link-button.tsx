@@ -17,9 +17,9 @@ function isAppleMobile(): boolean {
 }
 
 // "Watch on Plex" / "Watch on Jellyfin": opens the title on the media server.
-// A plain link to the server's web client; on an iPhone or iPad a server with
-// an app link (Plex) is handed to its app first, and the web page opens only
-// when the app did not take over.
+// A plain link to the server's web client; on an iPhone or iPad a link with an
+// app address (Plex, or Swiftfin for Jellyfin) is handed to the app first, and
+// the web page opens only when no app took over.
 export function WatchLinkButton({ link }: { link: WatchLink }) {
   const t = useT();
   const server = mediaServerName(link.server);

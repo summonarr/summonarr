@@ -332,7 +332,7 @@ export const discoveryPaths: OpenApiPaths = {
                             server: { type: "string", enum: ["plex", "jellyfin"] },
                             name: { type: "string", nullable: true, description: "The server's display name; null unless the caller can see several servers of this kind" },
                             webUrl: { type: "string", description: "Opens the title in a browser (app.plex.tv, or the Jellyfin server's web client)" },
-                            appUrl: { type: "string", nullable: true, description: "Opens the title in the server's mobile app (plex://…); null when it has no app link (Jellyfin). Fall back to webUrl when nothing handles it" },
+                            appUrl: { type: "string", nullable: true, description: "Opens the title in a mobile app: plex://libraries/… for Plex, swiftfin://… for Jellyfin (only when the caller has a Jellyfin user on that server). Null when there is none. Fall back to webUrl when nothing handles it" },
                           },
                         },
                       },

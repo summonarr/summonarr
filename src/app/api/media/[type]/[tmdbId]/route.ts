@@ -121,7 +121,7 @@ async function viewerWatchLinks(session: SummonarrSession, tmdbId: number, media
       plex: flags["feature.integration.plex"] ?? false,
       jellyfin: flags["feature.integration.jellyfin"] ?? false,
     });
-    return await loadWatchLinks(visible, tmdbId, mediaType, show);
+    return await loadWatchLinks(visible, tmdbId, mediaType, show, session.user.id);
   } catch (err) {
     console.warn("[media] watch links read failed:", err instanceof Error ? err.message : err);
     return [];

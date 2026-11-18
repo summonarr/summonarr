@@ -258,7 +258,7 @@ export async function loadDetailPageState(
     badges,
     // A convenience link, never worth failing the page for.
     watchLinks: Promise.all([visible, badges])
-      .then(([v, show]) => loadWatchLinks(v, tmdbId, mediaType, show))
+      .then(([v, show]) => loadWatchLinks(v, tmdbId, mediaType, show, userId))
       .catch(emptyOnFailure(isMovie ? "movie-page" : "tv-page", "watch-links", tmdbId)),
     ...adminExtraReads(permissions, flags, mediaType, tmdbId),
   });

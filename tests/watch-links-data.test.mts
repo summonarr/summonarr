@@ -32,8 +32,14 @@ let plexRows: Array<Record<string, unknown>> = [];
 let jellyfinRows: Array<Record<string, unknown>> = [];
 let libraryCalls: Array<{ model: string; where: Where; select: Record<string, boolean> }> = [];
 let settingWrites: Array<{ key: string; value: string }> = [];
+let viewer: { id: string; plexUserId: string | null; jellyfinUserId: string | null } | null = null;
+let serverUsers: Array<{ id: string; source: string; serverInstance: string; sourceUserId: string; userId: string | null; manualUserLink: boolean; active: boolean }> = [];
+let identityReads = 0;
 
 beforeEach(() => {
+  viewer = null;
+  serverUsers = [];
+  identityReads = 0;
   settings = {};
   plexRows = [];
   jellyfinRows = [];
@@ -51,6 +57,21 @@ shadowPrismaModel(prisma, "setting", {
     settingWrites.push({ key: where.key, value: create.value });
     return create;
   },
+});
+shadowPrismaModel(prisma, "user", {
+  findUnique: async () => {
+    identityReads++;
+    return viewer;
+  },
+});
+type Branch = { userId?: string; source?: string; sourceUserId?: string; manualUserLink?: boolean };
+shadowPrismaModel(prisma, "mediaServerUser", {
+  findMany: async ({ where }: { where: { source: string; active: boolean; serverInstance: { in: string[] }; OR: Branch[] } }) =>
+    serverUsers
+      .filter((r) => r.source === where.source && r.active === where.active && where.serverInstance.in.includes(r.serverInstance))
+      .filter((r) => where.OR.some((b) => Object.entries(b).every(([k, v]) => (r as Record<string, unknown>)[k] === v)))
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((r) => ({ serverInstance: r.serverInstance, sourceUserId: r.sourceUserId })),
 });
 for (const [model, rows] of [["plexLibraryItem", () => plexRows], ["jellyfinLibraryItem", () => jellyfinRows]] as const) {
   shadowPrismaModel(prisma, model, {
@@ -79,7 +100,7 @@ test("a title on the default Plex and Jellyfin servers gets one link each", asyn
       server: "plex",
       name: null,
       webUrl: `https://app.plex.tv/desktop/#!/server/${MACHINE}/details?key=%2Flibrary%2Fmetadata%2F12345`,
-      appUrl: `plex://preplay/?metadataKey=%2Flibrary%2Fmetadata%2F12345&server=${MACHINE}`,
+      appUrl: `plex://libraries/${MACHINE}/unmatched/%2Flibrary%2Fmetadata%2F12345`,
     },
     {
       server: "jellyfin",
@@ -158,6 +179,55 @@ test("the media type is part of the read: a movie's row is not a show's link", a
   plexRows = [plexRow("", "12345")];
   settings = { plexMachineId: MACHINE };
   assert.deepEqual(await loadWatchLinks({ plex: [""], jellyfin: [] }, 550, "TV", BOTH), []);
+});
+
+// ── the Jellyfin app link (Swiftfin) ────────────────────────────────────────
+const JF_USER = "11112222333344445555666677778888";
+const jfSettings = () => ({ jellyfinServerId: JF_SERVER, jellyfinUrl: "http://jf.lan" });
+const serverUser = (over: Partial<(typeof serverUsers)[number]>) =>
+  ({ id: "m1", source: "jellyfin", serverInstance: "", sourceUserId: JF_USER, userId: null, manualUserLink: false, active: true, ...over });
+
+test("a viewer with a Jellyfin identity on the server gets the Swiftfin link beside the web one", async () => {
+  jellyfinRows = [jellyfinRow("", JF_ITEM)];
+  settings = jfSettings();
+  viewer = { id: "u_1", plexUserId: null, jellyfinUserId: JF_USER };
+  serverUsers = [serverUser({})];
+  const [link] = await loadWatchLinks({ plex: [], jellyfin: [""] }, 550, "MOVIE", BOTH, "u_1");
+  assert.equal(link.appUrl, `swiftfin://${JF_SERVER}/${JF_USER}/item/${JF_ITEM}`);
+  assert.ok(link.webUrl.startsWith("http://jf.lan/web/index.html#/details"));
+});
+
+test("the Swiftfin link uses only the viewer's own active identity on THAT server", async () => {
+  jellyfinRows = [jellyfinRow("", JF_ITEM)];
+  settings = jfSettings();
+  viewer = { id: "u_1", plexUserId: null, jellyfinUserId: null };
+  const none = async () => (await loadWatchLinks({ plex: [], jellyfin: [""] }, 550, "MOVIE", BOTH, "u_1"))[0].appUrl;
+  // Someone else's identity.
+  serverUsers = [serverUser({ userId: "u_2" })];
+  assert.equal(await none(), null);
+  // The viewer's, but removed from the server.
+  serverUsers = [serverUser({ userId: "u_1", active: false })];
+  assert.equal(await none(), null);
+  // The viewer's, on another server.
+  serverUsers = [serverUser({ userId: "u_1", serverInstance: "remote" })];
+  assert.equal(await none(), null);
+  // A subject match an admin has pinned elsewhere is not the viewer's (guardrail 34).
+  viewer = { id: "u_1", plexUserId: null, jellyfinUserId: JF_USER };
+  serverUsers = [serverUser({ userId: "u_2", manualUserLink: true })];
+  assert.equal(await none(), null);
+  // An admin's manual link to the viewer is.
+  serverUsers = [serverUser({ userId: "u_1", manualUserLink: true })];
+  assert.equal(await none(), `swiftfin://${JF_SERVER}/${JF_USER}/item/${JF_ITEM}`);
+});
+
+test("no viewer, or no Jellyfin link, means no identity read at all", async () => {
+  jellyfinRows = [jellyfinRow("", JF_ITEM)];
+  plexRows = [plexRow("", "12345")];
+  settings = { ...jfSettings(), plexMachineId: MACHINE };
+  const [, jf] = await loadWatchLinks({ plex: [""], jellyfin: [""] }, 550, "MOVIE", BOTH);
+  assert.equal(jf.appUrl, null);
+  await loadWatchLinks({ plex: [""], jellyfin: [] }, 550, "MOVIE", BOTH, "u_1");
+  assert.equal(identityReads, 0);
 });
 
 // ── the identity stamper ────────────────────────────────────────────────────

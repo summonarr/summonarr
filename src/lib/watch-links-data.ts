@@ -3,7 +3,8 @@ import { prisma } from "@/lib/prisma";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { plexSettingKey, jellyfinSettingKey, type MediaServerService } from "@/lib/media-instances";
 import type { VisibleServerInstances } from "@/lib/media-visibility";
-import { jellyfinWatchUrl, plexWatchUrls, watchItemId, type WatchLink } from "@/lib/watch-links";
+import { jellyfinWatchUrl, plexWatchUrls, swiftfinWatchUrl, watchItemId, type WatchLink } from "@/lib/watch-links";
+import { linkedIdentityBranches } from "@/lib/my-watch-history";
 
 // "Watch on Plex / Jellyfin" — the data half, and the ONLY producer of a watch
 // link (guardrail 35b). A link exists for a server only when:
@@ -15,7 +16,10 @@ import { jellyfinWatchUrl, plexWatchUrls, watchItemId, type WatchLink } from "@/
 //     no upstream call is made here;
 //   • for Jellyfin, a browser-usable address is stored.
 // It carries the item id, the server identity and the browser address — never
-// a path (guardrail 37f), a token or a slug.
+// a path (guardrail 37f), a token or a slug. A Jellyfin APP link (Swiftfin)
+// also names the viewer's OWN Jellyfin user on that server, found through the
+// shared linkage rule (guardrail 34); a viewer with no identity there gets the
+// web link alone.
 
 type MediaType = "MOVIE" | "TV";
 
@@ -30,6 +34,29 @@ async function namesFor(service: MediaServerService, held: Held[]): Promise<Map<
   return new Map((await getMediaInstances(service)).map((i) => [i.slug, i.name]));
 }
 
+// The viewer's own active Jellyfin user id on each of these servers.
+async function viewerJellyfinIds(viewerId: string | null, held: Held[]): Promise<Map<string, string>> {
+  if (viewerId === null || held.length === 0) return new Map();
+  const user = await prisma.user.findUnique({
+    where: { id: viewerId },
+    select: { id: true, plexUserId: true, jellyfinUserId: true },
+  });
+  if (!user) return new Map();
+  const rows = await prisma.mediaServerUser.findMany({
+    where: {
+      source: "jellyfin",
+      active: true,
+      serverInstance: { in: held.map((h) => h.slug) },
+      OR: linkedIdentityBranches(user),
+    },
+    select: { serverInstance: true, sourceUserId: true },
+    orderBy: { id: "asc" },
+  });
+  const out = new Map<string, string>();
+  for (const row of rows) if (!out.has(row.serverInstance)) out.set(row.serverInstance, row.sourceUserId);
+  return out;
+}
+
 const usable = (rows: Array<{ serverInstance: string; itemId: string | null }>, order: string[]): Held[] =>
   rows
     .flatMap((r) => (r.itemId === null ? [] : [{ slug: r.serverInstance, itemId: r.itemId }]))
@@ -41,6 +68,8 @@ export async function loadWatchLinks(
   tmdbId: number,
   mediaType: MediaType,
   show: { showPlex: boolean; showJellyfin: boolean },
+  // The viewer's account, for the Jellyfin app link; null = web links only.
+  viewerId: string | null = null,
 ): Promise<WatchLink[]> {
   const plexSlugs = show.showPlex ? visible.plex : [];
   const jellyfinSlugs = show.showJellyfin ? visible.jellyfin : [];
@@ -72,25 +101,33 @@ export async function loadWatchLinks(
       jellyfinSettingKey(h.slug, "Url"),
     ]),
   ];
-  const [settingRows, plexNames, jellyfinNames] = await Promise.all([
+  const [settingRows, plexNames, jellyfinNames, jellyfinUsers] = await Promise.all([
     prisma.setting.findMany({ where: { key: { in: keys } }, select: { key: true, value: true } }),
     namesFor("plex", plex),
     namesFor("jellyfin", jellyfin),
+    viewerJellyfinIds(viewerId, jellyfin),
   ]);
   const setting = new Map(settingRows.map((r) => [r.key, r.value]));
 
   const links: WatchLink[] = [];
   for (const held of plex) {
-    const urls = plexWatchUrls(setting.get(plexSettingKey(held.slug, "MachineId")) ?? "", held.itemId);
+    const urls = plexWatchUrls(setting.get(plexSettingKey(held.slug, "MachineId")) ?? "", held.itemId, mediaType);
     if (urls) links.push({ server: "plex", name: plexNames.get(held.slug) ?? null, ...urls });
   }
   for (const held of jellyfin) {
+    const serverId = setting.get(jellyfinSettingKey(held.slug, "ServerId")) ?? "";
     const webUrl = jellyfinWatchUrl(
       [setting.get(jellyfinSettingKey(held.slug, "WebAddress")), setting.get(jellyfinSettingKey(held.slug, "Url"))],
-      setting.get(jellyfinSettingKey(held.slug, "ServerId")) ?? "",
+      serverId,
       held.itemId,
     );
-    if (webUrl) links.push({ server: "jellyfin", name: jellyfinNames.get(held.slug) ?? null, webUrl, appUrl: null });
+    if (!webUrl) continue;
+    links.push({
+      server: "jellyfin",
+      name: jellyfinNames.get(held.slug) ?? null,
+      webUrl,
+      appUrl: swiftfinWatchUrl(serverId, jellyfinUsers.get(held.slug), held.itemId),
+    });
   }
   return links;
 }
