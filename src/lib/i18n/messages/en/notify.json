@@ -185,6 +185,8 @@
   "notify.discord.adminIssueMessage.title": "💬 User Reply on Issue — {title}",
   "notify.discord.adminIssueMessage.descriptionFromAdmin": "**{user}** replied. Open the issue in Summonarr to read the message.",
   "notify.discord.adminIssueMessage.description": "**{user}** added a message. Open the issue in Summonarr to read it.",
+  "notify.discord.adminIssueMessage.descriptionFromAdminUnnamed": "An admin replied. Open the issue in Summonarr to read the message.",
+  "notify.discord.adminIssueMessage.descriptionUnnamed": "The reporter added a message. Open the issue in Summonarr to read it.",
   "notify.discord.issueResolved.title": "✅ Issue Resolved — {title}",
   "notify.discord.issueResolved.description": "The issue you reported with **{media}** has been resolved.",
   "notify.discord.issueResolved.resolution": "**Resolution:** {resolution}",

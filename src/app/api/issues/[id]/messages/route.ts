@@ -128,9 +128,10 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
     },
     authorId: session.user.id,
     authorDisplayName: session.user.name ?? null,
-    // Managers (the admin fan-out and the agents) see emails throughout the
-    // issue surface, so the email fallback stays for them; the reporter never
-    // gets it (issue-reply-notify.ts).
+    // Managers see emails throughout the issue surface, so the email fallback
+    // stays for the per-admin push and email and the agents. The reporter never
+    // gets it, and neither does the shared Discord channel
+    // (issue-reply-notify.ts passes authorDisplayName there).
     authorName: session.user.name ?? session.user.email ?? "Someone",
     fromIssueAdmin: isIssueAdmin,
     text,

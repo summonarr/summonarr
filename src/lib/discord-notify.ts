@@ -781,7 +781,9 @@ async function linkedPermissionHolders(
 
 export async function notifyAdminsIssueMessage(
   title: string,
-  userName: string,
+  // The author's DISPLAY name, or null when they have none. Never a name that
+  // falls back to the email: the post goes to the shared channel (see below).
+  displayName: string | null,
   // Never posted: this fan-out only reaches the shared channel (see below).
   _body: string,
   opts: { excludeUserId?: string; fromAdmin?: boolean; restrictToUserId?: string; tmdbId?: number | null; mediaType?: string | null } = {},
@@ -813,9 +815,14 @@ export async function notifyAdminsIssueMessage(
       title: opts.fromAdmin
         ? t("notify.discord.adminIssueMessage.titleFromAdmin", { title: escMd(localTitle) })
         : t("notify.discord.adminIssueMessage.title", { title: escMd(localTitle) }),
-      description: opts.fromAdmin
-        ? t("notify.discord.adminIssueMessage.descriptionFromAdmin", { user: escMd(userName) })
-        : t("notify.discord.adminIssueMessage.description", { user: escMd(userName) }),
+      // A name-less author is described by role, never by email.
+      description: displayName
+        ? opts.fromAdmin
+          ? t("notify.discord.adminIssueMessage.descriptionFromAdmin", { user: escMd(displayName) })
+          : t("notify.discord.adminIssueMessage.description", { user: escMd(displayName) })
+        : opts.fromAdmin
+          ? t("notify.discord.adminIssueMessage.descriptionFromAdminUnnamed")
+          : t("notify.discord.adminIssueMessage.descriptionUnnamed"),
       timestamp: new Date().toISOString(),
     };
 
