@@ -17,6 +17,8 @@
   "detail.hide.hidden": "Nascosto",
   "detail.hide.notInterested": "Non mi interessa",
   "detail.watchTrailer": "Guarda il trailer",
+  "detail.watchOn": "Guarda su {server}",
+  "detail.watchOnNamed": "Guarda su {server} ({name})",
   "detail.runtime.minutes": "{minutes} min",
   "detail.runtime.hours": "{hours} h",
   "detail.runtime.hoursMinutes": "{hours} h {minutes} min",

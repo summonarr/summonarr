@@ -136,7 +136,8 @@ const DISCORD_REGISTRATION = ["discordPublicKey", "discordCommands"] as const;
 // - optional add-payload fields (minimum availability, language profile):
 //   blank = stop sending the field, back to the arr's own default.
 // - external URLs: blank = the "Open in Radarr/Sonarr" links use the
-//   connection URL again (arrBrowserBase skips an empty value).
+//   connection URL again (arrBrowserBase skips an empty value). Same for the
+//   Jellyfin browser address and the "Watch on Jellyfin" links.
 // - Discord routing ids and the invite: blanking the notify channel is the
 //   documented way back to DMs, and a role/invite could otherwise only be
 //   replaced. A blank guild id switches registration to GLOBAL commands; a
@@ -228,6 +229,10 @@ const BASE_SETTINGS = {
   jellyfinMoviePathStripPrefix: { type: TEXT, clearable: true },
   jellyfinTvPathStripPrefix: { type: TEXT, clearable: true },
   jellyfinRestrictSignIn: { type: BOOLEAN },
+  // The address a BROWSER uses for the default Jellyfin server — the "Watch on
+  // Jellyfin" links (watch-links.ts). Never fetched by the server. Blank = the
+  // links use jellyfinUrl.
+  jellyfinWebAddress: { type: SERVER_URL, clearable: true },
   // A handle ("@alice") or a link; a link must be https://, which also rules out
   // javascript:/data: in the <a href> the donate page renders. Amazon has no
   // handle form.

@@ -18,6 +18,12 @@ import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { getVisibleServerInstances } from "@/lib/media-visibility";
+import { getFeatureFlags } from "@/lib/features";
+import { getBadgeVisibility } from "@/lib/badge-visibility";
+import { loadWatchLinks } from "@/lib/watch-links-data";
+import type { WatchLink } from "@/lib/watch-links";
+import type { SummonarrSession } from "@/lib/api-auth";
 
 // Lightweight projection for related/collection rails on native clients — the
 // app only needs poster + label + availability marks for these, not the full
@@ -105,6 +111,23 @@ function loadCollectionParts(type: "movie" | "tv", detail: TmdbMedia, userId: st
     });
 }
 
+// "Watch on Plex / Jellyfin" for the native detail screen — the same links,
+// under the same visibility and chip mask, as the web page (guardrail 35b).
+// Best-effort: a failed read ships no links rather than failing the title.
+async function viewerWatchLinks(session: SummonarrSession, tmdbId: number, mediaType: "MOVIE" | "TV"): Promise<WatchLink[]> {
+  try {
+    const [visible, flags] = await Promise.all([getVisibleServerInstances(session), getFeatureFlags()]);
+    const show = getBadgeVisibility(session, {
+      plex: flags["feature.integration.plex"] ?? false,
+      jellyfin: flags["feature.integration.jellyfin"] ?? false,
+    });
+    return await loadWatchLinks(visible, tmdbId, mediaType, show);
+  } catch (err) {
+    console.warn("[media] watch links read failed:", err instanceof Error ? err.message : err);
+    return [];
+  }
+}
+
 // Full single-title detail for native clients. The web app builds this in a
 // server component (src/app/(app)/{movie,tv}/[id]); this mirrors it as REST:
 // rich TMDB details (genres, runtime, seasons, ratings, trailer) + top cast +
@@ -164,13 +187,14 @@ export const GET = withAuth(async (
     // too), both availability passes and the viewer's own flags. Ratings are
     // skipped for the related rail — native tiles show no rating chips, only
     // the poster + availability mark.
-    const [[withAvailability], similarWithAvailability, collectionParts, flags] = await Promise.all([
+    const [[withAvailability], similarWithAvailability, collectionParts, flags, watchLinks] = await Promise.all([
       // includeHidden: never filter out the very item the viewer opened, even if
       // they've hidden it. The related rail below is left to filter normally.
       attachAllAvailability([detail], session.user.id, { show4k, includeHidden: true }),
       attachAllAvailability(suggestions.slice(0, 12), session.user.id, { skipRatings: true }),
       loadCollectionParts(type, detail, session.user.id),
       viewerTitleFlags(session.user.id, tmdbId, type === "tv" ? "TV" : "MOVIE", show4k),
+      viewerWatchLinks(session, tmdbId, type === "tv" ? "TV" : "MOVIE"),
     ]);
 
     // `collection` stays null when the title has none (native clients decode
@@ -188,6 +212,7 @@ export const GET = withAuth(async (
       ...extras,
       collection,
       ...flags,
+      watchLinks,
     });
   } catch (err) {
     console.error("[media] detail fetch failed:", err);

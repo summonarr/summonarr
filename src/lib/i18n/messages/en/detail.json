@@ -17,6 +17,8 @@
   "detail.hide.hidden": "Hidden",
   "detail.hide.notInterested": "Not Interested",
   "detail.watchTrailer": "Watch Trailer",
+  "detail.watchOn": "Watch on {server}",
+  "detail.watchOnNamed": "Watch on {server} ({name})",
   "detail.runtime.minutes": "{minutes}m",
   "detail.runtime.hours": "{hours}h",
   "detail.runtime.hoursMinutes": "{hours}h {minutes}m",

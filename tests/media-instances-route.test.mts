@@ -587,6 +587,9 @@ test("Setting cleanup covers the WHOLE per-instance field union, not just the co
       "plexRemoteAdminEmail",
       "plexRemoteAdminToken",
       "plexRemoteLibraries",
+      // App-written identity for the watch links (guardrail 35b): a server
+      // re-registered under this slug must not inherit another server's id.
+      "plexRemoteMachineId",
       "plexRemoteMoviePathStripPrefix",
       "plexRemotePathStripPrefix",
       // App-written status key — this instance still owns it, so removal must

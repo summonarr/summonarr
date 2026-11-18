@@ -246,6 +246,8 @@
   "settings.form.library.noneSelected": "未选择媒体库——将同步所有媒体库。",
   "settings.form.library.saveSelection": "保存媒体库选择",
   "settings.form.jellyfin.serverUrl": "Jellyfin 服务器 URL",
+  "settings.form.jellyfin.webAddress": "浏览器访问地址（可选）",
+  "settings.form.jellyfin.webAddressHelp": "用户的浏览器访问此 Jellyfin 服务器所用的地址，用于“在 Jellyfin 上观看”链接。留空则使用服务器 URL。",
   "settings.form.jellyfin.apiKeyPlaceholder": "在 Jellyfin → 控制台 → API 密钥中生成",
   "settings.form.jellyfin.apiKeyHelp": "在 Jellyfin 控制台 → 高级 → API 密钥中生成 API 密钥。",
   "settings.form.library.librariesLoaded_one": "（已加载 {count} 个媒体库）",

@@ -246,6 +246,8 @@
   "settings.form.library.noneSelected": "No libraries selected — all libraries will be synced.",
   "settings.form.library.saveSelection": "Save Library Selection",
   "settings.form.jellyfin.serverUrl": "Jellyfin Server URL",
+  "settings.form.jellyfin.webAddress": "Address for browsers (optional)",
+  "settings.form.jellyfin.webAddressHelp": "The address your users' browsers use for this Jellyfin server, for the “Watch on Jellyfin” links. Leave blank to use the server URL.",
   "settings.form.jellyfin.apiKeyPlaceholder": "Generate one in Jellyfin → Dashboard → API Keys",
   "settings.form.jellyfin.apiKeyHelp": "Generate an API key under Jellyfin Dashboard → Advanced → API Keys.",
   "settings.form.library.librariesLoaded_one": "({count} library loaded)",

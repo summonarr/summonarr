@@ -6,6 +6,7 @@ import { WatchlistButton } from "@/components/media/watchlist-button";
 import { HideButton } from "@/components/media/hide-button";
 import { ReportIssueButton } from "@/components/media/report-issue-button";
 import { TrailerButton } from "@/components/media/trailer-button";
+import { WatchLinkButton } from "@/components/media/watch-link-button";
 import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
 import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { ArrManageButton } from "@/components/admin/arr-title/title-manager";
@@ -15,7 +16,7 @@ import type { DetailMediaType, DetailPageState } from "@/lib/detail-page-data";
 import type { Translator } from "@/lib/i18n/translate";
 
 // The action row of a movie or TV detail page: Request (default, 4K, each
-// named instance), Watchlist, Hide, Report issue, Vote to delete, Trailer, and
+// named instance), Watch on Plex/Jellyfin, Watchlist, Hide, Report issue, Vote to delete, Trailer, and
 // an admin's Radarr/Sonarr controls. One copy for both pages; the state comes
 // from loadDetailPageState.
 //
@@ -57,6 +58,10 @@ export function DetailActions({
       style={{ gap: 10, marginTop: 6 }}
     >
       <RequestActions media={media} mediaType={mediaType} state={state} canRequest={canRequest} />
+      {/* One per server the viewer may see that holds the title (guardrail 35b). */}
+      {state.watchLinks.map((link) => (
+        <WatchLinkButton key={`watch-${media.id}-${link.webUrl}`} link={link} />
+      ))}
       <WatchlistButton key={`watchlist-${media.id}`} tmdbId={media.id} mediaType={mediaType} initialOnWatchlist={state.onWatchlist} />
       <HideButton
         key={`hide-${media.id}`}

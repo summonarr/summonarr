@@ -18,6 +18,7 @@ import { plexLibraryRow, jellyfinLibraryRow } from "./library-rows";
 import { warnOnChange, forgetWarnOnChange } from "./log-dedup";
 import { plexHoldNeedsCounts, plexHoldReason } from "./plex-sync-guard";
 import { jellyfinHoldNeedsCounts, jellyfinHoldReason } from "./jellyfin-sync-guard";
+import { stampMediaServerIdentities } from "./media-server-identity";
 import { addPresence, removePresence, droppedTmdbIds, type SyncFlags, type WindDown } from "./sync-orchestrator-shared";
 
 // The configured servers and each one's own library selection.
@@ -128,6 +129,8 @@ export async function syncLibraries(flags: SyncFlags, targets: LibraryTargets, w
     ),
     syncPlexLibraries(flags, targets, plex, windDownBefore, signal),
     syncJellyfinLibraries(flags, targets, jellyfin, windDownBefore, signal),
+    // Each server's own identity, for the "Watch on …" links (never throws).
+    stampMediaServerIdentities(targets),
   ]);
   for (const result of results) {
     if (result.status === "rejected") {

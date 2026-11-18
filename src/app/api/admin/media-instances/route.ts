@@ -75,6 +75,8 @@ const PLEX_INSTANCE_FIELDS: Record<PlexSettingField, true> = {
   // the instance must take it too or the row is orphaned forever (nothing else
   // ever writes a de-registered slug's keys).
   ServerReachable: true,
+  // App-written too (the library sync): the server's identity for watch links.
+  MachineId: true,
   Libraries: true,
   PathStripPrefix: true,
   MoviePathStripPrefix: true,
@@ -88,6 +90,8 @@ const JELLYFIN_INSTANCE_FIELDS: Record<JellyfinSettingField, true> = {
   MoviePathStripPrefix: true,
   TvPathStripPrefix: true,
   RestrictSignIn: true,
+  ServerId: true,
+  WebAddress: true,
 };
 
 // Every Setting key a named instance can own — used to clean up on removal.
@@ -121,6 +125,10 @@ interface InstancePayload {
   url?: string; // Jellyfin
   apiKey?: string; // Jellyfin, secret
   restrictSignIn?: boolean; // Jellyfin — omit to leave the stored value untouched
+  // Jellyfin — the address a BROWSER uses for this server (the "Watch on
+  // Jellyfin" links); never fetched by the server. Omit to leave untouched;
+  // "" DELETES the row, so the links use the connection URL again.
+  webAddress?: string;
   // Comma-joined library ids/section keys to sync from THIS server. Omit to
   // leave untouched; "" clears the selection, which means "sync all libraries".
   // Per-server because a Plex section key is only meaningful on the server it
@@ -148,7 +156,7 @@ interface SavePayload {
 type TxClient = PrismaTxClient;
 
 const PLEX_VIEW_FIELDS: PlexSettingField[] = ["ServerUrl", "AdminToken", "AdminEmail", "Libraries", "MoviePathStripPrefix", "TvPathStripPrefix"];
-const JELLYFIN_VIEW_FIELDS: JellyfinSettingField[] = ["Url", "ApiKey", "RestrictSignIn", "Libraries", "MoviePathStripPrefix", "TvPathStripPrefix"];
+const JELLYFIN_VIEW_FIELDS: JellyfinSettingField[] = ["Url", "ApiKey", "RestrictSignIn", "WebAddress", "Libraries", "MoviePathStripPrefix", "TvPathStripPrefix"];
 
 // Same parse as isJellyfinSignInAllowed (auth.ts): fail-CLOSED, so a missing row
 // reads as restricted. The GET view must report that default rather than `false`,
@@ -206,6 +214,7 @@ function instanceView(service: MediaServerService, slug: string, name: string, r
     url: stripUrlUserinfo(map[jellyfinSettingKey(slug, "Url")] ?? ""),
     hasApiKey: !!map[jellyfinSettingKey(slug, "ApiKey")],
     restrictSignIn: readRestrictSignIn(map[jellyfinSettingKey(slug, "RestrictSignIn")]),
+    webAddress: stripUrlUserinfo(map[jellyfinSettingKey(slug, "WebAddress")] ?? ""),
     libraries: map[jellyfinSettingKey(slug, "Libraries")] ?? "",
     moviePathStripPrefix: map[jellyfinSettingKey(slug, "MoviePathStripPrefix")] ?? "",
     tvPathStripPrefix: map[jellyfinSettingKey(slug, "TvPathStripPrefix")] ?? "",
@@ -392,7 +401,13 @@ function validateSave(
       const err = validateServerUrl(rawUrl.trim(), {}, t);
       if (err) return bad(t("apiAdmin.mediaInstances.invalidServerUrl", { slug: inst.slug, reason: err }));
     }
-    for (const [field, value] of [["adminEmail", inst.adminEmail], ["libraries", inst.libraries], ["moviePathStripPrefix", inst.moviePathStripPrefix], ["tvPathStripPrefix", inst.tvPathStripPrefix], ["address", rawUrl]] as const) {
+    // The browser address: same URL rules, though the server never fetches it —
+    // it becomes the host of a link every viewer of that server is handed.
+    if (service === "jellyfin" && typeof inst.webAddress === "string" && inst.webAddress.trim().length > 0) {
+      const err = validateServerUrl(inst.webAddress.trim(), {}, t);
+      if (err) return bad(t("apiAdmin.mediaInstances.invalidServerUrl", { slug: inst.slug, reason: err }));
+    }
+    for (const [field, value] of [["webAddress", inst.webAddress], ["adminEmail", inst.adminEmail], ["libraries", inst.libraries], ["moviePathStripPrefix", inst.moviePathStripPrefix], ["tvPathStripPrefix", inst.tvPathStripPrefix], ["address", rawUrl]] as const) {
       if (typeof value === "string" && value.length > FREE_TEXT_MAX_LEN) {
         return bad(t("apiAdmin.mediaInstances.fieldTooLong", { slug: inst.slug, field, max: FREE_TEXT_MAX_LEN }));
       }
@@ -449,6 +464,8 @@ async function writeInstanceSettings(tx: TxClient, service: MediaServerService, 
   // explicit no-strip override isn't expressible, and doesn't need to be:
   // stripping is a conditional startsWith, so an inherited prefix that
   // doesn't match this server's paths is already a no-op.)
+  // (The Jellyfin browser address has the same delete-on-blank rule: blank
+  // means "use the connection URL", which an absent row already says.)
   const setStripPrefix = async (key: string, value: string | undefined) => {
     if (value === undefined) return;
     const trimmed = value.trim();
@@ -466,6 +483,7 @@ async function writeInstanceSettings(tx: TxClient, service: MediaServerService, 
     await set(jellyfinSettingKey(inst.slug, "Url"), trimmedString(inst.url), false);
     await set(jellyfinSettingKey(inst.slug, "ApiKey"), inst.apiKey, true);
     await set(jellyfinSettingKey(inst.slug, "RestrictSignIn"), typeof inst.restrictSignIn === "boolean" ? String(inst.restrictSignIn) : undefined, false);
+    await setStripPrefix(jellyfinSettingKey(inst.slug, "WebAddress"), rawString(inst.webAddress));
     await set(jellyfinSettingKey(inst.slug, "Libraries"), trimmedString(inst.libraries), false);
     await setStripPrefix(jellyfinSettingKey(inst.slug, "MoviePathStripPrefix"), rawString(inst.moviePathStripPrefix));
     await setStripPrefix(jellyfinSettingKey(inst.slug, "TvPathStripPrefix"), rawString(inst.tvPathStripPrefix));

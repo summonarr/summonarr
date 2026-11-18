@@ -17,6 +17,8 @@
   "detail.hide.hidden": "Oculto",
   "detail.hide.notInterested": "Sem interesse",
   "detail.watchTrailer": "Ver trailer",
+  "detail.watchOn": "Assistir no {server}",
+  "detail.watchOnNamed": "Assistir no {server} ({name})",
   "detail.runtime.minutes": "{minutes} min",
   "detail.runtime.hours": "{hours} h",
   "detail.runtime.hoursMinutes": "{hours} h {minutes} min",

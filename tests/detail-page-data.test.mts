@@ -106,6 +106,9 @@ for (const [model, rows] of [["plexLibraryItem", () => plexRows], ["jellyfinLibr
       const row = (rows() as Array<Record<string, unknown>>).find((r) => whereMatches(r, args.where));
       return row ? project(row, args.select) : null;
     },
+    // The watch-links read (watch-links-data.ts).
+    findMany: async (args: { where: Where; select?: Record<string, boolean> }) =>
+      (rows() as Array<Record<string, unknown>>).filter((r) => whereMatches(r, args.where)).map((r) => project(r, args.select)),
   });
 }
 for (const service of ["radarr", "sonarr"] as const) {
@@ -285,4 +288,17 @@ test("emptyOnFailure logs the scope, source and id once and degrades to an empty
   const out = await Promise.reject(new Error("TMDB 503")).catch(emptyOnFailure("movie-page", "credits", 550));
   assert.deepEqual(out, []);
   assert.deepEqual(warns, ["[movie-page] credits read failed for 550: TMDB 503"]);
+});
+
+// ── watch links (guardrail 35b) ─────────────────────────────────────────────
+test("watch links ride the page state for a viewer shown the chip, and are withheld from one who is not", async () => {
+  settings = { "feature.integration.plex": "true", plexMachineId: "abc123" };
+  plexRows = [{ tmdbId: 550, mediaType: "MOVIE", serverInstance: "", plexRatingKey: "42", plexRatingKeys: [] } as (typeof plexRows)[number]];
+  // A member who signs in through Plex is shown the Plex chip.
+  const plexUser: Session = { ...USER, user: { ...USER.user, mediaServer: "plex" } };
+  const shown = await loadDetailPageState(plexUser, MOVIE, "MOVIE");
+  assert.deepEqual(shown.watchLinks.map((l) => l.webUrl), ["https://app.plex.tv/desktop/#!/server/abc123/details?key=%2Flibrary%2Fmetadata%2F42"]);
+  // A viewer with no media server of their own is shown no Plex chip.
+  const user = await loadDetailPageState(USER, MOVIE, "MOVIE");
+  assert.deepEqual(user.watchLinks, []);
 });

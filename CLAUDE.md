@@ -1046,6 +1046,19 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - `tests/media-visibility-read-path.test.mts` pins the list and the fast path (mutation-verified).
     - `POST /api/report` `vote_reason` follows the votes list: the votes feature on, a non-blank reason, another voter's vote, a title not hidden from the reporter — else the 404 of a missing vote.
     - The viewer's own "not interested" titles (`HiddenItem`) leave a paged POOL the same way: `/top` and `/api/top-rated` share ONE pipeline ([top-rated.ts](src/lib/top-rated.ts)) that drops them before paging and orders its default view from CACHED IMDb ratings only (`readCachedImdbRatings`, never an upstream warm over the pool); `attachAllAvailability` drops them BEFORE enrichment. `/api/search` is the exception (`includeHidden: true`): a search by name still finds a hidden title.
+35b. **A "Watch on Plex / Jellyfin" link is produced ONLY by `loadWatchLinks` ([watch-links-data.ts](src/lib/watch-links-data.ts)), under the viewer's visible instances and chip mask, from STORED data — never a live upstream call at render, and never a path, token or slug.** URL shapes in [watch-links.ts](src/lib/watch-links.ts) (pure); server identities stamped per `/api/sync` run by [media-server-identity.ts](src/lib/media-server-identity.ts).
+
+    Why:
+    - A link names a server (its Plex machineIdentifier, or its Jellyfin address and server Id) and an item on it. Built outside the visibility-scoped read, it would tell a viewer that a restricted server holds the title (35), and what that server is.
+    - The detail page and `GET /api/media/{type}/{tmdbId}` render per request; a `/identity` or `/System/Info/Public` call there would hang every page on a server that is down.
+
+    Rules:
+    - The library read is filtered by `serverInstance: { in: visible.* }` and selects only the instance and the item ids — the canonical id, else the first of the array (37, 37c); never `filePath` (37f). A server with no stored identity, or a Jellyfin server with no browser-usable address, yields no link.
+    - Plex is addressed through app.plex.tv by machine id (plus a `plex://` app link); Jellyfin through its own web client at the per-instance `WebAddress` setting, else the connection `Url`. `WebAddress` is plaintext and NEVER fetched by the server. It is not named `ExternalUrl`: a server registered under the slug `external` already owns `jellyfinExternalUrl` as its connection URL.
+    - `MachineId` / `ServerId` are written only by the sync, only when the read succeeded and the value changed; a failed read keeps the stored one. The stamper never throws into the sync.
+    - The wire field `watchLinks` is additive and self-announcing (a client shows the button when a link is present), so `API_VERSION` is not bumped (25). `name` is the server's display name and only when the viewer sees several servers of that kind.
+    - TV links open the show. `TVEpisodeCache` has no instance or item id, so there is no per-episode link.
+    - `tests/watch-links.test.mts` and `tests/watch-links-data.test.mts` pin it.
 36. **An unconfigured media server is SKIPPED, never failed. A client must decide that BEFORE the request, not from the response.**
 
     Detail and rationale: [docs/guardrails/36.md](docs/guardrails/36.md).

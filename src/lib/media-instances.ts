@@ -69,6 +69,10 @@ export type PlexSettingField =
   // default server's status. Not a secret — MEDIA_INSTANCE_SECRET_RE matches
   // only AdminToken/ApiKey, so this stays plaintext, which is correct.
   | "ServerReachable"
+  // Written by the library sync (media-server-identity.ts), never by a form:
+  // the server's own machineIdentifier, which the "Watch on Plex" links name
+  // the server by (watch-links.ts). An id, not a secret — plaintext.
+  | "MachineId"
   | "Libraries"
   | "PathStripPrefix"
   | "MoviePathStripPrefix"
@@ -87,7 +91,15 @@ export type JellyfinSettingField =
   | "PathStripPrefix"
   | "MoviePathStripPrefix"
   | "TvPathStripPrefix"
-  | "RestrictSignIn";
+  | "RestrictSignIn"
+  // Written by the library sync: the server's own Id (/System/Info/Public),
+  // the `serverId` of a "Watch on Jellyfin" link. Plaintext.
+  | "ServerId"
+  // The address a BROWSER uses for this server — the "Watch on Jellyfin"
+  // links. Never fetched by the server. Blank = fall back to Url. Not named
+  // "ExternalUrl": a server registered under the slug "external" already owns
+  // jellyfinExternalUrl as its connection Url.
+  | "WebAddress";
 
 // e.g. jellyfinSettingKey("", "Url")           → "jellyfinUrl"   (exact legacy key)
 //      jellyfinSettingKey("remote", "ApiKey")  → "jellyfinRemoteApiKey"
@@ -102,8 +114,8 @@ export function jellyfinSettingKey(instance: MediaInstanceKey, field: JellyfinSe
 // config without overwriting the default's. Existing keys can't change (every
 // deployment stores them), so a NEW instance must not take such a slug; an
 // already-registered one keeps reading as valid.
-const PLEX_FIELDS = ["ServerUrl", "AdminToken", "AdminEmail", "ServerReachable", "Libraries", "PathStripPrefix", "MoviePathStripPrefix", "TvPathStripPrefix"] as const satisfies readonly PlexSettingField[];
-const JELLYFIN_FIELDS = ["Url", "ApiKey", "Libraries", "PathStripPrefix", "MoviePathStripPrefix", "TvPathStripPrefix", "RestrictSignIn"] as const satisfies readonly JellyfinSettingField[];
+const PLEX_FIELDS = ["ServerUrl", "AdminToken", "AdminEmail", "ServerReachable", "MachineId", "Libraries", "PathStripPrefix", "MoviePathStripPrefix", "TvPathStripPrefix"] as const satisfies readonly PlexSettingField[];
+const JELLYFIN_FIELDS = ["Url", "ApiKey", "Libraries", "PathStripPrefix", "MoviePathStripPrefix", "TvPathStripPrefix", "RestrictSignIn", "ServerId", "WebAddress"] as const satisfies readonly JellyfinSettingField[];
 // A field added to either union without being listed here fails to compile.
 const _everyFieldListed: [Exclude<PlexSettingField, (typeof PLEX_FIELDS)[number]>, Exclude<JellyfinSettingField, (typeof JELLYFIN_FIELDS)[number]>] extends [never, never] ? true : never = true;
 void _everyFieldListed;

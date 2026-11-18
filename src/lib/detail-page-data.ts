@@ -13,6 +13,8 @@ import { arrInstancesForTitle } from "@/lib/arr-links-data";
 import { getAdminTitleNeverWatched, type TitleNeverWatched } from "@/lib/never-watched-report";
 import { generateRequestToken } from "@/lib/request-token";
 import { DEFAULT_ARR_INSTANCE, FOURK_ARR_INSTANCE } from "@/lib/arr-instances";
+import { loadWatchLinks } from "@/lib/watch-links-data";
+import type { WatchLink } from "@/lib/watch-links";
 
 // The viewer-scoped state behind a movie or TV detail page: library
 // availability, the viewer's own requests and 4K / named-instance state, the
@@ -33,6 +35,9 @@ export interface DetailPageState {
   jellyfinCommunityRating: number | null;
   showPlex: boolean;
   showJellyfin: boolean;
+  // "Watch on Plex / Jellyfin": one per server the viewer may see that holds
+  // the title (guardrail 35b).
+  watchLinks: WatchLink[];
   // Queued on the default instance.
   arrPending: boolean;
   // Any of the viewer's live non-4K requests — the hero's Requested badge.
@@ -227,6 +232,12 @@ export async function loadDetailPageState(
   // a disabled Plex or Jellyfin.
   const flags = getFeatureFlags();
   const blacklisted = isBlacklisted(tmdbId, mediaType);
+  const badges = flags.then((f) =>
+    getBadgeVisibility(session, {
+      plex: flagOn(f, "feature.integration.plex"),
+      jellyfin: flagOn(f, "feature.integration.jellyfin"),
+    }),
+  );
 
   const reads = await allNamed({
     ...libraryReads(visible, tmdbId, mediaType),
@@ -244,20 +255,23 @@ export async function loadDetailPageState(
     // A 4K instance configured AND the viewer can request 4K.
     show4k: getShow4kVisibility(session, isMovie ? "movie" : "tv"),
     flags,
+    badges,
+    // A convenience link, never worth failing the page for.
+    watchLinks: Promise.all([visible, badges])
+      .then(([v, show]) => loadWatchLinks(v, tmdbId, mediaType, show))
+      .catch(emptyOnFailure(isMovie ? "movie-page" : "tv-page", "watch-links", tmdbId)),
     ...adminExtraReads(permissions, flags, mediaType, tmdbId),
   });
 
   const wantedSlugs = new Set(reads.wanted.map((w) => w.arrInstance));
-  const { showPlex, showJellyfin } = getBadgeVisibility(session, {
-    plex: flagOn(reads.flags, "feature.integration.plex"),
-    jellyfin: flagOn(reads.flags, "feature.integration.jellyfin"),
-  });
+  const { showPlex, showJellyfin } = reads.badges;
   return {
     plexAvailable: !!reads.plexItem,
     jellyfinAvailable: !!reads.jellyfinItem,
     jellyfinCommunityRating: reads.jellyfinItem?.communityRating ?? null,
     showPlex,
     showJellyfin,
+    watchLinks: reads.watchLinks,
     arrPending: wantedSlugs.has(DEFAULT_ARR_INSTANCE),
     requestedAny: reads.userRequests.length > 0,
     requested: reads.requested,
