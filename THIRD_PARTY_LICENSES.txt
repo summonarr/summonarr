@@ -6294,7 +6294,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ------------------------------------------------------------------------------
 
-effect@3.20.0
+effect@3.22.4
 License: MIT
 
 MIT License
