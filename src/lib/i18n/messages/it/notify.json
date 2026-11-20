@@ -185,6 +185,8 @@
   "notify.discord.adminIssueMessage.title": "💬 Risposta dell'utente alla segnalazione — {title}",
   "notify.discord.adminIssueMessage.descriptionFromAdmin": "**{user}** ha risposto. Apri la segnalazione in Summonarr per leggere il messaggio.",
   "notify.discord.adminIssueMessage.description": "**{user}** ha aggiunto un messaggio. Apri la segnalazione in Summonarr per leggerlo.",
+  "notify.discord.adminIssueMessage.descriptionFromAdminUnnamed": "Un amministratore ha risposto. Apri la segnalazione in Summonarr per leggere il messaggio.",
+  "notify.discord.adminIssueMessage.descriptionUnnamed": "Chi ha inviato la segnalazione ha aggiunto un messaggio. Apri la segnalazione in Summonarr per leggerlo.",
   "notify.discord.issueResolved.title": "✅ Segnalazione risolta — {title}",
   "notify.discord.issueResolved.description": "Il problema che hai segnalato con **{media}** è stato risolto.",
   "notify.discord.issueResolved.resolution": "**Risoluzione:** {resolution}",

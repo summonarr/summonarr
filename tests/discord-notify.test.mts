@@ -547,6 +547,33 @@ test("admin fan-out: restrictToUserId narrows the query, fromAdmin flips the hea
   assert.ok(String(embed.title).startsWith("💬 Admin Reply on Issue — Dune"));
 });
 
+test("admin fan-out: a name-less author is described by role in the shared channel, in both directions", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindManyRows = [{ discordId: "555555555555555555", role: "ADMIN", permissions: 1n }];
+
+  await notifyAdminsIssueMessage("Dune", null, "on it", { fromAdmin: true });
+  await notifyAdminsIssueMessage("Dune", null, "still broken");
+  await notifyAdminsIssueMessage("Dune", "Jane", "on it", { fromAdmin: true });
+
+  const descriptions = sent.map((s) => String((s.body?.embeds as Array<Record<string, unknown>>)[0].description));
+  assert.deepEqual(descriptions, [
+    "An admin replied. Open the issue in Summonarr to read the message.",
+    "The reporter added a message. Open the issue in Summonarr to read it.",
+    "**Jane** replied. Open the issue in Summonarr to read the message.",
+  ]);
+});
+
+test("the issue-reply announcer hands the shared-channel Discord ping the display name, never the email-fallback name", async () => {
+  // Every linked user reads the shared channel, and authorName falls back to the
+  // author's sign-in email.
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync(new URL("../src/lib/issue-reply-notify.ts", import.meta.url), "utf8");
+  const calls = source.match(/notifyAdminsIssueMessage\(([^)]*)\)/g) ?? [];
+  assert.equal(calls.length, 1, "one call site");
+  assert.match(calls[0], /^notifyAdminsIssueMessage\(issue\.title, a\.authorDisplayName,/);
+  assert.ok(!calls[0].includes("a.authorName"), calls[0]);
+});
+
 test("admin fan-out isolates per-recipient failures: one 500 doesn't stop the rest and only logs", async () => {
   setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
   userFindManyRows = [

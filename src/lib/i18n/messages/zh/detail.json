@@ -17,6 +17,8 @@
   "detail.hide.hidden": "已隐藏",
   "detail.hide.notInterested": "不感兴趣",
   "detail.watchTrailer": "观看预告片",
+  "detail.watchOn": "在 {server} 上观看",
+  "detail.watchOnNamed": "在 {server}（{name}）上观看",
   "detail.runtime.minutes": "{minutes} 分钟",
   "detail.runtime.hours": "{hours} 小时",
   "detail.runtime.hoursMinutes": "{hours} 小时 {minutes} 分钟",

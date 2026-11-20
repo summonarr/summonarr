@@ -27,7 +27,7 @@ export interface IssueReplyAnnouncement {
   authorId: string;
   /** The author's display name; null when they have none. */
   authorDisplayName: string | null;
-  /** Name shown to managers and the outbound agents (they see emails across the issue surface). */
+  /** Name shown to managers one by one (push, email) and to the outbound agents; falls back to the email, so never post it to a shared channel. */
   authorName: string;
   /** The author holds MANAGE_ISSUES (an issue admin replying). */
   fromIssueAdmin: boolean;
@@ -112,7 +112,9 @@ async function announceReply(a: IssueReplyAnnouncement, sends: Array<Promise<unk
       fromAdmin: a.fromIssueAdmin,
       ...(issue.claimedBy ? { restrictToUserId: issue.claimedBy } : {}),
     };
-    sends.push(notifyAdminsIssueMessage(issue.title, a.authorName, text, { ...adminOpts, ...media }).catch(warnChannel("admin discord")));
+    // Discord posts this one to the SHARED channel, so it gets the display name
+    // only; the push and email below go to each admin and keep the email fallback.
+    sends.push(notifyAdminsIssueMessage(issue.title, a.authorDisplayName, text, { ...adminOpts, ...media }).catch(warnChannel("admin discord")));
     sends.push(notifyAdminsIssueMessagePush({ title: issue.title, ...media, userName: a.authorName, body: text, issueId: issue.id, ...adminOpts }).catch(warnChannel("admin push")));
     sends.push(notifyAdminsIssueMessageEmail({ issueTitle: issue.title, ...media, userName: a.authorName, body: text, issueId: issue.id, ...adminOpts }).catch(warnChannel("admin email")));
     return owed;

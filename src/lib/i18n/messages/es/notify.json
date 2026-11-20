@@ -185,6 +185,8 @@
   "notify.discord.adminIssueMessage.title": "💬 Respuesta de un usuario en la incidencia — {title}",
   "notify.discord.adminIssueMessage.descriptionFromAdmin": "**{user}** respondió. Abre la incidencia en Summonarr para leer el mensaje.",
   "notify.discord.adminIssueMessage.description": "**{user}** añadió un mensaje. Abre la incidencia en Summonarr para leerlo.",
+  "notify.discord.adminIssueMessage.descriptionFromAdminUnnamed": "Un administrador respondió. Abre la incidencia en Summonarr para leer el mensaje.",
+  "notify.discord.adminIssueMessage.descriptionUnnamed": "Quien informó de la incidencia añadió un mensaje. Abre la incidencia en Summonarr para leerlo.",
   "notify.discord.issueResolved.title": "✅ Incidencia resuelta — {title}",
   "notify.discord.issueResolved.description": "Se resolvió la incidencia que reportaste sobre **{media}**.",
   "notify.discord.issueResolved.resolution": "**Resolución:** {resolution}",

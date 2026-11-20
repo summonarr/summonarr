@@ -185,6 +185,8 @@
   "notify.discord.adminIssueMessage.title": "💬 Benutzerantwort zum Problem – {title}",
   "notify.discord.adminIssueMessage.descriptionFromAdmin": "**{user}** hat geantwortet. Öffnen Sie das Problem in Summonarr, um die Nachricht zu lesen.",
   "notify.discord.adminIssueMessage.description": "**{user}** hat eine Nachricht hinzugefügt. Öffnen Sie das Problem in Summonarr, um sie zu lesen.",
+  "notify.discord.adminIssueMessage.descriptionFromAdminUnnamed": "Ein Administrator hat geantwortet. Öffnen Sie das Problem in Summonarr, um die Nachricht zu lesen.",
+  "notify.discord.adminIssueMessage.descriptionUnnamed": "Die Person, die das Problem gemeldet hat, hat eine Nachricht hinzugefügt. Öffnen Sie das Problem in Summonarr, um sie zu lesen.",
   "notify.discord.issueResolved.title": "✅ Problem gelöst – {title}",
   "notify.discord.issueResolved.description": "Das von Ihnen gemeldete Problem mit **{media}** wurde gelöst.",
   "notify.discord.issueResolved.resolution": "**Lösung:** {resolution}",

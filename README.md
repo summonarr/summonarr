@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.40.1 — stable and running in production. Found a problem? See [Feedback](#feedback).
+> **Status:** v0.41.0 — stable and running in production. Found a problem? See [Feedback](#feedback).
 
 ## Install
 
@@ -173,6 +173,29 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted and the developer collects no data. The one server the developer runs is the push relay for iOS notifications, which can't be self-hosted and never sees media titles or usernames (see [APNs relay trust](./docker-container/README.md#apns-relay-trust-ios-push)). The iOS app itself talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.41.0
+
+**Added**
+
+- "Watch on Plex" / "Watch on Jellyfin" buttons on movie and TV detail pages: a title in the library gets one button per media server you can see. Plex opens in app.plex.tv, or in the Plex app on an iPhone or iPad; Jellyfin opens in the server's web client, or in Swiftfin when you have an account on that server.
+- A per-server Jellyfin "Public URL" setting: the address a browser uses for those links, falling back to the connection URL.
+- `GET /api/media/{type}/{tmdbId}` returns the same links as `watchLinks` (additive).
+
+**Changed**
+
+- The library sync stores each server's identity (Plex machine id, Jellyfin server id) so the watch links need no call to the server when a page renders.
+- Runtime image moved to Node 26.13.0 (Alpine 3.23).
+- Dependencies: Next.js and eslint-config-next 16.4.6, jose 6.2.17, Playwright 1.65.0 (dev).
+- CI actions: github/codeql-action 4.39.3, docker/login-action 4.8.0.
+- The project brief lists the current Node and Next.js versions.
+
+**Fixed**
+
+- Notices still owed from an earlier run are redelivered on every sync run.
+- A request comment or issue reply is still announced when its author's account has since been disabled.
+- The episode cache is not rewritten for a media server that is not configured.
+- A dead initial value removed from the admin server-user policy push.
 
 ### v0.40.1
 

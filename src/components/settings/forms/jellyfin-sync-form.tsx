@@ -21,15 +21,20 @@ interface JellyfinSyncFormProps {
   initialUrl: string;
   initialApiKey: string;
   initialJellyfinLibraries: string;
+  initialWebAddress?: string;
 }
 
-export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLibraries }: JellyfinSyncFormProps) {
+export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLibraries, initialWebAddress = "" }: JellyfinSyncFormProps) {
   const t = useT();
   const [url,    setUrl]    = useState(initialUrl);
   // Write-only: the field starts EMPTY (the mask is only its placeholder, so a
   // typed edit can never be the mask plus text); blank means "keep the saved key".
   const [apiKey, setApiKey] = useState("");
   const [keySaved, setKeySaved] = useState(initialApiKey.length > 0);
+  // The address a browser uses for this server (the "Watch on Jellyfin"
+  // links). Sent only when changed; "" clears it (the links use the URL above).
+  const [webAddress, setWebAddress] = useState(initialWebAddress);
+  const [savedWebAddress, setSavedWebAddress] = useState(initialWebAddress);
   // Whether the server holds a SAVED Jellyfin URL + key. /api/sync/jellyfin
   // syncs the stored config, not what is typed in the fields, so the Sync
   // button must follow this and not the inputs: on a fresh install the typed,
@@ -51,7 +56,12 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     const sentKey = apiKey;
-    const stored = await server.saveAndTest({ jellyfinUrl: url, jellyfinApiKey: apiKey || SECRET_MASK_SENTINEL }, (r) =>
+    const sentWebAddress = webAddress.trim();
+    const stored = await server.saveAndTest({
+      jellyfinUrl: url,
+      jellyfinApiKey: apiKey || SECRET_MASK_SENTINEL,
+      ...(sentWebAddress !== savedWebAddress ? { jellyfinWebAddress: sentWebAddress } : {}),
+    }, (r) =>
       // A 422 with `jellyfinError` means the server tested the new URL/key
       // before writing and the test failed — nothing was saved.
       (typeof r.data.jellyfinError === "string" && r.data.jellyfinError) || r.error || t("settings.form.common.saveFailed"));
@@ -60,6 +70,7 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
     if (stored) {
       setConfigured(true);
       setKeySaved(true);
+      setSavedWebAddress(sentWebAddress);
       setApiKey((k) => (k === sentKey ? "" : k));
     }
   }
@@ -95,6 +106,18 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
             <p className="text-xs text-zinc-500">
               {t("settings.form.jellyfin.apiKeyHelp")}
             </p>
+          </div>
+          <div className="space-y-1.5 lg:col-span-2">
+            <Label htmlFor="jellyfin-web-address">{t("settings.form.jellyfin.webAddress")}</Label>
+            <Input
+              id="jellyfin-web-address"
+              type="url"
+              value={webAddress}
+              onChange={(e) => { setWebAddress(e.target.value); server.edited(); }}
+              placeholder="https://jellyfin.example.com"
+              className="bg-zinc-800 border-zinc-700 font-mono"
+            />
+            <p className="text-xs text-zinc-500">{t("settings.form.jellyfin.webAddressHelp")}</p>
           </div>
         </div>
         <div className="flex items-center gap-3 flex-wrap">

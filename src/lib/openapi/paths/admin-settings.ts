@@ -58,7 +58,7 @@ const PLEX_INSTANCE_VIEW = {
 
 const JELLYFIN_INSTANCE_VIEW = {
   type: "object",
-  required: ["slug", "name", "restricted", "url", "hasApiKey", "restrictSignIn", "libraries", "moviePathStripPrefix", "tvPathStripPrefix"],
+  required: ["slug", "name", "restricted", "url", "hasApiKey", "restrictSignIn", "webAddress", "libraries", "moviePathStripPrefix", "tvPathStripPrefix"],
   properties: {
     slug: { type: "string", description: "'' = the default server" },
     name: { type: "string" },
@@ -66,6 +66,7 @@ const JELLYFIN_INSTANCE_VIEW = {
     url: { type: "string", description: "Userinfo stripped" },
     hasApiKey: { type: "boolean", description: "The API key itself is never returned" },
     restrictSignIn: { type: "boolean", description: "true when no row is stored (fail-closed)" },
+    webAddress: { type: "string", description: "The address a browser uses for this server (the Watch on Jellyfin links); \"\" = the connection url. Userinfo stripped" },
     libraries: { type: "string", description: "Comma-joined library ids; \"\" = all" },
     moviePathStripPrefix: { type: "string", description: "\"\" = inherits the default server's prefix" },
     tvPathStripPrefix: { type: "string" },
@@ -327,6 +328,7 @@ export const adminSettingsPaths: OpenApiPaths = {
                       url: { type: "string", description: "Jellyfin only" },
                       apiKey: { type: "string", maxLength: 4096, writeOnly: true, description: "Jellyfin only; write-only, send the mask sentinel to keep unchanged" },
                       restrictSignIn: { type: "boolean", description: "Jellyfin only; omit to leave the stored value untouched" },
+                      webAddress: { type: "string", description: "Jellyfin only; the address a browser uses for this server. Omit to leave untouched; \"\" deletes the row (the links use url)" },
                       restricted: { type: "boolean", description: "Gate this server's library behind a per-user view grant (never the default instance)" },
                       libraries: { type: "string", description: "Comma-joined library ids/section keys to sync from THIS server; omit to leave untouched, \"\" syncs all" },
                       moviePathStripPrefix: { type: "string", description: "Omit to leave untouched; \"\" deletes the row (inherit the default server's prefix)" },

@@ -19,7 +19,7 @@ export const MEDIA_TAB_KEYS = [
   "siteUrl",
   "plexAdminEmail", "plexServerUrl", "plexLibraries",
   "plexWatchlistServerSource", "plexWatchlistServerAutoEnroll", "plexWatchlistServerStatus",
-  "jellyfinUrl", "jellyfinApiKey", "jellyfinLibraries",
+  "jellyfinUrl", "jellyfinApiKey", "jellyfinLibraries", "jellyfinWebAddress",
   "playHistoryEnabled", "playHistoryPlexEnabled", "playHistoryJellyfinEnabled",
   "concurrentStreamLimit", "playHistoryWatchedThreshold", "playHistoryCompletionThreshold", "playHistoryArcGapDays",
   "playHistoryPollingInterval", "playHistoryRetentionDays", STATS_TIME_ZONE_KEY,
@@ -99,6 +99,7 @@ export function MediaTab({ cfg, t }: { cfg: MediaSettings; t: Translator }) {
           initialUrl={cfg.jellyfinUrl ?? ""}
           initialApiKey={cfg.jellyfinApiKey ? SECRET_MASK_SENTINEL : ""}
           initialJellyfinLibraries={cfg.jellyfinLibraries ?? ""}
+          initialWebAddress={cfg.jellyfinWebAddress ?? ""}
         />
       </SettingsCard>
 

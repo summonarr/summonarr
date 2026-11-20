@@ -296,7 +296,7 @@ export const discoveryPaths: OpenApiPaths = {
                   { $ref: "#/components/schemas/TmdbMedia" },
                   {
                     type: "object",
-                    required: ["cast", "similar", "keywords", "keywordList", "genreList", "watchProviders", "homepage", "collection", "votedByMe", "onWatchlist", "onHidden"],
+                    required: ["cast", "similar", "keywords", "keywordList", "genreList", "watchProviders", "homepage", "collection", "votedByMe", "onWatchlist", "onHidden", "watchLinks"],
                     properties: {
                       cast: {
                         type: "array",
@@ -322,6 +322,20 @@ export const discoveryPaths: OpenApiPaths = {
                       onWatchlist: { type: "boolean" },
                       onHidden: { type: "boolean" },
                       requested4kByMe: { type: "boolean", description: "Present only when the viewer can see 4K state: the caller holds an open 4K request" },
+                      watchLinks: {
+                        type: "array",
+                        description: "\"Watch on Plex / Jellyfin\": one per media server the caller may see that holds the title and whose identity the library sync has stored. Empty when there is none. Absent on servers older than this field",
+                        items: {
+                          type: "object",
+                          required: ["server", "name", "webUrl", "appUrl"],
+                          properties: {
+                            server: { type: "string", enum: ["plex", "jellyfin"] },
+                            name: { type: "string", nullable: true, description: "The server's display name; null unless the caller can see several servers of this kind" },
+                            webUrl: { type: "string", description: "Opens the title in a browser (app.plex.tv, or the Jellyfin server's web client)" },
+                            appUrl: { type: "string", nullable: true, description: "Opens the title in a mobile app: plex://libraries/… for Plex, swiftfin://… for Jellyfin (only when the caller has a Jellyfin user on that server). Null when there is none. Fall back to webUrl when nothing handles it" },
+                          },
+                        },
+                      },
                     },
                   },
                 ],

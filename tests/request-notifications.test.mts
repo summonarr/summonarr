@@ -1108,6 +1108,61 @@ test("outbox drain: an 'approved' notice is sent only while the request is still
   assert.deepEqual(settledKeys(), ["request.approved:still:inbox"]);
 });
 
+test("outbox drain: an 'approved' notice still goes out once the request has moved on to AVAILABLE; a declined one does not follow a reopen", async () => {
+  const requestStatus: Record<string, string> = { fast: "AVAILABLE", reopened: "PENDING" };
+  shadowPrismaModel(prisma, "mediaRequest", {
+    findMany: async (args: { where: { id: { in: string[] } } }) =>
+      args.where.id.in.flatMap((id) => (requestStatus[id] ? [{ id, status: requestStatus[id] }] : [])),
+  });
+  claimImpl = async () => [
+    owed("fast", "inbox", { kind: "request.approved" }),
+    owed("reopened", "inbox", { kind: "request.declined" }),
+  ] as never;
+
+  const res = await drainOutbox("test");
+  await quiesce();
+
+  assert.deepEqual(res, { delivered: 1, dropped: 1 });
+  assert.deepEqual(droppedIds(), ["ob-reopened-inbox"]);
+  assert.deepEqual(createManyCalls[0].data.map((d) => [d.userId, d.type]), [["user-fast", "REQUEST_APPROVED"]]);
+});
+
+test("outbox drain: a row that fails its schema is deleted, not re-locked forever", async () => {
+  claimImpl = async () => [
+    { id: "ob-bad", kind: "request.available", channel: "inbox", dedupeKey: "k", userId: null, payload: {}, attempts: "one", expired: false },
+    owed("ok", "inbox"),
+  ] as never;
+
+  const res = await drainOutbox("test");
+  await quiesce();
+
+  assert.deepEqual(res, { delivered: 1, dropped: 1 });
+  assert.deepEqual(droppedIds(), ["ob-bad"]);
+});
+
+test("outbox drain: a comment row is not dropped because its AUTHOR was disabled since (the recipient is re-checked by the announcer)", async () => {
+  disabledRequesterIds = ["author-1"];
+  shadowPrismaModel(prisma, "requestComment", { findMany: async () => [{ id: "c1" }] });
+  try {
+    claimImpl = async () => [{
+      id: "ob-comment", kind: "request.comment", channel: "all", dedupeKey: "request.comment:c1:all", userId: "author-1",
+      payload: {
+        commentId: "c1",
+        request: { id: "r1", title: "T", mediaType: "MOVIE", tmdbId: 1, posterPath: null, requestedBy: "owner-1", arrInstance: "" },
+        authorId: "author-1", authorName: "A", authorDisplayName: null, text: "hi", authorIsManager: true,
+      },
+      attempts: 1, expired: false,
+    }] as never;
+    const res = await drainOutbox("test");
+    await quiesce();
+
+    assert.equal(res.dropped, 0, "the author's state must not drop the announcement");
+    assert.equal(res.delivered, 1);
+  } finally {
+    disabledRequesterIds = [];
+  }
+});
+
 // ═══ Failure reporting: a send that failed stays owed (guardrail 14f) ═══════
 // The senders used to swallow their failures, so a channel that "returned" was
 // settled whether or not anything was delivered. Each now reports the sends

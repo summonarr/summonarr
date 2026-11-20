@@ -21,6 +21,9 @@ const InstanceViewSchema = v.object({
   // isJellyfinSignInAllowed. The API resolves an absent Setting row to `true`,
   // matching auth.ts's fail-closed default.
   restrictSignIn: v.optional(v.boolean()),
+  // jellyfin — the address a browser uses for this server (the "Watch on
+  // Jellyfin" links). "" = no row: the links use `url`. Saving "" deletes it.
+  webAddress: v.optional(v.string()),
   // BOTH services — gate this server's library behind a per-user `view` grant
   // (User.mediaServerGrants → canViewMediaInstance). Registry metadata, not a
   // Setting row. Round-tripped straight back through POST, so the draft carries
@@ -52,6 +55,7 @@ export interface Draft {
   token: string; // adminToken (plex) or apiKey (jellyfin)
   adminEmail: string; // plex only
   restrictSignIn: boolean; // jellyfin only
+  webAddress: string; // jellyfin only
   restricted: boolean; // both services — per-user view grant required
   hasToken: boolean;
   isNew: boolean;
@@ -80,6 +84,7 @@ export function toDraft(view: InstanceView, service: MediaServerService): Draft 
     // unchecked (= "anyone may sign in") for a server that is actually
     // restricted.
     restrictSignIn: view.restrictSignIn ?? true,
+    webAddress: view.webAddress ?? "",
     libraries: view.libraries ?? "",
     // Strict === true, matching the registry normalizer this value came from
     // (media-instance-registry.ts). Unlike restrictSignIn the safe default is
@@ -103,7 +108,7 @@ export function newDraft(): Draft {
     // `restricted` defaults to FALSE for the opposite reason: an unrestricted
     // server is the status quo, and a restricted one with no grants yet issued
     // would be invisible to every non-admin the moment it finished syncing.
-    slug: "", name: "", url: "", token: "", adminEmail: "", restrictSignIn: true, restricted: false,
+    slug: "", name: "", url: "", token: "", adminEmail: "", restrictSignIn: true, webAddress: "", restricted: false,
     hasToken: false, isNew: true, libraries: "", moviePathStripPrefix: "", tvPathStripPrefix: "",
   };
 }
@@ -205,6 +210,7 @@ export function instancesPayload(drafts: Draft[], service: MediaServerService) {
           url: d.url.trim(),
           apiKey: secretField(d),
           restrictSignIn: d.restrictSignIn,
+          webAddress: d.webAddress.trim(),
         }),
   }));
 }

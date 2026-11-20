@@ -266,6 +266,24 @@ function InstanceCard({
         </div>
       )}
 
+      {/* Jellyfin-only: the address a BROWSER uses for this server, for the
+          "Watch on Jellyfin" links. Blank deletes the row (the links use the
+          URL above). */}
+      {service === "jellyfin" && (
+        <div className="space-y-1.5">
+          <Label htmlFor={field("web-address")}>{t("settings.form.jellyfin.webAddress")}</Label>
+          <Input
+            id={field("web-address")}
+            type="url"
+            value={d.webAddress}
+            onChange={(e) => onUpdate({ webAddress: e.target.value })}
+            placeholder="https://jellyfin.example.com"
+            className="bg-zinc-800 border-zinc-700 font-mono"
+          />
+          <p className="text-xs text-zinc-500">{t("settings.form.jellyfin.webAddressHelp")}</p>
+        </div>
+      )}
+
       {/* Per-server library selection. Load-on-demand rather than eager:
           enumerating needs THIS server's stored url+token, so it is only
           possible once the instance has been saved. An empty selection

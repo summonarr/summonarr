@@ -17,6 +17,8 @@
   "detail.hide.hidden": "Masqué",
   "detail.hide.notInterested": "Pas intéressé",
   "detail.watchTrailer": "Voir la bande-annonce",
+  "detail.watchOn": "Regarder sur {server}",
+  "detail.watchOnNamed": "Regarder sur {server} ({name})",
   "detail.runtime.minutes": "{minutes} min",
   "detail.runtime.hours": "{hours} h",
   "detail.runtime.hoursMinutes": "{hours} h {minutes} min",

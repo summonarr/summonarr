@@ -246,6 +246,8 @@
   "settings.form.library.noneSelected": "Nessuna libreria selezionata — verranno sincronizzate tutte le librerie.",
   "settings.form.library.saveSelection": "Salva la selezione delle librerie",
   "settings.form.jellyfin.serverUrl": "URL del server Jellyfin",
+  "settings.form.jellyfin.webAddress": "URL pubblico (facoltativo)",
+  "settings.form.jellyfin.webAddressHelp": "L'indirizzo che apre questo server Jellyfin in un browser, anche dall'esterno della tua rete; usato dai link «Guarda su Jellyfin». Lascia vuoto per usare l'URL del server qui sopra.",
   "settings.form.jellyfin.apiKeyPlaceholder": "Generane una in Jellyfin → Dashboard → API Keys",
   "settings.form.jellyfin.apiKeyHelp": "Genera una chiave API in Jellyfin Dashboard → Advanced → API Keys.",
   "settings.form.library.librariesLoaded_one": "({count} libreria caricata)",

@@ -185,6 +185,8 @@
   "notify.discord.adminIssueMessage.title": "💬 Réponse d'un utilisateur au signalement — {title}",
   "notify.discord.adminIssueMessage.descriptionFromAdmin": "**{user}** a répondu. Ouvrez le signalement dans Summonarr pour lire le message.",
   "notify.discord.adminIssueMessage.description": "**{user}** a ajouté un message. Ouvrez le signalement dans Summonarr pour le lire.",
+  "notify.discord.adminIssueMessage.descriptionFromAdminUnnamed": "Un administrateur a répondu. Ouvrez le signalement dans Summonarr pour lire le message.",
+  "notify.discord.adminIssueMessage.descriptionUnnamed": "L'auteur du signalement a ajouté un message. Ouvrez le signalement dans Summonarr pour le lire.",
   "notify.discord.issueResolved.title": "✅ Signalement résolu — {title}",
   "notify.discord.issueResolved.description": "Le problème que vous avez signalé concernant **{media}** a été résolu.",
   "notify.discord.issueResolved.resolution": "**Résolution :** {resolution}",

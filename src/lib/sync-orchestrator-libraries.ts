@@ -6,8 +6,8 @@ import { resolvePlexLegacyGuids, mergeResolvedLegacyItems } from "./plex-legacy-
 import { getPlexConfig } from "./plex-config";
 import { buildSeriesItemIdIndex, getJellyfinSyncFolders, getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "./jellyfin";
 import { getJellyfinConfig } from "./jellyfin-config";
-import { getSyncableMediaInstances, type MediaInstanceConfig } from "./media-instance-registry";
-import { plexSettingKey, jellyfinSettingKey } from "./media-instances";
+import { getSyncableMediaInstances, getMediaInstances, type MediaInstanceConfig } from "./media-instance-registry";
+import { plexSettingKey, jellyfinSettingKey, DEFAULT_MEDIA_INSTANCE } from "./media-instances";
 import { syncDownloadPolicies } from "./download-policy";
 import { patchPlexShowFilePaths, replacePlexLibraryForInstances, replaceJellyfinLibraryForInstances, type PlexLibraryRow, type JellyfinLibraryRow } from "./library-staging";
 import { replaceEpisodeCacheForSource } from "./episode-cache";
@@ -18,6 +18,7 @@ import { plexLibraryRow, jellyfinLibraryRow } from "./library-rows";
 import { warnOnChange, forgetWarnOnChange } from "./log-dedup";
 import { plexHoldNeedsCounts, plexHoldReason } from "./plex-sync-guard";
 import { jellyfinHoldNeedsCounts, jellyfinHoldReason } from "./jellyfin-sync-guard";
+import { stampMediaServerIdentities } from "./media-server-identity";
 import { addPresence, removePresence, droppedTmdbIds, type SyncFlags, type WindDown } from "./sync-orchestrator-shared";
 
 // The configured servers and each one's own library selection.
@@ -123,11 +124,13 @@ export async function syncLibraries(flags: SyncFlags, targets: LibraryTargets, w
     // holds the lock, skip the redundant pass — it will reconcile on its own.
     withAdvisoryLock(
       DOWNLOAD_POLICIES_LOCK_ID,
-      () => syncDownloadPolicies(),
+      (lockSignal) => syncDownloadPolicies(signal ? AbortSignal.any([lockSignal, signal]) : lockSignal),
       () => [],
     ),
     syncPlexLibraries(flags, targets, plex, windDownBefore, signal),
     syncJellyfinLibraries(flags, targets, jellyfin, windDownBefore, signal),
+    // Each server's own identity, for the "Watch on …" links (never throws).
+    stampMediaServerIdentities(targets),
   ]);
   for (const result of results) {
     if (result.status === "rejected") {
@@ -395,6 +398,7 @@ async function writePlexEpisodeCache(
   // episode rows for the length of its outage. A library-WRITE failure
   // deliberately does not veto (the fetched episode data is still complete).
   if (!episodesCoverEveryServer(allEpisodesFetched, writable.length, fetchedCount) || signal?.aborted) return;
+  if (await unconfiguredNamedServerHoldsRows("plex", writable.map((w) => w.slug))) return;
   try {
     // Staged load + short atomic swap under advisory lock 2002,1 (shared with
     // /api/sync/tv-episodes and sync/plex). The rows never cross the wire
@@ -410,6 +414,38 @@ async function writePlexEpisodeCache(
 // episode fetch did too. Pure.
 function episodesCoverEveryServer(allEpisodesFetched: boolean, writableCount: number, fetchedCount: number): boolean {
   return allEpisodesFetched && writableCount === fetchedCount && writableCount > 0;
+}
+
+// TVEpisodeCache has no serverInstance column, so the whole-table rewrite also
+// replaces the episodes a REGISTERED-but-unconfigured named server contributed
+// (an admin mid-edit, a blanked token) — while its library rows are deliberately
+// kept (guardrail 35). Hold the rewrite while such a server still holds library
+// rows: its episodes stay until it is reconfigured or de-registered. The same
+// predicate as the demote veto (libraryCoverage); the synthesized default ("")
+// is excluded for the same reason. A failed read holds too — never rewrite on a
+// guess.
+async function unconfiguredNamedServerHoldsRows(source: "plex" | "jellyfin", writtenSlugs: readonly string[]): Promise<boolean> {
+  try {
+    const written = new Set(writtenSlugs);
+    const registered = await getMediaInstances(source);
+    const missing = registered.filter((i) => i.slug !== DEFAULT_MEDIA_INSTANCE && !written.has(i.slug)).map((i) => i.slug);
+    if (missing.length === 0) return false;
+    const where = { serverInstance: { in: missing } };
+    const held = source === "plex"
+      ? await prisma.plexLibraryItem.findFirst({ where, select: { tmdbId: true } })
+      : await prisma.jellyfinLibraryItem.findFirst({ where, select: { tmdbId: true } });
+    if (!held) return false;
+    warnOnChange(
+      `episode-cache-held:${source}`,
+      missing.join(","),
+      `[sync] ${source} episode cache not rewritten: ${missing.length} registered server(s) are not configured but still hold library rows, ` +
+        "so their episodes would be wiped. Reconfigure or remove them to resume.",
+    );
+    return true;
+  } catch (err) {
+    console.warn(`[sync] ${source} episode cache held: could not read the registered servers:`, err instanceof Error ? err.message : String(err));
+    return true;
+  }
 }
 
 type JellyfinFetched = {
@@ -569,6 +605,7 @@ async function writeJellyfinEpisodeCache(
     }
   }
   if (!episodesCoverEveryServer(allEpisodesFetched, writable.length, fetchedCount) || signal?.aborted) return;
+  if (await unconfiguredNamedServerHoldsRows("jellyfin", writable.map((w) => w.slug))) return;
   try {
     await replaceEpisodeCacheForSource("jellyfin", allEpisodeRows);
   } catch (err) {
