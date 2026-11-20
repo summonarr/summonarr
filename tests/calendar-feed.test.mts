@@ -53,6 +53,8 @@ console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" "));
 console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
 
 // ── scripted fetch — TMDB only, and only the warm may call it ───────────────
+// Every scripted date is relative to today: a fixed date drops out of the
+// feed's window as the calendar moves on, and the suite starts failing.
 const fetchCalls: URL[] = [];
 globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = new URL(String(input));
@@ -63,22 +65,22 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
   if (movie) {
     return json({
       id: Number(movie[1]),
-      release_date: "2026-11-01",
-      release_dates: { results: [{ iso_3166_1: "US", release_dates: [{ type: 4, release_date: "2026-12-01T00:00:00.000Z" }] }] },
+      release_date: iso(10),
+      release_dates: { results: [{ iso_3166_1: "US", release_dates: [{ type: 4, release_date: `${iso(40)}T00:00:00.000Z` }] }] },
     });
   }
   const season = url.pathname.match(/^\/3\/tv\/(\d+)\/season\/(\d+)$/);
   if (season) {
-    return json({ episodes: [{ episode_number: 1, season_number: Number(season[2]), name: "Pilot", air_date: "2026-10-20" }] });
+    return json({ episodes: [{ episode_number: 1, season_number: Number(season[2]), name: "Pilot", air_date: iso(7) }] });
   }
   const tv = url.pathname.match(/^\/3\/tv\/(\d+)$/);
   if (tv) {
     return json({
       id: Number(tv[1]),
       status: "Returning Series",
-      last_air_date: "2026-09-01",
-      seasons: [{ season_number: 1, episode_count: 8, air_date: "2026-09-01" }],
-      next_episode_to_air: { air_date: "2026-10-20", season_number: 1, episode_number: 1, name: "Pilot" },
+      last_air_date: iso(-45),
+      seasons: [{ season_number: 1, episode_count: 8, air_date: iso(-45) }],
+      next_episode_to_air: { air_date: iso(7), season_number: 1, episode_number: 1, name: "Pilot" },
     });
   }
   throw new Error(`unscripted TMDB path ${url.pathname}`);
