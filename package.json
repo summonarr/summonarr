@@ -1,6 +1,6 @@
 {
   "name": "summonarr",
-  "version": "0.41.0",
+  "version": "0.41.1",
   "private": true,
   "license": "AGPL-3.0-only",
   "engines": {
@@ -51,7 +51,8 @@
     "deepmerge-ts": "^8.0.1",
     "mysql2": "^3.23.1",
     "browserslist": "^4.28.7",
-    "@humanfs/node": "^0.16.8"
+    "@humanfs/node": "^0.16.8",
+    "effect": "3.22.4"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.5",
