@@ -1232,6 +1232,42 @@ test("a bearer request after a role change passes WITHOUT rotating, and the app'
   assertPassedThrough(second, "the app's original token must still pass the proxy");
 });
 
+// ── privilege change on a COOKIE session whose same request is refused ──────
+//
+// Losing a permission both rotates the session and makes the admin gate refuse.
+// The refusal has to carry the replacement cookie, or the browser is left with
+// a dead one: signed out instead of demoted.
+test("a refusal in the pass that rotated a cookie session still delivers the rotated cookie (403 and redirect-home), never to a bearer", async () => {
+  const cases = [
+    { path: "/api/admin/users", status: 403 },
+    { path: "/admin/users", status: 307 },
+  ];
+  for (const { path, status } of cases) {
+    const { userId, sessionId, token } = await mintSession({ role: "ADMIN", transport: "cookie" });
+    const u = usersById.get(userId);
+    assert.ok(u);
+    u.role = "USER"; // demoted since the cookie was signed
+    const refused = await proxy(req(path, { headers: asCookie(token) }));
+    assert.equal(refused.status, status, path);
+    assert.ok(!sessionRows.has(sessionId), "precondition: the session was rotated");
+    const cookie = setCookies(refused).find((c) => c.startsWith(`${COOKIE}=`) && !c.includes("Max-Age=0"));
+    assert.ok(cookie, `${path}: the refusal must carry the rotated cookie`);
+    assert.equal(refused.headers.get("cache-control"), "private, no-store", path);
+    // The browser's next request, with the cookie it was just handed, is still signed in.
+    const rotated = cookie.slice(COOKIE.length + 1).split(";")[0];
+    assertPassedThrough(await proxy(req("/api/requests", { headers: asCookie(rotated) })), path);
+  }
+
+  const native = await mintSession({ role: "ADMIN", transport: "bearer" });
+  const nu = usersById.get(native.userId);
+  assert.ok(nu);
+  nu.role = "USER";
+  const bearer = await proxy(req("/api/admin/users", { headers: asBearer(native.token) }));
+  assert.equal(bearer.status, 403);
+  assert.deepEqual(setCookies(bearer), [], "a bearer client is never handed a token (guardrail 6b)");
+  assert.equal(bearer.headers.get("cache-control"), null);
+});
+
 // ── AUTH_URL that doesn't parse ─────────────────────────────────────────────
 
 test("a blank or scheme-less AUTH_URL never 500s a redirect: the login and admin-denial redirects fall back to the request's origin", async () => {

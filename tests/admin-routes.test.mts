@@ -142,14 +142,32 @@ function makeTx() {
     },
     // Tagged-template form: strings array + interpolated bind values. Both the
     // role-change CAS and anonymize's last-admin CAS read the row count back.
-    $executeRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    $executeRaw: async (strings: TemplateStringsArray | { text: string }, ...values: unknown[]) => {
+      // A single Prisma.sql object: the grant edits' advisory lock.
+      if (!Array.isArray(strings)) {
+        txOps.push({ op: "$executeRaw", args: { sql: (strings as { text: string }).text, values: [] } });
+        return 0;
+      }
       // reactivateUser now runs INSIDE the lock-42 tx; route its guarded restore to
       // the same stub the top-level client used.
       if (/UPDATE "User" SET "deactivatedAt" = NULL/.test(strings.join("?"))) {
-        return (fakePrisma as unknown as { $executeRaw: (s: TemplateStringsArray, ...v: unknown[]) => Promise<number> }).$executeRaw(strings, ...values);
+        return (fakePrisma as unknown as { $executeRaw: (s: TemplateStringsArray, ...v: unknown[]) => Promise<number> }).$executeRaw(strings as TemplateStringsArray, ...values);
       }
       txOps.push({ op: "$executeRaw", args: { sql: strings.join("?"), values } });
       return casRows;
+    },
+    // The grant edits read the instance registries inside their transaction:
+    // the Radarr/Sonarr ones through setting.findUnique, the Plex/Jellyfin ones
+    // as a row-locked raw read (one Prisma.sql object, its key the one value).
+    $queryRaw: async (query: { values: unknown[] }) => {
+      const value = settings.get(String(query.values[0]));
+      return value === undefined ? [] : [{ value }];
+    },
+    setting: {
+      findUnique: async (args: { where: { key: string } }) => {
+        const value = settings.get(args.where.key);
+        return value === undefined ? null : { key: args.where.key, value };
+      },
     },
     account: { deleteMany: rec("account.deleteMany") },
     pushSubscription: { deleteMany: rec("pushSubscription.deleteMany") },
@@ -167,6 +185,7 @@ function makeTx() {
     traktConnection: { deleteMany: rec("traktConnection.deleteMany") },
     autoRequestLedger: { deleteMany: rec("autoRequestLedger.deleteMany") },
     verificationToken: { deleteMany: rec("verificationToken.deleteMany") },
+    plexTokenCache: { deleteMany: rec("plexTokenCache.deleteMany") },
     // Two-factor credentials — purge and the admin 2FA reset share this write set.
     userTotp: { deleteMany: rec("userTotp.deleteMany") },
     webAuthnCredential: { deleteMany: rec("webAuthnCredential.deleteMany") },
@@ -244,7 +263,11 @@ function makeTx() {
           role: u.role, permissions: u.permissions,
         } : null;
       },
-      update: rec("user.update"),
+      update: async (args?: unknown) => {
+        if (topUserUpdateError) throw topUserUpdateError;
+        txOps.push({ op: "user.update", args });
+        return {};
+      },
       // The manual link's admin re-check reads the current and the new owner.
       findMany: async (args: { where: { id: { in: string[] } } }) =>
         args.where.id.in.flatMap((id) => {
@@ -1479,6 +1502,12 @@ const FIELD_BRANCHES: Array<{ body: Record<string, unknown>; field: string; acti
   { body: { notifyOnApproved: false }, field: "notifyOnApproved", action: "SETTINGS_CHANGE", resigns: false },
 ];
 
+// The grant edits write inside a transaction (they read the instance registries
+// under a lock first); every other field writes on the top-level client.
+const isUserWrite = (o: TxOp) => o.op === "user.update(top)" || o.op === "user.update";
+const registerNamed = (key: "plexInstances" | "jellyfinInstances" | "arrRadarrInstances" | "arrSonarrInstances", ...slugs: string[]) =>
+  settings.set(key, JSON.stringify(slugs.map((slug) => ({ slug, name: slug, restricted: true }))));
+
 const fieldPatch = (header: Record<string, string>, id: string, body: unknown) =>
   userPatch(req(`http://localhost:3000/api/admin/users/${id}`, { method: "PATCH", headers: { ...header, "content-type": "application/json" }, body: JSON.stringify(body) }), ctxFor(id));
 
@@ -1493,7 +1522,7 @@ test("field PATCH: each branch answers { id, <field> }, writes once, audits once
     const json = await res.json();
     assert.deepEqual(Object.keys(json).sort(), ["id", c.field].sort(), c.field);
     assert.equal(json.id, targetId);
-    assert.equal(txOps.filter((o) => o.op === "user.update(top)").length, 1, `${c.field}: one write`);
+    assert.equal(txOps.filter(isUserWrite).length, 1, `${c.field}: one write`);
     await flush();
     assert.equal(auditRows.length, 1, `${c.field}: one audit row`);
     assert.equal(auditRows[0].action, c.action, c.field);
@@ -1861,6 +1890,8 @@ test("account actions judge an ADMIN target by role OR the ADMIN bit before any 
 test("mediaServerGrants: the map is normalized, written, echoed and audited — and a plex slug never leaks into the identically-named jellyfin one", async () => {
   const admin = await mintSession("ADMIN", 1n);
   const targetId = seedUser("USER");
+  registerNamed("plexInstances", "remote", "attic");
+  registerNamed("jellyfinInstances", "remote");
   const res = await patchGrants(
     targetId,
     admin.header,
@@ -1877,7 +1908,7 @@ test("mediaServerGrants: the map is normalized, written, echoed and audited — 
   const expected = { plex: { remote: { view: true } } };
   assert.deepEqual(await res.json(), { id: targetId, mediaServerGrants: expected });
 
-  const writes = txOps.filter((o) => o.op === "user.update(top)");
+  const writes = txOps.filter(isUserWrite);
   assert.equal(writes.length, 1, "exactly one row write");
   assert.deepEqual(
     (writes[0].args as { where: { id: string }; data: unknown }).data,
@@ -1918,12 +1949,64 @@ test("mediaServerGrants: an ARRAY is rejected 400 with ZERO writes — typeof []
   assert.deepEqual(await cleared.json(), { id: targetId, mediaServerGrants: {} });
 });
 
+// A grant holds no identity of the server it was made for, so an entry stored
+// for a slug nothing registers is inherited by whatever is registered under it
+// later. The Users editor sends the WHOLE map it loaded, so a tab opened before
+// an instance was removed sends the removed slug back.
+test("grant maps: an entry for a slug that is no longer registered is not stored, echoed or audited", async () => {
+  const admin = await mintSession("ADMIN", Permission.ADMIN);
+  const targetId = seedUser("USER");
+  // "remote" was removed after the editor loaded; "keep" is still registered.
+  // Jellyfin still has its own "remote": the services are separate namespaces.
+  registerNamed("plexInstances", "keep");
+  registerNamed("jellyfinInstances", "remote");
+  auditRows.length = 0;
+  txOps = [];
+  const media = await fieldPatch(admin.header, targetId, {
+    mediaServerGrants: { plex: { remote: { view: true }, keep: { view: true } }, jellyfin: { remote: { view: true }, gone: { view: true } } },
+  });
+  assert.equal(media.status, 200);
+  const keptMedia = { plex: { keep: { view: true } }, jellyfin: { remote: { view: true } } };
+  assert.deepEqual(await media.json(), { id: targetId, mediaServerGrants: keptMedia });
+
+  // instanceGrants has ONE entry per slug for both services: a slug either
+  // still registers is kept.
+  registerNamed("arrRadarrInstances", "anime");
+  registerNamed("arrSonarrInstances", "kids");
+  const arr = await fieldPatch(admin.header, targetId, {
+    instanceGrants: { anime: { request: true }, kids: { autoApprove: true }, gone: { request: true, autoApprove: true } },
+  });
+  assert.equal(arr.status, 200);
+  const keptArr = { anime: { request: true }, kids: { autoApprove: true } };
+  assert.deepEqual(await arr.json(), { id: targetId, instanceGrants: keptArr });
+
+  assert.deepEqual(
+    txOps.filter(isUserWrite).map((o) => (o.args as { data: unknown }).data),
+    [{ mediaServerGrants: keptMedia }, { instanceGrants: keptArr }],
+  );
+  // The registry is read under a lock, before the write, in the write's own
+  // transaction — the lock a removal's revoke takes.
+  const arrOps = txOps.slice(txOps.findIndex((o) => o.op === "user.update") + 1).map((o) => o.op);
+  assert.deepEqual(arrOps, ["$executeRaw", "user.update"]);
+  assert.match((txOps.find((o) => o.op === "$executeRaw")!.args as { sql: string }).sql, /pg_advisory_xact_lock\(2101, 5\)/);
+
+  await flush();
+  const after = auditRows.map((r) => (JSON.parse(r.details as string) as { after: unknown }).after);
+  assert.deepEqual(after, [keptMedia, keptArr]);
+
+  // With nothing registered, nothing is stored.
+  settings.clear();
+  const none = await fieldPatch(admin.header, targetId, { mediaServerGrants: { plex: { remote: { view: true } } } });
+  assert.deepEqual(await none.json(), { id: targetId, mediaServerGrants: {} });
+});
+
 test("mediaServerGrants: prototype-pollution keys are dropped at BOTH nesting levels, and Object.prototype is left untouched", async () => {
   const admin = await mintSession("ADMIN", 1n);
   const targetId = seedUser("USER");
   // Hand-built JSON, not JSON.stringify: an object literal's `__proto__:` sets
   // the prototype instead of creating an own key, so only a parsed body can
   // reproduce what an attacker actually sends. JSON.parse makes it OWN.
+  registerNamed("plexInstances", "remote");
   const raw =
     '{"mediaServerGrants":{' +
     '"__proto__":{"remote":{"view":true}},' +

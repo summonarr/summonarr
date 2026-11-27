@@ -176,7 +176,9 @@ async function rebuildEpisodeSource(
 
 // One Plex server's episodes; null when it is not configured. The show map is
 // built with legacy-agent shows resolved, as the orchestrator does — the
-// internal fallback walk can't see them and this rewrite is whole-table.
+// internal fallback walk can't see them and this rewrite is whole-table. The
+// map build throws when legacy lookups fell short of shows this server already
+// stores; the caller counts that as a failed server and keeps the cache.
 async function plexInstanceEpisodes(inst: MediaInstanceConfig): Promise<EpisodeCacheRow[] | null> {
   const cfg = await getPlexConfig(inst.slug);
   if (!cfg.url || !cfg.token) return null;
@@ -184,7 +186,7 @@ async function plexInstanceEpisodes(inst: MediaInstanceConfig): Promise<EpisodeC
   const token = cfg.token;
   const selected = await readSelection(plexSettingKey(inst.slug, "Libraries"));
   const sections = await getPlexLibrarySections(serverUrl, token);
-  const showKeys = await buildPlexShowKeyMap(serverUrl, token, selected, sections);
+  const showKeys = await buildPlexShowKeyMap(serverUrl, token, selected, sections, inst.slug);
   return getPlexTVEpisodes(serverUrl, token, selected, sections, showKeys);
 }
 

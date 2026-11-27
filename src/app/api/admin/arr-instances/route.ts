@@ -15,7 +15,8 @@ import {
 } from "@/lib/arr-instances";
 import { connectionChanged, connectionWrites, instancePayloadError, keptApiKeyRebind, type InstancePayload } from "@/lib/arr-instances-save";
 import { settleLimit } from "@/lib/concurrency";
-import { buildArrInstanceRegistryWrite, getArrInstances, readArrInstanceRegistryForSave } from "@/lib/arr-instance-registry";
+import { buildArrInstanceRegistryWrite, getArrInstances, readArrInstanceRegistryForSave, slugsRegisteredNowhereInTx } from "@/lib/arr-instance-registry";
+import { revokeArrInstanceGrantsInTx } from "@/lib/instance-grant-prune";
 import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
 import { BATCH_TX_TIMEOUT } from "@/lib/batch-write";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -101,7 +102,7 @@ function instanceView(service: ArrService, instance: ArrInstanceConfig, map: Rec
 }
 
 type RemovedInfo = { slug: string; openRequests: number };
-type RemovedCounts = Record<string, { wantedItems: number; availableItems: number; trashApplications: number }>;
+type RemovedCounts = Record<string, { wantedItems: number; availableItems: number; trashApplications: number; grantsRevoked: number }>;
 type SaveOutcome =
   | { kind: "stale" }
   | { kind: "secretRebind"; slug: string }
@@ -245,7 +246,15 @@ async function removeInstanceRows(tx: TxClient, service: ArrService, removed: st
     const trash = await tx.trashApplication.deleteMany({
       where: { arrInstance: slug, trashSpec: { service: service === "radarr" ? "RADARR" : "SONARR" } },
     });
-    counts[slug] = { wantedItems: wanted.count, availableItems: available.count, trashApplications: trash.count };
+    counts[slug] = { wantedItems: wanted.count, availableItems: available.count, trashApplications: trash.count, grantsRevoked: 0 };
+  }
+  // Users' request/auto-approve grants for a slug NEITHER service registers
+  // any more. Left behind they are invisible until an instance is registered
+  // under that slug again, and then they apply to it without anyone granting
+  // anything. A slug the other service still registers keeps its grants: the
+  // map has one entry per slug for both (guardrail 32).
+  for (const slug of await slugsRegisteredNowhereInTx(tx, service, removed)) {
+    counts[slug].grantsRevoked = await revokeArrInstanceGrantsInTx(tx, slug);
   }
   return counts;
 }

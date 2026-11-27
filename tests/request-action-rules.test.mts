@@ -94,6 +94,33 @@ test("a picked target holds only while the group still offers it", () => {
   assert.equal(rules.chosenActionTarget([], "x"), undefined);
 });
 
+test("the actions' mount key survives the admin's own approve changing the representative, and follows a pick", () => {
+  const r = (requestId: string, status: string, arrInstance: string) => ({ requestId, status, arrInstance, adminNote: null });
+  const keyOf = (requesters: ReturnType<typeof r>[], aggregate: string, chosen: string | null) =>
+    rules.actionsMountKey(rules.actionTargets(requesters, aggregate), chosen);
+  // An approved request beside a pending one, the newer first as the page
+  // lists them. The pending one is the representative; approving it makes the
+  // approved one the representative on the refresh the approve itself causes.
+  // The key must not move, or the approve still out is aborted with its answer.
+  for (const pendingInstance of ["4k", ""]) {
+    const before = [r("a", "APPROVED", ""), r("b", "PENDING", pendingInstance)];
+    const after = [r("a", "APPROVED", ""), r("b", "APPROVED", pendingInstance)];
+    assert.equal(rules.chosenActionTarget(rules.actionTargets(before, "PENDING"), null)?.requestId, "b");
+    assert.equal(rules.chosenActionTarget(rules.actionTargets(after, "APPROVED"), null)?.requestId, "a", "the aimed request did change");
+    assert.equal(keyOf(before, "PENDING", null), keyOf(after, "APPROVED", null), `instance "${pendingInstance}"`);
+  }
+  // A pick is keyed by its request, representative or not, so it too stays
+  // put through its own approve; picking another target starts clean.
+  const before = [r("a", "APPROVED", ""), r("b", "PENDING", "4k")];
+  const after = [r("a", "APPROVED", ""), r("b", "APPROVED", "4k")];
+  assert.equal(keyOf(before, "PENDING", "b"), "b");
+  assert.equal(keyOf(after, "APPROVED", "b"), "b");
+  assert.notEqual(keyOf(before, "PENDING", "a"), keyOf(before, "PENDING", "b"));
+  assert.notEqual(keyOf(before, "PENDING", "a"), keyOf(before, "PENDING", null));
+  // A pick the group no longer offers is the representative again.
+  assert.equal(keyOf(after, "APPROVED", "gone"), keyOf(after, "APPROVED", null));
+});
+
 test("the group's pending ids are used only while the aimed request is the PENDING one", () => {
   const pending = ["p1", "p2"];
   assert.deepEqual(rules.groupDecisionIds("PENDING", pending), pending);

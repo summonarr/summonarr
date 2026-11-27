@@ -7,8 +7,8 @@ import { invalidateUserSession } from "@/lib/auth";
 import { prisma, type PrismaTxClient } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, presetExceeds, parseInstanceGrants, serializeInstanceGrants, parseMediaServerGrants, serializeMediaServerGrants, type InstanceAccess } from "@/lib/permissions";
-import { getArrInstances } from "@/lib/arr-instance-registry";
-import { getMediaInstances } from "@/lib/media-instance-registry";
+import { arrSlugsForGrantWriteInTx, getArrInstances } from "@/lib/arr-instance-registry";
+import { getMediaInstances, registeredSlugsForUpdateInTx } from "@/lib/media-instance-registry";
 import { isValidContentRatingCap } from "@/lib/content-rating";
 import {
   contentCapBeyondOwn,
@@ -17,6 +17,8 @@ import {
   isUserNotifKey,
   isUserQuotaField,
   mediaServerGrantsBeyondOwn,
+  onlyRegisteredInstanceGrants,
+  onlyRegisteredMediaServerGrants,
   presentUserPatchFields,
   storedQuotaValue,
   type UserNotifKey,
@@ -167,14 +169,18 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
 // runs its own validation, subset and self/admin gates first.
 async function commitField(
   { req, t, session, id, callerIsAdmin }: EditContext,
-  write: (db: Pick<PrismaTxClient, "user">) => Promise<unknown>,
-  audit: { action: "SETTINGS_CHANGE" | "USER_PERMISSIONS_CHANGE"; details: Record<string, unknown> },
-  response: Record<string, unknown>,
-  { invalidate = true }: { invalidate?: boolean } = {},
+  write: (db: PrismaTxClient) => Promise<unknown>,
+  audit: { action: "SETTINGS_CHANGE" | "USER_PERMISSIONS_CHANGE"; details: Lazy<Record<string, unknown>> },
+  response: Lazy<Record<string, unknown>>,
+  // `inTx`: the write takes locks of its own (the grant edits), so an ADMIN's
+  // runs in a transaction too. `details` and `response` may be functions, read
+  // after the write, for a value the write itself settles.
+  { invalidate = true, inTx = false }: { invalidate?: boolean; inTx?: boolean } = {},
 ): Promise<NextResponse> {
   try {
     if (callerIsAdmin) {
-      await write(prisma);
+      if (inTx) await prisma.$transaction(async (tx) => { await write(tx); });
+      else await write(prisma);
     } else {
       // A delegate's write re-reads the target under lock 42 first: a promotion
       // to ADMIN — or a grant of management permissions the delegate lacks —
@@ -195,12 +201,15 @@ async function commitField(
     userName: session.user.name ?? session.user.email,
     action: audit.action,
     target: `user:${id}`,
-    details: audit.details,
+    details: settled(audit.details),
     ...auditContext(req, session),
   });
   if (invalidate) invalidateUserSession(id);
-  return NextResponse.json({ id, ...response });
+  return NextResponse.json({ id, ...settled(response) });
 }
+
+type Lazy<T> = T | (() => T);
+const settled = <T extends object>(value: Lazy<T>): T => (typeof value === "function" ? (value as () => T)() : value);
 
 // The target is named by id (+ display name), never by email — on the
 // permission and grant rows below (audit-scrub.ts).
@@ -320,15 +329,24 @@ async function editInstanceGrants(ctx: EditContext, raw: unknown): Promise<NextR
       return beyondOwn(t);
     }
   }
-  const grants = serializeInstanceGrants(parsedGrants);
+  let grants = serializeInstanceGrants(parsedGrants);
   const prev = await prisma.user.findUnique({ where: { id }, select: { instanceGrants: true, name: true } });
   if (!prev) return notFound(t);
   return commitField(
     ctx,
-    (db) => db.user.update({ where: { id }, data: { instanceGrants: grants } }),
+    // The body replaces the whole map, and an editor that loaded before an
+    // instance was removed sends that slug's entry back. Stored again, it would
+    // be inherited by whatever is later registered under the slug (guardrail
+    // 32), so only slugs registered NOW are written — decided under the lock a
+    // removal's revoke holds, so neither can land between the other's steps.
+    async (db) => {
+      grants = serializeInstanceGrants(onlyRegisteredInstanceGrants(parsedGrants, await arrSlugsForGrantWriteInTx(db)));
+      await db.user.update({ where: { id }, data: { instanceGrants: grants } });
+    },
     // `before` too, so the trail shows which grants a change removed.
-    { action: "USER_PERMISSIONS_CHANGE", details: { field: "instanceGrants", ...targetDetails(id, prev.name), before: prev.instanceGrants, after: grants } },
-    { instanceGrants: grants },
+    { action: "USER_PERMISSIONS_CHANGE", details: () => ({ field: "instanceGrants", ...targetDetails(id, prev.name), before: prev.instanceGrants, after: grants }) },
+    () => ({ instanceGrants: grants }),
+    { inTx: true },
   );
 }
 
@@ -361,14 +379,25 @@ async function editMediaServerGrants(ctx: EditContext, raw: unknown): Promise<Ne
       return beyondOwn(t);
     }
   }
-  const grants = serializeMediaServerGrants(parsedGrants);
+  let grants = serializeMediaServerGrants(parsedGrants);
   const prev = await prisma.user.findUnique({ where: { id }, select: { mediaServerGrants: true, name: true } });
   if (!prev) return notFound(t);
   return commitField(
     ctx,
-    (db) => db.user.update({ where: { id }, data: { mediaServerGrants: grants } }),
-    { action: "USER_PERMISSIONS_CHANGE", details: { field: "mediaServerGrants", ...targetDetails(id, prev.name), before: prev.mediaServerGrants, after: grants } },
-    { mediaServerGrants: grants },
+    // Only servers registered NOW keep an entry (see editInstanceGrants): a
+    // stale editor's entry for a removed server would otherwise make a server
+    // later registered under that slug visible to this user (guardrail 35).
+    // Each registry row is locked first, one after the other — the row a
+    // removal writes before it revokes.
+    async (db) => {
+      const plex = await registeredSlugsForUpdateInTx(db, "plex");
+      const jellyfin = await registeredSlugsForUpdateInTx(db, "jellyfin");
+      grants = serializeMediaServerGrants(onlyRegisteredMediaServerGrants(parsedGrants, { plex, jellyfin }));
+      await db.user.update({ where: { id }, data: { mediaServerGrants: grants } });
+    },
+    { action: "USER_PERMISSIONS_CHANGE", details: () => ({ field: "mediaServerGrants", ...targetDetails(id, prev.name), before: prev.mediaServerGrants, after: grants }) },
+    () => ({ mediaServerGrants: grants }),
+    { inTx: true },
   );
 }
 

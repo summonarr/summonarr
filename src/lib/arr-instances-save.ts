@@ -167,6 +167,10 @@ export function connectionChanged(
  * new host on the save's own connection test and every later call, so the
  * route refuses it — a changed address needs the key typed again. An explicit
  * "" clears the key and a cleared url sends nothing, so neither is a rebind.
+ * A stored address that was CLEARED (a blank row) still binds the key: only an
+ * instance that never had an address row lets a kept key take its first one,
+ * as in the media-instances save. Otherwise clearing the address and then
+ * setting a new one would carry the key over in two saves.
  */
 export function keptApiKeyRebind(
   inst: Pick<InstancePayload, "url" | "apiKey">,
@@ -174,6 +178,6 @@ export function keptApiKeyRebind(
 ): boolean {
   if (inst.apiKey !== undefined && inst.apiKey !== SECRET_MASK_SENTINEL) return false;
   const nextUrl = typeof inst.url === "string" ? inst.url.trim() : "";
-  if (!nextUrl || !stored.url || !stored.apiKey) return false;
+  if (!nextUrl || stored.url === undefined || !stored.apiKey) return false;
   return !sameServerUrl(stored.url, nextUrl);
 }

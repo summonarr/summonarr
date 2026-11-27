@@ -34,21 +34,38 @@ let findManyThrows = false;
     deleteMany: async () => ({ count: 0 }),
   },
   mediaRequest: { findMany: async () => [] },
+  plexLibraryItem: {
+    count: async (args: { where: { serverInstance: string; OR: [{ plexRatingKey: { in: string[] } }, { plexRatingKeys: { hasSome: string[] } }] } }) => {
+      rowCountWheres.push(args.where);
+      const [canonical, any] = args.where.OR;
+      return storedRows.filter((r) =>
+        r.serverInstance === args.where.serverInstance &&
+        (canonical.plexRatingKey.in.includes(r.plexRatingKey) || r.plexRatingKeys.some((k) => any.plexRatingKeys.hasSome.includes(k))),
+      ).length;
+    },
+  },
 };
+let storedRows: Array<{ serverInstance: string; plexRatingKey: string; plexRatingKeys: string[] }> = [];
+const rowCountWheres: unknown[] = [];
 
+const PLEX = "http://plex.test:32400";
+let plexShows: Array<Record<string, unknown>> = [];
 const findCalls: string[] = [];
 let findResponder: (imdbId: string) => Response = () => {
   throw new Error("unexpected /find");
 };
 globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = String(input);
+  if (url.startsWith(PLEX)) {
+    return new Response(JSON.stringify({ MediaContainer: { totalSize: plexShows.length, size: plexShows.length, Metadata: plexShows } }), { status: 200 });
+  }
   const m = /\/3\/find\/([^?]+)/.exec(url);
   if (!m) throw new Error(`unexpected fetch ${url}`);
   findCalls.push(m[1]);
   return findResponder(m[1]);
 }) as typeof fetch;
 
-const { resolvePlexLegacyGuidsDetailed } = await import("../src/lib/plex-legacy-resolve.ts");
+const { resolvePlexLegacyGuidsDetailed, storedRowsLostToLegacyShortfall, buildPlexShowKeyMap } = await import("../src/lib/plex-legacy-resolve.ts");
 type Ref = Parameters<typeof resolvePlexLegacyGuidsDetailed>[0] extends Map<string, infer R> ? R : never;
 
 const data = (ratingKey: string) => ({
@@ -123,4 +140,61 @@ test("a cached imdb mapping of the wrong shape is a miss: the id is asked again,
   assert.deepEqual(findCalls, ["tt5"]);
   assert.deepEqual(res.items.map((i) => i.tmdbId), [56]);
   assert.equal(res.complete, true);
+});
+
+test("an incomplete resolution counts the stored rows a full replace would delete — and nothing else", async () => {
+  reset();
+  rowCountWheres.length = 0;
+  storedRows = [
+    { serverInstance: "", plexRatingKey: "1", plexRatingKeys: ["1"] },        // resolved on an earlier run
+    { serverInstance: "", plexRatingKey: "90", plexRatingKeys: ["90", "3"] }, // held as a duplicate copy
+    { serverInstance: "other", plexRatingKey: "2", plexRatingKeys: ["2"] },   // another server's row
+    { serverInstance: "", plexRatingKey: "4", plexRatingKeys: ["4"] },        // answered this run: rewritten, not lost
+  ];
+  const legacy = refs(
+    { ratingKey: "1", imdbId: "tt1", data: data("1") },
+    { ratingKey: "2", imdbId: "tt2", data: data("2") }, // never resolved here: no row on this server
+    { ratingKey: "3", imdbId: "tt3", data: data("3") },
+    { ratingKey: "4", imdbId: "tt4", data: data("4") }, // answered this run
+  );
+  const incomplete = { items: [{ tmdbId: 44, ratingKey: "4", data: data("4") }], complete: false };
+  assert.equal(await storedRowsLostToLegacyShortfall("", [{ refs: legacy, resolution: incomplete }]), 2);
+  // A ref that has never resolved holds no row: nothing is lost, so nothing holds.
+  assert.equal(await storedRowsLostToLegacyShortfall("", [{ refs: refs({ ratingKey: "2", imdbId: "tt2", data: data("2") }), resolution: { items: [], complete: false } }]), 0);
+  // A complete resolution is never a shortfall, and costs no read.
+  rowCountWheres.length = 0;
+  assert.equal(await storedRowsLostToLegacyShortfall("", [{ refs: legacy, resolution: { items: [], complete: true } }]), 0);
+  assert.equal(rowCountWheres.length, 0);
+});
+
+// The show map feeds a whole-namespace episode-cache replace: a legacy show
+// that resolved earlier and is left out of it would lose its cached episodes.
+test("the show map rejects when a legacy lookup fell short of a show the server already stores, and only then", async () => {
+  const sections = [{ key: "2", title: "TV", type: "show" }] as Parameters<typeof buildPlexShowKeyMap>[3];
+  plexShows = [
+    { type: "show", ratingKey: "10", title: "Modern", guid: "plex://show/abc", Guid: [{ id: "tmdb://500" }] },
+    { type: "show", ratingKey: "11", title: "Legacy", guid: "com.plexapp.agents.imdb://tt11?lang=en" },
+  ];
+
+  // The cache read fails, so the legacy show gets no answer; it holds a row.
+  reset();
+  findManyThrows = true;
+  storedRows = [{ serverInstance: "", plexRatingKey: "11", plexRatingKeys: ["11"] }];
+  await assert.rejects(buildPlexShowKeyMap(PLEX, "t", undefined, sections, ""), /legacy-agent lookups did not all answer and 1 stored row/);
+
+  // Same shortfall, but the show has never resolved on THIS server: nothing
+  // stored depends on it, so the map is built without it.
+  storedRows = [{ serverInstance: "other", plexRatingKey: "11", plexRatingKeys: ["11"] }];
+  const short = await buildPlexShowKeyMap(PLEX, "t", undefined, sections, "");
+  assert.deepEqual([...short.keys()], ["10"]);
+
+  // Every lookup answered: the legacy show is in the map.
+  reset();
+  cacheRows.set("imdb-to-tmdb:tt11", JSON.stringify({ movie: null, tv: 611 }));
+  storedRows = [{ serverInstance: "", plexRatingKey: "11", plexRatingKeys: ["11"] }];
+  const full = await buildPlexShowKeyMap(PLEX, "t", undefined, sections, "");
+  assert.deepEqual(full.get("11"), [611]);
+  assert.deepEqual(full.get("10"), [500]);
+  storedRows = [];
+  plexShows = [];
 });

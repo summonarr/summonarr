@@ -2033,6 +2033,86 @@ test("an EMPTY Plex answer for an instance with NO stored rows still proceeds â€
   assert.equal(txTouching("plexLibraryItem").length, 1, "nothing to protect, so the (empty) replace runs as before");
 });
 
+test("a Plex listing that ends before the server's own count is a failed fetch â€” rows and episode cache kept, no success stamp", async () => {
+  configureBothServers();
+  const both = bothServersRespond([550, 551], [550]);
+  respond = (url) => {
+    if (url.origin !== PLEX_ORIGIN || url.pathname !== "/library/sections/1/all") return both(url);
+    // Two titles, then an empty page, while the server counts five.
+    const first = url.searchParams.get("X-Plex-Container-Start") === "0";
+    return okJson({
+      MediaContainer: {
+        totalSize: 5,
+        Metadata: first
+          ? [550, 551].map((id) => ({ ratingKey: `rk${id}`, type: "movie", title: `Movie ${id}`, Guid: [{ id: `tmdb://${id}` }] }))
+          : [],
+      },
+    });
+  };
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(txTouching("plexLibraryItem").length, 0, "a short listing must not replace the instance's rows");
+  assert.equal(
+    txTouching("tVEpisodeCache").filter((t) => t.ops.some((o) => o.method === "deleteMany" && JSON.stringify(o.args).includes('"plex"'))).length,
+    0,
+    "the Plex episode rewrite is vetoed too",
+  );
+  assert.ok(!settingUpserts.some((u) => u.key === "lastPlexSyncSucceededAt"));
+  assert.ok((b.failedSources as string[]).includes("plex"));
+});
+
+// A legacy-agent movie (imdb:// guid, no tmdb id) beside a modern one. This
+// suite stubs no TmdbCache read, so the lookup fails and resolution is incomplete.
+function plexWithLegacyMovie(): (url: URL) => Response {
+  const modern = plexResponder([550]);
+  return (url) => {
+    if (url.pathname !== "/library/sections/1/all") return modern(url);
+    return okJson({
+      MediaContainer: {
+        totalSize: 2,
+        Metadata: [
+          { ratingKey: "rk550", type: "movie", title: "Movie 550", Guid: [{ id: "tmdb://550" }] },
+          { ratingKey: "rk-old", type: "movie", title: "Old Agent", guid: "com.plexapp.agents.imdb://tt0133093?lang=en" },
+        ],
+      },
+    });
+  };
+}
+
+test("legacy-agent lookups that did not answer hold a Plex instance whose stored rows depend on them", async () => {
+  configureBothServers();
+  preservedRowSlugs.plexLibraryItem.add(""); // the title resolved on an earlier run and holds a row
+  const plex = plexWithLegacyMovie();
+  const both = bothServersRespond([], [550]);
+  respond = (url) => (url.origin === PLEX_ORIGIN ? plex(url) : both(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(txTouching("plexLibraryItem").length, 0, "the replace would delete the legacy title's stored row");
+  assert.ok(!settingUpserts.some((u) => u.key === "lastPlexSyncSucceededAt"));
+  assert.ok((b.failedSources as string[]).includes("plex"));
+});
+
+test("legacy-agent lookups that did not answer do NOT hold an instance with no stored row to lose", async () => {
+  configureBothServers();
+  const plex = plexWithLegacyMovie();
+  const both = bothServersRespond([], [550]);
+  respond = (url) => (url.origin === PLEX_ORIGIN ? plex(url) : both(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  assert.equal(txTouching("plexLibraryItem").length, 1, "a never-resolved legacy item stays invisible; the sync still writes");
+});
+
 // Plex with an explicit section list; each listed key answers its own titles
 // (movies as tmdb-guid movie rows, an empty list for a show section).
 function plexSectionsResponder(

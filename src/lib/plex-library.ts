@@ -7,6 +7,7 @@ import {
   FETCH_TIMEOUT_MS,
   noRetry,
   plexFetch,
+  assertPlexWalkComplete,
   plexFetchAllPages,
   plexUrl,
   readPlexContainer,
@@ -78,7 +79,12 @@ interface SectionListing {
   includeGuids?: boolean;
 }
 
-/** Walks one section listing, handing each page's entries that pass `item` to `onItems`. */
+/**
+ * Walks one section listing, handing each page's entries that pass `item` to
+ * `onItems`. Rejects a listing that came back short (assertPlexWalkComplete):
+ * the sync replaces a server's library rows and the episode cache from these
+ * walks, so a short one must read as a failed fetch, not as the whole library.
+ */
 export async function walkPlexSection<T>(
   serverUrl: string,
   token: string,
@@ -89,7 +95,8 @@ export async function walkPlexSection<T>(
 ): Promise<void> {
   const path = `/library/sections/${encodeURIComponent(listing.sectionKey)}/${listing.recentlyAdded ? "recentlyAdded" : "all"}`;
   const query = `?type=${listing.plexType}${listing.includeGuids ? "&includeGuids=1" : ""}`;
-  await plexFetchAllPages(plexUrl(serverUrl, `${path}${query}`), token, (raw) => onItems(parseEach(item, raw)), signal);
+  const walk = await plexFetchAllPages(plexUrl(serverUrl, `${path}${query}`), token, (raw) => onItems(parseEach(item, raw)), signal);
+  assertPlexWalkComplete(walk, `section ${listing.sectionKey} type=${listing.plexType}`);
 }
 
 // Legacy-agent items whose guid scheme carries NO tmdb id at all (see

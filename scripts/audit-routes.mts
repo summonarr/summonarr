@@ -286,10 +286,143 @@ export function stripComments(src: string): string {
   return out;
 }
 
+/** The closing bracket for each opening one. */
+const CLOSERS: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
+
+/** Index just past the quoted literal that opens at `start`. */
+function skipQuoted(src: string, start: number): number {
+  const quote = src[start];
+  let i = start + 1;
+  while (i < src.length) {
+    if (src[i] === "\\") i += 2;
+    // Only a template literal spans lines; an unterminated quote stops here.
+    else if (src[i] === "\n" && quote !== "`") break;
+    else if (src[i++] === quote) break;
+  }
+  return i;
+}
+
+/**
+ * Index just past the string or regex literal opening at `i`, or -1 when no
+ * literal opens there. `from` is where the enclosing statement starts.
+ *
+ * Regex literals matter as much as strings: `x.replace(/\(/g, "")` holds a
+ * bracket and `/'/` a quote, and either one read as code throws the caller's
+ * depth count off for the rest of the statement. A `/` is told from a division
+ * by what precedes it, the same rule `stripComments` uses.
+ */
+function skipLiteral(src: string, i: number, from: number): number {
+  const c = src[i];
+  if (c === '"' || c === "'" || c === "`") return skipQuoted(src, i);
+  if (c !== "/") return -1;
+  let p = i - 1;
+  while (p >= from && /\s/.test(src[p])) p--;
+  const prev = p >= from ? src[p] : "";
+  if (prev !== "" && !REGEX_MAY_FOLLOW.has(prev) && !KEYWORD_BEFORE_REGEX.test(src.slice(Math.max(from, i - 24), i))) {
+    return -1;
+  }
+  let j = i + 1;
+  let inClass = false;
+  // A regex literal cannot span lines; a newline means this `/` was not one.
+  while (j < src.length && src[j] !== "\n") {
+    if (src[j] === "\\") {
+      j += 2;
+      continue;
+    }
+    const ch = src[j++];
+    if (ch === "[") inClass = true;
+    else if (ch === "]") inClass = false;
+    else if (ch === "/" && !inClass) return j;
+  }
+  return -1;
+}
+
+/**
+ * HTTP methods bound by an `export const|let|var` statement in a position
+ * `parseTopLevelDecls` does not read. It reads ONE identifier, the one directly
+ * after the keyword, so two forms carry a method past it: a destructuring
+ * pattern (`export const { POST, DELETE } = handlers`) and any declarator after
+ * the first (`export const GET = withAuth(...), POST = bare`).
+ *
+ * The statement is walked with bracket depth tracked and string and regex
+ * literals skipped, ending at its
+ * depth-0 `;` or, failing that, at the next column-0 declaration. Every method
+ * name inside a pattern is reported, a renamed source key included
+ * (`{ GET: internal }`): over-reporting fails the audit loudly, which is the
+ * safe direction.
+ */
+function unreadExportedBindings(src: string): string[] {
+  const found: string[] = [];
+  const stmtRe = /^export\s+(?:const|let|var)\b/gm;
+  const nextDeclRe = /^(?:export\s|async\s|function\s|const\s|let\s|var\s|class\s|interface\s|type\s|enum\s)/gm;
+
+  for (let m = stmtRe.exec(src); m !== null; m = stmtRe.exec(src)) {
+    nextDeclRe.lastIndex = m.index + m[0].length;
+    const limit = nextDeclRe.exec(src)?.index ?? src.length;
+
+    let i = m.index + m[0].length;
+    let first = true;
+    while (i < limit) {
+      while (i < limit && /\s/.test(src[i])) i++;
+      if (i >= limit) break;
+
+      // The binding this declarator introduces.
+      if (src[i] === "{" || src[i] === "[") {
+        const open = i;
+        const stack = [CLOSERS[src[i]]];
+        i++;
+        while (i < limit && stack.length > 0) {
+          const c = src[i];
+          const past = skipLiteral(src, i, m.index);
+          if (past !== -1) {
+            i = past;
+            continue;
+          }
+          if (c in CLOSERS) stack.push(CLOSERS[c]);
+          else if (c === stack[stack.length - 1]) stack.pop();
+          i++;
+        }
+        for (const word of src.slice(open, i).match(/[A-Za-z_$][\w$]*/g) ?? []) {
+          if (HTTP_METHODS.has(word)) found.push(word);
+        }
+      } else {
+        const id = /^[A-Za-z_$][\w$]*/.exec(src.slice(i, limit));
+        // The first declarator's plain identifier is the one the parser reads.
+        if (id && !first && HTTP_METHODS.has(id[0])) found.push(id[0]);
+      }
+      first = false;
+
+      // Skip the type annotation and initializer, up to this declarator's comma.
+      let depth = 0;
+      let ended = true;
+      while (i < limit) {
+        const c = src[i];
+        const past = skipLiteral(src, i, m.index);
+        if (past !== -1) {
+          i = past;
+          continue;
+        }
+        if (c in CLOSERS) depth++;
+        else if (c === ")" || c === "]" || c === "}") depth--;
+        else if (depth === 0 && c === ";") break;
+        else if (depth === 0 && c === ",") {
+          ended = false;
+          i++;
+          break;
+        }
+        i++;
+      }
+      if (ended) break;
+    }
+  }
+  return found;
+}
+
 /**
  * HTTP methods exported through a form `parseTopLevelDecls` cannot model: brace
- * re-exports (`export { GET }`, `export { handler as POST } from "./impl"`) and
- * star re-exports.
+ * re-exports (`export { GET }`, `export { handler as POST } from "./impl"`),
+ * star re-exports, a destructured `export const { POST } = …`, and a second or
+ * later declarator of one `export const` statement.
  *
  * The zero-handler check in main() only fires when EVERY handler in a file is
  * unmodeled. A file pairing one parsed handler with one re-exported method keeps
@@ -308,6 +441,7 @@ export function findUnmodeledMethodExports(src: string): string[] {
   // `export * from "./impl"` may re-export any method, and which ones is not
   // knowable without following the import — which this audit deliberately won't.
   if (/^export\s*\*/m.test(src)) found.add("*");
+  for (const name of unreadExportedBindings(src)) found.add(name);
   return [...found];
 }
 

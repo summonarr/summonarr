@@ -192,14 +192,18 @@ shadowPrismaModel(prisma, "mediaRequest", {
   findFirst: async () => null, findUnique: async () => null, count: async () => 0,
 });
 // The upcoming route reads its own cache table rather than TMDB, so it needs a
-// row to have anything to enrich.
+// row to have anything to enrich. The row's date is relative to today: the
+// route drops a release older than its cutoff, so a fixed date empties the list
+// once the calendar passes it.
+const upcomingReleaseDate = () => new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10);
 shadowPrismaModel(prisma, "upcomingCacheItem", {
   findMany: async (args: unknown) => {
     rec("upcomingCacheItem.findMany", args);
+    const releaseDate = upcomingReleaseDate();
     return [{
       tmdbId: 603, mediaType: "MOVIE", title: "The Matrix", overview: "o",
-      posterPath: "/m.jpg", backdropPath: "/b.jpg", releaseDate: "2026-12-01",
-      releaseYear: "2026", voteAverage: 8.2, cachedAt: new Date(),
+      posterPath: "/m.jpg", backdropPath: "/b.jpg", releaseDate,
+      releaseYear: releaseDate.slice(0, 4), voteAverage: 8.2, cachedAt: new Date(),
     }];
   },
   count: async () => 1, deleteMany: async () => ({ count: 0 }), createMany: async () => ({ count: 0 }),

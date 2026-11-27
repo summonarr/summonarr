@@ -114,7 +114,13 @@ test("admin user PATCH answers { id } plus the one field group it applied; disab
   const visit = (n: ts.Node) => {
     if (ts.isCallExpression(n) && n.expression.getText(sf) === "commitField") {
       // commitField(ctx, write, audit, answer, opts?)
-      const arg = n.arguments[3];
+      // The answer is an object literal, or `() => ({ … })` for a value the
+      // write itself settles (the grant edits).
+      let arg: ts.Node | undefined = n.arguments[3];
+      if (arg && ts.isArrowFunction(arg)) {
+        arg = arg.body;
+        while (ts.isParenthesizedExpression(arg)) arg = arg.expression;
+      }
       assert.ok(arg && ts.isObjectLiteralExpression(arg), "commitField's answer is an object literal");
       for (const k of objectLiteralKeys(arg, sf)) {
         if (k === "[quotaField]") ["movieQuotaLimit", "movieQuotaDays", "tvQuotaLimit", "tvQuotaDays"].forEach((q) => fieldKeys.add(q));

@@ -120,6 +120,30 @@ export function mediaServerGrantsBeyondOwn(
   return false;
 }
 
+// ── Grants name REGISTERED instances only ────────────────────────────────────
+// A grant is keyed by slug and holds no identity of the instance it was made
+// for. One stored for a slug nothing registers is dormant until an instance is
+// registered under that slug, and then applies to it with nobody granting it.
+// The grant edits therefore keep only the slugs registered when they write.
+
+export function onlyRegisteredInstanceGrants(grants: InstanceGrants, registered: ReadonlySet<string>): InstanceGrants {
+  const out: InstanceGrants = {};
+  for (const [slug, g] of Object.entries(grants)) if (registered.has(slug)) out[slug] = g;
+  return out;
+}
+
+export function onlyRegisteredMediaServerGrants(
+  grants: MediaServerGrants,
+  registered: { plex: ReadonlySet<string>; jellyfin: ReadonlySet<string> },
+): MediaServerGrants {
+  const out: MediaServerGrants = {};
+  for (const service of ["plex", "jellyfin"] as const) {
+    const kept = Object.entries(grants[service] ?? {}).filter(([slug]) => registered[service].has(slug));
+    if (kept.length > 0) out[service] = Object.fromEntries(kept);
+  }
+  return out;
+}
+
 // `null` (no cap) is the loosest value: a capped caller may not clear a cap, and
 // may not set one more mature than its own. An uncapped caller may set anything.
 export function contentCapBeyondOwn(proposed: string | null, callerCap: string | null): boolean {

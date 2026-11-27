@@ -16,6 +16,7 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import { upstreamStatusKey } from "@/lib/never-watched-data";
 import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
+import { revokeMediaServerGrantsInTx } from "@/lib/instance-grant-prune";
 
 // Admin management surface for the full Plex/Jellyfin instance list (multi-
 // server support): the registry metadata (slug/name — deliberately thin, see
@@ -490,7 +491,7 @@ async function writeInstanceSettings(tx: TxClient, service: MediaServerService, 
   }
 }
 
-type RemovedCounts = { libraryItems: number; activeSessions: number; serverUsersDisabled: number; watchSyncPairs: number };
+type RemovedCounts = { libraryItems: number; activeSessions: number; serverUsersDisabled: number; watchSyncPairs: number; grantsRevoked: number };
 
 // Clean up everything a removed named instance owned, in the save's transaction.
 async function cleanUpRemovedInstance(tx: TxClient, service: MediaServerService, slug: string): Promise<RemovedCounts> {
@@ -549,7 +550,14 @@ async function cleanUpRemovedInstance(tx: TxClient, service: MediaServerService,
     data: { active: false },
   });
 
-  return { libraryItems: library.count, activeSessions: sessions.count, serverUsersDisabled: serverUsers.count, watchSyncPairs: watchSyncPairs.count };
+  // Users' visibility grants for this server (User.mediaServerGrants). A grant
+  // names only the service and the slug, so one left behind stays invisible
+  // until a server is registered under this slug again — and then every
+  // account that could see the old server sees the new, restricted one
+  // without anyone granting anything.
+  const grantsRevoked = await revokeMediaServerGrantsInTx(tx, service, slug);
+
+  return { libraryItems: library.count, activeSessions: sessions.count, serverUsersDisabled: serverUsers.count, watchSyncPairs: watchSyncPairs.count, grantsRevoked };
 }
 
 type ConnectionTest = { ok?: boolean; error?: string };

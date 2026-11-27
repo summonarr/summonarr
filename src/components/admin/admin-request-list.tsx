@@ -10,7 +10,7 @@ import Image from "next/image";
 import { AlertTriangle, Film, Tv2, Loader2, Check, X, ExternalLink } from "@/components/icons";
 import Link from "next/link";
 import { RequestActions } from "./request-actions";
-import { actionTargets, chosenActionTarget, type RequestMediaType } from "./request-action-rules";
+import { actionTargets, actionsMountKey, chosenActionTarget, type RequestMediaType } from "./request-action-rules";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { RequestThread } from "@/components/requests/request-thread";
 import { OpenInArrLink, arrInstanceLabel } from "./open-in-arr";
@@ -1002,9 +1002,12 @@ function RequestGroupRow({
             </StyledSelect>
           )}
           <RequestActions
-            // A picked target starts from clean state: the representative's
-            // open panel or half-typed note must not act on another request.
-            key={targetIsRepresentative ? "representative" : target.requestId}
+            // A picked target starts from clean state. The representative
+            // keeps one key across refreshes, so an approve still out (and its
+            // Radarr/Sonarr answer) survives the admin's own decision changing
+            // which request is the representative; the forms that must not
+            // follow to another request are keyed by it inside RequestActions.
+            key={actionsMountKey(targets, chosenTargetId)}
             requestId={target.requestId}
             currentStatus={target.status}
             mediaType={group.mediaType}

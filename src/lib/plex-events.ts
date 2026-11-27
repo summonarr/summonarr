@@ -251,6 +251,15 @@ function parseSseFrame(frame: string): { event: string; data: string } | null {
   return dataParts.length === 0 ? null : { event, data: dataParts.join("\n") };
 }
 
+// A notification's ratingKey as the string ActiveSession.sourceItemId stores
+// (Plex sends it as a string; a number is tolerated). Anything else is "not
+// stated", and an event that does not name its item is applied as before.
+function notificationRatingKey(value: unknown): string | undefined {
+  if (typeof value === "string") return value || undefined;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return undefined;
+}
+
 // A notification's viewOffset as a stored progressMs; null when it is missing,
 // non-finite or negative, and then no progressMs is written. The guardrail-20
 // movement check compares this exact value with the stored one.
@@ -946,18 +955,19 @@ class PlexEventStreamManager {
       if (!sessionKey) continue;
       const state = typeof n.state === "string" ? n.state : undefined;
       const viewOffset = typeof n.viewOffset === "number" && Number.isFinite(n.viewOffset) ? n.viewOffset : undefined;
+      const ratingKey = notificationRatingKey(n.ratingKey);
       if (state === "stopped") {
         // viewOffset is the playhead position at stop. Pass it through so the
         // PlayHistory row's progressMs reflects where the user actually left
         // off, not the last 5s-poll snapshot which can lag.
-        this.enqueueSessionOp(sessionKey, () => this.finalizeStopped(sessionKey, viewOffset));
+        this.enqueueSessionOp(sessionKey, () => this.finalizeStopped(sessionKey, viewOffset, ratingKey));
       } else if (state === "playing" || state === "paused" || state === "buffering") {
         // Non-stop state transitions: update ActiveSession.state in near
         // realtime so the Now Playing card flips between PLAYING / PAUSED /
         // BUFFERING within ~1s instead of waiting up to 5s for the next poll.
-        // The 5s poller is still authoritative for progressMs, playtimeMs
-        // accumulation, and full metadata refresh.
-        this.enqueueSessionOp(sessionKey, () => this.applyLiveStateUpdate(sessionKey, state, viewOffset));
+        // The 5s poller is still authoritative for playtimeMs accumulation,
+        // full metadata refresh and an item change under one sessionKey.
+        this.enqueueSessionOp(sessionKey, () => this.applyLiveStateUpdate(sessionKey, state, viewOffset, ratingKey));
       }
     }
   }
@@ -1014,6 +1024,7 @@ class PlexEventStreamManager {
     sessionKey: string,
     state: "playing" | "paused" | "buffering",
     viewOffset: number | undefined,
+    ratingKey?: string,
   ): Promise<void> {
     // Instance-qualified ActiveSession id: "plex:<key>" for the default
     // instance (byte-identical to the single-server era), 3-segment for named.
@@ -1034,9 +1045,17 @@ class PlexEventStreamManager {
       // silently misses, hence this companion refresh here.
       const prior = await prisma.activeSession.findUnique({
         where: { id },
-        select: { state: true, progressMs: true },
+        select: { state: true, progressMs: true, sourceItemId: true },
       });
       if (!prior) return;
+      // Auto-play of the next item keeps the sessionKey and changes the
+      // ratingKey. This event then describes the NEW item, while the row is
+      // still the previous one until the poller finalizes it (its item-changed
+      // rule, planPlexContinuation). Writing the new item's near-zero playhead
+      // here would make that finalize record the finished item as barely
+      // started, so nothing of this event goes onto the row. The poller
+      // finalizes it on its next tick whatever the anchor says.
+      if (ratingKey && prior.sourceItemId && ratingKey !== prior.sourceItemId) return;
       const transitionedToPlaying = prior.state !== "playing" && state === "playing";
 
       // Did the playhead MOVE in this event (forward OR backward — a seek is
@@ -1102,7 +1121,7 @@ class PlexEventStreamManager {
     }
   }
 
-  private async finalizeStopped(sessionKey: string, viewOffset: number | undefined): Promise<void> {
+  private async finalizeStopped(sessionKey: string, viewOffset: number | undefined, ratingKey?: string): Promise<void> {
     const id = activeSessionId("plex", this.instance, sessionKey);
     try {
       const existing = await prisma.activeSession.findUnique({ where: { id } });
@@ -1143,7 +1162,12 @@ class PlexEventStreamManager {
       if ((await this.stillReportedByPlex(sessionKey)) === "present") return;
 
       const now = new Date();
-      const progressMs = toProgressMs(viewOffset);
+      // A stop that names ANOTHER item than the row's (the next item auto-played
+      // under this sessionKey and was quit before the poller saw the change)
+      // carries the new item's playhead. The row is still the previous item, so
+      // it is finalized from its own stored playhead, as in applyLiveStateUpdate.
+      const otherItem = !!ratingKey && !!existing.sourceItemId && ratingKey !== existing.sourceItemId;
+      const progressMs = otherItem ? null : toProgressMs(viewOffset);
       const finalized = applyFinalTick(existing, now, progressMs !== null ? { progressMs } : {});
 
       await recordCompletedSession(finalized, { stoppedAt: now });

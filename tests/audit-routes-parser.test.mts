@@ -111,6 +111,113 @@ test("findUnmodeledMethodExports reports nothing for the ordinary wrapper form",
   assert.deepEqual(findUnmodeledMethodExports(src), []);
 });
 
+test("PIN: methods exported by destructuring beside a parsed handler are reported", () => {
+  // Next accepts this form, and the declaration parser reads only an identifier
+  // directly after `const` — so POST and DELETE were never examined while the
+  // guarded GET kept the handler count above zero.
+  const src = [
+    "export const GET = withAuth(async () => NextResponse.json({}));",
+    "export const { POST, DELETE } = handlers;",
+  ].join("\n");
+  assert.deepEqual(parseTopLevelDecls(src).filter((d) => d.exported).map((d) => d.name), ["GET"]);
+  assert.deepEqual(findUnmodeledMethodExports(src), ["POST", "DELETE"]);
+});
+
+test("destructured method exports are found in every pattern shape", () => {
+  assert.deepEqual(findUnmodeledMethodExports("export const [GET, POST] = pair;"), ["GET", "POST"]);
+  assert.deepEqual(findUnmodeledMethodExports("export const { post: POST } = handlers;"), ["POST"]);
+  assert.deepEqual(
+    findUnmodeledMethodExports("export const {\n  PUT = fallback({ a: 1 }),\n  inner: { PATCH },\n} = handlers;"),
+    ["PUT", "PATCH"],
+  );
+  assert.deepEqual(findUnmodeledMethodExports("export let { HEAD } = handlers;"), ["HEAD"]);
+  // A pattern binding no method is somebody's ordinary config export.
+  assert.deepEqual(findUnmodeledMethodExports("export const { dynamic, runtime } = segmentConfig;"), []);
+});
+
+test("PIN: a method declared after the first declarator of one export statement is reported", () => {
+  const src = [
+    "export const GET = withAuth(async (req, ctx, session) => {",
+    "    return NextResponse.json({ a: [1, 2], b: f(3, 4) });",
+    "  }),",
+    "  POST = async () => NextResponse.json({});",
+  ].join("\n");
+  assert.deepEqual(parseTopLevelDecls(src).filter((d) => d.exported).map((d) => d.name), ["GET"]);
+  assert.deepEqual(findUnmodeledMethodExports(src), ["POST"]);
+  assert.deepEqual(
+    findUnmodeledMethodExports("export const dynamic = 'force-dynamic', { DELETE } = handlers, PUT: Handler = bare;"),
+    ["DELETE", "PUT"],
+  );
+});
+
+test("commas and method names inside an initializer are not read as declarators", () => {
+  const src = [
+    "export const POST = withAuth(async (req, ctx, session) => {",
+    '  const a = 1, GET = 2;',
+    '  await send(url, { method: "PUT", body: "x, DELETE = 1; y" }, PATCH);',
+    "  return NextResponse.json([a, GET]);",
+    "});",
+    "export const maxDuration = 60;",
+    "const helper = (x: number, HEAD = 1) => x;",
+  ].join("\n");
+  assert.deepEqual(findUnmodeledMethodExports(src), []);
+});
+
+test("PIN: a regex literal in the first initializer does not hide a later declarator", () => {
+  // A bracket or a quote inside a regex is not code. Counted as one, it leaves
+  // the depth off (or opens a phantom string), the comma that starts the next
+  // declarator is never seen at depth 0, and POST passes on GET's guard.
+  const withBody = (expr: string) =>
+    `export const GET = withAuth(async (req) => NextResponse.json({ a: ${expr} })),\n  POST = async () => NextResponse.json({});\n`;
+  for (const expr of [
+    String.raw`x.replace(/\(/g, "")`,
+    String.raw`x.split(/\)/)`,
+    `x.replace(/"/g, "")`,
+    `s.replace(/'/g, '')`,
+    "x.replace(/[(/]/g, '')",
+    "x.match(/`/) ? 1 : 2",
+    String.raw`(() => { return /\{/.test(x); })()`,
+  ]) {
+    const src = stripComments(withBody(expr));
+    assert.deepEqual(findUnmodeledMethodExports(src), ["POST"], expr);
+    assert.deepEqual(findUnmodeledMethodExports(withBody(expr)), ["POST"], `${expr} (raw)`);
+  }
+  // A regex inside a destructuring default, before the method it would hide.
+  assert.deepEqual(
+    findUnmodeledMethodExports(String.raw`export const { a = /\}/.test(x), POST } = handlers;`),
+    ["POST"],
+  );
+});
+
+test("a division or a regex holding a comma is not read as a declarator boundary", () => {
+  const src = [
+    "export const GET = withAuth(async (req) => {",
+    "  const half = total / 2, POST = count / 3;",
+    "  return NextResponse.json({ a: x.split(/, PUT = /), half, POST });",
+    "});",
+    "export const ratio = width / height;",
+    "export const sep = /, DELETE = /;",
+  ].join("\n");
+  assert.deepEqual(findUnmodeledMethodExports(src), []);
+});
+
+test("PIN (end to end): a destructured or comma-declared method fails the audit beside a guarded handler", () => {
+  const destructured = auditFixture({
+    things: [
+      "export const GET = withAuth(async () => NextResponse.json({}));",
+      "export const { POST, DELETE } = handlers;",
+    ].join("\n"),
+  });
+  assert.equal(destructured.status, 1, destructured.output);
+  assert.match(destructured.output, /cannot audit: POST, DELETE/);
+
+  const comma = auditFixture({
+    things: "export const GET = withAuth(async () => NextResponse.json({})),\n  POST = async () => NextResponse.json({});\n",
+  });
+  assert.equal(comma.status, 1, comma.output);
+  assert.match(comma.output, /cannot audit: POST/);
+});
+
 test("a commented-out re-export inside a block comment is not flagged", () => {
   // A `//` line could never match the ^export anchor anyway; a block comment
   // leaves the inner line starting at column 0, so only stripping saves it from

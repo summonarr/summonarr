@@ -23,7 +23,7 @@ const AUDIT_LOG_RETENTION_DAYS = 365;
 type PurgeKey =
   | "authSessions" | "discordLinkTokens" | "discordMergeCodes" | "discordSearchCache"
   | "webhookReplays" | "plexTokensExpired" | "plexTokensLegacy" | "tmdbMediaCore"
-  | "ipLookupCache" | "auditLogs";
+  | "ipLookupCache" | "auditLogs" | "verificationTokens";
 
 interface PurgeLeg {
   key: PurgeKey;
@@ -53,10 +53,14 @@ function purgeLegs(now: Date): PurgeLeg[] {
     { key: "tmdbMediaCore", run: () => prisma.tmdbMediaCore.deleteMany({ where: expired }) },
     { key: "ipLookupCache", run: () => prisma.ipLookupCache.deleteMany({ where: { fetchedAt: { lt: ago(IP_LOOKUP_RETENTION_DAYS) } } }) },
     { key: "auditLogs", run: () => prisma.auditLog.deleteMany({ where: { createdAt: { lt: ago(AUDIT_LOG_RETENTION_DAYS) } } }) },
+    // A notification-email verification that was never confirmed: its
+    // identifier carries the typed address, and nothing else removes the row
+    // once its 30-minute link has lapsed.
+    { key: "verificationTokens", run: () => prisma.verificationToken.deleteMany({ where: { expires: { lt: now } } }) },
   ];
 }
 
-// One leg at a time: ten deletes at once would take every connection of the
+// One leg at a time: every delete at once would take every connection of the
 // five-connection Prisma pool for the length of the slowest. Each leg is one
 // statement on an indexed date column, and a daily run keeps each to about a
 // day's rows. A failing leg never stops the others; an abort stops before the

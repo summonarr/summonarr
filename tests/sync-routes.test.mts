@@ -143,6 +143,7 @@ const notificationCreateManyData: Array<Record<string, unknown>> = [];
 const settingUpserts: Array<{ key: string; value: string }> = [];
 const auditRows: Array<Record<string, unknown>> = [];
 const existingPlexByType = new Map<string, number[]>();
+let plexRowsUnderLegacyKeys = 0;
 const existingJellyfinByType = new Map<string, number[]>();
 const plexFindManyWheres: Array<Record<string, unknown>> = []; // every plexLibraryItem.findMany where (dedupe + recentOnly reads)
 
@@ -275,6 +276,8 @@ const fakePrisma = {
       plexFindManyWheres.push(args.where as Record<string, unknown>);
       return existingRowsFor(existingPlexByType, args);
     },
+    // "Do stored rows depend on a legacy lookup that did not answer?"
+    count: async () => plexRowsUnderLegacyKeys,
   },
   jellyfinLibraryItem: {
     findMany: async (args: FindManyByTmdbArgs) => existingRowsFor(existingJellyfinByType, args),
@@ -612,6 +615,7 @@ beforeEach(() => {
   auditRows.length = 0;
   settings.clear();
   existingPlexByType.clear();
+  plexRowsUnderLegacyKeys = 0;
   existingJellyfinByType.clear();
   storedJellyfinRows.length = 0;
   plexFindManyWheres.length = 0;
@@ -1391,6 +1395,58 @@ test("jellyfin { full: true } → NO MinDateLastSaved; wholesale deleteMany + re
 });
 
 // ── failure paths ───────────────────────────────────────────────────────────
+
+test("a Plex listing that ends before the server's own count → 502, the library untouched", async () => {
+  configurePlex();
+  const whole = plexMovieResponder([]);
+  respond = (url) => {
+    if (url.pathname !== "/library/sections/1/all") return whole(url);
+    const first = url.searchParams.get("X-Plex-Container-Start") === "0";
+    return okJson({
+      MediaContainer: {
+        totalSize: 5,
+        Metadata: first ? [{ ratingKey: "rk603", type: "movie", title: "M", Guid: [{ id: "tmdb://603" }] }] : [],
+      },
+    });
+  };
+
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(res.status, 502);
+  await settleFireAndForget();
+  assert.equal(transactions.length, 0, "a short listing must not replace the server's rows");
+  assert.ok(errors.some((e) => e.includes("came back short: 1 of 5")), errors.join(" | "));
+  assert.ok(!settings.has("lastPlexSyncSucceededAt"));
+});
+
+// A legacy-agent movie (imdb:// guid, no tmdb id) beside a modern one. This
+// suite stubs no TmdbCache read, so the lookup fails and resolution is incomplete.
+const LEGACY_LIBRARY = [
+  { ratingKey: "rk603", type: "movie", title: "M", Guid: [{ id: "tmdb://603" }] },
+  { ratingKey: "rk-old", type: "movie", title: "Old Agent", guid: "com.plexapp.agents.imdb://tt0133093?lang=en" },
+];
+
+test("a full Plex resync whose legacy-agent lookups did not answer keeps the library when stored rows depend on them", async () => {
+  configurePlex();
+  respond = plexMovieResponder(LEGACY_LIBRARY);
+  plexRowsUnderLegacyKeys = 1;
+
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(res.status, 502);
+  await settleFireAndForget();
+  assert.equal(transactions.length, 0, "the replace would delete the legacy title's stored row");
+  assert.ok(errors.some((e) => e.includes("legacy-agent lookups did not all answer")), errors.join(" | "));
+});
+
+test("unanswered legacy-agent lookups never block a resync with nothing to lose: no stored row, or a recent-only (insert-only) run", async () => {
+  configurePlex();
+  respond = plexMovieResponder(LEGACY_LIBRARY);
+  const full = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(full.status, 200);
+
+  plexRowsUnderLegacyKeys = 1;
+  const recent = await postPlexSync(plexReq({ headers: AS_CRON }));
+  assert.equal(recent.status, 200);
+});
 
 test("an unreachable source → 502, the library untouched (zero transactions), and an ok:false ledger row", async () => {
   configurePlex();

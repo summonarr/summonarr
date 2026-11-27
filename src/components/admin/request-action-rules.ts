@@ -111,6 +111,24 @@ export function chosenActionTarget<T extends ActionTarget>(targets: readonly T[]
 }
 
 /**
+ * The React key the row mounts its actions under: the picked request's id
+ * while that pick is in effect, else one shared key for "the representative".
+ *
+ * The actions' own call state — the request in flight, the Radarr/Sonarr
+ * answer, the optimistic status — must outlive a change of representative,
+ * because the admin's own approve causes one: approving the pending request of
+ * a title that also has an approved one makes the approved one the
+ * representative on the next refresh, and a key that followed the request
+ * would remount mid-approve, abort the call and drop a failed push's message.
+ * A pick is by request id, so its key follows the request. What must NOT
+ * outlive the aimed request (an open delete confirm, a reply draft, the
+ * decline form) is keyed by the request inside the actions themselves.
+ */
+export function actionsMountKey<T extends ActionTarget>(targets: readonly T[], chosenId: string | null): string {
+  return chosenId !== null && targets.some((r) => r.requestId === chosenId) ? chosenId : "representative";
+}
+
+/**
  * The requests a decision or reply on the row goes to as a GROUP, or null when
  * it goes to the aimed request alone.
  *

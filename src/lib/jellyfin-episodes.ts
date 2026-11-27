@@ -5,7 +5,8 @@
 import { v, type Infer } from "./validate";
 import { loose, looseString, parseEach } from "./media-server-payload";
 import { jellyfinItemsUrl, type ItemsParam } from "./jellyfin-http";
-import { walkJellyfinSequential } from "./jellyfin-paging";
+import { forgetShortfall, isKnownShortfall, rememberShortfall, walkJellyfinSequential } from "./jellyfin-paging";
+import { warnOnChange } from "./log-dedup";
 import { getJellyfinSeriesItemIndex, parseJellyfinDate } from "./jellyfin-library";
 
 export interface JellyfinTVEpisodeData {
@@ -99,9 +100,68 @@ export async function getJellyfinTVEpisodes(
   const fields = "SeriesId,ParentIndexNumber,IndexNumber,IndexNumberEnd,DateCreated";
   const parents: ItemsParam[] = libraryIds?.size ? Array.from(libraryIds, (id) => ["ParentId", id] as const) : [null];
   for (const parent of parents) {
-    await walkJellyfinSequential(episodesQuery(baseUrl, parent, fields, "DateCreated,SortName"), apiKey, processEpisodes, undefined, signal);
+    await walkEpisodesWhole(episodesQuery(baseUrl, parent, fields, "DateCreated,SortName"), apiKey, processEpisodes, signal);
   }
   return Array.from(episodeMap.values());
+}
+
+// The library-wide walk feeds a whole-source REPLACE of the episode cache, and
+// it is paged by offset: an episode removed mid-walk (an arr upgrade replacing
+// a file) shifts every later one down, so the one at the next page boundary is
+// never served, and a page that comes back short before the end drops the rest
+// — while the walk still ends "healthy". So a walk that served fewer entries
+// than page 0 counted is read again (`onPage` merges by episode, so a second
+// pass only adds), the rule readByCount applies to the Movie/Series listing:
+// short twice with a MOVED count rejects — a failed fetch, which keeps the
+// stored cache — and short twice by the SAME count is a server that counts
+// more than it serves, read as served and said once (guardrail 7b).
+//
+// Unlike that listing, a short page ENDS this walk, so a server that cuts a
+// page the same way twice (a scan in progress, an empty first page) is short
+// by the same count too, and the replace would delete the whole unread tail.
+// So the same-count reading is taken only for a small gap on a walk that
+// served something; a larger one rejects on every run, which leaves the
+// stored cache stale rather than cut.
+const EPISODE_SHORTFALL_TOLERANCE = 0.01;
+function withinShortfallTolerance(total: number, served: number): boolean {
+  return served > 0 && total - served <= Math.ceil(total * EPISODE_SHORTFALL_TOLERANCE);
+}
+
+async function walkEpisodesWhole(
+  query: string,
+  apiKey: string,
+  onPage: (items: unknown[]) => void,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  const read = async () => {
+    let served = 0;
+    const total = await walkJellyfinSequential(query, apiKey, (items) => {
+      served += items.length;
+      onPage(items);
+    }, undefined, signal);
+    return { served, total };
+  };
+  const key = `jellyfin-episode-shortfall:${query}`;
+  const first = await read();
+  if (first.total === null || first.served >= first.total) {
+    forgetShortfall(key);
+    return;
+  }
+  if (isKnownShortfall(key, first.total, first.served)) return;
+  const second = await read();
+  if (second.total === null || second.served >= second.total) {
+    forgetShortfall(key);
+    return;
+  }
+  if (second.total !== first.total || !withinShortfallTolerance(second.total, second.served)) {
+    throw new Error(`Jellyfin episode listing came back short: ${second.served} of ${second.total} items`);
+  }
+  rememberShortfall(key, second.total, second.served);
+  warnOnChange(
+    key,
+    `${second.served}/${second.total}`,
+    `[jellyfin] the episode listing reports ${second.total} item(s) but serves ${second.served}; read as served`,
+  );
 }
 
 export async function getJellyfinEpisodesForShow(

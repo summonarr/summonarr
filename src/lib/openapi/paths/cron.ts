@@ -241,6 +241,7 @@ export const cronPaths: OpenApiPaths = {
                       tmdbMediaCore: { type: "integer" },
                       ipLookupCache: { type: "integer" },
                       auditLogs: { type: "integer" },
+                      verificationTokens: { type: "integer" },
                     },
                   },
                   errorCount: { type: "integer" },

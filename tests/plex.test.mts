@@ -359,6 +359,59 @@ test("getPlexSectionTmdbIds pages by totalSize, advancing X-Plex-Container-Start
   assert.equal(fetchCalls[1].url.searchParams.get("X-Plex-Container-Start"), "2");
 });
 
+test("a listing that ends before the server's own count is a failed read, never a smaller library", async () => {
+  const S = "http://plex-short1.test:32400";
+  const mv = (id: number) => ({ type: "movie", ratingKey: String(id), title: `M${id}`, Guid: [{ id: `tmdb://${id}` }] });
+  // An empty page while the server still counts more.
+  respond = (url) => {
+    const start = url.searchParams.get("X-Plex-Container-Start");
+    if (start === "0") return mediaContainer([mv(1), mv(2)], { totalSize: 5 });
+    if (start === "2") return mediaContainer([], { totalSize: 5 });
+    throw new Error(`unexpected page start=${start}`);
+  };
+  await assert.rejects(getPlexSectionTmdbIds(S, "t", "1", "movie"), /came back short: 2 of 5/);
+
+  // An item removed mid-walk: every later entry shifts one offset down, so one
+  // is never served, and the server's count drops with it.
+  respond = (url) => {
+    const start = url.searchParams.get("X-Plex-Container-Start");
+    if (start === "0") return mediaContainer([mv(1), mv(2)], { totalSize: 4 });
+    if (start === "2") return mediaContainer([mv(4)], { totalSize: 3 });
+    throw new Error(`unexpected page start=${start}`);
+  };
+  await assert.rejects(getPlexSectionTmdbIds(S, "t", "1", "movie"), /came back short: 3 of 4/);
+
+  // The episode listing is judged the same way: an empty first page beside a
+  // non-zero count is not "no episodes".
+  respond = (url) => {
+    if (url.pathname === "/library/sections/2/all" && url.searchParams.get("type") === "4") {
+      return mediaContainer([], { totalSize: 40 });
+    }
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+  await assert.rejects(
+    getPlexTVEpisodes(S, "t", undefined, [{ key: "2", title: "TV", type: "show" }], new Map([["10", [100]]])),
+    /came back short: 0 of 40/,
+  );
+});
+
+test("a library that really is smaller, or grew mid-walk, is a whole listing", async () => {
+  const S = "http://plex-short2.test:32400";
+  const mv = (id: number) => ({ type: "movie", ratingKey: String(id), title: `M${id}`, Guid: [{ id: `tmdb://${id}` }] });
+  respond = () => mediaContainer([mv(1)], { totalSize: 1 });
+  assert.deepEqual([...(await getPlexSectionTmdbIds(S, "t", "1", "movie")).keys()], [1]);
+  respond = () => mediaContainer([], { totalSize: 0 });
+  assert.equal((await getPlexSectionTmdbIds(S, "t", "1", "movie")).size, 0);
+  // An item added mid-walk raises the count and is served.
+  respond = (url) => {
+    const start = url.searchParams.get("X-Plex-Container-Start");
+    if (start === "0") return mediaContainer([mv(1), mv(2)], { totalSize: 3 });
+    if (start === "2") return mediaContainer([mv(3), mv(4)], { totalSize: 4 });
+    throw new Error(`unexpected page start=${start}`);
+  };
+  assert.equal((await getPlexSectionTmdbIds(S, "t", "1", "movie")).size, 4);
+});
+
 test("getPlexSectionTmdbIds with NO totalSize keeps paging until an empty page — container.size must not truncate the sync", async () => {
   // The inline comment in plexFetchAllPages declares this load-bearing: falling
   // back to container.size (the PAGE's count) would stop after one page and

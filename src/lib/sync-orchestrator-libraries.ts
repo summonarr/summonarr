@@ -2,7 +2,7 @@
 // fetch every configured server, write its rows, then the episode cache.
 import { prisma } from "./prisma";
 import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLibraryItemData, type PlexTVEpisodeData, type PlexLegacyGuidRef } from "./plex";
-import { resolvePlexLegacyGuids, mergeResolvedLegacyItems } from "./plex-legacy-resolve";
+import { resolvePlexLegacyGuidsDetailed, mergeResolvedLegacyItems, storedRowsLostToLegacyShortfall, legacyShortfallError } from "./plex-legacy-resolve";
 import { getPlexConfig } from "./plex-config";
 import { buildSeriesItemIdIndex, getJellyfinSyncFolders, getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "./jellyfin";
 import { getJellyfinConfig } from "./jellyfin-config";
@@ -178,7 +178,8 @@ function plexHoldWarning(slug: string, hold: NonNullable<ReturnType<typeof plexH
 // legacy-agent resolution), then the short-answer hold. `result: null` is a
 // failed or held server — its stored rows stay, and the run is not a complete
 // picture. A walk the lock's abort ended rejects (never a partial library) and
-// lands here the same way. Never throws.
+// lands here the same way, as does a listing that came back short of the
+// server's own count. Never throws.
 async function fetchPlexInstance(
   instance: MediaInstanceConfig,
   librarySelections: LibraryTargets["librarySelections"],
@@ -215,15 +216,21 @@ async function fetchPlexInstance(
         signal,
       }),
     ]);
-    // Resolve + merge legacy-agent items (self-catching, never throws): a
-    // resolution failure degrades those items to their previous invisibility
-    // rather than failing the instance's fetch.
+    // Resolve + merge legacy-agent items (self-catching, never throws). A
+    // lookup that did not answer leaves a never-resolved item as invisible as
+    // it was; but when a title that resolved on an earlier run would lose its
+    // stored row to this run's replace, the instance is a failed fetch.
     const [resolvedMovies, resolvedTv] = await Promise.all([
-      resolvePlexLegacyGuids(movieLegacy, "MOVIE"),
-      resolvePlexLegacyGuids(tvLegacy, "TV"),
+      resolvePlexLegacyGuidsDetailed(movieLegacy, "MOVIE"),
+      resolvePlexLegacyGuidsDetailed(tvLegacy, "TV"),
     ]);
-    mergeResolvedLegacyItems(resolvedMovies, movieIds);
-    mergeResolvedLegacyItems(resolvedTv, tvIds, ratingKeyToTmdb);
+    const lost = await storedRowsLostToLegacyShortfall(instance.slug, [
+      { refs: movieLegacy, resolution: resolvedMovies },
+      { refs: tvLegacy, resolution: resolvedTv },
+    ]);
+    if (lost > 0) throw legacyShortfallError(instance.slug, lost);
+    mergeResolvedLegacyItems(resolvedMovies.items, movieIds);
+    mergeResolvedLegacyItems(resolvedTv.items, tvIds, ratingKeyToTmdb);
     // A SHORT answer for a server we already hold rows for is not a complete
     // picture: a saved selection naming a library Plex recreated under a new
     // key, or a Plex that is mid-scan or just started, comes back with one type

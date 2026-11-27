@@ -75,7 +75,7 @@ let casRows = 1; // rows affected by the last-admin CAS ($executeRaw)
 let userUpdateManyRows = 1; // rows affected by purge's final guarded update (races: set to 0)
 let lastCas: { sql: string; values: unknown[] } | null = null;
 // What user.findUnique returns to purgeUserDataInTx's precondition check.
-let userState: { deactivatedAt: Date | null; purgedAt: Date | null } | null = null;
+let userState: { deactivatedAt: Date | null; purgedAt: Date | null; email?: string; plexUserId?: string | null } | null = null;
 type AuditStoreRow = { id: string; target: string; userId: string | null; userName: string; details: string | null };
 let auditStore: AuditStoreRow[] = [];
 let ownedRequestIds: string[] = [];
@@ -122,6 +122,7 @@ const baseTx = {
   traktConnection: { deleteMany: record("traktConnection", "deleteMany") },
   autoRequestLedger: { deleteMany: record("autoRequestLedger", "deleteMany") },
   verificationToken: { deleteMany: record("verificationToken", "deleteMany") },
+  plexTokenCache: { deleteMany: record("plexTokenCache", "deleteMany") },
   userTotp: { deleteMany: record("userTotp", "deleteMany") },
   webAuthnCredential: { deleteMany: record("webAuthnCredential", "deleteMany") },
   mfaRecoveryCode: { deleteMany: record("mfaRecoveryCode", "deleteMany") },
@@ -214,6 +215,8 @@ const PURGE_OPS = [
   "userTotp.deleteMany",
   "webAuthnCredential.deleteMany",
   "mfaRecoveryCode.deleteMany",
+  // The Plex sign-in token cache rows naming this person (email, plex.tv id).
+  "plexTokenCache.deleteMany",
   "pushSubscription.deleteMany",
   "pushSubscriptionRemoval.deleteMany",
   "discordLinkToken.deleteMany",
@@ -259,7 +262,7 @@ beforeEach(() => {
   casRows = 1;
   userUpdateManyRows = 1;
   lastCas = null;
-  userState = { deactivatedAt: DISABLED_AT, purgedAt: null };
+  userState = { deactivatedAt: DISABLED_AT, purgedAt: null, email: "member@example.com", plexUserId: null };
   auditStore = [];
   ownedRequestIds = [];
 });
@@ -383,7 +386,8 @@ test("purge is idempotent — an already-purged row is a no-op, not a second scr
 test("purge of a disabled account issues the full scrub set, in order", async () => {
   await purgeUserDataInTx(purgeTx, ID, NOW);
   assert.deepEqual(opNames(), PURGE_OPS);
-  for (const op of PURGE_OPS.slice(1, 10)) {
+  // The Plex token cache has no user id column; its own tests pin its filter.
+  for (const op of PURGE_OPS.slice(1, 11).filter((name) => name !== "plexTokenCache.deleteMany")) {
     assert.deepEqual(opArgs(op), { where: { userId: ID } }, op);
   }
   // Scoped to THIS account: the ledger rows of everyone else stay.
@@ -495,6 +499,27 @@ test("purge drops the user's pending notification-email verification tokens (the
   assert.deepEqual(opArgs("verificationToken.deleteMany"), {
     where: { identifier: { startsWith: `notif-email:${ID}:` } },
   });
+});
+
+test("purge drops the Plex token cache rows that name the account, by the id and email read before the scrub", async () => {
+  // The cache keeps the verified email and plex.tv account id in plaintext and
+  // has no user id column; the scrub nulls plexUserId, so it must be read first.
+  userState = { deactivatedAt: DISABLED_AT, purgedAt: null, email: "ada@example.com", plexUserId: "plex-77" };
+  await purgeUserDataInTx(purgeTx, ID, NOW);
+  assert.deepEqual(opArgs("plexTokenCache.deleteMany"), {
+    where: { OR: [{ plexUserId: "plex-77" }, { email: "ada@example.com" }] },
+  });
+  assert.ok(
+    opNames().indexOf("plexTokenCache.deleteMany") < opNames().indexOf("user.updateMany"),
+    "inside the purge, before the row is anonymized",
+  );
+});
+
+test("purge of an account with no Plex id matches the token cache by email alone, never a null id", async () => {
+  // `plexUserId: null` in the filter would delete every legacy row in the table.
+  userState = { deactivatedAt: DISABLED_AT, purgedAt: null, email: "ada@example.com", plexUserId: null };
+  await purgeUserDataInTx(purgeTx, ID, NOW);
+  assert.deepEqual(opArgs("plexTokenCache.deleteMany"), { where: { OR: [{ email: "ada@example.com" }] } });
 });
 
 // ── purged-row detection (the pre-`purgedAt` migration gap) ─────────────────

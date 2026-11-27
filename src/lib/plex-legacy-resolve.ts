@@ -5,6 +5,7 @@ import { sanitizeForLog } from "./sanitize";
 import { mapLimit } from "./concurrency";
 import { v, check } from "./validate";
 import { resolveTvdbToTmdb } from "./arr";
+import { prisma } from "./prisma";
 import { foldDuplicateRatingKeys, plexLibraryRatingKeys, getPlexTmdbIds, type PlexLegacyGuidRef, type PlexLibraryItemData, type PlexSection } from "./plex";
 
 // Resolves the legacy-agent secondary channel (see PlexLegacyGuidRef in
@@ -17,7 +18,10 @@ import { foldDuplicateRatingKeys, plexLibraryRatingKeys, getPlexTmdbIds, type Pl
 //
 // Best-effort by design: any resolution failure degrades that item to its
 // previous invisibility instead of throwing, so guardrail 35's all-or-nothing
-// instance gates can never trip on a metadata lookup.
+// instance gates can never trip on a metadata lookup. The one exception is a
+// title that resolved on an EARLIER run and so holds a library row: a full
+// replace fed by this run's incomplete set would delete that row, so a writer
+// about to replace asks storedRowsLostToLegacyShortfall first and holds.
 
 const IMDB_TO_TMDB_TTL_RESOLVED   = 365 * 24 * 60 * 60;
 const IMDB_TO_TMDB_TTL_UNRESOLVED =        24 * 60 * 60;
@@ -181,6 +185,44 @@ export async function resolvePlexLegacyGuidsDetailed(
   return { items: out, complete };
 }
 
+// Bind-parameter headroom for the two key lists below (guardrail 23c).
+const LEGACY_KEY_CHUNK = 5_000;
+
+/**
+ * How many of `serverInstance`'s stored library rows a full replace would
+ * delete because legacy resolution was INCOMPLETE this run: rows held under a
+ * ratingKey whose ref got no answer. Zero when every lookup answered, and zero
+ * for a ref that has never resolved (it holds no row, so nothing is lost and
+ * the instance is never held for it). A writer about to full-replace treats a
+ * non-zero answer as a failed fetch for that instance.
+ */
+export async function storedRowsLostToLegacyShortfall(
+  serverInstance: string,
+  runs: ReadonlyArray<{ refs: ReadonlyMap<string, PlexLegacyGuidRef>; resolution: LegacyResolution }>,
+): Promise<number> {
+  const unresolved: string[] = [];
+  for (const { refs, resolution } of runs) {
+    if (resolution.complete) continue;
+    const resolved = new Set(resolution.items.map((i) => i.ratingKey));
+    for (const key of refs.keys()) if (!resolved.has(key)) unresolved.push(key);
+  }
+  let lost = 0;
+  for (let i = 0; i < unresolved.length; i += LEGACY_KEY_CHUNK) {
+    const keys = unresolved.slice(i, i + LEGACY_KEY_CHUNK);
+    lost += await prisma.plexLibraryItem.count({
+      where: { serverInstance, OR: [{ plexRatingKey: { in: keys } }, { plexRatingKeys: { hasSome: keys } }] },
+    });
+  }
+  return lost;
+}
+
+/** The message a writer fails its fetch with when the answer above is non-zero. */
+export function legacyShortfallError(serverInstance: string, lost: number): Error {
+  return new Error(
+    `Plex legacy-agent lookups did not all answer and ${lost} stored row(s) of instance "${serverInstance}" depend on them; keeping the stored library`,
+  );
+}
+
 export async function resolvePlexLegacyGuids(
   refs: Map<string, PlexLegacyGuidRef>,
   mediaType: "MOVIE" | "TV",
@@ -238,11 +280,18 @@ export function mergeResolvedLegacyItems(
 // every thetvdb:// / imdb:// show the orchestrator had cached, until its next
 // run. Same listing the internal walk pages, so no extra requests. `signal`
 // ends the walk (it rejects) when a caller's advisory lock is lost.
+//
+// The map feeds a whole-namespace replace, so it REJECTS when legacy lookups
+// did not all answer and `serverInstance` stores rows that depend on them:
+// those shows resolved on an earlier run, their episodes are cached, and a
+// replace built without them would delete those episodes. The same hold the
+// library writers apply; a show that has never resolved holds nothing back.
 export async function buildPlexShowKeyMap(
   serverUrl: string,
   token: string,
   selectedKeys: Set<string> | undefined,
   sections: PlexSection[],
+  serverInstance: string,
   signal?: AbortSignal,
 ): Promise<Map<string, number[]>> {
   const ratingKeyToTmdb = new Map<string, number[]>();
@@ -254,6 +303,9 @@ export async function buildPlexShowKeyMap(
     legacyOut: tvLegacy,
     signal,
   });
-  mergeResolvedLegacyItems(await resolvePlexLegacyGuids(tvLegacy, "TV"), tvIds, ratingKeyToTmdb);
+  const resolution = await resolvePlexLegacyGuidsDetailed(tvLegacy, "TV");
+  const lost = await storedRowsLostToLegacyShortfall(serverInstance, [{ refs: tvLegacy, resolution }]);
+  if (lost > 0) throw legacyShortfallError(serverInstance, lost);
+  mergeResolvedLegacyItems(resolution.items, tvIds, ratingKeyToTmdb);
   return ratingKeyToTmdb;
 }

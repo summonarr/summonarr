@@ -206,6 +206,39 @@ export async function readArrInstanceRegistryForSave(tx: RegistryTx, service: Ar
   return parseRegistryValue(service, row?.value);
 }
 
+// Serializes the check below across the two services' saves, which otherwise
+// hold different locks (2101/1 and 2101/2).
+const GRANT_REVOKE_LOCK = Prisma.sql`SELECT pg_advisory_xact_lock(2101, 5)`;
+
+// Of the named slugs a save just removed from `removedFrom`, the ones the OTHER
+// service does not register either — the slugs whose per-user grants
+// (User.instanceGrants, one entry per slug for both services) no instance is
+// left to answer. Call it AFTER the caller's own registry write, in the same
+// transaction: under the lock, when Radarr "anime" and Sonarr "anime" are
+// removed at the same moment, the save that gets here second reads the first
+// one's committed registry and reports the slug, where each would otherwise
+// see the other's instance still registered and both would keep the grants.
+export async function slugsRegisteredNowhereInTx(tx: RegistryTx, removedFrom: ArrService, removed: readonly string[]): Promise<string[]> {
+  if (removed.length === 0) return [];
+  await tx.$executeRaw(GRANT_REVOKE_LOCK);
+  const other: ArrService = removedFrom === "radarr" ? "sonarr" : "radarr";
+  const row = await tx.setting.findUnique({ where: { key: REGISTRY_KEY[other] } });
+  const kept = new Set(parseRegistryValue(other, row?.value).map((i) => i.slug));
+  return removed.filter((slug) => !kept.has(slug));
+}
+
+// Every NAMED slug either service registers, for a writer of
+// User.instanceGrants: read under the same lock as the check above, so a
+// removal's revoke and a grant write never interleave — the write either
+// commits first and is revoked with the rest, or reads the registry the
+// removal committed.
+export async function arrSlugsForGrantWriteInTx(tx: RegistryTx): Promise<Set<string>> {
+  await tx.$executeRaw(GRANT_REVOKE_LOCK);
+  const radarr = await tx.setting.findUnique({ where: { key: REGISTRY_KEY.radarr } });
+  const sonarr = await tx.setting.findUnique({ where: { key: REGISTRY_KEY.sonarr } });
+  return new Set([...parseRegistryValue("radarr", radarr?.value), ...parseRegistryValue("sonarr", sonarr?.value)].map((i) => i.slug));
+}
+
 // The slugs (of `slugs`) whose connection is configured — url + apiKey BOTH
 // non-empty — read with ONE Setting query over every slug's two keys. Every
 // configured-ness probe in this module funnels through here so the per-request

@@ -3,7 +3,7 @@ import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections, type PlexLegacyGuidRef, type PlexSection, type PlexTVEpisodeData } from "@/lib/plex";
 import { plexLibraryRow } from "@/lib/library-rows";
-import { resolvePlexLegacyGuids, mergeResolvedLegacyItems } from "@/lib/plex-legacy-resolve";
+import { resolvePlexLegacyGuidsDetailed, mergeResolvedLegacyItems, storedRowsLostToLegacyShortfall, legacyShortfallError } from "@/lib/plex-legacy-resolve";
 import { getPlexConfig } from "@/lib/plex-config";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, plexSettingKey } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
@@ -136,7 +136,7 @@ async function syncPlex(request: NextRequest, rawBody: Record<string, unknown>, 
 
   let fetched: PlexFetch;
   try {
-    fetched = await fetchPlexLibrary(server, recentOnly, signal);
+    fetched = await fetchPlexLibrary(server, instance, recentOnly, signal);
   } catch (err) {
     // Guardrail 41: a walk the lock's abort ended REJECTS (never a partial
     // library) before anything was written, so the stored rows stand. Plex did
@@ -205,10 +205,14 @@ async function syncPlex(request: NextRequest, rawBody: Record<string, unknown>, 
 // orchestrator's Plex arm. recentOnly reads /recentlyAdded bounded by
 // RECENT_WINDOW_MS (addedAt-desc, early-stop once a whole page predates it);
 // without the bound the "incremental" path would page the ENTIRE section.
-// Throws on any upstream failure, and when `signal` (the resync's lock) aborts
-// mid-walk.
+// Throws on any upstream failure, on a listing that came back short of the
+// server's own count, and when `signal` (the resync's lock) aborts mid-walk. A
+// full resync also throws when legacy-agent lookups did not all answer and a
+// stored row depends on one (the replace would delete it); recentOnly only
+// inserts, so nothing is lost there.
 async function fetchPlexLibrary(
   { serverUrl, token, selectedKeys }: PlexServer,
+  instance: MediaInstanceKey,
   recentOnly: boolean,
   signal: AbortSignal,
 ): Promise<PlexFetch> {
@@ -230,11 +234,18 @@ async function fetchPlexLibrary(
     }),
   ]);
   const [resolvedMovies, resolvedTv] = await Promise.all([
-    resolvePlexLegacyGuids(movieLegacy, "MOVIE"),
-    resolvePlexLegacyGuids(tvLegacy, "TV"),
+    resolvePlexLegacyGuidsDetailed(movieLegacy, "MOVIE"),
+    resolvePlexLegacyGuidsDetailed(tvLegacy, "TV"),
   ]);
-  mergeResolvedLegacyItems(resolvedMovies, movieIds);
-  mergeResolvedLegacyItems(resolvedTv, tvIds, ratingKeyToTmdb);
+  if (!recentOnly) {
+    const lost = await storedRowsLostToLegacyShortfall(instance, [
+      { refs: movieLegacy, resolution: resolvedMovies },
+      { refs: tvLegacy, resolution: resolvedTv },
+    ]);
+    if (lost > 0) throw legacyShortfallError(instance, lost);
+  }
+  mergeResolvedLegacyItems(resolvedMovies.items, movieIds);
+  mergeResolvedLegacyItems(resolvedTv.items, tvIds, ratingKeyToTmdb);
   return { sections, movieIds, tvIds, ratingKeyToTmdb };
 }
 

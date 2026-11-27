@@ -55,6 +55,13 @@ import { processSingleton } from "@/lib/process-singleton";
 
 const ALLOWLIST_TTL_MS = 30 * 60 * 1000; // re-fetch at most every 30 minutes (per instance)
 const RETRY_BACKOFF_MS = 5 * 60 * 1000; // after a failed/empty fetch, wait before retrying (per instance)
+// A confirming read (getConfirmedPlexAllowlist) accepts a set whose plex.tv
+// read STARTED within this window, and starts at most one read per instance per
+// window — so a user who really was unshared costs one plex.tv read, not one
+// per request. After a failed or empty answer it waits RETRY_BACKOFF_MS like
+// every other read: a server that is down is not probed once a minute, and the
+// two empty answers that shrink a set (emptyStreak) stay a backoff apart.
+const CONFIRM_WINDOW_MS = 60 * 1000;
 
 // Both member key spaces are cached: plex.tv account ids (immutable — matched
 // first) and emails (mutable — the legacy fallback key).
@@ -85,6 +92,13 @@ type SlugState = {
   // (a truncated list must not log everyone out); the second replaces the
   // cache, so removing the last friend does take effect.
   emptyStreak: number;
+  // When the plex.tv read that produced `cache` STARTED (0: none, or read with
+  // a replaced token). A set says nothing about a share made after this.
+  cacheReadStartedAt: number;
+  // When the first attempt of the current run of non-"ok" attempts STARTED (0:
+  // the latest settled attempt produced a set). While it is set, this
+  // instance's set cannot be confirmed — see getConfirmedPlexAllowlist.
+  failingSince: number;
 };
 
 // Process-wide (guardrail 27a): this module is reached from the proxy, page
@@ -176,6 +190,9 @@ function startSlugRefresh(slug: MediaInstanceKey, state: SlugState, now: number)
       // call refetches with the new one instead of trusting this for a TTL.
       if (state.generation !== generation) return res.outcome;
       const outcome = applyFetchResult(state, res);
+      if (state.cache !== null && (state.cache === res.entry || state.cache === res.confirmedEmpty)) {
+        state.cacheReadStartedAt = now;
+      }
       // An "unconfigured" verdict must NOT arm the backoff: the attempt cost
       // three findUniques and zero plex.tv traffic (the backoff exists to
       // protect plex.tv), and honoring a cached "unconfigured" skip after the
@@ -186,12 +203,15 @@ function startSlugRefresh(slug: MediaInstanceKey, state: SlugState, now: number)
       // unconfigured → skip again (cheap); newly configured → a real fetch
       // that either completes the union or cold-poisons to null (fail open).
       if (outcome === "unconfigured") state.lastAttemptAt = 0;
+      if (outcome === "ok") state.failingSince = 0;
+      else if (state.failingSince === 0) state.failingSince = now;
       return outcome;
     })
     .catch((err) => {
       if (state.generation === generation) {
         state.lastOutcome = "indeterminate";
         state.emptyStreak = 0;
+        if (state.failingSince === 0) state.failingSince = now;
       }
       console.warn(
         `[plex-membership] allowlist fetch failed for ${mediaInstanceLabel("plex", slug)}:`,
@@ -231,7 +251,7 @@ async function consultInstances(now: number): Promise<Array<{ slug: MediaInstanc
   for (const { slug } of instances) {
     let state = slugStates.get(slug);
     if (!state) {
-      state = { cache: null, lastAttemptAt: 0, inflight: null, lastOutcome: null, generation: 0, emptyStreak: 0 };
+      state = { cache: null, lastAttemptAt: 0, inflight: null, lastOutcome: null, generation: 0, emptyStreak: 0, cacheReadStartedAt: 0, failingSince: 0 };
       slugStates.set(slug, state);
     }
     const fresh = state.cache !== null && now - state.cache.fetchedAt < ALLOWLIST_TTL_MS;
@@ -272,7 +292,7 @@ export async function getCachedPlexAllowlist(): Promise<PlexServerMembers | null
   const consulted = await consultInstances(Date.now());
   if (!consulted) return null;
 
-  const parts: Array<{ slug: MediaInstanceKey; ids: Set<string>; emails: Set<string>; fetchedAt: number }> = [];
+  const parts: UnionPart[] = [];
   for (const { slug, state } of consulted) {
     // Block only on a COLD instance, so enforcement begins on the first Plex
     // request after boot. With a stale set in hand, serve it and let the
@@ -296,6 +316,12 @@ export async function getCachedPlexAllowlist(): Promise<PlexServerMembers | null
     return null;
   }
 
+  return composeUnion(parts);
+}
+
+type UnionPart = { slug: MediaInstanceKey; ids: Set<string>; emails: Set<string>; fetchedAt: number };
+
+function composeUnion(parts: UnionPart[]): PlexServerMembers | null {
   if (parts.length === 0) return null; // zero configured instances
   // Slugs are lowercase-alnum (registry-validated), so ":"/"|" are unambiguous.
   const key = parts.map((p) => `${p.slug}:${p.fetchedAt}`).join("|");
@@ -309,6 +335,69 @@ export async function getCachedPlexAllowlist(): Promise<PlexServerMembers | null
         };
   composed.value = { key, members };
   return members;
+}
+
+/**
+ * The same union, but only from sets CONFIRMED current: every configured
+ * instance's set must come from a plex.tv read that started within
+ * CONFIRM_WINDOW_MS and not before `notBefore` (ms; the session's sign-in time,
+ * when the live sign-in check last vouched for the user). An instance whose set
+ * is older gets ONE awaited read — coalesced with any read in flight, at most
+ * one per instance per window, and none inside the retry backoff of a failed or
+ * empty answer.
+ *
+ * An instance that holds a set but CANNOT be re-read (its latest attempt
+ * failed, came back empty, or found its settings blanked) contributes that
+ * last-known set, exactly as it does to getCachedPlexAllowlist — one server
+ * that is down must not switch the un-share lockout off on every other server.
+ * The one exception is a session whose sign-in falls between that set's read
+ * and the first failed attempt: only then could the set predate a share the
+ * live sign-in check vouched for (sign-in cannot vouch through a server it
+ * cannot read), and the answer is null — no opinion, the caller fails open.
+ * Null too for a cold instance with no set, and for a set that is merely older
+ * than this session with no failed attempt to explain it.
+ *
+ * This is the read a caller makes BEFORE revoking on a miss in
+ * getCachedPlexAllowlist: that set can be up to a TTL old (older still while
+ * served stale), so it does not know a member shared since it was fetched.
+ */
+export async function getConfirmedPlexAllowlist(notBefore = 0): Promise<PlexServerMembers | null> {
+  const now = Date.now();
+  const consulted = await consultInstances(now);
+  if (!consulted) return null;
+
+  const confirmed = (state: SlugState): boolean =>
+    state.cache !== null &&
+    state.cacheReadStartedAt > now - CONFIRM_WINDOW_MS &&
+    state.cacheReadStartedAt >= notBefore;
+
+  // Start every needed read before awaiting any (the check-and-start is
+  // synchronous per slug, so concurrent callers share one read).
+  const pending: Array<Promise<AttemptOutcome>> = [];
+  for (const { slug, state } of consulted) {
+    if (confirmed(state)) continue;
+    const minGap = state.lastOutcome === "indeterminate" ? RETRY_BACKOFF_MS : CONFIRM_WINDOW_MS;
+    if (!state.inflight && now - state.lastAttemptAt >= minGap) startSlugRefresh(slug, state, now);
+    if (state.inflight) pending.push(state.inflight);
+  }
+  await Promise.all(pending); // each self-catches
+
+  // Unreadable right now, but its last-known set still answers for this session.
+  const lastKnown = (state: SlugState): boolean =>
+    state.cache !== null &&
+    state.failingSince > 0 &&
+    (state.cacheReadStartedAt >= notBefore || notBefore > state.failingSince);
+
+  const parts: UnionPart[] = [];
+  for (const { slug, state } of consulted) {
+    if (state.cache && (confirmed(state) || lastKnown(state))) {
+      parts.push({ slug, ids: state.cache.ids, emails: state.cache.emails, fetchedAt: state.cache.fetchedAt });
+      continue;
+    }
+    if (!state.cache && state.lastOutcome === "unconfigured") continue;
+    return null;
+  }
+  return composeUnion(parts);
 }
 
 /**
@@ -343,6 +432,8 @@ export function expirePlexMembershipCache(slug: MediaInstanceKey): void {
   if (!state) return;
   if (state.cache) state.cache = { ...state.cache, fetchedAt: 0 };
   state.lastAttemptAt = 0;
+  state.cacheReadStartedAt = 0;
+  state.failingSince = 0;
   // A fetch already in flight read the OLD token: its answer is discarded.
   state.generation += 1;
   state.emptyStreak = 0;

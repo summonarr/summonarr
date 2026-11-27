@@ -747,3 +747,94 @@ test("removing the last friend: one confirmed-empty answer is served stale, a se
   assert.ok(!afterTwo.emails.has("fresh-token-user@example.com"), "the unshared friend is no longer a member");
   assert.ok(afterTwo.emails.has("rfriend@example.com"), "the other server's members are untouched");
 });
+
+// ── getConfirmedPlexAllowlist: the read made before a cached miss revokes ───
+// Fresh slugs ("home", "cabin") on the same module cache; the default instance
+// stays configured and healthy throughout.
+
+test("confirming read: an instance that cannot be re-read serves its last-known set — it never switches the lockout off for the healthy ones", async () => {
+  const { getConfirmedPlexAllowlist } = await import("../src/lib/plex-membership.ts");
+  fakeNow += 31 * MIN;
+  settings.plexInstances = registryJson("home", "cabin");
+  settings.plexHomeServerUrl = BRINE_URL;
+  settings.plexHomeAdminToken = BRINE_TOKEN;
+  settings.plexCabinServerUrl = TARDY_URL;
+  settings.plexCabinAdminToken = TARDY_TOKEN;
+  let homeFriends = ["x@example.com", "h@example.com"];
+  let cabinUp = true;
+  usersResponder = (call) => {
+    const token = call.headers.get("x-plex-token");
+    if (token === ADMIN_TOKEN) return xmlResponse(usersXml([{ email: "d@example.com", machine: MACHINE_ID }]));
+    if (token === BRINE_TOKEN) return xmlResponse(usersXml(homeFriends.map((email) => ({ email, machine: BRINE_MACHINE }))));
+    if (token === TARDY_TOKEN) {
+      if (!cabinUp) return new Response("outage", { status: 503 });
+      return xmlResponse(usersXml([{ email: "c@example.com", machine: TARDY_MACHINE }]));
+    }
+    throw new Error(`unexpected plex.tv token ${token}`);
+  };
+  const cabinReads = () => usersCalls.filter((c) => c.headers.get("x-plex-token") === TARDY_TOKEN).length;
+  const warm = await getCachedPlexAllowlist();
+  await flushAsync();
+  assert.ok(warm?.emails.has("x@example.com") && warm.emails.has("c@example.com"));
+  const setsReadAt = fakeNow;
+
+  // The cabin server goes away; x is unshared from the home server.
+  fakeNow += 31 * MIN;
+  cabinUp = false;
+  homeFriends = ["h@example.com"];
+  const cabinDownAt = fakeNow;
+  const forOldSession = await getConfirmedPlexAllowlist(setsReadAt - 60 * MIN);
+  assert.ok(forOldSession, "one unreadable instance must not turn the whole answer into 'no opinion'");
+  assert.ok(!forOldSession.emails.has("x@example.com"), "the unshared user is gone from the confirmed union");
+  assert.ok(forOldSession.emails.has("h@example.com"), "the healthy instance's fresh set");
+  assert.ok(forOldSession.emails.has("c@example.com"), "the unreadable instance's last-known set");
+  const readsAfterFirst = cabinReads();
+
+  // A session that signed in while the cabin server was already unreadable was
+  // not vouched for by it: the last-known set answers, and the dead server is
+  // not probed again inside its retry backoff.
+  fakeNow += 2 * MIN;
+  const forNewSession = await getConfirmedPlexAllowlist(fakeNow - 1 * MIN);
+  assert.ok(forNewSession && !forNewSession.emails.has("x@example.com"));
+  assert.equal(cabinReads(), readsAfterFirst, "no second read of the dead server one confirm window later");
+
+  // A session that signed in between the cabin set's read and its first failed
+  // read could have been shared there since: no opinion.
+  assert.equal(await getConfirmedPlexAllowlist(cabinDownAt - 10 * MIN), null);
+
+  // Settings blanked while the instance stays registered: same rule.
+  fakeNow += 6 * MIN;
+  delete settings.plexCabinAdminToken;
+  const blanked = await getConfirmedPlexAllowlist(setsReadAt - 60 * MIN);
+  assert.ok(blanked && blanked.emails.has("c@example.com") && !blanked.emails.has("x@example.com"));
+});
+
+test("confirming read: the two empty answers that shrink a set stay a retry backoff apart", async () => {
+  const { getConfirmedPlexAllowlist } = await import("../src/lib/plex-membership.ts");
+  fakeNow += 31 * MIN;
+  settings.plexInstances = registryJson("home");
+  // plex.tv answers the home server's list scoped and EMPTY (the server still
+  // identifies itself) — a blip, or the last friend really removed.
+  usersResponder = (call) => {
+    const token = call.headers.get("x-plex-token");
+    if (token === ADMIN_TOKEN) return xmlResponse(usersXml([{ email: "d@example.com", machine: MACHINE_ID }]));
+    if (token === BRINE_TOKEN) return xmlResponse(usersXml([]));
+    throw new Error(`unexpected plex.tv token ${token}`);
+  };
+  const homeReads = () => usersCalls.filter((c) => c.headers.get("x-plex-token") === BRINE_TOKEN).length;
+  const before = homeReads();
+  await getCachedPlexAllowlist(); // the TTL refresh gets the first empty answer
+  await flushAsync();
+  assert.equal(homeReads() - before, 1);
+
+  // One confirm window later a cached miss asks for confirmation.
+  fakeNow += 1 * MIN + 1_000;
+  const soon = await getConfirmedPlexAllowlist(0);
+  assert.equal(homeReads() - before, 1, "the second empty answer must not be read inside the retry backoff");
+  assert.ok(soon?.emails.has("h@example.com"), "one empty answer never shrinks the set");
+
+  fakeNow += 5 * MIN;
+  const afterBackoff = await getConfirmedPlexAllowlist(0);
+  assert.equal(homeReads() - before, 2);
+  assert.ok(afterBackoff && !afterBackoff.emails.has("h@example.com"), "a second empty answer, a backoff later, does");
+});

@@ -8,7 +8,8 @@ import {
   type SessionTransport,
 } from "@/lib/session-jwt";
 import { cachedSessionCheckIsStale, markSessionForceRevoked, shouldForceDbCheck } from "@/lib/session-revocation";
-import { getCachedPlexAllowlist } from "@/lib/plex-membership";
+import { getCachedPlexAllowlist, getConfirmedPlexAllowlist } from "@/lib/plex-membership";
+import type { PlexServerMembers } from "@/lib/plex";
 import {
   MANAGEMENT_MASK,
   Permission,
@@ -213,7 +214,7 @@ async function verifyAgainstDb(
   ]);
   if (!authSessionRow || !dbUser) return null;
   if (isRevokedForUser(claims, dbUser)) return null;
-  if (await plexMembershipRevoked(claims, dbUser)) return null;
+  if (await plexMembershipRevoked(claims, dbUser, authSessionRow.createdAt)) return null;
 
   void prisma.authSession
     .update({ where: { sessionId }, data: { lastSeenAt: new Date() } })
@@ -272,7 +273,19 @@ function isRevokedForUser(claims: SessionClaims, dbUser: SessionUser): boolean {
 // True when the user is no longer shared: ALL of their sessions (every device)
 // are then revoked by advancing sessionsRevokedAt past their tokens' iat, and
 // this request is refused.
-async function plexMembershipRevoked(claims: SessionClaims, dbUser: SessionUser): Promise<boolean> {
+//
+// A miss in the CACHED set never revokes on its own: that set can predate a
+// share (sign-in asks plex.tv live, so a member invited since the last fetch
+// signs in and is then absent here). The miss is confirmed against a set read
+// after this session's sign-in (getConfirmedPlexAllowlist — one bounded,
+// coalesced plex.tv read at most). A server that cannot be re-read keeps
+// answering from its last-known set, except for a session that signed in after
+// that set was read and before the server was seen failing: that fails open.
+async function plexMembershipRevoked(
+  claims: SessionClaims,
+  dbUser: SessionUser,
+  sessionCreatedAt: Date | null | undefined,
+): Promise<boolean> {
   if (claims.provider !== "plex" || dbUser.role === "ADMIN") return false;
   const allowlist = await getCachedPlexAllowlist();
   if (!allowlist) return false;
@@ -283,10 +296,14 @@ async function plexMembershipRevoked(claims: SessionClaims, dbUser: SessionUser)
   // moment the user changes their plex.tv address, and an email-only match used
   // to revoke every device of a still-shared member. Legacy rows with a null
   // plexUserId keep the email-only behavior via the fallback.
-  const stillMember =
-    (dbUser.plexUserId != null && allowlist.ids.has(dbUser.plexUserId)) ||
-    candidateEmails.some((e) => allowlist.emails.has(e));
-  if (candidateEmails.length === 0 || stillMember) return false;
+  const memberOf = (set: PlexServerMembers): boolean =>
+    (dbUser.plexUserId != null && set.ids.has(dbUser.plexUserId)) ||
+    candidateEmails.some((e) => set.emails.has(e));
+  if (candidateEmails.length === 0 || memberOf(allowlist)) return false;
+  const confirmed = await getConfirmedPlexAllowlist(
+    sessionCreatedAt instanceof Date ? sessionCreatedAt.getTime() : 0,
+  );
+  if (!confirmed || memberOf(confirmed)) return false;
   await prisma.user
     .update({ where: { id: claims.id }, data: { sessionsRevokedAt: new Date() } })
     .catch(() => {});

@@ -138,6 +138,29 @@ let settingKeyReads: Array<string[] | null> = [];
 // save that committed while this one waited on the lock.
 let onLock: (() => void) | null = null;
 
+// What the route's raw statements do, applied to the user rows below: an
+// advisory lock, or the revoke of one grant key (instance-grant-prune.ts) —
+// `"<column>" #- ARRAY[…path]`, only on rows that hold the path.
+type GrantRow = { id: string; mediaServerGrants?: unknown; instanceGrants?: unknown };
+let grantRows: GrantRow[] = [];
+function runGrantRevoke(query: { sql?: string; values?: unknown[] }): number | null {
+  const m = /^UPDATE "User" SET "(mediaServerGrants|instanceGrants)" = "\1" #- /.exec(query.sql ?? "");
+  if (!m) return null;
+  const column = m[1] as "mediaServerGrants" | "instanceGrants";
+  const values = (query.values ?? []) as string[];
+  const path = values.slice(0, values.length / 2);
+  let count = 0;
+  for (const row of grantRows) {
+    let holder = row[column] as Record<string, unknown> | undefined;
+    for (const key of path.slice(0, -1)) holder = holder && typeof holder === "object" ? (holder[key] as Record<string, unknown> | undefined) : undefined;
+    const last = path[path.length - 1];
+    if (!holder || typeof holder !== "object" || !(last in holder)) continue;
+    delete holder[last];
+    count++;
+  }
+  return count;
+}
+
 function makeClient(txId: number | null) {
   const record = (model: string, op: string, where: Where, data?: unknown) => {
     ops.push({ txId, model, op, where, data });
@@ -172,8 +195,13 @@ function makeClient(txId: number | null) {
     // its SQL so the tests can pin that the registry read follows it in the
     // same transaction; `onLock` lets a test commit a "concurrent" save at the
     // moment this one holds the lock.
-    $executeRaw: async (query: { sql?: string } | TemplateStringsArray) => {
+    $executeRaw: async (query: { sql?: string; values?: unknown[] } | TemplateStringsArray) => {
       const sql = "sql" in query && typeof query.sql === "string" ? query.sql : String(query);
+      const revoked = "sql" in query ? runGrantRevoke(query) : null;
+      if (revoked !== null) {
+        record("$executeRaw", "revokeGrants", { sql });
+        return revoked;
+      }
       record("$executeRaw", "lock", { sql });
       onLock?.();
       return 0;
@@ -374,6 +402,7 @@ beforeEach(() => {
   watchSyncPairs = [];
   failUpsertKey = null;
   onLock = null;
+  grantRows = [];
   respond = (url) => { throw new Error(`unexpected fetch ${url}`); };
 });
 
@@ -726,10 +755,34 @@ test("removal is audited post-commit with the slugs and row counts destroyed (gu
   assert.equal(auditRows[0].target, "media-instances:plex");
   const details = JSON.parse(String(auditRows[0].details)) as {
     removed: string[];
-    removedCounts: Record<string, { libraryItems: number; activeSessions: number; serverUsersDisabled: number; watchSyncPairs: number }>;
+    removedCounts: Record<string, { libraryItems: number; activeSessions: number; serverUsersDisabled: number; watchSyncPairs: number; grantsRevoked: number }>;
   };
   assert.deepEqual(details.removed, ["remote"]);
-  assert.deepEqual(details.removedCounts.remote, { libraryItems: 2, activeSessions: 1, serverUsersDisabled: 1, watchSyncPairs: 0 });
+  assert.deepEqual(details.removedCounts.remote, { libraryItems: 2, activeSessions: 1, serverUsersDisabled: 1, watchSyncPairs: 0, grantsRevoked: 0 });
+});
+
+test("removing a server revokes users' visibility grants for ITS service and slug only, in the save's transaction", async () => {
+  // A grant names only the service and the slug. Left behind, it is invisible
+  // until a server is registered under "remote" again, and then every account
+  // that could see the old server sees the new one without anyone granting it.
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  grantRows = [
+    { id: "alice", mediaServerGrants: { plex: { remote: { view: true }, keep: { view: true } }, jellyfin: { remote: { view: true } } } },
+    { id: "bob", mediaServerGrants: { plex: { keep: { view: true } } } },
+    { id: "carol", mediaServerGrants: null },
+  ];
+  assert.equal((await POST(postReq(removeAll, admin.header), undefined)).status, 200);
+  await flush();
+
+  assert.deepEqual(grantRows[0].mediaServerGrants, { plex: { keep: { view: true } }, jellyfin: { remote: { view: true } } }, "only plex \"remote\" is revoked: another server and the Jellyfin server of the same slug keep theirs");
+  assert.deepEqual(grantRows[1].mediaServerGrants, { plex: { keep: { view: true } } });
+  const revokes = opsFor("$executeRaw", "revokeGrants");
+  assert.equal(revokes.length, 1, "one statement per removed server");
+  const lockAt = ops.findIndex((o) => o.model === "$executeRaw" && o.op === "lock");
+  assert.ok(lockAt >= 0 && ops.indexOf(revokes[0]) > lockAt, "inside the save's transaction, after its lock");
+  const details = JSON.parse(String(auditRows[0].details)) as { removedCounts: Record<string, { grantsRevoked: number }> };
+  assert.equal(details.removedCounts.remote.grantsRevoked, 1, "the audit says how many accounts lost a grant");
 });
 
 test("a save that removes NOTHING performs no cleanup at all (the default instance is never a removal candidate)", async () => {

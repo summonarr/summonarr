@@ -288,16 +288,18 @@ export async function purgeUserDataInTx(
 ): Promise<void> {
   // The email is read here, before the scrub below rewrites it: the legacy
   // session-revoke rows, and the older moderation rows of since-deleted
-  // requests, can only be found by it.
+  // requests, can only be found by it. The Plex account id likewise: the scrub
+  // nulls it, and the Plex token cache rows are keyed on it.
   const row = await tx.user.findUnique({
     where: { id },
-    select: { deactivatedAt: true, purgedAt: true, email: true },
+    select: { deactivatedAt: true, purgedAt: true, email: true, plexUserId: true },
   });
   if (!row) throw new NotDeactivatedError();
   if (row.purgedAt) return; // idempotent — already scrubbed
   if (!row.deactivatedAt) throw new NotDeactivatedError();
 
   await purgeCredentialsInTx(tx, id);
+  await purgePlexTokenCacheInTx(tx, row.email, row.plexUserId);
   await purgeDeviceLinksInTx(tx, id);
   await purgePersonalDataInTx(tx, id);
   await scrubAuditTrailInTx(tx, id, row.email);
@@ -352,6 +354,24 @@ async function purgeCredentialsInTx(tx: TxClient, id: string): Promise<void> {
   // data and an erasure must not leave it behind. Same write set as the admin
   // reset and the self-service disable.
   await deleteAllMfaInTx(tx, id);
+}
+
+// The Plex sign-in token cache: each row keeps the verified email and the
+// plex.tv account id in plaintext beside the token's hash, and belongs to no
+// user row, so nothing keyed on the user id reaches it. Matched on the values
+// read before the scrub — the account id, and the email for rows written before
+// that column existed. Left behind, they would sit in the table (and in every
+// backup) until the expiry sweep.
+async function purgePlexTokenCacheInTx(
+  tx: TxClient,
+  email: string | null | undefined,
+  plexUserId: string | null | undefined,
+): Promise<void> {
+  const match: Prisma.PlexTokenCacheWhereInput[] = [];
+  if (plexUserId) match.push({ plexUserId });
+  if (email) match.push({ email });
+  if (match.length === 0) return;
+  await tx.plexTokenCache.deleteMany({ where: { OR: match } });
 }
 
 // Push devices and pending Discord link/merge codes.

@@ -860,6 +860,55 @@ test("a multi-episode file counts every episode in its range, bounded", async ()
   assert.deepEqual(show.map((e) => e.episodeNumber), [4, 5]);
 });
 
+test("the library-wide episode walk never returns a listing shorter than the server counted as whole", async () => {
+  const ep = (n: number) => ({ SeriesId: "ser-1", ParentIndexNumber: 1, IndexNumber: n });
+  const series = new Map([["ser-1", 100]]);
+  const nums = (rows: { episodeNumber: number }[]) => rows.map((e) => e.episodeNumber).sort((a, b) => a - b);
+
+  // Short twice with a MOVED count: a listing changing under the read rejects,
+  // so the caller's whole-source replace never runs on it.
+  let B = nextBase();
+  let reads = 0;
+  respond = () => okJson({ Items: [ep(1)], TotalRecordCount: 5 + reads++ });
+  await assert.rejects(getJellyfinTVEpisodes(B, "k", undefined, series), /episode listing came back short: 1 of 6/);
+
+  // Short once (an episode removed mid-walk), whole on the second read: both
+  // passes are merged and the walk is accepted.
+  B = nextBase();
+  reads = 0;
+  respond = () => (reads++ === 0
+    ? okJson({ Items: [ep(1)], TotalRecordCount: 2 })
+    : okJson({ Items: [ep(1), ep(2)], TotalRecordCount: 2 }));
+  assert.deepEqual(nums(await getJellyfinTVEpisodes(B, "k", undefined, series)), [1, 2]);
+  assert.equal(sent.filter((r) => r.url.startsWith(B)).length, 2, "the short walk was read again");
+
+  // Short twice by the SAME count: a server that counts more than it serves —
+  // read as served, said once, and not re-read on the next run.
+  B = nextBase();
+  respond = () => okJson({ Items: [ep(1), ep(2)], TotalRecordCount: 3 });
+  warns.length = 0;
+  assert.deepEqual(nums(await getJellyfinTVEpisodes(B, "k", undefined, series)), [1, 2]);
+  assert.equal(warns.filter((w) => w.includes("episode listing reports 3 item(s) but serves 2")).length, 1);
+  sent.length = 0;
+  assert.deepEqual(nums(await getJellyfinTVEpisodes(B, "k", undefined, series)), [1, 2]);
+  assert.equal(sent.length, 1, "a settled shortfall is read once");
+  assert.equal(warns.filter((w) => w.includes("episode listing reports")).length, 1);
+
+  // Short twice by the same count, but by far more than a miscount: a page cut
+  // before the end drops the whole tail. Rejected on every run, never settled.
+  B = nextBase();
+  respond = () => okJson({ Items: Array.from({ length: 400 }, (_, i) => ep(i + 1)), TotalRecordCount: 75_000 });
+  warns.length = 0;
+  await assert.rejects(getJellyfinTVEpisodes(B, "k", undefined, series), /episode listing came back short: 400 of 75000/);
+  await assert.rejects(getJellyfinTVEpisodes(B, "k", undefined, series), /episode listing came back short: 400 of 75000/);
+  assert.equal(warns.filter((w) => w.includes("read as served")).length, 0);
+
+  // An empty listing beside a count is never read as "the server holds nothing".
+  B = nextBase();
+  respond = () => okJson({ Items: [], TotalRecordCount: 1 });
+  await assert.rejects(getJellyfinTVEpisodes(B, "k", undefined, series), /episode listing came back short: 0 of 1/);
+});
+
 test("episodes with a provided series map: exact fields query, SeriesId→tmdbId mapping, specials/invalid indices skipped, duplicates deduped", async () => {
   const B = nextBase();
   respond = () => okJson({

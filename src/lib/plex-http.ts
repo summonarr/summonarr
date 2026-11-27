@@ -183,16 +183,21 @@ const MAX_PAGES = Math.ceil(MAX_PAGED_ITEMS / PLEX_PAGE_SIZE);
  * `signal` reaches the request and the retry sleeps: an abort mid-walk REJECTS
  * with the page's error, so a library walk never returns a silently partial
  * listing. A page with no MediaContainer is a failed read, not retried.
+ *
+ * Answers what it read, so a caller whose result REPLACES stored rows can tell
+ * a whole listing from a short one (assertPlexWalkComplete).
  */
 export async function plexFetchAllPages(
   baseUrl: string,
   token: string,
   onPage: (items: unknown[]) => PageControl,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<PlexPagedWalk> {
   let pages = 0;
   let start = 0;
   let total = Infinity;
+  let reported: number | undefined;
+  let stopped = false;
   while (start < total) {
     if (++pages > MAX_PAGES) {
       console.warn(`[plex] paginated fetch hit the ${MAX_PAGED_ITEMS}-item ceiling at start=${start}; truncating.`);
@@ -227,9 +232,37 @@ export async function plexFetchAllPages(
     // at page 0 ended the walk before the shifted tail — the OLDEST records,
     // the same ones every run on a busy server. A page that omits it keeps the
     // last known count; MAX_PAGES still bounds an ever-growing one.
-    if (container.totalSize !== undefined) total = container.totalSize;
-    const stop = onPage(items) === STOP_PAGING;
+    if (container.totalSize !== undefined) {
+      total = container.totalSize;
+      if (reported === undefined || total > reported) reported = total;
+    }
+    stopped = onPage(items) === STOP_PAGING;
     start += items.length;
-    if (stop || items.length === 0) break;
+    if (stopped || items.length === 0) break;
   }
+  return { read: start, reported, stopped };
+}
+
+export interface PlexPagedWalk {
+  /** Entries the server served across every page. */
+  read: number;
+  /** The HIGHEST totalSize any page reported; undefined when none did. */
+  reported: number | undefined;
+  /** True when `onPage` ended the walk (STOP_PAGING). */
+  stopped: boolean;
+}
+
+/**
+ * Rejects a walk that served fewer entries than the server said the listing
+ * holds: a page that came back empty before the end, the item ceiling, or an
+ * item removed mid-walk (every later entry shifts one offset down, so one is
+ * never served — the count then drops, which is why the HIGHEST reported total
+ * is the one compared). For a caller that replaces stored rows from the walk,
+ * such a listing is a failed read, never a smaller library: a library that
+ * really shrank reports the smaller total and passes. A walk the caller
+ * stopped, or one the server never counted, is not judged.
+ */
+export function assertPlexWalkComplete(walk: PlexPagedWalk, what: string): void {
+  if (walk.stopped || walk.reported === undefined || walk.read >= walk.reported) return;
+  throw new Error(`Plex ${what} listing came back short: ${walk.read} of ${walk.reported} items`);
 }

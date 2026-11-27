@@ -225,9 +225,39 @@ shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown, opts?: { t
 // SQL so the ordering pins below can find it; `onLock` lets a test commit a
 // "concurrent" save at the moment this one holds the lock.
 let onLock: (() => void) | null = null;
-shadowPrismaClientMethod(prisma, "$executeRaw", async (query: { sql?: string } | TemplateStringsArray) => {
-  rec("$executeRaw", "sql" in query && typeof query.sql === "string" ? query.sql : String(query));
-  onLock?.();
+
+// What the route's raw statements do, applied to the user rows below: an
+// advisory lock, or the revoke of one grant key (instance-grant-prune.ts) —
+// `"<column>" #- ARRAY[…path]`, only on rows that hold the path.
+type GrantRow = { id: string; mediaServerGrants?: unknown; instanceGrants?: unknown };
+let grantRows: GrantRow[] = [];
+function runGrantRevoke(query: { sql?: string; values?: unknown[] }): number | null {
+  const m = /^UPDATE "User" SET "(mediaServerGrants|instanceGrants)" = "\1" #- /.exec(query.sql ?? "");
+  if (!m) return null;
+  const column = m[1] as "mediaServerGrants" | "instanceGrants";
+  const values = (query.values ?? []) as string[];
+  const path = values.slice(0, values.length / 2);
+  let count = 0;
+  for (const row of grantRows) {
+    let holder = row[column] as Record<string, unknown> | undefined;
+    for (const key of path.slice(0, -1)) holder = holder && typeof holder === "object" ? (holder[key] as Record<string, unknown> | undefined) : undefined;
+    const last = path[path.length - 1];
+    if (!holder || typeof holder !== "object" || !(last in holder)) continue;
+    delete holder[last];
+    count++;
+  }
+  return count;
+}
+shadowPrismaClientMethod(prisma, "$executeRaw", async (query: { sql?: string; values?: unknown[] } | TemplateStringsArray) => {
+  const sql = "sql" in query && typeof query.sql === "string" ? query.sql : String(query);
+  const revoked = "sql" in query ? runGrantRevoke(query) : null;
+  if (revoked !== null) {
+    rec("revokeGrants", (query as { values?: unknown[] }).values);
+    return revoked;
+  }
+  rec("$executeRaw", sql);
+  // Only a save lock is the moment a "concurrent" save can commit.
+  if (/pg_advisory_xact_lock\(2101, [1-4]\)/.test(sql)) onLock?.();
   return 0;
 });
 shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async () => { rec("$queryRawUnsafe"); return []; });
@@ -295,6 +325,7 @@ beforeEach(() => {
   ipinfoOk = true;
   openRequestCount = 0;
   onLock = null;
+  grantRows = [];
 });
 
 // ── gating ───────────────────────────────────────────────────────────────────
@@ -723,6 +754,31 @@ test("a kept API key (mask or omitted) with a CHANGED address is refused 400 wit
   assert.ok(!fetchCalls.some((u) => u.host === "10.0.0.66:7878"));
 });
 
+test("clearing the address does not free the kept API key: a later new address still needs the key typed again", async () => {
+  const t = await mintSession();
+  registry("radarr", [{ slug: "anime", name: "Anime" }]);
+  settings.set(arrSettingKey("radarr", "anime", "Url"), "http://10.0.0.8:7878");
+  settings.set(arrSettingKey("radarr", "anime", "ApiKey"), "stored-key");
+  const post = (inst: Record<string, unknown>) =>
+    saveInstances(t, { service: "radarr", instances: [{ slug: "anime", name: "Anime", ...inst }] });
+
+  // Clearing the address is a legal save and keeps the stored key.
+  assert.equal((await post({ url: "" })).status, 200);
+  assert.equal(settings.get(arrSettingKey("radarr", "anime", "Url")), "");
+  assert.equal(settings.get(arrSettingKey("radarr", "anime", "ApiKey")), "stored-key");
+
+  for (const kept of [{ apiKey: SECRET_MASK_SENTINEL }, {}]) {
+    const moved = await post({ url: "http://10.0.0.66:7878", ...kept });
+    assert.equal(moved.status, 400);
+    assert.match(((await moved.json()) as { error: string }).error, /can't be kept with a new server address/);
+  }
+  assert.equal(settings.get(arrSettingKey("radarr", "anime", "Url")), "");
+  assert.equal(fetchCalls.length, 0, "the stored key is never sent to the new host");
+
+  // The key typed again travels with the new address.
+  assert.equal((await post({ url: "http://10.0.0.66:7878", apiKey: "typed-again" })).status, 200);
+});
+
 test("a save that changes no address or key waits on no connection test", async () => {
   const t = await mintSession();
   registry("radarr", [{ slug: "anime", name: "Anime" }]);
@@ -800,7 +856,7 @@ test("removing a slug that still has open requests is NOT refused — the strand
   assert.equal(created.length, 1);
   const details = JSON.parse((created[0].args as { data: { details: string } }).data.details);
   assert.deepEqual(details.removed, [{ slug: "anime", openRequests: 3 }]);
-  assert.deepEqual(details.removedCounts, { anime: { wantedItems: 0, availableItems: 0, trashApplications: 0 } });
+  assert.deepEqual(details.removedCounts, { anime: { wantedItems: 0, availableItems: 0, trashApplications: 0, grantsRevoked: 0 } });
 });
 
 test("a Sonarr removal counts TV requests; a save that removes nothing counts none and reports an empty list", async () => {
@@ -954,6 +1010,43 @@ test("an instance another save added while this one waited for the lock is REMOV
   assert.equal(settings.get(arrSettingKey("radarr", "west", "ApiKey")), undefined, "no orphaned API key");
   assert.equal(settings.get(arrSettingKey("radarr", "west", "Url")), undefined);
   assert.deepEqual(JSON.parse(settings.get("arrRadarrInstances") ?? "[]").map((e: { slug: string }) => e.slug), ["anime"]);
+});
+
+test("removing a named instance revokes users' grants for its slug — unless the other service still registers that slug", async () => {
+  // User.instanceGrants has ONE entry per slug for Radarr and Sonarr alike. A
+  // grant left behind after the last "anime" is gone is invisible until an
+  // instance is registered under "anime" again, and then applies to it without
+  // anyone granting anything.
+  const t = await mintSession();
+  registry("radarr", [{ slug: "anime", name: "Anime" }, { slug: "docs", name: "Docs" }]);
+  registry("sonarr", [{ slug: "anime", name: "Anime" }]);
+  grantRows = [
+    { id: "alice", instanceGrants: { anime: { request: true }, docs: { request: true, autoApprove: true }, kids: { request: true } } },
+    { id: "bob", instanceGrants: { docs: { request: true } } },
+    { id: "carol", instanceGrants: null },
+  ];
+
+  const res = await saveInstances(t, { service: "radarr", instances: [] });
+  assert.equal(res.status, 200);
+  for (const task of afterTasks.splice(0)) await task();
+  assert.deepEqual(grantRows[0].instanceGrants, { anime: { request: true }, kids: { request: true } }, "\"docs\" is gone everywhere; \"anime\" still names Sonarr's instance");
+  assert.deepEqual(grantRows[1].instanceGrants, {});
+  assert.deepEqual(opsOf("revokeGrants").map((c) => c.args), [["docs", "docs"]]);
+  const details = JSON.parse((opsOf("auditLog.create")[0].args as { data: { details: string } }).data.details) as { removedCounts: Record<string, { grantsRevoked: number }> };
+  assert.equal(details.removedCounts.docs.grantsRevoked, 2, "the audit says how many accounts lost a grant");
+  assert.equal(details.removedCounts.anime.grantsRevoked, 0);
+
+  // The check follows this save's own registry write, under the shared lock:
+  // two saves removing the slug from both services at once must not each see
+  // the other's instance still registered.
+  const writeAt = ops.findIndex((o) => o.op === "setting.upsert" && (o.args as { key: string }).key === "arrRadarrInstances");
+  const sharedLockAt = ops.findIndex((o) => o.op === "$executeRaw" && /pg_advisory_xact_lock\(2101, 5\)/.test(String(o.args)));
+  const otherReadAt = ops.findIndex((o) => o.op === "setting.findUnique" && o.args === "arrSonarrInstances");
+  assert.ok(writeAt >= 0 && sharedLockAt > writeAt && otherReadAt > sharedLockAt);
+
+  // Now the last "anime" goes too.
+  assert.equal((await saveInstances(t, { service: "sonarr", instances: [] })).status, 200);
+  assert.deepEqual(grantRows[0].instanceGrants, { kids: { request: true } });
 });
 
 test("\"keep the saved key\" for a named instance another save just removed is a 409, not a keyless re-add", async () => {

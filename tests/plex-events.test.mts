@@ -737,6 +737,29 @@ test("GUARDRAIL 20: a pause→playing transition refreshes the anchor even with 
   );
 });
 
+test("an event naming ANOTHER item than the row's (auto-play under one sessionKey) writes nothing onto the previous item's row", async () => {
+  armLiveRow("item-next", { state: "playing", progressMs: 2_520_000n, sourceItemId: "ep-1" });
+  // The next episode starts under the same sessionKey, playhead near zero.
+  pushFrame(playingFrame({ sessionKey: "item-next", ratingKey: "ep-2", state: "playing", viewOffset: 1_500 }));
+  // The same item still updates, with the anchor refreshed on movement (guardrail 20).
+  armLiveRow("item-same", { state: "playing", progressMs: 10_000n, sourceItemId: "ep-1" });
+  pushFrame(playingFrame({ sessionKey: "item-same", ratingKey: "ep-1", state: "playing", viewOffset: 15_000 }));
+  // A numeric ratingKey is the same item as its string form.
+  armLiveRow("item-num", { state: "playing", progressMs: 10_000n, sourceItemId: "77" });
+  pushFrame(playingFrame({ sessionKey: "item-num", ratingKey: 77, state: "playing", viewOffset: 16_000 }));
+  await waitFor(() => updatesFor("plex:item-num").length === 1, "live-state update for item-num");
+  const same = updatesFor("plex:item-same");
+  assert.equal(same.length, 1);
+  assert.equal(same[0].data.progressMs, 15_000n);
+  assert.ok(same[0].data.progressUpdatedAt instanceof Date, "guardrail 20: the matching item still refreshes the stall anchor on movement");
+  assert.equal(updatesFor("plex:item-num")[0].data.progressMs, 16_000n);
+  assert.equal(
+    updatesFor("plex:item-next").length,
+    0,
+    "the next item's playhead must not overwrite the previous item's row — the poller finalizes that row from it",
+  );
+});
+
 test("missing or negative viewOffset writes state only — no progressMs, no anchor refresh without a transition", async () => {
   armLiveRow("g20-nooff", { state: "playing", progressMs: 7_000n });
   pushFrame(playingFrame({ sessionKey: "g20-nooff", state: "paused" })); // no viewOffset
@@ -842,6 +865,28 @@ test("a real stop threads the SSE viewOffset into the PlayHistory row, ledgers t
   const [casDelete, forceClean] = deletesFor("plex:stop-real");
   assert.equal(casDelete.where?.lastSeenAt, row.lastSeenAt, "recordCompletedSession's delete is CAS-guarded on the lastSeenAt it read");
   assert.equal(forceClean.where?.lastSeenAt, undefined, "the SSE force-clean delete is unconditional — SSE stop is authoritative even if the poller bumped lastSeenAt");
+});
+
+test("a stop naming ANOTHER item than the row's finalizes the previous item from its own playhead, not the next item's", async () => {
+  plexSnapshotSessions = [];
+  const row = armLiveRow("stop-next", {
+    state: "paused",
+    playtimeMs: 2_520_000n,
+    progressMs: 2_520_000n,
+    durationMs: 2_580_000n,
+    sourceItemId: "ep-1",
+    startedAt: new Date(Date.now() - 2_600_000),
+    lastSeenAt: new Date(Date.now() - 4_000),
+  });
+  // Episode 2 auto-played under the same sessionKey and was quit before the
+  // poller saw the item change: the stop carries episode 2's playhead.
+  pushFrame(playingFrame({ sessionKey: "stop-next", ratingKey: "ep-2", state: "stopped", viewOffset: 3_000 }));
+  const sid = `stop-next:${row.startedAt.toISOString()}`;
+  await waitFor(() => historyRows().some((r) => r.sourceSessionId === sid), "PlayHistory write for stop-next");
+  const hist = historyRows().find((r) => r.sourceSessionId === sid)!;
+  assert.equal(hist.sourceItemId, "ep-1");
+  assert.equal(hist.completed, true, "the finished episode keeps its own 2520000/2580000 playhead — the next item's 3000 would read as barely started");
+  assert.equal(isPlexSessionRecentlyFinalized("plex:stop-next"), true);
 });
 
 test("GR27: a failed PlayHistory write leaves the session un-ledgered so a later stop can retry and finalize", async () => {

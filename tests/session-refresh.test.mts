@@ -1083,6 +1083,146 @@ test("ACCEPTED TRADE-OFF: membership on ANY instance keeps a plex session — ev
   );
 });
 
+// ── a cached miss is confirmed before it revokes ────────────────────────────
+// One more named instance ("late"), continuing the same module cache. Sign-in
+// asks plex.tv live, so a member shared after the cached set was fetched holds
+// a valid new session while the cached set still excludes them.
+const LATE_URL = "http://203.0.113.80:32400";
+const lateSettings = () => ({
+  plexInstances: JSON.stringify([{ slug: "late", name: "Late" }]),
+  plexLateServerUrl: LATE_URL,
+  plexLateAdminToken: "late-admin-token",
+});
+// plexFixtureFetch, counting the plex.tv membership reads it serves.
+function countingPlexFetch(friends: () => string[] | "outage"): { fetch: typeof fetch; reads: () => number } {
+  let reads = 0;
+  const impl = (async (input: RequestInfo | URL) => {
+    const list = friends();
+    if (String(input).startsWith("https://plex.tv/api/users")) {
+      reads++;
+      if (list === "outage") return new Response("outage", { status: 503 });
+    }
+    return plexFixtureFetch(LATE_URL, "machine-late", list === "outage" ? [] : list)(input);
+  }) as typeof fetch;
+  return { fetch: impl, reads: () => reads };
+}
+
+test("a member shared AFTER the cached set was fetched keeps the session they just signed in to", async (t) => {
+  const throwingFetch = globalThis.fetch;
+  const realNow = Date.now;
+  let friends: string[] | "outage" = ["other@example.com"];
+  const plexTv = countingPlexFetch(() => friends);
+  membershipSettings = lateSettings();
+  globalThis.fetch = plexTv.fetch;
+  t.after(() => {
+    globalThis.fetch = throwingFetch;
+    Date.now = realNow;
+    membershipSettings = {};
+  });
+
+  // Warm the cache while u@example.com is NOT shared.
+  const { getCachedPlexAllowlist } = await import("../src/lib/plex-membership.ts");
+  const warm = await getCachedPlexAllowlist();
+  assert.ok(warm && !warm.emails.has("u@example.com"));
+  assert.equal(plexTv.reads(), 1);
+
+  // The admin shares the library; the friend signs in two minutes later.
+  friends = ["other@example.com", "u@example.com"];
+  const signedInAt = realNow() + 2 * 60_000;
+  Date.now = () => signedInAt;
+  const first = await mint({ provider: "plex", role: "USER", createdAt: new Date(signedInAt) });
+  const second = await mint({ provider: "plex", role: "USER", createdAt: new Date(signedInAt) });
+  Date.now = () => signedInAt + 1_000;
+
+  const result = await verifyAndRefreshSession(first.token, COOKIE);
+  assert.ok(result, "the stale cached set must not sign a just-shared member out");
+  assert.equal(usersById.get(first.userId)?.sessionsRevokedAt, null, "no revocation may be written");
+  assert.equal(plexTv.reads(), 2, "the miss was confirmed with exactly one fresh plex.tv read");
+
+  // The confirmed set is now the cached one: no further plex.tv traffic.
+  assert.ok(await verifyAndRefreshSession(second.token, COOKIE));
+  assert.equal(plexTv.reads(), 2);
+});
+
+test("a member really unshared is still revoked — by the FRESH read, at most one per minute per instance", async (t) => {
+  const throwingFetch = globalThis.fetch;
+  const realNow = Date.now;
+  const friends: string[] | "outage" = ["other@example.com"]; // u@example.com has been unshared
+  const plexTv = countingPlexFetch(() => friends);
+  membershipSettings = lateSettings();
+  globalThis.fetch = plexTv.fetch;
+  t.after(() => {
+    globalThis.fetch = throwingFetch;
+    Date.now = realNow;
+    membershipSettings = {};
+  });
+
+  // Sessions from before the unshare; the cached set (from the test above,
+  // still holding u) is past its TTL by the time they are checked.
+  const a = await mint({ provider: "plex", role: "USER" });
+  const b = await mint({ provider: "plex", role: "USER" });
+  const c = await mint({ provider: "plex", role: "USER" });
+  const later = realNow() + 40 * 60_000;
+  Date.now = () => later;
+
+  // First check past the TTL: the stale set (with u) is served, refresh runs.
+  assert.ok(await verifyAndRefreshSession(a.token, COOKIE), "served stale — still a member by the last-known set");
+  for (let i = 0; i < 30; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(plexTv.reads(), 1, "one background refresh");
+
+  // The refreshed set excludes u and was read after these sessions' sign-in and
+  // within the window: it IS the confirmation — revoked with no extra read.
+  assert.equal(await verifyAndRefreshSession(b.token, COOKIE), null);
+  assert.ok(usersById.get(b.userId)?.sessionsRevokedAt instanceof Date);
+  assert.equal(plexTv.reads(), 1);
+
+  // Two minutes on, the set is no longer recent enough to revoke on its own:
+  // exactly one fresh read confirms the miss.
+  Date.now = () => later + 2 * 60_000;
+  assert.equal(await verifyAndRefreshSession(c.token, COOKIE), null);
+  assert.ok(usersById.get(c.userId)?.sessionsRevokedAt instanceof Date);
+  assert.equal(plexTv.reads(), 2);
+});
+
+test("a miss plex.tv cannot confirm: a session newer than the cached set fails OPEN with no retry; an older one is still revoked by the last-known set", async (t) => {
+  const throwingFetch = globalThis.fetch;
+  const realNow = Date.now;
+  const plexTv = countingPlexFetch(() => "outage");
+  membershipSettings = lateSettings();
+  globalThis.fetch = plexTv.fetch;
+  t.after(() => {
+    globalThis.fetch = throwingFetch;
+    Date.now = realNow;
+    membershipSettings = {};
+  });
+
+  const later = realNow() + 50 * 60_000; // the cached set (without u, read ~8 minutes earlier) is inside its TTL
+  // Signed in AFTER the cached set was read and before plex.tv went away: the
+  // set may predate their share, and nothing newer can be read.
+  const a = await mint({ provider: "plex", role: "USER", createdAt: new Date(later - 60_000) });
+  const b = await mint({ provider: "plex", role: "USER", createdAt: new Date(later - 60_000) });
+  // Signed in BEFORE the cached set was read: that set already answers for it.
+  const old = await mint({ provider: "plex", role: "USER" });
+  Date.now = () => later;
+
+  assert.ok(await verifyAndRefreshSession(a.token, COOKIE), "an unconfirmed miss must not revoke");
+  assert.equal(usersById.get(a.userId)?.sessionsRevokedAt, null);
+  assert.equal(plexTv.reads(), 1);
+  // Two minutes on — past the confirm window, inside the failed read's backoff.
+  Date.now = () => later + 2 * 60_000;
+  assert.ok(await verifyAndRefreshSession(b.token, COOKIE));
+  assert.equal(usersById.get(b.userId)?.sessionsRevokedAt, null);
+  assert.equal(plexTv.reads(), 1, "a failed read arms the retry backoff — no second plex.tv call");
+
+  assert.equal(
+    await verifyAndRefreshSession(old.token, COOKIE),
+    null,
+    "an outage must not switch the lockout off: the last-known set was read after this sign-in",
+  );
+  assert.ok(usersById.get(old.userId)?.sessionsRevokedAt instanceof Date);
+  assert.equal(plexTv.reads(), 1);
+});
+
 test("resignLifetimeSeconds: the deadline decides; a legacy token without one keeps its own exp as a hard ceiling", async () => {
   const { resignLifetimeSeconds } = await import("../src/lib/session-refresh.ts");
   const now = 1_000_000;

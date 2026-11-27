@@ -73,6 +73,65 @@ if [ -z "${CRON_SECRET:-}" ]; then
   exit 2
 fi
 
+# ── Origin for cookie-style POSTs ──────────────────────────────────────────────
+# The proxy (src/proxy.ts) refuses a mutating /api request that carries neither
+# a bearer token nor a trusted Origin/Referer with 403, BEFORE it looks at the
+# session. A browser always sends Origin on a same-origin POST, so the
+# session-auth checks below send one too. A server with AUTH_URL configured
+# trusts ONLY that origin (plus AUTH_TRUSTED_ORIGIN), however it was reached —
+# a loopback port, a LAN address, a container name — so the configured AUTH_URL
+# is used whenever one is found (env, then the same .env files CRON_SECRET is
+# read from), else the target's own origin. Override with SMOKE_ORIGIN.
+origin_of() {
+  # The origin of an http(s) URL as `new URL(x).origin` reports it — which is
+  # what the server compares against (parseTrustedOriginEntry): scheme and host
+  # lowercased, no userinfo, path, query or fragment, no default port.
+  local url scheme rest
+  url=$(printf '%s' "$1" | tr -d '\r')
+  scheme=$(printf '%s' "${url%%://*}" | tr '[:upper:]' '[:lower:]')
+  rest="${url#*://}"
+  rest="${rest%%[/?#]*}"
+  rest="${rest##*@}"
+  rest=$(printf '%s' "$rest" | tr '[:upper:]' '[:lower:]')
+  case "$scheme:$rest" in
+    http:*:80)   rest="${rest%:80}" ;;
+    https:*:443) rest="${rest%:443}" ;;
+  esac
+  rest="${rest%:}"
+  printf '%s://%s' "$scheme" "$rest"
+}
+
+env_value() {
+  # One value as an env file means it: no CR from a CRLF line ending, no
+  # surrounding whitespace, the quoted part of a quoted value, and nothing
+  # after the first whitespace of an unquoted one (an inline comment).
+  local v
+  v=$(printf '%s' "$1" | tr -d '\r')
+  v="${v#"${v%%[![:space:]]*}"}"
+  case "$v" in
+    \"*) v="${v#\"}"; v="${v%%\"*}" ;;
+    \'*) v="${v#\'}"; v="${v%%\'*}" ;;
+    *)   v="${v%%[[:space:]]*}" ;;
+  esac
+  printf '%s' "$v"
+}
+
+ORIGIN="${SMOKE_ORIGIN:-}"
+if [ -z "$ORIGIN" ]; then
+  CONFIGURED_AUTH_URL="${AUTH_URL:-}"
+  if [ -z "$CONFIGURED_AUTH_URL" ] && [ -f .env.local ]; then
+    CONFIGURED_AUTH_URL=$(grep -E '^AUTH_URL=' .env.local | head -1 | cut -d= -f2-)
+  fi
+  if [ -z "$CONFIGURED_AUTH_URL" ] && [ -f .env ]; then
+    CONFIGURED_AUTH_URL=$(grep -E '^AUTH_URL=' .env | head -1 | cut -d= -f2-)
+  fi
+  CONFIGURED_ORIGIN=$(origin_of "$(env_value "$CONFIGURED_AUTH_URL")")
+  case "$CONFIGURED_ORIGIN" in
+    http://?*|https://?*) ORIGIN="$CONFIGURED_ORIGIN" ;;
+  esac
+fi
+[ -n "$ORIGIN" ] || ORIGIN=$(origin_of "$URL")
+
 # ── Detect docker compose ──────────────────────────────────────────────────────
 if command -v docker >/dev/null 2>&1 && docker compose ps --format=json >/dev/null 2>&1; then
   HAVE_DOCKER=1
@@ -100,6 +159,7 @@ run_logs_grep() {
 echo ""
 printf "${CYAN}Summonarr smoke test${NC}\n"
 printf "Target:        %s\n" "$URL"
+printf "Origin sent:   %s\n" "$ORIGIN"
 printf "CRON_SECRET:   %s... (%d chars)\n" "${CRON_SECRET:0:8}" "${#CRON_SECRET}"
 printf "Docker access: %s\n" "$([ "$HAVE_DOCKER" = "1" ] && echo "yes" || echo "no — DB tests will skip")"
 printf "Admin cookie:  %s\n" "$([ -n "${ADMIN_COOKIE:-}" ] && echo "provided" || echo "not provided — admin tests will skip")"
@@ -334,18 +394,23 @@ case "$code" in
   *) fail "machine-session" "got $code, want 403 (default) or 200 (if enabled)" ;;
 esac
 
-# 22. revoke-all requires auth (the proxy in src/proxy.ts answers 302 → /login or 401 for unauth)
+# 22. revoke-all requires auth. Sent with the Origin a same-origin browser POST
+# carries, so the answer is the proxy's auth gate (302 → /login or 401) and not
+# its CSRF refusal.
 code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+  -H "Origin: $ORIGIN" \
   -H "Content-Type: application/json" -d '{}' \
   "$URL/api/sessions/revoke-all")
 case "$code" in
   302|401) pass "POST /api/sessions/revoke-all → $code (rejects unauth)" ;;
+  403)     fail "revoke-all unauth" "got 403 — the server does not trust Origin '$ORIGIN'; set SMOKE_ORIGIN to its AUTH_URL origin" ;;
   *)       fail "revoke-all unauth" "got $code, want 302/401" ;;
 esac
 
 # 23. push/subscribe length cap before DNS resolve
 giant=$(printf 'a%.0s' $(seq 1 3000))
 code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+  -H "Origin: $ORIGIN" \
   -H "Content-Type: application/json" \
   -d "{\"endpoint\":\"https://fcm.googleapis.com/$giant\",\"keys\":{\"p256dh\":\"x\",\"auth\":\"y\"}}" \
   "$URL/api/push/subscribe")
@@ -353,6 +418,7 @@ case "$code" in
   302) pass "push/subscribe rejects unauth before body parse (302 → /login)" ;;
   401) pass "push/subscribe rejects unauthenticated (401 — expected without cookie)" ;;
   400) pass "push/subscribe rejected oversize endpoint (400)" ;;
+  403) fail "push/subscribe oversize" "got 403 — the server does not trust Origin '$ORIGIN'; set SMOKE_ORIGIN to its AUTH_URL origin" ;;
   *)   fail "push/subscribe oversize" "got $code, want 302/400/401" ;;
 esac
 
@@ -362,7 +428,8 @@ section "Behaviour (admin cookie)"
 if [ -n "${ADMIN_COOKIE:-}" ]; then
   # 24. revoke-all without confirmPassword
   code=$(curl -s -o /tmp/revoke.json -w "%{http_code}" -X POST \
-    -H "Cookie: $ADMIN_COOKIE" -H "Content-Type: application/json" -d '{}' \
+    -H "Cookie: $ADMIN_COOKIE" -H "Origin: $ORIGIN" \
+    -H "Content-Type: application/json" -d '{}' \
     "$URL/api/sessions/revoke-all")
   if [ "$code" = "401" ]; then
     if grep -q "password-required\|session-too-old" /tmp/revoke.json; then
@@ -371,7 +438,7 @@ if [ -n "${ADMIN_COOKIE:-}" ]; then
       fail "revoke-all step-up reason" "got 401 but unexpected body: $(cat /tmp/revoke.json)"
     fi
   else
-    fail "revoke-all without password" "got $code, want 401"
+    fail "revoke-all without password" "got $code, want 401 (a 403 means the server does not trust Origin '$ORIGIN' — set SMOKE_ORIGIN to its AUTH_URL origin)"
   fi
 
   # 25. /api/sessions GET works with cookie

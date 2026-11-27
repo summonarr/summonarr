@@ -306,14 +306,24 @@ async function protectedPathRefusal(
   // admin-surface rules in admin-access.ts.
   const { claims } = session.result;
   const perms = effectivePermissions(claims.role, parsePermissions(claims.permissions));
+  let refusal: Response;
   switch (proxyAccessDecision(request.nextUrl.pathname, claims.role, perms)) {
     case "forbidden":
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      refusal = NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      break;
     case "redirect-home":
-      return NextResponse.redirect(appUrl("/", request));
+      refusal = NextResponse.redirect(appUrl("/", request));
+      break;
     case "allow":
       return null;
   }
+  // The refusal still carries the re-signed cookie. A lost permission is what
+  // both rotates the session (the old sessionId is dead once this pass has
+  // run) and makes this gate refuse, so dropping the replacement here left the
+  // browser holding a dead cookie: signed out instead of demoted.
+  const { refreshed } = session.result;
+  if (refreshed && !fromBearer) returnRefreshedCookie(refusal, refreshed);
+  return refusal;
 }
 
 // Hand the refreshed JWT to the DOWNSTREAM verifier in THIS pass. The session

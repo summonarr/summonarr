@@ -227,7 +227,24 @@ test("the row's actions can be aimed at any request of the group, and a picked o
   assert.match(row, /const targets = actionTargets\(group\.requesters, group\.aggregateStatus\);/);
   assert.match(row, /const target = chosenActionTarget\(targets, chosenTargetId\) \?\? primaryRequester;/);
   assert.match(row, /\{targets\.length > 1 && \(\s*<StyledSelect/, "the picker only where there is a choice");
-  assert.match(row, /key=\{targetIsRepresentative \? "representative" : target\.requestId\}/);
+  // The mount key is the rule's (tests/request-action-rules.test.mts): stable
+  // for the representative, the request id for a pick.
+  const mount = between(row, "<RequestActions", "/>");
+  assert.match(mount, /\bkey=\{actionsMountKey\(targets, chosenTargetId\)\}/);
+  assert.equal(mount.match(/\bkey=/g)?.length, 1, "one key");
+  // The calls outlive a change of the aimed request; the forms do not. A
+  // refresh that swaps the representative must drop an open delete confirm,
+  // reply draft or decline note instead of pointing it at the new request,
+  // without aborting an approve still out or losing its push failure.
+  const outer = between(actions(), "export function RequestActions(", "function RequestActionForms(");
+  assert.match(outer, /const m = useRequestMutations\(\{ requestId, currentStatus, groupPendingIds \}\);/);
+  assert.match(outer, /<RequestActionForms key=\{requestId\} \{\.\.\.props\} m=\{m\} \/>/);
+  assert.doesNotMatch(outer, /useState|usePendingForms/, "no form state above the request key");
+  const inner = between(actions(), "function RequestActionForms(", "function PendingActions(");
+  assert.doesNotMatch(inner, /useRequestMutations\(/, "the calls are not remounted with the forms");
+  for (const state of ["usePendingForms({ mediaType, arrInstance, m })", "useState(false)", "useState(existingAdminNote ?? \"\")"]) {
+    assert.ok(inner.includes(state), state);
+  }
   assert.match(row, /requestId=\{target\.requestId\}\s*currentStatus=\{target\.status\}/);
   assert.match(row, /arrInstance=\{target\.arrInstance\}/);
 });

@@ -340,9 +340,21 @@ function usePendingForms({ mediaType, arrInstance, m }: { mediaType: RequestMedi
   };
 }
 
-export function RequestActions({ requestId, currentStatus, mediaType, arrInstance, arrInstanceName, existingAdminNote, groupPendingIds, onDialogActive }: RequestActionsProps) {
-  const t = useT();
+// The calls and their answers live here, the open forms one level down, keyed
+// by the request: a refresh can put another request in this row's place (the
+// old representative deleted, moved on, or overtaken by the admin's own
+// approve) and the two must part ways. An open delete confirm, reply draft or
+// decline note stays behind with the request it was opened for — it would
+// otherwise land on a request the admin never chose — while a call still out
+// and its Radarr/Sonarr answer stay on the row.
+export function RequestActions(props: RequestActionsProps) {
+  const { requestId, currentStatus, groupPendingIds } = props;
   const m = useRequestMutations({ requestId, currentStatus, groupPendingIds });
+  return <RequestActionForms key={requestId} {...props} m={m} />;
+}
+
+function RequestActionForms({ requestId, currentStatus, mediaType, arrInstance, arrInstanceName, existingAdminNote, groupPendingIds, onDialogActive, m }: RequestActionsProps & { m: RequestMutations }) {
+  const t = useT();
   const forms = usePendingForms({ mediaType, arrInstance, m });
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showReply, setShowReply] = useState(false);

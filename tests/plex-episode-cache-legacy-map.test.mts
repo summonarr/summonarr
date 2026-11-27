@@ -11,7 +11,9 @@ const read = (p: string) => readFileSync(new URL(`../${p}`, import.meta.url), "u
 
 test("the tv-episodes route builds its whole-table show map with legacy shows resolved", () => {
   const tv = read("src/app/api/sync/tv-episodes/route.ts");
-  assert.match(tv, /buildPlexShowKeyMap\(/);
+  // The server's slug goes in: the map build holds the replace when legacy
+  // lookups fell short of shows that server already stores.
+  assert.match(tv, /buildPlexShowKeyMap\(serverUrl, token, selected, sections, inst\.slug\)/);
   assert.doesNotMatch(tv, /getPlexTVEpisodes\(serverUrl, token, selected, sections\)/);
 });
 
@@ -20,7 +22,7 @@ test("the tv-episodes route builds its whole-table show map with legacy shows re
 // map, which has the legacy-agent shows merged into it.
 test("the Plex resync's episode walk reuses its legacy-resolved map, and recentOnly merges instead of rewriting", () => {
   const plex = read("src/app/api/sync/plex/route.ts");
-  assert.match(plex, /mergeResolvedLegacyItems\(resolvedTv, tvIds, ratingKeyToTmdb\)/);
+  assert.match(plex, /mergeResolvedLegacyItems\(resolvedTv\.items, tvIds, ratingKeyToTmdb\)/);
   assert.match(plex, /walkPlexEpisodes\(server, fetched\.sections, async \(\) => fetched\.ratingKeyToTmdb/);
   assert.match(plex, /recentOnly \? mergeRecentEpisodesForSource\("plex", episodes\) : replaceEpisodeCacheForSource\("plex", episodes\)/);
   assert.doesNotMatch(plex, /recentOnly \? undefined : ratingKeyToTmdb/);
@@ -30,6 +32,6 @@ test("buildPlexShowKeyMap collects AND resolves the legacy channel", () => {
   const src = read("src/lib/plex-legacy-resolve.ts");
   const body = src.slice(src.indexOf("export async function buildPlexShowKeyMap"));
   assert.match(body, /getPlexTmdbIds\([^)]*tvLegacy/);
-  assert.match(body, /resolvePlexLegacyGuids\(tvLegacy, "TV"\)/);
+  assert.match(body, /resolvePlexLegacyGuidsDetailed\(tvLegacy, "TV"\)/);
   assert.match(body, /mergeResolvedLegacyItems\([\s\S]*ratingKeyToTmdb\)/);
 });

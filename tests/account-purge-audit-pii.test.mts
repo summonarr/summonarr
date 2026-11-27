@@ -317,6 +317,7 @@ const purgeTx = {
   traktConnection: { deleteMany: record("traktConnection.deleteMany") },
   autoRequestLedger: { deleteMany: record("autoRequestLedger.deleteMany") },
   verificationToken: { deleteMany: record("verificationToken.deleteMany") },
+  plexTokenCache: { deleteMany: record("plexTokenCache.deleteMany") },
   mediaRequest: {
     findMany: async (args: { where: { requestedBy: string }; select: unknown }) => {
       purgeOps.push("mediaRequest.findMany");

@@ -150,7 +150,7 @@ function counter(model: string) {
 
 for (const model of [
   "authSession", "discordLinkToken", "discordMergeCode", "discordSearchCache",
-  "webhookReplay", "plexTokenCache", "tmdbMediaCore", "ipLookupCache", "auditLog",
+  "webhookReplay", "plexTokenCache", "tmdbMediaCore", "ipLookupCache", "auditLog", "verificationToken",
   "user", "mediaServerUser", "playHistory", "activeSession", "tmdbCache",
   "cronRun", "trashApplication", "trashSpec", "mediaRequest", "plexLibraryItem",
   "jellyfinLibraryItem", "notification", "pushSubscription", "deletionVote", "issue",
@@ -586,8 +586,17 @@ test("purge-auth-sessions: sweeps every table the job claims to, and only those"
   assert.deepEqual(swept, [
     "auditLog", "authSession", "discordLinkToken", "discordMergeCode",
     "discordSearchCache", "ipLookupCache", "plexTokenCache", "plexTokenCache",
-    "tmdbMediaCore", "webhookReplay",
+    "tmdbMediaCore", "verificationToken", "webhookReplay",
   ]);
+});
+
+test("purge-auth-sessions: lapsed notification-email verifications are swept by their own expiry", async () => {
+  // The identifier carries the typed address; a link nobody clicked is removed by nothing else.
+  await purge.POST(authed(purge));
+  const [sweep] = opsOf("verificationToken.deleteMany");
+  const where = sweep.args as { expires?: { lt?: Date } };
+  assert.deepEqual(Object.keys(where), ["expires"], `bounded by expiry only: ${JSON.stringify(where)}`);
+  assert.ok(where.expires?.lt instanceof Date && Math.abs(where.expires.lt.getTime() - Date.now()) < 60_000);
 });
 
 test("purge-auth-sessions: the audit-log cutoff is far longer than the PII-scrub cutoff", async () => {
@@ -723,7 +732,7 @@ test("scrub-audit-pii: aged admin-action rows lose the TARGET user's name/email 
 
 // ── 5: purge-auth-sessions failure isolation ─────────────────────────────────
 
-test("purge-auth-sessions: one failing delete does NOT abort the other nine", async () => {
+test("purge-auth-sessions: one failing delete does NOT abort the other ten", async () => {
   shadowPrismaModel(prisma, "webhookReplay", {
     ...counter("webhookReplay"),
     deleteMany: async () => {
@@ -733,7 +742,7 @@ test("purge-auth-sessions: one failing delete does NOT abort the other nine", as
   });
   const res = await purge.POST(authed(purge));
   const swept = ops.filter((o) => o.op.endsWith(".deleteMany")).length;
-  assert.equal(swept, 10, `only ${swept} deletes were attempted — a failing leg must not stop the rest`);
+  assert.equal(swept, 11, `only ${swept} deletes were attempted — a failing leg must not stop the rest`);
   const body = await res.json();
   assert.equal(body.errorCount, 1);
   // 200 + X-Cron-Degraded, like every other cron, so withCronRunRecording
@@ -763,7 +772,7 @@ test("purge-auth-sessions: the legs run one at a time, never all at once on the 
       return { count: 0 };
     },
   });
-  const models = ["authSession", "discordLinkToken", "discordMergeCode", "discordSearchCache", "webhookReplay", "plexTokenCache", "tmdbMediaCore", "ipLookupCache", "auditLog"];
+  const models = ["authSession", "discordLinkToken", "discordMergeCode", "discordSearchCache", "webhookReplay", "plexTokenCache", "tmdbMediaCore", "ipLookupCache", "auditLog", "verificationToken"];
   for (const m of models) shadowPrismaModel(prisma, m, slow(m));
   try {
     const res = await purge.POST(authed(purge));
@@ -805,6 +814,7 @@ test("purge-auth-sessions: a failing leg reports 0 under ITS key and is logged b
     assert.deepEqual(Object.keys(body.deleted), [
       "authSessions", "discordLinkTokens", "discordMergeCodes", "discordSearchCache", "webhookReplays",
       "plexTokensExpired", "plexTokensLegacy", "tmdbMediaCore", "ipLookupCache", "auditLogs",
+      "verificationTokens",
     ]);
     const line = errors.find((e) => e.includes("[cron/purge-auth-sessions]"));
     assert.ok(line, `no scoped error log: ${errors.join(" | ")}`);
